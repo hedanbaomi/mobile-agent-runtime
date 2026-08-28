@@ -213,23 +213,79 @@ class KnowledgeRepository(
         return continueImport(job, row.string("display_name"), bytes, format)
     }
 
+    fun retryUnknownVision(jobId: String, acknowledgeDuplicateCharge: Boolean): ImportJob {
+        check(acknowledgeDuplicateCharge) {
+            "Retry may bill the Vision provider twice. Acknowledge the duplicate-charge risk."
+        }
+        val row = db.query("SELECT * FROM import_jobs WHERE id = ?", listOf(jobId)).singleOrNull()
+            ?: error("import job not found")
+        val documentId = row.string("document_id")
+        db.execute(
+            "DELETE FROM vision_results WHERE status = ? AND asset_hash IN (SELECT blob_hash FROM assets WHERE document_id = ?)",
+            listOf("UNKNOWN_OUTCOME", documentId),
+        )
+        return grantVisionConsent(jobId)
+    }
+
     fun locateCitation(citation: Citation): EvidenceLocator {
+        val missing = EvidenceLocator(citation.documentId, "Source removed", citation.page, citation.assetId, citation.sourceSpan, null, removed = true)
         val document = db.query(
-            "SELECT display_name, blob_hash, deleted_at FROM documents WHERE id = ?",
+            "SELECT display_name, blob_hash, deleted_at, active_version_id FROM documents WHERE id = ?",
             listOf(citation.documentId),
         ).singleOrNull()
-        if (document == null || document.string("deleted_at").isNotBlank()) {
-            return EvidenceLocator(citation.documentId, "Source removed", citation.page, citation.assetId, citation.sourceSpan, null, removed = true)
+        if (document == null || document.string("deleted_at").isNotBlank()) return missing
+        val versionId = citation.documentVersionId.ifBlank { document.string("active_version_id") }
+        if (versionId.isBlank()) return missing
+        val version = db.query(
+            "SELECT id FROM document_versions WHERE id = ? AND document_id = ?",
+            listOf(versionId, citation.documentId),
+        ).singleOrNull()
+        if (version == null) return missing
+        if (citation.chunkId.isNotBlank()) {
+            val chunk = db.query(
+                "SELECT id, page, asset_ids FROM chunks WHERE id = ? AND document_version_id = ?",
+                listOf(citation.chunkId, versionId),
+            ).singleOrNull() ?: return missing
+            val chunkAssets = chunk.string("asset_ids").split(',').filter { it.isNotBlank() }
+            if (citation.assetId != null && citation.assetId !in chunkAssets) return missing
+            val page = chunk.string("page").toIntOrNull() ?: citation.page
+            if (citation.assetId != null) {
+                val asset = db.query(
+                    "SELECT blob_hash, page, document_version_id FROM assets WHERE id = ? AND document_id = ?",
+                    listOf(citation.assetId, citation.documentId),
+                ).singleOrNull() ?: return missing
+                val assetVersion = asset.string("document_version_id")
+                if (assetVersion.isNotBlank() && assetVersion != versionId) return missing
+                return EvidenceLocator(
+                    documentId = citation.documentId,
+                    displayName = document.string("display_name"),
+                    page = asset.string("page").toIntOrNull() ?: page,
+                    assetId = citation.assetId,
+                    sourceSpan = citation.sourceSpan,
+                    blobHash = asset.string("blob_hash"),
+                    removed = false,
+                )
+            }
+            return EvidenceLocator(
+                documentId = citation.documentId,
+                displayName = document.string("display_name"),
+                page = page,
+                assetId = null,
+                sourceSpan = citation.sourceSpan,
+                blobHash = document.string("blob_hash"),
+                removed = false,
+            )
         }
-        return EvidenceLocator(
-            documentId = citation.documentId,
-            displayName = document.string("display_name"),
-            page = citation.page,
-            assetId = citation.assetId,
-            sourceSpan = citation.sourceSpan,
-            blobHash = document.string("blob_hash"),
-            removed = false,
-        )
+        return missing
+    }
+
+    fun assetBytes(assetId: String): Pair<String, ByteArray>? {
+        val asset = db.query("SELECT blob_hash FROM assets WHERE id = ?", listOf(assetId)).singleOrNull() ?: return null
+        val hash = asset.string("blob_hash")
+        val bytes = blobs.get(hash) ?: return null
+        val media = db.query("SELECT media_type FROM blobs WHERE hash = ?", listOf(hash)).singleOrNull()?.string("media_type")
+            ?: "application/octet-stream"
+        return media to bytes
     }
 
     fun search(query: String, topK: Int = 8, knowledgeBaseIds: List<String>? = null): List<SearchHit> =
@@ -299,7 +355,8 @@ class KnowledgeRepository(
             "SELECT text FROM chunks WHERE document_version_id = ? ORDER BY ordinal",
             listOf(version),
         ).joinToString("\n") { it.string("text") }
-        return text.take(maxChars.coerceAtLeast(0))
+        val cap = maxChars.coerceIn(0, 16_384)
+        return text.take(cap)
     }
 
     fun deleteDocument(documentId: String) {
@@ -506,7 +563,12 @@ class KnowledgeRepository(
     }
 
     private fun indexPublication(job: ImportJob, bytes: ByteArray, parsed: ParsedPublication) {
-        job.hasImages = parsed.needsVision || parsed.assets.isNotEmpty()
+        val processable = parsed.assets.filter { it.kind == "IMAGE" && it.bytes.isNotEmpty() }
+        val blocked = parsed.assets.filter {
+            it.kind == "EXTERNAL" || it.kind == "MISSING" || it.kind == "PAGE" ||
+                (it.kind == "IMAGE" && it.bytes.isEmpty())
+        }
+        job.hasImages = parsed.needsVision || processable.isNotEmpty() || blocked.isNotEmpty()
         val visionTexts = mutableListOf<IndexedChunk>()
         if (job.hasImages) {
             advanceThrough(job, if (job.visionConfigured) ImportStage.AWAITING_UPLOAD_CONSENT else ImportStage.WAITING_FOR_VISION_MODEL)
@@ -519,8 +581,19 @@ class KnowledgeRepository(
                 return
             }
             job.visionConsent = true
+            if (blocked.isNotEmpty()) {
+                fail(
+                    job,
+                    "Visual pages or external/missing images cannot be processed without local raster bytes. Nothing was downloaded.",
+                )
+                return
+            }
+            if (processable.isEmpty()) {
+                fail(job, "needsVision is set but there is no processable page or image asset. The document is not READY.")
+                return
+            }
             advanceThrough(job, ImportStage.VISION_PROCESSING)
-            when (val outcome = processAssets(job, parsed.assets)) {
+            when (val outcome = processAssets(job, processable)) {
                 is VisionBatch.Failed -> {
                     fail(job, outcome.message)
                     return
@@ -533,17 +606,21 @@ class KnowledgeRepository(
                 is VisionBatch.Ok -> visionTexts += outcome.chunks
             }
         }
-        val pageChunks = parsed.pages.filter { it.text.isNotBlank() }.flatMap { page ->
+        val pageChunks = parsed.pages.filter { it.text.isNotBlank() && !it.needsVision }.flatMap { page ->
             TextChunker.chunk(page.text).map { IndexedChunk(it, page.page, emptyList(), "page:${page.page}") }
         }
         val chunks = (pageChunks + visionTexts).ifEmpty {
-            if (parsed.text.isNotBlank()) TextChunker.chunk(parsed.text).map { IndexedChunk(it, 1, emptyList(), null) } else emptyList()
+            if (!parsed.needsVision && parsed.text.isNotBlank()) {
+                TextChunker.chunk(parsed.text).map { IndexedChunk(it, 1, emptyList(), null) }
+            } else {
+                emptyList()
+            }
         }
         if (chunks.isEmpty()) {
             fail(job, "The file produced no indexable text. Visual items were not dropped.")
             return
         }
-        publishChunks(job, bytes, chunks, parsed.parserFingerprint, parsed.assets)
+        publishChunks(job, bytes, chunks, parsed.parserFingerprint, processable)
     }
 
     private sealed interface VisionBatch {
@@ -556,6 +633,9 @@ class KnowledgeRepository(
         val backend = vision ?: return VisionBatch.Failed("Vision model is configured in profile but no backend is bound")
         val chunks = mutableListOf<IndexedChunk>()
         assets.forEach { asset ->
+            if (asset.bytes.isEmpty() || asset.kind != "IMAGE") {
+                return VisionBatch.Failed("Visual asset ${asset.localId} is not rasterizable and was not downloaded")
+            }
             val stored = blobs.put(asset.bytes, asset.mediaType)
             upsertBlob(stored)
             val assetId = EntityId.random().value
@@ -571,15 +651,20 @@ class KnowledgeRepository(
                 section = asset.section,
             )
             db.execute(
-                "INSERT OR REPLACE INTO assets(id,document_id,blob_hash,page,section,kind,surrounding_text_hash) VALUES (?,?,?,?,?,?,?)",
-                listOf(assetId, job.documentId, stored.sha256, asset.page, asset.section, asset.kind, contextHash),
+                "INSERT OR REPLACE INTO assets(id,document_id,document_version_id,blob_hash,page,section,kind,surrounding_text_hash) VALUES (?,?,?,?,?,?,?,?)",
+                listOf(assetId, job.documentId, null, stored.sha256, asset.page, asset.section, asset.kind, contextHash),
             )
-            val cached = db.query("SELECT status, ocr_text, description FROM vision_results WHERE cache_key = ?", listOf(input.cacheKey)).singleOrNull()
+            val cached = db.query(
+                "SELECT status, ocr_text, description, table_markdown, result_type FROM vision_results WHERE cache_key = ?",
+                listOf(input.cacheKey),
+            ).singleOrNull()
             val outcome = when (cached?.string("status")) {
                 "SUCCESS" -> VisionOutcome.Success(
                     runtime.mobileagent.knowledge.VisionSuccess(
                         ocrText = cached.string("ocr_text"),
                         semanticDescription = cached.string("description"),
+                        tableMarkdown = cached.string("table_markdown"),
+                        type = cached.string("result_type").ifBlank { "image" },
                     ),
                 )
                 "UNKNOWN_OUTCOME" -> VisionOutcome.UnknownOutcome
@@ -587,34 +672,23 @@ class KnowledgeRepository(
             }
             when (outcome) {
                 is VisionOutcome.UnknownOutcome -> {
-                    db.execute(
-                        "INSERT OR REPLACE INTO vision_results(cache_key,asset_hash,context_hash,model_fingerprint,prompt_version,schema_version,status,ocr_text,description,processed_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
-                        listOf(input.cacheKey, stored.sha256, contextHash, visionModelFingerprint, VISION_PROMPT_VERSION, VISION_SCHEMA_VERSION, "UNKNOWN_OUTCOME", "", "", Utc.nowIso()),
-                    )
+                    persistVision(input.cacheKey, stored.sha256, contextHash, "UNKNOWN_OUTCOME", "", "", "", "")
                     return VisionBatch.Unknown
                 }
                 is VisionOutcome.Failed -> {
-                    db.execute(
-                        "INSERT OR REPLACE INTO vision_results(cache_key,asset_hash,context_hash,model_fingerprint,prompt_version,schema_version,status,ocr_text,description,processed_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
-                        listOf(input.cacheKey, stored.sha256, contextHash, visionModelFingerprint, VISION_PROMPT_VERSION, VISION_SCHEMA_VERSION, "FAILED", "", outcome.message, Utc.nowIso()),
-                    )
+                    persistVision(input.cacheKey, stored.sha256, contextHash, "FAILED", "", outcome.message, "", "")
                     return VisionBatch.Failed(outcome.message)
                 }
                 is VisionOutcome.Success -> {
-                    db.execute(
-                        "INSERT OR REPLACE INTO vision_results(cache_key,asset_hash,context_hash,model_fingerprint,prompt_version,schema_version,status,ocr_text,description,processed_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
-                        listOf(
-                            input.cacheKey,
-                            stored.sha256,
-                            contextHash,
-                            visionModelFingerprint,
-                            VISION_PROMPT_VERSION,
-                            VISION_SCHEMA_VERSION,
-                            "SUCCESS",
-                            outcome.result.ocrText,
-                            outcome.result.semanticDescription,
-                            Utc.nowIso(),
-                        ),
+                    persistVision(
+                        input.cacheKey,
+                        stored.sha256,
+                        contextHash,
+                        "SUCCESS",
+                        outcome.result.ocrText,
+                        outcome.result.semanticDescription,
+                        outcome.result.tableMarkdown,
+                        outcome.result.type,
                     )
                     val body = buildString {
                         append("Visual evidence")
@@ -624,6 +698,10 @@ class KnowledgeRepository(
                         if (outcome.result.ocrText.isNotBlank()) {
                             append('\n')
                             append(outcome.result.ocrText)
+                        }
+                        if (outcome.result.tableMarkdown.isNotBlank()) {
+                            append('\n')
+                            append(outcome.result.tableMarkdown)
                         }
                         if (asset.surroundingText.isNotBlank()) {
                             append('\n')
@@ -635,6 +713,35 @@ class KnowledgeRepository(
             }
         }
         return VisionBatch.Ok(chunks)
+    }
+
+    private fun persistVision(
+        cacheKey: String,
+        assetHash: String,
+        contextHash: String,
+        status: String,
+        ocr: String,
+        description: String,
+        tableMarkdown: String,
+        type: String,
+    ) {
+        db.execute(
+            "INSERT OR REPLACE INTO vision_results(cache_key,asset_hash,context_hash,model_fingerprint,prompt_version,schema_version,status,ocr_text,description,table_markdown,result_type,processed_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+            listOf(
+                cacheKey,
+                assetHash,
+                contextHash,
+                visionModelFingerprint,
+                VISION_PROMPT_VERSION,
+                VISION_SCHEMA_VERSION,
+                status,
+                ocr,
+                description,
+                tableMarkdown,
+                type,
+                Utc.nowIso(),
+            ),
+        )
     }
 
     private data class IndexedChunk(
@@ -672,6 +779,7 @@ class KnowledgeRepository(
                 )
                 persistChunks(versionId, chunks)
                 persistEmbeddings(versionId)
+                db.execute("UPDATE assets SET document_version_id = ? WHERE document_id = ? AND (document_version_id IS NULL OR document_version_id = '')", listOf(versionId, job.documentId))
                 db.execute("UPDATE document_versions SET status = ? WHERE id = ?", listOf("READY", versionId))
                 db.execute("UPDATE documents SET active_version_id = ?, deleted_at = NULL WHERE id = ?", listOf(versionId, job.documentId))
                 rebuildUnlocked(job.knowledgeBaseId)

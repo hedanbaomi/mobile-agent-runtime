@@ -55,6 +55,23 @@ class KnowledgeViewModel(application: Application) : AndroidViewModel(applicatio
         }
     }
 
+    fun retryVision(jobId: String) {
+        viewModelScope.launch(Dispatchers.IO) {
+            val job = try {
+                app.container.knowledge.retryUnknownVision(jobId, acknowledgeDuplicateCharge = true)
+            } catch (e: Exception) {
+                withContext(Dispatchers.Main) {
+                    status.value = "Vision retry failed: ${e.message ?: "error"}"
+                }
+                return@launch
+            }
+            withContext(Dispatchers.Main) {
+                status.value = "${job.stage}${job.error?.let { " — $it" }.orEmpty()}"
+                reload()
+            }
+        }
+    }
+
     fun rebuild() {
         viewModelScope.launch(Dispatchers.IO) {
             val kb = app.container.knowledge.ensureDefaultBase()

@@ -8,6 +8,8 @@ import kotlinx.coroutines.flow.flow
 import runtime.mobileagent.domain.AppError
 import runtime.mobileagent.domain.ErrorCode
 import runtime.mobileagent.domain.RetryClass
+import runtime.mobileagent.provider.AssistantToolCall
+import runtime.mobileagent.provider.ChatMessage
 import runtime.mobileagent.provider.ModelAdapter
 import runtime.mobileagent.provider.ModelEvent
 import runtime.mobileagent.provider.ModelRequest
@@ -22,6 +24,7 @@ class AgentRuntime(
     private val clock: () -> Long = { System.currentTimeMillis() },
     private val tools: ToolBroker? = null,
     private val secretsForRedaction: () -> List<String> = { emptyList() },
+    private val onApprove: suspend (ToolCall) -> Boolean = { false },
 ) {
     fun run(
         run: AgentRun,
@@ -48,18 +51,11 @@ class AgentRuntime(
             return@flow
         }
         run.state = RunState.ASSEMBLING
-        val messages = prompt.asMessages().map { it.toMutableMap() }.toMutableList()
+        val messages = prompt.asMessages().toMutableList()
         val toolMaps = if (toolsEnabled && tools != null) toolSpecsAsMaps() else emptyList()
-        if (!toolsEnabled && toolMaps.isNotEmpty()) {
-            run.state = RunState.FAILED
-            emit(ModelEvent.Failed("This model cannot execute tools"))
-            return@flow
-        }
         while (true) {
-            if (clock() - run.startedAtMs > run.budget.maxRuntimeMs) {
-                run.state = RunState.BUDGET_EXHAUSTED
-                run.stopReason = "time"
-                emit(ModelEvent.Failed("Run budget exhausted"))
+            if (budgetExhausted(run)) {
+                emitBudget(run)
                 return@flow
             }
             if (run.modelRounds >= run.budget.maxModelRounds) {
@@ -71,26 +67,46 @@ class AgentRuntime(
             run.state = RunState.MODEL_STREAMING
             val request = ModelRequest(
                 modelId = modelId,
-                messages = messages.map { it.toMap() },
+                messages = messages.toList(),
                 tools = toolMaps,
                 stream = true,
             )
             val pendingTools = linkedMapOf<String, ToolCall>()
+            val assistantText = StringBuilder()
             var terminal: ModelEvent? = null
             adapter.stream(request, secret).collect { event ->
+                if (terminal is ModelEvent.Failed) return@collect
+                if (budgetExhausted(run)) {
+                    terminal = ModelEvent.Failed("Run budget exhausted")
+                    return@collect
+                }
                 val outgoing = when (event) {
                     is ModelEvent.Failed ->
-                        ModelEvent.Failed(SecretRedactor.redact(event.sanitizedMessage, secretsForRedaction() + String(secret)))
+                        ModelEvent.Failed(redact(event.sanitizedMessage, secret))
                     else -> event
                 }
                 when (outgoing) {
                     is ModelEvent.ToolCallDelta -> {
+                        if (!toolsEnabled || tools == null) {
+                            terminal = ModelEvent.Failed("This model cannot execute tools")
+                            return@collect
+                        }
                         pendingTools[outgoing.callId] = ToolCall(outgoing.callId, outgoing.name, outgoing.argumentsJson)
                     }
-                    ModelEvent.Completed -> terminal = outgoing
+                    is ModelEvent.TextDelta -> {
+                        assistantText.append(outgoing.text)
+                        emit(outgoing)
+                    }
+                    ModelEvent.Completed -> if (terminal !is ModelEvent.Failed) terminal = outgoing
                     is ModelEvent.Failed -> terminal = outgoing
                     else -> emit(outgoing)
                 }
+            }
+            if (budgetExhausted(run)) {
+                run.state = RunState.BUDGET_EXHAUSTED
+                run.stopReason = "time"
+                emit(ModelEvent.Failed("Run budget exhausted"))
+                return@flow
             }
             val ended = terminal
             if (ended is ModelEvent.Failed) {
@@ -103,45 +119,88 @@ class AgentRuntime(
                 emit(ModelEvent.Completed)
                 return@flow
             }
+            if (!toolsEnabled || tools == null) {
+                run.state = RunState.FAILED
+                emit(ModelEvent.Failed("This model cannot execute tools"))
+                return@flow
+            }
             if (run.toolCalls + pendingTools.size > run.budget.maxToolCalls) {
                 run.state = RunState.BUDGET_EXHAUSTED
                 emit(ModelEvent.Failed("Tool call budget exhausted"))
                 return@flow
             }
-            val broker = tools
-            if (broker == null) {
-                run.state = RunState.FAILED
-                emit(ModelEvent.Failed("This model cannot execute tools"))
-                return@flow
-            }
-            val toolMessages = mutableListOf<Map<String, String>>()
+            messages += ChatMessage(
+                role = "assistant",
+                text = assistantText.toString(),
+                toolCalls = pendingTools.values.map { call ->
+                    AssistantToolCall(call.callId, call.name, call.argumentsJson)
+                },
+            )
             for (call in pendingTools.values) {
+                if (budgetExhausted(run)) {
+                    emitBudget(run)
+                    return@flow
+                }
                 run.toolCalls += 1
                 run.state = RunState.TOOL_EXECUTING
-                when (val result = broker.invoke(call)) {
+                val result = when (val first = tools.invoke(call)) {
                     ToolResult.NeedsApproval -> {
                         run.state = RunState.WAITING_TOOL_APPROVAL
+                        emit(ModelEvent.ToolApprovalRequired(call.callId, call.name, call.argumentsJson))
+                        if (!onApprove(call)) {
+                            run.state = RunState.FAILED
+                            emit(ModelEvent.Failed(redact("Tool ${call.name} was rejected", secret)))
+                            return@flow
+                        }
+                        if (budgetExhausted(run)) {
+                            emitBudget(run)
+                            return@flow
+                        }
+                        tools.approve(call.callId)
+                    }
+                    else -> first
+                }
+                when (result) {
+                    is ToolResult.Denied -> {
+                        messages += ChatMessage(
+                            role = "tool",
+                            text = redact(result.reason, secret),
+                            toolCallId = call.callId,
+                        )
+                    }
+                    is ToolResult.Invalid -> {
+                        messages += ChatMessage(
+                            role = "tool",
+                            text = redact(result.reason, secret),
+                            toolCallId = call.callId,
+                        )
+                    }
+                    is ToolResult.Value -> {
+                        messages += ChatMessage(
+                            role = "tool",
+                            text = redact(result.json, secret),
+                            toolCallId = call.callId,
+                        )
+                    }
+                    ToolResult.NeedsApproval -> {
+                        run.state = RunState.FAILED
                         emit(ModelEvent.Failed("Tool ${call.name} needs user confirmation"))
                         return@flow
                     }
-                    is ToolResult.Denied -> {
-                        run.state = RunState.FAILED
-                        emit(ModelEvent.Failed(result.reason))
-                        return@flow
-                    }
-                    is ToolResult.Invalid -> {
-                        toolMessages += mapOf("role" to "tool", "content" to result.reason, "tool_call_id" to call.callId)
-                    }
-                    is ToolResult.Value -> {
-                        toolMessages += mapOf(
-                            "role" to "tool",
-                            "content" to SecretRedactor.redact(result.json, secretsForRedaction()),
-                            "tool_call_id" to call.callId,
-                        )
-                    }
                 }
             }
-            messages += toolMessages.map { it.toMutableMap() }
         }
     }
+
+    private fun budgetExhausted(run: AgentRun): Boolean =
+        clock() - run.startedAtMs > run.budget.maxRuntimeMs
+
+    private suspend fun kotlinx.coroutines.flow.FlowCollector<ModelEvent>.emitBudget(run: AgentRun) {
+        run.state = RunState.BUDGET_EXHAUSTED
+        run.stopReason = "time"
+        emit(ModelEvent.Failed("Run budget exhausted"))
+    }
+
+    private fun redact(text: String, secret: CharArray): String =
+        SecretRedactor.redact(text, secretsForRedaction() + String(secret))
 }

@@ -27,13 +27,14 @@ import runtime.mobileagent.domain.ProviderProfile
 fun ProvidersScreen(
     providers: List<ProviderProfile>,
     status: String,
-    onSave: (name: String, baseUrl: String, modelId: String, apiKey: String, vision: Boolean) -> Boolean,
+    onSave: (name: String, baseUrl: String, modelId: String, apiKey: String, vision: Boolean, tools: Boolean) -> Boolean,
 ) {
     val name = remember { mutableStateOf("") }
     val baseUrl = remember { mutableStateOf("https://api.openai.com/v1") }
     val modelId = remember { mutableStateOf("") }
     val apiKey = remember { mutableStateOf("") }
     val vision = remember { mutableStateOf(false) }
+    val tools = remember { mutableStateOf(false) }
     Column(
         Modifier
             .fillMaxSize()
@@ -57,9 +58,13 @@ fun ProvidersScreen(
             Checkbox(checked = vision.value, onCheckedChange = { vision.value = it })
             Text("This model accepts images (Vision). Required before image knowledge can leave WAITING.")
         }
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Checkbox(checked = tools.value, onCheckedChange = { tools.value = it })
+            Text("This model can call tools. HTTP still requires confirmation.")
+        }
         Button(
             onClick = {
-                val ok = onSave(name.value, baseUrl.value, modelId.value, apiKey.value, vision.value)
+                val ok = onSave(name.value, baseUrl.value, modelId.value, apiKey.value, vision.value, tools.value)
                 if (ok) apiKey.value = ""
             },
             modifier = Modifier.padding(top = 8.dp),

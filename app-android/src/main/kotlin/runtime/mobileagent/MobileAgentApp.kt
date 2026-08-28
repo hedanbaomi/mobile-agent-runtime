@@ -35,9 +35,6 @@ class AppContainer(app: MobileAgentApp) {
     val db = app.database
     val secrets = AndroidSecretStore(app, db)
     val profiles = ProfileRepository(db)
-    val knowledge = KnowledgeRepository(db, CasBlobSink(File(app.filesDir, "cas")))
-    val skills = SkillRepository(db)
-    val announcements = AnnouncementRepository(db)
     val http: HttpClient = HttpClient(OkHttp) {
         install(HttpTimeout) {
             requestTimeoutMillis = 180_000
@@ -45,6 +42,14 @@ class AppContainer(app: MobileAgentApp) {
             socketTimeoutMillis = 180_000
         }
     }
+    val knowledge = KnowledgeRepository(
+        db,
+        CasBlobSink(File(app.filesDir, "cas")),
+        vision = OpenAiCompatibleVision(http, profiles, secrets),
+        visionModelFingerprint = profiles.visionBinding()?.second?.modelId ?: "vision-unconfigured",
+    )
+    val skills = SkillRepository(db)
+    val announcements = AnnouncementRepository(db)
     val announcementHttp: HttpClient = HttpClient(OkHttp) {
         install(HttpTimeout) {
             requestTimeoutMillis = 30_000

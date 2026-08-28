@@ -14,13 +14,16 @@ import io.ktor.utils.io.readUTF8Line
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flow
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
 import runtime.mobileagent.domain.ErrorCode
 import runtime.mobileagent.domain.ModelProfile
 import runtime.mobileagent.domain.Utc
+import runtime.mobileagent.provider.AssistantToolCall
 import runtime.mobileagent.provider.CapabilityReport
+import runtime.mobileagent.provider.ChatMessage
 import runtime.mobileagent.provider.EmbeddingBatch
 import runtime.mobileagent.provider.EmbeddingRequest
 import runtime.mobileagent.provider.ModelAdapter
@@ -55,11 +58,7 @@ class OpenAiCompatibleAdapter(
                 "messages",
                 buildJsonArray {
                     request.messages.forEach { msg ->
-                        add(
-                            buildJsonObject {
-                                msg.forEach { (k, v) -> put(k, JsonPrimitive(v)) }
-                            },
-                        )
+                        add(encodeMessage(msg))
                     }
                 },
             )
@@ -119,11 +118,12 @@ class OpenAiCompatibleAdapter(
                 }
                 val channel = response.bodyAsChannel()
                 val toolBuf = linkedMapOf<String, Pair<String, StringBuilder>>()
+                val indexToId = mutableMapOf<Int, String>()
                 var sawCompleted = false
                 var sawFailed = false
                 while (!channel.isClosedForRead) {
                     val line = channel.readUTF8Line() ?: break
-                    OpenAiSse.eventsFromLine(line, toolBuf, listOf(token)).forEach { event ->
+                    OpenAiSse.eventsFromLine(line, toolBuf, listOf(token), indexToId).forEach { event ->
                         val outgoing = when (event) {
                             is ModelEvent.Failed ->
                                 ModelEvent.Failed(SecretRedactor.redact(event.sanitizedMessage, listOf(token)))
@@ -156,5 +156,66 @@ class OpenAiCompatibleAdapter(
 
     companion object {
         fun url(base: String, path: String): String = base.trimEnd('/') + path
+
+        internal fun encodeMessage(msg: ChatMessage) = buildJsonObject {
+            put("role", JsonPrimitive(msg.role))
+            msg.toolCallId?.let { put("tool_call_id", JsonPrimitive(it)) }
+            if (msg.toolCalls.isNotEmpty()) {
+                put(
+                    "tool_calls",
+                    buildJsonArray {
+                        msg.toolCalls.forEach { call ->
+                            add(encodeToolCall(call))
+                        }
+                    },
+                )
+                if (msg.text.isNotEmpty()) {
+                    put("content", JsonPrimitive(msg.text))
+                } else {
+                    put("content", JsonNull)
+                }
+            } else if (msg.images.isNotEmpty()) {
+                put(
+                    "content",
+                    buildJsonArray {
+                        if (msg.text.isNotEmpty()) {
+                            add(
+                                buildJsonObject {
+                                    put("type", JsonPrimitive("text"))
+                                    put("text", JsonPrimitive(msg.text))
+                                },
+                            )
+                        }
+                        msg.images.forEach { image ->
+                            add(
+                                buildJsonObject {
+                                    put("type", JsonPrimitive("image_url"))
+                                    put(
+                                        "image_url",
+                                        buildJsonObject {
+                                            put("url", JsonPrimitive("data:${image.mediaType};base64,${image.base64}"))
+                                        },
+                                    )
+                                },
+                            )
+                        }
+                    },
+                )
+            } else {
+                put("content", JsonPrimitive(msg.text))
+            }
+        }
+
+        private fun encodeToolCall(call: AssistantToolCall) = buildJsonObject {
+            put("id", JsonPrimitive(call.id))
+            put("type", JsonPrimitive("function"))
+            put(
+                "function",
+                buildJsonObject {
+                    put("name", JsonPrimitive(call.name))
+                    put("arguments", JsonPrimitive(call.argumentsJson))
+                },
+            )
+        }
     }
 }

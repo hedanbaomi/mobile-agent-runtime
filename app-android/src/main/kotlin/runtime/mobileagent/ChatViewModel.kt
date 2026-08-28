@@ -8,6 +8,7 @@ import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.catch
@@ -26,11 +27,15 @@ import runtime.mobileagent.knowledge.EvidenceLocator
 import runtime.mobileagent.knowledge.RetrievalBudget
 import runtime.mobileagent.knowledge.StrictVisualDecision
 import runtime.mobileagent.knowledge.StrictVisualPolicy
+import runtime.mobileagent.provider.InlineImage
 import runtime.mobileagent.provider.ModelEvent
 import runtime.mobileagent.provider.SecretRedactor
 import runtime.mobileagent.provider.openai.OpenAiCompatibleAdapter
+import runtime.mobileagent.skills.HostHttp
 import runtime.mobileagent.skills.ToolBroker
+import runtime.mobileagent.skills.ToolCall
 import runtime.mobileagent.skills.ToolContext
+import java.util.Base64
 
 class ChatViewModel(application: Application) : AndroidViewModel(application) {
     private val app = application as MobileAgentApp
@@ -40,12 +45,14 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     val status = mutableStateOf("Save a Provider key, then send a message. Images in the knowledge base wait until a Vision model is configured.")
     val textDegradation = mutableStateOf(false)
     val locator = mutableStateOf<EvidenceLocator?>(null)
+    val pendingTool = mutableStateOf<ToolCall?>(null)
     private var lastCitations: List<Citation> = emptyList()
     private var runJob: Job? = null
+    private var approval = CompletableDeferred<Boolean>()
 
     fun send() {
         val text = input.value.trim()
-        if (text.isBlank() || streaming.value) return
+        if (text.isBlank() || streaming.value || pendingTool.value != null) return
         val binding = app.container.profiles.chatBinding()
         if (binding == null) {
             status.value = "Configure a Provider and chat model first."
@@ -80,6 +87,8 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         lastCitations = citations
         val hasVisual = hits.any { it.assetId != null }
         val chatSupportsImages = "image" in model.capabilities
+        var visualWarning: String? = null
+        val currentImages = mutableListOf<InlineImage>()
         when (val decision = StrictVisualPolicy.allow(hasVisual, chatSupportsImages, textDegradation.value)) {
             is StrictVisualDecision.Reject -> {
                 streaming.value = false
@@ -88,8 +97,27 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                 return
             }
             is StrictVisualDecision.Allow -> {
-                decision.warning?.let { warning ->
-                    status.value += " $warning"
+                visualWarning = decision.warning
+                if (hasVisual && chatSupportsImages && visualWarning == null) {
+                    hits.mapNotNull { it.assetId }.distinct().take(4).forEach { assetId ->
+                        val loaded = app.container.knowledge.assetBytes(assetId) ?: return@forEach
+                        if (loaded.second.size > 2 * 1024 * 1024) return@forEach
+                        currentImages += InlineImage(
+                            mediaType = loaded.first,
+                            base64 = Base64.getEncoder().encodeToString(loaded.second),
+                            assetId = assetId,
+                        )
+                    }
+                    if (currentImages.isEmpty()) {
+                        streaming.value = false
+                        val reason = "Strict mode requires original images in-budget, but none could be attached."
+                        status.value = reason
+                        lines[assistantIndex] = ChatLine("Assistant", reason)
+                        return
+                    }
+                }
+                visualWarning?.let { warning ->
+                    lines[assistantIndex] = ChatLine("Assistant", "$warning\n")
                 }
             }
         }
@@ -115,21 +143,34 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                 role to line.text
             },
             currentUser = text,
+            currentImages = currentImages,
         )
         val adapter = OpenAiCompatibleAdapter(app.container.http, provider.baseUrl)
+        val grant = app.container.skills.effectiveGrant()
         val broker = ToolBroker(
-            effectiveCapabilities = setOf("knowledge.search", "knowledge.read") + app.container.skills.effectiveCapabilities(),
+            effectiveCapabilities = grant.capabilities,
             context = ToolContext(
                 search = { query, ids, topK ->
-                    val found = app.container.knowledge.search(query, topK, ids.ifEmpty { null })
+                    val found = app.container.knowledge.search(query, topK, ids)
                     found.joinToString("\n") { hit -> "${hit.documentId}:${hit.text}" }
                 },
                 readDocument = { id, max -> app.container.knowledge.readDocumentText(id, max) },
+                httpGet = { url -> HostHttp.get(url, grant.hosts) },
+                allowedHosts = grant.hosts,
+                grantedKnowledgeBaseIds = grant.knowledgeBaseIds,
             ),
             autoApproveSideEffects = false,
         )
         val toolsEnabled = "tools" in model.capabilities
-        val runtime = AgentRuntime(adapter, tools = broker)
+        val runtime = AgentRuntime(
+            adapter,
+            tools = broker,
+            onApprove = { call ->
+                pendingTool.value = call
+                approval = CompletableDeferred()
+                approval.await()
+            },
+        )
         runJob = viewModelScope.launch {
             var secret: CharArray? = null
             try {
@@ -148,9 +189,15 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                                 appendAssistant(assistantIndex, "\n[$sanitized]")
                                 status.value = sanitized
                             }
-                            ModelEvent.Completed -> status.value = "Completed locally-orchestrated request."
+                            ModelEvent.Completed -> {
+                                status.value = "Completed locally-orchestrated request."
+                            }
                             is ModelEvent.Usage -> status.value = "Tokens in ${event.inputTokens} / out ${event.outputTokens}"
                             is ModelEvent.ToolCallDelta -> Unit
+                            is ModelEvent.ToolApprovalRequired -> {
+                                pendingTool.value = ToolCall(event.callId, event.name, event.argumentsJson)
+                                status.value = "Approve HTTP tool ${event.name}?"
+                            }
                         }
                     }
             } catch (e: AppException) {
@@ -181,9 +228,21 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         }.orEmpty()
     }
 
+    fun approveTool() {
+        pendingTool.value = null
+        approval.complete(true)
+    }
+
+    fun rejectTool() {
+        pendingTool.value = null
+        approval.complete(false)
+    }
+
     fun cancel() {
         runJob?.cancel()
         streaming.value = false
+        pendingTool.value = null
+        if (!approval.isCompleted) approval.complete(false)
         status.value = "Cancelled."
     }
 

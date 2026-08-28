@@ -7,8 +7,8 @@ import java.io.ByteArrayInputStream
 import java.util.zip.ZipInputStream
 
 object OfficeParser {
-    const val DOCX_FINGERPRINT = "docx-xml-v1"
-    const val EPUB_FINGERPRINT = "epub-xml-v1"
+    const val DOCX_FINGERPRINT = "docx-xml-v2"
+    const val EPUB_FINGERPRINT = "epub-xml-v2"
 
     fun parse(fileName: String, bytes: ByteArray): ParsedPublication {
         val inspection = ZipSafety.inspect(bytes)
@@ -44,25 +44,21 @@ object OfficeParser {
                 textParts += text
                 pages += ExtractedPage(index + 1, text, needsVision = false)
             }
-            Regex("r:embed=\"([^\"]+)\"").findAll(paraXml).forEach { rel ->
-                val media = findMedia(entries, rel.groupValues[1])
-                if (media != null) {
-                    assets += ExtractedAsset(
-                        localId = rel.groupValues[1],
-                        kind = "IMAGE",
-                        page = index + 1,
-                        section = "paragraph-${index + 1}",
-                        bytes = media.second,
-                        mediaType = guessImageType(media.first),
-                        surroundingText = text,
-                    )
-                }
+            Regex("r:(embed|link)=\"([^\"]+)\"").findAll(paraXml).forEach { rel ->
+                val relId = rel.groupValues[2]
+                assets += relationshipAsset(
+                    entries = entries,
+                    relId = relId,
+                    page = index + 1,
+                    section = "paragraph-${index + 1}",
+                    surroundingText = text,
+                )
             }
         }
         if (textParts.isEmpty() && assets.isEmpty()) error("DOCX has no extractable text or images")
         val mediaFiles = entries.filter { it.key.lowercase().startsWith("word/media/") }
         mediaFiles.forEach { (name, payload) ->
-            if (assets.none { it.bytes.contentEquals(payload) }) {
+            if (assets.none { it.bytes.isNotEmpty() && it.bytes.contentEquals(payload) }) {
                 assets += ExtractedAsset(
                     localId = name.substringAfterLast('/'),
                     kind = "IMAGE",
@@ -74,12 +70,13 @@ object OfficeParser {
                 )
             }
         }
+        val needsVision = assets.any { it.kind == "IMAGE" || it.kind == "EXTERNAL" || it.kind == "MISSING" }
         return ParsedPublication(
             format = SourceFormat.OFFICE_ARCHIVE,
             text = textParts.joinToString("\n"),
-            pages = pages.ifEmpty { listOf(ExtractedPage(1, textParts.joinToString("\n"), assets.isNotEmpty())) },
+            pages = pages.ifEmpty { listOf(ExtractedPage(1, textParts.joinToString("\n"), needsVision)) },
             assets = assets,
-            needsVision = assets.isNotEmpty(),
+            needsVision = needsVision,
             parserFingerprint = DOCX_FINGERPRINT,
         )
     }
@@ -107,19 +104,7 @@ object OfficeParser {
                 pages += ExtractedPage(index + 1, stripped, needsVision = false)
             }
             Regex("(?is)<img[^>]+src\\s*=\\s*\"([^\"]+)\"").findAll(html).forEach { img ->
-                val src = img.groupValues[1].substringAfterLast('/').lowercase()
-                val media = entries.entries.firstOrNull { it.key.lowercase().endsWith(src) }
-                if (media != null) {
-                    assets += ExtractedAsset(
-                        localId = media.key.substringAfterLast('/'),
-                        kind = "IMAGE",
-                        page = index + 1,
-                        section = name,
-                        bytes = media.value,
-                        mediaType = guessImageType(media.key),
-                        surroundingText = stripped,
-                    )
-                }
+                assets += epubImageAsset(entries, img.groupValues[1], index + 1, name, stripped)
             }
         }
         entries.filter { it.key.lowercase().contains("/images/") || imageName(it.key) }.forEach { (name, payload) ->
@@ -136,12 +121,13 @@ object OfficeParser {
             }
         }
         if (texts.isEmpty() && assets.isEmpty()) error("EPUB has no extractable text or images")
+        val needsVision = assets.any { it.kind == "IMAGE" || it.kind == "EXTERNAL" || it.kind == "MISSING" }
         return ParsedPublication(
             format = SourceFormat.OFFICE_ARCHIVE,
             text = texts.joinToString("\n"),
-            pages = pages.ifEmpty { listOf(ExtractedPage(1, texts.joinToString("\n"), assets.isNotEmpty())) },
+            pages = pages.ifEmpty { listOf(ExtractedPage(1, texts.joinToString("\n"), needsVision)) },
             assets = assets,
-            needsVision = assets.isNotEmpty(),
+            needsVision = needsVision,
             parserFingerprint = EPUB_FINGERPRINT,
         )
     }
@@ -159,20 +145,73 @@ object OfficeParser {
         return out
     }
 
-    private fun findMedia(entries: Map<String, ByteArray>, embed: String): Pair<String, ByteArray>? {
+    private fun relationshipAsset(
+        entries: Map<String, ByteArray>,
+        relId: String,
+        page: Int,
+        section: String,
+        surroundingText: String,
+    ): ExtractedAsset {
         val rels = entries.entries.firstOrNull { it.key.lowercase() == "word/_rels/document.xml.rels" }?.value
         if (rels != null) {
             val xml = String(rels, Charsets.UTF_8)
-            val target = Regex("Id=\"${Regex.escape(embed)}\"[^>]*Target=\"([^\"]+)\"").find(xml)?.groupValues?.get(1)
-                ?: Regex("Target=\"([^\"]+)\"[^>]*Id=\"${Regex.escape(embed)}\"").find(xml)?.groupValues?.get(1)
-            if (target != null) {
+            val tag = Regex("<Relationship[^>]*Id=\"${Regex.escape(relId)}\"[^>]*/?>").find(xml)?.value
+                ?: Regex("<Relationship[^>]*Id=\"${Regex.escape(relId)}\"[\\s\\S]*?/>").find(xml)?.value
+            if (tag != null) {
+                val target = Regex("Target=\"([^\"]+)\"").find(tag)?.groupValues?.get(1).orEmpty()
+                val mode = Regex("TargetMode=\"([^\"]+)\"").find(tag)?.groupValues?.get(1).orEmpty()
+                val external = mode.equals("External", ignoreCase = true) ||
+                    target.startsWith("http://", ignoreCase = true) ||
+                    target.startsWith("https://", ignoreCase = true)
+                if (external) {
+                    return ExtractedAsset(relId, "EXTERNAL", page, section, ByteArray(0), "image/*", surroundingText)
+                }
                 val path = if (target.startsWith("/")) target.drop(1) else "word/" + target.removePrefix("../")
                 val hit = entries.entries.firstOrNull { it.key.replace('\\', '/').equals(path, ignoreCase = true) }
                     ?: entries.entries.firstOrNull { it.key.endsWith(target.substringAfterLast('/')) }
-                if (hit != null) return hit.toPair()
+                if (hit != null) {
+                    return ExtractedAsset(relId, "IMAGE", page, section, hit.value, guessImageType(hit.key), surroundingText)
+                }
+                return ExtractedAsset(relId, "MISSING", page, section, ByteArray(0), "image/*", surroundingText)
             }
         }
-        return entries.entries.firstOrNull { it.key.contains(embed, ignoreCase = true) }?.toPair()
+        val fallback = entries.entries.firstOrNull { it.key.contains(relId, ignoreCase = true) }
+        return if (fallback != null) {
+            ExtractedAsset(relId, "IMAGE", page, section, fallback.value, guessImageType(fallback.key), surroundingText)
+        } else {
+            ExtractedAsset(relId, "MISSING", page, section, ByteArray(0), "image/*", surroundingText)
+        }
+    }
+
+    private fun epubImageAsset(
+        entries: Map<String, ByteArray>,
+        src: String,
+        page: Int,
+        section: String,
+        surroundingText: String,
+    ): ExtractedAsset {
+        val trimmed = src.trim()
+        if (trimmed.startsWith("http://", ignoreCase = true) ||
+            trimmed.startsWith("https://", ignoreCase = true) ||
+            trimmed.startsWith("file:", ignoreCase = true)
+        ) {
+            return ExtractedAsset(trimmed, "EXTERNAL", page, section, ByteArray(0), "image/*", surroundingText)
+        }
+        val leaf = trimmed.substringAfterLast('/').lowercase()
+        val media = entries.entries.firstOrNull { it.key.lowercase().endsWith(leaf) }
+        return if (media != null) {
+            ExtractedAsset(
+                media.key.substringAfterLast('/'),
+                "IMAGE",
+                page,
+                section,
+                media.value,
+                guessImageType(media.key),
+                surroundingText,
+            )
+        } else {
+            ExtractedAsset(leaf.ifBlank { trimmed }, "MISSING", page, section, ByteArray(0), "image/*", surroundingText)
+        }
     }
 
     private fun guessImageType(name: String): String {

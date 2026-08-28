@@ -90,6 +90,14 @@ class ProfileRepository(private val db: SqlConnection) {
         return null
     }
 
+    fun visionBinding(): Pair<ProviderProfile, ModelProfile>? {
+        for (provider in listProviders()) {
+            val model = listModels(provider.id).firstOrNull { "image" in it.capabilities } ?: continue
+            return provider to model
+        }
+        return null
+    }
+
     fun chatModel(): ModelProfile? = chatBinding()?.second
 
     fun visionConfigured(): Boolean = listModels().any { "image" in it.capabilities }

@@ -27,7 +27,7 @@ class ProvidersViewModel(application: Application) : AndroidViewModel(applicatio
         providers.addAll(app.container.profiles.listProviders())
     }
 
-    fun save(name: String, baseUrl: String, modelId: String, apiKey: String, vision: Boolean): Boolean {
+    fun save(name: String, baseUrl: String, modelId: String, apiKey: String, vision: Boolean, tools: Boolean = false): Boolean {
         if (name.isBlank() || baseUrl.isBlank() || modelId.isBlank()) {
             status.value = "Name, base URL, and model id are required."
             return false
@@ -50,6 +50,7 @@ class ProvidersViewModel(application: Application) : AndroidViewModel(applicatio
         app.container.profiles.upsertProvider(profile)
         val capabilities = mutableSetOf("stream")
         if (vision) capabilities += "image"
+        if (tools) capabilities += "tools"
         app.container.profiles.upsertModel(
             ModelProfile(
                 id = EntityId.random().value,

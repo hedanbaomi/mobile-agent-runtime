@@ -7,57 +7,91 @@ import java.io.ByteArrayOutputStream
 import java.util.zip.Inflater
 
 object PdfParser {
-    const val FINGERPRINT = "pdf-text-v1"
+    const val FINGERPRINT = "pdf-text-v2"
 
     fun parse(bytes: ByteArray): ParsedPublication {
         if (bytes.size < 5 || String(bytes.copyOfRange(0, 5), Charsets.ISO_8859_1) != "%PDF-") {
             error("Not a PDF")
         }
         val latin = String(bytes, Charsets.ISO_8859_1)
-        val streams = extractStreams(bytes, latin)
-        val texts = mutableListOf<String>()
+        val objects = extractIndirectObjects(bytes, latin)
+        val pageNumbers = pageKids(objects).ifEmpty {
+            objects.filter { (_, obj) -> isPageDict(obj.dict) }.keys.sorted()
+        }
+        val imageObjects = objects.filter { (_, obj) -> isImageDict(obj.dict) }
         val assets = mutableListOf<ExtractedAsset>()
+        val pages = mutableListOf<ExtractedPage>()
         var imageOrdinal = 0
-        streams.forEach { stream ->
-            val decoded = decodeStream(stream)
-            extractPdfStrings(decoded).forEach { texts += it }
-            if (stream.dict.contains("/Image") || stream.filter.contains("DCTDecode")) {
+        val assignedImages = mutableSetOf<Int>()
+        pageNumbers.forEachIndexed { index, objNum ->
+            val pageObj = objects[objNum] ?: return@forEachIndexed
+            val pageIndex = index + 1
+            val content = pageContent(objects, pageObj.dict)
+            val decoded = content?.let { decodeStream(it) } ?: ByteArray(0)
+            val pageLatin = String(decoded, Charsets.ISO_8859_1)
+            val text = extractPdfStrings(decoded).joinToString(" ").trim()
+            val xobjects = pageXObjects(pageObj.dict)
+            xobjects.forEach { (name, imageObjNum) ->
+                val image = objects[imageObjNum] ?: return@forEach
+                if (!isImageDict(image.dict) || image.stream == null) return@forEach
+                assignedImages += imageObjNum
                 imageOrdinal += 1
-                val payload = if (stream.filter.contains("DCTDecode")) decoded else stream.raw
+                val filter = streamFilter(image.dict)
+                val payload = if (filter.contains("DCTDecode")) decodeStream(image) else image.stream
+                val usedOnPage = pageLatin.contains("/$name") || Regex("/${Regex.escape(name)}\\s+Do").containsMatchIn(pageLatin)
                 assets += ExtractedAsset(
                     localId = "img-$imageOrdinal",
                     kind = "IMAGE",
-                    page = null,
-                    section = null,
+                    page = if (usedOnPage || xobjects.size == 1) pageIndex else pageIndex,
+                    section = name,
                     bytes = payload,
-                    mediaType = if (stream.filter.contains("DCTDecode")) "image/jpeg" else "application/octet-stream",
-                    surroundingText = extractPdfStrings(decoded).joinToString(" "),
+                    mediaType = if (filter.contains("DCTDecode")) "image/jpeg" else "application/octet-stream",
+                    surroundingText = text,
+                )
+            }
+            val hasImages = xobjects.isNotEmpty() || Regex("/Subtype\\s*/Image").containsMatchIn(pageObj.dict)
+            val hasDrawing = hasVectorDrawing(pageLatin)
+            val needsVision = hasImages || hasDrawing || text.isEmpty()
+            pages += ExtractedPage(pageIndex, text, needsVision)
+            if (needsVision && assets.none { it.page == pageIndex && it.kind == "IMAGE" && it.bytes.isNotEmpty() }) {
+                assets += ExtractedAsset(
+                    localId = "page-$pageIndex",
+                    kind = "PAGE",
+                    page = pageIndex,
+                    section = null,
+                    bytes = ByteArray(0),
+                    mediaType = "application/pdf-page",
+                    surroundingText = text,
                 )
             }
         }
-        val pageCount = Regex("/Type\\s*/Page(?![s])").findAll(latin).count().coerceAtLeast(
-            if (texts.isNotEmpty() || assets.isNotEmpty()) 1 else 0,
-        )
-        val joined = texts.joinToString("\n").trim()
-        val hasImages = assets.isNotEmpty() || latin.contains("/Subtype /Image") || latin.contains("/Subtype/Image")
-        val hasUncertainGraphics = hasVectorDrawing(latin) && !hasOnlyTextOperators(latin)
-        val needsVision = hasImages || hasUncertainGraphics || (joined.isEmpty() && pageCount > 0)
-        if (pageCount == 0 && joined.isEmpty() && assets.isEmpty()) {
+        imageObjects.forEach { (num, image) ->
+            if (num in assignedImages || image.stream == null) return@forEach
+            imageOrdinal += 1
+            val filter = streamFilter(image.dict)
+            val payload = if (filter.contains("DCTDecode")) decodeStream(image) else image.stream
+            assets += ExtractedAsset(
+                localId = "img-$imageOrdinal",
+                kind = "IMAGE",
+                page = null,
+                section = null,
+                bytes = payload,
+                mediaType = if (filter.contains("DCTDecode")) "image/jpeg" else "application/octet-stream",
+                surroundingText = "",
+            )
+        }
+        if (pages.isEmpty() && assets.isEmpty()) {
             error("PDF has no extractable pages or text")
         }
-        val pages = if (pageCount <= 1) {
-            listOf(ExtractedPage(1, joined, needsVision))
-        } else {
-            val parts = splitByPageMarkers(joined, pageCount)
-            parts.mapIndexed { index, text -> ExtractedPage(index + 1, text, needsVision) }
-        }
+        val orderedPages = pages.ifEmpty { listOf(ExtractedPage(1, "", needsVision = true)) }
+        val needsVision = orderedPages.any { it.needsVision } || assets.any { it.kind == "IMAGE" || it.kind == "PAGE" }
         return ParsedPublication(
             format = SourceFormat.PDF,
-            text = pages.joinToString("\n") { page ->
+            text = orderedPages.joinToString("\n") { page ->
                 val prefix = "Page ${page.page}: "
                 if (page.text.isBlank()) prefix.trim() else prefix + page.text
             },
-            pages = pages,
+            pages = orderedPages,
             assets = assets,
             needsVision = needsVision,
             parserFingerprint = FINGERPRINT,
@@ -66,11 +100,36 @@ object PdfParser {
 
     fun writeSimpleTextPdf(text: String): ByteArray {
         val escaped = text.replace("\\", "\\\\").replace("(", "\\(").replace(")", "\\)")
-        val streamBody = "BT /F1 12 Tf 72 720 Td ($escaped) Tj ET\n"
-        return assemblePdf(
-            content = streamBody,
-            extraObjects = emptyList(),
-            resources = "/Font << /F1 5 0 R >>",
+        return assemblePages(
+            listOf(PageContent("BT /F1 12 Tf 72 720 Td ($escaped) Tj ET\n", "/Font << /F1 FONT >>")),
+        )
+    }
+
+    fun writeTextAndVectorPdf(text: String): ByteArray {
+        val escaped = text.replace("\\", "\\\\").replace("(", "\\(").replace(")", "\\)")
+        return assemblePages(
+            listOf(
+                PageContent(
+                    "BT /F1 12 Tf 72 720 Td ($escaped) Tj ET\n0 0 100 100 re f\n",
+                    "/Font << /F1 FONT >>",
+                ),
+            ),
+        )
+    }
+
+    fun writeDrawingOnlyPdf(): ByteArray =
+        assemblePages(listOf(PageContent("0 0 100 100 re f\n", "")))
+
+    fun writeTwoPageTextPdf(page1: String, page2: String): ByteArray {
+        fun body(text: String): String {
+            val escaped = text.replace("\\", "\\\\").replace("(", "\\(").replace(")", "\\)")
+            return "BT /F1 12 Tf 72 720 Td ($escaped) Tj ET\n"
+        }
+        return assemblePages(
+            listOf(
+                PageContent(body(page1), "/Font << /F1 FONT >>"),
+                PageContent(body(page2), "/Font << /F1 FONT >>"),
+            ),
         )
     }
 
@@ -82,46 +141,95 @@ object PdfParser {
             append(jpeg.size)
             append(" >>\nstream\n")
         }
-        val content = "BT /F1 12 Tf 72 700 Td ($escaped) Tj ET\nq 100 0 0 100 72 400 cm /Im1 Do Q\n"
-        return assemblePdf(
-            content = content,
+        return assemblePages(
+            pages = listOf(
+                PageContent(
+                    "BT /F1 12 Tf 72 700 Td ($escaped) Tj ET\nq 100 0 0 100 72 400 cm /Im1 Do Q\n",
+                    "/Font << /F1 FONT >> /XObject << /Im1 IMAGE >>",
+                ),
+            ),
             extraObjects = listOf(imageObj to jpeg),
-            resources = "/Font << /F1 5 0 R >> /XObject << /Im1 6 0 R >>",
         )
     }
 
-    private data class PdfStream(val dict: String, val filter: String, val raw: ByteArray)
+    private data class PdfObject(val dict: String, val stream: ByteArray?)
+    private data class PageContent(val content: String, val resources: String)
 
-    private fun extractStreams(bytes: ByteArray, latin: String): List<PdfStream> {
-        val out = mutableListOf<PdfStream>()
-        val marker = "stream"
-        var from = 0
-        while (true) {
-            val idx = latin.indexOf(marker, from)
-            if (idx < 0) break
-            val dictStart = latin.lastIndexOf("<<", idx)
-            val dict = if (dictStart >= 0) latin.substring(dictStart, idx) else ""
-            var dataStart = idx + marker.length
+    private fun extractIndirectObjects(bytes: ByteArray, latin: String): Map<Int, PdfObject> {
+        val out = linkedMapOf<Int, PdfObject>()
+        val header = Regex("(\\d+)\\s+0\\s+obj")
+        header.findAll(latin).forEach { match ->
+            val number = match.groupValues[1].toInt()
+            val start = match.range.last + 1
+            val end = latin.indexOf("endobj", start)
+            if (end < 0) return@forEach
+            val body = latin.substring(start, end)
+            val streamIdx = body.indexOf("stream")
+            if (streamIdx < 0) {
+                out[number] = PdfObject(body, null)
+                return@forEach
+            }
+            val dict = body.substring(0, streamIdx)
+            var dataStart = match.range.last + 1 + streamIdx + "stream".length
             if (dataStart < bytes.size && bytes[dataStart] == '\r'.code.toByte()) dataStart++
             if (dataStart < bytes.size && bytes[dataStart] == '\n'.code.toByte()) dataStart++
-            val end = latin.indexOf("endstream", dataStart)
-            if (end < 0) break
-            var dataEnd = end
+            val endStreamAbs = latin.indexOf("endstream", dataStart)
+            if (endStreamAbs < 0) {
+                out[number] = PdfObject(dict, null)
+                return@forEach
+            }
+            var dataEnd = endStreamAbs
             if (dataEnd > 0 && latin[dataEnd - 1] == '\n') dataEnd--
             if (dataEnd > 0 && latin[dataEnd - 1] == '\r') dataEnd--
             val raw = bytes.copyOfRange(dataStart.coerceAtMost(bytes.size), dataEnd.coerceAtMost(bytes.size))
-            val filter = Regex("/Filter\\s*/([A-Za-z]+)").find(dict)?.groupValues?.get(1).orEmpty()
-            out += PdfStream(dict, filter, raw)
-            from = end + 9
+            out[number] = PdfObject(dict, raw)
         }
         return out
     }
 
-    private fun decodeStream(stream: PdfStream): ByteArray {
-        if (stream.filter != "FlateDecode") return stream.raw
+    private fun pageKids(objects: Map<Int, PdfObject>): List<Int> {
+        val pages = objects.values.firstOrNull { obj ->
+            Regex("/Type\\s*/Pages").containsMatchIn(obj.dict) && !isPageDict(obj.dict)
+        } ?: return emptyList()
+        val kids = Regex("/Kids\\s*\\[([^]]*)]").find(pages.dict)?.groupValues?.get(1) ?: return emptyList()
+        return Regex("(\\d+)\\s+0\\s+R").findAll(kids).map { it.groupValues[1].toInt() }.toList()
+    }
+
+    private fun isPageDict(dict: String): Boolean =
+        Regex("/Type\\s*/Page(?![sA-Za-z])").containsMatchIn(dict)
+
+    private fun isImageDict(dict: String): Boolean =
+        dict.contains("/Image") || Regex("/Subtype\\s*/Image").containsMatchIn(dict) ||
+            streamFilter(dict).contains("DCTDecode")
+
+    private fun pageContent(objects: Map<Int, PdfObject>, dict: String): PdfObject? {
+        val single = Regex("/Contents\\s+(\\d+)\\s+0\\s+R").find(dict)?.groupValues?.get(1)?.toIntOrNull()
+        if (single != null) return objects[single]
+        val array = Regex("/Contents\\s*\\[([^]]*)]").find(dict)?.groupValues?.get(1)
+        if (array != null) {
+            val nums = Regex("(\\d+)\\s+0\\s+R").findAll(array).map { it.groupValues[1].toInt() }.toList()
+            val combined = nums.mapNotNull { objects[it]?.stream }.fold(ByteArray(0)) { acc, next -> acc + next }
+            val first = nums.firstOrNull()?.let { objects[it] }
+            return PdfObject(first?.dict.orEmpty(), combined)
+        }
+        return null
+    }
+
+    private fun pageXObjects(dict: String): Map<String, Int> {
+        val section = Regex("/XObject\\s*<<([^>]*)>>").find(dict)?.groupValues?.get(1) ?: return emptyMap()
+        return Regex("/([A-Za-z0-9._]+)\\s+(\\d+)\\s+0\\s+R").findAll(section)
+            .associate { it.groupValues[1] to it.groupValues[2].toInt() }
+    }
+
+    private fun streamFilter(dict: String): String =
+        Regex("/Filter\\s*/([A-Za-z]+)").find(dict)?.groupValues?.get(1).orEmpty()
+
+    private fun decodeStream(obj: PdfObject): ByteArray {
+        val raw = obj.stream ?: return ByteArray(0)
+        if (streamFilter(obj.dict) != "FlateDecode") return raw
         return runCatching {
             val inflater = Inflater()
-            inflater.setInput(stream.raw)
+            inflater.setInput(raw)
             val out = ByteArrayOutputStream()
             val buf = ByteArray(4096)
             while (!inflater.finished()) {
@@ -131,7 +239,7 @@ object PdfParser {
             }
             inflater.end()
             out.toByteArray()
-        }.getOrDefault(stream.raw)
+        }.getOrDefault(raw)
     }
 
     private fun extractPdfStrings(data: ByteArray): List<String> {
@@ -164,44 +272,43 @@ object PdfParser {
             Regex("(?<![A-Za-z])(f|f\\*|F|B|b|S|s)\\s").containsMatchIn(stripped)
     }
 
-    private fun hasOnlyTextOperators(latin: String): Boolean {
-        val stripped = latin.replace(Regex("BT[\\s\\S]*?ET"), " ")
-        return !stripped.contains("/Image") && !Regex("\\sDo\\s").containsMatchIn(stripped)
-    }
-
-    private fun splitByPageMarkers(text: String, pageCount: Int): List<String> {
-        if (pageCount <= 1) return listOf(text)
-        val chunk = (text.length / pageCount).coerceAtLeast(1)
-        return (0 until pageCount).map { index ->
-            val start = index * chunk
-            val end = if (index == pageCount - 1) text.length else ((index + 1) * chunk).coerceAtMost(text.length)
-            if (start >= text.length) "" else text.substring(start, end)
-        }
-    }
-
     private fun jpegStub(): ByteArray {
         val header = byteArrayOf(0xFF.toByte(), 0xD8.toByte(), 0xFF.toByte(), 0xD9.toByte())
         return header
     }
 
-    private fun assemblePdf(
-        content: String,
-        extraObjects: List<Pair<String, ByteArray>>,
-        resources: String,
+    private fun assemblePages(
+        pages: List<PageContent>,
+        extraObjects: List<Pair<String, ByteArray>> = emptyList(),
     ): ByteArray {
-        val contentBytes = content.toByteArray(Charsets.ISO_8859_1)
+        val n = pages.size
         val objects = mutableListOf<ByteArray>()
         fun obj(body: String) = body.toByteArray(Charsets.ISO_8859_1)
+        val fontObj = 3 + (2 * n)
+        val firstExtra = fontObj + 1
         objects += obj("1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n")
-        objects += obj("2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n")
-        objects += obj(
-            "3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R /Resources << $resources >> >>\nendobj\n",
-        )
-        objects += obj("4 0 obj\n<< /Length ${contentBytes.size} >>\nstream\n") + contentBytes + obj("\nendstream\nendobj\n")
-        objects += obj("5 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>\nendobj\n")
+        val kids = (0 until n).joinToString(" ") { "${3 + it} 0 R" }
+        objects += obj("2 0 obj\n<< /Type /Pages /Kids [$kids] /Count $n >>\nendobj\n")
+        pages.forEachIndexed { index, page ->
+            val pageObj = 3 + index
+            val contentObj = 3 + n + index
+            val resources = page.resources
+                .replace("FONT", "$fontObj 0 R")
+                .replace("IMAGE", "$firstExtra 0 R")
+            objects += obj(
+                "$pageObj 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents $contentObj 0 R /Resources << $resources >> >>\nendobj\n",
+            )
+        }
+        pages.forEachIndexed { index, page ->
+            val contentObj = 3 + n + index
+            val contentBytes = page.content.toByteArray(Charsets.ISO_8859_1)
+            objects += obj("$contentObj 0 obj\n<< /Length ${contentBytes.size} >>\nstream\n") +
+                contentBytes + obj("\nendstream\nendobj\n")
+        }
+        objects += obj("$fontObj 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>\nendobj\n")
         extraObjects.forEachIndexed { index, (dictPrefix, payload) ->
-            val n = 6 + index
-            objects += obj("$n 0 obj\n$dictPrefix") + payload + obj("\nendstream\nendobj\n")
+            val num = firstExtra + index
+            objects += obj("$num 0 obj\n$dictPrefix") + payload + obj("\nendstream\nendobj\n")
         }
         val header = "%PDF-1.4\n".toByteArray(Charsets.ISO_8859_1)
         val out = ByteArrayOutputStream()

@@ -3,7 +3,7 @@
 
 # Skills 执行与安全模型
 
-状态：M5 本地 JVM 已落地（清单检查、A—E 分类、内置工具与 Tool Loop）。对应R09—R12、S01—S11。**知识是数据，Prompt是指令，Skill脚本是可执行代码，三者不共享信任等级。** Python 隔离执行仍属 M6，不能用指令展示代替执行能力，本轮不宣称完整 MVP。
+状态：M5 本地 JVM 已落地（清单检查、A—E 分类、内置工具与 Tool Loop）。M5R 修复后：工具协议含 assistant.tool_calls、结构化权限与包 CAS、HTTPS 边界、限额直接 class E。对应R09—R12、S01—S11。**知识是数据，Prompt是指令，Skill脚本是可执行代码，三者不共享信任等级。** Python 隔离执行仍属 M6，不能用指令展示代替执行能力，本轮不宣称完整 MVP。
 
 ## 1. Skill包与兼容性
 
@@ -161,3 +161,11 @@ App外部导入Python仍涉及动态代码和平台政策约束。首版仅用�
 | S08 | LOCAL_PASS | 四件内置工具 schema、碎片 JSON、重复 id、HTTP 确认 |
 | S09 | LOCAL_PASS | 无 tools 能力不带工具；越权 HTTP Denied；预算耗尽 |
 | S10 | LOCAL_PASS（工具输出） | 工具结果脱敏。未跑完整导出矩阵 |
+
+## 10. M5R01—M5R11 本地修复（2026-08-28）
+
+- Tool loop 第二轮保留 assistant.tool_calls 再跟 tool 结果；Adapter 按结构化 JSON 编码。HTTP NeedsApproval 在 Chat 暂停并提供批准/拒绝后续跑。
+- Provider 可标记 tools 能力。Chat 不再全局合并全部 KB；`knowledge_search` 只使用当前 grant 的 knowledgeBaseIds。
+- 安装保存完整 manifest JSON 与原包 bytes；同 hash 重导入不叠加 grant。限额/炸弹/远程依赖（大小写不敏感）一律 class E。
+- HTTP 仅 HTTPS、allow-list、禁 loopback/私网；`file://` 与 `http://` 在回调前拒绝。工具输出与 read_document 有上限。
+- 成功/失败/拒绝工具输出都用当前 Provider secret 脱敏。SSE 按 tool index 映射 id。总时限在模型轮结束和每个工具前重查。`toolsEnabled=false` 收到 tool call 不执行。

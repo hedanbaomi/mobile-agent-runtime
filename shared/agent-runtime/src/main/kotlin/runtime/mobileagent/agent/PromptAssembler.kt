@@ -3,6 +3,9 @@
 
 package runtime.mobileagent.agent
 
+import runtime.mobileagent.provider.ChatMessage
+import runtime.mobileagent.provider.InlineImage
+
 data class EffectivePrompt(
     val runtimeContract: String,
     val userSystemPrompt: String,
@@ -10,18 +13,19 @@ data class EffectivePrompt(
     val retrieved: List<String>,
     val history: List<Pair<String, String>>,
     val currentUser: String,
+    val currentImages: List<InlineImage> = emptyList(),
 ) {
-    fun asMessages(): List<Map<String, String>> {
-        val messages = mutableListOf<Map<String, String>>()
+    fun asMessages(): List<ChatMessage> {
+        val messages = mutableListOf<ChatMessage>()
         val system = buildString {
             appendLine(runtimeContract)
             appendLine(userSystemPrompt)
             skillInstructions.forEach { appendLine(it) }
             retrieved.forEach { appendLine(it) }
         }.trim()
-        if (system.isNotEmpty()) messages += mapOf("role" to "system", "content" to system)
-        history.forEach { (role, content) -> messages += mapOf("role" to role, "content" to content) }
-        messages += mapOf("role" to "user", "content" to currentUser)
+        if (system.isNotEmpty()) messages += ChatMessage(role = "system", text = system)
+        history.forEach { (role, content) -> messages += ChatMessage(role = role, text = content) }
+        messages += ChatMessage(role = "user", text = currentUser, images = currentImages)
         return messages
     }
 }

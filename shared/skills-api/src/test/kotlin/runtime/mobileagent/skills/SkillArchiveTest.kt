@@ -83,6 +83,55 @@ class SkillArchiveTest {
     }
 
     @Test
+    fun moreThanFiveThousandEntriesIsClassE() {
+        val out = ByteArrayOutputStream()
+        ZipOutputStream(out).use { zip ->
+            zip.putNextEntry(ZipEntry("SKILL.md"))
+            zip.write("# helper\n".toByteArray())
+            zip.closeEntry()
+            repeat(5001) { i ->
+                zip.putNextEntry(ZipEntry("f$i.txt"))
+                zip.write("x".toByteArray())
+                zip.closeEntry()
+            }
+        }
+        val inspection = SkillArchive.inspect(out.toByteArray())
+        assertEquals(CompatibilityClass.E, inspection.classification)
+        assertFalse(inspection.installable)
+        assertFalse(SkillInstaller.install(out.toByteArray()).accepted)
+    }
+
+    @Test
+    fun compressionBombIsClassE() {
+        val payload = "a".repeat(90_000).toByteArray()
+        val out = ByteArrayOutputStream()
+        ZipOutputStream(out).use { zip ->
+            zip.putNextEntry(ZipEntry("SKILL.md"))
+            zip.write("# helper\n".toByteArray())
+            zip.closeEntry()
+            val entry = ZipEntry("bomb.txt")
+            zip.putNextEntry(entry)
+            zip.write(payload)
+            zip.closeEntry()
+        }
+        val bytes = out.toByteArray()
+        val inspection = SkillArchive.inspect(bytes)
+        assertEquals(CompatibilityClass.E, inspection.classification)
+        assertFalse(inspection.installable)
+    }
+
+    @Test
+    fun uppercaseRemoteWheelIsClassE() {
+        val zip = zip(
+            "mobile-skill.json" to validManifest("python").toByteArray(),
+            "requirements.txt" to "requests @ HTTPS://example.invalid/a.whl\n".toByteArray(),
+        )
+        val inspection = SkillArchive.inspect(zip)
+        assertEquals(CompatibilityClass.E, inspection.classification)
+        assertFalse(inspection.installable)
+    }
+
+    @Test
     fun shellRuntimeIsClassDAndInstallableAsInstructions() {
         val zip = zip("mobile-skill.json" to validManifest("shell").toByteArray())
         val inspection = SkillArchive.inspect(zip)

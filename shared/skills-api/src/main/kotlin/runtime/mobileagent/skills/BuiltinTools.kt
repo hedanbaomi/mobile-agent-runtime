@@ -36,6 +36,7 @@ data class ToolContext(
     val readDocument: (documentId: String, maxChars: Int) -> String,
     val httpGet: (url: String) -> String = { error("HTTP is not configured") },
     val allowedHosts: Set<String> = emptySet(),
+    val grantedKnowledgeBaseIds: Set<String> = emptySet(),
 )
 
 class ToolBroker(
@@ -93,14 +94,21 @@ class ToolBroker(
         "knowledge_search" -> {
             val query = args.string("query")
             val topK = args["topK"]?.jsonPrimitive?.contentOrNull?.toIntOrNull() ?: 8
-            val ids = args["knowledgeBaseIds"]?.toString()?.let { raw ->
+            val requested = args["knowledgeBaseIds"]?.toString()?.let { raw ->
                 Regex("\"([^\"]+)\"").findAll(raw).map { it.groupValues[1] }.toList()
             }.orEmpty()
-            context.search(query, ids, topK)
+            val allowed = context.grantedKnowledgeBaseIds
+            val ids = if (requested.isEmpty()) allowed.toList() else requested.filter { it in allowed }
+            if (ids.isEmpty()) {
+                """{"hits":[],"warning":"No authorized knowledge base in the current grant"}"""
+            } else {
+                capOutput(context.search(query, ids, topK))
+            }
         }
         "read_document" -> {
-            val maxChars = args["maxChars"]?.jsonPrimitive?.contentOrNull?.toIntOrNull() ?: 4000
-            context.readDocument(args.string("documentId"), maxChars)
+            val requested = args["maxChars"]?.jsonPrimitive?.contentOrNull?.toIntOrNull() ?: 4000
+            val maxChars = requested.coerceIn(0, HttpPolicy.MAX_READ_DOCUMENT_CHARS)
+            capOutput(context.readDocument(args.string("documentId"), maxChars))
         }
         "calculator" -> {
             val value = Calculator.eval(args.string("expression"))
@@ -110,12 +118,8 @@ class ToolBroker(
             val url = args.string("url")
             val method = args["method"]?.jsonPrimitive?.contentOrNull ?: "GET"
             if (method.uppercase() != "GET") error("Only GET is allowed without extra confirmation")
-            val host = URI(url).host?.lowercase() ?: error("URL host is missing")
-            if (host !in context.allowedHosts) error("Host $host is not in the HTTP allow-list")
-            if (host == "localhost" || host.endsWith(".local") || host.startsWith("127.") || host == "::1") {
-                error("Loopback HTTP is not allowed")
-            }
-            context.httpGet(url)
+            HttpPolicy.assertRequest(url, context.allowedHosts)
+            capOutput(context.httpGet(url))
         }
         else -> error("Unknown tool")
     }
@@ -134,6 +138,11 @@ class ToolBroker(
 
     private fun JsonObject.string(key: String): String =
         this[key]?.jsonPrimitive?.contentOrNull ?: error("missing $key")
+
+    private fun capOutput(value: String): String {
+        if (value.length <= HttpPolicy.MAX_TOOL_OUTPUT_CHARS) return value
+        error("Tool output exceeds ${HttpPolicy.MAX_TOOL_OUTPUT_CHARS} characters")
+    }
 }
 
 object BuiltinTools {
@@ -231,4 +240,77 @@ object Calculator {
 
 fun toolSpecsAsMaps(): List<Map<String, String>> = BuiltinTools.all.map {
     mapOf("name" to it.name, "description" to it.description, "parameters" to it.parametersJson)
+}
+
+object HttpPolicy {
+    const val MAX_TOOL_OUTPUT_CHARS = 32_768
+    const val MAX_READ_DOCUMENT_CHARS = 16_384
+    const val MAX_HTTP_RESPONSE_BYTES = 1 * 1024 * 1024
+    const val MAX_REDIRECTS = 3
+
+    fun assertRequest(url: String, allowedHosts: Set<String>) {
+        val uri = runCatching { URI(url) }.getOrNull() ?: error("URL is not valid")
+        val scheme = uri.scheme?.lowercase() ?: error("URL scheme is missing")
+        if (scheme != "https") error("Only HTTPS URLs are allowed")
+        val host = uri.host?.lowercase()?.trim('.') ?: error("URL host is missing")
+        if (host !in allowedHosts.map { it.lowercase() }.toSet()) {
+            error("Host $host is not in the HTTP allow-list")
+        }
+        if (isForbiddenHost(host)) error("Loopback or private HTTP is not allowed")
+        uri.port.takeIf { it > 0 }?.let { port ->
+            if (port != 443) error("Only HTTPS port 443 is allowed")
+        }
+    }
+
+    fun isForbiddenHost(host: String): Boolean {
+        val h = host.lowercase().trim('[', ']')
+        if (h == "localhost" || h.endsWith(".local") || h == "::1" || h == "0.0.0.0") return true
+        if (h.startsWith("127.") || h.startsWith("10.") || h.startsWith("192.168.") || h.startsWith("169.254.")) return true
+        if (h.startsWith("172.")) {
+            val second = h.split('.').getOrNull(1)?.toIntOrNull()
+            if (second != null && second in 16..31) return true
+        }
+        return false
+    }
+}
+
+object HostHttp {
+    fun get(url: String, allowedHosts: Set<String>): String {
+        var current = url
+        repeat(HttpPolicy.MAX_REDIRECTS + 1) { hop ->
+            HttpPolicy.assertRequest(current, allowedHosts)
+            val connection = URI(current).toURL().openConnection() as java.net.HttpURLConnection
+            connection.instanceFollowRedirects = false
+            connection.connectTimeout = 10_000
+            connection.readTimeout = 20_000
+            connection.requestMethod = "GET"
+            val code = connection.responseCode
+            if (code in 300..399) {
+                val location = connection.getHeaderField("Location") ?: error("Redirect is missing Location")
+                connection.disconnect()
+                current = URI(current).resolve(location).toString()
+                return@repeat
+            }
+            if (code !in 200..299) {
+                connection.disconnect()
+                error("HTTP $code")
+            }
+            val body = connection.inputStream.use { stream ->
+                val out = java.io.ByteArrayOutputStream()
+                val buf = ByteArray(8192)
+                var total = 0
+                while (true) {
+                    val n = stream.read(buf)
+                    if (n <= 0) break
+                    total += n
+                    if (total > HttpPolicy.MAX_HTTP_RESPONSE_BYTES) error("HTTP response exceeds limit")
+                    out.write(buf, 0, n)
+                }
+                out.toByteArray()
+            }
+            connection.disconnect()
+            return String(body, Charsets.UTF_8)
+        }
+        error("Too many HTTP redirects")
+    }
 }

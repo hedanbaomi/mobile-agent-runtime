@@ -40,6 +40,7 @@ class BuiltinToolsTest {
                     """{"n":$count}"""
                 },
                 readDocument = { _, _ -> "{}" },
+                grantedKnowledgeBaseIds = setOf("kb-a"),
             ),
             autoApproveSideEffects = true,
         )
@@ -81,5 +82,42 @@ class BuiltinToolsTest {
             ToolCall("h", "http_request", """{"url":"https://localhost/secret"}"""),
         )
         assertTrue(result is ToolResult.Invalid)
+    }
+
+    @Test
+    fun fileAndPlainHttpNeverReachCallback() {
+        var calls = 0
+        val tools = broker(autoApprove = true, http = { calls += 1; it })
+        val file = tools.invoke(ToolCall("f", "http_request", """{"url":"file:///etc/passwd"}"""))
+        val http = tools.invoke(ToolCall("h", "http_request", """{"url":"http://api.example.com/v1"}"""))
+        assertTrue(file is ToolResult.Invalid)
+        assertTrue(http is ToolResult.Invalid)
+        assertEquals(0, calls)
+    }
+
+    @Test
+    fun oversizedHttpOutputIsRejected() {
+        val huge = "x".repeat(HttpPolicy.MAX_TOOL_OUTPUT_CHARS + 1)
+        val result = broker(autoApprove = true, http = { huge }).invoke(
+            ToolCall("h", "http_request", """{"url":"https://api.example.com/v1"}"""),
+        )
+        assertTrue(result is ToolResult.Invalid)
+    }
+
+    @Test
+    fun searchDoesNotCrossUnauthorizedKnowledgeBase() {
+        val tools = ToolBroker(
+            setOf("knowledge.search"),
+            ToolContext(
+                search = { _, ids, _ -> ids.joinToString { "HIT:$it" } },
+                readDocument = { _, _ -> "SECRET-KB-B" },
+                grantedKnowledgeBaseIds = setOf("kb-a"),
+            ),
+        )
+        val result = tools.invoke(
+            ToolCall("s", "knowledge_search", """{"query":"q","knowledgeBaseIds":["kb-b"]}"""),
+        ) as ToolResult.Value
+        assertTrue("kb-b" !in result.json)
+        assertTrue(result.json.contains("No authorized") || result.json.contains("hits"))
     }
 }

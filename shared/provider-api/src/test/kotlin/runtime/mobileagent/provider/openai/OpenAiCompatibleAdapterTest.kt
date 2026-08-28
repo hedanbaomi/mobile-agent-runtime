@@ -9,6 +9,7 @@ import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertFalse
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
+import runtime.mobileagent.provider.ChatMessage
 import runtime.mobileagent.provider.ModelEvent
 import runtime.mobileagent.provider.ModelRequest
 import io.ktor.client.HttpClient
@@ -29,6 +30,30 @@ class OpenAiSseTest {
         val done = OpenAiSse.eventsFromLine("data: [DONE]", buf)
         assertEquals(listOf(ModelEvent.TextDelta("Hello")), delta)
         assertEquals(listOf(ModelEvent.Completed), done)
+    }
+
+    @Test
+    fun interleavedToolIndexesDoNotCrossAppend() {
+        val buf = linkedMapOf<String, Pair<String, StringBuilder>>()
+        val indexToId = mutableMapOf<Int, String>()
+        OpenAiSse.eventsFromLine(
+            """data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call-a","function":{"name":"a","arguments":"{\"x\":"}}]}}]}""",
+            buf,
+            indexToId = indexToId,
+        )
+        OpenAiSse.eventsFromLine(
+            """data: {"choices":[{"delta":{"tool_calls":[{"index":1,"id":"call-b","function":{"name":"b","arguments":"{\"y\":1}"}}]}}]}""",
+            buf,
+            indexToId = indexToId,
+        )
+        val lastA = OpenAiSse.eventsFromLine(
+            """data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"1}"}}]}}]}""",
+            buf,
+            indexToId = indexToId,
+        ).filterIsInstance<ModelEvent.ToolCallDelta>().last()
+        assertEquals("call-a", lastA.callId)
+        assertEquals("""{"x":1}""", lastA.argumentsJson)
+        assertEquals("""{"y":1}""", buf.getValue("call-b").second.toString())
     }
 
     @Test
@@ -66,7 +91,7 @@ class OpenAiCompatibleAdapterTest {
         }
         val adapter = OpenAiCompatibleAdapter(HttpClient(engine), "https://example.invalid/v1")
         val events = adapter.stream(
-            ModelRequest(modelId = "demo", messages = listOf(mapOf("role" to "user", "content" to "hi"))),
+            ModelRequest(modelId = "demo", messages = listOf(ChatMessage(role = "user", text = "hi"))),
             "test-secret-token".toCharArray(),
         ).toList()
         assertEquals(listOf(ModelEvent.TextDelta("Hi"), ModelEvent.Completed), events)
@@ -79,7 +104,7 @@ class OpenAiCompatibleAdapterTest {
         }
         val adapter = OpenAiCompatibleAdapter(HttpClient(engine), "https://example.invalid/v1")
         val events = adapter.stream(
-            ModelRequest(modelId = "demo", messages = listOf(mapOf("role" to "user", "content" to "hi"))),
+            ModelRequest(modelId = "demo", messages = listOf(ChatMessage(role = "user", text = "hi"))),
             "sk-testsecretvalue".toCharArray(),
         ).toList()
         assertEquals(listOf(ModelEvent.Failed("PROVIDER_UNAUTHORIZED")), events)
@@ -96,7 +121,7 @@ class OpenAiCompatibleAdapterTest {
         }
         val adapter = OpenAiCompatibleAdapter(HttpClient(engine), "https://example.invalid/v1")
         val events = adapter.stream(
-            ModelRequest(modelId = "demo", messages = listOf(mapOf("role" to "user", "content" to "hi"))),
+            ModelRequest(modelId = "demo", messages = listOf(ChatMessage(role = "user", text = "hi"))),
             "test-secret-token".toCharArray(),
         ).toList()
         assertEquals(ModelEvent.TextDelta("partial"), events.first())
@@ -116,7 +141,7 @@ class OpenAiCompatibleAdapterTest {
         }
         val adapter = OpenAiCompatibleAdapter(HttpClient(engine), "https://example.invalid/v1")
         val events = adapter.stream(
-            ModelRequest(modelId = "demo", messages = listOf(mapOf("role" to "user", "content" to "hi"))),
+            ModelRequest(modelId = "demo", messages = listOf(ChatMessage(role = "user", text = "hi"))),
             secret.toCharArray(),
         ).toList()
         assertEquals(1, events.size)
@@ -136,9 +161,47 @@ class OpenAiCompatibleAdapterTest {
         }
         val adapter = OpenAiCompatibleAdapter(HttpClient(engine), "https://example.invalid/v1")
         val events = adapter.stream(
-            ModelRequest(modelId = "demo", messages = listOf(mapOf("role" to "user", "content" to "hi"))),
+            ModelRequest(modelId = "demo", messages = listOf(ChatMessage(role = "user", text = "hi"))),
             "test-secret-token".toCharArray(),
         ).toList()
         assertEquals(listOf(ModelEvent.Failed("UNKNOWN_OUTCOME")), events)
+    }
+
+    @Test
+    fun requestBodyEncodesAssistantToolCallsAndImages() = runTest {
+        var captured = ""
+        val engine = MockEngine { request ->
+            captured = when (val body = request.body) {
+                is io.ktor.http.content.TextContent -> body.text
+                else -> body.toString()
+            }
+            respond(
+                content = "data: [DONE]\n\n",
+                status = HttpStatusCode.OK,
+                headers = headersOf(HttpHeaders.ContentType, "text/event-stream"),
+            )
+        }
+        val adapter = OpenAiCompatibleAdapter(HttpClient(engine), "https://example.invalid/v1")
+        adapter.stream(
+            ModelRequest(
+                modelId = "demo",
+                messages = listOf(
+                    ChatMessage(role = "assistant", toolCalls = listOf(
+                        runtime.mobileagent.provider.AssistantToolCall("t1", "calculator", """{"expression":"1"}"""),
+                    )),
+                    ChatMessage(role = "tool", text = "ok", toolCallId = "t1"),
+                    ChatMessage(
+                        role = "user",
+                        text = "see",
+                        images = listOf(runtime.mobileagent.provider.InlineImage("image/png", "QQ==", "a1")),
+                    ),
+                ),
+            ),
+            "test-secret-token".toCharArray(),
+        ).toList()
+        assertTrue(captured.contains("\"tool_calls\""))
+        assertTrue(captured.contains("\"tool_call_id\":\"t1\""))
+        assertTrue(captured.contains("image_url"))
+        assertTrue(captured.contains("data:image/png;base64,QQ=="))
     }
 }

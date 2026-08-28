@@ -41,7 +41,9 @@ class AgentRuntimeTest {
         assertEquals(RunState.COMPLETED, run.state)
         assertEquals(1, run.toolCalls)
         assertEquals(2, adapter.requests.size)
-        assertTrue(adapter.requests.last().messages.any { it["role"] == "tool" })
+        val second = adapter.requests.last().messages
+        assertTrue(second.any { it.role == "assistant" && it.toolCalls.any { call -> call.id == "t1" } })
+        assertTrue(second.any { it.role == "tool" && it.toolCallId == "t1" })
     }
 
     @Test
@@ -89,8 +91,67 @@ class AgentRuntimeTest {
         runBlocking {
             runtime.run(AgentRun("r", "s", "c"), prompt(), "m", charArrayOf('x'), toolsEnabled = true).toList()
         }
-        val toolMsg = adapter.requests.last().messages.first { it["role"] == "tool" }
-        assertFalseSecret(toolMsg.getValue("content"))
+        val toolMsg = adapter.requests.last().messages.first { it.role == "tool" }
+        assertFalseSecret(toolMsg.text)
+    }
+
+    @Test
+    fun toolsDisabledDoesNotExecuteBroker() {
+        val adapter = ScriptedAdapter(
+            listOf(listOf(ModelEvent.ToolCallDelta("t1", "calculator", """{"expression":"1"}"""), ModelEvent.Completed)),
+        )
+        val runtime = AgentRuntime(adapter, tools = ToolBroker(emptySet(), ToolContext({ _, _, _ -> "{}" }, { _, _ -> "{}" })))
+        val run = AgentRun("r", "s", "c")
+        val events = runBlocking {
+            runtime.run(run, prompt(), "model", charArrayOf('s'), toolsEnabled = false).toList()
+        }
+        assertTrue(events.any { it is ModelEvent.Failed })
+        assertEquals(0, run.toolCalls)
+        assertTrue(adapter.requests.single().tools.isEmpty())
+    }
+
+    @Test
+    fun budgetCheckedAfterStreamEnds() {
+        var now = 0L
+        val adapter = ScriptedAdapter(
+            listOf(listOf(ModelEvent.TextDelta("late"), ModelEvent.Completed)),
+            onStream = { now = 2000 },
+        )
+        val runtime = AgentRuntime(adapter, clock = { now }, tools = ToolBroker(emptySet(), ToolContext({ _, _, _ -> "{}" }, { _, _ -> "{}" })))
+        val run = AgentRun("r", "s", "c", budget = RunBudget(maxRuntimeMs = 1000))
+        val events = runBlocking {
+            runtime.run(run, prompt(), "model", charArrayOf('s'), toolsEnabled = true).toList()
+        }
+        assertTrue(events.any { it is ModelEvent.Failed && it.sanitizedMessage.contains("budget") })
+        assertEquals(RunState.BUDGET_EXHAUSTED, run.state)
+        assertTrue(events.none { it is ModelEvent.Completed })
+    }
+
+    @Test
+    fun currentSecretIsRedactedFromInvalidToolResult() {
+        val secret = "live-provider-secret-token"
+        val adapter = ScriptedAdapter(
+            listOf(
+                listOf(ModelEvent.ToolCallDelta("t1", "knowledge_search", """{"query":"q"}"""), ModelEvent.Completed),
+                listOf(ModelEvent.TextDelta("done"), ModelEvent.Completed),
+            ),
+        )
+        val runtime = AgentRuntime(
+            adapter,
+            tools = ToolBroker(
+                setOf("knowledge.search"),
+                ToolContext(
+                    search = { _, _, _ -> error("provider said $secret") },
+                    readDocument = { _, _ -> "{}" },
+                    grantedKnowledgeBaseIds = setOf("kb-a"),
+                ),
+            ),
+        )
+        runBlocking {
+            runtime.run(AgentRun("r", "s", "c"), prompt(), "m", secret.toCharArray(), toolsEnabled = true).toList()
+        }
+        val toolMsg = adapter.requests.last().messages.first { it.role == "tool" }
+        assertTrue(secret !in toolMsg.text)
     }
 
     private fun assertFalseSecret(text: String) {
@@ -99,7 +160,10 @@ class AgentRuntimeTest {
 
     private fun prompt() = EffectivePrompt("contract", "", emptyList(), emptyList(), emptyList(), "hello")
 
-    private class ScriptedAdapter(private val scripts: List<List<ModelEvent>>) : ModelAdapter {
+    private class ScriptedAdapter(
+        private val scripts: List<List<ModelEvent>>,
+        private val onStream: () -> Unit = {},
+    ) : ModelAdapter {
         val requests = mutableListOf<ModelRequest>()
         private var i = 0
         override suspend fun probe(profile: runtime.mobileagent.domain.ModelProfile): CapabilityReport {
@@ -108,6 +172,7 @@ class AgentRuntimeTest {
 
         override fun stream(request: ModelRequest, secret: CharArray): Flow<ModelEvent> = flow {
             requests += request
+            onStream()
             val events = scripts.getOrElse(i++) { listOf(ModelEvent.Completed) }
             events.forEach { emit(it) }
         }

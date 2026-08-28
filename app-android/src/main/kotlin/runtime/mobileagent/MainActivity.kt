@@ -88,6 +88,9 @@ class MainActivity : ComponentActivity() {
                             onCancel = chatVm::cancel,
                             onToggleDegradation = { chatVm.textDegradation.value = it },
                             onOpenCitation = chatVm::openCitation,
+                            pendingToolName = chatVm.pendingTool.value?.name,
+                            onApproveTool = chatVm::approveTool,
+                            onRejectTool = chatVm::rejectTool,
                         )
                     }
                     composable("agents") { AgentsScreen() }
@@ -105,6 +108,7 @@ class MainActivity : ComponentActivity() {
                             onImport = knowledgeVm::importUris,
                             onRebuild = knowledgeVm::rebuild,
                             onGrantVision = knowledgeVm::grantVision,
+                            onRetryVision = knowledgeVm::retryVision,
                         )
                     }
                     composable("skills") {

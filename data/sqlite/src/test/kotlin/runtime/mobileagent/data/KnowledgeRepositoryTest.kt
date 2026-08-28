@@ -507,6 +507,190 @@ class KnowledgeRepositoryTest {
         assertTrue(skills.enabledInstructions().any { it.contains("Helper") })
     }
 
+    @Test
+    fun vectorPdfDoesNotBecomeReadyWithoutVision() {
+        val db = JdbcSqlConnection()
+        Migrations.apply(db)
+        val repo = KnowledgeRepository(db, MemoryBlobSink())
+        val pdf = runtime.mobileagent.knowledge.PdfParser.writeTextAndVectorPdf("vector label")
+        val job = repo.importBytes("draw.pdf", "application/pdf", pdf, visionConfigured = false)
+        assertEquals(ImportStage.WAITING_FOR_VISION_MODEL, job.stage)
+        assertTrue(repo.search("vector").isEmpty())
+    }
+
+    @Test
+    fun drawingOnlyPdfDoesNotCallVisionOrBecomeReady() {
+        val db = JdbcSqlConnection()
+        Migrations.apply(db)
+        var calls = 0
+        val vision = runtime.mobileagent.knowledge.VisionBackend {
+            calls += 1
+            runtime.mobileagent.knowledge.VisionOutcome.Success(
+                runtime.mobileagent.knowledge.VisionSuccess("ocr", "desc"),
+            )
+        }
+        val repo = KnowledgeRepository(db, MemoryBlobSink(), vision = vision)
+        val pdf = runtime.mobileagent.knowledge.PdfParser.writeDrawingOnlyPdf()
+        val job = repo.importBytes("draw.pdf", "application/pdf", pdf, visionConfigured = true, visionConsent = true)
+        assertEquals(ImportStage.FAILED, job.stage)
+        assertEquals(0, calls)
+        assertTrue(repo.search("Page").isEmpty())
+    }
+
+    @Test
+    fun docxExternalImageDoesNotBecomeReadyOrFetch() {
+        val db = JdbcSqlConnection()
+        Migrations.apply(db)
+        var calls = 0
+        val vision = runtime.mobileagent.knowledge.VisionBackend {
+            calls += 1
+            runtime.mobileagent.knowledge.VisionOutcome.Success(
+                runtime.mobileagent.knowledge.VisionSuccess("ocr", "desc"),
+            )
+        }
+        val repo = KnowledgeRepository(db, MemoryBlobSink(), vision = vision)
+        val zip = zipBytesNamed(
+            "word/document.xml" to """<w:document><w:body><w:p><w:r><w:t>caption</w:t></w:r></w:p><w:p><w:r><w:drawing><a:blip r:link="rId9"/></w:drawing></w:r></w:p></w:body></w:document>""",
+            "word/_rels/document.xml.rels" to """<Relationships><Relationship Id="rId9" Type="http://example/image" Target="https://example.invalid/image.png" TargetMode="External"/></Relationships>""",
+        )
+        val job = repo.importBytes("note.docx", "application/vnd.openxmlformats-officedocument.wordprocessingml.document", zip, true, visionConsent = true)
+        assertEquals(ImportStage.FAILED, job.stage)
+        assertEquals(0, calls)
+        assertTrue(repo.search("caption").isEmpty())
+    }
+
+    @Test
+    fun visionTableMarkdownIsIndexedAndCached() {
+        val db = JdbcSqlConnection()
+        Migrations.apply(db)
+        val png = byteArrayOf(0x89.toByte(), 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A) + ByteArray(16)
+        var calls = 0
+        val vision = runtime.mobileagent.knowledge.VisionBackend {
+            calls += 1
+            runtime.mobileagent.knowledge.VisionOutcome.Success(
+                runtime.mobileagent.knowledge.VisionSuccess(
+                    ocrText = "",
+                    semanticDescription = "table",
+                    tableMarkdown = "TABLE_ONLY_MARKER",
+                    type = "table",
+                ),
+            )
+        }
+        val repo = KnowledgeRepository(db, MemoryBlobSink(), vision = vision, visionModelFingerprint = "vision-test")
+        val first = repo.importBytes("grid.png", "image/png", png, visionConfigured = true, visionConsent = true)
+        assertEquals(ImportStage.READY, first.stage)
+        assertTrue(repo.search("TABLE_ONLY_MARKER").any { "TABLE_ONLY_MARKER" in it.text })
+        val second = repo.grantVisionConsent(first.id)
+        assertEquals(ImportStage.READY, second.stage)
+        assertEquals(1, calls)
+        assertTrue(repo.search("TABLE_ONLY_MARKER").any { "TABLE_ONLY_MARKER" in it.text })
+    }
+
+    @Test
+    fun unknownVisionRetryRequiresAckAndCanSucceed() {
+        val db = JdbcSqlConnection()
+        Migrations.apply(db)
+        val png = byteArrayOf(0x89.toByte(), 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A) + ByteArray(16)
+        var calls = 0
+        val vision = runtime.mobileagent.knowledge.VisionBackend {
+            calls += 1
+            if (calls == 1) runtime.mobileagent.knowledge.VisionOutcome.UnknownOutcome
+            else runtime.mobileagent.knowledge.VisionOutcome.Success(
+                runtime.mobileagent.knowledge.VisionSuccess("ocr", "recovered"),
+            )
+        }
+        val repo = KnowledgeRepository(db, MemoryBlobSink(), vision = vision)
+        val job = repo.importBytes("scan.png", "image/png", png, visionConfigured = true, visionConsent = true)
+        assertEquals(ImportStage.FAILED, job.stage)
+        val again = repo.grantVisionConsent(job.id)
+        assertEquals(ImportStage.FAILED, again.stage)
+        assertEquals(1, calls)
+        val retried = repo.retryUnknownVision(job.id, acknowledgeDuplicateCharge = true)
+        assertEquals(ImportStage.READY, retried.stage)
+        assertEquals(2, calls)
+        assertTrue(repo.search("recovered").isNotEmpty())
+    }
+
+    @Test
+    fun locatorRejectsForgedCitationAndReturnsAssetHash() {
+        val db = JdbcSqlConnection()
+        Migrations.apply(db)
+        val pdf = runtime.mobileagent.knowledge.PdfParser.writePdfWithImageXObject("flowchart page")
+        val vision = runtime.mobileagent.knowledge.VisionBackend {
+            runtime.mobileagent.knowledge.VisionOutcome.Success(
+                runtime.mobileagent.knowledge.VisionSuccess("ocr-flow", "flowchart of torque"),
+            )
+        }
+        val repo = KnowledgeRepository(db, MemoryBlobSink(), vision = vision, visionModelFingerprint = "vision-test")
+        val job = repo.importBytes("flow.pdf", "application/pdf", pdf, visionConfigured = true, visionConsent = true)
+        assertEquals(ImportStage.READY, job.stage)
+        val hits = repo.search("flowchart")
+        val bound = CitationMap.bind("run", hits)
+        val locator = repo.locateCitation(bound.first())
+        assertFalse(locator.removed)
+        assertEquals(1, locator.page)
+        assertTrue(locator.assetId != null)
+        val asset = db.query("SELECT blob_hash FROM assets WHERE id = ?", listOf(locator.assetId)).single()
+        assertEquals(asset.string("blob_hash"), locator.blobHash)
+        val forged = bound.first().copy(chunkId = "no-such-chunk", documentVersionId = "forged", assetId = "forged")
+        assertTrue(repo.locateCitation(forged).removed)
+    }
+
+    @Test
+    fun twoPagePdfDoesNotSplitByCharacterCount() {
+        val db = JdbcSqlConnection()
+        Migrations.apply(db)
+        val repo = KnowledgeRepository(db, MemoryBlobSink())
+        val pdf = runtime.mobileagent.knowledge.PdfParser.writeTwoPageTextPdf("ALPHAPAGEUNIQUE", "BETAPAGEUNIQUE")
+        val job = repo.importBytes("two.pdf", "application/pdf", pdf, false)
+        assertEquals(ImportStage.READY, job.stage)
+        val alphaPages = repo.search("ALPHAPAGEUNIQUE").filter { "ALPHAPAGEUNIQUE" in it.text }.map { it.page }.toSet()
+        val betaPages = repo.search("BETAPAGEUNIQUE").filter { "BETAPAGEUNIQUE" in it.text }.map { it.page }.toSet()
+        assertEquals(setOf(1), alphaPages)
+        assertEquals(setOf(2), betaPages)
+    }
+
+    @Test
+    fun skillGrantDoesNotSearchUndeclaredKnowledgeBase() {
+        val db = JdbcSqlConnection()
+        Migrations.apply(db)
+        val kbA = "kb-a"
+        val kbB = "kb-b"
+        val repo = KnowledgeRepository(db, MemoryBlobSink())
+        repo.createKnowledgeBase("A", kbA)
+        repo.createKnowledgeBase("B", kbB)
+        repo.importBytes("a.txt", "text/plain", "alpha-only-marker".toByteArray(), false, knowledgeBaseId = kbA)
+        repo.importBytes("b.txt", "text/plain", "beta-private-marker".toByteArray(), false, knowledgeBaseId = kbB)
+        val skills = SkillRepository(db)
+        val manifest = """
+            {"schemaVersion":1,"id":"dev.example.kb","name":"KB","version":"1","license":"AGPL-3.0-only",
+             "runtime":{"kind":"instruction"},
+             "permissions":{"knowledge.search":{"knowledgeBaseIds":["kb-a"]}}}
+        """.trimIndent()
+        val zip = zipBytesNamed("mobile-skill.json" to manifest, "SKILL.md" to "# k\n")
+        assertTrue(skills.importPackage(zip, enable = true).accepted)
+        val grant = skills.effectiveGrant()
+        val broker = runtime.mobileagent.skills.ToolBroker(
+            grant.capabilities,
+            runtime.mobileagent.skills.ToolContext(
+                search = { query, ids, topK ->
+                    repo.search(query, topK, ids).joinToString { it.text }
+                },
+                readDocument = { id, max -> repo.readDocumentText(id, max) },
+                grantedKnowledgeBaseIds = grant.knowledgeBaseIds,
+            ),
+        )
+        val result = broker.invoke(
+            runtime.mobileagent.skills.ToolCall("s", "knowledge_search", """{"query":"marker","knowledgeBaseIds":["kb-b"]}"""),
+        ) as runtime.mobileagent.skills.ToolResult.Value
+        assertTrue("beta-private-marker" !in result.json)
+        val reimport = skills.importPackage(zip, enable = true)
+        assertTrue(reimport.accepted)
+        assertEquals(1, skills.grantsFor(skills.list().single().installId).size)
+        val bytes = skills.packageBytes(skills.list().single().packageHash)
+        assertTrue(bytes != null && bytes.contentEquals(zip))
+    }
+
     private fun zipBytesNamed(vararg files: Pair<String, String>): ByteArray {
         val out = ByteArrayOutputStream()
         ZipOutputStream(out).use { zip ->

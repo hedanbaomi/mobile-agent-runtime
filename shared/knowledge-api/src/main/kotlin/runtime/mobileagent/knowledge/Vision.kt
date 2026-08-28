@@ -4,7 +4,7 @@
 package runtime.mobileagent.knowledge
 
 const val VISION_PROMPT_VERSION = "vision-prompt-v1"
-const val VISION_SCHEMA_VERSION = "vision-result-v1"
+const val VISION_SCHEMA_VERSION = "vision-result-v2"
 const val VISION_PREPROCESS_VERSION = "vision-pre-v1"
 
 data class VisionInput(

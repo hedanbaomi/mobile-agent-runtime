@@ -3,7 +3,7 @@
 
 # 知识库、多模态和检索契约
 
-状态：M3 文本路径本地 JVM 已落地（schema v4）。M4 在 schema v5 上增加 PDF 文本、DOCX/EPUB 正文/内嵌图、assets/vision_results、Vision 同意与成功缓存、引用页/图定位；独立图片与 Markdown 外链图在无 Vision 时仍等待，不标 READY。向量空间仍是 `local-hash-v1-d32`（不是 ONNX 模型包、不是 USearch JNI）。K06 仅覆盖检查点续跑，不是 300—500 文件设备负载。对应 R05—R08、K01—K08。
+状态：M3 文本路径本地 JVM 已落地（schema v4）。M4 在 schema v5 上增加 PDF 文本、DOCX/EPUB 正文/内嵌图、assets/vision_results、Vision 同意与成功缓存、引用页/图定位；M4R 修复后 schema v6 补 `document_version_id`、完整视觉结果（含 tableMarkdown）和显式 UNKNOWN 重试。独立图片与 Markdown 外链图在无 Vision 时仍等待，不标 READY。向量空间仍是 `local-hash-v1-d32`（不是 ONNX 模型包、不是 USearch JNI）。K06 仅覆盖检查点续跑，不是 300—500 文件设备负载。对应 R05—R08、K01—K08。
 
 ## 1. 数据模型与一致性
 
@@ -153,3 +153,16 @@ python -B -m reuse lint
 | K04 | LOCAL_PASS（策略/定位） | 严格模式拒绝；文本降级警告；citation 含 page/asset。未跑真机原图查看器 |
 | K06 | 检查点 LOCAL_PASS；非 DEVICE_PASS | 未跑 300—500 文件/真机杀进程矩阵 |
 | K08 | LOCAL_PASS（定位） | 未知 citation 与已删来源不生成假链接。未做过大原图设备预算 |
+
+## 11. M4R01—M4R07 本地修复（2026-08-28）
+
+对照交接审查逐条核实后修复，未通过放宽视觉要求消掉报错。
+
+- App 绑定 `OpenAiCompatibleVision`：有 image 能力的 Provider/模型/secret 才会真正调用；测试 fake backend 不能代替该接线。
+- PDF 识别 `BT…ET` 之外的绘图指令；needsVision 且没有可处理光栅图时等待或失败，不用合成 `Page N:` 发布 READY。按 Kids/内容流映射页码，图片 `page` 来自页面 XObject，不再按字符数切页。
+- DOCX `r:link`/`TargetMode=External` 与 EPUB 外链/缺失图记为 EXTERNAL/MISSING，零自动外联，文档不 READY。
+- 严格模式在 image 能力下发送预算内 data-URI 原图；无法附带则阻止。文本降级警告写进回答正文，完成时不覆盖。
+- `locateCitation` 校验 document/version/chunk/asset；图引用返回 asset hash。伪造 citation 为 removed。
+- Vision 缓存写入 `table_markdown`/`result_type` 并建块；UNKNOWN_OUTCOME 仍不自动重放，提供 `retryUnknownVision(..., acknowledgeDuplicateCharge=true)` 与知识库页按钮。
+
+PDF 页光栅化、ONNX、设备原图查看器仍未做。独立复审前不把 K02—K04/K08 升为阶段验收通过。

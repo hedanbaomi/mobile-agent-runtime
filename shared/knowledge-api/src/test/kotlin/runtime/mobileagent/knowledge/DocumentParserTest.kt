@@ -81,6 +81,69 @@ class DocumentParserTest {
     }
 
     @Test
+    fun textPlusVectorPdfNeedsVision() {
+        val pdf = PdfParser.writeTextAndVectorPdf("vector label")
+        val parsed = PdfParser.parse(pdf)
+        assertTrue(parsed.needsVision)
+        assertTrue(parsed.assets.any { it.kind == "PAGE" && it.bytes.isEmpty() })
+    }
+
+    @Test
+    fun drawingOnlyPdfNeedsVisionWithoutRasterAssets() {
+        val parsed = PdfParser.parse(PdfParser.writeDrawingOnlyPdf())
+        assertTrue(parsed.needsVision)
+        assertTrue(parsed.assets.none { it.kind == "IMAGE" && it.bytes.isNotEmpty() })
+    }
+
+    @Test
+    fun twoPageTextKeepsPageBoundaries() {
+        val parsed = PdfParser.parse(PdfParser.writeTwoPageTextPdf("FIRSTPAGEONLYTOKEN", "SECONDPAGEONLYTOKEN"))
+        assertEquals(2, parsed.pages.size)
+        assertTrue(parsed.pages[0].text.contains("FIRSTPAGEONLYTOKEN"))
+        assertTrue(parsed.pages[1].text.contains("SECONDPAGEONLYTOKEN"))
+        assertFalse(parsed.pages[0].text.contains("SECONDPAGEONLYTOKEN"))
+    }
+
+    @Test
+    fun imagePdfAssignsPageToAsset() {
+        val parsed = PdfParser.parse(PdfParser.writePdfWithImageXObject("flowchart page"))
+        assertEquals(1, parsed.assets.single { it.kind == "IMAGE" }.page)
+    }
+
+    @Test
+    fun docxExternalImageIsRecordedAndNotFetched() {
+        val zip = zip(
+            "word/document.xml" to """
+                <w:document><w:body>
+                <w:p><w:r><w:t>caption text</w:t></w:r></w:p>
+                <w:p><w:r><w:drawing><a:blip r:link="rId9"/></w:drawing></w:r></w:p>
+                </w:body></w:document>
+            """.trimIndent().toByteArray(),
+            "word/_rels/document.xml.rels" to """
+                <Relationships>
+                <Relationship Id="rId9" Type="http://example/image" Target="https://example.invalid/image.png" TargetMode="External"/>
+                </Relationships>
+            """.trimIndent().toByteArray(),
+        )
+        val parsed = OfficeParser.parse("note.docx", zip)
+        assertTrue(parsed.needsVision)
+        assertEquals("EXTERNAL", parsed.assets.single().kind)
+        assertEquals(0, parsed.assets.single().bytes.size)
+    }
+
+    @Test
+    fun epubExternalImageIsRecorded() {
+        val zip = zip(
+            "mimetype" to "application/epub+zip".toByteArray(),
+            "META-INF/container.xml" to "<container><rootfiles><rootfile full-path=\"OPS/content.opf\"/></rootfiles></container>".toByteArray(),
+            "OPS/ch1.xhtml" to "<html><body><p>chapter</p><img src=\"https://example.invalid/fig.png\"/></body></html>".toByteArray(),
+        )
+        val parsed = OfficeParser.parse("book.epub", zip)
+        assertTrue(parsed.needsVision)
+        assertEquals("EXTERNAL", parsed.assets.single().kind)
+    }
+
+    @Test
     fun zipSlipStillRejectedBeforeParse() {
         val error = assertThrows(IllegalStateException::class.java) {
             OfficeParser.parse("evil.docx", zip("../outside.txt" to "nope".toByteArray()))

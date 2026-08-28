@@ -3,6 +3,13 @@
 
 package runtime.mobileagent.skills
 
+data class PermissionSpec(
+    val capability: String,
+    val knowledgeBaseIds: Set<String> = emptySet(),
+    val hosts: Set<String> = emptySet(),
+    val methods: Set<String> = emptySet(),
+)
+
 data class SkillManifest(
     val schemaVersion: Int,
     val id: String,
@@ -12,6 +19,7 @@ data class SkillManifest(
     val runtimeKind: String,
     val entrypoint: String,
     val permissions: Set<String>,
+    val permissionSpecs: List<PermissionSpec> = emptyList(),
 )
 
 enum class CompatibilityClass { A, B, C, D, E }
@@ -23,6 +31,10 @@ data class PermissionGrant(
     val capabilities: Set<String>,
     val revoked: Boolean = false,
     val revision: Int = 1,
+    val knowledgeBaseIds: Set<String> = emptySet(),
+    val hosts: Set<String> = emptySet(),
+    val methods: Set<String> = emptySet(),
+    val scopesJson: String = "{}",
 )
 
 object CapabilityBroker {

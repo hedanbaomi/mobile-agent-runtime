@@ -6,9 +6,11 @@ package runtime.mobileagent.skills
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import java.io.ByteArrayInputStream
+import java.io.ByteArrayOutputStream
 import java.security.MessageDigest
 import java.util.zip.ZipInputStream
 
@@ -20,6 +22,8 @@ data class SkillInspection(
     val packageHash: String,
     val files: List<String>,
     val installable: Boolean,
+    val rawManifestJson: String? = null,
+    val packageBytes: ByteArray? = null,
 )
 
 object SkillArchive {
@@ -42,10 +46,20 @@ object SkillArchive {
         }
         if (bytes.size >= 4 && bytes[0] == 0x50.toByte() && bytes[1] == 0x4B.toByte()) {
             val archive = readArchive(bytes, reasons)
-            if (reasons.any { it.contains("Zip Slip") || it.contains("bomb") || it.contains("symlink") || it.contains("native") || it.contains("pip") }) {
-                return SkillInspection(CompatibilityClass.E, reasons.distinct(), null, archive.markdown, hash, archive.files, false)
+            if (isClassEReason(reasons)) {
+                return SkillInspection(
+                    CompatibilityClass.E,
+                    reasons.distinct(),
+                    null,
+                    archive.markdown,
+                    hash,
+                    archive.files,
+                    installable = false,
+                    rawManifestJson = archive.manifestJson,
+                    packageBytes = bytes,
+                )
             }
-            return classify(archive, hash, reasons)
+            return classify(archive, hash, reasons, bytes)
         }
         val markdown = runCatching { String(bytes, Charsets.UTF_8) }.getOrNull()
         if (markdown != null && markdown.contains("# ") && !markdown.contains('\u0000')) {
@@ -57,6 +71,7 @@ object SkillArchive {
                 hash,
                 listOf("SKILL.md"),
                 installable = true,
+                packageBytes = bytes,
             )
         }
         reasons += "Not a skill archive or SKILL.md"
@@ -81,7 +96,8 @@ object SkillArchive {
         var pip = false
         var total = 0L
         var count = 0
-        ZipInputStream(ByteArrayInputStream(bytes)).use { zip ->
+        val zip = ZipInputStream(ByteArrayInputStream(bytes))
+        try {
             while (true) {
                 val entry = zip.nextEntry ?: break
                 count += 1
@@ -95,20 +111,24 @@ object SkillArchive {
                     continue
                 }
                 if (entry.isDirectory) continue
-                if (entry.method == 0 && entry.compressedSize > 0 && entry.size / entry.compressedSize > MAX_RATIO) {
-                    reasons += "Compression bomb ratio exceeds 100"
-                }
-                val payload = zip.readBytes()
-                if (payload.size > MAX_ENTRY_BYTES) {
+                val payload = readBounded(zip, MAX_ENTRY_BYTES.toInt())
+                if (payload == null) {
                     reasons += "Entry exceeds size limit: $name"
                     continue
+                }
+                if (entry.compressedSize > 0 && payload.size.toLong() / entry.compressedSize.coerceAtLeast(1) > MAX_RATIO) {
+                    reasons += "Compression bomb ratio exceeds 100"
                 }
                 total += payload.size
                 if (total > MAX_TOTAL_BYTES) {
                     reasons += "Uncompressed archive exceeds 200 MiB"
                     break
                 }
-                if (bytes.isNotEmpty() && bytes.size > 0 && total / bytes.size.toLong().coerceAtLeast(1) > MAX_RATIO && payload.size > 1024 * 1024) {
+                val zipSize = bytes.size.toLong().coerceAtLeast(1)
+                if (payload.size > 256 && payload.size.toLong() / zipSize > MAX_RATIO) {
+                    reasons += "Compression bomb ratio exceeds 100"
+                }
+                if (total > 256 && total / zipSize > MAX_RATIO) {
                     reasons += "Compression bomb ratio exceeds 100"
                 }
                 files += name
@@ -116,8 +136,10 @@ object SkillArchive {
                 if (looksNative(lower, payload)) native = true
                 if (lower.endsWith("mobile-skill.json")) manifest = String(payload, Charsets.UTF_8)
                 if (lower.endsWith("skill.md")) markdown = String(payload, Charsets.UTF_8)
-                if (lower.contains("requirements") && String(payload, Charsets.UTF_8).contains("http")) pip = true
+                if (looksRemoteDependency(lower, payload)) pip = true
             }
+        } finally {
+            zip.close()
         }
         if (native) reasons += "Native payload (ELF/DEX/JAR/SO/wheel) is not allowed"
         if (pip) reasons += "pip / remote dependency install is not allowed"
@@ -128,33 +150,111 @@ object SkillArchive {
         return ArchiveContent(files, manifest, markdown, native, pip, runtime, schema)
     }
 
-    private fun classify(archive: ArchiveContent, hash: String, reasons: MutableList<String>): SkillInspection {
+    private fun readBounded(zip: ZipInputStream, max: Int): ByteArray? {
+        val out = ByteArrayOutputStream()
+        val buf = ByteArray(8192)
+        var total = 0
+        while (true) {
+            val n = zip.read(buf)
+            if (n <= 0) break
+            total += n
+            if (total > max) return null
+            out.write(buf, 0, n)
+        }
+        return out.toByteArray()
+    }
+
+    private fun classify(
+        archive: ArchiveContent,
+        hash: String,
+        reasons: MutableList<String>,
+        packageBytes: ByteArray,
+    ): SkillInspection {
         if (archive.native || archive.pip) {
-            return SkillInspection(CompatibilityClass.E, reasons.distinct(), null, archive.markdown, hash, archive.files, false)
+            return SkillInspection(
+                CompatibilityClass.E,
+                reasons.distinct(),
+                null,
+                archive.markdown,
+                hash,
+                archive.files,
+                false,
+                archive.manifestJson,
+                packageBytes,
+            )
         }
         val json = archive.manifestJson
         if (json == null) {
             reasons += "No mobile-skill.json; instruction-only"
-            return SkillInspection(CompatibilityClass.A, reasons.distinct(), null, archive.markdown, hash, archive.files, true)
+            return SkillInspection(
+                CompatibilityClass.A,
+                reasons.distinct(),
+                null,
+                archive.markdown,
+                hash,
+                archive.files,
+                true,
+                null,
+                packageBytes,
+            )
         }
         val obj = runCatching { Json.parseToJsonElement(json).jsonObject }.getOrNull()
         if (obj == null) {
             reasons += "mobile-skill.json is not valid JSON"
-            return SkillInspection(CompatibilityClass.E, reasons.distinct(), null, archive.markdown, hash, archive.files, false)
+            return SkillInspection(
+                CompatibilityClass.E,
+                reasons.distinct(),
+                null,
+                archive.markdown,
+                hash,
+                archive.files,
+                false,
+                json,
+                packageBytes,
+            )
         }
         val schema = obj["schemaVersion"]?.jsonPrimitive?.contentOrNull?.toIntOrNull()
         if (schema != 1) {
             reasons += "Unknown mobile-skill schema: ${schema ?: "missing"}"
-            return SkillInspection(CompatibilityClass.E, reasons.distinct(), null, archive.markdown, hash, archive.files, false)
+            return SkillInspection(
+                CompatibilityClass.E,
+                reasons.distinct(),
+                null,
+                archive.markdown,
+                hash,
+                archive.files,
+                false,
+                json,
+                packageBytes,
+            )
         }
         val runtime = obj["runtime"]?.jsonObject ?: JsonObject(emptyMap())
         val kind = runtime["kind"]?.jsonPrimitive?.contentOrNull.orEmpty()
         val entry = runtime["entrypoint"]?.jsonPrimitive?.contentOrNull.orEmpty()
         if (entry.contains("..") || entry.startsWith("/") || entry.contains("::")) {
             reasons += "Entrypoint is not a package module"
-            return SkillInspection(CompatibilityClass.E, reasons.distinct(), null, archive.markdown, hash, archive.files, false)
+            return SkillInspection(
+                CompatibilityClass.E,
+                reasons.distinct(),
+                null,
+                archive.markdown,
+                hash,
+                archive.files,
+                false,
+                json,
+                packageBytes,
+            )
         }
-        val permissions = obj["permissions"]?.jsonObject?.keys.orEmpty()
+        val permObj = obj["permissions"]?.jsonObject
+        val specs = permObj?.map { (cap, value) ->
+            val nested = value as? JsonObject
+            PermissionSpec(
+                capability = cap,
+                knowledgeBaseIds = nested.stringSet("knowledgeBaseIds"),
+                hosts = nested.stringSet("hosts"),
+                methods = nested.stringSet("methods"),
+            )
+        }.orEmpty()
         val manifest = SkillManifest(
             schemaVersion = 1,
             id = obj["id"]?.jsonPrimitive?.contentOrNull.orEmpty(),
@@ -163,7 +263,8 @@ object SkillArchive {
             license = obj["license"]?.jsonPrimitive?.contentOrNull.orEmpty(),
             runtimeKind = kind.ifBlank { "instruction" },
             entrypoint = entry,
-            permissions = permissions,
+            permissions = specs.map { it.capability }.toSet(),
+            permissionSpecs = specs,
         )
         val classification = when (kind) {
             "python" -> if (runtime["mode"]?.jsonPrimitive?.contentOrNull == "pure-python") CompatibilityClass.B else CompatibilityClass.C
@@ -174,7 +275,48 @@ object SkillArchive {
         }
         if (classification == CompatibilityClass.C) reasons += "Unsupported dependencies; script stays disabled"
         if (classification == CompatibilityClass.D) reasons += "Runtime $kind cannot execute on this device"
-        return SkillInspection(classification, reasons.distinct(), manifest, archive.markdown, hash, archive.files, true)
+        return SkillInspection(
+            classification,
+            reasons.distinct(),
+            manifest,
+            archive.markdown,
+            hash,
+            archive.files,
+            true,
+            json,
+            packageBytes,
+        )
+    }
+
+    private fun JsonObject?.stringSet(key: String): Set<String> {
+        val element = this?.get(key) ?: return emptySet()
+        return runCatching {
+            element.jsonArray.mapNotNull { it.jsonPrimitive.contentOrNull }.filter { it.isNotBlank() }.toSet()
+        }.getOrDefault(emptySet())
+    }
+
+    private fun isClassEReason(reasons: List<String>): Boolean =
+        reasons.any { reason ->
+            val lower = reason.lowercase()
+            lower.contains("zip slip") || lower.contains("bomb") || lower.contains("symlink") ||
+                lower.contains("native") || lower.contains("pip") || lower.contains("remote") ||
+                lower.contains("exceeds") || lower.contains("limit")
+        }
+
+    private fun looksRemoteDependency(name: String, payload: ByteArray): Boolean {
+        val lowerName = name.lowercase()
+        val looksLikeLock = lowerName.contains("requirements") ||
+            lowerName.endsWith("pipfile") ||
+            lowerName.endsWith("poetry.lock") ||
+            lowerName.endsWith("uv.lock") ||
+            lowerName.endsWith("pyproject.toml") ||
+            lowerName.endsWith(".in")
+        if (!looksLikeLock) return false
+        val text = runCatching { String(payload, Charsets.UTF_8) }.getOrDefault("")
+        val lower = text.lowercase()
+        return Regex("https?://").containsMatchIn(lower) ||
+            lower.contains("git+") ||
+            Regex("@\\s*https?://").containsMatchIn(lower)
     }
 
     private fun looksNative(name: String, payload: ByteArray): Boolean {

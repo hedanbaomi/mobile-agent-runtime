@@ -32,6 +32,9 @@ fun ChatScreen(
     onCancel: () -> Unit,
     onToggleDegradation: (Boolean) -> Unit,
     onOpenCitation: (String) -> Unit,
+    pendingToolName: String? = null,
+    onApproveTool: () -> Unit = {},
+    onRejectTool: () -> Unit = {},
 ) {
     Column(Modifier.fillMaxSize().padding(16.dp)) {
         Text(status, modifier = Modifier.padding(bottom = 8.dp))
@@ -49,12 +52,19 @@ fun ChatScreen(
             label = { Text("Message") },
         )
         Row(Modifier.padding(top = 8.dp)) {
-            Button(onClick = onSend, enabled = !streaming && input.isNotBlank()) { Text("Send") }
+            Button(onClick = onSend, enabled = !streaming && input.isNotBlank() && pendingToolName == null) { Text("Send") }
             Button(
                 onClick = onCancel,
                 enabled = streaming,
                 modifier = Modifier.padding(start = 8.dp),
             ) { Text("Cancel") }
+        }
+        if (pendingToolName != null) {
+            Text("Tool $pendingToolName needs confirmation. HTTP may leave the device.")
+            Row(Modifier.padding(top = 8.dp)) {
+                Button(onClick = onApproveTool) { Text("Approve tool") }
+                Button(onClick = onRejectTool, modifier = Modifier.padding(start = 8.dp)) { Text("Reject tool") }
+            }
         }
         Row(Modifier.padding(top = 8.dp)) {
             Button(onClick = { onToggleDegradation(!textDegradation) }) {

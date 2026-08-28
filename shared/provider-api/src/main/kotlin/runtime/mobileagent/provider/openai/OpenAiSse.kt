@@ -18,6 +18,7 @@ object OpenAiSse {
         line: String,
         toolBuf: LinkedHashMap<String, Pair<String, StringBuilder>>,
         extraSecrets: List<String> = emptyList(),
+        indexToId: MutableMap<Int, String> = mutableMapOf(),
     ): List<ModelEvent> {
         val trimmed = line.trim()
         if (trimmed.isEmpty() || trimmed.startsWith(":")) return emptyList()
@@ -35,9 +36,11 @@ object OpenAiSse {
         val toolCalls = delta?.get("tool_calls")?.jsonArray
         toolCalls?.forEach { call ->
             val c = call.jsonObject
+            val index = c["index"]?.jsonPrimitive?.contentOrNull?.toIntOrNull()
             val id = c["id"]?.jsonPrimitive?.contentOrNull
-                ?: toolBuf.keys.lastOrNull()
-                ?: return@forEach
+                ?: index?.let { indexToId[it] }
+            if (id == null) return@forEach
+            if (index != null) indexToId[index] = id
             val name = c["function"]?.jsonObject?.get("name")?.jsonPrimitive?.contentOrNull.orEmpty()
             val args = c["function"]?.jsonObject?.get("arguments")?.jsonPrimitive?.contentOrNull.orEmpty()
             val acc = toolBuf.getOrPut(id) { name to StringBuilder() }

@@ -32,4 +32,7 @@
     <string name="sett_anonymous_metrics">Anonymous Announcement Metrics</string>
     <string name="sett_export_data">Export Data</string>
     <string name="sett_license_agpl">GNU AGPL-3.0-only</string>
+    <string name="sett_check_updates">Check for Updates</string>
+    <string name="sett_already_latest">Already the latest version (v1.0.0-dev)</string>
+    <string name="sett_update_available">New update available: %1$s</string>
 </resources>

@@ -18,10 +18,8 @@ SPDX-License-Identifier: AGPL-3.0-only
 
   <!-- Announcement 1: Mandatory Security Notice -->
   <rect x="16" y="96" width="368" height="160" rx="10" fill="#FFFFFF" stroke="#E02424" stroke-width="1.5"/>
-  <div style="display:flex;">
-    <rect x="28" y="108" width="80" height="20" rx="4" fill="#FDE8E8"/>
-    <text x="34" y="122" font-size="10" fill="#9B1C1C" font-weight="700">MANDATORY</text>
-  </div>
+  <rect x="28" y="108" width="80" height="20" rx="4" fill="#FDE8E8"/>
+  <text x="34" y="122" font-size="10" fill="#9B1C1C" font-weight="700">MANDATORY</text>
   <text x="28" y="148" font-size="13" fill="#111827" font-weight="700">Security Patch v1.0.2 Notice</text>
   <text x="28" y="168" font-size="11" fill="#4B5563">Updated bundled SQLite driver to eliminate ABI vulnerabilities on Android API 26. Digital signature verified.</text>
   

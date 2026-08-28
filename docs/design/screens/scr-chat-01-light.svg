@@ -48,7 +48,7 @@ SPDX-License-Identifier: AGPL-3.0-only
   <rect x="16" y="410" width="368" height="130" rx="10" fill="#FFFFFF" stroke="#C27803" stroke-width="1.5"/>
   <rect x="16" y="410" width="368" height="26" rx="10" fill="#FEF08A"/>
   <text x="28" y="427" font-size="11" fill="#723B13" font-weight="700">[Tool Execution Approval Required]</text>
-  <text x="28" y="454" font-size="11" fill="#111827">Skill: <strong>skill_calculator</strong> (Isolated CPython)</text>
+  <text x="28" y="454" font-size="11" fill="#111827">Skill: <tspan font-weight="700">skill_calculator</tspan> (Isolated CPython)</text>
   <rect x="28" y="464" width="344" height="34" rx="4" fill="#F3F4F6"/>
   <text x="36" y="484" font-size="11" fill="#1F2A37" font-family="monospace">{"operation": "eval_matrix", "dim": 64}</text>
   

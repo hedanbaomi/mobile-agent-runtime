@@ -37,7 +37,7 @@ SPDX-License-Identifier: AGPL-3.0-only
       --outline: #d1d5db;
       --outline-variant: #e5e7eb;
       --code-font: "JetBrains Mono", Menlo, Monaco, Consolas, monospace;
-      --sans-font: Roboto, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      --sans-font: Roboto, "Noto Sans SC", "PingFang SC", "Microsoft YaHei", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
       --radius-sm: 6px;
       --radius-md: 10px;
       --radius-lg: 16px;
@@ -74,282 +74,250 @@ SPDX-License-Identifier: AGPL-3.0-only
       --on-surface-variant: #9ca3af;
       --outline: #4b5563;
       --outline-variant: #374151;
-      --shadow-1: 0 1px 3px rgba(0,0,0,0.3);
-      --shadow-2: 0 4px 6px rgba(0,0,0,0.25);
-      --shadow-3: 0 10px 15px rgba(0,0,0,0.35);
     }
 
     * { box-sizing: border-box; margin: 0; padding: 0; }
     body {
       font-family: var(--sans-font);
-      background: #0b0f19;
-      color: #e5e7eb;
-      min-height: 100vh;
+      background-color: #0f172a;
+      color: #f8fafc;
       display: flex;
       flex-direction: column;
       align-items: center;
+      min-height: 100vh;
       padding: 16px;
     }
 
     .top-control-bar {
       width: 100%;
-      max-width: 900px;
+      max-width: 440px;
       display: flex;
       justify-content: space-between;
       align-items: center;
-      background: #1e293b;
-      padding: 12px 20px;
-      border-radius: 12px;
-      margin-bottom: 16px;
-      box-shadow: 0 4px 10px rgba(0,0,0,0.2);
+      margin-bottom: 12px;
+      padding: 8px 12px;
+      background: rgba(30, 41, 59, 0.8);
+      backdrop-filter: blur(8px);
+      border-radius: var(--radius-md);
+      border: 1px solid rgba(255, 255, 255, 0.1);
     }
-    .top-control-bar .title-group {
-      display: flex;
-      align-items: center;
-      gap: 10px;
+    .top-control-bar .title-group h1 { font-size: 14px; font-weight: 700; color: #f8fafc; }
+    .top-control-bar .title-group .badge {
+      display: inline-block;
+      font-size: 10px;
+      padding: 2px 6px;
+      border-radius: 4px;
+      background: var(--primary);
+      color: #ffffff;
+      margin-top: 2px;
     }
-    .top-control-bar h1 {
-      font-size: 16px;
-      font-weight: 600;
-      color: #f3f4f6;
-    }
-    .top-control-bar .badge {
-      background: #3b82f6;
-      color: #fff;
+    .top-control-bar .actions { display: flex; gap: 6px; }
+    .top-control-bar .actions button {
+      padding: 6px 10px;
       font-size: 11px;
-      padding: 2px 8px;
-      border-radius: 9999px;
-      font-weight: 500;
-    }
-    .top-control-bar .actions {
-      display: flex;
-      gap: 12px;
-    }
-    .top-control-bar button {
-      background: #334155;
-      color: #f1f5f9;
-      border: 1px solid #475569;
-      padding: 6px 14px;
-      border-radius: 6px;
+      font-weight: 600;
+      border-radius: var(--radius-sm);
+      border: none;
       cursor: pointer;
-      font-size: 13px;
-      font-weight: 500;
-      transition: all 0.2s;
+      background: #334155;
+      color: #f8fafc;
+      transition: background 0.2s;
     }
-    .top-control-bar button:hover {
-      background: #475569;
-    }
+    .top-control-bar .actions button:hover { background: #475569; }
 
-    /* Phone Shell Container */
-    .device-container {
+    .device-wrapper {
       width: 100%;
-      max-width: 420px;
+      max-width: 412px;
       height: 840px;
       background: var(--background);
       color: var(--on-background);
-      border: 10px solid #1e293b;
-      border-radius: 36px;
-      overflow: hidden;
+      border-radius: 28px;
+      box-shadow: 0 25px 50px -12px rgba(0,0,0,0.5);
+      border: 4px solid #334155;
       display: flex;
       flex-direction: column;
       position: relative;
-      box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.5);
-      transition: background 0.2s, color 0.2s;
+      overflow: hidden;
+      transition: background 0.3s, color 0.3s;
     }
 
-    /* Android Status Bar */
     .status-bar {
       height: 28px;
-      background: var(--surface);
-      border-bottom: 1px solid var(--outline-variant);
+      padding: 0 16px;
       display: flex;
       justify-content: space-between;
       align-items: center;
-      padding: 0 16px;
       font-size: 11px;
       font-weight: 600;
       color: var(--on-surface-variant);
-      z-index: 10;
-    }
-
-    /* Top App Bar */
-    .app-header {
-      height: 52px;
       background: var(--surface);
       border-bottom: 1px solid var(--outline-variant);
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      padding: 0 16px;
-      flex-shrink: 0;
-    }
-    .app-header .header-title {
-      font-size: 17px;
-      font-weight: 600;
-      color: var(--on-surface);
-    }
-    .app-header .header-action-btn {
-      background: var(--surface-variant);
-      color: var(--on-surface-variant);
-      border: 1px solid var(--outline);
-      padding: 4px 10px;
-      border-radius: var(--radius-sm);
-      font-size: 12px;
-      font-weight: 500;
-      cursor: pointer;
+      user-select: none;
     }
 
-    /* Banner container */
-    .pinned-banner {
-      background: var(--warning-container);
-      color: var(--on-warning-container);
-      padding: 8px 12px;
-      font-size: 12px;
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      border-bottom: 1px solid var(--warning);
-    }
-    .pinned-banner a {
-      color: var(--on-warning-container);
-      font-weight: 600;
-      text-decoration: underline;
-      cursor: pointer;
-    }
-
-    /* Main Viewport */
-    .content-viewport {
+    .app-viewport {
       flex: 1;
-      overflow-y: auto;
       display: flex;
       flex-direction: column;
+      overflow: hidden;
       position: relative;
     }
 
-    /* Bottom Navigation Bar */
+    .tab-panel {
+      flex: 1;
+      display: none;
+      flex-direction: column;
+      overflow: hidden;
+    }
+    .tab-panel.active { display: flex; }
+
+    .app-header {
+      height: 52px;
+      padding: 0 16px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      background: var(--surface);
+      border-bottom: 1px solid var(--outline-variant);
+      user-select: none;
+    }
+    .app-header .header-title { font-size: 16px; font-weight: 700; color: var(--on-surface); }
+    .app-header .header-action-btn {
+      padding: 4px 10px;
+      border-radius: var(--radius-sm);
+      font-size: 12px;
+      font-weight: 600;
+      background: var(--primary-container);
+      color: var(--on-primary-container);
+      border: none;
+      cursor: pointer;
+    }
+
     .bottom-nav {
-      height: 64px;
+      height: 60px;
       background: var(--surface);
       border-top: 1px solid var(--outline-variant);
       display: flex;
       justify-content: space-around;
       align-items: center;
-      flex-shrink: 0;
-      padding: 0 4px;
+      user-select: none;
     }
     .nav-tab {
       flex: 1;
+      height: 100%;
       display: flex;
       flex-direction: column;
       align-items: center;
       justify-content: center;
-      gap: 3px;
-      background: transparent;
-      border: none;
-      color: var(--on-surface-variant);
+      gap: 2px;
       font-size: 10px;
       font-weight: 500;
+      color: var(--on-surface-variant);
+      background: transparent;
+      border: none;
       cursor: pointer;
-      padding: 6px 0;
-      border-radius: var(--radius-sm);
-      transition: all 0.15s;
+      transition: color 0.15s;
     }
     .nav-tab .tab-icon {
+      font-family: var(--code-font);
       font-size: 11px;
       font-weight: 700;
-      background: var(--surface-variant);
       padding: 2px 6px;
       border-radius: 4px;
     }
-    .nav-tab.active {
-      color: var(--primary);
-    }
+    .nav-tab.active { color: var(--primary); font-weight: 700; }
     .nav-tab.active .tab-icon {
       background: var(--primary-container);
       color: var(--on-primary-container);
     }
 
-    /* Generic UI Elements */
-    .card {
-      background: var(--surface);
-      border: 1px solid var(--outline-variant);
-      border-radius: var(--radius-md);
-      padding: 14px;
-      margin: 10px 14px;
-      box-shadow: var(--shadow-1);
-    }
-    .card-title {
-      font-size: 14px;
-      font-weight: 600;
-      color: var(--on-surface);
-      margin-bottom: 6px;
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-    }
-    .card-desc {
-      font-size: 12px;
-      color: var(--on-surface-variant);
-      line-height: 1.4;
-    }
-    .tag {
-      font-size: 10px;
-      font-weight: 600;
-      padding: 2px 6px;
-      border-radius: 4px;
-      display: inline-block;
-    }
-    .tag-primary { background: var(--primary-container); color: var(--on-primary-container); }
-    .tag-success { background: var(--tertiary-container); color: var(--on-tertiary-container); }
-    .tag-warning { background: var(--warning-container); color: var(--on-warning-container); }
-    .tag-error { background: var(--error-container); color: var(--on-error-container); }
-    .tag-neutral { background: var(--surface-variant); color: var(--on-surface-variant); }
-
     .btn {
       display: inline-flex;
       align-items: center;
       justify-content: center;
-      gap: 6px;
       padding: 8px 14px;
+      font-size: 12px;
+      font-weight: 600;
       border-radius: var(--radius-sm);
-      font-size: 13px;
-      font-weight: 500;
-      cursor: pointer;
       border: none;
-      transition: opacity 0.15s;
+      cursor: pointer;
+      transition: opacity 0.2s, filter 0.2s;
+      text-decoration: none;
     }
     .btn:hover { opacity: 0.9; }
-    .btn-primary { background: var(--primary); color: var(--on-primary); }
-    .btn-secondary { background: var(--surface-variant); color: var(--on-surface); border: 1px solid var(--outline); }
-    .btn-danger { background: var(--error); color: #fff; }
     .btn-sm { padding: 4px 8px; font-size: 11px; }
+    .btn-primary { background: var(--primary); color: var(--on-primary); }
+    .btn-secondary { background: var(--surface-variant); color: var(--on-surface-variant); border: 1px solid var(--outline); }
+    .btn-danger { background: var(--error); color: var(--on-primary); }
+    .btn-warning { background: var(--warning); color: #ffffff; }
 
-    /* Screen Tab Panels */
-    .tab-panel {
-      display: none;
-      flex: 1;
-      flex-direction: column;
+    .card {
+      background: var(--surface);
+      border: 1px solid var(--outline-variant);
+      border-radius: var(--radius-md);
+      padding: 12px 14px;
+      margin: 0 14px 10px;
+      box-shadow: var(--shadow-1);
     }
-    .tab-panel.active {
+    .card-title {
+      font-size: 13px;
+      font-weight: 700;
+      color: var(--on-surface);
       display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 6px;
     }
+    .card-desc { font-size: 11px; color: var(--on-surface-variant); line-height: 1.4; }
 
-    /* Screen 1: Chat Styles */
-    .chat-messages {
+    .tag {
+      display: inline-block;
+      padding: 2px 6px;
+      font-size: 10px;
+      font-weight: 700;
+      border-radius: 4px;
+    }
+    .tag-success { background: var(--tertiary-container); color: var(--on-tertiary-container); }
+    .tag-warning { background: var(--warning-container); color: var(--on-warning-container); }
+    .tag-error { background: var(--error-container); color: var(--on-error-container); }
+    .tag-primary { background: var(--primary-container); color: var(--on-primary-container); }
+    .tag-neutral { background: var(--surface-variant); color: var(--on-surface-variant); }
+
+    .form-group { margin-bottom: 8px; }
+    .form-label { display: block; font-size: 11px; font-weight: 600; color: var(--on-surface-variant); margin-bottom: 4px; }
+    .form-control {
+      width: 100%;
+      padding: 8px 10px;
+      font-size: 12px;
+      background: var(--surface-variant);
+      color: var(--on-surface);
+      border: 1px solid var(--outline);
+      border-radius: var(--radius-sm);
+      outline: none;
+    }
+    .form-control:focus { border-color: var(--primary); }
+
+    .chat-container {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+      background: var(--background);
+    }
+    .chat-msg-list {
       flex: 1;
       padding: 12px 14px;
+      overflow-y: auto;
       display: flex;
       flex-direction: column;
-      gap: 12px;
-      overflow-y: auto;
+      gap: 10px;
     }
     .msg {
-      max-width: 85%;
-      border-radius: var(--radius-md);
+      max-width: 88%;
       padding: 10px 12px;
-      font-size: 13px;
+      border-radius: var(--radius-md);
+      font-size: 12px;
       line-height: 1.45;
-      position: relative;
     }
     .msg-user {
       align-self: flex-end;
@@ -367,189 +335,134 @@ SPDX-License-Identifier: AGPL-3.0-only
     }
     .msg-meta {
       font-size: 10px;
-      margin-top: 4px;
       color: var(--on-surface-variant);
+      margin-top: 4px;
       display: flex;
       justify-content: space-between;
       gap: 8px;
     }
-    .citation-box {
-      margin-top: 8px;
-      padding: 6px 8px;
+
+    .citation-card {
       background: var(--surface-variant);
+      border: 1px solid var(--outline);
       border-left: 3px solid var(--primary);
-      border-radius: 4px;
+      border-radius: var(--radius-sm);
+      padding: 6px 10px;
+      margin-top: 6px;
       font-size: 11px;
       cursor: pointer;
     }
-    .citation-box:hover {
-      background: var(--outline-variant);
-    }
+    .citation-title { font-weight: 700; color: var(--primary); display: flex; justify-content: space-between; }
+    .citation-body { color: var(--on-surface-variant); font-size: 10px; margin-top: 2px; }
+
     .chat-input-bar {
       padding: 8px 12px;
       background: var(--surface);
       border-top: 1px solid var(--outline-variant);
       display: flex;
       gap: 8px;
-      align-items: center;
     }
     .chat-input-bar input {
       flex: 1;
       padding: 8px 12px;
+      font-size: 12px;
+      background: var(--surface-variant);
+      color: var(--on-surface);
       border: 1px solid var(--outline);
-      background: var(--background);
-      color: var(--on-background);
-      border-radius: var(--radius-sm);
-      font-size: 13px;
+      border-radius: var(--radius-full);
       outline: none;
     }
-    .chat-input-bar input:focus {
-      border-color: var(--primary);
-    }
+    .chat-input-bar input:focus { border-color: var(--primary); }
+
     .streaming-bar {
       background: var(--primary-container);
       color: var(--on-primary-container);
+      padding: 6px 12px;
       font-size: 11px;
-      padding: 4px 12px;
+      font-weight: 600;
       display: flex;
       justify-content: space-between;
       align-items: center;
+      border-top: 1px solid var(--outline-variant);
     }
 
-    /* Tool Approval Card in Chat */
-    .tool-card {
-      background: var(--surface);
-      border: 1px solid var(--warning);
-      border-radius: var(--radius-md);
-      padding: 10px;
-      font-size: 12px;
-    }
-    .tool-header {
-      font-weight: 600;
-      color: var(--warning);
-      margin-bottom: 4px;
-    }
-    .tool-json {
-      background: var(--surface-variant);
-      font-family: var(--code-font);
-      padding: 6px;
-      border-radius: 4px;
+    .ui-table {
+      width: 100%;
+      border-collapse: collapse;
       font-size: 11px;
-      margin: 6px 0;
-      overflow-x: auto;
+      margin-top: 6px;
+    }
+    .ui-table th {
+      text-align: left;
+      padding: 4px 6px;
+      background: var(--surface-variant);
+      color: var(--on-surface-variant);
+      font-weight: 600;
+      border-bottom: 1px solid var(--outline);
+    }
+    .ui-table td {
+      padding: 5px 6px;
+      border-bottom: 1px solid var(--outline-variant);
+      color: var(--on-surface);
     }
 
-    /* Modal & Drawer Overlays */
     .overlay {
       position: absolute;
       top: 0; left: 0; right: 0; bottom: 0;
-      background: rgba(0,0,0,0.6);
+      background: rgba(0, 0, 0, 0.55);
+      backdrop-filter: blur(2px);
       display: none;
       justify-content: center;
       align-items: center;
-      z-index: 50;
       padding: 16px;
+      z-index: 100;
     }
     .overlay.active { display: flex; }
     .modal-box {
+      width: 100%;
+      max-height: 85%;
+      overflow-y: auto;
       background: var(--surface);
       color: var(--on-surface);
       border-radius: var(--radius-lg);
-      padding: 18px;
-      width: 100%;
-      max-width: 360px;
+      padding: 16px;
       box-shadow: var(--shadow-3);
-      border: 1px solid var(--outline);
+      border: 1px solid var(--outline-variant);
     }
-    .modal-title {
-      font-size: 15px;
-      font-weight: 600;
-      margin-bottom: 8px;
-    }
-    .modal-body {
-      font-size: 13px;
-      color: var(--on-surface-variant);
-      margin-bottom: 16px;
-      line-height: 1.4;
-    }
-    .modal-actions {
-      display: flex;
-      justify-content: flex-end;
-      gap: 8px;
-    }
+    .modal-title { font-size: 14px; font-weight: 700; margin-bottom: 8px; color: var(--on-surface); }
+    .modal-body { font-size: 12px; color: var(--on-surface-variant); line-height: 1.45; margin-bottom: 12px; }
+    .modal-actions { display: flex; justify-content: flex-end; gap: 8px; }
 
-    /* Drawer */
     .drawer {
       position: absolute;
-      top: 0; right: -100%; bottom: 0;
-      width: 85%;
+      bottom: 0; left: 0; right: 0;
+      height: 70%;
       background: var(--surface);
-      color: var(--on-surface);
+      border-top-left-radius: var(--radius-lg);
+      border-top-right-radius: var(--radius-lg);
+      border: 1px solid var(--outline);
       box-shadow: var(--shadow-3);
-      z-index: 60;
-      transition: right 0.25s ease;
+      transform: translateY(100%);
+      transition: transform 0.25s ease-out;
+      z-index: 90;
       display: flex;
       flex-direction: column;
-      border-left: 1px solid var(--outline);
     }
-    .drawer.active { right: 0; }
+    .drawer.active { transform: translateY(0); }
     .drawer-header {
-      padding: 14px 16px;
-      border-bottom: 1px solid var(--outline-variant);
+      padding: 12px 16px;
       display: flex;
       justify-content: space-between;
       align-items: center;
-      font-size: 14px;
-      font-weight: 600;
+      border-bottom: 1px solid var(--outline-variant);
+      font-weight: 700;
+      font-size: 13px;
     }
     .drawer-body {
       flex: 1;
       padding: 14px 16px;
       overflow-y: auto;
       font-size: 12px;
-      line-height: 1.5;
-    }
-
-    /* Table styles */
-    .ui-table {
-      width: 100%;
-      border-collapse: collapse;
-      font-size: 11px;
-      margin-top: 8px;
-    }
-    .ui-table th, .ui-table td {
-      border: 1px solid var(--outline-variant);
-      padding: 6px 8px;
-      text-align: left;
-    }
-    .ui-table th {
-      background: var(--surface-variant);
-      font-weight: 600;
-    }
-
-    /* Form styles */
-    .form-group {
-      margin-bottom: 12px;
-    }
-    .form-label {
-      font-size: 11px;
-      font-weight: 600;
-      color: var(--on-surface-variant);
-      margin-bottom: 4px;
-      display: block;
-    }
-    .form-control {
-      width: 100%;
-      padding: 8px 10px;
-      border: 1px solid var(--outline);
-      background: var(--background);
-      color: var(--on-background);
-      border-radius: var(--radius-sm);
-      font-size: 12px;
-      outline: none;
-    }
-    .form-control:focus {
-      border-color: var(--primary);
     }
   </style>
 </head>
@@ -564,136 +477,144 @@ SPDX-License-Identifier: AGPL-3.0-only
     <div class="actions">
       <button onclick="toggleLanguage()" id="langToggleBtn">English</button>
       <button onclick="toggleTheme()" id="themeToggleBtn">切换深色模式</button>
-      <button onclick="openModal('modal-ack')">模拟重要公告</button>
+      <button onclick="openAckModal(true)">置顶公告</button>
       <button onclick="openDrawer('drawer-inspector')">审查请求</button>
     </div>
   </div>
 
-  <!-- Android Phone Frame -->
-  <div class="device-container" id="deviceFrame">
-
+  <!-- Simulated Android Phone Device -->
+  <div class="device-wrapper" id="deviceFrame">
     <!-- Android Status Bar -->
     <div class="status-bar">
       <span>12:00</span>
-      <span>5G | [BAT: 98%] [SEC: Keystore Active]</span>
+      <span id="topStatusNotice">5G | 安全沙箱 | AGPL-3.0</span>
     </div>
 
-    <!-- Pinned Important Announcement Banner -->
-    <div class="pinned-banner" id="pinnedBanner">
-      <span>[Pinned Notice] Security patch v1.0.2 ready.</span>
-      <a onclick="switchTab('announcements')">View Details</a>
-    </div>
-
-    <!-- Main Viewport -->
-    <div class="content-viewport">
+    <!-- Viewport -->
+    <div class="app-viewport">
 
       <!-- TAB 1: CHAT SCREEN (SCR-CHAT-01 .. SCR-CHAT-06) -->
       <div class="tab-panel active" id="tab-chat">
         <div class="app-header">
-          <div>
-            <div class="header-title">Agent: Doc Research</div>
-            <div style="font-size:10px; color:var(--on-surface-variant)">Model: deepseek-chat | Space: KB-01 (v2)</div>
-          </div>
-          <button class="header-action-btn" onclick="openDrawer('drawer-inspector')">Inspect</button>
+          <div class="header-title" id="chatTitle">对话: 技术文档助手</div>
+          <button class="header-action-btn" onclick="openDrawer('drawer-inspector')" id="chatInspectBtn">审查请求</button>
         </div>
 
-        <div class="chat-messages" id="chatMsgList">
-          <div class="msg msg-user">
-            <div>请根据本地知识库分析移动端 Python 运行时的安全隔离策略。</div>
-            <div class="msg-meta">
-              <span>12:01</span>
-              <span>Input Tokens: 38</span>
+        <div class="chat-container">
+          <div class="chat-msg-list" id="chatMsgList">
+            <!-- Message 1 (User) -->
+            <div class="msg msg-user">
+              <div class="msg-content">请根据本地知识库分析移动端 Python 运行时的安全隔离策略。</div>
+              <div class="msg-meta">
+                <span>12:01</span>
+                <span>输入: 38 tokens</span>
+              </div>
+            </div>
+
+            <!-- Message 2 (Agent) -->
+            <div class="msg msg-agent">
+              <div class="msg-content">
+                根据 <code>docs/SKILLS_AND_SECURITY.md</code> 安全规范定义：<br/>
+                1. <strong>独立进程隔离</strong>：CPython 运行在独立的 Android Isolated Service 进程中；<br/>
+                2. <strong>零权限沙箱</strong>：沙箱进程不声明任何直接网络或文件读写权限；<br/>
+                3. <strong>Broker 鉴权</strong>：所有外部调用必须经 Capability Broker 单次鉴权。
+              </div>
+
+              <!-- Citation Card (SCR-CHAT-05) -->
+              <div class="citation-card" onclick="showEvidence('docs/SKILLS_AND_SECURITY.md', '12-28')">
+                <div class="citation-title">
+                  <span>[Ref 1] docs/SKILLS_AND_SECURITY.md</span>
+                  <span>[查看原文]</span>
+                </div>
+                <div class="citation-body">分块 #12 | 匹配度: 0.94 | CAS 哈希: 7f49c01...</div>
+              </div>
+
+              <div class="msg-meta">
+                <span>142 tokens | 28 t/s</span>
+                <span>用时: 1.2s</span>
+              </div>
+            </div>
+
+            <!-- Tool Execution Approval Card (SCR-CHAT-04) -->
+            <div class="card" id="toolApprovalCard" style="border: 1.5px solid var(--warning); margin: 4px 0;">
+              <div class="card-title" style="color: var(--warning);">
+                <span id="toolCardTitle">[需要确认工具调用执行]</span>
+                <span class="tag tag-warning" id="toolCardTag">待批准</span>
+              </div>
+              <div style="font-size:11px; margin-bottom:6px;">
+                <span id="toolSkillLabel">目标技能:</span> <strong>skill_calculator</strong> (Isolated CPython)
+              </div>
+              <div style="background:var(--surface-variant); padding:6px 8px; border-radius:4px; font-family:var(--code-font); font-size:11px;">
+                {"operation": "eval_matrix", "dim": 64}
+              </div>
+              <div style="display:flex; gap:6px; margin-top:8px;" id="toolActionsRow">
+                <button class="btn btn-primary btn-sm" onclick="approveTool(true)" id="btnApproveTool">单次批准</button>
+                <button class="btn btn-secondary btn-sm" onclick="approveTool(false)" id="btnRejectTool">拒绝</button>
+              </div>
             </div>
           </div>
 
-          <div class="msg msg-agent">
-            <div>根据知识库 <code>docs/SKILLS_AND_SECURITY.md</code> 的规范：<br/>
-            1. Python 必须运行在独立的 isolated service 进程中；<br/>
-            2. 不直接赋予网络和文件权限，所有 I/O 操作由宿主 Capability Broker 逐次鉴权；<br/>
-            3. 执行完毕立即销毁进程，保证无全局变量和线程残留。</div>
-            
-            <div class="citation-box" onclick="showEvidence('SKILLS_AND_SECURITY.md', 'Line 45-68')">
-              <strong>[Ref 1]</strong> docs/SKILLS_AND_SECURITY.md (Chunk #12, Score: 0.94)
-            </div>
-
-            <div class="msg-meta">
-              <span>12:01</span>
-              <span>142 tokens | 28 t/s | Cost: BYOK</span>
-            </div>
+          <!-- Live Streaming Status Indicator -->
+          <div class="streaming-bar" id="streamIndicator" style="display:none;">
+            <span id="streamStatusText">正在生成: 45 tokens (26 t/s)...</span>
+            <button class="btn btn-danger btn-sm" onclick="cancelStream()" id="btnCancelStream">取消生成</button>
           </div>
 
-          <!-- Tool Approval Demo in Chat -->
-          <div class="tool-card">
-            <div class="tool-header">[Tool Execution Approval Required]</div>
-            <div>Skill: <strong>skill_calculator</strong> (Isolated CPython)</div>
-            <div class="tool-json">{ "operation": "eval_matrix", "dim": 64 }</div>
-            <div style="display:flex; gap:6px; margin-top:8px;">
-              <button class="btn btn-primary btn-sm" onclick="approveTool(true)">Approve</button>
-              <button class="btn btn-secondary btn-sm" onclick="approveTool(false)">Reject</button>
-            </div>
+          <!-- Input Bar -->
+          <div class="chat-input-bar">
+            <input type="text" id="chatInput" placeholder="输入问题或测试工具调用..." />
+            <button class="btn btn-primary" id="chatSendBtn" onclick="simulateSendMessage()">发送</button>
           </div>
-        </div>
-
-        <!-- Live Streaming Status Indicator -->
-        <div class="streaming-bar" id="streamIndicator" style="display:none;">
-          <span id="streamStatusText">Streaming: 45 tokens generated (26 t/s)...</span>
-          <button class="btn btn-danger btn-sm" onclick="cancelStream()">Stop</button>
-        </div>
-
-        <!-- Input Bar -->
-        <div class="chat-input-bar">
-          <input type="text" id="chatInput" placeholder="Ask question or test tool loop..." />
-          <button class="btn btn-primary" id="chatSendBtn" onclick="simulateSendMessage()">Send</button>
         </div>
       </div>
 
       <!-- TAB 2: AGENTS SCREEN (SCR-AGENT-01 .. SCR-AGENT-06) -->
       <div class="tab-panel" id="tab-agents">
         <div class="app-header">
-          <div class="header-title">Agent Profiles</div>
-          <button class="header-action-btn" onclick="alert('Creating new Agent Profile...')">[+] New</button>
+          <div class="header-title" id="agentsHeaderTitle">智能体配置</div>
+          <button class="header-action-btn" onclick="openAgentEditModal(false)" id="btnNewAgent">[+] 新建</button>
         </div>
 
         <div style="padding: 10px 0; overflow-y:auto; flex:1;">
           <div class="card">
             <div class="card-title">
-              <span>Doc Research Agent</span>
-              <span class="tag tag-success">ACTIVE</span>
+              <span id="agent1Name">技术文档助手 (Doc Research Assistant)</span>
+              <span class="tag tag-success" id="agent1Status">已激活</span>
             </div>
-            <div class="card-desc">Specialized in deep RAG search over local PDF/Markdown with hybrid lexical and vector retrieval.</div>
-            <div style="margin-top:8px; font-size:11px; color:var(--on-surface-variant);">
-              Chat: <code>deepseek-chat</code> | Vision: <code>None</code> | KB: 2 bound
+            <div class="card-desc" id="agent1Desc">专注于本地 PDF/Markdown 深度检索，采用词法与向量双路混合召回与 RRF 融合重排。</div>
+            <div style="margin-top:8px; font-size:11px; color:var(--on-surface-variant);" id="agent1Roles">
+              对话: <code>deepseek-chat</code> | 视觉: <code>无</code> | 挂载知识库: 2 个
             </div>
             <div style="margin-top:10px; display:flex; gap:6px;">
-              <button class="btn btn-secondary btn-sm" onclick="alert('Viewing Prompt Revision Diff...')">Revisions (v4)</button>
-              <button class="btn btn-primary btn-sm" onclick="alert('Editing Agent parameters...')">Edit</button>
+              <button class="btn btn-secondary btn-sm" onclick="openRevisionsModal()" id="btnAgentRevs">修订历史 (v4)</button>
+              <button class="btn btn-primary btn-sm" onclick="openAgentEditModal(true)" id="btnAgentEdit">编辑参数</button>
             </div>
           </div>
 
           <div class="card">
             <div class="card-title">
-              <span>Code Companion</span>
-              <span class="tag tag-neutral">IDLE</span>
+              <span id="agent2Name">代码审查助手 (Code Companion)</span>
+              <span class="tag tag-neutral" id="agent2Status">闲置</span>
             </div>
-            <div class="card-desc">Assists with Python scripting, AST analysis, and execution verification in isolated sandbox.</div>
-            <div style="margin-top:8px; font-size:11px; color:var(--on-surface-variant);">
-              Chat: <code>gpt-4o-mini</code> | Skills: <code>calculator</code>, <code>web_fetch</code>
+            <div class="card-desc" id="agent2Desc">协助 Python 代码逻辑分析、AST 检查以及在沙箱环境中的安全执行验证。</div>
+            <div style="margin-top:8px; font-size:11px; color:var(--on-surface-variant);" id="agent2Roles">
+              对话: <code>gpt-4o-mini</code> | 技能: <code>calculator</code>, <code>web_fetch</code>
             </div>
             <div style="margin-top:10px; display:flex; gap:6px;">
-              <button class="btn btn-secondary btn-sm">Revisions (v1)</button>
-              <button class="btn btn-primary btn-sm">Edit</button>
+              <button class="btn btn-secondary btn-sm" onclick="openRevisionsModal()" id="btnAgent2Revs">修订历史 (v1)</button>
+              <button class="btn btn-primary btn-sm" onclick="openAgentEditModal(true)" id="btnAgent2Edit">编辑参数</button>
             </div>
           </div>
 
           <!-- Parameter configuration preview -->
           <div class="card">
-            <div class="card-title">Parameter Defaults & Budget</div>
+            <div class="card-title" id="paramCardTitle">全局推理与生成预算</div>
             <div class="form-group">
-              <label class="form-label">Temperature: 0.3 (Precise)</label>
+              <label class="form-label" id="lblTemp">温度系数 (Temperature): 0.3 (精确)</label>
               <input type="range" min="0" max="100" value="30" style="width:100%" />
             </div>
             <div class="form-group">
-              <label class="form-label">Max Context Budget: 8192 Tokens</label>
+              <label class="form-label" id="lblContext">最大上下文预算: 8192 Tokens</label>
               <input type="range" min="1024" max="32768" value="8192" style="width:100%" />
             </div>
           </div>
@@ -703,42 +624,42 @@ SPDX-License-Identifier: AGPL-3.0-only
       <!-- TAB 3: PROVIDERS SCREEN (SCR-PROV-01 .. SCR-PROV-04) -->
       <div class="tab-panel" id="tab-providers">
         <div class="app-header">
-          <div class="header-title">Model Providers (BYOK)</div>
-          <button class="header-action-btn">[+] Add</button>
+          <div class="header-title" id="provHeaderTitle">模型服务商 (BYOK)</div>
+          <button class="header-action-btn" onclick="openProbeDialog('DeepSeek Official')" id="btnAddProv">[+] 连通测试</button>
         </div>
 
         <div style="padding: 10px 0; overflow-y:auto; flex:1;">
           <div class="card">
             <div class="card-title">
               <span>DeepSeek Official</span>
-              <span class="tag tag-success">CONNECTED</span>
+              <span class="tag tag-success" id="prov1Tag">已连接</span>
             </div>
             <div class="form-group" style="margin-top:8px;">
-              <label class="form-label">Base URL</label>
+              <label class="form-label" id="lblBaseUrl1">接口地址 (Base URL)</label>
               <input class="form-control" type="text" value="https://api.deepseek.com/v1" readonly />
             </div>
             <div class="form-group">
-              <label class="form-label">API Key (Android Keystore Protected)</label>
+              <label class="form-label" id="lblKey1">API Key (Android Keystore 加密存储)</label>
               <input class="form-control" type="password" value="sk-synthetic-masked-token-12345" readonly />
             </div>
             <div style="display:flex; gap:6px;">
-              <button class="btn btn-primary btn-sm" onclick="probeConnection('DeepSeek Official', 142)">Test Probe</button>
-              <button class="btn btn-secondary btn-sm">Edit</button>
+              <button class="btn btn-primary btn-sm" onclick="openProbeDialog('DeepSeek Official')" id="btnProbe1">连通性探测</button>
+              <button class="btn btn-secondary btn-sm" onclick="showProbeOutcome('DeepSeek Official', '401')" id="btnProbeFail1">模拟 401 失败</button>
             </div>
           </div>
 
           <div class="card">
             <div class="card-title">
               <span>Local vLLM Server</span>
-              <span class="tag tag-warning">UNTESTED</span>
+              <span class="tag tag-warning" id="prov2Tag">未测试</span>
             </div>
             <div class="form-group" style="margin-top:8px;">
-              <label class="form-label">Base URL</label>
+              <label class="form-label" id="lblBaseUrl2">接口地址 (Base URL)</label>
               <input class="form-control" type="text" value="http://192.168.1.100:8000/v1" readonly />
             </div>
             <div style="display:flex; gap:6px;">
-              <button class="btn btn-primary btn-sm" onclick="probeConnection('Local vLLM Server', 45)">Test Probe</button>
-              <button class="btn btn-secondary btn-sm">Edit</button>
+              <button class="btn btn-primary btn-sm" onclick="openProbeDialog('Local vLLM Server')" id="btnProbe2">连通性探测</button>
+              <button class="btn btn-secondary btn-sm" onclick="showProbeOutcome('Local vLLM Server', 'timeout')" id="btnProbeFail2">模拟超时失败</button>
             </div>
           </div>
         </div>
@@ -747,40 +668,40 @@ SPDX-License-Identifier: AGPL-3.0-only
       <!-- TAB 4: KNOWLEDGE SCREEN (SCR-KNOW-01 .. SCR-KNOW-07) -->
       <div class="tab-panel" id="tab-knowledge">
         <div class="app-header">
-          <div class="header-title">Knowledge Bases</div>
-          <button class="header-action-btn" onclick="alert('Selecting files via Android SAF...')">[+] Import</button>
+          <div class="header-title" id="knowHeaderTitle">本地知识库</div>
+          <button class="header-action-btn" onclick="openSafImportModal()" id="btnImportDoc">[+] 导入文件</button>
         </div>
 
         <div style="padding: 10px 0; overflow-y:auto; flex:1;">
-          <!-- Waiting for Vision Banner -->
-          <div style="background:var(--warning-container); color:var(--on-warning-container); padding:10px 14px; margin:0 14px 10px; border-radius:var(--radius-md); font-size:12px; border:1px solid var(--warning);">
-            <div style="font-weight:600; margin-bottom:4px;">[Waiting State: WAITING_FOR_VISION_MODEL]</div>
-            <div>Import job detected 4 images in Markdown documents. Configure a Vision Model in Agent settings to proceed, or choose pure text extraction.</div>
+          <!-- Waiting for Vision Banner (SCR-KNOW-05) -->
+          <div id="visionWaitingBanner" style="background:var(--warning-container); color:var(--on-warning-container); padding:10px 14px; margin:0 14px 10px; border-radius:var(--radius-md); font-size:12px; border:1px solid var(--warning);">
+            <div style="font-weight:700; margin-bottom:4px;" id="bannerVisionTitle">[等待状态: WAITING_FOR_VISION_MODEL]</div>
+            <div id="bannerVisionDesc">导入任务检测到 Markdown 中包含 4 张图片引用。请在 Agent 中配置 Vision 模型以提取图片内容，或选择仅提取纯文本。</div>
             <div style="margin-top:8px; display:flex; gap:6px;">
-              <button class="btn btn-primary btn-sm" onclick="switchTab('agents')">Configure Vision</button>
-              <button class="btn btn-secondary btn-sm" onclick="alert('Continuing with text-only fallback...')">Text Only</button>
+              <button class="btn btn-primary btn-sm" onclick="switchTab('agents')" id="btnCfgVision">配置视觉模型</button>
+              <button class="btn btn-secondary btn-sm" onclick="resolveVisionFallback()" id="btnTxtOnly">仅提取文本</button>
             </div>
           </div>
 
           <div class="card">
             <div class="card-title">
-              <span>Architecture Docs (KB-01)</span>
-              <span class="tag tag-success">READY</span>
+              <span id="kbName">系统架构文档库 (KB-01)</span>
+              <span class="tag tag-success" id="kbTag">就绪</span>
             </div>
-            <div class="card-desc">FTS5 lexical index + Local USearch HNSW vector index (dim: 384).</div>
+            <div class="card-desc" id="kbDesc">FTS5 词法全文索引 + 本地 USearch 向量索引 (维度: 384)。</div>
             <table class="ui-table">
               <thead>
-                <tr><th>Document</th><th>Format</th><th>Status</th><th>Chunks</th></tr>
+                <tr><th id="thDoc">文档名称</th><th id="thFmt">格式</th><th id="thSts">状态</th><th id="thChk">分块数</th></tr>
               </thead>
-              <tbody>
+              <tbody id="kbDocTableBody">
                 <tr><td>IMPLEMENTATION_PLAN.md</td><td>[MD]</td><td>Ready</td><td>18</td></tr>
                 <tr><td>KNOWLEDGE.md</td><td>[MD]</td><td>Ready</td><td>12</td></tr>
                 <tr><td>android_security.pdf</td><td>[PDF]</td><td>Ready</td><td>45</td></tr>
               </tbody>
             </table>
             <div style="margin-top:10px; display:flex; gap:6px;">
-              <button class="btn btn-secondary btn-sm" onclick="alert('Rebuilding USearch vector index...')">Rebuild Index</button>
-              <button class="btn btn-secondary btn-sm" onclick="alert('Viewing CAS blob details...')">CAS Details</button>
+              <button class="btn btn-secondary btn-sm" onclick="openRebuildIndexModal()" id="btnRebuildIdx">重建索引</button>
+              <button class="btn btn-secondary btn-sm" onclick="showEvidence('CAS-KB01-INDEX', 'All Chunks')" id="btnCasDetails">CAS 存储详情</button>
             </div>
           </div>
         </div>
@@ -789,39 +710,40 @@ SPDX-License-Identifier: AGPL-3.0-only
       <!-- TAB 5: SKILLS SCREEN (SCR-SKILL-01 .. SCR-SKILL-05) -->
       <div class="tab-panel" id="tab-skills">
         <div class="app-header">
-          <div class="header-title">Skills & Sandbox</div>
-          <button class="header-action-btn">[+] Install</button>
+          <div class="header-title" id="skillsHeaderTitle">技能沙箱</div>
+          <button class="header-action-btn" onclick="openSkillSourceModal()" id="btnInstallSkill">[+] 查看源码</button>
         </div>
 
         <div style="padding: 10px 0; overflow-y:auto; flex:1;">
           <div class="card">
             <div class="card-title">
-              <span>skill_calculator</span>
-              <span class="tag tag-primary">ISOLATED CPYTHON</span>
+              <span>skill_calculator v1.0.0</span>
+              <span class="tag tag-primary" id="tagCpython">隔离 CPYTHON</span>
             </div>
-            <div class="card-desc">Matrix and formula computations running in detached zero-permission isolated process.</div>
+            <div class="card-desc" id="skillCalcDesc">矩阵与公式计算，运行于完全剥离 Android 权限的独立子进程中。</div>
             <div style="margin-top:8px; font-size:11px; color:var(--on-surface-variant);">
-              Timeout: <code>5000ms</code> | Memory Cap: <code>64MB</code> | License: <code>AGPL-3.0-only</code>
+              超时限制: <code>5000ms</code> | 内存上限: <code>64MB</code> | 协议: <code>AGPL-3.0-only</code>
             </div>
             <div style="margin-top:10px; display:flex; gap:6px;">
-              <button class="btn btn-secondary btn-sm" onclick="alert('Opening source viewer for skill.py...')">View Source</button>
-              <button class="btn btn-secondary btn-sm" onclick="alert('Permissions: No network, No files.')">Permissions</button>
+              <button class="btn btn-secondary btn-sm" onclick="openSkillSourceModal()" id="btnViewSrc">查看源码</button>
+              <button class="btn btn-secondary btn-sm" onclick="openSkillPermsModal()" id="btnSkillPerms">权限矩阵</button>
             </div>
           </div>
 
           <div class="card">
             <div class="card-title">
-              <span>Audit Log & Broker Activity</span>
+              <span id="auditCardTitle">Broker 审计日志</span>
               <span class="tag tag-neutral">LOGS</span>
             </div>
-            <div style="font-size:11px; color:var(--on-surface-variant); margin-bottom:6px;">Recent isolated execution events:</div>
+            <div style="font-size:11px; color:var(--on-surface-variant); margin-bottom:6px;" id="auditCardDesc">最近隔离进程执行事件:</div>
             <table class="ui-table">
               <thead>
-                <tr><th>Time</th><th>Invocation ID</th><th>Result</th><th>Duration</th></tr>
+                <tr><th id="thTime">时间</th><th id="thInv">调用 ID</th><th id="thRes">结果</th><th id="thLat">耗时</th></tr>
               </thead>
               <tbody>
-                <tr><td>12:01:04</td><td>inv_8f21a</td><td>[SUCCESS]</td><td>142ms</td></tr>
-                <tr><td>11:45:20</td><td>inv_7a09c</td><td>[REJECTED]</td><td>-</td></tr>
+                <tr><td>12:01:04</td><td>inv_8f21a</td><td><span class="tag tag-success">[成功]</span></td><td>142ms</td></tr>
+                <tr><td>11:45:20</td><td>inv_7a09c</td><td><span class="tag tag-warning">[拒绝]</span></td><td>-</td></tr>
+                <tr><td>10:12:08</td><td>inv_6b44e</td><td><span class="tag tag-error">[超时]</span></td><td>5000ms</td></tr>
               </tbody>
             </table>
           </div>
@@ -831,33 +753,36 @@ SPDX-License-Identifier: AGPL-3.0-only
       <!-- TAB 6: ANNOUNCEMENTS SCREEN (SCR-ANN-01 .. SCR-ANN-05) -->
       <div class="tab-panel" id="tab-announcements">
         <div class="app-header">
-          <div class="header-title">Announcements</div>
-          <button class="header-action-btn" onclick="alert('Marked all as read.')">Mark Read</button>
+          <div class="header-title" id="annHeaderTitle">公告中心</div>
+          <button class="header-action-btn" onclick="markAllAnnRead()" id="btnMarkRead">全部已读</button>
         </div>
 
         <div style="padding: 10px 0; overflow-y:auto; flex:1;">
-          <div class="card">
+          <div class="card" style="border: 1.5px solid var(--error);">
             <div class="card-title">
-              <span>[Urgent] Security Patch v1.0.2</span>
-              <span class="tag tag-error">MANDATORY</span>
+              <span id="ann1Title">[紧急] 安全补丁 v1.0.2</span>
+              <span class="tag tag-error" id="ann1Tag">强确认</span>
             </div>
-            <div class="card-desc">Updated bundled SQLite driver to eliminate ABI vulnerabilities on Android API 26. Digital signature verified.</div>
+            <div class="card-desc" id="ann1Desc">已更新内置 SQLite 驱动，消除了在 Android API 26 上的 ABI 安全漏洞。数字签名已验证。</div>
             <div style="margin-top:8px; font-size:10px; color:var(--on-surface-variant);">
-              Published: 2026-08-28 | Revision: 3 | ETag: "a81f-99"
+              发布时间: 2026-08-28 | 修订版本: 3 | ETag: "a81f-99"
             </div>
             <div style="margin-top:10px;">
-              <button class="btn btn-primary btn-sm" onclick="openModal('modal-ack')">Read & Acknowledge</button>
+              <button class="btn btn-primary btn-sm" onclick="openAckModal(true)" id="btnReadAck">阅读并确认</button>
             </div>
           </div>
 
           <div class="card">
             <div class="card-title">
-              <span>[Feature] M0.5 UI Design System Completed</span>
-              <span class="tag tag-primary">NEW</span>
+              <span id="ann2Title">[新功能] M0.5 UI 设计基线与简体中文已交付</span>
+              <span class="tag tag-primary" id="ann2Tag">最新</span>
             </div>
-            <div class="card-desc">Comprehensive 7-category screen specifications and Material 3 design tokens are now available.</div>
+            <div class="card-desc" id="ann2Desc">七大类页面高保真规范、Material 3 设计 Token 与双语国际化支持现已就绪。</div>
             <div style="margin-top:8px; font-size:10px; color:var(--on-surface-variant);">
-              Published: 2026-08-28 | Revision: 1
+              发布时间: 2026-08-28 | 修订版本: 1
+            </div>
+            <div style="margin-top:10px;">
+              <button class="btn btn-secondary btn-sm" onclick="openAckModal(false)" id="btnReadNotice">查看详情</button>
             </div>
           </div>
         </div>
@@ -866,39 +791,51 @@ SPDX-License-Identifier: AGPL-3.0-only
       <!-- TAB 7: ABOUT & SETTINGS SCREEN (SCR-SETT-01 .. SCR-SETT-04) -->
       <div class="tab-panel" id="tab-about">
         <div class="app-header">
-          <div class="header-title">Settings & About</div>
+          <div class="header-title" id="aboutHeaderTitle">设置与关于</div>
         </div>
 
         <div style="padding: 10px 0; overflow-y:auto; flex:1;">
+          <!-- Language Selector Entry (SCR-SETT-01) -->
           <div class="card">
-            <div class="card-title">Privacy & Telemetry</div>
+            <div class="card-title" id="settLangTitle">界面语言 (Language)</div>
+            <div class="form-group" style="margin-top:8px;">
+              <select class="form-control" id="settLangSelect" onchange="onSettingLanguageChange(this.value)">
+                <option value="zh-CN">简体中文 (zh-CN)</option>
+                <option value="en-US">English (en-US)</option>
+              </select>
+            </div>
+          </div>
+
+          <div class="card">
+            <div class="card-title" id="settPrivacyTitle">隐私与匿名指标</div>
             <div style="display:flex; justify-content:space-between; align-items:center; margin-top:8px;">
               <div>
-                <div style="font-size:13px; font-weight:500;">Anonymous Announcement Metrics</div>
-                <div style="font-size:11px; color:var(--on-surface-variant);">No telemetry is sent to any server.</div>
+                <div style="font-size:12px; font-weight:600;" id="settMetricsTitle">匿名公告送达指标</div>
+                <div style="font-size:11px; color:var(--on-surface-variant);" id="settMetricsDesc">默认完全关闭。绝不上报任何个人数据或查询。</div>
               </div>
-              <span class="tag tag-neutral">DISABLED</span>
+              <span class="tag tag-neutral" id="settMetricsTag">已禁用</span>
             </div>
           </div>
 
           <div class="card">
-            <div class="card-title">Data Backup & Migration</div>
-            <div class="card-desc">Export all Agents, Prompts, and Knowledge Base CAS indexes (excluding Keystore secrets).</div>
+            <div class="card-title" id="settBackupTitle">数据备份与导出</div>
+            <div class="card-desc" id="settBackupDesc">导出全部 Agent、Prompt 历史及知识库索引（自动排除 Keystore 私密凭据）。</div>
             <div style="margin-top:10px; display:flex; gap:6px;">
-              <button class="btn btn-secondary btn-sm" onclick="alert('Exporting sanitized JSON package...')">Export Data</button>
-              <button class="btn btn-secondary btn-sm" onclick="alert('Importing data package...')">Restore</button>
+              <button class="btn btn-secondary btn-sm" onclick="openExportModal()" id="btnExportData">导出备份包</button>
+              <button class="btn btn-secondary btn-sm" onclick="alert('数据恢复就绪：请选择合法的 .json 备份包。')" id="btnRestoreData">恢复数据</button>
             </div>
           </div>
 
           <div class="card">
-            <div class="card-title">Software License & Integrity</div>
+            <div class="card-title" id="settLicenseTitle">软件许可与完整性</div>
             <div style="font-size:12px; line-height:1.5;">
-              <div><strong>Package:</strong> mobileAgentRuntime</div>
-              <div><strong>Version:</strong> v1.0.0-dev (Git SHA: <code>547f567</code>)</div>
-              <div><strong>License:</strong> GNU AGPL-3.0-only</div>
+              <div><strong>应用名:</strong> mobileAgentRuntime</div>
+              <div><strong>版本:</strong> v1.0.0-dev (Git SHA: <code>c9798dc</code>)</div>
+              <div><strong>开源协议:</strong> GNU AGPL-3.0-only</div>
             </div>
-            <div style="margin-top:10px;">
-              <button class="btn btn-primary btn-sm" onclick="alert('Opening AGPL-3.0-only full license text...')">View AGPL License</button>
+            <div style="margin-top:10px; display:flex; gap:6px;">
+              <button class="btn btn-secondary btn-sm" onclick="openUpdateModal()" id="btnCheckUpdate">检查更新</button>
+              <button class="btn btn-primary btn-sm" onclick="openLicenseModal()" id="btnViewLicense">查看 AGPL-3.0 许可正文</button>
             </div>
           </div>
         </div>
@@ -910,74 +847,111 @@ SPDX-License-Identifier: AGPL-3.0-only
     <div class="bottom-nav">
       <button class="nav-tab active" onclick="switchTab('chat')">
         <span class="tab-icon">[C]</span>
-        <span>Chat</span>
+        <span id="navChat">对话</span>
       </button>
       <button class="nav-tab" onclick="switchTab('agents')">
         <span class="tab-icon">[A]</span>
-        <span>Agents</span>
+        <span id="navAgents">智能体</span>
       </button>
       <button class="nav-tab" onclick="switchTab('providers')">
         <span class="tab-icon">[P]</span>
-        <span>Providers</span>
+        <span id="navProviders">服务商</span>
       </button>
       <button class="nav-tab" onclick="switchTab('knowledge')">
         <span class="tab-icon">[K]</span>
-        <span>Knowledge</span>
+        <span id="navKnowledge">知识库</span>
       </button>
       <button class="nav-tab" onclick="switchTab('skills')">
         <span class="tab-icon">[S]</span>
-        <span>Skills</span>
+        <span id="navSkills">技能</span>
       </button>
       <button class="nav-tab" onclick="switchTab('announcements')">
         <span class="tab-icon">[N]</span>
-        <span>News</span>
+        <span id="navAnn">公告</span>
       </button>
       <button class="nav-tab" onclick="switchTab('about')">
         <span class="tab-icon">[i]</span>
-        <span>About</span>
+        <span id="navAbout">关于</span>
       </button>
     </div>
 
     <!-- Request Inspector Drawer (SCR-CHAT-06) -->
     <div class="drawer" id="drawer-inspector">
       <div class="drawer-header">
-        <span>Request Inspector</span>
+        <span id="inspectorTitle">请求审查 (Request Inspector)</span>
         <button class="btn btn-secondary btn-sm" onclick="closeDrawer('drawer-inspector')">[X]</button>
       </div>
       <div class="drawer-body">
         <div style="margin-bottom:10px;">
-          <strong>Target Provider:</strong> DeepSeek Official<br/>
-          <strong>Endpoint:</strong> <code>https://api.deepseek.com/v1/chat/completions</code><br/>
-          <strong>Authorization:</strong> <code>Bearer sk-*** [Protected in Keystore]</code>
+          <strong>目标服务商:</strong> DeepSeek Official<br/>
+          <strong>接口地址:</strong> <code>https://api.deepseek.com/v1/chat/completions</code><br/>
+          <strong>密钥鉴权:</strong> <code>Bearer sk-*** [已在 Keystore 加密保护]</code>
         </div>
         <hr style="border:none; border-top:1px solid var(--outline-variant); margin:10px 0;" />
-        <div><strong>Effective Prompt Layers:</strong></div>
+        <div><strong>生效 Prompt 分层:</strong></div>
         <div style="background:var(--surface-variant); padding:8px; border-radius:4px; font-family:var(--code-font); font-size:11px; margin-top:6px;">
-          [1. Runtime Contract]<br/>
+          [1. 运行时不可变契约]<br/>
           You are an on-device agent coordinator.<br/><br/>
-          [2. User System Prompt]<br/>
+          [2. 用户系统提示词 (v4)]<br/>
           Answer questions with technical precision.<br/><br/>
-          [3. Knowledge Context]<br/>
-          Source: docs/SKILLS_AND_SECURITY.md (Length: 480 chars)<br/><br/>
-          [4. User Input]<br/>
+          [3. 挂载知识库分块]<br/>
+          Source: docs/SKILLS_AND_SECURITY.md (长度: 480 字符)<br/><br/>
+          [4. 当前用户输入]<br/>
           请根据本地知识库分析移动端 Python 运行时的安全隔离策略。
         </div>
         <div style="margin-top:10px; font-size:11px; color:var(--on-surface-variant);">
-          Total Tokens: 384 / Budget: 8192 (Safe)
+          消耗 Token: 384 / 预算上限: 8192 (安全范围内)
         </div>
       </div>
     </div>
 
-    <!-- Modal: Mandatory Announcement Acknowledgement (SCR-ANN-04) -->
-    <div class="overlay" id="modal-ack">
+    <!-- Modal: Agent Profile Editor (SCR-AGENT-02) -->
+    <div class="overlay" id="modal-agent-edit">
       <div class="modal-box">
-        <div class="modal-title">[Important Security Notice]</div>
+        <div class="modal-title" id="modalAgentEditTitle">编辑智能体配置</div>
         <div class="modal-body">
-          You are receiving a mandatory update notice regarding Android SQLite FTS5 driver compatibility.<br/><br/>
-          This notice requires your explicit acknowledgement before proceeding to use background index services.
+          <div class="form-group">
+            <label class="form-label">智能体名称</label>
+            <input class="form-control" type="text" id="inputAgentName" value="技术文档助手" />
+          </div>
+          <div class="form-group">
+            <label class="form-label">系统提示词 (System Prompt)</label>
+            <textarea class="form-control" id="inputAgentPrompt" rows="3">你是一个移动端技术方案分析专家。请根据本地知识库准确回答，并标明 [Ref N] 引用出处。</textarea>
+          </div>
+          <div class="form-group">
+            <label class="form-label">默认对话模型</label>
+            <select class="form-control" id="selectAgentModel">
+              <option value="deepseek-chat">deepseek-chat (DeepSeek Official)</option>
+              <option value="gpt-4o-mini">gpt-4o-mini (OpenAI Provider)</option>
+            </select>
+          </div>
+          <div class="form-group">
+            <label class="form-label">温度系数 (Temperature)</label>
+            <input type="range" min="0" max="100" value="30" style="width:100%" />
+          </div>
         </div>
         <div class="modal-actions">
-          <button class="btn btn-primary" onclick="closeModal('modal-ack')">I Have Read and Acknowledge</button>
+          <button class="btn btn-secondary" onclick="closeModal('modal-agent-edit')">取消</button>
+          <button class="btn btn-primary" onclick="saveAgentEdit()">保存并生效</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Modal: Prompt Revision Diff (SCR-AGENT-03) -->
+    <div class="overlay" id="modal-revisions">
+      <div class="modal-box">
+        <div class="modal-title">[Prompt 版本比对: v4 对比 v3]</div>
+        <div class="modal-body">
+          <div style="background:var(--surface-variant); padding:10px; border-radius:4px; font-family:var(--code-font); font-size:11px;">
+            You are a technical document analyst.<br/>
+            Current date: {date}<br/>
+            <span style="color:var(--tertiary);">+ Always cite chunk citations with format [Ref N].</span><br/>
+            <span style="color:var(--tertiary);">+ Never fabricate facts without CAS proof.</span><br/>
+            Active knowledge bases: {knowledge_bases}
+          </div>
+        </div>
+        <div class="modal-actions">
+          <button class="btn btn-primary" onclick="closeModal('modal-revisions')">关闭</button>
         </div>
       </div>
     </div>
@@ -985,12 +959,12 @@ SPDX-License-Identifier: AGPL-3.0-only
     <!-- Modal: Evidence Viewer (SCR-KNOW-06) -->
     <div class="overlay" id="modal-evidence">
       <div class="modal-box">
-        <div class="modal-title" id="evidenceTitle">[Evidence Viewer]</div>
+        <div class="modal-title" id="evidenceTitle">[证据原文查看器]</div>
         <div class="modal-body" id="evidenceContent" style="font-family:var(--code-font); font-size:11px; background:var(--surface-variant); padding:10px; border-radius:4px;">
-          Loading chunk data from CAS repository...
+          正在从 CAS 仓库加载分块数据...
         </div>
         <div class="modal-actions">
-          <button class="btn btn-secondary" onclick="closeModal('modal-evidence')">Close</button>
+          <button class="btn btn-secondary" onclick="closeModal('modal-evidence')">关闭</button>
         </div>
       </div>
     </div>
@@ -998,10 +972,164 @@ SPDX-License-Identifier: AGPL-3.0-only
     <!-- Modal: Connection Probe Result (SCR-PROV-04) -->
     <div class="overlay" id="modal-probe">
       <div class="modal-box">
-        <div class="modal-title" id="probeTitle">Probe Result</div>
-        <div class="modal-body" id="probeBody">Testing...</div>
+        <div class="modal-title" id="probeTitle">连通性探测结果</div>
+        <div class="modal-body" id="probeBody">正在测试网络连通性...</div>
         <div class="modal-actions">
-          <button class="btn btn-primary" onclick="closeModal('modal-probe')">OK</button>
+          <button class="btn btn-primary" onclick="closeModal('modal-probe')">完成</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Modal: SAF Import Simulator (SCR-KNOW-03) -->
+    <div class="overlay" id="modal-saf">
+      <div class="modal-box">
+        <div class="modal-title">[SAF 系统文件选择器]</div>
+        <div class="modal-body">
+          <div style="margin-bottom:8px;">请选择导入到本地 CAS 知识库的文件类型:</div>
+          <div style="display:flex; flex-direction:column; gap:6px;">
+            <label><input type="checkbox" checked /> Markdown 技术文档 (*.md)</label>
+            <label><input type="checkbox" checked /> 文本文件 (*.txt)</label>
+            <label><input type="checkbox" /> 图像与扫描件 (*.png, *.jpg)</label>
+            <label><input type="checkbox" /> PDF 文档 (*.pdf)</label>
+          </div>
+        </div>
+        <div class="modal-actions">
+          <button class="btn btn-secondary" onclick="closeModal('modal-saf')">取消</button>
+          <button class="btn btn-primary" onclick="simulateSafImport()">开始导入</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Modal: Index Rebuild Simulator (SCR-KNOW-07) -->
+    <div class="overlay" id="modal-rebuild">
+      <div class="modal-box">
+        <div class="modal-title">[重建知识库索引]</div>
+        <div class="modal-body">
+          将重新执行 FTS5 分词切块与向量生成 (空间: local-hash-v1-d32)。<br/>
+          已建立原子切换保护，重建失败不会损坏原有可用代际。
+        </div>
+        <div class="modal-actions">
+          <button class="btn btn-secondary" onclick="closeModal('modal-rebuild')">取消</button>
+          <button class="btn btn-primary" onclick="executeRebuildIndex()">立即重建</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Modal: Skill Source Viewer (SCR-SKILL-02) -->
+    <div class="overlay" id="modal-skill-src">
+      <div class="modal-box">
+        <div class="modal-title">[技能源码: skill_calculator.py]</div>
+        <div class="modal-body">
+          <!-- REUSE-IgnoreStart -->
+          <div style="background:var(--surface-variant); padding:10px; border-radius:4px; font-family:var(--code-font); font-size:11px;">
+            # SPDX-License-Identifier: AGPL-3.0-only<br/>
+            def execute(params: dict) -&gt; dict:<br/>
+            &nbsp;&nbsp;&nbsp;&nbsp;op = params.get("operation")<br/>
+            &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;if op == "eval_matrix":<br/>
+            &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;dim = int(params.get("dim", 2))<br/>
+            &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;return {"result": "matrix_computed", "size": dim * dim}<br/>
+            &nbsp;&nbsp;&nbsp;&nbsp;return {"error": "unsupported_operation"}
+          </div>
+          <!-- REUSE-IgnoreEnd -->
+        </div>
+        <div class="modal-actions">
+          <button class="btn btn-primary" onclick="closeModal('modal-skill-src')">关闭</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Modal: Skill Permissions Grid (SCR-SKILL-04) -->
+    <div class="overlay" id="modal-skill-perms">
+      <div class="modal-box">
+        <div class="modal-title">[Broker 权限矩阵管理]</div>
+        <div class="modal-body">
+          <div style="display:flex; justify-content:space-between; margin-bottom:8px;">
+            <span>网络访问 (Network)</span>
+            <span class="tag tag-error">已拦截 (NONE)</span>
+          </div>
+          <div style="display:flex; justify-content:space-between; margin-bottom:8px;">
+            <span>文件系统 (FileSystem)</span>
+            <span class="tag tag-error">已拦截 (NONE)</span>
+          </div>
+          <div style="display:flex; justify-content:space-between; margin-bottom:8px;">
+            <span>IPC 管道 (ParcelFileDescriptor)</span>
+            <span class="tag tag-success">允许 (单次通信)</span>
+          </div>
+        </div>
+        <div class="modal-actions">
+          <button class="btn btn-danger" onclick="revokeSkillPerms()">全部撤销授权</button>
+          <button class="btn btn-secondary" onclick="closeModal('modal-skill-perms')">关闭</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Modal: Mandatory Announcement Acknowledgement (SCR-ANN-05) -->
+    <div class="overlay" id="modal-ack">
+      <div class="modal-box">
+        <div class="modal-title" id="ackModalTitle">[重要安全升级公告]</div>
+        <div class="modal-body" id="ackModalBody">
+          您收到一条关于 Android SQLite FTS5 原生驱动兼容性升级的通知。<br/><br/>
+          此安全补丁需要显式确认后方可继续运行后台检索服务。
+        </div>
+        <div class="modal-actions" id="ackModalActions">
+          <button class="btn btn-primary" onclick="closeModal('modal-ack')" id="btnAckConfirm">我已阅读并确认此公告</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Modal: Data Backup Export (SCR-SETT-02) -->
+    <div class="overlay" id="modal-export">
+      <div class="modal-box">
+        <div class="modal-title">[导出数据备份包]</div>
+        <div class="modal-body">
+          正在生成脱敏 JSON 导出包：<br/>
+          - 智能体配置: 2 个<br/>
+          - 知识库索引与 CAS 元数据: 3 份文档<br/>
+          - 私密 API 密钥: 0 个 (已依法规严格排除在备份之外)
+        </div>
+        <div class="modal-actions">
+          <button class="btn btn-secondary" onclick="closeModal('modal-export')">关闭</button>
+          <button class="btn btn-primary" onclick="executeExportData()">下载备份文件</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Modal: Full AGPL License (SCR-SETT-04) -->
+    <div class="overlay" id="modal-license">
+      <div class="modal-box">
+        <div class="modal-title">GNU Affero General Public License v3.0</div>
+        <div class="modal-body" style="font-family:var(--code-font); font-size:10px; max-height:240px; overflow-y:auto; background:var(--surface-variant); padding:8px;">
+          GNU AFFERO GENERAL PUBLIC LICENSE<br/>
+          Version 3, 19 November 2007<br/><br/>
+          Copyright (C) 2026 mobileAgentRuntime contributors<br/><br/>
+          Everyone is permitted to copy and distribute verbatim copies of this license document, but changing it is not allowed.<br/><br/>
+          0. Definitions.<br/>
+          "This License" refers to version 3 of the GNU Affero General Public License.<br/>
+          "The Program" refers to any copyrightable work licensed under this License...
+        </div>
+        <div class="modal-actions">
+          <button class="btn btn-primary" onclick="closeModal('modal-license')">关闭</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Modal: Check for Updates (SCR-SETT-03) -->
+    <div class="overlay" id="modal-update">
+      <div class="modal-box">
+        <div class="modal-title" id="updateModalTitle">[软件版本与检查更新]</div>
+        <div class="modal-body" id="updateModalBody">
+          <strong>当前安装版本:</strong> v1.0.0-dev (Git SHA: <code>c9798dc</code>)<br/>
+          <strong>官方发布源:</strong> Cloudflare Worker (Ed25519 签名验证)<br/><br/>
+          <div style="background:var(--tertiary-container); color:var(--on-tertiary-container); padding:8px 10px; border-radius:4px; font-size:11px; font-weight:600;">
+            [OK] 当前已是最新版本，暂无待安装的安全更新或功能补丁。
+          </div>
+          <div style="margin-top:8px; font-size:10px; color:var(--on-surface-variant);">
+            上次检查时间: 2026-08-28 20:30:00 (自动缓存有效期: 6小时)
+          </div>
+        </div>
+        <div class="modal-actions">
+          <button class="btn btn-secondary" onclick="checkUpdateNow()" id="btnCheckNow">立即重新检查</button>
+          <button class="btn btn-primary" onclick="closeModal('modal-update')">关闭</button>
         </div>
       </div>
     </div>
@@ -1018,8 +1146,36 @@ SPDX-License-Identifier: AGPL-3.0-only
         langBtn: 'English',
         themeLight: '切换浅色模式',
         themeDark: '切换深色模式',
-        btnNotice: '模拟重要公告',
-        btnInspect: '审查请求'
+        topNotice: '5G | 安全沙箱 | AGPL-3.0',
+        chatTitle: '对话: 技术文档助手',
+        chatInspectBtn: '审查请求',
+        toolCardTitle: '[需要确认工具调用执行]',
+        toolCardTag: '待批准',
+        toolSkillLabel: '目标技能:',
+        btnApproveTool: '单次批准',
+        btnRejectTool: '拒绝',
+        chatPlaceholder: '输入问题或测试工具调用...',
+        chatSendBtn: '发送',
+        agentsHeaderTitle: '智能体配置',
+        btnNewAgent: '[+] 新建',
+        paramCardTitle: '全局推理与生成预算',
+        provHeaderTitle: '模型服务商 (BYOK)',
+        btnAddProv: '[+] 连通测试',
+        knowHeaderTitle: '本地知识库',
+        btnImportDoc: '[+] 导入文件',
+        skillsHeaderTitle: '技能沙箱',
+        btnInstallSkill: '[+] 查看源码',
+        annHeaderTitle: '公告中心',
+        btnMarkRead: '全部已读',
+        aboutHeaderTitle: '设置与关于',
+        btnCheckUpdate: '检查更新',
+        navChat: '对话',
+        navAgents: '智能体',
+        navProviders: '服务商',
+        navKnowledge: '知识库',
+        navSkills: '技能',
+        navAnn: '公告',
+        navAbout: '关于'
       },
       'en-US': {
         appTitle: 'mobileAgentRuntime - UI Prototype',
@@ -1027,18 +1183,87 @@ SPDX-License-Identifier: AGPL-3.0-only
         langBtn: '简体中文',
         themeLight: 'Switch to Light Theme',
         themeDark: 'Switch to Dark Theme',
-        btnNotice: 'Simulate Mandatory Notice',
-        btnInspect: 'Inspect Request'
+        topNotice: '5G | Isolated Sandbox | AGPL-3.0',
+        chatTitle: 'Chat: Doc Research Agent',
+        chatInspectBtn: 'Inspect Request',
+        toolCardTitle: '[Tool Execution Approval Required]',
+        toolCardTag: 'PENDING',
+        toolSkillLabel: 'Target Skill:',
+        btnApproveTool: 'Approve Once',
+        btnRejectTool: 'Reject',
+        chatPlaceholder: 'Ask a question or test tools...',
+        chatSendBtn: 'Send',
+        agentsHeaderTitle: 'Agent Profiles',
+        btnNewAgent: '[+] New',
+        paramCardTitle: 'Global Inference & Budget Cap',
+        provHeaderTitle: 'Model Providers (BYOK)',
+        btnAddProv: '[+] Test Probe',
+        knowHeaderTitle: 'Knowledge Bases',
+        btnImportDoc: '[+] Import',
+        skillsHeaderTitle: 'Skills & Sandbox',
+        btnInstallSkill: '[+] View Source',
+        annHeaderTitle: 'Announcements',
+        btnMarkRead: 'Mark Read',
+        aboutHeaderTitle: 'Settings & About',
+        btnCheckUpdate: 'Check for Updates',
+        navChat: 'Chat',
+        navAgents: 'Agents',
+        navProviders: 'Providers',
+        navKnowledge: 'Knowledge',
+        navSkills: 'Skills',
+        navAnn: 'News',
+        navAbout: 'About'
       }
     };
 
-    function toggleLanguage() {
-      currentLang = (currentLang === 'zh-CN') ? 'en-US' : 'zh-CN';
+    function applyLanguage(lang) {
+      currentLang = lang;
       const dict = i18n[currentLang];
       document.getElementById('appTitle').textContent = dict.appTitle;
       document.getElementById('appBadge').textContent = dict.appBadge;
       document.getElementById('langToggleBtn').textContent = dict.langBtn;
       document.getElementById('themeToggleBtn').textContent = isDark ? dict.themeLight : dict.themeDark;
+      document.getElementById('topStatusNotice').textContent = dict.topNotice;
+      document.getElementById('chatTitle').textContent = dict.chatTitle;
+      document.getElementById('chatInspectBtn').textContent = dict.chatInspectBtn;
+      document.getElementById('toolCardTitle').textContent = dict.toolCardTitle;
+      document.getElementById('toolCardTag').textContent = dict.toolCardTag;
+      document.getElementById('toolSkillLabel').textContent = dict.toolSkillLabel;
+      document.getElementById('btnApproveTool').textContent = dict.btnApproveTool;
+      document.getElementById('btnRejectTool').textContent = dict.btnRejectTool;
+      document.getElementById('chatInput').placeholder = dict.chatPlaceholder;
+      document.getElementById('chatSendBtn').textContent = dict.chatSendBtn;
+      document.getElementById('agentsHeaderTitle').textContent = dict.agentsHeaderTitle;
+      document.getElementById('btnNewAgent').textContent = dict.btnNewAgent;
+      document.getElementById('paramCardTitle').textContent = dict.paramCardTitle;
+      document.getElementById('provHeaderTitle').textContent = dict.provHeaderTitle;
+      document.getElementById('btnAddProv').textContent = dict.btnAddProv;
+      document.getElementById('knowHeaderTitle').textContent = dict.knowHeaderTitle;
+      document.getElementById('btnImportDoc').textContent = dict.btnImportDoc;
+      document.getElementById('skillsHeaderTitle').textContent = dict.skillsHeaderTitle;
+      document.getElementById('btnInstallSkill').textContent = dict.btnInstallSkill;
+      document.getElementById('annHeaderTitle').textContent = dict.annHeaderTitle;
+      document.getElementById('btnMarkRead').textContent = dict.btnMarkRead;
+      document.getElementById('aboutHeaderTitle').textContent = dict.aboutHeaderTitle;
+      document.getElementById('btnCheckUpdate').textContent = dict.btnCheckUpdate;
+      document.getElementById('navChat').textContent = dict.navChat;
+      document.getElementById('navAgents').textContent = dict.navAgents;
+      document.getElementById('navProviders').textContent = dict.navProviders;
+      document.getElementById('navKnowledge').textContent = dict.navKnowledge;
+      document.getElementById('navSkills').textContent = dict.navSkills;
+      document.getElementById('navAnn').textContent = dict.navAnn;
+      document.getElementById('navAbout').textContent = dict.navAbout;
+
+      const sel = document.getElementById('settLangSelect');
+      if (sel) sel.value = lang;
+    }
+
+    function toggleLanguage() {
+      applyLanguage(currentLang === 'zh-CN' ? 'en-US' : 'zh-CN');
+    }
+
+    function onSettingLanguageChange(val) {
+      applyLanguage(val);
     }
 
     // Tab switching logic
@@ -1049,7 +1274,6 @@ SPDX-License-Identifier: AGPL-3.0-only
       const targetPanel = document.getElementById('tab-' + tabId);
       if (targetPanel) targetPanel.classList.add('active');
       
-      // Update nav button active state
       const tabs = ['chat', 'agents', 'providers', 'knowledge', 'skills', 'announcements', 'about'];
       const index = tabs.indexOf(tabId);
       if (index !== -1) {
@@ -1063,12 +1287,13 @@ SPDX-License-Identifier: AGPL-3.0-only
       isDark = !isDark;
       const device = document.getElementById('deviceFrame');
       const btn = document.getElementById('themeToggleBtn');
+      const dict = i18n[currentLang];
       if (isDark) {
         device.setAttribute('data-theme', 'dark');
-        btn.textContent = 'Switch to Light Theme';
+        btn.textContent = dict.themeLight;
       } else {
         device.removeAttribute('data-theme');
-        btn.textContent = 'Switch to Dark Theme';
+        btn.textContent = dict.themeDark;
       }
     }
 
@@ -1088,42 +1313,154 @@ SPDX-License-Identifier: AGPL-3.0-only
       document.getElementById(drawerId).classList.remove('active');
     }
 
+    // Agent modals
+    function openAgentEditModal(isEdit) {
+      document.getElementById('modalAgentEditTitle').textContent = isEdit ? '编辑智能体配置' : '新建智能体';
+      openModal('modal-agent-edit');
+    }
+    function saveAgentEdit() {
+      const name = document.getElementById('inputAgentName').value;
+      document.getElementById('agent1Name').textContent = name;
+      closeModal('modal-agent-edit');
+    }
+    function openRevisionsModal() {
+      openModal('modal-revisions');
+    }
+
     // Evidence popup
     function showEvidence(file, lines) {
-      document.getElementById('evidenceTitle').textContent = 'Evidence: ' + file + ' (' + lines + ')';
+      document.getElementById('evidenceTitle').textContent = '[证据原文] ' + file + ' (' + lines + ')';
       document.getElementById('evidenceContent').textContent = 
-        '// Source: ' + file + '\n' +
-        '// Content-Addressed Storage hash: sha256:7f49c01...\n' +
-        '1. Python runtime executed in isolated process.\n' +
-        '2. Zero Android permission granted.\n' +
-        '3. Broker intercepts every capability request.';
+        '// 数据来源: ' + file + '\n' +
+        '// CAS 内容寻址哈希: sha256:7f49c0182ba0...\n' +
+        '1. Python 运行时执行于独立 isolated service 进程。\n' +
+        '2. 进程未授予任何直接 Android 权限。\n' +
+        '3. Broker 拦截并校验每一次能力调用请求。';
       openModal('modal-evidence');
     }
 
     // Probe simulation
-    function probeConnection(providerName, latency) {
-      document.getElementById('probeTitle').textContent = 'Probe: ' + providerName;
+    function openProbeDialog(providerName) {
+      document.getElementById('probeTitle').textContent = '连通性测试: ' + providerName;
       document.getElementById('probeBody').innerHTML = 
-        '<strong>Status:</strong> <span style="color:var(--tertiary);">CONNECTED [200 OK]</span><br/>' +
-        '<strong>Round-trip Latency:</strong> ' + latency + ' ms<br/>' +
-        '<strong>Detected Models:</strong> deepseek-chat, deepseek-coder<br/>' +
-        '<strong>Capabilities:</strong> Streaming [YES], Tools [YES], Vision [NO]';
+        '<strong>状态:</strong> <span style="color:var(--tertiary);">CONNECTED [200 OK]</span><br/>' +
+        '<strong>往返时延:</strong> 142 ms<br/>' +
+        '<strong>已检测模型:</strong> deepseek-chat, deepseek-coder<br/>' +
+        '<strong>能力矩阵:</strong> 流式输出 [支持], 工具调用 [支持], 视觉 [无]';
       openModal('modal-probe');
+    }
+    function showProbeOutcome(providerName, type) {
+      document.getElementById('probeTitle').textContent = '连通性测试: ' + providerName;
+      if (type === '401') {
+        document.getElementById('probeBody').innerHTML =
+          '<strong>状态:</strong> <span style="color:var(--error);">AUTH_FAILED [401 Unauthorized]</span><br/>' +
+          '<strong>原因:</strong> 提供的 API Token 无效或已过期。<br/>' +
+          '<strong>建议:</strong> 请在 Android Keystore 密钥管理中更新 Token。';
+      } else {
+        document.getElementById('probeBody').innerHTML =
+          '<strong>状态:</strong> <span style="color:var(--error);">TIMEOUT [504 Gateway Timeout]</span><br/>' +
+          '<strong>原因:</strong> 目标服务地址在 5000ms 内未响应。<br/>' +
+          '<strong>建议:</strong> 请检查局域网连接或服务端口设置。';
+      }
+      openModal('modal-probe');
+    }
+
+    // Knowledge actions
+    function openSafImportModal() {
+      openModal('modal-saf');
+    }
+    function simulateSafImport() {
+      closeModal('modal-saf');
+      const tbody = document.getElementById('kbDocTableBody');
+      const newRow = document.createElement('tr');
+      newRow.innerHTML = '<td>agent_protocol_v2.md</td><td>[MD]</td><td><span class="tag tag-success">Ready</span></td><td>8</td>';
+      tbody.appendChild(newRow);
+    }
+    function resolveVisionFallback() {
+      document.getElementById('visionWaitingBanner').style.display = 'none';
+    }
+    function openRebuildIndexModal() {
+      openModal('modal-rebuild');
+    }
+    function executeRebuildIndex() {
+      closeModal('modal-rebuild');
+      alert('索引重建完成：已验证 FTS5 词法表与 local-hash-v1-d32 向量代际一致性。');
+    }
+
+    // Skills actions
+    function openSkillSourceModal() {
+      openModal('modal-skill-src');
+    }
+    function openSkillPermsModal() {
+      openModal('modal-skill-perms');
+    }
+    function revokeSkillPerms() {
+      closeModal('modal-skill-perms');
+      alert('已即时撤销该技能全部 Broker 调用权限。');
+    }
+
+    // Announcements
+    function openAckModal(isMandatory) {
+      const modal = document.getElementById('modal-ack');
+      const title = document.getElementById('ackModalTitle');
+      const body = document.getElementById('ackModalBody');
+      const actions = document.getElementById('ackModalActions');
+      if (isMandatory) {
+        title.textContent = '[重要安全升级公告 - 强制确认]';
+        body.innerHTML = '您正在查阅关于 SQLite 驱动与沙箱安全补丁的强制通知。<br/><br/>此更新包含核心运行时安全修复，需确认后方可继续。';
+        actions.innerHTML = '<button class="btn btn-primary" onclick="closeModal(\'modal-ack\')">我已阅读并确认此公告</button>';
+      } else {
+        title.textContent = '[版本特性公告]';
+        body.innerHTML = 'mobileAgentRuntime M0.5 UI 设计基线与双语支持已全面就绪。';
+        actions.innerHTML = '<button class="btn btn-secondary" onclick="closeModal(\'modal-ack\')">稍后阅读</button><button class="btn btn-primary" onclick="closeModal(\'modal-ack\')">已知悉</button>';
+      }
+      openModal('modal-ack');
+    }
+    function markAllAnnRead() {
+      alert('所有未读公告已标记为已读。');
+    }
+
+    // Settings actions
+    function openExportModal() {
+      openModal('modal-export');
+    }
+    function executeExportData() {
+      closeModal('modal-export');
+      alert('脱敏备份数据已生成并导出。');
+    }
+    function openLicenseModal() {
+      openModal('modal-license');
+    }
+    function openUpdateModal() {
+      openModal('modal-update');
+    }
+    function checkUpdateNow() {
+      const body = document.getElementById('updateModalBody');
+      body.innerHTML = '<strong>当前安装版本:</strong> v1.0.0-dev (Git SHA: <code>c9798dc</code>)<br/>' +
+        '<strong>官方发布源:</strong> Cloudflare Worker (Ed25519 签名验证)<br/><br/>' +
+        '<div style="background:var(--tertiary-container); color:var(--on-tertiary-container); padding:8px 10px; border-radius:4px; font-size:11px; font-weight:600;">' +
+        '[OK] 检查完成：已向安全发布源校验 Ed25519 签名与 SHA-256 镜像，当前已是最新版本。' +
+        '</div>' +
+        '<div style="margin-top:8px; font-size:10px; color:var(--on-surface-variant);">' +
+        '刚刚完成检查 (自动缓存有效期: 6小时)' +
+        '</div>';
     }
 
     // Chat message & streaming simulation
     let streamingTimer = null;
+    let msgCounter = 0;
     function simulateSendMessage() {
       const input = document.getElementById('chatInput');
       const text = input.value.trim();
       if (!text) return;
 
       const list = document.getElementById('chatMsgList');
+      msgCounter++;
       
       // User message
       const userDiv = document.createElement('div');
       userDiv.className = 'msg msg-user';
-      userDiv.innerHTML = '<div>' + escapeHtml(text) + '</div><div class="msg-meta"><span>Just now</span><span>Tokens: ~20</span></div>';
+      userDiv.innerHTML = '<div class="msg-content">' + escapeHtml(text) + '</div><div class="msg-meta"><span>刚刚</span><span>Tokens: ~20</span></div>';
       list.appendChild(userDiv);
       input.value = '';
       list.scrollTop = list.scrollHeight;
@@ -1134,42 +1471,62 @@ SPDX-License-Identifier: AGPL-3.0-only
       
       const agentDiv = document.createElement('div');
       agentDiv.className = 'msg msg-agent';
-      agentDiv.innerHTML = '<div id="currentStreamText"></div><div class="msg-meta"><span>Generating...</span></div>';
+      const streamTextSpan = document.createElement('div');
+      streamTextSpan.className = 'msg-content';
+      agentDiv.appendChild(streamTextSpan);
+
+      const metaDiv = document.createElement('div');
+      metaDiv.className = 'msg-meta';
+      metaDiv.innerHTML = '<span>正在分析与生成...</span>';
+      agentDiv.appendChild(metaDiv);
       list.appendChild(agentDiv);
 
-      const targetText = '正在分析您的请求并检索本地向量数据库... 根据配置，已启用安全脱敏与 CAS 原文检索。';
+      const targetText = currentLang === 'zh-CN'
+        ? '正在分析您的请求并检索本地向量数据库... 根据安全配置，已启用 AES-GCM 密钥脱敏与 CAS 原文检索。'
+        : 'Analyzing your query and searching local vector database... According to security rules, AES-GCM secret redaction and CAS proof are enabled.';
       let charIdx = 0;
       clearInterval(streamingTimer);
 
       streamingTimer = setInterval(() => {
         if (charIdx < targetText.length) {
           charIdx += 2;
-          document.getElementById('currentStreamText').textContent = targetText.slice(0, charIdx) + ' |';
+          streamTextSpan.textContent = targetText.slice(0, charIdx) + ' |';
           list.scrollTop = list.scrollHeight;
         } else {
           clearInterval(streamingTimer);
-          document.getElementById('currentStreamText').textContent = targetText;
+          streamTextSpan.textContent = targetText;
           streamBar.style.display = 'none';
+          metaDiv.innerHTML = '<span>142 tokens | 28 t/s</span><span>用时: 0.8s</span>';
         }
-      }, 80);
+      }, 60);
     }
 
     function cancelStream() {
       clearInterval(streamingTimer);
       document.getElementById('streamIndicator').style.display = 'none';
-      const curText = document.getElementById('currentStreamText');
-      if (curText) {
-        curText.textContent += ' [Cancelled by User]';
-      }
     }
 
     function approveTool(approved) {
-      alert(approved ? 'Tool execution approved by user.' : 'Tool execution rejected by user.');
+      const card = document.getElementById('toolApprovalCard');
+      const tag = document.getElementById('toolCardTag');
+      const row = document.getElementById('toolActionsRow');
+      if (approved) {
+        tag.className = 'tag tag-success';
+        tag.textContent = currentLang === 'zh-CN' ? '已批准' : 'APPROVED';
+        row.innerHTML = '<span style="font-size:11px; color:var(--tertiary); font-weight:600;">[OK] 已向 Isolated CPython 沙箱发送执行指令</span>';
+      } else {
+        tag.className = 'tag tag-error';
+        tag.textContent = currentLang === 'zh-CN' ? '已拒绝' : 'REJECTED';
+        row.innerHTML = '<span style="font-size:11px; color:var(--error); font-weight:600;">[X] 用户已拒绝该工具调用</span>';
+      }
     }
 
     function escapeHtml(str) {
       return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
     }
+
+    // Initialize default language
+    applyLanguage('zh-CN');
   </script>
 </body>
 </html>

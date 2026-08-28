@@ -44,7 +44,7 @@
 | SCR-ANN-05 | 强提醒与确认阻断弹窗 | `scr-ann-01-light.svg` | `feature.announcements.AckNoticeDialog` | `AnnouncementsViewModel.ackState` | M2 | U03, U05, N03 |
 | SCR-SETT-01 | 设置主页与隐私开关 | `scr-sett-01-dark.svg` | `feature.settings.SettingsScreen` | `SettingsViewModel.privacyPrefs` | M1, M7 | U01, U05, N08 |
 | SCR-SETT-02 | 数据导入导出与离线备份 | `scr-sett-01-dark.svg` | `feature.settings.BackupRestoreScreen` | `SettingsViewModel.backupState` | M7 | U04, U05, A07 |
-| SCR-SETT-03 | 应用版本与源码信息 | `scr-sett-01-dark.svg` | `feature.settings.AboutScreen` | `AboutViewModel.buildInfo` | M0, M1 | U01, L04 |
+| SCR-SETT-03 | 应用版本、源码与检查更新 | `scr-sett-01-dark.svg` | `feature.settings.AboutScreen` | `AboutViewModel.buildInfo` | M0, M1, M2 | U01, L04, N01 |
 | SCR-SETT-04 | AGPL-3.0 协议与开源许可 | `scr-sett-01-dark.svg` | `feature.settings.LicenseViewerScreen` | `AboutViewModel.licenseText` | M0, M7 | U01, L04 |
 
 ## 2. 现有 M1 实现与 M0.5 设计基线差异分析

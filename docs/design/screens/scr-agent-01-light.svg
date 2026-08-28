@@ -46,10 +46,8 @@ SPDX-License-Identifier: AGPL-3.0-only
 
   <!-- Prompt Editor & Revision Diff -->
   <rect x="16" y="362" width="368" height="180" rx="10" fill="#FFFFFF" stroke="#E5E7EB"/>
-  <div style="display:flex; justify-content:space-between;">
-    <text x="28" y="384" font-size="11" fill="#4B5563" font-weight="700">SYSTEM PROMPT (Revision #4)</text>
-    <text x="290" y="384" font-size="10" fill="#1A56DB" font-weight="600">[Diff vs #3]</text>
-  </div>
+  <text x="28" y="384" font-size="11" fill="#4B5563" font-weight="700">SYSTEM PROMPT (Revision #4)</text>
+  <text x="290" y="384" font-size="10" fill="#1A56DB" font-weight="600">[Diff vs #3]</text>
   <rect x="28" y="394" width="344" height="106" rx="4" fill="#F9FAFB" stroke="#D1D5DB"/>
   <text x="36" y="414" font-size="11" fill="#111827" font-family="monospace">You are a technical document analyst.</text>
   <text x="36" y="432" font-size="11" fill="#111827" font-family="monospace">Current date: {date}</text>
@@ -60,7 +58,7 @@ SPDX-License-Identifier: AGPL-3.0-only
 
   <!-- Hyperparameters Card -->
   <rect x="16" y="552" width="368" height="170" rx="10" fill="#FFFFFF" stroke="#E5E7EB"/>
-  <text x="28" y="574" font-size="11" fill="#4B5563" font-weight="700">RETRIEVAL & GENERATION BUDGET</text>
+  <text x="28" y="574" font-size="11" fill="#4B5563" font-weight="700">RETRIEVAL &amp; GENERATION BUDGET</text>
   
   <text x="28" y="596" font-size="11" fill="#111827">Temperature: 0.30</text>
   <rect x="28" y="604" width="344" height="6" rx="3" fill="#E5E7EB"/>

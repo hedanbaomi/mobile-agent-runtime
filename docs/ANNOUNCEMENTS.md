@@ -139,7 +139,7 @@ Markdown关闭原始HTML、脚本、远程嵌入，图片不带Provider认证头
 
 本地 Worker 使用内存 store 实现与 `schema.sql` 相同的待发布修订冲突、审计和 feed 版本语义；未执行 `wrangler deploy`，未创建生产 D1。
 
-```
+```bash
 cd services/announcements
 set MAR_ADMIN_TOKEN=replace-with-local-test-token
 node src/local-server.mjs

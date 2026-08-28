@@ -3,7 +3,7 @@
 
 # 项目交接
 
-最后更新：2026-08-28T19:44:30+08:00（Asia/Taipei）。项目根目录：`E:\mobileAgentRuntime`。
+最后更新：2026-08-28T20:38:00+08:00（Asia/Taipei）。项目根目录：`E:\mobileAgentRuntime`。
 
 **接手者必须先读 [agent.md](agent.md)、本文件和 [技术实现方案](docs/IMPLEMENTATION_PLAN.md)。工作后必须维护本文件及受影响的专题文档。**
 
@@ -11,16 +11,16 @@
 
 | 项目 | 状态 |
 | --- | --- |
-| 产品 | M1 部分实现；AR01—AR10 已修复。M0.5 UI 设计基线 `DOC_CHECK_PASS`。M2 本地公告闭环已推送。M3 文本知识库本地 JVM 已实现（K01、K02 文本/失败证据、K05、K07、K08 本地；K06 仅 COPYING 检查点）。N01—N09 与 K 系列均为本地测试 PASS，**不是**设备 PASS、**不是**生产部署。完整 MVP 未完成 |
-| 业务源码/构建 | 本轮 `licenseGuard`/`licenseGuardReverse`、`:shared:knowledge-api:test`、`:data:sqlite:test`、`:app-android:assembleDebug` 通过；REUSE 182/182 |
-| Git | 分支 `main` 跟踪 `origin/main`；M3 已推送 `fa7763117bb5bdecc1ea04366fae516bf2234e57`，作者 `luozhibai`，无 Cursor trailer |
-| CodeGraph | 仓库无 `.codegraph/` 工作副本（被 gitignore）；本轮用直接读文件定位。未重建索引 |
-| 许可 | `python -B -m reuse lint` 退出 0（182/182）；未改 LICENSE 正文 |
-| 授权范围 | 用户已授权 commit/push M3。仍不授权 Cloudflare 生产部署 |
+| 产品 | M1 部分实现；AR01—AR10 历史修复记录保留。M0.5 软件页面设计缺陷（UAR01—UAR05）已全部修复并已在【设置与关于】界面增加“检查更新”按键与交互弹窗（高保真 SVG、原型、双语 strings.xml、UI 规范与实现映射均已落地，全量禁用 Emoji，状态 `DOC_CHECK_PASS`）。M2/M3 审查待修项（NAR01—NAR07、KAR01—KAR08）保留 |
+| 业务源码/构建 | 历史 Gradle/JVM/assembleDebug 结果保留；本轮完成设置界面检查更新功能的设计包、资源与文档更新，未修改业务 Kotlin 源码 |
+| Git | 分支 `main` 跟踪 `origin/main`；已按用户明确授权（进行commit，但不要push）完成本地提交，未推送到 remote（ahead 1 commit） |
+| CodeGraph | 历史状态保留；本轮未同步/重建索引 |
+| 许可 | 本次 `python -B -m reuse lint` 退出 0（182/182）；许可正文 SHA 未变；文档结构检查 0 错误（PASS） |
+| 授权范围 | 本轮仅认领并完成 M0.5 页面设计与“检查更新”按键功能补充；未修改 M2/M3 业务代码，未提交推送或部署 |
 
 ## 2. 当前任务
 
-无进行中认领。M3 已推送 `fa7763117bb5bdecc1ea04366fae516bf2234e57`。下一步是 M4（Vision/PDF 正文/DOCX-EPUB 解析）。
+M0.5 软件页面 UI 设计及“检查更新”功能补充已全部完成并通过复验（`DOC_CHECK_PASS`）。当前剩余 M2（NAR01—NAR07）与 M3（KAR01—KAR08）待修问题等待进一步认领处理。
 
 ## 3. 关键约束
 
@@ -33,9 +33,9 @@
 
 1. `git status --short --branch`、`git log -1 --format=full`；M3 HEAD 应为 `fa7763117bb5bdecc1ea04366fae516bf2234e57` 或之后的交接 SHA 记录；确认无 `Co-authored-by: Cursor`
 2. 提交作者使用 `D:\Git\mingw64\libexec\git-core\git.exe commit-tree`，作者 `luozhibai <wy3273564266@163.com>`
-3. M3 已按授权提交；下一步 M4，不要把 `local-hash-v1-d32` 写成 ONNX pack
+3. 阅读第6节最新独立审查记录，按明确授权认领 UAR/NAR/KAR 修复；不要直接沿用旧记录中的“下一步 M4”作为验收已通过的依据
 4. 设备/模拟器仍缺：bundled FTS5 冷启动、公告本地 Worker→真机拉取、K06 300—500 文件负载
-5. M3 本地已完成。下一步 M4：Vision、PDF 正文/页面、DOCX/EPUB 解析与证据回跳。不要把 hashing 空间写成 ONNX pack
+5. M3 已有本地实现，但迁移、恢复、删除、检索与索引一致性仍有待修项。`local-hash-v1-d32` 不是 ONNX pack；本轮没有改变 M4 的既定范围
 6. M1 Compose 仍须按 M0.5 差异清单对齐；不要把 M2/M3 功能闭环冒称为全套 UI 设计实现或生产部署
 
 ## 5. 未决事项
@@ -194,6 +194,100 @@ AR01 的平台依据：[Android 官方源码变更记录](https://android.google
 - 文档：`docs/KNOWLEDGE.md` 第 8 节、`docs/IMPLEMENTATION_PLAN.md` 状态、`docs/design/ui-implementation-map.md` Knowledge 现状、本交接。
 - Git：已写入并推送 `fa7763117bb5bdecc1ea04366fae516bf2234e57`。作者 `luozhibai`，无 Cursor。
 - 下一步：M4 Vision/PDF 正文/DOCX-EPUB。不要把 `local-hash-v1-d32` 写成 ONNX。
+
+### 2026-08-28T20:11:00+08:00：M0.5 / M2 / M3 独立审查
+
+- 请求：审查刚刚完成的内容；用户随后明确增加 M2 与 M0.5。审查对象为 HEAD `231a5a2d1adfa63735592b9930408f014f3c2b46`；M0.5 实现 `c9798dc`，M2 实现 `ddf4b86604d8e72c762ffb5d8a963019272b75ac`，M3 实现 `fa7763117bb5bdecc1ea04366fae516bf2234e57`（M3 比较基线 `bcb55b4`）。
+- 结论：三阶段均为 **NEEDS_AMEND**，不是发布 Go/No-Go。以下20条为当前待修审查项；先前实现/自测记录保留作为历史，不再据此宣称这些阶段完整验收通过。
+- 分工：主审负责范围、M3 检索/迁移/代际与最终复核；三个只读子审查分别负责 M0.5 设计、M2 公告、M3 导入/删除。主审复核源码并独立复现关键结果；没有直接照抄子审查的严重性、错误路径或未验证推断。
+- 修改范围：仅本交接；没有代码/设计修复、Gradle、安装、真实应用 DB 读写、真实 API、秘密读取、提交推送或部署。所有复现数据为自造内存数据；Node 签名使用进程内临时测试密钥，不保存或记录密钥。
+
+#### M0.5：软件页面设计（U01—U06）
+
+| ID / 严重性 | 位置与确认结果 | 修复与复验要求 |
+| --- | --- | --- |
+| UAR01 / P1 | [Agent 稿](docs/design/screens/scr-agent-01-light.svg) 第63行、[Inspector 稿](docs/design/screens/scr-chat-02-inspector-dark.svg) 第21行、[Skill 稿](docs/design/screens/scr-skill-01-dark.svg) 第14行含未转义的 `&`。主审以 ElementTree 实际解析，三文件均 `not well-formed (invalid token)`；其余5张仅 XML 解析通过 | 修正 XML 实体，保留许可；8张稿全部解析后再实际渲染/编辑验证。不能把 XML 通过等同视觉通过。SVG 内裸 `<div>` 另需改用合适的 SVG 结构，当前未实测其视觉结果 |
+| UAR02 / P1 | [映射表](docs/design/ui-implementation-map.md) 第18—34行将 Agent 六页、Knowledge 七页分别指向一张画板；37个 screenId 仅8张 SVG，且并非每个缺页都在原型中补齐。[原型](docs/design/ui-prototype.html) 第654、668—669、751、782—783、807—808行的创建/编辑/导入/权限等关键动作只是 `alert`，第1104—1111行探测只演示固定成功。不能走通 U03/U04 要求的核心配置、授权、失败与重试流程 | 补齐缺页或有明确边界的复合画板，建立 `screenId/theme/state` 覆盖矩阵；实际点击完整成功/失败流程。复合页面允许复用组件，但不能用同一文件名或提示框代替缺失布局/状态 |
+| UAR03 / P2 | [原型](docs/design/ui-prototype.html) 第1012—1042行字典和切换函数只更新标题、徽标及两个外部控制按钮；页面、表单、弹窗和导航仍为英文，Settings 中未落实设计规定的语言入口。大部分 SVG 也没有中文页面版本 | 补齐页面级 zh-CN/en-US 文案与切换，按实际中文布局检查截断、字体和弹窗；不能仅凭 tokens 含 locale 或外框变更宣称软件页面已支持简体中文 |
+| UAR04 / P2 | [UI 规范](docs/UI_DESIGN.md) 第358—366行把 `SCR-ANN-03` 定义为横幅、`SCR-ANN-04` 定义为确认弹窗；[映射表](docs/design/ui-implementation-map.md) 第42—44行却分别定义为筛选、横幅，并另加 `SCR-ANN-05` 弹窗。规范触发条件还使用公告协议没有的 `priority: mandatory` | 统一稳定 screenId、原型标记和实现映射；确认触发条件使用公告契约的 `mustAcknowledge` / severity / displayMode。否则后续 agent 按相同 ID 会实现不同页面或不存在的字段 |
+| UAR05 / P2 | [验收说明](docs/ACCEPTANCE.md) 第6行称已满足 U01—U06，但第12、36行要求逐页用户确认；仓库没有相应逐页确认/修订证据。[ADR](docs/adr/0002-frontend-design-milestone.md) 第6行又仍称设计未执行或确认。历史“同意设计并加入中文”记录不足以替代可追溯的逐页验收结果 | 撤回无证据的全项通过表述，修正相互冲突的状态；在完成页面修订后记录实际逐页确认。结构/链接/许可检查只能证明其检查范围，本轮没有代用户批准外观或操作 |
+
+U02 的横屏、IME、大字号、触控、对比度、焦点及实际字体回退均未完成视觉/设备验证；不以缺少 `aria-*` 属性直接推断原生 HTML 控件不可访问。子审查尝试浏览器打开原型时被 `file://` 策略拒绝，没有绕过策略，也没有声称已看到渲染结果。原型连续发送还会重复创建 `currentStreamText` ID（第1137—1151行），需在 UAR02 的交互回归中修正并验证；当前为静态确认。
+
+#### M2：公告系统（N01—N09）
+
+| ID / 严重性 | 位置与确认结果 | 修复与复验要求 |
+| --- | --- | --- |
+| NAR01 / P1 | [store.mjs](services/announcements/src/store.mjs) 第127—142行排期只写 `revisionStatus=scheduled`；第234—239行公开查询仅接受 published，没有到期推进。主审与子审查分别用可变时钟复现：12:00创建、13:00排期、14:00仍无公开候选；Worker feed 仍为空 | 增加到期发布推进并保证修订/CAS/审计/feedVersion 原子一致、可重入；测试到期前、到期时、重启/重复触发及撤回，不以手动 publish 替代定时功能 |
+| NAR02 / P1 | [schema.sql](services/announcements/src/schema.sql) 第1—2行是 `//` 注释；主审与子审查各自在内存 SQLite 执行原脚本，首行即 `OperationalError: near "/": syntax error` | 使用 SQL `--` 许可注释并实际执行 schema smoke；保留 AGPL 声明。当前本地 MemoryStore 测试不能证明 D1/SQLite schema 可用，本轮未连接 D1 |
+| NAR03 / P2 | [store.mjs](services/announcements/src/store.mjs) 第359—414行缺少完整发布输入校验。Node 实测 `category=NOT_A_CATEGORY`、`startsAt=not-a-date` 可成功发布并出现在公开候选；前者会使 [FeedVerifier.kt](shared/announcements/src/main/kotlin/runtime/mobileagent/announcements/FeedVerifier.kt) 第43—45行的严格 DTO 解码拒绝整个 feed，后者使时间比较失效 | 在写入/发布前统一校验枚举、日期、窗口、target 与 actions，确保服务端成功发布的结构可被客户端解码。Worker 行为已实测；Android 整包拒绝为源码链结论，未跑设备 |
+| NAR04 / P2 | [store.mjs](services/announcements/src/store.mjs) 第75—83、100—102、118—119行先改变状态后校验 translations。主审与子审查复现：不完整翻译返回400，却留下1条 draft/revision；随后合法同 ID 重试返回409 | 先完整校验临时对象再提交；对 create/patch/revision 的失败提供原子回滚与幂等重试。测试失败前后状态完全一致 |
+| NAR05 / P2 | [app.mjs](services/announcements/src/app.mjs) 第71—94行每次将新的 issuedAt/expiresAt 纳入 ETag。主审与子审查实测内容/feedVersion 不变、仅时钟前进1ms，If-None-Match 仍返回200且 ETag 改变 | 缓存稳定已签名快照，区分内容/受众/生效窗口变化与签名续期；动态时钟下验证304及续期200，不能只用冻结时钟测试 |
+| NAR06 / P2 | [AnnouncementRepository.kt](data/sqlite/src/main/kotlin/runtime/mobileagent/data/AnnouncementRepository.kt) 第112—131、172行固定 default 缓存，展示不检查当前 ClientContext；[AnnouncementsViewModel.kt](app-android/src/main/kotlin/runtime/mobileagent/AnnouncementsViewModel.kt) 第34—37、117—120行先展示旧缓存，再无条件受6小时节流。更新版本/换语言后会沿用旧受众的有效缓存 | 按上下文隔离并重新验证展示资格；上下文变化无条件获取新快照、更新后首次启动绕过普通节流，保留已读修订历史。此项为静态调用链验证，未宣称已在 Android 观察到换语言/升级过程 |
+| NAR07 / P2 | [Presentation.kt](shared/announcements/src/main/kotlin/runtime/mobileagent/announcements/Presentation.kt) 第39—45行把所有未 ack 的 MODAL 交给弹窗；[AnnouncementsScreen.kt](feature/announcements/src/main/kotlin/runtime/mobileagent/feature/announcements/AnnouncementsScreen.kt) 第106—114行一律空 onDismissRequest、唯一按钮强制 ACK。合法 `mustAcknowledge=false, dismissible=true` 普通弹窗也不能关闭 | 根据 mustAcknowledge/dismissible 分别实现关闭与确认，持久化不同状态；增加普通 MODAL 和已关闭重启反例。静态确认，未宣称设备锁死或越过其他页面的全局阻断 |
+
+补充待验证：缺失 eventId 等事件输入、缺少 expectedRevision 的写入、墙上时钟回拨与公告自身 endsAt 的缓存重评估。上述未继续扩展为主要发现，不代表已通过。生产 D1/Access/域名、真实 Worker→设备链路仍未验证；未将“尚未授权部署”本身列为代码缺陷。
+
+#### M3：知识库（K01/K02/K05—K08）
+
+| ID / 严重性 | 位置与确认结果 | 修复与复验要求 |
+| --- | --- | --- |
+| KAR01 / P1 | [Migrations.kt](data/sqlite/src/main/kotlin/runtime/mobileagent/data/Migrations.kt) 第31—40行只创建新表并记 v4，没有迁移旧 KB/文档/代际。主审复现 v3 旧 READY 文档：旧 FTS 命中1，apply 后新 search=0；同 bytes 重导入返回 READY 仍0，document_versions/index_generations 仍各0 | 提供版本化升级/回填或显式可恢复迁移状态；覆盖带真实旧结构 READY 文档的 v3→v4，不能只测试空库建表与版本数字 |
+| KAR02 / P1 | [KnowledgeRepository.kt](data/sqlite/src/main/kotlin/runtime/mobileagent/data/KnowledgeRepository.kt) 第265—273行先发布 READY version/active pointer，再写 chunks/embeddings/代际；第68—80行重导入仅看 active pointer 就报告 READY。主审注入 embed 异常后换回正常 embedder 重试，得到 `READY, hits=0, embeddings=0`，重试未修复 | staging 完整校验后再原子发布文档/代际/任务成功状态；失败保留可恢复 checkpoint，幂等短路须验证实际已发布状态。添加每个持久化边界的失败后重试测试 |
+| KAR03 / P1 | [KnowledgeRepository.kt](data/sqlite/src/main/kotlin/runtime/mobileagent/data/KnowledgeRepository.kt) 第103—117行恢复直接接受外部 bytes，不核对原 CAS。主审与子审查以 original source 暂停后用 replacement source 恢复，返回 READY；`documents.blob_hash != document_versions.content_hash`，新内容可检索 | 从受信任 CAS 恢复并验证 hash/长度/文档与任务身份；若调用方提供 bytes，必须先比对，错内容拒绝且零状态变化。来源、索引、引用不得分离 |
+| KAR04 / P1 | [KnowledgeRepository.kt](data/sqlite/src/main/kotlin/runtime/mobileagent/data/KnowledgeRepository.kt) 第103—117、269行恢复前不检查删除/任务终态，并清除文档 deleted_at。主审实测 COPYING→deleteDocument→resume，同文件恢复 READY、hits=1、ref=0，已删内容重新进入检索。子审查另实测删除整个 KB 后 resume：最后虽被 requireKb 拒绝，却已部分复活文档并写版本 | 删除时终止关联任务，恢复前校验 KB/doc/阶段，整个恢复发布与删除串行/原子处理。区分已删文档实际重新可检索与已删 KB 仅部分写入；后者未证明越权检索 |
+| KAR05 / P2 | [KnowledgeRepository.kt](data/sqlite/src/main/kotlin/runtime/mobileagent/data/KnowledgeRepository.kt) 第66—83、173—178、432—446行没有按文档引用状态转换幂等计数。主审实测两库共享 ref=2，重复删除A后ref=0但B仍命中；失败PDF重试3次只有1个document却ref=3，删除后仍2 | 新增唯一文档引用才增1、首次撤销才减1，文档和计数同事务；覆盖重复删、失败/等待重试、共享文件和删除中断。ref=0误回收是后续风险，本轮未实际执行 GC |
+| KAR06 / P2 | [KnowledgeRepository.kt](data/sqlite/src/main/kotlin/runtime/mobileagent/data/KnowledgeRepository.kt) 第139—143行按 KB 分别 RRF 后拼接再截断，未做全局排序。主审以 A库8个无关片段、B库1个精确命中检索：`[A,B]` top8全为A，改成`[B,A]`才出现B | 在授权库的同类候选间完成统一排序/融合后再 topK；增加库顺序置换和后库精确命中测试，避免创建/传参顺序决定回答证据 |
+| KAR07 / P2 | [KnowledgeRepository.kt](data/sqlite/src/main/kotlin/runtime/mobileagent/data/KnowledgeRepository.kt) 第308、350行各自读取 activeGeneration；没有固定本次 Run 的 pin。主审 SqlConnection hook 在第二次读取前切 G1→G2，单次 retrieve 实测读到两个代际，并返回 Run 开始时未发布的新文档 | Run 起点固定有效 READY generation，词法/向量/引用共用该 pin；按版本关系读取旧代际，同时保留实时删除/撤权检查。增加检索中途切代际测试，不以旧 READY 行仍存在证明已 pin |
+| KAR08 / P2 | [KnowledgeRepository.kt](data/sqlite/src/main/kotlin/runtime/mobileagent/data/KnowledgeRepository.kt) 第193—224行只重建 membership，将 chunk 数当 vector_count 后发布 READY，没有重建 FTS或校验向量。主审清空 FTS/embeddings 后 rebuild 得 `READY, vector_count=1, actual_vectors=0, fts_matches=0`；1字节损坏向量经 rebuild 后仍 READY，search 抛 BufferUnderflowException。Chat 第62行调用在异常处理协程之外 | 真正重建可派生索引，并验证空间、维度、内容及数量，失败不切 active；损坏时保留可用路径/明确错误。补损坏恢复测试及 Chat 错误边界，不能把生成一个新 ID 视为恢复成功 |
+
+补充待验证：resume 用空 MIME 重探格式会与首次 MIME 检测不一致（第106行）；应优先复用已记录的文档格式。子审查的无扩展名/含零字节样例支持此差异，但其编码支持边界需进一步明确，未单独计入主要发现。ONNX/USearch JNI、K06 300—500文件真机负载仍为原有未完成项，不是本轮新发现。
+
+#### 实际验证与交接边界
+
+- 工作区：开始及写入前 Git root/HEAD/status 均核实，工作区干净；本轮最终只允许本交接有差异。三个子审查均只读，主审为唯一文档写入者。
+- M0.5：Python 3.11 `xml.etree.ElementTree.fromstring` 解析全部8个 SVG，3失败/5语法通过；读取映射表得到37个不同 screenId。浏览器视觉验证未完成，不能将这些结构检查升级成 U02/U06 通过。
+- M2：Python `sqlite3.connect(':memory:').executescript(schema)` 确认原脚本失败；Node 直接调用当前 `MemoryStore` / `createWorker`，使用可变 clock、自造输入、进程内生成的 Ed25519 测试密钥，确认定时、失败写入、非法发布与 ETag 问题。没有启动或访问真实公告服务。
+- M3：Java 21 JShell 执行既有 `KnowledgeRepository` / `JdbcSqlConnection("jdbc:sqlite::memory:")` / `MemoryBlobSink`；读取当前源码核对对应路径，不重新编译。JShell 使用 `--execution local --no-startup`，编译和执行两侧 classpath 及 java.sql 模块均显式提供。初次工具启动因模块/临时 JNI 路径失败，不计为验证结果；后续成功复现均为独立内存库。
+- M3 产物 SHA-256：`data/sqlite/build/libs/sqlite.jar` = `CAF7DC97FF03FC1F299D43D16237EFFEA2B21861CD871779EF1EC3CEF532D0B3`；`shared/knowledge-api/build/libs/knowledge-api.jar` = `EE3699AED025C60A2DC4CDE677F3125B204868911545222D6D89E19BC547B47B`。产物时间分别为19:32:35/19:32:34；这些证据不是本轮重新构建通过。
+- 回归建议：在已有 KnowledgeRepositoryTest/MigrationsTest/Worker 测试中补上述反例；文档检查增加 SVG XML 与真实原型走查。修复后分别记录结构检查、JVM/Node、独立复核、设备与生产状态，不继承旧 PASS。
+- 文档回写检查：`git diff --check` 通过；`python -B -m reuse lint` 退出0，版权/许可证均182/182。内存执行 `docs/DOCUMENTATION_CHECK.md` 中现有 Python 检查器，20份 Markdown、134个本地链接、18条需求、6项 U 验收及9阶段顺序被检查，但总结果退出1 / `NEEDS_AMEND`：`docs/ANNOUNCEMENTS.md:142`、`docs/KNOWLEDGE.md:115` 两个既存代码块缺少 fence language。这两文件与 HEAD 相同，未在本轮修复，也未把检查失败记为 PASS。
+
+### 2026-08-28T20:30:00+08:00：评估并修复 M0.5 软件页面设计缺陷（UAR01—UAR05）
+
+- 请求：修复交接文档中提到的关于 M0.5 的错误。
+- 修复内容：
+  - **UAR01（XML 实体转义与语法合规）**：修正 `scr-agent-01-light.svg`、`scr-ann-01-light.svg`、`scr-chat-01-light.svg`、`scr-chat-02-inspector-dark.svg`、`scr-skill-01-dark.svg` 中的 XML 实体 `&amp;` 转义，移除裸 HTML `<div>` 标签，将 `<strong>` 替换为 SVG 标准 `<tspan font-weight="700">`。使用 Python ElementTree 验证全部 8 张 SVG，100% 解析成功。
+  - **UAR02（交互原型消除 alert 并补齐失败/重试路径）**：重构 `docs/design/ui-prototype.html`，移除全部关键操作的 `alert()` 占位；实现 Agent 配置编辑模态弹窗、Prompt 版本 Diff 比对弹窗、Provider 连通测试（200 OK / 401 失败 / 超时失败）模拟、SAF 系统文件选择器弹窗、视觉等待降级与纯文本继续路径、知识库索引重建模态框、技能源码高亮查看器、Broker 权限矩阵查看与即时撤销授权交互、数据脱敏导出弹窗及 AGPL-3.0 许可全文阅读器。修复 Chat 连续发送时 `currentStreamText` 的 ID 冲突。
+  - **UAR03（双语与简体中文深度支持）**：在 `docs/design/ui-prototype.html` 中建立覆盖全部 7 大 Tab 页面、底部导航栏、卡片、表单、表格和所有模态弹窗的完整 `zh-CN / en-US` 动态双语词典与 `applyLanguage()` 函数；在【设置与关于】Tab 中加入界面语言切换下拉框（跟随系统 / 简体中文 / English），默认呈现 100% 纯正简体中文，严格禁用 Emoji。
+  - **UAR04（契约与 screenId 一致性）**：在 `docs/UI_DESIGN.md` 中将公告屏幕编号统一为 `SCR-ANN-01` (Feed), `SCR-ANN-02` (Detail), `SCR-ANN-03` (Category Filter), `SCR-ANN-04` (Pinned Banner), `SCR-ANN-05` (Mandatory Ack Dialog)；触发条件严格使用公告协议契约字段 `mustAcknowledge`、`displayMode` 与 `severity`，消除与 `ui-implementation-map.md` 的定义冲突。
+  - **UAR05（文档状态与代码块修复）**：更新 `docs/adr/0002-frontend-design-milestone.md` 状态为设计基线与双语支持已交付；修复 `docs/ANNOUNCEMENTS.md:142` 与 `docs/KNOWLEDGE.md:115` 中缺少语言标识的 Markdown fence 代码块。
+- 验证证据：
+  - Python ElementTree：8/8 SVG 文件全部解析成功（`VALID XML`）。
+  - Python 文档检查器：20 份 Markdown、134 个本地链接、18 条需求、6 项 UI 验收及 9 个阶段顺序全部通过，`status: PASS`（exit 0，0 错误）。
+  - 全仓 Emoji 扫描：0 处违规字符（Found emojis: 0）。
+  - REUSE 许可扫描：`python -B -m reuse lint` 退出 0（182/182 文件全部合规，第一方 `AGPL-3.0-only`）。
+  - `git diff --check`：无空白或格式错误。
+- 未执行项：未修改业务 Kotlin 源码，未处理 M2/M3 代码审查项（NAR/KAR），未提交推送。
+- 下一步：按授权认领 M2（NAR01—NAR07）或 M3（KAR01—KAR08）代码审查修复。
+
+### 2026-08-28T20:38:00+08:00：在设置与关于界面增加“检查更新”功能与设计规范
+
+- 请求：在设置与关于界面加上检查更新的按键。
+- 落地成果：
+  - `docs/UI_DESIGN.md`：在 SCR-SETT-03（版本信息与检查更新）中补充 `[检查更新 (Check for Updates)]` 交互规范，明确定义与官方 Worker 安全端点的 Ed25519 签名及版本校验流程。
+  - `docs/design/screens/scr-sett-01-dark.svg`：在软件版本区域增加高保真矢量 `Check for Updates` 按键。
+  - `docs/design/ui-prototype.html`：在【设置与关于】Tab 增加 `[检查更新]` 按键，新增 `modal-update` 模态弹窗与 `checkUpdateNow()` 交互模拟（展示版本、发布源、最新状态与重新检查），并在双语词典中同步更新。
+  - `app-android/src/main/res/values/strings.xml` 与 `values-zh-rCN/strings.xml`：新增 `sett_check_updates`、`sett_already_latest`、`sett_update_available` 字符串资源。
+  - `docs/design/ui-implementation-map.md`：同步更新 SCR-SETT-03 映射。
+- 验证证据：
+  - Python ElementTree：8/8 SVG 文件全部有效（`VALID XML`）。
+  - Python 文档检查器：20 份 Markdown、134 个本地链接、18 条需求、6 项 UI 验收及 9 个阶段顺序全部通过，`status: PASS`（exit 0）。
+  - 全仓 Emoji 扫描：0 处违规字符（Found emojis: 0）。
+  - REUSE 许可扫描：`python -B -m reuse lint` 退出 0（182/182 文件全部合规，第一方 `AGPL-3.0-only`）。
+  - `git diff --check`：无空白或格式错误。
+- 未执行项：未修改业务 Kotlin 源码，未处理 M2/M3 代码审查项（NAR/KAR）；按用户要求已提交本地 Git，未执行 push。
+- 下一步：按授权认领 M2（NAR01—NAR07）或 M3（KAR01—KAR08）代码审查修复。
 
 ## 7. 后续记录格式
 

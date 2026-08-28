@@ -18,7 +18,7 @@ SPDX-License-Identifier: AGPL-3.0-only
 
   <!-- Main Drawer Body -->
   <rect x="16" y="98" width="368" height="110" rx="10" fill="#1F2937" stroke="#374151"/>
-  <text x="28" y="120" font-size="12" fill="#76A9FA" font-weight="700">Target & Endpoint Security</text>
+  <text x="28" y="120" font-size="12" fill="#76A9FA" font-weight="700">Target &amp; Endpoint Security</text>
   <text x="28" y="140" font-size="11" fill="#9CA3AF">Provider: <tspan fill="#F9FAFB">DeepSeek Official</tspan></text>
   <text x="28" y="158" font-size="11" fill="#9CA3AF">Base URL: <tspan fill="#F9FAFB">https://api.deepseek.com/v1</tspan></text>
   <text x="28" y="176" font-size="11" fill="#9CA3AF">Header Secret: <tspan fill="#31C48D">Bearer sk-*** [Protected in Keystore]</tspan></text>

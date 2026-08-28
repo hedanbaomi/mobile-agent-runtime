@@ -341,29 +341,35 @@
 
 ### 3.6 Announcements (公告中心)
 
-#### SCR-ANN-01: 公告中心列表 (Announcements Center)
+#### SCR-ANN-01: 公告中心列表 (Announcements Center Feed)
+- **展示方式**: 按照发布时间逆序排列的卡片流。
 - **顶部**: 状态过滤器（全部 / 未读）、一键标为已读按钮 `[Mark all as read]`。
 - **公告卡片**:
-  - 优先级徽标：`[Urgent]` (红色)、`[Feature]` (蓝色)、`[Notice]` (灰色)。
-  - 公告标题、发布日期、修订号 (Revision)。
+  - 严重等级徽标 (severity)：`[Critical]` (红色)、`[Warning]` (橙黄色)、`[Info]` (蓝色)。
+  - 公告标题、发布日期、修订号 (Revision)、ETag 摘要。
   - 未读红点指示器。
   - 摘要预览。
 
 #### SCR-ANN-02: 公告详情阅读 (Announcement Detail View)
 - **内容**:
   - 完整富文本与 Markdown 渲染（支持有序列表、链接、强调文本）。
-  - 数字签名验证状态徽标：`[Signature Verified: Official Cloudflare Worker Source]`。
+  - 数字签名验证状态徽标：`[Signature: Ed25519 Verified [Worker Origin]]`。
   - 操作按钮：`[Acknowledge / Close]`。
 
-#### SCR-ANN-03: 应用内置顶横幅 (Pinned Announcement Banner)
+#### SCR-ANN-03: 未读与分类筛选 (Category & Unread Filter Bar)
+- **分类标签**: `[全部 (All)]`, `[安全 (Security)]`, `[功能 (Feature)]`, `[维护 (Maintenance)]`, `[未读 (Unread)]`。
+- **交互**: 动态过滤 Feed 列表中的公告项目。
+
+#### SCR-ANN-04: 应用内置顶横幅 (Pinned Announcement Banner)
 - **展示位置**: 位于应用顶部导航栏下方。
+- **触发条件**: 公告 `displayMode: BANNER` 且当前处于生效时间窗口内。
 - **样式**: 高亮背景条，显示重要通知单行摘要与查看按钮 `[View Details]`，右侧有关闭按钮 `[X]`。
 
-#### SCR-ANN-04: 强制重要公告确认弹窗 (Mandatory Acknowledgement Dialog)
-- **触发条件**: 接收到标记为 `priority: mandatory` 且未确认的重要公告（如安全补丁、服务变更）。
+#### SCR-ANN-05: 强制重要公告确认弹窗 (Mandatory Acknowledgement Dialog)
+- **触发条件**: 接收到标记为 `mustAcknowledge: true`（或 `displayMode: MODAL`）且本地尚未记录确认状态的公告（如安全补丁、重大服务变更）。
 - **交互**:
-  - 模态对话框，阻断常规操作。
-  - 必须阅读并点击 `[I Have Read and Acknowledge This Notice]` 按钮后方可解除阻断并持久化记录确认状态。
+  - 模态对话框，阻断常规操作（`mustAcknowledge=true` 时不可点击外部空白处忽略）。
+  - 用户必须阅读并点击 `[I Have Read and Acknowledge]` 按钮后方可解除阻断，并将确认凭证持久化写入本地 SQLite。
 
 ---
 
@@ -384,12 +390,16 @@
 - **导入恢复**:
   - 支持还原旧版本数据包，自动执行 Schema 迁移。
 
-#### SCR-SETT-03: 版本信息与开源代码 (About & Source Code)
+#### SCR-SETT-03: 版本信息与检查更新 (About, Version & Updates)
 - **展示内容**:
   - 软件名称与工程代号: `mobileAgentRuntime`。
   - 版本号 (Version Name): 如 `v1.0.0-dev`。
-  - 构建 Git Commit SHA: 如 `547f567...`。
+  - 构建 Git Commit SHA: 如 `c9798dc...`。
   - 官方源代码仓库链接与 CODEOWNERS 声明。
+- **操作按键**:
+  - `[检查更新 (Check for Updates)]`：点击向官方 Worker 安全端点请求最新版本发布快照与 Ed25519 签名。
+  - 若为最新版，弹出提示 `[当前已是最新版本 (v1.0.0-dev)]`；
+  - 若有新版本发布，展示版本变更摘要、安全修复等级及 SHA-256 校验包信息。
 
 #### SCR-SETT-04: 许可证与第三方声明 (License & Notices)
 - **第一方许可**: 完整展示 GNU Affero General Public License v3 (AGPL-3.0-only) 官方文本。

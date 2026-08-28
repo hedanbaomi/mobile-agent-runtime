@@ -112,7 +112,7 @@ FTS5能力不等于中文分词质量。必须建立中文专名、英文术语�
 
 命令（均本机，`--no-daemon`）：
 
-```
+```bash
 .\gradlew.bat licenseGuard licenseGuardReverse :shared:knowledge-api:test :data:sqlite:test :app-android:assembleDebug
 python -B -m reuse lint
 ```

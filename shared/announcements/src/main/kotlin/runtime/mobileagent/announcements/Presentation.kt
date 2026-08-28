@@ -37,11 +37,15 @@ object AnnouncementPresentation {
         }
 
     fun modal(records: List<CachedAnnouncement>): CachedAnnouncement? =
-        records.firstOrNull {
-            !it.withdrawn &&
-                !it.signatureExpired &&
-                it.item.displayMode == DisplayMode.MODAL &&
-                it.state.acknowledgedAt == null
+        records.firstOrNull { record ->
+            !record.withdrawn &&
+                !record.signatureExpired &&
+                record.item.displayMode == DisplayMode.MODAL &&
+                if (record.item.mustAcknowledge) {
+                    record.state.acknowledgedAt == null
+                } else {
+                    record.state.dismissedAt == null && record.state.acknowledgedAt == null
+                }
         }
 
     private fun severityRank(severity: Severity): Int = when (severity) {

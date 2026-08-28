@@ -39,5 +39,6 @@ object Migrations {
             connection.execute("DELETE FROM schema_version")
             connection.execute("INSERT INTO schema_version(version) VALUES (?)", listOf(VERSION))
         }
+        KnowledgeRepository(connection, runtime.mobileagent.knowledge.MemoryBlobSink()).repairIndexes()
     }
 }

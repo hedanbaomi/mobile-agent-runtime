@@ -10,8 +10,9 @@ data class StoredBlob(
     val localRef: String,
 )
 
-fun interface BlobSink {
+interface BlobSink {
     fun put(bytes: ByteArray, mediaType: String): StoredBlob
+    fun get(sha256: String): ByteArray?
 }
 
 class MemoryBlobSink : BlobSink {
@@ -22,6 +23,8 @@ class MemoryBlobSink : BlobSink {
         blobs[sha] = bytes.copyOf()
         return StoredBlob(sha, bytes.size, mediaType, "memory:$sha")
     }
+
+    override fun get(sha256: String): ByteArray? = blobs[sha256]?.copyOf()
 }
 
 class FileBlobSink(private val root: java.io.File) : BlobSink {
@@ -57,6 +60,14 @@ class FileBlobSink(private val root: java.io.File) : BlobSink {
             "CAS commit failed"
         }
         return StoredBlob(sha, bytes.size, mediaType, ref(sha))
+    }
+
+    override fun get(sha256: String): ByteArray? {
+        val file = java.io.File(java.io.File(root, sha256.take(2)), sha256)
+        if (!file.isFile) return null
+        val bytes = file.readBytes()
+        if (sha256Hex(bytes) != sha256) return null
+        return bytes
     }
 
     private fun ref(sha: String): String = "cas/${sha.take(2)}/$sha"

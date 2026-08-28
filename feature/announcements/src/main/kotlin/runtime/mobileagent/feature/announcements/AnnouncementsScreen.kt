@@ -104,12 +104,23 @@ fun AnnouncementsScreen(
         )
     }
     modal?.let { record ->
+        val forceAck = record.item.mustAcknowledge
+        val canDismiss = !forceAck && record.item.dismissible
         AlertDialog(
-            onDismissRequest = { },
+            onDismissRequest = { if (canDismiss) onDismiss(record) },
             title = { Text(record.item.title) },
             text = { Text(record.item.bodyMarkdown) },
             confirmButton = {
-                Button(onClick = { onAcknowledge(record) }) { Text(stringResource(AnnR.string.ann_acknowledge)) }
+                if (forceAck) {
+                    Button(onClick = { onAcknowledge(record) }) { Text(stringResource(AnnR.string.ann_acknowledge)) }
+                } else {
+                    Button(onClick = { onDismiss(record) }) { Text(stringResource(AnnR.string.ann_dismiss)) }
+                }
+            },
+            dismissButton = if (canDismiss) {
+                { OutlinedButton(onClick = { onDismiss(record) }) { Text(stringResource(AnnR.string.ann_close)) } }
+            } else {
+                null
             },
         )
     }

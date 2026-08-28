@@ -1,6 +1,3 @@
-// SPDX-FileCopyrightText: 2026 mobileAgentRuntime contributors
-// SPDX-License-Identifier: AGPL-3.0-only
-
 -- SPDX-FileCopyrightText: 2026 mobileAgentRuntime contributors
 -- SPDX-License-Identifier: AGPL-3.0-only
 CREATE TABLE IF NOT EXISTS announcements (

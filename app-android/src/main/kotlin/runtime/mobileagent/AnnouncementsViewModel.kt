@@ -16,7 +16,6 @@ import runtime.mobileagent.announcements.ClientContext
 import runtime.mobileagent.announcements.DisplayMode
 import java.time.Instant
 import java.util.Locale
-import java.util.concurrent.TimeUnit
 
 class AnnouncementsViewModel(application: Application) : AndroidViewModel(application) {
     private val app = application as MobileAgentApp
@@ -45,7 +44,7 @@ class AnnouncementsViewModel(application: Application) : AndroidViewModel(applic
     )
 
     fun reload() {
-        records.value = repo.records()
+        records.value = repo.records(client = client())
         baseUrl.value = repo.baseUrl()
         publicKeyHex.value = repo.publicKeyHex()
         statsEnabled.value = repo.statsEnabled()
@@ -114,14 +113,14 @@ class AnnouncementsViewModel(application: Application) : AndroidViewModel(applic
                 status.value = "Configure the local announcement URL and public key to fetch a signed feed."
                 return@launch
             }
-            if (!force && recentlyChecked()) {
+            if (!force && !repo.needsFetch(client())) {
                 status.value = "Using cached announcements. Automatic checks wait 6 hours."
                 return@launch
             }
             status.value = "Checking announcements..."
             val outcome = withContext(Dispatchers.IO) {
-                repo.markAttempt()
-                runCatching { app.container.announcementFetcher.fetch(url, client(), repo.etag()) }
+                repo.markAttempt(client())
+                runCatching { app.container.announcementFetcher.fetch(url, client(), repo.etag(client())) }
                     .getOrElse { FetchOutcome.Failed(it.message ?: "fetch failed") }
             }
             when (outcome) {
@@ -152,11 +151,5 @@ class AnnouncementsViewModel(application: Application) : AndroidViewModel(applic
                 """{"events":[{"eventId":"${java.util.UUID.randomUUID()}","type":"$type","installId":"${client.installId}","platform":"${client.platform}","channel":"${client.channel}","versionCode":${client.versionCode},"locale":"${client.locale}","announcementId":"${item.item.id}","revision":${item.item.revision},"occurredAt":"${Instant.now()}"}]}"""
             runCatching { app.container.announcementFetcher.postEvents(url, true, body) }
         }
-    }
-
-    private fun recentlyChecked(): Boolean {
-        val last = repo.lastAttemptAt() ?: return false
-        val instant = runCatching { Instant.parse(last) }.getOrNull() ?: return false
-        return Instant.now().toEpochMilli() - instant.toEpochMilli() < TimeUnit.HOURS.toMillis(6)
     }
 }

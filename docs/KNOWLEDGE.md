@@ -129,3 +129,13 @@ python -B -m reuse lint
 | K08 | LOCAL_PASS（文本） | 未知 citation id 不解析；空查询无命中；预算裁剪。原图回跳属 M4 |
 
 未执行：模拟器/真机 FTS5 冷启动、ONNX 加载、USearch x86_64 JNI、K06 设备负载、独立安全审阅。
+
+## 9. KAR01—KAR08 本地修复（2026-08-28）
+
+- v3 READY 文档在 `Migrations.apply` 后回填 `document_versions` 并 `repairIndexes` 重建代际/FTS/向量。
+- 先 staging chunks/embeddings/代际，事务成功后再把文档标 READY；embed 失败保持 FAILED，同 blob 重试可修复。
+- `resumeImport` 从 CAS 校验 hash；错误 bytes 与已删文档/知识库拒绝；删除会取消未完成任务。
+- blob `ref_count` 按仍存活文档计数，重复删除与失败重试不累计。
+- 多库检索先合并词法/向量再全局 RRF。
+- 一次 retrieve 固定 READY generation pin；rebuild 重写 FTS 并校验向量长度，失败不切 active。
+- Chat 在检索异常时停止发送并提示，不把异常留在协程外。

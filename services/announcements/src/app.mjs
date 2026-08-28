@@ -66,12 +66,11 @@ function cors(response, request) {
 
 async function publicFeed(request, url, ctx) {
   const now = ctx.clock();
+  ctx.store.promoteDue(now);
   const client = parseClient(request, url);
   const snapshot = buildSnapshot(ctx.store, client, now);
-  const payloadObject = {
+  const contentObject = {
     feedVersion: ctx.store.feedState.contentVersion,
-    issuedAt: now.toISOString(),
-    expiresAt: new Date(now.getTime() + 24 * 60 * 60 * 1000).toISOString(),
     requestTarget: {
       platform: client.platform,
       channel: client.channel,
@@ -83,29 +82,59 @@ async function publicFeed(request, url, ctx) {
     items: snapshot.items,
     withdrawn: snapshot.withdrawn,
   };
+  const cacheKey = [
+    client.platform,
+    client.channel,
+    String(client.versionCode),
+    client.locale,
+    client.installId,
+    String(contentObject.feedVersion),
+    sha256Hex(JSON.stringify(contentObject)),
+  ].join("|");
+  const cached = ctx.store.signedSnapshots.get(cacheKey);
+  const inm = request.headers.get("If-None-Match");
+  if (cached) {
+    const remainingMs = Date.parse(cached.expiresAt) - now.getTime();
+    if (remainingMs > 60 * 60 * 1000) {
+      if (inm && inm === cached.etag) {
+        return new Response(null, {
+          status: 304,
+          headers: {
+            ETag: cached.etag,
+            "Cache-Control": "private, no-store",
+          },
+        });
+      }
+      return Response.json(cached.envelope, {
+        headers: {
+          ETag: cached.etag,
+          "Cache-Control": "private, no-store",
+        },
+      });
+    }
+  }
+  const payloadObject = {
+    ...contentObject,
+    issuedAt: now.toISOString(),
+    expiresAt: new Date(now.getTime() + 24 * 60 * 60 * 1000).toISOString(),
+  };
   const payloadText = JSON.stringify(payloadObject);
   if (Buffer.byteLength(payloadText, "utf8") > MAX_PAYLOAD_BYTES || payloadObject.items.length > MAX_ITEMS) {
     throw new HttpError(413, "feed exceeds size limits");
   }
   const payloadBase64 = Buffer.from(payloadText, "utf8").toString("base64");
-  const etag = `"${sha256Hex(payloadText).slice(0, 32)}"`;
-  const inm = request.headers.get("If-None-Match");
-  const remainingMs = Date.parse(payloadObject.expiresAt) - now.getTime();
-  if (inm && inm === etag && remainingMs > 60 * 60 * 1000) {
-    return new Response(null, {
-      status: 304,
-      headers: {
-        ETag: etag,
-        "Cache-Control": "private, no-store",
-      },
-    });
-  }
+  const etag = `"${sha256Hex(JSON.stringify(contentObject)).slice(0, 32)}"`;
   const envelope = {
     schemaVersion: 1,
     keyId: ctx.keys.keyId,
     payloadBase64,
     signatureBase64: signPayload(ctx.keys.privateKey, payloadBase64),
   };
+  ctx.store.signedSnapshots.set(cacheKey, {
+    etag,
+    envelope,
+    expiresAt: payloadObject.expiresAt,
+  });
   return Response.json(envelope, {
     headers: {
       ETag: etag,
@@ -207,6 +236,7 @@ async function admin(request, url, ctx) {
   if (parts[0] !== "admin" || parts[1] !== "v1") throw new HttpError(404, "not found");
 
   if (url.pathname === "/admin/v1/announcements" && request.method === "GET") {
+    ctx.store.promoteDue(now);
     return Response.json({ items: ctx.store.listAdmin() });
   }
   if (url.pathname === "/admin/v1/announcements" && request.method === "POST") {

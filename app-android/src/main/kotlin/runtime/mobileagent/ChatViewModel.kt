@@ -57,7 +57,14 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             snapshotId = "live",
             conversationId = "default",
         )
-        val result = app.container.knowledge.retrieve(run.runId, text)
+        val result = try {
+            app.container.knowledge.retrieve(run.runId, text)
+        } catch (e: Exception) {
+            streaming.value = false
+            status.value = "Retrieval failed. ${e.message ?: "index error"}"
+            lines[assistantIndex] = ChatLine("Assistant", "Knowledge retrieval failed. The previous chat is unchanged.")
+            return
+        }
         val hits = RetrievalBudget.clip(result.hits)
         val citations = runtime.mobileagent.knowledge.CitationMap.bind(run.runId, hits)
         val retrieved = hits.mapIndexed { i, hit ->

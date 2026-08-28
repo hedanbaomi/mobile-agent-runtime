@@ -3,7 +3,7 @@
 
 # 技术实现方案
 
-版本：v1.2 设计基线，2026-08-28。状态：**部分实现**。M0 本地构建/许可已落地；M0.5 软件页面 UI 设计基线已全面完成（交付产物包括 [docs/UI_DESIGN.md](UI_DESIGN.md)、[docs/design/ui-tokens.json](design/ui-tokens.json)、[docs/design/ui-implementation-map.md](design/ui-implementation-map.md)、[docs/design/ui-prototype.html](design/ui-prototype.html) 以及 [docs/design/screens/](design/screens/README.md) 矢量页面稿，页面与文档严格禁用 Emoji）。M1 已接通 OpenAI 兼容流式 Chat、Keystore 密钥引用、TXT/MD SAF 导入与含图等待；现有 UI 须按 M0.5 设计补齐。M2 本地公告闭环已落地（未部署 Cloudflare）。M3 文本路径本地 JVM 已落地：CAS 多库、代际索引、FTS+`local-hash-v1-d32`+RRF；**不是** ONNX 模型包、**不是** USearch JNI、**不是** K06 设备负载。完整 MVP、CPython、USearch JNI、公告生产部署仍未完成。
+版本：v1.2 设计基线，2026-08-28。状态：**部分实现**。M0 本地构建/许可已落地；M0.5 软件页面 UI 设计基线已全面完成（交付产物包括 [docs/UI_DESIGN.md](UI_DESIGN.md)、[docs/design/ui-tokens.json](design/ui-tokens.json)、[docs/design/ui-implementation-map.md](design/ui-implementation-map.md)、[docs/design/ui-prototype.html](design/ui-prototype.html) 以及 [docs/design/screens/](design/screens/README.md) 矢量页面稿，页面与文档严格禁用 Emoji）。M1 已接通 OpenAI 兼容流式 Chat、Keystore 密钥引用、TXT/MD SAF 导入与含图等待；现有 UI 须按 M0.5 设计补齐。M2 本地公告闭环已落地（未部署 Cloudflare）；NAR01—NAR07 已在本地修复。M3 文本路径本地 JVM 已落地：CAS 多库、代际索引、FTS+`local-hash-v1-d32`+RRF；KAR01—KAR08 已在本地修复。**不是** ONNX 模型包、**不是** USearch JNI、**不是** K06 设备负载。完整 MVP、CPython、USearch JNI、公告生产部署仍未完成。
 
 开工入口：[agent.md](../agent.md) → [HANDOFF.md](../HANDOFF.md) → 本文。范围依据见 [REQUIREMENTS.md](REQUIREMENTS.md)。含图知识库、Python 隔离和公告分别详见专题，不能只实现本文概要。
 

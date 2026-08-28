@@ -3,7 +3,7 @@
 
 # 公告系统实现契约
 
-状态：M2 本地实现已落地（Worker/Admin/验签缓存/客户端展示），对应 R13—R15、N01—N09。公告独立于用户模型/API Key；不能等 Python 完成才补。Worker、D1 逻辑表、管理端与占卜产品完全隔离。**当前不创建、不绑定、不部署 Cloudflare 生产资源**；本地 PASS 不等于已部署。
+状态：M2 本地实现已落地（Worker/Admin/验签缓存/客户端展示），对应 R13—R15、N01—N09。NAR01—NAR07 审查项已在本地修复：到期推进 scheduled、schema.sql 可在 SQLite 执行、发布前校验枚举/时间、失败写入不留脏草稿、内容稳定 ETag、缓存按 ClientContext 隔离、可关闭的普通 MODAL。**当前不创建、不绑定、不部署 Cloudflare 生产资源**；本地 PASS 不等于已部署。
 
 ## 1. 职责与展示
 

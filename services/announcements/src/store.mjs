@@ -10,6 +10,9 @@ export class HttpError extends Error {
 }
 
 const PENDING = new Set(["draft", "scheduled"]);
+const CATEGORIES = new Set(["GENERAL", "FEATURE", "MAINTENANCE", "SERVICE_INCIDENT", "UPDATE", "SECURITY", "DEPRECATION"]);
+const SEVERITIES = new Set(["INFO", "NOTICE", "WARNING", "CRITICAL"]);
+const DISPLAY_MODES = new Set(["CENTER_ONLY", "BANNER", "MODAL"]);
 const ALLOWED_ACTIONS = new Set(["OPEN_HTTPS_URL", "OPEN_APP_ROUTE", "DISMISS", "ACKNOWLEDGE"]);
 const ALLOWED_ROUTES = new Set([
   "app://settings/providers",
@@ -53,6 +56,7 @@ export class MemoryStore {
     this.audit = [];
     this.feedState = { id: 1, sequence: 0, contentVersion: 0, keyId: "local-dev-1" };
     this.idempotency = new Map();
+    this.signedSnapshots = new Map();
   }
 
   pendingKey(announcementId) {
@@ -71,6 +75,8 @@ export class MemoryStore {
     if (this.announcements.has(id)) {
       throw new HttpError(409, "announcement already exists");
     }
+    this.assertTranslations(input.translations);
+    this.normalizeBody(input, { strict: true });
     const created = now.toISOString();
     this.announcements.set(id, {
       id,
@@ -98,7 +104,9 @@ export class MemoryStore {
       throw new HttpError(409, "only draft revisions can be patched");
     }
     const merged = { ...JSON.parse(pending.bodyJson), ...input };
-    pending.bodyJson = JSON.stringify(this.normalizeBody(merged));
+    if (input.translations) this.assertTranslations(input.translations);
+    this.normalizeBody(merged, { strict: true });
+    pending.bodyJson = JSON.stringify(this.normalizeBody(merged, { strict: true }));
     if (input.translations) this.writeTranslations(id, pending.revision, input.translations);
     this.touch(id, now);
     this.auditPush(actor, "patch", id, pending.revision, requestId, now, "patched draft");
@@ -113,6 +121,8 @@ export class MemoryStore {
     if (this.pendingKey(id)) {
       throw new HttpError(409, "a draft or scheduled revision already exists");
     }
+    this.assertTranslations(input.translations);
+    this.normalizeBody(input, { strict: true });
     const announcement = this.requireAnnouncement(id);
     const next = this.maxRevision(id) + 1;
     this.writeRevision(id, next, "draft", input, now);
@@ -131,9 +141,10 @@ export class MemoryStore {
     if (expectedRevision != null && pending.revision !== expectedRevision) {
       throw new HttpError(409, "revision conflict");
     }
+    this.assertInstant(startsAt, "startsAt");
     const body = JSON.parse(pending.bodyJson);
     body.startsAt = startsAt;
-    pending.bodyJson = JSON.stringify(this.normalizeBody(body));
+    pending.bodyJson = JSON.stringify(this.normalizeBody(body, { strict: true }));
     pending.revisionStatus = "scheduled";
     this.touch(id, now);
     this.auditPush(actor, "schedule", id, pending.revision, requestId, now, `scheduled for ${startsAt}`);
@@ -149,6 +160,14 @@ export class MemoryStore {
     if (expectedRevision != null && pending.revision !== expectedRevision) {
       throw new HttpError(409, "revision conflict");
     }
+    this.publishPending(id, pending, actor, requestId, now, "publish");
+    const announcement = this.requireAnnouncement(id);
+    const result = { id, revision: pending.revision, status: "published", feedVersion: this.feedState.contentVersion };
+    this.idempotency.set(requestId, result);
+    return result;
+  }
+
+  publishPending(id, pending, actor, requestId, now, action) {
     this.validatePublish(id, pending);
     const announcement = this.requireAnnouncement(id);
     if (announcement.currentPublishedRevision != null && pending.revision <= announcement.currentPublishedRevision) {
@@ -162,15 +181,12 @@ export class MemoryStore {
     pending.revisionStatus = "published";
     const body = JSON.parse(pending.bodyJson);
     if (!body.publishedAt) body.publishedAt = now.toISOString();
-    pending.bodyJson = JSON.stringify(this.normalizeBody(body));
+    pending.bodyJson = JSON.stringify(this.normalizeBody(body, { strict: true }));
     announcement.currentPublishedRevision = pending.revision;
     announcement.status = "published";
     this.bumpFeed(now);
     this.touch(id, now);
-    this.auditPush(actor, "publish", id, pending.revision, requestId, now, `published revision ${pending.revision}; feed ${this.feedState.contentVersion}`);
-    const result = { id, revision: pending.revision, status: "published", feedVersion: this.feedState.contentVersion };
-    this.idempotency.set(requestId, result);
-    return result;
+    this.auditPush(actor, action, id, pending.revision, requestId, now, `published revision ${pending.revision}; feed ${this.feedState.contentVersion}`);
   }
 
   withdraw(id, actor, requestId, now) {
@@ -240,6 +256,21 @@ export class MemoryStore {
       candidates.push({ announcement, rev, body, translations: this.translationMap(announcement.id, rev.revision) });
     }
     return { withdrawn, candidates };
+  }
+
+  promoteDue(now) {
+    const due = [...this.revisions.values()].filter((rev) => {
+      if (rev.revisionStatus !== "scheduled") return false;
+      const announcement = this.announcements.get(rev.announcementId);
+      if (!announcement || announcement.status === "withdrawn" || announcement.status === "archived") return false;
+      const body = JSON.parse(rev.bodyJson);
+      const starts = body.startsAt ? Date.parse(body.startsAt) : Number.NaN;
+      return Number.isFinite(starts) && starts <= now.getTime();
+    });
+    for (const rev of due) {
+      if (rev.revisionStatus !== "scheduled") continue;
+      this.publishPending(rev.announcementId, rev, "scheduler", `schedule:${rev.announcementId}:${rev.revision}:${now.toISOString()}`, now, "schedule-promote");
+    }
   }
 
   recordEvents(events, now) {
@@ -318,7 +349,7 @@ export class MemoryStore {
   }
 
   writeRevision(announcementId, revision, revisionStatus, input, now) {
-    const body = this.normalizeBody(input);
+    const body = this.normalizeBody(input, { strict: true });
     const row = {
       announcementId,
       revision,
@@ -332,6 +363,18 @@ export class MemoryStore {
   }
 
   writeTranslations(announcementId, revision, translations) {
+    this.assertTranslations(translations);
+    for (const [locale, value] of Object.entries(translations)) {
+      this.translations.set(`${announcementId}:${revision}:${locale}`, {
+        locale,
+        title: value.title,
+        summary: value.summary,
+        bodyMarkdown: value.bodyMarkdown,
+      });
+    }
+  }
+
+  assertTranslations(translations) {
     if (!translations || !translations.default) {
       throw new HttpError(400, "default translation is required");
     }
@@ -339,12 +382,6 @@ export class MemoryStore {
       if (!value?.title || !value?.summary || value.bodyMarkdown == null) {
         throw new HttpError(400, `translation ${locale} is incomplete`);
       }
-      this.translations.set(`${announcementId}:${revision}:${locale}`, {
-        locale,
-        title: value.title,
-        summary: value.summary,
-        bodyMarkdown: value.bodyMarkdown,
-      });
     }
   }
 
@@ -356,9 +393,10 @@ export class MemoryStore {
     return map;
   }
 
-  normalizeBody(input) {
+  normalizeBody(input, options = {}) {
+    const strict = Boolean(options.strict);
     const target = input.target || {};
-    return {
+    const body = {
       category: input.category || "GENERAL",
       severity: input.severity || "INFO",
       displayMode: input.displayMode || "CENTER_ONLY",
@@ -370,22 +408,55 @@ export class MemoryStore {
         channel: target.channel || "all",
         minVersionCode: target.minVersionCode ?? null,
         maxVersionCode: target.maxVersionCode ?? null,
-        locales: target.locales || [],
+        locales: Array.isArray(target.locales) ? target.locales : [],
         rolloutPercent: target.rolloutPercent ?? 100,
         rolloutSalt: target.rolloutSalt || "default",
       },
-      actions: input.actions || [],
+      actions: Array.isArray(input.actions) ? input.actions : [],
       image: input.image || null,
       startsAt: input.startsAt || null,
       endsAt: input.endsAt || null,
       publishedAt: input.publishedAt || null,
     };
+    if (strict) this.assertBody(body);
+    return body;
+  }
+
+  assertBody(body) {
+    if (!CATEGORIES.has(body.category)) throw new HttpError(400, "invalid category");
+    if (!SEVERITIES.has(body.severity)) throw new HttpError(400, "invalid severity");
+    if (!DISPLAY_MODES.has(body.displayMode)) throw new HttpError(400, "invalid displayMode");
+    if (body.startsAt) this.assertInstant(body.startsAt, "startsAt");
+    if (body.endsAt) this.assertInstant(body.endsAt, "endsAt");
+    if (body.startsAt && body.endsAt && Date.parse(body.endsAt) <= Date.parse(body.startsAt)) {
+      throw new HttpError(400, "endsAt must be after startsAt");
+    }
+    const percent = body.target.rolloutPercent;
+    if (!Number.isInteger(percent) || percent < 0 || percent > 100) {
+      throw new HttpError(400, "invalid rolloutPercent");
+    }
+    if (body.target.minVersionCode != null && !Number.isInteger(body.target.minVersionCode)) {
+      throw new HttpError(400, "invalid minVersionCode");
+    }
+    if (body.target.maxVersionCode != null && !Number.isInteger(body.target.maxVersionCode)) {
+      throw new HttpError(400, "invalid maxVersionCode");
+    }
+    if (!Array.isArray(body.actions) || body.actions.length > 4) {
+      throw new HttpError(400, "invalid actions");
+    }
+  }
+
+  assertInstant(value, field) {
+    if (!value || !Number.isFinite(Date.parse(value))) {
+      throw new HttpError(400, `invalid ${field}`);
+    }
   }
 
   validatePublish(id, pending) {
     const translations = this.translationMap(id, pending.revision);
     if (!translations.default) throw new HttpError(400, "default translation is required");
-    const body = JSON.parse(pending.bodyJson);
+    const body = this.normalizeBody(JSON.parse(pending.bodyJson), { strict: true });
+    pending.bodyJson = JSON.stringify(body);
     if (body.mustAcknowledge) {
       if (!["WARNING", "CRITICAL"].includes(body.severity) || body.displayMode !== "MODAL") {
         throw new HttpError(400, "mustAcknowledge requires WARNING/CRITICAL and MODAL");
@@ -458,6 +529,7 @@ export class MemoryStore {
     this.feedState.sequence += 1;
     this.feedState.contentVersion += 1;
     this.feedState.updatedAt = now.toISOString();
+    this.signedSnapshots.clear();
   }
 
   auditPush(actor, action, announcementId, revision, requestId, now, summary) {

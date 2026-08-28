@@ -67,25 +67,46 @@ class KnowledgeRepository(
         val existingId = existingDocument(kbId, stored.sha256)
         if (existingId != null) {
             val prior = db.query("SELECT active_version_id, deleted_at FROM documents WHERE id = ?", listOf(existingId)).single()
-            if (prior.string("deleted_at").isBlank() && prior.string("active_version_id").isNotBlank()) {
+            if (prior.string("deleted_at").isBlank()) {
+                if (isPublishedReady(existingId, kbId)) {
+                    val job = ImportJob(
+                        id = EntityId.random().value,
+                        knowledgeBaseId = kbId,
+                        documentId = existingId,
+                        stage = ImportStage.READY,
+                        visionConfigured = visionConfigured,
+                        localEmbeddingAvailable = true,
+                    )
+                    persistJob(job, displayName)
+                    return job
+                }
                 val job = ImportJob(
                     id = EntityId.random().value,
                     knowledgeBaseId = kbId,
                     documentId = existingId,
-                    stage = ImportStage.READY,
+                    hasImages = MediaKind.isImage(format),
                     visionConfigured = visionConfigured,
                     localEmbeddingAvailable = true,
                 )
                 persistJob(job, displayName)
-                return job
+                if (pauseAt == ImportStage.COPYING) {
+                    job.stage = ImportStage.COPYING
+                    persistJob(job, displayName)
+                    return job
+                }
+                return continueImport(job, displayName, bytes, format)
             }
         }
-        upsertBlob(stored)
-        val documentId = existingId ?: EntityId.random().value
-        db.execute(
-            "INSERT OR REPLACE INTO documents(id,kb_id,blob_hash,display_name,format,active_version_id,deleted_at) VALUES (?,?,?,?,?,?,?)",
-            listOf(documentId, kbId, stored.sha256, displayName, format.name, null, null),
-        )
+        db.transaction {
+            upsertBlob(stored)
+            val documentId = existingId ?: EntityId.random().value
+            db.execute(
+                "INSERT OR REPLACE INTO documents(id,kb_id,blob_hash,display_name,format,active_version_id,deleted_at) VALUES (?,?,?,?,?,?,?)",
+                listOf(documentId, kbId, stored.sha256, displayName, format.name, null, null),
+            )
+            syncBlobRef(stored.sha256)
+        }
+        val documentId = existingDocument(kbId, stored.sha256)!!
         val job = ImportJob(
             id = EntityId.random().value,
             knowledgeBaseId = kbId,
@@ -94,27 +115,50 @@ class KnowledgeRepository(
             visionConfigured = visionConfigured,
         )
         job.localEmbeddingAvailable = true
-        advanceThrough(job, ImportStage.COPYING)
         persistJob(job, displayName)
-        if (pauseAt == ImportStage.COPYING) return job
+        if (pauseAt == ImportStage.COPYING) {
+            job.stage = ImportStage.COPYING
+            persistJob(job, displayName)
+            return job
+        }
         return continueImport(job, displayName, bytes, format)
     }
 
-    fun resumeImport(jobId: String, bytes: ByteArray, visionConfigured: Boolean): ImportJob {
-        val row = db.query("SELECT * FROM import_jobs WHERE id = ?", listOf(jobId)).single()
+    fun resumeImport(jobId: String, bytes: ByteArray? = null, visionConfigured: Boolean): ImportJob = synchronized(indexLock) {
+        val row = db.query("SELECT * FROM import_jobs WHERE id = ?", listOf(jobId)).singleOrNull()
+            ?: error("import job not found")
+        val documentId = row.string("document_id")
+        val kbId = row.string("kb_id")
+        requireKb(kbId)
+        val document = db.query("SELECT blob_hash, deleted_at, format FROM documents WHERE id = ?", listOf(documentId)).singleOrNull()
+            ?: error("document not found")
+        check(document.string("deleted_at").isBlank()) { "document deleted" }
+        val stage = ImportStage.valueOf(row.string("stage"))
+        check(stage != ImportStage.CANCELLED && stage != ImportStage.READY) { "import job is not resumable" }
+        val expected = document.string("blob_hash")
+        val payload = when {
+            bytes != null -> {
+                val actual = sha256Hex(bytes)
+                check(actual == expected) { "resume bytes do not match the stored CAS blob" }
+                bytes
+            }
+            else -> blobs.get(expected) ?: error("CAS blob is missing")
+        }
         val displayName = row.string("display_name")
-        val format = MediaKind.detect(displayName, "", bytes.copyOf(minOf(bytes.size, 64)))
+        val recordedFormat = document.string("format")
+        val format = recordedFormat.takeIf { it.isNotBlank() }?.let { runCatching { SourceFormat.valueOf(it) }.getOrNull() }
+            ?: MediaKind.detect(displayName, "", payload.copyOf(minOf(payload.size, 64)))
         val job = ImportJob(
             id = jobId,
-            knowledgeBaseId = row.string("kb_id"),
-            documentId = row.string("document_id"),
-            stage = ImportStage.valueOf(row.string("stage")),
+            knowledgeBaseId = kbId,
+            documentId = documentId,
+            stage = stage,
             hasImages = row.long("has_images") != 0L,
             visionConfigured = visionConfigured,
             localEmbeddingAvailable = true,
             error = row.string("error").ifBlank { null },
         )
-        return continueImport(job, displayName, bytes, format)
+        return continueImport(job, displayName, payload, format)
     }
 
     fun search(query: String, topK: Int = 8, knowledgeBaseIds: List<String>? = null): List<SearchHit> =
@@ -124,7 +168,8 @@ class KnowledgeRepository(
         if (query.isBlank()) return RetrievalResult(emptyList(), emptyList(), listOf("empty query"))
         val warnings = mutableListOf<String>()
         val bases = knowledgeBaseIds ?: listKnowledgeBases().map { it.first }
-        val fused = mutableListOf<SearchHit>()
+        val lexical = mutableListOf<SearchHit>()
+        val vector = mutableListOf<SearchHit>()
         for (kbId in bases) {
             val kb = db.query("SELECT * FROM knowledge_bases WHERE id = ? AND deleted_at IS NULL", listOf(kbId)).singleOrNull()
             if (kb == null) {
@@ -136,11 +181,15 @@ class KnowledgeRepository(
                 warnings += "Knowledge base $kbId uses space $space; query embedder is ${embedder.spaceId}"
                 continue
             }
-            val lexical = lexicalHits(kbId, query, 40)
-            val vector = vectorHits(kbId, query, 40)
-            fused += ReciprocalRankFusion.merge(listOf(lexical, vector)).take(topK)
+            val pin = pinnedReadyGeneration(kbId)
+            if (pin == null) {
+                warnings += "Knowledge base $kbId has no READY generation"
+                continue
+            }
+            lexical += lexicalHits(kbId, query, 40, pin)
+            vector += vectorHits(kbId, query, 40, pin)
         }
-        val hits = fused.take(topK)
+        val hits = ReciprocalRankFusion.merge(listOf(lexical, vector)).take(topK)
         if (hits.isEmpty()) warnings += "No in-scope evidence"
         return RetrievalResult(hits, CitationMap.bind(runId, hits), warnings)
     }
@@ -172,64 +221,143 @@ class KnowledgeRepository(
 
     fun deleteDocument(documentId: String) {
         synchronized(indexLock) {
-            val row = db.query("SELECT kb_id, blob_hash FROM documents WHERE id = ?", listOf(documentId)).singleOrNull() ?: return
-            db.execute("UPDATE documents SET deleted_at = ? WHERE id = ?", listOf(Utc.nowIso(), documentId))
-            decrementBlob(row.string("blob_hash"))
+            val row = db.query("SELECT kb_id, blob_hash, deleted_at FROM documents WHERE id = ?", listOf(documentId)).singleOrNull() ?: return
+            if (row.string("deleted_at").isNotBlank()) return
+            db.transaction {
+                db.execute("UPDATE documents SET deleted_at = ? WHERE id = ?", listOf(Utc.nowIso(), documentId))
+                db.execute(
+                    "UPDATE import_jobs SET stage = ?, error = ? WHERE document_id = ? AND stage NOT IN (?,?)",
+                    listOf(ImportStage.CANCELLED.name, "document deleted", documentId, ImportStage.READY.name, ImportStage.CANCELLED.name),
+                )
+                syncBlobRef(row.string("blob_hash"))
+            }
             rebuildIndex(row.string("kb_id"))
         }
     }
 
     fun deleteKnowledgeBase(kbId: String) {
         synchronized(indexLock) {
-            db.query("SELECT id FROM documents WHERE kb_id = ? AND deleted_at IS NULL", listOf(kbId)).forEach { row ->
-                val doc = db.query("SELECT blob_hash FROM documents WHERE id = ?", listOf(row.string("id"))).single()
-                db.execute("UPDATE documents SET deleted_at = ? WHERE id = ?", listOf(Utc.nowIso(), row.string("id")))
-                decrementBlob(doc.string("blob_hash"))
+            db.transaction {
+                db.query("SELECT id, blob_hash FROM documents WHERE kb_id = ? AND deleted_at IS NULL", listOf(kbId)).forEach { row ->
+                    db.execute("UPDATE documents SET deleted_at = ? WHERE id = ?", listOf(Utc.nowIso(), row.string("id")))
+                    db.execute(
+                        "UPDATE import_jobs SET stage = ?, error = ? WHERE document_id = ? AND stage NOT IN (?,?)",
+                        listOf(ImportStage.CANCELLED.name, "knowledge base deleted", row.string("id"), ImportStage.READY.name, ImportStage.CANCELLED.name),
+                    )
+                    syncBlobRef(row.string("blob_hash"))
+                }
+                db.execute("UPDATE knowledge_bases SET deleted_at = ?, active_generation_id = NULL WHERE id = ?", listOf(Utc.nowIso(), kbId))
             }
-            db.execute("UPDATE knowledge_bases SET deleted_at = ?, active_generation_id = NULL WHERE id = ?", listOf(Utc.nowIso(), kbId))
         }
     }
 
     fun rebuildIndex(kbId: String): String = synchronized(indexLock) {
         requireKb(kbId)
+        db.transaction { rebuildUnlocked(kbId) }
+    }
+
+    fun repairIndexes() {
+        synchronized(indexLock) {
+            db.query("SELECT id, active_version_id, blob_hash FROM documents WHERE deleted_at IS NULL AND active_version_id IS NOT NULL").forEach { doc ->
+                val versionId = doc.string("active_version_id")
+                val exists = db.query("SELECT id FROM document_versions WHERE id = ?", listOf(versionId))
+                if (exists.isEmpty()) {
+                    db.execute(
+                        "INSERT INTO document_versions(id,document_id,parser_fingerprint,content_hash,status,created_at) VALUES (?,?,?,?,?,?)",
+                        listOf(versionId, doc.string("id"), PARSER_FINGERPRINT, doc.string("blob_hash"), "READY", Utc.nowIso()),
+                    )
+                }
+            }
+            listKnowledgeBases().forEach { (kbId, _) ->
+                val live = db.query(
+                    "SELECT COUNT(*) AS n FROM documents WHERE kb_id = ? AND deleted_at IS NULL AND active_version_id IS NOT NULL",
+                    listOf(kbId),
+                ).single().long("n")
+                if (live == 0L) return@forEach
+                val pin = pinnedReadyGeneration(kbId)
+                val members = if (pin == null) 0L else {
+                    db.query("SELECT COUNT(*) AS n FROM generation_members WHERE generation_id = ?", listOf(pin)).single().long("n")
+                }
+                if (pin == null || members == 0L) {
+                    db.transaction { rebuildUnlocked(kbId) }
+                }
+            }
+        }
+    }
+
+    private fun rebuildUnlocked(kbId: String): String {
         val generationId = EntityId.random().value
         val versions = db.query(
             "SELECT id, active_version_id FROM documents WHERE kb_id = ? AND deleted_at IS NULL AND active_version_id IS NOT NULL",
             listOf(kbId),
         )
         var vectors = 0
-        db.transaction {
-            db.execute(
-                "INSERT INTO index_generations(id,kb_id,space_id,manifest_hash,state,vector_count,fts_version,created_at) VALUES (?,?,?,?,?,?,?,?)",
-                listOf(generationId, kbId, embedder.spaceId, generationId, "BUILDING", 0, 1, Utc.nowIso()),
-            )
-            versions.forEach { doc ->
-                val versionId = doc.string("active_version_id")
-                db.query("SELECT id FROM chunks WHERE document_version_id = ?", listOf(versionId)).forEach { chunk ->
-                    db.execute(
-                        "INSERT OR IGNORE INTO generation_members(generation_id,chunk_id,space_id,document_version_id) VALUES (?,?,?,?)",
-                        listOf(generationId, chunk.string("id"), embedder.spaceId, versionId),
-                    )
-                    vectors += 1
+        db.execute(
+            "INSERT INTO index_generations(id,kb_id,space_id,manifest_hash,state,vector_count,fts_version,created_at) VALUES (?,?,?,?,?,?,?,?)",
+            listOf(generationId, kbId, embedder.spaceId, generationId, "BUILDING", 0, 1, Utc.nowIso()),
+        )
+        versions.forEach { doc ->
+            val versionId = doc.string("active_version_id")
+            db.query("SELECT id, ordinal, text FROM chunks WHERE document_version_id = ? ORDER BY ordinal", listOf(versionId)).forEach { chunk ->
+                val chunkId = chunk.string("id")
+                val text = chunk.string("text")
+                val rowid = db.query("SELECT rowid AS rid FROM chunks WHERE id = ?", listOf(chunkId)).single().long("rid")
+                runCatching { db.execute("DELETE FROM chunks_fts WHERE rowid = ?", listOf(rowid)) }
+                runCatching { db.execute("INSERT INTO chunks_fts(rowid, text) VALUES (?, ?)", listOf(rowid, CjkLexical.indexText(text))) }
+                val vector = embedder.embed(text)
+                check(vector.size == embedder.dimension) { "embedding dimension mismatch" }
+                db.execute(
+                    "INSERT OR REPLACE INTO embeddings(chunk_id,space_id,vector_blob,content_hash) VALUES (?,?,?,?)",
+                    listOf(chunkId, embedder.spaceId, floatsToBytes(vector), sha256Hex(text.toByteArray())),
+                )
+                val stored = db.query(
+                    "SELECT vector_blob FROM embeddings WHERE chunk_id = ? AND space_id = ?",
+                    listOf(chunkId, embedder.spaceId),
+                ).singleOrNull() ?: error("embedding missing after rebuild")
+                val blob = stored.columns["vector_blob"]
+                val bytes = when (blob) {
+                    is ByteArray -> blob
+                    is java.sql.Blob -> blob.getBytes(1, blob.length().toInt())
+                    else -> error("embedding blob unreadable")
                 }
+                check(bytes.size == embedder.dimension * 4) { "embedding byte length mismatch" }
+                db.execute(
+                    "INSERT OR IGNORE INTO generation_members(generation_id,chunk_id,space_id,document_version_id) VALUES (?,?,?,?)",
+                    listOf(generationId, chunkId, embedder.spaceId, versionId),
+                )
+                vectors += 1
             }
-            db.execute(
-                "UPDATE index_generations SET state = ?, vector_count = ?, manifest_hash = ? WHERE id = ?",
-                listOf("READY", vectors, sha256Hex("$generationId:$vectors".toByteArray()), generationId),
-            )
-            db.execute(
-                "UPDATE knowledge_bases SET active_generation_id = ?, embedding_space_id = ? WHERE id = ?",
-                listOf(generationId, embedder.spaceId, kbId),
-            )
         }
-        generationId
+        val actualVectors = db.query(
+            "SELECT COUNT(*) AS n FROM generation_members g JOIN embeddings e ON e.chunk_id = g.chunk_id AND e.space_id = g.space_id WHERE g.generation_id = ?",
+            listOf(generationId),
+        ).single().long("n").toInt()
+        if (actualVectors != vectors) {
+            db.execute("UPDATE index_generations SET state = ? WHERE id = ?", listOf("FAILED", generationId))
+            error("rebuild vector count mismatch")
+        }
+        db.execute(
+            "UPDATE index_generations SET state = ?, vector_count = ?, manifest_hash = ? WHERE id = ?",
+            listOf("READY", vectors, sha256Hex("$generationId:$vectors".toByteArray()), generationId),
+        )
+        db.execute(
+            "UPDATE knowledge_bases SET active_generation_id = ?, embedding_space_id = ? WHERE id = ?",
+            listOf(generationId, embedder.spaceId, kbId),
+        )
+        return generationId
     }
 
     private fun continueImport(job: ImportJob, displayName: String, bytes: ByteArray, format: SourceFormat): ImportJob {
         advanceThrough(job, ImportStage.PARSING)
         when (format) {
             SourceFormat.IMAGE -> advanceThrough(job, ImportStage.WAITING_FOR_VISION_MODEL)
-            SourceFormat.TEXT, SourceFormat.MARKDOWN -> indexTextDocument(job, bytes, format)
+            SourceFormat.TEXT, SourceFormat.MARKDOWN -> {
+                try {
+                    indexTextDocument(job, bytes, format)
+                } catch (t: Throwable) {
+                    fail(job, t.message ?: "indexing failed")
+                }
+            }
             SourceFormat.PDF -> fail(job, "PDF import is not in this build yet. The file was copied and was not dropped.")
             SourceFormat.OFFICE_ARCHIVE -> {
                 val inspection = ZipSafety.inspect(bytes)
@@ -262,15 +390,20 @@ class KnowledgeRepository(
         }
         val versionId = EntityId.random().value
         val contentHash = sha256Hex(bytes)
-        db.execute(
-            "INSERT INTO document_versions(id,document_id,parser_fingerprint,content_hash,status,created_at) VALUES (?,?,?,?,?,?)",
-            listOf(versionId, job.documentId, PARSER_FINGERPRINT, contentHash, "READY", Utc.nowIso()),
-        )
-        db.execute("UPDATE documents SET active_version_id = ?, deleted_at = NULL WHERE id = ?", listOf(versionId, job.documentId))
-        persistChunks(versionId, chunks)
-        persistEmbeddings(versionId)
+        synchronized(indexLock) {
+            db.transaction {
+                db.execute(
+                    "INSERT INTO document_versions(id,document_id,parser_fingerprint,content_hash,status,created_at) VALUES (?,?,?,?,?,?)",
+                    listOf(versionId, job.documentId, PARSER_FINGERPRINT, contentHash, "STAGING", Utc.nowIso()),
+                )
+                persistChunks(versionId, chunks)
+                persistEmbeddings(versionId)
+                db.execute("UPDATE document_versions SET status = ? WHERE id = ?", listOf("READY", versionId))
+                db.execute("UPDATE documents SET active_version_id = ?, deleted_at = NULL WHERE id = ?", listOf(versionId, job.documentId))
+                rebuildUnlocked(job.knowledgeBaseId)
+            }
+        }
         advanceThrough(job, ImportStage.READY)
-        rebuildIndex(job.knowledgeBaseId)
     }
 
     private fun persistChunks(documentVersionId: String, chunks: List<String>) {
@@ -297,6 +430,7 @@ class KnowledgeRepository(
         val rows = db.query("SELECT id, ordinal, text FROM chunks WHERE document_version_id = ? ORDER BY ordinal", listOf(documentVersionId))
         rows.forEach { row ->
             val vector = embedder.embed(row.string("text"))
+            check(vector.size == embedder.dimension) { "embedding dimension mismatch" }
             db.execute(
                 "INSERT OR REPLACE INTO embeddings(chunk_id,space_id,vector_blob,content_hash) VALUES (?,?,?,?)",
                 listOf(row.string("id"), embedder.spaceId, floatsToBytes(vector), row.string("id")),
@@ -304,8 +438,7 @@ class KnowledgeRepository(
         }
     }
 
-    private fun lexicalHits(kbId: String, query: String, topK: Int): List<SearchHit> {
-        val generation = activeGeneration(kbId) ?: return emptyList()
+    private fun lexicalHits(kbId: String, query: String, topK: Int, generation: String): List<SearchHit> {
         val tokenized = CjkLexical.indexText(query)
         val fts = runCatching {
             db.query(
@@ -346,8 +479,7 @@ class KnowledgeRepository(
         }
     }
 
-    private fun vectorHits(kbId: String, query: String, topK: Int): List<SearchHit> {
-        val generation = activeGeneration(kbId) ?: return emptyList()
+    private fun vectorHits(kbId: String, query: String, topK: Int, generation: String): List<SearchHit> {
         val queryVec = embedder.embed(query)
         val index = CosineIndex(embedder.dimension)
         val members = db.query(
@@ -370,6 +502,7 @@ class KnowledgeRepository(
                 is java.sql.Blob -> blob.getBytes(1, blob.length().toInt())
                 else -> return@forEach
             }
+            if (bytes.size != embedder.dimension * 4) return@forEach
             index.add(row.string("chunk_id"), bytesToFloats(bytes, embedder.dimension))
             byId[row.string("chunk_id")] = SearchHit(
                 chunkId = row.string("chunk_id"),
@@ -385,9 +518,34 @@ class KnowledgeRepository(
         }
     }
 
-    private fun activeGeneration(kbId: String): String? =
-        db.query("SELECT active_generation_id FROM knowledge_bases WHERE id = ?", listOf(kbId))
-            .singleOrNull()?.string("active_generation_id")?.ifBlank { null }
+    private fun pinnedReadyGeneration(kbId: String): String? {
+        val generationId = db.query("SELECT active_generation_id FROM knowledge_bases WHERE id = ?", listOf(kbId))
+            .singleOrNull()?.string("active_generation_id")?.ifBlank { null } ?: return null
+        val state = db.query("SELECT state FROM index_generations WHERE id = ?", listOf(generationId))
+            .singleOrNull()?.string("state")
+        return if (state == "READY") generationId else null
+    }
+
+    private fun isPublishedReady(documentId: String, kbId: String): Boolean {
+        val versionId = db.query("SELECT active_version_id FROM documents WHERE id = ? AND deleted_at IS NULL", listOf(documentId))
+            .singleOrNull()?.string("active_version_id")?.ifBlank { null } ?: return false
+        val versionReady = db.query("SELECT status FROM document_versions WHERE id = ?", listOf(versionId))
+            .singleOrNull()?.string("status") == "READY"
+        if (!versionReady) return false
+        val chunks = db.query("SELECT COUNT(*) AS n FROM chunks WHERE document_version_id = ?", listOf(versionId)).single().long("n")
+        if (chunks == 0L) return false
+        val embeddings = db.query(
+            "SELECT COUNT(*) AS n FROM embeddings e JOIN chunks c ON c.id = e.chunk_id WHERE c.document_version_id = ? AND e.space_id = ?",
+            listOf(versionId, embedder.spaceId),
+        ).single().long("n")
+        if (embeddings != chunks) return false
+        val pin = pinnedReadyGeneration(kbId) ?: return false
+        val members = db.query(
+            "SELECT COUNT(*) AS n FROM generation_members WHERE generation_id = ? AND document_version_id = ?",
+            listOf(pin, versionId),
+        ).single().long("n")
+        return members == chunks
+    }
 
     private fun requireKb(kbId: String) {
         val row = db.query("SELECT deleted_at FROM knowledge_bases WHERE id = ?", listOf(kbId)).singleOrNull()
@@ -433,17 +591,19 @@ class KnowledgeRepository(
         val existing = db.query("SELECT ref_count FROM blobs WHERE hash = ?", listOf(stored.sha256)).singleOrNull()
         if (existing == null) {
             db.execute(
-                "INSERT INTO blobs(hash,byte_length,media_type,local_ref,ref_count) VALUES (?,?,?,?,1)",
+                "INSERT INTO blobs(hash,byte_length,media_type,local_ref,ref_count) VALUES (?,?,?,?,0)",
                 listOf(stored.sha256, stored.byteLength, stored.mediaType, stored.localRef),
             )
-        } else {
-            db.execute("UPDATE blobs SET ref_count = ref_count + 1 WHERE hash = ?", listOf(stored.sha256))
         }
         return stored
     }
 
-    private fun decrementBlob(hash: String) {
-        db.execute("UPDATE blobs SET ref_count = MAX(ref_count - 1, 0) WHERE hash = ?", listOf(hash))
+    private fun syncBlobRef(hash: String) {
+        val live = db.query(
+            "SELECT COUNT(*) AS n FROM documents WHERE blob_hash = ? AND deleted_at IS NULL",
+            listOf(hash),
+        ).single().long("n")
+        db.execute("UPDATE blobs SET ref_count = ? WHERE hash = ?", listOf(live, hash))
     }
 
     private fun quoteFts(query: String): String {

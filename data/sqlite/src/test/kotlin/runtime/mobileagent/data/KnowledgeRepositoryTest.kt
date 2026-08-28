@@ -7,6 +7,7 @@ import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertFalse
 import org.junit.jupiter.api.Assertions.assertNotEquals
 import org.junit.jupiter.api.Assertions.assertNull
+import org.junit.jupiter.api.Assertions.assertThrows
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
 import runtime.mobileagent.knowledge.CitationMap
@@ -251,6 +252,155 @@ class KnowledgeRepositoryTest {
         assertTrue(result.citations.isEmpty())
     }
 
+    @Test
+    fun v3ReadyDocumentsAreSearchableAfterUpgrade() {
+        val db = JdbcSqlConnection()
+        applyLegacyV3(db)
+        db.execute(
+            "INSERT INTO knowledge_bases(id,name,active_generation_id,embedding_space_id,created_at,deleted_at) VALUES (?,?,?,?,?,?)",
+            listOf("kb-old", "Legacy", null, null, "2026-08-28T00:00:00Z", null),
+        )
+        db.execute(
+            "INSERT INTO blobs(hash,byte_length,media_type,local_ref,ref_count) VALUES (?,?,?,?,?)",
+            listOf("hash-old", 12, "text/plain", "memory:hash-old", 1),
+        )
+        db.execute(
+            "INSERT INTO documents(id,kb_id,blob_hash,display_name,format,active_version_id,deleted_at) VALUES (?,?,?,?,?,?,?)",
+            listOf("doc-old", "kb-old", "hash-old", "notes.txt", "TEXT", "ver-old", null),
+        )
+        db.execute(
+            "INSERT INTO chunks(id,document_version_id,ordinal,text,content_hash) VALUES (?,?,?,?,?)",
+            listOf("chunk-old", "ver-old", 0, "Alpha widget torque spec is 12Nm.", "c-old"),
+        )
+        val rowid = db.query("SELECT rowid AS rid FROM chunks WHERE id = ?", listOf("chunk-old")).single().long("rid")
+        db.execute("INSERT INTO chunks_fts(rowid, text) VALUES (?, ?)", listOf(rowid, "Alpha widget torque spec is 12Nm."))
+        db.execute("INSERT INTO schema_version(version) VALUES (?)", listOf(3))
+        Migrations.apply(db)
+        val repo = KnowledgeRepository(db, MemoryBlobSink())
+        assertTrue(repo.search("widget", knowledgeBaseIds = listOf("kb-old")).any { "12Nm" in it.text })
+        assertEquals(1, db.query("SELECT COUNT(*) AS n FROM document_versions").single().long("n"))
+        assertTrue(db.query("SELECT COUNT(*) AS n FROM index_generations WHERE state = ?", listOf("READY")).single().long("n") >= 1)
+    }
+
+    @Test
+    fun failedEmbeddingDoesNotPublishReadyAndRetryRepairs() {
+        val db = JdbcSqlConnection()
+        Migrations.apply(db)
+        val sink = MemoryBlobSink()
+        val failing = KnowledgeRepository(db, sink, ThrowingEmbedder())
+        val first = failing.importBytes("notes.txt", "text/plain", "retryable widget text".toByteArray(), false)
+        assertEquals(ImportStage.FAILED, first.stage)
+        assertTrue(failing.search("widget").isEmpty())
+        val ok = KnowledgeRepository(db, sink)
+        val second = ok.importBytes("notes.txt", "text/plain", "retryable widget text".toByteArray(), false)
+        assertEquals(ImportStage.READY, second.stage)
+        assertTrue(ok.search("widget").any { "retryable" in it.text })
+    }
+
+    @Test
+    fun resumeRejectsMismatchedBytesAndDeletedDocuments() {
+        val db = JdbcSqlConnection()
+        Migrations.apply(db)
+        val sink = MemoryBlobSink()
+        val repo = KnowledgeRepository(db, sink)
+        val payload = "resume original source".toByteArray()
+        val paused = repo.importBytes("resume.txt", "text/plain", payload, false, pauseAt = ImportStage.COPYING)
+        assertThrows(IllegalStateException::class.java) {
+            repo.resumeImport(paused.id, "replacement source".toByteArray(), false)
+        }
+        assertEquals(ImportStage.COPYING, repo.listJobs().first().first.stage)
+        repo.deleteDocument(paused.documentId)
+        assertThrows(IllegalStateException::class.java) {
+            repo.resumeImport(paused.id, payload, false)
+        }
+        assertTrue(repo.search("original").none { it.documentId == paused.documentId })
+    }
+
+    @Test
+    fun blobRefCountFollowsLiveDocumentsNotRetries() {
+        val db = JdbcSqlConnection()
+        Migrations.apply(db)
+        val sink = MemoryBlobSink()
+        val repo = KnowledgeRepository(db, sink)
+        val shared = "shared once".toByteArray()
+        val a = repo.createKnowledgeBase("A")
+        val b = repo.createKnowledgeBase("B")
+        repo.importBytes("s.txt", "text/plain", shared, false, a)
+        repo.importBytes("s.txt", "text/plain", shared, false, b)
+        val hash = sink.blobs.keys.single()
+        assertEquals(2, repo.blobRefCount(hash))
+        repo.deleteKnowledgeBase(a)
+        repo.deleteKnowledgeBase(a)
+        assertEquals(1, repo.blobRefCount(hash))
+        val pdf = repo.importBytes("x.pdf", "application/pdf", "%PDF-1.4 leftover".toByteArray(), false)
+        repeat(2) {
+            repo.importBytes("x.pdf", "application/pdf", "%PDF-1.4 leftover".toByteArray(), false)
+        }
+        val pdfHash = db.query("SELECT blob_hash FROM documents WHERE id = ?", listOf(pdf.documentId)).single().string("blob_hash")
+        assertEquals(1, repo.blobRefCount(pdfHash))
+        repo.deleteDocument(pdf.documentId)
+        repo.deleteDocument(pdf.documentId)
+        assertEquals(0, repo.blobRefCount(pdfHash))
+    }
+
+    @Test
+    fun laterLibraryExactHitIsKeptRegardlessOfBaseOrder() {
+        val db = JdbcSqlConnection()
+        Migrations.apply(db)
+        val repo = KnowledgeRepository(db, MemoryBlobSink())
+        val a = repo.createKnowledgeBase("Noise")
+        val b = repo.createKnowledgeBase("Signal")
+        repeat(8) { i ->
+            repo.importBytes("n$i.txt", "text/plain", "generic filler paragraph $i about weather".toByteArray(), false, a)
+        }
+        repo.importBytes("hit.txt", "text/plain", "uniqueTokenOnlyInB".toByteArray(), false, b)
+        val forward = repo.search("uniqueTokenOnlyInB", topK = 8, knowledgeBaseIds = listOf(a, b))
+        val reverse = repo.search("uniqueTokenOnlyInB", topK = 8, knowledgeBaseIds = listOf(b, a))
+        assertTrue(forward.any { "uniqueTokenOnlyInB" in it.text })
+        assertTrue(reverse.any { "uniqueTokenOnlyInB" in it.text })
+    }
+
+    @Test
+    fun retrievePinsGenerationForTheWholeRun() {
+        val inner = JdbcSqlConnection()
+        Migrations.apply(inner)
+        val repo = KnowledgeRepository(inner, MemoryBlobSink())
+        val kb = repo.ensureDefaultBase()
+        repo.importBytes("one.txt", "text/plain", "first generation pin token".toByteArray(), false, kb)
+        val first = inner.query("SELECT active_generation_id FROM knowledge_bases WHERE id = ?", listOf(kb)).single().string("active_generation_id")
+        val db = GenerationSwitchingConnection(inner, first)
+        val pinned = KnowledgeRepository(db, MemoryBlobSink())
+        val hits = pinned.search("pin", knowledgeBaseIds = listOf(kb))
+        assertTrue(hits.any { "first generation" in it.text })
+        assertEquals(1, db.activeReads)
+    }
+
+    @Test
+    fun rebuildRestoresWipedDerivedIndexes() {
+        val db = JdbcSqlConnection()
+        Migrations.apply(db)
+        val repo = KnowledgeRepository(db, MemoryBlobSink())
+        val kb = repo.ensureDefaultBase()
+        repo.importBytes("keep.txt", "text/plain", "rebuildable lexical evidence".toByteArray(), false, kb)
+        db.execute("DELETE FROM chunks_fts")
+        db.execute("DELETE FROM embeddings")
+        repo.rebuildIndex(kb)
+        assertTrue(repo.search("lexical").any { "rebuildable" in it.text })
+    }
+
+    private fun applyLegacyV3(db: JdbcSqlConnection) {
+        listOf(
+            "CREATE TABLE IF NOT EXISTS schema_version (version INTEGER NOT NULL PRIMARY KEY)",
+            "CREATE TABLE IF NOT EXISTS knowledge_bases (id TEXT PRIMARY KEY, name TEXT NOT NULL, active_generation_id TEXT, embedding_space_id TEXT, created_at TEXT NOT NULL, deleted_at TEXT)",
+            "CREATE TABLE IF NOT EXISTS blobs (hash TEXT PRIMARY KEY, byte_length INTEGER NOT NULL, media_type TEXT NOT NULL, local_ref TEXT NOT NULL, ref_count INTEGER NOT NULL)",
+            "CREATE TABLE IF NOT EXISTS documents (id TEXT PRIMARY KEY, kb_id TEXT NOT NULL, blob_hash TEXT NOT NULL, display_name TEXT NOT NULL, format TEXT NOT NULL, active_version_id TEXT, deleted_at TEXT, UNIQUE(kb_id, blob_hash), FOREIGN KEY(kb_id) REFERENCES knowledge_bases(id))",
+            "CREATE TABLE IF NOT EXISTS chunks (id TEXT PRIMARY KEY, document_version_id TEXT NOT NULL, ordinal INTEGER NOT NULL, text TEXT NOT NULL, content_hash TEXT NOT NULL, UNIQUE(document_version_id, ordinal))",
+            "CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(text, content='chunks', content_rowid='rowid')",
+            "CREATE TABLE IF NOT EXISTS embeddings (chunk_id TEXT NOT NULL, space_id TEXT NOT NULL, vector_blob BLOB NOT NULL, content_hash TEXT NOT NULL, PRIMARY KEY(chunk_id, space_id))",
+            "CREATE TABLE IF NOT EXISTS import_jobs (id TEXT PRIMARY KEY, kb_id TEXT NOT NULL, document_id TEXT NOT NULL, display_name TEXT NOT NULL, stage TEXT NOT NULL, has_images INTEGER NOT NULL, error TEXT, updated_at TEXT NOT NULL)",
+        ).forEach { db.execute(it) }
+    }
+
     private fun zipSlip(): ByteArray = zipBytes("../evil.txt", "no")
 
     private fun validZip(name: String): ByteArray = zipBytes(name, "application/epub+zip")
@@ -264,4 +414,31 @@ class KnowledgeRepositoryTest {
         }
         return out.toByteArray()
     }
+}
+
+private class ThrowingEmbedder : runtime.mobileagent.knowledge.TextEmbedder {
+    override val spaceId: String = "local-hash-v1-d32"
+    override val dimension: Int = 32
+    override fun embed(text: String): FloatArray = error("embed failed")
+}
+
+private class GenerationSwitchingConnection(
+    private val inner: SqlConnection,
+    private val original: String,
+) : SqlConnection {
+    var activeReads: Int = 0
+
+    override fun execute(sql: String, args: List<Any?>) = inner.execute(sql, args)
+
+    override fun query(sql: String, args: List<Any?>): List<SqlRow> {
+        if (sql.contains("SELECT active_generation_id FROM knowledge_bases")) {
+            activeReads += 1
+            if (activeReads > 1) {
+                return listOf(SqlRow(mapOf("active_generation_id" to "gen-other")))
+            }
+        }
+        return inner.query(sql, args)
+    }
+
+    override fun <T> transaction(block: () -> T): T = inner.transaction(block)
 }

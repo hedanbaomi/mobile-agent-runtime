@@ -44,20 +44,40 @@ class AnnouncementRepositoryTest {
         repo.markAllRead(repo.records())
         assertTrue(AnnouncementPresentation.modal(repo.records()) != null)
         repo.markAcknowledged(first.item.id, first.item.revision)
-        assertEquals(null, AnnouncementPresentation.modal(repo.records()))
+        assertEquals(null, AnnouncementPresentation.modal(repo.records(client = client)))
 
         val next = """{"feedVersion":2,"issuedAt":"2026-08-28T12:00:00Z","expiresAt":"2026-08-29T12:00:00Z","requestTarget":{"platform":"android","channel":"stable","versionCode":1,"locale":"en"},"audienceHash":"${FeedVerifier.audienceHash(client.installId)}","complete":true,"items":[{"id":"security-demo","revision":2,"category":"SECURITY","severity":"WARNING","displayMode":"MODAL","title":"Notice 2","summary":"Read","bodyMarkdown":"Body text two.","mustAcknowledge":true,"dismissible":false,"pinned":true,"actions":[{"type":"ACKNOWLEDGE","key":"ack","label":"OK"}],"target":{"platform":"android","channel":"stable","rolloutPercent":100,"rolloutSalt":"stable-salt"}}],"withdrawn":[]}"""
         assertNull(repo.applyEnvelope(sign(next), "etag-2", client, Instant.parse("2026-08-28T12:00:00Z")))
-        assertEquals(2, AnnouncementPresentation.modal(repo.records())?.item?.revision)
+        assertEquals(2, AnnouncementPresentation.modal(repo.records(client = client))?.item?.revision)
 
         val withdrawn = """{"feedVersion":3,"issuedAt":"2026-08-28T12:00:00Z","expiresAt":"2026-08-29T12:00:00Z","requestTarget":{"platform":"android","channel":"stable","versionCode":1,"locale":"en"},"audienceHash":"${FeedVerifier.audienceHash(client.installId)}","complete":true,"items":[],"withdrawn":[{"id":"security-demo","revision":2}]}"""
         assertNull(repo.applyEnvelope(sign(withdrawn), "etag-3", client, Instant.parse("2026-08-28T12:00:00Z")))
-        assertEquals(null, AnnouncementPresentation.modal(repo.records()))
-        assertTrue(repo.records().any { it.withdrawn })
+        assertEquals(null, AnnouncementPresentation.modal(repo.records(client = client)))
+        assertTrue(repo.records(client = client).any { it.withdrawn })
 
         val bad = envelope.replace("test-only-1", "other-key")
         assertEquals("unknown key", repo.applyEnvelope(bad, "etag-bad", client, Instant.parse("2026-08-28T12:00:00Z")))
-        assertTrue(repo.records().any { it.withdrawn })
+        assertTrue(repo.records(client = client).any { it.withdrawn })
+    }
+
+    @Test
+    fun dismissibleModalIsHiddenAfterDismissAndContextChangeRefetches() {
+        val db = JdbcSqlConnection()
+        Migrations.apply(db)
+        val repo = AnnouncementRepository(db)
+        repo.setPublicKeyHex(publicKey.joinToString("") { "%02x".format(it.toInt() and 0xFF) })
+        repo.setKeyId("test-only-1")
+        val payload = """{"feedVersion":1,"issuedAt":"2026-08-28T12:00:00Z","expiresAt":"2026-08-29T12:00:00Z","requestTarget":{"platform":"android","channel":"stable","versionCode":1,"locale":"en"},"audienceHash":"${FeedVerifier.audienceHash(client.installId)}","complete":true,"items":[{"id":"promo","revision":1,"category":"FEATURE","severity":"INFO","displayMode":"MODAL","title":"Promo","summary":"Optional","bodyMarkdown":"You can close this.","mustAcknowledge":false,"dismissible":true,"pinned":false,"actions":[{"type":"DISMISS","key":"d","label":"OK"}],"target":{"platform":"android","channel":"stable","rolloutPercent":100,"rolloutSalt":"stable-salt"}}],"withdrawn":[]}"""
+        assertNull(repo.applyEnvelope(sign(payload), "etag-p", client, Instant.parse("2026-08-28T12:00:00Z")))
+        val promo = repo.records(client = client).single()
+        assertTrue(AnnouncementPresentation.modal(repo.records(client = client)) != null)
+        repo.markDismissed(promo.item.id, promo.item.revision)
+        assertEquals(null, AnnouncementPresentation.modal(repo.records(client = client)))
+        val zh = client.copy(locale = "zh-CN")
+        assertTrue(repo.needsFetch(zh, Instant.parse("2026-08-28T12:01:00Z")))
+        val bumped = client.copy(versionCode = 2)
+        assertTrue(repo.needsFetch(bumped, Instant.parse("2026-08-28T12:01:00Z")))
+        assertEquals(false, repo.needsFetch(client, Instant.parse("2026-08-28T12:01:00Z")))
     }
 
     private fun sign(payload: String): String {

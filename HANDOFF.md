@@ -3,7 +3,7 @@
 
 # 项目交接
 
-最后更新：2026-08-28T20:38:00+08:00（Asia/Taipei）。项目根目录：`E:\mobileAgentRuntime`。
+最后更新：2026-08-28T21:00:26+08:00（Asia/Taipei）。项目根目录：`E:\mobileAgentRuntime`。
 
 **接手者必须先读 [agent.md](agent.md)、本文件和 [技术实现方案](docs/IMPLEMENTATION_PLAN.md)。工作后必须维护本文件及受影响的专题文档。**
 
@@ -11,16 +11,16 @@
 
 | 项目 | 状态 |
 | --- | --- |
-| 产品 | M1 部分实现；AR01—AR10 历史修复记录保留。M0.5 软件页面设计缺陷（UAR01—UAR05）已全部修复并已在【设置与关于】界面增加“检查更新”按键与交互弹窗（高保真 SVG、原型、双语 strings.xml、UI 规范与实现映射均已落地，全量禁用 Emoji，状态 `DOC_CHECK_PASS`）。M2/M3 审查待修项（NAR01—NAR07、KAR01—KAR08）保留 |
-| 业务源码/构建 | 历史 Gradle/JVM/assembleDebug 结果保留；本轮完成设置界面检查更新功能的设计包、资源与文档更新，未修改业务 Kotlin 源码 |
-| Git | 分支 `main` 跟踪 `origin/main`；已按用户明确授权（进行commit，但不要push）完成本地提交，未推送到 remote（ahead 1 commit） |
-| CodeGraph | 历史状态保留；本轮未同步/重建索引 |
-| 许可 | 本次 `python -B -m reuse lint` 退出 0（182/182）；许可正文 SHA 未变；文档结构检查 0 错误（PASS） |
-| 授权范围 | 本轮仅认领并完成 M0.5 页面设计与“检查更新”按键功能补充；未修改 M2/M3 业务代码，未提交推送或部署 |
+| 产品 | M1 部分实现；AR01—AR10 历史修复保留。M0.5 UAR01—UAR05 已修复（本地提交 `9dc7560`）。M2 NAR01—NAR07 与 M3 KAR01—KAR08 已在本轮修复。完整 MVP 未完成 |
+| 业务源码/构建 | 本轮 `licenseGuard`/`licenseGuardReverse`、`:shared:knowledge-api:test`、`:shared:announcements:test`、`:data:sqlite:test`、`:app-android:assembleDebug` 通过；`node src/worker.test.mjs` 通过；REUSE 182/182 |
+| Git | 分支 `main` 跟踪 `origin/main`；修复提交将与未推送的 M0.5 一并 push。作者 `luozhibai`，无 Cursor trailer |
+| CodeGraph | 仓库无 `.codegraph/` 工作副本（被 gitignore）；本轮用直接读文件定位。未重建索引 |
+| 许可 | `python -B -m reuse lint` 退出 0（182/182）；未改 LICENSE 正文 |
+| 授权范围 | 用户已授权修复交接中的 M2/M3 问题并 commit/push，使 origin 与本地相同。仍不授权 Cloudflare 生产部署 |
 
 ## 2. 当前任务
 
-M0.5 软件页面 UI 设计及“检查更新”功能补充已全部完成并通过复验（`DOC_CHECK_PASS`）。当前剩余 M2（NAR01—NAR07）与 M3（KAR01—KAR08）待修问题等待进一步认领处理。
+无进行中认领。NAR01—NAR07 与 KAR01—KAR08 已修复。下一步默认 M4，不要把 hashing 空间写成 ONNX。
 
 ## 3. 关键约束
 
@@ -31,11 +31,11 @@ M0.5 软件页面 UI 设计及“检查更新”功能补充已全部完成并�
 
 ## 4. 接手顺序
 
-1. `git status --short --branch`、`git log -1 --format=full`；M3 HEAD 应为 `fa7763117bb5bdecc1ea04366fae516bf2234e57` 或之后的交接 SHA 记录；确认无 `Co-authored-by: Cursor`
+1. `git status --short --branch`、`git log -1 --format=full`；确认 HEAD 无 `Co-authored-by: Cursor`
 2. 提交作者使用 `D:\Git\mingw64\libexec\git-core\git.exe commit-tree`，作者 `luozhibai <wy3273564266@163.com>`
-3. 阅读第6节最新独立审查记录，按明确授权认领 UAR/NAR/KAR 修复；不要直接沿用旧记录中的“下一步 M4”作为验收已通过的依据
+3. M0.5 UAR 与 M2 NAR01—NAR07、M3 KAR01—KAR08 已按交接修复；下一步默认 M4，不要把 `local-hash-v1-d32` 写成 ONNX pack
 4. 设备/模拟器仍缺：bundled FTS5 冷启动、公告本地 Worker→真机拉取、K06 300—500 文件负载
-5. M3 已有本地实现，但迁移、恢复、删除、检索与索引一致性仍有待修项。`local-hash-v1-d32` 不是 ONNX pack；本轮没有改变 M4 的既定范围
+5. `local-hash-v1-d32` 不是 ONNX pack；本轮没有改变 M4 的既定范围（Vision/PDF 正文/DOCX-EPUB）
 6. M1 Compose 仍须按 M0.5 差异清单对齐；不要把 M2/M3 功能闭环冒称为全套 UI 设计实现或生产部署
 
 ## 5. 未决事项
@@ -288,6 +288,16 @@ U02 的横屏、IME、大字号、触控、对比度、焦点及实际字体回�
   - `git diff --check`：无空白或格式错误。
 - 未执行项：未修改业务 Kotlin 源码，未处理 M2/M3 代码审查项（NAR/KAR）；按用户要求已提交本地 Git，未执行 push。
 - 下一步：按授权认领 M2（NAR01—NAR07）或 M3（KAR01—KAR08）代码审查修复。
+
+### 2026-08-28T21:00:26+08:00：修复 M2 NAR01—NAR07 与 M3 KAR01—KAR08
+
+- 请求：检查并修复交接中写成的问题；M0.5 已修复并本地提交，M2/M3 未处理。完成后 commit/push，使 origin 与本地相同。
+- M2：到期推进 scheduled；`schema.sql` 仅 SQL `--` 注释并可在 SQLite 执行；发布/写入前校验 category/日期；失败翻译不留脏草稿；内容不变时 ETag 在时钟前进后仍 304；缓存按 ClientContext/versionCode 隔离并跳过 6 小时节流；`mustAcknowledge=false` 且 `dismissible=true` 的 MODAL 可关闭。
+- M3：v3→v4 回填并重建索引；staging 后再 READY；resume 校验 CAS hash 且拒绝已删文档；ref_count 按存活文档；全局 RRF；retrieve pin READY 代际；rebuild 重写 FTS/向量；Chat 捕获检索异常。
+- 验证：`node src/worker.test.mjs` 退出 0（含 NAR01—NAR05）；`.\gradlew.bat licenseGuard licenseGuardReverse :shared:knowledge-api:test :shared:announcements:test :data:sqlite:test :app-android:assembleDebug --no-daemon` BUILD SUCCESSFUL；`python -B -m reuse lint` 182/182。
+- 未执行：真机/模拟器、Cloudflare 部署、ONNX/USearch JNI、K06 设备负载、独立审阅。
+- 文档：`docs/ANNOUNCEMENTS.md`、`docs/KNOWLEDGE.md` 第9节、`docs/IMPLEMENTATION_PLAN.md`、本交接。
+- Git：与未推送的 `9dc7560` 一并 push。SHA 在提交后回写。
 
 ## 7. 后续记录格式
 

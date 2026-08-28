@@ -12,4 +12,5 @@ class CasBlobSink(root: File) : BlobSink {
     private val inner = FileBlobSink(root)
 
     override fun put(bytes: ByteArray, mediaType: String): StoredBlob = inner.put(bytes, mediaType)
+    override fun get(sha256: String): ByteArray? = inner.get(sha256)
 }

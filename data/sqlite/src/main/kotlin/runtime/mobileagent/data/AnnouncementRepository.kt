@@ -50,27 +50,37 @@ class AnnouncementRepository(private val db: SqlConnection) {
 
     fun setKeyId(value: String) = setPref(PREF_KEY_ID, value.trim())
 
-    fun etag(): String? = cacheRow()?.string("etag")?.ifBlank { null }
+    fun etag(client: ClientContext): String? = cacheRow(cacheKey(client))?.string("etag")?.ifBlank { null }
 
-    fun lastFetchedAt(): String? = cacheRow()?.string("fetched_at")?.ifBlank { null }
+    fun lastFetchedAt(): String? = cacheRow(pref(PREF_CACHE_CONTEXT) ?: CACHE_KEY)?.string("fetched_at")?.ifBlank { null }
 
-    fun lastAttemptAt(): String? = cacheRow()?.string("last_attempt_at")?.ifBlank { null }
+    fun lastAttemptAt(client: ClientContext): String? =
+        cacheRow(cacheKey(client))?.string("last_attempt_at")?.ifBlank { null }
 
-    fun markAttempt() {
+    fun needsFetch(client: ClientContext, now: Instant = Instant.now()): Boolean {
+        if (cacheKey(client) != pref(PREF_CACHE_CONTEXT)) return true
+        if (client.versionCode.toString() != pref(PREF_CACHE_APP_VERSION)) return true
+        val last = lastAttemptAt(client) ?: return true
+        val instant = runCatching { Instant.parse(last) }.getOrNull() ?: return true
+        return now.toEpochMilli() - instant.toEpochMilli() >= java.util.concurrent.TimeUnit.HOURS.toMillis(6)
+    }
+
+    fun markAttempt(client: ClientContext) {
         val now = Utc.nowIso()
-        val row = cacheRow()
+        val key = cacheKey(client)
+        val row = cacheRow(key)
         if (row == null) {
             db.execute(
                 "INSERT INTO announcement_feed_cache(cache_key,etag,envelope_json,payload_json,feed_version,issued_at,expires_at,fetched_at,last_attempt_at) VALUES(?,?,?,?,?,?,?,?,?)",
-                listOf(CACHE_KEY, "", "", "", 0L, "", "", "", now),
+                listOf(key, "", "", "", 0L, "", "", "", now),
             )
         } else {
-            db.execute("UPDATE announcement_feed_cache SET last_attempt_at=? WHERE cache_key=?", listOf(now, CACHE_KEY))
+            db.execute("UPDATE announcement_feed_cache SET last_attempt_at=? WHERE cache_key=?", listOf(now, key))
         }
     }
 
     fun applyEnvelope(envelopeJson: String, etag: String, client: ClientContext, now: Instant = Instant.now()): String? {
-        val previous = cacheRow()?.long("feed_version")?.takeIf { it > 0 }
+        val previous = cacheRow(cacheKey(client))?.long("feed_version")?.takeIf { it > 0 }
         return when (val result = FeedVerifier.verify(envelopeJson, publicKeys(), client, now, previous)) {
             is FeedVerifyResult.Rejected -> result.reason
             is FeedVerifyResult.Accepted -> {
@@ -88,11 +98,11 @@ class AnnouncementRepository(private val db: SqlConnection) {
                             listOf(ref.id, ref.revision),
                         )
                     }
-                    db.execute("DELETE FROM announcement_feed_cache WHERE cache_key=?", listOf(CACHE_KEY))
+                    db.execute("DELETE FROM announcement_feed_cache WHERE cache_key=?", listOf(cacheKey(client)))
                     db.execute(
                         "INSERT INTO announcement_feed_cache(cache_key,etag,envelope_json,payload_json,feed_version,issued_at,expires_at,fetched_at,last_attempt_at) VALUES(?,?,?,?,?,?,?,?,?)",
                         listOf(
-                            CACHE_KEY,
+                            cacheKey(client),
                             etag,
                             envelopeJson,
                             json.encodeToString(result.payload),
@@ -103,15 +113,19 @@ class AnnouncementRepository(private val db: SqlConnection) {
                             Utc.nowIso(),
                         ),
                     )
+                    setPref(PREF_CACHE_CONTEXT, cacheKey(client))
+                    setPref(PREF_CACHE_APP_VERSION, client.versionCode.toString())
                 }
                 null
             }
         }
     }
 
-    fun records(now: Instant = Instant.now()): List<CachedAnnouncement> {
-        val expiresAt = cacheRow()?.string("expires_at").orEmpty()
+    fun records(now: Instant = Instant.now(), client: ClientContext? = null): List<CachedAnnouncement> {
+        val key = client?.let { cacheKey(it) } ?: pref(PREF_CACHE_CONTEXT) ?: CACHE_KEY
+        val expiresAt = cacheRow(key)?.string("expires_at").orEmpty()
         val expired = expiresAt.isNotBlank() && runCatching { Instant.parse(expiresAt) }.getOrNull()?.isBefore(now) == true
+        val contextStale = client != null && pref(PREF_CACHE_CONTEXT) != cacheKey(client)
         val states = db.query("SELECT * FROM announcement_state").associate { row ->
             (row.string("announcement_id") to row.long("revision").toInt()) to AnnouncementLocalState(
                 readAt = row.string("read_at").ifBlank { null },
@@ -120,14 +134,17 @@ class AnnouncementRepository(private val db: SqlConnection) {
                 acknowledgedAt = row.string("acknowledged_at").ifBlank { null },
             )
         }
-        return db.query("SELECT * FROM announcement_items").map { row ->
+        return db.query("SELECT * FROM announcement_items").mapNotNull { row ->
             val item = json.decodeFromString<AnnouncementItem>(row.string("item_json"))
+            if (client != null && !runtime.mobileagent.announcements.Targeting.matches(item.target.toTarget(), client, item.id)) {
+                return@mapNotNull null
+            }
             val active = row.long("active") == 1L
             CachedAnnouncement(
                 item = item,
                 state = states[item.id to item.revision] ?: AnnouncementLocalState(),
                 withdrawn = row.long("withdrawn") == 1L,
-                signatureExpired = expired || !active,
+                signatureExpired = expired || !active || contextStale,
             )
         }
     }
@@ -159,7 +176,8 @@ class AnnouncementRepository(private val db: SqlConnection) {
         )
     }
 
-    private fun cacheRow() = db.query("SELECT * FROM announcement_feed_cache WHERE cache_key=?", listOf(CACHE_KEY)).singleOrNull()
+    private fun cacheRow(key: String = pref(PREF_CACHE_CONTEXT) ?: CACHE_KEY) =
+        db.query("SELECT * FROM announcement_feed_cache WHERE cache_key=?", listOf(key)).singleOrNull()
 
     private fun pref(key: String): String? =
         db.query("SELECT value FROM app_prefs WHERE key=?", listOf(key)).firstOrNull()?.string("value")
@@ -176,6 +194,11 @@ class AnnouncementRepository(private val db: SqlConnection) {
         private const val PREF_PUBLIC_KEY = "announce_public_key_hex"
         private const val PREF_KEY_ID = "announce_key_id"
         private const val PREF_EVENT_QUEUE = "announce_event_queue"
+        private const val PREF_CACHE_CONTEXT = "announce_cache_context"
+        private const val PREF_CACHE_APP_VERSION = "announce_cache_app_version"
+
+        fun cacheKey(client: ClientContext): String =
+            listOf(client.platform, client.channel, client.versionCode.toString(), client.locale, client.installId).joinToString("|")
 
         fun parseHex(hex: String): ByteArray? {
             if (hex.length != 64 || hex.any { it !in HEX }) return null

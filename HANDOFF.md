@@ -3,7 +3,7 @@
 
 # 项目交接
 
-最后更新：2026-08-28T22:42:00+08:00（Asia/Taipei）。项目根目录：`E:\mobileAgentRuntime`。
+最后更新：2026-08-28T22:44:00+08:00（Asia/Taipei）。项目根目录：`E:\mobileAgentRuntime`。
 
 **接手者必须先读 [agent.md](agent.md)、本文件和 [技术实现方案](docs/IMPLEMENTATION_PLAN.md)。工作后必须维护本文件及受影响的专题文档。**
 
@@ -13,14 +13,14 @@
 | --- | --- |
 | 产品 | M1 部分实现。UAR/NAR/KAR 保留先前修复记录。M4/M5 独立审查仍为历史 `NEEDS_AMEND`；本轮已按源码核实并修复 M4R01—M4R07、M5R01—M5R11（JVM 回归）。独立复审前不能按阶段完成进入 M6 |
 | 业务源码/构建 | 本轮 Gradle `licenseGuard`/`licenseGuardReverse`、相关模块测试与 `assembleDebug` BUILD SUCCESSFUL；`python -B -m reuse lint` 195/195 退出 0。未跑模拟器/真机/付费模型 |
-| Git | 分支 `main` 跟踪 `origin/main`，本地 ahead 3。M4R/M5R 修复提交 `d8abaea25c69e50ae14d77534d670f82f3a216f6`。先前未推送的 `75fc381`、`103a7d2` 将一并 push。作者 `luozhibai`，无 Cursor trailer |
+| Git | 分支 `main` 跟踪 `origin/main`，已同步。M4R/M5R 修复 `d8abaea25c69e50ae14d77534d670f82f3a216f6`；SHA 记录 `4bda75074b948bc83106bf5a19b623dd28e11d90`。`git push origin main` 已将 `a3b87f2..4bda750` 推到 `https://github.com/hedanbaomi/mobile-agent-runtime.git`。作者 `luozhibai`，无 Cursor trailer |
 | CodeGraph | 修复后执行 `codegraph sync`；未提交 `.codegraph/` |
 | 许可 | 提交前 `licenseGuard`/`licenseGuardReverse` BUILD SUCCESSFUL；`python -B -m reuse lint` 195/195。未改 LICENSE 正文 |
-| 授权范围 | 用户已授权 commit 与 push。不部署 Cloudflare，不实现 M6 CPython |
+| 授权范围 | 用户已授权的 commit 与 push 已完成。不部署 Cloudflare，不实现 M6 CPython |
 
 ## 2. 当前任务
 
-进行中：用户已授权 `git push origin main`（含先前未推送的 `75fc381`/`103a7d2` 与本轮 `d8abaea`）。
+无进行中任务。M4R/M5R 已提交并推送；独立复审前不把阶段验收标为通过。
 
 ## 3. 关键约束
 
@@ -385,7 +385,7 @@ U02 的横屏、IME、大字号、触控、对比度、焦点及实际字体回�
 - Git：父提交 `103a7d2`；先前未推送的 `75fc381`/`103a7d2` 将一并 push。作者 `luozhibai <wy3273564266@163.com>`，走 `D:\Git\mingw64\libexec\git-core\git.exe commit-tree`。
 - 下一步：独立复审后再改阶段结论。不自动开工 M6。
 
-修复提交已写入 `d8abaea25c69e50ae14d77534d670f82f3a216f6`（作者/提交者 `luozhibai`，无 Cursor trailer）。push 结果另记。
+修复提交已写入 `d8abaea25c69e50ae14d77534d670f82f3a216f6`（作者/提交者 `luozhibai`，无 Cursor trailer）。SHA 记录提交 `4bda75074b948bc83106bf5a19b623dd28e11d90`。`git push origin main` 成功：`a3b87f2..4bda750`（含先前未推送的 M4/M5 `75fc381`/`103a7d2`）。
 
 ## 7. 后续记录格式
 

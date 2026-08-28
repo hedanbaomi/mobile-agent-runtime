@@ -13,7 +13,7 @@
 | --- | --- |
 | 产品 | M1 部分实现；AR01—AR10 已按代码核实并修复。完整 MVP 未完成 |
 | 业务源码/构建 | 本轮 `licenseGuard`/`licenseGuardReverse`、相关 JVM 测试、`:app-android:assembleDebug` 通过；APK 含 `libsqliteJni.so`。未做设备冷启动 |
-| Git | 分支 `main` 跟踪 `origin/main`；用户已于 2026-08-28 授权 commit 并 push 本轮 AR 修复 |
+| Git | 分支 `main` 跟踪 `origin/main`；AR 修复提交 `6b42f7bc1e5fbbe036e3640d9d21f6200544c98a` 已授权 push。作者 `luozhibai`，无 Cursor trailer |
 | CodeGraph | 修后未重建索引 |
 | 许可 | `python -B -m reuse lint` 本轮退出 0（140/140）；CI 固定 `reuse==6.2.0` |
 | 授权范围 | 用户已授权评估并修复 AR01—AR10，并于 2026-08-28 授权 commit 并 push `main` |
@@ -122,7 +122,7 @@ AR01 的平台依据：[Android 官方源码变更记录](https://android.google
   - AR10：SPDX 表达式必须严格等于 `AGPL-3.0-only`。
 - 验证：`.\gradlew.bat licenseGuard licenseGuardReverse :shared:knowledge-api:test :shared:provider-api:test :data:sqlite:test :build-logic:license-guard:test :app-android:assembleDebug` BUILD SUCCESSFUL；`python -B -m reuse lint` 退出 0。未跑真机/模拟器、未跑付费模型、未独立审阅。
 - 文档：`docs/KNOWLEDGE.md` 同步 Markdown 含图等待。
-- Git：用户授权 `commit并push`。本修订写入 `main` 并推送到 `origin`。作者 `luozhibai`，无 Cursor。
+- Git：用户授权 `commit并push`。已写入 `6b42f7bc1e5fbbe036e3640d9d21f6200544c98a`。作者 `luozhibai`，无 Cursor。
 - 下一步：设备验证 bundled FTS5 冷启动。
 
 ## 7. 后续记录格式

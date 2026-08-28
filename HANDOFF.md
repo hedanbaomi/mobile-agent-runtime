@@ -3,7 +3,7 @@
 
 # 项目交接
 
-最后更新：2026-08-28T23:20:00+08:00（Asia/Taipei）。项目根目录：`E:\mobileAgentRuntime`。
+最后更新：2026-08-28T23:22:00+08:00（Asia/Taipei）。项目根目录：`E:\mobileAgentRuntime`。
 
 **接手者必须先读 [agent.md](agent.md)、本文件和 [技术实现方案](docs/IMPLEMENTATION_PLAN.md)。工作后必须维护本文件及受影响的专题文档。**
 
@@ -13,14 +13,14 @@
 | --- | --- |
 | 产品 | M4/M5 第二次独立审查仍为历史 `NEEDS_AMEND`。本轮已按源码核实并修复 M4RR01—M4RR04、M5RR01—M5RR05（JVM 回归）。独立复审前不能按阶段完成进入 M6。UAR/NAR/KAR 历史记录保留 |
 | 业务源码/构建 | Gradle `licenseGuard`/`licenseGuardReverse`、knowledge/skills/agent-runtime/sqlite/provider 测试与 `assembleDebug` BUILD SUCCESSFUL；`python -B -m reuse lint` 195/195 退出 0。未跑模拟器/真机/付费模型 |
-| Git | 分支 `main` 跟踪 `origin/main`，本地 ahead 1。M4RR/M5RR 修复提交 `1a035aa8c413dac50d0d2cd8854bb5a112100404`。作者 `luozhibai`，无 Cursor trailer |
+| Git | 分支 `main` 跟踪 `origin/main`，已同步。M4RR/M5RR 修复 `1a035aa8c413dac50d0d2cd8854bb5a112100404`；SHA 记录 `cc7a65c7155b5d2a156866bc30dfa63d65dc7de7`。`git push origin main` 已将 `7f3f2e8..cc7a65c` 推到 `https://github.com/hedanbaomi/mobile-agent-runtime.git`。作者 `luozhibai`，无 Cursor trailer |
 | CodeGraph | 修复后执行 `codegraph sync`；未提交 `.codegraph/` |
 | 许可 | 提交前 `licenseGuard`/`licenseGuardReverse` BUILD SUCCESSFUL；`python -B -m reuse lint` 195/195。未改 LICENSE 正文 |
 | 授权范围 | 用户要求核对交接新问题并在属实时修复，完成后 commit 与 push。不部署 Cloudflare，不实现 M6 CPython |
 
 ## 2. 当前任务
 
-进行中：用户已授权 `git push origin main`（含 `1a035aa`）。
+无进行中任务。M4RR/M5RR 已提交并推送；独立复审前不把阶段验收标为通过。
 
 ## 3. 关键约束
 
@@ -459,7 +459,7 @@ U02 的横屏、IME、大字号、触控、对比度、焦点及实际字体回�
 - M5：`read_document` 校验 KB；HTTP method 交集；live grant 每次 invoke/approve；撤销后新 callId 与待批准恢复均拒绝；拒绝 IP 字面值并核验解析地址；预算 `withTimeout` 取消上游；截断 ZIP 与 Unix symlink 为 class E。
 - 验证：`.\gradlew.bat licenseGuard licenseGuardReverse :shared:knowledge-api:test :shared:skills-api:test :shared:agent-runtime:test :shared:provider-api:test :data:sqlite:test :app-android:assembleDebug --no-daemon` BUILD SUCCESSFUL；`python -B -m reuse lint` 195/195 退出 0。未跑真机/付费 Vision/真实 HTTP、未独立复审。
 - 文档：`docs/KNOWLEDGE.md` 第12节、`docs/SKILLS_AND_SECURITY.md` 第11节、`docs/IMPLEMENTATION_PLAN.md` 状态、本交接。
-- Git：修复提交 `1a035aa8c413dac50d0d2cd8854bb5a112100404`（作者/提交者 `luozhibai`，无 Cursor trailer）。push 结果另记。
+- Git：修复提交 `1a035aa8c413dac50d0d2cd8854bb5a112100404`（作者/提交者 `luozhibai`，无 Cursor trailer）。SHA 记录 `cc7a65c7155b5d2a156866bc30dfa63d65dc7de7`。`git push origin main` 成功：`7f3f2e8..cc7a65c`。
 - 下一步：独立复审后再改阶段结论。不自动开工 M6。
 
 ## 7. 后续记录格式

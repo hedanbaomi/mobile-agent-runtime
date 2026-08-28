@@ -3,7 +3,7 @@
 
 # 项目交接
 
-最后更新：2026-08-28T19:43:22+08:00（Asia/Taipei）。项目根目录：`E:\mobileAgentRuntime`。
+最后更新：2026-08-28T19:44:30+08:00（Asia/Taipei）。项目根目录：`E:\mobileAgentRuntime`。
 
 **接手者必须先读 [agent.md](agent.md)、本文件和 [技术实现方案](docs/IMPLEMENTATION_PLAN.md)。工作后必须维护本文件及受影响的专题文档。**
 
@@ -13,14 +13,14 @@
 | --- | --- |
 | 产品 | M1 部分实现；AR01—AR10 已修复。M0.5 UI 设计基线 `DOC_CHECK_PASS`。M2 本地公告闭环已推送。M3 文本知识库本地 JVM 已实现（K01、K02 文本/失败证据、K05、K07、K08 本地；K06 仅 COPYING 检查点）。N01—N09 与 K 系列均为本地测试 PASS，**不是**设备 PASS、**不是**生产部署。完整 MVP 未完成 |
 | 业务源码/构建 | 本轮 `licenseGuard`/`licenseGuardReverse`、`:shared:knowledge-api:test`、`:data:sqlite:test`、`:app-android:assembleDebug` 通过；REUSE 182/182 |
-| Git | 分支 `main` 跟踪 `origin/main`；M3 按用户授权随本提交入库，SHA 在推送后回写。作者 `luozhibai`，无 Cursor trailer |
+| Git | 分支 `main` 跟踪 `origin/main`；M3 已推送 `fa7763117bb5bdecc1ea04366fae516bf2234e57`，作者 `luozhibai`，无 Cursor trailer |
 | CodeGraph | 仓库无 `.codegraph/` 工作副本（被 gitignore）；本轮用直接读文件定位。未重建索引 |
 | 许可 | `python -B -m reuse lint` 退出 0（182/182）；未改 LICENSE 正文 |
 | 授权范围 | 用户已授权 commit/push M3。仍不授权 Cloudflare 生产部署 |
 
 ## 2. 当前任务
 
-无进行中认领。M3 文本知识库本地实现已完成，用户已授权 commit/push。下一步是 M4（Vision/PDF 正文/DOCX-EPUB 解析）。
+无进行中认领。M3 已推送 `fa7763117bb5bdecc1ea04366fae516bf2234e57`。下一步是 M4（Vision/PDF 正文/DOCX-EPUB 解析）。
 
 ## 3. 关键约束
 
@@ -31,7 +31,7 @@
 
 ## 4. 接手顺序
 
-1. `git status --short --branch`、`git log -1 --format=full`；确认 HEAD 无 `Co-authored-by: Cursor`
+1. `git status --short --branch`、`git log -1 --format=full`；M3 HEAD 应为 `fa7763117bb5bdecc1ea04366fae516bf2234e57` 或之后的交接 SHA 记录；确认无 `Co-authored-by: Cursor`
 2. 提交作者使用 `D:\Git\mingw64\libexec\git-core\git.exe commit-tree`，作者 `luozhibai <wy3273564266@163.com>`
 3. M3 已按授权提交；下一步 M4，不要把 `local-hash-v1-d32` 写成 ONNX pack
 4. 设备/模拟器仍缺：bundled FTS5 冷启动、公告本地 Worker→真机拉取、K06 300—500 文件负载
@@ -192,7 +192,7 @@ AR01 的平台依据：[Android 官方源码变更记录](https://android.google
   - `python -B -m reuse lint` → 退出 0，182/182。
 - 未执行：真机/模拟器、ONNX、USearch JNI、K06 300—500 文件、付费模型、独立审阅、commit/push、Cloudflare。
 - 文档：`docs/KNOWLEDGE.md` 第 8 节、`docs/IMPLEMENTATION_PLAN.md` 状态、`docs/design/ui-implementation-map.md` Knowledge 现状、本交接。
-- Git：用户已授权 commit/push。本提交写入 M3；推送后回写 SHA。作者 `luozhibai`，无 Cursor。
+- Git：已写入并推送 `fa7763117bb5bdecc1ea04366fae516bf2234e57`。作者 `luozhibai`，无 Cursor。
 - 下一步：M4 Vision/PDF 正文/DOCX-EPUB。不要把 `local-hash-v1-d32` 写成 ONNX。
 
 ## 7. 后续记录格式

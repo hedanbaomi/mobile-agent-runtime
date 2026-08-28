@@ -13,7 +13,7 @@
 | --- | --- |
 | 产品 | M1 部分实现；上一实现轮记录 AR01—AR10 已修复。M0.5 软件页面 UI 设计基线交付并获用户明确确认同意，已补齐简体中文（zh-CN）与双语本地化支持（高保真矢量稿、Token、原型、映射、双语 strings.xml 与规范已落地，全量禁用 Emoji，状态 `DOC_CHECK_PASS`）。完整 MVP 未完成 |
 | 业务源码/构建 | guard、相关 JVM 测试及 assembleDebug 通过，APK 含 `libsqliteJni.so`；本轮完成设计包、双语资源与文档交付 |
-| Git | 分支 `main` 跟踪 `origin/main`；用户明确授权“同意设计,但应当加入对简体中文支持,完成后允许commit与push”。已执行 commit 并 push 至 remote |
+| Git | 分支 `main` 跟踪 `origin/main`；已按用户授权提交并推送，最新提交为 `c9798dc336864a353cfe9c2b0edd7d16aa37769c`，工作区干净 |
 | CodeGraph | 修复轮未重建索引；本轮仅文档与设计/资源变更，未同步索引 |
 | 许可 | 本轮 `python -B -m reuse lint` 退出 0（157/157）；许可正文 SHA 未变；未改许可配置或 CI |
 | 授权范围 | 用户本轮明确授权：完成 M0.5 软件页面 UI 设计及简体中文支持后，执行 commit 与 push。不包含生产部署或云端发布 |

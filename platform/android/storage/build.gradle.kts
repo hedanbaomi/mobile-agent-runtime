@@ -27,7 +27,5 @@ dependencies {
     implementation(project(":data:sqlite"))
     implementation(libs.androidx.documentfile)
     implementation(libs.androidx.sqlite)
-    implementation(libs.androidx.sqlite.framework)
     implementation(libs.androidx.sqlite.bundled)
-
 }

@@ -9,6 +9,7 @@ import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import runtime.mobileagent.provider.ModelEvent
+import runtime.mobileagent.provider.SecretRedactor
 
 object OpenAiSse {
     private val json = Json { ignoreUnknownKeys = true }
@@ -16,6 +17,7 @@ object OpenAiSse {
     fun eventsFromLine(
         line: String,
         toolBuf: LinkedHashMap<String, Pair<String, StringBuilder>>,
+        extraSecrets: List<String> = emptyList(),
     ): List<ModelEvent> {
         val trimmed = line.trim()
         if (trimmed.isEmpty() || trimmed.startsWith(":")) return emptyList()
@@ -24,7 +26,7 @@ object OpenAiSse {
         if (data == "[DONE]") return listOf(ModelEvent.Completed)
         val obj = runCatching { json.parseToJsonElement(data).jsonObject }.getOrNull() ?: return emptyList()
         obj["error"]?.jsonObject?.get("message")?.jsonPrimitive?.contentOrNull?.let { msg ->
-            return listOf(ModelEvent.Failed(msg))
+            return listOf(ModelEvent.Failed(SecretRedactor.redact(msg, extraSecrets)))
         }
         val choice = obj["choices"]?.jsonArray?.firstOrNull()?.jsonObject ?: return emptyList()
         val events = mutableListOf<ModelEvent>()

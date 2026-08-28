@@ -38,3 +38,22 @@ object ReciprocalRankFusion {
         }
     }
 }
+
+object RetrievalBudget {
+    const val DEFAULT_MAX_CHARS = 6000
+
+    fun clip(hits: List<SearchHit>, maxChars: Int = DEFAULT_MAX_CHARS): List<SearchHit> {
+        if (maxChars <= 0) return emptyList()
+        val out = mutableListOf<SearchHit>()
+        var used = 0
+        for (hit in hits) {
+            if (used >= maxChars) break
+            val remaining = maxChars - used
+            val text = if (hit.text.length <= remaining) hit.text else hit.text.take(remaining)
+            if (text.isEmpty()) break
+            out += hit.copy(text = text)
+            used += text.length
+        }
+        return out
+    }
+}

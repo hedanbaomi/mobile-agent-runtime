@@ -29,7 +29,7 @@ path = [
     "agent.md",
     "HANDOFF.md",
     "LICENSE_POLICY.md",
-    "docs/SKILLS_AND_SECURITY.md",
+    "docs/**",
 ]
 precedence = "aggregate"
 SPDX-FileCopyrightText = "2026 mobileAgentRuntime contributors"

@@ -19,4 +19,13 @@ class SecretRedactorTest {
         assertFalse(out.contains("sk-abcdefghijklmn"))
         assertFalse(out.contains("leftover"))
     }
+
+    @Test
+    fun extraSecretIsRequiredForArbitraryTokens() {
+        val token = "synthetic-provider-token-12345"
+        val raw = SecretRedactor.redact("Invalid credential: $token")
+        assertTrue(raw.contains(token))
+        val redacted = SecretRedactor.redact("Invalid credential: $token", listOf(token))
+        assertFalse(redacted.contains(token))
+    }
 }

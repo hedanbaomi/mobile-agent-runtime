@@ -3,7 +3,7 @@
 
 # 知识库、多模态和检索契约
 
-状态：v1 设计，部分实现。TXT/MD 经 SAF 复制到 CAS 后写入 FTS，可标 READY（词法检索；尚无 ONNX 向量）。含图文件复制后停在 `WAITING_FOR_VISION_MODEL`，不得标 READY。PDF/DOCX/EPUB 复制后失败并说明原因，不静默当文本。对应 R05—R08、K01—K08。
+状态：v1 设计，部分实现。TXT/MD 经 SAF 复制到 CAS 后写入 FTS，可标 READY（词法检索；尚无 ONNX 向量）。独立图片以及 Markdown 中的 `![]()`/`<img>` 引用停在 `WAITING_FOR_VISION_MODEL`，不得标 READY，且不外联下载。PDF/DOCX/EPUB 复制后失败并说明原因，不静默当文本。对应 R05—R08、K01—K08。
 
 ## 1. 数据模型与一致性
 

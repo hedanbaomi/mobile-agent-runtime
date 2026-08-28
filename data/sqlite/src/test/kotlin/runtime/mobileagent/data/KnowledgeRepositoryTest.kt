@@ -43,4 +43,17 @@ class KnowledgeRepositoryTest {
         assertEquals(ImportStage.FAILED, job.stage)
         assertTrue(job.error.orEmpty().contains("PDF"))
     }
+
+    @Test
+    fun markdownImageSyntaxWaitsAndIsNotReady() {
+        val db = JdbcSqlConnection()
+        Migrations.apply(db)
+        val repo = KnowledgeRepository(db, MemoryBlobSink())
+        val body = "# Recipe\n\nSee the diagram:\n\n![oven](photo.png)\n".toByteArray()
+        val job = repo.importBytes("recipe.md", "text/markdown", body, visionConfigured = false)
+        assertEquals(ImportStage.WAITING_FOR_VISION_MODEL, job.stage)
+        assertTrue(job.hasImages)
+        assertFalse(runtime.mobileagent.knowledge.ImportStateMachine.isCompleteSuccess(job))
+        assertTrue(repo.search("diagram").isEmpty())
+    }
 }

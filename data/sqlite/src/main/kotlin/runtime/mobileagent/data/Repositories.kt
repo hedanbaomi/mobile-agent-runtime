@@ -82,7 +82,15 @@ class ProfileRepository(private val db: SqlConnection) {
         }
     }
 
-    fun chatModel(): ModelProfile? = listModels().firstOrNull { it.role == ModelRole.CHAT }
+    fun chatBinding(): Pair<ProviderProfile, ModelProfile>? {
+        for (provider in listProviders()) {
+            val model = listModels(provider.id).firstOrNull { it.role == ModelRole.CHAT } ?: continue
+            return provider to model
+        }
+        return null
+    }
+
+    fun chatModel(): ModelProfile? = chatBinding()?.second
 
     fun visionConfigured(): Boolean = listModels().any { "image" in it.capabilities }
 }

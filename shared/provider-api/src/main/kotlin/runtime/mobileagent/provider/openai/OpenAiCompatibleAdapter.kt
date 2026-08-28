@@ -91,16 +91,29 @@ class OpenAiCompatibleAdapter(
                 }
                 val channel = response.bodyAsChannel()
                 val toolBuf = linkedMapOf<String, Pair<String, StringBuilder>>()
-                var completed = false
+                var sawCompleted = false
+                var sawFailed = false
                 while (!channel.isClosedForRead) {
                     val line = channel.readUTF8Line() ?: break
-                    OpenAiSse.eventsFromLine(line, toolBuf).forEach { event ->
-                        if (event is ModelEvent.Completed) completed = true
-                        emit(event)
+                    OpenAiSse.eventsFromLine(line, toolBuf, listOf(token)).forEach { event ->
+                        val outgoing = when (event) {
+                            is ModelEvent.Failed ->
+                                ModelEvent.Failed(SecretRedactor.redact(event.sanitizedMessage, listOf(token)))
+                            else -> event
+                        }
+                        when (outgoing) {
+                            is ModelEvent.Completed -> sawCompleted = true
+                            is ModelEvent.Failed -> sawFailed = true
+                            else -> Unit
+                        }
+                        emit(outgoing)
                     }
-                    if (completed) break
+                    if (sawCompleted || sawFailed) break
                 }
-                if (!completed) emit(ModelEvent.Completed)
+                if (sawFailed || sawCompleted) {
+                    return@execute
+                }
+                emit(ModelEvent.Failed(ErrorCode.UNKNOWN_OUTCOME.name))
             }
         } catch (e: kotlinx.coroutines.CancellationException) {
             throw e

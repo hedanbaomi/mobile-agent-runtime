@@ -20,6 +20,7 @@ import runtime.mobileagent.domain.AppException
 import runtime.mobileagent.domain.EntityId
 import runtime.mobileagent.domain.ErrorCode
 import runtime.mobileagent.feature.chat.ChatLine
+import runtime.mobileagent.knowledge.RetrievalBudget
 import runtime.mobileagent.provider.ModelEvent
 import runtime.mobileagent.provider.SecretRedactor
 import runtime.mobileagent.provider.openai.OpenAiCompatibleAdapter
@@ -35,10 +36,14 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     fun send() {
         val text = input.value.trim()
         if (text.isBlank() || streaming.value) return
-        val provider = app.container.profiles.listProviders().firstOrNull()
-        val model = app.container.profiles.chatModel()
-        if (provider == null || model == null) {
+        val binding = app.container.profiles.chatBinding()
+        if (binding == null) {
             status.value = "Configure a Provider and chat model first."
+            return
+        }
+        val (provider, model) = binding
+        if (model.providerId != provider.id) {
+            status.value = "Chat model is not bound to the selected provider."
             return
         }
         input.value = ""
@@ -47,7 +52,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         lines.add(ChatLine("Assistant", ""))
         streaming.value = true
         status.value = "Streaming from ${provider.baseUrl} (${model.modelId}). Nothing is sent to this project's servers."
-        val hits = app.container.knowledge.search(text)
+        val hits = RetrievalBudget.clip(app.container.knowledge.search(text))
         val retrieved = hits.mapIndexed { i, hit -> "[citation:$i ${hit.chunkId}] ${hit.text}" }
         if (app.container.knowledge.waitingForVisionCount() > 0) {
             status.value += " Some imported images are waiting for a Vision model and were not added to context."
@@ -84,8 +89,9 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                         when (event) {
                             is ModelEvent.TextDelta -> appendAssistant(assistantIndex, event.text)
                             is ModelEvent.Failed -> {
-                                appendAssistant(assistantIndex, "\n[${SecretRedactor.redact(event.sanitizedMessage)}]")
-                                status.value = event.sanitizedMessage
+                                val sanitized = SecretRedactor.redact(event.sanitizedMessage)
+                                appendAssistant(assistantIndex, "\n[$sanitized]")
+                                status.value = sanitized
                             }
                             ModelEvent.Completed -> status.value = "Completed locally-orchestrated request."
                             is ModelEvent.Usage -> status.value = "Tokens in ${event.inputTokens} / out ${event.outputTokens}"

@@ -43,6 +43,14 @@ object MediaKind {
 
     fun isImage(format: SourceFormat): Boolean = format == SourceFormat.IMAGE
 
+    fun markdownReferencesImages(text: String): Boolean {
+        if (MARKDOWN_IMAGE.containsMatchIn(text)) return true
+        return HTML_IMAGE.containsMatchIn(text)
+    }
+
+    private val MARKDOWN_IMAGE = Regex("""!\[[^\]]*]\(\s*[^)\s]+[^)]*\)""")
+    private val HTML_IMAGE = Regex("""<img\b[^>]*\bsrc\s*=""", RegexOption.IGNORE_CASE)
+
     private fun isImageHeader(header: ByteArray): Boolean {
         if (header.size < 12) return false
         if (header[0] == 0xFF.toByte() && header[1] == 0xD8.toByte()) return true

@@ -59,6 +59,44 @@ class LicenseScannerTest {
         assertTrue(violations.any { it.contains("must not be MIT") }, violations.joinToString("\n"))
     }
 
+    @Test
+    fun dualLicenseExpressionIsRejected(@TempDir tmp: Path) {
+        val license = "AGPL-BODY".repeat(40).toByteArray()
+        val scanner = LicenseScanner(expectedLicenseSha256 = sha(license))
+        writeMinimalProject(tmp, license)
+        tmp.resolve("shared/Dual.kt").writeText(
+            """
+            // SPDX-FileCopyrightText: 2026 mobileAgentRuntime contributors
+            // SPDX-License-Identifier: AGPL-3.0-only OR Apache-2.0
+            class Dual
+            """.trimIndent(),
+        )
+        val violations = scanner.scan(tmp)
+        assertTrue(violations.any { it.contains("exactly AGPL-3.0-only") }, violations.joinToString("\n"))
+    }
+
+    @Test
+    fun apacheAnnotationCannotExemptFirstPartyTree(@TempDir tmp: Path) {
+        val license = "AGPL-BODY".repeat(40).toByteArray()
+        val scanner = LicenseScanner(expectedLicenseSha256 = sha(license))
+        writeMinimalProject(tmp, license)
+        tmp.resolve("REUSE.toml").writeText(
+            tmp.resolve("REUSE.toml").toFile().readText() + """
+
+            [[annotations]]
+            path = ["shared/domain", "shared/domain/**"]
+            precedence = "override"
+            SPDX-FileCopyrightText = "Vendor"
+            SPDX-License-Identifier = "${'"' + "Apache-2.0" + '"'}"
+            """.trimIndent(),
+        )
+        val unmarked = tmp.resolve("shared/domain/Skip.kt")
+        unmarked.parent.createDirectories()
+        unmarked.writeText("class Skip\n")
+        val violations = scanner.scan(tmp)
+        assertTrue(violations.any { it.contains("shared/domain/Skip.kt") }, violations.joinToString("\n"))
+    }
+
     private fun writeMinimalProject(root: Path, license: ByteArray) {
         Files.write(root.resolve("LICENSE"), license)
         root.resolve("LICENSES").createDirectories()

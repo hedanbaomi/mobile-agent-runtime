@@ -69,6 +69,33 @@ object LicenseGuardReverseTests {
             check(thirdPartyViolations.isEmpty()) {
                 "legal third-party MIT should pass, got $thirdPartyViolations"
             }
+            assertFails("dual license on first-party") {
+                val root = fixture(tmp.resolve("dual-license"), licenseBytes)
+                root.resolve("shared/example.kt").writeText(
+                    """
+                    // SPDX-FileCopyrightText: 2026 mobileAgentRuntime contributors
+                    // SPDX-License-Identifier: AGPL-3.0-only OR Apache-2.0
+                    class Example
+                    """.trimIndent(),
+                )
+                LicenseScanner().scan(root)
+            }
+            assertFails("apache annotation covering first-party") {
+                val root = fixture(tmp.resolve("apache-first-party"), licenseBytes)
+                val reuse = root.resolve("REUSE.toml")
+                reuse.writeText(
+                    reuse.readText(Charsets.UTF_8) + """
+
+                    [[annotations]]
+                    path = ["shared", "shared/**"]
+                    precedence = "override"
+                    SPDX-FileCopyrightText = "Example Authors"
+                    SPDX-License-Identifier = "Apache-2.0"
+                    """.trimIndent(),
+                )
+                root.resolve("shared/example.kt").writeText("class Example\n")
+                LicenseScanner().scan(root)
+            }
         } finally {
             tmp.toFile().deleteRecursively()
         }

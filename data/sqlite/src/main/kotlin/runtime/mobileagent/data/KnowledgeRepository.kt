@@ -61,13 +61,21 @@ class KnowledgeRepository(
             }
             SourceFormat.TEXT, SourceFormat.MARKDOWN -> {
                 val text = String(bytes, Charsets.UTF_8)
-                val chunks = TextChunker.chunk(text)
-                if (chunks.isEmpty()) {
-                    job.stage = ImportStage.FAILED
-                    job.error = "The file is empty"
+                job.hasImages = format == SourceFormat.MARKDOWN && MediaKind.markdownReferencesImages(text)
+                if (job.hasImages) {
+                    advanceThrough(job, ImportStage.WAITING_FOR_VISION_MODEL)
+                    if (job.stage == ImportStage.WAITING_FOR_VISION_MODEL) {
+                        job.error = "Markdown references images. They were not downloaded and the document is not READY."
+                    }
                 } else {
-                    persistChunks(documentId, chunks)
-                    advanceThrough(job, ImportStage.READY)
+                    val chunks = TextChunker.chunk(text)
+                    if (chunks.isEmpty()) {
+                        job.stage = ImportStage.FAILED
+                        job.error = "The file is empty"
+                    } else {
+                        persistChunks(documentId, chunks)
+                        advanceThrough(job, ImportStage.READY)
+                    }
                 }
             }
             SourceFormat.PDF -> fail(job, "PDF import is not in this build yet. The file was copied and was not dropped.")

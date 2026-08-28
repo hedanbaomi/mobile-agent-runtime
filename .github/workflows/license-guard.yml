@@ -25,5 +25,5 @@ jobs:
         run: ./gradlew licenseGuard licenseGuardReverse --no-daemon
       - name: REUSE
         run: |
-          python -m pip install reuse
+          python -m pip install "reuse==6.2.0"
           python -m reuse lint

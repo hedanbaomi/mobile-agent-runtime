@@ -91,13 +91,16 @@ class LicenseScanner(
                 if ("SPDX-FileCopyrightText:" !in header) {
                     violations += "$rel: missing SPDX-FileCopyrightText"
                 }
-                when {
-                    "SPDX-License-Identifier: AGPL-3.0-only" in header -> Unit
-                    "SPDX-License-Identifier: AGPL-3.0-or-later" in header ->
+                val expression = spdxLicenseExpression(header)
+                when (expression) {
+                    "AGPL-3.0-only" -> Unit
+                    "AGPL-3.0-or-later" ->
                         violations += "$rel: AGPL-3.0-or-later is forbidden"
-                    Regex("SPDX-License-Identifier:\\s*MIT\\b").containsMatchIn(header) ->
+                    "MIT" ->
                         violations += "$rel: first-party SPDX must not be MIT"
-                    else -> violations += "$rel: missing SPDX-License-Identifier: AGPL-3.0-only"
+                    null -> violations += "$rel: missing SPDX-License-Identifier: AGPL-3.0-only"
+                    else ->
+                        violations += "$rel: first-party SPDX must be exactly AGPL-3.0-only, found $expression"
                 }
             }
         }
@@ -108,6 +111,7 @@ class LicenseScanner(
         if (rel == "local.properties") return false
         if (rel.endsWith(".jar")) return false
         if (rel in THIRD_PARTY_WRAPPER) return false
+        if (rel == "vendor" || rel.startsWith("vendor/")) return false
         if (thirdParty.any { rel == it || rel.startsWith("$it/") }) return false
         return file.extension.lowercase() in FIRST_PARTY_EXTENSIONS || file.name in FIRST_PARTY_NAMES
     }
@@ -123,12 +127,28 @@ class LicenseScanner(
             if (block.contains("AGPL-3.0-only")) continue
             Regex(""""([^"]+)"""").findAll(block).forEach { match ->
                 val value = match.groupValues[1]
-                if ('/' in value || value.startsWith("gradle")) {
+                if (isExemptThirdPartyPath(value)) {
                     paths += value
                 }
             }
         }
         return paths
+    }
+
+    private fun isExemptThirdPartyPath(value: String): Boolean {
+        val rel = value.replace('\\', '/').trimEnd('/')
+        if (rel in THIRD_PARTY_WRAPPER) return true
+        if (rel == "vendor" || rel.startsWith("vendor/")) return true
+        return false
+    }
+
+    internal fun spdxLicenseExpression(header: String): String? {
+        val line = header.lineSequence().firstOrNull { it.contains("SPDX-License-Identifier:") } ?: return null
+        return line.substringAfter("SPDX-License-Identifier:")
+            .substringBefore("-->")
+            .trim()
+            .trimStart('/', '*')
+            .trim()
     }
 
     private fun sha256Hex(bytes: ByteArray): String {

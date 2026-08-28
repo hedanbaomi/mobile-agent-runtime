@@ -15,6 +15,7 @@
 - [scr-skill-01-dark.svg](scr-skill-01-dark.svg): Skill 沙箱管理、安全清单与调用审计日志（深色主题）
 - [scr-ann-01-light.svg](scr-ann-01-light.svg): 公告中心、置顶横幅与强制确认模态弹窗（浅色主题）
 - [scr-sett-01-dark.svg](scr-sett-01-dark.svg): 设置主页、隐私开关、数据备份与 AGPL 许可证（深色主题）
+- [scr-chat-03-66ccff.svg](scr-chat-03-66ccff.svg): Chat 主对话流、气泡布局、引用与工具确认卡片（66ccff 主题）
 
 ## 2. 设计规范说明
 

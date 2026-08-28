@@ -76,6 +76,35 @@ SPDX-License-Identifier: AGPL-3.0-only
       --outline-variant: #374151;
     }
 
+    [data-theme="66ccff"] {
+      --primary: #66ccff;
+      --on-primary: #003b52;
+      --primary-container: #e0f4ff;
+      --on-primary-container: #004863;
+      --secondary: #4a6069;
+      --on-secondary: #ffffff;
+      --secondary-container: #d6e9f0;
+      --on-secondary-container: #142930;
+      --tertiary: #0e9f6e;
+      --on-tertiary: #ffffff;
+      --tertiary-container: #def7ec;
+      --on-tertiary-container: #03543f;
+      --error: #e02424;
+      --error-container: #fde8e8;
+      --on-error-container: #9b1c1c;
+      --warning: #c27803;
+      --warning-container: #fef08a;
+      --on-warning-container: #723b13;
+      --background: #f2f9fd;
+      --on-background: #0e1e24;
+      --surface: #ffffff;
+      --on-surface: #0e1e24;
+      --surface-variant: #e3eff5;
+      --on-surface-variant: #3d545e;
+      --outline: #b8d3e0;
+      --outline-variant: #d3e5ee;
+    }
+
     * { box-sizing: border-box; margin: 0; padding: 0; }
     body {
       font-family: var(--sans-font);
@@ -806,6 +835,18 @@ SPDX-License-Identifier: AGPL-3.0-only
             </div>
           </div>
 
+          <!-- Theme & Palette Selector Entry (SCR-SETT-01) -->
+          <div class="card">
+            <div class="card-title" id="settThemeTitle">界面主题与主色调 (Theme & Palette)</div>
+            <div class="form-group" style="margin-top:8px;">
+              <select class="form-control" id="settThemeSelect" onchange="onSettingThemeChange(this.value)">
+                <option value="light" id="optThemeLight">浅色模式 (Light)</option>
+                <option value="dark" id="optThemeDark">深色模式 (Dark)</option>
+                <option value="66ccff" id="optTheme66ccff">66ccff</option>
+              </select>
+            </div>
+          </div>
+
           <div class="card">
             <div class="card-title" id="settPrivacyTitle">隐私与匿名指标</div>
             <div style="display:flex; justify-content:space-between; align-items:center; margin-top:8px;">
@@ -1139,13 +1180,21 @@ SPDX-License-Identifier: AGPL-3.0-only
   <script>
     // Localization dictionary
     let currentLang = 'zh-CN';
+    let currentTheme = 'light';
+    const themeSequence = ['light', 'dark', '66ccff'];
+
     const i18n = {
       'zh-CN': {
         appTitle: 'mobileAgentRuntime - UI 原型系统',
         appBadge: 'M0.5 设计基线 (zh-CN)',
         langBtn: 'English',
-        themeLight: '切换浅色模式',
-        themeDark: '切换深色模式',
+        themeNextDark: '切换深色模式',
+        themeNext66ccff: '切换至 66ccff',
+        themeNextLight: '切换浅色模式',
+        settThemeTitle: '界面主题与主色调 (Theme & Palette)',
+        optThemeLight: '浅色模式 (Light)',
+        optThemeDark: '深色模式 (Dark)',
+        optTheme66ccff: '66ccff',
         topNotice: '5G | 安全沙箱 | AGPL-3.0',
         chatTitle: '对话: 技术文档助手',
         chatInspectBtn: '审查请求',
@@ -1181,8 +1230,13 @@ SPDX-License-Identifier: AGPL-3.0-only
         appTitle: 'mobileAgentRuntime - UI Prototype',
         appBadge: 'M0.5 Design Baseline (en-US)',
         langBtn: '简体中文',
-        themeLight: 'Switch to Light Theme',
-        themeDark: 'Switch to Dark Theme',
+        themeNextDark: 'Switch to Dark',
+        themeNext66ccff: 'Switch to 66ccff',
+        themeNextLight: 'Switch to Light',
+        settThemeTitle: 'Theme & Palette',
+        optThemeLight: 'Light Theme',
+        optThemeDark: 'Dark Theme',
+        optTheme66ccff: '66ccff',
         topNotice: '5G | Isolated Sandbox | AGPL-3.0',
         chatTitle: 'Chat: Doc Research Agent',
         chatInspectBtn: 'Inspect Request',
@@ -1216,13 +1270,25 @@ SPDX-License-Identifier: AGPL-3.0-only
       }
     };
 
+    function updateThemeButtonText() {
+      const btn = document.getElementById('themeToggleBtn');
+      const dict = i18n[currentLang];
+      if (!btn) return;
+      if (currentTheme === 'light') {
+        btn.textContent = dict.themeNextDark;
+      } else if (currentTheme === 'dark') {
+        btn.textContent = dict.themeNext66ccff;
+      } else {
+        btn.textContent = dict.themeNextLight;
+      }
+    }
+
     function applyLanguage(lang) {
       currentLang = lang;
       const dict = i18n[currentLang];
       document.getElementById('appTitle').textContent = dict.appTitle;
       document.getElementById('appBadge').textContent = dict.appBadge;
       document.getElementById('langToggleBtn').textContent = dict.langBtn;
-      document.getElementById('themeToggleBtn').textContent = isDark ? dict.themeLight : dict.themeDark;
       document.getElementById('topStatusNotice').textContent = dict.topNotice;
       document.getElementById('chatTitle').textContent = dict.chatTitle;
       document.getElementById('chatInspectBtn').textContent = dict.chatInspectBtn;
@@ -1246,6 +1312,10 @@ SPDX-License-Identifier: AGPL-3.0-only
       document.getElementById('btnMarkRead').textContent = dict.btnMarkRead;
       document.getElementById('aboutHeaderTitle').textContent = dict.aboutHeaderTitle;
       document.getElementById('btnCheckUpdate').textContent = dict.btnCheckUpdate;
+      document.getElementById('settThemeTitle').textContent = dict.settThemeTitle;
+      document.getElementById('optThemeLight').textContent = dict.optThemeLight;
+      document.getElementById('optThemeDark').textContent = dict.optThemeDark;
+      document.getElementById('optTheme66ccff').textContent = dict.optTheme66ccff;
       document.getElementById('navChat').textContent = dict.navChat;
       document.getElementById('navAgents').textContent = dict.navAgents;
       document.getElementById('navProviders').textContent = dict.navProviders;
@@ -1254,8 +1324,10 @@ SPDX-License-Identifier: AGPL-3.0-only
       document.getElementById('navAnn').textContent = dict.navAnn;
       document.getElementById('navAbout').textContent = dict.navAbout;
 
-      const sel = document.getElementById('settLangSelect');
-      if (sel) sel.value = lang;
+      updateThemeButtonText();
+
+      const selLang = document.getElementById('settLangSelect');
+      if (selLang) selLang.value = lang;
     }
 
     function toggleLanguage() {
@@ -1281,20 +1353,35 @@ SPDX-License-Identifier: AGPL-3.0-only
       }
     }
 
-    // Theme toggle logic
-    let isDark = false;
-    function toggleTheme() {
-      isDark = !isDark;
+    // Theme toggle & apply logic
+    function applyTheme(themeName) {
+      currentTheme = themeName;
       const device = document.getElementById('deviceFrame');
-      const btn = document.getElementById('themeToggleBtn');
-      const dict = i18n[currentLang];
-      if (isDark) {
+      const selTheme = document.getElementById('settThemeSelect');
+
+      if (themeName === 'dark') {
         device.setAttribute('data-theme', 'dark');
-        btn.textContent = dict.themeLight;
+      } else if (themeName === '66ccff') {
+        device.setAttribute('data-theme', '66ccff');
       } else {
         device.removeAttribute('data-theme');
-        btn.textContent = dict.themeDark;
       }
+
+      updateThemeButtonText();
+
+      if (selTheme) {
+        selTheme.value = themeName;
+      }
+    }
+
+    function toggleTheme() {
+      const idx = themeSequence.indexOf(currentTheme);
+      const nextIdx = (idx + 1) % themeSequence.length;
+      applyTheme(themeSequence[nextIdx]);
+    }
+
+    function onSettingThemeChange(val) {
+      applyTheme(val);
     }
 
     // Modal controls

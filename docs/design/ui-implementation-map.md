@@ -102,3 +102,13 @@
 - **动态语言支持**:
   - `SettingsViewModel` 维护应用语言偏好（跟随系统 / 简体中文 / English）。
   - Compose 树通过 `CompositionLocalProvider(LocalConfiguration provides configuration)` 实现全应用界面语言热切换。
+
+## 5. 多主题与 66ccff 色彩系统映射
+
+- **主题调色板**:
+  - **浅色模式 (Light Theme)**: 主色 `#1A56DB`，亮白底色与灰阶卡片。
+  - **深色模式 (Dark Theme)**: 主色 `#76A9FA`，暗灰底色（`#111827`）与深灰容器（`#1F2937`）。
+  - **66ccff 主题 (66ccff Theme)**: 主色 `#66CCFF`，整体采用浅色风格（浅蓝白底色 `#F2F9FD` 与纯白卡片 `#FFFFFF`，气泡、按钮、置顶横幅与导航高亮均以 `#66CCFF` 为主色调）。
+- **选择器展示规则**:
+  - 界面主题与色彩选择下拉框/设置项中，必须直接显示十六进制色彩编码 `66ccff`，严禁使用“蓝色”或“Blue”等模糊字样。
+  - 矢量设计稿 `docs/design/screens/scr-chat-03-66ccff.svg` 与原型 `docs/design/ui-prototype.html` 均已完整实装该浅色风格主题。

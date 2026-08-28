@@ -1,0 +1,88 @@
+<!--
+SPDX-FileCopyrightText: 2026 mobileAgentRuntime contributors
+SPDX-License-Identifier: AGPL-3.0-only
+-->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 800" width="400" height="800" style="background:#F2F9FD; font-family:Roboto, sans-serif;">
+  <!-- Status Bar -->
+  <rect x="0" y="0" width="400" height="28" fill="#FFFFFF"/>
+  <text x="16" y="18" font-size="11" fill="#3D545E" font-weight="600">12:00</text>
+  <text x="260" y="18" font-size="11" fill="#004863" font-weight="700">5G | [66ccff Light]</text>
+  <line x1="0" y1="28" x2="400" y2="28" stroke="#D3E5EE" stroke-width="1"/>
+
+  <!-- Top App Bar -->
+  <rect x="0" y="28" width="400" height="56" fill="#FFFFFF"/>
+  <line x1="0" y1="28" x2="4" y2="84" stroke="#66CCFF" stroke-width="4"/>
+  <text x="16" y="54" font-size="16" fill="#003B52" font-weight="700">Agent: Doc Research</text>
+  <text x="16" y="72" font-size="11" fill="#4A6069">Model: deepseek-chat | Theme: <tspan fill="#004863" font-weight="700">66ccff</tspan></text>
+  <rect x="300" y="42" width="84" height="28" rx="6" fill="#E0F4FF" stroke="#66CCFF"/>
+  <text x="314" y="60" font-size="11" fill="#003B52" font-weight="700">Inspect</text>
+  <line x1="0" y1="84" x2="400" y2="84" stroke="#D3E5EE" stroke-width="1"/>
+
+  <!-- Pinned Banner (66ccff Light Tint) -->
+  <rect x="0" y="84" width="400" height="32" fill="#E0F4FF"/>
+  <text x="16" y="104" font-size="11" fill="#004863" font-weight="600">[Pinned Notice] Primary accent: 66ccff (Light Style).</text>
+  <text x="320" y="104" font-size="11" fill="#003B52" font-weight="700" text-decoration="underline">Details</text>
+  <line x1="0" y1="116" x2="400" y2="116" stroke="#66CCFF" stroke-width="1.5"/>
+
+  <!-- User Message Bubble (Dominant 66ccff Primary) -->
+  <rect x="70" y="130" width="314" height="64" rx="12" fill="#66CCFF" filter="drop-shadow(0px 2px 4px rgba(102,204,255,0.3))"/>
+  <text x="84" y="152" font-size="12" fill="#003B52" font-weight="600">请根据本地知识库分析移动端 Python 运行</text>
+  <text x="84" y="170" font-size="12" fill="#003B52" font-weight="600">时的安全隔离策略与 Broker 架构。</text>
+  <text x="320" y="186" font-size="9" fill="#004863">12:01 | In: 38t</text>
+
+  <!-- Agent Message Bubble (Clean White Card on Light Background) -->
+  <rect x="16" y="206" width="368" height="190" rx="12" fill="#FFFFFF" stroke="#B8D3E0" filter="drop-shadow(0px 1px 3px rgba(0,0,0,0.05))"/>
+  <text x="28" y="228" font-size="12" fill="#0E1E24" font-weight="700">根据 docs/SKILLS_AND_SECURITY.md 规范：</text>
+  <text x="28" y="248" font-size="12" fill="#3D545E">1. Python 运行在独立的 isolated service 进程；</text>
+  <text x="28" y="266" font-size="12" fill="#3D545E">2. 进程无直接网络/文件权限，全部经 Broker 鉴权；</text>
+  <text x="28" y="284" font-size="12" fill="#3D545E">3. 单次运行后销毁重置，避免全局状态污染。</text>
+
+  <!-- Citation Card Inside Bubble -->
+  <rect x="28" y="296" width="344" height="42" rx="6" fill="#E0F4FF" stroke="#B8D3E0"/>
+  <line x1="28" y1="296" x2="28" y2="338" stroke="#66CCFF" stroke-width="4"/>
+  <text x="38" y="314" font-size="11" fill="#004863" font-weight="700">[Ref 1] docs/SKILLS_AND_SECURITY.md</text>
+  <text x="38" y="330" font-size="10" fill="#4A6069">Chunk #12 | Score: 0.94 | Jump to CAS Original</text>
+
+  <text x="28" y="384" font-size="10" fill="#4A6069">142 tokens | 28 t/s | Cost: BYOK | Gen Time: 1.2s</text>
+
+  <!-- Tool Approval Card -->
+  <rect x="16" y="410" width="368" height="130" rx="10" fill="#FFFFFF" stroke="#66CCFF" stroke-width="1.5" filter="drop-shadow(0px 1px 3px rgba(0,0,0,0.05))"/>
+  <rect x="16" y="410" width="368" height="26" rx="10" fill="#E0F4FF"/>
+  <text x="28" y="427" font-size="11" fill="#004863" font-weight="700">[Tool Execution Approval Required]</text>
+  <text x="28" y="454" font-size="11" fill="#0E1E24">Skill: <tspan font-weight="700" fill="#004863">skill_calculator</tspan> (Isolated CPython)</text>
+  <rect x="28" y="464" width="344" height="34" rx="4" fill="#F2F9FD" stroke="#D3E5EE"/>
+  <text x="36" y="484" font-size="11" fill="#003B52" font-family="monospace">{"operation": "eval_matrix", "dim": 64}</text>
+  
+  <rect x="28" y="506" width="80" height="24" rx="4" fill="#66CCFF"/>
+  <text x="46" y="522" font-size="11" fill="#003B52" font-weight="700">Approve</text>
+
+  <rect x="116" y="506" width="80" height="24" rx="4" fill="#E3EFF5" stroke="#B8D3E0"/>
+  <text x="138" y="522" font-size="11" fill="#3D545E" font-weight="600">Reject</text>
+
+  <!-- Input Field Area -->
+  <rect x="0" y="670" width="400" height="66" fill="#FFFFFF"/>
+  <line x1="0" y1="670" x2="400" y2="670" stroke="#D3E5EE" stroke-width="1"/>
+  <rect x="16" y="682" width="290" height="42" rx="8" fill="#F2F9FD" stroke="#B8D3E0"/>
+  <text x="28" y="707" font-size="12" fill="#4A6069">Ask anything or use attached knowledge...</text>
+  <rect x="316" y="682" width="68" height="42" rx="8" fill="#66CCFF"/>
+  <text x="332" y="707" font-size="12" fill="#003B52" font-weight="700">Send</text>
+
+  <!-- Bottom Navigation Bar (7 tabs) -->
+  <rect x="0" y="736" width="400" height="64" fill="#FFFFFF"/>
+  <line x1="0" y1="736" x2="400" y2="736" stroke="#D3E5EE" stroke-width="1"/>
+  <rect x="14" y="740" width="36" height="4" rx="2" fill="#66CCFF"/>
+  <text x="22" y="759" font-size="11" fill="#004863" font-weight="700">[C]</text>
+  <text x="16" y="784" font-size="10" fill="#004863" font-weight="700">Chat</text>
+  <text x="76" y="759" font-size="11" fill="#4A6069">[A]</text>
+  <text x="68" y="784" font-size="10" fill="#4A6069">Agents</text>
+  <text x="132" y="759" font-size="11" fill="#4A6069">[P]</text>
+  <text x="124" y="784" font-size="10" fill="#4A6069">Providers</text>
+  <text x="188" y="759" font-size="11" fill="#4A6069">[K]</text>
+  <text x="180" y="784" font-size="10" fill="#4A6069">Knowledge</text>
+  <text x="246" y="759" font-size="11" fill="#4A6069">[S]</text>
+  <text x="240" y="784" font-size="10" fill="#4A6069">Skills</text>
+  <text x="302" y="759" font-size="11" fill="#4A6069">[N]</text>
+  <text x="298" y="784" font-size="10" fill="#4A6069">News</text>
+  <text x="358" y="759" font-size="11" fill="#4A6069">[i]</text>
+  <text x="354" y="784" font-size="10" fill="#4A6069">About</text>
+</svg>

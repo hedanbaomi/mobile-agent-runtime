@@ -35,4 +35,8 @@
     <string name="sett_check_updates">检查更新</string>
     <string name="sett_already_latest">当前已是最新版本 (v1.0.0-dev)</string>
     <string name="sett_update_available">检测到新版本可用: %1$s</string>
+    <string name="sett_theme_title">界面主题与主色调</string>
+    <string name="sett_theme_light">浅色模式</string>
+    <string name="sett_theme_dark">深色模式</string>
+    <string name="sett_theme_66ccff">66ccff</string>
 </resources>

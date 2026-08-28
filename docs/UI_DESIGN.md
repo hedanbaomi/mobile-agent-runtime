@@ -18,14 +18,16 @@
 
 ### 1.2 色彩系统 (Color Palette)
 
-色彩分为浅色模式 (Light Theme) 与深色模式 (Dark Theme)，具体数值定义于 [ui-tokens.json](design/ui-tokens.json)。
+色彩提供浅色模式 (Light Theme)、深色模式 (Dark Theme) 以及以 `#66ccff` 为主色调的专门版本 (66ccff Theme)，具体数值定义于 [ui-tokens.json](design/ui-tokens.json)。
 
 - **主色 (Primary)**:
   - 浅色: `#1A56DB` (深蓝) | 容器: `#E1EFFE` | 文本: `#FFFFFF`
   - 深色: `#76A9FA` (亮蓝) | 容器: `#233876` | 文本: `#1E429F`
+  - 66ccff 主题: `#66CCFF` (以 66ccff 为主色调的浅色风格主题，在界面色彩与主题选择处直接显示色彩编码 `66ccff`，不显示“蓝色”) | 容器: `#E0F4FF` | 文本: `#003B52`
 - **中性底色 (Surface & Background)**:
   - 浅色背景: `#F9FAFB` | 浅色卡片: `#FFFFFF` | 描边: `#D1D5DB`
   - 深色背景: `#111827` | 深色卡片: `#1F2937` | 描边: `#4B5563`
+  - 66ccff 主题背景: `#F2F9FD` (浅蓝白底色) | 卡片: `#FFFFFF` (纯白卡片) | 描边: `#B8D3E0`
 - **状态语义色阶 (Status Colors)**:
   - **就绪/成功 (Ready/Success)**: `#0E9F6E` (绿) / 容器 `#DEF7EC`
   - **等待/挂起 (Waiting/Warning)**: `#C27803` (黄褐) / 容器 `#FEF08A`
@@ -379,7 +381,7 @@
 - **偏好开关**:
   - **匿名统计开关**: 默认关闭，文案：`[Anonymous Announcement Metrics: Disabled (No device telemetry is uploaded)]`。
   - **请求检查模式**: 开启后在发送前默认弹出有效请求检查。
-  - **主题设置**: `[Follow System]`, `[Light Theme]`, `[Dark Theme]`。
+  - **主题与主色调设置**: 提供 `[Follow System]`, `[Light Theme]`, `[Dark Theme]`, `[66ccff]`。在颜色与主题选择处直接显示十六进制编码 `66ccff`，而不使用“蓝色”或“Blue”等字样。
   - **本地缓存清理**: 临时文件、缩略图缓存一键清理。
 
 #### SCR-SETT-02: 数据备份与完整导出 (Backup, Export & Restore)
@@ -419,6 +421,7 @@
 6. `scr-skill-01-dark.svg`: Skill 列表、安全清单、权限控制矩阵与审计日志（深色主题）
 7. `scr-ann-01-light.svg`: 公告中心、置顶横幅与强制确认模态弹窗（浅色主题）
 8. `scr-sett-01-dark.svg`: 设置主页、隐私保护开关、数据导出与 AGPL 许可证（深色主题）
+9. `scr-chat-03-66ccff.svg`: Chat 主对话流、气泡布局、引用与工具确认卡片（66ccff 主题）
 
 ---
 

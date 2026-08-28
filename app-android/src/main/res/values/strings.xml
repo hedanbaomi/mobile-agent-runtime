@@ -35,4 +35,8 @@
     <string name="sett_check_updates">Check for Updates</string>
     <string name="sett_already_latest">Already the latest version (v1.0.0-dev)</string>
     <string name="sett_update_available">New update available: %1$s</string>
+    <string name="sett_theme_title">Theme &amp; Palette</string>
+    <string name="sett_theme_light">Light Theme</string>
+    <string name="sett_theme_dark">Dark Theme</string>
+    <string name="sett_theme_66ccff">66ccff</string>
 </resources>

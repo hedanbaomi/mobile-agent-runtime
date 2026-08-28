@@ -3,7 +3,7 @@
 
 # 项目交接
 
-最后更新：2026-08-28T19:17:29+08:00（Asia/Taipei）。项目根目录：`E:\mobileAgentRuntime`。
+最后更新：2026-08-28T19:23:37+08:00（Asia/Taipei）。项目根目录：`E:\mobileAgentRuntime`。
 
 **接手者必须先读 [agent.md](agent.md)、本文件和 [技术实现方案](docs/IMPLEMENTATION_PLAN.md)。工作后必须维护本文件及受影响的专题文档。**
 
@@ -13,14 +13,14 @@
 | --- | --- |
 | 产品 | M1 部分实现；AR01—AR10 已修复。M0.5 UI 设计基线 `DOC_CHECK_PASS`。M2 本地公告闭环已实现（Worker/Admin/验签缓存/客户端），N01—N09 为本地测试 PASS，**不是**设备 PASS、**不是**生产部署。完整 MVP 未完成 |
 | 业务源码/构建 | 本轮 `licenseGuard`/`licenseGuardReverse`、`:shared:announcements:test`、`:data:sqlite:test`、`:app-android:assembleDebug` 通过；`node src/worker.test.mjs` 通过；REUSE 178/178 |
-| Git | 分支 `main` 跟踪 `origin/main`；HEAD 仍为 `a708a71079f8ef35da18071e7c0e41eef9d38cdd`。用户已授权提交并推送 M2；SHA 在提交后回写 |
+| Git | 分支 `main` 跟踪 `origin/main`；M2 已推送 `ddf4b86604d8e72c762ffb5d8a963019272b75ac`，作者 `luozhibai`，无 Cursor trailer |
 | CodeGraph | 仓库无 `.codegraph/` 工作副本（被 gitignore）；本轮用直接读文件定位。未重建索引 |
 | 许可 | `python -B -m reuse lint` 退出 0（178/178）；未改 LICENSE 正文；CI 增加 Node 20 公告 Worker 测试 |
-| 授权范围 | 用户明确授权：commit 并 push M2，完成后开始 M3。仍不授权 Cloudflare 生产部署 |
+| 授权范围 | 用户已授权 commit/push M2，并要求完成后开始 M3。仍不授权 Cloudflare 生产部署 |
 
 ## 2. 当前任务
 
-进行中：按用户授权提交并推送 M2，随后开始 M3 文本知识库（K01、K02、K05—K08 本地）。不部署 Cloudflare 生产。
+进行中：M3 文本知识库（K01、K02 文本/失败证据、K05—K08 本地）。不部署 Cloudflare；不把 hashing 空间冒充 ONNX 模型包。
 
 ## 3. 关键约束
 
@@ -31,16 +31,16 @@
 
 ## 4. 接手顺序
 
-1. `git status --short --branch`、`git log -1 --format=full`；确认 M2 未提交改动仍在工作区
+1. `git status --short --branch`、`git log -1 --format=full`；M2 HEAD 应为 `ddf4b86604d8e72c762ffb5d8a963019272b75ac` 或之后的交接 SHA 记录
 2. 确认 HEAD 无 `Co-authored-by: Cursor`
 3. 若用户授权提交：不要用被劫持的 `git commit`；用 `D:\Git\mingw64\libexec\git-core\git.exe commit-tree`，作者 `luozhibai <wy3273564266@163.com>`
 4. 设备/模拟器仍缺：bundled FTS5 冷启动、公告本地 Worker→真机拉取
-5. GitHub Ruleset 仍为 `M0_REMOTE_PENDING`
+5. M2 已入库。下一步 M3：多知识库 CAS 引用、代际索引、词法+向量融合、删除/重建与导入检查点。PDF/DOCX/EPUB 正文与视觉仍属后续；当前需明确失败/等待证据
 6. M1 Compose 仍须按 M0.5 差异清单对齐；不要把 M2 功能闭环冒称为全套 UI 设计实现或生产部署
 
 ## 5. 未决事项
 
-Play 生产包名、品牌、Cloudflare 账户/域名/Access、生产签名密钥、Embedding 模型包、NDK/USearch x86_64、CPython 3.14.x 包哈希。GitHub Ruleset 未验证。M2 未提交。未跑模拟器/真机公告拉取。公告 Compose 未按 M0.5 全部视觉标注对齐。历史 AR 修复不等于完整安全验收或发布许可。
+Play 生产包名、品牌、Cloudflare 账户/域名/Access、生产签名密钥、Embedding ONNX 模型包、NDK/USearch x86_64、CPython 3.14.x 包哈希。GitHub Ruleset 未验证。未跑模拟器/真机公告拉取。公告 Compose 未按 M0.5 全部视觉标注对齐。历史 AR 修复不等于完整安全验收或发布许可。
 
 ## 6. 工作记录
 
@@ -169,11 +169,11 @@ AR01 的平台依据：[Android 官方源码变更记录](https://android.google
   - `node src/rollout.test.mjs`；`node src/worker.test.mjs` → 退出 0（N01/N02/N05/N06/N07/N08/N09 协议）。
   - `.\gradlew.bat licenseGuard licenseGuardReverse :shared:announcements:test :data:sqlite:test :app-android:assembleDebug --no-daemon` → BUILD SUCCESSFUL。
   - `python -B -m reuse lint` → 退出 0，178/178。
-- 未执行：commit/push、`wrangler deploy`、生产 D1、模拟器/真机拉取、独立安全审阅、付费模型。N04 小屏/大字体/深色未做设备走查。
+- 未执行：`wrangler deploy`、生产 D1、模拟器/真机拉取、独立安全审阅、付费模型。N04 小屏/大字体/深色未做设备走查。
 - 验收记录：N01—N09 `LOCAL_PASS`（协议与 JVM）；非 `DEVICE_PASS`、非 `DEPLOYED`。
-- Git：改动仍在工作区。用户已授权本轮提交与推送。
+- Git：已按授权提交并推送 `ddf4b86604d8e72c762ffb5d8a963019272b75ac`。作者 `luozhibai`，无 Cursor。
 - 文档：`docs/ANNOUNCEMENTS.md` 第 9 节本地运行；`docs/design/ui-implementation-map.md` 公告实现状态；CI 增加 Node Worker 测试。
-- 下一步：用户若要入库再提交；本地联调 `set MAR_ADMIN_TOKEN=...` 后 `node services/announcements/src/local-server.mjs`，把打印的公钥与 `http://10.0.2.2:8787` 填进调试版公告页。禁止把此次结果标为生产已部署。
+- 下一步：开始 M3 文本知识库。
 
 ## 7. 后续记录格式
 

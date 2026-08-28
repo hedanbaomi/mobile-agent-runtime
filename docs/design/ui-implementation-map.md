@@ -81,12 +81,16 @@
 - **当前状态**：Agents/Skills 仍为占位。Announcements 已具备列表/详情/横幅/确认弹窗、未读筛选、本地验签缓存与统计开关（M2）；Settings/About 含匿名统计默认关闭。视觉仍未按全部 M0.5 标注对齐。
 - **需按设计对齐项**：Agents/Skills 在对应里程碑按设计稿实现；公告管理 Web 已在 `admin/announcements/index.html` 提供本地编辑/预览/发布。
 
+### 2.5 Knowledge 模块（M3 本地）
+- **当前状态**：`KnowledgeScreen` 可 SAF 导入、显示 job 阶段/错误、Rebuild index；Chat 将检索命中以 citation id 拼进 prompt。没有独立文档详情页、证据查看器或重建确认对话框的设计对齐实现。
+- **需按设计对齐项**：SCR-KNOW-02/06/07 与 SCR-CHAT-05 的卡片/回跳仍待 M0.5 视觉与 M4 原图证据。
+
 ## 3. 实现顺序与文件归属
 
 1. **M0.5（当前）**：完成设计系统规范（[docs/UI_DESIGN.md](../UI_DESIGN.md)）、设计 Token（[docs/design/ui-tokens.json](ui-tokens.json)）、可点击原型（[docs/design/ui-prototype.html](ui-prototype.html)）、高保真矢量稿（[docs/design/screens/](screens/README.md)）及映射文档；建立基础双语资源表（`values/strings.xml` 与 `values-zh-rCN/strings.xml`）。
 2. **M1 实现**：按设计基线重构 `feature/chat`、`feature/providers`、`feature/agents` 主界面与会话流。
 3. **M2 实现**：按设计基线实现 `feature/announcements` 客户端展示及通知弹窗。
-4. **M3 & M4 实现**：按设计基线实现 `feature/knowledge` 文档管理、多模态等待横幅与证据回跳。
+4. **M3 & M4 实现**：M3 本地已接通知识库导入列表、Rebuild index 与 Chat citation 文本；尚未按 M0.5 全套视觉标注对齐，也没有原文/原图证据查看器（属 M4）。
 5. **M5 & M6 实现**：按设计基线实现 `feature/skills` 安全清单、权限开关与 Tool 确认卡片。
 6. **M7 实现**：按设计基线实现 `feature/settings` 完整数据备份、隐私控制与许可阅读器。
 

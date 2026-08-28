@@ -38,6 +38,17 @@ class KnowledgeViewModel(application: Application) : AndroidViewModel(applicatio
         }
     }
 
+    fun rebuild() {
+        viewModelScope.launch(Dispatchers.IO) {
+            val kb = app.container.knowledge.ensureDefaultBase()
+            app.container.knowledge.rebuildIndex(kb)
+            withContext(Dispatchers.Main) {
+                status.value = "Index rebuilt from SQLite. Old deleted documents stay excluded."
+                reload()
+            }
+        }
+    }
+
     fun importUris(uris: List<Uri>) {
         if (uris.isEmpty()) return
         viewModelScope.launch {
@@ -53,7 +64,7 @@ class KnowledgeViewModel(application: Application) : AndroidViewModel(applicatio
                     if (job.stage == ImportStage.WAITING_FOR_VISION_MODEL) {
                         status.value = "$name copied. Waiting for a Vision model — not READY."
                     } else if (job.stage == ImportStage.READY) {
-                        status.value = "$name is ready for lexical search. Vector embedding still needs a local model pack."
+                        status.value = "$name is ready for on-device lexical and local-hash retrieval. ONNX model pack is still separate."
                     } else {
                         status.value = "$name: ${job.stage}${job.error?.let { " — $it" } ?: ""}"
                     }

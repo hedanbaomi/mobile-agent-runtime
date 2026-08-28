@@ -3,7 +3,7 @@
 
 # 项目交接
 
-最后更新：2026-08-28T19:23:37+08:00（Asia/Taipei）。项目根目录：`E:\mobileAgentRuntime`。
+最后更新：2026-08-28T19:43:22+08:00（Asia/Taipei）。项目根目录：`E:\mobileAgentRuntime`。
 
 **接手者必须先读 [agent.md](agent.md)、本文件和 [技术实现方案](docs/IMPLEMENTATION_PLAN.md)。工作后必须维护本文件及受影响的专题文档。**
 
@@ -11,32 +11,32 @@
 
 | 项目 | 状态 |
 | --- | --- |
-| 产品 | M1 部分实现；AR01—AR10 已修复。M0.5 UI 设计基线 `DOC_CHECK_PASS`。M2 本地公告闭环已实现（Worker/Admin/验签缓存/客户端），N01—N09 为本地测试 PASS，**不是**设备 PASS、**不是**生产部署。完整 MVP 未完成 |
-| 业务源码/构建 | 本轮 `licenseGuard`/`licenseGuardReverse`、`:shared:announcements:test`、`:data:sqlite:test`、`:app-android:assembleDebug` 通过；`node src/worker.test.mjs` 通过；REUSE 178/178 |
-| Git | 分支 `main` 跟踪 `origin/main`；M2 已推送 `ddf4b86604d8e72c762ffb5d8a963019272b75ac`，作者 `luozhibai`，无 Cursor trailer |
+| 产品 | M1 部分实现；AR01—AR10 已修复。M0.5 UI 设计基线 `DOC_CHECK_PASS`。M2 本地公告闭环已推送。M3 文本知识库本地 JVM 已实现（K01、K02 文本/失败证据、K05、K07、K08 本地；K06 仅 COPYING 检查点）。N01—N09 与 K 系列均为本地测试 PASS，**不是**设备 PASS、**不是**生产部署。完整 MVP 未完成 |
+| 业务源码/构建 | 本轮 `licenseGuard`/`licenseGuardReverse`、`:shared:knowledge-api:test`、`:data:sqlite:test`、`:app-android:assembleDebug` 通过；REUSE 182/182 |
+| Git | 分支 `main` 跟踪 `origin/main`；M3 按用户授权随本提交入库，SHA 在推送后回写。作者 `luozhibai`，无 Cursor trailer |
 | CodeGraph | 仓库无 `.codegraph/` 工作副本（被 gitignore）；本轮用直接读文件定位。未重建索引 |
-| 许可 | `python -B -m reuse lint` 退出 0（178/178）；未改 LICENSE 正文；CI 增加 Node 20 公告 Worker 测试 |
-| 授权范围 | 用户已授权 commit/push M2，并要求完成后开始 M3。仍不授权 Cloudflare 生产部署 |
+| 许可 | `python -B -m reuse lint` 退出 0（182/182）；未改 LICENSE 正文 |
+| 授权范围 | 用户已授权 commit/push M3。仍不授权 Cloudflare 生产部署 |
 
 ## 2. 当前任务
 
-进行中：M3 文本知识库（K01、K02 文本/失败证据、K05—K08 本地）。不部署 Cloudflare；不把 hashing 空间冒充 ONNX 模型包。
+无进行中认领。M3 文本知识库本地实现已完成，用户已授权 commit/push。下一步是 M4（Vision/PDF 正文/DOCX-EPUB 解析）。
 
 ## 3. 关键约束
 
 - 第一方 `AGPL-3.0-only`。applicationId 暂为 `runtime.mobileagent`。CODEOWNERS 为 `@hedanbaomi`。
 - Python 不得在主进程执行；isolated service 已声明，CPython 包未嵌入。
-- 含图知识库无 Vision 时等待。TXT/MD 可词法 READY；无 ONNX 向量。USearch JNI 未构建。
+- 含图知识库无 Vision 时等待。TXT/MD 可词法 READY；向量空间是 `local-hash-v1-d32`，无 ONNX 模型包。USearch JNI 未构建。
 - 不部署 Cloudflare 生产资源。提交作者使用仓库 Git 用户 `luozhibai`，不含 Cursor。Cursor 环境会劫持 `git commit`；需用 `D:\Git\mingw64\libexec\git-core\git.exe commit-tree`。
 
 ## 4. 接手顺序
 
-1. `git status --short --branch`、`git log -1 --format=full`；M2 HEAD 应为 `ddf4b86604d8e72c762ffb5d8a963019272b75ac` 或之后的交接 SHA 记录
-2. 确认 HEAD 无 `Co-authored-by: Cursor`
-3. 若用户授权提交：不要用被劫持的 `git commit`；用 `D:\Git\mingw64\libexec\git-core\git.exe commit-tree`，作者 `luozhibai <wy3273564266@163.com>`
-4. 设备/模拟器仍缺：bundled FTS5 冷启动、公告本地 Worker→真机拉取
-5. M2 已入库。下一步 M3：多知识库 CAS 引用、代际索引、词法+向量融合、删除/重建与导入检查点。PDF/DOCX/EPUB 正文与视觉仍属后续；当前需明确失败/等待证据
-6. M1 Compose 仍须按 M0.5 差异清单对齐；不要把 M2 功能闭环冒称为全套 UI 设计实现或生产部署
+1. `git status --short --branch`、`git log -1 --format=full`；确认 HEAD 无 `Co-authored-by: Cursor`
+2. 提交作者使用 `D:\Git\mingw64\libexec\git-core\git.exe commit-tree`，作者 `luozhibai <wy3273564266@163.com>`
+3. M3 已按授权提交；下一步 M4，不要把 `local-hash-v1-d32` 写成 ONNX pack
+4. 设备/模拟器仍缺：bundled FTS5 冷启动、公告本地 Worker→真机拉取、K06 300—500 文件负载
+5. M3 本地已完成。下一步 M4：Vision、PDF 正文/页面、DOCX/EPUB 解析与证据回跳。不要把 hashing 空间写成 ONNX pack
+6. M1 Compose 仍须按 M0.5 差异清单对齐；不要把 M2/M3 功能闭环冒称为全套 UI 设计实现或生产部署
 
 ## 5. 未决事项
 
@@ -174,6 +174,26 @@ AR01 的平台依据：[Android 官方源码变更记录](https://android.google
 - Git：已按授权提交并推送 `ddf4b86604d8e72c762ffb5d8a963019272b75ac`。作者 `luozhibai`，无 Cursor。
 - 文档：`docs/ANNOUNCEMENTS.md` 第 9 节本地运行；`docs/design/ui-implementation-map.md` 公告实现状态；CI 增加 Node Worker 测试。
 - 下一步：开始 M3 文本知识库。
+
+### 2026-08-28T19:37:04+08:00：完成 M3 文本知识库本地路径（未提交）
+
+- 请求：用户要求 commit/push M2 后开始 M3。M2 已在 `ddf4b866` / `bcb55b4d` 入库。本轮只做 M3，未再提交。
+- 范围：K01、K02 文本与失败证据、K05、K07、K08 本地；K06 仅 COPYING 检查点。不实现 Vision/PDF 正文/DOCX-EPUB 解析、ONNX pack、USearch JNI、K06 设备负载。
+- 行为：
+  - Schema v4：`document_versions`、`index_generations`、`generation_members`。
+  - 多知识库 CAS 引用计数；同库同 blob 幂等；删一库不破坏另一库。
+  - TXT/MD READY；图与 Markdown 图 `WAITING_FOR_VISION_MODEL`；PDF/DOCX/EPUB 复制后 FAILED 并给原因；ZIP 内存检查 zip-slip/体积，不落盘解压。
+  - CJK unigram/bigram FTS + `HashingTextEmbedder` 空间 `local-hash-v1-d32` + RRF。异 space 警告且不混算。
+  - 删除文档后重建新代际；旧 READY 代际行保留；BUILDING 未切 active 不用于检索。
+  - COPYING 检查点 `resumeImport` 不重复 blob。Chat `retrieve` + CitationMap；知识库 Rebuild index。
+- 曾失败：`deletedDocumentIsNotReturnedAndRebuildKeepsLiveGeneration` 把 `search("disappear").isEmpty()` 当成删除证据，但 hashing 近邻仍会返回仍存在的 keep 文档。已改为断言已删 `documentId` 不出现。
+- 验证：
+  - `.\gradlew.bat licenseGuard licenseGuardReverse :shared:knowledge-api:test :data:sqlite:test :app-android:assembleDebug --no-daemon` → BUILD SUCCESSFUL。
+  - `python -B -m reuse lint` → 退出 0，182/182。
+- 未执行：真机/模拟器、ONNX、USearch JNI、K06 300—500 文件、付费模型、独立审阅、commit/push、Cloudflare。
+- 文档：`docs/KNOWLEDGE.md` 第 8 节、`docs/IMPLEMENTATION_PLAN.md` 状态、`docs/design/ui-implementation-map.md` Knowledge 现状、本交接。
+- Git：用户已授权 commit/push。本提交写入 M3；推送后回写 SHA。作者 `luozhibai`，无 Cursor。
+- 下一步：M4 Vision/PDF 正文/DOCX-EPUB。不要把 `local-hash-v1-d32` 写成 ONNX。
 
 ## 7. 后续记录格式
 

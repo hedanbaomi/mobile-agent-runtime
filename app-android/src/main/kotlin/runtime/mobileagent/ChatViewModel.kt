@@ -52,13 +52,26 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         lines.add(ChatLine("Assistant", ""))
         streaming.value = true
         status.value = "Streaming from ${provider.baseUrl} (${model.modelId}). Nothing is sent to this project's servers."
-        val hits = RetrievalBudget.clip(app.container.knowledge.search(text))
-        val retrieved = hits.mapIndexed { i, hit -> "[citation:$i ${hit.chunkId}] ${hit.text}" }
+        val run = AgentRun(
+            runId = EntityId.random().value,
+            snapshotId = "live",
+            conversationId = "default",
+        )
+        val result = app.container.knowledge.retrieve(run.runId, text)
+        val hits = RetrievalBudget.clip(result.hits)
+        val citations = runtime.mobileagent.knowledge.CitationMap.bind(run.runId, hits)
+        val retrieved = hits.mapIndexed { i, hit ->
+            val id = citations.getOrNull(i)?.citationId ?: i.toString()
+            "[citation:$id ${hit.chunkId}] ${hit.text}"
+        }
+        if (result.warnings.isNotEmpty()) {
+            status.value += " " + result.warnings.joinToString(" ")
+        }
         if (app.container.knowledge.waitingForVisionCount() > 0) {
             status.value += " Some imported images are waiting for a Vision model and were not added to context."
         }
         val prompt = EffectivePrompt(
-            runtimeContract = "You are a local Android agent runtime. Cite retrieved snippets by citation id. Do not claim images were processed if they were not.",
+            runtimeContract = "You are a local Android agent runtime. Cite retrieved snippets by citation id. Unknown citation ids are invalid. Do not claim images were processed if they were not.",
             userSystemPrompt = "",
             skillInstructions = emptyList(),
             retrieved = retrieved,
@@ -67,11 +80,6 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                 role to line.text
             },
             currentUser = text,
-        )
-        val run = AgentRun(
-            runId = EntityId.random().value,
-            snapshotId = "live",
-            conversationId = "default",
         )
         val adapter = OpenAiCompatibleAdapter(app.container.http, provider.baseUrl)
         val runtime = AgentRuntime(adapter)

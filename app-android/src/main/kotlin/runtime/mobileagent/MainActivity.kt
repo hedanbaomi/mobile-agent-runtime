@@ -96,6 +96,7 @@ class MainActivity : ComponentActivity() {
                             jobs = knowledgeVm.jobs,
                             status = knowledgeVm.status.value,
                             onImport = knowledgeVm::importUris,
+                            onRebuild = knowledgeVm::rebuild,
                         )
                     }
                     composable("skills") { SkillsScreen() }

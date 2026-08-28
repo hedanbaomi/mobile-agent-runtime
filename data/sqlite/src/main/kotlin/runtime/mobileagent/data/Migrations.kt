@@ -4,7 +4,7 @@
 package runtime.mobileagent.data
 
 object Migrations {
-    const val VERSION = 3
+    const val VERSION = 4
 
     private val statements = listOf(
         "CREATE TABLE IF NOT EXISTS schema_version (version INTEGER NOT NULL PRIMARY KEY)",
@@ -28,6 +28,9 @@ object Migrations {
         "CREATE TABLE IF NOT EXISTS announcement_items (announcement_id TEXT NOT NULL, revision INTEGER NOT NULL, item_json TEXT NOT NULL, withdrawn INTEGER NOT NULL, active INTEGER NOT NULL, PRIMARY KEY(announcement_id, revision))",
         "CREATE TABLE IF NOT EXISTS audit_events (id TEXT PRIMARY KEY, run_id TEXT, created_at TEXT NOT NULL, component TEXT NOT NULL, action TEXT NOT NULL, result TEXT NOT NULL, error_code TEXT, summary TEXT NOT NULL)",
         "CREATE TABLE IF NOT EXISTS import_jobs (id TEXT PRIMARY KEY, kb_id TEXT NOT NULL, document_id TEXT NOT NULL, display_name TEXT NOT NULL, stage TEXT NOT NULL, has_images INTEGER NOT NULL, error TEXT, updated_at TEXT NOT NULL)",
+        "CREATE TABLE IF NOT EXISTS document_versions (id TEXT PRIMARY KEY, document_id TEXT NOT NULL, parser_fingerprint TEXT NOT NULL, content_hash TEXT NOT NULL, status TEXT NOT NULL, created_at TEXT NOT NULL)",
+        "CREATE TABLE IF NOT EXISTS index_generations (id TEXT PRIMARY KEY, kb_id TEXT NOT NULL, space_id TEXT NOT NULL, manifest_hash TEXT NOT NULL, state TEXT NOT NULL, vector_count INTEGER NOT NULL, fts_version INTEGER NOT NULL, created_at TEXT NOT NULL)",
+        "CREATE TABLE IF NOT EXISTS generation_members (generation_id TEXT NOT NULL, chunk_id TEXT NOT NULL, space_id TEXT NOT NULL, document_version_id TEXT NOT NULL, PRIMARY KEY(generation_id, chunk_id))",
     )
 
     fun apply(connection: SqlConnection) {

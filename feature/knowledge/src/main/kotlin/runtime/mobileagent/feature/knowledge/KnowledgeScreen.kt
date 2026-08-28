@@ -30,6 +30,7 @@ fun KnowledgeScreen(
     jobs: List<KnowledgeJobRow>,
     status: String,
     onImport: (List<Uri>) -> Unit,
+    onRebuild: () -> Unit = {},
 ) {
     val picker = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
         onImport(uris)
@@ -39,6 +40,7 @@ fun KnowledgeScreen(
         Text("Import uses the system file picker. Python and Skills cannot see real filesystem paths.")
         Text(status, modifier = Modifier.padding(vertical = 8.dp))
         Button(onClick = { picker.launch(arrayOf("*/*")) }) { Text("Import with system picker") }
+        Button(onClick = onRebuild, modifier = Modifier.padding(top = 8.dp)) { Text("Rebuild index") }
         LazyColumn(Modifier.padding(top = 12.dp)) {
             items(jobs) { job ->
                 val detail = job.error?.let { " — $it" }.orEmpty()

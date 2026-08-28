@@ -62,5 +62,6 @@ class FileBlobSink(private val root: java.io.File) : BlobSink {
     private fun ref(sha: String): String = "cas/${sha.take(2)}/$sha"
 }
 
-internal fun sha256Hex(bytes: ByteArray): String =
-    java.security.MessageDigest.getInstance("SHA-256").digest(bytes).joinToString("") { "%02x".format(it) }
+fun sha256Hex(bytes: ByteArray): String =
+    java.security.MessageDigest.getInstance("SHA-256").digest(bytes)
+        .joinToString("") { "%02x".format(it.toInt() and 0xFF) }

@@ -3,7 +3,7 @@
 
 # 知识库、多模态和检索契约
 
-状态：v1 设计，部分实现。TXT/MD 经 SAF 复制到 CAS 后写入 FTS，可标 READY（词法检索；尚无 ONNX 向量）。独立图片以及 Markdown 中的 `![]()`/`<img>` 引用停在 `WAITING_FOR_VISION_MODEL`，不得标 READY，且不外联下载。PDF/DOCX/EPUB 复制后失败并说明原因，不静默当文本。对应 R05—R08、K01—K08。
+状态：M3 文本路径本地 JVM 已落地（schema v4）。TXT/MD 经 SAF 复制到 CAS 后写入 FTS5 与 `local-hash-v1-d32` 向量空间（明确不是 ONNX 模型包、不是 USearch JNI），可标 READY。独立图片以及 Markdown 中的 `![]()`/`<img>` 引用停在 `WAITING_FOR_VISION_MODEL`。PDF/DOCX/EPUB 复制后失败并说明原因；ZIP 会在内存中检查路径与膨胀上限，不落盘解压。K06 仅覆盖 COPYING 检查点续跑，不是 300—500 文件设备负载。对应 R05—R08、K01—K08。
 
 ## 1. 数据模型与一致性
 
@@ -105,3 +105,27 @@ FTS5能力不等于中文分词质量。必须建立中文专名、英文术语�
 先实现纯接口与小型fixture → CAS/SQLite迁移 → TXT/MD解析和FTS → embedding/USearch代际 → 恢复与删除 → PDF文本 → 视觉页/图片 → DOCX/EPUB → 真机长任务。每步均有K系列验收；视觉spike可以提前，但不能据此标记全格式支持。
 
 测试语料必须是可合法提交的自造/开放许可fixture，包含扫描PDF、矢量图、坏PDF、DOCX图片、EPUB图、中文专名和两个KB复用blob。不使用用户私有知识库充当公开测试资产。
+
+## 8. M3 本地验证（2026-08-28）
+
+本轮实现：多知识库 CAS 引用计数、同库同 blob 幂等、`document_versions`/`index_generations`/`generation_members`、CJK 单字/双字 FTS、SQLite 内余弦检索 + RRF、删除后重建、COPYING 检查点续跑、CitationMap、6000 字符预算裁剪。Chat 用 `retrieve` + citation id；知识库页有 Rebuild index。向量写入 SQLite，**没有** ONNX pack，**没有** USearch 文件切换。
+
+命令（均本机，`--no-daemon`）：
+
+```
+.\gradlew.bat licenseGuard licenseGuardReverse :shared:knowledge-api:test :data:sqlite:test :app-android:assembleDebug
+python -B -m reuse lint
+```
+
+结果：Gradle BUILD SUCCESSFUL；REUSE 182/182 退出 0。
+
+| 验收 | 本轮状态 | 证据边界 |
+| --- | --- | --- |
+| K01 | LOCAL_PASS | 同库幂等 refCount=1；两库共享 blob 删一库后另一库可检索 |
+| K02 | LOCAL_PASS（文本/失败证据） | TXT/MD READY；PDF FAILED 含原因；合法 EPUB/DOCX ZIP 内存检查后 FAILED；zip-slip 拒绝；图与 MD 图等待。未解析 PDF/DOCX/EPUB 正文 |
+| K05 | LOCAL_PASS | 「张伟」/USearch、代码与表格 token、异 space 警告且不混算。召回是 hashing 空间，不是模型包 |
+| K06 | 检查点 LOCAL_PASS；非 DEVICE_PASS | `pauseAt=COPYING` 后续跑不重复 blob。未跑 300—500 文件/真机杀进程矩阵 |
+| K07 | LOCAL_PASS | 删除文档后新代际不含该文档；旧 READY 代际行保留；BUILDING 代际在未切 active 前不用于检索 |
+| K08 | LOCAL_PASS（文本） | 未知 citation id 不解析；空查询无命中；预算裁剪。原图回跳属 M4 |
+
+未执行：模拟器/真机 FTS5 冷启动、ONNX 加载、USearch x86_64 JNI、K06 设备负载、独立安全审阅。

@@ -31,6 +31,7 @@ import runtime.mobileagent.knowledge.TextEmbedder
 import runtime.mobileagent.knowledge.VISION_PROMPT_VERSION
 import runtime.mobileagent.knowledge.VISION_SCHEMA_VERSION
 import runtime.mobileagent.knowledge.VisionBackend
+import runtime.mobileagent.knowledge.VisionBinding
 import runtime.mobileagent.knowledge.VisionCacheKey
 import runtime.mobileagent.knowledge.VisionInput
 import runtime.mobileagent.knowledge.VisionOutcome
@@ -45,6 +46,7 @@ class KnowledgeRepository(
     private val embedder: TextEmbedder = HashingTextEmbedder(),
     private val vision: VisionBackend? = null,
     private val visionModelFingerprint: String = "vision-unconfigured",
+    private val visionBinding: () -> VisionBinding? = { null },
 ) {
     private val indexLock = Any()
 
@@ -188,6 +190,7 @@ class KnowledgeRepository(
             embeddingConsent = runCatching { row.long("embedding_consent") != 0L }.getOrDefault(false),
             localEmbeddingAvailable = true,
             error = row.string("error").ifBlank { null },
+            consentedVisionFingerprint = runCatching { row.string("vision_binding_json") }.getOrNull()?.ifBlank { null },
         )
         return continueImport(job, displayName, payload, format)
     }
@@ -209,6 +212,7 @@ class KnowledgeRepository(
             visionConfigured = true,
             visionConsent = true,
             localEmbeddingAvailable = true,
+            consentedVisionFingerprint = visionFingerprint(),
         )
         return continueImport(job, row.string("display_name"), bytes, format)
     }
@@ -346,10 +350,11 @@ class KnowledgeRepository(
     fun blobRefCount(hash: String): Long =
         db.query("SELECT ref_count FROM blobs WHERE hash = ?", listOf(hash)).singleOrNull()?.long("ref_count") ?: 0L
 
-    fun readDocumentText(documentId: String, maxChars: Int): String {
-        val document = db.query("SELECT active_version_id, deleted_at FROM documents WHERE id = ?", listOf(documentId)).singleOrNull()
+    fun readDocumentText(documentId: String, maxChars: Int, allowedKnowledgeBaseIds: Set<String>? = null): String {
+        val document = db.query("SELECT active_version_id, deleted_at, kb_id FROM documents WHERE id = ?", listOf(documentId)).singleOrNull()
             ?: return ""
         if (document.string("deleted_at").isNotBlank()) return ""
+        if (allowedKnowledgeBaseIds != null && document.string("kb_id") !in allowedKnowledgeBaseIds) return ""
         val version = document.string("active_version_id")
         val text = db.query(
             "SELECT text FROM chunks WHERE document_version_id = ? ORDER BY ordinal",
@@ -357,6 +362,13 @@ class KnowledgeRepository(
         ).joinToString("\n") { it.string("text") }
         val cap = maxChars.coerceIn(0, 16_384)
         return text.take(cap)
+    }
+
+    fun documentKnowledgeBaseId(documentId: String): String? {
+        val document = db.query("SELECT kb_id, deleted_at FROM documents WHERE id = ?", listOf(documentId)).singleOrNull()
+            ?: return null
+        if (document.string("deleted_at").isNotBlank()) return null
+        return document.string("kb_id").ifBlank { null }
     }
 
     fun deleteDocument(documentId: String) {
@@ -580,7 +592,14 @@ class KnowledgeRepository(
                 job.error = "Vision upload has not been approved. No image bytes left the device."
                 return
             }
+            if (!visionBindingMatches(job)) {
+                job.visionConsent = false
+                job.stage = ImportStage.AWAITING_UPLOAD_CONSENT
+                job.error = "Vision destination changed. Approve upload to the current Provider and model. No image bytes left the device."
+                return
+            }
             job.visionConsent = true
+            job.consentedVisionFingerprint = visionFingerprint()
             if (blocked.isNotEmpty()) {
                 fail(
                     job,
@@ -643,7 +662,7 @@ class KnowledgeRepository(
             val input = VisionInput(
                 assetHash = stored.sha256,
                 contextHash = contextHash,
-                modelFingerprint = visionModelFingerprint,
+                modelFingerprint = visionFingerprint(),
                 bytes = asset.bytes,
                 mediaType = asset.mediaType,
                 surroundingText = asset.surroundingText,
@@ -731,7 +750,7 @@ class KnowledgeRepository(
                 cacheKey,
                 assetHash,
                 contextHash,
-                visionModelFingerprint,
+                visionFingerprint(),
                 VISION_PROMPT_VERSION,
                 VISION_SCHEMA_VERSION,
                 status,
@@ -968,8 +987,11 @@ class KnowledgeRepository(
     }
 
     private fun persistJob(job: ImportJob, displayName: String) {
+        if (job.visionConsent && job.consentedVisionFingerprint.isNullOrBlank()) {
+            job.consentedVisionFingerprint = visionFingerprint()
+        }
         db.execute(
-            "INSERT OR REPLACE INTO import_jobs(id,kb_id,document_id,display_name,stage,has_images,error,updated_at,vision_consent,embedding_is_api,embedding_consent) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            "INSERT OR REPLACE INTO import_jobs(id,kb_id,document_id,display_name,stage,has_images,error,updated_at,vision_consent,embedding_is_api,embedding_consent,vision_binding_json) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
             listOf(
                 job.id,
                 job.knowledgeBaseId,
@@ -982,8 +1004,18 @@ class KnowledgeRepository(
                 if (job.visionConsent) 1 else 0,
                 if (job.embeddingIsApi) 1 else 0,
                 if (job.embeddingConsent) 1 else 0,
+                job.consentedVisionFingerprint,
             ),
         )
+    }
+
+    private fun visionFingerprint(): String = visionBinding()?.fingerprint ?: visionModelFingerprint
+
+    private fun visionBindingMatches(job: ImportJob): Boolean {
+        val current = visionFingerprint()
+        val consented = job.consentedVisionFingerprint
+        if (consented.isNullOrBlank()) return current == "vision-unconfigured"
+        return consented == current
     }
 
     private fun existingDocument(kbId: String, hash: String): String? =

@@ -45,11 +45,30 @@ object SkillArchive {
             return SkillInspection(CompatibilityClass.E, reasons, null, null, hash, emptyList(), false)
         }
         if (bytes.size >= 4 && bytes[0] == 0x50.toByte() && bytes[1] == 0x4B.toByte()) {
-            val archive = readArchive(bytes, reasons)
-            if (isClassEReason(reasons)) {
+            if (!hasZipEocd(bytes) || zipHasSymlink(bytes)) {
+                reasons += if (zipHasSymlink(bytes)) "Symlink entries are not allowed" else "Archive is truncated or damaged"
+                return SkillInspection(CompatibilityClass.E, reasons.distinct(), null, null, hash, emptyList(), false, packageBytes = bytes)
+            }
+            val archive = runCatching { readArchive(bytes, reasons) }.getOrElse { error ->
+                reasons += "Archive is truncated or damaged"
                 return SkillInspection(
                     CompatibilityClass.E,
-                    reasons.distinct(),
+                    (reasons + (error.message ?: "zip")).distinct(),
+                    null,
+                    null,
+                    hash,
+                    emptyList(),
+                    false,
+                    packageBytes = bytes,
+                )
+            }
+            if (archive.files.isEmpty() && archive.manifestJson == null && archive.markdown == null) {
+                reasons += "ZIP has no readable entries"
+            }
+            if (isClassEReason(reasons) || archive.files.isEmpty() && archive.manifestJson == null) {
+                return SkillInspection(
+                    CompatibilityClass.E,
+                    reasons.distinct().ifEmpty { listOf("ZIP has no readable entries") },
                     null,
                     archive.markdown,
                     hash,
@@ -300,8 +319,58 @@ object SkillArchive {
             val lower = reason.lowercase()
             lower.contains("zip slip") || lower.contains("bomb") || lower.contains("symlink") ||
                 lower.contains("native") || lower.contains("pip") || lower.contains("remote") ||
-                lower.contains("exceeds") || lower.contains("limit")
+                lower.contains("exceeds") || lower.contains("limit") || lower.contains("truncated") ||
+                lower.contains("damaged") || lower.contains("no readable")
         }
+
+    private fun hasZipEocd(bytes: ByteArray): Boolean {
+        val min = 22
+        if (bytes.size < min) return false
+        val start = (bytes.size - min - 65535).coerceAtLeast(0)
+        var i = bytes.size - min
+        while (i >= start) {
+            if (bytes[i] == 0x50.toByte() && bytes[i + 1] == 0x4B.toByte() &&
+                bytes[i + 2] == 0x05.toByte() && bytes[i + 3] == 0x06.toByte()
+            ) {
+                return true
+            }
+            i--
+        }
+        return false
+    }
+
+    private fun zipHasSymlink(bytes: ByteArray): Boolean {
+        var i = 0
+        while (i + 46 <= bytes.size) {
+            if (bytes[i] == 0x50.toByte() && bytes[i + 1] == 0x4B.toByte() &&
+                bytes[i + 2] == 0x01.toByte() && bytes[i + 3] == 0x02.toByte()
+            ) {
+                val nameLen = u16(bytes, i + 28)
+                val extraLen = u16(bytes, i + 30)
+                val commentLen = u16(bytes, i + 32)
+                val extAttr = u32(bytes, i + 38)
+                val mode = (extAttr ushr 16).toInt()
+                if (mode and 0xF000 == 0xA000) return true
+                i += 46 + nameLen + extraLen + commentLen
+                continue
+            }
+            i++
+        }
+        return false
+    }
+
+    private fun u16(bytes: ByteArray, offset: Int): Int {
+        if (offset + 1 >= bytes.size) return 0
+        return (bytes[offset].toInt() and 0xFF) or ((bytes[offset + 1].toInt() and 0xFF) shl 8)
+    }
+
+    private fun u32(bytes: ByteArray, offset: Int): Long {
+        if (offset + 3 >= bytes.size) return 0
+        return (bytes[offset].toLong() and 0xFF) or
+            ((bytes[offset + 1].toLong() and 0xFF) shl 8) or
+            ((bytes[offset + 2].toLong() and 0xFF) shl 16) or
+            ((bytes[offset + 3].toLong() and 0xFF) shl 24)
+    }
 
     private fun looksRemoteDependency(name: String, payload: ByteArray): Boolean {
         val lowerName = name.lowercase()

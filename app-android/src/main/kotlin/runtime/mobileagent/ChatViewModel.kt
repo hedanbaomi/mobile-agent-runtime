@@ -27,6 +27,8 @@ import runtime.mobileagent.knowledge.EvidenceLocator
 import runtime.mobileagent.knowledge.RetrievalBudget
 import runtime.mobileagent.knowledge.StrictVisualDecision
 import runtime.mobileagent.knowledge.StrictVisualPolicy
+import runtime.mobileagent.knowledge.VisualAttachmentPlan
+import runtime.mobileagent.knowledge.VisualAttachmentPolicy
 import runtime.mobileagent.provider.InlineImage
 import runtime.mobileagent.provider.ModelEvent
 import runtime.mobileagent.provider.SecretRedactor
@@ -99,21 +101,30 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             is StrictVisualDecision.Allow -> {
                 visualWarning = decision.warning
                 if (hasVisual && chatSupportsImages && visualWarning == null) {
-                    hits.mapNotNull { it.assetId }.distinct().take(4).forEach { assetId ->
-                        val loaded = app.container.knowledge.assetBytes(assetId) ?: return@forEach
-                        if (loaded.second.size > 2 * 1024 * 1024) return@forEach
-                        currentImages += InlineImage(
-                            mediaType = loaded.first,
-                            base64 = Base64.getEncoder().encodeToString(loaded.second),
-                            assetId = assetId,
-                        )
-                    }
-                    if (currentImages.isEmpty()) {
-                        streaming.value = false
-                        val reason = "Strict mode requires original images in-budget, but none could be attached."
-                        status.value = reason
-                        lines[assistantIndex] = ChatLine("Assistant", reason)
-                        return
+                    val visualIds = hits.mapNotNull { it.assetId }
+                    when (
+                        val plan = VisualAttachmentPolicy.plan(visualIds) { assetId ->
+                            app.container.knowledge.assetBytes(assetId)
+                        }
+                    ) {
+                        is VisualAttachmentPlan.Incomplete -> {
+                            if (!textDegradation.value) {
+                                streaming.value = false
+                                status.value = plan.reason
+                                lines[assistantIndex] = ChatLine("Assistant", plan.reason)
+                                return
+                            }
+                            visualWarning = plan.reason
+                        }
+                        is VisualAttachmentPlan.Complete -> {
+                            plan.images.forEach { loaded ->
+                                currentImages += InlineImage(
+                                    mediaType = loaded.mediaType,
+                                    base64 = Base64.getEncoder().encodeToString(loaded.bytes),
+                                    assetId = loaded.assetId,
+                                )
+                            }
+                        }
                     }
                 }
                 visualWarning?.let { warning ->
@@ -146,20 +157,27 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             currentImages = currentImages,
         )
         val adapter = OpenAiCompatibleAdapter(app.container.http, provider.baseUrl)
-        val grant = app.container.skills.effectiveGrant()
         val broker = ToolBroker(
-            effectiveCapabilities = grant.capabilities,
+            effectiveCapabilities = emptySet(),
             context = ToolContext(
                 search = { query, ids, topK ->
                     val found = app.container.knowledge.search(query, topK, ids)
                     found.joinToString("\n") { hit -> "${hit.documentId}:${hit.text}" }
                 },
-                readDocument = { id, max -> app.container.knowledge.readDocumentText(id, max) },
-                httpGet = { url -> HostHttp.get(url, grant.hosts) },
-                allowedHosts = grant.hosts,
-                grantedKnowledgeBaseIds = grant.knowledgeBaseIds,
+                readDocument = { id, max ->
+                    val grant = app.container.skills.effectiveGrant()
+                    app.container.knowledge.readDocumentText(id, max, grant.knowledgeBaseIds)
+                },
+                httpGet = { url ->
+                    val grant = app.container.skills.effectiveGrant()
+                    HostHttp.get(url, grant.hosts)
+                },
+                allowedHosts = emptySet(),
+                grantedKnowledgeBaseIds = emptySet(),
+                documentKnowledgeBaseId = { id -> app.container.knowledge.documentKnowledgeBaseId(id) },
             ),
             autoApproveSideEffects = false,
+            liveGrant = { app.container.skills.effectiveGrant() },
         )
         val toolsEnabled = "tools" in model.capabilities
         val runtime = AgentRuntime(

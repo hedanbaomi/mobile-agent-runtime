@@ -8,7 +8,7 @@ import java.util.zip.ZipInputStream
 
 object OfficeParser {
     const val DOCX_FINGERPRINT = "docx-xml-v2"
-    const val EPUB_FINGERPRINT = "epub-xml-v2"
+    const val EPUB_FINGERPRINT = "epub-xml-v3"
 
     fun parse(fileName: String, bytes: ByteArray): ParsedPublication {
         val inspection = ZipSafety.inspect(bytes)
@@ -197,11 +197,11 @@ object OfficeParser {
         ) {
             return ExtractedAsset(trimmed, "EXTERNAL", page, section, ByteArray(0), "image/*", surroundingText)
         }
-        val leaf = trimmed.substringAfterLast('/').lowercase()
-        val media = entries.entries.firstOrNull { it.key.lowercase().endsWith(leaf) }
+        val resolved = resolvePackagePath(section, trimmed)
+        val media = entries.entries.firstOrNull { it.key.replace('\\', '/').equals(resolved, ignoreCase = true) }
         return if (media != null) {
             ExtractedAsset(
-                media.key.substringAfterLast('/'),
+                media.key,
                 "IMAGE",
                 page,
                 section,
@@ -210,7 +210,7 @@ object OfficeParser {
                 surroundingText,
             )
         } else {
-            ExtractedAsset(leaf.ifBlank { trimmed }, "MISSING", page, section, ByteArray(0), "image/*", surroundingText)
+            ExtractedAsset(resolved.ifBlank { trimmed }, "MISSING", page, section, ByteArray(0), "image/*", surroundingText)
         }
     }
 
@@ -223,6 +223,27 @@ object OfficeParser {
             lower.endsWith(".webp") -> "image/webp"
             else -> "application/octet-stream"
         }
+    }
+
+    internal fun resolvePackagePath(section: String, src: String): String {
+        val raw = src.substringBefore('#').substringBefore('?').replace('\\', '/').trim()
+        if (raw.isEmpty()) return ""
+        val combined = when {
+            raw.startsWith("/") -> raw.drop(1)
+            else -> {
+                val base = section.replace('\\', '/').substringBeforeLast('/', missingDelimiterValue = "")
+                if (base.isEmpty()) raw else "$base/$raw"
+            }
+        }
+        val parts = mutableListOf<String>()
+        combined.split('/').forEach { piece ->
+            when (piece) {
+                "", "." -> Unit
+                ".." -> if (parts.isNotEmpty()) parts.removeAt(parts.lastIndex)
+                else -> parts += piece
+            }
+        }
+        return parts.joinToString("/")
     }
 
     private fun imageName(name: String): Boolean {

@@ -3,7 +3,7 @@
 
 # 知识库、多模态和检索契约
 
-状态：M3 文本路径本地 JVM 已落地（schema v4）。M4 在 schema v5 上增加 PDF 文本、DOCX/EPUB 正文/内嵌图、assets/vision_results、Vision 同意与成功缓存、引用页/图定位；M4R 修复后 schema v6 补 `document_version_id`、完整视觉结果（含 tableMarkdown）和显式 UNKNOWN 重试。独立图片与 Markdown 外链图在无 Vision 时仍等待，不标 READY。向量空间仍是 `local-hash-v1-d32`（不是 ONNX 模型包、不是 USearch JNI）。K06 仅覆盖检查点续跑，不是 300—500 文件设备负载。对应 R05—R08、K01—K08。
+状态：M3 文本路径本地 JVM 已落地（schema v4）。M4 在 schema v5 上增加 PDF 文本、DOCX/EPUB 正文/内嵌图、assets/vision_results、Vision 同意与成功缓存、引用页/图定位；M4R 修复后 schema v6 补 `document_version_id`、完整视觉结果（含 tableMarkdown）和显式 UNKNOWN 重试。M4RR 修复后 schema v7 补 `import_jobs.vision_binding_json`（同意/缓存绑定 Provider+endpoint+revision）。独立图片与 Markdown 外链图在无 Vision 时仍等待，不标 READY。向量空间仍是 `local-hash-v1-d32`（不是 ONNX 模型包、不是 USearch JNI）。K06 仅覆盖检查点续跑，不是 300—500 文件设备负载。对应 R05—R08、K01—K08。
 
 ## 1. 数据模型与一致性
 
@@ -166,3 +166,12 @@ python -B -m reuse lint
 - Vision 缓存写入 `table_markdown`/`result_type` 并建块；UNKNOWN_OUTCOME 仍不自动重放，提供 `retryUnknownVision(..., acknowledgeDuplicateCharge=true)` 与知识库页按钮。
 
 PDF 页光栅化、ONNX、设备原图查看器仍未做。独立复审前不把 K02—K04/K08 升为阶段验收通过。
+
+## 12. M4RR01—M4RR04 本地修复（2026-08-28）
+
+对照第二次审查核实后修复，未通过放宽视觉完整性消掉报错。
+
+- PDF 内容流 `BI/ID/EI` inline image 计入 needsVision；可提取则保存为 IMAGE，否则等待/失败，不再把带图页标 READY。
+- 严格模式比较命中图与可附图集合；超限、缺失 CAS、超过 4 张均阻止，除非用户显式文本降级并在回答中保留警告。
+- Vision 同意与缓存绑定 `providerId|modelId|endpoint|revision`。换 Provider/域名/版本后零外发直至重确认；同 modelId 跨 Provider 不再共用缓存。schema v7 增加 `import_jobs.vision_binding_json`。
+- EPUB 按章节目录解析相对 `src`，同名文件不再错章绑定。

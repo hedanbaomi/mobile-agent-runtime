@@ -120,4 +120,124 @@ class BuiltinToolsTest {
         assertTrue("kb-b" !in result.json)
         assertTrue(result.json.contains("No authorized") || result.json.contains("hits"))
     }
+
+    @Test
+    fun readDocumentFromUnauthorizedKnowledgeBaseIsDenied() {
+        val tools = ToolBroker(
+            setOf("knowledge.read"),
+            ToolContext(
+                search = { _, _, _ -> "{}" },
+                readDocument = { _, _ -> "private-B-marker" },
+                grantedKnowledgeBaseIds = setOf("kb-a"),
+                documentKnowledgeBaseId = { id -> if (id == "doc-b") "kb-b" else "kb-a" },
+            ),
+        )
+        val denied = tools.invoke(ToolCall("r", "read_document", """{"documentId":"doc-b"}"""))
+        assertTrue(denied is ToolResult.Denied)
+        assertTrue("private-B-marker" !in denied.toString())
+        val empty = ToolBroker(
+            setOf("knowledge.read"),
+            ToolContext(
+                search = { _, _, _ -> "{}" },
+                readDocument = { _, _ -> "secret" },
+            ),
+        ).invoke(ToolCall("r2", "read_document", """{"documentId":"doc-a"}"""))
+        assertTrue(empty is ToolResult.Denied)
+    }
+
+    @Test
+    fun postOnlyGrantRejectsGet() {
+        var calls = 0
+        val tools = ToolBroker(
+            setOf("network.http"),
+            ToolContext(
+                search = { _, _, _ -> "{}" },
+                readDocument = { _, _ -> "{}" },
+                httpGet = { calls += 1; """{"ok":true}""" },
+                allowedHosts = setOf("api.example.com"),
+                grantedMethods = setOf("POST"),
+            ),
+            autoApproveSideEffects = true,
+        )
+        val result = tools.invoke(ToolCall("h", "http_request", """{"url":"https://api.example.com/v1","method":"GET"}"""))
+        assertTrue(result is ToolResult.Denied)
+        assertEquals(0, calls)
+    }
+
+    @Test
+    fun revokeStopsNewCallsOnSameBroker() {
+        var grant = PermissionGrant("g", "i", "h", setOf("knowledge.read"), knowledgeBaseIds = setOf("kb-a"))
+        val tools = ToolBroker(
+            emptySet(),
+            ToolContext(
+                search = { _, _, _ -> "{}" },
+                readDocument = { _, _ -> "private-A-marker" },
+                grantedKnowledgeBaseIds = setOf("kb-a"),
+                documentKnowledgeBaseId = { "kb-a" },
+            ),
+            liveGrant = { grant },
+        )
+        val first = tools.invoke(ToolCall("r1", "read_document", """{"documentId":"doc-a"}"""))
+        assertTrue(first is ToolResult.Value)
+        grant = grant.copy(revoked = true, capabilities = emptySet(), knowledgeBaseIds = emptySet())
+        val second = tools.invoke(ToolCall("r2", "read_document", """{"documentId":"doc-a"}"""))
+        assertTrue(second is ToolResult.Denied)
+    }
+
+    @Test
+    fun pendingHttpApproveAfterRevokeIsDenied() {
+        var grant = PermissionGrant(
+            "g",
+            "i",
+            "h",
+            setOf("network.http"),
+            hosts = setOf("api.example.com"),
+            methods = setOf("GET"),
+        )
+        var calls = 0
+        val tools = ToolBroker(
+            emptySet(),
+            ToolContext(
+                search = { _, _, _ -> "{}" },
+                readDocument = { _, _ -> "{}" },
+                httpGet = { calls += 1; """{"ok":true}""" },
+                allowedHosts = setOf("api.example.com"),
+            ),
+            liveGrant = { grant },
+        )
+        val call = ToolCall("h1", "http_request", """{"url":"https://api.example.com/v1","method":"GET"}""")
+        assertEquals(ToolResult.NeedsApproval, tools.invoke(call))
+        grant = grant.copy(revoked = true, capabilities = emptySet())
+        val approved = tools.approve("h1")
+        assertTrue(approved is ToolResult.Denied)
+        assertEquals(0, calls)
+    }
+
+    @Test
+    fun ipLiteralsAreRejectedBeforeCallback() {
+        var calls = 0
+        val tools = broker(autoApprove = true, http = { calls += 1; it })
+        val v6 = tools.invoke(ToolCall("a", "http_request", """{"url":"https://[fc00::1]/"}"""))
+        val link = tools.invoke(ToolCall("b", "http_request", """{"url":"https://[fe80::1]/"}"""))
+        val dotted = tools.invoke(ToolCall("c", "http_request", """{"url":"https://2130706433/"}"""))
+        assertTrue(v6 is ToolResult.Invalid)
+        assertTrue(link is ToolResult.Invalid)
+        assertTrue(dotted is ToolResult.Invalid)
+        assertEquals(0, calls)
+    }
+
+    @Test
+    fun resolvedPrivateAddressIsRejected() {
+        val error = runCatching {
+            HttpPolicy.assertDestination(
+                "https://public.example.invalid/",
+                setOf("public.example.invalid"),
+            ) { listOf(java.net.InetAddress.getByName("127.0.0.1")) }
+        }.exceptionOrNull()
+        assertTrue(error is IllegalStateException)
+        val v6 = runCatching {
+            HttpPolicy.assertRequest("https://[fc00::1]/", setOf("fc00::1"))
+        }.exceptionOrNull()
+        assertTrue(v6 is IllegalStateException)
+    }
 }

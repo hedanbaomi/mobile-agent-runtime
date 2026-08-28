@@ -3,7 +3,7 @@
 
 # 项目交接
 
-最后更新：2026-08-28T22:44:00+08:00（Asia/Taipei）。项目根目录：`E:\mobileAgentRuntime`。
+最后更新：2026-08-28T23:20:00+08:00（Asia/Taipei）。项目根目录：`E:\mobileAgentRuntime`。
 
 **接手者必须先读 [agent.md](agent.md)、本文件和 [技术实现方案](docs/IMPLEMENTATION_PLAN.md)。工作后必须维护本文件及受影响的专题文档。**
 
@@ -11,16 +11,16 @@
 
 | 项目 | 状态 |
 | --- | --- |
-| 产品 | M1 部分实现。UAR/NAR/KAR 保留先前修复记录。M4/M5 独立审查仍为历史 `NEEDS_AMEND`；本轮已按源码核实并修复 M4R01—M4R07、M5R01—M5R11（JVM 回归）。独立复审前不能按阶段完成进入 M6 |
-| 业务源码/构建 | 本轮 Gradle `licenseGuard`/`licenseGuardReverse`、相关模块测试与 `assembleDebug` BUILD SUCCESSFUL；`python -B -m reuse lint` 195/195 退出 0。未跑模拟器/真机/付费模型 |
-| Git | 分支 `main` 跟踪 `origin/main`，已同步。M4R/M5R 修复 `d8abaea25c69e50ae14d77534d670f82f3a216f6`；SHA 记录 `4bda75074b948bc83106bf5a19b623dd28e11d90`。`git push origin main` 已将 `a3b87f2..4bda750` 推到 `https://github.com/hedanbaomi/mobile-agent-runtime.git`。作者 `luozhibai`，无 Cursor trailer |
+| 产品 | M4/M5 第二次独立审查仍为历史 `NEEDS_AMEND`。本轮已按源码核实并修复 M4RR01—M4RR04、M5RR01—M5RR05（JVM 回归）。独立复审前不能按阶段完成进入 M6。UAR/NAR/KAR 历史记录保留 |
+| 业务源码/构建 | Gradle `licenseGuard`/`licenseGuardReverse`、knowledge/skills/agent-runtime/sqlite/provider 测试与 `assembleDebug` BUILD SUCCESSFUL；`python -B -m reuse lint` 195/195 退出 0。未跑模拟器/真机/付费模型 |
+| Git | 分支 `main` 跟踪 `origin/main`。用户已授权 commit 与 push。修复即将写入新提交，SHA 在提交后回写。作者 `luozhibai` |
 | CodeGraph | 修复后执行 `codegraph sync`；未提交 `.codegraph/` |
 | 许可 | 提交前 `licenseGuard`/`licenseGuardReverse` BUILD SUCCESSFUL；`python -B -m reuse lint` 195/195。未改 LICENSE 正文 |
-| 授权范围 | 用户已授权的 commit 与 push 已完成。不部署 Cloudflare，不实现 M6 CPython |
+| 授权范围 | 用户要求核对交接新问题并在属实时修复，完成后 commit 与 push。不部署 Cloudflare，不实现 M6 CPython |
 
 ## 2. 当前任务
 
-无进行中任务。M4R/M5R 已提交并推送；独立复审前不把阶段验收标为通过。
+进行中：按用户授权用 `commit-tree` 提交 M4RR/M5RR 修复并 `git push origin main`。作者 `luozhibai`，不含 Cursor trailer。
 
 ## 3. 关键约束
 
@@ -386,6 +386,81 @@ U02 的横屏、IME、大字号、触控、对比度、焦点及实际字体回�
 - 下一步：独立复审后再改阶段结论。不自动开工 M6。
 
 修复提交已写入 `d8abaea25c69e50ae14d77534d670f82f3a216f6`（作者/提交者 `luozhibai`，无 Cursor trailer）。SHA 记录提交 `4bda75074b948bc83106bf5a19b623dd28e11d90`。`git push origin main` 成功：`a3b87f2..4bda750`（含先前未推送的 M4/M5 `75fc381`/`103a7d2`）。
+
+### 2026-08-28T22:52:00+08:00：M4/M5 修复后第二次独立审查
+
+#### 范围、基线与结论
+
+- 请求：再次审查 M4 与 M5；不直接修复。根目录 `E:\mobileAgentRuntime`，HEAD `7f3f2e83883ff612b5f248ee21e17557d8e24692`，修复 `d8abaea25c69e50ae14d77534d670f82f3a216f6`，对比上轮审查基线 `103a7d2a0e21a534627e408834e5454837ac729b`。开工 `main...origin/main`、工作区干净。
+- 已按入口阅读 agent/HANDOFF/实现计划及相关要求、许可、KNOWLEDGE、SKILLS_AND_SECURITY、验收契约。M4 解析/引用和 M5 安装/权限由两条只读审查线复核，主审负责 App 接线、模型协议、预算与证据整合。未再扩查 M0.5/M2/M3。
+- **结论：M4/M5 仍为 NEEDS_AMEND。确认 9 项剩余或新增问题：6 P1、3 P2。** 不重复把已修复的旧触发条件报成当前缺陷；也不以 51 个现有测试通过推定新边界成立。
+- 下表“原反例通过”仅指原审查中的具体触发条件；“源码接通”不等于真实设备/Provider 验收。修复者的历史 18 项修复声明原样保留，当前状态以本节为准。
+
+#### 上轮 18 项逐项复核
+
+| 原 ID | 本轮判断 | 证据与未闭环边界 |
+| --- | --- | --- |
+| M4R01 | 部分修复 | App 已注入 OpenAiCompatibleVision，并构造包含图片的请求；同意记录、实际目的地与缓存身份仍不一致，见 M4RR03；未跑真实模型 |
+| M4R02 | 部分修复 | text+vector、drawing-only 原反例已等待/失败，不再以 Page 标记 READY；inline image 仍静默遗漏，见 M4RR01 |
+| M4R03 | 原反例通过 | DOCX/EPUB 外链图被标为 EXTERNAL/MISSING；Repository 阻止不完整导入，测试零假后端调用；多目录同名图片另见 M4RR04 |
+| M4R04 | 部分修复 | typed image 消息和回答内降级警告已存在；多图/超限图仍可部分静默省略，见 M4RR02 |
+| M4R05 | 原反例通过 | 现有两页 PDF、图片页码、version/chunk/asset 归属、asset blob hash 测试通过；EPUB 来源错绑另见 M4RR04，不能据此宣称任意 PDF/EPUB 页定位完整 |
+| M4R06 | 原反例通过 | tableMarkdown/type 已入 schema/cache；table-only 标记可检索，缓存命中不再次调用假后端 |
+| M4R07 | 原反例通过 | UNKNOWN 不自动重放；显式 retryUnknownVision 和重复收费风险提示已存在，手动重试可恢复；目的地变更仍受 M4RR03 限制 |
+| M5R01 | 原反例通过 | 第二轮保留 assistant.tool_calls 与对应 tool_call_id，Runtime 测试通过；Adapter 静态核对为结构化 JSON 编码 |
+| M5R02 | 源码接通，设备未验 | Provider tools 开关、HTTP 宿主、Chat 审批/拒绝回调已接线；Broker 假 HTTP 审批测试通过，不是设备/网络端到端通过 |
+| M5R03 | 部分修复 | KB/host/method 范围和完整 manifest 已保存，knowledge_search 过滤生效，同包不叠 grant；read_document、HTTP method 和运行中撤销仍失败，见 M5RR01/02 |
+| M5R04 | 部分修复 | 5000+ 项、压缩炸弹均 class E；流式累计上限已存在，现有回归通过；截断 ZIP、符号链接仍被接受，见 M5RR05 |
+| M5R05 | 部分修复 | file/http 拒绝、逐跳 URL 检查、有界 HTTP/工具输出已实现；IP/DNS 边界不完整，见 M5RR03 |
+| M5R06 | 原反例通过 | 当前 secret 加入脱敏；工具 Invalid/Value 路径相关 Runtime 测试通过。旧 secretsInToolOutput 测试的无 KB grant 路径不能单独作为调用已执行的证据，另有当前 secret 的真实回调反例回归通过 |
+| M5R07 | 原反例通过 | Adapter 持续传入 index→id map；独立并行 SSE 片段得到 a={expression:1+1}、b={expression:2+2}，未串接 |
+| M5R08 | 部分修复 | 流结束/执行前补查可防止迟到 COMPLETED 和迟到工具执行；没有实际截止/上游取消，见 M5RR04 |
+| M5R09 | 原反例通过 | toolsEnabled=false 时收到 tool call 明确失败且不执行 Broker，测试通过 |
+| M5R10 | 原反例通过 | 大写 HTTPS 远程 wheel 被判 class E，测试通过 |
+| M5R11 | 原反例通过 | 原包 bytes/source_hash/完整 manifest 已持久化；静态核对及独立审阅，未要求提前执行 M6 Python |
+
+#### 当前发现与修复验收条件
+
+| ID / 优先级 | 当前源码位置 | 触发、影响、证据与必须补的回归 |
+| --- | --- | --- |
+| M4RR01 / P1 | `shared/knowledge-api/src/main/kotlin/runtime/mobileagent/knowledge/PdfParser.kt:33-56,269-272` | 内容流中的 inline image（BI/ID/EI）既不是 XObject，也未进入矢量指令检测。主审自造有 catalog/page/font/content/xref 的 PDF，正文 caption 后带 1×1 RGB inline image：解析 needsVision=false/assets=0；真 Repository + 内存 SQLite 返回 READY，Vision 调用 0，search(caption)=1。视觉证据被漏掉而显示完整成功。须提取此图片，或识别不支持视觉并等待/失败；补“文字+inline image”仓库回归，不能只测无文字扫描页或 XObject |
+| M4RR02 / P1 | `app-android/src/main/kotlin/runtime/mobileagent/ChatViewModel.kt:101-111,124-146` | 严格模式只取前 4 个 asset，缺失或大于 2 MiB 的图片直接跳过，仅在最终一张都没有时阻止；所有命中文本/引用仍进入提示词。两张图中一张超限、另一张可附，或 5 个短视觉命中时，会无提示地少发原图。RetrievalBudget 仅裁字符数，未提供完整性保障。此项为明确静态调用链证据，未声称运行 Android。须比较命中与实际附图集合；不完整则阻止/分批/要求显式降级并持久提示，补混合大小、缺失 CAS、5 图反例（K04/K08） |
+| M4RR03 / P1 | `app-android/src/main/kotlin/runtime/mobileagent/MobileAgentApp.kt:45-49`；`OpenAiCompatibleVision.kt:29-36`；`data/sqlite/src/main/kotlin/runtime/mobileagent/data/KnowledgeRepository.kt:178-192,646-671` | Repository 在 App 创建时仅捕获 modelId 作 fingerprint，实际 Vision 每张图却重新挑当前 Provider/模型；任务只保存 vision_consent 布尔值，无目的域名/Provider/revision/数据范围。内存反例：A 配置下已同意并暂停 COPYING，换用 B 指纹和假后端后 resume，无新同意即 READY/B 调用=1；另两个 Provider 用同 modelId，A 调用=1、B 调用=0，B 库内容复用 A 的视觉结果。须让同意、执行和缓存共享不可变完整绑定，配置/范围变化后零外发直到重确认；补换 Provider/域名/模型/版本及同 modelId 跨 Provider 缓存隔离（K03）。未访问真实 Provider |
+| M4RR04 / P2 | `shared/knowledge-api/src/main/kotlin/runtime/mobileagent/knowledge/OfficeParser.kt:186-213` | EPUB 将 src 截为 basename 再取第一个 endsWith 匹配，不相对 XHTML 所在目录解析。内存 ZIP 两章分别引用各自 images/fig.png，源字节标记 A/B；主审观察第二章 page=2 错绑 A，B 被补扫为 page=null。会产生错误视觉上下文/章节引用。须按章节 parent 解析规范化相对 URI、精确匹配包路径；不能按同名文件猜测，补双目录同名图的 bytes/page/section 回归 |
+| M5RR01 / P1 | `shared/skills-api/src/main/kotlin/runtime/mobileagent/skills/BuiltinTools.kt:108-122`；`app-android/src/main/kotlin/runtime/mobileagent/ChatViewModel.kt:157`；`data/sqlite/src/main/kotlin/runtime/mobileagent/data/KnowledgeRepository.kt:349-359` | 资源 scope 保存了但未完整执行：只给 knowledge_search 检查 KB，read_document 直接按 documentId 取正文，宿主也不验 KB。主审用真实 SkillRepository 安装仅授权 knowledge.read→kb-a 的包，调用 kb-b 的真实 documentId，返回 private-B-marker；另一包 grant.methods=[POST]，GET 经批准后仍进入假 HTTP 回调（calls=1）。须在宿主读取前校验 document.kb_id 与本次有效 grant/Agent 范围，并将 method 等资源范围纳入 Broker 求交集；补 A grant/B doc、空授权和 POST-only grant/GET 拒绝用例。通用批准不能隐式扩大 manifest 范围 |
+| M5RR02 / P1 | `app-android/src/main/kotlin/runtime/mobileagent/ChatViewModel.kt:149-160`；`shared/skills-api/src/main/kotlin/runtime/mobileagent/skills/BuiltinTools.kt:50-85` | Broker 在 send 时捕获一次聚合 grant，invoke/approve 不复核当前 revision、撤销或启用状态。主审 revoke 后有效 capabilities 已为空，旧 Broker 使用新的 callId 仍读出先前授权 A 的正文。HTTP 等待审批期间撤权也没有当前 grant 检查。须每次调用及审批恢复时重新求有效授权，绑定 install/hash/Agent/revision；撤销后旧会话与新调用均拒绝，补“撤权→同一 Broker→新 callId”和“等待审批→撤权→批准”用例（S07） |
+| M5RR03 / P1 | `shared/skills-api/src/main/kotlin/runtime/mobileagent/skills/BuiltinTools.kt:251-273,278-287` | HTTP 只检 URL 字面 host，未解析并固定实际远端地址；私网 IPv6 和整数 IPv4 也未覆盖。纯 URI/策略复现：允许列表中的 https://[fc00::1]/、https://[fe80::1]/、https://2130706433/ 均通过。HostHttp 随即 openConnection，缺少授权域名解析到私网/重绑定防护。此处只证明校验放行及宿主调用链，没有访问这些地址。须拒绝 IP 字面值/私网/loopback/link-local，逐跳核验解析结果并将验证地址绑定到连接，补受控 DNS/IPv6/整数地址/重定向测试（S05） |
+| M5RR04 / P2 | `shared/agent-runtime/src/main/kotlin/runtime/mobileagent/agent/AgentRuntime.kt:77-81,146-159,195-196` | 超时只在事件或操作结束时检查，return@collect 不会终止上游；没有覆盖模型等待、审批与工具执行的总截止时间。独立慢流每个事件 delay 80ms，预算 20ms，仍消费全部 3 个事件，约 340ms 才返回 BUDGET_EXHAUSTED；若上游不结束会持续等待。旧“结束后不报 COMPLETED”已修，但限时/取消契约仍不成立。须以剩余总预算限制模型/审批/工具并传播取消；补挂起源、持续流、阻塞工具和审批超时，验证截止后不继续消费/执行（S09） |
+| M5RR05 / P2 | `shared/skills-api/src/main/kotlin/runtime/mobileagent/skills/SkillArchive.kt:47-62,99-114,186-198` | PK 前缀即进入 ZipInputStream；读不到条目也按缺 manifest 的 instruction-only 包接受，且不检查 central directory 的 Unix 链接属性。主审复现仅 4 字节 PK/03/04：class=A/files=[]/accepted=true；另在有效内存 ZIP 的 link 条目写入 Unix mode 0120777，class=A/accepted=true。没有写出或跟随链接，缺陷是安装前拒绝边界不成立。须完整校验 ZIP 结构/扫描结束、处理解析异常并拒绝链接，失败统一 class E，补截断/损坏/真实链接属性与规范化重复路径用例（S01/S02） |
+
+#### 验证证据与边界
+
+- 本轮 **未运行 Gradle、构建或写测试文件**。使用已存在的新编译 JAR/测试类、Java 21 JShell `--execution local`、Kotlin/coroutines/serialization、SQLite JDBC 和内存数据库；已用 javap 核实新构造参数、retryUnknownVision、typed SSE 等签名。直接反射调用已读源码的 @Test 方法，逐个输出结果，无失败：AgentRuntimeTest 7、DocumentParserTest 13、KnowledgeRepositoryTest 的 9 个 M4 相关方法、BuiltinToolsTest 9、SkillArchiveTest 11、CapabilityBrokerTest 2，合计 **51/51**。这不是 clean build 或 Gradle 测试任务执行记录。
+- Repository 9 个方法：incompleteEpubFailsWithEvidence、textPdfIsSearchableWithoutVision、visionUnknownOutcomeDoesNotMarkReadyOrRetry、vectorPdfDoesNotBecomeReadyWithoutVision、drawingOnlyPdfDoesNotCallVisionOrBecomeReady、docxExternalImageDoesNotBecomeReadyOrFetch、visionTableMarkdownIsIndexedAndCached、unknownVisionRetryRequiresAckAndCanSucceed、locatorRejectsForgedCitationAndReturnsAssetHash。
+- 额外独立反例：inline PDF→READY/0 Vision calls；切换假 Vision binding 恢复任务→B calls=1；同 modelId 跨 Provider→A calls=1/B calls=0；EPUB 同名图错章；仅 kb-a grant 读 kb-b；POST-only grant 仍执行 GET 假回调；撤销后旧 Broker 新 callId 仍读；三种受禁 IP 写法通过策略；20ms Runtime 预算仍消费 3×80ms 慢流；截断 ZIP 与 Unix symlink 属性 ZIP 可安装；并行 SSE 两个 callId 参数分别正确。PDF fixture 含 xref，EPUB 的 A/B 为合成字节身份标记，ZIP symlink 仅修改内存 central directory 属性；均不冒充真实模型效果或设备测试。
+- JAR SHA-256：agent-runtime=`0311C789DA5E5AF046BFB4C9A03945693E515FC5EACBB2B5F1AA860A6CC2A2B9`；knowledge-api=`B1A89D5A34447675842C5107DFB8EE0F3FE972D02B8E3CF4F4A2A63F05DF4A3B`；skills-api=`F029AA92660743E3A74EB740C9AC7E3D331F6C6190DEFA0DD4E76CAAC59E30FF`；sqlite=`AD300731DBE4C726AC389E54C7E9BECAA9A760F4147B78F91F3C635A88F16366`。
+- App 源码已核对 Provider tools 开关、审批回调、typed assistant/tool/image 请求、Vision 注入及调用路径。未运行 Android/Compose、模拟器/真机、真实 Provider/Vision/HTTP/DNS、Cloudflare、付费 API；未做 K06 大规模负载、PDF 光栅化、ONNX/USearch JNI、CPython，不将这些已披露范围缺口单独算新增缺陷。
+- 其他观察不计入 9 项：locator 仍未比较 Citation.knowledgeBaseId（正常 CitationMap 未见错误，未证明权限绕过）；嵌套 PDF Pages 解析兼容性仍有限；Chat 审批 UI 仅展示工具名，具体目标/参数的设备验收仍缺。修复引用/权限时应补相应反例，不能称完整安全/设备验收通过。
+- 本轮只更新 HANDOFF 事实与审查记录，未改变架构/接口/范围/验收标准，未覆盖修复者历史自测；技术专题现有要求继续有效。未 commit/push；HEAD 保持审查基线。
+
+#### 下一步
+
+1. 获得修复授权后，先处理 M4RR01/02/03、M5RR01/02/03，再处理三项 P2；每项先补本节反例，不放宽既定视觉完整性、当前授权与时限要求。
+2. 变更需要同步相应专题文档及测试，并重新进行独立审查。App 接线/审批/换 Provider、受控 HTTP 连接和取消传播应补适当集成证据；不能只重复当前 51 个通过测试。
+3. 本轮未授权业务修复、提交、推送、设备安装或 M6 开工。最终文档与许可核验结果见下方收工记录。
+
+收工核验：执行 `docs/DOCUMENTATION_CHECK.md` 既有 Python 检查块，PASS/exit 0（20 份 Markdown、129 本地链接、18 需求、6 UI 验收、9 阶段）；`python -B -m reuse lint` exit 0，195/195。`git diff --check` 无错误；仅 HANDOFF 有差异，HEAD 仍为 `7f3f2e8`，`HEAD...origin/main` 为 0/0。本轮未修业务代码、未提交/推送。上述检查不改变 M4/M5 的 NEEDS_AMEND 结论。
+
+### 2026-08-28T23:20:00+08:00：核实并修复 M4RR01—M4RR04、M5RR01—M5RR05
+
+- 请求：检查交接新写入的问题，属实则修复，完成后 commit 与 push。
+- 判定：9 项全部属实（对照 HEAD `7f3f2e8`）。无误报。
+- M4：PDF `BI/ID/EI` 计入视觉；严格模式不完整附图则阻止或显式降级；Vision 同意/缓存绑定 Provider+endpoint+revision（schema v7）；EPUB 按章节目录精确匹配同名图。
+- M5：`read_document` 校验 KB；HTTP method 交集；live grant 每次 invoke/approve；撤销后新 callId 与待批准恢复均拒绝；拒绝 IP 字面值并核验解析地址；预算 `withTimeout` 取消上游；截断 ZIP 与 Unix symlink 为 class E。
+- 验证：`.\gradlew.bat licenseGuard licenseGuardReverse :shared:knowledge-api:test :shared:skills-api:test :shared:agent-runtime:test :shared:provider-api:test :data:sqlite:test :app-android:assembleDebug --no-daemon` BUILD SUCCESSFUL；`python -B -m reuse lint` 195/195 退出 0。未跑真机/付费 Vision/真实 HTTP、未独立复审。
+- 文档：`docs/KNOWLEDGE.md` 第12节、`docs/SKILLS_AND_SECURITY.md` 第11节、`docs/IMPLEMENTATION_PLAN.md` 状态、本交接。
+- Git：修复即将提交。作者 `luozhibai`。
+- 下一步：独立复审后再改阶段结论。不自动开工 M6。
 
 ## 7. 后续记录格式
 

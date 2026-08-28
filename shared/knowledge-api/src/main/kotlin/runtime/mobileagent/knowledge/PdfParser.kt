@@ -7,7 +7,7 @@ import java.io.ByteArrayOutputStream
 import java.util.zip.Inflater
 
 object PdfParser {
-    const val FINGERPRINT = "pdf-text-v2"
+    const val FINGERPRINT = "pdf-text-v3"
 
     fun parse(bytes: ByteArray): ParsedPublication {
         if (bytes.size < 5 || String(bytes.copyOfRange(0, 5), Charsets.ISO_8859_1) != "%PDF-") {
@@ -49,7 +49,20 @@ object PdfParser {
                     surroundingText = text,
                 )
             }
-            val hasImages = xobjects.isNotEmpty() || Regex("/Subtype\\s*/Image").containsMatchIn(pageObj.dict)
+            extractInlineImages(decoded).forEach { payload ->
+                imageOrdinal += 1
+                assets += ExtractedAsset(
+                    localId = "inline-$imageOrdinal",
+                    kind = "IMAGE",
+                    page = pageIndex,
+                    section = "inline",
+                    bytes = payload,
+                    mediaType = "application/octet-stream",
+                    surroundingText = text,
+                )
+            }
+            val hasInline = hasInlineImage(pageLatin)
+            val hasImages = xobjects.isNotEmpty() || hasInline || Regex("/Subtype\\s*/Image").containsMatchIn(pageObj.dict)
             val hasDrawing = hasVectorDrawing(pageLatin)
             val needsVision = hasImages || hasDrawing || text.isEmpty()
             pages += ExtractedPage(pageIndex, text, needsVision)
@@ -119,6 +132,14 @@ object PdfParser {
 
     fun writeDrawingOnlyPdf(): ByteArray =
         assemblePages(listOf(PageContent("0 0 100 100 re f\n", "")))
+
+    fun writeTextAndInlineImagePdf(text: String): ByteArray {
+        val escaped = text.replace("\\", "\\\\").replace("(", "\\(").replace(")", "\\)")
+        val rgb = byteArrayOf(0xFF.toByte(), 0x00, 0x00)
+        val content = "BT /F1 12 Tf 72 720 Td ($escaped) Tj ET\nBI /W 1 /H 1 /CS /RGB /BPC 8 ID " +
+            String(rgb, Charsets.ISO_8859_1) + " EI\n"
+        return assemblePages(listOf(PageContent(content, "/Font << /F1 FONT >>")))
+    }
 
     fun writeTwoPageTextPdf(page1: String, page2: String): ByteArray {
         fun body(text: String): String {
@@ -270,6 +291,20 @@ object PdfParser {
         val stripped = latin.replace(Regex("BT[\\s\\S]*?ET"), " ")
         return Regex("(?<![A-Za-z])(re|m|l|c|v|y)\\s").containsMatchIn(stripped) &&
             Regex("(?<![A-Za-z])(f|f\\*|F|B|b|S|s)\\s").containsMatchIn(stripped)
+    }
+
+    private fun hasInlineImage(latin: String): Boolean {
+        val stripped = latin.replace(Regex("BT[\\s\\S]*?ET"), " ")
+        return Regex("(?<![A-Za-z])BI\\b[\\s\\S]*?\\bID\\b[\\s\\S]*?\\bEI\\b").containsMatchIn(stripped)
+    }
+
+    private fun extractInlineImages(decoded: ByteArray): List<ByteArray> {
+        val latin = String(decoded, Charsets.ISO_8859_1)
+        val matches = Regex("(?<![A-Za-z])BI\\b([\\s\\S]*?)\\bID\\b([\\s\\S]*?)\\bEI\\b").findAll(latin)
+        return matches.mapNotNull { match ->
+            val payload = match.groupValues[2].trimStart { it == ' ' || it == '\n' || it == '\r' || it == '\t' }
+            payload.toByteArray(Charsets.ISO_8859_1).takeIf { it.isNotEmpty() }
+        }.toList()
     }
 
     private fun jpegStub(): ByteArray {

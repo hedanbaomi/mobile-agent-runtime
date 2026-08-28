@@ -3,7 +3,7 @@
 
 # 技术实现方案
 
-版本：v1.2 设计基线，2026-08-28。状态：**部分实现**。M0 本地构建/许可已落地；M0.5 软件页面 UI 设计基线已全面完成。M1 已接通 OpenAI 兼容流式 Chat、Keystore 密钥引用、TXT/MD SAF 导入与含图等待；现有 UI 须按 M0.5 设计补齐。M2 本地公告闭环已落地（未部署 Cloudflare）；NAR01—NAR07 已在本地修复。M3 文本路径本地 JVM 已落地：CAS 多库、代际索引、FTS+`local-hash-v1-d32`+RRF；KAR01—KAR08 已在本地修复。M4 本地 JVM 已落地并完成 M4R01—M4R07 修复（schema v6、App Vision 接线、绘图 PDF 不 READY、外链图零外联、原图消息、locator 校验）；**不是** PDF 光栅化渲染包、**不是** ONNX、**不是** K06 设备负载。M5 本地 JVM 已落地并完成 M5R01—M5R11 修复（tool_calls 协议、结构化权限、HTTPS 边界、限额 class E）；**不是** CPython 隔离（M6）、**不是** 完整 MVP。独立复审前不把这些修复标为阶段验收通过。完整 MVP、CPython、USearch JNI、公告生产部署仍未完成。
+版本：v1.2 设计基线，2026-08-28。状态：**部分实现**。M0 本地构建/许可已落地；M0.5 软件页面 UI 设计基线已全面完成。M1 已接通 OpenAI 兼容流式 Chat、Keystore 密钥引用、TXT/MD SAF 导入与含图等待；现有 UI 须按 M0.5 设计补齐。M2 本地公告闭环已落地（未部署 Cloudflare）；NAR01—NAR07 已在本地修复。M3 文本路径本地 JVM 已落地：CAS 多库、代际索引、FTS+`local-hash-v1-d32`+RRF；KAR01—KAR08 已在本地修复。M4 本地 JVM 已落地并完成 M4R/M4RR 修复（schema v7、App Vision 接线、inline/绘图 PDF 不 READY、外链图零外联、原图完整性、locator 校验、同意与缓存绑定 Provider）；**不是** PDF 光栅化渲染包、**不是** ONNX、**不是** K06 设备负载。M5 本地 JVM 已落地并完成 M5R/M5RR 修复（tool_calls 协议、live grant、HTTPS/IP 边界、ZIP 结构拒绝、预算取消）；**不是** CPython 隔离（M6）、**不是** 完整 MVP。独立复审前不把这些修复标为阶段验收通过。完整 MVP、CPython、USearch JNI、公告生产部署仍未完成。
 
 开工入口：[agent.md](../agent.md) → [HANDOFF.md](../HANDOFF.md) → 本文。范围依据见 [REQUIREMENTS.md](REQUIREMENTS.md)。含图知识库、Python 隔离和公告分别详见专题，不能只实现本文概要。
 

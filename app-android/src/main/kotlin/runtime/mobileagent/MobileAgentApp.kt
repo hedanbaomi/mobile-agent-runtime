@@ -46,7 +46,16 @@ class AppContainer(app: MobileAgentApp) {
         db,
         CasBlobSink(File(app.filesDir, "cas")),
         vision = OpenAiCompatibleVision(http, profiles, secrets),
-        visionModelFingerprint = profiles.visionBinding()?.second?.modelId ?: "vision-unconfigured",
+        visionBinding = {
+            profiles.visionBinding()?.let { (provider, model) ->
+                runtime.mobileagent.knowledge.VisionBinding(
+                    providerId = provider.id,
+                    modelId = model.modelId,
+                    endpoint = provider.baseUrl,
+                    revision = maxOf(provider.revision, model.revision),
+                )
+            }
+        },
     )
     val skills = SkillRepository(db)
     val announcements = AnnouncementRepository(db)

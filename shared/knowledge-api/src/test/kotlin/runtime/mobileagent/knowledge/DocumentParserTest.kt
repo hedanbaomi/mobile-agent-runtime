@@ -107,7 +107,18 @@ class DocumentParserTest {
     @Test
     fun imagePdfAssignsPageToAsset() {
         val parsed = PdfParser.parse(PdfParser.writePdfWithImageXObject("flowchart page"))
-        assertEquals(1, parsed.assets.single { it.kind == "IMAGE" }.page)
+        assertEquals(1, parsed.assets.single().page)
+    }
+
+    @Test
+    fun textPlusInlineImageNeedsVision() {
+        val parsed = PdfParser.parse(PdfParser.writeTextAndInlineImagePdf("inline caption token"))
+        assertTrue(parsed.needsVision)
+        assertTrue(parsed.text.contains("inline caption token"))
+        assertTrue(
+            parsed.assets.any { it.kind == "IMAGE" && it.bytes.isNotEmpty() } ||
+                parsed.assets.any { it.kind == "PAGE" && it.bytes.isEmpty() },
+        )
     }
 
     @Test
@@ -144,6 +155,27 @@ class DocumentParserTest {
     }
 
     @Test
+    fun epubSameBasenameUsesChapterDirectory() {
+        val pngA = byteArrayOf(0x89.toByte(), 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A) + "MARK-A".toByteArray()
+        val pngB = byteArrayOf(0x89.toByte(), 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A) + "MARK-B".toByteArray()
+        val zip = zip(
+            "mimetype" to "application/epub+zip".toByteArray(),
+            "META-INF/container.xml" to "<container><rootfiles><rootfile full-path=\"OPS/content.opf\"/></rootfiles></container>".toByteArray(),
+            "OPS/ch1/chapter.xhtml" to "<html><body><p>one</p><img src=\"images/fig.png\"/></body></html>".toByteArray(),
+            "OPS/ch2/chapter.xhtml" to "<html><body><p>two</p><img src=\"images/fig.png\"/></body></html>".toByteArray(),
+            "OPS/ch1/images/fig.png" to pngA,
+            "OPS/ch2/images/fig.png" to pngB,
+        )
+        val parsed = OfficeParser.parse("book.epub", zip)
+        val page1 = parsed.assets.single { it.page == 1 && it.kind == "IMAGE" }
+        val page2 = parsed.assets.single { it.page == 2 && it.kind == "IMAGE" }
+        assertTrue(String(page1.bytes, Charsets.ISO_8859_1).contains("MARK-A"))
+        assertTrue(String(page2.bytes, Charsets.ISO_8859_1).contains("MARK-B"))
+        assertEquals("OPS/ch1/chapter.xhtml", page1.section)
+        assertEquals("OPS/ch2/chapter.xhtml", page2.section)
+    }
+
+    @Test
     fun zipSlipStillRejectedBeforeParse() {
         val error = assertThrows(IllegalStateException::class.java) {
             OfficeParser.parse("evil.docx", zip("../outside.txt" to "nope".toByteArray()))
@@ -160,6 +192,23 @@ class DocumentParserTest {
             "Original images were not sent. Visual evidence may be incomplete.",
             (degraded as StrictVisualDecision.Allow).warning,
         )
+    }
+
+    @Test
+    fun visualAttachmentRejectsPartialOrOversizedSets() {
+        val tiny = "image/png" to ByteArray(8)
+        val huge = "image/png" to ByteArray(VisualAttachmentPolicy.MAX_BYTES + 1)
+        val mixed = VisualAttachmentPolicy.plan(listOf("ok", "big")) { id ->
+            if (id == "ok") tiny else huge
+        }
+        assertTrue(mixed is VisualAttachmentPlan.Incomplete)
+        val missing = VisualAttachmentPolicy.plan(listOf("gone")) { null }
+        assertTrue(missing is VisualAttachmentPlan.Incomplete)
+        val five = VisualAttachmentPolicy.plan((1..5).map { "a$it" }) { tiny }
+        assertTrue(five is VisualAttachmentPlan.Incomplete)
+        val ok = VisualAttachmentPolicy.plan(listOf("a", "b")) { tiny }
+        assertTrue(ok is VisualAttachmentPlan.Complete)
+        assertEquals(2, (ok as VisualAttachmentPlan.Complete).images.size)
     }
 
     private fun zip(vararg files: Pair<String, ByteArray>): ByteArray {

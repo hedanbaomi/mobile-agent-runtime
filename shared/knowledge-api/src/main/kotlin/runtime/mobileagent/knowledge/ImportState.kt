@@ -35,6 +35,7 @@ data class ImportJob(
     var embeddingConsent: Boolean = false,
     var localEmbeddingAvailable: Boolean = true,
     var error: String? = null,
+    var consentedVisionFingerprint: String? = null,
 )
 
 object ImportStateMachine {

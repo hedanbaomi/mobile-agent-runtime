@@ -46,6 +46,55 @@ object VisionCacheKey {
         sha256Hex("${page ?: ""}|${section.orEmpty()}|$surroundingText".toByteArray(Charsets.UTF_8))
 }
 
+data class VisionBinding(
+    val providerId: String,
+    val modelId: String,
+    val endpoint: String,
+    val revision: Int,
+) {
+    val fingerprint: String
+        get() = "$providerId|$modelId|${endpoint.trimEnd('/').lowercase()}|$revision"
+}
+
+data class LoadedVisual(
+    val assetId: String,
+    val mediaType: String,
+    val bytes: ByteArray,
+)
+
+sealed interface VisualAttachmentPlan {
+    data class Complete(val images: List<LoadedVisual>) : VisualAttachmentPlan
+    data class Incomplete(val reason: String) : VisualAttachmentPlan
+}
+
+object VisualAttachmentPolicy {
+    const val MAX_IMAGES = 4
+    const val MAX_BYTES = 2 * 1024 * 1024
+
+    fun plan(
+        assetIds: List<String>,
+        load: (String) -> Pair<String, ByteArray>?,
+    ): VisualAttachmentPlan {
+        val ids = assetIds.distinct()
+        if (ids.isEmpty()) return VisualAttachmentPlan.Complete(emptyList())
+        if (ids.size > MAX_IMAGES) {
+            return VisualAttachmentPlan.Incomplete(
+                "Strict mode cannot silently omit visual hits (${ids.size} images, max $MAX_IMAGES).",
+            )
+        }
+        val images = mutableListOf<LoadedVisual>()
+        for (id in ids) {
+            val loaded = load(id)
+                ?: return VisualAttachmentPlan.Incomplete("Visual asset $id is missing from CAS.")
+            if (loaded.second.size > MAX_BYTES) {
+                return VisualAttachmentPlan.Incomplete("Visual asset $id exceeds 2 MiB.")
+            }
+            images += LoadedVisual(id, loaded.first, loaded.second)
+        }
+        return VisualAttachmentPlan.Complete(images)
+    }
+}
+
 object StrictVisualPolicy {
     fun allow(
         hasVisualEvidence: Boolean,

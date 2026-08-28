@@ -128,6 +128,34 @@ class AgentRuntimeTest {
     }
 
     @Test
+    fun slowStreamStopsWhenBudgetExpires() {
+        val adapter = object : ModelAdapter {
+            var emitted = 0
+            override suspend fun probe(profile: runtime.mobileagent.domain.ModelProfile) = error("not used")
+            override fun stream(request: ModelRequest, secret: CharArray): Flow<ModelEvent> = flow {
+                repeat(3) {
+                    kotlinx.coroutines.delay(80)
+                    emitted += 1
+                    emit(ModelEvent.TextDelta("x"))
+                }
+                emit(ModelEvent.Completed)
+            }
+            override suspend fun embed(request: EmbeddingRequest, secret: CharArray) = error("not used")
+        }
+        val runtime = AgentRuntime(adapter, tools = ToolBroker(emptySet(), ToolContext({ _, _, _ -> "{}" }, { _, _ -> "{}" })))
+        val run = AgentRun("r", "s", "c", budget = RunBudget(maxRuntimeMs = 20))
+        val started = System.currentTimeMillis()
+        val events = runBlocking {
+            runtime.run(run, prompt(), "model", charArrayOf('s'), toolsEnabled = false).toList()
+        }
+        val elapsed = System.currentTimeMillis() - started
+        assertTrue(events.any { it is ModelEvent.Failed && it.sanitizedMessage.contains("budget") })
+        assertTrue(events.none { it is ModelEvent.Completed })
+        assertTrue(elapsed < 250, "elapsed=$elapsed")
+        assertTrue(adapter.emitted <= 1)
+    }
+
+    @Test
     fun currentSecretIsRedactedFromInvalidToolResult() {
         val secret = "live-provider-secret-token"
         val adapter = ScriptedAdapter(

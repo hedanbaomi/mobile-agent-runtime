@@ -37,32 +37,45 @@ data class ToolContext(
     val httpGet: (url: String) -> String = { error("HTTP is not configured") },
     val allowedHosts: Set<String> = emptySet(),
     val grantedKnowledgeBaseIds: Set<String> = emptySet(),
+    val grantedMethods: Set<String> = emptySet(),
+    val documentKnowledgeBaseId: (documentId: String) -> String? = { null },
 )
 
 class ToolBroker(
     private val effectiveCapabilities: Set<String>,
     private val context: ToolContext,
     private val autoApproveSideEffects: Boolean = false,
+    private val liveGrant: (() -> PermissionGrant)? = null,
 ) {
     private val completed = linkedMapOf<String, ToolResult>()
     private val pending = linkedMapOf<String, ToolCall>()
 
     fun invoke(call: ToolCall): ToolResult {
-        completed[call.callId]?.let { return it }
+        val grant = liveGrant?.invoke()
+        val caps = activeCapabilities(grant)
+        val ctx = activeContext(grant)
+        completed[call.callId]?.let { remembered ->
+            if (caps.isEmpty() && BuiltinTools.byName[call.name]?.capability?.isNotEmpty() == true) {
+                return ToolResult.Denied("Current grant is empty or revoked")
+            }
+            return remembered
+        }
         val spec = BuiltinTools.byName[call.name] ?: return ToolResult.Invalid("Unknown tool ${call.name}")
         val args = parseObject(call.argumentsJson) ?: return ToolResult.Invalid("Tool arguments are incomplete JSON")
         val missing = specRequired(spec).filter { key -> !args.containsKey(key) }
         if (missing.isNotEmpty()) {
             return ToolResult.Invalid("Missing parameters: ${missing.joinToString()}")
         }
-        if (spec.capability.isNotEmpty() && spec.capability !in effectiveCapabilities) {
+        if (spec.capability.isNotEmpty() && spec.capability !in caps) {
             return remember(call.callId, ToolResult.Denied("Capability ${spec.capability} is not granted"))
         }
+        val denied = authorize(spec, args, ctx)
+        if (denied != null) return remember(call.callId, denied)
         if (spec.sideEffect && !autoApproveSideEffects) {
             pending[call.callId] = call
             return ToolResult.NeedsApproval
         }
-        val result = runCatching { execute(spec.name, args) }.fold(
+        val result = runCatching { execute(spec.name, args, ctx) }.fold(
             onSuccess = { ToolResult.Value(it) },
             onFailure = { ToolResult.Invalid(it.message ?: "tool failed") },
         )
@@ -72,17 +85,63 @@ class ToolBroker(
     fun approve(callId: String): ToolResult {
         val call = pending.remove(callId) ?: return ToolResult.Invalid("No pending side-effect call")
         completed.remove(callId)
-        return invokeApproved(call)
-    }
-
-    private fun invokeApproved(call: ToolCall): ToolResult {
-        val spec = BuiltinTools.byName.getValue(call.name)
-        val args = parseObject(call.argumentsJson)!!
-        val result = runCatching { execute(spec.name, args) }.fold(
+        val grant = liveGrant?.invoke()
+        val caps = activeCapabilities(grant)
+        val ctx = activeContext(grant)
+        val spec = BuiltinTools.byName[call.name] ?: return ToolResult.Invalid("Unknown tool ${call.name}")
+        val args = parseObject(call.argumentsJson) ?: return ToolResult.Invalid("Tool arguments are incomplete JSON")
+        if (spec.capability.isNotEmpty() && spec.capability !in caps) {
+            return remember(call.callId, ToolResult.Denied("Capability ${spec.capability} is not granted"))
+        }
+        val denied = authorize(spec, args, ctx)
+        if (denied != null) return remember(call.callId, denied)
+        val result = runCatching { execute(spec.name, args, ctx) }.fold(
             onSuccess = { ToolResult.Value(it) },
             onFailure = { ToolResult.Invalid(it.message ?: "tool failed") },
         )
         return remember(call.callId, result)
+    }
+
+    private fun activeCapabilities(grant: PermissionGrant?): Set<String> {
+        if (grant == null) return effectiveCapabilities
+        return if (grant.revoked) emptySet() else grant.capabilities
+    }
+
+    private fun activeContext(grant: PermissionGrant?): ToolContext {
+        if (grant == null) return context
+        if (grant.revoked) {
+            return context.copy(
+                grantedKnowledgeBaseIds = emptySet(),
+                allowedHosts = emptySet(),
+                grantedMethods = emptySet(),
+            )
+        }
+        return context.copy(
+            grantedKnowledgeBaseIds = grant.knowledgeBaseIds,
+            allowedHosts = grant.hosts,
+            grantedMethods = grant.methods,
+        )
+    }
+
+    private fun authorize(spec: ToolSpec, args: JsonObject, ctx: ToolContext): ToolResult.Denied? {
+        if (spec.name == "read_document") {
+            if (ctx.grantedKnowledgeBaseIds.isEmpty()) {
+                return ToolResult.Denied("No authorized knowledge base in the current grant")
+            }
+            val documentId = args.string("documentId")
+            val kb = ctx.documentKnowledgeBaseId(documentId)
+            if (kb == null || kb !in ctx.grantedKnowledgeBaseIds) {
+                return ToolResult.Denied("Document is not in an authorized knowledge base")
+            }
+        }
+        if (spec.name == "http_request") {
+            val method = (args["method"]?.jsonPrimitive?.contentOrNull ?: "GET").uppercase()
+            val allowed = ctx.grantedMethods.map { it.uppercase() }.toSet()
+            if (allowed.isNotEmpty() && method !in allowed) {
+                return ToolResult.Denied("HTTP method is not granted")
+            }
+        }
+        return null
     }
 
     private fun remember(id: String, result: ToolResult): ToolResult {
@@ -90,25 +149,25 @@ class ToolBroker(
         return result
     }
 
-    private fun execute(name: String, args: JsonObject): String = when (name) {
+    private fun execute(name: String, args: JsonObject, ctx: ToolContext): String = when (name) {
         "knowledge_search" -> {
             val query = args.string("query")
             val topK = args["topK"]?.jsonPrimitive?.contentOrNull?.toIntOrNull() ?: 8
             val requested = args["knowledgeBaseIds"]?.toString()?.let { raw ->
                 Regex("\"([^\"]+)\"").findAll(raw).map { it.groupValues[1] }.toList()
             }.orEmpty()
-            val allowed = context.grantedKnowledgeBaseIds
+            val allowed = ctx.grantedKnowledgeBaseIds
             val ids = if (requested.isEmpty()) allowed.toList() else requested.filter { it in allowed }
             if (ids.isEmpty()) {
                 """{"hits":[],"warning":"No authorized knowledge base in the current grant"}"""
             } else {
-                capOutput(context.search(query, ids, topK))
+                capOutput(ctx.search(query, ids, topK))
             }
         }
         "read_document" -> {
             val requested = args["maxChars"]?.jsonPrimitive?.contentOrNull?.toIntOrNull() ?: 4000
             val maxChars = requested.coerceIn(0, HttpPolicy.MAX_READ_DOCUMENT_CHARS)
-            capOutput(context.readDocument(args.string("documentId"), maxChars))
+            capOutput(ctx.readDocument(args.string("documentId"), maxChars))
         }
         "calculator" -> {
             val value = Calculator.eval(args.string("expression"))
@@ -118,8 +177,8 @@ class ToolBroker(
             val url = args.string("url")
             val method = args["method"]?.jsonPrimitive?.contentOrNull ?: "GET"
             if (method.uppercase() != "GET") error("Only GET is allowed without extra confirmation")
-            HttpPolicy.assertRequest(url, context.allowedHosts)
-            capOutput(context.httpGet(url))
+            HttpPolicy.assertRequest(url, ctx.allowedHosts)
+            capOutput(ctx.httpGet(url))
         }
         else -> error("Unknown tool")
     }
@@ -252,8 +311,9 @@ object HttpPolicy {
         val uri = runCatching { URI(url) }.getOrNull() ?: error("URL is not valid")
         val scheme = uri.scheme?.lowercase() ?: error("URL scheme is missing")
         if (scheme != "https") error("Only HTTPS URLs are allowed")
-        val host = uri.host?.lowercase()?.trim('.') ?: error("URL host is missing")
-        if (host !in allowedHosts.map { it.lowercase() }.toSet()) {
+        val host = requestHost(uri) ?: error("URL host is missing")
+        if (isIpLiteral(host)) error("IP literals are not allowed")
+        if (host !in allowedHosts.map { it.lowercase().trim('.') }.toSet()) {
             error("Host $host is not in the HTTP allow-list")
         }
         if (isForbiddenHost(host)) error("Loopback or private HTTP is not allowed")
@@ -262,24 +322,85 @@ object HttpPolicy {
         }
     }
 
+    fun assertDestination(
+        url: String,
+        allowedHosts: Set<String>,
+        resolve: (String) -> List<java.net.InetAddress> = { host ->
+            java.net.InetAddress.getAllByName(host).toList()
+        },
+    ) {
+        assertRequest(url, allowedHosts)
+        val host = requestHost(URI(url)) ?: error("URL host is missing")
+        val addresses = resolve(host)
+        if (addresses.isEmpty()) error("Host did not resolve")
+        addresses.forEach { address ->
+            if (isForbiddenAddress(address)) error("Resolved address is not allowed")
+        }
+    }
+
+    fun requestHost(uri: URI): String? {
+        val host = uri.host?.lowercase()?.trim('.')
+        if (!host.isNullOrBlank()) return host
+        val authority = uri.rawAuthority?.substringBefore('@')?.let { raw ->
+            if (raw.contains('@')) uri.rawAuthority.substringAfter('@') else uri.rawAuthority
+        } ?: uri.authority
+        return authority?.substringBefore(']')?.trim('[', ']')?.substringBefore(':')?.lowercase()?.trim('.')?.ifBlank { null }
+    }
+
+    fun isIpLiteral(host: String): Boolean {
+        val h = host.lowercase().trim('[', ']')
+        if (h.contains(':')) return true
+        if (h.startsWith("0x")) return true
+        if (h.all { it.isDigit() } && h.isNotEmpty()) return true
+        val parts = h.split('.')
+        return parts.size in 1..4 && parts.all { part -> part.toIntOrNull() != null }
+    }
+
     fun isForbiddenHost(host: String): Boolean {
         val h = host.lowercase().trim('[', ']')
         if (h == "localhost" || h.endsWith(".local") || h == "::1" || h == "0.0.0.0") return true
+        if (isIpLiteral(h) && isForbiddenAddress(runCatching { java.net.InetAddress.getByName(h) }.getOrNull())) return true
         if (h.startsWith("127.") || h.startsWith("10.") || h.startsWith("192.168.") || h.startsWith("169.254.")) return true
         if (h.startsWith("172.")) {
             val second = h.split('.').getOrNull(1)?.toIntOrNull()
             if (second != null && second in 16..31) return true
+        }
+        if (h.startsWith("fc") || h.startsWith("fd") || h.startsWith("fe80")) return true
+        return false
+    }
+
+    fun isForbiddenAddress(address: java.net.InetAddress?): Boolean {
+        if (address == null) return true
+        if (address.isAnyLocalAddress || address.isLoopbackAddress || address.isLinkLocalAddress ||
+            address.isSiteLocalAddress || address.isMulticastAddress
+        ) {
+            return true
+        }
+        if (address is java.net.Inet6Address) {
+            val first = address.address.firstOrNull()?.toInt()?.and(0xFF) ?: return true
+            if (first in 0xfc..0xfd) return true
+            if (first == 0xfe && (address.address.getOrNull(1)?.toInt()?.and(0xC0) == 0x80)) return true
         }
         return false
     }
 }
 
 object HostHttp {
-    fun get(url: String, allowedHosts: Set<String>): String {
+    fun get(
+        url: String,
+        allowedHosts: Set<String>,
+        resolve: (String) -> List<java.net.InetAddress> = { host ->
+            java.net.InetAddress.getAllByName(host).toList()
+        },
+    ): String {
         var current = url
         repeat(HttpPolicy.MAX_REDIRECTS + 1) { hop ->
-            HttpPolicy.assertRequest(current, allowedHosts)
-            val connection = URI(current).toURL().openConnection() as java.net.HttpURLConnection
+            HttpPolicy.assertDestination(current, allowedHosts, resolve)
+            val uri = URI(current)
+            val host = HttpPolicy.requestHost(uri) ?: error("URL host is missing")
+            val pinned = resolve(host).firstOrNull() ?: error("Host did not resolve")
+            if (HttpPolicy.isForbiddenAddress(pinned)) error("Resolved address is not allowed")
+            val connection = uri.toURL().openConnection() as java.net.HttpURLConnection
             connection.instanceFollowRedirects = false
             connection.connectTimeout = 10_000
             connection.readTimeout = 20_000

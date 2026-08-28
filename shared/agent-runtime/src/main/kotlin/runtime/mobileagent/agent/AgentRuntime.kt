@@ -3,8 +3,12 @@
 
 package runtime.mobileagent.agent
 
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.cancellable
 import kotlinx.coroutines.flow.flow
+import kotlinx.coroutines.withTimeout
 import runtime.mobileagent.domain.AppError
 import runtime.mobileagent.domain.ErrorCode
 import runtime.mobileagent.domain.RetryClass
@@ -74,33 +78,45 @@ class AgentRuntime(
             val pendingTools = linkedMapOf<String, ToolCall>()
             val assistantText = StringBuilder()
             var terminal: ModelEvent? = null
-            adapter.stream(request, secret).collect { event ->
-                if (terminal is ModelEvent.Failed) return@collect
-                if (budgetExhausted(run)) {
-                    terminal = ModelEvent.Failed("Run budget exhausted")
-                    return@collect
-                }
-                val outgoing = when (event) {
-                    is ModelEvent.Failed ->
-                        ModelEvent.Failed(redact(event.sanitizedMessage, secret))
-                    else -> event
-                }
-                when (outgoing) {
-                    is ModelEvent.ToolCallDelta -> {
-                        if (!toolsEnabled || tools == null) {
-                            terminal = ModelEvent.Failed("This model cannot execute tools")
-                            return@collect
+            try {
+                withTimeout(remainingMs(run)) {
+                    adapter.stream(request, secret).cancellable().collect { event ->
+                        if (terminal is ModelEvent.Failed) return@collect
+                        if (budgetExhausted(run)) {
+                            throw CancellationException("budget")
                         }
-                        pendingTools[outgoing.callId] = ToolCall(outgoing.callId, outgoing.name, outgoing.argumentsJson)
+                        val outgoing = when (event) {
+                            is ModelEvent.Failed ->
+                                ModelEvent.Failed(redact(event.sanitizedMessage, secret))
+                            else -> event
+                        }
+                        when (outgoing) {
+                            is ModelEvent.ToolCallDelta -> {
+                                if (!toolsEnabled || tools == null) {
+                                    terminal = ModelEvent.Failed("This model cannot execute tools")
+                                    return@collect
+                                }
+                                pendingTools[outgoing.callId] = ToolCall(outgoing.callId, outgoing.name, outgoing.argumentsJson)
+                            }
+                            is ModelEvent.TextDelta -> {
+                                assistantText.append(outgoing.text)
+                                emit(outgoing)
+                            }
+                            ModelEvent.Completed -> if (terminal !is ModelEvent.Failed) terminal = outgoing
+                            is ModelEvent.Failed -> terminal = outgoing
+                            else -> emit(outgoing)
+                        }
                     }
-                    is ModelEvent.TextDelta -> {
-                        assistantText.append(outgoing.text)
-                        emit(outgoing)
-                    }
-                    ModelEvent.Completed -> if (terminal !is ModelEvent.Failed) terminal = outgoing
-                    is ModelEvent.Failed -> terminal = outgoing
-                    else -> emit(outgoing)
                 }
+            } catch (e: TimeoutCancellationException) {
+                emitBudget(run)
+                return@flow
+            } catch (e: CancellationException) {
+                if (e.message == "budget" || budgetExhausted(run)) {
+                    emitBudget(run)
+                    return@flow
+                }
+                throw e
             }
             if (budgetExhausted(run)) {
                 run.state = RunState.BUDGET_EXHAUSTED
@@ -143,23 +159,35 @@ class AgentRuntime(
                 }
                 run.toolCalls += 1
                 run.state = RunState.TOOL_EXECUTING
-                val result = when (val first = tools.invoke(call)) {
-                    ToolResult.NeedsApproval -> {
-                        run.state = RunState.WAITING_TOOL_APPROVAL
-                        emit(ModelEvent.ToolApprovalRequired(call.callId, call.name, call.argumentsJson))
-                        if (!onApprove(call)) {
-                            run.state = RunState.FAILED
-                            emit(ModelEvent.Failed(redact("Tool ${call.name} was rejected", secret)))
-                            return@flow
+                val result = try {
+                    withTimeout(remainingMs(run)) {
+                        when (val first = tools.invoke(call)) {
+                            ToolResult.NeedsApproval -> {
+                                run.state = RunState.WAITING_TOOL_APPROVAL
+                                emit(ModelEvent.ToolApprovalRequired(call.callId, call.name, call.argumentsJson))
+                                if (!onApprove(call)) {
+                                    run.state = RunState.FAILED
+                                    emit(ModelEvent.Failed(redact("Tool ${call.name} was rejected", secret)))
+                                    return@withTimeout null
+                                }
+                                if (budgetExhausted(run)) {
+                                    throw CancellationException("budget")
+                                }
+                                tools.approve(call.callId)
+                            }
+                            else -> first
                         }
-                        if (budgetExhausted(run)) {
-                            emitBudget(run)
-                            return@flow
-                        }
-                        tools.approve(call.callId)
                     }
-                    else -> first
-                }
+                } catch (e: TimeoutCancellationException) {
+                    emitBudget(run)
+                    return@flow
+                } catch (e: CancellationException) {
+                    if (e.message == "budget" || budgetExhausted(run)) {
+                        emitBudget(run)
+                        return@flow
+                    }
+                    throw e
+                } ?: return@flow
                 when (result) {
                     is ToolResult.Denied -> {
                         messages += ChatMessage(
@@ -191,6 +219,9 @@ class AgentRuntime(
             }
         }
     }
+
+    private fun remainingMs(run: AgentRun): Long =
+        (run.budget.maxRuntimeMs - (clock() - run.startedAtMs)).coerceAtLeast(1)
 
     private fun budgetExhausted(run: AgentRun): Boolean =
         clock() - run.startedAtMs > run.budget.maxRuntimeMs

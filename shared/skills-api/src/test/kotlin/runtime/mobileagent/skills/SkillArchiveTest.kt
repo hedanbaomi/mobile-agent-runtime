@@ -139,6 +139,43 @@ class SkillArchiveTest {
         assertTrue(inspection.installable)
     }
 
+    @Test
+    fun truncatedZipIsClassE() {
+        val truncated = byteArrayOf(0x50, 0x4B, 0x03, 0x04)
+        val inspection = SkillArchive.inspect(truncated)
+        assertEquals(CompatibilityClass.E, inspection.classification)
+        assertFalse(inspection.installable)
+        assertFalse(SkillInstaller.install(truncated).accepted)
+    }
+
+    @Test
+    fun unixSymlinkAttributeIsClassE() {
+        val raw = zip("SKILL.md" to "# helper\n".toByteArray())
+        val patched = patchUnixSymlink(raw)
+        val inspection = SkillArchive.inspect(patched)
+        assertEquals(CompatibilityClass.E, inspection.classification)
+        assertFalse(inspection.installable)
+    }
+
+    private fun patchUnixSymlink(bytes: ByteArray): ByteArray {
+        val out = bytes.copyOf()
+        var i = 0
+        while (i + 46 <= out.size) {
+            if (out[i] == 0x50.toByte() && out[i + 1] == 0x4B.toByte() &&
+                out[i + 2] == 0x01.toByte() && out[i + 3] == 0x02.toByte()
+            ) {
+                val mode = 0xA000 shl 16
+                out[i + 38] = (mode and 0xFF).toByte()
+                out[i + 39] = ((mode ushr 8) and 0xFF).toByte()
+                out[i + 40] = ((mode ushr 16) and 0xFF).toByte()
+                out[i + 41] = ((mode ushr 24) and 0xFF).toByte()
+                return out
+            }
+            i++
+        }
+        error("central directory not found")
+    }
+
     private fun validManifest(kind: String): String = """
         {
           "schemaVersion": 1,

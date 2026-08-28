@@ -12,6 +12,7 @@ import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
 import runtime.mobileagent.knowledge.CitationMap
 import runtime.mobileagent.knowledge.ImportStage
+import runtime.mobileagent.knowledge.ImportStateMachine
 import runtime.mobileagent.knowledge.MemoryBlobSink
 import java.io.ByteArrayOutputStream
 import java.util.zip.ZipEntry
@@ -689,6 +690,136 @@ class KnowledgeRepositoryTest {
         assertEquals(1, skills.grantsFor(skills.list().single().installId).size)
         val bytes = skills.packageBytes(skills.list().single().packageHash)
         assertTrue(bytes != null && bytes.contentEquals(zip))
+    }
+
+    @Test
+    fun inlineImagePdfDoesNotBecomeReadyWithoutVision() {
+        val db = JdbcSqlConnection()
+        Migrations.apply(db)
+        val repo = KnowledgeRepository(db, MemoryBlobSink())
+        val pdf = runtime.mobileagent.knowledge.PdfParser.writeTextAndInlineImagePdf("inline caption token")
+        val job = repo.importBytes("inline.pdf", "application/pdf", pdf, visionConfigured = false)
+        assertTrue(job.stage == ImportStage.WAITING_FOR_VISION_MODEL || job.stage == ImportStage.FAILED)
+        assertFalse(ImportStateMachine.isCompleteSuccess(job))
+        assertTrue(repo.search("inline caption token").isEmpty() || job.stage != ImportStage.READY)
+    }
+
+    @Test
+    fun visionConsentDoesNotFollowSwitchedProvider() {
+        val db = JdbcSqlConnection()
+        Migrations.apply(db)
+        val png = byteArrayOf(0x89.toByte(), 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A) + ByteArray(16)
+        var binding = runtime.mobileagent.knowledge.VisionBinding("prov-a", "shared-model", "https://a.example.invalid/v1", 1)
+        val calls = mutableMapOf<String, Int>()
+        val vision = runtime.mobileagent.knowledge.VisionBackend {
+            val id = binding.providerId
+            calls[id] = calls.getOrDefault(id, 0) + 1
+            runtime.mobileagent.knowledge.VisionOutcome.Success(
+                runtime.mobileagent.knowledge.VisionSuccess("ocr", "desc-$id"),
+            )
+        }
+        val first = KnowledgeRepository(db, MemoryBlobSink(), vision = vision, visionBinding = { binding })
+        val paused = first.importBytes("scan.png", "image/png", png, visionConfigured = true, visionConsent = true, pauseAt = ImportStage.COPYING)
+        assertEquals(ImportStage.COPYING, paused.stage)
+        binding = runtime.mobileagent.knowledge.VisionBinding("prov-b", "shared-model", "https://b.example.invalid/v1", 1)
+        val resumed = first.resumeImport(paused.id, png, visionConfigured = true)
+        assertEquals(ImportStage.AWAITING_UPLOAD_CONSENT, resumed.stage)
+        assertEquals(0, calls.getOrDefault("prov-b", 0))
+        assertFalse(ImportStateMachine.isCompleteSuccess(resumed))
+    }
+
+    @Test
+    fun visionCacheDoesNotCrossProvidersWithSameModelId() {
+        val db = JdbcSqlConnection()
+        Migrations.apply(db)
+        val png = byteArrayOf(0x89.toByte(), 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A) + ByteArray(16)
+        var binding = runtime.mobileagent.knowledge.VisionBinding("prov-a", "shared-model", "https://a.example.invalid/v1", 1)
+        val calls = mutableMapOf<String, Int>()
+        val vision = runtime.mobileagent.knowledge.VisionBackend {
+            val id = binding.providerId
+            calls[id] = calls.getOrDefault(id, 0) + 1
+            runtime.mobileagent.knowledge.VisionOutcome.Success(
+                runtime.mobileagent.knowledge.VisionSuccess("ocr", "desc-$id"),
+            )
+        }
+        val repo = KnowledgeRepository(db, MemoryBlobSink(), vision = vision, visionBinding = { binding })
+        repo.createKnowledgeBase("A", "kb-a")
+        repo.createKnowledgeBase("B", "kb-b")
+        val a = repo.importBytes("scan.png", "image/png", png, true, knowledgeBaseId = "kb-a", visionConsent = true)
+        assertEquals(ImportStage.READY, a.stage)
+        assertEquals(1, calls["prov-a"])
+        binding = runtime.mobileagent.knowledge.VisionBinding("prov-b", "shared-model", "https://b.example.invalid/v1", 1)
+        val b = repo.importBytes("scan.png", "image/png", png, true, knowledgeBaseId = "kb-b", visionConsent = true)
+        assertEquals(ImportStage.READY, b.stage)
+        assertEquals(1, calls["prov-b"])
+    }
+
+    @Test
+    fun epubSameNameImagesStayOnTheirChapters() {
+        val db = JdbcSqlConnection()
+        Migrations.apply(db)
+        val pngA = byteArrayOf(0x89.toByte(), 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A) + "MARK-A".toByteArray()
+        val pngB = byteArrayOf(0x89.toByte(), 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A) + "MARK-B".toByteArray()
+        val zip = zipNamedBytes(
+            "mimetype" to "application/epub+zip".toByteArray(),
+            "OPS/ch1/chapter.xhtml" to "<html><body><p>chapter-one-unique</p><img src=\"images/fig.png\"/></body></html>".toByteArray(),
+            "OPS/ch2/chapter.xhtml" to "<html><body><p>chapter-two-unique</p><img src=\"images/fig.png\"/></body></html>".toByteArray(),
+            "OPS/ch1/images/fig.png" to pngA,
+            "OPS/ch2/images/fig.png" to pngB,
+        )
+        val parsed = runtime.mobileagent.knowledge.OfficeParser.parse("book.epub", zip)
+        val page2 = parsed.assets.single { it.page == 2 && it.kind == "IMAGE" }
+        assertTrue(String(page2.bytes, Charsets.ISO_8859_1).contains("MARK-B"))
+    }
+
+    @Test
+    fun readDocumentHonorsKnowledgeBaseGrant() {
+        val db = JdbcSqlConnection()
+        Migrations.apply(db)
+        val repo = KnowledgeRepository(db, MemoryBlobSink())
+        repo.createKnowledgeBase("A", "kb-a")
+        repo.createKnowledgeBase("B", "kb-b")
+        val a = repo.importBytes("a.txt", "text/plain", "private-A-marker".toByteArray(), false, knowledgeBaseId = "kb-a")
+        val b = repo.importBytes("b.txt", "text/plain", "private-B-marker".toByteArray(), false, knowledgeBaseId = "kb-b")
+        assertEquals(ImportStage.READY, a.stage)
+        val grant = runtime.mobileagent.skills.PermissionGrant(
+            grantId = "g",
+            installId = "i",
+            packageHash = "h",
+            capabilities = setOf("knowledge.read"),
+            knowledgeBaseIds = setOf("kb-a"),
+        )
+        val broker = runtime.mobileagent.skills.ToolBroker(
+            emptySet(),
+            runtime.mobileagent.skills.ToolContext(
+                search = { _, _, _ -> "{}" },
+                readDocument = { id, max -> repo.readDocumentText(id, max, grant.knowledgeBaseIds) },
+                grantedKnowledgeBaseIds = emptySet(),
+                documentKnowledgeBaseId = { id -> repo.documentKnowledgeBaseId(id) },
+            ),
+            liveGrant = { grant },
+        )
+        val denied = broker.invoke(
+            runtime.mobileagent.skills.ToolCall("r", "read_document", """{"documentId":"${b.documentId}"}"""),
+        )
+        assertTrue(denied is runtime.mobileagent.skills.ToolResult.Denied)
+        assertTrue("private-B-marker" !in denied.toString())
+        val allowed = broker.invoke(
+            runtime.mobileagent.skills.ToolCall("r2", "read_document", """{"documentId":"${a.documentId}"}"""),
+        ) as runtime.mobileagent.skills.ToolResult.Value
+        assertTrue(allowed.json.contains("private-A-marker"))
+    }
+
+    private fun zipNamedBytes(vararg files: Pair<String, ByteArray>): ByteArray {
+        val out = ByteArrayOutputStream()
+        ZipOutputStream(out).use { zip ->
+            files.forEach { (name, payload) ->
+                zip.putNextEntry(ZipEntry(name))
+                zip.write(payload)
+                zip.closeEntry()
+            }
+        }
+        return out.toByteArray()
     }
 
     private fun zipBytesNamed(vararg files: Pair<String, String>): ByteArray {

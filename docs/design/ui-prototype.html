@@ -1,0 +1,1175 @@
+<!DOCTYPE html>
+<!--
+SPDX-FileCopyrightText: 2026 mobileAgentRuntime contributors
+SPDX-License-Identifier: AGPL-3.0-only
+-->
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>mobileAgentRuntime - UI Design Prototype (M0.5)</title>
+  <style>
+    :root {
+      --primary: #1a56db;
+      --on-primary: #ffffff;
+      --primary-container: #e1effe;
+      --on-primary-container: #1e429f;
+      --secondary: #4b5563;
+      --on-secondary: #ffffff;
+      --secondary-container: #f3f4f6;
+      --on-secondary-container: #1f2a37;
+      --tertiary: #0e9f6e;
+      --on-tertiary: #ffffff;
+      --tertiary-container: #def7ec;
+      --on-tertiary-container: #03543f;
+      --error: #e02424;
+      --error-container: #fde8e8;
+      --on-error-container: #9b1c1c;
+      --warning: #c27803;
+      --warning-container: #fef08a;
+      --on-warning-container: #723b13;
+      --background: #f9fafb;
+      --on-background: #111827;
+      --surface: #ffffff;
+      --on-surface: #111827;
+      --surface-variant: #f3f4f6;
+      --on-surface-variant: #4b5563;
+      --outline: #d1d5db;
+      --outline-variant: #e5e7eb;
+      --code-font: "JetBrains Mono", Menlo, Monaco, Consolas, monospace;
+      --sans-font: Roboto, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      --radius-sm: 6px;
+      --radius-md: 10px;
+      --radius-lg: 16px;
+      --radius-full: 9999px;
+      --shadow-1: 0 1px 3px rgba(0,0,0,0.1);
+      --shadow-2: 0 4px 6px rgba(0,0,0,0.08);
+      --shadow-3: 0 10px 15px rgba(0,0,0,0.12);
+    }
+
+    [data-theme="dark"] {
+      --primary: #76a9fa;
+      --on-primary: #1e429f;
+      --primary-container: #233876;
+      --on-primary-container: #e1effe;
+      --secondary: #9ca3af;
+      --on-secondary: #1f2a37;
+      --secondary-container: #374151;
+      --on-secondary-container: #f3f4f6;
+      --tertiary: #31c48d;
+      --on-tertiary: #03543f;
+      --tertiary-container: #046c4e;
+      --on-tertiary-container: #def7ec;
+      --error: #f98080;
+      --error-container: #771d1d;
+      --on-error-container: #fde8e8;
+      --warning: #faca15;
+      --warning-container: #633112;
+      --on-warning-container: #fef08a;
+      --background: #111827;
+      --on-background: #f9fafb;
+      --surface: #1f2937;
+      --on-surface: #f9fafb;
+      --surface-variant: #374151;
+      --on-surface-variant: #9ca3af;
+      --outline: #4b5563;
+      --outline-variant: #374151;
+      --shadow-1: 0 1px 3px rgba(0,0,0,0.3);
+      --shadow-2: 0 4px 6px rgba(0,0,0,0.25);
+      --shadow-3: 0 10px 15px rgba(0,0,0,0.35);
+    }
+
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: var(--sans-font);
+      background: #0b0f19;
+      color: #e5e7eb;
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      padding: 16px;
+    }
+
+    .top-control-bar {
+      width: 100%;
+      max-width: 900px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      background: #1e293b;
+      padding: 12px 20px;
+      border-radius: 12px;
+      margin-bottom: 16px;
+      box-shadow: 0 4px 10px rgba(0,0,0,0.2);
+    }
+    .top-control-bar .title-group {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+    .top-control-bar h1 {
+      font-size: 16px;
+      font-weight: 600;
+      color: #f3f4f6;
+    }
+    .top-control-bar .badge {
+      background: #3b82f6;
+      color: #fff;
+      font-size: 11px;
+      padding: 2px 8px;
+      border-radius: 9999px;
+      font-weight: 500;
+    }
+    .top-control-bar .actions {
+      display: flex;
+      gap: 12px;
+    }
+    .top-control-bar button {
+      background: #334155;
+      color: #f1f5f9;
+      border: 1px solid #475569;
+      padding: 6px 14px;
+      border-radius: 6px;
+      cursor: pointer;
+      font-size: 13px;
+      font-weight: 500;
+      transition: all 0.2s;
+    }
+    .top-control-bar button:hover {
+      background: #475569;
+    }
+
+    /* Phone Shell Container */
+    .device-container {
+      width: 100%;
+      max-width: 420px;
+      height: 840px;
+      background: var(--background);
+      color: var(--on-background);
+      border: 10px solid #1e293b;
+      border-radius: 36px;
+      overflow: hidden;
+      display: flex;
+      flex-direction: column;
+      position: relative;
+      box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.5);
+      transition: background 0.2s, color 0.2s;
+    }
+
+    /* Android Status Bar */
+    .status-bar {
+      height: 28px;
+      background: var(--surface);
+      border-bottom: 1px solid var(--outline-variant);
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 0 16px;
+      font-size: 11px;
+      font-weight: 600;
+      color: var(--on-surface-variant);
+      z-index: 10;
+    }
+
+    /* Top App Bar */
+    .app-header {
+      height: 52px;
+      background: var(--surface);
+      border-bottom: 1px solid var(--outline-variant);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0 16px;
+      flex-shrink: 0;
+    }
+    .app-header .header-title {
+      font-size: 17px;
+      font-weight: 600;
+      color: var(--on-surface);
+    }
+    .app-header .header-action-btn {
+      background: var(--surface-variant);
+      color: var(--on-surface-variant);
+      border: 1px solid var(--outline);
+      padding: 4px 10px;
+      border-radius: var(--radius-sm);
+      font-size: 12px;
+      font-weight: 500;
+      cursor: pointer;
+    }
+
+    /* Banner container */
+    .pinned-banner {
+      background: var(--warning-container);
+      color: var(--on-warning-container);
+      padding: 8px 12px;
+      font-size: 12px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      border-bottom: 1px solid var(--warning);
+    }
+    .pinned-banner a {
+      color: var(--on-warning-container);
+      font-weight: 600;
+      text-decoration: underline;
+      cursor: pointer;
+    }
+
+    /* Main Viewport */
+    .content-viewport {
+      flex: 1;
+      overflow-y: auto;
+      display: flex;
+      flex-direction: column;
+      position: relative;
+    }
+
+    /* Bottom Navigation Bar */
+    .bottom-nav {
+      height: 64px;
+      background: var(--surface);
+      border-top: 1px solid var(--outline-variant);
+      display: flex;
+      justify-content: space-around;
+      align-items: center;
+      flex-shrink: 0;
+      padding: 0 4px;
+    }
+    .nav-tab {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 3px;
+      background: transparent;
+      border: none;
+      color: var(--on-surface-variant);
+      font-size: 10px;
+      font-weight: 500;
+      cursor: pointer;
+      padding: 6px 0;
+      border-radius: var(--radius-sm);
+      transition: all 0.15s;
+    }
+    .nav-tab .tab-icon {
+      font-size: 11px;
+      font-weight: 700;
+      background: var(--surface-variant);
+      padding: 2px 6px;
+      border-radius: 4px;
+    }
+    .nav-tab.active {
+      color: var(--primary);
+    }
+    .nav-tab.active .tab-icon {
+      background: var(--primary-container);
+      color: var(--on-primary-container);
+    }
+
+    /* Generic UI Elements */
+    .card {
+      background: var(--surface);
+      border: 1px solid var(--outline-variant);
+      border-radius: var(--radius-md);
+      padding: 14px;
+      margin: 10px 14px;
+      box-shadow: var(--shadow-1);
+    }
+    .card-title {
+      font-size: 14px;
+      font-weight: 600;
+      color: var(--on-surface);
+      margin-bottom: 6px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+    .card-desc {
+      font-size: 12px;
+      color: var(--on-surface-variant);
+      line-height: 1.4;
+    }
+    .tag {
+      font-size: 10px;
+      font-weight: 600;
+      padding: 2px 6px;
+      border-radius: 4px;
+      display: inline-block;
+    }
+    .tag-primary { background: var(--primary-container); color: var(--on-primary-container); }
+    .tag-success { background: var(--tertiary-container); color: var(--on-tertiary-container); }
+    .tag-warning { background: var(--warning-container); color: var(--on-warning-container); }
+    .tag-error { background: var(--error-container); color: var(--on-error-container); }
+    .tag-neutral { background: var(--surface-variant); color: var(--on-surface-variant); }
+
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 6px;
+      padding: 8px 14px;
+      border-radius: var(--radius-sm);
+      font-size: 13px;
+      font-weight: 500;
+      cursor: pointer;
+      border: none;
+      transition: opacity 0.15s;
+    }
+    .btn:hover { opacity: 0.9; }
+    .btn-primary { background: var(--primary); color: var(--on-primary); }
+    .btn-secondary { background: var(--surface-variant); color: var(--on-surface); border: 1px solid var(--outline); }
+    .btn-danger { background: var(--error); color: #fff; }
+    .btn-sm { padding: 4px 8px; font-size: 11px; }
+
+    /* Screen Tab Panels */
+    .tab-panel {
+      display: none;
+      flex: 1;
+      flex-direction: column;
+    }
+    .tab-panel.active {
+      display: flex;
+    }
+
+    /* Screen 1: Chat Styles */
+    .chat-messages {
+      flex: 1;
+      padding: 12px 14px;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+      overflow-y: auto;
+    }
+    .msg {
+      max-width: 85%;
+      border-radius: var(--radius-md);
+      padding: 10px 12px;
+      font-size: 13px;
+      line-height: 1.45;
+      position: relative;
+    }
+    .msg-user {
+      align-self: flex-end;
+      background: var(--primary);
+      color: var(--on-primary);
+      border-bottom-right-radius: 2px;
+    }
+    .msg-agent {
+      align-self: flex-start;
+      background: var(--surface);
+      color: var(--on-surface);
+      border: 1px solid var(--outline-variant);
+      border-bottom-left-radius: 2px;
+      box-shadow: var(--shadow-1);
+    }
+    .msg-meta {
+      font-size: 10px;
+      margin-top: 4px;
+      color: var(--on-surface-variant);
+      display: flex;
+      justify-content: space-between;
+      gap: 8px;
+    }
+    .citation-box {
+      margin-top: 8px;
+      padding: 6px 8px;
+      background: var(--surface-variant);
+      border-left: 3px solid var(--primary);
+      border-radius: 4px;
+      font-size: 11px;
+      cursor: pointer;
+    }
+    .citation-box:hover {
+      background: var(--outline-variant);
+    }
+    .chat-input-bar {
+      padding: 8px 12px;
+      background: var(--surface);
+      border-top: 1px solid var(--outline-variant);
+      display: flex;
+      gap: 8px;
+      align-items: center;
+    }
+    .chat-input-bar input {
+      flex: 1;
+      padding: 8px 12px;
+      border: 1px solid var(--outline);
+      background: var(--background);
+      color: var(--on-background);
+      border-radius: var(--radius-sm);
+      font-size: 13px;
+      outline: none;
+    }
+    .chat-input-bar input:focus {
+      border-color: var(--primary);
+    }
+    .streaming-bar {
+      background: var(--primary-container);
+      color: var(--on-primary-container);
+      font-size: 11px;
+      padding: 4px 12px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+
+    /* Tool Approval Card in Chat */
+    .tool-card {
+      background: var(--surface);
+      border: 1px solid var(--warning);
+      border-radius: var(--radius-md);
+      padding: 10px;
+      font-size: 12px;
+    }
+    .tool-header {
+      font-weight: 600;
+      color: var(--warning);
+      margin-bottom: 4px;
+    }
+    .tool-json {
+      background: var(--surface-variant);
+      font-family: var(--code-font);
+      padding: 6px;
+      border-radius: 4px;
+      font-size: 11px;
+      margin: 6px 0;
+      overflow-x: auto;
+    }
+
+    /* Modal & Drawer Overlays */
+    .overlay {
+      position: absolute;
+      top: 0; left: 0; right: 0; bottom: 0;
+      background: rgba(0,0,0,0.6);
+      display: none;
+      justify-content: center;
+      align-items: center;
+      z-index: 50;
+      padding: 16px;
+    }
+    .overlay.active { display: flex; }
+    .modal-box {
+      background: var(--surface);
+      color: var(--on-surface);
+      border-radius: var(--radius-lg);
+      padding: 18px;
+      width: 100%;
+      max-width: 360px;
+      box-shadow: var(--shadow-3);
+      border: 1px solid var(--outline);
+    }
+    .modal-title {
+      font-size: 15px;
+      font-weight: 600;
+      margin-bottom: 8px;
+    }
+    .modal-body {
+      font-size: 13px;
+      color: var(--on-surface-variant);
+      margin-bottom: 16px;
+      line-height: 1.4;
+    }
+    .modal-actions {
+      display: flex;
+      justify-content: flex-end;
+      gap: 8px;
+    }
+
+    /* Drawer */
+    .drawer {
+      position: absolute;
+      top: 0; right: -100%; bottom: 0;
+      width: 85%;
+      background: var(--surface);
+      color: var(--on-surface);
+      box-shadow: var(--shadow-3);
+      z-index: 60;
+      transition: right 0.25s ease;
+      display: flex;
+      flex-direction: column;
+      border-left: 1px solid var(--outline);
+    }
+    .drawer.active { right: 0; }
+    .drawer-header {
+      padding: 14px 16px;
+      border-bottom: 1px solid var(--outline-variant);
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      font-size: 14px;
+      font-weight: 600;
+    }
+    .drawer-body {
+      flex: 1;
+      padding: 14px 16px;
+      overflow-y: auto;
+      font-size: 12px;
+      line-height: 1.5;
+    }
+
+    /* Table styles */
+    .ui-table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 11px;
+      margin-top: 8px;
+    }
+    .ui-table th, .ui-table td {
+      border: 1px solid var(--outline-variant);
+      padding: 6px 8px;
+      text-align: left;
+    }
+    .ui-table th {
+      background: var(--surface-variant);
+      font-weight: 600;
+    }
+
+    /* Form styles */
+    .form-group {
+      margin-bottom: 12px;
+    }
+    .form-label {
+      font-size: 11px;
+      font-weight: 600;
+      color: var(--on-surface-variant);
+      margin-bottom: 4px;
+      display: block;
+    }
+    .form-control {
+      width: 100%;
+      padding: 8px 10px;
+      border: 1px solid var(--outline);
+      background: var(--background);
+      color: var(--on-background);
+      border-radius: var(--radius-sm);
+      font-size: 12px;
+      outline: none;
+    }
+    .form-control:focus {
+      border-color: var(--primary);
+    }
+  </style>
+</head>
+<body>
+
+  <!-- Top Web Page Control Bar -->
+  <div class="top-control-bar">
+    <div class="title-group">
+      <h1 id="appTitle">mobileAgentRuntime - UI 原型系统</h1>
+      <span class="badge" id="appBadge">M0.5 设计基线 (zh-CN)</span>
+    </div>
+    <div class="actions">
+      <button onclick="toggleLanguage()" id="langToggleBtn">English</button>
+      <button onclick="toggleTheme()" id="themeToggleBtn">切换深色模式</button>
+      <button onclick="openModal('modal-ack')">模拟重要公告</button>
+      <button onclick="openDrawer('drawer-inspector')">审查请求</button>
+    </div>
+  </div>
+
+  <!-- Android Phone Frame -->
+  <div class="device-container" id="deviceFrame">
+
+    <!-- Android Status Bar -->
+    <div class="status-bar">
+      <span>12:00</span>
+      <span>5G | [BAT: 98%] [SEC: Keystore Active]</span>
+    </div>
+
+    <!-- Pinned Important Announcement Banner -->
+    <div class="pinned-banner" id="pinnedBanner">
+      <span>[Pinned Notice] Security patch v1.0.2 ready.</span>
+      <a onclick="switchTab('announcements')">View Details</a>
+    </div>
+
+    <!-- Main Viewport -->
+    <div class="content-viewport">
+
+      <!-- TAB 1: CHAT SCREEN (SCR-CHAT-01 .. SCR-CHAT-06) -->
+      <div class="tab-panel active" id="tab-chat">
+        <div class="app-header">
+          <div>
+            <div class="header-title">Agent: Doc Research</div>
+            <div style="font-size:10px; color:var(--on-surface-variant)">Model: deepseek-chat | Space: KB-01 (v2)</div>
+          </div>
+          <button class="header-action-btn" onclick="openDrawer('drawer-inspector')">Inspect</button>
+        </div>
+
+        <div class="chat-messages" id="chatMsgList">
+          <div class="msg msg-user">
+            <div>请根据本地知识库分析移动端 Python 运行时的安全隔离策略。</div>
+            <div class="msg-meta">
+              <span>12:01</span>
+              <span>Input Tokens: 38</span>
+            </div>
+          </div>
+
+          <div class="msg msg-agent">
+            <div>根据知识库 <code>docs/SKILLS_AND_SECURITY.md</code> 的规范：<br/>
+            1. Python 必须运行在独立的 isolated service 进程中；<br/>
+            2. 不直接赋予网络和文件权限，所有 I/O 操作由宿主 Capability Broker 逐次鉴权；<br/>
+            3. 执行完毕立即销毁进程，保证无全局变量和线程残留。</div>
+            
+            <div class="citation-box" onclick="showEvidence('SKILLS_AND_SECURITY.md', 'Line 45-68')">
+              <strong>[Ref 1]</strong> docs/SKILLS_AND_SECURITY.md (Chunk #12, Score: 0.94)
+            </div>
+
+            <div class="msg-meta">
+              <span>12:01</span>
+              <span>142 tokens | 28 t/s | Cost: BYOK</span>
+            </div>
+          </div>
+
+          <!-- Tool Approval Demo in Chat -->
+          <div class="tool-card">
+            <div class="tool-header">[Tool Execution Approval Required]</div>
+            <div>Skill: <strong>skill_calculator</strong> (Isolated CPython)</div>
+            <div class="tool-json">{ "operation": "eval_matrix", "dim": 64 }</div>
+            <div style="display:flex; gap:6px; margin-top:8px;">
+              <button class="btn btn-primary btn-sm" onclick="approveTool(true)">Approve</button>
+              <button class="btn btn-secondary btn-sm" onclick="approveTool(false)">Reject</button>
+            </div>
+          </div>
+        </div>
+
+        <!-- Live Streaming Status Indicator -->
+        <div class="streaming-bar" id="streamIndicator" style="display:none;">
+          <span id="streamStatusText">Streaming: 45 tokens generated (26 t/s)...</span>
+          <button class="btn btn-danger btn-sm" onclick="cancelStream()">Stop</button>
+        </div>
+
+        <!-- Input Bar -->
+        <div class="chat-input-bar">
+          <input type="text" id="chatInput" placeholder="Ask question or test tool loop..." />
+          <button class="btn btn-primary" id="chatSendBtn" onclick="simulateSendMessage()">Send</button>
+        </div>
+      </div>
+
+      <!-- TAB 2: AGENTS SCREEN (SCR-AGENT-01 .. SCR-AGENT-06) -->
+      <div class="tab-panel" id="tab-agents">
+        <div class="app-header">
+          <div class="header-title">Agent Profiles</div>
+          <button class="header-action-btn" onclick="alert('Creating new Agent Profile...')">[+] New</button>
+        </div>
+
+        <div style="padding: 10px 0; overflow-y:auto; flex:1;">
+          <div class="card">
+            <div class="card-title">
+              <span>Doc Research Agent</span>
+              <span class="tag tag-success">ACTIVE</span>
+            </div>
+            <div class="card-desc">Specialized in deep RAG search over local PDF/Markdown with hybrid lexical and vector retrieval.</div>
+            <div style="margin-top:8px; font-size:11px; color:var(--on-surface-variant);">
+              Chat: <code>deepseek-chat</code> | Vision: <code>None</code> | KB: 2 bound
+            </div>
+            <div style="margin-top:10px; display:flex; gap:6px;">
+              <button class="btn btn-secondary btn-sm" onclick="alert('Viewing Prompt Revision Diff...')">Revisions (v4)</button>
+              <button class="btn btn-primary btn-sm" onclick="alert('Editing Agent parameters...')">Edit</button>
+            </div>
+          </div>
+
+          <div class="card">
+            <div class="card-title">
+              <span>Code Companion</span>
+              <span class="tag tag-neutral">IDLE</span>
+            </div>
+            <div class="card-desc">Assists with Python scripting, AST analysis, and execution verification in isolated sandbox.</div>
+            <div style="margin-top:8px; font-size:11px; color:var(--on-surface-variant);">
+              Chat: <code>gpt-4o-mini</code> | Skills: <code>calculator</code>, <code>web_fetch</code>
+            </div>
+            <div style="margin-top:10px; display:flex; gap:6px;">
+              <button class="btn btn-secondary btn-sm">Revisions (v1)</button>
+              <button class="btn btn-primary btn-sm">Edit</button>
+            </div>
+          </div>
+
+          <!-- Parameter configuration preview -->
+          <div class="card">
+            <div class="card-title">Parameter Defaults & Budget</div>
+            <div class="form-group">
+              <label class="form-label">Temperature: 0.3 (Precise)</label>
+              <input type="range" min="0" max="100" value="30" style="width:100%" />
+            </div>
+            <div class="form-group">
+              <label class="form-label">Max Context Budget: 8192 Tokens</label>
+              <input type="range" min="1024" max="32768" value="8192" style="width:100%" />
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- TAB 3: PROVIDERS SCREEN (SCR-PROV-01 .. SCR-PROV-04) -->
+      <div class="tab-panel" id="tab-providers">
+        <div class="app-header">
+          <div class="header-title">Model Providers (BYOK)</div>
+          <button class="header-action-btn">[+] Add</button>
+        </div>
+
+        <div style="padding: 10px 0; overflow-y:auto; flex:1;">
+          <div class="card">
+            <div class="card-title">
+              <span>DeepSeek Official</span>
+              <span class="tag tag-success">CONNECTED</span>
+            </div>
+            <div class="form-group" style="margin-top:8px;">
+              <label class="form-label">Base URL</label>
+              <input class="form-control" type="text" value="https://api.deepseek.com/v1" readonly />
+            </div>
+            <div class="form-group">
+              <label class="form-label">API Key (Android Keystore Protected)</label>
+              <input class="form-control" type="password" value="sk-synthetic-masked-token-12345" readonly />
+            </div>
+            <div style="display:flex; gap:6px;">
+              <button class="btn btn-primary btn-sm" onclick="probeConnection('DeepSeek Official', 142)">Test Probe</button>
+              <button class="btn btn-secondary btn-sm">Edit</button>
+            </div>
+          </div>
+
+          <div class="card">
+            <div class="card-title">
+              <span>Local vLLM Server</span>
+              <span class="tag tag-warning">UNTESTED</span>
+            </div>
+            <div class="form-group" style="margin-top:8px;">
+              <label class="form-label">Base URL</label>
+              <input class="form-control" type="text" value="http://192.168.1.100:8000/v1" readonly />
+            </div>
+            <div style="display:flex; gap:6px;">
+              <button class="btn btn-primary btn-sm" onclick="probeConnection('Local vLLM Server', 45)">Test Probe</button>
+              <button class="btn btn-secondary btn-sm">Edit</button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- TAB 4: KNOWLEDGE SCREEN (SCR-KNOW-01 .. SCR-KNOW-07) -->
+      <div class="tab-panel" id="tab-knowledge">
+        <div class="app-header">
+          <div class="header-title">Knowledge Bases</div>
+          <button class="header-action-btn" onclick="alert('Selecting files via Android SAF...')">[+] Import</button>
+        </div>
+
+        <div style="padding: 10px 0; overflow-y:auto; flex:1;">
+          <!-- Waiting for Vision Banner -->
+          <div style="background:var(--warning-container); color:var(--on-warning-container); padding:10px 14px; margin:0 14px 10px; border-radius:var(--radius-md); font-size:12px; border:1px solid var(--warning);">
+            <div style="font-weight:600; margin-bottom:4px;">[Waiting State: WAITING_FOR_VISION_MODEL]</div>
+            <div>Import job detected 4 images in Markdown documents. Configure a Vision Model in Agent settings to proceed, or choose pure text extraction.</div>
+            <div style="margin-top:8px; display:flex; gap:6px;">
+              <button class="btn btn-primary btn-sm" onclick="switchTab('agents')">Configure Vision</button>
+              <button class="btn btn-secondary btn-sm" onclick="alert('Continuing with text-only fallback...')">Text Only</button>
+            </div>
+          </div>
+
+          <div class="card">
+            <div class="card-title">
+              <span>Architecture Docs (KB-01)</span>
+              <span class="tag tag-success">READY</span>
+            </div>
+            <div class="card-desc">FTS5 lexical index + Local USearch HNSW vector index (dim: 384).</div>
+            <table class="ui-table">
+              <thead>
+                <tr><th>Document</th><th>Format</th><th>Status</th><th>Chunks</th></tr>
+              </thead>
+              <tbody>
+                <tr><td>IMPLEMENTATION_PLAN.md</td><td>[MD]</td><td>Ready</td><td>18</td></tr>
+                <tr><td>KNOWLEDGE.md</td><td>[MD]</td><td>Ready</td><td>12</td></tr>
+                <tr><td>android_security.pdf</td><td>[PDF]</td><td>Ready</td><td>45</td></tr>
+              </tbody>
+            </table>
+            <div style="margin-top:10px; display:flex; gap:6px;">
+              <button class="btn btn-secondary btn-sm" onclick="alert('Rebuilding USearch vector index...')">Rebuild Index</button>
+              <button class="btn btn-secondary btn-sm" onclick="alert('Viewing CAS blob details...')">CAS Details</button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- TAB 5: SKILLS SCREEN (SCR-SKILL-01 .. SCR-SKILL-05) -->
+      <div class="tab-panel" id="tab-skills">
+        <div class="app-header">
+          <div class="header-title">Skills & Sandbox</div>
+          <button class="header-action-btn">[+] Install</button>
+        </div>
+
+        <div style="padding: 10px 0; overflow-y:auto; flex:1;">
+          <div class="card">
+            <div class="card-title">
+              <span>skill_calculator</span>
+              <span class="tag tag-primary">ISOLATED CPYTHON</span>
+            </div>
+            <div class="card-desc">Matrix and formula computations running in detached zero-permission isolated process.</div>
+            <div style="margin-top:8px; font-size:11px; color:var(--on-surface-variant);">
+              Timeout: <code>5000ms</code> | Memory Cap: <code>64MB</code> | License: <code>AGPL-3.0-only</code>
+            </div>
+            <div style="margin-top:10px; display:flex; gap:6px;">
+              <button class="btn btn-secondary btn-sm" onclick="alert('Opening source viewer for skill.py...')">View Source</button>
+              <button class="btn btn-secondary btn-sm" onclick="alert('Permissions: No network, No files.')">Permissions</button>
+            </div>
+          </div>
+
+          <div class="card">
+            <div class="card-title">
+              <span>Audit Log & Broker Activity</span>
+              <span class="tag tag-neutral">LOGS</span>
+            </div>
+            <div style="font-size:11px; color:var(--on-surface-variant); margin-bottom:6px;">Recent isolated execution events:</div>
+            <table class="ui-table">
+              <thead>
+                <tr><th>Time</th><th>Invocation ID</th><th>Result</th><th>Duration</th></tr>
+              </thead>
+              <tbody>
+                <tr><td>12:01:04</td><td>inv_8f21a</td><td>[SUCCESS]</td><td>142ms</td></tr>
+                <tr><td>11:45:20</td><td>inv_7a09c</td><td>[REJECTED]</td><td>-</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+
+      <!-- TAB 6: ANNOUNCEMENTS SCREEN (SCR-ANN-01 .. SCR-ANN-05) -->
+      <div class="tab-panel" id="tab-announcements">
+        <div class="app-header">
+          <div class="header-title">Announcements</div>
+          <button class="header-action-btn" onclick="alert('Marked all as read.')">Mark Read</button>
+        </div>
+
+        <div style="padding: 10px 0; overflow-y:auto; flex:1;">
+          <div class="card">
+            <div class="card-title">
+              <span>[Urgent] Security Patch v1.0.2</span>
+              <span class="tag tag-error">MANDATORY</span>
+            </div>
+            <div class="card-desc">Updated bundled SQLite driver to eliminate ABI vulnerabilities on Android API 26. Digital signature verified.</div>
+            <div style="margin-top:8px; font-size:10px; color:var(--on-surface-variant);">
+              Published: 2026-08-28 | Revision: 3 | ETag: "a81f-99"
+            </div>
+            <div style="margin-top:10px;">
+              <button class="btn btn-primary btn-sm" onclick="openModal('modal-ack')">Read & Acknowledge</button>
+            </div>
+          </div>
+
+          <div class="card">
+            <div class="card-title">
+              <span>[Feature] M0.5 UI Design System Completed</span>
+              <span class="tag tag-primary">NEW</span>
+            </div>
+            <div class="card-desc">Comprehensive 7-category screen specifications and Material 3 design tokens are now available.</div>
+            <div style="margin-top:8px; font-size:10px; color:var(--on-surface-variant);">
+              Published: 2026-08-28 | Revision: 1
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- TAB 7: ABOUT & SETTINGS SCREEN (SCR-SETT-01 .. SCR-SETT-04) -->
+      <div class="tab-panel" id="tab-about">
+        <div class="app-header">
+          <div class="header-title">Settings & About</div>
+        </div>
+
+        <div style="padding: 10px 0; overflow-y:auto; flex:1;">
+          <div class="card">
+            <div class="card-title">Privacy & Telemetry</div>
+            <div style="display:flex; justify-content:space-between; align-items:center; margin-top:8px;">
+              <div>
+                <div style="font-size:13px; font-weight:500;">Anonymous Announcement Metrics</div>
+                <div style="font-size:11px; color:var(--on-surface-variant);">No telemetry is sent to any server.</div>
+              </div>
+              <span class="tag tag-neutral">DISABLED</span>
+            </div>
+          </div>
+
+          <div class="card">
+            <div class="card-title">Data Backup & Migration</div>
+            <div class="card-desc">Export all Agents, Prompts, and Knowledge Base CAS indexes (excluding Keystore secrets).</div>
+            <div style="margin-top:10px; display:flex; gap:6px;">
+              <button class="btn btn-secondary btn-sm" onclick="alert('Exporting sanitized JSON package...')">Export Data</button>
+              <button class="btn btn-secondary btn-sm" onclick="alert('Importing data package...')">Restore</button>
+            </div>
+          </div>
+
+          <div class="card">
+            <div class="card-title">Software License & Integrity</div>
+            <div style="font-size:12px; line-height:1.5;">
+              <div><strong>Package:</strong> mobileAgentRuntime</div>
+              <div><strong>Version:</strong> v1.0.0-dev (Git SHA: <code>547f567</code>)</div>
+              <div><strong>License:</strong> GNU AGPL-3.0-only</div>
+            </div>
+            <div style="margin-top:10px;">
+              <button class="btn btn-primary btn-sm" onclick="alert('Opening AGPL-3.0-only full license text...')">View AGPL License</button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+    </div>
+
+    <!-- Bottom Navigation Bar (7 Tabs) -->
+    <div class="bottom-nav">
+      <button class="nav-tab active" onclick="switchTab('chat')">
+        <span class="tab-icon">[C]</span>
+        <span>Chat</span>
+      </button>
+      <button class="nav-tab" onclick="switchTab('agents')">
+        <span class="tab-icon">[A]</span>
+        <span>Agents</span>
+      </button>
+      <button class="nav-tab" onclick="switchTab('providers')">
+        <span class="tab-icon">[P]</span>
+        <span>Providers</span>
+      </button>
+      <button class="nav-tab" onclick="switchTab('knowledge')">
+        <span class="tab-icon">[K]</span>
+        <span>Knowledge</span>
+      </button>
+      <button class="nav-tab" onclick="switchTab('skills')">
+        <span class="tab-icon">[S]</span>
+        <span>Skills</span>
+      </button>
+      <button class="nav-tab" onclick="switchTab('announcements')">
+        <span class="tab-icon">[N]</span>
+        <span>News</span>
+      </button>
+      <button class="nav-tab" onclick="switchTab('about')">
+        <span class="tab-icon">[i]</span>
+        <span>About</span>
+      </button>
+    </div>
+
+    <!-- Request Inspector Drawer (SCR-CHAT-06) -->
+    <div class="drawer" id="drawer-inspector">
+      <div class="drawer-header">
+        <span>Request Inspector</span>
+        <button class="btn btn-secondary btn-sm" onclick="closeDrawer('drawer-inspector')">[X]</button>
+      </div>
+      <div class="drawer-body">
+        <div style="margin-bottom:10px;">
+          <strong>Target Provider:</strong> DeepSeek Official<br/>
+          <strong>Endpoint:</strong> <code>https://api.deepseek.com/v1/chat/completions</code><br/>
+          <strong>Authorization:</strong> <code>Bearer sk-*** [Protected in Keystore]</code>
+        </div>
+        <hr style="border:none; border-top:1px solid var(--outline-variant); margin:10px 0;" />
+        <div><strong>Effective Prompt Layers:</strong></div>
+        <div style="background:var(--surface-variant); padding:8px; border-radius:4px; font-family:var(--code-font); font-size:11px; margin-top:6px;">
+          [1. Runtime Contract]<br/>
+          You are an on-device agent coordinator.<br/><br/>
+          [2. User System Prompt]<br/>
+          Answer questions with technical precision.<br/><br/>
+          [3. Knowledge Context]<br/>
+          Source: docs/SKILLS_AND_SECURITY.md (Length: 480 chars)<br/><br/>
+          [4. User Input]<br/>
+          请根据本地知识库分析移动端 Python 运行时的安全隔离策略。
+        </div>
+        <div style="margin-top:10px; font-size:11px; color:var(--on-surface-variant);">
+          Total Tokens: 384 / Budget: 8192 (Safe)
+        </div>
+      </div>
+    </div>
+
+    <!-- Modal: Mandatory Announcement Acknowledgement (SCR-ANN-04) -->
+    <div class="overlay" id="modal-ack">
+      <div class="modal-box">
+        <div class="modal-title">[Important Security Notice]</div>
+        <div class="modal-body">
+          You are receiving a mandatory update notice regarding Android SQLite FTS5 driver compatibility.<br/><br/>
+          This notice requires your explicit acknowledgement before proceeding to use background index services.
+        </div>
+        <div class="modal-actions">
+          <button class="btn btn-primary" onclick="closeModal('modal-ack')">I Have Read and Acknowledge</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Modal: Evidence Viewer (SCR-KNOW-06) -->
+    <div class="overlay" id="modal-evidence">
+      <div class="modal-box">
+        <div class="modal-title" id="evidenceTitle">[Evidence Viewer]</div>
+        <div class="modal-body" id="evidenceContent" style="font-family:var(--code-font); font-size:11px; background:var(--surface-variant); padding:10px; border-radius:4px;">
+          Loading chunk data from CAS repository...
+        </div>
+        <div class="modal-actions">
+          <button class="btn btn-secondary" onclick="closeModal('modal-evidence')">Close</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Modal: Connection Probe Result (SCR-PROV-04) -->
+    <div class="overlay" id="modal-probe">
+      <div class="modal-box">
+        <div class="modal-title" id="probeTitle">Probe Result</div>
+        <div class="modal-body" id="probeBody">Testing...</div>
+        <div class="modal-actions">
+          <button class="btn btn-primary" onclick="closeModal('modal-probe')">OK</button>
+        </div>
+      </div>
+    </div>
+
+  </div>
+
+  <script>
+    // Localization dictionary
+    let currentLang = 'zh-CN';
+    const i18n = {
+      'zh-CN': {
+        appTitle: 'mobileAgentRuntime - UI 原型系统',
+        appBadge: 'M0.5 设计基线 (zh-CN)',
+        langBtn: 'English',
+        themeLight: '切换浅色模式',
+        themeDark: '切换深色模式',
+        btnNotice: '模拟重要公告',
+        btnInspect: '审查请求'
+      },
+      'en-US': {
+        appTitle: 'mobileAgentRuntime - UI Prototype',
+        appBadge: 'M0.5 Design Baseline (en-US)',
+        langBtn: '简体中文',
+        themeLight: 'Switch to Light Theme',
+        themeDark: 'Switch to Dark Theme',
+        btnNotice: 'Simulate Mandatory Notice',
+        btnInspect: 'Inspect Request'
+      }
+    };
+
+    function toggleLanguage() {
+      currentLang = (currentLang === 'zh-CN') ? 'en-US' : 'zh-CN';
+      const dict = i18n[currentLang];
+      document.getElementById('appTitle').textContent = dict.appTitle;
+      document.getElementById('appBadge').textContent = dict.appBadge;
+      document.getElementById('langToggleBtn').textContent = dict.langBtn;
+      document.getElementById('themeToggleBtn').textContent = isDark ? dict.themeLight : dict.themeDark;
+    }
+
+    // Tab switching logic
+    function switchTab(tabId) {
+      document.querySelectorAll('.tab-panel').forEach(p => p.classList.remove('active'));
+      document.querySelectorAll('.nav-tab').forEach(b => b.classList.remove('active'));
+      
+      const targetPanel = document.getElementById('tab-' + tabId);
+      if (targetPanel) targetPanel.classList.add('active');
+      
+      // Update nav button active state
+      const tabs = ['chat', 'agents', 'providers', 'knowledge', 'skills', 'announcements', 'about'];
+      const index = tabs.indexOf(tabId);
+      if (index !== -1) {
+        document.querySelectorAll('.nav-tab')[index].classList.add('active');
+      }
+    }
+
+    // Theme toggle logic
+    let isDark = false;
+    function toggleTheme() {
+      isDark = !isDark;
+      const device = document.getElementById('deviceFrame');
+      const btn = document.getElementById('themeToggleBtn');
+      if (isDark) {
+        device.setAttribute('data-theme', 'dark');
+        btn.textContent = 'Switch to Light Theme';
+      } else {
+        device.removeAttribute('data-theme');
+        btn.textContent = 'Switch to Dark Theme';
+      }
+    }
+
+    // Modal controls
+    function openModal(modalId) {
+      document.getElementById(modalId).classList.add('active');
+    }
+    function closeModal(modalId) {
+      document.getElementById(modalId).classList.remove('active');
+    }
+
+    // Drawer controls
+    function openDrawer(drawerId) {
+      document.getElementById(drawerId).classList.add('active');
+    }
+    function closeDrawer(drawerId) {
+      document.getElementById(drawerId).classList.remove('active');
+    }
+
+    // Evidence popup
+    function showEvidence(file, lines) {
+      document.getElementById('evidenceTitle').textContent = 'Evidence: ' + file + ' (' + lines + ')';
+      document.getElementById('evidenceContent').textContent = 
+        '// Source: ' + file + '\n' +
+        '// Content-Addressed Storage hash: sha256:7f49c01...\n' +
+        '1. Python runtime executed in isolated process.\n' +
+        '2. Zero Android permission granted.\n' +
+        '3. Broker intercepts every capability request.';
+      openModal('modal-evidence');
+    }
+
+    // Probe simulation
+    function probeConnection(providerName, latency) {
+      document.getElementById('probeTitle').textContent = 'Probe: ' + providerName;
+      document.getElementById('probeBody').innerHTML = 
+        '<strong>Status:</strong> <span style="color:var(--tertiary);">CONNECTED [200 OK]</span><br/>' +
+        '<strong>Round-trip Latency:</strong> ' + latency + ' ms<br/>' +
+        '<strong>Detected Models:</strong> deepseek-chat, deepseek-coder<br/>' +
+        '<strong>Capabilities:</strong> Streaming [YES], Tools [YES], Vision [NO]';
+      openModal('modal-probe');
+    }
+
+    // Chat message & streaming simulation
+    let streamingTimer = null;
+    function simulateSendMessage() {
+      const input = document.getElementById('chatInput');
+      const text = input.value.trim();
+      if (!text) return;
+
+      const list = document.getElementById('chatMsgList');
+      
+      // User message
+      const userDiv = document.createElement('div');
+      userDiv.className = 'msg msg-user';
+      userDiv.innerHTML = '<div>' + escapeHtml(text) + '</div><div class="msg-meta"><span>Just now</span><span>Tokens: ~20</span></div>';
+      list.appendChild(userDiv);
+      input.value = '';
+      list.scrollTop = list.scrollHeight;
+
+      // Start streaming simulation
+      const streamBar = document.getElementById('streamIndicator');
+      streamBar.style.display = 'flex';
+      
+      const agentDiv = document.createElement('div');
+      agentDiv.className = 'msg msg-agent';
+      agentDiv.innerHTML = '<div id="currentStreamText"></div><div class="msg-meta"><span>Generating...</span></div>';
+      list.appendChild(agentDiv);
+
+      const targetText = '正在分析您的请求并检索本地向量数据库... 根据配置，已启用安全脱敏与 CAS 原文检索。';
+      let charIdx = 0;
+      clearInterval(streamingTimer);
+
+      streamingTimer = setInterval(() => {
+        if (charIdx < targetText.length) {
+          charIdx += 2;
+          document.getElementById('currentStreamText').textContent = targetText.slice(0, charIdx) + ' |';
+          list.scrollTop = list.scrollHeight;
+        } else {
+          clearInterval(streamingTimer);
+          document.getElementById('currentStreamText').textContent = targetText;
+          streamBar.style.display = 'none';
+        }
+      }, 80);
+    }
+
+    function cancelStream() {
+      clearInterval(streamingTimer);
+      document.getElementById('streamIndicator').style.display = 'none';
+      const curText = document.getElementById('currentStreamText');
+      if (curText) {
+        curText.textContent += ' [Cancelled by User]';
+      }
+    }
+
+    function approveTool(approved) {
+      alert(approved ? 'Tool execution approved by user.' : 'Tool execution rejected by user.');
+    }
+
+    function escapeHtml(str) {
+      return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    }
+  </script>
+</body>
+</html>

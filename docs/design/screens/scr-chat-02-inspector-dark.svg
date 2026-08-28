@@ -1,0 +1,72 @@
+<!--
+SPDX-FileCopyrightText: 2026 mobileAgentRuntime contributors
+SPDX-License-Identifier: AGPL-3.0-only
+-->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 800" width="400" height="800" style="background:#111827; font-family:Roboto, sans-serif;">
+  <!-- Dark Status Bar -->
+  <rect x="0" y="0" width="400" height="28" fill="#1F2937"/>
+  <text x="16" y="18" font-size="11" fill="#9CA3AF" font-weight="600">12:00</text>
+  <text x="260" y="18" font-size="11" fill="#9CA3AF" font-weight="600">Keystore [AES-GCM]</text>
+  <line x1="0" y1="28" x2="400" y2="28" stroke="#374151" stroke-width="1"/>
+
+  <!-- Top Bar -->
+  <rect x="0" y="28" width="400" height="56" fill="#1F2937"/>
+  <text x="16" y="60" font-size="16" fill="#F9FAFB" font-weight="700">Request Inspector</text>
+  <rect x="330" y="42" width="54" height="28" rx="6" fill="#374151" stroke="#4B5563"/>
+  <text x="348" y="60" font-size="12" fill="#F9FAFB" font-weight="600">[X]</text>
+  <line x1="0" y1="84" x2="400" y2="84" stroke="#374151" stroke-width="1"/>
+
+  <!-- Main Drawer Body -->
+  <rect x="16" y="98" width="368" height="110" rx="10" fill="#1F2937" stroke="#374151"/>
+  <text x="28" y="120" font-size="12" fill="#76A9FA" font-weight="700">Target & Endpoint Security</text>
+  <text x="28" y="140" font-size="11" fill="#9CA3AF">Provider: <tspan fill="#F9FAFB">DeepSeek Official</tspan></text>
+  <text x="28" y="158" font-size="11" fill="#9CA3AF">Base URL: <tspan fill="#F9FAFB">https://api.deepseek.com/v1</tspan></text>
+  <text x="28" y="176" font-size="11" fill="#9CA3AF">Header Secret: <tspan fill="#31C48D">Bearer sk-*** [Protected in Keystore]</tspan></text>
+  <text x="28" y="194" font-size="10" fill="#9CA3AF">Direct Socket/Process Access: <tspan fill="#F98080">BLOCKED</tspan></text>
+
+  <!-- Prompt Layers Section -->
+  <rect x="16" y="220" width="368" height="420" rx="10" fill="#1F2937" stroke="#374151"/>
+  <text x="28" y="242" font-size="12" fill="#76A9FA" font-weight="700">Effective Prompt Layers</text>
+
+  <!-- Layer 1: Runtime Contract -->
+  <rect x="28" y="254" width="344" height="60" rx="6" fill="#111827" stroke="#374151"/>
+  <text x="36" y="272" font-size="10" fill="#9CA3AF" font-weight="700">[Layer 1: Runtime Contract (Immutable)]</text>
+  <text x="36" y="290" font-size="10" fill="#D1D5DB" font-family="monospace">You are mobileAgentRuntime coordinator.</text>
+  <text x="36" y="304" font-size="10" fill="#D1D5DB" font-family="monospace">Budget: 8 turns, 20 tools, 180s cap.</text>
+
+  <!-- Layer 2: User System Prompt -->
+  <rect x="28" y="322" width="344" height="60" rx="6" fill="#111827" stroke="#374151"/>
+  <text x="36" y="340" font-size="10" fill="#9CA3AF" font-weight="700">[Layer 2: User System Prompt (v4)]</text>
+  <text x="36" y="358" font-size="10" fill="#D1D5DB" font-family="monospace">Answer accurately based on provided KB.</text>
+  <text x="36" y="372" font-size="10" fill="#D1D5DB" font-family="monospace">Always include verified citation citations.</text>
+
+  <!-- Layer 3: Knowledge Context -->
+  <rect x="28" y="390" width="344" height="90" rx="6" fill="#111827" stroke="#374151"/>
+  <text x="36" y="408" font-size="10" fill="#31C48D" font-weight="700">[Layer 3: RAG Retrieved Chunks (Ready)]</text>
+  <text x="36" y="424" font-size="10" fill="#9CA3AF">KB: Architecture Docs (Space: KB-01, Dim: 384)</text>
+  <text x="36" y="440" font-size="10" fill="#D1D5DB" font-family="monospace">&gt; Chunk #12 (docs/SKILLS_AND_SECURITY.md)</text>
+  <text x="36" y="456" font-size="10" fill="#D1D5DB" font-family="monospace">&gt; Length: 480 chars | Budget Allocated: 280 tokens</text>
+  <text x="36" y="472" font-size="10" fill="#9CA3AF">Vision Model Check: Pass (0 images in chunk)</text>
+
+  <!-- Layer 4: Current User Input -->
+  <rect x="28" y="488" width="344" height="60" rx="6" fill="#111827" stroke="#374151"/>
+  <text x="36" y="506" font-size="10" fill="#76A9FA" font-weight="700">[Layer 4: Current Message]</text>
+  <text x="36" y="524" font-size="10" fill="#F9FAFB">请根据本地知识库分析移动端 Python 运...</text>
+  <text x="36" y="538" font-size="9" fill="#9CA3AF">Tokens: 38</text>
+
+  <!-- Budget Summary -->
+  <rect x="28" y="556" width="344" height="70" rx="6" fill="#233876"/>
+  <text x="36" y="574" font-size="11" fill="#E1EFFE" font-weight="700">Token Budget Consumption</text>
+  <text x="36" y="594" font-size="10" fill="#E1EFFE">Input: 384 t | Reserved Output: 1024 t | Limit: 8192 t</text>
+  <rect x="36" y="604" width="320" height="8" rx="4" fill="#111827"/>
+  <rect x="36" y="604" width="48" height="8" rx="4" fill="#31C48D"/>
+
+  <!-- Footer Actions -->
+  <rect x="16" y="654" width="368" height="42" rx="8" fill="#374151" stroke="#4B5563"/>
+  <text x="120" y="680" font-size="12" fill="#F9FAFB" font-weight="600">Export Sanitized Trace</text>
+
+  <!-- Navigation Bar -->
+  <rect x="0" y="736" width="400" height="64" fill="#1F2937"/>
+  <line x1="0" y1="736" x2="400" y2="736" stroke="#374151" stroke-width="1"/>
+  <text x="16" y="774" font-size="11" fill="#76A9FA" font-weight="700">[Chat - Inspector Active]</text>
+</svg>

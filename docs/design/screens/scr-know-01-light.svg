@@ -1,0 +1,123 @@
+<!--
+SPDX-FileCopyrightText: 2026 mobileAgentRuntime contributors
+SPDX-License-Identifier: AGPL-3.0-only
+-->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 800" width="400" height="800" style="background:#F9FAFB; font-family:Roboto, sans-serif;">
+  <!-- Status Bar -->
+  <rect x="0" y="0" width="400" height="28" fill="#FFFFFF"/>
+  <text x="16" y="18" font-size="11" fill="#4B5563" font-weight="600">12:00</text>
+  <text x="280" y="18" font-size="11" fill="#4B5563" font-weight="600">5G | Storage: CAS</text>
+  <line x1="0" y1="28" x2="400" y2="28" stroke="#E5E7EB" stroke-width="1"/>
+
+  <!-- Top App Bar -->
+  <rect x="0" y="28" width="400" height="56" fill="#FFFFFF"/>
+  <text x="16" y="62" font-size="16" fill="#111827" font-weight="700">Knowledge Bases</text>
+  <rect x="290" y="42" width="94" height="28" rx="6" fill="#1A56DB"/>
+  <text x="306" y="60" font-size="11" fill="#FFFFFF" font-weight="600">[+] SAF Import</text>
+  <line x1="0" y1="84" x2="400" y2="84" stroke="#E5E7EB" stroke-width="1"/>
+
+  <!-- Waiting for Vision Banner (WAITING_FOR_VISION_MODEL) -->
+  <rect x="16" y="96" width="368" height="106" rx="8" fill="#FEF08A" stroke="#C27803" stroke-width="1.5"/>
+  <text x="28" y="118" font-size="11" fill="#723B13" font-weight="700">[Waiting State: WAITING_FOR_VISION_MODEL]</text>
+  <text x="28" y="138" font-size="11" fill="#723B13">Import job detected 4 images in Markdown files.</text>
+  <text x="28" y="154" font-size="11" fill="#723B13">Vision Model is required to parse charts/diagrams.</text>
+  <rect x="28" y="166" width="108" height="24" rx="4" fill="#723B13"/>
+  <text x="36" y="182" font-size="10" fill="#FFFFFF" font-weight="600">Configure Vision</text>
+  <rect x="144" y="166" width="90" height="24" rx="4" fill="#FFFFFF" stroke="#C27803"/>
+  <text x="156" y="182" font-size="10" fill="#723B13" font-weight="600">Text Fallback</text>
+
+  <!-- Knowledge Base 1 Card -->
+  <rect x="16" y="214" width="368" height="340" rx="10" fill="#FFFFFF" stroke="#E5E7EB"/>
+  <text x="28" y="238" font-size="14" fill="#111827" font-weight="700">Architecture Docs (KB-01)</text>
+  <rect x="304" y="224" width="68" height="20" rx="4" fill="#DEF7EC"/>
+  <text x="316" y="238" font-size="10" fill="#03543F" font-weight="700">[READY]</text>
+  <text x="28" y="258" font-size="11" fill="#6B7280">FTS5 Full-Text + Local USearch HNSW (Dim: 384) | Generation: gen_02</text>
+
+  <!-- Document Table -->
+  <rect x="28" y="270" width="344" height="24" fill="#F3F4F6"/>
+  <text x="34" y="286" font-size="10" fill="#4B5563" font-weight="700">Document</text>
+  <text x="190" y="286" font-size="10" fill="#4B5563" font-weight="700">Format</text>
+  <text x="250" y="286" font-size="10" fill="#4B5563" font-weight="700">Status</text>
+  <text x="314" y="286" font-size="10" fill="#4B5563" font-weight="700">Chunks</text>
+
+  <!-- Row 1 -->
+  <line x1="28" y1="294" x2="372" y2="294" stroke="#E5E7EB"/>
+  <text x="34" y="312" font-size="10" fill="#111827">IMPLEMENTATION_PLAN.md</text>
+  <text x="194" y="312" font-size="10" fill="#1A56DB">[MD]</text>
+  <text x="250" y="312" font-size="10" fill="#0E9F6E">Ready</text>
+  <text x="326" y="312" font-size="10" fill="#111827">18</text>
+
+  <!-- Row 2 -->
+  <line x1="28" y1="324" x2="372" y2="324" stroke="#E5E7EB"/>
+  <text x="34" y="342" font-size="10" fill="#111827">KNOWLEDGE.md</text>
+  <text x="194" y="342" font-size="10" fill="#1A56DB">[MD]</text>
+  <text x="250" y="342" font-size="10" fill="#0E9F6E">Ready</text>
+  <text x="326" y="342" font-size="10" fill="#111827">12</text>
+
+  <!-- Row 3 -->
+  <line x1="28" y1="354" x2="372" y2="354" stroke="#E5E7EB"/>
+  <text x="34" y="372" font-size="10" fill="#111827">android_security_guide.pdf</text>
+  <text x="194" y="372" font-size="10" fill="#E02424">[PDF]</text>
+  <text x="250" y="372" font-size="10" fill="#0E9F6E">Ready</text>
+  <text x="326" y="372" font-size="10" fill="#111827">45</text>
+
+  <!-- Row 4 -->
+  <line x1="28" y1="384" x2="372" y2="384" stroke="#E5E7EB"/>
+  <text x="34" y="402" font-size="10" fill="#111827">system_architecture.png</text>
+  <text x="194" y="402" font-size="10" fill="#C27803">[IMG]</text>
+  <text x="250" y="402" font-size="10" fill="#C27803">Waiting</text>
+  <text x="326" y="402" font-size="10" fill="#6B7280">-</text>
+
+  <!-- CAS Fingerprint -->
+  <rect x="28" y="420" width="344" height="40" rx="4" fill="#F9FAFB" stroke="#E5E7EB"/>
+  <text x="34" y="436" font-size="9" fill="#6B7280">Content Addressable Storage (CAS):</text>
+  <text x="34" y="450" font-size="9" fill="#111827" font-family="monospace">cas_root/7f/49/7f49c01824a... (Dedup enabled)</text>
+
+  <!-- Actions -->
+  <rect x="28" y="474" width="94" height="26" rx="4" fill="#F3F4F6" stroke="#D1D5DB"/>
+  <text x="40" y="491" font-size="10" fill="#1F2A37" font-weight="600">Rebuild Index</text>
+
+  <rect x="130" y="474" width="94" height="26" rx="4" fill="#F3F4F6" stroke="#D1D5DB"/>
+  <text x="144" y="491" font-size="10" fill="#1F2A37" font-weight="600">Evidence View</text>
+
+  <rect x="232" y="474" width="60" height="26" rx="4" fill="#FDE8E8" stroke="#E02424"/>
+  <text x="246" y="491" font-size="10" fill="#E02424" font-weight="600">Delete</text>
+
+  <!-- Multi-Job Progress Indicator -->
+  <rect x="16" y="566" width="368" height="150" rx="10" fill="#FFFFFF" stroke="#E5E7EB"/>
+  <text x="28" y="588" font-size="12" fill="#111827" font-weight="700">Foreground Import Worker (ForegroundService)</text>
+  <text x="28" y="608" font-size="11" fill="#4B5563">Importing: batch_20260828 (14 / 50 files)</text>
+  <rect x="28" y="618" width="344" height="8" rx="4" fill="#E5E7EB"/>
+  <rect x="28" y="618" width="110" height="8" rx="4" fill="#1A56DB"/>
+
+  <text x="28" y="644" font-size="10" fill="#6B7280">Current Phase: [2/4] Chunking and Lexical Indexing (FTS5)</text>
+  <text x="28" y="660" font-size="10" fill="#6B7280">Next Phase: Local Embedding (ONNX Mobile Runtime)</text>
+
+  <rect x="28" y="674" width="70" height="24" rx="4" fill="#F3F4F6" stroke="#D1D5DB"/>
+  <text x="44" y="690" font-size="10" fill="#1F2A37">Pause</text>
+
+  <rect x="106" y="674" width="70" height="24" rx="4" fill="#FDE8E8" stroke="#E02424"/>
+  <text x="122" y="690" font-size="10" fill="#E02424">Cancel</text>
+
+  <!-- Bottom Navigation Bar (7 tabs) -->
+  <rect x="0" y="736" width="400" height="64" fill="#FFFFFF"/>
+  <line x1="0" y1="736" x2="400" y2="736" stroke="#E5E7EB" stroke-width="1"/>
+  <text x="22" y="759" font-size="11" fill="#6B7280">[C]</text>
+  <text x="16" y="784" font-size="10" fill="#6B7280">Chat</text>
+  <text x="76" y="759" font-size="11" fill="#6B7280">[A]</text>
+  <text x="68" y="784" font-size="10" fill="#6B7280">Agents</text>
+  <text x="132" y="759" font-size="11" fill="#6B7280">[P]</text>
+  <text x="122" y="784" font-size="10" fill="#6B7280">Providers</text>
+
+  <!-- Tab 4: Knowledge (Selected) -->
+  <rect x="172" y="744" width="62" height="22" rx="4" fill="#E1EFFE"/>
+  <text x="198" y="759" font-size="11" fill="#1A56DB" font-weight="700">[K]</text>
+  <text x="178" y="784" font-size="10" fill="#1A56DB" font-weight="700">Knowledge</text>
+
+  <text x="248" y="759" font-size="11" fill="#6B7280">[S]</text>
+  <text x="242" y="784" font-size="10" fill="#6B7280">Skills</text>
+  <text x="306" y="759" font-size="11" fill="#6B7280">[N]</text>
+  <text x="302" y="784" font-size="10" fill="#6B7280">News</text>
+  <text x="360" y="759" font-size="11" fill="#6B7280">[i]</text>
+  <text x="354" y="784" font-size="10" fill="#6B7280">About</text>
+</svg>

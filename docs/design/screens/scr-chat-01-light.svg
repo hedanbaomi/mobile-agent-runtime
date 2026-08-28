@@ -1,0 +1,107 @@
+<!--
+SPDX-FileCopyrightText: 2026 mobileAgentRuntime contributors
+SPDX-License-Identifier: AGPL-3.0-only
+-->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 800" width="400" height="800" style="background:#F9FAFB; font-family:Roboto, sans-serif;">
+  <!-- Status Bar -->
+  <rect x="0" y="0" width="400" height="28" fill="#FFFFFF"/>
+  <text x="16" y="18" font-size="11" fill="#4B5563" font-weight="600">12:00</text>
+  <text x="280" y="18" font-size="11" fill="#4B5563" font-weight="600">5G | BAT: 98%</text>
+  <line x1="0" y1="28" x2="400" y2="28" stroke="#E5E7EB" stroke-width="1"/>
+
+  <!-- Top App Bar -->
+  <rect x="0" y="28" width="400" height="56" fill="#FFFFFF"/>
+  <text x="16" y="54" font-size="16" fill="#111827" font-weight="700">Agent: Doc Research</text>
+  <text x="16" y="72" font-size="11" fill="#6B7280">Model: deepseek-chat | Space: KB-01 (v2)</text>
+  <rect x="300" y="42" width="84" height="28" rx="6" fill="#F3F4F6" stroke="#D1D5DB"/>
+  <text x="314" y="60" font-size="11" fill="#1F2A37" font-weight="500">Inspect</text>
+  <line x1="0" y1="84" x2="400" y2="84" stroke="#E5E7EB" stroke-width="1"/>
+
+  <!-- Pinned Banner -->
+  <rect x="0" y="84" width="400" height="32" fill="#FEF08A"/>
+  <text x="16" y="104" font-size="11" fill="#723B13" font-weight="600">[Pinned Notice] Security patch v1.0.2 ready.</text>
+  <text x="320" y="104" font-size="11" fill="#723B13" font-weight="700" text-decoration="underline">Details</text>
+  <line x1="0" y1="116" x2="400" y2="116" stroke="#C27803" stroke-width="1"/>
+
+  <!-- User Message Bubble -->
+  <rect x="70" y="130" width="314" height="64" rx="12" fill="#1A56DB"/>
+  <text x="84" y="152" font-size="12" fill="#FFFFFF">请根据本地知识库分析移动端 Python 运行</text>
+  <text x="84" y="170" font-size="12" fill="#FFFFFF">时的安全隔离策略与 Broker 架构。</text>
+  <text x="320" y="186" font-size="9" fill="#E1EFFE">12:01 | In: 38t</text>
+
+  <!-- Agent Message Bubble -->
+  <rect x="16" y="206" width="368" height="190" rx="12" fill="#FFFFFF" stroke="#E5E7EB" filter="drop-shadow(0px 1px 2px rgba(0,0,0,0.05))"/>
+  <text x="28" y="228" font-size="12" fill="#111827" font-weight="600">根据 docs/SKILLS_AND_SECURITY.md 规范：</text>
+  <text x="28" y="248" font-size="12" fill="#374151">1. Python 运行在独立的 isolated service 进程；</text>
+  <text x="28" y="266" font-size="12" fill="#374151">2. 进程无直接网络/文件权限，全部经 Broker 鉴权；</text>
+  <text x="28" y="284" font-size="12" fill="#374151">3. 单次运行后销毁重置，避免全局状态污染。</text>
+
+  <!-- Citation Card Inside Bubble -->
+  <rect x="28" y="296" width="344" height="42" rx="6" fill="#F3F4F6" stroke="#D1D5DB"/>
+  <line x1="28" y1="296" x2="28" y2="338" stroke="#1A56DB" stroke-width="4"/>
+  <text x="38" y="314" font-size="11" fill="#1A56DB" font-weight="700">[Ref 1] docs/SKILLS_AND_SECURITY.md</text>
+  <text x="38" y="330" font-size="10" fill="#6B7280">Chunk #12 | Score: 0.94 | Jump to CAS Original</text>
+
+  <text x="28" y="384" font-size="10" fill="#6B7280">142 tokens | 28 t/s | Cost: BYOK | Gen Time: 1.2s</text>
+
+  <!-- Tool Approval Card -->
+  <rect x="16" y="410" width="368" height="130" rx="10" fill="#FFFFFF" stroke="#C27803" stroke-width="1.5"/>
+  <rect x="16" y="410" width="368" height="26" rx="10" fill="#FEF08A"/>
+  <text x="28" y="427" font-size="11" fill="#723B13" font-weight="700">[Tool Execution Approval Required]</text>
+  <text x="28" y="454" font-size="11" fill="#111827">Skill: <strong>skill_calculator</strong> (Isolated CPython)</text>
+  <rect x="28" y="464" width="344" height="34" rx="4" fill="#F3F4F6"/>
+  <text x="36" y="484" font-size="11" fill="#1F2A37" font-family="monospace">{"operation": "eval_matrix", "dim": 64}</text>
+  
+  <rect x="28" y="506" width="80" height="24" rx="4" fill="#1A56DB"/>
+  <text x="46" y="522" font-size="11" fill="#FFFFFF" font-weight="600">Approve</text>
+
+  <rect x="116" y="506" width="80" height="24" rx="4" fill="#F3F4F6" stroke="#D1D5DB"/>
+  <text x="138" y="522" font-size="11" fill="#374151" font-weight="600">Reject</text>
+
+  <!-- Streaming Status Banner -->
+  <rect x="0" y="650" width="400" height="26" fill="#E1EFFE"/>
+  <text x="16" y="667" font-size="11" fill="#1E429F">Streaming: 142 tokens generated (28 t/s)...</text>
+  <rect x="330" y="653" width="54" height="20" rx="4" fill="#E02424"/>
+  <text x="344" y="667" font-size="10" fill="#FFFFFF" font-weight="600">Stop</text>
+
+  <!-- Input Bar -->
+  <rect x="0" y="676" width="400" height="60" fill="#FFFFFF"/>
+  <line x1="0" y1="676" x2="400" y2="676" stroke="#E5E7EB" stroke-width="1"/>
+  <rect x="16" y="688" width="300" height="36" rx="8" fill="#F9FAFB" stroke="#D1D5DB"/>
+  <text x="28" y="711" font-size="12" fill="#9CA3AF">Ask question or test tool loop...</text>
+  <rect x="326" y="688" width="58" height="36" rx="8" fill="#1A56DB"/>
+  <text x="340" y="711" font-size="12" fill="#FFFFFF" font-weight="600">Send</text>
+
+  <!-- Bottom Navigation Bar (7 tabs) -->
+  <rect x="0" y="736" width="400" height="64" fill="#FFFFFF"/>
+  <line x1="0" y1="736" x2="400" y2="736" stroke="#E5E7EB" stroke-width="1"/>
+
+  <!-- Tab 1: Chat (Selected) -->
+  <rect x="10" y="744" width="40" height="22" rx="4" fill="#E1EFFE"/>
+  <text x="22" y="759" font-size="11" fill="#1A56DB" font-weight="700">[C]</text>
+  <text x="16" y="784" font-size="10" fill="#1A56DB" font-weight="700">Chat</text>
+
+  <!-- Tab 2: Agents -->
+  <text x="76" y="759" font-size="11" fill="#6B7280">[A]</text>
+  <text x="68" y="784" font-size="10" fill="#6B7280">Agents</text>
+
+  <!-- Tab 3: Providers -->
+  <text x="132" y="759" font-size="11" fill="#6B7280">[P]</text>
+  <text x="122" y="784" font-size="10" fill="#6B7280">Providers</text>
+
+  <!-- Tab 4: Knowledge -->
+  <text x="188" y="759" font-size="11" fill="#6B7280">[K]</text>
+  <text x="178" y="784" font-size="10" fill="#6B7280">Knowledge</text>
+
+  <!-- Tab 5: Skills -->
+  <text x="248" y="759" font-size="11" fill="#6B7280">[S]</text>
+  <text x="242" y="784" font-size="10" fill="#6B7280">Skills</text>
+
+  <!-- Tab 6: News -->
+  <text x="306" y="759" font-size="11" fill="#6B7280">[N]</text>
+  <text x="302" y="784" font-size="10" fill="#6B7280">News</text>
+
+  <!-- Tab 7: About -->
+  <text x="360" y="759" font-size="11" fill="#6B7280">[i]</text>
+  <text x="354" y="784" font-size="10" fill="#6B7280">About</text>
+</svg>

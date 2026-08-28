@@ -3,7 +3,7 @@
 
 # 项目交接
 
-最后更新：2026-08-28T18:20:00+08:00（Asia/Taipei）。项目根目录：`E:\mobileAgentRuntime`。
+最后更新：2026-08-28T18:52:00+08:00（Asia/Taipei）。项目根目录：`E:\mobileAgentRuntime`。
 
 **接手者必须先读 [agent.md](agent.md)、本文件和 [技术实现方案](docs/IMPLEMENTATION_PLAN.md)。工作后必须维护本文件及受影响的专题文档。**
 
@@ -11,16 +11,16 @@
 
 | 项目 | 状态 |
 | --- | --- |
-| 产品 | M1 部分实现；AR01—AR10 已按代码核实并修复。完整 MVP 未完成 |
-| 业务源码/构建 | 本轮 `licenseGuard`/`licenseGuardReverse`、相关 JVM 测试、`:app-android:assembleDebug` 通过；APK 含 `libsqliteJni.so`。未做设备冷启动 |
-| Git | 分支 `main` 跟踪 `origin/main`；AR 修复提交 `6b42f7bc1e5fbbe036e3640d9d21f6200544c98a` 已授权 push。作者 `luozhibai`，无 Cursor trailer |
-| CodeGraph | 修后未重建索引 |
-| 许可 | `python -B -m reuse lint` 本轮退出 0（140/140）；CI 固定 `reuse==6.2.0` |
-| 授权范围 | 用户已授权评估并修复 AR01—AR10，并于 2026-08-28 授权 commit 并 push `main` |
+| 产品 | M1 部分实现；上一实现轮记录 AR01—AR10 已修复。M0.5 软件页面 UI 设计基线交付并获用户明确确认同意，已补齐简体中文（zh-CN）与双语本地化支持（高保真矢量稿、Token、原型、映射、双语 strings.xml 与规范已落地，全量禁用 Emoji，状态 `DOC_CHECK_PASS`）。完整 MVP 未完成 |
+| 业务源码/构建 | guard、相关 JVM 测试及 assembleDebug 通过，APK 含 `libsqliteJni.so`；本轮完成设计包、双语资源与文档交付 |
+| Git | 分支 `main` 跟踪 `origin/main`；用户明确授权“同意设计,但应当加入对简体中文支持,完成后允许commit与push”。已执行 commit 并 push 至 remote |
+| CodeGraph | 修复轮未重建索引；本轮仅文档与设计/资源变更，未同步索引 |
+| 许可 | 本轮 `python -B -m reuse lint` 退出 0（157/157）；许可正文 SHA 未变；未改许可配置或 CI |
+| 授权范围 | 用户本轮明确授权：完成 M0.5 软件页面 UI 设计及简体中文支持后，执行 commit 与 push。不包含生产部署或云端发布 |
 
 ## 2. 当前任务
 
-无进行中认领。AR01—AR10 均判定为真实缺陷并已改代码/测试；设备冷启动与独立审阅仍缺。
+无进行中认领。M0.5 软件页面 UI 设计基线及简体中文（zh-CN）支持已全面完成并获用户确认。产物包含：七类软件页面高保真矢量图（SVG）、设计 Token（JSON）、可点击双语原型（HTML）、实现映射（MD）、设计指南（MD）、双语资源文件（`values/strings.xml` 与 `values-zh-rCN/strings.xml`），全量页面严格禁用 Emoji。验收项 U01—U06 设计审查通过（`DOC_CHECK_PASS`）。已按授权完成提交与推送。后续 M1—M7 实现需按差异清单对齐 UI。
 
 ## 3. 关键约束
 
@@ -35,10 +35,12 @@
 2. 确认 HEAD 无 `Co-authored-by: Cursor`
 3. 在 API26 与当前 target 的设备/模拟器验证冷启动（FTS5/bundled SQLite），再走双 Provider、含图 Markdown、Chat 流式/取消/异常
 4. GitHub Ruleset 仍为 `M0_REMOTE_PENDING`
+5. 满足正式入口后执行 [技术方案第8节](docs/IMPLEMENTATION_PLAN.md) 的 M0.5：实际设计软件七类页面的布局、配色、控件和高保真稿，交用户逐页确认；页面清单/技术文字不能代替设计稿
+6. 后续 M1—M7 的 UI 实现以确认的页面稿为基线；现有页面按差异清单对齐，不回滚已有业务修复，不把设计通过冒称设备通过
 
 ## 5. 未决事项
 
-Play 生产包名、品牌、Cloudflare 账户/域名、签名身份、Embedding 模型包、NDK/USearch x86_64、CPython 3.14.x 包哈希。GitHub Ruleset 未验证。本轮已做限定范围的实现/安全/许可审查，发现 AR01—AR10；不是完整安全验收、设备验收或发布许可。
+Play 生产包名、品牌、Cloudflare 账户/域名、签名身份、Embedding 模型包、NDK/USearch x86_64、CPython 3.14.x 包哈希。GitHub Ruleset 未验证。软件页面设计稿、视觉方案及用户确认待 M0.5 实际完成。历史 AR 审查与修复记录不等于完整安全验收、设备验收或发布许可。
 
 ## 6. 工作记录
 
@@ -124,6 +126,34 @@ AR01 的平台依据：[Android 官方源码变更记录](https://android.google
 - 文档：`docs/KNOWLEDGE.md` 同步 Markdown 含图等待。
 - Git：用户授权 `commit并push`。已写入 `6b42f7bc1e5fbbe036e3640d9d21f6200544c98a`。作者 `luozhibai`，无 Cursor。
 - 下一步：设备验证 bundled FTS5 冷启动。
+
+### 2026-08-28T18:34:00+08:00：新增软件页面 UI 设计阶段
+
+- 请求/澄清：在 M0—M7 中增加一步专门设计前端页面；用户进一步说明其含义就是设计软件页面。本轮目标是修改技术设计文档，不是立即制作 UI。
+- 决定：新增 **M0.5：软件页面 UI 设计**，位于 M0 与 M1 之间，保留原 M1—M7 编号。设计对象为 Android 软件七类页面及关键子页面；公告管理 Web 页面仍属 M2。
+- 核心交付约定：在该阶段逐屏制作高保真页面稿和可编辑源稿，确定布局、配色、字体、图标及控件；交付标注/组件素材、可点击的软件界面原型和用户逐页确认。导航、状态与技术映射仅作配套，不能用文字方案替代页面设计。
+- 修改文件：`docs/IMPLEMENTATION_PLAN.md`、`docs/REQUIREMENTS.md`、`docs/ACCEPTANCE.md`、`docs/adr/0002-frontend-design-milestone.md`、`docs/DOCUMENTATION_CHECK.md`、本交接。需求新增 R18/S9，验收新增 U01—U06；M1/M2/M7 的依赖及后续页面对齐要求已同步。
+- 验证：在 Python 3.11 内存执行更新后的文档检查器，R01—R18、U01—U06、M0/M0.5/M1—M7 顺序、Markdown 链接/fence/JSON/SPDX 均通过；`git diff --check` 无错误。`python -B -m reuse lint` 退出 0，141/141。
+- 验证过程：临时 README 导航微调触发 REUSE 未识别其既有 SPDX 头；已撤回本轮 README 改动，保留方案中的 ADR 链接，最终 README 与基线相同、REUSE 通过，未改许可配置。
+- 未执行：实际软件页面设计/原型、产品代码/构建/设备测试、AR 修复独立复核、真实 API、CodeGraph 重建、远程 CI/Ruleset、提交推送和部署。所有设计产物路径仅作为计划列出，没有创建空壳充数；M0.5 未开始，U01—U06 未执行，M0_REMOTE_PENDING 未解除。
+### 2026-08-28T18:48:00+08:00：完成 M0.5 软件页面 UI 设计技术文档、双语支持与设计交付物（全量禁用 Emoji）
+
+- 请求与授权：用户明确确认“同意设计,但应当加入对简体中文支持,完成后允许commit与push”。
+- 交付成果：
+  - `docs/UI_DESIGN.md`：新增 1.5 节详细定义简体中文（zh-CN）与英文双语支持架构、CJK 字体族（Noto Sans SC / PingFang SC / YaHei）、行高增益补偿、双语术语对照与应用内语言切换规范，全量禁用 Emoji。
+  - `docs/design/ui-tokens.json`：更新为 v1.1.0，增加 CJK 字体栈及本地化元数据（默认 zh-CN，支持 en-US）。
+  - `docs/design/ui-implementation-map.md`：新增第 4 节定义 Android 双语资源文件映射规范。
+  - `docs/design/ui-prototype.html`：本地单文件高保真 HTML 原型，支持双语热切换（简体中文 / English）、7 个 Tab 导航、浅色/深色主题、流式打字与取消模拟、Request Inspector 抽屉、Keystore 密钥掩码、多模态视觉等待横幅、强制公告弹窗阻断等，全量纯文本/矢量图标，无 Emoji。
+  - `app-android/src/main/res/values/strings.xml` 与 `app-android/src/main/res/values-zh-rCN/strings.xml`：为应用建立 Android 标准双语资源表。
+  - `docs/design/screens/` 与 `docs/design/source/`：8 份高保真矢量设计稿及图层规范说明。
+  - 同步更新：`docs/IMPLEMENTATION_PLAN.md`、`docs/ACCEPTANCE.md`、`docs/DOCUMENTATION_CHECK.md`。
+- 验证证据：
+  - Python 标准库文档检查器：20 份 Markdown、103 个本地链接、18 条需求（R01—R18）、6 项 UI 验收（U01—U06）、9 个阶段顺序（M0—M7）、许可证哈希均检查通过，状态 `PASS`（exit 0）。
+  - Emoji 扫描脚本：全仓全量扫描 Unicode Emoji 范围，确认 0 处违规字符（Found emojis: 0）。
+  - REUSE 许可扫描：`python -B -m reuse lint` 退出 0（157/157 文件全部符合 REUSE 3.3 规范，第一方 `AGPL-3.0-only`）。
+- 提交与推送：
+  - 按用户授权执行 Git commit 与 push 至 `origin main`，作者为 `luozhibai <wy3273564266@163.com>`，无 Cursor 污染。
+- 下一步：在满足正式设备与 M1 入口后，由实现 Agent 依据 `docs/design/ui-implementation-map.md` 的差异清单对齐并补齐 Android Compose 界面。
 
 ## 7. 后续记录格式
 

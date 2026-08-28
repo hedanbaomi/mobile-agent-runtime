@@ -1,0 +1,103 @@
+<!--
+SPDX-FileCopyrightText: 2026 mobileAgentRuntime contributors
+SPDX-License-Identifier: AGPL-3.0-only
+-->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 800" width="400" height="800" style="background:#111827; font-family:Roboto, sans-serif;">
+  <!-- Dark Status Bar -->
+  <rect x="0" y="0" width="400" height="28" fill="#1F2937"/>
+  <text x="16" y="18" font-size="11" fill="#9CA3AF" font-weight="600">12:00</text>
+  <text x="260" y="18" font-size="11" fill="#9CA3AF" font-weight="600">Keystore: Enforced</text>
+  <line x1="0" y1="28" x2="400" y2="28" stroke="#374151" stroke-width="1"/>
+
+  <!-- Top App Bar -->
+  <rect x="0" y="28" width="400" height="56" fill="#1F2937"/>
+  <text x="16" y="62" font-size="16" fill="#F9FAFB" font-weight="700">Model Providers (BYOK)</text>
+  <rect x="310" y="42" width="74" height="28" rx="6" fill="#76A9FA"/>
+  <text x="328" y="60" font-size="11" fill="#1E429F" font-weight="700">[+] Add</text>
+  <line x1="0" y1="84" x2="400" y2="84" stroke="#374151" stroke-width="1"/>
+
+  <!-- Provider 1: DeepSeek Official -->
+  <rect x="16" y="96" width="368" height="270" rx="10" fill="#1F2937" stroke="#374151"/>
+  <text x="28" y="122" font-size="14" fill="#F9FAFB" font-weight="700">DeepSeek Official</text>
+  <rect x="270" y="108" width="100" height="20" rx="4" fill="#046C4E"/>
+  <text x="278" y="122" font-size="10" fill="#DEF7EC" font-weight="700">CONNECTED (142ms)</text>
+
+  <!-- Endpoint -->
+  <text x="28" y="152" font-size="11" fill="#9CA3AF">Base URL:</text>
+  <rect x="28" y="160" width="344" height="26" rx="4" fill="#111827" stroke="#374151"/>
+  <text x="36" y="177" font-size="11" fill="#D1D5DB" font-family="monospace">https://api.deepseek.com/v1</text>
+
+  <!-- Secret Key -->
+  <text x="28" y="206" font-size="11" fill="#9CA3AF">API Key (Android Keystore Secret Ref: sec_d91a):</text>
+  <rect x="28" y="214" width="344" height="26" rx="4" fill="#111827" stroke="#374151"/>
+  <text x="36" y="231" font-size="11" fill="#31C48D" font-family="monospace">sk-************************************</text>
+
+  <!-- Capabilities -->
+  <text x="28" y="258" font-size="10" fill="#9CA3AF">Verified Capabilities:</text>
+  <rect x="28" y="266" width="68" height="18" rx="3" fill="#233876"/>
+  <text x="34" y="279" font-size="9" fill="#E1EFFE">[Streaming]</text>
+
+  <rect x="102" y="266" width="76" height="18" rx="3" fill="#233876"/>
+  <text x="108" y="279" font-size="9" fill="#E1EFFE">[Tool Calls]</text>
+
+  <rect x="184" y="266" width="70" height="18" rx="3" fill="#233876"/>
+  <text x="190" y="279" font-size="9" fill="#E1EFFE">[JSON Mode]</text>
+
+  <rect x="260" y="266" width="66" height="18" rx="3" fill="#374151"/>
+  <text x="266" y="279" font-size="9" fill="#9CA3AF">[No Vision]</text>
+
+  <!-- Action Buttons -->
+  <rect x="28" y="320" width="100" height="28" rx="4" fill="#76A9FA"/>
+  <text x="44" y="338" font-size="11" fill="#1E429F" font-weight="700">Test Probe</text>
+
+  <rect x="136" y="320" width="70" height="28" rx="4" fill="#374151" stroke="#4B5563"/>
+  <text x="156" y="338" font-size="11" fill="#F9FAFB">Models</text>
+
+  <rect x="214" y="320" width="60" height="28" rx="4" fill="#374151" stroke="#4B5563"/>
+  <text x="232" y="338" font-size="11" fill="#F9FAFB">Edit</text>
+
+  <!-- Provider 2: Self-hosted vLLM -->
+  <rect x="16" y="380" width="368" height="180" rx="10" fill="#1F2937" stroke="#374151"/>
+  <text x="28" y="406" font-size="14" fill="#F9FAFB" font-weight="700">Local vLLM Cluster</text>
+  <rect x="290" y="392" width="80" height="20" rx="4" fill="#633112"/>
+  <text x="298" y="406" font-size="10" fill="#FEF08A" font-weight="700">UNTESTED</text>
+
+  <text x="28" y="434" font-size="11" fill="#9CA3AF">Base URL:</text>
+  <rect x="28" y="442" width="344" height="26" rx="4" fill="#111827" stroke="#374151"/>
+  <text x="36" y="459" font-size="11" fill="#D1D5DB" font-family="monospace">http://192.168.1.120:8000/v1</text>
+
+  <text x="28" y="488" font-size="11" fill="#9CA3AF">API Key: <tspan fill="#6B7280">(None required)</tspan></text>
+
+  <rect x="28" y="512" width="100" height="28" rx="4" fill="#76A9FA"/>
+  <text x="44" y="530" font-size="11" fill="#1E429F" font-weight="700">Test Probe</text>
+
+  <!-- Security Statement Note -->
+  <rect x="16" y="576" width="368" height="140" rx="10" fill="#233876"/>
+  <text x="28" y="600" font-size="12" fill="#E1EFFE" font-weight="700">Zero Secret Leakage Guarantee</text>
+  <text x="28" y="620" font-size="11" fill="#E1EFFE">1. Keys stored exclusively in Android Keystore (AES-GCM);</text>
+  <text x="28" y="638" font-size="11" fill="#E1EFFE">2. SQLite database contains only random secretRef tokens;</text>
+  <text x="28" y="656" font-size="11" fill="#E1EFFE">3. Export files and logs are scrubbed by SecretRedactor;</text>
+  <text x="28" y="674" font-size="11" fill="#E1EFFE">4. Outbound calls only made to user-configured Base URLs.</text>
+
+  <!-- Bottom Navigation Bar (7 tabs) -->
+  <rect x="0" y="736" width="400" height="64" fill="#1F2937"/>
+  <line x1="0" y1="736" x2="400" y2="736" stroke="#374151" stroke-width="1"/>
+  <text x="22" y="759" font-size="11" fill="#9CA3AF">[C]</text>
+  <text x="16" y="784" font-size="10" fill="#9CA3AF">Chat</text>
+  <text x="76" y="759" font-size="11" fill="#9CA3AF">[A]</text>
+  <text x="68" y="784" font-size="10" fill="#9CA3AF">Agents</text>
+
+  <!-- Tab 3: Providers (Selected) -->
+  <rect x="120" y="744" width="56" height="22" rx="4" fill="#233876"/>
+  <text x="142" y="759" font-size="11" fill="#76A9FA" font-weight="700">[P]</text>
+  <text x="126" y="784" font-size="10" fill="#76A9FA" font-weight="700">Providers</text>
+
+  <text x="188" y="759" font-size="11" fill="#9CA3AF">[K]</text>
+  <text x="178" y="784" font-size="10" fill="#9CA3AF">Knowledge</text>
+  <text x="248" y="759" font-size="11" fill="#9CA3AF">[S]</text>
+  <text x="242" y="784" font-size="10" fill="#9CA3AF">Skills</text>
+  <text x="306" y="759" font-size="11" fill="#9CA3AF">[N]</text>
+  <text x="302" y="784" font-size="10" fill="#9CA3AF">News</text>
+  <text x="360" y="759" font-size="11" fill="#9CA3AF">[i]</text>
+  <text x="354" y="784" font-size="10" fill="#9CA3AF">About</text>
+</svg>

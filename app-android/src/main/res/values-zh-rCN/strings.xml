@@ -1,0 +1,35 @@
+<!-- SPDX-FileCopyrightText: 2026 mobileAgentRuntime contributors -->
+<!-- SPDX-License-Identifier: AGPL-3.0-only -->
+<resources>
+    <string name="app_name">mobileAgentRuntime</string>
+    <string name="nav_chat">对话</string>
+    <string name="nav_agents">智能体</string>
+    <string name="nav_providers">服务商</string>
+    <string name="nav_knowledge">知识库</string>
+    <string name="nav_skills">技能</string>
+    <string name="nav_announcements">公告</string>
+    <string name="nav_about">关于</string>
+
+    <string name="chat_send">发送</string>
+    <string name="chat_cancel">取消</string>
+    <string name="chat_input_placeholder">输入问题或使用挂载知识库检索...</string>
+    <string name="chat_inspect_request">审查请求</string>
+    <string name="chat_streaming_status">正在生成: 已生成 %1$d 个 Token (%2$d t/s)</string>
+
+    <string name="tool_approval_title">[需要确认工具调用执行]</string>
+    <string name="tool_approve_once">单次批准</string>
+    <string name="tool_reject">拒绝</string>
+
+    <string name="prov_test_probe">连通性探测</string>
+    <string name="prov_keystore_masked">已加密保存在 Android Keystore (AES-GCM)</string>
+
+    <string name="know_waiting_vision">[等待状态: 等待视觉模型配置 WAITING_FOR_VISION_MODEL]</string>
+    <string name="know_rebuild_index">重建索引</string>
+
+    <string name="ann_pinned_notice">[置顶公告]</string>
+    <string name="ann_acknowledge">我已阅读并确认此公告</string>
+
+    <string name="sett_anonymous_metrics">匿名公告统计指标</string>
+    <string name="sett_export_data">导出数据备份</string>
+    <string name="sett_license_agpl">GNU AGPL-3.0-only 开源许可</string>
+</resources>

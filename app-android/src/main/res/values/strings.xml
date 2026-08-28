@@ -1,0 +1,35 @@
+<!-- SPDX-FileCopyrightText: 2026 mobileAgentRuntime contributors -->
+<!-- SPDX-License-Identifier: AGPL-3.0-only -->
+<resources>
+    <string name="app_name">mobileAgentRuntime</string>
+    <string name="nav_chat">Chat</string>
+    <string name="nav_agents">Agents</string>
+    <string name="nav_providers">Providers</string>
+    <string name="nav_knowledge">Knowledge</string>
+    <string name="nav_skills">Skills</string>
+    <string name="nav_announcements">News</string>
+    <string name="nav_about">About</string>
+
+    <string name="chat_send">Send</string>
+    <string name="chat_cancel">Cancel</string>
+    <string name="chat_input_placeholder">Ask anything or use attached knowledge...</string>
+    <string name="chat_inspect_request">Inspect Request</string>
+    <string name="chat_streaming_status">Streaming: %1$d tokens generated (%2$d t/s)</string>
+
+    <string name="tool_approval_title">[Tool Execution Approval Required]</string>
+    <string name="tool_approve_once">Approve Once</string>
+    <string name="tool_reject">Reject</string>
+
+    <string name="prov_test_probe">Test Probe</string>
+    <string name="prov_keystore_masked">Stored securely in Android Keystore (AES-GCM)</string>
+
+    <string name="know_waiting_vision">[Waiting: WAITING_FOR_VISION_MODEL]</string>
+    <string name="know_rebuild_index">Rebuild Index</string>
+
+    <string name="ann_pinned_notice">[Pinned Notice]</string>
+    <string name="ann_acknowledge">I Have Read and Acknowledge</string>
+
+    <string name="sett_anonymous_metrics">Anonymous Announcement Metrics</string>
+    <string name="sett_export_data">Export Data</string>
+    <string name="sett_license_agpl">GNU AGPL-3.0-only</string>
+</resources>

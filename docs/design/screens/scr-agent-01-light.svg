@@ -1,0 +1,103 @@
+<!--
+SPDX-FileCopyrightText: 2026 mobileAgentRuntime contributors
+SPDX-License-Identifier: AGPL-3.0-only
+-->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 800" width="400" height="800" style="background:#F9FAFB; font-family:Roboto, sans-serif;">
+  <!-- Status Bar -->
+  <rect x="0" y="0" width="400" height="28" fill="#FFFFFF"/>
+  <text x="16" y="18" font-size="11" fill="#4B5563" font-weight="600">12:00</text>
+  <text x="280" y="18" font-size="11" fill="#4B5563" font-weight="600">5G | BAT: 98%</text>
+  <line x1="0" y1="28" x2="400" y2="28" stroke="#E5E7EB" stroke-width="1"/>
+
+  <!-- Top App Bar -->
+  <rect x="0" y="28" width="400" height="56" fill="#FFFFFF"/>
+  <text x="16" y="62" font-size="16" fill="#111827" font-weight="700">Agent: Edit Profile</text>
+  <rect x="310" y="42" width="74" height="28" rx="6" fill="#1A56DB"/>
+  <text x="330" y="60" font-size="11" fill="#FFFFFF" font-weight="600">Save</text>
+  <line x1="0" y1="84" x2="400" y2="84" stroke="#E5E7EB" stroke-width="1"/>
+
+  <!-- Agent Basic Info Card -->
+  <rect x="16" y="96" width="368" height="96" rx="10" fill="#FFFFFF" stroke="#E5E7EB"/>
+  <text x="28" y="118" font-size="11" fill="#4B5563" font-weight="700">AGENT IDENTITY</text>
+  <rect x="28" y="128" width="344" height="28" rx="4" fill="#F9FAFB" stroke="#D1D5DB"/>
+  <text x="36" y="146" font-size="12" fill="#111827">Doc Research Assistant</text>
+  <text x="28" y="174" font-size="10" fill="#6B7280">Snapshot Boundary: Auto-advance to rev_005 on save.</text>
+
+  <!-- Model Roles Matrix Card -->
+  <rect x="16" y="202" width="368" height="150" rx="10" fill="#FFFFFF" stroke="#E5E7EB"/>
+  <text x="28" y="224" font-size="11" fill="#4B5563" font-weight="700">MODEL ROLE ASSIGNMENTS</text>
+
+  <!-- Chat Role -->
+  <text x="28" y="248" font-size="11" fill="#111827">Chat Model:</text>
+  <rect x="120" y="234" width="252" height="24" rx="4" fill="#F9FAFB" stroke="#D1D5DB"/>
+  <text x="128" y="250" font-size="11" fill="#111827">deepseek-chat (DeepSeek API)</text>
+
+  <!-- Vision Role -->
+  <text x="28" y="280" font-size="11" fill="#111827">Vision Model:</text>
+  <rect x="120" y="266" width="252" height="24" rx="4" fill="#F9FAFB" stroke="#D1D5DB"/>
+  <text x="128" y="282" font-size="11" fill="#111827">gpt-4o-mini (OpenAI Provider)</text>
+
+  <!-- Embedding Role -->
+  <text x="28" y="312" font-size="11" fill="#111827">Embedding:</text>
+  <rect x="120" y="298" width="252" height="24" rx="4" fill="#F9FAFB" stroke="#D1D5DB"/>
+  <text x="128" y="314" font-size="11" fill="#111827">Local ONNX (bge-small-zh-v1.5)</text>
+
+  <text x="28" y="340" font-size="10" fill="#0E9F6E">[Status: All 3 roles validated and available]</text>
+
+  <!-- Prompt Editor & Revision Diff -->
+  <rect x="16" y="362" width="368" height="180" rx="10" fill="#FFFFFF" stroke="#E5E7EB"/>
+  <div style="display:flex; justify-content:space-between;">
+    <text x="28" y="384" font-size="11" fill="#4B5563" font-weight="700">SYSTEM PROMPT (Revision #4)</text>
+    <text x="290" y="384" font-size="10" fill="#1A56DB" font-weight="600">[Diff vs #3]</text>
+  </div>
+  <rect x="28" y="394" width="344" height="106" rx="4" fill="#F9FAFB" stroke="#D1D5DB"/>
+  <text x="36" y="414" font-size="11" fill="#111827" font-family="monospace">You are a technical document analyst.</text>
+  <text x="36" y="432" font-size="11" fill="#111827" font-family="monospace">Current date: {date}</text>
+  <text x="36" y="450" font-size="11" fill="#0E9F6E" font-family="monospace">+ Always cite chunk citations with format [Ref N].</text>
+  <text x="36" y="468" font-size="11" fill="#0E9F6E" font-family="monospace">+ Never fabricate facts without CAS proof.</text>
+  <text x="36" y="486" font-size="11" fill="#6B7280" font-family="monospace">Active knowledge bases: {knowledge_bases}</text>
+  <text x="28" y="524" font-size="10" fill="#6B7280">Variables: {date}, {agent_name}, {knowledge_bases} supported.</text>
+
+  <!-- Hyperparameters Card -->
+  <rect x="16" y="552" width="368" height="170" rx="10" fill="#FFFFFF" stroke="#E5E7EB"/>
+  <text x="28" y="574" font-size="11" fill="#4B5563" font-weight="700">RETRIEVAL & GENERATION BUDGET</text>
+  
+  <text x="28" y="596" font-size="11" fill="#111827">Temperature: 0.30</text>
+  <rect x="28" y="604" width="344" height="6" rx="3" fill="#E5E7EB"/>
+  <rect x="28" y="604" width="103" height="6" rx="3" fill="#1A56DB"/>
+  <circle cx="131" cy="607" r="6" fill="#1A56DB"/>
+
+  <text x="28" y="632" font-size="11" fill="#111827">Max Output Tokens: 2048</text>
+  <rect x="28" y="640" width="344" height="6" rx="3" fill="#E5E7EB"/>
+  <rect x="28" y="640" width="172" height="6" rx="3" fill="#1A56DB"/>
+  <circle cx="200" cy="643" r="6" fill="#1A56DB"/>
+
+  <text x="28" y="668" font-size="11" fill="#111827">Top-K Chunks: 5 (FTS5 / Vector RRF Ratio: 0.5)</text>
+  <rect x="28" y="676" width="344" height="6" rx="3" fill="#E5E7EB"/>
+  <rect x="28" y="676" width="172" height="6" rx="3" fill="#0E9F6E"/>
+  <circle cx="200" cy="679" r="6" fill="#0E9F6E"/>
+
+  <text x="28" y="706" font-size="10" fill="#6B7280">Bound Resources: KB-01, KB-02 | Skills: None</text>
+
+  <!-- Bottom Navigation Bar (7 tabs) -->
+  <rect x="0" y="736" width="400" height="64" fill="#FFFFFF"/>
+  <line x1="0" y1="736" x2="400" y2="736" stroke="#E5E7EB" stroke-width="1"/>
+  <!-- Tab 2: Agents (Selected) -->
+  <text x="22" y="759" font-size="11" fill="#6B7280">[C]</text>
+  <text x="16" y="784" font-size="10" fill="#6B7280">Chat</text>
+
+  <rect x="64" y="744" width="48" height="22" rx="4" fill="#E1EFFE"/>
+  <text x="82" y="759" font-size="11" fill="#1A56DB" font-weight="700">[A]</text>
+  <text x="70" y="784" font-size="10" fill="#1A56DB" font-weight="700">Agents</text>
+
+  <text x="132" y="759" font-size="11" fill="#6B7280">[P]</text>
+  <text x="122" y="784" font-size="10" fill="#6B7280">Providers</text>
+  <text x="188" y="759" font-size="11" fill="#6B7280">[K]</text>
+  <text x="178" y="784" font-size="10" fill="#6B7280">Knowledge</text>
+  <text x="248" y="759" font-size="11" fill="#6B7280">[S]</text>
+  <text x="242" y="784" font-size="10" fill="#6B7280">Skills</text>
+  <text x="306" y="759" font-size="11" fill="#6B7280">[N]</text>
+  <text x="302" y="784" font-size="10" fill="#6B7280">News</text>
+  <text x="360" y="759" font-size="11" fill="#6B7280">[i]</text>
+  <text x="354" y="784" font-size="10" fill="#6B7280">About</text>
+</svg>

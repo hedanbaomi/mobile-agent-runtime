@@ -25,7 +25,7 @@ class MigrationsTest {
             ),
         )
         assertEquals("Local", repo.listProviders().single().name)
-        assertEquals(2, db.query("SELECT version FROM schema_version").single().long("version"))
+        assertEquals(3, db.query("SELECT version FROM schema_version").single().long("version"))
     }
 
     @Test

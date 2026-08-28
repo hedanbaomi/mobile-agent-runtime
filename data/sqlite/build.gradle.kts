@@ -20,7 +20,9 @@ dependencies {
     implementation(project(":shared:skills-api"))
     implementation(project(":shared:provider-api"))
     implementation(project(":shared:serialization"))
+    implementation(project(":shared:announcements"))
     testImplementation("org.xerial:sqlite-jdbc:3.47.2.0")
+    testImplementation(libs.bcprov)
 
     implementation(libs.kotlinx.serialization.json)
     implementation(libs.kotlinx.coroutines.core)

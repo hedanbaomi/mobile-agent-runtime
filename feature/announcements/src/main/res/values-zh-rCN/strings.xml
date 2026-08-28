@@ -1,0 +1,18 @@
+<!-- SPDX-FileCopyrightText: 2026 mobileAgentRuntime contributors -->
+<!-- SPDX-License-Identifier: AGPL-3.0-only -->
+<resources>
+    <string name="ann_title">公告</string>
+    <string name="ann_empty">暂无已缓存公告。成功完成签名拉取后，离线历史会显示在这里。</string>
+    <string name="ann_refresh">刷新</string>
+    <string name="ann_mark_all_read">全部标为已读</string>
+    <string name="ann_dismiss">关闭</string>
+    <string name="ann_close">关闭</string>
+    <string name="ann_pinned_notice">置顶公告</string>
+    <string name="ann_acknowledge">我已阅读并确认此公告</string>
+    <string name="ann_base_url">公告服务地址</string>
+    <string name="ann_public_key">Ed25519 公钥（十六进制）</string>
+    <string name="ann_save_endpoint">保存本地接入点</string>
+    <string name="ann_filter_unread">未读</string>
+    <string name="ann_filter_all">全部</string>
+    <string name="ann_filter_history">历史</string>
+</resources>

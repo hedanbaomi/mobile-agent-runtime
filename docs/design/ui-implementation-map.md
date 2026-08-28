@@ -78,8 +78,8 @@
   3. 增加原文/原图查看器与索引状态（SCR-KNOW-06, 07）。
 
 ### 2.4 Agents, Skills, Announcements, Settings 模块
-- **当前状态**：仅有单占位文本或最简结构。
-- **需按设计对齐项**：在后续对应里程碑（M1/M2/M5/M7）严格按照 M0.5 设计稿实现完整界面组件。
+- **当前状态**：Agents/Skills 仍为占位。Announcements 已具备列表/详情/横幅/确认弹窗、未读筛选、本地验签缓存与统计开关（M2）；Settings/About 含匿名统计默认关闭。视觉仍未按全部 M0.5 标注对齐。
+- **需按设计对齐项**：Agents/Skills 在对应里程碑按设计稿实现；公告管理 Web 已在 `admin/announcements/index.html` 提供本地编辑/预览/发布。
 
 ## 3. 实现顺序与文件归属
 

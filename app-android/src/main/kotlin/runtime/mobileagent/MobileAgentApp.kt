@@ -7,6 +7,7 @@ import android.app.Application
 import io.ktor.client.HttpClient
 import io.ktor.client.engine.okhttp.OkHttp
 import io.ktor.client.plugins.HttpTimeout
+import runtime.mobileagent.data.AnnouncementRepository
 import runtime.mobileagent.data.KnowledgeRepository
 import runtime.mobileagent.data.Migrations
 import runtime.mobileagent.data.ProfileRepository
@@ -34,6 +35,7 @@ class AppContainer(app: MobileAgentApp) {
     val secrets = AndroidSecretStore(app, db)
     val profiles = ProfileRepository(db)
     val knowledge = KnowledgeRepository(db, CasBlobSink(File(app.filesDir, "cas")))
+    val announcements = AnnouncementRepository(db)
     val http: HttpClient = HttpClient(OkHttp) {
         install(HttpTimeout) {
             requestTimeoutMillis = 180_000
@@ -41,4 +43,12 @@ class AppContainer(app: MobileAgentApp) {
             socketTimeoutMillis = 180_000
         }
     }
+    val announcementHttp: HttpClient = HttpClient(OkHttp) {
+        install(HttpTimeout) {
+            requestTimeoutMillis = 30_000
+            connectTimeoutMillis = 10_000
+            socketTimeoutMillis = 30_000
+        }
+    }
+    val announcementFetcher = AnnouncementFetcher(announcementHttp)
 }

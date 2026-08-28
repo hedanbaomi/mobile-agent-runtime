@@ -3,7 +3,7 @@
 
 # 项目交接
 
-最后更新：2026-08-28T18:52:00+08:00（Asia/Taipei）。项目根目录：`E:\mobileAgentRuntime`。
+最后更新：2026-08-28T19:17:29+08:00（Asia/Taipei）。项目根目录：`E:\mobileAgentRuntime`。
 
 **接手者必须先读 [agent.md](agent.md)、本文件和 [技术实现方案](docs/IMPLEMENTATION_PLAN.md)。工作后必须维护本文件及受影响的专题文档。**
 
@@ -11,16 +11,16 @@
 
 | 项目 | 状态 |
 | --- | --- |
-| 产品 | M1 部分实现；上一实现轮记录 AR01—AR10 已修复。M0.5 软件页面 UI 设计基线交付并获用户明确确认同意，已补齐简体中文（zh-CN）与双语本地化支持（高保真矢量稿、Token、原型、映射、双语 strings.xml 与规范已落地，全量禁用 Emoji，状态 `DOC_CHECK_PASS`）。完整 MVP 未完成 |
-| 业务源码/构建 | guard、相关 JVM 测试及 assembleDebug 通过，APK 含 `libsqliteJni.so`；本轮完成设计包、双语资源与文档交付 |
-| Git | 分支 `main` 跟踪 `origin/main`；已按用户授权提交并推送，最新提交为 `c9798dc336864a353cfe9c2b0edd7d16aa37769c`，工作区干净 |
-| CodeGraph | 修复轮未重建索引；本轮仅文档与设计/资源变更，未同步索引 |
-| 许可 | 本轮 `python -B -m reuse lint` 退出 0（157/157）；许可正文 SHA 未变；未改许可配置或 CI |
-| 授权范围 | 用户本轮明确授权：完成 M0.5 软件页面 UI 设计及简体中文支持后，执行 commit 与 push。不包含生产部署或云端发布 |
+| 产品 | M1 部分实现；AR01—AR10 已修复。M0.5 UI 设计基线 `DOC_CHECK_PASS`。M2 本地公告闭环已实现（Worker/Admin/验签缓存/客户端），N01—N09 为本地测试 PASS，**不是**设备 PASS、**不是**生产部署。完整 MVP 未完成 |
+| 业务源码/构建 | 本轮 `licenseGuard`/`licenseGuardReverse`、`:shared:announcements:test`、`:data:sqlite:test`、`:app-android:assembleDebug` 通过；`node src/worker.test.mjs` 通过；REUSE 178/178 |
+| Git | 分支 `main` 跟踪 `origin/main`；HEAD 仍为 `a708a71079f8ef35da18071e7c0e41eef9d38cdd`。用户已授权提交并推送 M2；SHA 在提交后回写 |
+| CodeGraph | 仓库无 `.codegraph/` 工作副本（被 gitignore）；本轮用直接读文件定位。未重建索引 |
+| 许可 | `python -B -m reuse lint` 退出 0（178/178）；未改 LICENSE 正文；CI 增加 Node 20 公告 Worker 测试 |
+| 授权范围 | 用户明确授权：commit 并 push M2，完成后开始 M3。仍不授权 Cloudflare 生产部署 |
 
 ## 2. 当前任务
 
-无进行中认领。M0.5 软件页面 UI 设计基线及简体中文（zh-CN）支持已全面完成并获用户确认。产物包含：七类软件页面高保真矢量图（SVG）、设计 Token（JSON）、可点击双语原型（HTML）、实现映射（MD）、设计指南（MD）、双语资源文件（`values/strings.xml` 与 `values-zh-rCN/strings.xml`），全量页面严格禁用 Emoji。验收项 U01—U06 设计审查通过（`DOC_CHECK_PASS`）。已按授权完成提交与推送。后续 M1—M7 实现需按差异清单对齐 UI。
+进行中：按用户授权提交并推送 M2，随后开始 M3 文本知识库（K01、K02、K05—K08 本地）。不部署 Cloudflare 生产。
 
 ## 3. 关键约束
 
@@ -31,16 +31,16 @@
 
 ## 4. 接手顺序
 
-1. `git status --short --branch`、`git log -1 --format=full`
+1. `git status --short --branch`、`git log -1 --format=full`；确认 M2 未提交改动仍在工作区
 2. 确认 HEAD 无 `Co-authored-by: Cursor`
-3. 在 API26 与当前 target 的设备/模拟器验证冷启动（FTS5/bundled SQLite），再走双 Provider、含图 Markdown、Chat 流式/取消/异常
-4. GitHub Ruleset 仍为 `M0_REMOTE_PENDING`
-5. 满足正式入口后执行 [技术方案第8节](docs/IMPLEMENTATION_PLAN.md) 的 M0.5：实际设计软件七类页面的布局、配色、控件和高保真稿，交用户逐页确认；页面清单/技术文字不能代替设计稿
-6. 后续 M1—M7 的 UI 实现以确认的页面稿为基线；现有页面按差异清单对齐，不回滚已有业务修复，不把设计通过冒称设备通过
+3. 若用户授权提交：不要用被劫持的 `git commit`；用 `D:\Git\mingw64\libexec\git-core\git.exe commit-tree`，作者 `luozhibai <wy3273564266@163.com>`
+4. 设备/模拟器仍缺：bundled FTS5 冷启动、公告本地 Worker→真机拉取
+5. GitHub Ruleset 仍为 `M0_REMOTE_PENDING`
+6. M1 Compose 仍须按 M0.5 差异清单对齐；不要把 M2 功能闭环冒称为全套 UI 设计实现或生产部署
 
 ## 5. 未决事项
 
-Play 生产包名、品牌、Cloudflare 账户/域名、签名身份、Embedding 模型包、NDK/USearch x86_64、CPython 3.14.x 包哈希。GitHub Ruleset 未验证。软件页面设计稿、视觉方案及用户确认待 M0.5 实际完成。历史 AR 审查与修复记录不等于完整安全验收、设备验收或发布许可。
+Play 生产包名、品牌、Cloudflare 账户/域名/Access、生产签名密钥、Embedding 模型包、NDK/USearch x86_64、CPython 3.14.x 包哈希。GitHub Ruleset 未验证。M2 未提交。未跑模拟器/真机公告拉取。公告 Compose 未按 M0.5 全部视觉标注对齐。历史 AR 修复不等于完整安全验收或发布许可。
 
 ## 6. 工作记录
 
@@ -154,6 +154,26 @@ AR01 的平台依据：[Android 官方源码变更记录](https://android.google
 - 提交与推送：
   - 按用户授权执行 Git commit 与 push 至 `origin main`，作者为 `luozhibai <wy3273564266@163.com>`，无 Cursor 污染。
 - 下一步：在满足正式设备与 M1 入口后，由实现 Agent 依据 `docs/design/ui-implementation-map.md` 的差异清单对齐并补齐 Android Compose 界面。
+
+### 2026-08-28T19:17:29+08:00：完成 M2 本地公告 Worker/Admin/客户端（未部署、未提交）
+
+- 请求：用户已更新技术实现文档并完成 M0.5；检查工作区，若干净则完成 M2。
+- 开工状态：`git status` 干净；HEAD `a708a71079f8ef35da18071e7c0e41eef9d38cdd`；未部署 Cloudflare；无 `.codegraph/`。
+- 范围：N01—N09 本地闭环。独立内存 Worker + 本地 Admin + Ed25519 信封 + Android 验签缓存/已读确认/统计默认关。不创建生产 D1/Access/域名，不 `wrangler deploy`，不碰占卜项目。
+- 主要行为：
+  - Worker：`services/announcements/src/app.mjs` 公开 `GET /api/v1/announcements` 签名快照与 `POST /api/v1/events`；管理 API 用 `X-Admin-Token` 测试身份；草稿/定时/未到期不进公开 feed；待发布修订冲突 409；撤回 tombstone；ETag/304 且临近过期重签；统计默认不写 receipts。
+  - 验签：前缀 `MAR-ANNOUNCEMENTS-V1\n` + payloadBase64；客户端 BouncyCastle Ed25519；与 Node 测试种子黄金向量一致。未知 key/坏签名/错 audience/旧 feedVersion 拒绝并保留旧缓存。
+  - Android：独立 `announcementHttp`（无 Provider Authorization）；`AnnouncementRepository` schema v3；公告中心未读/全部/历史、横幅、强制确认弹窗；统计开关默认关。debug 仅允许 `10.0.2.2`/`127.0.0.1`/`localhost` 明文。
+  - Admin：`admin/announcements/index.html` 由 `node src/local-server.mjs` 同源提供；私钥不进 APK/仓库。
+- 验证（均本机）：
+  - `node src/rollout.test.mjs`；`node src/worker.test.mjs` → 退出 0（N01/N02/N05/N06/N07/N08/N09 协议）。
+  - `.\gradlew.bat licenseGuard licenseGuardReverse :shared:announcements:test :data:sqlite:test :app-android:assembleDebug --no-daemon` → BUILD SUCCESSFUL。
+  - `python -B -m reuse lint` → 退出 0，178/178。
+- 未执行：commit/push、`wrangler deploy`、生产 D1、模拟器/真机拉取、独立安全审阅、付费模型。N04 小屏/大字体/深色未做设备走查。
+- 验收记录：N01—N09 `LOCAL_PASS`（协议与 JVM）；非 `DEVICE_PASS`、非 `DEPLOYED`。
+- Git：改动仍在工作区。用户已授权本轮提交与推送。
+- 文档：`docs/ANNOUNCEMENTS.md` 第 9 节本地运行；`docs/design/ui-implementation-map.md` 公告实现状态；CI 增加 Node Worker 测试。
+- 下一步：用户若要入库再提交；本地联调 `set MAR_ADMIN_TOKEN=...` 后 `node services/announcements/src/local-server.mjs`，把打印的公钥与 `http://10.0.2.2:8787` 填进调试版公告页。禁止把此次结果标为生产已部署。
 
 ## 7. 后续记录格式
 

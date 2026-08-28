@@ -3,7 +3,7 @@
 
 # 公告系统实现契约
 
-状态：v1设计，待实现。对应R13—R15、N01—N09。公告是M1/M2的正式工作，必须独立于用户模型/API Key可用性；不能等Python完成才补。Worker、D1、管理端与占卜产品完全隔离，当前不创建生产资源。
+状态：M2 本地实现已落地（Worker/Admin/验签缓存/客户端展示），对应 R13—R15、N01—N09。公告独立于用户模型/API Key；不能等 Python 完成才补。Worker、D1 逻辑表、管理端与占卜产品完全隔离。**当前不创建、不绑定、不部署 Cloudflare 生产资源**；本地 PASS 不等于已部署。
 
 ## 1. 职责与展示
 
@@ -132,3 +132,19 @@ Markdown关闭原始HTML、脚本、远程嵌入，图片不带Provider认证头
 优先Cloudflare Access管理员认证，Worker校验对应签发者/audience/有效期；没有Access的本地测试使用独立测试身份适配，不能在生产偷偷沿用。浏览器cookie认证需要CSRF保护和精确Origin规则；CORS不是身份鉴别。管理员凭据、Cloudflare token、签名私钥不进APK/仓库/日志。
 
 本地Worker/D1 fixture先验证迁移、定时、发布和客户端验签。测试与生产独立绑定，禁止默认复用占卜项目资源。部署前确认账户/数据库/域名/secret来源，保存迁移备份和回退计划；发布应用/后端代码还需许可、source revision和审计证据。没有远程授权时交付本地验证结果，不把它标为已部署。
+
+## 9. M2 本地运行（非生产）
+
+验签库固定为 BouncyCastle `bcprov-jdk18on`（API 26 不依赖系统 Ed25519）。签名输入为 `MAR-ANNOUNCEMENTS-V1\n` + `payloadBase64`。服务端 Node `node:crypto` Ed25519 与客户端验签使用同一测试种子黄金向量。
+
+本地 Worker 使用内存 store 实现与 `schema.sql` 相同的待发布修订冲突、审计和 feed 版本语义；未执行 `wrangler deploy`，未创建生产 D1。
+
+```
+cd services/announcements
+set MAR_ADMIN_TOKEN=replace-with-local-test-token
+node src/local-server.mjs
+```
+
+管理页：`http://127.0.0.1:8787/admin/announcements`。进程会打印 `MAR_ANNOUNCE_PUBLIC_KEY_HEX`（公钥，不是私钥）。Android 调试包在公告页填写该 URL 与公钥后手动刷新；debug 构建仅允许 `10.0.2.2`/`127.0.0.1`/`localhost` 明文，release 仍要求 HTTPS。统计开关默认关闭。
+
+协议测试：`node src/rollout.test.mjs` 与 `node src/worker.test.mjs`。

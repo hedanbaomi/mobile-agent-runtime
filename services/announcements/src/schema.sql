@@ -34,6 +34,17 @@ CREATE TABLE IF NOT EXISTS announcement_translations (
   PRIMARY KEY (announcement_id, revision, locale)
 );
 
+CREATE TABLE IF NOT EXISTS install_state (
+  install_id_hash TEXT PRIMARY KEY,
+  platform TEXT NOT NULL,
+  channel TEXT NOT NULL,
+  version_code INTEGER NOT NULL,
+  locale TEXT NOT NULL,
+  first_seen_at TEXT NOT NULL,
+  last_active_at TEXT NOT NULL,
+  last_counted_activity_at TEXT
+);
+
 CREATE TABLE IF NOT EXISTS announcement_receipts (
   install_id_hash TEXT NOT NULL,
   announcement_id TEXT NOT NULL,

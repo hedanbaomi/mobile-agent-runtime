@@ -4,11 +4,158 @@
 <html lang="en">
 <head>
   <meta charset="utf-8" />
-  <title>Announcement admin</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Announcement admin (local)</title>
+  <style>
+    :root { color-scheme: light dark; --bg:#f9fafb; --fg:#111827; --card:#fff; --line:#d1d5db; --accent:#1a56db; --danger:#e02424; }
+    body { margin:0; font-family: "Segoe UI", "Noto Sans SC", sans-serif; background:var(--bg); color:var(--fg); }
+    header, main { max-width: 960px; margin: 0 auto; padding: 16px; }
+    h1 { font-size: 1.4rem; }
+    .card { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:16px; margin-bottom:16px; }
+    label { display:block; font-size:0.85rem; margin:8px 0 4px; }
+    input, select, textarea { width:100%; box-sizing:border-box; padding:8px; border:1px solid var(--line); border-radius:8px; }
+    textarea { min-height: 88px; }
+    .row { display:grid; grid-template-columns: 1fr 1fr; gap:12px; }
+    button { background:var(--accent); color:#fff; border:0; border-radius:8px; padding:8px 12px; margin:4px 4px 0 0; }
+    button.secondary { background:#4b5563; }
+    button.danger { background:var(--danger); }
+    .preview { border:1px solid var(--line); border-radius:16px; padding:16px; max-width:360px; min-height:280px; }
+    .status { font-size:0.9rem; white-space:pre-wrap; }
+    @media (max-width: 800px) { .row { grid-template-columns: 1fr; } }
+  </style>
 </head>
 <body>
-  <h1>Announcement admin</h1>
-  <p>Local admin shell. Authentication must use a test adapter, never production Cloudflare Access secrets in the APK.</p>
-  <p>Publish, withdraw, and archive require an authenticated Worker. This page does not embed signing keys.</p>
+  <header>
+    <h1>Announcement admin</h1>
+    <p>Local test adapter only. Do not paste production Cloudflare Access tokens, signing private keys, or Provider API keys. This page talks to the local Worker on the same origin.</p>
+  </header>
+  <main>
+    <section class="card">
+      <label>Admin token (X-Admin-Token, local test)</label>
+      <input id="token" type="password" autocomplete="off" />
+      <button type="button" onclick="reloadList()">Load list</button>
+    </section>
+    <section class="card">
+      <h2>Editor</h2>
+      <div class="row">
+        <div>
+          <label>id</label><input id="id" value="security-demo" />
+          <label>category</label>
+          <select id="category"><option>GENERAL</option><option>FEATURE</option><option>MAINTENANCE</option><option>SERVICE_INCIDENT</option><option>UPDATE</option><option selected>SECURITY</option><option>DEPRECATION</option></select>
+          <label>severity</label>
+          <select id="severity"><option>INFO</option><option>NOTICE</option><option selected>WARNING</option><option>CRITICAL</option></select>
+          <label>displayMode</label>
+          <select id="displayMode" onchange="renderPreview()"><option>CENTER_ONLY</option><option>BANNER</option><option selected>MODAL</option></select>
+          <label>rolloutPercent</label><input id="rolloutPercent" type="number" min="0" max="100" value="100" />
+          <label>rolloutSalt</label><input id="rolloutSalt" value="stable-salt" />
+          <label>startsAt (UTC)</label><input id="startsAt" placeholder="2026-08-29T00:00:00.000Z" />
+        </div>
+        <div>
+          <label>title</label><input id="title" value="Security notice" oninput="renderPreview()" />
+          <label>summary</label><input id="summary" value="Please read" oninput="renderPreview()" />
+          <label>bodyMarkdown</label><textarea id="body" oninput="renderPreview()">Signed announcement body.</textarea>
+          <label><input id="mustAck" type="checkbox" checked onchange="renderPreview()" /> mustAcknowledge</label>
+          <label><input id="pinned" type="checkbox" checked /> pinned</label>
+          <label>HTTPS action URL</label><input id="httpsUrl" value="https://example.invalid/notice" />
+        </div>
+      </div>
+      <p>
+        <button type="button" onclick="createDraft()">Create draft</button>
+        <button type="button" class="secondary" onclick="schedule()">Schedule</button>
+        <button type="button" onclick="publish()">Publish</button>
+        <button type="button" class="danger" onclick="withdraw()">Withdraw</button>
+        <button type="button" class="secondary" onclick="archive()">Archive</button>
+        <button type="button" class="secondary" onclick="newRevision()">New revision</button>
+      </p>
+      <p class="status" id="status"></p>
+    </section>
+    <section class="card">
+      <h2>Android preview</h2>
+      <div class="preview" id="preview"></div>
+    </section>
+    <section class="card">
+      <h2>Published list</h2>
+      <pre id="list" class="status"></pre>
+    </section>
+  </main>
+  <script>
+    const api = location.origin;
+    function token() { return document.getElementById("token").value; }
+    function headers() {
+      return {
+        "content-type": "application/json",
+        "X-Admin-Token": token(),
+        "X-Request-Id": crypto.randomUUID()
+      };
+    }
+    function body() {
+      const mustAck = document.getElementById("mustAck").checked;
+      const actions = mustAck
+        ? [{ type: "ACKNOWLEDGE", key: "ack", label: "I have read and acknowledge" }]
+        : [{ type: "DISMISS", key: "dismiss", label: "Dismiss" }];
+      const httpsUrl = document.getElementById("httpsUrl").value.trim();
+      if (httpsUrl) actions.push({ type: "OPEN_HTTPS_URL", key: "link", label: "Open link", url: httpsUrl });
+      return {
+        id: document.getElementById("id").value.trim(),
+        category: document.getElementById("category").value,
+        severity: document.getElementById("severity").value,
+        displayMode: document.getElementById("displayMode").value,
+        mustAcknowledge: mustAck,
+        dismissible: !mustAck,
+        pinned: document.getElementById("pinned").checked,
+        startsAt: document.getElementById("startsAt").value.trim() || null,
+        target: {
+          platform: "android",
+          channel: "all",
+          rolloutPercent: Number(document.getElementById("rolloutPercent").value),
+          rolloutSalt: document.getElementById("rolloutSalt").value.trim() || "default",
+          locales: []
+        },
+        actions,
+        translations: {
+          default: {
+            title: document.getElementById("title").value,
+            summary: document.getElementById("summary").value,
+            bodyMarkdown: document.getElementById("body").value
+          }
+        }
+      };
+    }
+    async function call(path, method, payload) {
+      const response = await fetch(api + path, {
+        method,
+        headers: headers(),
+        body: method === "GET" ? undefined : JSON.stringify(payload || {})
+      });
+      const text = await response.text();
+      document.getElementById("status").textContent = response.status + " " + text;
+      return { response, text };
+    }
+    async function createDraft() { await call("/admin/v1/announcements", "POST", body()); await reloadList(); }
+    async function newRevision() { await call("/admin/v1/announcements/" + body().id + "/revisions", "POST", body()); await reloadList(); }
+    async function schedule() { await call("/admin/v1/announcements/" + body().id + "/schedule", "POST", { startsAt: body().startsAt, expectedRevision: 1 }); await reloadList(); }
+    async function publish() { await call("/admin/v1/announcements/" + body().id + "/publish", "POST", { expectedRevision: 1 }); await reloadList(); }
+    async function withdraw() { await call("/admin/v1/announcements/" + body().id + "/withdraw", "POST", {}); await reloadList(); }
+    async function archive() { await call("/admin/v1/announcements/" + body().id + "/archive", "POST", {}); await reloadList(); }
+    async function reloadList() {
+      const result = await call("/admin/v1/announcements", "GET");
+      document.getElementById("list").textContent = result.text;
+    }
+    function renderPreview() {
+      const mode = document.getElementById("displayMode").value;
+      const title = document.getElementById("title").value;
+      const summary = document.getElementById("summary").value;
+      const md = document.getElementById("body").value;
+      const ack = document.getElementById("mustAck").checked;
+      document.getElementById("preview").innerHTML =
+        "<strong>" + escapeHtml(mode) + "</strong><h3>" + escapeHtml(title) + "</h3><p>" +
+        escapeHtml(summary) + "</p><p>" + escapeHtml(md) + "</p>" +
+        (ack ? "<button type='button'>I have read and acknowledge</button>" : "<button type='button'>Dismiss</button>");
+    }
+    function escapeHtml(value) {
+      return String(value).replace(/[&<>"']/g, (ch) => ({ "&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;" }[ch]));
+    }
+    renderPreview();
+  </script>
 </body>
 </html>

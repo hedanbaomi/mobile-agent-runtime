@@ -19,8 +19,12 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-      - name: Grant wrapper execute permission
-        run: chmod +x gradlew
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Announcement worker tests
+        working-directory: services/announcements
+        run: node src/rollout.test.mjs && node src/worker.test.mjs
       - name: licenseGuard
         run: ./gradlew licenseGuard licenseGuardReverse --no-daemon
       - name: REUSE

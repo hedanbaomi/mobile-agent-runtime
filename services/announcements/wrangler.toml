@@ -5,3 +5,9 @@ main = "src/worker.mjs"
 compatibility_date = "2025-01-01"
 
 # Local/dev only. Production Cloudflare resources are not created in this task.
+# Do not bind this Worker to another product's D1 database or Access policy.
+# Signing private keys belong in local environment variables, never in this file or the APK.
+
+[vars]
+MAR_ANNOUNCE_KEY_ID = "local-dev-1"
+

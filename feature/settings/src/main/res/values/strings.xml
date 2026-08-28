@@ -1,0 +1,6 @@
+<!-- SPDX-FileCopyrightText: 2026 mobileAgentRuntime contributors -->
+<!-- SPDX-License-Identifier: AGPL-3.0-only -->
+<resources>
+    <string name="sett_anonymous_metrics">Anonymous announcement metrics</string>
+    <string name="sett_metrics_help">Off by default. The install ID is only used for rollout when fetching announcements. Enabling this sends anonymous counts, never chat, keys, or knowledge.</string>
+</resources>

@@ -1,0 +1,6 @@
+<!-- SPDX-FileCopyrightText: 2026 mobileAgentRuntime contributors -->
+<!-- SPDX-License-Identifier: AGPL-3.0-only -->
+<resources>
+    <string name="sett_anonymous_metrics">匿名公告统计</string>
+    <string name="sett_metrics_help">默认关闭。拉取公告时安装 ID 仅用于灰度。开启后只发送匿名计数，不会上传对话、密钥或知识库内容。</string>
+</resources>

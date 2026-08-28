@@ -44,6 +44,7 @@ class MainActivity : ComponentActivity() {
             val chatVm: ChatViewModel = viewModel()
             val providersVm: ProvidersViewModel = viewModel()
             val knowledgeVm: KnowledgeViewModel = viewModel()
+            val announcementsVm: AnnouncementsViewModel = viewModel()
             val tabs = listOf(
                 Triple("chat", "Chat", Icons.AutoMirrored.Filled.Chat),
                 Triple("agents", "Agents", Icons.Filled.Person),
@@ -98,9 +99,49 @@ class MainActivity : ComponentActivity() {
                         )
                     }
                     composable("skills") { SkillsScreen() }
-                    composable("announcements") { AnnouncementsScreen(emptyList()) }
+                    composable("announcements") {
+                        AnnouncementsScreen(
+                            items = announcementsVm.visible(),
+                            status = announcementsVm.status.value,
+                            filter = announcementsVm.filter.value.name.lowercase(),
+                            banner = announcementsVm.banner(),
+                            modal = announcementsVm.modal(),
+                            selected = announcementsVm.selected.value,
+                            baseUrl = announcementsVm.baseUrl.value,
+                            publicKeyHex = announcementsVm.publicKeyHex.value,
+                            onFilter = { key ->
+                                announcementsVm.filter.value = when (key) {
+                                    "all" -> AnnouncementsViewModel.Filter.ALL
+                                    "history" -> AnnouncementsViewModel.Filter.HISTORY
+                                    else -> AnnouncementsViewModel.Filter.UNREAD
+                                }
+                            },
+                            onRefresh = { announcementsVm.refresh(force = true) },
+                            onOpen = announcementsVm::open,
+                            onCloseDetail = { announcementsVm.selected.value = null },
+                            onMarkAllRead = announcementsVm::markAllRead,
+                            onDismiss = announcementsVm::dismiss,
+                            onAcknowledge = announcementsVm::acknowledge,
+                            onSaveEndpoint = announcementsVm::saveEndpoint,
+                            onAppRoute = { route ->
+                                val tab = when (route) {
+                                    "app://settings/providers" -> "providers"
+                                    "app://settings/knowledge" -> "knowledge"
+                                    "app://about", "app://update" -> "about"
+                                    else -> "announcements"
+                                }
+                                dest.value = tab
+                                nav.navigate(tab)
+                            },
+                        )
+                    }
                     composable("about") {
-                        AboutScreen(BuildConfig.VERSION_NAME, BuildConfig.GIT_REVISION)
+                        AboutScreen(
+                            BuildConfig.VERSION_NAME,
+                            BuildConfig.GIT_REVISION,
+                            statsEnabled = announcementsVm.statsEnabled.value,
+                            onStats = announcementsVm::setStats,
+                        )
                     }
                 }
             }

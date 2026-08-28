@@ -13,7 +13,7 @@
 | --- | --- |
 | 产品 | M1 部分实现；AR01—AR10 历史修复保留。M0.5 UAR01—UAR05 已修复（本地提交 `9dc7560`）。M2 NAR01—NAR07 与 M3 KAR01—KAR08 已在本轮修复。完整 MVP 未完成 |
 | 业务源码/构建 | 本轮 `licenseGuard`/`licenseGuardReverse`、`:shared:knowledge-api:test`、`:shared:announcements:test`、`:data:sqlite:test`、`:app-android:assembleDebug` 通过；`node src/worker.test.mjs` 通过；REUSE 182/182 |
-| Git | 分支 `main`；本轮修复提交 `6ab2dc21ab955bf0ab317e0d4076db2805a0c749`，与未推送的 M0.5 `9dc7560` 一并 push。作者 `luozhibai`，无 Cursor trailer |
+| Git | 分支 `main` 跟踪 `origin/main`。NAR/KAR 修复 `6ab2dc21ab955bf0ab317e0d4076db2805a0c749` 与 M0.5 `9dc7560` 已推送。作者 `luozhibai`，无 Cursor trailer |
 | CodeGraph | 仓库无 `.codegraph/` 工作副本（被 gitignore）；本轮用直接读文件定位。未重建索引 |
 | 许可 | `python -B -m reuse lint` 退出 0（182/182）；未改 LICENSE 正文 |
 | 授权范围 | 用户已授权修复交接中的 M2/M3 问题并 commit/push，使 origin 与本地相同。仍不授权 Cloudflare 生产部署 |
@@ -297,7 +297,7 @@ U02 的横屏、IME、大字号、触控、对比度、焦点及实际字体回�
 - 验证：`node src/worker.test.mjs` 退出 0（含 NAR01—NAR05）；`.\gradlew.bat licenseGuard licenseGuardReverse :shared:knowledge-api:test :shared:announcements:test :data:sqlite:test :app-android:assembleDebug --no-daemon` BUILD SUCCESSFUL；`python -B -m reuse lint` 182/182。
 - 未执行：真机/模拟器、Cloudflare 部署、ONNX/USearch JNI、K06 设备负载、独立审阅。
 - 文档：`docs/ANNOUNCEMENTS.md`、`docs/KNOWLEDGE.md` 第9节、`docs/IMPLEMENTATION_PLAN.md`、本交接。
-- Git：本轮提交 `6ab2dc21ab955bf0ab317e0d4076db2805a0c749`（作者 `luozhibai`，无 Cursor），与未推送的 `9dc7560` 一并 push。
+- Git：修复提交 `6ab2dc21ab955bf0ab317e0d4076db2805a0c749` 已推送（作者 `luozhibai`，无 Cursor），含 M0.5 `9dc7560`。`origin/main` 与本地相同。
 
 ## 7. 后续记录格式
 

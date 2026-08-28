@@ -31,6 +31,7 @@ fun KnowledgeScreen(
     status: String,
     onImport: (List<Uri>) -> Unit,
     onRebuild: () -> Unit = {},
+    onGrantVision: (String) -> Unit = {},
 ) {
     val picker = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
         onImport(uris)
@@ -45,6 +46,11 @@ fun KnowledgeScreen(
             items(jobs) { job ->
                 val detail = job.error?.let { " — $it" }.orEmpty()
                 Text("${job.displayName}: ${job.stage}$detail")
+                if (job.stage == "AWAITING_UPLOAD_CONSENT") {
+                    Button(onClick = { onGrantVision(job.id) }, modifier = Modifier.padding(top = 4.dp)) {
+                        Text("Approve Vision upload")
+                    }
+                }
             }
         }
     }

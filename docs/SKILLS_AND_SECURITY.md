@@ -3,7 +3,7 @@
 
 # Skills 执行与安全模型
 
-状态：v1设计，待实现。对应R09—R12、S01—S11。**知识是数据，Prompt是指令，Skill脚本是可执行代码，三者不共享信任等级。** Python完整功能是MVP门槛，不能用指令展示代替执行能力。
+状态：M5 本地 JVM 已落地（清单检查、A—E 分类、内置工具与 Tool Loop）。对应R09—R12、S01—S11。**知识是数据，Prompt是指令，Skill脚本是可执行代码，三者不共享信任等级。** Python 隔离执行仍属 M6，不能用指令展示代替执行能力，本轮不宣称完整 MVP。
 
 ## 1. Skill包与兼容性
 
@@ -149,3 +149,15 @@ executor认证由SecretStore在传输适配器注入，不放DTO。grantId本身
 App外部导入Python仍涉及动态代码和平台政策约束。首版仅用户主动选择本地Python源码、不自动下载更新Skill、不加载外部native/DEX/JAR。发布前按当时Android/Google Play政策独立审查，不能从解释器存在推导“保证上架”。公告只能导航至更新页，不能充当代码分发渠道。
 
 独立安全审阅必须覆盖安装器、Binder身份、撤权、网络过滤、秘密、资源终止和下一次调用恢复。测试通过只针对已测版本与场景，不宣传绝对防逃逸。
+
+## 9. M5 本地验证（2026-08-28）
+
+本轮：`SkillArchive`/`SkillInstaller` 对 zip-slip、ELF/DEX/JAR/SO、pip 远程依赖、未知 schema、哈希不符判 E 并拒绝安装；缺清单的 SKILL.md 为 A；pure-python 清单为 B；shell/node 为 D 可存指令不可执行。内置 `knowledge_search`/`read_document`/`calculator`/`http_request`：不完整 JSON 不执行、重复 call id 不双执行、HTTP 需确认、loopback 拒绝、Prompt 不能扩大 grant。`AgentRuntime` Tool Loop 计入轮次与工具预算；工具输出走 SecretRedactor。未嵌入 CPython，未跑 S03—S07 隔离。
+
+| 验收 | 本轮状态 | 证据边界 |
+| --- | --- | --- |
+| S01 | LOCAL_PASS | 无清单 A、未知 schema E、哈希不符 E、源码/许可可见、不自动执行 |
+| S02 | LOCAL_PASS | zip-slip/ELF/pip 拒绝且不写入 skill_installs |
+| S08 | LOCAL_PASS | 四件内置工具 schema、碎片 JSON、重复 id、HTTP 确认 |
+| S09 | LOCAL_PASS | 无 tools 能力不带工具；越权 HTTP Denied；预算耗尽 |
+| S10 | LOCAL_PASS（工具输出） | 工具结果脱敏。未跑完整导出矩阵 |

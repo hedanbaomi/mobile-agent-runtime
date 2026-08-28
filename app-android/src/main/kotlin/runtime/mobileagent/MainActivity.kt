@@ -44,6 +44,7 @@ class MainActivity : ComponentActivity() {
             val chatVm: ChatViewModel = viewModel()
             val providersVm: ProvidersViewModel = viewModel()
             val knowledgeVm: KnowledgeViewModel = viewModel()
+            val skillsVm: SkillsViewModel = viewModel()
             val announcementsVm: AnnouncementsViewModel = viewModel()
             val tabs = listOf(
                 Triple("chat", "Chat", Icons.AutoMirrored.Filled.Chat),
@@ -78,9 +79,15 @@ class MainActivity : ComponentActivity() {
                             input = chatVm.input.value,
                             streaming = chatVm.streaming.value,
                             status = chatVm.status.value,
+                            textDegradation = chatVm.textDegradation.value,
+                            locatorText = chatVm.locator.value?.let { loc ->
+                                if (loc.removed) "Source removed" else "${loc.displayName} page=${loc.page ?: "-"} asset=${loc.assetId ?: "-"}"
+                            },
                             onInput = { chatVm.input.value = it },
                             onSend = chatVm::send,
                             onCancel = chatVm::cancel,
+                            onToggleDegradation = { chatVm.textDegradation.value = it },
+                            onOpenCitation = chatVm::openCitation,
                         )
                     }
                     composable("agents") { AgentsScreen() }
@@ -97,9 +104,17 @@ class MainActivity : ComponentActivity() {
                             status = knowledgeVm.status.value,
                             onImport = knowledgeVm::importUris,
                             onRebuild = knowledgeVm::rebuild,
+                            onGrantVision = knowledgeVm::grantVision,
                         )
                     }
-                    composable("skills") { SkillsScreen() }
+                    composable("skills") {
+                        SkillsScreen(
+                            rows = skillsVm.rows,
+                            status = skillsVm.status.value,
+                            onImport = skillsVm::importUris,
+                            onToggle = skillsVm::toggle,
+                        )
+                    }
                     composable("announcements") {
                         AnnouncementsScreen(
                             items = announcementsVm.visible(),

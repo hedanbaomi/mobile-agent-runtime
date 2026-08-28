@@ -13,6 +13,7 @@ import io.ktor.http.contentType
 import io.ktor.utils.io.readUTF8Line
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flow
+import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
@@ -62,6 +63,33 @@ class OpenAiCompatibleAdapter(
                     }
                 },
             )
+            if (request.tools.isNotEmpty()) {
+                put(
+                    "tools",
+                    buildJsonArray {
+                        request.tools.forEach { spec ->
+                            add(
+                                buildJsonObject {
+                                    put("type", JsonPrimitive("function"))
+                                    put(
+                                        "function",
+                                        buildJsonObject {
+                                            put("name", JsonPrimitive(spec["name"].orEmpty()))
+                                            put("description", JsonPrimitive(spec["description"].orEmpty()))
+                                            put(
+                                                "parameters",
+                                                runCatching {
+                                                    Json.parseToJsonElement(spec["parameters"] ?: "{}")
+                                                }.getOrDefault(Json.parseToJsonElement("{}")),
+                                            )
+                                        },
+                                    )
+                                },
+                            )
+                        }
+                    },
+                )
+            }
         }
         val token = String(secret)
         try {

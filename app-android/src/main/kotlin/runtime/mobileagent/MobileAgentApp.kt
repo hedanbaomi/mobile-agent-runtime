@@ -11,6 +11,7 @@ import runtime.mobileagent.data.AnnouncementRepository
 import runtime.mobileagent.data.KnowledgeRepository
 import runtime.mobileagent.data.Migrations
 import runtime.mobileagent.data.ProfileRepository
+import runtime.mobileagent.data.SkillRepository
 import runtime.mobileagent.security.AndroidSecretStore
 import runtime.mobileagent.storage.AndroidContextSqlite
 import runtime.mobileagent.storage.CasBlobSink
@@ -35,6 +36,7 @@ class AppContainer(app: MobileAgentApp) {
     val secrets = AndroidSecretStore(app, db)
     val profiles = ProfileRepository(db)
     val knowledge = KnowledgeRepository(db, CasBlobSink(File(app.filesDir, "cas")))
+    val skills = SkillRepository(db)
     val announcements = AnnouncementRepository(db)
     val http: HttpClient = HttpClient(OkHttp) {
         install(HttpTimeout) {

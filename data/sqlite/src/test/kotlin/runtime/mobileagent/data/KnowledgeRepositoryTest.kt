@@ -201,13 +201,13 @@ class KnowledgeRepositoryTest {
     }
 
     @Test
-    fun epubArchiveFailsWithEvidenceAndIsNotParsed() {
+    fun incompleteEpubFailsWithEvidence() {
         val db = JdbcSqlConnection()
         Migrations.apply(db)
         val repo = KnowledgeRepository(db, MemoryBlobSink())
         val job = repo.importBytes("book.epub", "application/epub+zip", validZip("mimetype"), false)
         assertEquals(ImportStage.FAILED, job.stage)
-        assertTrue(job.error.orEmpty().contains("DOCX/EPUB"))
+        assertTrue(job.error.orEmpty().contains("EPUB") || job.error.orEmpty().contains("HTML"))
     }
 
     @Test
@@ -386,6 +386,137 @@ class KnowledgeRepositoryTest {
         db.execute("DELETE FROM embeddings")
         repo.rebuildIndex(kb)
         assertTrue(repo.search("lexical").any { "rebuildable" in it.text })
+    }
+
+    @Test
+    fun textPdfIsSearchableWithoutVision() {
+        val db = JdbcSqlConnection()
+        Migrations.apply(db)
+        val repo = KnowledgeRepository(db, MemoryBlobSink())
+        val job = repo.importBytes("spec.pdf", "application/pdf", runtime.mobileagent.knowledge.PdfParser.writeSimpleTextPdf("Alpha widget torque spec is 12Nm."), false)
+        assertEquals(ImportStage.READY, job.stage)
+        val hits = repo.search("widget")
+        assertTrue(hits.any { "12Nm" in it.text })
+        assertTrue(hits.any { it.page == 1 })
+        val bound = CitationMap.bind("run", hits)
+        val locator = repo.locateCitation(bound.first())
+        assertEquals(1, locator.page)
+        assertFalse(locator.removed)
+    }
+
+    @Test
+    fun imagePdfWaitsWithoutVisionAndProcessesWithConsent() {
+        val db = JdbcSqlConnection()
+        Migrations.apply(db)
+        val pdf = runtime.mobileagent.knowledge.PdfParser.writePdfWithImageXObject("vector flowchart")
+        val waiting = KnowledgeRepository(db, MemoryBlobSink()).importBytes("flow.pdf", "application/pdf", pdf, visionConfigured = false)
+        assertEquals(ImportStage.WAITING_FOR_VISION_MODEL, waiting.stage)
+        assertFalse(runtime.mobileagent.knowledge.ImportStateMachine.isCompleteSuccess(waiting))
+        val seen = mutableListOf<String>()
+        val vision = runtime.mobileagent.knowledge.VisionBackend { input ->
+            seen += input.cacheKey
+            runtime.mobileagent.knowledge.VisionOutcome.Success(
+                runtime.mobileagent.knowledge.VisionSuccess("ocr-flow", "flowchart of torque"),
+            )
+        }
+        val repo = KnowledgeRepository(db, MemoryBlobSink(), vision = vision, visionModelFingerprint = "vision-test")
+        val awaiting = repo.importBytes("flow.pdf", "application/pdf", pdf, visionConfigured = true, visionConsent = false)
+        assertEquals(ImportStage.AWAITING_UPLOAD_CONSENT, awaiting.stage)
+        assertTrue(seen.isEmpty())
+        val ready = repo.grantVisionConsent(awaiting.id)
+        assertEquals(ImportStage.READY, ready.stage)
+        assertEquals(1, seen.size)
+        assertTrue(repo.search("flowchart").any { it.assetId != null })
+        val again = repo.grantVisionConsent(awaiting.id)
+        assertEquals(ImportStage.READY, again.stage)
+        assertEquals(1, seen.size)
+    }
+
+    @Test
+    fun visionUnknownOutcomeDoesNotMarkReadyOrRetry() {
+        val db = JdbcSqlConnection()
+        Migrations.apply(db)
+        val png = byteArrayOf(0x89.toByte(), 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A) + ByteArray(16)
+        var calls = 0
+        val vision = runtime.mobileagent.knowledge.VisionBackend {
+            calls += 1
+            runtime.mobileagent.knowledge.VisionOutcome.UnknownOutcome
+        }
+        val repo = KnowledgeRepository(db, MemoryBlobSink(), vision = vision)
+        val job = repo.importBytes("scan.png", "image/png", png, visionConfigured = true, visionConsent = true)
+        assertEquals(ImportStage.FAILED, job.stage)
+        assertTrue(job.error.orEmpty().contains("UNKNOWN_OUTCOME"))
+        assertEquals(1, calls)
+        val retry = repo.importBytes("scan.png", "image/png", png, visionConfigured = true, visionConsent = true)
+        assertEquals(ImportStage.FAILED, retry.stage)
+        assertEquals(1, calls)
+    }
+
+    @Test
+    fun apiEmbeddingWithoutConsentDoesNotIndex() {
+        val db = JdbcSqlConnection()
+        Migrations.apply(db)
+        val repo = KnowledgeRepository(db, MemoryBlobSink())
+        val job = repo.importBytes(
+            "notes.txt",
+            "text/plain",
+            "secret-on-device-only".toByteArray(),
+            visionConfigured = false,
+            embeddingIsApi = true,
+            embeddingConsent = false,
+        )
+        assertEquals(ImportStage.AWAITING_EMBEDDING_CONSENT, job.stage)
+        assertTrue(repo.search("secret-on-device-only").isEmpty())
+    }
+
+    @Test
+    fun epubWithTextIsSearchable() {
+        val db = JdbcSqlConnection()
+        Migrations.apply(db)
+        val repo = KnowledgeRepository(db, MemoryBlobSink())
+        val zip = zipBytesNamed(
+            "mimetype" to "application/epub+zip",
+            "OPS/ch1.xhtml" to "<html><body><p>EPUB mentions USearch JNI</p></body></html>",
+        )
+        val job = repo.importBytes("book.epub", "application/epub+zip", zip, false)
+        assertEquals(ImportStage.READY, job.stage)
+        assertTrue(repo.search("USearch").any { "JNI" in it.text })
+    }
+
+    @Test
+    fun skillEPackageIsNotInstalled() {
+        val db = JdbcSqlConnection()
+        Migrations.apply(db)
+        val skills = SkillRepository(db)
+        val elf = byteArrayOf(0x7F, 'E'.code.toByte(), 'L'.code.toByte(), 'F'.code.toByte()) + ByteArray(4)
+        val zip = zipBytesNamed("native.so" to String(elf, Charsets.ISO_8859_1))
+        val result = skills.importPackage(zip)
+        assertFalse(result.accepted)
+        assertTrue(skills.list().isEmpty())
+    }
+
+    @Test
+    fun skillInstructionPackageCanBeListed() {
+        val db = JdbcSqlConnection()
+        Migrations.apply(db)
+        val skills = SkillRepository(db)
+        val zip = zipBytesNamed("SKILL.md" to "# Helper\nSearch only granted libraries.\n")
+        val result = skills.importPackage(zip, enable = true)
+        assertTrue(result.accepted)
+        assertEquals(1, skills.list().size)
+        assertTrue(skills.enabledInstructions().any { it.contains("Helper") })
+    }
+
+    private fun zipBytesNamed(vararg files: Pair<String, String>): ByteArray {
+        val out = ByteArrayOutputStream()
+        ZipOutputStream(out).use { zip ->
+            files.forEach { (name, payload) ->
+                zip.putNextEntry(ZipEntry(name))
+                zip.write(payload.toByteArray())
+                zip.closeEntry()
+            }
+        }
+        return out.toByteArray()
     }
 
     private fun applyLegacyV3(db: JdbcSqlConnection) {

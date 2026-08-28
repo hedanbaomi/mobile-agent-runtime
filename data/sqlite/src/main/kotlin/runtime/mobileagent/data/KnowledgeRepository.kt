@@ -6,14 +6,21 @@ package runtime.mobileagent.data
 import runtime.mobileagent.domain.EntityId
 import runtime.mobileagent.domain.Utc
 import runtime.mobileagent.knowledge.BlobSink
+import runtime.mobileagent.knowledge.Citation
 import runtime.mobileagent.knowledge.CitationMap
 import runtime.mobileagent.knowledge.CjkLexical
 import runtime.mobileagent.knowledge.CosineIndex
+import runtime.mobileagent.knowledge.EvidenceLocator
+import runtime.mobileagent.knowledge.ExtractedAsset
+import runtime.mobileagent.knowledge.ExtractedPage
 import runtime.mobileagent.knowledge.HashingTextEmbedder
 import runtime.mobileagent.knowledge.ImportJob
 import runtime.mobileagent.knowledge.ImportStage
 import runtime.mobileagent.knowledge.ImportStateMachine
 import runtime.mobileagent.knowledge.MediaKind
+import runtime.mobileagent.knowledge.OfficeParser
+import runtime.mobileagent.knowledge.ParsedPublication
+import runtime.mobileagent.knowledge.PdfParser
 import runtime.mobileagent.knowledge.ReciprocalRankFusion
 import runtime.mobileagent.knowledge.RetrievalResult
 import runtime.mobileagent.knowledge.SearchHit
@@ -21,6 +28,12 @@ import runtime.mobileagent.knowledge.SourceFormat
 import runtime.mobileagent.knowledge.StoredBlob
 import runtime.mobileagent.knowledge.TextChunker
 import runtime.mobileagent.knowledge.TextEmbedder
+import runtime.mobileagent.knowledge.VISION_PROMPT_VERSION
+import runtime.mobileagent.knowledge.VISION_SCHEMA_VERSION
+import runtime.mobileagent.knowledge.VisionBackend
+import runtime.mobileagent.knowledge.VisionCacheKey
+import runtime.mobileagent.knowledge.VisionInput
+import runtime.mobileagent.knowledge.VisionOutcome
 import runtime.mobileagent.knowledge.ZipSafety
 import runtime.mobileagent.knowledge.sha256Hex
 import java.nio.ByteBuffer
@@ -30,6 +43,8 @@ class KnowledgeRepository(
     private val db: SqlConnection,
     private val blobs: BlobSink,
     private val embedder: TextEmbedder = HashingTextEmbedder(),
+    private val vision: VisionBackend? = null,
+    private val visionModelFingerprint: String = "vision-unconfigured",
 ) {
     private val indexLock = Any()
 
@@ -58,6 +73,9 @@ class KnowledgeRepository(
         visionConfigured: Boolean,
         knowledgeBaseId: String? = null,
         pauseAt: ImportStage? = null,
+        visionConsent: Boolean = false,
+        embeddingIsApi: Boolean = false,
+        embeddingConsent: Boolean = false,
     ): ImportJob {
         require(bytes.size <= MediaKind.MAX_IMPORT_BYTES) { "RESOURCE_LIMIT" }
         val kbId = knowledgeBaseId ?: ensureDefaultBase()
@@ -75,6 +93,9 @@ class KnowledgeRepository(
                         documentId = existingId,
                         stage = ImportStage.READY,
                         visionConfigured = visionConfigured,
+                        visionConsent = visionConsent,
+                        embeddingIsApi = embeddingIsApi,
+                        embeddingConsent = embeddingConsent,
                         localEmbeddingAvailable = true,
                     )
                     persistJob(job, displayName)
@@ -86,6 +107,9 @@ class KnowledgeRepository(
                     documentId = existingId,
                     hasImages = MediaKind.isImage(format),
                     visionConfigured = visionConfigured,
+                    visionConsent = visionConsent,
+                    embeddingIsApi = embeddingIsApi,
+                    embeddingConsent = embeddingConsent,
                     localEmbeddingAvailable = true,
                 )
                 persistJob(job, displayName)
@@ -113,6 +137,9 @@ class KnowledgeRepository(
             documentId = documentId,
             hasImages = MediaKind.isImage(format),
             visionConfigured = visionConfigured,
+            visionConsent = visionConsent,
+            embeddingIsApi = embeddingIsApi,
+            embeddingConsent = embeddingConsent,
         )
         job.localEmbeddingAvailable = true
         persistJob(job, displayName)
@@ -155,10 +182,54 @@ class KnowledgeRepository(
             stage = stage,
             hasImages = row.long("has_images") != 0L,
             visionConfigured = visionConfigured,
+            visionConsent = row.string("vision_consent").let { it == "1" || it.equals("true", true) } ||
+                runCatching { row.long("vision_consent") != 0L }.getOrDefault(false),
+            embeddingIsApi = runCatching { row.long("embedding_is_api") != 0L }.getOrDefault(false),
+            embeddingConsent = runCatching { row.long("embedding_consent") != 0L }.getOrDefault(false),
             localEmbeddingAvailable = true,
             error = row.string("error").ifBlank { null },
         )
         return continueImport(job, displayName, payload, format)
+    }
+
+    fun grantVisionConsent(jobId: String): ImportJob {
+        val row = db.query("SELECT * FROM import_jobs WHERE id = ?", listOf(jobId)).singleOrNull()
+            ?: error("import job not found")
+        val documentId = row.string("document_id")
+        val document = db.query("SELECT blob_hash, format, deleted_at FROM documents WHERE id = ?", listOf(documentId)).single()
+        check(document.string("deleted_at").isBlank()) { "document deleted" }
+        val bytes = blobs.get(document.string("blob_hash")) ?: error("CAS blob is missing")
+        val format = runCatching { SourceFormat.valueOf(document.string("format")) }.getOrDefault(SourceFormat.UNKNOWN)
+        val job = ImportJob(
+            id = jobId,
+            knowledgeBaseId = row.string("kb_id"),
+            documentId = documentId,
+            stage = ImportStage.QUEUED,
+            hasImages = true,
+            visionConfigured = true,
+            visionConsent = true,
+            localEmbeddingAvailable = true,
+        )
+        return continueImport(job, row.string("display_name"), bytes, format)
+    }
+
+    fun locateCitation(citation: Citation): EvidenceLocator {
+        val document = db.query(
+            "SELECT display_name, blob_hash, deleted_at FROM documents WHERE id = ?",
+            listOf(citation.documentId),
+        ).singleOrNull()
+        if (document == null || document.string("deleted_at").isNotBlank()) {
+            return EvidenceLocator(citation.documentId, "Source removed", citation.page, citation.assetId, citation.sourceSpan, null, removed = true)
+        }
+        return EvidenceLocator(
+            documentId = citation.documentId,
+            displayName = document.string("display_name"),
+            page = citation.page,
+            assetId = citation.assetId,
+            sourceSpan = citation.sourceSpan,
+            blobHash = document.string("blob_hash"),
+            removed = false,
+        )
     }
 
     fun search(query: String, topK: Int = 8, knowledgeBaseIds: List<String>? = null): List<SearchHit> =
@@ -218,6 +289,18 @@ class KnowledgeRepository(
 
     fun blobRefCount(hash: String): Long =
         db.query("SELECT ref_count FROM blobs WHERE hash = ?", listOf(hash)).singleOrNull()?.long("ref_count") ?: 0L
+
+    fun readDocumentText(documentId: String, maxChars: Int): String {
+        val document = db.query("SELECT active_version_id, deleted_at FROM documents WHERE id = ?", listOf(documentId)).singleOrNull()
+            ?: return ""
+        if (document.string("deleted_at").isNotBlank()) return ""
+        val version = document.string("active_version_id")
+        val text = db.query(
+            "SELECT text FROM chunks WHERE document_version_id = ? ORDER BY ordinal",
+            listOf(version),
+        ).joinToString("\n") { it.string("text") }
+        return text.take(maxChars.coerceAtLeast(0))
+    }
 
     fun deleteDocument(documentId: String) {
         synchronized(indexLock) {
@@ -350,7 +433,13 @@ class KnowledgeRepository(
     private fun continueImport(job: ImportJob, displayName: String, bytes: ByteArray, format: SourceFormat): ImportJob {
         advanceThrough(job, ImportStage.PARSING)
         when (format) {
-            SourceFormat.IMAGE -> advanceThrough(job, ImportStage.WAITING_FOR_VISION_MODEL)
+            SourceFormat.IMAGE -> {
+                try {
+                    indexPublication(job, bytes, standaloneImage(bytes, displayName))
+                } catch (t: Throwable) {
+                    fail(job, t.message ?: "image import failed")
+                }
+            }
             SourceFormat.TEXT, SourceFormat.MARKDOWN -> {
                 try {
                     indexTextDocument(job, bytes, format)
@@ -358,19 +447,47 @@ class KnowledgeRepository(
                     fail(job, t.message ?: "indexing failed")
                 }
             }
-            SourceFormat.PDF -> fail(job, "PDF import is not in this build yet. The file was copied and was not dropped.")
+            SourceFormat.PDF -> {
+                try {
+                    indexPublication(job, bytes, PdfParser.parse(bytes))
+                } catch (t: Throwable) {
+                    fail(job, t.message ?: "PDF import failed")
+                }
+            }
             SourceFormat.OFFICE_ARCHIVE -> {
                 val inspection = ZipSafety.inspect(bytes)
                 if (!inspection.ok) {
                     fail(job, inspection.reason)
                 } else {
-                    fail(job, "DOCX/EPUB import is not in this build yet. ${inspection.reason}.")
+                    try {
+                        indexPublication(job, bytes, OfficeParser.parse(displayName, bytes))
+                    } catch (t: Throwable) {
+                        fail(job, t.message ?: "DOCX/EPUB import failed")
+                    }
                 }
             }
             SourceFormat.UNKNOWN -> fail(job, "Unsupported file type. The file was copied and was not dropped.")
         }
         persistJob(job, displayName)
         return job
+    }
+
+    private fun standaloneImage(bytes: ByteArray, displayName: String): ParsedPublication {
+        val mime = when {
+            displayName.lowercase().endsWith(".png") -> "image/png"
+            displayName.lowercase().endsWith(".jpg") || displayName.lowercase().endsWith(".jpeg") -> "image/jpeg"
+            else -> "image/*"
+        }
+        return ParsedPublication(
+            format = SourceFormat.IMAGE,
+            text = "",
+            pages = listOf(ExtractedPage(1, "", needsVision = true)),
+            assets = listOf(
+                ExtractedAsset("image-1", "IMAGE", 1, displayName, bytes, mime, ""),
+            ),
+            needsVision = true,
+            parserFingerprint = "image-v1",
+        )
     }
 
     private fun indexTextDocument(job: ImportJob, bytes: ByteArray, format: SourceFormat) {
@@ -380,11 +497,168 @@ class KnowledgeRepository(
             advanceThrough(job, ImportStage.WAITING_FOR_VISION_MODEL)
             if (job.stage == ImportStage.WAITING_FOR_VISION_MODEL) {
                 job.error = "Markdown references images. They were not downloaded and the document is not READY."
+            } else if (job.stage == ImportStage.AWAITING_UPLOAD_CONSENT) {
+                job.error = "Markdown image files are not fetched automatically. Import the image files or grant Vision after they exist in CAS."
             }
             return
         }
-        val chunks = TextChunker.chunk(text)
+        publishChunks(job, bytes, textChunks = TextChunker.chunk(text).map { IndexedChunk(it, null, emptyList(), null) }, fingerprint = PARSER_FINGERPRINT)
+    }
+
+    private fun indexPublication(job: ImportJob, bytes: ByteArray, parsed: ParsedPublication) {
+        job.hasImages = parsed.needsVision || parsed.assets.isNotEmpty()
+        val visionTexts = mutableListOf<IndexedChunk>()
+        if (job.hasImages) {
+            advanceThrough(job, if (job.visionConfigured) ImportStage.AWAITING_UPLOAD_CONSENT else ImportStage.WAITING_FOR_VISION_MODEL)
+            if (job.stage == ImportStage.WAITING_FOR_VISION_MODEL) {
+                job.error = "Visual content is waiting for a Vision model and is not READY."
+                return
+            }
+            if (job.stage == ImportStage.AWAITING_UPLOAD_CONSENT && !job.visionConsent) {
+                job.error = "Vision upload has not been approved. No image bytes left the device."
+                return
+            }
+            job.visionConsent = true
+            advanceThrough(job, ImportStage.VISION_PROCESSING)
+            when (val outcome = processAssets(job, parsed.assets)) {
+                is VisionBatch.Failed -> {
+                    fail(job, outcome.message)
+                    return
+                }
+                is VisionBatch.Unknown -> {
+                    job.stage = ImportStage.FAILED
+                    job.error = "UNKNOWN_OUTCOME: Vision result is uncertain and was not billed as success. Retry is manual."
+                    return
+                }
+                is VisionBatch.Ok -> visionTexts += outcome.chunks
+            }
+        }
+        val pageChunks = parsed.pages.filter { it.text.isNotBlank() }.flatMap { page ->
+            TextChunker.chunk(page.text).map { IndexedChunk(it, page.page, emptyList(), "page:${page.page}") }
+        }
+        val chunks = (pageChunks + visionTexts).ifEmpty {
+            if (parsed.text.isNotBlank()) TextChunker.chunk(parsed.text).map { IndexedChunk(it, 1, emptyList(), null) } else emptyList()
+        }
         if (chunks.isEmpty()) {
+            fail(job, "The file produced no indexable text. Visual items were not dropped.")
+            return
+        }
+        publishChunks(job, bytes, chunks, parsed.parserFingerprint, parsed.assets)
+    }
+
+    private sealed interface VisionBatch {
+        data class Ok(val chunks: List<IndexedChunk>) : VisionBatch
+        data class Failed(val message: String) : VisionBatch
+        data object Unknown : VisionBatch
+    }
+
+    private fun processAssets(job: ImportJob, assets: List<ExtractedAsset>): VisionBatch {
+        val backend = vision ?: return VisionBatch.Failed("Vision model is configured in profile but no backend is bound")
+        val chunks = mutableListOf<IndexedChunk>()
+        assets.forEach { asset ->
+            val stored = blobs.put(asset.bytes, asset.mediaType)
+            upsertBlob(stored)
+            val assetId = EntityId.random().value
+            val contextHash = VisionCacheKey.contextHash(asset.surroundingText, asset.page, asset.section)
+            val input = VisionInput(
+                assetHash = stored.sha256,
+                contextHash = contextHash,
+                modelFingerprint = visionModelFingerprint,
+                bytes = asset.bytes,
+                mediaType = asset.mediaType,
+                surroundingText = asset.surroundingText,
+                page = asset.page,
+                section = asset.section,
+            )
+            db.execute(
+                "INSERT OR REPLACE INTO assets(id,document_id,blob_hash,page,section,kind,surrounding_text_hash) VALUES (?,?,?,?,?,?,?)",
+                listOf(assetId, job.documentId, stored.sha256, asset.page, asset.section, asset.kind, contextHash),
+            )
+            val cached = db.query("SELECT status, ocr_text, description FROM vision_results WHERE cache_key = ?", listOf(input.cacheKey)).singleOrNull()
+            val outcome = when (cached?.string("status")) {
+                "SUCCESS" -> VisionOutcome.Success(
+                    runtime.mobileagent.knowledge.VisionSuccess(
+                        ocrText = cached.string("ocr_text"),
+                        semanticDescription = cached.string("description"),
+                    ),
+                )
+                "UNKNOWN_OUTCOME" -> VisionOutcome.UnknownOutcome
+                else -> backend.process(input)
+            }
+            when (outcome) {
+                is VisionOutcome.UnknownOutcome -> {
+                    db.execute(
+                        "INSERT OR REPLACE INTO vision_results(cache_key,asset_hash,context_hash,model_fingerprint,prompt_version,schema_version,status,ocr_text,description,processed_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                        listOf(input.cacheKey, stored.sha256, contextHash, visionModelFingerprint, VISION_PROMPT_VERSION, VISION_SCHEMA_VERSION, "UNKNOWN_OUTCOME", "", "", Utc.nowIso()),
+                    )
+                    return VisionBatch.Unknown
+                }
+                is VisionOutcome.Failed -> {
+                    db.execute(
+                        "INSERT OR REPLACE INTO vision_results(cache_key,asset_hash,context_hash,model_fingerprint,prompt_version,schema_version,status,ocr_text,description,processed_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                        listOf(input.cacheKey, stored.sha256, contextHash, visionModelFingerprint, VISION_PROMPT_VERSION, VISION_SCHEMA_VERSION, "FAILED", "", outcome.message, Utc.nowIso()),
+                    )
+                    return VisionBatch.Failed(outcome.message)
+                }
+                is VisionOutcome.Success -> {
+                    db.execute(
+                        "INSERT OR REPLACE INTO vision_results(cache_key,asset_hash,context_hash,model_fingerprint,prompt_version,schema_version,status,ocr_text,description,processed_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                        listOf(
+                            input.cacheKey,
+                            stored.sha256,
+                            contextHash,
+                            visionModelFingerprint,
+                            VISION_PROMPT_VERSION,
+                            VISION_SCHEMA_VERSION,
+                            "SUCCESS",
+                            outcome.result.ocrText,
+                            outcome.result.semanticDescription,
+                            Utc.nowIso(),
+                        ),
+                    )
+                    val body = buildString {
+                        append("Visual evidence")
+                        asset.page?.let { append(" page $it") }
+                        append(": ")
+                        append(outcome.result.semanticDescription)
+                        if (outcome.result.ocrText.isNotBlank()) {
+                            append('\n')
+                            append(outcome.result.ocrText)
+                        }
+                        if (asset.surroundingText.isNotBlank()) {
+                            append('\n')
+                            append(asset.surroundingText)
+                        }
+                    }
+                    chunks += IndexedChunk(body, asset.page, listOf(assetId), asset.section)
+                }
+            }
+        }
+        return VisionBatch.Ok(chunks)
+    }
+
+    private data class IndexedChunk(
+        val text: String,
+        val page: Int?,
+        val assetIds: List<String>,
+        val span: String?,
+    )
+
+    private fun publishChunks(
+        job: ImportJob,
+        bytes: ByteArray,
+        textChunks: List<IndexedChunk>,
+        fingerprint: String,
+        assets: List<ExtractedAsset> = emptyList(),
+    ) {
+        if (job.embeddingIsApi && !job.embeddingConsent) {
+            advanceThrough(job, ImportStage.AWAITING_EMBEDDING_CONSENT)
+            if (job.stage == ImportStage.AWAITING_EMBEDDING_CONSENT) {
+                job.error = "API embedding was not approved. No text left the device."
+            }
+            return
+        }
+        val chunks = textChunks.ifEmpty {
             fail(job, "The file is empty")
             return
         }
@@ -394,7 +668,7 @@ class KnowledgeRepository(
             db.transaction {
                 db.execute(
                     "INSERT INTO document_versions(id,document_id,parser_fingerprint,content_hash,status,created_at) VALUES (?,?,?,?,?,?)",
-                    listOf(versionId, job.documentId, PARSER_FINGERPRINT, contentHash, "STAGING", Utc.nowIso()),
+                    listOf(versionId, job.documentId, fingerprint, contentHash, "STAGING", Utc.nowIso()),
                 )
                 persistChunks(versionId, chunks)
                 persistEmbeddings(versionId)
@@ -406,22 +680,31 @@ class KnowledgeRepository(
         advanceThrough(job, ImportStage.READY)
     }
 
-    private fun persistChunks(documentVersionId: String, chunks: List<String>) {
+    private fun persistChunks(documentVersionId: String, chunks: List<IndexedChunk>) {
         val existing = db.query("SELECT id, rowid AS rid FROM chunks WHERE document_version_id = ?", listOf(documentVersionId))
         existing.forEach { row ->
             runCatching { db.execute("DELETE FROM chunks_fts WHERE rowid = ?", listOf(row.long("rid"))) }
         }
         db.execute("DELETE FROM chunks WHERE document_version_id = ?", listOf(documentVersionId))
-        chunks.forEachIndexed { ordinal, text ->
+        chunks.forEachIndexed { ordinal, chunk ->
             val id = EntityId.random().value
-            val hash = sha256Hex(text.toByteArray(Charsets.UTF_8))
+            val hash = sha256Hex(chunk.text.toByteArray(Charsets.UTF_8))
             db.execute(
-                "INSERT INTO chunks(id,document_version_id,ordinal,text,content_hash) VALUES (?,?,?,?,?)",
-                listOf(id, documentVersionId, ordinal, text, hash),
+                "INSERT INTO chunks(id,document_version_id,ordinal,text,content_hash,source_span,asset_ids,page) VALUES (?,?,?,?,?,?,?,?)",
+                listOf(
+                    id,
+                    documentVersionId,
+                    ordinal,
+                    chunk.text,
+                    hash,
+                    chunk.span,
+                    chunk.assetIds.joinToString(","),
+                    chunk.page,
+                ),
             )
             val rowid = db.query("SELECT rowid AS rid FROM chunks WHERE id = ?", listOf(id)).single().long("rid")
             runCatching {
-                db.execute("INSERT INTO chunks_fts(rowid, text) VALUES (?, ?)", listOf(rowid, CjkLexical.indexText(text)))
+                db.execute("INSERT INTO chunks_fts(rowid, text) VALUES (?, ?)", listOf(rowid, CjkLexical.indexText(chunk.text)))
             }
         }
     }
@@ -443,7 +726,8 @@ class KnowledgeRepository(
         val fts = runCatching {
             db.query(
                 """
-                SELECT chunks.id AS chunk_id, documents.id AS document_id, chunks.text AS text, chunks.document_version_id AS version_id
+                SELECT chunks.id AS chunk_id, documents.id AS document_id, chunks.text AS text, chunks.document_version_id AS version_id,
+                       chunks.page AS page, chunks.asset_ids AS asset_ids, chunks.source_span AS source_span
                 FROM chunks_fts
                 JOIN chunks ON chunks.rowid = chunks_fts.rowid
                 JOIN generation_members ON generation_members.chunk_id = chunks.id AND generation_members.generation_id = ?
@@ -457,7 +741,8 @@ class KnowledgeRepository(
         val rows = fts.ifEmpty {
             db.query(
                 """
-                SELECT chunks.id AS chunk_id, documents.id AS document_id, chunks.text AS text, chunks.document_version_id AS version_id
+                SELECT chunks.id AS chunk_id, documents.id AS document_id, chunks.text AS text, chunks.document_version_id AS version_id,
+                       chunks.page AS page, chunks.asset_ids AS asset_ids, chunks.source_span AS source_span
                 FROM chunks
                 JOIN generation_members ON generation_members.chunk_id = chunks.id AND generation_members.generation_id = ?
                 JOIN documents ON documents.active_version_id = chunks.document_version_id
@@ -475,6 +760,9 @@ class KnowledgeRepository(
                 score = 1.0 / (index + 1),
                 knowledgeBaseId = kbId,
                 documentVersionId = row.string("version_id"),
+                assetId = row.string("asset_ids").split(',').firstOrNull { it.isNotBlank() },
+                page = row.string("page").toIntOrNull(),
+                sourceSpan = row.string("source_span").ifBlank { null },
             )
         }
     }
@@ -485,7 +773,8 @@ class KnowledgeRepository(
         val members = db.query(
             """
             SELECT embeddings.chunk_id AS chunk_id, embeddings.vector_blob AS vector_blob, chunks.text AS text,
-                   documents.id AS document_id, chunks.document_version_id AS version_id
+                   documents.id AS document_id, chunks.document_version_id AS version_id,
+                   chunks.page AS page, chunks.asset_ids AS asset_ids, chunks.source_span AS source_span
             FROM generation_members
             JOIN embeddings ON embeddings.chunk_id = generation_members.chunk_id AND embeddings.space_id = generation_members.space_id
             JOIN chunks ON chunks.id = generation_members.chunk_id
@@ -511,6 +800,9 @@ class KnowledgeRepository(
                 score = 0.0,
                 knowledgeBaseId = kbId,
                 documentVersionId = row.string("version_id"),
+                assetId = row.string("asset_ids").split(',').firstOrNull { it.isNotBlank() },
+                page = row.string("page").toIntOrNull(),
+                sourceSpan = row.string("source_span").ifBlank { null },
             )
         }
         return index.search(queryVec, topK).mapIndexed { indexRank, (id, score) ->
@@ -569,7 +861,7 @@ class KnowledgeRepository(
 
     private fun persistJob(job: ImportJob, displayName: String) {
         db.execute(
-            "INSERT OR REPLACE INTO import_jobs(id,kb_id,document_id,display_name,stage,has_images,error,updated_at) VALUES (?,?,?,?,?,?,?,?)",
+            "INSERT OR REPLACE INTO import_jobs(id,kb_id,document_id,display_name,stage,has_images,error,updated_at,vision_consent,embedding_is_api,embedding_consent) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
             listOf(
                 job.id,
                 job.knowledgeBaseId,
@@ -579,6 +871,9 @@ class KnowledgeRepository(
                 if (job.hasImages) 1 else 0,
                 job.error,
                 Utc.nowIso(),
+                if (job.visionConsent) 1 else 0,
+                if (job.embeddingIsApi) 1 else 0,
+                if (job.embeddingConsent) 1 else 0,
             ),
         )
     }

@@ -25,12 +25,17 @@ fun ChatScreen(
     input: String,
     streaming: Boolean,
     status: String,
+    textDegradation: Boolean,
+    locatorText: String?,
     onInput: (String) -> Unit,
     onSend: () -> Unit,
     onCancel: () -> Unit,
+    onToggleDegradation: (Boolean) -> Unit,
+    onOpenCitation: (String) -> Unit,
 ) {
     Column(Modifier.fillMaxSize().padding(16.dp)) {
         Text(status, modifier = Modifier.padding(bottom = 8.dp))
+        locatorText?.let { Text(it, modifier = Modifier.padding(bottom = 8.dp)) }
         LazyColumn(Modifier.weight(1f)) {
             items(lines) { line ->
                 Text("${line.role}: ${line.text}", modifier = Modifier.padding(bottom = 8.dp))
@@ -50,6 +55,16 @@ fun ChatScreen(
                 enabled = streaming,
                 modifier = Modifier.padding(start = 8.dp),
             ) { Text("Cancel") }
+        }
+        Row(Modifier.padding(top = 8.dp)) {
+            Button(onClick = { onToggleDegradation(!textDegradation) }) {
+                Text(if (textDegradation) "Text degradation on" else "Text degradation off")
+            }
+            Button(
+                onClick = { onOpenCitation("0") },
+                modifier = Modifier.padding(start = 8.dp),
+                enabled = !streaming,
+            ) { Text("Open citation 0") }
         }
     }
 }

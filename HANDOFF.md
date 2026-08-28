@@ -3,7 +3,7 @@
 
 # 项目交接
 
-最后更新：2026-08-28T21:00:26+08:00（Asia/Taipei）。项目根目录：`E:\mobileAgentRuntime`。
+最后更新：2026-08-28T22:20:00+08:00（Asia/Taipei）。项目根目录：`E:\mobileAgentRuntime`。
 
 **接手者必须先读 [agent.md](agent.md)、本文件和 [技术实现方案](docs/IMPLEMENTATION_PLAN.md)。工作后必须维护本文件及受影响的专题文档。**
 
@@ -11,16 +11,16 @@
 
 | 项目 | 状态 |
 | --- | --- |
-| 产品 | M1 部分实现；AR01—AR10 历史修复保留。M0.5 UAR01—UAR05 已修复（本地提交 `9dc7560`）。M2 NAR01—NAR07 与 M3 KAR01—KAR08 已在本轮修复。完整 MVP 未完成 |
-| 业务源码/构建 | 本轮 `licenseGuard`/`licenseGuardReverse`、`:shared:knowledge-api:test`、`:shared:announcements:test`、`:data:sqlite:test`、`:app-android:assembleDebug` 通过；`node src/worker.test.mjs` 通过；REUSE 182/182 |
-| Git | 分支 `main` 跟踪 `origin/main`。NAR/KAR 修复 `6ab2dc21ab955bf0ab317e0d4076db2805a0c749` 与 M0.5 `9dc7560` 已推送。作者 `luozhibai`，无 Cursor trailer |
-| CodeGraph | 仓库无 `.codegraph/` 工作副本（被 gitignore）；本轮用直接读文件定位。未重建索引 |
-| 许可 | `python -B -m reuse lint` 退出 0（182/182）；未改 LICENSE 正文 |
-| 授权范围 | 用户已授权修复交接中的 M2/M3 问题并 commit/push，使 origin 与本地相同。仍不授权 Cloudflare 生产部署 |
+| 产品 | M1 部分实现。M0.5 UAR 与 M2 NAR、M3 KAR 已修复。M4/M5 本地 JVM 已落地。完整 MVP 未完成（缺 M6 CPython） |
+| 业务源码/构建 | 本轮 `licenseGuard`/`licenseGuardReverse`、knowledge/skills/agent-runtime/sqlite/provider/announcements 测试、`:app-android:assembleDebug` 通过；REUSE 194/194 |
+| Git | 分支 `main` 跟踪 `origin/main`；本轮只 commit、不 push。作者 `luozhibai`，无 Cursor trailer |
+| CodeGraph | 仓库无 `.codegraph/` 工作副本；本轮用直接读文件定位 |
+| 许可 | `python -B -m reuse lint` 退出 0（194/194）；未改 LICENSE 正文 |
+| 授权范围 | 用户已授权完成 M4 与 M5 并只 commit、先不 push。仍不授权 Cloudflare 生产部署、不授权把 hashing 写成 ONNX、不授权嵌入 CPython |
 
 ## 2. 当前任务
 
-无进行中认领。NAR01—NAR07 与 KAR01—KAR08 已修复。下一步默认 M4，不要把 hashing 空间写成 ONNX。
+无进行中认领。M4/M5 本地路径已落地并准备提交。下一步默认 M6 隔离 CPython 最小验证；不要把 `local-hash-v1-d32` 写成 ONNX pack，不要把 M5 当作完整 MVP。
 
 ## 3. 关键约束
 
@@ -33,7 +33,7 @@
 
 1. `git status --short --branch`、`git log -1 --format=full`；确认 HEAD 无 `Co-authored-by: Cursor`
 2. 提交作者使用 `D:\Git\mingw64\libexec\git-core\git.exe commit-tree`，作者 `luozhibai <wy3273564266@163.com>`
-3. M0.5 UAR 与 M2 NAR01—NAR07、M3 KAR01—KAR08 已按交接修复；下一步默认 M4，不要把 `local-hash-v1-d32` 写成 ONNX pack
+3. M4/M5 本地路径已落地；下一步默认 M6，不要把 `local-hash-v1-d32` 写成 ONNX pack，不要把仅有 Native 工具的 M5 当作完整 MVP
 4. 设备/模拟器仍缺：bundled FTS5 冷启动、公告本地 Worker→真机拉取、K06 300—500 文件负载
 5. `local-hash-v1-d32` 不是 ONNX pack；本轮没有改变 M4 的既定范围（Vision/PDF 正文/DOCX-EPUB）
 6. M1 Compose 仍须按 M0.5 差异清单对齐；不要把 M2/M3 功能闭环冒称为全套 UI 设计实现或生产部署
@@ -298,6 +298,16 @@ U02 的横屏、IME、大字号、触控、对比度、焦点及实际字体回�
 - 未执行：真机/模拟器、Cloudflare 部署、ONNX/USearch JNI、K06 设备负载、独立审阅。
 - 文档：`docs/ANNOUNCEMENTS.md`、`docs/KNOWLEDGE.md` 第9节、`docs/IMPLEMENTATION_PLAN.md`、本交接。
 - Git：修复提交 `6ab2dc21ab955bf0ab317e0d4076db2805a0c749` 已推送（作者 `luozhibai`，无 Cursor），含 M0.5 `9dc7560`。`origin/main` 与本地相同。
+
+### 2026-08-28T22:20:00+08:00：完成 M4 与 M5 本地路径（只 commit，不 push）
+
+- 请求：完成 M4 和 M5，完成后只 commit，先不 push。
+- M4：PDF 文本与 JPEG XObject 检测；DOCX/EPUB 正文/内嵌图；schema v5 assets/vision_results；无 Vision 等待；未同意 0 次调用；成功 cacheKey 不重发；UNKNOWN_OUTCOME 不自动重试；API embedding 未同意不索引；严格模式与文本降级；citation 页/图定位。
+- M5：Skill 包 A—E 分类，E 拒绝；zip-slip/原生/pip 拒绝；内置四件工具与 Tool Loop；重复 call id 不双执行；HTTP 需确认；工具输出脱敏。未嵌入 CPython。
+- 验证：`.\gradlew.bat licenseGuard licenseGuardReverse :shared:knowledge-api:test :shared:skills-api:test :shared:agent-runtime:test :shared:provider-api:test :data:sqlite:test :shared:announcements:test :app-android:assembleDebug --no-daemon` BUILD SUCCESSFUL；`python -B -m reuse lint` 194/194。
+- 未执行：真机/模拟器、Cloudflare、ONNX/USearch JNI、K06 设备负载、CPython 隔离、独立审阅、push。
+- 文档：`docs/KNOWLEDGE.md` 第10节、`docs/SKILLS_AND_SECURITY.md` 第9节、`docs/IMPLEMENTATION_PLAN.md`、本交接。
+- Git：本轮提交后回写 SHA；不 push。
 
 ## 7. 后续记录格式
 

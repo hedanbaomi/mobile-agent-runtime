@@ -38,6 +38,23 @@ class KnowledgeViewModel(application: Application) : AndroidViewModel(applicatio
         }
     }
 
+    fun grantVision(jobId: String) {
+        viewModelScope.launch(Dispatchers.IO) {
+            val job = try {
+                app.container.knowledge.grantVisionConsent(jobId)
+            } catch (e: Exception) {
+                withContext(Dispatchers.Main) {
+                    status.value = "Vision consent failed: ${e.message ?: "error"}"
+                }
+                return@launch
+            }
+            withContext(Dispatchers.Main) {
+                status.value = "${job.stage}${job.error?.let { " — $it" }.orEmpty()}"
+                reload()
+            }
+        }
+    }
+
     fun rebuild() {
         viewModelScope.launch(Dispatchers.IO) {
             val kb = app.container.knowledge.ensureDefaultBase()

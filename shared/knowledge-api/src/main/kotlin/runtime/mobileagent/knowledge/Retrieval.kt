@@ -10,6 +10,9 @@ data class Citation(
     val documentId: String,
     val chunkId: String,
     val assetId: String? = null,
+    val page: Int? = null,
+    val documentVersionId: String = "",
+    val sourceSpan: String? = null,
 )
 
 data class SearchHit(
@@ -19,6 +22,19 @@ data class SearchHit(
     val score: Double,
     val knowledgeBaseId: String = "",
     val documentVersionId: String = "",
+    val assetId: String? = null,
+    val page: Int? = null,
+    val sourceSpan: String? = null,
+)
+
+data class EvidenceLocator(
+    val documentId: String,
+    val displayName: String,
+    val page: Int?,
+    val assetId: String?,
+    val sourceSpan: String?,
+    val blobHash: String?,
+    val removed: Boolean,
 )
 
 data class RetrievalResult(
@@ -36,6 +52,10 @@ object CitationMap {
                 knowledgeBaseId = hit.knowledgeBaseId,
                 documentId = hit.documentId,
                 chunkId = hit.chunkId,
+                assetId = hit.assetId,
+                page = hit.page,
+                documentVersionId = hit.documentVersionId,
+                sourceSpan = hit.sourceSpan,
             )
         }
 

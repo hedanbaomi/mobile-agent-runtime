@@ -3,7 +3,7 @@
 
 # 知识库、多模态和检索契约
 
-状态：M3 文本路径本地 JVM 已落地（schema v4）。TXT/MD 经 SAF 复制到 CAS 后写入 FTS5 与 `local-hash-v1-d32` 向量空间（明确不是 ONNX 模型包、不是 USearch JNI），可标 READY。独立图片以及 Markdown 中的 `![]()`/`<img>` 引用停在 `WAITING_FOR_VISION_MODEL`。PDF/DOCX/EPUB 复制后失败并说明原因；ZIP 会在内存中检查路径与膨胀上限，不落盘解压。K06 仅覆盖 COPYING 检查点续跑，不是 300—500 文件设备负载。对应 R05—R08、K01—K08。
+状态：M3 文本路径本地 JVM 已落地（schema v4）。M4 在 schema v5 上增加 PDF 文本、DOCX/EPUB 正文/内嵌图、assets/vision_results、Vision 同意与成功缓存、引用页/图定位；独立图片与 Markdown 外链图在无 Vision 时仍等待，不标 READY。向量空间仍是 `local-hash-v1-d32`（不是 ONNX 模型包、不是 USearch JNI）。K06 仅覆盖检查点续跑，不是 300—500 文件设备负载。对应 R05—R08、K01—K08。
 
 ## 1. 数据模型与一致性
 
@@ -139,3 +139,17 @@ python -B -m reuse lint
 - 多库检索先合并词法/向量再全局 RRF。
 - 一次 retrieve 固定 READY generation pin；rebuild 重写 FTS 并校验向量长度，失败不切 active。
 - Chat 在检索异常时停止发送并提示，不把异常留在协程外。
+
+## 10. M4 本地验证（2026-08-28）
+
+本轮：保守 PDF 文本提取（含 JPEG XObject 检测）；DOCX/EPUB 在 ZipSafety 之后解析正文与内嵌图；Vision 缺模型等待、未同意不外发、成功结果按 cacheKey 不重发、UNKNOWN_OUTCOME 不自动重试；Chat 严格模式拒绝无图能力模型，显式文本降级才继续并提示原图未发送；citation 可定位页/图，已删来源显示 Source removed。未实现 PDF 页光栅化、ONNX pack、设备 K06 负载。
+
+命令：`.\gradlew.bat licenseGuard licenseGuardReverse :shared:knowledge-api:test :data:sqlite:test :app-android:assembleDebug --no-daemon`；`python -B -m reuse lint`。
+
+| 验收 | 本轮状态 | 证据边界 |
+| --- | --- | --- |
+| K02 | LOCAL_PASS（PDF/DOCX/EPUB 文本路径） | 文本 PDF READY 可检索；残缺 EPUB/坏 PDF FAILED 含原因；zip-slip 仍拒绝 |
+| K03 | LOCAL_PASS（JVM） | 无 Vision 等待且非 READY；未同意 0 次 Vision 调用；API embedding 未同意不建索引 |
+| K04 | LOCAL_PASS（策略/定位） | 严格模式拒绝；文本降级警告；citation 含 page/asset。未跑真机原图查看器 |
+| K06 | 检查点 LOCAL_PASS；非 DEVICE_PASS | 未跑 300—500 文件/真机杀进程矩阵 |
+| K08 | LOCAL_PASS（定位） | 未知 citation 与已删来源不生成假链接。未做过大原图设备预算 |

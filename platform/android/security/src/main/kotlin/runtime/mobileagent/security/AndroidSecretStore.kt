@@ -20,14 +20,31 @@ class AndroidSecretStore(
 ) : SecretStore {
     override suspend fun resolveForHost(ref: String): CharArray {
         val row = db.query("SELECT ciphertext FROM secrets WHERE ref = ?", listOf(ref)).singleOrNull()
-            ?: error("SECRET_UNAVAILABLE")
+            ?: throw runtime.mobileagent.domain.AppException(
+                runtime.mobileagent.domain.AppError(
+                    runtime.mobileagent.domain.ErrorCode.SECRET_UNAVAILABLE,
+                    "The saved provider key is missing. Save a key on the Providers screen.",
+                    runtime.mobileagent.domain.RetryClass.USER_ACTION,
+                    "secret",
+                    ref,
+                ),
+            )
         val blob = row.columns["ciphertext"] as ByteArray
         return decrypt(blob).toCharArray()
     }
 
     fun put(ref: String, secret: CharArray) {
-        val cipher = encrypt(String(secret).toByteArray(Charsets.UTF_8))
-        db.execute("INSERT OR REPLACE INTO secrets(ref, ciphertext, created_at) VALUES (?,?,?)", listOf(ref, cipher, java.time.Instant.now().toString()))
+        val bytes = String(secret).toByteArray(Charsets.UTF_8)
+        try {
+            val cipher = encrypt(bytes)
+            db.execute(
+                "INSERT OR REPLACE INTO secrets(ref, ciphertext, created_at) VALUES (?,?,?)",
+                listOf(ref, cipher, java.time.Instant.now().toString()),
+            )
+        } finally {
+            bytes.fill(0)
+            secret.fill('\u0000')
+        }
     }
 
     private fun key(): SecretKey {

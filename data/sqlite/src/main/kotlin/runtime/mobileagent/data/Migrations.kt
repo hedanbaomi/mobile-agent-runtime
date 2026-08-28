@@ -4,7 +4,7 @@
 package runtime.mobileagent.data
 
 object Migrations {
-    const val VERSION = 1
+    const val VERSION = 2
 
     private val statements = listOf(
         "CREATE TABLE IF NOT EXISTS schema_version (version INTEGER NOT NULL PRIMARY KEY)",
@@ -24,12 +24,14 @@ object Migrations {
         "CREATE TABLE IF NOT EXISTS secrets (ref TEXT PRIMARY KEY, ciphertext BLOB NOT NULL, created_at TEXT NOT NULL)",
         "CREATE TABLE IF NOT EXISTS announcement_state (announcement_id TEXT NOT NULL, revision INTEGER NOT NULL, read_at TEXT, displayed_at TEXT, dismissed_at TEXT, acknowledged_at TEXT, PRIMARY KEY(announcement_id, revision))",
         "CREATE TABLE IF NOT EXISTS audit_events (id TEXT PRIMARY KEY, run_id TEXT, created_at TEXT NOT NULL, component TEXT NOT NULL, action TEXT NOT NULL, result TEXT NOT NULL, error_code TEXT, summary TEXT NOT NULL)",
-        "INSERT OR IGNORE INTO schema_version(version) VALUES (1)",
+        "CREATE TABLE IF NOT EXISTS import_jobs (id TEXT PRIMARY KEY, kb_id TEXT NOT NULL, document_id TEXT NOT NULL, display_name TEXT NOT NULL, stage TEXT NOT NULL, has_images INTEGER NOT NULL, error TEXT, updated_at TEXT NOT NULL)",
     )
 
     fun apply(connection: SqlConnection) {
         connection.transaction {
             statements.forEach { connection.execute(it) }
+            connection.execute("DELETE FROM schema_version")
+            connection.execute("INSERT INTO schema_version(version) VALUES (?)", listOf(VERSION))
         }
     }
 }

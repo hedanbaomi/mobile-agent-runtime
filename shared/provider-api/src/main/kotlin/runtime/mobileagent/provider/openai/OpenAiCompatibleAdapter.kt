@@ -4,7 +4,6 @@
 package runtime.mobileagent.provider.openai
 
 import io.ktor.client.HttpClient
-import io.ktor.client.plugins.HttpTimeout
 import io.ktor.client.request.headers
 import io.ktor.client.request.preparePost
 import io.ktor.client.request.setBody
@@ -14,14 +13,10 @@ import io.ktor.http.contentType
 import io.ktor.utils.io.readUTF8Line
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flow
-import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
-import kotlinx.serialization.json.contentOrNull
-import kotlinx.serialization.json.jsonArray
-import kotlinx.serialization.json.jsonObject
-import kotlinx.serialization.json.jsonPrimitive
+import runtime.mobileagent.domain.ErrorCode
 import runtime.mobileagent.domain.ModelProfile
 import runtime.mobileagent.domain.Utc
 import runtime.mobileagent.provider.CapabilityReport
@@ -36,8 +31,6 @@ class OpenAiCompatibleAdapter(
     private val http: HttpClient,
     private val baseUrl: String,
 ) : ModelAdapter {
-    private val json = Json { ignoreUnknownKeys = true }
-
     override suspend fun probe(profile: ModelProfile): CapabilityReport {
         return CapabilityReport(
             modelId = profile.modelId,
@@ -50,6 +43,10 @@ class OpenAiCompatibleAdapter(
     }
 
     override fun stream(request: ModelRequest, secret: CharArray): Flow<ModelEvent> = flow {
+        if (secret.isEmpty()) {
+            emit(ModelEvent.Failed("SECRET_UNAVAILABLE"))
+            return@flow
+        }
         val payload = buildJsonObject {
             put("model", JsonPrimitive(request.modelId))
             put("stream", JsonPrimitive(true))
@@ -75,40 +72,38 @@ class OpenAiCompatibleAdapter(
                 }
                 setBody(payload.toString())
             }.execute { response ->
-                if (response.status.value == 401) {
-                    emit(ModelEvent.Failed("Provider rejected credentials"))
+                val status = response.status.value
+                if (status == 401) {
+                    emit(ModelEvent.Failed(ErrorCode.PROVIDER_UNAUTHORIZED.name))
                     return@execute
                 }
-                if (response.status.value >= 500) {
-                    emit(ModelEvent.Failed(SecretRedactor.redact(response.status.toString(), listOf(token))))
+                if (status == 429) {
+                    emit(ModelEvent.Failed(ErrorCode.RATE_LIMITED.name))
+                    return@execute
+                }
+                if (status >= 400) {
+                    emit(
+                        ModelEvent.Failed(
+                            SecretRedactor.redact("Provider HTTP $status", listOf(token)),
+                        ),
+                    )
                     return@execute
                 }
                 val channel = response.bodyAsChannel()
                 val toolBuf = linkedMapOf<String, Pair<String, StringBuilder>>()
+                var completed = false
                 while (!channel.isClosedForRead) {
                     val line = channel.readUTF8Line() ?: break
-                    if (!line.startsWith("data:")) continue
-                    val data = line.removePrefix("data:").trim()
-                    if (data == "[DONE]") {
-                        emit(ModelEvent.Completed)
-                        break
+                    OpenAiSse.eventsFromLine(line, toolBuf).forEach { event ->
+                        if (event is ModelEvent.Completed) completed = true
+                        emit(event)
                     }
-                    val obj = runCatching { json.parseToJsonElement(data).jsonObject }.getOrNull() ?: continue
-                    val choice = obj["choices"]?.jsonArray?.firstOrNull()?.jsonObject ?: continue
-                    val delta = choice["delta"]?.jsonObject
-                    delta?.get("content")?.jsonPrimitive?.contentOrNull?.let { emit(ModelEvent.TextDelta(it)) }
-                    val toolCalls = delta?.get("tool_calls")?.jsonArray
-                    toolCalls?.forEach { call ->
-                        val c = call.jsonObject
-                        val id = c["id"]?.jsonPrimitive?.contentOrNull ?: return@forEach
-                        val name = c["function"]?.jsonObject?.get("name")?.jsonPrimitive?.contentOrNull ?: ""
-                        val args = c["function"]?.jsonObject?.get("arguments")?.jsonPrimitive?.contentOrNull ?: ""
-                        val acc = toolBuf.getOrPut(id) { name to StringBuilder() }
-                        acc.second.append(args)
-                        emit(ModelEvent.ToolCallDelta(id, acc.first.ifBlank { name }, acc.second.toString()))
-                    }
+                    if (completed) break
                 }
+                if (!completed) emit(ModelEvent.Completed)
             }
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
         } catch (e: Exception) {
             emit(ModelEvent.Failed(SecretRedactor.redact(e.message ?: "network", listOf(token))))
         }
@@ -120,10 +115,5 @@ class OpenAiCompatibleAdapter(
 
     companion object {
         fun url(base: String, path: String): String = base.trimEnd('/') + path
-        fun client(): HttpClient = HttpClient {
-            install(HttpTimeout) {
-                requestTimeoutMillis = 60_000
-            }
-        }
     }
 }

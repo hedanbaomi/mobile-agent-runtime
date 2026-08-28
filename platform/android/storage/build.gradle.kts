@@ -23,6 +23,7 @@ android {
 
 dependencies {
     implementation(project(":shared:domain"))
+    implementation(project(":shared:knowledge-api"))
     implementation(project(":data:sqlite"))
     implementation(libs.androidx.documentfile)
     implementation(libs.androidx.sqlite)

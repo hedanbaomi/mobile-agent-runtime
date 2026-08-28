@@ -4,16 +4,41 @@
 package runtime.mobileagent
 
 import android.app.Application
+import io.ktor.client.HttpClient
+import io.ktor.client.engine.okhttp.OkHttp
+import io.ktor.client.plugins.HttpTimeout
+import runtime.mobileagent.data.KnowledgeRepository
 import runtime.mobileagent.data.Migrations
+import runtime.mobileagent.data.ProfileRepository
+import runtime.mobileagent.security.AndroidSecretStore
 import runtime.mobileagent.storage.AndroidContextSqlite
+import runtime.mobileagent.storage.CasBlobSink
+import java.io.File
 
 class MobileAgentApp : Application() {
     lateinit var database: AndroidContextSqlite
+        private set
+    lateinit var container: AppContainer
         private set
 
     override fun onCreate() {
         super.onCreate()
         database = AndroidContextSqlite(this)
         Migrations.apply(database)
+        container = AppContainer(this)
+    }
+}
+
+class AppContainer(app: MobileAgentApp) {
+    val db = app.database
+    val secrets = AndroidSecretStore(app, db)
+    val profiles = ProfileRepository(db)
+    val knowledge = KnowledgeRepository(db, CasBlobSink(File(app.filesDir, "cas")))
+    val http: HttpClient = HttpClient(OkHttp) {
+        install(HttpTimeout) {
+            requestTimeoutMillis = 180_000
+            connectTimeoutMillis = 15_000
+            socketTimeoutMillis = 180_000
+        }
     }
 }

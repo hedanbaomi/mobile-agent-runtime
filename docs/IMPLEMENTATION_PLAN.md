@@ -3,7 +3,7 @@
 
 # 技术实现方案
 
-版本：v1 设计基线，2026-08-28。状态：**待实现**。本文件的目录、类型和命令描述目标工程；除文档、许可文件、本地 Git/CodeGraph 外，不能据此推断组件已经存在。
+版本：v1 设计基线，2026-08-28。状态：**部分实现**。M0 本地构建/许可已落地；M1 已接通 OpenAI 兼容流式 Chat、Keystore 密钥引用、TXT/MD SAF 导入与含图等待。完整 MVP、CPython、USearch JNI、公告部署仍未完成。
 
 开工入口：[agent.md](../agent.md) → [HANDOFF.md](../HANDOFF.md) → 本文。范围依据见 [REQUIREMENTS.md](REQUIREMENTS.md)。含图知识库、Python 隔离和公告分别详见专题，不能只实现本文概要。
 
@@ -237,15 +237,13 @@ M0 可以并行准备本地许可和构建，但没有远程仓库/Ruleset授权
 
 ## 10. 首个开发任务如何开始
 
-下一位 Agent先完成 M0，不从 Chat UI开始：确认 owner/repo/package → 锁构建兼容矩阵 → 建立最小可编译 Android/KMP工程 → LICENSE/SPDX/REUSE/许可扫描和反向测试 → CI/CODEOWNERS/受保护分支 → 本地与远程证据分开记录。
-
-未来 M0建立这些任务后才可执行下列命令；**当前文件不存在，不能声称已运行**：
+M0 本地构建与许可任务已存在。远程 Ruleset 仍为 `M0_REMOTE_PENDING`，不得宣称 M0 全部完成。后续工作从 HANDOFF 的下一步开始，而不是再从空工程初始化。
 
 ```powershell
 .\gradlew.bat licenseGuard
-.\gradlew.bat check
+.\gradlew.bat licenseGuardReverse
 .\gradlew.bat :app-android:assembleDebug
-reuse lint
+python -m reuse lint
 ```
 
 远程 owner和保护能力未确认时停留在 M0未完成，不伪造 CODEOWNERS 身份，不申请过宽权限。后续按 [ACCEPTANCE.md](ACCEPTANCE.md) 验证，任何实现变化在同一轮维护本方案、专题文档和交接。

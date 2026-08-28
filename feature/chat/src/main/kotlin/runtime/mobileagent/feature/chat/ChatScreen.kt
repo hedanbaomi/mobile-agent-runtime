@@ -4,6 +4,7 @@
 package runtime.mobileagent.feature.chat
 
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
@@ -13,36 +14,42 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.mutableStateListOf
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 
+data class ChatLine(val role: String, val text: String)
+
 @Composable
-fun ChatScreen() {
-    val input = remember { mutableStateOf("") }
-    val lines = remember { mutableStateListOf<String>() }
+fun ChatScreen(
+    lines: List<ChatLine>,
+    input: String,
+    streaming: Boolean,
+    status: String,
+    onInput: (String) -> Unit,
+    onSend: () -> Unit,
+    onCancel: () -> Unit,
+) {
     Column(Modifier.fillMaxSize().padding(16.dp)) {
+        Text(status, modifier = Modifier.padding(bottom = 8.dp))
         LazyColumn(Modifier.weight(1f)) {
-            items(lines) { Text(it, modifier = Modifier.padding(bottom = 8.dp)) }
+            items(lines) { line ->
+                Text("${line.role}: ${line.text}", modifier = Modifier.padding(bottom = 8.dp))
+            }
         }
         OutlinedTextField(
-            value = input.value,
-            onValueChange = { input.value = it },
+            value = input,
+            onValueChange = onInput,
             modifier = Modifier.fillMaxWidth(),
+            enabled = !streaming,
             label = { Text("Message") },
         )
-        Button(
-            onClick = {
-                val text = input.value
-                if (text.isNotBlank()) {
-                    lines.add("You: $text")
-                    input.value = ""
-                    lines.add("Assistant: configure a Provider and Agent in Settings to stream a real reply.")
-                }
-            },
-            modifier = Modifier.padding(top = 8.dp),
-        ) { Text("Send") }
+        Row(Modifier.padding(top = 8.dp)) {
+            Button(onClick = onSend, enabled = !streaming && input.isNotBlank()) { Text("Send") }
+            Button(
+                onClick = onCancel,
+                enabled = streaming,
+                modifier = Modifier.padding(start = 8.dp),
+            ) { Text("Cancel") }
+        }
     }
 }

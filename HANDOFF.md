@@ -3,7 +3,7 @@
 
 # 项目交接
 
-最后更新：2026-08-28T17:25:00+08:00（Asia/Taipei）。项目根目录：`E:\mobileAgentRuntime`。
+最后更新：2026-08-28T17:45:00+08:00（Asia/Taipei）。项目根目录：`E:\mobileAgentRuntime`。
 
 **接手者必须先读 [agent.md](agent.md)、本文件和 [技术实现方案](docs/IMPLEMENTATION_PLAN.md)。工作后必须维护本文件及受影响的专题文档。**
 
@@ -11,35 +11,35 @@
 
 | 项目 | 状态 |
 | --- | --- |
-| 产品 | Android 工程与共享运行时已开始实现；完整 MVP 未完成 |
-| 业务源码/构建 | Gradle 多模块已建立；`:app-android:assembleDebug` 本地通过 |
-| Git | 分支 `main` 跟踪 `origin/main`；实现提交 `aa2fa1ec72366902e3ff09a4653e1764b3eec334`；交接记录 `f69fb3f85d75af8d195ccf9dd606ea2d7cf256d9` 已随 `git push -u origin main` 推到 `https://github.com/hedanbaomi/mobile-agent-runtime.git`；作者/提交者均为 `luozhibai`，无 Cursor trailer |
-| CodeGraph | 1.1.1；源码增加后需 `codegraph sync .` |
-| 许可 | licenseGuard / reverse 本地通过；`python -m reuse lint` 在暂存后通过（127/127）；GitHub Ruleset 未配置 |
-| 授权范围 | 实现产品；提交时不得把 Cursor 写入贡献者；用户已于 2026-08-28 授权 push `main` |
+| 产品 | M1 部分接通：OpenAI 兼容流式 Chat、Keystore 密钥、SAF 导入；完整 MVP 未完成 |
+| 业务源码/构建 | Gradle 多模块；`:app-android:assembleDebug` 本轮通过 |
+| Git | 分支 `main` 跟踪 `origin/main`；用户已于 2026-08-28 授权 commit 并 push。本修订含 M1 Chat/Keystore/SAF。作者须为 `luozhibai`，无 Cursor trailer |
+| CodeGraph | 本轮曾执行 `codegraph sync .`（扫描/解析开始；CLI 提前返回，索引是否写完未确认） |
+| 许可 | 本轮 `licenseGuard` / `licenseGuardReverse` 通过 |
+| 授权范围 | 实现产品；提交时不得把 Cursor 写入贡献者；用户已授权 push `main`，并于 2026-08-28 再次授权 commit 并 push 本轮 M1 |
 
 ## 2. 当前任务
 
-无进行中认领。本地 M0 与共享契约已提交；完整 MVP（真实 Chat 流式、密钥入库、知识 SAF、CPython 隔离包、USearch JNI、远程 Ruleset）仍开放。
+无进行中认领。本轮已完成 Chat 真流式、Provider 密钥写入、知识 SAF 导入（含图等待）。
 
 ## 3. 关键约束
 
 - 第一方 `AGPL-3.0-only`。applicationId 暂为 `runtime.mobileagent`。CODEOWNERS 为 `@hedanbaomi`。
 - Python 不得在主进程执行；isolated service 已声明，CPython 包未嵌入。
-- 含图知识库无 Vision 时等待。USearch JNI 未构建，现为 SQLite 真值上的暴力检索端口。
-- 不部署 Cloudflare 生产资源。提交作者使用仓库 Git 用户 `luozhibai`，不含 Cursor。
+- 含图知识库无 Vision 时等待。TXT/MD 可词法 READY；无 ONNX 向量。USearch JNI 未构建。
+- 不部署 Cloudflare 生产资源。提交作者使用仓库 Git 用户 `luozhibai`，不含 Cursor。Cursor 环境会劫持 `git commit`；需用 `D:\Git\mingw64\libexec\git-core\git.exe commit-tree`。
 
 ## 4. 接手顺序
 
-1. `git rev-parse --show-toplevel`、`git status --short --branch`、`git log -1 --format=full`、`git remote -v`
-2. 确认 HEAD 无 `Co-authored-by: Cursor`。Cursor 环境会把 `git commit` / `git commit-tree` 改写成带 trailer 的 `git commit`；重写未推送提交时用 `D:\Git\mingw64\libexec\git-core\git.exe commit-tree`。
-3. `.\gradlew.bat licenseGuard licenseGuardReverse`、JVM 测试、`:app-android:assembleDebug`
-4. 远程已存在 `main`；GitHub Ruleset/required checks 仍为 `M0_REMOTE_PENDING`，需在仓库设置中配置
-5. 下一功能优先补全 Chat 真实流式、Provider 密钥写入、知识导入 SAF
+1. `git status --short --branch`、`git log -1 --format=full`
+2. 确认 HEAD 无 `Co-authored-by: Cursor`
+3. 真机/模拟器走：Providers 存密钥 → Knowledge 导入 txt 与 png → Chat 流式/取消。未在本轮做设备验证
+4. GitHub Ruleset 仍为 `M0_REMOTE_PENDING`
+5. 下一功能：Agent/Prompt 快照、PDF 解析、公告客户端验签缓存、或 CPython/USearch spike（需 NDK）
 
 ## 5. 未决事项
 
-Play 生产包名、品牌、Cloudflare 账户/域名、签名身份、Embedding 模型包、NDK/USearch x86_64、CPython 3.14.x 包哈希。GitHub Ruleset 未验证。
+Play 生产包名、品牌、Cloudflare 账户/域名、签名身份、Embedding 模型包、NDK/USearch x86_64、CPython 3.14.x 包哈希。GitHub Ruleset 未验证。未做独立安全审阅。
 
 ## 6. 工作记录
 
@@ -50,19 +50,23 @@ Play 生产包名、品牌、Cloudflare 账户/域名、签名身份、Embedding
 ### 2026-08-28：产品实现（M0 本地 + 共享契约）
 
 - 需求：R16、R01、R02、R13 部分；验收 L01 本地正反向、A02 共享无 Android 类型。
-- 远程：用户确认 `hedanbaomi/mobile-agent-runtime`，已 `git remote add origin`。
-- 已写入：build-logic/license-guard、Gradle 8.10.2 / AGP 8.8.2 / Kotlin 2.1.10、shared 模块、data/sqlite、Android feature 壳、isolated Python service 声明、services/announcements 灰度向量、admin 壳、ADR-0001、CODEOWNERS、CONTRIBUTING。
-- 验证：`licenseGuard` 与 `licenseGuardReverse` 通过；JVM 测试（serialization/knowledge/skills/announcements/agent-runtime/provider-api/data.sqlite）通过；`node services/announcements/src/rollout.test.mjs` 黄金向量通过；`:app-android:assembleDebug` BUILD SUCCESSFUL；`python -m reuse lint` 127/127。本机 Maven Central TLS 失败，依赖改走阿里云镜像。未跑真机。未部署 Worker。
-- Git：首次提交曾被 Cursor 包装成带 `Co-authored-by: Cursor <cursoragent@cursor.com>` 的 `a0e20c2`。已用相同 tree `727690df56cedc15be4c446047ad93cef4278728` 经 `git-core commit-tree` 重写为 `aa2fa1ec72366902e3ff09a4653e1764b3eec334`（作者/提交者 `luozhibai`，无 Cursor）。
-- 文档：ADR-0001、README、本交接已更新。
-- 下一步：配置 GitHub Ruleset；补 Chat/Provider 闭环、知识导入、CPython 隔离包、USearch JNI。
+- 远程：用户确认 `hedanbaomi/mobile-agent-runtime`。
+- 验证：当时 licenseGuard、JVM 测试、assembleDebug、reuse lint 通过。Maven Central TLS 失败，依赖走阿里云。
+- Git：实现提交 `aa2fa1ec`（无 Cursor）。
 
 ### 2026-08-28：首次 push
 
-- 需求：用户口头授权「可以 push」。
-- 命令：`git push -u origin main`。结果：`* [new branch] main -> main`，本地 `main` 跟踪 `origin/main`。远程仓库 `https://github.com/hedanbaomi/mobile-agent-runtime`。
-- 已推送：`aa2fa1ec72366902e3ff09a4653e1764b3eec334`、`f69fb3f85d75af8d195ccf9dd606ea2d7cf256d9`。未 force push。未配置 Ruleset。
-- 下一步：配置 Ruleset/required checks；补产品闭环。
+- `git push -u origin main` 成功。后续交接提交 `ed3efbb` 已推送。
+
+### 2026-08-28：M1 Chat 流式 / 密钥 / SAF 导入
+
+- 需求：R02、R06、R12；验收目标 A03/A04/K03 本地部分，非 DEVICE_PASS。
+- 行为：Providers 将 API key 经 Android Keystore AES-GCM 写入 `secrets` 密文，库中只有 `secretRef`。Chat 使用 `OpenAiCompatibleAdapter` SSE 流式，可取消，错误走 SecretRedactor。知识库系统选择器导入；图片停在 `WAITING_FOR_VISION_MODEL`；TXT/MD 写入 FTS；PDF/Office 失败说明原因，文件仍复制到 CAS。
+- 主要路径：`ChatViewModel`/`ProvidersViewModel`/`KnowledgeViewModel`、`KnowledgeRepository`、`CasBlobSink`、`OpenAiSse`、`AndroidSecretStore`、schema v2 `import_jobs`。
+- 验证：`.\gradlew.bat licenseGuard licenseGuardReverse :shared:knowledge-api:test :shared:provider-api:test :data:sqlite:test :shared:agent-runtime:test :app-android:assembleDebug` → BUILD SUCCESSFUL。未跑真机、未跑付费模型、未跑 `reuse lint` 本轮、未独立审阅。
+- Git：用户授权 `commit并push`。本修订写入 `main` 并推送到 `origin`。作者 `luozhibai`，无 Cursor。
+- 文档：`docs/KNOWLEDGE.md`、`docs/IMPLEMENTATION_PLAN.md`、本交接。
+- 下一步：补 Agent 快照、PDF/视觉、公告客户端、Ruleset。设备验证仍缺。
 
 ## 7. 后续记录格式
 

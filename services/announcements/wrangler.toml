@@ -1,0 +1,7 @@
+# SPDX-FileCopyrightText: 2026 mobileAgentRuntime contributors
+# SPDX-License-Identifier: AGPL-3.0-only
+name = "mobile-agent-runtime-announcements"
+main = "src/worker.mjs"
+compatibility_date = "2025-01-01"
+
+# Local/dev only. Production Cloudflare resources are not created in this task.

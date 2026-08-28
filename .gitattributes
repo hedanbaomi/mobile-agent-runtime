@@ -1,0 +1,9 @@
+# SPDX-FileCopyrightText: 2026 mobileAgentRuntime contributors
+# SPDX-License-Identifier: AGPL-3.0-only
+* text=auto
+*.md text eol=lf
+/.gitignore text eol=lf
+/.gitattributes text eol=lf
+# Preserve license bytes for the future licenseGuard hash on every platform.
+/LICENSE -text
+/LICENSES/AGPL-3.0-only.txt -text

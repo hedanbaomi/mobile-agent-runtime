@@ -1,0 +1,26 @@
+# SPDX-FileCopyrightText: 2026 mobileAgentRuntime contributors
+# SPDX-License-Identifier: AGPL-3.0-only
+
+# Local CodeGraph database is generated; initialize it per checkout.
+/.codegraph/
+.gradle/
+**/build/
+local.properties
+.idea/
+*.iml
+.env
+.env.*
+!.env.example
+*.jks
+*.keystore
+.wrangler/
+node_modules/
+.private/
+.kotlin/
+**/captures/
+*.apk
+*.aab
+*.ap_
+.cxx/
+*.hprof
+

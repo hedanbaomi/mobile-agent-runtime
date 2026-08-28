@@ -1,0 +1,36 @@
+# SPDX-FileCopyrightText: 2026 mobileAgentRuntime contributors
+# SPDX-License-Identifier: AGPL-3.0-only
+
+version = 1
+
+SPDX-PackageName = "mobileAgentRuntime"
+SPDX-PackageSupplier = "mobileAgentRuntime contributors"
+SPDX-PackageDownloadLocation = "https://github.com/hedanbaomi/mobile-agent-runtime"
+
+[[annotations]]
+path = [
+    "gradlew",
+    "gradlew.bat",
+    "gradle/wrapper/gradle-wrapper.jar",
+    "gradle/wrapper/gradle-wrapper.properties",
+]
+precedence = "override"
+SPDX-FileCopyrightText = "Copyright Gradle contributors"
+SPDX-License-Identifier = "Apache-2.0"
+
+[[annotations]]
+path = ["app-android/src/main/assets/AGPL-3.0-only.txt"]
+precedence = "override"
+SPDX-FileCopyrightText = "Copyright (C) 2007 Free Software Foundation, Inc. <https://fsf.org/>"
+SPDX-License-Identifier = "AGPL-3.0-only"
+
+[[annotations]]
+path = [
+    "agent.md",
+    "HANDOFF.md",
+    "LICENSE_POLICY.md",
+    "docs/SKILLS_AND_SECURITY.md",
+]
+precedence = "aggregate"
+SPDX-FileCopyrightText = "2026 mobileAgentRuntime contributors"
+SPDX-License-Identifier = "AGPL-3.0-only"

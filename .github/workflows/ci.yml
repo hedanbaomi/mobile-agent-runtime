@@ -1,0 +1,35 @@
+# SPDX-FileCopyrightText: 2026 mobileAgentRuntime contributors
+# SPDX-License-Identifier: AGPL-3.0-only
+
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Grant wrapper execute permission
+        run: chmod +x gradlew
+      - name: licenseGuard
+        run: ./gradlew licenseGuard licenseGuardReverse --no-daemon
+      - name: REUSE
+        run: |
+          python -m pip install reuse
+          python -m reuse lint
+      - name: Unit tests and Android debug APK
+        run: ./gradlew check :app-android:assembleDebug --no-daemon
+      - name: CycloneDX placeholder evidence
+        run: |
+          mkdir -p docs/evidence
+          echo "SBOM generation is wired after the first successful assemble; see HANDOFF." > docs/evidence/sbom-pending.txt

@@ -1,0 +1,19 @@
+# SPDX-FileCopyrightText: 2026 mobileAgentRuntime contributors
+# SPDX-License-Identifier: AGPL-3.0-only
+#
+# GitHub owner confirmed 2026-08-28: hedanbaomi/mobile-agent-runtime.
+# This file does not replace repository Rulesets; those remain M0_REMOTE_PENDING
+# until verified on GitHub.
+
+* @hedanbaomi
+
+/LICENSE @hedanbaomi
+/LICENSES/ @hedanbaomi
+/LICENSE_POLICY.md @hedanbaomi
+/REUSE.toml @hedanbaomi
+/AGENTS.md @hedanbaomi
+/agent.md @hedanbaomi
+/CONTRIBUTING.md @hedanbaomi
+/CODEOWNERS @hedanbaomi
+/build-logic/license-guard/ @hedanbaomi
+/.github/ @hedanbaomi

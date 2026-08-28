@@ -13,7 +13,7 @@
 | --- | --- |
 | 产品 | M1 部分实现。M0.5 UAR 与 M2 NAR、M3 KAR 已修复。M4/M5 本地 JVM 已落地。完整 MVP 未完成（缺 M6 CPython） |
 | 业务源码/构建 | 本轮 `licenseGuard`/`licenseGuardReverse`、knowledge/skills/agent-runtime/sqlite/provider/announcements 测试、`:app-android:assembleDebug` 通过；REUSE 194/194 |
-| Git | 分支 `main` 跟踪 `origin/main`；本轮只 commit、不 push。作者 `luozhibai`，无 Cursor trailer |
+| Git | 分支 `main` 跟踪 `origin/main`，本地 ahead 1。M4/M5 提交 `75fc38110618d4c7a731e1d9c6b0efa448c2f987`。作者 `luozhibai`，无 Cursor trailer。未 push |
 | CodeGraph | 仓库无 `.codegraph/` 工作副本；本轮用直接读文件定位 |
 | 许可 | `python -B -m reuse lint` 退出 0（194/194）；未改 LICENSE 正文 |
 | 授权范围 | 用户已授权完成 M4 与 M5 并只 commit、先不 push。仍不授权 Cloudflare 生产部署、不授权把 hashing 写成 ONNX、不授权嵌入 CPython |
@@ -307,7 +307,7 @@ U02 的横屏、IME、大字号、触控、对比度、焦点及实际字体回�
 - 验证：`.\gradlew.bat licenseGuard licenseGuardReverse :shared:knowledge-api:test :shared:skills-api:test :shared:agent-runtime:test :shared:provider-api:test :data:sqlite:test :shared:announcements:test :app-android:assembleDebug --no-daemon` BUILD SUCCESSFUL；`python -B -m reuse lint` 194/194。
 - 未执行：真机/模拟器、Cloudflare、ONNX/USearch JNI、K06 设备负载、CPython 隔离、独立审阅、push。
 - 文档：`docs/KNOWLEDGE.md` 第10节、`docs/SKILLS_AND_SECURITY.md` 第9节、`docs/IMPLEMENTATION_PLAN.md`、本交接。
-- Git：本轮提交后回写 SHA；不 push。
+- Git：提交 `75fc38110618d4c7a731e1d9c6b0efa448c2f987`（作者 `luozhibai`，无 Cursor）。按授权未 push，`origin/main` 仍落后本地。
 
 ## 7. 后续记录格式
 

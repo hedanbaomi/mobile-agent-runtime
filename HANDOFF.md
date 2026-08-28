@@ -13,7 +13,7 @@
 | --- | --- |
 | 产品 | M1 部分接通：OpenAI 兼容流式 Chat、Keystore 密钥、SAF 导入；完整 MVP 未完成 |
 | 业务源码/构建 | Gradle 多模块；`:app-android:assembleDebug` 本轮通过 |
-| Git | 分支 `main` 跟踪 `origin/main`；用户已于 2026-08-28 授权 commit 并 push。本修订含 M1 Chat/Keystore/SAF。作者须为 `luozhibai`，无 Cursor trailer |
+| Git | 分支 `main` 跟踪 `origin/main`；HEAD `7a71c26e2dcc8169bb50636e8391dc4c18881577` 已 push。作者/提交者 `luozhibai`，无 Cursor trailer |
 | CodeGraph | 本轮曾执行 `codegraph sync .`（扫描/解析开始；CLI 提前返回，索引是否写完未确认） |
 | 许可 | 本轮 `licenseGuard` / `licenseGuardReverse` 通过 |
 | 授权范围 | 实现产品；提交时不得把 Cursor 写入贡献者；用户已授权 push `main`，并于 2026-08-28 再次授权 commit 并 push 本轮 M1 |
@@ -64,7 +64,7 @@ Play 生产包名、品牌、Cloudflare 账户/域名、签名身份、Embedding
 - 行为：Providers 将 API key 经 Android Keystore AES-GCM 写入 `secrets` 密文，库中只有 `secretRef`。Chat 使用 `OpenAiCompatibleAdapter` SSE 流式，可取消，错误走 SecretRedactor。知识库系统选择器导入；图片停在 `WAITING_FOR_VISION_MODEL`；TXT/MD 写入 FTS；PDF/Office 失败说明原因，文件仍复制到 CAS。
 - 主要路径：`ChatViewModel`/`ProvidersViewModel`/`KnowledgeViewModel`、`KnowledgeRepository`、`CasBlobSink`、`OpenAiSse`、`AndroidSecretStore`、schema v2 `import_jobs`。
 - 验证：`.\gradlew.bat licenseGuard licenseGuardReverse :shared:knowledge-api:test :shared:provider-api:test :data:sqlite:test :shared:agent-runtime:test :app-android:assembleDebug` → BUILD SUCCESSFUL。未跑真机、未跑付费模型、未跑 `reuse lint` 本轮、未独立审阅。
-- Git：用户授权 `commit并push`。本修订写入 `main` 并推送到 `origin`。作者 `luozhibai`，无 Cursor。
+- Git：用户授权 `commit并push`。已写入并推送 `7a71c26e2dcc8169bb50636e8391dc4c18881577`。作者 `luozhibai`，无 Cursor。
 - 文档：`docs/KNOWLEDGE.md`、`docs/IMPLEMENTATION_PLAN.md`、本交接。
 - 下一步：补 Agent 快照、PDF/视觉、公告客户端、Ruleset。设备验证仍缺。
 

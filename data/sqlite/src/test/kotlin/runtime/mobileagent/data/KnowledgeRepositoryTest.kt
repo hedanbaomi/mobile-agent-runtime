@@ -21,6 +21,7 @@ import runtime.mobileagent.knowledge.sha256Hex
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.runBlocking
 import java.io.ByteArrayOutputStream
+import java.util.zip.DeflaterOutputStream
 import java.util.zip.ZipEntry
 import java.util.zip.ZipOutputStream
 
@@ -1205,6 +1206,33 @@ class KnowledgeRepositoryTest {
     }
 
     @Test
+    fun rawFlatePdfImageDoesNotReachVisionOrBecomeReady() {
+        val db = JdbcSqlConnection()
+        Migrations.apply(db)
+        var calls = 0
+        val vision = runtime.mobileagent.knowledge.VisionBackend {
+            calls += 1
+            runtime.mobileagent.knowledge.VisionOutcome.Success(
+                runtime.mobileagent.knowledge.VisionSuccess("ocr", "desc"),
+            )
+        }
+        val repo = KnowledgeRepository(db, MemoryBlobSink(), vision = vision)
+        val pdf = rawFlateImagePdf("raw image label")
+
+        val job = repo.importBytes(
+            "raw-image.pdf",
+            "application/pdf",
+            pdf,
+            visionConfigured = true,
+            visionConsent = true,
+        )
+
+        assertEquals(ImportStage.FAILED, job.stage)
+        assertEquals(0, calls)
+        assertTrue(repo.search("raw image label").isEmpty())
+    }
+
+    @Test
     fun docxExternalImageDoesNotBecomeReadyOrFetch() {
         val db = JdbcSqlConnection()
         Migrations.apply(db)
@@ -1535,6 +1563,24 @@ class KnowledgeRepositoryTest {
             zip.closeEntry()
         }
         return out.toByteArray()
+    }
+
+    private fun rawFlateImagePdf(label: String): ByteArray {
+        val pdf = runtime.mobileagent.knowledge.PdfParser.writePdfWithImageXObject(label)
+        val marker = "/Filter /DCTDecode /Length 4 >>\nstream\n"
+        val markerStart = String(pdf, Charsets.ISO_8859_1).indexOf(marker)
+        require(markerStart >= 0) { "Image object marker not found" }
+        val oldPayloadStart = markerStart + marker.length
+        val oldPayloadEnd = oldPayloadStart + 4
+        val compressed = ByteArrayOutputStream().also { out ->
+            DeflaterOutputStream(out).use { it.write(byteArrayOf(0x7F, 0x20, 0x10)) }
+        }.toByteArray()
+        return ByteArrayOutputStream().apply {
+            write(pdf, 0, markerStart)
+            write("/Filter /FlateDecode /Length ${compressed.size} >>\nstream\n".toByteArray(Charsets.ISO_8859_1))
+            write(compressed)
+            write(pdf, oldPayloadEnd, pdf.size - oldPayloadEnd)
+        }.toByteArray()
     }
 
     private fun testApiBinding(

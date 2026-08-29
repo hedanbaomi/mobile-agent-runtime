@@ -3,7 +3,7 @@
 
 # Skills 执行与安全模型
 
-状态：M5 本地 JVM 已落地（清单检查、A—E 分类、内置工具与 Tool Loop）。M5R/M5RR 修复后：工具协议含 assistant.tool_calls、live grant、read_document KB 校验、HTTPS/IP 字面值拒绝、ZIP 结构/symlink class E、预算取消上游。对应R09—R12、S01—S11。**知识是数据，Prompt是指令，Skill脚本是可执行代码，三者不共享信任等级。** Python 隔离执行仍属 M6，不能用指令展示代替执行能力，本轮不宣称完整 MVP。
+状态：M5 本地 JVM 已落地（清单检查、A—E 分类、内置工具与 Tool Loop）。M5R/M5RR 修复后：工具协议含 assistant.tool_calls、live grant、read_document KB 校验、HTTPS/IP 字面值拒绝、完整 EOCD/central/local ZIP 结构校验、canonical duplicate/symlink class E、预算取消上游。对应R09—R12、S01—S11。**知识是数据，Prompt是指令，Skill脚本是可执行代码，三者不共享信任等级。** Python 隔离执行仍属 M6，不能用指令展示代替执行能力，本轮不宣称正式 release。
 
 ## 1. Skill包与兼容性
 
@@ -177,3 +177,11 @@ App外部导入Python仍涉及动态代码和平台政策约束。首版仅用�
 - HTTP 拒绝 IP 字面值（含 IPv6 私网、整数 IPv4）；解析结果逐跳核验，私网/loopback/link-local 不得连接。
 - Runtime 以剩余预算 `withTimeout` 取消模型流、审批等待与工具；上游 delay 不再把超时事件全部消费完。
 - 截断 ZIP、无 EOCD、Unix symlink 属性一律 class E，不再把 PK 前缀空包当成 instruction-only A。
+
+## 12. Skill ZIP 与运行预算收口（2026-08-29）
+
+- Skill ZIP 在读取或暴露 manifest/source 前校验单磁盘 EOCD、central directory 边界/数量、每个 local header，以及名称、flags、method、CRC 与大小一致性；fake EOCD、无 central directory、central/local 分叉均归 Class E。
+- 路径统一分隔符、去除 `.`、折叠可解析层级、NFC 归一化并按 `Locale.ROOT` 小写后检查重复；大小写或 canonical duplicate 不再允许两个 manifest/source 产生审批与执行分叉。
+- bit3 data descriptor 的实际 CRC、压缩/解压大小必须与 central entry 一致；目录项也在跳过业务内容前执行同样的完整性、单项大小、压缩比和聚合总量检查，目录名不能成为资源限制旁路。
+- Agent Runtime 对 `beforeModelRequest` 使用自身剩余预算的 `withTimeoutOrNull`：自身 deadline 到期记录 `BUDGET_EXHAUSTED` 且不启动模型；调用方取消仍沿取消路径处理，不伪装成预算耗尽。
+- 新回归覆盖 fake EOCD、大小写/规范化重复路径、central/local 名称不一致和虚拟时间下的 pre-request budget timeout。

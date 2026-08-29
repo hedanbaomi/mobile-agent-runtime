@@ -6,7 +6,9 @@ package runtime.mobileagent.agent
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.toList
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.test.runTest
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
@@ -125,6 +127,37 @@ class AgentRuntimeTest {
         assertTrue(events.any { it is ModelEvent.Failed && it.sanitizedMessage.contains("budget") })
         assertEquals(RunState.BUDGET_EXHAUSTED, run.state)
         assertTrue(events.none { it is ModelEvent.Completed })
+    }
+
+    @Test
+    fun beforeModelRequestTimeoutExhaustsBudgetWithoutStartingModel() = runTest {
+        var callbackStarted = false
+        val adapter = ScriptedAdapter(listOf(listOf(ModelEvent.TextDelta("never"), ModelEvent.Completed)))
+        val runtime = AgentRuntime(
+            adapter,
+            clock = { 0L },
+            tools = ToolBroker(emptySet(), ToolContext({ _, _, _ -> "{}" }, { _, _ -> "{}" })),
+        )
+        val run = AgentRun("r", "s", "c", budget = RunBudget(maxRuntimeMs = 20))
+
+        val events = runtime.run(
+            AgentRuntimeRequest(
+                run = run,
+                prompt = prompt(),
+                modelId = "model",
+                secret = charArrayOf('s'),
+                toolsEnabled = false,
+                beforeModelRequest = {
+                    callbackStarted = true
+                    delay(21)
+                },
+            ),
+        ).toList()
+
+        assertTrue(callbackStarted)
+        assertEquals(RunState.BUDGET_EXHAUSTED, run.state)
+        assertTrue(events.any { it is RuntimeEvent.ModelEvent && it.event is ModelEvent.Failed })
+        assertTrue(adapter.requests.isEmpty())
     }
 
     @Test

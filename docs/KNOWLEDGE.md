@@ -3,7 +3,7 @@
 
 # 知识库、多模态和检索契约
 
-状态（2026-08-29）：Round21 debug 集成已接入经 hash 校验的 MiniLM ONNX 模型包、USearch JNI、PDF 页渲染与 API Embedding 独立授权。API36/x86_64 上 API Embedding 5 项、Knowledge 4 项设备测试通过；schema v10 已包含查询未知门禁、可恢复外发 operation 与查询向量缓存。320 文件/472,363,598 bytes fixture 完成 20 文本 READY、300 图片 WAITING、专名引用、幂等和共享 blob 删除隔离，但未执行真实 Vision、全阶段故障注入及 Android 12—16 前台任务矩阵，明确不是完整 K06 PASS。对应 R05—R08、K01—K08；最新证据见 [knowledge-runtime](evidence/2026-08-29/knowledge-runtime.md)、[knowledge-load](evidence/2026-08-29/knowledge-load.md)、[final-debug-validation](evidence/2026-08-29/final-debug-validation.md) 与 [HANDOFF](../HANDOFF.md)。
+状态（2026-08-29）：Round21 debug 集成已接入经 hash 校验的 MiniLM ONNX 模型包、USearch JNI、PDF 页渲染与 API Embedding 独立授权。API36/x86_64 上 API Embedding 5 项、Knowledge 4 项设备测试通过；schema v10 已包含查询未知门禁、可恢复外发 operation 与查询向量缓存。320 文件/472,363,598 bytes fixture 完成 20 文本 READY、300 图片 WAITING、专名引用、幂等和共享 blob 删除隔离；API31/34/35/36 上最终 debug 制品的真实 WorkManager、前台契约、等待终态与取消短测各 3/3 通过。PDF parser v5 只把签名与 DCT filter 同时可信的 JPEG 作为 IMAGE，raw/Flate XObject 保留为 PAGE 阻断且仓储层验证 Vision 零调用。尚未执行真实 Vision、全阶段故障注入、Android 15 六小时 timeout 与 Android 16 Job 配额耗尽，明确不是完整 K06 PASS。对应 R05—R08、K01—K08；最新证据见 [knowledge-runtime](evidence/2026-08-29/knowledge-runtime.md)、[knowledge-load](evidence/2026-08-29/knowledge-load.md)、[foreground-import-matrix](evidence/2026-08-29/foreground-import-matrix.md)、[final-debug-validation](evidence/2026-08-29/final-debug-validation.md) 与 [HANDOFF](../HANDOFF.md)。
 
 ## 1. 数据模型与一致性
 
@@ -186,3 +186,11 @@ PDF 页光栅化、ONNX、设备原图查看器仍未做。独立复审前不把
 - 严格模式比较命中图与可附图集合；超限、缺失 CAS、超过 4 张均阻止，除非用户显式文本降级并在回答中保留警告。
 - Vision 同意与缓存绑定 `providerId|modelId|endpoint|revision`。换 Provider/域名/版本后零外发直至重确认；同 modelId 跨 Provider 不再共用缓存。schema v7 增加 `import_jobs.vision_binding_json`。
 - EPUB 按章节目录解析相对 `src`，同名文件不再错章绑定。
+
+## 13. PDF XObject 媒体真实性修复（2026-08-29）
+
+- parser fingerprint 升为 `pdf-text-v5-pdfrenderer`，使旧版本解析结果按正常版本机制重建，不沿用存在媒体类型歧义的结果。
+- `/Filter /DCTDecode` 与数组形式 `/Filter [/DCTDecode]` 都先解析为 filter 列表；仅当 filter 恰为单一 DCT 且 payload 具有 JPEG 签名时生成 `IMAGE image/jpeg`。
+- raw/Flate PDF Image XObject 不再以 `application/octet-stream` 发送给 Vision。若它属于页面且没有受信任 rasterizer 输出，该页保留空 payload 的 `PAGE` 阻断并使导入失败/等待，不发布不完整 READY 内容。
+- `/Contents [A B]` 中每个流按自身 filter 独立解码；缺失、悬空、unsupported 或未完整解压的内容流都要求 rasterizer/page blocker，不能被同页有效 JPEG 掩盖。
+- `DocumentParserTest` 覆盖 raw/Flate、DCT 数组、同页混合图像、多内容流与悬空内容引用；`KnowledgeRepositoryTest` 进一步断言 raw/Flate fixture 导入失败、不可检索且 Vision backend 调用次数为 0。

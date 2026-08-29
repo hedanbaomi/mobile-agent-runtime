@@ -3,8 +3,8 @@
 
 # Android UI implementation evidence
 
-Date: 2026-08-29  
-Design baseline: `7511b22ffd7a7d3021b7857b6500cbe75d037ad6`  
+Date: 2026-08-29
+Design baseline: `7511b22ffd7a7d3021b7857b6500cbe75d037ad6`
 Scope: feature Compose surfaces, the new `runtime.mobileagent.ui` shell, and the MainActivity host wiring.
 
 ## Implemented mapping

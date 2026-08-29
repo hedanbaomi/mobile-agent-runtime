@@ -8,6 +8,7 @@ import org.junit.jupiter.api.Assertions.assertFalse
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
 import java.io.ByteArrayOutputStream
+import java.util.zip.CRC32
 import java.util.zip.ZipEntry
 import java.util.zip.ZipOutputStream
 
@@ -149,6 +150,144 @@ class SkillArchiveTest {
     }
 
     @Test
+    fun localHeaderWithFakeEocdAndNoCentralDirectoryIsClassE() {
+        val valid = zip("SKILL.md" to "# helper\n".toByteArray())
+        val centralDirectoryOffset = signatureOffset(valid, 0x50, 0x4B, 0x01, 0x02)
+        val fakeEocd = ByteArray(22).also {
+            it[0] = 0x50
+            it[1] = 0x4B
+            it[2] = 0x05
+            it[3] = 0x06
+        }
+        val localHeaderOnly = valid.copyOfRange(0, centralDirectoryOffset) + fakeEocd
+
+        val inspection = SkillArchive.inspect(localHeaderOnly)
+
+        assertEquals(CompatibilityClass.E, inspection.classification)
+        assertFalse(inspection.installable)
+    }
+
+    @Test
+    fun caseInsensitiveDuplicatePathsAreClassEWithoutSourceExposure() {
+        val bytes = zip(
+            "mobile-skill.json" to validManifest("python").toByteArray(),
+            "MOBILE-SKILL.JSON" to validManifest("python").toByteArray(),
+            "SKILL.md" to "# helper\n".toByteArray(),
+        )
+
+        val inspection = SkillArchive.inspect(bytes)
+
+        assertEquals(CompatibilityClass.E, inspection.classification)
+        assertFalse(inspection.installable)
+        assertEquals(null, inspection.manifest)
+        assertEquals(null, inspection.skillMarkdown)
+        assertEquals(null, inspection.rawManifestJson)
+    }
+
+    @Test
+    fun normalizedDuplicatePathsAreClassEWithoutSourceExposure() {
+        val bytes = zip(
+            "./mobile-skill.json" to validManifest("python").toByteArray(),
+            "mobile-skill.json" to validManifest("python").toByteArray(),
+        )
+
+        val inspection = SkillArchive.inspect(bytes)
+
+        assertEquals(CompatibilityClass.E, inspection.classification)
+        assertFalse(inspection.installable)
+        assertEquals(null, inspection.manifest)
+        assertEquals(null, inspection.rawManifestJson)
+    }
+
+    @Test
+    fun localAndCentralEntryNamesMustMatch() {
+        val valid = zip("SKILL.md" to "# helper\n".toByteArray())
+        val mismatched = patchCentralName(valid, "OTHER.md")
+
+        val inspection = SkillArchive.inspect(mismatched)
+
+        assertEquals(CompatibilityClass.E, inspection.classification)
+        assertFalse(inspection.installable)
+    }
+
+    @Test
+    fun signedDataDescriptorArchiveRemainsSupported() {
+        val inspection = SkillArchive.inspect(zip("SKILL.md" to "# helper\n".toByteArray()))
+
+        assertEquals(CompatibilityClass.A, inspection.classification)
+        assertTrue(inspection.installable)
+    }
+
+    @Test
+    fun unsignedDataDescriptorArchiveRemainsSupported() {
+        val signed = zip("SKILL.md" to "# helper\n".toByteArray())
+        val unsigned = removeDataDescriptorSignature(signed)
+
+        val inspection = SkillArchive.inspect(unsigned)
+
+        assertEquals(CompatibilityClass.A, inspection.classification)
+        assertTrue(inspection.installable)
+    }
+
+    @Test
+    fun archiveWithoutDataDescriptorRemainsSupported() {
+        val inspection = SkillArchive.inspect(storedZip("SKILL.md" to "# helper\n".toByteArray()))
+
+        assertEquals(CompatibilityClass.A, inspection.classification)
+        assertTrue(inspection.installable)
+    }
+
+    @Test
+    fun dataDescriptorCentralCrcMismatchIsClassE() {
+        val valid = zip("SKILL.md" to "# helper\n".toByteArray())
+        val mismatched = patchCentralU32(valid, fieldOffset = 16, value = 0L)
+
+        val inspection = SkillArchive.inspect(mismatched)
+
+        assertEquals(CompatibilityClass.E, inspection.classification)
+        assertFalse(inspection.installable)
+    }
+
+    @Test
+    fun dataDescriptorCentralSizeMismatchIsClassE() {
+        val valid = zip("SKILL.md" to "# helper\n".toByteArray())
+        val mismatched = patchCentralU32(valid, fieldOffset = 24, value = 0L)
+
+        val inspection = SkillArchive.inspect(mismatched)
+
+        assertEquals(CompatibilityClass.E, inspection.classification)
+        assertFalse(inspection.installable)
+    }
+
+    @Test
+    fun directoryDescriptorCentralMetadataMismatchIsClassE() {
+        val valid = zip(
+            "empty/" to ByteArray(0),
+            "SKILL.md" to "# helper\n".toByteArray(),
+        )
+        val mismatched = patchCentralU32(valid, fieldOffset = 16, value = 1L)
+
+        val inspection = SkillArchive.inspect(mismatched)
+
+        assertEquals(CompatibilityClass.E, inspection.classification)
+        assertFalse(inspection.installable)
+    }
+
+    @Test
+    fun directoryPayloadCannotBypassCompressionRatioLimit() {
+        val bytes = zip(
+            "compressed-directory/" to ByteArray(128 * 1024),
+            "SKILL.md" to "# helper\n".toByteArray(),
+        )
+
+        val inspection = SkillArchive.inspect(bytes)
+
+        assertEquals(CompatibilityClass.E, inspection.classification)
+        assertFalse(inspection.installable)
+        assertTrue(inspection.reasons.any { it.contains("Compression bomb") })
+    }
+
+    @Test
     fun unixSymlinkAttributeIsClassE() {
         val raw = zip("SKILL.md" to "# helper\n".toByteArray())
         val patched = patchUnixSymlink(raw)
@@ -174,6 +313,79 @@ class SkillArchiveTest {
             i++
         }
         error("central directory not found")
+    }
+
+    private fun signatureOffset(bytes: ByteArray, vararg signature: Int): Int {
+        require(signature.size == 4)
+        for (offset in 0..bytes.size - signature.size) {
+            if (signature.indices.all { index ->
+                    (bytes[offset + index].toInt() and 0xFF) == signature[index]
+                }) {
+                return offset
+            }
+        }
+        error("signature not found")
+    }
+
+    private fun patchCentralName(bytes: ByteArray, replacement: String): ByteArray {
+        val out = bytes.copyOf()
+        val centralOffset = signatureOffset(out, 0x50, 0x4B, 0x01, 0x02)
+        val nameLength = (out[centralOffset + 28].toInt() and 0xFF) or
+            ((out[centralOffset + 29].toInt() and 0xFF) shl 8)
+        val nameBytes = replacement.toByteArray()
+        require(nameBytes.size == nameLength)
+        nameBytes.copyInto(out, destinationOffset = centralOffset + 46)
+        return out
+    }
+
+    private fun patchCentralU32(bytes: ByteArray, fieldOffset: Int, value: Long): ByteArray {
+        require(value in 0..0xFFFF_FFFFL)
+        val out = bytes.copyOf()
+        val centralOffset = signatureOffset(out, 0x50, 0x4B, 0x01, 0x02)
+        repeat(4) { index ->
+            out[centralOffset + fieldOffset + index] = ((value ushr (index * 8)) and 0xFF).toByte()
+        }
+        return out
+    }
+
+    private fun removeDataDescriptorSignature(bytes: ByteArray): ByteArray {
+        val descriptorOffset = signatureOffset(bytes, 0x50, 0x4B, 0x07, 0x08)
+        val unsigned = bytes.copyOfRange(0, descriptorOffset) + bytes.copyOfRange(descriptorOffset + 4, bytes.size)
+        val eocdOffset = signatureOffset(unsigned, 0x50, 0x4B, 0x05, 0x06)
+        val centralOffset = readU32(unsigned, eocdOffset + 16)
+        writeU32(unsigned, eocdOffset + 16, centralOffset - 4)
+        return unsigned
+    }
+
+    private fun readU32(bytes: ByteArray, offset: Int): Long =
+        (bytes[offset].toLong() and 0xFF) or
+            ((bytes[offset + 1].toLong() and 0xFF) shl 8) or
+            ((bytes[offset + 2].toLong() and 0xFF) shl 16) or
+            ((bytes[offset + 3].toLong() and 0xFF) shl 24)
+
+    private fun writeU32(bytes: ByteArray, offset: Int, value: Long) {
+        require(value in 0..0xFFFF_FFFFL)
+        repeat(4) { index ->
+            bytes[offset + index] = ((value ushr (index * 8)) and 0xFF).toByte()
+        }
+    }
+
+    private fun storedZip(vararg files: Pair<String, ByteArray>): ByteArray {
+        val out = ByteArrayOutputStream()
+        ZipOutputStream(out).use { zip ->
+            files.forEach { (name, payload) ->
+                val crc = CRC32().also { it.update(payload) }.value
+                val entry = ZipEntry(name).apply {
+                    method = ZipEntry.STORED
+                    size = payload.size.toLong()
+                    this.crc = crc
+                }
+                zip.putNextEntry(entry)
+                zip.write(payload)
+                zip.closeEntry()
+            }
+        }
+        return out.toByteArray()
     }
 
     private fun validManifest(kind: String): String = """

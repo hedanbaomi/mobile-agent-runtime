@@ -10,6 +10,7 @@ import kotlinx.coroutines.flow.cancellable
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
@@ -195,7 +196,19 @@ class AgentRuntime(
                     finish()
                     return@flow
                 }
-                withTimeout(remainingMs(run)) { request.beforeModelRequest() }
+                // Use withTimeoutOrNull so the runtime-owned deadline is
+                // distinguishable from a caller cancellation.  Catching a
+                // TimeoutCancellationException here would also catch a
+                // parent timeout and incorrectly turn it into a budget
+                // terminal state.
+                val beforeRequestCompleted = withTimeoutOrNull(remainingMs(run)) {
+                    request.beforeModelRequest()
+                    true
+                }
+                if (beforeRequestCompleted != true) {
+                    emitBudget()
+                    return@flow
+                }
                 emit(
                     RuntimeEvent.RequestPrepared(
                         operationId = request.operationId,

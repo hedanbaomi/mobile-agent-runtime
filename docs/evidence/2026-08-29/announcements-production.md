@@ -3,11 +3,11 @@
 
 # Announcements production readiness evidence
 
-Date: 2026-08-29 (Asia/Taipei)  
-Scope: `services/announcements/**`, `admin/announcements/**` only.  
-Worker: `mobile-agent-runtime-announcements`  
-D1: `mobile-agent-runtime-announcements-prod` / `06cf40c7-dd84-4560-859a-1a417f47207e`  
-Origin: `https://mobile-agent-runtime-announcements.gmailforzhibai.workers.dev`  
+Date: 2026-08-29 (Asia/Taipei)
+Scope: `services/announcements/**`, `admin/announcements/**` only.
+Worker: `mobile-agent-runtime-announcements`
+D1: `mobile-agent-runtime-announcements-prod` / `06cf40c7-dd84-4560-859a-1a417f47207e`
+Origin: `https://mobile-agent-runtime-announcements.gmailforzhibai.workers.dev`
 Signing key id: `mar-prod-20260829-1`
 
 ## Boundary

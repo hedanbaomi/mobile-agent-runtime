@@ -3,7 +3,7 @@
 
 # 技术实现方案
 
-版本：v1.4 debug 集成记录，2026-08-29；继承 v1.2 页面设计基线及用户后续 66ccff 修订。状态：**debug 产品集成通过，完整验收仍有外部门禁**。M1/M5 已接通持久会话、不可变快照、真实请求检查、工具循环、MCP/Python 工具与未知结果门禁；受控 Provider 的消息恢复与计算器循环已在模拟器验证。M3/M4 已接入 MiniLM ONNX、USearch JNI、PDF 页渲染、原图引用、API Embedding 独立授权；Round21 API Embedding 5 项与 Knowledge 4 项设备测试通过，但 320 文件仅完成本地文本/存储等待组件，不能标完整 K06。M7 已实现 schema v10、流式 ZIP 迁移、MCP 与 Remote 接口。M6 官方 CPython 3.14.7/JNI/隔离 IPC 在 Round22 设备 12 项通过，包含日志超限与立即合法结果的竞态反例。M2 独立 D1/Worker 版本 `dd2be020-85ff-48ef-8b83-779a7a9cc02b` 已部署；公开 HTTPS 后检受本机网络阻断，Access 管理配置未完成且后台保持拒绝。当前不是正式 Android release，也不代表完整 K06/生产身份验收。
+版本：v1.6 debug 开发收口，2026-08-29；继承 v1.2 页面设计基线及用户后续 66ccff 修订。状态：**用户定义的开发阶段已完成，正式 release 与公告线上操作后置**。M1/M5 已接通持久会话、不可变快照、真实请求检查、工具循环、MCP/Python 工具与未知结果门禁；本轮补齐 Skill ZIP central/local 一致性、canonical duplicate 拒绝和 pre-request 预算分类。M3/M4 已接入 MiniLM ONNX、USearch JNI、PDF 页渲染、原图引用、API Embedding 独立授权；本轮 PDF parser v5 阻止 raw/Flate 图像伪装外发，API36 Knowledge 4/4 与 API31/34/35/36 最终 debug APK 的真实 WorkManager/前台契约/等待终态/取消短测各 3/3 通过。M7 已实现 schema v10、流式 ZIP 迁移、MCP 与 Remote 接口。M6 官方 CPython 3.14.7/JNI/隔离 IPC 在 Round22 设备 12 项通过，包含日志超限与立即合法结果的竞态反例。公告系统后续部署/线上后检由用户自行操作；正式 Android release 将与用户另行安排。320 文件的长时系统边界、真实 Vision、Android 15 六小时 timeout、Android 16 Job 配额耗尽及全阶段故障注入没有执行，不能标完整 K06、生产或 release PASS。
 
 开工入口：[agent.md](../agent.md) → [HANDOFF.md](../HANDOFF.md) → 本文。范围依据见 [REQUIREMENTS.md](REQUIREMENTS.md)。含图知识库、Python 隔离和公告分别详见专题，不能只实现本文概要。
 

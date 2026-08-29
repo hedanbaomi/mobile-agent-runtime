@@ -3,9 +3,9 @@
 
 # Final debug integration validation
 
-Date: 2026-08-29 (Asia/Taipei)  
+Date: 2026-08-29 (Asia/Taipei)
 Scope: current uncommitted integration tree based on
-`7511b22ffd7a7d3021b7857b6500cbe75d037ad6`.  
+`7511b22ffd7a7d3021b7857b6500cbe75d037ad6`.
 This is debug and device evidence. It is not a formal Android release, signed
 release acceptance, full K06 acceptance, or authorization to commit/push.
 

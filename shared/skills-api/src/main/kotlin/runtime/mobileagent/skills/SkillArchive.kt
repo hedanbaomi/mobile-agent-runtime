@@ -11,7 +11,11 @@ import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
+import java.nio.charset.Charset
+import java.text.Normalizer
 import java.security.MessageDigest
+import java.util.Locale
+import java.util.zip.CRC32
 import java.util.zip.ZipInputStream
 
 data class SkillInspection(
@@ -33,6 +37,13 @@ object SkillArchive {
     const val MAX_TOTAL_BYTES = 200L * 1024 * 1024
     const val MAX_RATIO = 100
 
+    private const val EOCD_SIGNATURE = 0x06054B50
+    private const val CENTRAL_DIRECTORY_SIGNATURE = 0x02014B50
+    private const val LOCAL_FILE_SIGNATURE = 0x04034B50
+    private const val EOCD_LENGTH = 22
+    private const val MAX_ZIP_COMMENT_BYTES = 65_535
+    private const val UINT32_MAX = 0xFFFF_FFFFL
+
     fun inspect(bytes: ByteArray, expectedHash: String? = null): SkillInspection {
         val hash = sha256Hex(bytes)
         val reasons = mutableListOf<String>()
@@ -45,11 +56,44 @@ object SkillArchive {
             return SkillInspection(CompatibilityClass.E, reasons, null, null, hash, emptyList(), false)
         }
         if (bytes.size >= 4 && bytes[0] == 0x50.toByte() && bytes[1] == 0x4B.toByte()) {
-            if (!hasZipEocd(bytes) || zipHasSymlink(bytes)) {
-                reasons += if (zipHasSymlink(bytes)) "Symlink entries are not allowed" else "Archive is truncated or damaged"
+            val structure = runCatching { validateZipStructure(bytes) }.getOrElse { error ->
+                reasons += "Archive is truncated or damaged"
+                return SkillInspection(
+                    CompatibilityClass.E,
+                    (reasons + (error.message ?: "zip")).distinct(),
+                    null,
+                    null,
+                    hash,
+                    emptyList(),
+                    false,
+                    packageBytes = bytes,
+                )
+            }
+            val duplicatePath = structure.entries
+                .map { canonicalArchivePath(it.name) }
+                .groupingBy { it }
+                .eachCount()
+                .any { (_, count) -> count > 1 }
+            if (duplicatePath) {
+                reasons += "Duplicate archive paths are not allowed"
+                return SkillInspection(
+                    CompatibilityClass.E,
+                    reasons,
+                    null,
+                    null,
+                    hash,
+                    emptyList(),
+                    false,
+                    packageBytes = bytes,
+                )
+            }
+            if (structure.entries.any { it.isSymlink }) {
+                reasons += "Symlink entries are not allowed"
                 return SkillInspection(CompatibilityClass.E, reasons.distinct(), null, null, hash, emptyList(), false, packageBytes = bytes)
             }
-            val archive = runCatching { readArchive(bytes, reasons) }.getOrElse { error ->
+            val archive = runCatching {
+                readArchive(bytes, reasons, structure.entries.sortedBy { it.localHeaderOffset })
+            }.getOrElse { error ->
                 reasons += "Archive is truncated or damaged"
                 return SkillInspection(
                     CompatibilityClass.E,
@@ -107,7 +151,31 @@ object SkillArchive {
         val schemaVersion: Int?,
     )
 
-    private fun readArchive(bytes: ByteArray, reasons: MutableList<String>): ArchiveContent {
+    private data class ZipCentralEntry(
+        val name: String,
+        val nameOffset: Long,
+        val nameLength: Int,
+        val flags: Int,
+        val compressionMethod: Int,
+        val crc32: Long,
+        val compressedSize: Long,
+        val uncompressedSize: Long,
+        val externalAttributes: Long,
+        val localHeaderOffset: Long,
+    ) {
+        val isSymlink: Boolean
+            get() = ((externalAttributes ushr 16).toInt() and 0xF000) == 0xA000
+    }
+
+    private data class ZipStructure(
+        val entries: List<ZipCentralEntry>,
+    )
+
+    private fun readArchive(
+        bytes: ByteArray,
+        reasons: MutableList<String>,
+        expectedEntries: List<ZipCentralEntry>,
+    ): ArchiveContent {
         val files = mutableListOf<String>()
         var manifest: String? = null
         var markdown: String? = null
@@ -129,11 +197,23 @@ object SkillArchive {
                     reasons += "Zip Slip path is not allowed: $name"
                     continue
                 }
-                if (entry.isDirectory) continue
                 val payload = readBounded(zip, MAX_ENTRY_BYTES.toInt())
                 if (payload == null) {
                     reasons += "Entry exceeds size limit: $name"
                     continue
+                }
+                val expected = expectedEntries.getOrNull(count - 1)
+                if (expected == null) {
+                    reasons += "ZIP local headers do not match the central directory"
+                } else {
+                    val crc = CRC32().also { it.update(payload) }.value
+                    if (entry.name != expected.name ||
+                        entry.compressedSize != expected.compressedSize ||
+                        payload.size.toLong() != expected.uncompressedSize ||
+                        crc != expected.crc32
+                    ) {
+                        reasons += "ZIP entry data does not match the central directory"
+                    }
                 }
                 if (entry.compressedSize > 0 && payload.size.toLong() / entry.compressedSize.coerceAtLeast(1) > MAX_RATIO) {
                     reasons += "Compression bomb ratio exceeds 100"
@@ -150,6 +230,7 @@ object SkillArchive {
                 if (total > 256 && total / zipSize > MAX_RATIO) {
                     reasons += "Compression bomb ratio exceeds 100"
                 }
+                if (entry.isDirectory) continue
                 files += name
                 val lower = name.lowercase()
                 if (looksNative(lower, payload)) native = true
@@ -160,6 +241,7 @@ object SkillArchive {
         } finally {
             zip.close()
         }
+        if (count != expectedEntries.size) reasons += "ZIP local headers do not match the central directory"
         if (native) reasons += "Native payload (ELF/DEX/JAR/SO/wheel) is not allowed"
         if (pip) reasons += "pip / remote dependency install is not allowed"
         val parsed = manifest?.let { runCatching { Json.parseToJsonElement(it).jsonObject }.getOrNull() }
@@ -320,57 +402,191 @@ object SkillArchive {
             lower.contains("zip slip") || lower.contains("bomb") || lower.contains("symlink") ||
                 lower.contains("native") || lower.contains("pip") || lower.contains("remote") ||
                 lower.contains("exceeds") || lower.contains("limit") || lower.contains("truncated") ||
-                lower.contains("damaged") || lower.contains("no readable")
+                lower.contains("damaged") || lower.contains("no readable") || lower.contains("duplicate archive") ||
+                lower.contains("central directory")
         }
 
-    private fun hasZipEocd(bytes: ByteArray): Boolean {
-        val min = 22
-        if (bytes.size < min) return false
-        val start = (bytes.size - min - 65535).coerceAtLeast(0)
-        var i = bytes.size - min
-        while (i >= start) {
-            if (bytes[i] == 0x50.toByte() && bytes[i + 1] == 0x4B.toByte() &&
-                bytes[i + 2] == 0x05.toByte() && bytes[i + 3] == 0x06.toByte()
-            ) {
-                return true
-            }
-            i--
+    /**
+     * Validates the single-disk ZIP central directory before ZipInputStream sees any source.
+     * ZipInputStream is intentionally retained for bounded payload reads, but it accepts local
+     * headers without a central directory, so the EOCD and every central record are checked here.
+     */
+    private fun validateZipStructure(bytes: ByteArray): ZipStructure {
+        val eocd = findEocd(bytes) ?: error("ZIP end record is missing or malformed")
+        val disk = u16Checked(bytes, eocd + 4)
+        val centralDisk = u16Checked(bytes, eocd + 6)
+        val entriesOnDisk = u16Checked(bytes, eocd + 8)
+        val entriesTotal = u16Checked(bytes, eocd + 10)
+        val centralSize = u32Checked(bytes, eocd + 12)
+        val centralOffset = u32Checked(bytes, eocd + 16)
+        if (disk != 0 || centralDisk != 0 || entriesOnDisk != entriesTotal) {
+            error("Multi-disk ZIP archives are not supported")
         }
-        return false
+        if (entriesTotal == 0xFFFF || centralSize == UINT32_MAX || centralOffset == UINT32_MAX) {
+            error("ZIP64 archives are not supported")
+        }
+        val centralEnd = centralOffset.checkedAdd(centralSize)
+        if (centralOffset > eocd.toLong() || centralEnd != eocd.toLong()) {
+            error("ZIP central directory bounds are invalid")
+        }
+
+        val entries = ArrayList<ZipCentralEntry>(entriesTotal)
+        var cursor = centralOffset
+        repeat(entriesTotal) {
+            if (cursor.checkedAdd(46L) > centralEnd || !hasSignature(bytes, cursor, CENTRAL_DIRECTORY_SIGNATURE)) {
+                error("ZIP central directory record is missing or malformed")
+            }
+            val nameLength = u16Checked(bytes, cursor + 28)
+            val extraLength = u16Checked(bytes, cursor + 30)
+            val commentLength = u16Checked(bytes, cursor + 32)
+            val recordEnd = cursor.checkedAdd(46L + nameLength + extraLength + commentLength)
+            if (recordEnd > centralEnd) error("ZIP central directory record exceeds its bounds")
+            val flags = u16Checked(bytes, cursor + 8)
+            val compressionMethod = u16Checked(bytes, cursor + 10)
+            val crc32 = u32Checked(bytes, cursor + 16)
+            val compressedSize = u32Checked(bytes, cursor + 20)
+            val uncompressedSize = u32Checked(bytes, cursor + 24)
+            if (compressedSize == UINT32_MAX || uncompressedSize == UINT32_MAX) {
+                error("ZIP64 archives are not supported")
+            }
+            val nameStart = cursor + 46
+            val nameBytes = bytes.copyOfRange(nameStart.toInt(), (nameStart + nameLength).toInt())
+            entries += ZipCentralEntry(
+                decodeZipName(nameBytes, flags),
+                nameStart,
+                nameLength,
+                flags,
+                compressionMethod,
+                crc32,
+                compressedSize,
+                uncompressedSize,
+                u32Checked(bytes, cursor + 38),
+                u32Checked(bytes, cursor + 42),
+            )
+            cursor = recordEnd
+        }
+        if (cursor != centralEnd) error("ZIP central directory size does not match its records")
+
+        entries.forEach { entry ->
+            val localOffset = entry.localHeaderOffset
+            if (localOffset.checkedAdd(30L) > centralOffset || !hasSignature(bytes, localOffset, LOCAL_FILE_SIGNATURE)) {
+                error("ZIP local header does not match the central directory")
+            }
+            val localNameLength = u16Checked(bytes, localOffset + 26)
+            val localExtraLength = u16Checked(bytes, localOffset + 28)
+            val localHeaderEnd = localOffset.checkedAdd(30L + localNameLength + localExtraLength)
+            if (localHeaderEnd > centralOffset) {
+                error("ZIP local header exceeds the archive data area")
+            }
+            val localFlags = u16Checked(bytes, localOffset + 6)
+            val localCompressionMethod = u16Checked(bytes, localOffset + 8)
+            if (localFlags != entry.flags || localCompressionMethod != entry.compressionMethod) {
+                error("ZIP local header metadata does not match the central directory")
+            }
+            val localNameStart = localOffset + 30
+            val localNameBytes = bytes.copyOfRange(
+                localNameStart.toInt(),
+                (localNameStart + localNameLength).toInt(),
+            )
+            val localName = decodeZipName(localNameBytes, localFlags)
+            if (localName != entry.name || !sameBytes(bytes, entry.nameOffset, entry.nameLength, localNameStart, localNameLength)) {
+                error("ZIP local header name does not match the central directory")
+            }
+            if (localFlags and 0x08 == 0) {
+                val localCrc32 = u32Checked(bytes, localOffset + 14)
+                val localCompressedSize = u32Checked(bytes, localOffset + 18)
+                val localUncompressedSize = u32Checked(bytes, localOffset + 22)
+                if (localCrc32 != entry.crc32 ||
+                    localCompressedSize != entry.compressedSize ||
+                    localUncompressedSize != entry.uncompressedSize
+                ) {
+                    error("ZIP local header sizes or checksum do not match the central directory")
+                }
+            }
+        }
+        return ZipStructure(entries)
     }
 
-    private fun zipHasSymlink(bytes: ByteArray): Boolean {
-        var i = 0
-        while (i + 46 <= bytes.size) {
-            if (bytes[i] == 0x50.toByte() && bytes[i + 1] == 0x4B.toByte() &&
-                bytes[i + 2] == 0x01.toByte() && bytes[i + 3] == 0x02.toByte()
-            ) {
-                val nameLen = u16(bytes, i + 28)
-                val extraLen = u16(bytes, i + 30)
-                val commentLen = u16(bytes, i + 32)
-                val extAttr = u32(bytes, i + 38)
-                val mode = (extAttr ushr 16).toInt()
-                if (mode and 0xF000 == 0xA000) return true
-                i += 46 + nameLen + extraLen + commentLen
-                continue
+    private fun findEocd(bytes: ByteArray): Int? {
+        if (bytes.size < EOCD_LENGTH) return null
+        val start = (bytes.size - EOCD_LENGTH - MAX_ZIP_COMMENT_BYTES).coerceAtLeast(0)
+        var offset = bytes.size - EOCD_LENGTH
+        while (offset >= start) {
+            if (hasSignature(bytes, offset.toLong(), EOCD_SIGNATURE)) {
+                val commentLength = u16Checked(bytes, offset + 20)
+                val centralSize = u32Checked(bytes, offset + 12)
+                val centralOffset = u32Checked(bytes, offset + 16)
+                if (offset.toLong() + EOCD_LENGTH + commentLength == bytes.size.toLong() &&
+                    centralOffset.checkedAdd(centralSize) == offset.toLong()
+                ) return offset
             }
-            i++
+            offset -= 1
         }
-        return false
+        return null
     }
 
-    private fun u16(bytes: ByteArray, offset: Int): Int {
-        if (offset + 1 >= bytes.size) return 0
+    private fun decodeZipName(bytes: ByteArray, flags: Int): String =
+        runCatching {
+            val charset = if (flags and 0x800 != 0) Charsets.UTF_8 else Charset.forName("IBM437")
+            String(bytes, charset)
+        }.getOrElse { String(bytes, Charsets.UTF_8) }
+
+    private fun canonicalArchivePath(name: String): String {
+        val segments = name.replace('\\', '/').split('/')
+        val normalized = ArrayDeque<String>()
+        segments.forEach { segment ->
+            when (segment) {
+                "", "." -> Unit
+                ".." -> if (normalized.isNotEmpty()) normalized.removeLast() else normalized.addLast(segment)
+                else -> normalized.addLast(segment)
+            }
+        }
+        return Normalizer.normalize(normalized.joinToString("/"), Normalizer.Form.NFC).lowercase(Locale.ROOT)
+    }
+
+    private fun hasSignature(bytes: ByteArray, offset: Long, signature: Int): Boolean {
+        if (offset < 0 || offset > bytes.size - 4) return false
+        val i = offset.toInt()
+        return (bytes[i].toInt() and 0xFF) == (signature and 0xFF) &&
+            (bytes[i + 1].toInt() and 0xFF) == ((signature ushr 8) and 0xFF) &&
+            (bytes[i + 2].toInt() and 0xFF) == ((signature ushr 16) and 0xFF) &&
+            (bytes[i + 3].toInt() and 0xFF) == ((signature ushr 24) and 0xFF)
+    }
+
+    private fun sameBytes(bytes: ByteArray, firstOffset: Long, firstLength: Int, secondOffset: Long, secondLength: Int): Boolean {
+        if (firstLength != secondLength || firstOffset < 0 || secondOffset < 0) return false
+        if (firstOffset > bytes.size - firstLength || secondOffset > bytes.size - secondLength) return false
+        repeat(firstLength) { index ->
+            if (bytes[(firstOffset + index).toInt()] != bytes[(secondOffset + index).toInt()]) return false
+        }
+        return true
+    }
+
+    private fun u16Checked(bytes: ByteArray, offset: Int): Int {
+        if (offset < 0 || offset + 1 >= bytes.size) error("ZIP field exceeds archive bounds")
         return (bytes[offset].toInt() and 0xFF) or ((bytes[offset + 1].toInt() and 0xFF) shl 8)
     }
 
-    private fun u32(bytes: ByteArray, offset: Int): Long {
-        if (offset + 3 >= bytes.size) return 0
+    private fun u16Checked(bytes: ByteArray, offset: Long): Int {
+        if (offset > Int.MAX_VALUE) error("ZIP field exceeds archive bounds")
+        return u16Checked(bytes, offset.toInt())
+    }
+
+    private fun u32Checked(bytes: ByteArray, offset: Int): Long {
+        if (offset < 0 || offset + 3 >= bytes.size) error("ZIP field exceeds archive bounds")
         return (bytes[offset].toLong() and 0xFF) or
             ((bytes[offset + 1].toLong() and 0xFF) shl 8) or
             ((bytes[offset + 2].toLong() and 0xFF) shl 16) or
             ((bytes[offset + 3].toLong() and 0xFF) shl 24)
     }
+
+    private fun u32Checked(bytes: ByteArray, offset: Long): Long {
+        if (offset > Int.MAX_VALUE) error("ZIP field exceeds archive bounds")
+        return u32Checked(bytes, offset.toInt())
+    }
+
+    private fun Long.checkedAdd(value: Long): Long =
+        if (value < 0 || this > Long.MAX_VALUE - value) error("ZIP field overflows archive bounds") else this + value
 
     private fun looksRemoteDependency(name: String, payload: ByteArray): Boolean {
         val lowerName = name.lowercase()

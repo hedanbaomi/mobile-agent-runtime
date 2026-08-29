@@ -9,6 +9,7 @@ import org.junit.jupiter.api.Assertions.assertThrows
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
 import java.io.ByteArrayOutputStream
+import java.util.zip.DeflaterOutputStream
 import java.util.zip.ZipEntry
 import java.util.zip.ZipOutputStream
 
@@ -132,6 +133,64 @@ class DocumentParserTest {
     }
 
     @Test
+    fun rawFlateImageXObjectStaysAnExplicitPageBlocker() {
+        val compressedRgb = deflate(byteArrayOf(0x7F, 0x20, 0x10))
+        val pdf = replaceImageObject(
+            PdfParser.writePdfWithImageXObject("raw RGB page"),
+            filterSyntax = "/Filter /FlateDecode",
+            payload = compressedRgb,
+        )
+        val parsed = PdfParser.parse(pdf)
+        assertTrue(parsed.needsVision)
+        assertTrue(parsed.assets.none { it.kind == "IMAGE" && it.bytes.isNotEmpty() })
+        assertTrue(parsed.assets.any { it.kind == "PAGE" && it.page == 1 && it.bytes.isEmpty() })
+    }
+
+    @Test
+    fun dctArrayFilterKeepsOnlySignatureValidatedJpeg() {
+        val jpeg = byteArrayOf(0xFF.toByte(), 0xD8.toByte(), 0xFF.toByte(), 0xD9.toByte())
+        val pdf = replaceImageObject(
+            PdfParser.writePdfWithImageXObject("array DCT page"),
+            filterSyntax = "/Filter [/DCTDecode]",
+            payload = jpeg,
+        )
+        val parsed = PdfParser.parse(pdf)
+        val asset = parsed.assets.single { it.kind == "IMAGE" }
+        assertEquals("image/jpeg", asset.mediaType)
+        assertEquals(jpeg.toList(), asset.bytes.toList())
+        assertTrue(parsed.assets.none { it.mediaType == "application/octet-stream" })
+    }
+
+    @Test
+    fun validJpegDoesNotHideUnsupportedImageOnTheSamePage() {
+        val parsed = PdfParser.parse(addRawFlateImageToPage(PdfParser.writePdfWithImageXObject("mixed image page")))
+
+        assertEquals(1, parsed.assets.count { it.kind == "IMAGE" && it.mediaType == "image/jpeg" })
+        assertTrue(parsed.assets.any { it.kind == "PAGE" && it.page == 1 && it.bytes.isEmpty() })
+    }
+
+    @Test
+    fun independentlyDecodedContentStreamsKeepLaterVisualBlocker() {
+        val parsed = PdfParser.parse(contentArrayPdfWithFlateTextAndVectorJpeg())
+
+        assertTrue(parsed.text.contains("content array label"))
+        assertEquals(1, parsed.assets.count { it.kind == "IMAGE" && it.mediaType == "image/jpeg" })
+        assertTrue(parsed.assets.any { it.kind == "PAGE" && it.page == 1 && it.bytes.isEmpty() })
+    }
+
+    @Test
+    fun danglingContentsCannotBeHiddenByValidJpeg() {
+        val pdf = String(PdfParser.writePdfWithImageXObject("dangling content"), Charsets.ISO_8859_1)
+            .replace("/Contents 4 0 R", "/Contents 999 0 R")
+            .toByteArray(Charsets.ISO_8859_1)
+
+        val parsed = PdfParser.parse(pdf)
+
+        assertEquals(1, parsed.assets.count { it.kind == "IMAGE" && it.mediaType == "image/jpeg" })
+        assertTrue(parsed.assets.any { it.kind == "PAGE" && it.page == 1 && it.bytes.isEmpty() })
+    }
+
+    @Test
     fun textPlusInlineImageNeedsVision() {
         val parsed = PdfParser.parse(PdfParser.writeTextAndInlineImagePdf("inline caption token"))
         assertTrue(parsed.needsVision)
@@ -241,6 +300,93 @@ class DocumentParserTest {
                 zip.closeEntry()
             }
         }
+        return out.toByteArray()
+    }
+
+    private fun deflate(bytes: ByteArray): ByteArray {
+        val out = ByteArrayOutputStream()
+        DeflaterOutputStream(out).use { it.write(bytes) }
+        return out.toByteArray()
+    }
+
+    private fun replaceImageObject(pdf: ByteArray, filterSyntax: String, payload: ByteArray): ByteArray {
+        val marker = "/Filter /DCTDecode /Length 4 >>\nstream\n"
+        val markerStart = String(pdf, Charsets.ISO_8859_1).indexOf(marker)
+        require(markerStart >= 0) { "Image object marker not found" }
+        val oldPayloadStart = markerStart + marker.length
+        val oldPayloadEnd = oldPayloadStart + 4
+        return ByteArrayOutputStream().apply {
+            write(pdf, 0, markerStart)
+            write("$filterSyntax /Length ${payload.size} >>\nstream\n".toByteArray(Charsets.ISO_8859_1))
+            write(payload)
+            write(pdf, oldPayloadEnd, pdf.size - oldPayloadEnd)
+        }.toByteArray()
+    }
+
+    private fun addRawFlateImageToPage(pdf: ByteArray): ByteArray {
+        val compressed = deflate(byteArrayOf(0x7F, 0x20, 0x10))
+        val latin = String(pdf, Charsets.ISO_8859_1)
+            .replace(
+                "/XObject << /Im1 6 0 R >>",
+                "/XObject << /Im1 6 0 R /Im2 7 0 R >>",
+            )
+            .replace(
+                "/Im1 Do Q\n",
+                "/Im1 Do Q\nq 100 0 0 100 200 400 cm /Im2 Do Q\n",
+            )
+        val xref = latin.indexOf("xref\n")
+        require(xref >= 0) { "xref marker not found" }
+        val imageObject = buildString {
+            append("7 0 obj\n")
+            append("<< /Type /XObject /Subtype /Image /Width 1 /Height 1 ")
+            append("/ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /FlateDecode ")
+            append("/Length ${compressed.size} >>\nstream\n")
+        }.toByteArray(Charsets.ISO_8859_1)
+        return ByteArrayOutputStream().apply {
+            write(latin.substring(0, xref).toByteArray(Charsets.ISO_8859_1))
+            write(imageObject)
+            write(compressed)
+            write("\nendstream\nendobj\n".toByteArray(Charsets.ISO_8859_1))
+            write(latin.substring(xref).toByteArray(Charsets.ISO_8859_1))
+        }.toByteArray()
+    }
+
+    private fun contentArrayPdfWithFlateTextAndVectorJpeg(): ByteArray {
+        val text = deflate("BT /F1 12 Tf 72 700 Td (content array label) Tj ET\n".toByteArray())
+        val visual = "0 0 100 100 re f\nq 100 0 0 100 72 400 cm /Im1 Do Q\n".toByteArray()
+        val jpeg = byteArrayOf(0xFF.toByte(), 0xD8.toByte(), 0xFF.toByte(), 0xD9.toByte())
+        fun plain(number: Int, body: String): ByteArray =
+            "$number 0 obj\n$body\nendobj\n".toByteArray(Charsets.ISO_8859_1)
+        fun stream(number: Int, dict: String, payload: ByteArray): ByteArray =
+            "$number 0 obj\n<< $dict /Length ${payload.size} >>\nstream\n".toByteArray(Charsets.ISO_8859_1) +
+                payload + "\nendstream\nendobj\n".toByteArray(Charsets.ISO_8859_1)
+        val objects = listOf(
+            plain(1, "<< /Type /Catalog /Pages 2 0 R >>"),
+            plain(2, "<< /Type /Pages /Kids [3 0 R] /Count 1 >>"),
+            plain(
+                3,
+                "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents [4 0 R 5 0 R] " +
+                    "/Resources << /Font << /F1 6 0 R >> /XObject << /Im1 7 0 R >> >> >>",
+            ),
+            stream(4, "/Filter /FlateDecode", text),
+            stream(5, "", visual),
+            plain(6, "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>"),
+            stream(
+                7,
+                "/Type /XObject /Subtype /Image /Width 1 /Height 1 /ColorSpace /DeviceRGB " +
+                    "/BitsPerComponent 8 /Filter /DCTDecode",
+                jpeg,
+            ),
+        )
+        val out = ByteArrayOutputStream()
+        out.write("%PDF-1.4\n".toByteArray(Charsets.ISO_8859_1))
+        val offsets = objects.map { body -> out.size().also { out.write(body) } }
+        val xref = out.size()
+        out.write("xref\n0 8\n0000000000 65535 f \n".toByteArray(Charsets.ISO_8859_1))
+        offsets.forEach { offset ->
+            out.write("%010d 00000 n \n".format(offset).toByteArray(Charsets.ISO_8859_1))
+        }
+        out.write("trailer\n<< /Size 8 /Root 1 0 R >>\nstartxref\n$xref\n%%EOF\n".toByteArray(Charsets.ISO_8859_1))
         return out.toByteArray()
     }
 }

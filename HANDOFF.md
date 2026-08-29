@@ -53,7 +53,7 @@
 - 构建：Round22 全部 debug/JVM/SQLite/IPC/SBOM/license 命令 `BUILD SUCCESSFUL`。debug APK SHA-256 `80FF8109B908B3D4E828B846B70C98B58A5B2AC3350C7449AF235D8F40616750`；test APK SHA-256 `A75741FBA9742E1A885FA7C957425B019292FD7426E7DD54E21E6FFA28CD7026`。
 - 设备：Android 16/API 36 x86_64 模拟器，Python 12/12、API Embedding 5/5、Knowledge 4/4 通过；新增“日志超限后立即返回合法 JSON”竞态单项 1/1，并验证下一调用恢复。证据见 `docs/evidence/2026-08-29/final-debug-validation.md`。
 - 独立复核：原 M6/Python 审查者核对 native 原子计数、结果排序、每次调用初始化、host abort/cleanup 与 Round22 日志，确认旧日志竞态闭环，未发现新的 P1/P2。
-- 公告生产：独立 D1 远程迁移无待办；Worker 版本 `dd2be020-85ff-48ef-8b83-779a7a9cc02b` 已部署，包含 source hash `07f164ef5f473ff426488eeeddf0bb7d1cb522286c5389e85baa2351bb473ae3` 和生产签名 secret binding。Access team/audience 为空时后台保持 503；不得在用户不在场时替其创建身份组织/政策。
+- 公告生产：独立 D1 远程迁移无待办；issue #1 最终 Worker 版本 `70b42812-5fd9-45e7-902f-ae35d56151a2` 已承载 100% 流量，source hash `b835d4709d29b1111f1673f19a5a64d5d8ae09c14138c3f363e4d6d5de40ca25`。自定义域名签名、304、400、源码归档回读均通过；未认证 admin API 被 Cloudflare Access 302 拦截。未改 Access 策略或生产签名 secret。
 - K06 边界：320 文件/472,363,598 bytes fixture 完成本地文本与存储等待组件，20 READY 文本、300 WAITING 图片、零 Vision 调用；未执行真实 Vision、完整故障矩阵和 Android 12—16 前台服务矩阵，因此明确不是完整 K06 PASS。
 - 未做：正式 Android release、正式签名、commit/push、真实付费 Provider/Vision、Cloudflare Access 身份策略和从本机进行的公网 TLS 后检。
 
@@ -684,3 +684,12 @@ U02 的横屏、IME、大字号、触控、对比度、焦点及实际字体回�
 - release 边界：`:app-android:verifyReleaseSigning` 因缺用户 release keystore、store password、alias、key password而按设计失败关闭；未生成或借用签名身份，根 `releaseGate` 不标 PASS。当前为 `LOCAL_PACKAGE_READY`，不是正式 AAB/release；`versionName=0.1.0`/`versionCode=1` 不擅自变更。
 - F-001：用户观察在统计期间稳定出现两次，但最初问题仍不能稳定复现；状态保持 `candidate_intermittent`，不得写成已修复。若用户人工再次发现，需连同 APK SHA、dirty/schema/build 与完整 Logcat 重启复核修复。
 - 尚未执行：真实收费 Provider/Vision、500 文件批次实机、初始 SAF→staging 进程死亡、ENOSPC、Android 15 六小时 timeout、Android 16 Job 配额耗尽、正式签名 AAB/商店发布。公告生产部署尚未在本节发生，下一步先形成 clean source commit，再备份 D1、部署并记录 version/source hash/HTTPS 后检。
+
+### 2026-08-29T16:59:42+08:00：最终提交、debug 打包与 issue #1 Cloudflare 部署
+
+- Git：最终复核/1.0 本地门禁实现提交 `dbdb526df2a4f5ab58c015cfc06f4fa650390806`。生产后检定点修复提交 `6baefddc3afe808b04acb0ce5f353e39d0199131`（跨 isolate 的确定性签名窗口/ETag）与 `1582a89c67b3d74722da93f5981eb392ede793b7`（Cloudflare 弱 ETag 比较）。三项均为本地 `main` commit；本轮未 push。
+- Android 包：从 clean commit `dbdb526df2a4f5ab58c015cfc06f4fa650390806` 生成。debug APK 211,144,278 bytes，SHA-256 `81a4ad15a3a9dd974cf17c52cfef043ca0f0d53cc67f60857de1c9b13f3028ba`；androidTest APK 1,194,575 bytes，SHA-256 `259c97a70f9f4a5431c970813b7620cc535ef6f05f7f19d2459f9667af0ec6a8`；CycloneDX 1.6 SBOM 153,342 bytes，SHA-256 `6c45cbb7a7269108c3cb74dad274f2853f58eba7e7024d53d5440b2b442ae174`。正式 release 仍因缺用户签名四项输入而 `BLOCKED_SIGNING`。
+- 生产前：远端 D1 `No migrations to apply!`。备份 `.private/agent-handoff/announcements-production/2026-08-29/d1-before-issue1-dbdb526.sql`，4,183 bytes，SHA-256 `dcff7e39f88ce9ac51c16149a9821882e3676b56a63f274ceec00a18660c7c7b`；内容未打印、路径被 Git 忽略。
+- 生产部署：最终 Worker version `70b42812-5fd9-45e7-902f-ae35d56151a2`，100% 流量；source hash `b835d4709d29b1111f1673f19a5a64d5d8ae09c14138c3f363e4d6d5de40ca25`。29 文件远端 ZIP 为 79,655 bytes，SHA-256 `48afdbd4606278d48bb0559563e2b331e6b3bcc4f27171b520d97ca66d0c95d7`，与本地归档一致。
+- 公网后检：自定义域名 feed HTTP 200、schema 1、key id 匹配、Ed25519 验签成功、audience/target 匹配、complete 空快照；匹配 Cloudflare 弱 ETag 返回 304；非法 platform 返回 400；`/source` 与 manifest/archive 均 200；匿名 `/admin/v1/stats` 返回 Access 302。未发布测试公告、未写事件、未改 D1 schema/Access/secret。
+- 边界：F-001 仍是 `candidate_intermittent`，不是已修复；若用户人工再次发现，按对应 APK SHA、dirty/schema/build 与完整 Logcat 重启复核。至此停止自动复核—修复循环；后续由用户安排正式 release，公告的已登录 Admin 浏览器验收/自然定时发布可由所有者操作。

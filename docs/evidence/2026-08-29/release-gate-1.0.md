@@ -46,4 +46,12 @@ F-001 工具能力开关相关进程退出曾在问题统计期间稳定出现�
 
 ## 最终包记录
 
-clean source commit、debug APK、androidTest APK 与 SBOM 的最终 SHA-256 在本轮完成提交与重新打包后追加；生产公告部署证据追加后若产生仅文档提交，会同时记录“源码部署 commit”和“最终证据 commit”，不混淆二者。
+Android 制品从 clean source commit `dbdb526df2a4f5ab58c015cfc06f4fa650390806` 生成。之后的 `6baefddc3afe808b04acb0ce5f353e39d0199131` 与 `1582a89c67b3d74722da93f5981eb392ede793b7` 只修复公告 Worker 的跨 isolate/弱 ETag 条件请求，不改变 Android 源码；因此不把后续 Worker commit 冒充为 APK 的构建来源。
+
+| 制品 | 字节 | SHA-256 |
+| --- | ---: | --- |
+| `app-android/build/outputs/apk/debug/app-android-debug.apk` | 211,144,278 | `81a4ad15a3a9dd974cf17c52cfef043ca0f0d53cc67f60857de1c9b13f3028ba` |
+| `app-android/build/outputs/apk/androidTest/debug/app-android-debug-androidTest.apk` | 1,194,575 | `259c97a70f9f4a5431c970813b7620cc535ef6f05f7f19d2459f9667af0ec6a8` |
+| `app-android/build/reports/sbom/debug.cdx.json` | 153,342 | `6c45cbb7a7269108c3cb74dad274f2853f58eba7e7024d53d5440b2b442ae174` |
+
+三项制品同轮 `BUILD SUCCESSFUL`；SBOM 为 CycloneDX 1.6、166 components。APK 使用 debug 签名，仅供本地验收；正式 AAB 仍保持 `BLOCKED_SIGNING`。

@@ -7,18 +7,16 @@ Date: 2026-08-29 (Asia/Taipei)
 Scope: `services/announcements/**`, `admin/announcements/**` only.
 Worker: `mobile-agent-runtime-announcements`
 D1: `mobile-agent-runtime-announcements-prod` / `06cf40c7-dd84-4560-859a-1a417f47207e`
-Origin: `https://mobile-agent-runtime-announcements.gmailforzhibai.workers.dev`
+Origin: `https://announcements.luotianyi.fun`
 Signing key id: `mar-prod-20260829-1`
 
 ## Boundary
 
-This evidence records implementation and local verification by the
-announcements subtask. No `wrangler deploy`, remote D1 migration, remote D1
-query, secret write, Access application change, browser authentication, commit,
-push, or release was performed here. Production resource creation and final
-deployment remain owner controlled. The Access team domain and audience are
-intentionally absent, so production `/admin/v1` must remain fail closed while
-the public signed feed can operate after authorized deployment.
+The initial implementation subtask performed only local verification. The
+owner later authorized the main agent to back up the independent production D1
+database and deploy the issue #1 Worker update. The final production execution
+and HTTPS post-check below supersede the earlier local-only boundary without
+claiming an authenticated admin-browser acceptance or Android store release.
 
 The production private key was not read or copied into this workspace. The
 required secret interface is `MAR_ANNOUNCE_PRIVATE_KEY_PKCS8`, standard base64
@@ -33,7 +31,7 @@ Ed25519 PKCS#8 DER. The public key is distributed separately by the owner.
 | Worker | `src/worker.mjs` binds `ANNOUNCEMENTS_DB`, imports PKCS#8 key secret in production, has cron handler, accepts only explicit `local` or normalized `production` modes, and returns generic 503 for missing/invalid configuration | Implemented; authorized production deployment recorded below |
 | Admin auth | `src/access.mjs` verifies Access RS256 assertion signature, exact issuer/audience, `exp`/`nbf`/`iat`; production does not read `MAR_ADMIN_TOKEN` | Implemented; Access application setup pending |
 | Admin UI | same origin editor/list/preview and revision-aware actions; production page explains Access requirement; no secret input outside loopback local server | Implemented; browser acceptance pending |
-| Source route | `/source` serves the hash named source archive staged by `scripts/build-source-artifact.mjs --stage-assets`; generator excludes env/private/node_modules paths and emits SPDX metadata for generated HTML plus a REUSE sidecar for `manifest.json` | Implemented; final hash `07f164ef5f473ff426488eeeddf0bb7d1cb522286c5389e85baa2351bb473ae3` deployed as recorded below |
+| Source route | `/source` serves the hash named source archive staged by `scripts/build-source-artifact.mjs --stage-assets`; generator excludes env/private/node_modules paths and emits SPDX metadata for generated HTML plus a REUSE sidecar for `manifest.json` | Implemented; final hash `b835d4709d29b1111f1673f19a5a64d5d8ae09c14138c3f363e4d6d5de40ca25` deployed and downloaded back byte-for-byte |
 
 ## Commands and results
 
@@ -84,32 +82,62 @@ production execution section below; items 4-5 remain open:
 
 ## Main-agent authorized production execution
 
-The owner subsequently authorized the main agent to deploy this independent
-announcements system. The private signing key was injected through Wrangler's
-secret interface without being printed or copied into this evidence.
+The private signing key was not read or printed. Wrangler's secret inventory
+confirmed only the required secret name; the checked-in key id remains
+`mar-prod-20260829-1`.
 
-- Remote D1 migration inspection reports `No migrations to apply!` for
+### Pre-deploy and rollback evidence
+
+- Clean Android/final-review source commit:
+  `dbdb526df2a4f5ab58c015cfc06f4fa650390806`.
+- Final Worker protocol source commit:
+  `1582a89c67b3d74722da93f5981eb392ede793b7`.
+- Remote migration inspection before deployment: `No migrations to apply!` for
   `mobile-agent-runtime-announcements-prod`.
-- The deployed Worker version is
-  `dd2be020-85ff-48ef-8b83-779a7a9cc02b`, created at
-  `2026-08-28T17:49:11.929Z`.
-- Wrangler version inspection confirms `fetch` and `scheduled` handlers,
-  `nodejs_compat`, the independent D1 binding, Assets, the private-key secret
-  binding, `MAR_ENV=production` and `MAR_ANNOUNCE_KEY_ID=mar-prod-20260829-1`.
-- The deployed Assets include the final licensed source artifact
-  `07f164ef5f473ff426488eeeddf0bb7d1cb522286c5389e85baa2351bb473ae3`.
-  Deployment evidence is retained at
-  `.private/overnight/announcements-production/deploy-source-license-update.log`.
-- Access team domain and audience remain empty. Production `/admin/v1` is
-  therefore intentionally fail closed; local production-mode verification
-  confirmed that `X-Admin-Token` cannot bypass it.
+- Pre-deploy D1 export:
+  `.private/agent-handoff/announcements-production/2026-08-29/d1-before-issue1-dbdb526.sql`,
+  4,183 bytes, SHA-256
+  `dcff7e39f88ce9ac51c16149a9821882e3676b56a63f274ceec00a18660c7c7b`.
+  The private export is ignored by Git and its SQL content is not reproduced in
+  this evidence.
 
-Two owner-controlled gates remain. The Cloudflare account does not yet have the
-Zero Trust organization/authentication domain needed to define the Access
-identity policy, and creating that account-level identity configuration while
-the owner is absent would be unsafe. In addition, this host resolves the
-`workers.dev` endpoint through reserved address `198.18.2.56`; the TLS client
-fails before receiving HTTP headers. The deployment/version/bindings are
-confirmed through Wrangler, but the public signature/ETag and browser Access
-post-checks must be repeated from a normal network after the owner configures
-the identity policy.
+### Deployment and targeted production repair
+
+The first issue #1 deployment exposed a real production-only ETag failure: a
+conditional request returned 200 because signed snapshots were isolate-local.
+Commit `6baefddc3afe808b04acb0ce5f353e39d0199131` bound envelopes and ETags to a
+deterministic 12-hour rotation window. A second HTTPS check showed Cloudflare
+weakening the compressed response ETag; commit
+`1582a89c67b3d74722da93f5981eb392ede793b7` added RFC-compatible weak comparison.
+Both changes added cold-cache/weak-ETag regression coverage. This was a targeted
+repair of the failed deployment gate, not another broad review cycle.
+
+- Final Worker version: `70b42812-5fd9-45e7-902f-ae35d56151a2`, 100% traffic.
+- Final licensed source hash:
+  `b835d4709d29b1111f1673f19a5a64d5d8ae09c14138c3f363e4d6d5de40ca25`.
+- Source manifest: 29 files. Remote archive: 79,655 bytes, SHA-256
+  `48afdbd4606278d48bb0559563e2b331e6b3bcc4f27171b520d97ca66d0c95d7`,
+  identical to the local committed archive.
+- Wrangler reports the `fetch` and `scheduled` handlers, five-minute cron,
+  independent production D1, Assets, `nodejs_compat`, production mode and the
+  existing Access/signing bindings. No Access policy or secret was changed.
+
+### HTTPS post-check
+
+The custom origin passed the final read-only protocol check:
+
+| Check | Result |
+| --- | --- |
+| Signed feed | HTTP 200; envelope schema 1; key id matched; `feedVersion=0`; complete empty snapshot |
+| Ed25519 verification | Passed against the Android-pinned production public key |
+| Audience and target | Install UUID hash and android/stable/version 1/zh-CN target matched |
+| Conditional fetch | Cloudflare weak ETag returned; matching `If-None-Match` produced HTTP 304 |
+| Invalid client context | HTTP 400 |
+| `/source` | HTTP 200; final hash, 29-file manifest and archive bytes matched |
+| Unauthenticated `/admin/v1/stats` | HTTP 302 to Cloudflare Access; no anonymous admin data returned |
+
+The empty feed is the current database state, not an error. No test announcement,
+admin mutation, migration, Access-policy change or production event upload was
+performed. Authenticated admin-browser acceptance and a natural scheduled
+publication remain owner-operated checks; they do not block the public issue #1
+deployment recorded here.

@@ -5,7 +5,7 @@
 
 Android 优先的 BYOK Agent Runtime：本地知识库、多模态资料处理、可配置 Prompt 与模型参数、受控 Skills 执行，以及独立远程公告。
 
-**当前状态：** 0.1.1、0.2、0.3 的最终复核与修复已收口；1.0 本地门禁已完成严格依赖校验、全仓 `check`、API 31 instrumentation 与 debug APK/SBOM 打包。正式 AAB 仍因未提供用户 release keystore 而按设计 `BLOCKED_SIGNING`，版本号暂不擅自改为 1.0.0，后续与用户共同安排 release。F-001（工具能力开关相关进程退出）曾稳定观察到两次但仍无法稳定复现，保持 `candidate_intermittent`，不能写成已修复。公告 issue #1 的 Android、Worker/Admin 修改已完成本地验证，生产更新在本轮最终部署步骤单独记录。
+**当前状态：** 0.1.1、0.2、0.3 的最终复核与修复已收口；1.0 本地门禁已完成严格依赖校验、全仓 `check`、API 31 instrumentation 与 debug APK/SBOM 打包。正式 AAB 仍因未提供用户 release keystore 而按设计 `BLOCKED_SIGNING`，版本号暂不擅自改为 1.0.0，后续与用户共同安排 release。F-001（工具能力开关相关进程退出）曾稳定观察到两次但仍无法稳定复现，保持 `candidate_intermittent`，不能写成已修复。公告 issue #1 的 Android、Worker/Admin 修改已部署到 Cloudflare，公网签名 feed、条件 304、源码归档与 Access 匿名拒绝后检通过；完整 version/source hash/备份见生产证据。
 
 源码：<https://github.com/hedanbaomi/mobile-agent-runtime>
 

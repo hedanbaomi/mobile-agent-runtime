@@ -50,4 +50,6 @@
 
 ## 主流程最终集成更新
 
-主流程已重新执行 `npm test` 与 `npm run check`，均 exit 0；严格 Gradle `check` 与 API 31 公共公告请求/UI smoke 同样通过。生产部署仍必须从 clean source commit 生成 source artifact、先做 D1 备份并记录 Worker version，再完成 HTTPS 签名 feed、ETag、`/source` 与 admin fail-closed 后检；在这些字段实际取得前，本文件结论仍只到 `LOCAL_PASS`。
+主流程已重新执行 `npm test` 与 `npm run check`，均 exit 0；严格 Gradle `check` 与 API 31 公共公告请求/UI smoke 同样通过。随后从 clean commit 导出远端 D1 备份并部署到 Cloudflare。生产首轮后检发现 isolate-local cache 与 Cloudflare 弱 ETag 导致条件请求返回 200，已用两个定点提交补回归并重新部署。
+
+最终 Worker version 为 `70b42812-5fd9-45e7-902f-ae35d56151a2`，source hash 为 `b835d4709d29b1111f1673f19a5a64d5d8ae09c14138c3f363e4d6d5de40ca25`。自定义域名后检确认签名 feed 200、Ed25519 验签通过、条件请求 304、无效上下文 400、`/source` 归档逐字节一致；未认证 admin API 被 Cloudflare Access 302 拦截。结论由 `LOCAL_PASS` 提升为公共公告系统 `DEPLOYED`，但不冒充已完成带登录会话的 Admin 浏览器验收。

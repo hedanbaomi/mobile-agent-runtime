@@ -3,7 +3,7 @@
 
 # 公告系统实现契约
 
-状态：M2 与 GitHub issue #1 的 Android、Worker/Admin 实现已落地，对应 R13—R15、N01—N09。客户端具备 cache-first 展示、前台单飞刷新、成功节流、失败退避、手动强制刷新、统计身份隔离与 fail-open；后台具备普通/重要/更新预设及 DAU/WAU/MAU、版本/渠道/平台聚合。NAR01—NAR07 审查项保持修复。API 31 release UI/公共请求 instrumentation 2/2 通过。生产部署是本轮独立步骤，必须以实际 Worker version、D1 备份、source hash 与公网后检记录为准；本地 PASS 不自动等于 `DEPLOYED`。
+状态：M2 与 GitHub issue #1 的 Android、Worker/Admin 实现已落地，对应 R13—R15、N01—N09。客户端具备 cache-first 展示、前台单飞刷新、成功节流、失败退避、手动强制刷新、统计身份隔离与 fail-open；后台具备普通/重要/更新预设及 DAU/WAU/MAU、版本/渠道/平台聚合。NAR01—NAR07 审查项保持修复。API 31 release UI/公共请求 instrumentation 2/2 通过。生产 Worker `70b42812-5fd9-45e7-902f-ae35d56151a2` 已部署，自定义域名签名/304/400/源码归档/Access 匿名拒绝后检通过；D1 备份与完整证据见本轮 production evidence。
 
 ## 1. 职责与展示
 
@@ -155,4 +155,4 @@ node src/local-server.mjs
 - feed rollout install ID 与可选 telemetry identity 分离。统计默认关闭；开启后才产生 `install_seen` 与六小时去重的 `app_active`，关闭会清事件队列、telemetry identity 和去重标记，但保留公告缓存与灰度身份。
 - Worker/D1 统计只返回同意样本的 `installSeen`、`appActive`、DAU/WAU/MAU 和近 30 日版本/渠道/平台分布，不返回原始 install/event 标识或内容。事件白名单、幂等、retention、Access、CSRF 与 admin fail-closed 边界未放宽。
 - Admin 增加普通公告、重要公告、版本更新三个预设；更新预设固定 `OPEN_APP_ROUTE app://update`。高级字段仍保留完整模型且默认折叠。
-- 本地 `npm test`、`npm run check`、local D1 migration/smoke 及 Android API 31 release UI/公共请求 2/2 均通过。生产部署结果必须在完成后追加 Worker version、source hash、D1 备份与 HTTPS 协议后检，不能提前填写。
+- 本地 `npm test`、`npm run check`、local D1 migration/smoke 及 Android API 31 release UI/公共请求 2/2 均通过。生产后检进一步发现并修复跨 isolate cache 与 Cloudflare 弱 ETag 条件请求问题；最终 source hash 为 `b835d4709d29b1111f1673f19a5a64d5d8ae09c14138c3f363e4d6d5de40ca25`，匹配 ETag 返回 304。

@@ -1,0 +1,25 @@
+# SPDX-FileCopyrightText: 2026 mobileAgentRuntime contributors
+# SPDX-License-Identifier: AGPL-3.0-only
+# Explicit local-only configuration. The all-zero id is not a Cloudflare
+# resource and prevents an accidental remote binding when this file is used.
+name = "mobile-agent-runtime-announcements-local"
+main = "src/worker.mjs"
+compatibility_date = "2025-01-01"
+compatibility_flags = ["nodejs_compat"]
+
+[assets]
+directory = "../../admin/announcements"
+binding = "ASSETS"
+run_worker_first = ["/api/*", "/admin/*", "/source/*"]
+
+[[d1_databases]]
+binding = "ANNOUNCEMENTS_DB"
+database_name = "mobile-agent-runtime-announcements-local"
+database_id = "00000000-0000-4000-8000-000000000000"
+migrations_dir = "migrations"
+
+[vars]
+MAR_ENV = "local"
+MAR_ANNOUNCE_KEY_ID = "local-dev-1"
+MAR_ADMIN_ORIGIN = "http://127.0.0.1:8787"
+MAR_PUBLIC_ORIGIN = "http://127.0.0.1:8787"

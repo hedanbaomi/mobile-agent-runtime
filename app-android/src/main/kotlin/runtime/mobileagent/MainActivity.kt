@@ -3,168 +3,33 @@
 
 package runtime.mobileagent
 
+import android.graphics.Color
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
-import androidx.compose.foundation.layout.padding
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.Chat
-import androidx.compose.material.icons.filled.Build
-import androidx.compose.material.icons.filled.Folder
-import androidx.compose.material.icons.filled.Info
-import androidx.compose.material.icons.filled.Notifications
-import androidx.compose.material.icons.filled.Person
-import androidx.compose.material.icons.filled.Settings
-import androidx.compose.material3.Icon
-import androidx.compose.material3.NavigationBar
-import androidx.compose.material3.NavigationBarItem
-import androidx.compose.material3.Scaffold
-import androidx.compose.material3.Text
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
-import androidx.compose.ui.Modifier
-import androidx.lifecycle.viewmodel.compose.viewModel
-import androidx.navigation.compose.NavHost
-import androidx.navigation.compose.composable
-import androidx.navigation.compose.rememberNavController
-import runtime.mobileagent.feature.agents.AgentsScreen
-import runtime.mobileagent.feature.announcements.AnnouncementsScreen
-import runtime.mobileagent.feature.chat.ChatScreen
-import runtime.mobileagent.feature.knowledge.KnowledgeScreen
-import runtime.mobileagent.feature.providers.ProvidersScreen
-import runtime.mobileagent.feature.settings.AboutScreen
-import runtime.mobileagent.feature.skills.SkillsScreen
+import androidx.core.view.WindowCompat
+import runtime.mobileagent.ui.MainApp
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        setContent {
-            val nav = rememberNavController()
-            val dest = remember { mutableStateOf("chat") }
-            val chatVm: ChatViewModel = viewModel()
-            val providersVm: ProvidersViewModel = viewModel()
-            val knowledgeVm: KnowledgeViewModel = viewModel()
-            val skillsVm: SkillsViewModel = viewModel()
-            val announcementsVm: AnnouncementsViewModel = viewModel()
-            val tabs = listOf(
-                Triple("chat", "Chat", Icons.AutoMirrored.Filled.Chat),
-                Triple("agents", "Agents", Icons.Filled.Person),
-                Triple("providers", "Providers", Icons.Filled.Settings),
-                Triple("knowledge", "Knowledge", Icons.Filled.Folder),
-                Triple("skills", "Skills", Icons.Filled.Build),
-                Triple("announcements", "News", Icons.Filled.Notifications),
-                Triple("about", "About", Icons.Filled.Info),
-            )
-            Scaffold(
-                bottomBar = {
-                    NavigationBar {
-                        tabs.forEach { (route, label, icon) ->
-                            NavigationBarItem(
-                                selected = dest.value == route,
-                                onClick = {
-                                    dest.value = route
-                                    nav.navigate(route)
-                                },
-                                icon = { Icon(icon, contentDescription = label) },
-                                label = { Text(label) },
-                            )
-                        }
-                    }
-                },
-            ) { padding ->
-                NavHost(navController = nav, startDestination = "chat", modifier = Modifier.padding(padding)) {
-                    composable("chat") {
-                        ChatScreen(
-                            lines = chatVm.lines,
-                            input = chatVm.input.value,
-                            streaming = chatVm.streaming.value,
-                            status = chatVm.status.value,
-                            textDegradation = chatVm.textDegradation.value,
-                            locatorText = chatVm.locator.value?.let { loc ->
-                                if (loc.removed) "Source removed" else "${loc.displayName} page=${loc.page ?: "-"} asset=${loc.assetId ?: "-"}"
-                            },
-                            onInput = { chatVm.input.value = it },
-                            onSend = chatVm::send,
-                            onCancel = chatVm::cancel,
-                            onToggleDegradation = { chatVm.textDegradation.value = it },
-                            onOpenCitation = chatVm::openCitation,
-                            pendingToolName = chatVm.pendingTool.value?.name,
-                            onApproveTool = chatVm::approveTool,
-                            onRejectTool = chatVm::rejectTool,
-                        )
-                    }
-                    composable("agents") { AgentsScreen() }
-                    composable("providers") {
-                        ProvidersScreen(
-                            providers = providersVm.providers,
-                            status = providersVm.status.value,
-                            onSave = providersVm::save,
-                        )
-                    }
-                    composable("knowledge") {
-                        KnowledgeScreen(
-                            jobs = knowledgeVm.jobs,
-                            status = knowledgeVm.status.value,
-                            onImport = knowledgeVm::importUris,
-                            onRebuild = knowledgeVm::rebuild,
-                            onGrantVision = knowledgeVm::grantVision,
-                            onRetryVision = knowledgeVm::retryVision,
-                        )
-                    }
-                    composable("skills") {
-                        SkillsScreen(
-                            rows = skillsVm.rows,
-                            status = skillsVm.status.value,
-                            onImport = skillsVm::importUris,
-                            onToggle = skillsVm::toggle,
-                        )
-                    }
-                    composable("announcements") {
-                        AnnouncementsScreen(
-                            items = announcementsVm.visible(),
-                            status = announcementsVm.status.value,
-                            filter = announcementsVm.filter.value.name.lowercase(),
-                            banner = announcementsVm.banner(),
-                            modal = announcementsVm.modal(),
-                            selected = announcementsVm.selected.value,
-                            baseUrl = announcementsVm.baseUrl.value,
-                            publicKeyHex = announcementsVm.publicKeyHex.value,
-                            onFilter = { key ->
-                                announcementsVm.filter.value = when (key) {
-                                    "all" -> AnnouncementsViewModel.Filter.ALL
-                                    "history" -> AnnouncementsViewModel.Filter.HISTORY
-                                    else -> AnnouncementsViewModel.Filter.UNREAD
-                                }
-                            },
-                            onRefresh = { announcementsVm.refresh(force = true) },
-                            onOpen = announcementsVm::open,
-                            onCloseDetail = { announcementsVm.selected.value = null },
-                            onMarkAllRead = announcementsVm::markAllRead,
-                            onDismiss = announcementsVm::dismiss,
-                            onAcknowledge = announcementsVm::acknowledge,
-                            onSaveEndpoint = announcementsVm::saveEndpoint,
-                            onAppRoute = { route ->
-                                val tab = when (route) {
-                                    "app://settings/providers" -> "providers"
-                                    "app://settings/knowledge" -> "knowledge"
-                                    "app://about", "app://update" -> "about"
-                                    else -> "announcements"
-                                }
-                                dest.value = tab
-                                nav.navigate(tab)
-                            },
-                        )
-                    }
-                    composable("about") {
-                        AboutScreen(
-                            BuildConfig.VERSION_NAME,
-                            BuildConfig.GIT_REVISION,
-                            statsEnabled = announcementsVm.statsEnabled.value,
-                            onStats = announcementsVm::setStats,
-                        )
-                    }
-                }
-            }
+        configureSystemBars()
+        setContent { MainApp() }
+    }
+
+    private fun configureSystemBars() {
+        // The first frame uses the product's light 66ccff surface. MobileAgentTheme
+        // reapplies the exact surface and icon contrast whenever the theme changes.
+        WindowCompat.setDecorFitsSystemWindows(window, true)
+        val surface = Color.rgb(242, 249, 253)
+        window.statusBarColor = surface
+        window.navigationBarColor = surface
+        WindowCompat.getInsetsController(window, window.decorView).apply {
+            isAppearanceLightStatusBars = true
+            isAppearanceLightNavigationBars = true
+        }
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.Q) {
+            window.isNavigationBarContrastEnforced = false
         }
     }
 }

@@ -18,6 +18,7 @@ enum class ErrorCode {
     INDEX_NOT_READY,
     SCHEMA_UNSUPPORTED,
     VISION_REQUIRED,
+    TRANSFER_INVALID,
 }
 
 enum class RetryClass { NONE, USER_ACTION, TRANSIENT, NEVER }

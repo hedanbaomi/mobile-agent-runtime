@@ -1,48 +1,19 @@
 // SPDX-FileCopyrightText: 2026 mobileAgentRuntime contributors
 // SPDX-License-Identifier: AGPL-3.0-only
 
-export class HttpError extends Error {
-  constructor(status, message, extra = {}) {
-    super(message);
-    this.status = status;
-    this.extra = extra;
-  }
-}
+import { HttpError } from "./errors.mjs";
+import {
+  assertAnnouncementBody,
+  assertEventValue,
+  assertInstant,
+  assertPublishData,
+  assertTranslationsValue,
+  normalizeAnnouncementBody,
+} from "./validation.mjs";
+
+export { HttpError } from "./errors.mjs";
 
 const PENDING = new Set(["draft", "scheduled"]);
-const CATEGORIES = new Set(["GENERAL", "FEATURE", "MAINTENANCE", "SERVICE_INCIDENT", "UPDATE", "SECURITY", "DEPRECATION"]);
-const SEVERITIES = new Set(["INFO", "NOTICE", "WARNING", "CRITICAL"]);
-const DISPLAY_MODES = new Set(["CENTER_ONLY", "BANNER", "MODAL"]);
-const ALLOWED_ACTIONS = new Set(["OPEN_HTTPS_URL", "OPEN_APP_ROUTE", "DISMISS", "ACKNOWLEDGE"]);
-const ALLOWED_ROUTES = new Set([
-  "app://settings/providers",
-  "app://settings/knowledge",
-  "app://announcements",
-  "app://about",
-  "app://update",
-]);
-const EVENT_TYPES = new Set([
-  "install_seen",
-  "app_active",
-  "announcement_fetched",
-  "announcement_displayed",
-  "announcement_opened",
-  "announcement_acknowledged",
-  "action_clicked",
-]);
-const EVENT_KEYS = new Set([
-  "eventId",
-  "type",
-  "installId",
-  "platform",
-  "channel",
-  "versionCode",
-  "locale",
-  "announcementId",
-  "revision",
-  "actionId",
-  "occurredAt",
-]);
 const SIX_HOURS_MS = 6 * 60 * 60 * 1000;
 
 export class MemoryStore {
@@ -375,14 +346,7 @@ export class MemoryStore {
   }
 
   assertTranslations(translations) {
-    if (!translations || !translations.default) {
-      throw new HttpError(400, "default translation is required");
-    }
-    for (const [locale, value] of Object.entries(translations)) {
-      if (!value?.title || !value?.summary || value.bodyMarkdown == null) {
-        throw new HttpError(400, `translation ${locale} is incomplete`);
-      }
-    }
+    assertTranslationsValue(translations);
   }
 
   translationMap(announcementId, revision) {
@@ -394,105 +358,26 @@ export class MemoryStore {
   }
 
   normalizeBody(input, options = {}) {
-    const strict = Boolean(options.strict);
-    const target = input.target || {};
-    const body = {
-      category: input.category || "GENERAL",
-      severity: input.severity || "INFO",
-      displayMode: input.displayMode || "CENTER_ONLY",
-      mustAcknowledge: Boolean(input.mustAcknowledge),
-      dismissible: input.dismissible !== false,
-      pinned: Boolean(input.pinned),
-      target: {
-        platform: target.platform || "all",
-        channel: target.channel || "all",
-        minVersionCode: target.minVersionCode ?? null,
-        maxVersionCode: target.maxVersionCode ?? null,
-        locales: Array.isArray(target.locales) ? target.locales : [],
-        rolloutPercent: target.rolloutPercent ?? 100,
-        rolloutSalt: target.rolloutSalt || "default",
-      },
-      actions: Array.isArray(input.actions) ? input.actions : [],
-      image: input.image || null,
-      startsAt: input.startsAt || null,
-      endsAt: input.endsAt || null,
-      publishedAt: input.publishedAt || null,
-    };
-    if (strict) this.assertBody(body);
-    return body;
+    return normalizeAnnouncementBody(input, options);
   }
 
   assertBody(body) {
-    if (!CATEGORIES.has(body.category)) throw new HttpError(400, "invalid category");
-    if (!SEVERITIES.has(body.severity)) throw new HttpError(400, "invalid severity");
-    if (!DISPLAY_MODES.has(body.displayMode)) throw new HttpError(400, "invalid displayMode");
-    if (body.startsAt) this.assertInstant(body.startsAt, "startsAt");
-    if (body.endsAt) this.assertInstant(body.endsAt, "endsAt");
-    if (body.startsAt && body.endsAt && Date.parse(body.endsAt) <= Date.parse(body.startsAt)) {
-      throw new HttpError(400, "endsAt must be after startsAt");
-    }
-    const percent = body.target.rolloutPercent;
-    if (!Number.isInteger(percent) || percent < 0 || percent > 100) {
-      throw new HttpError(400, "invalid rolloutPercent");
-    }
-    if (body.target.minVersionCode != null && !Number.isInteger(body.target.minVersionCode)) {
-      throw new HttpError(400, "invalid minVersionCode");
-    }
-    if (body.target.maxVersionCode != null && !Number.isInteger(body.target.maxVersionCode)) {
-      throw new HttpError(400, "invalid maxVersionCode");
-    }
-    if (!Array.isArray(body.actions) || body.actions.length > 4) {
-      throw new HttpError(400, "invalid actions");
-    }
+    assertAnnouncementBody(body);
   }
 
   assertInstant(value, field) {
-    if (!value || !Number.isFinite(Date.parse(value))) {
-      throw new HttpError(400, `invalid ${field}`);
-    }
+    assertInstant(value, field);
   }
 
   validatePublish(id, pending) {
     const translations = this.translationMap(id, pending.revision);
-    if (!translations.default) throw new HttpError(400, "default translation is required");
     const body = this.normalizeBody(JSON.parse(pending.bodyJson), { strict: true });
     pending.bodyJson = JSON.stringify(body);
-    if (body.mustAcknowledge) {
-      if (!["WARNING", "CRITICAL"].includes(body.severity) || body.displayMode !== "MODAL") {
-        throw new HttpError(400, "mustAcknowledge requires WARNING/CRITICAL and MODAL");
-      }
-      if (!body.actions.some((action) => action.type === "ACKNOWLEDGE")) {
-        throw new HttpError(400, "mustAcknowledge requires an ACKNOWLEDGE action");
-      }
-    }
-    for (const action of body.actions) {
-      if (!ALLOWED_ACTIONS.has(action.type)) throw new HttpError(400, "action type not allowed");
-      if (action.type === "OPEN_HTTPS_URL" && !String(action.url || "").startsWith("https://")) {
-        throw new HttpError(400, "OPEN_HTTPS_URL requires https");
-      }
-      if (action.type === "OPEN_APP_ROUTE" && !ALLOWED_ROUTES.has(action.url)) {
-        throw new HttpError(400, "OPEN_APP_ROUTE is not in the allowlist");
-      }
-    }
-    if (body.image && !String(body.image).startsWith("https://")) {
-      throw new HttpError(400, "image must be https");
-    }
-    for (const translation of Object.values(translations)) {
-      if (/<[a-zA-Z/!]/.test(translation.bodyMarkdown) || /javascript:|intent:|file:/i.test(translation.bodyMarkdown)) {
-        throw new HttpError(400, "markdown must not contain HTML, scripts, or blocked schemes");
-      }
-    }
+    assertPublishData(body, translations);
   }
 
   assertEvent(event) {
-    for (const key of Object.keys(event)) {
-      if (key === "installIdHash") continue;
-      if (!EVENT_KEYS.has(key)) throw new HttpError(400, `unknown event field ${key}`);
-    }
-    if (!EVENT_TYPES.has(event.type)) throw new HttpError(400, "event type not allowed");
-    if (/chat|prompt|api[_-]?key|authorization|skill|knowledge/i.test(JSON.stringify(event))) {
-      throw new HttpError(400, "event contains forbidden content");
-    }
+    assertEventValue(event);
   }
 
   requireAnnouncement(id) {

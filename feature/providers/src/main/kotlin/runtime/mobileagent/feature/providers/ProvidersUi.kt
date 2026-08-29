@@ -1,0 +1,349 @@
+// SPDX-FileCopyrightText: 2026 mobileAgentRuntime contributors
+// SPDX-License-Identifier: AGPL-3.0-only
+
+package runtime.mobileagent.feature.providers
+
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.BoxWithConstraints
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Button
+import androidx.compose.material3.Card
+import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.Checkbox
+import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.FilterChip
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Surface
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.text.input.KeyboardCapitalization
+import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.unit.dp
+
+data class ProviderCardUi(
+    val id: String,
+    val name: String,
+    val baseUrl: String,
+    val apiFormat: String,
+    val status: String = "",
+    val modelCount: Int = 0,
+    val secretConfigured: Boolean = false,
+)
+
+data class ProviderModelUi(
+    val id: String,
+    val modelId: String,
+    val role: String = "CHAT",
+    val capabilities: Set<String> = emptySet(),
+    val contextLimit: Int? = null,
+    val outputLimit: Int? = null,
+)
+
+data class ProviderDraft(
+    val id: String? = null,
+    val modelProfileId: String? = null,
+    val name: String = "",
+    val baseUrl: String = "",
+    val apiFormat: String = "OPENAI_COMPATIBLE",
+    val modelId: String = "",
+    val apiKey: String = "",
+    val vision: Boolean = false,
+    val tools: Boolean = false,
+    val role: String = "CHAT",
+    val parametersJson: String = "{}",
+    val contextLimit: Int = 32768,
+    val outputLimit: Int = 4096,
+    val mcpConfigured: Boolean = false,
+)
+
+data class ProbeCheckUi(val label: String, val result: String, val ok: Boolean? = null)
+
+data class ProbeUiState(
+    val phase: String = "idle",
+    val message: String = "",
+    val checks: List<ProbeCheckUi> = emptyList(),
+    val lastChecked: String = "",
+)
+
+data class ProvidersUiState(
+    val providers: List<ProviderCardUi> = emptyList(),
+    val selectedProviderId: String? = null,
+    val models: List<ProviderModelUi> = emptyList(),
+    val draft: ProviderDraft = ProviderDraft(),
+    val probe: ProbeUiState = ProbeUiState(),
+    val editorOpen: Boolean = false,
+    val loading: Boolean = false,
+    val error: String? = null,
+    val status: String = "",
+    val language: String = "zh-CN",
+    val mcpReason: String = "MCP 适配器报告已配置端点后，MCP 设置才可用。",
+    /** The configuration entry is available even when no MCP endpoint is configured. */
+    val mcpEntryEnabled: Boolean = false,
+    /** Save and validation feedback remains visible while the editor is open. */
+    val editorError: String? = null,
+)
+
+data class ProvidersActions(
+    val onSelectProvider: (String) -> Unit = {},
+    val onDraftChange: (ProviderDraft) -> Unit = {},
+    val onOpenEditor: (String?) -> Unit = {},
+    val onCloseEditor: () -> Unit = {},
+    val onSave: () -> Unit = {},
+    val onDelete: () -> Unit = {},
+    val onEditModel: (String?) -> Unit = {},
+    val onDeleteModel: (String) -> Unit = {},
+    val onProbe: () -> Unit = {},
+    val onCloseProbe: () -> Unit = {},
+    val onOpenMcpSettings: () -> Unit = {},
+)
+
+@Composable
+fun ProvidersScreen(state: ProvidersUiState, actions: ProvidersActions = ProvidersActions(), modifier: Modifier = Modifier) {
+    val zh = state.language.equals("zh-CN", true)
+    var deleteProviderId by remember { mutableStateOf<String?>(null) }
+    var deleteModelId by remember { mutableStateOf<String?>(null) }
+    var probeRequested by remember { mutableStateOf(false) }
+    BoxWithConstraints(modifier.fillMaxSize().padding(16.dp)) {
+        val wide = maxWidth >= 720.dp
+        if (wide) {
+            Row(Modifier.fillMaxSize(), horizontalArrangement = Arrangement.spacedBy(16.dp)) {
+                ProviderListPane(state, actions, zh, Modifier.weight(0.42f).fillMaxSize())
+                Column(Modifier.weight(0.58f).fillMaxSize().verticalScroll(rememberScrollState())) {
+                    ProviderDetail(state, actions, onRequestDeleteProvider = { deleteProviderId = it }, onRequestDeleteModel = { deleteModelId = it }, onRequestProbe = { probeRequested = true }, zh = zh)
+                }
+            }
+        } else {
+            Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                ProviderListPane(state, actions, zh, Modifier.fillMaxWidth())
+                ProviderDetail(state, actions, onRequestDeleteProvider = { deleteProviderId = it }, onRequestDeleteModel = { deleteModelId = it }, onRequestProbe = { probeRequested = true }, zh = zh)
+            }
+        }
+    }
+    if (state.editorOpen) ProviderEditorDialog(state, actions, zh)
+    if (state.probe.phase != "idle") ProbeDialog(state.probe, actions.onCloseProbe, zh)
+    if (probeRequested) {
+        AlertDialog(
+            onDismissRequest = { probeRequested = false },
+            title = { Text(if (zh) "运行服务商探测？" else "Run provider probe?") },
+            text = { Text(if (zh) "能力探测可能产生服务商费用，并会向已配置端点发送请求。" else "Capability tests may incur provider charges and send a request to the configured endpoint.") },
+            confirmButton = { Button(onClick = { probeRequested = false; actions.onProbe() }) { Text(if (zh) "运行探测" else "Run probe") } },
+            dismissButton = { TextButton(onClick = { probeRequested = false }) { Text(if (zh) "取消" else "Cancel") } },
+        )
+    }
+    deleteProviderId?.let { providerId ->
+        val name = state.providers.firstOrNull { it.id == providerId }?.name.orEmpty()
+        AlertDialog(
+            onDismissRequest = { deleteProviderId = null },
+            title = { Text(if (zh) "删除服务商？" else "Delete provider?") },
+            text = { Text(if (zh) "将删除 $name 及其模型元数据；保存的凭据由宿主操作移除。" else "Delete $name and its model metadata? Stored credentials will be removed by the host operation.") },
+            confirmButton = { Button(onClick = { deleteProviderId = null; actions.onDelete() }) { Text(if (zh) "删除" else "Delete") } },
+            dismissButton = { TextButton(onClick = { deleteProviderId = null }) { Text(if (zh) "取消" else "Cancel") } },
+        )
+    }
+    deleteModelId?.let { modelId ->
+        AlertDialog(
+            onDismissRequest = { deleteModelId = null },
+            title = { Text(if (zh) "删除模型元数据？" else "Delete model metadata?") },
+            text = { Text(if (zh) "将从服务商配置中删除此模型；不会自动联系服务商。" else "This removes the model from the provider profile. The provider is not contacted automatically.") },
+            confirmButton = { Button(onClick = { deleteModelId = null; actions.onDeleteModel(modelId) }) { Text(if (zh) "删除" else "Delete") } },
+            dismissButton = { TextButton(onClick = { deleteModelId = null }) { Text(if (zh) "取消" else "Cancel") } },
+        )
+    }
+}
+
+@Composable
+private fun ProviderListPane(state: ProvidersUiState, actions: ProvidersActions, zh: Boolean, modifier: Modifier) {
+    Column(modifier) {
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            Text(if (zh) "服务商" else "Providers", style = MaterialTheme.typography.headlineSmall, modifier = Modifier.weight(1f))
+            Button(onClick = { actions.onOpenEditor(null) }) { Text(if (zh) "添加服务商" else "Add provider") }
+        }
+        if (state.status.isNotBlank()) Text(state.status, style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(vertical = 8.dp))
+        if (state.loading) {
+            CircularProgressIndicator(Modifier.padding(top = 16.dp).size(24.dp))
+        } else if (state.error != null) {
+            Text(state.error, color = MaterialTheme.colorScheme.error, modifier = Modifier.padding(top = 16.dp))
+        } else if (state.providers.isEmpty()) {
+            EmptyProviderState(zh)
+        } else {
+            LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.height(280.dp).padding(top = 12.dp)) {
+                items(state.providers, key = { it.id }) { provider ->
+                    ProviderCard(provider, provider.id == state.selectedProviderId, zh) { actions.onSelectProvider(provider.id) }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun EmptyProviderState(zh: Boolean) {
+    Card(Modifier.fillMaxWidth().padding(top = 16.dp)) {
+        Column(Modifier.padding(16.dp)) {
+            Text(if (zh) "尚未配置服务商" else "No providers configured", style = MaterialTheme.typography.titleMedium)
+            Text(if (zh) "添加服务商以选择模型。凭据保留在本设备。" else "Add a provider to select a model. Credentials remain on this device.", style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(top = 4.dp))
+        }
+    }
+}
+
+@Composable
+private fun ProviderCard(provider: ProviderCardUi, selected: Boolean, zh: Boolean, onClick: () -> Unit) {
+    Surface(
+        color = if (selected) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceVariant,
+        modifier = Modifier.fillMaxWidth().clickable(onClick = onClick),
+    ) {
+        Column(Modifier.padding(14.dp)) {
+            Row(Modifier.fillMaxWidth()) {
+                Text(provider.name, style = MaterialTheme.typography.titleMedium, modifier = Modifier.weight(1f))
+                if (provider.status.isNotBlank()) FilterChip(selected = provider.status.equals("ready", true), onClick = {}, enabled = false, label = { Text(provider.status) })
+            }
+            Text(provider.baseUrl, style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(top = 4.dp))
+            Text(if (zh) "${provider.apiFormat} · ${provider.modelCount} 个模型" else "${provider.apiFormat} · ${provider.modelCount} models", style = MaterialTheme.typography.labelSmall, modifier = Modifier.padding(top = 4.dp))
+            Text(if (provider.secretConfigured) { if (zh) "已配置密钥引用" else "Credential reference configured" } else { if (zh) "未配置密钥引用" else "Credential reference missing" }, style = MaterialTheme.typography.labelSmall, modifier = Modifier.padding(top = 4.dp))
+        }
+    }
+}
+
+@Composable
+private fun ProviderDetail(
+    state: ProvidersUiState,
+    actions: ProvidersActions,
+    onRequestDeleteProvider: (String) -> Unit,
+    onRequestDeleteModel: (String) -> Unit,
+    onRequestProbe: () -> Unit,
+    zh: Boolean,
+) {
+    val provider = state.providers.firstOrNull { it.id == state.selectedProviderId }
+    if (provider == null) {
+        Text(if (zh) "选择服务商以查看模型和能力。" else "Select a provider to inspect models and capabilities.", style = MaterialTheme.typography.bodyMedium, modifier = Modifier.padding(24.dp))
+        return
+    }
+    Text(provider.name, style = MaterialTheme.typography.headlineSmall)
+    Text(provider.baseUrl, style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(top = 4.dp))
+    Row(Modifier.padding(vertical = 10.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        Button(onClick = { actions.onOpenEditor(provider.id) }) { Text(if (zh) "编辑" else "Edit") }
+        OutlinedButton(onClick = onRequestProbe) { Text(if (zh) "探测连接" else "Probe connection") }
+        OutlinedButton(onClick = { onRequestDeleteProvider(provider.id) }) { Text(if (zh) "删除" else "Delete") }
+    }
+    Text(if (zh) "模型与能力" else "Models and capabilities", style = MaterialTheme.typography.titleMedium)
+    if (state.models.isEmpty()) Text(if (zh) "暂无模型元数据。" else "No model metadata is available.", style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(top = 8.dp))
+    state.models.forEach { model ->
+        Card(Modifier.fillMaxWidth().padding(top = 8.dp)) {
+            Column(Modifier.padding(12.dp)) {
+                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                    Text(model.modelId, style = MaterialTheme.typography.titleMedium, modifier = Modifier.weight(1f))
+                    TextButton(onClick = { actions.onEditModel(model.id) }) { Text(if (zh) "编辑" else "Edit") }
+                    TextButton(onClick = { onRequestDeleteModel(model.id) }) { Text(if (zh) "删除" else "Delete") }
+                }
+                Text(if (zh) "角色：${model.role}" else "Role: ${model.role}", style = MaterialTheme.typography.bodySmall)
+                val capabilityLabel = if (model.capabilities.isEmpty()) {
+                    if (zh) "能力不可用" else "Capabilities unavailable"
+                } else {
+                    if (zh) "能力：${model.capabilities.sorted().joinToString()}" else "Capabilities: ${model.capabilities.sorted().joinToString()}"
+                }
+                Text(capabilityLabel, style = MaterialTheme.typography.bodySmall)
+                val limits = listOfNotNull(model.contextLimit?.let { "context $it" }, model.outputLimit?.let { "output $it" })
+                if (limits.isNotEmpty()) Text(limits.joinToString(" · "), style = MaterialTheme.typography.labelSmall)
+            }
+        }
+    }
+    Spacer(Modifier.height(16.dp))
+    Text(if (zh) "MCP 工具" else "MCP tools", style = MaterialTheme.typography.titleMedium)
+    Text(state.mcpReason, style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(top = 4.dp))
+    OutlinedButton(onClick = actions.onOpenMcpSettings, enabled = state.mcpEntryEnabled, modifier = Modifier.padding(top = 8.dp)) {
+        Text(if (zh) "打开 MCP 设置" else "Open MCP settings")
+    }
+}
+
+@Composable
+private fun ProviderEditorDialog(state: ProvidersUiState, actions: ProvidersActions, zh: Boolean) {
+    val draft = state.draft
+    val noCorrectionText = KeyboardOptions(
+        capitalization = KeyboardCapitalization.None,
+        autoCorrectEnabled = false,
+        keyboardType = KeyboardType.Text,
+    )
+    val noCorrectionAscii = KeyboardOptions(
+        capitalization = KeyboardCapitalization.None,
+        autoCorrectEnabled = false,
+        keyboardType = KeyboardType.Ascii,
+    )
+    val uriOptions = KeyboardOptions(
+        capitalization = KeyboardCapitalization.None,
+        autoCorrectEnabled = false,
+        keyboardType = KeyboardType.Uri,
+    )
+    AlertDialog(
+        onDismissRequest = actions.onCloseEditor,
+        title = { Text(if (draft.modelProfileId != null) { if (zh) "编辑模型" else "Edit model" } else if (draft.id == null) { if (zh) "添加服务商" else "Add provider" } else { if (zh) "编辑服务商" else "Edit provider" }) },
+        text = {
+            Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                state.editorError?.let { Text(it, color = MaterialTheme.colorScheme.error) }
+                OutlinedTextField(draft.name, { actions.onDraftChange(draft.copy(name = it)) }, label = { Text(if (zh) "名称" else "Name") }, keyboardOptions = noCorrectionText, modifier = Modifier.fillMaxWidth())
+                OutlinedTextField(draft.baseUrl, { actions.onDraftChange(draft.copy(baseUrl = it)) }, label = { Text(if (zh) "基础地址" else "Base URL") }, keyboardOptions = uriOptions, modifier = Modifier.fillMaxWidth())
+                OutlinedTextField(draft.apiFormat, { actions.onDraftChange(draft.copy(apiFormat = it)) }, label = { Text(if (zh) "API 格式" else "API format") }, keyboardOptions = noCorrectionAscii, modifier = Modifier.fillMaxWidth())
+                OutlinedTextField(draft.modelId, { actions.onDraftChange(draft.copy(modelId = it)) }, label = { Text(if (zh) "模型 ID" else "Model id") }, keyboardOptions = noCorrectionAscii, modifier = Modifier.fillMaxWidth())
+                OutlinedTextField(draft.role, { actions.onDraftChange(draft.copy(role = it)) }, label = { Text(if (zh) "模型角色" else "Model role") }, keyboardOptions = noCorrectionAscii, modifier = Modifier.fillMaxWidth())
+                OutlinedTextField(draft.parametersJson, { actions.onDraftChange(draft.copy(parametersJson = it)) }, label = { Text(if (zh) "参数 JSON" else "Parameters JSON") }, keyboardOptions = noCorrectionText, minLines = 2, modifier = Modifier.fillMaxWidth())
+                OutlinedTextField(draft.contextLimit.toString(), { actions.onDraftChange(draft.copy(contextLimit = it.toIntOrNull() ?: draft.contextLimit)) }, label = { Text(if (zh) "上下文预算" else "Context budget") }, keyboardOptions = noCorrectionAscii, modifier = Modifier.fillMaxWidth())
+                OutlinedTextField(draft.outputLimit.toString(), { actions.onDraftChange(draft.copy(outputLimit = it.toIntOrNull() ?: draft.outputLimit)) }, label = { Text(if (zh) "输出预算" else "Output budget") }, keyboardOptions = noCorrectionAscii, modifier = Modifier.fillMaxWidth())
+                OutlinedTextField(draft.apiKey, { actions.onDraftChange(draft.copy(apiKey = it)) }, label = { Text(if (draft.id == null) { if (zh) "API 密钥" else "API key" } else { if (zh) "替换 API 密钥（可选）" else "Replace API key (optional)" }) }, visualTransformation = PasswordVisualTransformation(), keyboardOptions = noCorrectionAscii, modifier = Modifier.fillMaxWidth())
+                CheckRow(if (zh) "模型支持图片" else "Model accepts images", draft.vision) { actions.onDraftChange(draft.copy(vision = it)) }
+                CheckRow(if (zh) "模型可调用工具" else "Model can call tools", draft.tools) { actions.onDraftChange(draft.copy(tools = it)) }
+                Text(if (zh) "能力探测可能产生服务商费用，且只在明确确认后运行。" else "Capability probes can incur provider charges and only run after explicit confirmation.", style = MaterialTheme.typography.bodySmall)
+            }
+        },
+        confirmButton = { Button(onClick = actions.onSave) { Text(if (zh) "保存" else "Save") } },
+        dismissButton = { TextButton(onClick = actions.onCloseEditor) { Text(if (zh) "取消" else "Cancel") } },
+    )
+}
+
+@Composable
+private fun CheckRow(label: String, checked: Boolean, onChecked: (Boolean) -> Unit) {
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Checkbox(checked = checked, onCheckedChange = onChecked)
+        Text(label)
+    }
+}
+
+@Composable
+private fun ProbeDialog(probe: ProbeUiState, onClose: () -> Unit, zh: Boolean) {
+    AlertDialog(
+        onDismissRequest = { if (probe.phase != "running") onClose() },
+        title = { Text(if (zh) "服务商探测" else "Provider probe") },
+        text = {
+            Column(Modifier.verticalScroll(rememberScrollState())) {
+                if (probe.phase == "running") CircularProgressIndicator(Modifier.size(24.dp))
+                if (probe.message.isNotBlank()) Text(probe.message, modifier = Modifier.padding(top = 8.dp))
+                probe.checks.forEach { check ->
+                    Text("${check.label}: ${check.result}", style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(top = 6.dp))
+                }
+                if (probe.lastChecked.isNotBlank()) Text(probe.lastChecked, style = MaterialTheme.typography.labelSmall, modifier = Modifier.padding(top = 8.dp))
+            }
+        },
+        confirmButton = { if (probe.phase != "running") Button(onClick = onClose) { Text(if (zh) "关闭" else "Close") } },
+    )
+}

@@ -7,7 +7,7 @@ import java.sql.Connection
 import java.sql.DriverManager
 import java.sql.PreparedStatement
 
-class JdbcSqlConnection(url: String = "jdbc:sqlite::memory:") : SqlConnection {
+class JdbcSqlConnection(url: String = "jdbc:sqlite::memory:") : SqlConnection, AutoCloseable {
     private val connection: Connection = DriverManager.getConnection(url).apply {
         createStatement().use { it.execute("PRAGMA foreign_keys = ON") }
     }
@@ -53,4 +53,6 @@ class JdbcSqlConnection(url: String = "jdbc:sqlite::memory:") : SqlConnection {
         args.forEachIndexed { index, value -> stmt.setObject(index + 1, value) }
         return stmt
     }
+
+    override fun close() = connection.close()
 }

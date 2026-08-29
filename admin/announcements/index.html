@@ -1,159 +1,161 @@
 <!-- SPDX-FileCopyrightText: 2026 mobileAgentRuntime contributors -->
 <!-- SPDX-License-Identifier: AGPL-3.0-only -->
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
 <head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Announcement admin (local)</title>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="referrer" content="no-referrer">
+  <title>Announcements administration</title>
   <style>
-    :root { color-scheme: light dark; --bg:#f9fafb; --fg:#111827; --card:#fff; --line:#d1d5db; --accent:#1a56db; --danger:#e02424; }
-    body { margin:0; font-family: "Segoe UI", "Noto Sans SC", sans-serif; background:var(--bg); color:var(--fg); }
-    header, main { max-width: 960px; margin: 0 auto; padding: 16px; }
-    h1 { font-size: 1.4rem; }
+    :root { color-scheme: light dark; --bg:#f6f8fb; --fg:#172033; --card:#fff; --line:#ccd4e0; --accent:#1b5bd6; --danger:#b42318; --muted:#5a667a; }
+    @media (prefers-color-scheme: dark) { :root { --bg:#121722; --fg:#edf2fb; --card:#1c2432; --line:#3a4659; --muted:#b8c2d4; } }
+    * { box-sizing:border-box; }
+    body { margin:0; font:15px/1.45 system-ui, "Segoe UI", sans-serif; background:var(--bg); color:var(--fg); }
+    header, main { max-width:1040px; margin:auto; padding:18px; }
+    h1 { margin:.2rem 0 .5rem; font-size:1.55rem; } h2 { margin-top:0; font-size:1.15rem; }
     .card { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:16px; margin-bottom:16px; }
-    label { display:block; font-size:0.85rem; margin:8px 0 4px; }
-    input, select, textarea { width:100%; box-sizing:border-box; padding:8px; border:1px solid var(--line); border-radius:8px; }
-    textarea { min-height: 88px; }
-    .row { display:grid; grid-template-columns: 1fr 1fr; gap:12px; }
-    button { background:var(--accent); color:#fff; border:0; border-radius:8px; padding:8px 12px; margin:4px 4px 0 0; }
-    button.secondary { background:#4b5563; }
-    button.danger { background:var(--danger); }
-    .preview { border:1px solid var(--line); border-radius:16px; padding:16px; max-width:360px; min-height:280px; }
-    .status { font-size:0.9rem; white-space:pre-wrap; }
-    @media (max-width: 800px) { .row { grid-template-columns: 1fr; } }
+    .notice { border-left:4px solid var(--accent); color:var(--muted); }
+    .warning { border-left-color:#d97706; }
+    .row { display:grid; grid-template-columns:1fr 1fr; gap:14px; }
+    label { display:block; margin:9px 0 4px; font-size:.86rem; font-weight:600; }
+    input, select, textarea { width:100%; padding:9px; border:1px solid var(--line); border-radius:7px; background:var(--card); color:var(--fg); }
+    textarea { min-height:110px; resize:vertical; }
+    button { border:0; border-radius:7px; padding:9px 13px; margin:8px 5px 0 0; background:var(--accent); color:white; cursor:pointer; }
+    button.secondary { background:#667085; } button.danger { background:var(--danger); }
+    button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible { outline:3px solid #8ab4ff; outline-offset:2px; }
+    .grid { display:grid; grid-template-columns:minmax(0,1.2fr) minmax(260px,.8fr); gap:16px; }
+    .preview { border:1px solid var(--line); border-radius:14px; padding:16px; min-height:260px; }
+    .preview h3 { margin:.5rem 0; } .preview p { white-space:pre-wrap; overflow-wrap:anywhere; }
+    pre { white-space:pre-wrap; overflow:auto; margin:0; }
+    .status { min-height:1.4em; color:var(--muted); white-space:pre-wrap; }
+    .sr-only { position:absolute; width:1px; height:1px; padding:0; margin:-1px; overflow:hidden; clip:rect(0,0,0,0); white-space:nowrap; border:0; }
+    @media (max-width:800px) { .row, .grid { grid-template-columns:1fr; } header, main { padding:12px; } }
   </style>
 </head>
 <body>
   <header>
-    <h1>Announcement admin</h1>
-    <p>Local test adapter only. Do not paste production Cloudflare Access tokens, signing private keys, or Provider API keys. This page talks to the local Worker on the same origin.</p>
+    <h1>Announcements administration</h1>
+    <p class="card notice" id="securityNotice">Production management uses the same origin and Cloudflare Access. The Worker verifies the Access assertion, issuer, audience and expiry; this page never accepts a signing private key or Provider credential.</p>
   </header>
   <main>
-    <section class="card">
-      <label>Admin token (X-Admin-Token, local test)</label>
-      <input id="token" type="password" autocomplete="off" />
-      <button type="button" onclick="reloadList()">Load list</button>
+    <section class="card notice warning" id="accessNotice" hidden>
+      <strong>Access is required before production writes are enabled.</strong>
+      <p>The API returned an unavailable or unauthorized response. Ask the owner to configure the Cloudflare Access application and audience. A local test token is accepted only on a loopback local server.</p>
+    </section>
+    <section class="card" id="localAuth" hidden>
+      <h2>Local test authentication</h2>
+      <label for="token">Admin token (local loopback only)</label>
+      <input id="token" type="password" autocomplete="off">
+      <p class="status">Do not paste a production token here. Production uses the Access browser session cookie.</p>
     </section>
     <section class="card">
-      <h2>Editor</h2>
-      <div class="row">
+      <h2>Draft editor</h2>
+      <div class="grid">
         <div>
-          <label>id</label><input id="id" value="security-demo" />
-          <label>category</label>
-          <select id="category"><option>GENERAL</option><option>FEATURE</option><option>MAINTENANCE</option><option>SERVICE_INCIDENT</option><option>UPDATE</option><option selected>SECURITY</option><option>DEPRECATION</option></select>
-          <label>severity</label>
-          <select id="severity"><option>INFO</option><option>NOTICE</option><option selected>WARNING</option><option>CRITICAL</option></select>
-          <label>displayMode</label>
-          <select id="displayMode" onchange="renderPreview()"><option>CENTER_ONLY</option><option>BANNER</option><option selected>MODAL</option></select>
-          <label>rolloutPercent</label><input id="rolloutPercent" type="number" min="0" max="100" value="100" />
-          <label>rolloutSalt</label><input id="rolloutSalt" value="stable-salt" />
-          <label>startsAt (UTC)</label><input id="startsAt" placeholder="2026-08-29T00:00:00.000Z" />
+          <div class="row">
+            <div><label for="id">Announcement id</label><input id="id" value="security-demo" autocomplete="off"></div>
+            <div><label for="category">Category</label><select id="category"><option>GENERAL</option><option>FEATURE</option><option>MAINTENANCE</option><option>SERVICE_INCIDENT</option><option>UPDATE</option><option selected>SECURITY</option><option>DEPRECATION</option></select></div>
+          </div>
+          <div class="row">
+            <div><label for="severity">Severity</label><select id="severity"><option>INFO</option><option>NOTICE</option><option selected>WARNING</option><option>CRITICAL</option></select></div>
+            <div><label for="displayMode">Display mode</label><select id="displayMode" onchange="renderPreview()"><option>CENTER_ONLY</option><option>BANNER</option><option selected>MODAL</option></select></div>
+          </div>
+          <div class="row">
+            <div><label for="rolloutPercent">Rollout percent</label><input id="rolloutPercent" type="number" min="0" max="100" value="100"></div>
+            <div><label for="rolloutSalt">Rollout salt</label><input id="rolloutSalt" value="stable-salt" autocomplete="off"></div>
+          </div>
+          <div class="row">
+            <div><label for="startsAt">Starts at (UTC ISO)</label><input id="startsAt" placeholder="2026-08-29T00:00:00.000Z"></div>
+            <div><label for="endsAt">Ends at (UTC ISO)</label><input id="endsAt" placeholder="optional"></div>
+          </div>
+          <label><input id="mustAck" type="checkbox" checked onchange="renderPreview()"> Must acknowledge</label>
+          <label><input id="pinned" type="checkbox" checked> Pinned</label>
         </div>
         <div>
-          <label>title</label><input id="title" value="Security notice" oninput="renderPreview()" />
-          <label>summary</label><input id="summary" value="Please read" oninput="renderPreview()" />
-          <label>bodyMarkdown</label><textarea id="body" oninput="renderPreview()">Signed announcement body.</textarea>
-          <label><input id="mustAck" type="checkbox" checked onchange="renderPreview()" /> mustAcknowledge</label>
-          <label><input id="pinned" type="checkbox" checked /> pinned</label>
-          <label>HTTPS action URL</label><input id="httpsUrl" value="https://example.invalid/notice" />
+          <label for="title">Default title</label><input id="title" value="Security notice" oninput="renderPreview()">
+          <label for="summary">Default summary</label><input id="summary" value="Please read" oninput="renderPreview()">
+          <label for="body">Default body Markdown</label><textarea id="body" oninput="renderPreview()">Signed announcement body.</textarea>
+          <label for="httpsUrl">HTTPS action URL (optional)</label><input id="httpsUrl" value="https://example.invalid/notice" autocomplete="off">
         </div>
       </div>
       <p>
         <button type="button" onclick="createDraft()">Create draft</button>
+        <button type="button" class="secondary" onclick="newRevision()">New revision</button>
         <button type="button" class="secondary" onclick="schedule()">Schedule</button>
         <button type="button" onclick="publish()">Publish</button>
         <button type="button" class="danger" onclick="withdraw()">Withdraw</button>
         <button type="button" class="secondary" onclick="archive()">Archive</button>
-        <button type="button" class="secondary" onclick="newRevision()">New revision</button>
       </p>
-      <p class="status" id="status"></p>
+      <p class="status" id="status" aria-live="polite"></p>
     </section>
     <section class="card">
       <h2>Android preview</h2>
-      <div class="preview" id="preview"></div>
+      <div class="preview" id="preview" aria-label="Announcement preview"></div>
     </section>
     <section class="card">
-      <h2>Published list</h2>
-      <pre id="list" class="status"></pre>
+      <h2>Announcements</h2>
+      <button type="button" class="secondary" onclick="reloadList()">Reload list</button>
+      <pre id="list" class="status" aria-live="polite"></pre>
     </section>
   </main>
   <script>
     const api = location.origin;
-    function token() { return document.getElementById("token").value; }
+    const isLocal = /^(127\.0\.0\.1|localhost)$/.test(location.hostname);
+    let announcements = [];
+    document.getElementById("localAuth").hidden = !isLocal;
+    function localToken() { return document.getElementById("token").value; }
     function headers() {
-      return {
-        "content-type": "application/json",
-        "X-Admin-Token": token(),
-        "X-Request-Id": crypto.randomUUID()
-      };
+      const value = { "content-type": "application/json", "X-Request-Id": crypto.randomUUID() };
+      if (isLocal && localToken()) value["X-Admin-Token"] = localToken();
+      return value;
     }
-    function body() {
+    function announcementBody() {
       const mustAck = document.getElementById("mustAck").checked;
-      const actions = mustAck
-        ? [{ type: "ACKNOWLEDGE", key: "ack", label: "I have read and acknowledge" }]
-        : [{ type: "DISMISS", key: "dismiss", label: "Dismiss" }];
-      const httpsUrl = document.getElementById("httpsUrl").value.trim();
-      if (httpsUrl) actions.push({ type: "OPEN_HTTPS_URL", key: "link", label: "Open link", url: httpsUrl });
+      const actions = mustAck ? [{ type:"ACKNOWLEDGE", key:"ack", label:"I have read and acknowledge" }] : [{ type:"DISMISS", key:"dismiss", label:"Dismiss" }];
+      const url = document.getElementById("httpsUrl").value.trim();
+      if (url) actions.push({ type:"OPEN_HTTPS_URL", key:"link", label:"Open link", url });
       return {
-        id: document.getElementById("id").value.trim(),
-        category: document.getElementById("category").value,
-        severity: document.getElementById("severity").value,
-        displayMode: document.getElementById("displayMode").value,
-        mustAcknowledge: mustAck,
-        dismissible: !mustAck,
-        pinned: document.getElementById("pinned").checked,
-        startsAt: document.getElementById("startsAt").value.trim() || null,
-        target: {
-          platform: "android",
-          channel: "all",
-          rolloutPercent: Number(document.getElementById("rolloutPercent").value),
-          rolloutSalt: document.getElementById("rolloutSalt").value.trim() || "default",
-          locales: []
-        },
-        actions,
-        translations: {
-          default: {
-            title: document.getElementById("title").value,
-            summary: document.getElementById("summary").value,
-            bodyMarkdown: document.getElementById("body").value
-          }
-        }
+        id: document.getElementById("id").value.trim(), category: document.getElementById("category").value,
+        severity: document.getElementById("severity").value, displayMode: document.getElementById("displayMode").value,
+        mustAcknowledge: mustAck, dismissible: !mustAck, pinned: document.getElementById("pinned").checked,
+        startsAt: document.getElementById("startsAt").value.trim() || null, endsAt: document.getElementById("endsAt").value.trim() || null,
+        target: { platform:"android", channel:"all", rolloutPercent:Number(document.getElementById("rolloutPercent").value), rolloutSalt:document.getElementById("rolloutSalt").value.trim() || "default", locales:[] },
+        actions, translations: { default: { title:document.getElementById("title").value, summary:document.getElementById("summary").value, bodyMarkdown:document.getElementById("body").value } }
       };
     }
+    function selected() { return announcements.find((item) => item.id === document.getElementById("id").value.trim()); }
+    function pendingRevision() { return selected()?.pendingRevision ?? null; }
+    function publishedRevision() { return selected()?.currentPublishedRevision ?? null; }
     async function call(path, method, payload) {
-      const response = await fetch(api + path, {
-        method,
-        headers: headers(),
-        body: method === "GET" ? undefined : JSON.stringify(payload || {})
-      });
+      const response = await fetch(api + path, { method, headers: headers(), credentials:"same-origin", body: method === "GET" ? undefined : JSON.stringify(payload || {}) });
       const text = await response.text();
       document.getElementById("status").textContent = response.status + " " + text;
+      if (response.status === 401 || response.status === 403 || response.status === 503) document.getElementById("accessNotice").hidden = false;
       return { response, text };
     }
-    async function createDraft() { await call("/admin/v1/announcements", "POST", body()); await reloadList(); }
-    async function newRevision() { await call("/admin/v1/announcements/" + body().id + "/revisions", "POST", body()); await reloadList(); }
-    async function schedule() { await call("/admin/v1/announcements/" + body().id + "/schedule", "POST", { startsAt: body().startsAt, expectedRevision: 1 }); await reloadList(); }
-    async function publish() { await call("/admin/v1/announcements/" + body().id + "/publish", "POST", { expectedRevision: 1 }); await reloadList(); }
-    async function withdraw() { await call("/admin/v1/announcements/" + body().id + "/withdraw", "POST", {}); await reloadList(); }
-    async function archive() { await call("/admin/v1/announcements/" + body().id + "/archive", "POST", {}); await reloadList(); }
+    async function createDraft() { await call("/admin/v1/announcements", "POST", announcementBody()); await reloadList(); }
+    async function newRevision() { await call("/admin/v1/announcements/" + encodeURIComponent(announcementBody().id) + "/revisions", "POST", announcementBody()); await reloadList(); }
+    async function schedule() { const revision = pendingRevision(); if (revision == null) return showNeedRevision(); await call(path("schedule"), "POST", { startsAt:announcementBody().startsAt, expectedRevision:revision }); await reloadList(); }
+    async function publish() { const revision = pendingRevision(); if (revision == null) return showNeedRevision(); await call(path("publish"), "POST", { expectedRevision:revision }); await reloadList(); }
+    async function withdraw() { const revision = publishedRevision(); if (revision == null) return showNeedRevision(); await call(path("withdraw"), "POST", { expectedRevision:revision }); await reloadList(); }
+    async function archive() { const revision = publishedRevision(); if (revision == null) return showNeedRevision(); await call(path("archive"), "POST", { expectedRevision:revision }); await reloadList(); }
+    function path(action) { return "/admin/v1/announcements/" + encodeURIComponent(document.getElementById("id").value.trim()) + "/" + action; }
+    function showNeedRevision() { document.getElementById("status").textContent = "Load an existing announcement first so the expected revision can be checked."; }
     async function reloadList() {
       const result = await call("/admin/v1/announcements", "GET");
+      try { const parsed = JSON.parse(result.text); announcements = Array.isArray(parsed.items) ? parsed.items : []; } catch { announcements = []; }
       document.getElementById("list").textContent = result.text;
     }
     function renderPreview() {
-      const mode = document.getElementById("displayMode").value;
-      const title = document.getElementById("title").value;
-      const summary = document.getElementById("summary").value;
-      const md = document.getElementById("body").value;
-      const ack = document.getElementById("mustAck").checked;
-      document.getElementById("preview").innerHTML =
-        "<strong>" + escapeHtml(mode) + "</strong><h3>" + escapeHtml(title) + "</h3><p>" +
-        escapeHtml(summary) + "</p><p>" + escapeHtml(md) + "</p>" +
-        (ack ? "<button type='button'>I have read and acknowledge</button>" : "<button type='button'>Dismiss</button>");
-    }
-    function escapeHtml(value) {
-      return String(value).replace(/[&<>"']/g, (ch) => ({ "&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;" }[ch]));
+      const target = document.getElementById("preview");
+      target.textContent = "";
+      const mode = document.createElement("strong"); mode.textContent = document.getElementById("displayMode").value;
+      const title = document.createElement("h3"); title.textContent = document.getElementById("title").value;
+      const summary = document.createElement("p"); summary.textContent = document.getElementById("summary").value;
+      const body = document.createElement("p"); body.textContent = document.getElementById("body").value;
+      const action = document.createElement("button"); action.type = "button"; action.textContent = document.getElementById("mustAck").checked ? "I have read and acknowledge" : "Dismiss"; action.disabled = true;
+      target.append(mode, title, summary, body, action);
     }
     renderPreview();
   </script>

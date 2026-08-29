@@ -19,7 +19,8 @@ data class ProviderProfile(
     val baseUrl: String,
     val headerSecretRefs: Map<String, String> = emptyMap(),
     val nonSecretHeaders: Map<String, String> = emptyMap(),
-    val secretRef: String,
+    /** Empty only for imported portable snapshots/providers awaiting local credential binding. */
+    val secretRef: String = "",
     val revision: Int,
 )
 
@@ -34,6 +35,8 @@ data class ModelProfile(
     val contextLimit: Int,
     val outputLimit: Int,
     val revision: Int,
+    /** Validated model defaults; the schema above describes allowed values. */
+    val parametersJson: String = "{}",
 )
 
 @Serializable
@@ -49,6 +52,12 @@ data class AgentProfile(
     val skillIds: List<String> = emptyList(),
     val retrievalMode: String = "explicit",
     val revision: Int,
+    /** JSON object containing validated per-agent model parameter overrides. */
+    val parameterOverridesJson: String = "{}",
+    /** JSON object containing the context and retrieval budget policy. */
+    val contextPolicyJson: String = "{}",
+    /** JSON object containing deterministic permission and degradation settings. */
+    val permissionSettingsJson: String = "{}",
 )
 
 @Serializable

@@ -5,6 +5,7 @@ package runtime.mobileagent.skills
 
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertTrue
+import org.junit.jupiter.api.Assertions.assertThrows
 import org.junit.jupiter.api.Test
 
 class BuiltinToolsTest {
@@ -239,5 +240,71 @@ class BuiltinToolsTest {
             HttpPolicy.assertRequest("https://[fc00::1]/", setOf("fc00::1"))
         }.exceptionOrNull()
         assertTrue(v6 is IllegalStateException)
+    }
+
+    @Test
+    fun reusedCallIdCannotChangeToolOrArgumentsOrReplacePendingApproval() {
+        val tools = broker()
+        val calculator = ToolCall("id", "calculator", """{"expression":"1+1"}""")
+        assertTrue(tools.invoke(calculator) is ToolResult.Value)
+        assertTrue(tools.invoke(calculator.copy(argumentsJson = """{"expression":"2+2"}""")) is ToolResult.Invalid)
+        assertTrue(tools.invoke(calculator.copy(name = "http_request", argumentsJson = """{"url":"https://api.example.com/"}""")) is ToolResult.Invalid)
+        val http = ToolCall("pending", "http_request", """{"url":"https://api.example.com/first"}""")
+        assertEquals(ToolResult.NeedsApproval, tools.invoke(http))
+        assertTrue(tools.invoke(http.copy(argumentsJson = """{"url":"https://api.example.com/replaced"}""")) is ToolResult.Invalid)
+        assertTrue(tools.approve("pending") is ToolResult.Value)
+    }
+
+    @Test
+    fun malformedParameterTypesAndBoundsNeverReachHostCallbacks() {
+        var calls = 0
+        val tools = ToolBroker(setOf("knowledge.search", "knowledge.read", "network.http"), ToolContext(
+            search = { _, _, _ -> calls++; "{}" },
+            readDocument = { _, _ -> calls++; "{}" },
+            httpGet = { calls++; "{}" },
+            grantedKnowledgeBaseIds = setOf("kb-a"),
+            documentKnowledgeBaseId = { "kb-a" },
+            allowedHosts = setOf("api.example.com"),
+        ), autoApproveSideEffects = true)
+        val inputs = listOf(
+            "knowledge_search" to """{"query":7}""",
+            "knowledge_search" to """{"query":"q","topK":"8"}""",
+            "knowledge_search" to """{"query":"q","topK":0}""",
+            "knowledge_search" to """{"query":"q","topK":101}""",
+            "knowledge_search" to """{"query":"q","topK":1.5}""",
+            "knowledge_search" to """{"query":"q","knowledgeBaseIds":"kb-a"}""",
+            "knowledge_search" to """{"query":"q","knowledgeBaseIds":["kb-a",null]}""",
+            "knowledge_search" to """{"query":"q","extra":true}""",
+            "read_document" to """{"documentId":[]}""",
+            "read_document" to """{"documentId":"doc","maxChars":16385}""",
+            "http_request" to """{"url":null}""",
+            "http_request" to """{"url":"https://api.example.com/","method":{}}""",
+            "calculator" to """{"expression":true}""",
+        )
+        inputs.forEachIndexed { index, (name, arguments) ->
+            assertTrue(tools.invoke(ToolCall("bad-$index", name, arguments)) is ToolResult.Invalid, arguments)
+        }
+        assertEquals(0, calls)
+    }
+
+    @Test
+    fun cachedResultIsNotDisclosedAfterGrantScopeChanges() {
+        var grant = PermissionGrant("g", "i", "h", setOf("knowledge.read"), knowledgeBaseIds = setOf("kb-a"))
+        val tools = ToolBroker(emptySet(), ToolContext(
+            search = { _, _, _ -> "{}" }, readDocument = { _, _ -> "private-A-marker" },
+            documentKnowledgeBaseId = { "kb-a" },
+        ), liveGrant = { grant })
+        val call = ToolCall("read", "read_document", """{"documentId":"doc-a"}""")
+        assertTrue(tools.invoke(call) is ToolResult.Value)
+        grant = grant.copy(knowledgeBaseIds = setOf("kb-b"))
+        assertTrue(tools.invoke(call) is ToolResult.Denied)
+    }
+
+    @Test
+    fun interruptedBlockingToolIsNotConvertedToCachedInvalidResult() {
+        val tools = broker(autoApprove = true, http = { throw InterruptedException("cancelled") })
+        assertThrows(InterruptedException::class.java) {
+            tools.invoke(ToolCall("cancel", "http_request", """{"url":"https://api.example.com/"}"""))
+        }
     }
 }

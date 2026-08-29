@@ -3,7 +3,7 @@
 
 # 技术实现方案
 
-版本：v1.2 设计基线，2026-08-28。状态：**部分实现**。M0 本地构建/许可已落地；M0.5 软件页面 UI 设计基线已全面完成。M1 已接通 OpenAI 兼容流式 Chat、Keystore 密钥引用、TXT/MD SAF 导入与含图等待；现有 UI 须按 M0.5 设计补齐。M2 本地公告闭环已落地（未部署 Cloudflare）；NAR01—NAR07 已在本地修复。M3 文本路径本地 JVM 已落地：CAS 多库、代际索引、FTS+`local-hash-v1-d32`+RRF；KAR01—KAR08 已在本地修复。M4 本地 JVM 已落地并完成 M4R/M4RR 修复（schema v7、App Vision 接线、inline/绘图 PDF 不 READY、外链图零外联、原图完整性、locator 校验、同意与缓存绑定 Provider）；**不是** PDF 光栅化渲染包、**不是** ONNX、**不是** K06 设备负载。M5 本地 JVM 已落地并完成 M5R/M5RR 修复（tool_calls 协议、live grant、HTTPS/IP 边界、ZIP 结构拒绝、预算取消）；**不是** CPython 隔离（M6）、**不是** 完整 MVP。独立复审前不把这些修复标为阶段验收通过。完整 MVP、CPython、USearch JNI、公告生产部署仍未完成。
+版本：v1.4 debug 集成记录，2026-08-29；继承 v1.2 页面设计基线及用户后续 66ccff 修订。状态：**debug 产品集成通过，完整验收仍有外部门禁**。M1/M5 已接通持久会话、不可变快照、真实请求检查、工具循环、MCP/Python 工具与未知结果门禁；受控 Provider 的消息恢复与计算器循环已在模拟器验证。M3/M4 已接入 MiniLM ONNX、USearch JNI、PDF 页渲染、原图引用、API Embedding 独立授权；Round21 API Embedding 5 项与 Knowledge 4 项设备测试通过，但 320 文件仅完成本地文本/存储等待组件，不能标完整 K06。M7 已实现 schema v10、流式 ZIP 迁移、MCP 与 Remote 接口。M6 官方 CPython 3.14.7/JNI/隔离 IPC 在 Round22 设备 12 项通过，包含日志超限与立即合法结果的竞态反例。M2 独立 D1/Worker 版本 `dd2be020-85ff-48ef-8b83-779a7a9cc02b` 已部署；公开 HTTPS 后检受本机网络阻断，Access 管理配置未完成且后台保持拒绝。当前不是正式 Android release，也不代表完整 K06/生产身份验收。
 
 开工入口：[agent.md](../agent.md) → [HANDOFF.md](../HANDOFF.md) → 本文。范围依据见 [REQUIREMENTS.md](REQUIREMENTS.md)。含图知识库、Python 隔离和公告分别详见专题，不能只实现本文概要。
 
@@ -103,6 +103,8 @@ docs/evidence/                脱敏的验证结果，按任务分目录
 ## 5. 领域模型与持久化契约
 
 所有公共导入导出使用 `schemaVersion`，未知主版本明确拒绝；UTC 时间、稳定字符串 ID、数字范围显式验证。数据库升级逐版迁移，失败保留原库，不自动清空重建用户数据。
+
+当前数据库版本为 v10：v8 增加完整 Agent 快照、typed messages/Run/审计和设置持久化；v9 增加 API Embedding 查询未知结果门禁；v10 增加可恢复的 `embedding_operations` 阶段状态与 `embedding_query_vectors` 查询向量缓存。查询向量只在完整 retrieve 成功后清理尝试门禁；本地检索后半段失败可复用已校验向量，不重复外发。细节见 [KNOWLEDGE §4.1](KNOWLEDGE.md#41-api-外发与未知查询的一次性重试)。导出格式的 schemaVersion 与数据库版本相互独立。完整知识库/会话走有界流式 ZIP，默认不包含原文、Skill 包或会话；用户逐项选择后写入 SAF 指定位置，云端文档提供方可能自行同步。导入快照不携带密钥/授权，明确要求本地重新配置，UNKNOWN 不自动重放。
 
 | 实体/逻辑表 | 必要字段与约束 |
 | --- | --- |

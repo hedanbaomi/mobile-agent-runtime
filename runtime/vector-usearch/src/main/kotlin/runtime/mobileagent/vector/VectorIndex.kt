@@ -3,13 +3,11 @@
 
 package runtime.mobileagent.vector
 
-interface VectorIndex {
-    val spaceId: String
-    fun add(id: String, vector: FloatArray)
-    fun search(query: FloatArray, topK: Int): List<Pair<String, Float>>
-}
+import runtime.mobileagent.knowledge.VectorIndexPort
 
-class BruteForceVectorIndex(override val spaceId: String, private val dimension: Int) : VectorIndex {
+interface VectorIndex : VectorIndexPort
+
+class BruteForceVectorIndex(override val spaceId: String, override val dimension: Int) : VectorIndex {
     private val rows = linkedMapOf<String, FloatArray>()
 
     override fun add(id: String, vector: FloatArray) {

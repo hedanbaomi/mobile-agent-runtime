@@ -15,7 +15,7 @@ const adminToken = process.env.MAR_ADMIN_TOKEN || "";
 if (!adminToken) {
   console.error("Set MAR_ADMIN_TOKEN for local admin writes. Public feed still serves.");
 }
-const worker = createWorker({ keys, adminToken });
+const worker = createWorker({ keys, adminToken, environment: "local", allowLocalAdmin: true });
 
 const server = createServer(async (req, res) => {
   try {
@@ -23,7 +23,13 @@ const server = createServer(async (req, res) => {
     const url = new URL(req.url || "/", `http://${host}`);
     if (url.pathname === "/admin/announcements" || url.pathname === "/admin/announcements/") {
       const html = await readFile(adminPage, "utf8");
-      res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+      res.writeHead(200, {
+        "content-type": "text/html; charset=utf-8",
+        "x-content-type-options": "nosniff",
+        "x-frame-options": "DENY",
+        "referrer-policy": "no-referrer",
+        "content-security-policy": "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src https: data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'",
+      });
       res.end(html);
       return;
     }

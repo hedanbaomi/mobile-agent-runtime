@@ -25,6 +25,18 @@ SPDX-FileCopyrightText = "Copyright (C) 2007 Free Software Foundation, Inc. <htt
 SPDX-License-Identifier = "AGPL-3.0-only"
 
 [[annotations]]
+path = ["services/announcements/package.json", "services/announcements/package-lock.json"]
+precedence = "aggregate"
+SPDX-FileCopyrightText = "2026 mobileAgentRuntime contributors"
+SPDX-License-Identifier = "AGPL-3.0-only"
+
+[[annotations]]
+path = ["admin/announcements/source/*/manifest.json", "admin/announcements/source/*/mobile-agent-runtime-announcements-source.zip"]
+precedence = "aggregate"
+SPDX-FileCopyrightText = "2026 mobileAgentRuntime contributors"
+SPDX-License-Identifier = "AGPL-3.0-only"
+
+[[annotations]]
 path = [
     "agent.md",
     "HANDOFF.md",

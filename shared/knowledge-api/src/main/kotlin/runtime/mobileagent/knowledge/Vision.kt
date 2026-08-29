@@ -51,9 +51,16 @@ data class VisionBinding(
     val modelId: String,
     val endpoint: String,
     val revision: Int,
+    /** Provider profile revision; defaults to the legacy combined revision. */
+    val providerRevision: Int = revision,
+    /** Model profile revision; defaults to the legacy combined revision. */
+    val modelRevision: Int = revision,
 ) {
     val fingerprint: String
-        get() = "$providerId|$modelId|${endpoint.trimEnd('/').lowercase()}|$revision"
+        // Keep path spelling significant.  Only discard redundant trailing
+        // separators; callers that want scheme/host canonicalization must do
+        // so before constructing the binding.
+        get() = "$providerId|$modelId|${endpoint.trimEnd('/')}|provider:$providerRevision|model:$modelRevision"
 }
 
 data class LoadedVisual(

@@ -23,6 +23,12 @@ class AndroidContextSqlite(
     private val connection: SQLiteConnection = BundledSQLiteDriver().open(
         context.getDatabasePath(name).absolutePath,
     )
+    // JVM monitors are re-entrant, but SQLite transactions are not.  The
+    // repository can legitimately call a helper that opens another logical
+    // transaction while holding the same connection, so nested scopes use
+    // savepoints instead of issuing a second BEGIN.
+    private var transactionDepth = 0
+    private var savepointSequence = 0L
 
     override fun execute(sql: String, args: List<Any?>) {
         synchronized(lock) {
@@ -52,13 +58,31 @@ class AndroidContextSqlite(
 
     override fun <T> transaction(block: () -> T): T {
         synchronized(lock) {
-            connection.prepare("BEGIN IMMEDIATE").use { it.step() }
+            val nested = transactionDepth > 0
+            val savepoint = if (nested) "mobileagent_sp_${++savepointSequence}" else null
+            if (nested) {
+                connection.prepare("SAVEPOINT $savepoint").use { it.step() }
+            } else {
+                connection.prepare("BEGIN IMMEDIATE").use { it.step() }
+            }
+            transactionDepth += 1
             return try {
                 val result = block()
-                connection.prepare("COMMIT").use { it.step() }
+                if (nested) {
+                    connection.prepare("RELEASE SAVEPOINT $savepoint").use { it.step() }
+                } else {
+                    connection.prepare("COMMIT").use { it.step() }
+                }
+                transactionDepth -= 1
                 result
             } catch (t: Throwable) {
-                runCatching { connection.prepare("ROLLBACK").use { it.step() } }
+                transactionDepth = (transactionDepth - 1).coerceAtLeast(0)
+                if (nested) {
+                    runCatching { connection.prepare("ROLLBACK TO SAVEPOINT $savepoint").use { it.step() } }
+                    runCatching { connection.prepare("RELEASE SAVEPOINT $savepoint").use { it.step() } }
+                } else {
+                    runCatching { connection.prepare("ROLLBACK").use { it.step() } }
+                }
                 throw t
             }
         }

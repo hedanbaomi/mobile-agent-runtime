@@ -96,6 +96,23 @@ object LicenseGuardReverseTests {
                 root.resolve("shared/example.kt").writeText("class Example\n")
                 LicenseScanner().scan(root)
             }
+            for ((path, _) in LicenseScanner.PINNED_LEGAL_ASSETS) {
+                val root = fixture(tmp.resolve("pinned-legal-asset"), licenseBytes)
+                val target = root.resolve(path)
+                target.parent.createDirectories()
+                Files.copy(repoRoot.resolve(path), target)
+                val sidecar = target.resolveSibling(target.fileName.toString() + ".license")
+                Files.copy(repoRoot.resolve(path + ".license"), sidecar)
+                check(LicenseScanner().scan(root).isEmpty()) { "Exact original legal asset must retain its upstream license" }
+                target.writeText(target.readText() + "\nmodified\n")
+                assertFails("modified pinned legal asset") { LicenseScanner().scan(root) }
+                Files.copy(repoRoot.resolve(path), target, java.nio.file.StandardCopyOption.REPLACE_EXISTING)
+                Files.delete(sidecar)
+                assertFails("missing original legal asset sidecar") { LicenseScanner().scan(root) }
+                Files.copy(repoRoot.resolve(path + ".license"), sidecar)
+                target.resolveSibling("unlicensed-code.html").writeText("<script>void 0</script>")
+                assertFails("sibling first-party HTML is never exempted") { LicenseScanner().scan(root) }
+            }
         } finally {
             tmp.toFile().deleteRecursively()
         }

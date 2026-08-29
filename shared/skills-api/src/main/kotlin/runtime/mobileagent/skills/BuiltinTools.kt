@@ -4,11 +4,32 @@
 package runtime.mobileagent.skills
 
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.intOrNull
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
+import okhttp3.Authenticator
+import okhttp3.Call
+import okhttp3.Callback
+import okhttp3.ConnectionPool
+import okhttp3.CookieJar
+import okhttp3.Dns
+import okhttp3.OkHttpClient
+import okhttp3.Request
+import okhttp3.Response
+import java.io.IOException
+import java.io.InterruptedIOException
+import java.net.InetAddress
+import java.net.Proxy
 import java.net.URI
+import java.net.UnknownHostException
+import java.util.concurrent.CancellationException
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicReference
 
 data class ToolSpec(
     val name: String,
@@ -28,6 +49,8 @@ sealed interface ToolResult {
     data class Value(val json: String) : ToolResult
     data class Denied(val reason: String) : ToolResult
     data class Invalid(val reason: String) : ToolResult
+    /** A request may have executed externally; only an acknowledged new invocation may retry. */
+    data class UnknownOutcome(val reason: String) : ToolResult
     data object NeedsApproval : ToolResult
 }
 
@@ -49,14 +72,33 @@ class ToolBroker(
 ) {
     private val completed = linkedMapOf<String, ToolResult>()
     private val pending = linkedMapOf<String, ToolCall>()
+    private val requests = linkedMapOf<String, ToolCall>()
+    private val completionScopes = linkedMapOf<String, CompletionScope>()
 
+    private data class CompletionScope(
+        val capabilities: Set<String>,
+        val knowledgeBaseIds: Set<String>,
+        val hosts: Set<String>,
+        val methods: Set<String>,
+        val grant: PermissionGrant?,
+    )
+
+    private fun scope(caps: Set<String>, ctx: ToolContext, grant: PermissionGrant?) = CompletionScope(
+        caps.toSet(), ctx.grantedKnowledgeBaseIds.toSet(), ctx.allowedHosts.toSet(), ctx.grantedMethods.toSet(), grant,
+    )
+
+    @Synchronized
     fun invoke(call: ToolCall): ToolResult {
+        if (call.callId.isBlank()) return ToolResult.Invalid("Tool call ID is missing")
+        if (requests[call.callId]?.let { it != call } == true) {
+            return ToolResult.Invalid("Tool call ID was already used for a different request")
+        }
         val grant = liveGrant?.invoke()
         val caps = activeCapabilities(grant)
         val ctx = activeContext(grant)
         completed[call.callId]?.let { remembered ->
-            if (caps.isEmpty() && BuiltinTools.byName[call.name]?.capability?.isNotEmpty() == true) {
-                return ToolResult.Denied("Current grant is empty or revoked")
+            if (completionScopes[call.callId] != scope(caps, ctx, grant)) {
+                return ToolResult.Denied("Current grant changed; cached tool output is unavailable")
             }
             return remembered
         }
@@ -66,6 +108,9 @@ class ToolBroker(
         if (missing.isNotEmpty()) {
             return ToolResult.Invalid("Missing parameters: ${missing.joinToString()}")
         }
+        validateArguments(spec, args)?.let { return ToolResult.Invalid(it) }
+        requests[call.callId] = call
+        completionScopes[call.callId] = scope(caps, ctx, grant)
         if (spec.capability.isNotEmpty() && spec.capability !in caps) {
             return remember(call.callId, ToolResult.Denied("Capability ${spec.capability} is not granted"))
         }
@@ -77,17 +122,19 @@ class ToolBroker(
         }
         val result = runCatching { execute(spec.name, args, ctx) }.fold(
             onSuccess = { ToolResult.Value(it) },
-            onFailure = { ToolResult.Invalid(it.message ?: "tool failed") },
+            onFailure = { toolFailure(it) },
         )
         return remember(call.callId, result)
     }
 
+    @Synchronized
     fun approve(callId: String): ToolResult {
         val call = pending.remove(callId) ?: return ToolResult.Invalid("No pending side-effect call")
         completed.remove(callId)
         val grant = liveGrant?.invoke()
         val caps = activeCapabilities(grant)
         val ctx = activeContext(grant)
+        completionScopes[call.callId] = scope(caps, ctx, grant)
         val spec = BuiltinTools.byName[call.name] ?: return ToolResult.Invalid("Unknown tool ${call.name}")
         val args = parseObject(call.argumentsJson) ?: return ToolResult.Invalid("Tool arguments are incomplete JSON")
         if (spec.capability.isNotEmpty() && spec.capability !in caps) {
@@ -97,7 +144,7 @@ class ToolBroker(
         if (denied != null) return remember(call.callId, denied)
         val result = runCatching { execute(spec.name, args, ctx) }.fold(
             onSuccess = { ToolResult.Value(it) },
-            onFailure = { ToolResult.Invalid(it.message ?: "tool failed") },
+            onFailure = { toolFailure(it) },
         )
         return remember(call.callId, result)
     }
@@ -149,13 +196,17 @@ class ToolBroker(
         return result
     }
 
+    private fun toolFailure(error: Throwable): ToolResult.Invalid {
+        // runInterruptible must see cancellation instead of a cached tool error.
+        if (error is InterruptedException || error is CancellationException) throw error
+        return ToolResult.Invalid(error.message ?: "tool failed")
+    }
+
     private fun execute(name: String, args: JsonObject, ctx: ToolContext): String = when (name) {
         "knowledge_search" -> {
             val query = args.string("query")
-            val topK = args["topK"]?.jsonPrimitive?.contentOrNull?.toIntOrNull() ?: 8
-            val requested = args["knowledgeBaseIds"]?.toString()?.let { raw ->
-                Regex("\"([^\"]+)\"").findAll(raw).map { it.groupValues[1] }.toList()
-            }.orEmpty()
+            val topK = args["topK"]?.jsonPrimitive?.intOrNull ?: 8
+            val requested = (args["knowledgeBaseIds"] as? JsonArray)?.map { it.jsonPrimitive.content }.orEmpty()
             val allowed = ctx.grantedKnowledgeBaseIds
             val ids = if (requested.isEmpty()) allowed.toList() else requested.filter { it in allowed }
             if (ids.isEmpty()) {
@@ -165,8 +216,7 @@ class ToolBroker(
             }
         }
         "read_document" -> {
-            val requested = args["maxChars"]?.jsonPrimitive?.contentOrNull?.toIntOrNull() ?: 4000
-            val maxChars = requested.coerceIn(0, HttpPolicy.MAX_READ_DOCUMENT_CHARS)
+            val maxChars = args["maxChars"]?.jsonPrimitive?.intOrNull ?: 4000
             capOutput(ctx.readDocument(args.string("documentId"), maxChars))
         }
         "calculator" -> {
@@ -195,6 +245,27 @@ class ToolBroker(
         return Regex("\"([^\"]+)\"").findAll(required).map { it.groupValues[1] }.toList()
     }
 
+    private fun validateArguments(spec: ToolSpec, args: JsonObject): String? {
+        val properties = Json.parseToJsonElement(spec.parametersJson).jsonObject.getValue("properties").jsonObject
+        for ((key, value) in args) {
+            val property = properties[key]?.jsonObject ?: return "Unknown parameter: $key"
+            val primitive = value as? JsonPrimitive
+            when (property.getValue("type").jsonPrimitive.content) {
+                "string" -> if (primitive?.isString != true || primitive.content.isBlank()) return "$key must be a nonblank string"
+                "integer" -> {
+                    val number = primitive?.takeUnless { it.isString }?.intOrNull ?: return "$key must be an integer"
+                    val minimum = property["minimum"]?.jsonPrimitive?.intOrNull
+                    val maximum = property["maximum"]?.jsonPrimitive?.intOrNull
+                    if ((minimum != null && number < minimum) || (maximum != null && number > maximum)) return "$key is outside its allowed range"
+                }
+                "array" -> if (value !is JsonArray || value.any { it !is JsonPrimitive || !it.isString || it.content.isBlank() }) {
+                    return "$key must be an array of nonblank strings"
+                }
+            }
+        }
+        return null
+    }
+
     private fun JsonObject.string(key: String): String =
         this[key]?.jsonPrimitive?.contentOrNull ?: error("missing $key")
 
@@ -208,28 +279,28 @@ object BuiltinTools {
     val knowledgeSearch = ToolSpec(
         name = "knowledge_search",
         description = "Search authorized local knowledge bases",
-        parametersJson = """{"type":"object","required":["query"],"properties":{"query":{"type":"string"},"knowledgeBaseIds":{"type":"array"},"topK":{"type":"integer"}}}""",
+        parametersJson = """{"type":"object","additionalProperties":false,"required":["query"],"properties":{"query":{"type":"string","minLength":1},"knowledgeBaseIds":{"type":"array","items":{"type":"string","minLength":1}},"topK":{"type":"integer","minimum":1,"maximum":100}}}""",
         capability = "knowledge.search",
         sideEffect = false,
     )
     val readDocument = ToolSpec(
         name = "read_document",
         description = "Read a document that belongs to an authorized knowledge base",
-        parametersJson = """{"type":"object","required":["documentId"],"properties":{"documentId":{"type":"string"},"maxChars":{"type":"integer"}}}""",
+        parametersJson = """{"type":"object","additionalProperties":false,"required":["documentId"],"properties":{"documentId":{"type":"string","minLength":1},"maxChars":{"type":"integer","minimum":1,"maximum":16384}}}""",
         capability = "knowledge.read",
         sideEffect = false,
     )
     val calculator = ToolSpec(
         name = "calculator",
         description = "Evaluate a numeric expression",
-        parametersJson = """{"type":"object","required":["expression"],"properties":{"expression":{"type":"string"}}}""",
+        parametersJson = """{"type":"object","additionalProperties":false,"required":["expression"],"properties":{"expression":{"type":"string","minLength":1}}}""",
         capability = "",
         sideEffect = false,
     )
     val httpRequest = ToolSpec(
         name = "http_request",
         description = "GET an allow-listed HTTPS URL",
-        parametersJson = """{"type":"object","required":["url"],"properties":{"url":{"type":"string"},"method":{"type":"string"}}}""",
+        parametersJson = """{"type":"object","additionalProperties":false,"required":["url"],"properties":{"url":{"type":"string","minLength":1},"method":{"type":"string","minLength":1}}}""",
         capability = "network.http",
         sideEffect = true,
     )
@@ -311,15 +382,14 @@ object HttpPolicy {
         val uri = runCatching { URI(url) }.getOrNull() ?: error("URL is not valid")
         val scheme = uri.scheme?.lowercase() ?: error("URL scheme is missing")
         if (scheme != "https") error("Only HTTPS URLs are allowed")
+        if (uri.rawUserInfo != null) error("URL credentials are not allowed")
         val host = requestHost(uri) ?: error("URL host is missing")
         if (isIpLiteral(host)) error("IP literals are not allowed")
         if (host !in allowedHosts.map { it.lowercase().trim('.') }.toSet()) {
             error("Host $host is not in the HTTP allow-list")
         }
         if (isForbiddenHost(host)) error("Loopback or private HTTP is not allowed")
-        uri.port.takeIf { it > 0 }?.let { port ->
-            if (port != 443) error("Only HTTPS port 443 is allowed")
-        }
+        if (uri.port != -1 && uri.port != 443) error("Only HTTPS port 443 is allowed")
     }
 
     fun assertDestination(
@@ -386,52 +456,153 @@ object HttpPolicy {
 }
 
 object HostHttp {
+    private const val MAX_TIMEOUT_MILLIS = 30_000L
+    private val client by lazy { OkHttpClient() }
+
+    /** Blocking boundary: callers in coroutines must use runInterruptible(Dispatchers.IO). */
     fun get(
         url: String,
         allowedHosts: Set<String>,
-        resolve: (String) -> List<java.net.InetAddress> = { host ->
-            java.net.InetAddress.getAllByName(host).toList()
-        },
+        resolve: (String) -> List<InetAddress> = { host -> InetAddress.getAllByName(host).toList() },
+    ): String = get(url, allowedHosts, resolve, client)
+
+    // The injected client enables loopback TLS/socket tests; production always uses the private client.
+    internal fun get(
+        url: String,
+        allowedHosts: Set<String>,
+        resolve: (String) -> List<InetAddress>,
+        client: OkHttpClient,
+        timeoutMillis: Long = MAX_TIMEOUT_MILLIS,
     ): String {
+        require(timeoutMillis in 1..MAX_TIMEOUT_MILLIS)
+        val deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(timeoutMillis)
         var current = url
         repeat(HttpPolicy.MAX_REDIRECTS + 1) { hop ->
-            HttpPolicy.assertDestination(current, allowedHosts, resolve)
+            if (Thread.currentThread().isInterrupted) throw InterruptedException("HTTP request interrupted")
+            HttpPolicy.assertRequest(current, allowedHosts)
             val uri = URI(current)
             val host = HttpPolicy.requestHost(uri) ?: error("URL host is missing")
-            val pinned = resolve(host).firstOrNull() ?: error("Host did not resolve")
-            if (HttpPolicy.isForbiddenAddress(pinned)) error("Resolved address is not allowed")
-            val connection = uri.toURL().openConnection() as java.net.HttpURLConnection
-            connection.instanceFollowRedirects = false
-            connection.connectTimeout = 10_000
-            connection.readTimeout = 20_000
-            connection.requestMethod = "GET"
-            val code = connection.responseCode
-            if (code in 300..399) {
-                val location = connection.getHeaderField("Location") ?: error("Redirect is missing Location")
-                connection.disconnect()
+            val remaining = deadline - System.nanoTime()
+            if (remaining <= 0) throw InterruptedIOException("HTTP request timed out")
+            // New pool for every hop prevents a previously connected/coalesced socket from
+            // bypassing that hop's validated DNS. The URL host remains intact for TLS/SNI.
+            val pool = ConnectionPool(0, 1, TimeUnit.NANOSECONDS)
+            val hopClient = client.newBuilder()
+                .dns(ValidatedDns(host, resolve))
+                .proxy(Proxy.NO_PROXY)
+                .cookieJar(CookieJar.NO_COOKIES)
+                .authenticator(Authenticator.NONE)
+                .proxyAuthenticator(Authenticator.NONE)
+                .followRedirects(false)
+                .followSslRedirects(false)
+                .retryOnConnectionFailure(false)
+                .addNetworkInterceptor { chain ->
+                    val response = chain.proceed(chain.request())
+                    // OkHttp 4.12 may retry 503 + Retry-After: 0 even when connection
+                    // retries are disabled. Fail before its automatic follow-up layer.
+                    if (response.code == 503) {
+                        response.close()
+                        throw IOException("HTTP 503")
+                    }
+                    response
+                }
+                .connectionPool(pool)
+                .connectTimeout(10, TimeUnit.SECONDS)
+                .readTimeout(20, TimeUnit.SECONDS)
+                .callTimeout(remaining, TimeUnit.NANOSECONDS)
+                .build()
+            val request = Request.Builder().url(current).get().build()
+            // Fail closed if URI and OkHttp interpret the authority differently.
+            if (request.url.host.lowercase().trimEnd('.') != host) error("URL host is ambiguous")
+            val response = try {
+                awaitResponse(hopClient.newCall(request), deadline)
+            } finally {
+                pool.evictAll()
+            }
+            if (response.code in 300..399) {
+                if (hop == HttpPolicy.MAX_REDIRECTS) error("Too many HTTP redirects")
+                val location = response.location ?: error("Redirect is missing Location")
                 current = URI(current).resolve(location).toString()
                 return@repeat
             }
-            if (code !in 200..299) {
-                connection.disconnect()
-                error("HTTP $code")
-            }
-            val body = connection.inputStream.use { stream ->
-                val out = java.io.ByteArrayOutputStream()
-                val buf = ByteArray(8192)
-                var total = 0
-                while (true) {
-                    val n = stream.read(buf)
-                    if (n <= 0) break
-                    total += n
-                    if (total > HttpPolicy.MAX_HTTP_RESPONSE_BYTES) error("HTTP response exceeds limit")
-                    out.write(buf, 0, n)
-                }
-                out.toByteArray()
-            }
-            connection.disconnect()
-            return String(body, Charsets.UTF_8)
+            return response.body
         }
         error("Too many HTTP redirects")
+    }
+
+    private class ValidatedDns(
+        private val host: String,
+        private val resolve: (String) -> List<InetAddress>,
+    ) : Dns {
+        private var pinned: List<InetAddress>? = null
+
+        @Synchronized
+        override fun lookup(hostname: String): List<InetAddress> {
+            if (hostname.lowercase().trimEnd('.') != host) throw UnknownHostException("Unexpected DNS host")
+            pinned?.let { return it }
+            // Validation happens inside OkHttp's actual DNS path, not in a separate lookup.
+            // DNS is off the waiting thread, so a slow platform resolver cannot hold the caller
+            // past the deadline. A cancelled call cannot connect when a late lookup returns.
+            val addresses = try {
+                resolve(host).toList()
+            } catch (error: RuntimeException) {
+                throw UnknownHostException("Host resolution failed").apply { initCause(error) }
+            }
+            if (addresses.isEmpty() || addresses.any(HttpPolicy::isForbiddenAddress)) {
+                throw UnknownHostException("Resolved address is not allowed")
+            }
+            return addresses.also { pinned = it }
+        }
+    }
+
+    private data class HopResponse(val code: Int, val location: String?, val body: String)
+
+    private fun awaitResponse(call: Call, deadline: Long): HopResponse {
+        val done = CountDownLatch(1)
+        val outcome = AtomicReference<Result<HopResponse>>()
+        call.enqueue(object : Callback {
+            override fun onFailure(call: Call, e: IOException) {
+                outcome.set(Result.failure(e))
+                done.countDown()
+            }
+
+            override fun onResponse(call: Call, response: Response) {
+                try {
+                    outcome.set(runCatching {
+                        response.use {
+                            if (it.code in 300..399) return@runCatching HopResponse(it.code, it.header("Location"), "")
+                            if (!it.isSuccessful) error("HTTP ${it.code}")
+                            val body = it.body ?: error("HTTP response body is missing")
+                            if (body.contentLength() > HttpPolicy.MAX_HTTP_RESPONSE_BYTES) error("HTTP response exceeds limit")
+                            val out = java.io.ByteArrayOutputStream()
+                            body.byteStream().use { stream ->
+                                val buffer = ByteArray(8192)
+                                var total = 0
+                                while (true) {
+                                    val count = stream.read(buffer)
+                                    if (count < 0) break
+                                    total += count
+                                    if (total > HttpPolicy.MAX_HTTP_RESPONSE_BYTES) error("HTTP response exceeds limit")
+                                    out.write(buffer, 0, count)
+                                }
+                            }
+                            HopResponse(it.code, null, out.toString(Charsets.UTF_8.name()))
+                        }
+                    })
+                } finally {
+                    done.countDown()
+                }
+            }
+        })
+        try {
+            val remaining = deadline - System.nanoTime()
+            if (remaining <= 0 || !done.await(remaining, TimeUnit.NANOSECONDS)) {
+                throw InterruptedIOException("HTTP request timed out")
+            }
+            return outcome.get().getOrThrow()
+        } finally {
+            // Cancels even while a callback is reading a slow body; closes the active socket.
+            call.cancel()
+        }
     }
 }

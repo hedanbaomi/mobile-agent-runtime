@@ -5,11 +5,17 @@ package runtime.mobileagent.data
 
 import runtime.mobileagent.domain.EntityId
 import runtime.mobileagent.domain.Utc
+import runtime.mobileagent.knowledge.ApiQueryAttempt
+import runtime.mobileagent.knowledge.ApiQueryUnknownOutcomeException
 import runtime.mobileagent.knowledge.BlobSink
+import runtime.mobileagent.knowledge.ApiEmbeddingBinding
+import runtime.mobileagent.knowledge.BatchTextEmbedder
+import runtime.mobileagent.knowledge.CancellableBatchTextEmbedder
 import runtime.mobileagent.knowledge.Citation
 import runtime.mobileagent.knowledge.CitationMap
 import runtime.mobileagent.knowledge.CjkLexical
 import runtime.mobileagent.knowledge.CosineIndex
+import runtime.mobileagent.knowledge.EmbeddingUnknownOutcomeException
 import runtime.mobileagent.knowledge.EvidenceLocator
 import runtime.mobileagent.knowledge.ExtractedAsset
 import runtime.mobileagent.knowledge.ExtractedPage
@@ -21,6 +27,7 @@ import runtime.mobileagent.knowledge.MediaKind
 import runtime.mobileagent.knowledge.OfficeParser
 import runtime.mobileagent.knowledge.ParsedPublication
 import runtime.mobileagent.knowledge.PdfParser
+import runtime.mobileagent.knowledge.PdfPageRasterizer
 import runtime.mobileagent.knowledge.ReciprocalRankFusion
 import runtime.mobileagent.knowledge.RetrievalResult
 import runtime.mobileagent.knowledge.SearchHit
@@ -35,10 +42,13 @@ import runtime.mobileagent.knowledge.VisionBinding
 import runtime.mobileagent.knowledge.VisionCacheKey
 import runtime.mobileagent.knowledge.VisionInput
 import runtime.mobileagent.knowledge.VisionOutcome
+import runtime.mobileagent.knowledge.VectorIndexFactory
 import runtime.mobileagent.knowledge.ZipSafety
 import runtime.mobileagent.knowledge.sha256Hex
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.runBlocking
 
 class KnowledgeRepository(
     private val db: SqlConnection,
@@ -47,28 +57,188 @@ class KnowledgeRepository(
     private val vision: VisionBackend? = null,
     private val visionModelFingerprint: String = "vision-unconfigured",
     private val visionBinding: () -> VisionBinding? = { null },
+    private val pdfRasterizer: PdfPageRasterizer? = null,
+    /** Optional explicitly selected remote/API text embedding adapter. */
+    private val apiEmbedder: TextEmbedder? = null,
+    /** Additional explicitly selected API adapters, keyed by their immutable spaceId. */
+    private val apiEmbedders: List<TextEmbedder> = emptyList(),
+    /** Optional Android ANN implementation; JVM callers use CosineIndex. */
+    private val vectorIndexFactory: VectorIndexFactory? = null,
+    /** Resolves a newly selected API adapter by its exact persisted space id. */
+    private val apiEmbedderResolver: (String) -> TextEmbedder? = { null },
 ) {
     private val indexLock = Any()
+    private val configuredApiEmbedders: List<TextEmbedder> =
+        listOfNotNull(apiEmbedder) + apiEmbedders
+
+    init {
+        require(configuredApiEmbedders.none { it.spaceId == embedder.spaceId }) {
+            "An API embedding adapter must not reuse the local embedding spaceId"
+        }
+        require(configuredApiEmbedders.map { it.spaceId }.distinct().size == configuredApiEmbedders.size) {
+            "Each API embedding adapter must have a unique fixed spaceId"
+        }
+        configuredApiEmbedders.forEach { adapter ->
+            require(adapter.spaceId.isNotBlank()) { "API embedding adapter spaceId must not be blank" }
+            require(adapter.dimension > 0) { "API embedding adapter dimension must be positive" }
+        }
+    }
 
     fun ensureDefaultBase(): String {
         val existing = db.query("SELECT id FROM knowledge_bases WHERE deleted_at IS NULL ORDER BY created_at LIMIT 1")
-        if (existing.isNotEmpty()) return existing.single().string("id")
+        // The ordering/limit is an optimization, not a uniqueness contract:
+        // an already populated database may contain multiple live bases.
+        if (existing.isNotEmpty()) return existing.first().string("id")
         return createKnowledgeBase("On-device library", DEFAULT_KB_ID)
     }
 
-    fun createKnowledgeBase(name: String, id: String = EntityId.random().value): String {
+    fun createKnowledgeBase(
+        name: String,
+        id: String = EntityId.random().value,
+        embeddingSpaceId: String = embedder.spaceId,
+    ): String {
+        require(embeddingSpaceId.isNotBlank()) { "embeddingSpaceId must not be blank" }
         db.execute(
             "INSERT INTO knowledge_bases(id,name,active_generation_id,embedding_space_id,created_at,deleted_at) VALUES (?,?,?,?,?,?)",
-            listOf(id, name, null, embedder.spaceId, Utc.nowIso(), null),
+            listOf(id, name, null, embeddingSpaceId, Utc.nowIso(), null),
         )
         return id
+    }
+
+    /**
+     * Create a KB with a user-selected, fully specified API binding.  The
+     * adapter must already be registered by AppContainer; this method never
+     * discovers a provider or makes a network call.
+     */
+    fun createKnowledgeBase(
+        name: String,
+        binding: ApiEmbeddingBinding,
+        id: String = EntityId.random().value,
+    ): String {
+        check(apiEmbedderForSpace(binding.spaceId) != null) {
+            "No API embedding adapter is registered for the selected binding"
+        }
+        return createKnowledgeBase(name, id, binding.spaceId)
+    }
+
+    /** Explicit name for AppContainer/KnowledgeVM call sites. */
+    fun createApiKnowledgeBase(
+        name: String,
+        binding: ApiEmbeddingBinding,
+        id: String = EntityId.random().value,
+    ): String = createKnowledgeBase(name, binding, id)
+
+    /**
+     * Rebind one KB only after a fresh explicit API consent.  A new generation
+     * is built under the new space before it becomes active; a failed build
+     * leaves the prior binding and active generation intact through the DB
+     * transaction.
+     */
+    fun rebindApiKnowledgeBase(
+        knowledgeBaseId: String,
+        binding: ApiEmbeddingBinding,
+        embeddingConsent: Boolean,
+        acknowledgeDuplicateCharge: Boolean = false,
+    ): String = runBlocking {
+        rebindApiKnowledgeBaseCancellable(
+            knowledgeBaseId = knowledgeBaseId,
+            binding = binding,
+            embeddingConsent = embeddingConsent,
+            acknowledgeDuplicateCharge = acknowledgeDuplicateCharge,
+        )
+    }
+
+    /** Read the immutable space identity selected for a KB for UI confirmation. */
+    fun embeddingSpaceId(knowledgeBaseId: String): String? {
+        requireKb(knowledgeBaseId)
+        return db.query(
+            "SELECT embedding_space_id FROM knowledge_bases WHERE id = ?",
+            listOf(knowledgeBaseId),
+        ).singleOrNull()?.string("embedding_space_id")?.ifBlank { null }
+    }
+
+    /** Read-only signal for UI to route an uncertain rebind to reconfiguration. */
+    fun hasUnknownApiRebind(knowledgeBaseId: String): Boolean = synchronized(indexLock) {
+        requireKb(knowledgeBaseId)
+        unknownRebindGates(knowledgeBaseId).isNotEmpty()
+    }
+
+    /**
+     * List query embedding attempts which still need an explicit user action.
+     * Query text is never persisted or returned; callers receive only the
+     * complete target space and its SHA-256 key.
+     */
+    fun pendingApiQueries(knowledgeBaseId: String): List<ApiQueryAttempt> = synchronized(indexLock) {
+        requireKb(knowledgeBaseId)
+        db.query(
+            "SELECT kb_id, space_id, query_hash, retry_authorized, error, updated_at FROM embedding_query_attempts WHERE kb_id = ? ORDER BY updated_at, query_hash",
+            listOf(knowledgeBaseId),
+        ).map(::apiQueryAttempt)
+    }
+
+    /**
+     * Grant one retry for a pending API query. The grant is consumed
+     * atomically by the next matching [retrieve] call and cannot be reused.
+     */
+    fun authorizeApiQueryRetry(
+        knowledgeBaseId: String,
+        spaceId: String,
+        queryHash: String,
+        acknowledgeDuplicateCharge: Boolean,
+    ): ApiQueryAttempt = synchronized(indexLock) {
+        check(acknowledgeDuplicateCharge) {
+            "Retry may bill the embedding provider twice. Acknowledge the duplicate-charge risk."
+        }
+        requireKb(knowledgeBaseId)
+        requireQueryHash(queryHash)
+        check(ApiEmbeddingBinding.parseSpaceId(spaceId) != null) {
+            "API query retry requires a complete current embedding binding"
+        }
+        val currentSpace = db.query(
+            "SELECT embedding_space_id FROM knowledge_bases WHERE id = ? AND deleted_at IS NULL",
+            listOf(knowledgeBaseId),
+        ).singleOrNull()?.string("embedding_space_id").orEmpty()
+        check(currentSpace == spaceId) {
+            "API query retry target no longer matches the knowledge base binding"
+        }
+        check(currentSpace != embedder.spaceId) { "API query retry requires an API embedding space" }
+        check(hasApiEmbeddingConsent(knowledgeBaseId)) {
+            "API query retry requires persisted text embedding consent"
+        }
+        db.transaction {
+            val row = db.query(
+                "SELECT kb_id, space_id, query_hash, retry_authorized, error, updated_at FROM embedding_query_attempts WHERE kb_id = ? AND space_id = ? AND query_hash = ?",
+                listOf(knowledgeBaseId, spaceId, queryHash),
+            ).singleOrNull() ?: error("No pending API query attempt exists for this key")
+            check(!row.boolean("retry_authorized")) {
+                "This API query retry authorization has already been consumed or granted"
+            }
+            db.execute(
+                "UPDATE embedding_query_attempts SET retry_authorized = 1, updated_at = ? WHERE kb_id = ? AND space_id = ? AND query_hash = ? AND retry_authorized = 0",
+                listOf(Utc.nowIso(), knowledgeBaseId, spaceId, queryHash),
+            )
+            val updated = db.query(
+                "SELECT kb_id, space_id, query_hash, retry_authorized, error, updated_at FROM embedding_query_attempts WHERE kb_id = ? AND space_id = ? AND query_hash = ?",
+                listOf(knowledgeBaseId, spaceId, queryHash),
+            ).singleOrNull() ?: error("API query retry authorization row disappeared")
+            check(updated.boolean("retry_authorized")) {
+                "API query retry authorization was not atomically recorded"
+            }
+            apiQueryAttempt(updated)
+        }
     }
 
     fun listKnowledgeBases(): List<Pair<String, String>> =
         db.query("SELECT id, name FROM knowledge_bases WHERE deleted_at IS NULL ORDER BY created_at")
             .map { it.string("id") to it.string("name") }
 
-    fun importBytes(
+    /**
+     * Suspending API import entry point.  Parsing, CAS writes, cache commits,
+     * and short SQLite transitions remain synchronous, but the selected API
+     * adapter is called only by [executeEmbeddingOperation] outside
+     * [indexLock].  App/Worker callers should prefer this method for API KBs.
+     */
+    suspend fun importBytesCancellable(
         displayName: String,
         mediaType: String,
         bytes: ByteArray,
@@ -82,13 +252,469 @@ class KnowledgeRepository(
         require(bytes.size <= MediaKind.MAX_IMPORT_BYTES) { "RESOURCE_LIMIT" }
         val kbId = knowledgeBaseId ?: ensureDefaultBase()
         requireKb(kbId)
+        validateRequestedEmbeddingSelection(kbId, embeddingIsApi, embeddingConsent)
+        check(embeddingIsApi) {
+            "The suspending import entry point is reserved for an explicitly selected API embedding"
+        }
         val format = MediaKind.detect(displayName, mediaType, bytes.copyOf(minOf(bytes.size, 64)))
         val stored = blobs.put(bytes, mediaType.ifBlank { guessedMime(format) })
         val existingId = existingDocument(kbId, stored.sha256)
         if (existingId != null) {
             val prior = db.query("SELECT active_version_id, deleted_at FROM documents WHERE id = ?", listOf(existingId)).single()
             if (prior.string("deleted_at").isBlank()) {
-                if (isPublishedReady(existingId, kbId)) {
+                val unknownEmbedding = db.query(
+                    "SELECT error FROM import_jobs WHERE document_id = ? AND embedding_is_api = 1 ORDER BY updated_at DESC LIMIT 1",
+                    listOf(existingId),
+                ).firstOrNull()?.string("error")?.takeIf { it.contains("UNKNOWN_OUTCOME", ignoreCase = true) }
+                    ?.takeIf { it.contains("embedding", ignoreCase = true) }
+                if (unknownEmbedding != null) {
+                    val job = ImportJob(
+                        id = EntityId.random().value,
+                        knowledgeBaseId = kbId,
+                        documentId = existingId,
+                        stage = ImportStage.FAILED,
+                        visionConfigured = visionConfigured,
+                        visionConsent = visionConsent,
+                        embeddingIsApi = true,
+                        embeddingConsent = embeddingConsent,
+                        localEmbeddingAvailable = true,
+                        error = API_EMBEDDING_UNKNOWN_ERROR,
+                    )
+                    persistJob(job, displayName)
+                    return job
+                }
+                if (isPublishedReady(existingId, kbId, requestedApi = true)) {
+                    val job = ImportJob(
+                        id = EntityId.random().value,
+                        knowledgeBaseId = kbId,
+                        documentId = existingId,
+                        stage = ImportStage.READY,
+                        visionConfigured = visionConfigured,
+                        visionConsent = visionConsent,
+                        embeddingIsApi = true,
+                        embeddingConsent = embeddingConsent,
+                        localEmbeddingAvailable = true,
+                    )
+                    persistJob(job, displayName)
+                    return job
+                }
+                val job = ImportJob(
+                    id = EntityId.random().value,
+                    knowledgeBaseId = kbId,
+                    documentId = existingId,
+                    hasImages = MediaKind.isImage(format),
+                    visionConfigured = visionConfigured,
+                    visionConsent = visionConsent,
+                    embeddingIsApi = true,
+                    embeddingConsent = embeddingConsent,
+                    localEmbeddingAvailable = true,
+                )
+                persistJob(job, displayName)
+                if (pauseAt == ImportStage.COPYING) {
+                    job.stage = ImportStage.COPYING
+                    persistJob(job, displayName)
+                    return job
+                }
+                return continueImportCancellable(job, displayName, bytes, format)
+            }
+        }
+        synchronized(indexLock) {
+            db.transaction {
+                upsertBlob(stored)
+                val documentId = existingId ?: EntityId.random().value
+                db.execute(
+                    "INSERT OR REPLACE INTO documents(id,kb_id,blob_hash,display_name,format,active_version_id,deleted_at) VALUES (?,?,?,?,?,?,?)",
+                    listOf(documentId, kbId, stored.sha256, displayName, format.name, null, null),
+                )
+                syncBlobRef(stored.sha256)
+            }
+        }
+        val documentId = existingDocument(kbId, stored.sha256)!!
+        val job = ImportJob(
+            id = EntityId.random().value,
+            knowledgeBaseId = kbId,
+            documentId = documentId,
+            hasImages = MediaKind.isImage(format),
+            visionConfigured = visionConfigured,
+            visionConsent = visionConsent,
+            embeddingIsApi = true,
+            embeddingConsent = embeddingConsent,
+        )
+        job.localEmbeddingAvailable = true
+        persistJob(job, displayName)
+        if (pauseAt == ImportStage.COPYING) {
+            job.stage = ImportStage.COPYING
+            persistJob(job, displayName)
+            return job
+        }
+        return continueImportCancellable(job, displayName, bytes, format)
+    }
+
+    /** Suspending API resume bridge used after a Worker/process interruption. */
+    suspend fun resumeImportCancellable(
+        jobId: String,
+        bytes: ByteArray? = null,
+        visionConfigured: Boolean,
+    ): ImportJob {
+        val row = db.query("SELECT * FROM import_jobs WHERE id = ?", listOf(jobId)).singleOrNull()
+            ?: error("import job not found")
+        check(row.boolean("embedding_is_api")) {
+            "The suspending resume entry point is reserved for API embedding jobs"
+        }
+        val documentId = row.string("document_id")
+        val kbId = row.string("kb_id")
+        requireKb(kbId)
+        val document = db.query("SELECT blob_hash, deleted_at, format FROM documents WHERE id = ?", listOf(documentId)).singleOrNull()
+            ?: error("document not found")
+        check(document.string("deleted_at").isBlank()) { "document deleted" }
+        val stage = ImportStage.valueOf(row.string("stage"))
+        check(stage != ImportStage.CANCELLED && stage != ImportStage.READY) { "import job is not resumable" }
+        if (stage == ImportStage.FAILED && row.string("error").contains("UNKNOWN_OUTCOME", ignoreCase = true)) {
+            error("UNKNOWN_OUTCOME: explicit duplicate-charge acknowledgement is required before retry")
+        }
+        val expected = document.string("blob_hash")
+        val payload = when {
+            bytes != null -> {
+                check(sha256Hex(bytes) == expected) { "resume bytes do not match the stored CAS blob" }
+                bytes
+            }
+            else -> blobs.get(expected) ?: error("CAS blob is missing")
+        }
+        val displayName = row.string("display_name")
+        val recordedFormat = document.string("format")
+        val format = recordedFormat.takeIf { it.isNotBlank() }?.let { runCatching { SourceFormat.valueOf(it) }.getOrNull() }
+            ?: MediaKind.detect(displayName, "", payload.copyOf(minOf(payload.size, 64)))
+        val job = importJobFromRow(row, visionConfigured, stage, documentId, kbId)
+        validateRequestedEmbeddingSelection(kbId, api = true, consent = job.embeddingConsent)
+        return continueImportCancellable(job, displayName, payload, format)
+    }
+
+    /** Suspending Vision consent bridge; text embedding consent remains separate. */
+    suspend fun grantVisionConsentCancellable(jobId: String): ImportJob {
+        val row = db.query("SELECT * FROM import_jobs WHERE id = ?", listOf(jobId)).singleOrNull()
+            ?: error("import job not found")
+        check(row.boolean("embedding_is_api")) {
+            "The suspending Vision bridge is reserved for API embedding jobs"
+        }
+        val documentId = row.string("document_id")
+        val document = db.query("SELECT blob_hash, format, deleted_at FROM documents WHERE id = ?", listOf(documentId)).single()
+        check(document.string("deleted_at").isBlank()) { "document deleted" }
+        val bytes = blobs.get(document.string("blob_hash")) ?: error("CAS blob is missing")
+        val format = runCatching { SourceFormat.valueOf(document.string("format")) }.getOrDefault(SourceFormat.UNKNOWN)
+        val job = ImportJob(
+            id = jobId,
+            knowledgeBaseId = row.string("kb_id"),
+            documentId = documentId,
+            stage = ImportStage.QUEUED,
+            hasImages = true,
+            visionConfigured = true,
+            visionConsent = true,
+            embeddingIsApi = true,
+            embeddingConsent = row.boolean("embedding_consent"),
+            localEmbeddingAvailable = true,
+            consentedVisionFingerprint = visionFingerprint(),
+        )
+        return continueImportCancellable(job, row.string("display_name"), bytes, format)
+    }
+
+    /** Suspending text embedding consent bridge. */
+    suspend fun grantEmbeddingConsentCancellable(
+        jobId: String,
+        visionConfigured: Boolean = false,
+    ): ImportJob = grantEmbeddingConsentCancellableInternal(jobId, visionConfigured, allowUnknownOutcome = false)
+
+    private suspend fun grantEmbeddingConsentCancellableInternal(
+        jobId: String,
+        visionConfigured: Boolean,
+        allowUnknownOutcome: Boolean,
+    ): ImportJob {
+        val row = db.query("SELECT * FROM import_jobs WHERE id = ?", listOf(jobId)).singleOrNull()
+            ?: error("import job not found")
+        check(row.boolean("embedding_is_api")) { "Import job did not select API embedding" }
+        check(allowUnknownOutcome || !row.string("error").contains("UNKNOWN_OUTCOME", ignoreCase = true)) {
+            "UNKNOWN_OUTCOME: use retryUnknownEmbedding with explicit duplicate-charge acknowledgement"
+        }
+        val kbId = row.string("kb_id")
+        requireKb(kbId)
+        val space = db.query("SELECT embedding_space_id FROM knowledge_bases WHERE id = ?", listOf(kbId))
+            .singleOrNull()?.string("embedding_space_id").orEmpty()
+        check(apiEmbedderForSpace(space) != null) {
+            "The selected API embedding binding is unavailable; no text was sent"
+        }
+        val documentId = row.string("document_id")
+        val document = db.query("SELECT blob_hash, format, deleted_at FROM documents WHERE id = ?", listOf(documentId))
+            .singleOrNull() ?: error("document not found")
+        check(document.string("deleted_at").isBlank()) { "document deleted" }
+        val bytes = blobs.get(document.string("blob_hash")) ?: error("CAS blob is missing")
+        val format = runCatching { SourceFormat.valueOf(document.string("format")) }.getOrDefault(SourceFormat.UNKNOWN)
+        val job = importJobFromRow(row, visionConfigured, ImportStage.QUEUED, documentId, kbId).also {
+            it.embeddingIsApi = true
+            it.embeddingConsent = true
+        }
+        validateRequestedEmbeddingSelection(kbId, api = true, consent = true)
+        // The staged operation rechecks consent from durable state immediately
+        // before dispatch. Persist the user's explicit approval before creating
+        // or dispatching that operation; otherwise the safety recheck observes
+        // the old false value and converts a local preflight mismatch into an
+        // UNKNOWN external outcome without sending any request.
+        persistJob(job, row.string("display_name"))
+        return continueImportCancellable(job, row.string("display_name"), bytes, format)
+    }
+
+    /** Explicit duplicate-charge acknowledgement for an uncertain API import. */
+    suspend fun retryUnknownEmbeddingCancellable(
+        jobId: String,
+        acknowledgeDuplicateCharge: Boolean,
+        visionConfigured: Boolean = false,
+    ): ImportJob {
+        check(acknowledgeDuplicateCharge) {
+            "Retry may bill the embedding provider twice. Acknowledge the duplicate-charge risk."
+        }
+        val row = db.query("SELECT embedding_is_api, error, display_name FROM import_jobs WHERE id = ?", listOf(jobId))
+            .singleOrNull() ?: error("import job not found")
+        check(!row.string("display_name").startsWith(UNKNOWN_REBIND_PREFIX)) {
+            "This UNKNOWN_OUTCOME belongs to an API rebind; retry the rebind with explicit acknowledgement"
+        }
+        check(row.boolean("embedding_is_api")) { "Import job did not select API embedding" }
+        check(row.string("error").contains("UNKNOWN_OUTCOME", ignoreCase = true)) {
+            "Import job has no unknown embedding outcome to retry"
+        }
+        check(row.string("error").contains("embedding", ignoreCase = true)) {
+            "Unknown outcome belongs to another stage; use its explicit retry action"
+        }
+        return grantEmbeddingConsentCancellableInternal(jobId, visionConfigured, allowUnknownOutcome = true)
+    }
+
+    /** Suspending API rebind bridge.  The provider call is always lock free. */
+    suspend fun rebindApiKnowledgeBaseCancellable(
+        knowledgeBaseId: String,
+        binding: ApiEmbeddingBinding,
+        embeddingConsent: Boolean,
+        acknowledgeDuplicateCharge: Boolean = false,
+    ): String {
+        check(embeddingConsent) {
+            "Changing the API embedding binding requires fresh text embedding consent"
+        }
+        requireKb(knowledgeBaseId)
+        check(unknownRebindGates(knowledgeBaseId).isEmpty() || acknowledgeDuplicateCharge) {
+            "UNKNOWN_OUTCOME: a prior API rebind is uncertain; explicit duplicate-charge acknowledgement is required"
+        }
+        val selectedEmbedder = apiEmbedderForSpace(binding.spaceId)
+        val currentSpace = db.query(
+            "SELECT embedding_space_id FROM knowledge_bases WHERE id = ?",
+            listOf(knowledgeBaseId),
+        ).singleOrNull()?.string("embedding_space_id").orEmpty()
+        check(currentSpace != binding.spaceId) { "Knowledge base is already bound to the selected embedding space" }
+        val existing = activeEmbeddingOperation(knowledgeBaseId)
+        if (existing != null) {
+            check(existing.kind == "REBIND" && existing.spaceId == binding.spaceId) {
+                "another embedding operation is already active for this knowledge base"
+            }
+            return when (existing.state) {
+                "CACHE_READY" -> finalizeEmbeddingOperation(existing.token)
+                "PREPARED" -> {
+                    executeEmbeddingOperation(
+                        existing,
+                        selectedEmbedder ?: error("No API embedding adapter is registered for the selected binding"),
+                    )
+                    finalizeEmbeddingOperation(existing.token)
+                }
+                "DISPATCHED" -> {
+                    markEmbeddingOperationUnknown(existing)
+                    throw EmbeddingUnknownOutcomeException()
+                }
+                else -> error("embedding operation is not resumable: ${existing.state}")
+            }
+        }
+        val embedderForOperation = selectedEmbedder
+            ?: error("No API embedding adapter is registered for the selected binding")
+        val operation = synchronized(indexLock) {
+            db.transaction {
+                val persistedSpace = db.query(
+                    "SELECT embedding_space_id, deleted_at FROM knowledge_bases WHERE id = ?",
+                    listOf(knowledgeBaseId),
+                ).singleOrNull() ?: error("knowledge base not found")
+                check(persistedSpace.string("deleted_at").isBlank()) { "knowledge base deleted" }
+                check(persistedSpace.string("embedding_space_id") == currentSpace) {
+                    "knowledge base binding changed before API rebind"
+                }
+                val pointers = activeDocumentPointers(knowledgeBaseId)
+                val inputsByVersion = embeddingInputsByVersionForKnowledgeBase(knowledgeBaseId)
+                val manifest = operationManifestHash(
+                    kind = "REBIND",
+                    knowledgeBaseId = knowledgeBaseId,
+                    targetSpace = binding.spaceId,
+                    sourceSpace = currentSpace,
+                    inputsByVersion = inputsByVersion,
+                    activePointers = pointers,
+                )
+                insertEmbeddingOperation(
+                    kind = "REBIND",
+                    knowledgeBaseId = knowledgeBaseId,
+                    jobId = null,
+                    documentId = null,
+                    documentVersionId = null,
+                    spaceId = binding.spaceId,
+                    inputManifestHash = manifest,
+                    consentFingerprint = apiConsentFingerprint("REBIND", knowledgeBaseId, binding.spaceId, sourceSpace = currentSpace),
+                )
+            }
+        }
+        return try {
+            executeEmbeddingOperation(operation, embedderForOperation)
+            finalizeEmbeddingOperation(operation.token)
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (interrupted: InterruptedException) {
+            Thread.currentThread().interrupt()
+            throw interrupted
+        } catch (failure: Throwable) {
+            if (isUnknownEmbeddingFailure(failure)) persistRebindUnknownGate(knowledgeBaseId, binding)
+            throw failure
+        }
+    }
+
+    /** Suspending API rebuild bridge; no provider request is made under indexLock. */
+    suspend fun rebuildIndexCancellable(
+        knowledgeBaseId: String,
+        acknowledgeDuplicateCharge: Boolean = false,
+    ): String {
+        requireKb(knowledgeBaseId)
+        val currentSpace = db.query("SELECT embedding_space_id FROM knowledge_bases WHERE id = ?", listOf(knowledgeBaseId))
+            .singleOrNull()?.string("embedding_space_id").orEmpty()
+        check(currentSpace != embedder.spaceId) {
+            "The suspending rebuild entry point is reserved for API embedding spaces"
+        }
+        check(hasApiEmbeddingConsent(knowledgeBaseId)) {
+            "API embedding rebuild requires explicit persisted consent"
+        }
+        val unknown = latestUnknownEmbeddingOperation(knowledgeBaseId, "REBUILD")
+        check(unknown == null || acknowledgeDuplicateCharge) {
+            "UNKNOWN_OUTCOME: a prior API rebuild is uncertain; explicit duplicate-charge acknowledgement is required"
+        }
+        val selectedEmbedder = apiEmbedderForSpace(currentSpace)
+        val existing = activeEmbeddingOperation(knowledgeBaseId)
+        if (existing != null) {
+            check(existing.kind == "REBUILD" && existing.spaceId == currentSpace) {
+                "another embedding operation is already active for this knowledge base"
+            }
+            return when (existing.state) {
+                "CACHE_READY" -> finalizeEmbeddingOperation(existing.token)
+                "PREPARED" -> {
+                    executeEmbeddingOperation(
+                        existing,
+                        selectedEmbedder ?: error("No API embedding adapter is registered for the selected binding"),
+                    )
+                    finalizeEmbeddingOperation(existing.token)
+                }
+                "DISPATCHED" -> {
+                    markEmbeddingOperationUnknown(existing)
+                    throw EmbeddingUnknownOutcomeException()
+                }
+                else -> error("embedding operation is not resumable: ${existing.state}")
+            }
+        }
+        val embedderForOperation = selectedEmbedder
+            ?: error("No API embedding adapter is registered for the selected binding")
+        val operation = synchronized(indexLock) {
+            db.transaction {
+                val persistedSpace = db.query(
+                    "SELECT embedding_space_id, deleted_at FROM knowledge_bases WHERE id = ?",
+                    listOf(knowledgeBaseId),
+                ).singleOrNull() ?: error("knowledge base not found")
+                check(persistedSpace.string("deleted_at").isBlank()) { "knowledge base deleted" }
+                check(persistedSpace.string("embedding_space_id") == currentSpace) {
+                    "knowledge base binding changed before API rebuild"
+                }
+                val inputsByVersion = embeddingInputsByVersionForKnowledgeBase(knowledgeBaseId)
+                val manifest = operationManifestHash(
+                    kind = "REBUILD",
+                    knowledgeBaseId = knowledgeBaseId,
+                    targetSpace = currentSpace,
+                    sourceSpace = currentSpace,
+                    inputsByVersion = inputsByVersion,
+                    activePointers = activeDocumentPointers(knowledgeBaseId),
+                )
+                insertEmbeddingOperation(
+                    kind = "REBUILD",
+                    knowledgeBaseId = knowledgeBaseId,
+                    jobId = null,
+                    documentId = null,
+                    documentVersionId = null,
+                    spaceId = currentSpace,
+                    inputManifestHash = manifest,
+                    consentFingerprint = apiConsentFingerprint("REBUILD", knowledgeBaseId, currentSpace),
+                )
+            }
+        }
+        executeEmbeddingOperation(operation, embedderForOperation)
+        return finalizeEmbeddingOperation(operation.token)
+    }
+
+    fun importBytes(
+        displayName: String,
+        mediaType: String,
+        bytes: ByteArray,
+        visionConfigured: Boolean,
+        knowledgeBaseId: String? = null,
+        pauseAt: ImportStage? = null,
+        visionConsent: Boolean = false,
+        embeddingIsApi: Boolean = false,
+        embeddingConsent: Boolean = false,
+    ): ImportJob {
+        val routedKbId = knowledgeBaseId ?: ensureDefaultBase()
+        // API embedding is the only potentially billable path.  Keep the
+        // legacy synchronous method for local ONNX/hash imports, but bridge a
+        // selected API KB to the suspending implementation before taking the
+        // repository/index lock.  This preserves source compatibility while
+        // making the App/Worker entry point safe for slow transports.
+        if (embeddingIsApi || isApiKnowledgeBase(routedKbId)) {
+            return runBlocking {
+                importBytesCancellable(
+                    displayName = displayName,
+                    mediaType = mediaType,
+                    bytes = bytes,
+                    visionConfigured = visionConfigured,
+                    knowledgeBaseId = routedKbId,
+                    pauseAt = pauseAt,
+                    visionConsent = visionConsent,
+                    embeddingIsApi = embeddingIsApi,
+                    embeddingConsent = embeddingConsent,
+                )
+            }
+        }
+        require(bytes.size <= MediaKind.MAX_IMPORT_BYTES) { "RESOURCE_LIMIT" }
+        val kbId = routedKbId
+        requireKb(kbId)
+        validateRequestedEmbeddingSelection(kbId, embeddingIsApi, embeddingConsent)
+        val format = MediaKind.detect(displayName, mediaType, bytes.copyOf(minOf(bytes.size, 64)))
+        val stored = blobs.put(bytes, mediaType.ifBlank { guessedMime(format) })
+        val existingId = existingDocument(kbId, stored.sha256)
+        if (existingId != null) {
+            val prior = db.query("SELECT active_version_id, deleted_at FROM documents WHERE id = ?", listOf(existingId)).single()
+            if (prior.string("deleted_at").isBlank()) {
+                val unknownEmbedding = db.query(
+                    "SELECT error FROM import_jobs WHERE document_id = ? AND embedding_is_api = 1 ORDER BY updated_at DESC LIMIT 1",
+                    listOf(existingId),
+                ).firstOrNull()?.string("error")?.takeIf { it.contains("UNKNOWN_OUTCOME", ignoreCase = true) }
+                    ?.takeIf { it.contains("embedding", ignoreCase = true) }
+                if (unknownEmbedding != null && embeddingIsApi) {
+                    val job = ImportJob(
+                        id = EntityId.random().value,
+                        knowledgeBaseId = kbId,
+                        documentId = existingId,
+                        stage = ImportStage.FAILED,
+                        visionConfigured = visionConfigured,
+                        visionConsent = visionConsent,
+                        embeddingIsApi = true,
+                        embeddingConsent = embeddingConsent,
+                        localEmbeddingAvailable = true,
+                        error = "UNKNOWN_OUTCOME: prior API embedding is uncertain; explicit duplicate-charge acknowledgement is required",
+                    )
+                    persistJob(job, displayName)
+                    return job
+                }
+                if (isPublishedReady(existingId, kbId, embeddingIsApi)) {
                     val job = ImportJob(
                         id = EntityId.random().value,
                         knowledgeBaseId = kbId,
@@ -153,7 +779,15 @@ class KnowledgeRepository(
         return continueImport(job, displayName, bytes, format)
     }
 
-    fun resumeImport(jobId: String, bytes: ByteArray? = null, visionConfigured: Boolean): ImportJob = synchronized(indexLock) {
+    fun resumeImport(jobId: String, bytes: ByteArray? = null, visionConfigured: Boolean): ImportJob {
+        val apiJob = db.query(
+            "SELECT embedding_is_api FROM import_jobs WHERE id = ?",
+            listOf(jobId),
+        ).singleOrNull()?.boolean("embedding_is_api") == true
+        if (apiJob) {
+            return runBlocking { resumeImportCancellable(jobId, bytes, visionConfigured) }
+        }
+        return synchronized(indexLock) {
         val row = db.query("SELECT * FROM import_jobs WHERE id = ?", listOf(jobId)).singleOrNull()
             ?: error("import job not found")
         val documentId = row.string("document_id")
@@ -164,6 +798,9 @@ class KnowledgeRepository(
         check(document.string("deleted_at").isBlank()) { "document deleted" }
         val stage = ImportStage.valueOf(row.string("stage"))
         check(stage != ImportStage.CANCELLED && stage != ImportStage.READY) { "import job is not resumable" }
+        if (stage == ImportStage.FAILED && row.string("error").contains("UNKNOWN_OUTCOME", ignoreCase = true)) {
+            error("UNKNOWN_OUTCOME: explicit duplicate-charge acknowledgement is required before retry")
+        }
         val expected = document.string("blob_hash")
         val payload = when {
             bytes != null -> {
@@ -182,20 +819,56 @@ class KnowledgeRepository(
             knowledgeBaseId = kbId,
             documentId = documentId,
             stage = stage,
-            hasImages = row.long("has_images") != 0L,
+            hasImages = row.boolean("has_images"),
             visionConfigured = visionConfigured,
             visionConsent = row.string("vision_consent").let { it == "1" || it.equals("true", true) } ||
                 runCatching { row.long("vision_consent") != 0L }.getOrDefault(false),
-            embeddingIsApi = runCatching { row.long("embedding_is_api") != 0L }.getOrDefault(false),
-            embeddingConsent = runCatching { row.long("embedding_consent") != 0L }.getOrDefault(false),
+            embeddingIsApi = row.boolean("embedding_is_api"),
+            embeddingConsent = row.boolean("embedding_consent"),
             localEmbeddingAvailable = true,
             error = row.string("error").ifBlank { null },
             consentedVisionFingerprint = runCatching { row.string("vision_binding_json") }.getOrNull()?.ifBlank { null },
         )
+        validateRequestedEmbeddingSelection(kbId, job.embeddingIsApi, job.embeddingConsent)
         return continueImport(job, displayName, payload, format)
+        }
+    }
+
+    /**
+     * Mark an in-flight import cancelled.  The CAS source remains intact so a
+     * later explicit re-import can resume from the copied document without
+     * mutating the published generation.  This method is idempotent for an
+     * already-cancelled job and never rewrites a READY job.
+     */
+    fun cancelImport(jobId: String): Boolean = synchronized(indexLock) {
+        val row = db.query("SELECT stage FROM import_jobs WHERE id = ?", listOf(jobId)).singleOrNull() ?: return false
+        val stage = runCatching { ImportStage.valueOf(row.string("stage")) }.getOrNull() ?: return false
+        if (stage == ImportStage.READY) return false
+        val operation = requestEmbeddingOperationCancelForJob(jobId)
+        if (stage != ImportStage.CANCELLED) {
+            val postDispatchUnknown = operation?.state == "UNKNOWN" && operation.error.contains("UNKNOWN_OUTCOME")
+            db.execute(
+                "UPDATE import_jobs SET stage = ?, error = ?, updated_at = ? WHERE id = ?",
+                listOf(
+                    if (postDispatchUnknown) ImportStage.FAILED.name else ImportStage.CANCELLED.name,
+                    if (postDispatchUnknown) API_EMBEDDING_CANCEL_UNKNOWN_ERROR else "Cancelled by user",
+                    Utc.nowIso(),
+                    jobId,
+                ),
+            )
+        }
+        true
     }
 
     fun grantVisionConsent(jobId: String): ImportJob {
+        val apiJob = db.query(
+            "SELECT embedding_is_api FROM import_jobs WHERE id = ?",
+            listOf(jobId),
+        ).singleOrNull()?.boolean("embedding_is_api") == true
+        if (apiJob) {
+            return runBlocking { grantVisionConsentCancellable(jobId) }
+        }
+        return synchronized(indexLock) {
         val row = db.query("SELECT * FROM import_jobs WHERE id = ?", listOf(jobId)).singleOrNull()
             ?: error("import job not found")
         val documentId = row.string("document_id")
@@ -211,10 +884,13 @@ class KnowledgeRepository(
             hasImages = true,
             visionConfigured = true,
             visionConsent = true,
+            embeddingIsApi = row.boolean("embedding_is_api"),
+            embeddingConsent = row.boolean("embedding_consent"),
             localEmbeddingAvailable = true,
             consentedVisionFingerprint = visionFingerprint(),
         )
         return continueImport(job, row.string("display_name"), bytes, format)
+        }
     }
 
     fun retryUnknownVision(jobId: String, acknowledgeDuplicateCharge: Boolean): ImportJob {
@@ -231,14 +907,121 @@ class KnowledgeRepository(
         return grantVisionConsent(jobId)
     }
 
+    /**
+     * Approve sending text for an API-bound import.  Vision consent is copied
+     * independently from the persisted job and is never implied by this call.
+     */
+    fun grantEmbeddingConsent(jobId: String, visionConfigured: Boolean = false): ImportJob =
+        runBlocking { grantEmbeddingConsentCancellable(jobId, visionConfigured) }
+
+    private fun grantEmbeddingConsentInternal(
+        jobId: String,
+        visionConfigured: Boolean,
+        allowUnknownOutcome: Boolean,
+    ): ImportJob {
+        val row = db.query("SELECT * FROM import_jobs WHERE id = ?", listOf(jobId)).singleOrNull()
+            ?: error("import job not found")
+        check(row.boolean("embedding_is_api")) { "Import job did not select API embedding" }
+        check(allowUnknownOutcome || !row.string("error").contains("UNKNOWN_OUTCOME", ignoreCase = true)) {
+            "UNKNOWN_OUTCOME: use retryUnknownEmbedding with explicit duplicate-charge acknowledgement"
+        }
+        val kbId = row.string("kb_id")
+        requireKb(kbId)
+        val space = db.query(
+            "SELECT embedding_space_id FROM knowledge_bases WHERE id = ?",
+            listOf(kbId),
+        ).singleOrNull()?.string("embedding_space_id").orEmpty()
+        check(apiEmbedderForSpace(space) != null) {
+            "The selected API embedding binding is unavailable; no text was sent"
+        }
+        val documentId = row.string("document_id")
+        val document = db.query(
+            "SELECT blob_hash, format, deleted_at FROM documents WHERE id = ?",
+            listOf(documentId),
+        ).singleOrNull() ?: error("document not found")
+        check(document.string("deleted_at").isBlank()) { "document deleted" }
+        val bytes = blobs.get(document.string("blob_hash")) ?: error("CAS blob is missing")
+        val format = runCatching { SourceFormat.valueOf(document.string("format")) }.getOrDefault(SourceFormat.UNKNOWN)
+        val job = ImportJob(
+            id = jobId,
+            knowledgeBaseId = kbId,
+            documentId = documentId,
+            stage = ImportStage.QUEUED,
+            hasImages = row.boolean("has_images"),
+            visionConfigured = visionConfigured,
+            visionConsent = row.boolean("vision_consent"),
+            embeddingIsApi = true,
+            embeddingConsent = true,
+            localEmbeddingAvailable = true,
+            consentedVisionFingerprint = row.string("vision_binding_json").ifBlank { null },
+        )
+        validateRequestedEmbeddingSelection(kbId, api = true, consent = true)
+        return continueImport(job, row.string("display_name"), bytes, format)
+    }
+
+    /**
+     * Retry an uncertain API embedding only after the user acknowledges a
+     * possible duplicate provider charge.  There is intentionally no worker
+     * path to this method.
+     */
+    fun retryUnknownEmbedding(
+        jobId: String,
+        acknowledgeDuplicateCharge: Boolean,
+        visionConfigured: Boolean = false,
+    ): ImportJob {
+        val apiJob = db.query(
+            "SELECT embedding_is_api FROM import_jobs WHERE id = ?",
+            listOf(jobId),
+        ).singleOrNull()?.boolean("embedding_is_api") == true
+        if (apiJob) {
+            return runBlocking {
+                retryUnknownEmbeddingCancellable(jobId, acknowledgeDuplicateCharge, visionConfigured)
+            }
+        }
+        return synchronized(indexLock) {
+        check(acknowledgeDuplicateCharge) {
+            "Retry may bill the embedding provider twice. Acknowledge the duplicate-charge risk."
+        }
+        val row = db.query("SELECT embedding_is_api, error, display_name FROM import_jobs WHERE id = ?", listOf(jobId)).singleOrNull()
+            ?: error("import job not found")
+        check(!row.string("display_name").startsWith(UNKNOWN_REBIND_PREFIX)) {
+            "This UNKNOWN_OUTCOME belongs to an API rebind; retry the rebind with explicit acknowledgement"
+        }
+        check(row.boolean("embedding_is_api")) { "Import job did not select API embedding" }
+        check(row.string("error").contains("UNKNOWN_OUTCOME", ignoreCase = true)) {
+            "Import job has no unknown embedding outcome to retry"
+        }
+        check(row.string("error").contains("embedding", ignoreCase = true)) {
+            "Unknown outcome belongs to another stage; use its explicit retry action"
+        }
+        // The persisted UNKNOWN_OUTCOME row is deliberately left untouched
+        // until continueImport writes a successful READY result. If the
+        // explicit retry crashes or is uncertain again, the old gate remains.
+        grantEmbeddingConsentInternal(jobId, visionConfigured, allowUnknownOutcome = true)
+        }
+    }
+
     fun locateCitation(citation: Citation): EvidenceLocator {
         val missing = EvidenceLocator(citation.documentId, "Source removed", citation.page, citation.assetId, citation.sourceSpan, null, removed = true)
+        val citedKnowledgeBaseId = citation.knowledgeBaseId.takeIf { it.isNotBlank() } ?: return missing
+        val knowledgeBase = db.query(
+            "SELECT id, deleted_at FROM knowledge_bases WHERE id = ?",
+            listOf(citedKnowledgeBaseId),
+        ).singleOrNull()
+        if (knowledgeBase == null || knowledgeBase.string("id").isBlank() || knowledgeBase.string("deleted_at").isNotBlank()) {
+            return missing
+        }
         val document = db.query(
-            "SELECT display_name, blob_hash, deleted_at, active_version_id FROM documents WHERE id = ?",
+            "SELECT kb_id, display_name, blob_hash, deleted_at, active_version_id FROM documents WHERE id = ?",
             listOf(citation.documentId),
         ).singleOrNull()
         if (document == null || document.string("deleted_at").isNotBlank()) return missing
-        val versionId = citation.documentVersionId.ifBlank { document.string("active_version_id") }
+        val documentKnowledgeBaseId = document.string("kb_id")
+        if (documentKnowledgeBaseId.isBlank() || documentKnowledgeBaseId != citedKnowledgeBaseId) return missing
+        // A citation must carry the exact version it came from.  Falling back
+        // to the current active version would let a forged/legacy citation
+        // silently point at a different document revision.
+        val versionId = citation.documentVersionId
         if (versionId.isBlank()) return missing
         val version = db.query(
             "SELECT id FROM document_versions WHERE id = ? AND document_id = ?",
@@ -259,7 +1042,7 @@ class KnowledgeRepository(
                     listOf(citation.assetId, citation.documentId),
                 ).singleOrNull() ?: return missing
                 val assetVersion = asset.string("document_version_id")
-                if (assetVersion.isNotBlank() && assetVersion != versionId) return missing
+                if (assetVersion.isBlank() || assetVersion != versionId) return missing
                 return EvidenceLocator(
                     documentId = citation.documentId,
                     displayName = document.string("display_name"),
@@ -283,6 +1066,23 @@ class KnowledgeRepository(
         return missing
     }
 
+    /**
+     * Resolve source bytes only after the full citation scope/version/asset
+     * checks above have passed.  The caller never needs the CAS hash or path;
+     * PDF page citations return the original PDF bytes and retain [Citation.page].
+     */
+    fun evidenceBytes(citation: Citation): Pair<String, ByteArray>? {
+        val locator = locateCitation(citation)
+        if (locator.removed) return null
+        val hash = locator.blobHash?.takeIf { it.isNotBlank() } ?: return null
+        val bytes = blobs.get(hash) ?: return null
+        val mediaType = db.query(
+            "SELECT media_type FROM blobs WHERE hash = ?",
+            listOf(hash),
+        ).singleOrNull()?.string("media_type")?.ifBlank { null } ?: return null
+        return mediaType to bytes
+    }
+
     fun assetBytes(assetId: String): Pair<String, ByteArray>? {
         val asset = db.query("SELECT blob_hash FROM assets WHERE id = ?", listOf(assetId)).singleOrNull() ?: return null
         val hash = asset.string("blob_hash")
@@ -298,7 +1098,7 @@ class KnowledgeRepository(
     fun retrieve(runId: String, query: String, topK: Int = 8, knowledgeBaseIds: List<String>? = null): RetrievalResult {
         if (query.isBlank()) return RetrievalResult(emptyList(), emptyList(), listOf("empty query"))
         val warnings = mutableListOf<String>()
-        val bases = knowledgeBaseIds ?: listKnowledgeBases().map { it.first }
+        val bases = (knowledgeBaseIds ?: listKnowledgeBases().map { it.first }).distinct()
         val lexical = mutableListOf<SearchHit>()
         val vector = mutableListOf<SearchHit>()
         for (kbId in bases) {
@@ -308,8 +1108,31 @@ class KnowledgeRepository(
                 continue
             }
             val space = kb.string("embedding_space_id")
-            if (space.isNotBlank() && space != embedder.spaceId) {
-                warnings += "Knowledge base $kbId uses space $space; query embedder is ${embedder.spaceId}"
+            // Check persisted consent before resolving a dynamic adapter. The
+            // resolver is construction-only by contract, but this ordering
+            // keeps a no-consent query from reaching any provider adapter.
+            if (space.isNotBlank() && space != embedder.spaceId && !hasApiEmbeddingConsent(kbId)) {
+                warnings += "Knowledge base $kbId uses embedding space $space but has no persisted API embedding consent for query vectors"
+                continue
+            }
+            val apiQueryHash = if (space.isNotBlank() && space != embedder.spaceId) {
+                queryHash(query).also { rejectPendingApiQueryBeforeResolver(kbId, space, it) }
+            } else {
+                null
+            }
+            // A successful provider result is an immutable, billable cache
+            // entry.  Read it before resolving a dynamic adapter so a process
+            // restart can finish local retrieval even when that adapter is no
+            // longer configured.  The cache is keyed by the complete space id
+            // and query digest; it never stores the original query text.
+            val cachedQueryVector = apiQueryHash?.let { queryVectorCache(space, it) }
+            val queryEmbedder = if (cachedQueryVector != null) {
+                CachedQueryEmbedder(space, cachedQueryVector.dimension)
+            } else {
+                embeddingForSpace(space)
+            }
+            if (queryEmbedder == null) {
+                warnings += "Knowledge base $kbId uses space $space; no matching query embedder is configured"
                 continue
             }
             val pin = pinnedReadyGeneration(kbId)
@@ -318,7 +1141,42 @@ class KnowledgeRepository(
                 continue
             }
             lexical += lexicalHits(kbId, query, 40, pin)
-            vector += vectorHits(kbId, query, 40, pin)
+            if (apiQueryHash != null && cachedQueryVector == null) {
+                // Resolve only after a durable pending-row check.  A previous
+                // UNKNOWN result therefore cannot reach a provider adapter
+                // until the UI explicitly authorizes this exact query key.
+                claimApiQueryAttempt(kbId, space, apiQueryHash)
+            }
+            var queryVectorReady = cachedQueryVector != null
+            try {
+                vector += vectorHits(
+                    kbId,
+                    query,
+                    40,
+                    pin,
+                    queryEmbedder,
+                    queryVector = cachedQueryVector?.vector,
+                    onQueryVectorReady = apiQueryHash?.let { hash ->
+                        { vector ->
+                            // Commit the successful provider vector before
+                            // deleting the attempt row.  If local SQLite/JNI
+                            // retrieval fails afterwards, the next identical
+                            // query reuses this vector and is never re-billed.
+                            insertQueryVectorCache(space, hash, vector, queryEmbedder.dimension)
+                            clearApiQueryAttempt(kbId, space, hash)
+                            queryVectorReady = true
+                        }
+                    },
+                )
+            } catch (failure: Throwable) {
+                if (apiQueryHash != null && cachedQueryVector == null && !queryVectorReady && isUncertainApiQueryFailure(failure)) {
+                    persistApiQueryUnknown(kbId, space, apiQueryHash)
+                    // Do not attach a provider exception: it may echo the
+                    // original query. The durable row carries only the key.
+                    throw ApiQueryUnknownOutcomeException(kbId, space, apiQueryHash)
+                }
+                throw failure
+            }
         }
         val hits = ReciprocalRankFusion.merge(listOf(lexical, vector)).take(topK)
         if (hits.isEmpty()) warnings += "No in-scope evidence"
@@ -339,7 +1197,10 @@ class KnowledgeRepository(
                     knowledgeBaseId = row.string("kb_id"),
                     documentId = row.string("document_id"),
                     stage = ImportStage.valueOf(row.string("stage")),
-                    hasImages = row.long("has_images") != 0L,
+                    hasImages = row.boolean("has_images"),
+                    visionConsent = row.boolean("vision_consent"),
+                    embeddingIsApi = row.boolean("embedding_is_api"),
+                    embeddingConsent = row.boolean("embedding_consent"),
                     error = row.string("error").ifBlank { null },
                 ),
                 row.string("display_name"),
@@ -372,18 +1233,35 @@ class KnowledgeRepository(
     }
 
     fun deleteDocument(documentId: String) {
+        var knowledgeBaseId: String? = null
         synchronized(indexLock) {
             val row = db.query("SELECT kb_id, blob_hash, deleted_at FROM documents WHERE id = ?", listOf(documentId)).singleOrNull() ?: return
             if (row.string("deleted_at").isNotBlank()) return
+            knowledgeBaseId = row.string("kb_id")
             db.transaction {
                 db.execute("UPDATE documents SET deleted_at = ? WHERE id = ?", listOf(Utc.nowIso(), documentId))
                 db.execute(
                     "UPDATE import_jobs SET stage = ?, error = ? WHERE document_id = ? AND stage NOT IN (?,?)",
                     listOf(ImportStage.CANCELLED.name, "document deleted", documentId, ImportStage.READY.name, ImportStage.CANCELLED.name),
                 )
+                db.execute(
+                    "UPDATE embedding_operations SET cancel_requested = 1, state = CASE WHEN state = 'DISPATCHED' THEN 'UNKNOWN' WHEN state IN('PREPARED','CACHE_READY') THEN 'CANCELLED' ELSE state END, error = CASE WHEN state = 'DISPATCHED' THEN ? ELSE error END, updated_at = ? WHERE document_id = ? AND state IN('PREPARED','DISPATCHED','CACHE_READY')",
+                    listOf(API_EMBEDDING_CANCEL_UNKNOWN_ERROR, Utc.nowIso(), documentId),
+                )
                 syncBlobRef(row.string("blob_hash"))
             }
-            rebuildIndex(row.string("kb_id"))
+        }
+        // Do not call the API rebuild bridge while the repository monitor is
+        // held.  A remote embedding rebuild after deletion is also avoided:
+        // invalidate the generation and let an explicit user rebuild decide
+        // whether the remaining text may leave the device.
+        val kbId = knowledgeBaseId ?: return
+        if (isApiKnowledgeBase(kbId)) {
+            synchronized(indexLock) {
+                db.execute("UPDATE knowledge_bases SET active_generation_id = NULL WHERE id = ?", listOf(kbId))
+            }
+        } else {
+            rebuildIndex(kbId)
         }
     }
 
@@ -399,16 +1277,39 @@ class KnowledgeRepository(
                     syncBlobRef(row.string("blob_hash"))
                 }
                 db.execute("UPDATE knowledge_bases SET deleted_at = ?, active_generation_id = NULL WHERE id = ?", listOf(Utc.nowIso(), kbId))
+                db.execute(
+                    "UPDATE embedding_operations SET cancel_requested = 1, state = CASE WHEN state = 'DISPATCHED' THEN 'UNKNOWN' WHEN state IN('PREPARED','CACHE_READY') THEN 'CANCELLED' ELSE state END, error = CASE WHEN state = 'DISPATCHED' THEN ? ELSE error END, updated_at = ? WHERE kb_id = ? AND state IN('PREPARED','DISPATCHED','CACHE_READY')",
+                    listOf(API_EMBEDDING_CANCEL_UNKNOWN_ERROR, Utc.nowIso(), kbId),
+                )
             }
         }
     }
 
-    fun rebuildIndex(kbId: String): String = synchronized(indexLock) {
-        requireKb(kbId)
-        db.transaction { rebuildUnlocked(kbId) }
+    fun rebuildIndex(kbId: String, acknowledgeDuplicateCharge: Boolean = false): String {
+        if (isApiKnowledgeBase(kbId)) {
+            return runBlocking { rebuildIndexCancellable(kbId, acknowledgeDuplicateCharge) }
+        }
+        return synchronized(indexLock) {
+            requireKb(kbId)
+            db.transaction { rebuildUnlocked(kbId) }
+        }
     }
 
     fun repairIndexes() {
+        // API rebuilds must leave the repository monitor before awaiting the
+        // adapter.  The legacy local repair below remains serialized exactly
+        // as before and explicitly skips API spaces.
+        listKnowledgeBases()
+            .map { it.first }
+            .filter {
+                isApiKnowledgeBase(it) && hasApiEmbeddingConsent(it) &&
+                    latestUnknownEmbeddingOperation(it, "REBUILD") == null &&
+                    db.query(
+                        "SELECT embedding_space_id FROM knowledge_bases WHERE id = ? AND deleted_at IS NULL",
+                        listOf(it),
+                    ).singleOrNull()?.string("embedding_space_id")?.let { space -> apiEmbedderForSpace(space) != null } == true
+            }
+            .forEach { runBlocking { rebuildIndexCancellable(it) } }
         synchronized(indexLock) {
             db.query("SELECT id, active_version_id, blob_hash FROM documents WHERE deleted_at IS NULL AND active_version_id IS NOT NULL").forEach { doc ->
                 val versionId = doc.string("active_version_id")
@@ -426,6 +1327,25 @@ class KnowledgeRepository(
                     listOf(kbId),
                 ).single().long("n")
                 if (live == 0L) return@forEach
+                var space = db.query("SELECT embedding_space_id FROM knowledge_bases WHERE id = ?", listOf(kbId))
+                    .singleOrNull()?.string("embedding_space_id").orEmpty()
+                if (space.isBlank()) {
+                    // This is a one-time legacy repair, not a retrieval
+                    // fallback: after this write the KB has an explicit fixed
+                    // space and all query paths require that persisted value.
+                    space = embedder.spaceId
+                    db.execute(
+                        "UPDATE knowledge_bases SET embedding_space_id = ? WHERE id = ? AND (embedding_space_id IS NULL OR embedding_space_id = '')",
+                        listOf(space, kbId),
+                    )
+                }
+                // A persisted API space may be intentionally unavailable
+                // during early process startup.  Leave its previous
+                // generation pinned until the explicitly selected adapter is
+                // injected; migration/repair must not silently rebuild it in
+                // the local fixture space.
+                if (space != embedder.spaceId) return@forEach
+                if (embeddingForSpace(space) == null) return@forEach
                 val pin = pinnedReadyGeneration(kbId)
                 val members = if (pin == null) 0L else {
                     db.query("SELECT COUNT(*) AS n FROM generation_members WHERE generation_id = ?", listOf(pin)).single().long("n")
@@ -437,45 +1357,95 @@ class KnowledgeRepository(
         }
     }
 
-    private fun rebuildUnlocked(kbId: String): String {
-        val generationId = EntityId.random().value
+    private fun embeddingInputsForKnowledgeBase(kbId: String): List<EmbeddingInput> =
+        embeddingInputsByVersionForKnowledgeBase(kbId).values.flatten()
+
+    private fun embeddingInputsByVersionForKnowledgeBase(kbId: String): LinkedHashMap<String, List<EmbeddingInput>> {
         val versions = db.query(
             "SELECT id, active_version_id FROM documents WHERE kb_id = ? AND deleted_at IS NULL AND active_version_id IS NOT NULL",
             listOf(kbId),
         )
+        return linkedMapOf<String, List<EmbeddingInput>>().also { chunksByVersion ->
+            versions.forEach { doc ->
+                val versionId = doc.string("active_version_id")
+                chunksByVersion[versionId] = db.query(
+                    "SELECT id, ordinal, text, content_hash FROM chunks WHERE document_version_id = ? ORDER BY ordinal",
+                    listOf(versionId),
+                ).map { row ->
+                    EmbeddingInput(
+                        chunkId = row.string("id"),
+                        text = row.string("text"),
+                        contentHash = row.string("content_hash").ifBlank {
+                            sha256Hex(row.string("text").toByteArray(Charsets.UTF_8))
+                        },
+                    )
+                }
+            }
+        }
+    }
+
+    private fun rebuildUnlocked(
+        kbId: String,
+        apiConsentGrantedForOperation: Boolean = false,
+    ): String {
+        val boundSpace = db.query(
+            "SELECT embedding_space_id FROM knowledge_bases WHERE id = ?",
+            listOf(kbId),
+        ).singleOrNull()?.string("embedding_space_id").orEmpty()
+        check(boundSpace.isNotBlank()) {
+            "Knowledge base $kbId has no fixed embedding space; refusing to rebuild"
+        }
+        if (boundSpace != embedder.spaceId &&
+            !apiConsentGrantedForOperation &&
+            !hasApiEmbeddingConsent(kbId)
+        ) {
+            error("API embedding rebuild requires explicit persisted consent")
+        }
+        val indexEmbedder = embedderForKnowledgeBase(kbId)
+        check(boundSpace == indexEmbedder.spaceId) {
+            "Knowledge base $kbId binding changed while rebuilding; refusing a mixed-space generation"
+        }
+        val chunksByVersion = embeddingInputsByVersionForKnowledgeBase(kbId)
+        ensureEmbeddings(chunksByVersion.values.flatten(), indexEmbedder)
+        return buildGenerationFromCachedUnlocked(kbId, indexEmbedder, chunksByVersion)
+    }
+
+    /**
+     * Build only the derived FTS/ANN generation.  Every embedding must already
+     * be present in the immutable embedding cache before this method is called;
+     * it therefore never invokes a provider and is safe for the short finalize
+     * transaction of an API operation.
+     */
+    private fun buildGenerationFromCachedUnlocked(
+        kbId: String,
+        indexEmbedder: TextEmbedder,
+        chunksByVersion: LinkedHashMap<String, List<EmbeddingInput>> = embeddingInputsByVersionForKnowledgeBase(kbId),
+    ): String {
+        val generationId = EntityId.random().value
         var vectors = 0
         db.execute(
             "INSERT INTO index_generations(id,kb_id,space_id,manifest_hash,state,vector_count,fts_version,created_at) VALUES (?,?,?,?,?,?,?,?)",
-            listOf(generationId, kbId, embedder.spaceId, generationId, "BUILDING", 0, 1, Utc.nowIso()),
+            listOf(generationId, kbId, indexEmbedder.spaceId, generationId, "BUILDING", 0, 1, Utc.nowIso()),
         )
-        versions.forEach { doc ->
-            val versionId = doc.string("active_version_id")
-            db.query("SELECT id, ordinal, text FROM chunks WHERE document_version_id = ? ORDER BY ordinal", listOf(versionId)).forEach { chunk ->
-                val chunkId = chunk.string("id")
-                val text = chunk.string("text")
+        chunksByVersion.forEach { (versionId, chunks) ->
+            chunks.forEach { chunk ->
+                val chunkId = chunk.chunkId
+                val text = chunk.text
                 val rowid = db.query("SELECT rowid AS rid FROM chunks WHERE id = ?", listOf(chunkId)).single().long("rid")
                 runCatching { db.execute("DELETE FROM chunks_fts WHERE rowid = ?", listOf(rowid)) }
                 runCatching { db.execute("INSERT INTO chunks_fts(rowid, text) VALUES (?, ?)", listOf(rowid, CjkLexical.indexText(text))) }
-                val vector = embedder.embed(text)
-                check(vector.size == embedder.dimension) { "embedding dimension mismatch" }
-                db.execute(
-                    "INSERT OR REPLACE INTO embeddings(chunk_id,space_id,vector_blob,content_hash) VALUES (?,?,?,?)",
-                    listOf(chunkId, embedder.spaceId, floatsToBytes(vector), sha256Hex(text.toByteArray())),
-                )
                 val stored = db.query(
-                    "SELECT vector_blob FROM embeddings WHERE chunk_id = ? AND space_id = ?",
-                    listOf(chunkId, embedder.spaceId),
+                    "SELECT content_hash, vector_blob FROM embeddings WHERE chunk_id = ? AND space_id = ?",
+                    listOf(chunkId, indexEmbedder.spaceId),
                 ).singleOrNull() ?: error("embedding missing after rebuild")
-                val blob = stored.columns["vector_blob"]
-                val bytes = when (blob) {
-                    is ByteArray -> blob
-                    is java.sql.Blob -> blob.getBytes(1, blob.length().toInt())
-                    else -> error("embedding blob unreadable")
+                check(stored.string("content_hash") == chunk.contentHash) {
+                    "embedding content hash changed for chunk $chunkId"
                 }
-                check(bytes.size == embedder.dimension * 4) { "embedding byte length mismatch" }
+                val bytes = embeddingBytes(stored)
+                validateEmbeddingBytes(bytes, indexEmbedder.dimension)
                 db.execute(
                     "INSERT OR IGNORE INTO generation_members(generation_id,chunk_id,space_id,document_version_id) VALUES (?,?,?,?)",
-                    listOf(generationId, chunkId, embedder.spaceId, versionId),
+                    listOf(generationId, chunkId, indexEmbedder.spaceId, versionId),
                 )
                 vectors += 1
             }
@@ -493,10 +1463,224 @@ class KnowledgeRepository(
             listOf("READY", vectors, sha256Hex("$generationId:$vectors".toByteArray()), generationId),
         )
         db.execute(
-            "UPDATE knowledge_bases SET active_generation_id = ?, embedding_space_id = ? WHERE id = ?",
-            listOf(generationId, embedder.spaceId, kbId),
+            "UPDATE knowledge_bases SET active_generation_id = ? WHERE id = ?",
+            listOf(generationId, kbId),
         )
         return generationId
+    }
+
+    private fun importJobFromRow(
+        row: SqlRow,
+        visionConfigured: Boolean,
+        stage: ImportStage,
+        documentId: String = row.string("document_id"),
+        knowledgeBaseId: String = row.string("kb_id"),
+    ): ImportJob = ImportJob(
+        id = row.string("id"),
+        knowledgeBaseId = knowledgeBaseId,
+        documentId = documentId,
+        stage = stage,
+        hasImages = row.boolean("has_images"),
+        visionConfigured = visionConfigured,
+        visionConsent = row.boolean("vision_consent"),
+        embeddingIsApi = row.boolean("embedding_is_api"),
+        embeddingConsent = row.boolean("embedding_consent"),
+        localEmbeddingAvailable = true,
+        error = row.string("error").ifBlank { null },
+        consentedVisionFingerprint = row.string("vision_binding_json").ifBlank { null },
+    )
+
+    private suspend fun continueImportCancellable(
+        job: ImportJob,
+        displayName: String,
+        bytes: ByteArray,
+        format: SourceFormat,
+    ): ImportJob {
+        // A CACHE_READY operation is resumable without another provider call.
+        // A DISPATCHED operation has an unknown external outcome (for example
+        // after process death) and is converted to a durable gate instead of
+        // being replayed automatically.
+        activeEmbeddingOperationForJob(job.id)?.let { operation ->
+            when (operation.state) {
+                "CACHE_READY" -> {
+                    finalizeEmbeddingOperation(operation.token)
+                    job.stage = ImportStage.READY
+                    job.error = null
+                    persistJob(job, displayName)
+                    return job
+                }
+                "PREPARED" -> {
+                    val selected = apiEmbedderForSpace(operation.spaceId)
+                        ?: error("API embedding binding is unavailable; no text was sent")
+                    executeEmbeddingOperation(operation, selected)
+                    finalizeEmbeddingOperation(operation.token)
+                    job.stage = ImportStage.READY
+                    job.error = null
+                    persistJob(job, displayName)
+                    return job
+                }
+                "DISPATCHED" -> {
+                    markEmbeddingOperationUnknown(operation)
+                    job.stage = ImportStage.FAILED
+                    job.error = API_EMBEDDING_UNKNOWN_ERROR
+                    persistJob(job, displayName)
+                    throw EmbeddingUnknownOutcomeException()
+                }
+            }
+        }
+        try {
+            advanceThrough(job, ImportStage.PARSING)
+            when (format) {
+                SourceFormat.IMAGE -> indexPublicationCancellable(job, bytes, standaloneImage(bytes, displayName))
+                SourceFormat.TEXT, SourceFormat.MARKDOWN -> indexTextDocumentCancellable(job, bytes, format)
+                SourceFormat.PDF -> indexPublicationCancellable(job, bytes, PdfParser.parse(bytes, pdfRasterizer))
+                SourceFormat.OFFICE_ARCHIVE -> {
+                    val inspection = ZipSafety.inspect(bytes)
+                    if (!inspection.ok) {
+                        fail(job, inspection.reason)
+                    } else {
+                        indexPublicationCancellable(job, bytes, OfficeParser.parse(displayName, bytes))
+                    }
+                }
+                SourceFormat.UNKNOWN -> fail(job, "Unsupported file type. The file was copied and was not dropped.")
+            }
+            persistJob(job, displayName)
+            return job
+        } catch (cancelled: CancellationException) {
+            persistApiCancellation(job, displayName)
+            throw cancelled
+        } catch (interrupted: InterruptedException) {
+            Thread.currentThread().interrupt()
+            persistApiCancellation(job, displayName)
+            throw interrupted
+        } catch (failure: Throwable) {
+            // Unknown embedding results are already persisted by the
+            // operation state machine.  Keep the compatibility contract of
+            // importBytes: return a FAILED job rather than replaying it.
+            fail(job, failure.message ?: "API import failed")
+            persistJob(job, displayName)
+            return job
+        }
+    }
+
+    private fun persistApiCancellation(job: ImportJob, displayName: String) {
+        val operation = activeEmbeddingOperationForJob(job.id) ?: latestEmbeddingOperationForJob(job.id)
+        when (operation?.state) {
+            "DISPATCHED" -> {
+                markEmbeddingOperationUnknown(operation)
+                job.stage = ImportStage.FAILED
+                job.error = API_EMBEDDING_CANCEL_UNKNOWN_ERROR
+            }
+            "UNKNOWN" -> {
+                job.stage = ImportStage.FAILED
+                job.error = API_EMBEDDING_CANCEL_UNKNOWN_ERROR
+            }
+            "PREPARED", "CACHE_READY" -> {
+                operation?.let { markEmbeddingOperation(it.token, "CANCELLED", "Cancelled by user", onlyIfActive = true) }
+                job.stage = ImportStage.CANCELLED
+                job.error = "Cancelled by user"
+            }
+            "PUBLISHED" -> {
+                // Finalize won the race with cancellation.  Preserve the
+                // durable READY outcome rather than overwriting it.
+                job.stage = ImportStage.READY
+                job.error = null
+            }
+            else -> {
+                job.stage = ImportStage.CANCELLED
+                job.error = "Cancelled by user"
+            }
+        }
+        persistJob(job, displayName)
+    }
+
+    private fun displayNameForJob(jobId: String): String =
+        db.query("SELECT display_name FROM import_jobs WHERE id = ?", listOf(jobId))
+            .singleOrNull()?.string("display_name")?.ifBlank { jobId } ?: jobId
+
+    private suspend fun indexTextDocumentCancellable(job: ImportJob, bytes: ByteArray, format: SourceFormat) {
+        val text = String(bytes, Charsets.UTF_8)
+        job.hasImages = format == SourceFormat.MARKDOWN && MediaKind.markdownReferencesImages(text)
+        if (job.hasImages) {
+            advanceThrough(job, ImportStage.WAITING_FOR_VISION_MODEL)
+            if (job.stage == ImportStage.WAITING_FOR_VISION_MODEL) {
+                job.error = "Markdown references images. They were not downloaded and the document is not READY."
+            } else if (job.stage == ImportStage.AWAITING_UPLOAD_CONSENT) {
+                job.error = "Markdown image files are not fetched automatically. Import the image files or grant Vision after they exist in CAS."
+            }
+            return
+        }
+        publishChunksCancellable(
+            job,
+            bytes,
+            TextChunker.chunk(text).map { IndexedChunk(it, null, emptyList(), null) },
+            PARSER_FINGERPRINT,
+        )
+    }
+
+    private suspend fun indexPublicationCancellable(job: ImportJob, bytes: ByteArray, parsed: ParsedPublication) {
+        val processable = parsed.assets.filter { it.kind == "IMAGE" && it.bytes.isNotEmpty() }
+        val blocked = parsed.assets.filter {
+            it.kind == "EXTERNAL" || it.kind == "MISSING" || it.kind == "PAGE" ||
+                (it.kind == "IMAGE" && it.bytes.isEmpty())
+        }
+        job.hasImages = parsed.needsVision || processable.isNotEmpty() || blocked.isNotEmpty()
+        val visionTexts = mutableListOf<IndexedChunk>()
+        if (job.hasImages) {
+            advanceThrough(job, if (job.visionConfigured) ImportStage.AWAITING_UPLOAD_CONSENT else ImportStage.WAITING_FOR_VISION_MODEL)
+            if (job.stage == ImportStage.WAITING_FOR_VISION_MODEL) {
+                job.error = "Visual content is waiting for a Vision model and is not READY."
+                return
+            }
+            if (job.stage == ImportStage.AWAITING_UPLOAD_CONSENT && !job.visionConsent) {
+                job.error = "Vision upload has not been approved. No image bytes left the device."
+                return
+            }
+            if (!visionBindingMatches(job)) {
+                job.visionConsent = false
+                job.stage = ImportStage.AWAITING_UPLOAD_CONSENT
+                job.error = "Vision destination changed. Approve upload to the current Provider and model. No image bytes left the device."
+                return
+            }
+            job.visionConsent = true
+            job.consentedVisionFingerprint = visionFingerprint()
+            if (blocked.isNotEmpty()) {
+                fail(job, "Visual pages or external/missing images cannot be processed without local raster bytes. Nothing was downloaded.")
+                return
+            }
+            if (processable.isEmpty()) {
+                fail(job, "needsVision is set but there is no processable page or image asset. The document is not READY.")
+                return
+            }
+            advanceThrough(job, ImportStage.VISION_PROCESSING)
+            when (val outcome = processAssets(job, processable)) {
+                is VisionBatch.Failed -> {
+                    fail(job, outcome.message)
+                    return
+                }
+                is VisionBatch.Unknown -> {
+                    job.stage = ImportStage.FAILED
+                    job.error = "UNKNOWN_OUTCOME: Vision result is uncertain and was not billed as success. Retry is manual."
+                    return
+                }
+                is VisionBatch.Ok -> visionTexts += outcome.chunks
+            }
+        }
+        val pageChunks = parsed.pages.filter { it.text.isNotBlank() && !it.needsVision }.flatMap { page ->
+            TextChunker.chunk(page.text).map { IndexedChunk(it, page.page, emptyList(), "page:${page.page}") }
+        }
+        val chunks = (pageChunks + visionTexts).ifEmpty {
+            if (!parsed.needsVision && parsed.text.isNotBlank()) {
+                TextChunker.chunk(parsed.text).map { IndexedChunk(it, 1, emptyList(), null) }
+            } else {
+                emptyList()
+            }
+        }
+        if (chunks.isEmpty()) {
+            fail(job, "The file produced no indexable text. Visual items were not dropped.")
+            return
+        }
+        publishChunksCancellable(job, bytes, chunks, parsed.parserFingerprint, processable)
     }
 
     private fun continueImport(job: ImportJob, displayName: String, bytes: ByteArray, format: SourceFormat): ImportJob {
@@ -505,6 +1689,11 @@ class KnowledgeRepository(
             SourceFormat.IMAGE -> {
                 try {
                     indexPublication(job, bytes, standaloneImage(bytes, displayName))
+                } catch (cancelled: CancellationException) {
+                    throw cancelled
+                } catch (interrupted: InterruptedException) {
+                    Thread.currentThread().interrupt()
+                    throw interrupted
                 } catch (t: Throwable) {
                     fail(job, t.message ?: "image import failed")
                 }
@@ -512,13 +1701,23 @@ class KnowledgeRepository(
             SourceFormat.TEXT, SourceFormat.MARKDOWN -> {
                 try {
                     indexTextDocument(job, bytes, format)
+                } catch (cancelled: CancellationException) {
+                    throw cancelled
+                } catch (interrupted: InterruptedException) {
+                    Thread.currentThread().interrupt()
+                    throw interrupted
                 } catch (t: Throwable) {
                     fail(job, t.message ?: "indexing failed")
                 }
             }
             SourceFormat.PDF -> {
                 try {
-                    indexPublication(job, bytes, PdfParser.parse(bytes))
+                    indexPublication(job, bytes, PdfParser.parse(bytes, pdfRasterizer))
+                } catch (cancelled: CancellationException) {
+                    throw cancelled
+                } catch (interrupted: InterruptedException) {
+                    Thread.currentThread().interrupt()
+                    throw interrupted
                 } catch (t: Throwable) {
                     fail(job, t.message ?: "PDF import failed")
                 }
@@ -530,6 +1729,11 @@ class KnowledgeRepository(
                 } else {
                     try {
                         indexPublication(job, bytes, OfficeParser.parse(displayName, bytes))
+                    } catch (cancelled: CancellationException) {
+                        throw cancelled
+                    } catch (interrupted: InterruptedException) {
+                        Thread.currentThread().interrupt()
+                        throw interrupted
                     } catch (t: Throwable) {
                         fail(job, t.message ?: "DOCX/EPUB import failed")
                     }
@@ -770,6 +1974,753 @@ class KnowledgeRepository(
         val span: String?,
     )
 
+    private data class EmbeddingInput(
+        val chunkId: String,
+        val text: String,
+        val contentHash: String,
+    )
+
+    private data class EmbeddingOperationRecord(
+        val token: String,
+        val kind: String,
+        val knowledgeBaseId: String,
+        val jobId: String?,
+        val documentId: String?,
+        val documentVersionId: String?,
+        val spaceId: String,
+        val inputManifestHash: String,
+        val bindingFingerprint: String,
+        val consentFingerprint: String,
+        val state: String,
+        val cancelRequested: Boolean,
+        val error: String,
+    )
+
+    private data class PreparedEmbeddingOperation(
+        val record: EmbeddingOperationRecord,
+        val inputsByVersion: LinkedHashMap<String, List<EmbeddingInput>>,
+    )
+
+    private class OperationAborted(message: String) : IllegalStateException(message)
+
+    private fun activeDocumentPointers(knowledgeBaseId: String): LinkedHashMap<String, String> =
+        linkedMapOf<String, String>().also { pointers ->
+            db.query(
+                "SELECT id, active_version_id FROM documents WHERE kb_id = ? AND deleted_at IS NULL ORDER BY id",
+                listOf(knowledgeBaseId),
+            ).forEach { row -> pointers[row.string("id")] = row.string("active_version_id") }
+            // The active generation is also a publication pointer.  Include
+            // it in the operation manifest so an unrelated local rebuild
+            // cannot be silently overwritten by a later API finalize.
+            pointers[ACTIVE_GENERATION_POINTER] = db.query(
+                "SELECT active_generation_id FROM knowledge_bases WHERE id = ?",
+                listOf(knowledgeBaseId),
+            ).singleOrNull()?.string("active_generation_id").orEmpty()
+        }
+
+    private fun operationManifestHash(
+        kind: String,
+        knowledgeBaseId: String,
+        targetSpace: String,
+        sourceSpace: String,
+        inputsByVersion: Map<String, List<EmbeddingInput>>,
+        activePointers: Map<String, String>,
+    ): String {
+        val canonical = buildString {
+            append("kind=").append(kind)
+            append("|kb=").append(knowledgeBaseId)
+            append("|target=").append(targetSpace)
+            append("|source=").append(sourceSpace)
+            activePointers.toSortedMap().forEach { (documentId, versionId) ->
+                append("|active=").append(documentId).append(':').append(versionId)
+            }
+            inputsByVersion.toSortedMap().forEach { (versionId, inputs) ->
+                append("|version=").append(versionId)
+                inputs.sortedWith(compareBy<EmbeddingInput> { it.chunkId }.thenBy { it.contentHash })
+                    .forEach { input ->
+                        val hash = input.contentHash.ifBlank {
+                            sha256Hex(input.text.toByteArray(Charsets.UTF_8))
+                        }
+                        append('|').append(input.chunkId).append('=').append(hash)
+                    }
+            }
+        }
+        return sha256Hex(canonical.toByteArray(Charsets.UTF_8))
+    }
+
+    private fun apiConsentFingerprint(
+        kind: String,
+        knowledgeBaseId: String,
+        spaceId: String,
+        jobId: String? = null,
+        sourceSpace: String = spaceId,
+    ): String = sha256Hex(
+        "api-consent|kind=$kind|kb=$knowledgeBaseId|space=$spaceId|source=$sourceSpace|job=${jobId.orEmpty()}"
+            .toByteArray(Charsets.UTF_8),
+    )
+
+    private fun embeddingOperation(row: SqlRow): EmbeddingOperationRecord = EmbeddingOperationRecord(
+        token = row.string("token"),
+        kind = row.string("kind"),
+        knowledgeBaseId = row.string("kb_id"),
+        jobId = row.string("job_id").ifBlank { null },
+        documentId = row.string("document_id").ifBlank { null },
+        documentVersionId = row.string("document_version_id").ifBlank { null },
+        spaceId = row.string("space_id"),
+        inputManifestHash = row.string("input_manifest_hash"),
+        bindingFingerprint = row.string("binding_fingerprint"),
+        consentFingerprint = row.string("consent_fingerprint"),
+        state = row.string("state"),
+        cancelRequested = row.boolean("cancel_requested"),
+        error = row.string("error"),
+    )
+
+    private fun operationByToken(token: String): EmbeddingOperationRecord? =
+        db.query("SELECT * FROM embedding_operations WHERE token = ?", listOf(token))
+            .singleOrNull()?.let(::embeddingOperation)
+
+    private fun activeEmbeddingOperation(knowledgeBaseId: String): EmbeddingOperationRecord? =
+        db.query(
+            "SELECT * FROM embedding_operations WHERE kb_id = ? AND state IN('PREPARED','DISPATCHED','CACHE_READY') ORDER BY created_at LIMIT 1",
+            listOf(knowledgeBaseId),
+        ).singleOrNull()?.let(::embeddingOperation)
+
+    private fun latestUnknownEmbeddingOperation(knowledgeBaseId: String, kind: String): EmbeddingOperationRecord? =
+        db.query(
+            "SELECT * FROM embedding_operations WHERE kb_id = ? AND kind = ? AND state = 'UNKNOWN' ORDER BY updated_at DESC LIMIT 1",
+            listOf(knowledgeBaseId, kind),
+        ).singleOrNull()?.let(::embeddingOperation)
+
+    private fun activeEmbeddingOperationForJob(jobId: String): EmbeddingOperationRecord? =
+        db.query(
+            "SELECT * FROM embedding_operations WHERE job_id = ? AND state IN('PREPARED','DISPATCHED','CACHE_READY') ORDER BY created_at LIMIT 1",
+            listOf(jobId),
+        ).singleOrNull()?.let(::embeddingOperation)
+
+    private fun latestEmbeddingOperationForJob(jobId: String): EmbeddingOperationRecord? =
+        db.query(
+            "SELECT * FROM embedding_operations WHERE job_id = ? ORDER BY created_at DESC LIMIT 1",
+            listOf(jobId),
+        ).singleOrNull()?.let(::embeddingOperation)
+
+    private fun inputsForVersion(documentVersionId: String): List<EmbeddingInput> =
+        db.query(
+            "SELECT id, ordinal, text, content_hash FROM chunks WHERE document_version_id = ? ORDER BY ordinal",
+            listOf(documentVersionId),
+        ).map { row ->
+            EmbeddingInput(
+                chunkId = row.string("id"),
+                text = row.string("text"),
+                contentHash = row.string("content_hash").ifBlank {
+                    sha256Hex(row.string("text").toByteArray(Charsets.UTF_8))
+                },
+            )
+        }
+
+    private fun operationInputsByVersion(operation: EmbeddingOperationRecord): LinkedHashMap<String, List<EmbeddingInput>> {
+        val versionId = operation.documentVersionId
+        if (!versionId.isNullOrBlank()) {
+            return linkedMapOf(versionId to inputsForVersion(versionId))
+        }
+        return embeddingInputsByVersionForKnowledgeBase(operation.knowledgeBaseId)
+    }
+
+    private fun insertEmbeddingOperation(
+        kind: String,
+        knowledgeBaseId: String,
+        jobId: String?,
+        documentId: String?,
+        documentVersionId: String?,
+        spaceId: String,
+        inputManifestHash: String,
+        consentFingerprint: String,
+    ): EmbeddingOperationRecord {
+        val token = EntityId.random().value
+        val now = Utc.nowIso()
+        db.execute(
+            "INSERT INTO embedding_operations(token,kind,kb_id,job_id,document_id,document_version_id,space_id,input_manifest_hash,binding_fingerprint,consent_fingerprint,state,cancel_requested,error,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            listOf(
+                token,
+                kind,
+                knowledgeBaseId,
+                jobId,
+                documentId,
+                documentVersionId,
+                spaceId,
+                inputManifestHash,
+                spaceId,
+                consentFingerprint,
+                "PREPARED",
+                0,
+                "",
+                now,
+                now,
+            ),
+        )
+        return operationByToken(token) ?: error("embedding operation disappeared after insert")
+    }
+
+    private fun markEmbeddingOperation(
+        token: String,
+        state: String,
+        error: String = "",
+        onlyIfActive: Boolean = false,
+    ): EmbeddingOperationRecord = synchronized(indexLock) {
+        db.transaction {
+            val where = if (onlyIfActive) {
+                " AND state IN('PREPARED','DISPATCHED','CACHE_READY')"
+            } else {
+                ""
+            }
+            db.execute(
+                "UPDATE embedding_operations SET state = ?, error = ?, updated_at = ? WHERE token = ?$where",
+                listOf(state, error, Utc.nowIso(), token),
+            )
+            operationByToken(token) ?: error("embedding operation disappeared")
+        }
+    }
+
+    private fun requestEmbeddingOperationCancelForJob(jobId: String): EmbeddingOperationRecord? = synchronized(indexLock) {
+        db.transaction {
+            val current = activeEmbeddingOperationForJob(jobId) ?: return@transaction null
+            db.execute(
+                "UPDATE embedding_operations SET cancel_requested = 1, state = CASE WHEN state = 'DISPATCHED' THEN 'UNKNOWN' WHEN state IN('PREPARED','CACHE_READY') THEN 'CANCELLED' ELSE state END, error = CASE WHEN state = 'DISPATCHED' THEN ? ELSE error END, updated_at = ? WHERE token = ?",
+                listOf(API_EMBEDDING_CANCEL_UNKNOWN_ERROR, Utc.nowIso(), current.token),
+            )
+            operationByToken(current.token)
+        }
+    }
+
+    private fun stageEmbeddingCacheHits(
+        inputsByVersion: LinkedHashMap<String, List<EmbeddingInput>>,
+        spaceId: String,
+        dimension: Int,
+    ): LinkedHashMap<String, MutableList<EmbeddingInput>> {
+        val pending = linkedMapOf<String, MutableList<EmbeddingInput>>()
+        inputsByVersion.values.flatten().forEach { input ->
+            val contentHash = input.contentHash.ifBlank {
+                sha256Hex(input.text.toByteArray(Charsets.UTF_8))
+            }
+            val existing = storedEmbedding(input.chunkId, spaceId)
+            if (existing != null) {
+                check(existing.contentHash == contentHash) {
+                    "embedding content hash changed for chunk ${input.chunkId}"
+                }
+                validateEmbeddingBytes(existing.bytes, dimension)
+                return@forEach
+            }
+            val cached = cachedEmbedding(spaceId, contentHash)
+            if (cached != null) {
+                validateEmbeddingBytes(cached.bytes, dimension)
+                insertEmbedding(input.chunkId, spaceId, cached.bytes, contentHash)
+            } else {
+                pending.getOrPut(contentHash) { mutableListOf() }
+                    .add(input.copy(contentHash = contentHash))
+            }
+        }
+        return pending
+    }
+
+    private fun markEmbeddingOperationUnknown(operation: EmbeddingOperationRecord): EmbeddingOperationRecord {
+        val updated = markEmbeddingOperation(
+            operation.token,
+            state = "UNKNOWN",
+            error = API_EMBEDDING_UNKNOWN_ERROR,
+            onlyIfActive = true,
+        )
+        if (!operation.jobId.isNullOrBlank()) {
+            synchronized(indexLock) {
+                db.transaction {
+                    db.execute(
+                        "UPDATE import_jobs SET stage = ?, error = ?, updated_at = ? WHERE id = ? AND stage <> ?",
+                        listOf(
+                            ImportStage.FAILED.name,
+                            API_EMBEDDING_UNKNOWN_ERROR,
+                            Utc.nowIso(),
+                            operation.jobId,
+                            ImportStage.CANCELLED.name,
+                        ),
+                    )
+                }
+            }
+        }
+        if (operation.kind == "REBIND") {
+            ApiEmbeddingBinding.parseSpaceId(operation.spaceId)?.let {
+                persistRebindUnknownGate(operation.knowledgeBaseId, it)
+            }
+        }
+        return updated
+    }
+
+    private fun dispatchEmbeddingOperation(operation: EmbeddingOperationRecord): EmbeddingOperationRecord {
+        return synchronized(indexLock) {
+            db.transaction {
+                val current = operationByToken(operation.token) ?: error("embedding operation not found")
+                check(current.state == "PREPARED") {
+                    when (current.state) {
+                        "UNKNOWN" -> API_EMBEDDING_UNKNOWN_ERROR
+                        "CANCELLED" -> "API embedding operation was cancelled"
+                        else -> "embedding operation is not dispatchable in state ${current.state}"
+                    }
+                }
+                check(!current.cancelRequested) { "API embedding operation was cancelled before dispatch" }
+                db.execute(
+                    "UPDATE embedding_operations SET state = 'DISPATCHED', updated_at = ? WHERE token = ? AND state = 'PREPARED' AND cancel_requested = 0",
+                    listOf(Utc.nowIso(), operation.token),
+                )
+                operationByToken(operation.token) ?: error("embedding operation disappeared")
+            }
+        }
+    }
+
+    /**
+     * Recheck the operation's local safety boundary immediately before the
+     * provider call.  Preparation and dispatch are deliberately separate so a
+     * concurrent cancel/delete/revoke can win without ever sending text.  No
+     * provider code is called from this transaction.
+     */
+    private fun verifyEmbeddingOperationBeforeProvider(operation: EmbeddingOperationRecord): EmbeddingOperationRecord =
+        synchronized(indexLock) {
+            db.transaction {
+                val current = operationByToken(operation.token) ?: error("embedding operation not found")
+                check(current.state == "DISPATCHED") {
+                    when (current.state) {
+                        "UNKNOWN" -> API_EMBEDDING_UNKNOWN_ERROR
+                        "CANCELLED" -> "API embedding operation was cancelled"
+                        else -> "embedding operation is not dispatched in state ${current.state}"
+                    }
+                }
+                check(!current.cancelRequested) { "API embedding operation was cancelled before provider request" }
+                val kb = db.query(
+                    "SELECT embedding_space_id, deleted_at FROM knowledge_bases WHERE id = ?",
+                    listOf(current.knowledgeBaseId),
+                ).singleOrNull() ?: error("knowledge base not found")
+                check(kb.string("deleted_at").isBlank()) { "knowledge base deleted before provider request" }
+                val currentSpace = kb.string("embedding_space_id")
+                if (current.kind == "REBIND") {
+                    check(currentSpace != current.spaceId) {
+                        "knowledge base rebind target changed before provider request"
+                    }
+                } else {
+                    check(currentSpace == current.spaceId) {
+                        "knowledge base binding changed before provider request"
+                    }
+                }
+                check(current.bindingFingerprint == current.spaceId) {
+                    "embedding operation binding fingerprint changed before provider request"
+                }
+                val sourceSpace = if (current.kind == "REBIND") currentSpace else current.spaceId
+                check(
+                    operationManifestHash(
+                        kind = current.kind,
+                        knowledgeBaseId = current.knowledgeBaseId,
+                        targetSpace = current.spaceId,
+                        sourceSpace = sourceSpace,
+                        inputsByVersion = operationInputsByVersion(current),
+                        activePointers = activeDocumentPointers(current.knowledgeBaseId),
+                    ) == current.inputManifestHash,
+                ) {
+                    "knowledge base inputs or active document pointers changed before provider request"
+                }
+                current.documentId?.let { documentId ->
+                    val document = db.query(
+                        "SELECT kb_id, deleted_at FROM documents WHERE id = ?",
+                        listOf(documentId),
+                    ).singleOrNull() ?: error("document not found before provider request")
+                    check(document.string("kb_id") == current.knowledgeBaseId && document.string("deleted_at").isBlank()) {
+                        "document was deleted or moved before provider request"
+                    }
+                }
+                current.jobId?.let { jobId ->
+                    val job = db.query(
+                        "SELECT embedding_is_api, embedding_consent, stage FROM import_jobs WHERE id = ?",
+                        listOf(jobId),
+                    ).singleOrNull() ?: error("import job not found before provider request")
+                    check(job.boolean("embedding_is_api") && job.boolean("embedding_consent")) {
+                        "API embedding consent was revoked before provider request"
+                    }
+                    check(job.string("stage") != ImportStage.CANCELLED.name) {
+                        "API embedding job was cancelled before provider request"
+                    }
+                }
+                current
+            }
+        }
+
+    private suspend fun executeEmbeddingOperation(
+        operation: EmbeddingOperationRecord,
+        selectedEmbedder: TextEmbedder,
+    ): EmbeddingOperationRecord {
+        val inputsByVersion = try {
+            operationInputsByVersion(operation)
+        } catch (failure: Throwable) {
+            // No provider request has been dispatched yet.  Keep this local
+            // preparation failure distinct from an uncertain external result.
+            markEmbeddingOperation(operation.token, "FAILED", API_EMBEDDING_FAILED_ERROR, onlyIfActive = true)
+            throw failure
+        }
+        val pending = try {
+            synchronized(indexLock) {
+                db.transaction {
+                    stageEmbeddingCacheHits(inputsByVersion, operation.spaceId, selectedEmbedder.dimension)
+                }
+            }
+        } catch (failure: Throwable) {
+            markEmbeddingOperation(operation.token, "FAILED", API_EMBEDDING_FAILED_ERROR, onlyIfActive = true)
+            throw failure
+        }
+        if (pending.isEmpty()) {
+            val current = operationByToken(operation.token) ?: error("embedding operation not found")
+            if (current.state == "PREPARED") {
+                return markEmbeddingOperation(current.token, "CACHE_READY", onlyIfActive = true)
+            }
+            return current
+        }
+        val dispatched = dispatchEmbeddingOperation(operation)
+        try {
+            val readyToSend = verifyEmbeddingOperationBeforeProvider(dispatched)
+            val representatives = pending.values.map { it.first() }
+            val vectors = when (selectedEmbedder) {
+                is CancellableBatchTextEmbedder ->
+                    selectedEmbedder.embedBatchCancellable(representatives.map { it.text })
+                is BatchTextEmbedder -> selectedEmbedder.embedBatch(representatives.map { it.text })
+                else -> representatives.map { selectedEmbedder.embed(it.text) }
+            }
+            check(vectors.size == representatives.size) {
+                "embedding backend returned ${vectors.size} vectors for ${representatives.size} cache misses"
+            }
+            val bytesByHash = pending.keys.zip(vectors).associate { (contentHash, vector) ->
+                validateEmbeddingVector(vector, selectedEmbedder.dimension)
+                contentHash to floatsToBytes(vector)
+            }
+            // This is the independent successful-cache commit.  It is kept
+            // separate from generation publication so a later SQL/JNI failure
+            // cannot make the provider request run again.
+            synchronized(indexLock) {
+                db.transaction {
+                    val current = operationByToken(dispatched.token) ?: error("embedding operation not found")
+                    check(current.state == "DISPATCHED" || current.state == "UNKNOWN") {
+                        "embedding operation changed while provider request was in flight"
+                    }
+                    pending.forEach { (contentHash, inputs) ->
+                        val bytes = bytesByHash.getValue(contentHash)
+                        inputs.forEach { input ->
+                            insertEmbedding(input.chunkId, dispatched.spaceId, bytes, contentHash)
+                        }
+                    }
+                    if (current.state == "DISPATCHED" && !current.cancelRequested) {
+                        db.execute(
+                            "UPDATE embedding_operations SET state = 'CACHE_READY', error = '', updated_at = ? WHERE token = ? AND state = 'DISPATCHED' AND cancel_requested = 0",
+                            listOf(Utc.nowIso(), dispatched.token),
+                        )
+                    }
+                }
+            }
+            return operationByToken(readyToSend.token) ?: error("embedding operation disappeared")
+        } catch (cancelled: CancellationException) {
+            markEmbeddingOperationUnknown(dispatched)
+            throw cancelled
+        } catch (interrupted: InterruptedException) {
+            Thread.currentThread().interrupt()
+            markEmbeddingOperationUnknown(dispatched)
+            throw interrupted
+        } catch (failure: Throwable) {
+            // Once DISPATCHED was durably recorded, every subsequent failure
+            // has an uncertain external outcome, including malformed output,
+            // local cache commit errors, and ordinary transport exceptions.
+            // Never classify it as a retryable FAILED operation.
+            markEmbeddingOperationUnknown(dispatched)
+            throw failure
+        }
+    }
+
+    private fun validateOperationCache(operation: EmbeddingOperationRecord, inputsByVersion: LinkedHashMap<String, List<EmbeddingInput>>, dimension: Int) {
+        inputsByVersion.values.flatten().forEach { input ->
+            val expectedHash = input.contentHash.ifBlank {
+                sha256Hex(input.text.toByteArray(Charsets.UTF_8))
+            }
+            val stored = storedEmbedding(input.chunkId, operation.spaceId)
+                ?: error("embedding cache missing for chunk ${input.chunkId}")
+            check(stored.contentHash == expectedHash) {
+                "embedding content hash changed for chunk ${input.chunkId}"
+            }
+            validateEmbeddingBytes(stored.bytes, dimension)
+        }
+    }
+
+    private fun operationDimension(operation: EmbeddingOperationRecord): Int {
+        ApiEmbeddingBinding.parseSpaceId(operation.spaceId)?.dimension?.let { return it }
+        val row = db.query(
+            "SELECT vector_blob FROM embeddings WHERE space_id = ? LIMIT 1",
+            listOf(operation.spaceId),
+        ).singleOrNull() ?: error("API embedding dimension is unavailable")
+        val bytes = embeddingBytes(row)
+        check(bytes.isNotEmpty() && bytes.size % 4 == 0) { "API embedding dimension is unavailable" }
+        return bytes.size / 4
+    }
+
+    private fun currentOperationEmbedder(operation: EmbeddingOperationRecord): TextEmbedder =
+        apiEmbedderForSpace(operation.spaceId)
+            ?: CachedQueryEmbedder(operation.spaceId, operationDimension(operation))
+
+    /**
+     * Finalize one operation in a short CAS transaction.  Provider calls have
+     * already completed and all successful vectors are durable at this point.
+     */
+    private fun finalizeEmbeddingOperation(token: String): String {
+        val initial = operationByToken(token) ?: error("embedding operation not found")
+        val selectedEmbedder = currentOperationEmbedder(initial)
+        return try {
+            synchronized(indexLock) {
+                db.transaction {
+                    val operation = operationByToken(token) ?: error("embedding operation not found")
+                    if (operation.state != "CACHE_READY") {
+                        when (operation.state) {
+                            "UNKNOWN" -> throw EmbeddingUnknownOutcomeException()
+                            "CANCELLED" -> error("API embedding operation was cancelled")
+                            else -> error("embedding operation is not ready to publish: ${operation.state}")
+                        }
+                    }
+                    if (operation.cancelRequested) error("API embedding operation was cancelled")
+                    check(operation.bindingFingerprint == operation.spaceId) {
+                        "embedding operation binding fingerprint changed"
+                    }
+                    val kb = db.query(
+                        "SELECT embedding_space_id, deleted_at FROM knowledge_bases WHERE id = ?",
+                        listOf(operation.knowledgeBaseId),
+                    ).singleOrNull() ?: throw OperationAborted("knowledge base was removed while embedding")
+                    val currentSpace = kb.string("embedding_space_id")
+                    if (kb.string("deleted_at").isNotBlank()) {
+                        throw OperationAborted("knowledge base was deleted while embedding")
+                    }
+                    val expectedConsentFingerprint = when (operation.kind) {
+                        "IMPORT" -> apiConsentFingerprint(
+                            "IMPORT",
+                            operation.knowledgeBaseId,
+                            operation.spaceId,
+                            operation.jobId,
+                        )
+                        "REBUILD" -> apiConsentFingerprint("REBUILD", operation.knowledgeBaseId, operation.spaceId)
+                        "REBIND" -> apiConsentFingerprint(
+                            "REBIND",
+                            operation.knowledgeBaseId,
+                            operation.spaceId,
+                            sourceSpace = currentSpace,
+                        )
+                        else -> operation.consentFingerprint
+                    }
+                    if (operation.consentFingerprint != expectedConsentFingerprint) {
+                        throw OperationAborted("API embedding consent changed while embedding")
+                    }
+                    val expectedSourceSpace = if (operation.kind == "REBIND") currentSpace else operation.spaceId
+                    val inputsByVersion = operationInputsByVersion(operation)
+                    val manifest = operationManifestHash(
+                        kind = operation.kind,
+                        knowledgeBaseId = operation.knowledgeBaseId,
+                        targetSpace = operation.spaceId,
+                        sourceSpace = expectedSourceSpace,
+                        inputsByVersion = inputsByVersion,
+                        activePointers = activeDocumentPointers(operation.knowledgeBaseId),
+                    )
+                    if (manifest != operation.inputManifestHash) {
+                        throw OperationAborted("knowledge base inputs or active document pointer changed while embedding")
+                    }
+                    if (operation.kind == "REBIND") {
+                        if (currentSpace == operation.spaceId) {
+                            throw OperationAborted("API rebind target was changed by another operation")
+                        }
+                    } else if (currentSpace != operation.spaceId) {
+                        throw OperationAborted("knowledge base embedding binding changed while embedding")
+                    }
+                    if (operation.kind == "REBUILD" && !hasApiEmbeddingConsent(operation.knowledgeBaseId)) {
+                        throw OperationAborted("API embedding consent is no longer present")
+                    }
+                    operation.jobId?.let { jobId ->
+                        val job = db.query(
+                            "SELECT embedding_is_api, embedding_consent, stage FROM import_jobs WHERE id = ?",
+                            listOf(jobId),
+                        ).singleOrNull() ?: throw OperationAborted("import job was removed while embedding")
+                        if (!job.boolean("embedding_is_api") || !job.boolean("embedding_consent") ||
+                            job.string("stage") == ImportStage.CANCELLED.name
+                        ) {
+                            throw OperationAborted("import consent or cancellation changed while embedding")
+                        }
+                    }
+                    validateOperationCache(operation, inputsByVersion, selectedEmbedder.dimension)
+                    when (operation.kind) {
+                        "IMPORT" -> {
+                            val versionId = operation.documentVersionId ?: error("import operation has no document version")
+                            val documentId = operation.documentId ?: error("import operation has no document")
+                            val version = db.query(
+                                "SELECT status, document_id FROM document_versions WHERE id = ?",
+                                listOf(versionId),
+                            ).singleOrNull() ?: throw OperationAborted("staging document version was removed")
+                            if (version.string("document_id") != documentId) {
+                                throw OperationAborted("import document version does not match document")
+                            }
+                            if (version.string("status") != "STAGING" && version.string("status") != "READY") {
+                                throw OperationAborted("import document version is not publishable")
+                            }
+                            val activeBefore = db.query(
+                                "SELECT active_version_id, deleted_at FROM documents WHERE id = ? AND kb_id = ?",
+                                listOf(documentId, operation.knowledgeBaseId),
+                            ).singleOrNull() ?: throw OperationAborted("document was removed while embedding")
+                            if (activeBefore.string("deleted_at").isNotBlank()) {
+                                throw OperationAborted("document was deleted while embedding")
+                            }
+                            db.execute("UPDATE assets SET document_version_id = ? WHERE document_id = ? AND (document_version_id IS NULL OR document_version_id = '')", listOf(versionId, documentId))
+                            db.execute("UPDATE document_versions SET status = 'READY' WHERE id = ?", listOf(versionId))
+                            val where = if (activeBefore.string("active_version_id").isBlank()) {
+                                "active_version_id IS NULL"
+                            } else {
+                                "active_version_id = ?"
+                            }
+                            val args = if (activeBefore.string("active_version_id").isBlank()) {
+                                listOf<Any?>(versionId, documentId)
+                            } else {
+                                listOf<Any?>(versionId, documentId, activeBefore.string("active_version_id"))
+                            }
+                            db.execute(
+                                "UPDATE documents SET active_version_id = ?, deleted_at = NULL WHERE id = ? AND $where",
+                                args,
+                            )
+                            val after = db.query("SELECT active_version_id FROM documents WHERE id = ?", listOf(documentId)).singleOrNull()
+                            if (after?.string("active_version_id") != versionId) {
+                                throw OperationAborted("document active pointer changed while publishing")
+                            }
+                        }
+                        "REBIND" -> {
+                            db.execute(
+                                "UPDATE knowledge_bases SET embedding_space_id = ?, active_generation_id = NULL WHERE id = ? AND embedding_space_id = ?",
+                                listOf(operation.spaceId, operation.knowledgeBaseId, currentSpace),
+                            )
+                            val after = db.query("SELECT embedding_space_id FROM knowledge_bases WHERE id = ?", listOf(operation.knowledgeBaseId)).singleOrNull()
+                            check(after?.string("embedding_space_id") == operation.spaceId) { "knowledge base binding changed while rebinding" }
+                            db.execute(
+                                "UPDATE import_jobs SET embedding_is_api = 1, embedding_consent = 1, updated_at = ? WHERE kb_id = ? AND stage = ?",
+                                listOf(Utc.nowIso(), operation.knowledgeBaseId, ImportStage.READY.name),
+                            )
+                            db.execute(
+                                "DELETE FROM import_jobs WHERE kb_id = ? AND stage = ? AND display_name GLOB ?",
+                                listOf(operation.knowledgeBaseId, ImportStage.FAILED.name, "$UNKNOWN_REBIND_PREFIX*"),
+                            )
+                        }
+                        "REBUILD" -> Unit
+                        else -> error("unknown embedding operation kind ${operation.kind}")
+                    }
+                    val generation = buildGenerationFromCachedUnlocked(
+                        operation.knowledgeBaseId,
+                        selectedEmbedder,
+                    )
+                    operation.jobId?.let { jobId ->
+                        db.execute(
+                            "UPDATE import_jobs SET stage = ?, error = NULL, updated_at = ? WHERE id = ? AND stage <> ?",
+                            listOf(ImportStage.READY.name, Utc.nowIso(), jobId, ImportStage.CANCELLED.name),
+                        )
+                    }
+                    db.execute(
+                        "UPDATE embedding_operations SET state = 'PUBLISHED', error = '', updated_at = ? WHERE token = ? AND state = 'CACHE_READY'",
+                        listOf(Utc.nowIso(), token),
+                    )
+                    generation
+                }
+            }
+        } catch (aborted: OperationAborted) {
+            markEmbeddingOperation(token, "ABORTED", aborted.message ?: "embedding operation aborted", onlyIfActive = true)
+            throw aborted
+        }
+    }
+
+    private suspend fun publishChunksCancellable(
+        job: ImportJob,
+        bytes: ByteArray,
+        textChunks: List<IndexedChunk>,
+        fingerprint: String,
+        assets: List<ExtractedAsset> = emptyList(),
+    ) {
+        if (!job.embeddingConsent) {
+            advanceThrough(job, ImportStage.AWAITING_EMBEDDING_CONSENT)
+            if (job.stage == ImportStage.AWAITING_EMBEDDING_CONSENT) {
+                job.error = "API embedding was not approved. No text left the device."
+            }
+            return
+        }
+        val selectedEmbedder = embedderForJob(job)
+        check(selectedEmbedder.spaceId != embedder.spaceId) {
+            "API suspending path cannot use the local embedding space"
+        }
+        val chunks = textChunks.ifEmpty {
+            fail(job, "The file is empty")
+            return
+        }
+        val versionId = EntityId.random().value
+        val contentHash = sha256Hex(bytes)
+        val operation = synchronized(indexLock) {
+            db.transaction {
+                check(activeEmbeddingOperation(job.knowledgeBaseId) == null) {
+                    "another embedding operation is already active for this knowledge base"
+                }
+                val currentSpace = db.query(
+                    "SELECT embedding_space_id, deleted_at FROM knowledge_bases WHERE id = ?",
+                    listOf(job.knowledgeBaseId),
+                ).singleOrNull() ?: error("knowledge base not found")
+                check(currentSpace.string("deleted_at").isBlank()) { "knowledge base deleted" }
+                check(currentSpace.string("embedding_space_id") == selectedEmbedder.spaceId) {
+                    "knowledge base binding changed before API import"
+                }
+                val activePointers = activeDocumentPointers(job.knowledgeBaseId)
+                db.execute(
+                    "INSERT INTO document_versions(id,document_id,parser_fingerprint,content_hash,status,created_at) VALUES (?,?,?,?,?,?)",
+                    listOf(versionId, job.documentId, fingerprint, contentHash, "STAGING", Utc.nowIso()),
+                )
+                persistChunks(versionId, chunks)
+                val inputsByVersion = linkedMapOf(versionId to inputsForVersion(versionId))
+                val manifest = operationManifestHash(
+                    kind = "IMPORT",
+                    knowledgeBaseId = job.knowledgeBaseId,
+                    targetSpace = selectedEmbedder.spaceId,
+                    sourceSpace = selectedEmbedder.spaceId,
+                    inputsByVersion = inputsByVersion,
+                    activePointers = activePointers,
+                )
+                insertEmbeddingOperation(
+                    kind = "IMPORT",
+                    knowledgeBaseId = job.knowledgeBaseId,
+                    jobId = job.id,
+                    documentId = job.documentId,
+                    documentVersionId = versionId,
+                    spaceId = selectedEmbedder.spaceId,
+                    inputManifestHash = manifest,
+                    consentFingerprint = apiConsentFingerprint("IMPORT", job.knowledgeBaseId, selectedEmbedder.spaceId, job.id),
+                )
+            }
+        }
+        try {
+            executeEmbeddingOperation(operation, selectedEmbedder)
+            finalizeEmbeddingOperation(operation.token)
+            advanceThrough(job, ImportStage.READY)
+            job.error = null
+        } catch (cancelled: CancellationException) {
+            persistApiCancellation(job, displayNameForJob(job.id))
+            throw cancelled
+        } catch (interrupted: InterruptedException) {
+            Thread.currentThread().interrupt()
+            persistApiCancellation(job, displayNameForJob(job.id))
+            throw interrupted
+        } catch (failure: Throwable) {
+            val operationState = latestEmbeddingOperationForJob(job.id)?.state
+            if (isUnknownEmbeddingFailure(failure) || operationState == "UNKNOWN") {
+                job.stage = ImportStage.FAILED
+                job.error = API_EMBEDDING_UNKNOWN_ERROR
+            } else if (operationState == "CANCELLED") {
+                job.stage = ImportStage.CANCELLED
+                job.error = "Cancelled by user"
+            } else {
+                fail(job, API_EMBEDDING_FAILED_ERROR)
+            }
+        }
+    }
+
     private fun publishChunks(
         job: ImportJob,
         bytes: ByteArray,
@@ -784,6 +2735,8 @@ class KnowledgeRepository(
             }
             return
         }
+        val selectedEmbedder = embedderForJob(job)
+        ensureEmbeddingSpace(job.knowledgeBaseId, selectedEmbedder.spaceId)
         val chunks = textChunks.ifEmpty {
             fail(job, "The file is empty")
             return
@@ -797,11 +2750,14 @@ class KnowledgeRepository(
                     listOf(versionId, job.documentId, fingerprint, contentHash, "STAGING", Utc.nowIso()),
                 )
                 persistChunks(versionId, chunks)
-                persistEmbeddings(versionId)
+                persistEmbeddings(versionId, selectedEmbedder)
                 db.execute("UPDATE assets SET document_version_id = ? WHERE document_id = ? AND (document_version_id IS NULL OR document_version_id = '')", listOf(versionId, job.documentId))
                 db.execute("UPDATE document_versions SET status = ? WHERE id = ?", listOf("READY", versionId))
                 db.execute("UPDATE documents SET active_version_id = ?, deleted_at = NULL WHERE id = ?", listOf(versionId, job.documentId))
-                rebuildUnlocked(job.knowledgeBaseId)
+                rebuildUnlocked(
+                    job.knowledgeBaseId,
+                    apiConsentGrantedForOperation = job.embeddingIsApi && job.embeddingConsent,
+                )
             }
         }
         advanceThrough(job, ImportStage.READY)
@@ -836,15 +2792,137 @@ class KnowledgeRepository(
         }
     }
 
-    private fun persistEmbeddings(documentVersionId: String) {
-        val rows = db.query("SELECT id, ordinal, text FROM chunks WHERE document_version_id = ? ORDER BY ordinal", listOf(documentVersionId))
-        rows.forEach { row ->
-            val vector = embedder.embed(row.string("text"))
-            check(vector.size == embedder.dimension) { "embedding dimension mismatch" }
-            db.execute(
-                "INSERT OR REPLACE INTO embeddings(chunk_id,space_id,vector_blob,content_hash) VALUES (?,?,?,?)",
-                listOf(row.string("id"), embedder.spaceId, floatsToBytes(vector), row.string("id")),
+    private fun persistEmbeddings(documentVersionId: String, selectedEmbedder: TextEmbedder) {
+        val inputs = db.query(
+            "SELECT id, ordinal, text, content_hash FROM chunks WHERE document_version_id = ? ORDER BY ordinal",
+            listOf(documentVersionId),
+        ).map { row ->
+            EmbeddingInput(
+                chunkId = row.string("id"),
+                text = row.string("text"),
+                contentHash = row.string("content_hash").ifBlank {
+                    sha256Hex(row.string("text").toByteArray(Charsets.UTF_8))
+                },
             )
+        }
+        ensureEmbeddings(inputs, selectedEmbedder)
+    }
+
+    /**
+     * Ensure immutable successful rows for all [inputs].  Cache hits are
+     * copied by content hash into the new chunk key; only cache misses call
+     * the selected backend.  Duplicate texts within one version are batched
+     * once as well.
+     */
+    private fun ensureEmbeddings(inputs: List<EmbeddingInput>, selectedEmbedder: TextEmbedder) {
+        if (inputs.isEmpty()) return
+        val pending = linkedMapOf<String, MutableList<EmbeddingInput>>()
+        inputs.forEach { input ->
+            val expectedHash = input.contentHash.ifBlank {
+                sha256Hex(input.text.toByteArray(Charsets.UTF_8))
+            }
+            val existing = storedEmbedding(input.chunkId, selectedEmbedder.spaceId)
+            if (existing != null) {
+                check(existing.contentHash == expectedHash) {
+                    "embedding content hash changed for chunk ${input.chunkId}"
+                }
+                validateEmbeddingBytes(existing.bytes, selectedEmbedder.dimension)
+                return@forEach
+            }
+            val cached = cachedEmbedding(selectedEmbedder.spaceId, expectedHash)
+            if (cached != null) {
+                validateEmbeddingBytes(cached.bytes, selectedEmbedder.dimension)
+                insertEmbedding(input.chunkId, selectedEmbedder.spaceId, cached.bytes, expectedHash)
+            } else {
+                pending.getOrPut(expectedHash) { mutableListOf() }.add(input.copy(contentHash = expectedHash))
+            }
+        }
+        if (pending.isEmpty()) return
+
+        val representatives = pending.values.map { it.first() }
+        val vectors = if (selectedEmbedder is BatchTextEmbedder) {
+            selectedEmbedder.embedBatch(representatives.map { it.text })
+        } else {
+            representatives.map { selectedEmbedder.embed(it.text) }
+        }
+        check(vectors.size == representatives.size) {
+            "embedding backend returned ${vectors.size} vectors for ${representatives.size} cache misses"
+        }
+        pending.entries.zip(vectors).forEach { (entry, vector) ->
+            val contentHash = entry.key
+            validateEmbeddingVector(vector, selectedEmbedder.dimension)
+            val bytes = floatsToBytes(vector)
+            entry.value.forEach { input ->
+                insertEmbedding(input.chunkId, selectedEmbedder.spaceId, bytes, contentHash)
+            }
+        }
+    }
+
+    private data class StoredEmbedding(
+        val contentHash: String,
+        val bytes: ByteArray,
+    )
+
+    private fun storedEmbedding(chunkId: String, spaceId: String): StoredEmbedding? =
+        db.query(
+            "SELECT content_hash, vector_blob FROM embeddings WHERE chunk_id = ? AND space_id = ?",
+            listOf(chunkId, spaceId),
+        ).singleOrNull()?.let { row -> storedEmbedding(row) }
+
+    private fun cachedEmbedding(spaceId: String, contentHash: String): StoredEmbedding? =
+        db.query(
+            """
+            SELECT e.content_hash, e.vector_blob
+            FROM embeddings e
+            JOIN chunks c ON c.id = e.chunk_id
+            WHERE e.space_id = ? AND e.content_hash = ? AND c.content_hash = ?
+            LIMIT 1
+            """.trimIndent(),
+            listOf(spaceId, contentHash, contentHash),
+        ).singleOrNull()?.let { row -> storedEmbedding(row) }
+
+    private fun storedEmbedding(row: SqlRow): StoredEmbedding =
+        StoredEmbedding(row.string("content_hash"), embeddingBytes(row))
+
+    private fun insertEmbedding(chunkId: String, spaceId: String, bytes: ByteArray, contentHash: String) {
+        val existing = storedEmbedding(chunkId, spaceId)
+        if (existing != null) {
+            check(existing.contentHash == contentHash) {
+                "embedding content hash changed for chunk $chunkId"
+            }
+            check(existing.bytes.contentEquals(bytes)) {
+                "embedding vector changed for chunk $chunkId"
+            }
+            return
+        }
+        db.execute(
+            "INSERT INTO embeddings(chunk_id,space_id,vector_blob,content_hash) VALUES (?,?,?,?)",
+            listOf(chunkId, spaceId, bytes.copyOf(), contentHash),
+        )
+        val stored = storedEmbedding(chunkId, spaceId) ?: error("embedding missing after insert")
+        check(stored.contentHash == contentHash && stored.bytes.contentEquals(bytes)) {
+            "embedding changed during insert for chunk $chunkId"
+        }
+    }
+
+    private fun validateEmbeddingVector(vector: FloatArray, dimension: Int) {
+        check(vector.size == dimension) { "embedding dimension mismatch" }
+        check(vector.all { it.isFinite() }) { "embedding contains a non-finite value" }
+    }
+
+    private fun validateEmbeddingBytes(bytes: ByteArray, dimension: Int) {
+        check(bytes.size == dimension * 4) { "embedding byte length mismatch" }
+        check(bytesToFloats(bytes, dimension).all { it.isFinite() }) {
+            "embedding cache contains a non-finite value"
+        }
+    }
+
+    private fun embeddingBytes(row: SqlRow): ByteArray {
+        val blob = row.columns["vector_blob"]
+        return when (blob) {
+            is ByteArray -> blob.copyOf()
+            is java.sql.Blob -> blob.getBytes(1, blob.length().toInt())
+            else -> error("embedding blob unreadable")
         }
     }
 
@@ -860,6 +2938,7 @@ class KnowledgeRepository(
                 JOIN generation_members ON generation_members.chunk_id = chunks.id AND generation_members.generation_id = ?
                 JOIN documents ON documents.active_version_id = chunks.document_version_id
                 WHERE documents.kb_id = ? AND documents.deleted_at IS NULL AND chunks_fts MATCH ?
+                ORDER BY bm25(chunks_fts) ASC, chunks.id ASC
                 LIMIT ?
                 """.trimIndent(),
                 listOf(generation, kbId, quoteFts(tokenized.ifBlank { query }), topK),
@@ -874,6 +2953,7 @@ class KnowledgeRepository(
                 JOIN generation_members ON generation_members.chunk_id = chunks.id AND generation_members.generation_id = ?
                 JOIN documents ON documents.active_version_id = chunks.document_version_id
                 WHERE documents.kb_id = ? AND documents.deleted_at IS NULL AND chunks.text LIKE ?
+                ORDER BY chunks.id ASC
                 LIMIT ?
                 """.trimIndent(),
                 listOf(generation, kbId, "%$query%", topK),
@@ -894,9 +2974,18 @@ class KnowledgeRepository(
         }
     }
 
-    private fun vectorHits(kbId: String, query: String, topK: Int, generation: String): List<SearchHit> {
-        val queryVec = embedder.embed(query)
-        val index = CosineIndex(embedder.dimension)
+    private fun vectorHits(
+        kbId: String,
+        query: String,
+        topK: Int,
+        generation: String,
+        selectedEmbedder: TextEmbedder,
+        queryVector: FloatArray? = null,
+        onQueryVectorReady: ((FloatArray) -> Unit)? = null,
+    ): List<SearchHit> {
+        val queryVec = queryVector?.copyOf() ?: selectedEmbedder.embed(query)
+        validateEmbeddingVector(queryVec, selectedEmbedder.dimension)
+        onQueryVectorReady?.invoke(queryVec.copyOf())
         val members = db.query(
             """
             SELECT embeddings.chunk_id AS chunk_id, embeddings.vector_blob AS vector_blob, chunks.text AS text,
@@ -911,6 +3000,7 @@ class KnowledgeRepository(
             listOf(generation, kbId),
         )
         val byId = linkedMapOf<String, SearchHit>()
+        val vectors = mutableListOf<Pair<String, FloatArray>>()
         members.forEach { row ->
             val blob = row.columns["vector_blob"]
             val bytes = when (blob) {
@@ -918,8 +3008,8 @@ class KnowledgeRepository(
                 is java.sql.Blob -> blob.getBytes(1, blob.length().toInt())
                 else -> return@forEach
             }
-            if (bytes.size != embedder.dimension * 4) return@forEach
-            index.add(row.string("chunk_id"), bytesToFloats(bytes, embedder.dimension))
+            if (bytes.size != selectedEmbedder.dimension * 4) return@forEach
+            vectors += row.string("chunk_id") to bytesToFloats(bytes, selectedEmbedder.dimension)
             byId[row.string("chunk_id")] = SearchHit(
                 chunkId = row.string("chunk_id"),
                 documentId = row.string("document_id"),
@@ -932,20 +3022,259 @@ class KnowledgeRepository(
                 sourceSpan = row.string("source_span").ifBlank { null },
             )
         }
-        return index.search(queryVec, topK).mapIndexed { indexRank, (id, score) ->
+        if (vectors.isEmpty()) return emptyList()
+        val native = vectorIndexFactory?.create(selectedEmbedder.spaceId, selectedEmbedder.dimension, vectors.size)
+        if (native != null) {
+            return try {
+                vectors.forEach { (id, vector) -> native.add(id, vector) }
+                native.search(queryVec, topK).map { (id, score) -> byId.getValue(id).copy(score = score.toDouble()) }
+            } finally {
+                native.close()
+            }
+        }
+        val fallback = CosineIndex(selectedEmbedder.dimension)
+        vectors.forEach { (id, vector) -> fallback.add(id, vector) }
+        return fallback.search(queryVec, topK).map { (id, score) ->
             byId.getValue(id).copy(score = score.toDouble())
         }
     }
 
     private fun pinnedReadyGeneration(kbId: String): String? {
-        val generationId = db.query("SELECT active_generation_id FROM knowledge_bases WHERE id = ?", listOf(kbId))
-            .singleOrNull()?.string("active_generation_id")?.ifBlank { null } ?: return null
-        val state = db.query("SELECT state FROM index_generations WHERE id = ?", listOf(generationId))
-            .singleOrNull()?.string("state")
-        return if (state == "READY") generationId else null
+        // Keep the active-generation read as one stable snapshot boundary. A
+        // few SqlConnection implementations pin that exact read to the
+        // caller's run, so do not fold the KB-space lookup into this query.
+        val generationId = db.query(
+            "SELECT active_generation_id FROM knowledge_bases WHERE id = ?",
+            listOf(kbId),
+        ).singleOrNull()?.string("active_generation_id")?.ifBlank { return null } ?: return null
+        val kb = db.query(
+            "SELECT embedding_space_id, deleted_at FROM knowledge_bases WHERE id = ?",
+            listOf(kbId),
+        ).singleOrNull() ?: return null
+        if (kb.string("deleted_at").isNotBlank()) return null
+        val kbSpace = kb.string("embedding_space_id")
+        val generation = db.query(
+            "SELECT state, space_id FROM index_generations WHERE id = ?",
+            listOf(generationId),
+        ).singleOrNull() ?: return null
+        return if (generation.string("state") == "READY" &&
+            kbSpace.isNotBlank() &&
+            generation.string("space_id") == kbSpace
+        ) generationId else null
     }
 
-    private fun isPublishedReady(documentId: String, kbId: String): Boolean {
+    private fun hasApiEmbeddingConsent(kbId: String): Boolean {
+        if (db.query(
+                "SELECT id FROM import_jobs WHERE kb_id = ? AND embedding_is_api = 1 AND embedding_consent = 1 LIMIT 1",
+                listOf(kbId),
+            ).isNotEmpty()
+        ) return true
+
+        // An empty KB can have no import_job row to carry the user's explicit
+        // consent.  A published API operation is the durable consent record in
+        // that case, but it is valid only while its complete fixed space is
+        // still the KB's current binding.
+        return db.query(
+            """
+            SELECT o.token
+            FROM embedding_operations o
+            JOIN knowledge_bases k ON k.id = o.kb_id
+            WHERE o.kb_id = ? AND o.state = 'PUBLISHED' AND o.space_id = k.embedding_space_id
+              AND o.consent_fingerprint <> ''
+            LIMIT 1
+            """.trimIndent(),
+            listOf(kbId),
+        ).isNotEmpty()
+    }
+
+    private data class CachedQueryVector(
+        val dimension: Int,
+        val vector: FloatArray,
+    )
+
+    /**
+     * Load one immutable successful API query vector.  A malformed or
+     * dimension-mismatched cache row fails closed instead of silently calling
+     * the provider again.
+     */
+    private fun queryVectorCache(spaceId: String, queryHash: String): CachedQueryVector? {
+        val row = db.query(
+            "SELECT vector_blob, dimension FROM embedding_query_vectors WHERE space_id = ? AND query_hash = ?",
+            listOf(spaceId, queryHash),
+        ).singleOrNull() ?: return null
+        val dimension = row.long("dimension").toInt()
+        check(dimension > 0) { "query embedding cache dimension is invalid" }
+        val boundDimension = ApiEmbeddingBinding.parseSpaceId(spaceId)?.dimension
+        check(boundDimension == null || boundDimension == dimension) {
+            "query embedding cache dimension does not match the bound API space"
+        }
+        val bytes = embeddingBytes(row)
+        validateEmbeddingBytes(bytes, dimension)
+        return CachedQueryVector(dimension, bytesToFloats(bytes, dimension))
+    }
+
+    /**
+     * Persist a successful provider result independently of index publication.
+     * Existing bytes are immutable: an equal retry is idempotent, while any
+     * changed content is rejected rather than replaced.
+     */
+    private fun insertQueryVectorCache(
+        spaceId: String,
+        queryHash: String,
+        vector: FloatArray,
+        dimension: Int,
+    ) = synchronized(indexLock) {
+        requireQueryHash(queryHash)
+        validateEmbeddingVector(vector, dimension)
+        val bytes = floatsToBytes(vector)
+        db.transaction {
+            val existing = db.query(
+                "SELECT vector_blob, dimension FROM embedding_query_vectors WHERE space_id = ? AND query_hash = ?",
+                listOf(spaceId, queryHash),
+            ).singleOrNull()
+            if (existing != null) {
+                val existingDimension = existing.long("dimension").toInt()
+                check(existingDimension == dimension) {
+                    "query embedding cache dimension changed"
+                }
+                val existingBytes = embeddingBytes(existing)
+                check(existingBytes.contentEquals(bytes)) {
+                    "query embedding cache vector changed"
+                }
+                return@transaction
+            }
+            db.execute(
+                "INSERT INTO embedding_query_vectors(space_id,query_hash,vector_blob,dimension,created_at) VALUES (?,?,?,?,?)",
+                listOf(spaceId, queryHash, bytes.copyOf(), dimension, Utc.nowIso()),
+            )
+        }
+    }
+
+    private fun queryHash(query: String): String =
+        sha256Hex(query.toByteArray(Charsets.UTF_8))
+
+    private fun requireQueryHash(queryHash: String) {
+        require(queryHash.matches(QUERY_HASH_PATTERN)) {
+            "queryHash must be a lowercase SHA-256 hex digest"
+        }
+    }
+
+    private fun apiQueryAttempt(row: SqlRow): ApiQueryAttempt = ApiQueryAttempt(
+        knowledgeBaseId = row.string("kb_id"),
+        spaceId = row.string("space_id"),
+        queryHash = row.string("query_hash"),
+        retryAuthorized = row.boolean("retry_authorized"),
+        error = row.string("error"),
+        updatedAt = row.string("updated_at"),
+    )
+
+    /**
+     * Reject an unresolved attempt before constructing a dynamic adapter.  A
+     * pending row is the durable billable-call barrier for this exact
+     * knowledge-base, embedding space, and query hash.
+     */
+    private fun rejectPendingApiQueryBeforeResolver(
+        knowledgeBaseId: String,
+        spaceId: String,
+        queryHash: String,
+    ) {
+        val row = db.query(
+            "SELECT retry_authorized FROM embedding_query_attempts WHERE kb_id = ? AND space_id = ? AND query_hash = ?",
+            listOf(knowledgeBaseId, spaceId, queryHash),
+        ).singleOrNull() ?: return
+        if (!row.boolean("retry_authorized")) {
+            throw ApiQueryUnknownOutcomeException(knowledgeBaseId, spaceId, queryHash)
+        }
+    }
+
+    /**
+     * Insert the first attempt or consume an explicit one-time retry grant.
+     * The transaction serializes the state transition so two callers cannot
+     * reuse one authorization while an adapter call is in flight.
+     */
+    private fun claimApiQueryAttempt(
+        knowledgeBaseId: String,
+        spaceId: String,
+        queryHash: String,
+    ) = synchronized(indexLock) {
+        db.transaction {
+            val row = db.query(
+                "SELECT retry_authorized FROM embedding_query_attempts WHERE kb_id = ? AND space_id = ? AND query_hash = ?",
+                listOf(knowledgeBaseId, spaceId, queryHash),
+            ).singleOrNull()
+            when {
+                row == null -> db.execute(
+                    "INSERT INTO embedding_query_attempts(kb_id,space_id,query_hash,retry_authorized,error,updated_at) VALUES (?,?,?,?,?,?)",
+                    listOf(
+                        knowledgeBaseId,
+                        spaceId,
+                        queryHash,
+                        0,
+                        API_QUERY_PENDING_ERROR,
+                        Utc.nowIso(),
+                    ),
+                )
+
+                !row.boolean("retry_authorized") ->
+                    throw ApiQueryUnknownOutcomeException(knowledgeBaseId, spaceId, queryHash)
+
+                else -> {
+                    db.execute(
+                        "UPDATE embedding_query_attempts SET retry_authorized = 0, error = ?, updated_at = ? WHERE kb_id = ? AND space_id = ? AND query_hash = ? AND retry_authorized = 1",
+                        listOf(
+                            API_QUERY_PENDING_ERROR,
+                            Utc.nowIso(),
+                            knowledgeBaseId,
+                            spaceId,
+                            queryHash,
+                        ),
+                    )
+                    check(
+                        db.query(
+                            "SELECT retry_authorized FROM embedding_query_attempts WHERE kb_id = ? AND space_id = ? AND query_hash = ?",
+                            listOf(knowledgeBaseId, spaceId, queryHash),
+                        ).singleOrNull()?.boolean("retry_authorized") == false,
+                    ) {
+                        "API query retry authorization was not atomically consumed"
+                    }
+                }
+            }
+        }
+    }
+
+    private fun persistApiQueryUnknown(
+        knowledgeBaseId: String,
+        spaceId: String,
+        queryHash: String,
+    ) = synchronized(indexLock) {
+        db.transaction {
+            db.execute(
+                "UPDATE embedding_query_attempts SET retry_authorized = 0, error = ?, updated_at = ? WHERE kb_id = ? AND space_id = ? AND query_hash = ?",
+                listOf(
+                    API_QUERY_UNKNOWN_ERROR,
+                    Utc.nowIso(),
+                    knowledgeBaseId,
+                    spaceId,
+                    queryHash,
+                ),
+            )
+        }
+    }
+
+    private fun clearApiQueryAttempt(
+        knowledgeBaseId: String,
+        spaceId: String,
+        queryHash: String,
+    ) = synchronized(indexLock) {
+        db.transaction {
+            db.execute(
+                "DELETE FROM embedding_query_attempts WHERE kb_id = ? AND space_id = ? AND query_hash = ?",
+                listOf(knowledgeBaseId, spaceId, queryHash),
+            )
+        }
+    }
+
+    private fun isPublishedReady(documentId: String, kbId: String, requestedApi: Boolean = false): Boolean {
         val versionId = db.query("SELECT active_version_id FROM documents WHERE id = ? AND deleted_at IS NULL", listOf(documentId))
             .singleOrNull()?.string("active_version_id")?.ifBlank { null } ?: return false
         val versionReady = db.query("SELECT status FROM document_versions WHERE id = ?", listOf(versionId))
@@ -953,9 +3282,16 @@ class KnowledgeRepository(
         if (!versionReady) return false
         val chunks = db.query("SELECT COUNT(*) AS n FROM chunks WHERE document_version_id = ?", listOf(versionId)).single().long("n")
         if (chunks == 0L) return false
+        val space = db.query("SELECT embedding_space_id FROM knowledge_bases WHERE id = ?", listOf(kbId))
+            .singleOrNull()?.string("embedding_space_id").orEmpty()
+        val selectedEmbedder: TextEmbedder = when {
+            requestedApi -> apiEmbedderForSpace(space) ?: return false
+            space == embedder.spaceId -> embedder
+            else -> return false
+        }
         val embeddings = db.query(
             "SELECT COUNT(*) AS n FROM embeddings e JOIN chunks c ON c.id = e.chunk_id WHERE c.document_version_id = ? AND e.space_id = ?",
-            listOf(versionId, embedder.spaceId),
+            listOf(versionId, selectedEmbedder.spaceId),
         ).single().long("n")
         if (embeddings != chunks) return false
         val pin = pinnedReadyGeneration(kbId) ?: return false
@@ -964,6 +3300,156 @@ class KnowledgeRepository(
             listOf(pin, versionId),
         ).single().long("n")
         return members == chunks
+    }
+
+    private fun embedderForJob(job: ImportJob): TextEmbedder {
+        val space = db.query(
+            "SELECT embedding_space_id FROM knowledge_bases WHERE id = ?",
+            listOf(job.knowledgeBaseId),
+        ).singleOrNull()?.string("embedding_space_id").orEmpty()
+        check(space.isNotBlank()) {
+            "Knowledge base ${job.knowledgeBaseId} has no fixed embedding space; select and bind one explicitly"
+        }
+        return if (job.embeddingIsApi) {
+            apiEmbedderForSpace(space)
+                ?: error("API embedding was selected, but its fixed binding has no matching adapter")
+        } else {
+            check(space == embedder.spaceId) {
+                "Local embedding was selected, but knowledge base ${job.knowledgeBaseId} is bound to API space $space"
+            }
+            embedder
+        }
+    }
+
+    private fun embeddingForSpace(spaceId: String): TextEmbedder? {
+        if (spaceId.isBlank()) return null
+        if (spaceId == embedder.spaceId) return embedder
+        return apiEmbedderForSpace(spaceId)
+    }
+
+    private fun isApiKnowledgeBase(knowledgeBaseId: String): Boolean {
+        val space = db.query(
+            "SELECT embedding_space_id FROM knowledge_bases WHERE id = ? AND deleted_at IS NULL",
+            listOf(knowledgeBaseId),
+        ).singleOrNull()?.string("embedding_space_id").orEmpty()
+        return space.isNotBlank() && space != embedder.spaceId
+    }
+
+    private fun apiEmbedderForSpace(spaceId: String): TextEmbedder? =
+        if (spaceId.isBlank()) {
+            null
+        } else {
+            val binding = ApiEmbeddingBinding.parseSpaceId(spaceId)
+            val static = configuredApiEmbedders.firstOrNull { it.spaceId == spaceId }
+            when {
+                static != null && (binding == null || static.dimension == binding.dimension) -> static
+                binding == null -> null
+                else -> runCatching { apiEmbedderResolver(spaceId) }
+                    .getOrNull()
+                    ?.takeIf { it.spaceId == spaceId && it.dimension == binding.dimension }
+            }
+        }
+
+    private fun unknownRebindGates(knowledgeBaseId: String): List<SqlRow> =
+        db.query(
+            "SELECT id FROM import_jobs WHERE kb_id = ? AND stage = ? AND embedding_is_api = 1 AND display_name GLOB ?",
+            listOf(knowledgeBaseId, ImportStage.FAILED.name, "$UNKNOWN_REBIND_PREFIX*"),
+        )
+
+    private fun persistRebindUnknownGate(
+        knowledgeBaseId: String,
+        binding: ApiEmbeddingBinding,
+    ) {
+        val document = db.query(
+            "SELECT id FROM documents WHERE kb_id = ? AND deleted_at IS NULL ORDER BY id LIMIT 1",
+            listOf(knowledgeBaseId),
+        ).singleOrNull() ?: return
+        val marker = "$UNKNOWN_REBIND_PREFIX${binding.spaceId}"
+        val existingId = db.query(
+            "SELECT id FROM import_jobs WHERE kb_id = ? AND stage = ? AND display_name = ? LIMIT 1",
+            listOf(knowledgeBaseId, ImportStage.FAILED.name, marker),
+        ).firstOrNull()?.string("id")
+        val job = ImportJob(
+            id = existingId ?: EntityId.random().value,
+            knowledgeBaseId = knowledgeBaseId,
+            documentId = document.string("id"),
+            stage = ImportStage.FAILED,
+            embeddingIsApi = true,
+            embeddingConsent = true,
+            error = "UNKNOWN_OUTCOME: API rebind result is uncertain; explicit duplicate-charge acknowledgement is required",
+        )
+        // Keep the marker outside the failed rebind transaction. The message
+        // is intentionally sanitized; only the durable gate matters here.
+        persistJob(job, marker)
+    }
+
+    private fun isUnknownEmbeddingFailure(failure: Throwable): Boolean {
+        var current: Throwable? = failure
+        while (current != null) {
+            if (current is EmbeddingUnknownOutcomeException ||
+                current.message?.contains("UNKNOWN_OUTCOME", ignoreCase = true) == true
+            ) return true
+            current = current.cause
+        }
+        return false
+    }
+
+    private fun isUncertainApiQueryFailure(failure: Throwable): Boolean {
+        if (isUnknownEmbeddingFailure(failure)) return true
+        var current: Throwable? = failure
+        while (current != null) {
+            if (current is java.util.concurrent.CancellationException || current is InterruptedException) return true
+            current = current.cause
+        }
+        return false
+    }
+
+    private fun validateRequestedEmbeddingSelection(kbId: String, api: Boolean, consent: Boolean) {
+        val space = db.query(
+            "SELECT embedding_space_id FROM knowledge_bases WHERE id = ?",
+            listOf(kbId),
+        ).singleOrNull()?.string("embedding_space_id").orEmpty()
+        if (api) {
+            // Before consent we intentionally allow the job to reach the
+            // consent state even when the selected adapter is unavailable;
+            // this performs no network call.  Approval itself must have a
+            // matching, complete binding or it fails closed.
+            if (consent) {
+                check(space.isNotBlank()) { "API embedding requires a fixed KB embedding binding" }
+                check(apiEmbedderForSpace(space) != null) {
+                    "API embedding binding $space is unavailable; no text was sent"
+                }
+            }
+        } else if (space.isNotBlank()) {
+            check(space == embedder.spaceId) {
+                "This knowledge base is bound to API embedding space $space; select API embedding explicitly"
+            }
+        }
+    }
+
+    private fun embedderForKnowledgeBase(kbId: String): TextEmbedder {
+        val space = db.query("SELECT embedding_space_id FROM knowledge_bases WHERE id = ?", listOf(kbId))
+            .singleOrNull()?.string("embedding_space_id").orEmpty()
+        return embeddingForSpace(space)
+            ?: error("Knowledge base $kbId uses embedding space $space, but no matching adapter is configured")
+    }
+
+    private fun ensureEmbeddingSpace(kbId: String, selectedSpace: String) {
+        require(selectedSpace.isNotBlank()) { "selected embedding space must not be blank" }
+        val row = db.query("SELECT embedding_space_id FROM knowledge_bases WHERE id = ?", listOf(kbId)).singleOrNull()
+            ?: error("knowledge base not found")
+        val existing = row.string("embedding_space_id").ifBlank { null }
+        when {
+            existing == null -> db.execute(
+                "UPDATE knowledge_bases SET embedding_space_id = ? WHERE id = ?",
+                listOf(selectedSpace, kbId),
+            )
+            existing == selectedSpace -> Unit
+            else -> error(
+                "Knowledge base $kbId is bound to embedding space $existing; " +
+                    "selected space $selectedSpace must use a separate knowledge base",
+            )
+        }
     }
 
     private fun requireKb(kbId: String) {
@@ -1074,5 +3560,33 @@ class KnowledgeRepository(
     companion object {
         const val DEFAULT_KB_ID = "kb-default"
         const val PARSER_FINGERPRINT = "text-utf8-v1"
+        private const val UNKNOWN_REBIND_PREFIX = "__api_rebind_unknown__:"
+        private const val API_QUERY_PENDING_ERROR =
+            "API_QUERY_PENDING: explicit retry authorization is required"
+        private const val API_QUERY_UNKNOWN_ERROR =
+            "UNKNOWN_OUTCOME: API query embedding result is uncertain; explicit retry authorization is required"
+        private const val API_EMBEDDING_UNKNOWN_ERROR =
+            "UNKNOWN_OUTCOME: API embedding result is uncertain; explicit duplicate-charge acknowledgement is required"
+        private const val API_EMBEDDING_CANCEL_UNKNOWN_ERROR =
+            "UNKNOWN_OUTCOME: API embedding request was cancelled after dispatch; its external outcome is uncertain"
+        private const val API_EMBEDDING_FAILED_ERROR =
+            "API embedding failed; inspect the configured provider and retry only when safe"
+        private const val ACTIVE_GENERATION_POINTER = "\u0000active_generation"
+        private val QUERY_HASH_PATTERN = Regex("[0-9a-f]{64}")
     }
+}
+
+private fun SqlRow.boolean(name: String): Boolean = when (val value = columns[name]) {
+    is Boolean -> value
+    is Number -> value.toLong() != 0L
+    else -> value?.toString()?.let { it == "1" || it.equals("true", ignoreCase = true) } ?: false
+}
+
+/** TextEmbedder facade for a query vector restored from the immutable cache. */
+private class CachedQueryEmbedder(
+    override val spaceId: String,
+    override val dimension: Int,
+) : TextEmbedder {
+    override fun embed(text: String): FloatArray =
+        error("query vector was already restored from the immutable cache")
 }

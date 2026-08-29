@@ -46,6 +46,32 @@ class CitationMapTest {
     }
 }
 
+class VisionBindingTest {
+    @Test
+    fun fingerprintKeepsEndpointPathCaseAndBothRevisions() {
+        val binding = VisionBinding(
+            providerId = "provider",
+            modelId = "vision-model",
+            endpoint = "HTTPS://Host.example/V1/CaseSensitive///",
+            revision = 7,
+            providerRevision = 2,
+            modelRevision = 9,
+        )
+        assertTrue(binding.fingerprint.contains("HTTPS://Host.example/V1/CaseSensitive"))
+        assertFalse(binding.fingerprint.contains("casesensitive"))
+        assertTrue(binding.fingerprint.endsWith("provider:2|model:9"))
+        assertFalse(binding.fingerprint == binding.copy(providerRevision = 3).fingerprint)
+        assertFalse(binding.fingerprint == binding.copy(modelRevision = 10).fingerprint)
+    }
+
+    @Test
+    fun legacyRevisionConstructorBindsBothRevisionFields() {
+        val legacy = VisionBinding("provider", "model", "https://host/v1", 4)
+        val explicit = VisionBinding("provider", "model", "https://host/v1", 4, 4, 4)
+        assertEquals(explicit.fingerprint, legacy.fingerprint)
+    }
+}
+
 class ReciprocalRankFusionTest {
     @Test
     fun prefersItemsHighInBothRankings() {

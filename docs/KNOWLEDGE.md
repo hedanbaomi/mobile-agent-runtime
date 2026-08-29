@@ -3,7 +3,7 @@
 
 # 知识库、多模态和检索契约
 
-状态：M3 文本路径本地 JVM 已落地（schema v4）。M4 在 schema v5 上增加 PDF 文本、DOCX/EPUB 正文/内嵌图、assets/vision_results、Vision 同意与成功缓存、引用页/图定位；M4R 修复后 schema v6 补 `document_version_id`、完整视觉结果（含 tableMarkdown）和显式 UNKNOWN 重试。M4RR 修复后 schema v7 补 `import_jobs.vision_binding_json`（同意/缓存绑定 Provider+endpoint+revision）。独立图片与 Markdown 外链图在无 Vision 时仍等待，不标 READY。向量空间仍是 `local-hash-v1-d32`（不是 ONNX 模型包、不是 USearch JNI）。K06 仅覆盖检查点续跑，不是 300—500 文件设备负载。对应 R05—R08、K01—K08。
+状态（2026-08-29）：Round21 debug 集成已接入经 hash 校验的 MiniLM ONNX 模型包、USearch JNI、PDF 页渲染与 API Embedding 独立授权。API36/x86_64 上 API Embedding 5 项、Knowledge 4 项设备测试通过；schema v10 已包含查询未知门禁、可恢复外发 operation 与查询向量缓存。320 文件/472,363,598 bytes fixture 完成 20 文本 READY、300 图片 WAITING、专名引用、幂等和共享 blob 删除隔离，但未执行真实 Vision、全阶段故障注入及 Android 12—16 前台任务矩阵，明确不是完整 K06 PASS。对应 R05—R08、K01—K08；最新证据见 [knowledge-runtime](evidence/2026-08-29/knowledge-runtime.md)、[knowledge-load](evidence/2026-08-29/knowledge-load.md)、[final-debug-validation](evidence/2026-08-29/final-debug-validation.md) 与 [HANDOFF](../HANDOFF.md)。
 
 ## 1. 数据模型与一致性
 
@@ -20,6 +20,7 @@
 | chunks | id、documentVersionId、ordinal、text、sourceSpan、assetIds、contentHash、chunkerFingerprint；版本+ordinal唯一 |
 | embedding_spaces | id、provider/model pack指纹、dimension、dtype、normalization、distanceMetric、tokenizer/preprocessing版本 |
 | embeddings | chunkId、spaceId、vectorBlob、contentHash；chunkId+spaceId唯一；维度校验；成功向量不可变并可跨索引代际复用 |
+| embedding_query_attempts | kbId、完整 spaceId、queryHash 联合主键；retryAuthorized 默认 false；error、updatedAt；不持久化原始查询文本 |
 | generation_members | generationId+chunkId联合唯一，关联spaceId、documentVersionId和embedding；代际成员关系与向量本体分离 |
 | index_generations | id、kbId、spaceId、manifestHash、state、vectorCount、ftsVersion、createdAt；active指针只指向 READY |
 | import_jobs | id、kbId、documentId、state、stage、parser/vision/embedding指纹、checkpoint、error、updatedAt |
@@ -71,6 +72,16 @@ DOCX/EPUB关联图片与所在段落/章节；独立图片保留原始像素内�
 ## 4. Embedding空间与模型包
 
 默认本地 ONNX Embedding，可选用户 API。两者使用同一 EmbeddingPort，但不能混合向量空间。Model Pack含 manifest、权重、Tokenizer、预处理、池化、归一化、维度、距离度量、许可、来源和SHA-256；加载前校验，文件损坏或算子不支持时拒绝，不自动下载其他模型替代。
+
+### 4.1 API 外发与未知查询的一次性重试
+
+API 空间绑定 Provider ID/revision、规范化 endpoint、ModelProfile ID/revision、实际 modelId、维度和 dataScope。确认页面展示完整目的地、模型与数据范围；Vision 同意不能替代此同意。公开 `rebuildIndex`/`repairIndexes` 在缺少该空间的有效同意时必须于解析 API adapter 前拒绝，不能借重建入口外发文本。
+
+schema v9 的 `embedding_query_attempts` 以 `(kb_id, space_id, SHA-256(query UTF-8))` 标识一次查询。调用外部 embedding 前，以短事务新建 pending 行或消费已批准的一次重试；外部结果未知、取消、中断及进程死亡保留该行。schema v10 的 `embedding_query_vectors` 在得到合法、匹配空间的向量后缓存该向量；只有完整 retrieve 成功才清理尝试门禁与缓存。若 generation/chunk/native index 等本地后半段失败，下次提交复用缓存向量，不再次调用外部 API。相同键在未批准且无合法缓存时不得解析 adapter 或发送请求；不同 KB、空间和查询不共享授权。
+
+仓库接口为 `pendingApiQueries(kbId)` 与 `authorizeApiQueryRetry(kbId, spaceId, queryHash, acknowledgeDuplicateCharge)`。后者只记录一次重试许可，不发请求。知识库页显示查询 hash、完整目标与可能重复收费的风险；用户确认后，须回到聊天主动重新提交同一查询。下一次提交在调用前消费许可；再次未知需再次确认。App/内置工具/Python Broker 将 `ApiQueryUnknownOutcomeException` 映射为 UNKNOWN，停止当前 Run，不静默回退本地模型、不自动重放。数据库不保存查询原文来实现该门禁。
+
+schema v10 的 `embedding_operations` 把 API import/rebuild/rebind 拆为短事务准备、`DISPATCHED` 外部调用和短事务提交。外部调用期间不持有 SQLite 锁；dispatch 前重新核对 KB/document、完整 binding/space、consent、输入 manifest、取消状态和 generation 指针。进入 `DISPATCHED` 后的异常、取消或进程中断一律持久化 UNKNOWN，不自动重放。Round21 设备测试验证了慢路径不再因跨线程 SQLite monitor 死锁，但这不替代完整性能与网络故障验收。
 
 `spaceId` 对完整指纹取稳定哈希。查询必须使用目标知识库 spaceId对应的模型生成 query embedding，不能使用当前聊天模型猜测向量。模型/Tokenizer/维度/池化变化创建新代际，后台重建后切换，不原地覆盖。
 

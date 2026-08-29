@@ -5,6 +5,7 @@ import { spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { verify } from "node:crypto";
 import { createWorker } from "./app.mjs";
+import workerEntry from "./worker.mjs";
 import { SIGN_PREFIX, audienceHash, generateKeyPair, keyPairFromSeed, signPayload } from "./sign.mjs";
 import { MemoryStore } from "./store.mjs";
 import { localeFallback } from "./targeting.mjs";
@@ -519,3 +520,45 @@ assert.deepEqual(localeFallback("zh-Hans-CN"), ["zh-Hans-CN", "zh-CN", "zh-Hans"
 }
 
 console.log("announcement worker protocol tests ok");
+
+{
+  function fakeD1() {
+    return {
+      prepare() {
+        const statement = {
+          bind() {
+            return statement;
+          },
+          async first() {
+            return { id: 1, sequence: 0, content_version: 0, key_id: "", updated_at: "2026-08-28T12:00:00.000Z" };
+          },
+          async all() {
+            return { results: [] };
+          },
+          async run() {
+            return { success: true, meta: { changes: 0 } };
+          },
+        };
+        return statement;
+      },
+      async batch() {
+        return [];
+      },
+    };
+  }
+
+  async function entryStatus(marEnv) {
+    const response = await workerEntry.fetch(
+      new Request(`${BASE}/admin/v1/announcements`, { headers: { "X-Admin-Token": ADMIN } }),
+      { ANNOUNCEMENTS_DB: fakeD1(), MAR_ENV: marEnv, MAR_ADMIN_TOKEN: ADMIN },
+    );
+    return response.status;
+  }
+
+  assert.equal(await entryStatus("local"), 200);
+  assert.equal(await entryStatus(" LoCaL "), 200);
+  assert.equal(await entryStatus(" production "), 503);
+  assert.equal(await entryStatus("prod"), 503);
+  assert.equal(await entryStatus("staging"), 503);
+  console.log("worker environment allowlist rejects typo values and token fallback ok");
+}

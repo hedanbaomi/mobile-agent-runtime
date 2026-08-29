@@ -23,6 +23,28 @@ export function keyPairFromSeed(seed = TEST_ONLY_SEED) {
   return wrap(publicKey, privateKey, "test-only-1");
 }
 
+/**
+ * Import the production Ed25519 private key from a PKCS#8 DER secret. The
+ * base64 value belongs in a Worker secret (`MAR_ANNOUNCE_PRIVATE_KEY_PKCS8`)
+ * and is never written to a response, log, or D1 row.
+ */
+export function keyPairFromPkcs8(base64, keyId) {
+  if (typeof base64 !== "string" || !base64 || !/^[A-Za-z0-9+/]+={0,2}$/.test(base64)) {
+    throw new Error("MAR_ANNOUNCE_PRIVATE_KEY_PKCS8 must be base64 PKCS#8 DER");
+  }
+  const der = Buffer.from(base64, "base64");
+  if (!der.length || der.toString("base64") !== base64.replace(/\s+/g, "")) {
+    throw new Error("MAR_ANNOUNCE_PRIVATE_KEY_PKCS8 is not canonical base64");
+  }
+  const privateKey = createPrivateKey({ key: der, format: "der", type: "pkcs8" });
+  const publicKey = createPublicKey(privateKey);
+  const normalizedKeyId = typeof keyId === "string" ? keyId.trim() : "";
+  if (!normalizedKeyId || normalizedKeyId.length > 128 || !/^[A-Za-z0-9._-]+$/.test(normalizedKeyId)) {
+    throw new Error("MAR_ANNOUNCE_KEY_ID is invalid");
+  }
+  return wrap(publicKey, privateKey, normalizedKeyId);
+}
+
 function wrap(publicKey, privateKey, keyId) {
   return {
     publicKey,

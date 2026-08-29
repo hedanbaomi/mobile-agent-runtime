@@ -20,6 +20,9 @@ dependencies {
 
     implementation(libs.kotlinx.serialization.json)
     implementation(libs.kotlinx.coroutines.core)
+    implementation(libs.okhttp)
+    testImplementation(libs.okhttp.mockwebserver)
+    testImplementation("com.squareup.okhttp3:okhttp-tls:${libs.versions.okhttp.get()}")
     testImplementation(libs.junit.jupiter)
     testImplementation(libs.junit.jupiter.engine)
     testImplementation(libs.kotlinx.coroutines.test)

@@ -7,9 +7,9 @@ import java.io.ByteArrayOutputStream
 import java.util.zip.Inflater
 
 object PdfParser {
-    const val FINGERPRINT = "pdf-text-v3"
+    const val FINGERPRINT = "pdf-text-v4-pdfrenderer"
 
-    fun parse(bytes: ByteArray): ParsedPublication {
+    fun parse(bytes: ByteArray, rasterizer: PdfPageRasterizer? = null): ParsedPublication {
         if (bytes.size < 5 || String(bytes.copyOfRange(0, 5), Charsets.ISO_8859_1) != "%PDF-") {
             error("Not a PDF")
         }
@@ -23,6 +23,27 @@ object PdfParser {
         val pages = mutableListOf<ExtractedPage>()
         var imageOrdinal = 0
         val assignedImages = mutableSetOf<Int>()
+
+        // Text extraction and visual classification happen before rasterizing.
+        // Rendering only the pages that need visual evidence keeps a text-only
+        // PDF cheap and leaves renderer failure visible through PAGE blockers.
+        val pagesNeedingRaster = pageNumbers.mapNotNull { objNum ->
+            val pageObj = objects[objNum] ?: return@mapNotNull null
+            val content = pageContent(objects, pageObj.dict)
+            val decoded = content?.let { decodeStream(it) } ?: ByteArray(0)
+            val pageLatin = String(decoded, Charsets.ISO_8859_1)
+            val text = extractPdfStrings(decoded).joinToString(" ").trim()
+            val hasInline = hasInlineImage(pageLatin)
+            val hasImages = pageXObjects(pageObj.dict).isNotEmpty() || hasInline ||
+                Regex("/Subtype\\s*/Image").containsMatchIn(pageObj.dict)
+            val hasDrawing = hasVectorDrawing(pageLatin)
+            if (hasImages || hasDrawing || text.isEmpty()) pageNumbers.indexOf(objNum) + 1 else null
+        }
+        val renderedPages = rasterizer?.let { renderer ->
+            runCatching { renderer.render(bytes, pagesNeedingRaster.distinct()) }
+                .getOrDefault(emptyList())
+                .associateBy { it.page }
+        }.orEmpty()
         pageNumbers.forEachIndexed { index, objNum ->
             val pageObj = objects[objNum] ?: return@forEachIndexed
             val pageIndex = index + 1
@@ -49,23 +70,44 @@ object PdfParser {
                     surroundingText = text,
                 )
             }
-            extractInlineImages(decoded).forEach { payload ->
-                imageOrdinal += 1
-                assets += ExtractedAsset(
-                    localId = "inline-$imageOrdinal",
-                    kind = "IMAGE",
-                    page = pageIndex,
-                    section = "inline",
-                    bytes = payload,
-                    mediaType = "application/octet-stream",
-                    surroundingText = text,
-                )
+            // Inline image payloads are not necessarily standalone image files
+            // (for example, raw RGB samples).  When a renderer is available the
+            // complete page PNG is the authoritative visual attachment.  Keep
+            // a source payload only when it is already a standalone encoded
+            // image and no complete page image was supplied.  Raw RGB samples
+            // are deliberately left behind as a PAGE blocker instead of being
+            // sent to a Vision backend with a false image MIME type.
+            if (rasterizer == null || renderedPages[pageIndex] == null) {
+                extractInlineImages(decoded).filter { isEncodedImage(it) }.forEach { payload ->
+                    imageOrdinal += 1
+                    assets += ExtractedAsset(
+                        localId = "inline-$imageOrdinal",
+                        kind = "IMAGE",
+                        page = pageIndex,
+                        section = "inline",
+                        bytes = payload,
+                        mediaType = inlineMediaType(payload),
+                        surroundingText = text,
+                    )
+                }
             }
             val hasInline = hasInlineImage(pageLatin)
             val hasImages = xobjects.isNotEmpty() || hasInline || Regex("/Subtype\\s*/Image").containsMatchIn(pageObj.dict)
             val hasDrawing = hasVectorDrawing(pageLatin)
             val needsVision = hasImages || hasDrawing || text.isEmpty()
             pages += ExtractedPage(pageIndex, text, needsVision)
+            val rendered = renderedPages[pageIndex]?.takeIf { it.bytes.isNotEmpty() }
+            if (rendered != null) {
+                assets += ExtractedAsset(
+                    localId = "page-rendered-$pageIndex",
+                    kind = "IMAGE",
+                    page = pageIndex,
+                    section = "pdf-page-$pageIndex",
+                    bytes = rendered.bytes,
+                    mediaType = rendered.mediaType.ifBlank { "image/png" },
+                    surroundingText = text,
+                )
+            }
             if (needsVision && assets.none { it.page == pageIndex && it.kind == "IMAGE" && it.bytes.isNotEmpty() }) {
                 assets += ExtractedAsset(
                     localId = "page-$pageIndex",
@@ -306,6 +348,20 @@ object PdfParser {
             payload.toByteArray(Charsets.ISO_8859_1).takeIf { it.isNotEmpty() }
         }.toList()
     }
+
+    private fun isEncodedImage(payload: ByteArray): Boolean =
+        payload.startsWith(byteArrayOf(0xFF.toByte(), 0xD8.toByte(), 0xFF.toByte())) ||
+            payload.startsWith(byteArrayOf(0x89.toByte(), 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A)) ||
+            payload.startsWith(byteArrayOf(0x47, 0x49, 0x46, 0x38))
+
+    private fun inlineMediaType(payload: ByteArray): String = when {
+        payload.startsWith(byteArrayOf(0xFF.toByte(), 0xD8.toByte(), 0xFF.toByte())) -> "image/jpeg"
+        payload.startsWith(byteArrayOf(0x89.toByte(), 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A)) -> "image/png"
+        else -> "image/gif"
+    }
+
+    private fun ByteArray.startsWith(prefix: ByteArray): Boolean =
+        size >= prefix.size && prefix.indices.all { this[it] == prefix[it] }
 
     private fun jpegStub(): ByteArray {
         val header = byteArrayOf(0xFF.toByte(), 0xD8.toByte(), 0xFF.toByte(), 0xD9.toByte())

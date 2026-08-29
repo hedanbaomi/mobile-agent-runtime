@@ -8,6 +8,8 @@ plugins {
     alias(libs.plugins.kotlin.serialization)
 }
 
+apply(from = rootProject.file("tools/debug-sbom.gradle.kts"))
+
 android {
     namespace = "runtime.mobileagent"
     compileSdk = libs.versions.compileSdk.get().toInt()
@@ -17,11 +19,15 @@ android {
         targetSdk = libs.versions.targetSdk.get().toInt()
         versionCode = 1
         versionName = "0.1.0"
+        testInstrumentationRunner = "runtime.mobileagent.PythonRuntimeDeviceTestRunner"
         ndk {
             abiFilters += listOf("arm64-v8a", "x86_64")
         }
         buildConfigField("String", "SOURCE_URL", "\"https://github.com/hedanbaomi/mobile-agent-runtime\"")
         buildConfigField("String", "GIT_REVISION", "\"uncommitted\"")
+        buildConfigField("String", "ANNOUNCEMENTS_BASE_URL", "\"https://announcements.luotianyi.fun\"")
+        buildConfigField("String", "ANNOUNCEMENTS_KEY_ID", "\"mar-prod-20260829-1\"")
+        buildConfigField("String", "ANNOUNCEMENTS_PUBLIC_KEY_HEX", "\"e89c5b55f45a303f5c721a568493edfb9f268b39967ac597b2e105725a552df8\"")
     }
     buildFeatures {
         compose = true
@@ -76,5 +82,10 @@ dependencies {
     implementation(libs.ktor.client.okhttp)
     implementation(libs.ktor.client.core)
     implementation(libs.kotlinx.coroutines.core)
+    implementation(libs.kotlinx.serialization.json)
     implementation(libs.bcprov)
+    androidTestImplementation("androidx.test:runner:1.6.2")
+    androidTestImplementation("androidx.test.ext:junit:1.2.1")
+    androidTestImplementation("junit:junit:4.13.2")
+    androidTestImplementation("androidx.work:work-testing:2.10.0")
 }

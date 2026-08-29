@@ -96,6 +96,27 @@ class DocumentParserTest {
     }
 
     @Test
+    fun rendererTurnsVectorPageIntoLocatableImageAsset() {
+        val rendered = byteArrayOf(1, 2, 3, 4)
+        val parsed = PdfParser.parse(PdfParser.writeDrawingOnlyPdf(), PdfPageRasterizer { _, pages ->
+            pages.map { page -> RenderedPdfPage(page, rendered, "image/png", 612, 792) }
+        })
+        val asset = parsed.assets.single { it.localId == "page-rendered-1" }
+        assertEquals("IMAGE", asset.kind)
+        assertEquals(1, asset.page)
+        assertEquals("pdf-page-1", asset.section)
+        assertEquals(rendered.toList(), asset.bytes.toList())
+        assertTrue(asset.bytes.isNotEmpty())
+        assertTrue(parsed.assets.none { it.kind == "PAGE" })
+    }
+
+    @Test
+    fun rendererFailureKeepsExplicitPageBlocker() {
+        val parsed = PdfParser.parse(PdfParser.writeDrawingOnlyPdf(), PdfPageRasterizer { _, _ -> emptyList() })
+        assertTrue(parsed.assets.any { it.kind == "PAGE" && it.page == 1 && it.bytes.isEmpty() })
+    }
+
+    @Test
     fun twoPageTextKeepsPageBoundaries() {
         val parsed = PdfParser.parse(PdfParser.writeTwoPageTextPdf("FIRSTPAGEONLYTOKEN", "SECONDPAGEONLYTOKEN"))
         assertEquals(2, parsed.pages.size)

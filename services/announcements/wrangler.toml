@@ -3,11 +3,31 @@
 name = "mobile-agent-runtime-announcements"
 main = "src/worker.mjs"
 compatibility_date = "2025-01-01"
+compatibility_flags = ["nodejs_compat"]
 
-# Local/dev only. Production Cloudflare resources are not created in this task.
-# Do not bind this Worker to another product's D1 database or Access policy.
-# Signing private keys belong in local environment variables, never in this file or the APK.
+[assets]
+directory = "../../admin/announcements"
+binding = "ASSETS"
+run_worker_first = ["/api/*", "/admin/*", "/source/*"]
+
+[triggers]
+crons = ["*/5 * * * *"]
+
+[[d1_databases]]
+binding = "ANNOUNCEMENTS_DB"
+database_name = "mobile-agent-runtime-announcements-prod"
+database_id = "06cf40c7-dd84-4560-859a-1a417f47207e"
+migrations_dir = "migrations"
+
+# Public production configuration. The database is an independent resource for
+# this Worker; do not point it at another product's D1. The Access fields are
+# bound to the owner-approved path-scoped Access application. Public signed
+# feeds remain outside /admin/* and continue to work without an Access session.
 
 [vars]
-MAR_ANNOUNCE_KEY_ID = "local-dev-1"
-
+MAR_ENV = "production"
+MAR_ANNOUNCE_KEY_ID = "mar-prod-20260829-1"
+MAR_ADMIN_ORIGIN = "https://announcements.luotianyi.fun"
+MAR_PUBLIC_ORIGIN = "https://announcements.luotianyi.fun"
+MAR_ACCESS_TEAM_DOMAIN = "https://bitter-sunset-2597.cloudflareaccess.com"
+MAR_ACCESS_AUDIENCE = "10a34dc2d0183d6d554ba2e2180fb0c8bd5b8cabe9058b5b9f1e1c5f39c84394"

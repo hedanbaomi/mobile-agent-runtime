@@ -86,6 +86,16 @@ class LicenseScanner(
                 if (child.name !in SKIP_DIRS && !rel.startsWith(".")) {
                     walk(root, child, thirdParty, violations)
                 }
+            } else if (child.isRegularFile() && rel in PINNED_LEGAL_ASSETS) {
+                // This is an unmodified upstream license document, not first-party HTML.
+                // The exact path AND bytes are locked; no directory or extension is exempted.
+                if (sha256Hex(child.readBytes()) != PINNED_LEGAL_ASSETS.getValue(rel)) {
+                    violations += "$rel: pinned third-party legal text hash mismatch"
+                }
+                val sidecar = child.resolveSibling(child.fileName.toString() + ".license")
+                if (!sidecar.isRegularFile() || spdxLicenseExpression(sidecar.readText(Charsets.UTF_8)) != "MIT") {
+                    violations += "$rel: missing original third-party MIT license sidecar"
+                }
             } else if (child.isRegularFile() && shouldScan(child, rel, thirdParty)) {
                 val header = child.readText(Charsets.UTF_8).lineSequence().take(12).joinToString("\n")
                 if ("SPDX-FileCopyrightText:" !in header) {
@@ -159,6 +169,10 @@ class LicenseScanner(
     private data class MarkerFile(val path: String, val marker: String)
 
     companion object {
+        internal val PINNED_LEGAL_ASSETS = mapOf(
+            "app-android/src/main/assets/licenses/maven/org.bouncycastle__bcprov-jdk18on__1.79/LICENSE.html" to
+                "edbbb10380b1271998b867a2e36b1cbee226e03d438726e1a91f80c5dde11849",
+        )
         const val EXPECTED_AGPL_SHA256 =
             "0d96a4ff68ad6d4b6f1f30f713b18d5184912ba8dd389f86aa7710db079abcb0"
         const val SOURCE_URL = "https://github.com/hedanbaomi/mobile-agent-runtime"

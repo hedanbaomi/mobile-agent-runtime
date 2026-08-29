@@ -10,10 +10,16 @@ import org.junit.jupiter.api.Assertions.assertNull
 import org.junit.jupiter.api.Assertions.assertThrows
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
+import runtime.mobileagent.knowledge.ApiEmbeddingBinding
+import runtime.mobileagent.knowledge.ApiQueryUnknownOutcomeException
 import runtime.mobileagent.knowledge.CitationMap
+import runtime.mobileagent.knowledge.EmbeddingUnknownOutcomeException
 import runtime.mobileagent.knowledge.ImportStage
 import runtime.mobileagent.knowledge.ImportStateMachine
 import runtime.mobileagent.knowledge.MemoryBlobSink
+import runtime.mobileagent.knowledge.sha256Hex
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.runBlocking
 import java.io.ByteArrayOutputStream
 import java.util.zip.ZipEntry
 import java.util.zip.ZipOutputStream
@@ -112,6 +118,39 @@ class KnowledgeRepositoryTest {
         )
         assertTrue(repo.search("张伟").any { "纠缠" in it.text })
         assertTrue(repo.search("USearch").any { "JNI" in it.text })
+    }
+
+    @Test
+    fun lexicalRankingUsesBm25BeforeLimitForSharedCjkTerms() {
+        val db = JdbcSqlConnection()
+        Migrations.apply(db)
+        val repo = KnowledgeRepository(
+            db,
+            MemoryBlobSink(),
+            vectorIndexFactory = runtime.mobileagent.knowledge.VectorIndexFactory { spaceId, dimension, _ ->
+                EmptyVectorIndex(spaceId, dimension)
+            },
+        )
+        val kb = repo.createKnowledgeBase("Chinese library")
+        repeat(20) { index ->
+            repo.importBytes(
+                "noise-$index.txt",
+                "text/plain",
+                "仓库日常记录与通用流程 filler-$index".toByteArray(),
+                visionConfigured = false,
+                knowledgeBaseId = kb,
+            )
+        }
+        repo.importBytes(
+            "target.txt",
+            "text/plain",
+            "松岳仓库专名目标证据 target-marker".toByteArray(),
+            visionConfigured = false,
+            knowledgeBaseId = kb,
+        )
+
+        val hits = repo.search("松岳仓库", topK = 8, knowledgeBaseIds = listOf(kb))
+        assertTrue(hits.any { "target-marker" in it.text })
     }
 
     @Test
@@ -425,7 +464,7 @@ class KnowledgeRepositoryTest {
         assertEquals(ImportStage.AWAITING_UPLOAD_CONSENT, awaiting.stage)
         assertTrue(seen.isEmpty())
         val ready = repo.grantVisionConsent(awaiting.id)
-        assertEquals(ImportStage.READY, ready.stage)
+        assertEquals(ImportStage.READY, ready.stage, ready.error)
         assertEquals(1, seen.size)
         assertTrue(repo.search("flowchart").any { it.assetId != null })
         val again = repo.grantVisionConsent(awaiting.id)
@@ -468,6 +507,633 @@ class KnowledgeRepositoryTest {
         )
         assertEquals(ImportStage.AWAITING_EMBEDDING_CONSENT, job.stage)
         assertTrue(repo.search("secret-on-device-only").isEmpty())
+    }
+
+    @Test
+    fun selectedApiEmbeddingUsesItsOwnSpaceAfterConsent() {
+        val db = JdbcSqlConnection()
+        Migrations.apply(db)
+        val api = CountingEmbedder("api-space-v1", 8)
+        val repo = KnowledgeRepository(db, MemoryBlobSink(), apiEmbedder = api)
+        val kb = repo.createKnowledgeBase("API library", embeddingSpaceId = api.spaceId)
+        val job = repo.importBytes(
+            "api.txt",
+            "text/plain",
+            "selected API evidence".toByteArray(),
+            visionConfigured = false,
+            knowledgeBaseId = kb,
+            embeddingIsApi = true,
+            embeddingConsent = true,
+        )
+        assertEquals(ImportStage.READY, job.stage)
+        assertTrue(api.calls > 0)
+        assertTrue(repo.search("selected", knowledgeBaseIds = listOf(kb)).any { "API evidence" in it.text })
+        assertEquals(
+            api.spaceId,
+            db.query("SELECT embedding_space_id FROM knowledge_bases WHERE id = ?", listOf(kb)).single().string("embedding_space_id"),
+        )
+    }
+
+    @Test
+    fun apiEmbeddingConsentIsIndependentAndMakesZeroCallsBeforeApproval() {
+        val db = JdbcSqlConnection()
+        Migrations.apply(db)
+        val binding = testApiBinding()
+        val api = CountingEmbedder(binding.spaceId, binding.dimension)
+        val repo = KnowledgeRepository(db, MemoryBlobSink(), apiEmbedder = api)
+        val kb = repo.createApiKnowledgeBase("API library", binding)
+
+        val job = repo.importBytes(
+            "notes.txt",
+            "text/plain",
+            "private text".toByteArray(),
+            visionConfigured = false,
+            knowledgeBaseId = kb,
+            embeddingIsApi = true,
+            embeddingConsent = false,
+        )
+
+        assertEquals(ImportStage.AWAITING_EMBEDDING_CONSENT, job.stage)
+        assertEquals(0, api.calls)
+    }
+
+    @Test
+    fun changingApiHostOrModelWithoutFreshConsentDoesNotCallEitherAdapter() {
+        val db = JdbcSqlConnection()
+        Migrations.apply(db)
+        val originalBinding = testApiBinding()
+        val changedBinding = testApiBinding(endpoint = "https://api.example.test/v2/embeddings", modelId = "other-model", modelRevision = 2)
+        val original = CountingEmbedder(originalBinding.spaceId, originalBinding.dimension)
+        val changed = CountingEmbedder(changedBinding.spaceId, changedBinding.dimension)
+        val repo = KnowledgeRepository(db, MemoryBlobSink(), apiEmbedder = original, apiEmbedders = listOf(changed))
+        val kb = repo.createApiKnowledgeBase("API library", originalBinding)
+
+        assertThrows(IllegalStateException::class.java) {
+            repo.rebindApiKnowledgeBase(kb, changedBinding, embeddingConsent = false)
+        }
+        assertEquals(0, original.calls)
+        assertEquals(0, changed.calls)
+    }
+
+    @Test
+    fun apiEmbedderResolverIsExactAndChecksBindingDimension() {
+        val db = JdbcSqlConnection()
+        Migrations.apply(db)
+        val binding = testApiBinding()
+        val api = CountingEmbedder(binding.spaceId, binding.dimension)
+        val requestedSpaces = mutableListOf<String>()
+        val repo = KnowledgeRepository(
+            db,
+            MemoryBlobSink(),
+            apiEmbedderResolver = { spaceId ->
+                requestedSpaces += spaceId
+                if (spaceId == binding.spaceId) api else null
+            },
+        )
+        val kb = repo.createApiKnowledgeBase("resolved API library", binding)
+        val job = repo.importBytes(
+            "resolved.txt",
+            "text/plain",
+            "resolver selected evidence".toByteArray(),
+            visionConfigured = false,
+            knowledgeBaseId = kb,
+            embeddingIsApi = true,
+            embeddingConsent = true,
+        )
+
+        assertEquals(ImportStage.READY, job.stage)
+        assertTrue(requestedSpaces.isNotEmpty())
+        assertTrue(requestedSpaces.all { it == binding.spaceId })
+        assertTrue(api.calls > 0)
+
+        val wrongDimension = CountingEmbedder(binding.spaceId, binding.dimension + 1)
+        val rejected = KnowledgeRepository(
+            JdbcSqlConnection().also { Migrations.apply(it) },
+            MemoryBlobSink(),
+            apiEmbedderResolver = { wrongDimension },
+        )
+        assertThrows(IllegalStateException::class.java) {
+            rejected.createApiKnowledgeBase("wrong dimension", binding)
+        }
+        assertEquals(0, wrongDimension.calls)
+    }
+
+    @Test
+    fun queryWithoutApiConsentDoesNotResolveOrCallApiEmbedder() {
+        val db = JdbcSqlConnection()
+        Migrations.apply(db)
+        val binding = testApiBinding()
+        val api = CountingEmbedder(binding.spaceId, binding.dimension)
+        var resolverCalls = 0
+        val repo = KnowledgeRepository(
+            db,
+            MemoryBlobSink(),
+            apiEmbedderResolver = {
+                resolverCalls += 1
+                api
+            },
+        )
+        val kb = repo.createApiKnowledgeBase("API library", binding)
+        resolverCalls = 0
+        val awaiting = repo.importBytes(
+            "private.txt",
+            "text/plain",
+            "private API text".toByteArray(),
+            visionConfigured = false,
+            knowledgeBaseId = kb,
+            embeddingIsApi = true,
+            embeddingConsent = false,
+        )
+        assertEquals(ImportStage.AWAITING_EMBEDDING_CONSENT, awaiting.stage)
+        resolverCalls = 0
+        assertTrue(repo.search("private", knowledgeBaseIds = listOf(kb)).isEmpty())
+        assertEquals(0, resolverCalls)
+        assertEquals(0, api.calls)
+    }
+
+    @Test
+    fun publicRebuildRequiresApiConsentBeforeResolvingAdapter() {
+        val db = JdbcSqlConnection()
+        Migrations.apply(db)
+        val binding = testApiBinding()
+        val api = CountingEmbedder(binding.spaceId, binding.dimension)
+        var resolverCalls = 0
+        val repo = KnowledgeRepository(
+            db,
+            MemoryBlobSink(),
+            apiEmbedderResolver = {
+                resolverCalls += 1
+                api
+            },
+        )
+        val kb = repo.createApiKnowledgeBase("API library", binding)
+        resolverCalls = 0
+
+        assertThrows(IllegalStateException::class.java) { repo.rebuildIndex(kb) }
+        assertEquals(0, resolverCalls)
+        assertEquals(0, api.calls)
+    }
+
+    @Test
+    fun apiKnowledgeBaseCannotBeImportedOrResumedAsLocal() {
+        val db = JdbcSqlConnection()
+        Migrations.apply(db)
+        val binding = testApiBinding()
+        val api = CountingEmbedder(binding.spaceId, binding.dimension)
+        val repo = KnowledgeRepository(db, MemoryBlobSink(), apiEmbedder = api)
+        val kb = repo.createApiKnowledgeBase("API library", binding)
+
+        assertThrows(IllegalStateException::class.java) {
+            repo.importBytes(
+                "local-mistake.txt",
+                "text/plain",
+                "must not use local embedding".toByteArray(),
+                visionConfigured = false,
+                knowledgeBaseId = kb,
+                embeddingIsApi = false,
+                embeddingConsent = false,
+            )
+        }
+        assertEquals(0, api.calls)
+
+        val awaiting = repo.importBytes(
+            "resume-mistake.txt",
+            "text/plain",
+            "must not resume with local embedding".toByteArray(),
+            visionConfigured = false,
+            knowledgeBaseId = kb,
+            embeddingIsApi = true,
+            embeddingConsent = false,
+        )
+        db.execute(
+            "UPDATE import_jobs SET embedding_is_api = 0, embedding_consent = 0 WHERE id = ?",
+            listOf(awaiting.id),
+        )
+        assertThrows(IllegalStateException::class.java) {
+            repo.resumeImport(awaiting.id, visionConfigured = false)
+        }
+        assertEquals(0, api.calls)
+    }
+
+    @Test
+    fun uncertainApiRebindLeavesDurableGateAndDoesNotRetryAutomatically() {
+        val db = JdbcSqlConnection()
+        Migrations.apply(db)
+        val binding = testApiBinding()
+        val api = UnknownEmbedder(binding.spaceId, binding.dimension)
+        val repo = KnowledgeRepository(db, MemoryBlobSink(), apiEmbedder = api)
+        val kb = repo.createKnowledgeBase("Local library")
+        repo.importBytes(
+            "existing.txt",
+            "text/plain",
+            "existing local evidence".toByteArray(),
+            visionConfigured = false,
+            knowledgeBaseId = kb,
+        )
+        val localSpace = repo.embeddingSpaceId(kb)
+
+        assertThrows(EmbeddingUnknownOutcomeException::class.java) {
+            repo.rebindApiKnowledgeBase(kb, binding, embeddingConsent = true)
+        }
+        assertEquals(1, api.calls)
+        assertEquals(localSpace, repo.embeddingSpaceId(kb))
+        assertEquals(
+            1,
+            db.query(
+                "SELECT id FROM import_jobs WHERE kb_id = ? AND stage = ? AND display_name LIKE ?",
+                listOf(kb, ImportStage.FAILED.name, "__api_rebind_unknown__:%"),
+            ).size,
+        )
+
+        assertThrows(IllegalStateException::class.java) {
+            repo.rebindApiKnowledgeBase(kb, binding, embeddingConsent = true)
+        }
+        assertEquals(1, api.calls)
+    }
+
+    @Test
+    fun successfulApiVectorsAreReusedAcrossRebuildAndKnowledgeBases() {
+        val db = JdbcSqlConnection()
+        Migrations.apply(db)
+        val binding = testApiBinding()
+        val api = CountingEmbedder(binding.spaceId, binding.dimension)
+        val repo = KnowledgeRepository(db, MemoryBlobSink(), apiEmbedder = api)
+        val firstKb = repo.createApiKnowledgeBase("First API library", binding)
+        val payload = "stable API evidence".toByteArray()
+        assertEquals(
+            ImportStage.READY,
+            repo.importBytes(
+                "first.txt",
+                "text/plain",
+                payload,
+                visionConfigured = false,
+                knowledgeBaseId = firstKb,
+                embeddingIsApi = true,
+                embeddingConsent = true,
+            ).stage,
+        )
+        val callsAfterFirst = api.calls
+        repo.rebuildIndex(firstKb)
+        assertEquals(callsAfterFirst, api.calls)
+
+        val secondKb = repo.createApiKnowledgeBase("Second API library", binding)
+        assertEquals(
+            ImportStage.READY,
+            repo.importBytes(
+                "second.txt",
+                "text/plain",
+                payload,
+                visionConfigured = false,
+                knowledgeBaseId = secondKb,
+                embeddingIsApi = true,
+                embeddingConsent = true,
+            ).stage,
+        )
+        assertEquals(callsAfterFirst, api.calls)
+    }
+
+    @Test
+    fun unknownApiEmbeddingCannotBeResumedAutomatically() {
+        val db = JdbcSqlConnection()
+        Migrations.apply(db)
+        val binding = testApiBinding()
+        val api = UnknownEmbedder(binding.spaceId, binding.dimension)
+        val repo = KnowledgeRepository(db, MemoryBlobSink(), apiEmbedder = api)
+        val kb = repo.createApiKnowledgeBase("API library", binding)
+        val job = repo.importBytes(
+            "unknown.txt",
+            "text/plain",
+            "uncertain response".toByteArray(),
+            visionConfigured = false,
+            knowledgeBaseId = kb,
+            embeddingIsApi = true,
+            embeddingConsent = true,
+        )
+
+        assertEquals(ImportStage.FAILED, job.stage)
+        assertTrue(job.error.orEmpty().contains("UNKNOWN_OUTCOME"))
+        assertThrows(IllegalStateException::class.java) {
+            repo.resumeImport(job.id, visionConfigured = false)
+        }
+        val duplicate = repo.importBytes(
+            "unknown.txt",
+            "text/plain",
+            "uncertain response".toByteArray(),
+            visionConfigured = false,
+            knowledgeBaseId = kb,
+            embeddingIsApi = true,
+            embeddingConsent = true,
+        )
+        assertEquals(ImportStage.FAILED, duplicate.stage)
+        assertEquals(1, api.calls)
+    }
+
+    @Test
+    fun unknownApiEmbeddingRetriesOnceOnlyAfterExplicitAcknowledgement() {
+        val db = JdbcSqlConnection()
+        Migrations.apply(db)
+        val binding = testApiBinding()
+        val api = FailOnceUnknownEmbedder(binding.spaceId, binding.dimension)
+        val repo = KnowledgeRepository(db, MemoryBlobSink(), apiEmbedder = api)
+        val kb = repo.createApiKnowledgeBase("API library", binding)
+        val failed = repo.importBytes(
+            "retry.txt",
+            "text/plain",
+            "retryable API evidence".toByteArray(),
+            visionConfigured = false,
+            knowledgeBaseId = kb,
+            embeddingIsApi = true,
+            embeddingConsent = true,
+        )
+
+        assertEquals(ImportStage.FAILED, failed.stage)
+        assertTrue(failed.error.orEmpty().contains("UNKNOWN_OUTCOME"))
+        assertEquals(1, api.calls)
+        assertThrows(IllegalStateException::class.java) {
+            repo.retryUnknownEmbedding(failed.id, acknowledgeDuplicateCharge = false)
+        }
+        assertEquals(1, api.calls)
+
+        val ready = repo.retryUnknownEmbedding(failed.id, acknowledgeDuplicateCharge = true)
+        assertEquals(ImportStage.READY, ready.stage)
+        assertEquals(2, api.calls)
+        assertTrue(ready.error == null)
+        assertThrows(IllegalStateException::class.java) {
+            repo.retryUnknownEmbedding(failed.id, acknowledgeDuplicateCharge = true)
+        }
+        assertEquals(2, api.calls)
+    }
+
+    @Test
+    fun unknownApiQueryRequiresExplicitOneTimeAuthorization() {
+        val db = JdbcSqlConnection()
+        Migrations.apply(db)
+        val binding = testApiBinding()
+        val api = FailOnceUnknownEmbedder(binding.spaceId, binding.dimension).also { it.failNext = false }
+        val repo = KnowledgeRepository(db, MemoryBlobSink(), apiEmbedder = api)
+        val kb = repo.createApiKnowledgeBase("API library", binding)
+        assertEquals(
+            ImportStage.READY,
+            repo.importBytes(
+                "query-source.txt",
+                "text/plain",
+                "stable API query source".toByteArray(),
+                visionConfigured = false,
+                knowledgeBaseId = kb,
+                embeddingIsApi = true,
+                embeddingConsent = true,
+            ).stage,
+        )
+        val query = "uncertain query"
+        val queryHash = sha256Hex(query.toByteArray(Charsets.UTF_8))
+        api.failNext = true
+
+        val first = assertThrows(ApiQueryUnknownOutcomeException::class.java) {
+            repo.retrieve("query-run", query, knowledgeBaseIds = listOf(kb))
+        }
+        assertEquals(kb, first.knowledgeBaseId)
+        assertEquals(binding.spaceId, first.spaceId)
+        assertEquals(queryHash, first.queryHash)
+        assertTrue(first.message.orEmpty().contains("explicit retry authorization"))
+        assertTrue(query !in first.message.orEmpty())
+        assertEquals(2, api.calls)
+
+        val pending = repo.pendingApiQueries(kb)
+        assertEquals(1, pending.size)
+        assertEquals(queryHash, pending.single().queryHash)
+        assertFalse(pending.single().retryAuthorized)
+        assertThrows(ApiQueryUnknownOutcomeException::class.java) {
+            repo.retrieve("query-run-2", query, knowledgeBaseIds = listOf(kb))
+        }
+        assertEquals(2, api.calls)
+        assertThrows(IllegalStateException::class.java) {
+            repo.authorizeApiQueryRetry(kb, binding.spaceId, queryHash, acknowledgeDuplicateCharge = false)
+        }
+        assertEquals(2, api.calls)
+
+        val authorized = repo.authorizeApiQueryRetry(kb, binding.spaceId, queryHash, acknowledgeDuplicateCharge = true)
+        assertTrue(authorized.retryAuthorized)
+        val retried = repo.retrieve("query-run-3", query, knowledgeBaseIds = listOf(kb))
+        assertTrue(retried.hits.isNotEmpty())
+        assertEquals(3, api.calls)
+        assertTrue(repo.pendingApiQueries(kb).isEmpty())
+    }
+
+    @Test
+    fun interruptedApiQueryIsDurablyUnknownAndNotAutoRetried() {
+        val db = JdbcSqlConnection()
+        Migrations.apply(db)
+        val binding = testApiBinding()
+        val api = InterruptedOnceEmbedder(binding.spaceId, binding.dimension)
+        val repo = KnowledgeRepository(db, MemoryBlobSink(), apiEmbedder = api)
+        val kb = repo.createApiKnowledgeBase("API library", binding)
+        api.interruptNext = false
+        assertEquals(
+            ImportStage.READY,
+            repo.importBytes(
+                "query-source.txt",
+                "text/plain",
+                "stable API query source".toByteArray(),
+                visionConfigured = false,
+                knowledgeBaseId = kb,
+                embeddingIsApi = true,
+                embeddingConsent = true,
+            ).stage,
+        )
+        api.interruptNext = true
+
+        assertThrows(ApiQueryUnknownOutcomeException::class.java) {
+            repo.retrieve("interrupted-query-run", "interrupt me", knowledgeBaseIds = listOf(kb))
+        }
+        assertEquals(2, api.calls)
+        assertThrows(ApiQueryUnknownOutcomeException::class.java) {
+            repo.retrieve("interrupted-query-run-2", "interrupt me", knowledgeBaseIds = listOf(kb))
+        }
+        assertEquals(2, api.calls)
+        assertFalse(repo.pendingApiQueries(kb).single().retryAuthorized)
+    }
+
+    @Test
+    fun successfulApiQueryVectorIsReusedAfterLocalAnnFailure() {
+        val db = JdbcSqlConnection()
+        Migrations.apply(db)
+        val binding = testApiBinding()
+        val api = CountingEmbedder(binding.spaceId, binding.dimension)
+        val sink = MemoryBlobSink()
+        val failing = KnowledgeRepository(
+            db,
+            sink,
+            apiEmbedder = api,
+            vectorIndexFactory = runtime.mobileagent.knowledge.VectorIndexFactory { spaceId, dimension, _ ->
+                ThrowingVectorIndex(spaceId, dimension)
+            },
+        )
+        val kb = failing.createApiKnowledgeBase("API library", binding)
+        assertEquals(
+            ImportStage.READY,
+            failing.importBytes(
+                "query-cache.txt",
+                "text/plain",
+                "cache survives local ANN failure".toByteArray(),
+                visionConfigured = false,
+                knowledgeBaseId = kb,
+                embeddingIsApi = true,
+                embeddingConsent = true,
+            ).stage,
+        )
+        val beforeQuery = api.calls
+        assertThrows(IllegalStateException::class.java) {
+            failing.retrieve("cache-failure", "reuse this query", knowledgeBaseIds = listOf(kb))
+        }
+        assertEquals(beforeQuery + 1, api.calls)
+        assertEquals(
+            1,
+            db.query(
+                "SELECT COUNT(*) AS n FROM embedding_query_vectors WHERE space_id = ?",
+                listOf(binding.spaceId),
+            ).single().long("n"),
+        )
+
+        val healthy = KnowledgeRepository(db, sink, apiEmbedder = api)
+        val result = healthy.retrieve("cache-retry", "reuse this query", knowledgeBaseIds = listOf(kb))
+        assertTrue(result.hits.isNotEmpty())
+        assertEquals(beforeQuery + 1, api.calls)
+    }
+
+    @Test
+    fun apiEmbeddingCacheSurvivesGenerationPublishFailure() {
+        val inner = JdbcSqlConnection()
+        Migrations.apply(inner)
+        val db = FailOnceGenerationConnection(inner)
+        val binding = testApiBinding()
+        val api = CountingEmbedder(binding.spaceId, binding.dimension)
+        val repo = KnowledgeRepository(db, MemoryBlobSink(), apiEmbedder = api)
+        val kb = repo.createApiKnowledgeBase("API library", binding)
+        val first = repo.importBytes(
+            "publish-failure.txt",
+            "text/plain",
+            "cache before generation publication".toByteArray(),
+            visionConfigured = false,
+            knowledgeBaseId = kb,
+            embeddingIsApi = true,
+            embeddingConsent = true,
+        )
+        assertEquals(ImportStage.FAILED, first.stage)
+        val callsAfterCache = api.calls
+        val resumed = repo.resumeImport(first.id, visionConfigured = false)
+        assertEquals(ImportStage.READY, resumed.stage)
+        assertEquals(callsAfterCache, api.calls)
+        assertTrue(repo.search("publication", knowledgeBaseIds = listOf(kb)).isNotEmpty())
+    }
+
+    @Test
+    fun cancelledApiEmbeddingAfterDispatchBecomesUnknownWithoutReplay() {
+        val db = JdbcSqlConnection()
+        Migrations.apply(db)
+        val binding = testApiBinding()
+        val api = CancelledCancellableEmbedder(binding.spaceId, binding.dimension)
+        val repo = KnowledgeRepository(db, MemoryBlobSink(), apiEmbedder = api)
+        val kb = repo.createApiKnowledgeBase("API library", binding)
+
+        assertThrows(CancellationException::class.java) {
+            runBlocking {
+                repo.importBytesCancellable(
+                    "cancelled.txt",
+                    "text/plain",
+                    "cancel after dispatch".toByteArray(),
+                    visionConfigured = false,
+                    knowledgeBaseId = kb,
+                    embeddingIsApi = true,
+                    embeddingConsent = true,
+                )
+            }
+        }
+        assertEquals(1, api.calls)
+        assertEquals(
+            1,
+            db.query(
+                "SELECT COUNT(*) AS n FROM embedding_operations WHERE kb_id = ? AND state = 'UNKNOWN'",
+                listOf(kb),
+            ).single().long("n"),
+        )
+        val job = db.query("SELECT id, stage, error FROM import_jobs WHERE kb_id = ? ORDER BY updated_at DESC LIMIT 1", listOf(kb)).single()
+        assertEquals(ImportStage.FAILED.name, job.string("stage"))
+        assertTrue(job.string("error").contains("UNKNOWN_OUTCOME"))
+        assertThrows(IllegalStateException::class.java) {
+            repo.resumeImport(job.string("id"), visionConfigured = false)
+        }
+        assertEquals(1, api.calls)
+    }
+
+    @Test
+    fun ordinaryApiEmbeddingFailureAfterDispatchBecomesUnknownWithoutReplay() {
+        val db = JdbcSqlConnection()
+        Migrations.apply(db)
+        val binding = testApiBinding()
+        val api = OrdinaryFailureEmbedder(binding.spaceId, binding.dimension)
+        val repo = KnowledgeRepository(db, MemoryBlobSink(), apiEmbedder = api)
+        val kb = repo.createApiKnowledgeBase("API library", binding)
+
+        val failed = repo.importBytes(
+            "ordinary-failure.txt",
+            "text/plain",
+            "failure after dispatch".toByteArray(),
+            visionConfigured = false,
+            knowledgeBaseId = kb,
+            embeddingIsApi = true,
+            embeddingConsent = true,
+        )
+
+        assertEquals(ImportStage.FAILED, failed.stage)
+        assertTrue(failed.error.orEmpty().contains("UNKNOWN_OUTCOME"))
+        assertEquals(1, api.calls)
+        assertEquals(
+            1,
+            db.query(
+                "SELECT COUNT(*) AS n FROM embedding_operations WHERE kb_id = ? AND state = 'UNKNOWN'",
+                listOf(kb),
+            ).single().long("n"),
+        )
+        assertThrows(IllegalStateException::class.java) {
+            repo.resumeImport(failed.id, visionConfigured = false)
+        }
+        assertEquals(1, api.calls)
+    }
+
+    @Test
+    fun visionConsentDoesNotImplyApiEmbeddingConsent() {
+        val db = JdbcSqlConnection()
+        Migrations.apply(db)
+        val binding = testApiBinding()
+        val api = CountingEmbedder(binding.spaceId, binding.dimension)
+        var visionCalls = 0
+        val vision = runtime.mobileagent.knowledge.VisionBackend {
+            visionCalls += 1
+            runtime.mobileagent.knowledge.VisionOutcome.Success(
+                runtime.mobileagent.knowledge.VisionSuccess("ocr", "description"),
+            )
+        }
+        val repo = KnowledgeRepository(db, MemoryBlobSink(), vision = vision, apiEmbedder = api)
+        val kb = repo.createApiKnowledgeBase("API library", binding)
+        val png = byteArrayOf(0x89.toByte(), 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A) + ByteArray(16)
+        val awaiting = repo.importBytes(
+            "visual.png",
+            "image/png",
+            png,
+            visionConfigured = true,
+            knowledgeBaseId = kb,
+            visionConsent = true,
+            embeddingIsApi = true,
+            embeddingConsent = false,
+        )
+
+        assertEquals(ImportStage.AWAITING_EMBEDDING_CONSENT, awaiting.stage)
+        assertEquals(1, visionCalls)
+        assertEquals(0, api.calls)
+        val ready = repo.grantEmbeddingConsent(awaiting.id, visionConfigured = true)
+        assertEquals(ImportStage.READY, ready.stage, ready.error)
+        assertEquals(1, visionCalls)
+        assertTrue(api.calls > 0)
     }
 
     @Test
@@ -633,8 +1299,18 @@ class KnowledgeRepositoryTest {
         assertTrue(locator.assetId != null)
         val asset = db.query("SELECT blob_hash FROM assets WHERE id = ?", listOf(locator.assetId)).single()
         assertEquals(asset.string("blob_hash"), locator.blobHash)
+        val evidence = repo.evidenceBytes(bound.first())
+        assertEquals("image/jpeg", evidence?.first)
+        assertTrue(evidence?.second?.isNotEmpty() == true)
         val forged = bound.first().copy(chunkId = "no-such-chunk", documentVersionId = "forged", assetId = "forged")
         assertTrue(repo.locateCitation(forged).removed)
+        val otherKnowledgeBase = repo.createKnowledgeBase("Other library")
+        assertTrue(repo.locateCitation(bound.first().copy(knowledgeBaseId = otherKnowledgeBase)).removed)
+        assertTrue(repo.locateCitation(bound.first().copy(knowledgeBaseId = "")).removed)
+        assertTrue(repo.locateCitation(bound.first().copy(documentVersionId = "")).removed)
+        assertNull(repo.evidenceBytes(bound.first().copy(knowledgeBaseId = otherKnowledgeBase)))
+        repo.deleteKnowledgeBase(otherKnowledgeBase)
+        assertTrue(repo.locateCitation(bound.first().copy(knowledgeBaseId = otherKnowledgeBase)).removed)
     }
 
     @Test
@@ -860,9 +1536,23 @@ class KnowledgeRepositoryTest {
         }
         return out.toByteArray()
     }
+
+    private fun testApiBinding(
+        endpoint: String = "https://api.example.test/v1/embeddings",
+        modelId: String = "embedding-model",
+        modelRevision: Int = 1,
+    ): ApiEmbeddingBinding = ApiEmbeddingBinding(
+        providerId = "provider-test",
+        endpoint = endpoint,
+        providerRevision = 1,
+        modelId = modelId,
+        modelRevision = modelRevision,
+        dimension = 8,
+        dataScope = "document text; retrieval purpose",
+    )
 }
 
-private class ThrowingEmbedder : runtime.mobileagent.knowledge.TextEmbedder {
+    private class ThrowingEmbedder : runtime.mobileagent.knowledge.TextEmbedder {
     override val spaceId: String = "local-hash-v1-d32"
     override val dimension: Int = 32
     override fun embed(text: String): FloatArray = error("embed failed")
@@ -887,4 +1577,126 @@ private class GenerationSwitchingConnection(
     }
 
     override fun <T> transaction(block: () -> T): T = inner.transaction(block)
+}
+
+private class CountingEmbedder(
+    override val spaceId: String,
+    override val dimension: Int,
+) : runtime.mobileagent.knowledge.TextEmbedder {
+    var calls: Int = 0
+
+    override fun embed(text: String): FloatArray {
+        calls += 1
+        return FloatArray(dimension) { index -> (text.hashCode() + index).toFloat() }
+    }
+}
+
+private class EmptyVectorIndex(
+    override val spaceId: String,
+    override val dimension: Int,
+) : runtime.mobileagent.knowledge.VectorIndexPort {
+    override fun add(id: String, vector: FloatArray) = Unit
+
+    override fun search(query: FloatArray, topK: Int): List<Pair<String, Float>> = emptyList()
+}
+
+private class ThrowingVectorIndex(
+    override val spaceId: String,
+    override val dimension: Int,
+) : runtime.mobileagent.knowledge.VectorIndexPort {
+    override fun add(id: String, vector: FloatArray) = Unit
+
+    override fun search(query: FloatArray, topK: Int): List<Pair<String, Float>> =
+        error("injected local ANN failure")
+}
+
+private class FailOnceGenerationConnection(
+    private val inner: SqlConnection,
+) : SqlConnection {
+    private var failNextGenerationUpdate = true
+
+    override fun execute(sql: String, args: List<Any?>) {
+        if (failNextGenerationUpdate && sql.contains("UPDATE index_generations SET state")) {
+            failNextGenerationUpdate = false
+            error("injected generation publication failure")
+        }
+        inner.execute(sql, args)
+    }
+
+    override fun query(sql: String, args: List<Any?>): List<SqlRow> = inner.query(sql, args)
+
+    override fun <T> transaction(block: () -> T): T = inner.transaction(block)
+}
+
+private class CancelledCancellableEmbedder(
+    override val spaceId: String,
+    override val dimension: Int,
+) : runtime.mobileagent.knowledge.TextEmbedder,
+    runtime.mobileagent.knowledge.CancellableBatchTextEmbedder {
+    var calls: Int = 0
+
+    override fun embed(text: String): FloatArray = error("sync API embedding is not allowed in this fixture")
+
+    override suspend fun embedBatchCancellable(texts: List<String>): List<FloatArray> {
+        calls += 1
+        throw CancellationException("cancelled after dispatch")
+    }
+}
+
+private class OrdinaryFailureEmbedder(
+    override val spaceId: String,
+    override val dimension: Int,
+) : runtime.mobileagent.knowledge.TextEmbedder {
+    var calls: Int = 0
+
+    override fun embed(text: String): FloatArray {
+        calls += 1
+        throw IllegalStateException("injected provider failure after dispatch")
+    }
+}
+
+private class UnknownEmbedder(
+    override val spaceId: String,
+    override val dimension: Int,
+) : runtime.mobileagent.knowledge.TextEmbedder {
+    var calls: Int = 0
+
+    override fun embed(text: String): FloatArray {
+        calls += 1
+        throw EmbeddingUnknownOutcomeException()
+    }
+}
+
+private class FailOnceUnknownEmbedder(
+    override val spaceId: String,
+    override val dimension: Int,
+) : runtime.mobileagent.knowledge.TextEmbedder {
+    var calls: Int = 0
+    var failNext = true
+
+    override fun embed(text: String): FloatArray {
+        calls += 1
+        if (failNext) {
+            failNext = false
+            throw EmbeddingUnknownOutcomeException()
+        }
+        return FloatArray(dimension) { index -> (text.hashCode() + index).toFloat() }
+    }
+}
+
+private class InterruptedOnceEmbedder(
+    override val spaceId: String,
+    override val dimension: Int,
+) : runtime.mobileagent.knowledge.TextEmbedder {
+    var calls: Int = 0
+    var interruptNext: Boolean = true
+
+    override fun embed(text: String): FloatArray {
+        calls += 1
+        if (interruptNext) {
+            interruptNext = false
+            throw InterruptedException("transport interrupted")
+        }
+        return FloatArray(dimension) { index -> (text.hashCode() + index).toFloat() }
+    }
 }

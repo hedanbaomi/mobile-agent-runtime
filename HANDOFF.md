@@ -3,7 +3,7 @@
 
 # 项目交接
 
-最后更新：2026-08-29T00:02:00+08:00（Asia/Taipei）。项目根目录：`E:\mobileAgentRuntime`。
+最后更新：2026-08-29T08:15:00+08:00（Asia/Taipei）。项目根目录：`E:\mobileAgentRuntime`。
 
 **接手者必须先读 [agent.md](agent.md)、本文件和 [技术实现方案](docs/IMPLEMENTATION_PLAN.md)。工作后必须维护本文件及受影响的专题文档。**
 
@@ -12,37 +12,50 @@
 | 项目 | 状态 |
 | --- | --- |
 | 产品 | M4/M5 历史修复记录保留。M0.5 UI 设计包在浅色与深色基础上，新增并重构了整体为浅色风格、主色调为 `#66CCFF` 的 `66ccff` 专用主题（包含 Light-style Token、高保真 SVG `scr-chat-03-66ccff.svg`、规范文档、双语资源与交互原型，并在选择处严格直接显示色彩编码 `66ccff`，禁用 Emoji，状态 `DOC_CHECK_PASS`） |
-| 业务源码/构建 | 历史 Gradle/JVM 测试通过；本轮调整 66ccff 主题设计包产物、资源与文档，未修改业务 Kotlin 源码 |
-| Git | 分支 `main` 跟踪 `origin/main`；已按用户明确指令完成 commit 与 push，工作区干净 |
-| CodeGraph | 历史状态保留；本轮未同步/重建索引 |
-| 许可 | 本次 `python -B -m reuse lint` 退出 0（196/196）；许可正文 SHA 未变；文档结构检查 0 错误（PASS） |
-| 授权范围 | 本轮已获用户明确授权执行 commit 与 push；未部署 Cloudflare |
+| 业务源码/构建 | Round22 最终 debug 集成构建通过；JVM/SQLite/IPC 测试、SBOM 与两项 license guard 成功。模拟器上 Python 12/12（含日志超限与立即成功竞态）、API Embedding 5/5、Knowledge 4/4 通过。官方 CPython 隔离运行时、API 查询 UNKNOWN/缓存门禁、MiniLM/USearch/PDF 设备路径已验证。320 文件负载完成本地文本/存储等待组件，但不等于完整 K06 |
+| Git | 分支 `main` 跟踪 `origin/main`。用户已授权 commit 与 push。HEAD 仍为 `7511b22ffd7a7d3021b7857b6500cbe75d037ad6`，本轮实现即将写入新提交，SHA 在提交后回写。作者 `luozhibai` |
+| CodeGraph | 历史状态保留；提交前未强制重建索引。未提交 `.codegraph/` |
+| 许可 | 提交前 `licenseGuard`/`licenseGuardReverse` BUILD SUCCESSFUL；`python -B -m reuse lint` 316/316 退出 0。未改 LICENSE 正文 |
+| 授权范围 | 用户明确授权 commit 与 push。不发布正式 Android release，不调用付费模型 |
 
 ## 2. 当前任务
 
-66ccff 浅色主题版本设计交付完成并通过复验（`DOC_CHECK_PASS`），代码与文档已完成 commit 与 push。当前无进行中阻塞任务，等待后续指令。
+进行中：按用户授权用 `commit-tree` 提交本轮产品实现并 `git push origin main`。作者 `luozhibai`，不含 Cursor trailer。正式 Android release 仍后置。
+
+单一写入责任：主审负责 App 原有 ViewModel/MainActivity/DI、SkillRepository、根配置/文档、模拟器、生产部署；product_ui 负责 feature/** 与 app/ui/**；product_data 负责领域/序列化/Profile 与 Agent/Conversation/Settings/Transfer repository，以及唯一 Migrations 写入；knowledge_runtime 负责知识库/解析/本地嵌入/向量/存储/后台导入；python_runtime 负责 CPython 与 IPC；announcements_production 负责 services/admin 公告源码及本地部署准备；protocol_adapters 负责 provider-api/agent-runtime、skills-api 新 ToolExecutor 与 remote DTO；http_transport 仅负责 BuiltinTools/HostHttp、skills-api 模块依赖与对应测试。两个只读审阅者仅复核 1a035aa 的旧反例。每个实现者维护独立 evidence 文档，主审汇总根交接。共享 Gradle/模拟器由主审协调，不互相覆盖代码或全仓构建。
 
 ## 3. 关键约束
 
 - 第一方 `AGPL-3.0-only`。applicationId 暂为 `runtime.mobileagent`。CODEOWNERS 为 `@hedanbaomi`。
-- Python 不得在主进程执行；isolated service 已声明，CPython 包未嵌入。
-- 含图知识库无 Vision 时等待。TXT/MD 可词法 READY；向量空间是 `local-hash-v1-d32`，无 ONNX 模型包。USearch JNI 未构建。
-- 不部署 Cloudflare 生产资源。提交作者使用仓库 Git 用户 `luozhibai`，不含 Cursor。Cursor 环境会劫持 `git commit`；需用 `D:\Git\mingw64\libexec\git-core\git.exe commit-tree`。
+- Python 不得在主进程执行；官方 CPython 3.14.7 双 ABI 已嵌入并完成 JNI 编译。Round22 在 Android 16/API 36 x86_64 上完成真实 isolated UID/沙箱/取消/限额 12 项验收；其余 Android 版本矩阵仍不能推定通过。
+- 含图知识库无 Vision 时等待。Android PDF 光栅化、固定版本 MiniLM ONNX 包、USearch JNI 已实现并在 Round21 设备测试通过。320 文件 fixture 仅证明本地文本/存储等待组件；真实 Vision、完整故障矩阵与 Android 12—16 前台任务矩阵仍缺。旧 hash embedder 仅保留测试兼容，不能作为生产 ONNX 证据。
+- 用户已于 2026-08-29 授权本产品独立 Cloudflare 公告正式部署，取代历史“不部署”限制；不得复用或改动其他项目 Worker/D1/私有材料。正式 Android release 未授权。用户已于 2026-08-29T08:10 明确要求完成 commit 与 push。
 
 ## 4. 接手顺序
 
 1. `git status --short --branch`、`git log -1 --format=full`；确认 HEAD 无 `Co-authored-by: Cursor`
 2. 提交作者使用 `D:\Git\mingw64\libexec\git-core\git.exe commit-tree`，作者 `luozhibai <wy3273564266@163.com>`
-3. 先读本文件最新 M4/M5 审查与复现；得到修复授权后处理阻断项，不能把旧 LOCAL_PASS 或编译通过当作当前审查通过；M6 不自动开工
-4. 设备/模拟器仍缺：bundled FTS5 冷启动、公告本地 Worker→真机拉取、K06 300—500 文件负载
-5. `local-hash-v1-d32` 不是 ONNX pack；本轮没有改变 M4 的既定范围（Vision/PDF 正文/DOCX-EPUB）
-6. M1 Compose 仍须按 M0.5 差异清单对齐；不要把 M2/M3 功能闭环冒称为全套 UI 设计实现或生产部署
+3. 先读最新认领与证据；当前用户已授权继续 M1—M7 实现并验证，先核实 1a035aa 修复，保留视觉/授权边界；不能把旧 LOCAL_PASS、设计或编译通过当作当前业务/设备/部署通过
+4. 设备 debug 验收以 Round22 APK/hash 和 `final-debug-validation.md` 为准；不要沿用 Round17 之前的失败日志或旧 hash embedder 结果
+5. K06 fixture 已进入删除/隔离验证后的终态，不得再次 resume；完整 K06 另建受控 fixture，补真实 Vision、故障注入和 Android 12—16 前台任务矩阵
+6. Cloudflare Worker 已部署；下一步只能在用户在场时配置 Zero Trust/Access 身份策略，并从正常网络完成公网签名/ETag/后台浏览器后检
 
 ## 5. 未决事项
 
-Play 生产包名、品牌、Cloudflare 账户/域名/Access、生产签名密钥、Embedding ONNX 模型包、NDK/USearch x86_64、CPython 3.14.x 包哈希。GitHub Ruleset 未验证。未跑模拟器/真机公告拉取。公告 Compose 未按 M0.5 全部视觉标注对齐。历史 AR 修复不等于完整安全验收或发布许可。
+正式包名/品牌/Android release 与签名仍后置。Cloudflare Access 需用户在场创建/选择 Zero Trust 组织与身份策略；公开 `workers.dev` 在本机被解析到保留网段且 TLS 后检未通过。完整 K06 仍缺真实 Vision、全阶段 kill/cancel/offline/disk-full 注入和 Android 12—16 前台任务矩阵。GitHub Ruleset 未在本轮验证。MCP/归档/API Embedding 的本地实现和设备测试已经完成，但不能据此把未执行的生产身份配置、正式 release 或完整 K06 冒称通过。
 
 ## 6. 工作记录
+
+### 2026-08-29T07:10:00+08:00：Round22 debug 集成、设备验收与公告生产部署
+
+- 基线/工作区：`main`、HEAD `7511b22ffd7a7d3021b7857b6500cbe75d037ad6`，保留本轮大规模未提交实现；未 reset/clean/stash/commit/push。
+- 实现：数据库 schema v10 增加 embedding operation 与 query-vector 持久化；API Embedding 导入/重建/重绑改为短事务与 dispatch 前复核，`DISPATCHED` 后未知结果不自动重放；完整产品 UI、MCP、流式 ZIP、第三方声明、官方 CPython 3.14.7 隔离运行时和 native stdout/FD 防线已经接通。
+- 构建：Round22 全部 debug/JVM/SQLite/IPC/SBOM/license 命令 `BUILD SUCCESSFUL`。debug APK SHA-256 `80FF8109B908B3D4E828B846B70C98B58A5B2AC3350C7449AF235D8F40616750`；test APK SHA-256 `A75741FBA9742E1A885FA7C957425B019292FD7426E7DD54E21E6FFA28CD7026`。
+- 设备：Android 16/API 36 x86_64 模拟器，Python 12/12、API Embedding 5/5、Knowledge 4/4 通过；新增“日志超限后立即返回合法 JSON”竞态单项 1/1，并验证下一调用恢复。证据见 `docs/evidence/2026-08-29/final-debug-validation.md`。
+- 独立复核：原 M6/Python 审查者核对 native 原子计数、结果排序、每次调用初始化、host abort/cleanup 与 Round22 日志，确认旧日志竞态闭环，未发现新的 P1/P2。
+- 公告生产：独立 D1 远程迁移无待办；Worker 版本 `dd2be020-85ff-48ef-8b83-779a7a9cc02b` 已部署，包含 source hash `07f164ef5f473ff426488eeeddf0bb7d1cb522286c5389e85baa2351bb473ae3` 和生产签名 secret binding。Access team/audience 为空时后台保持 503；不得在用户不在场时替其创建身份组织/政策。
+- K06 边界：320 文件/472,363,598 bytes fixture 完成本地文本与存储等待组件，20 READY 文本、300 WAITING 图片、零 Vision 调用；未执行真实 Vision、完整故障矩阵和 Android 12—16 前台服务矩阵，因此明确不是完整 K06 PASS。
+- 未做：正式 Android release、正式签名、commit/push、真实付费 Provider/Vision、Cloudflare Access 身份策略和从本机进行的公网 TLS 后检。
 
 ### 2026-08-28：初始文档交接任务
 
@@ -498,6 +511,84 @@ U02 的横屏、IME、大字号、触控、对比度、焦点及实际字体回�
   - `git diff --check`：无空白或格式错误。
 - 未执行项：本轮未修改 Kotlin 业务代码；已按用户明确指令完成 commit 并推送至 `origin/main`。
 
+### 2026-08-29T00:10:00+08:00：无人值守产品完成目标启动
+
+- 用户当前授权：按技术实现文档持续推进直至完成产品；可自行启动模拟器、采用 debug 签名；正式 release 后置；明确授权本产品公告 Cloudflare 正式部署；允许自主设立 goal。已建立持续目标，未指定 Token 预算。
+- 基线：`7511b22ffd7a7d3021b7857b6500cbe75d037ad6`；`1a035aa8c413dac50d0d2cd8854bb5a112100404` 为第二轮审查修复，最新设计是整体浅色、主色 `#66CCFF`、选项原样显示 `66ccff`，无 Emoji。开工 Git 干净。
+- 恢复现场：读取规则/交接/计划/专题，CodeGraph 优先；Android CLI 已安装、存在 medium_phone AVD，但无运行设备；构建 SDK 指向 E:/Android/Sdk，CLI 默认 SDK 为 C:/Users/32735/AppData/Local/Android/Sdk，启动前需核实实际包路径，避免盲改用户环境。
+- Cloudflare：已通过内置浏览器确认用户所指账户已登录；只读核实账户及入口，尚未创建/修改/部署资源，不读取 Cookie/本地存储/私钥。生产身份、资源隔离、签名密钥来源、管理员认证、源代码与回滚证据将先落实。
+- 当前事实：本地公告只有 MemoryStore，D1/生产入口仍须实装；Agent/Profile/会话持久化及七类 Compose 页面仍有缺口；M6 CPython、PDF 栅格化、真实 ONNX/USearch、M7 导入导出/MCP/恢复不能以旧测试或空模块冒充完成。
+- 执行组织：按第2节单一写入责任并行推进；先完成可用接口与独立本地验证，主审集成与模拟器回归，生产操作仅主审执行。继续保持第一方 AGPL-only、秘密不入代码/日志/交接、不触碰其他项目。
+- 验收与收工：本轮进行中，后续按实际命令、设备证据、部署结果和独立审阅逐项维护；不预写 PASS，不提前关闭目标。即使有外部阻碍，也先完成可独立推进部分并记录准确未完成项。
+
+### 2026-08-29T00:28:00+08:00：运行环境与应用接线推进
+
+- SDK 路径已核实：C:/Users/32735/AppData/Local/Android/Sdk 是指向 E:/Android/Sdk 的 Junction，不是两个独立 SDK。`android --sdk E:\Android\Sdk emulator start medium_phone` 成功，设备 `emulator-5554`、API36、x86_64；未清空 AVD。旧 APK `adb install -r` 与 MainActivity 启动成功，已查看基线截图，仅证明旧版本启动。
+- Wrangler 4.127.1 `whoami` 当前 OAuth 有 Worker/D1 写权限，未读取凭据文件。只读 D1/Worker 清单没有本产品资源；账户 workers.dev 后缀已核对。Cloudflare 控制台明确 Zero Trust 尚未设置：管理员 Access 权限需要用户在场的动作确认，不能无人值守绕过；生产 public feed 可在独立 D1/签名就绪后部署，缺 Access 时管理 API 必须拒绝访问。
+- M4RR01—04 独立复核：已有最新 JAR/Java21 JShell 内存 fixture 7/7 通过；仅覆盖旧反例，不代替新实现构建、设备、PDF 栅格化/ONNX。
+- M5 实际传输缺口确认：HostHttp 的被检查 DNS 地址未被原 URLConnection 使用，安排专门修复为固定实际连接地址并保留 TLS 主机名校验；准确结果见 [HTTP 传输证据](docs/evidence/2026-08-29/http-transport.md)。当前 Gradle 指定测试运行中，尚未标 PASS。
+- 主流程补显式 Skill 权限审查、按包/Agent 资源交集、撤权/源码查看 API 及仓储回归；接入 Provider 编辑/角色/参数/删除保护/显式收费探测，以及 Agent 编辑/Prompt 历史/新会话快照 ViewModel。新 API 正在与并行模块集成，尚未编译验收。
+- CodeGraph 已先行用于源码定位；新增文件或精确路径查询返回不相关文件/被截断时，转为限定路径读取。暂不并行重建索引，最终由主流程统一更新。
+
+### 2026-08-29T00:38:00+08:00：独立生产资源与业务接线
+
+- 实际生产操作：`wrangler d1 create mobile-agent-runtime-announcements-prod` 成功，ID `06cf40c7-dd84-4560-859a-1a417f47207e`（WNAM）；不复用其他项目资源。计划 Worker `mobile-agent-runtime-announcements`，Origin `https://mobile-agent-runtime-announcements.gmailforzhibai.workers.dev`，绑定 `ANNOUNCEMENTS_DB`。当前未运行远程迁移、secret 注入或 deploy。
+- 已在 gitignored、限制 ACL 的 `.private/overnight/announcements-production/` 生成 Ed25519 签名密钥；私钥不得进入交接/日志/仓库。公开 keyId `mar-prod-20260829-1`，publicKeyHex `e89c5b55f45a303f5c721a568493edfb9f268b39967ac597b2e105725a552df8`。APK 已写公开配置，仍须部署后协议核验。Access 尚未建立，管理 API 必须关闭，不允许 local token 降级。
+- 数据层新增 Profile/Agent immutable Snapshot/Conversation/Run/Audit/Settings/Transfer；页面新增 state/actions，主流程正接真实 repository。`resolveSnapshot` 从冻结 manifest 取 Provider/Model/Prompt，不能回查 live 配置替代。Skills 导入先检查且默认未授权，显式授权按包/Agent/KB 范围，源码按包哈希核验。
+- 新 HTTP 指定测试两轮：第一轮编译修复后第二轮 30 项中 28 通过，2 项为测试读取 HTTP/2 Host 不当；测试已修正为 authority/Host。第三轮在 embedding 模块 Gradle 脚本配置期失败，未执行测试。等待该所有者修复再由主流程统一重跑，尚未 PASS。
+- 官方 CPython 3.14.7 Android 双 ABI 包已下载并固定 SHA，JNI/isolated IPC 实现进行中；旧“CPython 未嵌入”事实将以实际 APK/设备验证更新，不能提前称 M6 完成。
+- 全部变更仍未提交；无正式 release、无真实收费 Provider 调用。目标持续执行，当前不是产品完成声明。
+
+### 2026-08-29T01:20:00+08:00：生产部署与统一构建进度
+
+- 公告生产仅操作本产品资源：D1 远程空库导出成功（32 bytes，SHA-256 `309d1516f5d4f4f792b17106f7b761312f848c634e3028d70e6eb8ed39df7398`）；0001/0002 远程迁移成功，后读确认 announcements=0、rows_written=0。签名私钥经 stdin 注入，不进入模型输出/仓库。
+- `wrangler deploy --config wrangler.toml` exit0，Worker `mobile-agent-runtime-announcements`、version `34a2dfca-f180-4358-bcdd-66abc354ce1c`、cron `*/5 * * * *`。最终源码归档 `9366cf1d9642f89436769b0f8df3585e5f5b669ac01aacf47a2864c2fc754168`：28 文件逐字节对比当前树及 ZIP、hash/路径排除验证通过；74709 bytes。主审 npm check/test/preflight 均 exit0。
+- 生产公开协议后检**未通过**：Node fetch、curl Schannel 与内置浏览器分别遇到 fetch failed/TLS connection failed/ERR_CONNECTION_CLOSED；没有因此标签名或 304 通过。Access 尚未设置，代码保持后台 fail-closed；不创建权限策略、不回退 local token。
+- NDK r27d 官方下载 781506724 bytes、SHA1 `56607cbccd3642d4a1991f6bb3114a00f884f426`；现场 27.3.13750724 的 properties、clang、toolchain、sysroot 头与官方 ZIP 逐字节一致，CMake3.22.1 可用。CPython 与 USearch arm64-v8a/x86_64 原生库真实编译通过。
+- 主审 fresh JVM：skills51、provider23、agent-runtime16、knowledge33、serialization4，合计127 tests / 0 failure。data最新58/2fail：损坏schema fixture 被SQLite先拒绝、TransferCodec误拒绝nonSecretHeaders，已交所有者修复；IPC和App构建仍继续，未替代新APK设备验收。
+- UI接线 MainActivity/MainScreens/UiDialogs 已由product_ui完成冻结，主审后续整合。新增PythonSkillTools、RunTools、MCP App接线分别按独占文件认领；主审保留Chat/DI/原ViewModel/根文档/Gradle/设备/生产写入权。只读Python安全审阅正在进行。
+- 主审补Application隔离进程不初始化宿主DB/Keystore/后台网络；工具与模型UNKNOWN_OUTCOME将显式终止并持久化，不以Value/FAILED隐式重试；Vision复用统一有界协议，严格结构化输出。上述新改动尚待下一轮测试。
+- 无新 commit/push、无正式 release、无真实收费模型调用。持续目标仍 active；此为进行中交接，不是完成声明。
+
+### 2026-08-29T01:53:00+08:00：真实设备首轮与许可修正
+
+- 最近完整测试 XML 复核：skills51、provider23、agent-runtime18、knowledge33、serialization5、sqlite58、IPC5，合计193项/0失败。该结果属于安全修正/流式归档/API Embedding 追加之前的基线，不能替代后续重跑。
+- round7 `assembleDebug assembleDebugAndroidTest` 成功；debug APK 210226924 bytes，SHA256 `C1B6AC3E03D43EAECD4E5BC8E00CE527C28CD430AA7A0049B3E04E307D541D4D`。原 medium_phone 空间不足，未清理/擦除；创建独立 `E:\Android\Avd\mar_api36_debug.avd`，API36/x86_64、12GiB data、3072MiB RAM，emulator-5556，已实际安装 APK。
+- 新包冷启动**失败**：Android ICU 拒绝 `AgentRepository` 未转义的右花括号模板正则。已定位；主审同步修 `PromptTemplates`，data owner 修对应 repository。日志 `.private/overnight/device/round7-cold-start-crash.log`。旧 JVM 正例不能替代此设备结果。
+- 已实际执行单个 CPython smoke，**1项/1失败**：`runtime_unavailable`。APK 为 `assets/python3.14.zip` 而 loader 要求 `python/python3.14.zip`；runtime owner 正修。未声称 Python 已在设备执行成功。模型 pack 也已修 generated assets 根，但新路径尚未通过新 APK 验证。
+- round8 build 因 TransferCodec 正在实施的 `validateConversations` 未落盘而失败，等待正确函数完整落盘后重跑；不移除校验来通过编译。新增真实 KnowledgeRuntimeDeviceTest（ONNX/USearch/FTS/ICU）和扩充 Python 安全测试源码，尚未编译/设备执行。
+- 独立 M6 审查发现发送后 timeout/EOF/取消未知语义、posix_spawn、原始 FD 注入和日志洪泛缺口；runtime/App owner 正修，新增私有 native nonce/终止策略及测试。主审 Chat 不覆盖子执行器持久 UNKNOWN，并只对有明确 `CANCELLED_BEFORE_DISPATCH` 证据的对应 call 排除未知；输出 token 预算正在贯通。
+- API Embedding 后端与绑定/授权、完整流式 ZIP 导出及本地凭据重新绑定仍在实现；默认不外发。MCP 配置和引用原图已接线但尚未设备验收。
+- 本轮首次 licenseGuard/REUSE 发现生成 source 索引/JSON/ZIP metadata、knowledge evidence 头缺漏；正在修正，未更改/弱化 license guard。仅把本地 Wrangler 生成缓存非破坏地移到 `.private/overnight/announcements-local-state-20260829`，无生产状态变更。实际 debug 依赖报告已生成，新增 `generateDebugSbom` 任务待运行。
+- 主审重新逐字节核验28个公告源码文件/ZIP/manifest；新 sourceHash `07f164ef5f473ff426488eeeddf0bb7d1cb522286c5389e85baa2351bb473ae3`、74760bytes。正式部署 exit0，新 version `dd2be020-85ff-48ef-8b83-779a7a9cc02b`，只更新同产品代码/资产，D1/secret/Access不变；旧归档保留。新 HTTPS后检 curl exit35，TLS handshake failed，无HTTP响应，仍非生产协议PASS。
+- 所有改动仍未提交；无正式 release、无真实收费 Provider/Vision 调用。goal保持active。
+
 ## 7. 后续记录格式
 
 每次新增日期标题，写清：任务/需求 ID、修改文件、事实结果、验证命令和证据、未执行项、Git 状态、待解决问题、下一步。
+
+### 2026-08-29：provider-api streaming redaction、embeddings 与输出预算边界
+
+- 范围：本轮重新独占 `shared/provider-api/**`；未改 `shared/agent-runtime`、Android App/MCP UI 或 Python IPC。保留当前 Provider 的 8 MiB 响应、1 MiB SSE 行界限、UNKNOWN 与取消边界。
+- 修改：`ModelRequest` 末尾新增兼容默认的 `outputTokenLimit: Int?`；OpenAI-compatible payload 在参数最终合并后校验并注入 `max_tokens`，拒绝非法、越预算或同时存在的 `max_tokens`/`max_completion_tokens`，均在 HTTP 前失败。流式文本对主凭据和已解析 custom `SecretRef` 进行跨 delta 脱敏；疑似前缀只在正常完成时 flush，EOF/异常/取消丢弃；完整 JSON content/error 脱敏，含凭据的工具参数在发出工具事件前以 `UNKNOWN_OUTCOME` 失败。实现了有界 `/embeddings` POST，严格检查请求上限、data 数量、唯一连续 index、重排、维度、数字与 finite。
+- 测试：补充 MockEngine 的主/custom header 分片回显、半凭据 EOF、完整 JSON content、含凭据工具参数、输出预算前置校验、embedding 重排及损坏响应覆盖。按协调要求未运行 Gradle；`git diff --check` 无错误。协调者需在工作树稳定后运行 provider-api 与相关模块测试；本轮未访问真实 Provider、未发生真实收费请求。
+- 证据：`docs/evidence/2026-08-29/protocol-adapters.md` 已同步；当前编译、统一测试、设备/生产状态均待主审确认。未 commit/push。
+
+### 2026-08-29T02:29:00+08:00：round12/13 真实设备与接线推进
+
+- round13 `assembleDebug assembleDebugAndroidTest generateDebugSbom data:sqlite:test` 构建成功（1m2s）；debug APK 212842053 bytes，SHA256 `0f03d534e20fd2f610143c02bfe7118f39caaf2b4c9f4fa0ee6b6a892007eeae`。data XML 68项/0失败，其中 ProductData 6项覆盖完整ZIP往返及压缩比。SBOM 166 resolved components，与该APK hash一致。
+- 专用 API36/x86_64 emulator-5556 真实 Knowledge 4/4通过：ONNX稳定归一化、USearch JNI、SQLite FTS/引用/删除/代际、Android ICU模板初始化。冷启动成功。round12 Python11项失败被cleanup关闭log pipe异常遮蔽；runtime修复后round13单个normal测试仍1/1失败，结果为FAILED/python_error。未声称Python执行成功；安全stage/type诊断已落，round14重建中。
+- 当前APK已确认 `assets/python/python3.14.zip`（内含LICENSE）、CPython/USearch/ONNX完整许可与MiniLM Apache正文。完整第三方索引/144外部坐标声明和Settings/About入口正在实施，未以POM名称代替完整原文。
+- 本机受控Provider fixture监听127.0.0.1:8765，仅用于debug模拟器10.0.2.2；输出标明LOCAL QA FIXTURE，使用明确假凭据，无真实Provider/付费调用。尚未通过UI完整会话验收；表单错误显示、URL键盘及系统语言/文字对比已修源码，待新包验证。
+- API Embedding已有严格持久space/模型revision/resolver，主审新增 `ApiEmbeddingRegistry` 并接DI，KnowledgeVM/独立文本上传与重复收费确认正接线。发现显式UNKNOWN retry仍被grant入口拒绝，已交仓库owner最小修复及回归；绝不绕过授权或回退本地空间。
+- K06 opt-in测试源码已冻结：320人工文件约450MiB，其中300幅stored PNG用于真实图像存储/等待压力，20篇文本走真实ONNX/JNI。尚未生成或运行负载，不等价自然压缩语料或450MiB模型吞吐；Android12—16矩阵仍未执行。
+- 生产版本仍 `dd2be020-85ff-48ef-8b83-779a7a9cc02b`；公共HTTPS后检TLS关闭和Access未配置仍未闭环。未增加生产资源、未发布实际公告、未改其他项目。
+- 本轮恢复时goal工具返回blocked（与较早记录active不同）；不伪造重建goal或完成状态，按用户原授权继续可独立推进的实现/验证。所有源码WIP保留，无commit/push、无正式release。下一步：新APK定位Python错误、API Embedding UI/授权回归、受控Provider UI旅程、负载与独立审阅、最终文档和证据归档。
+
+### 2026-08-29T08:15:00+08:00：授权提交并推送 Round22 工作区
+
+- 请求：用户明确要求完成 commit 与 push。
+- 范围：自 HEAD `7511b22` 以来的产品实现（CPython 隔离、ONNX/USearch、MCP/工具、66ccff UI、独立公告、证据与许可资产）。不提交 `.codegraph/`、构建产物、`.private/`、签名密钥或 Worker 私钥。
+- 验证：提交前 `.\gradlew.bat licenseGuard licenseGuardReverse --no-daemon` BUILD SUCCESSFUL；`python -B -m reuse lint` 316/316 退出 0。未再跑模拟器或付费模型。
+- Git：父提交 `7511b22`；作者 `luozhibai <wy3273564266@163.com>`，走 `D:\Git\mingw64\libexec\git-core\git.exe commit-tree`。SHA 与 push 结果在提交后回写。
+- 下一步：正式 Android release 仍须另行授权。不自动改 Cloudflare Access 身份策略。

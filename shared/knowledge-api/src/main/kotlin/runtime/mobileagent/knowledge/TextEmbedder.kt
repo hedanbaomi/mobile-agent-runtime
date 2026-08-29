@@ -12,6 +12,38 @@ interface TextEmbedder {
 }
 
 /**
+ * Optional batch boundary for providers that can embed several chunks in one
+ * request.  The repository uses this only after checking its immutable
+ * `(spaceId, contentHash)` cache, so a successful chunk is never sent again
+ * merely because an index generation was rebuilt.
+ */
+interface BatchTextEmbedder {
+    fun embedBatch(texts: List<String>): List<FloatArray>
+}
+
+/**
+ * Suspending boundary used by long running remote embedding operations.
+ *
+ * Implementations must propagate coroutine cancellation to their transport and
+ * must not retain a repository/SQLite transaction while the request is in
+ * flight.  [BatchTextEmbedder] remains the synchronous compatibility boundary
+ * for local fixtures and existing callers.
+ */
+interface CancellableBatchTextEmbedder {
+    suspend fun embedBatchCancellable(texts: List<String>): List<FloatArray>
+}
+
+/**
+ * A remote embedding call reached an uncertain transport boundary.  Callers
+ * must persist this as UNKNOWN_OUTCOME and require an explicit duplicate
+ * charge acknowledgement before retrying; this exception is never retried by
+ * an import worker automatically.
+ */
+class EmbeddingUnknownOutcomeException(
+    cause: Throwable? = null,
+) : RuntimeException("UNKNOWN_OUTCOME: embedding result is uncertain", cause)
+
+/**
  * Local retrieval fixture space. This is not an ONNX model pack and must not be mixed with
  * a later model-pack spaceId. Production ONNX weights are still a separate authorized pack.
  */

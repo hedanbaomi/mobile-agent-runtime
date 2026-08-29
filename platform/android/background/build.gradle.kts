@@ -24,6 +24,7 @@ android {
 dependencies {
     implementation(project(":shared:domain"))
     implementation(project(":shared:knowledge-api"))
+    implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.work.runtime)
 
 }

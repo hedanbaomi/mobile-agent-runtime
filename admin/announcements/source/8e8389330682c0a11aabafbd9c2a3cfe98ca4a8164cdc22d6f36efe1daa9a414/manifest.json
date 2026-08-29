@@ -1,0 +1,127 @@
+{
+  "schemaVersion": 1,
+  "sourceHash": "8e8389330682c0a11aabafbd9c2a3cfe98ca4a8164cdc22d6f36efe1daa9a414",
+  "artifact": "mobile-agent-runtime-announcements-source.zip",
+  "files": [
+    {
+      "path": "services/announcements/src/access.mjs",
+      "bytes": 7004
+    },
+    {
+      "path": "services/announcements/src/app.mjs",
+      "bytes": 18681
+    },
+    {
+      "path": "services/announcements/src/d1-store.mjs",
+      "bytes": 36069
+    },
+    {
+      "path": "services/announcements/src/errors.mjs",
+      "bytes": 296
+    },
+    {
+      "path": "services/announcements/src/local-server.mjs",
+      "bytes": 2837
+    },
+    {
+      "path": "services/announcements/src/rollout.mjs",
+      "bytes": 484
+    },
+    {
+      "path": "services/announcements/src/schema.sql",
+      "bytes": 3456
+    },
+    {
+      "path": "services/announcements/src/sign.mjs",
+      "bytes": 2970
+    },
+    {
+      "path": "services/announcements/src/store.mjs",
+      "bytes": 15968
+    },
+    {
+      "path": "services/announcements/src/targeting.mjs",
+      "bytes": 2065
+    },
+    {
+      "path": "services/announcements/src/validation.mjs",
+      "bytes": 10595
+    },
+    {
+      "path": "services/announcements/src/worker.mjs",
+      "bytes": 3045
+    },
+    {
+      "path": "services/announcements/src/access.test.mjs",
+      "bytes": 2060
+    },
+    {
+      "path": "services/announcements/src/rollout.test.mjs",
+      "bytes": 447
+    },
+    {
+      "path": "services/announcements/src/worker.test.mjs",
+      "bytes": 20252
+    },
+    {
+      "path": "services/announcements/migrations/0001_initial.sql",
+      "bytes": 2353
+    },
+    {
+      "path": "services/announcements/migrations/0002_hardened_contract.sql",
+      "bytes": 2236
+    },
+    {
+      "path": "services/announcements/package.json",
+      "bytes": 801
+    },
+    {
+      "path": "services/announcements/package-lock.json",
+      "bytes": 50046
+    },
+    {
+      "path": "services/announcements/wrangler.toml",
+      "bytes": 1330
+    },
+    {
+      "path": "services/announcements/wrangler.local.toml",
+      "bytes": 864
+    },
+    {
+      "path": "services/announcements/DEPLOYMENT.md",
+      "bytes": 6142
+    },
+    {
+      "path": "services/announcements/scripts/build-source-artifact.mjs",
+      "bytes": 4810
+    },
+    {
+      "path": "services/announcements/scripts/local-smoke.mjs",
+      "bytes": 3062
+    },
+    {
+      "path": "services/announcements/scripts/preflight.mjs",
+      "bytes": 2524
+    },
+    {
+      "path": "admin/announcements/index.html",
+      "bytes": 12389
+    },
+    {
+      "path": "LICENSE",
+      "bytes": 34523
+    },
+    {
+      "path": "LICENSE_POLICY.md",
+      "bytes": 5500
+    }
+  ],
+  "excludes": [
+    ".env*",
+    ".dev.vars*",
+    "node_modules/",
+    ".wrangler/",
+    "private/",
+    "secrets/"
+  ]
+}

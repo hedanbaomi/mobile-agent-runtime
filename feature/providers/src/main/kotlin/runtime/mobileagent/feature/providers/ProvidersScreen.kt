@@ -30,7 +30,7 @@ fun ProvidersScreen(
     onSave: (name: String, baseUrl: String, modelId: String, apiKey: String, vision: Boolean, tools: Boolean) -> Boolean,
 ) {
     val name = remember { mutableStateOf("") }
-    val baseUrl = remember { mutableStateOf("https://api.openai.com/v1") }
+    val baseUrl = remember { mutableStateOf("") }
     val modelId = remember { mutableStateOf("") }
     val apiKey = remember { mutableStateOf("") }
     val vision = remember { mutableStateOf(false) }

@@ -8,6 +8,7 @@ import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
+import runtime.mobileagent.domain.ErrorCode
 import runtime.mobileagent.provider.ModelEvent
 import runtime.mobileagent.provider.SecretRedactor
 
@@ -24,7 +25,13 @@ object OpenAiSse {
         if (trimmed.isEmpty() || trimmed.startsWith(":")) return emptyList()
         if (!trimmed.startsWith("data:")) return emptyList()
         val data = trimmed.removePrefix("data:").trim()
-        if (data == "[DONE]") return listOf(ModelEvent.Completed)
+        if (data == "[DONE]") {
+            val toolEvents = flushToolCalls(toolBuf, extraSecrets)
+                ?: return listOf(ModelEvent.Failed(ErrorCode.UNKNOWN_OUTCOME.name))
+            toolBuf.clear()
+            indexToId.clear()
+            return toolEvents + ModelEvent.Completed
+        }
         val obj = runCatching { json.parseToJsonElement(data).jsonObject }.getOrNull() ?: return emptyList()
         obj["error"]?.jsonObject?.get("message")?.jsonPrimitive?.contentOrNull?.let { msg ->
             return listOf(ModelEvent.Failed(SecretRedactor.redact(msg, extraSecrets)))
@@ -48,14 +55,37 @@ object OpenAiSse {
                 toolBuf[id] = name to acc.second
             }
             acc.second.append(args)
-            val resolved = toolBuf.getValue(id)
-            events += ModelEvent.ToolCallDelta(id, resolved.first.ifBlank { name }, resolved.second.toString())
         }
         val usage = obj["usage"]?.jsonObject
         if (usage != null) {
             val input = usage["prompt_tokens"]?.jsonPrimitive?.contentOrNull?.toIntOrNull() ?: 0
             val output = usage["completion_tokens"]?.jsonPrimitive?.contentOrNull?.toIntOrNull() ?: 0
             events += ModelEvent.Usage(input, output)
+        }
+        return events
+    }
+
+    /**
+     * Tool arguments are withheld until the provider's terminal marker.  A
+     * partial argument cannot be sent to the runtime, and a call containing a
+     * credential is rejected without exposing any earlier argument prefix.
+     */
+    private fun flushToolCalls(
+        toolBuf: LinkedHashMap<String, Pair<String, StringBuilder>>,
+        secrets: List<String>,
+    ): List<ModelEvent>? {
+        if (toolBuf.isEmpty()) return emptyList()
+        val events = mutableListOf<ModelEvent>()
+        for ((callId, call) in toolBuf) {
+            val arguments = call.second.toString()
+            val parsed = runCatching { json.parseToJsonElement(arguments).jsonObject }.getOrNull()
+                ?: return null
+            if (containsCredentialText(callId, secrets) ||
+                containsCredentialText(call.first, secrets) ||
+                containsCredentialText(arguments, secrets) ||
+                containsCredentialJson(parsed, secrets)
+            ) return null
+            events += ModelEvent.ToolCallDelta(callId, call.first, arguments)
         }
         return events
     }

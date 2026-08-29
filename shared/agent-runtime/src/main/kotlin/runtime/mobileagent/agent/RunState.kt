@@ -16,6 +16,7 @@ enum class RunState {
     COMPLETED,
     CANCELLED,
     FAILED,
+    UNKNOWN_OUTCOME,
     BUDGET_EXHAUSTED,
 }
 

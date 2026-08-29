@@ -49,4 +49,30 @@ class ParameterMergerTest {
         )
         assertEquals("0.5", result.getValue("temperature").toString())
     }
+
+    @Test
+    fun reservedFieldInTypedModelLayerIsRejectedCaseInsensitively() {
+        val ex = assertThrows(AppException::class.java) {
+            ParameterMerger.merge(
+                ParameterLayers(modelParameters = mapOf("STREAM" to JsonPrimitive(false))),
+                emptyMap(),
+                emptyMap(),
+                "typed-layer",
+            )
+        }
+        assertEquals(ErrorCode.INVALID_CONFIG, ex.error.code)
+    }
+
+    @Test
+    fun legacyExtrasAcceptOnlyJsonShapedValues() {
+        val ex = assertThrows(AppException::class.java) {
+            ParameterMerger.merge(
+                ParameterLayers(),
+                mapOf("callback" to Any()),
+                emptyMap(),
+                "legacy-extra",
+            )
+        }
+        assertEquals(ErrorCode.INVALID_CONFIG, ex.error.code)
+    }
 }

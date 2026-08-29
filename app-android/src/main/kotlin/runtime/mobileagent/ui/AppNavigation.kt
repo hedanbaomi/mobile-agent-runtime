@@ -10,6 +10,10 @@ import androidx.compose.material.icons.outlined.Extension
 import androidx.compose.material.icons.outlined.MenuBook
 import androidx.compose.material.icons.outlined.Settings
 import androidx.compose.material.icons.outlined.SmartToy
+import androidx.compose.material.icons.outlined.MoreHoriz
+import androidx.compose.material.icons.outlined.Info
+import androidx.compose.material.icons.outlined.BugReport
+import androidx.compose.material.icons.outlined.Cloud
 import androidx.compose.material.icons.outlined.Tune
 
 object AppRoutes {
@@ -20,6 +24,10 @@ object AppRoutes {
     const val SKILLS = "skills"
     const val NEWS = "news"
     const val SETTINGS = "settings"
+    const val MORE = "more"
+    const val ABOUT = "about"
+    const val INSPECTOR = "inspector"
+    const val MCP = "mcp"
 }
 
 /** The seven product destinations in design order. Labels are localized at the shell boundary. */
@@ -31,6 +39,23 @@ fun defaultAppDestinations(chinese: Boolean = true): List<AppNavigationDestinati
     AppNavigationDestination(AppRoutes.SKILLS, if (chinese) "技能" else "Skills", Icons.Outlined.Extension),
     AppNavigationDestination(AppRoutes.NEWS, if (chinese) "公告" else "News", Icons.Outlined.Campaign),
     AppNavigationDestination(AppRoutes.SETTINGS, if (chinese) "设置" else "Settings", Icons.Outlined.Settings),
+)
+
+fun phonePrimaryDestinations(chinese: Boolean = true): List<AppNavigationDestination> = listOf(
+    AppNavigationDestination(AppRoutes.CHAT, if (chinese) "对话" else "Chat", Icons.Outlined.Chat),
+    AppNavigationDestination(AppRoutes.AGENTS, if (chinese) "智能体" else "Agents", Icons.Outlined.SmartToy),
+    AppNavigationDestination(AppRoutes.KNOWLEDGE, if (chinese) "知识" else "Knowledge", Icons.Outlined.MenuBook),
+    AppNavigationDestination(AppRoutes.SKILLS, if (chinese) "技能" else "Skills", Icons.Outlined.Extension),
+    AppNavigationDestination(AppRoutes.MORE, if (chinese) "更多" else "More", Icons.Outlined.MoreHoriz),
+)
+
+fun moreHubItems(chinese: Boolean = true): List<AppNavigationDestination> = listOf(
+    AppNavigationDestination(AppRoutes.PROVIDERS, if (chinese) "服务商" else "Providers", Icons.Outlined.Tune),
+    AppNavigationDestination(AppRoutes.NEWS, if (chinese) "公告" else "News", Icons.Outlined.Campaign),
+    AppNavigationDestination(AppRoutes.MCP, if (chinese) "MCP" else "MCP", Icons.Outlined.Cloud),
+    AppNavigationDestination(AppRoutes.SETTINGS, if (chinese) "设置" else "Settings", Icons.Outlined.Settings),
+    AppNavigationDestination(AppRoutes.ABOUT, if (chinese) "关于" else "About", Icons.Outlined.Info),
+    AppNavigationDestination(AppRoutes.INSPECTOR, if (chinese) "请求检查器" else "Request inspector", Icons.Outlined.BugReport),
 )
 
 fun appThemeMode(value: String?): AppThemeMode = when (value?.lowercase()) {

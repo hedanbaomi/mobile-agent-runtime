@@ -35,6 +35,7 @@ data class EffectivePrompt(
     val currentImages: List<InlineImage> = emptyList(),
     /** Typed history preserves tool calls, tool results, and image metadata. */
     val typedHistory: List<ChatMessage>? = null,
+    val globalRootPrompt: String = "",
 ) {
     /**
      * Assemble a model prompt with visible trust boundaries.  Skills and
@@ -46,6 +47,9 @@ data class EffectivePrompt(
     fun assemble(): PromptAssembly {
         val blocks = buildList {
             add(PromptBlock(PromptTrust.TRUSTED_RUNTIME, runtimeContract))
+            if (globalRootPrompt.isNotBlank()) {
+                add(PromptBlock(PromptTrust.USER_CONFIGURATION, globalRootPrompt))
+            }
             add(PromptBlock(PromptTrust.USER_CONFIGURATION, userSystemPrompt))
             skillInstructions.forEach { add(PromptBlock(PromptTrust.UNTRUSTED_SKILL, it)) }
             retrieved.forEach { add(PromptBlock(PromptTrust.UNTRUSTED_KNOWLEDGE, it)) }
@@ -54,6 +58,7 @@ data class EffectivePrompt(
         val messages = mutableListOf<ChatMessage>()
         val system = buildString {
             appendTagged("runtime-contract", runtimeContract)
+            appendTagged("global-root-prompt", globalRootPrompt)
             appendTagged("user-system-prompt", userSystemPrompt)
             if (skillInstructions.isNotEmpty()) {
                 appendLine("<untrusted-skill-instructions>")

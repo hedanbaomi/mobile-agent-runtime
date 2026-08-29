@@ -96,7 +96,11 @@ data class AgentEditorUi(
 data class AgentsUiState(
     val agents: List<AgentCardUi> = emptyList(),
     val selectedAgentId: String? = null,
+    val summary: AgentEditorUi? = null,
     val editor: AgentEditorUi? = null,
+    val editorOpen: Boolean = false,
+    val editorDirty: Boolean = false,
+    val hasRerankerModels: Boolean = false,
     val query: String = "",
     val language: String = "zh-CN",
     val loading: Boolean = false,
@@ -178,7 +182,7 @@ private fun AgentCard(agent: AgentCardUi, selected: Boolean, onClick: () -> Unit
 @Composable
 private fun AgentSummary(state: AgentsUiState, actions: AgentsActions) {
     val zh = state.language.equals("zh-CN", true)
-    val editor = state.editor
+    val editor = state.summary
     if (editor == null) {
         Text(if (zh) "选择智能体以查看提示词、模型角色和资源绑定。" else "Select an agent to inspect its prompt, model roles, and resource bindings.", modifier = Modifier.padding(24.dp))
         return
@@ -188,7 +192,7 @@ private fun AgentSummary(state: AgentsUiState, actions: AgentsActions) {
             Text(editor.name.ifBlank { if (zh) "智能体" else "Agent" }, style = MaterialTheme.typography.headlineSmall)
             Text(if (zh) "修订版 ${editor.revision}" else "Revision ${editor.revision}", style = MaterialTheme.typography.bodySmall)
         }
-        Button(onClick = actions.onSave) { Text(if (zh) "保存" else "Save") }
+        Button(onClick = { actions.onOpenEditor(state.selectedAgentId) }) { Text(if (zh) "编辑" else "Edit") }
     }
     if (editor.snapshotLabel.isNotBlank()) {
         Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.tertiaryContainer), modifier = Modifier.fillMaxWidth().padding(top = 12.dp)) {
@@ -197,22 +201,20 @@ private fun AgentSummary(state: AgentsUiState, actions: AgentsActions) {
     }
     Text(if (zh) "模型角色" else "Model roles", style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(top = 16.dp))
     ModelRoleRow(if (zh) "对话" else "Chat", editor.chatModelId, editor, actions, zh)
-    ModelRoleRow(if (zh) "视觉" else "Vision", editor.visionModelId, editor, actions, zh)
-    ModelRoleRow(if (zh) "嵌入" else "Embedding", editor.embeddingModelId, editor, actions, zh)
-    ModelRoleRow(if (zh) "重排" else "Reranker", editor.rerankerModelId, editor, actions, zh)
+    ModelRoleRow(if (zh) "视觉（可选）" else "Vision (optional)", editor.visionModelId, editor, actions, zh)
+    if (state.hasRerankerModels) {
+        ModelRoleRow(if (zh) "重排" else "Reranker", editor.rerankerModelId, editor, actions, zh)
+    }
     Text(if (zh) "提示词" else "Prompt", style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(top = 16.dp))
     Text(editor.prompt.ifBlank { if (zh) "暂无提示词修订版。" else "No prompt revision is available." }, modifier = Modifier.padding(top = 6.dp))
-    OutlinedButton(onClick = actions.onSavePromptRevision, modifier = Modifier.padding(top = 8.dp)) { Text(if (zh) "保存提示词修订" else "Save prompt revision") }
     if (editor.promptRevisions.isNotEmpty()) {
         Text(if (zh) "提示词历史" else "Prompt history", style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(top = 12.dp))
         editor.promptRevisions.forEach { revision ->
             Card(Modifier.fillMaxWidth().padding(top = 6.dp)) {
                 Column(Modifier.padding(10.dp)) {
-                    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                        Text("r${revision.revision} · ${revision.label}", Modifier.weight(1f), fontWeight = FontWeight.SemiBold)
-                        if (!revision.active) TextButton(onClick = { actions.onRestorePrompt(revision.id) }) { Text(if (zh) "恢复" else "Restore") }
-                    }
+                    Text("r${revision.revision} · ${revision.label}", fontWeight = FontWeight.SemiBold)
                     if (revision.createdAt.isNotBlank()) Text(revision.createdAt, style = MaterialTheme.typography.labelSmall)
+                    if (revision.active) Text(if (zh) "当前生效" else "Active", style = MaterialTheme.typography.labelSmall)
                 }
             }
         }
@@ -223,13 +225,11 @@ private fun AgentSummary(state: AgentsUiState, actions: AgentsActions) {
     Text(if (zh) "资源" else "Resources", style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(top = 16.dp))
     if (editor.resourceBindings.isEmpty()) Text(if (zh) "没有绑定知识库或技能。" else "No knowledge bases or skills are bound.", style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(top = 6.dp))
     editor.resourceBindings.forEach { binding ->
-        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-            Checkbox(binding.enabled, { actions.onToggleResource(binding.id, it) })
-            Column(Modifier.weight(1f)) {
-                Text(binding.name)
-                Text("${binding.type}${if (binding.permissionSummary.isBlank()) "" else " · ${binding.permissionSummary}"}", style = MaterialTheme.typography.labelSmall)
-            }
-        }
+        Text(
+            "${binding.name} · ${binding.type}${if (binding.enabled) "" else if (zh) "（未启用）" else " (disabled)"}${if (binding.permissionSummary.isBlank()) "" else " · ${binding.permissionSummary}"}",
+            style = MaterialTheme.typography.bodySmall,
+            modifier = Modifier.padding(top = 4.dp),
+        )
     }
     Text(if (zh) "检索模式：${editor.retrievalMode}" else "Retrieval mode: ${editor.retrievalMode}", style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(top = 8.dp))
     OutlinedButton(onClick = actions.onSnapshot, modifier = Modifier.padding(top = 8.dp)) { Text(if (zh) "创建快照边界" else "Create snapshot boundary") }
@@ -255,12 +255,18 @@ private fun AgentEditorDialog(editor: AgentEditorUi, actions: AgentsActions, zh:
                 error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
                 OutlinedTextField(editor.name, { actions.onEditorChange(editor.copy(name = it)) }, label = { Text(if (zh) "名称" else "Name") }, modifier = Modifier.fillMaxWidth())
                 OutlinedTextField(editor.prompt, { actions.onEditorChange(editor.copy(prompt = it)) }, label = { Text(if (zh) "提示词修订" else "Prompt revision") }, minLines = 5, modifier = Modifier.fillMaxWidth())
+                editor.promptRevisions.filter { !it.active }.forEach { revision ->
+                    TextButton(onClick = { actions.onRestorePrompt(revision.id) }) {
+                        Text(if (zh) "载入 r${revision.revision} ${revision.label}" else "Load r${revision.revision} ${revision.label}")
+                    }
+                }
                 OutlinedTextField(editor.retrievalMode, { actions.onEditorChange(editor.copy(retrievalMode = it)) }, label = { Text(if (zh) "检索模式" else "Retrieval mode") }, modifier = Modifier.fillMaxWidth())
                 Text(if (zh) "模型角色" else "Model roles", style = MaterialTheme.typography.titleMedium)
                 RoleDropdown(if (zh) "对话" else "Chat", editor.chatModelId, editor.modelOptions, "CHAT", zh) { actions.onEditorChange(editor.copy(chatModelId = it)) }
-                RoleDropdown(if (zh) "视觉" else "Vision", editor.visionModelId, editor.modelOptions, "VISION", zh) { actions.onEditorChange(editor.copy(visionModelId = it)) }
-                RoleDropdown(if (zh) "嵌入" else "Embedding", editor.embeddingModelId, editor.modelOptions, "EMBEDDING", zh) { actions.onEditorChange(editor.copy(embeddingModelId = it)) }
-                RoleDropdown(if (zh) "重排" else "Reranker", editor.rerankerModelId, editor.modelOptions, "RERANKER", zh) { actions.onEditorChange(editor.copy(rerankerModelId = it)) }
+                RoleDropdown(if (zh) "视觉（可选）" else "Vision (optional)", editor.visionModelId, editor.modelOptions, "VISION", zh) { actions.onEditorChange(editor.copy(visionModelId = it)) }
+                if (editor.modelOptions.any { it.role.equals("RERANKER", true) }) {
+                    RoleDropdown(if (zh) "重排" else "Reranker", editor.rerankerModelId, editor.modelOptions, "RERANKER", zh) { actions.onEditorChange(editor.copy(rerankerModelId = it)) }
+                }
                 Text(if (zh) "参数" else "Parameters", style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(top = 8.dp))
                 val parameterNames = (editor.parameterSchema + editor.parameters.keys).distinct()
                 if (parameterNames.isEmpty()) Text(if (zh) "参数模式不可用，因此不显示覆盖字段。" else "Parameter schema unavailable; no override field is shown.", style = MaterialTheme.typography.bodySmall)
@@ -300,7 +306,12 @@ private fun RoleDropdown(
     onSelect: (String?) -> Unit,
 ) {
     var expanded by androidx.compose.runtime.remember { androidx.compose.runtime.mutableStateOf(false) }
-    val matching = options.filter { it.role.equals(role, true) }
+    val matching = when (role.uppercase()) {
+        "CHAT" -> options.filter { it.role.equals("CHAT", true) || it.role.equals("VISION", true) }
+        "VISION" -> options.filter { it.role.equals("VISION", true) || "image" in it.capabilities }
+        "RERANKER" -> options.filter { it.role.equals("RERANKER", true) }
+        else -> emptyList()
+    }
     val selected = options.firstOrNull { it.id == selectedId }
     Column {
         OutlinedButton(onClick = { expanded = true }, modifier = Modifier.fillMaxWidth()) {

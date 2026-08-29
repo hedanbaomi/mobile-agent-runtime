@@ -73,6 +73,38 @@ class KnowledgeRepositoryTest {
     }
 
     @Test
+    fun textOnlyMarkdownPersistsVisualGapsAndIsSearchable() {
+        val db = JdbcSqlConnection()
+        Migrations.apply(db)
+        val repo = KnowledgeRepository(db, MemoryBlobSink())
+        val body = "# Recipe\n\nSee the diagram:\n\n![oven](photo.png)\nOven temperature is 180C.\n".toByteArray()
+        val waiting = repo.importBytes("recipe.md", "text/markdown", body, visionConfigured = false)
+        assertEquals(ImportStage.WAITING_FOR_VISION_MODEL, waiting.stage)
+        val gapped = repo.acceptTextOnlyVisualGaps(waiting.id)
+        assertEquals(ImportStage.READY_WITH_VISUAL_GAPS, gapped.stage)
+        assertFalse(ImportStateMachine.isCompleteSuccess(gapped))
+        assertTrue(ImportStateMachine.isPublished(gapped.stage))
+        assertTrue(repo.search("180C").any { "180C" in it.text })
+        val versionStatus = db.query("SELECT status FROM document_versions").single().string("status")
+        assertEquals("READY_WITH_VISUAL_GAPS", versionStatus)
+    }
+
+    @Test
+    fun textOnlyImageWithoutTextKeepsWaiting() {
+        val db = JdbcSqlConnection()
+        Migrations.apply(db)
+        val repo = KnowledgeRepository(db, MemoryBlobSink())
+        val png = byteArrayOf(0x89.toByte(), 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A) + ByteArray(16)
+        val waiting = repo.importBytes("diagram.png", "image/png", png, visionConfigured = false)
+        assertEquals(ImportStage.WAITING_FOR_VISION_MODEL, waiting.stage)
+        val thrown = assertThrows(IllegalStateException::class.java) { repo.acceptTextOnlyVisualGaps(waiting.id) }
+        assertTrue(thrown.message.orEmpty().contains("no indexable text", ignoreCase = true))
+        val still = repo.listJobs().single().first
+        assertEquals(ImportStage.WAITING_FOR_VISION_MODEL, still.stage)
+        assertFalse(ImportStateMachine.isPublished(still.stage))
+    }
+
+    @Test
     fun sharedBlobSurvivesDeletingOneKnowledgeBase() {
         val db = JdbcSqlConnection()
         Migrations.apply(db)

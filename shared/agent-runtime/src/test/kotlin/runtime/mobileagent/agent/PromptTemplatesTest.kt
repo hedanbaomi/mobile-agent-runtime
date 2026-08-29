@@ -38,4 +38,25 @@ class PromptTemplatesTest {
         assertTrue(system.contains("<untrusted-knowledge-evidence>"))
         assertEquals(PromptTrust.UNTRUSTED_SKILL, prompt.assemble().blocks[2].trust)
     }
+
+    @Test
+    fun globalRootPromptSitsBetweenRuntimeAndAgentPrompt() {
+        val prompt = EffectivePrompt(
+            runtimeContract = "contract",
+            userSystemPrompt = "agent",
+            skillInstructions = emptyList(),
+            retrieved = emptyList(),
+            history = emptyList(),
+            currentUser = "hello",
+            globalRootPrompt = "root layer",
+        )
+        val blocks = prompt.assemble().blocks
+        assertEquals(PromptTrust.TRUSTED_RUNTIME, blocks[0].trust)
+        assertEquals("root layer", blocks[1].text)
+        assertEquals("agent", blocks[2].text)
+        val system = prompt.asMessages().first { it.role == "system" }.text
+        assertTrue(system.contains("<global-root-prompt>"))
+        assertTrue(system.indexOf("<runtime-contract>") < system.indexOf("<global-root-prompt>"))
+        assertTrue(system.indexOf("<global-root-prompt>") < system.indexOf("<user-system-prompt>"))
+    }
 }

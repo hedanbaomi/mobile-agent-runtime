@@ -38,6 +38,10 @@ import runtime.mobileagent.domain.ModelProfile
 import runtime.mobileagent.domain.RetryClass
 import runtime.mobileagent.domain.Utc
 import runtime.mobileagent.domain.AppException
+import runtime.mobileagent.domain.InputModality
+import runtime.mobileagent.domain.ModelFeature
+import runtime.mobileagent.domain.ModelOperation
+import runtime.mobileagent.domain.withEndpoint
 import runtime.mobileagent.provider.AssistantToolCall
 import runtime.mobileagent.provider.CapabilityProbeStatus
 import runtime.mobileagent.provider.CapabilityReport
@@ -115,10 +119,12 @@ class OpenAiCompatibleAdapter(
             }.execute { response ->
                 val status = response.status.value
                 if (status in 200..299) {
+                    val toolsSummary = probeDeclaredFeature(profile, resolved, tools = true)
+                    val imagesSummary = probeDeclaredFeature(profile, resolved, tools = false)
                     profileReport.copy(
-                        source = "live-model-metadata",
+                        source = "live-model-metadata; tools=$toolsSummary; images=$imagesSummary",
                         status = CapabilityProbeStatus.SUCCEEDED,
-                        charged = false,
+                        charged = toolsSummary.startsWith("http-") || imagesSummary.startsWith("http-"),
                         operationId = operationId,
                     )
                 } else {
@@ -534,6 +540,94 @@ class OpenAiCompatibleAdapter(
             operationId = "embedding",
         ).asException()
 
+    private suspend fun probeDeclaredFeature(
+        profile: ModelProfile,
+        headers: ResolvedHeaders,
+        tools: Boolean,
+    ): String {
+        val endpoint = profile.withEndpoint().endpoint
+        val chat = ModelOperation.CHAT in endpoint.operations || profile.role.name == "CHAT" || profile.role.name == "VISION"
+        val declared = if (tools) {
+            ModelFeature.TOOL_CALLING in endpoint.features || "tools" in profile.capabilities
+        } else {
+            InputModality.IMAGE in endpoint.inputModalities || "image" in profile.capabilities || profile.role.name == "VISION"
+        }
+        if (!declared || !chat) return "not-declared"
+        val body = buildJsonObject {
+            put("model", JsonPrimitive(profile.modelId))
+            put("max_tokens", JsonPrimitive(1))
+            put("stream", JsonPrimitive(false))
+            put(
+                "messages",
+                buildJsonArray {
+                    add(
+                        buildJsonObject {
+                            put("role", JsonPrimitive("user"))
+                            if (tools) {
+                                put("content", JsonPrimitive("Reply with ok."))
+                            } else {
+                                put(
+                                    "content",
+                                    buildJsonArray {
+                                        add(buildJsonObject {
+                                            put("type", JsonPrimitive("text"))
+                                            put("text", JsonPrimitive("Describe the image in one word."))
+                                        })
+                                        add(buildJsonObject {
+                                            put("type", JsonPrimitive("image_url"))
+                                            put("image_url", buildJsonObject {
+                                                put("url", JsonPrimitive("data:image/png;base64,$PROBE_PNG"))
+                                            })
+                                        })
+                                    },
+                                )
+                            }
+                        },
+                    )
+                },
+            )
+            if (tools) {
+                put(
+                    "tools",
+                    buildJsonArray {
+                        add(
+                            buildJsonObject {
+                                put("type", JsonPrimitive("function"))
+                                put(
+                                    "function",
+                                    buildJsonObject {
+                                        put("name", JsonPrimitive("mar_probe_noop"))
+                                        put("description", JsonPrimitive("No-op probe. Do not call this function."))
+                                        put(
+                                            "parameters",
+                                            buildJsonObject {
+                                                put("type", JsonPrimitive("object"))
+                                                put("properties", buildJsonObject { })
+                                            },
+                                        )
+                                    },
+                                )
+                            },
+                        )
+                    },
+                )
+            }
+        }
+        return try {
+            http.preparePost(url(baseUrl, "/chat/completions")) {
+                contentType(ContentType.Application.Json)
+                headers {
+                    headers.values.forEach { (name, value) -> append(name, value) }
+                }
+                setBody(body.toString())
+            }.execute { response ->
+                "http-${response.status.value}"
+            }
+        } catch (_: Exception) {
+            "network-failed"
+        }
+    }
+
     private suspend fun resolveHeaders(
         token: String,
         requestHeaders: Map<String, RequestHeaderValue>,
@@ -659,6 +753,8 @@ class OpenAiCompatibleAdapter(
         private const val MAX_EMBEDDING_INPUT_BYTES = 512 * 1024
         private const val MAX_EMBEDDING_REQUEST_BYTES = 1_048_576
         private const val MAX_EMBEDDING_DIMENSION = 16_384
+        private const val PROBE_PNG =
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
 
         private val FORBIDDEN_HEADERS = setOf(
             "host",

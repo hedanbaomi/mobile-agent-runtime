@@ -25,6 +25,8 @@ import java.io.File
 import runtime.mobileagent.background.ImportWorkerRegistry
 import runtime.mobileagent.background.ImportJobHandler
 import runtime.mobileagent.background.ImportCancellationHandler
+import runtime.mobileagent.background.ImportBatchHandler
+import runtime.mobileagent.background.ConsentTicketHandler
 import runtime.mobileagent.background.ImportWorkScheduler
 import runtime.mobileagent.embedding.AndroidModelPackLoader
 import runtime.mobileagent.embedding.OnnxTextEmbedder
@@ -135,6 +137,20 @@ class AppContainer(app: MobileAgentApp) {
     init {
         ImportWorkerRegistry.handler = ImportJobHandler { id, configured -> knowledge.resumeImport(id, visionConfigured = configured) }
         ImportWorkerRegistry.cancellationHandler = ImportCancellationHandler { id -> knowledge.cancelImport(id); Unit }
+        ImportWorkerRegistry.batchHandler = ImportBatchHandler { batchId, configured ->
+            if (!knowledge.generationStillCurrent(batchId)) {
+                knowledge.failBatch(batchId, "Knowledge base generation changed; this batch cannot publish.")
+            } else {
+                knowledge.queuedJobIds(batchId).forEach { jobId ->
+                    ImportWorkScheduler.enqueue(app, jobId, configured)
+                }
+                knowledge.refreshBatchProgress(batchId)
+            }
+        }
+        ImportWorkerRegistry.consentHandler = ConsentTicketHandler { ticketId, configured ->
+            knowledge.applyConsentTicket(ticketId, configured)
+            Unit
+        }
         // Only copied local jobs are resumed automatically. Consent/unknown states never initiate a paid replay.
         knowledge.listJobs().filter { it.first.stage == ImportStage.COPYING }.forEach { (job, _, _) ->
             ImportWorkScheduler.enqueue(app, job.id, profiles.visionConfigured())

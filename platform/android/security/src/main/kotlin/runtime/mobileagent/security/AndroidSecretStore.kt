@@ -6,6 +6,7 @@ package runtime.mobileagent.security
 import android.content.Context
 import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
+import runtime.mobileagent.data.SecretInventory
 import runtime.mobileagent.data.SqlConnection
 import runtime.mobileagent.provider.SecretStore
 import java.security.KeyStore
@@ -19,7 +20,7 @@ class AndroidSecretStore(
     private val db: SqlConnection,
 ) : SecretStore {
     override suspend fun resolveForHost(ref: String): CharArray {
-        val row = db.query("SELECT ciphertext FROM secrets WHERE ref = ?", listOf(ref)).singleOrNull()
+        val blob = SecretInventory(db).ciphertext(ref)
             ?: throw runtime.mobileagent.domain.AppException(
                 runtime.mobileagent.domain.AppError(
                     runtime.mobileagent.domain.ErrorCode.SECRET_UNAVAILABLE,
@@ -29,23 +30,20 @@ class AndroidSecretStore(
                     ref,
                 ),
             )
-        val blob = row.columns["ciphertext"] as ByteArray
         return decrypt(blob).toCharArray()
     }
 
     fun put(ref: String, secret: CharArray) {
         val bytes = String(secret).toByteArray(Charsets.UTF_8)
         try {
-            val cipher = encrypt(bytes)
-            db.execute(
-                "INSERT OR REPLACE INTO secrets(ref, ciphertext, created_at) VALUES (?,?,?)",
-                listOf(ref, cipher, java.time.Instant.now().toString()),
-            )
+            SecretInventory(db).putActive(ref, encrypt(bytes))
         } finally {
             bytes.fill(0)
             secret.fill('\u0000')
         }
     }
+
+    fun inventory(): SecretInventory = SecretInventory(db)
 
     private fun key(): SecretKey {
         val ks = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }

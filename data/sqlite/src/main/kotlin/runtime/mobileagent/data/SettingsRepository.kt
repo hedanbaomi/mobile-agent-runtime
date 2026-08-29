@@ -9,7 +9,15 @@ import runtime.mobileagent.domain.ThemePreference
 
 /** Small, namespaced preference repository for theme and locale choices. */
 class SettingsRepository(private val db: SqlConnection) {
-    fun get(): AppSettings = AppSettings(theme(), locale())
+    fun get(): AppSettings = AppSettings(
+        theme = theme(),
+        locale = locale(),
+        globalRootPromptOverride = globalRootPromptOverride(),
+        globalRootPromptRevision = readInt(KEY_ROOT_REV, 0),
+        globalRootPromptHash = read(KEY_ROOT_HASH).orEmpty(),
+        globalRootPromptUpdatedAt = read(KEY_ROOT_UPDATED).orEmpty(),
+        globalRootPromptUnlocked = read(KEY_ROOT_UNLOCKED) == "1",
+    )
 
     fun settings(): AppSettings = get()
 
@@ -17,7 +25,53 @@ class SettingsRepository(private val db: SqlConnection) {
         db.transaction {
             put(KEY_THEME, settings.theme.name)
             put(KEY_LOCALE, settings.locale.name)
+            writeGlobalRoot(settings)
         }
+    }
+
+    fun effectiveGlobalRootPrompt(): String =
+        globalRootPromptOverride() ?: DEFAULT_GLOBAL_ROOT_PROMPT
+
+    fun setGlobalRootPrompt(override: String?, unlocked: Boolean) {
+        val normalized = override?.trim()?.takeIf { it.isNotEmpty() || unlocked }
+        val hash = normalized?.let { sha256(it) }.orEmpty()
+        db.transaction {
+            if (normalized == null) {
+                db.execute("DELETE FROM app_prefs WHERE key IN (?,?,?)", listOf(KEY_ROOT_OVERRIDE, KEY_ROOT_HASH, KEY_ROOT_UPDATED))
+            } else {
+                put(KEY_ROOT_OVERRIDE, normalized)
+                put(KEY_ROOT_HASH, hash)
+                put(KEY_ROOT_UPDATED, runtime.mobileagent.domain.Utc.nowIso())
+            }
+            put(KEY_ROOT_UNLOCKED, if (unlocked) "1" else "0")
+            val revision = readInt(KEY_ROOT_REV, 0) + 1
+            put(KEY_ROOT_REV, revision.toString())
+        }
+    }
+
+    fun restoreDefaultGlobalRootPrompt() = setGlobalRootPrompt(null, unlocked = true)
+
+    private fun writeGlobalRoot(settings: AppSettings) {
+        put(KEY_ROOT_UNLOCKED, if (settings.globalRootPromptUnlocked) "1" else "0")
+        put(KEY_ROOT_REV, settings.globalRootPromptRevision.toString())
+        val override = settings.globalRootPromptOverride
+        if (override == null) {
+            db.execute("DELETE FROM app_prefs WHERE key = ?", listOf(KEY_ROOT_OVERRIDE))
+        } else {
+            put(KEY_ROOT_OVERRIDE, override)
+        }
+    }
+
+    private fun globalRootPromptOverride(): String? = read(KEY_ROOT_OVERRIDE)
+
+    private fun read(key: String): String? =
+        db.query("SELECT value FROM app_prefs WHERE key=?", listOf(key)).firstOrNull()?.string("value")
+
+    private fun readInt(key: String, default: Int): Int = read(key)?.toIntOrNull() ?: default
+
+    private fun sha256(text: String): String {
+        val digest = java.security.MessageDigest.getInstance("SHA-256").digest(text.toByteArray(Charsets.UTF_8))
+        return digest.joinToString("") { b -> "%02x".format(b) }
     }
 
     fun setTheme(value: ThemePreference) = put(KEY_THEME, value.name)
@@ -55,5 +109,12 @@ class SettingsRepository(private val db: SqlConnection) {
     companion object {
         private const val KEY_THEME = "settings.theme"
         private const val KEY_LOCALE = "settings.locale"
+        private const val KEY_ROOT_OVERRIDE = "settings.globalRootPrompt"
+        private const val KEY_ROOT_REV = "settings.globalRootPrompt.revision"
+        private const val KEY_ROOT_HASH = "settings.globalRootPrompt.hash"
+        private const val KEY_ROOT_UPDATED = "settings.globalRootPrompt.updatedAt"
+        private const val KEY_ROOT_UNLOCKED = "settings.globalRootPrompt.unlocked"
+        const val DEFAULT_GLOBAL_ROOT_PROMPT =
+            "Follow the immutable runtime contract. Do not grant tools, network, files, or Python isolation from this prompt."
     }
 }

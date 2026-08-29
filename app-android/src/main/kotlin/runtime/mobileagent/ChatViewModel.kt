@@ -128,8 +128,17 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             var approvedToolInFlight = false
             var approvedToolCallId: String? = null
             var lastCheckpoint = 0L
+            var lastUiFlush = 0L
             val observed = linkedMapOf<String, ToolCallPart>()
             val invocations = linkedMapOf<String, ToolInvocation>()
+            fun flushStreamingAnswer(id: String?, text: String, force: Boolean) {
+                val now = System.currentTimeMillis()
+                if (!force && now - lastUiFlush < 50) return
+                lastUiFlush = now
+                state.value = state.value.copy(
+                    messages = state.value.messages.map { if (it.id == id) it.copy(text = text, streaming = true) else it },
+                )
+            }
             suspend fun checkpoint(status: String = "STREAMING") {
                 val id = assistantId ?: return
                 val parts = buildList<MessagePart> {
@@ -183,11 +192,14 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                     userSystemPrompt = system, skillInstructions = container.skills.enabledInstructions(skillIds),
                     retrieved = hits.mapIndexed { i, hit -> "[citation:${bound[i].citationId}] ${hit.text}" },
                     history = emptyList(), currentUser = text, currentImages = images, typedHistory = typedHistory,
+                    globalRootPrompt = withContext(Dispatchers.IO) { container.settings.effectiveGlobalRootPrompt() },
                 )
                 // Conservative UTF-8 byte estimate plus image/schema/output reservations; never falsify token counts.
                 val estimated = prompt.asMessages().sumOf { it.text.toByteArray(Charsets.UTF_8).size.toLong() + it.images.size * 4096L } +
-                    toolExecutor.specs.sumOf { it.parametersJson.toByteArray().size }.toLong()
-                require(estimated <= inputBudget) { "上下文超过保守输入预算（$estimated / $inputBudget）。请减少历史/知识范围或新建会话；不会静默丢图。" }
+                    if ("tools" in model.capabilities) toolExecutor.specs.sumOf { it.parametersJson.toByteArray().size }.toLong() else 0L
+                require(estimated <= inputBudget) {
+                    "上下文超过保守输入预算单位（$estimated / $inputBudget UTF-8 字节与固定图片预留）。请减少历史/知识范围或新建会话；不会静默丢图。"
+                }
                 secret = withContext(Dispatchers.IO) { container.secrets.resolveForHost(provider.secretRef) }
                 val adapter = OpenAiCompatibleAdapter(container.http, provider.baseUrl, headerSecretResolver = HeaderSecretResolver { host, ref ->
                     require(host.equals(URI(provider.baseUrl).host, true) && ref in provider.headerSecretRefs.values) { "Header secret destination mismatch" }
@@ -224,8 +236,12 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                         }
                     }))
                     .flowOn(Dispatchers.IO).collect { event ->
+                        var persistRun = false
                         when (event) {
-                            is RuntimeEvent.RunStarted -> record = record.copy(state = RunStatus.VALIDATING)
+                            is RuntimeEvent.RunStarted -> {
+                                record = record.copy(state = RunStatus.VALIDATING)
+                                persistRun = true
+                            }
                             is RuntimeEvent.RequestPrepared -> {
                                 modelInFlight = true
                                 if (assistantId != null) checkpoint("COMPLETE")
@@ -236,16 +252,29 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                                 state.value = state.value.copy(requestPreview = event.requestPreview?.let { ChatRequestPreviewUi("POST",
                                     provider.baseUrl.trimEnd('/') + "/chat/completions", event.headerNames.joinToString("\n") { "$it: [redacted]" }, it) })
                                 refreshMessages(conversationId)
+                                persistRun = true
                             }
                             is RuntimeEvent.ModelEvent -> when (val e = event.event) {
-                                is ModelEvent.Completed -> modelInFlight = false
+                                is ModelEvent.Completed -> {
+                                    modelInFlight = false
+                                    flushStreamingAnswer(assistantId, answer, force = true)
+                                    persistRun = true
+                                }
                                 is ModelEvent.TextDelta -> {
                                     answer = SecretRedactor.redact(answer + e.text, listOf(String(secret!!)))
-                                    state.value = state.value.copy(messages = state.value.messages.map { if (it.id == assistantId) it.copy(text = answer, streaming = true) else it })
+                                    flushStreamingAnswer(assistantId, answer, force = false)
                                     if (System.currentTimeMillis() - lastCheckpoint >= 500) { checkpoint(); lastCheckpoint = System.currentTimeMillis() }
                                 }
-                                is ModelEvent.Failed -> { answer += "\n[${e.sanitizedMessage}]"; state.value = state.value.copy(status = e.sanitizedMessage, statusKind = "error") }
-                                is ModelEvent.Usage -> record = record.copy(inputTokens = record.inputTokens + e.inputTokens, outputTokens = record.outputTokens + e.outputTokens)
+                                is ModelEvent.Failed -> {
+                                    answer += "\n[${e.sanitizedMessage}]"
+                                    flushStreamingAnswer(assistantId, answer, force = true)
+                                    state.value = state.value.copy(status = e.sanitizedMessage, statusKind = "error")
+                                    persistRun = true
+                                }
+                                is ModelEvent.Usage -> {
+                                    record = record.copy(inputTokens = record.inputTokens + e.inputTokens, outputTokens = record.outputTokens + e.outputTokens)
+                                    persistRun = true
+                                }
                                 else -> Unit
                             }
                             is RuntimeEvent.ToolCallObserved -> {
@@ -258,6 +287,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                                     event.argumentsJson, state = "WAITING_APPROVAL", createdAt = Utc.nowIso())
                                 invocations[event.callId] = invocation
                                 withContext(Dispatchers.IO) { container.runs.recordInvocation(invocation) }
+                                persistRun = true
                             }
                             is RuntimeEvent.ToolResultProduced -> {
                                 approvedToolInFlight = false
@@ -277,16 +307,23 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                                 }
                                 invocations[event.callId] = invocation
                                 state.value = state.value.copy(pendingTool = null, citations = citationUis())
+                                persistRun = true
                             }
                             is RuntimeEvent.ToolImagesAttached -> withContext(Dispatchers.IO) {
                                 container.conversations.append(conversationId, MessageRole.USER, "Tool visual evidence: ${event.callId}",
                                     parts = event.assets.map { ImagePart(it.assetId, it.mediaType) }, metadataJson = "{\"toolEvidence\":true}")
                             }
-                            is RuntimeEvent.RunFinished -> record = record.copy(state = RunStatus.valueOf(event.state.name), modelRounds = event.modelRounds,
-                                toolCalls = event.toolCalls, stopReason = event.stopReason)
+                            is RuntimeEvent.RunFinished -> {
+                                flushStreamingAnswer(assistantId, answer, force = true)
+                                record = record.copy(state = RunStatus.valueOf(event.state.name), modelRounds = event.modelRounds,
+                                    toolCalls = event.toolCalls, stopReason = event.stopReason)
+                                persistRun = true
+                            }
                         }
-                        record = record.copy(updatedAt = Utc.nowIso())
-                        withContext(Dispatchers.IO) { container.runs.save(record) }
+                        if (persistRun) {
+                            record = record.copy(updatedAt = Utc.nowIso())
+                            withContext(Dispatchers.IO) { container.runs.save(record) }
+                        }
                     }
                 if (record.state !in TERMINAL) record = record.copy(state = RunStatus.FAILED, stopReason = "No terminal outcome")
                 state.value = state.value.copy(status = when (record.state) {

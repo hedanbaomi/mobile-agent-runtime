@@ -33,7 +33,9 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 
@@ -64,6 +66,10 @@ data class ThirdPartyNoticesUiState(
 data class SettingsUiState(
     val versionName: String = "",
     val gitRevision: String = "",
+    val gitDirty: Boolean = false,
+    val schemaVersion: Int = 0,
+    val buildTimeUtc: String = "",
+    val diagnosticText: String = "",
     /** zh-CN is the product default; the ViewModel may replace it with the persisted choice. */
     val language: String = "zh-CN",
     /** 66ccff is the product default light accent and is shown literally in the selector. */
@@ -81,6 +87,11 @@ data class SettingsUiState(
     val mcpEntryEnabled: Boolean = false,
     /** Local-only third-party notice browser state; the host may populate it from APK assets. */
     val thirdPartyNotices: ThirdPartyNoticesUiState = ThirdPartyNoticesUiState(),
+    val globalRootPrompt: String = "",
+    val globalRootPromptOverride: String? = null,
+    val globalRootPromptUnlocked: Boolean = false,
+    val globalRootPromptRevision: Int = 0,
+    val globalRootPromptUpdatedAt: String = "",
 )
 
 data class SettingsActions(
@@ -99,6 +110,9 @@ data class SettingsActions(
     val onOpenThirdPartyNotices: () -> Unit = {},
     val onCloseThirdPartyNotices: () -> Unit = {},
     val onSelectThirdPartyNotice: (String) -> Unit = {},
+    val onUnlockRootPrompt: () -> Unit = {},
+    val onSaveRootPrompt: (String) -> Unit = {},
+    val onRestoreRootPrompt: () -> Unit = {},
 )
 
 /** State-driven alias for hosts that still route the settings tab through AboutScreen. */
@@ -111,6 +125,7 @@ fun AboutScreen(state: SettingsUiState, actions: SettingsActions = SettingsActio
 fun SettingsScreen(state: SettingsUiState, actions: SettingsActions = SettingsActions(), modifier: Modifier = Modifier) {
     val zh = state.language.equals("zh-CN", true) || state.language.equals("system", true)
     val context = LocalContext.current
+    val clipboard = LocalClipboardManager.current
     var languageMenu by remember { mutableStateOf(false) }
     var themeMenu by remember { mutableStateOf(false) }
     var showLicense by remember { mutableStateOf(false) }
@@ -142,6 +157,32 @@ fun SettingsScreen(state: SettingsUiState, actions: SettingsActions = SettingsAc
                             DropdownMenuItem(text = { Text(label) }, onClick = { themeMenu = false; actions.onTheme(key) })
                         }
                     }
+                }
+            }
+        }
+        Card(Modifier.fillMaxWidth()) {
+            var draftPrompt by remember(state.globalRootPrompt, state.globalRootPromptUnlocked) {
+                mutableStateOf(state.globalRootPrompt)
+            }
+            Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text(if (zh) "全局根提示词" else "Global root prompt", style = MaterialTheme.typography.titleMedium)
+                Text(
+                    if (zh) "位于不可编辑的运行时协议与 Agent 提示词之间。不能授予工具、网络、文件或 Python 隔离。"
+                    else "Inserted between the immutable runtime contract and the agent prompt. It cannot grant tools, network, files, or Python isolation.",
+                    style = MaterialTheme.typography.bodySmall,
+                )
+                if (!state.globalRootPromptUnlocked) {
+                    OutlinedButton(onClick = actions.onUnlockRootPrompt) { Text(if (zh) "解锁高级编辑" else "Unlock advanced editing") }
+                } else {
+                    OutlinedTextField(draftPrompt, { draftPrompt = it }, minLines = 4, modifier = Modifier.fillMaxWidth())
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Button(onClick = { actions.onSaveRootPrompt(draftPrompt) }) { Text(if (zh) "保存覆盖" else "Save override") }
+                        OutlinedButton(onClick = actions.onRestoreRootPrompt) { Text(if (zh) "恢复默认" else "Restore default") }
+                    }
+                    Text(
+                        "r${state.globalRootPromptRevision} · ${state.globalRootPromptUpdatedAt}",
+                        style = MaterialTheme.typography.labelSmall,
+                    )
                 }
             }
         }
@@ -191,6 +232,11 @@ fun SettingsScreen(state: SettingsUiState, actions: SettingsActions = SettingsAc
                 Text(if (zh) "关于" else "About", style = MaterialTheme.typography.titleMedium)
                 Text("mobileAgentRuntime")
                 Text("${state.versionName} (${state.gitRevision})", style = MaterialTheme.typography.bodySmall)
+                Text(
+                    if (zh) "数据库 schema ${state.schemaVersion} · 构建 ${state.buildTimeUtc}"
+                    else "DB schema ${state.schemaVersion} · built ${state.buildTimeUtc}",
+                    style = MaterialTheme.typography.bodySmall,
+                )
                 Text("AGPL-3.0-only", style = MaterialTheme.typography.bodySmall)
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     OutlinedButton(onClick = { showAbout = true }) { Text(if (zh) "查看版本信息" else "Version details") }
@@ -206,7 +252,26 @@ fun SettingsScreen(state: SettingsUiState, actions: SettingsActions = SettingsAc
         }
     }
     if (showAbout) {
-        AlertDialog(onDismissRequest = { showAbout = false }, title = { Text("mobileAgentRuntime") }, text = { Text("${state.versionName} (${state.gitRevision})\nAGPL-3.0-only") }, confirmButton = { Button(onClick = { showAbout = false }) { Text(if (zh) "关闭" else "Close") } })
+        AlertDialog(
+            onDismissRequest = { showAbout = false },
+            title = { Text("mobileAgentRuntime") },
+            text = {
+                Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Text("${state.versionName}\n${state.diagnosticText.trim()}\nAGPL-3.0-only")
+                    Text(
+                        if (zh) "诊断不含密钥。工具能力开关崩溃仍需绑定此 revision 的完整 Logcat。"
+                        else "Diagnostics omit secrets. A tools-capability crash still needs full Logcat bound to this revision.",
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                }
+            },
+            confirmButton = { Button(onClick = { showAbout = false }) { Text(if (zh) "关闭" else "Close") } },
+            dismissButton = {
+                TextButton(onClick = { clipboard.setText(AnnotatedString(state.diagnosticText)) }) {
+                    Text(if (zh) "复制诊断" else "Copy diagnostics")
+                }
+            },
+        )
     }
     if (showLicense) {
         val license = agplText ?: if (zh) "正在读取 AGPL-3.0-only 文本…" else "Loading AGPL-3.0-only text…"

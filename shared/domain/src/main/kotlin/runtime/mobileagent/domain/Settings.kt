@@ -30,4 +30,9 @@ typealias LocaleMode = LocalePreference
 data class AppSettings(
     val theme: ThemePreference = ThemePreference.SYSTEM,
     val locale: LocalePreference = LocalePreference.SYSTEM,
+    val globalRootPromptOverride: String? = null,
+    val globalRootPromptRevision: Int = 0,
+    val globalRootPromptHash: String = "",
+    val globalRootPromptUpdatedAt: String = "",
+    val globalRootPromptUnlocked: Boolean = false,
 )

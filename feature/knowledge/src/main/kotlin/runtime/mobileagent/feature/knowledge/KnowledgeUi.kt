@@ -80,6 +80,19 @@ data class KnowledgeQueryAttemptUi(
     val retryAuthorized: Boolean = false,
 )
 
+data class KnowledgeBatchUi(
+    val id: String,
+    val displayName: String,
+    val kind: String,
+    val state: String,
+    val totalItems: Int,
+    val copied: Int,
+    val processing: Int,
+    val waiting: Int,
+    val failed: Int,
+    val error: String? = null,
+)
+
 data class KnowledgeWaitingUi(
     val jobId: String,
     val displayName: String,
@@ -112,10 +125,13 @@ data class KnowledgeUiState(
     val embeddingSpaceLabel: String = "",
     val embeddingModels: List<KnowledgeEmbeddingModelUi> = emptyList(),
     val apiQueryAttempts: List<KnowledgeQueryAttemptUi> = emptyList(),
+    val batches: List<KnowledgeBatchUi> = emptyList(),
 )
 
 data class KnowledgeActions(
     val onImport: (List<Uri>) -> Unit = {},
+    val onImportZip: (Uri) -> Unit = {},
+    val onImportFolder: (Uri) -> Unit = {},
     val onSelectBase: (String) -> Unit = {},
     val onOpenEvidence: (String) -> Unit = {},
     val onRebuild: () -> Unit = {},
@@ -151,11 +167,22 @@ fun KnowledgeScreen(state: KnowledgeUiState, actions: KnowledgeActions = Knowled
     val picker = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
         if (uris.isNotEmpty()) selectedUris = uris
     }
+    val zipPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        if (uri != null) actions.onImportZip(uri)
+    }
+    val folderPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
+        if (uri != null) actions.onImportFolder(uri)
+    }
     BoxWithConstraints(modifier.fillMaxSize().padding(16.dp)) {
         val wide = maxWidth >= 720.dp
         if (wide) {
             Row(Modifier.fillMaxSize(), horizontalArrangement = Arrangement.spacedBy(16.dp)) {
-                KnowledgeBasePane(state, actions, zh, { picker.launch(arrayOf("*/*")) }, { newBaseDialog = true }, { deleteBaseId = it }, {
+                KnowledgeBasePane(
+                    state, actions, zh,
+                    { picker.launch(arrayOf("*/*")) },
+                    { zipPicker.launch(arrayOf("application/zip", "*/*")) },
+                    { folderPicker.launch(null) },
+                    { newBaseDialog = true }, { deleteBaseId = it }, {
                     embeddingModelId = ""
                     embeddingDimension = ""
                     embeddingModelMenu = false
@@ -165,7 +192,12 @@ fun KnowledgeScreen(state: KnowledgeUiState, actions: KnowledgeActions = Knowled
             }
         } else {
             Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                KnowledgeBasePane(state, actions, zh, { picker.launch(arrayOf("*/*")) }, { newBaseDialog = true }, { deleteBaseId = it }, {
+                KnowledgeBasePane(
+                    state, actions, zh,
+                    { picker.launch(arrayOf("*/*")) },
+                    { zipPicker.launch(arrayOf("application/zip", "*/*")) },
+                    { folderPicker.launch(null) },
+                    { newBaseDialog = true }, { deleteBaseId = it }, {
                     embeddingModelId = ""
                     embeddingDimension = ""
                     embeddingModelMenu = false
@@ -348,6 +380,8 @@ private fun KnowledgeBasePane(
     actions: KnowledgeActions,
     zh: Boolean,
     onImport: () -> Unit,
+    onImportZip: () -> Unit,
+    onImportFolder: () -> Unit,
     onCreateBase: () -> Unit,
     onDeleteBase: (String) -> Unit,
     onConfigureEmbedding: () -> Unit,
@@ -357,9 +391,13 @@ private fun KnowledgeBasePane(
         Text(if (zh) "知识" else "Knowledge", style = MaterialTheme.typography.headlineSmall)
         Row(Modifier.fillMaxWidth().padding(top = 8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             Button(onClick = onCreateBase) { Text(if (zh) "新建" else "New") }
-            OutlinedButton(onClick = onImport) { Text(if (zh) "导入" else "Import") }
         }
-        Text(if (zh) "文件通过 Android 系统选择器选择并保存在本地。" else "Files are selected through Android's system picker and stay in local storage.", style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(top = 6.dp))
+        Row(Modifier.fillMaxWidth().padding(top = 8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            OutlinedButton(onClick = onImport) { Text(if (zh) "添加文件" else "Add files") }
+            OutlinedButton(onClick = onImportFolder) { Text(if (zh) "导入文件夹" else "Import folder") }
+            OutlinedButton(onClick = onImportZip) { Text(if (zh) "导入 ZIP" else "Import ZIP") }
+        }
+        Text(if (zh) "文件、文件夹和知识库 ZIP 通过系统选择器进入应用管理存储；DOCX/EPUB 仍按办公文档解析。" else "Files, folders, and knowledge ZIP archives stay in app-managed storage. DOCX/EPUB remain office documents.", style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(top = 6.dp))
         if (state.embeddingSpaceLabel.isNotBlank()) {
             Text(
                 if (zh) "当前 Embedding 空间：${state.embeddingSpaceLabel}" else "Current Embedding space: ${state.embeddingSpaceLabel}",
@@ -398,7 +436,7 @@ private fun KnowledgeContentPane(state: KnowledgeUiState, actions: KnowledgeActi
     Column(modifier) {
         if (state.status.isNotBlank()) StatusCard(state.status)
         state.waiting.forEach { WaitingCard(it, actions, zh) }
-        val selectedQueryAttempts = state.apiQueryAttempts.filter { it.spaceId == state.selectedBaseId }
+        val selectedQueryAttempts = state.apiQueryAttempts
         if (selectedQueryAttempts.isNotEmpty()) {
             Text(
                 if (zh) "未知查询" else "Queries with unknown results",
@@ -409,10 +447,33 @@ private fun KnowledgeContentPane(state: KnowledgeUiState, actions: KnowledgeActi
         }
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
             Text(if (zh) "文档" else "Documents", style = MaterialTheme.typography.titleLarge, modifier = Modifier.weight(1f))
-            OutlinedButton(onClick = onRebuild, enabled = state.rebuildEnabled) { Text(if (zh) "重建索引" else "Rebuild index") }
+            OutlinedButton(onClick = onRebuild, enabled = state.rebuildEnabled && !knowledgeImportActive(state)) {
+                Text(if (zh) "重建索引" else "Rebuild index")
+            }
         }
-        if (state.documents.isEmpty()) Text(if (zh) "此知识库没有文档。" else "No documents in this knowledge base.", style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(top = 12.dp))
+        if (knowledgeImportActive(state) || state.jobs.isNotEmpty() || state.loading) {
+            Text(knowledgeImportSummary(state, zh), style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(top = 8.dp))
+        }
+        if (state.documents.isEmpty() && !knowledgeImportActive(state) && !state.loading && state.jobs.isEmpty()) {
+            Text(if (zh) "此知识库没有文档。" else "No documents in this knowledge base.", style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(top = 12.dp))
+        }
         state.documents.forEach { document -> DocumentCard(document, onDelete, actions, zh) }
+        if (state.batches.isNotEmpty()) {
+            Text(if (zh) "导入批次" else "Import batches", style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(top = 18.dp))
+            state.batches.forEach { batch ->
+                Card(Modifier.fillMaxWidth().padding(top = 8.dp)) {
+                    Column(Modifier.padding(12.dp)) {
+                        Text("${batch.displayName} · ${batch.kind} · ${batch.state}", fontWeight = FontWeight.SemiBold)
+                        Text(
+                            if (zh) "共 ${batch.totalItems}，已复制 ${batch.copied}，处理中 ${batch.processing}，等待 ${batch.waiting}，失败 ${batch.failed}。"
+                            else "${batch.totalItems} items, copied ${batch.copied}, processing ${batch.processing}, waiting ${batch.waiting}, failed ${batch.failed}.",
+                            style = MaterialTheme.typography.bodySmall,
+                        )
+                        batch.error?.let { Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall) }
+                    }
+                }
+            }
+        }
         if (state.jobs.isNotEmpty()) {
             Text(if (zh) "导入任务" else "Import jobs", style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(top = 18.dp))
             state.jobs.forEach { job -> JobCard(job, actions, zh) }
@@ -545,6 +606,7 @@ private fun knowledgeStageLabel(stage: String, zh: Boolean): String = when (stag
     "UNKNOWN" -> if (zh) "未知" else "Unknown"
     "NOT_READY" -> if (zh) "未完成" else "Not ready"
     "READY" -> if (zh) "已完成" else "Ready"
+    "READY_WITH_VISUAL_GAPS" -> if (zh) "仅文本（视觉未处理）" else "Text only (visual gaps)"
     "FAILED" -> if (zh) "失败" else "Failed"
     "CANCELLED" -> if (zh) "已取消" else "Cancelled"
     "COPYING" -> if (zh) "复制中" else "Copying"
@@ -576,4 +638,22 @@ private fun EvidenceDialog(evidence: KnowledgeEvidenceUi, onClose: () -> Unit) {
         },
         confirmButton = { Button(onClick = onClose) { Text("关闭 / Close") } },
     )
+}
+
+private val KNOWLEDGE_TERMINAL_STAGES = setOf("READY", "READY_WITH_VISUAL_GAPS", "FAILED", "CANCELLED")
+
+private fun knowledgeImportActive(state: KnowledgeUiState): Boolean =
+    state.loading || state.jobs.any { it.stage.uppercase() !in KNOWLEDGE_TERMINAL_STAGES }
+
+private fun knowledgeImportSummary(state: KnowledgeUiState, zh: Boolean): String {
+    val jobs = state.jobs
+    val processing = jobs.count { it.stage.uppercase() !in KNOWLEDGE_TERMINAL_STAGES && it.stage.uppercase() !in setOf("WAITING_FOR_VISION_MODEL", "AWAITING_UPLOAD_CONSENT", "AWAITING_EMBEDDING_CONSENT") }
+    val waiting = jobs.count { it.stage.uppercase() in setOf("WAITING_FOR_VISION_MODEL", "AWAITING_UPLOAD_CONSENT", "AWAITING_EMBEDDING_CONSENT") }
+    val failed = jobs.count { it.stage.equals("FAILED", true) }
+    val ready = jobs.count { it.stage.equals("READY", true) || it.stage.equals("READY_WITH_VISUAL_GAPS", true) }
+    return if (zh) {
+        "导入进度：共 ${jobs.size} 项，处理中 $processing，等待 $waiting，完成 $ready，失败 $failed。"
+    } else {
+        "Import progress: ${jobs.size} item(s), $processing processing, $waiting waiting, $ready finished, $failed failed."
+    }
 }

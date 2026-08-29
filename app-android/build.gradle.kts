@@ -1,6 +1,10 @@
 // SPDX-FileCopyrightText: 2026 mobileAgentRuntime contributors
 // SPDX-License-Identifier: AGPL-3.0-only
 
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.TimeZone
+
 plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.android)
@@ -9,6 +13,34 @@ plugins {
 }
 
 apply(from = rootProject.file("tools/debug-sbom.gradle.kts"))
+
+fun gitCapture(vararg args: String): String = try {
+    val process = ProcessBuilder(listOf("git") + args.toList())
+        .directory(rootProject.projectDir)
+        .redirectErrorStream(true)
+        .start()
+    val text = process.inputStream.bufferedReader(Charsets.UTF_8).readText().trim()
+    if (process.waitFor() == 0) text else "unknown"
+} catch (_: Exception) {
+    "unknown"
+}
+
+fun buildConfigString(value: String): String =
+    "\"${value.replace("\\", "\\\\").replace("\"", "\\\"")}\""
+
+val gitHead = gitCapture("rev-parse", "HEAD")
+val gitDirty = gitCapture("status", "--porcelain").isNotEmpty()
+val gitRevision = when {
+    gitHead == "unknown" -> "unknown"
+    gitDirty -> "$gitHead-dirty"
+    else -> gitHead
+}
+val dbSchemaVersion = Regex("""const val VERSION = (\d+)""")
+    .find(rootProject.file("data/sqlite/src/main/kotlin/runtime/mobileagent/data/Migrations.kt").readText())
+    ?.groupValues?.get(1) ?: "0"
+val buildTimeUtc = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss'Z'").apply {
+    timeZone = TimeZone.getTimeZone("UTC")
+}.format(Date())
 
 android {
     namespace = "runtime.mobileagent"
@@ -24,7 +56,10 @@ android {
             abiFilters += listOf("arm64-v8a", "x86_64")
         }
         buildConfigField("String", "SOURCE_URL", "\"https://github.com/hedanbaomi/mobile-agent-runtime\"")
-        buildConfigField("String", "GIT_REVISION", "\"uncommitted\"")
+        buildConfigField("String", "GIT_REVISION", buildConfigString(gitRevision))
+        buildConfigField("boolean", "GIT_DIRTY", gitDirty.toString())
+        buildConfigField("int", "DB_SCHEMA_VERSION", dbSchemaVersion)
+        buildConfigField("String", "BUILD_TIME_UTC", buildConfigString(buildTimeUtc))
         buildConfigField("String", "ANNOUNCEMENTS_BASE_URL", "\"https://announcements.luotianyi.fun\"")
         buildConfigField("String", "ANNOUNCEMENTS_KEY_ID", "\"mar-prod-20260829-1\"")
         buildConfigField("String", "ANNOUNCEMENTS_PUBLIC_KEY_HEX", "\"e89c5b55f45a303f5c721a568493edfb9f268b39967ac597b2e105725a552df8\"")
@@ -70,6 +105,7 @@ dependencies {
     implementation(project(":feature:skills"))
     implementation(project(":feature:announcements"))
     implementation(project(":feature:settings"))
+    implementation(libs.androidx.documentfile)
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.activity.compose)
     implementation(libs.androidx.navigation.compose)

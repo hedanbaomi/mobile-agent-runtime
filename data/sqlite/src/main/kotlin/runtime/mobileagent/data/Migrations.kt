@@ -16,12 +16,12 @@ import runtime.mobileagent.domain.RetryClass
  * version error escapes the transaction, leaving schema_version at its previous value.
  */
 object Migrations {
-    const val VERSION = 10
+    const val VERSION = 11
 
     private val statements = listOf(
         "CREATE TABLE IF NOT EXISTS schema_version (version INTEGER NOT NULL PRIMARY KEY)",
         "CREATE TABLE IF NOT EXISTS provider_profiles (id TEXT PRIMARY KEY, name TEXT NOT NULL, api_format TEXT NOT NULL, base_url TEXT NOT NULL, header_secret_refs TEXT NOT NULL, non_secret_headers TEXT NOT NULL, secret_ref TEXT NOT NULL, revision INTEGER NOT NULL)",
-        "CREATE TABLE IF NOT EXISTS model_profiles (id TEXT PRIMARY KEY, provider_id TEXT NOT NULL, role TEXT NOT NULL, model_id TEXT NOT NULL, capabilities TEXT NOT NULL, parameter_schema_json TEXT NOT NULL, parameters_json TEXT NOT NULL DEFAULT '{}', context_limit INTEGER NOT NULL, output_limit INTEGER NOT NULL, revision INTEGER NOT NULL, FOREIGN KEY(provider_id) REFERENCES provider_profiles(id))",
+        "CREATE TABLE IF NOT EXISTS model_profiles (id TEXT PRIMARY KEY, provider_id TEXT NOT NULL, role TEXT NOT NULL, model_id TEXT NOT NULL, capabilities TEXT NOT NULL, parameter_schema_json TEXT NOT NULL, parameters_json TEXT NOT NULL DEFAULT '{}', context_limit INTEGER NOT NULL, output_limit INTEGER NOT NULL, revision INTEGER NOT NULL, endpoint_json TEXT NOT NULL DEFAULT '{}', FOREIGN KEY(provider_id) REFERENCES provider_profiles(id))",
         "CREATE TABLE IF NOT EXISTS agent_profiles (id TEXT PRIMARY KEY, name TEXT NOT NULL, prompt_revision_id TEXT NOT NULL, chat_profile_id TEXT NOT NULL, vision_profile_id TEXT, embedding_profile_id TEXT, reranker_profile_id TEXT, knowledge_base_ids TEXT NOT NULL, skill_ids TEXT NOT NULL, retrieval_mode TEXT NOT NULL, revision INTEGER NOT NULL, parameter_overrides_json TEXT NOT NULL DEFAULT '{}', context_policy_json TEXT NOT NULL DEFAULT '{}', permission_settings_json TEXT NOT NULL DEFAULT '{}')",
         "CREATE TABLE IF NOT EXISTS prompt_revisions (id TEXT PRIMARY KEY, agent_id TEXT NOT NULL, parent_revision_id TEXT, template TEXT NOT NULL, allowed_variables TEXT NOT NULL, created_at TEXT NOT NULL)",
         "CREATE TABLE IF NOT EXISTS conversations (id TEXT PRIMARY KEY, snapshot_id TEXT NOT NULL, title TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL)",
@@ -35,13 +35,17 @@ object Migrations {
         "CREATE TABLE IF NOT EXISTS chunks (id TEXT PRIMARY KEY, document_version_id TEXT NOT NULL, ordinal INTEGER NOT NULL, text TEXT NOT NULL, content_hash TEXT NOT NULL, source_span TEXT, asset_ids TEXT, page INTEGER, UNIQUE(document_version_id, ordinal))",
         "CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(text, content='chunks', content_rowid='rowid')",
         "CREATE TABLE IF NOT EXISTS embeddings (chunk_id TEXT NOT NULL, space_id TEXT NOT NULL, vector_blob BLOB NOT NULL, content_hash TEXT NOT NULL, PRIMARY KEY(chunk_id, space_id))",
-        "CREATE TABLE IF NOT EXISTS secrets (ref TEXT PRIMARY KEY, ciphertext BLOB NOT NULL, created_at TEXT NOT NULL)",
+        "CREATE TABLE IF NOT EXISTS secrets (ref TEXT PRIMARY KEY, ciphertext BLOB, created_at TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'ACTIVE', retired_at TEXT)",
         "CREATE TABLE IF NOT EXISTS announcement_state (announcement_id TEXT NOT NULL, revision INTEGER NOT NULL, read_at TEXT, displayed_at TEXT, dismissed_at TEXT, acknowledged_at TEXT, PRIMARY KEY(announcement_id, revision))",
         "CREATE TABLE IF NOT EXISTS app_prefs (key TEXT PRIMARY KEY, value TEXT NOT NULL)",
         "CREATE TABLE IF NOT EXISTS announcement_feed_cache (cache_key TEXT PRIMARY KEY, etag TEXT NOT NULL, envelope_json TEXT NOT NULL, payload_json TEXT NOT NULL, feed_version INTEGER NOT NULL, issued_at TEXT NOT NULL, expires_at TEXT NOT NULL, fetched_at TEXT NOT NULL, last_attempt_at TEXT NOT NULL)",
         "CREATE TABLE IF NOT EXISTS announcement_items (announcement_id TEXT NOT NULL, revision INTEGER NOT NULL, item_json TEXT NOT NULL, withdrawn INTEGER NOT NULL, active INTEGER NOT NULL, PRIMARY KEY(announcement_id, revision))",
         "CREATE TABLE IF NOT EXISTS audit_events (id TEXT PRIMARY KEY, run_id TEXT, created_at TEXT NOT NULL, component TEXT NOT NULL, action TEXT NOT NULL, result TEXT NOT NULL, error_code TEXT, summary TEXT NOT NULL, input_bytes INTEGER NOT NULL DEFAULT 0, output_bytes INTEGER NOT NULL DEFAULT 0, input_tokens INTEGER NOT NULL DEFAULT 0, output_tokens INTEGER NOT NULL DEFAULT 0, metadata_json TEXT NOT NULL DEFAULT '{}')",
-        "CREATE TABLE IF NOT EXISTS import_jobs (id TEXT PRIMARY KEY, kb_id TEXT NOT NULL, document_id TEXT NOT NULL, display_name TEXT NOT NULL, stage TEXT NOT NULL, has_images INTEGER NOT NULL, error TEXT, updated_at TEXT NOT NULL, vision_consent INTEGER NOT NULL DEFAULT 0, embedding_is_api INTEGER NOT NULL DEFAULT 0, embedding_consent INTEGER NOT NULL DEFAULT 0, vision_binding_json TEXT)",
+        "CREATE TABLE IF NOT EXISTS import_jobs (id TEXT PRIMARY KEY, kb_id TEXT NOT NULL, document_id TEXT NOT NULL, display_name TEXT NOT NULL, stage TEXT NOT NULL, has_images INTEGER NOT NULL, error TEXT, updated_at TEXT NOT NULL, vision_consent INTEGER NOT NULL DEFAULT 0, embedding_is_api INTEGER NOT NULL DEFAULT 0, embedding_consent INTEGER NOT NULL DEFAULT 0, vision_binding_json TEXT, batch_id TEXT)",
+        "CREATE TABLE IF NOT EXISTS import_batches (id TEXT PRIMARY KEY, kb_id TEXT NOT NULL, generation_id TEXT, kind TEXT NOT NULL, display_name TEXT NOT NULL, state TEXT NOT NULL, total_items INTEGER NOT NULL DEFAULT 0, copied INTEGER NOT NULL DEFAULT 0, processing INTEGER NOT NULL DEFAULT 0, waiting INTEGER NOT NULL DEFAULT 0, failed INTEGER NOT NULL DEFAULT 0, error TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, FOREIGN KEY(kb_id) REFERENCES knowledge_bases(id))",
+        "CREATE TABLE IF NOT EXISTS import_items (id TEXT PRIMARY KEY, batch_id TEXT NOT NULL, item_key TEXT NOT NULL, relative_path TEXT NOT NULL, job_id TEXT, kind TEXT NOT NULL, state TEXT NOT NULL, attempt_count INTEGER NOT NULL DEFAULT 0, error TEXT, UNIQUE(batch_id, item_key), FOREIGN KEY(batch_id) REFERENCES import_batches(id))",
+        "CREATE TABLE IF NOT EXISTS consent_tickets (id TEXT PRIMARY KEY, kind TEXT NOT NULL CHECK(kind IN('VISION','API_EMBEDDING','QUERY_RETRY')), job_id TEXT, kb_id TEXT NOT NULL, fingerprint TEXT NOT NULL, consumed INTEGER NOT NULL DEFAULT 0 CHECK(consumed IN(0,1)), created_at TEXT NOT NULL)",
+        "CREATE TABLE IF NOT EXISTS capability_probes (id TEXT PRIMARY KEY, provider_id TEXT NOT NULL, model_id TEXT NOT NULL, provider_revision INTEGER NOT NULL, verification TEXT NOT NULL, tools_summary TEXT NOT NULL, images_summary TEXT NOT NULL, source TEXT NOT NULL, probed_at TEXT NOT NULL)",
         "CREATE TABLE IF NOT EXISTS document_versions (id TEXT PRIMARY KEY, document_id TEXT NOT NULL, parser_fingerprint TEXT NOT NULL, content_hash TEXT NOT NULL, status TEXT NOT NULL, created_at TEXT NOT NULL)",
         "CREATE TABLE IF NOT EXISTS embedding_operations (token TEXT PRIMARY KEY, kind TEXT NOT NULL CHECK(kind IN('IMPORT','REBUILD','REBIND')), kb_id TEXT NOT NULL, job_id TEXT, document_id TEXT, document_version_id TEXT, space_id TEXT NOT NULL, input_manifest_hash TEXT NOT NULL, binding_fingerprint TEXT NOT NULL, consent_fingerprint TEXT NOT NULL, state TEXT NOT NULL CHECK(state IN('PREPARED','DISPATCHED','CACHE_READY','PUBLISHED','FAILED','CANCELLED','ABORTED','UNKNOWN')), cancel_requested INTEGER NOT NULL DEFAULT 0 CHECK(cancel_requested IN(0,1)), error TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, FOREIGN KEY(kb_id) REFERENCES knowledge_bases(id), FOREIGN KEY(job_id) REFERENCES import_jobs(id), FOREIGN KEY(document_id) REFERENCES documents(id), FOREIGN KEY(document_version_id) REFERENCES document_versions(id))",
         "CREATE TABLE IF NOT EXISTS embedding_query_vectors (space_id TEXT NOT NULL, query_hash TEXT NOT NULL, vector_blob BLOB NOT NULL, dimension INTEGER NOT NULL CHECK(dimension > 0), created_at TEXT NOT NULL, PRIMARY KEY(space_id,query_hash))",
@@ -104,7 +108,11 @@ object Migrations {
         Column("audit_events", "output_tokens", "INTEGER NOT NULL DEFAULT 0"),
         Column("audit_events", "metadata_json", "TEXT NOT NULL DEFAULT '{}'"),
         Column("import_jobs", "vision_binding_json", "TEXT"),
+        Column("import_jobs", "batch_id", "TEXT"),
         Column("runs", "retry_acknowledged_at", "TEXT"),
+        Column("model_profiles", "endpoint_json", "TEXT NOT NULL DEFAULT '{}'"),
+        Column("secrets", "status", "TEXT NOT NULL DEFAULT 'ACTIVE'"),
+        Column("secrets", "retired_at", "TEXT"),
     )
 
     fun apply(connection: SqlConnection) {
@@ -115,6 +123,7 @@ object Migrations {
             if (current > VERSION) unsupported(current)
             statements.drop(1).forEach { sql -> connection.execute(sql) }
             columns.forEach { column -> ensureColumn(connection, column) }
+            backfillV11(connection)
             validateRequiredSchema(connection)
             connection.execute("DELETE FROM schema_version")
             connection.execute("INSERT INTO schema_version(version) VALUES (?)", listOf(VERSION))
@@ -188,6 +197,7 @@ object Migrations {
         "embedding_query_attempts",
         "chunks_fts", "announcement_state", "announcement_feed_cache", "announcement_items",
         "documents", "chunks", "embeddings", "secrets", "app_prefs", "audit_events", "import_jobs",
+        "import_batches", "import_items", "consent_tickets", "capability_probes",
         "document_versions", "embedding_operations", "embedding_query_vectors", "index_generations", "generation_members", "assets", "vision_results",
         "skill_packages", "skill_installs", "permission_grants", "skill_invocations", "runs", "tool_invocations",
     )
@@ -226,5 +236,26 @@ object Migrations {
         "embedding_query_vectors" to "vector_blob",
         "embedding_query_vectors" to "dimension",
         "embedding_query_vectors" to "created_at",
+        "model_profiles" to "endpoint_json",
+        "secrets" to "status",
+        "import_jobs" to "batch_id",
     )
+
+    private fun backfillV11(connection: SqlConnection) {
+        connection.query("SELECT id, role, capabilities, endpoint_json FROM model_profiles").forEach { row ->
+            val stored = row.string("endpoint_json")
+            if (stored.isNotBlank() && stored != "{}") return@forEach
+            val role = runCatching { runtime.mobileagent.domain.ModelRole.valueOf(row.string("role")) }
+                .getOrDefault(runtime.mobileagent.domain.ModelRole.CHAT)
+            val caps = runCatching {
+                kotlinx.serialization.json.Json.decodeFromString<List<String>>(row.string("capabilities").ifBlank { "[]" })
+            }.getOrDefault(emptyList()).toSet()
+            val endpoint = runtime.mobileagent.domain.ModelEndpoint.fromLegacy(role, caps)
+            val encoded = kotlinx.serialization.json.Json.encodeToString(
+                runtime.mobileagent.domain.ModelEndpoint.serializer(),
+                endpoint,
+            )
+            connection.execute("UPDATE model_profiles SET endpoint_json = ? WHERE id = ?", listOf(encoded, row.string("id")))
+        }
+    }
 }

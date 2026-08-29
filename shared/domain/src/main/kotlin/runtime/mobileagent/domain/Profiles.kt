@@ -37,6 +37,7 @@ data class ModelProfile(
     val revision: Int,
     /** Validated model defaults; the schema above describes allowed values. */
     val parametersJson: String = "{}",
+    val endpoint: ModelEndpoint = ModelEndpoint.fromLegacy(role, capabilities),
 )
 
 @Serializable

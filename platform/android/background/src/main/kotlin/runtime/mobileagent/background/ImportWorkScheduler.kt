@@ -30,12 +30,26 @@ fun interface ImportCancellationHandler {
     fun cancel(jobId: String)
 }
 
+fun interface ImportBatchHandler {
+    fun process(batchId: String, visionConfigured: Boolean)
+}
+
+fun interface ConsentTicketHandler {
+    fun apply(ticketId: String, visionConfigured: Boolean)
+}
+
 object ImportWorkerRegistry {
     @Volatile
     var handler: ImportJobHandler? = null
 
     @Volatile
     var cancellationHandler: ImportCancellationHandler? = null
+
+    @Volatile
+    var batchHandler: ImportBatchHandler? = null
+
+    @Volatile
+    var consentHandler: ConsentTicketHandler? = null
 }
 
 /**
@@ -49,6 +63,8 @@ object ImportWorkScheduler {
     private val cancellationScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     const val INPUT_JOB_ID = "runtime.mobileagent.import.JOB_ID"
     const val INPUT_VISION_CONFIGURED = "runtime.mobileagent.import.VISION_CONFIGURED"
+    const val INPUT_BATCH_ID = "runtime.mobileagent.import.BATCH_ID"
+    const val INPUT_TICKET_ID = "runtime.mobileagent.import.TICKET_ID"
     const val TAG = "runtime.mobileagent.import"
 
     fun enqueue(
@@ -60,6 +76,50 @@ object ImportWorkScheduler {
         val request = request(jobId, visionConfigured)
         WorkManager.getInstance(context).enqueueUniqueWork(
             uniqueName(jobId),
+            ExistingWorkPolicy.KEEP,
+            request,
+        )
+        return request.id
+    }
+
+    fun enqueueBatch(context: Context, batchId: String, visionConfigured: Boolean): UUID {
+        require(batchId.isNotBlank()) { "batchId must not be blank" }
+        val request = OneTimeWorkRequestBuilder<ImportBatchWorker>()
+            .setInputData(
+                androidx.work.Data.Builder()
+                    .putString(INPUT_BATCH_ID, batchId)
+                    .putBoolean(INPUT_VISION_CONFIGURED, visionConfigured)
+                    .build(),
+            )
+            .setConstraints(Constraints.Builder().setRequiredNetworkType(NetworkType.NOT_REQUIRED).build())
+            .setBackoffCriteria(BackoffPolicy.EXPONENTIAL, 30, TimeUnit.SECONDS)
+            .addTag(TAG)
+            .addTag("$TAG:batch:$batchId")
+            .build()
+        WorkManager.getInstance(context).enqueueUniqueWork(
+            "$TAG:batch:$batchId",
+            ExistingWorkPolicy.KEEP,
+            request,
+        )
+        return request.id
+    }
+
+    fun enqueueConsent(context: Context, ticketId: String, visionConfigured: Boolean): UUID {
+        require(ticketId.isNotBlank()) { "ticketId must not be blank" }
+        val request = OneTimeWorkRequestBuilder<ConsentWorker>()
+            .setInputData(
+                androidx.work.Data.Builder()
+                    .putString(INPUT_TICKET_ID, ticketId)
+                    .putBoolean(INPUT_VISION_CONFIGURED, visionConfigured)
+                    .build(),
+            )
+            .setConstraints(Constraints.Builder().setRequiredNetworkType(NetworkType.NOT_REQUIRED).build())
+            .setBackoffCriteria(BackoffPolicy.EXPONENTIAL, 30, TimeUnit.SECONDS)
+            .addTag(TAG)
+            .addTag("$TAG:consent:$ticketId")
+            .build()
+        WorkManager.getInstance(context).enqueueUniqueWork(
+            "$TAG:consent:$ticketId",
             ExistingWorkPolicy.KEEP,
             request,
         )

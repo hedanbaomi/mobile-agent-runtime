@@ -13,12 +13,14 @@ import runtime.mobileagent.domain.AgentProfile
 import runtime.mobileagent.domain.Conversation
 import runtime.mobileagent.domain.EntityId
 import runtime.mobileagent.domain.Utc
+import runtime.mobileagent.domain.isRerankEndpoint
 import runtime.mobileagent.feature.agents.*
 import runtime.mobileagent.provider.SecretRedactor
 
 class AgentsViewModel(application: Application) : AndroidViewModel(application) {
     private val app = application as MobileAgentApp
     val state = mutableStateOf(AgentsUiState())
+    private var editorBaseline: AgentEditorUi? = null
 
     init { reload() }
 
@@ -26,56 +28,39 @@ class AgentsViewModel(application: Application) : AndroidViewModel(application) 
         val profiles = app.container.profiles
         val agents = app.container.agents.list()
         val selected = state.value.selectedAgentId ?: app.container.uiPreferences.getString("selected-agent", null)
+        val selectedId = selected?.takeIf { id -> agents.any { it.id == id } }
         state.value = state.value.copy(
             agents = agents.map { agent ->
                 AgentCardUi(agent.id, agent.name, agent.revision,
                     profiles.getModel(agent.chatProfileId)?.modelId ?: "模型不可用",
                     "${agent.knowledgeBaseIds.size} 个知识库 · ${agent.skillIds.size} 个 Skill")
             },
-            selectedAgentId = selected?.takeIf { id -> agents.any { it.id == id } },
+            selectedAgentId = selectedId,
+            summary = selectedId?.let { editorFrom(it) },
+            hasRerankerModels = profiles.listModels().any { it.isRerankEndpoint() },
         )
     }
 
     fun select(id: String) {
+        if (state.value.editorDirty) return
         if (app.container.agents.get(id) == null) return
         app.container.uiPreferences.edit().putString("selected-agent", id).apply()
-        state.value = state.value.copy(selectedAgentId = id)
-        openEditor(id)
+        state.value = state.value.copy(selectedAgentId = id, summary = editorFrom(id), editor = null, editorDirty = false, editorOpen = false)
     }
 
     fun openEditor(id: String?) {
-        val agent = id?.let { app.container.agents.get(it) }
-        val options = app.container.profiles.listModels().map { model ->
-            val provider = app.container.profiles.getProvider(model.providerId)
-            AgentModelOptionUi(model.id, "${provider?.name.orEmpty()} / ${model.modelId}", model.role.name, model.capabilities)
-        }
-        val knowledge = app.container.db.query("SELECT id,name FROM knowledge_bases WHERE deleted_at IS NULL ORDER BY name,id").map { row ->
-            AgentResourceBindingUi(row.string("id"), row.string("name"), "knowledge",
-                row.string("id") in agent?.knowledgeBaseIds.orEmpty(), "仅本 Agent 可检索已绑定的知识库")
-        }
-        val skills = app.container.skills.list().map { skill ->
-            AgentResourceBindingUi(skill.installId, skill.name, "skill", skill.installId in agent?.skillIds.orEmpty(),
-                if (skill.enabled) "执行仍受当前逐资源授权约束" else "未启用；绑定不会自动授予权限")
-        }
-        val revisions = agent?.let { app.container.agents.listPromptRevisions(it.id) }.orEmpty()
-        val prompt = agent?.let { app.container.agents.getPromptRevision(it.promptRevisionId)?.template }.orEmpty()
-        state.value = state.value.copy(error = null, editor = AgentEditorUi(
-            id = agent?.id, name = agent?.name.orEmpty(), modelOptions = options,
-            chatModelId = agent?.chatProfileId, visionModelId = agent?.visionProfileId,
-            embeddingModelId = agent?.embeddingProfileId, rerankerModelId = agent?.rerankerProfileId,
-            prompt = prompt, promptRevisions = revisions.mapIndexed { index, item ->
-                PromptRevisionUi(item.id, index + 1, item.id.take(8), item.template, item.createdAt, item.parentRevisionId, item.id == agent?.promptRevisionId)
-            },
-            parameters = agent?.parameterOverridesJson?.let { raw ->
-                runCatching { Json.parseToJsonElement(raw).jsonObject.mapValues { it.value.toString() } }.getOrDefault(emptyMap())
-            }.orEmpty(),
-            resourceBindings = knowledge + skills, retrievalMode = agent?.retrievalMode ?: "explicit",
-            snapshotLabel = "修改配置只影响新会话；现有会话保留不可变快照，撤权立即生效。", revision = agent?.revision ?: 0,
-        ))
+        val editor = editorFrom(id)
+        editorBaseline = editor
+        state.value = state.value.copy(error = null, editor = editor, editorDirty = false, editorOpen = true)
     }
 
-    fun edit(editor: AgentEditorUi) { state.value = state.value.copy(editor = editor) }
-    fun closeEditor() { state.value = state.value.copy(editor = null, error = null) }
+    fun edit(editor: AgentEditorUi) {
+        state.value = state.value.copy(editor = editor, editorDirty = editor != editorBaseline)
+    }
+    fun closeEditor() {
+        editorBaseline = null
+        state.value = state.value.copy(editor = null, error = null, editorDirty = false, editorOpen = false)
+    }
     fun query(value: String) { state.value = state.value.copy(query = value) }
 
     fun toggleResource(id: String, enabled: Boolean) {
@@ -96,7 +81,7 @@ class AgentsViewModel(application: Application) : AndroidViewModel(application) 
                 id = previous?.id ?: EntityId.random().value, name = editor.name.trim(),
                 promptRevisionId = previous?.promptRevisionId ?: EntityId.random().value,
                 chatProfileId = model, visionProfileId = editor.visionModelId,
-                embeddingProfileId = editor.embeddingModelId, rerankerProfileId = editor.rerankerModelId,
+                embeddingProfileId = previous?.embeddingProfileId, rerankerProfileId = editor.rerankerModelId,
                 knowledgeBaseIds = editor.resourceBindings.filter { it.type == "knowledge" && it.enabled }.map { it.id },
                 skillIds = editor.resourceBindings.filter { it.type == "skill" && it.enabled }.map { it.id },
                 retrievalMode = editor.retrievalMode, revision = (previous?.revision ?: 0) + 1,
@@ -105,7 +90,15 @@ class AgentsViewModel(application: Application) : AndroidViewModel(application) 
             )
             val saved = app.container.agents.saveWithPrompt(profile, editor.prompt)
             app.container.uiPreferences.edit().putString("selected-agent", saved.id).apply()
-            state.value = state.value.copy(selectedAgentId = saved.id, editor = null, error = null, status = "已保存 Agent；旧会话快照不变。")
+            editorBaseline = null
+            state.value = state.value.copy(
+                selectedAgentId = saved.id,
+                editor = null,
+                editorOpen = false,
+                editorDirty = false,
+                error = null,
+                status = "已保存 Agent；旧会话快照不变。",
+            )
             reload()
             true
         } catch (error: Exception) {
@@ -133,5 +126,36 @@ class AgentsViewModel(application: Application) : AndroidViewModel(application) 
     } catch (error: Exception) {
         state.value = state.value.copy(error = SecretRedactor.redact(error.message ?: "创建会话失败。"))
         null
+    }
+
+    private fun editorFrom(id: String?): AgentEditorUi {
+        val agent = id?.let { app.container.agents.get(it) }
+        val options = app.container.profiles.listModels().map { model ->
+            val provider = app.container.profiles.getProvider(model.providerId)
+            AgentModelOptionUi(model.id, "${provider?.name.orEmpty()} / ${model.modelId}", model.role.name, model.capabilities)
+        }
+        val knowledge = app.container.db.query("SELECT id,name FROM knowledge_bases WHERE deleted_at IS NULL ORDER BY name,id").map { row ->
+            AgentResourceBindingUi(row.string("id"), row.string("name"), "knowledge",
+                row.string("id") in agent?.knowledgeBaseIds.orEmpty(), "仅本 Agent 可检索已绑定的知识库")
+        }
+        val skills = app.container.skills.list().map { skill ->
+            AgentResourceBindingUi(skill.installId, skill.name, "skill", skill.installId in agent?.skillIds.orEmpty(),
+                if (skill.enabled) "执行仍受当前逐资源授权约束" else "未启用；绑定不会自动授予权限")
+        }
+        val revisions = agent?.let { app.container.agents.listPromptRevisions(it.id) }.orEmpty()
+        val prompt = agent?.let { app.container.agents.getPromptRevision(it.promptRevisionId)?.template }.orEmpty()
+        return AgentEditorUi(
+            id = agent?.id, name = agent?.name.orEmpty(), modelOptions = options,
+            chatModelId = agent?.chatProfileId, visionModelId = agent?.visionProfileId,
+            embeddingModelId = null, rerankerModelId = agent?.rerankerProfileId,
+            prompt = prompt, promptRevisions = revisions.mapIndexed { index, item ->
+                PromptRevisionUi(item.id, index + 1, item.id.take(8), item.template, item.createdAt, item.parentRevisionId, item.id == agent?.promptRevisionId)
+            },
+            parameters = agent?.parameterOverridesJson?.let { raw ->
+                runCatching { Json.parseToJsonElement(raw).jsonObject.mapValues { it.value.toString() } }.getOrDefault(emptyMap())
+            }.orEmpty(),
+            resourceBindings = knowledge + skills, retrievalMode = agent?.retrievalMode ?: "explicit",
+            snapshotLabel = "修改配置只影响新会话；现有会话保留不可变快照，撤权立即生效。", revision = agent?.revision ?: 0,
+        )
     }
 }

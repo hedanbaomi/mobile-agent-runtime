@@ -25,7 +25,7 @@ import java.io.ByteArrayOutputStream
 class SkillsViewModel(application: Application) : AndroidViewModel(application) {
     private val app = application as MobileAgentApp
     val rows = mutableStateListOf<SkillRow>()
-    val status = mutableStateOf("Import a local zip or SKILL.md. Class E packages are refused. Python isolation is not in this build.")
+    val status = mutableStateOf("Import a local zip or SKILL.md. Class E packages are refused. Isolated CPython runs imported Python skills.")
     val state = mutableStateOf(SkillsUiState())
     val permissionRequest = mutableStateOf<Pair<String, String>?>(null)
     private val pendingImports = ArrayDeque<Pair<String, SkillInspection>>()

@@ -103,8 +103,9 @@ data class ProvidersUiState(
     val mcpReason: String = "MCP 适配器报告已配置端点后，MCP 设置才可用。",
     /** The configuration entry is available even when no MCP endpoint is configured. */
     val mcpEntryEnabled: Boolean = false,
-    /** Save and validation feedback remains visible while the editor is open. */
     val editorError: String? = null,
+    val deleteModelCount: Int = 0,
+    val deleteSnapshotCount: Int = 0,
 )
 
 data class ProvidersActions(
@@ -159,7 +160,10 @@ fun ProvidersScreen(state: ProvidersUiState, actions: ProvidersActions = Provide
         AlertDialog(
             onDismissRequest = { deleteProviderId = null },
             title = { Text(if (zh) "删除服务商？" else "Delete provider?") },
-            text = { Text(if (zh) "将删除 $name 及其模型元数据；保存的凭据由宿主操作移除。" else "Delete $name and its model metadata? Stored credentials will be removed by the host operation.") },
+            text = { Text(
+                if (zh) "将删除 $name 及其模型元数据。当前引用：${state.deleteModelCount} 个模型，${state.deleteSnapshotCount} 个会话快照。无引用时密文会退休并进入垃圾回收；Keystore 条目由系统生命周期管理。"
+                else "Delete $name and its model metadata. Current references: ${state.deleteModelCount} models, ${state.deleteSnapshotCount} conversation snapshots. Unreferenced ciphertext is retired and garbage-collected; Keystore entries follow the platform lifecycle."
+            ) },
             confirmButton = { Button(onClick = { deleteProviderId = null; actions.onDelete() }) { Text(if (zh) "删除" else "Delete") } },
             dismissButton = { TextButton(onClick = { deleteProviderId = null }) { Text(if (zh) "取消" else "Cancel") } },
         )
@@ -304,16 +308,19 @@ private fun ProviderEditorDialog(state: ProvidersUiState, actions: ProvidersActi
                 state.editorError?.let { Text(it, color = MaterialTheme.colorScheme.error) }
                 OutlinedTextField(draft.name, { actions.onDraftChange(draft.copy(name = it)) }, label = { Text(if (zh) "名称" else "Name") }, keyboardOptions = noCorrectionText, modifier = Modifier.fillMaxWidth())
                 OutlinedTextField(draft.baseUrl, { actions.onDraftChange(draft.copy(baseUrl = it)) }, label = { Text(if (zh) "基础地址" else "Base URL") }, keyboardOptions = uriOptions, modifier = Modifier.fillMaxWidth())
-                OutlinedTextField(draft.apiFormat, { actions.onDraftChange(draft.copy(apiFormat = it)) }, label = { Text(if (zh) "API 格式" else "API format") }, keyboardOptions = noCorrectionAscii, modifier = Modifier.fillMaxWidth())
-                OutlinedTextField(draft.modelId, { actions.onDraftChange(draft.copy(modelId = it)) }, label = { Text(if (zh) "模型 ID" else "Model id") }, keyboardOptions = noCorrectionAscii, modifier = Modifier.fillMaxWidth())
-                OutlinedTextField(draft.role, { actions.onDraftChange(draft.copy(role = it)) }, label = { Text(if (zh) "模型角色" else "Model role") }, keyboardOptions = noCorrectionAscii, modifier = Modifier.fillMaxWidth())
-                OutlinedTextField(draft.parametersJson, { actions.onDraftChange(draft.copy(parametersJson = it)) }, label = { Text(if (zh) "参数 JSON" else "Parameters JSON") }, keyboardOptions = noCorrectionText, minLines = 2, modifier = Modifier.fillMaxWidth())
-                OutlinedTextField(draft.contextLimit.toString(), { actions.onDraftChange(draft.copy(contextLimit = it.toIntOrNull() ?: draft.contextLimit)) }, label = { Text(if (zh) "上下文预算" else "Context budget") }, keyboardOptions = noCorrectionAscii, modifier = Modifier.fillMaxWidth())
-                OutlinedTextField(draft.outputLimit.toString(), { actions.onDraftChange(draft.copy(outputLimit = it.toIntOrNull() ?: draft.outputLimit)) }, label = { Text(if (zh) "输出预算" else "Output budget") }, keyboardOptions = noCorrectionAscii, modifier = Modifier.fillMaxWidth())
+                Text(if (zh) "API 格式：OpenAI Compatible（当前唯一支持的格式）" else "API format: OpenAI Compatible (the only supported format)", style = MaterialTheme.typography.bodySmall)
+                if (draft.modelProfileId != null || draft.modelId.isNotBlank() || draft.id == null) {
+                    OutlinedTextField(draft.modelId, { actions.onDraftChange(draft.copy(modelId = it)) }, label = { Text(if (zh) "模型 ID" else "Model id") }, keyboardOptions = noCorrectionAscii, modifier = Modifier.fillMaxWidth())
+                    Text(if (zh) "操作：CHAT / EMBEDDING / RERANKER；图片是 Chat 的输入模态，不是独立服务。" else "Operation: CHAT / EMBEDDING / RERANKER. Images are a Chat input modality, not a separate service.", style = MaterialTheme.typography.bodySmall)
+                    OutlinedTextField(draft.role, { actions.onDraftChange(draft.copy(role = it)) }, label = { Text(if (zh) "操作/角色" else "Operation / role") }, keyboardOptions = noCorrectionAscii, modifier = Modifier.fillMaxWidth())
+                    OutlinedTextField(draft.parametersJson, { actions.onDraftChange(draft.copy(parametersJson = it)) }, label = { Text(if (zh) "参数 JSON" else "Parameters JSON") }, keyboardOptions = noCorrectionText, minLines = 2, modifier = Modifier.fillMaxWidth())
+                    OutlinedTextField(draft.contextLimit.toString(), { actions.onDraftChange(draft.copy(contextLimit = it.toIntOrNull() ?: draft.contextLimit)) }, label = { Text(if (zh) "上下文预算" else "Context budget") }, keyboardOptions = noCorrectionAscii, modifier = Modifier.fillMaxWidth())
+                    OutlinedTextField(draft.outputLimit.toString(), { actions.onDraftChange(draft.copy(outputLimit = it.toIntOrNull() ?: draft.outputLimit)) }, label = { Text(if (zh) "输出预算" else "Output budget") }, keyboardOptions = noCorrectionAscii, modifier = Modifier.fillMaxWidth())
+                    CheckRow(if (zh) "输入包含图片" else "Input includes images", draft.vision) { actions.onDraftChange(draft.copy(vision = it)) }
+                    CheckRow(if (zh) "可调用工具" else "Can call tools", draft.tools) { actions.onDraftChange(draft.copy(tools = it)) }
+                }
                 OutlinedTextField(draft.apiKey, { actions.onDraftChange(draft.copy(apiKey = it)) }, label = { Text(if (draft.id == null) { if (zh) "API 密钥" else "API key" } else { if (zh) "替换 API 密钥（可选）" else "Replace API key (optional)" }) }, visualTransformation = PasswordVisualTransformation(), keyboardOptions = noCorrectionAscii, modifier = Modifier.fillMaxWidth())
-                CheckRow(if (zh) "模型支持图片" else "Model accepts images", draft.vision) { actions.onDraftChange(draft.copy(vision = it)) }
-                CheckRow(if (zh) "模型可调用工具" else "Model can call tools", draft.tools) { actions.onDraftChange(draft.copy(tools = it)) }
-                Text(if (zh) "能力探测可能产生服务商费用，且只在明确确认后运行。" else "Capability probes can incur provider charges and only run after explicit confirmation.", style = MaterialTheme.typography.bodySmall)
+                Text(if (zh) "能力探测分别记录用户声明与真实验证，可能产生服务商费用，且只在明确确认后运行。" else "Probes record user-declared vs verified behavior, can incur provider charges, and only run after explicit confirmation.", style = MaterialTheme.typography.bodySmall)
             }
         },
         confirmButton = { Button(onClick = actions.onSave) { Text(if (zh) "保存" else "Save") } },

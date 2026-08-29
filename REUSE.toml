@@ -41,6 +41,7 @@ path = [
     "agent.md",
     "HANDOFF.md",
     "LICENSE_POLICY.md",
+    "README.md",
     "docs/**",
 ]
 precedence = "aggregate"

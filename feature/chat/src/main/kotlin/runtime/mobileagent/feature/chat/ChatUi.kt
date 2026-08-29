@@ -174,9 +174,6 @@ fun ChatScreen(state: ChatUiState, actions: ChatActions = ChatActions(), modifie
     state.selectedCitationId?.let { id -> state.citations.firstOrNull { it.id == id } }?.let {
         CitationDialog(it, actions.onCloseCitation, state.language.equals("zh-CN", true))
     }
-    if (state.inspectorOpen && state.requestPreview != null) {
-        RequestInspectorDialog(state.requestPreview, state.promptLayers, actions.onCloseRequestInspector, state.language.equals("zh-CN", true))
-    }
 }
 
 @Composable
@@ -578,24 +575,46 @@ private fun citationImageSample(width: Int, height: Int): Int {
 }
 
 @Composable
+fun RequestInspectorScreen(
+    request: ChatRequestPreviewUi,
+    layers: List<ChatPromptLayerUi>,
+    onClose: () -> Unit,
+    zh: Boolean,
+    modifier: Modifier = Modifier,
+) {
+    Column(modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp)) {
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            Text(if (zh) "请求检查器" else "Request inspector", style = MaterialTheme.typography.headlineSmall, modifier = Modifier.weight(1f))
+            Button(onClick = onClose) { Text(if (zh) "关闭" else "Close") }
+        }
+        Text("${request.method} ${request.url}", style = MaterialTheme.typography.labelLarge, modifier = Modifier.padding(top = 12.dp))
+        if (request.redacted) {
+            Text(
+                if (zh) "API Key 和敏感请求头已遮盖；消息正文、提示词和知识内容仍会完整显示。"
+                else "API keys and sensitive headers are redacted; message bodies, prompts, and knowledge still appear in full.",
+                style = MaterialTheme.typography.bodySmall,
+                modifier = Modifier.padding(top = 4.dp),
+            )
+        }
+        if (request.headers.isNotBlank()) Text(request.headers, modifier = Modifier.padding(top = 10.dp))
+        if (request.body.isNotBlank()) Text(request.body, modifier = Modifier.padding(top = 10.dp))
+        if (layers.isNotEmpty()) {
+            Text(if (zh) "提示词层" else "Prompt layers", style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(top = 14.dp))
+            layers.forEach { layer ->
+                Text(layer.label, style = MaterialTheme.typography.labelLarge, modifier = Modifier.padding(top = 8.dp))
+                Text(layer.text, style = MaterialTheme.typography.bodySmall)
+            }
+        }
+    }
+}
+
+@Composable
 private fun RequestInspectorDialog(request: ChatRequestPreviewUi, layers: List<ChatPromptLayerUi>, onClose: () -> Unit, zh: Boolean) {
     AlertDialog(
         onDismissRequest = onClose,
         title = { Text(if (zh) "请求检查器" else "Request inspector") },
         text = {
-            Column(Modifier.verticalScroll(rememberScrollState())) {
-                Text("${request.method} ${request.url}", style = MaterialTheme.typography.labelLarge)
-                if (request.redacted) Text(if (zh) "敏感信息已遮盖。" else "Secrets are redacted.", style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(top = 4.dp))
-                if (request.headers.isNotBlank()) Text(request.headers, modifier = Modifier.padding(top = 10.dp))
-                if (request.body.isNotBlank()) Text(request.body, modifier = Modifier.padding(top = 10.dp))
-                if (layers.isNotEmpty()) {
-                    Text(if (zh) "提示词层" else "Prompt layers", style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(top = 14.dp))
-                    layers.forEach { layer ->
-                        Text(layer.label, style = MaterialTheme.typography.labelLarge, modifier = Modifier.padding(top = 8.dp))
-                        Text(layer.text, style = MaterialTheme.typography.bodySmall)
-                    }
-                }
-            }
+            RequestInspectorScreen(request, layers, onClose, zh)
         },
         confirmButton = { Button(onClick = onClose) { Text(if (zh) "关闭" else "Close") } },
     )

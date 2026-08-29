@@ -12,8 +12,12 @@ import kotlinx.coroutines.*
 import runtime.mobileagent.background.ImportWorkScheduler
 import runtime.mobileagent.feature.knowledge.*
 import runtime.mobileagent.knowledge.ApiEmbeddingBinding
+import runtime.mobileagent.knowledge.ImportBatchKind
 import runtime.mobileagent.knowledge.ImportStage
+import runtime.mobileagent.knowledge.KnowledgeArchive
 import runtime.mobileagent.knowledge.MediaKind
+import androidx.documentfile.provider.DocumentFile
+import android.content.Intent
 import runtime.mobileagent.provider.SecretRedactor
 import java.io.ByteArrayOutputStream
 
@@ -76,9 +80,12 @@ class KnowledgeViewModel(application: Application) : AndroidViewModel(applicatio
                             state.value = state.value.copy(
                                 bases = snapshot.bases, selectedBaseId = snapshot.selectedBaseId,
                                 documents = snapshot.documents, jobs = snapshot.jobs, waiting = snapshot.waiting,
-                                rebuildEnabled = snapshot.selectedBaseId != null && !state.value.loading,
+                                rebuildEnabled = snapshot.selectedBaseId != null &&
+                                    !state.value.loading &&
+                                    snapshot.jobs.none { it.stage in ACTIVE },
                                 embeddingSpaceLabel = snapshot.embeddingSpaceLabel,
                                 embeddingModels = snapshot.embeddingModels, apiQueryAttempts = snapshot.apiQueryAttempts,
+                                batches = snapshot.batches,
                             )
                         } else refreshRequested = true
                     } catch (cancelled: CancellationException) { throw cancelled }
@@ -121,6 +128,20 @@ class KnowledgeViewModel(application: Application) : AndroidViewModel(applicatio
                         ApiEmbeddingBinding.parseSpaceId(attempt.spaceId)?.let(app.container.apiEmbeddings::label)
                             ?: attempt.spaceId, attempt.retryAuthorized)
                 },
+                batches = selected?.let(repo::listBatches).orEmpty().map { batch ->
+                    KnowledgeBatchUi(
+                        id = batch.id,
+                        displayName = batch.displayName,
+                        kind = batch.kind.name,
+                        state = batch.state.name,
+                        totalItems = batch.totalItems,
+                        copied = batch.copied,
+                        processing = batch.processing,
+                        waiting = batch.waiting,
+                        failed = batch.failed,
+                        error = batch.error,
+                    )
+                },
             )
     }
     fun selectBase(id: String) {
@@ -144,6 +165,9 @@ class KnowledgeViewModel(application: Application) : AndroidViewModel(applicatio
         val revision = ++embeddingRevision
         val selection = selectionRevision
         readOnIo({
+            require(repo.listJobs().none { it.first.knowledgeBaseId == id && it.first.stage.name in ACTIVE }) {
+                "请先取消或等待当前导入任务，再重建索引。"
+            }
             val api = repo.embeddingSpaceId(id)?.let(ApiEmbeddingBinding::parseSpaceId)
             api?.let { prepareEmbedding(EmbeddingAction.REBUILD, id, null, it, false) }
         }, { revision == embeddingRevision && selection == selectionRevision }) { prepared ->
@@ -224,24 +248,25 @@ class KnowledgeViewModel(application: Application) : AndroidViewModel(applicatio
                         requireNotNull(pending.queryHash), acknowledgeDuplicateCharge = true)
                     "已允许此查询按相同目标重试一次。请返回聊天页重新提交；未自动发送任何请求。"
                 }
-                EmbeddingAction.REBIND -> {
-                    repo.rebindApiKnowledgeBase(pending.knowledgeBaseId, pending.binding, embeddingConsent = true,
-                        acknowledgeDuplicateCharge = pending.retry)
-                    "Embedding 空间与索引已更新；新导入仍须独立确认文本外发。"
-                }
-                EmbeddingAction.REBUILD -> { repo.rebuildIndex(pending.knowledgeBaseId); "已按确认的 API Embedding 空间重建索引。" }
-                EmbeddingAction.GRANT, EmbeddingAction.RETRY -> {
-                    val currentJob = repo.listJobs().firstOrNull { it.first.id == pending.jobId }?.first
-                        ?: error("导入任务已移除；未发送文本。")
-                    require(currentJob.knowledgeBaseId == pending.knowledgeBaseId &&
-                        (if (pending.kind == EmbeddingAction.RETRY) currentJob.error?.contains("UNKNOWN_OUTCOME") == true
-                        else currentJob.stage == ImportStage.AWAITING_EMBEDDING_CONSENT)) {
-                        "导入任务已变更，请重新确认；未发送文本。"
+                EmbeddingAction.REBIND, EmbeddingAction.REBUILD, EmbeddingAction.GRANT, EmbeddingAction.RETRY -> {
+                    val actionName = pending.kind.name
+                    val fingerprint = buildString {
+                        appendLine(actionName)
+                        if (pending.kind == EmbeddingAction.REBIND) {
+                            appendLine(pending.binding.spaceId)
+                            append(if (pending.retry) "duplicate" else "fresh")
+                        } else {
+                            append(pending.binding.fingerprint)
+                        }
                     }
-                    val job = if (pending.kind == EmbeddingAction.RETRY) repo.retryUnknownEmbedding(pending.jobId!!,
-                        acknowledgeDuplicateCharge = true, visionConfigured = app.container.profiles.visionConfigured())
-                    else repo.grantEmbeddingConsent(pending.jobId!!, app.container.profiles.visionConfigured())
-                    "${job.stage}${job.error?.let { "：$it" }.orEmpty()}"
+                    val ticket = repo.issueConsentTicket(
+                        "API_EMBEDDING",
+                        pending.jobId,
+                        pending.knowledgeBaseId,
+                        fingerprint,
+                    )
+                    ImportWorkScheduler.enqueueConsent(app, ticket, app.container.profiles.visionConfigured())
+                    "已记录一次性授权并转入前台任务；不会在此页面协程中发送文本。"
                 }
             }
         }
@@ -269,16 +294,62 @@ class KnowledgeViewModel(application: Application) : AndroidViewModel(applicatio
         dismissVision()
         action {
             require(currentVisionTarget() == fingerprint) { "Vision 目标已变更，请重新确认。" }
-            val job = if (request.second) repo.retryUnknownVision(request.first, acknowledgeDuplicateCharge = true) else repo.grantVisionConsent(request.first)
-            "${job.stage}${job.error?.let { "：$it" }.orEmpty()}"
+            val job = repo.listJobs().firstOrNull { it.first.id == request.first }?.first
+                ?: error("导入任务不存在。")
+            val ticket = repo.issueConsentTicket(
+                "VISION",
+                job.id,
+                job.knowledgeBaseId,
+                (if (request.second) "RETRY\n" else "GRANT\n") + fingerprint.orEmpty(),
+            )
+            ImportWorkScheduler.enqueueConsent(app, ticket, app.container.profiles.visionConfigured())
+            "已记录一次性授权并转入前台任务；不会在此页面协程中上传图片。"
         }
     }
     fun keepWaiting() { state.value = state.value.copy(status = "继续保留本地原件，不会自动上传或标记完成。") }
-    fun textOnly(id: String) { state.value = state.value.copy(status = "导入仍保持等待；文本降级只由对话页的明确开关控制，不能把未处理图片标为完整导入。") }
+    fun textOnly(id: String) = action {
+        val job = repo.acceptTextOnlyVisualGaps(id)
+        job.error ?: "已建立仅文本版本；图片仍在本地，未标为完整导入。"
+    }
 
-    fun importUris(uris: List<Uri>) {
-        if (uris.isEmpty()) return
-        if (uris.size > 500) { state.value = state.value.copy(error = "一次最多选择 500 个文件。"); return }
+    fun importUris(uris: List<Uri>) = importNamedUris(uris.map { displayName(it) to it }, ImportBatchKind.FILES, "files")
+
+    fun importZip(uri: Uri) = importNamedUris(listOf(displayName(uri) to uri), ImportBatchKind.ZIP, displayName(uri))
+
+    fun importTree(treeUri: Uri) {
+        viewModelScope.launch {
+            try {
+                runCatching {
+                    app.contentResolver.takePersistableUriPermission(
+                        treeUri,
+                        Intent.FLAG_GRANT_READ_URI_PERMISSION,
+                    )
+                }
+                val files = runInterruptible(Dispatchers.IO) {
+                    val root = DocumentFile.fromTreeUri(app, treeUri) ?: error("无法打开文件夹。")
+                    walkTree(root, "")
+                }
+                require(files.size <= 500) { "一次最多选择 500 个文件。" }
+                val label = DocumentFile.fromTreeUri(app, treeUri)?.name ?: "folder"
+                importNamedUris(files, ImportBatchKind.FOLDER, label)
+            } catch (cancel: CancellationException) { throw cancel }
+            catch (failure: Exception) { fail(failure) }
+        }
+    }
+
+    private fun walkTree(dir: DocumentFile, prefix: String): List<Pair<String, Uri>> {
+        val out = ArrayList<Pair<String, Uri>>()
+        dir.listFiles().forEach { child ->
+            val name = child.name ?: return@forEach
+            if (child.isDirectory) out += walkTree(child, "$prefix$name/")
+            else out += ("$prefix$name" to child.uri)
+        }
+        return out
+    }
+
+    private fun importNamedUris(files: List<Pair<String, Uri>>, kind: ImportBatchKind, label: String) {
+        if (files.isEmpty()) return
+        if (files.size > 500) { state.value = state.value.copy(error = "一次最多选择 500 个文件。"); return }
         viewModelScope.launch {
             activeOperations += 1
             state.value = state.value.copy(loading = true, error = null)
@@ -288,21 +359,51 @@ class KnowledgeViewModel(application: Application) : AndroidViewModel(applicatio
                     selectionRevision += 1
                     state.value = state.value.copy(selectedBaseId = it)
                 }
-                uris.forEachIndexed { index, uri ->
-                    val name = runInterruptible(Dispatchers.IO) { displayName(uri) }
-                    state.value = state.value.copy(status = "正在复制 ${index + 1}/${uris.size}：$name")
-                    val job = runInterruptible(Dispatchers.IO) {
-                        val bytes = readLimited(uri)
-                        repo.importBytes(name, app.contentResolver.getType(uri).orEmpty(), bytes,
+                val createdBatchId = if (kind == ImportBatchKind.ZIP) {
+                    null
+                } else {
+                    runInterruptible(Dispatchers.IO) { repo.beginBatch(id, kind, label) }
+                }
+                var resolvedBatchId = createdBatchId
+                files.forEachIndexed { index, (name, uri) ->
+                    state.value = state.value.copy(status = "正在复制 ${index + 1}/${files.size}：$name")
+                    runInterruptible(Dispatchers.IO) {
+                        val bytes = readLimited(uri, name)
+                        val imported = repo.importBytes(name, app.contentResolver.getType(uri).orEmpty(), bytes,
                             app.container.profiles.visionConfigured(), id, pauseAt = ImportStage.COPYING,
                             embeddingIsApi = repo.embeddingSpaceId(id)?.let(ApiEmbeddingBinding::parseSpaceId) != null,
                             embeddingConsent = false)
+                        if (createdBatchId != null) {
+                            repo.bindJobToBatch(createdBatchId, imported, name)
+                        } else if (resolvedBatchId == null) {
+                            resolvedBatchId = repo.jobBatchId(imported.id)
+                        }
                     }
-                    if (job.stage != ImportStage.READY) runInterruptible(Dispatchers.IO) {
+                }
+                runInterruptible(Dispatchers.IO) {
+                    val batchId = resolvedBatchId
+                    if (batchId != null) {
+                        repo.refreshBatchProgress(batchId)
+                        if (!repo.generationStillCurrent(batchId)) {
+                            repo.failBatch(batchId, "Knowledge base generation changed; this batch cannot publish.")
+                        } else {
+                            ImportWorkScheduler.enqueueBatch(app, batchId, app.container.profiles.visionConfigured())
+                        }
+                    }
+                    repo.listJobs().filter { it.first.knowledgeBaseId == id && it.first.stage.name in ACTIVE }.forEach { (job, _, _) ->
                         ImportWorkScheduler.enqueue(app, job.id, app.container.profiles.visionConfigured())
                     }
                 }
-                state.value = state.value.copy(status = "原件已复制到本地；后台任务将继续处理，可离开此页。图片及 API Embedding 文本不会未经同意上传。")
+                val snapshot = runInterruptible(Dispatchers.IO) { loadSnapshot(id) }
+                state.value = state.value.copy(
+                    bases = snapshot.bases, selectedBaseId = snapshot.selectedBaseId,
+                    documents = snapshot.documents, jobs = snapshot.jobs, waiting = snapshot.waiting,
+                    embeddingSpaceLabel = snapshot.embeddingSpaceLabel,
+                    embeddingModels = snapshot.embeddingModels, apiQueryAttempts = snapshot.apiQueryAttempts,
+                    batches = snapshot.batches,
+                    status = "原件已复制到本地；批次任务将继续处理，可离开此页。图片及 API Embedding 文本不会未经同意上传。",
+                    rebuildEnabled = snapshot.selectedBaseId != null && snapshot.jobs.none { it.stage in ACTIVE },
+                )
             } catch (cancel: CancellationException) { throw cancel }
             catch (failure: Exception) { fail(failure) }
             finally {
@@ -370,12 +471,19 @@ class KnowledgeViewModel(application: Application) : AndroidViewModel(applicatio
         }
         return uri.lastPathSegment ?: "file"
     }
-    private fun readLimited(uri: Uri): ByteArray = (app.contentResolver.openInputStream(uri) ?: error("无法读取文件。")).use { input ->
+    private fun readLimited(uri: Uri, name: String = displayName(uri)): ByteArray = (app.contentResolver.openInputStream(uri) ?: error("无法读取文件。")).use { input ->
+        val limit = if (name.lowercase().endsWith(".zip")) KnowledgeArchive.MAX_TOTAL_BYTES else MediaKind.MAX_IMPORT_BYTES
         val out = ByteArrayOutputStream(); val buffer = ByteArray(16384)
         while (true) { val count = input.read(buffer); if (count < 0) break
-            require(out.size().toLong() + count <= MediaKind.MAX_IMPORT_BYTES) { "RESOURCE_LIMIT" }; out.write(buffer, 0, count) }
+            require(out.size().toLong() + count <= limit) { "RESOURCE_LIMIT" }; out.write(buffer, 0, count) }
         out.toByteArray()
     }
     private fun fail(failure: Exception) { state.value = state.value.copy(error = SecretRedactor.redact(failure.message ?: "操作失败。")) }
-    private companion object { val ACTIVE = setOf("COPYING", "HASHING", "PARSING", "CHUNKING", "EMBEDDING", "INDEXING", "RETRY_WAIT") }
+    private companion object {
+        val ACTIVE = setOf(
+            "QUEUED", "COPYING", "HASHING", "PARSING", "VISION_PROCESSING", "CHUNKING",
+            "SELECT_EMBEDDING_BACKEND", "EMBEDDING", "INDEXING", "RETRY_WAIT",
+            "WAITING_FOR_VISION_MODEL", "AWAITING_UPLOAD_CONSENT", "AWAITING_EMBEDDING_CONSENT",
+        )
+    }
 }

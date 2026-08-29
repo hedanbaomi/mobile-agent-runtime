@@ -5,7 +5,7 @@
 
 Android 优先的 BYOK Agent Runtime：本地知识库、多模态资料处理、可配置 Prompt 与模型参数、受控 Skills 执行，以及独立远程公告。
 
-**当前状态：** 本地 M0 构建与许可防线已落地，debug APK 可组装。完整 MVP（含隔离 Python）尚未完成。生产包名、GitHub Ruleset 和 Cloudflare 部署仍待确认。
+**当前状态：** debug 开发阶段已接通隔离 CPython、本地 ONNX/USearch、MCP/工具循环与独立公告 Worker。0.1.1 已落地 F-002–F-006 源码修复、真实 Git revision/dirty/schema/构建时间，以及 F-014/F-020 文案；F-001 仍需新 APK 绑定 Logcat。0.2/0.3/1.0 与正式 Android release 未开始。
 
 源码：<https://github.com/hedanbaomi/mobile-agent-runtime>
 

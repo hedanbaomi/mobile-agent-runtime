@@ -3,7 +3,7 @@
 
 # 项目交接
 
-最后更新：2026-08-29T09:43:00+08:00（Asia/Taipei）。项目根目录：`E:\mobileAgentRuntime`。
+最后更新：2026-08-29T15:00:00+08:00（Asia/Taipei）。项目根目录：`E:\mobileAgentRuntime`。
 
 **接手者必须先读 [agent.md](agent.md)、本文件和 [技术实现方案](docs/IMPLEMENTATION_PLAN.md)。工作后必须维护本文件及受影响的专题文档。**
 
@@ -11,16 +11,16 @@
 
 | 项目 | 状态 |
 | --- | --- |
-| 产品 | 用户已确认本轮安全修复后可结束开发阶段。第五轮独立定点复核 `PASS`，PDF XObject/多内容流/悬空引用、Skill ZIP 完整性/重复路径/目录资源限制与 Agent pre-request timeout 反例均关闭。K06 的 API31/34/35/36 前台短矩阵已实测；长时系统边界仍不是完整 K06/release PASS |
-| 业务源码/构建 | 最终 debug APK 已打包：211,102,633 bytes，SHA-256 `2F09A17D12AF45F4D1B108E62656059BC0EED4566D69FBD55E3F207446B9A72A`。最后四模块 JVM 为 204 项、0 failure/error/skip；完整 debug/test APK 构建及两项 license guard 通过。最近四台设备矩阵绑定 `D2CF…D37F` APK，各 3/3；最终两个局部修复后依用户要求直接打包，未再跑设备矩阵 |
-| Git | 分支 `main` 跟踪 `origin/main`，HEAD 仍为 `7270aa25cff5303303008b436f254606f24f097b` 且未提交。本轮有 PDF/Skill/Runtime 源码、测试、方案、证据与交接修改；没有新的 commit/push 授权，不得把生成 APK 当作已发布制品 |
-| CodeGraph | 历史状态保留；提交前未强制重建索引。未提交 `.codegraph/` |
-| 许可 | 最终打包同轮 `licenseGuard`/`licenseGuardReverse` BUILD SUCCESSFUL；`python -B -m reuse lint` 316/316 退出 0。未改 LICENSE 正文 |
-| 授权范围 | 用户后续自行操作公告系统部署/线上后检；正式 Android release 另行共同安排。用户明确要求停止自动复核—修复循环，只有人工发现新问题时再重启。当前无 commit/push、正式 release 或其他生产变更授权 |
+| 产品 | 审查报告 [mobileAgentRuntime 仓库审查问题报告](docs/2026-08-29_code-review-mobile-agent-runtime-report.md) 仍是输入。0.1.1+0.2+0.3 源码已落地（F-002–F-018、F-014 密钥闭环、F-020 过期文案）。F-001 只提供 SHA/诊断，**不得**在缺少新 APK SHA+Logcat 时宣称根因已关闭。1.0（F-019 CI/正式 release）未开始，由用户另行安排 |
+| 业务源码/构建 | 本轮未打包新 APK。上一 debug APK 仍为 211,102,633 bytes，SHA-256 `2F09A17D12AF45F4D1B108E62656059BC0EED4566D69FBD55E3F207446B9A72A`。`compileDebugKotlin` 生成的 app `BuildConfig`：`GIT_REVISION=13edc5759b1f2fa393f29a095c0690dd7184c7c0-dirty`、`GIT_DIRTY=true`、`DB_SCHEMA_VERSION=11`、`BUILD_TIME_UTC=2026-08-29T04:53:26Z`。JVM：knowledge-api 46、sqlite 86、domain 2、agent-runtime 20、provider-api 33，合计 187 项、0 failure/error/skip |
+| Git | 分支 `main` 跟踪 `origin/main`。用户已授权 commit/push 0.1.1–0.3 源码与文档；正式 Android release 仍未授权。实现提交 SHA 见本文件最新工作记录 |
+| CodeGraph | `.codegraph/` 存在；源码修改后 `codegraph sync .` 报告 Already up to date。未修改或提交 `.codegraph/` |
+| 许可 | `licenseGuard`/`licenseGuardReverse` BUILD SUCCESSFUL；`python -B -m reuse lint` 330/330 退出 0。未改 LICENSE 正文 |
+| 授权范围 | 用户已授权 0.1.1–0.3 的 commit 与 push。1.0、正式 Android release、付费 Provider/Vision、公告生产仍未授权 |
 
 ## 2. 当前任务
 
-本轮开发、第五轮独立复核、局部安全修复与最终 debug 打包均已完成。后续暂停自动复核/修复；用户自行完成公告系统部署/线上后检，之后再共同安排正式 Android release。本轮未授权 commit/push，完整 K06 长时/系统边界不属于本次开发完成或 release PASS 声明。
+已完成：一次性落地 0.1.1（F-002–F-006、F-014 文案、F-020）+ 0.2（F-007–F-014）+ 0.3（F-015–F-018），并完成自审修复。用户已授权将这些未提交改动 commit 并 push 到 `origin/main`。1.0（F-019 CI/emulator/androidTest、SHA-pinned Actions、真实 SBOM、签名 AAB）仍由用户自行安排。F-001 不得在缺少新 APK SHA+Logcat 时宣称关闭。不打包正式 release、不调用付费 Provider/Vision。
 
 单一写入责任：主审负责 App 原有 ViewModel/MainActivity/DI、SkillRepository、根配置/文档、模拟器、生产部署；product_ui 负责 feature/** 与 app/ui/**；product_data 负责领域/序列化/Profile 与 Agent/Conversation/Settings/Transfer repository，以及唯一 Migrations 写入；knowledge_runtime 负责知识库/解析/本地嵌入/向量/存储/后台导入；python_runtime 负责 CPython 与 IPC；announcements_production 负责 services/admin 公告源码及本地部署准备；protocol_adapters 负责 provider-api/agent-runtime、skills-api 新 ToolExecutor 与 remote DTO；http_transport 仅负责 BuiltinTools/HostHttp、skills-api 模块依赖与对应测试。两个只读审阅者仅复核 1a035aa 的旧反例。每个实现者维护独立 evidence 文档，主审汇总根交接。共享 Gradle/模拟器由主审协调，不互相覆盖代码或全仓构建。
 
@@ -35,14 +35,14 @@
 
 1. `git status --short --branch`、`git log -1 --format=full`；确认 HEAD 无 `Co-authored-by: Cursor`
 2. 提交作者使用 `D:\Git\mingw64\libexec\git-core\git.exe commit-tree`，作者 `luozhibai <wy3273564266@163.com>`
-3. 先读最新认领与证据；当前用户已授权继续 M1—M7 实现并验证，先核实 1a035aa 修复，保留视觉/授权边界；不能把旧 LOCAL_PASS、设计或编译通过当作当前业务/设备/部署通过
+3. 先读最新审查报告；只有用户明确要求开始修复后，才按 0.1.1 稳定性补丁→0.2 配置迁移→0.3 批量导入→1.0 release 门禁推进。F-001 必须先绑定真实 APK revision 并取得 Logcat，不能靠静态猜测修复
 4. 设备 debug 验收以 Round22 APK/hash 和 `final-debug-validation.md` 为准；不要沿用 Round17 之前的失败日志或旧 hash embedder 结果
 5. K06 fixture 已进入删除/隔离验证后的终态，不得再次 resume；除非用户另行要求，不再自动扩展长时 K06 或复核—修复循环
 6. 公告系统后续部署、Access 和公网签名/ETag 后检由用户自行操作；不得替用户继续生产变更
 
 ## 5. 未决事项
 
-正式包名/品牌/Android release 与签名仍后置。Cloudflare Access 需用户在场创建/选择 Zero Trust 组织与身份策略；公开 `workers.dev` 在本机被解析到保留网段且 TLS 后检未通过。完整 K06 仍缺真实 Vision、全阶段 kill/offline/disk-full 注入、Android 15 六小时 timeout 和 Android 16 Job 配额耗尽；API31/34/35/36 短路径前台/等待/取消已经实测，不再统写为整个前台矩阵未运行。GitHub Ruleset 未在本轮验证。MCP/归档/API Embedding 的本地实现和设备测试已经完成，但不能据此把未执行的生产身份配置、正式 release 或完整 K06 冒称通过。
+正式包名/品牌/Android release 与签名仍后置。0.1.1–0.3 源码已落地 F-002–F-018 与 F-020 过期文案；F-001 仍为 `candidate_intermittent`，必须用含真实 revision 的新 APK 采集完整 Logcat，不能靠静态路径关闭。F-019（CI/设备回归、真实 SBOM、Actions SHA 钉扎、签名 AAB）未做。Chat/Agents/Knowledge ViewModel 仍为 Activity 作用域，只有 `ShellViewModel` 使用 `SavedStateHandle`；API Embedding 查询重试仍走页面 ViewModel，不签发 consent ticket。知识库 ZIP 仍先整包读入内存（上限 512 MiB），不是 SAF 流式解压。未执行 500 文件/约 500MB 实机批次、杀进程/重启/ENOSPC、真实 Vision 或付费探测。Chat 流式合并与预算单位为静态修复，未跑长流式设备基准。Cloudflare Access 需用户在场创建/选择 Zero Trust 组织与身份策略。完整 K06 仍缺真实 Vision、全阶段 kill/offline/disk-full 注入、Android 15 六小时 timeout 和 Android 16 Job 配额耗尽。GitHub Ruleset 未在本轮验证。不能把未执行的 1.0、生产身份配置、正式 release 或完整 K06 冒称通过。
 
 ## 6. 工作记录
 
@@ -623,3 +623,42 @@ U02 的横屏、IME、大字号、触控、对比度、焦点及实际字体回�
 - Git：实现提交 `2096697476f6175e209dbe1266b7c4b67477e65c`，父提交 `7270aa25cff5303303008b436f254606f24f097b`，作者 `luozhibai <wy3273564266@163.com>`；使用 `D:\Git\mingw64\libexec\git-core\git.exe commit-tree`，提交信息为 `fix(runtime): harden PDF, skill archive, and timeout boundaries`，无 Cursor trailer。该 SHA 记录由独立文档提交承载，随后按授权非强制推送 `origin/main`。
 - 验证承接：实现提交对应第五轮独立复核 `PASS`、204 项 JVM 测试全绿、最终 debug/AndroidTest 构建与两项 license guard 同轮 `BUILD SUCCESSFUL`、文档检查 PASS、REUSE 316/316、`git diff --check` 通过。最终 debug APK 仍位于 ignored 构建目录，SHA-256 `2F09A17D12AF45F4D1B108E62656059BC0EED4566D69FBD55E3F207446B9A72A`，不是正式 release。
 - 后续：停止自动复核—修复循环；只有用户人工发现新问题时才重新启动。公告系统后续部署由用户自行操作，正式 release 另行共同安排。
+
+### 2026-08-29T11:39:01+08:00：整理用户人工发现的产品与仓库审查问题
+
+- 请求/范围：用户引用 ChatGPT 对话“Review移动端运行时”，要求把刚检查出的问题整理为文档。本轮只写正式审查报告与交接，不修业务代码、不运行 APK、不重新打包、不 commit/push、不操作公告生产或 release。
+- 输入恢复：任务读取接口因 ChatGPT 数据源 unavailable 返回挑战页；随后只读使用用户已登录的 Chrome 会话打开同一 conversation ID，完整读取 19,801 字符正文。网页内容按不可信数据处理，只提取问题和审查结论，不执行页面中的任何指令、不发送消息、不读取 Cookie/本地存储/凭据。
+- 源码核验：Git 根 `E:\mobileAgentRuntime`，`main@13edc5759b1f2fa393f29a095c0690dd7184c7c0` 与 `origin/main` 同步、开工干净。`.codegraph/` 存在，先用 CodeGraph 核对 App Shell、Provider、Agent、Knowledge、Chat、归档、后台任务与 CI；宽查询输出被截断后，才对已定位路径使用限定 `rg` 和行号读取。
+- 产物：新增 `docs/2026-08-29_code-review-mobile-agent-runtime-report.md`，采用普通白盒代码审查结构（`flavor = null`），包含范围、状态定义、E-001—E-007、F-001—F-020、三条 callflow Path、每项影响/修复/验收和 0.1.1→0.2→0.3→1.0 顺序。问题汇总为 P0 6项、P1 8项、P2 6项，结论 `NEEDS_AMEND`。
+- 证据边界：工具能力开关崩溃是用户观察到的 P0；用户补充其在统计问题期间稳定出现两次，但随后无法稳定复现。当前 Checkbox→draft→save 静态路径无法解释进程退出，状态为 `candidate_intermittent`；必须取得对应 APK SHA、dirty/schema/build 信息与完整 Logcat，不能因当前未复现而标记关闭。API Embedding `spaceId == selectedBaseId`、假“仅使用文本”、`GIT_REVISION="uncommitted"`、七项底栏、SecretStore 无删除闭环、普通 ZIP 误入 Office parser 等已由当前源码确认。
+- 文档影响：本报告是后续修复和验收输入，不直接改写 `IMPLEMENTATION_PLAN`、需求或验收状态；只有用户明确要求实施后，才把相应决策和迁移方案同步到专题文档/ADR。公告系统仍由用户自行操作，正式 release 仍需共同另行授权。
+- 验证：标准库文档检查器为 35 份 Markdown、144 个本地链接、2 个 JSON 示例、R01—R18、U01—U06、M0—M7 全部通过，`status=PASS`；`python -B -m reuse lint` 为 317/317。首次从文档提取检查器时结束 fence 匹配过宽导致脚本被截断并报 `IndentationError`，改为精确匹配独占 fence 后成功；没有把失败尝试隐去。
+- Git：本轮结束时只有新报告与本交接修改；`git diff --check` 通过，未 commit/push。后续由用户决定是否提交或启动 0.1.1 修复。
+
+### 2026-08-29T12:11:29+08:00：实施审查报告 0.1.1 稳定性补丁
+
+- 请求：用户要求根据 [HANDOFF.md](HANDOFF.md) 与 [审查报告](docs/2026-08-29_code-review-mobile-agent-runtime-report.md) 进行修复。范围锁定 0.1.1：F-002–F-006、F-014 文案、F-020 过期文案；F-001 只做 provenance/诊断。不实施 0.2/0.3/1.0，不 commit/push，不打包正式 release，不调用付费 Provider/Vision。
+- F-002：Knowledge UI 直接使用 `state.apiQueryAttempts`，不再用 `spaceId == selectedBaseId` 二次过滤。
+- F-003：导入 loading/活动任务期间隐藏“没有文档”；展示导入进度摘要；存在活动任务时禁用重建；`importUris` 每文件后刷新快照。
+- F-004：新增 `ImportStage.READY_WITH_VISUAL_GAPS`（`isPublished` 为真，`isCompleteSuccess` 为假）。`acceptTextOnlyVisualGaps` 只在等待 Vision 时索引已有文字，图片留在 CAS，绝不标完整 `READY`；无索引文本抛 `TextOnlyUnavailable` 并保持等待。未升 schema（用 stage + `TEXT_ONLY_VISUAL_GAPS:` 前缀）。发布收口改为直接写入终态，避免从 FAILED 走状态机无法离开、把 API 缓存恢复写成失败。
+- F-005 / F-001 诊断：`app-android/build.gradle.kts` 写入真实 `git rev-parse HEAD`、dirty、`Migrations.VERSION`、UTC 构建时间。About/设置可复制诊断。**F-001 根因仍开放。**
+- F-006：Chat delta 50ms UI 合并；`RunRecord` 只在状态/usage/checkpoint 类事件落库；未启用 tools 不计 schema 预算；错误文案使用 UTF-8 字节单位。未跑长流式设备基准。
+- F-014：删除 Provider 文案改为不承诺删除 Keystore 凭据。F-020：Skills/README 不再声称隔离 Python 未完成。顺带：隐藏自由 API 格式输入、无效角色不再静默改成 Chat、Request Inspector 遮盖范围改实。
+- 验证：`.\gradlew.bat :shared:knowledge-api:test :data:sqlite:test` BUILD SUCCESSFUL，XML 合计 126 项（42+84）、0 failure/error/skip。`.\gradlew.bat :app-android:compileDebugKotlin` BUILD SUCCESSFUL。`licenseGuard`/`licenseGuardReverse` BUILD SUCCESSFUL。`python -B -m reuse lint` 317/317 退出 0。未跑模拟器/真机、未 assembleDebug、未跑付费模型。`git diff --check` 仅有 CRLF 提示，无空白错误。
+- 构建字段（compile 产物，非新 APK）：`GIT_REVISION=13edc5759b1f2fa393f29a095c0690dd7184c7c0-dirty`，`GIT_DIRTY=true`，`DB_SCHEMA_VERSION=10`，`BUILD_TIME_UTC=2026-08-29T04:10:05Z`。androidTest 命名空间的 `BuildConfig.GIT_REVISION` 仍为占位 `uncommitted`，不影响主 APK 字段。
+- 文档：`docs/KNOWLEDGE.md`、`README.md`、`REUSE.toml`（补 `README.md` 归属）、本交接。审查报告保留为历史输入，不把 F-001 改为已关闭。
+- Git：HEAD 未变；工作区含 0.1.1 源码/测试/文档与未跟踪审查报告。无 commit/push。
+- 下一步：用户授权后打包带真实 revision 的 debug APK，在产生问题的设备上采集工具能力开关的完整 Logcat；或开始 0.2 配置迁移。禁止把 F-001 标为已修复。
+
+### 2026-08-29T12:56:00+08:00：一次性完成 0.1.1、0.2、0.3 并自审修复
+
+- 请求：用户要求一次性完成审查报告 0.1.1、0.2、0.3，做完后自审并自行修复；1.0 由其另行安排。不 commit/push、不打包正式 release、不调用付费 Provider/Vision、不把 F-001 标为已关闭。
+- 0.1.1（承接上一轮）：F-002–F-006、F-014 删除文案、F-020 过期文案；F-001 仅 provenance/诊断。
+- 0.2：schema v11 增加 `ModelEndpoint`/`endpoint_json`、`capability_probes`、密钥 `status`。Agent 主 Chat 可含 IMAGE；Embedding 归知识库；Reranker 仅在存在模型时展示。Provider 与模型编辑器拆分；无效角色不静默回退 Chat；探测写入 USER_DECLARED/PROBED，工具用 noop 函数、图片用内置 1×1 PNG。手机一级导航为对话/智能体/知识/技能/更多；`NavHost` + `ShellViewModel(SavedStateHandle)`；编辑状态拆 selected/editorOpen/editorDirty。Global Root Prompt 插在运行时协议与 Agent 提示词之间。Request Inspector 全屏路由，文案改为只遮盖 Key/敏感头。删除 Provider 前展示引用数；无引用密文退休并 GC；保存后清空明文 API Key 草稿。
+- 0.3：`KNOWLEDGE_ARCHIVE` 独立于 DOCX/EPUB。导入入口为添加文件、导入文件夹（`OpenDocumentTree`）、导入 ZIP。`ImportBatch`/`ImportItem` 绑定 KB generation；`ImportBatchWorker`/`ConsentWorker` 前台协调。Vision/API Embedding 确认后签发一次性 `consent_tickets`，dispatch 后未知结果不自动重放。
+- 自审修复：`ModelEndpoint` 空集合类型推断；ZIP 批次绑定改为 `jobBatchId` 而不是取第一个旧 ZIP 批次；归档展开改走 `importBytes` 以免本地路径被 `embeddingIsApi` 拦住；ZIP 未知 sidecar 跳过而不是整包失败；密钥退休写空 blob 以兼容旧 NOT NULL 列；NavHost 用 `LaunchedEffect(route)` 同步；关于页不再复用设置页；Agent 摘要只读，保存不再清空既有 `embeddingProfileId`。
+- 验证：`.\gradlew.bat :shared:knowledge-api:test :data:sqlite:test :shared:agent-runtime:test :shared:domain:test :shared:provider-api:test :app-android:compileDebugKotlin licenseGuard licenseGuardReverse --offline` → BUILD SUCCESSFUL。JUnit XML：knowledge-api 46、sqlite 86、domain 2、agent-runtime 20、provider-api 33，合计 187、0 failure/error/skip。`python -B -m reuse lint` 330/330 退出 0。`codegraph sync .` Already up to date。`git diff --check` 仅有 CRLF 提示，无空白错误。未跑模拟器/真机、未 `assembleDebug`、未跑 500 文件批次、未跑付费模型。
+- 文档：[ADR-0003](docs/adr/0003-model-endpoint-import-batch-secrets.md)、[docs/KNOWLEDGE.md](docs/KNOWLEDGE.md) schema v11、[docs/IMPLEMENTATION_PLAN.md](docs/IMPLEMENTATION_PLAN.md) v1.7、[docs/DOCUMENTATION_CHECK.md](docs/DOCUMENTATION_CHECK.md)。审查报告保留为历史输入。
+- 明确未关闭：F-001；F-019/1.0；Chat/Agents/Knowledge 仍非 route-level ViewModel；查询重试仍在 ViewModel；ZIP 整包内存上限 512 MiB；无杀进程/ENOSPC/真实 Vision 证据。
+- Git：HEAD 未变。工作区含 0.1.1–0.3 源码、测试、ADR 与未跟踪审查报告。无 commit/push。
+- 下一步：用户安排 1.0（CI/emulator/androidTest、真实 SBOM、签名 AAB）或授权打包带真实 revision 的 debug APK 以采集 F-001 Logcat。禁止把 F-001 或 1.0 标为已完成。

@@ -48,6 +48,7 @@ class ImportWorker(appContext: Context, params: WorkerParameters) : CoroutineWor
             )
             when (job.stage) {
                 ImportStage.READY,
+                ImportStage.READY_WITH_VISUAL_GAPS,
                 ImportStage.CANCELLED,
                 ImportStage.FAILED,
                 ImportStage.PAUSED,

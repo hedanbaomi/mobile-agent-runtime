@@ -3,7 +3,7 @@
 
 # 知识库、多模态和检索契约
 
-状态（2026-08-29）：Round21 debug 集成已接入经 hash 校验的 MiniLM ONNX 模型包、USearch JNI、PDF 页渲染与 API Embedding 独立授权。API36/x86_64 上 API Embedding 5 项、Knowledge 4 项设备测试通过；schema v10 已包含查询未知门禁、可恢复外发 operation 与查询向量缓存。320 文件/472,363,598 bytes fixture 完成 20 文本 READY、300 图片 WAITING、专名引用、幂等和共享 blob 删除隔离；API31/34/35/36 上最终 debug 制品的真实 WorkManager、前台契约、等待终态与取消短测各 3/3 通过。PDF parser v5 只把签名与 DCT filter 同时可信的 JPEG 作为 IMAGE，raw/Flate XObject 保留为 PAGE 阻断且仓储层验证 Vision 零调用。尚未执行真实 Vision、全阶段故障注入、Android 15 六小时 timeout 与 Android 16 Job 配额耗尽，明确不是完整 K06 PASS。对应 R05—R08、K01—K08；最新证据见 [knowledge-runtime](evidence/2026-08-29/knowledge-runtime.md)、[knowledge-load](evidence/2026-08-29/knowledge-load.md)、[foreground-import-matrix](evidence/2026-08-29/foreground-import-matrix.md)、[final-debug-validation](evidence/2026-08-29/final-debug-validation.md) 与 [HANDOFF](../HANDOFF.md)。
+状态（2026-08-29）：Round21 debug 集成已接入经 hash 校验的 MiniLM ONNX 模型包、USearch JNI、PDF 页渲染与 API Embedding 独立授权。0.1.1 已实现可审计的 `READY_WITH_VISUAL_GAPS` 文本降级。0.2/0.3 将 schema 升至 v11：`ModelEndpoint`、`import_batches`/`import_items`、`consent_tickets`、`capability_probes` 与密钥 status。知识库 ZIP 为独立 `KNOWLEDGE_ARCHIVE`，不复用 DOCX/EPUB。API36/x86_64 上 API Embedding 5 项、Knowledge 4 项设备测试通过；schema v10 已包含查询未知门禁、可恢复外发 operation 与查询向量缓存。320 文件/472,363,598 bytes fixture 完成 20 文本 READY、300 图片 WAITING、专名引用、幂等和共享 blob 删除隔离；API31/34/35/36 上最终 debug 制品的真实 WorkManager、前台契约、等待终态与取消短测各 3/3 通过。PDF parser v5 只把签名与 DCT filter 同时可信的 JPEG 作为 IMAGE，raw/Flate XObject 保留为 PAGE 阻断且仓储层验证 Vision 零调用。尚未执行真实 Vision、全阶段故障注入、Android 15 六小时 timeout、Android 16 Job 配额耗尽、500 文件批次实机或付费探测，明确不是完整 K06 PASS。对应 R05—R08、K01—K08；最新证据见 [knowledge-runtime](evidence/2026-08-29/knowledge-runtime.md)、[knowledge-load](evidence/2026-08-29/knowledge-load.md)、[foreground-import-matrix](evidence/2026-08-29/foreground-import-matrix.md)、[final-debug-validation](evidence/2026-08-29/final-debug-validation.md) 与 [HANDOFF](../HANDOFF.md)。
 
 ## 1. 数据模型与一致性
 
@@ -23,8 +23,10 @@
 | embedding_query_attempts | kbId、完整 spaceId、queryHash 联合主键；retryAuthorized 默认 false；error、updatedAt；不持久化原始查询文本 |
 | generation_members | generationId+chunkId联合唯一，关联spaceId、documentVersionId和embedding；代际成员关系与向量本体分离 |
 | index_generations | id、kbId、spaceId、manifestHash、state、vectorCount、ftsVersion、createdAt；active指针只指向 READY |
-| import_jobs | id、kbId、documentId、state、stage、parser/vision/embedding指纹、checkpoint、error、updatedAt |
-| import_items | jobId、itemKey、kind、state、attemptCount、resultRef；job+itemKey唯一 |
+| import_jobs | id、kbId、documentId、state、stage、parser/vision/embedding指纹、checkpoint、error、updatedAt、batchId |
+| import_batches | id、kbId、generationId、kind、displayName、state、计数、error |
+| import_items | batchId、itemKey、relativePath、jobId、kind、state、attemptCount、error；batch+itemKey唯一 |
+| consent_tickets | id、kind、jobId、kbId、fingerprint、consumed、createdAt；一次性付费授权 |
 
 SQLite是向量与元数据真值，FTS与USearch均为可重建派生数据。Run开始时从activeGenerationId取得已就绪代际并固定引用；本次检索始终使用该代际，切换active不影响已开始Run，但删除/撤权实时生效。所有检索都检查文档未删除、授权仍存在、generation匹配该Run的有效pin。旧代际在使用者释放后才回收，即使旧向量文件尚未清理，也不能返回已删除/未发布内容。
 
@@ -47,13 +49,14 @@ CHUNKING → SELECT_EMBEDDING_BACKEND
   本地模型且可用 ──────────────────────→ EMBEDDING
   用户选择API → AWAITING_EMBEDDING_CONSENT → EMBEDDING
 EMBEDDING → INDEXING → READY
+用户明确选择仅文本 → READY_WITH_VISUAL_GAPS（图片仍在 CAS，不是完整 READY）
 
 可从工作阶段进入：PAUSED / RETRY_WAIT / FAILED / CANCELLED
 ```
 
-`WAITING_FOR_VISION_MODEL`是可恢复等待，不是导入成功；配置好模型后回到原检查点。纯文本也必须经过Embedding后端选择；API分支在外发前进入`AWAITING_EMBEDDING_CONSENT`，未授权只暂停，不发请求。有效授权可跳过重复弹窗但不能跳过本地校验；绑定Provider、规范化目的域名、模型ID/版本、数据类型/范围和用途，任一变化须重新确认。用户拒绝时保留检查点，不能自动换Provider；本地模型失败不能自动回退API。视觉同意不自动授权把全部文本发送给Embedding。
+`WAITING_FOR_VISION_MODEL`是可恢复等待，不是导入成功；配置好模型后回到原检查点。用户可在等待卡片选择「仅使用文本」，这会索引已有文字并留下可审计的 `READY_WITH_VISUAL_GAPS` 版本；没有可索引文本时任务保持等待。纯文本也必须经过Embedding后端选择；API分支在外发前进入`AWAITING_EMBEDDING_CONSENT`，未授权只暂停，不发请求。有效授权可跳过重复弹窗但不能跳过本地校验；绑定Provider、规范化目的域名、模型ID/版本、数据类型/范围和用途，任一变化须重新确认。用户拒绝时保留检查点，不能自动换Provider；本地模型失败不能自动回退API。视觉同意不自动授权把全部文本发送给Embedding。
 
-首版默认整份文档原子就绪：存在待视觉处理项时，不把该文档标为 READY。其他已就绪文档仍可查询。若日后支持局部可用，必须有独立 `PARTIAL` 状态、醒目覆盖范围和验收，不能伪装完整成功。
+首版默认整份文档原子就绪：存在待视觉处理项时，不把该文档标为 READY。`READY_WITH_VISUAL_GAPS` 是明确的文本降级，不能伪装完整成功。其他已就绪文档仍可查询。
 
 TXT/Markdown、PDF、DOCX、EPUB、常见图片分阶段实现，但最终首版范围不能仅用纯文本替代。DOCX/EPUB为不可信归档，不执行宏/脚本/外部资源，不自动访问包内URL。限制解压文件数、总大小、膨胀比和路径；拒绝 Zip Slip、链接和压缩炸弹。
 

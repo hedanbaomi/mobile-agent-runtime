@@ -12,10 +12,17 @@ import runtime.mobileagent.domain.ApiFormat
 import runtime.mobileagent.domain.AppError
 import runtime.mobileagent.domain.AppException
 import runtime.mobileagent.domain.ErrorCode
+import runtime.mobileagent.domain.CapabilityVerification
+import runtime.mobileagent.domain.EntityId
+import runtime.mobileagent.domain.ModelEndpoint
 import runtime.mobileagent.domain.ModelProfile
 import runtime.mobileagent.domain.ModelRole
 import runtime.mobileagent.domain.ProviderProfile
 import runtime.mobileagent.domain.RetryClass
+import runtime.mobileagent.domain.Utc
+import runtime.mobileagent.domain.acceptsImages
+import runtime.mobileagent.domain.isChatEndpoint
+import runtime.mobileagent.domain.withEndpoint
 
 /**
  * Persistence for user configured providers and models.
@@ -71,12 +78,30 @@ class ProfileRepository(private val db: SqlConnection) {
 
     /** Returns false when models or immutable snapshots still reference the provider. */
     fun deleteProvider(id: String): Boolean {
-        if (getProvider(id) == null) return false
-        val modelRef = db.query("SELECT id FROM model_profiles WHERE provider_id = ? LIMIT 1", listOf(id)).isNotEmpty()
-        val snapshotRef = db.query("SELECT id FROM agent_snapshots WHERE provider_id = ? LIMIT 1", listOf(id)).isNotEmpty()
-        if (modelRef || snapshotRef) return false
+        val preview = providerDeletePreview(id) ?: return false
+        if (!preview.canDelete) return false
         db.execute("DELETE FROM provider_profiles WHERE id = ?", listOf(id))
+        if (preview.secretRef.isNotBlank()) {
+            SecretInventory(db).retireIfUnreferenced(preview.secretRef)
+        }
         return true
+    }
+
+    fun providerDeletePreview(id: String): runtime.mobileagent.domain.ProviderDeletePreview? {
+        val provider = getProvider(id) ?: return null
+        val modelCount = db.query("SELECT COUNT(*) AS n FROM model_profiles WHERE provider_id = ?", listOf(id))
+            .single().long("n").toInt()
+        val snapshotCount = db.query("SELECT COUNT(*) AS n FROM agent_snapshots WHERE provider_id = ?", listOf(id))
+            .single().long("n").toInt()
+        val secretStatus = provider.secretRef.takeIf { it.isNotBlank() }?.let { SecretInventory(db).status(it) }
+        return runtime.mobileagent.domain.ProviderDeletePreview(
+            providerId = id,
+            modelCount = modelCount,
+            snapshotCount = snapshotCount,
+            secretRef = provider.secretRef,
+            secretStatus = secretStatus,
+            canDelete = modelCount == 0 && snapshotCount == 0,
+        )
     }
 
     fun deleteProviderOrThrow(id: String) {
@@ -104,7 +129,7 @@ class ProfileRepository(private val db: SqlConnection) {
         requireReference("model", profile.id, getModel(profile.id) == null)
         requireReference("provider", profile.providerId, getProvider(profile.providerId) != null)
         db.execute(
-            "INSERT INTO model_profiles (id,provider_id,role,model_id,capabilities,parameter_schema_json,parameters_json,context_limit,output_limit,revision) VALUES (?,?,?,?,?,?,?,?,?,?)",
+            "INSERT INTO model_profiles (id,provider_id,role,model_id,capabilities,parameter_schema_json,parameters_json,context_limit,output_limit,revision,endpoint_json) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
             profile.modelArgs(json),
         )
         return profile
@@ -117,7 +142,7 @@ class ProfileRepository(private val db: SqlConnection) {
         if (current != null && profile.revision < current.revision) throw invalid("Model revision is older than the stored revision")
         requireReference("provider", profile.providerId, getProvider(profile.providerId) != null)
         db.execute(
-            "UPDATE model_profiles SET provider_id=?,role=?,model_id=?,capabilities=?,parameter_schema_json=?,parameters_json=?,context_limit=?,output_limit=?,revision=? WHERE id=?",
+            "UPDATE model_profiles SET provider_id=?,role=?,model_id=?,capabilities=?,parameter_schema_json=?,parameters_json=?,context_limit=?,output_limit=?,revision=?,endpoint_json=? WHERE id=?",
             listOf(
                 profile.providerId,
                 profile.role.name,
@@ -128,6 +153,7 @@ class ProfileRepository(private val db: SqlConnection) {
                 profile.contextLimit,
                 profile.outputLimit,
                 profile.revision,
+                json.encodeToString(runtime.mobileagent.domain.ModelEndpoint.serializer(), profile.withEndpoint().endpoint),
                 profile.id,
             ),
         )
@@ -160,19 +186,49 @@ class ProfileRepository(private val db: SqlConnection) {
     }
 
     /** Resolve a chat model and its owning provider in one join; names never influence binding. */
-    fun chatBinding(): Pair<ProviderProfile, ModelProfile>? = binding(
-        "m.role = ?", listOf(ModelRole.CHAT.name),
-    )
+    fun chatBinding(): Pair<ProviderProfile, ModelProfile>? = bindingRows()
+        .asSequence()
+        .map { it.toBinding() }
+        .firstOrNull { (_, model) -> model.isChatEndpoint() }
 
     /** Resolve an image-capable model and its owning provider in one join. */
     fun visionBinding(): Pair<ProviderProfile, ModelProfile>? = bindingRows()
         .asSequence()
         .map { it.toBinding() }
-        .firstOrNull { (_, model) -> model.role == ModelRole.VISION || "image" in model.capabilities }
+        .firstOrNull { (_, model) -> model.acceptsImages() }
 
     fun chatModel(): ModelProfile? = chatBinding()?.second
 
-    fun visionConfigured(): Boolean = listModels().any { it.role == ModelRole.VISION || "image" in it.capabilities }
+    fun visionConfigured(): Boolean = listModels().any { it.acceptsImages() }
+
+    fun recordProbe(
+        modelId: String,
+        providerRevision: Int,
+        toolsSummary: String,
+        imagesSummary: String,
+        source: String,
+        probed: Boolean,
+    ) {
+        val model = getModel(modelId) ?: return
+        db.execute(
+            "INSERT INTO capability_probes(id,provider_id,model_id,provider_revision,verification,tools_summary,images_summary,source,probed_at) VALUES (?,?,?,?,?,?,?,?,?)",
+            listOf(
+                EntityId.random().value,
+                model.providerId,
+                model.modelId,
+                providerRevision,
+                if (probed) CapabilityVerification.PROBED.name else CapabilityVerification.USER_DECLARED.name,
+                toolsSummary,
+                imagesSummary,
+                source,
+                Utc.nowIso(),
+            ),
+        )
+        if (probed) {
+            val endpoint = model.withEndpoint().endpoint.copy(verification = CapabilityVerification.PROBED)
+            upsertModel(model.copy(endpoint = endpoint, revision = model.revision + 1))
+        }
+    }
 
     fun providerForModel(modelId: String): ProviderProfile? =
         getModel(modelId)?.let { getProvider(it.providerId) }
@@ -189,7 +245,8 @@ class ProfileRepository(private val db: SqlConnection) {
                 "p.secret_ref AS p_secret_ref,p.revision AS p_revision,m.id AS m_id,m.provider_id AS m_provider_id," +
                 "m.role AS m_role,m.model_id AS m_model_id,m.capabilities AS m_capabilities," +
                 "m.parameter_schema_json AS m_parameter_schema_json,m.parameters_json AS m_parameters_json," +
-                "m.context_limit AS m_context_limit,m.output_limit AS m_output_limit,m.revision AS m_revision " +
+                "m.context_limit AS m_context_limit,m.output_limit AS m_output_limit,m.revision AS m_revision," +
+                "m.endpoint_json AS m_endpoint_json " +
                 "FROM provider_profiles p JOIN model_profiles m ON m.provider_id=p.id$where " +
                 "ORDER BY p.name,p.id,m.model_id,m.id",
             args,
@@ -207,18 +264,21 @@ class ProfileRepository(private val db: SqlConnection) {
             secretRef = string("p_secret_ref"),
             revision = long("p_revision").toInt(),
         )
+        val caps = decodeList(string("m_capabilities")).toSet()
+        val role = ModelRole.valueOf(string("m_role"))
         val model = ModelProfile(
             id = string("m_id"),
             providerId = string("m_provider_id"),
-            role = ModelRole.valueOf(string("m_role")),
+            role = role,
             modelId = string("m_model_id"),
-            capabilities = decodeList(string("m_capabilities")).toSet(),
+            capabilities = caps,
             parameterSchemaJson = string("m_parameter_schema_json").ifBlank { "{}" },
             contextLimit = long("m_context_limit").toInt(),
             outputLimit = long("m_output_limit").toInt(),
             revision = long("m_revision").toInt(),
             parametersJson = string("m_parameters_json").ifBlank { "{}" },
-        )
+            endpoint = decodeEndpoint(role, caps, string("m_endpoint_json")),
+        ).withEndpoint()
         return provider to model
     }
 
@@ -320,18 +380,21 @@ class ProfileRepository(private val db: SqlConnection) {
     private fun SqlRow.toModel(json: Json): ModelProfile {
         val caps = runCatching { json.decodeFromString<List<String>>(string("capabilities").ifBlank { "[]" }) }
             .getOrElse { throw invalid("Invalid persisted model capabilities") }
+            .toSet()
+        val role = ModelRole.valueOf(string("role"))
         return ModelProfile(
             id = string("id"),
             providerId = string("provider_id"),
-            role = ModelRole.valueOf(string("role")),
+            role = role,
             modelId = string("model_id"),
-            capabilities = caps.toSet(),
+            capabilities = caps,
             parameterSchemaJson = string("parameter_schema_json").ifBlank { "{}" },
             contextLimit = long("context_limit").toInt(),
             outputLimit = long("output_limit").toInt(),
             revision = long("revision").toInt(),
             parametersJson = string("parameters_json").ifBlank { "{}" },
-        )
+            endpoint = decodeEndpoint(role, caps, string("endpoint_json")),
+        ).withEndpoint()
     }
 
     private fun ProviderProfile.providerArgs(json: Json): List<Any?> = listOf(
@@ -339,10 +402,20 @@ class ProfileRepository(private val db: SqlConnection) {
         json.encodeToString(headerSecretRefs), json.encodeToString(nonSecretHeaders), secretRef, revision,
     )
 
-    private fun ModelProfile.modelArgs(json: Json): List<Any?> = listOf(
-        id, providerId, role.name, modelId, json.encodeToString(capabilities.toList().sorted()),
-        parameterSchemaJson, parametersJson, contextLimit, outputLimit, revision,
-    )
+    private fun ModelProfile.modelArgs(json: Json): List<Any?> {
+        val resolved = withEndpoint()
+        return listOf(
+            id, providerId, role.name, modelId, json.encodeToString(capabilities.toList().sorted()),
+            parameterSchemaJson, parametersJson, contextLimit, outputLimit, revision,
+            json.encodeToString(ModelEndpoint.serializer(), resolved.endpoint),
+        )
+    }
+
+    private fun decodeEndpoint(role: ModelRole, capabilities: Set<String>, raw: String): ModelEndpoint {
+        if (raw.isBlank() || raw == "{}") return ModelEndpoint.fromLegacy(role, capabilities)
+        return runCatching { json.decodeFromString(ModelEndpoint.serializer(), raw) }
+            .getOrElse { ModelEndpoint.fromLegacy(role, capabilities) }
+    }
 
     companion object {
         private val SAFE_ID = Regex("[A-Za-z0-9][A-Za-z0-9._:-]{0,255}")

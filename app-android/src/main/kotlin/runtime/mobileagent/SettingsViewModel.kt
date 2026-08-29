@@ -29,7 +29,17 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
     private var transferRunning = false
 
     fun uiState(statsEnabled: Boolean, noticeCount: Int): SettingsUiState = SettingsUiState(
-        versionName = BuildConfig.VERSION_NAME + " debug", gitRevision = BuildConfig.GIT_REVISION,
+        versionName = BuildConfig.VERSION_NAME + " debug",
+        gitRevision = BuildConfig.GIT_REVISION,
+        gitDirty = BuildConfig.GIT_DIRTY,
+        schemaVersion = BuildConfig.DB_SCHEMA_VERSION,
+        buildTimeUtc = BuildConfig.BUILD_TIME_UTC,
+        diagnosticText = buildString {
+            appendLine("revision=${BuildConfig.GIT_REVISION}")
+            appendLine("dirty=${BuildConfig.GIT_DIRTY}")
+            appendLine("schema=${BuildConfig.DB_SCHEMA_VERSION}")
+            appendLine("builtAt=${BuildConfig.BUILD_TIME_UTC}")
+        },
         themeMode = when (preferences.value.theme) {
             ThemePreference.SYSTEM -> "system"; ThemePreference.LIGHT -> "light"
             ThemePreference.DARK -> "dark"; ThemePreference.COLOR_66CCFF -> "66ccff"
@@ -41,6 +51,11 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
         exportState = exportStatus.value, updateState = updateStatus.value, noticeCount = noticeCount,
         licenseText = app.assets.open("AGPL-3.0-only.txt").bufferedReader().use { it.readText() },
         error = error.value,
+        globalRootPrompt = app.container.settings.effectiveGlobalRootPrompt(),
+        globalRootPromptOverride = preferences.value.globalRootPromptOverride,
+        globalRootPromptUnlocked = preferences.value.globalRootPromptUnlocked,
+        globalRootPromptRevision = preferences.value.globalRootPromptRevision,
+        globalRootPromptUpdatedAt = preferences.value.globalRootPromptUpdatedAt,
     )
 
     fun theme(value: String) {
@@ -62,6 +77,21 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
     fun inspector(value: Boolean) {
         app.container.uiPreferences.edit().putBoolean("request-inspector", value).apply()
         inspectorEnabled.value = value
+    }
+
+    fun unlockRootPrompt() {
+        app.container.settings.setGlobalRootPrompt(app.container.settings.get().globalRootPromptOverride, unlocked = true)
+        preferences.value = app.container.settings.get()
+    }
+
+    fun saveRootPrompt(text: String) {
+        app.container.settings.setGlobalRootPrompt(text, unlocked = true)
+        preferences.value = app.container.settings.get()
+    }
+
+    fun restoreRootPrompt() {
+        app.container.settings.restoreDefaultGlobalRootPrompt()
+        preferences.value = app.container.settings.get()
     }
 
     fun exportAgents(): List<Pair<String, String>> = app.container.agents.list().map { it.id to it.name }

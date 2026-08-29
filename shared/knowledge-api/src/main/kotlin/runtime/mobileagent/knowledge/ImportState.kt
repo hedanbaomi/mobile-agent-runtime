@@ -17,6 +17,7 @@ enum class ImportStage {
     EMBEDDING,
     INDEXING,
     READY,
+    READY_WITH_VISUAL_GAPS,
     PAUSED,
     RETRY_WAIT,
     FAILED,
@@ -36,6 +37,7 @@ data class ImportJob(
     var localEmbeddingAvailable: Boolean = true,
     var error: String? = null,
     var consentedVisionFingerprint: String? = null,
+    var visualGapsAccepted: Boolean = false,
 )
 
 object ImportStateMachine {
@@ -71,4 +73,7 @@ object ImportStateMachine {
     }
 
     fun isCompleteSuccess(job: ImportJob): Boolean = job.stage == ImportStage.READY
+
+    fun isPublished(stage: ImportStage): Boolean =
+        stage == ImportStage.READY || stage == ImportStage.READY_WITH_VISUAL_GAPS
 }

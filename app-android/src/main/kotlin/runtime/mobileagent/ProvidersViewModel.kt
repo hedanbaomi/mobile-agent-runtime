@@ -18,6 +18,7 @@ import runtime.mobileagent.domain.EntityId
 import runtime.mobileagent.domain.ModelProfile
 import runtime.mobileagent.domain.ModelRole
 import runtime.mobileagent.domain.ProviderProfile
+import runtime.mobileagent.domain.withEndpoint
 import runtime.mobileagent.provider.SecretRedactor
 import java.net.URI
 
@@ -60,15 +61,14 @@ class ProvidersViewModel(application: Application) : AndroidViewModel(applicatio
     fun saveDraft(draft: ProviderDraft): Boolean {
         if (busy.value) return false
         return try {
-            require(draft.name.isNotBlank() && draft.modelId.isNotBlank()) { "请填写名称和模型 ID。" }
+            require(draft.name.isNotBlank()) { "请填写名称。" }
+            if (draft.modelId.isNotBlank() || draft.modelProfileId != null) {
+                require(draft.modelId.isNotBlank()) { "请填写模型 ID。" }
+            }
             val endpoint = URI(draft.baseUrl.trim().trimEnd('/'))
             require(endpoint.host != null && endpoint.rawUserInfo == null && endpoint.rawFragment == null && endpoint.rawQuery == null) { "服务地址必须是有效的 Base URL，不能含凭据、查询或片段。" }
             val debugLocal = BuildConfig.DEBUG && endpoint.host in setOf("localhost", "127.0.0.1", "10.0.2.2", "[::1]")
             require(endpoint.scheme == "https" || (debugLocal && endpoint.scheme == "http")) { "服务地址必须使用 HTTPS。Debug 仅允许本机测试 HTTP。" }
-            require(draft.contextLimit > 0 && draft.outputLimit > 0 && draft.outputLimit <= draft.contextLimit) { "上下文和输出预算必须为正数，输出不能超过上下文。" }
-            val parameters = Json.parseToJsonElement(draft.parametersJson)
-            require(parameters is JsonObject) { "模型参数必须是 JSON 对象。" }
-            rejectReserved(parameters)
             val previous = draft.providerId?.let { app.container.profiles.getProvider(it) }
             require(draft.providerId == null || previous != null) { "服务已被删除，请重新打开表单。" }
             require(previous != null || draft.apiKey.isNotBlank()) { "新服务需要 API Key；密钥只会以 Keystore 密文保存。" }
@@ -76,28 +76,43 @@ class ProvidersViewModel(application: Application) : AndroidViewModel(applicatio
                 "服务目标发生变化，请重新填写该目标的 API Key；不会把旧目标的密钥转发到新地址。"
             }
             val providerId = previous?.id ?: EntityId.random().value
-            val modelPrevious = draft.modelProfileId?.let { app.container.profiles.getModel(it) }
-            require(modelPrevious == null || modelPrevious.providerId == providerId) { "模型不属于当前服务。" }
+            val saveModel = draft.modelId.isNotBlank() || draft.modelProfileId != null
+            var parameters: JsonObject = JsonObject(emptyMap())
+            var modelPrevious: ModelProfile? = null
+            if (saveModel) {
+                require(draft.modelId.isNotBlank()) { "请填写模型 ID。" }
+                require(draft.contextLimit > 0 && draft.outputLimit > 0 && draft.outputLimit <= draft.contextLimit) { "上下文和输出预算必须为正数，输出不能超过上下文。" }
+                val parsed = Json.parseToJsonElement(draft.parametersJson)
+                require(parsed is JsonObject) { "模型参数必须是 JSON 对象。" }
+                rejectReserved(parsed)
+                parameters = parsed
+                modelPrevious = draft.modelProfileId?.let { app.container.profiles.getModel(it) }
+                require(modelPrevious == null || modelPrevious.providerId == providerId) { "模型不属于当前服务。" }
+            }
             val provider = ProviderProfile(
                 id = providerId, name = draft.name.trim(), apiFormat = ApiFormat.OPENAI_COMPATIBLE,
                 baseUrl = endpoint.toASCIIString(), secretRef = if (draft.apiKey.isNotBlank()) "provider:$providerId:${EntityId.random().value}" else previous!!.secretRef,
                 headerSecretRefs = previous?.headerSecretRefs.orEmpty(), nonSecretHeaders = previous?.nonSecretHeaders.orEmpty(),
                 revision = (previous?.revision ?: 0) + 1,
             )
-            val model = ModelProfile(
+            val model = if (saveModel) ModelProfile(
                 id = modelPrevious?.id ?: EntityId.random().value, providerId = providerId,
                 role = draft.role, modelId = draft.modelId.trim(), capabilities = draft.capabilities,
                 parameterSchemaJson = modelPrevious?.parameterSchemaJson ?: "{}",
                 parametersJson = parameters.toString(), contextLimit = draft.contextLimit, outputLimit = draft.outputLimit,
                 revision = (modelPrevious?.revision ?: 0) + 1,
-            )
+            ).withEndpoint() else null
             app.container.db.transaction {
                 if (draft.apiKey.isNotBlank()) app.container.secrets.put(provider.secretRef, draft.apiKey.toCharArray())
                 app.container.profiles.upsertProvider(provider)
-                app.container.profiles.upsertModel(model)
+                if (model != null) app.container.profiles.upsertModel(model)
             }
             reload()
-            status.value = "已保存 ${provider.name} / ${model.modelId}。能力标记来自手动配置，尚未发送探测请求。"
+            status.value = if (draft.modelId.isBlank()) {
+                "已保存 ${provider.name}。"
+            } else {
+                "已保存 ${provider.name} / ${draft.modelId.trim()}。能力标记来自手动配置，尚未发送探测请求。"
+            }
             true
         } catch (error: Exception) {
             status.value = SecretRedactor.redact(error.message ?: "保存失败。", listOf(draft.apiKey).filter { it.isNotBlank() })
@@ -112,6 +127,8 @@ class ProvidersViewModel(application: Application) : AndroidViewModel(applicatio
             reload()
         } catch (error: Exception) { status.value = SecretRedactor.redact(error.message ?: "删除失败。") }
     }
+
+    fun deletePreview(id: String) = app.container.profiles.providerDeletePreview(id)
 
     fun deleteProvider(id: String) {
         try {
@@ -136,6 +153,17 @@ class ProvidersViewModel(application: Application) : AndroidViewModel(applicatio
                         .probe(model, secret!!, runtime.mobileagent.provider.ProbeConsent.GRANTED, EntityId.random().value)
                 }
                 status.value = "探测完成：${report.source}；stream=${report.supportsStream}，tools=${report.supportsTools}，image=${report.supportsImages}。"
+                val tools = report.source.substringAfter("tools=", "user-declared").substringBefore(';').substringBefore(' ')
+                val images = report.source.substringAfter("images=", "user-declared").substringBefore(';').substringBefore(' ')
+                app.container.profiles.recordProbe(
+                    model.id,
+                    provider.revision,
+                    tools,
+                    images,
+                    report.source,
+                    report.status == runtime.mobileagent.provider.CapabilityProbeStatus.SUCCEEDED,
+                )
+                reload()
             } catch (error: Exception) {
                 status.value = SecretRedactor.redact(error.message ?: "探测失败。", listOfNotNull(secret?.let(::String)))
             } finally { secret?.fill('\u0000'); busy.value = false }

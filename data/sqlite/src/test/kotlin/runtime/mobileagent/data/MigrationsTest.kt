@@ -55,7 +55,7 @@ class MigrationsTest {
 
         Migrations.apply(db)
 
-        assertEquals(10, db.query("SELECT version FROM schema_version").single().long("version").toInt())
+        assertEquals(Migrations.VERSION, db.query("SELECT version FROM schema_version").single().long("version").toInt())
         assertEquals("Existing KB", db.query("SELECT name FROM knowledge_bases WHERE id = ?", listOf("kb-v8")).single().string("name"))
         assertEquals(
             listOf("kb_id", "space_id", "query_hash", "retry_authorized", "error", "updated_at"),
@@ -161,7 +161,7 @@ class MigrationsTest {
         Migrations.apply(db)
         assertEquals(1, db.query("SELECT * FROM embedding_operations").size)
         assertEquals(1, db.query("SELECT * FROM embedding_query_vectors").size)
-        assertEquals(10, db.query("SELECT version FROM schema_version").single().long("version").toInt())
+        assertEquals(Migrations.VERSION, db.query("SELECT version FROM schema_version").single().long("version").toInt())
     }
 
     private fun insertEmbeddingOperation(

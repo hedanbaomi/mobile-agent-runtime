@@ -150,7 +150,7 @@ raise SystemExit(1 if issues else 0)
 ## 7. 2026-08-28 软件页面 UI 设计阶段文档更新
 
 - 用户要求并澄清：新增专门设计软件页面的步骤。现已在 M0 与 M1 间增加 M0.5，保持 M1—M7 编号；以逐屏高保真页面稿/可编辑源稿、布局与视觉标注为核心交付。
-- 来源与约束：新增 R18/S9、U01—U06 和 [ADR-0002](adr/0002-frontend-design-milestone.md)；M1 增加设计基线入口，后续页面按确认的设计实现。
+- 来源与约束：新增 R18/S9、U01—U06 和 [ADR-0002](adr/0002-frontend-design-milestone.md)；M1 增加设计基线入口，后续页面按确认的设计实现。0.2/0.3 配置与导入批次见 [ADR-0003](adr/0003-model-endpoint-import-batch-secrets.md)。
 
 ## 8. 2026-08-28 M0.5 软件页面 UI 设计基线交付核查
 

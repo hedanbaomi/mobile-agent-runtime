@@ -9,6 +9,7 @@ enum class SourceFormat {
     IMAGE,
     PDF,
     OFFICE_ARCHIVE,
+    KNOWLEDGE_ARCHIVE,
     UNKNOWN,
 }
 
@@ -22,7 +23,9 @@ object MediaKind {
         if (header.startsWith(byteArrayOf(0x50, 0x4B, 0x03, 0x04)) ||
             header.startsWith(byteArrayOf(0x50, 0x4B, 0x05, 0x06))
         ) {
-            return SourceFormat.OFFICE_ARCHIVE
+            val officeName = name.endsWith(".docx") || name.endsWith(".epub") || name.endsWith(".odt") ||
+                name.endsWith(".docm")
+            return if (officeName) SourceFormat.OFFICE_ARCHIVE else SourceFormat.KNOWLEDGE_ARCHIVE
         }
         if (isImageHeader(header) || mime.startsWith("image/") ||
             name.endsWith(".png") || name.endsWith(".jpg") || name.endsWith(".jpeg") ||

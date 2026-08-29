@@ -5,6 +5,7 @@ package runtime.mobileagent.knowledge
 
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertFalse
+import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
 
 class ImportStateMachineTest {
@@ -13,6 +14,13 @@ class ImportStateMachineTest {
         val job = ImportJob("j", "kb", "doc", hasImages = true, visionConfigured = false)
         repeat(6) { ImportStateMachine.advance(job) }
         assertEquals(ImportStage.WAITING_FOR_VISION_MODEL, job.stage)
+        assertFalse(ImportStateMachine.isCompleteSuccess(job))
+    }
+
+    @Test
+    fun publishedTextOnlyIsNotCompleteSuccess() {
+        val job = ImportJob("j", "kb", "doc", stage = ImportStage.READY_WITH_VISUAL_GAPS, hasImages = true)
+        assertTrue(ImportStateMachine.isPublished(job.stage))
         assertFalse(ImportStateMachine.isCompleteSuccess(job))
     }
 

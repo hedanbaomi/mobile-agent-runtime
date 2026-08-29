@@ -191,12 +191,12 @@ async function publicFeed(request, url, ctx) {
   const cached = ctx.store.signedSnapshots.get(cacheKey);
   const inm = request.headers.get("If-None-Match");
   if (cached && Date.parse(cached.expiresAt) - now.getTime() > 60 * 60 * 1000) {
-    if (inm && inm === cached.etag) {
+    if (ifNoneMatchMatches(inm, cached.etag)) {
       return new Response(null, { status: 304, headers: { ETag: cached.etag, "Cache-Control": "private, no-store" } });
     }
     return Response.json(cached.envelope, { headers: { ETag: cached.etag, "Cache-Control": "private, no-store" } });
   }
-  if (inm && inm === etag) {
+  if (ifNoneMatchMatches(inm, etag)) {
     return new Response(null, { status: 304, headers: { ETag: etag, "Cache-Control": "private, no-store" } });
   }
   const payloadObject = {
@@ -217,6 +217,15 @@ async function publicFeed(request, url, ctx) {
   };
   ctx.store.signedSnapshots.set(cacheKey, { etag, envelope, expiresAt: payloadObject.expiresAt });
   return Response.json(envelope, { headers: { ETag: etag, "Cache-Control": "private, no-store" } });
+}
+
+function ifNoneMatchMatches(header, etag) {
+  if (!header) return false;
+  const expected = etag.replace(/^W\//i, "");
+  return header.split(",").some((value) => {
+    const candidate = value.trim();
+    return candidate === "*" || candidate.replace(/^W\//i, "") === expected;
+  });
 }
 
 async function getFeedState(store) {

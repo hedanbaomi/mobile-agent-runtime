@@ -242,7 +242,7 @@ assert.deepEqual(localeFallback("zh-Hans-CN"), ["zh-Hans-CN", "zh-CN", "zh-Hans"
   const second = await decodeFeed(worker, INSTALL_B, { "If-None-Match": first.response.headers.get("ETag") });
   assert.equal(second.response.status, 304);
   worker.store.signedSnapshots.clear();
-  const coldIsolate = await decodeFeed(worker, INSTALL_B, { "If-None-Match": first.response.headers.get("ETag") });
+  const coldIsolate = await decodeFeed(worker, INSTALL_B, { "If-None-Match": `W/${first.response.headers.get("ETag")}` });
   assert.equal(coldIsolate.response.status, 304);
   const nearExpiry = createWorker({
     store: worker.store,

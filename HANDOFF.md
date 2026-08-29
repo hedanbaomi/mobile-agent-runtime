@@ -616,3 +616,10 @@ U02 的横屏、IME、大字号、触控、对比度、焦点及实际字体回�
 - 最终包：`E:\mobileAgentRuntime\app-android\build\outputs\apk\debug\app-android-debug.apk`，211,102,633 bytes，SHA-256 `2F09A17D12AF45F4D1B108E62656059BC0EED4566D69FBD55E3F207446B9A72A`。androidTest APK 598,675 bytes，SHA-256 `65CEA8A5EB5303A8383671C993D60F9909AD8172429367FDDDD2D4DDBBC6C0B2`。最终打包与两项 license guard 同轮 `BUILD SUCCESSFUL`（373 tasks，22 executed）；这是 debug 签名包，不是正式 release。
 - 文档/许可：同步 `IMPLEMENTATION_PLAN`、`KNOWLEDGE`、`SKILLS_AND_SECURITY`、前台矩阵与本交接；清除三份历史证据的 9 处尾随空白，使标准库文档检查恢复 PASS。`python -B -m reuse lint` 为 316/316，LICENSE 未改。API34/35 AVD 已正常停止，收工恢复为原有 API31/API36 运行组合。
 - Git：HEAD 未变，当前源码/测试/文档修改均未提交、未推送；构建产物位于 ignored build 目录。后续如需提交/推送或正式 release，须取得新的明确授权并从当前工作树恢复现场。
+
+### 2026-08-29T09:51:04+08:00：授权提交并推送最终复核修复
+
+- 请求/边界：用户明确要求完成 commit 与 push；本次只提交第五轮复核后的源码、测试与文档，不提交 APK、`build/`、`.private/`、密钥或其他本机产物，不执行公告系统生产操作或正式 Android release。
+- Git：实现提交 `2096697476f6175e209dbe1266b7c4b67477e65c`，父提交 `7270aa25cff5303303008b436f254606f24f097b`，作者 `luozhibai <wy3273564266@163.com>`；使用 `D:\Git\mingw64\libexec\git-core\git.exe commit-tree`，提交信息为 `fix(runtime): harden PDF, skill archive, and timeout boundaries`，无 Cursor trailer。该 SHA 记录由独立文档提交承载，随后按授权非强制推送 `origin/main`。
+- 验证承接：实现提交对应第五轮独立复核 `PASS`、204 项 JVM 测试全绿、最终 debug/AndroidTest 构建与两项 license guard 同轮 `BUILD SUCCESSFUL`、文档检查 PASS、REUSE 316/316、`git diff --check` 通过。最终 debug APK 仍位于 ignored 构建目录，SHA-256 `2F09A17D12AF45F4D1B108E62656059BC0EED4566D69FBD55E3F207446B9A72A`，不是正式 release。
+- 后续：停止自动复核—修复循环；只有用户人工发现新问题时才重新启动。公告系统后续部署由用户自行操作，正式 release 另行共同安排。

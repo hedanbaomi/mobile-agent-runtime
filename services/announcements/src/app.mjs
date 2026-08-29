@@ -14,6 +14,8 @@ const MAX_ACTIONS = 4;
 const MAX_EVENTS = 50;
 const MAX_EVENT_BYTES = 64 * 1024;
 const MAX_ADMIN_BYTES = 1024 * 1024;
+const SIGNED_SNAPSHOT_ROTATION_MS = 12 * 60 * 60 * 1000;
+const SIGNED_SNAPSHOT_VALIDITY_MS = 24 * 60 * 60 * 1000;
 const LOCAL_ORIGIN = /^https?:\/\/(127\.0\.0\.1|localhost)(:\d+)?$/;
 const ADMIN_BLOCKED_HTML = `<!doctype html><meta charset="utf-8"><title>Announcements admin unavailable</title><meta name="viewport" content="width=device-width,initial-scale=1"><main><h1>Announcements administration is unavailable</h1><p>Production administration is protected by Cloudflare Access. Ask an operator to configure the Access application and audience before using this page.</p></main>`;
 
@@ -179,7 +181,13 @@ async function publicFeed(request, url, ctx) {
     withdrawn: snapshot.withdrawn,
   };
   const contentHash = sha256Hex(JSON.stringify(contentObject));
-  const cacheKey = [client.platform, client.channel, String(client.versionCode), client.locale, client.installId, String(contentObject.feedVersion), contentHash].join("|");
+  // Worker isolates cannot share their in-memory signed snapshot cache. Bind the
+  // ETag and signed payload to a deterministic rotation window so any isolate
+  // can honor If-None-Match while still forcing a fresh envelope well before
+  // the previous signature expires.
+  const rotationStart = Math.floor(now.getTime() / SIGNED_SNAPSHOT_ROTATION_MS) * SIGNED_SNAPSHOT_ROTATION_MS;
+  const etag = `"${sha256Hex(`${contentHash}:${rotationStart}`).slice(0, 32)}"`;
+  const cacheKey = [client.platform, client.channel, String(client.versionCode), client.locale, client.installId, String(contentObject.feedVersion), contentHash, String(rotationStart)].join("|");
   const cached = ctx.store.signedSnapshots.get(cacheKey);
   const inm = request.headers.get("If-None-Match");
   if (cached && Date.parse(cached.expiresAt) - now.getTime() > 60 * 60 * 1000) {
@@ -188,17 +196,19 @@ async function publicFeed(request, url, ctx) {
     }
     return Response.json(cached.envelope, { headers: { ETag: cached.etag, "Cache-Control": "private, no-store" } });
   }
+  if (inm && inm === etag) {
+    return new Response(null, { status: 304, headers: { ETag: etag, "Cache-Control": "private, no-store" } });
+  }
   const payloadObject = {
     ...contentObject,
-    issuedAt: now.toISOString(),
-    expiresAt: new Date(now.getTime() + 24 * 60 * 60 * 1000).toISOString(),
+    issuedAt: new Date(rotationStart).toISOString(),
+    expiresAt: new Date(rotationStart + SIGNED_SNAPSHOT_VALIDITY_MS).toISOString(),
   };
   const payloadText = JSON.stringify(payloadObject);
   if (Buffer.byteLength(payloadText, "utf8") > MAX_PAYLOAD_BYTES || payloadObject.items.length > MAX_ITEMS) {
     throw new HttpError(413, "feed exceeds size limits");
   }
   const payloadBase64 = Buffer.from(payloadText, "utf8").toString("base64");
-  const etag = `"${contentHash.slice(0, 32)}"`;
   const envelope = {
     schemaVersion: 1,
     keyId: ctx.keys.keyId,

@@ -13,7 +13,7 @@
 | --- | --- |
 | 产品 | 审查报告 [mobileAgentRuntime 仓库审查问题报告](docs/2026-08-29_code-review-mobile-agent-runtime-report.md) 仍是输入。0.1.1+0.2+0.3 源码已落地（F-002–F-018、F-014 密钥闭环、F-020 过期文案）。F-001 只提供 SHA/诊断，**不得**在缺少新 APK SHA+Logcat 时宣称根因已关闭。1.0（F-019 CI/正式 release）未开始，由用户另行安排 |
 | 业务源码/构建 | 本轮未打包新 APK。上一 debug APK 仍为 211,102,633 bytes，SHA-256 `2F09A17D12AF45F4D1B108E62656059BC0EED4566D69FBD55E3F207446B9A72A`。`compileDebugKotlin` 生成的 app `BuildConfig`：`GIT_REVISION=13edc5759b1f2fa393f29a095c0690dd7184c7c0-dirty`、`GIT_DIRTY=true`、`DB_SCHEMA_VERSION=11`、`BUILD_TIME_UTC=2026-08-29T04:53:26Z`。JVM：knowledge-api 46、sqlite 86、domain 2、agent-runtime 20、provider-api 33，合计 187 项、0 failure/error/skip |
-| Git | 分支 `main` 跟踪 `origin/main`。用户已授权 commit/push 0.1.1–0.3 源码与文档；正式 Android release 仍未授权。实现提交 SHA 见本文件最新工作记录 |
+| Git | 分支 `main` 跟踪 `origin/main`。实现提交 `ef8e4363884358a8ed75acdf58fc64c69c94d6e7`（父提交 `13edc5759b1f2fa393f29a095c0690dd7184c7c0`），作者 `luozhibai <wy3273564266@163.com>`，无 Cursor trailer。用户已授权 push；正式 Android release 仍未授权 |
 | CodeGraph | `.codegraph/` 存在；源码修改后 `codegraph sync .` 报告 Already up to date。未修改或提交 `.codegraph/` |
 | 许可 | `licenseGuard`/`licenseGuardReverse` BUILD SUCCESSFUL；`python -B -m reuse lint` 330/330 退出 0。未改 LICENSE 正文 |
 | 授权范围 | 用户已授权 0.1.1–0.3 的 commit 与 push。1.0、正式 Android release、付费 Provider/Vision、公告生产仍未授权 |
@@ -662,3 +662,10 @@ U02 的横屏、IME、大字号、触控、对比度、焦点及实际字体回�
 - 明确未关闭：F-001；F-019/1.0；Chat/Agents/Knowledge 仍非 route-level ViewModel；查询重试仍在 ViewModel；ZIP 整包内存上限 512 MiB；无杀进程/ENOSPC/真实 Vision 证据。
 - Git：HEAD 未变。工作区含 0.1.1–0.3 源码、测试、ADR 与未跟踪审查报告。无 commit/push。
 - 下一步：用户安排 1.0（CI/emulator/androidTest、真实 SBOM、签名 AAB）或授权打包带真实 revision 的 debug APK 以采集 F-001 Logcat。禁止把 F-001 或 1.0 标为已完成。
+
+### 2026-08-29T15:01:00+08:00：授权提交并推送 0.1.1–0.3
+
+- 请求：用户明确要求完成 commit 与 push。范围仅 0.1.1–0.3 源码、测试与文档；不提交 `.codegraph/`、`build/`、APK 或密钥；不执行公告生产或正式 Android release。
+- Git：实现提交 `ef8e4363884358a8ed75acdf58fc64c69c94d6e7`，父提交 `13edc5759b1f2fa393f29a095c0690dd7184c7c0`，作者/提交者 `luozhibai <wy3273564266@163.com>`。使用 `D:\Git\mingw64\libexec\git-core\git.exe commit-tree`，提交信息为 `fix(runtime): land 0.1.1-0.3 review remediations and schema v11.`，无 Cursor trailer。
+- 未关闭：F-001、F-019/1.0、500 文件实机批次、真实 Vision。
+- 下一步：本交接记录 SHA 后随授权非强制推送 `origin/main`。

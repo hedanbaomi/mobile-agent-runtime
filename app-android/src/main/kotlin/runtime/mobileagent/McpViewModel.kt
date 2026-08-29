@@ -6,6 +6,7 @@ package runtime.mobileagent
 import android.app.Application
 import androidx.compose.runtime.mutableStateOf
 import androidx.lifecycle.AndroidViewModel
+import androidx.lifecycle.SavedStateHandle
 import androidx.lifecycle.viewModelScope
 import java.net.URI
 import java.security.MessageDigest
@@ -123,7 +124,10 @@ data class McpUiState(
  * confirmation.  Configuration is deliberately kept out of the database
  * migration surface because it contains only endpoint metadata and references.
  */
-class McpViewModel(application: Application) : AndroidViewModel(application) {
+class McpViewModel(
+    application: Application,
+    private val savedStateHandle: SavedStateHandle,
+) : AndroidViewModel(application) {
     private val app = application as MobileAgentApp
     val state = mutableStateOf(McpUiState())
 
@@ -141,7 +145,8 @@ class McpViewModel(application: Application) : AndroidViewModel(application) {
             return
         }
         val config = stored.value
-        val selected = state.value.selectedAgentId?.takeIf { id -> agents.any { it.id == id } }
+        val selected = (state.value.selectedAgentId
+            ?: savedStateHandle.get<String>(SELECTED_AGENT_KEY))?.takeIf { id -> agents.any { it.id == id } }
         state.value = toUiState(config, agents, selected, status = state.value.status)
     }
 
@@ -267,6 +272,7 @@ class McpViewModel(application: Application) : AndroidViewModel(application) {
 
     fun selectAgent(agentId: String?) {
         val selected = agentId?.takeIf { id -> state.value.agents.any { it.id == id } }
+        if (selected == null) savedStateHandle.remove<String>(SELECTED_AGENT_KEY) else savedStateHandle[SELECTED_AGENT_KEY] = selected
         val config = McpConfigStore.read(app.container).value
         val grant = config?.grants?.firstOrNull { it.agentId == selected }
         state.value = state.value.copy(
@@ -445,6 +451,10 @@ class McpViewModel(application: Application) : AndroidViewModel(application) {
         return value
     }
 
+    private companion object {
+        const val SELECTED_AGENT_KEY = "mcp.selectedAgentId"
+    }
+
 }
 
 /** Shared local preference codec for the ViewModel and the runtime tool factory. */
@@ -524,6 +534,7 @@ internal object McpConfigStore {
             require(snapshot.schemaHashes.all { (name, hash) -> config.tools.first { it.namespacedName == name }.schemaHash == hash }) { "MCP snapshot schema hash 不匹配" }
         }
     }
+
 }
 
 internal fun mcpFingerprint(tools: List<McpToolDefinition>): String =

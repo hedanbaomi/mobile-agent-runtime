@@ -45,7 +45,7 @@ import runtime.mobileagent.knowledge.ImportStage
 /**
  * Device/API-matrix coverage for the real WorkManager worker and foreground contract.
  *
- * The instrumentation runner substitutes a plain Application, so these fixtures never
+ * The instrumentation runner defers MobileAgentApp host initialization, so these fixtures never
  * open the product database, inspect user jobs or initialize provider/network clients.
  * Android 15's cumulative six-hour timeout and Android 16 quota exhaustion require the
  * separate controlled-device procedure documented in foreground-import-matrix.md.

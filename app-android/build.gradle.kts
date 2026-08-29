@@ -14,6 +14,38 @@ plugins {
 
 apply(from = rootProject.file("tools/debug-sbom.gradle.kts"))
 
+// Release signing is intentionally opt-in. A release task must never silently
+// fall back to the debug keystore or create a new signing identity.
+val releaseKeystorePath = providers.gradleProperty("android.release.keystore")
+    .orElse(providers.environmentVariable("ANDROID_RELEASE_KEYSTORE"))
+val releaseStorePassword = providers.gradleProperty("android.release.storePassword")
+    .orElse(providers.environmentVariable("ANDROID_RELEASE_STORE_PASSWORD"))
+val releaseKeyAlias = providers.gradleProperty("android.release.keyAlias")
+    .orElse(providers.environmentVariable("ANDROID_RELEASE_KEY_ALIAS"))
+val releaseKeyPassword = providers.gradleProperty("android.release.keyPassword")
+    .orElse(providers.environmentVariable("ANDROID_RELEASE_KEY_PASSWORD"))
+
+val verifyReleaseSigning = tasks.register("verifyReleaseSigning") {
+    group = "verification"
+    description = "Fail closed unless all explicitly configured release signing inputs are present."
+    doLast {
+        val values = linkedMapOf(
+            "android.release.keystore or ANDROID_RELEASE_KEYSTORE" to releaseKeystorePath.orNull,
+            "android.release.storePassword or ANDROID_RELEASE_STORE_PASSWORD" to releaseStorePassword.orNull,
+            "android.release.keyAlias or ANDROID_RELEASE_KEY_ALIAS" to releaseKeyAlias.orNull,
+            "android.release.keyPassword or ANDROID_RELEASE_KEY_PASSWORD" to releaseKeyPassword.orNull,
+        )
+        val missing = values.filterValues { it.isNullOrBlank() }.keys
+        check(missing.isEmpty()) {
+            "Release signing is fail-closed. Missing explicit input(s): ${missing.joinToString()}. " +
+                "No debug key or generated identity is permitted."
+        }
+        check(file(releaseKeystorePath.get()).isFile) {
+            "Configured release keystore does not exist; refusing to sign"
+        }
+    }
+}
+
 fun gitCapture(vararg args: String): String = try {
     val process = ProcessBuilder(listOf("git") + args.toList())
         .directory(rootProject.projectDir)
@@ -80,6 +112,41 @@ android {
             excludes += "/META-INF/{AL2.0,LGPL2.1}"
         }
     }
+    signingConfigs {
+        create("release") {
+            // Keep the AGP model configured when values are supplied, while the
+            // verification task above remains the authoritative fail-closed
+            // guard for every release-producing task.
+            releaseKeystorePath.orNull?.takeIf { it.isNotBlank() }?.let { storeFile = file(it) }
+            storePassword = releaseStorePassword.orNull
+            keyAlias = releaseKeyAlias.orNull
+            keyPassword = releaseKeyPassword.orNull
+        }
+    }
+    buildTypes {
+        getByName("debug") {
+            ndk {
+                abiFilters.clear()
+                abiFilters += listOf("arm64-v8a", "x86_64")
+            }
+        }
+        getByName("release") {
+            signingConfig = signingConfigs.getByName("release")
+            ndk {
+                abiFilters.clear()
+                abiFilters += "arm64-v8a"
+            }
+        }
+    }
+}
+
+tasks.configureEach {
+    // `preReleaseBuild` is also used by read-only release lint/check tasks. Keep those usable
+    // without private signing material; every artifact-producing release task below, and the
+    // root releaseGate, still fails closed through verifyReleaseSigning.
+    if (name in setOf("validateSigningRelease", "packageRelease", "signReleaseBundle", "assembleRelease", "bundleRelease")) {
+        dependsOn(verifyReleaseSigning)
+    }
 }
 
 dependencies {
@@ -120,8 +187,11 @@ dependencies {
     implementation(libs.kotlinx.coroutines.core)
     implementation(libs.kotlinx.serialization.json)
     implementation(libs.bcprov)
-    androidTestImplementation("androidx.test:runner:1.6.2")
-    androidTestImplementation("androidx.test.ext:junit:1.2.1")
-    androidTestImplementation("junit:junit:4.13.2")
+    androidTestImplementation(platform(libs.androidx.compose.bom))
+    androidTestImplementation(libs.androidx.compose.ui.test.junit4)
+    androidTestImplementation(libs.ktor.client.mock)
+    androidTestImplementation(libs.androidx.test.runner)
+    androidTestImplementation(libs.androidx.test.ext.junit)
+    androidTestImplementation(libs.junit4)
     androidTestImplementation("androidx.work:work-testing:2.10.0")
 }

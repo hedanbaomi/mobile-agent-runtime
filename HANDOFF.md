@@ -3,7 +3,7 @@
 
 # 项目交接
 
-最后更新：2026-08-29T15:00:00+08:00（Asia/Taipei）。项目根目录：`E:\mobileAgentRuntime`。
+最后更新：2026-08-29T15:12:38+08:00（Asia/Taipei）。项目根目录：`E:\mobileAgentRuntime`。
 
 **接手者必须先读 [agent.md](agent.md)、本文件和 [技术实现方案](docs/IMPLEMENTATION_PLAN.md)。工作后必须维护本文件及受影响的专题文档。**
 
@@ -11,16 +11,16 @@
 
 | 项目 | 状态 |
 | --- | --- |
-| 产品 | 审查报告 [mobileAgentRuntime 仓库审查问题报告](docs/2026-08-29_code-review-mobile-agent-runtime-report.md) 仍是输入。0.1.1+0.2+0.3 源码已落地（F-002–F-018、F-014 密钥闭环、F-020 过期文案）。F-001 只提供 SHA/诊断，**不得**在缺少新 APK SHA+Logcat 时宣称根因已关闭。1.0（F-019 CI/正式 release）未开始，由用户另行安排 |
+| 产品 | 审查报告 [mobileAgentRuntime 仓库审查问题报告](docs/2026-08-29_code-review-mobile-agent-runtime-report.md) 仍是输入。0.1.1+0.2+0.3 源码已落地，当前任务将先复核并修复确认问题，再执行 1.0 门禁，最后按 GitHub issue #1 修改并部署公告系统。F-001 只提供 SHA/诊断，**不得**在缺少新 APK SHA+Logcat 时宣称根因已关闭 |
 | 业务源码/构建 | 本轮未打包新 APK。上一 debug APK 仍为 211,102,633 bytes，SHA-256 `2F09A17D12AF45F4D1B108E62656059BC0EED4566D69FBD55E3F207446B9A72A`。`compileDebugKotlin` 生成的 app `BuildConfig`：`GIT_REVISION=13edc5759b1f2fa393f29a095c0690dd7184c7c0-dirty`、`GIT_DIRTY=true`、`DB_SCHEMA_VERSION=11`、`BUILD_TIME_UTC=2026-08-29T04:53:26Z`。JVM：knowledge-api 46、sqlite 86、domain 2、agent-runtime 20、provider-api 33，合计 187 项、0 failure/error/skip |
 | Git | 分支 `main` 跟踪 `origin/main` 且已同步。实现提交 `ef8e4363884358a8ed75acdf58fc64c69c94d6e7`；交接记录 `4b02df264740f62876d7d303f3ddf18386fc4bbd` 已随 `git push origin HEAD` 推到 `https://github.com/hedanbaomi/mobile-agent-runtime.git`（`13edc57..4b02df2`）。作者/提交者 `luozhibai <wy3273564266@163.com>`，无 Cursor trailer。正式 Android release 仍未授权 |
 | CodeGraph | `.codegraph/` 存在；源码修改后 `codegraph sync .` 报告 Already up to date。未修改或提交 `.codegraph/` |
 | 许可 | `licenseGuard`/`licenseGuardReverse` BUILD SUCCESSFUL；`python -B -m reuse lint` 330/330 退出 0。未改 LICENSE 正文 |
-| 授权范围 | 用户已授权 0.1.1–0.3 的 commit 与 push。1.0、正式 Android release、付费 Provider/Vision、公告生产仍未授权 |
+| 授权范围 | 用户已授权当前任务复核并修复 0.1.1–0.3、执行 1.0 门禁，以及按 GitHub issue #1 完成公告系统 Cloudflare 生产部署。当前指令不自动授权 GitHub push、应用商店发布、付费 Provider/Vision 调用或未经核对的 Cloudflare Access 组织/身份变更 |
 
 ## 2. 当前任务
 
-已完成：一次性落地 0.1.1（F-002–F-006、F-014 文案、F-020）+ 0.2（F-007–F-014）+ 0.3（F-015–F-018），并完成自审修复。用户已授权将这些未提交改动 commit 并 push 到 `origin/main`。1.0（F-019 CI/emulator/androidTest、SHA-pinned Actions、真实 SBOM、签名 AAB）仍由用户自行安排。F-001 不得在缺少新 APK SHA+Logcat 时宣称关闭。不打包正式 release、不调用付费 Provider/Vision。
+进行中：以 `13edc5759b1f2fa393f29a095c0690dd7184c7c0` 为 0.1.1–0.3 固定审查点，对 `ef8e4363884358a8ed75acdf58fc64c69c94d6e7` 及后续记录做规范/需求双轴复核；确认问题后修复并补证据。随后执行 1.0（F-019 CI/emulator/androidTest、SHA-pinned Actions、真实 SBOM/provenance、正式构建门禁），再实现 GitHub issue #1 的公告刷新、匿名统计、更新入口和管理预设，最后仅对已核对的本产品 Worker/D1 执行 Cloudflare 部署与线上后检。F-001 不得在缺少新 APK SHA+Logcat 时宣称关闭；不调用付费 Provider/Vision，不自动 push 或发布应用商店。
 
 单一写入责任：主审负责 App 原有 ViewModel/MainActivity/DI、SkillRepository、根配置/文档、模拟器、生产部署；product_ui 负责 feature/** 与 app/ui/**；product_data 负责领域/序列化/Profile 与 Agent/Conversation/Settings/Transfer repository，以及唯一 Migrations 写入；knowledge_runtime 负责知识库/解析/本地嵌入/向量/存储/后台导入；python_runtime 负责 CPython 与 IPC；announcements_production 负责 services/admin 公告源码及本地部署准备；protocol_adapters 负责 provider-api/agent-runtime、skills-api 新 ToolExecutor 与 remote DTO；http_transport 仅负责 BuiltinTools/HostHttp、skills-api 模块依赖与对应测试。两个只读审阅者仅复核 1a035aa 的旧反例。每个实现者维护独立 evidence 文档，主审汇总根交接。共享 Gradle/模拟器由主审协调，不互相覆盖代码或全仓构建。
 
@@ -674,3 +674,13 @@ U02 的横屏、IME、大字号、触控、对比度、焦点及实际字体回�
 
 - `git push origin HEAD` 将 `13edc57..4b02df2` 推到 `origin/main`。远程与本地同步。未发布正式 Android release，未操作公告生产。
 - 下一步：用户安排 1.0，或授权打包带真实 revision 的 debug APK 以采集 F-001 Logcat。
+
+### 2026-08-29T16:39:34+08:00：最终复核修复与 1.0 本地门禁完成
+
+- 请求/边界：用户要求审查 0.1.1、0.2、0.3，发现问题即修复，随后执行 1.0；本轮是最后一次自动复核—修复，完成后直接打包，只有用户人工再发现问题才重启该程序。用户明确授权全部修复后按 GitHub issue #1 部署公告系统到 Cloudflare；正式 Android release 后续共同安排。
+- 修复：能力探测按 metadata/stream/tools/image 真实语义独立判定；密钥按主 ref/Header/snapshot 引用感知退休并对损坏数据 fail-closed；批次单 coordinator、generation/item/job/consent 二次校验与文件型 ZIP staging；route-scoped ViewModel/SavedState；公告 cache-first/单飞/退避/统计身份与后台预设；API26—29 Python FD 方向检查；release signing、锁文件、verification metadata、Actions SHA pin、SBOM/provenance 门禁。
+- API 31 真实设备套件初跑出现两项确定性失败：ApiEmbedding fixture 把库存扫描误计为 secret read；release UI runner 用普通 `Application` 启动真实 Activity。修复为只统计 ciphertext lookup、非 UI instrumentation 延迟主容器而 Activity 首帧显式初始化。随后 UI 又暴露 NavHost graph 首帧竞态并修复。定向 Provider revision 1/1、release UI 2/2 通过；完整 XML 31 tests、30 pass、1 条需显式 `knowledgeLoad=true` 的 skip、0 failure/error。
+- 本地门禁：`check --dependency-verification=strict` 最终复跑 `BUILD SUCCESSFUL`，936 tasks（103 executed/833 up-to-date）；JVM XML 46 suites/301 tests/0 failure/error/skip。provider-api 37、sqlite 104、knowledge-api 51 tests 全绿。debug/AndroidTest assemble、Python lint 与 CycloneDX 1.6 debug SBOM（166 components）同轮通过。公告 `npm test`/`npm run check` exit 0。REUSE 首跑仅指出 24 个新 Gradle lockfile 缺归属，`REUSE.toml` 增加生成锁文件 AGPL annotation 后复跑 372/372 exit 0。
+- release 边界：`:app-android:verifyReleaseSigning` 因缺用户 release keystore、store password、alias、key password而按设计失败关闭；未生成或借用签名身份，根 `releaseGate` 不标 PASS。当前为 `LOCAL_PACKAGE_READY`，不是正式 AAB/release；`versionName=0.1.0`/`versionCode=1` 不擅自变更。
+- F-001：用户观察在统计期间稳定出现两次，但最初问题仍不能稳定复现；状态保持 `candidate_intermittent`，不得写成已修复。若用户人工再次发现，需连同 APK SHA、dirty/schema/build 与完整 Logcat 重启复核修复。
+- 尚未执行：真实收费 Provider/Vision、500 文件批次实机、初始 SAF→staging 进程死亡、ENOSPC、Android 15 六小时 timeout、Android 16 Job 配额耗尽、正式签名 AAB/商店发布。公告生产部署尚未在本节发生，下一步先形成 clean source commit，再备份 D1、部署并记录 version/source hash/HTTPS 后检。

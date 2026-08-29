@@ -17,8 +17,8 @@ import java.util.UUID
 
 import java.net.URLEncoder
 
-class AnnouncementFetcher(private val http: HttpClient) {
-    suspend fun fetch(baseUrl: String, client: ClientContext, etag: String?): FetchOutcome {
+class AnnouncementFetcher(private val http: HttpClient) : AnnouncementFetchPort {
+    override suspend fun fetch(baseUrl: String, client: ClientContext, etag: String?): FetchOutcome {
         val url = baseUrl.trimEnd('/') +
             "/api/v1/announcements?platform=${enc(client.platform)}&channel=${enc(client.channel)}" +
             "&versionCode=${client.versionCode}&locale=${enc(client.locale)}"
@@ -38,14 +38,16 @@ class AnnouncementFetcher(private val http: HttpClient) {
         }
     }
 
-    suspend fun postEvents(baseUrl: String, consent: Boolean, eventsJson: String) {
-        if (!consent) return
-        http.request(baseUrl.trimEnd('/') + "/api/v1/events") {
+    /** Upload only the coordinator's already-whitelisted event envelope. */
+    override suspend fun postEvents(baseUrl: String, consent: Boolean, eventsJson: String): Boolean {
+        if (!consent) return false
+        val response = http.request(baseUrl.trimEnd('/') + "/api/v1/events") {
             method = HttpMethod.Post
             header("X-Stats-Consent", "1")
             contentType(ContentType.Application.Json)
             setBody(eventsJson)
         }
+        return response.status.value in 200..299
     }
 
     fun newEventId(): String = UUID.randomUUID().toString()

@@ -3,6 +3,10 @@
 
 package runtime.mobileagent.data
 
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.contentOrNull
 import runtime.mobileagent.domain.AppError
 import runtime.mobileagent.domain.ErrorCode
 import runtime.mobileagent.domain.RetryClass
@@ -124,6 +128,7 @@ object Migrations {
             statements.drop(1).forEach { sql -> connection.execute(sql) }
             columns.forEach { column -> ensureColumn(connection, column) }
             backfillV11(connection)
+            validateSnapshotManifests(connection)
             validateRequiredSchema(connection)
             connection.execute("DELETE FROM schema_version")
             connection.execute("INSERT INTO schema_version(version) VALUES (?)", listOf(VERSION))
@@ -241,21 +246,79 @@ object Migrations {
         "import_jobs" to "batch_id",
     )
 
+    /**
+     * Validate every existing model before marking v11 complete and only derive endpoint_json
+     * where the old schema genuinely had no endpoint column/value.  Earlier code used
+     * getOrDefault(CHAT), getOrDefault(emptyList()) and a catch-all endpoint fallback, which
+     * silently changed damaged data into a different model binding.
+     */
     private fun backfillV11(connection: SqlConnection) {
         connection.query("SELECT id, role, capabilities, endpoint_json FROM model_profiles").forEach { row ->
-            val stored = row.string("endpoint_json")
-            if (stored.isNotBlank() && stored != "{}") return@forEach
-            val role = runCatching { runtime.mobileagent.domain.ModelRole.valueOf(row.string("role")) }
-                .getOrDefault(runtime.mobileagent.domain.ModelRole.CHAT)
-            val caps = runCatching {
-                kotlinx.serialization.json.Json.decodeFromString<List<String>>(row.string("capabilities").ifBlank { "[]" })
-            }.getOrDefault(emptyList()).toSet()
-            val endpoint = runtime.mobileagent.domain.ModelEndpoint.fromLegacy(role, caps)
-            val encoded = kotlinx.serialization.json.Json.encodeToString(
-                runtime.mobileagent.domain.ModelEndpoint.serializer(),
-                endpoint,
+            val modelId = row.string("id")
+            val role = ProfileRepository.decodeRole(
+                ProfileRepository.requirePersistedString(row.columns["role"], "role", modelId),
+                modelId,
             )
-            connection.execute("UPDATE model_profiles SET endpoint_json = ? WHERE id = ?", listOf(encoded, row.string("id")))
+            val caps = ProfileRepository.decodeCapabilities(
+                ProfileRepository.requirePersistedString(row.columns["capabilities"], "capabilities", modelId),
+                modelId,
+            )
+            val stored = ProfileRepository.requirePersistedString(row.columns["endpoint_json"], "endpoint_json", modelId)
+            val endpoint = ProfileRepository.decodePersistedEndpoint(stored, role, caps, modelId)
+            if (stored.isBlank() || stored.trim() == "{}") {
+                val encoded = kotlinx.serialization.json.Json.encodeToString(
+                    runtime.mobileagent.domain.ModelEndpoint.serializer(),
+                    endpoint,
+                )
+                connection.execute("UPDATE model_profiles SET endpoint_json = ? WHERE id = ?", listOf(encoded, modelId))
+            }
         }
     }
+
+    /**
+     * Snapshot expansion is immutable input to a run.  Validate its embedded model/provider
+     * fragments during startup migration as well as when the snapshot is later resolved, so a
+     * malformed old row cannot survive a successful schema upgrade and silently retarget a run.
+     * Empty manifests are retained for pre-expansion snapshots; there is no source data from
+     * which to reconstruct those rows, so the normal snapshot resolver remains fail-closed.
+     */
+    private fun validateSnapshotManifests(connection: SqlConnection) {
+        val json = Json { ignoreUnknownKeys = false; explicitNulls = false }
+        connection.query("SELECT id, binding_manifest_json, expanded_json FROM agent_snapshots").forEach { row ->
+            val snapshotId = row.string("id")
+            val bindingRaw = row.columns["binding_manifest_json"] as? String
+                ?: invalid("Snapshot $snapshotId binding_manifest_json is not text")
+            val expandedRaw = row.columns["expanded_json"] as? String
+                ?: invalid("Snapshot $snapshotId expanded_json is not text")
+            val binding = decodeSnapshotObject(json, bindingRaw, snapshotId, "binding_manifest_json")
+            val root = if (binding.isEmpty() && expandedRaw.isNotBlank() && expandedRaw.trim() != "{}") {
+                val expanded = decodeSnapshotObject(json, expandedRaw, snapshotId, "expanded_json")
+                val nested = expanded["bindingManifest"]
+                if (nested == null) expanded else nested as? JsonObject
+                    ?: invalid("Snapshot $snapshotId expanded bindingManifest is not an object")
+            } else {
+                binding
+            }
+            if (root.isEmpty()) return@forEach
+            val manifestId = (root["snapshotId"] as? JsonPrimitive)?.contentOrNull
+            if (manifestId != null && manifestId != snapshotId) {
+                invalid("Snapshot $snapshotId manifest id does not match its row")
+            }
+            SNAPSHOT_MODEL_KEYS.forEach { key ->
+                root[key]?.let { ProfileRepository.validatePersistedModelElement(it, "Snapshot $snapshotId $key") }
+            }
+            SNAPSHOT_PROVIDER_KEYS.forEach { key ->
+                root[key]?.let { ProfileRepository.validatePersistedProviderElement(it, "Snapshot $snapshotId $key") }
+            }
+        }
+    }
+
+    private fun decodeSnapshotObject(json: Json, raw: String, snapshotId: String, field: String): JsonObject {
+        if (raw.isBlank() || raw.trim() == "{}") return JsonObject(emptyMap())
+        return runCatching { json.parseToJsonElement(raw) as? JsonObject }
+            .getOrNull() ?: invalid("Snapshot $snapshotId $field is not a JSON object")
+    }
+
+    private val SNAPSHOT_MODEL_KEYS = listOf("chatModel", "visionModel", "embeddingModel", "rerankerModel")
+    private val SNAPSHOT_PROVIDER_KEYS = listOf("provider", "visionProvider", "embeddingProvider", "rerankerProvider")
 }

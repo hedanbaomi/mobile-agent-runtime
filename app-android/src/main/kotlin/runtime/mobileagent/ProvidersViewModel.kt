@@ -107,11 +107,21 @@ class ProvidersViewModel(application: Application) : AndroidViewModel(applicatio
                 app.container.profiles.upsertProvider(provider)
                 if (model != null) app.container.profiles.upsertModel(model)
             }
+            // A replacement key gets a fresh reference. Retire the previous
+            // reference only after the provider row points at the new one;
+            // SecretInventory also considers shared/header and immutable-snapshot
+            // references before retiring, so this cannot invalidate a shared key.
+            val oldSecretCleanupFailed = previous?.secretRef
+                ?.takeIf { it.isNotBlank() && it != provider.secretRef }
+                ?.let { oldRef ->
+                    runCatching { app.container.secrets.inventory().retireIfUnreferenced(oldRef) }.isFailure
+                } == true
             reload()
             status.value = if (draft.modelId.isBlank()) {
-                "已保存 ${provider.name}。"
+                "已保存 ${provider.name}。" + if (oldSecretCleanupFailed) "旧密钥仍保留，引用检查失败；请修复存储后重试回收。" else ""
             } else {
-                "已保存 ${provider.name} / ${draft.modelId.trim()}。能力标记来自手动配置，尚未发送探测请求。"
+                "已保存 ${provider.name} / ${draft.modelId.trim()}。能力标记来自手动配置，尚未发送探测请求。" +
+                    if (oldSecretCleanupFailed) "旧密钥仍保留，引用检查失败；请修复存储后重试回收。" else ""
             }
             true
         } catch (error: Exception) {
@@ -152,9 +162,10 @@ class ProvidersViewModel(application: Application) : AndroidViewModel(applicatio
                     runtime.mobileagent.provider.openai.OpenAiCompatibleAdapter(app.container.http, provider.baseUrl)
                         .probe(model, secret!!, runtime.mobileagent.provider.ProbeConsent.GRANTED, EntityId.random().value)
                 }
-                status.value = "探测完成：${report.source}；stream=${report.supportsStream}，tools=${report.supportsTools}，image=${report.supportsImages}。"
-                val tools = report.source.substringAfter("tools=", "user-declared").substringBefore(';').substringBefore(' ')
-                val images = report.source.substringAfter("images=", "user-declared").substringBefore(';').substringBefore(' ')
+                val tools = capabilitySummary(report.source, "tools")
+                val images = capabilitySummary(report.source, "image")
+                val chargeNote = if (report.charged) "可能产生 Provider 费用" else "未发送可能计费请求"
+                status.value = "能力探测${if (report.status == runtime.mobileagent.provider.CapabilityProbeStatus.SUCCEEDED) "完成" else "未完成"}：metadata=${capabilitySummary(report.source, "metadata")}; stream=${capabilitySummary(report.source, "stream")}，tools=$tools，image=$images；$chargeNote。"
                 app.container.profiles.recordProbe(
                     model.id,
                     provider.revision,
@@ -176,4 +187,11 @@ class ProvidersViewModel(application: Application) : AndroidViewModel(applicatio
             if (value is JsonObject) rejectReserved(value)
         }
     }
+
+    private fun capabilitySummary(source: String, key: String): String =
+        source.split(';')
+            .firstOrNull { it.substringBefore('=') == key }
+            ?.substringAfter('=')
+            ?.ifBlank { "unknown" }
+            ?: "not-recorded"
 }

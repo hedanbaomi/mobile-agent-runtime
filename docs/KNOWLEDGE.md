@@ -3,7 +3,7 @@
 
 # 知识库、多模态和检索契约
 
-状态（2026-08-29）：Round21 debug 集成已接入经 hash 校验的 MiniLM ONNX 模型包、USearch JNI、PDF 页渲染与 API Embedding 独立授权。0.1.1 已实现可审计的 `READY_WITH_VISUAL_GAPS` 文本降级。0.2/0.3 将 schema 升至 v11：`ModelEndpoint`、`import_batches`/`import_items`、`consent_tickets`、`capability_probes` 与密钥 status。知识库 ZIP 为独立 `KNOWLEDGE_ARCHIVE`，不复用 DOCX/EPUB。API36/x86_64 上 API Embedding 5 项、Knowledge 4 项设备测试通过；schema v10 已包含查询未知门禁、可恢复外发 operation 与查询向量缓存。320 文件/472,363,598 bytes fixture 完成 20 文本 READY、300 图片 WAITING、专名引用、幂等和共享 blob 删除隔离；API31/34/35/36 上最终 debug 制品的真实 WorkManager、前台契约、等待终态与取消短测各 3/3 通过。PDF parser v5 只把签名与 DCT filter 同时可信的 JPEG 作为 IMAGE，raw/Flate XObject 保留为 PAGE 阻断且仓储层验证 Vision 零调用。尚未执行真实 Vision、全阶段故障注入、Android 15 六小时 timeout、Android 16 Job 配额耗尽、500 文件批次实机或付费探测，明确不是完整 K06 PASS。对应 R05—R08、K01—K08；最新证据见 [knowledge-runtime](evidence/2026-08-29/knowledge-runtime.md)、[knowledge-load](evidence/2026-08-29/knowledge-load.md)、[foreground-import-matrix](evidence/2026-08-29/foreground-import-matrix.md)、[final-debug-validation](evidence/2026-08-29/final-debug-validation.md) 与 [HANDOFF](../HANDOFF.md)。
+状态（2026-08-29）：Round21 debug 集成已接入经 hash 校验的 MiniLM ONNX 模型包、USearch JNI、PDF 页渲染与 API Embedding 独立授权。0.1.1 已实现可审计的 `READY_WITH_VISUAL_GAPS` 文本降级。0.2/0.3 将 schema 升至 v11：`ModelEndpoint`、`import_batches`/`import_items`、`consent_tickets`、`capability_probes` 与密钥 status。知识库 ZIP 为独立 `KNOWLEDGE_ARCHIVE`，不复用 DOCX/EPUB；Android URI 先限额复制并 `fsync` 到应用私有 staging 文件，中央目录和本地条目在文件上验证，展开时堆内仅保留单个受限 entry。批次状态、item/job 同步、generation 校验、consent ticket 二次校验及安全恢复均由持久 coordinator 负责。API36/x86_64 上 API Embedding 5 项、Knowledge 4 项设备测试通过；API31 最终集成 instrumentation 31 项中 30 pass、1 条受控大负载用例按设计 skip、0 failure/error。320 文件/472,363,598 bytes fixture 完成 20 文本 READY、300 图片 WAITING、专名引用、幂等和共享 blob 删除隔离；API31/34/35/36 上最终 debug 制品的真实 WorkManager、前台契约、等待终态与取消短测各 3/3 通过。PDF parser v5 只把签名与 DCT filter 同时可信的 JPEG 作为 IMAGE，raw/Flate XObject 保留为 PAGE 阻断且仓储层验证 Vision 零调用。尚未执行真实 Vision、初始 SAF→staging 复制期间的进程死亡恢复、ENOSPC、Android 15 六小时 timeout、Android 16 Job 配额耗尽、500 文件批次实机或付费探测，明确不是完整 K06 PASS。对应 R05—R08、K01—K08；最新证据见 [review-011-03-import-batch](evidence/2026-08-29/review-011-03-import-batch.md)、[knowledge-runtime](evidence/2026-08-29/knowledge-runtime.md)、[knowledge-load](evidence/2026-08-29/knowledge-load.md)、[foreground-import-matrix](evidence/2026-08-29/foreground-import-matrix.md)、[release-gate-1.0](evidence/2026-08-29/release-gate-1.0.md) 与 [HANDOFF](../HANDOFF.md)。
 
 ## 1. 数据模型与一致性
 
@@ -197,3 +197,10 @@ PDF 页光栅化、ONNX、设备原图查看器仍未做。独立复审前不把
 - raw/Flate PDF Image XObject 不再以 `application/octet-stream` 发送给 Vision。若它属于页面且没有受信任 rasterizer 输出，该页保留空 payload 的 `PAGE` 阻断并使导入失败/等待，不发布不完整 READY 内容。
 - `/Contents [A B]` 中每个流按自身 filter 独立解码；缺失、悬空、unsupported 或未完整解压的内容流都要求 rasterizer/page blocker，不能被同页有效 JPEG 掩盖。
 - `DocumentParserTest` 覆盖 raw/Flate、DCT 数组、同页混合图像、多内容流与悬空内容引用；`KnowledgeRepositoryTest` 进一步断言 raw/Flate fixture 导入失败、不可检索且 Vision backend 调用次数为 0。
+
+## 14. 0.3 最终复核与恢复边界（2026-08-29）
+
+- `KnowledgeViewModel` 不再把完整知识 ZIP 读入 `ByteArray`：SAF 输入以 16 KiB 缓冲复制到 `files/import-staging/`，执行总大小上限与 `fd.sync()`，异常时删除该精确临时文件。
+- `KnowledgeArchive.forEachEntry(File)` 在文件上校验 EOCD、中央目录、local entry、CRC、大小、压缩比、重复/规范化路径、链接与嵌套归档；展开时只把当前受限 entry 交给仓储层，立即转为 CAS/job/item，不保留全量 payload 列表。
+- `processBatch` 是 Android 和仓储层唯一批次协调入口；批次 claim、Provider/Vision dispatch 前后及发布前均重新核对 generation。启动恢复把安全的本地处理中 item 还原为 QUEUED，外部 `DISPATCHED` 仍按 UNKNOWN fail-closed，不自动重复收费。
+- API 31 完整 instrumentation 已覆盖批次/consent、API Embedding、WorkManager、隔离 Python 与 release UI 的集成路径；这不等于 500 文件/500 MiB、磁盘满或全阶段杀进程矩阵。初始 SAF→staging 复制尚未持久化断点，复制期间进程死亡需要用户重新选择文件；ENOSPC 只会作为导入失败返回，尚无专用设备故障注入证据。

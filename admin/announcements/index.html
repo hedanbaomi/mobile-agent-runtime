@@ -27,6 +27,10 @@
     .grid { display:grid; grid-template-columns:minmax(0,1.2fr) minmax(260px,.8fr); gap:16px; }
     .preview { border:1px solid var(--line); border-radius:14px; padding:16px; min-height:260px; }
     .preview h3 { margin:.5rem 0; } .preview p { white-space:pre-wrap; overflow-wrap:anywhere; }
+    .presets { display:flex; flex-wrap:wrap; gap:8px; margin:0 0 12px; padding:0; border:0; }
+    .presets button { margin:0; }
+    details { border:1px solid var(--line); border-radius:8px; padding:10px 12px; margin-top:12px; }
+    details summary { cursor:pointer; font-weight:700; }
     pre { white-space:pre-wrap; overflow:auto; margin:0; }
     .status { min-height:1.4em; color:var(--muted); white-space:pre-wrap; }
     .sr-only { position:absolute; width:1px; height:1px; padding:0; margin:-1px; overflow:hidden; clip:rect(0,0,0,0); white-space:nowrap; border:0; }
@@ -51,34 +55,53 @@
     </section>
     <section class="card">
       <h2>Draft editor</h2>
+      <fieldset class="presets" aria-label="公告预设">
+        <legend class="sr-only">公告预设</legend>
+        <button type="button" class="secondary" onclick="applyPreset('general')">普通公告 / General</button>
+        <button type="button" class="secondary" onclick="applyPreset('important')">重要公告 / Important</button>
+        <button type="button" class="secondary" onclick="applyPreset('update')">版本更新 / Version update</button>
+      </fieldset>
       <div class="grid">
         <div>
-          <div class="row">
-            <div><label for="id">Announcement id</label><input id="id" value="security-demo" autocomplete="off"></div>
-            <div><label for="category">Category</label><select id="category"><option>GENERAL</option><option>FEATURE</option><option>MAINTENANCE</option><option>SERVICE_INCIDENT</option><option>UPDATE</option><option selected>SECURITY</option><option>DEPRECATION</option></select></div>
-          </div>
-          <div class="row">
-            <div><label for="severity">Severity</label><select id="severity"><option>INFO</option><option>NOTICE</option><option selected>WARNING</option><option>CRITICAL</option></select></div>
-            <div><label for="displayMode">Display mode</label><select id="displayMode" onchange="renderPreview()"><option>CENTER_ONLY</option><option>BANNER</option><option selected>MODAL</option></select></div>
-          </div>
-          <div class="row">
-            <div><label for="rolloutPercent">Rollout percent</label><input id="rolloutPercent" type="number" min="0" max="100" value="100"></div>
-            <div><label for="rolloutSalt">Rollout salt</label><input id="rolloutSalt" value="stable-salt" autocomplete="off"></div>
-          </div>
-          <div class="row">
-            <div><label for="startsAt">Starts at (UTC ISO)</label><input id="startsAt" placeholder="2026-08-29T00:00:00.000Z"></div>
-            <div><label for="endsAt">Ends at (UTC ISO)</label><input id="endsAt" placeholder="optional"></div>
-          </div>
-          <label><input id="mustAck" type="checkbox" checked onchange="renderPreview()"> Must acknowledge</label>
-          <label><input id="pinned" type="checkbox" checked> Pinned</label>
+          <label for="id">Announcement id</label><input id="id" value="general-demo" autocomplete="off">
+          <label for="title">Default title</label><input id="title" value="General announcement" oninput="renderPreview()">
+          <label for="summary">Default summary</label><input id="summary" value="Please read" oninput="renderPreview()">
+          <label for="body">Default body Markdown</label><textarea id="body" oninput="renderPreview()">Announcement body.</textarea>
         </div>
         <div>
-          <label for="title">Default title</label><input id="title" value="Security notice" oninput="renderPreview()">
-          <label for="summary">Default summary</label><input id="summary" value="Please read" oninput="renderPreview()">
-          <label for="body">Default body Markdown</label><textarea id="body" oninput="renderPreview()">Signed announcement body.</textarea>
           <label for="httpsUrl">HTTPS action URL (optional)</label><input id="httpsUrl" value="https://example.invalid/notice" autocomplete="off">
+          <p class="status" id="presetHint">普通公告：信息提示，可关闭。</p>
         </div>
       </div>
+      <details id="advancedFields">
+        <summary>Advanced fields / 高级字段</summary>
+        <div class="row">
+          <div><label for="category">Category</label><select id="category"><option selected>GENERAL</option><option>FEATURE</option><option>MAINTENANCE</option><option>SERVICE_INCIDENT</option><option>UPDATE</option><option>SECURITY</option><option>DEPRECATION</option></select></div>
+          <div><label for="severity">Severity</label><select id="severity"><option selected>INFO</option><option>NOTICE</option><option>WARNING</option><option>CRITICAL</option></select></div>
+        </div>
+        <div class="row">
+          <div><label for="displayMode">Display mode</label><select id="displayMode" onchange="renderPreview()"><option selected>CENTER_ONLY</option><option>BANNER</option><option>MODAL</option></select></div>
+          <div><label for="rolloutPercent">Rollout percent</label><input id="rolloutPercent" type="number" min="0" max="100" value="100"></div>
+        </div>
+        <div class="row">
+          <div><label for="targetPlatform">Target platform</label><select id="targetPlatform"><option selected>android</option><option>desktop</option><option>ios</option><option>all</option></select></div>
+          <div><label for="targetChannel">Target channel</label><select id="targetChannel"><option selected>all</option><option>stable</option><option>beta</option><option>nightly</option></select></div>
+        </div>
+        <div class="row">
+          <div><label for="minVersionCode">Minimum version code</label><input id="minVersionCode" type="number" min="0" placeholder="optional"></div>
+          <div><label for="maxVersionCode">Maximum version code</label><input id="maxVersionCode" type="number" min="0" placeholder="optional"></div>
+        </div>
+        <div class="row">
+          <div><label for="rolloutSalt">Rollout salt</label><input id="rolloutSalt" value="default" autocomplete="off"></div>
+          <div><label for="locales">Target locales (comma separated)</label><input id="locales" placeholder="en,zh-CN" autocomplete="off"></div>
+        </div>
+        <div class="row">
+          <div><label for="startsAt">Starts at (UTC ISO)</label><input id="startsAt" placeholder="2026-08-29T00:00:00.000Z"></div>
+          <div><label for="endsAt">Ends at (UTC ISO)</label><input id="endsAt" placeholder="optional"></div>
+        </div>
+        <label><input id="mustAck" type="checkbox" onchange="renderPreview()"> Must acknowledge</label>
+        <label><input id="pinned" type="checkbox"> Pinned</label>
+      </details>
       <p>
         <button type="button" onclick="createDraft()">Create draft</button>
         <button type="button" class="secondary" onclick="newRevision()">New revision</button>
@@ -98,11 +121,32 @@
       <button type="button" class="secondary" onclick="reloadList()">Reload list</button>
       <pre id="list" class="status" aria-live="polite"></pre>
     </section>
+    <section class="card">
+      <h2>Anonymous activity statistics</h2>
+      <p class="status">Only consented, install-scoped aggregates are shown; no prompts, files, credentials, or event payloads are retained.</p>
+      <button type="button" class="secondary" onclick="reloadStats()">Reload stats</button>
+      <pre id="stats" class="status" aria-live="polite"></pre>
+    </section>
   </main>
   <script>
     const api = location.origin;
     const isLocal = /^(127\.0\.0\.1|localhost)$/.test(location.hostname);
     let announcements = [];
+    let activePreset = "general";
+    const PRESETS = {
+      general: {
+        id:"general-demo", category:"GENERAL", severity:"INFO", displayMode:"CENTER_ONLY", mustAck:false, pinned:false,
+        title:"General announcement", summary:"Please read", body:"Announcement body.", hint:"普通公告：信息提示，可关闭。"
+      },
+      important: {
+        id:"important-demo", category:"SECURITY", severity:"WARNING", displayMode:"MODAL", mustAck:true, pinned:true,
+        title:"Important notice", summary:"Please read and acknowledge", body:"Important announcement body.", hint:"重要公告：警告弹窗，需要明确确认。"
+      },
+      update: {
+        id:"update-demo", category:"UPDATE", severity:"NOTICE", displayMode:"BANNER", mustAck:false, pinned:true,
+        title:"Update available", summary:"A new version is available", body:"Open the app updater to review this version.", hint:"版本更新：按钮固定进入 app://update。"
+      }
+    };
     document.getElementById("localAuth").hidden = !isLocal;
     function localToken() { return document.getElementById("token").value; }
     function headers() {
@@ -110,18 +154,45 @@
       if (isLocal && localToken()) value["X-Admin-Token"] = localToken();
       return value;
     }
+    function applyPreset(name) {
+      const preset = PRESETS[name];
+      if (!preset) return;
+      activePreset = name;
+      for (const field of ["id", "title", "summary", "body"]) document.getElementById(field).value = preset[field];
+      for (const field of ["category", "severity", "displayMode"]) document.getElementById(field).value = preset[field];
+      document.getElementById("mustAck").checked = preset.mustAck;
+      document.getElementById("pinned").checked = preset.pinned;
+      document.getElementById("httpsUrl").value = "";
+      document.getElementById("httpsUrl").disabled = name === "update";
+      document.getElementById("presetHint").textContent = preset.hint;
+      renderPreview();
+    }
     function announcementBody() {
       const mustAck = document.getElementById("mustAck").checked;
-      const actions = mustAck ? [{ type:"ACKNOWLEDGE", key:"ack", label:"I have read and acknowledge" }] : [{ type:"DISMISS", key:"dismiss", label:"Dismiss" }];
+      const actions = activePreset === "update"
+        ? [{ type:"OPEN_APP_ROUTE", key:"update", label:"Open app updater", url:"app://update" }]
+        : (mustAck ? [{ type:"ACKNOWLEDGE", key:"ack", label:"I have read and acknowledge" }] : [{ type:"DISMISS", key:"dismiss", label:"Dismiss" }]);
       const url = document.getElementById("httpsUrl").value.trim();
-      if (url) actions.push({ type:"OPEN_HTTPS_URL", key:"link", label:"Open link", url });
+      if (url && activePreset !== "update") actions.push({ type:"OPEN_HTTPS_URL", key:"link", label:"Open link", url });
+      const optionalInteger = (id) => {
+        const value = document.getElementById(id).value.trim();
+        return value ? Number(value) : null;
+      };
+      const locales = document.getElementById("locales").value.split(",").map((value) => value.trim()).filter(Boolean);
       return {
         id: document.getElementById("id").value.trim(), category: document.getElementById("category").value,
         severity: document.getElementById("severity").value, displayMode: document.getElementById("displayMode").value,
         mustAcknowledge: mustAck, dismissible: !mustAck, pinned: document.getElementById("pinned").checked,
         startsAt: document.getElementById("startsAt").value.trim() || null, endsAt: document.getElementById("endsAt").value.trim() || null,
-        target: { platform:"android", channel:"all", rolloutPercent:Number(document.getElementById("rolloutPercent").value), rolloutSalt:document.getElementById("rolloutSalt").value.trim() || "default", locales:[] },
-        actions, translations: { default: { title:document.getElementById("title").value, summary:document.getElementById("summary").value, bodyMarkdown:document.getElementById("body").value } }
+        target: {
+          platform:document.getElementById("targetPlatform").value,
+          channel:document.getElementById("targetChannel").value,
+          minVersionCode:optionalInteger("minVersionCode"), maxVersionCode:optionalInteger("maxVersionCode"),
+          rolloutPercent:Number(document.getElementById("rolloutPercent").value),
+          rolloutSalt:document.getElementById("rolloutSalt").value.trim() || "default", locales
+        },
+        actions, image:null, publishedAt:null,
+        translations: { default: { title:document.getElementById("title").value, summary:document.getElementById("summary").value, bodyMarkdown:document.getElementById("body").value } }
       };
     }
     function selected() { return announcements.find((item) => item.id === document.getElementById("id").value.trim()); }
@@ -147,6 +218,10 @@
       try { const parsed = JSON.parse(result.text); announcements = Array.isArray(parsed.items) ? parsed.items : []; } catch { announcements = []; }
       document.getElementById("list").textContent = result.text;
     }
+    async function reloadStats() {
+      const result = await call("/admin/v1/stats", "GET");
+      document.getElementById("stats").textContent = result.text;
+    }
     function renderPreview() {
       const target = document.getElementById("preview");
       target.textContent = "";
@@ -154,10 +229,10 @@
       const title = document.createElement("h3"); title.textContent = document.getElementById("title").value;
       const summary = document.createElement("p"); summary.textContent = document.getElementById("summary").value;
       const body = document.createElement("p"); body.textContent = document.getElementById("body").value;
-      const action = document.createElement("button"); action.type = "button"; action.textContent = document.getElementById("mustAck").checked ? "I have read and acknowledge" : "Dismiss"; action.disabled = true;
+      const action = document.createElement("button"); action.type = "button"; action.textContent = activePreset === "update" ? "Open app updater" : (document.getElementById("mustAck").checked ? "I have read and acknowledge" : "Dismiss"); action.disabled = true;
       target.append(mode, title, summary, body, action);
     }
-    renderPreview();
+    applyPreset("general");
   </script>
 </body>
 </html>

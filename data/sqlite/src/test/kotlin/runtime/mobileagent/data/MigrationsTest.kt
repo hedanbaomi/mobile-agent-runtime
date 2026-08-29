@@ -8,8 +8,14 @@ import org.junit.jupiter.api.Assertions.assertThrows
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
 import runtime.mobileagent.domain.ApiFormat
+import runtime.mobileagent.domain.AgentProfile
 import runtime.mobileagent.domain.AppException
+import runtime.mobileagent.domain.CapabilityVerification
 import runtime.mobileagent.domain.ErrorCode
+import runtime.mobileagent.domain.InputModality
+import runtime.mobileagent.domain.ModelOperation
+import runtime.mobileagent.domain.ModelProfile
+import runtime.mobileagent.domain.ModelRole
 import runtime.mobileagent.domain.ProviderProfile
 
 class MigrationsTest {
@@ -260,5 +266,232 @@ class MigrationsTest {
             assertThrows(AppException::class.java) { Migrations.apply(db) }
             assertEquals(8.5, db.query("SELECT version FROM schema_version").single().columns["version"])
         }
+    }
+
+    @Test
+    fun legacyChatVisionEmbeddingAgentAndSnapshotMigrateWithoutLoss() {
+        JdbcSqlConnection().use { db ->
+            Migrations.apply(db)
+            val profiles = ProfileRepository(db)
+            listOf("chat", "vision", "embedding", "reranker").forEach { suffix ->
+                profiles.createProvider(
+                    ProviderProfile(
+                        id = "provider.legacy.$suffix",
+                        name = "Legacy $suffix",
+                        apiFormat = ApiFormat.OPENAI_COMPATIBLE,
+                        baseUrl = "https://$suffix.example.invalid/v1",
+                        revision = 1,
+                    ),
+                )
+            }
+            insertLegacyModel(db, "model.legacy.chat", "provider.legacy.chat", "CHAT", "[\"stream\"]")
+            insertLegacyModel(db, "model.legacy.vision", "provider.legacy.vision", "VISION", "[\"image\"]")
+            insertLegacyModel(db, "model.legacy.embedding", "provider.legacy.embedding", "EMBEDDING", "[]")
+            insertLegacyModel(db, "model.legacy.reranker", "provider.legacy.reranker", "RERANKER", "[]")
+
+            val agents = AgentRepository(db)
+            val agent = agents.saveWithPrompt(
+                AgentProfile(
+                    id = "agent.legacy",
+                    name = "Legacy Agent",
+                    promptRevisionId = "prompt.legacy",
+                    chatProfileId = "model.legacy.chat",
+                    visionProfileId = "model.legacy.vision",
+                    embeddingProfileId = "model.legacy.embedding",
+                    rerankerProfileId = "model.legacy.reranker",
+                    revision = 0,
+                ),
+                template = "Legacy prompt",
+            )
+            val snapshot = agents.createSnapshot(agent.id, "snapshot.legacy", "2026-08-29T00:00:00Z")
+
+            // Revert only the newly added endpoint column to the exact legacy representation.
+            // The role/capability rows remain untouched and are the source of the v11 backfill.
+            db.execute("UPDATE model_profiles SET endpoint_json = '{}' WHERE id LIKE 'model.legacy.%'")
+            db.execute("UPDATE schema_version SET version = ?", listOf(10))
+            Migrations.apply(db)
+
+            assertEquals(Migrations.VERSION, db.query("SELECT version FROM schema_version").single().long("version").toInt())
+            assertEquals(
+                setOf(ModelRole.CHAT, ModelRole.VISION, ModelRole.EMBEDDING, ModelRole.RERANKER),
+                profiles.listModels().map { it.role }.toSet(),
+            )
+            assertEquals(setOf(ModelOperation.CHAT), profiles.getModel("model.legacy.chat")!!.endpoint.operations)
+            assertEquals(setOf(ModelOperation.CHAT), profiles.getModel("model.legacy.vision")!!.endpoint.operations)
+            assertEquals(setOf(ModelOperation.EMBEDDING), profiles.getModel("model.legacy.embedding")!!.endpoint.operations)
+            assertEquals(setOf(ModelOperation.RERANK), profiles.getModel("model.legacy.reranker")!!.endpoint.operations)
+            assertEquals(setOf(InputModality.IMAGE, InputModality.TEXT), profiles.getModel("model.legacy.vision")!!.endpoint.inputModalities)
+
+            val restored = agents.resolveSnapshot(snapshot.id)
+            assertEquals(snapshot.id, restored.snapshot.id)
+            assertEquals("Legacy prompt", restored.prompt.template)
+            assertEquals("model.legacy.chat", restored.chatModel.id)
+            assertEquals("model.legacy.vision", restored.visionModel!!.id)
+            assertEquals("model.legacy.embedding", restored.embeddingModel!!.id)
+            assertEquals("model.legacy.reranker", restored.rerankerModel!!.id)
+        }
+    }
+
+    @Test
+    fun malformedLegacyRoleCapabilitiesAndEndpointFailClosedAndKeepVersion() {
+        val cases = listOf(
+            Triple("NOT_A_ROLE", "[]", "{}"),
+            Triple("CHAT", "{}", "{}"),
+            Triple("CHAT", "[]", "{not-json"),
+            Triple(
+                "CHAT",
+                "[]",
+                "{\"operations\":[],\"inputModalities\":[\"TEXT\"],\"features\":[],\"verification\":\"USER_DECLARED\"}",
+            ),
+            Triple(
+                "CHAT",
+                "[]",
+                "{\"operations\":[\"EMBEDDING\"],\"inputModalities\":[\"TEXT\"],\"features\":[],\"verification\":\"USER_DECLARED\"}",
+            ),
+        )
+        cases.forEachIndexed { index, (role, capabilities, endpoint) ->
+            JdbcSqlConnection().use { db ->
+                Migrations.apply(db)
+                db.execute(
+                    "INSERT INTO provider_profiles(id,name,api_format,base_url,header_secret_refs,non_secret_headers,secret_ref,revision) VALUES(?,?,?,?,?,?,?,?)",
+                    listOf("provider.bad.$index", "Bad $index", "OPENAI_COMPATIBLE", "https://bad.example.invalid", "{}", "{}", "", 1),
+                )
+                insertLegacyModel(
+                    db,
+                    id = "model.bad.$index",
+                    providerId = "provider.bad.$index",
+                    role = role,
+                    capabilities = capabilities,
+                    endpoint = endpoint,
+                )
+                db.execute("UPDATE schema_version SET version = ?", listOf(10))
+
+                assertThrows(AppException::class.java) { Migrations.apply(db) }
+                assertEquals(10, db.query("SELECT version FROM schema_version").single().long("version").toInt())
+                assertEquals(
+                    role,
+                    db.query("SELECT role FROM model_profiles WHERE id = ?", listOf("model.bad.$index")).single().string("role"),
+                )
+                assertEquals(
+                    capabilities,
+                    db.query("SELECT capabilities FROM model_profiles WHERE id = ?", listOf("model.bad.$index")).single().string("capabilities"),
+                )
+                assertEquals(
+                    endpoint,
+                    db.query("SELECT endpoint_json FROM model_profiles WHERE id = ?", listOf("model.bad.$index")).single().string("endpoint_json"),
+                )
+            }
+        }
+    }
+
+    @Test
+    fun metadataOnlyProbeDoesNotPromoteEndpointAndPerCapabilityResultsStayAuditable() {
+        JdbcSqlConnection().use { db ->
+            Migrations.apply(db)
+            val profiles = ProfileRepository(db)
+            profiles.createProvider(
+                ProviderProfile(
+                    id = "provider.probe",
+                    name = "Probe",
+                    apiFormat = ApiFormat.OPENAI_COMPATIBLE,
+                    baseUrl = "https://probe.example.invalid/v1",
+                    revision = 1,
+                ),
+            )
+            profiles.createModel(
+                ModelProfile(
+                    id = "model.probe",
+                    providerId = "provider.probe",
+                    role = ModelRole.CHAT,
+                    modelId = "probe-chat",
+                    capabilities = setOf("stream"),
+                    contextLimit = 4_096,
+                    outputLimit = 1_024,
+                    revision = 1,
+                ),
+            )
+
+            profiles.recordProbe(
+                modelId = "model.probe",
+                providerRevision = 1,
+                toolsSummary = "not-declared",
+                imagesSummary = "not-declared",
+                source = "metadata=verified;stream=not-declared;tools=not-declared;image=not-declared",
+                probed = true,
+            )
+            assertEquals(CapabilityVerification.UNKNOWN, profiles.getModel("model.probe")!!.endpoint.verification)
+            assertEquals("not-declared", db.query("SELECT tools_summary FROM capability_probes").single().string("tools_summary"))
+            assertEquals("PROBED", db.query("SELECT verification FROM capability_probes").single().string("verification"))
+
+            profiles.recordProbe(
+                modelId = "model.probe",
+                providerRevision = 1,
+                toolsSummary = "not-declared",
+                imagesSummary = "not-declared",
+                source = "metadata=verified;stream=verified;tools=not-declared;image=not-declared",
+                probed = true,
+            )
+            assertEquals(CapabilityVerification.PROBED, profiles.getModel("model.probe")!!.endpoint.verification)
+
+            profiles.recordProbe(
+                modelId = "model.probe",
+                providerRevision = 1,
+                toolsSummary = "http-400",
+                imagesSummary = "not-declared",
+                source = "metadata=verified;stream=verified;tools=http-400;image=not-declared",
+                probed = false,
+            )
+            assertEquals(CapabilityVerification.UNKNOWN, profiles.getModel("model.probe")!!.endpoint.verification)
+            val latest = db.query("SELECT tools_summary, images_summary, source FROM capability_probes ORDER BY probed_at DESC LIMIT 1").single()
+            assertEquals("http-400", latest.string("tools_summary"))
+            assertEquals("not-declared", latest.string("images_summary"))
+            assertTrue(latest.string("source").contains("stream=verified"))
+        }
+    }
+
+    @Test
+    fun malformedImmutableSnapshotFragmentFailsClosedAndKeepsSchemaVersion() {
+        JdbcSqlConnection().use { db ->
+            Migrations.apply(db)
+            val badManifest = """
+                {"snapshotId":"snapshot.bad","chatModel":{
+                  "id":"model.bad.snapshot","providerId":"provider.bad.snapshot","role":"CHAT",
+                  "modelId":"chat","capabilities":[],"parameterSchemaJson":"{}",
+                  "contextLimit":4096,"outputLimit":1024,"revision":1,"parametersJson":"{}",
+                  "endpoint":{"operations":["EMBEDDING"],"inputModalities":["TEXT"],"features":[],"verification":"USER_DECLARED"}
+                }}
+            """.trimIndent()
+            db.execute(
+                "INSERT INTO agent_snapshots(id,schema_version,agent_id,prompt_revision_id,chat_model_id,provider_revision,knowledge_base_ids,skill_ids,created_at,provider_id,chat_model_revision,vision_model_id,vision_model_revision,embedding_model_id,embedding_model_revision,reranker_model_id,reranker_model_revision,parameter_overrides_json,context_policy_json,permission_settings_json,binding_manifest_json,expanded_json) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                listOf(
+                    "snapshot.bad", 10, "agent.bad", "prompt.bad", "model.bad.snapshot", 1, "[]", "[]",
+                    "2026-08-29T00:00:00Z", "provider.bad.snapshot", 1, null, null, null, null, null, null,
+                    "{}", "{}", "{}", badManifest, "{}",
+                ),
+            )
+            db.execute("UPDATE schema_version SET version = ?", listOf(10))
+
+            assertThrows(AppException::class.java) { Migrations.apply(db) }
+            assertEquals(10, db.query("SELECT version FROM schema_version").single().long("version").toInt())
+            assertEquals(
+                badManifest,
+                db.query("SELECT binding_manifest_json FROM agent_snapshots WHERE id = ?", listOf("snapshot.bad"))
+                    .single().string("binding_manifest_json"),
+            )
+        }
+    }
+
+    private fun insertLegacyModel(
+        db: SqlConnection,
+        id: String,
+        providerId: String,
+        role: String,
+        capabilities: String,
+        endpoint: String = "{}",
+    ) {
+        db.execute(
+            "INSERT INTO model_profiles(id,provider_id,role,model_id,capabilities,parameter_schema_json,parameters_json,context_limit,output_limit,revision,endpoint_json) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+            listOf(id, providerId, role, id, capabilities, "{}", "{}", 4_096, 1_024, 1, endpoint),
+        )
     }
 }

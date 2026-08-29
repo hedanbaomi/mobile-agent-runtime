@@ -29,6 +29,7 @@ const files = [
   "services/announcements/src/worker.mjs",
   "services/announcements/src/access.test.mjs",
   "services/announcements/src/rollout.test.mjs",
+  "services/announcements/src/stats.test.mjs",
   "services/announcements/src/worker.test.mjs",
   "services/announcements/migrations/0001_initial.sql",
   "services/announcements/migrations/0002_hardened_contract.sql",

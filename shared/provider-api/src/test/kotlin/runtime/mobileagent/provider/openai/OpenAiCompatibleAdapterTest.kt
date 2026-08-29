@@ -551,12 +551,21 @@ class OpenAiCompatibleAdapterTest {
     }
 
     @Test
-    fun liveProbeRequiresConsentAndUsesMetadataOnlyEndpoint() = runTest {
+    fun liveProbeRequiresConsentAndVerifiesDeclaredStreamSemantics() = runTest {
         var requests = 0
         val engine = MockEngine { request ->
             requests += 1
-            assertTrue(request.url.encodedPath.endsWith("/models/demo"))
-            respond("{}", HttpStatusCode.OK)
+            if (request.url.encodedPath.endsWith("/models/demo")) {
+                respond("{\"id\":\"demo\",\"object\":\"model\"}", HttpStatusCode.OK)
+            } else {
+                assertTrue(request.url.encodedPath.endsWith("/chat/completions"))
+                assertTrue((request.body as io.ktor.http.content.TextContent).text.contains("\"stream\":true"))
+                respond(
+                    "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n\ndata: [DONE]\n\n",
+                    HttpStatusCode.OK,
+                    headersOf(HttpHeaders.ContentType, "text/event-stream"),
+                )
+            }
         }
         val adapter = OpenAiCompatibleAdapter(HttpClient(engine), "https://example.invalid/v1")
         val profile = ModelProfile(
@@ -572,9 +581,149 @@ class OpenAiCompatibleAdapterTest {
         val noProbe = adapter.probe(profile, "token".toCharArray(), runtime.mobileagent.provider.ProbeConsent.NOT_GRANTED, "p1")
         assertEquals(0, requests)
         assertEquals(runtime.mobileagent.provider.CapabilityProbeStatus.PROFILE_ONLY, noProbe.status)
+        assertTrue(noProbe.source.contains("consent-required"))
         val live = adapter.probe(profile, "token".toCharArray(), runtime.mobileagent.provider.ProbeConsent.GRANTED, "p2")
-        assertEquals(1, requests)
+        assertEquals(2, requests)
         assertEquals(runtime.mobileagent.provider.CapabilityProbeStatus.SUCCEEDED, live.status)
-        assertTrue(!live.charged)
+        assertTrue(live.supportsStream)
+        assertFalse(live.supportsTools)
+        assertFalse(live.supportsImages)
+        assertTrue(live.charged)
+        assertTrue(live.source.contains("metadata=verified"))
+        assertTrue(live.source.contains("stream=verified"))
+        assertTrue(live.source.contains("tools=not-declared"))
+        assertTrue(live.source.contains("image=not-declared"))
+    }
+
+    @Test
+    fun metadataHttpSuccessWithMalformedBodyDoesNotPromoteManualCapabilities() = runTest {
+        var requests = 0
+        val engine = MockEngine {
+            requests += 1
+            respond("{}", HttpStatusCode.OK)
+        }
+        val adapter = OpenAiCompatibleAdapter(HttpClient(engine), "https://example.invalid/v1")
+        val profile = ModelProfile(
+            id = "profile-1",
+            providerId = "provider-1",
+            modelId = "demo",
+            role = ModelRole.CHAT,
+            capabilities = setOf("stream", "tools", "image"),
+            contextLimit = 4096,
+            outputLimit = 1024,
+            revision = 1,
+        )
+        val report = adapter.probe(profile, "token".toCharArray(), runtime.mobileagent.provider.ProbeConsent.GRANTED, "p3")
+        assertEquals(1, requests)
+        assertEquals(runtime.mobileagent.provider.CapabilityProbeStatus.FAILED, report.status)
+        assertFalse(report.supportsStream)
+        assertFalse(report.supportsTools)
+        assertFalse(report.supportsImages)
+        assertFalse(report.charged)
+        assertTrue(report.source.contains("metadata=invalid-response"))
+        assertTrue(report.source.contains("stream=not-run"))
+        assertTrue(report.source.contains("tools=not-run"))
+        assertTrue(report.source.contains("image=not-run"))
+    }
+
+    @Test
+    fun metadataHttpFailureDoesNotPromoteManualCapabilities() = runTest {
+        var requests = 0
+        val engine = MockEngine {
+            requests += 1
+            respond("unauthorized", HttpStatusCode.Unauthorized)
+        }
+        val adapter = OpenAiCompatibleAdapter(HttpClient(engine), "https://example.invalid/v1")
+        val profile = ModelProfile(
+            id = "profile-1",
+            providerId = "provider-1",
+            modelId = "demo",
+            role = ModelRole.VISION,
+            capabilities = setOf("stream", "tools", "image"),
+            contextLimit = 4096,
+            outputLimit = 1024,
+            revision = 1,
+        )
+        val report = adapter.probe(profile, "token".toCharArray(), runtime.mobileagent.provider.ProbeConsent.GRANTED, "p3-http")
+        assertEquals(1, requests)
+        assertEquals(runtime.mobileagent.provider.CapabilityProbeStatus.FAILED, report.status)
+        assertFalse(report.supportsStream)
+        assertFalse(report.supportsTools)
+        assertFalse(report.supportsImages)
+        assertFalse(report.charged)
+        assertTrue(report.source.contains("metadata=http-401"))
+    }
+
+    @Test
+    fun toolsAndImageRequireSemanticResponsesAndRecordRejectedFeature() = runTest {
+        var requests = 0
+        val engine = MockEngine { request ->
+            requests += 1
+            when {
+                request.url.encodedPath.endsWith("/models/demo") ->
+                    respond("{\"id\":\"demo\"}", HttpStatusCode.OK)
+                (request.body as io.ktor.http.content.TextContent).text.contains("tool_choice") ->
+                    respond(
+                        "{\"choices\":[{\"message\":{\"tool_calls\":[{\"id\":\"probe\",\"type\":\"function\",\"function\":{\"name\":\"mar_probe_noop\",\"arguments\":\"{}\"}}]}}]}",
+                        HttpStatusCode.OK,
+                        headersOf(HttpHeaders.ContentType, "application/json"),
+                    )
+                else -> respond("unsupported image", HttpStatusCode.BadRequest)
+            }
+        }
+        val adapter = OpenAiCompatibleAdapter(HttpClient(engine), "https://example.invalid/v1")
+        val profile = ModelProfile(
+            id = "profile-1",
+            providerId = "provider-1",
+            modelId = "demo",
+            role = ModelRole.VISION,
+            capabilities = setOf("tools", "image"),
+            contextLimit = 4096,
+            outputLimit = 1024,
+            revision = 1,
+        )
+        val report = adapter.probe(profile, "token".toCharArray(), runtime.mobileagent.provider.ProbeConsent.GRANTED, "p4")
+        assertEquals(3, requests)
+        assertEquals(runtime.mobileagent.provider.CapabilityProbeStatus.FAILED, report.status)
+        assertTrue(report.supportsTools)
+        assertFalse(report.supportsImages)
+        assertFalse(report.supportsStream)
+        assertTrue(report.charged)
+        assertTrue(report.source.contains("tools=verified"))
+        assertTrue(report.source.contains("image=http-400"))
+    }
+
+    @Test
+    fun streamWithoutValidPayloadAndDoneIsNotVerified() = runTest {
+        var requests = 0
+        val engine = MockEngine { request ->
+            requests += 1
+            if (request.url.encodedPath.endsWith("/models/demo")) {
+                respond("{\"id\":\"demo\"}", HttpStatusCode.OK)
+            } else {
+                respond(
+                    "data: {\"choices\":[{\"delta\":{\"content\":\"partial\"}}]}\n\n",
+                    HttpStatusCode.OK,
+                    headersOf(HttpHeaders.ContentType, "text/event-stream"),
+                )
+            }
+        }
+        val adapter = OpenAiCompatibleAdapter(HttpClient(engine), "https://example.invalid/v1")
+        val profile = ModelProfile(
+            id = "profile-1",
+            providerId = "provider-1",
+            modelId = "demo",
+            role = ModelRole.CHAT,
+            capabilities = setOf("stream"),
+            contextLimit = 4096,
+            outputLimit = 1024,
+            revision = 1,
+        )
+        val report = adapter.probe(profile, "token".toCharArray(), runtime.mobileagent.provider.ProbeConsent.GRANTED, "p5")
+        assertEquals(2, requests)
+        assertEquals(runtime.mobileagent.provider.CapabilityProbeStatus.FAILED, report.status)
+        assertFalse(report.supportsStream)
+        assertTrue(report.charged)
+        assertTrue(report.source.contains("stream=invalid-response"))
     }
 }

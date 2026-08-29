@@ -3,7 +3,6 @@
 
 package runtime.mobileagent
 
-import android.app.Application
 import android.content.Context
 import android.content.ContextWrapper
 import androidx.test.ext.junit.runners.AndroidJUnit4
@@ -274,8 +273,9 @@ class ApiEmbeddingDeviceTest {
 
     private fun withFixture(mode: ReplyMode, body: (Fixture) -> Unit) {
         val target = InstrumentationRegistry.getInstrumentation().targetContext
-        check(target.applicationContext.javaClass == Application::class.java) {
-            "Use PythonRuntimeDeviceTestRunner's plain Application, never user App initialization"
+        val testApp = target.applicationContext as? MobileAgentApp
+        check(testApp != null && !testApp.isHostInitialized) {
+            "Use PythonRuntimeDeviceTestRunner's deferred host, never initialized user App state"
         }
         check(BuildConfig.DEBUG) { "Loopback cleartext fixtures are debug-only" }
         val id = UUID.randomUUID().toString()
@@ -336,7 +336,10 @@ class ApiEmbeddingDeviceTest {
         val secretReads = AtomicInteger()
         override fun execute(sql: String, args: List<Any?>) = delegate.execute(sql, args)
         override fun query(sql: String, args: List<Any?>): List<SqlRow> {
-            if (sql.trimStart().startsWith("SELECT", ignoreCase = true) && Regex("(?i)\\bsecrets\\b").containsMatchIn(sql)) {
+            // Inventory/GC legitimately scans secret refs and statuses without reading credential
+            // material. Count and constrain only the ciphertext lookup used by resolveForHost.
+            if (Regex("(?is)^\\s*SELECT\\s+ciphertext\\s*,\\s*status\\s+FROM\\s+secrets\\s+WHERE\\s+ref\\s*=\\s*\\?")
+                    .containsMatchIn(sql)) {
                 check(args.size == 1 && args.single() == ownSecretRef) { "Fixture may query only its own dummy credential row" }
                 secretReads.incrementAndGet()
             }

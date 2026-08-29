@@ -16,10 +16,13 @@ import runtime.mobileagent.knowledge.ImportBatchKind
 import runtime.mobileagent.knowledge.ImportStage
 import runtime.mobileagent.knowledge.KnowledgeArchive
 import runtime.mobileagent.knowledge.MediaKind
+import runtime.mobileagent.knowledge.sha256Hex
 import androidx.documentfile.provider.DocumentFile
 import android.content.Intent
 import runtime.mobileagent.provider.SecretRedactor
 import java.io.ByteArrayOutputStream
+import java.io.File
+import java.io.FileOutputStream
 
 data class EmbeddingConfirmation(val target: String, val retry: Boolean, val rebind: Boolean, val documentCount: Int,
     val queryRetry: Boolean = false)
@@ -250,6 +253,7 @@ class KnowledgeViewModel(application: Application) : AndroidViewModel(applicatio
                 }
                 EmbeddingAction.REBIND, EmbeddingAction.REBUILD, EmbeddingAction.GRANT, EmbeddingAction.RETRY -> {
                     val actionName = pending.kind.name
+                    val documentsHash = sha256Hex(pending.documentsFingerprint.toByteArray(Charsets.UTF_8))
                     val fingerprint = buildString {
                         appendLine(actionName)
                         if (pending.kind == EmbeddingAction.REBIND) {
@@ -258,6 +262,8 @@ class KnowledgeViewModel(application: Application) : AndroidViewModel(applicatio
                         } else {
                             append(pending.binding.fingerprint)
                         }
+                        append('\n')
+                        append(documentsHash)
                     }
                     val ticket = repo.issueConsentTicket(
                         "API_EMBEDDING",
@@ -296,11 +302,12 @@ class KnowledgeViewModel(application: Application) : AndroidViewModel(applicatio
             require(currentVisionTarget() == fingerprint) { "Vision 目标已变更，请重新确认。" }
             val job = repo.listJobs().firstOrNull { it.first.id == request.first }?.first
                 ?: error("导入任务不存在。")
+            val documentsHash = sha256Hex(documentsFingerprint(job.knowledgeBaseId).toByteArray(Charsets.UTF_8))
             val ticket = repo.issueConsentTicket(
                 "VISION",
                 job.id,
                 job.knowledgeBaseId,
-                (if (request.second) "RETRY\n" else "GRANT\n") + fingerprint.orEmpty(),
+                (if (request.second) "RETRY\n" else "GRANT\n") + fingerprint.orEmpty() + "\n" + documentsHash,
             )
             ImportWorkScheduler.enqueueConsent(app, ticket, app.container.profiles.visionConfigured())
             "已记录一次性授权并转入前台任务；不会在此页面协程中上传图片。"
@@ -368,11 +375,28 @@ class KnowledgeViewModel(application: Application) : AndroidViewModel(applicatio
                 files.forEachIndexed { index, (name, uri) ->
                     state.value = state.value.copy(status = "正在复制 ${index + 1}/${files.size}：$name")
                     runInterruptible(Dispatchers.IO) {
-                        val bytes = readLimited(uri, name)
-                        val imported = repo.importBytes(name, app.contentResolver.getType(uri).orEmpty(), bytes,
-                            app.container.profiles.visionConfigured(), id, pauseAt = ImportStage.COPYING,
-                            embeddingIsApi = repo.embeddingSpaceId(id)?.let(ApiEmbeddingBinding::parseSpaceId) != null,
-                            embeddingConsent = false)
+                        val apiEmbedding = repo.embeddingSpaceId(id)?.let(ApiEmbeddingBinding::parseSpaceId) != null
+                        val imported = if (kind == ImportBatchKind.ZIP) {
+                            val staged = stageArchive(uri)
+                            try {
+                                repo.importKnowledgeArchiveFile(
+                                    displayName = name,
+                                    file = staged,
+                                    visionConfigured = app.container.profiles.visionConfigured(),
+                                    knowledgeBaseId = id,
+                                    pauseAt = ImportStage.COPYING,
+                                    embeddingIsApi = apiEmbedding,
+                                    embeddingConsent = false,
+                                )
+                            } finally {
+                                if (!staged.delete()) staged.deleteOnExit()
+                            }
+                        } else {
+                            val bytes = readLimited(uri, name)
+                            repo.importBytes(name, app.contentResolver.getType(uri).orEmpty(), bytes,
+                                app.container.profiles.visionConfigured(), id, pauseAt = ImportStage.COPYING,
+                                embeddingIsApi = apiEmbedding, embeddingConsent = false)
+                        }
                         if (createdBatchId != null) {
                             repo.bindJobToBatch(createdBatchId, imported, name)
                         } else if (resolvedBatchId == null) {
@@ -389,9 +413,6 @@ class KnowledgeViewModel(application: Application) : AndroidViewModel(applicatio
                         } else {
                             ImportWorkScheduler.enqueueBatch(app, batchId, app.container.profiles.visionConfigured())
                         }
-                    }
-                    repo.listJobs().filter { it.first.knowledgeBaseId == id && it.first.stage.name in ACTIVE }.forEach { (job, _, _) ->
-                        ImportWorkScheduler.enqueue(app, job.id, app.container.profiles.visionConfigured())
                     }
                 }
                 val snapshot = runInterruptible(Dispatchers.IO) { loadSnapshot(id) }
@@ -477,6 +498,33 @@ class KnowledgeViewModel(application: Application) : AndroidViewModel(applicatio
         while (true) { val count = input.read(buffer); if (count < 0) break
             require(out.size().toLong() + count <= limit) { "RESOURCE_LIMIT" }; out.write(buffer, 0, count) }
         out.toByteArray()
+    }
+    private fun stageArchive(uri: Uri): File {
+        val directory = File(app.filesDir, "import-staging").apply {
+            check(exists() || mkdirs()) { "无法创建导入暂存目录。" }
+        }
+        val target = File.createTempFile("knowledge-", ".zip", directory)
+        try {
+            (app.contentResolver.openInputStream(uri) ?: error("无法读取文件。")).use { input ->
+                FileOutputStream(target).use { output ->
+                    val buffer = ByteArray(16 * 1024)
+                    var total = 0L
+                    while (true) {
+                        val count = input.read(buffer)
+                        if (count < 0) break
+                        total += count
+                        require(total <= KnowledgeArchive.MAX_TOTAL_BYTES) { "RESOURCE_LIMIT" }
+                        output.write(buffer, 0, count)
+                    }
+                    output.fd.sync()
+                }
+            }
+            require(target.length() >= 22L) { "Not a ZIP archive" }
+            return target
+        } catch (failure: Throwable) {
+            target.delete()
+            throw failure
+        }
     }
     private fun fail(failure: Exception) { state.value = state.value.copy(error = SecretRedactor.redact(failure.message ?: "操作失败。")) }
     private companion object {

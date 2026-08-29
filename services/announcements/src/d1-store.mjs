@@ -801,22 +801,71 @@ export class D1Store {
   async stats(now = new Date()) {
     const installs = await this.first("SELECT COUNT(*) AS count FROM install_state");
     const receipts = await this.first("SELECT COUNT(*) AS count FROM announcement_receipts");
+    const eventCounts = await this.first(
+      `SELECT
+        COUNT(DISTINCT CASE WHEN event_type = 'install_seen' THEN install_id_hash END) AS install_seen,
+        COUNT(DISTINCT CASE WHEN event_type = 'app_active' THEN install_id_hash END) AS app_active
+       FROM announcement_receipts`,
+    );
     const active = await this.first(
       `SELECT
-        COUNT(DISTINCT CASE WHEN julianday(?) - julianday(last_active_at) <= 1 THEN install_id_hash END) AS active_24h,
-        COUNT(DISTINCT CASE WHEN julianday(?) - julianday(last_active_at) <= 7 THEN install_id_hash END) AS active_7d,
-        COUNT(DISTINCT CASE WHEN julianday(?) - julianday(last_active_at) <= 30 THEN install_id_hash END) AS active_30d
+        COUNT(DISTINCT CASE WHEN julianday(?) >= julianday(last_active_at)
+          AND julianday(?) - julianday(last_active_at) <= 1 THEN install_id_hash END) AS dau,
+        COUNT(DISTINCT CASE WHEN julianday(?) >= julianday(last_active_at)
+          AND julianday(?) - julianday(last_active_at) <= 7 THEN install_id_hash END) AS wau,
+        COUNT(DISTINCT CASE WHEN julianday(?) >= julianday(last_active_at)
+          AND julianday(?) - julianday(last_active_at) <= 30 THEN install_id_hash END) AS mau
        FROM install_state`,
       now.toISOString(),
+      now.toISOString(),
+      now.toISOString(),
+      now.toISOString(),
+      now.toISOString(),
+      now.toISOString(),
+    );
+    const byVersion = await this.all(
+      `SELECT version_code AS version_code, COUNT(*) AS count
+         FROM install_state
+        WHERE julianday(?) >= julianday(last_active_at)
+          AND julianday(?) - julianday(last_active_at) <= 30
+        GROUP BY version_code ORDER BY version_code`,
+      now.toISOString(),
+      now.toISOString(),
+    );
+    const byChannel = await this.all(
+      `SELECT channel AS channel, COUNT(*) AS count
+         FROM install_state
+        WHERE julianday(?) >= julianday(last_active_at)
+          AND julianday(?) - julianday(last_active_at) <= 30
+        GROUP BY channel ORDER BY channel`,
+      now.toISOString(),
+      now.toISOString(),
+    );
+    const byPlatform = await this.all(
+      `SELECT platform AS platform, COUNT(*) AS count
+         FROM install_state
+        WHERE julianday(?) >= julianday(last_active_at)
+          AND julianday(?) - julianday(last_active_at) <= 30
+        GROUP BY platform ORDER BY platform`,
       now.toISOString(),
       now.toISOString(),
     );
     return {
       consentedInstalls: Number(installs?.count || 0),
       receiptRows: Number(receipts?.count || 0),
-      active24h: Number(active?.active_24h || 0),
-      active7d: Number(active?.active_7d || 0),
-      active30d: Number(active?.active_30d || 0),
+      installSeen: Number(eventCounts?.install_seen || 0),
+      appActive: Number(eventCounts?.app_active || 0),
+      dau: Number(active?.dau || 0),
+      wau: Number(active?.wau || 0),
+      mau: Number(active?.mau || 0),
+      // Keep the existing names as compatibility aliases for callers that
+      // already consume the 24h/7d/30d counters.
+      active24h: Number(active?.dau || 0),
+      active7d: Number(active?.wau || 0),
+      active30d: Number(active?.mau || 0),
+      byVersion: byVersion.map((row) => ({ versionCode: Number(row.version_code), count: Number(row.count || 0) })),
+      byChannel: byChannel.map((row) => ({ channel: row.channel, count: Number(row.count || 0) })),
+      byPlatform: byPlatform.map((row) => ({ platform: row.platform, count: Number(row.count || 0) })),
     };
   }
 

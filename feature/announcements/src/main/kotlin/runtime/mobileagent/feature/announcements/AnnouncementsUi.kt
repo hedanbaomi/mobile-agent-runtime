@@ -62,6 +62,8 @@ data class AnnouncementsActions(
     val onAcknowledge: (CachedAnnouncement) -> Unit = {},
     val onSaveEndpoint: (String, String) -> Unit = { _, _ -> },
     val onAppRoute: (String) -> Unit = {},
+    /** Called after an allowlisted action is selected; URLs/body text stay out of telemetry. */
+    val onActionClicked: (CachedAnnouncement, AnnouncementAction) -> Unit = { _, _ -> },
 )
 
 @Composable
@@ -96,6 +98,7 @@ fun AnnouncementsScreen(state: AnnouncementsUiState, actions: AnnouncementsActio
     state.selected?.let { record ->
         AnnouncementDetailDialog(record, actions.onCloseDetail, zh) { action ->
             if (AnnouncementActions.allowed(action)) {
+                actions.onActionClicked(record, action)
                 when (action.type) {
                     "OPEN_HTTPS_URL" -> action.url?.let(uriHandler::openUri)
                     "OPEN_APP_ROUTE" -> action.url?.let(actions.onAppRoute)

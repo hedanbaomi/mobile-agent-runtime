@@ -1,0 +1,45 @@
+# This is a Gradle generated file for dependency locking.
+# Manual edits can break the build and are not advised.
+# This file is expected to be part of source control.
+com.squareup.okhttp3:okhttp:4.12.0=runtimeClasspath
+com.squareup.okio:okio-jvm:3.6.0=runtimeClasspath
+com.squareup.okio:okio:3.6.0=runtimeClasspath
+io.ktor:ktor-client-core-jvm:3.0.1=runtimeClasspath
+io.ktor:ktor-client-core:3.0.1=runtimeClasspath
+io.ktor:ktor-events-jvm:3.0.1=runtimeClasspath
+io.ktor:ktor-events:3.0.1=runtimeClasspath
+io.ktor:ktor-http-jvm:3.0.1=runtimeClasspath
+io.ktor:ktor-http:3.0.1=runtimeClasspath
+io.ktor:ktor-io-jvm:3.0.1=runtimeClasspath
+io.ktor:ktor-io:3.0.1=runtimeClasspath
+io.ktor:ktor-serialization-jvm:3.0.1=runtimeClasspath
+io.ktor:ktor-serialization:3.0.1=runtimeClasspath
+io.ktor:ktor-sse-jvm:3.0.1=runtimeClasspath
+io.ktor:ktor-sse:3.0.1=runtimeClasspath
+io.ktor:ktor-utils-jvm:3.0.1=runtimeClasspath
+io.ktor:ktor-utils:3.0.1=runtimeClasspath
+io.ktor:ktor-websocket-serialization-jvm:3.0.1=runtimeClasspath
+io.ktor:ktor-websocket-serialization:3.0.1=runtimeClasspath
+io.ktor:ktor-websockets-jvm:3.0.1=runtimeClasspath
+io.ktor:ktor-websockets:3.0.1=runtimeClasspath
+org.bouncycastle:bcprov-jdk18on:1.79=runtimeClasspath
+org.jetbrains.kotlin:kotlin-stdlib-common:2.1.10=runtimeClasspath
+org.jetbrains.kotlin:kotlin-stdlib-jdk7:1.9.10=runtimeClasspath
+org.jetbrains.kotlin:kotlin-stdlib-jdk8:1.9.10=runtimeClasspath
+org.jetbrains.kotlin:kotlin-stdlib:2.1.10=runtimeClasspath
+org.jetbrains.kotlinx:kotlinx-coroutines-bom:1.10.1=runtimeClasspath
+org.jetbrains.kotlinx:kotlinx-coroutines-core-jvm:1.10.1=runtimeClasspath
+org.jetbrains.kotlinx:kotlinx-coroutines-core:1.10.1=runtimeClasspath
+org.jetbrains.kotlinx:kotlinx-coroutines-slf4j:1.10.1=runtimeClasspath
+org.jetbrains.kotlinx:kotlinx-io-bytestring-jvm:0.5.4=runtimeClasspath
+org.jetbrains.kotlinx:kotlinx-io-bytestring:0.5.4=runtimeClasspath
+org.jetbrains.kotlinx:kotlinx-io-core-jvm:0.5.4=runtimeClasspath
+org.jetbrains.kotlinx:kotlinx-io-core:0.5.4=runtimeClasspath
+org.jetbrains.kotlinx:kotlinx-serialization-bom:1.7.3=runtimeClasspath
+org.jetbrains.kotlinx:kotlinx-serialization-core-jvm:1.7.3=runtimeClasspath
+org.jetbrains.kotlinx:kotlinx-serialization-core:1.7.3=runtimeClasspath
+org.jetbrains.kotlinx:kotlinx-serialization-json-jvm:1.7.3=runtimeClasspath
+org.jetbrains.kotlinx:kotlinx-serialization-json:1.7.3=runtimeClasspath
+org.jetbrains:annotations:23.0.0=runtimeClasspath
+org.slf4j:slf4j-api:2.0.16=runtimeClasspath
+empty=

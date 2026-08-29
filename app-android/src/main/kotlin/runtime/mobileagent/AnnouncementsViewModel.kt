@@ -7,14 +7,14 @@ import android.app.Application
 import androidx.compose.runtime.mutableStateOf
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
-import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
 import runtime.mobileagent.announcements.AnnouncementPresentation
+import runtime.mobileagent.announcements.AnnouncementAction
+import runtime.mobileagent.announcements.AnnouncementActions
 import runtime.mobileagent.announcements.CachedAnnouncement
 import runtime.mobileagent.announcements.ClientContext
 import runtime.mobileagent.announcements.DisplayMode
-import java.time.Instant
 import java.util.Locale
 
 class AnnouncementsViewModel(application: Application) : AndroidViewModel(application) {
@@ -66,12 +66,13 @@ class AnnouncementsViewModel(application: Application) : AndroidViewModel(applic
     fun saveEndpoint(url: String, keyHex: String) {
         repo.setBaseUrl(url)
         repo.setPublicKeyHex(keyHex)
+        app.container.announcementRefreshCoordinator.flushTelemetry()
         reload()
     }
 
     fun setStats(enabled: Boolean) {
-        repo.setStatsEnabled(enabled)
-        statsEnabled.value = enabled
+        app.container.announcementRefreshCoordinator.setStatsEnabled(enabled)
+        reload()
     }
 
     fun markRead(item: CachedAnnouncement) {
@@ -91,65 +92,69 @@ class AnnouncementsViewModel(application: Application) : AndroidViewModel(applic
 
     fun acknowledge(item: CachedAnnouncement) {
         repo.markAcknowledged(item.item.id, item.item.revision)
-        repo.markDisplayed(item.item.id, item.item.revision)
+        if (repo.markDisplayed(item.item.id, item.item.revision)) {
+            emit("announcement_displayed", item)
+        }
         emit("announcement_acknowledged", item)
         reload()
     }
 
     fun open(item: CachedAnnouncement) {
-        repo.markDisplayed(item.item.id, item.item.revision)
+        val displayed = repo.markDisplayed(item.item.id, item.item.revision)
         if (item.item.displayMode != DisplayMode.MODAL) {
             repo.markRead(item.item.id, item.item.revision)
         }
         selected.value = item
+        if (displayed) emit("announcement_displayed", item)
         emit("announcement_opened", item)
         reload()
     }
 
+    /** Record a validated action click without ever sending the action URL or body text. */
+    fun actionClicked(item: CachedAnnouncement, action: AnnouncementAction) {
+        if (!AnnouncementActions.allowed(action)) return
+        app.container.announcementRefreshCoordinator.recordEvent(
+            type = "action_clicked",
+            client = client(),
+            announcementId = item.item.id,
+            revision = item.item.revision,
+            actionId = action.key,
+        )
+    }
+
     fun refresh(force: Boolean) {
         viewModelScope.launch {
-            val url = repo.baseUrl()
-            if (url.isBlank() || repo.publicKeys().isEmpty()) {
-                status.value = "Configure the local announcement URL and public key to fetch a signed feed."
-                return@launch
-            }
-            if (!force && !repo.needsFetch(client())) {
-                status.value = "Using cached announcements. Automatic checks wait 6 hours."
-                return@launch
-            }
             status.value = "Checking announcements..."
-            val outcome = withContext(Dispatchers.IO) {
-                repo.markAttempt(client())
-                runCatching { app.container.announcementFetcher.fetch(url, client(), repo.etag(client())) }
-                    .getOrElse { FetchOutcome.Failed(it.message ?: "fetch failed") }
+            val result = try {
+                app.container.announcementRefreshCoordinator.refresh(force = force).await()
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (_: Throwable) {
+                // A coordinator/storage fault must not make the chat shell unavailable.
+                AnnouncementRefreshResult.Failed("announcement refresh unavailable")
             }
-            when (outcome) {
-                is FetchOutcome.NotModified -> status.value = "Announcements are up to date."
-                is FetchOutcome.Failed -> status.value = "Fetch failed. Chat and knowledge stay available. ${outcome.message}"
-                is FetchOutcome.Body -> {
-                    val reason = withContext(Dispatchers.IO) {
-                        repo.applyEnvelope(outcome.envelopeJson, outcome.etag, client())
-                    }
-                    status.value = if (reason == null) {
-                        "Signed announcements updated."
-                    } else {
-                        "Signature rejected ($reason). Previous cache kept."
-                    }
-                }
+            status.value = when (result) {
+                AnnouncementRefreshResult.ConfigurationUnavailable ->
+                    "Configure the local announcement URL and public key to fetch a signed feed."
+                AnnouncementRefreshResult.Skipped ->
+                    "Using cached announcements. Automatic checks wait 6 hours."
+                AnnouncementRefreshResult.NotModified -> "Announcements are up to date."
+                AnnouncementRefreshResult.Updated -> "Signed announcements updated."
+                is AnnouncementRefreshResult.Failed ->
+                    "Fetch failed. Chat and knowledge stay available. ${result.message}"
+                is AnnouncementRefreshResult.Rejected ->
+                    "Signature rejected (${result.reason}). Previous cache kept."
             }
             reload()
         }
     }
 
     private fun emit(type: String, item: CachedAnnouncement) {
-        if (!repo.statsEnabled()) return
-        val url = repo.baseUrl()
-        if (url.isBlank()) return
-        val client = client()
-        viewModelScope.launch(Dispatchers.IO) {
-            val body =
-                """{"events":[{"eventId":"${java.util.UUID.randomUUID()}","type":"$type","installId":"${client.installId}","platform":"${client.platform}","channel":"${client.channel}","versionCode":${client.versionCode},"locale":"${client.locale}","announcementId":"${item.item.id}","revision":${item.item.revision},"occurredAt":"${Instant.now()}"}]}"""
-            runCatching { app.container.announcementFetcher.postEvents(url, true, body) }
-        }
+        app.container.announcementRefreshCoordinator.recordEvent(
+            type = type,
+            client = client(),
+            announcementId = item.item.id,
+            revision = item.item.revision,
+        )
     }
 }

@@ -50,7 +50,7 @@ import kotlin.math.sqrt
 
 /**
  * Real packaged ONNX, JNI and bundled SQLite; no API model, network or user data.
- * The configured runner substitutes Application, so this is NOT MobileAgentApp cold-start proof.
+ * The configured runner defers host initialization, so this is NOT MobileAgentApp cold-start proof.
  */
 @RunWith(AndroidJUnit4::class)
 class KnowledgeRuntimeDeviceTest {

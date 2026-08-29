@@ -253,17 +253,21 @@ export class MemoryStore {
         continue;
       }
       const installIdHash = event.installIdHash;
+      const dimensions = {
+        platform: event.platform || "all",
+        channel: event.channel || "all",
+        versionCode: Number.isInteger(event.versionCode) ? event.versionCode : 0,
+        locale: event.locale || "default",
+      };
       if (event.type === "app_active") {
         const state = this.installState.get(installIdHash) || {
           installIdHash,
-          platform: event.platform,
-          channel: event.channel,
-          versionCode: event.versionCode,
-          locale: event.locale,
+          ...dimensions,
           firstSeenAt: now.toISOString(),
           lastActiveAt: now.toISOString(),
           lastCountedActivityAt: null,
         };
+        Object.assign(state, dimensions);
         state.lastActiveAt = now.toISOString();
         const lastCounted = state.lastCountedActivityAt ? Date.parse(state.lastCountedActivityAt) : 0;
         if (!state.lastCountedActivityAt || now.getTime() - lastCounted >= SIX_HOURS_MS) {
@@ -278,14 +282,12 @@ export class MemoryStore {
       } else {
         const state = this.installState.get(installIdHash) || {
           installIdHash,
-          platform: event.platform,
-          channel: event.channel,
-          versionCode: event.versionCode,
-          locale: event.locale,
+          ...dimensions,
           firstSeenAt: now.toISOString(),
           lastActiveAt: now.toISOString(),
           lastCountedActivityAt: null,
         };
+        Object.assign(state, dimensions);
         state.lastActiveAt = now.toISOString();
         this.installState.set(installIdHash, state);
       }
@@ -313,10 +315,51 @@ export class MemoryStore {
     return accepted;
   }
 
-  stats() {
+  stats(now = new Date()) {
     const installs = this.installState.size;
     const receipts = [...this.receipts.values()].length;
-    return { consentedInstalls: installs, receiptRows: receipts };
+    const nowMs = now.getTime();
+    const activeIn = (windowMs) => [...this.installState.values()].filter((state) => {
+      const lastActive = Date.parse(state.lastActiveAt);
+      return Number.isFinite(lastActive) && lastActive <= nowMs && nowMs - lastActive <= windowMs;
+    });
+    const dauRows = activeIn(24 * 60 * 60 * 1000);
+    const wauRows = activeIn(7 * 24 * 60 * 60 * 1000);
+    const mauRows = activeIn(30 * 24 * 60 * 60 * 1000);
+    const distinctEventInstalls = (eventType) => new Set(
+      [...this.receipts.values()]
+        .filter((receipt) => receipt.eventType === eventType)
+        .map((receipt) => receipt.installIdHash),
+    ).size;
+    const distribution = (rows, property, normalize = (value) => value) => {
+      const counts = new Map();
+      for (const row of rows) {
+        const value = normalize(row[property]);
+        counts.set(value, (counts.get(value) || 0) + 1);
+      }
+      return [...counts.entries()]
+        .map(([value, count]) => ({ [property]: value, count }))
+        .sort((left, right) => property === "versionCode"
+          ? left[property] - right[property]
+          : String(left[property]).localeCompare(String(right[property])));
+    };
+    return {
+      consentedInstalls: installs,
+      receiptRows: receipts,
+      installSeen: distinctEventInstalls("install_seen"),
+      appActive: distinctEventInstalls("app_active"),
+      dau: dauRows.length,
+      wau: wauRows.length,
+      mau: mauRows.length,
+      // Keep the existing names as compatibility aliases for callers that
+      // already consume the 24h/7d/30d counters.
+      active24h: dauRows.length,
+      active7d: wauRows.length,
+      active30d: mauRows.length,
+      byVersion: distribution(mauRows, "versionCode", (value) => Number(value || 0)),
+      byChannel: distribution(mauRows, "channel", (value) => value || "all"),
+      byPlatform: distribution(mauRows, "platform", (value) => value || "all"),
+    };
   }
 
   writeRevision(announcementId, revision, revisionStatus, input, now) {

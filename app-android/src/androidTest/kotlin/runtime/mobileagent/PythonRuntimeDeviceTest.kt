@@ -57,13 +57,16 @@ import java.util.zip.ZipEntry
 import java.util.zip.ZipOutputStream
 
 /**
- * The test host must not initialize MobileAgentApp's database, secrets or network clients.
+ * Non-UI tests must not initialize MobileAgentApp's database, secrets or network clients.
  * The real isolated service and its packaged JNI/official CPython are not replaced.
- * Production MobileAgentApp still needs its own isolated-process early return.
+ * MainActivity explicitly initializes the deferred host for the release UI smoke; production
+ * MobileAgentApp still initializes normally and keeps its isolated-process early return.
  */
 class PythonRuntimeDeviceTestRunner : AndroidJUnitRunner() {
-    override fun newApplication(cl: ClassLoader, className: String, context: Context): Application =
-        super.newApplication(cl, Application::class.java.name, context)
+    override fun newApplication(cl: ClassLoader, className: String, context: Context): Application {
+        MobileAgentApp.deferHostInitializationForInstrumentation = true
+        return super.newApplication(cl, MobileAgentApp::class.java.name, context)
+    }
 }
 
 /** Real device tests: no mocked runtime, no real database/key, and no network connection. */

@@ -6,20 +6,21 @@ name: ci
 on:
   push:
   pull_request:
+  workflow_dispatch:
 
 jobs:
   check:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-java@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/setup-java@c5195efecf7bdfc987ee8bae7a71cb8b11521c00 # v4.7.1
         with:
           distribution: temurin
           java-version: "17"
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@42375524e23c412d93fb67b49958b491fce71c38 # v5.4.0
         with:
           python-version: "3.11"
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: "20"
       - name: Announcement worker tests
@@ -31,9 +32,61 @@ jobs:
         run: |
           python -m pip install "reuse==6.2.0"
           python -m reuse lint
-      - name: Unit tests and Android debug APK
-        run: ./gradlew check :app-android:assembleDebug --no-daemon
-      - name: CycloneDX placeholder evidence
-        run: |
-          mkdir -p docs/evidence
-          echo "SBOM generation is wired after the first successful assemble; see HANDOFF." > docs/evidence/sbom-pending.txt
+      - name: Verify CI pins, dependency locks and checksums
+        run: ./gradlew verifyCiPins verifyDependencyLock verifyDependencyVerification --dependency-verification=strict --no-daemon
+      - name: Unit tests and Android debug APK/SBOM
+        run: ./gradlew check :app-android:assembleDebug :app-android:generateDebugSbom --dependency-verification=strict --no-daemon
+      - name: Upload debug SBOM
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: debug-sbom
+          path: app-android/build/reports/sbom/debug.cdx.json
+
+  android-smoke:
+    name: Android UI smoke (API ${{ matrix.api-level }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        api-level: [31, 34, 35, 36]
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/setup-java@c5195efecf7bdfc987ee8bae7a71cb8b11521c00 # v4.7.1
+        with:
+          distribution: temurin
+          java-version: "17"
+      - name: Provider/navigation/import/announcement client smoke
+        uses: reactivecircus/android-emulator-runner@324029e2f414c084d8b15ba075288885e74aef9c # v2.34.0
+        with:
+          api-level: ${{ matrix.api-level }}
+          target: google_apis
+          arch: x86_64
+          profile: Pixel_2
+          disable-animations: true
+          script: ./gradlew :app-android:connectedDebugAndroidTest -Pandroid.testInstrumentationRunnerArguments.class=runtime.mobileagent.ReleaseGateUiDeviceTest --dependency-verification=strict --no-daemon
+
+  release:
+    name: Signed release gate (manual only)
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    env:
+      ANDROID_RELEASE_KEYSTORE: ${{ secrets.ANDROID_RELEASE_KEYSTORE }}
+      ANDROID_RELEASE_STORE_PASSWORD: ${{ secrets.ANDROID_RELEASE_STORE_PASSWORD }}
+      ANDROID_RELEASE_KEY_ALIAS: ${{ secrets.ANDROID_RELEASE_KEY_ALIAS }}
+      ANDROID_RELEASE_KEY_PASSWORD: ${{ secrets.ANDROID_RELEASE_KEY_PASSWORD }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/setup-java@c5195efecf7bdfc987ee8bae7a71cb8b11521c00 # v4.7.1
+        with:
+          distribution: temurin
+          java-version: "17"
+      - name: Run signed release gate
+        run: ./gradlew releaseGate --dependency-verification=strict --no-daemon
+      - name: Upload signed AAB, SBOM and provenance
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: release-gate-${{ github.sha }}
+          path: |
+            app-android/build/outputs/bundle/release/*.aab
+            app-android/build/reports/sbom/release.cdx.json
+            app-android/build/reports/provenance/release.provenance.json

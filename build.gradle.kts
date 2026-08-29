@@ -11,6 +11,15 @@ plugins {
     alias(libs.plugins.compose.compiler) apply false
 }
 
+// Every resolvable configuration participates in dependency locking.  The
+// checked-in lockfiles are generated with `--write-locks` and are verified by
+// the release gate before any artifact can be considered reproducible.
+allprojects {
+    dependencyLocking {
+        lockAllConfigurations()
+    }
+}
+
 tasks.register("check") {
     group = "verification"
     description = "Run licenseGuard and all subproject checks."
@@ -22,3 +31,5 @@ tasks.register("check") {
         dependsOn(sub.tasks.matching { it.name == "check" })
     }
 }
+
+apply(from = rootProject.file("tools/release-gate.gradle.kts"))

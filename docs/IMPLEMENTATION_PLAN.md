@@ -3,7 +3,7 @@
 
 # 技术实现方案
 
-版本：v1.7 0.2/0.3 配置与批量导入，2026-08-29；继承 v1.6 debug 开发收口及 v1.2 页面设计基线。状态：**0.1.1–0.3 源码已落地；正式 release 与公告线上操作后置，1.0 由用户另行安排**。M1/M5 已接通持久会话、不可变快照、真实请求检查、工具循环、MCP/Python 工具与未知结果门禁；本轮补齐 Skill ZIP central/local 一致性、canonical duplicate 拒绝和 pre-request 预算分类。M3/M4 已接入 MiniLM ONNX、USearch JNI、PDF 页渲染、原图引用、API Embedding 独立授权；本轮 PDF parser v5 阻止 raw/Flate 图像伪装外发，API36 Knowledge 4/4 与 API31/34/35/36 最终 debug APK 的真实 WorkManager、前台契约、等待终态与取消短测各 3/3 通过。M7 已实现 schema v10，0.2/0.3 升至 schema v11（`ModelEndpoint`、`import_batches`/`import_items`、`consent_tickets`、`capability_probes`、密钥 status）。M6 官方 CPython 3.14.7/JNI/隔离 IPC 在 Round22 设备 12 项通过，包含日志超限与立即合法结果的竞态反例。公告系统后续部署/线上后检由用户自行操作；正式 Android release 将与用户另行安排。320 文件的长时系统边界、真实 Vision、Android 15 六小时 timeout、Android 16 Job 配额耗尽、500 文件批次实机及全阶段故障注入没有执行，不能标完整 K06、生产或 release PASS。
+版本：v1.8 最终复核与 1.0 本地门禁，2026-08-29；继承 v1.7 的 0.2/0.3 配置与批量导入。状态：**0.1.1–0.3 最终复核与修复已收口；1.0 本地门禁/调试包达到 `LOCAL_PACKAGE_READY`，正式签名 release 为 `BLOCKED_SIGNING`**。能力探测按 metadata/stream/tools/image 独立验证真实协议语义，密钥按 Provider/Header/不可变快照引用感知退休；业务 ViewModel 已按 `NavBackStackEntry` 隔离，首帧 NavHost graph 竞态已修复；知识 ZIP 使用应用私有 staging 文件、文件型中央目录验证和单 entry 展开，批次由持久 coordinator 恢复。严格依赖验证的全仓 `check`、API 31 instrumentation（31 项，30 pass、1 条受控 load 用例 skip）和 debug SBOM 已通过；release keystore、store password、alias、key password 均未由用户提供，因此不生成或冒用签名身份，也不把 debug 包称为正式 1.0。App 元数据仍为 `versionName=0.1.0`/`versionCode=1`，待后续共同安排正式 release 时再决定版本。F-001 曾稳定出现两次但未稳定复现，保持 `candidate_intermittent`，需对应 APK SHA 与完整 Logcat 才能定因。真实 Vision、Android 15 六小时 timeout、Android 16 Job 配额耗尽、500 文件批次实机、初始 ZIP staging 期间进程死亡及 ENOSPC 注入仍未执行，不能标完整 K06 或正式 release PASS。公告 issue #1 的生产部署与后检由本轮独立部署证据记录，不与 Android release 混为一项。
 
 开工入口：[agent.md](../agent.md) → [HANDOFF.md](../HANDOFF.md) → 本文。范围依据见 [REQUIREMENTS.md](REQUIREMENTS.md)。含图知识库、Python 隔离和公告分别详见专题，不能只实现本文概要。
 
@@ -284,6 +284,10 @@ M0.5 通过只表示设计基线可供实现，记为 `DOC_CHECK_PASS`；不代�
 | M7 | Agent/Knowledge/Skill导入导出、schema/迁移、崩溃恢复、MCP Adapter、Remote Skill Executor接口、多端端口稳定、许可/隐私/安全审阅 | M0—M6及M0.5证据齐备 | 全验收矩阵，含U01—U06、S11和A07；仍区分准备完成与实际发布 |
 
 M0 可以并行准备本地许可和构建，但没有远程仓库/Ruleset授权时记为 M0_REMOTE_PENDING，**不得宣称 M0完成**或绕过许可防线。发布与生产部署始终是独立授权，不隐含在 M2/M7。
+
+### 9.1 1.0 本地门禁状态（2026-08-29）
+
+本项目把本轮“进行 1.0”解释为 release gate 与可交付包准备，不擅自改应用商店版本、不发布正式 AAB。已落地全 SHA GitHub Actions pin、Gradle dependency locks、SHA-256 dependency verification metadata、CycloneDX 1.6 SBOM、clean-Git/AAB/SBOM/source hash provenance 校验、arm64-v8a-only release 与 debug/test 双 ABI。`check --dependency-verification=strict` 和 API 31 设备套件通过；`verifyReleaseSigning` 在缺少用户签名输入时确定性失败关闭。正式 `releaseGate` 只有在用户提供其 release keystore 四项输入并安排 release 后才能转为 PASS。证据见 [release-gate-1.0](evidence/2026-08-29/release-gate-1.0.md)。
 
 功能完整的MVP必须到M6（含Python Skills）通过后才可宣称，不得把纯问答或只有Native工具的M5当作完整MVP。M6的原生隔离风险可在M0完成后提前开展最小可行性实验，不改动M1—M5接口或减配安全要求；实验产物必须标明spike，验证通过后再纳入正式实现。
 

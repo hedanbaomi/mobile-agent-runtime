@@ -5,7 +5,7 @@
 
 Android 优先的 BYOK Agent Runtime：本地知识库、多模态资料处理、可配置 Prompt 与模型参数、受控 Skills 执行，以及独立远程公告。
 
-**当前状态：** debug 开发阶段已接通隔离 CPython、本地 ONNX/USearch、MCP/工具循环与独立公告 Worker。0.1.1 已落地 F-002–F-006 源码修复、真实 Git revision/dirty/schema/构建时间，以及 F-014/F-020 文案；F-001 仍需新 APK 绑定 Logcat。0.2/0.3/1.0 与正式 Android release 未开始。
+**当前状态：** 0.1.1、0.2、0.3 的最终复核与修复已收口；1.0 本地门禁已完成严格依赖校验、全仓 `check`、API 31 instrumentation 与 debug APK/SBOM 打包。正式 AAB 仍因未提供用户 release keystore 而按设计 `BLOCKED_SIGNING`，版本号暂不擅自改为 1.0.0，后续与用户共同安排 release。F-001（工具能力开关相关进程退出）曾稳定观察到两次但仍无法稳定复现，保持 `candidate_intermittent`，不能写成已修复。公告 issue #1 的 Android、Worker/Admin 修改已完成本地验证，生产更新在本轮最终部署步骤单独记录。
 
 源码：<https://github.com/hedanbaomi/mobile-agent-runtime>
 
@@ -33,8 +33,9 @@ Android 优先的 BYOK Agent Runtime：本地知识库、多模态资料处理�
 ```powershell
 .\gradlew.bat licenseGuard
 .\gradlew.bat licenseGuardReverse
-.\gradlew.bat :shared:provider-api:test :shared:agent-runtime:test :shared:knowledge-api:test :shared:skills-api:test :shared:announcements:test :shared:serialization:test :data:sqlite:test
+.\gradlew.bat check --dependency-verification=strict
 .\gradlew.bat :app-android:assembleDebug
+.\gradlew.bat :app-android:generateDebugSbom
 python -m reuse lint
 ```
 

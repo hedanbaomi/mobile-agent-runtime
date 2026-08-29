@@ -14,6 +14,7 @@ import android.os.ParcelFileDescriptor
 import android.os.Process
 import android.system.Os
 import android.system.OsConstants
+import java.io.File
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 import runtime.mobileagent.ipc.InvocationTicket
@@ -225,15 +226,32 @@ class IsolatedPythonService : Service() {
         return null
     }
 
-    private fun isReadOnly(descriptor: ParcelFileDescriptor): Boolean = runCatching {
-        val flags = Os.fcntlInt(descriptor.fileDescriptor, OsConstants.F_GETFL, 0)
-        (flags and OsConstants.O_ACCMODE) == OsConstants.O_RDONLY
-    }.getOrDefault(false)
+    private fun isReadOnly(descriptor: ParcelFileDescriptor): Boolean =
+        descriptorAccessMode(descriptor) == OsConstants.O_RDONLY
 
-    private fun isWriteOnly(descriptor: ParcelFileDescriptor): Boolean = runCatching {
-        val flags = Os.fcntlInt(descriptor.fileDescriptor, OsConstants.F_GETFL, 0)
-        (flags and OsConstants.O_ACCMODE) == OsConstants.O_WRONLY
-    }.getOrDefault(false)
+    private fun isWriteOnly(descriptor: ParcelFileDescriptor): Boolean =
+        descriptorAccessMode(descriptor) == OsConstants.O_WRONLY
+
+    /**
+     * Android only exposed Os.fcntlInt in API 30. On API 26-29, read the Linux fdinfo entry for
+     * this already-open descriptor; `flags` is an octal value and O_ACCMODE is stable across the
+     * supported kernels. Any unavailable or malformed entry fails closed.
+     */
+    private fun descriptorAccessMode(descriptor: ParcelFileDescriptor): Int? = runCatching {
+        val flags = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            Os.fcntlInt(descriptor.fileDescriptor, OsConstants.F_GETFL, 0)
+        } else {
+            File("/proc/self/fdinfo/${descriptor.fd}").useLines { lines ->
+                lines.firstOrNull { it.startsWith("flags:") }
+                    ?.substringAfter(':')
+                    ?.trim()
+                    ?.toLongOrNull(radix = 8)
+                    ?.toInt()
+                    ?: error("descriptor flags unavailable")
+            }
+        }
+        flags and OsConstants.O_ACCMODE
+    }.getOrNull()
 
     private fun closeMessage(message: PythonStartMessage) {
         listOf(

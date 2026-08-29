@@ -7,6 +7,10 @@ import android.app.Application
 import io.ktor.client.HttpClient
 import io.ktor.client.engine.okhttp.OkHttp
 import io.ktor.client.plugins.HttpTimeout
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import runtime.mobileagent.announcements.ClientContext
 import runtime.mobileagent.data.AnnouncementRepository
 import runtime.mobileagent.data.KnowledgeRepository
 import runtime.mobileagent.data.Migrations
@@ -34,6 +38,7 @@ import runtime.mobileagent.knowledge.TextEmbedder
 import runtime.mobileagent.knowledge.ImportStage
 import runtime.mobileagent.storage.AndroidPdfRendererAdapter
 import runtime.mobileagent.vector.UsearchVectorIndexFactory
+import java.util.Locale
 
 class MobileAgentApp : Application() {
     lateinit var database: AndroidContextSqlite
@@ -48,10 +53,30 @@ class MobileAgentApp : Application() {
         val isolated = if (android.os.Build.VERSION.SDK_INT >= 28) android.os.Process.isIsolated()
             else !android.os.Process.isApplicationUid(android.os.Process.myUid())
         if (isolated) return
-        database = AndroidContextSqlite(this)
-        Migrations.apply(database)
-        container = AppContainer(this)
-        container.runs.markInFlightUnknown()
+        if (!deferHostInitializationForInstrumentation) ensureHostInitialized()
+    }
+
+    /**
+     * Initialize host-only state before the first Activity frame. Instrumentation that exercises
+     * isolated services can defer this work, while a UI smoke still runs the production shell.
+     */
+    internal fun ensureHostInitialized() {
+        if (::container.isInitialized) return
+        synchronized(this) {
+            if (::container.isInitialized) return
+            if (!::database.isInitialized) database = AndroidContextSqlite(this)
+            Migrations.apply(database)
+            container = AppContainer(this)
+            container.runs.markInFlightUnknown()
+        }
+    }
+
+    internal val isHostInitialized: Boolean
+        get() = ::container.isInitialized
+
+    companion object {
+        @Volatile
+        internal var deferHostInitializationForInstrumentation: Boolean = false
     }
 }
 
@@ -133,26 +158,44 @@ class AppContainer(app: MobileAgentApp) {
         }
     }
     val announcementFetcher = AnnouncementFetcher(announcementHttp)
+    private val announcementScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    val announcementRefreshCoordinator = AnnouncementRefreshCoordinator(
+        store = RepositoryAnnouncementRefreshStore(announcements) {
+            ClientContext(
+                platform = "android",
+                channel = "stable",
+                versionCode = BuildConfig.VERSION_CODE,
+                locale = Locale.getDefault().toLanguageTag(),
+                // This identity is for feed rollout only. The optional telemetry identity lives
+                // in AnnouncementRepository and is never used for the signed-feed audience hash.
+                installId = announcements.installId(),
+            )
+        },
+        fetcher = announcementFetcher,
+        scope = announcementScope,
+    )
 
     init {
         ImportWorkerRegistry.handler = ImportJobHandler { id, configured -> knowledge.resumeImport(id, visionConfigured = configured) }
         ImportWorkerRegistry.cancellationHandler = ImportCancellationHandler { id -> knowledge.cancelImport(id); Unit }
         ImportWorkerRegistry.batchHandler = ImportBatchHandler { batchId, configured ->
-            if (!knowledge.generationStillCurrent(batchId)) {
-                knowledge.failBatch(batchId, "Knowledge base generation changed; this batch cannot publish.")
-            } else {
-                knowledge.queuedJobIds(batchId).forEach { jobId ->
-                    ImportWorkScheduler.enqueue(app, jobId, configured)
-                }
-                knowledge.refreshBatchProgress(batchId)
-            }
+            knowledge.processBatch(batchId, configured)
         }
         ImportWorkerRegistry.consentHandler = ConsentTicketHandler { ticketId, configured ->
             knowledge.applyConsentTicket(ticketId, configured)
             Unit
         }
-        // Only copied local jobs are resumed automatically. Consent/unknown states never initiate a paid replay.
-        knowledge.listJobs().filter { it.first.stage == ImportStage.COPYING }.forEach { (job, _, _) ->
+        // Resume one coordinator per durable batch. Consent and UNKNOWN states
+        // are never enqueued here, and processBatch revalidates every external
+        // operation before dispatch.
+        val recoverableBatches = knowledge.recoverableBatchIds().toSet()
+        recoverableBatches.forEach { batchId ->
+            ImportWorkScheduler.enqueueBatch(app, batchId, profiles.visionConfigured())
+        }
+        // Legacy pre-batch copied jobs remain individually resumable.
+        knowledge.listJobs().filter {
+            it.first.stage == ImportStage.COPYING && knowledge.jobBatchId(it.first.id) == null
+        }.forEach { (job, _, _) ->
             ImportWorkScheduler.enqueue(app, job.id, profiles.visionConfigured())
         }
     }

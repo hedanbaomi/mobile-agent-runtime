@@ -5,6 +5,7 @@ package runtime.mobileagent
 import android.app.Application
 import androidx.compose.runtime.mutableStateOf
 import androidx.lifecycle.AndroidViewModel
+import androidx.lifecycle.SavedStateHandle
 import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.flowOn
@@ -32,7 +33,10 @@ import java.time.LocalDate
 import java.util.Base64
 
 /** UI state projects durable conversations, immutable bindings, and checkpointed partial answers. */
-class ChatViewModel(application: Application) : AndroidViewModel(application) {
+class ChatViewModel(
+    application: Application,
+    private val savedStateHandle: SavedStateHandle,
+) : AndroidViewModel(application) {
     private val container get() = (getApplication<Application>() as MobileAgentApp).container
     val state = mutableStateOf(ChatUiState())
     val locator = mutableStateOf<EvidenceLocator?>(null)
@@ -50,8 +54,12 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             val conversations = container.conversations.list()
             val agents = container.agents.list()
             val selected = state.value.selectedSessionId?.takeIf { id -> conversations.any { it.id == id } }
+                ?: savedStateHandle.get<String>(SELECTED_SESSION_KEY)?.takeIf { id -> conversations.any { it.id == id } }
                 ?: container.uiPreferences.getString("selected-conversation", null)?.takeIf { id -> conversations.any { it.id == id } }
-            val agentId = state.value.selectedAgentId ?: container.uiPreferences.getString("selected-agent", null) ?: agents.firstOrNull()?.id
+            val agentId = state.value.selectedAgentId
+                ?: savedStateHandle.get<String>(SELECTED_AGENT_KEY)
+                ?: container.uiPreferences.getString("selected-agent", null)
+                ?: agents.firstOrNull()?.id
             val messages = selected?.let(container.conversations::messages).orEmpty()
             citations.clear()
             messages.forEach { restoreCitations(it.metadataJson) }
@@ -59,7 +67,8 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                 sessions = conversations.map { c -> ChatSessionUi(c.id, c.title, timeLabel = c.updatedAt.take(16),
                     agentName = "配置快照 " + c.snapshotId.take(8)) }, selectedSessionId = selected,
                 agents = agents.map { ChatAgentOptionUi(it.id, it.name) }, selectedAgentId = agentId,
-                messages = messages.map(::messageUi), citations = citationUis(), error = null,
+                messages = messages.map(::messageUi), citations = citationUis(),
+                inspectorOpen = savedStateHandle.get<Boolean>(INSPECTOR_KEY) ?: false, error = null,
             )
             if (selected != null && container.runs.list(selected).any { it.state == RunStatus.UNKNOWN_OUTCOME }) {
                 state.value = state.value.copy(status = "存在结果未知的运行，可能已产生费用或外部操作。不会自动重放。")
@@ -70,6 +79,8 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     fun selectAgent(id: String) {
         if (state.value.streaming) return
         container.uiPreferences.edit().putString("selected-agent", id).remove("selected-conversation").apply()
+        savedStateHandle[SELECTED_AGENT_KEY] = id
+        savedStateHandle.remove<String>(SELECTED_SESSION_KEY)
         state.value = state.value.copy(selectedAgentId = id, selectedSessionId = null, messages = emptyList(), citations = emptyList(),
             requestPreview = null, status = "新会话将冻结所选 Agent 的当前配置。")
     }
@@ -90,12 +101,16 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     fun selectSession(id: String) {
         if (state.value.streaming) return
         container.uiPreferences.edit().putString("selected-conversation", id).apply()
+        savedStateHandle[SELECTED_SESSION_KEY] = id
         state.value = state.value.copy(selectedSessionId = id, requestPreview = null, promptLayers = emptyList(), status = "会话使用已保存的配置快照。")
         reload()
     }
     fun input(value: String) { state.value = state.value.copy(input = value) }
     fun degrade(value: Boolean) { if (!state.value.streaming) state.value = state.value.copy(textDegradation = value) }
-    fun inspector(open: Boolean) { state.value = state.value.copy(inspectorOpen = open) }
+    fun inspector(open: Boolean) {
+        savedStateHandle[INSPECTOR_KEY] = open
+        state.value = state.value.copy(inspectorOpen = open)
+    }
     fun closeCitation() { selectedImage = null; state.value = state.value.copy(selectedCitationId = null); locator.value = null }
     fun cancelUnknownRetry() { unknownRetry.value = null }
     fun acknowledgeUnknown() {
@@ -470,5 +485,10 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
     private fun fail(failure: Exception) { state.value = state.value.copy(error = SecretRedactor.redact(failure.message ?: "操作失败。")) }
-    private companion object { val TERMINAL = setOf(RunStatus.COMPLETED, RunStatus.FAILED, RunStatus.CANCELLED, RunStatus.BUDGET_EXHAUSTED, RunStatus.UNKNOWN_OUTCOME) }
+    private companion object {
+        const val SELECTED_SESSION_KEY = "chat.selectedSessionId"
+        const val SELECTED_AGENT_KEY = "chat.selectedAgentId"
+        const val INSPECTOR_KEY = "chat.inspectorOpen"
+        val TERMINAL = setOf(RunStatus.COMPLETED, RunStatus.FAILED, RunStatus.CANCELLED, RunStatus.BUDGET_EXHAUSTED, RunStatus.UNKNOWN_OUTCOME)
+    }
 }

@@ -9,6 +9,7 @@ import android.provider.OpenableColumns
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.lifecycle.AndroidViewModel
+import androidx.lifecycle.SavedStateHandle
 import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -22,7 +23,10 @@ import runtime.mobileagent.skills.CompatibilityClass
 import runtime.mobileagent.provider.SecretRedactor
 import java.io.ByteArrayOutputStream
 
-class SkillsViewModel(application: Application) : AndroidViewModel(application) {
+class SkillsViewModel(
+    application: Application,
+    private val savedStateHandle: SavedStateHandle,
+) : AndroidViewModel(application) {
     private val app = application as MobileAgentApp
     val rows = mutableStateListOf<SkillRow>()
     val status = mutableStateOf("Import a local zip or SKILL.md. Class E packages are refused. Isolated CPython runs imported Python skills.")
@@ -32,6 +36,11 @@ class SkillsViewModel(application: Application) : AndroidViewModel(application) 
 
     init {
         reload()
+        state.value = state.value.copy(
+            query = savedStateHandle.get<String>(QUERY_KEY).orEmpty(),
+            filter = savedStateHandle.get<String>(FILTER_KEY) ?: "all",
+        )
+        savedStateHandle.get<String>(SELECTED_INSTALL_ID_KEY)?.let(::openDetail)
     }
 
     fun reload() {
@@ -141,24 +150,38 @@ class SkillsViewModel(application: Application) : AndroidViewModel(application) 
                         files = inspection.files.map { SkillSourceFileUi(it, kind = "纯文本预览，不执行") },
                     )
                 }
+                savedStateHandle[SELECTED_INSTALL_ID_KEY] = installId
                 state.value = state.value.copy(selectedInstallId = installId, detail = detail, error = null)
             } catch (error: Exception) { message(error.message ?: "读取 Skill 失败。") }
         }
     }
 
-    fun closeDetail() { state.value = state.value.copy(selectedInstallId = null, detail = null) }
-    fun query(value: String) { state.value = state.value.copy(query = value) }
-    fun filter(value: String) { state.value = state.value.copy(filter = value) }
+    fun closeDetail() {
+        savedStateHandle.remove<String>(SELECTED_INSTALL_ID_KEY)
+        state.value = state.value.copy(selectedInstallId = null, detail = null)
+    }
+    fun query(value: String) {
+        savedStateHandle[QUERY_KEY] = value
+        state.value = state.value.copy(query = value)
+    }
+    fun filter(value: String) {
+        savedStateHandle[FILTER_KEY] = value
+        state.value = state.value.copy(filter = value)
+    }
 
     fun openSource(installId: String, path: String) {
         viewModelScope.launch {
             try {
                 val content = withContext(Dispatchers.IO) { app.container.skills.sourceText(installId, path) }
+                savedStateHandle[SOURCE_PATH_KEY] = path
                 state.value = state.value.copy(sourcePath = path, sourceText = content)
             } catch (error: Exception) { message(error.message ?: "无法预览文件。") }
         }
     }
-    fun closeSource() { state.value = state.value.copy(sourcePath = null, sourceText = null) }
+    fun closeSource() {
+        savedStateHandle.remove<String>(SOURCE_PATH_KEY)
+        state.value = state.value.copy(sourcePath = null, sourceText = null)
+    }
 
     fun beginGrant(installId: String, capability: String) { permissionRequest.value = installId to capability }
     fun cancelGrant() { permissionRequest.value = null }
@@ -228,5 +251,12 @@ class SkillsViewModel(application: Application) : AndroidViewModel(application) 
             }
             return out.toByteArray()
         }
+    }
+
+    private companion object {
+        const val SELECTED_INSTALL_ID_KEY = "skills.selectedInstallId"
+        const val QUERY_KEY = "skills.query"
+        const val FILTER_KEY = "skills.filter"
+        const val SOURCE_PATH_KEY = "skills.sourcePath"
     }
 }

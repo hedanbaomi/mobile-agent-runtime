@@ -150,7 +150,7 @@ fun ProvidersScreen(state: ProvidersUiState, actions: ProvidersActions = Provide
         AlertDialog(
             onDismissRequest = { probeRequested = false },
             title = { Text(if (zh) "运行服务商探测？" else "Run provider probe?") },
-            text = { Text(if (zh) "能力探测可能产生服务商费用，并会向已配置端点发送请求。" else "Capability tests may incur provider charges and send a request to the configured endpoint.") },
+            text = { Text(if (zh) "能力探测会向已配置端点发送 metadata 请求，并可能分别发送最多 3 个最小 Chat 请求来验证流式、工具与图片能力；这些请求可能分别产生服务商费用。" else "The probe sends a metadata request and may send up to three separate minimal chat requests to verify streaming, tools, and images. Each request may incur provider charges.") },
             confirmButton = { Button(onClick = { probeRequested = false; actions.onProbe() }) { Text(if (zh) "运行探测" else "Run probe") } },
             dismissButton = { TextButton(onClick = { probeRequested = false }) { Text(if (zh) "取消" else "Cancel") } },
         )

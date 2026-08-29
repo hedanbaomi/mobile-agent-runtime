@@ -6,9 +6,14 @@ package runtime.mobileagent.data
 import org.bouncycastle.crypto.params.Ed25519PrivateKeyParameters
 import org.bouncycastle.crypto.signers.Ed25519Signer
 import org.junit.jupiter.api.Assertions.assertEquals
+import org.junit.jupiter.api.Assertions.assertNotEquals
 import org.junit.jupiter.api.Assertions.assertNull
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.jsonArray
 import runtime.mobileagent.announcements.AnnouncementPresentation
 import runtime.mobileagent.announcements.AnnouncementSignature
 import runtime.mobileagent.announcements.ClientContext
@@ -79,6 +84,91 @@ class AnnouncementRepositoryTest {
         assertTrue(repo.needsFetch(bumped, Instant.parse("2026-08-28T12:01:00Z")))
         assertEquals(false, repo.needsFetch(client, Instant.parse("2026-08-28T12:01:00Z")))
     }
+
+    @Test
+    fun automaticThrottleUsesLastSuccessfulFetchNotLastAttempt() {
+        val db = JdbcSqlConnection()
+        Migrations.apply(db)
+        val repo = AnnouncementRepository(db)
+        repo.setPublicKeyHex(publicKey.joinToString("") { "%02x".format(it.toInt() and 0xFF) })
+        repo.setKeyId("test-only-1")
+        val fetchedAt = Instant.parse("2026-08-28T12:00:00Z")
+        assertNull(repo.applyEnvelope(sign(feedPayload(client, 10)), "etag-10", client, fetchedAt))
+
+        // A later failed attempt must not move the six-hour automatic window.
+        repo.markAttempt(client, fetchedAt.plusSeconds(5 * 60 * 60))
+        assertTrue(repo.needsFetch(client, fetchedAt.plusSeconds(6 * 60 * 60 + 1)))
+        assertEquals(fetchedAt.toString(), repo.lastFetchedAt(client))
+    }
+
+    @Test
+    fun telemetryIdentityIsSeparateAndResetWhenStatsAreDisabled() {
+        val db = JdbcSqlConnection()
+        Migrations.apply(db)
+        val repo = AnnouncementRepository(db)
+        val rolloutId = repo.installId()
+        repo.setStatsEnabled(true)
+        val firstTelemetryId = repo.telemetryIdentity()
+        assertTrue(!firstTelemetryId.isNullOrBlank())
+        assertNotEquals(rolloutId, firstTelemetryId)
+        repo.recordInstallSeen(client, Instant.parse("2026-08-28T12:00:00Z"))
+        assertTrue(repo.pendingTelemetryJson().orEmpty().contains("install_seen"))
+
+        repo.setStatsEnabled(false)
+        assertNull(repo.telemetryIdentity())
+        assertNull(repo.pendingTelemetryJson())
+        assertEquals(rolloutId, repo.installId())
+
+        repo.setStatsEnabled(true)
+        assertNotEquals(firstTelemetryId, repo.telemetryIdentity())
+        assertEquals(rolloutId, repo.installId())
+    }
+
+    @Test
+    fun installSeenIsOnceAndAppActiveDedupResetsOnVersionChange() {
+        val db = JdbcSqlConnection()
+        Migrations.apply(db)
+        val repo = AnnouncementRepository(db)
+        repo.setStatsEnabled(true)
+        val at = Instant.parse("2026-08-28T12:00:00Z")
+        repo.recordInstallSeen(client, at)
+        repo.recordInstallSeen(client, at.plusSeconds(1))
+        repo.recordAppActive(client, at)
+        repo.recordAppActive(client, at.plusSeconds(5 * 60 * 60))
+        repo.recordAppActive(client, at.plusSeconds(6 * 60 * 60 + 1))
+        repo.recordAppActive(client.copy(versionCode = 2), at.plusSeconds(6 * 60 * 60 + 2))
+
+        val events = Json.parseToJsonElement(repo.pendingTelemetryJson()!!).jsonObject.getValue("events").jsonArray
+        assertEquals(4, events.size)
+        assertEquals(listOf("install_seen", "app_active", "app_active", "app_active"), events.map {
+            it.jsonObject.getValue("type").jsonPrimitive.content
+        })
+        events.forEach { event ->
+            assertTrue(event.jsonObject.keys.all { it in setOf(
+                "eventId", "type", "installId", "platform", "channel", "versionCode", "locale",
+                "announcementId", "revision", "actionId", "occurredAt",
+            ) })
+            assertTrue(event.jsonObject.values.none { value -> value.toString().contains("Body text") })
+        }
+    }
+
+    @Test
+    fun failedFetchKeepsPreviouslyVerifiedCacheUntouched() {
+        val db = JdbcSqlConnection()
+        Migrations.apply(db)
+        val repo = AnnouncementRepository(db)
+        repo.setPublicKeyHex(publicKey.joinToString("") { "%02x".format(it.toInt() and 0xFF) })
+        repo.setKeyId("test-only-1")
+        val at = Instant.parse("2026-08-28T12:00:00Z")
+        assertNull(repo.applyEnvelope(sign(feedPayload(client, 20)), "etag-20", client, at))
+        val before = repo.records(client = client).map { it.item.id to it.item.revision }
+        repo.markAttempt(client, at.plusSeconds(60))
+        repo.recordFetchFailure(client, at.plusSeconds(60), "network")
+        assertEquals(before, repo.records(client = client).map { it.item.id to it.item.revision })
+    }
+
+    private fun feedPayload(client: ClientContext, version: Long): String =
+        """{"feedVersion":$version,"issuedAt":"2026-08-28T12:00:00Z","expiresAt":"2026-08-29T12:00:00Z","requestTarget":{"platform":"android","channel":"stable","versionCode":1,"locale":"en"},"audienceHash":"${FeedVerifier.audienceHash(client.installId)}","complete":true,"items":[],"withdrawn":[]}"""
 
     private fun sign(payload: String): String {
         val payloadBase64 = Base64.getEncoder().encodeToString(payload.toByteArray())

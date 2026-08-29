@@ -14,6 +14,9 @@ import runtime.mobileagent.knowledge.ApiEmbeddingBinding
 import runtime.mobileagent.knowledge.ApiQueryUnknownOutcomeException
 import runtime.mobileagent.knowledge.CitationMap
 import runtime.mobileagent.knowledge.EmbeddingUnknownOutcomeException
+import runtime.mobileagent.knowledge.ImportBatchKind
+import runtime.mobileagent.knowledge.ImportBatchState
+import runtime.mobileagent.knowledge.ImportItemState
 import runtime.mobileagent.knowledge.ImportStage
 import runtime.mobileagent.knowledge.ImportStateMachine
 import runtime.mobileagent.knowledge.MemoryBlobSink

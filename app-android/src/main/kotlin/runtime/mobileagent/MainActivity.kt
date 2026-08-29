@@ -13,8 +13,16 @@ import runtime.mobileagent.ui.MainApp
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        (application as? MobileAgentApp)?.ensureHostInitialized()
         configureSystemBars()
         setContent { MainApp() }
+    }
+
+    override fun onStart() {
+        super.onStart()
+        // Foreground refresh belongs to the Activity/process lifecycle, not to construction of
+        // the announcements screen ViewModel. The coordinator handles single-flight and backoff.
+        (application as? MobileAgentApp)?.container?.announcementRefreshCoordinator?.foreground()
     }
 
     private fun configureSystemBars() {

@@ -3,7 +3,7 @@
 
 # 公告系统实现契约
 
-状态：M2 本地实现已落地（Worker/Admin/验签缓存/客户端展示），对应 R13—R15、N01—N09。NAR01—NAR07 审查项已在本地修复：到期推进 scheduled、schema.sql 可在 SQLite 执行、发布前校验枚举/时间、失败写入不留脏草稿、内容稳定 ETag、缓存按 ClientContext 隔离、可关闭的普通 MODAL。**当前不创建、不绑定、不部署 Cloudflare 生产资源**；本地 PASS 不等于已部署。
+状态：M2 与 GitHub issue #1 的 Android、Worker/Admin 实现已落地，对应 R13—R15、N01—N09。客户端具备 cache-first 展示、前台单飞刷新、成功节流、失败退避、手动强制刷新、统计身份隔离与 fail-open；后台具备普通/重要/更新预设及 DAU/WAU/MAU、版本/渠道/平台聚合。NAR01—NAR07 审查项保持修复。API 31 release UI/公共请求 instrumentation 2/2 通过。生产部署是本轮独立步骤，必须以实际 Worker version、D1 备份、source hash 与公网后检记录为准；本地 PASS 不自动等于 `DEPLOYED`。
 
 ## 1. 职责与展示
 
@@ -107,7 +107,7 @@ locale标准化为BCP-47；例如zh-Hans-CN → zh-CN → zh-Hans → zh → def
 
 Markdown关闭原始HTML、脚本、远程嵌入，图片不带Provider认证头，重定向同样校验。公告内容、按钮、图片任何形式都不能调用Python/Skill、授予权限、执行迁移、自动重建索引或静默安装APK。诸如“重建索引”只能导航到知识库设置，由用户另外确认。
 
-更新页由独立Update用例负责。若该用例支持下载，必须校验SHA-256、包名、签名与版本，再交系统用户确认安装；未实现更新器时只显示版本/可信发布页，不让公告绕过。
+`app://update` 只导航到设置页并触发一次用户可见的签名公告强制刷新，筛选当前客户端有效的 `UPDATE` 项；它不会自动下载或安装 APK。未来若增加下载，必须校验SHA-256、包名、签名与版本，再交系统用户确认安装，不能让公告绕过系统确认。
 
 ## 7. 匿名统计与隐私
 
@@ -137,7 +137,7 @@ Markdown关闭原始HTML、脚本、远程嵌入，图片不带Provider认证头
 
 验签库固定为 BouncyCastle `bcprov-jdk18on`（API 26 不依赖系统 Ed25519）。签名输入为 `MAR-ANNOUNCEMENTS-V1\n` + `payloadBase64`。服务端 Node `node:crypto` Ed25519 与客户端验签使用同一测试种子黄金向量。
 
-本地 Worker 使用内存 store 实现与 `schema.sql` 相同的待发布修订冲突、审计和 feed 版本语义；未执行 `wrangler deploy`，未创建生产 D1。
+本地 Worker 使用内存 store 实现与 `schema.sql` 相同的待发布修订冲突、审计和 feed 版本语义。生产资源与本地 fixture 严格分离；生产历史和本轮 issue #1 更新的部署结果只认 [deployment runbook](../services/announcements/DEPLOYMENT.md) 与本轮 release/deployment 证据，不由本地命令推断。
 
 ```bash
 cd services/announcements
@@ -148,3 +148,11 @@ node src/local-server.mjs
 管理页：`http://127.0.0.1:8787/admin/announcements`。进程会打印 `MAR_ANNOUNCE_PUBLIC_KEY_HEX`（公钥，不是私钥）。Android 调试包在公告页填写该 URL 与公钥后手动刷新；debug 构建仅允许 `10.0.2.2`/`127.0.0.1`/`localhost` 明文，release 仍要求 HTTPS。统计开关默认关闭。
 
 协议测试：`node src/rollout.test.mjs` 与 `node src/worker.test.mjs`。
+
+## 10. GitHub issue #1 客户端与统计增量（2026-08-29）
+
+- `MainActivity.onStart` 触发前台刷新；`AnnouncementRefreshCoordinator` 共享同一 in-flight 请求，自动检查按最后成功时间节流，失败只写 attempt/backoff 且不覆盖已验签缓存。公告页手动刷新可越过客户端节流。
+- feed rollout install ID 与可选 telemetry identity 分离。统计默认关闭；开启后才产生 `install_seen` 与六小时去重的 `app_active`，关闭会清事件队列、telemetry identity 和去重标记，但保留公告缓存与灰度身份。
+- Worker/D1 统计只返回同意样本的 `installSeen`、`appActive`、DAU/WAU/MAU 和近 30 日版本/渠道/平台分布，不返回原始 install/event 标识或内容。事件白名单、幂等、retention、Access、CSRF 与 admin fail-closed 边界未放宽。
+- Admin 增加普通公告、重要公告、版本更新三个预设；更新预设固定 `OPEN_APP_ROUTE app://update`。高级字段仍保留完整模型且默认折叠。
+- 本地 `npm test`、`npm run check`、local D1 migration/smoke 及 Android API 31 release UI/公共请求 2/2 均通过。生产部署结果必须在完成后追加 Worker version、source hash、D1 备份与 HTTPS 协议后检，不能提前填写。

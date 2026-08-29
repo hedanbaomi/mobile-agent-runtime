@@ -84,9 +84,11 @@ class OpenAiCompatibleAdapter(
         )
 
     /**
-     * A live probe is deliberately a separate opt-in operation. It uses the
-     * provider metadata endpoint and never silently falls back to a billable
-     * chat completion request.
+     * A live probe is deliberately a separate opt-in operation. Metadata and
+     * each declared chat capability are checked independently. A successful
+     * metadata response is not evidence that the model can stream, call tools,
+     * or consume images; those claims require a minimally valid response for
+     * the corresponding request.
      */
     override suspend fun probe(
         profile: ModelProfile,
@@ -97,13 +99,16 @@ class OpenAiCompatibleAdapter(
         val profileReport = probe(profile)
         if (consent != ProbeConsent.GRANTED) {
             return profileReport.copy(
-                source = "profile-only; explicit probe consent required",
+                source = "profile-only;consent-required;metadata=not-run;stream=not-run;tools=not-run;image=not-run",
                 operationId = operationId,
             )
         }
         if (secret.isEmpty()) {
             return profileReport.copy(
-                source = "live-probe-secret-unavailable",
+                supportsStream = false,
+                supportsTools = false,
+                supportsImages = false,
+                source = "metadata=not-run;stream=not-run;tools=not-run;image=not-run;secret=unavailable",
                 status = CapabilityProbeStatus.FAILED,
                 operationId = operationId,
             )
@@ -118,22 +123,44 @@ class OpenAiCompatibleAdapter(
                 }
             }.execute { response ->
                 val status = response.status.value
-                if (status in 200..299) {
-                    val toolsSummary = probeDeclaredFeature(profile, resolved, tools = true)
-                    val imagesSummary = probeDeclaredFeature(profile, resolved, tools = false)
+                val metadata = if (status in 200..299) {
+                    val body = readBounded(response.bodyAsChannel())
+                    if (metadataMatches(body, profile.modelId)) {
+                        MetadataProbeResult("verified", verified = true)
+                    } else {
+                        MetadataProbeResult("invalid-response", verified = false)
+                    }
+                } else {
+                    MetadataProbeResult("http-$status", verified = false)
+                }
+                if (!metadata.verified) {
                     profileReport.copy(
-                        source = "live-model-metadata; tools=$toolsSummary; images=$imagesSummary",
-                        status = CapabilityProbeStatus.SUCCEEDED,
-                        charged = toolsSummary.startsWith("http-") || imagesSummary.startsWith("http-"),
+                        supportsStream = false,
+                        supportsTools = false,
+                        supportsImages = false,
+                        source = "metadata=${metadata.summary};stream=not-run;tools=not-run;image=not-run",
+                        status = CapabilityProbeStatus.FAILED,
+                        charged = metadata.charged,
                         operationId = operationId,
                     )
                 } else {
+                    val stream = probeDeclaredFeature(profile, resolved, ProbeFeature.STREAM)
+                    val tools = probeDeclaredFeature(profile, resolved, ProbeFeature.TOOLS)
+                    val image = probeDeclaredFeature(profile, resolved, ProbeFeature.IMAGE)
+                    val featureResults = listOf(stream, tools, image)
                     profileReport.copy(
-                        source = "live-probe-http-$status",
-                        status = CapabilityProbeStatus.FAILED,
-                        // Treat a live request as potentially billable unless the
-                        // provider contract explicitly says otherwise.
-                        charged = true,
+                        supportsStream = stream.supported,
+                        supportsTools = tools.supported,
+                        supportsImages = image.supported,
+                        source = "metadata=${metadata.summary};stream=${stream.summary};tools=${tools.summary};image=${image.summary}",
+                        status = if (featureResults.all { it.summary == "verified" || it.summary == "not-declared" }) {
+                            CapabilityProbeStatus.SUCCEEDED
+                        } else {
+                            CapabilityProbeStatus.FAILED
+                        },
+                        // A chat capability probe is potentially billable even
+                        // when the provider later rejects or truncates it.
+                        charged = metadata.charged || featureResults.any { it.charged },
                         operationId = operationId,
                     )
                 }
@@ -142,9 +169,12 @@ class OpenAiCompatibleAdapter(
             throw e
         } catch (_: Exception) {
             profileReport.copy(
-                source = "live-probe-network-failed",
+                supportsStream = false,
+                supportsTools = false,
+                supportsImages = false,
+                source = "metadata=unknown-outcome;stream=not-run;tools=not-run;image=not-run",
                 status = CapabilityProbeStatus.FAILED,
-                charged = true,
+                charged = false,
                 operationId = operationId,
             )
         } finally {
@@ -543,29 +573,27 @@ class OpenAiCompatibleAdapter(
     private suspend fun probeDeclaredFeature(
         profile: ModelProfile,
         headers: ResolvedHeaders,
-        tools: Boolean,
-    ): String {
+        feature: ProbeFeature,
+    ): FeatureProbeResult {
         val endpoint = profile.withEndpoint().endpoint
         val chat = ModelOperation.CHAT in endpoint.operations || profile.role.name == "CHAT" || profile.role.name == "VISION"
-        val declared = if (tools) {
-            ModelFeature.TOOL_CALLING in endpoint.features || "tools" in profile.capabilities
-        } else {
-            InputModality.IMAGE in endpoint.inputModalities || "image" in profile.capabilities || profile.role.name == "VISION"
+        val declared = when (feature) {
+            ProbeFeature.STREAM -> ModelFeature.STREAMING in endpoint.features || "stream" in profile.capabilities
+            ProbeFeature.TOOLS -> ModelFeature.TOOL_CALLING in endpoint.features || "tools" in profile.capabilities
+            ProbeFeature.IMAGE -> InputModality.IMAGE in endpoint.inputModalities || "image" in profile.capabilities || profile.role.name == "VISION"
         }
-        if (!declared || !chat) return "not-declared"
+        if (!declared || !chat) return FeatureProbeResult("not-declared", supported = false, charged = false)
         val body = buildJsonObject {
             put("model", JsonPrimitive(profile.modelId))
             put("max_tokens", JsonPrimitive(1))
-            put("stream", JsonPrimitive(false))
+            put("stream", JsonPrimitive(feature == ProbeFeature.STREAM))
             put(
                 "messages",
                 buildJsonArray {
                     add(
                         buildJsonObject {
                             put("role", JsonPrimitive("user"))
-                            if (tools) {
-                                put("content", JsonPrimitive("Reply with ok."))
-                            } else {
+                            if (feature == ProbeFeature.IMAGE) {
                                 put(
                                     "content",
                                     buildJsonArray {
@@ -581,12 +609,14 @@ class OpenAiCompatibleAdapter(
                                         })
                                     },
                                 )
+                            } else {
+                                put("content", JsonPrimitive("Reply with ok."))
                             }
                         },
                     )
                 },
             )
-            if (tools) {
+            if (feature == ProbeFeature.TOOLS) {
                 put(
                     "tools",
                     buildJsonArray {
@@ -596,8 +626,8 @@ class OpenAiCompatibleAdapter(
                                 put(
                                     "function",
                                     buildJsonObject {
-                                        put("name", JsonPrimitive("mar_probe_noop"))
-                                        put("description", JsonPrimitive("No-op probe. Do not call this function."))
+                                        put("name", JsonPrimitive(PROBE_TOOL_NAME))
+                                        put("description", JsonPrimitive("Call this no-op probe exactly once."))
                                         put(
                                             "parameters",
                                             buildJsonObject {
@@ -611,6 +641,13 @@ class OpenAiCompatibleAdapter(
                         )
                     },
                 )
+                put(
+                    "tool_choice",
+                    buildJsonObject {
+                        put("type", JsonPrimitive("function"))
+                        put("function", buildJsonObject { put("name", JsonPrimitive(PROBE_TOOL_NAME)) })
+                    },
+                )
             }
         }
         return try {
@@ -621,12 +658,106 @@ class OpenAiCompatibleAdapter(
                 }
                 setBody(body.toString())
             }.execute { response ->
-                "http-${response.status.value}"
+                val status = response.status.value
+                if (status !in 200..299) {
+                    return@execute FeatureProbeResult("http-$status", supported = false, charged = true)
+                }
+                if (feature == ProbeFeature.STREAM) {
+                    val responseType = response.headers[HttpHeaders.ContentType].orEmpty().lowercase()
+                    if (!responseType.contains("text/event-stream")) {
+                        return@execute FeatureProbeResult("wrong-content-type", supported = false, charged = true)
+                    }
+                    val supported = parseStreamProbe(response.bodyAsChannel())
+                    FeatureProbeResult(if (supported) "verified" else "invalid-response", supported, charged = true)
+                } else {
+                    val supported = parseChatProbe(
+                        readBounded(response.bodyAsChannel()),
+                        requireToolCall = feature == ProbeFeature.TOOLS,
+                    )
+                    FeatureProbeResult(if (supported) "verified" else "invalid-response", supported, charged = true)
+                }
             }
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
         } catch (_: Exception) {
-            "network-failed"
+            // The request may have reached the provider before transport
+            // failure. Preserve UNKNOWN_OUTCOME/charged semantics instead of
+            // presenting this as a free, retry-safe failure.
+            FeatureProbeResult("unknown-outcome", supported = false, charged = true)
         }
     }
+
+    private fun metadataMatches(raw: String, expectedModelId: String): Boolean {
+        val id = runCatching {
+            Json.parseToJsonElement(raw).jsonObject["id"]?.jsonPrimitive?.contentOrNull
+        }.getOrNull() ?: return false
+        return id == expectedModelId
+    }
+
+    private fun parseChatProbe(raw: String, requireToolCall: Boolean): Boolean {
+        val root = runCatching { Json.parseToJsonElement(raw).jsonObject }.getOrNull() ?: return false
+        if (root["error"] != null) return false
+        val message = runCatching {
+            root["choices"]?.jsonArray?.firstOrNull()?.jsonObject?.get("message")?.jsonObject
+        }.getOrNull() ?: return false
+        if (requireToolCall) {
+            return runCatching {
+                message["tool_calls"]?.jsonArray?.any { element ->
+                    val call = element.jsonObject
+                    val function = call["function"]?.jsonObject ?: return@any false
+                    val name = function["name"]?.jsonPrimitive?.contentOrNull
+                    val arguments = function["arguments"]?.jsonPrimitive?.contentOrNull
+                    name == PROBE_TOOL_NAME && arguments != null &&
+                        runCatching { Json.parseToJsonElement(arguments).jsonObject }.isSuccess
+                } == true
+            }.getOrDefault(false)
+        }
+        return when (val content = message["content"]) {
+            is JsonPrimitive -> content.contentOrNull?.isNotBlank() == true
+            else -> runCatching {
+                content?.jsonArray?.any { part ->
+                    part.jsonObject["text"]?.jsonPrimitive?.contentOrNull?.isNotBlank() == true
+                } == true
+            }.getOrDefault(false)
+        }
+    }
+
+    private suspend fun parseStreamProbe(channel: ByteReadChannel): Boolean {
+        val toolBuf = linkedMapOf<String, Pair<String, StringBuilder>>()
+        var sawPayload = false
+        var sawCompleted = false
+        var sawFailed = false
+        var receivedBytes = 0L
+        while (!channel.isClosedForRead) {
+            val line = channel.readUTF8Line(1_048_576) ?: break
+            receivedBytes += line.toByteArray(Charsets.UTF_8).size + 1L
+            require(receivedBytes <= MAX_PROBE_RESPONSE_BYTES) { "Provider probe response exceeds limit" }
+            OpenAiSse.eventsFromLine(line, toolBuf).forEach { event ->
+                when (event) {
+                    is ModelEvent.TextDelta, is ModelEvent.ToolCallDelta, is ModelEvent.Usage -> sawPayload = true
+                    ModelEvent.Completed -> sawCompleted = true
+                    is ModelEvent.Failed -> sawFailed = true
+                    else -> Unit
+                }
+            }
+            if (sawCompleted || sawFailed) break
+        }
+        return sawPayload && sawCompleted && !sawFailed
+    }
+
+    private enum class ProbeFeature { STREAM, TOOLS, IMAGE }
+
+    private data class MetadataProbeResult(
+        val summary: String,
+        val verified: Boolean,
+        val charged: Boolean = false,
+    )
+
+    private data class FeatureProbeResult(
+        val summary: String,
+        val supported: Boolean,
+        val charged: Boolean,
+    )
 
     private suspend fun resolveHeaders(
         token: String,
@@ -747,6 +878,8 @@ class OpenAiCompatibleAdapter(
     private class InvalidHeaderException(message: String) : RuntimeException(message)
 
     companion object {
+        private const val PROBE_TOOL_NAME = "mar_probe_noop"
+        private const val MAX_PROBE_RESPONSE_BYTES = 1_048_576L
         private const val MAX_EMBEDDING_MODEL_CHARS = 256
         private const val MAX_EMBEDDING_INPUTS = 2_048
         private const val MAX_EMBEDDING_INPUT_CHARS = 16_384

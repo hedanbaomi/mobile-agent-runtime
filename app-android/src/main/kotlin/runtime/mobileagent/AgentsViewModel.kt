@@ -6,6 +6,7 @@ package runtime.mobileagent
 import android.app.Application
 import androidx.compose.runtime.mutableStateOf
 import androidx.lifecycle.AndroidViewModel
+import androidx.lifecycle.SavedStateHandle
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.jsonObject
@@ -17,17 +18,25 @@ import runtime.mobileagent.domain.isRerankEndpoint
 import runtime.mobileagent.feature.agents.*
 import runtime.mobileagent.provider.SecretRedactor
 
-class AgentsViewModel(application: Application) : AndroidViewModel(application) {
+class AgentsViewModel(
+    application: Application,
+    private val savedStateHandle: SavedStateHandle,
+) : AndroidViewModel(application) {
     private val app = application as MobileAgentApp
     val state = mutableStateOf(AgentsUiState())
     private var editorBaseline: AgentEditorUi? = null
 
-    init { reload() }
+    init {
+        reload()
+        savedStateHandle.get<String>(EDITOR_ID_KEY)?.let(::openEditor)
+    }
 
     fun reload() {
         val profiles = app.container.profiles
         val agents = app.container.agents.list()
-        val selected = state.value.selectedAgentId ?: app.container.uiPreferences.getString("selected-agent", null)
+        val selected = state.value.selectedAgentId
+            ?: savedStateHandle.get<String>(SELECTED_AGENT_KEY)
+            ?: app.container.uiPreferences.getString("selected-agent", null)
         val selectedId = selected?.takeIf { id -> agents.any { it.id == id } }
         state.value = state.value.copy(
             agents = agents.map { agent ->
@@ -45,12 +54,15 @@ class AgentsViewModel(application: Application) : AndroidViewModel(application) 
         if (state.value.editorDirty) return
         if (app.container.agents.get(id) == null) return
         app.container.uiPreferences.edit().putString("selected-agent", id).apply()
+        savedStateHandle[SELECTED_AGENT_KEY] = id
+        savedStateHandle.remove<String>(EDITOR_ID_KEY)
         state.value = state.value.copy(selectedAgentId = id, summary = editorFrom(id), editor = null, editorDirty = false, editorOpen = false)
     }
 
     fun openEditor(id: String?) {
         val editor = editorFrom(id)
         editorBaseline = editor
+        savedStateHandle[EDITOR_ID_KEY] = id
         state.value = state.value.copy(error = null, editor = editor, editorDirty = false, editorOpen = true)
     }
 
@@ -59,6 +71,7 @@ class AgentsViewModel(application: Application) : AndroidViewModel(application) 
     }
     fun closeEditor() {
         editorBaseline = null
+        savedStateHandle.remove<String>(EDITOR_ID_KEY)
         state.value = state.value.copy(editor = null, error = null, editorDirty = false, editorOpen = false)
     }
     fun query(value: String) { state.value = state.value.copy(query = value) }
@@ -90,6 +103,8 @@ class AgentsViewModel(application: Application) : AndroidViewModel(application) 
             )
             val saved = app.container.agents.saveWithPrompt(profile, editor.prompt)
             app.container.uiPreferences.edit().putString("selected-agent", saved.id).apply()
+            savedStateHandle[SELECTED_AGENT_KEY] = saved.id
+            savedStateHandle.remove<String>(EDITOR_ID_KEY)
             editorBaseline = null
             state.value = state.value.copy(
                 selectedAgentId = saved.id,
@@ -157,5 +172,10 @@ class AgentsViewModel(application: Application) : AndroidViewModel(application) 
             resourceBindings = knowledge + skills, retrievalMode = agent?.retrievalMode ?: "explicit",
             snapshotLabel = "修改配置只影响新会话；现有会话保留不可变快照，撤权立即生效。", revision = agent?.revision ?: 0,
         )
+    }
+
+    private companion object {
+        const val SELECTED_AGENT_KEY = "agents.selectedAgentId"
+        const val EDITOR_ID_KEY = "agents.editorId"
     }
 }

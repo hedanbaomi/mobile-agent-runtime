@@ -12,3 +12,16 @@
 
 存在 `.codegraph/` 时，理解或定位源码必须先用 `codegraph explore "问题或符号"` 或 CodeGraph MCP（指定本仓库 projectPath）。确无结果、索引为空或工具失败时记录原因，再使用 `rg` 和直接读取；不得把空索引当作源码不存在的唯一证据。
 
+## Agent skills
+
+### Issue tracker
+
+需求和问题记录在本仓库的 GitHub Issues；操作约定见 [docs/agents/issue-tracker.md](docs/agents/issue-tracker.md)。
+
+### Triage labels
+
+采用工程技能默认的五类 triage 标签；映射见 [docs/agents/triage-labels.md](docs/agents/triage-labels.md)。
+
+### Domain docs
+
+本仓库采用 single-context 领域文档布局；消费规则见 [docs/agents/domain.md](docs/agents/domain.md)。

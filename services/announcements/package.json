@@ -3,7 +3,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "test": "node src/rollout.test.mjs && node src/worker.test.mjs && node src/access.test.mjs",
+    "test": "node src/rollout.test.mjs && node src/worker.test.mjs && node src/access.test.mjs && node src/stats.test.mjs",
     "check": "node --check src/app.mjs && node --check src/access.mjs && node --check src/d1-store.mjs && node --check src/sign.mjs && node --check src/store.mjs && node --check src/worker.mjs",
     "dev": "wrangler dev --local --config wrangler.local.toml",
     "d1:migrate:local": "wrangler d1 migrations apply mobile-agent-runtime-announcements-local --local --config wrangler.local.toml",

@@ -31,6 +31,12 @@ SPDX-FileCopyrightText = "2026 mobileAgentRuntime contributors"
 SPDX-License-Identifier = "AGPL-3.0-only"
 
 [[annotations]]
+path = ["**/gradle.lockfile", "settings-gradle.lockfile"]
+precedence = "aggregate"
+SPDX-FileCopyrightText = "2026 mobileAgentRuntime contributors"
+SPDX-License-Identifier = "AGPL-3.0-only"
+
+[[annotations]]
 path = ["admin/announcements/source/*/manifest.json", "admin/announcements/source/*/mobile-agent-runtime-announcements-source.zip"]
 precedence = "aggregate"
 SPDX-FileCopyrightText = "2026 mobileAgentRuntime contributors"

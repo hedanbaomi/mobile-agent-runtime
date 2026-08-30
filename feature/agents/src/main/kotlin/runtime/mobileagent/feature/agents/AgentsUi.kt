@@ -73,6 +73,10 @@ data class AgentResourceBindingUi(
     val type: String,
     val enabled: Boolean,
     val permissionSummary: String = "",
+    /** Whether this resource can be added or removed from the Agent in the editor. */
+    val selectable: Boolean = true,
+    /** Whether an enabled binding is currently valid for persistence. */
+    val available: Boolean = true,
 )
 
 data class AgentEditorUi(
@@ -282,7 +286,11 @@ private fun AgentEditorDialog(editor: AgentEditorUi, actions: AgentsActions, zh:
                 if (editor.resourceBindings.isEmpty()) Text(if (zh) "暂无可绑定的知识库或技能。" else "No knowledge bases or skills are available to bind.", style = MaterialTheme.typography.bodySmall)
                 editor.resourceBindings.forEach { binding ->
                     Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                        Checkbox(binding.enabled, { actions.onToggleResource(binding.id, it) })
+                        Checkbox(
+                            checked = binding.enabled,
+                            onCheckedChange = { actions.onToggleResource(binding.id, it) },
+                            enabled = binding.selectable,
+                        )
                         Column(Modifier.weight(1f)) {
                             Text(binding.name)
                             Text("${binding.type} · ${binding.permissionSummary}", style = MaterialTheme.typography.labelSmall)

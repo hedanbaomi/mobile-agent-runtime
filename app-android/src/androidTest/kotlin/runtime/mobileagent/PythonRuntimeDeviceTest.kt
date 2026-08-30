@@ -23,11 +23,14 @@ import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.int
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
+import kotlinx.serialization.json.putJsonArray
+import kotlinx.serialization.json.putJsonObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
@@ -93,6 +96,47 @@ class PythonRuntimeDeviceTest {
         assertTrue("Each execution must receive a fresh process", first.isolatedPid != second.isolatedPid)
         awaitProcessGone(checkNotNull(first.isolatedPid))
         awaitProcessGone(checkNotNull(second.isolatedPid))
+    }
+
+    @Test(timeout = 45_000)
+    fun legacyClaudeCliProgramRunsAgainstOnlyModelProvidedVirtualFiles() = runBlocking {
+        val source = """
+            import re
+            import sys
+            from pathlib import Path
+
+            def main():
+                files = list(Path(sys.argv[1]).rglob("*.md"))
+                texts = {item: item.read_text(encoding="utf-8") for item in files}
+                stems = sorted(Path(item).stem for item in files)
+                count = sum(len(re.findall(r"[一-鿿]", text)) for text in texts.values())
+                print(f"{files[0].parent.name}|{stems[0]}|{count}")
+
+            if __name__ == "__main__":
+                main()
+        """.trimIndent()
+        val fixture = legacySkillZip("sample/scripts/check.py", source)
+        val input = buildJsonObject {
+            put("program", "sample/scripts/check.py")
+            put("__mobileagent_verified_program_source", source)
+            putJsonArray("arguments") { add(JsonPrimitive("docs")) }
+            putJsonArray("files") {
+                add(buildJsonObject {
+                    put("path", "docs/example.md")
+                    put("text", "测试文字")
+                })
+            }
+        }.toString()
+
+        val result = execute(fixture, input, entrypoint = "mobileagent_legacy_skill:run")
+        val value = succeeded(result)
+
+        assertEquals("sample/scripts/check.py", value.getValue("program").jsonPrimitive.content)
+        assertEquals("docs|example|4\n", value.getValue("stdout").jsonPrimitive.content)
+        assertNotNull("The compatibility program must report the Binder-observed isolated UID", result.isolatedUid)
+        assertTrue("The compatibility program must not share the host UID", Process.myUid() != result.isolatedUid)
+        assertTrue("The compatibility program must not run in the host process", Process.myPid() != result.isolatedPid)
+        awaitProcessGone(checkNotNull(result.isolatedPid))
     }
 
     @Test(timeout = 30_000)
@@ -450,14 +494,18 @@ class PythonRuntimeDeviceTest {
         fixture: Fixture,
         input: String = "{}",
         limits: PythonIpcProtocol.PythonLimits = PythonIpcProtocol.PythonLimits(),
+        entrypoint: String = "device_fixture:run",
     ): PythonExecutionResult {
         val ticket = ticket(fixture)
-        return withTimeout(20_000) { IsolatedPythonRuntime(context, TicketGateBroker(ticket)).execute(request(fixture, ticket, input, limits)) }
+        return withTimeout(20_000) {
+            IsolatedPythonRuntime(context, TicketGateBroker(ticket)).execute(request(fixture, ticket, input, limits, entrypoint))
+        }
     }
 
     private fun request(fixture: Fixture, ticket: InvocationTicket, input: String = "{}",
-                        limits: PythonIpcProtocol.PythonLimits = PythonIpcProtocol.PythonLimits()): PythonExecutionRequest =
-        PythonExecutionRequest(ticket, "device_fixture:run", input, PythonPackageSource.Bytes(fixture.bytes), limits)
+                        limits: PythonIpcProtocol.PythonLimits = PythonIpcProtocol.PythonLimits(),
+                        entrypoint: String = "device_fixture:run"): PythonExecutionRequest =
+        PythonExecutionRequest(ticket, entrypoint, input, PythonPackageSource.Bytes(fixture.bytes), limits)
 
     private fun ticket(fixture: Fixture): InvocationTicket = InvocationTicket(
         UUID.randomUUID().toString(), UUID.randomUUID().toString(), fixture.hash, 1, randomToken(),
@@ -492,6 +540,33 @@ class PythonRuntimeDeviceTest {
         assertTrue("Synthetic fixture must pass the actual package inspector", inspection.installable)
         assertEquals(CompatibilityClass.B, inspection.classification)
         assertEquals("device_fixture:run", inspection.manifest?.entrypoint)
+        return Fixture(bytes, hash)
+    }
+
+    private fun legacySkillZip(program: String, source: String): Fixture {
+        val entries = linkedMapOf(
+            "sample/SKILL.md" to "---\nname: sample-legacy\n---\n# Sample legacy\n",
+            program to source,
+        )
+        val bytes = ByteArrayOutputStream().also { output ->
+            ZipOutputStream(output).use { zip -> entries.forEach { (name, content) ->
+                val payload = content.toByteArray(Charsets.UTF_8)
+                val entry = ZipEntry(name).apply {
+                    method = ZipEntry.STORED
+                    size = payload.size.toLong()
+                    compressedSize = size
+                    crc = CRC32().apply { update(payload) }.value
+                    time = 0L
+                }
+                zip.putNextEntry(entry)
+                zip.write(payload)
+                zip.closeEntry()
+            } }
+        }.toByteArray()
+        val hash = MessageDigest.getInstance("SHA-256").digest(bytes).joinToString("") { "%02x".format(it.toInt() and 0xff) }
+        val inspection = SkillArchive.inspect(bytes, hash)
+        assertEquals(CompatibilityClass.B, inspection.classification)
+        assertEquals("mobileagent_legacy_skill:run", inspection.manifest?.entrypoint)
         return Fixture(bytes, hash)
     }
 

@@ -3,7 +3,7 @@
 
 # 公告系统实现契约
 
-状态：M2 与 GitHub issue #1 的 Android、Worker/Admin 实现已落地，对应 R13—R15、N01—N09。客户端具备 cache-first 展示、前台单飞刷新、成功节流、失败退避、手动强制刷新、统计身份隔离与 fail-open；后台具备普通/重要/更新预设及 DAU/WAU/MAU、版本/渠道/平台聚合。NAR01—NAR07 审查项保持修复。API 31 release UI/公共请求 instrumentation 2/2 通过。生产 Worker `70b42812-5fd9-45e7-902f-ae35d56151a2` 已部署，自定义域名签名/304/400/源码归档/Access 匿名拒绝后检通过；D1 备份与完整证据见本轮 production evidence。
+状态：M2 与 GitHub issue #1 的 Android、Worker/Admin 实现已落地，对应 R13—R15、N01—N09。客户端具备 cache-first 展示、前台单飞刷新、成功节流、失败退避、手动强制刷新、统计身份隔离与 fail-open；后台具备中文字段、按钮、状态/值、普通/重要/更新预设及 DAU/WAU/MAU、版本/渠道/平台聚合。NAR01—NAR07 审查项保持修复。API 31 release UI/公共请求 instrumentation 2/2 通过。生产 Worker `9480180b-d6d2-44e9-9a89-a4fe88b9bcbd` 已承载 100% 流量，source hash `5ca5795074e6e95842b9a93c8ba67a1af8eac100a1b9589d69530fd345d1cee9`；自定义域名签名/304/400/源码归档/Access 匿名拒绝和登录态后台中文显示后检通过，feedVersion 仍为 0 且未改公告内容。D1 备份与完整证据见 [2026-08-30 部署证据](evidence/2026-08-30/admin-cn-diagnostics-debug-deploy.md)。
 
 ## 1. 职责与展示
 
@@ -126,6 +126,8 @@ Markdown关闭原始HTML、脚本、远程嵌入，图片不带Provider认证头
 ## 8. 管理端和部署门槛
 
 管理页`/admin/announcements`，提供草稿编辑/Markdown预览、类别/等级/展示、定向、时间、灰度、动作、修订、发布、撤回、归档、统计和审计。发布前预览Android小屏弹窗、横幅、详情、深浅色和超长文本。
+
+管理页面向运营人员的可见字段、按钮、状态、预设、预览和统计标签使用中文；API枚举与请求字段名保持协议原值，避免中文化改变服务端契约。生产是否已更新只以本轮部署版本和线上后检为准。
 
 管理API至少包括GET列表/详情、POST新建、PATCH草稿、POST revisions、POST schedule/publish/withdraw/archive；写入要求认证、期望revision和幂等requestId，冲突409。已发布正文只能新修订；服务端授权不能只靠隐藏入口。
 

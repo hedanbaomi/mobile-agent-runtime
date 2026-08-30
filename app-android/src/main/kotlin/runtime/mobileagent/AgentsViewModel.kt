@@ -78,7 +78,13 @@ class AgentsViewModel(
 
     fun toggleResource(id: String, enabled: Boolean) {
         state.value.editor?.let { editor ->
-            edit(editor.copy(resourceBindings = editor.resourceBindings.map { if (it.id == id) it.copy(enabled = enabled) else it }))
+            edit(editor.copy(resourceBindings = editor.resourceBindings.map {
+                if (it.id == id && it.selectable && (!enabled || it.available)) {
+                    // Once a stale disabled binding is removed, keep it unavailable so it
+                    // cannot be accidentally re-added without enabling the Skill first.
+                    it.copy(enabled = enabled, selectable = it.available || enabled)
+                } else it
+            }))
         }
     }
 
@@ -88,6 +94,9 @@ class AgentsViewModel(
             require(editor.name.isNotBlank()) { "请填写 Agent 名称。" }
             val model = editor.chatModelId ?: error("请选择 Chat 模型。")
             require(editor.retrievalMode in setOf("explicit", "automatic")) { "检索模式必须是 explicit 或 automatic。" }
+            require(editor.resourceBindings.none { it.type == "skill" && it.enabled && !it.available }) {
+                "存在已绑定但当前未启用的技能，请先在技能页启用后再保存。"
+            }
             val previous = editor.id?.let { app.container.agents.get(it) }
             val parameters = JsonObject(editor.parameters.filterValues { it.isNotBlank() }.mapValues { Json.parseToJsonElement(it.value) })
             val profile = AgentProfile(
@@ -154,8 +163,22 @@ class AgentsViewModel(
                 row.string("id") in agent?.knowledgeBaseIds.orEmpty(), "仅本 Agent 可检索已绑定的知识库")
         }
         val skills = app.container.skills.list().map { skill ->
-            AgentResourceBindingUi(skill.installId, skill.name, "skill", skill.installId in agent?.skillIds.orEmpty(),
-                if (skill.enabled) "执行仍受当前逐资源授权约束" else "未启用；绑定不会自动授予权限")
+            val bound = skill.installId in agent?.skillIds.orEmpty()
+            AgentResourceBindingUi(
+                id = skill.installId,
+                name = skill.name,
+                type = "skill",
+                enabled = bound,
+                // A disabled Skill cannot be newly selected, but an existing
+                // stale binding must remain removable so the editor is not trapped.
+                selectable = skill.enabled || bound,
+                available = skill.enabled,
+                permissionSummary = when {
+                    !skill.enabled && bound -> "已绑定但当前未启用；请先在技能页启用后再保存"
+                    !skill.enabled -> "未启用；请先在技能页启用后绑定"
+                    else -> "执行仍受当前逐资源授权约束"
+                },
+            )
         }
         val revisions = agent?.let { app.container.agents.listPromptRevisions(it.id) }.orEmpty()
         val prompt = agent?.let { app.container.agents.getPromptRevision(it.promptRevisionId)?.template }.orEmpty()

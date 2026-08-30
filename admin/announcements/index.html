@@ -1,12 +1,12 @@
 <!-- SPDX-FileCopyrightText: 2026 mobileAgentRuntime contributors -->
 <!-- SPDX-License-Identifier: AGPL-3.0-only -->
 <!doctype html>
-<html lang="en">
+<html lang="zh-CN">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="referrer" content="no-referrer">
-  <title>Announcements administration</title>
+  <title>公告管理后台</title>
   <style>
     :root { color-scheme: light dark; --bg:#f6f8fb; --fg:#172033; --card:#fff; --line:#ccd4e0; --accent:#1b5bd6; --danger:#b42318; --muted:#5a667a; }
     @media (prefers-color-scheme: dark) { :root { --bg:#121722; --fg:#edf2fb; --card:#1c2432; --line:#3a4659; --muted:#b8c2d4; } }
@@ -39,92 +39,92 @@
 </head>
 <body>
   <header>
-    <h1>Announcements administration</h1>
-    <p class="card notice" id="securityNotice">Production management uses the same origin and Cloudflare Access. The Worker verifies the Access assertion, issuer, audience and expiry; this page never accepts a signing private key or Provider credential.</p>
+    <h1>公告管理后台</h1>
+    <p class="card notice" id="securityNotice">生产管理使用同源访问和 Cloudflare Access。Worker 会校验 Access 断言、签发者、受众和有效期；本页面不会接受签名私钥或 Provider 凭据。</p>
   </header>
   <main>
     <section class="card notice warning" id="accessNotice" hidden>
-      <strong>Access is required before production writes are enabled.</strong>
-      <p>The API returned an unavailable or unauthorized response. Ask the owner to configure the Cloudflare Access application and audience. A local test token is accepted only on a loopback local server.</p>
+      <strong>启用生产写入前必须配置 Access。</strong>
+      <p>API 返回了不可用或未授权响应。请让负责人配置 Cloudflare Access 应用和受众。仅本地回环服务器接受本地测试令牌。</p>
     </section>
     <section class="card" id="localAuth" hidden>
-      <h2>Local test authentication</h2>
-      <label for="token">Admin token (local loopback only)</label>
+      <h2>本地测试认证</h2>
+      <label for="token">管理员令牌（仅限本地回环）</label>
       <input id="token" type="password" autocomplete="off">
-      <p class="status">Do not paste a production token here. Production uses the Access browser session cookie.</p>
+      <p class="status">请勿在此粘贴生产令牌。生产环境使用 Cloudflare Access 浏览器会话认证。</p>
     </section>
     <section class="card">
-      <h2>Draft editor</h2>
+      <h2>草稿编辑器</h2>
       <fieldset class="presets" aria-label="公告预设">
         <legend class="sr-only">公告预设</legend>
-        <button type="button" class="secondary" onclick="applyPreset('general')">普通公告 / General</button>
-        <button type="button" class="secondary" onclick="applyPreset('important')">重要公告 / Important</button>
-        <button type="button" class="secondary" onclick="applyPreset('update')">版本更新 / Version update</button>
+        <button type="button" class="secondary" onclick="applyPreset('general')">普通公告</button>
+        <button type="button" class="secondary" onclick="applyPreset('important')">重要公告</button>
+        <button type="button" class="secondary" onclick="applyPreset('update')">版本更新</button>
       </fieldset>
       <div class="grid">
         <div>
-          <label for="id">Announcement id</label><input id="id" value="general-demo" autocomplete="off">
-          <label for="title">Default title</label><input id="title" value="General announcement" oninput="renderPreview()">
-          <label for="summary">Default summary</label><input id="summary" value="Please read" oninput="renderPreview()">
-          <label for="body">Default body Markdown</label><textarea id="body" oninput="renderPreview()">Announcement body.</textarea>
+          <label for="id">公告 ID（技术值）</label><input id="id" value="general-demo" autocomplete="off">
+          <label for="title">默认标题</label><input id="title" value="常规公告" oninput="renderPreview()">
+          <label for="summary">默认摘要</label><input id="summary" value="请阅读此公告" oninput="renderPreview()">
+          <label for="body">默认正文 Markdown</label><textarea id="body" oninput="renderPreview()">这是公告正文。</textarea>
         </div>
         <div>
-          <label for="httpsUrl">HTTPS action URL (optional)</label><input id="httpsUrl" value="https://example.invalid/notice" autocomplete="off">
+          <label for="httpsUrl">HTTPS 操作链接（可选）</label><input id="httpsUrl" value="https://example.invalid/notice" autocomplete="off">
           <p class="status" id="presetHint">普通公告：信息提示，可关闭。</p>
         </div>
       </div>
       <details id="advancedFields">
-        <summary>Advanced fields / 高级字段</summary>
+        <summary>高级字段</summary>
         <div class="row">
-          <div><label for="category">Category</label><select id="category"><option selected>GENERAL</option><option>FEATURE</option><option>MAINTENANCE</option><option>SERVICE_INCIDENT</option><option>UPDATE</option><option>SECURITY</option><option>DEPRECATION</option></select></div>
-          <div><label for="severity">Severity</label><select id="severity"><option selected>INFO</option><option>NOTICE</option><option>WARNING</option><option>CRITICAL</option></select></div>
+          <div><label for="category">类别</label><select id="category"><option value="GENERAL" selected>常规</option><option value="FEATURE">功能</option><option value="MAINTENANCE">维护</option><option value="SERVICE_INCIDENT">服务故障</option><option value="UPDATE">更新</option><option value="SECURITY">安全</option><option value="DEPRECATION">弃用</option></select></div>
+          <div><label for="severity">严重程度</label><select id="severity"><option value="INFO" selected>信息</option><option value="NOTICE">通知</option><option value="WARNING">警告</option><option value="CRITICAL">严重</option></select></div>
         </div>
         <div class="row">
-          <div><label for="displayMode">Display mode</label><select id="displayMode" onchange="renderPreview()"><option selected>CENTER_ONLY</option><option>BANNER</option><option>MODAL</option></select></div>
-          <div><label for="rolloutPercent">Rollout percent</label><input id="rolloutPercent" type="number" min="0" max="100" value="100"></div>
+          <div><label for="displayMode">展示方式</label><select id="displayMode" onchange="renderPreview()"><option value="CENTER_ONLY" selected>居中展示</option><option value="BANNER">横幅</option><option value="MODAL">弹窗</option></select></div>
+          <div><label for="rolloutPercent">灰度比例</label><input id="rolloutPercent" type="number" min="0" max="100" value="100"></div>
         </div>
         <div class="row">
-          <div><label for="targetPlatform">Target platform</label><select id="targetPlatform"><option selected>android</option><option>desktop</option><option>ios</option><option>all</option></select></div>
-          <div><label for="targetChannel">Target channel</label><select id="targetChannel"><option selected>all</option><option>stable</option><option>beta</option><option>nightly</option></select></div>
+          <div><label for="targetPlatform">目标平台</label><select id="targetPlatform"><option value="android" selected>安卓</option><option value="desktop">桌面端</option><option value="ios">iOS（苹果系统）</option><option value="all">全部</option></select></div>
+          <div><label for="targetChannel">目标渠道</label><select id="targetChannel"><option value="all" selected>全部</option><option value="stable">稳定版</option><option value="beta">测试版</option><option value="nightly">夜间版</option></select></div>
         </div>
         <div class="row">
-          <div><label for="minVersionCode">Minimum version code</label><input id="minVersionCode" type="number" min="0" placeholder="optional"></div>
-          <div><label for="maxVersionCode">Maximum version code</label><input id="maxVersionCode" type="number" min="0" placeholder="optional"></div>
+          <div><label for="minVersionCode">最低版本号</label><input id="minVersionCode" type="number" min="0" placeholder="可选"></div>
+          <div><label for="maxVersionCode">最高版本号</label><input id="maxVersionCode" type="number" min="0" placeholder="可选"></div>
         </div>
         <div class="row">
-          <div><label for="rolloutSalt">Rollout salt</label><input id="rolloutSalt" value="default" autocomplete="off"></div>
-          <div><label for="locales">Target locales (comma separated)</label><input id="locales" placeholder="en,zh-CN" autocomplete="off"></div>
+          <div><label for="rolloutSalt">灰度盐值</label><input id="rolloutSalt" value="default" autocomplete="off"></div>
+          <div><label for="locales">目标语言区域（用逗号分隔）</label><input id="locales" placeholder="例如：zh-CN, en-US" autocomplete="off"></div>
         </div>
         <div class="row">
-          <div><label for="startsAt">Starts at (UTC ISO)</label><input id="startsAt" placeholder="2026-08-29T00:00:00.000Z"></div>
-          <div><label for="endsAt">Ends at (UTC ISO)</label><input id="endsAt" placeholder="optional"></div>
+          <div><label for="startsAt">开始时间（UTC ISO）</label><input id="startsAt" placeholder="2026-08-29T00:00:00.000Z"></div>
+          <div><label for="endsAt">结束时间（UTC ISO）</label><input id="endsAt" placeholder="可选"></div>
         </div>
-        <label><input id="mustAck" type="checkbox" onchange="renderPreview()"> Must acknowledge</label>
-        <label><input id="pinned" type="checkbox"> Pinned</label>
+        <label><input id="mustAck" type="checkbox" onchange="renderPreview()"> 需要确认</label>
+        <label><input id="pinned" type="checkbox"> 置顶</label>
       </details>
       <p>
-        <button type="button" onclick="createDraft()">Create draft</button>
-        <button type="button" class="secondary" onclick="newRevision()">New revision</button>
-        <button type="button" class="secondary" onclick="schedule()">Schedule</button>
-        <button type="button" onclick="publish()">Publish</button>
-        <button type="button" class="danger" onclick="withdraw()">Withdraw</button>
-        <button type="button" class="secondary" onclick="archive()">Archive</button>
+        <button type="button" onclick="createDraft()">创建草稿</button>
+        <button type="button" class="secondary" onclick="newRevision()">新建修订</button>
+        <button type="button" class="secondary" onclick="schedule()">排期</button>
+        <button type="button" onclick="publish()">发布</button>
+        <button type="button" class="danger" onclick="withdraw()">撤回</button>
+        <button type="button" class="secondary" onclick="archive()">归档</button>
       </p>
       <p class="status" id="status" aria-live="polite"></p>
     </section>
     <section class="card">
-      <h2>Android preview</h2>
-      <div class="preview" id="preview" aria-label="Announcement preview"></div>
+      <h2>安卓预览</h2>
+      <div class="preview" id="preview" aria-label="公告预览"></div>
     </section>
     <section class="card">
-      <h2>Announcements</h2>
-      <button type="button" class="secondary" onclick="reloadList()">Reload list</button>
+      <h2>公告列表</h2>
+      <button type="button" class="secondary" onclick="reloadList()">重新加载列表</button>
       <pre id="list" class="status" aria-live="polite"></pre>
     </section>
     <section class="card">
-      <h2>Anonymous activity statistics</h2>
-      <p class="status">Only consented, install-scoped aggregates are shown; no prompts, files, credentials, or event payloads are retained.</p>
-      <button type="button" class="secondary" onclick="reloadStats()">Reload stats</button>
+      <h2>匿名活动统计</h2>
+      <p class="status">仅显示已同意且按安装范围聚合的数据；不会保留提示词、文件、凭据或事件载荷。</p>
+      <button type="button" class="secondary" onclick="reloadStats()">重新加载统计</button>
       <pre id="stats" class="status" aria-live="polite"></pre>
     </section>
   </main>
@@ -133,18 +133,41 @@
     const isLocal = /^(127\.0\.0\.1|localhost)$/.test(location.hostname);
     let announcements = [];
     let activePreset = "general";
+    const DISPLAY_MODE_LABELS = { CENTER_ONLY:"居中展示", BANNER:"横幅", MODAL:"弹窗" };
+    const ADMIN_VALUE_LABELS = {
+      status:{ draft:"草稿", scheduled:"已定时", published:"已发布", withdrawn:"已撤回", archived:"已归档" },
+      revisionStatus:{ draft:"草稿", scheduled:"已定时", published:"已发布", superseded:"已被新修订替代", withdrawn:"已撤回", archived:"已归档" },
+      category:{ GENERAL:"常规", FEATURE:"功能", MAINTENANCE:"维护", SERVICE_INCIDENT:"服务故障", UPDATE:"更新", SECURITY:"安全", DEPRECATION:"弃用" },
+      severity:{ INFO:"信息", NOTICE:"通知", WARNING:"警告", CRITICAL:"严重" },
+      displayMode:DISPLAY_MODE_LABELS,
+      platform:{ android:"安卓", desktop:"桌面端", ios:"iOS（苹果系统）", all:"全部" },
+      channel:{ stable:"稳定版", beta:"测试版", nightly:"夜间版", all:"全部" },
+      type:{ OPEN_HTTPS_URL:"打开 HTTPS 链接", OPEN_APP_ROUTE:"打开应用内页面", DISMISS:"关闭", ACKNOWLEDGE:"确认已读" },
+      locale:{ default:"默认语言", en:"英语", "en-US":"英语（美国）", "zh-CN":"简体中文" }
+    };
+    const ADMIN_FIELD_LABELS = {
+      items:"公告条目", id:"公告 ID", currentPublishedRevision:"当前已发布修订", status:"状态", createdAt:"创建时间", updatedAt:"更新时间",
+      pendingRevision:"待发布修订", revisions:"修订记录", announcementId:"公告 ID", announcement_id:"公告 ID", revision:"修订号", revisionStatus:"修订状态",
+      category:"类别", severity:"严重程度", displayMode:"展示方式", title:"标题", summary:"摘要", bodyMarkdown:"正文 Markdown", mustAcknowledge:"需要确认",
+      dismissible:"可关闭", pinned:"置顶", target:"目标", actions:"操作", image:"图片", startsAt:"开始时间", endsAt:"结束时间", publishedAt:"发布时间", locale:"语言区域",
+      body:"公告内容", bodyJson:"公告内容 JSON", translations:"翻译", type:"操作类型", key:"操作键", label:"操作文案", url:"操作地址",
+      rolloutPercent:"灰度百分比", rolloutSalt:"灰度盐值", locales:"目标语言区域", minVersionCode:"最低版本号", maxVersionCode:"最高版本号",
+      consentedInstalls:"已同意统计的安装数", receiptRows:"回执记录数", installSeen:"已记录安装数", appActive:"活跃安装数", dau:"日活跃安装数", wau:"周活跃安装数", mau:"月活跃安装数",
+      active24h:"24 小时活跃安装数", active7d:"7 天活跃安装数", active30d:"30 天活跃安装数", byVersion:"按版本统计", byChannel:"按渠道统计", byPlatform:"按平台统计",
+      versionCode:"版本号", channel:"渠道", platform:"平台", count:"数量", feedVersion:"Feed 版本"
+    };
     const PRESETS = {
       general: {
         id:"general-demo", category:"GENERAL", severity:"INFO", displayMode:"CENTER_ONLY", mustAck:false, pinned:false,
-        title:"General announcement", summary:"Please read", body:"Announcement body.", hint:"普通公告：信息提示，可关闭。"
+        title:"常规公告", summary:"请阅读此公告", body:"这是公告正文。", hint:"普通公告：信息提示，可关闭。"
       },
       important: {
         id:"important-demo", category:"SECURITY", severity:"WARNING", displayMode:"MODAL", mustAck:true, pinned:true,
-        title:"Important notice", summary:"Please read and acknowledge", body:"Important announcement body.", hint:"重要公告：警告弹窗，需要明确确认。"
+        title:"重要通知", summary:"请阅读并确认", body:"这是重要公告正文。", hint:"重要公告：警告弹窗，需要明确确认。"
       },
       update: {
         id:"update-demo", category:"UPDATE", severity:"NOTICE", displayMode:"BANNER", mustAck:false, pinned:true,
-        title:"Update available", summary:"A new version is available", body:"Open the app updater to review this version.", hint:"版本更新：按钮固定进入 app://update。"
+        title:"有新版本可用", summary:"检测到可用的新版本", body:"打开应用更新入口以查看此版本。", hint:"版本更新：按钮固定进入 app://update。"
       }
     };
     document.getElementById("localAuth").hidden = !isLocal;
@@ -170,10 +193,10 @@
     function announcementBody() {
       const mustAck = document.getElementById("mustAck").checked;
       const actions = activePreset === "update"
-        ? [{ type:"OPEN_APP_ROUTE", key:"update", label:"Open app updater", url:"app://update" }]
-        : (mustAck ? [{ type:"ACKNOWLEDGE", key:"ack", label:"I have read and acknowledge" }] : [{ type:"DISMISS", key:"dismiss", label:"Dismiss" }]);
+        ? [{ type:"OPEN_APP_ROUTE", key:"update", label:"打开应用更新", url:"app://update" }]
+        : (mustAck ? [{ type:"ACKNOWLEDGE", key:"ack", label:"我已阅读并确认" }] : [{ type:"DISMISS", key:"dismiss", label:"关闭" }]);
       const url = document.getElementById("httpsUrl").value.trim();
-      if (url && activePreset !== "update") actions.push({ type:"OPEN_HTTPS_URL", key:"link", label:"Open link", url });
+      if (url && activePreset !== "update") actions.push({ type:"OPEN_HTTPS_URL", key:"link", label:"打开链接", url });
       const optionalInteger = (id) => {
         const value = document.getElementById(id).value.trim();
         return value ? Number(value) : null;
@@ -201,7 +224,12 @@
     async function call(path, method, payload) {
       const response = await fetch(api + path, { method, headers: headers(), credentials:"same-origin", body: method === "GET" ? undefined : JSON.stringify(payload || {}) });
       const text = await response.text();
-      document.getElementById("status").textContent = response.status + " " + text;
+      let detail = "";
+      if (text) {
+        try { detail = "\n" + JSON.stringify(localizeAdminData(JSON.parse(text)), null, 2); }
+        catch { detail = "\n服务器返回了无法解析的技术响应。"; }
+      }
+      document.getElementById("status").textContent = "服务器响应：" + response.status + "（" + (response.ok ? "成功" : "失败") + "）" + detail;
       if (response.status === 401 || response.status === 403 || response.status === 503) document.getElementById("accessNotice").hidden = false;
       return { response, text };
     }
@@ -212,24 +240,35 @@
     async function withdraw() { const revision = publishedRevision(); if (revision == null) return showNeedRevision(); await call(path("withdraw"), "POST", { expectedRevision:revision }); await reloadList(); }
     async function archive() { const revision = publishedRevision(); if (revision == null) return showNeedRevision(); await call(path("archive"), "POST", { expectedRevision:revision }); await reloadList(); }
     function path(action) { return "/admin/v1/announcements/" + encodeURIComponent(document.getElementById("id").value.trim()) + "/" + action; }
-    function showNeedRevision() { document.getElementById("status").textContent = "Load an existing announcement first so the expected revision can be checked."; }
+    function showNeedRevision() { document.getElementById("status").textContent = "请先加载现有公告，以便校验预期修订号。"; }
     async function reloadList() {
       const result = await call("/admin/v1/announcements", "GET");
       try { const parsed = JSON.parse(result.text); announcements = Array.isArray(parsed.items) ? parsed.items : []; } catch { announcements = []; }
-      document.getElementById("list").textContent = result.text;
+      document.getElementById("list").textContent = formatAdminResponse(result.text, "服务器返回的公告数据：");
     }
     async function reloadStats() {
       const result = await call("/admin/v1/stats", "GET");
-      document.getElementById("stats").textContent = result.text;
+      document.getElementById("stats").textContent = formatAdminResponse(result.text, "服务器返回的统计数据：");
+    }
+    function localizeAdminData(value, field = "") {
+      if (value === null) return "无";
+      if (typeof value === "boolean") return value ? "是" : "否";
+      if (Array.isArray(value)) return value.map((item) => localizeAdminData(item, field));
+      if (typeof value !== "object") return typeof value === "string" ? (ADMIN_VALUE_LABELS[field]?.[value] || value) : value;
+      return Object.fromEntries(Object.entries(value).map(([key, item]) => [ADMIN_FIELD_LABELS[key] || "技术字段：" + key, localizeAdminData(item, key)]));
+    }
+    function formatAdminResponse(text, prefix) {
+      try { return prefix + "\n" + JSON.stringify(localizeAdminData(JSON.parse(text)), null, 2); }
+      catch { return prefix + "\n原始响应：\n" + text; }
     }
     function renderPreview() {
       const target = document.getElementById("preview");
       target.textContent = "";
-      const mode = document.createElement("strong"); mode.textContent = document.getElementById("displayMode").value;
+      const mode = document.createElement("strong"); mode.textContent = "展示方式：" + (DISPLAY_MODE_LABELS[document.getElementById("displayMode").value] || "未知");
       const title = document.createElement("h3"); title.textContent = document.getElementById("title").value;
       const summary = document.createElement("p"); summary.textContent = document.getElementById("summary").value;
       const body = document.createElement("p"); body.textContent = document.getElementById("body").value;
-      const action = document.createElement("button"); action.type = "button"; action.textContent = activePreset === "update" ? "Open app updater" : (document.getElementById("mustAck").checked ? "I have read and acknowledge" : "Dismiss"); action.disabled = true;
+      const action = document.createElement("button"); action.type = "button"; action.textContent = activePreset === "update" ? "打开应用更新" : (document.getElementById("mustAck").checked ? "我已阅读并确认" : "关闭"); action.disabled = true;
       target.append(mode, title, summary, body, action);
     }
     applyPreset("general");

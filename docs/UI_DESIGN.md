@@ -143,6 +143,12 @@
   - 底部显示实时状态栏：`[Streaming: 142 tokens generated (24 t/s)]`。
   - 发送按钮在生成期间切换为高亮红色 `[Cancel / Stop]` 按钮。
   - 点击取消后，立即停止网络读取，消息状态标记为 `[Cancelled by User]`，保留已生成部分，严禁假装完整成功。
+  - 流式运行的状态 owner 属于稳定应用 shell，而不是 Chat 目的地 entry；用户在输出期间打开智能体、更多或请求检查器，运行继续并在返回 Chat 后显示同一会话的增量/终态。
+
+#### SCR-CHAT-03A: 有效请求检查状态
+- Chat 与请求检查器读取同一稳定运行状态，不从“上一页”猜测 ViewModel。
+- 未开启检查器时显示“请求检查器已关闭，请到设置开启”；开启但尚未产生 `RequestPrepared` 时显示“请求尚未准备”；已准备时只显示内存中的脱敏预览。
+- 预览不得含 Authorization、API Key、Header secret，不因导航而复制成第二份可持久化正文。
 
 #### SCR-CHAT-04: 工具调用确认卡片 (Tool Approval Card)
 - **触发条件**: 模型发起带副作用或需显式授权的 Tool Call（如写入文件、执行外部网络请求）。
@@ -406,6 +412,19 @@
 #### SCR-SETT-04: 许可证与第三方声明 (License & Notices)
 - **第一方许可**: 完整展示 GNU Affero General Public License v3 (AGPL-3.0-only) 官方文本。
 - **第三方开源组件公告**: 完整展示项目使用的开源库（如 AndroidX, Jetpack Compose, Kotlin Multiplatform, Ktor, kotlinx.serialization, USearch, ONNX Runtime 等）的原作者版权及许可证声明。
+
+#### SCR-SETT-05: 应用内诊断日志 (In-app Diagnostics)
+- **默认状态**: 关闭；关闭时不创建诊断事件。开关旁明确说明日志仅保存在本机，并可能包含脱敏后的运行状态。
+- **状态与操作**: 展示“已开启/已关闭”、当前占用与上限；提供“导出诊断 ZIP”和“清除诊断日志”。导出使用系统文件选择器，不自动上传。
+- **隐私说明**: 明示不记录聊天、Prompt、知识文件名/API Key/Header/请求正文；原生崩溃和系统强杀仍需 ADB Logcat。崩溃后用户应先重开应用并导出，未导出前不要清除。
+- **失败状态**: 导出目标不可写时显示错误且保留原日志；清除后状态立即归零。
+
+### 3.8 人工终审导航与配置修正（2026-08-30）
+
+- Chat 顶部“无智能体”采用与相邻操作一致的按钮外形和最小 48 dp 高度、112 dp 宽度；disabled 只表示尚未选择 Agent，不缩小触控/视觉占位。
+- More 下 Provider、公告、MCP、设置、关于、请求检查器六个二级页面都有应用内返回操作；Android 系统返回回到 More，不直接退出应用。
+- 公告地址、key id 与公钥是应用构建时固定信任根，不作为运营者或普通用户字段展示，不提供保存/编辑操作。
+- Agent 编辑页中禁用或缺失的已绑定 Skill 明确标红且只能取消；只有已安装并启用的 install ID 可选择和保存。
 
 ---
 

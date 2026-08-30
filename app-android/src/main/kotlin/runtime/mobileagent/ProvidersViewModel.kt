@@ -19,6 +19,7 @@ import runtime.mobileagent.domain.ModelProfile
 import runtime.mobileagent.domain.ModelRole
 import runtime.mobileagent.domain.ProviderProfile
 import runtime.mobileagent.domain.withEndpoint
+import runtime.mobileagent.diagnostics.ProviderModelSavePhase
 import runtime.mobileagent.provider.SecretRedactor
 import java.net.URI
 
@@ -60,6 +61,13 @@ class ProvidersViewModel(application: Application) : AndroidViewModel(applicatio
 
     fun saveDraft(draft: ProviderDraft): Boolean {
         if (busy.value) return false
+        runCatching {
+            app.diagnostics.recordProviderModelSave(
+                ProviderModelSavePhase.START,
+                draft.capabilities,
+                draft.role.name,
+            )
+        }
         return try {
             require(draft.name.isNotBlank()) { "请填写名称。" }
             if (draft.modelId.isNotBlank() || draft.modelProfileId != null) {
@@ -123,11 +131,32 @@ class ProvidersViewModel(application: Application) : AndroidViewModel(applicatio
                 "已保存 ${provider.name} / ${draft.modelId.trim()}。能力标记来自手动配置，尚未发送探测请求。" +
                     if (oldSecretCleanupFailed) "旧密钥仍保留，引用检查失败；请修复存储后重试回收。" else ""
             }
+            runCatching {
+                app.diagnostics.recordProviderModelSave(
+                    ProviderModelSavePhase.SUCCESS,
+                    draft.capabilities,
+                    draft.role.name,
+                )
+            }
             true
         } catch (error: Exception) {
+            runCatching {
+                app.diagnostics.recordProviderModelSave(
+                    ProviderModelSavePhase.FAILURE,
+                    draft.capabilities,
+                    draft.role.name,
+                    error,
+                )
+            }
             status.value = SecretRedactor.redact(error.message ?: "保存失败。", listOf(draft.apiKey).filter { it.isNotBlank() })
             false
         }
+    }
+
+    /** Record only the anonymous capability changed by the editor; no provider identity is kept. */
+    fun recordCapabilityToggle(capability: String, enabled: Boolean) {
+        if (capability !in setOf("image", "tools")) return
+        runCatching { app.diagnostics.recordCapabilityToggle(capability, enabled) }
     }
 
     fun deleteModel(id: String) {

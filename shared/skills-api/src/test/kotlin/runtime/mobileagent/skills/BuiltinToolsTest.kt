@@ -7,6 +7,7 @@ import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Assertions.assertThrows
 import org.junit.jupiter.api.Test
+import kotlinx.coroutines.runBlocking
 
 class BuiltinToolsTest {
     private fun broker(
@@ -306,5 +307,59 @@ class BuiltinToolsTest {
         assertThrows(InterruptedException::class.java) {
             tools.invoke(ToolCall("cancel", "http_request", """{"url":"https://api.example.com/"}"""))
         }
+    }
+
+    @Test
+    fun webSearchRequiresApprovalAndExecutesOnlyOnce() = runBlocking {
+        var calls = 0
+        val tools = WebSearchToolExecutor(
+            configured = true,
+            authorized = { true },
+            search = { query, count, dispatched ->
+                dispatched()
+                calls++
+                """{"results":[{"title":"$query","url":"https://example.com/","snippet":"$count"}]}"""
+            },
+        )
+        val call = ToolCall("search-1", "web_search", """{"query":"android agent","maxResults":3}""")
+        assertEquals(ToolResult.NeedsApproval, tools.invoke(call))
+        val result = tools.approve(call.callId) as ToolResult.Value
+        assertTrue(result.json.contains("android agent"))
+        assertEquals(result, tools.invoke(call))
+        assertEquals(1, calls)
+    }
+
+    @Test
+    fun webSearchIsAbsentWithoutConfigurationAndRevocationStopsApproval() = runBlocking {
+        val absent = WebSearchToolExecutor(false, { true }) { _, _, _ -> "{}" }
+        assertTrue(absent.specs.isEmpty())
+        assertTrue(absent.invoke(ToolCall("missing", "web_search", """{"query":"q"}""")) is ToolResult.Invalid)
+
+        var authorized = true
+        var calls = 0
+        val tools = WebSearchToolExecutor(true, { authorized }) { _, _, _ -> calls++; "{}" }
+        val call = ToolCall("revoked", "web_search", """{"query":"q"}""")
+        assertEquals(ToolResult.NeedsApproval, tools.invoke(call))
+        authorized = false
+        assertTrue(tools.approve(call.callId) is ToolResult.Denied)
+        assertEquals(0, calls)
+    }
+
+    @Test
+    fun webSearchRejectsOversizedQueryAndMarksPostDispatchFailureUnknown() = runBlocking {
+        var calls = 0
+        val tools = WebSearchToolExecutor(true, { true }) { _, _, dispatched ->
+            dispatched()
+            calls++
+            error("secret transport detail")
+        }
+        val tooLong = ToolCall("long", "web_search", """{"query":"${"x".repeat(401)}"}""")
+        assertTrue(tools.invoke(tooLong) is ToolResult.Invalid)
+        val call = ToolCall("unknown", "web_search", """{"query":"q"}""")
+        assertEquals(ToolResult.NeedsApproval, tools.invoke(call))
+        val result = tools.approve(call.callId)
+        assertTrue(result is ToolResult.UnknownOutcome)
+        assertTrue("secret transport detail" !in result.toString())
+        assertEquals(1, calls)
     }
 }

@@ -19,14 +19,9 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
-import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
-import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.res.stringResource
@@ -44,8 +39,6 @@ fun AnnouncementsScreen(
     banner: CachedAnnouncement?,
     modal: CachedAnnouncement?,
     selected: CachedAnnouncement?,
-    baseUrl: String,
-    publicKeyHex: String,
     onFilter: (String) -> Unit,
     onRefresh: () -> Unit,
     onOpen: (CachedAnnouncement) -> Unit,
@@ -53,7 +46,6 @@ fun AnnouncementsScreen(
     onMarkAllRead: () -> Unit,
     onDismiss: (CachedAnnouncement) -> Unit,
     onAcknowledge: (CachedAnnouncement) -> Unit,
-    onSaveEndpoint: (String, String) -> Unit,
     onAppRoute: (String) -> Unit,
 ) {
     val uriHandler = LocalUriHandler.current
@@ -94,7 +86,6 @@ fun AnnouncementsScreen(
                 }
             }
         }
-        EndpointForm(baseUrl, publicKeyHex, onSaveEndpoint)
     }
     selected?.let { record ->
         AnnouncementDetailScreen(
@@ -149,19 +140,6 @@ fun AnnouncementDetailScreen(
         },
         confirmButton = { Button(onClick = onClose) { Text(stringResource(AnnR.string.ann_close)) } },
     )
-}
-
-@Composable
-private fun EndpointForm(baseUrl: String, publicKeyHex: String, onSave: (String, String) -> Unit) {
-    var url by remember(baseUrl) { mutableStateOf(baseUrl) }
-    var key by remember(publicKeyHex) { mutableStateOf(publicKeyHex) }
-    Column(Modifier.padding(top = 12.dp)) {
-        OutlinedTextField(url, { url = it }, label = { Text(stringResource(AnnR.string.ann_base_url)) }, modifier = Modifier.fillMaxWidth())
-        OutlinedTextField(key, { key = it }, label = { Text(stringResource(AnnR.string.ann_public_key)) }, modifier = Modifier.fillMaxWidth())
-        OutlinedButton(onClick = { onSave(url, key) }, modifier = Modifier.padding(top = 8.dp)) {
-            Text(stringResource(AnnR.string.ann_save_endpoint))
-        }
-    }
 }
 
 private fun handleAction(

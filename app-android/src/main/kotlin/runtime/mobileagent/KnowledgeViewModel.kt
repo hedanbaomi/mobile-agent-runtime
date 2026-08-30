@@ -10,6 +10,7 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.*
 import runtime.mobileagent.background.ImportWorkScheduler
+import runtime.mobileagent.diagnostics.DiagnosticProgressGate
 import runtime.mobileagent.feature.knowledge.*
 import runtime.mobileagent.knowledge.ApiEmbeddingBinding
 import runtime.mobileagent.knowledge.ImportBatchKind
@@ -359,6 +360,11 @@ class KnowledgeViewModel(application: Application) : AndroidViewModel(applicatio
         if (files.size > 500) { state.value = state.value.copy(error = "一次最多选择 500 个文件。"); return }
         viewModelScope.launch {
             activeOperations += 1
+            val progressGate = DiagnosticProgressGate()
+            val enqueueGate = DiagnosticProgressGate()
+            var copiedCount = 0
+            var diagnosticStage = "staging"
+            recordDiagnostics { recordKnowledgeImportStart(kind.name, files.size) }
             state.value = state.value.copy(loading = true, error = null)
             try {
                 val requestedBase = state.value.selectedBaseId
@@ -373,6 +379,7 @@ class KnowledgeViewModel(application: Application) : AndroidViewModel(applicatio
                 }
                 var resolvedBatchId = createdBatchId
                 files.forEachIndexed { index, (name, uri) ->
+                    diagnosticStage = "copying"
                     state.value = state.value.copy(status = "正在复制 ${index + 1}/${files.size}：$name")
                     runInterruptible(Dispatchers.IO) {
                         val apiEmbedding = repo.embeddingSpaceId(id)?.let(ApiEmbeddingBinding::parseSpaceId) != null
@@ -399,9 +406,26 @@ class KnowledgeViewModel(application: Application) : AndroidViewModel(applicatio
                         }
                         if (createdBatchId != null) {
                             repo.bindJobToBatch(createdBatchId, imported, name)
+                            // Wake the idempotent coordinator as soon as this item is durably
+                            // bound. The generation check stays immediately before the external
+                            // scheduler call; the final enqueue below remains the recovery fence.
+                            if (!repo.generationStillCurrent(createdBatchId)) {
+                                repo.failBatch(createdBatchId, "Knowledge base generation changed; this batch cannot publish.")
+                                error("Knowledge base generation changed; this batch cannot publish.")
+                            }
+                            ImportWorkScheduler.enqueueBatch(app, createdBatchId, app.container.profiles.visionConfigured())
                         } else if (resolvedBatchId == null) {
                             resolvedBatchId = repo.jobBatchId(imported.id)
                         }
+                    }
+                    copiedCount = index + 1
+                    if (progressGate.shouldRecord("copied", copiedCount, files.size)) {
+                        recordDiagnostics {
+                            recordKnowledgeImportProgress(kind.name, "copied", copiedCount, files.size)
+                        }
+                    }
+                    if (createdBatchId != null && enqueueGate.shouldRecord("queued", copiedCount, files.size)) {
+                        recordDiagnostics { recordKnowledgeImportEnqueued(kind.name, copiedCount) }
                     }
                 }
                 runInterruptible(Dispatchers.IO) {
@@ -410,11 +434,17 @@ class KnowledgeViewModel(application: Application) : AndroidViewModel(applicatio
                         repo.refreshBatchProgress(batchId)
                         if (!repo.generationStillCurrent(batchId)) {
                             repo.failBatch(batchId, "Knowledge base generation changed; this batch cannot publish.")
+                            error("Knowledge base generation changed; this batch cannot publish.")
                         } else {
-                            ImportWorkScheduler.enqueueBatch(app, batchId, app.container.profiles.visionConfigured())
+                            diagnosticStage = "processing"
+                            ImportWorkScheduler.enqueueBatchFence(app, batchId, app.container.profiles.visionConfigured())
                         }
                     }
                 }
+                if (resolvedBatchId != null) {
+                    recordDiagnostics { recordKnowledgeImportEnqueued(kind.name, copiedCount) }
+                }
+                diagnosticStage = "processing"
                 val snapshot = runInterruptible(Dispatchers.IO) { loadSnapshot(id) }
                 state.value = state.value.copy(
                     bases = snapshot.bases, selectedBaseId = snapshot.selectedBaseId,
@@ -425,8 +455,16 @@ class KnowledgeViewModel(application: Application) : AndroidViewModel(applicatio
                     status = "原件已复制到本地；批次任务将继续处理，可离开此页。图片及 API Embedding 文本不会未经同意上传。",
                     rebuildEnabled = snapshot.selectedBaseId != null && snapshot.jobs.none { it.stage in ACTIVE },
                 )
-            } catch (cancel: CancellationException) { throw cancel }
-            catch (failure: Exception) { fail(failure) }
+                // This marks only durable local staging. Parsing/indexing completion is emitted by
+                // the batch worker, so a later processing failure cannot be masked as success.
+                recordDiagnostics { recordKnowledgeImportStaged(kind.name, copiedCount) }
+            } catch (cancel: CancellationException) {
+                recordDiagnostics { recordKnowledgeImportFailed(kind.name, diagnosticStage, copiedCount, cancel) }
+                throw cancel
+            } catch (failure: Exception) {
+                recordDiagnostics { recordKnowledgeImportFailed(kind.name, diagnosticStage, copiedCount, failure) }
+                fail(failure)
+            }
             finally {
                 withContext(NonCancellable + Dispatchers.Main.immediate) {
                     activeOperations = (activeOperations - 1).coerceAtLeast(0)
@@ -483,6 +521,11 @@ class KnowledgeViewModel(application: Application) : AndroidViewModel(applicatio
             catch (failure: Exception) { if (current()) fail(failure) }
         }
     }
+
+    private fun recordDiagnostics(block: runtime.mobileagent.diagnostics.AndroidDiagnosticLogger.() -> Unit) {
+        runCatching { app.diagnostics.block() }
+    }
+
     private fun currentVisionTarget(): String = app.container.profiles.visionBinding()?.let { (provider, model) ->
         "${provider.name} · ${provider.baseUrl} · ${model.modelId} · provider rev ${provider.revision} / model rev ${model.revision}"
     }.orEmpty()

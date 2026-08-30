@@ -14,13 +14,16 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import runtime.mobileagent.announcements.AnnouncementCategory
 import runtime.mobileagent.announcements.ClientContext
+import runtime.mobileagent.diagnostics.DiagnosticSanitizer
 import runtime.mobileagent.domain.LocalePreference
+import runtime.mobileagent.domain.SecretStatus
 import runtime.mobileagent.domain.ThemePreference
 import runtime.mobileagent.feature.settings.SettingsUiState
 import runtime.mobileagent.provider.SecretRedactor
 import runtime.mobileagent.serialization.TransferOptions
 import java.io.ByteArrayOutputStream
 import java.util.Locale
+import java.util.UUID
 
 class SettingsViewModel(application: Application) : AndroidViewModel(application) {
     private val app = application as MobileAgentApp
@@ -28,12 +31,18 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
     val exportStatus = mutableStateOf("")
     val updateStatus = mutableStateOf("当前为 debug 验证版，正式 release 将由用户另行确认。")
     val inspectorEnabled = mutableStateOf(app.container.uiPreferences.getBoolean("request-inspector", true))
+    val diagnosticsStatus = mutableStateOf("")
+    val webSearchStatus = mutableStateOf("")
     val error = mutableStateOf<String?>(null)
     private var pendingExport: Pair<String, TransferOptions>? = null
     private var transferRunning = false
     private var updateCheckRunning = false
 
-    fun uiState(statsEnabled: Boolean, noticeCount: Int): SettingsUiState = SettingsUiState(
+    fun uiState(statsEnabled: Boolean, noticeCount: Int): SettingsUiState {
+        val diagnosticFiles = app.diagnostics.status()
+        val searchRef = app.container.settings.webSearchSecretRef()
+        val searchConfigured = searchRef != null && app.container.secrets.inventory().status(searchRef) == SecretStatus.ACTIVE
+        return SettingsUiState(
         versionName = BuildConfig.VERSION_NAME + " debug",
         gitRevision = BuildConfig.GIT_REVISION,
         gitDirty = BuildConfig.GIT_DIRTY,
@@ -53,6 +62,10 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
             LocalePreference.SYSTEM -> "system"; LocalePreference.ZH_CN -> "zh-CN"; LocalePreference.EN_US -> "en-US"
         },
         statsEnabled = statsEnabled, requestInspectionEnabled = inspectorEnabled.value,
+        diagnosticsEnabled = diagnosticFiles.enabled,
+        diagnosticsSizeBytes = diagnosticFiles.sizeBytes,
+        diagnosticsLimitBytes = diagnosticFiles.totalLimitBytes,
+        diagnosticsState = diagnosticsStatus.value,
         exportState = exportStatus.value, updateState = updateStatus.value, noticeCount = noticeCount,
         licenseText = app.assets.open("AGPL-3.0-only.txt").bufferedReader().use { it.readText() },
         error = error.value,
@@ -61,7 +74,58 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
         globalRootPromptUnlocked = preferences.value.globalRootPromptUnlocked,
         globalRootPromptRevision = preferences.value.globalRootPromptRevision,
         globalRootPromptUpdatedAt = preferences.value.globalRootPromptUpdatedAt,
-    )
+        webSearchConfigured = searchConfigured,
+        webSearchEnabled = searchConfigured && app.container.settings.webSearchEnabled(),
+        webSearchState = webSearchStatus.value,
+        )
+    }
+
+    fun saveWebSearch(apiKey: String) {
+        val normalized = apiKey.trim()
+        if (normalized.isEmpty() || normalized.length > 4096 || normalized.any { it == '\r' || it == '\n' }) {
+            error.value = "请输入有效的 Brave Search API Key。"
+            return
+        }
+        val oldRef = app.container.settings.webSearchSecretRef()
+        val newRef = "search:brave:${UUID.randomUUID()}"
+        try {
+            app.container.secrets.put(newRef, normalized.toCharArray())
+            app.container.settings.setWebSearch(newRef, enabled = true)
+            oldRef?.takeIf { it != newRef }?.let { old ->
+                runCatching { app.container.secrets.inventory().retireIfUnreferenced(old) }
+            }
+            webSearchStatus.value = "联网搜索已配置并启用；每次查询仍需单独确认。"
+            error.value = null
+        } catch (_: Exception) {
+            runCatching { app.container.secrets.inventory().retireIfUnreferenced(newRef) }
+            webSearchStatus.value = "联网搜索配置未保存。"
+            error.value = "无法安全保存联网搜索凭据。"
+        }
+    }
+
+    fun setWebSearchEnabled(enabled: Boolean) {
+        val ref = app.container.settings.webSearchSecretRef()
+        if (ref == null || app.container.secrets.inventory().status(ref) != SecretStatus.ACTIVE) {
+            error.value = "请先保存有效的 Brave Search API Key。"
+            return
+        }
+        app.container.settings.setWebSearch(ref, enabled)
+        webSearchStatus.value = if (enabled) "联网搜索已启用；每次查询仍需单独确认。" else "联网搜索已停用。"
+        error.value = null
+    }
+
+    fun clearWebSearch() {
+        val oldRef = app.container.settings.webSearchSecretRef()
+        try {
+            app.container.settings.setWebSearch(null, enabled = false)
+            oldRef?.let { app.container.secrets.inventory().retireIfUnreferenced(it) }
+            webSearchStatus.value = "联网搜索凭据已移除。"
+            error.value = null
+        } catch (_: Exception) {
+            webSearchStatus.value = "联网搜索凭据未能完整移除。"
+            error.value = "无法安全移除联网搜索凭据。"
+        }
+    }
 
     fun theme(value: String) {
         val mode = when (value) {
@@ -82,6 +146,52 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
     fun inspector(value: Boolean) {
         app.container.uiPreferences.edit().putBoolean("request-inspector", value).apply()
         inspectorEnabled.value = value
+    }
+
+    fun setDiagnosticsEnabled(value: Boolean) {
+        try {
+            app.diagnostics.setEnabled(value)
+            diagnosticsStatus.value = if (value) "诊断记录已开启。" else "诊断记录已关闭；已有记录仍可导出或清除。"
+            error.value = null
+        } catch (failure: Exception) {
+            diagnosticsStatus.value = "无法保存诊断开关。"
+            error.value = DiagnosticSanitizer.text(failure.message ?: "无法保存诊断开关。")
+        }
+    }
+
+    fun exportDiagnosticsTo(uri: Uri?) {
+        if (uri == null) {
+            diagnosticsStatus.value = "已取消诊断导出。"
+            return
+        }
+        viewModelScope.launch {
+            try {
+                diagnosticsStatus.value = "正在导出诊断 ZIP…"
+                withContext(Dispatchers.IO) {
+                    val output = app.contentResolver.openOutputStream(uri, "wt") ?: error("无法打开导出位置。")
+                    output.use { app.diagnostics.exportTo(it) }
+                }
+                diagnosticsStatus.value = "诊断 ZIP 已保存；原生崩溃或系统强杀仍可能需要 ADB Logcat。"
+                error.value = null
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (failure: Exception) {
+                // Deliberately do not clear records here: a failed SAF write must leave the
+                // evidence available for another destination or a later export attempt.
+                diagnosticsStatus.value = "诊断导出失败；原记录未清除。"
+                error.value = DiagnosticSanitizer.text(failure.message ?: "诊断导出失败。")
+            }
+        }
+    }
+
+    fun clearDiagnostics() {
+        try {
+            app.diagnostics.clear()
+            diagnosticsStatus.value = "诊断记录已清除。"
+            error.value = null
+        } catch (failure: Exception) {
+            error.value = DiagnosticSanitizer.text(failure.message ?: "清除诊断记录失败。")
+        }
     }
 
     fun unlockRootPrompt() {

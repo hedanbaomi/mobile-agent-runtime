@@ -4,7 +4,25 @@
 package runtime.mobileagent.knowledge
 
 import java.io.ByteArrayInputStream
+import java.text.Normalizer
 import java.util.zip.ZipInputStream
+
+/**
+ * Returns a safe, NFC-normalized logical archive path, or null when the name
+ * could address a path outside the import root.  Dot checks are segment based
+ * so ordinary filenames such as `Hes.+theog..pdf` remain valid.
+ */
+internal fun normalizeZipEntryPath(name: String): String? {
+    val normalized = Normalizer.normalize(name.replace('\\', '/'), Normalizer.Form.NFC)
+    if (normalized.isBlank() || normalized.any { Character.isISOControl(it) }) return null
+    if (normalized.startsWith('/')) return null
+    val segments = normalized.split('/')
+    if (segments.any { it == "." || it == ".." }) return null
+    // Keep rejecting colons anywhere in an archive name: this covers drive
+    // prefixes and Windows alternate data streams on the extraction side.
+    if (normalized.contains(':')) return null
+    return normalized
+}
 
 object ZipSafety {
     const val MAX_ENTRIES = 256
@@ -22,9 +40,10 @@ object ZipSafety {
                 val entry = zip.nextEntry ?: break
                 count += 1
                 if (count > MAX_ENTRIES) return ZipInspection(false, "Archive has too many entries")
-                val name = entry.name.replace('\\', '/')
-                if (name.contains("..") || name.startsWith("/") || name.contains(":")) {
-                    return ZipInspection(false, "Archive path is not allowed: $name")
+                val rawName = entry.name
+                val name = normalizeZipEntryPath(rawName)
+                if (name == null) {
+                    return ZipInspection(false, "Archive path is not allowed: ${rawName.replace('\\', '/')}")
                 }
                 val buf = ByteArray(8192)
                 var size = 0L

@@ -127,6 +127,13 @@ class SecretInventory(private val db: SqlConnection) {
                 snapshotReferences(bindingRaw, expandedRaw, snapshotId).forEach { refs += it }
             }
         }
+        if (tableExists("app_prefs")) {
+            db.query("SELECT value FROM app_prefs WHERE key = ?", listOf(SettingsRepository.KEY_WEB_SEARCH_SECRET_REF))
+                .singleOrNull()?.let { row ->
+                    val ref = requiredText(row, "value", "web-search secret reference")
+                    if (ref.isNotBlank()) refs += ref
+                }
+        }
         return refs
     }
 

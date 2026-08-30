@@ -38,12 +38,15 @@ import runtime.mobileagent.knowledge.TextEmbedder
 import runtime.mobileagent.knowledge.ImportStage
 import runtime.mobileagent.storage.AndroidPdfRendererAdapter
 import runtime.mobileagent.vector.UsearchVectorIndexFactory
+import runtime.mobileagent.diagnostics.AndroidDiagnosticLogger
 import java.util.Locale
 
 class MobileAgentApp : Application() {
     lateinit var database: AndroidContextSqlite
         private set
     lateinit var container: AppContainer
+        private set
+    lateinit var diagnostics: AndroidDiagnosticLogger
         private set
 
     override fun onCreate() {
@@ -53,6 +56,18 @@ class MobileAgentApp : Application() {
         val isolated = if (android.os.Build.VERSION.SDK_INT >= 28) android.os.Process.isIsolated()
             else !android.os.Process.isApplicationUid(android.os.Process.myUid())
         if (isolated) return
+        // Diagnostics are host-only too: constructing this adapter touches only files and the
+        // opt-in preference, never the database, Keystore, workers, or network clients.
+        if (!::diagnostics.isInitialized) {
+            diagnostics = runCatching {
+                AndroidDiagnosticLogger(this).also { it.installUncaughtExceptionHandler() }
+            }.getOrElse {
+                // Diagnostics are support tooling. Storage or handler failures must never make
+                // the main runtime unavailable; the settings screen will remain safely disabled.
+                AndroidDiagnosticLogger.disabledFallback()
+            }
+            runCatching { diagnostics.recordProcessStarted() }
+        }
         if (!deferHostInitializationForInstrumentation) ensureHostInitialized()
     }
 
@@ -179,7 +194,14 @@ class AppContainer(app: MobileAgentApp) {
         ImportWorkerRegistry.handler = ImportJobHandler { id, configured -> knowledge.resumeImport(id, visionConfigured = configured) }
         ImportWorkerRegistry.cancellationHandler = ImportCancellationHandler { id -> knowledge.cancelImport(id); Unit }
         ImportWorkerRegistry.batchHandler = ImportBatchHandler { batchId, configured ->
-            knowledge.processBatch(batchId, configured)
+            runCatching { app.diagnostics.recordBatchWorkerStart() }
+            try {
+                knowledge.processBatch(batchId, configured)
+                runCatching { app.diagnostics.recordBatchWorkerComplete() }
+            } catch (failure: Throwable) {
+                runCatching { app.diagnostics.recordBatchWorkerFailed(failure) }
+                throw failure
+            }
         }
         ImportWorkerRegistry.consentHandler = ConsentTicketHandler { ticketId, configured ->
             knowledge.applyConsentTicket(ticketId, configured)

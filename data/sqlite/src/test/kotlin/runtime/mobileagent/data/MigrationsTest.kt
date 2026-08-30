@@ -442,7 +442,9 @@ class MigrationsTest {
                 probed = false,
             )
             assertEquals(CapabilityVerification.UNKNOWN, profiles.getModel("model.probe")!!.endpoint.verification)
-            val latest = db.query("SELECT tools_summary, images_summary, source FROM capability_probes ORDER BY probed_at DESC LIMIT 1").single()
+            // Utc.nowIso() has second precision, so probes recorded in one test turn can tie.
+            // SQLite rowid preserves insertion order for this append-only audit table.
+            val latest = db.query("SELECT tools_summary, images_summary, source FROM capability_probes ORDER BY probed_at DESC, rowid DESC LIMIT 1").single()
             assertEquals("http-400", latest.string("tools_summary"))
             assertEquals("not-declared", latest.string("images_summary"))
             assertTrue(latest.string("source").contains("stream=verified"))

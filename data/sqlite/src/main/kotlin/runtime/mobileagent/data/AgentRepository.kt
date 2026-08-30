@@ -417,10 +417,10 @@ class AgentRepository(
         }
         profile.skillIds.forEach { id ->
             val exists = db.query(
-                "SELECT p.id FROM skill_packages p JOIN skill_installs i ON i.package_hash=p.package_hash WHERE p.id=? AND i.enabled=1 LIMIT 1",
+                "SELECT i.install_id FROM skill_installs i JOIN skill_packages p ON p.package_hash=i.package_hash WHERE i.install_id=? AND i.enabled=1 LIMIT 1",
                 listOf(id),
             ).isNotEmpty()
-            if (!exists) throw invalid("Skill $id is missing or disabled")
+            if (!exists) throw invalid("Skill install $id is missing or disabled")
         }
     }
 

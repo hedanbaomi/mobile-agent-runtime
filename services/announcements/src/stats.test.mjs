@@ -3,6 +3,7 @@
 
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
+import { runInNewContext } from "node:vm";
 import { createWorker } from "./app.mjs";
 import { D1Store } from "./d1-store.mjs";
 import { audienceHash, generateKeyPair } from "./sign.mjs";
@@ -130,13 +131,111 @@ function recordAt(store, installId, receivedAt, dimensions, suffix) {
 
 {
   const admin = readFileSync(new URL("../../../admin/announcements/index.html", import.meta.url), "utf8");
-  assert.match(admin, /普通公告/);
-  assert.match(admin, /重要公告/);
-  assert.match(admin, /版本更新/);
+  const semanticText = [];
+  const semanticPattern = /<(title|h1|h2|label|button|summary|legend|strong|p)\b[^>]*>([\s\S]*?)<\/\1>/gi;
+  for (const match of admin.matchAll(semanticPattern)) {
+    const text = match[2].replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
+    if (text) semanticText.push(text);
+  }
+  for (const text of admin.matchAll(/\baria-label="([^"]+)"/gi)) semanticText.push(text[1]);
+  assert.match(admin, /<html lang="zh-CN">/);
+  assert.ok(semanticText.length > 0);
+  for (const text of semanticText) assert.match(text, /[\u3400-\u9fff]/, `可见管理端文案缺少简体中文：${text}`);
+  for (const [, value] of admin.matchAll(/\bplaceholder="([^"]+)"/gi)) {
+    if (!/^\d{4}-\d{2}-\d{2}T[\d:.]+Z$/.test(value)) assert.match(value, /[\u3400-\u9fff]/, `输入提示缺少简体中文：${value}`);
+  }
+
+  const staleVisibleEnglish = [
+    "Announcements administration", "Local test authentication", "Admin token (local loopback only)",
+    "Draft editor", "Default title", "Default summary", "Default body Markdown", "HTTPS action URL (optional)",
+    "Advanced fields /", "Category", "Severity", "Display mode", "Rollout percent", "Target platform", "Target channel",
+    "Minimum version code", "Maximum version code", "Rollout salt", "Target locales (comma separated)", "Starts at (UTC ISO)",
+    "Ends at (UTC ISO)", "Must acknowledge", "Pinned", "Create draft", "New revision", "Schedule", "Publish", "Withdraw",
+    "Archive", "Android preview", "Announcement preview", "Reload list", "Anonymous activity statistics", "Reload stats",
+    "Access is required before production writes are enabled.", "The API returned an unavailable or unauthorized response.",
+    "Do not paste a production token here.",
+  ];
+  const visibleText = semanticText.join("\n");
+  for (const text of staleVisibleEnglish) assert.equal(visibleText.includes(text), false, `检测到未翻译的管理端文案：${text}`);
+  for (const text of ["普通公告 / General", "重要公告 / Important", "版本更新 / Version update", "General announcement", "Please read", "Announcement body.", "Important notice", "Update available", "Open app updater", "I have read and acknowledge", "Open link", "Dismiss"]) {
+    assert.equal(admin.includes(text), false, `检测到未翻译的动态管理端文案：${text}`);
+  }
+
+  const optionsFor = (id) => {
+    const select = admin.match(new RegExp(`<select id="${id}"[^>]*>([\\s\\S]*?)</select>`));
+    assert.ok(select, `缺少选择器：${id}`);
+    return [...select[1].matchAll(/<option\b[^>]*value="([^"]+)"[^>]*>([^<]*)<\/option>/g)].map(([, value, label]) => [value, label]);
+  };
+  assert.deepEqual(optionsFor("category"), [
+    ["GENERAL", "常规"], ["FEATURE", "功能"], ["MAINTENANCE", "维护"], ["SERVICE_INCIDENT", "服务故障"],
+    ["UPDATE", "更新"], ["SECURITY", "安全"], ["DEPRECATION", "弃用"],
+  ]);
+  assert.deepEqual(optionsFor("severity"), [["INFO", "信息"], ["NOTICE", "通知"], ["WARNING", "警告"], ["CRITICAL", "严重"]]);
+  assert.deepEqual(optionsFor("displayMode"), [["CENTER_ONLY", "居中展示"], ["BANNER", "横幅"], ["MODAL", "弹窗"]]);
+  assert.deepEqual(optionsFor("targetPlatform"), [["android", "安卓"], ["desktop", "桌面端"], ["ios", "iOS（苹果系统）"], ["all", "全部"]]);
+  assert.deepEqual(optionsFor("targetChannel"), [["all", "全部"], ["stable", "稳定版"], ["beta", "测试版"], ["nightly", "夜间版"]]);
+
+  for (const text of ["常规公告", "重要通知", "有新版本可用", "这是公告正文。", "这是重要公告正文。", "打开应用更新"]) {
+    assert.ok(admin.includes(text), `缺少中文预设或预览文案：${text}`);
+  }
+  for (const prefix of ["服务器响应：", "服务器返回的公告数据：", "服务器返回的统计数据：", "请先加载现有公告，以便校验预期修订号。", "展示方式："]) {
+    assert.ok(admin.includes(prefix), `缺少中文状态前缀或提示：${prefix}`);
+  }
+  for (const [key, label] of [
+    ["items", "公告条目"], ["currentPublishedRevision", "当前已发布修订"], ["pendingRevision", "待发布修订"], ["revisionStatus", "修订状态"],
+    ["consentedInstalls", "已同意统计的安装数"], ["receiptRows", "回执记录数"], ["installSeen", "已记录安装数"], ["appActive", "活跃安装数"],
+    ["dau", "日活跃安装数"], ["wau", "周活跃安装数"], ["mau", "月活跃安装数"], ["byVersion", "按版本统计"], ["byChannel", "按渠道统计"],
+    ["byPlatform", "按平台统计"], ["versionCode", "版本号"], ["channel", "渠道"], ["platform", "平台"], ["count", "数量"],
+  ]) {
+    assert.ok(admin.includes(`${key}:"${label}"`), `缺少动态字段中文标签：${key}`);
+  }
+  assert.match(admin, /function localizeAdminData\(value, field = ""\)/);
+  assert.match(admin, /function formatAdminResponse\(text, prefix\)/);
+  assert.match(admin, /catch \{ return prefix \+ "\\n原始响应：\\n" \+ text; \}/);
+
+  const script = admin.match(/<script>([\s\S]*?)<\/script>/)?.[1];
+  assert.ok(script, "缺少管理端脚本");
+  const elements = new Map();
+  const element = (id) => {
+    if (!elements.has(id)) elements.set(id, { id, value:"", checked:false, hidden:false, disabled:false, textContent:"", append() {} });
+    return elements.get(id);
+  };
+  const context = {
+    location:{ origin:"http://127.0.0.1:8787", hostname:"127.0.0.1" },
+    document:{ getElementById:element, createElement:(tag) => ({ tag, type:"", disabled:false, textContent:"", append() {} }) },
+    crypto:{ randomUUID:() => "00000000-0000-4000-8000-000000000000" },
+    fetch:async () => { throw new Error("测试不应联网"); },
+  };
+  const runtimeSample = {
+    items:[{ status:"published", pendingRevision:null, revisions:[{ revisionStatus:"superseded" }], body:{
+      category:"SECURITY", severity:"WARNING", displayMode:"MODAL", mustAcknowledge:true,
+      target:{ platform:"android", channel:"stable" }, actions:[{ type:"OPEN_APP_ROUTE" }],
+    } }],
+    byChannel:[{ channel:"nightly", count:1 }], byPlatform:[{ platform:"desktop", count:1 }],
+  };
+  const executable = script.replace(/\s*applyPreset\("general"\);\s*$/, "") +
+    `\nglobalThis.__localized = localizeAdminData(${JSON.stringify(runtimeSample)});` +
+    `\nglobalThis.__formatted = formatAdminResponse(${JSON.stringify(JSON.stringify(runtimeSample))}, "服务器数据：");`;
+  runInNewContext(executable, context);
+  assert.equal(context.__localized["公告条目"][0]["状态"], "已发布");
+  assert.equal(context.__localized["公告条目"][0]["待发布修订"], "无");
+  assert.equal(context.__localized["公告条目"][0]["修订记录"][0]["修订状态"], "已被新修订替代");
+  assert.equal(context.__localized["公告条目"][0]["公告内容"]["类别"], "安全");
+  assert.equal(context.__localized["公告条目"][0]["公告内容"]["严重程度"], "警告");
+  assert.equal(context.__localized["公告条目"][0]["公告内容"]["展示方式"], "弹窗");
+  assert.equal(context.__localized["公告条目"][0]["公告内容"]["需要确认"], "是");
+  assert.equal(context.__localized["公告条目"][0]["公告内容"]["目标"]["平台"], "安卓");
+  assert.equal(context.__localized["公告条目"][0]["公告内容"]["目标"]["渠道"], "稳定版");
+  assert.equal(context.__localized["公告条目"][0]["公告内容"]["操作"][0]["操作类型"], "打开应用内页面");
+  assert.equal(context.__localized["按渠道统计"][0]["渠道"], "夜间版");
+  assert.equal(context.__localized["按平台统计"][0]["平台"], "桌面端");
+  for (const wireValue of ["published", "superseded", "SECURITY", "WARNING", "MODAL", "android", "stable", "nightly", "desktop", "OPEN_APP_ROUTE"]) {
+    assert.equal(context.__formatted.includes(`\"${wireValue}\"`), false, `显示结果泄漏英文协议值：${wireValue}`);
+  }
   assert.match(admin, /<details[^>]*id="advancedFields"/);
   assert.match(admin, /OPEN_APP_ROUTE/);
   assert.match(admin, /app:\/\/update/);
-  console.log("admin preset controls preserve full model and app update route ok");
+  console.log("admin UI semantic copy, translated option labels, and update route contract ok");
 }
 
 {

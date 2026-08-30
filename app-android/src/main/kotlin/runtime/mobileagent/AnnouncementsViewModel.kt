@@ -133,17 +133,20 @@ class AnnouncementsViewModel(application: Application) : AndroidViewModel(applic
                 // A coordinator/storage fault must not make the chat shell unavailable.
                 AnnouncementRefreshResult.Failed("announcement refresh unavailable")
             }
+            val chinese = Locale.getDefault().language.equals("zh", ignoreCase = true)
             status.value = when (result) {
                 AnnouncementRefreshResult.ConfigurationUnavailable ->
-                    "Configure the local announcement URL and public key to fetch a signed feed."
+                    if (chinese) "公告服务暂不可用。" else "The announcement service is unavailable."
                 AnnouncementRefreshResult.Skipped ->
-                    "Using cached announcements. Automatic checks wait 6 hours."
-                AnnouncementRefreshResult.NotModified -> "Announcements are up to date."
-                AnnouncementRefreshResult.Updated -> "Signed announcements updated."
+                    if (chinese) "正在使用缓存公告；自动检查间隔为 6 小时。" else "Using cached announcements. Automatic checks wait 6 hours."
+                AnnouncementRefreshResult.NotModified ->
+                    if (chinese) "公告已是最新。" else "Announcements are up to date."
+                AnnouncementRefreshResult.Updated ->
+                    if (chinese) "签名公告已更新。" else "Signed announcements updated."
                 is AnnouncementRefreshResult.Failed ->
-                    "Fetch failed. Chat and knowledge stay available. ${result.message}"
+                    if (chinese) "公告获取失败；对话与知识库仍可使用。" else "Fetch failed. Chat and knowledge stay available."
                 is AnnouncementRefreshResult.Rejected ->
-                    "Signature rejected (${result.reason}). Previous cache kept."
+                    if (chinese) "公告签名未通过验证，已保留上次缓存。" else "Signature rejected. Previous cache kept."
             }
             reload()
         }

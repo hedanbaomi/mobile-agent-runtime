@@ -34,6 +34,7 @@ import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
+import androidx.lifecycle.viewmodel.compose.LocalViewModelStoreOwner
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LifecycleEventEffect
 import androidx.navigation.NavBackStackEntry
@@ -45,20 +46,24 @@ import runtime.mobileagent.MobileAgentApp
 import runtime.mobileagent.ShellViewModel
 
 /**
- * The application shell owns only navigation state. Each destination creates its
- * own ViewModel against its [NavBackStackEntry], so inactive pages do not eagerly
- * construct or share state with every other destination.
+ * The application shell owns navigation state and long-running ViewModels. Chat,
+ * its inspector, and knowledge import staging deliberately share shell-scoped
+ * instances so route changes cannot cancel active work or lose its progress.
  */
 @Composable
 internal fun MainApp() {
     val app = LocalContext.current.applicationContext as MobileAgentApp
     val shellVm: ShellViewModel = viewModel()
+    val shellOwner = checkNotNull(LocalViewModelStoreOwner.current) { "MainApp requires a stable shell ViewModelStoreOwner" }
+    val chatVm: runtime.mobileagent.ChatViewModel = viewModel(viewModelStoreOwner = shellOwner)
+    val knowledgeVm: runtime.mobileagent.KnowledgeViewModel = viewModel(viewModelStoreOwner = shellOwner)
     val navController = rememberNavController()
     val initialRoute = shellVm.route().takeIf { it in allAppRoutes } ?: AppRoutes.CHAT
     var route by rememberSaveable { mutableStateOf(initialRoute) }
     var mcpReturnRoute by rememberSaveable { mutableStateOf(AppRoutes.SETTINGS) }
     var pendingRoute by rememberSaveable { mutableStateOf<String?>(null) }
     var unsavedDialog by rememberSaveable { mutableStateOf(false) }
+    var inspectorReturnRoute by rememberSaveable { mutableStateOf(AppRoutes.MORE) }
     var editorOwner by rememberSaveable { mutableStateOf<String?>(null) }
     var editorDirty by rememberSaveable { mutableStateOf(false) }
     var editorDiscard by remember { mutableStateOf<(() -> Unit)?>(null) }
@@ -83,6 +88,7 @@ internal fun MainApp() {
 
     fun navigate(target: String) {
         if (target !in allAppRoutes || target == route) return
+        if (target == AppRoutes.INSPECTOR) inspectorReturnRoute = route
         route = target
         shellVm.setRoute(target)
     }
@@ -127,6 +133,25 @@ internal fun MainApp() {
         target?.let(::navigate)
     }
 
+    fun handleBack(compact: Boolean) {
+        if (editorOwner == route && editorDirty) {
+            requestEditorClose()
+            return
+        }
+        if (route == AppRoutes.INSPECTOR) chatVm.inspector(false)
+        val target = appBackTarget(
+            compact = compact,
+            currentRoute = route,
+            inspectorReturnRoute = inspectorReturnRoute,
+            hasPreviousEntry = navController.previousBackStackEntry != null,
+        )
+        if (target != null && target != route) {
+            requestRoute(target)
+        } else if (!navController.popBackStack() && route != AppRoutes.CHAT) {
+            requestRoute(AppRoutes.CHAT)
+        }
+    }
+
     val settings = remember(settingsRevision) { app.container.settings.get() }
     val deviceLanguage = LocalConfiguration.current.locales.get(0)?.language.orEmpty()
     val language = effectiveLanguage(
@@ -149,6 +174,10 @@ internal fun MainApp() {
     MobileAgentTheme(mode = themeMode) {
         BoxWithConstraints(Modifier.fillMaxSize()) {
             val compact = maxWidth < 600.dp
+            BackHandler(
+                enabled = !(editorOwner == route && editorDirty) &&
+                    (route != AppRoutes.CHAT || navController.previousBackStackEntry != null),
+            ) { handleBack(compact) }
             val destinations = if (compact) phonePrimaryDestinations(chinese) else defaultAppDestinations(chinese)
             val selected = if (compact && route !in destinations.map { it.route }) AppRoutes.MORE else route
             AppNavigationScaffold(
@@ -163,16 +192,16 @@ internal fun MainApp() {
             ) { padding ->
                 Box(Modifier.fillMaxSize().padding(padding)) {
                     NavHost(navController = navController, startDestination = initialRoute) {
-                        composable(AppRoutes.CHAT) { ChatRoute(it, chinese, ::requestRoute, ::registerEditorState) }
+                        composable(AppRoutes.CHAT) { ChatRoute(chatVm, chinese, ::requestRoute, ::registerEditorState) }
                         composable(AppRoutes.AGENTS) { AgentsRoute(it, chinese, ::requestRoute, ::requestEditorClose, ::registerEditorState) }
                         composable(AppRoutes.PROVIDERS) {
                             ProvidersRoute(it, chinese, ::requestRoute, ::requestEditorClose, ::registerEditorState,
-                                { mcpReturnRoute = AppRoutes.PROVIDERS; requestRoute(AppRoutes.MCP) })
+                                { mcpReturnRoute = AppRoutes.PROVIDERS; requestRoute(AppRoutes.MCP) }, compact, { handleBack(compact) })
                         }
-                        composable(AppRoutes.KNOWLEDGE) { KnowledgeRoute(it, chinese, ::requestRoute) }
+                        composable(AppRoutes.KNOWLEDGE) { KnowledgeRoute(knowledgeVm, chinese, ::requestRoute) }
                         composable(AppRoutes.SKILLS) { SkillsRoute(it, chinese) }
                         composable(AppRoutes.NEWS) {
-                            AnnouncementsRoute(it, chinese) { appRoute ->
+                            AnnouncementsRoute(it, chinese, compact, { handleBack(compact) }) { appRoute ->
                                 if (appRoute == "app://update") pendingUpdateCheck = true
                                 requestRoute(routeFromAnnouncement(appRoute))
                             }
@@ -181,16 +210,26 @@ internal fun MainApp() {
                             SettingsRoute(it, chinese, ::requestRoute,
                                 { mcpReturnRoute = AppRoutes.SETTINGS; requestRoute(AppRoutes.MCP) },
                                 { settingsRevision++ }, autoCheckUpdate = pendingUpdateCheck,
-                                onAutoCheckConsumed = { pendingUpdateCheck = false })
+                                onAutoCheckConsumed = { pendingUpdateCheck = false }, showBack = compact,
+                                onBack = { handleBack(compact) })
                         }
                         composable(AppRoutes.ABOUT) {
                             SettingsRoute(it, chinese, ::requestRoute,
                                 { mcpReturnRoute = AppRoutes.ABOUT; requestRoute(AppRoutes.MCP) },
-                                { settingsRevision++ }, aboutOnly = true)
+                                { settingsRevision++ }, aboutOnly = true, showBack = compact,
+                                onBack = { handleBack(compact) })
                         }
                         composable(AppRoutes.MORE) { MoreHub(chinese, ::requestRoute) }
                         composable(AppRoutes.MCP) { McpRoute(it, chinese, if (compact) AppRoutes.MORE else mcpReturnRoute, ::requestRoute) }
-                        composable(AppRoutes.INSPECTOR) { InspectorRoute(it, chinese, navController, ::requestRoute) }
+                        composable(AppRoutes.INSPECTOR) {
+                            InspectorRoute(
+                                vm = chatVm,
+                                chinese = chinese,
+                                showBack = compact,
+                                inspectorEnabled = app.container.uiPreferences.getBoolean("request-inspector", true),
+                                onBack = { handleBack(compact) },
+                            )
+                        }
                     }
                 }
             }
@@ -204,6 +243,10 @@ private val allAppRoutes = setOf(
     AppRoutes.SKILLS, AppRoutes.NEWS, AppRoutes.SETTINGS, AppRoutes.MORE,
     AppRoutes.ABOUT, AppRoutes.INSPECTOR, AppRoutes.MCP,
 )
+
+/** Regression seam for routes whose active work must outlive a destination entry. */
+internal fun isShellScopedLongRunningRoute(route: String): Boolean =
+    route == AppRoutes.CHAT || route == AppRoutes.KNOWLEDGE
 
 @Composable
 private fun MoreHub(chinese: Boolean, onOpen: (String) -> Unit) {
@@ -221,9 +264,8 @@ private fun MoreHub(chinese: Boolean, onOpen: (String) -> Unit) {
 }
 
 @Composable
-private fun ChatRoute(entry: NavBackStackEntry, chinese: Boolean, onRoute: (String) -> Unit,
+private fun ChatRoute(vm: runtime.mobileagent.ChatViewModel, chinese: Boolean, onRoute: (String) -> Unit,
     onEditorState: (String, Boolean, (() -> Unit)?) -> Unit) {
-    val vm: runtime.mobileagent.ChatViewModel = viewModel(viewModelStoreOwner = entry)
     LifecycleEventEffect(Lifecycle.Event.ON_RESUME) { vm.reload() }
     val state = vm.state.value.copy(language = if (chinese) "zh-CN" else "en-US")
     val actions = runtime.mobileagent.feature.chat.ChatActions(
@@ -261,7 +303,7 @@ private fun AgentsRoute(entry: NavBackStackEntry, chinese: Boolean, onRoute: (St
 @Composable
 private fun ProvidersRoute(entry: NavBackStackEntry, chinese: Boolean, onRoute: (String) -> Unit,
     onRequestEditorClose: () -> Unit, onEditorState: (String, Boolean, (() -> Unit)?) -> Unit,
-    onOpenMcp: () -> Unit) {
+    onOpenMcp: () -> Unit, showBack: Boolean, onBack: () -> Unit) {
     val vm: runtime.mobileagent.ProvidersViewModel = viewModel(viewModelStoreOwner = entry)
     LifecycleEventEffect(Lifecycle.Event.ON_RESUME) { vm.reload() }
     var editorOpen by rememberSaveable { mutableStateOf(false) }
@@ -296,7 +338,11 @@ private fun ProvidersRoute(entry: NavBackStackEntry, chinese: Boolean, onRoute: 
     )
     val actions = runtime.mobileagent.feature.providers.ProvidersActions(
         onSelectProvider = { selectedProviderId = it; probeModelId = null },
-        onDraftChange = { providerDraft = it },
+        onDraftChange = { nextDraft ->
+            if (providerDraft.vision != nextDraft.vision) vm.recordCapabilityToggle("image", nextDraft.vision)
+            if (providerDraft.tools != nextDraft.tools) vm.recordCapabilityToggle("tools", nextDraft.tools)
+            providerDraft = nextDraft
+        },
         onOpenEditor = { id ->
             providerDraft = providerDraftFrom(providers.firstOrNull { it.id == id }, null)
             providerBaseline = providerDraft; providerError = null; editorOpen = true
@@ -340,12 +386,18 @@ private fun ProvidersRoute(entry: NavBackStackEntry, chinese: Boolean, onRoute: 
         },
         onCloseProbe = { probeModelId = null; probeMessage = "" }, onOpenMcpSettings = onOpenMcp,
     )
-    runtime.mobileagent.feature.providers.ProvidersScreen(state, actions)
+    if (showBack) {
+        Column(Modifier.fillMaxSize()) {
+            BackLabel(onClick = onBack, label = if (chinese) "返回" else "Back")
+            runtime.mobileagent.feature.providers.ProvidersScreen(state, actions, Modifier.weight(1f).fillMaxWidth())
+        }
+    } else {
+        runtime.mobileagent.feature.providers.ProvidersScreen(state, actions)
+    }
 }
 
 @Composable
-private fun KnowledgeRoute(entry: NavBackStackEntry, chinese: Boolean, onRoute: (String) -> Unit) {
-    val vm: runtime.mobileagent.KnowledgeViewModel = viewModel(viewModelStoreOwner = entry)
+private fun KnowledgeRoute(vm: runtime.mobileagent.KnowledgeViewModel, chinese: Boolean, onRoute: (String) -> Unit) {
     val state = vm.state.value.copy(language = if (chinese) "zh-CN" else "en-US")
     val actions = runtime.mobileagent.feature.knowledge.KnowledgeActions(
         onImport = vm::importUris, onImportZip = vm::importZip, onImportFolder = vm::importTree,
@@ -390,7 +442,8 @@ private fun SkillsRoute(entry: NavBackStackEntry, chinese: Boolean) {
 }
 
 @Composable
-private fun AnnouncementsRoute(entry: NavBackStackEntry, chinese: Boolean, onAppRoute: (String) -> Unit) {
+private fun AnnouncementsRoute(entry: NavBackStackEntry, chinese: Boolean, showBack: Boolean, onBack: () -> Unit,
+    onAppRoute: (String) -> Unit) {
     val vm: runtime.mobileagent.AnnouncementsViewModel = viewModel(viewModelStoreOwner = entry)
     val state = runtime.mobileagent.feature.announcements.AnnouncementsUiState(
         items = vm.visible(), status = vm.status.value,
@@ -399,7 +452,6 @@ private fun AnnouncementsRoute(entry: NavBackStackEntry, chinese: Boolean, onApp
             runtime.mobileagent.AnnouncementsViewModel.Filter.HISTORY -> "history"
             runtime.mobileagent.AnnouncementsViewModel.Filter.UNREAD -> "unread"
         }, banner = vm.banner(), modal = vm.modal(), selected = vm.selected.value,
-        baseUrl = vm.baseUrl.value, publicKeyHex = vm.publicKeyHex.value,
         language = if (chinese) "zh-CN" else "en-US",
     )
     val actions = runtime.mobileagent.feature.announcements.AnnouncementsActions(
@@ -411,16 +463,24 @@ private fun AnnouncementsRoute(entry: NavBackStackEntry, chinese: Boolean, onApp
             }; vm.reload()
         }, onRefresh = { vm.refresh(force = true) }, onOpen = vm::open,
         onCloseDetail = { vm.selected.value = null }, onMarkAllRead = vm::markAllRead,
-        onDismiss = vm::dismiss, onAcknowledge = vm::acknowledge, onSaveEndpoint = vm::saveEndpoint,
+        onDismiss = vm::dismiss, onAcknowledge = vm::acknowledge,
         onAppRoute = onAppRoute,
     )
-    runtime.mobileagent.feature.announcements.AnnouncementsScreen(state, actions)
+    if (showBack) {
+        Column(Modifier.fillMaxSize()) {
+            BackLabel(onClick = onBack, label = if (chinese) "返回" else "Back")
+            runtime.mobileagent.feature.announcements.AnnouncementsScreen(state, actions, Modifier.weight(1f).fillMaxWidth())
+        }
+    } else {
+        runtime.mobileagent.feature.announcements.AnnouncementsScreen(state, actions)
+    }
 }
 
 @Composable
 private fun SettingsRoute(entry: NavBackStackEntry, chinese: Boolean, onRoute: (String) -> Unit,
     onOpenMcp: () -> Unit, onSettingsChanged: () -> Unit, aboutOnly: Boolean = false,
-    autoCheckUpdate: Boolean = false, onAutoCheckConsumed: () -> Unit = {}) {
+    autoCheckUpdate: Boolean = false, onAutoCheckConsumed: () -> Unit = {}, showBack: Boolean = false,
+    onBack: () -> Unit = {}) {
     val vm: runtime.mobileagent.SettingsViewModel = viewModel(viewModelStoreOwner = entry)
     val app = LocalContext.current.applicationContext as MobileAgentApp
     var thirdParty by remember { mutableStateOf(runtime.mobileagent.feature.settings.ThirdPartyNoticesUiState()) }
@@ -428,6 +488,7 @@ private fun SettingsRoute(entry: NavBackStackEntry, chinese: Boolean, onRoute: (
     var exportAgents by remember { mutableStateOf<List<Pair<String, String>>>(emptyList()) }
     val importLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { vm.importFrom(it) }
     val exportLauncher = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/zip")) { vm.exportTo(it) }
+    val diagnosticsExportLauncher = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/zip")) { vm.exportDiagnosticsTo(it) }
     val mcpConfigured = runtime.mobileagent.McpConfigStore.read(app.container).value != null
     val raw = vm.uiState(app.container.announcements.statsEnabled(), app.container.announcements.records().count { it.state.readAt == null })
     val state = raw.copy(language = if (chinese) "zh-CN" else "en-US", themeMode = raw.themeMode.takeUnless { it.equals("system", true) } ?: "66ccff",
@@ -458,6 +519,9 @@ private fun SettingsRoute(entry: NavBackStackEntry, chinese: Boolean, onRoute: (
     val actions = runtime.mobileagent.feature.settings.SettingsActions(
         onLanguage = { vm.language(it); onSettingsChanged() }, onTheme = { vm.theme(it); onSettingsChanged() },
         onStats = { app.container.announcements.setStatsEnabled(it) }, onRequestInspection = vm::inspector,
+        onDiagnosticsEnabled = vm::setDiagnosticsEnabled,
+        onExportDiagnostics = { diagnosticsExportLauncher.launch("mobile-agent-diagnostics.zip") },
+        onClearDiagnostics = vm::clearDiagnostics,
         onExport = { exportAgents = vm.exportAgents(); exportChooserOpen = true },
         onImport = { importLauncher.launch(arrayOf("application/json", "application/zip", "*/*")) },
         onCheckUpdates = vm::checkUpdates, onOpenProviders = { onRoute(AppRoutes.PROVIDERS) },
@@ -467,8 +531,20 @@ private fun SettingsRoute(entry: NavBackStackEntry, chinese: Boolean, onRoute: (
         onCloseThirdPartyNotices = { thirdParty = thirdParty.copy(opened = false) },
         onSelectThirdPartyNotice = { id -> thirdParty = thirdParty.copy(opened = true, selectedComponentId = id, selectedLicenseText = null, error = null) },
         onUnlockRootPrompt = vm::unlockRootPrompt, onSaveRootPrompt = vm::saveRootPrompt, onRestoreRootPrompt = vm::restoreRootPrompt,
+        onSaveWebSearch = vm::saveWebSearch, onWebSearchEnabled = vm::setWebSearchEnabled,
+        onClearWebSearch = vm::clearWebSearch,
     )
-    if (aboutOnly) runtime.mobileagent.feature.settings.AboutScreen(state, actions) else runtime.mobileagent.feature.settings.SettingsScreen(state, actions)
+    if (showBack) {
+        Column(Modifier.fillMaxSize()) {
+            BackLabel(onClick = onBack, label = if (chinese) "返回" else "Back")
+            if (aboutOnly) runtime.mobileagent.feature.settings.AboutScreen(state, actions, Modifier.weight(1f).fillMaxWidth())
+            else runtime.mobileagent.feature.settings.SettingsScreen(state, actions, Modifier.weight(1f).fillMaxWidth())
+        }
+    } else if (aboutOnly) {
+        runtime.mobileagent.feature.settings.AboutScreen(state, actions)
+    } else {
+        runtime.mobileagent.feature.settings.SettingsScreen(state, actions)
+    }
     if (exportChooserOpen) ExportAgentDialog(chinese, exportAgents,
         onConfirm = { agentId, includeSkillPackages, includeKnowledgeContent, includeConversations ->
             exportChooserOpen = false
@@ -493,19 +569,50 @@ private fun McpRoute(entry: NavBackStackEntry, chinese: Boolean, returnRoute: St
 }
 
 @Composable
-private fun InspectorRoute(entry: NavBackStackEntry, chinese: Boolean, navController: androidx.navigation.NavHostController,
-    onRoute: (String) -> Unit) {
-    val owner = navController.previousBackStackEntry ?: entry
-    val vm: runtime.mobileagent.ChatViewModel = viewModel(viewModelStoreOwner = owner)
+private fun InspectorRoute(
+    vm: runtime.mobileagent.ChatViewModel,
+    chinese: Boolean,
+    showBack: Boolean,
+    inspectorEnabled: Boolean,
+    onBack: () -> Unit,
+) {
     val state = vm.state.value.copy(language = if (chinese) "zh-CN" else "en-US")
     val preview = state.requestPreview
-    if (preview == null) {
-        Column(Modifier.fillMaxSize().padding(16.dp)) {
-            Text(if (chinese) "没有可检查的脱敏请求。先发送一条消息。" else "No redacted request is available. Send a message first.")
-            androidx.compose.material3.Button(onClick = { onRoute(AppRoutes.CHAT) }) { Text(if (chinese) "返回对话" else "Back to chat") }
+    val close = {
+        vm.inspector(false)
+        onBack()
+    }
+    @Composable
+    fun InspectorContent(modifier: Modifier = Modifier) {
+        if (!inspectorEnabled) {
+            Column(modifier.fillMaxSize().padding(16.dp)) {
+                Text(
+                    if (chinese) "请求检查器已关闭，请在设置中开启后再发送消息。"
+                    else "Request inspection is disabled. Enable it in Settings, then send a message.",
+                )
+                androidx.compose.material3.Button(onClick = close) {
+                    Text(if (chinese) "返回来源" else "Back to source")
+                }
+            }
+        } else if (preview == null) {
+            Column(modifier.fillMaxSize().padding(16.dp)) {
+                Text(if (chinese) "尚无可检查的脱敏请求。先发送一条消息。" else "No redacted request is available yet. Send a message first.")
+                androidx.compose.material3.Button(onClick = close) {
+                    Text(if (chinese) "返回来源" else "Back to source")
+                }
+            }
+        } else {
+            runtime.mobileagent.feature.chat.RequestInspectorScreen(preview, state.promptLayers, close, chinese, modifier)
         }
-    } else runtime.mobileagent.feature.chat.RequestInspectorScreen(preview, state.promptLayers,
-        { vm.inspector(false); onRoute(AppRoutes.CHAT) }, chinese)
+    }
+    if (showBack) {
+        Column(Modifier.fillMaxSize()) {
+            BackLabel(onClick = close, label = if (chinese) "返回" else "Back")
+            InspectorContent(Modifier.weight(1f).fillMaxWidth())
+        }
+    } else {
+        InspectorContent()
+    }
 }
 
 private fun routeFromAnnouncement(appRoute: String): String = when (appRoute) {

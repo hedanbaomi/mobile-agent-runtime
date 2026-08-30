@@ -172,4 +172,25 @@ class SecretInventoryTest {
             assertEquals(SecretStatus.ACTIVE, inventory.status("ref-malformed-snapshot"))
         }
     }
+
+    @Test
+    fun configuredWebSearchKeyIsAFirstClassSecretReference() {
+        JdbcSqlConnection().use { db ->
+            Migrations.apply(db)
+            val settings = SettingsRepository(db)
+            val inventory = SecretInventory(db)
+            inventory.putActive("search:brave", byteArrayOf(8, 9))
+
+            settings.setWebSearch(secretRef = "search:brave", enabled = true)
+            assertEquals("search:brave", settings.webSearchSecretRef())
+            assertTrue(settings.webSearchEnabled())
+            assertTrue("search:brave" in inventory.referencedSecretRefs())
+            inventory.collectOrphans()
+            assertEquals(SecretStatus.ACTIVE, inventory.status("search:brave"))
+
+            settings.setWebSearch(secretRef = null, enabled = false)
+            inventory.collectOrphans()
+            assertEquals(SecretStatus.ORPHANED, inventory.status("search:brave"))
+        }
+    }
 }

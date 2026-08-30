@@ -50,7 +50,7 @@ codegraph status . --json
 Get-FileHash -Algorithm SHA256 -LiteralPath LICENSE,LICENSES/AGPL-3.0-only.txt
 ```
 
-下面为 Python 标准库检查器，已随 M0.5 文档更新扩展至 R01—R18、U01—U06 和阶段顺序；上方历史结果不因此改写。环境 Python 3.11；在 PowerShell 以单引号 here-string 传入 `python -B -`，或提取本代码块在内存中执行。它只检查根目录与 `docs/` 的第一方文档，不扫描构建/依赖目录，也不是产品 licenseGuard、REUSE 或业务测试：
+下面为 Python 标准库检查器，已随诊断日志需求更新扩展至 R01—R19、U01—U06 和阶段顺序；上方历史结果不因此改写。环境 Python 3.11；在 PowerShell 以单引号 here-string 传入 `python -B -`，或提取本代码块在内存中执行。它只检查根目录与 `docs/` 的第一方文档，不扫描构建/依赖目录，也不是产品 licenseGuard、REUSE 或业务测试：
 
 ```python
 # REUSE-IgnoreStart
@@ -100,7 +100,7 @@ for p in docs:
         if not resolved.is_relative_to(root): issues.append(rel + ": external local path " + target)
 req = (root / "docs/REQUIREMENTS.md").read_text(encoding="utf-8")
 ids = set(re.findall(r"\| (R\d{2}) \|", req))
-if ids != {f"R{i:02}" for i in range(1, 19)}: issues.append("R01-R18 coverage missing")
+if ids != {f"R{i:02}" for i in range(1, 20)}: issues.append("R01-R19 coverage missing")
 acceptance = (root / "docs/ACCEPTANCE.md").read_text(encoding="utf-8")
 ui_ids = set(re.findall(r"\| (U\d{2}) \|", acceptance))
 if ui_ids != {f"U{i:02}" for i in range(1, 7)}: issues.append("U01-U06 coverage missing")
@@ -157,3 +157,9 @@ raise SystemExit(1 if issues else 0)
 - 交付内容：完成 [docs/UI_DESIGN.md](UI_DESIGN.md)、[docs/design/ui-tokens.json](design/ui-tokens.json)、[docs/design/ui-implementation-map.md](design/ui-implementation-map.md)、[docs/design/ui-prototype.html](design/ui-prototype.html)、[docs/design/screens/](design/screens/README.md) 8 份高保真矢量设计稿及 [docs/design/source/](design/source/README.md) 源稿说明。所有页面及文档全量禁用 Emoji。
 - 实际验证：执行 Python 文档检查器，20 份 Markdown、97 个本地链接、18 条需求（R01—R18）、6 项 UI 验收（U01—U06）、9 个阶段顺序（M0—M7）、许可证哈希均通过，状态为 `PASS`；Emoji 扫描脚本确认 0 处违规字符；`python -B -m reuse lint` 退出 0（155/155）。
 - 范围与限制：本轮完成 M0.5 设计包交付与设计文档验收（`DOC_CHECK_PASS`）；未修改产品业务逻辑源码、未进行真实付费模型请求、未执行设备与生产部署，未 commit/push。详见 [交接记录](../HANDOFF.md)。
+
+## 9. 2026-08-30 Round3 能力修复文档同步
+
+- 已同步 [技术实现方案](IMPLEMENTATION_PLAN.md)、[验收矩阵](ACCEPTANCE.md)、[Skills 与安全](SKILLS_AND_SECURITY.md)、[需求依据](REQUIREMENTS.md)、[交接记录](../HANDOFF.md)和 [Round3 证据](evidence/2026-08-30/manual-review-round-3-capabilities.md)。
+- 文档明确区分：兼容标准库 Claude Skill 程序的真实 isolated CPython 调用；重型桌面依赖脚本改走原生知识工具；PowerShell、宿主 shell、任意文件系统和未授权网络不支持。
+- 全仓 `check` 936 tasks、API 31 定向设备矩阵 34/34、公告 `npm test`、REUSE 392/392 已通过；真实 Brave/付费 Provider/Vision、294 PDF 全量耗时、正式签名 release、commit/push 和 Cloudflare 再部署均未执行。

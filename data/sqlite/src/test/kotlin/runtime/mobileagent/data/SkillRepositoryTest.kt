@@ -5,7 +5,15 @@ package runtime.mobileagent.data
 
 import org.junit.jupiter.api.Assertions.*
 import org.junit.jupiter.api.Test
+import runtime.mobileagent.domain.AgentProfile
+import runtime.mobileagent.domain.AppException
+import runtime.mobileagent.domain.ApiFormat
+import runtime.mobileagent.domain.ModelProfile
+import runtime.mobileagent.domain.ModelRole
+import runtime.mobileagent.domain.ProviderProfile
+import runtime.mobileagent.skills.CompatibilityClass
 import java.io.ByteArrayOutputStream
+import java.text.Normalizer
 import java.util.zip.ZipEntry
 import java.util.zip.ZipOutputStream
 
@@ -69,6 +77,138 @@ class SkillRepositoryTest {
         assertThrows(IllegalArgumentException::class.java) { repository.inspect(skill.installId) }
     }
 
+    @Test
+    fun sourceViewerMatchesUnicodeEntryNamesUsingArchiveNormalization() = database { db ->
+        val repository = SkillRepository(db)
+        val nfdName = "scripts/" + Normalizer.normalize("résumé.py", Normalizer.Form.NFD)
+        repository.importPackage(packageBytes(mapOf(nfdName to "def run(ctx, arguments):\n    return {'ok': True}\n")))
+        val skill = repository.list().single()
+        val normalizedName = Normalizer.normalize(nfdName, Normalizer.Form.NFC)
+
+        assertTrue(repository.sourceFiles(skill.installId).contains(normalizedName))
+        assertTrue(repository.sourceText(skill.installId, normalizedName).contains("def run"))
+    }
+
+    @Test
+    fun enabledSkillCanBeBoundToAgentByInstallId() = database { db ->
+        val skills = SkillRepository(db)
+        assertTrue(skills.importPackage(packageBytes()).accepted)
+        val installId = skills.list().single().installId
+        skills.approvePermissions(installId, emptySet())
+        skills.setEnabled(installId, true)
+
+        val profiles = ProfileRepository(db)
+        profiles.createProvider(
+            ProviderProfile(
+                id = "provider.skills",
+                name = "Skill binding fixture",
+                apiFormat = ApiFormat.OPENAI_COMPATIBLE,
+                baseUrl = "https://example.invalid/v1",
+                secretRef = "fixture-secret",
+                revision = 1,
+            ),
+        )
+        profiles.createModel(
+            ModelProfile(
+                id = "model.skills.chat",
+                providerId = "provider.skills",
+                role = ModelRole.CHAT,
+                modelId = "fixture-chat",
+                capabilities = setOf("stream"),
+                contextLimit = 8_192,
+                outputLimit = 1_024,
+                revision = 1,
+            ),
+        )
+
+        val saved = AgentRepository(db).saveWithPrompt(
+            AgentProfile(
+                id = "agent.skills",
+                name = "Skill binding agent",
+                promptRevisionId = "created-atomically",
+                chatProfileId = "model.skills.chat",
+                skillIds = listOf(installId),
+                revision = 0,
+            ),
+            "Use only the explicitly bound skill.",
+        )
+
+        assertEquals(listOf(installId), saved.skillIds)
+        assertEquals(listOf(installId), AgentRepository(db).createSnapshot(saved.id).skillIds)
+    }
+
+    @Test
+    fun disabledSkillInstallIdCannotBeBoundToAgent() = database { db ->
+        val skills = SkillRepository(db)
+        assertTrue(skills.importPackage(packageBytes()).accepted)
+        val installId = skills.list().single().installId
+        assertFalse(skills.get(installId)!!.enabled)
+
+        createChatProfile(db)
+        val error = assertThrows(AppException::class.java) {
+            AgentRepository(db).saveWithPrompt(
+                agentProfile("agent.disabled-skill", "model.skills.chat", installId),
+                "Disabled skills must not be bound.",
+            )
+        }
+
+        assertTrue(error.message.orEmpty().contains("missing or disabled"))
+        assertEquals(0, db.query("SELECT COUNT(*) AS count FROM agent_profiles").single().long("count"))
+        assertEquals(0, db.query("SELECT COUNT(*) AS count FROM prompt_revisions").single().long("count"))
+    }
+
+    @Test
+    fun instructionOnlySkillCanBeBoundByEnabledInstallId() = database { db ->
+        val skills = SkillRepository(db)
+        assertTrue(skills.importPackage(instructionOnlyPackageBytes()).accepted)
+        val installed = skills.list().single()
+        assertEquals(CompatibilityClass.A, installed.classification)
+        skills.setEnabled(installed.installId, true)
+
+        createChatProfile(db)
+        val saved = AgentRepository(db).saveWithPrompt(
+            agentProfile("agent.instruction-only", "model.skills.chat", installed.installId),
+            "Use the instruction-only skill.",
+        )
+
+        assertEquals(listOf(installed.installId), saved.skillIds)
+    }
+
+    private fun createChatProfile(db: SqlConnection) {
+        val profiles = ProfileRepository(db)
+        profiles.createProvider(
+            ProviderProfile(
+                id = "provider.skills",
+                name = "Skill binding fixture",
+                apiFormat = ApiFormat.OPENAI_COMPATIBLE,
+                baseUrl = "https://example.invalid/v1",
+                secretRef = "fixture-secret",
+                revision = 1,
+            ),
+        )
+        profiles.createModel(
+            ModelProfile(
+                id = "model.skills.chat",
+                providerId = "provider.skills",
+                role = ModelRole.CHAT,
+                modelId = "fixture-chat",
+                capabilities = setOf("stream"),
+                contextLimit = 8_192,
+                outputLimit = 1_024,
+                revision = 1,
+            ),
+        )
+    }
+
+    private fun agentProfile(id: String, chatProfileId: String, skillId: String) = AgentProfile(
+        id = id,
+        name = "Skill binding agent",
+        promptRevisionId = "created-atomically",
+        chatProfileId = chatProfileId,
+        skillIds = listOf(skillId),
+        revision = 0,
+    )
+
     private fun database(block: (SqlConnection) -> Unit) {
         JdbcSqlConnection("jdbc:sqlite::memory:").use { db ->
             Migrations.apply(db)
@@ -76,7 +216,7 @@ class SkillRepositoryTest {
         }
     }
 
-    private fun packageBytes(): ByteArray {
+    private fun packageBytes(extraFiles: Map<String, String> = emptyMap()): ByteArray {
         val files = mapOf(
             "SKILL.md" to "# Test skill\nUser-selected local test package.",
             "scripts/main.py" to "def run(ctx, arguments):\n    return {\"ok\": True}\n",
@@ -85,7 +225,7 @@ class SkillRepositoryTest {
               "runtime":{"kind":"python","python":"3.14","entrypoint":"scripts.main:run","mode":"pure-python"},
               "permissions":{"knowledge.search":{"scope":"selected-by-user"},"network.http":{"hosts":["example.com"],"methods":["GET"]}}
             }""".trimIndent(),
-        )
+        ) + extraFiles
         val out = ByteArrayOutputStream()
         ZipOutputStream(out).use { zip ->
             files.forEach { (path, body) ->
@@ -93,6 +233,16 @@ class SkillRepositoryTest {
                 zip.write(body.toByteArray())
                 zip.closeEntry()
             }
+        }
+        return out.toByteArray()
+    }
+
+    private fun instructionOnlyPackageBytes(): ByteArray {
+        val out = ByteArrayOutputStream()
+        ZipOutputStream(out).use { zip ->
+            zip.putNextEntry(ZipEntry("SKILL.md"))
+            zip.write("# Instruction-only test skill\nUse this local instruction only.\n".toByteArray())
+            zip.closeEntry()
         }
         return out.toByteArray()
     }

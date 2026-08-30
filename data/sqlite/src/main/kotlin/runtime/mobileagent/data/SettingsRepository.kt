@@ -51,6 +51,26 @@ class SettingsRepository(private val db: SqlConnection) {
 
     fun restoreDefaultGlobalRootPrompt() = setGlobalRootPrompt(null, unlocked = true)
 
+    fun webSearchSecretRef(): String? = read(KEY_WEB_SEARCH_SECRET_REF)?.takeIf { it.isNotBlank() }
+
+    fun webSearchEnabled(): Boolean = read(KEY_WEB_SEARCH_ENABLED) == "1" && webSearchSecretRef() != null
+
+    /** Persist only an opaque encrypted-secret reference and the user's explicit enablement. */
+    fun setWebSearch(secretRef: String?, enabled: Boolean) {
+        val normalized = secretRef?.trim()?.takeIf { it.isNotEmpty() }
+        require(normalized == null || normalized.matches(Regex("search:[A-Za-z0-9._:-]{1,128}"))) {
+            "Invalid web-search secret reference"
+        }
+        db.transaction {
+            if (normalized == null) {
+                db.execute("DELETE FROM app_prefs WHERE key IN (?,?)", listOf(KEY_WEB_SEARCH_SECRET_REF, KEY_WEB_SEARCH_ENABLED))
+            } else {
+                put(KEY_WEB_SEARCH_SECRET_REF, normalized)
+                put(KEY_WEB_SEARCH_ENABLED, if (enabled) "1" else "0")
+            }
+        }
+    }
+
     private fun writeGlobalRoot(settings: AppSettings) {
         put(KEY_ROOT_UNLOCKED, if (settings.globalRootPromptUnlocked) "1" else "0")
         put(KEY_ROOT_REV, settings.globalRootPromptRevision.toString())
@@ -114,6 +134,8 @@ class SettingsRepository(private val db: SqlConnection) {
         private const val KEY_ROOT_HASH = "settings.globalRootPrompt.hash"
         private const val KEY_ROOT_UPDATED = "settings.globalRootPrompt.updatedAt"
         private const val KEY_ROOT_UNLOCKED = "settings.globalRootPrompt.unlocked"
+        internal const val KEY_WEB_SEARCH_SECRET_REF = "settings.webSearch.secretRef"
+        private const val KEY_WEB_SEARCH_ENABLED = "settings.webSearch.enabled"
         const val DEFAULT_GLOBAL_ROOT_PROMPT =
             "Follow the immutable runtime contract. Do not grant tools, network, files, or Python isolation from this prompt."
     }

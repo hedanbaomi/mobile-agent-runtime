@@ -22,15 +22,10 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
-import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
-import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.unit.dp
@@ -45,8 +40,6 @@ data class AnnouncementsUiState(
     val banner: CachedAnnouncement? = null,
     val modal: CachedAnnouncement? = null,
     val selected: CachedAnnouncement? = null,
-    val baseUrl: String = "",
-    val publicKeyHex: String = "",
     val loading: Boolean = false,
     val error: String? = null,
     val language: String = "zh-CN",
@@ -60,7 +53,6 @@ data class AnnouncementsActions(
     val onMarkAllRead: () -> Unit = {},
     val onDismiss: (CachedAnnouncement) -> Unit = {},
     val onAcknowledge: (CachedAnnouncement) -> Unit = {},
-    val onSaveEndpoint: (String, String) -> Unit = { _, _ -> },
     val onAppRoute: (String) -> Unit = {},
     /** Called after an allowlisted action is selected; URLs/body text stay out of telemetry. */
     val onActionClicked: (CachedAnnouncement, AnnouncementAction) -> Unit = { _, _ -> },
@@ -93,7 +85,6 @@ fun AnnouncementsScreen(state: AnnouncementsUiState, actions: AnnouncementsActio
                 items(state.items, key = { "${it.item.id}:${it.item.revision}" }) { record -> AnnouncementCard(record, actions, zh) }
             }
         }
-        EndpointForm(state.baseUrl, state.publicKeyHex, actions.onSaveEndpoint, zh)
     }
     state.selected?.let { record ->
         AnnouncementDetailDialog(record, actions.onCloseDetail, zh) { action ->
@@ -180,15 +171,4 @@ private fun AnnouncementDetailDialog(record: CachedAnnouncement, onClose: () -> 
         },
         confirmButton = { Button(onClick = onClose) { Text(if (zh) "关闭" else "Close") } },
     )
-}
-
-@Composable
-private fun EndpointForm(baseUrl: String, publicKeyHex: String, onSave: (String, String) -> Unit, zh: Boolean) {
-    var url by remember(baseUrl) { mutableStateOf(baseUrl) }
-    var key by remember(publicKeyHex) { mutableStateOf(publicKeyHex) }
-    Column(Modifier.padding(top = 12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-        OutlinedTextField(url, { url = it }, label = { Text(if (zh) "公告地址" else "Feed URL") }, modifier = Modifier.fillMaxWidth())
-        OutlinedTextField(key, { key = it }, label = { Text(if (zh) "公钥" else "Public key") }, modifier = Modifier.fillMaxWidth())
-        OutlinedButton(onClick = { onSave(url, key) }) { Text(if (zh) "保存公告设置" else "Save feed settings") }
-    }
 }

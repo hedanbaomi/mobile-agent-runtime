@@ -3,7 +3,7 @@
 
 # 技术实现方案
 
-版本：v1.8 最终复核与 1.0 本地门禁，2026-08-29；继承 v1.7 的 0.2/0.3 配置与批量导入。状态：**0.1.1–0.3 最终复核与修复已收口；1.0 本地门禁/调试包达到 `LOCAL_PACKAGE_READY`，正式签名 release 为 `BLOCKED_SIGNING`**。能力探测按 metadata/stream/tools/image 独立验证真实协议语义，密钥按 Provider/Header/不可变快照引用感知退休；业务 ViewModel 已按 `NavBackStackEntry` 隔离，首帧 NavHost graph 竞态已修复；知识 ZIP 使用应用私有 staging 文件、文件型中央目录验证和单 entry 展开，批次由持久 coordinator 恢复。严格依赖验证的全仓 `check`、API 31 instrumentation（31 项，30 pass、1 条受控 load 用例 skip）和 debug SBOM 已通过；release keystore、store password、alias、key password 均未由用户提供，因此不生成或冒用签名身份，也不把 debug 包称为正式 1.0。App 元数据仍为 `versionName=0.1.0`/`versionCode=1`，待后续共同安排正式 release 时再决定版本。F-001 曾稳定出现两次但未稳定复现，保持 `candidate_intermittent`，需对应 APK SHA 与完整 Logcat 才能定因。真实 Vision、Android 15 六小时 timeout、Android 16 Job 配额耗尽、500 文件批次实机、初始 ZIP staging 期间进程死亡及 ENOSPC 注入仍未执行，不能标完整 K06 或正式 release PASS。公告 issue #1 的生产部署与后检由本轮独立部署证据记录，不与 Android release 混为一项。
+版本：v2.1 人工终审能力修复包，2026-08-30；继承 v2.0 的界面、导航、诊断和公告部署状态。状态：**知识导入和 Chat 流跨顶层页面继续运行；请求检查器读取同一状态；Agent 获得逐次授权的固定 Brave 联网搜索；兼容的无清单 Claude Skill 标准库 CLI 在启用、授权、绑定后成为真实模型工具并由 isolated CPython 执行。最终复核问题已经修订并停止继续复核；新的 debug 签名 APK 等待用户人工终审，正式签名 release 仍为 `BLOCKED_SIGNING`**。不开放 PowerShell、宿主 shell、任意宿主文件系统、子进程、原生扩展或未授权网络。新 APK SHA-256 为 `d68a062b12121b76e502afd8a8cf3610d756876d3a7a00eca916f597ad564682`，API 31 x86_64 定向设备回归 34/34，全仓严格依赖 check 936 tasks 通过。此前公告 Worker 生产状态保持不变；本次没有重新部署或修改公告内容。App 元数据仍为 `versionName=0.1.0`/`versionCode=1`。F-001 曾稳定出现两次但未稳定复现，保持 `candidate_intermittent`；仅在用户人工再发现问题时凭诊断 ZIP、APK SHA 和必要的完整 Logcat 重启复核—修复。用户实际 294 个 PDF/约 301 MiB 未在测试设备完成全量端到端复跑，未调用真实 Brave、付费 Provider 或 Vision；Android 15 六小时 timeout、Android 16 Job 配额耗尽、500 文件批次实机、初始 ZIP staging 期间进程死亡及 ENOSPC 注入仍未执行，不能标完整 K06 或正式 release PASS。
 
 开工入口：[agent.md](../agent.md) → [HANDOFF.md](../HANDOFF.md) → 本文。范围依据见 [REQUIREMENTS.md](REQUIREMENTS.md)。含图知识库、Python 隔离和公告分别详见专题，不能只实现本文概要。
 
@@ -89,6 +89,7 @@ platform/android/storage/     SAF、CAS、只读句柄
 platform/android/security/    Keystore、Secret Redactor、权限
 platform/android/background/  前台导入、WorkManager、恢复
 platform/android/ipc/         Binder、调用身份、进程生命期
+app-android/.../diagnostics/  主进程内有界、脱敏、可导出的故障面包屑与崩溃摘要
 feature/chat|agents|providers|knowledge|skills|announcements|settings/
 services/announcements/       Worker、D1 migrations、协议测试
 admin/announcements/          管理 UI、预览、审计入口
@@ -104,7 +105,7 @@ docs/evidence/                脱敏的验证结果，按任务分目录
 
 所有公共导入导出使用 `schemaVersion`，未知主版本明确拒绝；UTC 时间、稳定字符串 ID、数字范围显式验证。数据库升级逐版迁移，失败保留原库，不自动清空重建用户数据。
 
-当前数据库版本为 v10：v8 增加完整 Agent 快照、typed messages/Run/审计和设置持久化；v9 增加 API Embedding 查询未知结果门禁；v10 增加可恢复的 `embedding_operations` 阶段状态与 `embedding_query_vectors` 查询向量缓存。查询向量只在完整 retrieve 成功后清理尝试门禁；本地检索后半段失败可复用已校验向量，不重复外发。细节见 [KNOWLEDGE §4.1](KNOWLEDGE.md#41-api-外发与未知查询的一次性重试)。导出格式的 schemaVersion 与数据库版本相互独立。完整知识库/会话走有界流式 ZIP，默认不包含原文、Skill 包或会话；用户逐项选择后写入 SAF 指定位置，云端文档提供方可能自行同步。导入快照不携带密钥/授权，明确要求本地重新配置，UNKNOWN 不自动重放。
+当前数据库版本为 v11：v8 增加完整 Agent 快照、typed messages/Run/审计和设置持久化；v9 增加 API Embedding 查询未知结果门禁；v10 增加可恢复的 `embedding_operations` 阶段状态与 `embedding_query_vectors` 查询向量缓存；v11 增加模型 endpoint 配置与 secret 退休状态，并对已有配置做 fail-closed 回填。查询向量只在完整 retrieve 成功后清理尝试门禁；本地检索后半段失败可复用已校验向量，不重复外发。细节见 [KNOWLEDGE §4.1](KNOWLEDGE.md#41-api-外发与未知查询的一次性重试)。导出格式的 schemaVersion 与数据库版本相互独立。完整知识库/会话走有界流式 ZIP，默认不包含原文、Skill 包或会话；用户逐项选择后写入 SAF 指定位置，云端文档提供方可能自行同步。导入快照不携带密钥/授权，明确要求本地重新配置，UNKNOWN 不自动重放。
 
 | 实体/逻辑表 | 必要字段与约束 |
 | --- | --- |
@@ -213,7 +214,7 @@ RAG 可由用户设置为自动检索或显式 knowledge_search；不得无条�
 | Knowledge | 导入、资源/图片数量、处理状态、等待原因、暂停恢复、删除/重建 |
 | Skills | 来源/许可/签名/兼容性/源码/权限；安装、禁用、撤销和调用日志 |
 | Announcements | 固定入口、未读、历史、横幅、重要确认；失败不影响其他能力 |
-| Settings/About | 数据/导出/隐私开关、源代码与版本、AGPL和第三方许可 |
+| Settings/About | 数据/导出/隐私开关、源代码与版本、AGPL和第三方许可；诊断日志启用、状态、SAF导出与清除 |
 
 用户首次完成 Provider → Agent → 本地知识导入 → 处理费用/隐私确认 → 索引就绪 → 带引用问答的闭环。全流程必须能说明“什么在本地、什么发送给谁”。
 
@@ -231,7 +232,7 @@ RAG 可由用户设置为自动检索或显式 knowledge_search；不得无条�
 | Knowledge | 知识库列表/详情、导入选择、文档列表/详情、导入进度、Vision/上传授权等待、原文/原图查看、删除/重建确认 |
 | Skills | Skill 列表/详情、来源/许可/源码/权限展示、导入安装、启用/禁用/撤销、调用记录 |
 | Announcements | 公告中心、详情、未读状态、横幅、重要公告确认弹窗 |
-| Settings/About | 隐私/统计设置、数据导入导出、版本与来源、AGPL/第三方许可页面 |
+| Settings/About | 隐私/统计设置、诊断日志/导出、数据导入导出、版本与来源、AGPL/第三方许可页面 |
 
 设计任务按以下顺序执行：
 
@@ -288,6 +289,22 @@ M0 可以并行准备本地许可和构建，但没有远程仓库/Ruleset授权
 ### 9.1 1.0 本地门禁状态（2026-08-29）
 
 本项目把本轮“进行 1.0”解释为 release gate 与可交付包准备，不擅自改应用商店版本、不发布正式 AAB。已落地全 SHA GitHub Actions pin、Gradle dependency locks、SHA-256 dependency verification metadata、CycloneDX 1.6 SBOM、clean-Git/AAB/SBOM/source hash provenance 校验、arm64-v8a-only release 与 debug/test 双 ABI。`check --dependency-verification=strict` 和 API 31 设备套件通过；`verifyReleaseSigning` 在缺少用户签名输入时确定性失败关闭。正式 `releaseGate` 只有在用户提供其 release keystore 四项输入并安排 release 后才能转为 PASS。证据见 [release-gate-1.0](evidence/2026-08-29/release-gate-1.0.md)。
+
+### 9.2 人工终审诊断包与公告部署状态（2026-08-30）
+
+设置页增加“隐私与调试”诊断入口：默认关闭，主动开启后记录有限白名单事件，可通过 SAF 导出有界 ZIP 或清除应用自有诊断文件。最终 API 31 x86_64 `DiagnosticsDeviceTest` 8/8 通过；debug APK 与签名、全仓门禁、后台中文运行时测试、D1 备份、生产版本及线上只读核验见 [本轮证据](evidence/2026-08-30/admin-cn-diagnostics-debug-deploy.md)。该包等待用户人工终审，不等于正式 release；自动复核—修复程序已经停止，只有用户报告新问题时重新启动。
+
+### 9.3 第二轮人工反馈修复包（2026-08-30）
+
+用户安装后报告 8 项问题，本次获准额外完成一次审查与修复。Android shell 现在持有稳定的 Chat/流状态，离开 Chat 到智能体、更多或请求检查器不会因为目的地 `NavBackStackEntry` 变化而销毁本次运行；请求检查器直接读取同一实例并区分关闭、尚未准备和已准备。More 的所有二级入口都有应用内返回，无智能体控件使用标准最小触控尺寸；公告 endpoint/key 不再作为用户可见或可编辑设置。知识/Skill ZIP 路径按规范化 segment 校验，合法文件名中的连续点不会再被误拒；Agent 绑定使用已启用的 install ID；批量知识导入逐项持久化即调度，并以 `APPEND_OR_REPLACE` 尾栅栏避免最后一个 `KEEP` worker 结束时丢失新工作。
+
+本轮在 API 31 x86_64 上定向设备回归 17/17，通过 `check --dependency-verification=strict` 936 tasks，并生成 [新 debug 包证据](evidence/2026-08-30/manual-review-round-2-fixes.md)。APK SHA-256 为 `650bcc7148f0cf341b91ec716b2ae445d2be104c7df1d29d808c3fbe356739df`。这是 dirty debug 人工终审包，不是正式 release；实际 294 个 PDF 的全量耗时仍待用户人工终审，本次未 commit/push、未重新部署公告系统。按用户要求，本段完成后不继续自动复核，只有收到新的人工问题才重启流程。
+
+### 9.4 第三轮能力反馈修复包（2026-08-30）
+
+稳定 shell owner 同时承载 Chat 和 Knowledge 长任务，导航离开不再成为取消信号。Agent 工具清单新增固定 Brave `web_search`，key 由 secret store 注入、每次调用需用户批准，模型不能选择任意 endpoint/header；响应在解析前使用活动 secret 脱敏并只返回有界公开 HTTPS 结果。无清单 Claude Skill 若含 `SKILL.md` 与安全标准库 CLI，可生成本地 Class B 清单；导入、启用、grant、Agent snapshot 后向模型公开真实工具，并在 isolated UID CPython 中只读取本次显式传入的内存虚拟 Markdown 文件。重型桌面依赖程序不直接执行，由原生知识库工具承担检索与文档读取。
+
+本轮在 API 31 x86_64 上定向设备回归 34/34，通过 `check --dependency-verification=strict` 936 tasks、公告 `npm test` 和 REUSE 392/392，并生成 [Round3 证据](evidence/2026-08-30/manual-review-round-3-capabilities.md)。APK SHA-256 为 `d68a062b12121b76e502afd8a8cf3610d756876d3a7a00eca916f597ad564682`。这是 dirty debug 人工终审包，不是正式 release；本次未调用真实 Brave/付费 Provider/Vision，未 commit/push、未重新部署公告系统。按用户要求，本段完成后不继续自动复核，只有收到新的人工问题才重启流程。
 
 功能完整的MVP必须到M6（含Python Skills）通过后才可宣称，不得把纯问答或只有Native工具的M5当作完整MVP。M6的原生隔离风险可在M0完成后提前开展最小可行性实验，不改动M1—M5接口或减配安全要求；实验产物必须标明spike，验证通过后再纳入正式实现。
 

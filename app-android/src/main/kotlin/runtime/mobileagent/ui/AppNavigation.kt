@@ -58,6 +58,28 @@ fun moreHubItems(chinese: Boolean = true): List<AppNavigationDestination> = list
     AppNavigationDestination(AppRoutes.INSPECTOR, if (chinese) "请求检查器" else "Request inspector", Icons.Outlined.BugReport),
 )
 
+/** Returns whether [route] is one of the phone-only destinations opened from More. */
+fun isMoreChildRoute(route: String): Boolean = moreHubItems(false).any { it.route == route }
+
+/**
+ * Pure back policy for the shell. A More child has a canonical More parent even when
+ * the route was restored as the NavHost start destination. Inspector keeps the source
+ * selected by the caller so opening it from Chat does not unexpectedly return to More.
+ */
+fun appBackTarget(
+    compact: Boolean,
+    currentRoute: String,
+    inspectorReturnRoute: String = AppRoutes.MORE,
+    hasPreviousEntry: Boolean,
+): String? {
+    if (compact && currentRoute == AppRoutes.INSPECTOR) {
+        return inspectorReturnRoute.takeUnless { it == AppRoutes.INSPECTOR } ?: AppRoutes.MORE
+    }
+    if (compact && isMoreChildRoute(currentRoute)) return AppRoutes.MORE
+    if (!hasPreviousEntry && currentRoute != AppRoutes.CHAT) return AppRoutes.CHAT
+    return null
+}
+
 fun appThemeMode(value: String?): AppThemeMode = when (value?.lowercase()) {
     "light" -> AppThemeMode.LIGHT
     "dark" -> AppThemeMode.DARK

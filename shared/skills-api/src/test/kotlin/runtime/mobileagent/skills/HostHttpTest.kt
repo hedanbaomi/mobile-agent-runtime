@@ -31,6 +31,20 @@ import javax.net.SocketFactory
 
 /** Only sockets mapped to this process's loopback TLS server can be opened. */
 class HostHttpTest {
+    @Test
+    fun reservedSecretHeaderNamesAreRejectedCaseInsensitively() {
+        val failure = runCatching {
+            HostHttp.getWithSecretHeader(
+                url = "https://example.com/",
+                allowedHosts = setOf("example.com"),
+                headerName = "aUtHoRiZaTiOn",
+                headerValue = "secret",
+                resolve = { emptyList() },
+            )
+        }.exceptionOrNull()
+        assertTrue(failure is IllegalArgumentException)
+    }
+
     private val host = "public.example.invalid"
     private val otherHost = "other.example.invalid"
     private val publicAddress = InetAddress.getByAddress(byteArrayOf(93, 184.toByte(), 216.toByte(), 34))
@@ -111,6 +125,25 @@ class HostHttpTest {
         assertNull(request.getHeader("Cookie"))
         assertNull(request.getHeader("Authorization"))
         assertTrue(fixture.sockets.all { it.isClosed })
+    }
+
+    @Test
+    fun fixedSecretHeaderIsNeverForwardedToAnotherHost() = LocalTlsFixture(host, otherHost).use { fixture ->
+        fixture.server.enqueue(MockResponse().setResponseCode(302).addHeader("Location", "https://$otherHost/next"))
+        fixture.server.enqueue(MockResponse().setBody("redirected"))
+        val body = HostHttp.getWithSecretHeader(
+            url = "https://$host/search?q=fixture",
+            allowedHosts = setOf(host, otherHost),
+            headerName = "X-Subscription-Token",
+            headerValue = "synthetic-token",
+            resolve = { listOf(publicAddress) },
+            client = fixture.client,
+        )
+        assertEquals("redirected", body)
+        val first = fixture.server.takeRequest(2, TimeUnit.SECONDS)!!
+        val second = fixture.server.takeRequest(2, TimeUnit.SECONDS)!!
+        assertEquals("synthetic-token", first.getHeader("X-Subscription-Token"))
+        assertNull(second.getHeader("X-Subscription-Token"))
     }
 
     @Test

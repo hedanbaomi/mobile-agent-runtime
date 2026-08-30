@@ -26,8 +26,56 @@ class KnowledgeArchiveTest {
     fun rejectsZipSlipAndDrivePaths() {
         val slip = zipOf("../secret.txt" to "nope")
         assertFalse(KnowledgeArchive.inspect(slip).ok)
+        val nestedSlip = zipOf("folder/../secret.txt" to "nope")
+        assertFalse(KnowledgeArchive.inspect(nestedSlip).ok)
+        val dotSegment = zipOf("folder/./secret.txt" to "nope")
+        assertFalse(KnowledgeArchive.inspect(dotSegment).ok)
+        val absolute = zipOf("/absolute/secret.txt" to "nope")
+        assertFalse(KnowledgeArchive.inspect(absolute).ok)
         val drive = zipOf("C:/windows/note.txt" to "nope")
         assertFalse(KnowledgeArchive.inspect(drive).ok)
+        val control = zipOf("folder/\u0001secret.txt" to "nope")
+        assertFalse(KnowledgeArchive.inspect(control).ok)
+    }
+
+    @Test
+    fun allowsConsecutiveDotsInsideALegitimateFileName() {
+        val zip = zipOf("books/Hes.+theog..pdf" to "%PDF-1.4\n%%EOF")
+
+        val summary = KnowledgeArchive.inspect(zip)
+
+        assertTrue(summary.ok, summary.reason)
+        assertEquals("books/Hes.+theog..pdf", summary.entries.single().name)
+    }
+
+    @Test
+    fun fileBackedArchiveAllowsConsecutiveDotsInsideALegitimateFileName() {
+        val path = Files.createTempFile("knowledge-archive-dots-", ".zip")
+        try {
+            Files.write(path, zipOf("books/Hes.+theog..pdf" to "%PDF-1.4\n%%EOF"))
+            val summary = KnowledgeArchive.forEachEntry(path.toFile()) { _, _ -> }
+            assertTrue(summary.ok, summary.reason)
+            assertEquals("books/Hes.+theog..pdf", summary.entries.single().name)
+        } finally {
+            Files.deleteIfExists(path)
+        }
+    }
+
+    @Test
+    fun zipSafetyUsesPathSegmentsAndRejectsControls() {
+        val legal = ZipSafety.inspect(zipOf("books/Hes.+theog..pdf" to "content"))
+        assertTrue(legal.ok, legal.reason)
+
+        listOf(
+            "folder/../escape.txt",
+            "folder/./escape.txt",
+            "/absolute.txt",
+            "C:/windows.txt",
+            "folder/\u0001.txt",
+        ).forEach { name ->
+            val inspection = ZipSafety.inspect(zipOf(name to "content"))
+            assertFalse(inspection.ok, name)
+        }
     }
 
     @Test

@@ -4,11 +4,18 @@
 package runtime.mobileagent.skills
 
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.buildJsonArray
+import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.put
+import kotlinx.serialization.json.putJsonArray
+import kotlinx.serialization.json.putJsonObject
 import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
 import java.nio.charset.Charset
@@ -28,6 +35,8 @@ data class SkillInspection(
     val installable: Boolean,
     val rawManifestJson: String? = null,
     val packageBytes: ByteArray? = null,
+    /** Exact verified sources for manifestless CLI compatibility; never model supplied. */
+    val legacyProgramSources: Map<String, String> = emptyMap(),
 )
 
 object SkillArchive {
@@ -43,6 +52,26 @@ object SkillArchive {
     private const val EOCD_LENGTH = 22
     private const val MAX_ZIP_COMMENT_BYTES = 65_535
     private const val UINT32_MAX = 0xFFFF_FFFFL
+    private const val MAX_LEGACY_PROGRAM_BYTES = 256 * 1024
+    private const val LEGACY_ENTRYPOINT = "mobileagent_legacy_skill:run"
+
+    private val LEGACY_FRONTMATTER_NAME = Regex("(?m)^name:\\s*([A-Za-z0-9._-]+)\\s*$")
+    private val LEGACY_MAIN_FUNCTION = Regex("(?m)^\\s*def\\s+main\\s*\\(")
+    private val LEGACY_MAIN_GUARD = Regex("if\\s+__name__\\s*==\\s*['\\\"]__main__['\\\"]")
+    private val LEGACY_IMPORT = Regex("(?m)^\\s*import\\s+([^#\\r\\n]+)")
+    private val LEGACY_FROM_IMPORT = Regex("(?m)^\\s*from\\s+([A-Za-z0-9_.]+)\\s+import\\s+")
+    private val LEGACY_STDLIB_MODULES = setOf(
+        "__future__", "argparse", "bisect", "collections", "contextlib", "csv", "datetime", "decimal",
+        "enum", "functools", "hashlib", "heapq", "io", "itertools", "json", "math", "pathlib", "random",
+        "re", "statistics", "string", "sys", "textwrap", "time", "typing", "unicodedata",
+    )
+    private val LEGACY_FORBIDDEN_TOKENS = mapOf(
+        "dynamic-import" to Regex("\\b(?:__import__|importlib)\\b"),
+        "dynamic-code" to Regex("\\b(?:eval|exec)\\s*\\("),
+        "process" to Regex("\\b(?:subprocess|os\\.(?:system|exec|spawn|fork))\\b"),
+        "network" to Regex("\\b(?:socket|urllib\\.request|http\\.client)\\b"),
+        "native-extension" to Regex("\\b(?:ctypes|cffi)\\b"),
+    )
 
     fun inspect(bytes: ByteArray, expectedHash: String? = null): SkillInspection {
         val hash = sha256Hex(bytes)
@@ -149,6 +178,12 @@ object SkillArchive {
         val pip: Boolean,
         val runtimeKind: String?,
         val schemaVersion: Int?,
+        val pythonSources: Map<String, String>,
+    )
+
+    private data class LegacyProgramInspection(
+        val compatible: List<String>,
+        val unsupportedModules: Map<String, Set<String>>,
     )
 
     private data class ZipCentralEntry(
@@ -181,6 +216,7 @@ object SkillArchive {
         var markdown: String? = null
         var native = false
         var pip = false
+        val pythonSources = linkedMapOf<String, String>()
         var total = 0L
         var count = 0
         val zip = ZipInputStream(ByteArrayInputStream(bytes))
@@ -192,9 +228,10 @@ object SkillArchive {
                     reasons += "Archive exceeds 5000 files"
                     break
                 }
-                val name = entry.name.replace('\\', '/')
-                if (name.contains("..") || name.startsWith("/") || name.contains(":")) {
-                    reasons += "Zip Slip path is not allowed: $name"
+                val rawName = entry.name
+                val name = normalizeArchivePath(rawName)
+                if (name == null) {
+                    reasons += "Zip Slip path is not allowed: ${rawName.replace('\\', '/')}"
                     continue
                 }
                 val payload = readBounded(zip, MAX_ENTRY_BYTES.toInt())
@@ -237,6 +274,12 @@ object SkillArchive {
                 if (lower.endsWith("mobile-skill.json")) manifest = String(payload, Charsets.UTF_8)
                 if (lower.endsWith("skill.md")) markdown = String(payload, Charsets.UTF_8)
                 if (looksRemoteDependency(lower, payload)) pip = true
+                if (lower.endsWith(".py") && payload.size <= MAX_LEGACY_PROGRAM_BYTES && payload.none { it == 0.toByte() }) {
+                    runCatching { payload.toString(Charsets.UTF_8) }
+                        .getOrNull()
+                        ?.takeIf { source -> '\uFFFD' !in source }
+                        ?.let { source -> pythonSources[name] = source }
+                }
             }
         } finally {
             zip.close()
@@ -248,7 +291,7 @@ object SkillArchive {
         val schema = parsed?.get("schemaVersion")?.jsonPrimitive?.contentOrNull?.toIntOrNull()
         val runtime = parsed?.get("runtime")?.jsonObject?.get("kind")?.jsonPrimitive?.contentOrNull
             ?: parsed?.get("runtime")?.jsonObject?.get("python")?.let { "python" }
-        return ArchiveContent(files, manifest, markdown, native, pip, runtime, schema)
+        return ArchiveContent(files, manifest, markdown, native, pip, runtime, schema, pythonSources)
     }
 
     private fun readBounded(zip: ZipInputStream, max: Int): ByteArray? {
@@ -286,7 +329,53 @@ object SkillArchive {
         }
         val json = archive.manifestJson
         if (json == null) {
-            reasons += "No mobile-skill.json; instruction-only"
+            // The compatibility layer is only for actual Claude Skills. A bare Python ZIP
+            // must not become executable merely because it happens to contain a stdlib CLI.
+            val legacy = if (archive.markdown != null) {
+                inspectLegacyPrograms(archive.pythonSources)
+            } else {
+                LegacyProgramInspection(emptyList(), emptyMap())
+            }
+            legacy.unsupportedModules.toSortedMap().forEach { (path, modules) ->
+                reasons += "Python program $path is not directly runnable in isolated Python; unsupported modules: ${modules.sorted().joinToString()}"
+                if (path.substringAfterLast('/').equals("books_kb.py", ignoreCase = true)) {
+                    reasons += "books_kb.py requires desktop ML/PDF dependencies; import the books as a knowledge base and use knowledge_search on Android"
+                }
+            }
+            if (legacy.compatible.isNotEmpty()) {
+                val programs = legacy.compatible.sorted()
+                val name = legacySkillName(archive.markdown)
+                val raw = legacyManifestJson(hash, name, programs).toString()
+                val manifest = SkillManifest(
+                    schemaVersion = 1,
+                    id = "legacy.${hash.take(24)}",
+                    name = name,
+                    version = "compat-1",
+                    license = "unknown",
+                    runtimeKind = "python",
+                    entrypoint = LEGACY_ENTRYPOINT,
+                    permissions = emptySet(),
+                    permissionSpecs = emptyList(),
+                )
+                reasons += "Detected ${programs.size} standard-library CLI program(s); runnable only in isolated Python with model-provided virtual files and per-call approval"
+                return SkillInspection(
+                    CompatibilityClass.B,
+                    reasons.distinct(),
+                    manifest,
+                    archive.markdown,
+                    hash,
+                    archive.files,
+                    true,
+                    raw,
+                    packageBytes,
+                    legacyProgramSources = programs.associateWith { program -> checkNotNull(archive.pythonSources[program]) },
+                )
+            }
+            reasons += if (archive.pythonSources.isEmpty()) {
+                "No mobile-skill.json; instruction-only"
+            } else {
+                "No compatible standard-library CLI program was found; instructions remain available"
+            }
             return SkillInspection(
                 CompatibilityClass.A,
                 reasons.distinct(),
@@ -387,6 +476,111 @@ object SkillArchive {
             json,
             packageBytes,
         )
+    }
+
+    private fun inspectLegacyPrograms(sources: Map<String, String>): LegacyProgramInspection {
+        val compatible = mutableListOf<String>()
+        val unsupported = linkedMapOf<String, Set<String>>()
+        sources.toSortedMap().forEach { (path, source) ->
+            if (!LEGACY_MAIN_FUNCTION.containsMatchIn(source) || !LEGACY_MAIN_GUARD.containsMatchIn(source)) return@forEach
+            val importedRoots = importedModuleRoots(source)
+            val unsupportedModules = importedRoots.filter { it !in LEGACY_STDLIB_MODULES }.toSortedSet()
+            val forbidden = LEGACY_FORBIDDEN_TOKENS.filter { it.value.containsMatchIn(source) }.map { it.key }.toSortedSet()
+            val failures = (unsupportedModules + forbidden).toSortedSet()
+            if (failures.isEmpty()) compatible += path else unsupported[path] = failures
+        }
+        return LegacyProgramInspection(compatible, unsupported)
+    }
+
+    private fun importedModuleRoots(source: String): Set<String> = buildSet {
+        LEGACY_IMPORT.findAll(source).forEach { match ->
+            match.groupValues[1].split(',').forEach { candidate ->
+                candidate.trim().substringBefore(' ').substringBefore('.').takeIf { it.isNotBlank() }?.let(::add)
+            }
+        }
+        LEGACY_FROM_IMPORT.findAll(source).forEach { match ->
+            match.groupValues[1].substringBefore('.').takeIf { it.isNotBlank() }?.let(::add)
+        }
+    }
+
+    private fun legacySkillName(markdown: String?): String = markdown
+        ?.let { LEGACY_FRONTMATTER_NAME.find(it)?.groupValues?.getOrNull(1) }
+        ?.takeIf { it.isNotBlank() }
+        ?.take(80)
+        ?: "Imported Claude Skill"
+
+    private fun legacyManifestJson(hash: String, name: String, programs: List<String>): JsonObject = buildJsonObject {
+        put("schemaVersion", 1)
+        put("id", "legacy.${hash.take(24)}")
+        put("name", name)
+        put("version", "compat-1")
+        put("license", "unknown")
+        putJsonObject("runtime") {
+            put("kind", "python")
+            put("python", "3.14")
+            put("mode", "pure-python")
+            put("entrypoint", LEGACY_ENTRYPOINT)
+        }
+        put("permissions", JsonObject(emptyMap()))
+        put("legacyPrograms", buildJsonArray { programs.forEach { add(JsonPrimitive(it)) } })
+        putJsonObject("inputSchema") {
+            put("type", "object")
+            put("additionalProperties", false)
+            put("required", JsonArray(listOf(JsonPrimitive("program"), JsonPrimitive("arguments"), JsonPrimitive("files"))))
+            putJsonObject("properties") {
+                putJsonObject("program") {
+                    put("type", "string")
+                    put("enum", buildJsonArray { programs.forEach { add(JsonPrimitive(it)) } })
+                }
+                putJsonObject("arguments") {
+                    put("type", "array")
+                    put("minItems", 0)
+                    put("maxItems", 64)
+                    putJsonObject("items") {
+                        put("type", "string")
+                        put("maxLength", 256)
+                    }
+                }
+                putJsonObject("files") {
+                    put("type", "array")
+                    put("minItems", 0)
+                    put("maxItems", 128)
+                    putJsonObject("items") {
+                        put("type", "object")
+                        put("additionalProperties", false)
+                        put("required", JsonArray(listOf(JsonPrimitive("path"), JsonPrimitive("text"))))
+                        putJsonObject("properties") {
+                            putJsonObject("path") {
+                                put("type", "string")
+                                put("minLength", 1)
+                                put("maxLength", 240)
+                            }
+                            putJsonObject("text") {
+                                put("type", "string")
+                                put("maxLength", 131_072)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        putJsonObject("outputSchema") {
+            put("type", "object")
+            put("additionalProperties", false)
+            put("required", JsonArray(listOf(JsonPrimitive("program"), JsonPrimitive("stdout"))))
+            putJsonObject("properties") {
+                putJsonObject("program") { put("type", "string") }
+                putJsonObject("stdout") {
+                    put("type", "string")
+                    put("maxLength", 262_144)
+                }
+            }
+        }
+        putJsonObject("limits") {
+            put("timeoutSeconds", 30)
+            put("maxOutputKiB", 512)
+            put("maxLogKiB", 128)
+        }
     }
 
     private fun JsonObject?.stringSet(key: String): Set<String> {
@@ -542,6 +736,24 @@ object SkillArchive {
             }
         }
         return Normalizer.normalize(normalized.joinToString("/"), Normalizer.Form.NFC).lowercase(Locale.ROOT)
+    }
+
+    /**
+     * Returns a safe, NFC-normalized logical archive path, or null when the
+     * name could address a path outside the import root. Dot checks are
+     * segment based so ordinary filenames containing consecutive dots remain
+     * valid.
+     */
+    private fun normalizeArchivePath(name: String): String? {
+        val normalized = Normalizer.normalize(name.replace('\\', '/'), Normalizer.Form.NFC)
+        if (normalized.isBlank() || normalized.any { Character.isISOControl(it) }) return null
+        if (normalized.startsWith('/')) return null
+        val segments = normalized.split('/')
+        if (segments.any { it == "." || it == ".." }) return null
+        // Keep rejecting colons anywhere in an archive name: this covers
+        // drive prefixes and Windows alternate data streams on extraction.
+        if (normalized.contains(':')) return null
+        return normalized
     }
 
     private fun hasSignature(bytes: ByteArray, offset: Long, signature: Int): Boolean {

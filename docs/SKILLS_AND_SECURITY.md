@@ -3,7 +3,7 @@
 
 # Skills 执行与安全模型
 
-状态：M5 本地 JVM 已落地（清单检查、A—E 分类、内置工具与 Tool Loop）。M5R/M5RR 修复后：工具协议含 assistant.tool_calls、live grant、read_document KB 校验、HTTPS/IP 字面值拒绝、完整 EOCD/central/local ZIP 结构校验、canonical duplicate/symlink class E、预算取消上游。对应R09—R12、S01—S11。**知识是数据，Prompt是指令，Skill脚本是可执行代码，三者不共享信任等级。** Python 隔离执行仍属 M6，不能用指令展示代替执行能力，本轮不宣称正式 release。
+状态：M5 工具协议和 M6 官方 CPython 3.14.7 隔离执行已经进入 debug 人工终审基线；工具协议含 assistant.tool_calls、live grant、read_document KB 校验、HTTPS/IP 字面值拒绝、完整 EOCD/central/local ZIP 结构校验、canonical duplicate/symlink class E、预算取消上游。2026-08-30 追加无清单 Claude Skill 的标准库 CLI 兼容层，但仍不构成正式 release。对应R09—R12、S01—S12。**知识是数据，Prompt是指令，Skill脚本是可执行代码，三者不共享信任等级。**
 
 ## 1. Skill包与兼容性
 
@@ -37,19 +37,29 @@
 
 | 等级 | 处理 |
 | --- | --- |
-| A Instruction-only | 支持读取SKILL.md指令；无可执行代码 |
-| B Pure Python Compatible | 符合版本/依赖/权限且用户批准后可执行 |
+| A Instruction-only | 支持读取SKILL.md指令；没有可由本机隔离运行时安全承接的程序 |
+| B Pure Python Compatible | 显式清单程序，或本机兼容分析确认的无清单标准库 CLI；启用、授权、Agent 绑定且逐次批准后可执行 |
 | C Unsupported dependencies | 保留说明，禁用脚本并列依赖原因 |
 | D Platform-specific | Shell/Node/Docker/桌面自动化等不能在本地执行；保留说明 |
 | E Dangerous/Invalid | 路径穿越、压缩炸弹、原生载荷、哈希不符等拒绝安装；不得回退成可信指令 |
 
 A/C/D的指令同样是不可信导入内容，启用前用户确认，不能让其中的安装命令自动执行。兼容分析是提示，不是安全证明。签名有效只证明来源/完整性，不自动产生信任或权限。
 
+### 1.1 无清单 Claude Skill 的 CLI 兼容层
+
+用户主动选择的 ZIP 若含 `SKILL.md` 及 Python CLI，但没有 `mobile-skill.json`，检查器只把同时满足以下条件的程序列入本机兼容清单：源码不超过 256 KiB、UTF-8、存在 `main()` 和 `__main__` 入口、import 仅属于受支持标准库子集，且静态检查未发现动态导入/动态代码、进程、网络或 native 扩展入口。其余脚本保留在源码预览和原因列表，不进入模型工具清单。该判断是 fail-closed 兼容门槛，不是对第三方源码的信任背书。
+
+本地兼容清单由原包 SHA-256、Skill 名称和允许程序路径确定；原 ZIP 字节不修改。模型只能从 schema 的 `program` 枚举选择程序，并提供有界 `arguments` 与本次 invocation 专用的 UTF-8 Markdown 虚拟文件。Host 在执行前再次验证原包 hash、启用状态、live grant、Agent/快照绑定及清单一致性，再把对应的已验证源码放入模型不可声明的内部字段；超出 1 MiB 输入预算时在 dispatch 前拒绝。隔离 worker 用替代 `pathlib.Path` 只实现虚拟语料所需的只读 `rglob/read_text/name/stem/parent`，不映射 SAF 路径、Android 路径或宿主目录。每次调用仍要求用户确认，worker 仍为一次性 isolated UID。
+
+`lieflat-less-ai-tone` 的 `compare-human-ai.py`、`check-translationese.py` 和 `check-structure.py` 属于上述标准库 CLI 形状，可通过同一个包绑定的 `py_*` 工具按原 `argv` 语义运行。`josephine-mccarthy-perspective/knowledge_base/books_kb.py` 依赖 PyMuPDF、RapidOCR、NumPy、PyTorch 和 Transformers，不能在该隔离 stdlib 中直接运行；Android 端必须明确改用已经绑定知识库的原生 PDF 解析、ONNX embedding、`knowledge_search`/`read_document`，且不得向用户或模型宣称桌面脚本已执行。
+
 ## 2. 安装流程和持久数据
 
 隔离暂存 → 限额解包和文件头检查 → Manifest/schema/hash验证 → 依赖/import静态分析 → 来源/许可/签名/权限/源码预览 → 用户逐资源批准 → 原子启用版本。版本切换保留回滚信息，权限新增必须重新批准。
 
 记录 `SkillPackage(id, version, packageHash, manifestHash, compatibility, source, license, signatureStatus)`、`SkillInstall(installId, packageHash, enabled)`、`PermissionGrant(grantId, installId, packageHash, resourceScope, capability, expiry, revision, revokedAt)`、`Invocation(invocationId, runId, packageHash, grantRevision, state)`。grant绑定包哈希，不能通过同名更新继承扩大的权限。
+
+Agent 资源绑定的稳定标识是 `SkillInstall.installId`，不是清单中的 package id。保存 Agent 时必须按 `skill_installs.install_id` 且 `enabled=1` 解析；instruction-only 的 Class A 包同样需要先由用户启用。一个已绑定后被禁用的 Skill 可以在编辑界面被取消绑定，但不能再次勾选或保存为有效绑定；否则显示明确的“缺失或已禁用”状态。
 
 默认上限作为实施初值：压缩包50 MiB、展开200 MiB、5000文件、膨胀比100；拒绝符号链接、硬链接、绝对路径、大小写冲突和规范化后重复路径。大小和内容检查独立于扩展名；不要只扫描`.so`字串。超限允许用户取消或在受控上限内调整，不能偷偷全部展开。
 
@@ -69,7 +79,7 @@ A/C/D的指令同样是不可信导入内容，启用前用户确认，不能让
 
 1. 宿主重新验证包hash、启用状态和当前授权，创建不可复用的invocationId与一次性IPC凭证。
 2. 启动独立service实例，绑定其进程/UID/Binder生命周期；不允许复用前次有状态worker。
-3. 传只读包FD与有限输入；CPython以zipimport或等价只读加载机制读取纯Python代码。具体FD访问实现必须由spike证明，不假定zipimport直接接受任意FD。
+3. 传只读包FD与有限输入；显式清单包由CPython以zipimport或等价只读加载机制读取纯Python代码。无清单兼容程序的源码由Host从已复核包中按允许路径提取，并作为模型无法声明的有界内部输入传给固定兼容入口；不能把隔离 UID 无法重新打开 `/proc/self/fd` 的平台行为当作宿主文件访问回退理由。
 4. SDK只能通过窄IPC提出结构化能力请求；Host执行身份/资源/参数/预算复核。
 5. 输出走有界通道；完成、取消、超时或Binder死亡都关闭FD/通道、吊销凭证和销毁worker。
 
@@ -117,6 +127,10 @@ CPU、FD、文件大小、地址空间等native限额在平台支持范围内设
 Keystore生成不可导出的加密key，Provider/Skill秘密作为密文保存；不得在SQLite/DataStore/Preferences保存明文secret。硬件保护依设备能力，不保证所有API26设备同样安全。
 
 日志、预览、错误、导出、崩溃信息统一脱敏。Request Inspector为用户本地按需查看，默认不持久化正文；“输入摘要”不能成为明文全文副本。生产日志默认不含聊天、Prompt、文件名、向量文本或Skill输入输出。
+
+应用内诊断日志同样默认关闭，只能由用户在设置页主动开启。实现使用固定事件/字段白名单，只记录会话、进程、`main`/`worker`/`other`线程类别、UTC、等级、构建 revision/dirty/schema/build time，以及匿名的能力开关、保存结果、知识导入/Skill检查安装/批次worker阶段与计数；不得记录 Provider/模型/Base URL/API Key/Header、聊天/Prompt、知识或Skill文件名/真实路径、请求正文或异常消息。所有字符串再次经过 secret、URL/query、Windows/Unix 路径、控制字符和长度清洗。当前段与上一段各至多64 KiB，最近崩溃摘要至多32 KiB，单事件至多4 KiB，导出ZIP至多192 KiB；未捕获异常只保留异常类型和有界类/方法/行号，写入后必须委托Android原始崩溃处理器。诊断初始化、轮转和handler安装均为best-effort，失败不能阻止App启动。
+
+诊断包经 Storage Access Framework 写到用户选择的位置，manifest包含构建和设备fingerprint以绑定复现环境；导出失败不得清除原始日志，清除只删除应用自有诊断文件。应用不申请`READ_LOGS`，不能捕获native崩溃、内核/系统强杀或被杀前未落盘的Android系统日志，这些场景仍需用户提供相同APK SHA对应的ADB Logcat。完整操作和字段契约见[诊断日志](DIAGNOSTICS.md)。
 
 备份策略排除秘密和设备绑定key相关状态，恢复后要求重新输入密钥；不要把自动备份当作跨设备秘密迁移。默认导出Agent/Prompt/模型非秘密参数、KB元数据和Skill配置，不含Key/Header/Cookie/敏感附件。用户显式选择完整KB/对话/Skill包导出时展示体积和隐私范围，保留原权利信息并重新导入验证；未选的blob和源码不得夹带。
 

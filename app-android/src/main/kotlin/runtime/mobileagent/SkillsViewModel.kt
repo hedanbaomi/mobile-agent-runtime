@@ -29,7 +29,7 @@ class SkillsViewModel(
 ) : AndroidViewModel(application) {
     private val app = application as MobileAgentApp
     val rows = mutableStateListOf<SkillRow>()
-    val status = mutableStateOf("Import a local zip or SKILL.md. Class E packages are refused. Isolated CPython runs imported Python skills.")
+    val status = mutableStateOf("导入本地 ZIP 或 SKILL.md。可兼容的 Claude Skill 标准库程序会以隔离 Python 工具运行；Class E 包会被拒绝。")
     val state = mutableStateOf(SkillsUiState())
     val permissionRequest = mutableStateOf<Pair<String, String>?>(null)
     private val pendingImports = ArrayDeque<Pair<String, SkillInspection>>()
@@ -82,6 +82,7 @@ class SkillsViewModel(
         if (uris.isEmpty()) return
         viewModelScope.launch {
             state.value = state.value.copy(loading = true, error = null)
+            var inspectedCount = 0
             try {
                 require(uris.size <= 10) { "一次最多检查 10 个 Skill 包。" }
                 var total = 0L
@@ -90,12 +91,16 @@ class SkillsViewModel(
                         val bytes = readLimited(uri)
                         total += bytes.size
                         require(total <= 100L * 1024 * 1024) { "此次检查的包总量不能超过 100 MiB。" }
-                        displayName(uri) to SkillArchive.inspect(bytes)
+                        val inspection = SkillArchive.inspect(bytes)
+                        inspectedCount += 1
+                        displayName(uri) to inspection
                     }
                 }
+                recordDiagnostics { recordSkillInspectSuccess(inspected.size) }
                 pendingImports.addAll(inspected)
                 nextImport()
             } catch (error: Exception) {
+                recordDiagnostics { recordSkillInspectFailed(inspectedCount, error) }
                 message(error.message ?: "读取或检查 Skill 失败。")
             } finally {
                 state.value = state.value.copy(loading = false)
@@ -112,9 +117,17 @@ class SkillsViewModel(
                 val result = withContext(Dispatchers.IO) {
                     app.container.skills.importPackage(inspection.packageBytes ?: error("包内容不可用"), inspection.packageHash)
                 }
+                if (result.accepted) {
+                    recordDiagnostics { recordSkillInstallSuccess() }
+                } else {
+                    recordDiagnostics { recordSkillInstallFailed(errorCode = "rejected") }
+                }
                 message(if (result.accepted) "已安装 ${pending.first}，尚未启用或授予权限。" else "包未安装：${result.inspection.reasons.joinToString()}")
                 reload()
-            } catch (error: Exception) { message(error.message ?: "安装失败。") }
+            } catch (error: Exception) {
+                recordDiagnostics { recordSkillInstallFailed(error) }
+                message(error.message ?: "安装失败。")
+            }
             nextImport()
         }
     }
@@ -128,7 +141,7 @@ class SkillsViewModel(
                 permissions = inspection.manifest?.permissionSpecs.orEmpty().map { spec ->
                     SkillPermissionUi(spec.capability, scopeLabel(spec.knowledgeBaseIds, spec.hosts, spec.methods), false)
                 }, installable = inspection.installable,
-                status = "原包保持不变；安装只保存到本机。逐资源授权和启用需另行确认。")
+                status = "原包字节保持不变；兼容清单只在本机按包哈希生成。安装仅保存到本机，逐资源授权和启用需另行确认。")
         })
     }
 
@@ -152,7 +165,11 @@ class SkillsViewModel(
                 }
                 savedStateHandle[SELECTED_INSTALL_ID_KEY] = installId
                 state.value = state.value.copy(selectedInstallId = installId, detail = detail, error = null)
-            } catch (error: Exception) { message(error.message ?: "读取 Skill 失败。") }
+                recordDiagnostics { recordSkillInspectSuccess() }
+            } catch (error: Exception) {
+                recordDiagnostics { recordSkillInspectFailed(1, error) }
+                message(error.message ?: "读取 Skill 失败。")
+            }
         }
     }
 
@@ -217,6 +234,10 @@ class SkillsViewModel(
     }
 
     fun availableKnowledgeBases(): List<Pair<String, String>> = app.container.knowledge.listKnowledgeBases()
+
+    private fun recordDiagnostics(block: runtime.mobileagent.diagnostics.AndroidDiagnosticLogger.() -> Unit) {
+        runCatching { app.diagnostics.block() }
+    }
 
     private fun message(value: String) {
         status.value = SecretRedactor.redact(value)

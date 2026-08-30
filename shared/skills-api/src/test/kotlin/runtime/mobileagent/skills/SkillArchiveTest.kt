@@ -7,6 +7,10 @@ import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertFalse
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.jsonArray
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 import java.io.ByteArrayOutputStream
 import java.util.zip.CRC32
 import java.util.zip.ZipEntry
@@ -20,6 +24,156 @@ class SkillArchiveTest {
         assertEquals(CompatibilityClass.A, inspection.classification)
         assertTrue(inspection.installable)
         assertTrue(inspection.skillMarkdown.orEmpty().contains("Helper"))
+    }
+
+    @Test
+    fun manifestlessClaudeSkillWithStdlibCliProgramGetsIsolatedCompatibilityManifest() {
+        val source = """
+            import re
+            import sys
+            from pathlib import Path
+
+            def main():
+                files = list(Path(sys.argv[1]).rglob("*.md"))
+                print(sum(len(re.findall(r"[一-鿿]", item.read_text(encoding="utf-8"))) for item in files))
+
+            if __name__ == "__main__":
+                main()
+        """.trimIndent().toByteArray()
+        val zip = zip(
+            "lieflat-less-ai-tone/SKILL.md" to "---\nname: lieflat-less-ai-tone\n---\n# 去 AI 味\n".toByteArray(),
+            "lieflat-less-ai-tone/scripts/check-translationese.py" to source,
+        )
+
+        val inspection = SkillArchive.inspect(zip)
+
+        assertEquals(CompatibilityClass.B, inspection.classification)
+        assertEquals("mobileagent_legacy_skill:run", inspection.manifest?.entrypoint)
+        assertEquals("lieflat-less-ai-tone", inspection.manifest?.name)
+        val raw = Json.parseToJsonElement(inspection.rawManifestJson!!).jsonObject
+        val programs = raw.getValue("legacyPrograms").jsonArray.map { it.jsonPrimitive.content }
+        assertEquals(listOf("lieflat-less-ai-tone/scripts/check-translationese.py"), programs)
+        val programEnum = raw.getValue("inputSchema").jsonObject
+            .getValue("properties").jsonObject
+            .getValue("program").jsonObject
+            .getValue("enum").jsonArray
+            .map { it.jsonPrimitive.content }
+        assertEquals(programs, programEnum)
+        assertEquals(source.toString(Charsets.UTF_8), inspection.legacyProgramSources.getValue(programs.single()))
+        assertTrue(inspection.reasons.any { it.contains("isolated Python", ignoreCase = true) })
+    }
+
+    @Test
+    fun barePythonZipDoesNotBecomeAnExecutableClaudeSkill() {
+        val inspection = SkillArchive.inspect(zip(
+            "scripts/rewrite.py" to "def main():\n    print('ok')\n\nif __name__ == '__main__':\n    main()\n".toByteArray(),
+        ))
+
+        assertEquals(CompatibilityClass.A, inspection.classification)
+        assertEquals(null, inspection.manifest)
+        assertTrue(inspection.legacyProgramSources.isEmpty())
+    }
+
+    @Test
+    fun allThreeLieflatAnalyzerProgramShapesAreExposed() {
+        val compare = """
+            import re
+            import sys
+            import collections
+            from pathlib import Path
+            def main():
+                print(len(list(Path(sys.argv[-1]).rglob("*.md"))))
+            if __name__ == "__main__":
+                main()
+        """.trimIndent().toByteArray()
+        val translationese = """
+            import re
+            import sys
+            from collections import defaultdict
+            from pathlib import Path
+            def main():
+                print(defaultdict(int), Path(sys.argv[-1]).stem)
+            if __name__ == "__main__":
+                main()
+        """.trimIndent().toByteArray()
+        val structure = """
+            import re
+            import sys
+            from pathlib import Path
+            def main():
+                print(Path(sys.argv[-1]).parent.name)
+            if __name__ == "__main__":
+                main()
+        """.trimIndent().toByteArray()
+        val inspection = SkillArchive.inspect(zip(
+            "SKILL.md" to "---\nname: lieflat-less-ai-tone\n---\n# Skill\n".toByteArray(),
+            "scripts/compare-human-ai.py" to compare,
+            "scripts/check-translationese.py" to translationese,
+            "scripts/check-structure.py" to structure,
+        ))
+
+        assertEquals(CompatibilityClass.B, inspection.classification)
+        assertEquals(
+            setOf("scripts/compare-human-ai.py", "scripts/check-translationese.py", "scripts/check-structure.py"),
+            inspection.legacyProgramSources.keys,
+        )
+    }
+
+    @Test
+    fun manifestlessClaudeSkillKeepsUnsupportedDependencyProgramInstructionOnly() {
+        val source = """
+            import numpy as np
+            import torch
+
+            def main():
+                print(np.asarray([1]))
+
+            if __name__ == "__main__":
+                main()
+        """.trimIndent().toByteArray()
+        val zip = zip(
+            "josephine/SKILL.md" to "---\nname: josephine-mccarthy-perspective\n---\n# Perspective\n".toByteArray(),
+            "josephine/knowledge_base/books_kb.py" to source,
+        )
+
+        val inspection = SkillArchive.inspect(zip)
+
+        assertEquals(CompatibilityClass.A, inspection.classification)
+        assertEquals(null, inspection.manifest)
+        assertTrue(inspection.reasons.any { it.contains("numpy") && it.contains("torch") })
+        assertTrue(inspection.reasons.any { it.contains("knowledge_search") })
+    }
+
+    @Test
+    fun mixedLegacyPackageExposesOnlyProgramsSupportedByTheIsolatedRuntime() {
+        val safe = """
+            import re
+            import sys
+            def main():
+                print(len(re.findall("x", sys.argv[1])))
+            if __name__ == "__main__":
+                main()
+        """.trimIndent().toByteArray()
+        val unsafe = """
+            import os
+            def main():
+                print(os.getcwd())
+            if __name__ == "__main__":
+                main()
+        """.trimIndent().toByteArray()
+        val inspection = SkillArchive.inspect(zip(
+            "SKILL.md" to "---\nname: mixed-skill\n---\n# Mixed\n".toByteArray(),
+            "scripts/safe.py" to safe,
+            "scripts/unsafe.py" to unsafe,
+        ))
+
+        assertEquals(CompatibilityClass.B, inspection.classification)
+        val raw = Json.parseToJsonElement(inspection.rawManifestJson!!).jsonObject
+        assertEquals(
+            listOf("scripts/safe.py"),
+            raw.getValue("legacyPrograms").jsonArray.map { it.jsonPrimitive.content },
+        )
+        assertTrue(inspection.reasons.any { it.contains("unsafe.py") && it.contains("os") })
     }
 
     @Test
@@ -47,6 +201,35 @@ class SkillArchiveTest {
         val inspection = SkillArchive.inspect(zip)
         assertEquals(CompatibilityClass.E, inspection.classification)
         assertFalse(inspection.installable)
+    }
+
+    @Test
+    fun consecutiveDotsInsideAFileNameRemainInstallable() {
+        val zip = zip(
+            "SKILL.md" to "# helper\n".toByteArray(),
+            "references/Hes.+theog..pdf" to "%PDF-1.4\n%%EOF".toByteArray(),
+        )
+
+        val inspection = SkillArchive.inspect(zip)
+
+        assertEquals(CompatibilityClass.A, inspection.classification)
+        assertTrue(inspection.installable)
+        assertTrue("references/Hes.+theog..pdf" in inspection.files)
+    }
+
+    @Test
+    fun pathSegmentsControlsAndDrivePathsAreClassE() {
+        listOf(
+            "folder/../escape/SKILL.md",
+            "folder/./escape/SKILL.md",
+            "/absolute/SKILL.md",
+            "C:/windows/SKILL.md",
+            "folder/\u0001SKILL.md",
+        ).forEach { name ->
+            val inspection = SkillArchive.inspect(zip(name to "# no".toByteArray()))
+            assertEquals(CompatibilityClass.E, inspection.classification, name)
+            assertFalse(inspection.installable, name)
+        }
     }
 
     @Test

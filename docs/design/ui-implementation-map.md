@@ -46,6 +46,7 @@
 | SCR-SETT-02 | 数据导入导出与离线备份 | `scr-sett-01-dark.svg` | `feature.settings.BackupRestoreScreen` | `SettingsViewModel.backupState` | M7 | U04, U05, A07 |
 | SCR-SETT-03 | 应用版本、源码与检查更新 | `scr-sett-01-dark.svg` | `feature.settings.AboutScreen` | `AboutViewModel.buildInfo` | M0, M1, M2 | U01, L04, N01 |
 | SCR-SETT-04 | AGPL-3.0 协议与开源许可 | `scr-sett-01-dark.svg` | `feature.settings.LicenseViewerScreen` | `AboutViewModel.licenseText` | M0, M7 | U01, L04 |
+| SCR-SETT-05 | 应用内诊断日志、导出与清除 | `scr-sett-01-dark.svg` | `feature.settings.SettingsScreen` | `SettingsViewModel.diagnosticsEnabled/diagnosticsStatus` | M7 | U05, A08, S10 |
 
 ## 2. 现有 M1 实现与 M0.5 设计基线差异分析
 

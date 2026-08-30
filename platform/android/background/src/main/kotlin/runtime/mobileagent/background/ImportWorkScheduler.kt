@@ -84,21 +84,26 @@ object ImportWorkScheduler {
 
     fun enqueueBatch(context: Context, batchId: String, visionConfigured: Boolean): UUID {
         require(batchId.isNotBlank()) { "batchId must not be blank" }
-        val request = OneTimeWorkRequestBuilder<ImportBatchWorker>()
-            .setInputData(
-                androidx.work.Data.Builder()
-                    .putString(INPUT_BATCH_ID, batchId)
-                    .putBoolean(INPUT_VISION_CONFIGURED, visionConfigured)
-                    .build(),
-            )
-            .setConstraints(Constraints.Builder().setRequiredNetworkType(NetworkType.NOT_REQUIRED).build())
-            .setBackoffCriteria(BackoffPolicy.EXPONENTIAL, 30, TimeUnit.SECONDS)
-            .addTag(TAG)
-            .addTag("$TAG:batch:$batchId")
-            .build()
+        val request = batchRequest(batchId, visionConfigured)
         WorkManager.getInstance(context).enqueueUniqueWork(
             "$TAG:batch:$batchId",
             ExistingWorkPolicy.KEEP,
+            request,
+        )
+        return request.id
+    }
+
+    /**
+     * Append one final durable drain after staging finishes. Unlike the per-item KEEP wakeups,
+     * this fence cannot be lost when the current worker has observed an empty queue but has not
+     * yet transitioned to a finished WorkManager state.
+     */
+    fun enqueueBatchFence(context: Context, batchId: String, visionConfigured: Boolean): UUID {
+        require(batchId.isNotBlank()) { "batchId must not be blank" }
+        val request = batchRequest(batchId, visionConfigured)
+        WorkManager.getInstance(context).enqueueUniqueWork(
+            "$TAG:batch:$batchId",
+            ExistingWorkPolicy.APPEND_OR_REPLACE,
             request,
         )
         return request.id
@@ -151,6 +156,20 @@ object ImportWorkScheduler {
     }
 
     fun uniqueName(jobId: String): String = "${TAG}:$jobId"
+
+    private fun batchRequest(batchId: String, visionConfigured: Boolean): OneTimeWorkRequest =
+        OneTimeWorkRequestBuilder<ImportBatchWorker>()
+            .setInputData(
+                androidx.work.Data.Builder()
+                    .putString(INPUT_BATCH_ID, batchId)
+                    .putBoolean(INPUT_VISION_CONFIGURED, visionConfigured)
+                    .build(),
+            )
+            .setConstraints(Constraints.Builder().setRequiredNetworkType(NetworkType.NOT_REQUIRED).build())
+            .setBackoffCriteria(BackoffPolicy.EXPONENTIAL, 30, TimeUnit.SECONDS)
+            .addTag(TAG)
+            .addTag("$TAG:batch:$batchId")
+            .build()
 
     private fun request(jobId: String, visionConfigured: Boolean): OneTimeWorkRequest =
         OneTimeWorkRequestBuilder<ImportWorker>()

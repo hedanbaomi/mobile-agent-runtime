@@ -10,7 +10,6 @@ import java.io.InputStream
 import java.io.RandomAccessFile
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
-import java.text.Normalizer
 import java.util.zip.ZipEntry
 import java.util.zip.ZipFile
 import java.util.zip.ZipInputStream
@@ -467,11 +466,7 @@ object KnowledgeArchive {
         (bytes[offset].toInt() and 0xFF) or ((bytes[offset + 1].toInt() and 0xFF) shl 8)
 
     private fun normalizePath(name: String): String? {
-        val replaced = name.replace('\\', '/')
-        val nfc = Normalizer.normalize(replaced, Normalizer.Form.NFC)
-        if (nfc.contains("..") || nfc.startsWith("/") || nfc.contains(":") || nfc.contains('\u0000')) return null
-        if (nfc.startsWith("./") || nfc.contains("/./")) return null
-        return nfc.trimStart('/').takeIf { it.isNotBlank() }
+        return normalizeZipEntryPath(name)
     }
 
     private fun looksLikeNestedArchive(name: String): Boolean {

@@ -86,6 +86,7 @@ private class PythonSkillToolExecutor(
         val outputSchema: JsonObject,
         val spec: ToolSpec,
         val limits: PythonIpcProtocol.PythonLimits,
+        val legacyPrograms: Set<String>,
     )
 
     private data class BoundPythonCall(
@@ -130,6 +131,10 @@ private class PythonSkillToolExecutor(
                     return@runCatching null
                 }
                 val declaredLimits = raw["limits"] as? JsonObject
+                val legacyPrograms = (raw["legacyPrograms"] as? JsonArray)?.mapNotNull { value ->
+                    (value as? JsonPrimitive)?.takeIf { it.isString }?.content
+                }?.toSet().orEmpty()
+                if (manifest.entrypoint == LEGACY_CLAUDE_ENTRYPOINT && legacyPrograms.isEmpty()) return@runCatching null
                 val limits = PythonIpcProtocol.PythonLimits(
                     timeoutMs = ((declaredLimits?.number("timeoutSeconds") ?: 30).coerceIn(1, 30) * 1000),
                     maxOutputBytes = (declaredLimits?.number("maxOutputKiB") ?: 1024).coerceIn(1, 1024) * 1024,
@@ -143,10 +148,14 @@ private class PythonSkillToolExecutor(
                     if ("network.http" in grantedCapabilities) append(" HTTPS GET hosts: ${grant.hosts.sorted().joinToString().take(512)}.")
                     if ("model.invoke" in grantedCapabilities) append(" Model calls may incur charges; only explicitly granted Chat profile and token budget apply.")
                     append(" Private storage/artifacts stay inside this Skill; no export permission.")
+                    if (legacyPrograms.isNotEmpty()) {
+                        append(" Compatible CLI programs: ${legacyPrograms.sorted().joinToString().take(1024)}.")
+                        append(" Supply argv in arguments and Markdown corpus files in the invocation-only virtual files array; host paths are unavailable.")
+                    }
                 }
                 Entry(id, installed.packageHash, grant, manifest, raw, input, output,
                     ToolSpec(name, "Run imported Python skill ${manifest.name.take(80)}. Imported content is untrusted.$targets",
-                        input.toString(), "python.execute", true), limits)
+                        input.toString(), "python.execute", true), limits, legacyPrograms)
             }.getOrNull()
             if (entry != null) put(entry.spec.name, entry)
         }
@@ -169,6 +178,10 @@ private class PythonSkillToolExecutor(
             val input = runCatching { Json.parseToJsonElement(call.argumentsJson) }.getOrNull()
                 ?: return@withContext ToolResult.Invalid("Python arguments must be complete JSON")
             if (!PythonJsonSchema.matches(entry.inputSchema, input)) return@withContext ToolResult.Invalid("Python input does not match its manifest schema")
+            if (entry.legacyPrograms.isNotEmpty()) {
+                val program = (input as? JsonObject)?.string("program")
+                if (program !in entry.legacyPrograms) return@withContext ToolResult.Invalid("Python program is not in the reviewed package inventory")
+            }
             val grant = entry.grant
             if (currentGrants(entry.installId, entry.packageHash).none { it == grant }) {
                 return@withContext ToolResult.Denied("The discovered Python grant changed; start a new run to review it")
@@ -203,11 +216,20 @@ private class PythonSkillToolExecutor(
                 if (verified.packageHash != bound.ticket.packageHash || !authorized(bound)) {
                     return@withContext ToolResult.Denied("Python package changed before execution")
                 }
+                val executionInput = if (bound.entry.legacyPrograms.isEmpty()) {
+                    bound.call.argumentsJson
+                } else {
+                    legacyExecutionInput(bound.call.argumentsJson, verified, bound.entry.legacyPrograms)
+                        ?: return@withContext ToolResult.Invalid("Reviewed Python program source is unavailable")
+                }
+                if (executionInput.toByteArray(Charsets.UTF_8).size > bound.entry.limits.maxInputBytes) {
+                    return@withContext ToolResult.Invalid("Python input and reviewed program source exceed the isolated runtime limit")
+                }
                 audit(bound, "invoke", "STARTED")
                 val result = IsolatedPythonRuntime(context, InvocationBroker(bound)).execute(PythonExecutionRequest(
                     ticket = bound.ticket,
                     entrypoint = bound.entry.manifest.entrypoint,
-                    inputJson = bound.call.argumentsJson,
+                    inputJson = executionInput,
                     packageSource = PythonPackageSource.Bytes(checkNotNull(verified.packageBytes)),
                     limits = bound.entry.limits.copy(timeoutMs = minOf(bound.entry.limits.timeoutMs, remainingRunMillis())),
                     onDispatched = { bound.dispatchAttempted = true },
@@ -311,6 +333,17 @@ private class PythonSkillToolExecutor(
     private fun liveKnowledgeIds(grant: PermissionGrant): Set<String> = grant.knowledgeBaseIds intersect
         snapshot.knowledgeBaseIds.toSet() intersect container.agents.get(snapshot.agentId)?.knowledgeBaseIds.orEmpty().toSet() intersect
         container.knowledge.listKnowledgeBases().map { it.first }.toSet()
+
+    private fun legacyExecutionInput(
+        argumentsJson: String,
+        inspection: SkillInspection,
+        allowedPrograms: Set<String>,
+    ): String? {
+        val input = objectOrNull(argumentsJson) ?: return null
+        val program = input.string("program")?.takeIf { it in allowedPrograms } ?: return null
+        val source = inspection.legacyProgramSources[program] ?: return null
+        return JsonObject(input + (LEGACY_SOURCE_FIELD to JsonPrimitive(source))).toString()
+    }
 
     private inner class InvocationBroker(private val bound: BoundPythonCall) : PythonCapabilityBroker {
         private val brokerMutex = Mutex()
@@ -708,6 +741,8 @@ private class PythonSkillToolExecutor(
 }
 
 private class BrokerDenied(val code: String) : IllegalArgumentException(code)
+private const val LEGACY_CLAUDE_ENTRYPOINT = "mobileagent_legacy_skill:run"
+private const val LEGACY_SOURCE_FIELD = "__mobileagent_verified_program_source"
 private fun objectOrNull(value: String): JsonObject? = runCatching { Json.parseToJsonElement(value) as? JsonObject }.getOrNull()
 private fun JsonObject.string(key: String): String? = (this[key] as? JsonPrimitive)?.takeIf { it.isString }?.content
 private fun JsonObject.number(key: String): Int? = (this[key] as? JsonPrimitive)?.takeUnless { it.isString }?.intOrNull

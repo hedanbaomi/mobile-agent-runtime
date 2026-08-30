@@ -344,7 +344,13 @@ private fun AgentChooser(state: ChatUiState, onSelect: (String) -> Unit) {
     var expanded by androidx.compose.runtime.remember { androidx.compose.runtime.mutableStateOf(false) }
     val selected = state.agents.firstOrNull { it.id == state.selectedAgentId }
     if (state.agents.isEmpty()) {
-        Text(if (zh) "无智能体" else "No agent", style = MaterialTheme.typography.labelSmall, modifier = Modifier.padding(horizontal = 8.dp))
+        OutlinedButton(
+            onClick = {},
+            enabled = false,
+            modifier = Modifier.heightIn(min = 48.dp).widthIn(min = 112.dp, max = 180.dp),
+        ) {
+            Text(if (zh) "无智能体" else "No agent", maxLines = 1, overflow = TextOverflow.Ellipsis)
+        }
     } else {
         Box {
             OutlinedButton(

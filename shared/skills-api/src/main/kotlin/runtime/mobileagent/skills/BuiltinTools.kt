@@ -466,6 +466,34 @@ object HostHttp {
         resolve: (String) -> List<InetAddress> = { host -> InetAddress.getAllByName(host).toList() },
     ): String = get(url, allowedHosts, resolve, client)
 
+    /**
+     * Send one fixed secret header only to the request's original host. Redirects to another
+     * allow-listed host are revalidated but never receive the credential.
+     */
+    fun getWithSecretHeader(
+        url: String,
+        allowedHosts: Set<String>,
+        headerName: String,
+        headerValue: String,
+        resolve: (String) -> List<InetAddress> = { host -> InetAddress.getAllByName(host).toList() },
+    ): String = getWithSecretHeader(url, allowedHosts, headerName, headerValue, resolve, client)
+
+    internal fun getWithSecretHeader(
+        url: String,
+        allowedHosts: Set<String>,
+        headerName: String,
+        headerValue: String,
+        resolve: (String) -> List<InetAddress>,
+        client: OkHttpClient,
+    ): String {
+        require(headerName.matches(Regex("[A-Za-z0-9-]{1,64}"))) { "Secret header name is invalid" }
+        require(headerName.lowercase() !in setOf("authorization", "cookie", "proxy-authorization")) { "Reserved secret header name" }
+        require(headerValue.isNotEmpty() && headerValue.length <= 4096 && headerValue.none { it == '\r' || it == '\n' }) {
+            "Secret header value is invalid"
+        }
+        return get(url, allowedHosts, resolve, client, secretHeader = headerName to headerValue)
+    }
+
     // The injected client enables loopback TLS/socket tests; production always uses the private client.
     internal fun get(
         url: String,
@@ -473,10 +501,12 @@ object HostHttp {
         resolve: (String) -> List<InetAddress>,
         client: OkHttpClient,
         timeoutMillis: Long = MAX_TIMEOUT_MILLIS,
+        secretHeader: Pair<String, String>? = null,
     ): String {
         require(timeoutMillis in 1..MAX_TIMEOUT_MILLIS)
         val deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(timeoutMillis)
         var current = url
+        val originalHost = HttpPolicy.requestHost(URI(url)) ?: error("URL host is missing")
         repeat(HttpPolicy.MAX_REDIRECTS + 1) { hop ->
             if (Thread.currentThread().isInterrupted) throw InterruptedException("HTTP request interrupted")
             HttpPolicy.assertRequest(current, allowedHosts)
@@ -511,7 +541,9 @@ object HostHttp {
                 .readTimeout(20, TimeUnit.SECONDS)
                 .callTimeout(remaining, TimeUnit.NANOSECONDS)
                 .build()
-            val request = Request.Builder().url(current).get().build()
+            val request = Request.Builder().url(current).get().apply {
+                if (host == originalHost) secretHeader?.let { (name, value) -> header(name, value) }
+            }.build()
             // Fail closed if URI and OkHttp interpret the authority differently.
             if (request.url.host.lowercase().trimEnd('.') != host) error("URL host is ambiguous")
             val response = try {

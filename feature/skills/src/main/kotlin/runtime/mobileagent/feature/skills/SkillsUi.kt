@@ -146,7 +146,15 @@ private fun SkillListPane(state: SkillsUiState, actions: SkillsActions, zh: Bool
             Text(if (zh) "技能" else "Skills", style = MaterialTheme.typography.headlineSmall, modifier = Modifier.weight(1f))
             Button(onClick = onImport) { Text(if (zh) "导入包" else "Import package") }
         }
-        Text(if (zh) "安装前会检查软件包。Python 运行时需等待宿主报告可用。" else "Packages are inspected before installation. Python execution remains unavailable until the host reports it.", style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(top = 6.dp))
+        Text(
+            if (zh) {
+                "安装前会检查软件包。缺少 mobile-skill.json 的 Claude Skill 若包含仅使用受支持标准库、带 main 入口的 Python 程序，会生成本机兼容清单并归为 Class B；启用、授权并绑定到当前智能体后，模型可通过隔离的 py_* 工具传入参数和本次调用专用的虚拟 Markdown 文件。依赖 NumPy、PyTorch、PyMuPDF 等组件的脚本会明确保持不可直接执行；知识库检索由应用原生 PDF/ONNX 能力承接。应用不提供 PowerShell、宿主 Shell 或任意文件系统访问。"
+            } else {
+                "Packages are inspected before installation. A manifestless Claude Skill with a main-style Python program using only the supported standard library receives a local compatibility manifest and becomes Class B. Once enabled, granted, and bound to the current agent, the model can pass arguments and invocation-only virtual Markdown files to its isolated py_* tool. Programs requiring NumPy, PyTorch, PyMuPDF, or similar dependencies remain explicitly unavailable; native PDF/ONNX knowledge tools provide the Android retrieval path. PowerShell, a host shell, and arbitrary filesystem access remain unavailable."
+            },
+            style = MaterialTheme.typography.bodySmall,
+            modifier = Modifier.padding(top = 6.dp),
+        )
         Row(Modifier.padding(top = 10.dp), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
             listOf("all" to if (zh) "全部" else "all", "enabled" to if (zh) "已启用" else "enabled", "disabled" to if (zh) "已停用" else "disabled").forEach { (key, label) -> FilterChip(selected = state.filter == key, onClick = { actions.onFilter(key) }, label = { Text(label) }) }
         }

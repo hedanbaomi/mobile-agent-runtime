@@ -20,6 +20,7 @@ import runtime.mobileagent.skills.SkillInspection
 import runtime.mobileagent.skills.HttpPolicy
 import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
+import java.text.Normalizer
 import java.util.zip.ZipInputStream
 
 data class InstalledSkill(
@@ -257,7 +258,8 @@ class SkillRepository(private val db: SqlConnection) {
         ZipInputStream(ByteArrayInputStream(bytes)).use { zip ->
             while (true) {
                 val entry = zip.nextEntry ?: break
-                if (entry.name.replace('\\', '/') == path && !entry.isDirectory) {
+                val normalizedEntry = Normalizer.normalize(entry.name.replace('\\', '/'), Normalizer.Form.NFC)
+                if (normalizedEntry == path && !entry.isDirectory) {
                     val out = ByteArrayOutputStream()
                     val buffer = ByteArray(8192)
                     while (true) {

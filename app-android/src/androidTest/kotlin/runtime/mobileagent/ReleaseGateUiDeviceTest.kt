@@ -18,6 +18,7 @@ import io.ktor.http.HttpStatusCode
 import io.ktor.http.headersOf
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -51,12 +52,47 @@ class ReleaseGateUiDeviceTest {
         waitForText("更多", "More")
         clickText("服务商", "Providers")
         waitForText("服务商", "Providers")
+        localized("返回", "Back").assertExists().assertHasClickAction().performClick()
+        waitForText("更多", "More")
 
-        clickText("更多", "More")
         clickText("公告", "News")
         waitForText("公告", "News")
-        localized("公告地址", "Feed URL").assertExists()
-        localized("公钥", "Public key").assertExists()
+        assertTextAbsent("公告地址", "Feed URL")
+        assertTextAbsent("公钥", "Public key")
+        assertTextAbsent("保存公告设置", "Save feed settings")
+    }
+
+    @Test
+    fun allMoreDestinationsExposeAnInAppBackAffordance() {
+        waitForText("对话", "Chat")
+        listOf(
+            "服务商" to "Providers",
+            "公告" to "News",
+            "MCP" to "MCP",
+            "设置" to "Settings",
+            "关于" to "About",
+            "请求检查器" to "Request inspector",
+        ).forEach { (chinese, english) ->
+            clickText("更多", "More")
+            waitForText("更多", "More")
+            clickText(chinese, english)
+            localized("返回", "Back").assertExists().assertHasClickAction().performClick()
+            waitForText("更多", "More")
+        }
+    }
+
+    @Test
+    fun systemBackFromMoreChildReturnsToMoreWithoutFinishingActivity() {
+        waitForText("对话", "Chat")
+        clickText("更多", "More")
+        clickText("服务商", "Providers")
+        waitForText("服务商", "Providers")
+
+        compose.activityRule.scenario.onActivity { activity ->
+            activity.onBackPressedDispatcher.onBackPressed()
+            assertFalse(activity.isFinishing)
+        }
+        waitForText("更多", "More")
     }
 
     @Test
@@ -128,5 +164,10 @@ class ReleaseGateUiDeviceTest {
         val chineseNodes = compose.onAllNodesWithText(chinese, useUnmergedTree = true).fetchSemanticsNodes()
         if (chineseNodes.isNotEmpty()) return true
         return compose.onAllNodesWithText(english, useUnmergedTree = true).fetchSemanticsNodes().isNotEmpty()
+    }
+
+    private fun assertTextAbsent(chinese: String, english: String) {
+        assertTrue(compose.onAllNodesWithText(chinese, useUnmergedTree = true).fetchSemanticsNodes().isEmpty())
+        assertTrue(compose.onAllNodesWithText(english, useUnmergedTree = true).fetchSemanticsNodes().isEmpty())
     }
 }

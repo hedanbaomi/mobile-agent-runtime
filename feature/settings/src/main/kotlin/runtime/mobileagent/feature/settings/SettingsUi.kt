@@ -37,6 +37,7 @@ import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 
 data class ThirdPartyNoticeFileUi(
@@ -76,6 +77,10 @@ data class SettingsUiState(
     val themeMode: String = "66ccff",
     val statsEnabled: Boolean = false,
     val requestInspectionEnabled: Boolean = true,
+    val diagnosticsEnabled: Boolean = false,
+    val diagnosticsSizeBytes: Long = 0L,
+    val diagnosticsLimitBytes: Long = 0L,
+    val diagnosticsState: String = "",
     val exportState: String = "",
     val updateState: String = "",
     val noticeCount: Int = 0,
@@ -92,6 +97,9 @@ data class SettingsUiState(
     val globalRootPromptUnlocked: Boolean = false,
     val globalRootPromptRevision: Int = 0,
     val globalRootPromptUpdatedAt: String = "",
+    val webSearchConfigured: Boolean = false,
+    val webSearchEnabled: Boolean = false,
+    val webSearchState: String = "",
 )
 
 data class SettingsActions(
@@ -99,6 +107,9 @@ data class SettingsActions(
     val onTheme: (String) -> Unit = {},
     val onStats: (Boolean) -> Unit = {},
     val onRequestInspection: (Boolean) -> Unit = {},
+    val onDiagnosticsEnabled: (Boolean) -> Unit = {},
+    val onExportDiagnostics: () -> Unit = {},
+    val onClearDiagnostics: () -> Unit = {},
     val onExport: () -> Unit = {},
     val onImport: () -> Unit = {},
     val onCheckUpdates: () -> Unit = {},
@@ -113,6 +124,9 @@ data class SettingsActions(
     val onUnlockRootPrompt: () -> Unit = {},
     val onSaveRootPrompt: (String) -> Unit = {},
     val onRestoreRootPrompt: () -> Unit = {},
+    val onSaveWebSearch: (String) -> Unit = {},
+    val onWebSearchEnabled: (Boolean) -> Unit = {},
+    val onClearWebSearch: () -> Unit = {},
 )
 
 /** State-driven alias for hosts that still route the settings tab through AboutScreen. */
@@ -161,6 +175,44 @@ fun SettingsScreen(state: SettingsUiState, actions: SettingsActions = SettingsAc
             }
         }
         Card(Modifier.fillMaxWidth()) {
+            var apiKey by remember { mutableStateOf("") }
+            Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text(if (zh) "联网搜索（Brave Search API）" else "Web search (Brave Search API)", style = MaterialTheme.typography.titleMedium)
+                Text(
+                    if (zh) "查询只会在每次工具调用得到你的确认后发送给 Brave；API 可能计费。密钥使用 Android Keystore 加密保存，不进入导出、诊断或请求检查器。"
+                    else "Each query is sent to Brave only after your per-call approval; the API may charge. The key is encrypted with Android Keystore and excluded from exports, diagnostics, and the request inspector.",
+                    style = MaterialTheme.typography.bodySmall,
+                )
+                OutlinedTextField(
+                    value = apiKey,
+                    onValueChange = { apiKey = it },
+                    modifier = Modifier.fillMaxWidth(),
+                    label = { Text(if (zh) "Brave Search API Key" else "Brave Search API key") },
+                    singleLine = true,
+                    visualTransformation = PasswordVisualTransformation(),
+                )
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Button(onClick = { actions.onSaveWebSearch(apiKey); apiKey = "" }, enabled = apiKey.isNotBlank()) {
+                        Text(if (zh) "保存并启用" else "Save and enable")
+                    }
+                    if (state.webSearchConfigured) {
+                        OutlinedButton(onClick = actions.onClearWebSearch) { Text(if (zh) "移除密钥" else "Remove key") }
+                    }
+                }
+                SettingSwitch(
+                    if (zh) "允许提供联网搜索工具" else "Expose web-search tool",
+                    state.webSearchEnabled,
+                    actions.onWebSearchEnabled,
+                )
+                Text(
+                    if (zh) "当前：${if (state.webSearchConfigured) "密钥已配置" else "未配置密钥"}。返回结果属于不可信外部内容，应用不会自动打开结果页面。"
+                    else "Current: ${if (state.webSearchConfigured) "key configured" else "no key configured"}. Results are untrusted external content and are never opened automatically.",
+                    style = MaterialTheme.typography.bodySmall,
+                )
+                if (state.webSearchState.isNotBlank()) Text(state.webSearchState, style = MaterialTheme.typography.bodySmall)
+            }
+        }
+        Card(Modifier.fillMaxWidth()) {
             var draftPrompt by remember(state.globalRootPrompt, state.globalRootPromptUnlocked) {
                 mutableStateOf(state.globalRootPrompt)
             }
@@ -191,6 +243,22 @@ fun SettingsScreen(state: SettingsUiState, actions: SettingsActions = SettingsAc
                 Text(if (zh) "隐私与调试" else "Privacy and diagnostics", style = MaterialTheme.typography.titleMedium)
                 SettingSwitch(if (zh) "匿名使用统计" else "Anonymous usage statistics", state.statsEnabled, actions.onStats)
                 SettingSwitch(if (zh) "显示请求检查器" else "Show request inspector", state.requestInspectionEnabled, actions.onRequestInspection)
+                SettingSwitch(if (zh) "应用内诊断记录（默认关闭）" else "In-app diagnostics (off by default)", state.diagnosticsEnabled, actions.onDiagnosticsEnabled)
+                Text(
+                    if (zh) "${if (state.diagnosticsEnabled) "已开启" else "已关闭"} · ${formatDiagnosticBytes(state.diagnosticsSizeBytes)} / ${formatDiagnosticBytes(state.diagnosticsLimitBytes)}"
+                    else "${if (state.diagnosticsEnabled) "On" else "Off"} · ${formatDiagnosticBytes(state.diagnosticsSizeBytes)} / ${formatDiagnosticBytes(state.diagnosticsLimitBytes)}",
+                    style = MaterialTheme.typography.bodySmall,
+                )
+                Text(
+                    if (zh) "仅记录有限的设备/错误元数据与匿名能力开关 breadcrumbs，不含聊天正文、Prompt、知识文件名/路径、密钥、请求头或请求正文。导出可能包含设备/错误元数据；原生崩溃或系统强杀仍可能需要 ADB Logcat。"
+                    else "Only bounded device/error metadata and anonymous capability breadcrumbs are recorded; chat text, prompts, knowledge filenames/paths, keys, headers, and request bodies are excluded. Export may contain device/error metadata; native crashes or system kills may still require ADB Logcat.",
+                    style = MaterialTheme.typography.bodySmall,
+                )
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Button(onClick = actions.onExportDiagnostics) { Text(if (zh) "导出诊断 ZIP" else "Export diagnostics ZIP") }
+                    OutlinedButton(onClick = actions.onClearDiagnostics, enabled = state.diagnosticsSizeBytes > 0) { Text(if (zh) "清除诊断" else "Clear diagnostics") }
+                }
+                if (state.diagnosticsState.isNotBlank()) Text(state.diagnosticsState, style = MaterialTheme.typography.bodySmall)
                 Text(if (zh) "API 密钥不会进入导出文件或请求检查器。" else "API keys never enter exports or the request inspector.", style = MaterialTheme.typography.bodySmall)
             }
         }
@@ -285,6 +353,12 @@ fun SettingsScreen(state: SettingsUiState, actions: SettingsActions = SettingsAc
             onClose = actions.onCloseThirdPartyNotices,
         )
     }
+}
+
+private fun formatDiagnosticBytes(bytes: Long): String = when {
+    bytes < 1024L -> "$bytes B"
+    bytes < 1024L * 1024L -> "${bytes / 1024L} KiB"
+    else -> "${bytes / (1024L * 1024L)} MiB"
 }
 
 @Composable

@@ -3,7 +3,7 @@
 
 # 项目交接
 
-最后更新：2026-08-29T15:12:38+08:00（Asia/Taipei）。项目根目录：`E:\mobileAgentRuntime`。
+最后更新：2026-08-30T13:38:42+08:00（Asia/Taipei）。项目根目录：`E:\mobileAgentRuntime`。
 
 **接手者必须先读 [agent.md](agent.md)、本文件和 [技术实现方案](docs/IMPLEMENTATION_PLAN.md)。工作后必须维护本文件及受影响的专题文档。**
 
@@ -11,40 +11,58 @@
 
 | 项目 | 状态 |
 | --- | --- |
-| 产品 | 审查报告 [mobileAgentRuntime 仓库审查问题报告](docs/2026-08-29_code-review-mobile-agent-runtime-report.md) 仍是输入。0.1.1+0.2+0.3 源码已落地，当前任务将先复核并修复确认问题，再执行 1.0 门禁，最后按 GitHub issue #1 修改并部署公告系统。F-001 只提供 SHA/诊断，**不得**在缺少新 APK SHA+Logcat 时宣称根因已关闭 |
-| 业务源码/构建 | 本轮未打包新 APK。上一 debug APK 仍为 211,102,633 bytes，SHA-256 `2F09A17D12AF45F4D1B108E62656059BC0EED4566D69FBD55E3F207446B9A72A`。`compileDebugKotlin` 生成的 app `BuildConfig`：`GIT_REVISION=13edc5759b1f2fa393f29a095c0690dd7184c7c0-dirty`、`GIT_DIRTY=true`、`DB_SCHEMA_VERSION=11`、`BUILD_TIME_UTC=2026-08-29T04:53:26Z`。JVM：knowledge-api 46、sqlite 86、domain 2、agent-runtime 20、provider-api 33，合计 187 项、0 failure/error/skip |
-| Git | 分支 `main` 跟踪 `origin/main` 且已同步。实现提交 `ef8e4363884358a8ed75acdf58fc64c69c94d6e7`；交接记录 `4b02df264740f62876d7d303f3ddf18386fc4bbd` 已随 `git push origin HEAD` 推到 `https://github.com/hedanbaomi/mobile-agent-runtime.git`（`13edc57..4b02df2`）。作者/提交者 `luozhibai <wy3273564266@163.com>`，无 Cursor trailer。正式 Android release 仍未授权 |
-| CodeGraph | `.codegraph/` 存在；源码修改后 `codegraph sync .` 报告 Already up to date。未修改或提交 `.codegraph/` |
-| 许可 | `licenseGuard`/`licenseGuardReverse` BUILD SUCCESSFUL；`python -B -m reuse lint` 330/330 退出 0。未改 LICENSE 正文 |
-| 授权范围 | 用户已授权当前任务复核并修复 0.1.1–0.3、执行 1.0 门禁，以及按 GitHub issue #1 完成公告系统 Cloudflare 生产部署。当前指令不自动授权 GitHub push、应用商店发布、付费 Provider/Vision 调用或未经核对的 Cloudflare Access 组织/身份变更 |
+| 产品 | 第三轮人工反馈已经收口：知识导入与 Chat 流跨顶层页面继续运行；请求检查器复用同一状态；Agent 获得逐次授权的 Brave `web_search`；兼容的无清单 Claude Skill Python CLI 在启用、授权、绑定后成为真实模型工具并在 isolated CPython 中执行。PowerShell、宿主 shell、任意宿主文件系统、子进程和未授权网络仍不开放。自动复核—修复再次停止，等待用户对新包人工终审；只有用户再发现问题时重启。F-001 保持 `candidate_intermittent` |
+| 业务源码/构建 | 新人工终审 debug APK 为 214,088,013 bytes，SHA-256 `d68a062b12121b76e502afd8a8cf3610d756876d3a7a00eca916f597ad564682`，Android Debug v2 签名证书 SHA-256 `315148930a70085176f864d43de4c7bf3469bca4e912a5ac84b057259350b788`。BuildConfig：`GIT_REVISION=dec1e5118c674b91c6039c0576978c811d02410e-dirty`、`GIT_DIRTY=true`、`DB_SCHEMA_VERSION=11`、`BUILD_TIME_UTC=2026-08-30T05:37:20Z`。严格依赖全仓 `check` 936 tasks 通过；API 31 x86_64 定向设备回归 34/34 通过；APK 安装并冷启动到 `MainActivity` 成功 |
+| Git | HEAD `dec1e5118c674b91c6039c0576978c811d02410e`；分支 `main` 跟踪 `origin/main` 且 ahead 4。当前实现与文档仍为未提交工作区；本轮未 commit/push，APK、构建目录和 `.private/` 备份不进入 Git。正式 Android release 未执行 |
+| CodeGraph | `.codegraph/` 存在；本轮理解源码继续先用 CodeGraph，源码修改后曾同步且报告 Already up to date。未修改或提交 `.codegraph/` |
+| 许可 | 全仓 `check` 所含许可门禁 BUILD SUCCESSFUL；`python -B -m reuse lint` 392/392 退出 0。未改 LICENSE 正文 |
+| 授权范围 | 用户已明确授权本次额外复核/修复和 debug 签包。此前公告系统 Cloudflare 生产部署已执行，但本次没有新的部署授权或线上写入需求，因此未重新部署。授权不延伸为 Git commit/push、正式签名 release、应用商店发布、付费 Provider/Vision 或 Cloudflare Access/secret 变更 |
 
 ## 2. 当前任务
 
-进行中：以 `13edc5759b1f2fa393f29a095c0690dd7184c7c0` 为 0.1.1–0.3 固定审查点，对 `ef8e4363884358a8ed75acdf58fc64c69c94d6e7` 及后续记录做规范/需求双轴复核；确认问题后修复并补证据。随后执行 1.0（F-019 CI/emulator/androidTest、SHA-pinned Actions、真实 SBOM/provenance、正式构建门禁），再实现 GitHub issue #1 的公告刷新、匿名统计、更新入口和管理预设，最后仅对已核对的本产品 Worker/D1 执行 Cloudflare 部署与线上后检。F-001 不得在缺少新 APK SHA+Logcat 时宣称关闭；不调用付费 Provider/Vision，不自动 push 或发布应用商店。
+本次跨页任务、联网搜索与 Claude Skill 程序调用修复、最终复核修订、34/34 设备回归和 debug 打包已经完成，当前只等待用户安装上述唯一命名 APK 做人工终审。自动复核—修复程序已停止；若人工发现问题，以该 APK SHA、应用内诊断 ZIP、发生时间/步骤及必要的完整 Logcat 作为新一轮输入。F-001 不得因暂未复现而关闭；不调用付费 Provider/Brave/Vision，不自动 commit/push、重新部署公告系统、正式签名或发布应用商店。
 
-单一写入责任：主审负责 App 原有 ViewModel/MainActivity/DI、SkillRepository、根配置/文档、模拟器、生产部署；product_ui 负责 feature/** 与 app/ui/**；product_data 负责领域/序列化/Profile 与 Agent/Conversation/Settings/Transfer repository，以及唯一 Migrations 写入；knowledge_runtime 负责知识库/解析/本地嵌入/向量/存储/后台导入；python_runtime 负责 CPython 与 IPC；announcements_production 负责 services/admin 公告源码及本地部署准备；protocol_adapters 负责 provider-api/agent-runtime、skills-api 新 ToolExecutor 与 remote DTO；http_transport 仅负责 BuiltinTools/HostHttp、skills-api 模块依赖与对应测试。两个只读审阅者仅复核 1a035aa 的旧反例。每个实现者维护独立 evidence 文档，主审汇总根交接。共享 Gradle/模拟器由主审协调，不互相覆盖代码或全仓构建。
+兼容的无清单 Claude Skill 会在重新导入后生成本地 Class B 清单；用户仍需启用、确认权限并绑定到 Agent，新会话才冻结到新 snapshot。用户样本中三个纯标准库文本分析程序已覆盖；依赖 PyMuPDF/NumPy/RapidOCR/PyTorch/Transformers 的重型程序继续通过原生知识库工具替代，不能冒称直接执行。完整证据见 `docs/evidence/2026-08-30/manual-review-round-3-capabilities.md`。
 
 ## 3. 关键约束
 
 - 第一方 `AGPL-3.0-only`。applicationId 暂为 `runtime.mobileagent`。CODEOWNERS 为 `@hedanbaomi`。
 - Python 不得在主进程执行；官方 CPython 3.14.7 双 ABI 已嵌入并完成 JNI 编译。Round22 在 Android 16/API 36 x86_64 上完成真实 isolated UID/沙箱/取消/限额 12 项验收；其余 Android 版本矩阵仍不能推定通过。
 - 含图知识库无 Vision 时等待。Android PDF 光栅化、固定版本 MiniLM ONNX 包、USearch JNI 已实现并在 Round21 设备测试通过。320 文件 fixture 仅证明本地文本/存储等待组件；API31/34/35/36 前台短矩阵已完成，真实 Vision、完整故障矩阵、Android15 六小时 timeout 与 Android16 Job 配额仍缺。旧 hash embedder 仅保留测试兼容，不能作为生产 ONNX 证据。
-- 用户曾授权本产品独立 Cloudflare 公告正式部署及 Round22 commit/push，这两项历史授权已执行/移交，不构成当前继续写生产或 Git 的授权。用户现决定自行操作后续公告部署/后检；正式 Android release 尚未授权。
+- 用户此前已明确授权并完成独立 Cloudflare 公告正式部署；本次修复没有重新部署，且该一次性授权不构成继续写生产、改变 Access/secret 或 Git commit/push 的授权。正式 Android release 尚未授权，等待人工终审后共同安排。
 
 ## 4. 接手顺序
 
 1. `git status --short --branch`、`git log -1 --format=full`；确认 HEAD 无 `Co-authored-by: Cursor`
 2. 提交作者使用 `D:\Git\mingw64\libexec\git-core\git.exe commit-tree`，作者 `luozhibai <wy3273564266@163.com>`
 3. 先读最新审查报告；只有用户明确要求开始修复后，才按 0.1.1 稳定性补丁→0.2 配置迁移→0.3 批量导入→1.0 release 门禁推进。F-001 必须先绑定真实 APK revision 并取得 Logcat，不能靠静态猜测修复
-4. 设备 debug 验收以 Round22 APK/hash 和 `final-debug-validation.md` 为准；不要沿用 Round17 之前的失败日志或旧 hash embedder 结果
+4. 当前人工终审以 Round3 APK/hash 和 `manual-review-round-3-capabilities.md` 为准；不要安装通用输出名或沿用 Round2/Round22 旧包
 5. K06 fixture 已进入删除/隔离验证后的终态，不得再次 resume；除非用户另行要求，不再自动扩展长时 K06 或复核—修复循环
-6. 公告系统后续部署、Access 和公网签名/ETag 后检由用户自行操作；不得替用户继续生产变更
+6. 本轮公告部署和公网签名/ETag/Admin 中文后检已完成；后续公告内容、Access、secret 或再次部署必须取得新的明确授权
 
 ## 5. 未决事项
 
-正式包名/品牌/Android release 与签名仍后置。0.1.1–0.3 源码已落地 F-002–F-018 与 F-020 过期文案；F-001 仍为 `candidate_intermittent`，必须用含真实 revision 的新 APK 采集完整 Logcat，不能靠静态路径关闭。F-019（CI/设备回归、真实 SBOM、Actions SHA 钉扎、签名 AAB）未做。Chat/Agents/Knowledge ViewModel 仍为 Activity 作用域，只有 `ShellViewModel` 使用 `SavedStateHandle`；API Embedding 查询重试仍走页面 ViewModel，不签发 consent ticket。知识库 ZIP 仍先整包读入内存（上限 512 MiB），不是 SAF 流式解压。未执行 500 文件/约 500MB 实机批次、杀进程/重启/ENOSPC、真实 Vision 或付费探测。Chat 流式合并与预算单位为静态修复，未跑长流式设备基准。Cloudflare Access 需用户在场创建/选择 Zero Trust 组织与身份策略。完整 K06 仍缺真实 Vision、全阶段 kill/offline/disk-full 注入、Android 15 六小时 timeout 和 Android 16 Job 配额耗尽。GitHub Ruleset 未在本轮验证。不能把未执行的 1.0、生产身份配置、正式 release 或完整 K06 冒称通过。
+正式包名/品牌/Android release 与签名仍后置。F-001 仍为 `candidate_intermittent`：优先启用“设置 → 隐私与调试 → 应用内诊断记录”，复现后导出 ZIP；native 崩溃、系统强杀或 ANR 仍需同一 APK SHA 的完整 Logcat，不能靠静态路径关闭。1.0 本地门禁、真实 debug SBOM、Actions SHA 钉扎和设备回归已完成，但正式签名 AAB 因无用户签名输入保持 `BLOCKED_SIGNING`。用户实际 294 个 PDF/约 301 MiB 的完整导入没有在实验设备上重跑，因此只确认 ZIP 合法路径、逐项入队和尾栅栏缺陷已修复，不宣称完成实际耗时/吞吐验收；另未执行 500 文件/约 500MB 实机批次、初始 SAF→staging 进程死亡、ENOSPC、真实 Vision、Android 15 六小时 timeout 或 Android 16 Job 配额耗尽。完整 K06、正式 release、生产身份策略变更和 GitHub Ruleset 仍不能冒称通过。
 
 ## 6. 工作记录
+
+### 2026-08-30T13:38:42+08:00：跨页任务、联网搜索、Claude Skill 程序调用与 Round3 debug 包
+
+- 输入：新诊断 ZIP SHA-256 `4b053560b3c9ffa479ab5e56c204a1afb3891392f2a513c2c3a05e51e9c23c03`。修复知识导入和 Chat 流随页面离开中断、模型缺少联网搜索、兼容 Claude Skill 程序未成为真实工具三个问题。
+- 实现：稳定 shell owner 持有跨页任务；固定 Brave HTTPS 搜索使用 secret store、逐次批准、固定 host/header、untrusted 有界结果和活动 secret 脱敏；无清单 Claude Skill 的安全标准库 CLI 生成本地 Class B 清单，经启用/grant/Agent snapshot 后成为模型工具并在 isolated UID CPython 中读取本次显式传入的内存虚拟 Markdown 文件。
+- 安全边界：不开放 PowerShell、宿主 shell、任意宿主文件系统、子进程、原生扩展或未授权网络。重型桌面依赖脚本仍使用原生 `knowledge_search`/`read_document` 路线且不得冒称原脚本运行。
+- 最终复核修订：补搜索响应及通用 Provider secret 脱敏、固定 Brave 描述、NFD ZIP 源码查看一致性、真实 `PythonSkillTools` 设备 E2E 和 S12 文档状态。按用户要求不再启动新一轮复核。
+- 验证：API 31 x86_64 六类定向设备测试 34/34、0 failed；全仓严格依赖 `check` 936 tasks；公告 `npm test`；REUSE 392/392；APK v2 签名、覆盖安装和冷启动均通过。
+- 制品：`app-android/build/outputs/apk/debug/mobile-agent-runtime-manual-review-round3-20260830-debug.apk`，214,088,013 bytes，SHA-256 `d68a062b12121b76e502afd8a8cf3610d756876d3a7a00eca916f597ad564682`。未 commit/push、未部署 Cloudflare、未执行正式 release。
+
+### 2026-08-30T10:43:43+08:00：人工终审反馈 8 项修复与新 debug 包
+
+- 输入：5 张人工截图与诊断 ZIP（SHA-256 `6832ebf3d500db309e0b89679366271e447310f6909a3b4fd6077155d390e904`）。ZIP 只有 7 条 INFO 事件，没有知识导入或 Skill 事件，因此不能从旧日志直接定位第 4—6 项；没有把用户文件名、真实路径或内容写入公共证据。
+- 修复：无智能体按钮提升到对称的最小触控尺寸；More 的六个二级页增加应用内返回且系统返回不再直接退出；公告地址/公钥从用户界面移除并保持 BuildConfig 固定接线；知识与 Skill ZIP 改为规范化路径分段校验，允许合法文件名内部连续点；Agent Skill 绑定改用启用的 install ID；知识导入逐项持久化后立即唤醒处理，最终批次栅栏使用 `APPEND_OR_REPLACE`；Chat 流协调器提升到稳定 shell owner，请求检查器复用同一状态并区分关闭/尚未准备/可用；后台运营可见值补齐中文映射。
+- 诊断：增加知识导入、Skill 检查/安装和批次 worker 的有界白名单事件；线程字段只记录 `main`/`worker`/`other` 分类；初始化与未捕获异常安装保持 best-effort，失败不阻止 App 启动。完成事件只在实际 worker 终态记录，SAF 复制/入队阶段使用 staged 语义。
+- 复核：两个独立轴指出 WorkManager `KEEP` 尾竞态、自由线程名、诊断初始化阻断启动风险和 staged/complete 语义混淆；以上均在本轮修正，随后按用户边界停止新的自动复核。
+- 验证：API 31 x86_64 `DiagnosticsDeviceTest,ReleaseGateUiDeviceTest,NavigationScopeTest` 17/17、0 failed；`check --dependency-verification=strict` 936 tasks BUILD SUCCESSFUL；公告 Node check/test 通过。新 APK 安装到 `emulator-5554` 成功并恢复 `runtime.mobileagent/.MainActivity`。
+- 制品：`app-android/build/outputs/apk/debug/mobile-agent-runtime-manual-review-round2-20260830-debug.apk`，211,785,942 bytes，SHA-256 `650bcc7148f0cf341b91ec716b2ae445d2be104c7df1d29d808c3fbe356739df`；Debug v2 签名证书 SHA-256 `315148930a70085176f864d43de4c7bf3469bca4e912a5ac84b057259350b788`。未 commit/push、未重新部署 Cloudflare、未执行正式 release。完整证据见 `docs/evidence/2026-08-30/manual-review-round-2-fixes.md`。
 
 ### 2026-08-29T07:10:00+08:00：Round22 debug 集成、设备验收与公告生产部署
 
@@ -693,3 +711,13 @@ U02 的横屏、IME、大字号、触控、对比度、焦点及实际字体回�
 - 生产部署：最终 Worker version `70b42812-5fd9-45e7-902f-ae35d56151a2`，100% 流量；source hash `b835d4709d29b1111f1673f19a5a64d5d8ae09c14138c3f363e4d6d5de40ca25`。29 文件远端 ZIP 为 79,655 bytes，SHA-256 `48afdbd4606278d48bb0559563e2b331e6b3bcc4f27171b520d97ca66d0c95d7`，与本地归档一致。
 - 公网后检：自定义域名 feed HTTP 200、schema 1、key id 匹配、Ed25519 验签成功、audience/target 匹配、complete 空快照；匹配 Cloudflare 弱 ETag 返回 304；非法 platform 返回 400；`/source` 与 manifest/archive 均 200；匿名 `/admin/v1/stats` 返回 Access 302。未发布测试公告、未写事件、未改 D1 schema/Access/secret。
 - 边界：F-001 仍是 `candidate_intermittent`，不是已修复；若用户人工再次发现，按对应 APK SHA、dirty/schema/build 与完整 Logcat 重启复核。至此停止自动复核—修复循环；后续由用户安排正式 release，公告的已登录 Admin 浏览器验收/自然定时发布可由所有者操作。
+
+### 2026-08-30T00:19:59+08:00：公告后台中文、诊断日志、人工终审包与授权部署
+
+- 请求/边界：用户要求公告后台运营字段全部中文，先补无法稳定复现问题的日志抓取能力，再做本轮唯一一次复核修复并直接输出 debug 签名 APK；随后明确授权部署新公告系统。未授权 commit/push、正式 release、公告内容写入、Access/secret 变更或付费模型调用。
+- 实现：后台字段、按钮、预设、状态/枚举值、统计和预览全部中文显示，wire value 保持协议英文；增加运行时 Node VM 测试。Android 增加默认关闭、主进程内白名单、有界滚动、SecretRedactor+URL/路径清洗、有限 JVM 崩溃摘要、SAF ZIP 导出/清除和 tools/image/Provider 保存面包屑。
+- 最终复核：规范轴发现日志规范化异常、启停事件、取消传播/SAF 错误脱敏问题；需求轴发现后台 JSON 值仍英文。全部修复并复验后按用户指令停止自动复核—修复，不再开始新一轮。
+- 构建/设备：全仓 `check :app-android:assembleDebug :app-android:assembleDebugAndroidTest licenseGuard licenseGuardReverse --dependency-verification=strict` BUILD SUCCESSFUL（1010 tasks，72 executed、938 up-to-date）；API 31 x86_64 `DiagnosticsDeviceTest` 最终 8/8 通过。APK 211,146,446 bytes，SHA-256 `b224a1621a9c16a77e550187eab66db7223d39eb0f0809a591c46e756b73b062`，Android Debug v2 证书 SHA-256 `315148930a70085176f864d43de4c7bf3469bca4e912a5ac84b057259350b788`。
+- 生产：D1 迁移无待办；部署前备份 4,183 bytes、SHA-256 `dcff7e39f88ce9ac51c16149a9821882e3676b56a63f274ceec00a18660c7c7b`。source hash `5ca5795074e6e95842b9a93c8ba67a1af8eac100a1b9589d69530fd345d1cee9`，29 files；ZIP 84,485 bytes、SHA-256 `c60e573e2f61f7d0941a919ec3b312fe393c02f81d898411779e52e446ff069e`。Worker version `9480180b-d6d2-44e9-9a89-a4fe88b9bcbd` 承载 100% 流量。
+- 后检：feed 200/schema1/key匹配/验签成功，ETag 304，非法 context 400，source manifest/archive 一致；匿名 Admin/统计由 Access 302 拒绝。用户现有 Access 登录态只读刷新确认后台标题、字段、预设、按钮、下拉值、预览和空状态均中文。feedVersion 0、items 0，未发布测试公告或改公告内容。
+- Git/后续：HEAD `dec1e5118c674b91c6039c0576978c811d02410e`，`main` ahead 4 且本轮工作区未提交；未 commit/push。人工终审尚未完成，F-001 保持 `candidate_intermittent`。完整证据见 `docs/evidence/2026-08-30/admin-cn-diagnostics-debug-deploy.md`。

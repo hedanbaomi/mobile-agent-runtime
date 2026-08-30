@@ -3,7 +3,7 @@
 
 # 项目交接
 
-最后更新：2026-08-30T15:42:40+08:00（Asia/Taipei）。项目根目录：`E:\mobileAgentRuntime`。
+最后更新：2026-08-30T15:54:25+08:00（Asia/Taipei）。项目根目录：`E:\mobileAgentRuntime`。
 
 **接手者必须先读 [agent.md](agent.md)、本文件和 [技术实现方案](docs/IMPLEMENTATION_PLAN.md)。工作后必须维护本文件及受影响的专题文档。**
 
@@ -67,6 +67,8 @@
 - 第三层 clean 输入根因：主 run `33298903859` 的 `check` 继续执行到 `:runtime:python-android:verifyOfficialCpython` 后失败；既有设计把 Python 3.14.7 官方 Android 双 ABI archive、Sigstore bundle 与解包目录只放在 ignored `runtime/python-android/build/official/3.14.7/`，本地长期缓存掩盖了 clean checkout 必然缺文件的问题。四个 emulator job 也已实际创建并启动 `pixel_2`，但同样需要这些构建输入后才能完成 instrumentation。
 - 当前候选增加 `prepareOfficialCpython`：只接受 `https://www.python.org:443/ftp/python/3.14.7`，禁止 userinfo、非标准端口和重定向；archive 继续使用原 pinned SHA-256，Sigstore bundle 新增精确 SHA-256（aarch64 `e65340a247a68e2248556c1ac16a5eea0689c2b3d6ec31be6f72b0dda5cd1c65`、x86_64 `840007443d6ac16262d33753875ed183bb55cc350ad809b090b4cf011055e099`）。下载先写临时文件并验 hash 后替换；解包先在临时目录确认 header、`libpython3.14.so` 与完整 PSF license，再复制到最终 build 目录，并以 archive hash marker 防止旧 prefix 被新 pin 复用。`verifyOfficialCpython` 仍 fail-closed 且现在依赖该准备任务；没有把产物提交 Git、换版本、放宽隔离、dependency verification 或许可门禁。Sigstore bundle 保持项目原有“随包保存并固定 hash”的边界，本轮没有冒称已增加独立 Rekor/证书验签。
 - clean-room 验证：先执行模块 clean 使 ignored CPython 缓存为空，再单独运行 strict `:runtime:python-android:verifyOfficialCpython`，真实重新下载约 45 MiB 双 ABI archive 与两个 bundle、跨平台解包并在 1m6s 内 BUILD SUCCESSFUL；第二次缓存验证 20s 通过。首次实现还在 Windows 目录原子 move 暴露 `AccessDeniedException`，已改为清空目标后复制并由后续严格结构验证兜底；该失败没有被忽略。随后 licenseGuard/reverse BUILD SUCCESSFUL、REUSE 392/392、strict 2 workflow pins/24 lockfiles/261404-byte verification metadata 通过；完整 strict `check :app-android:assembleDebug :app-android:generateDebugSbom` BUILD SUCCESSFUL（985 tasks：85 executed、27 from cache、873 up-to-date；166 SBOM components）。下一次 push 的 Ubuntu clean build 与四 API emulator 仍是最终远端边界。
+- 第三批提交/远端与新发现：按授权形成并推送 `f9ebfbd9d987bdea964abf9b9e539f3d43f9c450`（`fix(ci): prepare official CPython inputs`），本地、跟踪分支与 `ls-remote` 三方一致且工作区当时干净。新 run `33299872032` 已越过 CPython 缺失；其 check 的 announcement/license/REUSE/pins/locks/strict metadata 通过后，clean Ubuntu 在两个 feature resource task 同时解析 Linux AAPT2 时缺 `aapt2-8.8.2-12006047-linux.jar` checksum。现有 metadata 只有同版本 Windows jar 与 POM，本机 Windows 完整构建因此不能发现该 OS classifier。
+- Linux AAPT2 候选：从 Google Maven 官方固定 URL 下载 2,303,812-byte `com.android.tools.build:aapt2:8.8.2-12006047` Linux jar，SHA-256 为 `be548b5ec223fc866ac8025bc782635531ded6f26f3681e2fec91c68e95608ba`；只在既有 component 下新增这一精确 artifact，不使用 wildcard，不改 AGP 版本，strict verification 保持。新 push 和 GitHub Actions 最终结果仍待后续记录。
 
 ### 2026-08-30T13:59:30+08:00：Round3 提交并同步远端
 

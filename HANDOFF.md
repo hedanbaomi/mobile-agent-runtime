@@ -3,7 +3,7 @@
 
 # 项目交接
 
-最后更新：2026-08-30T13:59:30+08:00（Asia/Taipei）。项目根目录：`E:\mobileAgentRuntime`。
+最后更新：2026-08-30T14:45:47+08:00（Asia/Taipei）。项目根目录：`E:\mobileAgentRuntime`。
 
 **接手者必须先读 [agent.md](agent.md)、本文件和 [技术实现方案](docs/IMPLEMENTATION_PLAN.md)。工作后必须维护本文件及受影响的专题文档。**
 
@@ -13,14 +13,16 @@
 | --- | --- |
 | 产品 | 第三轮人工反馈已经收口：知识导入与 Chat 流跨顶层页面继续运行；请求检查器复用同一状态；Agent 获得逐次授权的 Brave `web_search`；兼容的无清单 Claude Skill Python CLI 在启用、授权、绑定后成为真实模型工具并在 isolated CPython 中执行。PowerShell、宿主 shell、任意宿主文件系统、子进程和未授权网络仍不开放。自动复核—修复再次停止，等待用户对新包人工终审；只有用户再发现问题时重启。F-001 保持 `candidate_intermittent` |
 | 业务源码/构建 | 新人工终审 debug APK 为 214,088,013 bytes，SHA-256 `d68a062b12121b76e502afd8a8cf3610d756876d3a7a00eca916f597ad564682`，Android Debug v2 签名证书 SHA-256 `315148930a70085176f864d43de4c7bf3469bca4e912a5ac84b057259350b788`。BuildConfig：`GIT_REVISION=dec1e5118c674b91c6039c0576978c811d02410e-dirty`、`GIT_DIRTY=true`、`DB_SCHEMA_VERSION=11`、`BUILD_TIME_UTC=2026-08-30T05:37:20Z`。严格依赖全仓 `check` 936 tasks 通过；API 31 x86_64 定向设备回归 34/34 通过；APK 安装并冷启动到 `MainActivity` 成功 |
-| Git | 第三轮功能实现提交 `87eb2ba7fc8d7d8dd2aec1184272a3acda4c86b7`；本交接状态另形成收尾提交，两者与原本地 ahead 4 同批推送到 `origin/main`，推送后用远端 ref 与本地 HEAD 精确核验同步。APK、构建目录、`.private/`、诊断原件和 `.codegraph/` 未进入 Git。正式 Android release 未执行 |
+| Git | 当前 CI 修复基线为已同步的 `main@d2080429b5a7498f94f9dc909fcfac2e07f4d1fd`。本轮只修改 Git wrapper 模式、CI workflow、dependency verification metadata 与本交接；用户已授权本轮验证完成后 commit/push。APK、构建目录、`.private/`、诊断原件和 `.codegraph/` 不进入 Git。正式 Android release 不执行 |
 | CodeGraph | `.codegraph/` 存在；本轮理解源码继续先用 CodeGraph，源码修改后曾同步且报告 Already up to date。未修改或提交 `.codegraph/` |
 | 许可 | 全仓 `check` 所含许可门禁 BUILD SUCCESSFUL；`python -B -m reuse lint` 392/392 退出 0。未改 LICENSE 正文 |
-| 授权范围 | 用户已明确授权本次额外复核/修复、debug 签包以及本轮 commit/push。本次 Git 授权不延伸为正式签名 release、应用商店发布、付费 Provider/Vision、Cloudflare 再部署或 Access/secret 变更 |
+| 授权范围 | 用户已明确授权本次 CI 基础设施修复完成后的 commit/push。本次 Git 授权不延伸为正式签名 release、应用商店发布、付费服务、Cloudflare 部署或 Access/secret 变更 |
 
 ## 2. 当前任务
 
-本次跨页任务、联网搜索与 Claude Skill 程序调用修复、最终复核修订、34/34 设备回归、debug 打包以及用户授权的 commit/push 已完成，当前只等待用户安装上述唯一命名 APK 做人工终审。自动复核—修复程序已停止；若人工发现问题，以该 APK SHA、应用内诊断 ZIP、发生时间/步骤及必要的完整 Logcat 作为新一轮输入。F-001 不得因暂未复现而关闭；不调用付费 Provider/Brave/Vision，不重新部署公告系统、正式签名或发布应用商店。
+当前任务是修复 `main@d2080429b5a7498f94f9dc909fcfac2e07f4d1fd` 的 GitHub Actions 基础设施失败，不改变产品行为。wrapper 模式、strict dependency verification metadata 与 emulator profile 已完成最小修复和本地门禁；真实 Linux checkout 及 API 31/34/35/36 emulator matrix 仍必须由本轮新 push 的 GitHub Actions 证明，不能用本地 Windows 构建替代。Signed release gate 在普通 push 下继续按设计跳过。
+
+此前跨页任务、联网搜索与 Claude Skill 程序调用修复、34/34 设备回归和人工终审 debug 包状态保持不变。自动产品复核—修复程序仍停止；若人工发现产品问题，以对应 APK SHA、应用内诊断 ZIP、发生时间/步骤及必要的完整 Logcat 作为新一轮输入。F-001 不得因暂未复现而关闭；本轮不调用付费 Provider/Brave/Vision，不重新部署公告系统、正式签名或发布应用商店。
 
 兼容的无清单 Claude Skill 会在重新导入后生成本地 Class B 清单；用户仍需启用、确认权限并绑定到 Agent，新会话才冻结到新 snapshot。用户样本中三个纯标准库文本分析程序已覆盖；依赖 PyMuPDF/NumPy/RapidOCR/PyTorch/Transformers 的重型程序继续通过原生知识库工具替代，不能冒称直接执行。完整证据见 `docs/evidence/2026-08-30/manual-review-round-3-capabilities.md`。
 
@@ -45,6 +47,17 @@
 正式包名/品牌/Android release 与签名仍后置。F-001 仍为 `candidate_intermittent`：优先启用“设置 → 隐私与调试 → 应用内诊断记录”，复现后导出 ZIP；native 崩溃、系统强杀或 ANR 仍需同一 APK SHA 的完整 Logcat，不能靠静态路径关闭。1.0 本地门禁、真实 debug SBOM、Actions SHA 钉扎和设备回归已完成，但正式签名 AAB 因无用户签名输入保持 `BLOCKED_SIGNING`。用户实际 294 个 PDF/约 301 MiB 的完整导入没有在实验设备上重跑，因此只确认 ZIP 合法路径、逐项入队和尾栅栏缺陷已修复，不宣称完成实际耗时/吞吐验收；另未执行 500 文件/约 500MB 实机批次、初始 SAF→staging 进程死亡、ENOSPC、真实 Vision、Android 15 六小时 timeout 或 Android 16 Job 配额耗尽。完整 K06、正式 release、生产身份策略变更和 GitHub Ruleset 仍不能冒称通过。
 
 ## 6. 工作记录
+
+### 2026-08-30T14:45:47+08:00：修复 d208042 的 GitHub Actions 基础设施失败
+
+- 请求/边界：用户要求修复 `d2080429b5a7498f94f9dc909fcfac2e07f4d1fd` 的 CI 失败，并在完成后 commit/push。本轮只动 CI、Gradle 验证元数据、wrapper Git 模式与交接；未改产品、公告、Agent、Knowledge、Skill 或 Python Runtime 行为，未触发正式 release、Cloudflare、secret 或付费服务。
+- 远端复核：GitHub run `33295949193` 的 `check` 因 `./gradlew: Permission denied`/126 失败，四个 API matrix job 都在 `avdmanager create avd --device Pixel_2` 阶段失败；run `33295949201` 的 `license` 只缺 `junit-bom-5.9.2.module` 与 `junit-bom-5.9.3.module`。普通 push 的 `Signed release gate (manual only)` 为 skipped，符合 `workflow_dispatch` 条件。
+- wrapper：基线索引模式为 `100644`；使用 `git update-index --chmod=+x gradlew` 恢复为 `100755`。`ci.yml` 的 check、android-smoke、manual release 三个独立 checkout 均增加与 `license-guard.yml` 一致的幂等 `chmod +x gradlew`，作为 checkout/跨平台容错；所有构建仍只走 Gradle wrapper。
+- verification metadata 根因：AGP 8.8.2 的构建 classpath 解析 `commons-io:2.13.0 → commons-parent:58` 时导入 `org.junit:junit-bom:5.9.3`；`grpc-core → animal-sniffer-annotations:1.23 → animal-sniffer-parent → mojo-parent:74` 时导入 `org.junit:junit-bom:5.9.2`。clean Linux 从仓库取得 Gradle Module Metadata，现有文件只有两份 POM checksum，strict verification 因而正确失败。新增 `.module` SHA-256 分别为 `ab137ba5a8e32c9b066bf9126a1c76dd5614b724ba5c0b02549772b5e9f4cf1f` 与 `b401fd25901e582a524aa5343c4b39e28bc56e24961c1069bf2b4bbfcee46b93`；本地缓存与 Maven Central 原件逐字节 hash 一致。`--write-verification-metadata sha256` 的候选 diff 还带入两个无关 POM，审查后已剔除，最终只保留目标 6 行；strict/lock/license 门禁均未降低。
+- emulator：当前 SDK 的 `avdmanager list device -c` 明确列出 `pixel_2`，不列出大小写错误的 `Pixel_2`。workflow 改为精确 `profile: pixel_2` 并保留说明；API `[31, 34, 35, 36]`、`google_apis`、`x86_64` 与 `runtime.mobileagent.ReleaseGateUiDeviceTest` 均未变，没有跳过 instrumentation。
+- 本地验证：`licenseGuard licenseGuardReverse` BUILD SUCCESSFUL；`python -B -m reuse lint` 392/392；strict `verifyCiPins verifyDependencyLock verifyDependencyVerification` BUILD SUCCESSFUL（2 workflows、24 lockfiles、260891-byte metadata）；strict `check :app-android:assembleDebug :app-android:generateDebugSbom` BUILD SUCCESSFUL（984 tasks，166 SBOM components）。PyYAML 6.0.3 成功解析两个 workflow；精确静态断言确认四 API、测试类、manual-only 条件及四处 chmod；`git diff --check` 无错误。
+- 审查/剩余：双轴只读审查未发现代码行为或规范硬性问题；最初 spec 轴要求把上述 POM 链与 metadata diff 审查写入仓库，本节已补齐。三个 job 的显式 chmod 属主观重复，但抽成 composite/reusable workflow 会扩大本次最小修复，因此保留。Windows 本机没有冒充 GitHub Ubuntu emulator；真实建 AVD、启动四台 emulator 与执行 instrumentation 必须等待新 push 的 Actions。
+- Git：本节记录时 HEAD 仍为基线、候选变更已通过本地门禁；用户已明确授权完成后的 commit/push。提交与远端同步结果以本任务最终 `git rev-parse HEAD`、`origin/main` 和 GitHub Actions run 为准，不把本节预写为已推送。
 
 ### 2026-08-30T13:59:30+08:00：Round3 提交并同步远端
 

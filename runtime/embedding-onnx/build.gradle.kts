@@ -115,12 +115,12 @@ val prepareModelPack = tasks.register("prepareModelPack") {
         val model = cache.resolve("model.onnx")
         val tokenizer = cache.resolve("tokenizer.json")
         downloadPinned(
-            "$modelPackSource/resolve/$modelPackRevision/onnx/model.onnx?download=true",
+            "${modelPackSource}resolve/$modelPackRevision/onnx/model.onnx?download=true",
             model,
             modelPackModelSha256,
         )
         downloadPinned(
-            "$modelPackSource/resolve/$modelPackRevision/tokenizer.json?download=true",
+            "${modelPackSource}resolve/$modelPackRevision/tokenizer.json?download=true",
             tokenizer,
             modelPackTokenizerSha256,
         )

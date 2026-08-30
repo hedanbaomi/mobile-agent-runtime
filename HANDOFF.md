@@ -3,7 +3,7 @@
 
 # 项目交接
 
-最后更新：2026-08-30T15:54:25+08:00（Asia/Taipei）。项目根目录：`E:\mobileAgentRuntime`。
+最后更新：2026-08-30T16:58:56+08:00（Asia/Taipei）。项目根目录：`E:\mobileAgentRuntime`。
 
 **接手者必须先读 [agent.md](agent.md)、本文件和 [技术实现方案](docs/IMPLEMENTATION_PLAN.md)。工作后必须维护本文件及受影响的专题文档。**
 
@@ -69,6 +69,8 @@
 - clean-room 验证：先执行模块 clean 使 ignored CPython 缓存为空，再单独运行 strict `:runtime:python-android:verifyOfficialCpython`，真实重新下载约 45 MiB 双 ABI archive 与两个 bundle、跨平台解包并在 1m6s 内 BUILD SUCCESSFUL；第二次缓存验证 20s 通过。首次实现还在 Windows 目录原子 move 暴露 `AccessDeniedException`，已改为清空目标后复制并由后续严格结构验证兜底；该失败没有被忽略。随后 licenseGuard/reverse BUILD SUCCESSFUL、REUSE 392/392、strict 2 workflow pins/24 lockfiles/261404-byte verification metadata 通过；完整 strict `check :app-android:assembleDebug :app-android:generateDebugSbom` BUILD SUCCESSFUL（985 tasks：85 executed、27 from cache、873 up-to-date；166 SBOM components）。下一次 push 的 Ubuntu clean build 与四 API emulator 仍是最终远端边界。
 - 第三批提交/远端与新发现：按授权形成并推送 `f9ebfbd9d987bdea964abf9b9e539f3d43f9c450`（`fix(ci): prepare official CPython inputs`），本地、跟踪分支与 `ls-remote` 三方一致且工作区当时干净。新 run `33299872032` 已越过 CPython 缺失；其 check 的 announcement/license/REUSE/pins/locks/strict metadata 通过后，clean Ubuntu 在两个 feature resource task 同时解析 Linux AAPT2 时缺 `aapt2-8.8.2-12006047-linux.jar` checksum。现有 metadata 只有同版本 Windows jar 与 POM，本机 Windows 完整构建因此不能发现该 OS classifier。
 - Linux AAPT2 候选：从 Google Maven 官方固定 URL 下载 2,303,812-byte `com.android.tools.build:aapt2:8.8.2-12006047` Linux jar，SHA-256 为 `be548b5ec223fc866ac8025bc782635531ded6f26f3681e2fec91c68e95608ba`；只在既有 component 下新增这一精确 artifact，不使用 wildcard，不改 AGP 版本，strict verification 保持。新 push 和 GitHub Actions 最终结果仍待后续记录。
+- 第四批提交/远端与测试夹具：按授权形成并推送 `6dae65bcd7c13b99a07ee61cf23292c793fea6df`（`fix(ci): verify Linux AAPT2 binary`），本地、跟踪分支与 `ls-remote` 三方一致。新 run `33300324979` 已证明 wrapper、announcement、licenseGuard、REUSE、strict pins/locks/verification、CPython 与 Linux AAPT2 均越过原故障；check 随后在 `HostHttpTest.crossHostRedirectRequiresAllowListAndDoesNotForwardCookies` 偶发 `okhttp3.internal.http2.StreamResetException`。同一原始用例在 WSL/Linux 单测 20/20、完整 `HostHttpTest` 20/20、完整 `shared:skills-api` 20/20 均通过，无法稳定复现；该夹具验证 host/DNS/TLS/redirect/cookie/secret，而不验证 HTTP/2 framing，因此仅把 MockWebServer 与注入 client 同时固定为 HTTP/1.1，保留全部安全断言且不改生产 `HostHttp`。修订后 Windows 完整模块测试通过，WSL/Linux 完整模块再做 20/20 压力通过。
+- emulator 新根因与候选：run `33300324979` 四个 `pixel_2` AVD 均实际创建，但 pinned runner 因 workflow 未配置 KVM 而使用 `-accel off`；API 31 开机耗时 582,694 ms，随后四个 API 均在安装 APK 前报告 `cmd: Can't find service: package`，未执行任何 instrumentation case。按当前 pinned `reactivecircus/android-emulator-runner@324029e...` README 的 Ubuntu 官方示例增加 KVM udev 权限步骤，显式 `disable-linux-hw-accel: false` 并在完整 emulator options 中加入 `-accel on`，使 KVM 不可用时 fail-closed 而不是退回软件模拟；action 报告 boot 后再以 120 秒有界检查确认目标 emulator 的 package service 存在，随后仍原样执行 `runtime.mobileagent.ReleaseGateUiDeviceTest`。API `[31,34,35,36]`、`google_apis`、`x86_64`、`pixel_2` 与 manual-only release skip 均未改变。本轮候选已通过 YAML 静态断言、`git diff --check`、licenseGuard/reverse、REUSE 392/392、strict 2 workflow pins/24 lockfiles/261631-byte verification metadata，以及完整 strict `check :app-android:assembleDebug :app-android:generateDebugSbom`（985 tasks、166 SBOM components）；新 push 的真实 KVM/四 API 结果仍是最终边界。
 
 ### 2026-08-30T13:59:30+08:00：Round3 提交并同步远端
 

@@ -10,6 +10,7 @@ import okhttp3.Dns
 import okhttp3.EventListener
 import okhttp3.HttpUrl
 import okhttp3.OkHttpClient
+import okhttp3.Protocol
 import okhttp3.mockwebserver.MockResponse
 import okhttp3.mockwebserver.MockWebServer
 import okhttp3.tls.HandshakeCertificates
@@ -62,10 +63,15 @@ class HostHttpTest {
         val client: OkHttpClient
 
         init {
+            // These tests exercise host/DNS/TLS/redirect policy, not HTTP/2 framing. Pin the
+            // loopback fixture to HTTP/1.1 so closing one redirect hop cannot race an HTTP/2
+            // RST_STREAM against the next hop on heavily loaded Linux CI runners.
+            server.protocols = listOf(Protocol.HTTP_1_1)
             server.useHttps(serverTls.sslSocketFactory(), false)
             server.start(InetAddress.getLoopbackAddress(), 0)
             client = OkHttpClient.Builder()
                 .sslSocketFactory(clientTls.sslSocketFactory(), clientTls.trustManager)
+                .protocols(listOf(Protocol.HTTP_1_1))
                 .socketFactory(object : SocketFactory() {
                     override fun createSocket(): Socket = object : Socket() {
                         override fun connect(endpoint: SocketAddress, timeout: Int) {

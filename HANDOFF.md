@@ -3,7 +3,7 @@
 
 # 项目交接
 
-最后更新：2026-08-30T13:38:42+08:00（Asia/Taipei）。项目根目录：`E:\mobileAgentRuntime`。
+最后更新：2026-08-30T13:59:30+08:00（Asia/Taipei）。项目根目录：`E:\mobileAgentRuntime`。
 
 **接手者必须先读 [agent.md](agent.md)、本文件和 [技术实现方案](docs/IMPLEMENTATION_PLAN.md)。工作后必须维护本文件及受影响的专题文档。**
 
@@ -13,14 +13,14 @@
 | --- | --- |
 | 产品 | 第三轮人工反馈已经收口：知识导入与 Chat 流跨顶层页面继续运行；请求检查器复用同一状态；Agent 获得逐次授权的 Brave `web_search`；兼容的无清单 Claude Skill Python CLI 在启用、授权、绑定后成为真实模型工具并在 isolated CPython 中执行。PowerShell、宿主 shell、任意宿主文件系统、子进程和未授权网络仍不开放。自动复核—修复再次停止，等待用户对新包人工终审；只有用户再发现问题时重启。F-001 保持 `candidate_intermittent` |
 | 业务源码/构建 | 新人工终审 debug APK 为 214,088,013 bytes，SHA-256 `d68a062b12121b76e502afd8a8cf3610d756876d3a7a00eca916f597ad564682`，Android Debug v2 签名证书 SHA-256 `315148930a70085176f864d43de4c7bf3469bca4e912a5ac84b057259350b788`。BuildConfig：`GIT_REVISION=dec1e5118c674b91c6039c0576978c811d02410e-dirty`、`GIT_DIRTY=true`、`DB_SCHEMA_VERSION=11`、`BUILD_TIME_UTC=2026-08-30T05:37:20Z`。严格依赖全仓 `check` 936 tasks 通过；API 31 x86_64 定向设备回归 34/34 通过；APK 安装并冷启动到 `MainActivity` 成功 |
-| Git | HEAD `dec1e5118c674b91c6039c0576978c811d02410e`；分支 `main` 跟踪 `origin/main` 且 ahead 4。当前实现与文档仍为未提交工作区；本轮未 commit/push，APK、构建目录和 `.private/` 备份不进入 Git。正式 Android release 未执行 |
+| Git | 第三轮功能实现提交 `87eb2ba7fc8d7d8dd2aec1184272a3acda4c86b7`；本交接状态另形成收尾提交，两者与原本地 ahead 4 同批推送到 `origin/main`，推送后用远端 ref 与本地 HEAD 精确核验同步。APK、构建目录、`.private/`、诊断原件和 `.codegraph/` 未进入 Git。正式 Android release 未执行 |
 | CodeGraph | `.codegraph/` 存在；本轮理解源码继续先用 CodeGraph，源码修改后曾同步且报告 Already up to date。未修改或提交 `.codegraph/` |
 | 许可 | 全仓 `check` 所含许可门禁 BUILD SUCCESSFUL；`python -B -m reuse lint` 392/392 退出 0。未改 LICENSE 正文 |
-| 授权范围 | 用户已明确授权本次额外复核/修复和 debug 签包。此前公告系统 Cloudflare 生产部署已执行，但本次没有新的部署授权或线上写入需求，因此未重新部署。授权不延伸为 Git commit/push、正式签名 release、应用商店发布、付费 Provider/Vision 或 Cloudflare Access/secret 变更 |
+| 授权范围 | 用户已明确授权本次额外复核/修复、debug 签包以及本轮 commit/push。本次 Git 授权不延伸为正式签名 release、应用商店发布、付费 Provider/Vision、Cloudflare 再部署或 Access/secret 变更 |
 
 ## 2. 当前任务
 
-本次跨页任务、联网搜索与 Claude Skill 程序调用修复、最终复核修订、34/34 设备回归和 debug 打包已经完成，当前只等待用户安装上述唯一命名 APK 做人工终审。自动复核—修复程序已停止；若人工发现问题，以该 APK SHA、应用内诊断 ZIP、发生时间/步骤及必要的完整 Logcat 作为新一轮输入。F-001 不得因暂未复现而关闭；不调用付费 Provider/Brave/Vision，不自动 commit/push、重新部署公告系统、正式签名或发布应用商店。
+本次跨页任务、联网搜索与 Claude Skill 程序调用修复、最终复核修订、34/34 设备回归、debug 打包以及用户授权的 commit/push 已完成，当前只等待用户安装上述唯一命名 APK 做人工终审。自动复核—修复程序已停止；若人工发现问题，以该 APK SHA、应用内诊断 ZIP、发生时间/步骤及必要的完整 Logcat 作为新一轮输入。F-001 不得因暂未复现而关闭；不调用付费 Provider/Brave/Vision，不重新部署公告系统、正式签名或发布应用商店。
 
 兼容的无清单 Claude Skill 会在重新导入后生成本地 Class B 清单；用户仍需启用、确认权限并绑定到 Agent，新会话才冻结到新 snapshot。用户样本中三个纯标准库文本分析程序已覆盖；依赖 PyMuPDF/NumPy/RapidOCR/PyTorch/Transformers 的重型程序继续通过原生知识库工具替代，不能冒称直接执行。完整证据见 `docs/evidence/2026-08-30/manual-review-round-3-capabilities.md`。
 
@@ -29,7 +29,7 @@
 - 第一方 `AGPL-3.0-only`。applicationId 暂为 `runtime.mobileagent`。CODEOWNERS 为 `@hedanbaomi`。
 - Python 不得在主进程执行；官方 CPython 3.14.7 双 ABI 已嵌入并完成 JNI 编译。Round22 在 Android 16/API 36 x86_64 上完成真实 isolated UID/沙箱/取消/限额 12 项验收；其余 Android 版本矩阵仍不能推定通过。
 - 含图知识库无 Vision 时等待。Android PDF 光栅化、固定版本 MiniLM ONNX 包、USearch JNI 已实现并在 Round21 设备测试通过。320 文件 fixture 仅证明本地文本/存储等待组件；API31/34/35/36 前台短矩阵已完成，真实 Vision、完整故障矩阵、Android15 六小时 timeout 与 Android16 Job 配额仍缺。旧 hash embedder 仅保留测试兼容，不能作为生产 ONNX 证据。
-- 用户此前已明确授权并完成独立 Cloudflare 公告正式部署；本次修复没有重新部署，且该一次性授权不构成继续写生产、改变 Access/secret 或 Git commit/push 的授权。正式 Android release 尚未授权，等待人工终审后共同安排。
+- 用户此前已明确授权并完成独立 Cloudflare 公告正式部署；本次修复没有重新部署。本轮 commit/push 授权在同步完成后即消费，不构成继续写生产、改变 Access/secret 或未来再次推送的授权。正式 Android release 尚未授权，等待人工终审后共同安排。
 
 ## 4. 接手顺序
 
@@ -45,6 +45,13 @@
 正式包名/品牌/Android release 与签名仍后置。F-001 仍为 `candidate_intermittent`：优先启用“设置 → 隐私与调试 → 应用内诊断记录”，复现后导出 ZIP；native 崩溃、系统强杀或 ANR 仍需同一 APK SHA 的完整 Logcat，不能靠静态路径关闭。1.0 本地门禁、真实 debug SBOM、Actions SHA 钉扎和设备回归已完成，但正式签名 AAB 因无用户签名输入保持 `BLOCKED_SIGNING`。用户实际 294 个 PDF/约 301 MiB 的完整导入没有在实验设备上重跑，因此只确认 ZIP 合法路径、逐项入队和尾栅栏缺陷已修复，不宣称完成实际耗时/吞吐验收；另未执行 500 文件/约 500MB 实机批次、初始 SAF→staging 进程死亡、ENOSPC、真实 Vision、Android 15 六小时 timeout 或 Android 16 Job 配额耗尽。完整 K06、正式 release、生产身份策略变更和 GitHub Ruleset 仍不能冒称通过。
 
 ## 6. 工作记录
+
+### 2026-08-30T13:59:30+08:00：Round3 提交并同步远端
+
+- 授权：用户明确要求 commit 和 push，使本地与远端同步；没有扩展到 Cloudflare、正式签名 release 或商店发布。
+- 提交：65 个候选文件经 staged diff、敏感信息模式和公告源码归档检查后形成 `87eb2ba7fc8d7d8dd2aec1184272a3acda4c86b7`（`feat: complete manual review fixes and agent tools`）；本交接状态另形成收尾文档提交。
+- 排除：Round3 APK、所有 build 输出、`.private/`、诊断原件和 `.codegraph/` 均未入库。
+- 推送：本地原有 ahead 4、behind 0；上述两个提交与原有四个本地提交同批 fast-forward 推送，随后以 `git fetch`、`rev-list`、`ls-remote` 和 clean status 核验 `origin/main == main`。
 
 ### 2026-08-30T13:38:42+08:00：跨页任务、联网搜索、Claude Skill 程序调用与 Round3 debug 包
 

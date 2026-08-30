@@ -2,6 +2,10 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 import java.io.File
+import java.net.HttpURLConnection
+import java.net.URI
+import java.nio.file.Files
+import java.nio.file.StandardCopyOption
 import java.security.MessageDigest
 import org.gradle.api.tasks.Copy
 import org.gradle.api.tasks.Sync
@@ -21,6 +25,11 @@ val officialCpythonSha256 = mapOf(
     "aarch64" to "6d50cc3aa66e414a439594089bcdfb5f1264358155c70c1f00471c24cfb477fb",
     "x86_64" to "2c16ce2359565cd8c24f86cfb75630768ba6607e732946b294b969797f583b60",
 )
+val officialCpythonSigstoreSha256 = mapOf(
+    "aarch64" to "e65340a247a68e2248556c1ac16a5eea0689c2b3d6ec31be6f72b0dda5cd1c65",
+    "x86_64" to "840007443d6ac16262d33753875ed183bb55cc350ad809b090b4cf011055e099",
+)
+val officialCpythonSource = "https://www.python.org/ftp/python/$officialCpythonVersion"
 val pythonAssetSourceDirectory = layout.buildDirectory.dir("generated/pythonAssetSources")
 val pythonAssetDirectory = layout.buildDirectory.dir("generated/pythonAssets")
 
@@ -40,7 +49,110 @@ fun File.sha256Hex(): String {
 fun prefixFor(architecture: String): File =
     officialCpythonDirectory.get().asFile.resolve("extract-$architecture/prefix")
 
+fun downloadPinned(url: String, destination: File, expectedSha256: String) {
+    destination.parentFile.mkdirs()
+    if (!destination.isFile || destination.sha256Hex() != expectedSha256) {
+        val temporary = destination.resolveSibling(".${destination.name}.download")
+        temporary.delete()
+        val source = URI(url)
+        check(
+            source.scheme == "https" &&
+                source.host == "www.python.org" &&
+                source.userInfo == null &&
+                source.port in listOf(-1, 443),
+        ) { "Official CPython source must be https://www.python.org:443" }
+        val connection = source.toURL().openConnection() as HttpURLConnection
+        connection.connectTimeout = 30_000
+        connection.readTimeout = 120_000
+        connection.instanceFollowRedirects = false
+        connection.requestMethod = "GET"
+        try {
+            check(connection.responseCode in 200..299) {
+                "Official CPython download failed for ${destination.name}: HTTP ${connection.responseCode}"
+            }
+            connection.inputStream.use { input ->
+                temporary.outputStream().use { output -> input.copyTo(output) }
+            }
+        } finally {
+            connection.disconnect()
+        }
+        check(temporary.sha256Hex() == expectedSha256) {
+            "Official CPython download hash mismatch for ${destination.name}"
+        }
+        runCatching {
+            Files.move(
+                temporary.toPath(),
+                destination.toPath(),
+                StandardCopyOption.REPLACE_EXISTING,
+                StandardCopyOption.ATOMIC_MOVE,
+            )
+        }.getOrElse {
+            Files.move(temporary.toPath(), destination.toPath(), StandardCopyOption.REPLACE_EXISTING)
+        }
+    }
+    check(destination.sha256Hex() == expectedSha256) {
+        "Official CPython cache is corrupt: ${destination.name}"
+    }
+}
+
+val prepareOfficialCpython = tasks.register("prepareOfficialCpython") {
+    // Deliberately keep this task untracked: every build re-hashes ignored
+    // external inputs, while valid downloads and matching extractions are reused.
+    inputs.property("officialCpythonVersion", officialCpythonVersion)
+    inputs.property("officialCpythonSha256", officialCpythonSha256)
+    inputs.property("officialCpythonSigstoreSha256", officialCpythonSigstoreSha256)
+    doLast {
+        officialCpythonSha256.forEach { (architecture, archiveSha256) ->
+            val root = officialCpythonDirectory.get().asFile
+            val archive = root.resolve("python-$officialCpythonVersion-$architecture-linux-android.tar.gz")
+            val sigstore = File("${archive}.sigstore")
+            downloadPinned("$officialCpythonSource/${archive.name}", archive, archiveSha256)
+            downloadPinned(
+                "$officialCpythonSource/${sigstore.name}",
+                sigstore,
+                officialCpythonSigstoreSha256.getValue(architecture),
+            )
+
+            val prefix = prefixFor(architecture)
+            val extracted = root.resolve("extract-$architecture")
+            val sourceMarker = extracted.resolve(".archive-sha256")
+            val extractionComplete =
+                sourceMarker.isFile &&
+                    sourceMarker.readText(Charsets.UTF_8).trim() == archiveSha256 &&
+                    prefix.resolve("include/python3.14/Python.h").isFile &&
+                    prefix.resolve("lib/libpython3.14.so").isFile &&
+                    prefix.resolve("lib/python3.14/LICENSE.txt").isFile
+            if (!extractionComplete) {
+                val temporary = root.resolve(".extract-$architecture.tmp")
+                temporary.deleteRecursively()
+                project.copy {
+                    from(tarTree(resources.gzip(archive)))
+                    into(temporary)
+                }
+                val temporaryPrefix = temporary.resolve("prefix")
+                check(temporaryPrefix.resolve("include/python3.14/Python.h").isFile) {
+                    "Official CPython headers were not extracted for $architecture"
+                }
+                check(temporaryPrefix.resolve("lib/libpython3.14.so").isFile) {
+                    "Official CPython library was not extracted for $architecture"
+                }
+                check(temporaryPrefix.resolve("lib/python3.14/LICENSE.txt").isFile) {
+                    "Official CPython PSF license was not extracted for $architecture"
+                }
+                temporary.resolve(".archive-sha256").writeText("$archiveSha256\n", Charsets.UTF_8)
+                extracted.deleteRecursively()
+                project.copy {
+                    from(temporary)
+                    into(extracted)
+                }
+                temporary.deleteRecursively()
+            }
+        }
+    }
+}
+
 val verifyOfficialCpython = tasks.register("verifyOfficialCpython") {
+    dependsOn(prepareOfficialCpython)
     doLast {
         officialCpythonSha256.forEach { (architecture, expectedHash) ->
             val archive = officialCpythonDirectory.get().asFile.resolve("python-$officialCpythonVersion-$architecture-linux-android.tar.gz")

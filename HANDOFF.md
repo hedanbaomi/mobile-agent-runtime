@@ -3,7 +3,7 @@
 
 # 项目交接
 
-最后更新：2026-08-30T15:14:41+08:00（Asia/Taipei）。项目根目录：`E:\mobileAgentRuntime`。
+最后更新：2026-08-30T15:42:40+08:00（Asia/Taipei）。项目根目录：`E:\mobileAgentRuntime`。
 
 **接手者必须先读 [agent.md](agent.md)、本文件和 [技术实现方案](docs/IMPLEMENTATION_PLAN.md)。工作后必须维护本文件及受影响的专题文档。**
 
@@ -13,14 +13,14 @@
 | --- | --- |
 | 产品 | 第三轮人工反馈已经收口：知识导入与 Chat 流跨顶层页面继续运行；请求检查器复用同一状态；Agent 获得逐次授权的 Brave `web_search`；兼容的无清单 Claude Skill Python CLI 在启用、授权、绑定后成为真实模型工具并在 isolated CPython 中执行。PowerShell、宿主 shell、任意宿主文件系统、子进程和未授权网络仍不开放。自动复核—修复再次停止，等待用户对新包人工终审；只有用户再发现问题时重启。F-001 保持 `candidate_intermittent` |
 | 业务源码/构建 | 新人工终审 debug APK 为 214,088,013 bytes，SHA-256 `d68a062b12121b76e502afd8a8cf3610d756876d3a7a00eca916f597ad564682`，Android Debug v2 签名证书 SHA-256 `315148930a70085176f864d43de4c7bf3469bca4e912a5ac84b057259350b788`。BuildConfig：`GIT_REVISION=dec1e5118c674b91c6039c0576978c811d02410e-dirty`、`GIT_DIRTY=true`、`DB_SCHEMA_VERSION=11`、`BUILD_TIME_UTC=2026-08-30T05:37:20Z`。严格依赖全仓 `check` 936 tasks 通过；API 31 x86_64 定向设备回归 34/34 通过；APK 安装并冷启动到 `MainActivity` 成功 |
-| Git | 第一批 CI 修复已提交并推送为 `57299ae12c0db7bed6ea755ca10bb2040cd9fc44`；新 Actions 又暴露此前被 wrapper 权限失败遮蔽的 clean-Linux 缺口，当前候选补两个精确 BOM POM checksum、修正固定模型包 URL 的重复 `/`、将官方仓库置于 Aliyun 后备镜像之前并维护本交接。用户已授权本轮验证完成后继续 commit/push。APK、构建目录、`.private/`、诊断原件和 `.codegraph/` 不进入 Git。正式 Android release 不执行 |
+| Git | 两批 CI 修复已提交并推送为 `57299ae12c0db7bed6ea755ca10bb2040cd9fc44`、`2ca96917c0c85d03529e2c2b9351f715a96906ae`。第二批 license 工作流 `33298903851` 全绿；主 CI `33298903859` 又证明 clean runner 缺少被 Git 忽略的官方 CPython Android 包，当前候选增加从 Python 官方 HTTPS 下载、精确 hash 校验和跨平台解包准备任务。用户已授权本轮验证完成后继续 commit/push。APK、构建目录、`.private/`、诊断原件和 `.codegraph/` 不进入 Git。正式 Android release 不执行 |
 | CodeGraph | `.codegraph/` 存在；本轮理解源码继续先用 CodeGraph，源码修改后曾同步且报告 Already up to date。未修改或提交 `.codegraph/` |
 | 许可 | 全仓 `check` 所含许可门禁 BUILD SUCCESSFUL；`python -B -m reuse lint` 392/392 退出 0。未改 LICENSE 正文 |
 | 授权范围 | 用户已明确授权本次 CI 基础设施修复完成后的 commit/push。本次 Git 授权不延伸为正式签名 release、应用商店发布、付费服务、Cloudflare 部署或 Access/secret 变更 |
 
 ## 2. 当前任务
 
-当前任务是修复 `main@d2080429b5a7498f94f9dc909fcfac2e07f4d1fd` 的 GitHub Actions 基础设施失败，不改变产品行为。wrapper 模式、strict dependency verification metadata、固定模型包下载路径与 emulator profile 已完成最小修复和本地门禁；真实 Linux clean build 及 API 31/34/35/36 emulator matrix 仍必须由第二次新 push 的 GitHub Actions 证明，不能用本地 Windows 构建替代。Signed release gate 在普通 push 下继续按设计跳过。
+当前任务是修复 `main@d2080429b5a7498f94f9dc909fcfac2e07f4d1fd` 的 GitHub Actions 基础设施失败，不改变产品行为。wrapper 模式、strict dependency verification metadata、固定模型包下载路径与 emulator profile 已完成最小修复和本地门禁；第二次 push 已证明 license 工作流全绿并让四个 `pixel_2` emulator 越过创建阶段，但主 check 暴露 clean checkout 没有本机 ignored CPython build 输入。当前候选把原有固定版本/双 ABI/hash/结构验证前置为可复现的官方 HTTPS 下载与解包；真实 Linux clean build 及 API 31/34/35/36 emulator matrix 仍必须由下一次新 push 的 GitHub Actions 证明，不能用本地 Windows 构建替代。Signed release gate 在普通 push 下继续按设计跳过。
 
 此前跨页任务、联网搜索与 Claude Skill 程序调用修复、34/34 设备回归和人工终审 debug 包状态保持不变。自动产品复核—修复程序仍停止；若人工发现产品问题，以对应 APK SHA、应用内诊断 ZIP、发生时间/步骤及必要的完整 Logcat 作为新一轮输入。F-001 不得因暂未复现而关闭；本轮不调用付费 Provider/Brave/Vision，不重新部署公告系统、正式签名或发布应用商店。
 
@@ -63,6 +63,10 @@
 - 新候选验证：strict `:build-logic:license-guard:compileTestKotlin :runtime:embedding-onnx:prepareModelPack` BUILD SUCCESSFUL；strict `check :app-android:assembleDebug :app-android:generateDebugSbom` BUILD SUCCESSFUL（984 tasks、166 components）；licenseGuard 双向检查通过；REUSE 392/392；strict CI pin/24 lockfiles/261080-byte verification metadata 全部通过。未降低 dependency/license/release 门禁，未正式 release、部署、调用 secret 或付费服务；第二批提交推送后仍须以全新 Actions 证明 clean download 与四台 emulator 实际完成。
 - emulator 后续失败与仓库顺序：第一批 run 的 API 31 emulator 已启动且进入 instrumentation 构建，但置顶的 Aliyun Gradle 插件镜像对 Kotlin DSL marker 返回 502；API 36 则在启动后命中上述模型 404。根与 build-logic settings 改为官方 `google()`/`mavenCentral()`/`gradlePluginPortal()` 优先，保留 Aliyun 三个地址为后备，没有删除镜像、换版本或关闭校验。`--refresh-dependencies` 的 strict 聚焦构建在 3m1s 内通过，证明官方路径可重新解析依赖。
 - 官方仓库路径额外暴露 AndroidX Navigation 2.8.7 请求 `kotlinx-serialization-core:1.6.3` 时读取的 `kotlinx-serialization-bom-1.6.3.pom`（最终仍由 1.7.3 胜出）；新增精确 SHA-256 `29d69842bb7d449be2aa4ade6a4a7ce6aa55827d0ab13d168745fe6d95739332`，本地 cache 与 Maven Central 3665-byte 原件一致。补齐后 strict dependencyInsight 成功，全量 strict `check`/APK/SBOM 再次 BUILD SUCCESSFUL（984 tasks、261404-byte metadata）；这是由实际失败证明必要的单一条目，不是 wildcard 或无关批量生成。
+- 第二批提交/远端：按授权形成并推送 `2ca96917c0c85d03529e2c2b9351f715a96906ae`（`fix(ci): stabilize clean Linux dependency resolution`），本地、跟踪分支与 `ls-remote` 三方一致且工作区当时干净。新 license run `33298903851` 在 2m13s 内全绿，证明 licenseGuard、REUSE、strict verification/pins 在 Ubuntu clean checkout 通过。
+- 第三层 clean 输入根因：主 run `33298903859` 的 `check` 继续执行到 `:runtime:python-android:verifyOfficialCpython` 后失败；既有设计把 Python 3.14.7 官方 Android 双 ABI archive、Sigstore bundle 与解包目录只放在 ignored `runtime/python-android/build/official/3.14.7/`，本地长期缓存掩盖了 clean checkout 必然缺文件的问题。四个 emulator job 也已实际创建并启动 `pixel_2`，但同样需要这些构建输入后才能完成 instrumentation。
+- 当前候选增加 `prepareOfficialCpython`：只接受 `https://www.python.org:443/ftp/python/3.14.7`，禁止 userinfo、非标准端口和重定向；archive 继续使用原 pinned SHA-256，Sigstore bundle 新增精确 SHA-256（aarch64 `e65340a247a68e2248556c1ac16a5eea0689c2b3d6ec31be6f72b0dda5cd1c65`、x86_64 `840007443d6ac16262d33753875ed183bb55cc350ad809b090b4cf011055e099`）。下载先写临时文件并验 hash 后替换；解包先在临时目录确认 header、`libpython3.14.so` 与完整 PSF license，再复制到最终 build 目录，并以 archive hash marker 防止旧 prefix 被新 pin 复用。`verifyOfficialCpython` 仍 fail-closed 且现在依赖该准备任务；没有把产物提交 Git、换版本、放宽隔离、dependency verification 或许可门禁。Sigstore bundle 保持项目原有“随包保存并固定 hash”的边界，本轮没有冒称已增加独立 Rekor/证书验签。
+- clean-room 验证：先执行模块 clean 使 ignored CPython 缓存为空，再单独运行 strict `:runtime:python-android:verifyOfficialCpython`，真实重新下载约 45 MiB 双 ABI archive 与两个 bundle、跨平台解包并在 1m6s 内 BUILD SUCCESSFUL；第二次缓存验证 20s 通过。首次实现还在 Windows 目录原子 move 暴露 `AccessDeniedException`，已改为清空目标后复制并由后续严格结构验证兜底；该失败没有被忽略。随后 licenseGuard/reverse BUILD SUCCESSFUL、REUSE 392/392、strict 2 workflow pins/24 lockfiles/261404-byte verification metadata 通过；完整 strict `check :app-android:assembleDebug :app-android:generateDebugSbom` BUILD SUCCESSFUL（985 tasks：85 executed、27 from cache、873 up-to-date；166 SBOM components）。下一次 push 的 Ubuntu clean build 与四 API emulator 仍是最终远端边界。
 
 ### 2026-08-30T13:59:30+08:00：Round3 提交并同步远端
 

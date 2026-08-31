@@ -3,7 +3,7 @@
 
 # 项目交接
 
-最后更新：2026-08-31T07:52:54+08:00（Asia/Taipei）。项目根目录：`E:\mobileAgentRuntime`。
+最后更新：2026-08-31T08:13:25+08:00（Asia/Taipei）。项目根目录：`E:\mobileAgentRuntime`。
 
 **接手者必须先读 [agent.md](agent.md)、本文件和 [技术实现方案](docs/IMPLEMENTATION_PLAN.md)。工作后必须维护本文件及受影响的专题文档。**
 
@@ -786,3 +786,10 @@ U02 的横屏、IME、大字号、触控、对比度、焦点及实际字体回�
 - 生成目录处理：Gradle 检查新生成的 `desktop/bridge/build` 与 `shared/bridge-protocol/build` 会被 REUSE 当成未许可二进制；仅执行这两个模块的 `clean` 后复跑 REUSE 通过。未清理 Android APK/build 产物，未删除用户数据。
 - 暂存边界：只允许仓库内当前 v2 源码、测试、文档、许可/锁文件、CI 与构建脚本；显式排除 `**/build/`、APK/AAB、`.private/`、诊断原件、`.codegraph/`、本地数据库、keystore/secret 和其他 ignored 文件。最终提交 SHA、推送结果及远端一致性以本任务结束时的 Git 核验为准。
 - 保留阻塞：真实 Shizuku、物理 USB Companion、真实 SAF provider 仍为 `E2E BLOCKED`；dirty-source APK/provenance 的历史事实不因后续提交源码而改变。
+
+### 2026-08-31T08:13:25+08:00：README 用户入口重写与独立推送
+
+- 请求/边界：用户要求使用 `lieflat-less-ai-tone` skill 重新制作 README，删去首页不需要的常识和对未实现内容的强调，并明确授权 commit/push；上一轮 `docs/` 仍只能本地 commit、不得 push。
+- README：改为面向使用者的 54 行入口，只保留项目简介、已有功能、使用方式、工具与文件权限、构建命令、代码结构和许可证。移除版本/发布状态、排除项清单、内部阶段证据与 Agent 交接入口。按 skill 白名单复查翻案腔、空转冒号、揭晓式破折号、段首评论和重复路标，触发项为 0；用户对结构重制与删减的明确要求优先于 skill 默认的信息/框架保持边界。
+- 验证：`gradlew.bat licenseGuard licenseGuardReverse check verifyCiPins verifyDependencyLock verifyDependencyVerification --dependency-verification=strict --no-daemon --no-build-cache --console=plain` 为 `BUILD SUCCESSFUL`（1m40s，971 tasks：62 executed/909 up-to-date）；REUSE compliant 514/514，`git diff --check -- README.md` 通过。REUSE 前只清理检查生成的 `desktop/bridge/build` 与 `shared/bridge-protocol/build`，未清理 Android APK/build 目录。
+- Git 保护：本地 `17f98a6f952b680777ad91038cb1b72a004dca50` 是 16 个 `docs/` 文件的未推送提交。README/HANDOFF 将从当前 `origin/main` 单独形成可推送提交，不能以本地 `main` 的直接祖先链推送，否则会夹带该文档提交；推送后本地再以非推送合并提交同时保留 README 与文档历史。最终 SHA 和远端一致性以本任务结束核验为准。

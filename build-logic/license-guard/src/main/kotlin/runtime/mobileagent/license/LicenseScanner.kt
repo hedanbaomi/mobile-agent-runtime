@@ -193,6 +193,8 @@ class LicenseScanner(
             ".private",
             ".idea",
             ".kotlin",
+            ".tmp-kotlin-check",
+            "__pycache__",
         )
         private val FIRST_PARTY_EXTENSIONS = setOf(
             "kt", "kts", "java", "md", "py", "ts", "js", "css", "html", "xml",

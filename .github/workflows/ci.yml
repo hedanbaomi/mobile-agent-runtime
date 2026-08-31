@@ -37,12 +37,25 @@ jobs:
       - name: Verify CI pins, dependency locks and checksums
         run: ./gradlew verifyCiPins verifyDependencyLock verifyDependencyVerification --dependency-verification=strict --no-daemon
       - name: Unit tests and Android debug APK/SBOM
-        run: ./gradlew check :app-android:assembleDebug :app-android:generateDebugSbom --dependency-verification=strict --no-daemon
-      - name: Upload debug SBOM
+        run: ./gradlew debugEvidenceGate --dependency-verification=strict --no-daemon
+      - name: Upload debug artifact evidence
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: debug-sbom
-          path: app-android/build/reports/sbom/debug.cdx.json
+          name: debug-evidence
+          path: |
+            app-android/build/reports/sbom/debug.cdx.json
+            app-android/build/reports/provenance/debug.provenance.json
+
+      - name: Review-like non-debuggable APK/SBOM/provenance gate
+        run: ./gradlew reviewGate --dependency-verification=strict --no-daemon
+      - name: Upload review security evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: review-security-evidence
+          path: |
+            app-android/build/outputs/apk/review/*.apk
+            app-android/build/reports/sbom/review.cdx.json
+            app-android/build/reports/provenance/review.provenance.json
 
   android-smoke:
     name: Android UI smoke (API ${{ matrix.api-level }})

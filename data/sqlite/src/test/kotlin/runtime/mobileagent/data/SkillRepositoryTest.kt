@@ -42,9 +42,31 @@ class SkillRepositoryTest {
         assertEquals(setOf("GET"), grant.methods)
         repository.revoke(id)
         assertTrue(repository.grantForInvocation(id, setOf(id), setOf("kb-a")).revoked)
+        val revoked = db.query("SELECT lifetime, created_at, revoked_at FROM permission_grants WHERE install_id = ?", listOf(id)).single()
+        assertEquals("PERSISTENT", revoked.string("lifetime"))
+        assertTrue(revoked.string("created_at").isNotBlank())
+        assertTrue(revoked.string("revoked_at").isNotBlank())
         assertThrows(IllegalArgumentException::class.java) { repository.setEnabled(id, true) }
         repository.importPackage(packageBytes())
         assertTrue(repository.grantForInvocation(id, setOf(id), setOf("kb-a")).revoked)
+    }
+
+    @Test
+    fun legacySkillGrantNeverTreatsScopedLifetimeAsCapabilityAuthority() = database { db ->
+        val repository = SkillRepository(db)
+        repository.importPackage(packageBytes())
+        val id = repository.list().single().installId
+        repository.approvePermissions(id, emptySet())
+        repository.setEnabled(id, true)
+        db.execute(
+            "UPDATE permission_grants SET lifetime = 'TASK', revoked = 0, revoked_at = NULL WHERE install_id = ?",
+            listOf(id),
+        )
+
+        // Legacy PermissionGrant has no task/session identity.  A malformed
+        // scoped row is therefore ignored, never widened into a persistent grant.
+        assertTrue(repository.effectiveGrant().revoked)
+        assertTrue(repository.grantsFor(id).isEmpty())
     }
 
     @Test

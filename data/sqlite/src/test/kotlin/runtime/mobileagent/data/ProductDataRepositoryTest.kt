@@ -177,6 +177,26 @@ class ProductDataRepositoryTest {
     }
 
     @Test
+    fun themeDefaultsToLightAndPreservesExplicitChoices() {
+        JdbcSqlConnection().use { db ->
+            Migrations.apply(db)
+            val settings = SettingsRepository(db)
+
+            assertEquals(ThemePreference.LIGHT, settings.theme())
+
+            listOf(
+                ThemePreference.SYSTEM,
+                ThemePreference.LIGHT,
+                ThemePreference.DARK,
+                ThemePreference.COLOR_66CCFF,
+            ).forEach { expected ->
+                settings.setTheme(expected)
+                assertEquals(expected, settings.theme())
+            }
+        }
+    }
+
+    @Test
     fun agentTransferIsSecretFreeAndTransactional() {
         JdbcSqlConnection().use { source ->
             Migrations.apply(source)

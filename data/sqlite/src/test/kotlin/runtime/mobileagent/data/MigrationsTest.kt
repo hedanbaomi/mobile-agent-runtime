@@ -4,6 +4,7 @@
 package runtime.mobileagent.data
 
 import org.junit.jupiter.api.Assertions.assertEquals
+import org.junit.jupiter.api.Assertions.assertFalse
 import org.junit.jupiter.api.Assertions.assertThrows
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
@@ -480,6 +481,112 @@ class MigrationsTest {
                 db.query("SELECT binding_manifest_json FROM agent_snapshots WHERE id = ?", listOf("snapshot.bad"))
                     .single().string("binding_manifest_json"),
             )
+        }
+    }
+
+    @Test
+    fun v12AuthorityMemoryAndAuditSchemaIsIdempotentAndNonDestructive() {
+        JdbcSqlConnection().use { db ->
+            Migrations.apply(db)
+            val firstPolicy = db.query("SELECT selected_authority, dangerous_mode, policy_version FROM authority_policy").single()
+            assertEquals("NONE", firstPolicy.string("selected_authority"))
+            assertEquals("DISABLED", firstPolicy.string("dangerous_mode"))
+            assertEquals(3, db.query("SELECT * FROM authority_preferences").size)
+            assertEquals("table", db.query("SELECT type FROM sqlite_master WHERE name = 'capability_grants'").single().string("type"))
+            assertEquals("view", db.query("SELECT type FROM sqlite_master WHERE name = 'workspace_acl'").single().string("type"))
+            assertTrue(db.query("PRAGMA table_info(skill_memory_entries)").none { it.string("name") == "content" })
+            assertTrue(db.query("PRAGMA table_info(approval_records)").none { it.string("name") == "cwd" || it.string("name") == "command" })
+            assertTrue(db.query("PRAGMA table_info(tool_audit_details)").none { it.string("name") == "command_preview" || it.string("name") == "stdout" || it.string("name") == "stderr" })
+
+            db.execute(
+                "INSERT INTO skill_installs(install_id,package_hash,enabled,created_at) VALUES(?,?,?,?)",
+                listOf("install-legacy", "package-legacy", 0, "2026-08-29T00:00:00Z"),
+            )
+            db.execute(
+                "INSERT INTO permission_grants(grant_id,install_id,package_hash,capabilities,revision,revoked,scopes_json) VALUES(?,?,?,?,?,?,?)",
+                listOf("grant-legacy", "install-legacy", "package-legacy", "file.read_text", 4, 1, "{}"),
+            )
+            Migrations.apply(db)
+            val grant = db.query("SELECT lifetime, policy_version, created_at, revoked_at, revision, revoked FROM permission_grants WHERE grant_id = 'grant-legacy'").single()
+            assertEquals("PERSISTENT", grant.string("lifetime"))
+            assertEquals(0, grant.long("policy_version"))
+            assertEquals("2026-08-29T00:00:00Z", grant.string("created_at"))
+            assertEquals("2026-08-29T00:00:00Z", grant.string("revoked_at"))
+            assertEquals(4, grant.long("revision"))
+            assertEquals(1, grant.long("revoked"))
+            Migrations.apply(db)
+            assertEquals(1, db.query("SELECT * FROM permission_grants WHERE grant_id = 'grant-legacy'").size)
+            assertEquals(firstPolicy.string("selected_authority"), db.query("SELECT selected_authority FROM authority_policy").single().string("selected_authority"))
+        }
+    }
+
+    @Test
+    fun v12LocalControlPlaneStateIsExcludedFromAgentTransfer() {
+        JdbcSqlConnection().use { db ->
+            Migrations.apply(db)
+            val profiles = ProfileRepository(db)
+            profiles.createProvider(
+                ProviderProfile(
+                    id = "provider.transfer.v12",
+                    name = "Transfer v12",
+                    apiFormat = ApiFormat.OPENAI_COMPATIBLE,
+                    baseUrl = "https://transfer-v12.example.invalid/v1",
+                    secretRef = "transfer-secret-marker",
+                    revision = 1,
+                ),
+            )
+            profiles.createModel(
+                ModelProfile(
+                    id = "model.transfer.v12",
+                    providerId = "provider.transfer.v12",
+                    role = ModelRole.CHAT,
+                    modelId = "chat-transfer-v12",
+                    capabilities = emptySet(),
+                    contextLimit = 1_000,
+                    outputLimit = 100,
+                    revision = 1,
+                ),
+            )
+            val agent = AgentRepository(db).saveWithPrompt(
+                AgentProfile(
+                    id = "agent.transfer.v12",
+                    name = "Transfer v12 Agent",
+                    promptRevisionId = "prompt.transfer.v12",
+                    chatProfileId = "model.transfer.v12",
+                    revision = 0,
+                ),
+                "Portable prompt",
+            )
+
+            // These are local bindings/control-plane state. TransferRepository owns the
+            // allowlist and must not copy any of their root/URI/secret/storage references.
+            db.execute(
+                "INSERT INTO workspaces(id,display_name,backend_type,root_reference,readable,writable,quota_bytes,max_file_bytes,enabled,revision,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+                listOf("workspace.transfer.v12", "Private", "INTERNAL", "workspace-root-marker", 1, 1, null, 1_048_576, 1, 1, "now", "now"),
+            )
+            db.execute(
+                "INSERT INTO saf_workspace_grants(workspace_id,uri_reference,read_granted,write_granted,persisted_flags,status,created_at,lost_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)",
+                listOf("workspace.transfer.v12", "content://tree/uri-marker", 1, 1, 1, "ACTIVE", "now", null, "now"),
+            )
+            db.execute(
+                "INSERT INTO desktop_trust(desktop_id,app_instance_id,secret_ref,status,created_at,last_seen_at,forgotten_at,revision) VALUES(?,?,?,?,?,?,?,?)",
+                listOf("desktop.transfer.v12", "app.transfer.v12", "bridge:desktop:desktop.transfer.v12", "TRUSTED", "now", null, null, 1),
+            )
+            db.execute(
+                "INSERT INTO skill_memory_spaces(space_id,install_id,package_hash,quota_bytes,max_entries,version,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)",
+                listOf("memory-transfer.v12", "install-transfer.v12", "package-transfer.v12", 1024, 1, 1, "now", "now"),
+            )
+            db.execute(
+                "INSERT INTO skill_memory_entries(entry_id,space_id,path,content_hash,storage_ref,byte_length,version,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)",
+                listOf("entry-transfer.v12", "memory-transfer.v12", "MEMORY.md", "hash-transfer.v12", "memory-sidecar-marker", 0, 1, "now", "now"),
+            )
+
+            val raw = TransferRepository(db).exportAgent(agent.id)
+            assertFalse(raw.contains("transfer-secret-marker"))
+            assertFalse(raw.contains("workspace-root-marker"))
+            assertFalse(raw.contains("content://tree/uri-marker"))
+            assertFalse(raw.contains("bridge:desktop:desktop.transfer.v12"))
+            assertFalse(raw.contains("memory-sidecar-marker"))
         }
     }
 

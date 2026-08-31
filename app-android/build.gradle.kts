@@ -97,6 +97,7 @@ android {
         buildConfigField("String", "ANNOUNCEMENTS_PUBLIC_KEY_HEX", "\"e89c5b55f45a303f5c721a568493edfb9f268b39967ac597b2e105725a552df8\"")
     }
     buildFeatures {
+        aidl = true
         compose = true
         buildConfig = true
     }
@@ -125,12 +126,31 @@ android {
     }
     buildTypes {
         getByName("debug") {
+            // A debuggable APK is intentionally excluded from the persistent
+            // elevated-control plane: `run-as` can access its app-private
+            // state.  Debug remains available for ordinary UI/runtime tests.
+            buildConfigField("boolean", "HIGH_PRIVILEGE_CONTROL_PLANE_ENABLED", "false")
+            ndk {
+                abiFilters.clear()
+                abiFilters += listOf("arm64-v8a", "x86_64")
+            }
+        }
+        create("review") {
+            // Internal security-acceptance artifact.  It deliberately uses the
+            // local debug signing identity while remaining non-debuggable, so
+            // it cannot be mistaken for or publish a formally signed release.
+            initWith(getByName("debug"))
+            isDebuggable = false
+            signingConfig = signingConfigs.getByName("debug")
+            matchingFallbacks += "debug"
+            buildConfigField("boolean", "HIGH_PRIVILEGE_CONTROL_PLANE_ENABLED", "true")
             ndk {
                 abiFilters.clear()
                 abiFilters += listOf("arm64-v8a", "x86_64")
             }
         }
         getByName("release") {
+            buildConfigField("boolean", "HIGH_PRIVILEGE_CONTROL_PLANE_ENABLED", "true")
             signingConfig = signingConfigs.getByName("release")
             ndk {
                 abiFilters.clear()
@@ -157,6 +177,7 @@ dependencies {
     implementation(project(":shared:knowledge-api"))
     implementation(project(":shared:skills-api"))
     implementation(project(":shared:announcements"))
+    implementation(project(":shared:bridge-protocol"))
     implementation(project(":data:sqlite"))
     implementation(project(":runtime:embedding-onnx"))
     implementation(project(":runtime:vector-usearch"))
@@ -173,6 +194,8 @@ dependencies {
     implementation(project(":feature:announcements"))
     implementation(project(":feature:settings"))
     implementation(libs.androidx.documentfile)
+    implementation(libs.shizuku.api)
+    implementation(libs.shizuku.provider)
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.activity.compose)
     implementation(libs.androidx.navigation.compose)

@@ -9,6 +9,7 @@ import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import runtime.mobileagent.domain.AppError
 import runtime.mobileagent.domain.AppException
+import runtime.mobileagent.domain.DesktopTrustStatus
 import runtime.mobileagent.domain.ErrorCode
 import runtime.mobileagent.domain.RetryClass
 import runtime.mobileagent.domain.SecretStatus
@@ -134,6 +135,21 @@ class SecretInventory(private val db: SqlConnection) {
                     if (ref.isNotBlank()) refs += ref
                 }
         }
+        if (tableExists("desktop_trust")) {
+            db.query("SELECT desktop_id, secret_ref, status FROM desktop_trust").forEach { row ->
+                val desktopId = requiredText(row, "desktop_id", "desktop trust")
+                val secretRef = requiredText(row, "secret_ref", "desktop $desktopId secret reference")
+                if (!secretRef.matches(DESKTOP_SECRET_REF)) {
+                    // A malformed active binding must not be treated as an orphan: fail closed.
+                    invalid("desktop $desktopId secret_ref is malformed")
+                }
+                val status = runCatching { DesktopTrustStatus.valueOf(row.string("status")) }
+                    .getOrElse { invalid("desktop $desktopId trust status is invalid") }
+                if (status == DesktopTrustStatus.TRUSTED || status == DesktopTrustStatus.REAUTH_REQUIRED) {
+                    refs += secretRef
+                }
+            }
+        }
         return refs
     }
 
@@ -231,5 +247,6 @@ class SecretInventory(private val db: SqlConnection) {
 
     private companion object {
         val SNAPSHOT_PROVIDER_KEYS = listOf("provider", "visionProvider", "embeddingProvider", "rerankerProvider")
+        val DESKTOP_SECRET_REF = Regex("bridge:desktop:[A-Za-z0-9][A-Za-z0-9._-]{0,255}")
     }
 }

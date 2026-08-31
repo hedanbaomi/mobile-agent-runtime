@@ -4,21 +4,27 @@
 package runtime.mobileagent
 
 import android.app.Application
+import android.content.Intent
 import android.net.Uri
 import androidx.compose.runtime.mutableStateOf
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import runtime.mobileagent.announcements.AnnouncementCategory
 import runtime.mobileagent.announcements.ClientContext
 import runtime.mobileagent.diagnostics.DiagnosticSanitizer
 import runtime.mobileagent.domain.LocalePreference
+import runtime.mobileagent.domain.Authority
+import runtime.mobileagent.domain.DangerousMode
 import runtime.mobileagent.domain.SecretStatus
 import runtime.mobileagent.domain.ThemePreference
 import runtime.mobileagent.feature.settings.SettingsUiState
+import runtime.mobileagent.feature.settings.WiredPairingUiState
 import runtime.mobileagent.provider.SecretRedactor
 import runtime.mobileagent.serialization.TransferOptions
 import java.io.ByteArrayOutputStream
@@ -27,6 +33,9 @@ import java.util.UUID
 
 class SettingsViewModel(application: Application) : AndroidViewModel(application) {
     private val app = application as MobileAgentApp
+    private val authorityPort = settingsAuthorityPort(app)
+    /** UI-facing copy of the adapter snapshot; the adapter remains the source of truth. */
+    val authorityState = mutableStateOf(authorityPort.snapshot())
     val preferences = mutableStateOf(app.container.settings.get())
     val exportStatus = mutableStateOf("")
     val updateStatus = mutableStateOf("当前为 debug 验证版，正式 release 将由用户另行确认。")
@@ -37,11 +46,20 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
     private var pendingExport: Pair<String, TransferOptions>? = null
     private var transferRunning = false
     private var updateCheckRunning = false
+    /** The pairing token is intentionally held only in this ViewModel process memory. */
+    private var wiredPairingPrompt: SettingsWiredPairingPrompt? = null
+    private var wiredPairingAttemptsRemaining = 0
+    private var wiredPairingReplacingTrust = false
+    private var wiredPairingStatus = ""
+    private var wiredPairingCompleting = false
+    private var wiredPairingExpiryJob: Job? = null
+    private val wiredPairingUiState = mutableStateOf(WiredPairingUiState())
 
     fun uiState(statsEnabled: Boolean, noticeCount: Int): SettingsUiState {
         val diagnosticFiles = app.diagnostics.status()
         val searchRef = app.container.settings.webSearchSecretRef()
         val searchConfigured = searchRef != null && app.container.secrets.inventory().status(searchRef) == SecretStatus.ACTIVE
+        val authority = authorityState.value
         return SettingsUiState(
         versionName = BuildConfig.VERSION_NAME + " debug",
         gitRevision = BuildConfig.GIT_REVISION,
@@ -77,7 +95,298 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
         webSearchConfigured = searchConfigured,
         webSearchEnabled = searchConfigured && app.container.settings.webSearchEnabled(),
         webSearchState = webSearchStatus.value,
+        appPrivateExecutionActive = authority.appPrivateAvailable,
+        selectedAuthority = authority.selectedAuthority.name,
+        shizukuAuthority = authority.shizuku.toUiState().copy(selected = authority.selectedAuthority == Authority.SHIZUKU),
+        wiredAdbAuthority = authority.wiredAdb.toUiState().copy(selected = authority.selectedAuthority == Authority.WIRED_ADB),
+        wiredPairing = wiredPairingUiState.value,
+        safWorkspace = authority.saf.toUiState(),
+        dangerousMode = authority.dangerousMode.name,
+        dangerousModeDurable = authority.durableDangerousMode.name,
+        dangerousModeBuildAllowed = authority.dangerousModeBuildAllowed,
+        dangerousModeBuildKnown = authority.dangerousModeBuildKnown,
+        dangerousModeReason = authority.dangerousModeReason,
         )
+    }
+
+    /** Revalidates ephemeral provider state and persisted SAF grants on resume. */
+    fun refreshAuthorities() {
+        runCatching { authorityPort.refresh() }
+            .onSuccess {
+                authorityState.value = it
+                error.value = null
+            }
+            .onFailure { failure ->
+                error.value = safeAuthorityError(failure)
+            }
+    }
+
+    fun selectAuthority(value: String) {
+        val authority = parseAuthority(value) ?: run {
+            error.value = "不支持的权限通道。"
+            return
+        }
+        if (authority != Authority.WIRED_ADB) clearWiredPairing(notifyPort = true, status = "CANCELLED")
+        mutateAuthority { authorityPort.selectAuthority(authority) }
+    }
+
+    fun setAuthorityIntent(value: String, enabled: Boolean) {
+        val authority = parseAuthority(value) ?: run {
+            error.value = "不支持的权限通道。"
+            return
+        }
+        if (authority == Authority.WIRED_ADB && !enabled) {
+            clearWiredPairing(notifyPort = true, status = "CANCELLED")
+        }
+        mutateAuthority { authorityPort.setUserIntent(authority, enabled) }
+    }
+
+    fun requestShizukuPermission() {
+        mutateAuthority { authorityPort.requestShizukuPermission() }
+    }
+
+    fun openShizuku() {
+        if (!authorityPort.openShizuku()) {
+            error.value = "无法打开 Shizuku 管理器；请稍后重试。"
+        } else {
+            error.value = null
+        }
+    }
+
+    @Deprecated("Use the foreground pairing flow")
+    fun reauthorizeWiredAdb() {
+        requestWiredAdbPairing(replaceExistingTrust = true)
+    }
+
+    fun forgetWiredAdb() {
+        clearWiredPairing(notifyPort = true, status = "CANCELLED")
+        mutateAuthority { authorityPort.forgetWiredAdb() }
+    }
+
+    /**
+     * Starts a foreground-only Wired ADB pairing exchange. The raw token is
+     * retained by the adapter/bridge; this ViewModel keeps only the ephemeral
+     * prompt needed by the visible Settings screen.
+     */
+    fun requestWiredAdbPairing(replaceExistingTrust: Boolean = false) {
+        clearWiredPairing(notifyPort = true, status = "")
+        val result = runCatching {
+            authorityPort.requestWiredAdbPairingToken(replaceExistingTrust)
+        }.getOrElse { failure ->
+            wiredPairingStatus = "FAILED"
+            publishWiredPairingState()
+            error.value = safeAuthorityError(failure)
+            return
+        }
+        authorityState.value = result.snapshot
+        val prompt = result.prompt
+        if (!result.accepted || prompt == null) {
+            wiredPairingStatus = "FAILED"
+            publishWiredPairingState()
+            error.value = authorityReason(result.reason)
+            return
+        }
+        wiredPairingPrompt = prompt
+        wiredPairingAttemptsRemaining = prompt.remainingAttempts
+        wiredPairingReplacingTrust = replaceExistingTrust
+        wiredPairingStatus = ""
+        wiredPairingCompleting = false
+        publishWiredPairingState()
+        scheduleWiredPairingExpiry(prompt)
+        error.value = null
+    }
+
+    /** Completes the bridge-held pairing exchange; no token crosses this seam. */
+    fun completeWiredAdbPairing() {
+        val prompt = wiredPairingPrompt ?: run {
+            error.value = "请先开始有线 ADB 前台配对。"
+            return
+        }
+        if (prompt.isCleared() || prompt.expiresAtEpochMs <= System.currentTimeMillis()) {
+            expireWiredPairing(prompt)
+            return
+        }
+        if (wiredPairingCompleting || wiredPairingAttemptsRemaining <= 0) return
+        wiredPairingCompleting = true
+        publishWiredPairingState()
+        viewModelScope.launch {
+            try {
+                val result = authorityPort.completeWiredAdbPairing()
+                // A cancel/replacement may have happened while the bridge call
+                // was suspended. Never let an old result mutate the new prompt.
+                if (wiredPairingPrompt !== prompt) return@launch
+                authorityState.value = result.snapshot
+                if (result.accepted) {
+                    clearWiredPairing(notifyPort = false, status = "COMPLETED")
+                    error.value = null
+                } else {
+                    wiredPairingAttemptsRemaining = (wiredPairingAttemptsRemaining - 1).coerceAtLeast(0)
+                    val expired = pairingFailureRequiresRestart(result.reason) ||
+                        wiredPairingAttemptsRemaining == 0
+                    if (expired) {
+                        clearWiredPairing(
+                            notifyPort = false,
+                            status = if (pairingFailureIsExpired(result.reason)) "EXPIRED" else "FAILED",
+                        )
+                    } else {
+                        wiredPairingStatus = "FAILED"
+                        wiredPairingCompleting = false
+                        publishWiredPairingState()
+                        error.value = authorityReason(result.reason)
+                    }
+                }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (failure: Throwable) {
+                if (wiredPairingPrompt === prompt) {
+                    wiredPairingCompleting = false
+                    publishWiredPairingState()
+                    error.value = safeAuthorityError(failure)
+                }
+            }
+        }
+    }
+
+    /**
+     * Ephemeral rendering/copy accessor. The caller must not retain the
+     * returned String; no SettingsUiState, snapshot, SavedState, DB, log, or
+     * diagnostic value contains this token.
+     */
+    fun wiredPairingToken(): String? =
+        wiredPairingPrompt?.tokenDisplay()?.takeIf { it.isNotEmpty() }
+
+    /** Clears the one-time token and asks the adapter to cancel its exchange. */
+    fun cancelWiredAdbPairing() {
+        clearWiredPairing(notifyPort = true, status = "CANCELLED")
+    }
+
+    /** Called only from the OpenDocumentTree result callback. */
+    fun authorizeSaf(
+        uri: Uri?,
+        grantFlags: Int = Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION,
+    ) {
+        if (uri == null) return
+        mutateAuthority { authorityPort.authorizeSaf(uri, grantFlags) }
+    }
+
+    fun revokeSaf() {
+        mutateAuthority { authorityPort.revokeSaf() }
+    }
+
+    /** The Settings UI displays and obtains explicit confirmation before this call. */
+    fun setDangerousMode(value: String) {
+        val mode = runCatching { DangerousMode.valueOf(value) }.getOrNull() ?: run {
+            error.value = "不支持的危险模式。"
+            return
+        }
+        val result = runCatching { authorityPort.setDangerousMode(mode, confirmed = true) }
+            .getOrElse { failure ->
+                error.value = safeAuthorityError(failure)
+                return
+            }
+        authorityState.value = result.snapshot
+        error.value = if (result.accepted) null else authorityReason(result.reason)
+    }
+
+    fun disableDangerousMode() {
+        val result = runCatching { authorityPort.setDangerousMode(DangerousMode.DISABLED, confirmed = true) }
+            .getOrElse { failure ->
+                error.value = safeAuthorityError(failure)
+                return
+            }
+        authorityState.value = result.snapshot
+        error.value = if (result.accepted) null else authorityReason(result.reason)
+    }
+
+    private fun publishWiredPairingState() {
+        val prompt = wiredPairingPrompt
+        wiredPairingUiState.value = WiredPairingUiState(
+            // The token itself is deliberately not part of the UI model. The
+            // feature host receives it only through wiredPairingToken().
+            hasToken = prompt?.isCleared() == false,
+            expiresAtEpochMs = prompt?.expiresAtEpochMs ?: 0L,
+            remainingAttempts = if (prompt == null) 0 else wiredPairingAttemptsRemaining,
+            status = wiredPairingStatus,
+            replacingExistingTrust = wiredPairingReplacingTrust,
+            completing = wiredPairingCompleting,
+        )
+    }
+
+    private fun scheduleWiredPairingExpiry(prompt: SettingsWiredPairingPrompt) {
+        wiredPairingExpiryJob?.cancel()
+        val waitMs = (prompt.expiresAtEpochMs - System.currentTimeMillis()).coerceAtLeast(0L)
+        wiredPairingExpiryJob = viewModelScope.launch {
+            delay(waitMs)
+            if (wiredPairingPrompt === prompt) expireWiredPairing(prompt)
+        }
+    }
+
+    private fun expireWiredPairing(prompt: SettingsWiredPairingPrompt) {
+        if (wiredPairingPrompt !== prompt) return
+        clearWiredPairing(notifyPort = true, status = "EXPIRED")
+        refreshAuthorities()
+    }
+
+    private fun clearWiredPairing(notifyPort: Boolean, status: String) {
+        val prompt = wiredPairingPrompt
+        wiredPairingPrompt = null
+        wiredPairingAttemptsRemaining = 0
+        wiredPairingReplacingTrust = false
+        wiredPairingCompleting = false
+        wiredPairingExpiryJob?.cancel()
+        wiredPairingExpiryJob = null
+        wiredPairingStatus = status
+        // Wipe the object after removing it from the published state. Any
+        // later UI recomposition sees no display value, while the underlying
+        // char array is overwritten even if an old object is still retained.
+        prompt?.clear()
+        publishWiredPairingState()
+        if (notifyPort) {
+            // Cancellation is best-effort during lifecycle teardown. The
+            // fail-closed port has no pending token and must not fabricate one.
+            runCatching { authorityPort.cancelWiredAdbPairing() }
+                .onSuccess { authorityState.value = it }
+        }
+    }
+
+    private fun pairingFailureRequiresRestart(reason: String?): Boolean =
+        pairingFailureIsExpired(reason) || reason?.contains("ATTEMPT", ignoreCase = true) == true
+
+    private fun pairingFailureIsExpired(reason: String?): Boolean =
+        reason?.contains("EXPIRED", ignoreCase = true) == true ||
+            reason?.contains("TIMEOUT", ignoreCase = true) == true
+
+    private fun mutateAuthority(update: () -> SettingsAuthoritySnapshot) {
+        runCatching { update() }
+            .onSuccess {
+                authorityState.value = it
+                error.value = null
+            }
+            .onFailure { error.value = safeAuthorityError(it) }
+    }
+
+    private fun parseAuthority(value: String): Authority? = when (value.trim().uppercase(Locale.ROOT)) {
+        "NONE", "APP_PRIVATE" -> Authority.NONE
+        "SHIZUKU", "SHIZUKU_BINDER" -> Authority.SHIZUKU
+        "WIRED_ADB", "WIRED-ADB", "WIRED ADB" -> Authority.WIRED_ADB
+        else -> null
+    }
+
+    private fun safeAuthorityError(failure: Throwable): String =
+        "权限状态未更新：${authorityReason(failure.message)}"
+
+    private fun authorityReason(reason: String?): String = when (reason) {
+        "DANGEROUS_MODE_BUILD_DENIED" -> "当前构建不允许开启危险模式；debug 或未知构建会安全关闭。"
+        "DANGEROUS_MODE_CONFIRMATION_REQUIRED" -> "请先确认危险模式风险。"
+        "DANGEROUS_MODE_ADAPTER_UNAVAILABLE" -> "危险模式适配器尚未接入；Shell 保持关闭。"
+        "AUTHORITY_ADAPTER_UNAVAILABLE" -> "权限适配器尚未接入；设置未保存。"
+        null, "" -> "权限状态未更新。"
+        else -> "权限状态未更新。"
+    }
+
+    override fun onCleared() {
+        clearWiredPairing(notifyPort = true, status = "CANCELLED")
+        super.onCleared()
     }
 
     fun saveWebSearch(apiKey: String) {
@@ -332,3 +641,23 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
         }
     }
 }
+
+private fun SettingsAuthorityProviderState.toUiState() =
+    runtime.mobileagent.feature.settings.AuthorityUiState(
+        authority = authority.name,
+        userIntentEnabled = userIntent != runtime.mobileagent.domain.AuthorityUserIntent.NONE,
+        platformGrant = platformGrant.name,
+        availability = availability.name,
+        connection = connection.name,
+        configured = configured,
+        trust = trust?.name.orEmpty(),
+    )
+
+private fun SettingsSafGrantState.toUiState() =
+    runtime.mobileagent.feature.settings.SafWorkspaceUiState(
+        configured = configured,
+        readGranted = readGranted,
+        writeGranted = writeGranted,
+        persisted = persisted,
+        status = status.name,
+    )

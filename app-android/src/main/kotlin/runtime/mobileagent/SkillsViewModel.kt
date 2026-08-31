@@ -20,6 +20,12 @@ import runtime.mobileagent.knowledge.MediaKind
 import runtime.mobileagent.skills.SkillArchive
 import runtime.mobileagent.skills.SkillInspection
 import runtime.mobileagent.skills.CompatibilityClass
+import runtime.mobileagent.memory.SkillMemoryAvailabilitySnapshot
+import runtime.mobileagent.memory.SkillMemoryAvailabilityState
+import runtime.mobileagent.memory.SKILL_MEMORY_APPEND_CAPABILITY
+import runtime.mobileagent.memory.SKILL_MEMORY_READ_CAPABILITY
+import runtime.mobileagent.memory.SKILL_MEMORY_REPLACE_CAPABILITY
+import runtime.mobileagent.memory.SKILL_MEMORY_SEARCH_CAPABILITY
 import runtime.mobileagent.provider.SecretRedactor
 import java.io.ByteArrayOutputStream
 
@@ -29,7 +35,7 @@ class SkillsViewModel(
 ) : AndroidViewModel(application) {
     private val app = application as MobileAgentApp
     val rows = mutableStateListOf<SkillRow>()
-    val status = mutableStateOf("导入本地 ZIP 或 SKILL.md。可兼容的 Claude Skill 标准库程序会以隔离 Python 工具运行；Class E 包会被拒绝。")
+    val status = mutableStateOf("导入本地 ZIP 或 SKILL.md。可兼容的 Claude Skill 标准库程序会以隔离 Python 工具运行；Class E 包会被拒绝。文件能力与危险模式始终按当前授权边界复核。")
     val state = mutableStateOf(SkillsUiState())
     val permissionRequest = mutableStateOf<Pair<String, String>?>(null)
     private val pendingImports = ArrayDeque<Pair<String, SkillInspection>>()
@@ -152,7 +158,9 @@ class SkillsViewModel(
                     val skill = app.container.skills.get(installId) ?: error("Skill 已移除。")
                     val inspection = app.container.skills.inspect(installId)
                     val grants = app.container.skills.grantsFor(installId).filter { !it.revoked && it.packageHash == skill.packageHash }
-                    val caps = grants.flatMap { it.capabilities }.toSet()
+                    val currentGrant = grants.singleOrNull()
+                    val caps = currentGrant?.capabilities.orEmpty()
+                    val memory = selectedAgentMemoryAvailability(skill.installId)
                     SkillDetailUi(
                         skill = SkillUi(skill.installId, skill.name, inspection.manifest?.version.orEmpty(), skill.classification.name,
                             skill.enabled, skill.license, skill.reasons, skill.packageHash, inspection.installable),
@@ -161,6 +169,12 @@ class SkillsViewModel(
                             SkillPermissionUi(spec.capability, scopeLabel(spec.knowledgeBaseIds, spec.hosts, spec.methods), spec.capability in caps)
                         },
                         files = inspection.files.map { SkillSourceFileUi(it, kind = "纯文本预览，不执行") },
+                        binding = SkillBindingUi(
+                            packageHashBound = currentGrant?.packageHash == skill.packageHash,
+                            grantRevision = currentGrant?.revision,
+                            capabilities = caps.sorted(),
+                        ),
+                        memory = memory,
                     )
                 }
                 savedStateHandle[SELECTED_INSTALL_ID_KEY] = installId
@@ -176,6 +190,17 @@ class SkillsViewModel(
     fun closeDetail() {
         savedStateHandle.remove<String>(SELECTED_INSTALL_ID_KEY)
         state.value = state.value.copy(selectedInstallId = null, detail = null)
+    }
+
+    /** Read only the canonical, non-sensitive memory projection for the selected Agent snapshot. */
+    private fun selectedAgentMemoryAvailability(installId: String): SkillMemoryUi {
+        val agentId = app.container.uiPreferences.getString("selected-agent", null).orEmpty()
+        if (agentId.isBlank()) return SkillMemoryUi(availability = SkillMemoryAvailability.UNAVAILABLE)
+        val snapshot = app.container.agents.snapshot(agentId)
+            ?: return SkillMemoryUi(availability = SkillMemoryAvailability.UNAVAILABLE)
+        return app.container.runtimeIntegration
+            .skillMemoryAvailability(snapshot.agentId, snapshot.id, installId)
+            .toUi()
     }
     fun query(value: String) {
         savedStateHandle[QUERY_KEY] = value
@@ -245,9 +270,9 @@ class SkillsViewModel(
     }
 
     private fun scopeLabel(kbs: Set<String>, hosts: Set<String>, methods: Set<String>): String =
-        listOfNotNull(kbs.takeIf { it.isNotEmpty() }?.joinToString(prefix = "知识库："),
-            hosts.takeIf { it.isNotEmpty() }?.joinToString(prefix = "目的域名："),
-            methods.takeIf { it.isNotEmpty() }?.joinToString(prefix = "HTTP 方法："))
+        listOfNotNull(kbs.takeIf { it.isNotEmpty() }?.let { "已选择知识库（${it.size} 个）" },
+            hosts.takeIf { it.isNotEmpty() }?.let { "已配置目的域名（${it.size} 个）" },
+            methods.takeIf { it.isNotEmpty() }?.let { "HTTP 方法：${it.sorted().joinToString("、")}" })
             .joinToString("；").ifBlank { "需要用户选择资源，默认无权限" }
 
     private fun displayName(uri: Uri): String {
@@ -281,3 +306,18 @@ class SkillsViewModel(
         const val SOURCE_PATH_KEY = "skills.sourcePath"
     }
 }
+
+private fun SkillMemoryAvailabilitySnapshot.toUi(): SkillMemoryUi = SkillMemoryUi(
+    availability = when (state) {
+        SkillMemoryAvailabilityState.ENABLED -> SkillMemoryAvailability.ENABLED
+        SkillMemoryAvailabilityState.EMPTY -> SkillMemoryAvailability.EMPTY
+        SkillMemoryAvailabilityState.GRANT_LOST -> SkillMemoryAvailability.GRANT_LOST
+        SkillMemoryAvailabilityState.UNAVAILABLE -> SkillMemoryAvailability.UNAVAILABLE
+    },
+    capabilities = buildList {
+        if (canRead) add(SKILL_MEMORY_READ_CAPABILITY)
+        if (canSearch) add(SKILL_MEMORY_SEARCH_CAPABILITY)
+        if (canAppend) add(SKILL_MEMORY_APPEND_CAPABILITY)
+        if (canReplace) add(SKILL_MEMORY_REPLACE_CAPABILITY)
+    },
+)

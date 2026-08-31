@@ -18,9 +18,9 @@
 
 ## 2. 当前事实与M0目标
 
-本轮交付标准许可证文件、现有第一方文档声明和本政策。**Gradle licenseGuard、REUSE配置/实际lint、CI、CODEOWNERS与GitHub Ruleset尚未建立或验证；不宣称防误改防线已完成。**
+M0 许可防线已经建立：`LICENSE`、`LICENSES/AGPL-3.0-only.txt`、本政策、`REUSE.toml`、`CONTRIBUTING.md`、`AGENTS.md`/`agent.md`、`CODEOWNERS`、`.github/workflows/license-guard.yml` 与 `build-logic/license-guard/` 均存在。当前本地证据为 licenseGuard 正/反向、REUSE 514/514、Actions pin、28 个 dependency lockfile、root+included-build strict dependency verification、CycloneDX SBOM/provenance 和 runtime notices 成品校验全部通过；准确命令见 [v2 最终证据](docs/evidence/2026-08-31/authority-tooling-v2-final.md)。
 
-M0必须建立：`LICENSE`、`LICENSES/AGPL-3.0-only.txt`、本政策、`REUSE.toml`、`CONTRIBUTING.md`、`AGENTS.md`/`agent.md`、`CODEOWNERS`、`.github/workflows/license-guard.yml`、`build-logic/license-guard/`。其他Agent入口可放简短链接规则，不复制多份会漂移的规范。
+本地 PASS 不能替代 GitHub 服务端 Ruleset/CODEOWNER 实际配置；远程保护状态必须以对应 run/ruleset 证据单列。当前产品 WIP 保持未提交，也没有利用历史远程授权绕过本地门禁。
 
 REUSE对可注释文件使用逐文件header；不可注释资产使用`.license`或精确`REUSE.toml`归属。许可证文本本身保留原文，不加项目版权header。[REUSE规范](https://reuse.software/spec/)说明文件级归属方式；实际是否通过必须运行工具验证。
 
@@ -38,11 +38,11 @@ REUSE对可注释文件使用逐文件header；不可注释资产使用`.license
 
 ## 4. 提交、CI与远程规则
 
-未来构建建立后，每次提交/推送前运行`gradlew.bat licenseGuard`、`gradlew.bat check`及`reuse lint`，CI同时生成依赖许可报告和CycloneDX SBOM。任务缺失或检查未运行不能写PASS，更不能用本轮文档检查替代。
+每次提交/推送前运行`gradlew.bat licenseGuard`、`gradlew.bat check`及`reuse lint`，CI同时生成依赖许可报告和CycloneDX SBOM。任务缺失或检查未运行不能写PASS，更不能用文档检查替代。
 
 所有者确认后配置CODEOWNERS保护许可证、归属清单、Agent规则、CI和guard；main要求PR、required checks、code-owner review，推新提交后旧approval失效，禁止force-push/删除和Agent bypass。实际支持能力取决于远程仓库配置，必须用可验证证据证明；仓库文件不能代替服务端规则。
 
-当前无远程地址、无CODEOWNER身份、无权限变更授权。首次提交应包含经本地检查的M0许可/构建防线；远程CI/Ruleset只能在远程建立后验证，单列M0_REMOTE_PENDING，不伪造其已生效。只有另行授权才可创建该初始提交/远程；全部M0验收完成前不做业务实现。本轮不创建一个绕过检查要求的文档提交。
+当前仓库已有远程和历史 CI 证据，但本轮没有新的 commit/push、Ruleset 或 CODEOWNER 身份变更授权。远程 CI/Ruleset 只能凭相应 GitHub 证据记为有效；本地 dirty WIP 的 PASS 不自动成为远程 PASS。本轮不创建绕过检查要求的提交，也不沿用旧授权推送当前产品变更。
 
 ## 5. 发布与变更
 

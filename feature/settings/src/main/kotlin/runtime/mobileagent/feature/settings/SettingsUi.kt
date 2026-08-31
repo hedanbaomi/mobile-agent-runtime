@@ -6,9 +6,11 @@ package runtime.mobileagent.feature.settings
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
@@ -35,10 +37,12 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
+import runtime.mobileagent.domain.DangerousMode
 
 data class ThirdPartyNoticeFileUi(
     val label: String,
@@ -64,6 +68,53 @@ data class ThirdPartyNoticesUiState(
     val error: String? = null,
 )
 
+/**
+ * Presentation-only projection of the shared authority lifecycle enums. The
+ * Android adapter maps canonical enum names into these bounded strings so the
+ * feature module does not define a second authority model.
+ */
+data class AuthorityUiState(
+    val authority: String,
+    val selected: Boolean = false,
+    val userIntentEnabled: Boolean = false,
+    val platformGrant: String = "UNKNOWN",
+    val availability: String = "UNSUPPORTED",
+    val connection: String = "DISCONNECTED",
+    val configured: Boolean = false,
+    val trust: String = "",
+)
+
+data class SafWorkspaceUiState(
+    val configured: Boolean = false,
+    val readGranted: Boolean = false,
+    val writeGranted: Boolean = false,
+    val persisted: Boolean = false,
+    val status: String = "REVOKED",
+)
+
+/**
+ * Ephemeral presentation state for the foreground Wired ADB pairing flow.
+ *
+ * The token itself is deliberately not a field here. The Android host passes
+ * an ephemeral accessor through [SettingsActions] only while this screen is
+ * visible. This state is occasionally included in test/debug output and must
+ * therefore contain metadata only.
+ */
+data class WiredPairingUiState(
+    val hasToken: Boolean = false,
+    val expiresAtEpochMs: Long = 0L,
+    val remainingAttempts: Int = 0,
+    val status: String = "",
+    val replacingExistingTrust: Boolean = false,
+    val completing: Boolean = false,
+) {
+    override fun toString(): String =
+        "WiredPairingUiState(expiresAtEpochMs=$expiresAtEpochMs, " +
+        "remainingAttempts=$remainingAttempts, status=$status, " +
+        "replacingExistingTrust=$replacingExistingTrust, completing=$completing, " +
+        "hasToken=$hasToken)"
+}
+
 data class SettingsUiState(
     val versionName: String = "",
     val gitRevision: String = "",
@@ -73,8 +124,8 @@ data class SettingsUiState(
     val diagnosticText: String = "",
     /** zh-CN is the product default; the ViewModel may replace it with the persisted choice. */
     val language: String = "zh-CN",
-    /** 66ccff is the product default light accent and is shown literally in the selector. */
-    val themeMode: String = "66ccff",
+    /** Light is the first-install default; 66ccff remains an explicit selectable accent. */
+    val themeMode: String = "light",
     val statsEnabled: Boolean = false,
     val requestInspectionEnabled: Boolean = true,
     val diagnosticsEnabled: Boolean = false,
@@ -100,6 +151,18 @@ data class SettingsUiState(
     val webSearchConfigured: Boolean = false,
     val webSearchEnabled: Boolean = false,
     val webSearchState: String = "",
+    val appPrivateExecutionActive: Boolean = true,
+    val selectedAuthority: String = "NONE",
+    val shizukuAuthority: AuthorityUiState = AuthorityUiState("SHIZUKU"),
+    val wiredAdbAuthority: AuthorityUiState = AuthorityUiState("WIRED_ADB"),
+    val wiredPairing: WiredPairingUiState = WiredPairingUiState(),
+    val safWorkspace: SafWorkspaceUiState = SafWorkspaceUiState(),
+    val dangerousMode: String = DangerousMode.DISABLED.name,
+    /** Durable policy is shown separately from the effective fail-closed policy. */
+    val dangerousModeDurable: String = DangerousMode.DISABLED.name,
+    val dangerousModeBuildAllowed: Boolean = false,
+    val dangerousModeBuildKnown: Boolean = false,
+    val dangerousModeReason: String = "DANGEROUS_MODE_BUILD_DENIED",
 )
 
 data class SettingsActions(
@@ -127,6 +190,22 @@ data class SettingsActions(
     val onSaveWebSearch: (String) -> Unit = {},
     val onWebSearchEnabled: (Boolean) -> Unit = {},
     val onClearWebSearch: () -> Unit = {},
+    val onSelectAuthority: (String) -> Unit = {},
+    val onAuthorityIntent: (String, Boolean) -> Unit = { _, _ -> },
+    val onRefreshAuthority: (String) -> Unit = {},
+    val onRequestShizukuPermission: () -> Unit = {},
+    val onOpenShizuku: () -> Unit = {},
+    val onRequestWiredPairing: (Boolean) -> Unit = {},
+    val onCompleteWiredPairing: () -> Unit = {},
+    val onCancelWiredPairing: () -> Unit = {},
+    /** Returns the in-memory one-time token only for immediate rendering/copy. */
+    val onWiredPairingToken: () -> String? = { null },
+    val onForgetWiredAdb: () -> Unit = {},
+    val onSelectSafTree: () -> Unit = {},
+    val onReauthorizeSaf: () -> Unit = {},
+    val onRevokeSaf: () -> Unit = {},
+    val onSetDangerousMode: (String) -> Unit = {},
+    val onDisableDangerousMode: () -> Unit = {},
 )
 
 /** State-driven alias for hosts that still route the settings tab through AboutScreen. */
@@ -152,10 +231,16 @@ fun SettingsScreen(state: SettingsUiState, actions: SettingsActions = SettingsAc
             }
         }
     }
-    Column(modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+    Column(
+        modifier.fillMaxSize()
+            .verticalScroll(rememberScrollState())
+            .padding(16.dp)
+            .testTag("settings.screen"),
+        verticalArrangement = Arrangement.spacedBy(12.dp),
+    ) {
         Text(if (zh) "设置" else "Settings", style = MaterialTheme.typography.headlineSmall)
         if (state.error != null) Text(state.error, color = MaterialTheme.colorScheme.error)
-        Card(Modifier.fillMaxWidth()) {
+        Card(Modifier.fillMaxWidth().testTag("settings.appearance")) {
             Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 Text(if (zh) "外观与语言" else "Appearance and language", style = MaterialTheme.typography.titleMedium)
                 SelectorRow(if (zh) "语言" else "Language", state.language, { languageMenu = true }) {
@@ -174,7 +259,7 @@ fun SettingsScreen(state: SettingsUiState, actions: SettingsActions = SettingsAc
                 }
             }
         }
-        Card(Modifier.fillMaxWidth()) {
+        Card(Modifier.fillMaxWidth().testTag("settings.web_search")) {
             var apiKey by remember { mutableStateOf("") }
             Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 Text(if (zh) "联网搜索（Brave Search API）" else "Web search (Brave Search API)", style = MaterialTheme.typography.titleMedium)
@@ -212,7 +297,7 @@ fun SettingsScreen(state: SettingsUiState, actions: SettingsActions = SettingsAc
                 if (state.webSearchState.isNotBlank()) Text(state.webSearchState, style = MaterialTheme.typography.bodySmall)
             }
         }
-        Card(Modifier.fillMaxWidth()) {
+        Card(Modifier.fillMaxWidth().testTag("settings.root_prompt")) {
             var draftPrompt by remember(state.globalRootPrompt, state.globalRootPromptUnlocked) {
                 mutableStateOf(state.globalRootPrompt)
             }
@@ -238,7 +323,8 @@ fun SettingsScreen(state: SettingsUiState, actions: SettingsActions = SettingsAc
                 }
             }
         }
-        Card(Modifier.fillMaxWidth()) {
+        AuthoritySettingsCard(state, actions, zh)
+        Card(Modifier.fillMaxWidth().testTag("settings.privacy_diagnostics")) {
             Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                 Text(if (zh) "隐私与调试" else "Privacy and diagnostics", style = MaterialTheme.typography.titleMedium)
                 SettingSwitch(if (zh) "匿名使用统计" else "Anonymous usage statistics", state.statsEnabled, actions.onStats)
@@ -262,7 +348,7 @@ fun SettingsScreen(state: SettingsUiState, actions: SettingsActions = SettingsAc
                 Text(if (zh) "API 密钥不会进入导出文件或请求检查器。" else "API keys never enter exports or the request inspector.", style = MaterialTheme.typography.bodySmall)
             }
         }
-        Card(Modifier.fillMaxWidth()) {
+        Card(Modifier.fillMaxWidth().testTag("settings.data_backup")) {
             Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 Text(if (zh) "数据与备份" else "Data and backup", style = MaterialTheme.typography.titleMedium)
                 Text(
@@ -280,7 +366,7 @@ fun SettingsScreen(state: SettingsUiState, actions: SettingsActions = SettingsAc
                 if (state.exportState.isNotBlank()) Text(state.exportState, style = MaterialTheme.typography.bodySmall)
             }
         }
-        Card(Modifier.fillMaxWidth()) {
+        Card(Modifier.fillMaxWidth().testTag("settings.feature_entry")) {
             Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 Text(if (zh) "功能入口" else "Feature entry points", style = MaterialTheme.typography.titleMedium)
                 Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -295,7 +381,7 @@ fun SettingsScreen(state: SettingsUiState, actions: SettingsActions = SettingsAc
                 Text(state.mcpDisabledReason, style = MaterialTheme.typography.bodySmall)
             }
         }
-        Card(Modifier.fillMaxWidth()) {
+        Card(Modifier.fillMaxWidth().testTag("settings.about")) {
             Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                 Text(if (zh) "关于" else "About", style = MaterialTheme.typography.titleMedium)
                 Text("mobileAgentRuntime")
@@ -355,6 +441,575 @@ fun SettingsScreen(state: SettingsUiState, actions: SettingsActions = SettingsAc
     }
 }
 
+@Composable
+private fun AuthoritySettingsCard(
+    state: SettingsUiState,
+    actions: SettingsActions,
+    chinese: Boolean,
+) {
+    var authorityMenu by remember { mutableStateOf(false) }
+    var dangerousMenu by remember { mutableStateOf(false) }
+    var pendingDangerousMode by remember { mutableStateOf<String?>(null) }
+    var pendingWiredPairingReplacement by remember { mutableStateOf(false) }
+    // RuntimeIntegration already applies the build admission fail-closed
+    // policy to dangerousMode. Keep that effective value visible while still
+    // exposing a durable enabled policy so the user can explicitly clear it.
+    val displayedDangerousMode = state.dangerousMode
+    val durableDangerousMode = state.dangerousModeDurable
+    val dangerousModeSelectorEnabled = state.dangerousModeBuildAllowed ||
+        durableDangerousMode != DangerousMode.DISABLED.name ||
+        displayedDangerousMode != DangerousMode.DISABLED.name
+    val selectedLabel = authorityLabel(state.selectedAuthority, chinese)
+    val selectedProvider = when (state.selectedAuthority) {
+        "SHIZUKU" -> state.shizukuAuthority
+        "WIRED_ADB" -> state.wiredAdbAuthority
+        else -> null
+    }
+    val shellAvailable = displayedDangerousMode != DangerousMode.DISABLED.name &&
+        selectedProvider?.let {
+            it.platformGrant == "GRANTED" &&
+                it.availability == "READY" &&
+                it.connection == "CONNECTED"
+        } == true
+    val safConfigured = state.safWorkspace.configured || state.safWorkspace.status == "GRANT_LOST"
+
+    Card(Modifier.fillMaxWidth().testTag("settings.authorities")) {
+        Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text(if (chinese) "命令与权限" else "Commands and authorities", style = MaterialTheme.typography.titleMedium)
+            Text(
+                if (chinese) "基础工作区始终与系统增强通道隔离。仅支持 Shizuku 与有线 ADB；当前通道不可用时不会自动切换。"
+                else "The basic workspace stays separate from system enhancement. Only Shizuku and wired ADB are supported; an unavailable channel never switches automatically.",
+                style = MaterialTheme.typography.bodySmall,
+            )
+            SelectorRow(
+                if (chinese) "当前系统增强通道" else "Current system enhancement channel",
+                selectedLabel,
+                { authorityMenu = true },
+                modifier = Modifier.testTag("settings.authority.selected"),
+                enabled = true,
+            ) {
+                DropdownMenu(authorityMenu, { authorityMenu = false }) {
+                    listOf(
+                        "NONE" to authorityLabel("NONE", chinese),
+                        "SHIZUKU" to authorityLabel("SHIZUKU", chinese),
+                        "WIRED_ADB" to authorityLabel("WIRED_ADB", chinese),
+                    ).forEach { (value, label) ->
+                        DropdownMenuItem(
+                            text = { Text(label) },
+                            onClick = {
+                                authorityMenu = false
+                                actions.onSelectAuthority(value)
+                            },
+                            modifier = Modifier.testTag("settings.authority.option.$value"),
+                        )
+                    }
+                }
+            }
+            AuthorityRow(
+                if (chinese) "基础工作区" else "Basic workspace",
+                if (state.appPrivateExecutionActive) {
+                    if (chinese) "已启用（逐次确认）" else "Enabled (per-call approval)"
+                } else {
+                    if (chinese) "当前不可用" else "Currently unavailable"
+                },
+                Modifier.testTag("settings.workspace.internal"),
+            )
+
+            ProviderLifecycleBlock(
+                state = state.shizukuAuthority,
+                label = "Shizuku",
+                chinese = chinese,
+                modifier = Modifier.testTag("settings.authority.shizuku"),
+                onIntent = { actions.onAuthorityIntent("SHIZUKU", it) },
+                onRefresh = { actions.onRefreshAuthority("SHIZUKU") },
+                onPrimaryAction = actions.onRequestShizukuPermission,
+                primaryActionLabel = if (chinese) "请求授权" else "Request grant",
+                primaryActionEnabled = state.shizukuAuthority.platformGrant != "GRANTED" &&
+                    state.shizukuAuthority.availability != "UNSUPPORTED",
+                onSecondaryAction = actions.onOpenShizuku,
+                secondaryActionLabel = if (chinese) "打开 Shizuku" else "Open Shizuku",
+            )
+
+            ProviderLifecycleBlock(
+                state = state.wiredAdbAuthority,
+                label = if (chinese) "有线 ADB" else "Wired ADB",
+                chinese = chinese,
+                modifier = Modifier.testTag("settings.authority.wired_adb"),
+                onIntent = { actions.onAuthorityIntent("WIRED_ADB", it) },
+                onRefresh = { actions.onRefreshAuthority("WIRED_ADB") },
+                onPrimaryAction = {
+                    val hasExistingTrust = state.wiredAdbAuthority.configured ||
+                        state.wiredAdbAuthority.trust in setOf("TRUSTED", "REAUTH_REQUIRED")
+                    if (hasExistingTrust) pendingWiredPairingReplacement = true
+                    else actions.onRequestWiredPairing(false)
+                },
+                primaryActionLabel = if (state.wiredAdbAuthority.configured ||
+                    state.wiredAdbAuthority.trust in setOf("TRUSTED", "REAUTH_REQUIRED")
+                ) {
+                    if (chinese) "替换已保存信任" else "Replace saved trust"
+                } else {
+                    if (chinese) "开始配对" else "Start pairing"
+                },
+                primaryActionEnabled = state.wiredAdbAuthority.availability != "UNSUPPORTED",
+                onSecondaryAction = actions.onForgetWiredAdb,
+                secondaryActionLabel = if (chinese) "忘记此电脑" else "Forget computer",
+                secondaryActionEnabled = state.wiredAdbAuthority.configured || state.wiredAdbAuthority.trust.isNotBlank(),
+            )
+
+            WiredPairingBlock(
+                pairing = state.wiredPairing,
+                chinese = chinese,
+                tokenProvider = actions.onWiredPairingToken,
+                onComplete = actions.onCompleteWiredPairing,
+                onCancel = actions.onCancelWiredPairing,
+            )
+
+            Column(
+                Modifier.fillMaxWidth().testTag("settings.workspace.saf"),
+                verticalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+                Text(if (chinese) "用户授权文件（SAF）" else "User-authorized files (SAF)", style = MaterialTheme.typography.labelLarge)
+                Text(
+                    if (chinese) {
+                        "状态：${safStatusLabel(state.safWorkspace.status, chinese)} · 读取：${readWriteLabel(state.safWorkspace.readGranted, chinese)} · 写入：${readWriteLabel(state.safWorkspace.writeGranted, chinese)}"
+                    } else {
+                        "Status: ${safStatusLabel(state.safWorkspace.status, chinese)} · Read: ${readWriteLabel(state.safWorkspace.readGranted, chinese)} · Write: ${readWriteLabel(state.safWorkspace.writeGranted, chinese)}"
+                    },
+                    style = MaterialTheme.typography.bodySmall,
+                )
+                Text(
+                    if (chinese) {
+                        if (state.safWorkspace.persisted) "持久授权已记录；返回设置时会重新校验提供方能力。"
+                        else "未记录持久授权；请选择目录以授予读取或写入能力。"
+                    } else {
+                        if (state.safWorkspace.persisted) "A persisted grant is recorded; provider capabilities are revalidated on resume."
+                        else "No persisted grant is recorded; choose a directory to grant read or write access."
+                    },
+                    style = MaterialTheme.typography.bodySmall,
+                )
+                ActionRow {
+                    Button(
+                        onClick = actions.onSelectSafTree,
+                        modifier = Modifier.testTag("settings.saf.authorize"),
+                    ) { Text(if (chinese) "选择目录" else "Choose directory") }
+                    OutlinedButton(
+                        onClick = actions.onReauthorizeSaf,
+                        enabled = safConfigured,
+                        modifier = Modifier.testTag("settings.saf.reauthorize"),
+                    ) { Text(if (chinese) "重新授权" else "Re-authorize") }
+                    OutlinedButton(
+                        onClick = actions.onRevokeSaf,
+                        enabled = safConfigured,
+                        modifier = Modifier.testTag("settings.saf.revoke"),
+                    ) { Text(if (chinese) "撤销" else "Revoke") }
+                }
+            }
+
+            Column(
+                Modifier.fillMaxWidth().testTag("settings.dangerous_mode"),
+                verticalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+                Text(if (chinese) "危险模式" else "Dangerous Mode", style = MaterialTheme.typography.labelLarge)
+                Text(
+                    if (chinese) "允许 Agent 直接执行 Android Shell 命令。它可能修改或删除文件、停止应用、修改部分系统设置；这不是 Root。"
+                    else "Allows the Agent to execute Android shell commands directly. It may modify or delete files, stop apps, or change some system settings; this is not Root.",
+                    style = MaterialTheme.typography.bodySmall,
+                )
+                SelectorRow(
+                    if (chinese) "策略" else "Policy",
+                    dangerousModeLabel(displayedDangerousMode, chinese),
+                    { dangerousMenu = true },
+                    modifier = Modifier.testTag("settings.dangerous_mode.selector"),
+                    enabled = dangerousModeSelectorEnabled,
+                ) {
+                    DropdownMenu(dangerousMenu, { dangerousMenu = false }) {
+                        listOf(
+                            DangerousMode.DISABLED.name to dangerousModeLabel(DangerousMode.DISABLED.name, chinese),
+                            DangerousMode.ENABLED_CONFIRM_HIGH_RISK.name to dangerousModeLabel(DangerousMode.ENABLED_CONFIRM_HIGH_RISK.name, chinese),
+                            DangerousMode.ENABLED_AUTONOMOUS.name to dangerousModeLabel(DangerousMode.ENABLED_AUTONOMOUS.name, chinese),
+                        ).forEach { (value, label) ->
+                            DropdownMenuItem(
+                                text = { Text(label) },
+                                enabled = value == DangerousMode.DISABLED.name || state.dangerousModeBuildAllowed,
+                                onClick = {
+                                    dangerousMenu = false
+                                    if (value == DangerousMode.DISABLED.name) actions.onDisableDangerousMode()
+                                    else pendingDangerousMode = value
+                                },
+                                modifier = Modifier.testTag("settings.dangerous_mode.option.$value"),
+                            )
+                        }
+                    }
+                }
+                if (!state.dangerousModeBuildAllowed) {
+                    Text(
+                        if (chinese) {
+                            if (state.dangerousModeBuildKnown) "当前构建未获高权限控制面许可；危险模式保持关闭。"
+                            else "构建变体未知；危险模式安全关闭，必须由受审查构建明确许可。"
+                        } else {
+                            if (state.dangerousModeBuildKnown) "This build is not admitted to the high-privilege control plane; Dangerous Mode stays off."
+                            else "The build variant is unknown; Dangerous Mode stays fail-closed until an explicitly reviewed build admits it."
+                        },
+                        color = MaterialTheme.colorScheme.error,
+                        style = MaterialTheme.typography.bodySmall,
+                        modifier = Modifier.testTag("settings.dangerous_mode.fail_closed"),
+                    )
+                }
+                if (durableDangerousMode != DangerousMode.DISABLED.name &&
+                    displayedDangerousMode == DangerousMode.DISABLED.name
+                ) {
+                    Text(
+                        if (chinese) {
+                            "持久策略：${dangerousModeLabel(durableDangerousMode, true)}；当前有效策略：已关闭（构建未获许可）。可在此清除持久策略。"
+                        } else {
+                            "Durable policy: ${dangerousModeLabel(durableDangerousMode, false)}; effective policy: Disabled (build not admitted). Clear the durable policy here."
+                        },
+                        color = MaterialTheme.colorScheme.error,
+                        style = MaterialTheme.typography.bodySmall,
+                        modifier = Modifier.testTag("settings.dangerous_mode.durable_fail_closed"),
+                    )
+                }
+                if (displayedDangerousMode != DangerousMode.DISABLED.name) {
+                    Text(
+                        if (chinese) "危险模式：已开启 · Shell：${if (shellAvailable) "可用" else "当前不可用"}"
+                        else "Dangerous Mode: enabled · Shell: ${if (shellAvailable) "available" else "currently unavailable"}",
+                        style = MaterialTheme.typography.bodySmall,
+                        modifier = Modifier.testTag("settings.dangerous_mode.shell_state"),
+                    )
+                    Text(
+                        when (displayedDangerousMode) {
+                            DangerousMode.ENABLED_AUTONOMOUS.name -> if (chinese) "完全自主：不会逐条询问，但仍受能力、选定通道、超时、输出与审计约束。" else "Autonomous: no per-command prompt, while capability, selected channel, timeout, output, and audit gates remain."
+                            else -> if (chinese) "高危命令确认：明显高风险操作仍需单次确认；检测不是安全沙箱。" else "High-risk confirmation: clearly risky operations still require one confirmation; detection is not a safety sandbox."
+                        },
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                    Text(
+                        if (chinese) "授权不会因任务结束、会话结束、后台、USB 拔出或 Binder 中断自动关闭；请使用上方策略选择“已关闭”。"
+                        else "The setting is not cleared by task/session end, backgrounding, USB removal, or Binder loss; choose Disabled above to turn it off.",
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                }
+            }
+        }
+    }
+
+    if (pendingWiredPairingReplacement) {
+        AlertDialog(
+            onDismissRequest = { pendingWiredPairingReplacement = false },
+            title = { Text(if (chinese) "确认替换已保存信任" else "Confirm replacing saved trust") },
+            text = {
+                Column(
+                    Modifier.verticalScroll(rememberScrollState())
+                        .testTag("settings.wired_adb.replace.risk_dialog"),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    Text(
+                        if (chinese) {
+                            "这会替换当前已保存的有线 ADB 信任关系，并开始一次新的前台配对。旧信任不会继续用于本次配对。"
+                        } else {
+                            "This replaces the saved wired ADB trust and starts a new foreground pairing. The old trust will not be used for this pairing."
+                        },
+                    )
+                    Text(
+                        if (chinese) "令牌只在当前设置页面临时显示；请确认你已准备好在电脑端完成配对。"
+                        else "The one-time token is shown only temporarily on this Settings screen; make sure you are ready to complete pairing on the computer.",
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                }
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        pendingWiredPairingReplacement = false
+                        actions.onRequestWiredPairing(true)
+                    },
+                    modifier = Modifier.testTag("settings.wired_adb.replace.confirm"),
+                ) { Text(if (chinese) "替换并开始配对" else "Replace and start pairing") }
+            },
+            dismissButton = {
+                TextButton(onClick = { pendingWiredPairingReplacement = false }) {
+                    Text(if (chinese) "取消" else "Cancel")
+                }
+            },
+        )
+    }
+
+    pendingDangerousMode?.let { mode ->
+        AlertDialog(
+            onDismissRequest = { pendingDangerousMode = null },
+            title = { Text(if (chinese) "确认开启危险模式" else "Confirm Dangerous Mode") },
+            text = {
+                Column(
+                    Modifier.verticalScroll(rememberScrollState()).testTag("settings.dangerous_mode.risk_dialog"),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    Text(
+                        if (chinese) "开启后，Agent 可以使用当前 Shizuku 或有线 ADB 的 Shell 权限直接执行命令。错误命令可能导致数据丢失、应用停止或设备状态异常。此功能不是 Root，也不是安全沙箱。"
+                        else "After enabling, the Agent may execute commands directly with the current Shizuku or wired ADB shell authority. Mistakes can cause data loss, stopped apps, or unexpected device state. This is not Root and not a safety sandbox.",
+                    )
+                    Text(
+                        if (chinese) "我理解风险，并知道系统增强通道不可用时 Shell 仍会保持不可用，不会自动切换。"
+                        else "I understand the risk and know that Shell remains unavailable when the selected enhancement channel is unavailable; it will not switch automatically.",
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                }
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        pendingDangerousMode = null
+                        actions.onSetDangerousMode(mode)
+                    },
+                    modifier = Modifier.testTag("settings.dangerous_mode.confirm"),
+                ) { Text(if (chinese) "确认开启" else "Enable") }
+            },
+            dismissButton = {
+                TextButton(onClick = { pendingDangerousMode = null }) { Text(if (chinese) "取消" else "Cancel") }
+            },
+        )
+    }
+}
+
+@Composable
+private fun WiredPairingBlock(
+    pairing: WiredPairingUiState,
+    chinese: Boolean,
+    tokenProvider: () -> String?,
+    onComplete: () -> Unit,
+    onCancel: () -> Unit,
+) {
+    var showToken by remember { mutableStateOf(false) }
+    val clipboard = LocalClipboardManager.current
+    // A newly issued prompt has a new expiry. Never carry a previous reveal
+    // choice into a replacement prompt, and never save the token in Compose
+    // state or SavedState.
+    LaunchedEffect(pairing.expiresAtEpochMs) {
+        showToken = false
+    }
+
+    // The token is read only for this composition/copy action and is never
+    // stored in SettingsUiState or rememberSaveable state.
+    val token = if (pairing.hasToken) tokenProvider() else null
+    if (token != null) {
+        Column(
+            Modifier.fillMaxWidth().testTag("settings.wired_adb.pairing"),
+            verticalArrangement = Arrangement.spacedBy(6.dp),
+        ) {
+            Text(
+                if (chinese) "一次性配对令牌（仅保留在当前设置页面）" else "One-time pairing token (this Settings screen only)",
+                style = MaterialTheme.typography.labelLarge,
+            )
+            Text(
+                if (chinese) {
+                    "先在电脑运行 `mar-bridge pair --serial <serial>`，将上面的令牌粘贴到电脑提示中；成功后再点“完成配对”。"
+                } else {
+                    "First run `mar-bridge pair --serial <serial>` on the computer, paste the token above into the computer prompt, then tap \"Complete pairing\"."
+                },
+                style = MaterialTheme.typography.bodySmall,
+                modifier = Modifier.testTag("settings.wired_adb.pairing.instructions"),
+            )
+            if (showToken) {
+                Text(
+                    token,
+                    modifier = Modifier.fillMaxWidth()
+                        .horizontalScroll(rememberScrollState())
+                        .testTag("settings.wired_adb.pairing.token"),
+                    style = MaterialTheme.typography.bodyMedium,
+                )
+            } else {
+                Text(
+                    if (chinese) "令牌已隐藏；点击“查看令牌”后才能复制。" else "The token is hidden; reveal it before copying.",
+                    style = MaterialTheme.typography.bodySmall,
+                    modifier = Modifier.testTag("settings.wired_adb.pairing.token.hidden"),
+                )
+            }
+            Text(
+                if (chinese) {
+                    "过期时间（时间戳）：${pairing.expiresAtEpochMs} · 剩余尝试：${pairing.remainingAttempts}"
+                } else {
+                    "Expiry (timestamp): ${pairing.expiresAtEpochMs} · Attempts remaining: ${pairing.remainingAttempts}"
+                },
+                style = MaterialTheme.typography.bodySmall,
+                modifier = Modifier.testTag("settings.wired_adb.pairing.expiry"),
+            )
+            if (pairing.replacingExistingTrust) {
+                Text(
+                    if (chinese) "正在替换已保存信任；完成前旧信任不会用于本次配对。"
+                    else "Saved trust is being replaced; the old trust is not used for this pairing.",
+                    style = MaterialTheme.typography.bodySmall,
+                )
+            }
+            ActionRow {
+                TextButton(
+                    onClick = { showToken = !showToken },
+                    modifier = Modifier.testTag("settings.wired_adb.pairing.reveal"),
+                ) { Text(if (showToken) if (chinese) "隐藏令牌" else "Hide token" else if (chinese) "查看令牌" else "View token") }
+                OutlinedButton(
+                    onClick = { if (showToken) clipboard.setText(AnnotatedString(token)) },
+                    enabled = showToken,
+                    modifier = Modifier.testTag("settings.wired_adb.pairing.copy"),
+                ) { Text(if (chinese) "复制令牌" else "Copy token") }
+                Button(
+                    onClick = onComplete,
+                    enabled = !pairing.completing && pairing.remainingAttempts > 0,
+                    modifier = Modifier.testTag("settings.wired_adb.pairing.complete"),
+                ) { Text(if (pairing.completing) if (chinese) "正在完成…" else "Completing…" else if (chinese) "完成配对" else "Complete pairing") }
+                OutlinedButton(
+                    onClick = onCancel,
+                    enabled = !pairing.completing,
+                    modifier = Modifier.testTag("settings.wired_adb.pairing.cancel"),
+                ) { Text(if (chinese) "取消" else "Cancel") }
+            }
+        }
+    } else if (pairing.status.isNotBlank()) {
+        Text(
+            pairingStatusLabel(pairing.status, chinese),
+            style = MaterialTheme.typography.bodySmall,
+            modifier = Modifier.fillMaxWidth().testTag("settings.wired_adb.pairing.status"),
+        )
+    }
+}
+
+@Composable
+private fun ProviderLifecycleBlock(
+    state: AuthorityUiState,
+    label: String,
+    chinese: Boolean,
+    modifier: Modifier = Modifier,
+    onIntent: (Boolean) -> Unit,
+    onRefresh: () -> Unit,
+    onPrimaryAction: () -> Unit,
+    primaryActionLabel: String,
+    primaryActionEnabled: Boolean,
+    onSecondaryAction: () -> Unit,
+    secondaryActionLabel: String,
+    secondaryActionEnabled: Boolean = true,
+) {
+    Column(modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(5.dp)) {
+        Text(label, style = MaterialTheme.typography.labelLarge)
+        if (state.selected) {
+            Text(
+                if (chinese) "当前选定通道" else "Currently selected channel",
+                style = MaterialTheme.typography.labelSmall,
+                modifier = Modifier.testTag("settings.authority.${state.authority.lowercase()}.selected"),
+            )
+        }
+        Text(
+            if (chinese) "用户意图：${if (state.userIntentEnabled) "已启用" else "未启用"} · 平台授权：${grantLabel(state.platformGrant, chinese)}"
+            else "User intent: ${if (state.userIntentEnabled) "enabled" else "disabled"} · Platform grant: ${grantLabel(state.platformGrant, chinese)}",
+            style = MaterialTheme.typography.bodySmall,
+        )
+        Text(
+            if (chinese) "可用性：${availabilityLabel(state.availability, chinese)} · 连接：${connectionLabel(state.connection, chinese)}"
+            else "Availability: ${availabilityLabel(state.availability, chinese)} · Connection: ${connectionLabel(state.connection, chinese)}",
+            style = MaterialTheme.typography.bodySmall,
+        )
+        val trust = state.trust.ifBlank { "FORGOTTEN".takeIf { state.authority == "WIRED_ADB" }.orEmpty() }
+        if (trust.isNotBlank()) {
+            Text(
+                if (chinese) "信任：${trustLabel(trust, chinese)}" else "Trust: ${trustLabel(trust, chinese)}",
+                style = MaterialTheme.typography.bodySmall,
+            )
+        }
+        SettingSwitch(
+            if (chinese) "保留此通道的用户意图" else "Keep user intent for this channel",
+            state.userIntentEnabled,
+            onIntent,
+            modifier = Modifier.testTag("settings.authority.${state.authority.lowercase()}.intent"),
+        )
+        ActionRow {
+            OutlinedButton(onClick = onRefresh, modifier = Modifier.testTag("settings.authority.${state.authority.lowercase()}.refresh")) {
+                Text(if (chinese) "刷新" else "Refresh")
+            }
+            Button(
+                onClick = onPrimaryAction,
+                enabled = primaryActionEnabled,
+                modifier = Modifier.testTag("settings.authority.${state.authority.lowercase()}.primary"),
+            ) { Text(primaryActionLabel) }
+            OutlinedButton(
+                onClick = onSecondaryAction,
+                enabled = secondaryActionEnabled,
+                modifier = Modifier.testTag("settings.authority.${state.authority.lowercase()}.secondary"),
+            ) { Text(secondaryActionLabel) }
+        }
+        if (!state.configured) {
+            Text(
+                if (chinese) "此通道尚未完成持久配置；连接状态不会替代用户授权。" else "This channel has no persistent configuration; connection state does not replace user authorization.",
+                style = MaterialTheme.typography.labelSmall,
+            )
+        }
+    }
+}
+
+@Composable
+private fun ActionRow(content: @Composable RowScope.() -> Unit) {
+    Row(
+        Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        content = content,
+    )
+}
+
+private fun authorityLabel(value: String, chinese: Boolean): String = when (value.uppercase()) {
+    "SHIZUKU" -> "Shizuku"
+    "WIRED_ADB" -> if (chinese) "有线 ADB" else "Wired ADB"
+    else -> if (chinese) "无（仅基础工作区）" else "None (basic workspace only)"
+}
+
+private fun dangerousModeLabel(value: String, chinese: Boolean): String = when (value) {
+    DangerousMode.ENABLED_CONFIRM_HIGH_RISK.name -> if (chinese) "开启：高危命令确认" else "Enabled: high-risk confirmation"
+    DangerousMode.ENABLED_AUTONOMOUS.name -> if (chinese) "开启：完全自主" else "Enabled: autonomous"
+    else -> if (chinese) "已关闭" else "Disabled"
+}
+
+private fun grantLabel(value: String, chinese: Boolean): String = when (value) {
+    "GRANTED" -> if (chinese) "已授权" else "Granted"
+    "DENIED" -> if (chinese) "已拒绝" else "Denied"
+    "REVOKED" -> if (chinese) "已撤销" else "Revoked"
+    else -> if (chinese) "未知" else "Unknown"
+}
+
+private fun readWriteLabel(value: Boolean, chinese: Boolean): String =
+    if (value) {
+        if (chinese) "已授权" else "Granted"
+    } else {
+        if (chinese) "未授权" else "Not granted"
+    }
+
+private fun availabilityLabel(value: String, chinese: Boolean): String = when (value) {
+    "READY" -> if (chinese) "可用" else "Ready"
+    "TEMPORARILY_UNAVAILABLE" -> if (chinese) "暂不可用" else "Temporarily unavailable"
+    else -> if (chinese) "不支持" else "Unsupported"
+}
+
+private fun connectionLabel(value: String, chinese: Boolean): String = when (value) {
+    "CONNECTING" -> if (chinese) "连接中" else "Connecting"
+    "CONNECTED" -> if (chinese) "已连接" else "Connected"
+    "DEGRADED" -> if (chinese) "已降级" else "Degraded"
+    else -> if (chinese) "已断开" else "Disconnected"
+}
+
+private fun trustLabel(value: String, chinese: Boolean): String = when (value) {
+    "TRUSTED" -> if (chinese) "已信任" else "Trusted"
+    "REAUTH_REQUIRED" -> if (chinese) "需要重新授权" else "Re-authorization required"
+    else -> if (chinese) "未配置" else "Not configured"
+}
+
+private fun pairingStatusLabel(value: String, chinese: Boolean): String = when (value) {
+    "EXPIRED" -> if (chinese) "配对令牌已过期；请重新开始前台配对。" else "The pairing token expired; start a new foreground pairing."
+    "CANCELLED" -> if (chinese) "前台配对已取消；令牌已清除。" else "Foreground pairing was cancelled; the token was cleared."
+    "COMPLETED" -> if (chinese) "有线 ADB 配对已完成。" else "Wired ADB pairing completed."
+    "FAILED" -> if (chinese) "配对未完成；请检查电脑端状态后重试或取消。" else "Pairing did not complete; check the computer and retry or cancel."
+    else -> if (chinese) "配对状态已更新。" else "Pairing status updated."
+}
+
+private fun safStatusLabel(value: String, chinese: Boolean): String = when (value) {
+    "ACTIVE" -> if (chinese) "有效" else "Active"
+    "GRANT_LOST" -> if (chinese) "授权已丢失" else "Grant lost"
+    else -> if (chinese) "已撤销" else "Revoked"
+}
+
 private fun formatDiagnosticBytes(bytes: Long): String = when {
     bytes < 1024L -> "$bytes B"
     bytes < 1024L * 1024L -> "${bytes / 1024L} KiB"
@@ -362,26 +1017,52 @@ private fun formatDiagnosticBytes(bytes: Long): String = when {
 }
 
 @Composable
-private fun SelectorRow(label: String, value: String, onOpen: () -> Unit, menu: @Composable () -> Unit) {
+private fun SelectorRow(
+    label: String,
+    value: String,
+    onOpen: () -> Unit,
+    modifier: Modifier = Modifier,
+    enabled: Boolean = true,
+    menu: @Composable () -> Unit,
+) {
     Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
         Text(label, Modifier.weight(1f))
-        BoxedSelector(value, onOpen, menu)
+        BoxedSelector(value, onOpen, menu, enabled, modifier)
     }
 }
 
 @Composable
-private fun BoxedSelector(value: String, onOpen: () -> Unit, menu: @Composable () -> Unit) {
+private fun BoxedSelector(
+    value: String,
+    onOpen: () -> Unit,
+    menu: @Composable () -> Unit,
+    enabled: Boolean = true,
+    modifier: Modifier = Modifier,
+) {
     androidx.compose.foundation.layout.Box {
-        OutlinedButton(onClick = onOpen) { Text(value) }
+        OutlinedButton(onClick = onOpen, enabled = enabled, modifier = modifier) { Text(value) }
         menu()
     }
 }
 
 @Composable
-private fun SettingSwitch(label: String, checked: Boolean, onChange: (Boolean) -> Unit) {
+private fun SettingSwitch(
+    label: String,
+    checked: Boolean,
+    onChange: (Boolean) -> Unit,
+    modifier: Modifier = Modifier,
+) {
     Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
         Text(label, Modifier.weight(1f))
-        Switch(checked = checked, onCheckedChange = onChange)
+        Switch(checked = checked, onCheckedChange = onChange, modifier = modifier)
+    }
+}
+
+@Composable
+private fun AuthorityRow(label: String, status: String, modifier: Modifier = Modifier) {
+    Column(modifier.fillMaxWidth()) {
+        Text(label, style = MaterialTheme.typography.labelLarge)
+        Text(status, style = MaterialTheme.typography.bodySmall)
     }
 }
 

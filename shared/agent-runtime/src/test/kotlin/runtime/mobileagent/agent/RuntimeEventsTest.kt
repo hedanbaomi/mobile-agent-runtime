@@ -183,7 +183,9 @@ class RuntimeEventsTest {
             executor = executor)).toList()
         assertEquals(RunState.UNKNOWN_OUTCOME, run.state)
         assertEquals(1, adapter.requests.size)
-        assertEquals("UNKNOWN_OUTCOME", events.filterIsInstance<RuntimeEvent.ToolResultProduced>().single().status)
+        val unknown = events.filterIsInstance<RuntimeEvent.ToolResultProduced>().single()
+        assertEquals("UNKNOWN_OUTCOME", unknown.status)
+        assertTrue(unknown.resultJson.contains("\"automaticReplayAllowed\":false"))
         assertEquals(RunState.UNKNOWN_OUTCOME, events.filterIsInstance<RuntimeEvent.RunFinished>().single().state)
     }
 

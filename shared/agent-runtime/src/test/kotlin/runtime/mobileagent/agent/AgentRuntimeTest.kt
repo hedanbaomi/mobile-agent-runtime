@@ -6,7 +6,11 @@ package runtime.mobileagent.agent
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.toList
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.awaitCancellation
+import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.test.runTest
 import org.junit.jupiter.api.Assertions.assertEquals
@@ -113,7 +117,7 @@ class AgentRuntimeTest {
     }
 
     @Test
-    fun budgetCheckedAfterStreamEnds() {
+    fun budgetExpiryAfterModelDispatchIsUnknown() {
         var now = 0L
         val adapter = ScriptedAdapter(
             listOf(listOf(ModelEvent.TextDelta("late"), ModelEvent.Completed)),
@@ -124,8 +128,8 @@ class AgentRuntimeTest {
         val events = runBlocking {
             runtime.run(run, prompt(), "model", charArrayOf('s'), toolsEnabled = true).toList()
         }
-        assertTrue(events.any { it is ModelEvent.Failed && it.sanitizedMessage.contains("budget") })
-        assertEquals(RunState.BUDGET_EXHAUSTED, run.state)
+        assertTrue(events.any { it is ModelEvent.Failed && it.sanitizedMessage.contains("UNKNOWN_OUTCOME") })
+        assertEquals(RunState.UNKNOWN_OUTCOME, run.state)
         assertTrue(events.none { it is ModelEvent.Completed })
     }
 
@@ -182,10 +186,123 @@ class AgentRuntimeTest {
             runtime.run(run, prompt(), "model", charArrayOf('s'), toolsEnabled = false).toList()
         }
         val elapsed = System.currentTimeMillis() - started
-        assertTrue(events.any { it is ModelEvent.Failed && it.sanitizedMessage.contains("budget") })
+        assertTrue(events.any { it is ModelEvent.Failed && it.sanitizedMessage.contains("UNKNOWN_OUTCOME") })
         assertTrue(events.none { it is ModelEvent.Completed })
         assertTrue(elapsed < 250, "elapsed=$elapsed")
         assertTrue(adapter.emitted <= 1)
+        assertEquals(RunState.UNKNOWN_OUTCOME, run.state)
+    }
+
+    @Test
+    fun modelTimeoutAfterDispatchIsUnknownAndIsNotReplayed() = runTest {
+        val adapter = object : ModelAdapter {
+            var requests = 0
+            override suspend fun probe(profile: runtime.mobileagent.domain.ModelProfile) = error("not used")
+            override fun stream(request: ModelRequest, secret: CharArray): Flow<ModelEvent> = flow {
+                requests += 1
+                delay(100)
+                emit(ModelEvent.Completed)
+            }
+            override suspend fun embed(request: EmbeddingRequest, secret: CharArray) = error("not used")
+        }
+        val run = AgentRun("model-timeout", "s", "c", budget = RunBudget(maxRuntimeMs = 20))
+        val events = AgentRuntime(adapter).run(
+            run,
+            prompt(),
+            "model",
+            charArrayOf(),
+            toolsEnabled = false,
+        ).toList()
+
+        assertEquals(RunState.UNKNOWN_OUTCOME, run.state)
+        assertEquals(1, adapter.requests)
+        assertTrue(events.any { it is ModelEvent.Failed && it.sanitizedMessage.contains("UNKNOWN_OUTCOME") })
+    }
+
+    @Test
+    fun toolTimeoutAfterDispatchIsUnknownAndIsNotReplayed() = runTest {
+        val adapter = ScriptedAdapter(
+            listOf(listOf(ModelEvent.ToolCallDelta("slow", "external", "{}"), ModelEvent.Completed)),
+        )
+        val executor = object : runtime.mobileagent.skills.ToolExecutor {
+            override val specs = listOf(
+                runtime.mobileagent.skills.ToolSpec("external", "external tool", "{\"type\":\"object\"}", "external", false),
+            )
+            var invocations = 0
+            override suspend fun invoke(call: runtime.mobileagent.skills.ToolCall): runtime.mobileagent.skills.ToolResult {
+                invocations += 1
+                delay(100)
+                return runtime.mobileagent.skills.ToolResult.Value("{}")
+            }
+            override suspend fun approve(callId: String): runtime.mobileagent.skills.ToolResult = error("unused")
+        }
+        val run = AgentRun("tool-timeout", "s", "c", budget = RunBudget(maxRuntimeMs = 20))
+        val events = AgentRuntime(adapter).run(
+            AgentRuntimeRequest(run, prompt(), "model", charArrayOf(), toolsEnabled = true, executor = executor),
+        ).toList()
+
+        assertEquals(RunState.UNKNOWN_OUTCOME, run.state)
+        assertEquals(1, executor.invocations)
+        assertEquals(1, adapter.requests.size)
+        assertEquals("UNKNOWN_OUTCOME", events.filterIsInstance<RuntimeEvent.ToolResultProduced>().single().status)
+    }
+
+    @Test
+    fun callerCancellationAfterModelDispatchPropagatesAndMarksUnknown() = runTest {
+        val started = CompletableDeferred<Unit>()
+        val adapter = object : ModelAdapter {
+            var requests = 0
+            override suspend fun probe(profile: runtime.mobileagent.domain.ModelProfile) = error("not used")
+            override fun stream(request: ModelRequest, secret: CharArray): Flow<ModelEvent> = flow {
+                requests += 1
+                started.complete(Unit)
+                awaitCancellation()
+            }
+            override suspend fun embed(request: EmbeddingRequest, secret: CharArray) = error("not used")
+        }
+        val run = AgentRun("model-cancel", "s", "c")
+        val job = launch {
+            AgentRuntime(adapter).run(run, prompt(), "model", charArrayOf(), toolsEnabled = false).toList()
+        }
+        started.await()
+        job.cancelAndJoin()
+
+        assertEquals(RunState.CANCELLED, run.state)
+        assertTrue(run.stopReason.orEmpty().contains("UNKNOWN_OUTCOME"))
+        assertEquals(1, adapter.requests)
+    }
+
+    @Test
+    fun callerCancellationAfterToolDispatchPropagatesAndMarksUnknown() = runTest {
+        val started = CompletableDeferred<Unit>()
+        val adapter = ScriptedAdapter(
+            listOf(listOf(ModelEvent.ToolCallDelta("cancel", "external", "{}"), ModelEvent.Completed)),
+        )
+        val executor = object : runtime.mobileagent.skills.ToolExecutor {
+            override val specs = listOf(
+                runtime.mobileagent.skills.ToolSpec("external", "external tool", "{\"type\":\"object\"}", "external", false),
+            )
+            var invocations = 0
+            override suspend fun invoke(call: runtime.mobileagent.skills.ToolCall): runtime.mobileagent.skills.ToolResult {
+                invocations += 1
+                started.complete(Unit)
+                awaitCancellation()
+            }
+            override suspend fun approve(callId: String): runtime.mobileagent.skills.ToolResult = error("unused")
+        }
+        val run = AgentRun("tool-cancel", "s", "c")
+        val job = launch {
+            AgentRuntime(adapter).run(
+                AgentRuntimeRequest(run, prompt(), "model", charArrayOf(), toolsEnabled = true, executor = executor),
+            ).toList()
+        }
+        started.await()
+        job.cancelAndJoin()
+
+        assertEquals(RunState.CANCELLED, run.state)
+        assertTrue(run.stopReason.orEmpty().contains("UNKNOWN_OUTCOME"))
+        assertEquals(1, executor.invocations)
+        assertEquals(1, adapter.requests.size)
     }
 
     @Test

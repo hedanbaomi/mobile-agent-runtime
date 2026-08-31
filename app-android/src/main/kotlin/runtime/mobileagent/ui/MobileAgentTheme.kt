@@ -179,7 +179,7 @@ private val Cc66ffColors = lightColorScheme(
 
 @Composable
 fun MobileAgentTheme(
-    mode: AppThemeMode = AppThemeMode.CC66FF,
+    mode: AppThemeMode = AppThemeMode.LIGHT,
     content: @Composable () -> Unit,
 ) {
     val dark = when (mode) {

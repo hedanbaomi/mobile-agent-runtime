@@ -5,6 +5,7 @@ package runtime.mobileagent.skills
 
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.runInterruptible
+import runtime.mobileagent.skills.tooling.ToolErrorCode
 
 /**
  * Runtime-facing tool boundary.
@@ -19,6 +20,12 @@ interface ToolExecutor {
     suspend fun invoke(call: ToolCall): ToolResult
 
     suspend fun approve(callId: String): ToolResult
+
+    /** Explicitly deny a pending approval; implementations may resolve callId to requestId. */
+    suspend fun reject(callId: String): ToolResult = ToolResult.Denied(ToolErrorCode.APPROVAL_DENIED.name)
+
+    /** Explicitly expire a pending approval; implementations may resolve callId to requestId. */
+    suspend fun expire(callId: String): ToolResult = ToolResult.Denied(ToolErrorCode.TIMEOUT.name)
 }
 
 /**

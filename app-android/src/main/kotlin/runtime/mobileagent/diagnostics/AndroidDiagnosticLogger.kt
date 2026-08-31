@@ -16,6 +16,8 @@ class AndroidDiagnosticLogger private constructor(
 ) {
     companion object {
         private const val ENABLED_KEY = "enabled"
+        // Shared by all facades in this app process so the fallback remains a stable session HMAC.
+        private val sessionReferenceHasher by lazy { DiagnosticReferenceHasher.session() }
 
         private fun androidStore(context: Context, directory: File, preferencesName: String): RollingDiagnosticLogStore {
             val preferences = context.applicationContext.getSharedPreferences(preferencesName, Context.MODE_PRIVATE)
@@ -40,6 +42,7 @@ class AndroidDiagnosticLogger private constructor(
                     fingerprint = Build.FINGERPRINT,
                 ),
                 processId = Process::myPid,
+                referenceHasher = sessionReferenceHasher,
             )
         }
 
@@ -106,6 +109,48 @@ class AndroidDiagnosticLogger private constructor(
     fun recordBatchWorkerComplete(): Boolean = store.recordBatchWorkerComplete()
 
     fun recordBatchWorkerFailed(failure: Throwable): Boolean = store.recordBatchWorkerFailed(failure)
+
+    /** Low-level compatibility seam; callers should prefer one of the typed record methods below. */
+    fun record(event: String, fields: Map<String, Any?> = emptyMap()): Boolean = store.record(event, fields)
+
+    fun recordAuthoritySelectionChanged(record: AuthoritySelectionChangedRecord): Boolean =
+        store.recordAuthoritySelectionChanged(record)
+
+    fun recordAuthorityStateChanged(record: AuthorityStateChangedRecord): Boolean =
+        store.recordAuthorityStateChanged(record)
+
+    fun recordShizukuLifecycle(record: ShizukuLifecycleRecord): Boolean = store.recordShizukuLifecycle(record)
+
+    fun recordWiredAdbLifecycle(record: WiredAdbLifecycleRecord): Boolean = store.recordWiredAdbLifecycle(record)
+
+    fun recordWorkspaceGrantChanged(record: WorkspaceGrantChangedRecord): Boolean =
+        store.recordWorkspaceGrantChanged(record)
+
+    fun recordWorkspaceOperationState(record: WorkspaceOperationStateRecord): Boolean =
+        store.recordWorkspaceOperationState(record)
+
+    fun recordSkillMemoryOperationState(record: SkillMemoryOperationStateRecord): Boolean =
+        store.recordSkillMemoryOperationState(record)
+
+    fun recordDangerousModeChanged(record: DangerousModeChangedRecord): Boolean =
+        store.recordDangerousModeChanged(record)
+
+    fun recordShellToolExposureChanged(record: ShellToolExposureChangedRecord): Boolean =
+        store.recordShellToolExposureChanged(record)
+
+    fun recordToolApprovalState(record: ToolApprovalStateRecord): Boolean = store.recordToolApprovalState(record)
+
+    fun recordShellExecutionState(record: ShellExecutionStateRecord): Boolean =
+        store.recordShellExecutionState(record)
+
+    fun recordBridgeRequestState(record: BridgeRequestStateRecord): Boolean =
+        store.recordBridgeRequestState(record)
+
+    fun recordDiagnosticDropSummary(record: DiagnosticDropSummaryRecord): Boolean =
+        store.recordDiagnosticDropSummary(record)
+
+    fun recordRuntimeToolingUnavailable(record: RuntimeToolingUnavailableRecord): Boolean =
+        store.recordRuntimeToolingUnavailable(record)
 
     fun status(): DiagnosticStatus = store.status()
 

@@ -10,6 +10,7 @@ import io.ktor.client.plugins.HttpTimeout
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
 import runtime.mobileagent.announcements.ClientContext
 import runtime.mobileagent.data.AnnouncementRepository
 import runtime.mobileagent.data.KnowledgeRepository
@@ -39,7 +40,13 @@ import runtime.mobileagent.knowledge.ImportStage
 import runtime.mobileagent.storage.AndroidPdfRendererAdapter
 import runtime.mobileagent.vector.UsearchVectorIndexFactory
 import runtime.mobileagent.diagnostics.AndroidDiagnosticLogger
+import runtime.mobileagent.integration.createWiredAdbDiagnosticSink
+import runtime.mobileagent.integration.RuntimeIntegration
+import runtime.mobileagent.shizuku.ShizukuAuthorityBridge
+import runtime.mobileagent.wired.WiredAdbAuthorityBridgeFactory
 import java.util.Locale
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicReference
 
 class MobileAgentApp : Application() {
     lateinit var database: AndroidContextSqlite
@@ -95,7 +102,9 @@ class MobileAgentApp : Application() {
     }
 }
 
-class AppContainer(app: MobileAgentApp) {
+class AppContainer(app: MobileAgentApp) : AgentGrantPortProvider, SettingsAuthorityPortProvider, AutoCloseable {
+    private val closed = AtomicBoolean(false)
+    private val runtimeIntegrationRef = AtomicReference<RuntimeIntegration?>()
     val db = app.database
     val uiPreferences = app.getSharedPreferences("ui-preferences", android.content.Context.MODE_PRIVATE)
     val secrets = AndroidSecretStore(app, db)
@@ -103,6 +112,14 @@ class AppContainer(app: MobileAgentApp) {
     val agents = AgentRepository(db)
     val conversations = ConversationRepository(db)
     val settings = SettingsRepository(db)
+    val shizuku = ShizukuAuthorityBridge(app).also { bridge ->
+        // A persisted Shizuku grant represents the user's earlier explicit consent. Re-bind the
+        // typed UserService after process restart, but never request permission or start Shizuku.
+        bridge.addPermissionResultListener { result ->
+            if (result.granted) bridge.bindUserService()
+        }
+        if (bridge.state.value.permissionGranted) bridge.bindUserService()
+    }
     val runs = RunRepository(db)
     val audits = AuditRepository(db)
     val transfer = TransferRepository(db, blobSink = CasBlobSink(File(app.filesDir, "cas")))
@@ -157,6 +174,43 @@ class AppContainer(app: MobileAgentApp) {
         apiEmbedderResolver = apiEmbeddings::resolve,
     )
     val skills = SkillRepository(db)
+    /**
+     * Production Wired ADB construction is the only app-scoped authority
+     * factory. It creates canonical app-private metadata and the independent
+     * Android Keystore secret store; no serial/desktop/token is inferred here.
+     */
+    val wiredAuthority = WiredAdbAuthorityBridgeFactory.create(
+        context = app,
+        diagnostics = createWiredAdbDiagnosticSink(app.diagnostics),
+        shellPermission = {
+            runCatching { runtimeIntegrationRef.get()?.wiredShellPermissionAvailable() == true }
+                .getOrDefault(false)
+        },
+    )
+    /**
+     * The process-lifetime v2 runtime facade.  All UI/tool consumers resolve
+     * adapters through this object; it owns the canonical repositories and
+     * never exposes backend roots, URI grants, or bridge credentials.
+     */
+    val runtimeIntegration = RuntimeIntegration(
+        context = app,
+        db = db,
+        agents = agents,
+        skills = skills,
+        auditRepository = audits,
+        diagnostics = app.diagnostics,
+        shizukuAuthority = shizuku,
+        wiredAuthority = wiredAuthority,
+    )
+    init {
+        runtimeIntegrationRef.set(runtimeIntegration)
+    }
+
+    override val agentGrantPort: AgentGrantPort
+        get() = runtimeIntegration.grants
+
+    override fun settingsAuthorityPort(): SettingsAuthorityPort = runtimeIntegration
+
     val announcements = AnnouncementRepository(db).apply {
         if (baseUrl().isBlank()) {
             setBaseUrl(BuildConfig.ANNOUNCEMENTS_BASE_URL)
@@ -190,7 +244,24 @@ class AppContainer(app: MobileAgentApp) {
         scope = announcementScope,
     )
 
+    /**
+     * Release process-lifetime bridges, HTTP clients and coroutine scopes.
+     * Android normally tears these down with the process, while tests and
+     * host restarts use this explicit idempotent boundary.
+     */
+    override fun close() {
+        if (!closed.compareAndSet(false, true)) return
+        announcementScope.cancel()
+        runCatching { runtimeIntegration.close() }
+        runtimeIntegrationRef.set(null)
+        runCatching { wiredAuthority.close() }
+        runCatching { shizuku.close() }
+        runCatching { announcementHttp.close() }
+        runCatching { http.close() }
+    }
+
     init {
+        registerSettingsAuthorityPortProvider(app, this)
         ImportWorkerRegistry.handler = ImportJobHandler { id, configured -> knowledge.resumeImport(id, visionConfigured = configured) }
         ImportWorkerRegistry.cancellationHandler = ImportCancellationHandler { id -> knowledge.cancelImport(id); Unit }
         ImportWorkerRegistry.batchHandler = ImportBatchHandler { batchId, configured ->

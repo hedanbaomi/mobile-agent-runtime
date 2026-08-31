@@ -28,7 +28,7 @@ typealias LocaleMode = LocalePreference
 
 @Serializable
 data class AppSettings(
-    val theme: ThemePreference = ThemePreference.SYSTEM,
+    val theme: ThemePreference = ThemePreference.LIGHT,
     val locale: LocalePreference = LocalePreference.SYSTEM,
     val globalRootPromptOverride: String? = null,
     val globalRootPromptRevision: Int = 0,

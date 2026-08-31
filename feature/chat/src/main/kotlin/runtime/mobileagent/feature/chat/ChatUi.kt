@@ -15,6 +15,7 @@ import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxHeight
@@ -58,6 +59,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -99,6 +101,12 @@ data class ChatToolApprovalUi(
     val summary: String,
     val confirmationRequired: Boolean = true,
     val externalEffect: Boolean = false,
+    /** Structured details are rendered locally and are never sent back to the model. */
+    val command: String? = null,
+    val cwd: String? = null,
+    val authority: String? = null,
+    val dangerousMode: String? = null,
+    val highRisk: Boolean = false,
 )
 
 data class ChatPromptLayerUi(val label: String, val text: String, val editable: Boolean = false)
@@ -113,7 +121,20 @@ data class ChatRequestPreviewUi(
 
 data class ChatAgentOptionUi(val id: String, val label: String)
 
+/**
+ * The approval callback intentionally has no session/persistent option.  This
+ * card grants the current invocation only; capability grants are a separate
+ * policy/repository operation and must never be inferred from a button click.
+ */
 enum class ToolApprovalChoice { APPROVE, REJECT }
+
+/** Safe, host-supplied state for the request inspector. */
+enum class ChatRequestInspectorAvailability {
+    DISABLED,
+    NOT_PREPARED,
+    CONTEXT_LOST,
+    READY,
+}
 
 data class ChatUiState(
     val sessions: List<ChatSessionUi> = emptyList(),
@@ -131,6 +152,12 @@ data class ChatUiState(
     val pendingTool: ChatToolApprovalUi? = null,
     val promptLayers: List<ChatPromptLayerUi> = emptyList(),
     val requestPreview: ChatRequestPreviewUi? = null,
+    /**
+     * Nullable for compatibility with hosts that only provide the legacy
+     * preview field.  The UI derives READY/NOT_PREPARED in that case; a host
+     * can provide DISABLED or CONTEXT_LOST explicitly without exposing data.
+     */
+    val requestInspectorAvailability: ChatRequestInspectorAvailability? = null,
     val inspectorOpen: Boolean = false,
     val loading: Boolean = false,
     val error: String? = null,
@@ -166,7 +193,11 @@ fun ChatScreen(state: ChatUiState, actions: ChatActions = ChatActions(), modifie
             }
         } else {
             Column(Modifier.fillMaxSize().padding(12.dp).imePadding()) {
-                SessionChooser(state, actions.onSelectSession)
+                // While a tool is waiting for approval, changing the session
+                // would detach the context the user is being asked to review
+                // and would consume valuable IME-visible space.  The current
+                // session title remains in the conversation header.
+                if (state.pendingTool == null) SessionChooser(state, actions.onSelectSession)
                 ChatConversationContent(state, actions, Modifier.weight(1f).fillMaxWidth())
             }
         }
@@ -178,26 +209,46 @@ fun ChatScreen(state: ChatUiState, actions: ChatActions = ChatActions(), modifie
 
 @Composable
 private fun ChatConversationContent(state: ChatUiState, actions: ChatActions, modifier: Modifier) {
-    Column(modifier) {
-        ChatHeader(state, actions)
-        if (state.status.isNotBlank()) StatusLine(state.status, state.statusKind)
-        if (state.loading) {
-            CenterState(if (state.language.equals("zh-CN", true)) "正在加载会话…" else "Loading conversations…", true, Modifier.weight(1f))
-        } else if (state.error != null) {
-            CenterState(state.error, false, Modifier.weight(1f))
-        } else if (state.messages.isEmpty()) {
-            CenterState(emptyConversationMessage(state, state.language.equals("zh-CN", true)), false, Modifier.weight(1f))
-        } else {
-            val listState = rememberLazyListState()
-            LaunchedEffect(state.messages.size, state.streaming) {
-                if (state.messages.isNotEmpty()) listState.animateScrollToItem(state.messages.lastIndex)
-            }
-            LazyColumn(state = listState, modifier = Modifier.weight(1f).fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                items(state.messages, key = { it.id }) { MessageBubble(it, state.citations, actions.onOpenCitation, state.language.equals("zh-CN", true)) }
+    BoxWithConstraints(modifier) {
+        // The detail viewport gives up space first when the IME is visible,
+        // while the action FlowRow remains outside the scroll container.  At
+        // least 72 dp is retained so even a compact screen can inspect the
+        // long command/summary and reach both actions.
+        val compactApproval = maxHeight < 360.dp
+        val approvalDetailMaxHeight = if (compactApproval) 48.dp else 168.dp
+        Column(Modifier.fillMaxSize()) {
+            if (state.pendingTool != null) {
+                // Approval is a blocking interaction.  Give it the whole
+                // conversation viewport so headers and empty-state copy cannot
+                // push the confirmation actions behind the IME or bottom bar.
+                ApprovalCard(
+                    approval = state.pendingTool,
+                    onChoice = actions.onToolApproval,
+                    zh = state.language.equals("zh-CN", true),
+                    detailMaxHeight = approvalDetailMaxHeight,
+                    compact = compactApproval,
+                )
+            } else {
+                ChatHeader(state, actions)
+                if (state.status.isNotBlank()) StatusLine(state.status, state.statusKind)
+                if (state.loading) {
+                    CenterState(if (state.language.equals("zh-CN", true)) "正在加载会话…" else "Loading conversations…", true, Modifier.weight(1f))
+                } else if (state.error != null) {
+                    CenterState(state.error, false, Modifier.weight(1f))
+                } else if (state.messages.isEmpty()) {
+                    CenterState(emptyConversationMessage(state, state.language.equals("zh-CN", true)), false, Modifier.weight(1f))
+                } else {
+                    val listState = rememberLazyListState()
+                    LaunchedEffect(state.messages.size, state.streaming) {
+                        if (state.messages.isNotEmpty()) listState.animateScrollToItem(state.messages.lastIndex)
+                    }
+                    LazyColumn(state = listState, modifier = Modifier.weight(1f).fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        items(state.messages, key = { it.id }) { MessageBubble(it, state.citations, actions.onOpenCitation, state.language.equals("zh-CN", true)) }
+                    }
+                }
+                Composer(state, actions)
             }
         }
-        state.pendingTool?.let { ApprovalCard(it, actions.onToolApproval, state.language.equals("zh-CN", true)) }
-        Composer(state, actions)
     }
 }
 
@@ -328,9 +379,10 @@ private fun ChatHeader(state: ChatUiState, actions: ChatActions) {
                 onClick = { actions.onToggleDegradation(!state.textDegradation) },
                 label = { Text(if (zh) "纯文本" else "Text only", maxLines = 1, overflow = TextOverflow.Ellipsis) },
             )
-            if (state.requestPreview != null) TextButton(
+            TextButton(
                 onClick = actions.onOpenRequestInspector,
                 colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.onSurface),
+                modifier = Modifier.testTag("chat.requestInspector.open"),
             ) {
                 Text(if (zh) "查看请求" else "View request", maxLines = 1, overflow = TextOverflow.Ellipsis)
             }
@@ -418,16 +470,108 @@ private fun MessageBubble(message: ChatMessageUi, citations: List<ChatCitationUi
 }
 
 @Composable
-private fun ApprovalCard(approval: ChatToolApprovalUi, onChoice: (ToolApprovalChoice) -> Unit, zh: Boolean) {
-    Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer), modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp)) {
-        Column(Modifier.padding(12.dp)) {
-            Text(if (zh) "需要确认" else "Confirmation required", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
-            Text(approval.name, style = MaterialTheme.typography.labelLarge)
-            Text(approval.summary, Modifier.padding(top = 4.dp))
-            if (approval.externalEffect) Text(if (zh) "此请求可能离开设备。" else "This request may leave the device.", style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(top = 4.dp))
-            Row(Modifier.padding(top = 8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                Button(onClick = { onChoice(ToolApprovalChoice.APPROVE) }) { Text(if (zh) "批准" else "Approve") }
-                OutlinedButton(onClick = { onChoice(ToolApprovalChoice.REJECT) }) { Text(if (zh) "拒绝" else "Reject") }
+@OptIn(ExperimentalLayoutApi::class)
+private fun ApprovalCard(
+    approval: ChatToolApprovalUi,
+    onChoice: (ToolApprovalChoice) -> Unit,
+    zh: Boolean,
+    detailMaxHeight: androidx.compose.ui.unit.Dp,
+    compact: Boolean,
+) {
+    Card(
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer),
+        modifier = Modifier.fillMaxWidth().padding(vertical = if (compact) 0.dp else 8.dp),
+    ) {
+        Column(Modifier.padding(if (compact) 8.dp else 12.dp)) {
+            Text(
+                if (zh) "需要确认" else "Confirmation required",
+                style = if (compact) MaterialTheme.typography.labelLarge else MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.SemiBold,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+            Text(
+                approval.name,
+                style = if (compact) MaterialTheme.typography.labelMedium else MaterialTheme.typography.labelLarge,
+                maxLines = if (compact) 1 else 2,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.padding(top = 2.dp),
+            )
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(max = detailMaxHeight)
+                    .verticalScroll(rememberScrollState())
+                    .testTag("chat.approval.details"),
+            ) {
+                approval.command?.let {
+                    Text(if (zh) "命令" else "Command", style = MaterialTheme.typography.labelMedium, modifier = Modifier.padding(top = 4.dp))
+                    Text(it)
+                }
+                approval.cwd?.let {
+                    Text(if (zh) "工作目录" else "Working directory", style = MaterialTheme.typography.labelMedium, modifier = Modifier.padding(top = 8.dp))
+                    Text(it)
+                }
+                approval.authority?.let {
+                    Text(if (zh) "权限通道" else "Authority", style = MaterialTheme.typography.labelMedium, modifier = Modifier.padding(top = 8.dp))
+                    Text(it)
+                }
+                approval.dangerousMode?.let {
+                    Text(if (zh) "危险模式" else "Dangerous mode", style = MaterialTheme.typography.labelMedium, modifier = Modifier.padding(top = 8.dp))
+                    Text(it)
+                }
+                if (approval.highRisk) {
+                    Text(if (zh) "高风险：需要重新确认" else "High risk: reconfirmation required", style = MaterialTheme.typography.labelMedium, modifier = Modifier.padding(top = 8.dp))
+                }
+                Text(approval.summary, Modifier.padding(top = 4.dp))
+                if (approval.externalEffect) {
+                    Text(
+                        if (zh) "此请求可能离开设备。" else "This request may leave the device.",
+                        style = MaterialTheme.typography.bodySmall,
+                        modifier = Modifier.padding(top = 4.dp),
+                    )
+                }
+                Text(
+                    if (zh) "仅允许本次调用，不会创建会话或持久权限。" else "Allows this invocation only; it does not create a session or persistent grant.",
+                    style = MaterialTheme.typography.bodySmall,
+                    modifier = Modifier.padding(top = 6.dp),
+                )
+            }
+            if (compact) {
+                Row(
+                    modifier = Modifier.fillMaxWidth().padding(top = 4.dp).testTag("chat.approval.actions"),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                ) {
+                    Button(
+                        onClick = { onChoice(ToolApprovalChoice.APPROVE) },
+                        modifier = Modifier.weight(1f).testTag("chat.approval.approve"),
+                        contentPadding = PaddingValues(horizontal = 8.dp),
+                    ) {
+                        Text(if (zh) "允许一次" else "Allow once", style = MaterialTheme.typography.labelMedium, maxLines = 1)
+                    }
+                    OutlinedButton(
+                        onClick = { onChoice(ToolApprovalChoice.REJECT) },
+                        modifier = Modifier.weight(1f).testTag("chat.approval.reject"),
+                        contentPadding = PaddingValues(horizontal = 8.dp),
+                    ) {
+                        Text(if (zh) "拒绝" else "Reject", style = MaterialTheme.typography.labelMedium, maxLines = 1)
+                    }
+                }
+            } else {
+                FlowRow(
+                    modifier = Modifier.fillMaxWidth().padding(top = 8.dp).testTag("chat.approval.actions"),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    Button(
+                        onClick = { onChoice(ToolApprovalChoice.APPROVE) },
+                        modifier = Modifier.testTag("chat.approval.approve"),
+                    ) { Text(if (zh) "允许一次" else "Allow once") }
+                    OutlinedButton(
+                        onClick = { onChoice(ToolApprovalChoice.REJECT) },
+                        modifier = Modifier.testTag("chat.approval.reject"),
+                    ) { Text(if (zh) "拒绝" else "Reject") }
+                }
             }
         }
     }
@@ -582,33 +726,55 @@ private fun citationImageSample(width: Int, height: Int): Int {
 
 @Composable
 fun RequestInspectorScreen(
-    request: ChatRequestPreviewUi,
+    request: ChatRequestPreviewUi?,
     layers: List<ChatPromptLayerUi>,
     onClose: () -> Unit,
     zh: Boolean,
     modifier: Modifier = Modifier,
+    availability: ChatRequestInspectorAvailability = request?.let { ChatRequestInspectorAvailability.READY }
+        ?: ChatRequestInspectorAvailability.NOT_PREPARED,
 ) {
     Column(modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp)) {
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
             Text(if (zh) "请求检查器" else "Request inspector", style = MaterialTheme.typography.headlineSmall, modifier = Modifier.weight(1f))
             Button(onClick = onClose) { Text(if (zh) "关闭" else "Close") }
         }
-        Text("${request.method} ${request.url}", style = MaterialTheme.typography.labelLarge, modifier = Modifier.padding(top = 12.dp))
-        if (request.redacted) {
-            Text(
-                if (zh) "API Key 和敏感请求头已遮盖；消息正文、提示词和知识内容仍会完整显示。"
-                else "API keys and sensitive headers are redacted; message bodies, prompts, and knowledge still appear in full.",
-                style = MaterialTheme.typography.bodySmall,
-                modifier = Modifier.padding(top = 4.dp),
-            )
+        // An explicit DISABLED state is authoritative even when a caller still
+        // holds an older in-memory preview.  Keep this guard at the rendering
+        // boundary so stale URL, headers, body, and prompt layers cannot leak.
+        val effectiveAvailability = when {
+            availability == ChatRequestInspectorAvailability.DISABLED -> ChatRequestInspectorAvailability.DISABLED
+            request != null -> ChatRequestInspectorAvailability.READY
+            availability == ChatRequestInspectorAvailability.READY -> ChatRequestInspectorAvailability.CONTEXT_LOST
+            else -> availability
         }
-        if (request.headers.isNotBlank()) Text(request.headers, modifier = Modifier.padding(top = 10.dp))
-        if (request.body.isNotBlank()) Text(request.body, modifier = Modifier.padding(top = 10.dp))
-        if (layers.isNotEmpty()) {
-            Text(if (zh) "提示词层" else "Prompt layers", style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(top = 14.dp))
-            layers.forEach { layer ->
-                Text(layer.label, style = MaterialTheme.typography.labelLarge, modifier = Modifier.padding(top = 8.dp))
-                Text(layer.text, style = MaterialTheme.typography.bodySmall)
+        val effectiveRequest = request.takeIf { effectiveAvailability == ChatRequestInspectorAvailability.READY }
+        if (effectiveRequest == null) {
+            val message = when (effectiveAvailability) {
+                ChatRequestInspectorAvailability.DISABLED -> if (zh) "请求检查器已关闭，请到设置开启。" else "Request inspection is disabled. Enable it in Settings."
+                ChatRequestInspectorAvailability.NOT_PREPARED -> if (zh) "请求尚未准备。发送消息并完成请求准备后，这里会显示脱敏请求。" else "The request is not prepared yet. A redacted request will appear after a message is prepared."
+                ChatRequestInspectorAvailability.CONTEXT_LOST -> if (zh) "请求检查器上下文已丢失，请返回对话后重试。" else "The request inspector context was lost. Return to the conversation and try again."
+                ChatRequestInspectorAvailability.READY -> error("READY without a request is normalized above")
+            }
+            Text(message, modifier = Modifier.padding(top = 16.dp).testTag("chat.requestInspector.state"))
+        } else {
+            Text("${effectiveRequest.method} ${effectiveRequest.url}", style = MaterialTheme.typography.labelLarge, modifier = Modifier.padding(top = 12.dp))
+            if (effectiveRequest.redacted) {
+                Text(
+                    if (zh) "敏感请求头与密钥已遮盖；以下内容仅来自脱敏请求检查数据。"
+                    else "Sensitive headers and keys are redacted; the content below is supplied as redacted inspector data.",
+                    style = MaterialTheme.typography.bodySmall,
+                    modifier = Modifier.padding(top = 4.dp),
+                )
+            }
+            if (effectiveRequest.headers.isNotBlank()) Text(effectiveRequest.headers, modifier = Modifier.padding(top = 10.dp))
+            if (effectiveRequest.body.isNotBlank()) Text(effectiveRequest.body, modifier = Modifier.padding(top = 10.dp))
+            if (layers.isNotEmpty()) {
+                Text(if (zh) "提示词层" else "Prompt layers", style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(top = 14.dp))
+                layers.forEach { layer ->
+                    Text(layer.label, style = MaterialTheme.typography.labelLarge, modifier = Modifier.padding(top = 8.dp))
+                    Text(layer.text, style = MaterialTheme.typography.bodySmall)
+                }
             }
         }
     }

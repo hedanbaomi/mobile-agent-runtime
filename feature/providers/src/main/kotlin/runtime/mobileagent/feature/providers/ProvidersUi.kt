@@ -75,10 +75,38 @@ data class ProviderDraft(
     val tools: Boolean = false,
     val role: String = "CHAT",
     val parametersJson: String = "{}",
-    val contextLimit: Int = 32768,
-    val outputLimit: Int = 4096,
+    // Keep budgets as text while editing so clearing a field does not
+    // immediately restore the previous value.  Persistence validation
+    // happens when the draft is submitted.
+    val contextLimit: String = "32768",
+    val outputLimit: String = "4096",
     val mcpConfigured: Boolean = false,
 )
+
+/**
+ * Parses the exact positive-integer form accepted by the Provider editor.
+ * The persisted ModelProfile remains Int-typed; this helper is only for the
+ * transient editor draft and its validation UI.
+ */
+fun parsePositiveProviderBudget(raw: String): Int? {
+    val normalized = raw.trim()
+    if (normalized.isEmpty() || normalized.any { it !in '0'..'9' }) return null
+    return normalized.toLongOrNull()
+        ?.takeIf { it in 1..Int.MAX_VALUE }
+        ?.toInt()
+}
+
+fun providerBudgetError(contextLimit: String, outputLimit: String, zh: Boolean): String? {
+    val context = parsePositiveProviderBudget(contextLimit)
+        ?: return if (zh) "上下文预算必须是正整数。" else "Context budget must be a positive integer."
+    val output = parsePositiveProviderBudget(outputLimit)
+        ?: return if (zh) "输出预算必须是正整数。" else "Output budget must be a positive integer."
+    return if (output > context) {
+        if (zh) "输出预算不能超过上下文预算。" else "Output budget cannot exceed the context budget."
+    } else {
+        null
+    }
+}
 
 data class ProbeCheckUi(val label: String, val result: String, val ok: Boolean? = null)
 
@@ -285,6 +313,8 @@ private fun ProviderDetail(
 @Composable
 private fun ProviderEditorDialog(state: ProvidersUiState, actions: ProvidersActions, zh: Boolean) {
     val draft = state.draft
+    val showModelFields = draft.modelProfileId != null || draft.modelId.isNotBlank() || draft.id == null
+    val budgetError = if (showModelFields) providerBudgetError(draft.contextLimit, draft.outputLimit, zh) else null
     val noCorrectionText = KeyboardOptions(
         capitalization = KeyboardCapitalization.None,
         autoCorrectEnabled = false,
@@ -306,16 +336,17 @@ private fun ProviderEditorDialog(state: ProvidersUiState, actions: ProvidersActi
         text = {
             Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 state.editorError?.let { Text(it, color = MaterialTheme.colorScheme.error) }
+                budgetError?.let { Text(it, color = MaterialTheme.colorScheme.error) }
                 OutlinedTextField(draft.name, { actions.onDraftChange(draft.copy(name = it)) }, label = { Text(if (zh) "名称" else "Name") }, keyboardOptions = noCorrectionText, modifier = Modifier.fillMaxWidth())
                 OutlinedTextField(draft.baseUrl, { actions.onDraftChange(draft.copy(baseUrl = it)) }, label = { Text(if (zh) "基础地址" else "Base URL") }, keyboardOptions = uriOptions, modifier = Modifier.fillMaxWidth())
                 Text(if (zh) "API 格式：OpenAI Compatible（当前唯一支持的格式）" else "API format: OpenAI Compatible (the only supported format)", style = MaterialTheme.typography.bodySmall)
-                if (draft.modelProfileId != null || draft.modelId.isNotBlank() || draft.id == null) {
+                if (showModelFields) {
                     OutlinedTextField(draft.modelId, { actions.onDraftChange(draft.copy(modelId = it)) }, label = { Text(if (zh) "模型 ID" else "Model id") }, keyboardOptions = noCorrectionAscii, modifier = Modifier.fillMaxWidth())
                     Text(if (zh) "操作：CHAT / EMBEDDING / RERANKER；图片是 Chat 的输入模态，不是独立服务。" else "Operation: CHAT / EMBEDDING / RERANKER. Images are a Chat input modality, not a separate service.", style = MaterialTheme.typography.bodySmall)
                     OutlinedTextField(draft.role, { actions.onDraftChange(draft.copy(role = it)) }, label = { Text(if (zh) "操作/角色" else "Operation / role") }, keyboardOptions = noCorrectionAscii, modifier = Modifier.fillMaxWidth())
                     OutlinedTextField(draft.parametersJson, { actions.onDraftChange(draft.copy(parametersJson = it)) }, label = { Text(if (zh) "参数 JSON" else "Parameters JSON") }, keyboardOptions = noCorrectionText, minLines = 2, modifier = Modifier.fillMaxWidth())
-                    OutlinedTextField(draft.contextLimit.toString(), { actions.onDraftChange(draft.copy(contextLimit = it.toIntOrNull() ?: draft.contextLimit)) }, label = { Text(if (zh) "上下文预算" else "Context budget") }, keyboardOptions = noCorrectionAscii, modifier = Modifier.fillMaxWidth())
-                    OutlinedTextField(draft.outputLimit.toString(), { actions.onDraftChange(draft.copy(outputLimit = it.toIntOrNull() ?: draft.outputLimit)) }, label = { Text(if (zh) "输出预算" else "Output budget") }, keyboardOptions = noCorrectionAscii, modifier = Modifier.fillMaxWidth())
+                    OutlinedTextField(draft.contextLimit, { actions.onDraftChange(draft.copy(contextLimit = it)) }, label = { Text(if (zh) "上下文预算" else "Context budget") }, keyboardOptions = noCorrectionAscii, modifier = Modifier.fillMaxWidth(), isError = budgetError != null && parsePositiveProviderBudget(draft.contextLimit) == null)
+                    OutlinedTextField(draft.outputLimit, { actions.onDraftChange(draft.copy(outputLimit = it)) }, label = { Text(if (zh) "输出预算" else "Output budget") }, keyboardOptions = noCorrectionAscii, modifier = Modifier.fillMaxWidth(), isError = budgetError != null && (parsePositiveProviderBudget(draft.outputLimit) == null || (parsePositiveProviderBudget(draft.contextLimit)?.let { context -> parsePositiveProviderBudget(draft.outputLimit)?.let { output -> output > context } } == true)))
                     CheckRow(if (zh) "输入包含图片" else "Input includes images", draft.vision) { actions.onDraftChange(draft.copy(vision = it)) }
                     CheckRow(if (zh) "可调用工具" else "Can call tools", draft.tools) { actions.onDraftChange(draft.copy(tools = it)) }
                 }
@@ -323,7 +354,7 @@ private fun ProviderEditorDialog(state: ProvidersUiState, actions: ProvidersActi
                 Text(if (zh) "能力探测分别记录用户声明与真实验证，可能产生服务商费用，且只在明确确认后运行。" else "Probes record user-declared vs verified behavior, can incur provider charges, and only run after explicit confirmation.", style = MaterialTheme.typography.bodySmall)
             }
         },
-        confirmButton = { Button(onClick = actions.onSave) { Text(if (zh) "保存" else "Save") } },
+        confirmButton = { Button(onClick = actions.onSave, enabled = budgetError == null) { Text(if (zh) "保存" else "Save") } },
         dismissButton = { TextButton(onClick = actions.onCloseEditor) { Text(if (zh) "取消" else "Cancel") } },
     )
 }

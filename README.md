@@ -3,43 +3,87 @@
 
 # mobileAgentRuntime
 
-Android 优先的 BYOK Agent Runtime：本地知识库、多模态资料处理、可配置 Prompt 与模型参数、受控 Skills 执行，以及独立远程公告。
+mobileAgentRuntime 是一个以 Android 为主要运行环境的 BYOK（Bring Your Own Key）智能体应用。模型服务由用户自行选择，资料、知识库、Skills、会话和权限状态保存在本地；应用负责上下文编排、检索、工具调用、审批与审计，而不是把用户数据集中到项目服务器。
 
-**当前状态：** 0.1.1、0.2、0.3 的最终复核与修复已收口；1.0 本地门禁已完成严格依赖校验、全仓 `check`、API 31 instrumentation 与 debug APK/SBOM 打包。正式 AAB 仍因未提供用户 release keystore 而按设计 `BLOCKED_SIGNING`，版本号暂不擅自改为 1.0.0，后续与用户共同安排 release。F-001（工具能力开关相关进程退出）曾稳定观察到两次但仍无法稳定复现，保持 `candidate_intermittent`，不能写成已修复。公告 issue #1 的 Android、Worker/Admin 修改已部署到 Cloudflare，公网签名 feed、条件 304、源码归档与 Access 匿名拒绝后检通过；完整 version/source hash/备份见生产证据。
+源码仓库：<https://github.com/hedanbaomi/mobile-agent-runtime>
 
-源码：<https://github.com/hedanbaomi/mobile-agent-runtime>
+> 当前应用元数据仍为 `0.1.0`。仓库可以构建 Debug/Review 包，但尚未发布正式签名的商店版本。
 
-## 从这里开始
+## 主要能力
 
-所有 Agent 开工前必须依次阅读 [agent.md](agent.md)、[HANDOFF.md](HANDOFF.md)、[技术实现方案](docs/IMPLEMENTATION_PLAN.md)，并查阅本次任务涉及的专题文档。完成、受阻或中断前必须维护交接记录。
+- 配置 OpenAI-compatible 模型服务、模型角色、上下文预算和输出预算。
+- 创建 Agent，并为不同会话冻结 Provider、模型、Prompt、Skill 和权限快照。
+- 导入文件、文件夹或知识库 ZIP，在设备上建立文本与向量索引。
+- 导入和启用本地 Skills；Python Skill 在受限运行时中执行，不直接获得宿主文件系统或系统命令权限。
+- 使用内置联网搜索、MCP、请求检查器和脱敏诊断导出定位问题。
+- 通过应用私有工作区或用户明确授权的 SAF 文件夹读写文件。
+- 可选接入 Shizuku 或 Windows 有线 USB ADB Companion，为经过批准的工具提供更高权限。
+- 接收独立签名的远程公告，不依赖模型 Provider。
 
-| 文档 | 用途 |
-| --- | --- |
-| [AGENTS.md](AGENTS.md) | 自动加载入口；指向统一工作规则 |
-| [agent.md](agent.md) | 开工、执行、验证、收工的强制规则 |
-| [HANDOFF.md](HANDOFF.md) | 当前事实、未完成工作、下一步及维护记录 |
-| [需求与决策依据](docs/REQUIREMENTS.md) | 对话来源、范围、已定要求与实施补充 |
-| [技术实现方案](docs/IMPLEMENTATION_PLAN.md) | 模块、数据模型、端口契约、任务顺序 |
-| [知识库与检索](docs/KNOWLEDGE.md) | 多模态导入、向量空间、恢复和引用 |
-| [Skills 与安全](docs/SKILLS_AND_SECURITY.md) | Python 隔离、权限、模型调用、数据边界 |
-| [公告系统](docs/ANNOUNCEMENTS.md) | Android、Worker、D1、管理端和协议 |
-| [验收与证据](docs/ACCEPTANCE.md) | 可复现验收场景、证据格式、完成门槛 |
-| [本轮核查记录](docs/DOCUMENTATION_CHECK.md) | 文档、许可文件、Git/CodeGraph的实际结果与限制 |
-| [许可证政策](LICENSE_POLICY.md) | AGPL-3.0-only、防误改、第三方归属 |
-| [ADR-0001](docs/adr/0001-build-matrix-and-provisional-identity.md) | 构建矩阵与仓库身份 |
+## 安装与首次使用
 
-## 本地检查
+应用支持 Android 8.0（API 26）及以上版本。当前没有正式 release 时，可以从源码构建 Debug APK：
 
 ```powershell
-.\gradlew.bat licenseGuard
-.\gradlew.bat licenseGuardReverse
+.\gradlew.bat :app-android:assembleDebug --dependency-verification=strict
+adb install -r app-android\build\outputs\apk\debug\app-android-debug.apk
+```
+
+首次打开后按以下顺序配置：
+
+1. 在“更多 → 服务商”中添加 Provider、API Key、模型 ID 和预算；需要真实能力探测时，阅读费用提示后再授权请求。
+2. 在“智能体”中创建 Agent，选择对话模型，并按需绑定 Skill、知识库和工作区权限。
+3. 在“知识”中导入文件或文件夹并等待索引完成。含图片的资料需要额外配置视觉模型，否则会保持等待而不会静默丢弃。
+4. 回到“对话”新建会话。会话会固定当时的 Agent 配置，之后修改 Agent 不会悄悄改变已有会话。
+5. 遇到问题时，在设置中开启诊断记录，复现后导出脱敏诊断 ZIP；诊断默认关闭，也不会记录 API Key、完整命令、文件正文或模型输出。
+
+## 文件、Skills 与高权限工具
+
+默认情况下，Agent 只能调用显式注册的 typed tools，并同时受 Agent grant、会话快照、工作区范围和逐次审批约束。
+
+- 应用私有工作区用于 Skill 产物和应用内部文件。
+- SAF 工作区由用户通过系统文件选择器授权，可随时撤销。
+- Shizuku 与 Wired ADB 是两个平级的可选 Authority；一个不可用时不会自动降级或切换到另一个。
+- `shell_exec` 只有在用户选择 Authority、授予相应 capability 并开启 Dangerous Mode 后才会出现。高风险操作仍需确认，并在执行前重新校验权限。
+
+项目不提供 Root、应用内无线 ADB、DPC、Accessibility、PTY、Termux 集成，也不会把桌面 PowerShell 或宿主 shell 直接暴露给模型。
+
+## 从源码构建
+
+准备以下环境：
+
+- JDK 17
+- Android SDK 35 与可用的 Android build-tools/platform-tools
+- Git；运行许可检查时还需要 Python 3 和 `reuse`
+
+常用命令：
+
+```powershell
+# 编译 Debug APK
+.\gradlew.bat :app-android:assembleDebug --dependency-verification=strict
+
+# 运行 JVM/Android lint 等仓库检查
 .\gradlew.bat check --dependency-verification=strict
-.\gradlew.bat :app-android:assembleDebug
-.\gradlew.bat :app-android:generateDebugSbom
+
+# 许可、锁文件与依赖验证
+.\gradlew.bat licenseGuard licenseGuardReverse `
+  verifyCiPins verifyDependencyLock verifyDependencyVerification `
+  --dependency-verification=strict
 python -m reuse lint
 ```
 
-依赖解析优先使用阿里云 Maven 镜像，因为本机访问 Maven Central 会出现 TLS 握手失败。远程 CI 仍可解析官方仓库。
+主要目录：
+
+| 目录 | 内容 |
+| --- | --- |
+| `app-android/` | Android 应用、集成层、诊断与设备测试 |
+| `feature/` | 对话、Agent、知识、Skills、设置等 Compose UI |
+| `shared/` | 领域模型、Provider、Agent runtime、工具与桥接协议 |
+| `data/sqlite/` | 本地持久化、迁移、权限与审计仓库 |
+| `desktop/bridge/` | Windows 有线 USB ADB Companion |
+| `services/announcements/` | 独立公告 Worker 与管理端 |
+
+参与开发前请阅读 [AGENTS.md](AGENTS.md)、[agent.md](agent.md) 和 [HANDOFF.md](HANDOFF.md)。许可证政策见 [LICENSE_POLICY.md](LICENSE_POLICY.md)。
 
 ## 许可证
 

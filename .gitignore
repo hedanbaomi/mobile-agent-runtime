@@ -5,6 +5,9 @@
 /.codegraph/
 .gradle/
 **/build/
+**/build/**
+.tmp-kotlin-check/
+**/__pycache__/
 local.properties
 .idea/
 *.iml
@@ -24,4 +27,3 @@ node_modules/
 *.ap_
 .cxx/
 *.hprof
-

@@ -97,6 +97,54 @@ class LicenseScannerTest {
         assertTrue(violations.any { it.contains("shared/domain/Skip.kt") }, violations.joinToString("\n"))
     }
 
+    @Test
+    fun generatedBuildAndCacheTreesAreIgnoredButSourceOmissionStillFails(@TempDir tmp: Path) {
+        val license = "AGPL-BODY".repeat(40).toByteArray()
+        val scanner = LicenseScanner(expectedLicenseSha256 = sha(license))
+        writeMinimalProject(tmp, license)
+
+        val generated = tmp.resolve("build/generated/Missing.kt")
+        generated.parent.createDirectories()
+        generated.writeText("class Generated\n")
+
+        val nestedGenerated = tmp.resolve("module/build/generated/NestedMissing.kt")
+        nestedGenerated.parent.createDirectories()
+        nestedGenerated.writeText("class NestedGenerated\n")
+
+        val kotlinCheck = tmp.resolve(".tmp-kotlin-check/recheck/Missing.kt")
+        kotlinCheck.parent.createDirectories()
+        kotlinCheck.writeText("class KotlinCheckGenerated\n")
+
+        val pythonCache = tmp.resolve("tools/__pycache__/generated.py")
+        pythonCache.parent.createDirectories()
+        pythonCache.writeText("generated = True\n")
+
+        val source = tmp.resolve("shared/Missing.kt")
+        source.writeText("class Missing\n")
+
+        val violations = scanner.scan(tmp)
+        assertTrue(
+            violations.none { it.contains("build/generated/Missing.kt") },
+            violations.joinToString("\n"),
+        )
+        assertTrue(
+            violations.none { it.contains("module/build/generated/NestedMissing.kt") },
+            violations.joinToString("\n"),
+        )
+        assertTrue(
+            violations.none { it.contains(".tmp-kotlin-check/recheck/Missing.kt") },
+            violations.joinToString("\n"),
+        )
+        assertTrue(
+            violations.none { it.contains("tools/__pycache__/generated.py") },
+            violations.joinToString("\n"),
+        )
+        assertTrue(
+            violations.any { it.contains("shared/Missing.kt") },
+            violations.joinToString("\n"),
+        )
+    }
+
     private fun writeMinimalProject(root: Path, license: ByteArray) {
         Files.write(root.resolve("LICENSE"), license)
         root.resolve("LICENSES").createDirectories()

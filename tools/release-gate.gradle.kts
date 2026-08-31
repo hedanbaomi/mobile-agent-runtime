@@ -219,42 +219,99 @@ val verifyCiPins = tasks.register("verifyCiPins") {
     }
 }
 
+private val ignoredBuildTreeDirectories = setOf(
+    ".git",
+    ".gradle",
+    ".codegraph",
+    ".private",
+    "build",
+    "node_modules",
+)
+
+fun dependencyLockFilesForIncludedBuild(buildRoot: File): List<File> {
+    val projectLockFiles = buildRoot.walkTopDown()
+        .onEnter { directory -> directory.name !in ignoredBuildTreeDirectories }
+        .filter { it.isFile && it.name in setOf("build.gradle", "build.gradle.kts") }
+        .map { it.parentFile.resolve("gradle.lockfile") }
+        .toList()
+    return (listOf(buildRoot.resolve("settings-gradle.lockfile")) + projectLockFiles)
+        .distinctBy { it.absoluteFile.normalize().path }
+}
+
+fun gatePath(file: File): String = try {
+    file.relativeTo(rootProject.projectDir).invariantSeparatorsPath
+} catch (_: IllegalArgumentException) {
+    file.absolutePath
+}
+
+fun verifyDependencyVerificationMetadata(label: String, metadata: File) {
+    check(metadata.isFile) {
+        "Missing $label dependency verification metadata: ${gatePath(metadata)}; " +
+            "generate it with --write-verification-metadata sha256"
+    }
+    val text = metadata.readText(Charsets.UTF_8)
+    check("<verification-metadata" in text && "<configuration>" in text) {
+        "$label dependency verification metadata is not a Gradle metadata document"
+    }
+    check("<verify-metadata>true</verify-metadata>" in text) {
+        "$label dependency verification metadata must keep verify-metadata=true"
+    }
+    val checksums = Regex("""<sha256\s+value="([0-9a-fA-F]{64})"""").findAll(text).toList()
+    check(checksums.isNotEmpty()) {
+        "$label dependency verification metadata has no SHA-256 component entries"
+    }
+    check("<!--" !in text.substringAfter("<verification-metadata", "")) {
+        "$label dependency verification metadata must not be a placeholder"
+    }
+    val wildcardTrust = Regex("""<trusted-(?:key|artifact)\b[^>]*\*[^>]*/?>""")
+        .containsMatchIn(text)
+    check(!wildcardTrust) {
+        "$label dependency verification metadata must not contain wildcard trust"
+    }
+}
+
 val verifyDependencyLock = tasks.register("verifyDependencyLock") {
     group = "verification"
-    description = "Require native Gradle dependency lockfiles for every build project."
+    description = "Require native Gradle dependency lockfiles for every root and included build project."
+    dependsOn(gradle.includedBuilds.map { it.task(":license-guard:verifyDependencyLock") })
     doLast {
         // The root settings lock protects plugin/version-catalog resolution;
-        // each included project owns its native gradle.lockfile.
+        // each root project and included project owns its native gradle.lockfile.
         val required = mutableListOf(rootProject.file("settings-gradle.lockfile"))
         // Settings-only grouping projects (:data, :feature, ... ) have no
         // build file or resolvable configuration, so there is no dependency
         // state to lock for them. Every leaf build project is required.
         required += subprojects.filter { it.path != ":" && it.buildFile.isFile }
             .map { it.file("gradle.lockfile") }
-        val missing = required.filterNot(File::isFile)
-        check(missing.isEmpty()) { "Missing dependency lockfiles: ${missing.joinToString { it.relativeTo(rootProject.projectDir).invariantSeparatorsPath }}" }
-        required.forEach { lock ->
+        gradle.includedBuilds.forEach { included ->
+            required += dependencyLockFilesForIncludedBuild(included.projectDir)
+        }
+        val distinctRequired = required.distinctBy { it.absoluteFile.normalize().path }
+        val missing = distinctRequired.filterNot(File::isFile)
+        check(missing.isEmpty()) { "Missing dependency lockfiles: ${missing.joinToString { gatePath(it) }}" }
+        distinctRequired.forEach { lock ->
             val text = lock.readText(Charsets.UTF_8)
             check("This is a Gradle generated file for dependency locking." in text) { "Invalid Gradle lockfile: ${lock.name}" }
         }
-        logger.lifecycle("Dependency lockfiles verified: ${required.size}")
+        logger.lifecycle("Dependency lockfiles verified: ${distinctRequired.size}")
     }
 }
 
 val verifyDependencyVerification = tasks.register("verifyDependencyVerification") {
     group = "verification"
     description = "Require Gradle dependency verification metadata with SHA-256 checksums."
+    dependsOn(gradle.includedBuilds.map { it.task(":license-guard:verifyDependencyVerification") })
     doLast {
-        val metadata = rootProject.file("gradle/verification-metadata.xml")
-        check(metadata.isFile) { "Missing gradle/verification-metadata.xml; generate it with --write-verification-metadata sha256" }
-        val text = metadata.readText(Charsets.UTF_8)
-        check("<verification-metadata" in text && "<component" in text && "sha256" in text) {
-            "Dependency verification metadata has no component SHA-256 entries"
+        val metadata = buildList {
+            add("root build" to rootProject.file("gradle/verification-metadata.xml"))
+            gradle.includedBuilds.forEach { included ->
+                add("included build ${included.name}" to included.projectDir.resolve("gradle/verification-metadata.xml"))
+            }
         }
-        check("<!--" !in text.substringAfter("<verification-metadata", "")) {
-            "Dependency verification metadata must not be a placeholder"
-        }
-        logger.lifecycle("Dependency verification metadata verified: ${metadata.length()} bytes")
+        metadata.forEach { (label, file) -> verifyDependencyVerificationMetadata(label, file) }
+        logger.lifecycle(
+            "Dependency verification metadata verified: ${metadata.joinToString { (label, file) -> "$label=${file.length()} bytes" }}",
+        )
     }
 }
 
@@ -291,6 +348,18 @@ val verifyReleaseProvenance = tasks.register("verifyReleaseProvenance") {
 
 tasks.named("check") {
     dependsOn(verifyCiPins, verifyDependencyLock, verifyDependencyVerification)
+}
+
+tasks.register("debugEvidenceGate") {
+    group = "verification"
+    description = "Run checks and verify a freshly assembled, hash-bound debug APK evidence set."
+    dependsOn("check", ":app-android:debugEvidenceGate")
+}
+
+tasks.register("reviewGate") {
+    group = "verification"
+    description = "Run checks and verify a freshly assembled non-debuggable review APK without signing or publishing."
+    dependsOn("check", ":app-android:reviewGate")
 }
 
 tasks.register("releaseGate") {

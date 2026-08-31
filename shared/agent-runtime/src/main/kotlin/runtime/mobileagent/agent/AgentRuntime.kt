@@ -4,12 +4,10 @@
 package runtime.mobileagent.agent
 
 import kotlinx.coroutines.CancellationException
-import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.cancellable
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.flow
-import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
@@ -82,6 +80,7 @@ class AgentRuntime(
         val secret = request.secret
         val toolExecutor = request.executor ?: executor ?: tools?.asToolExecutor()
         var finishedEmitted = false
+        var activeDispatch: DispatchKind? = null
 
         suspend fun emitModel(event: ModelEvent) {
             emit(RuntimeEvent.ModelEvent(event))
@@ -105,6 +104,31 @@ class AgentRuntime(
             run.state = RunState.BUDGET_EXHAUSTED
             run.stopReason = "time"
             emitModel(ModelEvent.Failed("Run budget exhausted"))
+            finish()
+        }
+
+        suspend fun emitUnknownModel() {
+            activeDispatch = null
+            run.state = RunState.UNKNOWN_OUTCOME
+            run.stopReason = UNKNOWN_MODEL_OUTCOME
+            emitModel(ModelEvent.Failed(UNKNOWN_MODEL_OUTCOME))
+            finish()
+        }
+
+        suspend fun emitUnknownTool(call: ToolCall) {
+            activeDispatch = null
+            run.state = RunState.UNKNOWN_OUTCOME
+            run.stopReason = UNKNOWN_TOOL_OUTCOME
+            emit(
+                RuntimeEvent.ToolResultProduced(
+                    callId = call.callId,
+                    name = call.name,
+                    status = "UNKNOWN_OUTCOME",
+                    resultSummary = "UNKNOWN_OUTCOME",
+                    resultJson = UNKNOWN_TOOL_ENVELOPE,
+                ),
+            )
+            emitModel(ModelEvent.Failed(UNKNOWN_TOOL_OUTCOME))
             finish()
         }
 
@@ -228,9 +252,15 @@ class AgentRuntime(
                 val pendingTools = linkedMapOf<String, ToolCall>()
                 val assistantText = StringBuilder()
                 var terminal: ModelEvent? = null
-                try {
-                    withTimeout(remainingMs(run)) {
-                        adapter.stream(modelRequest, secret).cancellable().collect { event ->
+                val modelStreamCompleted = try {
+                    withTimeoutOrNull(remainingMs(run)) {
+                        // ModelAdapter.stream is a lazy Flow in the provider contract.  The
+                        // dispatch boundary is immediately before collection, so a timeout
+                        // which fires before this point is a local budget result, while one
+                        // after it must be treated as potentially billable/unknown.
+                        val modelStream = adapter.stream(modelRequest, secret)
+                        activeDispatch = DispatchKind.MODEL
+                        modelStream.cancellable().collect { event ->
                             if (terminal is ModelEvent.Failed) return@collect
                             if (budgetExhausted(run)) throw CancellationException(BUDGET_CANCEL)
 
@@ -272,17 +302,40 @@ class AgentRuntime(
                                 else -> emitModel(outgoing)
                             }
                         }
+                        true
                     }
-                } catch (e: TimeoutCancellationException) {
-                    emitBudget()
-                    return@flow
                 } catch (e: CancellationException) {
-                    if (e.message == BUDGET_CANCEL || budgetExhausted(run)) {
-                        emitBudget()
+                    // BUDGET_CANCEL is runtime-owned and is only thrown from inside an
+                    // already-started stream.  All other cancellation belongs to the caller
+                    // (or the provider's cancellation boundary) and must propagate unchanged.
+                    if (e.message == BUDGET_CANCEL) {
+                        if (activeDispatch == DispatchKind.MODEL) {
+                            emitUnknownModel()
+                        } else {
+                            emitBudget()
+                        }
+                        return@flow
+                    }
+                    throw e
+                } catch (e: Exception) {
+                    // A transport/connection exception after collection began may have
+                    // reached the provider even when no terminal event was observed.
+                    if (activeDispatch == DispatchKind.MODEL) {
+                        emitUnknownModel()
                         return@flow
                     }
                     throw e
                 }
+
+                if (modelStreamCompleted != true) {
+                    if (activeDispatch == DispatchKind.MODEL) {
+                        emitUnknownModel()
+                    } else {
+                        emitBudget()
+                    }
+                    return@flow
+                }
+                activeDispatch = null
 
                 if (budgetExhausted(run)) {
                     emitBudget()
@@ -352,10 +405,19 @@ class AgentRuntime(
                         return@flow
                     }
                     run.state = RunState.TOOL_EXECUTING
+                    var approvalRejected = false
                     val result = try {
-                        withTimeout(remainingMs(run)) {
+                        withTimeoutOrNull(remainingMs(run)) {
+                            // invoke/approve are the executor dispatch boundary.  Once either
+                            // has been entered, cancellation or a transport timeout cannot
+                            // prove that the external operation did not happen.
+                            activeDispatch = DispatchKind.TOOL
                             when (val first = toolExecutor.invoke(call)) {
                                 ToolResult.NeedsApproval -> {
+                                    // NeedsApproval is an authorization result, not an
+                                    // external execution.  While waiting for the user, a
+                                    // cancellation remains a known lifecycle cancellation.
+                                    activeDispatch = null
                                     run.state = RunState.WAITING_TOOL_APPROVAL
                                     val safeArguments = redact(call.argumentsJson, secret)
                                     emit(
@@ -373,32 +435,56 @@ class AgentRuntime(
                                         ),
                                     )
                                     if (!onApprove(call)) {
+                                        approvalRejected = true
                                         run.state = RunState.FAILED
                                         emitModel(ModelEvent.Failed(redact("Tool ${call.name} was rejected", secret)))
-                                        return@withTimeout null
+                                        null
+                                    } else {
+                                        if (budgetExhausted(run)) throw CancellationException(BUDGET_CANCEL)
+                                        activeDispatch = DispatchKind.TOOL
+                                        toolExecutor.approve(call.callId)
                                     }
-                                    if (budgetExhausted(run)) throw CancellationException(BUDGET_CANCEL)
-                                    toolExecutor.approve(call.callId)
                                 }
                                 else -> first
                             }
                         }
-                    } catch (e: TimeoutCancellationException) {
-                        emitBudget()
-                        return@flow
                     } catch (e: CancellationException) {
-                        if (e.message == BUDGET_CANCEL || budgetExhausted(run)) {
-                            emitBudget()
+                        if (e.message == BUDGET_CANCEL) {
+                            if (activeDispatch == DispatchKind.TOOL) {
+                                emitUnknownTool(call)
+                            } else {
+                                emitBudget()
+                            }
+                            return@flow
+                        }
+                        // Do not swallow a lifecycle cancellation.  The outer handler keeps
+                        // the run CANCELLED, adding an UNKNOWN_OUTCOME reason when dispatch
+                        // had already begun.
+                        throw e
+                    } catch (e: Exception) {
+                        if (activeDispatch == DispatchKind.TOOL) {
+                            emitUnknownTool(call)
                             return@flow
                         }
                         throw e
-                    } ?: run {
+                    }
+                    if (result == null && approvalRejected) {
+                        activeDispatch = null
                         // The rejection branch emits its user-facing failure,
                         // but still needs the structured terminal lifecycle
                         // event before leaving the flow.
                         finish()
                         return@flow
                     }
+                    if (result == null) {
+                        if (activeDispatch == DispatchKind.TOOL) {
+                            emitUnknownTool(call)
+                        } else {
+                            emitBudget()
+                        }
+                        return@flow
+                    }
+                    activeDispatch = null
 
                     val (status, summary, modelText) = when (result) {
                         is ToolResult.Denied -> Triple("DENIED", result.reason, result.reason)
@@ -412,7 +498,15 @@ class AgentRuntime(
                             return@flow
                         }
                     }
-                    val safeText = redact(modelText, secret)
+                    // Unknown reasons can originate from an untrusted backend and are not
+                    // safe to persist as a tool result (the transfer contract requires an
+                    // object).  Keep the model-facing/persisted envelope fixed and bounded;
+                    // never replay or expose the backend's raw exception text.
+                    val safeText = if (result is ToolResult.UnknownOutcome) {
+                        UNKNOWN_TOOL_ENVELOPE
+                    } else {
+                        redact(modelText, secret)
+                    }
                     if (safeText.toByteArray(Charsets.UTF_8).size > TOOL_RESULT_MAX_BYTES) {
                         run.state = RunState.FAILED
                         emitModel(ModelEvent.Failed("Tool result exceeds the runtime output limit"))
@@ -430,7 +524,7 @@ class AgentRuntime(
                     )
                     if (result is ToolResult.UnknownOutcome) {
                         run.state = RunState.UNKNOWN_OUTCOME
-                        run.stopReason = "UNKNOWN_OUTCOME: $safeText"
+                        run.stopReason = UNKNOWN_TOOL_OUTCOME
                         emitModel(ModelEvent.Failed(run.stopReason!!))
                         finish()
                         return@flow
@@ -445,12 +539,14 @@ class AgentRuntime(
                             emitBudget()
                             return@flow
                         }
-                        withTimeout(remainingMs(run)) { request.toolImages(call, result) }
-                    } catch (e: TimeoutCancellationException) {
-                        emitBudget()
-                        return@flow
+                        val imagesOrNull = withTimeoutOrNull(remainingMs(run)) { request.toolImages(call, result) }
+                        if (imagesOrNull == null) {
+                            emitBudget()
+                            return@flow
+                        }
+                        imagesOrNull
                     } catch (e: CancellationException) {
-                        if (e.message == BUDGET_CANCEL || budgetExhausted(run)) {
+                        if (e.message == BUDGET_CANCEL) {
                             emitBudget()
                             return@flow
                         }
@@ -483,12 +579,23 @@ class AgentRuntime(
             // into a retryable model/tool result.  The provider/transport sees
             // the same cancellation through its suspend boundary.
             run.state = RunState.CANCELLED
-            run.stopReason = e.message?.takeIf { it.isNotBlank() } ?: "cancelled"
+            run.stopReason = if (activeDispatch != null) {
+                UNKNOWN_CANCELLED_OUTCOME
+            } else {
+                e.message?.takeIf { it.isNotBlank() } ?: "cancelled"
+            }
             throw e
         } catch (e: Exception) {
-            run.state = RunState.FAILED
-            emitModel(ModelEvent.Failed(redact(e.message ?: "Runtime failed", secret)))
-            finish()
+            if (activeDispatch != null) {
+                run.state = RunState.UNKNOWN_OUTCOME
+                run.stopReason = if (activeDispatch == DispatchKind.MODEL) UNKNOWN_MODEL_OUTCOME else UNKNOWN_TOOL_OUTCOME
+                emitModel(ModelEvent.Failed(run.stopReason!!))
+                finish()
+            } else {
+                run.state = RunState.FAILED
+                emitModel(ModelEvent.Failed(redact(e.message ?: "Runtime failed", secret)))
+                finish()
+            }
         }
     }
 
@@ -659,7 +766,13 @@ class AgentRuntime(
         val SCHEMA_TYPES = setOf("object", "array", "string", "number", "integer", "boolean", "null")
         const val MAX_SCHEMA_DEPTH = 16
         const val BUDGET_CANCEL = "agent-runtime-budget"
+        const val UNKNOWN_MODEL_OUTCOME = "UNKNOWN_OUTCOME: Model dispatch may have started; do not automatically retry"
+        const val UNKNOWN_TOOL_OUTCOME = "UNKNOWN_OUTCOME: Tool dispatch may have started; do not automatically retry"
+        const val UNKNOWN_CANCELLED_OUTCOME = "UNKNOWN_OUTCOME: Dispatch may have started before cancellation; do not automatically retry"
+        const val UNKNOWN_TOOL_ENVELOPE = "{\"status\":\"UNKNOWN_OUTCOME\",\"code\":\"UNKNOWN_OUTCOME\",\"automaticReplayAllowed\":false}"
         const val RESULT_SUMMARY_LIMIT = 1024
         const val TOOL_RESULT_MAX_BYTES = 1_048_576
     }
+
+    private enum class DispatchKind { MODEL, TOOL }
 }

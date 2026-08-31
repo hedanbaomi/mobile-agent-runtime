@@ -31,7 +31,13 @@ SPDX-FileCopyrightText = "2026 mobileAgentRuntime contributors"
 SPDX-License-Identifier = "AGPL-3.0-only"
 
 [[annotations]]
-path = ["**/gradle.lockfile", "settings-gradle.lockfile"]
+path = ["**/gradle.lockfile", "settings-gradle.lockfile", "**/settings-gradle.lockfile"]
+precedence = "aggregate"
+SPDX-FileCopyrightText = "2026 mobileAgentRuntime contributors"
+SPDX-License-Identifier = "AGPL-3.0-only"
+
+[[annotations]]
+path = ["gradle/verification-metadata.xml", "build-logic/gradle/verification-metadata.xml"]
 precedence = "aggregate"
 SPDX-FileCopyrightText = "2026 mobileAgentRuntime contributors"
 SPDX-License-Identifier = "AGPL-3.0-only"

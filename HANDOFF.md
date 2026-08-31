@@ -3,7 +3,7 @@
 
 # 项目交接
 
-最后更新：2026-08-30T16:58:56+08:00（Asia/Taipei）。项目根目录：`E:\mobileAgentRuntime`。
+最后更新：2026-08-31T07:52:54+08:00（Asia/Taipei）。项目根目录：`E:\mobileAgentRuntime`。
 
 **接手者必须先读 [agent.md](agent.md)、本文件和 [技术实现方案](docs/IMPLEMENTATION_PLAN.md)。工作后必须维护本文件及受影响的专题文档。**
 
@@ -11,18 +11,22 @@
 
 | 项目 | 状态 |
 | --- | --- |
-| 产品 | 第三轮人工反馈已经收口：知识导入与 Chat 流跨顶层页面继续运行；请求检查器复用同一状态；Agent 获得逐次授权的 Brave `web_search`；兼容的无清单 Claude Skill Python CLI 在启用、授权、绑定后成为真实模型工具并在 isolated CPython 中执行。PowerShell、宿主 shell、任意宿主文件系统、子进程和未授权网络仍不开放。自动复核—修复再次停止，等待用户对新包人工终审；只有用户再发现问题时重启。F-001 保持 `candidate_intermittent` |
-| 业务源码/构建 | 新人工终审 debug APK 为 214,088,013 bytes，SHA-256 `d68a062b12121b76e502afd8a8cf3610d756876d3a7a00eca916f597ad564682`，Android Debug v2 签名证书 SHA-256 `315148930a70085176f864d43de4c7bf3469bca4e912a5ac84b057259350b788`。BuildConfig：`GIT_REVISION=dec1e5118c674b91c6039c0576978c811d02410e-dirty`、`GIT_DIRTY=true`、`DB_SCHEMA_VERSION=11`、`BUILD_TIME_UTC=2026-08-30T05:37:20Z`。严格依赖全仓 `check` 936 tasks 通过；API 31 x86_64 定向设备回归 34/34 通过；APK 安装并冷启动到 `MainActivity` 成功 |
-| Git | 两批 CI 修复已提交并推送为 `57299ae12c0db7bed6ea755ca10bb2040cd9fc44`、`2ca96917c0c85d03529e2c2b9351f715a96906ae`。第二批 license 工作流 `33298903851` 全绿；主 CI `33298903859` 又证明 clean runner 缺少被 Git 忽略的官方 CPython Android 包，当前候选增加从 Python 官方 HTTPS 下载、精确 hash 校验和跨平台解包准备任务。用户已授权本轮验证完成后继续 commit/push。APK、构建目录、`.private/`、诊断原件和 `.codegraph/` 不进入 Git。正式 Android release 不执行 |
+| 产品 | 权限、工具与危险模式 v2 已实现：Capability/Workspace/Authority/Approval/Audit 单一模型；Internal/SAF/selected privileged workspace；Skill Memory；Shizuku；Windows 有线 USB ADB Companion；持久 Dangerous Mode 与受控 `shell_exec`；Settings/Agent/Chat/Skills/diagnostics 接线完成。确认卡小屏/IME 操作可达、Provider 预算可清空、首次主题浅色。Root、应用内无线 ADB、DPC、Termux、PTY、Accessibility、宿主 PowerShell/宿主 shell 仍明确排除。真实 Shizuku、USB Companion、SAF provider 仍为 `E2E BLOCKED`；F-001 保持 `candidate_intermittent` |
+| 业务源码/构建 | 当前 dirty Debug APK 为 212,309,041 bytes，SHA-256 `ee4640886e3135686ab6bc3a2d04e331291c875f98020cfa20ce861220073c44`；Review APK 为 204,272,935 bytes，SHA-256 `b8c96c49369054247d251f2646edc6c5b9804c1cf44f37edde07b9e0fec6cccc` 且 `debuggable=false`。两者为 171-component SBOM/provenance 绑定产物；严格全仓 `check`/Debug evidence gate 1024 tasks 与 Review gate 592 tasks 通过。最终 Debug APK 已清数据安装到 API 31 x86_64 并冷启动，首次主题为浅色；最终设备矩阵证据见 `docs/evidence/2026-08-31/authority-tooling-v2-final.md` |
+| Git | CI 基础设施最终以 `0c24f0a95c0644d3aedc992bae037c2fcccadc02` 同步到 `origin/main`；CI run `33302973939` 与 license run `33302973910` 全绿，API 31/34/35/36 均真实启动 emulator 并执行 4 项 `ReleaseGateUiDeviceTest`，manual-only signed release 正常 skipped。当前 v2 产品变更基于该 HEAD；用户已于 2026-08-31T07:52:54+08:00 明确授权将本轮源码、测试和文档一次性 commit/push 到当前 `main` 跟踪远端。最终提交与远端同步结果以该次 Git 操作后的 HEAD 为准。APK、构建目录、`.private/`、诊断原件和 `.codegraph/` 不进入 Git |
 | CodeGraph | `.codegraph/` 存在；本轮理解源码继续先用 CodeGraph，源码修改后曾同步且报告 Already up to date。未修改或提交 `.codegraph/` |
-| 许可 | 全仓 `check` 所含许可门禁 BUILD SUCCESSFUL；`python -B -m reuse lint` 392/392 退出 0。未改 LICENSE 正文 |
-| 授权范围 | 用户已明确授权本次 CI 基础设施修复完成后的 commit/push。本次 Git 授权不延伸为正式签名 release、应用商店发布、付费服务、Cloudflare 部署或 Access/secret 变更 |
+| 许可 | `licenseGuard`/反向门禁、Actions pin、28 个 lockfile、root+included-build strict verification 全部通过；`python -B -m reuse lint` 为 514/514 copyright、514/514 license、0 缺失/无效；148 Maven + 4 native/model notices 在 Debug/Review 两个成品边界通过。未改 LICENSE 正文，未降低许可或供应链门禁 |
+| 授权范围 | 当前仅新增一次性 commit/push 当前 v2 工作到 `origin/main` 的明确授权；仍禁止 Cloudflare/其他生产部署、正式 Android release、正式签名、付费服务、secret/Access 变更和历史改写。不得把本次 Git 授权外推为生产或未来再次推送授权 |
 
 ## 2. 当前任务
 
-当前任务是修复 `main@d2080429b5a7498f94f9dc909fcfac2e07f4d1fd` 的 GitHub Actions 基础设施失败，不改变产品行为。wrapper 模式、strict dependency verification metadata、固定模型包下载路径与 emulator profile 已完成最小修复和本地门禁；第二次 push 已证明 license 工作流全绿并让四个 `pixel_2` emulator 越过创建阶段，但主 check 暴露 clean checkout 没有本机 ignored CPython build 输入。当前候选把原有固定版本/双 ABI/hash/结构验证前置为可复现的官方 HTTPS 下载与解包；真实 Linux clean build 及 API 31/34/35/36 emulator matrix 仍必须由下一次新 push 的 GitHub Actions 证明，不能用本地 Windows 构建替代。Signed release gate 在普通 push 下继续按设计跳过。
+CI 基础设施修复已经完成并由 GitHub Actions 证明：`main@0c24f0a95c0644d3aedc992bae037c2fcccadc02` 的主 CI、license guard 与 API 31/34/35/36 emulator matrix 全绿，四个 matrix job 均实际执行 `ReleaseGateUiDeviceTest`；Signed release gate 在普通 push 下按设计 skipped。
 
-此前跨页任务、联网搜索与 Claude Skill 程序调用修复、34/34 设备回归和人工终审 debug 包状态保持不变。自动产品复核—修复程序仍停止；若人工发现产品问题，以对应 APK SHA、应用内诊断 ZIP、发生时间/步骤及必要的完整 Logcat 作为新一轮输入。F-001 不得因暂未复现而关闭；本轮不调用付费 Provider/Brave/Vision，不重新部署公告系统、正式签名或发布应用商店。
+第四轮记录只作为历史时间点。当前任务以 [权限、工具与危险模式 v2 规范](docs/mobile-agent-runtime-authority-tooling-codex-prompt-v2.md) 为单一控制范围；实现、严格构建、Debug/Review 产物、API 31 自动化和外部阻塞边界见 [最终本地证据](docs/evidence/2026-08-31/authority-tooling-v2-final.md)。若人工阶段再发现问题，应附 Debug APK SHA、发生时间/步骤、应用内诊断 ZIP及必要的完整 Logcat。F-001 不得因暂未复现而关闭；本轮不调用付费 Provider/Brave/Vision，不重新部署公告系统、正式签名或发布应用商店。
+
+2026-08-30T20:06:51+08:00 开始实施用户新增的 [权限、工具与危险模式 v2 规范](docs/mobile-agent-runtime-authority-tooling-codex-prompt-v2.md)。该规范整体取代本轮此前“永远不暴露任意 Shell”和三通道无线 ADB 草案：当前范围为统一 Capability/Workspace/Authority/Approval/Audit 模型、应用私有与 SAF 工作区、Skill 持久记忆、Shizuku 与 Windows 有线 USB ADB Desktop Companion、持久危险模式及 `shell_exec`；明确不做 Root、应用内无线 ADB、DPC、PTY、通用工具链安装器或 Accessibility。实现与自动化现已收敛；真实 Shizuku、物理 USB Companion 和真实 SAF provider 因环境缺失保持 `E2E BLOCKED`。实现与本地验证阶段保留全部既有 dirty WIP、不调用付费服务、不部署、不做正式 release；2026-08-31 用户随后明确授权将收敛后的 v2 源码、测试和文档 commit/push。
+
+2026-08-30T20:32:00+08:00 用户进一步明确：目标不是压缩验收范围，而是在交付人工测试前提高实现与自动化复核质量，尽量由本轮先发现并修复问题；同时扩展应用内诊断，使 Authority/Connection/Workspace/Approval/Bridge/Shell 的状态、重验、dispatch、timeout/cancel/truncation、断连与恢复可以关联定位。诊断仍必须 opt-in、闭合 schema、限额轮转且 fail-closed；禁止写入完整命令、stdout/stderr、工具参数、文件正文/名称/路径、SAF URI、ADB serial/endpoint、配对材料、密钥、prompt/模型输出或异常 message。Debuggable 构建不能作为控制面隔离安全证据；Dangerous Mode 的安全验收需要 non-debuggable review-like 构建，真机 Shizuku/USB 条件缺失时必须标为 E2E BLOCKED，不能以单元测试冒充。
 
 兼容的无清单 Claude Skill 会在重新导入后生成本地 Class B 清单；用户仍需启用、确认权限并绑定到 Agent，新会话才冻结到新 snapshot。用户样本中三个纯标准库文本分析程序已覆盖；依赖 PyMuPDF/NumPy/RapidOCR/PyTorch/Transformers 的重型程序继续通过原生知识库工具替代，不能冒称直接执行。完整证据见 `docs/evidence/2026-08-30/manual-review-round-3-capabilities.md`。
 
@@ -754,3 +758,31 @@ U02 的横屏、IME、大字号、触控、对比度、焦点及实际字体回�
 - 生产：D1 迁移无待办；部署前备份 4,183 bytes、SHA-256 `dcff7e39f88ce9ac51c16149a9821882e3676b56a63f274ceec00a18660c7c7b`。source hash `5ca5795074e6e95842b9a93c8ba67a1af8eac100a1b9589d69530fd345d1cee9`，29 files；ZIP 84,485 bytes、SHA-256 `c60e573e2f61f7d0941a919ec3b312fe393c02f81d898411779e52e446ff069e`。Worker version `9480180b-d6d2-44e9-9a89-a4fe88b9bcbd` 承载 100% 流量。
 - 后检：feed 200/schema1/key匹配/验签成功，ETag 304，非法 context 400，source manifest/archive 一致；匿名 Admin/统计由 Access 302 拒绝。用户现有 Access 登录态只读刷新确认后台标题、字段、预设、按钮、下拉值、预览和空状态均中文。feedVersion 0、items 0，未发布测试公告或改公告内容。
 - Git/后续：HEAD `dec1e5118c674b91c6039c0576978c811d02410e`，`main` ahead 4 且本轮工作区未提交；未 commit/push。人工终审尚未完成，F-001 保持 `candidate_intermittent`。完整证据见 `docs/evidence/2026-08-30/admin-cn-diagnostics-debug-deploy.md`。
+
+### 2026-08-31T00:05:32+08:00：Skill Memory v2 canonical port 与终态诊断修复（子任务交接）
+
+- 范围：仅改 Skill Memory owned sources、其 focused tests、以及 ChatViewModel 的 trusted Skill identity 传递；未改 RuntimeIntegration、未改 Chat lifecycle/approval/UI inspector，未 commit/push/deploy/打 APK。
+- 实现：SkillMemoryToolExecutor 统一走 `SkillMemoryRepositoryPort`，兼容构造器显式包裹 deprecated raw backend；只暴露 trusted Skill，binding 以 Agent/Snapshot/Skill/capability 交集校验并可由 frozen effective capabilities 收窄；新增 path/content-free typed availability DTO、调用 ID 白名单、deny/expire/cancel/unknown 终态诊断与 typed approval-owner seam。SQLite repository 加强 UTF-8、symlink/path、sidecar/hash 校验；raw backend 仅保留 deprecated 兼容层。
+- 测试：增加 trusted multi-skill、cross-agent/snapshot、frozen capability、approval terminal、restart/version/quota/migration replay focused tests（`SkillMemoryToolExecutorTest`、`SkillMemoryRepositoryTest`）。三份 memory source 的手工 Kotlin focused compile 退出 0；Gradle compile 未形成通过证据，受其他 WIP `Migrations.kt` 缺失四个 `migrateLegacy*` 符号阻塞。
+- 集成待办：`SqliteSkillMemoryRepositoryPort` 仍需由 integration writer 完成 capability_grants + snapshot_grant_bindings + current policy/frozen-capability canonical intersection及 repository typed error mapping；Chat `newSession()` 仍需调用同一 canonical grant→snapshot binding helper（目前仅 send 路径传递 trusted Skill identity）。稳定 API：`SkillMemoryRepositoryPort` 与 `SkillMemoryAvailabilitySnapshot(state, canRead, canSearch, canAppend, canReplace, entryCount, totalBytes)`。
+
+### 2026-08-31T02:00:41+08:00：权限、工具与危险模式 v2 本地收敛
+
+- 范围：v2 单一规范的 domain、migration、Authority、Approval、Internal/SAF/privileged Workspace、Skill Memory、Shizuku、Windows 有线 USB ADB Companion、Dangerous Mode、`shell_exec`、Settings/Agent/Chat/Skills/diagnostics 已完成生产接线。更早子任务记录中的“待接线”属于当时 checkpoint，不能覆盖本节当前事实。
+- 安全边界：只有 `SHIZUKU`/`WIRED_ADB` 两个平级 elevated Authority；selected provider 失效时 fail-closed 且不 fallback。审批绑定 frozen identity/revision，批准时重验；派发后无法确认的外部效果是 `UNKNOWN_OUTCOME` 且不重放。Root、应用内无线 ADB、DPC、Termux、PTY、Accessibility、宿主 PowerShell/宿主 shell 继续排除。
+- UI/生命周期：Chat/Knowledge 长任务不以离开页面作为取消信号；Inspector 使用同一 Chat 状态；审批卡在小屏、受限高度和大字体下详情可滚动而操作固定可达；Provider 预算允许空编辑后保存校验；首次/缺失/非法主题为浅色；Agent grants、Settings authority/SAF/Wired pairing、Skills Memory 只呈现安全元数据。
+- 诊断：默认关闭；v2 typed 事件闭合；agent/skill/workspace/call/approval/request 引用只写 32 hex 会话 HMAC；shell 不写 command/cwd/argv/stdout/stderr；当前/上一段/崩溃/事件/ZIP 上限为 256/256/32/4/640 KiB；IO/drop fail-closed 且不递归写日志。
+- 许可与构建：controlled clean、REUSE 514/514、license 正反向、Actions pin、28 lockfiles、root+included-build dependency verification、共享/JVM tests、全仓 `check` 1024 tasks、Debug evidence gate、Review gate 592 tasks 全部通过。Review APK 为 `debuggable=false`；Debug/Review 均有 171-component CycloneDX SBOM 与 SHA-bound provenance。runtime notices 的 148 Maven + 4 native/model 项在两份 APK 内逐文件验证通过。
+- 产物：Debug `app-android/build/outputs/apk/debug/app-android-debug.apk`，212,309,041 bytes，SHA-256 `ee4640886e3135686ab6bc3a2d04e331291c875f98020cfa20ce861220073c44`；Review `app-android/build/outputs/apk/review/app-android-review.apk`，204,272,935 bytes，SHA-256 `b8c96c49369054247d251f2646edc6c5b9804c1cf44f37edde07b9e0fec6cccc`。两包均使用 Android Debug v2 签名；Review 只供 non-debuggable 控制面审查，不是正式 release。
+- 最终独立复核：核心安全、UI/生命周期与构建证据三路首轮各发现一个 P1；分别修复 Wired ADB 诊断 stderr 跨边界泄漏、Inspector 禁用后的旧预览显示、最终 APK 与 SBOM/provenance hash 漂移。原审查者逐项复核关闭，最终三路均无 P0/P1。修复后 API 31 常规矩阵 188/188 PASS，Shizuku live 2 项因无真实 UserService 跳过并保持 E2E BLOCKED。
+- 设备：最终 Debug APK 已覆盖安装到 API 31 x86_64 `emulator-5554`，启动到 `MainActivity` 并确认首次浅色主题。最终 instrumentation 汇总与三路独立只读终审结论写入 [v2 最终证据](docs/evidence/2026-08-31/authority-tooling-v2-final.md)。
+- 阻塞：真实 Shizuku 服务/授权/UserService、真实 Windows USB Companion/物理断连恢复、真实 SAF provider 仍为 `E2E BLOCKED`，不得被 fixture 或模拟器结果替代。正式签名、AAB、商店、Cloudflare、付费服务、commit、push 均未执行。
+
+### 2026-08-31T07:52:54+08:00：v2 提交与推送授权、提交前门禁
+
+- 请求/边界：用户明确要求将当前工作 commit/push，使本地 `main` 与其跟踪远端同步。本次授权仅覆盖当前 v2 源码、测试、构建/许可元数据和文档；不覆盖正式 Android release、正式签名、Cloudflare/其他生产部署、付费服务、secret/Access 变更、强推或历史改写。
+- 现场：执行前 `main`、HEAD 与 `origin/main` 均为 `0c24f0a95c0644d3aedc992bae037c2fcccadc02`，ahead/behind 为 0/0；所有并行写入者已停止。`.codegraph/` 存在，先用 CodeGraph 复核本轮 v2 符号/文件并确认索引已是最新。
+- 提交前验证：`gradlew.bat licenseGuard licenseGuardReverse check verifyCiPins verifyDependencyLock verifyDependencyVerification --dependency-verification=strict --no-daemon --no-build-cache --console=plain` 为 `BUILD SUCCESSFUL`（1m53s，971 tasks：62 executed/909 up-to-date）；Actions pins 2、lockfiles 28、root verification metadata 264982 bytes、included build 26376 bytes。`python -B -m reuse lint -j` 为 compliant、514/514 copyright、514/514 license；`git diff --check` 退出 0，仅显示既有换行转换提示。
+- 生成目录处理：Gradle 检查新生成的 `desktop/bridge/build` 与 `shared/bridge-protocol/build` 会被 REUSE 当成未许可二进制；仅执行这两个模块的 `clean` 后复跑 REUSE 通过。未清理 Android APK/build 产物，未删除用户数据。
+- 暂存边界：只允许仓库内当前 v2 源码、测试、文档、许可/锁文件、CI 与构建脚本；显式排除 `**/build/`、APK/AAB、`.private/`、诊断原件、`.codegraph/`、本地数据库、keystore/secret 和其他 ignored 文件。最终提交 SHA、推送结果及远端一致性以本任务结束时的 Git 核验为准。
+- 保留阻塞：真实 Shizuku、物理 USB Companion、真实 SAF provider 仍为 `E2E BLOCKED`；dirty-source APK/provenance 的历史事实不因后续提交源码而改变。

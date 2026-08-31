@@ -20,6 +20,7 @@ import runtime.mobileagent.domain.ModelRole
 import runtime.mobileagent.domain.ProviderProfile
 import runtime.mobileagent.domain.withEndpoint
 import runtime.mobileagent.diagnostics.ProviderModelSavePhase
+import runtime.mobileagent.feature.providers.parsePositiveProviderBudget
 import runtime.mobileagent.provider.SecretRedactor
 import java.net.URI
 
@@ -33,8 +34,11 @@ data class ProviderDraft(
     val role: ModelRole = ModelRole.CHAT,
     val capabilities: Set<String> = setOf("stream"),
     val parametersJson: String = "{}",
-    val contextLimit: Int = 32_768,
-    val outputLimit: Int = 4_096,
+    // These remain strings for the lifetime of the editable draft. Empty or
+    // malformed input must reach save validation instead of falling back to a
+    // previous persisted value.
+    val contextLimit: String = "32768",
+    val outputLimit: String = "4096",
 )
 
 class ProvidersViewModel(application: Application) : AndroidViewModel(application) {
@@ -87,9 +91,15 @@ class ProvidersViewModel(application: Application) : AndroidViewModel(applicatio
             val saveModel = draft.modelId.isNotBlank() || draft.modelProfileId != null
             var parameters: JsonObject = JsonObject(emptyMap())
             var modelPrevious: ModelProfile? = null
+            var contextLimit = 0
+            var outputLimit = 0
             if (saveModel) {
                 require(draft.modelId.isNotBlank()) { "请填写模型 ID。" }
-                require(draft.contextLimit > 0 && draft.outputLimit > 0 && draft.outputLimit <= draft.contextLimit) { "上下文和输出预算必须为正数，输出不能超过上下文。" }
+                contextLimit = parsePositiveProviderBudget(draft.contextLimit)
+                    ?: error("上下文预算必须是正整数。")
+                outputLimit = parsePositiveProviderBudget(draft.outputLimit)
+                    ?: error("输出预算必须是正整数。")
+                require(outputLimit <= contextLimit) { "输出预算不能超过上下文预算。" }
                 val parsed = Json.parseToJsonElement(draft.parametersJson)
                 require(parsed is JsonObject) { "模型参数必须是 JSON 对象。" }
                 rejectReserved(parsed)
@@ -107,7 +117,7 @@ class ProvidersViewModel(application: Application) : AndroidViewModel(applicatio
                 id = modelPrevious?.id ?: EntityId.random().value, providerId = providerId,
                 role = draft.role, modelId = draft.modelId.trim(), capabilities = draft.capabilities,
                 parameterSchemaJson = modelPrevious?.parameterSchemaJson ?: "{}",
-                parametersJson = parameters.toString(), contextLimit = draft.contextLimit, outputLimit = draft.outputLimit,
+                parametersJson = parameters.toString(), contextLimit = contextLimit, outputLimit = outputLimit,
                 revision = (modelPrevious?.revision ?: 0) + 1,
             ).withEndpoint() else null
             app.container.db.transaction {

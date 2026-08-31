@@ -16,6 +16,9 @@ import runtime.mobileagent.ui.isMoreChildRoute
 import runtime.mobileagent.ui.isShellScopedLongRunningRoute
 import runtime.mobileagent.ui.moreHubItems
 import runtime.mobileagent.ui.phonePrimaryDestinations
+import runtime.mobileagent.ui.requestInspectorAvailability
+import runtime.mobileagent.feature.chat.ChatRequestInspectorAvailability
+import runtime.mobileagent.feature.chat.ChatUiState
 
 /** Regression checks for the route shape used by the route-scoped NavHost. */
 @RunWith(AndroidJUnit4::class)
@@ -62,5 +65,38 @@ class NavigationScopeTest {
         assertTrue(isShellScopedLongRunningRoute(AppRoutes.CHAT))
         assertTrue(isShellScopedLongRunningRoute(AppRoutes.KNOWLEDGE))
         assertTrue(!isShellScopedLongRunningRoute(AppRoutes.AGENTS))
+    }
+
+    @Test
+    fun inspectorRoutePreservesDisabledNotPreparedContextLostAndReadyStates() {
+        assertEquals(
+            ChatRequestInspectorAvailability.DISABLED,
+            requestInspectorAvailability(ChatUiState(), inspectorEnabled = false),
+        )
+        assertEquals(
+            ChatRequestInspectorAvailability.DISABLED,
+            requestInspectorAvailability(
+                ChatUiState(requestInspectorAvailability = ChatRequestInspectorAvailability.READY),
+                inspectorEnabled = false,
+            ),
+        )
+        assertEquals(
+            ChatRequestInspectorAvailability.NOT_PREPARED,
+            requestInspectorAvailability(ChatUiState(), inspectorEnabled = true),
+        )
+        assertEquals(
+            ChatRequestInspectorAvailability.CONTEXT_LOST,
+            requestInspectorAvailability(
+                ChatUiState(requestInspectorAvailability = ChatRequestInspectorAvailability.CONTEXT_LOST),
+                inspectorEnabled = true,
+            ),
+        )
+        assertEquals(
+            ChatRequestInspectorAvailability.READY,
+            requestInspectorAvailability(
+                ChatUiState(requestInspectorAvailability = ChatRequestInspectorAvailability.READY),
+                inspectorEnabled = true,
+            ),
+        )
     }
 }

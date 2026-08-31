@@ -30,14 +30,46 @@ class WebSearchDeviceTest {
     }
 
     @Test
-    fun runtimeCapabilitySummaryDoesNotInventShellOrArbitraryFiles() {
-        val summary = runtimeCapabilitySummary(listOf("web_search", "py_fixture_run", "read_document"))
-        assertTrue(summary.contains("web_search"))
-        assertTrue(summary.contains("isolated Python"))
-        assertTrue(summary.contains("PowerShell=unsupported"))
-        assertTrue(summary.contains("arbitrary filesystem=unsupported"))
-        assertTrue(summary.contains("books_kb.py"))
+    fun runtimeCapabilitySummaryReportsNoToolsAsUnavailable() {
+        val summary = runtimeCapabilitySummary(emptyList())
+        assertTrue(summary.contains("Active tools: none"))
+        assertTrue(summary.contains("web_search=unavailable in this run"))
+        assertTrue(summary.contains("isolated Python=unavailable in this run"))
+        assertTrue(summary.contains("workspace/file operations=unavailable in this run"))
+        assertTrue(summary.contains("Skill memory=unavailable in this run"))
+        assertTrue(summary.contains("shell_exec=unavailable in this run"))
+        assertTrue(summary.contains("Host PowerShell"))
+        assertTrue(summary.contains("Root"))
+    }
+
+    @Test
+    fun runtimeCapabilitySummaryReportsTypedWorkspaceAndSkillMemory() {
+        val summary = runtimeCapabilitySummary(
+            listOf("file_read_text", "memory_append", "workspace_list", "file_read_text"),
+        )
+        assertTrue(summary.contains("workspace/file operations=available through authorized typed tools"))
+        assertTrue(summary.contains("Skill memory=available only in bound Skill memory namespaces"))
+        assertTrue(summary.contains("web_search=unavailable in this run"))
+        assertTrue(summary.contains("shell_exec=unavailable in this run"))
+    }
+
+    @Test
+    fun runtimeCapabilitySummaryReportsShellOnlyAfterSelectedAuthorityAndDangerousModeGates() {
+        val summary = runtimeCapabilitySummary(listOf("shell_exec"))
+        assertTrue(summary.contains("shell_exec=available through the selected Android authority and Dangerous Mode"))
+        assertTrue(summary.contains("Host PowerShell, host shell, host filesystem"))
+        assertTrue(summary.contains("Root"))
+    }
+
+    @Test
+    fun runtimeCapabilitySummaryReportsPythonWebKnowledgeAndKeepsOrderDeterministic() {
+        val summary = runtimeCapabilitySummary(listOf("read_document", "py_fixture_run", "web_search"))
+        assertTrue(summary.contains("web_search=available with per-call approval"))
+        assertTrue(summary.contains("isolated Python=available only through enabled, granted Class B Skill tools"))
+        assertTrue(summary.contains("workspace/file operations=unavailable in this run"))
+        assertTrue(summary.contains("Skill memory=unavailable in this run"))
+        assertTrue(summary.contains("knowledge_search/read_document"))
         assertTrue(summary.contains("do not claim"))
-        assertEquals(summary, runtimeCapabilitySummary(listOf("read_document", "py_fixture_run", "web_search")))
+        assertEquals(summary, runtimeCapabilitySummary(listOf("web_search", "py_fixture_run", "read_document")))
     }
 }

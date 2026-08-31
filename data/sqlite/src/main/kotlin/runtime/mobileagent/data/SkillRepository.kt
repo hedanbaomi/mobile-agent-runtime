@@ -10,6 +10,7 @@ import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonPrimitive
 import runtime.mobileagent.domain.EntityId
+import runtime.mobileagent.domain.GrantLifetime
 import runtime.mobileagent.domain.Utc
 import runtime.mobileagent.skills.CompatibilityClass
 import runtime.mobileagent.skills.PermissionGrant
@@ -36,6 +37,8 @@ data class InstalledSkill(
 
 class SkillRepository(private val db: SqlConnection) {
     private val json = Json { ignoreUnknownKeys = true }
+    /** Legacy Skill grants have no task/session owner and are always durable. */
+    private val legacyGrantLifetime = GrantLifetime.PERSISTENT.name
 
     fun importPackage(bytes: ByteArray, expectedHash: String? = null, enable: Boolean = false): SkillInstallResult {
         val result = SkillInstaller.install(bytes, expectedHash)
@@ -84,9 +87,14 @@ class SkillRepository(private val db: SqlConnection) {
                 val hosts = specs.flatMap { it.hosts }.toSet()
                 val methods = specs.flatMap { it.methods }.toSet()
                 val scopes = """{"capabilities":${caps.toJsonArray()},"knowledgeBaseIds":${kbs.toJsonArray()},"hosts":${hosts.toJsonArray()},"methods":${methods.toJsonArray()}}"""
+                val createdAt = Utc.nowIso()
                 db.execute(
-                    "INSERT INTO permission_grants(grant_id,install_id,package_hash,capabilities,revision,revoked,scopes_json) VALUES (?,?,?,?,?,?,?)",
-                    listOf(EntityId.random().value, installId, inspection.packageHash, caps.joinToString(","), 1, if (enable) 0 else 1, scopes),
+                    "INSERT INTO permission_grants(grant_id,install_id,package_hash,capabilities,revision,revoked,scopes_json,lifetime,policy_version,created_at,expires_at,revoked_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                    listOf(
+                        EntityId.random().value, installId, inspection.packageHash, caps.joinToString(","), 1,
+                        if (enable) 0 else 1, scopes, legacyGrantLifetime, 0, createdAt, null,
+                        if (enable) null else createdAt,
+                    ),
                 )
             }
         }
@@ -137,8 +145,9 @@ class SkillRepository(private val db: SqlConnection) {
     }
 
     fun revoke(installId: String) {
+        val now = Utc.nowIso()
         db.transaction {
-            db.execute("UPDATE permission_grants SET revoked = 1, revision = revision + 1 WHERE install_id = ?", listOf(installId))
+            db.execute("UPDATE permission_grants SET revoked = 1, revoked_at = COALESCE(revoked_at, ?), revision = revision + 1 WHERE install_id = ?", listOf(now, installId))
             db.execute("UPDATE skill_installs SET enabled = 0 WHERE install_id = ?", listOf(installId))
         }
     }
@@ -155,7 +164,7 @@ class SkillRepository(private val db: SqlConnection) {
             """
             SELECT g.* FROM permission_grants g
             JOIN skill_installs i ON i.install_id = g.install_id
-            WHERE i.enabled = 1 AND g.revoked = 0 AND g.package_hash = i.package_hash
+            WHERE i.enabled = 1 AND g.revoked = 0 AND g.lifetime = 'PERSISTENT' AND g.package_hash = i.package_hash
             """.trimIndent(),
         )
         val grants = rows.map { rowToGrant(it) }.filter { installIds == null || it.installId in installIds }
@@ -176,7 +185,7 @@ class SkillRepository(private val db: SqlConnection) {
     }
 
     fun grantsFor(installId: String): List<PermissionGrant> =
-        db.query("SELECT * FROM permission_grants WHERE install_id = ?", listOf(installId)).map { rowToGrant(it) }
+        db.query("SELECT * FROM permission_grants WHERE install_id = ? AND lifetime = 'PERSISTENT'", listOf(installId)).map { rowToGrant(it) }
 
     fun get(installId: String): InstalledSkill? = list().firstOrNull { it.installId == installId }
 
@@ -226,13 +235,13 @@ class SkillRepository(private val db: SqlConnection) {
             val existing = grantsFor(installId).singleOrNull { it.packageHash == skill.packageHash }
             if (existing == null) {
                 db.execute(
-                    "INSERT INTO permission_grants(grant_id,install_id,package_hash,capabilities,revision,revoked,scopes_json) VALUES (?,?,?,?,?,?,?)",
-                    listOf(EntityId.random().value, installId, skill.packageHash, capabilities.sorted().joinToString(","), 1, 0, scopes),
+                    "INSERT INTO permission_grants(grant_id,install_id,package_hash,capabilities,revision,revoked,scopes_json,lifetime,policy_version,created_at,expires_at,revoked_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                    listOf(EntityId.random().value, installId, skill.packageHash, capabilities.sorted().joinToString(","), 1, 0, scopes, legacyGrantLifetime, 0, Utc.nowIso(), null, null),
                 )
             } else {
                 db.execute(
-                    "UPDATE permission_grants SET capabilities = ?, scopes_json = ?, revoked = 0, revision = revision + 1 WHERE grant_id = ?",
-                    listOf(capabilities.sorted().joinToString(","), scopes, existing.grantId),
+                    "UPDATE permission_grants SET capabilities = ?, scopes_json = ?, revoked = 0, revoked_at = NULL, lifetime = ?, revision = revision + 1 WHERE grant_id = ?",
+                    listOf(capabilities.sorted().joinToString(","), scopes, legacyGrantLifetime, existing.grantId),
                 )
             }
         }

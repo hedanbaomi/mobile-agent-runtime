@@ -104,7 +104,7 @@ class SettingsRepository(private val db: SqlConnection) {
 
     fun theme(): ThemePreference = db.query("SELECT value FROM app_prefs WHERE key=?", listOf(KEY_THEME))
         .firstOrNull()?.string("value")?.let { runCatching { ThemePreference.valueOf(it) }.getOrNull() }
-        ?: ThemePreference.SYSTEM
+        ?: ThemePreference.LIGHT
 
     fun themePreference(): ThemePreference = theme()
 

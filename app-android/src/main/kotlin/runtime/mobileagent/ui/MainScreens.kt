@@ -3,6 +3,7 @@
 
 package runtime.mobileagent.ui
 
+import android.content.Intent
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -167,7 +168,7 @@ internal fun MainApp() {
         runtime.mobileagent.domain.ThemePreference.LIGHT -> AppThemeMode.LIGHT
         runtime.mobileagent.domain.ThemePreference.DARK -> AppThemeMode.DARK
         runtime.mobileagent.domain.ThemePreference.COLOR_66CCFF -> AppThemeMode.CC66FF
-        runtime.mobileagent.domain.ThemePreference.SYSTEM -> AppThemeMode.CC66FF
+        runtime.mobileagent.domain.ThemePreference.SYSTEM -> AppThemeMode.SYSTEM
     }
 
     BackHandler(enabled = editorOwner == route && editorDirty) { requestEditorClose() }
@@ -247,6 +248,24 @@ private val allAppRoutes = setOf(
 /** Regression seam for routes whose active work must outlive a destination entry. */
 internal fun isShellScopedLongRunningRoute(route: String): Boolean =
     route == AppRoutes.CHAT || route == AppRoutes.KNOWLEDGE
+
+/**
+ * Preserve the host-provided inspector availability across Chat -> Inspector
+ * navigation. Legacy hosts without the field retain the old deterministic
+ * preview-based fallback.
+ */
+internal fun requestInspectorAvailability(
+    state: runtime.mobileagent.feature.chat.ChatUiState,
+    inspectorEnabled: Boolean,
+): runtime.mobileagent.feature.chat.ChatRequestInspectorAvailability =
+    if (!inspectorEnabled) {
+        runtime.mobileagent.feature.chat.ChatRequestInspectorAvailability.DISABLED
+    } else {
+        state.requestInspectorAvailability ?: when {
+            state.requestPreview == null -> runtime.mobileagent.feature.chat.ChatRequestInspectorAvailability.NOT_PREPARED
+            else -> runtime.mobileagent.feature.chat.ChatRequestInspectorAvailability.READY
+        }
+    }
 
 @Composable
 private fun MoreHub(chinese: Boolean, onOpen: (String) -> Unit) {
@@ -342,6 +361,7 @@ private fun ProvidersRoute(entry: NavBackStackEntry, chinese: Boolean, onRoute: 
             if (providerDraft.vision != nextDraft.vision) vm.recordCapabilityToggle("image", nextDraft.vision)
             if (providerDraft.tools != nextDraft.tools) vm.recordCapabilityToggle("tools", nextDraft.tools)
             providerDraft = nextDraft
+            providerError = null
         },
         onOpenEditor = { id ->
             providerDraft = providerDraftFrom(providers.firstOrNull { it.id == id }, null)
@@ -487,13 +507,34 @@ private fun SettingsRoute(entry: NavBackStackEntry, chinese: Boolean, onRoute: (
     var exportChooserOpen by remember { mutableStateOf(false) }
     var exportAgents by remember { mutableStateOf<List<Pair<String, String>>>(emptyList()) }
     val importLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { vm.importFrom(it) }
+    // Keep the provider-returned READ/WRITE flags with the URI. Providers are
+    // allowed to return a read-only tree even when the chooser was launched
+    // with both capabilities requested.
+    val safTreeLauncher = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
+        result.data?.data?.let { uri -> vm.authorizeSaf(uri, result.data?.flags ?: 0) }
+    }
+    val launchSafTree = {
+        safTreeLauncher.launch(
+            Intent(Intent.ACTION_OPEN_DOCUMENT_TREE).addFlags(
+                Intent.FLAG_GRANT_READ_URI_PERMISSION or
+                    Intent.FLAG_GRANT_WRITE_URI_PERMISSION or
+                    Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION,
+            ),
+        )
+    }
     val exportLauncher = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/zip")) { vm.exportTo(it) }
     val diagnosticsExportLauncher = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/zip")) { vm.exportDiagnosticsTo(it) }
     val mcpConfigured = runtime.mobileagent.McpConfigStore.read(app.container).value != null
     val raw = vm.uiState(app.container.announcements.statsEnabled(), app.container.announcements.records().count { it.state.readAt == null })
-    val state = raw.copy(language = if (chinese) "zh-CN" else "en-US", themeMode = raw.themeMode.takeUnless { it.equals("system", true) } ?: "66ccff",
-        mcpConfigured = mcpConfigured, mcpEntryEnabled = true, thirdPartyNotices = thirdParty)
+    val state = raw.copy(language = if (chinese) "zh-CN" else "en-US",
+        mcpConfigured = mcpConfigured, mcpEntryEnabled = true, thirdPartyNotices = thirdParty,
+    )
     val context = LocalContext.current
+    LifecycleEventEffect(Lifecycle.Event.ON_RESUME) { vm.refreshAuthorities() }
+    // Pairing tokens are foreground-only. Leaving/backgrounding this route
+    // clears the ViewModel's ephemeral token and asks the adapter to cancel.
+    LifecycleEventEffect(Lifecycle.Event.ON_PAUSE) { vm.cancelWiredAdbPairing() }
+    LaunchedEffect(Unit) { vm.refreshAuthorities() }
     LaunchedEffect(autoCheckUpdate) {
         if (autoCheckUpdate) {
             onAutoCheckConsumed()
@@ -533,6 +574,21 @@ private fun SettingsRoute(entry: NavBackStackEntry, chinese: Boolean, onRoute: (
         onUnlockRootPrompt = vm::unlockRootPrompt, onSaveRootPrompt = vm::saveRootPrompt, onRestoreRootPrompt = vm::restoreRootPrompt,
         onSaveWebSearch = vm::saveWebSearch, onWebSearchEnabled = vm::setWebSearchEnabled,
         onClearWebSearch = vm::clearWebSearch,
+        onSelectAuthority = vm::selectAuthority,
+        onAuthorityIntent = vm::setAuthorityIntent,
+        onRefreshAuthority = { vm.refreshAuthorities() },
+        onRequestShizukuPermission = vm::requestShizukuPermission,
+        onOpenShizuku = { vm.openShizuku() },
+        onRequestWiredPairing = vm::requestWiredAdbPairing,
+        onCompleteWiredPairing = vm::completeWiredAdbPairing,
+        onCancelWiredPairing = vm::cancelWiredAdbPairing,
+        onWiredPairingToken = vm::wiredPairingToken,
+        onForgetWiredAdb = vm::forgetWiredAdb,
+        onSelectSafTree = launchSafTree,
+        onReauthorizeSaf = launchSafTree,
+        onRevokeSaf = vm::revokeSaf,
+        onSetDangerousMode = vm::setDangerousMode,
+        onDisableDangerousMode = vm::disableDangerousMode,
     )
     if (showBack) {
         Column(Modifier.fillMaxSize()) {
@@ -578,32 +634,24 @@ private fun InspectorRoute(
 ) {
     val state = vm.state.value.copy(language = if (chinese) "zh-CN" else "en-US")
     val preview = state.requestPreview
+    val inspectorAvailability = requestInspectorAvailability(state, inspectorEnabled)
     val close = {
         vm.inspector(false)
         onBack()
     }
     @Composable
     fun InspectorContent(modifier: Modifier = Modifier) {
-        if (!inspectorEnabled) {
-            Column(modifier.fillMaxSize().padding(16.dp)) {
-                Text(
-                    if (chinese) "请求检查器已关闭，请在设置中开启后再发送消息。"
-                    else "Request inspection is disabled. Enable it in Settings, then send a message.",
-                )
-                androidx.compose.material3.Button(onClick = close) {
-                    Text(if (chinese) "返回来源" else "Back to source")
-                }
-            }
-        } else if (preview == null) {
-            Column(modifier.fillMaxSize().padding(16.dp)) {
-                Text(if (chinese) "尚无可检查的脱敏请求。先发送一条消息。" else "No redacted request is available yet. Send a message first.")
-                androidx.compose.material3.Button(onClick = close) {
-                    Text(if (chinese) "返回来源" else "Back to source")
-                }
-            }
-        } else {
-            runtime.mobileagent.feature.chat.RequestInspectorScreen(preview, state.promptLayers, close, chinese, modifier)
-        }
+        // Keep the ChatViewModel's shell-scoped availability as the single
+        // source of truth. RequestInspectorScreen owns the stable disabled,
+        // not-prepared, context-lost, and ready rendering for nullable data.
+        runtime.mobileagent.feature.chat.RequestInspectorScreen(
+            request = preview,
+            layers = state.promptLayers,
+            onClose = close,
+            zh = chinese,
+            modifier = modifier,
+            availability = inspectorAvailability,
+        )
     }
     if (showBack) {
         Column(Modifier.fillMaxSize()) {
@@ -643,7 +691,7 @@ private fun providerDraftFrom(provider: runtime.mobileagent.domain.ProviderProfi
     runtime.mobileagent.feature.providers.ProviderDraft(id = provider?.id, modelProfileId = model?.id,
         name = provider?.name.orEmpty(), baseUrl = provider?.baseUrl.orEmpty(), apiFormat = provider?.apiFormat?.name ?: "OPENAI_COMPATIBLE",
         modelId = model?.modelId.orEmpty(), role = model?.role?.name ?: "CHAT", parametersJson = model?.parametersJson ?: "{}",
-        contextLimit = model?.contextLimit ?: 32_768, outputLimit = model?.outputLimit ?: 4_096,
+        contextLimit = model?.contextLimit?.toString() ?: "32768", outputLimit = model?.outputLimit?.toString() ?: "4096",
         vision = model?.capabilities?.contains("image") == true, tools = model?.capabilities?.contains("tools") == true)
 
 private val providerDraftSaver: Saver<runtime.mobileagent.feature.providers.ProviderDraft, List<Any?>> = Saver(
@@ -653,7 +701,8 @@ private val providerDraftSaver: Saver<runtime.mobileagent.feature.providers.Prov
         id = value[0] as String?, modelProfileId = value[1] as String?, name = value[2] as String,
         baseUrl = value[3] as String, apiFormat = value[4] as String, modelId = value[5] as String,
         vision = value[6] as Boolean, tools = value[7] as Boolean, role = value[8] as String,
-        parametersJson = value[9] as String, contextLimit = value[10] as Int, outputLimit = value[11] as Int) },
+        parametersJson = value[9] as String, contextLimit = value[10]?.toString() ?: "32768",
+        outputLimit = value[11]?.toString() ?: "4096") },
 )
 
 private fun thirdPartyNoticeError(failure: Throwable, chinese: Boolean): String {

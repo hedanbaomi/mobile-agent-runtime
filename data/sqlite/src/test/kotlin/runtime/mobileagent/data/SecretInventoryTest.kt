@@ -193,4 +193,43 @@ class SecretInventoryTest {
             assertEquals(SecretStatus.ORPHANED, inventory.status("search:brave"))
         }
     }
+
+    @Test
+    fun activeAndReauthDesktopTrustsKeepBridgeSecretAliveUntilExplicitForget() {
+        JdbcSqlConnection().use { db ->
+            Migrations.apply(db)
+            val inventory = SecretInventory(db)
+            val trust = DesktopTrustRepository(db)
+            val ref = "bridge:desktop:desktop-1"
+            inventory.putActive(ref, byteArrayOf(1, 2, 3))
+            trust.trust("desktop-1", "app-1", ref)
+            assertTrue(ref in inventory.referencedSecretRefs())
+            inventory.collectOrphans()
+            assertEquals(SecretStatus.ACTIVE, inventory.status(ref))
+
+            trust.markReauthRequired("desktop-1")
+            assertTrue(ref in inventory.referencedSecretRefs())
+            trust.forget("desktop-1")
+            assertFalse(ref in inventory.referencedSecretRefs())
+            inventory.collectOrphans()
+            assertEquals(SecretStatus.ORPHANED, inventory.status(ref))
+            inventory.collectOrphans()
+            assertEquals(SecretStatus.DELETED, inventory.status(ref))
+        }
+    }
+
+    @Test
+    fun malformedDesktopTrustReferenceFailsClosed() {
+        JdbcSqlConnection().use { db ->
+            Migrations.apply(db)
+            val inventory = SecretInventory(db)
+            inventory.putActive("bridge:desktop:desktop-2", byteArrayOf(4))
+            db.execute(
+                "INSERT INTO desktop_trust(desktop_id,app_instance_id,secret_ref,status,created_at,last_seen_at,forgotten_at,revision) VALUES(?,?,?,?,?,?,?,?)",
+                listOf("desktop-2", "app-2", "not-a-bridge-ref", "TRUSTED", "now", null, null, 1),
+            )
+            assertThrows(AppException::class.java) { inventory.collectOrphans() }
+            assertEquals(SecretStatus.ACTIVE, inventory.status("bridge:desktop:desktop-2"))
+        }
+    }
 }

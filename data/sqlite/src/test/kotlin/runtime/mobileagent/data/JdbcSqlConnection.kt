@@ -13,7 +13,10 @@ class JdbcSqlConnection(url: String = "jdbc:sqlite::memory:") : SqlConnection, A
     }
 
     override fun execute(sql: String, args: List<Any?>) {
-        prepare(sql, args).use { it.executeUpdate() }
+        // Xerial SQLite reports a result set for ALTER TABLE ... ADD COLUMN statements
+        // containing CHECK constraints.  executeUpdate() then throws "Query returns results"
+        // even though the DDL succeeded; execute() is the JDBC contract for mixed SQLite DDL/DML.
+        prepare(sql, args).use { it.execute() }
     }
 
     override fun query(sql: String, args: List<Any?>): List<SqlRow> {

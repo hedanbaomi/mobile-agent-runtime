@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 import groovy.json.JsonOutput
+import groovy.json.JsonSlurper
 import java.io.File
 import java.nio.charset.StandardCharsets
 import java.security.MessageDigest
@@ -169,14 +170,167 @@ fun releaseBundleFile(): File {
     return bundles.single()
 }
 
+fun variantApkFile(variant: String): File {
+    val directory = layout.buildDirectory.dir("outputs/apk/$variant").get().asFile
+    val candidates = directory.listFiles { file ->
+        file.isFile && file.extension.equals("apk", ignoreCase = true)
+    }.orEmpty()
+    check(candidates.size == 1) {
+        "Expected exactly one " + variant + " APK in " + directory.absolutePath +
+            ", found " + candidates.size
+    }
+    return candidates.single()
+}
+
+fun sdkRootCandidates(): List<File> {
+    val roots = mutableListOf<File>()
+    listOf("ANDROID_SDK_ROOT", "ANDROID_HOME").forEach { variable ->
+        System.getenv(variable)?.takeIf { it.isNotBlank() }?.let { roots += File(it) }
+    }
+    val localProperties = rootProject.file("local.properties")
+    if (localProperties.isFile) {
+        localProperties.readLines(Charsets.UTF_8)
+            .firstOrNull { it.startsWith("sdk.dir=") }
+            ?.substringAfter("sdk.dir=")
+            ?.replace("\\\\", "\\")
+            ?.replace("\\:", ":")
+            ?.takeIf { it.isNotBlank() }
+            ?.let { roots += File(it) }
+    }
+    return roots.distinctBy { it.absoluteFile.normalize().path }
+}
+
+fun apkAnalyzer(): File {
+    val names = listOf("apkanalyzer.bat", "apkanalyzer")
+    val candidates = buildList {
+        sdkRootCandidates().forEach { sdk ->
+            names.forEach { name ->
+                add(sdk.resolve("cmdline-tools/latest/bin/$name"))
+                add(sdk.resolve("tools/bin/$name"))
+            }
+        }
+        System.getenv("PATH").orEmpty()
+            .split(File.pathSeparator)
+            .filter(String::isNotBlank)
+            .forEach { directory -> names.forEach { name -> add(File(directory, name)) } }
+    }
+    return candidates.firstOrNull { it.isFile } ?: error(
+        "apkanalyzer is required for APK security evidence. Checked ANDROID_SDK_ROOT, " +
+            "ANDROID_HOME, local.properties sdk.dir and PATH",
+    )
+}
+
+fun runExternalCommand(executable: File, arguments: List<String>): String {
+    val command = if (executable.extension.equals("bat", ignoreCase = true)) {
+        listOf(System.getenv("ComSpec") ?: "cmd.exe", "/d", "/c", executable.absolutePath) + arguments
+    } else {
+        listOf(executable.absolutePath) + arguments
+    }
+    val process = ProcessBuilder(command)
+        .directory(rootProject.projectDir)
+        .redirectErrorStream(true)
+        .start()
+    val output = process.inputStream.bufferedReader(StandardCharsets.UTF_8).readText().trim()
+    val exitCode = process.waitFor()
+    check(exitCode == 0) {
+        executable.name + " " + arguments.joinToString(" ") +
+            " failed with exit code " + exitCode + ": " + output
+    }
+    return output
+}
+
+fun verifyApkDebuggable(artifact: File, expected: Boolean) {
+    val output = runExternalCommand(
+        apkAnalyzer(),
+        listOf("manifest", "debuggable", artifact.absolutePath),
+    )
+    val actual = output.lineSequence()
+        .map { it.trim().lowercase() }
+        .lastOrNull { it == "true" || it == "false" }
+    check(actual != null) {
+        "apkanalyzer did not return a boolean debuggable value for " +
+            artifact.absolutePath + ": " + output
+    }
+    check(actual == expected.toString()) {
+        "APK debuggable=" + actual + ", expected debuggable=" + expected +
+            ": " + artifact.absolutePath
+    }
+}
+
+fun verifyBuildConfigControlPlane(variant: String, expected: Boolean) {
+    val generated = layout.buildDirectory.dir("generated/source/buildConfig/$variant").get().asFile
+        .walkTopDown()
+        .firstOrNull { it.isFile && it.name == "BuildConfig.java" }
+        ?: error("Generated BuildConfig.java for " + variant + " is missing")
+    val actual = Regex("""HIGH_PRIVILEGE_CONTROL_PLANE_ENABLED\s*=\s*(true|false)""")
+        .find(generated.readText(StandardCharsets.UTF_8))
+        ?.groupValues
+        ?.get(1)
+    check(actual == expected.toString()) {
+        "BuildConfig HIGH_PRIVILEGE_CONTROL_PLANE_ENABLED=" + actual +
+            ", expected " + expected + ": " + generated.absolutePath
+    }
+}
+
+fun verifyReviewBuildConfiguration() {
+    val buildFile = rootProject.file("app-android/build.gradle.kts")
+    val text = buildFile.readText(StandardCharsets.UTF_8)
+    val reviewStart = text.indexOf("""create("review")""")
+    val releaseStart = text.indexOf("""getByName("release")""", reviewStart)
+    check(reviewStart >= 0 && releaseStart > reviewStart) {
+        "app-android/build.gradle.kts has no bounded review build type block"
+    }
+    val reviewBlock = text.substring(reviewStart, releaseStart)
+    check("isDebuggable = false" in reviewBlock) {
+        "Review build type must remain non-debuggable"
+    }
+    check("""signingConfig = signingConfigs.getByName("debug")""" in reviewBlock) {
+        "Review gate must use the local debug identity only; release signing is forbidden"
+    }
+}
+
+fun verifyVariantSecurity(
+    variant: String,
+    artifact: File,
+    expectedDebuggable: Boolean,
+    expectedControlPlaneEnabled: Boolean,
+) {
+    verifyApkDebuggable(artifact, expectedDebuggable)
+    verifyBuildConfigControlPlane(variant, expectedControlPlaneEnabled)
+    if (variant == "review") {
+        verifyReviewBuildConfiguration()
+        val forbiddenReleaseTasks = gradle.taskGraph.allTasks
+            .filter { it.name in setOf("verifyReleaseSigning", "assembleRelease", "bundleRelease", "signReleaseBundle") }
+        check(forbiddenReleaseTasks.isEmpty()) {
+            "Review gate must not invoke release/signing tasks: " +
+                forbiddenReleaseTasks.map { it.path }
+        }
+    }
+}
+
 fun writeSbom(
     variant: String,
     configurationName: String,
     artifact: File,
     destination: File,
     requireClean: Boolean,
+    expectedDebuggable: Boolean? = null,
+    expectedControlPlaneEnabled: Boolean? = null,
 ) {
-    check(artifact.isFile) { "${variant.uppercase()} artifact is missing: ${artifact.absolutePath}" }
+    check(artifact.isFile) {
+        variant.uppercase() + " artifact is missing: " + artifact.absolutePath
+    }
+    if (expectedDebuggable != null) {
+        check(expectedControlPlaneEnabled != null) {
+            "A security build SBOM must declare its control-plane expectation"
+        }
+        verifyVariantSecurity(
+            variant,
+            artifact,
+            expectedDebuggable,
+            expectedControlPlaneEnabled,
+        )
+    }
     val (head, dirty) = gitState(requireClean)
     val sourceHash = sourceArchiveSha256()
     val artifactHash = sha256(artifact)
@@ -204,14 +358,33 @@ fun writeSbom(
             ),
         ),
         "components" to components,
-        "properties" to listOf(
-            mapOf("name" to "mobileagent:git-sha", "value" to head),
-            mapOf("name" to "mobileagent:git-dirty", "value" to dirty.toString()),
-            mapOf("name" to "mobileagent:source-archive-sha256", "value" to sourceHash),
-            mapOf("name" to "mobileagent:artifact-sha256", "value" to artifactHash),
-            mapOf("name" to "mobileagent:artifact-path", "value" to artifactPath),
-            mapOf("name" to "mobileagent:configuration", "value" to configurationName),
-        ),
+        "properties" to buildList {
+            add(mapOf("name" to "mobileagent:git-sha", "value" to head))
+            add(mapOf("name" to "mobileagent:git-dirty", "value" to dirty.toString()))
+            add(mapOf("name" to "mobileagent:source-archive-sha256", "value" to sourceHash))
+            add(mapOf("name" to "mobileagent:artifact-sha256", "value" to artifactHash))
+            add(mapOf("name" to "mobileagent:artifact-path", "value" to artifactPath))
+            add(mapOf("name" to "mobileagent:configuration", "value" to configurationName))
+            if (expectedDebuggable != null && expectedControlPlaneEnabled != null) {
+                add(mapOf("name" to "mobileagent:artifact-debuggable", "value" to expectedDebuggable.toString()))
+                add(
+                    mapOf(
+                        "name" to "mobileagent:security-build",
+                        "value" to if (!expectedDebuggable && expectedControlPlaneEnabled) {
+                            "review-like-non-debuggable"
+                        } else {
+                            "ordinary-debug"
+                        },
+                    ),
+                )
+                add(
+                    mapOf(
+                        "name" to "mobileagent:high-privilege-control-plane-enabled",
+                        "value" to expectedControlPlaneEnabled.toString(),
+                    ),
+                )
+            }
+        },
     )
     destination.parentFile.mkdirs()
     destination.writeText(JsonOutput.prettyPrint(JsonOutput.toJson(report)) + "\n", StandardCharsets.UTF_8)
@@ -219,17 +392,397 @@ fun writeSbom(
     logger.lifecycle("CycloneDX SBOM: ${destination.absolutePath} (${components.size} components)")
 }
 
-val debugApk = layout.buildDirectory.file("outputs/apk/debug/app-android-debug.apk")
-tasks.register("generateDebugSbom") {
+fun sbomProperty(report: Map<*, *>, name: String): String {
+    val properties = report["properties"] as? List<*>
+        ?: error("SBOM properties object is missing")
+    return properties.asSequence()
+        .mapNotNull { it as? Map<*, *> }
+        .firstOrNull { it["name"] == name }
+        ?.get("value")
+        ?.toString()
+        ?: error("SBOM property is missing: " + name)
+}
+
+fun verifySbom(
+    variant: String,
+    configurationName: String,
+    artifact: File,
+    sbom: File,
+    expectedDebuggable: Boolean? = null,
+    expectedControlPlaneEnabled: Boolean? = null,
+) {
+    check(sbom.isFile) { "Missing SBOM: " + sbom.absolutePath }
+    val parsed = JsonSlurper().parse(sbom) as? Map<*, *>
+        ?: error("SBOM is not a JSON object: " + sbom.absolutePath)
+    check(parsed["bomFormat"] == "CycloneDX") { "SBOM bomFormat is not CycloneDX" }
+    check(parsed["specVersion"] == "1.6") { "SBOM specVersion is not 1.6" }
+    check((parsed["components"] as? List<*>)?.isNotEmpty() == true) {
+        "SBOM has no components"
+    }
+    val (head, dirty) = gitState(requireClean = false)
+    val sourceHash = sourceArchiveSha256()
+    val artifactHash = sha256(artifact)
+    val artifactPath = artifact.relativeTo(rootProject.projectDir).invariantSeparatorsPath
+    check(sbomProperty(parsed, "mobileagent:git-sha") == head) {
+        "SBOM Git SHA is stale"
+    }
+    check(sbomProperty(parsed, "mobileagent:git-dirty") == dirty.toString()) {
+        "SBOM dirty-state evidence is stale"
+    }
+    check(sbomProperty(parsed, "mobileagent:source-archive-sha256") == sourceHash) {
+        "SBOM source archive hash is stale"
+    }
+    check(sbomProperty(parsed, "mobileagent:artifact-sha256") == artifactHash) {
+        "SBOM artifact hash does not match the current artifact"
+    }
+    check(sbomProperty(parsed, "mobileagent:artifact-path") == artifactPath) {
+        "SBOM artifact path does not match the current artifact"
+    }
+    check(sbomProperty(parsed, "mobileagent:configuration") == configurationName) {
+        "SBOM configuration evidence does not match the requested variant"
+    }
+    val metadata = parsed["metadata"] as? Map<*, *> ?: error("SBOM metadata is missing")
+    val application = metadata["component"] as? Map<*, *>
+        ?: error("SBOM application component is missing")
+    val hashes = application["hashes"] as? List<*> ?: error("SBOM application hashes are missing")
+    check(hashes.asSequence().mapNotNull { it as? Map<*, *> }.any {
+        it["alg"] == "SHA-256" && it["content"] == artifactHash
+    }) {
+        "SBOM application hash does not match the current artifact"
+    }
+    val expectedSerial = UUID.nameUUIDFromBytes(
+        "mobileAgentRuntime|$variant|$head|$sourceHash|$artifactHash".toByteArray(StandardCharsets.UTF_8),
+    )
+    check(parsed["serialNumber"] == "urn:uuid:$expectedSerial") {
+        "SBOM serial is not bound to the current Git/source/artifact evidence"
+    }
+    if (expectedDebuggable != null) {
+        check(expectedControlPlaneEnabled != null) {
+            "A security SBOM must declare its control-plane expectation"
+        }
+        check(sbomProperty(parsed, "mobileagent:artifact-debuggable") == expectedDebuggable.toString()) {
+            "SBOM debuggable evidence does not match the requested variant"
+        }
+        check(
+            sbomProperty(parsed, "mobileagent:high-privilege-control-plane-enabled") ==
+                expectedControlPlaneEnabled.toString(),
+        ) {
+            "SBOM control-plane evidence does not match the requested variant"
+        }
+        verifyVariantSecurity(variant, artifact, expectedDebuggable, expectedControlPlaneEnabled)
+    }
+}
+
+fun writeVariantProvenance(
+    variant: String,
+    configurationName: String,
+    artifact: File,
+    sbom: File,
+    destination: File,
+    expectedDebuggable: Boolean,
+    expectedControlPlaneEnabled: Boolean,
+) {
+    verifySbom(
+        variant,
+        configurationName,
+        artifact,
+        sbom,
+        expectedDebuggable,
+        expectedControlPlaneEnabled,
+    )
+    val (head, dirty) = gitState(requireClean = false)
+    val sourceHash = sourceArchiveSha256()
+    val artifactHash = sha256(artifact)
+    val sbomHash = sha256(sbom)
+    val artifactPath = artifact.relativeTo(rootProject.projectDir).invariantSeparatorsPath
+    val sbomPath = sbom.relativeTo(rootProject.projectDir).invariantSeparatorsPath
+    val report = linkedMapOf<String, Any>(
+        "schemaVersion" to 1,
+        "variant" to variant,
+        "gitDirty" to dirty,
+        "git" to mapOf(
+            "sha" to head,
+            "sourceUrl" to "https://github.com/hedanbaomi/mobile-agent-runtime",
+        ),
+        "sourceArchiveSha256" to sourceHash,
+        "artifact" to mapOf(
+            "type" to "android-apk",
+            "path" to artifactPath,
+            "sha256" to artifactHash,
+            "debuggable" to expectedDebuggable,
+        ),
+        "security" to mapOf(
+            "reviewLike" to (variant == "review"),
+            "highPrivilegeControlPlaneEnabled" to expectedControlPlaneEnabled,
+        ),
+        "sbom" to mapOf(
+            "format" to "CycloneDX-1.6",
+            "path" to sbomPath,
+            "sha256" to sbomHash,
+        ),
+    )
+    destination.parentFile.mkdirs()
+    destination.writeText(JsonOutput.prettyPrint(JsonOutput.toJson(report)) + "\n", StandardCharsets.UTF_8)
+    check(destination.isFile && destination.length() > 0) {
+        "Provenance manifest was not written"
+    }
+    logger.lifecycle("Variant provenance: " + destination.absolutePath)
+}
+
+fun verifyVariantProvenance(
+    variant: String,
+    configurationName: String,
+    artifact: File,
+    sbom: File,
+    manifest: File,
+    expectedDebuggable: Boolean,
+    expectedControlPlaneEnabled: Boolean,
+) {
+    check(manifest.isFile) { "Missing provenance manifest: " + manifest.absolutePath }
+    val parsed = JsonSlurper().parse(manifest) as? Map<*, *>
+        ?: error("Provenance is not a JSON object: " + manifest.absolutePath)
+    check(parsed["schemaVersion"] == 1) { "Unsupported provenance schema" }
+    check(parsed["variant"] == variant) { "Provenance variant does not match the requested gate" }
+    val (head, dirty) = gitState(requireClean = false)
+    val sourceHash = sourceArchiveSha256()
+    val artifactHash = sha256(artifact)
+    val sbomHash = sha256(sbom)
+    val artifactPath = artifact.relativeTo(rootProject.projectDir).invariantSeparatorsPath
+    val sbomPath = sbom.relativeTo(rootProject.projectDir).invariantSeparatorsPath
+    check(parsed["gitDirty"] == dirty) { "Provenance dirty-state evidence is stale" }
+    val git = parsed["git"] as? Map<*, *> ?: error("Provenance git object is missing")
+    check(git["sha"] == head) { "Provenance Git SHA is stale" }
+    check(parsed["sourceArchiveSha256"] == sourceHash) {
+        "Provenance source archive hash is stale"
+    }
+    val artifactRecord = parsed["artifact"] as? Map<*, *>
+        ?: error("Provenance artifact object is missing")
+    check(artifactRecord["path"] == artifactPath) { "Provenance artifact path is stale" }
+    check(artifactRecord["sha256"] == artifactHash) { "Provenance artifact hash is stale" }
+    check(artifactRecord["debuggable"] == expectedDebuggable) {
+        "Provenance debuggable evidence does not match the requested variant"
+    }
+    val security = parsed["security"] as? Map<*, *>
+        ?: error("Provenance security object is missing")
+    check(security["reviewLike"] == (variant == "review")) {
+        "Provenance review-like marker is stale"
+    }
+    check(security["highPrivilegeControlPlaneEnabled"] == expectedControlPlaneEnabled) {
+        "Provenance control-plane evidence does not match the requested variant"
+    }
+    val sbomRecord = parsed["sbom"] as? Map<*, *> ?: error("Provenance SBOM object is missing")
+    check(sbomRecord["format"] == "CycloneDX-1.6") { "Provenance SBOM format is invalid" }
+    check(sbomRecord["path"] == sbomPath) { "Provenance SBOM path is stale" }
+    check(sbomRecord["sha256"] == sbomHash) { "Provenance SBOM hash is stale" }
+    verifySbom(
+        variant,
+        configurationName,
+        artifact,
+        sbom,
+        expectedDebuggable,
+        expectedControlPlaneEnabled,
+    )
+    verifyVariantSecurity(variant, artifact, expectedDebuggable, expectedControlPlaneEnabled)
+}
+
+val debugSbom = layout.buildDirectory.file("reports/sbom/debug.cdx.json")
+val debugProvenance = layout.buildDirectory.file("reports/provenance/debug.provenance.json")
+
+val verifyDebugArtifact = tasks.register("verifyDebugArtifact") {
+    group = "verification"
+    description = "Verify the debug APK is debuggable and excluded from the elevated control plane."
+    dependsOn("assembleDebug")
+    doLast {
+        verifyVariantSecurity("debug", variantApkFile("debug"), expectedDebuggable = true, expectedControlPlaneEnabled = false)
+    }
+}
+
+val verifyDebugSecurity = tasks.register("verifyDebugSecurity") {
+    group = "verification"
+    description = "Verify the assembled debug APK security boundary."
+    dependsOn(verifyDebugArtifact)
+    doLast {
+        verifyVariantSecurity("debug", variantApkFile("debug"), expectedDebuggable = true, expectedControlPlaneEnabled = false)
+    }
+}
+
+val generateDebugSbom = tasks.register("generateDebugSbom") {
     group = "verification"
     description = "Write a CycloneDX inventory of the assembled debug APK and resolved runtime artifacts."
-    dependsOn("assembleDebug")
-    val destination = layout.buildDirectory.file("reports/sbom/debug.cdx.json")
-    outputs.file(destination)
+    dependsOn(verifyDebugSecurity)
+    outputs.file(debugSbom)
     outputs.upToDateWhen { false }
     doLast {
-        writeSbom("debug", "debugRuntimeClasspath", debugApk.get().asFile, destination.get().asFile, requireClean = false)
+        writeSbom(
+            "debug",
+            "debugRuntimeClasspath",
+            variantApkFile("debug"),
+            debugSbom.get().asFile,
+            requireClean = false,
+            expectedDebuggable = true,
+            expectedControlPlaneEnabled = false,
+        )
     }
+}
+
+val verifyDebugSbom = tasks.register("verifyDebugSbom") {
+    group = "verification"
+    description = "Reject stale or unbound debug APK SBOM evidence."
+    dependsOn(generateDebugSbom)
+    inputs.file(debugSbom)
+    doLast {
+        verifySbom(
+            "debug",
+            "debugRuntimeClasspath",
+            variantApkFile("debug"),
+            debugSbom.get().asFile,
+            expectedDebuggable = true,
+            expectedControlPlaneEnabled = false,
+        )
+    }
+}
+
+val generateDebugProvenance = tasks.register("generateDebugProvenance") {
+    group = "verification"
+    description = "Bind the debug APK, SBOM, Git SHA and source archive in a local evidence manifest."
+    dependsOn(verifyDebugSbom)
+    outputs.file(debugProvenance)
+    outputs.upToDateWhen { false }
+    doLast {
+        writeVariantProvenance(
+            "debug",
+            "debugRuntimeClasspath",
+            variantApkFile("debug"),
+            debugSbom.get().asFile,
+            debugProvenance.get().asFile,
+            expectedDebuggable = true,
+            expectedControlPlaneEnabled = false,
+        )
+    }
+}
+
+val verifyDebugProvenance = tasks.register("verifyDebugProvenance") {
+    group = "verification"
+    description = "Reject stale or mismatched debug APK provenance evidence."
+    dependsOn(generateDebugProvenance)
+    inputs.file(debugProvenance)
+    doLast {
+        verifyVariantProvenance(
+            "debug",
+            "debugRuntimeClasspath",
+            variantApkFile("debug"),
+            debugSbom.get().asFile,
+            debugProvenance.get().asFile,
+            expectedDebuggable = true,
+            expectedControlPlaneEnabled = false,
+        )
+    }
+}
+
+tasks.register("debugEvidenceGate") {
+    group = "verification"
+    description = "Assemble debug and verify a fresh, SHA-bound artifact/SBOM/provenance evidence set."
+    dependsOn(verifyDebugProvenance)
+}
+
+val reviewSbom = layout.buildDirectory.file("reports/sbom/review.cdx.json")
+val reviewProvenance = layout.buildDirectory.file("reports/provenance/review.provenance.json")
+
+val verifyReviewArtifact = tasks.register("verifyReviewArtifact") {
+    group = "verification"
+    description = "Verify the review APK is non-debuggable before security evidence is generated."
+    dependsOn("assembleReview")
+    doLast {
+        verifyVariantSecurity("review", variantApkFile("review"), expectedDebuggable = false, expectedControlPlaneEnabled = true)
+    }
+}
+
+val verifyReviewSecurity = tasks.register("verifyReviewSecurity") {
+    group = "verification"
+    description = "Verify the review-like security artifact and prohibit release/signing task use."
+    dependsOn(verifyReviewArtifact)
+    doLast {
+        verifyVariantSecurity("review", variantApkFile("review"), expectedDebuggable = false, expectedControlPlaneEnabled = true)
+    }
+}
+
+val generateReviewSbom = tasks.register("generateReviewSbom") {
+    group = "verification"
+    description = "Write a CycloneDX inventory for the non-debuggable review APK."
+    dependsOn(verifyReviewSecurity)
+    outputs.file(reviewSbom)
+    outputs.upToDateWhen { false }
+    doLast {
+        writeSbom(
+            "review",
+            "reviewRuntimeClasspath",
+            variantApkFile("review"),
+            reviewSbom.get().asFile,
+            requireClean = false,
+            expectedDebuggable = false,
+            expectedControlPlaneEnabled = true,
+        )
+    }
+}
+
+val verifyReviewSbom = tasks.register("verifyReviewSbom") {
+    group = "verification"
+    description = "Reject stale or unbound review-like APK SBOM evidence."
+    dependsOn(generateReviewSbom)
+    inputs.file(reviewSbom)
+    doLast {
+        verifySbom(
+            "review",
+            "reviewRuntimeClasspath",
+            variantApkFile("review"),
+            reviewSbom.get().asFile,
+            expectedDebuggable = false,
+            expectedControlPlaneEnabled = true,
+        )
+    }
+}
+
+val generateReviewProvenance = tasks.register("generateReviewProvenance") {
+    group = "verification"
+    description = "Bind the review APK, SBOM, Git SHA and source archive in a local security evidence manifest."
+    dependsOn(verifyReviewSbom)
+    outputs.file(reviewProvenance)
+    outputs.upToDateWhen { false }
+    doLast {
+        writeVariantProvenance(
+            "review",
+            "reviewRuntimeClasspath",
+            variantApkFile("review"),
+            reviewSbom.get().asFile,
+            reviewProvenance.get().asFile,
+            expectedDebuggable = false,
+            expectedControlPlaneEnabled = true,
+        )
+    }
+}
+
+val verifyReviewProvenance = tasks.register("verifyReviewProvenance") {
+    group = "verification"
+    description = "Reject stale or mismatched review-like APK provenance evidence."
+    dependsOn(generateReviewProvenance)
+    inputs.file(reviewProvenance)
+    doLast {
+        verifyVariantProvenance(
+            "review",
+            "reviewRuntimeClasspath",
+            variantApkFile("review"),
+            reviewSbom.get().asFile,
+            reviewProvenance.get().asFile,
+            expectedDebuggable = false,
+            expectedControlPlaneEnabled = true,
+        )
+    }
+}
+
+tasks.register("reviewGate") {
+    group = "verification"
+    description = "Assemble and verify a non-debuggable review-like APK with fresh SBOM/provenance, without release signing."
+    dependsOn(verifyReviewProvenance)
 }
 
 tasks.register("generateReleaseSbom") {

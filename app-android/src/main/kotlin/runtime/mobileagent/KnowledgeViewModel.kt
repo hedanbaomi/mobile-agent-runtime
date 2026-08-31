@@ -9,26 +9,26 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.*
+import kotlinx.coroutines.flow.collect
 import runtime.mobileagent.background.ImportWorkScheduler
-import runtime.mobileagent.diagnostics.DiagnosticProgressGate
 import runtime.mobileagent.feature.knowledge.*
 import runtime.mobileagent.knowledge.ApiEmbeddingBinding
 import runtime.mobileagent.knowledge.ImportBatchKind
 import runtime.mobileagent.knowledge.ImportStage
-import runtime.mobileagent.knowledge.KnowledgeArchive
-import runtime.mobileagent.knowledge.MediaKind
 import runtime.mobileagent.knowledge.sha256Hex
 import androidx.documentfile.provider.DocumentFile
 import android.content.Intent
 import runtime.mobileagent.provider.SecretRedactor
-import java.io.ByteArrayOutputStream
-import java.io.File
-import java.io.FileOutputStream
 
 data class EmbeddingConfirmation(val target: String, val retry: Boolean, val rebind: Boolean, val documentCount: Int,
     val queryRetry: Boolean = false)
 
-class KnowledgeViewModel(application: Application) : AndroidViewModel(application) {
+class KnowledgeViewModel(
+    application: Application,
+    private val importCoordinator: KnowledgeImportCoordinator,
+) : AndroidViewModel(application) {
+    constructor(application: Application) : this(application, KnowledgeImportCoordinator.forApplication(application))
+
     private val app = application as MobileAgentApp
     private val repo get() = app.container.knowledge
     val state = mutableStateOf(KnowledgeUiState())
@@ -44,6 +44,7 @@ class KnowledgeViewModel(application: Application) : AndroidViewModel(applicatio
     private var refreshJob: Job? = null
     private var refreshRequested = false
     private var activeOperations = 0
+    private val observedImportOperations = mutableSetOf<String>()
 
     private enum class EmbeddingAction { REBIND, REBUILD, GRANT, RETRY, QUERY_RETRY }
     private data class PendingEmbedding(
@@ -164,6 +165,12 @@ class KnowledgeViewModel(application: Application) : AndroidViewModel(applicatio
     fun deleteBase(id: String) = action { repo.deleteKnowledgeBase(id); "知识库已删除，引用保留为来源已移除。" }
     fun deleteDocument(id: String) = action { repo.deleteDocument(id); "文档已从知识库与当前索引删除。" }
     fun cancelJob(id: String) { ImportWorkScheduler.cancel(app, id); reload() }
+    /** Cancel the process-owned staging operation, when the UI has an operation handle. */
+    fun cancelOperation(operationId: String) {
+        if (!importCoordinator.cancel(operationId)) {
+            state.value = state.value.copy(error = "导入操作已结束或不存在。")
+        }
+    }
     fun rebuild() {
         val id = state.value.selectedBaseId ?: return
         val revision = ++embeddingRevision
@@ -358,119 +365,64 @@ class KnowledgeViewModel(application: Application) : AndroidViewModel(applicatio
     private fun importNamedUris(files: List<Pair<String, Uri>>, kind: ImportBatchKind, label: String) {
         if (files.isEmpty()) return
         if (files.size > 500) { state.value = state.value.copy(error = "一次最多选择 500 个文件。"); return }
+        val requestedBase = state.value.selectedBaseId
+        val inputs = files.map { (name, uri) ->
+            KnowledgeImportInput(
+                displayName = name,
+                sourceKey = uri.toString(),
+                openStream = { app.contentResolver.openInputStream(uri) ?: error("无法读取文件。") },
+                mediaType = { app.contentResolver.getType(uri).orEmpty() },
+            )
+        }
+        when (val started = importCoordinator.start(inputs, kind, label, requestedBase)) {
+            is KnowledgeImportStart.Started -> observeImport(started.operation)
+            is KnowledgeImportStart.AlreadyRunning -> observeImport(started.operation)
+            is KnowledgeImportStart.Rejected -> state.value = state.value.copy(error = started.reason)
+        }
+    }
+
+    private fun observeImport(operation: KnowledgeImportOperation) {
+        if (!observedImportOperations.add(operation.operationId)) return
+        activeOperations += 1
+        state.value = state.value.copy(loading = true, error = null)
         viewModelScope.launch {
-            activeOperations += 1
-            val progressGate = DiagnosticProgressGate()
-            val enqueueGate = DiagnosticProgressGate()
-            var copiedCount = 0
-            var diagnosticStage = "staging"
-            recordDiagnostics { recordKnowledgeImportStart(kind.name, files.size) }
-            state.value = state.value.copy(loading = true, error = null)
-            try {
-                val requestedBase = state.value.selectedBaseId
-                val id = requestedBase ?: runInterruptible(Dispatchers.IO) { repo.createKnowledgeBase("我的知识库") }.also {
-                    selectionRevision += 1
-                    state.value = state.value.copy(selectedBaseId = it)
-                }
-                val createdBatchId = if (kind == ImportBatchKind.ZIP) {
-                    null
-                } else {
-                    runInterruptible(Dispatchers.IO) { repo.beginBatch(id, kind, label) }
-                }
-                var resolvedBatchId = createdBatchId
-                files.forEachIndexed { index, (name, uri) ->
-                    diagnosticStage = "copying"
-                    state.value = state.value.copy(status = "正在复制 ${index + 1}/${files.size}：$name")
-                    runInterruptible(Dispatchers.IO) {
-                        val apiEmbedding = repo.embeddingSpaceId(id)?.let(ApiEmbeddingBinding::parseSpaceId) != null
-                        val imported = if (kind == ImportBatchKind.ZIP) {
-                            val staged = stageArchive(uri)
-                            try {
-                                repo.importKnowledgeArchiveFile(
-                                    displayName = name,
-                                    file = staged,
-                                    visionConfigured = app.container.profiles.visionConfigured(),
-                                    knowledgeBaseId = id,
-                                    pauseAt = ImportStage.COPYING,
-                                    embeddingIsApi = apiEmbedding,
-                                    embeddingConsent = false,
-                                )
-                            } finally {
-                                if (!staged.delete()) staged.deleteOnExit()
-                            }
-                        } else {
-                            val bytes = readLimited(uri, name)
-                            repo.importBytes(name, app.contentResolver.getType(uri).orEmpty(), bytes,
-                                app.container.profiles.visionConfigured(), id, pauseAt = ImportStage.COPYING,
-                                embeddingIsApi = apiEmbedding, embeddingConsent = false)
-                        }
-                        if (createdBatchId != null) {
-                            repo.bindJobToBatch(createdBatchId, imported, name)
-                            // Wake the idempotent coordinator as soon as this item is durably
-                            // bound. The generation check stays immediately before the external
-                            // scheduler call; the final enqueue below remains the recovery fence.
-                            if (!repo.generationStillCurrent(createdBatchId)) {
-                                repo.failBatch(createdBatchId, "Knowledge base generation changed; this batch cannot publish.")
-                                error("Knowledge base generation changed; this batch cannot publish.")
-                            }
-                            ImportWorkScheduler.enqueueBatch(app, createdBatchId, app.container.profiles.visionConfigured())
-                        } else if (resolvedBatchId == null) {
-                            resolvedBatchId = repo.jobBatchId(imported.id)
-                        }
-                    }
-                    copiedCount = index + 1
-                    if (progressGate.shouldRecord("copied", copiedCount, files.size)) {
-                        recordDiagnostics {
-                            recordKnowledgeImportProgress(kind.name, "copied", copiedCount, files.size)
-                        }
-                    }
-                    if (createdBatchId != null && enqueueGate.shouldRecord("queued", copiedCount, files.size)) {
-                        recordDiagnostics { recordKnowledgeImportEnqueued(kind.name, copiedCount) }
+            val progressJob = launch {
+                operation.progress.collect { progress ->
+                    if (progress.totalItems > 0) {
+                        state.value = state.value.copy(
+                            status = "导入进度 ${progress.copied}/${progress.totalItems}；处理 ${progress.processing}，等待 ${progress.waiting}。",
+                        )
                     }
                 }
-                runInterruptible(Dispatchers.IO) {
-                    val batchId = resolvedBatchId
-                    if (batchId != null) {
-                        repo.refreshBatchProgress(batchId)
-                        if (!repo.generationStillCurrent(batchId)) {
-                            repo.failBatch(batchId, "Knowledge base generation changed; this batch cannot publish.")
-                            error("Knowledge base generation changed; this batch cannot publish.")
-                        } else {
-                            diagnosticStage = "processing"
-                            ImportWorkScheduler.enqueueBatchFence(app, batchId, app.container.profiles.visionConfigured())
-                        }
-                    }
-                }
-                if (resolvedBatchId != null) {
-                    recordDiagnostics { recordKnowledgeImportEnqueued(kind.name, copiedCount) }
-                }
-                diagnosticStage = "processing"
-                val snapshot = runInterruptible(Dispatchers.IO) { loadSnapshot(id) }
-                state.value = state.value.copy(
-                    bases = snapshot.bases, selectedBaseId = snapshot.selectedBaseId,
-                    documents = snapshot.documents, jobs = snapshot.jobs, waiting = snapshot.waiting,
-                    embeddingSpaceLabel = snapshot.embeddingSpaceLabel,
-                    embeddingModels = snapshot.embeddingModels, apiQueryAttempts = snapshot.apiQueryAttempts,
-                    batches = snapshot.batches,
-                    status = "原件已复制到本地；批次任务将继续处理，可离开此页。图片及 API Embedding 文本不会未经同意上传。",
-                    rebuildEnabled = snapshot.selectedBaseId != null && snapshot.jobs.none { it.stage in ACTIVE },
-                )
-                // This marks only durable local staging. Parsing/indexing completion is emitted by
-                // the batch worker, so a later processing failure cannot be masked as success.
-                recordDiagnostics { recordKnowledgeImportStaged(kind.name, copiedCount) }
-            } catch (cancel: CancellationException) {
-                recordDiagnostics { recordKnowledgeImportFailed(kind.name, diagnosticStage, copiedCount, cancel) }
-                throw cancel
-            } catch (failure: Exception) {
-                recordDiagnostics { recordKnowledgeImportFailed(kind.name, diagnosticStage, copiedCount, failure) }
-                fail(failure)
             }
-            finally {
-                withContext(NonCancellable + Dispatchers.Main.immediate) {
-                    activeOperations = (activeOperations - 1).coerceAtLeast(0)
-                    state.value = state.value.copy(loading = activeOperations > 0)
-                    reload()
+            try {
+                val outcome = operation.completion.await()
+                when (outcome.terminal) {
+                    KnowledgeImportTerminal.COMPLETED -> state.value = state.value.copy(
+                        status = "原件已复制到本地；批次任务将继续处理，可离开此页。图片及 API Embedding 文本不会未经同意上传。",
+                    )
+                    KnowledgeImportTerminal.USER_CANCELLED -> state.value = state.value.copy(
+                        status = "已按用户请求取消导入；已复制的本地原件仍保留，可稍后重新导入。",
+                    )
+                    KnowledgeImportTerminal.SYSTEM_CANCELLED -> state.value = state.value.copy(
+                        status = "导入暂时停止；持久化检查点已保留，应用恢复后将继续处理。",
+                    )
+                    KnowledgeImportTerminal.FAILED -> state.value = state.value.copy(error = "导入失败，请查看批次状态后重试。")
                 }
+                outcome.knowledgeBaseId?.let { id ->
+                    if (state.value.selectedBaseId == null) {
+                        selectionRevision += 1
+                        state.value = state.value.copy(selectedBaseId = id)
+                    }
+                }
+            } catch (_: CancellationException) {
+                // Clearing this observer must never cancel the coordinator worker.
+            } finally {
+                progressJob.cancel()
+                observedImportOperations.remove(operation.operationId)
+                activeOperations = (activeOperations - 1).coerceAtLeast(0)
+                state.value = state.value.copy(loading = activeOperations > 0)
+                reload()
             }
         }
     }
@@ -522,10 +474,6 @@ class KnowledgeViewModel(application: Application) : AndroidViewModel(applicatio
         }
     }
 
-    private fun recordDiagnostics(block: runtime.mobileagent.diagnostics.AndroidDiagnosticLogger.() -> Unit) {
-        runCatching { app.diagnostics.block() }
-    }
-
     private fun currentVisionTarget(): String = app.container.profiles.visionBinding()?.let { (provider, model) ->
         "${provider.name} · ${provider.baseUrl} · ${model.modelId} · provider rev ${provider.revision} / model rev ${model.revision}"
     }.orEmpty()
@@ -534,40 +482,6 @@ class KnowledgeViewModel(application: Application) : AndroidViewModel(applicatio
             if (cursor.moveToFirst()) cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME).takeIf { it >= 0 }?.let { return cursor.getString(it) }
         }
         return uri.lastPathSegment ?: "file"
-    }
-    private fun readLimited(uri: Uri, name: String = displayName(uri)): ByteArray = (app.contentResolver.openInputStream(uri) ?: error("无法读取文件。")).use { input ->
-        val limit = if (name.lowercase().endsWith(".zip")) KnowledgeArchive.MAX_TOTAL_BYTES else MediaKind.MAX_IMPORT_BYTES
-        val out = ByteArrayOutputStream(); val buffer = ByteArray(16384)
-        while (true) { val count = input.read(buffer); if (count < 0) break
-            require(out.size().toLong() + count <= limit) { "RESOURCE_LIMIT" }; out.write(buffer, 0, count) }
-        out.toByteArray()
-    }
-    private fun stageArchive(uri: Uri): File {
-        val directory = File(app.filesDir, "import-staging").apply {
-            check(exists() || mkdirs()) { "无法创建导入暂存目录。" }
-        }
-        val target = File.createTempFile("knowledge-", ".zip", directory)
-        try {
-            (app.contentResolver.openInputStream(uri) ?: error("无法读取文件。")).use { input ->
-                FileOutputStream(target).use { output ->
-                    val buffer = ByteArray(16 * 1024)
-                    var total = 0L
-                    while (true) {
-                        val count = input.read(buffer)
-                        if (count < 0) break
-                        total += count
-                        require(total <= KnowledgeArchive.MAX_TOTAL_BYTES) { "RESOURCE_LIMIT" }
-                        output.write(buffer, 0, count)
-                    }
-                    output.fd.sync()
-                }
-            }
-            require(target.length() >= 22L) { "Not a ZIP archive" }
-            return target
-        } catch (failure: Throwable) {
-            target.delete()
-            throw failure
-        }
     }
     private fun fail(failure: Exception) { state.value = state.value.copy(error = SecretRedactor.redact(failure.message ?: "操作失败。")) }
     private companion object {

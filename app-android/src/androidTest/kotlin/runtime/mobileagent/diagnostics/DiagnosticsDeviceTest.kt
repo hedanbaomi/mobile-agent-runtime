@@ -11,6 +11,8 @@ import java.io.File
 import java.io.IOException
 import java.io.OutputStream
 import java.util.UUID
+import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
 import java.util.zip.ZipInputStream
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -27,6 +29,14 @@ class DiagnosticsDeviceTest {
             val store = newStore(directory, preferences)
             assertFalse(store.isEnabled)
             assertFalse(store.recordCapabilityToggle("tools", true))
+            assertFalse(store.recordDangerousModeChanged(true, DiagnosticDangerousModePolicy.AUTONOMOUS, "disabled-request"))
+            assertFalse(
+                store.recordShellExecutionState(
+                    commandSha256 = "a".repeat(64),
+                    terminalState = DiagnosticTerminalState.SUCCEEDED,
+                    authority = DiagnosticAuthority.NONE,
+                ),
+            )
             assertEquals(0L, store.status().totalBytes)
 
             store.setEnabled(true)
@@ -207,6 +217,171 @@ class DiagnosticsDeviceTest {
     }
 
     @Test
+    fun v2TypedEventsAreClosedAndHashUserControlledReferences() {
+        withStore { directory, preferences ->
+            preferences.setEnabled(true)
+            val store = newStore(directory, preferences)
+            val secret = "sk-diagnostic-v2-secret"
+            val path = "C:\\Users\\private\\workspace\\secret.txt"
+            val uri = "content://com.example.documents/tree/private"
+            val command = "rm -rf $path"
+            val stdout = "stdout-secret-$secret"
+            val agentId = "agent-$secret"
+            val skillId = "skill-$path"
+            val workspaceId = "workspace-$uri"
+            val callId = "call-$secret"
+            val approvalId = "approval-$path"
+
+            assertFalse(
+                store.record(
+                    "authority_selection_changed",
+                    mapOf("selectedAuthority" to "shizuku", "unknownField" to secret),
+                ),
+            )
+            assertTrue(
+                store.record(
+                    "runtime_tooling_unavailable",
+                    mapOf("errorCode" to "TOOL_EXECUTION_CONTEXT_UNAVAILABLE"),
+                ),
+            )
+            assertFalse(
+                store.record(
+                    "runtime_tooling_unavailable",
+                    mapOf("errorCode" to "UNSAFE_UNKNOWN_CODE", "prompt" to secret),
+                ),
+            )
+            assertTrue(
+                store.recordRuntimeToolingUnavailable(
+                    RuntimeToolingUnavailableCode.TOOL_EXECUTOR_FACTORY_UNAVAILABLE,
+                    sessionRef = "runtime-session-$secret",
+                    runRef = "runtime-run-$path",
+                ),
+            )
+            assertTrue(store.recordAuthoritySelectionChanged(DiagnosticAuthority.SHIZUKU, DiagnosticAuthority.NONE, "request-1"))
+            assertTrue(store.recordAuthorityStateChanged(DiagnosticAuthority.SHIZUKU, DiagnosticAuthorityState.AVAILABLE))
+            assertTrue(store.recordShizukuLifecycle(DiagnosticLifecycleState.READY, requestRef = "request-2"))
+            assertTrue(store.recordWiredAdbLifecycle(DiagnosticLifecycleState.DISCONNECTED, "io", "request-3"))
+            assertTrue(store.recordWorkspaceGrantChanged(workspaceId, DiagnosticGrantScope.READ_WRITE, true, "request-4"))
+            assertTrue(store.recordWorkspaceOperationState(workspaceId, DiagnosticOperation.READ, DiagnosticOperationState.SUCCEEDED, 2, "request-5"))
+            assertTrue(store.recordSkillMemoryOperationState(skillId, DiagnosticOperation.APPEND, DiagnosticOperationState.SUCCEEDED, 1, "request-6"))
+            assertTrue(store.recordDangerousModeChanged(true, DiagnosticDangerousModePolicy.CONFIRM_HIGH_RISK, "request-7"))
+            assertTrue(
+                store.recordShellToolExposureChanged(
+                    agentId,
+                    DiagnosticExposureState.EXPOSED,
+                    skillId,
+                    DiagnosticAuthority.SHIZUKU,
+                    "approved",
+                    "request-8",
+                ),
+            )
+            assertTrue(
+                store.recordToolApprovalState(
+                    callId = callId,
+                    state = DiagnosticApprovalState.APPROVED,
+                    approvalId = approvalId,
+                    agentId = agentId,
+                    skillId = skillId,
+                    requestRef = "request-9",
+                    capability = DiagnosticToolCapability.SHELL_EXECUTE,
+                    authority = DiagnosticAuthority.SHIZUKU,
+                    sessionRef = "approval-session-$secret",
+                ),
+            )
+            assertTrue(
+                store.recordShellExecutionState(
+                    commandSha256 = command,
+                    terminalState = DiagnosticTerminalState.SUCCEEDED,
+                    authority = DiagnosticAuthority.SHIZUKU,
+                    limitBucket = DiagnosticLimitBucket.SMALL,
+                    stdoutBytes = 32,
+                    stderrBytes = 4,
+                    durationBucket = DiagnosticLimitBucket.TINY,
+                    requestRef = "request-10",
+                    callId = callId,
+                    agentId = agentId,
+                    skillId = skillId,
+                ),
+            )
+            assertTrue(
+                store.recordBridgeRequestState(
+                    DiagnosticBridgeRequestState.COMPLETED,
+                    DiagnosticAuthority.WIRED_ADB,
+                    "request-11",
+                    count = 1,
+                ),
+            )
+            assertTrue(store.recordDiagnosticDropSummary(1, 2, 3, DiagnosticHealth.DEGRADED, "io"))
+
+            val zipBytes = store.exportBytes()
+            listOf(secret, path, uri, command, stdout, agentId, skillId, workspaceId, callId, approvalId).forEach { value ->
+                assertFalse("sensitive marker persisted: $value", zipBytes.containsBytes(value.toByteArray(Charsets.UTF_8)))
+            }
+            val entries = zipEntries(zipBytes)
+            val allText = entries.values.joinToString("\n")
+            listOf(
+                "authority_selection_changed", "authority_state_changed", "shizuku_lifecycle", "wired_adb_lifecycle",
+                "workspace_grant_changed", "workspace_operation_state", "skill_memory_operation_state",
+                "dangerous_mode_changed", "shell_tool_exposure_changed", "tool_approval_state", "shell_execution_state",
+                "bridge_request_state", "diagnostic_drop_summary", "runtime_tooling_unavailable",
+            ).forEach { event -> assertTrue("missing $event", allText.contains("\"event\":\"$event\"")) }
+            val references = Regex("\\\"(?:agentRef|skillRef|workspaceRef|callRef|approvalRef|requestRef)\\\":\\\"([0-9a-f]{32})\\\"")
+                .findAll(allText)
+                .map { it.groupValues[1] }
+                .toList()
+            assertTrue("expected hashed references", references.isNotEmpty())
+            assertTrue(references.all { it.length == RollingDiagnosticLogStore.MAX_REFERENCE_LENGTH })
+            assertFalse(allText.contains(agentId))
+            assertFalse(allText.contains(workspaceId))
+        }
+    }
+
+    @Test
+    fun concurrentWritesRemainNdjsonAndRotationKeepsCompleteLines() {
+        withStore { directory, preferences ->
+            preferences.setEnabled(true)
+            val store = newStore(directory, preferences)
+            val executor = Executors.newFixedThreadPool(8)
+            repeat(8) { worker ->
+                executor.submit {
+                    repeat(400) { index ->
+                        store.recordCapabilityToggle(if ((worker + index) % 2 == 0) "tools" else "image", index % 3 == 0)
+                    }
+                }
+            }
+            executor.shutdown()
+            assertTrue(executor.awaitTermination(30, TimeUnit.SECONDS))
+            val status = store.status()
+            assertTrue(status.currentBytes <= RollingDiagnosticLogStore.MAX_CURRENT_BYTES)
+            assertTrue(status.previousBytes <= RollingDiagnosticLogStore.MAX_PREVIOUS_BYTES)
+            listOf(RollingDiagnosticLogStore.CURRENT_FILE_NAME, RollingDiagnosticLogStore.PREVIOUS_FILE_NAME).forEach { name ->
+                val text = store.readFile(name).toString(Charsets.UTF_8)
+                text.lineSequence().filter { it.isNotBlank() }.forEach { line ->
+                    assertTrue("incomplete NDJSON line", line.startsWith("{") && line.endsWith("}"))
+                    assertTrue(line.contains("\"schemaVersion\":2"))
+                }
+            }
+        }
+    }
+
+    @Test
+    fun ioFailureReturnsFalseAndDoesNotCrashCaller() {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val path = File(context.cacheDir, "diagnostics-io-failure-${UUID.randomUUID()}")
+        val preferences = MemoryPreferences().also { it.setEnabled(true) }
+        try {
+            path.writeText("not a directory")
+            val store = newStore(path, preferences)
+            assertFalse(store.recordCapabilityToggle("tools", true))
+            val status = store.status()
+            assertTrue(status.writeFailureCount > 0)
+            assertTrue(status.health == DiagnosticHealth.DEGRADED)
+        } finally {
+            path.deleteRecursively()
+        }
+    }
+
+    @Test
     fun androidPreferenceAdapterPersistsOptIn() {
         val context = InstrumentationRegistry.getInstrumentation().targetContext
         val directory = File(context.cacheDir, "diagnostics-device-${UUID.randomUUID()}")
@@ -246,6 +421,22 @@ class DiagnosticsDeviceTest {
         } finally {
             directory.deleteRecursively()
         }
+    }
+
+    private fun zipEntries(bytes: ByteArray): Map<String, String> {
+        val entries = linkedMapOf<String, String>()
+        ZipInputStream(ByteArrayInputStream(bytes)).use { zip ->
+            while (true) {
+                val entry = zip.nextEntry ?: break
+                entries[entry.name] = zip.readBytes().toString(Charsets.UTF_8)
+            }
+        }
+        return entries
+    }
+
+    private fun ByteArray.containsBytes(needle: ByteArray): Boolean {
+        if (needle.isEmpty() || needle.size > size) return false
+        return indices.any { start -> needle.indices.all { offset -> this[start + offset] == needle[offset] } }
     }
 
     private class MemoryPreferences : DiagnosticPreferenceStore {

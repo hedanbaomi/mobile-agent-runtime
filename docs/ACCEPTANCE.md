@@ -7,9 +7,9 @@
 
 ## 1. 完成状态
 
-`NOT_STARTED`尚未做；`IN_PROGRESS`已开始；`IMPLEMENTED`有实现未充分验证；`LOCAL_PASS`指定本地测试通过；`DEVICE_PASS`指定真机通过；`REVIEWED`独立审阅通过；`DEPLOYED`已授权部署且有目标证据；`RELEASED`已授权发布且完成后检。
+`NOT_STARTED`尚未做；`IN_PROGRESS`已开始；`IMPLEMENTED`有实现未充分验证；`AUTOMATED TESTED`指定自动化测试通过；`LOCAL_PASS`指定本地测试通过；`DEVICE_PASS`指定真机通过；`E2E BLOCKED`实现/自动化证据存在但真实端到端所需硬件、服务或授权缺失；`REVIEWED`独立审阅通过；`DEPLOYED`已授权部署且有目标证据；`RELEASED`已授权发布且完成后检。
 
-状态可以分别记录，不要求假装线性升级。阻塞记原因和缺失条件，不能把未执行记为PASS。设计校验通过只记`DOC_CHECK_PASS`，不代表M0完成或产品可用；M0.5 还须有用户对页面与交互方案的确认记录。原型走查不能代替真实 Compose/管理端实现及设备验证。
+状态可以分别记录，不要求假装线性升级。`IMPLEMENTED`、`AUTOMATED TESTED` 与 `E2E BLOCKED` 必须分开填写；阻塞记原因和缺失条件，不能把未执行记为PASS。设计校验通过只记`DOC_CHECK_PASS`，不代表M0完成或产品可用；M0.5 还须有用户对页面与交互方案的确认记录。原型走查不能代替真实 Compose/管理端实现及设备验证。Debug APK、JVM 测试或静态检查不能替代 `debuggable=false` review-like build 的安全证据。
 
 ## 2. 文档和许可证
 
@@ -46,7 +46,30 @@ U01—U06 的首次验收对象为设计包，结果仅覆盖设计；后续 M1�
 | A05 | 建会话后修改Prompt/模型/参数；展开Effective Prompt并与测试server接收内容比较 | 旧会话保持快照；显式换配置有新边界；预览与最终真实请求角色/结构一致，secret脱敏 |
 | A06 | 两个Agent共享KB/Skill/Provider；撤权后续跑旧快照 | 不重复向量化；撤权立即优先于旧配置；不存在跨Agent授权泄漏 |
 | A07 | Agent/KB/Skill导入导出往返、旧schema迁移、未知schema/坏hash/部分失败 | 默认不含secret/敏感附件；显式完整导出保留许可；重导入完整且版本匹配；失败不清库 |
-| A08 | 默认关闭诊断后触发能力开关/保存；主动开启后制造滚动量、标记 secret/URL/query/path/换行、受控未捕获异常、导出目标失败、清除并重开应用 | 关闭时零日志且偏好可持久化；当前/上一段各不超过64 KiB、最近崩溃不超过32 KiB、单事件不超过4 KiB、ZIP不超过192 KiB；仅固定事件/字段，导出不含标记秘密、聊天/Prompt/知识文件名/请求正文/异常消息；异常记录后委托系统原处理器；失败导出不删除现场；manifest含revision/dirty/schema/build time/设备fingerprint；原生崩溃和系统强杀边界明确提示仍需ADB Logcat |
+| A08 | 默认关闭诊断后触发能力开关/保存；主动开启后制造滚动量、标记 secret/URL/query/path/换行、权限/审批/断连/超时/取消/未知结果、受控未捕获异常、导出目标失败、清除并重开应用 | 关闭时零日志且偏好可持久化；当前/上一段各不超过256 KiB、最近崩溃不超过32 KiB、单事件不超过4 KiB、ZIP不超过640 KiB；仅固定事件/字段，导出不含标记秘密、命令/argv/cwd、路径/URI/serial、stdout/stderr、聊天/Prompt/知识文件名/请求正文/异常消息；异常记录后委托系统原处理器；失败导出不删除现场；manifest含revision/dirty/schema/build time/设备fingerprint；原生崩溃和系统强杀边界明确提示仍需ADB Logcat |
+| A09 | 以 `debuggable=false` 的 review-like build 检查危险模式、工具暴露、审批绑定、选定 Authority 失效和恢复；分别准备真实 Shizuku 服务与 USB Desktop Companion | debug/JVM/静态结果不能作为控制面安全结论；未提供真实 Shizuku/USB 端时记 `E2E BLOCKED`，不记 `DEVICE_PASS`；只有选定 Authority 可派发且无自动 fallback，危险模式关闭时不注册 `shell_exec` |
+
+### 3.1 Wire tool name、capability 与 backend-neutral 语义
+
+公开 schema 只使用下表的 provider-neutral wire name；`shizuku_*`、`adb_*`、`saf_*` 等实现名不得出现在 Agent-facing schema。当前已有代码/历史证据中的兼容名称只在 Host 内部转换，不能成为新的规范。
+
+| Wire tool name | Capability | Backend-neutral 语义 | 可用 backend / 当前证据 |
+| --- | --- | --- | --- |
+| `workspace_list` | `workspace.enumerate` | 列出当前 workspace 根 | Internal / SAF / selected privileged adapter；应用私有实现 `IMPLEMENTED`、`AUTOMATED TESTED` |
+| `file_list` | `file.list` | 列出相对路径下的子项 | Internal / SAF / selected privileged adapter；provider-neutral schema `IMPLEMENTED`，端到端 `E2E BLOCKED` |
+| `file_stat` | `file.stat` | 返回受限元数据 | Internal / SAF / selected privileged adapter；统一实现与 fixture 自动化已存在，真实 SAF/Shizuku/USB E2E `BLOCKED` |
+| `file_read_text` | `file.read_text` | 按 UTF-8 与字节预算读取文本 | Internal / SAF / selected privileged adapter；应用私有兼容实现 `IMPLEMENTED`、`AUTOMATED TESTED` |
+| `file_write_text` | `file.write_text` | 按权限与配额原子替换文本 | Internal / SAF / selected privileged adapter；应用私有兼容实现 `IMPLEMENTED`、`AUTOMATED TESTED` |
+| `file_create_directory` | `file.create_directory` | 创建受限目录 | Internal / SAF / selected privileged adapter；应用私有兼容实现 `IMPLEMENTED`、`AUTOMATED TESTED` |
+| `file_move` | `file.move` | 在同一授权 workspace 内移动 | Internal / SAF / selected privileged adapter；统一实现与 fixture 自动化已存在，真实 SAF/Shizuku/USB E2E `BLOCKED` |
+| `file_delete` | `file.delete` | 删除单文件或空目录，遵守 backend 约束 | Internal / SAF / selected privileged adapter；当前实现有受限删除，统一 wire schema `IMPLEMENTED`、E2E `BLOCKED` |
+| `memory_read` | `memory.read` | 读取当前 Skill memory | canonical SQLite SkillMemory backend；`IMPLEMENTED`、`AUTOMATED TESTED` |
+| `memory_search` | `memory.search` | 在当前 Skill memory 内有界检索 | canonical SQLite SkillMemory backend；`IMPLEMENTED`、`AUTOMATED TESTED` |
+| `memory_append` | `memory.append` | 追加当前 Skill memory 条目 | canonical SQLite SkillMemory backend；`IMPLEMENTED`、`AUTOMATED TESTED` |
+| `memory_replace` | `memory.replace` | 替换当前 Skill memory 条目 | canonical SQLite SkillMemory backend；`IMPLEMENTED`、`AUTOMATED TESTED` |
+| `shell_exec` | `shell.execute` | Dangerous Mode 下执行一次 Android `/system/bin/sh`，受 timeout/output/cancel/audit 控制 | `ShellToolExecutor`、`ShizukuShellExecutor`、`WiredAdbShellExecutor` 已有 `IMPLEMENTED`；backend fixture 为 `AUTOMATED TESTED`；真实 Authority/硬件 E2E `E2E BLOCKED` |
+
+Typed file tools 仍须 workspace scope、路径/symlink/配额和 approval revalidation；`shell_exec` 是明确的高风险 escape hatch，不得声称继续受 typed workspace confinement。它不授予宿主 PowerShell、宿主 shell、Root、无线 ADB、DPC、Termux 或 PTY。
 
 ## 4. 知识库
 
@@ -87,6 +110,16 @@ K06另需前台任务兼容矩阵：Android12+后台启动限制、Android14+服
 | S10 | 测试secret混入模型错误/Skill输出/日志/导出，模型超时副作用未知 | 全路径脱敏；不无限持久化内容；UNKNOWN_OUTCOME不自动重放 |
 | S11 | 受控MCP server工具发现/新增/重连/取消/错误；Remote接口schema测试 | 不自动授权新增工具、不在手机起任意stdio、不重放副作用；Remote不自动上传用户包或知识库 |
 | S12 | 导入无 `mobile-skill.json`、含标准库 `main()` CLI 的 Claude Skill；启用、空权限确认、Agent 绑定后由模型按 program enum/argv/虚拟 Markdown 文件调用；同包含重型依赖脚本 | 原 ZIP/hash 不改；只把通过兼容门槛的程序列入 `py_*` 工具；每次调用仍批准且在新 isolated UID 中执行；隐藏已验证源码字段不能由模型声明；虚拟文件无法映射宿主路径。依赖 PyMuPDF/NumPy/PyTorch/Transformers 的 `books_kb.py` 明确不直跑，绑定知识库时由 `knowledge_search`/`read_document` 承接且模型不得伪称原脚本执行 |
+| S13 | Agent 调用应用私有 `workspace_list` 与 provider-neutral `file_*` typed tools；覆盖长路径、绝对路径、`..`、symlink、配额、重复 call ID、批准前后撤销 Agent/快照、替换写中断 | 读、列、写、建目录、移动和受限删除由 backend-neutral schema 表达并逐次批准、批准时复核；真实路径不进入模型或错误；Agent+快照命名空间互相隔离；越界/撤权 fail-closed；UTF-8 替换写原子且无临时残留；typed path 不等于 shell |
+| S14 | 对照 wire tool name→capability→backend-neutral 语义矩阵；Provider 无 tools、未知 tool、backend 名称伪装、schema additionalProperties 和重复 call ID | 只发送当前 Provider 声明且经 capability intersection 的中性 schema；未知/后端专用名称拒绝；schema 严格；同一 call 不重复执行；状态：mapping `IMPLEMENTED`，逐项自动化证据按工具记录 |
+| S15 | Dangerous Mode 首次开启/关闭、持久化、Agent capability、`ENABLED_CONFIRM_HIGH_RISK` 与 `ENABLED_AUTONOMOUS`、Authority 暂时不可用 | 首次开启有风险确认；显式关闭才关闭；Authority 暂时失效不清除 grant 或模式但不派发；普通模式不注册 `shell_exec`；高风险档逐次确认，自治档不逐条确认但仍受限；状态：契约 `IMPLEMENTED`，自动化/E2E 分别记录 |
+| S16 | 选择 `SHIZUKU` 或 `WIRED_ADB`，grant/availability/connection 变化，断连、重连、切换和撤权 | 两种 Authority 平级；只调度 selected provider；selected provider 失效返回确定错误且不自动 fallback；Binder/USB 恢复需 revalidate 后恢复；状态：生命周期 `IMPLEMENTED`，真实设备 `E2E BLOCKED` |
+| S17 | `shell_exec` command/cwd/timeout/output/cancel/exit code，超时、截断、断连、派发后未知结果 | 仅设备端 one-shot `/system/bin/sh`；无 PTY、宿主 shell、自动重放或模型指定 serial/host/port；结构化结果和终态；状态：Runtime/backend `IMPLEMENTED`，部分 backend fixture `AUTOMATED TESTED`，真实 Authority/硬件 `E2E BLOCKED` |
+| S18 | approval 与 Agent/Skill snapshot、selected Authority、Dangerous Mode、capability revision 和参数摘要绑定；批准后 revalidation 与 audit | 绑定任一项变化都 fail-closed；不得把自然语言“已批准”当 grant；未知结果不可自动重放；进程重启旧审批失效；诊断仅写哈希/枚举/计数；状态：`IMPLEMENTED`、`AUTOMATED TESTED` |
+| S19 | SAF 系统选择器、持久 URI grant、撤销、URI 不泄露到模型/日志 | SAF 是独立 workspace backend，不是 Authority；只操作用户选定 URI，grant 可撤销；不转成全局路径；状态：实现与负向 fixture `AUTOMATED TESTED`，真实 SAF provider `E2E BLOCKED` |
+| S20 | Shizuku 未安装/未授权/Binder dead/rebind；非 root UID；与 Wired ADB 同时可用 | 仅接受显式 Shizuku grant 与可证明 shell UID 2000；Root/UID0 不属于产品路线；Shizuku 失效不切 Wired ADB；实现与 fake/本地 service fixture `AUTOMATED TESTED`，真实 Shizuku 设备 `E2E BLOCKED` |
+| S21 | Windows Companion doctor/pair/reverse/session/request/recovery；官方 adb USB、loopback、会话序号/HMAC、断开与重连 | 只支持有线 USB ADB 平级 backend；不支持无线 ADB/LAN；桥不接受 host PowerShell、raw command、serial/port 由 Agent 指定；Companion/protocol 有 `IMPLEMENTED` 与 `AUTOMATED TESTED` 证据，真实设备时 `E2E BLOCKED` |
+| S22 | 非 debug 控制面、诊断导出/清除与 release gate | `debuggable=false` Review APK、Review SBOM/provenance 与 security gate 已 `LOCAL_PASS`；debug 证据单列；诊断限额固定为 256/256/32/4/640 KiB；真实 Shizuku/USB/SAF 仍保持 `E2E BLOCKED` |
 
 ## 6. 公告
 
@@ -104,9 +137,15 @@ K06另需前台任务兼容矩阵：Android12+后台启动限制、Android14+服
 
 ## 7. 证据产物和独立复核
 
+2026-08-31 v2 本地收敛证据：严格全仓 `check`、Debug evidence gate 与 `debuggable=false` Review gate 全部通过；Debug/Review 均生成 171-component CycloneDX 1.6 SBOM 和 SHA-bound provenance；REUSE、AGPL/license 正反向、Actions pin、28 个 lockfile、root+included-build strict dependency verification、148 Maven + 4 native/model 成品 notices 均通过。最终 Debug APK 已安装到 API 31 x86_64 并确认首次浅色主题；v2 instrumentation 按 Authority/Workspace/Memory、Tooling/Navigation/Search、UI/Release Gate、Diagnostics 分批执行。准确测试数、产物 hash、命令、独立只读复核与外部 `E2E BLOCKED` 列表见 [authority-tooling-v2-final](evidence/2026-08-31/authority-tooling-v2-final.md)。该证据是 dirty-source 本地候选，不代表正式签名、发布或生产部署。
+
 2026-08-30 第二轮人工反馈包补充验证：API 31 x86_64 上 `DiagnosticsDeviceTest`、`ReleaseGateUiDeviceTest`、`NavigationScopeTest` 合计 17/17、0 failed；`check --dependency-verification=strict` 936 tasks 通过。覆盖诊断启停/边界、More 二级返回、公告配置隐藏、无智能体尺寸和稳定导航 owner；ZIP/Skill install/批次调度由共享与 SQLite 测试覆盖。用户实际 294 个 PDF 的完整耗时及真实 Provider 跨页流仍保留为人工终审，不据此标 K06 或正式 release PASS。证据见 [manual-review-round-2-fixes](evidence/2026-08-30/manual-review-round-2-fixes.md)。
 
 2026-08-30 第三轮能力反馈包补充验证：API 31 x86_64 上 `NavigationScopeTest`、`WebSearchDeviceTest`、`PythonRuntimeDeviceTest`、`PythonSkillToolDeviceTest`、`DiagnosticsDeviceTest`、`ReleaseGateUiDeviceTest` 合计 34/34、0 failed；`check --dependency-verification=strict` 936 tasks 通过。`PythonSkillToolDeviceTest` 覆盖真实导入、启用、grant、Agent snapshot、模型可见 ToolSpec、逐次审批和 isolated CPython 虚拟文件执行；联网响应覆盖活动 key 脱敏。未调用真实 Brave/付费 Provider/Vision，也未跑用户 294 个 PDF 全量耗时，因此仍不是完整 K06 或正式 release PASS。证据见 [manual-review-round-3-capabilities](evidence/2026-08-30/manual-review-round-3-capabilities.md)。
+
+2026-08-30 第四轮人工反馈先完成三项可验证修复：长工具确认卡可在固定操作区上方滚动、Provider 两个预算输入可完整清空后再校验、首次/缺失/非法主题回退浅色且保留用户显式选择。Agent 文件能力只新增 S13 的应用私有文本工作区，API 31 x86_64 `WorkspaceAppToolsTest` 6/6；SAF、Termux、无线 ADB、DPC、root/Shizuku 和任意 shell 均未实现。最终全仓门禁、APK hash 与剩余边界见 [第四轮证据](evidence/2026-08-30/manual-review-round-4-ui-workspace.md)。
+
+上述第四轮记录是当时的时间限定证据，不是 v2 规范。v2 当前只保留 `SHIZUKU` 与 `WIRED_ADB` 两个 elevated Authority；无线 ADB、Termux、DPC、Root 与 PTY 仍为明确排除项。后续如有源码或测试进展，必须在本矩阵新增证据并分别填写 `IMPLEMENTED`、`AUTOMATED TESTED`、`E2E BLOCKED`，不得回写历史证据为真机 PASS。
 
 实现后在`docs/evidence/日期-任务ID/`保留脱敏报告、测试清单及允许公开的截图/日志。每份报告包含：需求/验收ID、范围、工具/依赖/SDK版本、Git SHA或未提交状态、命令与退出码、fixture哈希、观测结果、失败/剩余风险、审阅结论。敏感原始材料只放`.private/`，不在公共报告链接私有用户内容。
 
@@ -116,4 +155,4 @@ K06另需前台任务兼容矩阵：Android12+后台启动限制、Android14+服
 
 ## 8. 发布门槛
 
-必须满足功能范围、ABI/设备、安全、迁移、许可和隐私检查；M0.5 设计及后续 U 系列适用项必须有证据，M6未完成不能称功能完整MVP；M7发布准备通过也不代表授权部署或发布。发布任务另外记录目标、源码SHA/tag、产物hash、签名身份、依赖/SBOM、迁移备份、回退方法、用户授权和后检结果。
+必须满足功能范围、ABI/设备、安全、迁移、许可和隐私检查；M0.5 设计及后续 U 系列适用项必须有证据，M6未完成不能称功能完整MVP；Dangerous Mode 的安全门禁必须在 `debuggable=false` review-like build 上通过，不能用 debug APK 替代；Shizuku/Wired ADB 缺少真实端时只能记 `E2E BLOCKED`。M7发布准备通过也不代表授权部署或发布。发布任务另外记录目标、源码SHA/tag、产物hash、签名身份、依赖/SBOM、迁移备份、回退方法、用户授权和后检结果。

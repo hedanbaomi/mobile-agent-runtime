@@ -3,9 +3,9 @@
 
 # 文档与仓库初始化核查
 
-第1/2/4/5/6节保留初始文档任务的历史记录，不代表当前源码或里程碑状态；后续状态见 HANDOFF。本次软件页面 UI 设计阶段的文档变更记录见第7节，第3节检查器已同步更新。
+第1/2/4/5/6节保留初始文档任务的历史记录，不代表当前源码或里程碑状态；后续状态见 HANDOFF。本次软件页面 UI 设计阶段的文档变更记录见第7节。v2 权限工具文档在第10节登记为当前单一规范；历史轮次中的无线 ADB、Termux、DPC、Root 或 PTY 方案不再是现行路线。
 
-日期：2026-08-28，Asia/Taipei。范围仅本地文档、许可文件、Git和CodeGraph；不是Android/Worker功能验收。
+日期：2026-08-30，Asia/Taipei。范围仅本地文档、许可文件、Git和CodeGraph；不是Android/Worker功能验收，也不是 Shizuku/USB Companion 真实 E2E 或 Dangerous Mode 安全签署。
 
 ## 1. 来源与交付边界
 
@@ -24,8 +24,8 @@
 | 忽略本机索引 | `git check-ignore -v .codegraph/codegraph.db`匹配根.gitignore |
 | 许可证获取 | 从GNU官方纯文本地址获取，长度与正文关键段校验通过 |
 | 两份许可证 | 字节一致，SHA-256见下 |
-| 自动文档检查 | 重跑通过：12份Markdown、42个本地链接、1个JSON示例、17条需求；无断链、fence/JSON/头声明/尾随空白错误 |
-| 验收与规则检查 | 41个预期验收ID完整；两个Agent入口含交接/维护/许可marker；根配置SPDX通过 |
+| 自动文档检查 | 本轮完成后重跑；结果以当前脚本输出为准，覆盖 v2 所需文档、R01—R24、U01—U06、S01—S22 和原阶段顺序；无断链、fence/JSON/头声明/尾随空白错误才可记 PASS |
+| 验收与规则检查 | v2 工具映射、Authority 无 fallback、Dangerous Mode、诊断限额与 `E2E BLOCKED` 状态由本文档检查和 [ACCEPTANCE](ACCEPTANCE.md) 共同覆盖；不是产品功能 PASS |
 | 独立只读审阅 | 技术事实核查完成；文档初审NEEDS_AMEND，4项修订后定点复核PASS，无遗留P1/P2文档项 |
 | Gradle/REUSE/CI/真机/云 | 尚未建立或未执行，不属于本轮通过项 |
 
@@ -50,7 +50,7 @@ codegraph status . --json
 Get-FileHash -Algorithm SHA256 -LiteralPath LICENSE,LICENSES/AGPL-3.0-only.txt
 ```
 
-下面为 Python 标准库检查器，已随诊断日志需求更新扩展至 R01—R19、U01—U06 和阶段顺序；上方历史结果不因此改写。环境 Python 3.11；在 PowerShell 以单引号 here-string 传入 `python -B -`，或提取本代码块在内存中执行。它只检查根目录与 `docs/` 的第一方文档，不扫描构建/依赖目录，也不是产品 licenseGuard、REUSE 或业务测试：
+下面为 Python 标准库检查器，已扩展至 v2 所需文档、R01—R24、U01—U06、S01—S22 和阶段顺序；上方历史结果不因此改写。环境 Python 3.11；在 PowerShell 以单引号 here-string 传入 `python -B -`，或提取本代码块在内存中执行。它只检查根目录与 `docs/` 的第一方文档，不扫描构建/依赖目录，也不是产品 licenseGuard、REUSE 或业务测试：
 
 ```python
 # REUSE-IgnoreStart
@@ -59,19 +59,26 @@ import re, json, hashlib
 root = Path(r"E:\mobileAgentRuntime")
 docs = sorted([*root.glob("*.md"), *(root / "docs").rglob("*.md")])
 issues, link_count, json_count = [], 0, 0
-required = ["README.md", "AGENTS.md", "agent.md", "HANDOFF.md", "LICENSE_POLICY.md",
+required = ["README.md", "AGENTS.md", "agent.md", "HANDOFF.md", "LICENSE_POLICY.md", "CONTEXT.md",
             "docs/REQUIREMENTS.md", "docs/IMPLEMENTATION_PLAN.md", "docs/KNOWLEDGE.md",
             "docs/SKILLS_AND_SECURITY.md", "docs/ANNOUNCEMENTS.md", "docs/ACCEPTANCE.md",
-            "docs/DOCUMENTATION_CHECK.md", "LICENSE", "LICENSES/AGPL-3.0-only.txt"]
+            "docs/DIAGNOSTICS.md", "docs/DOCUMENTATION_CHECK.md",
+            "docs/mobile-agent-runtime-authority-tooling-codex-prompt-v2.md",
+            "docs/adr/0004-capability-authority-bridge.md", "docs/adr/0005-dangerous-shell-mode.md",
+            "docs/plans/multi-authority-controlled-execution.md", "docs/plans/shizuku-controlled-execution.md",
+            "docs/plans/wired-adb-desktop-bridge.md", "LICENSE", "LICENSES/AGPL-3.0-only.txt"]
 for name in required:
     if not (root / name).is_file(): issues.append("missing: " + name)
 for p in docs:
     t = p.read_text(encoding="utf-8")
     rel = p.relative_to(root).as_posix()
-    if "SPDX-License-Identifier: AGPL-3.0-only" not in "\n".join(t.splitlines()[:5]):
-        issues.append(rel + ": missing AGPL SPDX header")
-    if "SPDX-FileCopyrightText:" not in "\n".join(t.splitlines()[:5]):
-        issues.append(rel + ": missing copyright header")
+    # The v2 prompt is a user-provided normative prompt and is intentionally
+    # not rewritten or given a project SPDX header in this documentation task.
+    if rel != "docs/mobile-agent-runtime-authority-tooling-codex-prompt-v2.md":
+        if "SPDX-License-Identifier: AGPL-3.0-only" not in "\n".join(t.splitlines()[:5]):
+            issues.append(rel + ": missing AGPL SPDX header")
+        if "SPDX-FileCopyrightText:" not in "\n".join(t.splitlines()[:5]):
+            issues.append(rel + ": missing copyright header")
     inside, language, block = False, "", []
     prose = []
     for n, line in enumerate(t.splitlines(), 1):
@@ -100,10 +107,12 @@ for p in docs:
         if not resolved.is_relative_to(root): issues.append(rel + ": external local path " + target)
 req = (root / "docs/REQUIREMENTS.md").read_text(encoding="utf-8")
 ids = set(re.findall(r"\| (R\d{2}) \|", req))
-if ids != {f"R{i:02}" for i in range(1, 20)}: issues.append("R01-R19 coverage missing")
+if ids != {f"R{i:02}" for i in range(1, 25)}: issues.append("R01-R24 coverage missing")
 acceptance = (root / "docs/ACCEPTANCE.md").read_text(encoding="utf-8")
 ui_ids = set(re.findall(r"\| (U\d{2}) \|", acceptance))
 if ui_ids != {f"U{i:02}" for i in range(1, 7)}: issues.append("U01-U06 coverage missing")
+skill_ids = set(re.findall(r"\| (S\d{2}) \|", acceptance))
+if skill_ids != {f"S{i:02}" for i in range(1, 23)}: issues.append("S01-S22 coverage missing")
 plan = (root / "docs/IMPLEMENTATION_PLAN.md").read_text(encoding="utf-8")
 phases = re.findall(r"^\| (M\d+(?:\.\d+)?) \|", plan, re.MULTILINE)
 if phases != ["M0", "M0.5", *[f"M{i}" for i in range(1, 8)]]: issues.append("milestone order mismatch")
@@ -163,3 +172,19 @@ raise SystemExit(1 if issues else 0)
 - 已同步 [技术实现方案](IMPLEMENTATION_PLAN.md)、[验收矩阵](ACCEPTANCE.md)、[Skills 与安全](SKILLS_AND_SECURITY.md)、[需求依据](REQUIREMENTS.md)、[交接记录](../HANDOFF.md)和 [Round3 证据](evidence/2026-08-30/manual-review-round-3-capabilities.md)。
 - 文档明确区分：兼容标准库 Claude Skill 程序的真实 isolated CPython 调用；重型桌面依赖脚本改走原生知识工具；PowerShell、宿主 shell、任意文件系统和未授权网络不支持。
 - 全仓 `check` 936 tasks、API 31 定向设备矩阵 34/34、公告 `npm test`、REUSE 392/392 已通过；真实 Brave/付费 Provider/Vision、294 PDF 全量耗时、正式签名 release、commit/push 和 Cloudflare 再部署均未执行。
+
+## 10. 2026-08-30 v2 权限工具文档收敛
+
+- 当前单一规范为 [v2 prompt](mobile-agent-runtime-authority-tooling-codex-prompt-v2.md)；其配套单一事实分布在 [REQUIREMENTS](REQUIREMENTS.md)、[ACCEPTANCE](ACCEPTANCE.md)、[SKILLS_AND_SECURITY](SKILLS_AND_SECURITY.md)、[DIAGNOSTICS](DIAGNOSTICS.md)、[ADR-0004](adr/0004-capability-authority-bridge.md)、[ADR-0005](adr/0005-dangerous-shell-mode.md) 及三个执行计划中。
+- 当前 elevated Authority 仅为 `SHIZUKU` 与 `WIRED_ADB`，平级且无 fallback；SAF 是 workspace backend。Root、无线 ADB、DPC、Termux、PTY 和宿主 shell 仍排除。
+- 应用私有 typed workspace 可按既有实现/自动化证据记 `IMPLEMENTED`、`AUTOMATED TESTED`；真实 Shizuku、Windows USB Companion、Dangerous Mode 安全链路和 `debuggable=false` review-like build 缺失时必须记 `E2E BLOCKED`，不得用 debug/静态结果替代。
+- 诊断限额固定为当前段/上一段/崩溃/单事件/ZIP `256 KiB/256 KiB/32 KiB/4 KiB/640 KiB`；命令、路径、URI、serial、stdout/stderr、token 和自由文本禁止进入诊断。
+- 本轮仅变更文档，保留已有 Round2/3/4 历史证据原样作为时间限定记录；未修改 `HANDOFF.md`、`docs/IMPLEMENTATION_PLAN.md`、v2 prompt、源码或 secrets，未执行 Gradle、commit、push、deploy。
+
+## 11. 2026-08-31 v2 实现与证据同步
+
+- v2 不再是“仅文档”：Capability/Workspace/Authority/Approval/Audit、Internal/SAF/privileged workspace、Skill Memory、Shizuku、Windows 有线 USB ADB Companion、Dangerous Mode、`shell_exec`、Settings/Agent/Chat/Skills/diagnostics 均已有生产接线与自动化。第 10 节是当时文档 checkpoint，不覆盖本节。
+- 当前事实已同步到 [HANDOFF](../HANDOFF.md)、[IMPLEMENTATION_PLAN](IMPLEMENTATION_PLAN.md)、[ACCEPTANCE](ACCEPTANCE.md)、[DIAGNOSTICS](DIAGNOSTICS.md) 与 [v2 最终证据](evidence/2026-08-31/authority-tooling-v2-final.md)。更早历史证据保留原始时间边界，不回写为当前真机结论。
+- 本地验证包括：REUSE 514/514；license 正反向；Actions pin；28 lockfiles；root+included-build strict dependency verification；共享/JVM tests；全仓 `check` 1024 tasks；Debug/Review evidence gate；两份 171-component SBOM/provenance；Debug/Review 成品 notices；API 31 分批 instrumentation；Debug APK 安装与首次浅色主题。
+- `debuggable=false` Review gate 只证明本地非调试控制面和 artifact binding；真实 Shizuku、物理 USB Companion 与真实 SAF provider 仍是 `E2E BLOCKED`。Root、无线 ADB、DPC、Termux、PTY、Accessibility 和宿主 shell 是排除项。
+- 本轮没有降低 AGPL、REUSE、dependency verification 或 release gate，没有 commit/push、正式签名、release、部署、secret 变更或付费调用。最终核心安全、UI/生命周期、构建证据三路独立复核发现的三个 P1 已修复并由原审查者复核关闭；准确结论写入 v2 最终证据。

@@ -3,7 +3,7 @@
 
 # Skills 执行与安全模型
 
-状态：M5 工具协议和 M6 官方 CPython 3.14.7 隔离执行已经进入 debug 人工终审基线；工具协议含 assistant.tool_calls、live grant、read_document KB 校验、HTTPS/IP 字面值拒绝、完整 EOCD/central/local ZIP 结构校验、canonical duplicate/symlink class E、预算取消上游。2026-08-30 追加无清单 Claude Skill 的标准库 CLI 兼容层，但仍不构成正式 release。对应R09—R12、S01—S12。**知识是数据，Prompt是指令，Skill脚本是可执行代码，三者不共享信任等级。**
+状态：M5 工具协议和 M6 官方 CPython 3.14.7 隔离执行已经进入 debug 人工终审基线；工具协议含 assistant.tool_calls、live grant、read_document KB 校验、HTTPS/IP 字面值拒绝、完整 EOCD/central/local ZIP 结构校验、canonical duplicate/symlink class E、预算取消上游。2026-08-30 追加无清单 Claude Skill 的标准库 CLI 兼容层和逐次批准的应用私有文本工作区，但仍不构成正式 release。v2 进一步定义 provider-neutral typed tools、SAF workspace、Shizuku/Wired ADB 双 Authority 与 Dangerous Mode；这些能力按 `IMPLEMENTED`、`AUTOMATED TESTED`、`E2E BLOCKED` 分别报告。对应R09—R12、R20—R24、S01—S22。**知识是数据，Prompt是指令，Skill脚本是可执行代码，三者不共享信任等级。**
 
 ## 1. Skill包与兼容性
 
@@ -40,7 +40,7 @@
 | A Instruction-only | 支持读取SKILL.md指令；没有可由本机隔离运行时安全承接的程序 |
 | B Pure Python Compatible | 显式清单程序，或本机兼容分析确认的无清单标准库 CLI；启用、授权、Agent 绑定且逐次批准后可执行 |
 | C Unsupported dependencies | 保留说明，禁用脚本并列依赖原因 |
-| D Platform-specific | Shell/Node/Docker/桌面自动化等不能在本地执行；保留说明 |
+| D Platform-specific | Skill 内的 Shell/Node/Docker/桌面自动化等不能由 Python 隔离 worker 执行；保留说明。v2 的 Android `shell_exec` 是独立 Dangerous Mode control-plane，不是 Skill runtime 能力 |
 | E Dangerous/Invalid | 路径穿越、压缩炸弹、原生载荷、哈希不符等拒绝安装；不得回退成可信指令 |
 
 A/C/D的指令同样是不可信导入内容，启用前用户确认，不能让其中的安装命令自动执行。兼容分析是提示，不是安全证明。签名有效只证明来源/完整性，不自动产生信任或权限。
@@ -106,9 +106,34 @@ Agent 资源绑定的稳定标识是 `SkillInstall.installId`，不是清单中�
 
 HTTP写操作和文件导出等副作用必须向用户展示目的地与影响；不能因为模型说“用户已批准”而跳过。所有能力有超时和取消传播，调用完成后凭证不可重放。
 
+### 4.1 Agent 应用私有文本工作区
+
+当前应用私有工作区已有结构化实现和设备自动化证据；历史兼容 wire name 为 `workspace_list`、`workspace_read`、`workspace_write`、`workspace_create_directory`（以及受限删除），v2 Agent-facing schema 统一使用 `workspace_list`、`file_list`、`file_stat`、`file_read_text`、`file_write_text`、`file_create_directory`、`file_move`、`file_delete`。命名空间由 Agent ID 与冻结快照 ID 的 SHA-256 派生，真实目录位于应用私有存储；模型只看到相对路径。读取和列目录也会把内容交给远程模型，因此与写入、建目录一样逐次显示确认，批准时再次检查 Agent 与快照仍然存在，call ID 只能使用一次。
+
+路径拒绝绝对路径、反斜杠、冒号、NUL、`.`/`..`、过深层级、符号链接和 canonical 越界。文本必须是 UTF-8；单文件、单次读取、文件数、目录项、总字节与工具输出都有硬上限。替换写先写同目录临时文件、刷新后原子移动；删除（如 backend 支持）只允许单文件或空目录，不提供改权限、可执行位、原始文件描述符或 Android 真实路径。该工作区让模型可以在用户批准后创建和修改应用内部文本成果，也可以保存隔离 Skill 的结果，但不会把目录直接挂载进 Python worker，Skill 与工作区之间仍经过独立工具批准。
+
+下列能力不是该工具的别名；是否实现必须按独立权限域验收：
+
+- SAF：只在用户通过系统选择器选择具体文件或目录后，使用可撤销的 URI grant；不能把 URI 变成全局路径或默认授权整棵共享存储。SAF 是 workspace backend，不是 elevated Authority。
+- Shizuku 与有线 ADB：是两个平级、显式选择的 elevated Authority；selected provider 失效时 fail-closed，绝不自动 fallback。
+- Termux、无线 ADB、Device Owner/Profile Owner、Root：均不属于 v2 当前路线；不得以“外部 CLI”“ADB host”或“设备管理器权限”文案暗示已经接线。
+- PowerShell 是 Windows 宿主能力，不是 Android 能力。Windows Companion 只允许官方 adb、USB、loopback、`adb reverse` 和固定协议；不把 `ProcessBuilder`、`Runtime.exec`、PowerShell 或宿主文件系统暴露给 Agent。
+
+### 4.2 v2 wire/capability 与执行分层
+
+完整 wire name → capability → backend-neutral 映射见 [验收矩阵 §3.1](ACCEPTANCE.md)。Skill、Prompt、模型输出和 server description 都不能声明 Authority 或扩大 capability；最终权限是包声明 ∩ 用户 grant ∩ Agent/Skill snapshot ∩ selected Authority ∩ 当前策略 ∩ 本次预算。
+
+`shell_exec` 只在 Dangerous Mode、当前 Agent 允许 dangerous shell、已配置 selected `SHIZUKU`/`WIRED_ADB` 且该 Authority 允许 `shell.execute` 时注册。它执行 Android 端一次性 `/system/bin/sh`，支持 timeout/cancel/output limit，禁止 PTY 和自动重放；不改变 Skill/Python 的 isolated worker 边界，也不提供宿主 shell。Typed file tools 的路径和 workspace confinement 不得被描述为 shell 的安全沙箱。
+
+Dangerous Mode 持久保存至用户显式关闭，至少区分 `ENABLED_CONFIRM_HIGH_RISK` 与 `ENABLED_AUTONOMOUS`；确认检测器只能决定是否需要单次确认，不能改写命令或伪装 allowlist。Binder/USB 暂时断连不自动撤销 grant 或模式，但在 revalidation 前不派发；恢复后仍使用原 selected Authority，不切换到另一 Authority。
+
+### 4.3 Debug 安全边界与状态
+
+Debug APK 仅用于开发和自动化测试；它不是 control-plane security evidence。危险模式、shell 注册/审批、Authority 绑定与 secret 边界的安全结论必须来自 `debuggable=false` 的 review-like build，并由独立审阅记录。缺少真实 Shizuku 服务或 USB Companion 时，静态/单元/仪器证据可记 `IMPLEMENTED` 或 `AUTOMATED TESTED`，但设备链路必须记 `E2E BLOCKED`。
+
 ## 5. 依赖和资源限额
 
-首版只支持允许的stdlib子集、包内vendored纯Python和App预审依赖。**不支持运行时pip、自动下载依赖、任意subprocess、原生wheel、DEX/JAR/SO、Shell或可执行文件。** 直接socket/文件访问必须在真实系统边界被拒绝，import过滤只是减少攻击面。
+首版 Skill/Python runtime 只支持允许的stdlib子集、包内vendored纯Python和 App 预审依赖。**不支持运行时pip、自动下载依赖、任意subprocess、原生wheel、DEX/JAR/SO、Skill 内 Shell 或可执行文件。** v2 的 Android `shell_exec` 仅由独立 control-plane 在 Dangerous Mode 下提供，不得被实现成 Python/Skill 的逃逸入口。直接socket/文件访问必须在真实系统边界被拒绝，import过滤只是减少攻击面。
 
 | 限额 | 默认 | 强制位置 |
 | --- | --- | --- |
@@ -128,7 +153,7 @@ Keystore生成不可导出的加密key，Provider/Skill秘密作为密文保存�
 
 日志、预览、错误、导出、崩溃信息统一脱敏。Request Inspector为用户本地按需查看，默认不持久化正文；“输入摘要”不能成为明文全文副本。生产日志默认不含聊天、Prompt、文件名、向量文本或Skill输入输出。
 
-应用内诊断日志同样默认关闭，只能由用户在设置页主动开启。实现使用固定事件/字段白名单，只记录会话、进程、`main`/`worker`/`other`线程类别、UTC、等级、构建 revision/dirty/schema/build time，以及匿名的能力开关、保存结果、知识导入/Skill检查安装/批次worker阶段与计数；不得记录 Provider/模型/Base URL/API Key/Header、聊天/Prompt、知识或Skill文件名/真实路径、请求正文或异常消息。所有字符串再次经过 secret、URL/query、Windows/Unix 路径、控制字符和长度清洗。当前段与上一段各至多64 KiB，最近崩溃摘要至多32 KiB，单事件至多4 KiB，导出ZIP至多192 KiB；未捕获异常只保留异常类型和有界类/方法/行号，写入后必须委托Android原始崩溃处理器。诊断初始化、轮转和handler安装均为best-effort，失败不能阻止App启动。
+应用内诊断日志同样默认关闭，只能由用户在设置页主动开启。实现使用固定事件/字段白名单，只记录会话、进程、`main`/`worker`/`other`线程类别、UTC、等级、构建 revision/dirty/schema/build time，以及匿名的能力开关、保存结果、知识导入/Skill检查安装/批次worker阶段、Authority/approval/revalidation/dispatch/execution/terminal 阶段与计数；不得记录 Provider/模型/Base URL/API Key/Header、聊天/Prompt、知识或Skill文件名/真实路径、命令/argv/cwd、URI/ADB serial、请求正文、stdout/stderr 或异常消息。所有字符串再次经过 secret、URL/query、Windows/Unix 路径、控制字符和长度清洗。当前段与上一段各至多256 KiB，最近崩溃摘要至多32 KiB，单事件至多4 KiB，导出ZIP至多640 KiB；未捕获异常只保留异常类型和有界类/方法/行号，写入后必须委托Android原始崩溃处理器。诊断初始化、轮转和handler安装均为best-effort，失败不能阻止App启动。
 
 诊断包经 Storage Access Framework 写到用户选择的位置，manifest包含构建和设备fingerprint以绑定复现环境；导出失败不得清除原始日志，清除只删除应用自有诊断文件。应用不申请`READ_LOGS`，不能捕获native崩溃、内核/系统强杀或被杀前未落盘的Android系统日志，这些场景仍需用户提供相同APK SHA对应的ADB Logcat。完整操作和字段契约见[诊断日志](DIAGNOSTICS.md)。
 
@@ -199,3 +224,9 @@ App外部导入Python仍涉及动态代码和平台政策约束。首版仅用�
 - bit3 data descriptor 的实际 CRC、压缩/解压大小必须与 central entry 一致；目录项也在跳过业务内容前执行同样的完整性、单项大小、压缩比和聚合总量检查，目录名不能成为资源限制旁路。
 - Agent Runtime 对 `beforeModelRequest` 使用自身剩余预算的 `withTimeoutOrNull`：自身 deadline 到期记录 `BUDGET_EXHAUSTED` 且不启动模型；调用方取消仍沿取消路径处理，不伪装成预算耗尽。
 - 新回归覆盖 fake EOCD、大小写/规范化重复路径、central/local 名称不一致和虚拟时间下的 pre-request budget timeout。
+
+## 13. 应用私有工作区（2026-08-30）
+
+- Chat 的冻结 Agent snapshot 注入四个结构化工作区工具；Provider 未声明 `tools` 时仍不会发送工具 schema。
+- API 31 x86_64 `WorkspaceAppToolsTest` 6/6 通过：拒绝绝对路径/遍历、逐次批准和 call ID 防重放、UTF-8 原子替换且无临时文件残留、大小上限和 symlink 拒绝、撤销 Agent/快照后 fail-closed、读取/列目录也需要批准。
+- 设备测试只证明应用私有工作区路径。本轮没有执行 SAF、Termux、无线 ADB、DPC、root/Shizuku 或任意 shell 验收，不得以 S13 通过替代这些后续能力的独立设计和用户授权。

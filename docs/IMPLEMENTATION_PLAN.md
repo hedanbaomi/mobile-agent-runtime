@@ -3,7 +3,7 @@
 
 # 技术实现方案
 
-版本：v2.1 人工终审能力修复包，2026-08-30；继承 v2.0 的界面、导航、诊断和公告部署状态。状态：**知识导入和 Chat 流跨顶层页面继续运行；请求检查器读取同一状态；Agent 获得逐次授权的固定 Brave 联网搜索；兼容的无清单 Claude Skill 标准库 CLI 在启用、授权、绑定后成为真实模型工具并由 isolated CPython 执行。最终复核问题已经修订并停止继续复核；新的 debug 签名 APK 等待用户人工终审，正式签名 release 仍为 `BLOCKED_SIGNING`**。不开放 PowerShell、宿主 shell、任意宿主文件系统、子进程、原生扩展或未授权网络。新 APK SHA-256 为 `d68a062b12121b76e502afd8a8cf3610d756876d3a7a00eca916f597ad564682`，API 31 x86_64 定向设备回归 34/34，全仓严格依赖 check 936 tasks 通过。此前公告 Worker 生产状态保持不变；本次没有重新部署或修改公告内容。App 元数据仍为 `versionName=0.1.0`/`versionCode=1`。F-001 曾稳定出现两次但未稳定复现，保持 `candidate_intermittent`；仅在用户人工再发现问题时凭诊断 ZIP、APK SHA 和必要的完整 Logcat 重启复核—修复。用户实际 294 个 PDF/约 301 MiB 未在测试设备完成全量端到端复跑，未调用真实 Brave、付费 Provider 或 Vision；Android 15 六小时 timeout、Android 16 Job 配额耗尽、500 文件批次实机、初始 ZIP staging 期间进程死亡及 ENOSPC 注入仍未执行，不能标完整 K06 或正式 release PASS。
+版本：v2.2 权限、工具与危险模式本地收敛包，2026-08-31。状态：**[v2 单一规范](mobile-agent-runtime-authority-tooling-codex-prompt-v2.md) 的统一 Capability/Workspace/Authority/Approval/Audit、Internal/SAF/selected privileged workspace、Skill Memory、Shizuku、Windows 有线 USB ADB Companion、持久 Dangerous Mode、受控 `shell_exec`、Settings/Agent/Chat/Skills/diagnostics 已完成实现与本地自动化收敛；真实 Shizuku、物理 USB Companion 和真实 SAF provider 保持 `E2E BLOCKED`**。Root、应用内无线 ADB、DPC、Termux、PTY、Accessibility、宿主 PowerShell/宿主 shell 继续排除。当前 Debug APK SHA-256 为 `ee4640886e3135686ab6bc3a2d04e331291c875f98020cfa20ce861220073c44`；`debuggable=false` Review APK SHA-256 为 `b8c96c49369054247d251f2646edc6c5b9804c1cf44f37edde07b9e0fec6cccc`；全仓严格 `check` 1024 tasks、Review gate 592 tasks、两份 171-component SBOM/provenance 及成品 notices 验证通过。它们都是提交前 dirty-source 本地证据，不是正式 release；2026-08-31 用户已明确授权将当前 v2 源码、测试与文档 commit/push 到 `origin/main`，仍未部署、未调用付费服务。App 元数据仍为 `versionName=0.1.0`/`versionCode=1`。F-001 保持 `candidate_intermittent`；用户实际 294 个 PDF、Android 15/16 长时配额、ENOSPC 等 K06 边界仍未完成，不能标完整 K06 或正式 release PASS。
 
 开工入口：[agent.md](../agent.md) → [HANDOFF.md](../HANDOFF.md) → 本文。范围依据见 [REQUIREMENTS.md](REQUIREMENTS.md)。含图知识库、Python 隔离和公告分别详见专题，不能只实现本文概要。
 
@@ -305,6 +305,29 @@ M0 可以并行准备本地许可和构建，但没有远程仓库/Ruleset授权
 稳定 shell owner 同时承载 Chat 和 Knowledge 长任务，导航离开不再成为取消信号。Agent 工具清单新增固定 Brave `web_search`，key 由 secret store 注入、每次调用需用户批准，模型不能选择任意 endpoint/header；响应在解析前使用活动 secret 脱敏并只返回有界公开 HTTPS 结果。无清单 Claude Skill 若含 `SKILL.md` 与安全标准库 CLI，可生成本地 Class B 清单；导入、启用、grant、Agent snapshot 后向模型公开真实工具，并在 isolated UID CPython 中只读取本次显式传入的内存虚拟 Markdown 文件。重型桌面依赖程序不直接执行，由原生知识库工具承担检索与文档读取。
 
 本轮在 API 31 x86_64 上定向设备回归 34/34，通过 `check --dependency-verification=strict` 936 tasks、公告 `npm test` 和 REUSE 392/392，并生成 [Round3 证据](evidence/2026-08-30/manual-review-round-3-capabilities.md)。APK SHA-256 为 `d68a062b12121b76e502afd8a8cf3610d756876d3a7a00eca916f597ad564682`。这是 dirty debug 人工终审包，不是正式 release；本次未调用真实 Brave/付费 Provider/Vision，未 commit/push、未重新部署公告系统。按用户要求，本段完成后不继续自动复核，只有收到新的人工问题才重启流程。
+
+### 9.5 第四轮人工反馈：确认卡、预算、默认主题与工作区（2026-08-30）
+
+长工具确认内容改为有界滚动区，拒绝/批准操作固定可达；Provider 上下文/输出预算的编辑态改为字符串，允许完整清空，只有保存时才要求正整数且输出不超过上下文；首次启动及缺失/非法主题值回退浅色，`system`、浅色、深色和 `66ccff` 显式选择仍分别保留，`66ccff` 只作为用户主动选择的彩蛋主题。
+
+Agent 新增逐次批准的应用私有文本工作区：列目录、读取、创建目录和创建/替换 UTF-8 文件都在 Agent+冻结快照的独立 SHA-256 命名空间内，批准时复核身份并受路径、symlink、文件数和字节配额约束。它不向 isolated Python 映射 Android 路径，也不包含删除、shell 或权限提升。SAF、外部 Termux 适配器、无线 ADB、Device Owner/Profile Owner 及 root/Shizuku 被记录为互相独立的后续权限域，本轮没有实现或冒称通过。
+
+API 31 x86_64 定向验证已覆盖确认卡 2/2、预算 3/3、工作区 6/6；主题由 shared/domain 与 SQLite 测试覆盖。最终严格依赖全仓门禁和 debug APK 以 [第四轮证据](evidence/2026-08-30/manual-review-round-4-ui-workspace.md) 为准。本轮仍不执行正式签名 release、Cloudflare 部署、付费调用或生产权限变更；产品变更在取得新的 commit/push 授权前保持未提交。
+
+### 9.6 权限、工具与危险模式 v2（2026-08-31）
+
+本节取代 9.5 中“SAF/Shizuku 未实现”的历史状态，但不改写当时证据。当前实现以 [v2 规范](mobile-agent-runtime-authority-tooling-codex-prompt-v2.md) 为唯一控制文档：
+
+- shared/domain 和 SQLite v13 负责 Authority、Workspace、CapabilityGrant、SnapshotGrantBinding、Approval/Audit、lifetime owner 与迁移；ONCE 消费、TASK/SESSION owner、policy revision 和 snapshot binding 在 dispatch 前重新解析。
+- RuntimeIntegration 是应用唯一组合根，冻结 `ToolExecutionContext` 并创建 provider-neutral ToolExecutorFactory；模型只看到当前有效交集，不能选择 backend、serial、URI、root 或 host endpoint。
+- WorkspaceRegistry 统一 Internal、SAF 与 selected privileged backend；typed tools 按 ACL 与 Agent scope 交集、backend capability、path/symlink/version/quota 约束执行。SAF 无法证明原子替换时不冒充支持；未知后置状态返回 `UNKNOWN_OUTCOME`。
+- Skill Memory 通过 canonical SQLite repository 和当前 Agent/snapshot/trusted Skill/grant/frozen capability 交集；旧 raw backend 只保留 deprecated 兼容入口，不作为第二事实源。
+- Shizuku 验证 shell UID、caller/session/protocol，typed 文件 RPC 与 shell 输出使用 PFD/有界预算；Wired ADB Companion 使用显式 USB serial、固定 loopback、挑战身份、配对 token、AEAD/序号/tombstone 与 Android Keystore bound secret。两者平级且不 fallback。
+- `shell_exec` 仅在 Dangerous Mode、`shell.execute` capability 和 selected Authority 同时有效时注册；原始 command/cwd 只在用户审批 UI 中显示，不写诊断。inline approval 只授予本次调用；长期 grant 必须在 Agent 设置独立创建。
+- Chat 流和 Knowledge import 使用稳定 owner；跨页面不取消。进程重启后的旧 WAITING_TOOL_APPROVAL 会被终结并标记 invalidated，不能续批或自动重放。
+- v2 diagnostics 默认关闭、闭合 schema、会话 HMAC、固定 256/256/32/4/640 KiB 上限，并覆盖 Authority/Workspace/Memory/Approval/Shell/Bridge 的 started/terminal/unknown 路径。
+
+严格构建、API 31 设备矩阵、Debug/Review APK、SBOM/provenance、许可与 remaining E2E boundary 见 [最终本地证据](evidence/2026-08-31/authority-tooling-v2-final.md)。真实 Shizuku、物理 USB Companion 与真实 SAF provider 仍需用户后续提供环境；缺少它们不把实现降格为原型，但必须继续标 `E2E BLOCKED`，不得写成 `DEVICE_PASS`。Root、无线 ADB、DPC、Termux、PTY、Accessibility 与宿主 shell 不是待实现分支。
 
 功能完整的MVP必须到M6（含Python Skills）通过后才可宣称，不得把纯问答或只有Native工具的M5当作完整MVP。M6的原生隔离风险可在M0完成后提前开展最小可行性实验，不改动M1—M5接口或减配安全要求；实验产物必须标明spike，验证通过后再纳入正式实现。
 

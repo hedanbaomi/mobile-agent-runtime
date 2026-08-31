@@ -7,16 +7,16 @@
 
 ## 生成与覆盖
 
-- 输入：`.private/overnight/android-runtime-dependencies.log`；解析出 **144** 个 distinct external G:A:V。重复树节点和 `(c)` 约束按其 resolved 版本去重，项目依赖和 `platform` 伪组排除。
-- 缓存：每个坐标的 exact Gradle cache POM 均找到，覆盖 **144/144**；每个坐标在 `app-android/src/main/assets/licenses/maven/` 有一份完整适用许可证原文及 `.license` sidecar。
-- 归档内法律文件：18/144 个坐标至少保留了缓存 JAR/AAR 内的 LICENSE/NOTICE 文本；其余使用下表所述的官方精确版本来源或 Apache 标准原文。
-- 许可证解析未确认项：0/144；两个 POM 无 license 元素的坐标已分别由 Guava parent 和 exact SLF4J JAR/官方源补查，不把 POM 空白误报为许可证。
-- `licenses/index.json` 使用 schemaVersion 1；`files[].path` 是 Android AssetManager 相对路径（只以 `licenses/` 或 `modelpacks/` 开头）；`source` 是精确版本 Maven POM URL（AndroidX 使用 Google Maven），`licenseSource` 是许可证原文来源，`provenance` 保存 POM/缓存 artifact SHA-256。
+- 输入：`.private/overnight/android-runtime-dependencies.log`；解析出 **148** 个 distinct external G:A:V。重复树节点和 `(c)` 约束按其 resolved 版本去重，项目依赖和 `platform` 伪组排除；当前 strict graph 包含四个 Shizuku 13.1.5 坐标。
+- 缓存：每个坐标的 exact Gradle cache POM 均找到，覆盖 **148/148**；每个坐标在 `app-android/src/main/assets/licenses/maven/` 有一份完整适用许可证原文及 `.license` sidecar。
+- 归档内法律文件：18/148 个坐标至少保留了缓存 JAR/AAR 内的 LICENSE/NOTICE 文本；其余使用下表所述的官方精确版本来源或 Apache 标准原文。
+- 许可证解析未确认项：0/148；两个 POM 无 license 元素的坐标已分别由 Guava parent 和 exact SLF4J JAR/官方源补查，不把 POM 空白误报为许可证。
+- `licenses/index.json` 使用 schemaVersion 1；共 **152** 个组件（148 个 Maven + 4 个 native/model）；Maven `files[].path` 是 Android AssetManager 相对路径（只以 `licenses/` 或 `modelpacks/` 开头），native/model 的 `payloads[].path` 由对应 generated-assets 边界验证；`source` 是精确版本 Maven POM URL（AndroidX 使用 Google Maven），`licenseSource` 是许可证原文来源，`provenance` 保存 POM/缓存 artifact SHA-256。
 
 POM license 元数据（原样名称）计数：
 
 - `Bouncy Castle Licence`：1
-- `MIT License`：1
+- `MIT License`：5
 - `The Apache License, Version 2.0`：4
 - `The Apache Software License, Version 2.0`：136
 - `[no license element]`：2
@@ -28,7 +28,7 @@ POM license 元数据（原样名称）计数：
 - `com.squareup.okhttp3:okhttp:4.12.0` 保留 JAR 内 `okhttp3/internal/publicsuffix/NOTICE` 原文，并额外保留该 NOTICE 引用的官方 Mozilla MPL-2.0 全文；OkHttp 本身的 Apache-2.0 原文单独保留。
 - `com.microsoft.onnxruntime:onnxruntime-android:1.29.0` 使用 Microsoft 官方 `v1.29.0` LICENSE；`org.bouncycastle:bcprov-jdk18on:1.79` 使用 Bouncy Castle 官方 `r1rv79/LICENSE.html` 原文。
 
-## 144 坐标清单
+## 148 坐标清单
 
 | Coordinate | POM license name | Resolved license | Evidence/source | Asset directory |
 | --- | --- | --- | --- | --- |
@@ -119,10 +119,10 @@ POM license 元数据（原样名称）计数：
 | `androidx.savedstate:savedstate:1.2.1` | `The Apache Software License, Version 2.0` | `Apache-2.0` | cached POM metadata plus complete standard text; [`licenseSource`](https://www.apache.org/licenses/LICENSE-2.0.txt) | `licenses/maven/androidx.savedstate__savedstate__1.2.1/` |
 | `androidx.sqlite:sqlite-android:2.5.1` | `The Apache Software License, Version 2.0` | `Apache-2.0` | cached POM metadata plus complete standard text; [`licenseSource`](https://www.apache.org/licenses/LICENSE-2.0.txt) | `licenses/maven/androidx.sqlite__sqlite-android__2.5.1/` |
 | `androidx.sqlite:sqlite-bundled-android:2.5.1` | `The Apache Software License, Version 2.0` | `Apache-2.0` | cached POM metadata plus complete standard text; [`licenseSource`](https://www.apache.org/licenses/LICENSE-2.0.txt) | `licenses/maven/androidx.sqlite__sqlite-bundled-android__2.5.1/` |
-| `androidx.sqlite:sqlite-bundled:2.5.1` | `The Apache Software License, Version 2.0` | `Apache-2.0` | cached POM metadata plus complete standard text; [`licenseSource`](https://www.apache.org/licenses/LICENSE-2.0.txt) | `licenses/maven/androidx.sqlite__sqlite-bundled__2.5.1/` |
+| `androidx.sqlite:sqlite-bundled:2.5.1` | `The Apache Software License, Version 2.0` | `Apache-2.0` | cached POM metadata plus complete standard text; incomplete embedded license replaced with canonical full text; [`licenseSource`](https://www.apache.org/licenses/LICENSE-2.0.txt) | `licenses/maven/androidx.sqlite__sqlite-bundled__2.5.1/` |
 | `androidx.sqlite:sqlite-framework-android:2.5.1` | `The Apache Software License, Version 2.0` | `Apache-2.0` | cached POM metadata plus complete standard text; [`licenseSource`](https://www.apache.org/licenses/LICENSE-2.0.txt) | `licenses/maven/androidx.sqlite__sqlite-framework-android__2.5.1/` |
-| `androidx.sqlite:sqlite-framework:2.5.1` | `The Apache Software License, Version 2.0` | `Apache-2.0` | cached POM metadata plus complete standard text; [`licenseSource`](https://www.apache.org/licenses/LICENSE-2.0.txt) | `licenses/maven/androidx.sqlite__sqlite-framework__2.5.1/` |
-| `androidx.sqlite:sqlite:2.5.1` | `The Apache Software License, Version 2.0` | `Apache-2.0` | cached POM metadata plus complete standard text; [`licenseSource`](https://www.apache.org/licenses/LICENSE-2.0.txt) | `licenses/maven/androidx.sqlite__sqlite__2.5.1/` |
+| `androidx.sqlite:sqlite-framework:2.5.1` | `The Apache Software License, Version 2.0` | `Apache-2.0` | cached POM metadata plus complete standard text; incomplete embedded license replaced with canonical full text; [`licenseSource`](https://www.apache.org/licenses/LICENSE-2.0.txt) | `licenses/maven/androidx.sqlite__sqlite-framework__2.5.1/` |
+| `androidx.sqlite:sqlite:2.5.1` | `The Apache Software License, Version 2.0` | `Apache-2.0` | cached POM metadata plus complete standard text; incomplete embedded license replaced with canonical full text; [`licenseSource`](https://www.apache.org/licenses/LICENSE-2.0.txt) | `licenses/maven/androidx.sqlite__sqlite__2.5.1/` |
 | `androidx.startup:startup-runtime:1.1.1` | `The Apache Software License, Version 2.0` | `Apache-2.0` | cached POM metadata plus complete standard text; [`licenseSource`](https://www.apache.org/licenses/LICENSE-2.0.txt) | `licenses/maven/androidx.startup__startup-runtime__1.1.1/` |
 | `androidx.tracing:tracing-ktx:1.2.0` | `The Apache Software License, Version 2.0` | `Apache-2.0` | cached POM metadata plus complete standard text; [`licenseSource`](https://www.apache.org/licenses/LICENSE-2.0.txt) | `licenses/maven/androidx.tracing__tracing-ktx__1.2.0/` |
 | `androidx.tracing:tracing:1.2.0` | `The Apache Software License, Version 2.0` | `Apache-2.0` | cached POM metadata plus complete standard text; [`licenseSource`](https://www.apache.org/licenses/LICENSE-2.0.txt) | `licenses/maven/androidx.tracing__tracing__1.2.0/` |
@@ -135,6 +135,10 @@ POM license 元数据（原样名称）计数：
 | `com.squareup.okhttp3:okhttp:4.12.0` | `The Apache Software License, Version 2.0` | `Apache-2.0` | cached POM metadata plus complete standard text; [`licenseSource`](https://www.apache.org/licenses/LICENSE-2.0.txt) | `licenses/maven/com.squareup.okhttp3__okhttp__4.12.0/` |
 | `com.squareup.okio:okio-jvm:3.9.1` | `The Apache Software License, Version 2.0` | `Apache-2.0` | cached POM metadata plus complete standard text; [`licenseSource`](https://www.apache.org/licenses/LICENSE-2.0.txt) | `licenses/maven/com.squareup.okio__okio-jvm__3.9.1/` |
 | `com.squareup.okio:okio:3.9.1` | `The Apache Software License, Version 2.0` | `Apache-2.0` | cached POM metadata plus complete standard text; [`licenseSource`](https://www.apache.org/licenses/LICENSE-2.0.txt) | `licenses/maven/com.squareup.okio__okio__3.9.1/` |
+| `dev.rikka.shizuku:aidl:13.1.5` | `MIT License` | `MIT` | official Shizuku-API source pinned to 510fc988; [`licenseSource`](https://raw.githubusercontent.com/RikkaApps/Shizuku-API/510fc988c02c3475d8c25db170f96792f105bdf8/LICENSE) | `licenses/maven/dev.rikka.shizuku__aidl__13.1.5/` |
+| `dev.rikka.shizuku:api:13.1.5` | `MIT License` | `MIT` | official Shizuku-API source pinned to 510fc988; [`licenseSource`](https://raw.githubusercontent.com/RikkaApps/Shizuku-API/510fc988c02c3475d8c25db170f96792f105bdf8/LICENSE) | `licenses/maven/dev.rikka.shizuku__api__13.1.5/` |
+| `dev.rikka.shizuku:provider:13.1.5` | `MIT License` | `MIT` | official Shizuku-API source pinned to 510fc988; [`licenseSource`](https://raw.githubusercontent.com/RikkaApps/Shizuku-API/510fc988c02c3475d8c25db170f96792f105bdf8/LICENSE) | `licenses/maven/dev.rikka.shizuku__provider__13.1.5/` |
+| `dev.rikka.shizuku:shared:13.1.5` | `MIT License` | `MIT` | official Shizuku-API source pinned to 510fc988; [`licenseSource`](https://raw.githubusercontent.com/RikkaApps/Shizuku-API/510fc988c02c3475d8c25db170f96792f105bdf8/LICENSE) | `licenses/maven/dev.rikka.shizuku__shared__13.1.5/` |
 | `io.ktor:ktor-client-core-jvm:3.0.1` | `The Apache Software License, Version 2.0` | `Apache-2.0` | cached POM metadata plus complete standard text; [`licenseSource`](https://www.apache.org/licenses/LICENSE-2.0.txt) | `licenses/maven/io.ktor__ktor-client-core-jvm__3.0.1/` |
 | `io.ktor:ktor-client-core:3.0.1` | `The Apache Software License, Version 2.0` | `Apache-2.0` | cached POM metadata plus complete standard text; [`licenseSource`](https://www.apache.org/licenses/LICENSE-2.0.txt) | `licenses/maven/io.ktor__ktor-client-core__3.0.1/` |
 | `io.ktor:ktor-client-okhttp-jvm:3.0.1` | `The Apache Software License, Version 2.0` | `Apache-2.0` | cached POM metadata plus complete standard text; [`licenseSource`](https://www.apache.org/licenses/LICENSE-2.0.txt) | `licenses/maven/io.ktor__ktor-client-okhttp-jvm__3.0.1/` |
@@ -177,18 +181,18 @@ POM license 元数据（原样名称）计数：
 | `org.jetbrains:annotations:23.0.0` | `The Apache Software License, Version 2.0` | `Apache-2.0` | cached POM metadata plus complete standard text; [`licenseSource`](https://www.apache.org/licenses/LICENSE-2.0.txt) | `licenses/maven/org.jetbrains__annotations__23.0.0/` |
 | `org.slf4j:slf4j-api:2.0.16` | `[no license element]` | `MIT` | exact cached JAR license plus official v2.0.16 source; [`licenseSource`](https://raw.githubusercontent.com/qos-ch/slf4j/v_2.0.16/LICENSE.txt) | `licenses/maven/org.slf4j__slf4j-api__2.0.16/` |
 
-## 主流程待验证资产
+## Native/model 生成边界
 
-索引同时登记以下由其他 owner 管理的 native/model 文件；本次没有创建、覆盖或读取它们。它们在实际 APK 生成后由主流程检查存在性、APK 路径和 hash：
+索引同时登记以下由其他 owner 管理的 native/model 文件；每个法律文件和 payload 都有固定 SHA-256。`--check` 必须在明确的模块 generated-assets 根或 APK/AAB/ZIP 边界核对这些 bytes（artifact 只接受精确的 `assets/` 或 `base/assets/` 前缀），不把缺失的 `app-android/src/main/assets` 当成通过：
 
-- `asset:cpython-3.14.7`：`licenses/cpython-3.14.7/LICENSE.txt`, `licenses/cpython-3.14.7/NOTICE.txt`；状态 `pending-main-flow`。
-- `asset:usearch-2.25.1`：`licenses/usearch-2.25.1/LICENSE.txt`；状态 `pending-main-flow`。
-- `asset:onnxruntime-1.29.0`：`licenses/onnxruntime-1.29.0/LICENSE.txt`；状态 `pending-main-flow`。
-- `asset:all-MiniLM-L6-v2`：`modelpacks/all-MiniLM-L6-v2/LICENSES/Apache-2.0.txt`；状态 `pending-main-flow`。
+- `asset:cpython-3.14.7`：`licenses/cpython-3.14.7/LICENSE.txt` (b0e25a78cffb43f4d92de8b61ccfa1f1f98ecbc22330b54b5251e7b6ba010231), `licenses/cpython-3.14.7/NOTICE.txt` (87e76594ca56bd6b1116d2ee9b902b98c0940863762f9ef822de9a3cec31fcb3), `python/python3.14.zip` (8aa6768b2585279a566bef9f2b5c0568f3199c940fe77b2d84b240b97474e351)；generated boundary `runtime/python-android/build/generated/pythonAssets`；状态 `generated-assets-or-artifact`；source [`https://www.python.org/downloads/release/python-3147/`](https://www.python.org/downloads/release/python-3147/)。
+- `asset:usearch-2.25.1`：`licenses/usearch-2.25.1/LICENSE.txt` (c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4), `licenses/usearch-2.25.1/NOTICE.txt` (145493df94feaef58efd5f5fcedc9d4d3c08a285dbbf87a9eefae3455cb475a4)；generated boundary `runtime/vector-usearch/build/generated/vector-assets`；状态 `generated-assets-or-artifact`；source [`https://github.com/unum-cloud/USearch/archive/refs/tags/v2.25.1.zip`](https://github.com/unum-cloud/USearch/archive/refs/tags/v2.25.1.zip)。
+- `asset:onnxruntime-1.29.0`：`licenses/onnxruntime-1.29.0/LICENSE.txt` (2f07c72751aed99790b8a4869cf2311df85a860b22ded05fa22803587a48922c), `licenses/onnxruntime-1.29.0/NOTICE.txt` (af50216ba6c698e64b3a91f63278543d79f963938ca14fd23df45f2d6de3491c)；generated boundary `runtime/embedding-onnx/build/generated/embedding-assets`；状态 `generated-assets-or-artifact`；source [`https://github.com/microsoft/onnxruntime/releases/tag/v1.29.0`](https://github.com/microsoft/onnxruntime/releases/tag/v1.29.0)。
+- `asset:all-MiniLM-L6-v2`：`modelpacks/all-MiniLM-L6-v2/LICENSES/Apache-2.0.txt` (9bf4e882bdd75e8d10fc788c53d0a787ef0f59cead1fe1f0878c240896fc8610), `modelpacks/all-MiniLM-L6-v2/LICENSE-NOTICE.txt` (e4870c1e6fe1a4652eb6912c1df83a097653dd337560ac63c6a211a50a1f0333), `modelpacks/all-MiniLM-L6-v2/model.onnx` (6fd5d72fe4589f189f8ebc006442dbb529bb7ce38f8082112682524616046452), `modelpacks/all-MiniLM-L6-v2/tokenizer.json` (be50c3628f2bf5bb5e3a7f17b1f74611b2561a3a27eeab05e5aa30f411572037), `modelpacks/all-MiniLM-L6-v2/manifest.json` (e7ac456cccf4def26d7599afe0c200ff8900599776f970b4b7b8881fd17bf6e5)；generated boundary `runtime/embedding-onnx/build/generated/embedding-assets`；状态 `generated-assets-or-artifact`；source [`https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/`](https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/)。
 
 ## 验证边界
 
-- 可复核：Python 静态生成/JSON 结构/路径与每个 notice 文件 SHA-256 检查；POM 缓存 144/144；许可证原文覆盖 144/144。
+- 可复核：Python 静态生成/JSON 结构/路径与每个 notice 文件 SHA-256 检查；POM 缓存 148/148；许可证原文覆盖 148/148；native/model legal files 和 payloads 由 generated-assets 或 artifact 边界逐项 hash 检查。
 - 只读执行 `python -B -m reuse lint` 得到 exit 1：根 `LICENSES/MPL-2.0.txt` 尚未建立（本任务禁止改根许可资产），并有既存其他 WIP 的 REUSE 问题；本任务文件无该扫描器新增的 header 问题。没有为此改根 `REUSE.toml`、许可证目录或其他 owner 文件。
-- 本次未执行：Gradle、`generateDebugSbom`、APK 构建/解包、模拟器/设备验收、生产发布和主流程 UI 接线。
-- 本报告不是 `STAGING_PASS`、`PRODUCTION_PASS` 或设备验收。主流程应在统一 Gradle 与设备流程中确认这些 assets 实际进入 APK，并把 native/model 条目从 `pending-main-flow` 更新为其真实验证状态。
+- 本脚本不执行 Gradle、不下载二进制、不修改 generated native/model 输出；若 exact generated roots 不存在，`--check` fail closed，并要求主流程先生成这些输入。
+- 本报告不是 `STAGING_PASS`、`PRODUCTION_PASS` 或设备验收。APK/AAB 只有在显式传入 `--artifact` 且索引、所有 Maven sidecar、native/model legal files 和 payload hashes 均匹配时才通过本脚本的 artifact 边界检查；未知 ZIP 前缀不会被接受。

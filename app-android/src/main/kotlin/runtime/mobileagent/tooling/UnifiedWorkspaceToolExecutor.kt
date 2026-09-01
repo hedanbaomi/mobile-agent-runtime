@@ -97,9 +97,24 @@ class UnifiedWorkspaceToolExecutor(
         context: ToolExecutionContext,
         requestId: String,
     ): ToolResult {
-        val existing = synchronized(lock) { requestByModelCall[modelKey(context, call.callId)] }
-        if (existing != null) {
-            val bound = synchronized(lock) { callsByRequest[existing] }
+        val parsed = parse(call) ?: return ToolResult.Invalid(ToolErrorCode.INVALID_REQUEST.name)
+        val candidate = bind(requestId, call, parsed, context)
+        val existingReservation = synchronized(lock) {
+            val key = modelKey(context, call.callId)
+            val existingRequestId = requestByModelCall[key]
+            if (existingRequestId != null) {
+                true to callsByRequest[existingRequestId]
+            } else {
+                // Claim the model call id and publish its BoundCall in one
+                // critical section. Two concurrent deliveries can therefore
+                // never both pass the replay gate and reach the backend.
+                requestByModelCall[key] = requestId
+                callsByRequest[requestId] = candidate
+                false to null
+            }
+        }
+        if (existingReservation.first) {
+            val bound = existingReservation.second
             return when {
                 bound == null -> ToolResult.UnknownOutcome(ToolErrorCode.CALL_ID_REPLAY.name)
                 bound.call != call -> ToolResult.Invalid(ToolErrorCode.CALL_ID_REPLAY.name)
@@ -108,13 +123,7 @@ class UnifiedWorkspaceToolExecutor(
                 else -> ToolResult.UnknownOutcome(ToolErrorCode.CALL_ID_REPLAY.name)
             }
         }
-        val parsed = parse(call) ?: return ToolResult.Invalid(ToolErrorCode.INVALID_REQUEST.name)
-        val bound = bind(requestId, call, parsed, context)
-        synchronized(lock) {
-            requestByModelCall[modelKey(context, call.callId)] = requestId
-            callsByRequest[requestId] = bound
-        }
-        return invokeBound(bound, context)
+        return invokeBound(candidate, context)
     }
 
     /** Shared skills-api execution contract adapter. */
@@ -157,7 +166,7 @@ class UnifiedWorkspaceToolExecutor(
         }
         bound.approvalPending = false
         bound.approvalGrant = decision.grant
-        return invokeBound(bound, context, skipApproval = true)
+        return invokeBound(bound, context)
     }
 
     /** Explicitly deny a pending approval using either model call or request id. */
@@ -196,7 +205,7 @@ class UnifiedWorkspaceToolExecutor(
         }
         bound.approvalPending = false
         bound.approvalGrant = decision.grant
-        val result = invokeBoundExecution(bound, context, skipApproval = true)
+        val result = invokeBoundExecution(bound, context)
         bound.result = result.toLegacyResult()
         return result
     }
@@ -223,19 +232,19 @@ class UnifiedWorkspaceToolExecutor(
         return result
     }
 
-    private suspend fun invokeBound(bound: BoundCall, context: ToolExecutionContext, skipApproval: Boolean = false): ToolResult {
-        val result = invokeBoundExecution(bound, context, skipApproval)
+    private suspend fun invokeBound(bound: BoundCall, context: ToolExecutionContext): ToolResult {
+        val result = invokeBoundExecution(bound, context)
         bound.result = result.toLegacyResult()
         return bound.result!!
     }
 
-    private suspend fun invokeBoundExecution(bound: BoundCall, context: ToolExecutionContext, skipApproval: Boolean): ToolExecution {
+    private suspend fun invokeBoundExecution(bound: BoundCall, context: ToolExecutionContext): ToolExecution {
         val operation = bound.parsed
         val registered = operation.workspaceId.takeIf { it.isNotBlank() }?.let(registry::registered)
         val descriptor = registered?.descriptor
 
         // Check the selected provider and the exact backend implementation at
-        // every entry, including an approval continuation.  A stale grant or
+        // every entry, including a legacy approval continuation. A stale grant or
         // a provider switch can therefore never make the executor fall back
         // to another privileged backend.
         val structuralError = when {
@@ -288,59 +297,18 @@ class UnifiedWorkspaceToolExecutor(
             }
         }
 
-        if (!skipApproval) {
-            val decision = approvalEngine.request(
-                requestId = bound.requestId,
-                modelCallId = bound.call.callId,
-                binding = bound.binding,
-                scope = bound.scope,
-                suggestedLifetime = GrantLifetime.ONCE,
-            )
-            when {
-                decision.grant != null -> {
-                    bound.approvalGrant = decision.grant
-                    return invokeBoundExecution(bound, context, skipApproval = true)
-                }
-                decision.pending != null -> {
-                    bound.approvalPending = true
-                    bound.pendingApprovalId = decision.pending.approvalId
-                    if (!startAudit(bound, operation, decision.pending.approvalId)) {
-                        return ToolExecution.Failed(ToolError(ToolErrorCode.AUDIT_UNAVAILABLE))
-                    }
-                    return ToolExecution.Failed(ToolError(ToolErrorCode.APPROVAL_REQUIRED))
-                }
-                else -> {
-                    val result = ToolExecution.Failed(
-                        decision.reasonCode?.let(::ToolError) ?: ToolError(ToolErrorCode.APPROVAL_DENIED),
-                    )
-                    return finishAudit(bound, operation, result, context)
-                }
-            }
-        }
-
-        val grant = bound.approvalGrant
-            ?: return finishAudit(
-                bound,
-                operation,
-                ToolExecution.Failed(ToolError(ToolErrorCode.APPROVAL_REQUIRED)),
-                context,
-            )
-        val freshBinding = bind(bound.requestId, bound.call, bound.parsed, context).binding
-        val freshScope = bind(bound.requestId, bound.call, bound.parsed, context).scope
-        val consumed = approvalEngine.consume(
-            grant = grant,
-            currentBinding = freshBinding,
-            currentScope = freshScope,
-            currentGrantRevision = freshScope.grantRevision,
-            currentPolicyVersion = freshScope.policyVersion,
-        )
-        if (consumed !is ApprovalDecision.Approved) {
-            return finishAudit(bound, operation, consumed.toToolExecution(), context)
-        }
+        /*
+         * CapabilityGrant + SnapshotGrantBinding are the user's durable authorization. Requiring
+         * a second process-local ApprovalEngine grant here made every already-authorized file
+         * read/write stall behind a hidden per-call prompt. The canonical resolver below still
+         * rechecks revocation, expiry, policy version, workspace/path scope and consumes ONCE
+         * grants atomically immediately before dispatch. High-risk shell reconfirmation remains a
+         * separate ShellToolExecutor policy and is not weakened by this workspace rule.
+         */
 
         // Revalidate all policy/provider/backend facts immediately before the
-        // one-shot backend call.  This is deliberately repeated after grant
-        // consumption: approval does not pin a provider connection.
+        // one-shot backend call. A durable grant does not pin a provider
+        // connection, so all live routing facts are deliberately checked again.
         if (operation.kind == WorkspaceOperation.WORKSPACE_LIST) {
             if (authorizedWorkspaces(context).isEmpty()) {
                 return finishAudit(bound, operation, ToolExecution.Failed(ToolError(ToolErrorCode.CAPABILITY_DENIED)), context)
@@ -352,8 +320,8 @@ class UnifiedWorkspaceToolExecutor(
         }
 
         // The resolver's canonical gate is the final grant/revision/lifetime
-        // check.  It is deliberately after approval consumption and before
-        // dispatch, so a stale or ONCE grant can never reach the backend.
+        // check. It runs immediately before dispatch, so a stale or ONCE grant
+        // can never reach the backend.
         if (!authorizeForDispatch(context, operation)) {
             return finishAudit(bound, operation, ToolExecution.Failed(ToolError(ToolErrorCode.CAPABILITY_DENIED)), context)
         }
@@ -372,7 +340,10 @@ class UnifiedWorkspaceToolExecutor(
         } catch (_: CancellationException) {
             ToolExecution.Unknown(ToolError(ToolErrorCode.UNKNOWN_OUTCOME))
         } catch (_: Throwable) {
-            ToolExecution.Failed(ToolError(ToolErrorCode.IO_ERROR, retryable = true))
+            // STARTED was already durably accepted, so an exception cannot
+            // prove that the provider did not mutate state. Never advertise a
+            // retryable failure or replay this request.
+            ToolExecution.Unknown(ToolError(ToolErrorCode.UNKNOWN_OUTCOME))
         }
         val completed = recordTerminal(bound, operation, toolExecution, clock.nowMillis() - startedAt)
         if (!completed) {
@@ -1028,10 +999,10 @@ class UnifiedWorkspaceToolExecutor(
         WorkspaceOperation.WORKSPACE_LIST -> emptySet()
         WorkspaceOperation.LIST -> setOf("workspaceId", "relativePath", "maxEntries")
         WorkspaceOperation.STAT -> setOf("workspaceId", "relativePath")
-        WorkspaceOperation.READ -> setOf("workspaceId", "relativePath", "maxBytes", "expectedVersion")
+        WorkspaceOperation.READ -> setOf("workspaceId", "relativePath", "maxBytes")
         WorkspaceOperation.WRITE -> setOf("workspaceId", "relativePath", "text", "replace", "expectedVersion")
         WorkspaceOperation.CREATE_DIRECTORY, WorkspaceOperation.DELETE -> setOf("workspaceId", "relativePath", "expectedVersion")
-        WorkspaceOperation.MOVE -> setOf("workspaceId", "relativePath", "destinationRelativePath", "replace", "expectedVersion")
+        WorkspaceOperation.MOVE -> setOf("workspaceId", "relativePath", "destinationRelativePath", "expectedVersion")
     }
 
     private fun JsonObject.string(key: String): String? = (this[key] as? JsonPrimitive)?.takeIf { it.isString && it.content.isNotBlank() }?.content
@@ -1067,15 +1038,16 @@ class UnifiedWorkspaceToolExecutor(
         private val TOOL_NAMES = setOf(WORKSPACE_LIST, FILE_LIST, FILE_STAT, FILE_READ_TEXT, FILE_WRITE_TEXT, FILE_CREATE_DIRECTORY, FILE_DELETE, FILE_MOVE)
 
         private val FILE_SCHEMA = """{"type":"object","additionalProperties":false,"required":["workspaceId","relativePath"],"properties":{"workspaceId":{"type":"string","minLength":1,"maxLength":128},"relativePath":{"type":"string","minLength":1,"maxLength":512}}}"""
+        private val VERSIONED_FILE_SCHEMA = """{"type":"object","additionalProperties":false,"required":["workspaceId","relativePath"],"properties":{"workspaceId":{"type":"string","minLength":1,"maxLength":128},"relativePath":{"type":"string","minLength":1,"maxLength":512},"expectedVersion":{"type":"integer","minimum":0}}}"""
         private val TOOL_SPECS = listOf(
             ToolSpec(WORKSPACE_LIST, "List authorized workspaces.", """{"type":"object","additionalProperties":false,"properties":{}}""", CapabilityId(CapabilityId.WORKSPACE_ENUMERATE), false, TOOL_SCHEMA_VERSION),
             ToolSpec(FILE_LIST, "List entries in an authorized workspace.", """{"type":"object","additionalProperties":false,"required":["workspaceId"],"properties":{"workspaceId":{"type":"string","minLength":1,"maxLength":128},"relativePath":{"type":"string","maxLength":512},"maxEntries":{"type":"integer","minimum":1,"maximum":1000}}}""", CapabilityId(CapabilityId.FILE_LIST), false, TOOL_SCHEMA_VERSION),
             ToolSpec(FILE_STAT, "Read metadata for an authorized workspace entry.", FILE_SCHEMA, CapabilityId(CapabilityId.FILE_STAT), false, TOOL_SCHEMA_VERSION),
-            ToolSpec(FILE_READ_TEXT, "Read bounded UTF-8 text from an authorized workspace.", """{"type":"object","additionalProperties":false,"required":["workspaceId","relativePath"],"properties":{"workspaceId":{"type":"string","minLength":1,"maxLength":128},"relativePath":{"type":"string","minLength":1,"maxLength":512},"maxBytes":{"type":"integer","minimum":1,"maximum":262144},"expectedVersion":{"type":"integer","minimum":0}}}""", CapabilityId(CapabilityId.FILE_READ_TEXT), false, TOOL_SCHEMA_VERSION),
+            ToolSpec(FILE_READ_TEXT, "Read bounded UTF-8 text from an authorized workspace.", """{"type":"object","additionalProperties":false,"required":["workspaceId","relativePath"],"properties":{"workspaceId":{"type":"string","minLength":1,"maxLength":128},"relativePath":{"type":"string","minLength":1,"maxLength":512},"maxBytes":{"type":"integer","minimum":1,"maximum":262144}}}""", CapabilityId(CapabilityId.FILE_READ_TEXT), false, TOOL_SCHEMA_VERSION),
             ToolSpec(FILE_WRITE_TEXT, "Create or replace UTF-8 text in an authorized workspace.", """{"type":"object","additionalProperties":false,"required":["workspaceId","relativePath","text"],"properties":{"workspaceId":{"type":"string","minLength":1,"maxLength":128},"relativePath":{"type":"string","minLength":1,"maxLength":512},"text":{"type":"string","maxLength":262144},"replace":{"type":"boolean"},"expectedVersion":{"type":"integer","minimum":0}}}""", CapabilityId(CapabilityId.FILE_WRITE_TEXT), true, TOOL_SCHEMA_VERSION),
-            ToolSpec(FILE_CREATE_DIRECTORY, "Create a directory in an authorized workspace.", FILE_SCHEMA, CapabilityId(CapabilityId.FILE_CREATE_DIRECTORY), true, TOOL_SCHEMA_VERSION),
-            ToolSpec(FILE_DELETE, "Delete one authorized workspace file or empty directory.", FILE_SCHEMA, CapabilityId(CapabilityId.FILE_DELETE), true, TOOL_SCHEMA_VERSION),
-            ToolSpec(FILE_MOVE, "Move an entry within an authorized workspace.", """{"type":"object","additionalProperties":false,"required":["workspaceId","relativePath","destinationRelativePath"],"properties":{"workspaceId":{"type":"string","minLength":1,"maxLength":128},"relativePath":{"type":"string","minLength":1,"maxLength":512},"destinationRelativePath":{"type":"string","minLength":1,"maxLength":512},"replace":{"type":"boolean"},"expectedVersion":{"type":"integer","minimum":0}}}""", CapabilityId(CapabilityId.FILE_MOVE), true, TOOL_SCHEMA_VERSION),
+            ToolSpec(FILE_CREATE_DIRECTORY, "Create a directory in an authorized workspace.", VERSIONED_FILE_SCHEMA, CapabilityId(CapabilityId.FILE_CREATE_DIRECTORY), true, TOOL_SCHEMA_VERSION),
+            ToolSpec(FILE_DELETE, "Delete one authorized workspace file or empty directory.", VERSIONED_FILE_SCHEMA, CapabilityId(CapabilityId.FILE_DELETE), true, TOOL_SCHEMA_VERSION),
+            ToolSpec(FILE_MOVE, "Move an entry within an authorized workspace.", """{"type":"object","additionalProperties":false,"required":["workspaceId","relativePath","destinationRelativePath"],"properties":{"workspaceId":{"type":"string","minLength":1,"maxLength":128},"relativePath":{"type":"string","minLength":1,"maxLength":512},"destinationRelativePath":{"type":"string","minLength":1,"maxLength":512},"expectedVersion":{"type":"integer","minimum":0}}}""", CapabilityId(CapabilityId.FILE_MOVE), true, TOOL_SCHEMA_VERSION),
         )
 
         private fun canonicalJson(root: JsonObject): String = root.toSortedMap().entries.joinToString(";") { (key, value) -> "$key=$value" }

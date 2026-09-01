@@ -152,6 +152,15 @@ class AndroidDiagnosticLogger private constructor(
     fun recordRuntimeToolingUnavailable(record: RuntimeToolingUnavailableRecord): Boolean =
         store.recordRuntimeToolingUnavailable(record)
 
+    fun recordAuthorityConfigurationState(record: AuthorityConfigurationStateRecord): Boolean =
+        store.recordAuthorityConfigurationState(record)
+
+    fun recordDangerousModeDecision(record: DangerousModeDecisionRecord): Boolean =
+        store.recordDangerousModeDecision(record)
+
+    fun recordRuntimeToolExposure(record: RuntimeToolExposureRecord): Boolean =
+        store.recordRuntimeToolExposure(record)
+
     fun status(): DiagnosticStatus = store.status()
 
     fun exportTo(output: OutputStream) = store.exportTo(output)

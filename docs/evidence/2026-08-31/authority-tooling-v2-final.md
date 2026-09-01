@@ -1,9 +1,11 @@
 <!-- SPDX-FileCopyrightText: 2026 mobileAgentRuntime contributors -->
 <!-- SPDX-License-Identifier: AGPL-3.0-only -->
 
-# 权限、工具与诊断 v2 最终本地证据
+# 权限、工具与诊断 v2 历史本地证据（已由 2026-09-01 闭环取代）
 
 日期：2026-08-31（Asia/Taipei）。工作区：`E:\mobileAgentRuntime`。
+
+> 历史快照说明：本文保留 2026-08-31 当时“真实 SAF/Shizuku 环境缺失”的事实。2026-09-01 已在 API 31 x86_64 模拟器完成系统 DocumentsUI 持久 SAF grant、官方 Shizuku UID 2000 UserService 和模型工具真实 E2E，见 [后续闭环证据](../2026-09-01/workspace-tool-real-e2e.md)。物理 USB Companion、物理断连恢复和非模拟器设备差异仍未验证。
 
 ## 1. 范围与结论边界
 
@@ -50,7 +52,7 @@ python -B tools/runtime-notices.py --check --artifact app-android/build/outputs/
 - runtime notices：148 Maven coordinates、4 native/model entries，Debug/Review 两个打包边界逐文件 hash 校验 PASS。校验器仅为固定根资产 `THIRD_PARTY_NOTICES.md` 增加收窄例外，组件路径仍限制在许可/model/python 前缀。
 - 第一方许可与门禁没有降低：**NO**。
 
-## 4. 产物绑定
+## 4. 2026-08-31 历史产物绑定（不可用于当前构建）
 
 | 产物 | 大小 | SHA-256 | 说明 |
 | --- | ---: | --- | --- |
@@ -63,7 +65,7 @@ python -B tools/runtime-notices.py --check --artifact app-android/build/outputs/
 
 两份 provenance 的 source archive SHA-256 均为 `a24a51d00ee4418ffc08aca6a758f613e9a6fd488793767caf140ba634807a60`。两份 APK 均通过 APK Signature Scheme v2 验证；Debug 证书 SHA-256 为 `315148930a70085176f864d43de4c7bf3469bca4e912a5ac84b057259350b788`。Review 包使用本地 debug identity 只作非调试安全审查，不是正式签名身份。
 
-## 5. API 31 设备证据
+## 5. 2026-08-31 历史 API 31 设备证据
 
 设备：`mar_api31_matrix` / `emulator-5554`，Android API 31，x86_64，boot complete。
 
@@ -85,7 +87,7 @@ python -B tools/runtime-notices.py --check --artifact app-android/build/outputs/
 
 四个可执行批次合计 **188/188 PASS**；Shizuku live 的两个用例因设备没有真实 Shizuku UserService 按 `assumeTrue` 跳过，不计 PASS。XML 保存在 `app-android/build/reports/final-device-matrix-after-review/<batch>/`。任何 fixture/模拟器 PASS 都不替代下节真实端 E2E。
 
-## 6. 仍为 E2E BLOCKED 的外部边界
+## 6. 形成本文时仍为 E2E BLOCKED 的外部边界
 
 - 真实 Shizuku App、用户授权、UserService、Binder death/rebind、真实 shell 与 typed workspace。
 - Windows 真实 USB 设备、官方 adb、Companion 配对/reverse/encrypted session、物理断连与恢复。

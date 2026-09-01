@@ -55,21 +55,21 @@ U01—U06 的首次验收对象为设计包，结果仅覆盖设计；后续 M1�
 
 | Wire tool name | Capability | Backend-neutral 语义 | 可用 backend / 当前证据 |
 | --- | --- | --- | --- |
-| `workspace_list` | `workspace.enumerate` | 列出当前 workspace 根 | Internal / SAF / selected privileged adapter；应用私有实现 `IMPLEMENTED`、`AUTOMATED TESTED` |
-| `file_list` | `file.list` | 列出相对路径下的子项 | Internal / SAF / selected privileged adapter；provider-neutral schema `IMPLEMENTED`，端到端 `E2E BLOCKED` |
+| `workspace_list` | `workspace.enumerate` | 列出当前 workspace 根 | Internal / SAF / selected privileged adapter；API 31 真实 SAF 与 Shizuku `DEVICE E2E PASS` |
+| `file_list` | `file.list` | 列出相对路径下的子项 | Internal / SAF / selected privileged adapter；API 31 真实 SAF 与 Shizuku `DEVICE E2E PASS` |
 | `file_stat` | `file.stat` | 返回受限元数据 | Internal / SAF / selected privileged adapter；统一实现与 fixture 自动化已存在，真实 SAF/Shizuku/USB E2E `BLOCKED` |
-| `file_read_text` | `file.read_text` | 按 UTF-8 与字节预算读取文本 | Internal / SAF / selected privileged adapter；应用私有兼容实现 `IMPLEMENTED`、`AUTOMATED TESTED` |
-| `file_write_text` | `file.write_text` | 按权限与配额原子替换文本 | Internal / SAF / selected privileged adapter；应用私有兼容实现 `IMPLEMENTED`、`AUTOMATED TESTED` |
+| `file_read_text` | `file.read_text` | 按 UTF-8 与字节预算读取文本 | Internal / SAF / selected privileged adapter；API 31 真实 SAF 与 Shizuku `DEVICE E2E PASS` |
+| `file_write_text` | `file.write_text` | 按权限、配额与 backend 能力写入文本；只有可证明时才承诺原子替换 | Internal 支持版本化原子替换；SAF 仅支持 provider/grant 可证明的新建写，既有文件替换 fail-closed `UNSUPPORTED`；selected privileged adapter 按自身能力；API 31 真实 SAF 与 Shizuku `DEVICE E2E PASS` |
 | `file_create_directory` | `file.create_directory` | 创建受限目录 | Internal / SAF / selected privileged adapter；应用私有兼容实现 `IMPLEMENTED`、`AUTOMATED TESTED` |
 | `file_move` | `file.move` | 在同一授权 workspace 内移动 | Internal / SAF / selected privileged adapter；统一实现与 fixture 自动化已存在，真实 SAF/Shizuku/USB E2E `BLOCKED` |
-| `file_delete` | `file.delete` | 删除单文件或空目录，遵守 backend 约束 | Internal / SAF / selected privileged adapter；当前实现有受限删除，统一 wire schema `IMPLEMENTED`、E2E `BLOCKED` |
+| `file_delete` | `file.delete` | 删除单文件或空目录，遵守 backend 约束 | Internal / SAF / selected privileged adapter；API 31 真实 SAF 与 Shizuku 文件删除 `DEVICE E2E PASS`，空目录/异常 provider 边界保留自动化证据 |
 | `memory_read` | `memory.read` | 读取当前 Skill memory | canonical SQLite SkillMemory backend；`IMPLEMENTED`、`AUTOMATED TESTED` |
 | `memory_search` | `memory.search` | 在当前 Skill memory 内有界检索 | canonical SQLite SkillMemory backend；`IMPLEMENTED`、`AUTOMATED TESTED` |
 | `memory_append` | `memory.append` | 追加当前 Skill memory 条目 | canonical SQLite SkillMemory backend；`IMPLEMENTED`、`AUTOMATED TESTED` |
 | `memory_replace` | `memory.replace` | 替换当前 Skill memory 条目 | canonical SQLite SkillMemory backend；`IMPLEMENTED`、`AUTOMATED TESTED` |
-| `shell_exec` | `shell.execute` | Dangerous Mode 下执行一次 Android `/system/bin/sh`，受 timeout/output/cancel/audit 控制 | `ShellToolExecutor`、`ShizukuShellExecutor`、`WiredAdbShellExecutor` 已有 `IMPLEMENTED`；backend fixture 为 `AUTOMATED TESTED`；真实 Authority/硬件 E2E `E2E BLOCKED` |
+| `shell_exec` | `shell.execute` | Dangerous Mode 下执行一次 Android `/system/bin/sh`，受 timeout/output/cancel/audit 控制 | Shizuku 官方服务在 API 31 完成真实 shell UserService `DEVICE E2E PASS`；Wired ADB 仅 `IMPLEMENTED`/`AUTOMATED TESTED`，物理 USB `E2E BLOCKED` |
 
-Typed file tools 仍须 workspace scope、路径/symlink/配额和 approval revalidation；`shell_exec` 是明确的高风险 escape hatch，不得声称继续受 typed workspace confinement。它不授予宿主 PowerShell、宿主 shell、Root、无线 ADB、DPC、Termux 或 PTY。
+Typed file tools 仍须 workspace scope、路径/symlink/配额和 canonical grant revalidation；`shell_exec` 是明确的高风险 escape hatch，不得声称继续受 typed workspace confinement。它不授予宿主 PowerShell、宿主 shell、Root、无线 ADB、DPC、Termux 或 PTY。
 
 ## 4. 知识库
 
@@ -110,16 +110,16 @@ K06另需前台任务兼容矩阵：Android12+后台启动限制、Android14+服
 | S10 | 测试secret混入模型错误/Skill输出/日志/导出，模型超时副作用未知 | 全路径脱敏；不无限持久化内容；UNKNOWN_OUTCOME不自动重放 |
 | S11 | 受控MCP server工具发现/新增/重连/取消/错误；Remote接口schema测试 | 不自动授权新增工具、不在手机起任意stdio、不重放副作用；Remote不自动上传用户包或知识库 |
 | S12 | 导入无 `mobile-skill.json`、含标准库 `main()` CLI 的 Claude Skill；启用、空权限确认、Agent 绑定后由模型按 program enum/argv/虚拟 Markdown 文件调用；同包含重型依赖脚本 | 原 ZIP/hash 不改；只把通过兼容门槛的程序列入 `py_*` 工具；每次调用仍批准且在新 isolated UID 中执行；隐藏已验证源码字段不能由模型声明；虚拟文件无法映射宿主路径。依赖 PyMuPDF/NumPy/PyTorch/Transformers 的 `books_kb.py` 明确不直跑，绑定知识库时由 `knowledge_search`/`read_document` 承接且模型不得伪称原脚本执行 |
-| S13 | Agent 调用应用私有 `workspace_list` 与 provider-neutral `file_*` typed tools；覆盖长路径、绝对路径、`..`、symlink、配额、重复 call ID、批准前后撤销 Agent/快照、替换写中断 | 读、列、写、建目录、移动和受限删除由 backend-neutral schema 表达并逐次批准、批准时复核；真实路径不进入模型或错误；Agent+快照命名空间互相隔离；越界/撤权 fail-closed；UTF-8 替换写原子且无临时残留；typed path 不等于 shell |
+| S13 | Agent 调用应用私有 `workspace_list` 与 provider-neutral `file_*` typed tools；覆盖长路径、绝对路径、`..`、symlink、配额、重复 call ID、授权后撤销 Agent/快照、ONCE 并发消费、替换写中断 | 读、列、写、建目录、移动和受限删除由 backend-neutral schema 表达；已有有效 canonical capability grant 与 snapshot binding 时不再逐次弹出对话批准，但每次派发前仍复核撤销、过期、policy revision、workspace/path scope 与 selected Authority，ONCE grant 原子消费；真实路径不进入模型或错误；Agent+快照命名空间互相隔离；越界/撤权 fail-closed；Internal UTF-8 替换写须原子且无临时残留，SAF 仅在 provider/grant 能力可证明时新建、对既有目标的非原子替换必须拒绝；typed path 不等于 shell |
 | S14 | 对照 wire tool name→capability→backend-neutral 语义矩阵；Provider 无 tools、未知 tool、backend 名称伪装、schema additionalProperties 和重复 call ID | 只发送当前 Provider 声明且经 capability intersection 的中性 schema；未知/后端专用名称拒绝；schema 严格；同一 call 不重复执行；状态：mapping `IMPLEMENTED`，逐项自动化证据按工具记录 |
 | S15 | Dangerous Mode 首次开启/关闭、持久化、Agent capability、`ENABLED_CONFIRM_HIGH_RISK` 与 `ENABLED_AUTONOMOUS`、Authority 暂时不可用 | 首次开启有风险确认；显式关闭才关闭；Authority 暂时失效不清除 grant 或模式但不派发；普通模式不注册 `shell_exec`；高风险档逐次确认，自治档不逐条确认但仍受限；状态：契约 `IMPLEMENTED`，自动化/E2E 分别记录 |
-| S16 | 选择 `SHIZUKU` 或 `WIRED_ADB`，grant/availability/connection 变化，断连、重连、切换和撤权 | 两种 Authority 平级；只调度 selected provider；selected provider 失效返回确定错误且不自动 fallback；Binder/USB 恢复需 revalidate 后恢复；状态：生命周期 `IMPLEMENTED`，真实设备 `E2E BLOCKED` |
-| S17 | `shell_exec` command/cwd/timeout/output/cancel/exit code，超时、截断、断连、派发后未知结果 | 仅设备端 one-shot `/system/bin/sh`；无 PTY、宿主 shell、自动重放或模型指定 serial/host/port；结构化结果和终态；状态：Runtime/backend `IMPLEMENTED`，部分 backend fixture `AUTOMATED TESTED`，真实 Authority/硬件 `E2E BLOCKED` |
+| S16 | 选择 `SHIZUKU` 或 `WIRED_ADB`，grant/availability/connection 变化，断连、重连、切换和撤权 | 两种 Authority 平级；只调度 selected provider；selected provider 失效返回确定错误且不自动 fallback；Binder/USB 恢复需 revalidate 后恢复；Shizuku selected/granted/ready/connected 与 UserService 在 API 31 `DEVICE E2E PASS`，Wired ADB 物理 USB `E2E BLOCKED` |
+| S17 | `shell_exec` command/cwd/timeout/output/cancel/exit code，超时、截断、断连、派发后未知结果 | 仅设备端 one-shot `/system/bin/sh`；无 PTY、宿主 shell、自动重放或模型指定 serial/host/port；结构化结果和终态；Shizuku 真实 shell UserService 在 API 31 `DEVICE E2E PASS`，Wired ADB 物理链路 `E2E BLOCKED` |
 | S18 | approval 与 Agent/Skill snapshot、selected Authority、Dangerous Mode、capability revision 和参数摘要绑定；批准后 revalidation 与 audit | 绑定任一项变化都 fail-closed；不得把自然语言“已批准”当 grant；未知结果不可自动重放；进程重启旧审批失效；诊断仅写哈希/枚举/计数；状态：`IMPLEMENTED`、`AUTOMATED TESTED` |
-| S19 | SAF 系统选择器、持久 URI grant、撤销、URI 不泄露到模型/日志 | SAF 是独立 workspace backend，不是 Authority；只操作用户选定 URI，grant 可撤销；不转成全局路径；状态：实现与负向 fixture `AUTOMATED TESTED`，真实 SAF provider `E2E BLOCKED` |
-| S20 | Shizuku 未安装/未授权/Binder dead/rebind；非 root UID；与 Wired ADB 同时可用 | 仅接受显式 Shizuku grant 与可证明 shell UID 2000；Root/UID0 不属于产品路线；Shizuku 失效不切 Wired ADB；实现与 fake/本地 service fixture `AUTOMATED TESTED`，真实 Shizuku 设备 `E2E BLOCKED` |
+| S19 | SAF 系统选择器、持久 URI grant、撤销、URI 不泄露到模型/日志；授权目录后为 Agent 选择只读/读写快捷预设并新建会话 | SAF 是独立 workspace backend，不是 Authority；只操作用户选定 URI，grant 可撤销；不转成全局路径；平台目录授权不会静默扩大 Agent 权限，快捷预设一次持久化完整只读/读写 capability 集，已有会话快照不被改写；API 31 系统 DocumentsUI 持久授权及 list/read/write/delete `DEVICE E2E PASS`，异常 provider/物理设备差异仍保留边界 |
+| S20 | Shizuku 未安装/未授权/Binder dead/rebind；非 root UID；与 Wired ADB 同时可用 | 仅接受显式 Shizuku grant 与可证明 shell UID 2000；Root/UID0 不属于产品路线；Shizuku 失效不切 Wired ADB；官方 Shizuku 13.6.0、显式用户意图/授权、shell UID UserService 在 API 31 `DEVICE E2E PASS`，物理设备差异仍未验证 |
 | S21 | Windows Companion doctor/pair/reverse/session/request/recovery；官方 adb USB、loopback、会话序号/HMAC、断开与重连 | 只支持有线 USB ADB 平级 backend；不支持无线 ADB/LAN；桥不接受 host PowerShell、raw command、serial/port 由 Agent 指定；Companion/protocol 有 `IMPLEMENTED` 与 `AUTOMATED TESTED` 证据，真实设备时 `E2E BLOCKED` |
-| S22 | 非 debug 控制面、诊断导出/清除与 release gate | `debuggable=false` Review APK、Review SBOM/provenance 与 security gate 已 `LOCAL_PASS`；debug 证据单列；诊断限额固定为 256/256/32/4/640 KiB；真实 Shizuku/USB/SAF 仍保持 `E2E BLOCKED` |
+| S22 | 非 debug 控制面、诊断导出/清除与 release gate | `debuggable=false` Review APK、Review SBOM/provenance 与 security gate 已 `LOCAL_PASS`；debug 证据单列；诊断限额固定为 256/256/32/4/640 KiB；API 31 真实 Shizuku/SAF `DEVICE E2E PASS`，物理 USB 与非模拟器差异保持 `E2E BLOCKED` |
 
 ## 6. 公告
 
@@ -138,6 +138,10 @@ K06另需前台任务兼容矩阵：Android12+后台启动限制、Android14+服
 ## 7. 证据产物和独立复核
 
 2026-08-31 v2 本地收敛证据：严格全仓 `check`、Debug evidence gate 与 `debuggable=false` Review gate 全部通过；Debug/Review 均生成 171-component CycloneDX 1.6 SBOM 和 SHA-bound provenance；REUSE、AGPL/license 正反向、Actions pin、28 个 lockfile、root+included-build strict dependency verification、148 Maven + 4 native/model 成品 notices 均通过。最终 Debug APK 已安装到 API 31 x86_64 并确认首次浅色主题；v2 instrumentation 按 Authority/Workspace/Memory、Tooling/Navigation/Search、UI/Release Gate、Diagnostics 分批执行。准确测试数、产物 hash、命令、独立只读复核与外部 `E2E BLOCKED` 列表见 [authority-tooling-v2-final](evidence/2026-08-31/authority-tooling-v2-final.md)。该证据是 dirty-source 本地候选，不代表正式签名、发布或生产部署。
+
+2026-09-01 新诊断复现的根因是 typed workspace 在 canonical grant 与 snapshot binding 通过后仍创建第二份进程内批准，导致三次 `workspace_read` 停在重复确认而未派发。修复后持久授权直接进入实时复核；同 model call 并发只派发一次，live policy revision 变化立即撤销旧 executor 权限，STARTED 后异常按 `UNKNOWN_OUTCOME` 终结且不重放。API 31 `ToolingOrchestrationTest` 37/37、`DiagnosticsDeviceTest` 12/12，全仓 1078-task build 与 592-task Review gate 通过，第二轮独立只读复核 `PASS`。准确产物哈希和边界见根目录 `HANDOFF.md`；这仍是 dirty-source 本地候选，不是正式 release。
+
+2026-09-01 最新真实 E2E 复核：系统 DocumentsUI 对 `Download/mar-workspace` 的持久 SAF grant 和官方 Shizuku 13.6.0 均在 API 31 x86_64 模拟器实际配置。真实红灯定位为审计空 workspace、SAF tree/document URI、SAF mutation handle、Shizuku 根 list 路径和首次并发 bind 等独立边界错误；公开 schema 与 Wired expectedVersion 的静默忽略也已 fail-closed 收口。修复均只在对应 API 边界规范化；具体操作审计、路径隔离与 SAF 既有文件非原子覆盖拒绝未放宽。最终首次无预热 Shizuku bind 1/1、SAF 2/2、模型侧 Shizuku 1/1、Shizuku UserService 2/2，完整 connected matrix 235 tests 全通过，另有 1 个未显式启用的受控大负载 Knowledge skip。准确步骤、命令、哈希和 Review 边界见 [2026-09-01 真实工作区 E2E 证据](evidence/2026-09-01/workspace-tool-real-e2e.md)。物理 USB Companion、物理断连恢复与非模拟器设备差异仍保持 `E2E_BLOCKED`。
 
 2026-08-30 第二轮人工反馈包补充验证：API 31 x86_64 上 `DiagnosticsDeviceTest`、`ReleaseGateUiDeviceTest`、`NavigationScopeTest` 合计 17/17、0 failed；`check --dependency-verification=strict` 936 tasks 通过。覆盖诊断启停/边界、More 二级返回、公告配置隐藏、无智能体尺寸和稳定导航 owner；ZIP/Skill install/批次调度由共享与 SQLite 测试覆盖。用户实际 294 个 PDF 的完整耗时及真实 Provider 跨页流仍保留为人工终审，不据此标 K06 或正式 release PASS。证据见 [manual-review-round-2-fixes](evidence/2026-08-30/manual-review-round-2-fixes.md)。
 

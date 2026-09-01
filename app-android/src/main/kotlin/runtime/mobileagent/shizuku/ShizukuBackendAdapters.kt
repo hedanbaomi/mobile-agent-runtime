@@ -550,7 +550,13 @@ class ShizukuWorkspaceBackendAdapter(
     }
 
     private fun normalizePath(raw: String?, allowRoot: Boolean): String? = runCatching {
-        ShizukuWorkspacePathPolicy.parse(raw, allowRoot).joinToString("/")
+        // WorkspaceListRequest uses null for an omitted relative path, which is
+        // the canonical model-facing representation of the workspace root.
+        // The Binder path policy deliberately accepts only the explicit empty
+        // string for root, so normalize that API boundary here without making
+        // null valid for any non-root operation.
+        ShizukuWorkspacePathPolicy.parse(if (allowRoot && raw == null) "" else raw, allowRoot)
+            .joinToString("/")
     }.getOrNull()
 
     private fun isChildOf(path: String, parent: String): Boolean =

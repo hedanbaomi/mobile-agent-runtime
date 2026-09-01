@@ -22,6 +22,8 @@ import runtime.mobileagent.diagnostics.DiagnosticAuthority
 import runtime.mobileagent.diagnostics.DiagnosticToolCapability
 import runtime.mobileagent.diagnostics.RuntimeToolingUnavailableCode
 import runtime.mobileagent.diagnostics.RuntimeToolingUnavailableRecord
+import runtime.mobileagent.diagnostics.RuntimeToolExposureReason
+import runtime.mobileagent.diagnostics.RuntimeToolExposureRecord
 import runtime.mobileagent.diagnostics.ToolApprovalStateRecord
 import runtime.mobileagent.feature.chat.*
 import runtime.mobileagent.knowledge.*
@@ -326,6 +328,44 @@ class ChatViewModel(
                     null
                 }
                 var v2ToolingUnavailable = toolingContext == null
+                var v2NoEffectiveTools = false
+                val modelToolTransportEnabled = "tools" in model.capabilities
+                fun recordToolExposure(
+                    exposedToolCount: Int,
+                    ownerToolCounts: Map<String, Int> = emptyMap(),
+                    reason: RuntimeToolExposureReason,
+                ) {
+                    val context = toolingContext ?: return
+                    runCatching {
+                        val exposureInputs = container.runtimeIntegration.toolExposureDiagnostics(context)
+                        (getApplication<Application>() as MobileAgentApp).diagnostics.recordRuntimeToolExposure(
+                            RuntimeToolExposureRecord(
+                                agentId = context.agentId,
+                                sessionRef = conversationId,
+                                runRef = run.runId,
+                                effectiveGrantCount = context.canonicalGrants.size,
+                                snapshotBindingCount = context.snapshotGrantBindings.size,
+                                exposedToolCount = exposedToolCount,
+                                webToolCount = ownerToolCounts["web"] ?: 0,
+                                mcpToolCount = ownerToolCounts["mcp"] ?: 0,
+                                pythonToolCount = ownerToolCounts["python"] ?: 0,
+                                memoryToolCount = ownerToolCounts["memory"] ?: 0,
+                                workspaceToolCount = ownerToolCounts["workspace"] ?: 0,
+                                shellToolCount = ownerToolCounts["shell"] ?: 0,
+                                registeredWorkspaceCount = exposureInputs.registeredWorkspaceCount,
+                                grantedWorkspaceCount = exposureInputs.grantedWorkspaceCount,
+                                boundWorkspaceCount = exposureInputs.boundWorkspaceCount,
+                                registeredGrantedWorkspaceCount = exposureInputs.registeredGrantedWorkspaceCount,
+                                selectedAuthority = exposureInputs.selectedAuthority,
+                                selectedAuthorityReady = exposureInputs.selectedAuthorityReady,
+                                safGrantActive = exposureInputs.safGrantActive,
+                                safBackendRegistered = exposureInputs.safBackendRegistered,
+                                modelToolTransportEnabled = modelToolTransportEnabled,
+                                reason = reason,
+                            ),
+                        )
+                    }
+                }
                 fun noteV2ToolingUnavailable(errorCode: RuntimeToolingUnavailableCode) {
                     v2ToolingUnavailable = true
                     // Keep the diagnostic intentionally typed and non-sensitive:
@@ -347,13 +387,32 @@ class ChatViewModel(
                     runExecutorFactory = { python ->
                         toolingContext?.let { frozenContext ->
                             try {
-                                container.runtimeIntegration
+                                val factory = container.runtimeIntegration
                                     .createToolExecutorFactory(frozenContext, webExecutor, mcpExecutor, python)
-                                    .createLegacyExecutor()
+                                val catalogToolCount = factory.exposureSummary.totalTools
+                                val exposedToolCount = if (modelToolTransportEnabled) catalogToolCount else 0
+                                val reason = when {
+                                    !modelToolTransportEnabled -> RuntimeToolExposureReason.MODEL_TOOL_TRANSPORT_DISABLED
+                                    exposedToolCount > 0 -> RuntimeToolExposureReason.EXPOSED
+                                    frozenContext.canonicalGrants.isEmpty() -> RuntimeToolExposureReason.NO_EFFECTIVE_AGENT_GRANTS
+                                    frozenContext.snapshotGrantBindings.isEmpty() -> RuntimeToolExposureReason.NO_SNAPSHOT_BINDINGS
+                                    else -> RuntimeToolExposureReason.EMPTY_EFFECTIVE_TOOL_SET
+                                }
+                                v2NoEffectiveTools = exposedToolCount == 0
+                                recordToolExposure(
+                                    exposedToolCount,
+                                    factory.exposureSummary.ownerToolCounts.takeIf { modelToolTransportEnabled }.orEmpty(),
+                                    reason,
+                                )
+                                factory.createLegacyExecutor()
                             } catch (cancel: CancellationException) {
                                 throw cancel
                             } catch (_: Exception) {
                                 noteV2ToolingUnavailable(RuntimeToolingUnavailableCode.TOOL_EXECUTOR_FACTORY_UNAVAILABLE)
+                                recordToolExposure(
+                                    exposedToolCount = 0,
+                                    reason = RuntimeToolExposureReason.FACTORY_UNAVAILABLE,
+                                )
                                 null
                             }
                         }
@@ -396,6 +455,13 @@ class ChatViewModel(
                     citations = citationUis(), status = listOfNotNull(
                         "发送至 ${URI(provider.baseUrl).host} · ${model.modelId}。",
                         if (v2ToolingUnavailable) "工作区/高权限工具本次不可用。" else null,
+                        if (v2NoEffectiveTools) {
+                            if (!modelToolTransportEnabled) {
+                                "当前模型配置未启用工具调用；请在服务商页面完成工具能力探测或选择支持工具的模型，再新建会话。"
+                            } else {
+                                "当前 Agent/会话没有已授权的可选工具；若已选择 SAF 目录，请在智能体页授予“只读”或“读写”，再新建会话。"
+                            }
+                        } else null,
                         result.warnings.joinToString(" ").takeIf { it.isNotBlank() },
                     ).joinToString(" "))
                 val runtime = AgentRuntime(adapter, executor = toolExecutor, onApprove = { call ->

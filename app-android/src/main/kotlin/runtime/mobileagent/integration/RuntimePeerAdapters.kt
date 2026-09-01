@@ -254,10 +254,17 @@ internal class WiredWorkspaceBackend(
             1,
             content = request.text.toByteArray(StandardCharsets.UTF_8),
             replace = request.replace,
+            expectedVersion = request.expectedVersion,
         ).map { value -> WorkspaceMutation(value.relativePath ?: request.relativePath, WorkspaceEntryType.FILE, value.bytes ?: 0L) }
 
     override suspend fun createDirectory(request: WorkspaceCreateDirectoryRequest): WorkspaceResult<WorkspaceMutation> =
-        execute(request.workspaceId, WiredAdbFileOperation.CREATE_DIRECTORY, request.relativePath, 1)
+        execute(
+            request.workspaceId,
+            WiredAdbFileOperation.CREATE_DIRECTORY,
+            request.relativePath,
+            1,
+            expectedVersion = request.expectedVersion,
+        )
             .map { value -> WorkspaceMutation(value.relativePath ?: request.relativePath, WorkspaceEntryType.DIRECTORY) }
 
     override suspend fun move(request: WorkspaceMoveRequest): WorkspaceResult<WorkspaceMutation> =
@@ -267,10 +274,17 @@ internal class WiredWorkspaceBackend(
             request.sourcePath,
             1,
             destination = request.destinationPath,
+            expectedVersion = request.expectedVersion,
         ).map { value -> WorkspaceMutation(value.relativePath ?: request.destinationPath, WorkspaceEntryType.FILE, value.bytes ?: 0L) }
 
     override suspend fun delete(request: WorkspaceDeleteRequest): WorkspaceResult<WorkspaceMutation> =
-        execute(request.workspaceId, WiredAdbFileOperation.DELETE, request.relativePath, 1)
+        execute(
+            request.workspaceId,
+            WiredAdbFileOperation.DELETE,
+            request.relativePath,
+            1,
+            expectedVersion = request.expectedVersion,
+        )
             .map { value -> WorkspaceMutation(value.relativePath ?: request.relativePath, WorkspaceEntryType.FILE) }
 
     private suspend fun execute(
@@ -281,9 +295,13 @@ internal class WiredWorkspaceBackend(
         destination: String? = null,
         content: ByteArray? = null,
         replace: Boolean = false,
+        expectedVersion: Long? = null,
         maxBytes: Int = 24 * 1024,
     ): WorkspaceResult<WiredAdbFileResult> {
         if (workspaceId != descriptor.id) return WorkspaceResult.Failure(ToolError(ToolErrorCode.INVALID_REQUEST))
+        // The wired protocol currently has no compare-and-mutate precondition.
+        // Do not dispatch a mutation when the shared caller supplied one.
+        if (expectedVersion != null) return expectedVersionConflict()
         val request = runCatching {
             authority.newFileRequest(operation, path, destination, content, replace, maxBytes)
         }.getOrElse { return WorkspaceResult.Failure(ToolError(ToolErrorCode.INVALID_REQUEST)) }
@@ -293,6 +311,9 @@ internal class WiredWorkspaceBackend(
             null -> WorkspaceResult.Failure(ToolError(ToolErrorCode.UNKNOWN_OUTCOME))
         }
     }
+
+    private fun expectedVersionConflict(): WorkspaceResult.Failure =
+        WorkspaceResult.Failure(ToolError(ToolErrorCode.CONFLICT))
 
     private fun WiredAdbEntryType.toShared() = when (this) {
         WiredAdbEntryType.FILE -> WorkspaceEntryType.FILE

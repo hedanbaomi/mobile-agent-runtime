@@ -3,7 +3,7 @@
 
 # 技术实现方案
 
-版本：v2.2 权限、工具与危险模式本地收敛包，2026-08-31。状态：**[v2 单一规范](mobile-agent-runtime-authority-tooling-codex-prompt-v2.md) 的统一 Capability/Workspace/Authority/Approval/Audit、Internal/SAF/selected privileged workspace、Skill Memory、Shizuku、Windows 有线 USB ADB Companion、持久 Dangerous Mode、受控 `shell_exec`、Settings/Agent/Chat/Skills/diagnostics 已完成实现与本地自动化收敛；真实 Shizuku、物理 USB Companion 和真实 SAF provider 保持 `E2E BLOCKED`**。Root、应用内无线 ADB、DPC、Termux、PTY、Accessibility、宿主 PowerShell/宿主 shell 继续排除。当前 Debug APK SHA-256 为 `ee4640886e3135686ab6bc3a2d04e331291c875f98020cfa20ce861220073c44`；`debuggable=false` Review APK SHA-256 为 `b8c96c49369054247d251f2646edc6c5b9804c1cf44f37edde07b9e0fec6cccc`；全仓严格 `check` 1024 tasks、Review gate 592 tasks、两份 171-component SBOM/provenance 及成品 notices 验证通过。它们都是提交前 dirty-source 本地证据，不是正式 release；2026-08-31 用户已明确授权将当前 v2 源码、测试与文档 commit/push 到 `origin/main`，仍未部署、未调用付费服务。App 元数据仍为 `versionName=0.1.0`/`versionCode=1`。F-001 保持 `candidate_intermittent`；用户实际 294 个 PDF、Android 15/16 长时配额、ENOSPC 等 K06 边界仍未完成，不能标完整 K06 或正式 release PASS。
+版本：v2.3 权限、工具暴露与诊断可用性修复，2026-09-01。状态：**[v2 单一规范](mobile-agent-runtime-authority-tooling-codex-prompt-v2.md) 的统一 Capability/Workspace/Authority/Approval/Audit、Internal/SAF/selected privileged workspace、Skill Memory、Shizuku、Windows 有线 USB ADB Companion、持久 Dangerous Mode、受控 `shell_exec`、Settings/Agent/Chat/Skills/diagnostics 已完成实现与本地自动化收敛；API 31 x86_64 的系统 SAF provider 与官方 Shizuku 13.6.0 shell UserService 已完成真实 E2E，物理 USB Companion、物理断连恢复和非模拟器设备差异保持 `E2E BLOCKED`**。有效 canonical grant 与 snapshot binding 已授权的 typed workspace 调用不再在 Chat 重复询问，仍逐次复核撤销、过期、live policy revision、workspace/path scope、selected Authority 与 ONCE CAS；高风险 Shell 的策略确认不变。合法空工具集、模型 tools transport 关闭与 factory 故障已分离，`runtime_tool_exposure` 只记录安全聚合状态。Debug 继续拒绝 Dangerous Mode，控制面使用 `debuggable=false` Review 构建；Root、应用内无线 ADB、DPC、Termux、PTY、Accessibility、宿主 PowerShell/宿主 shell 继续排除。当前 dirty Debug APK 为 212,754,194 bytes、SHA-256 `ED6571CC4AE98101D6F049EC57FF9EE3EA6BA8F030CDFE2FD41C64A11E96FAD4`；Review APK 为 204,289,319 bytes、SHA-256 `E8289EE1DB02ADBF1C3F9C2AD8BF7B97FC07E676140EF5347AA2395C9F2AB477`。API 31 首次无预热 Shizuku bind 1/1、SAF 2/2、模型侧 Shizuku 1/1、Shizuku UserService 2/2，完整 connected matrix 235 tests 全通过（另有 1 个未显式启用的受控大负载 Knowledge skip）；全仓 strict 1084-task gate、两份 171-component SBOM、Review provenance、REUSE 516/516、许可与供应链门禁通过。准确命令、哈希和边界见 [2026-09-01 真实工作区 E2E 证据](evidence/2026-09-01/workspace-tool-real-e2e.md)。它们是未提交 dirty-source 的本地证据，不是正式 release；本轮尚未 commit/push、未部署、未调用付费服务。App 元数据仍为 `versionName=0.1.0`/`versionCode=1`。F-001 保持 `candidate_intermittent`；用户实际 294 个 PDF、Android 15/16 长时配额、ENOSPC 等 K06 边界仍未完成，不能标完整 K06 或正式 release PASS。
 
 开工入口：[agent.md](../agent.md) → [HANDOFF.md](../HANDOFF.md) → 本文。范围依据见 [REQUIREMENTS.md](REQUIREMENTS.md)。含图知识库、Python 隔离和公告分别详见专题，不能只实现本文概要。
 
@@ -194,7 +194,7 @@ RAG 可由用户设置为自动检索或显式 knowledge_search；不得无条�
 1. 校验模型能力、资源授权、知识库状态和请求预算；缺条件暂停，不能无声跳过。
 2. 生成检索证据集和固定引用 ID；构建真实请求，展示可审查内容。
 3. 接收流式消息；完成且验证 tool arguments 后交权限系统。
-4. 每次调用生成 invocationId，绑定 runId/skillId/包哈希/授权版本。需确认的副作用进入等待界面，用户拒绝则产生结构化拒绝结果。
+4. 每次调用生成 invocationId，绑定 runId/skillId/包哈希/授权版本。已经由 canonical capability grant 与 snapshot binding 授权的 typed workspace 操作直接进入实时复核，不在对话中重复索取同一授权；撤销、过期、policy revision、workspace/path scope、selected Authority 和 ONCE 消费仍在派发前 fail-closed。只有当前策略明确要求再次确认的高风险操作进入等待界面，用户拒绝则产生结构化拒绝结果。
 5. 执行器返回 typed result，输出标记为不可信数据；截断大输出保留原始尺寸、摘要和 artifact引用。
 6. 将工具结果按协议回传模型；到达停止条件或预算终止。无工具能力的模型只能进入用户明确选择的纯问答，不从自然语言中猜命令执行。
 
@@ -327,7 +327,7 @@ API 31 x86_64 定向验证已覆盖确认卡 2/2、预算 3/3、工作区 6/6；
 - Chat 流和 Knowledge import 使用稳定 owner；跨页面不取消。进程重启后的旧 WAITING_TOOL_APPROVAL 会被终结并标记 invalidated，不能续批或自动重放。
 - v2 diagnostics 默认关闭、闭合 schema、会话 HMAC、固定 256/256/32/4/640 KiB 上限，并覆盖 Authority/Workspace/Memory/Approval/Shell/Bridge 的 started/terminal/unknown 路径。
 
-严格构建、API 31 设备矩阵、Debug/Review APK、SBOM/provenance、许可与 remaining E2E boundary 见 [最终本地证据](evidence/2026-08-31/authority-tooling-v2-final.md)。真实 Shizuku、物理 USB Companion 与真实 SAF provider 仍需用户后续提供环境；缺少它们不把实现降格为原型，但必须继续标 `E2E BLOCKED`，不得写成 `DEVICE_PASS`。Root、无线 ADB、DPC、Termux、PTY、Accessibility 与宿主 shell 不是待实现分支。
+严格构建、API 31 设备矩阵、Debug/Review APK、SBOM/provenance、许可与 remaining E2E boundary 见 [2026-09-01 真实工作区 E2E 证据](evidence/2026-09-01/workspace-tool-real-e2e.md)。系统 DocumentsUI SAF 与官方 Shizuku UID 2000 UserService 已在 API 31 x86_64 模拟器 `DEVICE E2E PASS`；物理 USB Companion、物理断连恢复、OEM provider 和非模拟器设备差异仍为 `E2E_BLOCKED`。Root、无线 ADB、DPC、Termux、PTY、Accessibility 与宿主 shell 不是待实现分支。
 
 功能完整的MVP必须到M6（含Python Skills）通过后才可宣称，不得把纯问答或只有Native工具的M5当作完整MVP。M6的原生隔离风险可在M0完成后提前开展最小可行性实验，不改动M1—M5接口或减配安全要求；实验产物必须标明spike，验证通过后再纳入正式实现。
 

@@ -17,6 +17,7 @@ import org.junit.Test
 import org.junit.runner.RunWith
 import runtime.mobileagent.domain.AgentSnapshot
 import runtime.mobileagent.skills.tooling.WorkspaceEntryType
+import runtime.mobileagent.skills.tooling.WorkspaceListRequest
 import runtime.mobileagent.skills.tooling.WorkspaceMoveRequest
 import runtime.mobileagent.skills.tooling.WorkspaceResult
 import runtime.mobileagent.skills.tooling.WorkspaceStatRequest
@@ -71,6 +72,17 @@ class ShizukuLiveDeviceTest {
             val executor = bridge.createToolExecutor(snapshot, { true }, { true })
             assertEquals(5, executor.specs.size)
 
+            val workspaceBackend = ShizukuBackendFactory.createWorkspaceBackend(bridge)
+            val rootListing = workspaceBackend.list(
+                WorkspaceListRequest(
+                    workspaceId = ShizukuWorkspaceBackendAdapter.DEFAULT_WORKSPACE_ID,
+                    relativePath = null,
+                ),
+            )
+            assertTrue("An omitted list path must address the workspace root", rootListing is WorkspaceResult.Success)
+            approve(executor, "root-list", "shizuku_workspace_list", "{}")
+                .requireSuccess("list")
+
             approve(executor, "mkdir", "shizuku_workspace_mkdir", "{\"path\":\"$directory\"}")
                 .requireSuccess("mkdir")
             approve(
@@ -86,7 +98,6 @@ class ShizukuLiveDeviceTest {
                 "{\"path\":\"$file\",\"maxBytes\":1024}",
             ).requireSuccess("read")
             assertEquals("Shizuku typed round trip", read.getString("text"))
-            val workspaceBackend = ShizukuBackendFactory.createWorkspaceBackend(bridge)
             val stat = workspaceBackend.stat(
                 WorkspaceStatRequest(ShizukuWorkspaceBackendAdapter.DEFAULT_WORKSPACE_ID, file),
             )

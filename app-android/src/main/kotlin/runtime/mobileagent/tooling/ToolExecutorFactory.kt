@@ -52,9 +52,13 @@ class ToolExecutorFactory(
         CompositeToolExecutor(providers.map { it.executor })
     }
 
-    /** Shared skills-api registry with owner routing hidden from model schemas. */
-    val registry: ToolRegistry by lazy {
-        val registrations = providers.flatMap { provider ->
+    /**
+     * Frozen model-facing registrations. An empty list is a valid run state:
+     * it means the current Agent/snapshot has no effective optional tools, not
+     * that factory construction failed.
+     */
+    private val registrations: List<ToolRegistration> by lazy {
+        providers.flatMap { provider ->
             provider.executor.specs.mapNotNull { legacy ->
                 val capability = legacy.capability.takeIf { it.isNotBlank() }?.let { CapabilityId(it) }
                 ToolRegistration(
@@ -68,6 +72,17 @@ class ToolExecutorFactory(
                     ownerId = provider.ownerId,
                 )
             }
+        }.also { values ->
+            require(values.map { it.spec.name }.distinct().size == values.size) {
+                "Tool name is owned by more than one executor"
+            }
+        }
+    }
+
+    /** Shared skills-api registry with owner routing hidden from model schemas. */
+    val registry: ToolRegistry by lazy {
+        require(registrations.isNotEmpty()) {
+            "Cannot create a ToolRegistry for an empty effective tool set"
         }
         require(registrations.map { it.spec.name }.distinct().size == registrations.size) {
             "Tool name is owned by more than one executor"
@@ -78,10 +93,22 @@ class ToolExecutorFactory(
         ToolRegistry(registrations, handlers)
     }
 
-    val toolingSpecs: List<ToolSpec> by lazy { registry.snapshot().immutableSpecs() }
+    val toolingSpecs: List<ToolSpec> by lazy {
+        Collections.unmodifiableList(registrations.map { it.spec }.toList())
+    }
+
+    val exposureSummary: ToolExposureSummary by lazy {
+        ToolExposureSummary(
+            totalTools = registrations.size,
+            ownerToolCounts = Collections.unmodifiableMap(
+                registrations.groupingBy { registration -> registration.ownerId }.eachCount(),
+            ),
+        )
+    }
 
     fun createLegacyExecutor(): ToolExecutor = executor
     fun createToolRegistry(): ToolRegistry = registry
+    fun createToolRegistryOrNull(): ToolRegistry? = if (registrations.isEmpty()) null else registry
     fun beginRun(): ToolRunSnapshot = registry.beginRun()
 
     suspend fun invoke(call: ToolCall): ToolResult = executor.invoke(call)
@@ -135,6 +162,14 @@ class ToolExecutorFactory(
             }
         }
     }
+}
+
+/** Safe counts only; names, schemas, paths and provider details are deliberately absent. */
+data class ToolExposureSummary(
+    val totalTools: Int,
+    val ownerToolCounts: Map<String, Int>,
+) {
+    val hasExposedTools: Boolean get() = totalTools > 0
 }
 
 private class CompositeToolExecutor(executors: List<ToolExecutor>) : ToolExecutor {

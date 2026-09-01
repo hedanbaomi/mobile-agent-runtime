@@ -58,18 +58,43 @@ internal object SafWorkspaceCapabilityPolicy {
         val canMove = writeGranted && children.any {
             it.flags and (DocumentsContract.Document.FLAG_SUPPORTS_MOVE or DocumentsContract.Document.FLAG_SUPPORTS_RENAME) != 0
         }
-        if (canCreate) capabilities += InternalWorkspaceCapabilities.CREATE_DIRECTORY
+        if (canCreate) {
+            // A writable SAF tree can safely create a new text document even though the SAF
+            // contract cannot atomically replace an existing one.  Advertise the typed write
+            // operation so model calls with replace=false can reach the backend; write() still
+            // rejects existing-file replacement and expected-version compare/create requests.
+            capabilities += InternalWorkspaceCapabilities.WRITE_TEXT
+            capabilities += InternalWorkspaceCapabilities.CREATE_DIRECTORY
+        }
         if (canDelete) capabilities += InternalWorkspaceCapabilities.DELETE
         if (canMove) capabilities += InternalWorkspaceCapabilities.MOVE
 
-        // SAF has no atomic replacement contract.  FILE_WRITE_TEXT is intentionally absent even
-        // when a provider exposes FLAG_SUPPORTS_WRITE; existing-file replacement remains UNSUPPORTED.
+        // Writable describes the mutation surface, not an atomic-replacement guarantee.  The
+        // descriptor keeps supportsAtomicReplace=false and the backend fails closed for replace.
         return SafCapabilitySnapshot(
             writable = canCreate || canDelete || canMove,
             operationCapabilities = capabilities,
         )
     }
 }
+
+/**
+ * Rebind a provider-returned mutation handle to the user's persisted tree.
+ *
+ * DocumentsProvider mutation methods are allowed to return an ordinary document URI rather
+ * than a tree URI.  The returned URI is still untrusted: accept only the same content provider,
+ * extract its opaque document ID through DocumentsContract, and rebuild a tree-scoped URI using
+ * the original persisted grant.  No URI path is concatenated or exposed.
+ */
+internal fun rebindSafMutationDocumentUri(treeUri: Uri, returnedUri: Uri): Uri? = runCatching {
+    require(treeUri.scheme == ContentResolver.SCHEME_CONTENT)
+    require(returnedUri.scheme == ContentResolver.SCHEME_CONTENT)
+    require(returnedUri.authority == treeUri.authority)
+    require(returnedUri.query == null && returnedUri.fragment == null)
+    val documentId = DocumentsContract.getDocumentId(returnedUri)
+    require(documentId.isNotBlank())
+    DocumentsContract.buildDocumentUriUsingTree(treeUri, documentId)
+}.getOrNull()
 
 /**
  * Storage Access Framework tree backend.
@@ -720,7 +745,9 @@ internal class SafWorkspaceBackend(
     private fun postMutationUri(uri: Uri?): Uri {
         if (uri == null) InternalWorkspaceErrorCode.UNKNOWN_OUTCOME.error()
         return try {
-            safeDocumentUri(uri)
+            val treeBound = rebindSafMutationDocumentUri(treeUri, uri)
+                ?: InternalWorkspaceErrorCode.UNKNOWN_OUTCOME.error()
+            safeDocumentUri(treeBound)
         } catch (_: InternalWorkspaceFailure) {
             // The provider may have completed the operation before returning an invalid handle.
             InternalWorkspaceErrorCode.UNKNOWN_OUTCOME.error()
@@ -821,7 +848,10 @@ internal class SafWorkspaceBackend(
             }
             return usage
         }
-        return scan(treeUri, 0)
+        // A persisted tree grant URI (`.../tree/<id>`) is not itself a document URI on every
+        // DocumentsProvider.  Traverse from the verified root document URI so getDocumentId()
+        // and child queries use the provider's canonical tree-bound document form.
+        return scan(rootChild().uri, 0)
     }
 
     private fun inspectNode(node: Child): Usage {

@@ -161,6 +161,80 @@ internal fun saveAgentGrantDraft(
     return persisted
 }
 
+private val READ_ONLY_WORKSPACE_CAPABILITIES = listOf(
+    CapabilityId(CapabilityId.WORKSPACE_ENUMERATE),
+    CapabilityId(CapabilityId.FILE_LIST),
+    CapabilityId(CapabilityId.FILE_STAT),
+    CapabilityId(CapabilityId.FILE_READ_TEXT),
+)
+
+private val READ_WRITE_WORKSPACE_CAPABILITIES = READ_ONLY_WORKSPACE_CAPABILITIES + listOf(
+    CapabilityId(CapabilityId.FILE_WRITE_TEXT),
+    CapabilityId(CapabilityId.FILE_CREATE_DIRECTORY),
+    CapabilityId(CapabilityId.FILE_MOVE),
+    CapabilityId(CapabilityId.FILE_DELETE),
+)
+
+/**
+ * Persist the simple workspace preset as ordinary canonical grants. Existing
+ * matching active persistent grants are reused, so repeating the shortcut is
+ * idempotent and never broadens a relative-path or Skill-bound grant.
+ */
+internal fun saveAgentWorkspaceGrantPreset(
+    editor: AgentEditorUi,
+    agentId: String,
+    grantPort: AgentGrantPort,
+    createdAt: String = Utc.nowIso(),
+): List<CapabilityGrant> {
+    require(grantPort.available) { grantPort.unavailableMessage }
+    val preset = editor.workspaceGrantPreset ?: return emptyList()
+    val workspace = editor.workspaces.firstOrNull { it.id == preset.workspaceId && it.enabled }
+        ?: error("请选择可用工作区。")
+    require(workspace.readable) { "该工作区没有读取权限。" }
+    if (preset.access == AgentWorkspaceAccessPreset.READ_WRITE) {
+        require(workspace.writable) { "该工作区仅有读取权限，不能授予读写工具。" }
+    }
+    val capabilities = when (preset.access) {
+        AgentWorkspaceAccessPreset.READ_ONLY -> READ_ONLY_WORKSPACE_CAPABILITIES
+        AgentWorkspaceAccessPreset.READ_WRITE -> READ_WRITE_WORKSPACE_CAPABILITIES
+    }
+    val existing = editor.grants.asSequence()
+        .filter { it.enabled && !it.grant.revoked && !it.expired }
+        .map { it.grant }
+        .filter {
+            it.workspaceId == workspace.id &&
+                it.pathScope == null &&
+                it.skillInstallId == null &&
+                it.lifetime == GrantLifetime.PERSISTENT
+        }
+        .map { it.capability }
+        .toSet()
+    val missing = capabilities.filterNot(existing::contains)
+    if (missing.isEmpty()) return emptyList()
+    val policyVersion = grantPort.currentPolicyVersion()
+    return missing.map { capability ->
+        val grant = CapabilityGrant(
+            grantId = EntityId.random().value,
+            agentId = agentId,
+            capability = capability,
+            workspaceId = workspace.id,
+            lifetime = GrantLifetime.PERSISTENT,
+            policyVersion = policyVersion,
+            createdAt = createdAt,
+        )
+        grantPort.saveGrant(grant).also { persisted ->
+            require(
+                persisted.agentId == agentId &&
+                    persisted.capability == capability &&
+                    persisted.workspaceId == workspace.id &&
+                    persisted.pathScope == null &&
+                    persisted.skillInstallId == null &&
+                    persisted.lifetime == GrantLifetime.PERSISTENT,
+            ) { "Workspace preset grant save returned an unexpected binding" }
+        }
+    }
+}
+
 class AgentsViewModel(
     application: Application,
     private val savedStateHandle: SavedStateHandle,
@@ -263,13 +337,21 @@ class AgentsViewModel(
                 "存在已绑定但当前未启用的技能，请先在技能页启用后再保存。"
             }
             val previous = editor.id?.let { app.container.agents.get(it) }
-            val grantChanges = editor.grantDraft != null || editor.grants.any {
+            val grantChanges = editor.grantDraft != null || editor.workspaceGrantPreset != null || editor.grants.any {
                 !it.enabled && !it.grant.revoked && !it.expired
             }
             require(!grantChanges || grantPort.available) {
                 grantPort.unavailableMessage
             }
             if (editor.grantDraft != null) validateAgentGrantDraftForContext(editor)
+            editor.workspaceGrantPreset?.let { preset ->
+                val workspace = editor.workspaces.firstOrNull { it.id == preset.workspaceId && it.enabled }
+                    ?: error("请选择可用工作区。")
+                require(workspace.readable) { "该工作区没有读取权限。" }
+                if (preset.access == AgentWorkspaceAccessPreset.READ_WRITE) {
+                    require(workspace.writable) { "该工作区仅有读取权限，不能授予读写工具。" }
+                }
+            }
             val parameters = JsonObject(editor.parameters.filterValues { it.isNotBlank() }.mapValues { Json.parseToJsonElement(it.value) })
             val profile = AgentProfile(
                 id = previous?.id ?: EntityId.random().value, name = editor.name.trim(),
@@ -294,7 +376,11 @@ class AgentsViewModel(
                 editorOpen = false,
                 editorDirty = false,
                 error = null,
-                status = "已保存 Agent；旧会话快照不变。",
+                status = if (editor.workspaceGrantPreset != null || editor.grantDraft != null) {
+                    "已保存 Agent 和能力授权；请用此智能体新建会话以载入工具。旧会话不变。"
+                } else {
+                    "已保存 Agent；旧会话快照不变。"
+                },
                 grantStoreAvailable = grantPort.available,
                 grantStoreError = grantPortError,
             )
@@ -356,6 +442,7 @@ class AgentsViewModel(
             }
 
         if (editor.grantDraft != null) saveAgentGrantDraft(editor, agentId, grantPort)
+        if (editor.workspaceGrantPreset != null) saveAgentWorkspaceGrantPreset(editor, agentId, grantPort)
     }
 
     private fun editorFrom(id: String?): AgentEditorUi {
@@ -405,8 +492,9 @@ class AgentsViewModel(
             grants = grantData.grants,
             trustedSkills = grantData.trustedSkills,
             snapshotGrantBindings = grantData.snapshotBindings,
+            workspacePresetWorkspaceId = grantData.workspaces.firstOrNull { it.enabled }?.id,
             retrievalMode = agent?.retrievalMode ?: "explicit",
-            snapshotLabel = "修改配置只影响新会话；现有会话保留不可变快照，撤权立即生效。",
+            snapshotLabel = "用此智能体新建会话时会冻结当前配置和能力授权；现有会话不会新增工具，撤权仍立即生效。",
             revision = agent?.revision ?: 0,
         )
     }

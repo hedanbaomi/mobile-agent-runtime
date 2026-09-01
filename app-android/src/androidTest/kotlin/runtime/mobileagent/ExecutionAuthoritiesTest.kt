@@ -158,6 +158,24 @@ class ExecutionAuthoritiesTest {
             registerSettingsAuthorityPortProvider(app, app.container)
         }
     }
+
+    @Test
+    fun enableShizukuRecordsIntentSelectionAndRequestsGrantInOrder() {
+        val app = ApplicationProvider.getApplicationContext<MobileAgentApp>()
+        app.ensureHostInitialized()
+        val fake = FakeSettingsAuthorityPort()
+        registerSettingsAuthorityPortProvider(app, SettingsAuthorityPortProvider { fake })
+        try {
+            val viewModel = SettingsViewModel(app)
+            viewModel.enableShizuku()
+
+            assertEquals(listOf("intent:true", "select:SHIZUKU", "request"), fake.shizukuCalls)
+            assertEquals(Authority.SHIZUKU.name, viewModel.uiState(false, 0).selectedAuthority)
+            assertTrue(viewModel.uiState(false, 0).shizukuAuthority.userIntentEnabled)
+        } finally {
+            registerSettingsAuthorityPortProvider(app, app.container)
+        }
+    }
 }
 
 /** A deterministic adapter fake used only by Settings authority seam tests. */
@@ -165,6 +183,7 @@ private class FakeSettingsAuthorityPort : SettingsAuthorityPort {
     val token = "0123456789abcdef".repeat(4)
     var requestReplaceExistingTrust = false
     var cancelCalls = 0
+    val shizukuCalls = mutableListOf<String>()
     private var current = SettingsAuthoritySnapshot(
         wiredAdb = SettingsAuthorityProviderState(
             authority = Authority.WIRED_ADB,
@@ -179,9 +198,26 @@ private class FakeSettingsAuthorityPort : SettingsAuthorityPort {
 
     override fun snapshot(): SettingsAuthoritySnapshot = current
     override fun refresh(): SettingsAuthoritySnapshot = current
-    override fun selectAuthority(authority: Authority): SettingsAuthoritySnapshot = current
-    override fun setUserIntent(authority: Authority, enabled: Boolean): SettingsAuthoritySnapshot = current
-    override fun requestShizukuPermission(): SettingsAuthoritySnapshot = current
+    override fun selectAuthority(authority: Authority): SettingsAuthoritySnapshot {
+        shizukuCalls += "select:${authority.name}"
+        current = current.copy(selectedAuthority = authority)
+        return current
+    }
+    override fun setUserIntent(authority: Authority, enabled: Boolean): SettingsAuthoritySnapshot {
+        shizukuCalls += "intent:$enabled"
+        if (authority == Authority.SHIZUKU) {
+            current = current.copy(
+                shizuku = current.shizuku.copy(
+                    userIntent = if (enabled) AuthorityUserIntent.SHIZUKU else AuthorityUserIntent.NONE,
+                ),
+            )
+        }
+        return current
+    }
+    override fun requestShizukuPermission(): SettingsAuthoritySnapshot {
+        shizukuCalls += "request"
+        return current
+    }
     override fun openShizuku(): Boolean = false
     override fun reauthorizeWiredAdb(): SettingsAuthoritySnapshot = current
     override fun forgetWiredAdb(): SettingsAuthoritySnapshot = current

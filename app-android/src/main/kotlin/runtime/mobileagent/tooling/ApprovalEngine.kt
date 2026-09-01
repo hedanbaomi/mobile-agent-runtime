@@ -373,7 +373,10 @@ class ApprovalEngine(
             expiresAtMs = deadline(now, pendingTtlMs),
         )
         pending[requestId] = next
-        emitLocked(next, ApprovalLifecycleTransition.REQUESTED)
+        // REQUESTED is not an unexplained transition: callers need an explicit,
+        // stable reason in diagnostics so a timed-out approval can be separated
+        // from missing grants or a provider outage without logging command data.
+        emitLocked(next, ApprovalLifecycleTransition.REQUESTED, ToolErrorCode.APPROVAL_REQUIRED)
         return ApprovalRequest(true, pending = next, reasonCode = ToolErrorCode.APPROVAL_REQUIRED)
     }
 

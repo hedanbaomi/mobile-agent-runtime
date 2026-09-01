@@ -642,7 +642,7 @@ class ToolingContractsTest {
         }
         val delegate = object : ShellExecutor {
             override suspend fun execute(request: ShellExecRequest): ShellExecResult =
-                ShellExecResult.succeeded(request, 0, "secret-output", "", 1)
+                ShellExecResult.succeeded(request, 0, "secret-output", "stderr-输出", 1)
 
             override suspend fun cancel(requestId: String): Boolean = false
         }
@@ -659,6 +659,10 @@ class ToolingContractsTest {
         assertEquals(setOf(approvalId), events.map { it.approvalId }.toSet())
         assertEquals(setOf(sha256Hex(command)), events.map { it.commandSha256 }.toSet())
         assertEquals(setOf(sha256Hex(normalizeCwd(cwd)!!)), events.map { it.cwdSha256 }.toSet())
+        val completed = events.single { it.phase == ShellAuditPhase.COMPLETED }
+        assertEquals("secret-output".toByteArray(Charsets.UTF_8).size.toLong(), completed.stdoutBytes)
+        assertEquals("stderr-输出".toByteArray(Charsets.UTF_8).size.toLong(), completed.stderrBytes)
+        assertEquals(completed.stdoutBytes + completed.stderrBytes, completed.outputBytes)
         events.forEach {
             assertFalse(it.toString().contains(command))
             assertFalse(it.toString().contains(cwd))

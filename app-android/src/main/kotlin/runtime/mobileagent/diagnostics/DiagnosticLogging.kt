@@ -23,6 +23,7 @@ import javax.crypto.spec.SecretKeySpec
 
 /** The small, fixed schema used by in-app diagnostics. It is deliberately not a general logger. */
 enum class DiagnosticLevel(val wireName: String) {
+    DEBUG("DEBUG"),
     INFO("INFO"),
     ERROR("ERROR"),
 }
@@ -202,6 +203,53 @@ enum class DiagnosticLimitBucket(val wireName: String) {
     UNKNOWN("unknown"),
 }
 
+enum class DiagnosticPlatformGrant(val wireName: String) {
+    GRANTED("granted"),
+    DENIED("denied"),
+    UNKNOWN("unknown"),
+}
+
+enum class DiagnosticAvailability(val wireName: String) {
+    READY("ready"),
+    TEMPORARILY_UNAVAILABLE("temporarily_unavailable"),
+    UNSUPPORTED("unsupported"),
+    UNKNOWN("unknown"),
+}
+
+enum class DiagnosticConnection(val wireName: String) {
+    CONNECTED("connected"),
+    CONNECTING("connecting"),
+    DISCONNECTED("disconnected"),
+    DEGRADED("degraded"),
+    UNKNOWN("unknown"),
+}
+
+enum class DiagnosticAuthorityConfigurationReason(val wireName: String) {
+    SNAPSHOT("snapshot"),
+    USER_ACTION("user_action"),
+    REFRESH("refresh"),
+    PLATFORM_STATE_CHANGE("platform_state_change"),
+    MUTATION_FAILED("mutation_failed"),
+}
+
+enum class DiagnosticDangerousModeDecisionReason(val wireName: String) {
+    ACCEPTED("accepted"),
+    BUILD_DENIED("build_denied"),
+    AUTHORITY_UNAVAILABLE("authority_unavailable"),
+    USER_REJECTED("user_rejected"),
+    MUTATION_FAILED("mutation_failed"),
+    UNKNOWN("unknown"),
+}
+
+enum class RuntimeToolExposureReason(val wireName: String) {
+    EXPOSED("exposed"),
+    MODEL_TOOL_TRANSPORT_DISABLED("model_tool_transport_disabled"),
+    EMPTY_EFFECTIVE_TOOL_SET("empty_effective_tool_set"),
+    NO_EFFECTIVE_AGENT_GRANTS("no_effective_agent_grants"),
+    NO_SNAPSHOT_BINDINGS("no_snapshot_bindings"),
+    FACTORY_UNAVAILABLE("factory_unavailable"),
+}
+
 data class AuthoritySelectionChangedRecord(
     val selectedAuthority: DiagnosticAuthority,
     val previousAuthority: DiagnosticAuthority? = null,
@@ -323,6 +371,52 @@ data class RuntimeToolingUnavailableRecord(
     val runRef: String? = null,
 )
 
+data class AuthorityConfigurationStateRecord(
+    val authority: DiagnosticAuthority,
+    val userIntentEnabled: Boolean,
+    val selected: Boolean,
+    val platformGrant: DiagnosticPlatformGrant,
+    val availability: DiagnosticAvailability,
+    val connection: DiagnosticConnection,
+    val configured: Boolean,
+    val reason: DiagnosticAuthorityConfigurationReason,
+)
+
+data class DangerousModeDecisionRecord(
+    val requestedPolicy: DiagnosticDangerousModePolicy,
+    val accepted: Boolean,
+    val buildAllowed: Boolean,
+    val buildKnown: Boolean,
+    val authority: DiagnosticAuthority,
+    val reason: DiagnosticDangerousModeDecisionReason,
+    val requestRef: String? = null,
+)
+
+data class RuntimeToolExposureRecord(
+    val agentId: String,
+    val sessionRef: String? = null,
+    val runRef: String? = null,
+    val effectiveGrantCount: Int,
+    val snapshotBindingCount: Int,
+    val exposedToolCount: Int,
+    val webToolCount: Int = 0,
+    val mcpToolCount: Int = 0,
+    val pythonToolCount: Int = 0,
+    val memoryToolCount: Int = 0,
+    val workspaceToolCount: Int = 0,
+    val shellToolCount: Int = 0,
+    val registeredWorkspaceCount: Int = 0,
+    val grantedWorkspaceCount: Int = 0,
+    val boundWorkspaceCount: Int = 0,
+    val registeredGrantedWorkspaceCount: Int = 0,
+    val selectedAuthority: DiagnosticAuthority = DiagnosticAuthority.NONE,
+    val selectedAuthorityReady: Boolean = false,
+    val safGrantActive: Boolean = false,
+    val safBackendRegistered: Boolean = false,
+    val modelToolTransportEnabled: Boolean = true,
+    val reason: RuntimeToolExposureReason,
+)
+
 // Short aliases keep call sites readable while the *Record names remain the canonical API docs.
 typealias AuthoritySelectionChanged = AuthoritySelectionChangedRecord
 typealias AuthorityStateChanged = AuthorityStateChangedRecord
@@ -338,6 +432,9 @@ typealias ShellExecutionState = ShellExecutionStateRecord
 typealias BridgeRequestState = BridgeRequestStateRecord
 typealias DiagnosticDropSummary = DiagnosticDropSummaryRecord
 typealias RuntimeToolingUnavailable = RuntimeToolingUnavailableRecord
+typealias AuthorityConfigurationState = AuthorityConfigurationStateRecord
+typealias DangerousModeDecision = DangerousModeDecisionRecord
+typealias RuntimeToolExposure = RuntimeToolExposureRecord
 
 /** A deliberately tiny persistence seam, allowing the file logger to be tested without Android. */
 interface DiagnosticPreferenceStore {
@@ -420,6 +517,15 @@ class RollingDiagnosticLogStore(
         const val MAX_EXPORT_BYTES = 640 * 1024
         const val MAX_COUNT = 1_000_000
         const val MAX_REFERENCE_LENGTH = DiagnosticReferenceHasher.REFERENCE_LENGTH
+        private val DEBUG_EVENTS = setOf(
+            "authority_configuration_state",
+            "dangerous_mode_decision",
+            "runtime_tool_exposure",
+            "authority_selection_changed",
+            "authority_state_changed",
+            "workspace_grant_changed",
+            "shell_tool_exposure_changed",
+        )
 
         private fun currentUtc(): String = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'").apply {
             timeZone = TimeZone.getTimeZone("UTC")
@@ -471,6 +577,19 @@ class RollingDiagnosticLogStore(
         "bridge_request_state" to setOf("requestRef", "authority", "state", "errorCode", "durationBucket", "count"),
         "diagnostic_drop_summary" to setOf("droppedEvents", "droppedBytes", "failureCount", "health", "reasonCode"),
         "runtime_tooling_unavailable" to setOf("errorCode", "sessionRef", "runRef"),
+        "authority_configuration_state" to setOf(
+            "authority", "userIntentEnabled", "selected", "platformGrant", "availability", "connection",
+            "configured", "reasonCode",
+        ),
+        "dangerous_mode_decision" to setOf(
+            "requestedPolicy", "accepted", "buildAllowed", "buildKnown", "authority", "reasonCode", "requestRef",
+        ),
+        "runtime_tool_exposure" to setOf(
+            "agentRef", "sessionRef", "runRef", "effectiveGrantCount", "snapshotBindingCount", "exposedToolCount", "reasonCode",
+            "webToolCount", "mcpToolCount", "pythonToolCount", "memoryToolCount", "workspaceToolCount", "shellToolCount",
+            "registeredWorkspaceCount", "grantedWorkspaceCount", "boundWorkspaceCount", "registeredGrantedWorkspaceCount",
+            "selectedAuthority", "selectedAuthorityReady", "safGrantActive", "safBackendRegistered", "modelToolTransportEnabled",
+        ),
     )
 
     private val currentFile get() = File(rootDirectory, CURRENT_FILE_NAME)
@@ -928,6 +1047,61 @@ class RollingDiagnosticLogStore(
         runRef: String? = null,
     ): Boolean = recordRuntimeToolingUnavailable(RuntimeToolingUnavailableRecord(errorCode, sessionRef, runRef))
 
+    fun recordAuthorityConfigurationState(record: AuthorityConfigurationStateRecord): Boolean = record(
+        "authority_configuration_state",
+        mapOf(
+            "authority" to record.authority.wireName,
+            "userIntentEnabled" to record.userIntentEnabled,
+            "selected" to record.selected,
+            "platformGrant" to record.platformGrant.wireName,
+            "availability" to record.availability.wireName,
+            "connection" to record.connection.wireName,
+            "configured" to record.configured,
+            "reasonCode" to record.reason.wireName,
+        ),
+    )
+
+    fun recordDangerousModeDecision(record: DangerousModeDecisionRecord): Boolean = record(
+        "dangerous_mode_decision",
+        linkedMapOf<String, Any?>(
+            "requestedPolicy" to record.requestedPolicy.wireName,
+            "accepted" to record.accepted,
+            "buildAllowed" to record.buildAllowed,
+            "buildKnown" to record.buildKnown,
+            "authority" to record.authority.wireName,
+            "reasonCode" to record.reason.wireName,
+            "requestRef" to record.requestRef,
+        ).withoutNulls(),
+    )
+
+    fun recordRuntimeToolExposure(record: RuntimeToolExposureRecord): Boolean = record(
+        "runtime_tool_exposure",
+        linkedMapOf<String, Any?>(
+            "agentRef" to record.agentId,
+            "sessionRef" to record.sessionRef,
+            "runRef" to record.runRef,
+            "effectiveGrantCount" to record.effectiveGrantCount.coerceIn(0, MAX_COUNT),
+            "snapshotBindingCount" to record.snapshotBindingCount.coerceIn(0, MAX_COUNT),
+            "exposedToolCount" to record.exposedToolCount.coerceIn(0, MAX_COUNT),
+            "webToolCount" to record.webToolCount.coerceIn(0, MAX_COUNT),
+            "mcpToolCount" to record.mcpToolCount.coerceIn(0, MAX_COUNT),
+            "pythonToolCount" to record.pythonToolCount.coerceIn(0, MAX_COUNT),
+            "memoryToolCount" to record.memoryToolCount.coerceIn(0, MAX_COUNT),
+            "workspaceToolCount" to record.workspaceToolCount.coerceIn(0, MAX_COUNT),
+            "shellToolCount" to record.shellToolCount.coerceIn(0, MAX_COUNT),
+            "registeredWorkspaceCount" to record.registeredWorkspaceCount.coerceIn(0, MAX_COUNT),
+            "grantedWorkspaceCount" to record.grantedWorkspaceCount.coerceIn(0, MAX_COUNT),
+            "boundWorkspaceCount" to record.boundWorkspaceCount.coerceIn(0, MAX_COUNT),
+            "registeredGrantedWorkspaceCount" to record.registeredGrantedWorkspaceCount.coerceIn(0, MAX_COUNT),
+            "selectedAuthority" to record.selectedAuthority.wireName,
+            "selectedAuthorityReady" to record.selectedAuthorityReady,
+            "safGrantActive" to record.safGrantActive,
+            "safBackendRegistered" to record.safBackendRegistered,
+            "modelToolTransportEnabled" to record.modelToolTransportEnabled,
+            "reasonCode" to record.reason.wireName,
+        ).withoutNulls(),
+    )
+
     /** Crash logging never includes Throwable.message, which may contain user content or secrets. */
     fun recordCrash(thread: Thread, throwable: Throwable): Boolean = synchronized(lock) {
         if (!enabledSafely()) return@synchronized false
@@ -1290,6 +1464,109 @@ class RollingDiagnosticLogStore(
                     "runRef" to canonicalOptionalReference(fields["runRef"]),
                 ).withoutNulls()
             }
+            "authority_configuration_state" -> {
+                val authority = DiagnosticAuthority.entries.firstOrNull {
+                    it.wireName == fields["authority"] as? String
+                }?.wireName ?: return null
+                val userIntentEnabled = fields["userIntentEnabled"] as? Boolean ?: return null
+                val selected = fields["selected"] as? Boolean ?: return null
+                val platformGrant = DiagnosticPlatformGrant.entries.firstOrNull {
+                    it.wireName == fields["platformGrant"] as? String
+                }?.wireName ?: return null
+                val availability = DiagnosticAvailability.entries.firstOrNull {
+                    it.wireName == fields["availability"] as? String
+                }?.wireName ?: return null
+                val connection = DiagnosticConnection.entries.firstOrNull {
+                    it.wireName == fields["connection"] as? String
+                }?.wireName ?: return null
+                val configured = fields["configured"] as? Boolean ?: return null
+                val reason = DiagnosticAuthorityConfigurationReason.entries.firstOrNull {
+                    it.wireName == fields["reasonCode"] as? String
+                }?.wireName ?: return null
+                linkedMapOf(
+                    "authority" to authority,
+                    "userIntentEnabled" to userIntentEnabled,
+                    "selected" to selected,
+                    "platformGrant" to platformGrant,
+                    "availability" to availability,
+                    "connection" to connection,
+                    "configured" to configured,
+                    "reasonCode" to reason,
+                )
+            }
+            "dangerous_mode_decision" -> {
+                val requestedPolicy = DiagnosticDangerousModePolicy.entries.firstOrNull {
+                    it.wireName == fields["requestedPolicy"] as? String
+                }?.wireName ?: return null
+                val accepted = fields["accepted"] as? Boolean ?: return null
+                val buildAllowed = fields["buildAllowed"] as? Boolean ?: return null
+                val buildKnown = fields["buildKnown"] as? Boolean ?: return null
+                val authority = DiagnosticAuthority.entries.firstOrNull {
+                    it.wireName == fields["authority"] as? String
+                }?.wireName ?: return null
+                val reason = DiagnosticDangerousModeDecisionReason.entries.firstOrNull {
+                    it.wireName == fields["reasonCode"] as? String
+                }?.wireName ?: return null
+                linkedMapOf<String, Any?>(
+                    "requestedPolicy" to requestedPolicy,
+                    "accepted" to accepted,
+                    "buildAllowed" to buildAllowed,
+                    "buildKnown" to buildKnown,
+                    "authority" to authority,
+                    "reasonCode" to reason,
+                    "requestRef" to canonicalOptionalReference(fields["requestRef"]),
+                ).withoutNulls()
+            }
+            "runtime_tool_exposure" -> {
+                val agentRef = (fields["agentRef"] as? String)?.let(::canonicalReference) ?: return null
+                val effectiveGrantCount = fields["effectiveGrantCount"] as? Int ?: return null
+                val snapshotBindingCount = fields["snapshotBindingCount"] as? Int ?: return null
+                val exposedToolCount = fields["exposedToolCount"] as? Int ?: return null
+                val webToolCount = fields["webToolCount"] as? Int ?: return null
+                val mcpToolCount = fields["mcpToolCount"] as? Int ?: return null
+                val pythonToolCount = fields["pythonToolCount"] as? Int ?: return null
+                val memoryToolCount = fields["memoryToolCount"] as? Int ?: return null
+                val workspaceToolCount = fields["workspaceToolCount"] as? Int ?: return null
+                val shellToolCount = fields["shellToolCount"] as? Int ?: return null
+                val registeredWorkspaceCount = fields["registeredWorkspaceCount"] as? Int ?: return null
+                val grantedWorkspaceCount = fields["grantedWorkspaceCount"] as? Int ?: return null
+                val boundWorkspaceCount = fields["boundWorkspaceCount"] as? Int ?: return null
+                val registeredGrantedWorkspaceCount = fields["registeredGrantedWorkspaceCount"] as? Int ?: return null
+                val selectedAuthority = DiagnosticAuthority.entries.firstOrNull {
+                    it.wireName == fields["selectedAuthority"] as? String
+                }?.wireName ?: return null
+                val selectedAuthorityReady = fields["selectedAuthorityReady"] as? Boolean ?: return null
+                val safGrantActive = fields["safGrantActive"] as? Boolean ?: return null
+                val safBackendRegistered = fields["safBackendRegistered"] as? Boolean ?: return null
+                val modelToolTransportEnabled = fields["modelToolTransportEnabled"] as? Boolean ?: return null
+                val reason = RuntimeToolExposureReason.entries.firstOrNull {
+                    it.wireName == fields["reasonCode"] as? String
+                }?.wireName ?: return null
+                linkedMapOf<String, Any?>(
+                    "agentRef" to agentRef,
+                    "sessionRef" to canonicalOptionalReference(fields["sessionRef"]),
+                    "runRef" to canonicalOptionalReference(fields["runRef"]),
+                    "effectiveGrantCount" to effectiveGrantCount.coerceIn(0, MAX_COUNT),
+                    "snapshotBindingCount" to snapshotBindingCount.coerceIn(0, MAX_COUNT),
+                    "exposedToolCount" to exposedToolCount.coerceIn(0, MAX_COUNT),
+                    "webToolCount" to webToolCount.coerceIn(0, MAX_COUNT),
+                    "mcpToolCount" to mcpToolCount.coerceIn(0, MAX_COUNT),
+                    "pythonToolCount" to pythonToolCount.coerceIn(0, MAX_COUNT),
+                    "memoryToolCount" to memoryToolCount.coerceIn(0, MAX_COUNT),
+                    "workspaceToolCount" to workspaceToolCount.coerceIn(0, MAX_COUNT),
+                    "shellToolCount" to shellToolCount.coerceIn(0, MAX_COUNT),
+                    "registeredWorkspaceCount" to registeredWorkspaceCount.coerceIn(0, MAX_COUNT),
+                    "grantedWorkspaceCount" to grantedWorkspaceCount.coerceIn(0, MAX_COUNT),
+                    "boundWorkspaceCount" to boundWorkspaceCount.coerceIn(0, MAX_COUNT),
+                    "registeredGrantedWorkspaceCount" to registeredGrantedWorkspaceCount.coerceIn(0, MAX_COUNT),
+                    "selectedAuthority" to selectedAuthority,
+                    "selectedAuthorityReady" to selectedAuthorityReady,
+                    "safGrantActive" to safGrantActive,
+                    "safBackendRegistered" to safBackendRegistered,
+                    "modelToolTransportEnabled" to modelToolTransportEnabled,
+                    "reasonCode" to reason,
+                ).withoutNulls()
+            }
             "uncaught_exception" -> {
                 val type = fields["exceptionType"] as? String ?: return null
                 val stack = fields["stack"] as? String ?: return null
@@ -1302,12 +1579,12 @@ class RollingDiagnosticLogStore(
         }
     }
 
-    private fun levelFor(event: String): DiagnosticLevel =
-        if (event.endsWith("_failed") || event == "uncaught_exception" || event == "runtime_tooling_unavailable") {
+    private fun levelFor(event: String): DiagnosticLevel = when {
+        event.endsWith("_failed") || event == "uncaught_exception" || event == "runtime_tooling_unavailable" ->
             DiagnosticLevel.ERROR
-        } else {
-            DiagnosticLevel.INFO
-        }
+        event in DEBUG_EVENTS -> DiagnosticLevel.DEBUG
+        else -> DiagnosticLevel.INFO
+    }
 
     private fun renderLine(
         event: String,
@@ -1608,7 +1885,9 @@ class RollingDiagnosticLogStore(
     }
 
     private fun canonicalErrorCode(value: String): String = when (value.trim().lowercase()) {
-        "cancelled", "permission", "resource_limit", "io", "validation", "rejected", "unknown" -> value.trim().lowercase()
+        "cancelled", "permission", "resource_limit", "io", "validation", "rejected", "unknown",
+        "approval_required", "approval_denied", "timeout", "snapshot_stale", "invalid_request", "call_id_replay" ->
+            value.trim().lowercase()
         else -> "unknown"
     }
 

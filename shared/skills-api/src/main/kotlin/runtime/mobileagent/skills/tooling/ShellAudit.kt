@@ -93,6 +93,8 @@ data class ShellAuditEvent(
     val timedOut: Boolean = false,
     val cancelled: Boolean = false,
     val outputBytes: Long = 0,
+    val stdoutBytes: Long = 0,
+    val stderrBytes: Long = 0,
     val durationMs: Long = 0,
     /** Approval identity used to correlate STARTED with the terminal event. */
     val approvalId: String? = null,
@@ -106,6 +108,9 @@ data class ShellAuditEvent(
         require(commandSha256.matches(SHA256_HEX))
         require(cwdSha256 == null || cwdSha256.matches(SHA256_HEX))
         require(outputBytes >= 0)
+        require(stdoutBytes >= 0)
+        require(stderrBytes >= 0)
+        require(outputBytes == stdoutBytes + stderrBytes)
         require(durationMs >= 0)
     }
 
@@ -210,6 +215,8 @@ class AuditedShellExecutor(
             timedOut = result.timedOut,
             cancelled = result.cancelled,
             outputBytes = result.outputBytes,
+            stdoutBytes = result.stdout.toByteArray(Charsets.UTF_8).size.toLong(),
+            stderrBytes = result.stderr.toByteArray(Charsets.UTF_8).size.toLong(),
             durationMs = (nowMs() - startedAt).coerceAtLeast(0),
             approvalId = approvalId,
         )

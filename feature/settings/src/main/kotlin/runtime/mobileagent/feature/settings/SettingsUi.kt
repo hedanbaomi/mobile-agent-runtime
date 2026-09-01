@@ -121,6 +121,7 @@ data class SettingsUiState(
     val gitDirty: Boolean = false,
     val schemaVersion: Int = 0,
     val buildTimeUtc: String = "",
+    val buildType: String = "",
     val diagnosticText: String = "",
     /** zh-CN is the product default; the ViewModel may replace it with the persisted choice. */
     val language: String = "zh-CN",
@@ -194,6 +195,7 @@ data class SettingsActions(
     val onAuthorityIntent: (String, Boolean) -> Unit = { _, _ -> },
     val onRefreshAuthority: (String) -> Unit = {},
     val onRequestShizukuPermission: () -> Unit = {},
+    val onEnableShizuku: () -> Unit = {},
     val onOpenShizuku: () -> Unit = {},
     val onRequestWiredPairing: (Boolean) -> Unit = {},
     val onCompleteWiredPairing: () -> Unit = {},
@@ -204,6 +206,7 @@ data class SettingsActions(
     val onSelectSafTree: () -> Unit = {},
     val onReauthorizeSaf: () -> Unit = {},
     val onRevokeSaf: () -> Unit = {},
+    val onOpenAgents: () -> Unit = {},
     val onSetDangerousMode: (String) -> Unit = {},
     val onDisableDangerousMode: () -> Unit = {},
 )
@@ -522,12 +525,17 @@ private fun AuthoritySettingsCard(
                 modifier = Modifier.testTag("settings.authority.shizuku"),
                 onIntent = { actions.onAuthorityIntent("SHIZUKU", it) },
                 onRefresh = { actions.onRefreshAuthority("SHIZUKU") },
-                onPrimaryAction = actions.onRequestShizukuPermission,
-                primaryActionLabel = if (chinese) "请求授权" else "Request grant",
-                primaryActionEnabled = state.shizukuAuthority.platformGrant != "GRANTED" &&
-                    state.shizukuAuthority.availability != "UNSUPPORTED",
+                onPrimaryAction = actions.onEnableShizuku,
+                primaryActionLabel = if (chinese) "启用并选用 Shizuku" else "Enable and select Shizuku",
+                primaryActionEnabled = state.shizukuAuthority.availability != "UNSUPPORTED",
+                primaryActionTestTag = "settings.authority.shizuku.enable",
                 onSecondaryAction = actions.onOpenShizuku,
                 secondaryActionLabel = if (chinese) "打开 Shizuku" else "Open Shizuku",
+            )
+            Text(
+                if (chinese) "启用后会同时记录用户意图、选用 Shizuku，并在需要时请求系统授权。"
+                else "This records user intent, selects Shizuku, and requests the platform grant when needed.",
+                style = MaterialTheme.typography.bodySmall,
             )
 
             ProviderLifecycleBlock(
@@ -579,10 +587,10 @@ private fun AuthoritySettingsCard(
                 )
                 Text(
                     if (chinese) {
-                        if (state.safWorkspace.persisted) "持久授权已记录；返回设置时会重新校验提供方能力。"
+                        if (state.safWorkspace.persisted) "目录已授权给应用；还需到智能体页选择“只读”或“读写”，再用该智能体新建会话。"
                         else "未记录持久授权；请选择目录以授予读取或写入能力。"
                     } else {
-                        if (state.safWorkspace.persisted) "A persisted grant is recorded; provider capabilities are revalidated on resume."
+                        if (state.safWorkspace.persisted) "The app can access this directory. Choose read-only or read-write on the Agents page, then start a new conversation with that Agent."
                         else "No persisted grant is recorded; choose a directory to grant read or write access."
                     },
                     style = MaterialTheme.typography.bodySmall,
@@ -602,6 +610,11 @@ private fun AuthoritySettingsCard(
                         enabled = safConfigured,
                         modifier = Modifier.testTag("settings.saf.revoke"),
                     ) { Text(if (chinese) "撤销" else "Revoke") }
+                    OutlinedButton(
+                        onClick = actions.onOpenAgents,
+                        enabled = state.safWorkspace.persisted,
+                        modifier = Modifier.testTag("settings.saf.open_agents"),
+                    ) { Text(if (chinese) "去智能体授权" else "Open Agent grants") }
                 }
             }
 
@@ -644,10 +657,12 @@ private fun AuthoritySettingsCard(
                 if (!state.dangerousModeBuildAllowed) {
                     Text(
                         if (chinese) {
-                            if (state.dangerousModeBuildKnown) "当前构建未获高权限控制面许可；危险模式保持关闭。"
+                            if (state.buildType.equals("debug", true)) "当前为 Debug 构建，危险模式被安全禁用；请安装 Review 构建进行核验。"
+                            else if (state.dangerousModeBuildKnown) "当前构建未获高权限控制面许可；危险模式保持关闭。"
                             else "构建变体未知；危险模式安全关闭，必须由受审查构建明确许可。"
                         } else {
-                            if (state.dangerousModeBuildKnown) "This build is not admitted to the high-privilege control plane; Dangerous Mode stays off."
+                            if (state.buildType.equals("debug", true)) "Dangerous Mode is safely disabled in Debug builds; install a Review build to verify it."
+                            else if (state.dangerousModeBuildKnown) "This build is not admitted to the high-privilege control plane; Dangerous Mode stays off."
                             else "The build variant is unknown; Dangerous Mode stays fail-closed until an explicitly reviewed build admits it."
                         },
                         color = MaterialTheme.colorScheme.error,
@@ -881,6 +896,7 @@ private fun ProviderLifecycleBlock(
     onPrimaryAction: () -> Unit,
     primaryActionLabel: String,
     primaryActionEnabled: Boolean,
+    primaryActionTestTag: String? = null,
     onSecondaryAction: () -> Unit,
     secondaryActionLabel: String,
     secondaryActionEnabled: Boolean = true,
@@ -918,14 +934,16 @@ private fun ProviderLifecycleBlock(
             modifier = Modifier.testTag("settings.authority.${state.authority.lowercase()}.intent"),
         )
         ActionRow {
-            OutlinedButton(onClick = onRefresh, modifier = Modifier.testTag("settings.authority.${state.authority.lowercase()}.refresh")) {
-                Text(if (chinese) "刷新" else "Refresh")
-            }
             Button(
                 onClick = onPrimaryAction,
                 enabled = primaryActionEnabled,
-                modifier = Modifier.testTag("settings.authority.${state.authority.lowercase()}.primary"),
+                modifier = Modifier.testTag(
+                    primaryActionTestTag ?: "settings.authority.${state.authority.lowercase()}.primary",
+                ),
             ) { Text(primaryActionLabel) }
+            OutlinedButton(onClick = onRefresh, modifier = Modifier.testTag("settings.authority.${state.authority.lowercase()}.refresh")) {
+                Text(if (chinese) "刷新" else "Refresh")
+            }
             OutlinedButton(
                 onClick = onSecondaryAction,
                 enabled = secondaryActionEnabled,

@@ -19,8 +19,11 @@ import runtime.mobileagent.diagnostics.DiagnosticOperationState
 import runtime.mobileagent.skills.tooling.ShellExecRequest
 import runtime.mobileagent.skills.tooling.ShellExecutionStatus
 import runtime.mobileagent.skills.tooling.ToolErrorCode
+import runtime.mobileagent.skills.tooling.WorkspaceCreateDirectoryRequest
+import runtime.mobileagent.skills.tooling.WorkspaceDeleteRequest
 import runtime.mobileagent.skills.tooling.WorkspaceEntryType
 import runtime.mobileagent.skills.tooling.WorkspaceListRequest
+import runtime.mobileagent.skills.tooling.WorkspaceMoveRequest
 import runtime.mobileagent.skills.tooling.WorkspaceReadTextRequest
 import runtime.mobileagent.skills.tooling.WorkspaceResult
 import runtime.mobileagent.skills.tooling.WorkspaceWriteTextRequest
@@ -119,6 +122,35 @@ class RuntimePeerAdaptersTest {
     }
 
     @Test
+    fun workspaceMutationsWithExpectedVersionFailClosedBeforeBridgeDispatch() = runBlocking {
+        val fake = FakeWiredAuthority()
+        val backend = WiredWorkspaceBackend(fake)
+
+        val results = listOf(
+            backend.writeText(
+                WorkspaceWriteTextRequest(backend.descriptor.id, "notes.txt", "must not write", expectedVersion = 1L),
+            ),
+            backend.createDirectory(
+                WorkspaceCreateDirectoryRequest(backend.descriptor.id, "new-directory", expectedVersion = 1L),
+            ),
+            backend.move(
+                WorkspaceMoveRequest(backend.descriptor.id, "notes.txt", "moved.txt", expectedVersion = 1L),
+            ),
+            backend.delete(
+                WorkspaceDeleteRequest(backend.descriptor.id, "notes.txt", expectedVersion = 1L),
+            ),
+        )
+
+        results.forEach { result ->
+            assertTrue(result is WorkspaceResult.Failure)
+            assertEquals(ToolErrorCode.CONFLICT, (result as WorkspaceResult.Failure).error.code)
+        }
+        assertEquals(0, fake.fileRequestCalls)
+        assertTrue(fake.fileOperations.isEmpty())
+        assertEquals(null, fake.lastFileContent)
+    }
+
+    @Test
     fun workspaceAuditMapsEachTerminalResultCodeWithoutPromotingFailureToSuccess() {
         val cases = listOf(
             "SUCCEEDED" to DiagnosticOperationState.SUCCEEDED,
@@ -190,6 +222,7 @@ class RuntimePeerAdaptersTest {
         )
         override val status: StateFlow<WiredAdbStatus> = mutableStatus
         val shellCalls = AtomicInteger(0)
+        var fileRequestCalls = 0
         val fileOperations = mutableListOf<WiredAdbFileOperation>()
         var lastShellCommand: String? = null
             private set
@@ -256,15 +289,18 @@ class RuntimePeerAdaptersTest {
             contentUtf8: ByteArray?,
             replaceExisting: Boolean,
             maxBytes: Int,
-        ): WiredAdbFileRequest = WiredAdbFileRequest(
-            requestId = WiredAdbRequestId("file-${fileOperations.size}"),
-            operation = operation,
-            relativePath = relativePath,
-            destinationRelativePath = destinationRelativePath,
-            contentUtf8 = contentUtf8,
-            replaceExisting = replaceExisting,
-            maxBytes = maxBytes,
-        )
+        ): WiredAdbFileRequest {
+            fileRequestCalls++
+            return WiredAdbFileRequest(
+                requestId = WiredAdbRequestId("file-${fileOperations.size}"),
+                operation = operation,
+                relativePath = relativePath,
+                destinationRelativePath = destinationRelativePath,
+                contentUtf8 = contentUtf8,
+                replaceExisting = replaceExisting,
+                maxBytes = maxBytes,
+            )
+        }
 
         override fun newShellRequest(
             command: String,

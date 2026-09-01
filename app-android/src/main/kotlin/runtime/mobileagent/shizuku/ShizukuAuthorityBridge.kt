@@ -11,6 +11,7 @@ import android.os.IBinder
 import android.os.ParcelFileDescriptor
 import android.os.RemoteException
 import android.os.Process
+import android.os.SystemClock
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -55,6 +56,8 @@ class ShizukuAuthorityBridge(
     private var userServiceProtocolVersion: Int? = null
     private var userServiceSessionId: String? = null
     private var userServiceCallerUid: Int? = null
+    /** Non-null while one asynchronous Shizuku bind is awaiting its ServiceConnection callback. */
+    private var userServiceBindStartedAtElapsedMs: Long? = null
     /** Last verified grant; binder death changes availability, not user consent. */
     @Volatile private var lastKnownPermissionGranted = false
     private var permissionListenerRegistered = false
@@ -192,12 +195,24 @@ class ShizukuAuthorityBridge(
         if (ShizukuBridgePolicy.evaluateServer(current.asBridgeStatus()) !is ShizukuGateDecision.Allowed) {
             return false
         }
-        synchronized(lock) {
+        val shouldBind = synchronized(lock) {
             if (userServiceBinder?.pingBinder() == true) {
                 refresh()
                 return true
             }
+            val now = SystemClock.elapsedRealtime()
+            val pendingSince = userServiceBindStartedAtElapsedMs
+            if (pendingSince != null && now - pendingSince < USER_SERVICE_BIND_TIMEOUT_MS) {
+                false
+            } else {
+                // Permission-result, binder-received and AppContainer initialization callbacks can
+                // arrive together. Reserve the asynchronous bind before leaving the lock so they
+                // cannot create parallel UserServices and strand the canonical state at CONNECTING.
+                userServiceBindStartedAtElapsedMs = now
+                true
+            }
         }
+        if (!shouldBind) return true
         return runCatching {
             Shizuku.bindUserService(userServiceArgs, userServiceConnection)
             true
@@ -210,7 +225,9 @@ class ShizukuAuthorityBridge(
 
     /** Explicitly removes the UserService; it is not called as a fallback. */
     fun unbindUserService() {
-        val shouldUnbind = synchronized(lock) { userServiceBinder != null }
+        val shouldUnbind = synchronized(lock) {
+            userServiceBinder != null || userServiceBindStartedAtElapsedMs != null
+        }
         if (shouldUnbind && runCatching { Shizuku.pingBinder() }.getOrDefault(false)) {
             runCatching { Shizuku.unbindUserService(userServiceArgs, userServiceConnection, true) }
         }
@@ -918,6 +935,7 @@ class ShizukuAuthorityBridge(
         userServiceProtocolVersion = null
         userServiceSessionId = null
         userServiceCallerUid = null
+        userServiceBindStartedAtElapsedMs = null
     }
 
     private fun ShizukuAuthorityState.asBridgeStatus() = ShizukuBridgeStatus(
@@ -945,6 +963,7 @@ class ShizukuAuthorityBridge(
     companion object {
         const val PERMISSION_REQUEST_CODE = 0x4D52
         private const val USER_SERVICE_VERSION = 2
+        private const val USER_SERVICE_BIND_TIMEOUT_MS = 10_000L
         private const val SHIZUKU_MANAGER_PACKAGE = "moe.shizuku.privileged.api"
 
         const val BINDER_UNAVAILABLE = "BINDER_UNAVAILABLE"

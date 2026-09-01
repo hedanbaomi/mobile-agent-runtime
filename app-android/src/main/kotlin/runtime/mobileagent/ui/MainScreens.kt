@@ -578,6 +578,7 @@ private fun SettingsRoute(entry: NavBackStackEntry, chinese: Boolean, onRoute: (
         onAuthorityIntent = vm::setAuthorityIntent,
         onRefreshAuthority = { vm.refreshAuthorities() },
         onRequestShizukuPermission = vm::requestShizukuPermission,
+        onEnableShizuku = vm::enableShizuku,
         onOpenShizuku = { vm.openShizuku() },
         onRequestWiredPairing = vm::requestWiredAdbPairing,
         onCompleteWiredPairing = vm::completeWiredAdbPairing,
@@ -587,6 +588,7 @@ private fun SettingsRoute(entry: NavBackStackEntry, chinese: Boolean, onRoute: (
         onSelectSafTree = launchSafTree,
         onReauthorizeSaf = launchSafTree,
         onRevokeSaf = vm::revokeSaf,
+        onOpenAgents = { onRoute(AppRoutes.AGENTS) },
         onSetDangerousMode = vm::setDangerousMode,
         onDisableDangerousMode = vm::disableDangerousMode,
     )

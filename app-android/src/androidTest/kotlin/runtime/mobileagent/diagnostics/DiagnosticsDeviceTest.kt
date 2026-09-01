@@ -257,6 +257,56 @@ class DiagnosticsDeviceTest {
                     runRef = "runtime-run-$path",
                 ),
             )
+            assertTrue(
+                store.recordAuthorityConfigurationState(
+                    AuthorityConfigurationStateRecord(
+                        authority = DiagnosticAuthority.SHIZUKU,
+                        userIntentEnabled = true,
+                        selected = true,
+                        platformGrant = DiagnosticPlatformGrant.GRANTED,
+                        availability = DiagnosticAvailability.READY,
+                        connection = DiagnosticConnection.CONNECTED,
+                        configured = true,
+                        reason = DiagnosticAuthorityConfigurationReason.USER_ACTION,
+                    ),
+                ),
+            )
+            assertTrue(
+                store.recordDangerousModeDecision(
+                    DangerousModeDecisionRecord(
+                        requestedPolicy = DiagnosticDangerousModePolicy.AUTONOMOUS,
+                        accepted = false,
+                        buildAllowed = false,
+                        buildKnown = true,
+                        authority = DiagnosticAuthority.SHIZUKU,
+                        reason = DiagnosticDangerousModeDecisionReason.BUILD_DENIED,
+                    ),
+                ),
+            )
+            assertTrue(
+                store.recordRuntimeToolExposure(
+                    RuntimeToolExposureRecord(
+                        agentId = agentId,
+                        sessionRef = "tool-session-$secret",
+                        runRef = "tool-run-$path",
+                        effectiveGrantCount = 0,
+                        snapshotBindingCount = 0,
+                        exposedToolCount = 0,
+                        workspaceToolCount = 4,
+                        shellToolCount = 1,
+                        registeredWorkspaceCount = 3,
+                        grantedWorkspaceCount = 1,
+                        boundWorkspaceCount = 1,
+                        registeredGrantedWorkspaceCount = 1,
+                        selectedAuthority = DiagnosticAuthority.SHIZUKU,
+                        selectedAuthorityReady = true,
+                        safGrantActive = true,
+                        safBackendRegistered = true,
+                        modelToolTransportEnabled = true,
+                        reason = RuntimeToolExposureReason.EMPTY_EFFECTIVE_TOOL_SET,
+                    ),
+                ),
+            )
             assertTrue(store.recordAuthoritySelectionChanged(DiagnosticAuthority.SHIZUKU, DiagnosticAuthority.NONE, "request-1"))
             assertTrue(store.recordAuthorityStateChanged(DiagnosticAuthority.SHIZUKU, DiagnosticAuthorityState.AVAILABLE))
             assertTrue(store.recordShizukuLifecycle(DiagnosticLifecycleState.READY, requestRef = "request-2"))
@@ -283,6 +333,7 @@ class DiagnosticsDeviceTest {
                     agentId = agentId,
                     skillId = skillId,
                     requestRef = "request-9",
+                    reasonCode = "APPROVAL_REQUIRED",
                     capability = DiagnosticToolCapability.SHELL_EXECUTE,
                     authority = DiagnosticAuthority.SHIZUKU,
                     sessionRef = "approval-session-$secret",
@@ -324,7 +375,25 @@ class DiagnosticsDeviceTest {
                 "workspace_grant_changed", "workspace_operation_state", "skill_memory_operation_state",
                 "dangerous_mode_changed", "shell_tool_exposure_changed", "tool_approval_state", "shell_execution_state",
                 "bridge_request_state", "diagnostic_drop_summary", "runtime_tooling_unavailable",
+                "authority_configuration_state", "dangerous_mode_decision", "runtime_tool_exposure",
             ).forEach { event -> assertTrue("missing $event", allText.contains("\"event\":\"$event\"")) }
+            assertTrue(allText.contains("\"level\":\"DEBUG\""))
+            assertTrue(allText.contains("\"workspaceToolCount\":4"))
+            assertTrue(allText.contains("\"shellToolCount\":1"))
+            assertTrue(allText.contains("\"webToolCount\":0"))
+            assertTrue(allText.contains("\"mcpToolCount\":0"))
+            assertTrue(allText.contains("\"pythonToolCount\":0"))
+            assertTrue(allText.contains("\"memoryToolCount\":0"))
+            assertTrue(allText.contains("\"registeredWorkspaceCount\":3"))
+            assertTrue(allText.contains("\"grantedWorkspaceCount\":1"))
+            assertTrue(allText.contains("\"boundWorkspaceCount\":1"))
+            assertTrue(allText.contains("\"registeredGrantedWorkspaceCount\":1"))
+            assertTrue(allText.contains("\"selectedAuthority\":\"shizuku\""))
+            assertTrue(allText.contains("\"selectedAuthorityReady\":true"))
+            assertTrue(allText.contains("\"safGrantActive\":true"))
+            assertTrue(allText.contains("\"safBackendRegistered\":true"))
+            assertTrue(allText.contains("\"modelToolTransportEnabled\":true"))
+            assertTrue(allText.contains("\"reasonCode\":\"approval_required\""))
             val references = Regex("\\\"(?:agentRef|skillRef|workspaceRef|callRef|approvalRef|requestRef)\\\":\\\"([0-9a-f]{32})\\\"")
                 .findAll(allText)
                 .map { it.groupValues[1] }

@@ -5,6 +5,7 @@ package runtime.mobileagent
 
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertIsEnabled
+import androidx.compose.ui.test.assertHasClickAction
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithTag
@@ -62,6 +63,62 @@ class ExecutionAuthoritiesUiTest {
         composeRule.onNodeWithTag("settings.saf.authorize").assertIsDisplayed()
         composeRule.onNodeWithTag("settings.dangerous_mode").performScrollTo().assertIsDisplayed()
         composeRule.onNodeWithTag("settings.dangerous_mode.selector").assertIsDisplayed()
+    }
+
+    @Test
+    fun settingsExplainsTheOneStepShizukuAndSafToAgentGrantFlow() {
+        composeRule.setContent {
+            SettingsScreen(
+                SettingsUiState(
+                    language = "zh-CN",
+                    buildType = "debug",
+                    shizukuAuthority = runtime.mobileagent.feature.settings.AuthorityUiState(
+                        authority = "SHIZUKU",
+                        availability = "READY",
+                    ),
+                    safWorkspace = runtime.mobileagent.feature.settings.SafWorkspaceUiState(
+                        configured = true,
+                        readGranted = true,
+                        writeGranted = true,
+                        persisted = true,
+                        status = "ACTIVE",
+                    ),
+                ),
+                SettingsActions(),
+            )
+        }
+
+        composeRule.onNodeWithTag("settings.authority.shizuku.enable")
+            .performScrollTo()
+            .assertIsEnabled()
+            .assertHasClickAction()
+        composeRule.onNodeWithText("启用后会同时记录用户意图、选用 Shizuku，并在需要时请求系统授权。")
+            .performScrollTo()
+            .assertIsDisplayed()
+        composeRule.onNodeWithText("目录已授权给应用；还需到智能体页选择“只读”或“读写”，再用该智能体新建会话。")
+            .performScrollTo()
+            .assertIsDisplayed()
+        composeRule.onNodeWithText("当前为 Debug 构建，危险模式被安全禁用；请安装 Review 构建进行核验。")
+            .performScrollTo()
+            .assertIsDisplayed()
+    }
+
+    @Test
+    fun debugBuildExplainsThatDangerousModeRequiresReviewInEnglish() {
+        composeRule.setContent {
+            SettingsScreen(
+                SettingsUiState(
+                    language = "en-US",
+                    buildType = "debug",
+                    dangerousModeBuildKnown = true,
+                    dangerousModeBuildAllowed = false,
+                ),
+            )
+        }
+
+        composeRule.onNodeWithText(
+            "Dangerous Mode is safely disabled in Debug builds; install a Review build to verify it.",
+        ).performScrollTo().assertIsDisplayed()
     }
 
     @Test

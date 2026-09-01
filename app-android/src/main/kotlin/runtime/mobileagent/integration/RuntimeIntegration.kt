@@ -42,13 +42,19 @@ import runtime.mobileagent.data.WorkspaceRepository
 import runtime.mobileagent.diagnostics.AndroidDiagnosticLogger
 import runtime.mobileagent.diagnostics.AuthoritySelectionChangedRecord
 import runtime.mobileagent.diagnostics.AuthorityStateChangedRecord
+import runtime.mobileagent.diagnostics.AuthorityConfigurationStateRecord
 import runtime.mobileagent.diagnostics.DangerousModeChangedRecord
+import runtime.mobileagent.diagnostics.DangerousModeDecisionRecord
 import runtime.mobileagent.diagnostics.BridgeRequestStateRecord
 import runtime.mobileagent.diagnostics.DiagnosticReferenceHasher
 import runtime.mobileagent.diagnostics.DiagnosticBridgeRequestState
 import runtime.mobileagent.diagnostics.DiagnosticApprovalState
 import runtime.mobileagent.diagnostics.DiagnosticAuthority
 import runtime.mobileagent.diagnostics.DiagnosticAuthorityState
+import runtime.mobileagent.diagnostics.DiagnosticAuthorityConfigurationReason
+import runtime.mobileagent.diagnostics.DiagnosticAvailability
+import runtime.mobileagent.diagnostics.DiagnosticConnection
+import runtime.mobileagent.diagnostics.DiagnosticDangerousModeDecisionReason
 import runtime.mobileagent.diagnostics.DiagnosticDangerousModePolicy
 import runtime.mobileagent.diagnostics.DiagnosticExposureState
 import runtime.mobileagent.diagnostics.DiagnosticGrantScope
@@ -56,6 +62,7 @@ import runtime.mobileagent.diagnostics.DiagnosticLimitBucket
 import runtime.mobileagent.diagnostics.DiagnosticLifecycleState
 import runtime.mobileagent.diagnostics.DiagnosticOperation
 import runtime.mobileagent.diagnostics.DiagnosticOperationState
+import runtime.mobileagent.diagnostics.DiagnosticPlatformGrant
 import runtime.mobileagent.diagnostics.DiagnosticTerminalState
 import runtime.mobileagent.diagnostics.ShizukuLifecycleRecord
 import runtime.mobileagent.diagnostics.SkillMemoryOperationStateRecord
@@ -163,6 +170,21 @@ internal fun safRequestedFlags(resultFlags: Int): Int =
         .takeIf { it != 0 }
         ?: (Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
 
+/**
+ * Non-sensitive counts used to explain why a run did or did not receive workspace tools.
+ * Workspace ids, roots, URIs, paths, serials, and grant identifiers are intentionally absent.
+ */
+data class RuntimeToolExposureDiagnostics(
+    val registeredWorkspaceCount: Int,
+    val grantedWorkspaceCount: Int,
+    val boundWorkspaceCount: Int,
+    val registeredGrantedWorkspaceCount: Int,
+    val selectedAuthority: DiagnosticAuthority,
+    val selectedAuthorityReady: Boolean,
+    val safGrantActive: Boolean,
+    val safBackendRegistered: Boolean,
+)
+
 class RuntimeIntegration(
     private val context: Context,
     private val db: runtime.mobileagent.data.SqlConnection,
@@ -222,6 +244,7 @@ class RuntimeIntegration(
             capabilityGrantRepository.list(agentId, workspaceId)
         },
         bindings = { snapshotId -> capabilityGrantRepository.listSnapshotBindings(snapshotId) },
+        currentPolicyVersionReader = { authorityPolicyRepository.getPolicy().policyVersion },
     )
 
     /** One canonical DB/sidecar adapter owns binding, availability, and all memory operations. */
@@ -264,6 +287,7 @@ class RuntimeIntegration(
     private val shizukuPermissionRequestPending = AtomicBoolean(false)
     private val shizukuStateListener: (ShizukuAuthorityState) -> Unit = { state ->
         applyShizukuState(state)
+        recordAuthorityConfigurationSnapshot(DiagnosticAuthorityConfigurationReason.PLATFORM_STATE_CHANGE)
     }
     private val shizukuPermissionListener: (ShizukuPermissionResult) -> Unit = { result ->
         if (shizukuPermissionRequestPending.compareAndSet(true, false)) {
@@ -271,6 +295,7 @@ class RuntimeIntegration(
             // refresh, Binder reconnect, or process restart only updates live
             // grant/availability/connection facts.
             authorityManager.setConfigured(ElevatedAuthority.SHIZUKU, result.granted)
+            recordAuthorityConfigurationSnapshot(DiagnosticAuthorityConfigurationReason.USER_ACTION)
         }
     }
 
@@ -285,6 +310,7 @@ class RuntimeIntegration(
         applyWiredState(wiredAuthority.status.value)
         scheduleWiredReconnect()
         refreshSafWorkspace()
+        recordAuthorityConfigurationSnapshot(DiagnosticAuthorityConfigurationReason.SNAPSHOT)
     }
 
     /** UI-safe, repository-backed grant port used by AgentsViewModel. */
@@ -347,7 +373,33 @@ class RuntimeIntegration(
             memory = memory,
             workspace = workspace,
             shell = shell,
-        ).also { it.createToolRegistry() }
+        )
+    }
+
+    /**
+     * Return a closed, aggregate-only explanation of the workspace exposure inputs for one run.
+     * This is diagnostic data, not an authorization decision; executors still revalidate every
+     * grant, binding, provider state, path, and one-shot lifetime immediately before dispatch.
+     */
+    fun toolExposureDiagnostics(context: ToolExecutionContext): RuntimeToolExposureDiagnostics {
+        val frozen = freezeContext(context)
+        val registeredIds = workspaceRegistry.descriptors().map { it.id }.toSet()
+        val grantedIds = frozen.canonicalGrants.mapNotNull { it.workspaceId }.toSet()
+        val boundIds = frozen.snapshotGrantBindings.mapNotNull { it.workspaceId }.toSet()
+        val authorityState = authorityManager.state.value
+        val selected = authorityState.selectedAuthority
+        val selectedState = authorityState.statuses[selected]
+        val safGrant = safWorkspaceGrantRepository.get(SAF_WORKSPACE_ID)
+        return RuntimeToolExposureDiagnostics(
+            registeredWorkspaceCount = registeredIds.size,
+            grantedWorkspaceCount = grantedIds.size,
+            boundWorkspaceCount = boundIds.size,
+            registeredGrantedWorkspaceCount = registeredIds.intersect(grantedIds).intersect(boundIds).size,
+            selectedAuthority = (selected ?: Authority.NONE).toDiagnostic(),
+            selectedAuthorityReady = selected == null || selected == Authority.NONE || selectedState?.isReady == true,
+            safGrantActive = safGrant?.status == SafGrantStatus.ACTIVE,
+            safBackendRegistered = SAF_WORKSPACE_ID in registeredIds,
+        )
     }
 
     /** Create the memory executor for this run; bindings are rechecked at each approval. */
@@ -480,17 +532,37 @@ class RuntimeIntegration(
     override fun snapshot(): SettingsAuthoritySnapshot = settingsSnapshot()
 
     override fun refresh(): SettingsAuthoritySnapshot {
-        shizukuAuthority?.let { applyShizukuState(it.refresh()) }
+        shizukuAuthority?.let { bridge ->
+            var live = bridge.refresh()
+            val manager = authorityManager.state.value
+            val configured = manager.statuses[ElevatedAuthority.SHIZUKU]
+            val reconnectEligible = manager.selectedAuthority == ElevatedAuthority.SHIZUKU &&
+                configured?.isConfiguredForSelection == true &&
+                configured.userIntent == AuthorityUserIntent.SHIZUKU &&
+                live.permissionGranted &&
+                !live.ready
+            if (reconnectEligible) {
+                // Refresh is an explicit foreground recovery action. Re-bind only the already
+                // selected/configured provider; never request permission or choose a fallback.
+                bridge.bindUserService()
+                live = bridge.refresh()
+            }
+            applyShizukuState(live)
+        }
         refreshSafWorkspace()
         applyWiredState(wiredAuthority.status.value)
         scheduleWiredReconnect()
-        return settingsSnapshot()
+        return settingsSnapshot().also {
+            recordAuthorityConfigurationSnapshot(DiagnosticAuthorityConfigurationReason.REFRESH)
+        }
     }
 
     override fun selectAuthority(authority: Authority): SettingsAuthoritySnapshot {
         require(authority in Authority.entries) { "Unsupported authority" }
         check(authorityManager.selectAuthority(authority.toElevated())) { "Authority policy changed; reload and retry" }
-        return settingsSnapshot()
+        return settingsSnapshot().also {
+            recordAuthorityConfigurationSnapshot(DiagnosticAuthorityConfigurationReason.USER_ACTION)
+        }
     }
 
     override fun setUserIntent(authority: Authority, enabled: Boolean): SettingsAuthoritySnapshot {
@@ -503,7 +575,9 @@ class RuntimeIntegration(
             }
         }
         if (authority == Authority.WIRED_ADB && enabled) scheduleWiredReconnect()
-        return settingsSnapshot()
+        return settingsSnapshot().also {
+            recordAuthorityConfigurationSnapshot(DiagnosticAuthorityConfigurationReason.USER_ACTION)
+        }
     }
 
     override fun requestWiredAdbPairingToken(
@@ -578,7 +652,10 @@ class RuntimeIntegration(
         if (bridge.state.value.permissionGranted && shizukuPermissionRequestPending.compareAndSet(true, false)) {
             authorityManager.setConfigured(ElevatedAuthority.SHIZUKU, true)
         }
-        return refresh()
+        if (bridge.state.value.permissionGranted) bridge.bindUserService()
+        return refresh().also {
+            recordAuthorityConfigurationSnapshot(DiagnosticAuthorityConfigurationReason.USER_ACTION)
+        }
     }
 
     override fun openShizuku(): Boolean = runtime.mobileagent.openShizuku(appContext)
@@ -592,13 +669,17 @@ class RuntimeIntegration(
         if (wiredAuthority.status.value.trusted) {
             check(authorityManager.setConfigured(ElevatedAuthority.WIRED_ADB, true))
         }
-        return settingsSnapshot()
+        return settingsSnapshot().also {
+            recordAuthorityConfigurationSnapshot(DiagnosticAuthorityConfigurationReason.USER_ACTION)
+        }
     }
 
     override fun forgetWiredAdb(): SettingsAuthoritySnapshot {
         scope.launch { runCatching { wiredAuthority.forget() } }
         authorityManager.setConfigured(ElevatedAuthority.WIRED_ADB, false)
-        return refresh()
+        return refresh().also {
+            recordAuthorityConfigurationSnapshot(DiagnosticAuthorityConfigurationReason.USER_ACTION)
+        }
     }
 
     override fun authorizeSaf(uri: Uri): SettingsAuthoritySnapshot = authorizeSaf(
@@ -685,10 +766,38 @@ class RuntimeIntegration(
 
     override fun setDangerousMode(mode: DangerousMode, confirmed: Boolean): SettingsAuthorityMutation {
         if (mode != DangerousMode.DISABLED && !confirmed) {
-            return SettingsAuthorityMutation(false, settingsSnapshot(), "DANGEROUS_MODE_CONFIRMATION_REQUIRED")
+            val snapshot = settingsSnapshot()
+            diagnostics.recordDangerousModeDecision(
+                DangerousModeDecisionRecord(
+                    requestedPolicy = mode.toDiagnostic(),
+                    accepted = false,
+                    buildAllowed = snapshot.dangerousModeBuildAllowed,
+                    buildKnown = snapshot.dangerousModeBuildKnown,
+                    authority = snapshot.selectedAuthority.toDiagnostic(),
+                    reason = DiagnosticDangerousModeDecisionReason.USER_REJECTED,
+                ),
+            )
+            return SettingsAuthorityMutation(false, snapshot, "DANGEROUS_MODE_CONFIRMATION_REQUIRED")
         }
         val changed = dangerousModeManager.setPolicy(mode)
-        return SettingsAuthorityMutation(changed.accepted, settingsSnapshot(), changed.reason)
+        val snapshot = settingsSnapshot()
+        diagnostics.recordDangerousModeDecision(
+            DangerousModeDecisionRecord(
+                requestedPolicy = mode.toDiagnostic(),
+                accepted = changed.accepted,
+                buildAllowed = snapshot.dangerousModeBuildAllowed,
+                buildKnown = snapshot.dangerousModeBuildKnown,
+                authority = snapshot.selectedAuthority.toDiagnostic(),
+                reason = when {
+                    changed.accepted -> DiagnosticDangerousModeDecisionReason.ACCEPTED
+                    changed.reason == "DANGEROUS_MODE_BUILD_DENIED" -> DiagnosticDangerousModeDecisionReason.BUILD_DENIED
+                    changed.reason?.contains("AUTHORITY", ignoreCase = true) == true ->
+                        DiagnosticDangerousModeDecisionReason.AUTHORITY_UNAVAILABLE
+                    else -> DiagnosticDangerousModeDecisionReason.MUTATION_FAILED
+                },
+            ),
+        )
+        return SettingsAuthorityMutation(changed.accepted, snapshot, changed.reason)
     }
 
     // ---- Backend hydration and state -------------------------------------------------------
@@ -961,6 +1070,7 @@ class RuntimeIntegration(
                 val prior = previous
                 previous = state
                 applyWiredState(state)
+                recordAuthorityConfigurationSnapshot(DiagnosticAuthorityConfigurationReason.PLATFORM_STATE_CHANGE)
                 // A transport/provider transition may be the only signal that
                 // USB became available again. Retry only on the meaningful
                 // disconnected -> trusted edge; reconnect failures themselves
@@ -982,7 +1092,41 @@ class RuntimeIntegration(
                         ),
                     )
                 }
+                recordAuthorityConfigurationSnapshot(DiagnosticAuthorityConfigurationReason.SNAPSHOT, state)
             }
+        }
+    }
+
+    private fun recordAuthorityConfigurationSnapshot(
+        reason: DiagnosticAuthorityConfigurationReason,
+        state: AuthorityManagerState = authorityManager.state.value,
+    ) {
+        state.statuses.values.forEach { status ->
+            diagnostics.recordAuthorityConfigurationState(
+                AuthorityConfigurationStateRecord(
+                    authority = status.authority.toDiagnostic(),
+                    userIntentEnabled = status.userIntent != AuthorityUserIntent.NONE,
+                    selected = state.selectedAuthority == status.authority,
+                    platformGrant = when (status.grant) {
+                        PlatformGrant.GRANTED -> DiagnosticPlatformGrant.GRANTED
+                        PlatformGrant.DENIED, PlatformGrant.REVOKED -> DiagnosticPlatformGrant.DENIED
+                        PlatformGrant.UNKNOWN -> DiagnosticPlatformGrant.UNKNOWN
+                    },
+                    availability = when (status.availability) {
+                        Availability.READY -> DiagnosticAvailability.READY
+                        Availability.TEMPORARILY_UNAVAILABLE -> DiagnosticAvailability.TEMPORARILY_UNAVAILABLE
+                        Availability.UNSUPPORTED -> DiagnosticAvailability.UNSUPPORTED
+                    },
+                    connection = when (status.connection) {
+                        Connection.CONNECTED -> DiagnosticConnection.CONNECTED
+                        Connection.CONNECTING -> DiagnosticConnection.CONNECTING
+                        Connection.DISCONNECTED -> DiagnosticConnection.DISCONNECTED
+                        Connection.DEGRADED -> DiagnosticConnection.DEGRADED
+                    },
+                    configured = status.configured,
+                    reason = reason,
+                ),
+            )
         }
     }
 
@@ -1570,7 +1714,12 @@ private class SqliteRuntimeAuditSink(
                 capability = event.capability,
                 result = event.resultCode ?: event.phase.name,
                 createdAt = java.time.Instant.now().toString(),
-            ).workspaceHash(event.workspaceId, event.relativePathSha256)
+            // workspace_list enumerates the authorized set and therefore has no single
+            // workspace id.  The executor represents that scope as an empty string, while the
+            // canonical audit domain requires an absent id rather than an invalid blank id.
+            // Normalize only at this persistence boundary; concrete workspace operations keep
+            // their exact opaque id.
+            ).workspaceHash(event.workspaceId.takeIf { it.isNotBlank() }, event.relativePathSha256)
                 .approval(event.approvalId)
                 .duration(event.durationMs)
                 .build()
@@ -1613,7 +1762,7 @@ private class SqliteRuntimeAuditSink(
                 .exitCode(event.exitCode)
                 .timeout(event.timedOut)
                 .cancel(event.cancelled)
-                .outputBytes(event.outputBytes, 0L)
+                .outputBytes(event.stdoutBytes, event.stderrBytes)
                 .duration(event.durationMs)
                 .build()
         }.getOrNull() ?: return false
@@ -1635,7 +1784,8 @@ private class SqliteRuntimeAuditSink(
                         Authority.WIRED_ADB -> DiagnosticAuthority.WIRED_ADB
                         else -> DiagnosticAuthority.NONE
                     },
-                    stdoutBytes = event.outputBytes.toInt().coerceAtLeast(0),
+                    stdoutBytes = event.stdoutBytes.coerceAtMost(Int.MAX_VALUE.toLong()).toInt(),
+                    stderrBytes = event.stderrBytes.coerceAtMost(Int.MAX_VALUE.toLong()).toInt(),
                     requestRef = event.requestId,
                     callId = event.callId,
                     agentId = event.agentId,

@@ -76,6 +76,10 @@ object AgentTestTags {
     const val GRANT_LIFETIME = "agents.editor.grants.lifetime"
     const val GRANT_LIFETIME_CONTEXT = "agents.editor.grants.lifetime.context"
     const val GRANT_SHELL = "agents.editor.grants.shell.execute"
+    const val WORKSPACE_PRESET = "agents.editor.workspace_preset"
+    const val WORKSPACE_PRESET_SELECTOR = "agents.editor.workspace_preset.workspace"
+    const val WORKSPACE_PRESET_READ_ONLY = "agents.editor.workspace_preset.read_only"
+    const val WORKSPACE_PRESET_READ_WRITE = "agents.editor.workspace_preset.read_write"
     const val SNAPSHOT = "agents.snapshot"
 }
 
@@ -168,6 +172,14 @@ data class AgentGrantDraftUi(
     val skillInstallId: String? = null,
 )
 
+enum class AgentWorkspaceAccessPreset { READ_ONLY, READ_WRITE }
+
+/** One explicit, user-selected convenience bundle; persistence still writes canonical grants. */
+data class AgentWorkspaceGrantPresetUi(
+    val workspaceId: String,
+    val access: AgentWorkspaceAccessPreset,
+)
+
 data class AgentEditorUi(
     val id: String? = null,
     val name: String = "",
@@ -189,6 +201,8 @@ data class AgentEditorUi(
     val trustedSkills: List<AgentTrustedSkillUi> = emptyList(),
     val snapshotGrantBindings: List<AgentSnapshotGrantUi> = emptyList(),
     val grantDraft: AgentGrantDraftUi? = null,
+    val workspacePresetWorkspaceId: String? = null,
+    val workspaceGrantPreset: AgentWorkspaceGrantPresetUi? = null,
 )
 
 data class AgentsUiState(
@@ -407,7 +421,7 @@ private fun AgentSummary(state: AgentsUiState, actions: AgentsActions) {
         }
         Text(if (zh) "检索模式：${editor.retrievalMode}" else "Retrieval mode: ${editor.retrievalMode}", style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(top = 8.dp))
         OutlinedButton(onClick = actions.onSnapshot, modifier = Modifier.padding(top = 8.dp).testTag(AgentTestTags.SNAPSHOT)) {
-            Text(if (zh) "创建快照边界" else "Create snapshot boundary")
+            Text(if (zh) "用此智能体新建会话" else "Start a new conversation with this Agent")
         }
     }
 }
@@ -558,6 +572,7 @@ private fun grantLifetimeLabel(lifetime: GrantLifetime, zh: Boolean): String = w
 }
 
 @Composable
+@OptIn(ExperimentalLayoutApi::class)
 private fun AgentGrantEditor(
     editor: AgentEditorUi,
     actions: AgentsActions,
@@ -575,6 +590,103 @@ private fun AgentGrantEditor(
             Text(
                 if (zh) "授权存储未就绪；保存不会静默忽略授权变更。" else "Grant storage is unavailable; grant changes will not be silently ignored.",
                 color = MaterialTheme.colorScheme.error,
+                style = MaterialTheme.typography.bodySmall,
+            )
+        }
+        val presetWorkspaceId = editor.workspacePresetWorkspaceId
+            ?: editor.workspaces.firstOrNull { it.enabled }?.id
+        Column(
+            Modifier.fillMaxWidth()
+                .padding(vertical = 8.dp)
+                .border(1.dp, MaterialTheme.colorScheme.outlineVariant)
+                .padding(10.dp)
+                .testTag(AgentTestTags.WORKSPACE_PRESET),
+            verticalArrangement = Arrangement.spacedBy(6.dp),
+        ) {
+            Text(if (zh) "快捷授权文件工具" else "Quick file tool grant", fontWeight = FontWeight.SemiBold)
+            Text(
+                if (zh) "选择一个已由 SAF 或应用创建的工作区，再一次授予常用的读取或读写工具。高级授权仍可在下方逐项设置。"
+                else "Choose a SAF or app workspace, then grant the common read-only or read-write tools at once. Advanced per-capability grants remain below.",
+                style = MaterialTheme.typography.bodySmall,
+            )
+            WorkspaceDropdown(
+                selectedId = presetWorkspaceId,
+                workspaces = editor.workspaces,
+                zh = zh,
+                enabled = grantEditorReady && editor.workspaces.any { it.enabled },
+                testTag = AgentTestTags.WORKSPACE_PRESET_SELECTOR,
+                allowAgentScope = false,
+            ) { workspaceId ->
+                actions.onEditorChange(
+                    editor.copy(
+                        workspacePresetWorkspaceId = workspaceId,
+                        workspaceGrantPreset = null,
+                    ),
+                )
+            }
+            if (editor.workspaces.none { it.enabled }) {
+                Text(
+                    if (zh) "暂无可用工作区；请先到设置选择 SAF 目录。" else "No workspace is available; choose a SAF directory in Settings first.",
+                    color = MaterialTheme.colorScheme.error,
+                    style = MaterialTheme.typography.bodySmall,
+                )
+            }
+            FlowRow(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+                OutlinedButton(
+                    onClick = {
+                        presetWorkspaceId?.let { workspaceId ->
+                            actions.onEditorChange(
+                                editor.copy(
+                                    workspacePresetWorkspaceId = workspaceId,
+                                    workspaceGrantPreset = AgentWorkspaceGrantPresetUi(
+                                        workspaceId,
+                                        AgentWorkspaceAccessPreset.READ_ONLY,
+                                    ),
+                                ),
+                            )
+                        }
+                    },
+                    enabled = grantEditorReady && presetWorkspaceId != null,
+                    modifier = Modifier.testTag(AgentTestTags.WORKSPACE_PRESET_READ_ONLY),
+                ) { Text(if (zh) "允许读取" else "Allow reading") }
+                Button(
+                    onClick = {
+                        presetWorkspaceId?.let { workspaceId ->
+                            actions.onEditorChange(
+                                editor.copy(
+                                    workspacePresetWorkspaceId = workspaceId,
+                                    workspaceGrantPreset = AgentWorkspaceGrantPresetUi(
+                                        workspaceId,
+                                        AgentWorkspaceAccessPreset.READ_WRITE,
+                                    ),
+                                ),
+                            )
+                        }
+                    },
+                    enabled = grantEditorReady && editor.workspaces.any {
+                        it.id == presetWorkspaceId && it.enabled && it.writable
+                    },
+                    modifier = Modifier.testTag(AgentTestTags.WORKSPACE_PRESET_READ_WRITE),
+                ) { Text(if (zh) "允许读写" else "Allow reading and writing") }
+            }
+            editor.workspaceGrantPreset?.let { preset ->
+                Text(
+                    if (zh) {
+                        "待保存：${if (preset.access == AgentWorkspaceAccessPreset.READ_ONLY) "只读" else "读写"}。"
+                    } else {
+                        "Pending: ${if (preset.access == AgentWorkspaceAccessPreset.READ_ONLY) "read-only" else "read-write"}."
+                    },
+                    color = MaterialTheme.colorScheme.primary,
+                    style = MaterialTheme.typography.bodySmall,
+                )
+            }
+            Text(
+                if (zh) "保存后请用此智能体新建会话；已有会话的工具不会变化。"
+                else "Start a new conversation with this Agent after saving; existing conversations do not change.",
                 style = MaterialTheme.typography.bodySmall,
             )
         }
@@ -671,6 +783,8 @@ private fun AgentGrantDraftEditor(editor: AgentEditorUi, actions: AgentsActions,
             workspaces = editor.workspaces,
             zh = zh,
             enabled = enabled && draft.capability.value != CapabilityId.SHELL_EXECUTE,
+            testTag = AgentTestTags.GRANT_WORKSPACE,
+            allowAgentScope = true,
         ) { workspaceId -> actions.onEditorChange(editor.copy(grantDraft = draft.copy(workspaceId = workspaceId))) }
         OutlinedTextField(
             value = draft.pathScope.orEmpty(),
@@ -740,22 +854,26 @@ private fun WorkspaceDropdown(
     workspaces: List<AgentWorkspaceUi>,
     zh: Boolean,
     enabled: Boolean,
+    testTag: String,
+    allowAgentScope: Boolean,
     onSelect: (String?) -> Unit,
 ) {
     var expanded by remember { mutableStateOf(false) }
     val selected = workspaces.firstOrNull { it.id == selectedId }
-    OutlinedButton(onClick = { expanded = true }, enabled = enabled, modifier = Modifier.fillMaxWidth().testTag(AgentTestTags.GRANT_WORKSPACE)) {
+    OutlinedButton(onClick = { expanded = true }, enabled = enabled, modifier = Modifier.fillMaxWidth().testTag(testTag)) {
         Text(
-            if (zh) "工作区：${selected?.displayName ?: "Agent 级（不限定工作区）"}"
-            else "Workspace: ${selected?.displayName ?: "Agent scoped (no workspace)"}",
+            if (zh) "工作区：${selected?.displayName ?: if (allowAgentScope) "Agent 级（不限定工作区）" else "请选择工作区"}"
+            else "Workspace: ${selected?.displayName ?: if (allowAgentScope) "Agent scoped (no workspace)" else "Choose a workspace"}",
             modifier = Modifier.fillMaxWidth(),
         )
     }
     DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
-        DropdownMenuItem(
-            text = { Text(if (zh) "Agent 级（不限定工作区）" else "Agent scoped (no workspace)") },
-            onClick = { expanded = false; onSelect(null) },
-        )
+        if (allowAgentScope) {
+            DropdownMenuItem(
+                text = { Text(if (zh) "Agent 级（不限定工作区）" else "Agent scoped (no workspace)") },
+                onClick = { expanded = false; onSelect(null) },
+            )
+        }
         workspaces.forEach { workspace ->
             DropdownMenuItem(
                 text = {

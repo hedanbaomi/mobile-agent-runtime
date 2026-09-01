@@ -21,6 +21,28 @@ import runtime.mobileagent.domain.CapabilityId
 @RunWith(AndroidJUnit4::class)
 class WorkspaceBackendTest {
     @Test
+    fun safMutationDocumentUriIsReboundToPersistedTreeAndRejectsForeignHandles() {
+        val tree = Uri.parse("content://fixture.provider/tree/root")
+        val ordinaryDocument = Uri.parse("content://fixture.provider/document/root%2Fchild.txt")
+
+        val rebound = rebindSafMutationDocumentUri(tree, ordinaryDocument)
+        assertNotNull(rebound)
+        assertEquals("root", android.provider.DocumentsContract.getTreeDocumentId(rebound))
+        assertEquals("root/child.txt", android.provider.DocumentsContract.getDocumentId(rebound))
+
+        assertEquals(
+            rebound,
+            rebindSafMutationDocumentUri(
+                tree,
+                Uri.parse("content://fixture.provider/tree/root/document/root%2Fchild.txt"),
+            ),
+        )
+        assertEquals(null, rebindSafMutationDocumentUri(tree, Uri.parse("content://other.provider/document/root%2Fchild.txt")))
+        assertEquals(null, rebindSafMutationDocumentUri(tree, Uri.parse("content://fixture.provider/document/root%2Fchild.txt?token=secret")))
+        assertEquals(null, rebindSafMutationDocumentUri(tree, Uri.parse("content://fixture.provider/not-a-document")))
+    }
+
+    @Test
     fun internalBackendRejectsPathFormsBeforeCreatingAnything() {
         withInternal { backend, root ->
             val bad = listOf("../outside", "/absolute", "C:/absolute", "a//b", "a\\b", "a\u0000b", "a\u0001b")
@@ -191,7 +213,7 @@ class WorkspaceBackendTest {
     }
 
     @Test
-    fun safReadOnlyGrantAndUnsupportedProviderFlagsDoNotAdvertiseWrites() {
+    fun safCapabilitiesExposeCreateOnlyTextWritesButNotUnsupportedMutations() {
         val readOnly = SafWorkspaceCapabilityPolicy.derive(
             readGranted = true,
             writeGranted = false,
@@ -224,6 +246,18 @@ class WorkspaceBackendTest {
         assertFalse(unsupported.operationCapabilities.contains(InternalWorkspaceCapabilities.CREATE_DIRECTORY))
         assertFalse(unsupported.operationCapabilities.contains(InternalWorkspaceCapabilities.DELETE))
         assertFalse(unsupported.operationCapabilities.contains(InternalWorkspaceCapabilities.MOVE))
+
+        val createCapable = SafWorkspaceCapabilityPolicy.derive(
+            readGranted = true,
+            writeGranted = true,
+            rootFlags = android.provider.DocumentsContract.Document.FLAG_DIR_SUPPORTS_CREATE,
+            children = emptyList(),
+        )
+        assertTrue(createCapable.writable)
+        assertTrue(createCapable.operationCapabilities.contains(InternalWorkspaceCapabilities.WRITE_TEXT))
+        assertTrue(createCapable.operationCapabilities.contains(InternalWorkspaceCapabilities.CREATE_DIRECTORY))
+        assertFalse(createCapable.operationCapabilities.contains(InternalWorkspaceCapabilities.DELETE))
+        assertFalse(createCapable.operationCapabilities.contains(InternalWorkspaceCapabilities.MOVE))
     }
 
     @Test

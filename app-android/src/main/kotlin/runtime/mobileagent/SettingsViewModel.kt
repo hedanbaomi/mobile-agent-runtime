@@ -61,11 +61,12 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
         val searchConfigured = searchRef != null && app.container.secrets.inventory().status(searchRef) == SecretStatus.ACTIVE
         val authority = authorityState.value
         return SettingsUiState(
-        versionName = BuildConfig.VERSION_NAME + " debug",
+        versionName = BuildConfig.VERSION_NAME + " ${BuildConfig.BUILD_TYPE}",
         gitRevision = BuildConfig.GIT_REVISION,
         gitDirty = BuildConfig.GIT_DIRTY,
         schemaVersion = BuildConfig.DB_SCHEMA_VERSION,
         buildTimeUtc = BuildConfig.BUILD_TIME_UTC,
+        buildType = BuildConfig.BUILD_TYPE,
         diagnosticText = buildString {
             appendLine("revision=${BuildConfig.GIT_REVISION}")
             appendLine("dirty=${BuildConfig.GIT_DIRTY}")
@@ -143,6 +144,24 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
 
     fun requestShizukuPermission() {
         mutateAuthority { authorityPort.requestShizukuPermission() }
+    }
+
+    /**
+     * The primary Shizuku action deliberately performs all three explicit
+     * user choices in a visible order. Live Binder state never implies intent
+     * or selection, and a failure stops the remaining mutations.
+     */
+    fun enableShizuku() {
+        try {
+            authorityState.value = authorityPort.setUserIntent(Authority.SHIZUKU, true)
+            authorityState.value = authorityPort.selectAuthority(Authority.SHIZUKU)
+            if (authorityState.value.shizuku.platformGrant != runtime.mobileagent.skills.tooling.PlatformGrant.GRANTED) {
+                authorityState.value = authorityPort.requestShizukuPermission()
+            }
+            error.value = null
+        } catch (failure: Exception) {
+            error.value = safeAuthorityError(failure)
+        }
     }
 
     fun openShizuku() {

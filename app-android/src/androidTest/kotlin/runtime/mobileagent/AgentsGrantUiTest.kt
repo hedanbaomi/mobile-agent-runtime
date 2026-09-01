@@ -39,6 +39,8 @@ import runtime.mobileagent.feature.agents.AgentGrantUi
 import runtime.mobileagent.feature.agents.AgentTestTags
 import runtime.mobileagent.feature.agents.AgentTrustedSkillUi
 import runtime.mobileagent.feature.agents.AgentWorkspaceUi
+import runtime.mobileagent.feature.agents.AgentWorkspaceAccessPreset
+import runtime.mobileagent.feature.agents.AgentWorkspaceGrantPresetUi
 import runtime.mobileagent.feature.agents.AgentsActions
 import runtime.mobileagent.feature.agents.AgentsScreen
 import runtime.mobileagent.feature.agents.AgentsUiState
@@ -105,6 +107,86 @@ class AgentsGrantUiTest {
             assertEquals(1, port.policyReads)
             assertEquals(1, port.saveCalls)
         }
+    }
+
+    @Test
+    fun workspacePresetPersistsTheCompleteReadableToolSetInOneAction() {
+        val port = RecordingGrantPort()
+        val editor = fixtureEditor().copy(
+            grants = emptyList(),
+            workspaceGrantPreset = AgentWorkspaceGrantPresetUi(
+                workspaceId = "workspace.one",
+                access = AgentWorkspaceAccessPreset.READ_ONLY,
+            ),
+        )
+
+        val persisted = saveAgentWorkspaceGrantPreset(
+            editor = editor,
+            agentId = "agent.one",
+            grantPort = port,
+            createdAt = "2026-08-31T00:00:00Z",
+        )
+
+        assertEquals(
+            setOf(
+                CapabilityId.WORKSPACE_ENUMERATE,
+                CapabilityId.FILE_LIST,
+                CapabilityId.FILE_STAT,
+                CapabilityId.FILE_READ_TEXT,
+            ),
+            persisted.map { it.capability.value }.toSet(),
+        )
+        assertTrue(persisted.all { it.workspaceId == "workspace.one" })
+        assertTrue(persisted.all { it.lifetime == GrantLifetime.PERSISTENT })
+        assertEquals(4, port.saveCalls)
+    }
+
+    @Test
+    fun workspacePresetRejectsWriteAccessWhenProviderIsReadOnlyBeforeWriting() {
+        val port = RecordingGrantPort()
+        val editor = fixtureEditor().copy(
+            grants = emptyList(),
+            workspaceGrantPreset = AgentWorkspaceGrantPresetUi(
+                workspaceId = "workspace.one",
+                access = AgentWorkspaceAccessPreset.READ_WRITE,
+            ),
+        )
+
+        val failure = runCatching {
+            saveAgentWorkspaceGrantPreset(editor, "agent.one", port)
+        }.exceptionOrNull()
+
+        assertEquals("该工作区仅有读取权限，不能授予读写工具。", failure?.message)
+        assertEquals(0, port.saveCalls)
+    }
+
+    @Test
+    fun grantEditorOffersSimpleWorkspacePresetBeforeAdvancedSingleGrantFlow() {
+        var editor by mutableStateOf(fixtureEditor())
+        composeRule.setContent {
+            MaterialTheme {
+                AgentsScreen(
+                    state = AgentsUiState(
+                        selectedAgentId = "agent.one",
+                        summary = editor,
+                        editor = editor,
+                        editorOpen = true,
+                    ),
+                    actions = AgentsActions(onEditorChange = { editor = it }),
+                )
+            }
+        }
+
+        composeRule.onNodeWithTag(AgentTestTags.WORKSPACE_PRESET, useUnmergedTree = true)
+            .performScrollTo()
+            .assertIsDisplayed()
+        composeRule.onNodeWithTag(AgentTestTags.WORKSPACE_PRESET_READ_ONLY, useUnmergedTree = true)
+            .performScrollTo()
+            .performClick()
+        assertEquals(AgentWorkspaceAccessPreset.READ_ONLY, editor.workspaceGrantPreset?.access)
+        composeRule.onNodeWithText("保存后请用此智能体新建会话；已有会话的工具不会变化。", useUnmergedTree = true)
+            .performScrollTo()
+            .assertIsDisplayed()
     }
 
     @Test

@@ -5,6 +5,8 @@ package runtime.mobileagent.tooling
 
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
@@ -46,11 +48,14 @@ import runtime.mobileagent.skills.tooling.ToolExecution
 import runtime.mobileagent.skills.tooling.ToolErrorCode
 import runtime.mobileagent.skills.tooling.ToolInvocation
 import runtime.mobileagent.skills.tooling.WorkspaceBackend
+import runtime.mobileagent.skills.tooling.WorkspaceCreateDirectoryRequest
+import runtime.mobileagent.skills.tooling.WorkspaceDeleteRequest
 import runtime.mobileagent.skills.tooling.WorkspaceDescriptor
 import runtime.mobileagent.skills.tooling.WorkspaceEntryType
 import runtime.mobileagent.skills.tooling.WorkspaceFileStat
 import runtime.mobileagent.skills.tooling.WorkspaceListRequest
 import runtime.mobileagent.skills.tooling.WorkspaceListing
+import runtime.mobileagent.skills.tooling.WorkspaceMoveRequest
 import runtime.mobileagent.skills.tooling.WorkspaceMutation
 import runtime.mobileagent.skills.tooling.WorkspaceReadTextRequest
 import runtime.mobileagent.skills.tooling.WorkspaceResult
@@ -58,6 +63,19 @@ import runtime.mobileagent.skills.tooling.WorkspaceStatRequest
 import runtime.mobileagent.skills.tooling.WorkspaceText
 
 class ToolingOrchestrationTest {
+    @Test
+    fun emptyFactoryIsAValidNoToolsStateInsteadOfAFactoryFailure() = runBlocking {
+        val factory = ToolExecutorFactory()
+
+        assertTrue(factory.toolingSpecs.isEmpty())
+        assertTrue(factory.executor.specs.isEmpty())
+        assertNull(factory.createToolRegistryOrNull())
+        assertEquals(
+            ToolResult.Invalid("Unknown tool"),
+            factory.executor.invoke(ToolCall("call-empty", "missing_tool", "{}")),
+        )
+    }
+
     @Test
     fun dangerousBuildPolicyIsFailClosedUntilExplicitSafeVariantIsInjected() {
         assertFalse(DangerousBuildPolicy().permitsDangerousMode())
@@ -187,6 +205,7 @@ class ToolingOrchestrationTest {
 
         val pending = engine.request("request-life", "model-life", binding, scope).pending!!
         assertEquals(listOf(ApprovalLifecycleTransition.REQUESTED), events.map { it.transition })
+        assertEquals(ToolErrorCode.APPROVAL_REQUIRED, events.single().reasonCode)
         assertTrue(events.all { it.agentId == "agent-1" && it.sessionIdentity == "session-1" })
         val grant = (engine.approve("request-life", binding, scope) as ApprovalDecision.Approved).grant
         assertEquals(
@@ -217,6 +236,7 @@ class ToolingOrchestrationTest {
         engine.request("request-expire", "model-expire", expiringBinding, scope)
         assertEquals(ToolErrorCode.TIMEOUT, (engine.expire("request-expire") as ApprovalDecision.Rejected).code)
         assertEquals(ApprovalLifecycleTransition.EXPIRED, events.last().transition)
+        assertEquals(ToolErrorCode.TIMEOUT, events.last().reasonCode)
 
         val ttlBinding = binding.copy(requestId = "request-ttl", callId = "model-ttl")
         engine.request("request-ttl", "model-ttl", ttlBinding, scope)
@@ -907,7 +927,7 @@ class ToolingOrchestrationTest {
     }
 
     @Test
-    fun workspaceAuditLinksStartedAndTerminalToApprovalAndInternalRequestWithoutRawPathOrText() = runBlocking {
+    fun workspacePersistentGrantDispatchesWithoutSecondApprovalAndAuditsInternalRequest() = runBlocking {
         val descriptor = WorkspaceDescriptor(
             id = "workspace-audit",
             displayName = "Audit workspace",
@@ -971,17 +991,189 @@ class ToolingOrchestrationTest {
             name = UnifiedWorkspaceToolExecutor.FILE_WRITE_TEXT,
             argumentsJson = "{\"workspaceId\":\"workspace-audit\",\"relativePath\":\"secret.txt\",\"text\":\"secret-output\"}",
         )
-        val pending = executor.invoke(invocation, context)
-        assertTrue(pending is ToolExecution.Failed)
-        assertEquals(ToolErrorCode.APPROVAL_REQUIRED, (pending as ToolExecution.Failed).error.code)
-        val result = executor.approve(invocation.requestId, context)
+        val result = executor.invoke(invocation, context)
         assertTrue(result is ToolExecution.Value)
         assertEquals(2, auditEvents.size)
         assertEquals(setOf(invocation.requestId), auditEvents.map { it.requestId }.toSet())
-        assertEquals(1, auditEvents.map { it.approvalId }.distinct().size)
-        assertTrue(auditEvents.all { it.approvalId != null })
+        assertTrue(auditEvents.all { it.approvalId == null })
         assertTrue(auditEvents.all { !it.toString().contains("secret.txt") })
         assertTrue(auditEvents.all { !it.toString().contains("secret-output") })
+    }
+
+    @Test
+    fun concurrentDuplicateWorkspaceModelCallDispatchesExactlyOnce() = runBlocking {
+        val descriptor = WorkspaceDescriptor(
+            id = "workspace-duplicate-call",
+            displayName = "Duplicate call workspace",
+            backendType = WorkspaceBackendType.INTERNAL,
+        )
+        val dispatched = AtomicInteger(0)
+        val backendStarted = CompletableDeferred<Unit>()
+        val releaseBackend = CompletableDeferred<Unit>()
+        val backend = object : WorkspaceBackend {
+            override val descriptor: WorkspaceDescriptor = descriptor
+            override val capabilities: Set<CapabilityId> = setOf(CapabilityId(CapabilityId.FILE_READ_TEXT))
+
+            override suspend fun readText(request: WorkspaceReadTextRequest): WorkspaceResult<WorkspaceText> {
+                dispatched.incrementAndGet()
+                backendStarted.complete(Unit)
+                releaseBackend.await()
+                return WorkspaceResult.Success(WorkspaceText(request.relativePath, "ok"))
+            }
+        }
+        val registry = WorkspaceRegistry()
+        assertTrue(registry.register(descriptor, backend))
+        val context = workspaceContext(
+            workspaceGrants(grant("grant-duplicate-call", CapabilityId(CapabilityId.FILE_READ_TEXT), descriptor.id, "shared.txt")),
+        )
+        val bindBarrier = CountDownLatch(2)
+        val barrierArmed = AtomicBoolean(false)
+        val resolver = EffectiveCapabilityResolver(
+            nowEpochMs = {
+                if (barrierArmed.get()) {
+                    bindBarrier.countDown()
+                    assertTrue(bindBarrier.await(1, TimeUnit.SECONDS))
+                }
+                System.currentTimeMillis()
+            },
+        )
+        val auditStarted = AtomicInteger(0)
+        val auditTerminal = AtomicInteger(0)
+        val executor = UnifiedWorkspaceToolExecutor(
+            registry = registry,
+            approvalEngine = ApprovalEngine(),
+            resolver = resolver,
+            contextProvider = { context },
+            auditSink = object : WorkspaceAuditSink {
+                override suspend fun record(event: WorkspaceAuditEvent): Boolean {
+                    when (event.phase) {
+                        WorkspaceAuditPhase.STARTED -> auditStarted.incrementAndGet()
+                        WorkspaceAuditPhase.TERMINAL -> auditTerminal.incrementAndGet()
+                        WorkspaceAuditPhase.COMPLETED -> Unit
+                    }
+                    return true
+                }
+            },
+        )
+        val calls = List(2) {
+            ToolInvocation.fromRuntime(
+                callId = "model-duplicate-call",
+                snapshotId = context.snapshotId,
+                agentId = context.agentId,
+                name = UnifiedWorkspaceToolExecutor.FILE_READ_TEXT,
+                argumentsJson = "{\"workspaceId\":\"${descriptor.id}\",\"relativePath\":\"shared.txt\"}",
+            )
+        }
+        barrierArmed.set(true)
+        val executions = calls.map { invocation ->
+            async(Dispatchers.Default) { executor.invoke(invocation, context) }
+        }
+        withTimeout(1_000) { backendStarted.await() }
+        releaseBackend.complete(Unit)
+        val results = executions.map { deferred -> withTimeout(1_000) { deferred.await() } }
+
+        assertEquals(1, dispatched.get())
+        assertEquals(1, results.count { it is ToolExecution.Value })
+        assertEquals(1, results.count { it is ToolExecution.Unknown && it.error.code == ToolErrorCode.CALL_ID_REPLAY })
+        assertEquals(1, auditStarted.get())
+        assertEquals(1, auditTerminal.get())
+    }
+
+    @Test
+    fun livePolicyRevisionChangeInvalidatesFrozenWorkspaceExecutor() = runBlocking {
+        val descriptor = WorkspaceDescriptor(
+            id = "workspace-policy-revision",
+            displayName = "Policy revision workspace",
+            backendType = WorkspaceBackendType.INTERNAL,
+        )
+        val dispatched = AtomicInteger(0)
+        val backend = object : WorkspaceBackend {
+            override val descriptor: WorkspaceDescriptor = descriptor
+            override val capabilities: Set<CapabilityId> = setOf(CapabilityId(CapabilityId.FILE_READ_TEXT))
+
+            override suspend fun readText(request: WorkspaceReadTextRequest): WorkspaceResult<WorkspaceText> {
+                dispatched.incrementAndGet()
+                return WorkspaceResult.Success(WorkspaceText(request.relativePath, "ok"))
+            }
+        }
+        val registry = WorkspaceRegistry()
+        assertTrue(registry.register(descriptor, backend))
+        val grant = grant("grant-policy-revision", CapabilityId(CapabilityId.FILE_READ_TEXT), descriptor.id, "note.txt")
+        val context = workspaceContext(workspaceGrants(grant))
+        var livePolicyVersion = 1L
+        val resolver = EffectiveCapabilityResolver(
+            grants = CapabilityGrantReader { _, _ -> listOf(grant) },
+            bindings = SnapshotGrantBindingReader { context.snapshotGrantBindings },
+            currentPolicyVersionReader = { livePolicyVersion },
+        )
+        val executor = UnifiedWorkspaceToolExecutor(
+            registry = registry,
+            approvalEngine = ApprovalEngine(),
+            resolver = resolver,
+            contextProvider = { context },
+            auditSink = acceptingWorkspaceAuditSink(mutableListOf()),
+        )
+        fun invocation(callId: String) = ToolInvocation.fromRuntime(
+            callId = callId,
+            snapshotId = context.snapshotId,
+            agentId = context.agentId,
+            name = UnifiedWorkspaceToolExecutor.FILE_READ_TEXT,
+            argumentsJson = "{\"workspaceId\":\"${descriptor.id}\",\"relativePath\":\"note.txt\"}",
+        )
+
+        assertTrue(executor.invoke(invocation("model-policy-v1"), context) is ToolExecution.Value)
+        assertEquals(1, dispatched.get())
+
+        livePolicyVersion = 2L
+        val denied = executor.invoke(invocation("model-policy-v2"), context)
+        assertEquals(ToolErrorCode.CAPABILITY_DENIED, (denied as ToolExecution.Failed).error.code)
+        assertEquals(1, dispatched.get())
+    }
+
+    @Test
+    fun workspaceExceptionAfterStartedIsUnknownAndNeverReplayed() = runBlocking {
+        val descriptor = WorkspaceDescriptor(
+            id = "workspace-unknown-outcome",
+            displayName = "Unknown outcome workspace",
+            backendType = WorkspaceBackendType.INTERNAL,
+        )
+        val dispatched = AtomicInteger(0)
+        val backend = object : WorkspaceBackend {
+            override val descriptor: WorkspaceDescriptor = descriptor
+            override val capabilities: Set<CapabilityId> = setOf(CapabilityId(CapabilityId.FILE_READ_TEXT))
+
+            override suspend fun readText(request: WorkspaceReadTextRequest): WorkspaceResult<WorkspaceText> {
+                dispatched.incrementAndGet()
+                error("transport ended after dispatch")
+            }
+        }
+        val registry = WorkspaceRegistry()
+        assertTrue(registry.register(descriptor, backend))
+        val context = workspaceContext(
+            workspaceGrants(grant("grant-unknown-outcome", CapabilityId(CapabilityId.FILE_READ_TEXT), descriptor.id, "note.txt")),
+        )
+        val auditEvents = mutableListOf<WorkspaceAuditEvent>()
+        val executor = UnifiedWorkspaceToolExecutor(
+            registry = registry,
+            approvalEngine = ApprovalEngine(),
+            contextProvider = { context },
+            auditSink = acceptingWorkspaceAuditSink(auditEvents),
+        )
+        val invocation = ToolInvocation.fromRuntime(
+            callId = "model-unknown-outcome",
+            snapshotId = context.snapshotId,
+            agentId = context.agentId,
+            name = UnifiedWorkspaceToolExecutor.FILE_READ_TEXT,
+            argumentsJson = "{\"workspaceId\":\"${descriptor.id}\",\"relativePath\":\"note.txt\"}",
+        )
+
+        val first = executor.invoke(invocation, context)
+        assertEquals(ToolErrorCode.UNKNOWN_OUTCOME, (first as ToolExecution.Unknown).error.code)
+        val replay = executor.invoke(invocation, context)
+        assertEquals(ToolErrorCode.UNKNOWN_OUTCOME, (replay as ToolExecution.Unknown).error.code)
+        assertEquals(1, dispatched.get())
+        assertEquals(2, auditEvents.size)
+        assertEquals(WorkspaceAuditOutcome.UNKNOWN, auditEvents.single { it.phase == WorkspaceAuditPhase.TERMINAL }.outcome)
     }
 
     @Test
@@ -1088,6 +1280,89 @@ class ToolingOrchestrationTest {
     }
 
     @Test
+    fun workspaceSchemasRejectArgumentsThatTheTypedBackendCannotHonor() = runBlocking {
+        val descriptor = WorkspaceDescriptor(
+            id = "workspace-schema-contract",
+            displayName = "Schema contract workspace",
+            backendType = WorkspaceBackendType.INTERNAL,
+            writable = true,
+        )
+        val dispatched = AtomicInteger(0)
+        val backend = object : WorkspaceBackend {
+            override val descriptor: WorkspaceDescriptor = descriptor
+            override val capabilities: Set<CapabilityId> = setOf(
+                CapabilityId(CapabilityId.FILE_READ_TEXT),
+                CapabilityId(CapabilityId.FILE_CREATE_DIRECTORY),
+                CapabilityId(CapabilityId.FILE_MOVE),
+                CapabilityId(CapabilityId.FILE_DELETE),
+            )
+
+            override suspend fun readText(request: WorkspaceReadTextRequest): WorkspaceResult<WorkspaceText> {
+                dispatched.incrementAndGet()
+                return WorkspaceResult.Success(WorkspaceText(request.relativePath, "ok"))
+            }
+
+            override suspend fun createDirectory(request: WorkspaceCreateDirectoryRequest): WorkspaceResult<WorkspaceMutation> {
+                dispatched.incrementAndGet()
+                return WorkspaceResult.Success(WorkspaceMutation(request.relativePath, WorkspaceEntryType.DIRECTORY))
+            }
+
+            override suspend fun move(request: WorkspaceMoveRequest): WorkspaceResult<WorkspaceMutation> {
+                dispatched.incrementAndGet()
+                return WorkspaceResult.Success(WorkspaceMutation(request.destinationPath, WorkspaceEntryType.FILE))
+            }
+
+            override suspend fun delete(request: WorkspaceDeleteRequest): WorkspaceResult<WorkspaceMutation> {
+                dispatched.incrementAndGet()
+                return WorkspaceResult.Success(WorkspaceMutation(request.relativePath, WorkspaceEntryType.FILE))
+            }
+        }
+        val registry = WorkspaceRegistry()
+        assertTrue(registry.register(descriptor, backend))
+        val context = workspaceContext(
+            workspaceGrants(
+                grant("grant-schema-read", CapabilityId(CapabilityId.FILE_READ_TEXT), descriptor.id),
+                grant("grant-schema-create", CapabilityId(CapabilityId.FILE_CREATE_DIRECTORY), descriptor.id),
+                grant("grant-schema-move", CapabilityId(CapabilityId.FILE_MOVE), descriptor.id),
+                grant("grant-schema-delete", CapabilityId(CapabilityId.FILE_DELETE), descriptor.id),
+            ),
+        )
+        val executor = UnifiedWorkspaceToolExecutor(
+            registry = registry,
+            approvalEngine = ApprovalEngine(),
+            contextProvider = { context },
+        )
+        val schemas = executor.toolingSpecs.associate { it.name to it.inputSchema }
+
+        assertFalse(schemas.getValue(UnifiedWorkspaceToolExecutor.FILE_READ_TEXT).contains("expectedVersion"))
+        assertFalse(schemas.getValue(UnifiedWorkspaceToolExecutor.FILE_MOVE).contains("\"replace\""))
+        assertTrue(schemas.getValue(UnifiedWorkspaceToolExecutor.FILE_CREATE_DIRECTORY).contains("expectedVersion"))
+        assertTrue(schemas.getValue(UnifiedWorkspaceToolExecutor.FILE_DELETE).contains("expectedVersion"))
+
+        assertTrue(
+            executor.invoke(
+                ToolCall(
+                    "read-unsupported-version",
+                    UnifiedWorkspaceToolExecutor.FILE_READ_TEXT,
+                    "{\"workspaceId\":\"${descriptor.id}\",\"relativePath\":\"note.txt\",\"expectedVersion\":1}",
+                ),
+                context,
+            ) is ToolResult.Invalid,
+        )
+        assertTrue(
+            executor.invoke(
+                ToolCall(
+                    "move-unsupported-replace",
+                    UnifiedWorkspaceToolExecutor.FILE_MOVE,
+                    "{\"workspaceId\":\"${descriptor.id}\",\"relativePath\":\"from.txt\",\"destinationRelativePath\":\"to.txt\",\"replace\":true}",
+                ),
+                context,
+            ) is ToolResult.Invalid,
+        )
+        assertEquals(0, dispatched.get())
+    }
+
+    @Test
     fun workspaceListOnlyReturnsEnabledDescriptorsAuthorizedForCurrentAgent() = runBlocking {
         val alpha = WorkspaceDescriptor(
             id = "workspace-alpha",
@@ -1145,9 +1420,7 @@ class ToolingOrchestrationTest {
             name = UnifiedWorkspaceToolExecutor.WORKSPACE_LIST,
             argumentsJson = "{}",
         )
-        val pending = executor.invoke(invocation, context)
-        assertEquals(ToolErrorCode.APPROVAL_REQUIRED, (pending as ToolExecution.Failed).error.code)
-        val result = executor.approve(invocation.requestId, context)
+        val result = executor.invoke(invocation, context)
         val json = (result as ToolExecution.Value).json
         assertTrue(json.contains("workspace-alpha"))
         assertTrue(json.contains("Alpha"))
@@ -1221,9 +1494,7 @@ class ToolingOrchestrationTest {
                 name = name,
                 argumentsJson = arguments,
             )
-            val pending = executor.invoke(invocation, context)
-            assertEquals(ToolErrorCode.APPROVAL_REQUIRED, (pending as ToolExecution.Failed).error.code)
-            assertTrue(executor.approve(invocation.requestId, context) is ToolExecution.Value)
+            assertTrue(executor.invoke(invocation, context) is ToolExecution.Value)
         }
 
         assertEquals(6, auditEvents.size)
@@ -1232,7 +1503,7 @@ class ToolingOrchestrationTest {
         assertEquals(setOf(WorkspaceAuditOperation.LIST, WorkspaceAuditOperation.STAT, WorkspaceAuditOperation.READ), auditEvents.map { it.operation }.toSet())
         auditEvents.groupBy { it.requestId }.values.forEach { events ->
             assertEquals(2, events.size)
-            assertEquals(1, events.map { it.approvalId }.distinct().size)
+            assertTrue(events.all { it.approvalId == null })
             assertEquals(WorkspaceAuditOutcome.SUCCEEDED, events.single { it.phase == WorkspaceAuditPhase.TERMINAL }.outcome)
             assertTrue(events.all { !it.toString().contains("secret.txt") })
             assertTrue(events.all { !it.toString().contains("private text") })
@@ -1282,11 +1553,7 @@ class ToolingOrchestrationTest {
             name = UnifiedWorkspaceToolExecutor.FILE_READ_TEXT,
             argumentsJson = "{\"workspaceId\":\"${descriptor.id}\",\"relativePath\":\"secret.txt\"}",
         )
-        assertEquals(
-            ToolErrorCode.APPROVAL_REQUIRED,
-            (executor.invoke(invocation, context) as ToolExecution.Failed).error.code,
-        )
-        val result = executor.approve(invocation.requestId, context)
+        val result = executor.invoke(invocation, context)
         assertEquals(ToolErrorCode.CAPABILITY_DENIED, (result as ToolExecution.Failed).error.code)
         assertEquals(1, consumerCalls.get())
         assertEquals(0, dispatched.get())
@@ -1343,18 +1610,12 @@ class ToolingOrchestrationTest {
                 argumentsJson = "{\"workspaceId\":\"${descriptor.id}\",\"relativePath\":\"shared.txt\"}",
             )
         }
-        invocations.forEach { invocation ->
-            assertEquals(
-                ToolErrorCode.APPROVAL_REQUIRED,
-                (executor.invoke(invocation, baseContext) as ToolExecution.Failed).error.code,
-            )
-        }
-        val approvals = invocations.map { invocation ->
-            async(Dispatchers.Default) { executor.approve(invocation.requestId, baseContext) }
+        val executions = invocations.map { invocation ->
+            async(Dispatchers.Default) { executor.invoke(invocation, baseContext) }
         }
         withTimeout(1_000) { started.await() }
         release.complete(Unit)
-        val results = approvals.map { deferred -> withTimeout(1_000) { deferred.await() } }
+        val results = executions.map { deferred -> withTimeout(1_000) { deferred.await() } }
         assertTrue(onceConsumed.get())
         assertEquals(2, consumerCalls.get())
         assertEquals(1, dispatched.get())

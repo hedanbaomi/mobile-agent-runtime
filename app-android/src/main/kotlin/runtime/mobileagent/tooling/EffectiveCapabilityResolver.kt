@@ -95,6 +95,8 @@ class EffectiveCapabilityResolver(
     private val configSnapshotHash: String = "unbound-config",
     private val grants: CapabilityGrantReader = EMPTY_CAPABILITY_GRANT_READER,
     private val bindings: SnapshotGrantBindingReader = EMPTY_SNAPSHOT_BINDING_READER,
+    /** Optional durable policy source used by live pre-dispatch checks. */
+    private val currentPolicyVersionReader: (() -> Long)? = null,
     private val nowEpochMs: () -> Long = { System.currentTimeMillis() },
 ) {
     init {
@@ -263,6 +265,22 @@ class EffectiveCapabilityResolver(
          * approval and dispatch is observed.  The context rows remain useful
          * for a deterministic test/adapter seam when no reader is available.
          */
+        val livePolicyVersion = currentPolicyVersionReader?.invoke() ?: context.policyVersion
+        require(livePolicyVersion >= 0)
+        if (livePolicyVersion != context.policyVersion) {
+            return EffectiveCapabilitySnapshot(
+                agentId = context.agentId,
+                snapshotId = context.snapshotId,
+                capabilities = emptySet(),
+                perSkillCapabilities = emptyMap(),
+                grants = emptyList(),
+                bindings = emptyList(),
+                policyVersion = livePolicyVersion,
+                configSnapshotHash = context.configSnapshotHash,
+                taskIdentity = context.taskIdentity.takeIf { it.isNotBlank() },
+                sessionIdentity = context.sessionIdentity,
+            )
+        }
         val liveReadersConfigured = grants !== EMPTY_CAPABILITY_GRANT_READER ||
             bindings !== EMPTY_SNAPSHOT_BINDING_READER
         val liveGrants = if (liveReadersConfigured) grants.read(context.agentId, null).toList() else emptyList()
@@ -286,12 +304,12 @@ class EffectiveCapabilityResolver(
                     taskIdentity = context.taskIdentity.takeIf { it.isNotBlank() },
                     sessionIdentity = context.sessionIdentity,
                 ) &&
-                grant.policyVersion == context.policyVersion &&
+                grant.policyVersion == livePolicyVersion &&
                 sourceBindings.any { binding ->
                     binding.snapshotId == context.snapshotId &&
                         binding.grantId == grant.grantId &&
                         binding.capability == grant.capability &&
-                        binding.policyVersion == context.policyVersion &&
+                        binding.policyVersion == livePolicyVersion &&
                         binding.workspaceId == grant.workspaceId &&
                         binding.pathScope == grant.pathScope
                 }
@@ -314,12 +332,12 @@ class EffectiveCapabilityResolver(
                     binding.snapshotId == context.snapshotId &&
                         binding.grantId == grant.grantId &&
                         binding.capability == grant.capability &&
-                        binding.policyVersion == context.policyVersion &&
+                        binding.policyVersion == livePolicyVersion &&
                         binding.workspaceId == grant.workspaceId &&
                         binding.pathScope == grant.pathScope
                 }
             },
-            policyVersion = context.policyVersion,
+            policyVersion = livePolicyVersion,
             configSnapshotHash = context.configSnapshotHash,
             taskIdentity = context.taskIdentity.takeIf { it.isNotBlank() },
             sessionIdentity = context.sessionIdentity,

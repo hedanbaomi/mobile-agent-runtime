@@ -34,6 +34,10 @@ import java.util.UUID
  */
 internal class ShizukuWorkspaceFileStore(
     private val rootFile: File = FIXED_ROOT,
+    /** Full-device handles must not recursively scan `/` to calculate quota. */
+    private val enforceQuota: Boolean = true,
+    /** A device-root listing skips symlink entries instead of following them. */
+    private val skipSymlinksInList: Boolean = false,
 ) {
     private val lock = Any()
     private val rootPath: Path = rootFile.toPath().toAbsolutePath().normalize()
@@ -71,7 +75,10 @@ internal class ShizukuWorkspaceFileStore(
             if (children.size > MAX_DIRECTORY_ENTRIES) throw WorkspaceFailure(LIMIT)
             val entries = JSONArray()
             children.sortedBy { it.fileName.toString() }.forEach { child ->
-                rejectSymbolicLink(child)
+                if (Files.isSymbolicLink(child)) {
+                    if (skipSymlinksInList) return@forEach
+                    rejectSymbolicLink(child)
+                }
                 val childSegments = segments + child.fileName.toString()
                 val entry = JSONObject()
                     .put("path", relativePath(childSegments))
@@ -152,11 +159,13 @@ internal class ShizukuWorkspaceFileStore(
                 }
             }
 
-            val usage = inspectUsage(rootPath)
-            val oldBytes = if (existed) Files.size(target) else 0L
-            val newFiles = usage.files + if (existed) 0 else 1
-            val newBytes = usage.bytes - oldBytes + content.size
-            if (newFiles > MAX_FILES || newBytes > MAX_TOTAL_BYTES) throw WorkspaceFailure(LIMIT)
+            if (enforceQuota) {
+                val usage = inspectUsage(rootPath)
+                val oldBytes = if (existed) Files.size(target) else 0L
+                val newFiles = usage.files + if (existed) 0 else 1
+                val newBytes = usage.bytes - oldBytes + content.size
+                if (newFiles > MAX_FILES || newBytes > MAX_TOTAL_BYTES) throw WorkspaceFailure(LIMIT)
+            }
 
             val temporary = parent.resolve(".mar-shizuku-${UUID.randomUUID()}.tmp")
             try {
@@ -209,8 +218,10 @@ internal class ShizukuWorkspaceFileStore(
             val parent = directory.parent ?: throw WorkspaceFailure(OUTSIDE_ROOT)
             requireDirectory(parent)
             rejectSymbolicLink(parent)
-            val usage = inspectUsage(rootPath)
-            if (usage.entries + 1 > MAX_ENTRIES) throw WorkspaceFailure(LIMIT)
+            if (enforceQuota) {
+                val usage = inspectUsage(rootPath)
+                if (usage.entries + 1 > MAX_ENTRIES) throw WorkspaceFailure(LIMIT)
+            }
             try {
                 Files.createDirectory(directory)
             } catch (_: IOException) {

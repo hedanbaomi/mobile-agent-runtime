@@ -18,6 +18,7 @@ import runtime.mobileagent.domain.DangerousMode
 import runtime.mobileagent.domain.GrantLifetime
 import runtime.mobileagent.domain.Utc
 import runtime.mobileagent.domain.WorkspaceBackendType
+import runtime.mobileagent.domain.WorkspaceScope
 
 /**
  * SQLite schema owner for the application database.
@@ -31,7 +32,8 @@ object Migrations {
     // v13 adds durable grant owners/consumption markers and changes the canonical
     // uniqueness key. SQLite cannot alter a table-level UNIQUE constraint in place,
     // so old v12 tables are preserved under a legacy name and copied transactionally.
-    const val VERSION = 13
+    // v14 persists workspace scope and the explicit high-risk full-device grant.
+    const val VERSION = 14
 
     private val statements = listOf(
         "CREATE TABLE IF NOT EXISTS schema_version (version INTEGER NOT NULL PRIMARY KEY)",
@@ -73,7 +75,13 @@ object Migrations {
         "CREATE TABLE IF NOT EXISTS permission_grants (grant_id TEXT PRIMARY KEY, install_id TEXT NOT NULL, package_hash TEXT NOT NULL, capabilities TEXT NOT NULL, revision INTEGER NOT NULL, revoked INTEGER NOT NULL, scopes_json TEXT, lifetime TEXT NOT NULL DEFAULT 'PERSISTENT' CHECK(lifetime IN('ONCE','TASK','SESSION','PERSISTENT')), policy_version INTEGER NOT NULL DEFAULT 0 CHECK(policy_version >= 0), created_at TEXT NOT NULL DEFAULT '', expires_at TEXT, revoked_at TEXT)",
         "CREATE TABLE IF NOT EXISTS authority_policy (id INTEGER NOT NULL PRIMARY KEY CHECK(id = 1), selected_authority TEXT NOT NULL CHECK(selected_authority IN('NONE','SHIZUKU','WIRED_ADB')), dangerous_mode TEXT NOT NULL CHECK(dangerous_mode IN('DISABLED','ENABLED_CONFIRM_HIGH_RISK','ENABLED_AUTONOMOUS')), policy_version INTEGER NOT NULL DEFAULT 0 CHECK(policy_version >= 0), updated_at TEXT NOT NULL)",
         "CREATE TABLE IF NOT EXISTS authority_preferences (authority TEXT NOT NULL PRIMARY KEY CHECK(authority IN('NONE','SHIZUKU','WIRED_ADB')), user_intent_enabled INTEGER NOT NULL DEFAULT 0 CHECK(user_intent_enabled IN(0,1)), explicitly_configured INTEGER NOT NULL DEFAULT 0 CHECK(explicitly_configured IN(0,1)), updated_at TEXT NOT NULL)",
-        "CREATE TABLE IF NOT EXISTS workspaces (id TEXT PRIMARY KEY, display_name TEXT NOT NULL, backend_type TEXT NOT NULL CHECK(backend_type IN('INTERNAL','SAF_TREE','PRIVILEGED')), root_reference TEXT NOT NULL, readable INTEGER NOT NULL CHECK(readable IN(0,1)), writable INTEGER NOT NULL CHECK(writable IN(0,1)), quota_bytes INTEGER, max_file_bytes INTEGER NOT NULL, enabled INTEGER NOT NULL CHECK(enabled IN(0,1)), revision INTEGER NOT NULL DEFAULT 0 CHECK(revision >= 0), created_at TEXT NOT NULL, updated_at TEXT NOT NULL)",
+        "CREATE TABLE IF NOT EXISTS workspaces (id TEXT PRIMARY KEY, display_name TEXT NOT NULL, backend_type TEXT NOT NULL CHECK(backend_type IN('INTERNAL','SAF_TREE','PRIVILEGED')), root_reference TEXT NOT NULL, readable INTEGER NOT NULL CHECK(readable IN(0,1)), writable INTEGER NOT NULL CHECK(writable IN(0,1)), quota_bytes INTEGER, max_file_bytes INTEGER NOT NULL, enabled INTEGER NOT NULL CHECK(enabled IN(0,1)), revision INTEGER NOT NULL DEFAULT 0 CHECK(revision >= 0), created_at TEXT NOT NULL, updated_at TEXT NOT NULL, scope TEXT NOT NULL DEFAULT 'SELECTED_DIRECTORY' CHECK(scope IN('SELECTED_DIRECTORY','FULL_DEVICE_FILES')))",
+        // This row may be created immediately before a provider opens its
+        // device-root handle. The container materializes the corresponding
+        // workspace only after that typed operation succeeds, so the grant
+        // table deliberately has no eager FK; startup reconciliation treats
+        // orphaned rows as unavailable rather than widening access.
+        "CREATE TABLE IF NOT EXISTS full_device_files_grants (workspace_id TEXT PRIMARY KEY, revision INTEGER NOT NULL CHECK(revision > 0), confirmed_at_epoch_ms INTEGER NOT NULL CHECK(confirmed_at_epoch_ms > 0), created_at TEXT NOT NULL, updated_at TEXT NOT NULL, revoked_at TEXT)",
         "CREATE TABLE IF NOT EXISTS capability_grants (grant_id TEXT PRIMARY KEY, agent_id TEXT NOT NULL, skill_install_id TEXT, package_hash TEXT, capability TEXT NOT NULL, workspace_id TEXT, path_scope TEXT, lifetime TEXT NOT NULL CHECK(lifetime IN('ONCE','TASK','SESSION','PERSISTENT')), policy_version INTEGER NOT NULL CHECK(policy_version >= 0), created_at TEXT NOT NULL, expires_at TEXT, revoked_at TEXT, revision INTEGER NOT NULL DEFAULT 1 CHECK(revision > 0), task_id TEXT, session_id TEXT, consumed_at TEXT, CHECK(consumed_at IS NULL OR lifetime = 'ONCE'), CHECK((lifetime = 'ONCE' AND (task_id IS NULL OR trim(task_id) <> '') AND (session_id IS NULL OR trim(session_id) <> '')) OR (lifetime = 'TASK' AND task_id IS NOT NULL AND trim(task_id) <> '') OR (lifetime = 'SESSION' AND session_id IS NOT NULL AND trim(session_id) <> '') OR (lifetime = 'PERSISTENT' AND task_id IS NULL AND session_id IS NULL)), UNIQUE(agent_id, skill_install_id, package_hash, capability, workspace_id, path_scope, task_id, session_id))",
         "CREATE TRIGGER IF NOT EXISTS capability_grants_lifecycle_insert BEFORE INSERT ON capability_grants FOR EACH ROW WHEN NOT ((NEW.consumed_at IS NULL OR NEW.lifetime = 'ONCE') AND ((NEW.lifetime = 'ONCE' AND (NEW.task_id IS NULL OR trim(NEW.task_id) <> '') AND (NEW.session_id IS NULL OR trim(NEW.session_id) <> '')) OR (NEW.lifetime = 'TASK' AND NEW.task_id IS NOT NULL AND trim(NEW.task_id) <> '') OR (NEW.lifetime = 'SESSION' AND NEW.session_id IS NOT NULL AND trim(NEW.session_id) <> '') OR (NEW.lifetime = 'PERSISTENT' AND NEW.task_id IS NULL AND NEW.session_id IS NULL))) BEGIN SELECT RAISE(ABORT, 'invalid capability grant lifecycle'); END",
         "CREATE TRIGGER IF NOT EXISTS capability_grants_lifecycle_update BEFORE UPDATE OF lifetime,task_id,session_id,consumed_at ON capability_grants FOR EACH ROW WHEN NOT ((NEW.consumed_at IS NULL OR NEW.lifetime = 'ONCE') AND ((NEW.lifetime = 'ONCE' AND (NEW.task_id IS NULL OR trim(NEW.task_id) <> '') AND (NEW.session_id IS NULL OR trim(NEW.session_id) <> '')) OR (NEW.lifetime = 'TASK' AND NEW.task_id IS NOT NULL AND trim(NEW.task_id) <> '') OR (NEW.lifetime = 'SESSION' AND NEW.session_id IS NOT NULL AND trim(NEW.session_id) <> '') OR (NEW.lifetime = 'PERSISTENT' AND NEW.task_id IS NULL AND NEW.session_id IS NULL))) BEGIN SELECT RAISE(ABORT, 'invalid capability grant lifecycle'); END",
@@ -161,6 +169,10 @@ object Migrations {
         Column("capability_grants", "task_id", "TEXT"),
         Column("capability_grants", "session_id", "TEXT"),
         Column("capability_grants", "consumed_at", "TEXT"),
+        // Workspace scope was added after the original v13 table. Existing
+        // rows are ordinary selected directories; only explicit full-device
+        // attachments may carry the high-risk scope.
+        Column("workspaces", "scope", "TEXT NOT NULL DEFAULT 'SELECTED_DIRECTORY' CHECK(scope IN('SELECTED_DIRECTORY','FULL_DEVICE_FILES'))"),
     )
 
     fun apply(connection: SqlConnection) {
@@ -188,6 +200,7 @@ object Migrations {
             ensureDefaultAuthorityRows(connection)
             validateSnapshotManifests(connection)
             validateAuthoritySchema(connection)
+            validateWorkspaceScopes(connection)
             validateRequiredSchema(connection)
             connection.execute("DELETE FROM schema_version")
             connection.execute("INSERT INTO schema_version(version) VALUES (?)", listOf(VERSION))
@@ -231,6 +244,15 @@ object Migrations {
         REQUIRED_COLUMNS.forEach { (table, column) ->
             if (connection.query("PRAGMA table_info($table)").none { it.string("name") == column }) {
                 invalid("Required column $table.$column is missing after migration")
+            }
+        }
+    }
+
+    private fun validateWorkspaceScopes(connection: SqlConnection) {
+        connection.query("SELECT scope FROM workspaces").forEach { row ->
+            val raw = row.columns["scope"]?.toString()
+            if (raw == null || runCatching { WorkspaceScope.valueOf(raw) }.isFailure) {
+                invalid("workspaces.scope is invalid")
             }
         }
     }
@@ -348,7 +370,7 @@ object Migrations {
         "document_versions", "embedding_operations", "embedding_query_vectors", "index_generations", "generation_members", "assets", "vision_results",
         "skill_packages", "skill_installs", "permission_grants", "skill_invocations", "runs", "tool_invocations",
         "authority_policy", "authority_preferences", "workspaces", "workspace_acl", "capability_grants",
-        "snapshot_grant_bindings", "saf_workspace_grants", "desktop_identity", "desktop_trust",
+        "full_device_files_grants", "snapshot_grant_bindings", "saf_workspace_grants", "desktop_identity", "desktop_trust",
         "skill_memory_spaces", "skill_memory_entries", "approval_records", "tool_audit_details",
     )
 
@@ -402,6 +424,11 @@ object Migrations {
         "authority_preferences" to "user_intent_enabled",
         "authority_preferences" to "explicitly_configured",
         "workspaces" to "root_reference",
+        "workspaces" to "scope",
+        "full_device_files_grants" to "workspace_id",
+        "full_device_files_grants" to "revision",
+        "full_device_files_grants" to "confirmed_at_epoch_ms",
+        "full_device_files_grants" to "revoked_at",
         "capability_grants" to "capability",
         "capability_grants" to "lifetime",
         "capability_grants" to "policy_version",

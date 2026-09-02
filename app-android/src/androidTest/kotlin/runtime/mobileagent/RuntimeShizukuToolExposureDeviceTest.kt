@@ -129,9 +129,11 @@ class RuntimeShizukuToolExposureDeviceTest {
         val factory = container.runtimeIntegration.createToolExecutorFactory(context)
         val exposedNames = factory.toolingSpecs.map { it.name }.toSet()
         val exposure = container.runtimeIntegration.toolExposureDiagnostics(context)
-        assertTrue("workspace_list was not exposed: $exposedNames", "workspace_list" in exposedNames)
-        assertTrue("file_write_text was not exposed: $exposedNames", "file_write_text" in exposedNames)
-        assertTrue("file_read_text was not exposed: $exposedNames", "file_read_text" in exposedNames)
+        val safeExposure = "names=$exposedNames,summary=${factory.exposureSummary},inputs=$exposure," +
+            "settings=${container.runtimeIntegration.snapshot()}"
+        assertTrue("workspace_list was not exposed: $safeExposure", "workspace_list" in exposedNames)
+        assertTrue("file_write_text was not exposed: $safeExposure", "file_write_text" in exposedNames)
+        assertTrue("file_read_text was not exposed: $safeExposure", "file_read_text" in exposedNames)
         assertEquals(DiagnosticAuthority.SHIZUKU, exposure.selectedAuthority)
         assertTrue("Selected Shizuku was not ready in safe diagnostics", exposure.selectedAuthorityReady)
         assertEquals(1, exposure.grantedWorkspaceCount)
@@ -184,13 +186,17 @@ class RuntimeShizukuToolExposureDeviceTest {
     }
 
     private suspend fun waitUntilReady(container: AppContainer): Boolean {
+        var consecutiveReadySamples = 0
         repeat(100) {
             val snapshot = container.runtimeIntegration.refresh()
             if (snapshot.selectedAuthority == Authority.SHIZUKU &&
                 snapshot.shizuku.availability == Availability.READY &&
                 snapshot.shizuku.connection == Connection.CONNECTED
             ) {
-                return true
+                consecutiveReadySamples++
+                if (consecutiveReadySamples >= 5) return true
+            } else {
+                consecutiveReadySamples = 0
             }
             delay(50)
         }

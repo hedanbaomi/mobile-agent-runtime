@@ -6,6 +6,7 @@ package runtime.mobileagent.skills.tooling
 import java.nio.charset.StandardCharsets
 import runtime.mobileagent.domain.CapabilityId
 import runtime.mobileagent.domain.WorkspaceBackendType as DomainWorkspaceBackendType
+import runtime.mobileagent.domain.WorkspaceScope
 
 /** Backend identities are implementation details, never model tool names. */
 typealias WorkspaceBackendType = DomainWorkspaceBackendType
@@ -24,6 +25,7 @@ data class WorkspaceDescriptor(
     val maxFiles: Int = 5_000,
     val maxDirectoryEntries: Int = 1_000,
     val enabled: Boolean = true,
+    val scope: WorkspaceScope = WorkspaceScope.SELECTED_DIRECTORY,
 ) {
     init {
         require(id.isNotBlank())

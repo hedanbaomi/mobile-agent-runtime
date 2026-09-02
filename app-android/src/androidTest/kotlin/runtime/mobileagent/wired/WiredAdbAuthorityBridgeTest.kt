@@ -75,11 +75,12 @@ class WiredAdbAuthorityBridgeTest {
 
         val secrets = TestSecretStore()
         val trust = TestTrustStore()
+        val intent = InMemoryWiredAdbIntentStore()
         val bridge = WiredAdbAuthorityBridge(
             appInstanceId = appId,
             trustStore = trust,
             secretStore = secrets,
-            intentStore = InMemoryWiredAdbIntentStore(),
+            intentStore = intent,
             connector = WiredAdbLoopbackConnector { address, port ->
                 assertEquals(WIRED_ADB_LOOPBACK_ADDRESS, address)
                 assertEquals(WIRED_ADB_LOOPBACK_PORT, port)
@@ -104,9 +105,30 @@ class WiredAdbAuthorityBridgeTest {
 
         bridge.disconnect()
         assertEquals(WiredAdbLifecycleState.DISCONNECTED, bridge.status.value.state)
+        assertEquals(WiredAdbUserIntent.ENABLED, bridge.status.value.userIntent)
+        assertTrue(bridge.status.value.trusted)
         assertNotNull(trust.value)
         assertNotNull(secrets.resolve(record.secretRef))
         bridge.close()
+
+        // A missing transport/Wi-Fi connection and even a new app process must
+        // not erase explicit intent or paired trust. Only dispatch readiness is
+        // unavailable until the user-selected channel reconnects.
+        val offlineRestart = WiredAdbAuthorityBridge(
+            appInstanceId = appId,
+            trustStore = trust,
+            secretStore = secrets,
+            intentStore = intent,
+            connector = WiredAdbLoopbackConnector { _, _ -> error("transport remains offline") },
+        )
+        assertEquals(WiredAdbLifecycleState.TRUSTED, offlineRestart.status.value.state)
+        assertEquals(WiredAdbUserIntent.ENABLED, offlineRestart.status.value.userIntent)
+        assertTrue(offlineRestart.status.value.trusted)
+        assertEquals(WiredAdbConnectionState.DISCONNECTED, offlineRestart.status.value.connection)
+        assertEquals(WiredAdbAvailability.TEMPORARILY_UNAVAILABLE, offlineRestart.status.value.availability)
+        assertNotNull(trust.value)
+        assertNotNull(secrets.resolve(record.secretRef))
+        offlineRestart.close()
     }
 
     @Test

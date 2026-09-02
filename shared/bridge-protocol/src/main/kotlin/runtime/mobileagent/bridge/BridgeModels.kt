@@ -16,12 +16,13 @@ import kotlinx.serialization.json.JsonObject
 /** Constants shared by both ends of the loopback bridge. */
 object BridgeProtocol {
     /**
-     * Version 2 changes the first-pair direction: Android sends only its
-     * app identity, nonce and one-time token; the Desktop returns its
-     * selected-device identity in the challenge.  This is intentionally a
-     * wire break rather than accepting the v1 client-supplied desktop fields.
+     * Version 3 adds connection-scoped typed workspace attachments. Android
+     * may submit a user-selected device absolute path only to the encrypted
+     * bridge; the model-facing workspace API still exposes an opaque handle
+     * and workspace-relative paths. This is intentionally a wire break so a
+     * v2 peer can never silently use the new binding semantics.
      */
-    const val VERSION: Int = 2
+    const val VERSION: Int = 3
     const val TOKEN_BYTES: Int = 32
     const val NONCE_BYTES: Int = 32
     const val SERIAL_FINGERPRINT_BYTES: Int = 32
@@ -33,6 +34,10 @@ object BridgeProtocol {
     const val MAX_PAYLOAD_BYTES: Int = MAX_FRAME_BYTES - 128
     const val MAX_REQUEST_ID_BYTES: Int = 128
     const val MAX_COMMAND_BYTES: Int = 128 * 1024
+    const val MAX_WORKSPACE_ID_BYTES: Int = 128
+    const val MAX_WORKSPACE_DISPLAY_NAME_BYTES: Int = 256
+    const val MAX_DEVICE_PATH_BYTES: Int = 4 * 1024
+    const val WORKSPACE_BINDING_BYTES: Int = 32
     const val PAIRING_TTL_MILLIS: Long = 5 * 60 * 1_000L
     const val PAIRING_MAX_ATTEMPTS: Int = 5
     const val PAIRING_RATE_WINDOW_MILLIS: Long = 60 * 1_000L
@@ -40,10 +45,10 @@ object BridgeProtocol {
     /** A Desktop registration may never extend the App-issued five-minute window. */
     const val PAIRING_MAX_REGISTRATION_WINDOW_MILLIS: Long = PAIRING_TTL_MILLIS
     const val MAX_STATUS_BYTES: Int = 8 * 1024
-    const val DOMAIN: String = "MAR-BRIDGE-V2"
+    const val DOMAIN: String = "MAR-BRIDGE-V3"
 
     internal val MAGIC: ByteArray = byteArrayOf(0x4d, 0x41, 0x52, 0x42) // MARB
-    internal val FRAME_MAGIC: ByteArray = byteArrayOf(0x4d, 0x42, 0x46, 0x32) // MBF2
+    internal val FRAME_MAGIC: ByteArray = byteArrayOf(0x4d, 0x42, 0x46, 0x33) // MBF3
 }
 
 open class BridgeProtocolException(message: String, cause: Throwable? = null) :
@@ -131,6 +136,9 @@ object BridgeErrorCodes {
 /** Only fixed operations are accepted over a bridge request. */
 enum class BridgeOperation(val wireName: String) {
     WORKSPACE_LIST("workspace_list"),
+    WORKSPACE_ATTACH("workspace_attach"),
+    WORKSPACE_BROWSE("workspace_browse"),
+    WORKSPACE_RELEASE("workspace_release"),
     FILE_LIST("file_list"),
     FILE_STAT("file_stat"),
     FILE_READ_TEXT("file_read_text"),
@@ -430,6 +438,21 @@ data class BridgeRequestEnvelope(
     val requestId: String,
     val operation: String,
     val payload: JsonObject,
+)
+
+/**
+ * Desktop-to-shell-helper envelope. This is deliberately a distinct type
+ * from [BridgeRequestEnvelope]: root_path is used only inside the already
+ * authenticated desktop-to-device helper invocation and can never be
+ * accepted as a normal model/Android bridge request field.
+ */
+@Serializable
+data class BridgeHelperRequestEnvelope(
+    val protocolVersion: Int,
+    val workspaceRootPath: String,
+    val workspaceBinding: String,
+    val fullDevice: Boolean = false,
+    val request: BridgeRequestEnvelope,
 )
 
 @Serializable

@@ -113,6 +113,55 @@ class EffectiveCapabilityResolver(
         now: Long = nowEpochMs(),
         taskIdentity: String? = null,
         sessionIdentity: String? = null,
+    ): EffectiveCapabilitySnapshot = resolveInternal(
+        snapshot = snapshot,
+        grants = grants,
+        snapshotBindings = snapshotBindings,
+        currentPolicyVersion = currentPolicyVersion,
+        now = now,
+        taskIdentity = taskIdentity,
+        sessionIdentity = sessionIdentity,
+        allowUnboundLiveGrants = false,
+    )
+
+    /**
+     * Resolve the grant view which will be frozen for a new run.
+     *
+     * Persistent/session/task grants are allowed to be unbound here because
+     * the run is the first place where the current Agent/Session grant view is
+     * materialized.  ONCE grants still require an immutable snapshot binding;
+     * callers must use the normal snapshot flow when admitting one-shot
+     * capabilities.  Existing [resolve] remains strict for historical
+     * snapshots and audit/replay reads.
+     */
+    fun resolveForRun(
+        snapshot: AgentSnapshot,
+        grants: Iterable<CapabilityGrant>,
+        snapshotBindings: Iterable<SnapshotGrantBinding> = emptyList(),
+        currentPolicyVersion: Long = policyVersion,
+        now: Long = nowEpochMs(),
+        taskIdentity: String? = null,
+        sessionIdentity: String? = null,
+    ): EffectiveCapabilitySnapshot = resolveInternal(
+        snapshot = snapshot,
+        grants = grants,
+        snapshotBindings = snapshotBindings,
+        currentPolicyVersion = currentPolicyVersion,
+        now = now,
+        taskIdentity = taskIdentity,
+        sessionIdentity = sessionIdentity,
+        allowUnboundLiveGrants = true,
+    )
+
+    private fun resolveInternal(
+        snapshot: AgentSnapshot,
+        grants: Iterable<CapabilityGrant>,
+        snapshotBindings: Iterable<SnapshotGrantBinding>,
+        currentPolicyVersion: Long,
+        now: Long,
+        taskIdentity: String?,
+        sessionIdentity: String?,
+        allowUnboundLiveGrants: Boolean,
     ): EffectiveCapabilitySnapshot {
         val allBindings = snapshotBindings.filter { it.snapshotId == snapshot.id }.toList()
         val bindingByGrantAndCapability = allBindings.associateBy { it.grantId to it.capability }
@@ -121,10 +170,15 @@ class EffectiveCapabilityResolver(
             .filter { it.revision > 0 && it.isActiveFor(Instant.ofEpochMilli(now), taskIdentity, sessionIdentity) }
             .filter { it.policyVersion == currentPolicyVersion }
             .filter { grant ->
-                val binding = bindingByGrantAndCapability[grant.grantId to grant.capability] ?: return@filter false
-                binding.policyVersion == currentPolicyVersion &&
+                val binding = bindingByGrantAndCapability[grant.grantId to grant.capability]
+                val bindingMatches = binding != null &&
+                    binding.policyVersion == currentPolicyVersion &&
                     binding.workspaceId == grant.workspaceId &&
                     binding.pathScope == grant.pathScope
+                val unboundLiveGrant = allowUnboundLiveGrants &&
+                    grant.lifetime != GrantLifetime.ONCE &&
+                    grant.isActiveFor(Instant.ofEpochMilli(now), taskIdentity, sessionIdentity)
+                bindingMatches || unboundLiveGrant
             }
             .toList()
             .distinctBy { it.grantId to it.capability }
@@ -154,6 +208,23 @@ class EffectiveCapabilityResolver(
         taskIdentity: String? = null,
         sessionIdentity: String? = null,
     ): EffectiveCapabilitySnapshot = resolve(
+        snapshot = snapshot,
+        grants = grants.read(snapshot.agentId, null).toList(),
+        snapshotBindings = bindings.read(snapshot.id).toList(),
+        currentPolicyVersion = currentPolicyVersion,
+        now = now,
+        taskIdentity = taskIdentity,
+        sessionIdentity = sessionIdentity,
+    )
+
+    /** Repository adapter form used while freezing a new run. */
+    fun resolveForRun(
+        snapshot: AgentSnapshot,
+        currentPolicyVersion: Long = policyVersion,
+        now: Long = nowEpochMs(),
+        taskIdentity: String? = null,
+        sessionIdentity: String? = null,
+    ): EffectiveCapabilitySnapshot = resolveForRun(
         snapshot = snapshot,
         grants = grants.read(snapshot.agentId, null).toList(),
         snapshotBindings = bindings.read(snapshot.id).toList(),
@@ -296,16 +367,20 @@ class EffectiveCapabilityResolver(
             else -> emptyList()
         }
         val now = nowEpochMs()
+        val frozenByGrantAndCapability = context.canonicalGrants.associateBy { it.grantId to it.capability }
         val accepted = sourceGrants.filter { grant ->
-            grant.agentId == context.agentId &&
-                grant.revision > 0 &&
-                grant.isActiveFor(
+            if (grant.agentId != context.agentId ||
+                grant.revision <= 0 ||
+                !grant.isActiveFor(
                     now = Instant.ofEpochMilli(now),
                     taskIdentity = context.taskIdentity.takeIf { it.isNotBlank() },
                     sessionIdentity = context.sessionIdentity,
-                ) &&
-                grant.policyVersion == livePolicyVersion &&
-                sourceBindings.any { binding ->
+                ) ||
+                grant.policyVersion != livePolicyVersion
+            ) {
+                false
+            } else {
+                val bindingMatches = sourceBindings.any { binding ->
                     binding.snapshotId == context.snapshotId &&
                         binding.grantId == grant.grantId &&
                         binding.capability == grant.capability &&
@@ -313,6 +388,29 @@ class EffectiveCapabilityResolver(
                         binding.workspaceId == grant.workspaceId &&
                         binding.pathScope == grant.pathScope
                 }
+                if (!liveReadersConfigured) {
+                    // Without a live repository reader, retain the historical
+                    // strict behavior: a context-only grant is not enough to
+                    // prove authorization for dispatch.
+                    bindingMatches
+                } else {
+                    // A run may only continue with the exact canonical row it
+                    // froze at start.  This blocks both revocation and silent
+                    // scope/revision edits, while also preventing a grant
+                    // created after the run began from expanding it.
+                    val frozen = frozenByGrantAndCapability[grant.grantId to grant.capability]
+                    frozen != null && frozen == grant && (
+                        bindingMatches || (
+                            grant.lifetime != GrantLifetime.ONCE &&
+                                grant.isActiveFor(
+                                    now = Instant.ofEpochMilli(now),
+                                    taskIdentity = context.taskIdentity.takeIf { it.isNotBlank() },
+                                    sessionIdentity = context.sessionIdentity,
+                                )
+                            )
+                        )
+                }
+            }
         }
         val agent = accepted.filter { it.skillInstallId == null }.map { it.capability }.toSet() intersect policyCapabilities
         val perSkill = accepted.filter { it.skillInstallId != null }.groupBy { it.skillInstallId!! }

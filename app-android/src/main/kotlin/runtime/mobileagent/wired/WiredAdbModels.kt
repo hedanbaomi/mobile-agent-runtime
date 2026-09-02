@@ -169,6 +169,8 @@ data class WiredAdbFileResult(
     val created: Boolean? = null,
     val replaced: Boolean? = null,
     val deleted: Boolean? = null,
+    /** A bounded directory page may have more entries on the device. */
+    val truncated: Boolean = false,
 )
 
 data class WiredAdbShellResult(
@@ -213,6 +215,11 @@ enum class WiredAdbErrorCode {
     PROTOCOL_REPLAY,
     PROTOCOL_AUTH_FAILED,
     PROTOCOL_NO_COMPRESSION,
+    WORKSPACE_BINDING_INVALID,
+    WORKSPACE_BINDING_REPLAYED,
+    FULL_DEVICE_GRANT_REQUIRED,
+    ROOT_BACKEND_UNAVAILABLE,
+    ROOT_PATH_INVALID,
     UNKNOWN_OUTCOME,
     TIMEOUT,
     IO_ERROR,
@@ -352,7 +359,7 @@ internal const val WIRED_MAX_SEGMENT_BYTES = 120
 internal const val WIRED_MAX_PATH_DEPTH = 16
 internal const val PAIR_TOKEN_BYTES = BridgeProtocol.TOKEN_BYTES
 internal const val PAIR_TOKEN_TTL_MS = BridgeProtocol.PAIRING_TTL_MILLIS
-/** Pairing policy is owned by shared:bridge-protocol; it must be five for v2. */
+/** Pairing policy is owned by shared:bridge-protocol; it must be five for v3. */
 internal const val PAIR_MAX_ATTEMPTS = BridgeProtocol.PAIRING_MAX_ATTEMPTS
 
 internal val DEFAULT_WIRED_CLOCK = WiredAdbClock { System.currentTimeMillis() }

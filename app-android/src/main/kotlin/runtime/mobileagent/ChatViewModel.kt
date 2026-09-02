@@ -108,9 +108,18 @@ class ChatViewModel(
             val messages = selected?.let(container.conversations::messages).orEmpty()
             citations.clear()
             messages.forEach { restoreCitations(it.metadataJson) }
+            val agentNames = agents.associateBy { it.id }
             state.value = state.value.copy(
-                sessions = conversations.map { c -> ChatSessionUi(c.id, c.title, timeLabel = c.updatedAt.take(16),
-                    agentName = "配置快照 " + c.snapshotId.take(8)) }, selectedSessionId = selected,
+                sessions = conversations.map { c ->
+                    val snapshotAgentId = container.agents.getSnapshot(c.snapshotId)?.agentId
+                    ChatSessionUi(
+                        id = c.id,
+                        title = c.title,
+                        timeLabel = c.updatedAt.take(16),
+                        agentName = snapshotAgentId?.let { agentNames[it]?.name } ?: "配置快照 " + c.snapshotId.take(8),
+                        agentId = snapshotAgentId,
+                    )
+                }, selectedSessionId = selected,
                 agents = agents.map { ChatAgentOptionUi(it.id, it.name) }, selectedAgentId = agentId,
                 messages = messages.map(::messageUi), citations = citationUis(),
                 requestPreview = state.value.requestPreview?.takeIf { inspectorEnabled },

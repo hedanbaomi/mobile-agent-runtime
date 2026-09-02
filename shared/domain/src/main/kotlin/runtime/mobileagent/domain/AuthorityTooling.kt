@@ -73,6 +73,15 @@ fun GrantLifetime.matchesIdentity(
 @Serializable
 enum class WorkspaceBackendType { INTERNAL, SAF_TREE, PRIVILEGED }
 
+/**
+ * User-visible workspace scope is deliberately separate from the transport
+ * or authority. A selected directory is bounded by the directory the user
+ * attached; FULL_DEVICE_FILES is a separate, persistent high-risk grant. It
+ * is not a root grant and does not imply shell execution.
+ */
+@Serializable
+enum class WorkspaceScope { SELECTED_DIRECTORY, FULL_DEVICE_FILES }
+
 typealias WorkspaceType = WorkspaceBackendType
 typealias WorkspaceBackend = WorkspaceBackendType
 
@@ -90,6 +99,7 @@ data class Workspace(
     val revision: Long = 0,
     val createdAt: String = "",
     val updatedAt: String = "",
+    val scope: WorkspaceScope = WorkspaceScope.SELECTED_DIRECTORY,
 ) {
     init {
         require(isSafeId(id)) { "Workspace id is invalid" }

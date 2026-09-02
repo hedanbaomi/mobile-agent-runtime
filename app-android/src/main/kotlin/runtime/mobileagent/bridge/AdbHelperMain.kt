@@ -28,6 +28,9 @@ import runtime.mobileagent.wired.WIRED_MAX_READ_BYTES
 import runtime.mobileagent.wired.WiredAdbPathPolicy
 import runtime.mobileagent.wired.WIRED_WORKSPACE_ID
 
+private val SAFE_WORKSPACE_ID = Regex("[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
+private val BINDING_HEX = Regex("[0-9a-fA-F]{64}")
+
 /**
  * Shell-UID entry point for typed workspace file operations only.
  *
@@ -79,10 +82,20 @@ class AdbHelperServer(
     }
 
     private fun process(frame: ByteArray): BridgeResponseEnvelope {
-        val request = try {
+        val helperEnvelope = runCatching { BridgeCodec.decodeHelperRequest(frame) }.getOrNull()
+        val request = helperEnvelope?.request ?: try {
             BridgeCodec.decodeRequest(frame)
         } catch (_: Throwable) {
             return failure(newWiredAdbRequestId().value, ERR_PROTOCOL_FRAME_INVALID)
+        }
+        val dispatchEngine = if (helperEnvelope == null) {
+            engine
+        } else {
+            val scoped = engine as? runtime.mobileagent.wired.RootScopedPrivilegedFileEngine
+                ?: return failure(request.requestId, ERR_ROOT_BACKEND_UNAVAILABLE)
+            runCatching {
+                scoped.forRoot(helperEnvelope.workspaceRootPath, helperEnvelope.fullDevice)
+            }.getOrElse { return failure(request.requestId, ERR_ROOT_PATH_INVALID) }
         }
         val operation = runCatching { BridgeOperation.parse(request.operation) }.getOrNull()
             ?: return failure(request.requestId, ERR_REQUEST_INVALID)
@@ -97,11 +110,12 @@ class AdbHelperServer(
             else -> return failure(request.requestId, ERR_TYPED_OPERATION_REQUIRED)
         }
         val typed = runCatching {
-            validateFilePayloadKeys(fileOperation, request.payload)
-            typedRequest(request.requestId, fileOperation, request.payload)
+            val dynamicWorkspace = helperEnvelope != null
+            validateFilePayloadKeys(fileOperation, request.payload, dynamicWorkspace)
+            typedRequest(request.requestId, fileOperation, request.payload, dynamicWorkspace)
         }
             .getOrElse { return failure(request.requestId, ERR_REQUEST_INVALID) }
-        return when (val result = engine.execute(typed)) {
+        return when (val result = dispatchEngine.execute(typed)) {
             is WiredAdbFileEngineResult.Success -> success(request.requestId, result.result)
             is WiredAdbFileEngineResult.Failure -> failure(request.requestId, "FILE_${result.code}")
         }
@@ -111,9 +125,16 @@ class AdbHelperServer(
         requestId: String,
         operation: WiredAdbFileOperation,
         payload: JsonObject,
+        allowArbitraryWorkspace: Boolean,
     ): WiredAdbFileRequest {
         val id = WiredAdbRequestId(requestId)
-        require(payload.stringOrNull("workspace_id") == WIRED_WORKSPACE_ID)
+        val workspaceId = payload.stringOrNull("workspace_id")
+        if (allowArbitraryWorkspace) {
+            require(workspaceId != null && workspaceId.matches(SAFE_WORKSPACE_ID))
+            require(payload.stringOrNull("workspace_binding")?.matches(BINDING_HEX) == true)
+        } else {
+            require(workspaceId == WIRED_WORKSPACE_ID)
+        }
         val relativePath = payload.stringOrNull("relative_path")
         val destination = payload.stringOrNull("destination_relative_path")
         WiredAdbPathPolicy.parse(relativePath, allowRoot = operation == WiredAdbFileOperation.LIST)
@@ -141,16 +162,21 @@ class AdbHelperServer(
     private fun validateFilePayloadKeys(
         operation: WiredAdbFileOperation,
         payload: JsonObject,
+        allowArbitraryWorkspace: Boolean,
     ) {
+        val workspaceKeys = if (allowArbitraryWorkspace) {
+            setOf("workspace_id", "workspace_binding")
+        } else {
+            setOf("workspace_id")
+        }
         val allowed = when (operation) {
             WiredAdbFileOperation.LIST,
-            WiredAdbFileOperation.STAT -> setOf("workspace_id", "relative_path")
-            WiredAdbFileOperation.READ_TEXT -> setOf("workspace_id", "relative_path", "max_bytes")
-            WiredAdbFileOperation.WRITE_TEXT -> setOf("workspace_id", "relative_path", "content", "overwrite")
+            WiredAdbFileOperation.STAT -> workspaceKeys + "relative_path"
+            WiredAdbFileOperation.READ_TEXT -> workspaceKeys + setOf("relative_path", "max_bytes")
+            WiredAdbFileOperation.WRITE_TEXT -> workspaceKeys + setOf("relative_path", "content", "overwrite")
             WiredAdbFileOperation.CREATE_DIRECTORY,
-            WiredAdbFileOperation.DELETE -> setOf("workspace_id", "relative_path", "recursive")
-            WiredAdbFileOperation.MOVE -> setOf(
-                "workspace_id",
+            WiredAdbFileOperation.DELETE -> workspaceKeys + setOf("relative_path", "recursive")
+            WiredAdbFileOperation.MOVE -> workspaceKeys + setOf(
                 "relative_path",
                 "destination_relative_path",
                 "overwrite",
@@ -178,6 +204,7 @@ class AdbHelperServer(
         result.created?.let { put("created", it) }
         result.replaced?.let { put("replaced", it) }
         result.deleted?.let { put("deleted", it) }
+        if (result.truncated) put("truncated", true)
         if (result.entries.isNotEmpty()) {
             kotlinx.serialization.json.buildJsonArray {
                 result.entries.forEach { entry ->
@@ -299,5 +326,7 @@ class AdbHelperServer(
         const val ERR_REQUEST_INVALID = "REQUEST_INVALID"
         const val ERR_TYPED_OPERATION_REQUIRED = "TYPED_OPERATION_REQUIRED"
         const val ERR_RESPONSE_TOO_LARGE = "RESPONSE_TOO_LARGE"
+        const val ERR_ROOT_BACKEND_UNAVAILABLE = "ROOT_BACKEND_UNAVAILABLE"
+        const val ERR_ROOT_PATH_INVALID = "ROOT_PATH_INVALID"
     }
 }

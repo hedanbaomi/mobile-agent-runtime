@@ -16,6 +16,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -173,7 +174,7 @@ fun KnowledgeScreen(state: KnowledgeUiState, actions: KnowledgeActions = Knowled
     val folderPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
         if (uri != null) actions.onImportFolder(uri)
     }
-    BoxWithConstraints(modifier.fillMaxSize().padding(16.dp)) {
+    BoxWithConstraints(modifier.fillMaxSize().padding(horizontal = 16.dp, vertical = 12.dp)) {
         val wide = maxWidth >= 720.dp
         if (wide) {
             Row(Modifier.fillMaxSize(), horizontalArrangement = Arrangement.spacedBy(16.dp)) {
@@ -406,11 +407,21 @@ private fun KnowledgeBasePane(
             )
         }
         if (state.loading) CircularProgressIndicator(Modifier.padding(top = 16.dp))
-        else if (state.error != null) Text(state.error, color = MaterialTheme.colorScheme.error, modifier = Modifier.padding(top = 16.dp))
+        else if (state.error != null) {
+            Card(
+                Modifier.fillMaxWidth().padding(top = 16.dp),
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer),
+            ) { Text(state.error, color = MaterialTheme.colorScheme.onErrorContainer, modifier = Modifier.padding(14.dp)) }
+        }
         else if (state.bases.isEmpty()) Text(if (zh) "暂无知识库。" else "No knowledge bases available.", modifier = Modifier.padding(top = 16.dp))
         else LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.height(280.dp).padding(top = 12.dp)) {
             items(state.bases, key = { it.id }) { base ->
-                Surface(color = if (base.id == state.selectedBaseId) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceVariant, modifier = Modifier.fillMaxWidth().clickable { actions.onSelectBase(base.id) }) {
+                Card(
+                    colors = CardDefaults.cardColors(
+                        containerColor = if (base.id == state.selectedBaseId) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceContainerLow,
+                    ),
+                    modifier = Modifier.fillMaxWidth().heightIn(min = 56.dp).clickable { actions.onSelectBase(base.id) },
+                ) {
                     Column(Modifier.padding(12.dp)) {
                         Text(base.name, style = MaterialTheme.typography.titleMedium)
                         Text(if (zh) "${base.documentCount} 个文档" else "${base.documentCount} documents", style = MaterialTheme.typography.bodySmall)

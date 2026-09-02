@@ -167,28 +167,71 @@ internal object WiredAdbSharedAdapter {
         throw BridgeProtocolException("invalid bridge response")
     }
 
-    fun fileOperation(request: WiredAdbFileRequest): Pair<String, JsonObject> = when (request.operation) {
-        WiredAdbFileOperation.LIST -> "file_list" to filePayload(request) { }
-        WiredAdbFileOperation.STAT -> "file_stat" to filePayload(request) { }
-        WiredAdbFileOperation.READ_TEXT -> "file_read_text" to filePayload(request) {
+    fun fileOperation(request: WiredAdbFileRequest): Pair<String, JsonObject> =
+        fileOperation(request, WIRED_WORKSPACE_ID, null)
+
+    fun fileOperation(
+        request: WiredAdbFileRequest,
+        workspaceId: String,
+        workspaceBinding: String?,
+    ): Pair<String, JsonObject> = when (request.operation) {
+        WiredAdbFileOperation.LIST -> "file_list" to filePayload(request, workspaceId, workspaceBinding) { }
+        WiredAdbFileOperation.STAT -> "file_stat" to filePayload(request, workspaceId, workspaceBinding) { }
+        WiredAdbFileOperation.READ_TEXT -> "file_read_text" to filePayload(request, workspaceId, workspaceBinding) {
             put("max_bytes", request.maxBytes)
         }
-        WiredAdbFileOperation.WRITE_TEXT -> "file_write_text" to filePayload(request) {
+        WiredAdbFileOperation.WRITE_TEXT -> "file_write_text" to filePayload(request, workspaceId, workspaceBinding) {
             val content = request.contentUtf8 ?: throw BridgeProtocolException("file content is required")
             put("content", decodeUtf8(content))
             put("overwrite", request.replaceExisting)
         }
-        WiredAdbFileOperation.CREATE_DIRECTORY -> "file_create_directory" to filePayload(request) {
+        WiredAdbFileOperation.CREATE_DIRECTORY -> "file_create_directory" to filePayload(request, workspaceId, workspaceBinding) {
             put("recursive", false)
         }
-        WiredAdbFileOperation.MOVE -> "file_move" to filePayload(request) {
+        WiredAdbFileOperation.MOVE -> "file_move" to filePayload(request, workspaceId, workspaceBinding) {
             put("destination_relative_path", request.destinationRelativePath)
             put("overwrite", request.replaceExisting)
         }
-        WiredAdbFileOperation.DELETE -> "file_delete" to filePayload(request) {
+        WiredAdbFileOperation.DELETE -> "file_delete" to filePayload(request, workspaceId, workspaceBinding) {
             put("recursive", false)
         }
     }
+
+    fun workspaceAttachOperation(
+        workspaceId: String,
+        binding: String,
+        displayName: String,
+        absolutePath: String,
+        scope: WiredAdbWorkspaceScope,
+        grantRevision: Long,
+        confirmedByUser: Boolean,
+    ): Pair<String, JsonObject> = "workspace_attach" to buildJsonObject {
+        put("workspace_id", workspaceId)
+        put("workspace_binding", binding)
+        put("display_name", displayName)
+        put("absolute_path", absolutePath)
+        put("scope", if (scope == WiredAdbWorkspaceScope.FULL_DEVICE_FILES) "full_device_files" else "selected_directory")
+        put("grant_revision", grantRevision)
+        put("confirmed_by_user", confirmedByUser)
+    }
+
+    fun workspaceBrowseOperation(
+        workspaceId: String,
+        binding: String,
+        relativePath: String,
+        maxEntries: Int,
+    ): Pair<String, JsonObject> = "workspace_browse" to buildJsonObject {
+        put("workspace_id", workspaceId)
+        put("workspace_binding", binding)
+        put("relative_path", relativePath)
+        put("max_entries", maxEntries)
+    }
+
+    fun workspaceReleaseOperation(workspaceId: String, binding: String): Pair<String, JsonObject> =
+        "workspace_release" to buildJsonObject {
+            put("workspace_id", workspaceId)
+            put("workspace_binding", binding)
+        }
 
     fun shellOperation(request: WiredAdbShellRequest): Pair<String, JsonObject> =
         "shell_exec" to buildJsonObject {
@@ -227,8 +270,87 @@ internal object WiredAdbSharedAdapter {
             created = payload.boolean("created"),
             replaced = payload.boolean("replaced"),
             deleted = payload.boolean("deleted"),
+            truncated = payload.boolean("truncated") ?: false,
         )
     }
+
+    internal data class DecodedWorkspacePage(
+        val relativePath: String,
+        val entries: List<WiredAdbFileEntry>,
+        val truncated: Boolean,
+    )
+
+    fun decodeWorkspaceAttachment(
+        response: BridgeResponseEnvelope,
+        workspaceId: String,
+        binding: String,
+        scope: WiredAdbWorkspaceScope,
+    ): DecodedWorkspacePage {
+        require(response.success)
+        val payload = response.payload ?: throw BridgeProtocolException("workspace attachment payload is missing")
+        require(payload.keys.all { it in WORKSPACE_ATTACH_RESULT_KEYS })
+        require(payload.string("operation") == "workspace_attach")
+        require(payload.string("workspace_id") == workspaceId)
+        require(payload.string("workspace_binding") == binding)
+        require(payload.string("scope") == if (scope == WiredAdbWorkspaceScope.FULL_DEVICE_FILES) "full_device_files" else "selected_directory")
+        return decodeWorkspacePagePayload(payload, workspaceId, binding)
+    }
+
+    fun decodeWorkspacePage(
+        response: BridgeResponseEnvelope,
+        workspaceId: String,
+        binding: String,
+    ): DecodedWorkspacePage {
+        require(response.success)
+        val payload = response.payload ?: throw BridgeProtocolException("workspace page payload is missing")
+        require(payload.keys.all { it in WORKSPACE_BROWSE_RESULT_KEYS })
+        require(payload.string("operation") == "workspace_browse")
+        return decodeWorkspacePagePayload(payload, workspaceId, binding)
+    }
+
+    fun decodeWorkspaceRelease(
+        response: BridgeResponseEnvelope,
+        workspaceId: String,
+        binding: String,
+    ) {
+        require(response.success)
+        val payload = response.payload ?: throw BridgeProtocolException("workspace release payload is missing")
+        require(payload.keys.all { it in WORKSPACE_RELEASE_RESULT_KEYS })
+        require(payload.string("operation") == "workspace_release")
+        require(payload.string("workspace_id") == workspaceId)
+        require(payload.string("workspace_binding") == binding)
+    }
+
+    private fun decodeWorkspacePagePayload(
+        payload: JsonObject,
+        workspaceId: String,
+        binding: String,
+    ): DecodedWorkspacePage {
+        require(payload.keys.all { it in WORKSPACE_PAGE_RESULT_KEYS })
+        require(payload.string("workspace_id") == workspaceId)
+        require(payload.string("workspace_binding") == binding)
+        val path = payload.stringOrNull("relative_path") ?: ""
+        WiredAdbPathPolicy.parse(path, allowRoot = true)
+        val entries = decodeEntries(payload.array("entries"))
+        require(entries.size <= WIRED_MAX_DIRECTORY_ENTRIES)
+        return DecodedWorkspacePage(
+            relativePath = path,
+            entries = entries,
+            truncated = payload.boolean("truncated") ?: false,
+        )
+    }
+
+    private fun decodeEntries(array: JsonArray?): List<WiredAdbFileEntry> = array?.map { element ->
+        val item = element as? JsonObject ?: throw BridgeProtocolException("workspace entry is invalid")
+        val path = item.string("relative_path") ?: throw BridgeProtocolException("workspace entry path is missing")
+        WiredAdbPathPolicy.parse(path, allowRoot = false)
+        val type = when (item.string("type")) {
+            "file" -> WiredAdbEntryType.FILE
+            "directory", "dir" -> WiredAdbEntryType.DIRECTORY
+            else -> throw BridgeProtocolException("workspace entry type is invalid")
+        }
+        WiredAdbFileEntry(path, type, item.long("bytes"))
+    } ?: emptyList()
 
     fun decodeShellResult(response: BridgeResponseEnvelope): WiredAdbShellResult {
         if (!response.success) throw BridgeProtocolException("shell request failed")
@@ -254,10 +376,12 @@ internal object WiredAdbSharedAdapter {
 
     private fun filePayload(
         request: WiredAdbFileRequest,
+        workspaceId: String,
+        workspaceBinding: String?,
         extra: kotlinx.serialization.json.JsonObjectBuilder.() -> Unit,
     ): JsonObject = buildJsonObject {
-        // The workspace is an authority-owned constant; it is not model input.
-        put("workspace_id", WIRED_WORKSPACE_ID)
+        put("workspace_id", workspaceId)
+        workspaceBinding?.let { put("workspace_binding", it) }
         request.relativePath?.let { put("relative_path", it) }
         extra()
     }
@@ -330,8 +454,14 @@ internal object WiredAdbSharedAdapter {
     private fun JsonObject.array(name: String): JsonArray? = this[name] as? JsonArray
 
     private val FILE_RESULT_KEYS = setOf(
-        "operation", "relative_path", "entries", "text", "bytes", "created", "replaced", "deleted",
+        "operation", "relative_path", "entries", "text", "bytes", "created", "replaced", "deleted", "truncated",
     )
+    private val WORKSPACE_PAGE_RESULT_KEYS = setOf(
+        "operation", "workspace_id", "workspace_binding", "relative_path", "entries", "truncated",
+    )
+    private val WORKSPACE_ATTACH_RESULT_KEYS = WORKSPACE_PAGE_RESULT_KEYS + "scope"
+    private val WORKSPACE_BROWSE_RESULT_KEYS = WORKSPACE_PAGE_RESULT_KEYS + "max_entries"
+    private val WORKSPACE_RELEASE_RESULT_KEYS = setOf("operation", "workspace_id", "workspace_binding")
     private val SHELL_RESULT_KEYS = setOf(
         "exit_code", "stdout_base64", "stderr_base64", "timed_out", "cancelled",
         "stdout_truncated", "stderr_truncated", "duration_ms",

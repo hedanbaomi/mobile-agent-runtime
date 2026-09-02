@@ -188,13 +188,19 @@ class AuthorityManager(
         val statuses = ElevatedAuthority.entries.associateWith { authority ->
             val old = oldStatuses[authority]
             val preferences = this.preferences[authority]
+            val configured = preferences?.explicitlyConfigured == true
             AuthorityState(
                 authority = authority,
                 userIntent = if (preferences?.userIntentEnabled == true) AuthorityState.intentFor(authority) else AuthorityUserIntent.NONE,
-                grant = old?.grant ?: PlatformGrant.UNKNOWN,
-                availability = old?.availability ?: Availability.UNSUPPORTED,
+                // The durable configured marker is written only after an
+                // explicit, successful authorization/trust flow.  Rehydrate
+                // it as the last confirmed grant after process recreation;
+                // an offline Binder/USB/Wi-Fi probe is not a revocation.
+                grant = old?.grant ?: if (configured) PlatformGrant.GRANTED else PlatformGrant.UNKNOWN,
+                availability = old?.availability
+                    ?: if (configured) Availability.TEMPORARILY_UNAVAILABLE else Availability.UNSUPPORTED,
                 connection = old?.connection ?: Connection.DISCONNECTED,
-                configured = preferences?.explicitlyConfigured == true,
+                configured = configured,
                 revision = old?.revision ?: 1L,
                 identity = old?.identity,
             )

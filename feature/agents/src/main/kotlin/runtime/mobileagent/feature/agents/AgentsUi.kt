@@ -15,6 +15,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -32,7 +33,7 @@ import androidx.compose.material3.FilterChip
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -80,6 +81,10 @@ object AgentTestTags {
     const val WORKSPACE_PRESET_SELECTOR = "agents.editor.workspace_preset.workspace"
     const val WORKSPACE_PRESET_READ_ONLY = "agents.editor.workspace_preset.read_only"
     const val WORKSPACE_PRESET_READ_WRITE = "agents.editor.workspace_preset.read_write"
+    const val WORKSPACE_ACCESS = "agents.workspace_access"
+    const val WORKSPACE_ACCESS_SAF = "agents.workspace_access.saf"
+    const val WORKSPACE_ACCESS_PRIVILEGED = "agents.workspace_access.privileged"
+    const val WORKSPACE_ACCESS_FULL_DEVICE = "agents.workspace_access.full_device"
     const val SNAPSHOT = "agents.snapshot"
 }
 
@@ -180,6 +185,25 @@ data class AgentWorkspaceGrantPresetUi(
     val access: AgentWorkspaceAccessPreset,
 )
 
+/**
+ * Presentation-only projection of the workspace access broker.
+ *
+ * The feature never receives a URI, device path, serial, or authority token.
+ * A host that has not wired the broker leaves this value unavailable and the
+ * actions below remain disabled.  The broker, rather than this screen, owns
+ * SAF persistence and elevated-directory handles.
+ */
+data class AgentWorkspaceAccessUi(
+    val selectedWorkspaceName: String? = null,
+    val selectedBackendLabel: String? = null,
+    val availableWorkspaceCount: Int = 0,
+    val canChooseSaf: Boolean = false,
+    val canBrowsePrivileged: Boolean = false,
+    val fullDeviceFilesEnabled: Boolean = false,
+    val fullDeviceFilesEligible: Boolean = false,
+    val status: String = "",
+)
+
 data class AgentEditorUi(
     val id: String? = null,
     val name: String = "",
@@ -203,6 +227,7 @@ data class AgentEditorUi(
     val grantDraft: AgentGrantDraftUi? = null,
     val workspacePresetWorkspaceId: String? = null,
     val workspaceGrantPreset: AgentWorkspaceGrantPresetUi? = null,
+    val workspaceAccess: AgentWorkspaceAccessUi = AgentWorkspaceAccessUi(),
 )
 
 data class AgentsUiState(
@@ -234,6 +259,10 @@ data class AgentsActions(
     val onRestorePrompt: (String) -> Unit = {},
     val onToggleResource: (String, Boolean) -> Unit = { _, _ -> },
     val onSnapshot: () -> Unit = {},
+    /** Workspace selection is owned by the host WorkspaceAccess broker. */
+    val onChooseSafWorkspace: () -> Unit = {},
+    val onBrowsePrivilegedWorkspace: () -> Unit = {},
+    val onToggleFullDeviceFiles: (Boolean) -> Unit = {},
 )
 
 @Composable
@@ -280,12 +309,48 @@ private fun AgentListPane(state: AgentsUiState, actions: AgentsActions, modifier
             label = { Text(if (zh) "筛选智能体" else "Filter agents") },
             modifier = Modifier.fillMaxWidth().padding(top = 10.dp).testTag(AgentTestTags.QUERY),
         )
-        if (state.status.isNotBlank()) Text(state.status, style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(vertical = 8.dp))
+        if (state.status.isNotBlank()) {
+            Card(
+                Modifier.fillMaxWidth().padding(vertical = 8.dp),
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer),
+            ) {
+                Text(
+                    state.status,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onPrimaryContainer,
+                    modifier = Modifier.padding(12.dp),
+                    maxLines = 5,
+                )
+            }
+        }
         if (state.loading) CircularProgressIndicator(Modifier.padding(top = 16.dp))
-        else if (state.error != null) Text(state.error, color = MaterialTheme.colorScheme.error, modifier = Modifier.padding(top = 16.dp))
+        else if (state.error != null) {
+            Card(
+                Modifier.fillMaxWidth().padding(top = 16.dp),
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer),
+            ) {
+                Text(
+                    state.error,
+                    color = MaterialTheme.colorScheme.onErrorContainer,
+                    modifier = Modifier.padding(12.dp),
+                    maxLines = 5,
+                )
+            }
+        }
         else {
             val visible = state.agents.filter { state.query.isBlank() || it.name.contains(state.query, true) }
-            if (visible.isEmpty()) Text(if (zh) "暂无智能体。" else "No agents available.", style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(top = 16.dp))
+            if (visible.isEmpty()) {
+                Card(
+                    Modifier.fillMaxWidth().padding(top = 16.dp),
+                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerLow),
+                ) {
+                    Text(
+                        if (zh) "暂无智能体。" else "No agents available.",
+                        style = MaterialTheme.typography.bodySmall,
+                        modifier = Modifier.padding(14.dp),
+                    )
+                }
+            }
             else LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.height(280.dp).padding(top = 12.dp)) {
                 items(visible, key = { it.id }) { agent -> AgentCard(agent, agent.id == state.selectedAgentId) { actions.onSelectAgent(agent.id) } }
             }
@@ -295,9 +360,15 @@ private fun AgentListPane(state: AgentsUiState, actions: AgentsActions, modifier
 
 @Composable
 private fun AgentCard(agent: AgentCardUi, selected: Boolean, onClick: () -> Unit) {
-    Surface(
-        color = if (selected) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceVariant,
-        modifier = Modifier.fillMaxWidth().clickable(onClick = onClick).testTag("${AgentTestTags.CARD_PREFIX}${agent.id}"),
+    Card(
+        colors = CardDefaults.cardColors(
+            containerColor = if (selected) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceContainerLow,
+        ),
+        modifier = Modifier
+            .fillMaxWidth()
+            .heightIn(min = 56.dp)
+            .clickable(onClick = onClick)
+            .testTag("${AgentTestTags.CARD_PREFIX}${agent.id}"),
     ) {
         Column(Modifier.padding(14.dp)) {
             Row(Modifier.fillMaxWidth()) {
@@ -433,6 +504,94 @@ private fun ModelRoleRow(role: String, selectedId: String?, editor: AgentEditorU
         Text(role, Modifier.weight(0.25f), style = MaterialTheme.typography.labelLarge)
         if (selected == null) Text(if (zh) "未配置" else "Not configured", Modifier.weight(0.75f), style = MaterialTheme.typography.bodySmall)
         else FilterChip(selected = true, onClick = {}, enabled = false, label = { Text(selected.label) })
+    }
+}
+
+@Composable
+private fun AgentWorkspaceAccessCard(
+    access: AgentWorkspaceAccessUi,
+    actions: AgentsActions,
+    zh: Boolean,
+    modifier: Modifier = Modifier,
+) {
+    val connected = access.canChooseSaf || access.canBrowsePrivileged || access.fullDeviceFilesEligible
+    Card(
+        modifier = modifier.fillMaxWidth().testTag(AgentTestTags.WORKSPACE_ACCESS),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.secondaryContainer),
+    ) {
+        Column(
+            Modifier.fillMaxWidth().padding(14.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            Text(
+                if (zh) "工作区访问" else "Workspace access",
+                style = MaterialTheme.typography.titleMedium,
+            )
+            Text(
+                if (access.selectedWorkspaceName.isNullOrBlank()) {
+                    if (zh) "尚未为此智能体选择工作区。所有会话共用这里的选择。" else "No workspace is selected for this Agent. All of its sessions share this choice."
+                } else {
+                    if (zh) "当前工作区：${access.selectedWorkspaceName}" else "Current workspace: ${access.selectedWorkspaceName}"
+                },
+                style = MaterialTheme.typography.bodyMedium,
+            )
+            access.selectedBackendLabel?.takeIf { it.isNotBlank() }?.let {
+                Text(
+                    if (zh) "访问通道：$it" else "Access channel: $it",
+                    style = MaterialTheme.typography.bodySmall,
+                )
+            }
+            Text(
+                if (access.availableWorkspaceCount > 0) {
+                    if (zh) "可选工作区：${access.availableWorkspaceCount} 个" else "Available workspaces: ${access.availableWorkspaceCount}"
+                } else if (connected) {
+                    if (zh) "暂时没有可用工作区" else "No workspace is currently available"
+                } else {
+                    if (zh) "工作区访问设置尚未连接；当前不会授予任何额外权限。" else "Workspace access is not connected; no extra permission is granted."
+                },
+                style = MaterialTheme.typography.bodySmall,
+                color = if (connected) MaterialTheme.colorScheme.onSecondaryContainer else MaterialTheme.colorScheme.error,
+            )
+            access.status.takeIf { it.isNotBlank() }?.let {
+                Text(it, style = MaterialTheme.typography.bodySmall)
+            }
+            Row(
+                Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                OutlinedButton(
+                    onClick = actions.onChooseSafWorkspace,
+                    enabled = access.canChooseSaf,
+                    modifier = Modifier.weight(1f).testTag(AgentTestTags.WORKSPACE_ACCESS_SAF),
+                ) { Text(if (zh) "选择手机文件夹" else "Choose phone folder", maxLines = 2) }
+                OutlinedButton(
+                    onClick = actions.onBrowsePrivilegedWorkspace,
+                    enabled = access.canBrowsePrivileged,
+                    modifier = Modifier.weight(1f).testTag(AgentTestTags.WORKSPACE_ACCESS_PRIVILEGED),
+                ) { Text(if (zh) "浏览设备目录" else "Browse device directory", maxLines = 2) }
+            }
+            if (access.fullDeviceFilesEligible || access.fullDeviceFilesEnabled) {
+                Row(
+                    Modifier.fillMaxWidth().heightIn(min = 48.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Column(Modifier.weight(1f)) {
+                        Text(if (zh) "完整设备文件" else "Full device files", style = MaterialTheme.typography.labelLarge)
+                        Text(
+                            if (zh) "仅限 ADB 可见范围，不等于 Root；开启后对该智能体长期生效。"
+                            else "Limited to what ADB can see, not Root; enabling persists for this Agent.",
+                            style = MaterialTheme.typography.bodySmall,
+                        )
+                    }
+                    Switch(
+                        checked = access.fullDeviceFilesEnabled,
+                        onCheckedChange = actions.onToggleFullDeviceFiles,
+                        enabled = access.fullDeviceFilesEligible || access.fullDeviceFilesEnabled,
+                        modifier = Modifier.testTag(AgentTestTags.WORKSPACE_ACCESS_FULL_DEVICE),
+                    )
+                }
+            }
+        }
     }
 }
 
@@ -593,6 +752,7 @@ private fun AgentGrantEditor(
                 style = MaterialTheme.typography.bodySmall,
             )
         }
+        AgentWorkspaceAccessCard(editor.workspaceAccess, actions, zh, modifier = Modifier.padding(top = 8.dp))
         val presetWorkspaceId = editor.workspacePresetWorkspaceId
             ?: editor.workspaces.firstOrNull { it.enabled }?.id
         Column(

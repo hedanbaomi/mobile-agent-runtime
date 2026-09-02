@@ -245,9 +245,30 @@ enum class RuntimeToolExposureReason(val wireName: String) {
     EXPOSED("exposed"),
     MODEL_TOOL_TRANSPORT_DISABLED("model_tool_transport_disabled"),
     EMPTY_EFFECTIVE_TOOL_SET("empty_effective_tool_set"),
+    /** No active, policy-valid Agent-level workspace capability survived resolution. */
+    NO_AGENT_GRANT("no_agent_grant"),
+    /** The immutable session snapshot has no matching workspace grant binding. */
+    SESSION_BINDING_MISSING("session_binding_missing"),
+    /** A trusted Skill's workspace capabilities intersected to an empty set. */
+    SKILL_INTERSECTION_EMPTY("skill_intersection_empty"),
+    /** A registered backend could not produce a usable operation capability set. */
+    BACKEND_PROBE_FAILED("backend_probe_failed"),
+    /** The executor schema was frozen before a later grant/backend change could be observed. */
+    SCHEMA_FROZEN("schema_frozen"),
+    /** The selected Authority does not match the workspace backend's authority scope. */
+    AUTHORITY_MISMATCH("authority_mismatch"),
     NO_EFFECTIVE_AGENT_GRANTS("no_effective_agent_grants"),
     NO_SNAPSHOT_BINDINGS("no_snapshot_bindings"),
     FACTORY_UNAVAILABLE("factory_unavailable"),
+}
+
+/** Safe aggregate state for a dynamic workspace backend probe. */
+enum class DiagnosticBackendProbeState(val wireName: String) {
+    NOT_APPLICABLE("not_applicable"),
+    READY("ready"),
+    EMPTY_CAPABILITIES("empty_capabilities"),
+    FAILED("failed"),
+    UNKNOWN("unknown"),
 }
 
 data class AuthoritySelectionChangedRecord(
@@ -415,6 +436,24 @@ data class RuntimeToolExposureRecord(
     val safBackendRegistered: Boolean = false,
     val modelToolTransportEnabled: Boolean = true,
     val reason: RuntimeToolExposureReason,
+    /** Count of generic Agent grants that survived policy and snapshot revalidation. */
+    val effectiveAgentWorkspaceCapabilityCount: Int = 0,
+    /** Count remaining after applying the current trusted Skill intersection. */
+    val effectiveSkillWorkspaceCapabilityCount: Int = 0,
+    /** Number of registered workspace backends whose current descriptor is usable. */
+    val backendReadyWorkspaceCount: Int = 0,
+    /** Number of registered workspace backends whose probe failed or was unusable. */
+    val backendProbeFailureCount: Int = 0,
+    /** Number of workspaces rejected because their Authority differs from the selected one. */
+    val authorityMismatchWorkspaceCount: Int = 0,
+    /** True when this executor's model-facing schema was frozen for the current run. */
+    val schemaFrozen: Boolean = false,
+    /** Aggregate probe result for the selected/delivered workspace backends. */
+    val backendProbeState: DiagnosticBackendProbeState = DiagnosticBackendProbeState.UNKNOWN,
+    /** Current SAF descriptor operation-capability count; no URI or provider identity. */
+    val safOperationCapabilityCount: Int = 0,
+    /** Current SAF dynamic descriptor probe state. */
+    val safProbeState: DiagnosticBackendProbeState = DiagnosticBackendProbeState.UNKNOWN,
 )
 
 // Short aliases keep call sites readable while the *Record names remain the canonical API docs.
@@ -589,6 +628,9 @@ class RollingDiagnosticLogStore(
             "webToolCount", "mcpToolCount", "pythonToolCount", "memoryToolCount", "workspaceToolCount", "shellToolCount",
             "registeredWorkspaceCount", "grantedWorkspaceCount", "boundWorkspaceCount", "registeredGrantedWorkspaceCount",
             "selectedAuthority", "selectedAuthorityReady", "safGrantActive", "safBackendRegistered", "modelToolTransportEnabled",
+            "effectiveAgentWorkspaceCapabilityCount", "effectiveSkillWorkspaceCapabilityCount", "backendReadyWorkspaceCount",
+            "backendProbeFailureCount", "authorityMismatchWorkspaceCount", "schemaFrozen", "backendProbeState",
+            "safOperationCapabilityCount", "safProbeState",
         ),
     )
 
@@ -1099,6 +1141,15 @@ class RollingDiagnosticLogStore(
             "safBackendRegistered" to record.safBackendRegistered,
             "modelToolTransportEnabled" to record.modelToolTransportEnabled,
             "reasonCode" to record.reason.wireName,
+            "effectiveAgentWorkspaceCapabilityCount" to record.effectiveAgentWorkspaceCapabilityCount.coerceIn(0, MAX_COUNT),
+            "effectiveSkillWorkspaceCapabilityCount" to record.effectiveSkillWorkspaceCapabilityCount.coerceIn(0, MAX_COUNT),
+            "backendReadyWorkspaceCount" to record.backendReadyWorkspaceCount.coerceIn(0, MAX_COUNT),
+            "backendProbeFailureCount" to record.backendProbeFailureCount.coerceIn(0, MAX_COUNT),
+            "authorityMismatchWorkspaceCount" to record.authorityMismatchWorkspaceCount.coerceIn(0, MAX_COUNT),
+            "schemaFrozen" to record.schemaFrozen,
+            "backendProbeState" to record.backendProbeState.wireName,
+            "safOperationCapabilityCount" to record.safOperationCapabilityCount.coerceIn(0, MAX_COUNT),
+            "safProbeState" to record.safProbeState.wireName,
         ).withoutNulls(),
     )
 
@@ -1539,6 +1590,24 @@ class RollingDiagnosticLogStore(
                 val safGrantActive = fields["safGrantActive"] as? Boolean ?: return null
                 val safBackendRegistered = fields["safBackendRegistered"] as? Boolean ?: return null
                 val modelToolTransportEnabled = fields["modelToolTransportEnabled"] as? Boolean ?: return null
+                val effectiveAgentWorkspaceCapabilityCount = optionalCount(
+                    fields,
+                    "effectiveAgentWorkspaceCapabilityCount",
+                ) ?: return null
+                val effectiveSkillWorkspaceCapabilityCount = optionalCount(
+                    fields,
+                    "effectiveSkillWorkspaceCapabilityCount",
+                ) ?: return null
+                val backendReadyWorkspaceCount = optionalCount(fields, "backendReadyWorkspaceCount") ?: return null
+                val backendProbeFailureCount = optionalCount(fields, "backendProbeFailureCount") ?: return null
+                val authorityMismatchWorkspaceCount = optionalCount(
+                    fields,
+                    "authorityMismatchWorkspaceCount",
+                ) ?: return null
+                val schemaFrozen = fields["schemaFrozen"] as? Boolean ?: false
+                val backendProbeState = optionalBackendProbeState(fields, "backendProbeState") ?: return null
+                val safOperationCapabilityCount = optionalCount(fields, "safOperationCapabilityCount") ?: return null
+                val safProbeState = optionalBackendProbeState(fields, "safProbeState") ?: return null
                 val reason = RuntimeToolExposureReason.entries.firstOrNull {
                     it.wireName == fields["reasonCode"] as? String
                 }?.wireName ?: return null
@@ -1565,6 +1634,15 @@ class RollingDiagnosticLogStore(
                     "safBackendRegistered" to safBackendRegistered,
                     "modelToolTransportEnabled" to modelToolTransportEnabled,
                     "reasonCode" to reason,
+                    "effectiveAgentWorkspaceCapabilityCount" to effectiveAgentWorkspaceCapabilityCount,
+                    "effectiveSkillWorkspaceCapabilityCount" to effectiveSkillWorkspaceCapabilityCount,
+                    "backendReadyWorkspaceCount" to backendReadyWorkspaceCount,
+                    "backendProbeFailureCount" to backendProbeFailureCount,
+                    "authorityMismatchWorkspaceCount" to authorityMismatchWorkspaceCount,
+                    "schemaFrozen" to schemaFrozen,
+                    "backendProbeState" to backendProbeState,
+                    "safOperationCapabilityCount" to safOperationCapabilityCount,
+                    "safProbeState" to safProbeState,
                 ).withoutNulls()
             }
             "uncaught_exception" -> {
@@ -1722,6 +1800,19 @@ class RollingDiagnosticLogStore(
     private fun canonicalOptionalReference(value: Any?): String? {
         if (value == null) return null
         return (value as? String)?.let(::canonicalReference)
+    }
+
+    /** Optional fields keep old v2 exposure records readable while rejecting bad new values. */
+    private fun optionalCount(fields: Map<String, Any?>, key: String): Int? =
+        (fields[key] as? Int)?.coerceIn(0, MAX_COUNT) ?: if (fields[key] == null) 0 else null
+
+    private fun optionalBackendProbeState(fields: Map<String, Any?>, key: String): String? {
+        val value = fields[key] as? String ?: return if (fields[key] == null) {
+            DiagnosticBackendProbeState.UNKNOWN.wireName
+        } else {
+            null
+        }
+        return DiagnosticBackendProbeState.entries.firstOrNull { it.wireName == value }?.wireName
     }
 
     private fun canonicalAuthority(value: String): String = when (value.trim().lowercase()) {

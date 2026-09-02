@@ -7,6 +7,7 @@ import java.security.SecureRandom
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.assertThrows
 import org.junit.jupiter.api.Assertions.assertArrayEquals
+import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertFalse
 import org.junit.jupiter.api.Assertions.assertNotEquals
 import org.junit.jupiter.api.Assertions.assertTrue
@@ -173,6 +174,47 @@ class BridgeProtocolTest {
             buildJsonObject { put("command", command) },
         )
         assertThrows<IllegalArgumentException> { BridgeCodec.encodeRequest(request) }
+    }
+
+    @Test
+    fun workspaceAttachmentAndPrivateHelperEnvelopeAreStrictlyBound() {
+        val binding = "ab".repeat(BridgeProtocol.WORKSPACE_BINDING_BYTES)
+        val nested = BridgeRequestEnvelope(
+            BridgeProtocol.VERSION,
+            "workspace-request",
+            BridgeOperation.FILE_LIST.wireName,
+            buildJsonObject {
+                put("workspace_id", "agent-workspace")
+                put("workspace_binding", binding)
+                put("relative_path", "")
+            },
+        )
+        val helper = BridgeHelperRequestEnvelope(
+            protocolVersion = BridgeProtocol.VERSION,
+            workspaceRootPath = "/sdcard/Books",
+            workspaceBinding = binding,
+            request = nested,
+        )
+        val decoded = BridgeCodec.decodeHelperRequest(BridgeCodec.encodeHelperRequest(helper))
+        assertEquals(helper.workspaceRootPath, decoded.workspaceRootPath)
+        assertEquals(binding, decoded.workspaceBinding)
+        assertEquals(nested.requestId, decoded.request.requestId)
+
+        val fullDeviceWithNonRoot = helper.copy(workspaceRootPath = "/data", fullDevice = true)
+        assertThrows<IllegalArgumentException> { BridgeCodec.encodeHelperRequest(fullDeviceWithNonRoot) }
+        val unconfirmed = nested.copy(
+            operation = BridgeOperation.WORKSPACE_ATTACH.wireName,
+            payload = buildJsonObject {
+                put("workspace_id", "agent-workspace")
+                put("workspace_binding", binding)
+                put("display_name", "Books")
+                put("absolute_path", "/sdcard/Books")
+                put("scope", "selected_directory")
+                put("grant_revision", 0)
+                put("confirmed_by_user", false)
+            },
+        )
+        assertThrows<IllegalArgumentException> { BridgeCodec.encodeRequest(unconfirmed) }
     }
 
     @Test

@@ -406,6 +406,112 @@ class DiagnosticsDeviceTest {
     }
 
     @Test
+    fun runtimeToolExposureReasonsAndBackendAggregatesSurviveZipExport() {
+        withStore { directory, preferences ->
+            preferences.setEnabled(true)
+            val store = newStore(directory, preferences)
+            val secret = "workspace-uri-content://private/serial-ABC/grant-secret"
+            val reasons = listOf(
+                RuntimeToolExposureReason.NO_AGENT_GRANT,
+                RuntimeToolExposureReason.SESSION_BINDING_MISSING,
+                RuntimeToolExposureReason.SKILL_INTERSECTION_EMPTY,
+                RuntimeToolExposureReason.BACKEND_PROBE_FAILED,
+                RuntimeToolExposureReason.SCHEMA_FROZEN,
+                RuntimeToolExposureReason.AUTHORITY_MISMATCH,
+            )
+
+            reasons.forEach { reason ->
+                val backendFailed = reason == RuntimeToolExposureReason.BACKEND_PROBE_FAILED
+                val skillEmpty = reason == RuntimeToolExposureReason.SKILL_INTERSECTION_EMPTY
+                val authorityMismatch = reason == RuntimeToolExposureReason.AUTHORITY_MISMATCH
+                assertTrue(
+                    "record rejected for ${reason.wireName}",
+                    store.recordRuntimeToolExposure(
+                        RuntimeToolExposureRecord(
+                            agentId = "agent-$secret",
+                            sessionRef = "session-$secret",
+                            runRef = "run-$secret",
+                            effectiveGrantCount = 8,
+                            snapshotBindingCount = 8,
+                            exposedToolCount = 0,
+                            workspaceToolCount = 0,
+                            registeredWorkspaceCount = 4,
+                            grantedWorkspaceCount = 1,
+                            boundWorkspaceCount = 1,
+                            registeredGrantedWorkspaceCount = 1,
+                            selectedAuthority = DiagnosticAuthority.SHIZUKU,
+                            selectedAuthorityReady = true,
+                            safGrantActive = true,
+                            safBackendRegistered = true,
+                            modelToolTransportEnabled = true,
+                            reason = reason,
+                            effectiveAgentWorkspaceCapabilityCount = if (reason == RuntimeToolExposureReason.NO_AGENT_GRANT) 0 else 8,
+                            effectiveSkillWorkspaceCapabilityCount = if (skillEmpty) 0 else 8,
+                            backendReadyWorkspaceCount = if (backendFailed) 0 else 3,
+                            backendProbeFailureCount = if (backendFailed) 1 else 0,
+                            authorityMismatchWorkspaceCount = if (authorityMismatch) 1 else 0,
+                            schemaFrozen = reason == RuntimeToolExposureReason.SCHEMA_FROZEN,
+                            backendProbeState = if (backendFailed) {
+                                DiagnosticBackendProbeState.FAILED
+                            } else {
+                                DiagnosticBackendProbeState.READY
+                            },
+                            safOperationCapabilityCount = if (backendFailed) 0 else 4,
+                            safProbeState = if (backendFailed) {
+                                DiagnosticBackendProbeState.FAILED
+                            } else {
+                                DiagnosticBackendProbeState.READY
+                            },
+                        ),
+                    ),
+                )
+            }
+
+            val invalid = mapOf(
+                "agentRef" to "agent",
+                "effectiveGrantCount" to 1,
+                "snapshotBindingCount" to 1,
+                "exposedToolCount" to 0,
+                "webToolCount" to 0,
+                "mcpToolCount" to 0,
+                "pythonToolCount" to 0,
+                "memoryToolCount" to 0,
+                "workspaceToolCount" to 0,
+                "shellToolCount" to 0,
+                "registeredWorkspaceCount" to 1,
+                "grantedWorkspaceCount" to 1,
+                "boundWorkspaceCount" to 1,
+                "registeredGrantedWorkspaceCount" to 1,
+                "selectedAuthority" to "shizuku",
+                "selectedAuthorityReady" to true,
+                "safGrantActive" to true,
+                "safBackendRegistered" to true,
+                "modelToolTransportEnabled" to true,
+                "reasonCode" to "backend_probe_failed",
+                "unknownField" to secret,
+            )
+            assertFalse(store.record("runtime_tool_exposure", invalid))
+
+            val zipBytes = store.exportBytes()
+            val allText = zipEntries(zipBytes).values.joinToString("\n")
+            reasons.forEach { reason ->
+                assertTrue("missing ${reason.wireName}", allText.contains("\"reasonCode\":\"${reason.wireName}\""))
+            }
+            assertTrue(allText.contains("\"effectiveAgentWorkspaceCapabilityCount\":8"))
+            assertTrue(allText.contains("\"effectiveSkillWorkspaceCapabilityCount\":0"))
+            assertTrue(allText.contains("\"backendProbeFailureCount\":1"))
+            assertTrue(allText.contains("\"authorityMismatchWorkspaceCount\":1"))
+            assertTrue(allText.contains("\"schemaFrozen\":true"))
+            assertTrue(allText.contains("\"safGrantActive\":true"))
+            assertTrue(allText.contains("\"safBackendRegistered\":true"))
+            assertTrue(allText.contains("\"safOperationCapabilityCount\":0"))
+            assertTrue(allText.contains("\"safProbeState\":\"failed\""))
+            assertFalse(zipBytes.containsBytes(secret.toByteArray(Charsets.UTF_8)))
+            assertFalse(allText.contains("unknownField"))
+        }
+    }
+
+    @Test
     fun concurrentWritesRemainNdjsonAndRotationKeepsCompleteLines() {
         withStore { directory, preferences ->
             preferences.setEnabled(true)

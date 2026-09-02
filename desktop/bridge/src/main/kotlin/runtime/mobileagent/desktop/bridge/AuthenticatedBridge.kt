@@ -49,14 +49,39 @@ fun interface TypedBridgeRequestHandler {
 }
 
 /**
+ * Optional connection-scoped handler seam. Implementations use it for
+ * in-memory bindings that must not be reusable from another authenticated
+ * session. The base handler remains source-compatible for non-workspace
+ * integrations.
+ */
+interface ConnectionScopedTypedBridgeRequestHandler : TypedBridgeRequestHandler {
+    fun forConnection(sessionId: ByteArray): TypedBridgeRequestHandler
+}
+
+/**
  * The default handler is fail-closed, but it is not a no-op: every authenticated
  * request receives a typed terminal response. Shell is implemented through the
  * fixed ADB helper; all other operations require an explicitly supplied backend.
  */
-class DesktopTypedBridgeRequestHandler(
+class DesktopTypedBridgeRequestHandler private constructor(
     private val shell: () -> WiredAdbShellExecutor,
     private val typedFiles: (() -> WiredAdbTypedFileExecutor)? = null,
-) : TypedBridgeRequestHandler {
+    private val boundTypedFiles: (() -> WiredAdbBoundTypedFileExecutor)? = null,
+    private val bindings: WiredAdbWorkspaceBindingRegistry? = null,
+) : ConnectionScopedTypedBridgeRequestHandler, AutoCloseable {
+    constructor(
+        shell: () -> WiredAdbShellExecutor,
+        typedFiles: (() -> WiredAdbTypedFileExecutor)? = null,
+        boundTypedFiles: (() -> WiredAdbBoundTypedFileExecutor)? = null,
+    ) : this(shell, typedFiles, boundTypedFiles, null)
+
+    override fun forConnection(sessionId: ByteArray): TypedBridgeRequestHandler =
+        DesktopTypedBridgeRequestHandler(shell, typedFiles, boundTypedFiles, WiredAdbWorkspaceBindingRegistry(sessionId))
+
+    override fun close() {
+        bindings?.close()
+    }
+
     override fun handle(
         request: BridgeRequestEnvelope,
         cancellation: BridgeCancellation,
@@ -65,8 +90,14 @@ class DesktopTypedBridgeRequestHandler(
             .getOrElse {
                 return error(request, BridgeErrorCodes.REQUEST_INVALID, "request operation is invalid", false)
             }
+        if (runCatching { BridgeCodec.validatePayload(operation, request.payload) }.isFailure) {
+            return error(request, BridgeErrorCodes.REQUEST_INVALID, "request payload is invalid", false)
+        }
         return when (operation) {
             BridgeOperation.SHELL_EXEC -> executeShell(request, cancellation)
+            BridgeOperation.WORKSPACE_ATTACH -> executeWorkspaceAttach(request, cancellation)
+            BridgeOperation.WORKSPACE_BROWSE -> executeWorkspaceBrowse(request, cancellation)
+            BridgeOperation.WORKSPACE_RELEASE -> executeWorkspaceRelease(request)
             BridgeOperation.FILE_LIST,
             BridgeOperation.FILE_STAT,
             BridgeOperation.FILE_READ_TEXT,
@@ -88,19 +119,41 @@ class DesktopTypedBridgeRequestHandler(
         cancellation: BridgeCancellation,
     ): BridgeResponseEnvelope {
         val backend = typedFiles?.invoke()
-            ?: return error(
-                request,
-                BridgeErrorCodes.UNSUPPORTED_OPERATION,
-                "operation requires an explicitly configured typed backend",
-                retryable = false,
-            )
         val typedRequest = try {
             WiredAdbTypedFileRequest.parse(request)
         } catch (_: IllegalArgumentException) {
             return error(request, BridgeErrorCodes.REQUEST_INVALID, "typed file request is invalid", false)
         }
         return try {
-            backend.execute(typedRequest, cancellation)
+            val binding = typedRequest.workspaceBinding
+            if (binding != null) {
+                val registry = bindings ?: return error(
+                    request,
+                    BridgeErrorCodes.UNSUPPORTED_OPERATION,
+                    "workspace binding is not available",
+                    false,
+                )
+                val record = registry.lookup(typedRequest.workspaceId, binding)
+                    ?: return error(request, "WORKSPACE_BINDING_INVALID", "workspace binding is invalid", false)
+                val executor = boundTypedFiles?.invoke()
+                    ?: (backend as? WiredAdbBoundTypedFileExecutor)
+                    ?: return error(request, BridgeErrorCodes.UNSUPPORTED_OPERATION, "workspace binding is unavailable", false)
+                return executor.executeAtRoot(
+                    typedRequest,
+                    record.rootPath,
+                    record.fullDevice,
+                    cancellation,
+                ).takeIf { it.requestId == request.requestId }
+                    ?: error(request, BridgeErrorCodes.UNKNOWN_OUTCOME, "typed file outcome is unknown", false)
+            }
+            require(typedRequest.workspaceId == WIRED_WORKSPACE_ID)
+            val fixedBackend = backend ?: return error(
+                request,
+                BridgeErrorCodes.UNSUPPORTED_OPERATION,
+                "operation requires an explicitly configured typed backend",
+                retryable = false,
+            )
+            fixedBackend.execute(typedRequest, cancellation)
                 .takeIf { it.requestId == request.requestId }
                 ?: error(request, BridgeErrorCodes.UNKNOWN_OUTCOME, "typed file outcome is unknown", false)
         } catch (_: Throwable) {
@@ -108,6 +161,123 @@ class DesktopTypedBridgeRequestHandler(
             // prove whether a device-side write reached the helper.
             error(request, BridgeErrorCodes.UNKNOWN_OUTCOME, "typed file outcome is unknown", false)
         }
+    }
+
+    private fun executeWorkspaceAttach(
+        request: BridgeRequestEnvelope,
+        cancellation: BridgeCancellation,
+    ): BridgeResponseEnvelope {
+        val registry = bindings ?: return error(
+            request,
+            BridgeErrorCodes.UNSUPPORTED_OPERATION,
+            "workspace binding is unavailable",
+            false,
+        )
+        val executor = boundTypedFiles?.invoke()
+            ?: (typedFiles?.invoke() as? WiredAdbBoundTypedFileExecutor)
+            ?: return error(request, BridgeErrorCodes.UNSUPPORTED_OPERATION, "workspace binding is unavailable", false)
+        val payload = request.payload
+        val workspaceId = payload.stringRequired("workspace_id")
+        val binding = payload.stringRequired("workspace_binding")
+        val rootPath = payload.stringRequired("absolute_path")
+        val scope = payload.stringRequired("scope")
+        val fullDevice = scope == "full_device_files"
+        val probe = try {
+            WiredAdbTypedFileRequest.forWorkspaceRoot(
+                requestId = request.requestId,
+                operation = WiredAdbTypedFileOperation.LIST,
+                workspaceId = workspaceId,
+                workspaceBinding = binding,
+                relativePath = "",
+                maxBytes = WIRED_MAX_READ_BYTES,
+            )
+        } catch (_: IllegalArgumentException) {
+            return error(request, BridgeErrorCodes.REQUEST_INVALID, "workspace attachment is invalid", false)
+        }
+        val result = executor.executeAtRoot(probe, rootPath, fullDevice, cancellation)
+        if (!result.success) return result
+        if (!registry.register(workspaceId, binding, rootPath, fullDevice)) {
+            return error(request, "WORKSPACE_BINDING_REPLAYED", "workspace binding is already used", false)
+        }
+        val filePayload = result.payload ?: return error(request, BridgeErrorCodes.UNKNOWN_OUTCOME, "workspace outcome is unknown", false)
+        return result.copy(
+            payload = buildJsonObject {
+                put("operation", BridgeOperation.WORKSPACE_ATTACH.wireName)
+                put("workspace_id", workspaceId)
+                put("workspace_binding", binding)
+                put("scope", scope)
+                put("relative_path", "")
+                filePayload["entries"]?.let { put("entries", it) }
+                put("truncated", filePayload["truncated"] ?: JsonPrimitive(false))
+            },
+        )
+    }
+
+    private fun executeWorkspaceBrowse(
+        request: BridgeRequestEnvelope,
+        cancellation: BridgeCancellation,
+    ): BridgeResponseEnvelope {
+        val registry = bindings ?: return error(request, BridgeErrorCodes.UNSUPPORTED_OPERATION, "workspace binding is unavailable", false)
+        val payload = request.payload
+        val workspaceId = payload.stringRequired("workspace_id")
+        val binding = payload.stringRequired("workspace_binding")
+        val record = registry.lookup(workspaceId, binding)
+            ?: return error(request, "WORKSPACE_BINDING_INVALID", "workspace binding is invalid", false)
+        val executor = boundTypedFiles?.invoke()
+            ?: (typedFiles?.invoke() as? WiredAdbBoundTypedFileExecutor)
+            ?: return error(request, BridgeErrorCodes.UNSUPPORTED_OPERATION, "workspace binding is unavailable", false)
+        val path = payload.stringOrNull("relative_path") ?: ""
+        val maxEntries = payload.longOrNull("max_entries")?.toInt() ?: return error(
+            request,
+            BridgeErrorCodes.REQUEST_INVALID,
+            "workspace browse request is invalid",
+            false,
+        )
+        val probe = try {
+            WiredAdbTypedFileRequest.forWorkspaceRoot(
+                requestId = request.requestId,
+                operation = WiredAdbTypedFileOperation.LIST,
+                workspaceId = workspaceId,
+                workspaceBinding = binding,
+                relativePath = path,
+                maxBytes = WIRED_MAX_READ_BYTES,
+            )
+        } catch (_: IllegalArgumentException) {
+            return error(request, BridgeErrorCodes.REQUEST_INVALID, "workspace browse request is invalid", false)
+        }
+        val result = executor.executeAtRoot(probe, record.rootPath, record.fullDevice, cancellation)
+        if (!result.success) return result
+        val filePayload = result.payload ?: return error(request, BridgeErrorCodes.UNKNOWN_OUTCOME, "workspace outcome is unknown", false)
+        return result.copy(
+            payload = buildJsonObject {
+                put("operation", BridgeOperation.WORKSPACE_BROWSE.wireName)
+                put("workspace_id", workspaceId)
+                put("workspace_binding", binding)
+                put("relative_path", path)
+                filePayload["entries"]?.let { put("entries", it) }
+                put("truncated", filePayload["truncated"] ?: JsonPrimitive(false))
+                put("max_entries", maxEntries)
+            },
+        )
+    }
+
+    private fun executeWorkspaceRelease(request: BridgeRequestEnvelope): BridgeResponseEnvelope {
+        val registry = bindings ?: return error(request, BridgeErrorCodes.UNSUPPORTED_OPERATION, "workspace binding is unavailable", false)
+        val workspaceId = request.payload.stringRequired("workspace_id")
+        val binding = request.payload.stringRequired("workspace_binding")
+        if (!registry.remove(workspaceId, binding)) {
+            return error(request, "WORKSPACE_BINDING_INVALID", "workspace binding is invalid", false)
+        }
+        return BridgeResponseEnvelope(
+            protocolVersion = BridgeProtocol.VERSION,
+            requestId = request.requestId,
+            success = true,
+            payload = buildJsonObject {
+                put("operation", BridgeOperation.WORKSPACE_RELEASE.wireName)
+                put("workspace_id", workspaceId)
+                put("workspace_binding", binding)
+            },
+        )
     }
 
     private fun executeShell(
@@ -209,9 +379,13 @@ class AuthenticatedBridgeConnectionHandler(
             runCatching { socket.close() }
             return
         }
+        val connectionHandler = (requestHandler as? ConnectionScopedTypedBridgeRequestHandler)
+            ?.forConnection(connection.session.sessionId)
+            ?: requestHandler
         try {
-            ConnectionState(connection).run()
+            ConnectionState(connection, connectionHandler).run()
         } finally {
+            (connectionHandler as? AutoCloseable)?.close()
             connection.close()
         }
     }
@@ -223,6 +397,7 @@ class AuthenticatedBridgeConnectionHandler(
 
     private inner class ConnectionState(
         private val connection: DesktopAuthenticatedConnection,
+        private val requestHandler: TypedBridgeRequestHandler,
     ) {
         private val closed = AtomicBoolean(false)
         private val lock = Any()
@@ -499,6 +674,9 @@ private fun errorResponse(
 private fun JsonObject.string(name: String): String? = (this[name] as? JsonPrimitive)
     ?.takeIf { it.isString }
     ?.content
+
+private fun JsonObject.stringRequired(name: String): String =
+    string(name) ?: throw IllegalArgumentException("$name must be a string")
 
 private fun JsonObject.stringOrNull(name: String): String? = when (val element = this[name]) {
     null, JsonNull -> null

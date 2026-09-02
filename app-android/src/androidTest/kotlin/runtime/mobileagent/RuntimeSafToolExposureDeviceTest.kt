@@ -3,6 +3,7 @@
 
 package runtime.mobileagent
 
+import android.content.Intent
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import java.util.UUID
@@ -37,6 +38,9 @@ import runtime.mobileagent.provider.ModelEvent
 import runtime.mobileagent.provider.ModelRequest
 import runtime.mobileagent.skills.ToolCall
 import runtime.mobileagent.skills.ToolResult
+import runtime.mobileagent.integration.WorkspaceAccessGrantTarget
+import runtime.mobileagent.integration.WorkspaceAccessResult
+import runtime.mobileagent.integration.WorkspaceAccessStatus
 
 /**
  * Live Android DocumentsProvider proof for the complete SAF -> grant -> snapshot -> model tool
@@ -190,13 +194,47 @@ class RuntimeSafToolExposureDeviceTest {
     }
 
     @Test
+    fun reattachingPersistedSafTreeReturnsTheCommittedAgentWorkspace() {
+        val app = InstrumentationRegistry.getInstrumentation().targetContext.applicationContext as MobileAgentApp
+        app.ensureHostInitialized()
+        val persisted = app.contentResolver.persistedUriPermissions.firstOrNull()
+        assumeTrue("Grant a SAF directory before this live-provider scenario", persisted != null)
+        val agent = app.container.agents.list().firstOrNull()
+        assumeTrue("Create an Agent before this live-provider scenario", agent != null)
+        val flags =
+            (if (requireNotNull(persisted).isReadPermission) Intent.FLAG_GRANT_READ_URI_PERMISSION else 0) or
+                (if (persisted.isWritePermission) Intent.FLAG_GRANT_WRITE_URI_PERMISSION else 0)
+
+        val result = app.container.runtimeIntegration.workspaceAccessPort.attachSaf(
+            uri = persisted.uri,
+            resultFlags = flags,
+            grant = WorkspaceAccessGrantTarget(agentId = requireNotNull(agent).id),
+        )
+
+        assertTrue("A committed SAF attachment was reported as a failure: $result", result is WorkspaceAccessResult.Success)
+        val success = result as WorkspaceAccessResult.Success
+        assertEquals(WorkspaceAccessStatus.ACTIVE, success.workspace.status)
+        assertTrue(success.workspace.readable)
+        assertTrue(success.workspace.durablyAuthorized)
+        assertTrue(success.grants.isNotEmpty())
+        val listed = app.container.runtimeIntegration.workspaceAccessPort.listWorkspaces(agent.id)
+            .single { it.workspaceId == success.workspace.workspaceId }
+        assertEquals(WorkspaceAccessStatus.ACTIVE, listed.status)
+        assertTrue(listed.durablyAuthorized)
+    }
+
+    @Test
     fun persistedSafGrantExposesAndExecutesReadWriteToolsForNewSnapshot() {
         val app = InstrumentationRegistry.getInstrumentation().targetContext.applicationContext as MobileAgentApp
         app.ensureHostInitialized()
         val container = app.container
         val safWorkspace = container.runtimeIntegration.grants.listWorkspaces()
-            .firstOrNull { it.id == SAF_WORKSPACE_ID && it.enabled && it.readable && it.writable }
+            .firstOrNull {
+                it.backendType == runtime.mobileagent.domain.WorkspaceBackendType.SAF_TREE &&
+                    it.enabled && it.readable && it.writable
+            }
         assumeTrue("Grant a readable and writable SAF directory through Settings before this live test", safWorkspace != null)
+        val safWorkspaceId = requireNotNull(safWorkspace).id
 
         val suffix = UUID.randomUUID().toString().replace("-", "")
         val providerId = "provider.saf-e2e.$suffix"
@@ -244,7 +282,7 @@ class RuntimeSafToolExposureDeviceTest {
                     grantId = EntityId.random().value,
                     agentId = agentId,
                     capability = capability,
-                    workspaceId = SAF_WORKSPACE_ID,
+                    workspaceId = safWorkspaceId,
                     lifetime = GrantLifetime.PERSISTENT,
                     policyVersion = policyVersion,
                     createdAt = Utc.nowIso(),
@@ -286,7 +324,7 @@ class RuntimeSafToolExposureDeviceTest {
                 ToolCall(
                     "saf-file-list-$suffix",
                     "file_list",
-                    """{"workspaceId":"$SAF_WORKSPACE_ID","maxEntries":64}""",
+                    """{"workspaceId":"$safWorkspaceId","maxEntries":64}""",
                 ),
             )
         }
@@ -296,7 +334,7 @@ class RuntimeSafToolExposureDeviceTest {
                 ToolCall(
                     "saf-read-$suffix",
                     "file_read_text",
-                    """{"workspaceId":"$SAF_WORKSPACE_ID","relativePath":"seed.txt","maxBytes":4096}""",
+                    """{"workspaceId":"$safWorkspaceId","relativePath":"seed.txt","maxBytes":4096}""",
                 ),
             )
         }
@@ -309,7 +347,7 @@ class RuntimeSafToolExposureDeviceTest {
                     ToolCall(
                         "saf-write-$suffix",
                         "file_write_text",
-                        """{"workspaceId":"$SAF_WORKSPACE_ID","relativePath":"$proofPath","text":"$proofText","replace":false}""",
+                        """{"workspaceId":"$safWorkspaceId","relativePath":"$proofPath","text":"$proofText","replace":false}""",
                     ),
                 )
             }
@@ -320,7 +358,7 @@ class RuntimeSafToolExposureDeviceTest {
                     ToolCall(
                         "saf-proof-read-$suffix",
                         "file_read_text",
-                        """{"workspaceId":"$SAF_WORKSPACE_ID","relativePath":"$proofPath","maxBytes":4096}""",
+                        """{"workspaceId":"$safWorkspaceId","relativePath":"$proofPath","maxBytes":4096}""",
                     ),
                 )
             }
@@ -331,7 +369,7 @@ class RuntimeSafToolExposureDeviceTest {
                     ToolCall(
                         "saf-replace-$suffix",
                         "file_write_text",
-                        """{"workspaceId":"$SAF_WORKSPACE_ID","relativePath":"$proofPath","text":"must-not-replace","replace":true}""",
+                        """{"workspaceId":"$safWorkspaceId","relativePath":"$proofPath","text":"must-not-replace","replace":true}""",
                     ),
                 )
             }
@@ -344,7 +382,7 @@ class RuntimeSafToolExposureDeviceTest {
                     ToolCall(
                         "saf-unchanged-$suffix",
                         "file_read_text",
-                        """{"workspaceId":"$SAF_WORKSPACE_ID","relativePath":"$proofPath","maxBytes":4096}""",
+                        """{"workspaceId":"$safWorkspaceId","relativePath":"$proofPath","maxBytes":4096}""",
                     ),
                 )
             }
@@ -358,7 +396,7 @@ class RuntimeSafToolExposureDeviceTest {
                         ToolCall(
                             "saf-delete-$suffix",
                             "file_delete",
-                            """{"workspaceId":"$SAF_WORKSPACE_ID","relativePath":"$proofPath"}""",
+                            """{"workspaceId":"$safWorkspaceId","relativePath":"$proofPath"}""",
                         ),
                     )
                 }
@@ -370,7 +408,6 @@ class RuntimeSafToolExposureDeviceTest {
 
     private companion object {
         const val INTERNAL_WORKSPACE_ID = "internal"
-        const val SAF_WORKSPACE_ID = "saf-tree"
         val WORKSPACE_CAPABILITIES = listOf(
             CapabilityId(CapabilityId.WORKSPACE_ENUMERATE),
             CapabilityId(CapabilityId.FILE_LIST),

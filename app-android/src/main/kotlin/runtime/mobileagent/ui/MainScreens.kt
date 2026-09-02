@@ -8,6 +8,7 @@ import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -15,17 +16,26 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Button
 import androidx.compose.material3.Card
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.Saver
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
@@ -33,6 +43,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.lifecycle.viewmodel.compose.LocalViewModelStoreOwner
@@ -45,6 +56,9 @@ import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
 import runtime.mobileagent.MobileAgentApp
 import runtime.mobileagent.ShellViewModel
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 /**
  * The application shell owns navigation state and long-running ViewModels. Chat,
@@ -63,6 +77,7 @@ internal fun MainApp() {
     var route by rememberSaveable { mutableStateOf(initialRoute) }
     var mcpReturnRoute by rememberSaveable { mutableStateOf(AppRoutes.SETTINGS) }
     var pendingRoute by rememberSaveable { mutableStateOf<String?>(null) }
+    var pendingAgentId by rememberSaveable { mutableStateOf<String?>(null) }
     var unsavedDialog by rememberSaveable { mutableStateOf(false) }
     var inspectorReturnRoute by rememberSaveable { mutableStateOf(AppRoutes.MORE) }
     var editorOwner by rememberSaveable { mutableStateOf<String?>(null) }
@@ -193,8 +208,30 @@ internal fun MainApp() {
             ) { padding ->
                 Box(Modifier.fillMaxSize().padding(padding)) {
                     NavHost(navController = navController, startDestination = initialRoute) {
-                        composable(AppRoutes.CHAT) { ChatRoute(chatVm, chinese, ::requestRoute, ::registerEditorState) }
-                        composable(AppRoutes.AGENTS) { AgentsRoute(it, chinese, ::requestRoute, ::requestEditorClose, ::registerEditorState) }
+                        composable(AppRoutes.CHAT) {
+                            ChatRoute(
+                                chatVm,
+                                chinese,
+                                ::requestRoute,
+                                ::registerEditorState,
+                                onOpenAgentSettings = { agentId ->
+                                    pendingAgentId = agentId
+                                    requestRoute(AppRoutes.AGENTS)
+                                },
+                            )
+                        }
+                        composable(AppRoutes.AGENTS) {
+                            val targetAgentId = pendingAgentId
+                            AgentsRoute(
+                                it,
+                                chinese,
+                                ::requestRoute,
+                                ::requestEditorClose,
+                                ::registerEditorState,
+                                targetAgentId,
+                                onInitialAgentConsumed = { pendingAgentId = null },
+                            )
+                        }
                         composable(AppRoutes.PROVIDERS) {
                             ProvidersRoute(it, chinese, ::requestRoute, ::requestEditorClose, ::registerEditorState,
                                 { mcpReturnRoute = AppRoutes.PROVIDERS; requestRoute(AppRoutes.MCP) }, compact, { handleBack(compact) })
@@ -284,17 +321,20 @@ private fun MoreHub(chinese: Boolean, onOpen: (String) -> Unit) {
 
 @Composable
 private fun ChatRoute(vm: runtime.mobileagent.ChatViewModel, chinese: Boolean, onRoute: (String) -> Unit,
-    onEditorState: (String, Boolean, (() -> Unit)?) -> Unit) {
+    onEditorState: (String, Boolean, (() -> Unit)?) -> Unit,
+    onOpenAgentSettings: (String?) -> Unit = {}) {
     LifecycleEventEffect(Lifecycle.Event.ON_RESUME) { vm.reload() }
     val state = vm.state.value.copy(language = if (chinese) "zh-CN" else "en-US")
     val actions = runtime.mobileagent.feature.chat.ChatActions(
         onInput = vm::input, onSend = vm::send, onCancel = vm::cancel,
         onToggleDegradation = vm::degrade, onSelectSession = vm::selectSession,
         onNewSession = { vm.newSession() }, onSelectAgent = vm::selectAgent,
+        onNewSessionForAgent = { agentId -> vm.selectAgent(agentId); vm.newSession(); Unit },
         onOpenCitation = vm::openCitation, onCloseCitation = vm::closeCitation,
         onToolApproval = { choice -> vm.approveTool(choice == runtime.mobileagent.feature.chat.ToolApprovalChoice.APPROVE) },
         onOpenRequestInspector = { vm.inspector(true); onRoute(AppRoutes.INSPECTOR) },
         onCloseRequestInspector = { vm.inspector(false); onRoute(AppRoutes.CHAT) },
+        onOpenAgentSettings = onOpenAgentSettings,
     )
     runtime.mobileagent.feature.chat.ChatScreen(state, actions)
     vm.unknownRetry.value?.let { UnknownOutcomeDialog(chinese, vm::acknowledgeUnknown, vm::cancelUnknownRetry) }
@@ -303,20 +343,498 @@ private fun ChatRoute(vm: runtime.mobileagent.ChatViewModel, chinese: Boolean, o
 
 @Composable
 private fun AgentsRoute(entry: NavBackStackEntry, chinese: Boolean, onRoute: (String) -> Unit,
-    onRequestEditorClose: () -> Unit, onEditorState: (String, Boolean, (() -> Unit)?) -> Unit) {
+    onRequestEditorClose: () -> Unit, onEditorState: (String, Boolean, (() -> Unit)?) -> Unit,
+    initialAgentId: String? = null, onInitialAgentConsumed: () -> Unit = {}) {
     val vm: runtime.mobileagent.AgentsViewModel = viewModel(viewModelStoreOwner = entry)
-    LifecycleEventEffect(Lifecycle.Event.ON_RESUME) { vm.reload() }
-    val state = vm.state.value.copy(language = if (chinese) "zh-CN" else "en-US")
+    val app = LocalContext.current.applicationContext as MobileAgentApp
+    val integration = app.container.runtimeIntegration
+    val workspacePort = integration.workspaceAccessPort
+    val coroutineScope = rememberCoroutineScope()
+    var workspaceRevision by remember { mutableIntStateOf(0) }
+    var workspaceBusy by remember { mutableStateOf(false) }
+    var workspaceStatus by remember { mutableStateOf("") }
+    var browserPage by remember { mutableStateOf<runtime.mobileagent.skills.tooling.WorkspaceDirectoryPage?>(null) }
+    var browserTrail by remember { mutableStateOf<List<String>>(emptyList()) }
+    var browserOpen by remember { mutableStateOf(false) }
+    var wiredPathOpen by remember { mutableStateOf(false) }
+    var wiredPath by remember { mutableStateOf("") }
+    var confirmFullDevice by remember { mutableStateOf(false) }
+    LifecycleEventEffect(Lifecycle.Event.ON_RESUME) {
+        integration.refresh()
+        workspaceRevision++
+        vm.reload()
+    }
+    LaunchedEffect(initialAgentId) {
+        initialAgentId?.takeIf { it.isNotBlank() }?.let {
+            vm.select(it)
+            vm.openEditor(it)
+            onInitialAgentConsumed()
+        }
+    }
+    val baseState = vm.state.value.copy(language = if (chinese) "zh-CN" else "en-US")
+    val editorAgentId = baseState.editor?.id
+    val authoritySnapshot = remember(editorAgentId, workspaceRevision) { integration.snapshot() }
+    val workspaceLoad = remember(editorAgentId, workspaceRevision) {
+        runCatching { workspacePort.listWorkspaces(editorAgentId) }
+    }
+    val workspaceItems = workspaceLoad.getOrDefault(emptyList())
+    val selectedWorkspace = selectDurablyAuthorizedWorkspace(
+        workspaceItems,
+        runtime.mobileagent.domain.WorkspaceScope.SELECTED_DIRECTORY,
+    )
+    val fullDeviceWorkspace = selectDurablyAuthorizedWorkspace(
+        workspaceItems,
+        runtime.mobileagent.domain.WorkspaceScope.FULL_DEVICE_FILES,
+    )
+    val selectedAuthority = authoritySnapshot.selectedAuthority
+    val selectedProvider = when (selectedAuthority) {
+        runtime.mobileagent.domain.Authority.SHIZUKU -> authoritySnapshot.shizuku
+        runtime.mobileagent.domain.Authority.WIRED_ADB -> authoritySnapshot.wiredAdb
+        runtime.mobileagent.domain.Authority.NONE -> null
+    }
+    val authorityReady = selectedProvider?.let { provider ->
+        provider.configured &&
+            provider.platformGrant == runtime.mobileagent.skills.tooling.PlatformGrant.GRANTED &&
+            provider.availability == runtime.mobileagent.skills.tooling.Availability.READY &&
+            provider.connection == runtime.mobileagent.skills.tooling.Connection.CONNECTED
+    } == true
+    val workspaceAccess = runtime.mobileagent.feature.agents.AgentWorkspaceAccessUi(
+        selectedWorkspaceName = selectedWorkspace?.displayName,
+        selectedBackendLabel = selectedWorkspace?.let { workspaceBackendLabel(it.backendType, it.authority, chinese) },
+        availableWorkspaceCount = workspaceItems.count { item ->
+            item.status != runtime.mobileagent.integration.WorkspaceAccessStatus.REVOKED &&
+                item.status != runtime.mobileagent.integration.WorkspaceAccessStatus.DISABLED
+        },
+        canChooseSaf = editorAgentId != null && !workspaceBusy,
+        canBrowsePrivileged = editorAgentId != null && authorityReady && !workspaceBusy,
+        fullDeviceFilesEnabled = fullDeviceWorkspace != null,
+        fullDeviceFilesEligible = editorAgentId != null && authorityReady &&
+            authoritySnapshot.dangerousModeBuildAllowed &&
+            authoritySnapshot.dangerousMode != runtime.mobileagent.domain.DangerousMode.DISABLED && !workspaceBusy,
+        status = when {
+            workspaceBusy -> if (chinese) "正在更新工作区…" else "Updating workspace…"
+            workspaceStatus.isNotBlank() -> workspaceStatus
+            workspaceLoad.isFailure -> if (chinese) "读取工作区失败。" else "Unable to read workspaces."
+            fullDeviceWorkspace != null && !authorityReady -> if (chinese) {
+                "完整设备访问授权已保留；当前连接不可用，连接恢复后继续生效。"
+            } else {
+                "Full-device access remains authorized; it resumes when the selected connection returns."
+            }
+            selectedAuthority == runtime.mobileagent.domain.Authority.NONE -> if (chinese) {
+                "可直接选择手机文件夹；ADB 级目录需先在设置中选择并连接通道。"
+            } else {
+                "You can select a phone folder now. Choose and connect an ADB-level channel in Settings for privileged directories."
+            }
+            !authorityReady -> if (chinese) {
+                "ADB 级授权保持不变，但当前连接不可用。"
+            } else {
+                "ADB-level authorization is retained, but the current connection is unavailable."
+            }
+            else -> ""
+        },
+    )
+    val state = baseState.copy(editor = baseState.editor?.copy(workspaceAccess = workspaceAccess))
     val discard = remember(vm) { { vm.closeEditor() } }
     LaunchedEffect(state.editorDirty) { onEditorState(AppRoutes.AGENTS, state.editorDirty, discard) }
+
+    fun completeWorkspaceOperation(result: runtime.mobileagent.integration.WorkspaceAccessResult) {
+        workspaceStatus = workspaceAccessResultMessage(result, chinese)
+        workspaceRevision++
+        vm.reload()
+    }
+
+    fun launchWorkspaceOperation(block: suspend () -> runtime.mobileagent.integration.WorkspaceAccessResult) {
+        coroutineScope.launch {
+            workspaceBusy = true
+            val result = withContext(Dispatchers.IO) {
+                runCatching { block() }.getOrElse {
+                    runtime.mobileagent.integration.WorkspaceAccessResult.Failure(
+                        runtime.mobileagent.integration.WorkspaceAccessErrorCode.UNKNOWN_OUTCOME,
+                    )
+                }
+            }
+            workspaceBusy = false
+            completeWorkspaceOperation(result)
+        }
+    }
+
+    val safLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
+        val agentId = editorAgentId
+        if (uri != null && agentId != null) {
+            launchWorkspaceOperation {
+                workspacePort.attachSaf(
+                    uri = uri,
+                    grant = runtime.mobileagent.integration.WorkspaceAccessGrantTarget(agentId = agentId),
+                )
+            }
+        }
+    }
+
+    fun openPrivilegedWorkspace() {
+        if (editorAgentId == null) return
+        if (!authorityReady) {
+            workspaceStatus = if (chinese) "请先在设置中连接并选定 ADB 级通道。" else "Connect and select an ADB-level authority in Settings first."
+            return
+        }
+        if (selectedAuthority == runtime.mobileagent.domain.Authority.WIRED_ADB) {
+            wiredPath = ""
+            wiredPathOpen = true
+            return
+        }
+        coroutineScope.launch {
+            workspaceBusy = true
+            when (val result = withContext(Dispatchers.IO) {
+                workspacePort.browsePrivilegedRoot(selectedAuthority)
+            }) {
+                is runtime.mobileagent.skills.tooling.WorkspaceResult.Success -> {
+                    browserPage = result.value
+                    browserTrail = emptyList()
+                    browserOpen = true
+                    workspaceStatus = ""
+                }
+                is runtime.mobileagent.skills.tooling.WorkspaceResult.Failure -> {
+                    workspaceStatus = if (chinese) "无法打开设备目录：${result.error.code.name}" else "Unable to open device directories: ${result.error.code.name}"
+                }
+            }
+            workspaceBusy = false
+        }
+    }
+
     val actions = runtime.mobileagent.feature.agents.AgentsActions(
         onQuery = vm::query, onSelectAgent = vm::select, onOpenEditor = vm::openEditor,
         onCloseEditor = onRequestEditorClose, onEditorChange = vm::edit,
         onSave = { vm.save() }, onSavePromptRevision = { vm.save() },
         onRestorePrompt = vm::restorePrompt, onToggleResource = vm::toggleResource,
         onSnapshot = { if (vm.createConversation() != null) onRoute(AppRoutes.CHAT) },
+        onChooseSafWorkspace = { if (editorAgentId != null) safLauncher.launch(null) },
+        onBrowsePrivilegedWorkspace = ::openPrivilegedWorkspace,
+        onToggleFullDeviceFiles = { enabled ->
+            if (enabled) {
+                confirmFullDevice = true
+            } else {
+                val full = fullDeviceWorkspace
+                val revision = full?.let { workspacePort.fullDeviceFilesGrantRevision(it.workspaceId) }
+                if (full != null && revision != null) {
+                    launchWorkspaceOperation {
+                        workspacePort.revokeFullDeviceFiles(full.authority ?: selectedAuthority, full.workspaceId, revision)
+                    }
+                }
+            }
+        },
     )
     runtime.mobileagent.feature.agents.AgentsScreen(state, actions)
+
+    if (browserOpen) {
+        PrivilegedWorkspaceBrowserDialog(
+            page = browserPage,
+            currentLabel = browserTrail.lastOrNull() ?: if (chinese) "设备根目录" else "Device root",
+            busy = workspaceBusy,
+            chinese = chinese,
+            onOpenDirectory = { entry ->
+                val handle = entry.handle ?: return@PrivilegedWorkspaceBrowserDialog
+                coroutineScope.launch {
+                    workspaceBusy = true
+                    when (val result = withContext(Dispatchers.IO) {
+                        workspacePort.browsePrivileged(
+                            selectedAuthority,
+                            runtime.mobileagent.skills.tooling.WorkspaceBrowseRequest(handle),
+                        )
+                    }) {
+                        is runtime.mobileagent.skills.tooling.WorkspaceResult.Success -> {
+                            browserPage = result.value
+                            browserTrail = browserTrail + entry.name
+                        }
+                        is runtime.mobileagent.skills.tooling.WorkspaceResult.Failure -> {
+                            workspaceStatus = workspaceAccessResultMessage(
+                                runtime.mobileagent.integration.WorkspaceAccessResult.Failure(
+                                    runtime.mobileagent.integration.WorkspaceAccessErrorCode.UNKNOWN_OUTCOME,
+                                ),
+                                chinese,
+                            )
+                        }
+                    }
+                    workspaceBusy = false
+                }
+            },
+            onUp = {
+                val parent = browserPage?.parent ?: return@PrivilegedWorkspaceBrowserDialog
+                coroutineScope.launch {
+                    workspaceBusy = true
+                    when (val result = withContext(Dispatchers.IO) {
+                        workspacePort.browsePrivileged(
+                            selectedAuthority,
+                            runtime.mobileagent.skills.tooling.WorkspaceBrowseRequest(parent),
+                        )
+                    }) {
+                        is runtime.mobileagent.skills.tooling.WorkspaceResult.Success -> {
+                            browserPage = result.value
+                            browserTrail = browserTrail.dropLast(1)
+                        }
+                        is runtime.mobileagent.skills.tooling.WorkspaceResult.Failure -> Unit
+                    }
+                    workspaceBusy = false
+                }
+            },
+            onAttach = {
+                val page = browserPage ?: return@PrivilegedWorkspaceBrowserDialog
+                val agentId = editorAgentId ?: return@PrivilegedWorkspaceBrowserDialog
+                if (browserTrail.isEmpty()) {
+                    workspaceStatus = if (chinese) "设备根目录只能通过“完整设备文件”授权。" else "Device root requires Full device files authorization."
+                } else {
+                    browserOpen = false
+                    val workspaceId = newWorkspaceId("device")
+                    launchWorkspaceOperation {
+                        workspacePort.attachPrivilegedDirectory(
+                            authority = selectedAuthority,
+                            request = runtime.mobileagent.skills.tooling.WorkspaceAttachRequest(
+                                workspaceId = workspaceId,
+                                displayName = "${baseState.editor?.name?.ifBlank { "Agent" } ?: "Agent"} · ${browserTrail.last()}",
+                                directory = page.current,
+                            ),
+                            grant = runtime.mobileagent.integration.WorkspaceAccessGrantTarget(agentId = agentId),
+                        )
+                    }
+                }
+            },
+            onClose = { browserOpen = false },
+        )
+    }
+
+    if (wiredPathOpen) {
+        WiredPathDialog(
+            value = wiredPath,
+            chinese = chinese,
+            onValue = { wiredPath = it },
+            onConfirm = {
+                val agentId = editorAgentId ?: return@WiredPathDialog
+                val path = wiredPath
+                wiredPathOpen = false
+                launchWorkspaceOperation {
+                    workspacePort.attachPrivilegedPath(
+                        authority = runtime.mobileagent.domain.Authority.WIRED_ADB,
+                        workspaceId = newWorkspaceId("wired"),
+                        displayName = "${baseState.editor?.name?.ifBlank { "Agent" } ?: "Agent"} · ADB",
+                        absolutePath = path,
+                        grant = runtime.mobileagent.integration.WorkspaceAccessGrantTarget(agentId = agentId),
+                    )
+                }
+            },
+            onClose = { wiredPathOpen = false },
+        )
+    }
+
+    if (confirmFullDevice) {
+        FullDeviceFilesConfirmationDialog(
+            chinese = chinese,
+            onConfirm = {
+                confirmFullDevice = false
+                val agentId = editorAgentId ?: return@FullDeviceFilesConfirmationDialog
+                val workspaceId = agentFullDeviceWorkspaceId(agentId, selectedAuthority)
+                val currentRevision = workspacePort.fullDeviceFilesGrantRevision(workspaceId)
+                val nextRevision = (currentRevision ?: 0L) + 1L
+                launchWorkspaceOperation {
+                    workspacePort.openFullDeviceFiles(
+                        authority = selectedAuthority,
+                        request = runtime.mobileagent.skills.tooling.FullDeviceFilesRequest(
+                            workspaceId = workspaceId,
+                            displayName = if (chinese) "完整设备文件" else "Full device files",
+                            grantRevision = nextRevision,
+                            confirmedByUser = true,
+                        ),
+                        grant = runtime.mobileagent.integration.WorkspaceAccessGrantTarget(agentId = agentId),
+                    )
+                }
+            },
+            onClose = { confirmFullDevice = false },
+        )
+    }
+}
+
+/**
+ * Selects persisted Agent configuration without conflating it with current
+ * transport readiness. Disconnecting Shizuku or Wired ADB must never make a
+ * granted workspace disappear from the editor or remove its revoke control.
+ */
+internal fun selectDurablyAuthorizedWorkspace(
+    workspaces: List<runtime.mobileagent.integration.WorkspaceAccessItem>,
+    scope: runtime.mobileagent.domain.WorkspaceScope,
+): runtime.mobileagent.integration.WorkspaceAccessItem? = workspaces
+    .filter { item ->
+        item.scope == scope &&
+            item.durablyAuthorized &&
+            item.grantedCapabilities.isNotEmpty()
+    }
+    .maxByOrNull { it.grantRevision ?: 0L }
+
+@Composable
+private fun PrivilegedWorkspaceBrowserDialog(
+    page: runtime.mobileagent.skills.tooling.WorkspaceDirectoryPage?,
+    currentLabel: String,
+    busy: Boolean,
+    chinese: Boolean,
+    onOpenDirectory: (runtime.mobileagent.skills.tooling.WorkspaceDirectoryEntry) -> Unit,
+    onUp: () -> Unit,
+    onAttach: () -> Unit,
+    onClose: () -> Unit,
+) {
+    AlertDialog(
+        onDismissRequest = onClose,
+        modifier = Modifier.testTag("agents.workspace.browser"),
+        title = { Text(if (chinese) "选择设备目录" else "Choose device directory") },
+        text = {
+            Column(
+                Modifier.fillMaxWidth().heightIn(max = 480.dp).verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                Text(
+                    if (chinese) "当前位置：$currentLabel" else "Current: $currentLabel",
+                    style = MaterialTheme.typography.titleSmall,
+                )
+                Text(
+                    if (chinese) {
+                        "目录名称只在本机界面显示；模型只会得到选中后的工作区标识和相对路径。"
+                    } else {
+                        "Directory names stay in the local UI; the model receives only the attached workspace and relative paths."
+                    },
+                    style = MaterialTheme.typography.bodySmall,
+                )
+                if (busy) {
+                    CircularProgressIndicator(Modifier.size(28.dp))
+                } else {
+                    page?.entries.orEmpty()
+                        .filter { it.type == runtime.mobileagent.skills.tooling.WorkspaceEntryType.DIRECTORY }
+                        .forEach { entry ->
+                            Card(
+                                Modifier.fillMaxWidth().clickable(enabled = entry.handle != null) { onOpenDirectory(entry) },
+                            ) {
+                                Text(entry.name, Modifier.padding(14.dp), style = MaterialTheme.typography.bodyLarge)
+                            }
+                        }
+                    if (page?.entries.orEmpty().none { it.type == runtime.mobileagent.skills.tooling.WorkspaceEntryType.DIRECTORY }) {
+                        Text(if (chinese) "此处没有可进入的子目录。" else "No child directories are available here.")
+                    }
+                    if (page?.truncated == true) {
+                        Text(if (chinese) "目录过多，仅显示前一部分。" else "Only the first part of this directory is shown.")
+                    }
+                }
+                if (page?.parent != null) {
+                    TextButton(onClick = onUp, enabled = !busy) {
+                        Text(if (chinese) "返回上一级" else "Up one level")
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            Button(onClick = onAttach, enabled = page != null && !busy) {
+                Text(if (chinese) "使用当前目录" else "Use this directory")
+            }
+        },
+        dismissButton = { TextButton(onClick = onClose) { Text(if (chinese) "取消" else "Cancel") } },
+    )
+}
+
+@Composable
+private fun WiredPathDialog(
+    value: String,
+    chinese: Boolean,
+    onValue: (String) -> Unit,
+    onConfirm: () -> Unit,
+    onClose: () -> Unit,
+) {
+    AlertDialog(
+        onDismissRequest = onClose,
+        modifier = Modifier.testTag("agents.workspace.wired_path"),
+        title = { Text(if (chinese) "输入 ADB 设备目录" else "Enter an ADB device directory") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Text(
+                    if (chinese) {
+                        "请输入由你确认的绝对目录，例如 /sdcard/Download。路径只用于本次前台绑定，不会进入模型、日志或工具参数。"
+                    } else {
+                        "Enter an absolute directory you verified, such as /sdcard/Download. It is consumed only for this foreground binding and is not exposed to the model or logs."
+                    },
+                    style = MaterialTheme.typography.bodySmall,
+                )
+                OutlinedTextField(
+                    value = value,
+                    onValueChange = onValue,
+                    singleLine = true,
+                    label = { Text(if (chinese) "设备绝对目录" else "Absolute device directory") },
+                )
+            }
+        },
+        confirmButton = {
+            Button(onClick = onConfirm, enabled = value.startsWith("/") && value != "/") {
+                Text(if (chinese) "绑定" else "Attach")
+            }
+        },
+        dismissButton = { TextButton(onClick = onClose) { Text(if (chinese) "取消" else "Cancel") } },
+    )
+}
+
+@Composable
+private fun FullDeviceFilesConfirmationDialog(
+    chinese: Boolean,
+    onConfirm: () -> Unit,
+    onClose: () -> Unit,
+) {
+    AlertDialog(
+        onDismissRequest = onClose,
+        modifier = Modifier.testTag("agents.workspace.full_device_confirm"),
+        title = { Text(if (chinese) "开启完整设备文件访问？" else "Enable full-device file access?") },
+        text = {
+            Text(
+                if (chinese) {
+                    "此授权允许该智能体在当前工作区之外访问所选 ADB 级通道实际可见的文件。它不等于 Root，并会在断网、电脑离线或服务暂时断开时保留，直到你主动关闭或底层授权真正失效。"
+                } else {
+                    "This lets the Agent access files outside its current workspace that the selected ADB-level authority can actually see. It is not Root and remains authorized through temporary disconnects until you revoke it or the underlying grant is lost."
+                },
+            )
+        },
+        confirmButton = { Button(onClick = onConfirm) { Text(if (chinese) "确认开启" else "Enable") } },
+        dismissButton = { TextButton(onClick = onClose) { Text(if (chinese) "取消" else "Cancel") } },
+    )
+}
+
+private fun workspaceBackendLabel(
+    backend: runtime.mobileagent.domain.WorkspaceBackendType,
+    authority: runtime.mobileagent.domain.Authority?,
+    chinese: Boolean,
+): String = when (backend) {
+    runtime.mobileagent.domain.WorkspaceBackendType.SAF_TREE -> if (chinese) "手机文件夹（SAF）" else "Phone folder (SAF)"
+    runtime.mobileagent.domain.WorkspaceBackendType.PRIVILEGED -> when (authority) {
+        runtime.mobileagent.domain.Authority.SHIZUKU -> if (chinese) "Shizuku（ADB 级）" else "Shizuku (ADB-level)"
+        runtime.mobileagent.domain.Authority.WIRED_ADB -> if (chinese) "电脑 ADB" else "Desktop ADB"
+        else -> if (chinese) "ADB 级目录" else "ADB-level directory"
+    }
+    runtime.mobileagent.domain.WorkspaceBackendType.INTERNAL -> if (chinese) "应用私有目录" else "App-private directory"
+}
+
+private fun workspaceAccessResultMessage(
+    result: runtime.mobileagent.integration.WorkspaceAccessResult,
+    chinese: Boolean,
+): String = when (result) {
+    is runtime.mobileagent.integration.WorkspaceAccessResult.Success -> if (chinese) {
+        "工作区授权已保存；此智能体的所有会话将在下一次运行时使用最新权限。"
+    } else {
+        "Workspace access is saved; every session of this Agent uses the latest permissions on its next run."
+    }
+    is runtime.mobileagent.integration.WorkspaceAccessResult.Failure -> if (chinese) {
+        "工作区操作失败：${result.code.name}"
+    } else {
+        "Workspace operation failed: ${result.code.name}"
+    }
+}
+
+private fun newWorkspaceId(prefix: String): String =
+    "$prefix-${java.util.UUID.randomUUID().toString().replace("-", "")}".take(128)
+
+private fun agentFullDeviceWorkspaceId(agentId: String, authority: runtime.mobileagent.domain.Authority): String {
+    val digest = java.security.MessageDigest.getInstance("SHA-256")
+        .digest(agentId.toByteArray(Charsets.UTF_8))
+        .take(12)
+        .joinToString("") { "%02x".format(it) }
+    return "full-${authority.name.lowercase()}-$digest"
 }
 
 @Composable

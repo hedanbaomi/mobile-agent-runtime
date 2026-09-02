@@ -24,6 +24,9 @@ import runtime.mobileagent.bridge.BridgeSession
 import runtime.mobileagent.bridge.BridgeSequenceException
 import runtime.mobileagent.bridge.BridgeProtocol
 
+private val WIRED_WORKSPACE_ID_PATTERN = Regex("[A-Za-z0-9][A-Za-z0-9._~-]{0,127}")
+private val WIRED_BINDING_PATTERN = Regex("[0-9a-fA-F]{64}")
+
 /**
  * Android client for the single wired ADB authority.
  *
@@ -617,6 +620,162 @@ class WiredAdbAuthorityBridge internal constructor(
     fun newShellRequest(command: String): WiredAdbShellRequest =
         newShellRequest(command, null, 30_000L, WIRED_ADB_MAX_SHELL_OUTPUT_BYTES)
 
+    /**
+     * Attach a directory selected by the foreground user.  The absolute path
+     * exists only in this call and in the private desktop/helper envelope; a
+     * successful result contains an opaque connection/epoch-bound handle.
+     */
+    override suspend fun attachDirectory(
+        workspaceId: String,
+        displayName: String,
+        absolutePath: String,
+        scope: WiredAdbWorkspaceScope,
+        grantRevision: Long,
+        confirmedByUser: Boolean,
+    ): WiredAdbResult<WiredAdbWorkspaceAttachment> {
+        validateWorkspaceAttachment(workspaceId, displayName, absolutePath, scope, grantRevision, confirmedByUser)
+            ?.let { return WiredAdbResult.Failure(it) }
+        val operationEpoch = synchronized(stateLock) {
+            when {
+                closed -> return WiredAdbResult.Failure(WiredAdbErrorCode.BRIDGE_DISCONNECTED)
+                intentPersistenceFailed || _status.value.state != WiredAdbLifecycleState.READY ||
+                    channel == null || session == null ->
+                    return WiredAdbResult.Failure(WiredAdbErrorCode.BRIDGE_DISCONNECTED, retryable = true)
+                else -> lifecycleEpoch
+            }
+        }
+        val bindingBytes = try {
+            random.nextBytes(BridgeProtocol.WORKSPACE_BINDING_BYTES).also {
+                require(it.size == BridgeProtocol.WORKSPACE_BINDING_BYTES)
+            }
+        } catch (_: Throwable) {
+            return WiredAdbResult.Failure(WiredAdbErrorCode.INTERNAL_ERROR)
+        }
+        val binding = try {
+            bindingBytes.toHex()
+        } finally {
+            bindingBytes.fill(0)
+        }
+        val requestId = newWiredAdbRequestId()
+        if (!claimRequest(requestId)) return WiredAdbResult.Failure(WiredAdbErrorCode.REQUEST_INVALID)
+        val (operation, payload) = WiredAdbSharedAdapter.workspaceAttachOperation(
+            workspaceId = workspaceId,
+            binding = binding,
+            displayName = displayName,
+            absolutePath = absolutePath,
+            scope = scope,
+            grantRevision = grantRevision,
+            confirmedByUser = confirmedByUser,
+        )
+        val outcome = exchange(requestId, WIRED_ADB_FILE_READ_DEADLINE_MS) { active ->
+            WiredAdbSharedAdapter.encodeRequest(active, requestId, operation, payload)
+        }
+        val response = when (outcome) {
+            is WiredAdbResult.Failure -> return outcome
+            is WiredAdbResult.Success -> outcome.value
+        }
+        val decoded = try {
+            WiredAdbSharedAdapter.decodeWorkspaceAttachment(response, workspaceId, binding, scope)
+        } catch (_: Throwable) {
+            return protocolFailure(WiredAdbErrorCode.PROTOCOL_FRAME_INVALID)
+        }
+        try {
+            revalidateEpoch(operationEpoch)
+        } catch (_: LifecycleInvalidatedException) {
+            return WiredAdbResult.Failure(WiredAdbErrorCode.UNKNOWN_OUTCOME)
+        }
+        val handle = WiredAdbWorkspaceHandle(this, workspaceId, binding, operationEpoch)
+        val page = WiredAdbWorkspacePage(handle, decoded.relativePath, decoded.entries, decoded.truncated)
+        return WiredAdbResult.Success(WiredAdbWorkspaceAttachment(workspaceId, scope, handle, page))
+    }
+
+    override suspend fun browseDirectory(
+        handle: WiredAdbWorkspaceHandle,
+        relativePath: String?,
+        maxEntries: Int,
+    ): WiredAdbResult<WiredAdbWorkspacePage> {
+        validateWorkspaceHandle(handle)?.let { return WiredAdbResult.Failure(it) }
+        if (maxEntries !in 1..WIRED_MAX_DIRECTORY_ENTRIES) {
+            return WiredAdbResult.Failure(WiredAdbErrorCode.REQUEST_INVALID)
+        }
+        val path = try {
+            WiredAdbPathPolicy.parse(relativePath, allowRoot = true)
+            relativePath ?: ""
+        } catch (_: Throwable) {
+            return WiredAdbResult.Failure(WiredAdbErrorCode.REQUEST_INVALID)
+        }
+        val requestId = newWiredAdbRequestId()
+        if (!claimRequest(requestId)) return WiredAdbResult.Failure(WiredAdbErrorCode.REQUEST_INVALID)
+        val (operation, payload) = WiredAdbSharedAdapter.workspaceBrowseOperation(
+            workspaceId = handle.workspaceId,
+            binding = handle.binding,
+            relativePath = path,
+            maxEntries = maxEntries,
+        )
+        val outcome = exchange(requestId, WIRED_ADB_FILE_READ_DEADLINE_MS) { active ->
+            WiredAdbSharedAdapter.encodeRequest(active, requestId, operation, payload)
+        }
+        val response = when (outcome) {
+            is WiredAdbResult.Failure -> return outcome
+            is WiredAdbResult.Success -> outcome.value
+        }
+        val decoded = try {
+            WiredAdbSharedAdapter.decodeWorkspacePage(response, handle.workspaceId, handle.binding)
+        } catch (_: Throwable) {
+            return protocolFailure(WiredAdbErrorCode.PROTOCOL_FRAME_INVALID)
+        }
+        if (decoded.relativePath != path) return protocolFailure(WiredAdbErrorCode.PROTOCOL_FRAME_INVALID)
+        return WiredAdbResult.Success(
+            WiredAdbWorkspacePage(
+                handle = handle,
+                relativePath = decoded.relativePath,
+                entries = decoded.entries.take(maxEntries),
+                truncated = decoded.truncated || decoded.entries.size > maxEntries,
+            ),
+        )
+    }
+
+    override suspend fun executeBoundFile(
+        handle: WiredAdbWorkspaceHandle,
+        request: WiredAdbFileRequest,
+    ): WiredAdbResult<WiredAdbFileResult> {
+        validateWorkspaceHandle(handle)?.let { return WiredAdbResult.Failure(it) }
+        validateFileRequest(request)?.let { return WiredAdbResult.Failure(it) }
+        if (!claimRequest(request.requestId)) return WiredAdbResult.Failure(WiredAdbErrorCode.REQUEST_INVALID)
+        val (operation, payload) = WiredAdbSharedAdapter.fileOperation(request, handle.workspaceId, handle.binding)
+        val outcome = exchange(request.requestId, WIRED_ADB_FILE_READ_DEADLINE_MS) { active ->
+            WiredAdbSharedAdapter.encodeRequest(active, request.requestId, operation, payload)
+        }
+        return when (outcome) {
+            is WiredAdbResult.Failure -> outcome
+            is WiredAdbResult.Success -> try {
+                WiredAdbResult.Success(WiredAdbSharedAdapter.decodeFileResult(outcome.value, request.operation))
+            } catch (_: Throwable) {
+                protocolFailure(WiredAdbErrorCode.PROTOCOL_FRAME_INVALID)
+            }
+        }
+    }
+
+    override suspend fun releaseDirectory(handle: WiredAdbWorkspaceHandle): WiredAdbResult<Unit> {
+        validateWorkspaceHandle(handle)?.let { return WiredAdbResult.Failure(it) }
+        val requestId = newWiredAdbRequestId()
+        if (!claimRequest(requestId)) return WiredAdbResult.Failure(WiredAdbErrorCode.REQUEST_INVALID)
+        val (operation, payload) = WiredAdbSharedAdapter.workspaceReleaseOperation(handle.workspaceId, handle.binding)
+        val outcome = exchange(requestId, WIRED_ADB_FILE_READ_DEADLINE_MS) { active ->
+            WiredAdbSharedAdapter.encodeRequest(active, requestId, operation, payload)
+        }
+        val response = when (outcome) {
+            is WiredAdbResult.Failure -> return outcome
+            is WiredAdbResult.Success -> outcome.value
+        }
+        return try {
+            WiredAdbSharedAdapter.decodeWorkspaceRelease(response, handle.workspaceId, handle.binding)
+            WiredAdbResult.Success(Unit)
+        } catch (_: Throwable) {
+            protocolFailure(WiredAdbErrorCode.PROTOCOL_FRAME_INVALID)
+        }
+    }
+
     override suspend fun executeFile(request: WiredAdbFileRequest): WiredAdbResult<WiredAdbFileResult> {
         validateFileRequest(request)?.let { return WiredAdbResult.Failure(it) }
         if (!claimRequest(request.requestId)) return WiredAdbResult.Failure(WiredAdbErrorCode.REQUEST_INVALID)
@@ -966,6 +1125,50 @@ class WiredAdbAuthorityBridge internal constructor(
                 }
             }
             pendingRequests.remove(requestId.value)
+        }
+    }
+
+    private fun validateWorkspaceAttachment(
+        workspaceId: String,
+        displayName: String,
+        absolutePath: String,
+        scope: WiredAdbWorkspaceScope,
+        grantRevision: Long,
+        confirmedByUser: Boolean,
+    ): WiredAdbErrorCode? = try {
+        require(workspaceId.matches(WIRED_WORKSPACE_ID_PATTERN))
+        require(workspaceId.toByteArray(StandardCharsets.UTF_8).size <= BridgeProtocol.MAX_WORKSPACE_ID_BYTES)
+        require(displayName.isNotBlank())
+        require(displayName.toByteArray(StandardCharsets.UTF_8).size <= BridgeProtocol.MAX_WORKSPACE_DISPLAY_NAME_BYTES)
+        WiredAdbAbsolutePathPolicy.parse(absolutePath)
+        require(grantRevision >= 0L)
+        require(confirmedByUser)
+        if (scope == WiredAdbWorkspaceScope.SELECTED_DIRECTORY) {
+            // Binding "/" as a normal directory would silently grant the
+            // whole device; that scope is reserved for the explicit grant.
+            require(absolutePath != "/")
+        } else {
+            require(grantRevision > 0L && absolutePath == "/")
+        }
+        null
+    } catch (_: Throwable) {
+        if (scope == WiredAdbWorkspaceScope.FULL_DEVICE_FILES &&
+            (grantRevision <= 0L || !confirmedByUser)
+        ) WiredAdbErrorCode.FULL_DEVICE_GRANT_REQUIRED else WiredAdbErrorCode.REQUEST_INVALID
+    }
+
+    private fun validateWorkspaceHandle(handle: WiredAdbWorkspaceHandle): WiredAdbErrorCode? = synchronized(stateLock) {
+        when {
+            handle.owner !== this -> WiredAdbErrorCode.WORKSPACE_BINDING_INVALID
+            handle.workspaceId == "" || !handle.workspaceId.matches(WIRED_WORKSPACE_ID_PATTERN) ->
+                WiredAdbErrorCode.WORKSPACE_BINDING_INVALID
+            handle.binding.length != BridgeProtocol.WORKSPACE_BINDING_BYTES * 2 ||
+                !handle.binding.matches(WIRED_BINDING_PATTERN) -> WiredAdbErrorCode.WORKSPACE_BINDING_INVALID
+            closed || intentPersistenceFailed || lifecycleEpoch != handle.epoch ->
+                WiredAdbErrorCode.UNKNOWN_OUTCOME
+            channel == null || session == null || _status.value.state != WiredAdbLifecycleState.READY ->
+                WiredAdbErrorCode.BRIDGE_DISCONNECTED
+            else -> null
         }
     }
 

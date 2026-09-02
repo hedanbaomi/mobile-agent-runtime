@@ -15,7 +15,67 @@ import kotlinx.coroutines.flow.StateFlow
  */
 interface WiredAdbWorkspacePort {
     suspend fun executeFile(request: WiredAdbFileRequest): WiredAdbResult<WiredAdbFileResult>
+
+    /**
+     * Binds a user-selected absolute device directory to an opaque handle.
+     * The path is accepted only from a foreground user action and is never
+     * returned in the attachment or exposed to model-facing code.
+     */
+    suspend fun attachDirectory(
+        workspaceId: String,
+        displayName: String,
+        absolutePath: String,
+        scope: WiredAdbWorkspaceScope = WiredAdbWorkspaceScope.SELECTED_DIRECTORY,
+        grantRevision: Long = 0L,
+        confirmedByUser: Boolean = true,
+    ): WiredAdbResult<WiredAdbWorkspaceAttachment> =
+        WiredAdbResult.Failure(WiredAdbErrorCode.AUTHORITY_UNSUPPORTED)
+
+    suspend fun browseDirectory(
+        handle: WiredAdbWorkspaceHandle,
+        relativePath: String? = null,
+        maxEntries: Int = WIRED_MAX_DIRECTORY_ENTRIES,
+    ): WiredAdbResult<WiredAdbWorkspacePage> =
+        WiredAdbResult.Failure(WiredAdbErrorCode.AUTHORITY_UNSUPPORTED)
+
+    suspend fun executeBoundFile(
+        handle: WiredAdbWorkspaceHandle,
+        request: WiredAdbFileRequest,
+    ): WiredAdbResult<WiredAdbFileResult> =
+        WiredAdbResult.Failure(WiredAdbErrorCode.AUTHORITY_UNSUPPORTED)
+
+    suspend fun releaseDirectory(handle: WiredAdbWorkspaceHandle): WiredAdbResult<Unit> =
+        WiredAdbResult.Failure(WiredAdbErrorCode.AUTHORITY_UNSUPPORTED)
 }
+
+enum class WiredAdbWorkspaceScope { SELECTED_DIRECTORY, FULL_DEVICE_FILES }
+
+/** Opaque per-connection handle; path and bridge binding remain package-private. */
+class WiredAdbWorkspaceHandle internal constructor(
+    internal val owner: Any,
+    internal val workspaceId: String,
+    internal val binding: String,
+    internal val epoch: Long,
+) {
+    override fun toString(): String = "WiredAdbWorkspaceHandle(workspaceId=$workspaceId)"
+}
+
+data class WiredAdbWorkspaceAttachment(
+    val workspaceId: String,
+    val scope: WiredAdbWorkspaceScope,
+    val handle: WiredAdbWorkspaceHandle,
+    val initialPage: WiredAdbWorkspacePage,
+) {
+    override fun toString(): String =
+        "WiredAdbWorkspaceAttachment(workspaceId=$workspaceId, scope=$scope)"
+}
+
+data class WiredAdbWorkspacePage(
+    val handle: WiredAdbWorkspaceHandle,
+    val relativePath: String,
+    val entries: List<WiredAdbFileEntry>,
+    val truncated: Boolean,
+)
 
 /**
  * Backend-neutral dangerous-shell surface.  Policy/capability checks stay in

@@ -249,10 +249,13 @@ class UnifiedWorkspaceToolExecutor(
         // to another privileged backend.
         val structuralError = when {
             operation.kind == WorkspaceOperation.WORKSPACE_LIST -> {
-                if (authorizedWorkspaces(context).isEmpty()) ToolError(ToolErrorCode.CAPABILITY_DENIED) else null
+                workspaceListAvailabilityError(context)
             }
             registered == null -> ToolError(ToolErrorCode.WORKSPACE_NOT_FOUND)
-            !workspaceOperationAvailable(context, registered, operation.kind) -> ToolError(ToolErrorCode.CAPABILITY_DENIED)
+            !workspaceOperationAvailable(context, registered, operation.kind, requireLiveReady = false) ->
+                ToolError(ToolErrorCode.CAPABILITY_DENIED)
+            !workspaceOperationAvailable(context, registered, operation.kind, requireLiveReady = true) ->
+                ToolError(ToolErrorCode.AUTHORITY_TEMPORARILY_UNAVAILABLE)
             else -> null
         }
         if (structuralError != null) return finishAudit(bound, operation, ToolExecution.Failed(structuralError), context)
@@ -310,13 +313,22 @@ class UnifiedWorkspaceToolExecutor(
         // one-shot backend call. A durable grant does not pin a provider
         // connection, so all live routing facts are deliberately checked again.
         if (operation.kind == WorkspaceOperation.WORKSPACE_LIST) {
-            if (authorizedWorkspaces(context).isEmpty()) {
-                return finishAudit(bound, operation, ToolExecution.Failed(ToolError(ToolErrorCode.CAPABILITY_DENIED)), context)
+            val availabilityError = workspaceListAvailabilityError(context)
+            if (availabilityError != null) {
+                return finishAudit(bound, operation, ToolExecution.Failed(availabilityError), context)
             }
-        } else if (registered == null || !workspaceOperationAvailable(context, registered, operation.kind) ||
+        } else if (registered == null ||
+            !workspaceOperationAvailable(context, registered, operation.kind, requireLiveReady = false) ||
             !exactPathAuthorization(context, operation)
         ) {
             return finishAudit(bound, operation, ToolExecution.Failed(ToolError(ToolErrorCode.CAPABILITY_DENIED)), context)
+        } else if (!workspaceOperationAvailable(context, registered, operation.kind, requireLiveReady = true)) {
+            return finishAudit(
+                bound,
+                operation,
+                ToolExecution.Failed(ToolError(ToolErrorCode.AUTHORITY_TEMPORARILY_UNAVAILABLE)),
+                context,
+            )
         }
 
         // The resolver's canonical gate is the final grant/revision/lifetime
@@ -396,7 +408,11 @@ class UnifiedWorkspaceToolExecutor(
     private fun exposedSpecs(context: ToolExecutionContext): List<ToolSpec> =
         TOOL_SPECS.filter { spec ->
             val operation = operationForTool(spec.name) ?: return@filter false
-            authorizedWorkspaces(context, operation).isNotEmpty()
+            // A persisted selected authority remains part of the run schema
+            // while its Binder/USB/Wi-Fi transport is temporarily offline.
+            // Dispatch repeats the live-ready check and fails closed without
+            // switching providers, matching the shell exposure contract.
+            authorizedWorkspaces(context, operation, requireLiveReady = false).isNotEmpty()
         }
 
     /**
@@ -407,20 +423,23 @@ class UnifiedWorkspaceToolExecutor(
     private fun authorizedWorkspaces(
         context: ToolExecutionContext,
         operation: WorkspaceOperation = WorkspaceOperation.WORKSPACE_LIST,
+        requireLiveReady: Boolean = true,
     ): List<WorkspaceRegistry.RegisteredWorkspace> =
         registry.descriptors().mapNotNull { publicDescriptor ->
             registry.registered(publicDescriptor.id)
-        }.filter { registered -> workspaceOperationAvailable(context, registered, operation) }
+        }.filter { registered -> workspaceOperationAvailable(context, registered, operation, requireLiveReady) }
 
     private fun workspaceOperationAvailable(
         context: ToolExecutionContext,
         registered: WorkspaceRegistry.RegisteredWorkspace,
         operation: WorkspaceOperation,
+        requireLiveReady: Boolean = true,
     ): Boolean {
         val descriptor = registered.descriptor
         if (!descriptor.enabled) return false
-        if (descriptor.backendType == WorkspaceBackendType.PRIVILEGED && !privilegedProviderReady(descriptor, context)) {
-            return false
+        if (descriptor.backendType == WorkspaceBackendType.PRIVILEGED) {
+            if (!privilegedProviderConfigured(descriptor, context)) return false
+            if (requireLiveReady && !privilegedProviderReady(descriptor, context)) return false
         }
         if (!backendSupports(registered.backend, operation)) return false
         if (!descriptor.readable && !operation.isMutation) return false
@@ -475,7 +494,7 @@ class UnifiedWorkspaceToolExecutor(
             }
         }
         val workspaceIds = if (operation.kind == WorkspaceOperation.WORKSPACE_LIST) {
-            authorizedWorkspaces(context, WorkspaceOperation.WORKSPACE_LIST)
+            authorizedWorkspaces(context, WorkspaceOperation.WORKSPACE_LIST, requireLiveReady = false)
                 .map { it.descriptor.id }
         } else {
             listOf(operation.workspaceId)
@@ -521,6 +540,15 @@ class UnifiedWorkspaceToolExecutor(
         }.getOrDefault(false)
     }
 
+    private fun workspaceListAvailabilityError(context: ToolExecutionContext): ToolError? {
+        if (authorizedWorkspaces(context, requireLiveReady = true).isNotEmpty()) return null
+        return if (authorizedWorkspaces(context, requireLiveReady = false).isNotEmpty()) {
+            ToolError(ToolErrorCode.AUTHORITY_TEMPORARILY_UNAVAILABLE)
+        } else {
+            ToolError(ToolErrorCode.CAPABILITY_DENIED)
+        }
+    }
+
     /** A privileged descriptor is bound to one provider at registration time. */
     private fun privilegedAuthority(descriptor: runtime.mobileagent.skills.tooling.WorkspaceDescriptor): Authority? {
         if (descriptor.backendType != WorkspaceBackendType.PRIVILEGED) return null
@@ -531,18 +559,24 @@ class UnifiedWorkspaceToolExecutor(
     }
 
     private fun privilegedProviderReady(descriptor: runtime.mobileagent.skills.tooling.WorkspaceDescriptor, context: ToolExecutionContext): Boolean {
-        val expected = privilegedAuthority(descriptor) ?: return false
-        // A supplied live provider is authoritative.  A null value from that
-        // provider means that the user selected NONE (or that the provider
-        // cannot establish a selection), not permission to reuse the stale run
-        // snapshot.  Only an absent provider uses the frozen context seam.
-        val selection = if (authoritySelectionProvider != null) {
-            authoritySelectionProvider.invoke() ?: return false
-        } else {
-            context.authoritySelection
-        }
-        return selection.selected == expected && selection.selectedState?.isReady == true
+        if (!privilegedProviderConfigured(descriptor, context)) return false
+        val selection = currentAuthoritySelection(context) ?: return false
+        return selection.selectedState?.isReady == true
     }
+
+    private fun privilegedProviderConfigured(
+        descriptor: runtime.mobileagent.skills.tooling.WorkspaceDescriptor,
+        context: ToolExecutionContext,
+    ): Boolean {
+        val expected = privilegedAuthority(descriptor) ?: return false
+        val selection = currentAuthoritySelection(context) ?: return false
+        return selection.selected == expected && selection.selectedState?.isConfiguredForSelection == true
+    }
+
+    // A supplied live provider is authoritative. A null value means that no
+    // provider selection can be established; it never permits stale fallback.
+    private fun currentAuthoritySelection(context: ToolExecutionContext): ToolAuthoritySelection? =
+        if (authoritySelectionProvider != null) authoritySelectionProvider.invoke() else context.authoritySelection
 
     /** Start exactly once; approval id is carried through both audit records. */
     private suspend fun startAudit(bound: BoundCall, parsed: ParsedCall, approvalId: String?): Boolean {

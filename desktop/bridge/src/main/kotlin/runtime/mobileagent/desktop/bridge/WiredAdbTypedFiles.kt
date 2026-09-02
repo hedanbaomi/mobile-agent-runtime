@@ -17,6 +17,7 @@ import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 import runtime.mobileagent.bridge.BridgeCodec
 import runtime.mobileagent.bridge.BridgeErrorCodes
+import runtime.mobileagent.bridge.BridgeHelperRequestEnvelope
 import runtime.mobileagent.bridge.BridgeOperation
 import runtime.mobileagent.bridge.BridgeProtocol
 import runtime.mobileagent.bridge.BridgeRequestEnvelope
@@ -59,6 +60,8 @@ enum class WiredAdbTypedFileOperation(val wireName: String) {
 class WiredAdbTypedFileRequest private constructor(
     val requestId: String,
     val operation: WiredAdbTypedFileOperation,
+    val workspaceId: String,
+    val workspaceBinding: String?,
     val relativePath: String?,
     val destinationRelativePath: String?,
     val contentUtf8: ByteArray?,
@@ -73,7 +76,8 @@ class WiredAdbTypedFileRequest private constructor(
         requestId = requestId,
         operation = operation.wireName,
         payload = buildJsonObject {
-            put("workspace_id", WIRED_WORKSPACE_ID)
+            put("workspace_id", workspaceId)
+            workspaceBinding?.let { put("workspace_binding", it) }
             relativePath?.let { put("relative_path", it) }
             when (operation) {
                 WiredAdbTypedFileOperation.LIST,
@@ -93,6 +97,19 @@ class WiredAdbTypedFileRequest private constructor(
         },
     )
 
+    /** Private helper frame; the device root is never part of a bridge request. */
+    fun toHelperRequest(rootPath: String, fullDevice: Boolean): BridgeHelperRequestEnvelope {
+        val binding = workspaceBinding ?: error("workspace binding is required")
+        WiredAdbDesktopAbsolutePathPolicy.parse(rootPath)
+        return BridgeHelperRequestEnvelope(
+            protocolVersion = BridgeProtocol.VERSION,
+            workspaceRootPath = rootPath,
+            workspaceBinding = binding,
+            fullDevice = fullDevice,
+            request = toBridgeRequest(),
+        )
+    }
+
     companion object {
         /**
          * Parses the shared bridge envelope before a process is dispatched.
@@ -108,7 +125,11 @@ class WiredAdbTypedFileRequest private constructor(
             val operation = WiredAdbTypedFileOperation.parse(BridgeOperation.parse(request.operation))
             val payload = request.payload
             require(payload.keys.all { it in allowedKeys(operation) })
-            require(payload.stringRequired("workspace_id") == WIRED_WORKSPACE_ID)
+            val workspaceId = payload.stringRequired("workspace_id")
+            require(workspaceId.matches(SAFE_WORKSPACE_ID))
+            val workspaceBinding = payload.stringOrNull("workspace_binding")?.also {
+                require(it.length == 64 && it.all { character -> character in "0123456789abcdefABCDEF" })
+            }
 
             val relativePath = payload.stringOrNull("relative_path")
             WiredAdbDesktopPathPolicy.parse(
@@ -151,6 +172,8 @@ class WiredAdbTypedFileRequest private constructor(
             return WiredAdbTypedFileRequest(
                 requestId = request.requestId,
                 operation = operation,
+                workspaceId = workspaceId,
+                workspaceBinding = workspaceBinding,
                 relativePath = relativePath,
                 destinationRelativePath = destination,
                 contentUtf8 = content,
@@ -161,16 +184,40 @@ class WiredAdbTypedFileRequest private constructor(
 
         private fun allowedKeys(operation: WiredAdbTypedFileOperation): Set<String> = when (operation) {
             WiredAdbTypedFileOperation.LIST,
-            WiredAdbTypedFileOperation.STAT -> setOf("workspace_id", "relative_path")
-            WiredAdbTypedFileOperation.READ_TEXT -> setOf("workspace_id", "relative_path", "max_bytes")
-            WiredAdbTypedFileOperation.WRITE_TEXT -> setOf("workspace_id", "relative_path", "content", "overwrite")
+            WiredAdbTypedFileOperation.STAT -> setOf("workspace_id", "workspace_binding", "relative_path")
+            WiredAdbTypedFileOperation.READ_TEXT -> setOf("workspace_id", "workspace_binding", "relative_path", "max_bytes")
+            WiredAdbTypedFileOperation.WRITE_TEXT -> setOf("workspace_id", "workspace_binding", "relative_path", "content", "overwrite")
             WiredAdbTypedFileOperation.CREATE_DIRECTORY,
-            WiredAdbTypedFileOperation.DELETE -> setOf("workspace_id", "relative_path", "recursive")
+            WiredAdbTypedFileOperation.DELETE -> setOf("workspace_id", "workspace_binding", "relative_path", "recursive")
             WiredAdbTypedFileOperation.MOVE -> setOf(
                 "workspace_id",
+                "workspace_binding",
                 "relative_path",
                 "destination_relative_path",
                 "overwrite",
+            )
+        }
+
+        internal fun forWorkspaceRoot(
+            requestId: String,
+            operation: WiredAdbTypedFileOperation,
+            workspaceId: String,
+            workspaceBinding: String,
+            relativePath: String?,
+            maxBytes: Int = WIRED_MAX_READ_BYTES,
+        ): WiredAdbTypedFileRequest {
+            require(workspaceId.matches(SAFE_WORKSPACE_ID))
+            require(workspaceBinding.length == 64 && workspaceBinding.all { it in "0123456789abcdefABCDEF" })
+            return WiredAdbTypedFileRequest(
+                requestId = requestId,
+                operation = operation,
+                workspaceId = workspaceId,
+                workspaceBinding = workspaceBinding,
+                relativePath = relativePath,
+                destinationRelativePath = null,
+                contentUtf8 = null,
+                overwrite = false,
+                maxBytes = maxBytes,
             )
         }
     }
@@ -179,6 +226,16 @@ class WiredAdbTypedFileRequest private constructor(
 /** A typed file executor supplied by the authenticated Desktop handler. */
 fun interface WiredAdbTypedFileExecutor {
     fun execute(request: WiredAdbTypedFileRequest, cancellation: BridgeCancellation): BridgeResponseEnvelope
+}
+
+/** Typed helper execution rooted at one authenticated, connection-local bind. */
+fun interface WiredAdbBoundTypedFileExecutor {
+    fun executeAtRoot(
+        request: WiredAdbTypedFileRequest,
+        rootPath: String,
+        fullDevice: Boolean,
+        cancellation: BridgeCancellation,
+    ): BridgeResponseEnvelope
 }
 
 /**
@@ -191,7 +248,7 @@ class WiredAdbTypedFileExecutorImpl(
     private val deadlineMs: Long = WIRED_ADB_FILE_DEADLINE_MS,
     private val stdoutCapBytes: Int = BridgeProtocol.MAX_FRAME_BYTES,
     private val stderrCapBytes: Int = WIRED_ADB_HELPER_STDERR_CAP_BYTES,
-) : WiredAdbTypedFileExecutor {
+) : WiredAdbTypedFileExecutor, WiredAdbBoundTypedFileExecutor {
     init {
         require(deadlineMs in 1..5 * 60 * 1_000L)
         require(stdoutCapBytes in 1..BridgeProtocol.MAX_FRAME_BYTES)
@@ -239,6 +296,52 @@ class WiredAdbTypedFileExecutorImpl(
         }
     }
 
+    override fun executeAtRoot(
+        request: WiredAdbTypedFileRequest,
+        rootPath: String,
+        fullDevice: Boolean,
+        cancellation: BridgeCancellation,
+    ): BridgeResponseEnvelope {
+        if (cancellation.isRequested) return unknown(request.requestId)
+        require(request.workspaceBinding != null)
+        val frame = try {
+            WiredAdbHelperFrameCodec.encode(request.toHelperRequest(rootPath, fullDevice))
+        } catch (_: Throwable) {
+            return unknown(request.requestId)
+        }
+        return executeFrame(frame, request, cancellation)
+    }
+
+    private fun executeFrame(
+        frame: ByteArray,
+        request: WiredAdbTypedFileRequest,
+        cancellation: BridgeCancellation,
+    ): BridgeResponseEnvelope {
+        val result = try {
+            adb.runTypedFiles(
+                frame = frame,
+                timeoutMs = deadlineMs,
+                stdoutCapBytes = stdoutCapBytes,
+                stderrCapBytes = stderrCapBytes,
+                cancelRequested = { cancellation.isRequested },
+            )
+        } catch (_: Throwable) {
+            return unknown(request.requestId)
+        } finally {
+            java.util.Arrays.fill(frame, 0)
+        }
+        val process = result.process
+        if (process.outcome != ProcessOutcome.COMPLETE ||
+            process.exitCode != 0 ||
+            process.timedOut || process.cancelled || process.stdoutTruncated || cancellation.isRequested
+        ) return unknown(request.requestId)
+        return try {
+            WiredAdbHelperFrameCodec.decodeResponse(process.stdout, request)
+        } catch (_: Throwable) {
+            unknown(request.requestId)
+        }
+    }
+
     private fun unknown(requestId: String): BridgeResponseEnvelope = BridgeResponseEnvelope(
         protocolVersion = BridgeProtocol.VERSION,
         requestId = requestId,
@@ -252,6 +355,18 @@ class WiredAdbTypedFileExecutorImpl(
 internal object WiredAdbHelperFrameCodec {
     fun encode(request: BridgeRequestEnvelope): ByteArray {
         val body = BridgeCodec.encodeRequest(request)
+        require(body.size in 1..BridgeProtocol.MAX_FRAME_BYTES - 4)
+        val output = ByteArray(4 + body.size)
+        output[0] = (body.size ushr 24).toByte()
+        output[1] = (body.size ushr 16).toByte()
+        output[2] = (body.size ushr 8).toByte()
+        output[3] = body.size.toByte()
+        body.copyInto(output, 4)
+        return output
+    }
+
+    fun encode(request: BridgeHelperRequestEnvelope): ByteArray {
+        val body = BridgeCodec.encodeHelperRequest(request)
         require(body.size in 1..BridgeProtocol.MAX_FRAME_BYTES - 4)
         val output = ByteArray(4 + body.size)
         output[0] = (body.size ushr 24).toByte()
@@ -327,6 +442,7 @@ internal object WiredAdbHelperFrameCodec {
             }
         }
         listOf("created", "replaced", "deleted").forEach { payload.booleanOrNull(it) }
+        payload.booleanOrNull("truncated")
         when (request.operation) {
             WiredAdbTypedFileOperation.LIST -> Unit
             WiredAdbTypedFileOperation.STAT -> {
@@ -351,7 +467,7 @@ internal object WiredAdbHelperFrameCodec {
     }
 
     private fun resultKeys(operation: WiredAdbTypedFileOperation): Set<String> = when (operation) {
-        WiredAdbTypedFileOperation.LIST -> setOf("operation", "relative_path", "entries")
+        WiredAdbTypedFileOperation.LIST -> setOf("operation", "relative_path", "entries", "truncated")
         WiredAdbTypedFileOperation.STAT -> setOf("operation", "relative_path", "entries", "bytes")
         WiredAdbTypedFileOperation.READ_TEXT -> setOf("operation", "relative_path", "text", "bytes")
         WiredAdbTypedFileOperation.WRITE_TEXT -> setOf("operation", "relative_path", "bytes", "created", "replaced")
@@ -410,6 +526,26 @@ internal object WiredAdbDesktopPathPolicy {
     }.isSuccess
 }
 
+/** Absolute device path accepted only in a user-originated workspace attach. */
+internal object WiredAdbDesktopAbsolutePathPolicy {
+    fun parse(raw: String): String {
+        require(raw.isNotEmpty() && raw.startsWith('/'))
+        require(!raw.contains('\u0000') && !raw.contains('\\') && !raw.contains(':'))
+        require(Normalizer.normalize(raw, Normalizer.Form.NFC) == raw)
+        require(raw == "/" || !raw.endsWith('/') && !raw.contains("//"))
+        val pieces = raw.split('/').drop(1)
+        require(raw == "/" || pieces.isNotEmpty())
+        require(pieces.size <= 64)
+        pieces.forEach { piece ->
+            require(piece.isNotEmpty() && piece != "." && piece != "..")
+            require(strictUtf8(piece).size <= WIRED_MAX_SEGMENT_BYTES)
+            require(piece.none(Character::isISOControl))
+        }
+        require(strictUtf8(raw).size <= BridgeProtocol.MAX_DEVICE_PATH_BYTES)
+        return raw
+    }
+}
+
 internal const val WIRED_WORKSPACE_ID = "wired-adb"
 internal const val WIRED_MAX_FILE_BYTES = 256 * 1024
 internal const val WIRED_MAX_READ_BYTES = 24 * 1024
@@ -439,7 +575,11 @@ private val WIRED_ADB_HELPER_ERROR_CODES = setOf(
     "FILE_OPERATION_UNAVAILABLE",
     "FILE_ATOMIC_REPLACE_UNAVAILABLE",
     "FILE_WRITE_UNVERIFIED",
+    "ROOT_BACKEND_UNAVAILABLE",
+    "ROOT_PATH_INVALID",
 )
+
+private val SAFE_WORKSPACE_ID = Regex("[A-Za-z0-9][A-Za-z0-9._~-]{0,127}")
 
 private fun strictUtf8(value: String): ByteArray = try {
     val encoder = StandardCharsets.UTF_8.newEncoder()

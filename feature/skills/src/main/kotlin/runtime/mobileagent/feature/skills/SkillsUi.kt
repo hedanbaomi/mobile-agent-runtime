@@ -15,6 +15,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -160,7 +161,7 @@ fun SkillsScreen(state: SkillsUiState, actions: SkillsActions = SkillsActions(),
     val picker = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
         if (uris.isNotEmpty()) actions.onImport(uris)
     }
-    BoxWithConstraints(modifier.fillMaxSize().padding(16.dp).testTag("skills.root")) {
+    BoxWithConstraints(modifier.fillMaxSize().padding(horizontal = 16.dp, vertical = 12.dp).testTag("skills.root")) {
         val wide = maxWidth >= 720.dp
         if (wide) {
             Row(Modifier.fillMaxSize(), horizontalArrangement = Arrangement.spacedBy(16.dp)) {
@@ -200,7 +201,18 @@ private fun SkillListPane(state: SkillsUiState, actions: SkillsActions, zh: Bool
         }
         OutlinedTextField(state.query, actions.onQuery, label = { Text(if (zh) "筛选技能" else "Filter skills") }, modifier = Modifier.fillMaxWidth().padding(top = 8.dp))
         if (state.loading) CircularProgressIndicator(Modifier.padding(top = 16.dp))
-        else if (state.error != null) Text(safeDisplay(state.error.orEmpty()), color = MaterialTheme.colorScheme.error, modifier = Modifier.padding(top = 16.dp))
+        else if (state.error != null) {
+            Card(
+                Modifier.fillMaxWidth().padding(top = 16.dp),
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer),
+            ) {
+                Text(
+                    safeDisplay(state.error.orEmpty()),
+                    color = MaterialTheme.colorScheme.onErrorContainer,
+                    modifier = Modifier.padding(14.dp),
+                )
+            }
+        }
         else {
             val visible = state.skills.filter {
                 (state.query.isBlank() || it.name.contains(state.query, true)) &&
@@ -224,7 +236,12 @@ private fun SkillDetailPane(state: SkillsUiState, actions: SkillsActions, zh: Bo
 
 @Composable
 private fun SkillCard(skill: SkillUi, selected: Boolean, actions: SkillsActions, zh: Boolean) {
-    Surface(color = if (selected) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceVariant, modifier = Modifier.fillMaxWidth().clickable { actions.onOpenDetail(skill.installId) }) {
+    Card(
+        colors = CardDefaults.cardColors(
+            containerColor = if (selected) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceContainerLow,
+        ),
+        modifier = Modifier.fillMaxWidth().heightIn(min = 56.dp).clickable { actions.onOpenDetail(skill.installId) },
+    ) {
         Column(Modifier.padding(12.dp)) {
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                 Text(safeDisplay(skill.name), style = MaterialTheme.typography.titleMedium, modifier = Modifier.weight(1f))

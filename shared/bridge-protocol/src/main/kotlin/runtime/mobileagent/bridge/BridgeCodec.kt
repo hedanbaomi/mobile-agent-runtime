@@ -6,6 +6,7 @@ package runtime.mobileagent.bridge
 import java.nio.ByteBuffer
 import java.nio.charset.CodingErrorAction
 import java.nio.charset.StandardCharsets
+import java.text.Normalizer
 import kotlinx.serialization.SerializationException
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
@@ -39,17 +40,25 @@ object BridgeCodec {
 
     private val payloadKeys: Map<BridgeOperation, Set<String>> = mapOf(
         BridgeOperation.WORKSPACE_LIST to setOf("workspace_id", "relative_path"),
-        BridgeOperation.FILE_LIST to setOf("workspace_id", "relative_path", "include_hidden"),
-        BridgeOperation.FILE_STAT to setOf("workspace_id", "relative_path"),
-        BridgeOperation.FILE_READ_TEXT to setOf("workspace_id", "relative_path", "max_bytes"),
+        BridgeOperation.WORKSPACE_ATTACH to setOf(
+            "workspace_id", "workspace_binding", "display_name", "absolute_path", "scope",
+            "grant_revision", "confirmed_by_user",
+        ),
+        BridgeOperation.WORKSPACE_BROWSE to setOf(
+            "workspace_id", "workspace_binding", "relative_path", "max_entries",
+        ),
+        BridgeOperation.WORKSPACE_RELEASE to setOf("workspace_id", "workspace_binding"),
+        BridgeOperation.FILE_LIST to setOf("workspace_id", "workspace_binding", "relative_path", "include_hidden"),
+        BridgeOperation.FILE_STAT to setOf("workspace_id", "workspace_binding", "relative_path"),
+        BridgeOperation.FILE_READ_TEXT to setOf("workspace_id", "workspace_binding", "relative_path", "max_bytes"),
         BridgeOperation.FILE_WRITE_TEXT to setOf(
-            "workspace_id", "relative_path", "content", "overwrite", "expected_sha256",
+            "workspace_id", "workspace_binding", "relative_path", "content", "overwrite", "expected_sha256",
         ),
-        BridgeOperation.FILE_CREATE_DIRECTORY to setOf("workspace_id", "relative_path", "recursive"),
+        BridgeOperation.FILE_CREATE_DIRECTORY to setOf("workspace_id", "workspace_binding", "relative_path", "recursive"),
         BridgeOperation.FILE_MOVE to setOf(
-            "workspace_id", "relative_path", "destination_relative_path", "overwrite",
+            "workspace_id", "workspace_binding", "relative_path", "destination_relative_path", "overwrite",
         ),
-        BridgeOperation.FILE_DELETE to setOf("workspace_id", "relative_path", "recursive"),
+        BridgeOperation.FILE_DELETE to setOf("workspace_id", "workspace_binding", "relative_path", "recursive"),
         BridgeOperation.MEMORY_READ to setOf("memory_id", "offset", "limit"),
         BridgeOperation.MEMORY_SEARCH to setOf("query", "limit", "offset"),
         BridgeOperation.MEMORY_APPEND to setOf("memory_id", "content"),
@@ -97,6 +106,17 @@ object BridgeCodec {
 
     fun decodeRequest(bytes: ByteArray): BridgeRequestEnvelope = decode<BridgeRequestEnvelope>(bytes).also(::validateRequest)
 
+    /**
+     * Encodes the private desktop-to-shell-helper envelope. The helper root
+     * is never accepted by [encodeRequest] and therefore cannot leak into
+     * the model-facing request contract.
+     */
+    fun encodeHelperRequest(value: BridgeHelperRequestEnvelope): ByteArray =
+        encode(value).also { validateHelperRequest(value) }
+
+    fun decodeHelperRequest(bytes: ByteArray): BridgeHelperRequestEnvelope =
+        decode<BridgeHelperRequestEnvelope>(bytes).also(::validateHelperRequest)
+
     fun encodeResponse(value: BridgeResponseEnvelope): ByteArray =
         encode(value).also { validateResponse(value) }
 
@@ -122,6 +142,17 @@ object BridgeCodec {
         }
         validateJsonTree(payload, "payload", 0)
         when (operation) {
+            BridgeOperation.WORKSPACE_ATTACH -> validateWorkspaceAttachPayload(payload)
+            BridgeOperation.WORKSPACE_BROWSE -> validateWorkspaceBrowsePayload(payload)
+            BridgeOperation.WORKSPACE_RELEASE -> validateWorkspaceReleasePayload(payload)
+            BridgeOperation.WORKSPACE_LIST,
+            BridgeOperation.FILE_LIST,
+            BridgeOperation.FILE_STAT,
+            BridgeOperation.FILE_READ_TEXT,
+            BridgeOperation.FILE_WRITE_TEXT,
+            BridgeOperation.FILE_CREATE_DIRECTORY,
+            BridgeOperation.FILE_MOVE,
+            BridgeOperation.FILE_DELETE -> validateWorkspaceBindingIfPresent(payload)
             BridgeOperation.SHELL_EXEC -> {
                 val command = payload["command"]?.asString("command")
                     ?: throw BridgeProtocolException("shell_exec command is required")
@@ -141,6 +172,133 @@ object BridgeCodec {
                 }
             }
             else -> Unit
+        }
+    }
+
+    private fun validateHelperRequest(value: BridgeHelperRequestEnvelope) {
+        requireVersion(value.protocolVersion)
+        require(value.workspaceRootPath.isNotEmpty()) { "helper workspace root is required" }
+        val rootBytes = strictUtf8(value.workspaceRootPath, "workspaceRootPath")
+        require(rootBytes.size <= BridgeProtocol.MAX_DEVICE_PATH_BYTES) { "helper workspace root is too large" }
+        require(value.workspaceRootPath.startsWith('/')) { "helper workspace root must be absolute" }
+        if (value.fullDevice) require(value.workspaceRootPath == "/") {
+            "full-device helper root must be the device root"
+        }
+        validateWorkspaceBinding(value.workspaceBinding)
+        validateRequest(value.request)
+        require(BridgeOperation.parse(value.request.operation) in setOf(
+            BridgeOperation.FILE_LIST,
+            BridgeOperation.FILE_STAT,
+            BridgeOperation.FILE_READ_TEXT,
+            BridgeOperation.FILE_WRITE_TEXT,
+            BridgeOperation.FILE_CREATE_DIRECTORY,
+            BridgeOperation.FILE_MOVE,
+            BridgeOperation.FILE_DELETE,
+        )) { "helper operation is not a typed file operation" }
+        require(value.request.payload.stringOrNull("workspace_binding") == value.workspaceBinding) {
+            "helper workspace binding does not match request"
+        }
+    }
+
+    private fun validateWorkspaceAttachPayload(payload: JsonObject) {
+        validateWorkspaceIdentity(payload)
+        validateWorkspaceBinding(payload["workspace_binding"]?.asString("workspace_binding"))
+        val displayName = payload["display_name"]?.asString("display_name")
+            ?: throw BridgeProtocolException("workspace_attach display_name is required")
+        require(strictUtf8(displayName, "display_name").size <= BridgeProtocol.MAX_WORKSPACE_DISPLAY_NAME_BYTES) {
+            "workspace display name is too large"
+        }
+        val absolutePath = payload["absolute_path"]?.asString("absolute_path")
+            ?: throw BridgeProtocolException("workspace_attach absolute_path is required")
+        validateAbsoluteDevicePath(absolutePath)
+        val scope = payload["scope"]?.asString("scope")
+            ?: throw BridgeProtocolException("workspace_attach scope is required")
+        require(scope == "selected_directory" || scope == "full_device_files") {
+            "workspace_attach scope is invalid"
+        }
+        val revision = payload["grant_revision"]?.asLong("grant_revision")
+            ?: throw BridgeProtocolException("workspace_attach grant_revision is required")
+        require(revision >= 0L) { "workspace grant revision is invalid" }
+        val confirmed = payload["confirmed_by_user"]?.asBoolean("confirmed_by_user")
+            ?: throw BridgeProtocolException("workspace_attach confirmation is required")
+        require(confirmed) { "workspace attachment requires explicit confirmation" }
+        if (scope == "full_device_files") require(confirmed && revision > 0L) {
+            "full-device attachment requires explicit confirmation and grant"
+        }
+        if (scope == "full_device_files") require(absolutePath == "/") {
+            "full-device attachment must use the device root"
+        }
+    }
+
+    private fun validateWorkspaceBrowsePayload(payload: JsonObject) {
+        validateWorkspaceIdentity(payload)
+        validateWorkspaceBinding(payload["workspace_binding"]?.asString("workspace_binding"))
+        payload["relative_path"]?.asString("relative_path")?.let { validateRelativePath(it, allowRoot = true) }
+        val maxEntries = payload["max_entries"]?.asLong("max_entries")
+            ?: throw BridgeProtocolException("workspace_browse max_entries is required")
+        require(maxEntries in 1..256) { "workspace_browse max_entries is out of range" }
+    }
+
+    private fun validateWorkspaceReleasePayload(payload: JsonObject) {
+        validateWorkspaceIdentity(payload)
+        validateWorkspaceBinding(payload["workspace_binding"]?.asString("workspace_binding"))
+    }
+
+    private fun validateWorkspaceBindingIfPresent(payload: JsonObject) {
+        payload["workspace_id"]?.asString("workspace_id")?.let(::validateWorkspaceId)
+        payload["workspace_binding"]?.asString("workspace_binding")?.let(::validateWorkspaceBinding)
+    }
+
+    private fun validateWorkspaceIdentity(payload: JsonObject) {
+        val id = payload["workspace_id"]?.asString("workspace_id")
+            ?: throw BridgeProtocolException("workspace_id is required")
+        validateWorkspaceId(id)
+    }
+
+    private fun validateWorkspaceId(value: String) {
+        require(strictUtf8(value, "workspace_id").size <= BridgeProtocol.MAX_WORKSPACE_ID_BYTES) {
+            "workspace_id is too large"
+        }
+        require(value.matches(SAFE_WORKSPACE_ID)) { "workspace_id is invalid" }
+    }
+
+    private fun validateWorkspaceBinding(value: String?) {
+        val binding = value ?: throw BridgeProtocolException("workspace_binding is required")
+        hexBytes(binding, "workspace_binding", BridgeProtocol.WORKSPACE_BINDING_BYTES)
+    }
+
+    private fun validateAbsoluteDevicePath(value: String) {
+        require(strictUtf8(value, "absolute_path").size <= BridgeProtocol.MAX_DEVICE_PATH_BYTES) {
+            "absolute device path is too large"
+        }
+        require(value.startsWith('/') && !value.contains('\\') && !value.contains("//")) {
+            "absolute device path is invalid"
+        }
+        require(Normalizer.normalize(value, Normalizer.Form.NFC) == value) {
+            "absolute device path is not normalized"
+        }
+        val pieces = value.split('/').drop(1)
+        require(value == "/" || pieces.isNotEmpty() && pieces.all { it.isNotEmpty() }) {
+            "absolute device path is invalid"
+        }
+        require(pieces.none {
+            it == "." || it == ".." || it.contains('\u0000') || it.any(Char::isISOControl)
+        }) {
+            "absolute device path escapes root"
+        }
+    }
+
+    private fun validateRelativePath(value: String, allowRoot: Boolean) {
+        if (value.isEmpty()) {
+            require(allowRoot) { "relative path is empty" }
+            return
+        }
+        require(!value.startsWith('/') && !value.endsWith('/') && !value.contains("//")) {
+            "relative path is invalid"
+        }
+        val pieces = value.split('/')
+        require(pieces.none { it.isEmpty() || it == "." || it == ".." || it.contains('\u0000') }) {
+            "relative path escapes root"
         }
     }
 
@@ -320,6 +478,18 @@ object BridgeCodec {
     private fun JsonElement.asLong(field: String): Long =
         (this as? JsonPrimitive)?.takeUnless { it.isString }?.content?.toLongOrNull()
             ?: throw BridgeProtocolException("$field must be an integer")
+
+    private fun JsonElement.asBoolean(field: String): Boolean =
+        (this as? JsonPrimitive)?.takeUnless { it.isString }?.content?.toBooleanStrictOrNull()
+            ?: throw BridgeProtocolException("$field must be a boolean")
+
+    private fun JsonObject.stringOrNull(name: String): String? =
+        when (val value = this[name]) {
+            null, JsonNull -> null
+            else -> value.asString(name)
+        }
+
+    private val SAFE_WORKSPACE_ID = Regex("[A-Za-z0-9][A-Za-z0-9._~-]{0,127}")
 
     private fun decodeUtf8(bytes: ByteArray): String = try {
         StandardCharsets.UTF_8.newDecoder()

@@ -296,6 +296,73 @@ class ShizukuAuthorityBridge(
         service.moveSession(sessionId, sourcePath, destinationPath, replaceExisting)
     }
 
+    /** Opens the typed device-root browser; the result contains opaque handles only. */
+    internal fun dispatchDirectoryRoot(maxEntries: Int): ShizukuDispatchResult =
+        dispatch { service, sessionId -> service.openDirectoryRootSession(sessionId, maxEntries) }
+
+    /** Browses one service-owned opaque directory handle. */
+    internal fun dispatchDirectoryBrowse(handle: String, maxEntries: Int): ShizukuDispatchResult =
+        dispatch { service, sessionId -> service.browseDirectorySession(sessionId, handle, maxEntries) }
+
+    /** Attaches one service-owned opaque directory handle to the agent workspace. */
+    internal fun dispatchDirectoryAttach(handle: String): ShizukuDispatchResult =
+        dispatch { service, sessionId -> service.attachDirectorySession(sessionId, handle) }
+
+    internal fun dispatchWorkspaceList(
+        workspaceHandle: String,
+        relativePath: String,
+        maxEntries: Int,
+    ): ShizukuDispatchResult = dispatch { service, sessionId ->
+        service.listWorkspaceSession(sessionId, workspaceHandle, relativePath, maxEntries)
+    }
+
+    internal fun dispatchWorkspaceRead(
+        workspaceHandle: String,
+        relativePath: String,
+        maxBytes: Int,
+    ): ShizukuDispatchResult = dispatch { service, sessionId ->
+        service.readWorkspaceSession(sessionId, workspaceHandle, relativePath, maxBytes)
+    }
+
+    internal fun dispatchWorkspaceWrite(
+        workspaceHandle: String,
+        relativePath: String,
+        content: ByteArray,
+        replaceExisting: Boolean,
+    ): ShizukuDispatchResult = dispatch { service, sessionId ->
+        service.writeWorkspaceSession(sessionId, workspaceHandle, relativePath, content, replaceExisting)
+    }
+
+    internal fun dispatchWorkspaceMkdir(
+        workspaceHandle: String,
+        relativePath: String,
+    ): ShizukuDispatchResult = dispatch { service, sessionId ->
+        service.mkdirWorkspaceSession(sessionId, workspaceHandle, relativePath)
+    }
+
+    internal fun dispatchWorkspaceDelete(
+        workspaceHandle: String,
+        relativePath: String,
+    ): ShizukuDispatchResult = dispatch { service, sessionId ->
+        service.deleteWorkspaceSession(sessionId, workspaceHandle, relativePath)
+    }
+
+    internal fun dispatchWorkspaceStat(
+        workspaceHandle: String,
+        relativePath: String,
+    ): ShizukuDispatchResult = dispatch { service, sessionId ->
+        service.statWorkspaceSession(sessionId, workspaceHandle, relativePath)
+    }
+
+    internal fun dispatchWorkspaceMove(
+        workspaceHandle: String,
+        sourcePath: String,
+        destinationPath: String,
+        replaceExisting: Boolean,
+    ): ShizukuDispatchResult = dispatch { service, sessionId ->
+        service.moveWorkspaceSession(sessionId, workspaceHandle, sourcePath, destinationPath, replaceExisting)
+    }
+
     /**
      * Low-level shell entrypoint for the higher-level ShizukuShellExecutor
      * adapter.  It deliberately returns an internal result model rather than

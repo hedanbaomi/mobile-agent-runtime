@@ -12,6 +12,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
@@ -156,7 +157,7 @@ fun ProvidersScreen(state: ProvidersUiState, actions: ProvidersActions = Provide
     var deleteProviderId by remember { mutableStateOf<String?>(null) }
     var deleteModelId by remember { mutableStateOf<String?>(null) }
     var probeRequested by remember { mutableStateOf(false) }
-    BoxWithConstraints(modifier.fillMaxSize().padding(16.dp)) {
+    BoxWithConstraints(modifier.fillMaxSize().padding(horizontal = 16.dp, vertical = 12.dp)) {
         val wide = maxWidth >= 720.dp
         if (wide) {
             Row(Modifier.fillMaxSize(), horizontalArrangement = Arrangement.spacedBy(16.dp)) {
@@ -214,11 +215,11 @@ private fun ProviderListPane(state: ProvidersUiState, actions: ProvidersActions,
             Text(if (zh) "服务商" else "Providers", style = MaterialTheme.typography.headlineSmall, modifier = Modifier.weight(1f))
             Button(onClick = { actions.onOpenEditor(null) }) { Text(if (zh) "添加服务商" else "Add provider") }
         }
-        if (state.status.isNotBlank()) Text(state.status, style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(vertical = 8.dp))
+        if (state.status.isNotBlank()) ProviderStatus(state.status, Modifier.padding(vertical = 8.dp))
         if (state.loading) {
             CircularProgressIndicator(Modifier.padding(top = 16.dp).size(24.dp))
         } else if (state.error != null) {
-            Text(state.error, color = MaterialTheme.colorScheme.error, modifier = Modifier.padding(top = 16.dp))
+            ProviderStatus(state.error, Modifier.padding(top = 16.dp), error = true)
         } else if (state.providers.isEmpty()) {
             EmptyProviderState(zh)
         } else {
@@ -233,8 +234,8 @@ private fun ProviderListPane(state: ProvidersUiState, actions: ProvidersActions,
 
 @Composable
 private fun EmptyProviderState(zh: Boolean) {
-    Card(Modifier.fillMaxWidth().padding(top = 16.dp)) {
-        Column(Modifier.padding(16.dp)) {
+    Card(Modifier.fillMaxWidth().padding(top = 16.dp), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerLow)) {
+        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
             Text(if (zh) "尚未配置服务商" else "No providers configured", style = MaterialTheme.typography.titleMedium)
             Text(if (zh) "添加服务商以选择模型。凭据保留在本设备。" else "Add a provider to select a model. Credentials remain on this device.", style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(top = 4.dp))
         }
@@ -243,9 +244,11 @@ private fun EmptyProviderState(zh: Boolean) {
 
 @Composable
 private fun ProviderCard(provider: ProviderCardUi, selected: Boolean, zh: Boolean, onClick: () -> Unit) {
-    Surface(
-        color = if (selected) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceVariant,
-        modifier = Modifier.fillMaxWidth().clickable(onClick = onClick),
+    Card(
+        colors = CardDefaults.cardColors(
+            containerColor = if (selected) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceContainerLow,
+        ),
+        modifier = Modifier.fillMaxWidth().heightIn(min = 56.dp).clickable(onClick = onClick),
     ) {
         Column(Modifier.padding(14.dp)) {
             Row(Modifier.fillMaxWidth()) {
@@ -256,6 +259,24 @@ private fun ProviderCard(provider: ProviderCardUi, selected: Boolean, zh: Boolea
             Text(if (zh) "${provider.apiFormat} · ${provider.modelCount} 个模型" else "${provider.apiFormat} · ${provider.modelCount} models", style = MaterialTheme.typography.labelSmall, modifier = Modifier.padding(top = 4.dp))
             Text(if (provider.secretConfigured) { if (zh) "已配置密钥引用" else "Credential reference configured" } else { if (zh) "未配置密钥引用" else "Credential reference missing" }, style = MaterialTheme.typography.labelSmall, modifier = Modifier.padding(top = 4.dp))
         }
+    }
+}
+
+@Composable
+private fun ProviderStatus(message: String, modifier: Modifier = Modifier, error: Boolean = false) {
+    Card(
+        modifier = modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(
+            containerColor = if (error) MaterialTheme.colorScheme.errorContainer else MaterialTheme.colorScheme.primaryContainer,
+        ),
+    ) {
+        Text(
+            message,
+            modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
+            style = MaterialTheme.typography.bodyMedium,
+            color = if (error) MaterialTheme.colorScheme.onErrorContainer else MaterialTheme.colorScheme.onPrimaryContainer,
+            maxLines = 5,
+        )
     }
 }
 

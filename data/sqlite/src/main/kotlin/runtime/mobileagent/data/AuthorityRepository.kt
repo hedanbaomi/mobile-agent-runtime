@@ -22,6 +22,7 @@ import runtime.mobileagent.domain.SnapshotGrantBinding
 import runtime.mobileagent.domain.Utc
 import runtime.mobileagent.domain.Workspace
 import runtime.mobileagent.domain.WorkspaceBackendType
+import runtime.mobileagent.domain.WorkspaceScope
 
 /** Raised when a policy or grant update loses its optimistic concurrency race. */
 class AuthorityPolicyConflictException(message: String) : IllegalStateException(message)
@@ -222,11 +223,11 @@ class WorkspaceRepository(
         val now = clock()
         db.transaction {
             db.execute(
-                "INSERT INTO workspaces(id,display_name,backend_type,root_reference,readable,writable,quota_bytes,max_file_bytes,enabled,revision,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET display_name=excluded.display_name, backend_type=excluded.backend_type, root_reference=excluded.root_reference, readable=excluded.readable, writable=excluded.writable, quota_bytes=excluded.quota_bytes, max_file_bytes=excluded.max_file_bytes, enabled=excluded.enabled, revision=excluded.revision, updated_at=excluded.updated_at",
+                "INSERT INTO workspaces(id,display_name,backend_type,root_reference,readable,writable,quota_bytes,max_file_bytes,enabled,revision,created_at,updated_at,scope) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET display_name=excluded.display_name, backend_type=excluded.backend_type, root_reference=excluded.root_reference, readable=excluded.readable, writable=excluded.writable, quota_bytes=excluded.quota_bytes, max_file_bytes=excluded.max_file_bytes, enabled=excluded.enabled, revision=excluded.revision, updated_at=excluded.updated_at, scope=excluded.scope",
                 listOf(
                     workspace.id, workspace.displayName, workspace.backendType.name, workspace.rootReference,
                     bool(workspace.readable), bool(workspace.writable), workspace.quotaBytes, workspace.maxFileBytes,
-                    bool(workspace.enabled), workspace.revision, workspace.createdAt.ifBlank { now }, now,
+                    bool(workspace.enabled), workspace.revision, workspace.createdAt.ifBlank { now }, now, workspace.scope.name,
                 ),
             )
         }
@@ -262,6 +263,7 @@ private fun SqlRow.toWorkspace() = Workspace(
     revision = long("revision"),
     createdAt = string("created_at"),
     updatedAt = string("updated_at"),
+    scope = columns["scope"]?.toString()?.let { WorkspaceScope.valueOf(it) } ?: WorkspaceScope.SELECTED_DIRECTORY,
 )
 
 class CapabilityGrantRepository(

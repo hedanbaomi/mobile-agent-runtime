@@ -19,6 +19,7 @@ import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import runtime.mobileagent.domain.Authority
+import runtime.mobileagent.domain.AuthorityUserIntent
 import runtime.mobileagent.domain.CapabilityId
 import runtime.mobileagent.domain.CapabilityGrant
 import runtime.mobileagent.domain.DangerousMode
@@ -124,6 +125,50 @@ class ToolingOrchestrationTest {
         assertEquals(Connection.DISCONNECTED, after.status(Authority.SHIZUKU).connection)
         assertEquals(Authority.SHIZUKU, manager.selectedAuthorityForExecution())
         assertTrue(manager.withSelectedBackend(mapOf(Authority.WIRED_ADB to "other")).isFailure)
+    }
+
+    @Test
+    fun shizukuAuthorizationSurvivesDisconnectAndProcessRecreation() {
+        val store = InMemoryAuthorityStateStore()
+        val manager = AuthorityManager(store)
+        assertTrue(manager.selectAuthority(Authority.SHIZUKU))
+        assertTrue(manager.setUserIntent(Authority.SHIZUKU, true))
+        assertTrue(manager.setConfigured(Authority.SHIZUKU, true))
+        manager.updatePlatformGrant(Authority.SHIZUKU, PlatformGrant.GRANTED)
+        manager.updateAvailability(Authority.SHIZUKU, Availability.READY)
+        manager.updateConnection(Authority.SHIZUKU, Connection.CONNECTED)
+
+        manager.onBinderDisconnected()
+        val restarted = AuthorityManager(store)
+        val restored = restarted.state.value.status(Authority.SHIZUKU)
+        assertEquals(Authority.SHIZUKU, restarted.state.value.selectedAuthority)
+        assertEquals(AuthorityUserIntent.SHIZUKU, restored.userIntent)
+        assertTrue(restored.configured)
+        assertEquals(PlatformGrant.GRANTED, restored.grant)
+        assertEquals(Availability.TEMPORARILY_UNAVAILABLE, restored.availability)
+        assertEquals(Connection.DISCONNECTED, restored.connection)
+    }
+
+    @Test
+    fun wiredAuthorizationSurvivesUsbWifiDisconnectAndProcessRecreation() {
+        val store = InMemoryAuthorityStateStore()
+        val manager = AuthorityManager(store)
+        assertTrue(manager.selectAuthority(Authority.WIRED_ADB))
+        assertTrue(manager.setUserIntent(Authority.WIRED_ADB, true))
+        assertTrue(manager.setConfigured(Authority.WIRED_ADB, true))
+        manager.updatePlatformGrant(Authority.WIRED_ADB, PlatformGrant.GRANTED)
+        manager.updateAvailability(Authority.WIRED_ADB, Availability.READY)
+        manager.updateConnection(Authority.WIRED_ADB, Connection.CONNECTED)
+
+        manager.onUsbDisconnected()
+        val restarted = AuthorityManager(store)
+        val restored = restarted.state.value.status(Authority.WIRED_ADB)
+        assertEquals(Authority.WIRED_ADB, restarted.state.value.selectedAuthority)
+        assertEquals(AuthorityUserIntent.WIRED_ADB, restored.userIntent)
+        assertTrue(restored.configured)
+        assertEquals(PlatformGrant.GRANTED, restored.grant)
+        assertEquals(Availability.TEMPORARILY_UNAVAILABLE, restored.availability)
+        assertEquals(Connection.DISCONNECTED, restored.connection)
     }
 
     @Test
@@ -1691,6 +1736,62 @@ class ToolingOrchestrationTest {
             auditSink = acceptingWorkspaceAuditSink(mutableListOf()),
         )
         assertTrue(otherExecutor.toolingSpecs.isEmpty())
+    }
+
+    @Test
+    fun disconnectedPrivilegedWorkspaceRemainsExposedButDispatchFailsTemporarilyUnavailable() = runBlocking {
+        val descriptor = WorkspaceDescriptor(
+            id = "workspace-shizuku-offline",
+            displayName = "Persisted Shizuku workspace",
+            backendType = WorkspaceBackendType.PRIVILEGED,
+            rootReference = "authority:SHIZUKU",
+        )
+        val dispatched = AtomicInteger(0)
+        val backend = object : WorkspaceBackend {
+            override val descriptor: WorkspaceDescriptor = descriptor
+            override val capabilities: Set<CapabilityId> = setOf(CapabilityId(CapabilityId.WORKSPACE_ENUMERATE))
+
+            override suspend fun list(request: WorkspaceListRequest): WorkspaceResult<WorkspaceListing> {
+                dispatched.incrementAndGet()
+                return WorkspaceResult.Success(WorkspaceListing(request.relativePath ?: ".", emptyList()))
+            }
+        }
+        val registry = WorkspaceRegistry()
+        assertTrue(registry.register(descriptor, backend))
+        val enumerate = CapabilityId(CapabilityId.WORKSPACE_ENUMERATE)
+        val disconnected = AuthorityState.configured(Authority.SHIZUKU).preservingGrantAfterDisconnect()
+        val selection = AuthoritySelection(
+            selected = Authority.SHIZUKU,
+            states = mapOf(Authority.SHIZUKU to disconnected),
+        )
+        val context = workspaceContext(
+            workspaceGrants(grant("grant-shizuku-offline", enumerate, descriptor.id)),
+            authoritySelection = selection,
+        )
+        val auditEvents = mutableListOf<WorkspaceAuditEvent>()
+        val executor = UnifiedWorkspaceToolExecutor(
+            registry = registry,
+            approvalEngine = ApprovalEngine(),
+            contextProvider = { context },
+            auditSink = acceptingWorkspaceAuditSink(auditEvents),
+            authoritySelectionProvider = { selection },
+        )
+
+        assertEquals(listOf("workspace_list"), executor.toolingSpecs.map { it.name })
+        val invocation = ToolInvocation.fromRuntime(
+            callId = "model-shizuku-offline",
+            snapshotId = context.snapshotId,
+            agentId = context.agentId,
+            name = UnifiedWorkspaceToolExecutor.WORKSPACE_LIST,
+            argumentsJson = "{}",
+        )
+        val result = executor.invoke(invocation, context)
+
+        assertEquals(
+            ToolErrorCode.AUTHORITY_TEMPORARILY_UNAVAILABLE,
+            (result as ToolExecution.Failed).error.code,
+        )
+        assertEquals(0, dispatched.get())
     }
 
     @Test

@@ -9,6 +9,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.rememberScrollState
@@ -237,12 +238,24 @@ fun SettingsScreen(state: SettingsUiState, actions: SettingsActions = SettingsAc
     Column(
         modifier.fillMaxSize()
             .verticalScroll(rememberScrollState())
-            .padding(16.dp)
+            .padding(horizontal = 16.dp, vertical = 12.dp)
             .testTag("settings.screen"),
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
         Text(if (zh) "设置" else "Settings", style = MaterialTheme.typography.headlineSmall)
-        if (state.error != null) Text(state.error, color = MaterialTheme.colorScheme.error)
+        if (state.error != null) {
+            Card(
+                Modifier.fillMaxWidth(),
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer),
+            ) {
+                Text(
+                    state.error,
+                    color = MaterialTheme.colorScheme.onErrorContainer,
+                    modifier = Modifier.padding(14.dp),
+                    style = MaterialTheme.typography.bodyMedium,
+                )
+            }
+        }
         Card(Modifier.fillMaxWidth().testTag("settings.appearance")) {
             Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 Text(if (zh) "外观与语言" else "Appearance and language", style = MaterialTheme.typography.titleMedium)
@@ -1058,7 +1071,7 @@ private fun BoxedSelector(
     modifier: Modifier = Modifier,
 ) {
     androidx.compose.foundation.layout.Box {
-        OutlinedButton(onClick = onOpen, enabled = enabled, modifier = modifier) { Text(value) }
+        OutlinedButton(onClick = onOpen, enabled = enabled, modifier = modifier.heightIn(min = 48.dp)) { Text(value, maxLines = 2) }
         menu()
     }
 }
@@ -1072,7 +1085,7 @@ private fun SettingSwitch(
 ) {
     Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
         Text(label, Modifier.weight(1f))
-        Switch(checked = checked, onCheckedChange = onChange, modifier = modifier)
+        Switch(checked = checked, onCheckedChange = onChange, modifier = modifier.heightIn(min = 48.dp))
     }
 }
 

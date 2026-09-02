@@ -90,6 +90,7 @@ private fun Workspace.toDescriptor(): WorkspaceDescriptor = WorkspaceDescriptor(
     quotaBytes = quotaBytes,
     maxFileBytes = maxFileBytes,
     enabled = enabled,
+    scope = scope,
 )
 
 /** Adapter path guard; canonical result is the shared WorkspacePath String. */

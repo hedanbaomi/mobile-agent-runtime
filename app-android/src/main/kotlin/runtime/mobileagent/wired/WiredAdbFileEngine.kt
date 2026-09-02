@@ -17,6 +17,7 @@ import java.nio.file.DirectoryStream
 import java.nio.file.Files
 import java.nio.file.LinkOption
 import java.nio.file.Path
+import java.nio.file.Paths
 import java.nio.file.StandardCopyOption
 import java.nio.file.StandardOpenOption
 import java.text.Normalizer
@@ -29,6 +30,16 @@ import java.util.UUID
  */
 fun interface PrivilegedFileEngine {
     fun execute(request: WiredAdbFileRequest): WiredAdbFileEngineResult
+}
+
+/**
+ * Optional capability used by the shell-UID helper to bind one authenticated
+ * request stream to a user-selected device directory. Implementations must
+ * return a fresh engine whose root is validated before any operation; a
+ * caller must never use this seam to bypass the authority/grant checks.
+ */
+interface RootScopedPrivilegedFileEngine {
+    fun forRoot(rootPath: String, fullDevice: Boolean): PrivilegedFileEngine
 }
 
 sealed interface WiredAdbFileEngineResult {
@@ -80,8 +91,44 @@ object WiredAdbPathPolicy {
     }
 }
 
+/** Absolute device-path validation; canonical/symlink checks happen in NIO. */
+object WiredAdbAbsolutePathPolicy {
+    fun parse(raw: String): String {
+        require(raw.isNotEmpty() && raw.startsWith('/'))
+        require(!raw.contains('\u0000') && !raw.contains('\\') && !raw.contains(':'))
+        require(Normalizer.normalize(raw, Normalizer.Form.NFC) == raw)
+        require(raw == "/" || !raw.endsWith('/') && !raw.contains("//"))
+        val pieces = raw.split('/').drop(1)
+        require(raw == "/" || pieces.isNotEmpty())
+        require(pieces.size <= WIRED_MAX_ABSOLUTE_PATH_DEPTH)
+        pieces.forEach { piece ->
+            val bytes = strictUtf8(piece) ?: throw InvalidWiredAdbPath()
+            require(piece.isNotEmpty() && piece != "." && piece != "..")
+            require(bytes.size <= WIRED_MAX_SEGMENT_BYTES && piece.none(Char::isISOControl))
+        }
+        require(strictUtf8(raw)?.size ?: 0 <= WIRED_MAX_ABSOLUTE_PATH_BYTES)
+        return raw
+    }
+
+    fun isValid(raw: String): Boolean = runCatching { parse(raw) }.isSuccess
+
+    private fun strictUtf8(value: String): ByteArray? = try {
+        val encoder = StandardCharsets.UTF_8.newEncoder()
+            .onMalformedInput(CodingErrorAction.REPORT)
+            .onUnmappableCharacter(CodingErrorAction.REPORT)
+        encoder.encode(CharBuffer.wrap(value)).let { encoded ->
+            ByteArray(encoded.remaining()).also { encoded.get(it) }
+        }
+    } catch (_: CharacterCodingException) {
+        null
+    }
+}
+
 class InvalidWiredAdbPath : Exception()
 class WiredAdbPathLimit : Exception()
+
+private const val WIRED_MAX_ABSOLUTE_PATH_BYTES = 4 * 1024
+private const val WIRED_MAX_ABSOLUTE_PATH_DEPTH = 64
 
 /**
  * Conservative file implementation for the shell-UID helper.  It is fixed
@@ -90,9 +137,19 @@ class WiredAdbPathLimit : Exception()
  */
 class NioPrivilegedFileEngine(
     root: Path = File("/sdcard/Download/MobileAgentRuntime-Wired").toPath(),
-) : PrivilegedFileEngine {
+    private val fullDevice: Boolean = false,
+) : PrivilegedFileEngine, RootScopedPrivilegedFileEngine {
     private val lock = Any()
     private val rootPath = root.toAbsolutePath().normalize()
+
+    init {
+        require(rootPath.isAbsolute)
+    }
+
+    override fun forRoot(rootPath: String, fullDevice: Boolean): PrivilegedFileEngine {
+        WiredAdbAbsolutePathPolicy.parse(rootPath)
+        return NioPrivilegedFileEngine(Paths.get(rootPath), fullDevice)
+    }
 
     override fun execute(request: WiredAdbFileRequest): WiredAdbFileEngineResult = synchronized(lock) {
         try {
@@ -124,23 +181,34 @@ class NioPrivilegedFileEngine(
         val segments = WiredAdbPathPolicy.parse(request.relativePath, allowRoot = true)
         val directory = resolve(segments)
         if (!Files.exists(directory, LinkOption.NOFOLLOW_LINKS)) {
-            return WiredAdbFileResult(WiredAdbFileOperation.LIST, pathOf(segments))
+            throw EngineFailure(ERR_NOT_FOUND)
         }
         requireDirectory(directory)
         val children = entries(directory)
-        if (children.size > WIRED_MAX_DIRECTORY_ENTRIES) throw EngineFailure(ERR_LIMIT)
-        val output = children.sortedBy { it.fileName.toString() }.map { child ->
-            rejectSymlink(child)
-            val childSegments = segments + child.fileName.toString()
-            when {
-                Files.isDirectory(child, LinkOption.NOFOLLOW_LINKS) ->
-                    WiredAdbFileEntry(pathOf(childSegments), WiredAdbEntryType.DIRECTORY)
-                Files.isRegularFile(child, LinkOption.NOFOLLOW_LINKS) ->
-                    WiredAdbFileEntry(pathOf(childSegments), WiredAdbEntryType.FILE, Files.size(child))
-                else -> throw EngineFailure(ERR_UNSUPPORTED_ENTRY)
-            }
+        val sortedChildren = children.sortedBy { it.fileName.toString() }
+        val output = sortedChildren.take(WIRED_MAX_DIRECTORY_ENTRIES).mapNotNull { child ->
+            // Symlinks are not traversable entries. Omit them from directory
+            // browsing rather than turning a safe directory listing into a
+            // path disclosure or an all-or-nothing failure.
+            if (Files.isSymbolicLink(child)) return@mapNotNull null
+            runCatching {
+                rejectSymlink(child)
+                val childSegments = segments + child.fileName.toString()
+                when {
+                    Files.isDirectory(child, LinkOption.NOFOLLOW_LINKS) ->
+                        WiredAdbFileEntry(pathOf(childSegments), WiredAdbEntryType.DIRECTORY)
+                    Files.isRegularFile(child, LinkOption.NOFOLLOW_LINKS) ->
+                        WiredAdbFileEntry(pathOf(childSegments), WiredAdbEntryType.FILE, Files.size(child))
+                    else -> null
+                }
+            }.getOrNull()
         }
-        return WiredAdbFileResult(WiredAdbFileOperation.LIST, pathOf(segments), entries = output)
+        return WiredAdbFileResult(
+            WiredAdbFileOperation.LIST,
+            pathOf(segments),
+            entries = output,
+            truncated = sortedChildren.size > WIRED_MAX_DIRECTORY_ENTRIES,
+        )
     }
 
     private fun stat(request: WiredAdbFileRequest): WiredAdbFileResult {
@@ -332,6 +400,7 @@ class NioPrivilegedFileEngine(
     }
 
     private fun inspectUsage(): Usage {
+        if (fullDevice) return Usage(0, 0L, 0)
         if (!Files.exists(rootPath, LinkOption.NOFOLLOW_LINKS)) return Usage(0, 0L, 0)
         requireDirectory(rootPath)
         var files = 0

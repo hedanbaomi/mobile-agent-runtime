@@ -28,6 +28,12 @@ class ShizukuUserService private constructor(
     internal constructor(shellRunner: ShizukuShellRunner, testOnly: Unit) : this(shellRunner)
 
     private val files = ShizukuWorkspaceFileStore()
+    /**
+     * Device-root directory handles and attached workspace handles are kept
+     * only for this UserService instance.  They are opaque to the app and are
+     * invalid as soon as the authenticated service/session goes away.
+     */
+    private val privilegedDirectories = ShizukuDirectoryHandleStore()
     /** Android UID is stable for this process, but read it at each boundary. */
     private val serviceUid: Int
         get() = Process.myUid()
@@ -149,6 +155,95 @@ class ShizukuUserService private constructor(
         return shellRunner.cancel(callId)
     }
 
+    override fun openDirectoryRootSession(sessionId: String?, maxEntries: Int): String =
+        withSession(sessionId, "open_directory_root") {
+            if (maxEntries !in 1..ShizukuDirectoryHandleStore.MAX_DIRECTORY_ENTRIES) {
+                return@withSession denied("open_directory_root", ShizukuWorkspaceFileStore.LIMIT)
+            }
+            privilegedDirectories.openRoot(maxEntries)
+        }
+
+    override fun browseDirectorySession(
+        sessionId: String?,
+        directoryHandle: String?,
+        maxEntries: Int,
+    ): String = withSession(sessionId, "browse_directory") {
+        if (maxEntries !in 1..ShizukuDirectoryHandleStore.MAX_DIRECTORY_ENTRIES) {
+            return@withSession denied("browse_directory", ShizukuWorkspaceFileStore.LIMIT)
+        }
+        privilegedDirectories.browse(directoryHandle, maxEntries)
+    }
+
+    override fun attachDirectorySession(sessionId: String?, directoryHandle: String?): String =
+        withSession(sessionId, "attach_directory") {
+            privilegedDirectories.attach(directoryHandle)
+        }
+
+    override fun listWorkspaceSession(
+        sessionId: String?,
+        workspaceHandle: String?,
+        relativePath: String?,
+        maxEntries: Int,
+    ): String = withWorkspaceSession(sessionId, "list", workspaceHandle) { workspace ->
+        if (maxEntries !in 1..ShizukuWorkspaceFileStore.MAX_DIRECTORY_ENTRIES) {
+            return@withWorkspaceSession denied("list", ShizukuWorkspaceFileStore.LIMIT)
+        }
+        workspace.store.list(relativePath)
+    }
+
+    override fun readWorkspaceSession(
+        sessionId: String?,
+        workspaceHandle: String?,
+        relativePath: String?,
+        maxBytes: Int,
+    ): String = withWorkspaceSession(sessionId, "read", workspaceHandle) { workspace ->
+        workspace.store.read(relativePath, maxBytes)
+    }
+
+    override fun writeWorkspaceSession(
+        sessionId: String?,
+        workspaceHandle: String?,
+        relativePath: String?,
+        utf8Content: ByteArray?,
+        replaceExisting: Boolean,
+    ): String = withWorkspaceSession(sessionId, "write", workspaceHandle) { handle ->
+        handle.store.write(relativePath, utf8Content, replaceExisting)
+    }
+
+    override fun mkdirWorkspaceSession(
+        sessionId: String?,
+        workspaceHandle: String?,
+        relativePath: String?,
+    ): String = withWorkspaceSession(sessionId, "mkdir", workspaceHandle) { workspace ->
+        workspace.store.mkdir(relativePath)
+    }
+
+    override fun deleteWorkspaceSession(
+        sessionId: String?,
+        workspaceHandle: String?,
+        relativePath: String?,
+    ): String = withWorkspaceSession(sessionId, "delete", workspaceHandle) { workspace ->
+        workspace.store.delete(relativePath)
+    }
+
+    override fun statWorkspaceSession(
+        sessionId: String?,
+        workspaceHandle: String?,
+        relativePath: String?,
+    ): String = withWorkspaceSession(sessionId, "stat", workspaceHandle) { workspace ->
+        workspace.store.stat(relativePath)
+    }
+
+    override fun moveWorkspaceSession(
+        sessionId: String?,
+        workspaceHandle: String?,
+        sourcePath: String?,
+        destinationPath: String?,
+        replaceExisting: Boolean,
+    ): String = withWorkspaceSession(sessionId, "move", workspaceHandle) { workspace ->
+        workspace.store.move(sourcePath, destinationPath, replaceExisting)
+    }
+
     /** Reserved transaction used by Shizuku to tear down a UserService. */
     override fun destroy() {
         // destroy() has no session-id argument in Shizuku's reserved Binder
@@ -168,6 +263,20 @@ class ShizukuUserService private constructor(
     ): String {
         val denial = checkSession(requestedSessionId)
         return denial?.let { denied(operation, it) } ?: action()
+    }
+
+    private fun withWorkspaceSession(
+        requestedSessionId: String?,
+        operation: String,
+        workspaceHandle: String?,
+        action: (ShizukuDirectoryHandleStore.WorkspaceHandle) -> String,
+    ): String {
+        val denial = checkSession(requestedSessionId)
+        if (denial != null) return denied(operation, denial)
+        val workspace = privilegedDirectories.workspace(workspaceHandle)
+            ?: return denied(operation, ShizukuDirectoryHandleStore.INVALID_HANDLE)
+        return runCatching { action(workspace) }
+            .getOrElse { denied(operation, ShizukuWorkspaceFileStore.OPERATION_UNAVAILABLE) }
     }
 
     /**

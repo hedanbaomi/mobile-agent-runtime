@@ -13,7 +13,12 @@ package runtime.mobileagent.shizuku
  */
 object ShizukuBridgePolicy {
     const val MIN_SERVER_VERSION = 13
-    const val USER_SERVICE_PROTOCOL_VERSION = 2
+    /**
+     * Version 3 adds session-bound typed directory handles and attached
+     * workspace handles.  Older UserServices are rejected rather than being
+     * treated as if they could browse arbitrary device directories.
+     */
+    const val USER_SERVICE_PROTOCOL_VERSION = 3
     /** Kept as a named compatibility constant; root is never accepted by v2. */
     const val ROOT_UID = 0
     const val SHELL_UID = 2000

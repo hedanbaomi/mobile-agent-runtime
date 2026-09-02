@@ -33,6 +33,7 @@ import runtime.mobileagent.domain.CapabilityGrant
 import runtime.mobileagent.domain.CapabilityId
 import runtime.mobileagent.domain.GrantLifetime
 import runtime.mobileagent.domain.WorkspaceBackendType
+import runtime.mobileagent.domain.WorkspaceScope
 import runtime.mobileagent.feature.agents.AgentEditorUi
 import runtime.mobileagent.feature.agents.AgentGrantDraftUi
 import runtime.mobileagent.feature.agents.AgentGrantUi
@@ -41,9 +42,13 @@ import runtime.mobileagent.feature.agents.AgentTrustedSkillUi
 import runtime.mobileagent.feature.agents.AgentWorkspaceUi
 import runtime.mobileagent.feature.agents.AgentWorkspaceAccessPreset
 import runtime.mobileagent.feature.agents.AgentWorkspaceGrantPresetUi
+import runtime.mobileagent.feature.agents.AgentWorkspaceAccessUi
 import runtime.mobileagent.feature.agents.AgentsActions
 import runtime.mobileagent.feature.agents.AgentsScreen
 import runtime.mobileagent.feature.agents.AgentsUiState
+import runtime.mobileagent.integration.WorkspaceAccessItem
+import runtime.mobileagent.integration.WorkspaceAccessStatus
+import runtime.mobileagent.ui.selectDurablyAuthorizedWorkspace
 
 /** UI seam checks for the grant editor; these render no Application or repository internals. */
 class AgentsGrantUiTest {
@@ -254,6 +259,124 @@ class AgentsGrantUiTest {
             .assertIsDisplayed()
         assertTrue(composeRule.onAllNodesWithText("content://", useUnmergedTree = true).fetchSemanticsNodes().isEmpty())
         assertTrue(composeRule.onAllNodesWithText("a".repeat(64), useUnmergedTree = true).fetchSemanticsNodes().isEmpty())
+    }
+
+    @Test
+    fun workspaceAccessCardExposesOnlySafeActionsAndKeepsFullDeviceExplicit() {
+        var safChosen = false
+        var privilegedChosen = false
+        var fullDeviceEnabled = false
+        val editor = fixtureEditor().copy(
+            workspaceAccess = AgentWorkspaceAccessUi(
+                selectedWorkspaceName = "Documents",
+                selectedBackendLabel = "用户授权文件",
+                availableWorkspaceCount = 2,
+                canChooseSaf = true,
+                canBrowsePrivileged = true,
+                fullDeviceFilesEligible = true,
+            ),
+        )
+        composeRule.setContent {
+            Box(Modifier.width(320.dp).height(640.dp)) {
+                MaterialTheme {
+                    AgentsScreen(
+                        state = AgentsUiState(
+                            selectedAgentId = "agent.one",
+                            summary = editor,
+                            editor = editor,
+                            editorOpen = true,
+                        ),
+                        actions = AgentsActions(
+                            onChooseSafWorkspace = { safChosen = true },
+                            onBrowsePrivilegedWorkspace = { privilegedChosen = true },
+                            onToggleFullDeviceFiles = { fullDeviceEnabled = it },
+                        ),
+                    )
+                }
+            }
+        }
+
+        composeRule.onNodeWithTag(AgentTestTags.WORKSPACE_ACCESS, useUnmergedTree = true)
+            .performScrollTo()
+            .assertIsDisplayed()
+        composeRule.onNodeWithTag(AgentTestTags.WORKSPACE_ACCESS_SAF, useUnmergedTree = true)
+            .performScrollTo()
+            .performClick()
+        composeRule.onNodeWithTag(AgentTestTags.WORKSPACE_ACCESS_PRIVILEGED, useUnmergedTree = true)
+            .performScrollTo()
+            .performClick()
+        composeRule.onNodeWithTag(AgentTestTags.WORKSPACE_ACCESS_FULL_DEVICE, useUnmergedTree = true)
+            .performScrollTo()
+            .performClick()
+        assertTrue(safChosen)
+        assertTrue(privilegedChosen)
+        assertTrue(fullDeviceEnabled)
+        assertTrue(
+            composeRule.onAllNodesWithText("content://", useUnmergedTree = true)
+                .fetchSemanticsNodes().isEmpty(),
+        )
+    }
+
+    @Test
+    fun fullDeviceAuthorizationRemainsVisibleAndRevocableWhileAuthorityIsOffline() {
+        var requested: Boolean? = null
+        val editor = fixtureEditor().copy(
+            workspaceAccess = AgentWorkspaceAccessUi(
+                selectedWorkspaceName = "Documents",
+                selectedBackendLabel = "ADB 级目录",
+                availableWorkspaceCount = 2,
+                canChooseSaf = true,
+                canBrowsePrivileged = false,
+                fullDeviceFilesEnabled = true,
+                fullDeviceFilesEligible = false,
+                status = "完整设备访问授权已保留；当前连接不可用，连接恢复后继续生效。",
+            ),
+        )
+        composeRule.setContent {
+            MaterialTheme {
+                AgentsScreen(
+                    state = AgentsUiState(
+                        selectedAgentId = "agent.one",
+                        summary = editor,
+                        editor = editor,
+                        editorOpen = true,
+                    ),
+                    actions = AgentsActions(onToggleFullDeviceFiles = { requested = it }),
+                )
+            }
+        }
+
+        composeRule.onNodeWithText("完整设备访问授权已保留；当前连接不可用，连接恢复后继续生效。")
+            .performScrollTo()
+            .assertIsDisplayed()
+        composeRule.onNodeWithTag(AgentTestTags.WORKSPACE_ACCESS_FULL_DEVICE, useUnmergedTree = true)
+            .performScrollTo()
+            .performClick()
+        assertEquals(false, requested)
+    }
+
+    @Test
+    fun disconnectedAdbWorkspaceRemainsSelectedFromDurableAuthorization() {
+        val offlineWorkspace = WorkspaceAccessItem(
+            workspaceId = "workspace.offline",
+            displayName = "ADB 目录",
+            backendType = WorkspaceBackendType.PRIVILEGED,
+            scope = WorkspaceScope.SELECTED_DIRECTORY,
+            readable = false,
+            writable = false,
+            status = WorkspaceAccessStatus.UNAVAILABLE,
+            durablyAuthorized = true,
+            grantedCapabilities = setOf(CapabilityId(CapabilityId.FILE_READ_TEXT)),
+            grantRevision = 7L,
+        )
+
+        assertEquals(
+            offlineWorkspace,
+            selectDurablyAuthorizedWorkspace(
+                listOf(offlineWorkspace),
+                WorkspaceScope.SELECTED_DIRECTORY,
+            ),
+        )
     }
 
     @Test

@@ -58,4 +58,41 @@ class WorkspaceUiPresentationTest {
         }
         assertTrue(invalid.isFailure)
     }
+
+    @Test
+    fun fallbackPresentationDoesNotUseUriAndDoesNotNeedStore() {
+        val saf = runtime.mobileagent.domain.Workspace(
+            id = "ws-saf-fallback",
+            displayName = "content://tree/primary",
+            backendType = WorkspaceBackendType.SAF_TREE,
+            rootReference = "opaque",
+            readable = true,
+            writable = true,
+            quotaBytes = 1,
+            maxFileBytes = 1,
+            enabled = true,
+        )
+        val presentation = fallbackWorkspaceUiPresentation(saf, null, chinese = true)
+        assertEquals(WorkspaceUiKind.SAF, presentation?.kind)
+        assertFalse(presentation!!.title.contains("content://"))
+        val privileged = runtime.mobileagent.domain.Workspace(
+            id = "ws-priv-fallback",
+            displayName = "/storage/emulated/0/Download",
+            backendType = WorkspaceBackendType.PRIVILEGED,
+            rootReference = "authority:SHIZUKU",
+            readable = true,
+            writable = true,
+            quotaBytes = 1,
+            maxFileBytes = 1,
+            enabled = true,
+        )
+        assertEquals(
+            "/storage/emulated/0/Download",
+            fallbackWorkspaceUiPresentation(
+                privileged,
+                runtime.mobileagent.domain.Authority.SHIZUKU,
+                chinese = true,
+            )?.title,
+        )
+    }
 }

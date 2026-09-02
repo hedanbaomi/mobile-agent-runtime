@@ -8,6 +8,8 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.width
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Chat
+import androidx.compose.material.icons.outlined.Settings
+import androidx.compose.material.icons.outlined.Tune
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.getValue
@@ -252,6 +254,98 @@ class GlobalConversationUiTest {
         assertEquals(0, compose.onAllNodesWithText("菜单", useUnmergedTree = true).fetchSemanticsNodes().size)
         assertEquals(0, compose.onAllNodesWithText("更多", useUnmergedTree = true).fetchSemanticsNodes().size)
         compose.onNodeWithTag("conversation.context").assertIsDisplayed()
+    }
+
+    @Test
+    fun compactNonChatShellUsesMenuIconWithoutVisibleMenuText() {
+        var opened = 0
+        compose.setContent {
+            CompositionLocalProvider(LocalDensity provides Density(1f, fontScale = 1.8f)) {
+                MaterialTheme {
+                    GlobalDrawerShell(
+                        selectedRoute = "providers",
+                        destinations = listOf(
+                            runtime.mobileagent.ui.AppNavigationDestination(
+                                "providers",
+                                "服务商",
+                                Icons.Outlined.Tune,
+                            ),
+                            runtime.mobileagent.ui.AppNavigationDestination(
+                                "settings",
+                                "设置",
+                                Icons.Outlined.Settings,
+                            ),
+                        ),
+                        onRouteSelected = {},
+                        showCompactOpenButton = true,
+                        compactOpenButtonLabel = "打开菜单",
+                        modifier = Modifier.width(320.dp).height(640.dp),
+                        onDrawerOpenChange = { if (it) opened += 1 },
+                        content = { _ ->
+                            Box(Modifier.width(320.dp).height(640.dp))
+                        },
+                    )
+                }
+            }
+        }
+        compose.onNodeWithTag("global.drawer.open").assertIsDisplayed()
+        compose.onNodeWithContentDescription("打开菜单").assertIsDisplayed()
+        assertEquals(0, compose.onAllNodesWithText("菜单", useUnmergedTree = true).fetchSemanticsNodes().size)
+        compose.onNodeWithTag("global.drawer.open").performClick()
+        compose.waitForIdle()
+        assertEquals(1, opened)
+    }
+
+    @Test
+    fun landscapeNarrowHeightKeepsMenuIconReachable() {
+        compose.setContent {
+            CompositionLocalProvider(LocalDensity provides Density(1f, fontScale = 1.8f)) {
+                MaterialTheme {
+                    Box(Modifier.width(640.dp).height(320.dp)) {
+                        ConversationScreen(state = drawerState())
+                    }
+                }
+            }
+        }
+        compose.onNodeWithTag("conversation.drawer.open").assertIsDisplayed()
+        compose.onNodeWithContentDescription("打开菜单").assertIsDisplayed()
+        compose.onNodeWithTag("conversation.topBar").assertIsDisplayed()
+        assertEquals(0, compose.onAllNodesWithText("菜单", useUnmergedTree = true).fetchSemanticsNodes().size)
+    }
+
+    @Test
+    fun wideLayoutHidesCompactMenuOpener() {
+        compose.setContent {
+            CompositionLocalProvider(LocalDensity provides Density(1f, fontScale = 1.8f)) {
+                MaterialTheme {
+                    GlobalDrawerShell(
+                        selectedRoute = "settings",
+                        destinations = listOf(
+                            runtime.mobileagent.ui.AppNavigationDestination(
+                                "settings",
+                                "设置",
+                                Icons.Outlined.Settings,
+                            ),
+                            runtime.mobileagent.ui.AppNavigationDestination(
+                                "providers",
+                                "服务商",
+                                Icons.Outlined.Tune,
+                            ),
+                        ),
+                        onRouteSelected = {},
+                        showCompactOpenButton = true,
+                        compactOpenButtonLabel = "打开菜单",
+                        modifier = Modifier.width(640.dp).height(320.dp),
+                        content = { _ ->
+                            Box(Modifier.width(640.dp).height(320.dp))
+                        },
+                    )
+                }
+            }
+        }
+        compose.onNodeWithTag("global.shell.wide").assertIsDisplayed()
+        compose.onAllNodesWithTag("global.drawer.open").assertCountEquals(0)
+        assertEquals(0, compose.onAllNodesWithText("菜单", useUnmergedTree = true).fetchSemanticsNodes().size)
     }
 
     private fun drawerState(): ChatUiState = ChatUiState(

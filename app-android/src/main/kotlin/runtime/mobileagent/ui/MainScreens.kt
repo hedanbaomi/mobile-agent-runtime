@@ -346,7 +346,7 @@ internal fun MainApp() {
                 drawerOpen = drawerOpen,
                 onDrawerOpenChange = { drawerOpen = it },
                 showCompactMenuButton = route != AppRoutes.CHAT,
-                compactMenuButtonLabel = if (chinese) "菜单" else "Menu",
+                compactMenuButtonLabel = if (chinese) "打开菜单" else "Open menu",
                 consumeBottomSystemInsets = route != AppRoutes.CHAT,
                 drawerContent = { close ->
                     runtime.mobileagent.feature.chat.GlobalDrawerContent(
@@ -465,6 +465,38 @@ internal fun MainApp() {
                     }
                 }
             }
+        }
+        workspacePickerState.pendingNewThread?.let { pending ->
+            AlertDialog(
+                onDismissRequest = workspacePickerVm::clearResult,
+                title = { Text(if (chinese) "切换工作区" else "Switch workspace") },
+                text = {
+                    Text(
+                        if (chinese) {
+                            "工作区属于当前会话上下文，切换将创建新会话。"
+                        } else {
+                            "This workspace belongs to the current conversation. Switching creates a new conversation."
+                        },
+                    )
+                },
+                confirmButton = {
+                    TextButton(
+                        onClick = {
+                            chatVm.selectAgent(pending.agentId)
+                            chatVm.newSession(pending.requestedWorkspaceId)
+                            workspacePickerVm.clearResult()
+                            closeWorkspacePicker()
+                            drawerOpen = false
+                            requestRoute(AppRoutes.CHAT)
+                        },
+                    ) { Text(if (chinese) "创建新会话" else "Create conversation") }
+                },
+                dismissButton = {
+                    TextButton(onClick = workspacePickerVm::clearResult) {
+                        Text(if (chinese) "取消" else "Cancel")
+                    }
+                },
+            )
         }
         if (unsavedDialog) UnsavedChangesDialog(chinese, ::discardUnsaved, { unsavedDialog = false })
     }
@@ -1086,6 +1118,11 @@ private fun workspaceAccessResultMessage(
         "工作区授权已保存；此智能体的所有会话将在下一次运行时使用最新权限。"
     } else {
         "Workspace access is saved; every session of this Agent uses the latest permissions on its next run."
+    }
+    is runtime.mobileagent.integration.WorkspaceAccessResult.NewThreadRequired -> if (chinese) {
+        "工作区属于当前会话上下文，切换将创建新会话。"
+    } else {
+        "This workspace belongs to the current conversation. Switching creates a new conversation."
     }
     is runtime.mobileagent.integration.WorkspaceAccessResult.Failure -> if (chinese) {
         "工作区操作失败：${result.code.name}"

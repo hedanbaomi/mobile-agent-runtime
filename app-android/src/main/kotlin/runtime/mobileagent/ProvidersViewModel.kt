@@ -59,7 +59,14 @@ data class ProviderDraft(
     val outputLimit: String = "4096",
 )
 
-class ProvidersViewModel(application: Application) : AndroidViewModel(application) {
+fun interface ProviderAdapterFactory {
+    fun create(provider: ProviderProfile): runtime.mobileagent.provider.ModelAdapter
+}
+
+class ProvidersViewModel @JvmOverloads constructor(
+    application: Application,
+    private val adapterFactory: ProviderAdapterFactory? = null,
+) : AndroidViewModel(application) {
     private val app = application as MobileAgentApp
     val providers = mutableStateListOf<ProviderProfile>()
     val models = mutableStateListOf<ModelProfile>()
@@ -217,7 +224,7 @@ class ProvidersViewModel(application: Application) : AndroidViewModel(applicatio
 
     /** Requires a separate UI confirmation because even a minimal chat may be billed. */
     fun testConnection(modelId: String, approved: Boolean) {
-        if (!approved || busy.value) return
+        if (!approved) return
         probeJob?.cancel()
         probeJob = null
         val generation = ++probeGeneration
@@ -259,7 +266,7 @@ class ProvidersViewModel(application: Application) : AndroidViewModel(applicatio
             try {
                 val result = withContext(Dispatchers.IO) {
                     secret = app.container.secrets.resolveForHost(provider.secretRef)
-                    createAdapter(provider).testConnection(model, secret!!, operationId)
+                    adapterFor(provider).testConnection(model, secret!!, operationId)
                 }
                 recordConnectionCompleted(provider, model, result, elapsedMillis(started))
                 if (generation == probeGeneration) {
@@ -317,7 +324,7 @@ class ProvidersViewModel(application: Application) : AndroidViewModel(applicatio
 
     /** Requires a separate UI confirmation because capability checks may be billed. */
     fun probe(modelId: String, approved: Boolean) {
-        if (!approved || busy.value) return
+        if (!approved) return
         probeJob?.cancel()
         probeJob = null
         val generation = ++probeGeneration
@@ -365,7 +372,7 @@ class ProvidersViewModel(application: Application) : AndroidViewModel(applicatio
             try {
                 val report = withContext(Dispatchers.IO) {
                     secret = app.container.secrets.resolveForHost(provider.secretRef)
-                    createAdapter(provider).probe(
+                    adapterFor(provider).probe(
                         model,
                         secret!!,
                         runtime.mobileagent.provider.ProbeConsent.GRANTED,
@@ -488,6 +495,9 @@ class ProvidersViewModel(application: Application) : AndroidViewModel(applicatio
         busy.value = false
         probeState.value = ProviderProbeUiState()
     }
+
+    private fun adapterFor(provider: ProviderProfile): runtime.mobileagent.provider.ModelAdapter =
+        adapterFactory?.create(provider) ?: createAdapter(provider)
 
     private fun createAdapter(provider: ProviderProfile): runtime.mobileagent.provider.openai.OpenAiCompatibleAdapter {
         val headers = linkedMapOf<String, RequestHeaderValue>()

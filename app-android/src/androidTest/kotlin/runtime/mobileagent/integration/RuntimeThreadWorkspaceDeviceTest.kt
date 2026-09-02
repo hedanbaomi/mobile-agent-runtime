@@ -6,6 +6,7 @@ package runtime.mobileagent.integration
 import androidx.lifecycle.SavedStateHandle
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
+import java.io.File
 import java.util.UUID
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
@@ -524,19 +525,9 @@ class RuntimeThreadWorkspaceDeviceTest {
         val container = fixture.app.container
         val runtime = container.runtimeIntegration
         val threadPort = container.threadWorkspacePort
-        val workspaceRepository = WorkspaceRepository(container.db)
-        val other = saveWorkspace(workspaceRepository, "workspace-thread-switch-${fixture.suffix}")
-        val policyVersion = container.agentGrantPort.currentPolicyVersion()
-        container.agentGrantPort.saveGrant(
-            CapabilityGrant(
-                grantId = "grant-thread-switch-${fixture.suffix}",
-                agentId = fixture.agentId,
-                capability = CapabilityId(CapabilityId.FILE_READ_TEXT),
-                workspaceId = other.id,
-                lifetime = GrantLifetime.PERSISTENT,
-                policyVersion = policyVersion,
-                createdAt = fixture.now,
-            ),
+        val other = runtime.registerAppPrivateWorkspace(
+            workspaceId = "workspace-thread-switch-${fixture.suffix}",
+            root = File(fixture.app.filesDir, "agent-workspace-switch-${fixture.suffix}").toPath(),
         )
         runtime.useRecentWorkspace(
             workspaceId = RuntimeIntegration.INTERNAL_WORKSPACE_ID,
@@ -558,25 +549,25 @@ class RuntimeThreadWorkspaceDeviceTest {
             conversationId = "conversation-thread-switch-${fixture.suffix}",
             at = fixture.now,
         )
-        val rebound = runtime.useRecentWorkspace(
+        val firstBind = runtime.useRecentWorkspace(
             workspaceId = RuntimeIntegration.INTERNAL_WORKSPACE_ID,
             target = WorkspacePickerTarget(
                 agentId = fixture.agentId,
                 threadId = conversation.id,
             ),
         )
-        assertTrue("thread picker must bind without rewriting Agent default: $rebound", rebound is WorkspaceAccessResult.Success)
-        val unregistered = runtime.useRecentWorkspace(
+        assertTrue("unbound thread may bind once: $firstBind", firstBind is WorkspaceAccessResult.Success)
+        val switched = runtime.useRecentWorkspace(
             workspaceId = other.id,
             target = WorkspacePickerTarget(
                 agentId = fixture.agentId,
                 threadId = conversation.id,
             ),
         )
-        assertTrue(
-            "an unregistered workspace must not be bound by the picker: $unregistered",
-            unregistered is WorkspaceAccessResult.Failure,
-        )
+        val required = switched as? WorkspaceAccessResult.NewThreadRequired
+            ?: error("bound thread must not be rewritten: $switched")
+        assertEquals(conversation.id, required.currentThreadId)
+        assertEquals(other.id, required.requestedWorkspaceId)
         assertEquals(
             RuntimeIntegration.INTERNAL_WORKSPACE_ID,
             threadPort.conversationWorkspaceBinding(conversation.id)?.workspaceId,
@@ -584,6 +575,76 @@ class RuntimeThreadWorkspaceDeviceTest {
         assertEquals(
             RuntimeIntegration.INTERNAL_WORKSPACE_ID,
             threadPort.agentWorkspaceDefault(fixture.agentId)?.workspaceId,
+        )
+
+        val chat = ChatViewModel(fixture.app, SavedStateHandle())
+        chat.selectAgent(fixture.agentId)
+        val newConversationId = requireNotNull(chat.newSession(other.id))
+        assertEquals(other.id, threadPort.conversationWorkspaceBinding(newConversationId)?.workspaceId)
+        assertEquals(
+            RuntimeIntegration.INTERNAL_WORKSPACE_ID,
+            threadPort.conversationWorkspaceBinding(conversation.id)?.workspaceId,
+        )
+        assertEquals(
+            RuntimeIntegration.INTERNAL_WORKSPACE_ID,
+            threadPort.agentWorkspaceDefault(fixture.agentId)?.workspaceId,
+        )
+        val newConversation = requireNotNull(container.conversations.get(newConversationId))
+        val newSnapshot = requireNotNull(container.agents.getSnapshot(newConversation.snapshotId))
+        assertTrue(container.agentGrantPort.listSnapshotBindings(newSnapshot.id).all { it.workspaceId == other.id })
+        assertBoundWorkspaceTools(
+            runtime = runtime,
+            snapshot = snapshot,
+            conversationId = conversation.id,
+            workspaceId = RuntimeIntegration.INTERNAL_WORKSPACE_ID,
+            suffix = "${fixture.suffix}-old",
+        )
+        assertBoundWorkspaceTools(
+            runtime = runtime,
+            snapshot = newSnapshot,
+            conversationId = newConversationId,
+            workspaceId = other.id,
+            suffix = "${fixture.suffix}-new",
+        )
+    }
+
+    @Test
+    fun unboundThreadCanBindOnceAndThenStaysImmutable() = runBlocking {
+        val fixture = fixture()
+        val container = fixture.app.container
+        val runtime = container.runtimeIntegration
+        val threadPort = container.threadWorkspacePort
+        val snapshot = runtime.createSnapshotWithWorkspace(
+            agentId = fixture.agentId,
+            workspaceId = null,
+            snapshotId = "snapshot-unbound-first-${fixture.suffix}",
+            at = fixture.now,
+        )
+        val conversation = container.conversations.create(
+            snapshotId = snapshot.id,
+            title = "unbound first bind",
+            conversationId = "conversation-unbound-first-${fixture.suffix}",
+            at = fixture.now,
+        )
+        assertEquals(null, threadPort.conversationWorkspaceBinding(conversation.id))
+        val bound = runtime.useRecentWorkspace(
+            workspaceId = RuntimeIntegration.INTERNAL_WORKSPACE_ID,
+            target = WorkspacePickerTarget(agentId = fixture.agentId, threadId = conversation.id),
+        )
+        assertTrue(bound is WorkspaceAccessResult.Success)
+        assertEquals(
+            RuntimeIntegration.INTERNAL_WORKSPACE_ID,
+            threadPort.conversationWorkspaceBinding(conversation.id)?.workspaceId,
+        )
+        val other = saveWorkspace(WorkspaceRepository(container.db), "workspace-after-first-${fixture.suffix}")
+        val second = runtime.useRecentWorkspace(
+            workspaceId = other.id,
+            target = WorkspacePickerTarget(agentId = fixture.agentId, threadId = conversation.id),
+        )
+        assertTrue(second is WorkspaceAccessResult.NewThreadRequired)
+        assertEquals(
+            RuntimeIntegration.INTERNAL_WORKSPACE_ID,
+            threadPort.conversationWorkspaceBinding(conversation.id)?.workspaceId,
         )
     }
 

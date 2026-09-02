@@ -19,6 +19,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import runtime.mobileagent.domain.Authority
 import runtime.mobileagent.feature.agents.WorkspacePickerAttachedUi
 import runtime.mobileagent.feature.agents.WorkspacePickerAttachPhaseUi
+import runtime.mobileagent.feature.agents.WorkspacePickerNewThreadUi
 import runtime.mobileagent.feature.agents.WorkspacePickerAuthorityUi
 import runtime.mobileagent.feature.agents.WorkspacePickerBreadcrumbUi
 import runtime.mobileagent.feature.agents.WorkspacePickerEntryUi
@@ -264,9 +265,11 @@ class WorkspacePickerViewModel(
                             displayName = result.workspace.displayName,
                             statusLabel = result.workspace.status.toUiLabel(),
                         ),
+                        pendingNewThread = null,
                         statusMessage = "已打开最近工作区。",
                     )
                 }
+                is WorkspaceAccessResult.NewThreadRequired -> applyNewThreadRequired(result)
                 is WorkspaceAccessResult.Failure -> showError(
                     result.code.toUiCode(),
                     result.code.toUiMessage(),
@@ -280,6 +283,7 @@ class WorkspacePickerViewModel(
         _state.value = _state.value.copy(
             attachPhase = WorkspacePickerAttachPhaseUi.IDLE,
             attached = null,
+            pendingNewThread = null,
             statusMessage = null,
         )
     }
@@ -339,8 +343,6 @@ class WorkspacePickerViewModel(
     private fun applyAttachResult(result: WorkspaceAccessResult) {
         when (result) {
             is WorkspaceAccessResult.Success -> {
-                // Do not call listWorkspaces or re-read grants here.  The
-                // result is the exact committed transaction projection.
                 _state.value = _state.value.copy(
                     attachPhase = WorkspacePickerAttachPhaseUi.SUCCESS,
                     attached = WorkspacePickerAttachedUi(
@@ -348,17 +350,38 @@ class WorkspacePickerViewModel(
                         displayName = result.workspace.displayName,
                         statusLabel = result.workspace.status.toUiLabel(),
                     ),
+                    pendingNewThread = null,
                     errorCode = null,
                     errorMessage = null,
                     statusMessage = "工作区已添加。",
                 )
             }
+            is WorkspaceAccessResult.NewThreadRequired -> applyNewThreadRequired(result)
             is WorkspaceAccessResult.Failure -> showError(
                 result.code.toUiCode(),
                 result.code.toUiMessage(),
                 attachFailure = true,
             )
         }
+    }
+
+    private fun applyNewThreadRequired(result: WorkspaceAccessResult.NewThreadRequired) {
+        _state.value = _state.value.copy(
+            attachPhase = WorkspacePickerAttachPhaseUi.NEEDS_NEW_THREAD,
+            attached = WorkspacePickerAttachedUi(
+                workspaceId = result.requestedWorkspaceId,
+                displayName = result.workspace.displayName,
+                statusLabel = result.workspace.status.toUiLabel(),
+            ),
+            pendingNewThread = WorkspacePickerNewThreadUi(
+                agentId = result.agentId,
+                currentThreadId = result.currentThreadId,
+                requestedWorkspaceId = result.requestedWorkspaceId,
+            ),
+            errorCode = null,
+            errorMessage = null,
+            statusMessage = "工作区属于当前会话上下文，切换将创建新会话。",
+        )
     }
 
     private fun browseRoot(generation: Long, authority: Authority) {

@@ -52,6 +52,7 @@ enum class WorkspacePickerAttachPhaseUi {
     IDLE,
     ATTACHING,
     SUCCESS,
+    NEEDS_NEW_THREAD,
     ERROR,
 }
 
@@ -110,6 +111,12 @@ data class WorkspacePickerAttachedUi(
     val statusLabel: String,
 )
 
+data class WorkspacePickerNewThreadUi(
+    val agentId: String,
+    val currentThreadId: String,
+    val requestedWorkspaceId: String,
+)
+
 data class WorkspacePickerUiState(
     val mode: WorkspacePickerModeUi = WorkspacePickerModeUi.AUTHORITY_UNAVAILABLE,
     val authority: WorkspacePickerAuthorityUi = WorkspacePickerAuthorityUi(),
@@ -130,6 +137,7 @@ data class WorkspacePickerUiState(
     val advancedPathAvailable: Boolean = false,
     val attachPhase: WorkspacePickerAttachPhaseUi = WorkspacePickerAttachPhaseUi.IDLE,
     val attached: WorkspacePickerAttachedUi? = null,
+    val pendingNewThread: WorkspacePickerNewThreadUi? = null,
     val errorCode: WorkspacePickerErrorCodeUi? = null,
     val errorMessage: String? = null,
     val statusMessage: String? = null,

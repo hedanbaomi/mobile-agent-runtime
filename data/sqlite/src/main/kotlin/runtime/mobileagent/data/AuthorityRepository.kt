@@ -517,9 +517,9 @@ class ConversationWorkspaceBindingRepository(
     fun upsert(binding: ConversationWorkspaceBinding): ConversationWorkspaceBinding = save(binding)
 
     /**
-     * Bind a new conversation, or explicitly rebind an existing one by passing
-     * its current revision.  Calling bind with the same workspace is
-     * idempotent; switching workspaces without a revision is rejected.
+     * Bind a conversation on first use. The same workspace is idempotent.
+     * Switching to another workspace is rejected even with a matching revision:
+     * a Thread's workspace is immutable after the first bind.
      */
     fun bind(
         sessionId: String,
@@ -534,20 +534,8 @@ class ConversationWorkspaceBindingRepository(
             }
             return save(ConversationWorkspaceBinding(sessionId, workspaceId, boundAt, revision = 1L))
         }
-        if (expectedRevision == null) {
-            if (existing.workspaceId == workspaceId) return existing
-            throw WorkspaceBindingConflictException("Conversation workspace is already bound")
-        }
-        if (existing.revision != expectedRevision) {
-            throw WorkspaceBindingConflictException("Conversation workspace binding revision changed")
-        }
-        return save(
-            existing.copy(
-                workspaceId = workspaceId,
-                boundAt = boundAt,
-                revision = expectedRevision + 1L,
-            ),
-        )
+        if (existing.workspaceId == workspaceId) return existing
+        throw WorkspaceBindingConflictException("Conversation workspace is already bound")
     }
 
     fun compareAndSet(expectedRevision: Long, next: ConversationWorkspaceBinding): Boolean {

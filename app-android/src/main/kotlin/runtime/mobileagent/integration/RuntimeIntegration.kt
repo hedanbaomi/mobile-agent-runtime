@@ -122,6 +122,7 @@ import runtime.mobileagent.workspace.CanonicalWorkspaceSink
 import runtime.mobileagent.workspace.WorkspaceUiKind
 import runtime.mobileagent.workspace.WorkspaceUiPresentation
 import runtime.mobileagent.workspace.WorkspaceUiPresentationStore
+import runtime.mobileagent.workspace.fallbackWorkspaceUiPresentation
 import runtime.mobileagent.workspace.persistedWorkspaceFolderLabel
 import runtime.mobileagent.workspace.privilegedUiTitle
 import runtime.mobileagent.workspace.safTreeUiTitle
@@ -415,18 +416,27 @@ class RuntimeIntegration(
 
     override fun bindConversationWorkspace(binding: ConversationWorkspaceBinding): ConversationWorkspaceBinding {
         val previous = conversationWorkspaceBindingRepository.get(binding.sessionId)
-        val persisted = conversationWorkspaceBindingRepository.save(binding)
-        recordConversationWorkspaceBinding(
-            binding = persisted,
-            agentId = agents.getSnapshot(
-                db.query("SELECT agent_snapshot_id FROM conversations WHERE id = ?", listOf(binding.sessionId))
-                    .singleOrNull()
-                    ?.string("agent_snapshot_id")
-                    .orEmpty(),
-            )?.agentId.orEmpty(),
-            event = if (previous == null) ConversationWorkspaceEvent.BOUND else ConversationWorkspaceEvent.CHANGED,
-            previousWorkspaceId = previous?.workspaceId,
+        if (previous != null && previous.workspaceId != binding.workspaceId) {
+            throw IllegalStateException("Conversation workspace is immutable after the first bind")
+        }
+        val persisted = conversationWorkspaceBindingRepository.bind(
+            sessionId = binding.sessionId,
+            workspaceId = binding.workspaceId,
+            boundAt = binding.boundAt,
         )
+        if (previous == null) {
+            recordConversationWorkspaceBinding(
+                binding = persisted,
+                agentId = agents.getSnapshot(
+                    db.query("SELECT agent_snapshot_id FROM conversations WHERE id = ?", listOf(binding.sessionId))
+                        .singleOrNull()
+                        ?.string("agent_snapshot_id")
+                        .orEmpty(),
+                )?.agentId.orEmpty(),
+                event = ConversationWorkspaceEvent.BOUND,
+                previousWorkspaceId = null,
+            )
+        }
         return persisted
     }
 
@@ -609,8 +619,22 @@ class RuntimeIntegration(
         ) {
             reattachPrivilegedWorkspace(workspaceId)
         }
+        val existingBinding = pickerTarget?.threadId
+            ?.takeIf { plan.bindThread }
+            ?.let(conversationWorkspaceBindingRepository::get)
+        val switchingBoundThread = existingBinding != null && existingBinding.workspaceId != workspaceId
         val registered = workspaceRegistry.registered(workspaceId)
-            ?: return workspaceAccessFailure(WorkspaceAccessErrorCode.AUTHORITY_UNAVAILABLE)
+        if (registered == null) {
+            if (switchingBoundThread) {
+                return newThreadRequiredResult(
+                    pickerTarget = pickerTarget,
+                    existingBinding = existingBinding!!,
+                    workspace = workspace,
+                    grants = emptyList(),
+                )
+            }
+            return workspaceAccessFailure(WorkspaceAccessErrorCode.AUTHORITY_UNAVAILABLE)
+        }
         val grant = grantTargetFor(plan, pickerTarget.toWorkspaceTarget())
         var pickerCommit = PickerBindingCommit()
         val grants = try {
@@ -630,28 +654,13 @@ class RuntimeIntegration(
         } catch (_: RuntimeException) {
             return workspaceAccessFailure(WorkspaceAccessErrorCode.PERSISTENCE_FAILED)
         }
-        pickerCommit.conversation?.let { binding ->
-            recordConversationWorkspaceBinding(
-                binding,
-                pickerTarget?.agentId.orEmpty(),
-                if (pickerCommit.previousConversationWorkspaceId == null) {
-                    ConversationWorkspaceEvent.BOUND
-                } else {
-                    ConversationWorkspaceEvent.CHANGED
-                },
-                pickerCommit.previousConversationWorkspaceId,
-            )
-        }
-        return WorkspaceAccessResult.Success(
-            committedWorkspaceAccessItem(
-                workspace = workspace,
-                displayName = safeWorkspaceDisplayName(workspace, 1),
-                status = WorkspaceAccessStatus.ACTIVE,
-                authority = workspace.authorityOrNull(),
-                activeGrants = grants,
-                fullDeviceConfirmationPresent = true,
-            ),
-            grants.map { it.toWorkspaceAccessSummary() },
+        return finishPickerCommit(
+            workspace = workspace,
+            displayName = safeWorkspaceDisplayName(workspace, 1),
+            grants = grants,
+            pickerTarget = pickerTarget,
+            pickerCommit = pickerCommit,
+            authority = workspace.authorityOrNull(),
         )
     }
 
@@ -830,25 +839,14 @@ class RuntimeIntegration(
 
     /**
      * Local UI projection. Never used by tool schema, prompts or diagnostics.
+     * SharedPreferences labels are display metadata only; losing them cannot
+     * revoke a workspace. Fallback titles come from canonical Workspace
+     * displayName after rejecting URI/locator markers.
      */
     fun workspaceUiPresentation(workspaceId: String, chinese: Boolean = true): WorkspaceUiPresentation? {
         workspaceUiPresentations.get(workspaceId)?.let { return it }
         val workspace = workspaceRepository.get(workspaceId) ?: return null
-        val kind = workspaceUiKind(workspace, workspace.authorityOrNull())
-        val title = when (kind) {
-            WorkspaceUiKind.APP_PRIVATE ->
-                if (chinese) WorkspaceUiPresentation.APP_PRIVATE_TITLE_ZH else WorkspaceUiPresentation.APP_PRIVATE_TITLE_EN
-            WorkspaceUiKind.SAF ->
-                workspace.displayName.takeIf { !WorkspaceUiPresentation.containsSensitive(it) && !it.contains("://") }
-                    ?: if (chinese) "已授权文件夹" else "Authorized folder"
-            WorkspaceUiKind.PRIVILEGED_SHIZUKU,
-            WorkspaceUiKind.PRIVILEGED_WIRED,
-            -> workspace.displayName.takeIf { !WorkspaceUiPresentation.containsSensitive(it) }
-                ?: if (chinese) "ADB 目录" else "ADB directory"
-        }
-        return runCatching {
-            WorkspaceUiPresentation(workspaceId = workspaceId, kind = kind, title = title)
-        }.getOrNull()
+        return fallbackWorkspaceUiPresentation(workspace, workspace.authorityOrNull(), chinese)
     }
 
     private fun rememberUiPresentation(
@@ -1309,6 +1307,7 @@ class RuntimeIntegration(
             )
         ) {
             is WorkspaceAccessResult.Success -> settingsSnapshot()
+            is WorkspaceAccessResult.NewThreadRequired -> settingsSnapshot()
             is WorkspaceAccessResult.Failure -> error("SAF authorization failed: ${result.code.name}")
         }
     }
@@ -1726,6 +1725,43 @@ class RuntimeIntegration(
                 runtime.mobileagent.workspace.SharedWorkspaceBackendAdapter.createInternal(root, id),
             )
         }
+    }
+
+    /**
+     * Register another app-private workspace beside the canonical internal
+     * root. Production UI does not create a second INTERNAL backend; tests use
+     * this to prove a bound Thread cannot be rewritten onto a different
+     * registered workspace.
+     */
+    internal fun registerAppPrivateWorkspace(workspaceId: String, root: Path): Workspace {
+        require(workspaceId != INTERNAL_WORKSPACE_ID) {
+            "The canonical app-private workspace is adopted by the host"
+        }
+        runCatching { Files.createDirectories(root) }.getOrElse {
+            error("App-private workspace root is unavailable")
+        }
+        val existing = workspaceRepository.get(workspaceId)
+        val workspace = Workspace(
+            id = workspaceId,
+            displayName = existing?.displayName?.takeIf { it.isNotBlank() } ?: "Application workspace",
+            backendType = WorkspaceBackendType.INTERNAL,
+            rootReference = root.toAbsolutePath().normalize().toString(),
+            readable = true,
+            writable = true,
+            quotaBytes = existing?.quotaBytes ?: (4L * 1024L * 1024L),
+            maxFileBytes = existing?.maxFileBytes ?: (256L * 1024L),
+            enabled = true,
+            revision = existing?.revision ?: 0,
+            createdAt = existing?.createdAt.orEmpty(),
+            updatedAt = existing?.updatedAt.orEmpty(),
+            scope = WorkspaceScope.SELECTED_DIRECTORY,
+        )
+        val persisted = workspaceRepository.save(workspace)
+        workspaceRegistry.registerOrReplace(
+            persisted,
+            runtime.mobileagent.workspace.SharedWorkspaceBackendAdapter.createInternal(root, persisted.id),
+        )
+        return persisted
     }
 
     /** Map the old snapshot namespace to an opaque, neutral workspace id. */
@@ -2341,6 +2377,7 @@ class RuntimeIntegration(
         val conversation: ConversationWorkspaceBinding? = null,
         val previousConversationWorkspaceId: String? = null,
         val agentDefault: AgentWorkspaceDefault? = null,
+        val requiresNewThread: Boolean = false,
     )
 
     /**
@@ -2369,12 +2406,14 @@ class RuntimeIntegration(
         }
         val threadId = target.threadId.takeIf { bindThread }
         val priorConversation = threadId?.let(conversationWorkspaceBindingRepository::get)
-        val conversation = threadId?.let { sessionId ->
+        val requiresNewThread = priorConversation != null && priorConversation.workspaceId != workspace.id
+        val conversation = if (threadId != null && !requiresNewThread) {
             conversationWorkspaceBindingRepository.bind(
-                sessionId = sessionId,
+                sessionId = threadId,
                 workspaceId = workspace.id,
-                expectedRevision = priorConversation?.revision,
             )
+        } else {
+            null
         }
         require(!setAsAgentDefault || workspace.scope == WorkspaceScope.SELECTED_DIRECTORY) {
             "Full-device workspace cannot be an Agent default"
@@ -2394,7 +2433,83 @@ class RuntimeIntegration(
         } else {
             null
         }
-        return PickerBindingCommit(conversation, priorConversation?.workspaceId, agentDefault)
+        return PickerBindingCommit(
+            conversation = conversation,
+            previousConversationWorkspaceId = priorConversation?.workspaceId,
+            agentDefault = agentDefault,
+            requiresNewThread = requiresNewThread,
+        )
+    }
+
+    private fun finishPickerCommit(
+        workspace: Workspace,
+        displayName: String,
+        grants: List<CapabilityGrant>,
+        pickerTarget: WorkspacePickerTarget?,
+        pickerCommit: PickerBindingCommit,
+        authority: Authority?,
+    ): WorkspaceAccessResult {
+        pickerCommit.conversation?.let { binding ->
+            recordConversationWorkspaceBinding(
+                binding = binding,
+                agentId = pickerTarget?.agentId.orEmpty(),
+                event = ConversationWorkspaceEvent.BOUND,
+                previousWorkspaceId = null,
+            )
+        }
+        val item = committedWorkspaceAccessItem(
+            workspace = workspace,
+            displayName = displayName,
+            status = WorkspaceAccessStatus.ACTIVE,
+            authority = authority,
+            activeGrants = grants,
+            fullDeviceConfirmationPresent = true,
+        )
+        val summaries = grants.map { it.toWorkspaceAccessSummary() }
+        if (pickerCommit.requiresNewThread) {
+            val agentId = pickerTarget?.agentId
+            val threadId = pickerTarget?.threadId
+            val currentWorkspaceId = pickerCommit.previousConversationWorkspaceId
+            if (agentId != null && threadId != null && currentWorkspaceId != null) {
+                return WorkspaceAccessResult.NewThreadRequired(
+                    agentId = agentId,
+                    currentThreadId = threadId,
+                    currentWorkspaceId = currentWorkspaceId,
+                    requestedWorkspaceId = workspace.id,
+                    workspace = item,
+                    grants = summaries,
+                )
+            }
+        }
+        return WorkspaceAccessResult.Success(item, summaries)
+    }
+
+    private fun newThreadRequiredResult(
+        pickerTarget: WorkspacePickerTarget?,
+        existingBinding: ConversationWorkspaceBinding,
+        workspace: Workspace,
+        grants: List<CapabilityGrant>,
+    ): WorkspaceAccessResult {
+        val agentId = pickerTarget?.agentId
+        val threadId = pickerTarget?.threadId
+        if (agentId == null || threadId == null) {
+            return workspaceAccessFailure(WorkspaceAccessErrorCode.INVALID_REQUEST)
+        }
+        return WorkspaceAccessResult.NewThreadRequired(
+            agentId = agentId,
+            currentThreadId = threadId,
+            currentWorkspaceId = existingBinding.workspaceId,
+            requestedWorkspaceId = workspace.id,
+            workspace = committedWorkspaceAccessItem(
+                workspace = workspace,
+                displayName = safeWorkspaceDisplayName(workspace, 1),
+                status = WorkspaceAccessStatus.ACTIVE,
+                authority = workspace.authorityOrNull(),
+                activeGrants = grants,
+                fullDeviceConfirmationPresent = true,
+            ),
+            grants = grants.map { it.toWorkspaceAccessSummary() },
+        )
     }
 
     private fun ToolErrorCode.toWorkspaceAccessCode(): WorkspaceAccessErrorCode = when (this) {
@@ -2655,17 +2770,6 @@ class RuntimeIntegration(
             kind = WorkspaceUiKind.SAF,
             title = safTitle,
         )
-        val result = WorkspaceAccessResult.Success(
-            workspace = committedWorkspaceAccessItem(
-                workspace = workspace,
-                displayName = workspace.displayName,
-                status = WorkspaceAccessStatus.ACTIVE,
-                authority = null,
-                activeGrants = grants,
-                fullDeviceConfirmationPresent = true,
-            ),
-            grants = grants.map { it.toWorkspaceAccessSummary() },
-        )
         diagnostics.recordWorkspaceGrantChanged(
             WorkspaceGrantChangedRecord(
                 id,
@@ -2673,19 +2777,14 @@ class RuntimeIntegration(
                 true,
             ),
         )
-        pickerCommit.conversation?.let { binding ->
-            recordConversationWorkspaceBinding(
-                binding = binding,
-                agentId = pickerTarget?.agentId.orEmpty(),
-                event = if (pickerCommit.previousConversationWorkspaceId == null) {
-                    ConversationWorkspaceEvent.BOUND
-                } else {
-                    ConversationWorkspaceEvent.CHANGED
-                },
-                previousWorkspaceId = pickerCommit.previousConversationWorkspaceId,
-            )
-        }
-        return result
+        return finishPickerCommit(
+            workspace = workspace,
+            displayName = workspace.displayName,
+            grants = grants,
+            pickerTarget = pickerTarget,
+            pickerCommit = pickerCommit,
+            authority = null,
+        )
     }
 
     private fun CapabilityGrant.toWorkspaceAccessSummary(): WorkspaceAccessGrantSummary =
@@ -2887,18 +2986,6 @@ class RuntimeIntegration(
                 grantGeneration = grants.maxOfOrNull { it.revision }?.toDiagnosticGeneration() ?: 0,
             ),
         )
-        pickerCommit.conversation?.let { conversation ->
-            recordConversationWorkspaceBinding(
-                binding = conversation,
-                agentId = pickerTarget?.agentId.orEmpty(),
-                event = if (pickerCommit.previousConversationWorkspaceId == null) {
-                    ConversationWorkspaceEvent.BOUND
-                } else {
-                    ConversationWorkspaceEvent.CHANGED
-                },
-                previousWorkspaceId = pickerCommit.previousConversationWorkspaceId,
-            )
-        }
         val privilegedKind = if (authority == Authority.WIRED_ADB) {
             WorkspaceUiKind.PRIVILEGED_WIRED
         } else {
@@ -2909,16 +2996,13 @@ class RuntimeIntegration(
             kind = privilegedKind,
             title = privilegedUiTitle(displayName) ?: displayName.substringAfterLast('/').ifBlank { displayName },
         )
-        return WorkspaceAccessResult.Success(
-            committedWorkspaceAccessItem(
-                workspace = workspace,
-                displayName = workspace.displayName,
-                status = WorkspaceAccessStatus.ACTIVE,
-                authority = authority,
-                activeGrants = grants,
-                fullDeviceConfirmationPresent = true,
-            ),
-            grants.map { it.toWorkspaceAccessSummary() },
+        return finishPickerCommit(
+            workspace = workspace,
+            displayName = workspace.displayName,
+            grants = grants,
+            pickerTarget = pickerTarget,
+            pickerCommit = pickerCommit,
+            authority = authority,
         )
     }
 

@@ -9,6 +9,7 @@ import android.provider.DocumentsContract
 import runtime.mobileagent.domain.Authority
 import runtime.mobileagent.domain.Workspace
 import runtime.mobileagent.domain.WorkspaceBackendType
+import runtime.mobileagent.domain.WorkspaceScope
 
 /**
  * UI-only projection of a workspace the user selected.
@@ -106,6 +107,41 @@ fun workspaceUiKind(workspace: Workspace, authority: Authority?): WorkspaceUiKin
 }
 
 /**
+ * Safe title when [WorkspaceUiPresentationStore] has no row. This is not an
+ * authorization or recovery source of truth; losing SharedPreferences must
+ * not disable the workspace. Canonical locator/URI values are rejected.
+ */
+fun fallbackWorkspaceUiPresentation(
+    workspace: Workspace,
+    authority: Authority?,
+    chinese: Boolean,
+): WorkspaceUiPresentation? {
+    val kind = workspaceUiKind(workspace, authority)
+    val title = when (kind) {
+        WorkspaceUiKind.APP_PRIVATE -> kind.defaultTitle(chinese)
+        WorkspaceUiKind.SAF -> {
+            val candidate = workspace.displayName.trim()
+            when {
+                candidate.isBlank() || WorkspaceUiPresentation.containsSensitive(candidate) || candidate.contains("://") ->
+                    kind.defaultTitle(chinese)
+                else -> persistedWorkspaceFolderLabel(
+                    backendType = WorkspaceBackendType.SAF_TREE,
+                    requestedName = candidate,
+                    ordinal = 1,
+                    fullDevice = workspace.scope == WorkspaceScope.FULL_DEVICE_FILES,
+                )
+            }
+        }
+        WorkspaceUiKind.PRIVILEGED_SHIZUKU,
+        WorkspaceUiKind.PRIVILEGED_WIRED,
+        -> privilegedUiTitle(workspace.displayName) ?: kind.defaultTitle(chinese)
+    }
+    return runCatching {
+        WorkspaceUiPresentation(workspaceId = workspace.id, kind = kind, title = title)
+    }.getOrNull()
+}
+
+/**
  * Build a UI title from a user-selected privileged path or browse trail.
  * Paths such as `/storage/emulated/0/...` are allowed; URIs are not.
  */
@@ -140,7 +176,10 @@ fun safTreeUiTitle(context: Context, uri: Uri): String {
 
 /**
  * Process-local plus durable UI labels keyed by workspace id. Never read by
- * tool schema, prompt assembly or diagnostic event builders.
+ * tool schema, prompt assembly or diagnostic event builders. This store is
+ * not the authorization or recovery source of truth; `android:allowBackup`
+ * remains false, so a reinstall drops labels and the canonical Workspace row
+ * supplies a safe fallback.
  */
 class WorkspaceUiPresentationStore(context: Context) {
     private val prefs = context.applicationContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE)

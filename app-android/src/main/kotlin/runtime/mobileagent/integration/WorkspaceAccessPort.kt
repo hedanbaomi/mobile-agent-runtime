@@ -116,6 +116,20 @@ sealed interface WorkspaceAccessResult {
         val grants: List<WorkspaceAccessGrantSummary> = emptyList(),
     ) : WorkspaceAccessResult
 
+    /**
+     * The requested Thread already has an immutable workspace. The workspace
+     * and Agent grants may have been persisted; the current Thread binding was
+     * not rewritten. The foreground UI must confirm and create a new Thread.
+     */
+    data class NewThreadRequired(
+        val agentId: String,
+        val currentThreadId: String,
+        val currentWorkspaceId: String,
+        val requestedWorkspaceId: String,
+        val workspace: WorkspaceAccessItem,
+        val grants: List<WorkspaceAccessGrantSummary> = emptyList(),
+    ) : WorkspaceAccessResult
+
     data class Failure(val code: WorkspaceAccessErrorCode) : WorkspaceAccessResult
 }
 

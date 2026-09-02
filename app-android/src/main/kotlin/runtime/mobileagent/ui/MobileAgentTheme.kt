@@ -238,6 +238,16 @@ fun MobileAgentTheme(
  * drawer content without duplicating navigation mechanics.
  */
 @Composable
+fun appShellWindowInsets(consumeBottomSystemInsets: Boolean): WindowInsets {
+    val systemInsets = WindowInsets.safeDrawing.union(WindowInsets.displayCutout).exclude(WindowInsets.ime)
+    return if (consumeBottomSystemInsets) {
+        systemInsets
+    } else {
+        systemInsets.only(WindowInsetsSides.Horizontal + WindowInsetsSides.Top)
+    }
+}
+
+@Composable
 fun AppNavigationScaffold(
     destinations: List<AppNavigationDestination>,
     selectedRoute: String,
@@ -246,18 +256,13 @@ fun AppNavigationScaffold(
     drawerOpen: Boolean = false,
     onDrawerOpenChange: (Boolean) -> Unit = {},
     showCompactMenuButton: Boolean = false,
-    compactMenuButtonLabel: String = "菜单",
+    compactMenuButtonLabel: String = "打开菜单",
     consumeBottomSystemInsets: Boolean = true,
     drawerContent: (@Composable (onClose: () -> Unit) -> Unit)? = null,
     content: @Composable (PaddingValues) -> Unit,
 ) {
-    val systemInsets = WindowInsets.safeDrawing.union(WindowInsets.displayCutout).exclude(WindowInsets.ime)
-    val appliedInsets = if (consumeBottomSystemInsets) {
-        systemInsets
-    } else {
-        systemInsets.only(WindowInsetsSides.Horizontal + WindowInsetsSides.Top)
-    }
-    val shellModifier = modifier.windowInsetsPadding(appliedInsets)
+    val systemInsets = appShellWindowInsets(consumeBottomSystemInsets)
+    val shellModifier = modifier.windowInsetsPadding(systemInsets)
     if (drawerContent == null) {
         GlobalDrawerShell(
             selectedRoute = selectedRoute,

@@ -182,7 +182,9 @@ data class AgentWorkspaceDefault(
  *   and never binds a Thread.
  * - [SET_AGENT_DEFAULT]: attach, grant, and make the workspace the Agent
  *   default used by future Threads.  This is the normal Agent editor flow.
- * - [BIND_THREAD]: attach, grant, and bind the workspace to one Thread.  It
+ * - [BIND_THREAD]: attach, grant, and bind the workspace to one Thread on its
+ *   **first** bind. A later request for a different workspace does not rewrite
+ *   the existing Thread; the UI creates a new Thread instead.  It
  *   must never mutate the Agent default.
  */
 enum class WorkspaceIntent {

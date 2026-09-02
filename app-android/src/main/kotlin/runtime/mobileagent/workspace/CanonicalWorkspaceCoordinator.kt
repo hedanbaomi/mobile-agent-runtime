@@ -200,6 +200,8 @@ class CanonicalWorkspaceCoordinator(private val sink: CanonicalWorkspaceSink) {
                     WorkspaceSelectionOutcome.Committed(workspace, grants)
                 }
             is WorkspaceAccessResult.Failure -> WorkspaceSelectionOutcome.Failed(code)
+            is WorkspaceAccessResult.NewThreadRequired ->
+                WorkspaceSelectionOutcome.Failed(WorkspaceAccessErrorCode.CONFLICT)
         }
 
     companion object {

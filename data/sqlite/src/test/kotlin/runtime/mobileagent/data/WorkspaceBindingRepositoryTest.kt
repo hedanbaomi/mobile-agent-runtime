@@ -204,8 +204,9 @@ class WorkspaceBindingRepositoryTest {
                 defaults.set("agent-thread", "workspace-thread-a")
             }
             assertThrows(WorkspaceBindingConflictException::class.java) {
-                bindings.bind("conversation-thread-a", "workspace-thread-b", expectedRevision = 99L)
+                bindings.bind("conversation-thread-a", "workspace-thread-b", expectedRevision = firstBinding.revision)
             }
+            assertEquals("workspace-thread-a", bindings.get("conversation-thread-a")?.workspaceId)
         }
     }
 

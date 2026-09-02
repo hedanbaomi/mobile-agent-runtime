@@ -7,8 +7,17 @@ import android.app.Activity
 import android.os.Build
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.WindowInsetsSides
+import androidx.compose.foundation.layout.displayCutout
+import androidx.compose.foundation.layout.exclude
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.ime
+import androidx.compose.foundation.layout.only
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.safeDrawing
+import androidx.compose.foundation.layout.union
+import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
@@ -189,8 +198,8 @@ fun MobileAgentTheme(
     SideEffect {
         val window = (view.context as? Activity)?.window
         if (window != null) {
-            window.statusBarColor = colors.surface.toArgb()
-            window.navigationBarColor = colors.surface.toArgb()
+            window.statusBarColor = Color.Transparent.toArgb()
+            window.navigationBarColor = Color.Transparent.toArgb()
             WindowCompat.getInsetsController(window, view).apply {
                 isAppearanceLightStatusBars = !dark
                 isAppearanceLightNavigationBars = !dark
@@ -238,9 +247,17 @@ fun AppNavigationScaffold(
     onDrawerOpenChange: (Boolean) -> Unit = {},
     showCompactMenuButton: Boolean = false,
     compactMenuButtonLabel: String = "菜单",
+    consumeBottomSystemInsets: Boolean = true,
     drawerContent: (@Composable (onClose: () -> Unit) -> Unit)? = null,
     content: @Composable (PaddingValues) -> Unit,
 ) {
+    val systemInsets = WindowInsets.safeDrawing.union(WindowInsets.displayCutout).exclude(WindowInsets.ime)
+    val appliedInsets = if (consumeBottomSystemInsets) {
+        systemInsets
+    } else {
+        systemInsets.only(WindowInsetsSides.Horizontal + WindowInsetsSides.Top)
+    }
+    val shellModifier = modifier.windowInsetsPadding(appliedInsets)
     if (drawerContent == null) {
         GlobalDrawerShell(
             selectedRoute = selectedRoute,
@@ -250,7 +267,7 @@ fun AppNavigationScaffold(
             onDrawerOpenChange = onDrawerOpenChange,
             showCompactOpenButton = showCompactMenuButton,
             compactOpenButtonLabel = compactMenuButtonLabel,
-            modifier = modifier,
+            modifier = shellModifier,
             content = content,
         )
     } else {
@@ -262,7 +279,7 @@ fun AppNavigationScaffold(
             onDrawerOpenChange = onDrawerOpenChange,
             showCompactOpenButton = showCompactMenuButton,
             compactOpenButtonLabel = compactMenuButtonLabel,
-            modifier = modifier,
+            modifier = shellModifier,
             drawerContent = drawerContent,
             content = content,
         )

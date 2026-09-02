@@ -28,8 +28,8 @@ class MainActivity : ComponentActivity() {
     private fun configureSystemBars() {
         // The first frame uses the product's light 66ccff surface. MobileAgentTheme
         // reapplies the exact surface and icon contrast whenever the theme changes.
-        WindowCompat.setDecorFitsSystemWindows(window, true)
-        val surface = Color.rgb(242, 249, 253)
+        WindowCompat.setDecorFitsSystemWindows(window, false)
+        val surface = Color.TRANSPARENT
         window.statusBarColor = surface
         window.navigationBarColor = surface
         WindowCompat.getInsetsController(window, window.decorView).apply {

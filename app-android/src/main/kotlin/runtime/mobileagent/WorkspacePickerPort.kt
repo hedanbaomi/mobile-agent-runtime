@@ -6,9 +6,6 @@ package runtime.mobileagent
 import android.content.Intent
 import android.net.Uri
 import runtime.mobileagent.domain.Authority
-import runtime.mobileagent.domain.CapabilityId
-import runtime.mobileagent.domain.GrantLifetime
-import runtime.mobileagent.integration.WorkspaceAccessGrantTarget
 import runtime.mobileagent.integration.WorkspaceAccessItem
 import runtime.mobileagent.integration.WorkspaceAccessResult
 import runtime.mobileagent.skills.tooling.ToolError
@@ -46,13 +43,17 @@ data class WorkspacePickerAuthoritySnapshot(
     }
 }
 
-/** A target is supplied by the foreground UI, never by a model tool call. */
+/**
+ * A target is supplied by the foreground UI, never by a model tool call.
+ *
+ * Grant, Agent default and Thread binding are not fields on this type.
+ * [RuntimeIntegration] derives a single [runtime.mobileagent.domain.WorkspaceIntent]
+ * from the identities: a Thread id binds that Thread, an Agent id alone sets
+ * the Agent default, and an empty target only adds the workspace to the library.
+ */
 data class WorkspacePickerTarget(
     val agentId: String? = null,
     val threadId: String? = null,
-    val setAsAgentDefault: Boolean = false,
-    val grantCapabilities: Set<CapabilityId> = emptySet(),
-    val lifetime: GrantLifetime = GrantLifetime.PERSISTENT,
 ) {
     init {
         require(agentId == null || agentId.isNotBlank())
@@ -60,14 +61,6 @@ data class WorkspacePickerTarget(
         require(threadId == null || agentId != null) {
             "A thread workspace target requires an agent target"
         }
-    }
-
-    fun grantForWorkspace(): WorkspaceAccessGrantTarget? = agentId?.let {
-        WorkspaceAccessGrantTarget(
-            agentId = it,
-            capabilities = grantCapabilities,
-            lifetime = lifetime,
-        )
     }
 }
 
@@ -82,11 +75,10 @@ data class WorkspacePickerDirectoryAccess(
  * provider-neutral browse and attach DTOs; no path, URI, serial, locator, or
  * Binder object is exposed through picker state.
  *
- * RuntimeIntegration should provide the implementation.  The overloads with
- * [target] preserve the exact existing three-argument attach methods for
- * adapters that have not yet connected Thread/default binding.  A production
- * adapter should override the target overload and commit the workspace,
- * Agent grant, and Thread/default binding in its own canonical transaction.
+ * RuntimeIntegration should provide the implementation.  Attach methods take
+ * only a [WorkspacePickerTarget]: the grant, Agent default and Thread binding
+ * semantics are derived from that target inside the canonical transaction, so
+ * a picker can never assemble its own attach + grant + default combination.
  */
 interface WorkspacePickerPort {
     fun authoritySnapshot(): WorkspacePickerAuthoritySnapshot
@@ -112,32 +104,19 @@ interface WorkspacePickerPort {
     fun directoryAccess(page: WorkspaceDirectoryPage): WorkspacePickerDirectoryAccess =
         WorkspacePickerDirectoryAccess(readable = true, writable = false)
 
+    /** Attach a privileged directory; grant/default/binding follow the target. */
     suspend fun attachPrivilegedDirectory(
         authority: Authority,
         request: WorkspaceAttachRequest,
-        grant: WorkspaceAccessGrantTarget? = null,
+        target: WorkspacePickerTarget = WorkspacePickerTarget(),
     ): WorkspaceAccessResult
-
-    suspend fun attachPrivilegedDirectory(
-        authority: Authority,
-        request: WorkspaceAttachRequest,
-        grant: WorkspaceAccessGrantTarget?,
-        target: WorkspacePickerTarget,
-    ): WorkspaceAccessResult = attachPrivilegedDirectory(authority, request, grant)
 
     /** SAF is an explicit fallback and accepts a transient Activity-result URI only. */
     suspend fun attachSaf(
         uri: Uri,
         resultFlags: Int = DEFAULT_SAF_FLAGS,
-        grant: WorkspaceAccessGrantTarget? = null,
+        target: WorkspacePickerTarget = WorkspacePickerTarget(),
     ): WorkspaceAccessResult
-
-    suspend fun attachSaf(
-        uri: Uri,
-        resultFlags: Int,
-        grant: WorkspaceAccessGrantTarget?,
-        target: WorkspacePickerTarget,
-    ): WorkspaceAccessResult = attachSaf(uri, resultFlags, grant)
 
     /** Opens a previously attached recent workspace without changing its identity. */
     suspend fun useRecentWorkspace(
@@ -171,7 +150,7 @@ object UnavailableWorkspacePickerPort : WorkspacePickerPort {
     override suspend fun attachPrivilegedDirectory(
         authority: Authority,
         request: WorkspaceAttachRequest,
-        grant: WorkspaceAccessGrantTarget?,
+        target: WorkspacePickerTarget,
     ): WorkspaceAccessResult = WorkspaceAccessResult.Failure(
         runtime.mobileagent.integration.WorkspaceAccessErrorCode.AUTHORITY_UNAVAILABLE,
     )
@@ -179,7 +158,7 @@ object UnavailableWorkspacePickerPort : WorkspacePickerPort {
     override suspend fun attachSaf(
         uri: Uri,
         resultFlags: Int,
-        grant: WorkspaceAccessGrantTarget?,
+        target: WorkspacePickerTarget,
     ): WorkspaceAccessResult = WorkspaceAccessResult.Failure(
         runtime.mobileagent.integration.WorkspaceAccessErrorCode.URI_PERMISSION_REQUIRED,
     )

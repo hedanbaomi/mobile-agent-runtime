@@ -19,7 +19,10 @@ import runtime.mobileagent.domain.Authority
 import runtime.mobileagent.domain.CapabilityId
 import runtime.mobileagent.domain.GrantLifetime
 import runtime.mobileagent.domain.WorkspaceBackendType
+import runtime.mobileagent.domain.WorkspaceIntent
 import runtime.mobileagent.domain.WorkspaceScope
+import runtime.mobileagent.domain.WorkspaceTarget
+import runtime.mobileagent.domain.plan
 import runtime.mobileagent.skills.tooling.ToolError
 import runtime.mobileagent.skills.tooling.ToolErrorCode
 import runtime.mobileagent.skills.tooling.WorkspaceAttachRequest
@@ -31,43 +34,51 @@ import runtime.mobileagent.skills.tooling.WorkspaceResult
 /** Contract tests for the foreground picker seam, independent of a live ADB/Shizuku transport. */
 class WorkspacePickerContractTest {
     @Test
-    fun threadTargetRequiresAgentAndGrantProjectionKeepsTheSameTarget() {
+    fun threadTargetRequiresAgentAndNeverCarriesGrantFields() {
         val invalid = runCatching {
             WorkspacePickerTarget(threadId = "thread-without-agent")
         }
         assertTrue(invalid.isFailure)
 
-        val target = WorkspacePickerTarget(
+        val thread = WorkspacePickerTarget(
             agentId = "agent-picker-contract",
             threadId = "thread-picker-contract",
-            setAsAgentDefault = true,
-            grantCapabilities = setOf(CapabilityId(CapabilityId.FILE_READ_TEXT)),
-            lifetime = GrantLifetime.PERSISTENT,
         )
-        val grant = target.grantForWorkspace()
-        assertEquals(target.agentId, grant?.agentId)
-        assertEquals(target.grantCapabilities, grant?.capabilities)
-        assertEquals(target.lifetime, grant?.lifetime)
+        val agent = WorkspacePickerTarget(agentId = "agent-picker-contract")
+        assertEquals(
+            WorkspaceIntent.BIND_THREAD,
+            intentOf(thread),
+        )
+        assertEquals(
+            WorkspaceIntent.SET_AGENT_DEFAULT,
+            intentOf(agent),
+        )
+        val threadPlan = WorkspaceIntent.BIND_THREAD.plan(
+            WorkspaceTarget(agentId = thread.agentId, threadId = thread.threadId),
+        )
+        assertTrue(threadPlan.bindThread)
+        assertTrue(!threadPlan.setAgentDefault)
     }
 
     @Test
-    fun pickerCommitsWorkspaceGrantThreadAndDefaultAsOneResult() = runBlocking {
+    fun pickerCommitsThreadBindingWithoutMutatingAgentDefault() = runBlocking {
         val picker = FakePicker()
-        val target = target()
+        val target = WorkspacePickerTarget(
+            agentId = "agent-picker-contract",
+            threadId = "thread-picker-contract",
+        )
         val result = picker.attachPrivilegedDirectory(
             authority = Authority.SHIZUKU,
             request = request("picker-commit-workspace"),
-            grant = target.grantForWorkspace(),
             target = target,
         )
 
         val success = result as WorkspaceAccessResult.Success
         val committed = picker.committed
         assertEquals("picker-commit-workspace", success.workspace.workspaceId)
-        assertEquals(setOf(CapabilityId(CapabilityId.FILE_READ_TEXT)), success.workspace.grantedCapabilities)
         assertEquals("agent-picker-contract", committed?.agentId)
         assertEquals("thread-picker-contract", committed?.threadId)
-        assertEquals("agent-picker-contract", committed?.defaultAgentId)
+        assertNull(committed?.defaultAgentId)
         assertEquals(success.workspace.workspaceId, committed?.workspaceId)
         assertEquals(1, success.grants.size)
     }
@@ -75,13 +86,15 @@ class WorkspacePickerContractTest {
     @Test
     fun selectedAuthorityMismatchOrTemporaryUnavailableNeverFallsBackOrRevokes() = runBlocking {
         val picker = FakePicker()
-        val target = target()
+        val target = WorkspacePickerTarget(
+            agentId = "agent-picker-contract",
+            threadId = "thread-picker-contract",
+        )
         val request = request("picker-authority-contract")
 
         val mismatch = picker.attachPrivilegedDirectory(
             authority = Authority.WIRED_ADB,
             request = request,
-            grant = target.grantForWorkspace(),
             target = target,
         )
         assertEquals(
@@ -95,7 +108,6 @@ class WorkspacePickerContractTest {
         val unavailable = picker.attachPrivilegedDirectory(
             authority = Authority.SHIZUKU,
             request = request,
-            grant = target.grantForWorkspace(),
             target = target,
         )
         assertEquals(
@@ -109,11 +121,13 @@ class WorkspacePickerContractTest {
     @Test
     fun reconnectKeepsWorkspaceIdentityButPublishesFreshOpaqueHandle() = runBlocking {
         val picker = FakePicker()
-        val target = target()
+        val target = WorkspacePickerTarget(
+            agentId = "agent-picker-contract",
+            threadId = "thread-picker-contract",
+        )
         picker.attachPrivilegedDirectory(
             authority = Authority.SHIZUKU,
             request = request("picker-reattach-workspace"),
-            grant = target.grantForWorkspace(),
             target = target,
         )
         val first = picker.currentHandle("picker-reattach-workspace")
@@ -126,13 +140,11 @@ class WorkspacePickerContractTest {
         assertEquals(0, picker.revocationCount)
     }
 
-    private fun target() = WorkspacePickerTarget(
-        agentId = "agent-picker-contract",
-        threadId = "thread-picker-contract",
-        setAsAgentDefault = true,
-        grantCapabilities = setOf(CapabilityId(CapabilityId.FILE_READ_TEXT)),
-        lifetime = GrantLifetime.PERSISTENT,
-    )
+    private fun intentOf(target: WorkspacePickerTarget): WorkspaceIntent = when {
+        target.threadId != null -> WorkspaceIntent.BIND_THREAD
+        target.agentId != null -> WorkspaceIntent.SET_AGENT_DEFAULT
+        else -> WorkspaceIntent.ADD_TO_LIBRARY
+    }
 
     private fun request(workspaceId: String) = WorkspaceAttachRequest(
         workspaceId = workspaceId,
@@ -176,8 +188,6 @@ class WorkspacePickerContractTest {
         fun reconnect(workspaceId: String): WorkspaceDirectoryHandle? {
             val current = committed?.takeIf { it.workspaceId == workspaceId } ?: return null
             handleGeneration++
-            // Reattach replaces only the provider-owned handle.  The durable target commit remains
-            // the same object and is not revoked as a side effect of a transport reconnect.
             return FakeHandle(handleGeneration)
         }
 
@@ -194,13 +204,6 @@ class WorkspacePickerContractTest {
         override suspend fun attachPrivilegedDirectory(
             authority: Authority,
             request: WorkspaceAttachRequest,
-            grant: WorkspaceAccessGrantTarget?,
-        ): WorkspaceAccessResult = WorkspaceAccessResult.Failure(WorkspaceAccessErrorCode.UNSUPPORTED)
-
-        override suspend fun attachPrivilegedDirectory(
-            authority: Authority,
-            request: WorkspaceAttachRequest,
-            grant: WorkspaceAccessGrantTarget?,
             target: WorkspacePickerTarget,
         ): WorkspaceAccessResult {
             if (this.authority.selectedAuthority != authority) {
@@ -209,7 +212,7 @@ class WorkspacePickerContractTest {
             if (!this.authority.ready) {
                 return WorkspaceAccessResult.Failure(WorkspaceAccessErrorCode.AUTHORITY_UNAVAILABLE)
             }
-            if (target.agentId == null || target.threadId == null || target.grantForWorkspace() != grant) {
+            if (target.agentId == null || target.threadId == null) {
                 return WorkspaceAccessResult.Failure(WorkspaceAccessErrorCode.INVALID_REQUEST)
             }
             handleGeneration++
@@ -217,12 +220,10 @@ class WorkspacePickerContractTest {
                 workspaceId = request.workspaceId,
                 agentId = target.agentId,
                 threadId = target.threadId,
-                defaultAgentId = target.agentId.takeIf { target.setAsAgentDefault },
+                defaultAgentId = null,
             )
-            // The fixture models the required all-or-nothing commit: only after every target
-            // invariant is validated are workspace, grant, thread, and default published.
             committed = next
-            val capability = target.grantCapabilities.single()
+            val capability = CapabilityId(CapabilityId.FILE_READ_TEXT)
             return WorkspaceAccessResult.Success(
                 workspace = WorkspaceAccessItem(
                     workspaceId = request.workspaceId,
@@ -240,7 +241,7 @@ class WorkspacePickerContractTest {
                     WorkspaceAccessGrantSummary(
                         grantId = "contract-grant-${request.workspaceId}",
                         capability = capability,
-                        lifetime = target.lifetime,
+                        lifetime = GrantLifetime.PERSISTENT,
                         revision = 1L,
                     ),
                 ),
@@ -250,7 +251,7 @@ class WorkspacePickerContractTest {
         override suspend fun attachSaf(
             uri: Uri,
             resultFlags: Int,
-            grant: WorkspaceAccessGrantTarget?,
+            target: WorkspacePickerTarget,
         ): WorkspaceAccessResult = WorkspaceAccessResult.Failure(WorkspaceAccessErrorCode.UNSUPPORTED)
 
         private fun <T> unavailable(): WorkspaceResult<T> = WorkspaceResult.Failure(

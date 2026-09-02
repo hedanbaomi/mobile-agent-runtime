@@ -3,11 +3,20 @@
 
 package runtime.mobileagent
 
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.width
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.ui.Modifier
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onAllNodesWithText
+import androidx.compose.ui.test.onNodeWithContentDescription
+import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
+import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performScrollTo
+import androidx.compose.ui.unit.dp
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
@@ -100,6 +109,44 @@ class ProvidersTypedUiTest {
                 .fetchSemanticsNodes()
                 .isEmpty(),
         )
+    }
+
+    @Test
+    fun providerActionsFitNarrowScreenAndLongModelIdDoesNotOverflow() {
+        compose.setContent {
+            MaterialTheme {
+                Box(Modifier.width(320.dp).height(640.dp)) {
+                    ProvidersScreen(
+                        state = state(
+                            probe = ProviderProbeUiState(),
+                        ).copy(
+                            models = listOf(
+                                ProviderModelUi(
+                                    id = "model",
+                                    modelId = "openai-very-long-model-identifier-that-must-ellipsis-on-narrow-screens",
+                                ),
+                            ),
+                        ),
+                    )
+                }
+            }
+        }
+
+        compose.onNodeWithTag("provider.testConnection", useUnmergedTree = true)
+            .performScrollTo()
+            .assertIsDisplayed()
+        compose.onNodeWithTag("provider.capabilityProbe", useUnmergedTree = true)
+            .performScrollTo()
+            .assertIsDisplayed()
+        compose.onNodeWithTag("provider.overflow", useUnmergedTree = true)
+            .performScrollTo()
+            .assertIsDisplayed()
+        compose.onNodeWithContentDescription("服务商更多操作", useUnmergedTree = true).assertIsDisplayed()
+        compose.onAllNodesWithText("编辑", useUnmergedTree = true)
+            .fetchSemanticsNodes()
+            .also { assertEquals(0, it.size) }
+        compose.onNodeWithTag("provider.overflow", useUnmergedTree = true).performClick()
+        compose.onNodeWithTag("provider.overflow.edit", useUnmergedTree = true).assertIsDisplayed()
     }
 
     private fun state(probe: ProviderProbeUiState): ProvidersUiState = ProvidersUiState(

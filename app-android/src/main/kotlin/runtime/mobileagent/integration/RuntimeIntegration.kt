@@ -112,7 +112,20 @@ import runtime.mobileagent.domain.ToolAuditDetail
 import runtime.mobileagent.domain.Utc
 import runtime.mobileagent.domain.Workspace
 import runtime.mobileagent.domain.WorkspaceBackendType
+import runtime.mobileagent.domain.WorkspaceDraft
+import runtime.mobileagent.domain.WorkspaceIntent
+import runtime.mobileagent.domain.WorkspaceIntentPlan
 import runtime.mobileagent.domain.WorkspaceScope
+import runtime.mobileagent.domain.WorkspaceTarget
+import runtime.mobileagent.domain.plan
+import runtime.mobileagent.workspace.CanonicalWorkspaceSink
+import runtime.mobileagent.workspace.WorkspaceUiKind
+import runtime.mobileagent.workspace.WorkspaceUiPresentation
+import runtime.mobileagent.workspace.WorkspaceUiPresentationStore
+import runtime.mobileagent.workspace.persistedWorkspaceFolderLabel
+import runtime.mobileagent.workspace.privilegedUiTitle
+import runtime.mobileagent.workspace.safTreeUiTitle
+import runtime.mobileagent.workspace.workspaceUiKind
 import runtime.mobileagent.memory.SkillMemoryBinding
 import runtime.mobileagent.memory.SkillMemoryAvailabilitySnapshot
 import runtime.mobileagent.memory.SkillMemoryDiagnosticEvent
@@ -252,8 +265,10 @@ class RuntimeIntegration(
     private val diagnostics: AndroidDiagnosticLogger,
     private val shizukuAuthority: ShizukuAuthorityBridge? = null,
     private val wiredAuthority: WiredAdbAuthorityPort,
-) : SettingsAuthorityPort, ThreadWorkspacePort, ThreadWorkspaceRuntimePort, WorkspacePickerPort, AutoCloseable {
+) : SettingsAuthorityPort, ThreadWorkspacePort, ThreadWorkspaceRuntimePort, WorkspacePickerPort,
+    CanonicalWorkspaceSink, AutoCloseable {
     private val appContext = context.applicationContext
+    private val workspaceUiPresentations = WorkspaceUiPresentationStore(appContext)
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private val closed = AtomicBoolean(false)
     private val wiredReconnectInFlight = AtomicBoolean(false)
@@ -543,32 +558,46 @@ class RuntimeIntegration(
     override suspend fun attachPrivilegedDirectory(
         authority: Authority,
         request: WorkspaceAttachRequest,
-        grant: WorkspaceAccessGrantTarget?,
-    ): WorkspaceAccessResult = attachPrivilegedDirectoryInternal(authority, request, grant)
-
-    override suspend fun attachPrivilegedDirectory(
-        authority: Authority,
-        request: WorkspaceAttachRequest,
-        grant: WorkspaceAccessGrantTarget?,
         target: WorkspacePickerTarget,
-    ): WorkspaceAccessResult = attachPrivilegedDirectoryInternal(authority, request, grant, target)
+    ): WorkspaceAccessResult {
+        val plan = planFor(target)
+        return attachPrivilegedDirectoryInternal(
+            authority,
+            request,
+            grantTargetFor(plan, target.toWorkspaceTarget()),
+            pickerTarget = target,
+            plan = plan,
+        )
+    }
 
     override suspend fun attachSaf(
         uri: Uri,
         resultFlags: Int,
-        grant: WorkspaceAccessGrantTarget?,
-    ): WorkspaceAccessResult = attachSafWorkspace(uri, resultFlags, grant)
-
-    override suspend fun attachSaf(
-        uri: Uri,
-        resultFlags: Int,
-        grant: WorkspaceAccessGrantTarget?,
         target: WorkspacePickerTarget,
-    ): WorkspaceAccessResult = attachSafWorkspace(uri, resultFlags, grant, target)
+    ): WorkspaceAccessResult {
+        val plan = planFor(target)
+        return attachSafWorkspace(
+            uri,
+            resultFlags,
+            grantTargetFor(plan, target.toWorkspaceTarget()),
+            pickerTarget = target,
+            plan = plan,
+        )
+    }
 
     override suspend fun useRecentWorkspace(
         workspaceId: String,
         target: WorkspacePickerTarget,
+    ): WorkspaceAccessResult = useRecentWorkspace(
+        workspaceId = workspaceId,
+        pickerTarget = target,
+        plan = planFor(target),
+    )
+
+    internal suspend fun useRecentWorkspace(
+        workspaceId: String,
+        pickerTarget: WorkspacePickerTarget?,
+        plan: WorkspaceIntentPlan,
     ): WorkspaceAccessResult {
         val workspace = workspaceRepository.get(workspaceId)
             ?: return workspaceAccessFailure(WorkspaceAccessErrorCode.WORKSPACE_NOT_FOUND)
@@ -582,12 +611,18 @@ class RuntimeIntegration(
         }
         val registered = workspaceRegistry.registered(workspaceId)
             ?: return workspaceAccessFailure(WorkspaceAccessErrorCode.AUTHORITY_UNAVAILABLE)
-        val grant = target.grantForWorkspace()
+        val grant = grantTargetFor(plan, pickerTarget.toWorkspaceTarget())
         var pickerCommit = PickerBindingCommit()
         val grants = try {
             db.transaction {
                 val committed = grant?.let { persistWorkspaceGrantBundle(workspace, registered.backend, it) }.orEmpty()
-                pickerCommit = persistPickerTarget(workspace, target, committed)
+                pickerCommit = persistPickerTarget(
+                    workspace = workspace,
+                    target = pickerTarget,
+                    grants = committed,
+                    setAsAgentDefault = plan.persistDefaultNow(),
+                    bindThread = plan.bindThread,
+                )
                 committed
             }
         } catch (failure: WorkspaceAccessException) {
@@ -598,7 +633,7 @@ class RuntimeIntegration(
         pickerCommit.conversation?.let { binding ->
             recordConversationWorkspaceBinding(
                 binding,
-                target.agentId.orEmpty(),
+                pickerTarget?.agentId.orEmpty(),
                 if (pickerCommit.previousConversationWorkspaceId == null) {
                     ConversationWorkspaceEvent.BOUND
                 } else {
@@ -618,6 +653,221 @@ class RuntimeIntegration(
             ),
             grants.map { it.toWorkspaceAccessSummary() },
         )
+    }
+
+    // ---------------------------------------------------------------------
+    // Canonical workspace sink
+    //
+    // These methods are the only workspace write path.  A screen resolves
+    // a WorkspaceIntent + WorkspaceTarget, the intent is planned once, and
+    // the transaction below derives grant / Agent default / Thread binding
+    // from that plan.  No caller can compose its own combination.
+    // ---------------------------------------------------------------------
+
+    override suspend fun attachPrivileged(
+        authority: Authority,
+        request: WorkspaceAttachRequest,
+        plan: WorkspaceIntentPlan,
+        target: WorkspaceTarget,
+    ): WorkspaceAccessResult = attachPrivilegedDirectoryInternal(
+        authority = authority,
+        request = request,
+        grant = grantTargetFor(plan, target),
+        pickerTarget = pickerTargetFor(plan, target),
+        plan = plan,
+    )
+
+    override suspend fun attachSaf(
+        uri: Uri,
+        resultFlags: Int,
+        plan: WorkspaceIntentPlan,
+        target: WorkspaceTarget,
+    ): WorkspaceAccessResult = attachSafWorkspace(
+        uri = uri,
+        resultFlags = resultFlags,
+        grant = grantTargetFor(plan, target),
+        pickerTarget = pickerTargetFor(plan, target),
+        plan = plan,
+    )
+
+    override suspend fun attachPrivilegedPath(
+        authority: Authority,
+        workspaceId: String,
+        displayName: String,
+        absolutePath: String,
+        plan: WorkspaceIntentPlan,
+        target: WorkspaceTarget,
+    ): WorkspaceAccessResult = attachPrivilegedPathInternal(
+        authority = authority,
+        workspaceId = workspaceId,
+        displayName = displayName,
+        absolutePath = absolutePath,
+        grant = grantTargetFor(plan, target),
+        pickerTarget = pickerTargetFor(plan, target),
+        plan = plan,
+    )
+
+    override suspend fun openFullDeviceFiles(
+        authority: Authority,
+        request: FullDeviceFilesRequest,
+        plan: WorkspaceIntentPlan,
+        target: WorkspaceTarget,
+    ): WorkspaceAccessResult {
+        // A full-device workspace can never become an Agent default or a
+        // Thread binding; only its grant semantics follow the plan.
+        if (plan.setAgentDefault || plan.bindThread) {
+            return workspaceAccessFailure(WorkspaceAccessErrorCode.INVALID_REQUEST)
+        }
+        return openFullDeviceFilesInternal(
+            authority = authority,
+            request = request,
+            grant = grantTargetFor(plan, target),
+        )
+    }
+
+    override suspend fun useRecent(
+        workspaceId: String,
+        plan: WorkspaceIntentPlan,
+        target: WorkspaceTarget,
+    ): WorkspaceAccessResult = useRecentWorkspace(
+        workspaceId = workspaceId,
+        pickerTarget = pickerTargetFor(plan, target),
+        plan = plan,
+    )
+
+    /**
+     * Commit a staged draft. Grant and Agent default are written in one
+     * transaction, so a failure cannot leave an Agent that is granted but not
+     * defaulted (or the reverse).
+     */
+    override suspend fun commitDraft(draft: WorkspaceDraft, agentId: String): WorkspaceAccessResult {
+        val workspace = workspaceRepository.get(draft.workspaceId)
+            ?: return workspaceAccessFailure(WorkspaceAccessErrorCode.WORKSPACE_NOT_FOUND)
+        if (!workspace.enabled || workspace.scope != WorkspaceScope.SELECTED_DIRECTORY) {
+            return workspaceAccessFailure(WorkspaceAccessErrorCode.CAPABILITY_DENIED)
+        }
+        if (workspace.backendType == WorkspaceBackendType.PRIVILEGED &&
+            workspaceRegistry.registered(workspace.id) == null
+        ) {
+            reattachPrivilegedWorkspace(workspace.id)
+        }
+        val registered = workspaceRegistry.registered(workspace.id)
+            ?: return workspaceAccessFailure(WorkspaceAccessErrorCode.AUTHORITY_UNAVAILABLE)
+        val grants = try {
+            db.transaction {
+                val committed = persistWorkspaceGrantBundle(
+                    workspace,
+                    registered.backend,
+                    WorkspaceAccessGrantTarget(agentId = agentId),
+                )
+                persistPickerTarget(
+                    workspace = workspace,
+                    target = WorkspacePickerTarget(agentId = agentId),
+                    grants = committed,
+                    setAsAgentDefault = draft.setAsAgentDefault,
+                    bindThread = false,
+                )
+                committed
+            }
+        } catch (failure: WorkspaceAccessException) {
+            return workspaceAccessFailure(failure.accessCode)
+        } catch (_: RuntimeException) {
+            return workspaceAccessFailure(WorkspaceAccessErrorCode.PERSISTENCE_FAILED)
+        }
+        return WorkspaceAccessResult.Success(
+            committedWorkspaceAccessItem(
+                workspace = workspace,
+                displayName = safeWorkspaceDisplayName(workspace, 1),
+                status = WorkspaceAccessStatus.ACTIVE,
+                authority = workspace.authorityOrNull(),
+                activeGrants = grants,
+                fullDeviceConfirmationPresent = true,
+            ),
+            grants.map { it.toWorkspaceAccessSummary() },
+        )
+    }
+
+    /** Agent default is persisted only when the Agent already exists. */
+    private fun WorkspaceIntentPlan.persistDefaultNow(): Boolean = setAgentDefault && !deferred
+
+    private fun grantTargetFor(plan: WorkspaceIntentPlan, target: WorkspaceTarget): WorkspaceAccessGrantTarget? =
+        if (!plan.grantRequired) null else WorkspaceAccessGrantTarget(agentId = requireNotNull(target.agentId))
+
+    private fun pickerTargetFor(plan: WorkspaceIntentPlan, target: WorkspaceTarget): WorkspacePickerTarget? =
+        if (target.agentId == null && target.threadId == null) {
+            null
+        } else {
+            WorkspacePickerTarget(
+                agentId = target.agentId,
+                threadId = target.threadId.takeIf { plan.bindThread },
+            )
+        }
+
+    private fun WorkspacePickerTarget?.toWorkspaceTarget(): WorkspaceTarget = WorkspaceTarget(
+        agentId = this?.agentId,
+        threadId = this?.threadId,
+    )
+
+    /**
+     * Derive the single canonical plan for a picker identity.
+     *
+     * A Thread id always [WorkspaceIntent.BIND_THREAD]s and never mutates the
+     * Agent default. An Agent id without a Thread is the normal editor flow
+     * ([WorkspaceIntent.SET_AGENT_DEFAULT]). An empty target only adds the
+     * workspace to the library. A deferred Agent-default selection attaches
+     * the workspace to the library and stages grant/default for [commitDraft].
+     */
+    private fun planFor(target: WorkspacePickerTarget?): WorkspaceIntentPlan {
+        if (target == null) return WorkspaceIntent.ADD_TO_LIBRARY.plan(WorkspaceTarget())
+        val workspaceTarget = target.toWorkspaceTarget()
+        val intent = when {
+            target.threadId != null -> WorkspaceIntent.BIND_THREAD
+            target.agentId != null -> WorkspaceIntent.SET_AGENT_DEFAULT
+            else -> WorkspaceIntent.ADD_TO_LIBRARY
+        }
+        return intent.plan(workspaceTarget)
+    }
+
+    /**
+     * Local UI projection. Never used by tool schema, prompts or diagnostics.
+     */
+    fun workspaceUiPresentation(workspaceId: String, chinese: Boolean = true): WorkspaceUiPresentation? {
+        workspaceUiPresentations.get(workspaceId)?.let { return it }
+        val workspace = workspaceRepository.get(workspaceId) ?: return null
+        val kind = workspaceUiKind(workspace, workspace.authorityOrNull())
+        val title = when (kind) {
+            WorkspaceUiKind.APP_PRIVATE ->
+                if (chinese) WorkspaceUiPresentation.APP_PRIVATE_TITLE_ZH else WorkspaceUiPresentation.APP_PRIVATE_TITLE_EN
+            WorkspaceUiKind.SAF ->
+                workspace.displayName.takeIf { !WorkspaceUiPresentation.containsSensitive(it) && !it.contains("://") }
+                    ?: if (chinese) "已授权文件夹" else "Authorized folder"
+            WorkspaceUiKind.PRIVILEGED_SHIZUKU,
+            WorkspaceUiKind.PRIVILEGED_WIRED,
+            -> workspace.displayName.takeIf { !WorkspaceUiPresentation.containsSensitive(it) }
+                ?: if (chinese) "ADB 目录" else "ADB directory"
+        }
+        return runCatching {
+            WorkspaceUiPresentation(workspaceId = workspaceId, kind = kind, title = title)
+        }.getOrNull()
+    }
+
+    private fun rememberUiPresentation(
+        workspaceId: String,
+        kind: WorkspaceUiKind,
+        title: String,
+        breadcrumb: String? = null,
+    ) {
+        val safeTitle = title.takeIf { it.isNotBlank() && !WorkspaceUiPresentation.containsSensitive(it) } ?: return
+        runCatching {
+            workspaceUiPresentations.put(
+                WorkspaceUiPresentation(
+                    workspaceId = workspaceId,
+                    kind = kind,
+                    title = safeTitle.take(WorkspaceUiPresentation.MAX_TITLE),
+                    breadcrumb = breadcrumb?.takeIf { it.isNotBlank() && !WorkspaceUiPresentation.containsSensitive(it) },
+                ),
+            )
+        }
     }
 
     /**
@@ -1049,7 +1299,15 @@ class RuntimeIntegration(
     )
 
     override fun authorizeSaf(uri: Uri, resultFlags: Int): SettingsAuthoritySnapshot {
-        return when (val result = attachSafWorkspace(uri, resultFlags, grant = null)) {
+        return when (
+            val result = attachSafWorkspace(
+                uri,
+                resultFlags,
+                grant = null,
+                pickerTarget = null,
+                plan = planFor(null),
+            )
+        ) {
             is WorkspaceAccessResult.Success -> settingsSnapshot()
             is WorkspaceAccessResult.Failure -> error("SAF authorization failed: ${result.code.name}")
         }
@@ -1989,12 +2247,16 @@ class RuntimeIntegration(
         return WorkspaceAccessStatus.ACTIVE
     }
 
-    private fun safeWorkspaceDisplayName(workspace: Workspace, ordinal: Int): String = when {
-        workspace.backendType == WorkspaceBackendType.INTERNAL -> "应用工作区"
-        workspace.scope == WorkspaceScope.FULL_DEVICE_FILES -> "设备文件区 $ordinal"
-        workspace.backendType == WorkspaceBackendType.PRIVILEGED -> "ADB 目录 $ordinal"
-        else -> "用户工作区 $ordinal"
-    }
+    private fun safeWorkspaceDisplayName(
+        workspace: Workspace,
+        ordinal: Int,
+        requestedName: String = workspace.displayName,
+    ): String = persistedWorkspaceFolderLabel(
+        backendType = workspace.backendType,
+        requestedName = requestedName,
+        ordinal = ordinal,
+        fullDevice = workspace.scope == WorkspaceScope.FULL_DEVICE_FILES,
+    )
 
     private fun Workspace.authorityOrNull(): Authority? = if (backendType != WorkspaceBackendType.PRIVILEGED) {
         null
@@ -2081,14 +2343,23 @@ class RuntimeIntegration(
         val agentDefault: AgentWorkspaceDefault? = null,
     )
 
-    /** Called only from the surrounding workspace/grant transaction. */
+    /**
+     * Called only from the surrounding workspace/grant transaction.
+     *
+     * [setAsAgentDefault] and [bindThread] come from the resolved
+     * [WorkspaceIntentPlan], never from a screen: a Thread selection therefore
+     * can never mutate the Agent default, and a default selection can never
+     * rebind an existing Thread.
+     */
     private fun persistPickerTarget(
         workspace: Workspace,
         target: WorkspacePickerTarget?,
         grants: List<CapabilityGrant>,
+        setAsAgentDefault: Boolean = false,
+        bindThread: Boolean = target?.threadId != null,
     ): PickerBindingCommit {
         if (target == null || target.agentId == null) {
-            require(target?.threadId == null && target?.setAsAgentDefault != true) {
+            require(target?.threadId == null && !bindThread && !setAsAgentDefault) {
                 "A workspace binding target requires an Agent"
             }
             return PickerBindingCommit()
@@ -2096,23 +2367,25 @@ class RuntimeIntegration(
         require(grants.any { it.agentId == target.agentId && it.workspaceId == workspace.id }) {
             "Workspace binding requires an active Agent grant"
         }
-        val priorConversation = target.threadId?.let(conversationWorkspaceBindingRepository::get)
-        val conversation = target.threadId?.let { threadId ->
+        val threadId = target.threadId.takeIf { bindThread }
+        val priorConversation = threadId?.let(conversationWorkspaceBindingRepository::get)
+        val conversation = threadId?.let { sessionId ->
             conversationWorkspaceBindingRepository.bind(
-                sessionId = threadId,
+                sessionId = sessionId,
                 workspaceId = workspace.id,
                 expectedRevision = priorConversation?.revision,
             )
         }
-        val priorDefault = if (target.setAsAgentDefault) {
-            require(workspace.scope == WorkspaceScope.SELECTED_DIRECTORY) {
-                "Full-device workspace cannot be an Agent default"
-            }
+        require(!setAsAgentDefault || workspace.scope == WorkspaceScope.SELECTED_DIRECTORY) {
+            "Full-device workspace cannot be an Agent default"
+        }
+        val defaultRequested = setAsAgentDefault
+        val priorDefault = if (defaultRequested) {
             agentWorkspaceDefaultRepository.get(target.agentId)
         } else {
             null
         }
-        val agentDefault = if (target.setAsAgentDefault) {
+        val agentDefault = if (defaultRequested) {
             agentWorkspaceDefaultRepository.set(
                 agentId = target.agentId,
                 workspaceId = workspace.id,
@@ -2269,6 +2542,7 @@ class RuntimeIntegration(
         resultFlags: Int,
         grant: WorkspaceAccessGrantTarget?,
         pickerTarget: WorkspacePickerTarget? = null,
+        plan: WorkspaceIntentPlan,
     ): WorkspaceAccessResult {
         if (pickerTarget?.agentId != null && grant?.agentId != pickerTarget.agentId) {
             return workspaceAccessFailure(WorkspaceAccessErrorCode.INVALID_REQUEST)
@@ -2305,16 +2579,14 @@ class RuntimeIntegration(
         if (existingWorkspace != null && existingWorkspace.backendType != WorkspaceBackendType.SAF_TREE) {
             return workspaceAccessFailure(WorkspaceAccessErrorCode.CONFLICT)
         }
+        val safTitle = safTreeUiTitle(appContext, uri)
         val workspace = Workspace(
             id = id,
-            displayName = safeWorkspaceDisplayName(
-                Workspace(
-                    id = id,
-                    displayName = "workspace",
-                    backendType = WorkspaceBackendType.SAF_TREE,
-                    rootReference = uri.toString(),
-                ),
+            displayName = persistedWorkspaceFolderLabel(
+                backendType = WorkspaceBackendType.SAF_TREE,
+                requestedName = safTitle,
                 ordinal = (workspaceRepository.list().count { it.backendType == WorkspaceBackendType.SAF_TREE } + 1),
+                fullDevice = false,
             ),
             backendType = WorkspaceBackendType.SAF_TREE,
             rootReference = uri.toString(),
@@ -2347,7 +2619,13 @@ class RuntimeIntegration(
                 workspaceRepository.save(workspace)
                 safWorkspaceGrantRepository.save(safGrant)
                 val committedGrants = grant?.let { persistWorkspaceGrantBundle(workspace, backend, it) }.orEmpty()
-                pickerCommit = persistPickerTarget(workspace, pickerTarget, committedGrants)
+                pickerCommit = persistPickerTarget(
+                    workspace = workspace,
+                    target = pickerTarget,
+                    grants = committedGrants,
+                    setAsAgentDefault = plan.persistDefaultNow(),
+                    bindThread = plan.bindThread,
+                )
                 committedGrants
             }
         } catch (failure: WorkspaceAccessException) {
@@ -2372,6 +2650,11 @@ class RuntimeIntegration(
             }
             return workspaceAccessFailure(WorkspaceAccessErrorCode.UNKNOWN_OUTCOME)
         }
+        rememberUiPresentation(
+            workspaceId = workspace.id,
+            kind = WorkspaceUiKind.SAF,
+            title = safTitle,
+        )
         val result = WorkspaceAccessResult.Success(
             workspace = committedWorkspaceAccessItem(
                 workspace = workspace,
@@ -2433,6 +2716,7 @@ class RuntimeIntegration(
         request: WorkspaceAttachRequest,
         grant: WorkspaceAccessGrantTarget?,
         pickerTarget: WorkspacePickerTarget? = null,
+        plan: WorkspaceIntentPlan,
     ): WorkspaceAccessResult {
         if (pickerTarget?.agentId != null && grant?.agentId != pickerTarget.agentId) {
             return workspaceAccessFailure(WorkspaceAccessErrorCode.INVALID_REQUEST)
@@ -2450,7 +2734,7 @@ class RuntimeIntegration(
             is WorkspaceResult.Failure -> return workspaceAccessFailure(attachment.error.code.toWorkspaceAccessCode())
             is WorkspaceResult.Success -> attachment.value
         }
-        return persistPrivilegedAttachment(authority, request.workspaceId, request.displayName, value, grant, pickerTarget)
+        return persistPrivilegedAttachment(authority, request.workspaceId, request.displayName, value, grant, pickerTarget, plan)
     }
 
     private suspend fun attachPrivilegedPathInternal(
@@ -2459,6 +2743,8 @@ class RuntimeIntegration(
         displayName: String,
         absolutePath: String,
         grant: WorkspaceAccessGrantTarget?,
+        pickerTarget: WorkspacePickerTarget? = null,
+        plan: WorkspaceIntentPlan,
     ): WorkspaceAccessResult {
         if (authority != Authority.WIRED_ADB) return workspaceAccessFailure(WorkspaceAccessErrorCode.UNSUPPORTED)
         val provider = authorityProviderFor(authority) as? runtime.mobileagent.wired.WiredAdbDeviceWorkspaceProvider
@@ -2474,7 +2760,7 @@ class RuntimeIntegration(
             is WorkspaceResult.Failure -> return workspaceAccessFailure(attachment.error.code.toWorkspaceAccessCode())
             is WorkspaceResult.Success -> attachment.value
         }
-        return persistPrivilegedAttachment(authority, workspaceId, displayName, value, grant)
+        return persistPrivilegedAttachment(authority, workspaceId, displayName, value, grant, pickerTarget, plan)
     }
 
     private fun persistPrivilegedAttachment(
@@ -2484,6 +2770,7 @@ class RuntimeIntegration(
         value: runtime.mobileagent.skills.tooling.WorkspaceAttachment,
         grant: WorkspaceAccessGrantTarget?,
         pickerTarget: WorkspacePickerTarget? = null,
+        plan: WorkspaceIntentPlan,
     ): WorkspaceAccessResult {
         if (value.descriptor.id != workspaceId) {
             value.recoveryLocator?.clear()
@@ -2566,7 +2853,13 @@ class RuntimeIntegration(
                 workspaceRepository.save(workspace)
                 privilegedWorkspaceBindingRepository.save(binding)
                 val committedGrants = grant?.let { persistWorkspaceGrantBundle(workspace, value.backend, it) }.orEmpty()
-                pickerCommit = persistPickerTarget(workspace, pickerTarget, committedGrants)
+                pickerCommit = persistPickerTarget(
+                    workspace = workspace,
+                    target = pickerTarget,
+                    grants = committedGrants,
+                    setAsAgentDefault = plan.persistDefaultNow(),
+                    bindThread = plan.bindThread,
+                )
                 committedGrants
             }
         } catch (failure: WorkspaceAccessException) {
@@ -2606,6 +2899,16 @@ class RuntimeIntegration(
                 previousWorkspaceId = pickerCommit.previousConversationWorkspaceId,
             )
         }
+        val privilegedKind = if (authority == Authority.WIRED_ADB) {
+            WorkspaceUiKind.PRIVILEGED_WIRED
+        } else {
+            WorkspaceUiKind.PRIVILEGED_SHIZUKU
+        }
+        rememberUiPresentation(
+            workspaceId = workspaceId,
+            kind = privilegedKind,
+            title = privilegedUiTitle(displayName) ?: displayName.substringAfterLast('/').ifBlank { displayName },
+        )
         return WorkspaceAccessResult.Success(
             committedWorkspaceAccessItem(
                 workspace = workspace,
@@ -2880,7 +3183,7 @@ class RuntimeIntegration(
             listWorkspaceAccessItems(agentId)
 
         override fun attachSaf(uri: Uri, resultFlags: Int, grant: WorkspaceAccessGrantTarget?): WorkspaceAccessResult =
-            attachSafWorkspace(uri, resultFlags, grant)
+            attachSafWorkspace(uri, resultFlags, grant, pickerTarget = null, plan = planFor(null))
 
         override fun grantWorkspace(workspaceId: String, grant: WorkspaceAccessGrantTarget): WorkspaceAccessResult =
             grantWorkspaceInternal(workspaceId, grant)
@@ -2915,7 +3218,13 @@ class RuntimeIntegration(
             authority: Authority,
             request: WorkspaceAttachRequest,
             grant: WorkspaceAccessGrantTarget?,
-        ): WorkspaceAccessResult = attachPrivilegedDirectoryInternal(authority, request, grant)
+        ): WorkspaceAccessResult = attachPrivilegedDirectoryInternal(
+            authority,
+            request,
+            grant,
+            pickerTarget = null,
+            plan = planFor(null),
+        )
 
         override suspend fun attachPrivilegedPath(
             authority: Authority,
@@ -2929,6 +3238,8 @@ class RuntimeIntegration(
             displayName,
             absolutePath,
             grant,
+            pickerTarget = null,
+            plan = planFor(null),
         )
 
         override suspend fun openFullDeviceFiles(

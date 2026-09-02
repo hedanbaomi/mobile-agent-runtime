@@ -112,6 +112,11 @@ class ChatViewModel(
             citations.clear()
             messages.forEach { restoreCitations(it.metadataJson) }
             val agentNames = agents.associateBy { it.id }
+            val workspaceAccess = projectWorkspaceAccess(
+                conversationId = selected,
+                agentId = agentId,
+                agentLabel = agentId?.let { agentNames[it]?.name },
+            )
             state.value = state.value.copy(
                 sessions = conversations.map { c ->
                     val snapshotAgentId = container.agents.getSnapshot(c.snapshotId)?.agentId
@@ -132,6 +137,7 @@ class ChatViewModel(
                     persistedPreviewHint = hasPersistedRequestPreviewHint(selected),
                 ),
                 inspectorOpen = savedStateHandle.get<Boolean>(INSPECTOR_KEY) ?: false, error = null,
+                workspaceAccess = workspaceAccess,
             )
             if (invalidatedApprovalRuns > 0) {
                 state.value = state.value.copy(
@@ -1449,6 +1455,45 @@ class ChatViewModel(
                 message.parts.filterIsInstance<ToolCallPart>().map { AssistantToolCall(it.callId, it.name, it.argumentsJson) })
         }
     }
+
+    private fun projectWorkspaceAccess(
+        conversationId: String?,
+        agentId: String?,
+        agentLabel: String?,
+    ): ChatWorkspaceAccessUi {
+        val agentName = agentLabel?.takeIf { it.isNotBlank() } ?: "当前智能体"
+        val threadPort = (container as? ThreadWorkspacePortProvider)?.threadWorkspacePort
+        val binding = conversationId?.let { id ->
+            runCatching { threadPort?.conversationWorkspaceBinding(id) }.getOrNull()
+        }
+        val presentation = binding?.workspaceId?.let { workspaceId ->
+            runCatching { container.runtimeIntegration.workspaceUiPresentation(workspaceId) }.getOrNull()
+        }
+        val authority = runCatching { container.runtimeIntegration.snapshot() }.getOrNull()
+        val systemLabel = when {
+            authority == null -> ""
+            authority.selectedAuthority == Authority.SHIZUKU -> "Shizuku"
+            authority.selectedAuthority == Authority.WIRED_ADB -> "Wired ADB"
+            else -> ""
+        }
+        val summary = when {
+            conversationId == null -> "未配置工作区"
+            binding == null -> "未绑定工作区"
+            presentation != null -> presentation.title
+            else -> "已绑定工作区"
+        }
+        val permission = when {
+            binding == null -> "尚未授权此会话"
+            else -> "已绑定"
+        }
+        return ChatWorkspaceAccessUi(
+            agentLabel = agentName,
+            workspaceSummary = summary,
+            systemAccessLabel = systemLabel,
+            permissionLabel = permission,
+        )
+    }
+
     private fun fail(failure: Exception) { state.value = state.value.copy(error = SecretRedactor.redact(failure.message ?: "操作失败。")) }
     private companion object {
         const val SELECTED_SESSION_KEY = "chat.selectedSessionId"

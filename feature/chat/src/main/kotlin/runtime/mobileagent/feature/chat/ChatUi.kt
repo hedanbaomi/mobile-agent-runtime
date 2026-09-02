@@ -23,15 +23,22 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.ime
+import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.union
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.layout.windowInsetsPadding
+import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Menu
+import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.Button
@@ -43,6 +50,8 @@ import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.FilterChip
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
@@ -272,11 +281,11 @@ fun ChatScreen(state: ChatUiState, actions: ChatActions = ChatActions(), modifie
                         actions,
                         onOpenSidebar = {},
                         onOpenWorkspace = { openWorkspace(state.selectedAgentId, state.agents.firstOrNull { it.id == state.selectedAgentId }?.label ?: "当前智能体") },
-                        modifier = Modifier.weight(1f).fillMaxHeight().padding(16.dp).imePadding(),
+                        modifier = Modifier.weight(1f).fillMaxHeight().padding(16.dp),
                     )
                 }
             } else {
-                Column(Modifier.fillMaxSize().padding(12.dp).imePadding()) {
+                Column(Modifier.fillMaxSize().padding(12.dp)) {
                     ChatConversationContent(
                         state,
                         actions,
@@ -354,7 +363,7 @@ fun ConversationScreen(
     onOpenWorkspace: () -> Unit = {},
     modifier: Modifier = Modifier,
 ) {
-    Box(modifier.fillMaxSize().imePadding()) {
+    Box(modifier.fillMaxSize()) {
         ChatConversationContent(
             state = state,
             actions = actions,
@@ -621,16 +630,22 @@ fun ConversationTopBar(
             .testTag("conversation.topBar"),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        TextButton(
+        IconButton(
             onClick = onOpenDrawer,
-            modifier = Modifier.testTag("conversation.drawer.open"),
+            modifier = Modifier
+                .size(48.dp)
+                .testTag("conversation.drawer.open"),
         ) {
-            Text(if (zh) "菜单" else "Menu", maxLines = 1)
+            Icon(
+                Icons.Filled.Menu,
+                contentDescription = if (zh) "打开菜单" else "Open menu",
+            )
         }
         TextButton(
             onClick = { contextOpen = true },
             modifier = Modifier
                 .weight(1f)
+                .heightIn(min = 48.dp)
                 .testTag("conversation.context"),
         ) {
             Column(Modifier.fillMaxWidth(), horizontalAlignment = Alignment.CenterHorizontally) {
@@ -652,11 +667,16 @@ fun ConversationTopBar(
             }
         }
         Box {
-            TextButton(
+            IconButton(
                 onClick = { overflowOpen = true },
-                modifier = Modifier.testTag("conversation.more"),
+                modifier = Modifier
+                    .size(48.dp)
+                    .testTag("conversation.more"),
             ) {
-                Text(if (zh) "更多" else "More", maxLines = 1)
+                Icon(
+                    Icons.Filled.MoreVert,
+                    contentDescription = if (zh) "更多选项" else "More options",
+                )
             }
             DropdownMenu(
                 expanded = overflowOpen,
@@ -1085,7 +1105,13 @@ private fun Composer(state: ChatUiState, actions: ChatActions) {
         keyboard?.hide()
         actions.onSend()
     }
-    Row(Modifier.fillMaxWidth().padding(top = 8.dp), verticalAlignment = Alignment.Bottom) {
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .windowInsetsPadding(WindowInsets.ime.union(WindowInsets.navigationBars))
+            .padding(top = 8.dp),
+        verticalAlignment = Alignment.Bottom,
+    ) {
         OutlinedTextField(
             value = state.input,
             onValueChange = actions.onInput,

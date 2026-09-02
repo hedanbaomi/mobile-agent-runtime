@@ -107,6 +107,7 @@ class AppContainer(app: MobileAgentApp) :
     SettingsAuthorityPortProvider,
     ThreadWorkspacePortProvider,
     ThreadWorkspaceRuntimePortProvider,
+    runtime.mobileagent.workspace.CanonicalWorkspaceSinkProvider,
     AutoCloseable {
     private val closed = AtomicBoolean(false)
     private val runtimeIntegrationRef = AtomicReference<RuntimeIntegration?>()
@@ -220,6 +221,9 @@ class AppContainer(app: MobileAgentApp) :
         get() = runtimeIntegration
 
     override val threadWorkspaceRuntimePort: ThreadWorkspaceRuntimePort
+        get() = runtimeIntegration
+
+    override val canonicalWorkspaceSink: runtime.mobileagent.workspace.CanonicalWorkspaceSink?
         get() = runtimeIntegration
 
     val announcements = AnnouncementRepository(db).apply {

@@ -170,6 +170,120 @@ data class AgentWorkspaceDefault(
     val defaultWorkspaceId: String? get() = workspaceId
 }
 
+/**
+ * The three canonical workspace selection semantics.  They are mutually
+ * exclusive at the product level: a single user selection must resolve to
+ * exactly one intent, and the resulting transaction derives every side effect
+ * from that intent instead of letting each screen compose attach/grant/default
+ * on its own.
+ *
+ * - [ADD_TO_LIBRARY]: attach (or reuse) the workspace and, when an Agent is
+ *   already known, grant it to that Agent.  Never changes the Agent default
+ *   and never binds a Thread.
+ * - [SET_AGENT_DEFAULT]: attach, grant, and make the workspace the Agent
+ *   default used by future Threads.  This is the normal Agent editor flow.
+ * - [BIND_THREAD]: attach, grant, and bind the workspace to one Thread.  It
+ *   must never mutate the Agent default.
+ */
+enum class WorkspaceIntent {
+    ADD_TO_LIBRARY,
+    SET_AGENT_DEFAULT,
+    BIND_THREAD,
+}
+
+/**
+ * The subject a workspace selection applies to.  [agentId] is nullable so a
+ * not-yet-saved Agent draft can still choose a workspace; the resulting
+ * selection is then staged and committed only after the Agent exists.
+ */
+data class WorkspaceTarget(
+    val agentId: String? = null,
+    val threadId: String? = null,
+) {
+    init {
+        require(agentId == null || isBindingId(agentId)) { "Workspace target agent id is invalid" }
+        require(threadId == null || isBindingId(threadId)) { "Workspace target thread id is invalid" }
+        require(threadId == null || agentId != null) {
+            "A thread workspace target requires an agent target"
+        }
+    }
+}
+
+/**
+ * A workspace selection made before its Agent exists.  Nothing about it is
+ * authorized yet: no capability grant and no Agent default is written until
+ * [WorkspaceDraft] is committed with a concrete Agent id, so abandoning the
+ * editor cannot leave an orphan grant behind.
+ */
+data class WorkspaceDraft(
+    val workspaceId: String,
+    val displayName: String,
+    val setAsAgentDefault: Boolean = true,
+) {
+    init {
+        require(isBindingId(workspaceId)) { "Workspace draft id is invalid" }
+        require(displayName.length <= 256) { "Workspace draft display name is invalid" }
+    }
+}
+
+/**
+ * The resolved side effects of one selection.  It is produced by
+ * [WorkspaceIntent.plan] and is the only thing a downstream transaction is
+ * allowed to read, so no screen can reintroduce a second attach/grant/default
+ * composition.
+ */
+data class WorkspaceIntentPlan(
+    val intent: WorkspaceIntent,
+    val grantRequired: Boolean,
+    val setAgentDefault: Boolean,
+    val bindThread: Boolean,
+    /** True when the Agent does not exist yet and the selection must be staged. */
+    val deferred: Boolean,
+) {
+    init {
+        require(!bindThread || !deferred) { "A deferred selection cannot bind a thread" }
+        require(!setAgentDefault || !bindThread) {
+            "One selection cannot both set the Agent default and bind a thread"
+        }
+        require(!deferred || !grantRequired) { "A deferred selection cannot grant immediately" }
+    }
+}
+
+/**
+ * Resolve one intent against its target.  The rules are intentionally
+ * conservative: a missing Agent never silently downgrades to "attach only",
+ * it becomes a deferred draft the caller must commit later.
+ */
+fun WorkspaceIntent.plan(target: WorkspaceTarget): WorkspaceIntentPlan {
+    val hasAgent = target.agentId != null
+    return when (this) {
+        WorkspaceIntent.ADD_TO_LIBRARY -> WorkspaceIntentPlan(
+            intent = this,
+            grantRequired = hasAgent,
+            setAgentDefault = false,
+            bindThread = false,
+            deferred = false,
+        )
+        WorkspaceIntent.SET_AGENT_DEFAULT -> WorkspaceIntentPlan(
+            intent = this,
+            grantRequired = hasAgent,
+            setAgentDefault = true,
+            bindThread = false,
+            deferred = !hasAgent,
+        )
+        WorkspaceIntent.BIND_THREAD -> {
+            require(target.threadId != null) { "Binding a thread workspace requires a thread target" }
+            WorkspaceIntentPlan(
+                intent = this,
+                grantRequired = hasAgent,
+                setAgentDefault = false,
+                bindThread = true,
+                deferred = false,
+            )
+        }
+    }
+}
+
 private fun isBindingId(value: String): Boolean =
     value.length in 1..256 && value == value.trim() &&
         value.all { it.isLetterOrDigit() || it == '.' || it == '_' || it == '-' } &&

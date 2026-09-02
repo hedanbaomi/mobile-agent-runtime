@@ -3,15 +3,21 @@
 
 package runtime.mobileagent.integration
 
+import androidx.lifecycle.SavedStateHandle
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import java.util.UUID
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
+import runtime.mobileagent.AgentsViewModel
+import runtime.mobileagent.ChatViewModel
 import runtime.mobileagent.MobileAgentApp
 import runtime.mobileagent.WorkspacePickerTarget
 import runtime.mobileagent.data.WorkspaceRepository
@@ -28,7 +34,11 @@ import runtime.mobileagent.domain.ProviderProfile
 import runtime.mobileagent.domain.Utc
 import runtime.mobileagent.domain.Workspace
 import runtime.mobileagent.domain.WorkspaceBackendType
+import runtime.mobileagent.domain.WorkspaceDraft
+import runtime.mobileagent.domain.WorkspaceIntent
 import runtime.mobileagent.domain.WorkspaceScope
+import runtime.mobileagent.domain.WorkspaceTarget
+import runtime.mobileagent.domain.plan
 import runtime.mobileagent.skills.tooling.ToolErrorCode
 import runtime.mobileagent.skills.tooling.WorkspaceResult
 
@@ -83,23 +93,19 @@ class RuntimeThreadWorkspaceDeviceTest {
             target = WorkspacePickerTarget(
                 agentId = fixture.agentId,
                 threadId = conversation.id,
-                setAsAgentDefault = true,
-                grantCapabilities = setOf(read),
-                lifetime = GrantLifetime.PERSISTENT,
             ),
         )
         val committed = pickerResult as? WorkspaceAccessResult.Success
             ?: error("picker did not return a committed success: $pickerResult")
 
         assertEquals(RuntimeIntegration.INTERNAL_WORKSPACE_ID, committed.workspace.workspaceId)
-        assertEquals(setOf(read), committed.workspace.grantedCapabilities)
-        assertTrue(committed.grants.any { it.capability == read })
+        assertTrue(committed.grants.isNotEmpty())
         assertEquals(
             RuntimeIntegration.INTERNAL_WORKSPACE_ID,
             threadPort.conversationWorkspaceBinding(conversation.id)?.workspaceId,
         )
         assertEquals(
-            RuntimeIntegration.INTERNAL_WORKSPACE_ID,
+            null,
             threadPort.agentWorkspaceDefault(fixture.agentId)?.workspaceId,
         )
 
@@ -294,6 +300,291 @@ class RuntimeThreadWorkspaceDeviceTest {
         assertTrue(context.canonicalGrants.none { it.workspaceId != null })
         assertTrue(context.snapshotGrantBindings.none { it.workspaceId != null })
         assertTrue(context.effectiveCapabilities.none { it.value.startsWith("file.") })
+        val exposure = runtime.toolExposureDiagnostics(context)
+        assertEquals(0, exposure.grantedWorkspaceCount)
+        assertEquals(0, exposure.boundWorkspaceCount)
+        assertEquals(0, exposure.effectiveAgentWorkspaceCapabilityCount)
+        val factory = runtime.createToolExecutorFactory(context)
+        assertEquals(0, factory.exposureSummary.ownerToolCounts["workspace"] ?: 0)
+    }
+
+    @Test
+    fun deferredAgentDefaultAttachesWithoutGrantUntilDraftCommit() = runBlocking {
+        val fixture = fixture()
+        val container = fixture.app.container
+        val runtime = container.runtimeIntegration
+        val threadPort = container.threadWorkspacePort
+        val beforeGrants = container.agentGrantPort.listGrants(fixture.agentId, includeRevoked = true)
+        val deferred = WorkspaceIntent.SET_AGENT_DEFAULT.plan(WorkspaceTarget())
+        val attached = runtime.useRecent(
+            workspaceId = RuntimeIntegration.INTERNAL_WORKSPACE_ID,
+            plan = deferred,
+            target = WorkspaceTarget(),
+        )
+        val success = attached as? WorkspaceAccessResult.Success
+            ?: error("deferred SET_AGENT_DEFAULT must attach the workspace without requiring an Agent: $attached")
+        assertEquals(RuntimeIntegration.INTERNAL_WORKSPACE_ID, success.workspace.workspaceId)
+        assertTrue(success.grants.isEmpty())
+        assertEquals(beforeGrants, container.agentGrantPort.listGrants(fixture.agentId, includeRevoked = true))
+        assertEquals(null, threadPort.agentWorkspaceDefault(fixture.agentId)?.workspaceId)
+
+        val committed = runtime.commitDraft(
+            WorkspaceDraft(
+                workspaceId = RuntimeIntegration.INTERNAL_WORKSPACE_ID,
+                displayName = "应用私有工作区",
+                setAsAgentDefault = true,
+            ),
+            fixture.agentId,
+        ) as? WorkspaceAccessResult.Success
+            ?: error("draft commit did not succeed")
+        assertTrue(committed.grants.isNotEmpty())
+        assertEquals(
+            RuntimeIntegration.INTERNAL_WORKSPACE_ID,
+            threadPort.agentWorkspaceDefault(fixture.agentId)?.workspaceId,
+        )
+    }
+
+    @Test
+    fun setAgentDefaultThenNewThreadFreezesBindingAndExposesWorkspaceTools() = runBlocking {
+        val fixture = fixture()
+        val container = fixture.app.container
+        val runtime = container.runtimeIntegration
+        val threadPort = container.threadWorkspacePort
+        val committed = runtime.useRecentWorkspace(
+            workspaceId = RuntimeIntegration.INTERNAL_WORKSPACE_ID,
+            target = WorkspacePickerTarget(agentId = fixture.agentId),
+        ) as? WorkspaceAccessResult.Success
+            ?: error("SET_AGENT_DEFAULT did not commit")
+        assertEquals(RuntimeIntegration.INTERNAL_WORKSPACE_ID, committed.workspace.workspaceId)
+        assertEquals(
+            RuntimeIntegration.INTERNAL_WORKSPACE_ID,
+            threadPort.agentWorkspaceDefault(fixture.agentId)?.workspaceId,
+        )
+        val chat = ChatViewModel(fixture.app, SavedStateHandle())
+        chat.selectAgent(fixture.agentId)
+        val conversationId = requireNotNull(chat.newSession()) { "newSession must inherit the Agent default" }
+        assertEquals(
+            RuntimeIntegration.INTERNAL_WORKSPACE_ID,
+            threadPort.conversationWorkspaceBinding(conversationId)?.workspaceId,
+        )
+        val conversation = requireNotNull(container.conversations.get(conversationId))
+        val snapshot = requireNotNull(container.agents.getSnapshot(conversation.snapshotId))
+        assertBoundWorkspaceTools(
+            runtime = runtime,
+            snapshot = snapshot,
+            conversationId = conversationId,
+            workspaceId = RuntimeIntegration.INTERNAL_WORKSPACE_ID,
+            suffix = fixture.suffix,
+        )
+    }
+
+    @Test
+    fun newAgentEditorDraftSaveThenNewSessionExposesWorkspaceTools() {
+        val app = InstrumentationRegistry.getInstrumentation().targetContext.applicationContext as MobileAgentApp
+        app.ensureHostInitialized()
+        val suffix = UUID.randomUUID().toString().replace("-", "")
+        val container = app.container
+        val providerId = "provider-draft-$suffix"
+        val modelId = "model-draft-$suffix"
+        container.profiles.createProvider(
+            ProviderProfile(
+                id = providerId,
+                name = "Draft workspace fixture",
+                apiFormat = runtime.mobileagent.domain.ApiFormat.OPENAI_COMPATIBLE,
+                baseUrl = "https://example.invalid/v1",
+                secretRef = "fixture-draft-$suffix",
+                revision = 1,
+            ),
+        )
+        container.profiles.createModel(
+            ModelProfile(
+                id = modelId,
+                providerId = providerId,
+                role = ModelRole.CHAT,
+                modelId = "fixture-draft-model",
+                capabilities = setOf("stream", "tools"),
+                contextLimit = 4096,
+                outputLimit = 512,
+                revision = 1,
+            ),
+        )
+        val agentsBefore = container.agents.list().map { it.id }.toSet()
+        val vm = AgentsViewModel(app, SavedStateHandle())
+        vm.openEditor(null)
+        val editor = requireNotNull(vm.state.value.editor)
+        vm.edit(editor.copy(name = "Draft workspace agent", chatModelId = modelId, prompt = "Use the selected workspace."))
+        vm.stageWorkspaceDraft(
+            WorkspaceDraft(
+                workspaceId = RuntimeIntegration.INTERNAL_WORKSPACE_ID,
+                displayName = "应用私有工作区",
+                setAsAgentDefault = true,
+            ),
+        )
+        assertNotNull(vm.pendingWorkspaceDraft())
+        assertTrue(vm.save())
+        val agentId = requireNotNull(vm.state.value.selectedAgentId)
+        assertFalse(agentId in agentsBefore)
+        assertNull(vm.pendingWorkspaceDraft())
+        assertEquals(
+            RuntimeIntegration.INTERNAL_WORKSPACE_ID,
+            container.threadWorkspacePort.agentWorkspaceDefault(agentId)?.workspaceId,
+        )
+        assertTrue(
+            container.agentGrantPort.listGrants(agentId, includeRevoked = false)
+                .any { it.workspaceId == RuntimeIntegration.INTERNAL_WORKSPACE_ID },
+        )
+
+        val chat = ChatViewModel(app, SavedStateHandle())
+        chat.selectAgent(agentId)
+        val conversationId = requireNotNull(chat.newSession())
+        assertEquals(
+            RuntimeIntegration.INTERNAL_WORKSPACE_ID,
+            container.threadWorkspacePort.conversationWorkspaceBinding(conversationId)?.workspaceId,
+        )
+        val conversation = requireNotNull(container.conversations.get(conversationId))
+        val snapshot = requireNotNull(container.agents.getSnapshot(conversation.snapshotId))
+        assertBoundWorkspaceTools(
+            runtime = container.runtimeIntegration,
+            snapshot = snapshot,
+            conversationId = conversationId,
+            workspaceId = RuntimeIntegration.INTERNAL_WORKSPACE_ID,
+            suffix = suffix,
+        )
+    }
+
+    @Test
+    fun cancelEditorDropsDraftWithoutCreatingAgentOrGrant() {
+        val app = InstrumentationRegistry.getInstrumentation().targetContext.applicationContext as MobileAgentApp
+        app.ensureHostInitialized()
+        val agentsBefore = app.container.agents.list().map { it.id }.toSet()
+        val vm = AgentsViewModel(app, SavedStateHandle())
+        vm.openEditor(null)
+        vm.stageWorkspaceDraft(
+            WorkspaceDraft(
+                workspaceId = RuntimeIntegration.INTERNAL_WORKSPACE_ID,
+                displayName = "应用私有工作区",
+                setAsAgentDefault = true,
+            ),
+        )
+        vm.closeEditor()
+        assertNull(vm.pendingWorkspaceDraft())
+        assertEquals(agentsBefore, app.container.agents.list().map { it.id }.toSet())
+    }
+
+    @Test
+    fun failedDraftCommitRollsBackNewAgent() {
+        val app = InstrumentationRegistry.getInstrumentation().targetContext.applicationContext as MobileAgentApp
+        app.ensureHostInitialized()
+        val suffix = UUID.randomUUID().toString().replace("-", "")
+        val container = app.container
+        val providerId = "provider-rollback-$suffix"
+        val modelId = "model-rollback-$suffix"
+        container.profiles.createProvider(
+            ProviderProfile(
+                id = providerId,
+                name = "Rollback workspace fixture",
+                apiFormat = runtime.mobileagent.domain.ApiFormat.OPENAI_COMPATIBLE,
+                baseUrl = "https://example.invalid/v1",
+                secretRef = "fixture-rollback-$suffix",
+                revision = 1,
+            ),
+        )
+        container.profiles.createModel(
+            ModelProfile(
+                id = modelId,
+                providerId = providerId,
+                role = ModelRole.CHAT,
+                modelId = "fixture-rollback-model",
+                capabilities = setOf("stream"),
+                contextLimit = 4096,
+                outputLimit = 512,
+                revision = 1,
+            ),
+        )
+        val agentsBefore = container.agents.list().map { it.id }.toSet()
+        val vm = AgentsViewModel(app, SavedStateHandle())
+        vm.openEditor(null)
+        val editor = requireNotNull(vm.state.value.editor)
+        vm.edit(editor.copy(name = "Rollback workspace agent", chatModelId = modelId, prompt = "Use the selected workspace."))
+        vm.stageWorkspaceDraft(
+            WorkspaceDraft(
+                workspaceId = "ws-missing-$suffix",
+                displayName = "Download",
+                setAsAgentDefault = true,
+            ),
+        )
+        assertFalse(vm.save())
+        assertEquals(agentsBefore, container.agents.list().map { it.id }.toSet())
+        assertNotNull(vm.pendingWorkspaceDraft())
+    }
+
+    @Test
+    fun threadWorkspaceChangeDoesNotRewriteAgentDefault() = runBlocking {
+        val fixture = fixture()
+        val container = fixture.app.container
+        val runtime = container.runtimeIntegration
+        val threadPort = container.threadWorkspacePort
+        val workspaceRepository = WorkspaceRepository(container.db)
+        val other = saveWorkspace(workspaceRepository, "workspace-thread-switch-${fixture.suffix}")
+        val policyVersion = container.agentGrantPort.currentPolicyVersion()
+        container.agentGrantPort.saveGrant(
+            CapabilityGrant(
+                grantId = "grant-thread-switch-${fixture.suffix}",
+                agentId = fixture.agentId,
+                capability = CapabilityId(CapabilityId.FILE_READ_TEXT),
+                workspaceId = other.id,
+                lifetime = GrantLifetime.PERSISTENT,
+                policyVersion = policyVersion,
+                createdAt = fixture.now,
+            ),
+        )
+        runtime.useRecentWorkspace(
+            workspaceId = RuntimeIntegration.INTERNAL_WORKSPACE_ID,
+            target = WorkspacePickerTarget(agentId = fixture.agentId),
+        )
+        assertEquals(
+            RuntimeIntegration.INTERNAL_WORKSPACE_ID,
+            threadPort.agentWorkspaceDefault(fixture.agentId)?.workspaceId,
+        )
+        val snapshot = runtime.createSnapshotWithWorkspace(
+            agentId = fixture.agentId,
+            workspaceId = RuntimeIntegration.INTERNAL_WORKSPACE_ID,
+            snapshotId = "snapshot-thread-switch-${fixture.suffix}",
+            at = fixture.now,
+        )
+        val conversation = container.conversations.create(
+            snapshotId = snapshot.id,
+            title = "switch thread",
+            conversationId = "conversation-thread-switch-${fixture.suffix}",
+            at = fixture.now,
+        )
+        val rebound = runtime.useRecentWorkspace(
+            workspaceId = RuntimeIntegration.INTERNAL_WORKSPACE_ID,
+            target = WorkspacePickerTarget(
+                agentId = fixture.agentId,
+                threadId = conversation.id,
+            ),
+        )
+        assertTrue("thread picker must bind without rewriting Agent default: $rebound", rebound is WorkspaceAccessResult.Success)
+        val unregistered = runtime.useRecentWorkspace(
+            workspaceId = other.id,
+            target = WorkspacePickerTarget(
+                agentId = fixture.agentId,
+                threadId = conversation.id,
+            ),
+        )
+        assertTrue(
+            "an unregistered workspace must not be bound by the picker: $unregistered",
+            unregistered is WorkspaceAccessResult.Failure,
+        )
+        assertEquals(
+            RuntimeIntegration.INTERNAL_WORKSPACE_ID,
+            threadPort.conversationWorkspaceBinding(conversation.id)?.workspaceId,
+        )
+        assertEquals(
+            RuntimeIntegration.INTERNAL_WORKSPACE_ID,
+            threadPort.agentWorkspaceDefault(fixture.agentId)?.workspaceId,
+        )
     }
 
     @Test
@@ -365,6 +656,33 @@ class RuntimeThreadWorkspaceDeviceTest {
             "Use the selected workspace.",
         )
         return Fixture(app, agentId, suffix, Utc.nowIso())
+    }
+
+    private fun assertBoundWorkspaceTools(
+        runtime: RuntimeIntegration,
+        snapshot: runtime.mobileagent.domain.AgentSnapshot,
+        conversationId: String,
+        workspaceId: String,
+        suffix: String,
+    ) {
+        val context = runtime.createToolExecutionContextForWorkspace(
+            snapshot = snapshot,
+            workspaceId = workspaceId,
+            modelCallId = "model-call-bound-$suffix",
+            sessionIdentity = conversationId,
+            taskIdentity = "task-bound-$suffix",
+            configSnapshotHash = "config-bound-$suffix",
+        )
+        assertTrue(context.canonicalGrants.any { it.workspaceId == workspaceId })
+        assertTrue(context.snapshotGrantBindings.all { it.workspaceId == workspaceId })
+        val exposure = runtime.toolExposureDiagnostics(context)
+        assertTrue("binding persisted but grantedWorkspaceCount=0", exposure.grantedWorkspaceCount >= 1)
+        assertTrue("binding persisted but boundWorkspaceCount=0", exposure.boundWorkspaceCount >= 1)
+        assertTrue(exposure.effectiveAgentWorkspaceCapabilityCount > 0)
+        val factory = runtime.createToolExecutorFactory(context)
+        val workspaceToolCount = factory.exposureSummary.ownerToolCounts["workspace"] ?: 0
+        assertTrue("binding persisted but workspaceToolCount=0", workspaceToolCount > 0)
+        assertTrue(factory.toolingSpecs.any { it.name == "workspace_list" || it.name.startsWith("file_") })
     }
 
     private fun saveWorkspace(repository: WorkspaceRepository, id: String): Workspace = repository.save(

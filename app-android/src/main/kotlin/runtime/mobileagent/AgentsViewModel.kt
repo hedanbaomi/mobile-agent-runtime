@@ -350,9 +350,17 @@ class AgentsViewModel(
         (app.container as? ThreadWorkspacePortProvider)?.threadWorkspacePort
     private val threadWorkspaceRuntimePort: ThreadWorkspaceRuntimePort? =
         (app.container as? ThreadWorkspaceRuntimePortProvider)?.threadWorkspaceRuntimePort
+    private val canonicalWorkspaceSink: runtime.mobileagent.workspace.CanonicalWorkspaceSink? =
+        (app.container as? runtime.mobileagent.workspace.CanonicalWorkspaceSinkProvider)?.canonicalWorkspaceSink
     val state = mutableStateOf(AgentsUiState())
     private var editorBaseline: AgentEditorUi? = null
     private var grantPortError: String? = null
+    /**
+     * A workspace selection made before this Agent exists.  It is committed
+     * together with the Agent save, so abandoning the editor never leaves an
+     * orphan grant or default behind.
+     */
+    private var pendingWorkspaceDraft: runtime.mobileagent.domain.WorkspaceDraft? = null
 
     init {
         reload()
@@ -418,8 +426,34 @@ class AgentsViewModel(
     }
     fun closeEditor() {
         editorBaseline = null
+        pendingWorkspaceDraft = null
         savedStateHandle.remove<String>(EDITOR_ID_KEY)
         state.value = state.value.copy(editor = null, error = null, editorDirty = false, editorOpen = false)
+    }
+
+    /**
+     * Stage a workspace selection made before the Agent exists.  Nothing is
+     * authorized until [save] creates the Agent and commits the draft in the
+     * same flow, so cancelling the editor leaves no orphan grant or default.
+     *
+     * The staged draft does NOT mutate [AgentEditorUi.defaultWorkspaceId]: the
+     * default is committed by the canonical sink in [commitPendingWorkspaceDraft],
+     * and mutating the editor default here would make [save] also run the
+     * thread-workspace default path, double-writing the same default.
+     */
+    fun stageWorkspaceDraft(draft: runtime.mobileagent.domain.WorkspaceDraft) {
+        pendingWorkspaceDraft = draft
+        val editor = state.value.editor
+        if (editor != null) {
+            state.value = state.value.copy(editorDirty = true)
+        }
+    }
+
+    fun pendingWorkspaceDraft(): runtime.mobileagent.domain.WorkspaceDraft? = pendingWorkspaceDraft
+
+    /** Drop any staged draft without mutating persisted state. */
+    fun clearWorkspaceDraft() {
+        pendingWorkspaceDraft = null
     }
     fun query(value: String) { state.value = state.value.copy(query = value) }
 
@@ -478,31 +512,44 @@ class AgentsViewModel(
                 parameterOverridesJson = parameters.toString(), contextPolicyJson = previous?.contextPolicyJson ?: "{}",
                 permissionSettingsJson = previous?.permissionSettingsJson ?: "{}",
             )
-            val saved = app.container.agents.saveWithPrompt(profile, editor.prompt)
-            persistGrantChanges(editor, saved.id)
-            if (defaultChanged) persistWorkspaceDefault(editor, saved.id)
-            app.container.uiPreferences.edit().putString("selected-agent", saved.id).apply()
-            savedStateHandle[SELECTED_AGENT_KEY] = saved.id
-            savedStateHandle.remove<String>(EDITOR_ID_KEY)
-            editorBaseline = null
-            state.value = state.value.copy(
-                selectedAgentId = saved.id,
-                editor = null,
-                editorOpen = false,
-                editorDirty = false,
-                error = null,
-                status = if (editor.defaultWorkspaceId != editorBaseline?.defaultWorkspaceId ||
+            val createdNew = previous == null
+            var savedId: String? = null
+            try {
+                val saved = app.container.agents.saveWithPrompt(profile, editor.prompt)
+                savedId = saved.id
+                persistGrantChanges(editor, saved.id)
+                if (defaultChanged) persistWorkspaceDefault(editor, saved.id)
+                val hadDraft = pendingWorkspaceDraft != null
+                commitPendingWorkspaceDraft(saved.id)
+                val workspaceUpdated = defaultChanged || hadDraft ||
                     editor.workspaceGrantPreset != null || editor.grantDraft != null
-                ) {
-                    "已保存 Agent、工作区默认值和能力授权；新会话将使用默认值，旧会话不变。"
-                } else {
-                    "已保存 Agent；旧会话快照不变。"
-                },
-                grantStoreAvailable = grantPort.available,
-                grantStoreError = grantPortError,
-            )
-            reload()
-            true
+                app.container.uiPreferences.edit().putString("selected-agent", saved.id).apply()
+                savedStateHandle[SELECTED_AGENT_KEY] = saved.id
+                savedStateHandle.remove<String>(EDITOR_ID_KEY)
+                editorBaseline = null
+                pendingWorkspaceDraft = null
+                state.value = state.value.copy(
+                    selectedAgentId = saved.id,
+                    editor = null,
+                    editorOpen = false,
+                    editorDirty = false,
+                    error = null,
+                    status = if (workspaceUpdated) {
+                        "已保存 Agent、工作区默认值和能力授权；新会话将使用默认值，旧会话不变。"
+                    } else {
+                        "已保存 Agent；旧会话快照不变。"
+                    },
+                    grantStoreAvailable = grantPort.available,
+                    grantStoreError = grantPortError,
+                )
+                reload()
+                true
+            } catch (failure: Exception) {
+                if (createdNew && savedId != null) {
+                    rollbackNewAgent(savedId)
+                }
+                throw failure
+            }
         } catch (error: Exception) {
             state.value = state.value.copy(error = SecretRedactor.redact(error.message ?: "保存 Agent 失败。"))
             false
@@ -569,6 +616,42 @@ class AgentsViewModel(
 
         if (editor.grantDraft != null) saveAgentGrantDraft(editor, agentId, grantPort)
         if (editor.workspaceGrantPreset != null) saveAgentWorkspaceGrantPreset(editor, agentId, grantPort)
+    }
+
+    /**
+     * Commit a workspace selection staged before the Agent existed. Grant and
+     * Agent default are written atomically by the canonical sink, so a failure
+     * leaves no half-configured Agent. A staged draft only applies to a
+     * newly-created Agent; editing an existing Agent never goes through the
+     * draft path because the editor already supplies an agent id.
+     */
+    private fun commitPendingWorkspaceDraft(agentId: String) {
+        val draft = pendingWorkspaceDraft ?: return
+        val sink = canonicalWorkspaceSink ?: error("工作区写入通道未就绪。")
+        // The draft commit is part of the Agent save and must complete before
+        // save() reports success, so an abandoned editor never leaves a
+        // half-configured Agent. It may reattach a privileged backend, hence
+        // the blocking bridge over the suspend sink.
+        val result = kotlinx.coroutines.runBlocking { sink.commitDraft(draft, agentId) }
+        if (result is runtime.mobileagent.integration.WorkspaceAccessResult.Failure) {
+            error("保存工作区授权失败：${result.code.name}")
+        }
+        pendingWorkspaceDraft = null
+    }
+
+    /**
+     * A newly created Agent that failed its workspace commit must not remain
+     * as a half-configured profile with orphan grants.
+     */
+    private fun rollbackNewAgent(agentId: String) {
+        runCatching {
+            grantPort.listGrants(agentId, includeRevoked = true).forEach { pending ->
+                if (!pending.revoked) {
+                    runCatching { grantPort.revokeGrant(pending.grantId, pending.revision) }
+                }
+            }
+        }
+        runCatching { app.container.agents.delete(agentId) }
     }
 
     private fun persistWorkspaceDefault(editor: AgentEditorUi, agentId: String) {

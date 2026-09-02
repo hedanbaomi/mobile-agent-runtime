@@ -537,7 +537,7 @@ private fun AgentWorkspaceAccessCard(
                 if (access.selectedWorkspaceName.isNullOrBlank()) {
                     if (zh) "尚未为此智能体选择工作区。每个会话会单独固定自己的工作区。" else "No workspace is selected for this Agent. Each conversation keeps its own workspace binding."
                 } else {
-                    if (zh) "可用工作区：${access.selectedWorkspaceName}" else "Available workspace: ${access.selectedWorkspaceName}"
+                    if (zh) "当前工作区：${access.selectedWorkspaceName}" else "Current workspace: ${access.selectedWorkspaceName}"
                 },
                 style = MaterialTheme.typography.bodyMedium,
             )

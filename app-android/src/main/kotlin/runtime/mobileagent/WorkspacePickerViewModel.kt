@@ -29,7 +29,6 @@ import runtime.mobileagent.feature.agents.WorkspacePickerModeUi
 import runtime.mobileagent.feature.agents.WorkspacePickerRecentUi
 import runtime.mobileagent.feature.agents.WorkspacePickerUiState
 import runtime.mobileagent.integration.WorkspaceAccessErrorCode
-import runtime.mobileagent.integration.WorkspaceAccessGrantTarget
 import runtime.mobileagent.integration.WorkspaceAccessItem
 import runtime.mobileagent.integration.WorkspaceAccessResult
 import runtime.mobileagent.integration.WorkspaceAccessStatus
@@ -225,7 +224,7 @@ class WorkspacePickerViewModel(
             showError(WorkspacePickerErrorCodeUi.PERMISSION_DENIED, "当前位置不可访问。")
             return
         }
-        attachPrivileged(authority, page.current, level.label)
+        attachPrivileged(authority, page.current, pathHintForAttach(level.label))
     }
 
     /** Called by the host after the user explicitly selected a SAF tree. */
@@ -289,7 +288,6 @@ class WorkspacePickerViewModel(
         val generation = nextGeneration()
         val workspaceId = newWorkspaceId()
         val request = WorkspaceAttachRequest(workspaceId, displayName, handle)
-        val grant = target.grantForWorkspace()
         _state.value = _state.value.copy(
             attachPhase = WorkspacePickerAttachPhaseUi.ATTACHING,
             errorCode = null,
@@ -301,7 +299,7 @@ class WorkspacePickerViewModel(
         browseJob = viewModelScope.launch {
             val result = try {
                 withContext(Dispatchers.IO) {
-                    port.attachPrivilegedDirectory(authority, request, grant, target)
+                    port.attachPrivilegedDirectory(authority, request, target)
                 }
             } catch (cancelled: CancellationException) {
                 throw cancelled
@@ -315,8 +313,6 @@ class WorkspacePickerViewModel(
 
     private fun attachSaf(uri: Uri, resultFlags: Int, displayName: String) {
         val generation = nextGeneration()
-        val workspaceId = newWorkspaceId()
-        val grant = target.grantForWorkspace()
         _state.value = _state.value.copy(
             attachPhase = WorkspacePickerAttachPhaseUi.ATTACHING,
             errorCode = null,
@@ -328,7 +324,7 @@ class WorkspacePickerViewModel(
         browseJob = viewModelScope.launch {
             val result = try {
                 withContext(Dispatchers.IO) {
-                    port.attachSaf(uri, resultFlags, grant, target)
+                    port.attachSaf(uri, resultFlags, target)
                 }
             } catch (cancelled: CancellationException) {
                 throw cancelled
@@ -620,6 +616,18 @@ class WorkspacePickerViewModel(
     private fun privilegedRootLocationPriority(name: String): Int = when {
         name.equals("storage", ignoreCase = true) -> 0
         else -> 1
+    }
+
+    private fun pathHintForAttach(currentLabel: String): String {
+        val trail = directoryStack.map { it.label }.filter {
+            it.isNotBlank() && it != "根目录" && !it.equals("root", ignoreCase = true)
+        }
+        val joined = trail.joinToString("/")
+        return when {
+            joined.startsWith("/") -> joined
+            joined.isNotBlank() -> "/$joined"
+            else -> currentLabel
+        }
     }
 
     private fun isReadable(entry: WorkspaceDirectoryEntry): Boolean = entry.readable && entry.handle != null

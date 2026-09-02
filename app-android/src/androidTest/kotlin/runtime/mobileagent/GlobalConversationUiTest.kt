@@ -20,6 +20,8 @@ import androidx.compose.ui.test.assertIsNotEnabled
 import androidx.compose.ui.test.assertCountEquals
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onAllNodesWithTag
+import androidx.compose.ui.test.onAllNodesWithText
+import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performTextInput
@@ -221,6 +223,35 @@ class GlobalConversationUiTest {
             .assertIsDisplayed()
             .performClick()
         assertEquals(1, sent)
+    }
+
+    @Test
+    fun conversationTopBarUsesIconButtonsOnNarrowScreen() {
+        compose.setContent {
+            CompositionLocalProvider(LocalDensity provides Density(1f, fontScale = 1.6f)) {
+                MaterialTheme {
+                    Box(Modifier.width(320.dp).height(640.dp)) {
+                        ConversationScreen(
+                            state = drawerState().copy(
+                                workspaceAccess = runtime.mobileagent.feature.chat.ChatWorkspaceAccessUi(
+                                    workspaceSummary = "/storage/emulated/0/Download",
+                                    systemAccessLabel = "Shizuku",
+                                ),
+                            ),
+                        )
+                    }
+                }
+            }
+        }
+
+        compose.onNodeWithTag("conversation.topBar").assertIsDisplayed()
+        compose.onNodeWithTag("conversation.drawer.open").assertIsDisplayed()
+        compose.onNodeWithContentDescription("打开菜单").assertIsDisplayed()
+        compose.onNodeWithTag("conversation.more").assertIsDisplayed()
+        compose.onNodeWithContentDescription("更多选项").assertIsDisplayed()
+        assertEquals(0, compose.onAllNodesWithText("菜单", useUnmergedTree = true).fetchSemanticsNodes().size)
+        assertEquals(0, compose.onAllNodesWithText("更多", useUnmergedTree = true).fetchSemanticsNodes().size)
+        compose.onNodeWithTag("conversation.context").assertIsDisplayed()
     }
 
     private fun drawerState(): ChatUiState = ChatUiState(

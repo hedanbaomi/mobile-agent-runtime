@@ -62,9 +62,13 @@ import runtime.mobileagent.MobileAgentApp
 import runtime.mobileagent.ShellViewModel
 import runtime.mobileagent.WorkspacePickerTarget
 import runtime.mobileagent.WorkspacePickerViewModel
+import runtime.mobileagent.domain.WorkspaceIntent
+import runtime.mobileagent.domain.WorkspaceTarget
 import runtime.mobileagent.feature.agents.WorkspacePickerActions
 import runtime.mobileagent.feature.agents.WorkspacePickerAttachPhaseUi
 import runtime.mobileagent.feature.agents.WorkspacePickerScreen
+import runtime.mobileagent.workspace.CanonicalWorkspaceCoordinator
+import runtime.mobileagent.workspace.WorkspaceSelectionOutcome
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -257,7 +261,6 @@ internal fun MainApp() {
                 WorkspacePickerTarget(
                     agentId = workspacePickerAgentId,
                     threadId = workspacePickerThreadId,
-                    setAsAgentDefault = true,
                 ),
                 workspacePickerLabel,
             )
@@ -344,6 +347,7 @@ internal fun MainApp() {
                 onDrawerOpenChange = { drawerOpen = it },
                 showCompactMenuButton = route != AppRoutes.CHAT,
                 compactMenuButtonLabel = if (chinese) "菜单" else "Menu",
+                consumeBottomSystemInsets = route != AppRoutes.CHAT,
                 drawerContent = { close ->
                     runtime.mobileagent.feature.chat.GlobalDrawerContent(
                         state = drawerChatState,
@@ -558,6 +562,11 @@ private fun AgentsRoute(entry: NavBackStackEntry, chinese: Boolean, onRoute: (St
     val app = LocalContext.current.applicationContext as MobileAgentApp
     val integration = app.container.runtimeIntegration
     val workspacePort = integration.workspaceAccessPort
+    // The one canonical write seam for workspace selection.  This screen no
+    // longer calls attach/grant/default directly; every selection resolves a
+    // WorkspaceIntent + WorkspaceTarget here and the coordinator derives grant,
+    // Agent default and (never here) Thread binding from that plan.
+    val workspaceCoordinator = remember(integration) { CanonicalWorkspaceCoordinator(integration) }
     val coroutineScope = rememberCoroutineScope()
     var workspaceRevision by remember { mutableIntStateOf(0) }
     var workspaceBusy by remember { mutableStateOf(false) }
@@ -607,17 +616,22 @@ private fun AgentsRoute(entry: NavBackStackEntry, chinese: Boolean, onRoute: (St
             provider.availability == runtime.mobileagent.skills.tooling.Availability.READY &&
             provider.connection == runtime.mobileagent.skills.tooling.Connection.CONNECTED
     } == true
+    val pendingDraft = vm.pendingWorkspaceDraft()
+    val selectedPresentation = selectedWorkspace?.let { integration.workspaceUiPresentation(it.workspaceId, chinese) }
     val workspaceAccess = runtime.mobileagent.feature.agents.AgentWorkspaceAccessUi(
-        selectedWorkspaceName = selectedWorkspace?.displayName,
-        selectedBackendLabel = selectedWorkspace?.let { workspaceBackendLabel(it.backendType, it.authority, chinese) },
+        selectedWorkspaceName = pendingDraft?.displayName
+            ?: selectedPresentation?.title
+            ?: selectedWorkspace?.displayName,
+        selectedBackendLabel = selectedWorkspace?.let { workspaceBackendLabel(it.backendType, it.authority, chinese) }
+            ?: pendingDraft?.let { if (chinese) "待保存" else "Pending save" },
         availableWorkspaceCount = workspaceItems.count { item ->
             item.status != runtime.mobileagent.integration.WorkspaceAccessStatus.REVOKED &&
                 item.status != runtime.mobileagent.integration.WorkspaceAccessStatus.DISABLED
         },
-        canChooseSaf = editorAgentId != null && !workspaceBusy,
-        canBrowsePrivileged = editorAgentId != null && authorityReady && !workspaceBusy,
+        canChooseSaf = !workspaceBusy,
+        canBrowsePrivileged = authorityReady && !workspaceBusy,
         fullDeviceFilesEnabled = fullDeviceWorkspace != null,
-        fullDeviceFilesEligible = editorAgentId != null && authorityReady &&
+        fullDeviceFilesEligible = authorityReady &&
             authoritySnapshot.dangerousModeBuildAllowed &&
             authoritySnapshot.dangerousMode != runtime.mobileagent.domain.DangerousMode.DISABLED && !workspaceBusy,
         status = when {
@@ -652,6 +666,47 @@ private fun AgentsRoute(entry: NavBackStackEntry, chinese: Boolean, onRoute: (St
         vm.reload()
     }
 
+    fun completeWorkspaceSelection(outcome: WorkspaceSelectionOutcome) {
+        when (outcome) {
+            is WorkspaceSelectionOutcome.Committed -> {
+                workspaceStatus = if (chinese) "已添加工作区并设为默认；新会话将使用该工作区。" else "Workspace added and set as default; new conversations use it."
+                workspaceRevision++
+                vm.reload()
+            }
+            is WorkspaceSelectionOutcome.Staged -> {
+                // The Agent does not exist yet.  Keep the draft; it is committed
+                // atomically when the Agent is saved, and dropped on cancel.
+                vm.stageWorkspaceDraft(outcome.draft)
+                workspaceStatus = if (chinese) "已选择工作区；保存 Agent 后生效。" else "Workspace selected; it takes effect when the Agent is saved."
+                workspaceRevision++
+                vm.reload()
+            }
+            is WorkspaceSelectionOutcome.Failed -> {
+                workspaceStatus = workspaceAccessResultMessage(
+                    runtime.mobileagent.integration.WorkspaceAccessResult.Failure(outcome.code),
+                    chinese,
+                )
+                workspaceRevision++
+                vm.reload()
+            }
+        }
+    }
+
+    fun launchWorkspaceSelection(block: suspend () -> WorkspaceSelectionOutcome) {
+        coroutineScope.launch {
+            workspaceBusy = true
+            val outcome = withContext(Dispatchers.IO) {
+                runCatching { block() }.getOrElse {
+                    WorkspaceSelectionOutcome.Failed(
+                        runtime.mobileagent.integration.WorkspaceAccessErrorCode.UNKNOWN_OUTCOME,
+                    )
+                }
+            }
+            workspaceBusy = false
+            completeWorkspaceSelection(outcome)
+        }
+    }
+
     fun launchWorkspaceOperation(block: suspend () -> runtime.mobileagent.integration.WorkspaceAccessResult) {
         coroutineScope.launch {
             workspaceBusy = true
@@ -668,19 +723,21 @@ private fun AgentsRoute(entry: NavBackStackEntry, chinese: Boolean, onRoute: (St
     }
 
     val safLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
-        val agentId = editorAgentId
-        if (uri != null && agentId != null) {
-            launchWorkspaceOperation {
-                workspacePort.attachSaf(
+        if (uri != null) {
+            // A draft Agent (no id yet) selects with a bare target so the
+            // coordinator stages the selection for commit on save.
+            val target = editorAgentId?.let { WorkspaceTarget(agentId = it) } ?: WorkspaceTarget()
+            launchWorkspaceSelection {
+                workspaceCoordinator.selectSaf(
+                    intent = WorkspaceIntent.SET_AGENT_DEFAULT,
                     uri = uri,
-                    grant = runtime.mobileagent.integration.WorkspaceAccessGrantTarget(agentId = agentId),
+                    target = target,
                 )
             }
         }
     }
 
     fun openPrivilegedWorkspace() {
-        if (editorAgentId == null) return
         if (!authorityReady) {
             workspaceStatus = if (chinese) "请先在设置中连接并选定 ADB 级通道。" else "Connect and select an ADB-level authority in Settings first."
             return
@@ -715,7 +772,7 @@ private fun AgentsRoute(entry: NavBackStackEntry, chinese: Boolean, onRoute: (St
         onSave = { vm.save() }, onSavePromptRevision = { vm.save() },
         onRestorePrompt = vm::restorePrompt, onToggleResource = vm::toggleResource,
         onSnapshot = { if (vm.createConversation() != null) onRoute(AppRoutes.CHAT) },
-        onChooseSafWorkspace = { if (editorAgentId != null) safLauncher.launch(null) },
+        onChooseSafWorkspace = { safLauncher.launch(null) },
         onBrowsePrivilegedWorkspace = ::openPrivilegedWorkspace,
         onToggleFullDeviceFiles = { enabled ->
             if (enabled) {
@@ -786,21 +843,22 @@ private fun AgentsRoute(entry: NavBackStackEntry, chinese: Boolean, onRoute: (St
             },
             onAttach = {
                 val page = browserPage ?: return@PrivilegedWorkspaceBrowserDialog
-                val agentId = editorAgentId ?: return@PrivilegedWorkspaceBrowserDialog
                 if (browserTrail.isEmpty()) {
                     workspaceStatus = if (chinese) "设备根目录只能通过“完整设备文件”授权。" else "Device root requires Full device files authorization."
                 } else {
                     browserOpen = false
                     val workspaceId = newWorkspaceId("device")
-                    launchWorkspaceOperation {
-                        workspacePort.attachPrivilegedDirectory(
+                    val target = editorAgentId?.let { WorkspaceTarget(agentId = it) } ?: WorkspaceTarget()
+                    launchWorkspaceSelection {
+                        workspaceCoordinator.selectPrivileged(
+                            intent = WorkspaceIntent.SET_AGENT_DEFAULT,
                             authority = selectedAuthority,
                             request = runtime.mobileagent.skills.tooling.WorkspaceAttachRequest(
                                 workspaceId = workspaceId,
-                                displayName = "${baseState.editor?.name?.ifBlank { "Agent" } ?: "Agent"} · ${browserTrail.last()}",
+                                displayName = "/" + browserTrail.joinToString("/"),
                                 directory = page.current,
                             ),
-                            grant = runtime.mobileagent.integration.WorkspaceAccessGrantTarget(agentId = agentId),
+                            target = target,
                         )
                     }
                 }
@@ -815,16 +873,17 @@ private fun AgentsRoute(entry: NavBackStackEntry, chinese: Boolean, onRoute: (St
             chinese = chinese,
             onValue = { wiredPath = it },
             onConfirm = {
-                val agentId = editorAgentId ?: return@WiredPathDialog
                 val path = wiredPath
                 wiredPathOpen = false
-                launchWorkspaceOperation {
-                    workspacePort.attachPrivilegedPath(
+                val target = editorAgentId?.let { WorkspaceTarget(agentId = it) } ?: WorkspaceTarget()
+                launchWorkspaceSelection {
+                    workspaceCoordinator.selectPrivilegedPath(
+                        intent = WorkspaceIntent.SET_AGENT_DEFAULT,
                         authority = runtime.mobileagent.domain.Authority.WIRED_ADB,
                         workspaceId = newWorkspaceId("wired"),
-                        displayName = "${baseState.editor?.name?.ifBlank { "Agent" } ?: "Agent"} · ADB",
+                        displayName = path,
                         absolutePath = path,
-                        grant = runtime.mobileagent.integration.WorkspaceAccessGrantTarget(agentId = agentId),
+                        target = target,
                     )
                 }
             },
@@ -841,8 +900,8 @@ private fun AgentsRoute(entry: NavBackStackEntry, chinese: Boolean, onRoute: (St
                 val workspaceId = agentFullDeviceWorkspaceId(agentId, selectedAuthority)
                 val currentRevision = workspacePort.fullDeviceFilesGrantRevision(workspaceId)
                 val nextRevision = (currentRevision ?: 0L) + 1L
-                launchWorkspaceOperation {
-                    workspacePort.openFullDeviceFiles(
+                launchWorkspaceSelection {
+                    workspaceCoordinator.openFullDeviceFiles(
                         authority = selectedAuthority,
                         request = runtime.mobileagent.skills.tooling.FullDeviceFilesRequest(
                             workspaceId = workspaceId,
@@ -850,7 +909,7 @@ private fun AgentsRoute(entry: NavBackStackEntry, chinese: Boolean, onRoute: (St
                             grantRevision = nextRevision,
                             confirmedByUser = true,
                         ),
-                        grant = runtime.mobileagent.integration.WorkspaceAccessGrantTarget(agentId = agentId),
+                        target = WorkspaceTarget(agentId = agentId),
                     )
                 }
             },

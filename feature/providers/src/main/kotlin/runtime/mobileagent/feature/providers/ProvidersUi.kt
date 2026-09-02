@@ -5,8 +5,11 @@ package runtime.mobileagent.feature.providers
 
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -20,13 +23,19 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.FilterChip
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
@@ -40,9 +49,11 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import runtime.mobileagent.provider.CapabilityCheck
 import runtime.mobileagent.provider.CapabilityCheckStatus
@@ -355,6 +366,7 @@ private fun ProviderStatus(message: String, modifier: Modifier = Modifier, error
     }
 }
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun ProviderDetail(
     state: ProvidersUiState,
@@ -370,23 +382,100 @@ private fun ProviderDetail(
         Text(if (zh) "选择服务商以查看模型和能力。" else "Select a provider to inspect models and capabilities.", style = MaterialTheme.typography.bodyMedium, modifier = Modifier.padding(24.dp))
         return
     }
-    Text(provider.name, style = MaterialTheme.typography.headlineSmall)
-    Text(provider.baseUrl, style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(top = 4.dp))
-    Row(Modifier.padding(vertical = 10.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-        Button(onClick = onRequestConnection) { Text(if (zh) "测试连接" else "Test connection") }
-        OutlinedButton(onClick = onRequestProbe) { Text(if (zh) "能力探测" else "Capability probe") }
-        OutlinedButton(onClick = { actions.onOpenEditor(provider.id) }) { Text(if (zh) "编辑" else "Edit") }
-        OutlinedButton(onClick = { onRequestDeleteProvider(provider.id) }) { Text(if (zh) "删除" else "Delete") }
+    Text(provider.name, style = MaterialTheme.typography.headlineSmall, maxLines = 2, overflow = TextOverflow.Ellipsis)
+    Text(
+        provider.baseUrl,
+        style = MaterialTheme.typography.bodySmall,
+        modifier = Modifier.padding(top = 4.dp),
+        maxLines = 2,
+        overflow = TextOverflow.Ellipsis,
+    )
+    var providerMenuOpen by remember { mutableStateOf(false) }
+    FlowRow(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 10.dp)
+            .testTag("provider.actions"),
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        Button(
+            onClick = onRequestConnection,
+            modifier = Modifier.testTag("provider.testConnection"),
+        ) { Text(if (zh) "测试连接" else "Test connection") }
+        OutlinedButton(
+            onClick = onRequestProbe,
+            modifier = Modifier.testTag("provider.capabilityProbe"),
+        ) { Text(if (zh) "能力探测" else "Capability probe") }
+        Box {
+            IconButton(
+                onClick = { providerMenuOpen = true },
+                modifier = Modifier
+                    .size(48.dp)
+                    .testTag("provider.overflow"),
+            ) {
+                Icon(
+                    Icons.Filled.MoreVert,
+                    contentDescription = if (zh) "服务商更多操作" else "Provider more actions",
+                )
+            }
+            DropdownMenu(
+                expanded = providerMenuOpen,
+                onDismissRequest = { providerMenuOpen = false },
+            ) {
+                DropdownMenuItem(
+                    text = { Text(if (zh) "编辑" else "Edit") },
+                    onClick = { providerMenuOpen = false; actions.onOpenEditor(provider.id) },
+                    modifier = Modifier.testTag("provider.overflow.edit"),
+                )
+                DropdownMenuItem(
+                    text = { Text(if (zh) "删除" else "Delete") },
+                    onClick = { providerMenuOpen = false; onRequestDeleteProvider(provider.id) },
+                    modifier = Modifier.testTag("provider.overflow.delete"),
+                )
+            }
+        }
     }
     Text(if (zh) "模型与能力" else "Models and capabilities", style = MaterialTheme.typography.titleMedium)
     if (state.models.isEmpty()) Text(if (zh) "暂无模型元数据。" else "No model metadata is available.", style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(top = 8.dp))
     state.models.forEach { model ->
-        Card(Modifier.fillMaxWidth().padding(top = 8.dp)) {
+        var modelMenuOpen by remember(model.id) { mutableStateOf(false) }
+        Card(Modifier.fillMaxWidth().padding(top = 8.dp).testTag("provider.model.${model.id}")) {
             Column(Modifier.padding(12.dp)) {
                 Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                    Text(model.modelId, style = MaterialTheme.typography.titleMedium, modifier = Modifier.weight(1f))
-                    TextButton(onClick = { actions.onEditModel(model.id) }) { Text(if (zh) "编辑" else "Edit") }
-                    TextButton(onClick = { onRequestDeleteModel(model.id) }) { Text(if (zh) "删除" else "Delete") }
+                    Text(
+                        model.modelId,
+                        style = MaterialTheme.typography.titleMedium,
+                        modifier = Modifier.weight(1f),
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                    Box {
+                        IconButton(
+                            onClick = { modelMenuOpen = true },
+                            modifier = Modifier
+                                .size(48.dp)
+                                .testTag("provider.model.overflow.${model.id}"),
+                        ) {
+                            Icon(
+                                Icons.Filled.MoreVert,
+                                contentDescription = if (zh) "模型更多操作" else "Model more actions",
+                            )
+                        }
+                        DropdownMenu(
+                            expanded = modelMenuOpen,
+                            onDismissRequest = { modelMenuOpen = false },
+                        ) {
+                            DropdownMenuItem(
+                                text = { Text(if (zh) "编辑" else "Edit") },
+                                onClick = { modelMenuOpen = false; actions.onEditModel(model.id) },
+                            )
+                            DropdownMenuItem(
+                                text = { Text(if (zh) "删除" else "Delete") },
+                                onClick = { modelMenuOpen = false; onRequestDeleteModel(model.id) },
+                            )
+                        }
+                    }
                 }
                 Text(if (zh) "角色：${model.role}" else "Role: ${model.role}", style = MaterialTheme.typography.bodySmall)
                 val capabilityLabel = if (model.capabilities.isEmpty()) {

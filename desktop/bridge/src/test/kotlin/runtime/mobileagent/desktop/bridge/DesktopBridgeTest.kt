@@ -15,6 +15,7 @@ import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.assertThrows
 import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
 import runtime.mobileagent.bridge.BridgeCodec
 import runtime.mobileagent.bridge.BridgeErrorCodes
@@ -398,6 +399,182 @@ class DesktopBridgeTest {
         store.forget(identity)
     }
 
+    @Test
+    fun workspaceBindingSurvivesConnectionRecreationWithFreshHandleBinding() {
+        val store = InMemoryWiredAdbWorkspaceBindingStore()
+        val first = WiredAdbWorkspaceBindingRegistry(
+            ByteArray(BridgeProtocol.SESSION_ID_BYTES) { 1 },
+            store,
+        )
+        val originalBinding = "ab".repeat(BridgeProtocol.WORKSPACE_BINDING_BYTES)
+        val locator = first.newRecoveryLocator()
+        assertTrue(
+            first.register(
+                workspaceId = "agent-workspace",
+                binding = originalBinding,
+                rootPath = "/sdcard/Books",
+                fullDevice = false,
+                scope = "selected_directory",
+                recoveryLocator = locator,
+            ),
+        )
+        assertEquals("/sdcard/Books", store.load(locator)?.rootPath)
+        assertTrue(first.lookup("agent-workspace", originalBinding) != null)
+        first.close()
+        assertTrue(first.lookup("agent-workspace", originalBinding) == null)
+
+        val second = WiredAdbWorkspaceBindingRegistry(
+            ByteArray(BridgeProtocol.SESSION_ID_BYTES) { 2 },
+            store,
+        )
+        val freshBinding = "cd".repeat(BridgeProtocol.WORKSPACE_BINDING_BYTES)
+        val reopened = second.registerReopened(
+            workspaceId = "agent-workspace",
+            binding = freshBinding,
+            recoveryLocator = locator,
+            expectedScope = "selected_directory",
+        )
+        assertTrue(reopened != null)
+        assertEquals("/sdcard/Books", reopened?.rootPath)
+        assertEquals(false, reopened?.fullDevice)
+        assertTrue(second.lookup("agent-workspace", freshBinding) != null)
+
+        // A locator is reusable across a later connection, but cannot create
+        // two live handles in one authenticated session.
+        assertTrue(
+            second.registerReopened(
+                workspaceId = "agent-workspace",
+                binding = "ef".repeat(BridgeProtocol.WORKSPACE_BINDING_BYTES),
+                recoveryLocator = locator,
+                expectedScope = "selected_directory",
+            ) == null,
+        )
+        assertTrue(second.remove("wrong-workspace", freshBinding).not())
+        assertTrue(second.lookup("agent-workspace", freshBinding) != null)
+        assertTrue(second.remove("agent-workspace", freshBinding))
+        assertTrue(store.load(locator) == null)
+        second.close()
+    }
+
+    @Test
+    fun authenticatedHandlerReopensPersistedWorkspaceWithoutReturningRootPath() {
+        val store = InMemoryWiredAdbWorkspaceBindingStore()
+        val executor = RecordingBoundWorkspaceExecutor()
+        val root = "/sdcard/Books"
+        val base = DesktopTypedBridgeRequestHandler(
+            shell = { error("shell is not used by workspace reopen test") },
+            boundTypedFiles = { executor },
+            workspaceBindingStore = store,
+        )
+        val first = base.forConnection(ByteArray(BridgeProtocol.SESSION_ID_BYTES) { 3 })
+        val attachBinding = "ab".repeat(BridgeProtocol.WORKSPACE_BINDING_BYTES)
+        val attached = first.handle(
+            workspaceRequest(
+                requestId = "workspace-attach",
+                operation = BridgeOperation.WORKSPACE_ATTACH,
+                payload = buildJsonObject {
+                    put("workspace_id", "agent-workspace")
+                    put("workspace_binding", attachBinding)
+                    put("display_name", "Books")
+                    put("absolute_path", root)
+                    put("scope", "selected_directory")
+                    put("grant_revision", 0)
+                    put("confirmed_by_user", true)
+                },
+            ),
+            BridgeCancellation(),
+        )
+        assertTrue(attached.success)
+        val locator = attached.payload?.get("recovery_locator")?.jsonPrimitive?.content
+            ?: error("attach did not return a recovery locator")
+        assertTrue(locator.matches(Regex("[0-9a-f]{64}")))
+        assertTrue(attached.payload.toString().contains("recovery_locator"))
+        assertFalse(attached.payload.toString().contains(root))
+        assertEquals(root, executor.roots.last())
+
+        (first as AutoCloseable).close()
+        val second = base.forConnection(ByteArray(BridgeProtocol.SESSION_ID_BYTES) { 4 })
+        val freshBinding = "cd".repeat(BridgeProtocol.WORKSPACE_BINDING_BYTES)
+        val reopened = second.handle(
+            workspaceRequest(
+                requestId = "workspace-reopen",
+                operation = BridgeOperation.WORKSPACE_REOPEN,
+                payload = buildJsonObject {
+                    put("workspace_id", "agent-workspace")
+                    put("workspace_binding", freshBinding)
+                    put("recovery_locator", locator)
+                    put("scope", "selected_directory")
+                },
+            ),
+            BridgeCancellation(),
+        )
+        assertTrue(reopened.success)
+        assertEquals("workspace_reopen", reopened.payload?.get("operation")?.jsonPrimitive?.content)
+        assertEquals(locator, reopened.payload?.get("recovery_locator")?.jsonPrimitive?.content)
+        assertEquals(freshBinding, reopened.payload?.get("workspace_binding")?.jsonPrimitive?.content)
+        assertFalse(reopened.payload.toString().contains(root))
+        assertEquals(listOf(root, root), executor.roots)
+
+        val invalidLocator = second.handle(
+            workspaceRequest(
+                requestId = "workspace-reopen-invalid",
+                operation = BridgeOperation.WORKSPACE_REOPEN,
+                payload = buildJsonObject {
+                    put("workspace_id", "agent-workspace")
+                    put("workspace_binding", "ef".repeat(BridgeProtocol.WORKSPACE_BINDING_BYTES))
+                    put("recovery_locator", "00")
+                    put("scope", "selected_directory")
+                },
+            ),
+            BridgeCancellation(),
+        )
+        assertFalse(invalidLocator.success)
+        assertEquals(BridgeErrorCodes.REQUEST_INVALID, invalidLocator.errorCode)
+        assertEquals(listOf(root, root), executor.roots)
+        (second as AutoCloseable).close()
+    }
+
+    private class RecordingBoundWorkspaceExecutor : WiredAdbBoundTypedFileExecutor {
+        val roots = mutableListOf<String>()
+
+        override fun executeAtRoot(
+            request: WiredAdbTypedFileRequest,
+            rootPath: String,
+            fullDevice: Boolean,
+            cancellation: BridgeCancellation,
+        ): BridgeResponseEnvelope {
+            roots += rootPath
+            return BridgeResponseEnvelope(
+                protocolVersion = BridgeProtocol.VERSION,
+                requestId = request.requestId,
+                success = true,
+                payload = buildJsonObject {
+                    put("operation", "file_list")
+                    put("relative_path", "")
+                    put("entries", buildJsonArray {
+                        add(buildJsonObject {
+                            put("relative_path", "seed.txt")
+                            put("type", "file")
+                            put("bytes", 4)
+                        })
+                    })
+                    put("truncated", false)
+                },
+            )
+        }
+    }
+
+    private fun workspaceRequest(
+        requestId: String,
+        operation: BridgeOperation,
+        payload: kotlinx.serialization.json.JsonObject,
+    ): BridgeRequestEnvelope = BridgeRequestEnvelope(
+        protocolVersion = BridgeProtocol.VERSION,
+        requestId = requestId,
+        operation = operation.wireName,
+        payload = payload,
+    )
+
     private class RecordingRunner(private val responses: MutableList<ProcessCapture>) : ProcessRunner {
         val requests = mutableListOf<ProcessRequest>()
 
@@ -497,10 +674,20 @@ class DesktopBridgeTest {
                     files[path]?.let { put("bytes", it.toByteArray().size) }
                 }
                 BridgeOperation.FILE_READ_TEXT -> buildJsonObject {
+                    val content = files[path] ?: ""
+                    val totalBytes = content.toByteArray().size.toLong()
+                    val offsetBytes = request.payload["offset_bytes"]
+                        ?.toString()
+                        ?.trim('"')
+                        ?.toLongOrNull()
+                        ?: 0L
                     put("operation", "file_read_text")
                     put("relative_path", path)
-                    put("text", files[path] ?: "")
-                    put("bytes", (files[path] ?: "").toByteArray().size)
+                    put("text", content)
+                    put("bytes", totalBytes)
+                    put("offset_bytes", offsetBytes)
+                    put("total_bytes", totalBytes)
+                    put("eof", offsetBytes + totalBytes >= totalBytes)
                 }
                 BridgeOperation.FILE_WRITE_TEXT -> {
                     val content = request.payload.string("content") ?: error("fake write content missing")

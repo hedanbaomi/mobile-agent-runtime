@@ -35,6 +35,7 @@ import runtime.mobileagent.skills.tooling.ToolInvocation
 import runtime.mobileagent.skills.tooling.ToolSpec
 import runtime.mobileagent.skills.tooling.WorkspaceBackendType
 import runtime.mobileagent.skills.tooling.WorkspaceBackend
+import runtime.mobileagent.skills.tooling.WorkspaceApplyPatchRequest
 import runtime.mobileagent.skills.tooling.WorkspaceCreateDirectoryRequest
 import runtime.mobileagent.skills.tooling.WorkspaceDeleteRequest
 import runtime.mobileagent.skills.tooling.WorkspaceEntryType
@@ -42,6 +43,7 @@ import runtime.mobileagent.skills.tooling.WorkspaceListRequest
 import runtime.mobileagent.skills.tooling.WorkspaceMoveRequest
 import runtime.mobileagent.skills.tooling.WorkspaceMutation
 import runtime.mobileagent.skills.tooling.WorkspaceReadTextRequest
+import runtime.mobileagent.skills.tooling.WorkspacePatchFormat
 import runtime.mobileagent.skills.tooling.WorkspaceResult
 import runtime.mobileagent.skills.tooling.WorkspaceStatRequest
 import runtime.mobileagent.skills.tooling.WorkspaceWriteTextRequest
@@ -383,11 +385,30 @@ class UnifiedWorkspaceToolExecutor(
         return when (parsed.kind) {
             WorkspaceOperation.WORKSPACE_LIST -> WorkspaceResult.Success(authorizedWorkspaces(context).map { it.descriptor.forAgent() }) as WorkspaceResult<Any>
             WorkspaceOperation.LIST -> registered.backend.list(
-                WorkspaceListRequest(parsed.workspaceId, parsed.relativePath.takeUnless { it.isEmpty() }, parsed.maxEntries),
+                WorkspaceListRequest(
+                    workspaceId = parsed.workspaceId,
+                    relativePath = parsed.relativePath.takeUnless { it.isEmpty() },
+                    maxEntries = parsed.maxEntries,
+                    cursor = parsed.cursor,
+                ),
             ) as WorkspaceResult<Any>
             WorkspaceOperation.STAT -> registered.backend.stat(WorkspaceStatRequest(parsed.workspaceId, parsed.relativePath)) as WorkspaceResult<Any>
             WorkspaceOperation.READ -> registered.backend.readText(
-                WorkspaceReadTextRequest(parsed.workspaceId, parsed.relativePath, parsed.maxBytes.toLong()),
+                WorkspaceReadTextRequest(
+                    workspaceId = parsed.workspaceId,
+                    relativePath = parsed.relativePath,
+                    maxBytes = parsed.maxBytes.toLong(),
+                    offsetBytes = parsed.offsetBytes,
+                ),
+            ) as WorkspaceResult<Any>
+            WorkspaceOperation.APPLY_PATCH -> registered.backend.applyPatch(
+                WorkspaceApplyPatchRequest(
+                    workspaceId = parsed.workspaceId,
+                    relativePath = parsed.relativePath,
+                    patch = parsed.patch!!,
+                    expectedVersion = parsed.expectedVersion!!,
+                    format = parsed.patchFormat,
+                ),
             ) as WorkspaceResult<Any>
             WorkspaceOperation.WRITE -> registered.backend.writeText(
                 WorkspaceWriteTextRequest(parsed.workspaceId, parsed.relativePath, parsed.text!!, parsed.replaceExisting, parsed.expectedVersion),
@@ -765,6 +786,7 @@ class UnifiedWorkspaceToolExecutor(
             FILE_CREATE_DIRECTORY -> WorkspaceOperation.CREATE_DIRECTORY
             FILE_DELETE -> WorkspaceOperation.DELETE
             FILE_MOVE -> WorkspaceOperation.MOVE
+            FILE_APPLY_PATCH, APPLY_PATCH -> WorkspaceOperation.APPLY_PATCH
             else -> return null
         }
         val allowed = allowedKeys(kind)
@@ -772,22 +794,29 @@ class UnifiedWorkspaceToolExecutor(
         val workspaceId = if (kind == WorkspaceOperation.WORKSPACE_LIST) {
             ""
         } else {
-            root.string("workspaceId") ?: return null
+            root.aliasString("workspaceId", "workspace_id") ?: return null
         }
-        if (root.containsKey("relativePath") && !root.stringElement("relativePath")) return null
-        val rawPath = root.stringAllowEmpty("relativePath")
+        if (!root.aliasStringElement("relativePath", "relative_path")) return null
+        val rawPath = root.aliasStringAllowEmpty("relativePath", "relative_path")
         val path = if (kind == WorkspaceOperation.WORKSPACE_LIST) {
             ""
         } else {
             registry.validatePath(rawPath, kind == WorkspaceOperation.LIST)
         }
         val destination = if (kind == WorkspaceOperation.MOVE) {
-            registry.validatePath(root.string("destinationRelativePath"), false)
+            registry.validatePath(root.aliasString("destinationRelativePath", "destination_relative_path"), false)
         } else null
-        if (root.containsKey("maxBytes") && !root.longElement("maxBytes")) return null
-        if (root.containsKey("maxEntries") && !root.longElement("maxEntries")) return null
-        val maxBytes = root.optionalLong("maxBytes")?.also { require(it in 1..MAX_READ_BYTES) } ?: MAX_READ_BYTES.toLong()
-        val maxEntries = root.optionalLong("maxEntries")?.also { require(it in 1..MAX_ENTRIES) }?.toInt() ?: DEFAULT_MAX_ENTRIES
+        if (!root.aliasLongElement("maxBytes", "max_bytes")) return null
+        if (!root.aliasLongElement("maxEntries", "max_entries")) return null
+        if (root.containsKey("cursor") && !root.stringElement("cursor")) return null
+        if (!root.aliasLongElement("offsetBytes", "offset_bytes")) return null
+        val maxBytes = root.aliasLong("maxBytes", "max_bytes")?.also { require(it in 1..MAX_READ_BYTES) } ?: MAX_READ_BYTES.toLong()
+        val maxEntries = root.aliasLong("maxEntries", "max_entries")?.also { require(it in 1..MAX_ENTRIES) }?.toInt() ?: DEFAULT_MAX_ENTRIES
+        val cursor = root.string("cursor")
+        if (kind == WorkspaceOperation.LIST && root.containsKey("cursor") && cursor == null) return null
+        val offsetBytes = root.aliasLong("offsetBytes", "offset_bytes") ?: 0L
+        if (kind != WorkspaceOperation.READ && root.containsAny("offsetBytes", "offset_bytes")) return null
+        if (kind == WorkspaceOperation.READ && offsetBytes < 0L) return null
         val text = root.stringAllowEmpty("text")?.also {
             require(it.toByteArray(StandardCharsets.UTF_8).size <= MAX_WRITE_BYTES)
         }
@@ -795,17 +824,37 @@ class UnifiedWorkspaceToolExecutor(
         if (kind == WorkspaceOperation.WRITE && text == null) return null
         if (kind != WorkspaceOperation.WRITE && text != null) return null
         if (root.containsKey("replace") && !root.booleanElement("replace")) return null
-        if (root.containsKey("expectedVersion") && !root.longElement("expectedVersion")) return null
+        if (!root.aliasLongElement("expectedVersion", "expected_version")) return null
         val replace = root.boolean("replace") ?: false
-        val expected = root.long("expectedVersion")
+        val expected = root.aliasLong("expectedVersion", "expected_version")
+        val patch = root.stringAllowEmpty("patch")?.also {
+            require(it.isNotEmpty())
+            require(it.toByteArray(StandardCharsets.UTF_8).size <= MAX_PATCH_BYTES)
+        }
+        if (root.containsKey("patch") && !root.stringElement("patch")) return null
+        if (kind == WorkspaceOperation.APPLY_PATCH && patch == null) return null
+        if (kind != WorkspaceOperation.APPLY_PATCH && patch != null) return null
+        if (kind == WorkspaceOperation.APPLY_PATCH && expected == null) return null
+        val patchFormat = if (root.containsKey("format")) {
+            val rawFormat = root.stringAllowEmpty("format") ?: return null
+            when (rawFormat) {
+                "unified_diff" -> WorkspacePatchFormat.UNIFIED_DIFF
+                "replace" -> WorkspacePatchFormat.REPLACE
+                else -> return null
+            }
+        } else WorkspacePatchFormat.UNIFIED_DIFF
         ParsedCall(
             kind = kind,
             workspaceId = workspaceId,
             relativePath = path,
             destinationPath = destination,
             text = text,
+            patch = patch,
+            patchFormat = patchFormat,
             maxBytes = maxBytes.toInt(),
             maxEntries = maxEntries,
+            cursor = cursor,
+            offsetBytes = offsetBytes,
             replaceExisting = replace,
             expectedVersion = expected,
             capability = kind.capability,
@@ -817,41 +866,51 @@ class UnifiedWorkspaceToolExecutor(
         val json = runCatching {
             buildJsonObject {
                 put("success", true)
-                if (parsed.workspaceId.isNotBlank()) put("workspaceId", parsed.workspaceId)
+                if (parsed.workspaceId.isNotBlank()) put("workspace_id", parsed.workspaceId)
                 when (value) {
                     is List<*> -> putJsonArray("workspaces") {
                         value.filterIsInstance<runtime.mobileagent.skills.tooling.WorkspaceDescriptor>().forEach { descriptor ->
                             add(buildJsonObject {
-                                put("workspaceId", descriptor.id)
-                                put("displayName", descriptor.displayName)
+                                put("workspace_id", descriptor.id)
+                                put("display_name", descriptor.displayName)
                                 put("readable", descriptor.readable)
                                 put("writable", descriptor.writable)
                                 put("enabled", descriptor.enabled)
                             })
                         }
                     }
-                    is runtime.mobileagent.skills.tooling.WorkspaceListing -> putJsonArray("entries") {
-                        value.entries.forEach { entry -> add(buildJsonObject {
-                            put("relativePath", normalizeOutputPath(entry.relativePath))
-                            put("type", if (entry.type == WorkspaceEntryType.DIRECTORY) "directory" else "file")
-                            put("bytes", entry.sizeBytes)
-                            entry.version?.let { put("version", it) }
-                        }) }
+                    is runtime.mobileagent.skills.tooling.WorkspaceListing -> {
+                        putJsonArray("entries") {
+                            value.entries.forEach { entry -> add(buildJsonObject {
+                                put("relative_path", normalizeOutputPath(entry.relativePath))
+                                put("type", if (entry.type == WorkspaceEntryType.DIRECTORY) "directory" else "file")
+                                put("bytes", entry.sizeBytes)
+                                entry.version?.let { put("version", it) }
+                            }) }
+                        }
+                        value.nextCursor?.let {
+                            put("next_cursor", it)
+                            put("has_more", true)
+                        } ?: put("has_more", false)
                     }
                     is runtime.mobileagent.skills.tooling.WorkspaceFileStat -> {
-                        put("relativePath", WorkspacePathPolicy.normalize(value.relativePath, false))
+                        put("relative_path", WorkspacePathPolicy.normalize(value.relativePath, false))
                         put("type", if (value.type == WorkspaceEntryType.DIRECTORY) "directory" else "file")
                         put("bytes", value.sizeBytes)
                         value.version?.let { put("version", it) }
                     }
                     is runtime.mobileagent.skills.tooling.WorkspaceText -> {
-                        put("relativePath", WorkspacePathPolicy.normalize(value.relativePath, false))
+                        put("relative_path", WorkspacePathPolicy.normalize(value.relativePath, false))
                         put("text", value.text)
                         put("bytes", value.byteSize)
                         value.version?.let { put("version", it) }
+                        put("offset_bytes", value.offsetBytes)
+                        value.totalBytes?.let { put("total_bytes", it) }
+                        put("eof", value.eof)
+                        put("next_offset", value.nextOffsetBytes)
                     }
                     is WorkspaceMutation -> {
-                        put("relativePath", WorkspacePathPolicy.normalize(value.relativePath, false))
+                        put("relative_path", WorkspacePathPolicy.normalize(value.relativePath, false))
                         put("type", if (value.type == WorkspaceEntryType.DIRECTORY) "directory" else "file")
                         put("bytes", value.byteSize)
                         value.version?.let { put("version", it) }
@@ -958,8 +1017,12 @@ class UnifiedWorkspaceToolExecutor(
         val relativePath: String,
         val destinationPath: String?,
         val text: String?,
+        val patch: String?,
+        val patchFormat: WorkspacePatchFormat,
         val maxBytes: Int,
         val maxEntries: Int,
+        val cursor: String?,
+        val offsetBytes: Long,
         val replaceExisting: Boolean,
         val expectedVersion: Long?,
         val capability: CapabilityId,
@@ -985,6 +1048,7 @@ class UnifiedWorkspaceToolExecutor(
         FILE_CREATE_DIRECTORY -> WorkspaceOperation.CREATE_DIRECTORY
         FILE_DELETE -> WorkspaceOperation.DELETE
         FILE_MOVE -> WorkspaceOperation.MOVE
+        FILE_APPLY_PATCH -> WorkspaceOperation.APPLY_PATCH
         else -> null
     }
 
@@ -1027,16 +1091,21 @@ class UnifiedWorkspaceToolExecutor(
             CapabilityId(CapabilityId.FILE_MOVE), true,
             "move", WorkspaceMoveRequest::class.java, WorkspaceAuditOperation.MOVE,
         ),
+        APPLY_PATCH(
+            CapabilityId("file.apply_patch"), true,
+            "applyPatch", WorkspaceApplyPatchRequest::class.java, WorkspaceAuditOperation.WRITE,
+        ),
     }
 
     private fun allowedKeys(kind: WorkspaceOperation): Set<String> = when (kind) {
         WorkspaceOperation.WORKSPACE_LIST -> emptySet()
-        WorkspaceOperation.LIST -> setOf("workspaceId", "relativePath", "maxEntries")
-        WorkspaceOperation.STAT -> setOf("workspaceId", "relativePath")
-        WorkspaceOperation.READ -> setOf("workspaceId", "relativePath", "maxBytes")
-        WorkspaceOperation.WRITE -> setOf("workspaceId", "relativePath", "text", "replace", "expectedVersion")
-        WorkspaceOperation.CREATE_DIRECTORY, WorkspaceOperation.DELETE -> setOf("workspaceId", "relativePath", "expectedVersion")
-        WorkspaceOperation.MOVE -> setOf("workspaceId", "relativePath", "destinationRelativePath", "expectedVersion")
+        WorkspaceOperation.LIST -> setOf("workspaceId", "workspace_id", "relativePath", "relative_path", "maxEntries", "max_entries", "cursor")
+        WorkspaceOperation.STAT -> setOf("workspaceId", "workspace_id", "relativePath", "relative_path")
+        WorkspaceOperation.READ -> setOf("workspaceId", "workspace_id", "relativePath", "relative_path", "maxBytes", "max_bytes", "offsetBytes", "offset_bytes")
+        WorkspaceOperation.WRITE -> setOf("workspaceId", "workspace_id", "relativePath", "relative_path", "text", "replace", "expectedVersion", "expected_version")
+        WorkspaceOperation.CREATE_DIRECTORY, WorkspaceOperation.DELETE -> setOf("workspaceId", "workspace_id", "relativePath", "relative_path", "expectedVersion", "expected_version")
+        WorkspaceOperation.MOVE -> setOf("workspaceId", "workspace_id", "relativePath", "relative_path", "destinationRelativePath", "destination_relative_path", "expectedVersion", "expected_version")
+        WorkspaceOperation.APPLY_PATCH -> setOf("workspaceId", "workspace_id", "relativePath", "relative_path", "patch", "expectedVersion", "expected_version", "format")
     }
 
     private fun JsonObject.string(key: String): String? = (this[key] as? JsonPrimitive)?.takeIf { it.isString && it.content.isNotBlank() }?.content
@@ -1053,8 +1122,38 @@ class UnifiedWorkspaceToolExecutor(
     private fun JsonObject.booleanElement(key: String): Boolean =
         (this[key] as? JsonPrimitive)?.let { !it.isString && it.contentOrNull?.toBooleanStrictOrNull() != null } == true
 
+    private fun JsonObject.containsAny(first: String, second: String): Boolean =
+        containsKey(first) || containsKey(second)
+
+    private fun JsonObject.aliasElement(first: String, second: String): kotlinx.serialization.json.JsonElement? {
+        val firstValue = this[first]
+        val secondValue = this[second]
+        require(firstValue == null || secondValue == null || firstValue == secondValue) {
+            "Conflicting argument aliases"
+        }
+        return firstValue ?: secondValue
+    }
+
+    private fun JsonObject.aliasString(first: String, second: String): String? =
+        (aliasElement(first, second) as? JsonPrimitive)
+            ?.takeIf { it.isString && it.content.isNotBlank() }
+            ?.content
+
+    private fun JsonObject.aliasStringAllowEmpty(first: String, second: String): String? =
+        (aliasElement(first, second) as? JsonPrimitive)?.takeIf { it.isString }?.content
+
+    private fun JsonObject.aliasStringElement(first: String, second: String): Boolean =
+        !containsAny(first, second) || (aliasElement(first, second) as? JsonPrimitive)?.isString == true
+
+    private fun JsonObject.aliasLong(first: String, second: String): Long? =
+        (aliasElement(first, second) as? JsonPrimitive)?.takeUnless { it.isString }?.longOrNull
+
+    private fun JsonObject.aliasLongElement(first: String, second: String): Boolean =
+        !containsAny(first, second) ||
+            (aliasElement(first, second) as? JsonPrimitive)?.let { !it.isString && it.longOrNull != null } == true
+
     companion object {
-        const val TOOL_SCHEMA_VERSION = 2
+        const val TOOL_SCHEMA_VERSION = 3
         const val WORKSPACE_LIST = "workspace_list"
         const val FILE_LIST = "file_list"
         const val FILE_STAT = "file_stat"
@@ -1063,25 +1162,33 @@ class UnifiedWorkspaceToolExecutor(
         const val FILE_CREATE_DIRECTORY = "file_create_directory"
         const val FILE_DELETE = "file_delete"
         const val FILE_MOVE = "file_move"
+        const val FILE_APPLY_PATCH = "file_apply_patch"
+        /** Compatibility alias accepted on input; only [FILE_APPLY_PATCH] is exposed. */
+        const val APPLY_PATCH = "apply_patch"
         const val MAX_READ_BYTES = 256 * 1024
         const val MAX_WRITE_BYTES = 256 * 1024
+        const val MAX_PATCH_BYTES = MAX_WRITE_BYTES
         const val MAX_ENTRIES = 1_000
         const val DEFAULT_MAX_ENTRIES = 256
         const val MAX_RESULT_BYTES = 900 * 1024
         private const val PRIVILEGED_AUTHORITY_PREFIX = "authority:"
-        private val TOOL_NAMES = setOf(WORKSPACE_LIST, FILE_LIST, FILE_STAT, FILE_READ_TEXT, FILE_WRITE_TEXT, FILE_CREATE_DIRECTORY, FILE_DELETE, FILE_MOVE)
+        private val TOOL_NAMES = setOf(
+            WORKSPACE_LIST, FILE_LIST, FILE_STAT, FILE_READ_TEXT, FILE_WRITE_TEXT,
+            FILE_CREATE_DIRECTORY, FILE_DELETE, FILE_MOVE, FILE_APPLY_PATCH, APPLY_PATCH,
+        )
 
-        private val FILE_SCHEMA = """{"type":"object","additionalProperties":false,"required":["workspaceId","relativePath"],"properties":{"workspaceId":{"type":"string","minLength":1,"maxLength":128},"relativePath":{"type":"string","minLength":1,"maxLength":512}}}"""
-        private val VERSIONED_FILE_SCHEMA = """{"type":"object","additionalProperties":false,"required":["workspaceId","relativePath"],"properties":{"workspaceId":{"type":"string","minLength":1,"maxLength":128},"relativePath":{"type":"string","minLength":1,"maxLength":512},"expectedVersion":{"type":"integer","minimum":0}}}"""
+        private val FILE_SCHEMA = """{"type":"object","additionalProperties":false,"required":["workspace_id","relative_path"],"properties":{"workspace_id":{"type":"string","minLength":1,"maxLength":128},"relative_path":{"type":"string","minLength":1,"maxLength":512}}}"""
+        private val VERSIONED_FILE_SCHEMA = """{"type":"object","additionalProperties":false,"required":["workspace_id","relative_path"],"properties":{"workspace_id":{"type":"string","minLength":1,"maxLength":128},"relative_path":{"type":"string","minLength":1,"maxLength":512},"expected_version":{"type":"integer","minimum":0}}}"""
         private val TOOL_SPECS = listOf(
             ToolSpec(WORKSPACE_LIST, "List authorized workspaces.", """{"type":"object","additionalProperties":false,"properties":{}}""", CapabilityId(CapabilityId.WORKSPACE_ENUMERATE), false, TOOL_SCHEMA_VERSION),
-            ToolSpec(FILE_LIST, "List entries in an authorized workspace.", """{"type":"object","additionalProperties":false,"required":["workspaceId"],"properties":{"workspaceId":{"type":"string","minLength":1,"maxLength":128},"relativePath":{"type":"string","maxLength":512},"maxEntries":{"type":"integer","minimum":1,"maximum":1000}}}""", CapabilityId(CapabilityId.FILE_LIST), false, TOOL_SCHEMA_VERSION),
+            ToolSpec(FILE_LIST, "List entries in an authorized workspace.", """{"type":"object","additionalProperties":false,"required":["workspace_id"],"properties":{"workspace_id":{"type":"string","minLength":1,"maxLength":128},"relative_path":{"type":"string","maxLength":512},"max_entries":{"type":"integer","minimum":1,"maximum":1000},"cursor":{"type":"string","minLength":1,"maxLength":512}}}""", CapabilityId(CapabilityId.FILE_LIST), false, TOOL_SCHEMA_VERSION),
             ToolSpec(FILE_STAT, "Read metadata for an authorized workspace entry.", FILE_SCHEMA, CapabilityId(CapabilityId.FILE_STAT), false, TOOL_SCHEMA_VERSION),
-            ToolSpec(FILE_READ_TEXT, "Read bounded UTF-8 text from an authorized workspace.", """{"type":"object","additionalProperties":false,"required":["workspaceId","relativePath"],"properties":{"workspaceId":{"type":"string","minLength":1,"maxLength":128},"relativePath":{"type":"string","minLength":1,"maxLength":512},"maxBytes":{"type":"integer","minimum":1,"maximum":262144}}}""", CapabilityId(CapabilityId.FILE_READ_TEXT), false, TOOL_SCHEMA_VERSION),
-            ToolSpec(FILE_WRITE_TEXT, "Create or replace UTF-8 text in an authorized workspace.", """{"type":"object","additionalProperties":false,"required":["workspaceId","relativePath","text"],"properties":{"workspaceId":{"type":"string","minLength":1,"maxLength":128},"relativePath":{"type":"string","minLength":1,"maxLength":512},"text":{"type":"string","maxLength":262144},"replace":{"type":"boolean"},"expectedVersion":{"type":"integer","minimum":0}}}""", CapabilityId(CapabilityId.FILE_WRITE_TEXT), true, TOOL_SCHEMA_VERSION),
+            ToolSpec(FILE_READ_TEXT, "Read a bounded UTF-8 chunk from an authorized workspace.", """{"type":"object","additionalProperties":false,"required":["workspace_id","relative_path"],"properties":{"workspace_id":{"type":"string","minLength":1,"maxLength":128},"relative_path":{"type":"string","minLength":1,"maxLength":512},"max_bytes":{"type":"integer","minimum":1,"maximum":262144},"offset_bytes":{"type":"integer","minimum":0}}}""", CapabilityId(CapabilityId.FILE_READ_TEXT), false, TOOL_SCHEMA_VERSION),
+            ToolSpec(FILE_WRITE_TEXT, "Create or replace UTF-8 text in an authorized workspace.", """{"type":"object","additionalProperties":false,"required":["workspace_id","relative_path","text"],"properties":{"workspace_id":{"type":"string","minLength":1,"maxLength":128},"relative_path":{"type":"string","minLength":1,"maxLength":512},"text":{"type":"string","maxLength":262144},"replace":{"type":"boolean"},"expected_version":{"type":"integer","minimum":0}}}""", CapabilityId(CapabilityId.FILE_WRITE_TEXT), true, TOOL_SCHEMA_VERSION),
             ToolSpec(FILE_CREATE_DIRECTORY, "Create a directory in an authorized workspace.", VERSIONED_FILE_SCHEMA, CapabilityId(CapabilityId.FILE_CREATE_DIRECTORY), true, TOOL_SCHEMA_VERSION),
             ToolSpec(FILE_DELETE, "Delete one authorized workspace file or empty directory.", VERSIONED_FILE_SCHEMA, CapabilityId(CapabilityId.FILE_DELETE), true, TOOL_SCHEMA_VERSION),
-            ToolSpec(FILE_MOVE, "Move an entry within an authorized workspace.", """{"type":"object","additionalProperties":false,"required":["workspaceId","relativePath","destinationRelativePath"],"properties":{"workspaceId":{"type":"string","minLength":1,"maxLength":128},"relativePath":{"type":"string","minLength":1,"maxLength":512},"destinationRelativePath":{"type":"string","minLength":1,"maxLength":512},"expectedVersion":{"type":"integer","minimum":0}}}""", CapabilityId(CapabilityId.FILE_MOVE), true, TOOL_SCHEMA_VERSION),
+            ToolSpec(FILE_MOVE, "Move an entry within an authorized workspace.", """{"type":"object","additionalProperties":false,"required":["workspace_id","relative_path","destination_relative_path"],"properties":{"workspace_id":{"type":"string","minLength":1,"maxLength":128},"relative_path":{"type":"string","minLength":1,"maxLength":512},"destination_relative_path":{"type":"string","minLength":1,"maxLength":512},"expected_version":{"type":"integer","minimum":0}}}""", CapabilityId(CapabilityId.FILE_MOVE), true, TOOL_SCHEMA_VERSION),
+            ToolSpec(FILE_APPLY_PATCH, "Apply a conditional text patch in an authorized workspace.", """{"type":"object","additionalProperties":false,"required":["workspace_id","relative_path","patch","expected_version"],"properties":{"workspace_id":{"type":"string","minLength":1,"maxLength":128},"relative_path":{"type":"string","minLength":1,"maxLength":512},"patch":{"type":"string","minLength":1,"maxLength":262144},"expected_version":{"type":"integer","minimum":0},"format":{"type":"string","enum":["unified_diff","replace"]}}}""", CapabilityId("file.apply_patch"), true, TOOL_SCHEMA_VERSION),
         )
 
         private fun canonicalJson(root: JsonObject): String = root.toSortedMap().entries.joinToString(";") { (key, value) -> "$key=$value" }

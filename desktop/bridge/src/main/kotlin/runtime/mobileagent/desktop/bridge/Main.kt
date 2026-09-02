@@ -219,6 +219,7 @@ private fun runCompanion(command: BridgeCliCommand.Run) {
             DesktopTypedBridgeRequestHandler(
                 shell = { companion.shellExecutor() },
                 typedFiles = { companion.typedFileExecutor() },
+                workspaceBindingStore = DpapiDesktopWorkspaceBindingStore(command.trustDirectory),
             ),
         )
         companion = DesktopCompanion(

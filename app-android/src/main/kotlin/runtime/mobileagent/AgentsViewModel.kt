@@ -12,9 +12,12 @@ import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.jsonObject
 import runtime.mobileagent.data.InstalledSkill
 import runtime.mobileagent.domain.AgentProfile
+import runtime.mobileagent.domain.AgentSnapshot
+import runtime.mobileagent.domain.AgentWorkspaceDefault
 import runtime.mobileagent.domain.CapabilityGrant
 import runtime.mobileagent.domain.CapabilityId
 import runtime.mobileagent.domain.Conversation
+import runtime.mobileagent.domain.ConversationWorkspaceBinding
 import runtime.mobileagent.domain.EntityId
 import runtime.mobileagent.domain.GrantLifetime
 import runtime.mobileagent.domain.SnapshotGrantBinding
@@ -63,6 +66,75 @@ interface AgentGrantPortProvider {
     val agentGrantPort: AgentGrantPort
 }
 
+/**
+ * Narrow app-facing boundary for the durable workspace choice of a conversation and the
+ * default used when creating a new one.  Implementations belong to the process-lifetime
+ * RuntimeIntegration/container; UI code never reaches into SQLite and never receives a root or
+ * URI.  A missing implementation is deliberately fail-closed: callers may still create an
+ * unbound, no-workspace conversation, but they must not infer an Agent default or reuse another
+ * conversation's binding.
+ */
+interface ThreadWorkspacePort {
+    val available: Boolean
+        get() = false
+    val unavailableMessage: String
+        get() = "线程工作区绑定存储未就绪。"
+
+    fun conversationWorkspaceBinding(conversationId: String): ConversationWorkspaceBinding? = null
+    fun bindConversationWorkspace(binding: ConversationWorkspaceBinding): ConversationWorkspaceBinding =
+        error(unavailableMessage)
+
+    fun agentWorkspaceDefault(agentId: String): AgentWorkspaceDefault? = null
+
+    /** Resolve only a valid, active default for a *new* conversation; never fall back. */
+    fun resolveNewThreadWorkspace(agentId: String): String? = null
+
+    fun saveAgentWorkspaceDefault(default: AgentWorkspaceDefault): AgentWorkspaceDefault =
+        error(unavailableMessage)
+}
+
+/** AppContainer exposes the one canonical conversation/default workspace adapter through this. */
+interface ThreadWorkspacePortProvider {
+    val threadWorkspacePort: ThreadWorkspacePort
+}
+
+/**
+ * Runtime half of the thread-workspace boundary.  Snapshot creation and context freezing are
+ * kept together so a caller cannot accidentally create a snapshot containing the union of all
+ * Agent workspaces.  The selected workspace is nullable for an explicit unbound conversation;
+ * the implementation must then expose no workspace backend/grants.
+ */
+interface ThreadWorkspaceRuntimePort {
+    val available: Boolean
+        get() = false
+    val unavailableMessage: String
+        get() = "线程工作区运行时未就绪。"
+
+    fun createSnapshotWithWorkspace(
+        agentId: String,
+        workspaceId: String?,
+        snapshotId: String = EntityId.random().value,
+        at: String = Utc.nowIso(),
+    ): AgentSnapshot = error(unavailableMessage)
+
+    fun createToolExecutionContextForWorkspace(
+        snapshot: AgentSnapshot,
+        workspaceId: String?,
+        modelCallId: String,
+        sessionIdentity: String,
+        configSnapshotHash: String,
+        taskIdentity: String = "",
+        skillId: String? = null,
+        skillRevision: Long? = null,
+        trustedSkillEnvelope: Boolean = skillId != null,
+    ): runtime.mobileagent.tooling.ToolExecutionContext = error(unavailableMessage)
+}
+
+/** AppContainer exposes the same process-lifetime runtime adapter used by ChatViewModel. */
+interface ThreadWorkspaceRuntimePortProvider {
+    val threadWorkspaceRuntimePort: ThreadWorkspaceRuntimePort
+}
+
 private fun grantPortUnavailable(message: String): Nothing = error(message)
 
 private data class GrantUiData(
@@ -70,6 +142,7 @@ private data class GrantUiData(
     val grants: List<AgentGrantUi> = emptyList(),
     val trustedSkills: List<AgentTrustedSkillUi> = emptyList(),
     val snapshotBindings: List<AgentSnapshotGrantUi> = emptyList(),
+    val workspaceDefault: AgentWorkspaceDefault? = null,
 )
 
 /**
@@ -235,6 +308,32 @@ internal fun saveAgentWorkspaceGrantPreset(
     }
 }
 
+/**
+ * Validate the Agent default before saving the profile.  The persistence repository repeats
+ * this check against canonical rows; this UI-side check prevents the common partial-save case
+ * where a newly selected default has no persistent grant yet.  A pending preset/draft counts
+ * because [save] writes grants before the default.
+ */
+internal fun validateAgentWorkspaceDefaultDraft(editor: AgentEditorUi) {
+    val workspaceId = editor.defaultWorkspaceId ?: return
+    val workspace = editor.workspaces.firstOrNull { it.id == workspaceId && it.enabled }
+        ?: error("请选择可用的默认工作区。")
+    require(workspace.readable) { "默认工作区必须具备读取权限。" }
+    val existing = editor.grants.any { item ->
+        val grant = item.grant
+        item.enabled && !grant.revoked && !item.expired && item.skillTrusted &&
+            grant.workspaceId == workspaceId && grant.lifetime == GrantLifetime.PERSISTENT
+    }
+    val preset = editor.workspaceGrantPreset?.workspaceId == workspaceId
+    val draft = editor.grantDraft?.let { draft ->
+        draft.workspaceId == workspaceId && draft.lifetime == GrantLifetime.PERSISTENT &&
+            draft.capability != CapabilityId(CapabilityId.SHELL_EXECUTE)
+    } == true
+    require(existing || preset || draft) {
+        "默认工作区需要先授予该工作区的长期能力；保存不会自动扩大授权。"
+    }
+}
+
 class AgentsViewModel(
     application: Application,
     private val savedStateHandle: SavedStateHandle,
@@ -242,6 +341,15 @@ class AgentsViewModel(
     private val app = application as MobileAgentApp
     private val grantPort: AgentGrantPort =
         (app.container as? AgentGrantPortProvider)?.agentGrantPort ?: AgentGrantPort.EMPTY
+    /**
+     * Conversation/default binding is a separate canonical store from capability grants.  Keep
+     * the port optional during migrations so a missing adapter creates only an explicitly
+     * unbound conversation; it must never fall back to the old all-grants snapshot path.
+     */
+    private val threadWorkspacePort: ThreadWorkspacePort? =
+        (app.container as? ThreadWorkspacePortProvider)?.threadWorkspacePort
+    private val threadWorkspaceRuntimePort: ThreadWorkspaceRuntimePort? =
+        (app.container as? ThreadWorkspaceRuntimePortProvider)?.threadWorkspaceRuntimePort
     val state = mutableStateOf(AgentsUiState())
     private var editorBaseline: AgentEditorUi? = null
     private var grantPortError: String? = null
@@ -336,10 +444,16 @@ class AgentsViewModel(
             require(editor.resourceBindings.none { it.type == "skill" && it.enabled && !it.available }) {
                 "存在已绑定但当前未启用的技能，请先在技能页启用后再保存。"
             }
-            val previous = editor.id?.let { app.container.agents.get(it) }
-            val grantChanges = editor.grantDraft != null || editor.workspaceGrantPreset != null || editor.grants.any {
-                !it.enabled && !it.grant.revoked && !it.expired
+            val defaultChanged = editor.defaultWorkspaceId != editorBaseline?.defaultWorkspaceId
+            require(!defaultChanged || threadWorkspacePort?.available == true) {
+                threadWorkspacePort?.unavailableMessage ?: "线程工作区绑定存储未就绪。"
             }
+            if (defaultChanged && editor.defaultWorkspaceId != null) {
+                validateAgentWorkspaceDefaultDraft(editor)
+            }
+            val previous = editor.id?.let { app.container.agents.get(it) }
+            val grantChanges = editor.grantDraft != null || editor.workspaceGrantPreset != null ||
+                editor.grants.any { !it.enabled && !it.grant.revoked && !it.expired }
             require(!grantChanges || grantPort.available) {
                 grantPort.unavailableMessage
             }
@@ -366,6 +480,7 @@ class AgentsViewModel(
             )
             val saved = app.container.agents.saveWithPrompt(profile, editor.prompt)
             persistGrantChanges(editor, saved.id)
+            if (defaultChanged) persistWorkspaceDefault(editor, saved.id)
             app.container.uiPreferences.edit().putString("selected-agent", saved.id).apply()
             savedStateHandle[SELECTED_AGENT_KEY] = saved.id
             savedStateHandle.remove<String>(EDITOR_ID_KEY)
@@ -376,8 +491,10 @@ class AgentsViewModel(
                 editorOpen = false,
                 editorDirty = false,
                 error = null,
-                status = if (editor.workspaceGrantPreset != null || editor.grantDraft != null) {
-                    "已保存 Agent 和能力授权；请用此智能体新建会话以载入工具。旧会话不变。"
+                status = if (editor.defaultWorkspaceId != editorBaseline?.defaultWorkspaceId ||
+                    editor.workspaceGrantPreset != null || editor.grantDraft != null
+                ) {
+                    "已保存 Agent、工作区默认值和能力授权；新会话将使用默认值，旧会话不变。"
                 } else {
                     "已保存 Agent；旧会话快照不变。"
                 },
@@ -402,27 +519,36 @@ class AgentsViewModel(
 
     fun createConversation(): String? = try {
         val agentId = state.value.selectedAgentId ?: error("请先选择已保存的 Agent。")
-        require(grantPort.available) { grantPort.unavailableMessage }
         val now = Utc.nowIso()
-        val activeGrants = grantPort.listGrants(agentId, includeRevoked = false)
-            .filterNot { isGrantExpired(it, now) }
-        val snapshot = app.container.agents.createSnapshot(agentId)
-        activeGrants.forEach { grant ->
-            val binding = SnapshotGrantBinding(
-                snapshotId = snapshot.id,
-                grantId = grant.grantId,
-                capability = grant.capability,
-                workspaceId = grant.workspaceId,
-                pathScope = grant.pathScope,
-                policyVersion = grant.policyVersion,
-                boundAt = now,
-            )
-            val persisted = grantPort.bindSnapshot(binding)
-            require(persisted == binding) { "Snapshot grant binding save returned an unexpected binding" }
+        val workspaceId = threadWorkspacePort
+            ?.takeIf { it.available }
+            ?.resolveNewThreadWorkspace(agentId)
+        // RuntimeIntegration owns the exact workspace-filtered snapshot grant set.  During a
+        // staged migration, a missing runtime adapter may still create a safe, unbound snapshot;
+        // it must never use createSnapshotWithCurrentGrants(), which would union every workspace.
+        val snapshot = threadWorkspaceRuntimePort
+            ?.takeIf { it.available }
+            ?.createSnapshotWithWorkspace(agentId, workspaceId, at = now)
+            ?: app.container.agents.createSnapshot(agentId)
+        require(snapshot.agentId == agentId) { "Workspace snapshot belongs to another Agent" }
+        if (workspaceId != null) {
+            val port = threadWorkspacePort ?: error("线程工作区绑定存储未就绪。")
+            require(port.available) { port.unavailableMessage }
         }
         captureMcpSnapshot(app.container, snapshot.id, agentId)
         val conversation = Conversation(EntityId.random().value, snapshot.id, "新对话", now, now)
         app.container.conversations.create(conversation)
+        if (workspaceId != null) {
+            val port = threadWorkspacePort ?: error("线程工作区绑定存储未就绪。")
+            val binding = ConversationWorkspaceBinding(
+                sessionId = conversation.id,
+                workspaceId = workspaceId,
+                boundAt = now,
+                revision = 1L,
+            )
+            val persisted = port.bindConversationWorkspace(binding)
+            require(persisted == binding) { "会话工作区绑定保存返回了不一致的绑定。" }
+        }
         reload()
         conversation.id
     } catch (error: Exception) {
@@ -443,6 +569,36 @@ class AgentsViewModel(
 
         if (editor.grantDraft != null) saveAgentGrantDraft(editor, agentId, grantPort)
         if (editor.workspaceGrantPreset != null) saveAgentWorkspaceGrantPreset(editor, agentId, grantPort)
+    }
+
+    private fun persistWorkspaceDefault(editor: AgentEditorUi, agentId: String) {
+        val port = threadWorkspacePort ?: error("线程工作区绑定存储未就绪。")
+        require(port.available) { port.unavailableMessage }
+        val current = port.agentWorkspaceDefault(agentId)
+        val currentRevision = current?.revision ?: 0L
+        val expectedRevision = editorBaseline?.defaultWorkspaceRevision ?: 0L
+        require(currentRevision == expectedRevision) { "默认工作区已被其他操作修改，请重新打开 Agent 后再保存。" }
+        if (current?.workspaceId == editor.defaultWorkspaceId) return
+        val candidate = if (current == null) {
+            AgentWorkspaceDefault(
+                agentId = agentId,
+                workspaceId = editor.defaultWorkspaceId,
+                revision = 1L,
+                updatedAt = Utc.nowIso(),
+            )
+        } else {
+            current.copy(
+                workspaceId = editor.defaultWorkspaceId,
+                revision = current.revision + 1L,
+                updatedAt = Utc.nowIso(),
+            )
+        }
+        val persisted = port.saveAgentWorkspaceDefault(candidate)
+        require(
+            persisted.agentId == agentId &&
+                persisted.workspaceId == candidate.workspaceId &&
+                persisted.revision == candidate.revision,
+        ) { "默认工作区保存返回了不一致的绑定。" }
     }
 
     private fun editorFrom(id: String?): AgentEditorUi {
@@ -492,6 +648,8 @@ class AgentsViewModel(
             grants = grantData.grants,
             trustedSkills = grantData.trustedSkills,
             snapshotGrantBindings = grantData.snapshotBindings,
+            defaultWorkspaceId = grantData.workspaceDefault?.workspaceId,
+            defaultWorkspaceRevision = grantData.workspaceDefault?.revision ?: 0L,
             workspacePresetWorkspaceId = grantData.workspaces.firstOrNull { it.enabled }?.id,
             retrievalMode = agent?.retrievalMode ?: "explicit",
             snapshotLabel = "用此智能体新建会话时会冻结当前配置和能力授权；现有会话不会新增工具，撤权仍立即生效。",
@@ -506,6 +664,7 @@ class AgentsViewModel(
             return GrantUiData()
         }
         return try {
+            val workspaceDefault = agentId?.let { threadWorkspacePort?.agentWorkspaceDefault(it) }
             val workspaceRows = grantPort.listWorkspaces()
             val workspaceById = workspaceRows.associateBy { it.id }
             val workspaces = workspaceRows.map { workspace ->
@@ -564,7 +723,7 @@ class AgentsViewModel(
                     AgentSnapshotGrantUi(binding, binding.workspaceId?.let { workspaceById[it]?.displayName })
                 }
             }.orEmpty()
-            GrantUiData(workspaces, grants, trustedSkills, snapshotBindings)
+            GrantUiData(workspaces, grants, trustedSkills, snapshotBindings, workspaceDefault)
         } catch (error: Exception) {
             grantPortError = SecretRedactor.redact(error.message ?: "读取 Agent 授权失败。")
             GrantUiData()

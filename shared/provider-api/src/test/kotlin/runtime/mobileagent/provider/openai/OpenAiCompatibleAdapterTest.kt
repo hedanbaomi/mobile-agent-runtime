@@ -4,6 +4,7 @@
 package runtime.mobileagent.provider.openai
 
 import kotlinx.coroutines.flow.toList
+import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.test.runTest
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertFalse
@@ -22,8 +23,12 @@ import io.ktor.http.HttpHeaders
 import io.ktor.http.HttpStatusCode
 import io.ktor.http.headersOf
 import kotlinx.serialization.json.JsonPrimitive
+import java.net.SocketTimeoutException
 import runtime.mobileagent.domain.ModelProfile
 import runtime.mobileagent.domain.ModelRole
+import runtime.mobileagent.provider.CapabilityProbeStatus
+import runtime.mobileagent.provider.ProviderConnectionErrorCode
+import runtime.mobileagent.provider.ProviderConnectionResult
 import runtime.mobileagent.provider.ParameterLayers
 import runtime.mobileagent.provider.RequestHeaderValue
 
@@ -38,6 +43,24 @@ class OpenAiSseTest {
         val done = OpenAiSse.eventsFromLine("data: [DONE]", buf)
         assertEquals(listOf(ModelEvent.TextDelta("Hello")), delta)
         assertEquals(listOf(ModelEvent.Completed), done)
+    }
+
+    @Test
+    fun explicitReasoningFieldsBecomeTypedDeltasWithoutInventingReasoning() {
+        val buf = linkedMapOf<String, Pair<String, StringBuilder>>()
+        val canonical = OpenAiSse.eventsFromLine(
+            """data: {"choices":[{"delta":{"reasoning_content":"think"}}]}""",
+            buf,
+        )
+        val alias = OpenAiSse.eventsFromLine(
+            """data: {"choices":[{"delta":{"reasoning":"also think","content":"answer"}}]}""",
+            buf,
+        )
+        assertEquals(listOf(ModelEvent.ReasoningDelta("think")), canonical)
+        assertEquals(
+            listOf(ModelEvent.ReasoningDelta("also think"), ModelEvent.TextDelta("answer")),
+            alias,
+        )
     }
 
     @Test
@@ -136,6 +159,29 @@ class OpenAiCompatibleAdapterTest {
     }
 
     @Test
+    fun redactsExplicitReasoningDeltasAndKeepsThemSeparateFromAnswer() = runTest {
+        val secret = "reasoning-secret-token"
+        val engine = MockEngine {
+            respond(
+                content = "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"$secret\"}}]}\n\ndata: {\"choices\":[{\"delta\":{\"content\":\"answer\"}}]}\n\ndata: [DONE]\n\n",
+                status = HttpStatusCode.OK,
+                headers = headersOf(HttpHeaders.ContentType, "text/event-stream"),
+            )
+        }
+        val adapter = OpenAiCompatibleAdapter(HttpClient(engine), "https://example.invalid/v1")
+        val events = adapter.stream(
+            ModelRequest(modelId = "demo", messages = listOf(ChatMessage(role = "user", text = "hi"))),
+            secret.toCharArray(),
+        ).toList()
+        val reasoning = events.filterIsInstance<ModelEvent.ReasoningDelta>().joinToString("") { it.text }
+        val answer = events.filterIsInstance<ModelEvent.TextDelta>().joinToString("") { it.text }
+        assertTrue(reasoning.contains("***"))
+        assertFalse(reasoning.contains(secret))
+        assertEquals("answer", answer)
+        assertEquals(ModelEvent.Completed, events.last())
+    }
+
+    @Test
     fun redactsCustomSecretHeaderAcrossTextDeltas() = runTest {
         val secret = "custom-header-secret"
         val chunks = listOf("left-", "custom-", "header-", "secret", "-right")
@@ -225,6 +271,25 @@ class OpenAiCompatibleAdapterTest {
         assertTrue(text.contains("after"))
         assertFalse(text.contains(primary))
         assertFalse(text.contains(custom))
+        assertEquals(ModelEvent.Completed, events.last())
+    }
+
+    @Test
+    fun completeJsonReasoningFieldIsTypedAndNotFoldedIntoAnswer() = runTest {
+        val engine = MockEngine {
+            respond(
+                content = "{\"choices\":[{\"message\":{\"reasoning\":\"think\",\"content\":\"answer\"}}]}",
+                status = HttpStatusCode.OK,
+                headers = headersOf(HttpHeaders.ContentType, "application/json"),
+            )
+        }
+        val adapter = OpenAiCompatibleAdapter(HttpClient(engine), "https://example.invalid/v1")
+        val events = adapter.stream(
+            ModelRequest(modelId = "demo", messages = listOf(ChatMessage(role = "user", text = "hi"))),
+            "token".toCharArray(),
+        ).toList()
+        assertEquals(ModelEvent.ReasoningDelta("think"), events[0])
+        assertEquals(ModelEvent.TextDelta("answer"), events[1])
         assertEquals(ModelEvent.Completed, events.last())
     }
 
@@ -596,6 +661,155 @@ class OpenAiCompatibleAdapterTest {
     }
 
     @Test
+    fun testConnectionUsesMinimalChatPathAndReturnsTypedSuccess() = runBlocking {
+        var requests = 0
+        var path = ""
+        var body = ""
+        var auth = ""
+        val engine = MockEngine { request ->
+            requests += 1
+            path = request.url.encodedPath
+            body = (request.body as io.ktor.http.content.TextContent).text
+            auth = request.headers[HttpHeaders.Authorization].orEmpty()
+            respond(
+                content = "{\"choices\":[{\"message\":{\"content\":\"ok\"}}]}",
+                status = HttpStatusCode.OK,
+                headers = headersOf(HttpHeaders.ContentType, "application/json"),
+            )
+        }
+        val adapter = OpenAiCompatibleAdapter(HttpClient(engine), "https://example.invalid/v1")
+        val result = adapter.testConnection(
+            ModelProfile(
+                id = "profile-connection",
+                providerId = "provider-connection",
+                modelId = "demo",
+                role = ModelRole.CHAT,
+                capabilities = setOf("stream"),
+                contextLimit = 4096,
+                outputLimit = 64,
+                revision = 1,
+            ),
+            "connection-secret".toCharArray(),
+        )
+        assertTrue(result is ProviderConnectionResult.Success)
+        assertEquals(1, requests)
+        assertEquals("/v1/chat/completions", path)
+        assertTrue(auth.startsWith("Bearer "))
+        assertTrue(body.contains("\"stream\":false"))
+        assertTrue(body.contains("Reply with ok."))
+    }
+
+    @Test
+    fun testConnectionMapsAuthModelAndRateLimitFailures() = runBlocking {
+        listOf(
+            HttpStatusCode.Unauthorized to ProviderConnectionErrorCode.AUTH_FAILED,
+            HttpStatusCode.NotFound to ProviderConnectionErrorCode.MODEL_NOT_FOUND,
+            HttpStatusCode.TooManyRequests to ProviderConnectionErrorCode.RATE_LIMITED,
+        ).forEach { (httpStatus, expected) ->
+            val engine = MockEngine {
+                respond("rejected", httpStatus)
+            }
+            val adapter = OpenAiCompatibleAdapter(HttpClient(engine), "https://example.invalid/v1")
+            val result = adapter.testConnection(
+                ModelProfile(
+                    id = "profile-failure-${httpStatus.value}",
+                    providerId = "provider-failure",
+                    modelId = "demo",
+                    role = ModelRole.CHAT,
+                    capabilities = emptySet(),
+                    contextLimit = 4096,
+                    outputLimit = 64,
+                    revision = 1,
+                ),
+                "connection-secret".toCharArray(),
+            )
+            assertTrue(result is ProviderConnectionResult.Failure)
+            result as ProviderConnectionResult.Failure
+            assertEquals(expected, result.code)
+            assertEquals(httpStatus.value, result.httpStatus)
+            assertTrue(result.charged)
+        }
+    }
+
+    @Test
+    fun testConnectionMapsTransportTimeoutAndMalformedSuccess() = runBlocking {
+        val timeoutAdapter = OpenAiCompatibleAdapter(
+            HttpClient(MockEngine { throw SocketTimeoutException("fixture") }),
+            "https://example.invalid/v1",
+        )
+        val timeout = timeoutAdapter.testConnection(
+            ModelProfile(
+                id = "timeout-profile",
+                providerId = "provider",
+                modelId = "demo",
+                role = ModelRole.CHAT,
+                capabilities = emptySet(),
+                contextLimit = 4096,
+                outputLimit = 64,
+                revision = 1,
+            ),
+            "secret".toCharArray(),
+        )
+        assertEquals(ProviderConnectionErrorCode.TIMEOUT, (timeout as ProviderConnectionResult.Failure).code)
+        assertTrue(timeout.charged)
+
+        val invalidAdapter = OpenAiCompatibleAdapter(
+            HttpClient(MockEngine { respond("{}", HttpStatusCode.OK, headersOf(HttpHeaders.ContentType, "application/json")) }),
+            "https://example.invalid/v1",
+        )
+        val invalid = invalidAdapter.testConnection(
+            ModelProfile(
+                id = "invalid-profile",
+                providerId = "provider",
+                modelId = "demo",
+                role = ModelRole.CHAT,
+                capabilities = emptySet(),
+                contextLimit = 4096,
+                outputLimit = 64,
+                revision = 1,
+            ),
+            "secret".toCharArray(),
+        )
+        assertEquals(ProviderConnectionErrorCode.INVALID_RESPONSE, (invalid as ProviderConnectionResult.Failure).code)
+        assertTrue(invalid.charged)
+    }
+
+    @Test
+    fun chatCanConnectWhenMetadataIsUnsupportedAndCapabilityRemainsIndependent() = runBlocking {
+        var requests = 0
+        val engine = MockEngine { request ->
+            requests += 1
+            when {
+                request.url.encodedPath.endsWith("/models/demo") -> respond("not found", HttpStatusCode.NotFound)
+                else -> respond(
+                    "{\"choices\":[{\"message\":{\"content\":\"ok\"}}]}",
+                    HttpStatusCode.OK,
+                    headersOf(HttpHeaders.ContentType, "application/json"),
+                )
+            }
+        }
+        val adapter = OpenAiCompatibleAdapter(HttpClient(engine), "https://example.invalid/v1")
+        val profile = ModelProfile(
+            id = "metadata-missing",
+            providerId = "provider",
+            modelId = "demo",
+            role = ModelRole.CHAT,
+            capabilities = emptySet(),
+            contextLimit = 4096,
+            outputLimit = 64,
+            revision = 1,
+        )
+        val connection = adapter.testConnection(profile, "secret".toCharArray())
+        assertTrue(connection is ProviderConnectionResult.Success)
+        assertEquals(1, requests)
+        val report = adapter.probe(profile, "secret".toCharArray(), runtime.mobileagent.provider.ProbeConsent.GRANTED)
+        assertEquals(CapabilityProbeStatus.FAILED, report.status)
+        assertEquals(2, requests)
+        assertEquals(runtime.mobileagent.provider.CapabilityCheckStatus.FAILED, report.checks.first().status)
+        assertEquals(404, report.checks.first().httpStatus)
+    }
+
+    @Test
     fun metadataHttpSuccessWithMalformedBodyDoesNotPromoteManualCapabilities() = runTest {
         var requests = 0
         val engine = MockEngine {
@@ -684,7 +898,7 @@ class OpenAiCompatibleAdapterTest {
         )
         val report = adapter.probe(profile, "token".toCharArray(), runtime.mobileagent.provider.ProbeConsent.GRANTED, "p4")
         assertEquals(3, requests)
-        assertEquals(runtime.mobileagent.provider.CapabilityProbeStatus.FAILED, report.status)
+        assertEquals(runtime.mobileagent.provider.CapabilityProbeStatus.PARTIAL, report.status)
         assertTrue(report.supportsTools)
         assertFalse(report.supportsImages)
         assertFalse(report.supportsStream)
@@ -721,7 +935,7 @@ class OpenAiCompatibleAdapterTest {
         )
         val report = adapter.probe(profile, "token".toCharArray(), runtime.mobileagent.provider.ProbeConsent.GRANTED, "p5")
         assertEquals(2, requests)
-        assertEquals(runtime.mobileagent.provider.CapabilityProbeStatus.FAILED, report.status)
+        assertEquals(runtime.mobileagent.provider.CapabilityProbeStatus.PARTIAL, report.status)
         assertFalse(report.supportsStream)
         assertTrue(report.charged)
         assertTrue(report.source.contains("stream=invalid-response"))

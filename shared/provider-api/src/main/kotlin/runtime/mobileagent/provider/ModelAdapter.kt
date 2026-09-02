@@ -4,8 +4,70 @@
 package runtime.mobileagent.provider
 
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.toList
 import kotlinx.serialization.json.JsonElement
 import runtime.mobileagent.domain.ModelProfile
+
+/**
+ * A provider connection check is deliberately separate from capability
+ * discovery.  It answers only whether the current model configuration can
+ * complete one minimal chat request; it does not claim anything about
+ * streaming, tool calls, or image input.
+ */
+sealed interface ProviderConnectionResult {
+    data class Success(
+        val latencyMs: Long,
+        val providerReachable: Boolean = true,
+        val authenticated: Boolean = true,
+        val modelAccepted: Boolean = true,
+        /** A successful chat POST may still have incurred a small provider charge. */
+        val charged: Boolean = true,
+    ) : ProviderConnectionResult
+
+    data class Failure(
+        val code: ProviderConnectionErrorCode,
+        val httpStatus: Int? = null,
+        val retryable: Boolean,
+        /** True only when a request may have crossed the provider boundary. */
+        val charged: Boolean = false,
+    ) : ProviderConnectionResult
+}
+
+enum class ProviderConnectionErrorCode {
+    NETWORK_UNREACHABLE,
+    TLS_FAILURE,
+    TIMEOUT,
+    AUTH_FAILED,
+    MODEL_NOT_FOUND,
+    RATE_LIMITED,
+    PROVIDER_REJECTED,
+    INVALID_RESPONSE,
+    CONFIG_INVALID,
+    CREDENTIAL_UNAVAILABLE,
+    UNKNOWN,
+}
+
+enum class CapabilityCheck {
+    METADATA,
+    STREAM,
+    TOOLS,
+    IMAGE,
+}
+
+enum class CapabilityCheckStatus {
+    VERIFIED,
+    UNSUPPORTED,
+    NOT_DECLARED,
+    NOT_RUN,
+    FAILED,
+    UNKNOWN,
+}
+
+data class CapabilityCheckResult(
+    val capability: CapabilityCheck,
+    val status: CapabilityCheckStatus,
+    val httpStatus: Int? = null,
+)
 
 data class CapabilityReport(
     val modelId: String,
@@ -19,9 +81,11 @@ data class CapabilityReport(
     /** `PROFILE_ONLY` is the safe result when the user did not grant a live probe. */
     val status: CapabilityProbeStatus = CapabilityProbeStatus.PROFILE_ONLY,
     val operationId: String = "",
+    /** Structured per-capability results; [source] remains a legacy audit summary. */
+    val checks: List<CapabilityCheckResult> = emptyList(),
 )
 
-enum class CapabilityProbeStatus { PROFILE_ONLY, SUCCEEDED, FAILED }
+enum class CapabilityProbeStatus { PROFILE_ONLY, SUCCEEDED, PARTIAL, FAILED }
 
 /** A live capability probe is potentially billable and therefore opt-in. */
 enum class ProbeConsent { NOT_GRANTED, GRANTED }
@@ -91,6 +155,12 @@ data class ModelRequest(
 
 sealed interface ModelEvent {
     data class TextDelta(val text: String) : ModelEvent
+    /**
+     * A reasoning delta is emitted only when the provider explicitly sends a
+     * `reasoning_content` or `reasoning` field.  Adapters must not synthesize
+     * hidden reasoning from ordinary answer text.
+     */
+    data class ReasoningDelta(val text: String) : ModelEvent
     data class ToolCallDelta(val callId: String, val name: String, val argumentsJson: String) : ModelEvent
     data class Usage(val inputTokens: Int, val outputTokens: Int) : ModelEvent
     data class ToolApprovalRequired(val callId: String, val name: String, val argumentsJson: String) : ModelEvent
@@ -107,6 +177,70 @@ fun interface SecretStore {
 
 interface ModelAdapter {
     suspend fun probe(profile: ModelProfile): CapabilityReport
+
+    /**
+     * Test the same configured adapter path with one minimal chat request.
+     * Implementations should override this when they can preserve typed HTTP
+     * and transport error semantics. The default is intentionally conservative
+     * and uses the adapter's regular streaming path, so a third-party adapter
+     * cannot accidentally grow a second HTTP client just for diagnostics.
+     */
+    suspend fun testConnection(
+        profile: ModelProfile,
+        secret: CharArray,
+        operationId: String = "connection-test",
+    ): ProviderConnectionResult {
+        if (secret.isEmpty()) {
+            return ProviderConnectionResult.Failure(
+                code = ProviderConnectionErrorCode.CREDENTIAL_UNAVAILABLE,
+                retryable = false,
+            )
+        }
+        val request = ModelRequest(
+            modelId = profile.modelId,
+            messages = listOf(ChatMessage(role = "user", text = "Reply with ok.")),
+            stream = true,
+            operationId = operationId,
+            outputTokenLimit = profile.outputLimit.coerceAtLeast(1),
+        )
+        val started = System.nanoTime()
+        return try {
+            val events = mutableListOf<ModelEvent>()
+            withTimeoutForConnection {
+                events += stream(request, secret).toList()
+            }
+            val failed = events.filterIsInstance<ModelEvent.Failed>().firstOrNull()
+            if (failed != null) {
+                ProviderConnectionResult.Failure(
+                    code = failed.sanitizedMessage.toProviderConnectionErrorCode(),
+                    retryable = failed.sanitizedMessage == ProviderConnectionErrorCode.RATE_LIMITED.name,
+                    charged = true,
+                )
+            } else if (events.any { it is ModelEvent.Completed }) {
+                ProviderConnectionResult.Success(elapsedMillis(started))
+            } else {
+                ProviderConnectionResult.Failure(
+                    code = ProviderConnectionErrorCode.INVALID_RESPONSE,
+                    retryable = false,
+                    charged = true,
+                )
+            }
+        } catch (_: kotlinx.coroutines.TimeoutCancellationException) {
+            ProviderConnectionResult.Failure(
+                code = ProviderConnectionErrorCode.TIMEOUT,
+                retryable = true,
+                charged = true,
+            )
+        } catch (error: kotlinx.coroutines.CancellationException) {
+            throw error
+        } catch (_: Exception) {
+            ProviderConnectionResult.Failure(
+                code = ProviderConnectionErrorCode.UNKNOWN,
+                retryable = false,
+                charged = true,
+            )
+        }
+    }
 
     /**
      * Return the same request representation that an adapter would put on the
@@ -144,3 +278,26 @@ interface ModelAdapter {
     fun stream(request: ModelRequest, secret: CharArray): Flow<ModelEvent>
     suspend fun embed(request: EmbeddingRequest, secret: CharArray): EmbeddingBatch
 }
+
+private const val DEFAULT_CONNECTION_TIMEOUT_MS = 15_000L
+
+private suspend fun <T> withTimeoutForConnection(block: suspend () -> T): T =
+    kotlinx.coroutines.withTimeout(DEFAULT_CONNECTION_TIMEOUT_MS) { block() }
+
+private fun elapsedMillis(started: Long): Long =
+    ((System.nanoTime() - started) / 1_000_000L).coerceAtLeast(0L)
+
+private fun String.toProviderConnectionErrorCode(): ProviderConnectionErrorCode =
+    when (this) {
+        ProviderConnectionErrorCode.AUTH_FAILED.name,
+        "PROVIDER_UNAUTHORIZED",
+        -> ProviderConnectionErrorCode.AUTH_FAILED
+        ProviderConnectionErrorCode.RATE_LIMITED.name -> ProviderConnectionErrorCode.RATE_LIMITED
+        ProviderConnectionErrorCode.TIMEOUT.name -> ProviderConnectionErrorCode.TIMEOUT
+        ProviderConnectionErrorCode.MODEL_NOT_FOUND.name -> ProviderConnectionErrorCode.MODEL_NOT_FOUND
+        ProviderConnectionErrorCode.NETWORK_UNREACHABLE.name,
+        "NETWORK_UNAVAILABLE",
+        -> ProviderConnectionErrorCode.NETWORK_UNREACHABLE
+        ProviderConnectionErrorCode.INVALID_RESPONSE.name -> ProviderConnectionErrorCode.INVALID_RESPONSE
+        else -> ProviderConnectionErrorCode.UNKNOWN
+    }

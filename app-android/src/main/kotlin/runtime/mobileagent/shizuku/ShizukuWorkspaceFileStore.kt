@@ -22,6 +22,10 @@ import java.nio.file.LinkOption
 import java.nio.file.Path
 import java.nio.file.StandardCopyOption
 import java.nio.file.StandardOpenOption
+import java.nio.file.attribute.BasicFileAttributes
+import java.security.MessageDigest
+import java.security.SecureRandom
+import java.util.Base64
 import java.util.UUID
 
 /**
@@ -40,6 +44,7 @@ internal class ShizukuWorkspaceFileStore(
     private val skipSymlinksInList: Boolean = false,
 ) {
     private val lock = Any()
+    private val cursorStore = CursorStore()
     private val rootPath: Path = rootFile.toPath().toAbsolutePath().normalize()
 
     fun status(): String = synchronized(lock) {
@@ -63,20 +68,42 @@ internal class ShizukuWorkspaceFileStore(
         boundedJson(result)
     }
 
-    fun list(relativePath: String?): String = synchronized(lock) {
+    /**
+     * Lists at most one bounded page.  The cursor is a process-local random
+     * capability: it contains neither the directory path nor an offset and it
+     * is invalidated by a directory change or UserService restart.
+     */
+    fun list(
+        relativePath: String?,
+        maxEntries: Int = MAX_DIRECTORY_ENTRIES,
+        cursor: String? = null,
+    ): String = synchronized(lock) {
         guarded("list") {
+            if (maxEntries !in 1..MAX_DIRECTORY_ENTRIES) throw WorkspaceFailure(LIMIT)
             val segments = parsePath(relativePath, allowRoot = true)
             val directory = resolve(segments)
             if (!Files.exists(directory, LinkOption.NOFOLLOW_LINKS)) {
                 return@guarded success("list", segments).put("entries", JSONArray())
             }
             requireDirectory(directory)
-            val children = directoryEntries(directory)
-            if (children.size > MAX_DIRECTORY_ENTRIES) throw WorkspaceFailure(LIMIT)
+            val children = directoryEntries(directory).sortedBy { it.fileName.toString() }
+            if (children.size > MAX_ENTRIES) throw WorkspaceFailure(LIMIT)
+            val path = relativePath(segments)
+            val fingerprint = directoryVersion(directory)
+            val start = cursor?.let {
+                cursorStore.resolve(it, path, fingerprint) ?: throw WorkspaceFailure(INVALID_CURSOR)
+            } ?: 0
+            if (start > children.size) throw WorkspaceFailure(INVALID_CURSOR)
+            val end = minOf(start + maxEntries, children.size)
             val entries = JSONArray()
-            children.sortedBy { it.fileName.toString() }.forEach { child ->
+            var emittedEnd = start
+            for (index in start until end) {
+                val child = children[index]
                 if (Files.isSymbolicLink(child)) {
-                    if (skipSymlinksInList) return@forEach
+                    if (skipSymlinksInList) {
+                        emittedEnd = index + 1
+                        continue
+                    }
                     rejectSymbolicLink(child)
                 }
                 val childSegments = segments + child.fileName.toString()
@@ -87,13 +114,35 @@ internal class ShizukuWorkspaceFileStore(
                     Files.isRegularFile(child, LinkOption.NOFOLLOW_LINKS) -> {
                         val size = Files.size(child)
                         if (size > MAX_FILE_BYTES) throw WorkspaceFailure(FILE_TOO_LARGE)
-                        entry.put("type", "file").put("bytes", size)
+                        entry.put("type", "file").put("bytes", size).put("version", fileVersion(child))
                     }
                     else -> throw WorkspaceFailure(UNSUPPORTED_ENTRY)
                 }
+                if (entry.optString("type") == "directory") {
+                    entry.put("version", directoryVersion(child))
+                }
                 entries.put(entry)
+                // Long but valid names must still make progress without
+                // exceeding the Binder-safe JSON envelope.  Reserve room for
+                // a real continuation token before accepting the entry.
+                val probe = success("list", segments)
+                    .put("entries", entries)
+                    .put("version", fingerprint)
+                    .put("truncated", true)
+                    .put("nextCursor", "x".repeat(CURSOR_DISPLAY_BYTES))
+                if (probe.toString().toByteArray(StandardCharsets.UTF_8).size > MAX_OUTPUT_BYTES) {
+                    entries.remove(entries.length() - 1)
+                    break
+                }
+                emittedEnd = index + 1
             }
-            success("list", segments).put("entries", entries)
+            if (entries.length() == 0 && emittedEnd < children.size) throw WorkspaceFailure(OUTPUT_LIMIT)
+            val nextCursor = if (emittedEnd < children.size) cursorStore.issue(path, fingerprint, emittedEnd) else null
+            success("list", segments)
+                .put("entries", entries)
+                .put("version", fingerprint)
+                .put("truncated", nextCursor != null)
+                .put("nextCursor", nextCursor ?: JSONObject.NULL)
         }
     }
 
@@ -114,26 +163,137 @@ internal class ShizukuWorkspaceFileStore(
             success("stat", segments)
                 .put("type", type)
                 .put("bytes", bytes)
+                .put("version", if (type == "file") fileVersion(target) else directoryVersion(target))
         }
     }
 
     fun read(relativePath: String?, maxBytes: Int): String = synchronized(lock) {
-        guarded("read") {
+        readChunkJson(relativePath, maxBytes, offsetBytes = 0L)
+    }
+
+    /** Reads one bounded UTF-8 chunk without transporting the whole file. */
+    fun readChunk(relativePath: String?, maxBytes: Int, offsetBytes: Long): ReadChunkResult = synchronized(lock) {
+        try {
             if (maxBytes !in 1..MAX_READ_BYTES) throw WorkspaceFailure(LIMIT)
+            if (offsetBytes < 0L) throw WorkspaceFailure(OFFSET_OUT_OF_RANGE)
             val segments = parsePath(relativePath, allowRoot = false)
             val file = resolve(segments)
             rejectSymbolicLink(file)
-            if (!Files.isRegularFile(file, LinkOption.NOFOLLOW_LINKS)) {
-                throw WorkspaceFailure(NOT_FOUND)
-            }
+            if (!Files.isRegularFile(file, LinkOption.NOFOLLOW_LINKS)) throw WorkspaceFailure(NOT_FOUND)
             val size = Files.size(file)
             if (size > MAX_FILE_BYTES) throw WorkspaceFailure(FILE_TOO_LARGE)
-            if (size > maxBytes.toLong()) throw WorkspaceFailure(LIMIT)
-            val bytes = readBounded(file, maxBytes)
-            val text = decodeUtf8(bytes)
-            success("read", segments)
-                .put("bytes", bytes.size)
-                .put("text", text)
+            if (offsetBytes > size) throw WorkspaceFailure(OFFSET_OUT_OF_RANGE)
+            val raw = readBoundedChunk(file, offsetBytes, maxBytes)
+            val decoded = decodeChunk(raw)
+                ?: throw WorkspaceFailure(INVALID_CONTENT)
+            val consumed = decoded.second
+            if (raw.isNotEmpty() && consumed == 0) throw WorkspaceFailure(INVALID_CONTENT)
+            ReadChunkResult.Success(
+                path = relativePath(segments),
+                bytes = raw.copyOf(consumed),
+                version = fileVersion(file),
+                offsetBytes = offsetBytes,
+                totalBytes = size,
+                eof = offsetBytes + consumed >= size,
+            )
+        } catch (failure: WorkspaceFailure) {
+            ReadChunkResult.Failure(failure.code)
+        } catch (_: SecurityException) {
+            ReadChunkResult.Failure(PERMISSION_DENIED)
+        } catch (_: IOException) {
+            ReadChunkResult.Failure(OPERATION_UNAVAILABLE)
+        } catch (_: RuntimeException) {
+            ReadChunkResult.Failure(OPERATION_UNAVAILABLE)
+        }
+    }
+
+    private fun readChunkJson(relativePath: String?, maxBytes: Int, offsetBytes: Long): String =
+        guarded("read") {
+            when (val chunk = readChunk(relativePath, maxBytes, offsetBytes)) {
+                is ReadChunkResult.Failure -> throw WorkspaceFailure(chunk.code)
+                is ReadChunkResult.Success -> success("read", parsePath(relativePath, allowRoot = false))
+                    .put("bytes", chunk.bytes.size)
+                    .put("text", decodeUtf8(chunk.bytes))
+                    .put("version", chunk.version)
+                    .put("offsetBytes", chunk.offsetBytes)
+                    .put("totalBytes", chunk.totalBytes)
+                    .put("eof", chunk.eof)
+            }
+        }
+
+    /** Conditionally applies a bounded text patch using an atomic replacement. */
+    fun applyPatch(
+        relativePath: String?,
+        patch: String?,
+        expectedVersion: String?,
+        format: String?,
+    ): String = synchronized(lock) {
+        guarded("apply_patch") {
+            val patchValue = patch ?: throw WorkspaceFailure(INVALID_CONTENT)
+            val patchBytes = strictUtf8(patchValue)
+            if (patchBytes.size !in 1..MAX_PATCH_BYTES || patchValue.contains('\u0000')) {
+                throw WorkspaceFailure(LIMIT)
+            }
+            val expected = expectedVersion?.takeIf { it.length in 1..MAX_VERSION_CHARS }
+                ?: throw WorkspaceFailure(INVALID_VERSION)
+            val segments = parsePath(relativePath, allowRoot = false)
+            ensureRoot()
+            val target = resolve(segments)
+            rejectSymbolicLink(target)
+            if (!Files.isRegularFile(target, LinkOption.NOFOLLOW_LINKS)) throw WorkspaceFailure(NOT_FOUND)
+            val currentVersion = fileVersion(target)
+            if (currentVersion != expected) throw WorkspaceFailure(CONFLICT)
+            val sourceBytes = readAll(target)
+            val sourceText = decodeUtf8(sourceBytes)
+            val patchedText = when (format) {
+                PATCH_FORMAT_REPLACE -> patchValue
+                PATCH_FORMAT_UNIFIED_DIFF -> applyUnifiedDiff(sourceText, patchValue)
+                    ?: throw WorkspaceFailure(INVALID_PATCH)
+                else -> throw WorkspaceFailure(INVALID_PATCH)
+            }
+            val patchedBytes = strictUtf8(patchedText)
+            if (patchedBytes.size > MAX_FILE_BYTES) throw WorkspaceFailure(FILE_TOO_LARGE)
+            if (patchedBytes.contentEquals(sourceBytes)) {
+                return@guarded success("apply_patch", segments)
+                    .put("type", "file")
+                    .put("bytes", patchedBytes.size)
+                    .put("created", false)
+                    .put("version", currentVersion)
+            }
+            if (enforceQuota) {
+                val usage = inspectUsage(rootPath)
+                val retained = usage.bytes - sourceBytes.size
+                if (patchedBytes.size > MAX_TOTAL_BYTES - retained) throw WorkspaceFailure(LIMIT)
+            }
+            val parent = target.parent ?: throw WorkspaceFailure(OUTSIDE_ROOT)
+            requireDirectory(parent)
+            rejectSymbolicLink(parent)
+            val temporary = parent.resolve(".mar-shizuku-${UUID.randomUUID()}.tmp")
+            try {
+                createAndSync(temporary, patchedBytes)
+                rejectSymbolicLink(parent)
+                if (!Files.isRegularFile(target, LinkOption.NOFOLLOW_LINKS) || fileVersion(target) != currentVersion) {
+                    throw WorkspaceFailure(CONFLICT)
+                }
+                try {
+                    Files.move(temporary, target, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING)
+                } catch (_: AtomicMoveNotSupportedException) {
+                    throw WorkspaceFailure(ATOMIC_REPLACE_UNAVAILABLE)
+                } catch (_: UnsupportedOperationException) {
+                    throw WorkspaceFailure(ATOMIC_REPLACE_UNAVAILABLE)
+                }
+                rejectSymbolicLink(target)
+                if (!Files.isRegularFile(target, LinkOption.NOFOLLOW_LINKS) || Files.size(target) != patchedBytes.size.toLong()) {
+                    throw WorkspaceFailure(UNKNOWN_OUTCOME)
+                }
+                success("apply_patch", segments)
+                    .put("type", "file")
+                    .put("bytes", patchedBytes.size)
+                    .put("created", false)
+                    .put("version", fileVersion(target))
+            } finally {
+                runCatching { Files.deleteIfExists(temporary) }
+            }
         }
     }
 
@@ -472,6 +632,52 @@ internal class ShizukuWorkspaceFileStore(
         return entries
     }
 
+    private fun fileVersion(file: Path): String {
+        val attributes = Files.readAttributes(
+            file,
+            BasicFileAttributes::class.java,
+            LinkOption.NOFOLLOW_LINKS,
+        )
+        return sha256(
+            buildString {
+                append(attributes.size()).append('\u0000')
+                append(attributes.lastModifiedTime().toMillis()).append('\u0000')
+                append(attributes.creationTime().toMillis()).append('\u0000')
+                append(attributes.fileKey()?.toString().orEmpty())
+            }.toByteArray(StandardCharsets.UTF_8),
+        )
+    }
+
+    /** A metadata-only, opaque directory version suitable for CAS checks. */
+    private fun directoryVersion(directory: Path): String {
+        val digest = MessageDigest.getInstance("SHA-256")
+        val children = directoryEntries(directory).sortedBy { it.fileName.toString() }
+        if (children.size > MAX_ENTRIES) throw WorkspaceFailure(LIMIT)
+        children.forEach { child ->
+            if (Files.isSymbolicLink(child)) {
+                if (skipSymlinksInList) return@forEach
+                rejectSymbolicLink(child)
+            }
+            val name = child.fileName.toString()
+            val type = when {
+                Files.isDirectory(child, LinkOption.NOFOLLOW_LINKS) -> "directory"
+                Files.isRegularFile(child, LinkOption.NOFOLLOW_LINKS) -> "file"
+                else -> throw WorkspaceFailure(UNSUPPORTED_ENTRY)
+            }
+            val size = if (type == "file") Files.size(child) else -1L
+            val childVersion = if (type == "file") fileVersion(child) else directoryVersion(child)
+            digest.update("$name\u0000$type\u0000$size\u0000$childVersion\u0000".toByteArray(StandardCharsets.UTF_8))
+        }
+        return digest.digest().toHex()
+    }
+
+    private fun sha256(value: ByteArray): String =
+        MessageDigest.getInstance("SHA-256").digest(value).toHex()
+
+    private fun ByteArray.toHex(): String = buildString(size * 2) {
+        for (byte in this@toHex) append("%02x".format(byte.toInt() and 0xff))
+    }
+
     private fun inspectUsage(root: Path): Usage {
         if (!Files.exists(root, LinkOption.NOFOLLOW_LINKS)) return Usage(0, 0, 0)
         requireDirectory(root)
@@ -519,6 +725,144 @@ internal class ShizukuWorkspaceFileStore(
             }
         }
         return output.toByteArray()
+    }
+
+    private fun readBoundedChunk(file: Path, offset: Long, maximum: Int): ByteArray {
+        val size = Files.size(file)
+        val target = minOf(size - offset, maximum.toLong()).toInt()
+        if (target <= 0) return byteArrayOf()
+        val output = ByteArrayOutputStream(target)
+        Files.newByteChannel(file, StandardOpenOption.READ, LinkOption.NOFOLLOW_LINKS).use { channel ->
+            channel.position(offset)
+            val buffer = ByteBuffer.allocate(minOf(8 * 1024, target))
+            while (output.size() < target) {
+                buffer.clear()
+                buffer.limit(minOf(buffer.capacity(), target - output.size()))
+                val count = channel.read(buffer)
+                if (count < 0) break
+                if (count == 0) continue
+                output.write(buffer.array(), 0, count)
+            }
+        }
+        return output.toByteArray()
+    }
+
+    private fun readAll(file: Path): ByteArray {
+        val size = Files.size(file)
+        if (size > MAX_PATCH_SOURCE_BYTES || size > Int.MAX_VALUE.toLong()) throw WorkspaceFailure(FILE_TOO_LARGE)
+        return readBoundedChunk(file, 0L, size.toInt())
+    }
+
+    /** Return a valid UTF-8 prefix, trimming only an incomplete final code point. */
+    private fun decodeChunk(bytes: ByteArray): Pair<String, Int>? {
+        if (bytes.isEmpty()) return "" to 0
+        val first = runCatching { decodeUtf8(bytes) }.getOrNull()
+        if (first != null) return first to bytes.size
+        val minimum = maxOf(0, bytes.size - 3)
+        for (end in (bytes.size - 1) downTo minimum) {
+            val text = runCatching { decodeUtf8(bytes.copyOf(end)) }.getOrNull()
+            if (text != null) return text to end
+        }
+        return null
+    }
+
+    private fun applyUnifiedDiff(current: String, patch: String): String? {
+        val source = current.split("\n", ignoreCase = false, limit = Int.MAX_VALUE)
+        val diff = patch.split("\n", ignoreCase = false, limit = Int.MAX_VALUE)
+        if (diff.isEmpty()) return null
+        var index = 0
+        if (diff.getOrNull(0)?.startsWith("--- ") == true) {
+            if (diff.getOrNull(1)?.startsWith("+++ ") != true) return null
+            index = 2
+        }
+        val output = ArrayList<String>(source.size)
+        var sourceIndex = 0
+        var hunkCount = 0
+        val hunkPattern = Regex("^@@ -(\\d+)(?:,(\\d+))? \\+(\\d+)(?:,(\\d+))? @@.*$")
+        while (index < diff.size) {
+            if (diff[index].isEmpty() && index == diff.lastIndex) break
+            val header = hunkPattern.matchEntire(diff[index]) ?: return null
+            index++
+            val oldStart = header.groupValues[1].toIntOrNull() ?: return null
+            val oldCount = header.groupValues[2].takeIf { it.isNotEmpty() }?.toIntOrNull() ?: 1
+            val newCount = header.groupValues[4].takeIf { it.isNotEmpty() }?.toIntOrNull() ?: 1
+            if (oldStart < 0 || oldCount < 0 || newCount < 0) return null
+            val targetIndex = if (oldStart == 0) 0 else oldStart - 1
+            if (targetIndex < sourceIndex || targetIndex > source.size) return null
+            while (sourceIndex < targetIndex) output += source[sourceIndex++]
+            var consumedOld = 0
+            var consumedNew = 0
+            while (index < diff.size && !diff[index].startsWith("@@ ")) {
+                val line = diff[index++]
+                if (line.isEmpty() && index == diff.size) break
+                if (line == "\\ No newline at end of file") continue
+                if (line.isEmpty()) return null
+                when (line[0]) {
+                    ' ' -> {
+                        if (consumedOld >= oldCount || sourceIndex >= source.size || source[sourceIndex] != line.substring(1)) return null
+                        output += source[sourceIndex++]
+                        consumedOld++
+                        consumedNew++
+                    }
+                    '-' -> {
+                        if (consumedOld >= oldCount || sourceIndex >= source.size || source[sourceIndex] != line.substring(1)) return null
+                        sourceIndex++
+                        consumedOld++
+                    }
+                    '+' -> {
+                        if (consumedNew >= newCount) return null
+                        val added = line.substring(1)
+                        if (added.contains('\u0000')) return null
+                        output += added
+                        consumedNew++
+                    }
+                    else -> return null
+                }
+            }
+            if (consumedOld != oldCount || consumedNew != newCount) return null
+            hunkCount++
+        }
+        if (hunkCount == 0) return null
+        while (sourceIndex < source.size) output += source[sourceIndex++]
+        return output.joinToString("\n")
+    }
+
+    private class CursorStore {
+        private val random = SecureRandom()
+        private val entries = LinkedHashMap<String, CursorState>()
+
+        fun issue(path: String, version: String, offset: Int): String {
+            val bytes = ByteArray(CURSOR_BYTES)
+            random.nextBytes(bytes)
+            val token = Base64.getUrlEncoder().withoutPadding().encodeToString(bytes)
+            entries[token] = CursorState(path, version, offset)
+            while (entries.size > MAX_CURSORS) entries.remove(entries.keys.first())
+            bytes.fill(0)
+            return token
+        }
+
+        fun resolve(token: String, path: String, version: String): Int? {
+            if (token.length !in 1..MAX_CURSOR_BYTES || !token.all { it.isLetterOrDigit() || it == '-' || it == '_' }) {
+                return null
+            }
+            val state = entries.remove(token) ?: return null
+            return state.takeIf { it.path == path && it.version == version }?.offset
+        }
+
+        private data class CursorState(val path: String, val version: String, val offset: Int)
+    }
+
+    internal sealed interface ReadChunkResult {
+        data class Success(
+            val path: String,
+            val bytes: ByteArray,
+            val version: String,
+            val offsetBytes: Long,
+            val totalBytes: Long,
+            val eof: Boolean,
+        ) : ReadChunkResult
+
+        data class Failure(val code: String) : ReadChunkResult
     }
 
     private fun createAndSync(file: Path, bytes: ByteArray) {
@@ -570,8 +914,17 @@ internal class ShizukuWorkspaceFileStore(
         internal const val MAX_PATH_BYTES = 512
         internal const val MAX_SEGMENT_BYTES = 120
         internal const val MAX_PATH_DEPTH = 16
-        internal const val MAX_FILE_BYTES = 256 * 1024
-        internal const val MAX_READ_BYTES = 24 * 1024
+        /** Individual files may be larger than one Binder/read chunk. */
+        internal const val MAX_FILE_BYTES = 16 * 1024 * 1024
+        /** Typed reads are bounded to one 256 KiB chunk at the service boundary. */
+        internal const val MAX_READ_BYTES = 256 * 1024
+        internal const val MAX_PATCH_BYTES = 256 * 1024
+        internal const val MAX_PATCH_SOURCE_BYTES = 16 * 1024 * 1024
+        internal const val MAX_VERSION_CHARS = 128
+        internal const val MAX_CURSOR_BYTES = 512
+        internal const val CURSOR_BYTES = 32
+        internal const val CURSOR_DISPLAY_BYTES = 43
+        internal const val MAX_CURSORS = 1024
         internal const val MAX_TOTAL_BYTES = 4L * 1024 * 1024
         internal const val MAX_FILES = 128
         internal const val MAX_ENTRIES = 512
@@ -595,6 +948,14 @@ internal class ShizukuWorkspaceFileStore(
         const val OUTPUT_LIMIT = "OUTPUT_LIMIT"
         const val UNKNOWN_OUTCOME = "UNKNOWN_OUTCOME"
         const val MOVE_INTO_SELF = "MOVE_INTO_SELF"
+        const val INVALID_CURSOR = "INVALID_CURSOR"
+        const val INVALID_VERSION = "INVALID_VERSION"
+        const val OFFSET_OUT_OF_RANGE = "OFFSET_OUT_OF_RANGE"
+        const val CONFLICT = "CONFLICT"
+        const val INVALID_PATCH = "INVALID_PATCH"
+        const val UNSUPPORTED = "UNSUPPORTED"
+        const val PATCH_FORMAT_REPLACE = "REPLACE"
+        const val PATCH_FORMAT_UNIFIED_DIFF = "UNIFIED_DIFF"
 
         internal val FIXED_ROOT = File("/storage/emulated/0/Download/MobileAgentRuntime-Shizuku")
     }

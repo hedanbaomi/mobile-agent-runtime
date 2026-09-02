@@ -35,6 +35,7 @@ import runtime.mobileagent.wired.WiredAdbAuthorityPort
 import runtime.mobileagent.wired.WiredAdbConnectionState
 import runtime.mobileagent.wired.WiredAdbErrorCode
 import runtime.mobileagent.wired.WiredAdbFileOperation
+import runtime.mobileagent.wired.WiredAdbPatchFormat
 import runtime.mobileagent.wired.WiredAdbFileRequest
 import runtime.mobileagent.wired.WiredAdbFileResult
 import runtime.mobileagent.wired.WiredAdbLifecycleState
@@ -289,6 +290,12 @@ class RuntimePeerAdaptersTest {
             contentUtf8: ByteArray?,
             replaceExisting: Boolean,
             maxBytes: Int,
+            cursor: String?,
+            maxEntries: Int,
+            offsetBytes: Long,
+            patchUtf8: ByteArray?,
+            expectedVersion: Long?,
+            patchFormat: WiredAdbPatchFormat,
         ): WiredAdbFileRequest {
             fileRequestCalls++
             return WiredAdbFileRequest(
@@ -299,6 +306,12 @@ class RuntimePeerAdaptersTest {
                 contentUtf8 = contentUtf8,
                 replaceExisting = replaceExisting,
                 maxBytes = maxBytes,
+                cursor = cursor,
+                maxEntries = maxEntries,
+                offsetBytes = offsetBytes,
+                patchUtf8 = patchUtf8,
+                expectedVersion = expectedVersion,
+                patchFormat = patchFormat,
             )
         }
 

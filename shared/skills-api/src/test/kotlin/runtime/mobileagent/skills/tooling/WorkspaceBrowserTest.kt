@@ -7,6 +7,7 @@ package runtime.mobileagent.skills.tooling
 import kotlinx.coroutines.runBlocking
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertFalse
+import org.junit.jupiter.api.Assertions.assertThrows
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
 import runtime.mobileagent.domain.Authority
@@ -15,6 +16,24 @@ import runtime.mobileagent.domain.WorkspaceBackendType
 import runtime.mobileagent.domain.WorkspaceScope
 
 class WorkspaceBrowserTest {
+    @Test
+    fun recoveryLocatorIsDefensiveAndWipeable() {
+        val source = byteArrayOf(1, 2, 3, 4)
+        val locator = WorkspaceRecoveryLocator.fromBytes(source)
+        source[0] = 9
+        assertEquals(4, locator.sizeBytes)
+        assertEquals("WorkspaceRecoveryLocator", locator.toString())
+        val copy = locator.copyBytes()
+        copy[1] = 8
+        assertEquals(byteArrayOf(1, 2, 3, 4).toList(), locator.copyBytes().toList())
+
+        locator.clear()
+        assertTrue(locator.isCleared)
+        assertEquals(0, locator.sizeBytes)
+        assertThrows(IllegalStateException::class.java) { locator.copyBytes() }
+        locator.close()
+    }
+
     @Test
     fun browseUsesOpaqueSessionBoundHandlesAndAttachPrefixesPaths() = runBlocking {
         val provider = TypedAuthorityWorkspaceProvider(Authority.SHIZUKU, FakeBackend())

@@ -9,6 +9,9 @@ import java.nio.charset.CharacterCodingException
 import java.nio.charset.CodingErrorAction
 import java.nio.charset.StandardCharsets
 import java.security.MessageDigest
+import java.security.SecureRandom
+import java.util.Base64
+import java.util.LinkedHashMap
 import runtime.mobileagent.domain.CapabilityId
 
 /** The only backend kinds exposed by the typed workspace layer. */
@@ -32,6 +35,7 @@ internal object InternalWorkspaceCapabilities {
     val CREATE_DIRECTORY = CapabilityId(CapabilityId.FILE_CREATE_DIRECTORY)
     val MOVE = CapabilityId(CapabilityId.FILE_MOVE)
     val DELETE = CapabilityId(CapabilityId.FILE_DELETE)
+    val APPLY_PATCH = CapabilityId("file.apply_patch")
 }
 
 /** Stable, non-path-bearing error codes for model-facing workspace results. */
@@ -56,6 +60,8 @@ internal enum class InternalWorkspaceErrorCode {
     DEPTH_LIMIT_EXCEEDED,
     ENTRY_LIMIT_EXCEEDED,
     INVALID_UTF8,
+    OFFSET_OUT_OF_RANGE,
+    INVALID_PATCH,
     CONFLICT,
     UNSUPPORTED,
     IO_ERROR,
@@ -93,6 +99,8 @@ internal data class InternalWorkspaceError(
             InternalWorkspaceErrorCode.DEPTH_LIMIT_EXCEEDED -> "The workspace path is too deep."
             InternalWorkspaceErrorCode.ENTRY_LIMIT_EXCEEDED -> "The workspace entry limit was exceeded."
             InternalWorkspaceErrorCode.INVALID_UTF8 -> "Workspace text is not valid UTF-8."
+            InternalWorkspaceErrorCode.OFFSET_OUT_OF_RANGE -> "The requested file offset is outside the file."
+            InternalWorkspaceErrorCode.INVALID_PATCH -> "The workspace patch is invalid."
             InternalWorkspaceErrorCode.CONFLICT -> "The workspace entry changed; the operation was not applied."
             InternalWorkspaceErrorCode.UNSUPPORTED -> "The workspace provider cannot perform this operation safely."
             InternalWorkspaceErrorCode.IO_ERROR -> "The workspace operation could not be completed."
@@ -164,6 +172,7 @@ internal data class InternalWorkspaceList(
     val path: String,
     val entries: List<InternalWorkspaceEntry>,
     val version: String,
+    val nextCursor: String? = null,
 )
 
 internal data class InternalWorkspaceStat(
@@ -177,11 +186,20 @@ internal data class InternalWorkspaceContent(
     val path: String,
     val bytes: ByteArray,
     val version: String,
+    val offsetBytes: Long = 0L,
+    val totalBytes: Long? = null,
+    val eof: Boolean = true,
 ) {
     override fun equals(other: Any?): Boolean = other is InternalWorkspaceContent &&
-        path == other.path && bytes.contentEquals(other.bytes) && version == other.version
+        path == other.path && bytes.contentEquals(other.bytes) && version == other.version &&
+        offsetBytes == other.offsetBytes && totalBytes == other.totalBytes && eof == other.eof
 
-    override fun hashCode(): Int = 31 * (31 * path.hashCode() + bytes.contentHashCode()) + version.hashCode()
+    override fun hashCode(): Int {
+        var result = 31 * (31 * path.hashCode() + bytes.contentHashCode()) + version.hashCode()
+        result = 31 * result + offsetBytes.hashCode()
+        result = 31 * result + (totalBytes?.hashCode() ?: 0)
+        return 31 * result + eof.hashCode()
+    }
 }
 
 internal data class InternalWorkspaceWrite(
@@ -218,11 +236,26 @@ internal data class InternalWorkspaceTransfer(
 internal interface InternalWorkspaceBackendApi {
     val descriptor: InternalWorkspaceDescriptor
 
-    fun list(relativePath: String = ""): InternalWorkspaceResult<InternalWorkspaceList>
+    fun list(
+        relativePath: String = "",
+        maxEntries: Int = 256,
+        cursor: String? = null,
+    ): InternalWorkspaceResult<InternalWorkspaceList>
 
     fun stat(relativePath: String): InternalWorkspaceResult<InternalWorkspaceStat>
 
-    fun read(relativePath: String, maxBytes: Long = 256L * 1024L): InternalWorkspaceResult<InternalWorkspaceContent>
+    fun read(
+        relativePath: String,
+        maxBytes: Long = 256L * 1024L,
+        offsetBytes: Long = 0L,
+    ): InternalWorkspaceResult<InternalWorkspaceContent>
+
+    fun applyPatch(
+        relativePath: String,
+        patch: String,
+        expectedVersion: String?,
+        format: InternalWorkspacePatchFormat = InternalWorkspacePatchFormat.UNIFIED_DIFF,
+    ): InternalWorkspaceResult<InternalWorkspaceWrite>
 
     fun write(
         relativePath: String,
@@ -251,6 +284,45 @@ internal interface InternalWorkspaceBackendApi {
         expectedVersion: String? = null,
         replaceExisting: Boolean = false,
     ): InternalWorkspaceResult<InternalWorkspaceTransfer>
+}
+
+internal enum class InternalWorkspacePatchFormat {
+    UNIFIED_DIFF,
+    REPLACE,
+}
+
+/**
+ * Process-local opaque list cursors.  The token is random and maps only to
+ * backend-owned state; no path, URI, document id, or version is serialized in
+ * the model-facing cursor.  State is bounded so an untrusted caller cannot
+ * grow this map without limit.
+ */
+internal class InternalWorkspaceCursorStore(
+    private val maxTokens: Int = 512,
+) {
+    private data class State(val path: String, val fingerprint: String, val offset: Int)
+
+    private val random = SecureRandom()
+    private val states = LinkedHashMap<String, State>(maxTokens, 0.75f, true)
+
+    fun issue(path: String, fingerprint: String, offset: Int): String {
+        val bytes = ByteArray(24)
+        var token: String
+        synchronized(states) {
+            do {
+                random.nextBytes(bytes)
+                token = Base64.getUrlEncoder().withoutPadding().encodeToString(bytes)
+            } while (states.containsKey(token))
+            states[token] = State(path, fingerprint, offset)
+            while (states.size > maxTokens) states.entries.iterator().apply { next(); remove() }
+        }
+        return token
+    }
+
+    fun resolve(token: String, path: String, fingerprint: String): Int? = synchronized(states) {
+        val state = states[token] ?: return@synchronized null
+        if (state.path != path || state.fingerprint != fingerprint || state.offset < 0) null else state.offset
+    }
 }
 
 internal object InternalWorkspaceVersions {

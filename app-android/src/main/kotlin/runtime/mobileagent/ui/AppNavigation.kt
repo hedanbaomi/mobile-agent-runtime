@@ -41,6 +41,17 @@ fun defaultAppDestinations(chinese: Boolean = true): List<AppNavigationDestinati
     AppNavigationDestination(AppRoutes.SETTINGS, if (chinese) "设置" else "Settings", Icons.Outlined.Settings),
 )
 
+/**
+ * Destinations available from the application-wide drawer.  Compact layouts
+ * no longer hide product areas behind a bottom navigation bar; the drawer is
+ * the single navigation surface for both compact and wide windows.
+ */
+fun globalDrawerDestinations(chinese: Boolean = true): List<AppNavigationDestination> =
+    defaultAppDestinations(chinese) + listOf(
+        AppNavigationDestination(AppRoutes.MCP, if (chinese) "MCP" else "MCP", Icons.Outlined.Cloud),
+        AppNavigationDestination(AppRoutes.ABOUT, if (chinese) "关于" else "About", Icons.Outlined.Info),
+    )
+
 fun phonePrimaryDestinations(chinese: Boolean = true): List<AppNavigationDestination> = listOf(
     AppNavigationDestination(AppRoutes.CHAT, if (chinese) "对话" else "Chat", Icons.Outlined.Chat),
     AppNavigationDestination(AppRoutes.AGENTS, if (chinese) "智能体" else "Agents", Icons.Outlined.SmartToy),

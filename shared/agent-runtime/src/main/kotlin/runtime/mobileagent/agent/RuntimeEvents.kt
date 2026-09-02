@@ -3,11 +3,21 @@
 
 package runtime.mobileagent.agent
 
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.intOrNull
+import kotlinx.serialization.json.jsonPrimitive
 import runtime.mobileagent.provider.ChatMessage
 import runtime.mobileagent.provider.InlineImage
 import runtime.mobileagent.provider.ModelEvent as ProviderModelEvent
 import runtime.mobileagent.provider.ParameterLayers
 import runtime.mobileagent.provider.RequestHeaderValue
+import runtime.mobileagent.domain.DiffPart
+import runtime.mobileagent.domain.ErrorPart
+import runtime.mobileagent.domain.MessageErrorCode
+import runtime.mobileagent.domain.MessagePart
+import runtime.mobileagent.domain.ReasoningPart
 import runtime.mobileagent.skills.ToolCall
 import runtime.mobileagent.skills.ToolExecutor
 import runtime.mobileagent.skills.ToolResult
@@ -117,3 +127,94 @@ internal fun ParameterLayers.allKeys(): List<String> = buildList {
     addAll(agentOverrides.keys)
     if (!customJson.isNullOrBlank()) add("<custom-json>")
 }.distinct().sorted()
+
+/**
+ * Project only provider-declared message parts.  In particular, ordinary answer text is never
+ * reclassified as reasoning: providers must emit [ProviderModelEvent.ReasoningDelta] explicitly.
+ */
+fun ProviderModelEvent.toMessagePartOrNull(): MessagePart? = when (this) {
+    is ProviderModelEvent.ReasoningDelta ->
+        text.takeIf { it.isNotBlank() }?.let { ReasoningPart(it, streaming = true) }
+    is ProviderModelEvent.Failed -> toSafeErrorPart(sanitizedMessage)
+    else -> null
+}
+
+/** Convert provider/runtime failure labels into a closed, non-sensitive durable error. */
+fun toSafeErrorPart(value: String): ErrorPart {
+    val normalized = value.trim().uppercase()
+    val token = normalized
+        .substringBefore(':')
+        .substringBefore(' ')
+    val code = when {
+        token == "UNKNOWN_OUTCOME" || normalized.contains("UNKNOWN_OUTCOME") -> MessageErrorCode.UNKNOWN_OUTCOME
+        token == "INVALID_CONFIG" || token == "CONFIG_INVALID" -> MessageErrorCode.CONFIG_INVALID
+        token == "SECRET_UNAVAILABLE" -> MessageErrorCode.SECRET_UNAVAILABLE
+        token == "PROVIDER_UNAUTHORIZED" || normalized.contains("UNAUTHORIZED") -> MessageErrorCode.PROVIDER_UNAUTHORIZED
+        token == "RATE_LIMITED" -> MessageErrorCode.RATE_LIMITED
+        token == "NETWORK_UNAVAILABLE" || normalized.contains("NETWORK") -> MessageErrorCode.NETWORK_UNAVAILABLE
+        token == "CONTEXT_OVERFLOW" || token == "CONTEXT_BUDGET_EXCEEDED" || normalized.contains("CONTEXT") -> MessageErrorCode.CONTEXT_OVERFLOW
+        token == "PERMISSION_DENIED" || token == "CAPABILITY_DENIED" -> MessageErrorCode.PERMISSION_DENIED
+        token == "RESOURCE_LIMIT" || token == "BUDGET_EXHAUSTED" || normalized.contains("BUDGET") -> MessageErrorCode.BUDGET_EXHAUSTED
+        token == "TIMEOUT" || token == "TIMED_OUT" -> MessageErrorCode.TIMEOUT
+        token == "CANCELLED" || token == "CANCELED" -> MessageErrorCode.CANCELLED
+        token == "INVALID_RESPONSE" || token == "SCHEMA_UNSUPPORTED" || normalized.contains("SCHEMA") -> MessageErrorCode.INVALID_RESPONSE
+        token == "TOOL_FAILED" || token == "TOOL_ERROR" -> MessageErrorCode.TOOL_FAILED
+        else -> MessageErrorCode.INTERNAL
+    }
+    return ErrorPart(code, code.safeMessage(), retryable = code in RETRYABLE_ERROR_CODES)
+}
+
+/**
+ * Diff parts are accepted only from an explicit structured tool result.  A normal result string,
+ * patch argument, or assistant answer is intentionally not enough evidence to create a diff.
+ */
+fun RuntimeEvent.ToolResultProduced.toDiffPartOrNull(): DiffPart? {
+    val objectValue = runCatching { Json.parseToJsonElement(resultJson) as? JsonObject }.getOrNull() ?: return null
+    val kind = listOf("type", "kind", "result_type", "resultType")
+        .asSequence()
+        .mapNotNull { objectValue[it]?.jsonPrimitive?.contentOrNull }
+        .firstOrNull { it.equals("diff", ignoreCase = true) }
+        ?: return null
+    if (kind.isBlank()) return null
+    val summary = listOf("summary", "diff_summary", "diffSummary")
+        .asSequence()
+        .mapNotNull { objectValue[it]?.jsonPrimitive?.contentOrNull }
+        .firstOrNull { it.isNotBlank() }
+        ?: return null
+    val preview = listOf("patch_preview", "patchPreview", "patch")
+        .asSequence()
+        .mapNotNull { objectValue[it]?.jsonPrimitive?.contentOrNull }
+        .firstOrNull()
+        ?: ""
+    val changedFiles = listOf("changed_files", "changedFiles")
+        .asSequence()
+        .mapNotNull { objectValue[it]?.jsonPrimitive?.intOrNull }
+        .firstOrNull()
+        ?: 0
+    return runCatching { DiffPart(summary, preview, changedFiles) }.getOrNull()
+}
+
+private val RETRYABLE_ERROR_CODES = setOf(
+    MessageErrorCode.NETWORK_UNAVAILABLE,
+    MessageErrorCode.RATE_LIMITED,
+    MessageErrorCode.TIMEOUT,
+)
+
+private fun MessageErrorCode.safeMessage(): String = when (this) {
+    MessageErrorCode.CONFIG_INVALID -> "配置无效。"
+    MessageErrorCode.SECRET_UNAVAILABLE -> "服务商凭据不可用。"
+    MessageErrorCode.PROVIDER_UNAUTHORIZED -> "服务商拒绝了请求，请检查授权。"
+    MessageErrorCode.RATE_LIMITED -> "服务商暂时限流，请稍后再试。"
+    MessageErrorCode.NETWORK_UNAVAILABLE -> "网络不可用，未能完成请求。"
+    MessageErrorCode.CONTEXT_OVERFLOW -> "上下文或输出预算不足。"
+    MessageErrorCode.PERMISSION_DENIED -> "当前权限不允许执行该操作。"
+    MessageErrorCode.WORKSPACE_UNAVAILABLE -> "工作区当前不可用。"
+    MessageErrorCode.RESOURCE_LIMIT -> "已达到运行资源限制。"
+    MessageErrorCode.BUDGET_EXHAUSTED -> "已达到运行预算。"
+    MessageErrorCode.TIMEOUT -> "请求超时。"
+    MessageErrorCode.CANCELLED -> "请求已取消。"
+    MessageErrorCode.INVALID_RESPONSE -> "服务商返回了无法识别的结果。"
+    MessageErrorCode.TOOL_FAILED -> "工具执行失败。"
+    MessageErrorCode.UNKNOWN_OUTCOME -> "请求结果未知，可能已产生外部影响；不会自动重试。"
+    MessageErrorCode.INTERNAL -> "运行时发生内部错误。"
+}

@@ -19,6 +19,10 @@ import runtime.mobileagent.domain.TextPart
 import runtime.mobileagent.domain.ToolCallPart
 import runtime.mobileagent.domain.ToolResultPart
 import runtime.mobileagent.domain.CitationPart
+import runtime.mobileagent.domain.DiffPart
+import runtime.mobileagent.domain.ErrorPart
+import runtime.mobileagent.domain.MessagePartLimits
+import runtime.mobileagent.domain.ReasoningPart
 import runtime.mobileagent.domain.Utc
 
 /** Conversation and typed message persistence. Message content is append-only; status is mutable. */
@@ -50,8 +54,8 @@ class ConversationRepository(
         }
         val conversation = Conversation(conversationId, snapshotId, title.trim(), at, at)
         db.execute(
-            "INSERT INTO conversations(id,snapshot_id,title,created_at,updated_at) VALUES(?,?,?,?,?)",
-            listOf(conversation.id, conversation.snapshotId, conversation.title, conversation.createdAt, conversation.updatedAt),
+            "INSERT INTO conversations(id,snapshot_id,agent_snapshot_id,title,created_at,updated_at) VALUES(?,?,?,?,?,?)",
+            listOf(conversation.id, conversation.snapshotId, conversation.snapshotId, conversation.title, conversation.createdAt, conversation.updatedAt),
         )
         return conversation
     }
@@ -227,9 +231,20 @@ class ConversationRepository(
         requireText(message.createdAt, "message.createdAt")
         if (message.text.length > MAX_TEXT) throw invalid("Message text is too long")
         parseObject(message.metadataJson, "message.metadataJson")
+        if (message.parts.size > MessagePartLimits.MAX_PART_COUNT) {
+            throw invalid("Message contains too many parts")
+        }
+        var encodedPartBytes = 0L
         message.parts.forEach { part ->
+            val encoded = runCatching { json.encodeToString<MessagePart>(part) }
+                .getOrElse { throw invalid("Message part cannot be serialized") }
+            encodedPartBytes += encoded.toByteArray(Charsets.UTF_8).size
+            if (encodedPartBytes > MessagePartLimits.MAX_TOTAL_ENCODED_BYTES) {
+                throw invalid("Message parts exceed the durable size limit")
+            }
             when (part) {
                 is TextPart -> if (part.value.length > MAX_TEXT) throw invalid("Text message part is too long")
+                is ReasoningPart -> Unit // Constructor enforces bounded, non-empty provider content.
                 is ImagePart -> requireId(part.assetId, "image.assetId")
                 is ToolCallPart -> {
                     requireId(part.callId, "tool.callId")
@@ -240,7 +255,10 @@ class ConversationRepository(
                     requireId(part.callId, "toolResult.callId")
                     requireText(part.status, "toolResult.status")
                     if (part.resultJson.length > MAX_TEXT) throw invalid("Tool result is too long")
+                    parseObject(part.resultJson, "toolResult.resultJson")
                 }
+                is DiffPart -> Unit // Constructor enforces bounded, path-safe display data.
+                is ErrorPart -> Unit // Constructor and enum enforce a safe typed error surface.
                 is CitationPart -> requireId(part.citationId, "citation.citationId")
             }
         }
@@ -253,9 +271,12 @@ class ConversationRepository(
 
     private fun partType(part: MessagePart): String = when (part) {
         is TextPart -> "text"
+        is ReasoningPart -> "reasoning"
         is ImagePart -> "image"
         is ToolCallPart -> "tool_call"
         is ToolResultPart -> "tool_result"
+        is DiffPart -> "diff"
+        is ErrorPart -> "error"
         is CitationPart -> "citation"
     }
 
@@ -273,7 +294,7 @@ class ConversationRepository(
             throw invalid("Persisted message parts are invalid")
         }
         val parts = if (decoded.isEmpty() && string("text").isNotBlank()) listOf(TextPart(string("text"))) else decoded
-        return Message(
+        val message = Message(
             id = string("id"),
             conversationId = string("conversation_id"),
             parentMessageId = string("parent_message_id").ifBlank { null },
@@ -285,6 +306,10 @@ class ConversationRepository(
             parts = parts,
             metadataJson = string("metadata_json").ifBlank { "{}" },
         )
+        // Re-validate rows on read as well as on write.  This keeps hand-edited or partially
+        // migrated parts fail-closed instead of allowing malformed JSON into the runtime.
+        validateMessage(message)
+        return message
     }
 
     private fun requireId(value: String, field: String) {

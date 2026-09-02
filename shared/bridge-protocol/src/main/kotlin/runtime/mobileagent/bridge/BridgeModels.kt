@@ -38,6 +38,13 @@ object BridgeProtocol {
     const val MAX_WORKSPACE_DISPLAY_NAME_BYTES: Int = 256
     const val MAX_DEVICE_PATH_BYTES: Int = 4 * 1024
     const val WORKSPACE_BINDING_BYTES: Int = 32
+    /** Size of the opaque desktop-persisted locator returned by workspace attach. */
+    const val WORKSPACE_RECOVERY_LOCATOR_BYTES: Int = 32
+    /** Wire-side limits are deliberately below the encrypted frame budget. */
+    const val MAX_WORKSPACE_PAGE_ENTRIES: Int = 256
+    const val MAX_WORKSPACE_READ_BYTES: Int = 256 * 1024
+    const val MAX_WORKSPACE_PATCH_BYTES: Int = 768 * 1024
+    const val MAX_WORKSPACE_CURSOR_BYTES: Int = 512
     const val PAIRING_TTL_MILLIS: Long = 5 * 60 * 1_000L
     const val PAIRING_MAX_ATTEMPTS: Int = 5
     const val PAIRING_RATE_WINDOW_MILLIS: Long = 60 * 1_000L
@@ -131,18 +138,28 @@ object BridgeErrorCodes {
     const val UNSUPPORTED_OPERATION = "UNSUPPORTED_OPERATION"
     const val BRIDGE_DISABLED = "BRIDGE_DISABLED"
     const val BRIDGE_CLOSED = "BRIDGE_CLOSED"
+    const val WORKSPACE_BINDING_INVALID = "WORKSPACE_BINDING_INVALID"
+    const val WORKSPACE_BINDING_REPLAYED = "WORKSPACE_BINDING_REPLAYED"
+    const val WORKSPACE_LOCATOR_INVALID = "WORKSPACE_LOCATOR_INVALID"
+    const val WORKSPACE_NOT_FOUND = "WORKSPACE_NOT_FOUND"
+    const val WORKSPACE_CONFLICT = "WORKSPACE_CONFLICT"
+    const val WORKSPACE_OFFSET_OUT_OF_RANGE = "WORKSPACE_OFFSET_OUT_OF_RANGE"
+    const val WORKSPACE_INVALID_PATCH = "WORKSPACE_INVALID_PATCH"
+    const val WORKSPACE_ATOMIC_REPLACE_UNAVAILABLE = "WORKSPACE_ATOMIC_REPLACE_UNAVAILABLE"
 }
 
 /** Only fixed operations are accepted over a bridge request. */
 enum class BridgeOperation(val wireName: String) {
     WORKSPACE_LIST("workspace_list"),
     WORKSPACE_ATTACH("workspace_attach"),
+    WORKSPACE_REOPEN("workspace_reopen"),
     WORKSPACE_BROWSE("workspace_browse"),
     WORKSPACE_RELEASE("workspace_release"),
     FILE_LIST("file_list"),
     FILE_STAT("file_stat"),
     FILE_READ_TEXT("file_read_text"),
     FILE_WRITE_TEXT("file_write_text"),
+    FILE_APPLY_PATCH("file_apply_patch"),
     FILE_CREATE_DIRECTORY("file_create_directory"),
     FILE_MOVE("file_move"),
     FILE_DELETE("file_delete"),
@@ -439,6 +456,65 @@ data class BridgeRequestEnvelope(
     val operation: String,
     val payload: JsonObject,
 )
+
+/**
+ * Typed, authenticated workspace attachment request.  [absolutePath] is
+ * accepted only on the encrypted bridge and is never part of a
+ * model-facing/tool-facing request.  Its string representation is redacted
+ * because this DTO can exist briefly in desktop bridge diagnostics/tests.
+ */
+@Serializable
+data class BridgeWorkspaceAttachRequest(
+    val workspaceId: String,
+    val workspaceBinding: String,
+    val displayName: String,
+    val absolutePath: String,
+    val scope: String,
+    val grantRevision: Long,
+    val confirmedByUser: Boolean,
+) {
+    override fun toString(): String =
+        "BridgeWorkspaceAttachRequest(workspaceId=$workspaceId, scope=$scope, grantRevision=$grantRevision, confirmedByUser=$confirmedByUser, absolutePath=<redacted>, workspaceBinding=<redacted>)"
+}
+
+/**
+ * Typed reattach request.  The locator is an opaque capability reference
+ * persisted by Android in its encrypted store and resolved only by the
+ * authenticated companion; it is never a path or a model-visible value.
+ */
+@Serializable
+data class BridgeWorkspaceReopenRequest(
+    val workspaceId: String,
+    val workspaceBinding: String,
+    val recoveryLocator: String,
+    val scope: String,
+) {
+    override fun toString(): String =
+        "BridgeWorkspaceReopenRequest(workspaceId=$workspaceId, scope=$scope, recoveryLocator=<redacted>, workspaceBinding=<redacted>)"
+}
+
+@Serializable
+data class BridgeWorkspaceEntry(
+    val relativePath: String,
+    val type: String,
+    val bytes: Long? = null,
+)
+
+/** Typed response shared by attach and reopen; only relative entries cross. */
+@Serializable
+data class BridgeWorkspaceAttachmentResponse(
+    val operation: String,
+    val workspaceId: String,
+    val workspaceBinding: String,
+    val scope: String,
+    val recoveryLocator: String,
+    val relativePath: String = "",
+    val entries: List<BridgeWorkspaceEntry> = emptyList(),
+    val truncated: Boolean = false,
+) {
+    override fun toString(): String =
+        "BridgeWorkspaceAttachmentResponse(operation=$operation, workspaceId=$workspaceId, scope=$scope, entries=${entries.size}, truncated=$truncated, recoveryLocator=<redacted>, workspaceBinding=<redacted>)"
+}
 
 /**
  * Desktop-to-shell-helper envelope. This is deliberately a distinct type

@@ -43,6 +43,31 @@ class MigrationsTest {
     }
 
     @Test
+    fun conversationAgentSnapshotProjectionIsAddedAndBackfilled() {
+        val db = JdbcSqlConnection()
+        db.execute("CREATE TABLE schema_version(version INTEGER NOT NULL PRIMARY KEY)")
+        db.execute("INSERT INTO schema_version(version) VALUES (?)", listOf(Migrations.VERSION - 1))
+        db.execute(
+            "CREATE TABLE conversations(id TEXT PRIMARY KEY, snapshot_id TEXT NOT NULL, title TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL)",
+        )
+        db.execute(
+            "INSERT INTO conversations(id,snapshot_id,title,created_at,updated_at) VALUES(?,?,?,?,?)",
+            listOf("conversation.migration", "snapshot.migration", "Legacy conversation", "2026-09-02T00:00:00Z", "2026-09-02T00:00:00Z"),
+        )
+
+        Migrations.apply(db)
+
+        assertTrue(
+            db.query("PRAGMA table_info(conversations)").any { it.string("name") == "agent_snapshot_id" },
+        )
+        assertEquals(
+            "snapshot.migration",
+            db.query("SELECT agent_snapshot_id FROM conversations WHERE id = ?", listOf("conversation.migration"))
+                .single().string("agent_snapshot_id"),
+        )
+    }
+
+    @Test
     fun embeddingQueryAttemptsSurviveV10Migration() {
         val db = JdbcSqlConnection()
         Migrations.apply(db)

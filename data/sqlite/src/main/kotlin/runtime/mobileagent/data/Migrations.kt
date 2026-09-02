@@ -9,6 +9,7 @@ import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.contentOrNull
 import java.security.MessageDigest
+import java.time.Instant
 import runtime.mobileagent.domain.AppError
 import runtime.mobileagent.domain.CapabilityId
 import runtime.mobileagent.domain.ErrorCode
@@ -16,6 +17,10 @@ import runtime.mobileagent.domain.RetryClass
 import runtime.mobileagent.domain.Authority
 import runtime.mobileagent.domain.DangerousMode
 import runtime.mobileagent.domain.GrantLifetime
+import runtime.mobileagent.domain.AgentWorkspaceDefault
+import runtime.mobileagent.domain.ConversationWorkspaceBinding
+import runtime.mobileagent.domain.PrivilegedWorkspaceBinding
+import runtime.mobileagent.domain.PrivilegedWorkspaceBindingStatus
 import runtime.mobileagent.domain.Utc
 import runtime.mobileagent.domain.WorkspaceBackendType
 import runtime.mobileagent.domain.WorkspaceScope
@@ -33,7 +38,13 @@ object Migrations {
     // uniqueness key. SQLite cannot alter a table-level UNIQUE constraint in place,
     // so old v12 tables are preserved under a legacy name and copied transactionally.
     // v14 persists workspace scope and the explicit high-risk full-device grant.
-    const val VERSION = 14
+    // v15 adds encrypted privileged locators, immutable thread bindings, and
+    // agent defaults. None of those rows contain a provider handle or a
+    // plaintext path/URI.
+    // v16 adds the explicit agent_snapshot_id conversation projection used by
+    // the thread/workspace integration. snapshot_id remains for legacy data
+    // and repository consumers; both values must describe the same snapshot.
+    const val VERSION = 16
 
     private val statements = listOf(
         "CREATE TABLE IF NOT EXISTS schema_version (version INTEGER NOT NULL PRIMARY KEY)",
@@ -41,7 +52,7 @@ object Migrations {
         "CREATE TABLE IF NOT EXISTS model_profiles (id TEXT PRIMARY KEY, provider_id TEXT NOT NULL, role TEXT NOT NULL, model_id TEXT NOT NULL, capabilities TEXT NOT NULL, parameter_schema_json TEXT NOT NULL, parameters_json TEXT NOT NULL DEFAULT '{}', context_limit INTEGER NOT NULL, output_limit INTEGER NOT NULL, revision INTEGER NOT NULL, endpoint_json TEXT NOT NULL DEFAULT '{}', FOREIGN KEY(provider_id) REFERENCES provider_profiles(id))",
         "CREATE TABLE IF NOT EXISTS agent_profiles (id TEXT PRIMARY KEY, name TEXT NOT NULL, prompt_revision_id TEXT NOT NULL, chat_profile_id TEXT NOT NULL, vision_profile_id TEXT, embedding_profile_id TEXT, reranker_profile_id TEXT, knowledge_base_ids TEXT NOT NULL, skill_ids TEXT NOT NULL, retrieval_mode TEXT NOT NULL, revision INTEGER NOT NULL, parameter_overrides_json TEXT NOT NULL DEFAULT '{}', context_policy_json TEXT NOT NULL DEFAULT '{}', permission_settings_json TEXT NOT NULL DEFAULT '{}')",
         "CREATE TABLE IF NOT EXISTS prompt_revisions (id TEXT PRIMARY KEY, agent_id TEXT NOT NULL, parent_revision_id TEXT, template TEXT NOT NULL, allowed_variables TEXT NOT NULL, created_at TEXT NOT NULL)",
-        "CREATE TABLE IF NOT EXISTS conversations (id TEXT PRIMARY KEY, snapshot_id TEXT NOT NULL, title TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL)",
+        "CREATE TABLE IF NOT EXISTS conversations (id TEXT PRIMARY KEY, snapshot_id TEXT NOT NULL, agent_snapshot_id TEXT NOT NULL DEFAULT '', title TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL)",
         "CREATE TABLE IF NOT EXISTS agent_snapshots (id TEXT PRIMARY KEY, schema_version INTEGER NOT NULL, agent_id TEXT NOT NULL, prompt_revision_id TEXT NOT NULL, chat_model_id TEXT NOT NULL, provider_revision INTEGER NOT NULL, knowledge_base_ids TEXT NOT NULL, skill_ids TEXT NOT NULL, created_at TEXT NOT NULL, provider_id TEXT NOT NULL DEFAULT '', chat_model_revision INTEGER NOT NULL DEFAULT 0, vision_model_id TEXT, vision_model_revision INTEGER, embedding_model_id TEXT, embedding_model_revision INTEGER, reranker_model_id TEXT, reranker_model_revision INTEGER, parameter_overrides_json TEXT NOT NULL DEFAULT '{}', context_policy_json TEXT NOT NULL DEFAULT '{}', permission_settings_json TEXT NOT NULL DEFAULT '{}', binding_manifest_json TEXT NOT NULL DEFAULT '{}', expanded_json TEXT NOT NULL DEFAULT '{}')",
         "CREATE TABLE IF NOT EXISTS messages (id TEXT PRIMARY KEY, conversation_id TEXT NOT NULL, parent_message_id TEXT, role TEXT NOT NULL, text TEXT NOT NULL, status TEXT NOT NULL, created_at TEXT NOT NULL, parts_json TEXT NOT NULL DEFAULT '[]', metadata_json TEXT NOT NULL DEFAULT '{}', FOREIGN KEY(conversation_id) REFERENCES conversations(id))",
         "CREATE TABLE IF NOT EXISTS message_parts (id TEXT PRIMARY KEY, message_id TEXT NOT NULL, ordinal INTEGER NOT NULL, part_type TEXT NOT NULL, payload_json TEXT NOT NULL, UNIQUE(message_id, ordinal), FOREIGN KEY(message_id) REFERENCES messages(id))",
@@ -76,6 +87,9 @@ object Migrations {
         "CREATE TABLE IF NOT EXISTS authority_policy (id INTEGER NOT NULL PRIMARY KEY CHECK(id = 1), selected_authority TEXT NOT NULL CHECK(selected_authority IN('NONE','SHIZUKU','WIRED_ADB')), dangerous_mode TEXT NOT NULL CHECK(dangerous_mode IN('DISABLED','ENABLED_CONFIRM_HIGH_RISK','ENABLED_AUTONOMOUS')), policy_version INTEGER NOT NULL DEFAULT 0 CHECK(policy_version >= 0), updated_at TEXT NOT NULL)",
         "CREATE TABLE IF NOT EXISTS authority_preferences (authority TEXT NOT NULL PRIMARY KEY CHECK(authority IN('NONE','SHIZUKU','WIRED_ADB')), user_intent_enabled INTEGER NOT NULL DEFAULT 0 CHECK(user_intent_enabled IN(0,1)), explicitly_configured INTEGER NOT NULL DEFAULT 0 CHECK(explicitly_configured IN(0,1)), updated_at TEXT NOT NULL)",
         "CREATE TABLE IF NOT EXISTS workspaces (id TEXT PRIMARY KEY, display_name TEXT NOT NULL, backend_type TEXT NOT NULL CHECK(backend_type IN('INTERNAL','SAF_TREE','PRIVILEGED')), root_reference TEXT NOT NULL, readable INTEGER NOT NULL CHECK(readable IN(0,1)), writable INTEGER NOT NULL CHECK(writable IN(0,1)), quota_bytes INTEGER, max_file_bytes INTEGER NOT NULL, enabled INTEGER NOT NULL CHECK(enabled IN(0,1)), revision INTEGER NOT NULL DEFAULT 0 CHECK(revision >= 0), created_at TEXT NOT NULL, updated_at TEXT NOT NULL, scope TEXT NOT NULL DEFAULT 'SELECTED_DIRECTORY' CHECK(scope IN('SELECTED_DIRECTORY','FULL_DEVICE_FILES')))",
+        "CREATE TABLE IF NOT EXISTS privileged_workspace_bindings (workspace_id TEXT PRIMARY KEY, authority TEXT NOT NULL CHECK(authority IN('SHIZUKU','WIRED_ADB')), encrypted_locator BLOB NOT NULL CHECK(length(encrypted_locator) > 0 AND length(encrypted_locator) <= 1048576), locator_nonce BLOB NOT NULL CHECK(length(locator_nonce) >= 12 AND length(locator_nonce) <= 32), locator_version INTEGER NOT NULL CHECK(locator_version > 0), key_version INTEGER NOT NULL CHECK(key_version > 0), aad_app_instance_id TEXT NOT NULL, aad_workspace_id TEXT NOT NULL, aad_authority TEXT NOT NULL CHECK(aad_authority IN('SHIZUKU','WIRED_ADB')), aad_locator_version INTEGER NOT NULL CHECK(aad_locator_version > 0), scope TEXT NOT NULL CHECK(scope IN('SELECTED_DIRECTORY','FULL_DEVICE_FILES')), status TEXT NOT NULL CHECK(status IN('ACTIVE','UNAVAILABLE','UNAVAILABLE_AUTHORITY','REATTACHING','WORKSPACE_NOT_FOUND','PERMISSION_DENIED','GRANT_LOST','BINDING_UNRECOVERABLE','REVOKED')), revision INTEGER NOT NULL CHECK(revision > 0), created_at TEXT NOT NULL, updated_at TEXT NOT NULL, FOREIGN KEY(workspace_id) REFERENCES workspaces(id))",
+        "CREATE TABLE IF NOT EXISTS conversation_workspace_bindings (session_id TEXT PRIMARY KEY, workspace_id TEXT NOT NULL, bound_at TEXT NOT NULL, revision INTEGER NOT NULL CHECK(revision > 0), FOREIGN KEY(session_id) REFERENCES conversations(id) ON DELETE CASCADE, FOREIGN KEY(workspace_id) REFERENCES workspaces(id))",
+        "CREATE TABLE IF NOT EXISTS agent_workspace_defaults (agent_id TEXT PRIMARY KEY, workspace_id TEXT, revision INTEGER NOT NULL CHECK(revision > 0), updated_at TEXT NOT NULL, FOREIGN KEY(agent_id) REFERENCES agent_profiles(id) ON DELETE CASCADE, FOREIGN KEY(workspace_id) REFERENCES workspaces(id))",
         // This row may be created immediately before a provider opens its
         // device-root handle. The container materializes the corresponding
         // workspace only after that typed operation succeeds, so the grant
@@ -106,6 +120,9 @@ object Migrations {
         "CREATE INDEX IF NOT EXISTS idx_capability_grants_agent ON capability_grants(agent_id, revoked_at)",
         "CREATE INDEX IF NOT EXISTS idx_capability_grants_workspace ON capability_grants(workspace_id, revoked_at)",
         "CREATE INDEX IF NOT EXISTS idx_snapshot_grant_bindings_snapshot ON snapshot_grant_bindings(snapshot_id)",
+        "CREATE INDEX IF NOT EXISTS idx_privileged_workspace_bindings_status ON privileged_workspace_bindings(status, updated_at)",
+        "CREATE INDEX IF NOT EXISTS idx_conversation_workspace_bindings_workspace ON conversation_workspace_bindings(workspace_id, bound_at)",
+        "CREATE INDEX IF NOT EXISTS idx_agent_workspace_defaults_workspace ON agent_workspace_defaults(workspace_id)",
         "CREATE INDEX IF NOT EXISTS idx_memory_entries_space ON skill_memory_entries(space_id, path)",
         "CREATE INDEX IF NOT EXISTS idx_approval_records_call ON approval_records(call_id, created_at)",
         "CREATE INDEX IF NOT EXISTS idx_tool_audit_details_request ON tool_audit_details(request_id, created_at)",
@@ -173,6 +190,10 @@ object Migrations {
         // rows are ordinary selected directories; only explicit full-device
         // attachments may carry the high-risk scope.
         Column("workspaces", "scope", "TEXT NOT NULL DEFAULT 'SELECTED_DIRECTORY' CHECK(scope IN('SELECTED_DIRECTORY','FULL_DEVICE_FILES'))"),
+        // v16 exposes the snapshot under the explicit name used by the
+        // thread/workspace integration. Existing snapshot_id remains the
+        // compatibility source and is copied into this projection below.
+        Column("conversations", "agent_snapshot_id", "TEXT NOT NULL DEFAULT ''"),
     )
 
     fun apply(connection: SqlConnection) {
@@ -194,13 +215,16 @@ object Migrations {
             }
             statements.drop(1).forEach { sql -> connection.execute(sql) }
             columns.forEach { column -> ensureColumn(connection, column) }
+            backfillConversationSnapshotIds(connection)
             backfillV11(connection)
             backfillV12(connection)
             backfillV2ControlPlane(connection)
+            if (current < VERSION) migrateExistingConversationWorkspaceBindings(connection)
             ensureDefaultAuthorityRows(connection)
             validateSnapshotManifests(connection)
             validateAuthoritySchema(connection)
             validateWorkspaceScopes(connection)
+            validateWorkspaceBindings(connection)
             validateRequiredSchema(connection)
             connection.execute("DELETE FROM schema_version")
             connection.execute("INSERT INTO schema_version(version) VALUES (?)", listOf(VERSION))
@@ -233,6 +257,27 @@ object Migrations {
         }
     }
 
+    /**
+     * Keep the explicit AgentSnapshot column in sync with the historical
+     * snapshot_id column. The latter remains the compatibility source for
+     * existing repositories and transfers, while the former is consumed by
+     * the thread/workspace integration. Blank legacy values are safe to
+     * backfill; a conflicting non-blank value is treated as damaged data and
+     * aborts migration instead of silently selecting a different snapshot.
+     */
+    private fun backfillConversationSnapshotIds(connection: SqlConnection) {
+        connection.execute(
+            "UPDATE conversations SET agent_snapshot_id = snapshot_id " +
+                "WHERE agent_snapshot_id IS NULL OR trim(agent_snapshot_id) = ''",
+        )
+        val mismatch = connection.query(
+            "SELECT id FROM conversations WHERE agent_snapshot_id <> snapshot_id LIMIT 1",
+        ).singleOrNull()
+        if (mismatch != null) {
+            invalid("Conversation ${mismatch.string("id")} has conflicting snapshot ids")
+        }
+    }
+
     private fun validateRequiredSchema(connection: SqlConnection) {
         REQUIRED_TABLES.forEach { table ->
             val exists = connection.query(
@@ -255,6 +300,215 @@ object Migrations {
                 invalid("workspaces.scope is invalid")
             }
         }
+    }
+
+    /**
+     * v15 rows are deliberately validated separately from the ordinary workspace
+     * table. A provider locator is an opaque encrypted blob; accepting a TEXT
+     * value here would make a damaged/legacy plaintext row look recoverable.
+     * Any malformed row aborts the whole migration and leaves the old version
+     * marker untouched.
+     */
+    private fun validateWorkspaceBindings(connection: SqlConnection) {
+        connection.query("SELECT * FROM privileged_workspace_bindings").forEach { row ->
+            val source = "privileged_workspace_bindings[" + requiredText(row, "workspace_id") + "]"
+            val encryptedLocator = row.columns["encrypted_locator"] as? ByteArray
+                ?: invalid("$source.encrypted_locator is not a BLOB")
+            val locatorNonce = row.columns["locator_nonce"] as? ByteArray
+                ?: invalid("$source.locator_nonce is not a BLOB")
+            val authority = parseAuthority(requiredText(row, "authority"), source)
+            val aadAuthority = parseAuthority(requiredText(row, "aad_authority"), "$source.aad_authority")
+            val scope = runCatching { WorkspaceScope.valueOf(requiredText(row, "scope")) }
+                .getOrElse { invalid("$source.scope is invalid") }
+            val status = runCatching {
+                PrivilegedWorkspaceBindingStatus.valueOf(requiredText(row, "status"))
+            }.getOrElse { invalid("$source.status is invalid") }
+            val binding = runCatching {
+                PrivilegedWorkspaceBinding(
+                    workspaceId = requiredText(row, "workspace_id"),
+                    authority = authority,
+                    encryptedLocator = encryptedLocator,
+                    locatorNonce = locatorNonce,
+                    locatorVersion = requiredInt(row, "locator_version", source),
+                    keyVersion = requiredInt(row, "key_version", source),
+                    aadAppInstanceId = requiredText(row, "aad_app_instance_id"),
+                    aadWorkspaceId = requiredText(row, "aad_workspace_id"),
+                    aadAuthority = aadAuthority,
+                    aadLocatorVersion = requiredInt(row, "aad_locator_version", source),
+                    scope = scope,
+                    status = status,
+                    revision = requiredLong(row, "revision", source),
+                    createdAt = requiredText(row, "created_at"),
+                    updatedAt = requiredText(row, "updated_at"),
+                )
+            }.getOrElse {
+                invalid("$source is invalid")
+            }
+            val workspace = connection.query(
+                "SELECT backend_type, scope FROM workspaces WHERE id = ?",
+                listOf(binding.workspaceId),
+            ).singleOrNull() ?: invalid("$source references a missing workspace")
+            if (workspace.string("backend_type") != WorkspaceBackendType.PRIVILEGED.name) {
+                invalid("$source references a non-privileged workspace")
+            }
+            if (workspace.string("scope") != binding.scope.name) {
+                invalid("$source scope does not match its workspace")
+            }
+        }
+
+        connection.query("SELECT * FROM conversation_workspace_bindings").forEach { row ->
+            val source = "conversation_workspace_bindings[" + requiredText(row, "session_id") + "]"
+            val binding = runCatching {
+                ConversationWorkspaceBinding(
+                    sessionId = requiredText(row, "session_id"),
+                    workspaceId = requiredText(row, "workspace_id"),
+                    boundAt = requiredText(row, "bound_at"),
+                    revision = requiredLong(row, "revision", source),
+                )
+            }.getOrElse {
+                invalid("$source is invalid")
+            }
+            if (connection.query("SELECT id FROM conversations WHERE id = ?", listOf(binding.sessionId)).isEmpty()) {
+                invalid("$source references a missing conversation")
+            }
+            if (connection.query("SELECT id FROM workspaces WHERE id = ?", listOf(binding.workspaceId)).isEmpty()) {
+                invalid("$source references a missing workspace")
+            }
+        }
+
+        connection.query("SELECT * FROM agent_workspace_defaults").forEach { row ->
+            val source = "agent_workspace_defaults[" + requiredText(row, "agent_id") + "]"
+            val workspaceId = row.columns["workspace_id"]?.let { value ->
+                if (value !is String) invalid("$source.workspace_id is not text")
+                value.takeIf { it.isNotBlank() }
+            }
+            val default = runCatching {
+                AgentWorkspaceDefault(
+                    agentId = requiredText(row, "agent_id"),
+                    workspaceId = workspaceId,
+                    revision = requiredLong(row, "revision", source),
+                    updatedAt = requiredText(row, "updated_at"),
+                )
+            }.getOrElse {
+                invalid("$source is invalid")
+            }
+            if (connection.query("SELECT id FROM agent_profiles WHERE id = ?", listOf(default.agentId)).isEmpty()) {
+                invalid("$source references a missing agent")
+            }
+            if (default.workspaceId != null &&
+                connection.query("SELECT id FROM workspaces WHERE id = ?", listOf(default.workspaceId)).isEmpty()
+            ) {
+                invalid("$source references a missing workspace")
+            }
+        }
+    }
+
+    private fun requiredText(row: SqlRow, column: String): String {
+        val value = row.columns[column] as? String
+            ?: invalid("Persisted $column is not text")
+        if (value.length > 4096) invalid("Persisted $column is too long")
+        return value
+    }
+
+    private fun requiredLong(row: SqlRow, column: String, source: String): Long {
+        val raw = row.columns[column] ?: invalid("$source.$column is missing")
+        return when (raw) {
+            is Byte, is Short, is Int, is Long -> (raw as Number).toLong()
+            else -> invalid("$source.$column is not an integer")
+        }
+    }
+
+    private fun requiredInt(row: SqlRow, column: String, source: String): Int {
+        val value = requiredLong(row, column, source)
+        if (value !in Int.MIN_VALUE.toLong()..Int.MAX_VALUE.toLong()) {
+            invalid("$source.$column is out of range")
+        }
+        return value.toInt()
+    }
+
+    /**
+     * Bind old conversations only when the old data proves one unambiguous
+     * selected-directory workspace for the snapshot's Agent. Ambiguous rows
+     * remain unbound for an explicit user choice. The operation is additive,
+     * repeatable and never rewrites an existing binding.
+     */
+    private fun migrateExistingConversationWorkspaceBindings(connection: SqlConnection) {
+        connection.query(
+            "SELECT c.id, c.created_at, s.agent_id " +
+                "FROM conversations c JOIN agent_snapshots s ON s.id = c.snapshot_id " +
+                "LEFT JOIN conversation_workspace_bindings b ON b.session_id = c.id " +
+                "WHERE b.session_id IS NULL ORDER BY c.id",
+        ).forEach { conversation ->
+            val sessionId = conversation.string("id")
+            val agentId = conversation.string("agent_id")
+            if (!sessionId.isSafeMigrationId() || !agentId.isSafeMigrationId()) {
+                invalid("conversation workspace migration identity is invalid")
+            }
+            val now = Utc.nowIso()
+            val candidates = connection.query(
+                "SELECT DISTINCT cg.workspace_id, cg.expires_at " +
+                    "FROM capability_grants cg JOIN workspaces w ON w.id = cg.workspace_id " +
+                    "WHERE cg.agent_id = ? AND cg.workspace_id IS NOT NULL " +
+                    "AND cg.revoked_at IS NULL AND cg.consumed_at IS NULL " +
+                    "AND cg.lifetime = 'PERSISTENT' " +
+                    "AND (cg.expires_at IS NULL OR cg.expires_at > ?) " +
+                    "AND w.scope = 'SELECTED_DIRECTORY' AND w.enabled = 1 AND w.readable = 1 " +
+                    "ORDER BY cg.workspace_id",
+                listOf(agentId, now),
+            ).filter { row ->
+                migrationExpiryIsValid(row.columns["expires_at"], now)
+            }.map { it.string("workspace_id") }.filter { it.isSafeMigrationId() }.distinct()
+
+            val selected = when {
+                candidates.size == 1 -> candidates.single()
+                candidates.size > 1 -> null
+                else -> migrationDefaultWorkspace(connection, agentId)
+            } ?: return@forEach
+
+            val boundAt = conversation.columns["created_at"] as? String
+                ?: Utc.nowIso()
+            connection.execute(
+                "INSERT OR IGNORE INTO conversation_workspace_bindings(session_id,workspace_id,bound_at,revision) VALUES(?,?,?,1)",
+                listOf(sessionId, selected, boundAt),
+            )
+        }
+    }
+
+    private fun migrationDefaultWorkspace(connection: SqlConnection, agentId: String): String? {
+        // A persisted default is only a preference. It is eligible for an old
+        // thread when an independent active persistent grant still authorizes it.
+        val now = Utc.nowIso()
+        val persisted = connection.query(
+            "SELECT d.workspace_id, cg.expires_at " +
+                "FROM agent_workspace_defaults d JOIN workspaces w ON w.id = d.workspace_id " +
+                "JOIN capability_grants cg ON cg.agent_id = d.agent_id AND cg.workspace_id = d.workspace_id " +
+                "WHERE d.agent_id = ? AND d.workspace_id IS NOT NULL " +
+                "AND w.scope = 'SELECTED_DIRECTORY' AND w.enabled = 1 AND w.readable = 1 " +
+                "AND cg.lifetime = 'PERSISTENT' AND cg.revoked_at IS NULL AND cg.consumed_at IS NULL " +
+                "AND (cg.expires_at IS NULL OR cg.expires_at > ?)",
+            listOf(agentId, now),
+        ).filter { row -> migrationExpiryIsValid(row.columns["expires_at"], now) }
+            .map { it.string("workspace_id") }.filter { it.isSafeMigrationId() }.distinct()
+        if (persisted.size == 1) return persisted.single()
+        if (persisted.size > 1) return null
+
+        // INTERNAL is the conservative no-grant fallback. If an installation
+        // has several internal roots, leave the old conversation unbound rather
+        // than selecting one by insertion order.
+        val internal = connection.query(
+            "SELECT id FROM workspaces " +
+                "WHERE backend_type = 'INTERNAL' AND scope = 'SELECTED_DIRECTORY' " +
+                "AND enabled = 1 AND readable = 1 ORDER BY id",
+        ).map { it.string("id") }.filter { it.isSafeMigrationId() }.distinct()
+        return internal.singleOrNull()
+    }
+
+    private fun migrationExpiryIsValid(raw: Any?, nowIso: String): Boolean {
+        if (raw == null) return true
+        val value = raw as? String ?: return false
+        if (value.isBlank()) return true
+        val now = runCatching { Instant.parse(nowIso) }.getOrNull() ?: return false
+        return runCatching { Instant.parse(value).isAfter(now) }.getOrDefault(false)
     }
 
     private fun ensureDefaultAuthorityRows(connection: SqlConnection) {
@@ -370,7 +624,8 @@ object Migrations {
         "document_versions", "embedding_operations", "embedding_query_vectors", "index_generations", "generation_members", "assets", "vision_results",
         "skill_packages", "skill_installs", "permission_grants", "skill_invocations", "runs", "tool_invocations",
         "authority_policy", "authority_preferences", "workspaces", "workspace_acl", "capability_grants",
-        "full_device_files_grants", "snapshot_grant_bindings", "saf_workspace_grants", "desktop_identity", "desktop_trust",
+        "full_device_files_grants", "snapshot_grant_bindings", "saf_workspace_grants", "privileged_workspace_bindings",
+        "conversation_workspace_bindings", "agent_workspace_defaults", "desktop_identity", "desktop_trust",
         "skill_memory_spaces", "skill_memory_entries", "approval_records", "tool_audit_details",
     )
 
@@ -425,6 +680,8 @@ object Migrations {
         "authority_preferences" to "explicitly_configured",
         "workspaces" to "root_reference",
         "workspaces" to "scope",
+        "conversations" to "snapshot_id",
+        "conversations" to "agent_snapshot_id",
         "full_device_files_grants" to "workspace_id",
         "full_device_files_grants" to "revision",
         "full_device_files_grants" to "confirmed_at_epoch_ms",
@@ -440,6 +697,29 @@ object Migrations {
         "workspace_acl" to "session_id",
         "workspace_acl" to "consumed_at",
         "snapshot_grant_bindings" to "snapshot_id",
+        "privileged_workspace_bindings" to "workspace_id",
+        "privileged_workspace_bindings" to "authority",
+        "privileged_workspace_bindings" to "encrypted_locator",
+        "privileged_workspace_bindings" to "locator_nonce",
+        "privileged_workspace_bindings" to "locator_version",
+        "privileged_workspace_bindings" to "key_version",
+        "privileged_workspace_bindings" to "aad_app_instance_id",
+        "privileged_workspace_bindings" to "aad_workspace_id",
+        "privileged_workspace_bindings" to "aad_authority",
+        "privileged_workspace_bindings" to "aad_locator_version",
+        "privileged_workspace_bindings" to "scope",
+        "privileged_workspace_bindings" to "status",
+        "privileged_workspace_bindings" to "revision",
+        "privileged_workspace_bindings" to "created_at",
+        "privileged_workspace_bindings" to "updated_at",
+        "conversation_workspace_bindings" to "session_id",
+        "conversation_workspace_bindings" to "workspace_id",
+        "conversation_workspace_bindings" to "bound_at",
+        "conversation_workspace_bindings" to "revision",
+        "agent_workspace_defaults" to "agent_id",
+        "agent_workspace_defaults" to "workspace_id",
+        "agent_workspace_defaults" to "revision",
+        "agent_workspace_defaults" to "updated_at",
         "saf_workspace_grants" to "uri_reference",
         "saf_workspace_grants" to "status",
         "desktop_identity" to "app_instance_id",

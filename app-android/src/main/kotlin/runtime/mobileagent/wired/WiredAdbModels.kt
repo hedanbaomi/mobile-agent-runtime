@@ -104,6 +104,7 @@ enum class WiredAdbFileOperation {
     STAT,
     READ_TEXT,
     WRITE_TEXT,
+    APPLY_PATCH,
     CREATE_DIRECTORY,
     MOVE,
     DELETE,
@@ -118,12 +119,33 @@ class WiredAdbFileRequest internal constructor(
     val contentUtf8: ByteArray? = null,
     val replaceExisting: Boolean = false,
     val maxBytes: Int = WIRED_DEFAULT_READ_BYTES,
+    /** Opaque continuation token; it is never decoded outside the helper. */
+    val cursor: String? = null,
+    val maxEntries: Int = WIRED_MAX_DIRECTORY_ENTRIES,
+    val offsetBytes: Long = 0L,
+    val patchUtf8: ByteArray? = null,
+    val expectedVersion: Long? = null,
+    val patchFormat: WiredAdbPatchFormat = WiredAdbPatchFormat.UNIFIED_DIFF,
+    /** Authenticated binding supplied only by the private helper envelope. */
+    internal val workspaceBinding: String? = null,
 ) {
     init {
         require(relativePath != null || operation == WiredAdbFileOperation.LIST)
         require(destinationRelativePath == null || destinationRelativePath.isNotEmpty())
         require(contentUtf8 == null || contentUtf8.size <= WIRED_MAX_FILE_BYTES)
         require(maxBytes in 1..WIRED_MAX_READ_BYTES)
+        require(cursor == null || cursor.length in 1..WIRED_MAX_CURSOR_BYTES)
+        require(cursor == null || cursor.all { it.code in 0x21..0x7e })
+        require(maxEntries in 1..WIRED_MAX_DIRECTORY_ENTRIES)
+        require(offsetBytes >= 0L)
+        require(patchUtf8 == null || patchUtf8.size <= WIRED_MAX_PATCH_BYTES)
+        require(expectedVersion == null || expectedVersion >= 0L)
+        require(
+            (operation == WiredAdbFileOperation.APPLY_PATCH) ==
+                (patchUtf8 != null && expectedVersion != null),
+        )
+        require(operation == WiredAdbFileOperation.READ_TEXT || offsetBytes == 0L)
+        require(operation == WiredAdbFileOperation.LIST || cursor == null)
     }
 
     fun contentCopy(): ByteArray? = contentUtf8?.copyOf()
@@ -156,6 +178,7 @@ data class WiredAdbFileEntry(
     val relativePath: String,
     val type: WiredAdbEntryType,
     val bytes: Long? = null,
+    val version: Long? = null,
 )
 
 enum class WiredAdbEntryType { FILE, DIRECTORY }
@@ -171,7 +194,17 @@ data class WiredAdbFileResult(
     val deleted: Boolean? = null,
     /** A bounded directory page may have more entries on the device. */
     val truncated: Boolean = false,
+    /** Opaque continuation token, valid only for the same authenticated workspace binding. */
+    val nextCursor: String? = null,
+    /** Stable metadata/version token for stat/read/conditional patch. */
+    val version: Long? = null,
+    /** Byte offset and total size for a chunked text read. */
+    val offsetBytes: Long = 0L,
+    val totalBytes: Long? = null,
+    val eof: Boolean = true,
 )
+
+enum class WiredAdbPatchFormat { UNIFIED_DIFF, REPLACE }
 
 data class WiredAdbShellResult(
     val exitCode: Int?,
@@ -217,6 +250,13 @@ enum class WiredAdbErrorCode {
     PROTOCOL_NO_COMPRESSION,
     WORKSPACE_BINDING_INVALID,
     WORKSPACE_BINDING_REPLAYED,
+    WORKSPACE_LOCATOR_INVALID,
+    WORKSPACE_NOT_FOUND,
+    CONFLICT,
+    OFFSET_OUT_OF_RANGE,
+    INVALID_PATCH,
+    INVALID_CURSOR,
+    ATOMIC_REPLACE_UNAVAILABLE,
     FULL_DEVICE_GRANT_REQUIRED,
     ROOT_BACKEND_UNAVAILABLE,
     ROOT_PATH_INVALID,
@@ -347,7 +387,9 @@ internal const val WIRED_ADB_MAX_CWD_BYTES = 4 * 1024
 internal const val WIRED_ADB_MAX_SHELL_TIMEOUT_MS = 5 * 60 * 1000L
 internal const val WIRED_ADB_MAX_SHELL_OUTPUT_BYTES = 1L * 1024 * 1024
 internal const val WIRED_MAX_FILE_BYTES = 256 * 1024
-internal const val WIRED_MAX_READ_BYTES = 24 * 1024
+internal const val WIRED_MAX_READ_BYTES = 256 * 1024
+internal const val WIRED_MAX_PATCH_BYTES = 768 * 1024
+internal const val WIRED_MAX_CURSOR_BYTES = 512
 internal const val WIRED_DEFAULT_READ_BYTES = WIRED_MAX_READ_BYTES
 internal const val WIRED_MAX_TOTAL_BYTES = 4L * 1024 * 1024
 internal const val WIRED_MAX_FILES = 128

@@ -6,6 +6,7 @@ package runtime.mobileagent.shizuku;
 import android.os.ParcelFileDescriptor;
 
 parcelable ShizukuShellResponse;
+parcelable ShizukuWorkspaceReadResponse;
 
 /**
  * Narrow UserService interface for the optional Shizuku bridge.
@@ -86,6 +87,30 @@ interface IShizukuCommandService {
      */
     String attachDirectorySession(String sessionId, String directoryHandle) = 20;
 
+    /**
+     * Reopens a directory from the provider-owned opaque recovery locator.
+     * A fresh workspace handle is returned for this UserService session.
+     */
+    String reattachDirectorySession(String sessionId, in byte[] recoveryLocator) = 28;
+
+    /** Bounded-page fixed-workspace listing; cursor is a session-bound opaque token. */
+    String listPagedSession(String sessionId, String relativePath, int maxEntries, String cursor) = 29;
+    /** Reads a bounded UTF-8 chunk through a PFD; metadata remains a small envelope. */
+    ShizukuWorkspaceReadResponse readChunkSession(
+        String sessionId,
+        String relativePath,
+        long offsetBytes,
+        int maxBytes
+    ) = 30;
+    /** Conditionally applies a bounded text patch with an opaque expected version. */
+    String applyPatchSession(
+        String sessionId,
+        String relativePath,
+        String patch,
+        String expectedVersion,
+        String format
+    ) = 31;
+
     /** Session-bound typed operations for an attached directory workspace. */
     String listWorkspaceSession(String sessionId, String workspaceHandle, String relativePath, int maxEntries) = 21;
     String readWorkspaceSession(String sessionId, String workspaceHandle, String relativePath, int maxBytes) = 22;
@@ -94,4 +119,24 @@ interface IShizukuCommandService {
     String deleteWorkspaceSession(String sessionId, String workspaceHandle, String relativePath) = 25;
     String statWorkspaceSession(String sessionId, String workspaceHandle, String relativePath) = 26;
     String moveWorkspaceSession(String sessionId, String workspaceHandle, String sourcePath, String destinationPath, boolean replaceExisting) = 27;
+
+    /** Bounded-page selected-workspace listing; cursor is tied to the workspace session. */
+    String listWorkspacePagedSession(String sessionId, String workspaceHandle, String relativePath, int maxEntries, String cursor) = 32;
+    /** Selected-workspace chunk read through a PFD. */
+    ShizukuWorkspaceReadResponse readChunkWorkspaceSession(
+        String sessionId,
+        String workspaceHandle,
+        String relativePath,
+        long offsetBytes,
+        int maxBytes
+    ) = 33;
+    /** Selected-workspace conditional patch with bounded patch input. */
+    String applyPatchWorkspaceSession(
+        String sessionId,
+        String workspaceHandle,
+        String relativePath,
+        String patch,
+        String expectedVersion,
+        String format
+    ) = 34;
 }

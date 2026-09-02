@@ -3,6 +3,8 @@
 
 package runtime.mobileagent.wired
 
+import runtime.mobileagent.bridge.BridgeProtocol
+
 import android.content.Context
 import kotlinx.coroutines.flow.StateFlow
 
@@ -31,10 +33,23 @@ interface WiredAdbWorkspacePort {
     ): WiredAdbResult<WiredAdbWorkspaceAttachment> =
         WiredAdbResult.Failure(WiredAdbErrorCode.AUTHORITY_UNSUPPORTED)
 
+    /**
+     * Reopens a previously attached directory after the authenticated
+     * companion/session or Android process was recreated.  The locator is an
+     * opaque encrypted-store value; no absolute path is accepted here.
+     */
+    suspend fun reopenDirectory(
+        workspaceId: String,
+        recoveryLocator: WiredAdbWorkspaceRecoveryLocator,
+        scope: WiredAdbWorkspaceScope = WiredAdbWorkspaceScope.SELECTED_DIRECTORY,
+    ): WiredAdbResult<WiredAdbWorkspaceAttachment> =
+        WiredAdbResult.Failure(WiredAdbErrorCode.AUTHORITY_UNSUPPORTED)
+
     suspend fun browseDirectory(
         handle: WiredAdbWorkspaceHandle,
         relativePath: String? = null,
         maxEntries: Int = WIRED_MAX_DIRECTORY_ENTRIES,
+        cursor: String? = null,
     ): WiredAdbResult<WiredAdbWorkspacePage> =
         WiredAdbResult.Failure(WiredAdbErrorCode.AUTHORITY_UNSUPPORTED)
 
@@ -49,6 +64,32 @@ interface WiredAdbWorkspacePort {
 }
 
 enum class WiredAdbWorkspaceScope { SELECTED_DIRECTORY, FULL_DEVICE_FILES }
+
+/**
+ * Opaque, persistable reference returned by a successful workspace attach.
+ * It has no path/serial/endpoint representation and is intentionally
+ * redacted from logs and error strings.  The app container must encrypt it at
+ * rest before retaining it across process restarts.
+ */
+class WiredAdbWorkspaceRecoveryLocator private constructor(
+    private val encoded: String,
+) {
+    init {
+        require(encoded.length == BridgeProtocol.WORKSPACE_RECOVERY_LOCATOR_BYTES * 2)
+        require(encoded.all { it in "0123456789abcdefABCDEF" })
+    }
+
+    /** Returns a copy for the app's encrypted persistence adapter only. */
+    fun encodedCopy(): String = encoded
+
+    override fun toString(): String = "WiredAdbWorkspaceRecoveryLocator(<redacted>)"
+
+    companion object {
+        @JvmStatic
+        fun fromEncoded(value: String): WiredAdbWorkspaceRecoveryLocator =
+            WiredAdbWorkspaceRecoveryLocator(value.lowercase())
+    }
+}
 
 /** Opaque per-connection handle; path and bridge binding remain package-private. */
 class WiredAdbWorkspaceHandle internal constructor(
@@ -65,6 +106,7 @@ data class WiredAdbWorkspaceAttachment(
     val scope: WiredAdbWorkspaceScope,
     val handle: WiredAdbWorkspaceHandle,
     val initialPage: WiredAdbWorkspacePage,
+    val recoveryLocator: WiredAdbWorkspaceRecoveryLocator,
 ) {
     override fun toString(): String =
         "WiredAdbWorkspaceAttachment(workspaceId=$workspaceId, scope=$scope)"
@@ -75,6 +117,8 @@ data class WiredAdbWorkspacePage(
     val relativePath: String,
     val entries: List<WiredAdbFileEntry>,
     val truncated: Boolean,
+    val nextCursor: String? = null,
+    val version: Long? = null,
 )
 
 /**
@@ -124,6 +168,12 @@ interface WiredAdbAuthorityPort : AutoCloseable {
         contentUtf8: ByteArray? = null,
         replaceExisting: Boolean = false,
         maxBytes: Int = WIRED_DEFAULT_READ_BYTES,
+        cursor: String? = null,
+        maxEntries: Int = WIRED_MAX_DIRECTORY_ENTRIES,
+        offsetBytes: Long = 0L,
+        patchUtf8: ByteArray? = null,
+        expectedVersion: Long? = null,
+        patchFormat: WiredAdbPatchFormat = WiredAdbPatchFormat.UNIFIED_DIFF,
     ): WiredAdbFileRequest
 
     fun newShellRequest(

@@ -38,7 +38,7 @@ internal class ShizukuDirectoryHandleStore {
             validateDirectory(root)
             val token = directoryToken(root)
             renderDirectory("open_directory_root", token, root, parentToken = null, maxEntries)
-        }.getOrElse { failure("open_directory_root", DIRECTORY_UNAVAILABLE) }
+        }.getOrElse { failureForThrowable("open_directory_root", it) }
     }
 
     fun browse(token: String?, maxEntries: Int): String = synchronized(lock) {
@@ -48,7 +48,7 @@ internal class ShizukuDirectoryHandleStore {
             validateDirectory(handle.path)
             val parentToken = handle.parentPath?.let { directoryToken(it) }
             renderDirectory("browse_directory", token.orEmpty(), handle.path, parentToken, maxEntries)
-        }.getOrElse { failure("browse_directory", DIRECTORY_UNAVAILABLE) }
+        }.getOrElse { failureForThrowable("browse_directory", it) }
     }
 
     fun attach(token: String?): String = synchronized(lock) {
@@ -56,27 +56,26 @@ internal class ShizukuDirectoryHandleStore {
             val handle = directoryHandles[token]
                 ?: return@synchronized failure("attach_directory", INVALID_HANDLE)
             validateDirectory(handle.path)
-            if (workspaceHandles.size >= MAX_WORKSPACE_HANDLES) {
-                return@synchronized failure("attach_directory", LIMIT)
+            attachWorkspace("attach_directory", handle.path)
+        }.getOrElse { failureForThrowable("attach_directory", it) }
+    }
+
+    /**
+     * Reopens a directory from a provider-owned locator.  The old workspace
+     * token is intentionally not consulted; a new token is generated for this
+     * UserService instance and the locator is validated against the fixed root
+     * before any backend is created.
+     */
+    fun reattach(locator: ByteArray?): String = synchronized(lock) {
+        runCatching {
+            val decoded = ShizukuRecoveryLocatorCodec.decode(locator)
+                ?: throw StoreFailure(RECOVERY_LOCATOR_INVALID)
+            validateDirectory(decoded.path)
+            if (!ShizukuRecoveryLocatorCodec.identityMatches(decoded.path, decoded.fileKey)) {
+                throw StoreFailure(WORKSPACE_NOT_FOUND)
             }
-            val workspaceToken = newToken()
-            workspaceHandles[workspaceToken] = WorkspaceHandle(
-                path = handle.path,
-                rootIsDeviceRoot = handle.path == deviceRoot && deviceRoot == Paths.get("/"),
-                store = ShizukuWorkspaceFileStore(
-                    rootFile = handle.path.toFile(),
-                    enforceQuota = false,
-                skipSymlinksInList = handle.path == deviceRoot && deviceRoot == Paths.get("/"),
-                ),
-            )
-            bounded(
-                JSONObject()
-                    .put("ok", true)
-                    .put("operation", "attach_directory")
-                    .put("workspaceHandle", workspaceToken)
-                    .put("rootKind", if (handle.path == deviceRoot && deviceRoot == Paths.get("/")) "device" else "directory"),
-            )
-        }.getOrElse { failure("attach_directory", DIRECTORY_UNAVAILABLE) }
+            attachWorkspace("reattach_directory", decoded.path)
+        }.getOrElse { failureForThrowable("reattach_directory", it) }
     }
 
     fun workspace(token: String?): WorkspaceHandle? = synchronized(lock) {
@@ -97,6 +96,10 @@ internal class ShizukuDirectoryHandleStore {
             Files.newDirectoryStream(directory).use { stream -> stream.toList() }
         } catch (_: SecurityException) {
             return failure(operation, PERMISSION_DENIED)
+        } catch (_: java.nio.file.AccessDeniedException) {
+            return failure(operation, PERMISSION_DENIED)
+        } catch (failure: StoreFailure) {
+            return failure(operation, failure.code)
         } catch (_: Exception) {
             return failure(operation, DIRECTORY_UNAVAILABLE)
         }
@@ -154,7 +157,7 @@ internal class ShizukuDirectoryHandleStore {
     private fun directoryToken(path: Path): String {
         directoryTokensByPath[path]?.let { return it }
         if (directoryHandles.size >= MAX_DIRECTORY_HANDLES) {
-            throw IllegalStateException("directory handle limit")
+            throw StoreFailure(LIMIT)
         }
         val token = newToken()
         val parent = path.parent?.takeUnless { path == Paths.get("/") }
@@ -165,14 +168,62 @@ internal class ShizukuDirectoryHandleStore {
 
     private fun validateDirectory(path: Path) {
         val normalized = path.toAbsolutePath().normalize()
-        var current = Paths.get("/")
+        if (!isWithinDeviceRoot(normalized)) throw StoreFailure(OUTSIDE_ROOT)
+        var current = normalized.root ?: Paths.get("/")
         normalized.iterator().forEach { segment ->
             current = current.resolve(segment.toString())
-            if (Files.isSymbolicLink(current)) throw SecurityException()
-            if (!Files.exists(current, LinkOption.NOFOLLOW_LINKS)) throw IllegalStateException()
+            if (Files.isSymbolicLink(current)) throw StoreFailure(SYMLINK_REJECTED)
+            if (!Files.exists(current, LinkOption.NOFOLLOW_LINKS)) throw StoreFailure(WORKSPACE_NOT_FOUND)
         }
-        if (!Files.isDirectory(normalized, LinkOption.NOFOLLOW_LINKS)) throw IllegalStateException()
+        if (!Files.isDirectory(normalized, LinkOption.NOFOLLOW_LINKS)) throw StoreFailure(WORKSPACE_NOT_FOUND)
     }
+
+    private fun isWithinDeviceRoot(path: Path): Boolean = path.startsWith(deviceRoot)
+
+    private fun attachWorkspace(operation: String, path: Path): String {
+        if (workspaceHandles.size >= MAX_WORKSPACE_HANDLES) return failure(operation, LIMIT)
+        val locator = ShizukuRecoveryLocatorCodec.encode(path)
+            ?: return failure(operation, RECOVERY_LOCATOR_INVALID)
+        return try {
+            val workspaceToken = newToken()
+            workspaceHandles[workspaceToken] = WorkspaceHandle(
+                path = path,
+                rootIsDeviceRoot = isDeviceRoot(path),
+                store = ShizukuWorkspaceFileStore(
+                    rootFile = path.toFile(),
+                    enforceQuota = false,
+                    skipSymlinksInList = isDeviceRoot(path),
+                ),
+            )
+            bounded(
+                JSONObject()
+                    .put("ok", true)
+                    .put("operation", operation)
+                    .put("workspaceHandle", workspaceToken)
+                    .put("rootKind", if (isDeviceRoot(path)) "device" else "directory")
+                    .put(
+                        "recoveryLocator",
+                        Base64.getUrlEncoder().withoutPadding().encodeToString(locator),
+                    ),
+            )
+        } finally {
+            locator.fill(0)
+        }
+    }
+
+    private fun isDeviceRoot(path: Path): Boolean = path == deviceRoot && deviceRoot == Paths.get("/")
+
+    private fun failureForThrowable(operation: String, throwable: Throwable): String = failure(
+        operation,
+        (throwable as? StoreFailure)?.code
+            ?: if (throwable is SecurityException || throwable is java.nio.file.AccessDeniedException) {
+                PERMISSION_DENIED
+            } else {
+                DIRECTORY_UNAVAILABLE
+            },
+    )
+
+    private class StoreFailure(val code: String) : Exception()
 
     private fun newToken(): String {
         val bytes = ByteArray(TOKEN_BYTES)
@@ -207,6 +258,10 @@ internal class ShizukuDirectoryHandleStore {
     companion object {
         const val INVALID_HANDLE = "DIRECTORY_HANDLE_INVALID"
         const val DIRECTORY_UNAVAILABLE = "DIRECTORY_UNAVAILABLE"
+        const val RECOVERY_LOCATOR_INVALID = "RECOVERY_LOCATOR_INVALID"
+        const val WORKSPACE_NOT_FOUND = "WORKSPACE_NOT_FOUND"
+        const val OUTSIDE_ROOT = ShizukuWorkspaceFileStore.OUTSIDE_ROOT
+        const val SYMLINK_REJECTED = ShizukuWorkspaceFileStore.SYMLINK_REJECTED
         const val PERMISSION_DENIED = ShizukuWorkspaceFileStore.PERMISSION_DENIED
         const val LIMIT = ShizukuWorkspaceFileStore.LIMIT
         const val OUTPUT_LIMIT = ShizukuWorkspaceFileStore.OUTPUT_LIMIT

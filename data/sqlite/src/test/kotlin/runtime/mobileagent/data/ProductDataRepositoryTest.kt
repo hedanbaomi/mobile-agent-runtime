@@ -89,6 +89,11 @@ class ProductDataRepositoryTest {
 
             val conversations = ConversationRepository(db)
             val conversation = conversations.create(snapshot.id, "Conversation one", "conversation.one")
+            assertEquals(
+                snapshot.id,
+                db.query("SELECT agent_snapshot_id FROM conversations WHERE id = ?", listOf(conversation.id))
+                    .single().string("agent_snapshot_id"),
+            )
             conversations.appendMessage(
                 Message(
                     id = "message.one",

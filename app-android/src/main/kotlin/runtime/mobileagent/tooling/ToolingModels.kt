@@ -330,6 +330,9 @@ enum class WorkspaceAuditOperation {
             DomainCapabilityId.FILE_CREATE_DIRECTORY -> MKDIR
             DomainCapabilityId.FILE_MOVE -> MOVE
             DomainCapabilityId.FILE_DELETE -> DELETE
+            // Patch is a conditional file mutation. Keep it in the existing
+            // write audit bucket so older diagnostic sinks remain compatible.
+            "file.apply_patch" -> WRITE
             else -> throw IllegalArgumentException("Unsupported workspace capability")
         }
     }

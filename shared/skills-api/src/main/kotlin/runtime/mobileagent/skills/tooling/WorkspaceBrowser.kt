@@ -61,6 +61,77 @@ data class WorkspaceAttachRequest(
     }
 }
 
+/**
+ * Opaque provider-owned bytes used to recover a privileged directory after a
+ * process or Binder service restart.  The value is deliberately not a
+ * String/path model: callers can only obtain a defensive copy for immediate
+ * encryption/transport and can wipe the in-memory copy afterwards.
+ *
+ * The container is responsible for encrypting the bytes before persistence.
+ * Implementations must keep the locator provider-specific and must never put
+ * it in model-facing DTOs, logs, or error messages.
+ */
+class WorkspaceRecoveryLocator private constructor(
+    bytes: ByteArray,
+) : AutoCloseable {
+    private val lock = Any()
+    private val value = bytes.copyOf()
+    private var cleared = false
+
+    val sizeBytes: Int
+        get() = synchronized(lock) { if (cleared) 0 else value.size }
+
+    val isCleared: Boolean
+        get() = synchronized(lock) { cleared }
+
+    /** Returns a defensive copy for immediate encryption or provider use. */
+    fun copyBytes(): ByteArray = synchronized(lock) {
+        check(!cleared) { "Recovery locator is cleared" }
+        value.copyOf()
+    }
+
+    /** Wipes this process-local copy; repeated calls are harmless. */
+    fun clear() = synchronized(lock) {
+        java.util.Arrays.fill(value, 0)
+        cleared = true
+    }
+
+    override fun close() = clear()
+
+    override fun toString(): String = "WorkspaceRecoveryLocator"
+
+    override fun equals(other: Any?): Boolean = this === other
+
+    override fun hashCode(): Int = System.identityHashCode(this)
+
+    companion object {
+        const val MAX_BYTES: Int = 16 * 1024
+
+        fun fromBytes(bytes: ByteArray): WorkspaceRecoveryLocator {
+            require(bytes.isNotEmpty() && bytes.size <= MAX_BYTES) {
+                "Recovery locator size is invalid"
+            }
+            return WorkspaceRecoveryLocator(bytes)
+        }
+    }
+}
+
+/** Request to reopen a previously attached privileged directory. */
+data class WorkspaceReattachRequest(
+    val workspaceId: String,
+    val displayName: String,
+    val recoveryLocator: WorkspaceRecoveryLocator,
+    val scope: WorkspaceScope = WorkspaceScope.SELECTED_DIRECTORY,
+    /** Required when reopening a FULL_DEVICE_FILES attachment. */
+    val grantRevision: Long? = null,
+) {
+    init {
+        require(workspaceId.matches(Regex("[A-Za-z0-9][A-Za-z0-9._~-]{0,127}")))
+        require(displayName.isNotBlank() && displayName.length <= 256)
+        if (scope == WorkspaceScope.FULL_DEVICE_FILES) require(grantRevision != null && grantRevision > 0)
+    }
+}
+
 /** The operator has to persist this grant before a full-device backend opens. */
 data class FullDeviceFilesGrant(
     val workspaceId: String,
@@ -102,6 +173,8 @@ data class FullDeviceFilesRequest(
 data class WorkspaceAttachment(
     val descriptor: WorkspaceDescriptor,
     val backend: WorkspaceBackend,
+    /** Provider-owned locator, absent for non-recoverable/legacy backends. */
+    val recoveryLocator: WorkspaceRecoveryLocator? = null,
 ) {
     init { require(descriptor.id == backend.descriptor.id) }
 
@@ -125,6 +198,19 @@ interface PrivilegedWorkspaceProvider : AutoCloseable {
     val supportsFullDeviceFiles: Boolean
 
     suspend fun attachDirectory(request: WorkspaceAttachRequest): WorkspaceResult<WorkspaceAttachment>
+
+    /**
+     * Reopens a privileged directory using a locator returned by a prior
+     * [attachDirectory] call.  Implementations must create a new ephemeral
+     * backend handle; they must never reuse the old service-session handle.
+     * The default is fail-closed for providers without durable locators.
+     */
+    suspend fun reattachDirectory(request: WorkspaceReattachRequest): WorkspaceResult<WorkspaceAttachment> =
+        reopenDirectory(request)
+
+    /** Explicit alias for callers that use the provider's reopen terminology. */
+    suspend fun reopenDirectory(request: WorkspaceReattachRequest): WorkspaceResult<WorkspaceAttachment> =
+        WorkspaceResult.Failure(ToolError(ToolErrorCode.AUTHORITY_TEMPORARILY_UNAVAILABLE))
 
     suspend fun openFullDeviceFiles(request: FullDeviceFilesRequest): WorkspaceResult<WorkspaceAttachment>
 
@@ -332,7 +418,14 @@ private class PathScopedWorkspaceBackend(
     override val capabilities: Set<runtime.mobileagent.domain.CapabilityId> = delegate.capabilities
 
     override suspend fun list(request: WorkspaceListRequest): WorkspaceResult<WorkspaceListing> =
-        delegate.list(WorkspaceListRequest(delegate.descriptor.id, join(request.relativePath), request.maxEntries)).mapValue { value ->
+        delegate.list(
+            WorkspaceListRequest(
+                workspaceId = delegate.descriptor.id,
+                relativePath = join(request.relativePath),
+                maxEntries = request.maxEntries,
+                cursor = request.cursor,
+            ),
+        ).mapValue { value ->
             val path = strip(value.relativePath, rootAllowed = true) ?: throw ProtocolShapeException()
             val entries = value.entries.map { entry ->
                 WorkspaceEntry(
@@ -342,7 +435,7 @@ private class PathScopedWorkspaceBackend(
                     version = entry.version,
                 )
             }
-            WorkspaceListing(path.ifEmpty { "." }, entries, value.truncated)
+            WorkspaceListing(path.ifEmpty { "." }, entries, value.truncated, value.nextCursor)
         }
 
     override suspend fun stat(request: WorkspaceStatRequest): WorkspaceResult<WorkspaceFileStat> =
@@ -351,7 +444,27 @@ private class PathScopedWorkspaceBackend(
         }
 
     override suspend fun readText(request: WorkspaceReadTextRequest): WorkspaceResult<WorkspaceText> =
-        delegate.readText(WorkspaceReadTextRequest(delegate.descriptor.id, joinRequired(request.relativePath), request.maxBytes)).mapValue { value ->
+        delegate.readText(
+            WorkspaceReadTextRequest(
+                workspaceId = delegate.descriptor.id,
+                relativePath = joinRequired(request.relativePath),
+                maxBytes = request.maxBytes,
+                offsetBytes = request.offsetBytes,
+            ),
+        ).mapValue { value ->
+            value.copy(relativePath = strip(value.relativePath, rootAllowed = false) ?: throw ProtocolShapeException())
+        }
+
+    override suspend fun applyPatch(request: WorkspaceApplyPatchRequest): WorkspaceResult<WorkspaceMutation> =
+        delegate.applyPatch(
+            WorkspaceApplyPatchRequest(
+                workspaceId = delegate.descriptor.id,
+                relativePath = joinRequired(request.relativePath),
+                patch = request.patch,
+                expectedVersion = request.expectedVersion,
+                format = request.format,
+            ),
+        ).mapValue { value ->
             value.copy(relativePath = strip(value.relativePath, rootAllowed = false) ?: throw ProtocolShapeException())
         }
 

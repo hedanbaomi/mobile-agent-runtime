@@ -13,6 +13,7 @@ import runtime.mobileagent.skills.tooling.ToolError
 import runtime.mobileagent.skills.tooling.ToolErrorCode
 import runtime.mobileagent.skills.tooling.WorkspaceBackend as SharedWorkspaceBackend
 import runtime.mobileagent.skills.tooling.WorkspaceCreateDirectoryRequest
+import runtime.mobileagent.skills.tooling.WorkspaceApplyPatchRequest
 import runtime.mobileagent.skills.tooling.WorkspaceDescriptor as SharedWorkspaceDescriptor
 import runtime.mobileagent.skills.tooling.WorkspaceEntry as SharedWorkspaceEntry
 import runtime.mobileagent.skills.tooling.WorkspaceEntryType as SharedWorkspaceEntryType
@@ -22,6 +23,7 @@ import runtime.mobileagent.skills.tooling.WorkspaceListing
 import runtime.mobileagent.skills.tooling.WorkspaceMoveRequest
 import runtime.mobileagent.skills.tooling.WorkspaceMutation
 import runtime.mobileagent.skills.tooling.WorkspaceReadTextRequest
+import runtime.mobileagent.skills.tooling.WorkspacePatchFormat
 import runtime.mobileagent.skills.tooling.WorkspaceResult as SharedWorkspaceResult
 import runtime.mobileagent.skills.tooling.WorkspaceStatRequest
 import runtime.mobileagent.skills.tooling.WorkspaceText
@@ -58,7 +60,11 @@ class SharedWorkspaceBackendAdapter internal constructor(
         if (request.workspaceId != backend.descriptor.id || request.maxEntries < 1) {
             return failure(ToolErrorCode.INVALID_REQUEST)
         }
-        return when (val result = backend.list(request.relativePath ?: "")) {
+        return when (val result = backend.list(
+            relativePath = request.relativePath ?: "",
+            maxEntries = request.maxEntries,
+            cursor = request.cursor,
+        )) {
             is InternalWorkspaceResult.Failure -> failure(result.error)
             is InternalWorkspaceResult.Success -> {
                 val entries = result.value.entries
@@ -68,7 +74,8 @@ class SharedWorkspaceBackendAdapter internal constructor(
                     WorkspaceListing(
                         relativePath = result.value.path.ifEmpty { ROOT_PATH },
                         entries = entries,
-                        truncated = result.value.entries.size > entries.size,
+                        truncated = result.value.nextCursor != null || result.value.entries.size > entries.size,
+                        nextCursor = result.value.nextCursor,
                     ),
                 )
             }
@@ -97,6 +104,7 @@ class SharedWorkspaceBackendAdapter internal constructor(
         return when (val result = backend.read(
             request.relativePath,
             request.maxBytes.coerceAtMost(backend.descriptor.maxReadBytes),
+            request.offsetBytes,
         )) {
             is InternalWorkspaceResult.Failure -> failure(result.error)
             is InternalWorkspaceResult.Success -> when (val decoded = InternalWorkspaceVersions.decode(result.value.bytes)) {
@@ -107,9 +115,36 @@ class SharedWorkspaceBackendAdapter internal constructor(
                         text = decoded.value,
                         byteSize = result.value.bytes.size.toLong(),
                         version = publicVersion(result.value.version),
+                        offsetBytes = result.value.offsetBytes,
+                        totalBytes = result.value.totalBytes,
+                        eof = result.value.eof,
                     ),
                 )
             }
+        }
+    }
+
+    override suspend fun applyPatch(request: WorkspaceApplyPatchRequest): SharedWorkspaceResult<WorkspaceMutation> {
+        if (request.workspaceId != backend.descriptor.id) return failure(ToolErrorCode.INVALID_REQUEST)
+        val expected = when (val checked = implementationVersion(request.relativePath, request.expectedVersion)) {
+            is InternalWorkspaceResult.Failure -> return failure(checked.error)
+            is InternalWorkspaceResult.Success -> checked.value
+        }
+        if (expected == null) return failure(ToolErrorCode.CONFLICT)
+        val format = when (request.format) {
+            WorkspacePatchFormat.UNIFIED_DIFF -> InternalWorkspacePatchFormat.UNIFIED_DIFF
+            WorkspacePatchFormat.REPLACE -> InternalWorkspacePatchFormat.REPLACE
+        }
+        return when (val result = backend.applyPatch(request.relativePath, request.patch, expected, format)) {
+            is InternalWorkspaceResult.Failure -> failure(result.error)
+            is InternalWorkspaceResult.Success -> SharedWorkspaceResult.Success(
+                WorkspaceMutation(
+                    relativePath = result.value.path,
+                    type = SharedWorkspaceEntryType.FILE,
+                    byteSize = result.value.bytes,
+                    version = publicVersion(result.value.version),
+                ),
+            )
         }
     }
 
@@ -270,6 +305,8 @@ class SharedWorkspaceBackendAdapter internal constructor(
             InternalWorkspaceErrorCode.INVALID_PATH,
             InternalWorkspaceErrorCode.INVALID_ARGUMENT,
             InternalWorkspaceErrorCode.INVALID_UTF8,
+            InternalWorkspaceErrorCode.OFFSET_OUT_OF_RANGE,
+            InternalWorkspaceErrorCode.INVALID_PATCH,
             InternalWorkspaceErrorCode.READ_LIMIT_EXCEEDED,
             InternalWorkspaceErrorCode.ENTRY_EXISTS,
             InternalWorkspaceErrorCode.ENTRY_UNSUPPORTED,

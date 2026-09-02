@@ -39,7 +39,7 @@ import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.Divider
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.FilterChip
@@ -59,6 +59,8 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -84,6 +86,8 @@ data class ChatSessionUi(
     val agentName: String = "",
     /** Stable agent identity used only for local sidebar grouping. */
     val agentId: String? = null,
+    /** Friendly workspace label only; never a path, URI, or locator. */
+    val workspaceLabel: String = "",
 )
 
 data class ChatMessageUi(
@@ -93,6 +97,12 @@ data class ChatMessageUi(
     val timeLabel: String = "",
     val citationIds: List<String> = emptyList(),
     val streaming: Boolean = false,
+    /** Real provider-returned reasoning only; blank means no reasoning UI. */
+    val reasoning: String = "",
+    /** True while the provider is still sending the reasoning part. */
+    val reasoningStreaming: Boolean = false,
+    /** Optional compact event summary for tool/diff/test rows. */
+    val eventSummary: String = "",
 )
 
 data class ChatCitationUi(
@@ -189,6 +199,12 @@ data class ChatUiState(
     val emptyMessage: String = "",
     val language: String = "zh-CN",
     val workspaceAccess: ChatWorkspaceAccessUi = ChatWorkspaceAccessUi(),
+    /** Safe workspace summaries used by the global drawer; no URI or path. */
+    val workspaces: List<ChatWorkspaceUi> = emptyList(),
+    val selectedWorkspaceId: String? = null,
+    val currentAuthorityLabel: String = "",
+    val drawerDestinations: List<ChatDrawerDestinationUi> = emptyList(),
+    val modelLabel: String = "",
 )
 
 data class ChatActions(
@@ -207,6 +223,11 @@ data class ChatActions(
     val onCloseRequestInspector: () -> Unit = {},
     /** Opens Agent settings; workspace grants are changed there only. */
     val onOpenAgentSettings: (String?) -> Unit = {},
+    val onSelectWorkspace: (String) -> Unit = {},
+    val onNewSessionForWorkspace: (String) -> Unit = {},
+    val onOpenWorkspacePicker: () -> Unit = {},
+    /** Opens the SAF/workspace picker for a specific Agent without creating a session. */
+    val onAuthorizeWorkspaceForAgent: (String) -> Unit = {},
 )
 
 @Composable
@@ -245,7 +266,7 @@ fun ChatScreen(state: ChatUiState, actions: ChatActions = ChatActions(), modifie
                         onOpenWorkspace = openWorkspace,
                         modifier = Modifier.width(280.dp),
                     )
-                    Divider(modifier = Modifier.fillMaxHeight().width(1.dp))
+                    HorizontalDivider(modifier = Modifier.fillMaxHeight().width(1.dp))
                     ChatConversationContent(
                         state,
                         actions,
@@ -319,6 +340,37 @@ fun ChatScreen(state: ChatUiState, actions: ChatActions = ChatActions(), modifie
     }
 }
 
+/**
+ * Canonical conversation surface for the global app shell.  It intentionally
+ * owns no drawer or navigation state: the application shell supplies
+ * [onOpenDrawer], while this surface keeps only conversation-local UI.
+ * [ChatScreen] remains as a compatibility wrapper for older hosts and tests.
+ */
+@Composable
+fun ConversationScreen(
+    state: ChatUiState,
+    actions: ChatActions = ChatActions(),
+    onOpenDrawer: () -> Unit = {},
+    onOpenWorkspace: () -> Unit = {},
+    modifier: Modifier = Modifier,
+) {
+    Box(modifier.fillMaxSize().imePadding()) {
+        ChatConversationContent(
+            state = state,
+            actions = actions,
+            onOpenSidebar = onOpenDrawer,
+            onOpenWorkspace = onOpenWorkspace,
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(horizontal = 16.dp, vertical = 8.dp),
+            minimalHeader = true,
+        )
+    }
+    state.selectedCitationId?.let { id -> state.citations.firstOrNull { it.id == id } }?.let {
+        CitationDialog(it, actions.onCloseCitation, state.language.equals("zh-CN", true))
+    }
+}
+
 @Composable
 private fun ChatConversationContent(
     state: ChatUiState,
@@ -326,6 +378,7 @@ private fun ChatConversationContent(
     onOpenSidebar: () -> Unit,
     onOpenWorkspace: () -> Unit,
     modifier: Modifier,
+    minimalHeader: Boolean = false,
 ) {
     BoxWithConstraints(modifier) {
         // The detail viewport gives up space first when the IME is visible,
@@ -347,7 +400,7 @@ private fun ChatConversationContent(
                     compact = compactApproval,
                 )
             } else {
-                ChatHeader(state, actions, onOpenSidebar, onOpenWorkspace)
+                ChatHeader(state, actions, onOpenSidebar, onOpenWorkspace, minimal = minimalHeader)
                 if (state.status.isNotBlank()) StatusLine(state.status, state.statusKind)
                 if (state.loading) {
                     CenterState(if (state.language.equals("zh-CN", true)) "正在加载会话…" else "Loading conversations…", true, Modifier.weight(1f))
@@ -361,7 +414,15 @@ private fun ChatConversationContent(
                         if (state.messages.isNotEmpty()) listState.animateScrollToItem(state.messages.lastIndex)
                     }
                     LazyColumn(state = listState, modifier = Modifier.weight(1f).fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                        items(state.messages, key = { it.id }) { MessageBubble(it, state.citations, actions.onOpenCitation, state.language.equals("zh-CN", true)) }
+                        items(state.messages, key = { it.id }) {
+                            MessageBubble(
+                                message = it,
+                                citations = state.citations,
+                                onCitation = actions.onOpenCitation,
+                                zh = state.language.equals("zh-CN", true),
+                                minimal = minimalHeader,
+                            )
+                        }
                     }
                 }
                 Composer(state, actions)
@@ -457,7 +518,12 @@ private fun ChatHeader(
     actions: ChatActions,
     onOpenSidebar: () -> Unit,
     onOpenWorkspace: () -> Unit,
+    minimal: Boolean = false,
 ) {
+    if (minimal) {
+        ConversationTopBar(state, actions, onOpenSidebar, onOpenWorkspace)
+        return
+    }
     val zh = state.language.equals("zh-CN", true)
     val session = state.sessions.firstOrNull { it.id == state.selectedSessionId }
     Column(Modifier.fillMaxWidth().padding(bottom = 8.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -527,6 +593,196 @@ private fun ChatHeader(
     }
 }
 
+/** Compact, conversation-first header used by [ConversationScreen]. */
+@Composable
+@OptIn(ExperimentalMaterial3Api::class)
+fun ConversationTopBar(
+    state: ChatUiState,
+    actions: ChatActions,
+    onOpenDrawer: () -> Unit,
+    onOpenWorkspace: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val zh = state.language.equals("zh-CN", true)
+    val session = state.sessions.firstOrNull { it.id == state.selectedSessionId }
+    val agent = state.agents.firstOrNull { it.id == state.selectedAgentId }?.label
+        ?: session?.agentName?.takeIf { it.isNotBlank() }
+        ?: if (zh) "未选择智能体" else "No agent selected"
+    val workspace = state.workspaceAccess.workspaceSummary
+        .takeIf { it.isNotBlank() }
+        ?: if (zh) "未配置工作区" else "No workspace"
+    var contextOpen by rememberSaveable { mutableStateOf(false) }
+    var overflowOpen by rememberSaveable { mutableStateOf(false) }
+
+    Row(
+        modifier = modifier
+            .fillMaxWidth()
+            .heightIn(min = 56.dp)
+            .testTag("conversation.topBar"),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        TextButton(
+            onClick = onOpenDrawer,
+            modifier = Modifier.testTag("conversation.drawer.open"),
+        ) {
+            Text(if (zh) "菜单" else "Menu", maxLines = 1)
+        }
+        TextButton(
+            onClick = { contextOpen = true },
+            modifier = Modifier
+                .weight(1f)
+                .testTag("conversation.context"),
+        ) {
+            Column(Modifier.fillMaxWidth(), horizontalAlignment = Alignment.CenterHorizontally) {
+                Text(
+                    "$agent · $workspace",
+                    style = MaterialTheme.typography.titleMedium,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                if (state.workspaceAccess.systemAccessLabel.isNotBlank()) {
+                    Text(
+                        state.workspaceAccess.systemAccessLabel,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+            }
+        }
+        Box {
+            TextButton(
+                onClick = { overflowOpen = true },
+                modifier = Modifier.testTag("conversation.more"),
+            ) {
+                Text(if (zh) "更多" else "More", maxLines = 1)
+            }
+            DropdownMenu(
+                expanded = overflowOpen,
+                onDismissRequest = { overflowOpen = false },
+            ) {
+                DropdownMenuItem(
+                    text = { Text(if (zh) "查看请求" else "Inspect request") },
+                    onClick = { overflowOpen = false; actions.onOpenRequestInspector() },
+                    modifier = Modifier.testTag("conversation.requestInspector.open"),
+                )
+                DropdownMenuItem(
+                    text = { Text(if (zh) "新对话" else "New conversation") },
+                    onClick = { overflowOpen = false; actions.onNewSession() },
+                    modifier = Modifier.testTag("conversation.new"),
+                )
+                DropdownMenuItem(
+                    text = {
+                        Text(
+                            if (state.textDegradation) {
+                                if (zh) "关闭纯文本模式" else "Disable text-only mode"
+                            } else {
+                                if (zh) "启用纯文本模式" else "Enable text-only mode"
+                            },
+                        )
+                    },
+                    onClick = {
+                        overflowOpen = false
+                        actions.onToggleDegradation(!state.textDegradation)
+                    },
+                    modifier = Modifier.testTag("conversation.textMode"),
+                )
+            }
+        }
+    }
+    if (contextOpen) {
+        ConversationContextSheet(
+            state = state,
+            onDismiss = { contextOpen = false },
+            onOpenWorkspace = {
+                contextOpen = false
+                onOpenWorkspace()
+            },
+            onOpenAgentSettings = {
+                contextOpen = false
+                actions.onOpenAgentSettings(state.selectedAgentId)
+            },
+            onNewSession = {
+                contextOpen = false
+                actions.onNewSession()
+            },
+        )
+    }
+}
+
+/** Context details are transient UI only; actions remain delegated to the host. */
+@Composable
+@OptIn(ExperimentalMaterial3Api::class)
+fun ConversationContextSheet(
+    state: ChatUiState,
+    onDismiss: () -> Unit,
+    onOpenWorkspace: () -> Unit,
+    onOpenAgentSettings: () -> Unit,
+    onNewSession: () -> Unit,
+) {
+    val zh = state.language.equals("zh-CN", true)
+    val agent = state.agents.firstOrNull { it.id == state.selectedAgentId }?.label
+        ?: if (zh) "未选择智能体" else "No agent selected"
+    val workspace = state.workspaceAccess.workspaceSummary.ifBlank {
+        if (zh) "未配置工作区" else "No workspace"
+    }
+    androidx.compose.material3.ModalBottomSheet(onDismissRequest = onDismiss) {
+        Column(
+            Modifier
+                .fillMaxWidth()
+                .verticalScroll(rememberScrollState())
+                .padding(horizontal = 20.dp, vertical = 8.dp)
+                .testTag("conversation.context.sheet"),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            Text(if (zh) "当前上下文" else "Current context", style = MaterialTheme.typography.headlineSmall)
+            Text(if (zh) "智能体" else "Agent", style = MaterialTheme.typography.labelLarge)
+            Text(agent, style = MaterialTheme.typography.bodyLarge)
+            Text(if (zh) "工作区" else "Workspace", style = MaterialTheme.typography.labelLarge)
+            Text(workspace, style = MaterialTheme.typography.bodyLarge)
+            if (state.workspaceAccess.systemAccessLabel.isNotBlank()) {
+                Text(state.workspaceAccess.systemAccessLabel, style = MaterialTheme.typography.bodySmall)
+            }
+            if (state.workspaceAccess.permissionLabel.isNotBlank()) {
+                Text(
+                    if (zh) "权限：${state.workspaceAccess.permissionLabel}" else "Permission: ${state.workspaceAccess.permissionLabel}",
+                    style = MaterialTheme.typography.bodySmall,
+                )
+            }
+            if (state.modelLabel.isNotBlank()) {
+                Text(if (zh) "模型" else "Model", style = MaterialTheme.typography.labelLarge)
+                Text(state.modelLabel, style = MaterialTheme.typography.bodyLarge)
+            }
+            OutlinedButton(
+                onClick = onOpenWorkspace,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .testTag("conversation.context.workspace"),
+            ) {
+                Text(if (zh) "查看工作区" else "View workspace")
+            }
+            OutlinedButton(
+                onClick = onOpenAgentSettings,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .testTag("conversation.context.agentSettings"),
+            ) {
+                Text(if (zh) "管理智能体" else "Manage agent")
+            }
+            Button(
+                onClick = onNewSession,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .testTag("conversation.context.new"),
+            ) {
+                Text(if (zh) "新建对话" else "New conversation")
+            }
+            Spacer(Modifier.height(16.dp))
+        }
+    }
+}
+
 @Composable
 private fun AgentChooser(state: ChatUiState, onSelect: (String) -> Unit) {
     val zh = state.language.equals("zh-CN", true)
@@ -585,23 +841,126 @@ private fun StatusLine(status: String, kind: String) {
 
 @Composable
 @OptIn(ExperimentalLayoutApi::class)
-private fun MessageBubble(message: ChatMessageUi, citations: List<ChatCitationUi>, onCitation: (String) -> Unit, zh: Boolean) {
+private fun MessageBubble(
+    message: ChatMessageUi,
+    citations: List<ChatCitationUi>,
+    onCitation: (String) -> Unit,
+    zh: Boolean,
+    minimal: Boolean = false,
+) {
     val user = message.role.equals("user", ignoreCase = true)
+    val tool = message.role.equals("tool", ignoreCase = true) || message.eventSummary.isNotBlank()
     Row(Modifier.fillMaxWidth(), horizontalArrangement = if (user) Arrangement.End else Arrangement.Start) {
-        Card(
-            colors = CardDefaults.cardColors(containerColor = if (user) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceVariant),
-            modifier = Modifier.fillMaxWidth(if (user) 0.86f else 0.94f),
-        ) {
-            Column(Modifier.padding(12.dp)) {
-                Text(if (user) { if (zh) "你" else "You" } else message.role, style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.SemiBold)
-                Text(message.text, Modifier.padding(top = 4.dp))
-                if (message.streaming) Text(if (zh) "正在流式输出…" else "Streaming…", style = MaterialTheme.typography.labelSmall, modifier = Modifier.padding(top = 4.dp))
-                if (message.timeLabel.isNotBlank()) Text(message.timeLabel, style = MaterialTheme.typography.labelSmall)
-                val known = message.citationIds.mapNotNull { id -> citations.firstOrNull { it.id == id } }
-                if (known.isNotEmpty()) FlowRow(Modifier.padding(top = 6.dp), horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                    known.forEach { citation -> AssistChip(onClick = { onCitation(citation.id) }, label = { Text(if (zh) "来源：${citation.title}" else "Source: ${citation.title}") }) }
+        if (tool) {
+            ToolEventRow(message = message, zh = zh, modifier = Modifier.fillMaxWidth())
+        } else {
+            val bubbleModifier = Modifier
+                .fillMaxWidth(if (user) 0.86f else 0.94f)
+                .testTag("conversation.message.${message.id}")
+            val body: @Composable () -> Unit = {
+                Column(Modifier.padding(if (minimal && !user) 4.dp else 12.dp)) {
+                    Text(
+                        if (user) { if (zh) "你" else "You" } else message.role,
+                        style = MaterialTheme.typography.labelMedium,
+                        fontWeight = FontWeight.SemiBold,
+                    )
+                    if (message.reasoning.isNotBlank()) {
+                        ReasoningDisclosure(
+                            messageId = message.id,
+                            text = message.reasoning,
+                            streaming = message.reasoningStreaming,
+                            zh = zh,
+                        )
+                    }
+                    Text(message.text, Modifier.padding(top = 4.dp))
+                    if (message.streaming) Text(if (zh) "正在流式输出…" else "Streaming…", style = MaterialTheme.typography.labelSmall, modifier = Modifier.padding(top = 4.dp))
+                    if (message.timeLabel.isNotBlank()) Text(message.timeLabel, style = MaterialTheme.typography.labelSmall)
+                    val known = message.citationIds.mapNotNull { id -> citations.firstOrNull { it.id == id } }
+                    if (known.isNotEmpty()) FlowRow(Modifier.padding(top = 6.dp), horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                        known.forEach { citation -> AssistChip(onClick = { onCitation(citation.id) }, label = { Text(if (zh) "来源：${citation.title}" else "Source: ${citation.title}") }) }
+                    }
                 }
             }
+            if (minimal && !user) {
+                Column(bubbleModifier) { body() }
+            } else {
+                Card(
+                    colors = CardDefaults.cardColors(containerColor = if (user) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceVariant),
+                    modifier = bubbleModifier,
+                ) { body() }
+            }
+        }
+    }
+}
+
+@Composable
+private fun ToolEventRow(message: ChatMessageUi, zh: Boolean, modifier: Modifier = Modifier) {
+    Surface(
+        color = MaterialTheme.colorScheme.surfaceVariant,
+        shape = RoundedCornerShape(8.dp),
+        modifier = modifier.testTag("conversation.tool.${message.id}"),
+    ) {
+        Row(
+            Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 12.dp, vertical = 8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(
+                if (zh) "工具" else "Tool",
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Text(
+                message.eventSummary.ifBlank { message.text },
+                style = MaterialTheme.typography.bodyMedium,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.padding(start = 8.dp),
+            )
+        }
+    }
+}
+
+@Composable
+private fun ReasoningDisclosure(
+    messageId: String,
+    text: String,
+    streaming: Boolean,
+    zh: Boolean,
+) {
+    var expanded by rememberSaveable(messageId) { mutableStateOf(false) }
+    Column(
+        Modifier
+            .fillMaxWidth()
+            .padding(top = 6.dp)
+            .testTag("conversation.reasoning.$messageId"),
+    ) {
+        TextButton(
+            onClick = { expanded = !expanded },
+            modifier = Modifier
+                .heightIn(min = 48.dp)
+                .testTag("conversation.reasoning.toggle.$messageId"),
+        ) {
+            Text(
+                when {
+                    streaming && !expanded -> if (zh) "思考中…" else "Thinking…"
+                    expanded -> if (zh) "收起思考" else "Hide reasoning"
+                    else -> if (zh) "显示思考" else "Show reasoning"
+                },
+                maxLines = 1,
+            )
+        }
+        if (expanded) {
+            Text(
+                text,
+                style = MaterialTheme.typography.bodySmall,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(max = 240.dp)
+                    .verticalScroll(rememberScrollState())
+                    .testTag("conversation.reasoning.body.$messageId"),
+            )
         }
     }
 }
@@ -717,6 +1076,15 @@ private fun ApprovalCard(
 @Composable
 private fun Composer(state: ChatUiState, actions: ChatActions) {
     val zh = state.language.equals("zh-CN", true)
+    val focusManager = LocalFocusManager.current
+    val keyboard = LocalSoftwareKeyboardController.current
+    fun submit() {
+        // Keep the first-message path responsive: the host receives the send
+        // action immediately, while the input focus/IME is cleared locally.
+        focusManager.clearFocus(force = true)
+        keyboard?.hide()
+        actions.onSend()
+    }
     Row(Modifier.fillMaxWidth().padding(top = 8.dp), verticalAlignment = Alignment.Bottom) {
         OutlinedTextField(
             value = state.input,
@@ -725,11 +1093,27 @@ private fun Composer(state: ChatUiState, actions: ChatActions) {
             label = { Text(if (zh) "消息" else "Message") },
             minLines = 2,
             maxLines = 5,
-            modifier = Modifier.weight(1f),
+            modifier = Modifier
+                .weight(1f)
+                .testTag("conversation.composer.input"),
         )
         Spacer(Modifier.width(8.dp))
-        if (state.streaming) OutlinedButton(onClick = actions.onCancel) { Text(if (zh) "取消" else "Cancel") }
-        else Button(onClick = actions.onSend, enabled = state.input.isNotBlank() && state.pendingTool == null) { Text(if (zh) "发送" else "Send") }
+        if (state.streaming) {
+            OutlinedButton(
+                onClick = {
+                    focusManager.clearFocus(force = true)
+                    keyboard?.hide()
+                    actions.onCancel()
+                },
+                modifier = Modifier.testTag("conversation.composer.cancel"),
+            ) { Text(if (zh) "取消" else "Cancel") }
+        } else {
+            Button(
+                onClick = ::submit,
+                enabled = state.input.isNotBlank() && state.pendingTool == null,
+                modifier = Modifier.testTag("conversation.composer.send"),
+            ) { Text(if (zh) "发送" else "Send") }
+        }
     }
 }
 

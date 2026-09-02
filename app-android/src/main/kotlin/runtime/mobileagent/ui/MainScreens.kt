@@ -27,10 +27,12 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -45,6 +47,8 @@ import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.ViewModel
+import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.lifecycle.viewmodel.compose.LocalViewModelStoreOwner
 import androidx.lifecycle.Lifecycle
@@ -56,6 +60,11 @@ import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
 import runtime.mobileagent.MobileAgentApp
 import runtime.mobileagent.ShellViewModel
+import runtime.mobileagent.WorkspacePickerTarget
+import runtime.mobileagent.WorkspacePickerViewModel
+import runtime.mobileagent.feature.agents.WorkspacePickerActions
+import runtime.mobileagent.feature.agents.WorkspacePickerAttachPhaseUi
+import runtime.mobileagent.feature.agents.WorkspacePickerScreen
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -85,6 +94,62 @@ internal fun MainApp() {
     var editorDiscard by remember { mutableStateOf<(() -> Unit)?>(null) }
     var settingsRevision by remember { mutableIntStateOf(0) }
     var pendingUpdateCheck by rememberSaveable { mutableStateOf(false) }
+    var drawerOpen by rememberSaveable { mutableStateOf(false) }
+    var workspacePickerOpen by rememberSaveable { mutableStateOf(false) }
+    var workspacePickerAgentId by rememberSaveable { mutableStateOf<String?>(null) }
+    var workspacePickerThreadId by rememberSaveable { mutableStateOf<String?>(null) }
+    var workspacePickerLabel by rememberSaveable { mutableStateOf("当前智能体") }
+
+    val workspacePickerFactory = remember(app.container.runtimeIntegration) {
+        object : ViewModelProvider.Factory {
+            @Suppress("UNCHECKED_CAST")
+            override fun <T : ViewModel> create(modelClass: Class<T>): T {
+                require(modelClass.isAssignableFrom(WorkspacePickerViewModel::class.java))
+                return WorkspacePickerViewModel(app, app.container.runtimeIntegration) as T
+            }
+        }
+    }
+    val workspacePickerVm: WorkspacePickerViewModel = viewModel(
+        viewModelStoreOwner = shellOwner,
+        factory = workspacePickerFactory,
+    )
+    val workspacePickerState by workspacePickerVm.state.collectAsState()
+
+    val workspaceSafLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.StartActivityForResult(),
+    ) { result ->
+        val data = result.data
+        val uri = data?.data
+        if (uri != null) {
+            workspacePickerVm.onSafUriSelected(uri, data.flags)
+        }
+    }
+
+    fun launchWorkspaceSaf() {
+        workspaceSafLauncher.launch(
+            Intent(Intent.ACTION_OPEN_DOCUMENT_TREE).apply {
+                addFlags(
+                    Intent.FLAG_GRANT_READ_URI_PERMISSION or
+                        Intent.FLAG_GRANT_WRITE_URI_PERMISSION or
+                        Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION or
+                        Intent.FLAG_GRANT_PREFIX_URI_PERMISSION,
+                )
+            },
+        )
+    }
+
+    fun closeWorkspacePicker() {
+        workspacePickerOpen = false
+        workspacePickerVm.clearResult()
+    }
+
+    fun openWorkspacePicker(agentId: String?, threadId: String?, label: String) {
+        workspacePickerAgentId = agentId?.takeIf { it.isNotBlank() }
+        workspacePickerThreadId = threadId?.takeIf { it.isNotBlank() }
+        workspacePickerLabel = label.trim().ifBlank { "当前智能体" }.take(128)
+        drawerOpen = false
+        workspacePickerOpen = true
+    }
 
     val currentEntry by navController.currentBackStackEntryAsState()
     LaunchedEffect(currentEntry?.destination?.route) {
@@ -186,24 +251,111 @@ internal fun MainApp() {
         runtime.mobileagent.domain.ThemePreference.SYSTEM -> AppThemeMode.SYSTEM
     }
 
+    LaunchedEffect(workspacePickerOpen, workspacePickerAgentId, workspacePickerThreadId, workspacePickerLabel) {
+        if (workspacePickerOpen) {
+            workspacePickerVm.setTarget(
+                WorkspacePickerTarget(
+                    agentId = workspacePickerAgentId,
+                    threadId = workspacePickerThreadId,
+                    setAsAgentDefault = true,
+                ),
+                workspacePickerLabel,
+            )
+            workspacePickerVm.refresh()
+        }
+    }
+    LaunchedEffect(workspacePickerOpen, workspacePickerState.attachPhase) {
+        if (workspacePickerOpen && workspacePickerState.attachPhase == WorkspacePickerAttachPhaseUi.SUCCESS) {
+            closeWorkspacePicker()
+        }
+    }
+
+    val drawerDestinations = globalDrawerDestinations(chinese)
+    val drawerDestinationUi = drawerDestinations.map { destination ->
+        runtime.mobileagent.feature.chat.ChatDrawerDestinationUi(destination.route, destination.label)
+    }
+    val drawerChatState = chatVm.state.value.copy(
+        language = if (chinese) "zh-CN" else "en-US",
+        drawerDestinations = drawerDestinationUi,
+    )
+    val drawerSelectedAgentLabel = drawerChatState.agents
+        .firstOrNull { it.id == drawerChatState.selectedAgentId }
+        ?.label
+        ?: if (chinese) "当前智能体" else "Current Agent"
+    val drawerActions = runtime.mobileagent.feature.chat.ChatActions(
+        onSelectSession = { sessionId ->
+            chatVm.selectSession(sessionId)
+            drawerOpen = false
+            requestRoute(AppRoutes.CHAT)
+        },
+        onNewSession = {
+            chatVm.newSession()
+            drawerOpen = false
+            requestRoute(AppRoutes.CHAT)
+        },
+        onNewSessionForAgent = { agentId ->
+            chatVm.selectAgent(agentId)
+            chatVm.newSession()
+            drawerOpen = false
+            requestRoute(AppRoutes.CHAT)
+        },
+        onSelectAgent = { agentId ->
+            chatVm.selectAgent(agentId)
+            drawerOpen = false
+            requestRoute(AppRoutes.CHAT)
+        },
+        onNewSessionForWorkspace = { workspaceId ->
+            chatVm.newSession(workspaceId)
+            drawerOpen = false
+            requestRoute(AppRoutes.CHAT)
+        },
+        onOpenWorkspacePicker = {
+            openWorkspacePicker(
+                drawerChatState.selectedAgentId,
+                drawerChatState.selectedSessionId,
+                drawerSelectedAgentLabel,
+            )
+        },
+        onAuthorizeWorkspaceForAgent = { agentId ->
+            val label = drawerChatState.agents.firstOrNull { it.id == agentId }?.label
+                ?: if (chinese) "当前智能体" else "Current Agent"
+            openWorkspacePicker(agentId, null, label)
+        },
+        onOpenAgentSettings = { agentId ->
+            pendingAgentId = agentId
+            drawerOpen = false
+            requestRoute(AppRoutes.AGENTS)
+        },
+    )
+
     BackHandler(enabled = editorOwner == route && editorDirty) { requestEditorClose() }
     MobileAgentTheme(mode = themeMode) {
         BoxWithConstraints(Modifier.fillMaxSize()) {
             val compact = maxWidth < 600.dp
             BackHandler(
-                enabled = !(editorOwner == route && editorDirty) &&
-                    (route != AppRoutes.CHAT || navController.previousBackStackEntry != null),
+                    enabled = !(editorOwner == route && editorDirty) &&
+                        (route != AppRoutes.CHAT || navController.previousBackStackEntry != null),
             ) { handleBack(compact) }
-            val destinations = if (compact) phonePrimaryDestinations(chinese) else defaultAppDestinations(chinese)
-            val selected = if (compact && route !in destinations.map { it.route }) AppRoutes.MORE else route
+            val destinations = drawerDestinations
             AppNavigationScaffold(
                 destinations = destinations,
-                selectedRoute = selected,
+                selectedRoute = route,
+                drawerOpen = drawerOpen,
+                onDrawerOpenChange = { drawerOpen = it },
+                showCompactMenuButton = route != AppRoutes.CHAT,
+                compactMenuButtonLabel = if (chinese) "菜单" else "Menu",
+                drawerContent = { close ->
+                    runtime.mobileagent.feature.chat.GlobalDrawerContent(
+                        state = drawerChatState,
+                        actions = drawerActions,
+                        destinations = drawerDestinationUi,
+                        selectedRoute = route,
+                        onNavigate = ::requestRoute,
+                        onClose = close,
+                    )
+                },
                 onRouteSelected = { target ->
-                    val actual = if (compact && target == AppRoutes.MORE && route in moreHubItems(chinese).map { it.route } + AppRoutes.MORE) {
-                        AppRoutes.MORE
-                    } else target
-                    requestRoute(actual)
+                    requestRoute(target)
                 },
             ) { padding ->
                 Box(Modifier.fillMaxSize().padding(padding)) {
@@ -214,6 +366,10 @@ internal fun MainApp() {
                                 chinese,
                                 ::requestRoute,
                                 ::registerEditorState,
+                                onOpenDrawer = { drawerOpen = true },
+                                onOpenWorkspacePicker = { agentId, threadId, label ->
+                                    openWorkspacePicker(agentId, threadId, label)
+                                },
                                 onOpenAgentSettings = { agentId ->
                                     pendingAgentId = agentId
                                     requestRoute(AppRoutes.AGENTS)
@@ -269,6 +425,40 @@ internal fun MainApp() {
                             )
                         }
                     }
+                    if (workspacePickerOpen) {
+                        BackHandler { closeWorkspacePicker() }
+                        Surface(
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .testTag("global.workspace.picker"),
+                            color = MaterialTheme.colorScheme.background,
+                        ) {
+                            Column(Modifier.fillMaxSize()) {
+                                BackLabel(
+                                    onClick = ::closeWorkspacePicker,
+                                    label = if (chinese) "返回对话" else "Back to conversation",
+                                    modifier = Modifier.padding(horizontal = 8.dp),
+                                )
+                                WorkspacePickerScreen(
+                                    state = workspacePickerState,
+                                    actions = WorkspacePickerActions(
+                                        onRefresh = workspacePickerVm::refresh,
+                                        onOpenLocation = workspacePickerVm::openLocation,
+                                        onOpenBreadcrumb = workspacePickerVm::openBreadcrumb,
+                                        onOpenEntry = workspacePickerVm::openEntry,
+                                        onGoParent = workspacePickerVm::goParent,
+                                        onUseCurrentDirectory = workspacePickerVm::useCurrentDirectory,
+                                        onUseSafFallback = {
+                                            workspacePickerVm.chooseSafFallback()
+                                            launchWorkspaceSaf()
+                                        },
+                                        onOpenRecent = workspacePickerVm::openRecent,
+                                    ),
+                                    modifier = Modifier.weight(1f),
+                                )
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -322,21 +512,40 @@ private fun MoreHub(chinese: Boolean, onOpen: (String) -> Unit) {
 @Composable
 private fun ChatRoute(vm: runtime.mobileagent.ChatViewModel, chinese: Boolean, onRoute: (String) -> Unit,
     onEditorState: (String, Boolean, (() -> Unit)?) -> Unit,
+    onOpenDrawer: () -> Unit = {},
+    onOpenWorkspacePicker: (String?, String?, String) -> Unit = { _, _, _ -> },
     onOpenAgentSettings: (String?) -> Unit = {}) {
     LifecycleEventEffect(Lifecycle.Event.ON_RESUME) { vm.reload() }
     val state = vm.state.value.copy(language = if (chinese) "zh-CN" else "en-US")
+    val selectedAgentLabel = state.agents.firstOrNull { it.id == state.selectedAgentId }?.label
+        ?: if (chinese) "当前智能体" else "Current Agent"
     val actions = runtime.mobileagent.feature.chat.ChatActions(
         onInput = vm::input, onSend = vm::send, onCancel = vm::cancel,
         onToggleDegradation = vm::degrade, onSelectSession = vm::selectSession,
         onNewSession = { vm.newSession() }, onSelectAgent = vm::selectAgent,
         onNewSessionForAgent = { agentId -> vm.selectAgent(agentId); vm.newSession(); Unit },
+        onNewSessionForWorkspace = { workspaceId -> vm.newSession(workspaceId) },
         onOpenCitation = vm::openCitation, onCloseCitation = vm::closeCitation,
         onToolApproval = { choice -> vm.approveTool(choice == runtime.mobileagent.feature.chat.ToolApprovalChoice.APPROVE) },
         onOpenRequestInspector = { vm.inspector(true); onRoute(AppRoutes.INSPECTOR) },
         onCloseRequestInspector = { vm.inspector(false); onRoute(AppRoutes.CHAT) },
+        onOpenWorkspacePicker = {
+            onOpenWorkspacePicker(state.selectedAgentId, state.selectedSessionId, selectedAgentLabel)
+        },
+        onAuthorizeWorkspaceForAgent = { agentId ->
+            val label = state.agents.firstOrNull { it.id == agentId }?.label ?: selectedAgentLabel
+            onOpenWorkspacePicker(agentId, null, label)
+        },
         onOpenAgentSettings = onOpenAgentSettings,
     )
-    runtime.mobileagent.feature.chat.ChatScreen(state, actions)
+    runtime.mobileagent.feature.chat.ConversationScreen(
+        state = state,
+        actions = actions,
+        onOpenDrawer = onOpenDrawer,
+        onOpenWorkspace = {
+            onOpenWorkspacePicker(state.selectedAgentId, state.selectedSessionId, selectedAgentLabel)
+        },
+    )
     vm.unknownRetry.value?.let { UnknownOutcomeDialog(chinese, vm::acknowledgeUnknown, vm::cancelUnknownRetry) }
     LaunchedEffect(Unit) { onEditorState(AppRoutes.CHAT, false, null) }
 }
@@ -849,7 +1058,6 @@ private fun ProvidersRoute(entry: NavBackStackEntry, chinese: Boolean, onRoute: 
     var providerBaseline by rememberSaveable(stateSaver = providerDraftSaver) { mutableStateOf(runtime.mobileagent.feature.providers.ProviderDraft()) }
     var providerError by rememberSaveable { mutableStateOf<String?>(null) }
     var probeModelId by rememberSaveable { mutableStateOf<String?>(null) }
-    var probeMessage by rememberSaveable { mutableStateOf("") }
     val providers = vm.providers.toList()
     val models = vm.models.toList()
     val selectedId = selectedProviderId?.takeIf { id -> providers.any { it.id == id } } ?: providers.firstOrNull()?.id
@@ -863,18 +1071,17 @@ private fun ProvidersRoute(entry: NavBackStackEntry, chinese: Boolean, onRoute: 
     val state = runtime.mobileagent.feature.providers.ProvidersUiState(
         providers = providers.map { profile -> providerCardFrom(profile, models) }, selectedProviderId = selectedId,
         models = selectedModels.map(::providerModelFrom), draft = providerDraft,
-        probe = when {
-            probeModelId == null -> runtime.mobileagent.feature.providers.ProbeUiState()
-            probeModelId == "__none__" -> runtime.mobileagent.feature.providers.ProbeUiState(phase = "error", message = probeMessage)
-            vm.busy.value -> runtime.mobileagent.feature.providers.ProbeUiState(phase = "running", message = probeMessage)
-            else -> runtime.mobileagent.feature.providers.ProbeUiState(phase = "complete", message = vm.status.value)
-        }, editorOpen = editorOpen, loading = vm.busy.value, error = providerError, status = vm.status.value,
+        // The ViewModel owns the typed operation state.  Do not infer a
+        // terminal result from busy=false or parse a status string here.
+        probe = if (probeModelId == null) runtime.mobileagent.feature.providers.ProbeUiState()
+            else vm.probeState.value,
+        editorOpen = editorOpen, loading = vm.busy.value, error = providerError, status = vm.status.value,
         language = if (chinese) "zh-CN" else "en-US", mcpReason = if (mcpState.value != null) "MCP 配置入口可用。" else "MCP 尚未配置服务器。",
         mcpEntryEnabled = true, editorError = providerError, deleteModelCount = preview?.modelCount ?: 0,
         deleteSnapshotCount = preview?.snapshotCount ?: 0,
     )
     val actions = runtime.mobileagent.feature.providers.ProvidersActions(
-        onSelectProvider = { selectedProviderId = it; probeModelId = null },
+        onSelectProvider = { selectedProviderId = it; probeModelId = null; vm.clearProbe() },
         onDraftChange = { nextDraft ->
             if (providerDraft.vision != nextDraft.vision) vm.recordCapabilityToggle("image", nextDraft.vision)
             if (providerDraft.tools != nextDraft.tools) vm.recordCapabilityToggle("tools", nextDraft.tools)
@@ -902,12 +1109,13 @@ private fun ProvidersRoute(entry: NavBackStackEntry, chinese: Boolean, onRoute: 
                             .filter { it !in setOf("image", "tools") }.forEach(::add)
                     }, parametersJson = providerDraft.parametersJson, contextLimit = providerDraft.contextLimit,
                     outputLimit = providerDraft.outputLimit,
-                ))) {
+            ))) {
                 editorOpen = false; providerDraft = providerDraft.copy(apiKey = ""); providerBaseline = providerDraft
                 providerError = null; selectedProviderId = providerDraft.id ?: providers.firstOrNull { it.name == providerDraft.name.trim() }?.id
+                vm.clearProbe()
             } else if (vm.status.value.isNotBlank()) providerError = vm.status.value
         },
-        onDelete = { selectedId?.let(vm::deleteProvider); selectedProviderId = null },
+        onDelete = { selectedId?.let(vm::deleteProvider); selectedProviderId = null; vm.clearProbe() },
         onEditModel = { id ->
             val model = models.firstOrNull { it.id == id }
             providerDraft = providerDraftFrom(providers.firstOrNull { it.id == model?.providerId }, model)
@@ -917,12 +1125,19 @@ private fun ProvidersRoute(entry: NavBackStackEntry, chinese: Boolean, onRoute: 
         onProbe = {
             val model = selectedModels.firstOrNull()
             if (model == null) {
-                probeModelId = "__none__"; probeMessage = if (chinese) "当前服务商没有可探测的模型元数据。" else "This provider has no model metadata to probe."
+                probeModelId = "__none__"
+                vm.probe("__missing-model__", approved = true)
             } else {
-                probeModelId = model.id; probeMessage = if (chinese) "正在向已配置端点发送明确批准的探测请求。" else "Sending the explicitly approved probe request."; vm.probe(model.id, approved = true)
+                probeModelId = model.id
+                vm.probe(model.id, approved = true)
             }
         },
-        onCloseProbe = { probeModelId = null; probeMessage = "" }, onOpenMcpSettings = onOpenMcp,
+        onTestConnection = {
+            val model = selectedModels.firstOrNull()
+            probeModelId = model?.id ?: "__missing-model__"
+            vm.testConnection(model?.id ?: "__missing-model__", approved = true)
+        },
+        onCloseProbe = { probeModelId = null; vm.clearProbe() }, onOpenMcpSettings = onOpenMcp,
     )
     if (showBack) {
         Column(Modifier.fillMaxSize()) {

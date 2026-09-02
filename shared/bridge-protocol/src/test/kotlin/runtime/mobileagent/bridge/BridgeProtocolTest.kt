@@ -218,6 +218,61 @@ class BridgeProtocolTest {
     }
 
     @Test
+    fun workspaceReopenPayloadRoundTripsAsTypedOpaqueLocator() {
+        val binding = "ab".repeat(BridgeProtocol.WORKSPACE_BINDING_BYTES)
+        val locator = "cd".repeat(BridgeProtocol.WORKSPACE_RECOVERY_LOCATOR_BYTES)
+        val value = BridgeWorkspaceReopenRequest(
+            workspaceId = "agent-workspace",
+            workspaceBinding = binding,
+            recoveryLocator = locator,
+            scope = "selected_directory",
+        )
+
+        val payload = BridgeCodec.encodeWorkspaceReopenPayload(value)
+        assertEquals(value, BridgeCodec.decodeWorkspaceReopenPayload(payload))
+        assertEquals(BridgeOperation.WORKSPACE_REOPEN.wireName, BridgeOperation.parse("workspace_reopen").wireName)
+        assertTrue(value.toString().contains("recoveryLocator=<redacted>"))
+        assertFalse(value.toString().contains(locator))
+        assertFalse(value.toString().contains(binding))
+    }
+
+    @Test
+    fun workspaceReopenPayloadRejectsUnknownFieldsBadLocatorAndWrongScope() {
+        val binding = "ab".repeat(BridgeProtocol.WORKSPACE_BINDING_BYTES)
+        val locator = "cd".repeat(BridgeProtocol.WORKSPACE_RECOVERY_LOCATOR_BYTES)
+        val base = buildJsonObject {
+            put("workspace_id", "agent-workspace")
+            put("workspace_binding", binding)
+            put("recovery_locator", locator)
+            put("scope", "selected_directory")
+        }
+        assertThrows<IllegalArgumentException> {
+            BridgeCodec.decodeWorkspaceReopenPayload(
+                buildJsonObject {
+                    base.forEach { (key, child) -> put(key, child) }
+                    put("absolute_path", "/data")
+                },
+            )
+        }
+        assertThrows<IllegalArgumentException> {
+            BridgeCodec.decodeWorkspaceReopenPayload(
+                buildJsonObject {
+                    base.forEach { (key, child) -> put(key, child) }
+                    put("recovery_locator", "00")
+                },
+            )
+        }
+        assertThrows<IllegalArgumentException> {
+            BridgeCodec.decodeWorkspaceReopenPayload(
+                buildJsonObject {
+                    base.forEach { (key, child) -> put(key, child) }
+                    put("scope", "full_device")
+                },
+            )
+        }
+    }
+
+    @Test
     fun frameHasNoCompressionAndRejectsTrailingBytes() {
         val trust = SecretBytes.from(ByteArray(32) { 8 })
         val hash = ByteArray(32) { 9 }

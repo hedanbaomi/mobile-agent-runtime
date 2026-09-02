@@ -30,6 +30,7 @@ class ShizukuWorkspaceFileStoreTest {
         val context = ApplicationProvider.getApplicationContext<Context>()
         root = File(context.cacheDir, "shizuku-store-${UUID.randomUUID()}").apply { check(mkdirs()) }
         check(File(root, "Download").mkdirs())
+        check(File(root, "Download/MobileAgentRuntime-Shizuku").mkdirs())
         store = ShizukuWorkspaceFileStore(File(root, "Download/MobileAgentRuntime-Shizuku"))
     }
 
@@ -140,5 +141,67 @@ class ShizukuWorkspaceFileStoreTest {
         assertTrue(store.write("one.txt", "two".toByteArray(StandardCharsets.UTF_8), true).contains("\"ok\":true"))
         assertTrue(root.walkTopDown().none { it.name.startsWith(".mar-shizuku-") })
         assertFalse(store.read("missing.txt", 100).contains(root.absolutePath))
+    }
+
+    @Test
+    fun listingUsesOpaqueContinuationForMoreThanOnePage() {
+        repeat(300) { index ->
+            File(root, "Download/MobileAgentRuntime-Shizuku/item-${index.toString().padStart(3, '0')}.txt")
+                .writeText("$index")
+        }
+        val first = JSONObject(store.list(null, maxEntries = 128))
+        assertTrue(first.toString(), first.getBoolean("ok"))
+        assertEquals(128, first.getJSONArray("entries").length())
+        assertTrue(first.getBoolean("truncated"))
+        val cursor = first.getString("nextCursor")
+        assertTrue(cursor.length >= 40)
+        assertFalse(cursor.contains("item-"))
+
+        assertTrue(store.list(null, maxEntries = 128, cursor = "$cursor-x").contains("\"code\":\"INVALID_CURSOR\""))
+
+        val second = JSONObject(store.list(null, maxEntries = 128, cursor = cursor))
+        assertTrue(second.getBoolean("ok"))
+        assertEquals(128, second.getJSONArray("entries").length())
+        val third = JSONObject(store.list(null, maxEntries = 128, cursor = second.getString("nextCursor")))
+        assertTrue(third.getBoolean("ok"))
+        assertEquals(44, third.getJSONArray("entries").length())
+        assertFalse(third.getBoolean("truncated"))
+
+        val stale = JSONObject(store.list(null, maxEntries = 128))
+        File(root, "Download/MobileAgentRuntime-Shizuku/item-999.txt").writeText("changed")
+        assertTrue(store.list(null, maxEntries = 128, cursor = stale.getString("nextCursor"))
+            .contains("\"code\":\"INVALID_CURSOR\""))
+    }
+
+    @Test
+    fun statAndChunkReadSupportFilesLargerThanOneChunk() {
+        val file = File(root, "Download/MobileAgentRuntime-Shizuku/large.txt")
+        file.writeText("a".repeat(300 * 1024), StandardCharsets.UTF_8)
+        val stat = JSONObject(store.stat("large.txt"))
+        assertTrue(stat.getBoolean("ok"))
+        assertEquals(300L * 1024L, stat.getLong("bytes"))
+        assertTrue(stat.getString("version").length == 64)
+
+        val first = store.readChunk("large.txt", 24 * 1024, 0L) as ShizukuWorkspaceFileStore.ReadChunkResult.Success
+        assertEquals(24 * 1024, first.bytes.size)
+        assertEquals(300L * 1024L, first.totalBytes)
+        assertFalse(first.eof)
+        val second = store.readChunk("large.txt", 256 * 1024, first.offsetBytes + first.bytes.size) as ShizukuWorkspaceFileStore.ReadChunkResult.Success
+        assertEquals(256 * 1024, second.bytes.size)
+        assertFalse(second.eof)
+        val final = store.readChunk("large.txt", 256 * 1024, second.offsetBytes + second.bytes.size) as ShizukuWorkspaceFileStore.ReadChunkResult.Success
+        assertEquals(20 * 1024, final.bytes.size)
+        assertTrue(final.eof)
+    }
+
+    @Test
+    fun applyPatchRequiresCurrentVersionAndUsesAtomicReplacement() {
+        assertTrue(store.write("patch.txt", "before".toByteArray(StandardCharsets.UTF_8), false).contains("\"ok\":true"))
+        val version = JSONObject(store.stat("patch.txt")).getString("version")
+        val applied = JSONObject(store.applyPatch("patch.txt", "after", version, "REPLACE"))
+        assertTrue(applied.getBoolean("ok"))
+        assertEquals("after", JSONObject(store.read("patch.txt", 1024)).getString("text"))
+        assertTrue(store.applyPatch("patch.txt", "stale", version, "REPLACE").contains("\"code\":\"CONFLICT\""))
+        assertTrue(root.walkTopDown().none { it.name.startsWith(".mar-shizuku-") })
     }
 }

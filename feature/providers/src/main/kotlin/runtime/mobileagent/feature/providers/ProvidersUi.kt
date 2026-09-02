@@ -44,6 +44,9 @@ import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
+import runtime.mobileagent.provider.CapabilityCheck
+import runtime.mobileagent.provider.CapabilityCheckStatus
+import runtime.mobileagent.provider.ProviderConnectionErrorCode
 
 data class ProviderCardUi(
     val id: String,
@@ -109,14 +112,45 @@ fun providerBudgetError(contextLimit: String, outputLimit: String, zh: Boolean):
     }
 }
 
-data class ProbeCheckUi(val label: String, val result: String, val ok: Boolean? = null)
+enum class ProbePhase { IDLE, RUNNING, SUCCESS, PARTIAL, FAILURE }
 
-data class ProbeUiState(
-    val phase: String = "idle",
-    val message: String = "",
-    val checks: List<ProbeCheckUi> = emptyList(),
-    val lastChecked: String = "",
+enum class ProbeOperation { NONE, CONNECTION, CAPABILITY }
+
+data class ConnectionCheckUi(
+    val success: Boolean,
+    val latencyMs: Long? = null,
+    val error: ProviderConnectionErrorCode? = null,
+    val httpStatus: Int? = null,
+    val retryable: Boolean = false,
+    val charged: Boolean = false,
 )
+
+data class ProbeCheckUi(
+    val capability: CapabilityCheck,
+    val status: CapabilityCheckStatus,
+    val httpStatus: Int? = null,
+)
+
+/**
+ * Typed, render-ready state for both independent provider operations.  The
+ * legacy [ProbeUiState] name remains a type alias so callers can migrate
+ * without reintroducing string phases or free-form result text.
+ */
+data class ProviderProbeUiState(
+    val phase: ProbePhase = ProbePhase.IDLE,
+    val operation: ProbeOperation = ProbeOperation.NONE,
+    /** Stable local targets prevent a late result from being shown for another model. */
+    val providerId: String? = null,
+    val modelId: String? = null,
+    val connection: ConnectionCheckUi? = null,
+    val checks: List<ProbeCheckUi> = emptyList(),
+    val error: ProviderConnectionErrorCode? = null,
+    val charged: Boolean = false,
+    val latencyMs: Long? = null,
+    val lastChecked: String? = null,
+)
+
+typealias ProbeUiState = ProviderProbeUiState
 
 data class ProvidersUiState(
     val providers: List<ProviderCardUi> = emptyList(),
@@ -149,6 +183,7 @@ data class ProvidersActions(
     val onProbe: () -> Unit = {},
     val onCloseProbe: () -> Unit = {},
     val onOpenMcpSettings: () -> Unit = {},
+    val onTestConnection: () -> Unit = {},
 )
 
 @Composable
@@ -157,24 +192,64 @@ fun ProvidersScreen(state: ProvidersUiState, actions: ProvidersActions = Provide
     var deleteProviderId by remember { mutableStateOf<String?>(null) }
     var deleteModelId by remember { mutableStateOf<String?>(null) }
     var probeRequested by remember { mutableStateOf(false) }
+    var connectionRequested by remember { mutableStateOf(false) }
     BoxWithConstraints(modifier.fillMaxSize().padding(horizontal = 16.dp, vertical = 12.dp)) {
         val wide = maxWidth >= 720.dp
         if (wide) {
             Row(Modifier.fillMaxSize(), horizontalArrangement = Arrangement.spacedBy(16.dp)) {
                 ProviderListPane(state, actions, zh, Modifier.weight(0.42f).fillMaxSize())
                 Column(Modifier.weight(0.58f).fillMaxSize().verticalScroll(rememberScrollState())) {
-                    ProviderDetail(state, actions, onRequestDeleteProvider = { deleteProviderId = it }, onRequestDeleteModel = { deleteModelId = it }, onRequestProbe = { probeRequested = true }, zh = zh)
+                    ProviderDetail(
+                        state,
+                        actions,
+                        onRequestDeleteProvider = { deleteProviderId = it },
+                        onRequestDeleteModel = { deleteModelId = it },
+                        onRequestConnection = { connectionRequested = true },
+                        onRequestProbe = { probeRequested = true },
+                        zh = zh,
+                    )
                 }
             }
         } else {
             Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(12.dp)) {
                 ProviderListPane(state, actions, zh, Modifier.fillMaxWidth())
-                ProviderDetail(state, actions, onRequestDeleteProvider = { deleteProviderId = it }, onRequestDeleteModel = { deleteModelId = it }, onRequestProbe = { probeRequested = true }, zh = zh)
+                ProviderDetail(
+                    state,
+                    actions,
+                    onRequestDeleteProvider = { deleteProviderId = it },
+                    onRequestDeleteModel = { deleteModelId = it },
+                    onRequestConnection = { connectionRequested = true },
+                    onRequestProbe = { probeRequested = true },
+                    zh = zh,
+                )
             }
         }
     }
     if (state.editorOpen) ProviderEditorDialog(state, actions, zh)
-    if (state.probe.phase != "idle") ProbeDialog(state.probe, actions.onCloseProbe, zh)
+    if (state.probe.phase != ProbePhase.IDLE) ProbeDialog(state.probe, actions.onCloseProbe, zh)
+    if (connectionRequested) {
+        AlertDialog(
+            onDismissRequest = { connectionRequested = false },
+            title = { Text(if (zh) "测试服务商连接？" else "Test provider connection?") },
+            text = {
+                Text(
+                    if (zh) {
+                        "将按当前模型配置发送一次最小对话请求，以确认服务商可以正常响应。请求可能产生极小费用。"
+                    } else {
+                        "One minimal chat request will be sent using the current model configuration. It may incur a very small provider charge."
+                    },
+                )
+            },
+            confirmButton = {
+                Button(onClick = { connectionRequested = false; actions.onTestConnection() }) {
+                    Text(if (zh) "测试连接" else "Test connection")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { connectionRequested = false }) { Text(if (zh) "取消" else "Cancel") }
+            },
+        )
+    }
     if (probeRequested) {
         AlertDialog(
             onDismissRequest = { probeRequested = false },
@@ -286,6 +361,7 @@ private fun ProviderDetail(
     actions: ProvidersActions,
     onRequestDeleteProvider: (String) -> Unit,
     onRequestDeleteModel: (String) -> Unit,
+    onRequestConnection: () -> Unit,
     onRequestProbe: () -> Unit,
     zh: Boolean,
 ) {
@@ -297,8 +373,9 @@ private fun ProviderDetail(
     Text(provider.name, style = MaterialTheme.typography.headlineSmall)
     Text(provider.baseUrl, style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(top = 4.dp))
     Row(Modifier.padding(vertical = 10.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-        Button(onClick = { actions.onOpenEditor(provider.id) }) { Text(if (zh) "编辑" else "Edit") }
-        OutlinedButton(onClick = onRequestProbe) { Text(if (zh) "探测连接" else "Probe connection") }
+        Button(onClick = onRequestConnection) { Text(if (zh) "测试连接" else "Test connection") }
+        OutlinedButton(onClick = onRequestProbe) { Text(if (zh) "能力探测" else "Capability probe") }
+        OutlinedButton(onClick = { actions.onOpenEditor(provider.id) }) { Text(if (zh) "编辑" else "Edit") }
         OutlinedButton(onClick = { onRequestDeleteProvider(provider.id) }) { Text(if (zh) "删除" else "Delete") }
     }
     Text(if (zh) "模型与能力" else "Models and capabilities", style = MaterialTheme.typography.titleMedium)
@@ -389,20 +466,107 @@ private fun CheckRow(label: String, checked: Boolean, onChecked: (Boolean) -> Un
 }
 
 @Composable
-private fun ProbeDialog(probe: ProbeUiState, onClose: () -> Unit, zh: Boolean) {
+private fun ProbeDialog(probe: ProviderProbeUiState, onClose: () -> Unit, zh: Boolean) {
     AlertDialog(
-        onDismissRequest = { if (probe.phase != "running") onClose() },
-        title = { Text(if (zh) "服务商探测" else "Provider probe") },
+        onDismissRequest = { if (probe.phase != ProbePhase.RUNNING) onClose() },
+        title = {
+            Text(
+                when (probe.operation) {
+                    ProbeOperation.CONNECTION -> if (zh) "测试连接" else "Test connection"
+                    ProbeOperation.CAPABILITY -> if (zh) "能力探测" else "Capability probe"
+                    ProbeOperation.NONE -> if (zh) "服务商检查" else "Provider check"
+                },
+            )
+        },
         text = {
             Column(Modifier.verticalScroll(rememberScrollState())) {
-                if (probe.phase == "running") CircularProgressIndicator(Modifier.size(24.dp))
-                if (probe.message.isNotBlank()) Text(probe.message, modifier = Modifier.padding(top = 8.dp))
-                probe.checks.forEach { check ->
-                    Text("${check.label}: ${check.result}", style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(top = 6.dp))
+                if (probe.phase == ProbePhase.RUNNING) {
+                    CircularProgressIndicator(Modifier.size(24.dp))
+                    Text(if (zh) "正在检查…" else "Checking…", modifier = Modifier.padding(top = 8.dp))
+                } else {
+                    Text(probePhaseLabel(probe.phase, zh), modifier = Modifier.padding(top = 8.dp))
                 }
-                if (probe.lastChecked.isNotBlank()) Text(probe.lastChecked, style = MaterialTheme.typography.labelSmall, modifier = Modifier.padding(top = 8.dp))
+                probe.connection?.let { connection ->
+                    if (connection.success) {
+                        Text(if (zh) "连接成功" else "Connection succeeded", style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(top = 8.dp))
+                        connection.latencyMs?.let { latency ->
+                            Text(
+                                if (zh) "模型响应正常 · ${latency} ms" else "Model response normal · ${latency} ms",
+                                style = MaterialTheme.typography.bodySmall,
+                            )
+                        }
+                    } else {
+                        Text(
+                            if (zh) "连接失败：${connectionErrorLabel(connection.error, zh)}" else "Connection failed: ${connectionErrorLabel(connection.error, zh)}",
+                            color = MaterialTheme.colorScheme.error,
+                            style = MaterialTheme.typography.titleMedium,
+                            modifier = Modifier.padding(top = 8.dp),
+                        )
+                        connection.httpStatus?.let { status ->
+                            Text(
+                                if (zh) "HTTP ${status / 100}xx" else "HTTP ${status / 100}xx",
+                                style = MaterialTheme.typography.bodySmall,
+                            )
+                        }
+                    }
+                }
+                probe.checks.forEach { check ->
+                    Text(
+                        "${capabilityLabel(check.capability, zh)}：${capabilityStatusLabel(check.status, zh)}",
+                        style = MaterialTheme.typography.bodySmall,
+                        modifier = Modifier.padding(top = 6.dp),
+                    )
+                }
+                if (probe.charged && probe.phase != ProbePhase.RUNNING) {
+                    Text(
+                        if (zh) "本次检查可能产生服务商费用。" else "This check may have incurred provider charges.",
+                        style = MaterialTheme.typography.labelSmall,
+                        modifier = Modifier.padding(top = 8.dp),
+                    )
+                }
+                probe.lastChecked?.takeIf { it.isNotBlank() }?.let {
+                    Text(it, style = MaterialTheme.typography.labelSmall, modifier = Modifier.padding(top = 8.dp))
+                }
             }
         },
-        confirmButton = { if (probe.phase != "running") Button(onClick = onClose) { Text(if (zh) "关闭" else "Close") } },
+        confirmButton = { if (probe.phase != ProbePhase.RUNNING) Button(onClick = onClose) { Text(if (zh) "关闭" else "Close") } },
     )
+}
+
+private fun probePhaseLabel(phase: ProbePhase, zh: Boolean): String = when (phase) {
+    ProbePhase.IDLE -> if (zh) "尚未检查" else "Not checked"
+    ProbePhase.RUNNING -> if (zh) "正在检查…" else "Checking…"
+    ProbePhase.SUCCESS -> if (zh) "检查成功" else "Check succeeded"
+    ProbePhase.PARTIAL -> if (zh) "部分能力已确认" else "Partially verified"
+    ProbePhase.FAILURE -> if (zh) "检查失败" else "Check failed"
+}
+
+private fun capabilityLabel(capability: CapabilityCheck, zh: Boolean): String = when (capability) {
+    CapabilityCheck.METADATA -> if (zh) "模型信息" else "Metadata"
+    CapabilityCheck.STREAM -> if (zh) "流式输出" else "Streaming"
+    CapabilityCheck.TOOLS -> if (zh) "工具调用" else "Tools"
+    CapabilityCheck.IMAGE -> if (zh) "图片输入" else "Images"
+}
+
+private fun capabilityStatusLabel(status: CapabilityCheckStatus, zh: Boolean): String = when (status) {
+    CapabilityCheckStatus.VERIFIED -> if (zh) "支持" else "Supported"
+    CapabilityCheckStatus.UNSUPPORTED -> if (zh) "不支持" else "Unsupported"
+    CapabilityCheckStatus.NOT_DECLARED -> if (zh) "未声明" else "Not declared"
+    CapabilityCheckStatus.NOT_RUN -> if (zh) "未测试" else "Not tested"
+    CapabilityCheckStatus.FAILED -> if (zh) "检查失败" else "Check failed"
+    CapabilityCheckStatus.UNKNOWN -> if (zh) "未知" else "Unknown"
+}
+
+private fun connectionErrorLabel(error: ProviderConnectionErrorCode?, zh: Boolean): String = when (error) {
+    ProviderConnectionErrorCode.NETWORK_UNREACHABLE -> if (zh) "网络不可达" else "Network unreachable"
+    ProviderConnectionErrorCode.TLS_FAILURE -> if (zh) "TLS 安全连接失败" else "TLS failure"
+    ProviderConnectionErrorCode.TIMEOUT -> if (zh) "请求超时" else "Timeout"
+    ProviderConnectionErrorCode.AUTH_FAILED -> if (zh) "认证失败" else "Authentication failed"
+    ProviderConnectionErrorCode.MODEL_NOT_FOUND -> if (zh) "模型不存在" else "Model not found"
+    ProviderConnectionErrorCode.RATE_LIMITED -> if (zh) "请求受限" else "Rate limited"
+    ProviderConnectionErrorCode.PROVIDER_REJECTED -> if (zh) "服务商拒绝请求" else "Provider rejected request"
+    ProviderConnectionErrorCode.INVALID_RESPONSE -> if (zh) "响应无效" else "Invalid response"
+    ProviderConnectionErrorCode.CONFIG_INVALID -> if (zh) "配置无效" else "Invalid configuration"
+    ProviderConnectionErrorCode.CREDENTIAL_UNAVAILABLE -> if (zh) "凭据不可用" else "Credential unavailable"
+    ProviderConnectionErrorCode.UNKNOWN, null -> if (zh) "未知错误" else "Unknown error"
 }

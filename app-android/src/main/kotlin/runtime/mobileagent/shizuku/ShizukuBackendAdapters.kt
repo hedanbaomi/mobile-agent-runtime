@@ -3,6 +3,9 @@
 
 package runtime.mobileagent.shizuku
 
+import android.os.ParcelFileDescriptor
+import java.io.ByteArrayOutputStream
+import java.io.IOException
 import java.nio.CharBuffer
 import java.nio.charset.CharacterCodingException
 import java.nio.charset.CodingErrorAction
@@ -20,6 +23,7 @@ import runtime.mobileagent.skills.tooling.ToolError
 import runtime.mobileagent.skills.tooling.ToolErrorCode
 import runtime.mobileagent.skills.tooling.WorkspaceBackend
 import runtime.mobileagent.skills.tooling.WorkspaceBackendType
+import runtime.mobileagent.skills.tooling.WorkspaceApplyPatchRequest
 import runtime.mobileagent.skills.tooling.WorkspaceCreateDirectoryRequest
 import runtime.mobileagent.skills.tooling.WorkspaceDescriptor
 import runtime.mobileagent.skills.tooling.WorkspaceDeleteRequest
@@ -239,8 +243,9 @@ class ShizukuShellExecutor(
  * Public shared workspace adapter for the fixed, path-checked Shizuku store.
  *
  * The descriptor intentionally contains no absolute root or Binder identity.
- * Versioned mutation fields are rejected because the low-level typed RPC does
- * not implement optimistic versions; silently ignoring them would be unsafe.
+ * Versioned ordinary mutations remain rejected because their legacy RPCs do
+ * not implement optimistic versions.  apply_patch uses its own bounded,
+ * conditional transaction below.
  */
 class ShizukuWorkspaceBackendAdapter(
     private val bridge: ShizukuAuthorityBridge,
@@ -277,16 +282,18 @@ class ShizukuWorkspaceBackendAdapter(
         CapabilityId(CapabilityId.FILE_CREATE_DIRECTORY),
         CapabilityId(CapabilityId.FILE_MOVE),
         CapabilityId(CapabilityId.FILE_DELETE),
+        CapabilityId("file.apply_patch"),
     )
 
     override suspend fun list(request: WorkspaceListRequest): WorkspaceResult<WorkspaceListing> {
         if (request.workspaceId != descriptor.id) return failure(ToolErrorCode.INVALID_REQUEST)
         val normalized = normalizePath(request.relativePath, allowRoot = true)
             ?: return failure(ToolErrorCode.PATH_OUT_OF_SCOPE)
+        val pageSize = minOf(request.maxEntries, ShizukuWorkspaceFileStore.MAX_DIRECTORY_ENTRIES)
         return dispatchJson<WorkspaceListing>(
             operation = "list",
-            dispatch = safeDispatch { bridge.dispatchList(normalized) },
-            decode = { payload -> parseListPayload(payload, normalized, request.maxEntries) },
+            dispatch = safeDispatch { bridge.dispatchListPaged(normalized, pageSize, request.cursor) },
+            decode = { payload -> parseListPayload(payload, normalized, pageSize) },
         )
     }
 
@@ -309,10 +316,31 @@ class ShizukuWorkspaceBackendAdapter(
         if (maxBytes !in 1L..ShizukuWorkspaceFileStore.MAX_READ_BYTES.toLong()) {
             return failure(ToolErrorCode.FILE_TOO_LARGE)
         }
-        return dispatchJson<WorkspaceText>(
-            operation = "read",
-            dispatch = safeDispatch { bridge.dispatchRead(normalized, maxBytes.toInt()) },
-            decode = { payload -> parseReadPayload(payload, normalized, maxBytes) },
+        return readChunk(normalized, maxBytes.toInt(), request.offsetBytes)
+    }
+
+    override suspend fun applyPatch(request: WorkspaceApplyPatchRequest): WorkspaceResult<WorkspaceMutation> {
+        if (request.workspaceId != descriptor.id) return failure(ToolErrorCode.INVALID_REQUEST)
+        val normalized = normalizePath(request.relativePath, allowRoot = false)
+            ?: return failure(ToolErrorCode.PATH_OUT_OF_SCOPE)
+        val patchBytes = strictUtf8(request.patch) ?: return failure(ToolErrorCode.INVALID_REQUEST)
+        if (patchBytes.size !in 1..ShizukuWorkspaceFileStore.MAX_PATCH_BYTES) {
+            return failure(ToolErrorCode.FILE_TOO_LARGE)
+        }
+        val current = currentStat(normalized)
+            ?: return failure(ToolErrorCode.BRIDGE_PROTOCOL_MISMATCH)
+        if (current.publicVersion != request.expectedVersion) return failure(ToolErrorCode.CONFLICT)
+        return dispatchJson<WorkspaceMutation>(
+            operation = "apply_patch",
+            dispatch = safeDispatch {
+                bridge.dispatchApplyPatch(
+                    relativePath = normalized,
+                    patch = request.patch,
+                    expectedVersion = current.opaqueVersion,
+                    format = request.format.name,
+                )
+            },
+            decode = { payload -> parsePatchPayload(payload, normalized) },
         )
     }
 
@@ -394,27 +422,17 @@ class ShizukuWorkspaceBackendAdapter(
             }
             if (bytes < 0L || bytes > ShizukuWorkspaceFileStore.MAX_FILE_BYTES) return null
             if (!isChildOf(path, normalized)) return null
-            if (index < maxEntries) entries += WorkspaceEntry(path, type, bytes)
+            val version = parseOpaqueVersion(entry.optString("version", "")) ?: return null
+            if (index < maxEntries) entries += WorkspaceEntry(path, type, bytes, version.publicVersion)
         }
+        val nextCursor = payload.optString("nextCursor", "").takeIf { it.isNotEmpty() && it != "null" }
+        if (payload.optBoolean("truncated", false) != (nextCursor != null)) return null
         return WorkspaceListing(
             relativePath = normalized.ifEmpty { ROOT_PATH },
             entries = entries,
-            truncated = entriesJson.length() > entries.size,
+            truncated = nextCursor != null,
+            nextCursor = nextCursor,
         )
-    }
-
-    private fun parseReadPayload(
-        payload: JSONObject,
-        normalized: String,
-        maxBytes: Long,
-    ): WorkspaceText? {
-        val text = payload.optString("text", "")
-        val bytes = payload.optLong("bytes", -1L)
-        val responsePath = normalizePath(payload.optString("path", ""), allowRoot = false)
-        if (responsePath != normalized || bytes < 0L || bytes > maxBytes || strictUtf8(text)?.size?.toLong() != bytes) {
-            return null
-        }
-        return WorkspaceText(normalized, text, byteSize = bytes)
     }
 
     private fun parseStatPayload(payload: JSONObject, normalized: String): WorkspaceFileStat? {
@@ -425,11 +443,131 @@ class ShizukuWorkspaceBackendAdapter(
             else -> return null
         }
         val bytes = payload.optLong("bytes", -1L)
-        if (responsePath != normalized || bytes < 0L || bytes > ShizukuWorkspaceFileStore.MAX_FILE_BYTES ||
+        val version = parseOpaqueVersion(payload.optString("version", ""))
+        if (responsePath != normalized || bytes < 0L || bytes > ShizukuWorkspaceFileStore.MAX_FILE_BYTES || version == null ||
             (type == WorkspaceEntryType.DIRECTORY && bytes != 0L)
         ) return null
-        return WorkspaceFileStat(normalized, type, bytes)
+        return WorkspaceFileStat(normalized, type, bytes, version.publicVersion)
     }
+
+    private suspend fun readChunk(
+        normalized: String,
+        maxBytes: Int,
+        offsetBytes: Long,
+    ): WorkspaceResult<WorkspaceText> {
+        val dispatch = safeReadDispatch {
+            bridge.dispatchReadChunk(normalized, offsetBytes, maxBytes)
+        }
+        return when (dispatch) {
+            is ShizukuWorkspaceReadDispatchResult.Denied -> failure(ToolErrorCode.SHIZUKU_SERVICE_UNAVAILABLE)
+            is ShizukuWorkspaceReadDispatchResult.Failed -> if (dispatch.unknownOutcome) {
+                failure(ToolErrorCode.UNKNOWN_OUTCOME)
+            } else {
+                failure(dispatch.errorCode?.let { mapWorkspaceError(it, "read") } ?: ToolErrorCode.IO_ERROR)
+            }
+            is ShizukuWorkspaceReadDispatchResult.Success -> {
+                val response = dispatch.response
+                if (!response.accepted) {
+                    response.contentFd?.let { runCatching { it.close() } }
+                    failure(mapWorkspaceError(response.errorCode.orEmpty(), "read"))
+                } else {
+                    val metadata = runCatching { JSONObject(response.metadata ?: "") }.getOrNull()
+                    val bytes = runCatching {
+                        response.contentFd?.let { readChunkFd(it, maxBytes) }
+                    }.getOrNull()
+                    if (metadata == null || bytes == null) {
+                        response.contentFd?.let { runCatching { it.close() } }
+                        failure(ToolErrorCode.BRIDGE_PROTOCOL_MISMATCH)
+                    } else {
+                        parseReadMetadata(metadata, normalized, offsetBytes, maxBytes, bytes)
+                    }
+                }
+            }
+        }
+    }
+
+    private fun parseReadMetadata(
+        payload: JSONObject,
+        normalized: String,
+        requestedOffset: Long,
+        requestedMax: Int,
+        bytes: ByteArray,
+    ): WorkspaceResult<WorkspaceText> {
+        if (!payload.optBoolean("ok", false) || payload.optString("operation", "") != "read") {
+            return failure(ToolErrorCode.BRIDGE_PROTOCOL_MISMATCH)
+        }
+        val responsePath = normalizePath(payload.optString("path", ""), allowRoot = false)
+        val count = payload.optLong("bytes", -1L)
+        val offset = payload.optLong("offsetBytes", -1L)
+        val total = payload.optLong("totalBytes", -1L)
+        val eof = payload.optBoolean("eof", false)
+        val version = parseOpaqueVersion(payload.optString("version", ""))
+        val text = runCatching { decodeUtf8(bytes) }.getOrNull()
+        if (responsePath != normalized || count != bytes.size.toLong() || count < 0L || count > requestedMax ||
+            offset != requestedOffset || total < 0L || offset > total || count > total - offset || version == null || text == null ||
+            (eof != (count >= total - offset))
+        ) return failure(ToolErrorCode.BRIDGE_PROTOCOL_MISMATCH)
+        return runCatching {
+            WorkspaceResult.Success(
+                WorkspaceText(
+                    relativePath = normalized,
+                    text = text,
+                    byteSize = count,
+                    version = version.publicVersion,
+                    offsetBytes = offset,
+                    totalBytes = total,
+                    eof = eof,
+                ),
+            )
+        }.getOrElse { failure(ToolErrorCode.BRIDGE_PROTOCOL_MISMATCH) }
+    }
+
+    private fun readChunkFd(descriptor: ParcelFileDescriptor, maxBytes: Int): ByteArray {
+        val output = ByteArrayOutputStream(minOf(maxBytes, 8 * 1024))
+        ParcelFileDescriptor.AutoCloseInputStream(descriptor).use { input ->
+            val buffer = ByteArray(8 * 1024)
+            while (true) {
+                val count = input.read(buffer)
+                if (count < 0) break
+                if (count == 0) continue
+                if (output.size() + count > maxBytes) throw IOException("chunk exceeds limit")
+                output.write(buffer, 0, count)
+            }
+        }
+        return output.toByteArray()
+    }
+
+    private data class CurrentStat(val publicVersion: Long, val opaqueVersion: String)
+
+    private fun currentStat(normalized: String): CurrentStat? {
+        val dispatch = safeDispatch { bridge.dispatchStat(normalized) }
+        if (dispatch !is ShizukuDispatchResult.Success) return null
+        val payload = runCatching { JSONObject(dispatch.payload) }.getOrNull() ?: return null
+        if (!payload.optBoolean("ok", false) || payload.optString("operation", "") != "stat") return null
+        val version = parseOpaqueVersion(payload.optString("version", "")) ?: return null
+        val path = normalizePath(payload.optString("path", ""), allowRoot = false) ?: return null
+        return if (path == normalized) CurrentStat(version.publicVersion, version.opaqueVersion) else null
+    }
+
+    private fun parsePatchPayload(payload: JSONObject, normalized: String): WorkspaceMutation? {
+        val path = normalizePath(payload.optString("path", ""), allowRoot = false)
+        val bytes = payload.optLong("bytes", -1L)
+        val version = parseOpaqueVersion(payload.optString("version", ""))
+        if (path != normalized || payload.optString("type", "") != "file" || bytes < 0L ||
+            bytes > ShizukuWorkspaceFileStore.MAX_FILE_BYTES || payload.optBoolean("created", true) || version == null
+        ) return null
+        return WorkspaceMutation(normalized, WorkspaceEntryType.FILE, bytes, version.publicVersion)
+    }
+
+    private data class ParsedVersion(val publicVersion: Long, val opaqueVersion: String)
+
+    private fun parseOpaqueVersion(raw: String): ParsedVersion? {
+        if (raw.length != 64 || raw.any { it !in "0123456789abcdefABCDEF" }) return null
+        return runCatching { ParsedVersion(publicVersion(raw), raw.lowercase()) }.getOrNull()
+    }
+
+    private fun publicVersion(raw: String): Long =
+        java.lang.Long.parseUnsignedLong(raw.take(16), 16)
 
     private fun parseWritePayload(
         payload: JSONObject,
@@ -525,6 +663,11 @@ class ShizukuWorkspaceBackendAdapter(
         ShizukuWorkspaceFileStore.OUTPUT_LIMIT,
             -> if (operation == "read" || operation == "stat") ToolErrorCode.FILE_TOO_LARGE else ToolErrorCode.QUOTA_EXCEEDED
         ShizukuWorkspaceFileStore.UNKNOWN_OUTCOME -> ToolErrorCode.UNKNOWN_OUTCOME
+        ShizukuWorkspaceFileStore.CONFLICT -> ToolErrorCode.CONFLICT
+        ShizukuWorkspaceFileStore.INVALID_CURSOR,
+        ShizukuWorkspaceFileStore.INVALID_VERSION,
+        ShizukuWorkspaceFileStore.OFFSET_OUT_OF_RANGE,
+        ShizukuWorkspaceFileStore.INVALID_PATCH,
         ShizukuWorkspaceFileStore.TARGET_EXISTS,
         ShizukuWorkspaceFileStore.NON_EMPTY_DIRECTORY,
         ShizukuWorkspaceFileStore.MOVE_INTO_SELF,
@@ -532,9 +675,10 @@ class ShizukuWorkspaceBackendAdapter(
         ShizukuWorkspaceFileStore.INVALID_CONTENT,
             -> ToolErrorCode.INVALID_REQUEST
         ShizukuWorkspaceFileStore.ATOMIC_REPLACE_UNAVAILABLE,
+        ShizukuWorkspaceFileStore.UNSUPPORTED,
         ShizukuWorkspaceFileStore.OPERATION_UNAVAILABLE,
         ShizukuWorkspaceFileStore.WRITE_UNVERIFIED,
-            -> ToolErrorCode.IO_ERROR
+            -> ToolErrorCode.INTERNAL_ERROR
         else -> ToolErrorCode.IO_ERROR
     }
 
@@ -547,6 +691,14 @@ class ShizukuWorkspaceBackendAdapter(
         // A transport exception after a typed mutation may have reached the
         // service.  Preserve the no-replay boundary without exposing details.
         ShizukuDispatchResult.Failed("Shizuku dispatch failed", unknownOutcome = true)
+    }
+
+    private fun safeReadDispatch(
+        block: () -> ShizukuWorkspaceReadDispatchResult,
+    ): ShizukuWorkspaceReadDispatchResult = try {
+        block()
+    } catch (_: RuntimeException) {
+        ShizukuWorkspaceReadDispatchResult.Failed("Shizuku read dispatch failed", unknownOutcome = true)
     }
 
     private fun normalizePath(raw: String?, allowRoot: Boolean): String? = runCatching {
@@ -568,6 +720,16 @@ class ShizukuWorkspaceBackendAdapter(
             .onUnmappableCharacter(CodingErrorAction.REPORT)
         val encoded = encoder.encode(CharBuffer.wrap(value))
         ByteArray(encoded.remaining()).also { encoded.get(it) }
+    } catch (_: CharacterCodingException) {
+        null
+    }
+
+    private fun decodeUtf8(bytes: ByteArray): String? = try {
+        StandardCharsets.UTF_8.newDecoder()
+            .onMalformedInput(CodingErrorAction.REPORT)
+            .onUnmappableCharacter(CodingErrorAction.REPORT)
+            .decode(java.nio.ByteBuffer.wrap(bytes))
+            .toString()
     } catch (_: CharacterCodingException) {
         null
     }

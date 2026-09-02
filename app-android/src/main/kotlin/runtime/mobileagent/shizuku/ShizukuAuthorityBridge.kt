@@ -273,8 +273,33 @@ class ShizukuAuthorityBridge(
     internal fun dispatchList(relativePath: String): ShizukuDispatchResult =
         dispatch { service, sessionId -> service.listSession(sessionId, relativePath) }
 
+    internal fun dispatchListPaged(
+        relativePath: String,
+        maxEntries: Int,
+        cursor: String?,
+    ): ShizukuDispatchResult = dispatch { service, sessionId ->
+        service.listPagedSession(sessionId, relativePath, maxEntries, cursor)
+    }
+
     internal fun dispatchRead(relativePath: String, maxBytes: Int): ShizukuDispatchResult =
         dispatch { service, sessionId -> service.readSession(sessionId, relativePath, maxBytes) }
+
+    internal fun dispatchReadChunk(
+        relativePath: String,
+        offsetBytes: Long,
+        maxBytes: Int,
+    ): ShizukuWorkspaceReadDispatchResult = dispatchReadResponse { service, sessionId ->
+        service.readChunkSession(sessionId, relativePath, offsetBytes, maxBytes)
+    }
+
+    internal fun dispatchApplyPatch(
+        relativePath: String,
+        patch: String,
+        expectedVersion: String,
+        format: String,
+    ): ShizukuDispatchResult = dispatch { service, sessionId ->
+        service.applyPatchSession(sessionId, relativePath, patch, expectedVersion, format)
+    }
 
     internal fun dispatchWrite(relativePath: String, content: ByteArray, replaceExisting: Boolean): ShizukuDispatchResult =
         dispatch { service, sessionId -> service.writeSession(sessionId, relativePath, content, replaceExisting) }
@@ -308,6 +333,10 @@ class ShizukuAuthorityBridge(
     internal fun dispatchDirectoryAttach(handle: String): ShizukuDispatchResult =
         dispatch { service, sessionId -> service.attachDirectorySession(sessionId, handle) }
 
+    /** Reopens a directory using its opaque locator and receives a new handle. */
+    internal fun dispatchDirectoryReattach(locator: ByteArray): ShizukuDispatchResult =
+        dispatch { service, sessionId -> service.reattachDirectorySession(sessionId, locator) }
+
     internal fun dispatchWorkspaceList(
         workspaceHandle: String,
         relativePath: String,
@@ -316,12 +345,40 @@ class ShizukuAuthorityBridge(
         service.listWorkspaceSession(sessionId, workspaceHandle, relativePath, maxEntries)
     }
 
+    internal fun dispatchWorkspaceListPaged(
+        workspaceHandle: String,
+        relativePath: String,
+        maxEntries: Int,
+        cursor: String?,
+    ): ShizukuDispatchResult = dispatch { service, sessionId ->
+        service.listWorkspacePagedSession(sessionId, workspaceHandle, relativePath, maxEntries, cursor)
+    }
+
     internal fun dispatchWorkspaceRead(
         workspaceHandle: String,
         relativePath: String,
         maxBytes: Int,
     ): ShizukuDispatchResult = dispatch { service, sessionId ->
         service.readWorkspaceSession(sessionId, workspaceHandle, relativePath, maxBytes)
+    }
+
+    internal fun dispatchWorkspaceReadChunk(
+        workspaceHandle: String,
+        relativePath: String,
+        offsetBytes: Long,
+        maxBytes: Int,
+    ): ShizukuWorkspaceReadDispatchResult = dispatchReadResponse { service, sessionId ->
+        service.readChunkWorkspaceSession(sessionId, workspaceHandle, relativePath, offsetBytes, maxBytes)
+    }
+
+    internal fun dispatchWorkspaceApplyPatch(
+        workspaceHandle: String,
+        relativePath: String,
+        patch: String,
+        expectedVersion: String,
+        format: String,
+    ): ShizukuDispatchResult = dispatch { service, sessionId ->
+        service.applyPatchWorkspaceSession(sessionId, workspaceHandle, relativePath, patch, expectedVersion, format)
     }
 
     internal fun dispatchWorkspaceWrite(
@@ -430,6 +487,52 @@ class ShizukuAuthorityBridge(
             refresh()
             ShizukuDispatchResult.Failed("Shizuku UserService call failed", unknownOutcome = true)
         }
+    }
+
+    private fun dispatchReadResponse(
+        call: (IShizukuCommandService, String) -> ShizukuWorkspaceReadResponse,
+    ): ShizukuWorkspaceReadDispatchResult {
+        val current = refresh()
+        val decision = ShizukuBridgePolicy.evaluateDispatch(current.asBridgeStatus())
+        if (decision is ShizukuGateDecision.Denied) {
+            return ShizukuWorkspaceReadDispatchResult.Denied(decision.reason)
+        }
+        val target = synchronized(lock) {
+            val service = userService?.takeIf { candidate ->
+                runCatching { candidate.asBinder().pingBinder() }.getOrDefault(false)
+            }
+            val sessionId = userServiceSessionId
+            if (service == null || sessionId.isNullOrBlank()) null else service to sessionId
+        } ?: run {
+            refresh()
+            return ShizukuWorkspaceReadDispatchResult.Denied("Shizuku UserService is not connected")
+        }
+        return try {
+            val response = call(target.first, target.second)
+            if (!runCatching { target.first.asBinder().pingBinder() }.getOrDefault(false)) {
+                closeReadResponse(response)
+                synchronized(lock) { clearUserServiceLocked() }
+                refresh()
+                ShizukuWorkspaceReadDispatchResult.Failed(
+                    reason = "Shizuku UserService became unavailable",
+                    unknownOutcome = true,
+                )
+            } else {
+                ShizukuWorkspaceReadDispatchResult.Success(response)
+            }
+        } catch (_: RemoteException) {
+            synchronized(lock) { clearUserServiceLocked() }
+            refresh()
+            ShizukuWorkspaceReadDispatchResult.Failed("Shizuku UserService call failed", unknownOutcome = true)
+        } catch (_: RuntimeException) {
+            synchronized(lock) { clearUserServiceLocked() }
+            refresh()
+            ShizukuWorkspaceReadDispatchResult.Failed("Shizuku UserService call failed", unknownOutcome = true)
+        }
+    }
+
+    private fun closeReadResponse(response: ShizukuWorkspaceReadResponse) {
+        runCatching { response.contentFd?.close() }
     }
 
     private fun executeShellBlocking(request: ShizukuShellRequest): ShizukuShellResult {

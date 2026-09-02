@@ -9,6 +9,7 @@ import android.net.Uri
 import android.provider.DocumentsContract
 import java.io.ByteArrayOutputStream
 import java.io.IOException
+import java.io.InputStream
 import java.text.Normalizer
 import java.util.HashSet
 import runtime.mobileagent.domain.CapabilityId
@@ -79,6 +80,102 @@ internal object SafWorkspaceCapabilityPolicy {
 }
 
 /**
+ * The bounded SAF read primitive shared by the provider-backed implementation and its tests.
+ *
+ * It deliberately stops issuing reads as soon as the requested chunk is full.  A
+ * [DocumentsProvider] stream is not required to expose an EOF cheaply, so draining it to EOF
+ * would turn a bounded read into a full-file read and make every file larger than the read limit
+ * fail with [InternalWorkspaceErrorCode.READ_LIMIT_EXCEEDED].
+ */
+internal data class SafWorkspaceReadChunk(
+    val bytes: ByteArray,
+    val totalBytes: Long?,
+    val eof: Boolean,
+)
+
+internal fun readSafChunk(
+    input: InputStream,
+    offset: Long,
+    maximum: Int,
+    declaredSize: Long? = null,
+): SafWorkspaceReadChunk {
+    if (maximum < 1) InternalWorkspaceErrorCode.READ_LIMIT_EXCEEDED.error()
+    if (offset < 0L) InternalWorkspaceErrorCode.OFFSET_OUT_OF_RANGE.error()
+    if (declaredSize != null && (declaredSize < 0L || offset > declaredSize)) {
+        InternalWorkspaceErrorCode.OFFSET_OUT_OF_RANGE.error()
+    }
+
+    var remainingOffset = offset
+    while (remainingOffset > 0L) {
+        val skipped = try {
+            input.skip(remainingOffset)
+        } catch (_: IOException) {
+            InternalWorkspaceErrorCode.IO_ERROR.error()
+        }
+        if (skipped < 0L) InternalWorkspaceErrorCode.IO_ERROR.error()
+        if (skipped > 0L) {
+            remainingOffset -= skipped
+        } else {
+            val one = try {
+                input.read()
+            } catch (_: IOException) {
+                InternalWorkspaceErrorCode.IO_ERROR.error()
+            }
+            if (one < 0) InternalWorkspaceErrorCode.OFFSET_OUT_OF_RANGE.error()
+            remainingOffset--
+        }
+    }
+
+    // A declared size lets us avoid asking a non-conforming provider for bytes past its own
+    // metadata.  The subtraction is safe because offset was checked above.
+    val chunkLimit = declaredSize
+        ?.minus(offset)
+        ?.coerceAtMost(maximum.toLong())
+        ?.toInt()
+        ?: maximum
+    val output = ByteArrayOutputStream(chunkLimit.coerceAtMost(8 * 1024))
+    val buffer = ByteArray(8 * 1024)
+    var remainingBytes = chunkLimit
+    while (remainingBytes > 0) {
+        val requested = minOf(buffer.size, remainingBytes)
+        val count = try {
+            input.read(buffer, 0, requested)
+        } catch (_: IOException) {
+            InternalWorkspaceErrorCode.IO_ERROR.error()
+        }
+        if (count < 0) break
+        if (count == 0) {
+            // InputStream implementations should return a positive count for a non-empty
+            // request, but making progress on a one-byte read avoids a provider-specific spin.
+            val one = try {
+                input.read()
+            } catch (_: IOException) {
+                InternalWorkspaceErrorCode.IO_ERROR.error()
+            }
+            if (one < 0) break
+            output.write(one)
+            remainingBytes--
+            continue
+        }
+        if (count > requested || count > remainingBytes) {
+            InternalWorkspaceErrorCode.READ_LIMIT_EXCEEDED.error()
+        }
+        output.write(buffer, 0, count)
+        remainingBytes -= count
+    }
+
+    val bytes = output.toByteArray()
+    val totalBytes = declaredSize ?: if (bytes.size < maximum) {
+        offset.takeIf { it <= Long.MAX_VALUE - bytes.size.toLong() }
+            ?.plus(bytes.size.toLong())
+    } else {
+        null
+    }
+    val eof = declaredSize?.let { bytes.size.toLong() >= it - offset } ?: (bytes.size < maximum)
+    return SafWorkspaceReadChunk(bytes, totalBytes, eof)
+}
+
+/**
  * Rebind a provider-returned mutation handle to the user's persisted tree.
  *
  * DocumentsProvider mutation methods are allowed to return an ordinary document URI rather
@@ -113,6 +210,7 @@ internal class SafWorkspaceBackend(
 ) : InternalWorkspaceBackendApi {
     private val resolver: ContentResolver = resolverOverride ?: context.contentResolver
     private val lock = Any()
+    private val cursorStore = InternalWorkspaceCursorStore()
 
     /**
      * Descriptor state is intentionally re-probed instead of being cached.  Persisted SAF
@@ -179,14 +277,27 @@ internal class SafWorkspaceBackend(
         )
     }
 
-    override fun list(relativePath: String): InternalWorkspaceResult<InternalWorkspaceList> = synchronized(lock) {
+    override fun list(
+        relativePath: String,
+        maxEntries: Int,
+        cursor: String?,
+    ): InternalWorkspaceResult<InternalWorkspaceList> = synchronized(lock) {
         guarded {
+            if (maxEntries < 1) InternalWorkspaceErrorCode.INVALID_ARGUMENT.error()
             requireGrant(write = false)
             val segments = parse(relativePath, allowRoot = true)
             val directory = resolve(segments)
-            val children = children(directory.uri)
-            if (children.size > limits.maxDirectoryEntries) InternalWorkspaceErrorCode.ENTRY_LIMIT_EXCEEDED.error()
-            val entries = children.sortedBy { it.name }.map { child ->
+            val children = children(directory.uri).sortedBy { it.name }
+            if (children.size > limits.maxEntries) InternalWorkspaceErrorCode.ENTRY_LIMIT_EXCEEDED.error()
+            val fingerprint = directoryVersion(directory.uri)
+            val start = cursor?.let {
+                cursorStore.resolve(it, segments.joinToString("/"), fingerprint)
+                    ?: InternalWorkspaceErrorCode.INVALID_ARGUMENT.error()
+            } ?: 0
+            if (start > children.size) InternalWorkspaceErrorCode.INVALID_ARGUMENT.error()
+            val pageSize = minOf(maxEntries, limits.maxDirectoryEntries)
+            val end = minOf(start + pageSize, children.size)
+            val entries = children.subList(start, end).map { child ->
                 val childPath = (segments + child.name).joinToString("/")
                 InternalWorkspaceEntry(
                     path = childPath,
@@ -199,6 +310,9 @@ internal class SafWorkspaceBackend(
                 path = segments.joinToString("/"),
                 entries = entries,
                 version = directoryVersion(directory.uri),
+                nextCursor = if (end < children.size) {
+                    cursorStore.issue(segments.joinToString("/"), fingerprint, end)
+                } else null,
             )
         }
     }
@@ -217,23 +331,42 @@ internal class SafWorkspaceBackend(
         }
     }
 
-    override fun read(relativePath: String, maxBytes: Long): InternalWorkspaceResult<InternalWorkspaceContent> = synchronized(lock) {
+    override fun read(
+        relativePath: String,
+        maxBytes: Long,
+        offsetBytes: Long,
+    ): InternalWorkspaceResult<InternalWorkspaceContent> = synchronized(lock) {
         guarded {
             requireGrant(write = false)
             val segments = parse(relativePath, allowRoot = false)
             if (maxBytes < 1L || maxBytes > limits.maxReadBytes) InternalWorkspaceErrorCode.READ_LIMIT_EXCEEDED.error()
+            if (offsetBytes < 0L) InternalWorkspaceErrorCode.OFFSET_OUT_OF_RANGE.error()
             val node = resolve(segments)
             if (node.type != InternalWorkspaceEntryType.FILE) InternalWorkspaceErrorCode.ENTRY_UNSUPPORTED.error()
             if (node.flags and DocumentsContract.Document.FLAG_VIRTUAL_DOCUMENT != 0) {
                 InternalWorkspaceErrorCode.UNSUPPORTED.error()
             }
             val declaredSize = node.size
-            if (declaredSize != null && declaredSize > limits.maxFileBytes) InternalWorkspaceErrorCode.FILE_TOO_LARGE.error()
-            if (declaredSize != null && declaredSize > maxBytes) InternalWorkspaceErrorCode.READ_LIMIT_EXCEEDED.error()
-            val bytes = readBounded(node.uri, maxBytes.toInt())
-            InternalWorkspaceContent(segments.joinToString("/"), bytes, InternalWorkspaceVersions.bytes(bytes))
+            if (declaredSize != null && offsetBytes > declaredSize) InternalWorkspaceErrorCode.OFFSET_OUT_OF_RANGE.error()
+            val chunk = readChunk(node.uri, offsetBytes, maxBytes.toInt(), declaredSize)
+            InternalWorkspaceContent(
+                path = segments.joinToString("/"),
+                bytes = chunk.bytes,
+                version = fileVersion(node.uri),
+                offsetBytes = offsetBytes,
+                totalBytes = chunk.totalBytes,
+                eof = chunk.eof,
+            )
         }
     }
+
+    override fun applyPatch(
+        relativePath: String,
+        patch: String,
+        expectedVersion: String?,
+        format: InternalWorkspacePatchFormat,
+    ): InternalWorkspaceResult<InternalWorkspaceWrite> =
+        InternalWorkspaceResult.Failure(InternalWorkspaceError(InternalWorkspaceErrorCode.UNSUPPORTED))
 
     override fun write(
         relativePath: String,
@@ -664,7 +797,6 @@ internal class SafWorkspaceBackend(
                     val size = if (type == InternalWorkspaceEntryType.FILE && sizeIndex >= 0 && !cursor.isNull(sizeIndex)) {
                         cursor.getLong(sizeIndex).takeIf { it >= 0L }
                     } else null
-                    if (size != null && size > limits.maxFileBytes) InternalWorkspaceErrorCode.FILE_TOO_LARGE.error()
                     val flags = cursor.getInt(flagsIndex)
                     // buildDocumentUriUsingTree is the Android API operation that turns the
                     // provider-returned document ID into the provider's child URI.  No URI path
@@ -680,7 +812,6 @@ internal class SafWorkspaceBackend(
         } catch (_: RuntimeException) {
             InternalWorkspaceErrorCode.IO_ERROR.error()
         }
-        if (result.size > limits.maxDirectoryEntries) InternalWorkspaceErrorCode.ENTRY_LIMIT_EXCEEDED.error()
         return result
     }
 
@@ -712,7 +843,6 @@ internal class SafWorkspaceBackend(
                 val size = if (type == InternalWorkspaceEntryType.FILE && sizeIndex >= 0 && !cursor.isNull(sizeIndex)) {
                     cursor.getLong(sizeIndex).takeIf { it >= 0L }
                 } else null
-                if (size != null && size > limits.maxFileBytes) InternalWorkspaceErrorCode.FILE_TOO_LARGE.error()
                 return Child(uri, id, name, type, size, cursor.getInt(flagsIndex))
             } ?: InternalWorkspaceErrorCode.WORKSPACE_NOT_FOUND.error()
         } catch (failure: InternalWorkspaceFailure) {
@@ -784,7 +914,12 @@ internal class SafWorkspaceBackend(
     private fun nodeVersion(node: Child): String =
         if (node.type == InternalWorkspaceEntryType.FILE) fileVersion(node.uri) else directoryVersion(node.uri)
 
-    private fun fileVersion(uri: Uri): String = InternalWorkspaceVersions.bytes(readBounded(uri, limits.maxFileBytes.toInt()))
+    /**
+     * A metadata-only token is used for SAF stat/list/read and conditional
+     * mutation checks. Reading a document just to version it would defeat
+     * chunked reads and make a large provider file block the file tool.
+     */
+    private fun fileVersion(uri: Uri): String = metadataVersion(queryDocument(safeDocumentUri(uri)))
 
     private fun directoryVersion(uri: Uri): String {
         val digestInput = children(uri).sortedBy { it.name }.joinToString("\n") {
@@ -793,29 +928,26 @@ internal class SafWorkspaceBackend(
         return InternalWorkspaceVersions.bytes(digestInput.toByteArray(Charsets.UTF_8))
     }
 
-    private fun readBounded(uri: Uri, maximum: Int): ByteArray {
-        val output = ByteArrayOutputStream(maximum.coerceAtMost(8 * 1024))
+    private fun readChunk(
+        uri: Uri,
+        offset: Long,
+        maximum: Int,
+        declaredSize: Long? = null,
+    ): SafWorkspaceReadChunk {
         val input = try {
             resolver.openInputStream(uri) ?: InternalWorkspaceErrorCode.IO_ERROR.error()
         } catch (_: SecurityException) {
             InternalWorkspaceErrorCode.PERMISSION_DENIED.error()
         }
-        input.use {
-            val buffer = ByteArray(8 * 1024)
-            while (true) {
-                val count = try {
-                    it.read(buffer)
-                } catch (_: IOException) {
-                    InternalWorkspaceErrorCode.IO_ERROR.error()
-                }
-                if (count < 0) break
-                if (count == 0) continue
-                if (output.size() + count > maximum) InternalWorkspaceErrorCode.READ_LIMIT_EXCEEDED.error()
-                output.write(buffer, 0, count)
-            }
+        return input.use {
+            readSafChunk(it, offset, maximum, declaredSize)
         }
-        return output.toByteArray()
     }
+
+    private fun readBounded(uri: Uri, offset: Long, maximum: Int): ByteArray =
+        readChunk(uri, offset, maximum).bytes
+
+    private fun readBounded(uri: Uri, maximum: Int): ByteArray = readBounded(uri, 0L, maximum)
 
     private fun inspectUsage(): Usage {
         val visited = HashSet<String>()
@@ -839,7 +971,7 @@ internal class SafWorkspaceBackend(
                     )
                     if (usage.entries > limits.maxEntries) InternalWorkspaceErrorCode.ENTRY_LIMIT_EXCEEDED.error()
                 } else {
-                    val bytes = child.size ?: readBounded(child.uri, limits.maxFileBytes.toInt()).size.toLong()
+                    val bytes = child.size ?: readBounded(child.uri, maxFileProbeBytes()).size.toLong()
                     if (bytes > limits.maxFileBytes) InternalWorkspaceErrorCode.FILE_TOO_LARGE.error()
                     if (bytes > limits.quotaBytes - usage.bytes) InternalWorkspaceErrorCode.QUOTA_EXCEEDED.error()
                     usage = usage.copy(files = usage.files + 1, bytes = usage.bytes + bytes)
@@ -856,7 +988,7 @@ internal class SafWorkspaceBackend(
 
     private fun inspectNode(node: Child): Usage {
         if (node.type == InternalWorkspaceEntryType.FILE) {
-            val size = node.size ?: readBounded(node.uri, limits.maxFileBytes.toInt()).size.toLong()
+            val size = node.size ?: readBounded(node.uri, maxFileProbeBytes()).size.toLong()
             checkFileSize(size)
             return Usage(1, size, 1)
         }
@@ -876,6 +1008,10 @@ internal class SafWorkspaceBackend(
     private fun checkFileSize(size: Long) {
         if (size > limits.maxFileBytes) InternalWorkspaceErrorCode.FILE_TOO_LARGE.error()
     }
+
+    /** Read one byte beyond the per-file limit when a provider does not report a size. */
+    private fun maxFileProbeBytes(): Int =
+        if (limits.maxFileBytes < Int.MAX_VALUE.toLong()) limits.maxFileBytes.toInt() + 1 else Int.MAX_VALUE
 
     private fun isPathPrefix(prefix: List<String>, path: List<String>): Boolean =
         prefix.size <= path.size && path.subList(0, prefix.size) == prefix

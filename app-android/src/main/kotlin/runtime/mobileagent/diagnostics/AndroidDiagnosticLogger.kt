@@ -161,6 +161,79 @@ class AndroidDiagnosticLogger private constructor(
     fun recordRuntimeToolExposure(record: RuntimeToolExposureRecord): Boolean =
         store.recordRuntimeToolExposure(record)
 
+    fun recordPrivilegedWorkspaceSelection(record: PrivilegedWorkspaceSelectionRecord): Boolean =
+        store.recordPrivilegedWorkspaceSelection(record)
+
+    fun recordPrivilegedWorkspaceSelectionStarted(
+        authority: DiagnosticAuthority,
+        requestRef: String? = null,
+    ): Boolean = store.recordPrivilegedWorkspaceSelectionStarted(authority, requestRef)
+
+    fun recordPrivilegedWorkspaceSelectionCompleted(
+        authority: DiagnosticAuthority,
+        workspaceId: String,
+        durationMs: Long,
+        requestRef: String? = null,
+        errorCode: String = "none",
+    ): Boolean = store.recordPrivilegedWorkspaceSelectionCompleted(
+        authority,
+        workspaceId,
+        durationMs,
+        requestRef,
+        errorCode,
+    )
+
+    fun recordPrivilegedWorkspaceBindingPersisted(record: PrivilegedWorkspaceBindingPersistedRecord): Boolean =
+        store.recordPrivilegedWorkspaceBindingPersisted(record)
+
+    fun recordPrivilegedWorkspaceBindingSaved(record: PrivilegedWorkspaceBindingPersistedRecord): Boolean =
+        store.recordPrivilegedWorkspaceBindingSaved(record)
+
+    fun recordPrivilegedWorkspaceReattach(record: PrivilegedWorkspaceReattachRecord): Boolean =
+        store.recordPrivilegedWorkspaceReattach(record)
+
+    fun recordPrivilegedWorkspaceReattachStarted(record: PrivilegedWorkspaceReattachRecord): Boolean =
+        store.recordPrivilegedWorkspaceReattachStarted(record)
+
+    fun recordPrivilegedWorkspaceReattachSucceeded(record: PrivilegedWorkspaceReattachRecord): Boolean =
+        store.recordPrivilegedWorkspaceReattachSucceeded(record)
+
+    fun recordPrivilegedWorkspaceReattachFailed(record: PrivilegedWorkspaceReattachRecord): Boolean =
+        store.recordPrivilegedWorkspaceReattachFailed(record)
+
+    fun recordConversationWorkspace(record: ConversationWorkspaceRecord): Boolean =
+        store.recordConversationWorkspace(record)
+
+    fun recordConversationWorkspaceBound(record: ConversationWorkspaceRecord): Boolean =
+        store.recordConversationWorkspaceBound(record)
+
+    fun recordConversationWorkspaceChanged(record: ConversationWorkspaceRecord): Boolean =
+        store.recordConversationWorkspaceChanged(record)
+
+    fun recordConversationWorkspaceResolved(record: ConversationWorkspaceRecord): Boolean =
+        store.recordConversationWorkspaceResolved(record)
+
+    fun recordWorkspaceToolExposure(record: WorkspaceToolExposureRecord): Boolean =
+        store.recordWorkspaceToolExposure(record)
+
+    fun recordProviderConnectionTest(record: ProviderConnectionTestRecord): Boolean =
+        store.recordProviderConnectionTest(record)
+
+    fun recordProviderConnectionTestStarted(record: ProviderConnectionTestRecord): Boolean =
+        store.recordProviderConnectionTestStarted(record)
+
+    fun recordProviderConnectionTestCompleted(record: ProviderConnectionTestRecord): Boolean =
+        store.recordProviderConnectionTestCompleted(record)
+
+    fun recordProviderCapabilityProbe(record: ProviderCapabilityProbeRecord): Boolean =
+        store.recordProviderCapabilityProbe(record)
+
+    fun recordProviderCapabilityProbeStarted(record: ProviderCapabilityProbeRecord): Boolean =
+        store.recordProviderCapabilityProbeStarted(record)
+
+    fun recordProviderCapabilityProbeCompleted(record: ProviderCapabilityProbeRecord): Boolean =
+        store.recordProviderCapabilityProbeCompleted(record)
+
     fun status(): DiagnosticStatus = store.status()
 
     fun exportTo(output: OutputStream) = store.exportTo(output)

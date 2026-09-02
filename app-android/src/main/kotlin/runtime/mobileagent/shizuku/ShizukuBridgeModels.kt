@@ -67,6 +67,19 @@ sealed interface ShizukuDispatchResult {
     ) : ShizukuDispatchResult
 }
 
+/** Result of a bounded workspace chunk RPC whose payload is a PFD envelope. */
+sealed interface ShizukuWorkspaceReadDispatchResult {
+    data class Success(val response: ShizukuWorkspaceReadResponse) : ShizukuWorkspaceReadDispatchResult
+
+    data class Denied(val reason: String) : ShizukuWorkspaceReadDispatchResult
+
+    data class Failed(
+        val reason: String,
+        val unknownOutcome: Boolean,
+        val errorCode: String? = null,
+    ) : ShizukuWorkspaceReadDispatchResult
+}
+
 /** Permission result delivered by the explicit user-triggered request entry point. */
 data class ShizukuPermissionResult(
     val requestCode: Int,

@@ -3,7 +3,12 @@
 
 package runtime.mobileagent.shizuku
 
+import android.os.ParcelFileDescriptor
+import java.io.ByteArrayOutputStream
+import java.io.IOException
 import java.nio.charset.StandardCharsets
+import java.util.Arrays
+import java.util.Base64
 import org.json.JSONObject
 import runtime.mobileagent.domain.Authority
 import runtime.mobileagent.domain.CapabilityId
@@ -12,6 +17,7 @@ import runtime.mobileagent.skills.tooling.FullDeviceFilesGrantStore
 import runtime.mobileagent.skills.tooling.FullDeviceFilesRequest
 import runtime.mobileagent.skills.tooling.PrivilegedWorkspaceProvider
 import runtime.mobileagent.skills.tooling.WorkspaceAttachRequest
+import runtime.mobileagent.skills.tooling.WorkspaceApplyPatchRequest
 import runtime.mobileagent.skills.tooling.WorkspaceBackend
 import runtime.mobileagent.skills.tooling.WorkspaceBackendType
 import runtime.mobileagent.skills.tooling.WorkspaceBrowseRequest
@@ -29,6 +35,8 @@ import runtime.mobileagent.skills.tooling.WorkspaceListing
 import runtime.mobileagent.skills.tooling.WorkspaceMoveRequest
 import runtime.mobileagent.skills.tooling.WorkspaceMutation
 import runtime.mobileagent.skills.tooling.WorkspaceReadTextRequest
+import runtime.mobileagent.skills.tooling.WorkspaceRecoveryLocator
+import runtime.mobileagent.skills.tooling.WorkspaceReattachRequest
 import runtime.mobileagent.skills.tooling.WorkspaceResult
 import runtime.mobileagent.skills.tooling.WorkspaceStatRequest
 import runtime.mobileagent.skills.tooling.WorkspaceText
@@ -65,21 +73,66 @@ internal class ShizukuDeviceWorkspaceProvider(
         if (handle.owner !== owner) return failure(ToolErrorCode.INVALID_REQUEST)
         if (handle.deviceRoot) return failure(ToolErrorCode.ROOT_OPERATION_FORBIDDEN)
         val dispatch = safeDispatch { bridge.dispatchDirectoryAttach(handle.token) }
-        val workspaceHandle = parseAttach(dispatch) ?: return attachFailure(dispatch)
+        val attached = parseAttachment(dispatch, "attach_directory") ?: return attachFailure(dispatch)
+        if (attached.rootKind != "directory") return failure(ToolErrorCode.BRIDGE_PROTOCOL_MISMATCH)
         return WorkspaceResult.Success(
             runtime.mobileagent.skills.tooling.WorkspaceAttachment(
                 descriptor = descriptor(request.workspaceId, request.displayName, WorkspaceScope.SELECTED_DIRECTORY),
                 backend = ShizukuTokenWorkspaceBackend(
                     bridge = bridge,
-                    workspaceHandle = workspaceHandle,
+                    workspaceHandle = attached.workspaceHandle,
                     workspaceId = request.workspaceId,
                     displayName = request.displayName,
                     scope = WorkspaceScope.SELECTED_DIRECTORY,
                     owner = owner,
                 ),
+                recoveryLocator = attached.recoveryLocator,
             ),
         )
     }
+
+    override suspend fun reattachDirectory(
+        request: WorkspaceReattachRequest,
+    ): WorkspaceResult<runtime.mobileagent.skills.tooling.WorkspaceAttachment> {
+        if (closed) return failure(ToolErrorCode.AUTHORITY_TEMPORARILY_UNAVAILABLE)
+        if (request.scope == WorkspaceScope.FULL_DEVICE_FILES) {
+            val store = fullDeviceGrantStore
+                ?: return failure(ToolErrorCode.AUTHORITY_TEMPORARILY_UNAVAILABLE)
+            val grant = runCatching { store.load(request.workspaceId) }.getOrElse {
+                return failure(ToolErrorCode.UNKNOWN_OUTCOME)
+            } ?: return failure(ToolErrorCode.AUTHORITY_NOT_GRANTED)
+            if (grant.revision != request.grantRevision) return failure(ToolErrorCode.CONFLICT)
+        }
+        val locator = runCatching { request.recoveryLocator.copyBytes() }.getOrNull()
+            ?: return failure(ToolErrorCode.BRIDGE_PROTOCOL_MISMATCH)
+        val dispatch = try {
+            safeDispatch { bridge.dispatchDirectoryReattach(locator) }
+        } finally {
+            Arrays.fill(locator, 0)
+        }
+        val attached = parseAttachment(dispatch, "reattach_directory") ?: return attachFailure(dispatch)
+        val expectedRootKind = if (request.scope == WorkspaceScope.FULL_DEVICE_FILES) "device" else "directory"
+        if (attached.rootKind != expectedRootKind) return failure(ToolErrorCode.BRIDGE_PROTOCOL_MISMATCH)
+        return WorkspaceResult.Success(
+            runtime.mobileagent.skills.tooling.WorkspaceAttachment(
+                descriptor = descriptor(request.workspaceId, request.displayName, request.scope),
+                backend = ShizukuTokenWorkspaceBackend(
+                    bridge = bridge,
+                    workspaceHandle = attached.workspaceHandle,
+                    workspaceId = request.workspaceId,
+                    displayName = request.displayName,
+                    scope = request.scope,
+                    owner = owner,
+                ),
+                recoveryLocator = attached.recoveryLocator,
+            ),
+        )
+    }
+
+    override suspend fun reopenDirectory(
+        request: WorkspaceReattachRequest,
+    ): WorkspaceResult<runtime.mobileagent.skills.tooling.WorkspaceAttachment> =
+        reattachDirectory(request)
 
     override suspend fun openFullDeviceFiles(request: FullDeviceFilesRequest): WorkspaceResult<runtime.mobileagent.skills.tooling.WorkspaceAttachment> {
         if (closed) return failure(ToolErrorCode.AUTHORITY_TEMPORARILY_UNAVAILABLE)
@@ -99,18 +152,20 @@ internal class ShizukuDeviceWorkspaceProvider(
             return failure(ToolErrorCode.AUTHORITY_TEMPORARILY_UNAVAILABLE)
         }
         val dispatch = safeDispatch { bridge.dispatchDirectoryAttach(rootHandle.token) }
-        val workspaceHandle = parseAttach(dispatch) ?: return attachFailure(dispatch)
+        val attached = parseAttachment(dispatch, "attach_directory") ?: return attachFailure(dispatch)
+        if (attached.rootKind != "device") return failure(ToolErrorCode.BRIDGE_PROTOCOL_MISMATCH)
         return WorkspaceResult.Success(
             runtime.mobileagent.skills.tooling.WorkspaceAttachment(
                 descriptor = descriptor(request.workspaceId, request.displayName, WorkspaceScope.FULL_DEVICE_FILES),
                 backend = ShizukuTokenWorkspaceBackend(
                     bridge = bridge,
-                    workspaceHandle = workspaceHandle,
+                    workspaceHandle = attached.workspaceHandle,
                     workspaceId = request.workspaceId,
                     displayName = request.displayName,
                     scope = WorkspaceScope.FULL_DEVICE_FILES,
                     owner = owner,
                 ),
+                recoveryLocator = attached.recoveryLocator,
             ),
         )
     }
@@ -211,11 +266,33 @@ internal class ShizukuDeviceWorkspaceProvider(
         )
     }
 
-    private fun parseAttach(dispatch: ShizukuDispatchResult): String? {
-        val payload = payload(dispatch, "attach_directory") ?: return null
+    private fun parseAttachment(dispatch: ShizukuDispatchResult, operation: String): ParsedAttachment? {
+        val payload = payload(dispatch, operation) ?: return null
         val token = payload.optString("workspaceHandle", "")
-        return token.takeIf(::isOpaqueToken)
+        if (!isOpaqueToken(token)) return null
+        val rootKind = payload.optString("rootKind", "")
+            .takeIf { it == "directory" || it == "device" }
+            ?: return null
+        val encodedLocator = payload.optString("recoveryLocator", "")
+        if (encodedLocator.isBlank() || encodedLocator.length > WorkspaceRecoveryLocator.MAX_BYTES * 2) return null
+        val rawLocator = runCatching { Base64.getUrlDecoder().decode(encodedLocator) }.getOrNull()
+            ?: return null
+        val locator = try {
+            if (ShizukuRecoveryLocatorCodec.decode(rawLocator) == null) return null
+            WorkspaceRecoveryLocator.fromBytes(rawLocator)
+        } catch (_: IllegalArgumentException) {
+            return null
+        } finally {
+            Arrays.fill(rawLocator, 0)
+        }
+        return ParsedAttachment(token, rootKind, locator)
     }
+
+    private data class ParsedAttachment(
+        val workspaceHandle: String,
+        val rootKind: String,
+        val recoveryLocator: WorkspaceRecoveryLocator,
+    )
 
     private fun attachFailure(dispatch: ShizukuDispatchResult): WorkspaceResult.Failure = dispatchFailure(dispatch)
 
@@ -254,10 +331,12 @@ internal class ShizukuDeviceWorkspaceProvider(
     private fun mapError(code: String?): ToolErrorCode = when (code) {
         ShizukuDirectoryHandleStore.PERMISSION_DENIED -> ToolErrorCode.SHIZUKU_PERMISSION_DENIED
         ShizukuDirectoryHandleStore.INVALID_HANDLE -> ToolErrorCode.INVALID_REQUEST
+        ShizukuDirectoryHandleStore.RECOVERY_LOCATOR_INVALID -> ToolErrorCode.BRIDGE_PROTOCOL_MISMATCH
+        ShizukuDirectoryHandleStore.WORKSPACE_NOT_FOUND,
+        ShizukuWorkspaceFileStore.NOT_FOUND -> ToolErrorCode.WORKSPACE_NOT_FOUND
         ShizukuWorkspaceFileStore.INVALID_PATH,
         ShizukuWorkspaceFileStore.OUTSIDE_ROOT -> ToolErrorCode.PATH_OUT_OF_SCOPE
         ShizukuWorkspaceFileStore.SYMLINK_REJECTED -> ToolErrorCode.SYMLINK_FORBIDDEN
-        ShizukuWorkspaceFileStore.NOT_FOUND -> ToolErrorCode.WORKSPACE_NOT_FOUND
         ShizukuWorkspaceFileStore.FILE_TOO_LARGE -> ToolErrorCode.FILE_TOO_LARGE
         ShizukuWorkspaceFileStore.LIMIT,
         ShizukuWorkspaceFileStore.OUTPUT_LIMIT -> ToolErrorCode.QUOTA_EXCEEDED
@@ -317,13 +396,17 @@ private class ShizukuTokenWorkspaceBackend(
         CapabilityId(CapabilityId.FILE_CREATE_DIRECTORY),
         CapabilityId(CapabilityId.FILE_MOVE),
         CapabilityId(CapabilityId.FILE_DELETE),
+        CapabilityId("file.apply_patch"),
     )
 
     override suspend fun list(request: WorkspaceListRequest): WorkspaceResult<WorkspaceListing> {
         if (request.workspaceId != descriptor.id) return failure(ToolErrorCode.INVALID_REQUEST)
         val path = normalize(request.relativePath, allowRoot = true) ?: return failure(ToolErrorCode.PATH_OUT_OF_SCOPE)
-        val result = dispatch { bridge.dispatchWorkspaceList(workspaceHandle, path, request.maxEntries) }
-        return parseList(result, path, request.maxEntries)
+        val pageSize = minOf(request.maxEntries, ShizukuWorkspaceFileStore.MAX_DIRECTORY_ENTRIES)
+        val result = dispatch {
+            bridge.dispatchWorkspaceListPaged(workspaceHandle, path, pageSize, request.cursor)
+        }
+        return parseList(result, path, pageSize)
     }
 
     override suspend fun stat(request: WorkspaceStatRequest): WorkspaceResult<WorkspaceFileStat> {
@@ -338,7 +421,37 @@ private class ShizukuTokenWorkspaceBackend(
         if (request.maxBytes !in 1L..ShizukuWorkspaceFileStore.MAX_READ_BYTES.toLong()) {
             return failure(ToolErrorCode.FILE_TOO_LARGE)
         }
-        return parseRead(dispatch { bridge.dispatchWorkspaceRead(workspaceHandle, path, request.maxBytes.toInt()) }, path, request.maxBytes)
+        return readChunk(path, request.offsetBytes, request.maxBytes.toInt())
+    }
+
+    override suspend fun applyPatch(request: WorkspaceApplyPatchRequest): WorkspaceResult<WorkspaceMutation> {
+        if (request.workspaceId != descriptor.id) return failure(ToolErrorCode.INVALID_REQUEST)
+        val path = normalize(request.relativePath, allowRoot = false) ?: return failure(ToolErrorCode.PATH_OUT_OF_SCOPE)
+        val patchBytes = strictUtf8(request.patch) ?: return failure(ToolErrorCode.INVALID_REQUEST)
+        if (patchBytes.size !in 1..ShizukuWorkspaceFileStore.MAX_PATCH_BYTES) {
+            return failure(ToolErrorCode.FILE_TOO_LARGE)
+        }
+        val current = currentVersion(path) ?: return failure(ToolErrorCode.BRIDGE_PROTOCOL_MISMATCH)
+        if (current.publicVersion != request.expectedVersion) return failure(ToolErrorCode.CONFLICT)
+        val result = dispatch {
+            bridge.dispatchWorkspaceApplyPatch(
+                workspaceHandle = workspaceHandle,
+                relativePath = path,
+                patch = request.patch,
+                expectedVersion = current.opaqueVersion,
+                format = request.format.name,
+            )
+        }
+        val payload = payload(result, "apply_patch") ?: return dispatchFailure(result)
+        val responsePath = normalize(payload.optString("path", ""), allowRoot = false)
+        val bytes = payload.optLong("bytes", -1L)
+        val version = parseOpaqueVersion(payload.optString("version", ""))
+        if (responsePath != path || payload.optString("type", "") != "file" || bytes < 0L ||
+            bytes > ShizukuWorkspaceFileStore.MAX_FILE_BYTES || payload.optBoolean("created", true) || version == null
+        ) return failure(ToolErrorCode.BRIDGE_PROTOCOL_MISMATCH)
+        return WorkspaceResult.Success(
+            WorkspaceMutation(path, WorkspaceEntryType.FILE, bytes, version.publicVersion),
+        )
     }
 
     override suspend fun writeText(request: WorkspaceWriteTextRequest): WorkspaceResult<WorkspaceMutation> {
@@ -412,10 +525,21 @@ private class ShizukuTokenWorkspaceBackend(
                 else -> return failure(ToolErrorCode.BRIDGE_PROTOCOL_MISMATCH)
             }
             val bytes = item.optLong("bytes", 0L)
+            val version = parseOpaqueVersion(item.optString("version", ""))
+                ?: return failure(ToolErrorCode.BRIDGE_PROTOCOL_MISMATCH)
             if (bytes < 0L || bytes > ShizukuWorkspaceFileStore.MAX_FILE_BYTES || !isChild(entryPath, path)) return failure(ToolErrorCode.BRIDGE_PROTOCOL_MISMATCH)
-            output += WorkspaceEntry(entryPath, type, bytes)
+            output += WorkspaceEntry(entryPath, type, bytes, version.publicVersion)
         }
-        return WorkspaceResult.Success(WorkspaceListing(path.ifEmpty { "." }, output, items.length() > output.size))
+        val nextCursor = payload.optString("nextCursor", "").takeIf { it.isNotBlank() && it != "null" }
+        if (nextCursor != null && (nextCursor.length > 512 || nextCursor.any { it.code !in 0x21..0x7e })) {
+            return failure(ToolErrorCode.BRIDGE_PROTOCOL_MISMATCH)
+        }
+        if (payload.optBoolean("truncated", false) != (nextCursor != null)) {
+            return failure(ToolErrorCode.BRIDGE_PROTOCOL_MISMATCH)
+        }
+        return WorkspaceResult.Success(
+            WorkspaceListing(path.ifEmpty { "." }, output, nextCursor != null, nextCursor),
+        )
     }
 
     private fun parseStat(result: ShizukuDispatchResult, path: String): WorkspaceResult<WorkspaceFileStat> {
@@ -426,17 +550,104 @@ private class ShizukuTokenWorkspaceBackend(
             else -> return failure(ToolErrorCode.BRIDGE_PROTOCOL_MISMATCH)
         }
         val bytes = payload.optLong("bytes", -1L)
-        if (payload.optString("path", "") != path || bytes < 0L || bytes > ShizukuWorkspaceFileStore.MAX_FILE_BYTES) return failure(ToolErrorCode.BRIDGE_PROTOCOL_MISMATCH)
-        return WorkspaceResult.Success(WorkspaceFileStat(path, type, bytes))
+        val version = parseOpaqueVersion(payload.optString("version", ""))
+        if (payload.optString("path", "") != path || bytes < 0L || bytes > ShizukuWorkspaceFileStore.MAX_FILE_BYTES || version == null) {
+            return failure(ToolErrorCode.BRIDGE_PROTOCOL_MISMATCH)
+        }
+        return WorkspaceResult.Success(WorkspaceFileStat(path, type, bytes, version.publicVersion))
     }
 
-    private fun parseRead(result: ShizukuDispatchResult, path: String, maxBytes: Long): WorkspaceResult<WorkspaceText> {
-        val payload = payload(result, "read") ?: return dispatchFailure(result)
-        val text = payload.optString("text", "")
-        val bytes = payload.optLong("bytes", -1L)
-        if (payload.optString("path", "") != path || bytes < 0L || bytes > maxBytes || strictUtf8(text)?.size?.toLong() != bytes) return failure(ToolErrorCode.BRIDGE_PROTOCOL_MISMATCH)
-        return WorkspaceResult.Success(WorkspaceText(path, text, bytes))
+    private fun readChunk(path: String, offsetBytes: Long, maxBytes: Int): WorkspaceResult<WorkspaceText> {
+        val result = safeReadDispatch {
+            bridge.dispatchWorkspaceReadChunk(workspaceHandle, path, offsetBytes, maxBytes)
+        }
+        return when (result) {
+            is ShizukuWorkspaceReadDispatchResult.Denied -> failure(ToolErrorCode.SHIZUKU_SERVICE_UNAVAILABLE)
+            is ShizukuWorkspaceReadDispatchResult.Failed -> failure(
+                if (result.unknownOutcome) ToolErrorCode.UNKNOWN_OUTCOME else mapError(result.errorCode),
+            )
+            is ShizukuWorkspaceReadDispatchResult.Success -> {
+                val response = result.response
+                if (!response.accepted) {
+                    response.contentFd?.let { runCatching { it.close() } }
+                    failure(mapError(response.errorCode))
+                } else {
+                    val metadata = runCatching { JSONObject(response.metadata ?: "") }.getOrNull()
+                    val bytes = runCatching { response.contentFd?.let { readChunkFd(it, maxBytes) } }.getOrNull()
+                    if (metadata == null || bytes == null) {
+                        response.contentFd?.let { runCatching { it.close() } }
+                        failure(ToolErrorCode.BRIDGE_PROTOCOL_MISMATCH)
+                    } else {
+                        parseReadMetadata(metadata, path, offsetBytes, maxBytes, bytes)
+                    }
+                }
+            }
+        }
     }
+
+    private fun parseReadMetadata(
+        payload: JSONObject,
+        path: String,
+        requestedOffset: Long,
+        requestedMax: Int,
+        bytes: ByteArray,
+    ): WorkspaceResult<WorkspaceText> {
+        if (!payload.optBoolean("ok", false) || payload.optString("operation", "") != "read") {
+            return failure(ToolErrorCode.BRIDGE_PROTOCOL_MISMATCH)
+        }
+        val count = payload.optLong("bytes", -1L)
+        val offset = payload.optLong("offsetBytes", -1L)
+        val total = payload.optLong("totalBytes", -1L)
+        val eof = payload.optBoolean("eof", false)
+        val version = parseOpaqueVersion(payload.optString("version", ""))
+        val text = decodeUtf8(bytes)
+        if (payload.optString("path", "") != path || count != bytes.size.toLong() || count < 0L || count > requestedMax ||
+            offset != requestedOffset || total < 0L || offset > total || count > total - offset || version == null || text == null ||
+            eof != (count >= total - offset)
+        ) return failure(ToolErrorCode.BRIDGE_PROTOCOL_MISMATCH)
+        return runCatching {
+            WorkspaceResult.Success(
+                WorkspaceText(path, text, count, version.publicVersion, offset, total, eof),
+            )
+        }.getOrElse { failure(ToolErrorCode.BRIDGE_PROTOCOL_MISMATCH) }
+    }
+
+    private fun readChunkFd(descriptor: ParcelFileDescriptor, maxBytes: Int): ByteArray {
+        val output = ByteArrayOutputStream(minOf(maxBytes, 8 * 1024))
+        ParcelFileDescriptor.AutoCloseInputStream(descriptor).use { input ->
+            val buffer = ByteArray(8 * 1024)
+            while (true) {
+                val count = input.read(buffer)
+                if (count < 0) break
+                if (count == 0) continue
+                if (output.size() + count > maxBytes) throw IOException("chunk exceeds limit")
+                output.write(buffer, 0, count)
+            }
+        }
+        return output.toByteArray()
+    }
+
+    private data class ParsedVersion(val publicVersion: Long, val opaqueVersion: String)
+
+    private fun parseOpaqueVersion(raw: String): ParsedVersion? {
+        if (raw.length != 64 || raw.any { it !in "0123456789abcdefABCDEF" }) return null
+        return runCatching {
+            ParsedVersion(java.lang.Long.parseUnsignedLong(raw.take(16), 16), raw.lowercase())
+        }.getOrNull()
+    }
+
+    private fun currentVersion(path: String): ParsedVersion? {
+        val result = dispatch { bridge.dispatchWorkspaceStat(workspaceHandle, path) }
+        val payload = payload(result, "stat") ?: return null
+        if (payload.optString("path", "") != path) return null
+        return parseOpaqueVersion(payload.optString("version", ""))
+    }
+
+    private fun decodeUtf8(bytes: ByteArray): String? = runCatching {
+        String(bytes, StandardCharsets.UTF_8).also { text ->
+            require(text.toByteArray(StandardCharsets.UTF_8).contentEquals(bytes))
+        }
+    }.getOrNull()
 
     private fun parseMutation(result: ShizukuDispatchResult, operation: String, path: String, type: WorkspaceEntryType, expectedBytes: Long?): WorkspaceResult<WorkspaceMutation> {
         val payload = payload(result, operation) ?: return dispatchFailure(result)
@@ -471,6 +682,14 @@ private class ShizukuTokenWorkspaceBackend(
         ShizukuWorkspaceFileStore.LIMIT,
         ShizukuWorkspaceFileStore.OUTPUT_LIMIT -> ToolErrorCode.QUOTA_EXCEEDED
         ShizukuWorkspaceFileStore.UNKNOWN_OUTCOME -> ToolErrorCode.UNKNOWN_OUTCOME
+        ShizukuWorkspaceFileStore.CONFLICT -> ToolErrorCode.CONFLICT
+        ShizukuWorkspaceFileStore.PERMISSION_DENIED -> ToolErrorCode.SHIZUKU_PERMISSION_DENIED
+        ShizukuWorkspaceFileStore.INVALID_CURSOR,
+        ShizukuWorkspaceFileStore.INVALID_VERSION,
+        ShizukuWorkspaceFileStore.OFFSET_OUT_OF_RANGE,
+        ShizukuWorkspaceFileStore.INVALID_PATCH,
+        ShizukuWorkspaceFileStore.UNSUPPORTED,
+        -> ToolErrorCode.INVALID_REQUEST
         else -> ToolErrorCode.IO_ERROR
     }
 
@@ -478,6 +697,14 @@ private class ShizukuTokenWorkspaceBackend(
         block()
     } catch (_: RuntimeException) {
         ShizukuDispatchResult.Failed("Shizuku dispatch failed", unknownOutcome = true)
+    }
+
+    private fun safeReadDispatch(
+        block: () -> ShizukuWorkspaceReadDispatchResult,
+    ): ShizukuWorkspaceReadDispatchResult = try {
+        block()
+    } catch (_: RuntimeException) {
+        ShizukuWorkspaceReadDispatchResult.Failed("Shizuku read dispatch failed", unknownOutcome = true)
     }
 
     private fun normalize(raw: String?, allowRoot: Boolean): String? = runCatching {

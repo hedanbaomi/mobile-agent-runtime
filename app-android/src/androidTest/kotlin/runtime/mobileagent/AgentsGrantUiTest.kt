@@ -166,6 +166,64 @@ class AgentsGrantUiTest {
     }
 
     @Test
+    fun defaultWorkspaceRequiresAnActivePersistentGrantWithoutChangingOtherGrants() {
+        val noPersistentGrant = fixtureEditor().copy(defaultWorkspaceId = "workspace.one")
+        val missingGrantFailure = runCatching {
+            validateAgentWorkspaceDefaultDraft(noPersistentGrant)
+        }.exceptionOrNull()
+        assertEquals("默认工作区需要先授予该工作区的长期能力；保存不会自动扩大授权。", missingGrantFailure?.message)
+
+        val persistentGrant = CapabilityGrant(
+            grantId = "grant.persistent",
+            agentId = "agent.one",
+            capability = CapabilityId(CapabilityId.FILE_READ_TEXT),
+            workspaceId = "workspace.one",
+            lifetime = GrantLifetime.PERSISTENT,
+            policyVersion = 4,
+            createdAt = "2026-08-30T00:00:00Z",
+        )
+        val valid = noPersistentGrant.copy(
+            grants = listOf(AgentGrantUi(persistentGrant, workspaceName = "Documents")),
+        )
+        validateAgentWorkspaceDefaultDraft(valid)
+    }
+
+    @Test
+    fun workspaceDefaultSelectorIsSeparateFromQuickGrantAndCanBeCleared() {
+        var editor by mutableStateOf(fixtureEditor())
+        composeRule.setContent {
+            MaterialTheme {
+                AgentsScreen(
+                    state = AgentsUiState(
+                        selectedAgentId = "agent.one",
+                        summary = editor,
+                        editor = editor,
+                        editorOpen = true,
+                    ),
+                    actions = AgentsActions(onEditorChange = { editor = it }),
+                )
+            }
+        }
+
+        composeRule.onNodeWithTag(AgentTestTags.WORKSPACE_DEFAULT, useUnmergedTree = true)
+            .performScrollTo()
+            .assertIsDisplayed()
+        composeRule.onNodeWithTag(AgentTestTags.WORKSPACE_DEFAULT_SELECTOR, useUnmergedTree = true)
+            .performScrollTo()
+            .performClick()
+        composeRule.onNodeWithText("Documents", useUnmergedTree = true)
+            .performClick()
+        assertEquals("workspace.one", editor.defaultWorkspaceId)
+
+        composeRule.onNodeWithTag(AgentTestTags.WORKSPACE_DEFAULT_SELECTOR, useUnmergedTree = true)
+            .performScrollTo()
+            .performClick()
+        composeRule.onNodeWithText("不设置默认（新会话不绑定）", useUnmergedTree = true)
+            .performClick()
+        assertNull(editor.defaultWorkspaceId)
+    }
+
+    @Test
     fun grantEditorOffersSimpleWorkspacePresetBeforeAdvancedSingleGrantFlow() {
         var editor by mutableStateOf(fixtureEditor())
         composeRule.setContent {

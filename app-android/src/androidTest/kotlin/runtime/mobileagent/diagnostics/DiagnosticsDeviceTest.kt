@@ -512,6 +512,247 @@ class DiagnosticsDeviceTest {
     }
 
     @Test
+    fun workspaceThreadAndProviderEventsAreTypedClosedAndRedacted() {
+        withStore { directory, preferences ->
+            preferences.setEnabled(true)
+            val store = newStore(directory, preferences)
+            val secret = "content://private/${UUID.randomUUID()}-api-key"
+            val workspace = "workspace-$secret"
+            val agent = "agent-$secret"
+            val session = "session-$secret"
+            val provider = "provider-$secret"
+            val model = "model-$secret"
+
+            assertTrue(
+                store.recordPrivilegedWorkspaceSelection(
+                    PrivilegedWorkspaceSelectionRecord(
+                        DiagnosticWorkspaceSelectionPhase.STARTED,
+                        DiagnosticAuthority.SHIZUKU,
+                        requestRef = "pick-$secret",
+                    ),
+                ),
+            )
+            assertTrue(
+                store.recordPrivilegedWorkspaceSelection(
+                    PrivilegedWorkspaceSelectionRecord(
+                        DiagnosticWorkspaceSelectionPhase.COMPLETED,
+                        DiagnosticAuthority.SHIZUKU,
+                        workspaceId = workspace,
+                        requestRef = "pick-$secret",
+                        durationMs = 12L,
+                    ),
+                ),
+            )
+            assertTrue(
+                store.recordPrivilegedWorkspaceBindingPersisted(
+                    PrivilegedWorkspaceBindingPersistedRecord(
+                        workspaceId = workspace,
+                        authority = DiagnosticAuthority.SHIZUKU,
+                        bindingRevision = 3,
+                        grantGeneration = 4,
+                        requestRef = "bind-$secret",
+                    ),
+                ),
+            )
+            assertTrue(
+                store.recordPrivilegedWorkspaceReattach(
+                    PrivilegedWorkspaceReattachRecord(
+                        DiagnosticWorkspaceReattachPhase.STARTED,
+                        workspace,
+                        DiagnosticAuthority.SHIZUKU,
+                        bindingRevision = 3,
+                        grantGeneration = 4,
+                    ),
+                ),
+            )
+            assertTrue(
+                store.recordPrivilegedWorkspaceReattach(
+                    PrivilegedWorkspaceReattachRecord(
+                        DiagnosticWorkspaceReattachPhase.COMPLETED,
+                        workspace,
+                        DiagnosticAuthority.SHIZUKU,
+                        bindingRevision = 3,
+                        grantGeneration = 4,
+                        durationMs = 21L,
+                    ),
+                ),
+            )
+            assertTrue(
+                store.recordPrivilegedWorkspaceReattach(
+                    PrivilegedWorkspaceReattachRecord(
+                        DiagnosticWorkspaceReattachPhase.FAILED,
+                        "missing-$secret",
+                        DiagnosticAuthority.SHIZUKU,
+                        bindingRevision = 4,
+                        grantGeneration = 5,
+                        durationMs = 22L,
+                        errorCode = "workspace_not_found",
+                    ),
+                ),
+            )
+            assertTrue(
+                store.recordConversationWorkspace(
+                    ConversationWorkspaceRecord(
+                        ConversationWorkspaceEvent.BOUND,
+                        session,
+                        agent,
+                        workspace,
+                        DiagnosticAuthority.SHIZUKU,
+                        bindingRevision = 3,
+                        grantGeneration = 4,
+                        snapshotVersion = 5,
+                    ),
+                ),
+            )
+            assertTrue(
+                store.recordConversationWorkspace(
+                    ConversationWorkspaceRecord(
+                        ConversationWorkspaceEvent.CHANGED,
+                        session,
+                        agent,
+                        "workspace-new-$secret",
+                        DiagnosticAuthority.SHIZUKU,
+                        bindingRevision = 6,
+                        grantGeneration = 7,
+                        snapshotVersion = 8,
+                        previousWorkspaceId = workspace,
+                    ),
+                ),
+            )
+            assertTrue(
+                store.recordConversationWorkspace(
+                    ConversationWorkspaceRecord(
+                        ConversationWorkspaceEvent.RESOLVED,
+                        session,
+                        agent,
+                        workspace,
+                        DiagnosticAuthority.SHIZUKU,
+                        bindingRevision = 3,
+                        grantGeneration = 4,
+                        snapshotVersion = 9,
+                    ),
+                ),
+            )
+            assertTrue(
+                store.recordWorkspaceToolExposure(
+                    WorkspaceToolExposureRecord(
+                        agentId = agent,
+                        sessionId = session,
+                        workspaceId = workspace,
+                        authority = DiagnosticAuthority.SHIZUKU,
+                        capability = DiagnosticToolCapability.WORKSPACE_READ,
+                        exposed = DiagnosticExposureState.EXPOSED,
+                        grantGeneration = 4,
+                        snapshotVersion = 5,
+                        reasonCode = "none",
+                    ),
+                ),
+            )
+            assertTrue(
+                store.recordProviderConnectionTest(
+                    ProviderConnectionTestRecord(provider, model, DiagnosticProviderResultCode.STARTED),
+                ),
+            )
+            assertTrue(
+                store.recordProviderConnectionTest(
+                    ProviderConnectionTestRecord(
+                        provider,
+                        model,
+                        DiagnosticProviderResultCode.SUCCESS,
+                        DiagnosticHttpClass.TWO_HUNDRED,
+                        durationMs = 42L,
+                    ),
+                ),
+            )
+            assertTrue(
+                store.recordProviderCapabilityProbe(
+                    ProviderCapabilityProbeRecord(provider, model, DiagnosticProviderResultCode.STARTED),
+                ),
+            )
+            assertTrue(
+                store.recordProviderCapabilityProbe(
+                    ProviderCapabilityProbeRecord(
+                        provider,
+                        model,
+                        DiagnosticProviderResultCode.PARTIAL,
+                        DiagnosticHttpClass.FOUR_HUNDRED,
+                        durationMs = 43L,
+                    ),
+                ),
+            )
+
+            assertFalse(
+                store.record(
+                    "provider_connection_test_completed",
+                    mapOf("providerRef" to provider, "modelRef" to model, "resultCode" to "secret-result"),
+                ),
+            )
+            assertFalse(
+                store.record(
+                    "workspace_tool_exposure",
+                    mapOf(
+                        "agentRef" to agent,
+                        "workspaceRef" to workspace,
+                        "authority" to "shizuku",
+                        "capability" to "workspace_read",
+                        "exposed" to "exposed",
+                        "grantGeneration" to 1,
+                        "snapshotVersion" to 1,
+                        "reasonCode" to "none",
+                        "path" to secret,
+                    ),
+                ),
+            )
+            assertFalse(
+                store.record(
+                    "conversation_workspace_bound",
+                    mapOf(
+                        "sessionRef" to 7,
+                        "agentRef" to agent,
+                        "workspaceRef" to workspace,
+                        "authority" to "shizuku",
+                        "bindingRevision" to 1,
+                        "grantGeneration" to 1,
+                        "snapshotVersion" to 1,
+                    ),
+                ),
+            )
+
+            val zipBytes = store.exportBytes()
+            val entries = zipEntries(zipBytes)
+            val allText = entries.values.joinToString("\n")
+            listOf(
+                "privileged_workspace_selection_started",
+                "privileged_workspace_selection_completed",
+                "privileged_workspace_binding_persisted",
+                "privileged_workspace_reattach_started",
+                "privileged_workspace_reattach_completed",
+                "privileged_workspace_reattach_failed",
+                "conversation_workspace_bound",
+                "conversation_workspace_changed",
+                "conversation_workspace_resolved",
+                "workspace_tool_exposure",
+                "provider_connection_test_started",
+                "provider_connection_test_completed",
+                "provider_capability_probe_started",
+                "provider_capability_probe_completed",
+            ).forEach { event -> assertTrue("missing $event", allText.contains("\"event\":\"$event\"")) }
+            assertTrue(allText.contains("\"resultCode\":\"partial\""))
+            assertTrue(allText.contains("\"httpClass\":\"2xx\""))
+            assertTrue(allText.contains("\"errorCode\":\"workspace_not_found\""))
+            val references = Regex("\\\"(?:agentRef|sessionRef|workspaceRef|previousWorkspaceRef|providerRef|modelRef|requestRef)\\\":\\\"([0-9a-f]{32})\\\"")
+                .findAll(allText)
+                .map { it.groupValues[1] }
+                .toList()
+            assertTrue("expected hashed references", references.isNotEmpty())
+            assertTrue(references.all { it.length == RollingDiagnosticLogStore.MAX_REFERENCE_LENGTH })
+            assertFalse(zipBytes.containsBytes(secret.toByteArray(Charsets.UTF_8)))
+            assertFalse(allText.contains("secret-result"))
+            assertFalse(allText.contains("\"path\""))
+        }
+    }
+
+    @Test
     fun concurrentWritesRemainNdjsonAndRotationKeepsCompleteLines() {
         withStore { directory, preferences ->
             preferences.setEnabled(true)

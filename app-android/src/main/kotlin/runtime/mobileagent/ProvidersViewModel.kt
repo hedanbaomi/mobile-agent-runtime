@@ -19,10 +19,28 @@ import runtime.mobileagent.domain.ModelProfile
 import runtime.mobileagent.domain.ModelRole
 import runtime.mobileagent.domain.ProviderProfile
 import runtime.mobileagent.domain.withEndpoint
+import runtime.mobileagent.diagnostics.DiagnosticHttpClass
+import runtime.mobileagent.diagnostics.DiagnosticProviderResultCode
+import runtime.mobileagent.diagnostics.ProviderCapabilityProbeRecord
 import runtime.mobileagent.diagnostics.ProviderModelSavePhase
+import runtime.mobileagent.diagnostics.ProviderConnectionTestRecord
 import runtime.mobileagent.feature.providers.parsePositiveProviderBudget
+import runtime.mobileagent.feature.providers.ConnectionCheckUi
+import runtime.mobileagent.feature.providers.ProbeCheckUi
+import runtime.mobileagent.feature.providers.ProbeOperation
+import runtime.mobileagent.feature.providers.ProbePhase
+import runtime.mobileagent.feature.providers.ProviderProbeUiState
+import runtime.mobileagent.provider.CapabilityCheckStatus
+import runtime.mobileagent.provider.CapabilityProbeStatus
+import runtime.mobileagent.provider.CapabilityReport
+import runtime.mobileagent.provider.HeaderSecretResolver
+import runtime.mobileagent.provider.ProviderConnectionErrorCode
+import runtime.mobileagent.provider.ProviderConnectionResult
+import runtime.mobileagent.provider.RequestHeaderValue
 import runtime.mobileagent.provider.SecretRedactor
 import java.net.URI
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Job
 
 data class ProviderDraft(
     val providerId: String? = null,
@@ -47,6 +65,12 @@ class ProvidersViewModel(application: Application) : AndroidViewModel(applicatio
     val models = mutableStateListOf<ModelProfile>()
     val status = mutableStateOf("")
     val busy = mutableStateOf(false)
+    /** Typed operation state; UI must not derive completion from [busy]. */
+    val probeState = mutableStateOf(ProviderProbeUiState())
+    /** Invalidates an in-flight result when the user changes provider/model. */
+    private var probeGeneration = 0L
+    /** Cancels a superseded network operation instead of merely hiding its UI result. */
+    private var probeJob: Job? = null
 
     init { reload() }
 
@@ -55,6 +79,10 @@ class ProvidersViewModel(application: Application) : AndroidViewModel(applicatio
         providers.addAll(app.container.profiles.listProviders())
         models.clear()
         models.addAll(app.container.profiles.listModels())
+        val target = probeState.value
+        if (target.phase != ProbePhase.IDLE && target.modelId != null && models.none { it.id == target.modelId }) {
+            clearProbe()
+        }
     }
 
     fun save(name: String, baseUrl: String, modelId: String, apiKey: String, vision: Boolean, tools: Boolean = false): Boolean =
@@ -187,37 +215,515 @@ class ProvidersViewModel(application: Application) : AndroidViewModel(applicatio
         } catch (error: Exception) { status.value = SecretRedactor.redact(error.message ?: "删除失败。") }
     }
 
-    /** Requires a separate UI confirmation because even a short capability probe can be billed. */
+    /** Requires a separate UI confirmation because even a minimal chat may be billed. */
+    fun testConnection(modelId: String, approved: Boolean) {
+        if (!approved || busy.value) return
+        probeJob?.cancel()
+        probeJob = null
+        val generation = ++probeGeneration
+        val model = app.container.profiles.getModel(modelId)
+        val provider = model?.let { app.container.profiles.getProvider(it.providerId) }
+        if (model == null || provider == null) {
+            probeState.value = probeState.value.copy(
+                phase = ProbePhase.FAILURE,
+                operation = ProbeOperation.CONNECTION,
+                providerId = provider?.id,
+                modelId = modelId,
+                connection = ConnectionCheckUi(success = false, error = ProviderConnectionErrorCode.CONFIG_INVALID),
+                error = ProviderConnectionErrorCode.CONFIG_INVALID,
+                checks = emptyList(),
+                charged = false,
+                latencyMs = null,
+                lastChecked = null,
+            )
+            return
+        }
+        val operationId = EntityId.random().value
+        val started = System.nanoTime()
+        recordConnectionStarted(provider, model)
+        probeState.value = probeState.value.copy(
+            phase = ProbePhase.RUNNING,
+            operation = ProbeOperation.CONNECTION,
+            providerId = provider.id,
+            modelId = model.id,
+            connection = null,
+            error = null,
+            checks = emptyList(),
+            charged = false,
+            latencyMs = null,
+            lastChecked = null,
+        )
+        busy.value = true
+        probeJob = viewModelScope.launch {
+            var secret: CharArray? = null
+            try {
+                val result = withContext(Dispatchers.IO) {
+                    secret = app.container.secrets.resolveForHost(provider.secretRef)
+                    createAdapter(provider).testConnection(model, secret!!, operationId)
+                }
+                recordConnectionCompleted(provider, model, result, elapsedMillis(started))
+                if (generation == probeGeneration) {
+                    applyConnectionResult(result)
+                    status.value = connectionStatus(result)
+                }
+            } catch (error: runtime.mobileagent.domain.AppException) {
+                val failureCode = if (error.error.code == runtime.mobileagent.domain.ErrorCode.SECRET_UNAVAILABLE) {
+                    ProviderConnectionErrorCode.CREDENTIAL_UNAVAILABLE
+                } else {
+                    ProviderConnectionErrorCode.UNKNOWN
+                }
+                val result = ProviderConnectionResult.Failure(
+                    code = failureCode,
+                    retryable = false,
+                    charged = false,
+                )
+                recordConnectionCompleted(provider, model, result, elapsedMillis(started))
+                if (generation == probeGeneration) {
+                    applyConnectionResult(result)
+                    status.value = connectionStatus(result)
+                }
+            } catch (cancel: CancellationException) {
+                recordConnectionCompleted(
+                    provider,
+                    model,
+                    ProviderConnectionResult.Failure(
+                        code = ProviderConnectionErrorCode.UNKNOWN,
+                        retryable = false,
+                        charged = true,
+                    ),
+                    elapsedMillis(started),
+                )
+                throw cancel
+            } catch (_: Exception) {
+                val result = ProviderConnectionResult.Failure(
+                    code = ProviderConnectionErrorCode.UNKNOWN,
+                    retryable = false,
+                    charged = true,
+                )
+                recordConnectionCompleted(provider, model, result, elapsedMillis(started))
+                if (generation == probeGeneration) {
+                    applyConnectionResult(result)
+                    status.value = connectionStatus(result)
+                }
+            } finally {
+                secret?.fill('\u0000')
+                if (generation == probeGeneration) {
+                    busy.value = false
+                    probeJob = null
+                }
+            }
+        }
+    }
+
+    /** Requires a separate UI confirmation because capability checks may be billed. */
     fun probe(modelId: String, approved: Boolean) {
         if (!approved || busy.value) return
-        val model = app.container.profiles.getModel(modelId) ?: return
-        val provider = app.container.profiles.getProvider(model.providerId) ?: return
+        probeJob?.cancel()
+        probeJob = null
+        val generation = ++probeGeneration
+        val model = app.container.profiles.getModel(modelId)
+        val provider = model?.let { app.container.profiles.getProvider(it.providerId) }
+        if (model == null || provider == null) {
+            probeState.value = probeState.value.copy(
+                phase = ProbePhase.FAILURE,
+                operation = ProbeOperation.CAPABILITY,
+                providerId = provider?.id,
+                modelId = modelId,
+                error = ProviderConnectionErrorCode.CONFIG_INVALID,
+                connection = null,
+                checks = emptyList(),
+                charged = false,
+                latencyMs = null,
+                lastChecked = null,
+            )
+            return
+        }
+        val operationId = EntityId.random().value
+        val started = System.nanoTime()
+        recordCapabilityProbeStarted(provider, model)
+        val previous = probeState.value
+        val retainedConnection = previous.connection.takeIf {
+            previous.providerId == provider.id && previous.modelId == model.id
+        }
+        probeState.value = probeState.value.copy(
+            phase = ProbePhase.RUNNING,
+            operation = ProbeOperation.CAPABILITY,
+            providerId = provider.id,
+            modelId = model.id,
+            // Keep a successful/failed connection result visible while the
+            // independent capability operation is in flight.
+            connection = retainedConnection,
+            error = null,
+            checks = emptyList(),
+            charged = false,
+            latencyMs = null,
+            lastChecked = null,
+        )
         busy.value = true
-        viewModelScope.launch {
+        probeJob = viewModelScope.launch {
             var secret: CharArray? = null
             try {
                 val report = withContext(Dispatchers.IO) {
                     secret = app.container.secrets.resolveForHost(provider.secretRef)
-                    runtime.mobileagent.provider.openai.OpenAiCompatibleAdapter(app.container.http, provider.baseUrl)
-                        .probe(model, secret!!, runtime.mobileagent.provider.ProbeConsent.GRANTED, EntityId.random().value)
+                    createAdapter(provider).probe(
+                        model,
+                        secret!!,
+                        runtime.mobileagent.provider.ProbeConsent.GRANTED,
+                        operationId,
+                    )
                 }
-                val tools = capabilitySummary(report.source, "tools")
-                val images = capabilitySummary(report.source, "image")
-                val chargeNote = if (report.charged) "可能产生 Provider 费用" else "未发送可能计费请求"
-                status.value = "能力探测${if (report.status == runtime.mobileagent.provider.CapabilityProbeStatus.SUCCEEDED) "完成" else "未完成"}：metadata=${capabilitySummary(report.source, "metadata")}; stream=${capabilitySummary(report.source, "stream")}，tools=$tools，image=$images；$chargeNote。"
-                app.container.profiles.recordProbe(
-                    model.id,
-                    provider.revision,
-                    tools,
-                    images,
-                    report.source,
-                    report.status == runtime.mobileagent.provider.CapabilityProbeStatus.SUCCEEDED,
+                val checks = report.checks.map { check ->
+                    ProbeCheckUi(check.capability, check.status, check.httpStatus)
+                }
+                val phase = when (report.status) {
+                    CapabilityProbeStatus.SUCCEEDED -> ProbePhase.SUCCESS
+                    CapabilityProbeStatus.PARTIAL -> ProbePhase.PARTIAL
+                    CapabilityProbeStatus.FAILED,
+                    CapabilityProbeStatus.PROFILE_ONLY,
+                    -> ProbePhase.FAILURE
+                }
+                recordCapabilityProbeCompleted(provider, model, report, checks, elapsedMillis(started))
+                val tools = checks.firstOrNull { it.capability == runtime.mobileagent.provider.CapabilityCheck.TOOLS }
+                    ?.status?.toProbeSummary() ?: "unknown"
+                val images = checks.firstOrNull { it.capability == runtime.mobileagent.provider.CapabilityCheck.IMAGE }
+                    ?.status?.toProbeSummary() ?: "unknown"
+                val persisted = runCatching {
+                    app.container.profiles.recordProbe(
+                        model.id,
+                        provider.revision,
+                        tools,
+                        images,
+                        report.source,
+                        report.status != CapabilityProbeStatus.PROFILE_ONLY,
+                    )
+                }
+                if (generation == probeGeneration) {
+                    probeState.value = probeState.value.copy(
+                        phase = phase,
+                        operation = ProbeOperation.CAPABILITY,
+                        checks = checks,
+                        error = probeFailureCode(checks).takeIf { phase == ProbePhase.FAILURE },
+                        charged = report.charged,
+                        latencyMs = null,
+                        lastChecked = report.probedAt,
+                    )
+                    status.value = capabilityStatus(report.status, report.charged)
+                    persisted.onFailure {
+                        // The network result remains authoritative; a local
+                        // audit write failure must not turn a successful probe
+                        // into a connection failure in the UI.
+                        status.value = "能力探测完成，但验证记录未能保存。"
+                    }
+                    reload()
+                }
+            } catch (error: runtime.mobileagent.domain.AppException) {
+                val failureCode = if (error.error.code == runtime.mobileagent.domain.ErrorCode.SECRET_UNAVAILABLE) {
+                    ProviderConnectionErrorCode.CREDENTIAL_UNAVAILABLE
+                } else {
+                    ProviderConnectionErrorCode.UNKNOWN
+                }
+                recordCapabilityProbeCompleted(
+                    provider,
+                    model,
+                    status = CapabilityProbeStatus.FAILED,
+                    checks = emptyList(),
+                    durationMs = elapsedMillis(started),
+                    error = failureCode,
                 )
-                reload()
-            } catch (error: Exception) {
-                status.value = SecretRedactor.redact(error.message ?: "探测失败。", listOfNotNull(secret?.let(::String)))
-            } finally { secret?.fill('\u0000'); busy.value = false }
+                if (generation == probeGeneration) {
+                    probeState.value = probeState.value.copy(
+                        phase = ProbePhase.FAILURE,
+                        operation = ProbeOperation.CAPABILITY,
+                        error = failureCode,
+                        charged = false,
+                        latencyMs = null,
+                        lastChecked = null,
+                    )
+                    status.value = "能力探测失败。"
+                }
+            } catch (cancel: CancellationException) {
+                recordCapabilityProbeCompleted(
+                    provider,
+                    model,
+                    status = CapabilityProbeStatus.FAILED,
+                    checks = emptyList(),
+                    durationMs = elapsedMillis(started),
+                    error = ProviderConnectionErrorCode.UNKNOWN,
+                )
+                throw cancel
+            } catch (_: Exception) {
+                recordCapabilityProbeCompleted(
+                    provider,
+                    model,
+                    status = CapabilityProbeStatus.FAILED,
+                    checks = emptyList(),
+                    durationMs = elapsedMillis(started),
+                    error = ProviderConnectionErrorCode.UNKNOWN,
+                )
+                if (generation == probeGeneration) {
+                    probeState.value = probeState.value.copy(
+                        phase = ProbePhase.FAILURE,
+                        operation = ProbeOperation.CAPABILITY,
+                        error = ProviderConnectionErrorCode.UNKNOWN,
+                        charged = true,
+                        latencyMs = null,
+                        lastChecked = null,
+                    )
+                    status.value = "能力探测失败。"
+                }
+            } finally {
+                secret?.fill('\u0000')
+                if (generation == probeGeneration) {
+                    busy.value = false
+                    probeJob = null
+                }
+            }
         }
+    }
+
+    fun clearProbe() {
+        probeJob?.cancel()
+        probeJob = null
+        probeGeneration += 1
+        busy.value = false
+        probeState.value = ProviderProbeUiState()
+    }
+
+    private fun createAdapter(provider: ProviderProfile): runtime.mobileagent.provider.openai.OpenAiCompatibleAdapter {
+        val headers = linkedMapOf<String, RequestHeaderValue>()
+        provider.nonSecretHeaders.forEach { (name, value) -> headers[name] = RequestHeaderValue.Plain(value) }
+        provider.headerSecretRefs.forEach { (name, ref) -> headers[name] = RequestHeaderValue.SecretRef(ref) }
+        return runtime.mobileagent.provider.openai.OpenAiCompatibleAdapter(
+            app.container.http,
+            provider.baseUrl,
+            headerSecretResolver = HeaderSecretResolver { host, ref ->
+                require(host.equals(URI(provider.baseUrl).host, true) && ref in provider.headerSecretRefs.values) {
+                    "Header secret destination mismatch"
+                }
+                app.container.secrets.resolveForHost(ref)
+            },
+            defaultHeaders = headers,
+        )
+    }
+
+    private fun applyConnectionResult(result: ProviderConnectionResult) {
+        val connection = when (result) {
+            is ProviderConnectionResult.Success -> ConnectionCheckUi(
+                success = true,
+                latencyMs = result.latencyMs,
+                charged = result.charged,
+            )
+            is ProviderConnectionResult.Failure -> ConnectionCheckUi(
+                success = false,
+                error = result.code,
+                httpStatus = result.httpStatus,
+                retryable = result.retryable,
+                charged = result.charged,
+            )
+        }
+        probeState.value = probeState.value.copy(
+            phase = if (connection.success) ProbePhase.SUCCESS else ProbePhase.FAILURE,
+            operation = ProbeOperation.CONNECTION,
+            connection = connection,
+            error = connection.error,
+            charged = connection.charged,
+            latencyMs = connection.latencyMs,
+            lastChecked = null,
+        )
+    }
+
+    private fun recordConnectionStarted(provider: ProviderProfile, model: ModelProfile) {
+        runCatching {
+            app.diagnostics.recordProviderConnectionTestStarted(
+                ProviderConnectionTestRecord(
+                    providerId = provider.id,
+                    modelId = model.id,
+                    resultCode = DiagnosticProviderResultCode.STARTED,
+                ),
+            )
+        }
+    }
+
+    private fun recordConnectionCompleted(
+        provider: ProviderProfile,
+        model: ModelProfile,
+        result: ProviderConnectionResult,
+        durationMs: Long,
+    ) {
+        val httpStatus = (result as? ProviderConnectionResult.Failure)?.httpStatus
+        runCatching {
+            app.diagnostics.recordProviderConnectionTestCompleted(
+                ProviderConnectionTestRecord(
+                    providerId = provider.id,
+                    modelId = model.id,
+                    resultCode = result.toDiagnosticResultCode(),
+                    httpClass = httpClass(httpStatus ?: if (result is ProviderConnectionResult.Success) 200 else null),
+                    durationMs = durationMs,
+                ),
+            )
+        }
+    }
+
+    private fun recordCapabilityProbeStarted(provider: ProviderProfile, model: ModelProfile) {
+        runCatching {
+            app.diagnostics.recordProviderCapabilityProbeStarted(
+                ProviderCapabilityProbeRecord(
+                    providerId = provider.id,
+                    modelId = model.id,
+                    resultCode = DiagnosticProviderResultCode.STARTED,
+                ),
+            )
+        }
+    }
+
+    private fun recordCapabilityProbeCompleted(
+        provider: ProviderProfile,
+        model: ModelProfile,
+        report: CapabilityReport,
+        checks: List<ProbeCheckUi>,
+        durationMs: Long,
+    ) {
+        recordCapabilityProbeCompleted(
+            provider = provider,
+            model = model,
+            status = report.status,
+            checks = checks,
+            durationMs = durationMs,
+            error = probeFailureCode(checks),
+        )
+    }
+
+    private fun recordCapabilityProbeCompleted(
+        provider: ProviderProfile,
+        model: ModelProfile,
+        status: CapabilityProbeStatus,
+        checks: List<ProbeCheckUi>,
+        durationMs: Long,
+        error: ProviderConnectionErrorCode? = null,
+    ) {
+        val httpStatus = checks.firstOrNull { it.httpStatus != null }?.httpStatus
+        runCatching {
+            app.diagnostics.recordProviderCapabilityProbeCompleted(
+                ProviderCapabilityProbeRecord(
+                    providerId = provider.id,
+                    modelId = model.id,
+                    resultCode = status.toDiagnosticResultCode(error),
+                    httpClass = httpClass(httpStatus),
+                    durationMs = durationMs,
+                ),
+            )
+        }
+    }
+
+    private fun ProviderConnectionResult.toDiagnosticResultCode(): DiagnosticProviderResultCode = when (this) {
+        is ProviderConnectionResult.Success -> DiagnosticProviderResultCode.SUCCESS
+        is ProviderConnectionResult.Failure -> when (code) {
+            ProviderConnectionErrorCode.NETWORK_UNREACHABLE -> DiagnosticProviderResultCode.NETWORK_UNREACHABLE
+            ProviderConnectionErrorCode.TLS_FAILURE -> DiagnosticProviderResultCode.TLS_FAILURE
+            ProviderConnectionErrorCode.TIMEOUT -> DiagnosticProviderResultCode.TIMEOUT
+            ProviderConnectionErrorCode.AUTH_FAILED -> DiagnosticProviderResultCode.AUTH_FAILED
+            ProviderConnectionErrorCode.MODEL_NOT_FOUND -> DiagnosticProviderResultCode.MODEL_NOT_FOUND
+            ProviderConnectionErrorCode.RATE_LIMITED -> DiagnosticProviderResultCode.RATE_LIMITED
+            ProviderConnectionErrorCode.PROVIDER_REJECTED -> DiagnosticProviderResultCode.PROVIDER_REJECTED
+            ProviderConnectionErrorCode.INVALID_RESPONSE -> DiagnosticProviderResultCode.INVALID_RESPONSE
+            ProviderConnectionErrorCode.CONFIG_INVALID,
+            ProviderConnectionErrorCode.CREDENTIAL_UNAVAILABLE,
+            -> DiagnosticProviderResultCode.CONFIG_INVALID
+            ProviderConnectionErrorCode.UNKNOWN -> DiagnosticProviderResultCode.UNKNOWN
+        }
+    }
+
+    private fun CapabilityProbeStatus.toDiagnosticResultCode(
+        error: ProviderConnectionErrorCode?,
+    ): DiagnosticProviderResultCode = error?.let { failure ->
+        when (failure) {
+            ProviderConnectionErrorCode.NETWORK_UNREACHABLE -> DiagnosticProviderResultCode.NETWORK_UNREACHABLE
+            ProviderConnectionErrorCode.TLS_FAILURE -> DiagnosticProviderResultCode.TLS_FAILURE
+            ProviderConnectionErrorCode.TIMEOUT -> DiagnosticProviderResultCode.TIMEOUT
+            ProviderConnectionErrorCode.AUTH_FAILED -> DiagnosticProviderResultCode.AUTH_FAILED
+            ProviderConnectionErrorCode.MODEL_NOT_FOUND -> DiagnosticProviderResultCode.MODEL_NOT_FOUND
+            ProviderConnectionErrorCode.RATE_LIMITED -> DiagnosticProviderResultCode.RATE_LIMITED
+            ProviderConnectionErrorCode.PROVIDER_REJECTED -> DiagnosticProviderResultCode.PROVIDER_REJECTED
+            ProviderConnectionErrorCode.INVALID_RESPONSE -> DiagnosticProviderResultCode.INVALID_RESPONSE
+            ProviderConnectionErrorCode.CONFIG_INVALID,
+            ProviderConnectionErrorCode.CREDENTIAL_UNAVAILABLE,
+            -> DiagnosticProviderResultCode.CONFIG_INVALID
+            ProviderConnectionErrorCode.UNKNOWN -> DiagnosticProviderResultCode.UNKNOWN
+        }
+    } ?: when (this) {
+        CapabilityProbeStatus.SUCCEEDED -> DiagnosticProviderResultCode.SUCCEEDED
+        CapabilityProbeStatus.PARTIAL -> DiagnosticProviderResultCode.PARTIAL
+        CapabilityProbeStatus.FAILED,
+        CapabilityProbeStatus.PROFILE_ONLY,
+        -> DiagnosticProviderResultCode.FAILED
+    }
+
+    private fun httpClass(status: Int?): DiagnosticHttpClass = when (status) {
+        null -> DiagnosticHttpClass.NONE
+        in 200..299 -> DiagnosticHttpClass.TWO_HUNDRED
+        in 400..499 -> DiagnosticHttpClass.FOUR_HUNDRED
+        in 500..599 -> DiagnosticHttpClass.FIVE_HUNDRED
+        else -> DiagnosticHttpClass.UNKNOWN
+    }
+
+    private fun elapsedMillis(started: Long): Long =
+        ((System.nanoTime() - started) / 1_000_000L).coerceAtLeast(0L)
+
+    private fun connectionStatus(result: ProviderConnectionResult): String = when (result) {
+        is ProviderConnectionResult.Success -> "连接成功。"
+        is ProviderConnectionResult.Failure -> "连接失败：${connectionErrorStatusLabel(result.code)}。"
+    }
+
+    private fun capabilityStatus(result: CapabilityProbeStatus, charged: Boolean): String =
+        when (result) {
+            CapabilityProbeStatus.SUCCEEDED -> "能力探测完成。"
+            CapabilityProbeStatus.PARTIAL -> "能力探测完成，部分能力不可用。"
+            CapabilityProbeStatus.FAILED -> "能力探测失败。"
+            CapabilityProbeStatus.PROFILE_ONLY -> "仅记录配置声明，未完成真实验证。"
+        } + if (charged) "可能产生服务商费用。" else "未发送可能计费请求。"
+
+    private fun probeFailureCode(checks: List<ProbeCheckUi>): ProviderConnectionErrorCode? {
+        val failed = checks.firstOrNull {
+            it.status == CapabilityCheckStatus.FAILED || it.status == CapabilityCheckStatus.UNKNOWN
+        } ?: return null
+        return failed.httpStatus?.let(::connectionErrorForHttp)
+            ?: when (failed.status) {
+                CapabilityCheckStatus.FAILED -> ProviderConnectionErrorCode.INVALID_RESPONSE
+                CapabilityCheckStatus.UNKNOWN -> ProviderConnectionErrorCode.UNKNOWN
+                else -> null
+            }
+    }
+
+    private fun connectionErrorStatusLabel(code: ProviderConnectionErrorCode): String = when (code) {
+        ProviderConnectionErrorCode.NETWORK_UNREACHABLE -> "网络不可达"
+        ProviderConnectionErrorCode.TLS_FAILURE -> "安全连接失败"
+        ProviderConnectionErrorCode.TIMEOUT -> "请求超时"
+        ProviderConnectionErrorCode.AUTH_FAILED -> "认证失败"
+        ProviderConnectionErrorCode.MODEL_NOT_FOUND -> "模型不存在"
+        ProviderConnectionErrorCode.RATE_LIMITED -> "请求受限"
+        ProviderConnectionErrorCode.PROVIDER_REJECTED -> "服务商拒绝请求"
+        ProviderConnectionErrorCode.INVALID_RESPONSE -> "响应无效"
+        ProviderConnectionErrorCode.CONFIG_INVALID -> "配置无效"
+        ProviderConnectionErrorCode.CREDENTIAL_UNAVAILABLE -> "凭据不可用"
+        ProviderConnectionErrorCode.UNKNOWN -> "未知错误"
+    }
+
+    private fun connectionErrorForHttp(status: Int): ProviderConnectionErrorCode = when (status) {
+        401, 403 -> ProviderConnectionErrorCode.AUTH_FAILED
+        404 -> ProviderConnectionErrorCode.MODEL_NOT_FOUND
+        408 -> ProviderConnectionErrorCode.TIMEOUT
+        429 -> ProviderConnectionErrorCode.RATE_LIMITED
+        in 400..599 -> ProviderConnectionErrorCode.PROVIDER_REJECTED
+        else -> ProviderConnectionErrorCode.UNKNOWN
+    }
+
+    private fun CapabilityCheckStatus.toProbeSummary(): String = when (this) {
+        CapabilityCheckStatus.VERIFIED -> "verified"
+        CapabilityCheckStatus.UNSUPPORTED -> "unsupported"
+        CapabilityCheckStatus.NOT_DECLARED -> "not-declared"
+        CapabilityCheckStatus.NOT_RUN -> "not-run"
+        CapabilityCheckStatus.FAILED -> "failed"
+        CapabilityCheckStatus.UNKNOWN -> "unknown"
     }
 
     private fun rejectReserved(objectValue: JsonObject) {
@@ -227,10 +733,4 @@ class ProvidersViewModel(application: Application) : AndroidViewModel(applicatio
         }
     }
 
-    private fun capabilitySummary(source: String, key: String): String =
-        source.split(';')
-            .firstOrNull { it.substringBefore('=') == key }
-            ?.substringAfter('=')
-            ?.ifBlank { "unknown" }
-            ?: "not-recorded"
 }

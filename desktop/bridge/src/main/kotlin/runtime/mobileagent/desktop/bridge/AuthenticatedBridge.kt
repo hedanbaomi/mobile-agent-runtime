@@ -68,15 +68,23 @@ class DesktopTypedBridgeRequestHandler private constructor(
     private val typedFiles: (() -> WiredAdbTypedFileExecutor)? = null,
     private val boundTypedFiles: (() -> WiredAdbBoundTypedFileExecutor)? = null,
     private val bindings: WiredAdbWorkspaceBindingRegistry? = null,
+    private val workspaceBindingStore: WiredAdbWorkspaceBindingStore = InMemoryWiredAdbWorkspaceBindingStore(),
 ) : ConnectionScopedTypedBridgeRequestHandler, AutoCloseable {
     constructor(
         shell: () -> WiredAdbShellExecutor,
         typedFiles: (() -> WiredAdbTypedFileExecutor)? = null,
         boundTypedFiles: (() -> WiredAdbBoundTypedFileExecutor)? = null,
-    ) : this(shell, typedFiles, boundTypedFiles, null)
+        workspaceBindingStore: WiredAdbWorkspaceBindingStore = InMemoryWiredAdbWorkspaceBindingStore(),
+    ) : this(shell, typedFiles, boundTypedFiles, null, workspaceBindingStore)
 
     override fun forConnection(sessionId: ByteArray): TypedBridgeRequestHandler =
-        DesktopTypedBridgeRequestHandler(shell, typedFiles, boundTypedFiles, WiredAdbWorkspaceBindingRegistry(sessionId))
+        DesktopTypedBridgeRequestHandler(
+            shell,
+            typedFiles,
+            boundTypedFiles,
+            WiredAdbWorkspaceBindingRegistry(sessionId, workspaceBindingStore),
+            workspaceBindingStore,
+        )
 
     override fun close() {
         bindings?.close()
@@ -96,12 +104,14 @@ class DesktopTypedBridgeRequestHandler private constructor(
         return when (operation) {
             BridgeOperation.SHELL_EXEC -> executeShell(request, cancellation)
             BridgeOperation.WORKSPACE_ATTACH -> executeWorkspaceAttach(request, cancellation)
+            BridgeOperation.WORKSPACE_REOPEN -> executeWorkspaceReopen(request, cancellation)
             BridgeOperation.WORKSPACE_BROWSE -> executeWorkspaceBrowse(request, cancellation)
             BridgeOperation.WORKSPACE_RELEASE -> executeWorkspaceRelease(request)
             BridgeOperation.FILE_LIST,
             BridgeOperation.FILE_STAT,
             BridgeOperation.FILE_READ_TEXT,
             BridgeOperation.FILE_WRITE_TEXT,
+            BridgeOperation.FILE_APPLY_PATCH,
             BridgeOperation.FILE_CREATE_DIRECTORY,
             BridgeOperation.FILE_MOVE,
             BridgeOperation.FILE_DELETE -> executeTypedFile(request, cancellation)
@@ -177,10 +187,15 @@ class DesktopTypedBridgeRequestHandler private constructor(
             ?: (typedFiles?.invoke() as? WiredAdbBoundTypedFileExecutor)
             ?: return error(request, BridgeErrorCodes.UNSUPPORTED_OPERATION, "workspace binding is unavailable", false)
         val payload = request.payload
-        val workspaceId = payload.stringRequired("workspace_id")
-        val binding = payload.stringRequired("workspace_binding")
-        val rootPath = payload.stringRequired("absolute_path")
-        val scope = payload.stringRequired("scope")
+        val attach = try {
+            BridgeCodec.decodeWorkspaceAttachPayload(payload)
+        } catch (_: IllegalArgumentException) {
+            return error(request, BridgeErrorCodes.REQUEST_INVALID, "workspace attachment is invalid", false)
+        }
+        val workspaceId = attach.workspaceId
+        val binding = attach.workspaceBinding
+        val rootPath = attach.absolutePath
+        val scope = attach.scope
         val fullDevice = scope == "full_device_files"
         val probe = try {
             WiredAdbTypedFileRequest.forWorkspaceRoot(
@@ -196,19 +211,101 @@ class DesktopTypedBridgeRequestHandler private constructor(
         }
         val result = executor.executeAtRoot(probe, rootPath, fullDevice, cancellation)
         if (!result.success) return result
-        if (!registry.register(workspaceId, binding, rootPath, fullDevice)) {
+        val filePayload = result.payload ?: return error(request, BridgeErrorCodes.UNKNOWN_OUTCOME, "workspace outcome is unknown", false)
+        val recoveryLocator = registry.newRecoveryLocator()
+        if (!registry.register(
+                workspaceId = workspaceId,
+                binding = binding,
+                rootPath = rootPath,
+                fullDevice = fullDevice,
+                scope = scope,
+                recoveryLocator = recoveryLocator,
+            )
+        ) {
             return error(request, "WORKSPACE_BINDING_REPLAYED", "workspace binding is already used", false)
         }
-        val filePayload = result.payload ?: return error(request, BridgeErrorCodes.UNKNOWN_OUTCOME, "workspace outcome is unknown", false)
         return result.copy(
             payload = buildJsonObject {
                 put("operation", BridgeOperation.WORKSPACE_ATTACH.wireName)
                 put("workspace_id", workspaceId)
                 put("workspace_binding", binding)
                 put("scope", scope)
+                put("recovery_locator", recoveryLocator)
                 put("relative_path", "")
                 filePayload["entries"]?.let { put("entries", it) }
                 put("truncated", filePayload["truncated"] ?: JsonPrimitive(false))
+                filePayload["next_cursor"]?.let { put("next_cursor", it) }
+                filePayload["version"]?.let { put("version", it) }
+            },
+        )
+    }
+
+    private fun executeWorkspaceReopen(
+        request: BridgeRequestEnvelope,
+        cancellation: BridgeCancellation,
+    ): BridgeResponseEnvelope {
+        val registry = bindings ?: return error(
+            request,
+            BridgeErrorCodes.UNSUPPORTED_OPERATION,
+            "workspace binding is unavailable",
+            false,
+        )
+        val reopen = try {
+            BridgeCodec.decodeWorkspaceReopenPayload(request.payload)
+        } catch (_: IllegalArgumentException) {
+            return error(request, BridgeErrorCodes.REQUEST_INVALID, "workspace reopen request is invalid", false)
+        }
+        val persisted = try {
+            registry.loadForReopen(reopen.recoveryLocator)
+        } catch (_: Throwable) {
+            return error(request, BridgeErrorCodes.UNKNOWN_OUTCOME, "workspace binding outcome is unknown", false)
+        } ?: return error(request, BridgeErrorCodes.WORKSPACE_LOCATOR_INVALID, "workspace binding is unavailable", false)
+        if (persisted.workspaceId != reopen.workspaceId || persisted.scope != reopen.scope) {
+            return error(request, BridgeErrorCodes.WORKSPACE_LOCATOR_INVALID, "workspace binding is invalid", false)
+        }
+        val fullDevice = reopen.scope == "full_device_files"
+        if (persisted.fullDevice != fullDevice) {
+            return error(request, BridgeErrorCodes.WORKSPACE_LOCATOR_INVALID, "workspace binding is invalid", false)
+        }
+        val executor = boundTypedFiles?.invoke()
+            ?: (typedFiles?.invoke() as? WiredAdbBoundTypedFileExecutor)
+            ?: return error(request, BridgeErrorCodes.UNSUPPORTED_OPERATION, "workspace binding is unavailable", false)
+        val probe = try {
+            WiredAdbTypedFileRequest.forWorkspaceRoot(
+                requestId = request.requestId,
+                operation = WiredAdbTypedFileOperation.LIST,
+                workspaceId = reopen.workspaceId,
+                workspaceBinding = reopen.workspaceBinding,
+                relativePath = "",
+                maxBytes = WIRED_MAX_READ_BYTES,
+            )
+        } catch (_: IllegalArgumentException) {
+            return error(request, BridgeErrorCodes.REQUEST_INVALID, "workspace reopen request is invalid", false)
+        }
+        val result = executor.executeAtRoot(probe, persisted.rootPath, fullDevice, cancellation)
+        if (!result.success) return result
+        val filePayload = result.payload ?: return error(request, BridgeErrorCodes.UNKNOWN_OUTCOME, "workspace outcome is unknown", false)
+        if (registry.registerReopened(
+                workspaceId = reopen.workspaceId,
+                binding = reopen.workspaceBinding,
+                recoveryLocator = reopen.recoveryLocator,
+                expectedScope = reopen.scope,
+            ) == null
+        ) {
+            return error(request, BridgeErrorCodes.WORKSPACE_LOCATOR_INVALID, "workspace binding is unavailable", false)
+        }
+        return result.copy(
+            payload = buildJsonObject {
+                put("operation", BridgeOperation.WORKSPACE_REOPEN.wireName)
+                put("workspace_id", reopen.workspaceId)
+                put("workspace_binding", reopen.workspaceBinding)
+                put("scope", reopen.scope)
+                put("recovery_locator", reopen.recoveryLocator)
+                put("relative_path", "")
+                filePayload["entries"]?.let { put("entries", it) }
+                put("truncated", filePayload["truncated"] ?: JsonPrimitive(false))
+                filePayload["next_cursor"]?.let { put("next_cursor", it) }
+                filePayload["version"]?.let { put("version", it) }
             },
         )
     }
@@ -226,8 +323,8 @@ class DesktopTypedBridgeRequestHandler private constructor(
         val executor = boundTypedFiles?.invoke()
             ?: (typedFiles?.invoke() as? WiredAdbBoundTypedFileExecutor)
             ?: return error(request, BridgeErrorCodes.UNSUPPORTED_OPERATION, "workspace binding is unavailable", false)
-        val path = payload.stringOrNull("relative_path") ?: ""
-        val maxEntries = payload.longOrNull("max_entries")?.toInt() ?: return error(
+            val path = payload.stringOrNull("relative_path") ?: ""
+            val maxEntries = payload.longOrNull("max_entries")?.toInt() ?: return error(
             request,
             BridgeErrorCodes.REQUEST_INVALID,
             "workspace browse request is invalid",
@@ -241,6 +338,8 @@ class DesktopTypedBridgeRequestHandler private constructor(
                 workspaceBinding = binding,
                 relativePath = path,
                 maxBytes = WIRED_MAX_READ_BYTES,
+                cursor = payload.stringOrNull("cursor"),
+                maxEntries = maxEntries,
             )
         } catch (_: IllegalArgumentException) {
             return error(request, BridgeErrorCodes.REQUEST_INVALID, "workspace browse request is invalid", false)
@@ -256,6 +355,8 @@ class DesktopTypedBridgeRequestHandler private constructor(
                 put("relative_path", path)
                 filePayload["entries"]?.let { put("entries", it) }
                 put("truncated", filePayload["truncated"] ?: JsonPrimitive(false))
+                filePayload["next_cursor"]?.let { put("next_cursor", it) }
+                filePayload["version"]?.let { put("version", it) }
                 put("max_entries", maxEntries)
             },
         )

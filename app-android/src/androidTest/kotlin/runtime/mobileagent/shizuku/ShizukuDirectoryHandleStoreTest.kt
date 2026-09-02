@@ -5,13 +5,16 @@ package runtime.mobileagent.shizuku
 
 import java.io.File
 import java.nio.file.Files
+import java.util.Base64
 import java.util.UUID
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import org.junit.runner.RunWith
 import org.json.JSONObject
 import org.junit.After
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
@@ -88,5 +91,61 @@ class ShizukuDirectoryHandleStoreTest {
             link.delete()
         }
         outside.delete()
+    }
+
+    @Test
+    fun recoveryLocatorReopensWithFreshHandleAfterServiceRestart() {
+        val rootResponse = JSONObject(store.openRoot(16))
+        val rootToken = rootResponse.getString("handle")
+        val booksToken = rootResponse.getJSONArray("entries")
+            .let { entries ->
+                (0 until entries.length()).firstNotNullOf { index ->
+                    entries.getJSONObject(index).optString("handle", "")
+                        .takeIf { entries.getJSONObject(index).getString("name") == "books" }
+                }
+            }
+        val attached = JSONObject(store.attach(booksToken))
+        assertTrue(attached.getBoolean("ok"))
+        val oldWorkspaceToken = attached.getString("workspaceHandle")
+        val locator = Base64.getUrlDecoder().decode(attached.getString("recoveryLocator"))
+        assertFalse(attached.getString("recoveryLocator").contains(root.absolutePath))
+        val safeLocator = runtime.mobileagent.skills.tooling.WorkspaceRecoveryLocator.fromBytes(locator)
+        assertEquals("WorkspaceRecoveryLocator", safeLocator.toString())
+        assertTrue(safeLocator.sizeBytes > 0)
+
+        // A new UserService has a new handle table.  The old workspace token
+        // is not accepted, while the authenticated locator creates a new one.
+        val restarted = ShizukuDirectoryHandleStore(root.toPath())
+        assertNull(restarted.workspace(oldWorkspaceToken))
+        val reopened = JSONObject(restarted.reattach(locator))
+        assertTrue(reopened.getBoolean("ok"))
+        assertEquals("reattach_directory", reopened.getString("operation"))
+        assertTrue(reopened.getString("workspaceHandle") != oldWorkspaceToken)
+        assertNotNull(restarted.workspace(reopened.getString("workspaceHandle")))
+        safeLocator.clear()
+        assertTrue(safeLocator.isCleared)
+        locator.fill(0)
+    }
+
+    @Test
+    fun recoveryLocatorRejectsTamperAndMissingDirectory() {
+        val rootResponse = JSONObject(store.openRoot(16))
+        val entries = rootResponse.getJSONArray("entries")
+        val booksToken = (0 until entries.length()).first { index ->
+            entries.getJSONObject(index).getString("name") == "books"
+        }.let { entries.getJSONObject(it).getString("handle") }
+        val attached = JSONObject(store.attach(booksToken))
+        val locator = Base64.getUrlDecoder().decode(attached.getString("recoveryLocator"))
+        val tampered = locator.copyOf().also { it[0] = (it[0].toInt() xor 1).toByte() }
+        val restarted = ShizukuDirectoryHandleStore(root.toPath())
+        val tamperedResult = JSONObject(restarted.reattach(tampered))
+        assertFalse(tamperedResult.getBoolean("ok"))
+        assertTrue(tamperedResult.getString("code") == ShizukuDirectoryHandleStore.RECOVERY_LOCATOR_INVALID)
+
+        File(root, "books").deleteRecursively()
+        val missingResult = JSONObject(restarted.reattach(locator))
+        assertFalse(missingResult.getBoolean("ok"))
+        assertTrue(missingResult.getString("code") == ShizukuDirectoryHandleStore.WORKSPACE_NOT_FOUND)
+        locator.fill(0)
     }
 }

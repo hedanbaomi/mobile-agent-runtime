@@ -32,6 +32,7 @@ enum class WiredAdbTypedFileOperation(val wireName: String) {
     STAT(BridgeOperation.FILE_STAT.wireName),
     READ_TEXT(BridgeOperation.FILE_READ_TEXT.wireName),
     WRITE_TEXT(BridgeOperation.FILE_WRITE_TEXT.wireName),
+    APPLY_PATCH(BridgeOperation.FILE_APPLY_PATCH.wireName),
     CREATE_DIRECTORY(BridgeOperation.FILE_CREATE_DIRECTORY.wireName),
     MOVE(BridgeOperation.FILE_MOVE.wireName),
     DELETE(BridgeOperation.FILE_DELETE.wireName),
@@ -45,6 +46,7 @@ enum class WiredAdbTypedFileOperation(val wireName: String) {
             BridgeOperation.FILE_STAT -> STAT
             BridgeOperation.FILE_READ_TEXT -> READ_TEXT
             BridgeOperation.FILE_WRITE_TEXT -> WRITE_TEXT
+            BridgeOperation.FILE_APPLY_PATCH -> APPLY_PATCH
             BridgeOperation.FILE_CREATE_DIRECTORY -> CREATE_DIRECTORY
             BridgeOperation.FILE_MOVE -> MOVE
             BridgeOperation.FILE_DELETE -> DELETE
@@ -52,6 +54,8 @@ enum class WiredAdbTypedFileOperation(val wireName: String) {
         }
     }
 }
+
+enum class WiredAdbTypedPatchFormat { UNIFIED_DIFF, REPLACE }
 
 /**
  * Strict, transport-neutral DTO handed to the fixed ADB executor.  The
@@ -67,6 +71,12 @@ class WiredAdbTypedFileRequest private constructor(
     val contentUtf8: ByteArray?,
     val overwrite: Boolean,
     val maxBytes: Int,
+    val cursor: String?,
+    val offsetBytes: Long,
+    val maxEntries: Int,
+    val patchUtf8: ByteArray?,
+    val expectedVersion: Long?,
+    val patchFormat: WiredAdbTypedPatchFormat,
 ) {
     fun contentCopy(): ByteArray? = contentUtf8?.copyOf()
 
@@ -80,12 +90,23 @@ class WiredAdbTypedFileRequest private constructor(
             workspaceBinding?.let { put("workspace_binding", it) }
             relativePath?.let { put("relative_path", it) }
             when (operation) {
-                WiredAdbTypedFileOperation.LIST,
                 WiredAdbTypedFileOperation.STAT -> Unit
-                WiredAdbTypedFileOperation.READ_TEXT -> put("max_bytes", maxBytes)
+                WiredAdbTypedFileOperation.LIST -> {
+                    put("max_entries", maxEntries)
+                    cursor?.let { put("cursor", it) }
+                }
+                WiredAdbTypedFileOperation.READ_TEXT -> {
+                    put("max_bytes", maxBytes)
+                    put("offset_bytes", offsetBytes)
+                }
                 WiredAdbTypedFileOperation.WRITE_TEXT -> {
                     put("content", decodeUtf8(contentUtf8 ?: error("content is required")))
                     put("overwrite", overwrite)
+                }
+                WiredAdbTypedFileOperation.APPLY_PATCH -> {
+                    put("patch", decodeUtf8(patchUtf8 ?: error("patch is required")))
+                    put("expected_version", expectedVersion ?: error("version is required"))
+                    put("format", if (patchFormat == WiredAdbTypedPatchFormat.REPLACE) "replace" else "unified_diff")
                 }
                 WiredAdbTypedFileOperation.CREATE_DIRECTORY -> put("recursive", false)
                 WiredAdbTypedFileOperation.MOVE -> {
@@ -153,6 +174,42 @@ class WiredAdbTypedFileRequest private constructor(
             val maxBytes = payload.longOrNull("max_bytes")?.also {
                 require(it in 1..WIRED_MAX_READ_BYTES.toLong())
             }?.toInt() ?: WIRED_MAX_READ_BYTES
+            val offsetBytes = payload.longOrNull("offset_bytes")?.also {
+                require(it >= 0L)
+            } ?: 0L
+            if (operation != WiredAdbTypedFileOperation.READ_TEXT) {
+                require(payload.containsKey("offset_bytes").not())
+            }
+            val maxEntries = payload.longOrNull("max_entries")?.also {
+                require(it in 1..WIRED_MAX_DIRECTORY_ENTRIES.toLong())
+            }?.toInt() ?: WIRED_MAX_DIRECTORY_ENTRIES
+            if (operation != WiredAdbTypedFileOperation.LIST) {
+                require(payload.containsKey("max_entries").not())
+            }
+            val cursor = payload.stringOrNull("cursor")?.also {
+                require(it.length in 1..WIRED_MAX_CURSOR_BYTES)
+                require(it.all { character -> character.code in 0x21..0x7e })
+            }
+            if (operation != WiredAdbTypedFileOperation.LIST) {
+                require(payload.containsKey("cursor").not())
+            }
+            val patch = payload.stringOrNull("patch")?.let(::strictUtf8)
+            val expectedVersion = payload.longOrNull("expected_version")?.also {
+                require(it >= 0L)
+            }
+            val format = payload.stringOrNull("format")?.let {
+                when (it) {
+                    "unified_diff" -> WiredAdbTypedPatchFormat.UNIFIED_DIFF
+                    "replace" -> WiredAdbTypedPatchFormat.REPLACE
+                    else -> throw IllegalArgumentException("patch format is invalid")
+                }
+            } ?: WiredAdbTypedPatchFormat.UNIFIED_DIFF
+            if (operation == WiredAdbTypedFileOperation.APPLY_PATCH) {
+                require(patch != null && expectedVersion != null)
+                require(patch.size <= WIRED_MAX_PATCH_BYTES)
+            } else {
+                require(patch == null && expectedVersion == null && !payload.containsKey("format"))
+            }
             val overwrite = payload.booleanOrNull("overwrite") ?: false
             if (operation != WiredAdbTypedFileOperation.WRITE_TEXT &&
                 operation != WiredAdbTypedFileOperation.MOVE
@@ -179,14 +236,26 @@ class WiredAdbTypedFileRequest private constructor(
                 contentUtf8 = content,
                 overwrite = overwrite,
                 maxBytes = maxBytes,
+                cursor = cursor,
+                offsetBytes = offsetBytes,
+                maxEntries = maxEntries,
+                patchUtf8 = patch,
+                expectedVersion = expectedVersion,
+                patchFormat = format,
             )
         }
 
         private fun allowedKeys(operation: WiredAdbTypedFileOperation): Set<String> = when (operation) {
             WiredAdbTypedFileOperation.LIST,
-            WiredAdbTypedFileOperation.STAT -> setOf("workspace_id", "workspace_binding", "relative_path")
-            WiredAdbTypedFileOperation.READ_TEXT -> setOf("workspace_id", "workspace_binding", "relative_path", "max_bytes")
+            WiredAdbTypedFileOperation.STAT -> setOf("workspace_id", "workspace_binding", "relative_path") +
+                if (operation == WiredAdbTypedFileOperation.LIST) setOf("max_entries", "cursor") else emptySet()
+            WiredAdbTypedFileOperation.READ_TEXT -> setOf(
+                "workspace_id", "workspace_binding", "relative_path", "max_bytes", "offset_bytes",
+            )
             WiredAdbTypedFileOperation.WRITE_TEXT -> setOf("workspace_id", "workspace_binding", "relative_path", "content", "overwrite")
+            WiredAdbTypedFileOperation.APPLY_PATCH -> setOf(
+                "workspace_id", "workspace_binding", "relative_path", "patch", "expected_version", "format",
+            )
             WiredAdbTypedFileOperation.CREATE_DIRECTORY,
             WiredAdbTypedFileOperation.DELETE -> setOf("workspace_id", "workspace_binding", "relative_path", "recursive")
             WiredAdbTypedFileOperation.MOVE -> setOf(
@@ -205,6 +274,12 @@ class WiredAdbTypedFileRequest private constructor(
             workspaceBinding: String,
             relativePath: String?,
             maxBytes: Int = WIRED_MAX_READ_BYTES,
+            cursor: String? = null,
+            maxEntries: Int = WIRED_MAX_DIRECTORY_ENTRIES,
+            offsetBytes: Long = 0L,
+            patchUtf8: ByteArray? = null,
+            expectedVersion: Long? = null,
+            patchFormat: WiredAdbTypedPatchFormat = WiredAdbTypedPatchFormat.UNIFIED_DIFF,
         ): WiredAdbTypedFileRequest {
             require(workspaceId.matches(SAFE_WORKSPACE_ID))
             require(workspaceBinding.length == 64 && workspaceBinding.all { it in "0123456789abcdefABCDEF" })
@@ -218,6 +293,12 @@ class WiredAdbTypedFileRequest private constructor(
                 contentUtf8 = null,
                 overwrite = false,
                 maxBytes = maxBytes,
+                cursor = cursor,
+                offsetBytes = offsetBytes,
+                maxEntries = maxEntries,
+                patchUtf8 = patchUtf8,
+                expectedVersion = expectedVersion,
+                patchFormat = patchFormat,
             )
         }
     }
@@ -441,6 +522,14 @@ internal object WiredAdbHelperFrameCodec {
                 require(it == request.contentUtf8?.size?.toLong())
             }
         }
+        payload.longOrNull("version")?.also { require(it >= 0L) }
+        payload.longOrNull("offset_bytes")?.also { require(it >= 0L) }
+        payload.longOrNull("total_bytes")?.also { require(it >= 0L) }
+        payload.booleanOrNull("eof")
+        payload.stringOrNull("next_cursor")?.also {
+            require(it.length in 1..WIRED_MAX_CURSOR_BYTES)
+            require(it.all { character -> character.code in 0x21..0x7e })
+        }
         listOf("created", "replaced", "deleted").forEach { payload.booleanOrNull(it) }
         payload.booleanOrNull("truncated")
         when (request.operation) {
@@ -454,11 +543,18 @@ internal object WiredAdbHelperFrameCodec {
             WiredAdbTypedFileOperation.READ_TEXT -> {
                 require(payload.stringOrNull("text") != null)
                 require(payload.longOrNull("bytes") != null)
+                require(payload.longOrNull("offset_bytes") != null)
+                require(payload.longOrNull("total_bytes") != null)
+                require(payload.booleanOrNull("eof") != null)
             }
             WiredAdbTypedFileOperation.WRITE_TEXT -> {
                 require(payload.longOrNull("bytes") != null)
                 require(payload.booleanOrNull("created") != null)
                 require(payload.booleanOrNull("replaced") != null)
+            }
+            WiredAdbTypedFileOperation.APPLY_PATCH -> {
+                require(payload.longOrNull("bytes") != null)
+                require(payload.longOrNull("version") != null)
             }
             WiredAdbTypedFileOperation.CREATE_DIRECTORY -> require(payload.booleanOrNull("created") != null)
             WiredAdbTypedFileOperation.MOVE -> require(payload.booleanOrNull("replaced") != null)
@@ -467,16 +563,19 @@ internal object WiredAdbHelperFrameCodec {
     }
 
     private fun resultKeys(operation: WiredAdbTypedFileOperation): Set<String> = when (operation) {
-        WiredAdbTypedFileOperation.LIST -> setOf("operation", "relative_path", "entries", "truncated")
-        WiredAdbTypedFileOperation.STAT -> setOf("operation", "relative_path", "entries", "bytes")
-        WiredAdbTypedFileOperation.READ_TEXT -> setOf("operation", "relative_path", "text", "bytes")
-        WiredAdbTypedFileOperation.WRITE_TEXT -> setOf("operation", "relative_path", "bytes", "created", "replaced")
-        WiredAdbTypedFileOperation.CREATE_DIRECTORY -> setOf("operation", "relative_path", "created")
-        WiredAdbTypedFileOperation.MOVE -> setOf("operation", "relative_path", "bytes", "replaced")
-        WiredAdbTypedFileOperation.DELETE -> setOf("operation", "relative_path", "deleted")
+        WiredAdbTypedFileOperation.LIST -> setOf("operation", "relative_path", "entries", "truncated", "next_cursor", "version")
+        WiredAdbTypedFileOperation.STAT -> setOf("operation", "relative_path", "entries", "bytes", "version")
+        WiredAdbTypedFileOperation.READ_TEXT -> setOf(
+            "operation", "relative_path", "text", "bytes", "version", "offset_bytes", "total_bytes", "eof",
+        )
+        WiredAdbTypedFileOperation.WRITE_TEXT -> setOf("operation", "relative_path", "bytes", "created", "replaced", "version")
+        WiredAdbTypedFileOperation.APPLY_PATCH -> setOf("operation", "relative_path", "bytes", "version")
+        WiredAdbTypedFileOperation.CREATE_DIRECTORY -> setOf("operation", "relative_path", "created", "version")
+        WiredAdbTypedFileOperation.MOVE -> setOf("operation", "relative_path", "bytes", "replaced", "version")
+        WiredAdbTypedFileOperation.DELETE -> setOf("operation", "relative_path", "deleted", "version")
     }
 
-    private val ENTRY_KEYS = setOf("relative_path", "type", "bytes")
+    private val ENTRY_KEYS = setOf("relative_path", "type", "bytes", "version")
 }
 
 /**
@@ -548,7 +647,10 @@ internal object WiredAdbDesktopAbsolutePathPolicy {
 
 internal const val WIRED_WORKSPACE_ID = "wired-adb"
 internal const val WIRED_MAX_FILE_BYTES = 256 * 1024
-internal const val WIRED_MAX_READ_BYTES = 24 * 1024
+internal const val WIRED_MAX_READ_BYTES = 256 * 1024
+internal const val WIRED_MAX_PATCH_BYTES = 768 * 1024
+internal const val WIRED_MAX_CURSOR_BYTES = 512
+internal const val WIRED_MAX_DIRECTORY_ENTRIES = 256
 internal const val WIRED_MAX_ENTRIES = 512
 internal const val WIRED_MAX_PATH_BYTES = 512
 internal const val WIRED_MAX_SEGMENT_BYTES = 120
@@ -575,6 +677,10 @@ private val WIRED_ADB_HELPER_ERROR_CODES = setOf(
     "FILE_OPERATION_UNAVAILABLE",
     "FILE_ATOMIC_REPLACE_UNAVAILABLE",
     "FILE_WRITE_UNVERIFIED",
+    "FILE_CONFLICT",
+    "FILE_OFFSET_OUT_OF_RANGE",
+    "FILE_INVALID_PATCH",
+    "FILE_INVALID_CURSOR",
     "ROOT_BACKEND_UNAVAILABLE",
     "ROOT_PATH_INVALID",
 )

@@ -4,8 +4,12 @@
 package runtime.mobileagent.shizuku
 
 import android.os.Binder
+import android.os.ParcelFileDescriptor
 import android.os.Process
 import org.json.JSONObject
+import java.io.IOException
+import java.util.concurrent.ExecutorService
+import java.util.concurrent.Executors
 import java.util.UUID
 
 /**
@@ -34,6 +38,8 @@ class ShizukuUserService private constructor(
      * invalid as soon as the authenticated service/session goes away.
      */
     private val privilegedDirectories = ShizukuDirectoryHandleStore()
+    /** At most two bounded chunk writers may be in flight; bytes never cross Binder inline. */
+    private val workspaceReadPool: ExecutorService = Executors.newFixedThreadPool(2)
     /** Android UID is stable for this process, but read it at each boundary. */
     private val serviceUid: Int
         get() = Process.myUid()
@@ -96,6 +102,36 @@ class ShizukuUserService private constructor(
 
     override fun readSession(sessionId: String?, relativePath: String?, maxBytes: Int): String =
         withSession(sessionId, "read") { files.read(relativePath, maxBytes) }
+
+    override fun listPagedSession(
+        sessionId: String?,
+        relativePath: String?,
+        maxEntries: Int,
+        cursor: String?,
+    ): String = withSession(sessionId, "list") {
+        files.list(relativePath, maxEntries, cursor)
+    }
+
+    override fun readChunkSession(
+        sessionId: String?,
+        relativePath: String?,
+        offsetBytes: Long,
+        maxBytes: Int,
+    ): ShizukuWorkspaceReadResponse {
+        val denial = checkSession(sessionId)
+        if (denial != null) return ShizukuWorkspaceReadResponse.rejected(denial)
+        return readResponse(files.readChunk(relativePath, maxBytes, offsetBytes))
+    }
+
+    override fun applyPatchSession(
+        sessionId: String?,
+        relativePath: String?,
+        patch: String?,
+        expectedVersion: String?,
+        format: String?,
+    ): String = withSession(sessionId, "apply_patch") {
+        files.applyPatch(relativePath, patch, expectedVersion, format)
+    }
 
     override fun writeSession(
         sessionId: String?,
@@ -179,6 +215,14 @@ class ShizukuUserService private constructor(
             privilegedDirectories.attach(directoryHandle)
         }
 
+    override fun reattachDirectorySession(sessionId: String?, recoveryLocator: ByteArray?): String = try {
+        withSession(sessionId, "reattach_directory") {
+            privilegedDirectories.reattach(recoveryLocator)
+        }
+    } finally {
+        recoveryLocator?.fill(0)
+    }
+
     override fun listWorkspaceSession(
         sessionId: String?,
         workspaceHandle: String?,
@@ -198,6 +242,46 @@ class ShizukuUserService private constructor(
         maxBytes: Int,
     ): String = withWorkspaceSession(sessionId, "read", workspaceHandle) { workspace ->
         workspace.store.read(relativePath, maxBytes)
+    }
+
+    override fun listWorkspacePagedSession(
+        sessionId: String?,
+        workspaceHandle: String?,
+        relativePath: String?,
+        maxEntries: Int,
+        cursor: String?,
+    ): String = withWorkspaceSession(sessionId, "list", workspaceHandle) { workspace ->
+        if (maxEntries !in 1..ShizukuWorkspaceFileStore.MAX_DIRECTORY_ENTRIES) {
+            return@withWorkspaceSession denied("list", ShizukuWorkspaceFileStore.LIMIT)
+        }
+        workspace.store.list(relativePath, maxEntries, cursor)
+    }
+
+    override fun readChunkWorkspaceSession(
+        sessionId: String?,
+        workspaceHandle: String?,
+        relativePath: String?,
+        offsetBytes: Long,
+        maxBytes: Int,
+    ): ShizukuWorkspaceReadResponse {
+        val denial = checkSession(sessionId)
+        if (denial != null) return ShizukuWorkspaceReadResponse.rejected(denial)
+        val workspace = privilegedDirectories.workspace(workspaceHandle)
+            ?: return ShizukuWorkspaceReadResponse.rejected(ShizukuDirectoryHandleStore.INVALID_HANDLE)
+        val result = runCatching { workspace.store.readChunk(relativePath, maxBytes, offsetBytes) }
+            .getOrElse { ShizukuWorkspaceFileStore.ReadChunkResult.Failure(ShizukuWorkspaceFileStore.OPERATION_UNAVAILABLE) }
+        return readResponse(result)
+    }
+
+    override fun applyPatchWorkspaceSession(
+        sessionId: String?,
+        workspaceHandle: String?,
+        relativePath: String?,
+        patch: String?,
+        expectedVersion: String?,
+        format: String?,
+    ): String = withWorkspaceSession(sessionId, "apply_patch", workspaceHandle) { workspace ->
+        workspace.store.applyPatch(relativePath, patch, expectedVersion, format)
     }
 
     override fun writeWorkspaceSession(
@@ -253,7 +337,51 @@ class ShizukuUserService private constructor(
         // session token or any diagnostic data through this void transaction.
         if (checkCaller() != null) return
         runCatching { shellRunner.close() }
+        workspaceReadPool.shutdownNow()
         System.exit(0)
+    }
+
+    private fun readResponse(
+        result: ShizukuWorkspaceFileStore.ReadChunkResult,
+    ): ShizukuWorkspaceReadResponse {
+        return when (result) {
+        is ShizukuWorkspaceFileStore.ReadChunkResult.Failure ->
+            ShizukuWorkspaceReadResponse.rejected(result.code)
+        is ShizukuWorkspaceFileStore.ReadChunkResult.Success -> {
+            val metadata = JSONObject()
+                .put("ok", true)
+                .put("operation", "read")
+                .put("path", result.path)
+                .put("bytes", result.bytes.size)
+                .put("version", result.version)
+                .put("offsetBytes", result.offsetBytes)
+                .put("totalBytes", result.totalBytes)
+                .put("eof", result.eof)
+                .toString()
+            val pipe = try {
+                ParcelFileDescriptor.createPipe()
+            } catch (_: IOException) {
+                return ShizukuWorkspaceReadResponse.rejected(ShizukuWorkspaceFileStore.OPERATION_UNAVAILABLE)
+            }
+            try {
+                workspaceReadPool.execute {
+                    try {
+                        ParcelFileDescriptor.AutoCloseOutputStream(pipe[1]).use { output ->
+                            output.write(result.bytes)
+                            output.flush()
+                        }
+                    } catch (_: IOException) {
+                        runCatching { pipe[1].close() }
+                    }
+                }
+            } catch (_: RuntimeException) {
+                runCatching { pipe[0].close() }
+                runCatching { pipe[1].close() }
+                return ShizukuWorkspaceReadResponse.rejected(ShizukuWorkspaceFileStore.OPERATION_UNAVAILABLE)
+            }
+            ShizukuWorkspaceReadResponse.accepted(metadata, pipe[0])
+        }
+    }
     }
 
     private fun withSession(

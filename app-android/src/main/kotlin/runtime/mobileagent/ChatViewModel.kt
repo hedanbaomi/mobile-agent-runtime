@@ -16,6 +16,9 @@ import runtime.mobileagent.agent.AgentRuntimeRequest
 import runtime.mobileagent.agent.EffectivePrompt
 import runtime.mobileagent.agent.PromptTemplates
 import runtime.mobileagent.agent.RuntimeEvent
+import runtime.mobileagent.agent.toDiffPartOrNull
+import runtime.mobileagent.agent.toMessagePartOrNull
+import runtime.mobileagent.agent.toSafeErrorPart
 import runtime.mobileagent.domain.*
 import runtime.mobileagent.diagnostics.DiagnosticApprovalState
 import runtime.mobileagent.diagnostics.DiagnosticAuthority
@@ -154,16 +157,61 @@ class ChatViewModel(
             status = "新会话将冻结所选 Agent 的当前配置。")
     }
 
-    fun newSession(): String? {
+    /** Create a conversation using the canonical Agent default, if one is valid. */
+    fun newSession(): String? = createSession(requestedWorkspaceId = null, useAgentDefault = true)
+
+    /**
+     * Create a conversation whose workspace is decided once, at thread creation.  Passing null
+     * explicitly means an unbound thread; it never means "use the Agent's current workspace".
+     * The overload is reserved for a foreground picker and is validated again by the canonical
+     * runtime adapter.
+     */
+    fun newSession(workspaceId: String?): String? =
+        createSession(requestedWorkspaceId = workspaceId, useAgentDefault = false)
+
+    private fun createSession(requestedWorkspaceId: String?, useAgentDefault: Boolean): String? {
         if (state.value.streaming) return null
         return try {
             val id = state.value.selectedAgentId ?: error("请先创建并选择 Agent。")
             val agent = container.agents.get(id) ?: error("Agent 已不存在。")
-            val snapshot = container.runtimeIntegration.createSnapshotWithCurrentGrants(agentId = id)
+            val workspacePort = (container as? ThreadWorkspacePortProvider)?.threadWorkspacePort
+            val runtimePort = (container as? ThreadWorkspaceRuntimePortProvider)?.threadWorkspaceRuntimePort
+            val chosenWorkspaceId = if (useAgentDefault) {
+                workspacePort
+                    ?.takeIf { it.available }
+                    ?.resolveNewThreadWorkspace(id)
+            } else {
+                requestedWorkspaceId
+            }
+            require(chosenWorkspaceId == null || runtimePort?.available == true) {
+                runtimePort?.unavailableMessage ?: "线程工作区运行时未就绪。"
+            }
+            require(chosenWorkspaceId == null || workspacePort?.available == true) {
+                workspacePort?.unavailableMessage ?: "线程工作区绑定存储未就绪。"
+            }
+            // A missing integration may create a safe no-workspace snapshot during staged
+            // upgrades.  It must not call createSnapshotWithCurrentGrants(), whose old behavior
+            // copied every workspace grant into the new conversation.
+            val snapshot = runtimePort
+                ?.takeIf { it.available }
+                ?.createSnapshotWithWorkspace(id, chosenWorkspaceId)
+                ?: container.agents.createSnapshot(id)
             require(snapshot.agentId == id) { "Runtime grant binding returned a snapshot for a different agent." }
             require(snapshot.id.isNotBlank()) { "Runtime grant binding returned an invalid snapshot." }
             captureMcpSnapshot(container, snapshot.id, id)
             val conversation = container.conversations.create(snapshot.id, agent.name + " · " + LocalDate.now())
+            if (chosenWorkspaceId != null) {
+                val port = workspacePort ?: error("线程工作区绑定存储未就绪。")
+                require(port.available) { port.unavailableMessage }
+                val binding = ConversationWorkspaceBinding(
+                    sessionId = conversation.id,
+                    workspaceId = chosenWorkspaceId,
+                    boundAt = Utc.nowIso(),
+                    revision = 1L,
+                )
+                val persisted = port.bindConversationWorkspace(binding)
+                require(persisted == binding) { "会话工作区绑定保存返回了不一致的绑定。" }
+            }
             selectSession(conversation.id)
             conversation.id
         } catch (failure: Exception) { fail(failure); null }
@@ -216,8 +264,45 @@ class ChatViewModel(
         val unknown = container.runs.list(conversationId).lastOrNull { it.state == RunStatus.UNKNOWN_OUTCOME && it.retryAcknowledgedAt == null }
         if (unknown != null) { unknownRetry.value = unknown.runId; return }
         val conversation = container.conversations.get(conversationId) ?: return
+        // Persist the user's message before any asynchronous preflight.  A provider, retrieval,
+        // workspace, or tooling failure must never make the first message disappear.  The
+        // message is also projected immediately so the chat remains responsive while the run is
+        // being prepared.  The run's history below explicitly excludes this id to avoid sending
+        // the current turn twice (as both history and currentUser).
+        val userMessage = try {
+            container.conversations.append(
+                conversationId,
+                MessageRole.USER,
+                text,
+                parts = listOf(TextPart(text)),
+            )
+        } catch (failure: Exception) {
+            fail(failure)
+            return
+        }
+        state.value = state.value.copy(
+            messages = state.value.messages + messageUi(userMessage),
+            input = "",
+        )
         val binding = try { container.agents.resolveSnapshot(conversation.snapshotId) } catch (failure: Exception) { fail(failure); return }
         val degrade = state.value.textDegradation
+        val threadWorkspacePort = (container as? ThreadWorkspacePortProvider)?.threadWorkspacePort
+        var threadWorkspaceBindingReadFailed = false
+        val threadWorkspaceBinding = runCatching {
+            threadWorkspacePort?.conversationWorkspaceBinding(conversationId)
+        }.onFailure { threadWorkspaceBindingReadFailed = true }.getOrNull()
+        val threadWorkspaceId = threadWorkspaceBinding?.workspaceId
+        val threadWorkspaceRuntimePort =
+            (container as? ThreadWorkspaceRuntimePortProvider)?.threadWorkspaceRuntimePort
+        val workspacePreflightStatus = when {
+            threadWorkspaceBindingReadFailed -> "会话工作区绑定读取失败；工作区工具已关闭。"
+            threadWorkspacePort == null || !threadWorkspacePort.available ->
+                "线程工作区绑定服务未就绪；工作区工具已关闭。"
+            threadWorkspaceId == null -> "此会话未绑定工作区；不会自动使用其他工作区。"
+            threadWorkspaceRuntimePort == null || !threadWorkspaceRuntimePort.available ->
+                "此会话的工作区已固定，但运行时暂不可用；不会切换到其他通道。"
+            else -> "会话工作区已固定，正在检查配置、授权与上下文预算…"
+        }
         state.value = state.value.copy(
             streaming = true,
             input = "",
@@ -227,7 +312,7 @@ class ChatViewModel(
                 persistedPreviewHint = hasPersistedRequestPreviewHint(conversationId),
             ),
             error = null,
-            status = "正在检查配置、授权与上下文预算…",
+            status = workspacePreflightStatus,
             statusKind = "",
         )
         runJob = viewModelScope.launch {
@@ -238,6 +323,8 @@ class ChatViewModel(
             var secret: CharArray? = null
             var assistantId: String? = null
             var answer = ""
+            var reasoning = ""
+            var terminalError: ErrorPart? = null
             var metadata = "{}"
             var round = 0
             var modelInFlight = false
@@ -249,22 +336,50 @@ class ChatViewModel(
             var lastUiFlush = 0L
             val observed = linkedMapOf<String, ToolCallPart>()
             val invocations = linkedMapOf<String, ToolInvocation>()
-            fun flushStreamingAnswer(id: String?, text: String, force: Boolean) {
+            fun flushStreamingAnswer(id: String?, text: String, force: Boolean, reasoningText: String = reasoning) {
                 val now = System.currentTimeMillis()
                 if (!force && now - lastUiFlush < 50) return
                 lastUiFlush = now
                 state.value = state.value.copy(
-                    messages = state.value.messages.map { if (it.id == id) it.copy(text = text, streaming = true) else it },
+                    messages = state.value.messages.map {
+                        if (it.id == id) it.copy(
+                            text = text,
+                            streaming = true,
+                            reasoning = reasoningText,
+                            reasoningStreaming = reasoningText.isNotBlank() && !force,
+                        ) else it
+                    },
                 )
             }
             suspend fun checkpoint(status: String = "STREAMING") {
                 val id = assistantId ?: return
                 val parts = buildList<MessagePart> {
                     if (answer.isNotEmpty()) add(TextPart(answer))
+                    if (reasoning.isNotBlank()) add(ReasoningPart(reasoning, streaming = status == "STREAMING"))
+                    terminalError?.let(::add)
                     addAll(observed.values)
                     addAll(citations.values.filter { it.first.runId == run.runId }.map { CitationPart(it.first.citationId) })
                 }
                 withContext(NonCancellable + Dispatchers.IO) { container.conversations.checkpointAssistant(id, answer, parts, metadata, status) }
+            }
+            suspend fun persistTerminalError(part: ErrorPart) {
+                terminalError = part
+                if (assistantId == null) {
+                    val message = withContext(Dispatchers.IO) {
+                        container.conversations.append(
+                            conversationId,
+                            MessageRole.ASSISTANT,
+                            part.message,
+                            status = "ERROR",
+                            parts = listOf(part),
+                            metadataJson = metadata,
+                        )
+                    }
+                    assistantId = message.id
+                    state.value = state.value.copy(messages = state.value.messages + messageUi(message))
+                } else {
+                    checkpoint("ERROR")
+                }
             }
             try {
                 withContext(Dispatchers.IO) { container.runs.save(record) }
@@ -319,17 +434,25 @@ class ChatViewModel(
                         ?.toLong()
                 }
                 val toolingContext = try {
-                    withContext(Dispatchers.IO) {
-                        container.runtimeIntegration.createToolExecutionContext(
-                            snapshot = binding.snapshot,
-                            modelCallId = run.runId,
-                            sessionIdentity = conversationId,
-                            configSnapshotHash = configSnapshotHash,
-                            taskIdentity = run.runId,
-                            skillId = trustedSkillId,
-                            skillRevision = trustedSkillRevision,
-                            trustedSkillEnvelope = trustedSkillId != null,
-                        )
+                    if (threadWorkspaceBindingReadFailed ||
+                        threadWorkspaceRuntimePort == null ||
+                        !threadWorkspaceRuntimePort.available
+                    ) {
+                        null
+                    } else {
+                        withContext(Dispatchers.IO) {
+                            threadWorkspaceRuntimePort.createToolExecutionContextForWorkspace(
+                                snapshot = binding.snapshot,
+                                workspaceId = threadWorkspaceId,
+                                modelCallId = run.runId,
+                                sessionIdentity = conversationId,
+                                configSnapshotHash = configSnapshotHash,
+                                taskIdentity = run.runId,
+                                skillId = trustedSkillId,
+                                skillRevision = trustedSkillRevision,
+                                trustedSkillEnvelope = trustedSkillId != null,
+                            )
+                        }
                     }
                 } catch (cancel: CancellationException) {
                     throw cancel
@@ -429,7 +552,9 @@ class ChatViewModel(
                 )
                 val toolExecutor = runTools.executor
                 activeToolExecutor = toolExecutor
-                val history = withContext(Dispatchers.IO) { container.conversations.messages(conversationId) }
+                val history = withContext(Dispatchers.IO) {
+                    container.conversations.messages(conversationId).filterNot { it.id == userMessage.id }
+                }
                 val typedHistory = boundedHistory(history, limit("maxHistoryMessages", 20, 200), kbIds.toSet())
                 val availableToolNames = if ("tools" in model.capabilities) {
                     toolExecutor.specs.map { it.name }
@@ -458,11 +583,18 @@ class ChatViewModel(
                 val headers = mutableMapOf<String, RequestHeaderValue>()
                 provider.nonSecretHeaders.forEach { (name, value) -> headers[name] = RequestHeaderValue.Plain(value) }
                 provider.headerSecretRefs.forEach { (name, ref) -> headers[name] = RequestHeaderValue.SecretRef(ref) }
-                withContext(Dispatchers.IO) { container.conversations.append(conversationId, MessageRole.USER, text,
-                    parts = listOf(TextPart(text)) + images.map { ImagePart(it.assetId!!, it.mediaType) }) }
                 state.value = state.value.copy(promptLayers = prompt.assemble().blocks.map { ChatPromptLayerUi(it.trust.name, it.text) },
                     citations = citationUis(), status = listOfNotNull(
                         "发送至 ${URI(provider.baseUrl).host} · ${model.modelId}。",
+                        when {
+                            threadWorkspaceBindingReadFailed -> "会话工作区绑定读取失败；工作区工具已关闭。"
+                            threadWorkspacePort == null || !threadWorkspacePort.available ->
+                                "线程工作区绑定服务未就绪；工作区工具已关闭。"
+                            threadWorkspaceId == null -> "此会话未绑定工作区；不会自动使用其他工作区。"
+                            threadWorkspaceRuntimePort == null || !threadWorkspaceRuntimePort.available ->
+                                "此会话的工作区已固定，但运行时暂不可用；不会切换到其他通道。"
+                            else -> null
+                        },
                         if (v2ToolingUnavailable) "工作区/高权限工具本次不可用。" else null,
                         if (v2NoEffectiveTools) {
                             if (!modelToolTransportEnabled) {
@@ -544,7 +676,8 @@ class ChatViewModel(
                             is RuntimeEvent.RequestPrepared -> {
                                 modelInFlight = true
                                 if (assistantId != null) checkpoint("COMPLETE")
-                                observed.clear(); answer = if (round++ == 0 && warning != null) "$warning\n\n" else ""
+                                observed.clear(); reasoning = ""; terminalError = null
+                                answer = if (round++ == 0 && warning != null) "$warning\n\n" else ""
                                 assistantId = withContext(Dispatchers.IO) { container.conversations.append(conversationId, MessageRole.ASSISTANT,
                                     answer, status = "STREAMING", metadataJson = metadata).id }
                                 record = record.copy(state = RunStatus.MODEL_STREAMING, modelRounds = round)
@@ -573,10 +706,23 @@ class ChatViewModel(
                                     flushStreamingAnswer(assistantId, answer, force = false)
                                     if (System.currentTimeMillis() - lastCheckpoint >= 500) { checkpoint(); lastCheckpoint = System.currentTimeMillis() }
                                 }
+                                is ModelEvent.ReasoningDelta -> {
+                                    val projected = e.toMessagePartOrNull() as? ReasoningPart
+                                    if (projected != null) {
+                                        reasoning = SecretRedactor.redact(reasoning + projected.text, listOf(String(secret!!)))
+                                            .take(MessagePartLimits.MAX_REASONING_CHARS)
+                                        flushStreamingAnswer(assistantId, answer, force = false, reasoningText = reasoning)
+                                        if (System.currentTimeMillis() - lastCheckpoint >= 500) { checkpoint(); lastCheckpoint = System.currentTimeMillis() }
+                                    }
+                                }
                                 is ModelEvent.Failed -> {
-                                    answer += "\n[${e.sanitizedMessage}]"
+                                    val projected = e.toMessagePartOrNull() as? ErrorPart ?: toSafeErrorPart(e.sanitizedMessage)
+                                    val safeMessage = projected.message
+                                    answer = if (answer.isBlank()) safeMessage else answer.trimEnd() + "\n" + safeMessage
+                                    terminalError = projected
                                     flushStreamingAnswer(assistantId, answer, force = true)
-                                    state.value = state.value.copy(status = e.sanitizedMessage, statusKind = "error")
+                                    checkpoint("ERROR")
+                                    state.value = state.value.copy(status = safeMessage, statusKind = "error")
                                     persistRun = true
                                 }
                                 is ModelEvent.Usage -> {
@@ -641,8 +787,15 @@ class ChatViewModel(
                                         resultJson = event.resultJson, updatedAt = Utc.nowIso())
                                 withContext(Dispatchers.IO) {
                                     if (runtimeInvocationId in invocations) container.runs.updateInvocation(invocation) else container.runs.recordInvocation(invocation)
+                                    val diffPart = event.toDiffPartOrNull()
                                     container.conversations.append(conversationId, MessageRole.TOOL, event.resultJson,
-                                        parts = listOf(ToolResultPart(event.callId, event.resultJson, invocation.state)))
+                                        parts = buildList {
+                                            add(ToolResultPart(event.callId, event.resultJson, invocation.state))
+                                            // A diff is persisted only when the tool returned an
+                                            // explicit structured diff envelope; ordinary output or
+                                            // a patch argument is never guessed to be a diff.
+                                            diffPart?.let(::add)
+                                        })
                                 }
                                 invocations[runtimeInvocationId] = invocation
                                 forgetPendingApproval(run.runId, event.callId)
@@ -781,12 +934,19 @@ class ChatViewModel(
                 }
             } catch (failure: Exception) {
                 val queryUnknown = failure is ApiQueryUnknownOutcomeException
+                val errorPart = if (queryUnknown) {
+                    ErrorPart(
+                        MessageErrorCode.UNKNOWN_OUTCOME,
+                        "知识库查询结果未知，可能已产生外部影响；不会自动重试。",
+                    )
+                } else {
+                    toSafeErrorPart(failure.message.orEmpty())
+                }
                 record = record.copy(state = if (queryUnknown) RunStatus.UNKNOWN_OUTCOME else if (record.state in TERMINAL) record.state else RunStatus.FAILED,
                     errorCode = if (queryUnknown) "UNKNOWN_OUTCOME" else record.errorCode,
-                    stopReason = if (queryUnknown) "API Embedding 查询结果未知，可能已产生费用。请在知识库页确认该查询的一次性重试，再重新提交；不会自动重放。"
-                    else SecretRedactor.redact(failure.message ?: "执行失败", secret?.let { listOf(String(it)) }.orEmpty()))
-                state.value = state.value.copy(status = record.stopReason.orEmpty(), statusKind = "error", error = null)
-                if (assistantId == null) state.value = state.value.copy(input = text)
+                    stopReason = errorPart.message)
+                persistTerminalError(errorPart)
+                state.value = state.value.copy(status = errorPart.message, statusKind = "error", error = null)
             } finally {
                 // Shield the whole cleanup, including dispatcher returns. Individually shielding
                 // an IO block can still throw while returning to this already-cancelled UI job.
@@ -957,8 +1117,26 @@ class ChatViewModel(
         val messages = withContext(Dispatchers.IO) { container.conversations.messages(id) }
         state.value = state.value.copy(messages = messages.map(::messageUi))
     }
-    private fun messageUi(message: Message) = ChatMessageUi(message.id, message.role.name.lowercase(), message.text,
-        message.createdAt.take(16), message.parts.filterIsInstance<CitationPart>().map { it.citationId }, message.status == "STREAMING")
+    private fun messageUi(message: Message): ChatMessageUi {
+        val reasoningParts = message.parts.filterIsInstance<ReasoningPart>()
+        val errorPart = message.parts.filterIsInstance<ErrorPart>().lastOrNull()
+        val diffPart = message.parts.filterIsInstance<DiffPart>().lastOrNull()
+        return ChatMessageUi(
+            id = message.id,
+            role = message.role.name.lowercase(),
+            text = message.text,
+            timeLabel = message.createdAt.take(16),
+            citationIds = message.parts.filterIsInstance<CitationPart>().map { it.citationId },
+            streaming = message.status == "STREAMING",
+            reasoning = reasoningParts.joinToString("") { it.text },
+            reasoningStreaming = reasoningParts.lastOrNull()?.streaming == true,
+            eventSummary = when {
+                errorPart != null -> errorPart.message
+                diffPart != null -> diffPart.summary
+                else -> ""
+            },
+        )
+    }
 
     /**
      * Terminalize every durable invocation still waiting for approval.  Approval callbacks are

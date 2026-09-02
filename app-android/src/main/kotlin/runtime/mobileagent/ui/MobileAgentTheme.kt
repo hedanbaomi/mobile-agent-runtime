@@ -6,10 +6,7 @@ package runtime.mobileagent.ui
 import android.app.Activity
 import android.os.Build
 import androidx.compose.foundation.isSystemInDarkTheme
-import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.PaddingValues
-import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -17,11 +14,6 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.NavigationBar
-import androidx.compose.material3.NavigationBarItem
-import androidx.compose.material3.NavigationRail
-import androidx.compose.material3.NavigationRailItem
-import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.material3.darkColorScheme
@@ -34,7 +26,6 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalView
-import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.view.WindowCompat
@@ -232,8 +223,10 @@ fun MobileAgentTheme(
 }
 
 /**
- * Responsive seven destination shell. At 600dp and above it uses a rail; on a
- * phone it uses the designed bottom navigation bar. Content owns its own state.
+ * Responsive application shell.  The global drawer is the only navigation
+ * surface on compact windows; wide windows render it as a permanent sidebar.
+ * Content owns its own state and can provide richer Agent/session/workspace
+ * drawer content without duplicating navigation mechanics.
  */
 @Composable
 fun AppNavigationScaffold(
@@ -241,47 +234,38 @@ fun AppNavigationScaffold(
     selectedRoute: String,
     onRouteSelected: (String) -> Unit,
     modifier: Modifier = Modifier,
+    drawerOpen: Boolean = false,
+    onDrawerOpenChange: (Boolean) -> Unit = {},
+    showCompactMenuButton: Boolean = false,
+    compactMenuButtonLabel: String = "菜单",
+    drawerContent: (@Composable (onClose: () -> Unit) -> Unit)? = null,
     content: @Composable (PaddingValues) -> Unit,
 ) {
-    BoxWithConstraints(modifier = modifier.fillMaxSize()) {
-        val wide = maxWidth >= 600.dp
-        if (wide) {
-            Row(Modifier.fillMaxSize()) {
-                NavigationRail(
-                    containerColor = MaterialTheme.colorScheme.surface,
-                    contentColor = MaterialTheme.colorScheme.onSurface,
-                ) {
-                    destinations.forEach { destination ->
-                        NavigationRailItem(
-                            selected = selectedRoute == destination.route,
-                            onClick = { onRouteSelected(destination.route) },
-                            icon = { Icon(destination.icon, destination.contentDescription) },
-                            label = { Text(destination.label, maxLines = 1, overflow = TextOverflow.Ellipsis) },
-                        )
-                    }
-                }
-                Scaffold(Modifier.weight(1f).fillMaxHeight()) { padding -> content(padding) }
-            }
-        } else {
-            Scaffold(
-                bottomBar = {
-                    NavigationBar(
-                        containerColor = MaterialTheme.colorScheme.surface,
-                        contentColor = MaterialTheme.colorScheme.onSurface,
-                        tonalElevation = 0.dp,
-                    ) {
-                        destinations.forEach { destination ->
-                            NavigationBarItem(
-                                selected = selectedRoute == destination.route,
-                                onClick = { onRouteSelected(destination.route) },
-                                icon = { Icon(destination.icon, destination.contentDescription) },
-                                label = { Text(destination.label, maxLines = 1, overflow = TextOverflow.Ellipsis) },
-                            )
-                        }
-                    }
-                },
-            ) { padding -> content(padding) }
-        }
+    if (drawerContent == null) {
+        GlobalDrawerShell(
+            selectedRoute = selectedRoute,
+            destinations = destinations,
+            onRouteSelected = onRouteSelected,
+            drawerOpen = drawerOpen,
+            onDrawerOpenChange = onDrawerOpenChange,
+            showCompactOpenButton = showCompactMenuButton,
+            compactOpenButtonLabel = compactMenuButtonLabel,
+            modifier = modifier,
+            content = content,
+        )
+    } else {
+        GlobalDrawerShell(
+            selectedRoute = selectedRoute,
+            destinations = destinations,
+            onRouteSelected = onRouteSelected,
+            drawerOpen = drawerOpen,
+            onDrawerOpenChange = onDrawerOpenChange,
+            showCompactOpenButton = showCompactMenuButton,
+            compactOpenButtonLabel = compactMenuButtonLabel,
+            modifier = modifier,
+            drawerContent = drawerContent,
+            content = content,
+        )
     }
 }
 

@@ -562,6 +562,7 @@ private class PythonSkillToolExecutor(
                             text.append(event.text)
                             if (text.length > 16_000 || text.toString().toByteArray().size > 24_000) throw BrokerDenied("RESOURCE_LIMIT")
                         }
+                        is ModelEvent.ReasoningDelta -> Unit
                         is ModelEvent.Usage -> if (event.inputTokens.toLong() + event.outputTokens > reserved) throw BrokerDenied("RESOURCE_LIMIT")
                         ModelEvent.Completed -> completed = true
                         is ModelEvent.Failed, is ModelEvent.ToolCallDelta, is ModelEvent.ToolApprovalRequired -> throw BrokerDenied("UNKNOWN_OUTCOME")

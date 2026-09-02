@@ -12,6 +12,8 @@ import runtime.mobileagent.domain.AuthorityPreferences
 import runtime.mobileagent.domain.AuthorityPolicy
 import runtime.mobileagent.domain.CapabilityGrant
 import runtime.mobileagent.domain.CapabilityId
+import runtime.mobileagent.domain.AgentWorkspaceDefault
+import runtime.mobileagent.domain.ConversationWorkspaceBinding
 import runtime.mobileagent.domain.DangerousMode
 import runtime.mobileagent.domain.DesktopTrust
 import runtime.mobileagent.domain.DesktopTrustStatus
@@ -19,6 +21,8 @@ import runtime.mobileagent.domain.GrantLifetime
 import runtime.mobileagent.domain.SafGrantStatus
 import runtime.mobileagent.domain.SafWorkspaceGrant
 import runtime.mobileagent.domain.SnapshotGrantBinding
+import runtime.mobileagent.domain.PrivilegedWorkspaceBinding
+import runtime.mobileagent.domain.PrivilegedWorkspaceBindingStatus
 import runtime.mobileagent.domain.Utc
 import runtime.mobileagent.domain.Workspace
 import runtime.mobileagent.domain.WorkspaceBackendType
@@ -26,6 +30,9 @@ import runtime.mobileagent.domain.WorkspaceScope
 
 /** Raised when a policy or grant update loses its optimistic concurrency race. */
 class AuthorityPolicyConflictException(message: String) : IllegalStateException(message)
+
+/** Raised when a workspace binding update loses its optimistic concurrency race. */
+class WorkspaceBindingConflictException(message: String) : IllegalStateException(message)
 
 /**
  * Persists the user-selected authority and Dangerous Mode.  Availability, Binder state, USB
@@ -222,12 +229,23 @@ class WorkspaceRepository(
         validate(workspace)
         val now = clock()
         db.transaction {
+            val existing = get(workspace.id)
+            val privilegedBinding = db.query(
+                "SELECT authority, scope FROM privileged_workspace_bindings WHERE workspace_id = ?",
+                listOf(workspace.id),
+            ).singleOrNull()
+            if (privilegedBinding != null &&
+                (workspace.backendType != WorkspaceBackendType.PRIVILEGED ||
+                    workspace.scope.name != privilegedBinding.string("scope"))
+            ) {
+                throw WorkspaceBindingConflictException("Workspace binding scope/type cannot be changed")
+            }
             db.execute(
                 "INSERT INTO workspaces(id,display_name,backend_type,root_reference,readable,writable,quota_bytes,max_file_bytes,enabled,revision,created_at,updated_at,scope) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET display_name=excluded.display_name, backend_type=excluded.backend_type, root_reference=excluded.root_reference, readable=excluded.readable, writable=excluded.writable, quota_bytes=excluded.quota_bytes, max_file_bytes=excluded.max_file_bytes, enabled=excluded.enabled, revision=excluded.revision, updated_at=excluded.updated_at, scope=excluded.scope",
                 listOf(
                     workspace.id, workspace.displayName, workspace.backendType.name, workspace.rootReference,
                     bool(workspace.readable), bool(workspace.writable), workspace.quotaBytes, workspace.maxFileBytes,
-                    bool(workspace.enabled), workspace.revision, workspace.createdAt.ifBlank { now }, now, workspace.scope.name,
+                    bool(workspace.enabled), workspace.revision, workspace.createdAt.ifBlank { existing?.createdAt ?: now }, now, workspace.scope.name,
                 ),
             )
         }
@@ -238,15 +256,525 @@ class WorkspaceRepository(
 
     fun delete(id: String): Boolean {
         val existing = get(id) ?: return false
-        db.execute("DELETE FROM saf_workspace_grants WHERE workspace_id = ?", listOf(existing.id))
-        db.execute("DELETE FROM workspaces WHERE id = ?", listOf(id))
-        return true
+        // A workspace referenced by a thread/default/privileged locator must
+        // not disappear underneath that durable reference.  Callers may
+        // explicitly clear those references first; an ordinary delete is
+        // therefore fail-closed and never silently changes thread semantics.
+        val referenced =
+            db.query("SELECT workspace_id FROM privileged_workspace_bindings WHERE workspace_id = ? LIMIT 1", listOf(existing.id)).isNotEmpty() ||
+                db.query("SELECT workspace_id FROM conversation_workspace_bindings WHERE workspace_id = ? LIMIT 1", listOf(existing.id)).isNotEmpty() ||
+                db.query("SELECT workspace_id FROM agent_workspace_defaults WHERE workspace_id = ? LIMIT 1", listOf(existing.id)).isNotEmpty()
+        if (referenced) return false
+        return db.transaction {
+            db.execute("DELETE FROM saf_workspace_grants WHERE workspace_id = ?", listOf(existing.id))
+            db.execute("DELETE FROM workspaces WHERE id = ?", listOf(id))
+            db.query("SELECT id FROM workspaces WHERE id = ?", listOf(id)).isEmpty()
+        }
     }
 
     private fun validate(workspace: Workspace) {
         // Constructing Workspace performs the common bounds checks.  Keep these checks at the
         // persistence seam too, since rows may have been decoded by a different adapter.
         require(workspace.id.isNotBlank() && workspace.rootReference.isNotBlank()) { "Workspace is invalid" }
+    }
+}
+
+/**
+ * Persists the opaque locator needed to reattach a privileged workspace after
+ * an ephemeral Binder/socket handle is recreated.  Encryption and key
+ * lifecycle belong to the Android adapter; this repository only accepts the
+ * resulting ciphertext and AAD facts.
+ *
+ * The revision is a strict monotonic CAS.  A changed row must carry exactly
+ * current.revision + 1, so a stale authority callback cannot replace a newer
+ * locator or status.
+ */
+class PrivilegedWorkspaceBindingRepository(
+    private val db: SqlConnection,
+    private val clock: () -> String = { Utc.nowIso() },
+) {
+    fun get(workspaceId: String): PrivilegedWorkspaceBinding? = db.query(
+        "SELECT * FROM privileged_workspace_bindings WHERE workspace_id = ?",
+        listOf(workspaceId),
+    ).singleOrNull()?.toPrivilegedWorkspaceBinding()
+
+    fun find(workspaceId: String): PrivilegedWorkspaceBinding? = get(workspaceId)
+
+    fun list(status: PrivilegedWorkspaceBindingStatus? = null): List<PrivilegedWorkspaceBinding> {
+        val rows = if (status == null) {
+            db.query("SELECT * FROM privileged_workspace_bindings ORDER BY workspace_id")
+        } else {
+            db.query(
+                "SELECT * FROM privileged_workspace_bindings WHERE status = ? ORDER BY workspace_id",
+                listOf(status.name),
+            )
+        }
+        return rows.map { it.toPrivilegedWorkspaceBinding() }
+    }
+
+    fun forAuthority(authority: Authority): List<PrivilegedWorkspaceBinding> =
+        list().filter { it.authority == authority }
+
+    fun save(binding: PrivilegedWorkspaceBinding): PrivilegedWorkspaceBinding {
+        validateWorkspace(binding)
+        require(binding.createdAt.length <= PrivilegedWorkspaceBinding.MAX_TIMESTAMP_LENGTH) {
+            "Workspace binding timestamp is invalid"
+        }
+        require(binding.updatedAt.length <= PrivilegedWorkspaceBinding.MAX_TIMESTAMP_LENGTH) {
+            "Workspace binding timestamp is invalid"
+        }
+        return db.transaction {
+            val existing = get(binding.workspaceId)
+            val normalized = binding.copy(
+                createdAt = binding.createdAt.ifBlank { existing?.createdAt ?: clock() },
+                updatedAt = binding.updatedAt.ifBlank { clock() },
+            )
+            if (existing == null) {
+                if (normalized.revision != 1L) {
+                    throw WorkspaceBindingConflictException("Workspace binding initial revision must be one")
+                }
+                insert(normalized)
+            } else if (existing != normalized) {
+                if (normalized.createdAt != existing.createdAt) {
+                    throw WorkspaceBindingConflictException("Workspace binding creation timestamp is immutable")
+                }
+                if (normalized.revision != existing.revision + 1L) {
+                    throw WorkspaceBindingConflictException("Workspace binding revision changed")
+                }
+                update(existing.revision, normalized)
+            }
+            val persisted = get(normalized.workspaceId)
+                ?: throw WorkspaceBindingConflictException("Workspace binding save failed")
+            if (persisted != normalized) {
+                throw WorkspaceBindingConflictException("Workspace binding update lost its compare-and-set race")
+            }
+            persisted
+        }
+    }
+
+    fun upsert(binding: PrivilegedWorkspaceBinding): PrivilegedWorkspaceBinding = save(binding)
+
+    fun compareAndSet(expectedRevision: Long, next: PrivilegedWorkspaceBinding): Boolean {
+        require(expectedRevision > 0) { "Expected workspace binding revision must be positive" }
+        require(next.revision == expectedRevision + 1L) {
+            "Next workspace binding revision must increment by one"
+        }
+        return db.transaction {
+            val current = get(next.workspaceId) ?: return@transaction false
+            if (current.revision != expectedRevision) return@transaction false
+            val normalized = if (next.createdAt.isBlank()) next.copy(createdAt = current.createdAt) else next
+            if (normalized.createdAt != current.createdAt) return@transaction false
+            validateWorkspace(normalized)
+            update(expectedRevision, normalized)
+            get(normalized.workspaceId) == normalized
+        }
+    }
+
+    fun updateStatus(
+        workspaceId: String,
+        expectedRevision: Long,
+        status: PrivilegedWorkspaceBindingStatus,
+    ): PrivilegedWorkspaceBinding? {
+        val current = get(workspaceId) ?: return null
+        if (current.revision != expectedRevision) {
+            throw WorkspaceBindingConflictException("Workspace binding revision changed")
+        }
+        return save(
+            current.copy(
+                status = status,
+                revision = expectedRevision + 1L,
+                updatedAt = clock(),
+            ),
+        )
+    }
+
+    /** Explicit removal only; no caller should use this as disconnect handling. */
+    fun delete(workspaceId: String): Boolean = db.transaction {
+        if (get(workspaceId) == null) return@transaction false
+        db.execute(
+            "DELETE FROM privileged_workspace_bindings WHERE workspace_id = ?",
+            listOf(workspaceId),
+        )
+        get(workspaceId) == null
+    }
+
+    private fun validateWorkspace(binding: PrivilegedWorkspaceBinding) {
+        val workspace = db.query(
+            "SELECT backend_type, scope FROM workspaces WHERE id = ?",
+            listOf(binding.workspaceId),
+        ).singleOrNull() ?: throw IllegalArgumentException("Privileged workspace is missing")
+        require(workspace.string("backend_type") == WorkspaceBackendType.PRIVILEGED.name) {
+            "Privileged binding requires a privileged workspace"
+        }
+        require(workspace.string("scope") == binding.scope.name) {
+            "Privileged binding scope does not match workspace"
+        }
+    }
+
+    private fun insert(binding: PrivilegedWorkspaceBinding) {
+        db.execute(
+            "INSERT INTO privileged_workspace_bindings(workspace_id,authority,encrypted_locator,locator_nonce,locator_version,key_version,aad_app_instance_id,aad_workspace_id,aad_authority,aad_locator_version,scope,status,revision,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            listOf(
+                binding.workspaceId,
+                binding.authority.name,
+                binding.encryptedLocatorCopy(),
+                binding.locatorNonceCopy(),
+                binding.locatorVersion,
+                binding.keyVersion,
+                binding.aadAppInstanceId,
+                binding.aadWorkspaceId,
+                binding.aadAuthority.name,
+                binding.aadLocatorVersion,
+                binding.scope.name,
+                binding.status.name,
+                binding.revision,
+                binding.createdAt,
+                binding.updatedAt,
+            ),
+        )
+    }
+
+    private fun update(expectedRevision: Long, binding: PrivilegedWorkspaceBinding) {
+        db.execute(
+            "UPDATE privileged_workspace_bindings SET authority=?,encrypted_locator=?,locator_nonce=?,locator_version=?,key_version=?,aad_app_instance_id=?,aad_workspace_id=?,aad_authority=?,aad_locator_version=?,scope=?,status=?,revision=?,created_at=?,updated_at=? WHERE workspace_id=? AND revision=?",
+            listOf(
+                binding.authority.name,
+                binding.encryptedLocatorCopy(),
+                binding.locatorNonceCopy(),
+                binding.locatorVersion,
+                binding.keyVersion,
+                binding.aadAppInstanceId,
+                binding.aadWorkspaceId,
+                binding.aadAuthority.name,
+                binding.aadLocatorVersion,
+                binding.scope.name,
+                binding.status.name,
+                binding.revision,
+                binding.createdAt,
+                binding.updatedAt,
+                binding.workspaceId,
+                expectedRevision,
+            ),
+        )
+    }
+}
+
+/**
+ * The durable workspace choice for a conversation/session.  A row is
+ * immutable unless the caller explicitly supplies the current revision through
+ * [bind] or [compareAndSet].  No Agent default is consulted by this class.
+ */
+class ConversationWorkspaceBindingRepository(
+    private val db: SqlConnection,
+    private val clock: () -> String = { Utc.nowIso() },
+) {
+    fun get(sessionId: String): ConversationWorkspaceBinding? = db.query(
+        "SELECT * FROM conversation_workspace_bindings WHERE session_id = ?",
+        listOf(sessionId),
+    ).singleOrNull()?.toConversationWorkspaceBinding()
+
+    fun find(sessionId: String): ConversationWorkspaceBinding? = get(sessionId)
+
+    fun list(workspaceId: String? = null): List<ConversationWorkspaceBinding> {
+        val rows = if (workspaceId == null) {
+            db.query("SELECT * FROM conversation_workspace_bindings ORDER BY session_id")
+        } else {
+            db.query(
+                "SELECT * FROM conversation_workspace_bindings WHERE workspace_id = ? ORDER BY session_id",
+                listOf(workspaceId),
+            )
+        }
+        return rows.map { it.toConversationWorkspaceBinding() }
+    }
+
+    fun save(binding: ConversationWorkspaceBinding): ConversationWorkspaceBinding {
+        validateReferences(binding)
+        return db.transaction {
+            val existing = get(binding.sessionId)
+            val normalized = binding.copy(
+                boundAt = binding.boundAt.ifBlank { existing?.boundAt ?: clock() },
+            )
+            if (existing == null) {
+                if (normalized.revision != 1L) {
+                    throw WorkspaceBindingConflictException("Conversation workspace binding initial revision must be one")
+                }
+                insert(normalized)
+            } else if (existing != normalized) {
+                if (normalized.revision != existing.revision + 1L) {
+                    throw WorkspaceBindingConflictException("Conversation workspace binding revision changed")
+                }
+                update(existing.revision, normalized)
+            }
+            val persisted = get(normalized.sessionId)
+                ?: throw WorkspaceBindingConflictException("Conversation workspace binding save failed")
+            if (persisted != normalized) {
+                throw WorkspaceBindingConflictException("Conversation workspace binding update lost its compare-and-set race")
+            }
+            persisted
+        }
+    }
+
+    fun upsert(binding: ConversationWorkspaceBinding): ConversationWorkspaceBinding = save(binding)
+
+    /**
+     * Bind a new conversation, or explicitly rebind an existing one by passing
+     * its current revision.  Calling bind with the same workspace is
+     * idempotent; switching workspaces without a revision is rejected.
+     */
+    fun bind(
+        sessionId: String,
+        workspaceId: String,
+        boundAt: String = clock(),
+        expectedRevision: Long? = null,
+    ): ConversationWorkspaceBinding {
+        val existing = get(sessionId)
+        if (existing == null) {
+            if (expectedRevision != null && expectedRevision != 0L) {
+                throw WorkspaceBindingConflictException("Conversation workspace binding is missing")
+            }
+            return save(ConversationWorkspaceBinding(sessionId, workspaceId, boundAt, revision = 1L))
+        }
+        if (expectedRevision == null) {
+            if (existing.workspaceId == workspaceId) return existing
+            throw WorkspaceBindingConflictException("Conversation workspace is already bound")
+        }
+        if (existing.revision != expectedRevision) {
+            throw WorkspaceBindingConflictException("Conversation workspace binding revision changed")
+        }
+        return save(
+            existing.copy(
+                workspaceId = workspaceId,
+                boundAt = boundAt,
+                revision = expectedRevision + 1L,
+            ),
+        )
+    }
+
+    fun compareAndSet(expectedRevision: Long, next: ConversationWorkspaceBinding): Boolean {
+        require(expectedRevision > 0) { "Expected conversation binding revision must be positive" }
+        require(next.revision == expectedRevision + 1L) {
+            "Next conversation binding revision must increment by one"
+        }
+        return db.transaction {
+            val current = get(next.sessionId) ?: return@transaction false
+            if (current.revision != expectedRevision) return@transaction false
+            val normalized = if (next.boundAt.isBlank()) next.copy(boundAt = current.boundAt) else next
+            validateReferences(normalized)
+            update(expectedRevision, normalized)
+            get(normalized.sessionId) == normalized
+        }
+    }
+
+    /** Explicitly remove a binding; this does not revoke any Agent grant. */
+    fun clear(sessionId: String, expectedRevision: Long? = null): Boolean = db.transaction {
+        val current = get(sessionId) ?: return@transaction false
+        if (expectedRevision != null && current.revision != expectedRevision) {
+            throw WorkspaceBindingConflictException("Conversation workspace binding revision changed")
+        }
+        db.execute("DELETE FROM conversation_workspace_bindings WHERE session_id = ?", listOf(sessionId))
+        get(sessionId) == null
+    }
+
+    private fun validateReferences(binding: ConversationWorkspaceBinding) {
+        require(db.query("SELECT id FROM conversations WHERE id = ?", listOf(binding.sessionId)).isNotEmpty()) {
+            "Conversation is missing"
+        }
+        require(db.query("SELECT id FROM workspaces WHERE id = ?", listOf(binding.workspaceId)).isNotEmpty()) {
+            "Workspace is missing"
+        }
+    }
+
+    private fun insert(binding: ConversationWorkspaceBinding) {
+        db.execute(
+            "INSERT INTO conversation_workspace_bindings(session_id,workspace_id,bound_at,revision) VALUES(?,?,?,?)",
+            listOf(binding.sessionId, binding.workspaceId, binding.boundAt, binding.revision),
+        )
+    }
+
+    private fun update(expectedRevision: Long, binding: ConversationWorkspaceBinding) {
+        db.execute(
+            "UPDATE conversation_workspace_bindings SET workspace_id=?,bound_at=?,revision=? WHERE session_id=? AND revision=?",
+            listOf(binding.workspaceId, binding.boundAt, binding.revision, binding.sessionId, expectedRevision),
+        )
+    }
+}
+
+/**
+ * An Agent default is a preference for future conversations, not a grant and
+ * not a retroactive rebind.  A non-null default must already have an active
+ * persistent capability grant; removing that grant makes resolution return
+ * null without selecting a different workspace.
+ */
+class AgentWorkspaceDefaultRepository(
+    private val db: SqlConnection,
+    private val clock: () -> String = { Utc.nowIso() },
+) {
+    fun get(agentId: String): AgentWorkspaceDefault? = db.query(
+        "SELECT * FROM agent_workspace_defaults WHERE agent_id = ?",
+        listOf(agentId),
+    ).singleOrNull()?.toAgentWorkspaceDefault()
+
+    fun find(agentId: String): AgentWorkspaceDefault? = get(agentId)
+
+    fun list(): List<AgentWorkspaceDefault> = db.query(
+        "SELECT * FROM agent_workspace_defaults ORDER BY agent_id",
+    ).map { it.toAgentWorkspaceDefault() }
+
+    fun save(default: AgentWorkspaceDefault): AgentWorkspaceDefault {
+        validateAgent(default)
+        return db.transaction {
+            val existing = get(default.agentId)
+            val normalized = default.copy(updatedAt = default.updatedAt.ifBlank { clock() })
+            if (existing == null) {
+                if (normalized.revision != 1L) {
+                    throw WorkspaceBindingConflictException("Agent workspace default initial revision must be one")
+                }
+                insert(normalized)
+            } else if (existing != normalized) {
+                if (normalized.revision != existing.revision + 1L) {
+                    throw WorkspaceBindingConflictException("Agent workspace default revision changed")
+                }
+                update(existing.revision, normalized)
+            }
+            val persisted = get(normalized.agentId)
+                ?: throw WorkspaceBindingConflictException("Agent workspace default save failed")
+            if (persisted != normalized) {
+                throw WorkspaceBindingConflictException("Agent workspace default update lost its compare-and-set race")
+            }
+            persisted
+        }
+    }
+
+    fun upsert(default: AgentWorkspaceDefault): AgentWorkspaceDefault = save(default)
+
+    /**
+     * Set a new default, or explicitly change an existing default using its
+     * current revision.  Same-value calls are idempotent.
+     */
+    fun set(
+        agentId: String,
+        workspaceId: String?,
+        expectedRevision: Long? = null,
+        updatedAt: String = clock(),
+    ): AgentWorkspaceDefault {
+        val existing = get(agentId)
+        if (existing == null) {
+            if (expectedRevision != null && expectedRevision != 0L) {
+                throw WorkspaceBindingConflictException("Agent workspace default is missing")
+            }
+            return save(AgentWorkspaceDefault(agentId, workspaceId, revision = 1L, updatedAt = updatedAt))
+        }
+        if (expectedRevision == null) {
+            if (existing.workspaceId == workspaceId) return existing
+            throw WorkspaceBindingConflictException("Agent workspace default revision is required")
+        }
+        if (existing.revision != expectedRevision) {
+            throw WorkspaceBindingConflictException("Agent workspace default revision changed")
+        }
+        return save(
+            existing.copy(
+                workspaceId = workspaceId,
+                revision = expectedRevision + 1L,
+                updatedAt = updatedAt,
+            ),
+        )
+    }
+
+    fun compareAndSet(expectedRevision: Long, next: AgentWorkspaceDefault): Boolean {
+        require(expectedRevision > 0) { "Expected Agent workspace default revision must be positive" }
+        require(next.revision == expectedRevision + 1L) {
+            "Next Agent workspace default revision must increment by one"
+        }
+        return db.transaction {
+            val current = get(next.agentId) ?: return@transaction false
+            if (current.revision != expectedRevision) return@transaction false
+            val normalized = if (next.updatedAt.isBlank()) next.copy(updatedAt = current.updatedAt) else next
+            validateAgent(normalized)
+            update(expectedRevision, normalized)
+            get(normalized.agentId) == normalized
+        }
+    }
+
+    fun clear(agentId: String, expectedRevision: Long? = null): AgentWorkspaceDefault? {
+        val existing = get(agentId) ?: return null
+        if (expectedRevision != null && existing.revision != expectedRevision) {
+            throw WorkspaceBindingConflictException("Agent workspace default revision changed")
+        }
+        return save(
+            existing.copy(
+                workspaceId = null,
+                revision = existing.revision + 1L,
+                updatedAt = clock(),
+            ),
+        )
+    }
+
+    /**
+     * Resolve a default for a new conversation only.  There is intentionally
+     * no fallback here: a missing/revoked/expired workspace grant returns null
+     * and lets the caller request an explicit workspace choice.
+     */
+    fun resolveForNewThread(agentId: String): String? {
+        val default = get(agentId) ?: return null
+        val workspaceId = default.workspaceId ?: return null
+        val workspace = db.query(
+            "SELECT scope, enabled, readable FROM workspaces WHERE id = ?",
+            listOf(workspaceId),
+        ).singleOrNull() ?: return null
+        if (workspace.string("scope") != WorkspaceScope.SELECTED_DIRECTORY.name ||
+            workspace.long("enabled") != 1L ||
+            workspace.long("readable") != 1L
+        ) return null
+        return workspaceId.takeIf { hasActivePersistentGrant(agentId, it) }
+    }
+
+    private fun validateAgent(default: AgentWorkspaceDefault) {
+        require(db.query("SELECT id FROM agent_profiles WHERE id = ?", listOf(default.agentId)).isNotEmpty()) {
+            "Agent is missing"
+        }
+        val workspaceId = default.workspaceId ?: return
+        val workspace = db.query(
+            "SELECT scope FROM workspaces WHERE id = ?",
+            listOf(workspaceId),
+        ).singleOrNull() ?: throw IllegalArgumentException("Default workspace is missing")
+        require(workspace.string("scope") == WorkspaceScope.SELECTED_DIRECTORY.name) {
+            "Full-device workspace cannot be an Agent default"
+        }
+        require(hasActivePersistentGrant(default.agentId, workspaceId)) {
+            "Default workspace requires an active persistent grant"
+        }
+    }
+
+    private fun hasActivePersistentGrant(agentId: String, workspaceId: String): Boolean {
+        val now = runCatching { Instant.parse(clock()) }.getOrNull() ?: return false
+        return db.query(
+            "SELECT expires_at FROM capability_grants " +
+                "WHERE agent_id = ? AND workspace_id = ? AND lifetime = 'PERSISTENT' " +
+                "AND revoked_at IS NULL AND consumed_at IS NULL",
+            listOf(agentId, workspaceId),
+        ).any { row ->
+            val raw = row.columns["expires_at"]
+            if (raw == null) {
+                true
+            } else {
+                val value = raw as? String ?: return@any false
+                value.isBlank() || runCatching { Instant.parse(value).isAfter(now) }.getOrDefault(false)
+            }
+        }
+    }
+
+    private fun insert(default: AgentWorkspaceDefault) {
+        db.execute(
+            "INSERT INTO agent_workspace_defaults(agent_id,workspace_id,revision,updated_at) VALUES(?,?,?,?)",
+            listOf(default.agentId, default.workspaceId, default.revision, default.updatedAt),
+        )
+    }
+
+    private fun update(expectedRevision: Long, default: AgentWorkspaceDefault) {
+        db.execute(
+            "UPDATE agent_workspace_defaults SET workspace_id=?,revision=?,updated_at=? WHERE agent_id=? AND revision=?",
+            listOf(default.workspaceId, default.revision, default.updatedAt, default.agentId, expectedRevision),
+        )
     }
 }
 
@@ -265,6 +793,58 @@ private fun SqlRow.toWorkspace() = Workspace(
     updatedAt = string("updated_at"),
     scope = columns["scope"]?.toString()?.let { WorkspaceScope.valueOf(it) } ?: WorkspaceScope.SELECTED_DIRECTORY,
 )
+
+private fun SqlRow.toPrivilegedWorkspaceBinding(): PrivilegedWorkspaceBinding {
+    val encryptedLocator = columns["encrypted_locator"] as? ByteArray
+        ?: throw IllegalStateException("Privileged workspace locator is not a BLOB")
+    val locatorNonce = columns["locator_nonce"] as? ByteArray
+        ?: throw IllegalStateException("Privileged workspace nonce is not a BLOB")
+    val authority = runCatching { Authority.valueOf(string("authority")) }
+        .getOrElse { throw IllegalStateException("Privileged workspace authority is invalid") }
+    val aadAuthority = runCatching { Authority.valueOf(string("aad_authority")) }
+        .getOrElse { throw IllegalStateException("Privileged workspace AAD authority is invalid") }
+    val scope = runCatching { WorkspaceScope.valueOf(string("scope")) }
+        .getOrElse { throw IllegalStateException("Privileged workspace scope is invalid") }
+    val status = runCatching { PrivilegedWorkspaceBindingStatus.valueOf(string("status")) }
+        .getOrElse { throw IllegalStateException("Privileged workspace status is invalid") }
+    return PrivilegedWorkspaceBinding(
+        workspaceId = string("workspace_id"),
+        authority = authority,
+        encryptedLocator = encryptedLocator.copyOf(),
+        locatorNonce = locatorNonce.copyOf(),
+        locatorVersion = long("locator_version").toInt(),
+        keyVersion = long("key_version").toInt(),
+        aadAppInstanceId = string("aad_app_instance_id"),
+        aadWorkspaceId = string("aad_workspace_id"),
+        aadAuthority = aadAuthority,
+        aadLocatorVersion = long("aad_locator_version").toInt(),
+        scope = scope,
+        status = status,
+        revision = long("revision"),
+        createdAt = string("created_at"),
+        updatedAt = string("updated_at"),
+    )
+}
+
+private fun SqlRow.toConversationWorkspaceBinding() = ConversationWorkspaceBinding(
+    sessionId = string("session_id"),
+    workspaceId = string("workspace_id"),
+    boundAt = string("bound_at"),
+    revision = long("revision"),
+)
+
+private fun SqlRow.toAgentWorkspaceDefault(): AgentWorkspaceDefault {
+    val workspaceId = columns["workspace_id"]?.let { value ->
+        if (value !is String) throw IllegalStateException("Agent workspace default workspace is not text")
+        value.takeIf { it.isNotBlank() }
+    }
+    return AgentWorkspaceDefault(
+        agentId = string("agent_id"),
+        workspaceId = workspaceId,
+        revision = long("revision"),
+        updatedAt = string("updated_at"),
+    )
+}
 
 class CapabilityGrantRepository(
     private val db: SqlConnection,

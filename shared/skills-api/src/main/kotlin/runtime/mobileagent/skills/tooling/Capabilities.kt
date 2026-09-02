@@ -28,6 +28,7 @@ object ToolCapabilities {
     val FILE_CREATE_DIRECTORY = CapabilityId(CapabilityId.FILE_CREATE_DIRECTORY)
     val FILE_MOVE = CapabilityId(CapabilityId.FILE_MOVE)
     val FILE_DELETE = CapabilityId(CapabilityId.FILE_DELETE)
+    val FILE_APPLY_PATCH = CapabilityId("file.apply_patch")
     val MEMORY_READ = CapabilityId(CapabilityId.MEMORY_READ)
     val MEMORY_SEARCH = CapabilityId(CapabilityId.MEMORY_SEARCH)
     val MEMORY_APPEND = CapabilityId(CapabilityId.MEMORY_APPEND)
@@ -44,6 +45,7 @@ object ToolCapabilities {
         FILE_CREATE_DIRECTORY,
         FILE_MOVE,
         FILE_DELETE,
+        FILE_APPLY_PATCH,
         MEMORY_READ,
         MEMORY_SEARCH,
         MEMORY_APPEND,

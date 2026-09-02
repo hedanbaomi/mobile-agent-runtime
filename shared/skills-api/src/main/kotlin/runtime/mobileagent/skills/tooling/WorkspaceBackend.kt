@@ -61,10 +61,13 @@ data class WorkspaceListing(
     val relativePath: String,
     val entries: List<WorkspaceEntry>,
     val truncated: Boolean = false,
+    /** Opaque continuation token owned by the backend.  It contains no path or provider data. */
+    val nextCursor: String? = null,
 ) {
     init {
         require(relativePath.isNotEmpty())
         require(entries.size <= 100_000)
+        require(nextCursor == null || nextCursor.isNotBlank())
     }
 }
 
@@ -85,12 +88,27 @@ data class WorkspaceText(
     val text: String,
     val byteSize: Long = text.toByteArray(StandardCharsets.UTF_8).size.toLong(),
     val version: Long? = null,
+    /** Byte offset of this chunk in the complete UTF-8 file. */
+    val offsetBytes: Long = 0L,
+    /** Complete file size when the backend can determine it. */
+    val totalBytes: Long? = null,
+    /** True when this chunk reaches the end of the file. */
+    val eof: Boolean = true,
 ) {
     init {
         require(relativePath.isNotBlank())
         require(byteSize >= 0)
         require(byteSize == text.toByteArray(StandardCharsets.UTF_8).size.toLong())
+        require(offsetBytes >= 0)
+        require(totalBytes == null || (totalBytes >= 0 && offsetBytes <= totalBytes))
+        require(byteSize <= Long.MAX_VALUE - offsetBytes)
+        // Subtraction avoids overflow when a hostile provider reports a very
+        // large size or when a caller supplies a near-Long.MAX_VALUE offset.
+        require(totalBytes == null || byteSize <= totalBytes - offsetBytes)
+        require(!eof || totalBytes == null || byteSize >= totalBytes - offsetBytes)
     }
+
+    val nextOffsetBytes: Long get() = offsetBytes + byteSize
 }
 
 data class WorkspaceMutation(
@@ -109,11 +127,14 @@ data class WorkspaceListRequest(
     val workspaceId: String,
     val relativePath: String? = null,
     val maxEntries: Int = 256,
+    val cursor: String? = null,
 ) {
     init {
         require(workspaceId.isNotBlank())
         require(relativePath?.let { runCatching { WorkspacePath.normalize(it) }.isSuccess } ?: true)
         require(maxEntries in 1..100_000)
+        require(cursor == null || cursor.length in 1..512)
+        require(cursor == null || cursor.all { it.code in 0x21..0x7e })
     }
 }
 
@@ -131,11 +152,35 @@ data class WorkspaceReadTextRequest(
     val workspaceId: String,
     val relativePath: String,
     val maxBytes: Long = 1L * 1024L * 1024L,
+    val offsetBytes: Long = 0L,
 ) {
     init {
         require(workspaceId.isNotBlank())
         WorkspacePath.normalize(relativePath)
         require(maxBytes in 1..16L * 1024L * 1024L)
+        require(offsetBytes >= 0L)
+    }
+}
+
+/** The only patch encodings accepted by the typed file tool. */
+enum class WorkspacePatchFormat {
+    UNIFIED_DIFF,
+    REPLACE,
+}
+
+data class WorkspaceApplyPatchRequest(
+    val workspaceId: String,
+    val relativePath: String,
+    val patch: String,
+    val expectedVersion: Long,
+    val format: WorkspacePatchFormat = WorkspacePatchFormat.UNIFIED_DIFF,
+) {
+    init {
+        require(workspaceId.isNotBlank())
+        WorkspacePath.normalize(relativePath)
+        require(patch.isNotEmpty())
+        require(patch.toByteArray(StandardCharsets.UTF_8).size <= 16L * 1024L * 1024L)
+        require(expectedVersion >= 0L)
     }
 }
 
@@ -218,6 +263,7 @@ interface WorkspaceBackend {
             CapabilityId(CapabilityId.FILE_CREATE_DIRECTORY),
             CapabilityId(CapabilityId.FILE_MOVE),
             CapabilityId(CapabilityId.FILE_DELETE),
+            CapabilityId("file.apply_patch"),
         )
 
     suspend fun list(request: WorkspaceListRequest): WorkspaceResult<WorkspaceListing> =
@@ -227,6 +273,9 @@ interface WorkspaceBackend {
         unsupported()
 
     suspend fun readText(request: WorkspaceReadTextRequest): WorkspaceResult<WorkspaceText> =
+        unsupported()
+
+    suspend fun applyPatch(request: WorkspaceApplyPatchRequest): WorkspaceResult<WorkspaceMutation> =
         unsupported()
 
     suspend fun writeText(request: WorkspaceWriteTextRequest): WorkspaceResult<WorkspaceMutation> =
@@ -245,14 +294,33 @@ interface WorkspaceBackend {
         ToolError(ToolErrorCode.INTERNAL_ERROR, message = "Workspace operation is not implemented"),
     )
 
-    suspend fun list(workspaceId: String, relativePath: String? = null, maxEntries: Int = 256): WorkspaceResult<WorkspaceListing> =
-        list(WorkspaceListRequest(workspaceId, relativePath, maxEntries))
+    suspend fun list(
+        workspaceId: String,
+        relativePath: String? = null,
+        maxEntries: Int = 256,
+        cursor: String? = null,
+    ): WorkspaceResult<WorkspaceListing> =
+        list(WorkspaceListRequest(workspaceId, relativePath, maxEntries, cursor))
 
     suspend fun stat(workspaceId: String, relativePath: String): WorkspaceResult<WorkspaceFileStat> =
         stat(WorkspaceStatRequest(workspaceId, relativePath))
 
-    suspend fun readText(workspaceId: String, relativePath: String, maxBytes: Long = 1L * 1024L * 1024L): WorkspaceResult<WorkspaceText> =
-        readText(WorkspaceReadTextRequest(workspaceId, relativePath, maxBytes))
+    suspend fun readText(
+        workspaceId: String,
+        relativePath: String,
+        maxBytes: Long = 1L * 1024L * 1024L,
+        offsetBytes: Long = 0L,
+    ): WorkspaceResult<WorkspaceText> =
+        readText(WorkspaceReadTextRequest(workspaceId, relativePath, maxBytes, offsetBytes))
+
+    suspend fun applyPatch(
+        workspaceId: String,
+        relativePath: String,
+        patch: String,
+        expectedVersion: Long,
+        format: WorkspacePatchFormat = WorkspacePatchFormat.UNIFIED_DIFF,
+    ): WorkspaceResult<WorkspaceMutation> =
+        applyPatch(WorkspaceApplyPatchRequest(workspaceId, relativePath, patch, expectedVersion, format))
 
     suspend fun writeText(workspaceId: String, relativePath: String, text: String, replace: Boolean = true): WorkspaceResult<WorkspaceMutation> =
         writeText(WorkspaceWriteTextRequest(workspaceId, relativePath, text, replace))

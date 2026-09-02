@@ -15,9 +15,16 @@ import io.ktor.http.contentType
 import io.ktor.utils.io.readUTF8Line
 import io.ktor.utils.io.readAvailable
 import io.ktor.utils.io.ByteReadChannel
+import java.io.IOException
 import java.io.ByteArrayOutputStream
+import java.net.ConnectException
 import java.net.URI
 import java.net.URLEncoder
+import java.net.UnknownHostException
+import java.net.SocketTimeoutException
+import javax.net.ssl.SSLException
+import kotlinx.coroutines.TimeoutCancellationException
+import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.FlowCollector
 import kotlinx.coroutines.flow.flow
@@ -41,10 +48,15 @@ import runtime.mobileagent.domain.AppException
 import runtime.mobileagent.domain.InputModality
 import runtime.mobileagent.domain.ModelFeature
 import runtime.mobileagent.domain.ModelOperation
+import runtime.mobileagent.domain.ModelRole
 import runtime.mobileagent.domain.withEndpoint
+import runtime.mobileagent.domain.isChatEndpoint
 import runtime.mobileagent.provider.AssistantToolCall
 import runtime.mobileagent.provider.CapabilityProbeStatus
 import runtime.mobileagent.provider.CapabilityReport
+import runtime.mobileagent.provider.CapabilityCheck
+import runtime.mobileagent.provider.CapabilityCheckResult
+import runtime.mobileagent.provider.CapabilityCheckStatus
 import runtime.mobileagent.provider.ChatMessage
 import runtime.mobileagent.provider.EmbeddingBatch
 import runtime.mobileagent.provider.EmbeddingRequest
@@ -54,6 +66,8 @@ import runtime.mobileagent.provider.ModelEvent
 import runtime.mobileagent.provider.ModelRequest
 import runtime.mobileagent.provider.ParameterMerger
 import runtime.mobileagent.provider.ProbeConsent
+import runtime.mobileagent.provider.ProviderConnectionErrorCode
+import runtime.mobileagent.provider.ProviderConnectionResult
 import runtime.mobileagent.provider.RequestHeaderValue
 import runtime.mobileagent.provider.SecretRedactor
 
@@ -81,7 +95,156 @@ class OpenAiCompatibleAdapter(
             probedAt = Utc.nowIso(),
             charged = false,
             status = CapabilityProbeStatus.PROFILE_ONLY,
+            checks = profileChecks(profile),
         )
+
+    /**
+     * Run one minimal non-streaming chat request through the same payload,
+     * header and endpoint path used by normal model traffic.  This deliberately
+     * does not call the capability sub-probes: a provider may accept chat while
+     * rejecting metadata, streaming, tools, or images.
+     */
+    override suspend fun testConnection(
+        profile: ModelProfile,
+        secret: CharArray,
+        operationId: String,
+    ): ProviderConnectionResult {
+        if (secret.isEmpty()) {
+            return ProviderConnectionResult.Failure(
+                code = ProviderConnectionErrorCode.CREDENTIAL_UNAVAILABLE,
+                retryable = false,
+            )
+        }
+        val configured = profile.withEndpoint()
+        if (!configured.isChatEndpoint() || configured.modelId.isBlank()) {
+            return ProviderConnectionResult.Failure(
+                code = ProviderConnectionErrorCode.CONFIG_INVALID,
+                retryable = false,
+            )
+        }
+
+        val started = System.nanoTime()
+        val token = secret.concatToString()
+        try {
+            val modelParameters = runCatching {
+                Json.parseToJsonElement(configured.parametersJson).jsonObject
+            }.getOrElse { throw InvalidConnectionConfigException() }
+            val request = ModelRequest(
+                modelId = configured.modelId,
+                messages = listOf(ChatMessage(role = "user", text = "Reply with ok.")),
+                stream = false,
+                parameters = runtime.mobileagent.provider.ParameterLayers(modelParameters = modelParameters),
+                operationId = operationId,
+                outputTokenLimit = configured.outputLimit.coerceAtLeast(1),
+            )
+            val payload = buildPayload(request, includeImageBytes = true)
+            val resolved = resolveHeaders(token, emptyMap())
+            return withTimeout(CONNECTION_TIMEOUT_MS) {
+                http.preparePost(url(baseUrl, "/chat/completions")) {
+                    contentType(ContentType.Application.Json)
+                    headers {
+                        append(HttpHeaders.Accept, "text/event-stream, application/json")
+                        resolved.values.forEach { (name, value) -> append(name, value) }
+                    }
+                    setBody(payload.toString())
+                }.execute { response ->
+                    val status = response.status.value
+                    if (status !in 200..299) {
+                        return@execute connectionFailureForHttp(status)
+                    }
+                    val raw = readBounded(response.bodyAsChannel())
+                    val contentType = response.headers[HttpHeaders.ContentType].orEmpty().lowercase()
+                    val valid = if (contentType.contains("text/event-stream")) {
+                        parseConnectionSse(raw)
+                    } else {
+                        parseChatProbe(raw, requireToolCall = false)
+                    }
+                    if (valid) {
+                        ProviderConnectionResult.Success(
+                            latencyMs = elapsedMillis(started),
+                            charged = true,
+                        )
+                    } else {
+                        ProviderConnectionResult.Failure(
+                            code = ProviderConnectionErrorCode.INVALID_RESPONSE,
+                            retryable = false,
+                            charged = true,
+                        )
+                    }
+                }
+            }
+        } catch (_: InvalidConnectionConfigException) {
+            return ProviderConnectionResult.Failure(
+                code = ProviderConnectionErrorCode.CONFIG_INVALID,
+                retryable = false,
+            )
+        } catch (_: SecretUnavailableException) {
+            return ProviderConnectionResult.Failure(
+                code = ProviderConnectionErrorCode.CREDENTIAL_UNAVAILABLE,
+                retryable = false,
+            )
+        } catch (_: InvalidHeaderException) {
+            return ProviderConnectionResult.Failure(
+                code = ProviderConnectionErrorCode.CONFIG_INVALID,
+                retryable = false,
+            )
+        } catch (error: AppException) {
+            return ProviderConnectionResult.Failure(
+                code = if (error.error.code == ErrorCode.SECRET_UNAVAILABLE) {
+                    ProviderConnectionErrorCode.CREDENTIAL_UNAVAILABLE
+                } else {
+                    ProviderConnectionErrorCode.CONFIG_INVALID
+                },
+                retryable = false,
+            )
+        } catch (_: TimeoutCancellationException) {
+            return ProviderConnectionResult.Failure(
+                code = ProviderConnectionErrorCode.TIMEOUT,
+                retryable = true,
+                charged = true,
+            )
+        } catch (error: SocketTimeoutException) {
+            return ProviderConnectionResult.Failure(
+                code = ProviderConnectionErrorCode.TIMEOUT,
+                retryable = true,
+                charged = true,
+            )
+        } catch (_: SSLException) {
+            return ProviderConnectionResult.Failure(
+                code = ProviderConnectionErrorCode.TLS_FAILURE,
+                retryable = false,
+                charged = false,
+            )
+        } catch (_: UnknownHostException) {
+            return ProviderConnectionResult.Failure(
+                code = ProviderConnectionErrorCode.NETWORK_UNREACHABLE,
+                retryable = true,
+                charged = false,
+            )
+        } catch (_: ConnectException) {
+            return ProviderConnectionResult.Failure(
+                code = ProviderConnectionErrorCode.NETWORK_UNREACHABLE,
+                retryable = true,
+                charged = false,
+            )
+        } catch (_: IOException) {
+            return ProviderConnectionResult.Failure(
+                code = ProviderConnectionErrorCode.NETWORK_UNREACHABLE,
+                retryable = true,
+                charged = false,
+            )
+        } catch (error: kotlinx.coroutines.CancellationException) {
+            throw error
+        } catch (_: Exception) {
+            return ProviderConnectionResult.Failure(
+                code = ProviderConnectionErrorCode.UNKNOWN,
+                retryable = false,
+                charged = true,
+            )
+        } finally {
+            token.toCharArray().fill('\u0000')
+        }
+    }
 
     /**
      * A live probe is deliberately a separate opt-in operation. Metadata and
@@ -101,6 +264,7 @@ class OpenAiCompatibleAdapter(
             return profileReport.copy(
                 source = "profile-only;consent-required;metadata=not-run;stream=not-run;tools=not-run;image=not-run",
                 operationId = operationId,
+                checks = profileChecks(profile),
             )
         }
         if (secret.isEmpty()) {
@@ -111,6 +275,13 @@ class OpenAiCompatibleAdapter(
                 source = "metadata=not-run;stream=not-run;tools=not-run;image=not-run;secret=unavailable",
                 status = CapabilityProbeStatus.FAILED,
                 operationId = operationId,
+                checks = profileChecks(profile).map { check ->
+                    if (check.capability == CapabilityCheck.METADATA) {
+                        check.copy(status = CapabilityCheckStatus.FAILED)
+                    } else {
+                        check
+                    }
+                },
             )
         }
         val token = secret.concatToString()
@@ -126,12 +297,25 @@ class OpenAiCompatibleAdapter(
                 val metadata = if (status in 200..299) {
                     val body = readBounded(response.bodyAsChannel())
                     if (metadataMatches(body, profile.modelId)) {
-                        MetadataProbeResult("verified", verified = true)
+                        MetadataProbeResult(
+                            summary = "verified",
+                            verified = true,
+                            status = CapabilityCheckStatus.VERIFIED,
+                        )
                     } else {
-                        MetadataProbeResult("invalid-response", verified = false)
+                        MetadataProbeResult(
+                            summary = "invalid-response",
+                            verified = false,
+                            status = CapabilityCheckStatus.FAILED,
+                        )
                     }
                 } else {
-                    MetadataProbeResult("http-$status", verified = false)
+                    MetadataProbeResult(
+                        summary = "http-$status",
+                        verified = false,
+                        httpStatus = status,
+                        status = CapabilityCheckStatus.FAILED,
+                    )
                 }
                 if (!metadata.verified) {
                     profileReport.copy(
@@ -142,6 +326,16 @@ class OpenAiCompatibleAdapter(
                         status = CapabilityProbeStatus.FAILED,
                         charged = metadata.charged,
                         operationId = operationId,
+                        checks = listOf(
+                            CapabilityCheckResult(
+                                capability = CapabilityCheck.METADATA,
+                                status = metadata.status,
+                                httpStatus = metadata.httpStatus,
+                            ),
+                            CapabilityCheckResult(CapabilityCheck.STREAM, CapabilityCheckStatus.NOT_RUN),
+                            CapabilityCheckResult(CapabilityCheck.TOOLS, CapabilityCheckStatus.NOT_RUN),
+                            CapabilityCheckResult(CapabilityCheck.IMAGE, CapabilityCheckStatus.NOT_RUN),
+                        ),
                     )
                 } else {
                     val stream = probeDeclaredFeature(profile, resolved, ProbeFeature.STREAM)
@@ -153,15 +347,17 @@ class OpenAiCompatibleAdapter(
                         supportsTools = tools.supported,
                         supportsImages = image.supported,
                         source = "metadata=${metadata.summary};stream=${stream.summary};tools=${tools.summary};image=${image.summary}",
-                        status = if (featureResults.all { it.summary == "verified" || it.summary == "not-declared" }) {
-                            CapabilityProbeStatus.SUCCEEDED
-                        } else {
-                            CapabilityProbeStatus.FAILED
-                        },
+                        status = capabilityProbeStatus(featureResults),
                         // A chat capability probe is potentially billable even
                         // when the provider later rejects or truncates it.
                         charged = metadata.charged || featureResults.any { it.charged },
                         operationId = operationId,
+                        checks = listOf(
+                            CapabilityCheckResult(CapabilityCheck.METADATA, metadata.status, metadata.httpStatus),
+                            CapabilityCheckResult(CapabilityCheck.STREAM, stream.status, stream.httpStatus),
+                            CapabilityCheckResult(CapabilityCheck.TOOLS, tools.status, tools.httpStatus),
+                            CapabilityCheckResult(CapabilityCheck.IMAGE, image.status, image.httpStatus),
+                        ),
                     )
                 }
             }
@@ -176,6 +372,12 @@ class OpenAiCompatibleAdapter(
                 status = CapabilityProbeStatus.FAILED,
                 charged = false,
                 operationId = operationId,
+                checks = listOf(
+                    CapabilityCheckResult(CapabilityCheck.METADATA, CapabilityCheckStatus.UNKNOWN),
+                    CapabilityCheckResult(CapabilityCheck.STREAM, CapabilityCheckStatus.NOT_RUN),
+                    CapabilityCheckResult(CapabilityCheck.TOOLS, CapabilityCheckStatus.NOT_RUN),
+                    CapabilityCheckResult(CapabilityCheck.IMAGE, CapabilityCheckStatus.NOT_RUN),
+                ),
             )
         } finally {
             token.toCharArray().fill('\u0000')
@@ -281,6 +483,11 @@ class OpenAiCompatibleAdapter(
             is ModelEvent.TextDelta -> {
                 val safe = redactor.accept(event.text)
                 if (safe.isNotEmpty()) emit(ModelEvent.TextDelta(safe))
+                null
+            }
+            is ModelEvent.ReasoningDelta -> {
+                val safe = redactor.accept(event.text)
+                if (safe.isNotEmpty()) emit(ModelEvent.ReasoningDelta(safe))
                 null
             }
             is ModelEvent.ToolCallDelta -> {
@@ -582,7 +789,14 @@ class OpenAiCompatibleAdapter(
             ProbeFeature.TOOLS -> ModelFeature.TOOL_CALLING in endpoint.features || "tools" in profile.capabilities
             ProbeFeature.IMAGE -> InputModality.IMAGE in endpoint.inputModalities || "image" in profile.capabilities || profile.role.name == "VISION"
         }
-        if (!declared || !chat) return FeatureProbeResult("not-declared", supported = false, charged = false)
+        if (!declared || !chat) {
+            return FeatureProbeResult(
+                summary = "not-declared",
+                supported = false,
+                charged = false,
+                status = CapabilityCheckStatus.NOT_DECLARED,
+            )
+        }
         val body = buildJsonObject {
             put("model", JsonPrimitive(profile.modelId))
             put("max_tokens", JsonPrimitive(1))
@@ -660,21 +874,42 @@ class OpenAiCompatibleAdapter(
             }.execute { response ->
                 val status = response.status.value
                 if (status !in 200..299) {
-                    return@execute FeatureProbeResult("http-$status", supported = false, charged = true)
+                    return@execute FeatureProbeResult(
+                        summary = "http-$status",
+                        supported = false,
+                        charged = true,
+                        httpStatus = status,
+                        status = featureHttpStatus(status),
+                    )
                 }
                 if (feature == ProbeFeature.STREAM) {
                     val responseType = response.headers[HttpHeaders.ContentType].orEmpty().lowercase()
                     if (!responseType.contains("text/event-stream")) {
-                        return@execute FeatureProbeResult("wrong-content-type", supported = false, charged = true)
+                        return@execute FeatureProbeResult(
+                            summary = "wrong-content-type",
+                            supported = false,
+                            charged = true,
+                            status = CapabilityCheckStatus.FAILED,
+                        )
                     }
                     val supported = parseStreamProbe(response.bodyAsChannel())
-                    FeatureProbeResult(if (supported) "verified" else "invalid-response", supported, charged = true)
+                    FeatureProbeResult(
+                        summary = if (supported) "verified" else "invalid-response",
+                        supported = supported,
+                        charged = true,
+                        status = if (supported) CapabilityCheckStatus.VERIFIED else CapabilityCheckStatus.FAILED,
+                    )
                 } else {
                     val supported = parseChatProbe(
                         readBounded(response.bodyAsChannel()),
                         requireToolCall = feature == ProbeFeature.TOOLS,
                     )
-                    FeatureProbeResult(if (supported) "verified" else "invalid-response", supported, charged = true)
+                    FeatureProbeResult(
+                        summary = if (supported) "verified" else "invalid-response",
+                        supported = supported,
+                        charged = true,
+                        status = if (supported) CapabilityCheckStatus.VERIFIED else CapabilityCheckStatus.FAILED,
+                    )
                 }
             }
         } catch (e: kotlinx.coroutines.CancellationException) {
@@ -683,8 +918,47 @@ class OpenAiCompatibleAdapter(
             // The request may have reached the provider before transport
             // failure. Preserve UNKNOWN_OUTCOME/charged semantics instead of
             // presenting this as a free, retry-safe failure.
-            FeatureProbeResult("unknown-outcome", supported = false, charged = true)
+            FeatureProbeResult(
+                summary = "unknown-outcome",
+                supported = false,
+                charged = true,
+                status = CapabilityCheckStatus.UNKNOWN,
+            )
         }
+    }
+
+    private fun featureHttpStatus(status: Int): CapabilityCheckStatus = when {
+        status in 400..499 && status !in setOf(401, 403, 408, 429) -> CapabilityCheckStatus.UNSUPPORTED
+        status in 500..599 -> CapabilityCheckStatus.UNKNOWN
+        else -> CapabilityCheckStatus.FAILED
+    }
+
+    private fun profileChecks(profile: ModelProfile): List<CapabilityCheckResult> {
+        val configured = profile.withEndpoint()
+        val chat = configured.isChatEndpoint()
+        fun declared(feature: ProbeFeature): Boolean = when (feature) {
+            ProbeFeature.STREAM -> ModelFeature.STREAMING in configured.endpoint.features || "stream" in configured.capabilities
+            ProbeFeature.TOOLS -> ModelFeature.TOOL_CALLING in configured.endpoint.features || "tools" in configured.capabilities
+            ProbeFeature.IMAGE -> InputModality.IMAGE in configured.endpoint.inputModalities ||
+                "image" in configured.capabilities || configured.role == ModelRole.VISION
+        }
+        fun status(feature: ProbeFeature): CapabilityCheckStatus =
+            if (chat && declared(feature)) CapabilityCheckStatus.NOT_RUN else CapabilityCheckStatus.NOT_DECLARED
+        return listOf(
+            CapabilityCheckResult(CapabilityCheck.METADATA, CapabilityCheckStatus.NOT_RUN),
+            CapabilityCheckResult(CapabilityCheck.STREAM, status(ProbeFeature.STREAM)),
+            CapabilityCheckResult(CapabilityCheck.TOOLS, status(ProbeFeature.TOOLS)),
+            CapabilityCheckResult(CapabilityCheck.IMAGE, status(ProbeFeature.IMAGE)),
+        )
+    }
+
+    private fun capabilityProbeStatus(results: List<FeatureProbeResult>): CapabilityProbeStatus = when {
+        results.all { it.status == CapabilityCheckStatus.VERIFIED || it.status == CapabilityCheckStatus.NOT_DECLARED } ->
+            CapabilityProbeStatus.SUCCEEDED
+        results.any { it.status == CapabilityCheckStatus.UNSUPPORTED } -> CapabilityProbeStatus.PARTIAL
+        results.any { it.status == CapabilityCheckStatus.VERIFIED || it.status == CapabilityCheckStatus.NOT_DECLARED } ->
+            CapabilityProbeStatus.PARTIAL
+        else -> CapabilityProbeStatus.FAILED
     }
 
     private fun metadataMatches(raw: String, expectedModelId: String): Boolean {
@@ -734,7 +1008,11 @@ class OpenAiCompatibleAdapter(
             require(receivedBytes <= MAX_PROBE_RESPONSE_BYTES) { "Provider probe response exceeds limit" }
             OpenAiSse.eventsFromLine(line, toolBuf).forEach { event ->
                 when (event) {
-                    is ModelEvent.TextDelta, is ModelEvent.ToolCallDelta, is ModelEvent.Usage -> sawPayload = true
+                    is ModelEvent.TextDelta,
+                    is ModelEvent.ReasoningDelta,
+                    is ModelEvent.ToolCallDelta,
+                    is ModelEvent.Usage,
+                    -> sawPayload = true
                     ModelEvent.Completed -> sawCompleted = true
                     is ModelEvent.Failed -> sawFailed = true
                     else -> Unit
@@ -745,19 +1023,93 @@ class OpenAiCompatibleAdapter(
         return sawPayload && sawCompleted && !sawFailed
     }
 
+    private fun parseConnectionSse(raw: String): Boolean {
+        val toolBuf = linkedMapOf<String, Pair<String, StringBuilder>>()
+        var sawPayload = false
+        var sawCompleted = false
+        var sawFailed = false
+        raw.lineSequence().forEach { line ->
+            OpenAiSse.eventsFromLine(line, toolBuf).forEach { event ->
+                when (event) {
+                    is ModelEvent.TextDelta,
+                    is ModelEvent.ReasoningDelta,
+                    is ModelEvent.ToolCallDelta,
+                    is ModelEvent.Usage,
+                    -> sawPayload = true
+                    ModelEvent.Completed -> sawCompleted = true
+                    is ModelEvent.Failed -> sawFailed = true
+                    else -> Unit
+                }
+            }
+        }
+        return sawPayload && sawCompleted && !sawFailed
+    }
+
+    private fun connectionFailureForHttp(status: Int): ProviderConnectionResult.Failure = when (status) {
+        401, 403 -> ProviderConnectionResult.Failure(
+            code = ProviderConnectionErrorCode.AUTH_FAILED,
+            httpStatus = status,
+            retryable = false,
+            charged = true,
+        )
+        404 -> ProviderConnectionResult.Failure(
+            code = ProviderConnectionErrorCode.MODEL_NOT_FOUND,
+            httpStatus = status,
+            retryable = false,
+            charged = true,
+        )
+        408 -> ProviderConnectionResult.Failure(
+            code = ProviderConnectionErrorCode.TIMEOUT,
+            httpStatus = status,
+            retryable = true,
+            charged = true,
+        )
+        429 -> ProviderConnectionResult.Failure(
+            code = ProviderConnectionErrorCode.RATE_LIMITED,
+            httpStatus = status,
+            retryable = true,
+            charged = true,
+        )
+        in 400..499 -> ProviderConnectionResult.Failure(
+            code = ProviderConnectionErrorCode.PROVIDER_REJECTED,
+            httpStatus = status,
+            retryable = false,
+            charged = true,
+        )
+        in 500..599 -> ProviderConnectionResult.Failure(
+            code = ProviderConnectionErrorCode.PROVIDER_REJECTED,
+            httpStatus = status,
+            retryable = true,
+            charged = true,
+        )
+        else -> ProviderConnectionResult.Failure(
+            code = ProviderConnectionErrorCode.UNKNOWN,
+            httpStatus = status,
+            retryable = false,
+            charged = true,
+        )
+    }
+
     private enum class ProbeFeature { STREAM, TOOLS, IMAGE }
 
     private data class MetadataProbeResult(
         val summary: String,
         val verified: Boolean,
         val charged: Boolean = false,
+        val httpStatus: Int? = null,
+        val status: CapabilityCheckStatus = CapabilityCheckStatus.FAILED,
     )
 
     private data class FeatureProbeResult(
         val summary: String,
         val supported: Boolean,
         val charged: Boolean,
+        val httpStatus: Int? = null,
+        val status: CapabilityCheckStatus = CapabilityCheckStatus.FAILED,
     )
+
+    private fun elapsedMillis(started: Long): Long =
+        ((System.nanoTime() - started) / 1_000_000L).coerceAtLeast(0L)
 
     private suspend fun resolveHeaders(
         token: String,
@@ -828,6 +1180,9 @@ class OpenAiCompatibleAdapter(
                 return
             }
         val message = choice["message"]?.jsonObject
+        messageReasoningText(message)?.let {
+            emit(ModelEvent.ReasoningDelta(SecretRedactor.redact(it, redactionSecrets)))
+        }
         val toolEvents = mutableListOf<ModelEvent.ToolCallDelta>()
         message?.get("tool_calls")?.jsonArray?.forEach { element ->
             val call = element.jsonObject
@@ -867,6 +1222,14 @@ class OpenAiCompatibleAdapter(
         emit(ModelEvent.Completed)
     }
 
+    /** Prefer an explicitly supplied reasoning field; never derive one. */
+    private fun messageReasoningText(message: JsonObject?): String? =
+        listOf("reasoning_content", "reasoning")
+            .firstNotNullOfOrNull { key ->
+                (message?.get(key) as? JsonPrimitive)?.contentOrNull
+                    ?.takeIf { it.isNotBlank() }
+            }
+
     private data class ResolvedHeaders(
         val values: Map<String, String>,
         val secrets: List<String>,
@@ -876,10 +1239,12 @@ class OpenAiCompatibleAdapter(
 
     private class SecretUnavailableException : RuntimeException()
     private class InvalidHeaderException(message: String) : RuntimeException(message)
+    private class InvalidConnectionConfigException : RuntimeException()
 
     companion object {
         private const val PROBE_TOOL_NAME = "mar_probe_noop"
         private const val MAX_PROBE_RESPONSE_BYTES = 1_048_576L
+        private const val CONNECTION_TIMEOUT_MS = 15_000L
         private const val MAX_EMBEDDING_MODEL_CHARS = 256
         private const val MAX_EMBEDDING_INPUTS = 2_048
         private const val MAX_EMBEDDING_INPUT_CHARS = 16_384

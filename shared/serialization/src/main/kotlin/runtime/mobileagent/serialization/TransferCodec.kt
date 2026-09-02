@@ -25,12 +25,17 @@ import runtime.mobileagent.domain.Conversation
 import runtime.mobileagent.domain.ImagePart
 import runtime.mobileagent.domain.MessageRole
 import runtime.mobileagent.domain.Message
+import runtime.mobileagent.domain.MessagePart
 import runtime.mobileagent.domain.TextPart
 import runtime.mobileagent.domain.ToolCallPart
 import runtime.mobileagent.domain.ToolResultPart
 import runtime.mobileagent.domain.CitationPart
+import runtime.mobileagent.domain.DiffPart
+import runtime.mobileagent.domain.ErrorPart
 import runtime.mobileagent.domain.RunRecord
 import runtime.mobileagent.domain.ToolInvocation
+import runtime.mobileagent.domain.MessagePartLimits
+import runtime.mobileagent.domain.ReasoningPart
 import runtime.mobileagent.domain.AppError
 import runtime.mobileagent.domain.ErrorCode
 import runtime.mobileagent.domain.RetryClass
@@ -479,9 +484,23 @@ object TransferCodec {
         val metadata = requireJsonObject(message.metadataJson, operationId, "message.metadataJson")
         rejectSecretKeys(metadata, operationId)
         rejectUnredactedRequest(metadata, operationId)
+        if (message.parts.size > MessagePartLimits.MAX_PART_COUNT) {
+            invalid(operationId, "Message ${message.id} contains too many parts")
+        }
+        var encodedPartBytes = 0L
         message.parts.forEach { part ->
+            val encoded = try {
+                json.encodeToString<MessagePart>(part)
+            } catch (_: SerializationException) {
+                invalid(operationId, "Message ${message.id} contains an invalid part")
+            }
+            encodedPartBytes += encoded.toByteArray(Charsets.UTF_8).size
+            if (encodedPartBytes > MessagePartLimits.MAX_TOTAL_ENCODED_BYTES) {
+                invalid(operationId, "Message ${message.id} parts exceed the durable size limit")
+            }
             when (part) {
                 is TextPart -> if (part.value.length > MAX_TEXT) invalid(operationId, "Message text part is too long")
+                is ReasoningPart -> Unit // The domain constructor enforces real, bounded content.
                 is ImagePart -> {
                     requireId(part.assetId, operationId, "image.assetId")
                     requireText(part.mediaType, operationId, "image.mediaType")
@@ -499,6 +518,8 @@ object TransferCodec {
                     val result = requireJsonObject(part.resultJson, operationId, "toolResult.resultJson")
                     rejectSecretKeys(result, operationId)
                 }
+                is DiffPart -> Unit // The domain constructor enforces bounded, path-safe preview.
+                is ErrorPart -> Unit // The domain enum and constructor enforce a safe error value.
                 is CitationPart -> requireId(part.citationId, operationId, "citation.citationId")
             }
         }

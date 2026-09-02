@@ -8,15 +8,71 @@ import org.junit.jupiter.api.Assertions.assertThrows
 import org.junit.jupiter.api.Assertions.assertDoesNotThrow
 import org.junit.jupiter.api.Test
 import runtime.mobileagent.domain.AgentProfile
+import runtime.mobileagent.domain.AgentSnapshot
 import runtime.mobileagent.domain.AppException
 import runtime.mobileagent.domain.ApiFormat
+import runtime.mobileagent.domain.Conversation
+import runtime.mobileagent.domain.DiffPart
 import runtime.mobileagent.domain.ErrorCode
+import runtime.mobileagent.domain.ErrorPart
+import runtime.mobileagent.domain.Message
+import runtime.mobileagent.domain.MessageErrorCode
+import runtime.mobileagent.domain.MessageRole
 import runtime.mobileagent.domain.ModelProfile
 import runtime.mobileagent.domain.ModelRole
 import runtime.mobileagent.domain.PromptRevision
+import runtime.mobileagent.domain.ReasoningPart
 
 class TransferCodecTest {
     private val packageHash = "0".repeat(64)
+
+    @Test
+    fun conversationTransferRoundTripsNewMessageParts() {
+        val conversation = Conversation("conversation.one", "snapshot.one", "Conversation", "now", "now")
+        val transfer = ConversationTransfer(
+            conversation = conversation,
+            snapshot = AgentSnapshot(
+                id = "snapshot.one",
+                schemaVersion = SchemaVersion.CURRENT,
+                agentId = "agent.one",
+                promptRevisionId = "prompt.one",
+                chatModelId = "model.one",
+                providerRevision = 1,
+                knowledgeBaseIds = emptyList(),
+                skillIds = emptyList(),
+                createdAt = "now",
+                providerId = "provider.one",
+            ),
+            messages = listOf(
+                Message(
+                    id = "message.one",
+                    conversationId = conversation.id,
+                    role = MessageRole.ASSISTANT,
+                    status = "COMPLETE",
+                    createdAt = "now",
+                    parts = listOf(
+                        ReasoningPart("verified provider reasoning"),
+                        DiffPart("Updated one file", "diff --git a/src/Main.kt b/src/Main.kt"),
+                        ErrorPart(MessageErrorCode.TIMEOUT, "The request timed out", retryable = true),
+                    ),
+                ),
+            ),
+        )
+
+        val decoded = TransferCodec.decodeConversation(TransferCodec.encodeConversation(transfer))
+
+        assertEquals(transfer, decoded)
+    }
+
+    @Test
+    fun conversationTransferRejectsUnboundedOrAbsoluteDiffParts() {
+        assertThrows(IllegalArgumentException::class.java) {
+            DiffPart("changed", patchPreview = "C:\\private\\Main.kt")
+        }
+        assertThrows(IllegalArgumentException::class.java) {
+            ReasoningPart("x".repeat(64 * 1024 + 1))
+        }
+    }
 
     @Test
     fun roundTripKeepsSecretFreeSkillMetadata() {

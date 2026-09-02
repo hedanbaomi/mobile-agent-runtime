@@ -25,6 +25,9 @@ import runtime.mobileagent.wired.WiredAdbRequestId
 import runtime.mobileagent.wired.newWiredAdbRequestId
 import runtime.mobileagent.wired.WIRED_MAX_FILE_BYTES
 import runtime.mobileagent.wired.WIRED_MAX_READ_BYTES
+import runtime.mobileagent.wired.WIRED_MAX_PATCH_BYTES
+import runtime.mobileagent.wired.WIRED_MAX_CURSOR_BYTES
+import runtime.mobileagent.wired.WIRED_MAX_DIRECTORY_ENTRIES
 import runtime.mobileagent.wired.WiredAdbPathPolicy
 import runtime.mobileagent.wired.WIRED_WORKSPACE_ID
 
@@ -94,7 +97,11 @@ class AdbHelperServer(
             val scoped = engine as? runtime.mobileagent.wired.RootScopedPrivilegedFileEngine
                 ?: return failure(request.requestId, ERR_ROOT_BACKEND_UNAVAILABLE)
             runCatching {
-                scoped.forRoot(helperEnvelope.workspaceRootPath, helperEnvelope.fullDevice)
+                scoped.forRoot(
+                    helperEnvelope.workspaceRootPath,
+                    helperEnvelope.fullDevice,
+                    helperEnvelope.workspaceBinding,
+                )
             }.getOrElse { return failure(request.requestId, ERR_ROOT_PATH_INVALID) }
         }
         val operation = runCatching { BridgeOperation.parse(request.operation) }.getOrNull()
@@ -104,6 +111,7 @@ class AdbHelperServer(
             BridgeOperation.FILE_STAT -> WiredAdbFileOperation.STAT
             BridgeOperation.FILE_READ_TEXT -> WiredAdbFileOperation.READ_TEXT
             BridgeOperation.FILE_WRITE_TEXT -> WiredAdbFileOperation.WRITE_TEXT
+            BridgeOperation.FILE_APPLY_PATCH -> WiredAdbFileOperation.APPLY_PATCH
             BridgeOperation.FILE_CREATE_DIRECTORY -> WiredAdbFileOperation.CREATE_DIRECTORY
             BridgeOperation.FILE_MOVE -> WiredAdbFileOperation.MOVE
             BridgeOperation.FILE_DELETE -> WiredAdbFileOperation.DELETE
@@ -146,6 +154,30 @@ class AdbHelperServer(
         val maxBytes = payload.longOrNull("max_bytes")?.also {
             require(it in 1..WIRED_MAX_READ_BYTES)
         }?.toInt() ?: WIRED_MAX_READ_BYTES
+        val offsetBytes = payload.longOrNull("offset_bytes")?.also { require(it >= 0L) } ?: 0L
+        if (operation != WiredAdbFileOperation.READ_TEXT) require(!payload.containsKey("offset_bytes"))
+        val maxEntries = payload.longOrNull("max_entries")?.also {
+            require(it in 1..WIRED_MAX_DIRECTORY_ENTRIES)
+        }?.toInt() ?: WIRED_MAX_DIRECTORY_ENTRIES
+        if (operation != WiredAdbFileOperation.LIST) require(!payload.containsKey("max_entries"))
+        val cursor = payload.stringOrNull("cursor")?.also {
+            require(it.length in 1..WIRED_MAX_CURSOR_BYTES && it.all { character -> character.code in 0x21..0x7e })
+        }
+        if (operation != WiredAdbFileOperation.LIST) require(!payload.containsKey("cursor"))
+        val patch = payload.stringOrNull("patch")?.let(::strictUtf8)
+        val expectedVersion = payload.longOrNull("expected_version")?.also { require(it >= 0L) }
+        val patchFormat = payload.stringOrNull("format")?.let {
+            when (it) {
+                "unified_diff" -> runtime.mobileagent.wired.WiredAdbPatchFormat.UNIFIED_DIFF
+                "replace" -> runtime.mobileagent.wired.WiredAdbPatchFormat.REPLACE
+                else -> throw IllegalArgumentException("invalid patch format")
+            }
+        } ?: runtime.mobileagent.wired.WiredAdbPatchFormat.UNIFIED_DIFF
+        if (operation == WiredAdbFileOperation.APPLY_PATCH) {
+            require(patch != null && expectedVersion != null && patch.size <= WIRED_MAX_PATCH_BYTES)
+        } else {
+            require(patch == null && expectedVersion == null && !payload.containsKey("format"))
+        }
         val overwrite = payload.booleanOrNull("overwrite") ?: false
         return WiredAdbFileRequest(
             requestId = id,
@@ -155,6 +187,13 @@ class AdbHelperServer(
             contentUtf8 = content,
             replaceExisting = overwrite,
             maxBytes = maxBytes,
+            cursor = cursor,
+            maxEntries = maxEntries,
+            offsetBytes = offsetBytes,
+            patchUtf8 = patch,
+            expectedVersion = expectedVersion,
+            patchFormat = patchFormat,
+            workspaceBinding = payload.stringOrNull("workspace_binding"),
         )
     }
 
@@ -170,9 +209,12 @@ class AdbHelperServer(
             setOf("workspace_id")
         }
         val allowed = when (operation) {
-            WiredAdbFileOperation.LIST,
+            WiredAdbFileOperation.LIST -> workspaceKeys + setOf("relative_path", "max_entries", "cursor")
             WiredAdbFileOperation.STAT -> workspaceKeys + "relative_path"
-            WiredAdbFileOperation.READ_TEXT -> workspaceKeys + setOf("relative_path", "max_bytes")
+            WiredAdbFileOperation.READ_TEXT -> workspaceKeys + setOf("relative_path", "max_bytes", "offset_bytes")
+            WiredAdbFileOperation.APPLY_PATCH -> workspaceKeys + setOf(
+                "relative_path", "patch", "expected_version", "format",
+            )
             WiredAdbFileOperation.WRITE_TEXT -> workspaceKeys + setOf("relative_path", "content", "overwrite")
             WiredAdbFileOperation.CREATE_DIRECTORY,
             WiredAdbFileOperation.DELETE -> workspaceKeys + setOf("relative_path", "recursive")
@@ -205,6 +247,13 @@ class AdbHelperServer(
         result.replaced?.let { put("replaced", it) }
         result.deleted?.let { put("deleted", it) }
         if (result.truncated) put("truncated", true)
+        result.nextCursor?.let { put("next_cursor", it) }
+        result.version?.let { put("version", it) }
+        if (result.operation == WiredAdbFileOperation.READ_TEXT) {
+            put("offset_bytes", result.offsetBytes)
+            result.totalBytes?.let { put("total_bytes", it) }
+            put("eof", result.eof)
+        }
         if (result.entries.isNotEmpty()) {
             kotlinx.serialization.json.buildJsonArray {
                 result.entries.forEach { entry ->
@@ -212,6 +261,7 @@ class AdbHelperServer(
                         put("relative_path", entry.relativePath)
                         put("type", if (entry.type == WiredAdbEntryType.FILE) "file" else "directory")
                         entry.bytes?.let { put("bytes", it) }
+                        entry.version?.let { put("version", it) }
                     })
                 }
             }.also { array ->
@@ -225,6 +275,7 @@ class AdbHelperServer(
         WiredAdbFileOperation.STAT -> "file_stat"
         WiredAdbFileOperation.READ_TEXT -> "file_read_text"
         WiredAdbFileOperation.WRITE_TEXT -> "file_write_text"
+        WiredAdbFileOperation.APPLY_PATCH -> "file_apply_patch"
         WiredAdbFileOperation.CREATE_DIRECTORY -> "file_create_directory"
         WiredAdbFileOperation.MOVE -> "file_move"
         WiredAdbFileOperation.DELETE -> "file_delete"

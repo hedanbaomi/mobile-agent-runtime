@@ -73,6 +73,7 @@ class WiredAdbWorkspaceBackendAdapter(
         CapabilityId(CapabilityId.FILE_STAT),
         CapabilityId(CapabilityId.FILE_READ_TEXT),
         CapabilityId(CapabilityId.FILE_WRITE_TEXT),
+        CapabilityId("file.apply_patch"),
         CapabilityId(CapabilityId.FILE_CREATE_DIRECTORY),
         CapabilityId(CapabilityId.FILE_MOVE),
         CapabilityId(CapabilityId.FILE_DELETE),
@@ -82,14 +83,20 @@ class WiredAdbWorkspaceBackendAdapter(
         if (request.workspaceId != descriptor.id) return failure(ToolErrorCode.INVALID_REQUEST)
         val path = request.relativePath.orEmpty()
         if (path.toByteArray(StandardCharsets.UTF_8).size > WIRED_MAX_PATH_BYTES) return failure(ToolErrorCode.PATH_OUT_OF_SCOPE)
-        return execute(WiredAdbFileOperation.LIST, path, maxEntries = request.maxEntries).mapValue { result ->
+        return execute(
+            operation = WiredAdbFileOperation.LIST,
+            path = path,
+            maxEntries = request.maxEntries.coerceAtMost(WIRED_MAX_DIRECTORY_ENTRIES),
+            cursor = request.cursor,
+        ).mapValue { result ->
             if (result.relativePath.orEmpty() != path) throw ProtocolShapeException()
             WorkspaceListing(
                 relativePath = path.ifEmpty { "." },
                 entries = result.entries.take(request.maxEntries).map { entry ->
-                    WorkspaceEntry(entry.relativePath, entry.type.toSharedType(), entry.bytes ?: 0L)
+                    WorkspaceEntry(entry.relativePath, entry.type.toSharedType(), entry.bytes ?: 0L, entry.version)
                 },
-                truncated = result.entries.size > request.maxEntries,
+                truncated = result.truncated || result.nextCursor != null || result.entries.size > request.maxEntries,
+                nextCursor = result.nextCursor,
             )
         }
     }
@@ -99,24 +106,60 @@ class WiredAdbWorkspaceBackendAdapter(
         return execute(WiredAdbFileOperation.STAT, request.relativePath, maxEntries = 1).mapValue { result ->
             if (result.relativePath != request.relativePath || result.entries.size != 1) throw ProtocolShapeException()
             val entry = result.entries.single()
-            WorkspaceFileStat(entry.relativePath, entry.type.toSharedType(), entry.bytes ?: 0L)
+            WorkspaceFileStat(entry.relativePath, entry.type.toSharedType(), entry.bytes ?: 0L, entry.version)
         }
     }
 
     override suspend fun readText(request: WorkspaceReadTextRequest): WorkspaceResult<WorkspaceText> {
         if (request.workspaceId != descriptor.id) return failure(ToolErrorCode.INVALID_REQUEST)
-        if (request.maxBytes !in 1L..WIRED_MAX_READ_BYTES.toLong()) return failure(ToolErrorCode.FILE_TOO_LARGE)
+        if (request.maxBytes < 1L || request.offsetBytes < 0L) return failure(ToolErrorCode.INVALID_REQUEST)
+        val maxBytes = request.maxBytes.coerceAtMost(WIRED_MAX_READ_BYTES.toLong())
         return execute(
             operation = WiredAdbFileOperation.READ_TEXT,
             path = request.relativePath,
             maxEntries = 1,
-            maxBytes = request.maxBytes.toInt(),
+            maxBytes = maxBytes.toInt(),
+            offsetBytes = request.offsetBytes,
         ).mapValue { result ->
             val text = result.text ?: throw ProtocolShapeException()
             if (result.relativePath != request.relativePath) throw ProtocolShapeException()
             val bytes = result.bytes ?: text.toByteArray(StandardCharsets.UTF_8).size.toLong()
             if (bytes != text.toByteArray(StandardCharsets.UTF_8).size.toLong()) throw ProtocolShapeException()
-            WorkspaceText(request.relativePath, text, bytes)
+            WorkspaceText(
+                relativePath = request.relativePath,
+                text = text,
+                byteSize = bytes,
+                version = result.version,
+                offsetBytes = result.offsetBytes,
+                totalBytes = result.totalBytes,
+                eof = result.eof,
+            )
+        }
+    }
+
+    override suspend fun applyPatch(request: runtime.mobileagent.skills.tooling.WorkspaceApplyPatchRequest): WorkspaceResult<WorkspaceMutation> {
+        if (request.workspaceId != descriptor.id) return failure(ToolErrorCode.INVALID_REQUEST)
+        val patch = request.patch.toByteArray(StandardCharsets.UTF_8)
+        if (patch.size > WIRED_MAX_PATCH_BYTES) return failure(ToolErrorCode.FILE_TOO_LARGE)
+        return execute(
+            operation = WiredAdbFileOperation.APPLY_PATCH,
+            path = request.relativePath,
+            maxEntries = 1,
+            patch = patch,
+            expectedVersion = request.expectedVersion,
+            patchFormat = if (request.format == runtime.mobileagent.skills.tooling.WorkspacePatchFormat.REPLACE) {
+                WiredAdbPatchFormat.REPLACE
+            } else WiredAdbPatchFormat.UNIFIED_DIFF,
+        ).mapValue { result ->
+            if (result.relativePath != request.relativePath || result.bytes == null || result.version == null) {
+                throw ProtocolShapeException()
+            }
+            WorkspaceMutation(
+                relativePath = request.relativePath,
+                type = WorkspaceEntryType.FILE,
+                byteSize = result.bytes,
+                version = result.version,
+            )
         }
     }
 
@@ -179,9 +222,27 @@ class WiredAdbWorkspaceBackendAdapter(
         content: ByteArray? = null,
         replace: Boolean = false,
         maxBytes: Int = WIRED_DEFAULT_READ_BYTES,
+        cursor: String? = null,
+        offsetBytes: Long = 0L,
+        patch: ByteArray? = null,
+        expectedVersion: Long? = null,
+        patchFormat: WiredAdbPatchFormat = WiredAdbPatchFormat.UNIFIED_DIFF,
     ): WorkspaceResult<WiredAdbFileResult> {
         val request = runCatching {
-            authority.newFileRequest(operation, path, destination, content, replace, maxBytes)
+            authority.newFileRequest(
+                operation = operation,
+                relativePath = path,
+                destinationRelativePath = destination,
+                contentUtf8 = content,
+                replaceExisting = replace,
+                maxBytes = maxBytes,
+                cursor = cursor,
+                maxEntries = maxEntries.coerceAtMost(WIRED_MAX_DIRECTORY_ENTRIES),
+                offsetBytes = offsetBytes,
+                patchUtf8 = patch,
+                expectedVersion = expectedVersion,
+                patchFormat = patchFormat,
+            )
         }.getOrElse { return failure(ToolErrorCode.INVALID_REQUEST) }
         return try {
             when (val result = boundHandle?.let { authority.workspace.executeBoundFile(it, request) }
@@ -197,11 +258,6 @@ class WiredAdbWorkspaceBackendAdapter(
         } catch (_: RuntimeException) {
             failure(ToolErrorCode.UNKNOWN_OUTCOME)
         }
-    }
-
-    private fun WiredAdbEntryType.toSharedType(): WorkspaceEntryType = when (this) {
-        WiredAdbEntryType.FILE -> WorkspaceEntryType.FILE
-        WiredAdbEntryType.DIRECTORY -> WorkspaceEntryType.DIRECTORY
     }
 
     private fun WiredAdbErrorCode.toToolErrorCode(): ToolErrorCode = when (this) {
@@ -220,6 +276,12 @@ class WiredAdbWorkspaceBackendAdapter(
         WiredAdbErrorCode.BRIDGE_PROTOCOL_MISMATCH -> ToolErrorCode.BRIDGE_PROTOCOL_MISMATCH
         WiredAdbErrorCode.UNKNOWN_OUTCOME -> ToolErrorCode.UNKNOWN_OUTCOME
         WiredAdbErrorCode.TIMEOUT -> ToolErrorCode.TIMEOUT
+        WiredAdbErrorCode.WORKSPACE_NOT_FOUND -> ToolErrorCode.WORKSPACE_NOT_FOUND
+        WiredAdbErrorCode.CONFLICT -> ToolErrorCode.CONFLICT
+        WiredAdbErrorCode.OFFSET_OUT_OF_RANGE,
+        WiredAdbErrorCode.INVALID_CURSOR,
+        WiredAdbErrorCode.INVALID_PATCH -> ToolErrorCode.INVALID_REQUEST
+        WiredAdbErrorCode.ATOMIC_REPLACE_UNAVAILABLE -> ToolErrorCode.IO_ERROR
         WiredAdbErrorCode.IO_ERROR,
         WiredAdbErrorCode.INTERNAL_ERROR -> ToolErrorCode.IO_ERROR
         else -> ToolErrorCode.AUTHORITY_TEMPORARILY_UNAVAILABLE
@@ -243,6 +305,11 @@ private inline fun <T, R> WorkspaceResult<T>.mapValue(transform: (T) -> R): Work
         .getOrElse { WorkspaceResult.Failure(ToolError(ToolErrorCode.BRIDGE_PROTOCOL_MISMATCH)) }
 }
 
+private fun WiredAdbEntryType.toSharedType(): WorkspaceEntryType = when (this) {
+    WiredAdbEntryType.FILE -> WorkspaceEntryType.FILE
+    WiredAdbEntryType.DIRECTORY -> WorkspaceEntryType.DIRECTORY
+}
+
 /**
  * Wired ADB provider backed by the authenticated companion's opaque directory
  * bindings. The only absolute-path input is [attachUserPath], which is called
@@ -253,14 +320,23 @@ class WiredAdbDeviceWorkspaceProvider(
     private val fullDeviceGrantStore: FullDeviceFilesGrantStore?,
 ) : PrivilegedWorkspaceProvider {
     override val authority: Authority = Authority.WIRED_ADB
+    /**
+     * The picker starts at the user storage location instead of exposing the
+     * device root.  This is a provider-internal canonical location; it never
+     * crosses the model/runtime workspace contract.  The companion validates
+     * it again before creating the short-lived navigation binding.
+     */
+    private val defaultPickerRoot = "/storage/emulated/0"
+    private val pickerOwner = Any()
     private val browser = object : WorkspaceDirectoryBrowser {
         override suspend fun root(maxEntries: Int): WorkspaceResult<WorkspaceDirectoryPage> =
-            failure(ToolErrorCode.AUTHORITY_TEMPORARILY_UNAVAILABLE)
+            browseRoot(maxEntries)
 
         override suspend fun browse(request: WorkspaceBrowseRequest): WorkspaceResult<WorkspaceDirectoryPage> =
-            failure(ToolErrorCode.AUTHORITY_TEMPORARILY_UNAVAILABLE)
+            browsePickerDirectory(request)
     }
     private val activeHandles = linkedMapOf<String, WiredAdbWorkspaceHandle>()
+    private var pickerRoot: PickerDirectoryHandle? = null
     @Volatile private var closed = false
 
     override val directoryBrowser: WorkspaceDirectoryBrowser get() = browser
@@ -282,8 +358,215 @@ class WiredAdbDeviceWorkspaceProvider(
         return attachmentResult(attached, displayName, WorkspaceScope.SELECTED_DIRECTORY)
     }
 
-    override suspend fun attachDirectory(request: WorkspaceAttachRequest): WorkspaceResult<WorkspaceAttachment> =
-        failure(ToolErrorCode.AUTHORITY_TEMPORARILY_UNAVAILABLE)
+    override suspend fun attachDirectory(request: WorkspaceAttachRequest): WorkspaceResult<WorkspaceAttachment> {
+        if (closed) return failure(ToolErrorCode.AUTHORITY_TEMPORARILY_UNAVAILABLE)
+        val handle = request.directory as? PickerDirectoryHandle
+            ?: return failure(ToolErrorCode.INVALID_REQUEST)
+        if (handle.owner !== pickerOwner) return failure(ToolErrorCode.INVALID_REQUEST)
+        if (handle.virtualRoot) return failure(ToolErrorCode.ROOT_OPERATION_FORBIDDEN)
+        val attached = try {
+            authorityPort.workspace.attachDirectory(
+                workspaceId = request.workspaceId,
+                displayName = request.displayName,
+                // This path is retained only by the provider-owned opaque
+                // picker handle and is revalidated by the bridge.  It is not
+                // accepted from model-facing requests.
+                absolutePath = handle.absolutePath,
+                scope = WiredAdbWorkspaceScope.SELECTED_DIRECTORY,
+                confirmedByUser = true,
+            )
+        } catch (cancelled: kotlinx.coroutines.CancellationException) {
+            throw cancelled
+        } catch (_: RuntimeException) {
+            return failure(ToolErrorCode.UNKNOWN_OUTCOME)
+        }
+        return attachmentResult(attached, request.displayName, WorkspaceScope.SELECTED_DIRECTORY)
+    }
+
+    /**
+     * Creates one short-lived navigation binding for the default user-storage
+     * location.  A normal picker must not bind `/` as a selected workspace;
+     * full-device access remains behind the explicit grant path below.
+     */
+    private suspend fun browseRoot(maxEntries: Int): WorkspaceResult<WorkspaceDirectoryPage> {
+        if (closed) return failure(ToolErrorCode.AUTHORITY_TEMPORARILY_UNAVAILABLE)
+        if (maxEntries !in 1..WIRED_MAX_DIRECTORY_ENTRIES) {
+            return failure(ToolErrorCode.INVALID_REQUEST)
+        }
+        val existing = synchronized(activeHandles) { pickerRoot }
+        if (existing != null) {
+            val checked = browseRemote(existing, maxEntries)
+            if (checked is WorkspaceResult.Success) return syntheticRoot(existing)
+            synchronized(activeHandles) {
+                if (pickerRoot === existing) pickerRoot = null
+            }
+            return checked
+        }
+        val attached = try {
+            authorityPort.workspace.attachDirectory(
+                workspaceId = PICKER_WORKSPACE_ID,
+                displayName = PICKER_DISPLAY_NAME,
+                absolutePath = defaultPickerRoot,
+                scope = WiredAdbWorkspaceScope.SELECTED_DIRECTORY,
+                confirmedByUser = true,
+            )
+        } catch (cancelled: kotlinx.coroutines.CancellationException) {
+            throw cancelled
+        } catch (_: RuntimeException) {
+            return failure(ToolErrorCode.UNKNOWN_OUTCOME)
+        }
+        val value = when (attached) {
+            is WiredAdbResult.Failure -> return failure(attached.code.toToolErrorCode())
+            is WiredAdbResult.Success -> attached.value
+        }
+        if (value.scope != WiredAdbWorkspaceScope.SELECTED_DIRECTORY ||
+            value.initialPage.relativePath.isNotEmpty()
+        ) {
+            return failure(ToolErrorCode.BRIDGE_PROTOCOL_MISMATCH)
+        }
+        val root = PickerDirectoryHandle(
+            owner = pickerOwner,
+            remoteHandle = value.handle,
+            relativePath = "",
+            absolutePath = defaultPickerRoot,
+            parent = null,
+            virtualRoot = true,
+        )
+        synchronized(activeHandles) {
+            pickerRoot = root
+        }
+        return syntheticRoot(root)
+    }
+
+    private suspend fun browsePickerDirectory(
+        request: WorkspaceBrowseRequest,
+    ): WorkspaceResult<WorkspaceDirectoryPage> {
+        if (closed) return failure(ToolErrorCode.AUTHORITY_TEMPORARILY_UNAVAILABLE)
+        if (request.maxEntries !in 1..WIRED_MAX_DIRECTORY_ENTRIES) {
+            return failure(ToolErrorCode.INVALID_REQUEST)
+        }
+        val handle = request.handle as? PickerDirectoryHandle
+            ?: return failure(ToolErrorCode.INVALID_REQUEST)
+        if (handle.owner !== pickerOwner) return failure(ToolErrorCode.INVALID_REQUEST)
+        if (handle.virtualRoot) return browseRoot(request.maxEntries)
+        return browseRemote(handle, request.maxEntries)
+    }
+
+    private suspend fun browseRemote(
+        handle: PickerDirectoryHandle,
+        maxEntries: Int,
+    ): WorkspaceResult<WorkspaceDirectoryPage> {
+        val result = try {
+            authorityPort.workspace.browseDirectory(
+                handle = handle.remoteHandle,
+                relativePath = handle.relativePath.ifEmpty { null },
+                maxEntries = maxEntries,
+            )
+        } catch (cancelled: kotlinx.coroutines.CancellationException) {
+            throw cancelled
+        } catch (_: RuntimeException) {
+            return failure(ToolErrorCode.UNKNOWN_OUTCOME)
+        }
+        val page = when (result) {
+            is WiredAdbResult.Failure -> return failure(result.code.toToolErrorCode())
+            is WiredAdbResult.Success -> result.value
+        }
+        if (page.handle !== handle.remoteHandle || page.relativePath != handle.relativePath) {
+            return failure(ToolErrorCode.BRIDGE_PROTOCOL_MISMATCH)
+        }
+        val entries = ArrayList<WorkspaceDirectoryEntry>(page.entries.size)
+        for (entry in page.entries) {
+            val childName = directChildName(handle.relativePath, entry.relativePath)
+                ?: return failure(ToolErrorCode.BRIDGE_PROTOCOL_MISMATCH)
+            val childPath = entry.relativePath
+            val childAbsolutePath = joinAbsolute(handle.absolutePath, childName)
+            val childHandle = if (entry.type == WiredAdbEntryType.DIRECTORY) {
+                PickerDirectoryHandle(
+                    owner = pickerOwner,
+                    remoteHandle = handle.remoteHandle,
+                    relativePath = childPath,
+                    absolutePath = childAbsolutePath,
+                    parent = handle,
+                    virtualRoot = false,
+                )
+            } else {
+                null
+            }
+            entries += WorkspaceDirectoryEntry(
+                name = childName,
+                type = entry.type.toSharedType(),
+                sizeBytes = entry.bytes,
+                // The typed browse result is produced by the authenticated
+                // shell-UID helper.  Actual failures are reported by the
+                // subsequent browse/attach operation, never guessed here.
+                readable = true,
+                writable = true,
+                handle = childHandle,
+            )
+        }
+        return WorkspaceResult.Success(
+            WorkspaceDirectoryPage(
+                current = handle,
+                parent = handle.parent,
+                entries = entries.take(maxEntries),
+                truncated = page.truncated || entries.size > maxEntries,
+            ),
+        )
+    }
+
+    private fun syntheticRoot(handle: PickerDirectoryHandle): WorkspaceResult<WorkspaceDirectoryPage> {
+        val storage = PickerDirectoryHandle(
+            owner = pickerOwner,
+            remoteHandle = handle.remoteHandle,
+            relativePath = "",
+            absolutePath = defaultPickerRoot,
+            parent = handle,
+            virtualRoot = false,
+        )
+        return WorkspaceResult.Success(
+            WorkspaceDirectoryPage(
+                current = handle,
+                parent = null,
+                entries = listOf(
+                    WorkspaceDirectoryEntry(
+                        name = "storage",
+                        type = WorkspaceEntryType.DIRECTORY,
+                        readable = true,
+                        writable = true,
+                        handle = storage,
+                    ),
+                ),
+                truncated = false,
+            ),
+        )
+    }
+
+    private fun directChildName(parent: String, child: String): String? {
+        val prefix = if (parent.isEmpty()) "" else "$parent/"
+        if (!child.startsWith(prefix)) return null
+        val name = child.removePrefix(prefix)
+        return name.takeIf { it.isNotEmpty() && !it.contains('/') && it != "." && it != ".." }
+    }
+
+    private fun joinAbsolute(parent: String, child: String): String {
+        require(parent.startsWith('/') && !parent.endsWith('/'))
+        require(child.isNotEmpty() && !child.contains('/') && child != "." && child != "..")
+        return "$parent/$child"
+    }
+
+    private class PickerDirectoryHandle(
+        val owner: Any,
+        val remoteHandle: WiredAdbWorkspaceHandle,
+        val relativePath: String,
+        val absolutePath: String,
+        val parent: PickerDirectoryHandle?,
+        val virtualRoot: Boolean,
+    ) : WorkspaceDirectoryHandle()
+
+    private companion object {
+        const val PICKER_WORKSPACE_ID = "wired-picker-root"
+        const val PICKER_DISPLAY_NAME = "内部存储"
+    }
 
     override suspend fun openFullDeviceFiles(request: FullDeviceFilesRequest): WorkspaceResult<WorkspaceAttachment> {
         if (closed) return failure(ToolErrorCode.AUTHORITY_TEMPORARILY_UNAVAILABLE)
@@ -374,6 +657,12 @@ private fun WiredAdbErrorCode.toToolErrorCode(): ToolErrorCode = when (this) {
     WiredAdbErrorCode.BRIDGE_PROTOCOL_MISMATCH -> ToolErrorCode.BRIDGE_PROTOCOL_MISMATCH
     WiredAdbErrorCode.UNKNOWN_OUTCOME -> ToolErrorCode.UNKNOWN_OUTCOME
     WiredAdbErrorCode.TIMEOUT -> ToolErrorCode.TIMEOUT
+    WiredAdbErrorCode.WORKSPACE_NOT_FOUND -> ToolErrorCode.WORKSPACE_NOT_FOUND
+    WiredAdbErrorCode.CONFLICT -> ToolErrorCode.CONFLICT
+    WiredAdbErrorCode.OFFSET_OUT_OF_RANGE,
+    WiredAdbErrorCode.INVALID_CURSOR,
+    WiredAdbErrorCode.INVALID_PATCH -> ToolErrorCode.INVALID_REQUEST
+    WiredAdbErrorCode.ATOMIC_REPLACE_UNAVAILABLE -> ToolErrorCode.IO_ERROR
     WiredAdbErrorCode.IO_ERROR,
     WiredAdbErrorCode.INTERNAL_ERROR -> ToolErrorCode.IO_ERROR
     else -> ToolErrorCode.AUTHORITY_TEMPORARILY_UNAVAILABLE

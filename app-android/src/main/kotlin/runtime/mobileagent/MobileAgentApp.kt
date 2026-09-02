@@ -102,7 +102,12 @@ class MobileAgentApp : Application() {
     }
 }
 
-class AppContainer(app: MobileAgentApp) : AgentGrantPortProvider, SettingsAuthorityPortProvider, AutoCloseable {
+class AppContainer(app: MobileAgentApp) :
+    AgentGrantPortProvider,
+    SettingsAuthorityPortProvider,
+    ThreadWorkspacePortProvider,
+    ThreadWorkspaceRuntimePortProvider,
+    AutoCloseable {
     private val closed = AtomicBoolean(false)
     private val runtimeIntegrationRef = AtomicReference<RuntimeIntegration?>()
     val db = app.database
@@ -210,6 +215,12 @@ class AppContainer(app: MobileAgentApp) : AgentGrantPortProvider, SettingsAuthor
         get() = runtimeIntegration.grants
 
     override fun settingsAuthorityPort(): SettingsAuthorityPort = runtimeIntegration
+
+    override val threadWorkspacePort: ThreadWorkspacePort
+        get() = runtimeIntegration
+
+    override val threadWorkspaceRuntimePort: ThreadWorkspaceRuntimePort
+        get() = runtimeIntegration
 
     val announcements = AnnouncementRepository(db).apply {
         if (baseUrl().isBlank()) {

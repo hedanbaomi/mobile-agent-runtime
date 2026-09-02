@@ -1047,8 +1047,8 @@ class TransferRepository(
         }
         importSnapshot(transfer.snapshot, policy, warnings)
         db.execute(
-            "INSERT INTO conversations(id,snapshot_id,title,created_at,updated_at) VALUES(?,?,?,?,?)",
-            listOf(conversation.id, conversation.snapshotId, conversation.title, conversation.createdAt, conversation.updatedAt),
+            "INSERT INTO conversations(id,snapshot_id,agent_snapshot_id,title,created_at,updated_at) VALUES(?,?,?,?,?,?)",
+            listOf(conversation.id, conversation.snapshotId, conversation.snapshotId, conversation.title, conversation.createdAt, conversation.updatedAt),
         )
         transfer.messages.forEach { message ->
             db.execute(
@@ -1094,6 +1094,9 @@ class TransferRepository(
         is runtime.mobileagent.domain.ToolCallPart -> "tool_call"
         is runtime.mobileagent.domain.ToolResultPart -> "tool_result"
         is runtime.mobileagent.domain.CitationPart -> "citation"
+        is runtime.mobileagent.domain.ReasoningPart -> "reasoning"
+        is runtime.mobileagent.domain.DiffPart -> "diff"
+        is runtime.mobileagent.domain.ErrorPart -> "error"
     }
 
     private fun exportSkill(id: String, includeBytes: Boolean, packageIncluded: Boolean = false): SkillTransfer? {

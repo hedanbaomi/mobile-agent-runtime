@@ -313,6 +313,119 @@ class DpapiDesktopTrustStore(
     }
 }
 
+/**
+ * DPAPI-protected desktop mapping for attached wired workspaces.  The Android
+ * side stores only the opaque locator (inside its own Keystore-backed store);
+ * this companion store keeps the corresponding root path local to the
+ * explicitly selected Windows user and never returns it over the bridge.
+ */
+class DpapiDesktopWorkspaceBindingStore(
+    private val directory: Path,
+) : WiredAdbWorkspaceBindingStore {
+    init {
+        if (!Platform.isWindows()) {
+            throw DesktopTrustUnavailableException("Windows DPAPI is required for workspace bindings")
+        }
+        require(directory.isAbsolute) { "workspace binding directory must be absolute" }
+        WindowsTrustPathSecurity.checkDirectory(directory, createIfMissing = true)
+    }
+
+    override fun load(recoveryLocator: String): WiredAdbPersistedWorkspaceBinding? {
+        validateWorkspaceRecoveryLocator(recoveryLocator)
+        val file = recordPath(recoveryLocator)
+        WindowsTrustPathSecurity.checkDirectory(directory, createIfMissing = false)
+        if (Files.notExists(file, LinkOption.NOFOLLOW_LINKS)) return null
+        WindowsTrustPathSecurity.checkFile(file)
+        require(Files.size(file) <= MAX_WORKSPACE_BINDING_RECORD_BYTES) {
+            "workspace binding record is too large"
+        }
+        val protected = Files.readAllBytes(file)
+        return try {
+            val plain = try {
+                Crypt32Util.cryptUnprotectData(protected, WinCrypt.CRYPTPROTECT_UI_FORBIDDEN)
+            } catch (error: Exception) {
+                throw DesktopTrustUnavailableException("workspace binding decrypt failed", error)
+            }
+            try {
+                decodeWorkspaceBinding(plain, recoveryLocator)
+            } finally {
+                Arrays.fill(plain, 0)
+            }
+        } finally {
+            Arrays.fill(protected, 0)
+        }
+    }
+
+    override fun save(
+        recoveryLocator: String,
+        binding: WiredAdbPersistedWorkspaceBinding,
+    ) {
+        validateWorkspaceRecoveryLocator(recoveryLocator)
+        validateWorkspaceBinding(binding)
+        val plain = encodeWorkspaceBinding(recoveryLocator, binding)
+        try {
+            val protected = try {
+                Crypt32Util.cryptProtectData(plain, WinCrypt.CRYPTPROTECT_UI_FORBIDDEN)
+            } catch (error: Exception) {
+                throw DesktopTrustUnavailableException("workspace binding encrypt failed", error)
+            }
+            try {
+                val file = recordPath(recoveryLocator)
+                WindowsTrustPathSecurity.checkDirectory(directory, createIfMissing = true)
+                WindowsTrustPathSecurity.checkFileIfPresent(file)
+                val tmp = file.resolveSibling(".${file.fileName}.tmp-${ProcessHandle.current().pid()}-${System.nanoTime()}")
+                try {
+                    require(protected.size <= MAX_WORKSPACE_BINDING_RECORD_BYTES)
+                    Files.newOutputStream(tmp, StandardOpenOption.CREATE_NEW, StandardOpenOption.WRITE).use { output ->
+                        output.write(protected)
+                        output.flush()
+                    }
+                    FileChannel.open(tmp, StandardOpenOption.WRITE).use { channel -> channel.force(true) }
+                    WindowsTrustPathSecurity.checkFile(tmp)
+                    // A locator is immutable. Never overwrite an existing
+                    // mapping, because doing so could silently retarget an
+                    // already persisted Android workspace.
+                    if (Files.exists(file, LinkOption.NOFOLLOW_LINKS)) {
+                        throw FileAlreadyExistsException(file.toString())
+                    }
+                    Files.move(tmp, file, StandardCopyOption.ATOMIC_MOVE)
+                    WindowsTrustPathSecurity.checkFile(file)
+                } catch (error: Exception) {
+                    runCatching { Files.deleteIfExists(tmp) }
+                    if (error is FileAlreadyExistsException) throw error
+                    throw DesktopTrustUnavailableException("cannot persist workspace binding", error)
+                }
+            } finally {
+                Arrays.fill(protected, 0)
+            }
+        } finally {
+            Arrays.fill(plain, 0)
+        }
+    }
+
+    override fun remove(recoveryLocator: String) {
+        validateWorkspaceRecoveryLocator(recoveryLocator)
+        try {
+            WindowsTrustPathSecurity.checkDirectory(directory, createIfMissing = false)
+            val file = recordPath(recoveryLocator)
+            WindowsTrustPathSecurity.checkFileIfPresent(file)
+            Files.deleteIfExists(file)
+        } catch (error: Exception) {
+            throw DesktopTrustUnavailableException("cannot forget workspace binding", error)
+        }
+    }
+
+    private fun recordPath(recoveryLocator: String): Path {
+        val digest = MessageDigest.getInstance("SHA-256")
+            .digest(recoveryLocator.toByteArray(StandardCharsets.UTF_8))
+        return try {
+            directory.resolve("workspace-${BridgeEncoding.hex(digest)}.bin")
+        } finally {
+            Arrays.fill(digest, 0)
+        }
+    }
+}
+
 /** JVM tests can exercise orchestration without depending on Windows DPAPI. */
 class InMemoryDesktopTrustStore : DesktopTrustStore {
     private val records = LinkedHashMap<BridgeIdentity, DesktopTrustRecord>()
@@ -360,6 +473,9 @@ private const val TRUST_MAGIC = 0x4D415254 // MART
 private const val TRUST_FORMAT_VERSION = 1
 private const val MAX_PROTECTED_RECORD_BYTES = 128 * 1024
 private const val MAX_PROTECTED_ID_BYTES = 4 * 1024
+private const val WORKSPACE_BINDING_MAGIC = 0x4D415257 // MARW
+private const val WORKSPACE_BINDING_FORMAT_VERSION = 1
+private const val MAX_WORKSPACE_BINDING_RECORD_BYTES = 16 * 1024
 
 private fun validateDesktopId(value: String) {
     require(value.isNotBlank() && value.length <= 256) { "desktopId is invalid" }
@@ -367,6 +483,73 @@ private fun validateDesktopId(value: String) {
         "desktopId contains whitespace/control characters"
     }
     strictTrustUtf8(value)
+}
+
+private fun validateWorkspaceRecoveryLocator(value: String) {
+    require(value.length == BridgeProtocol.WORKSPACE_RECOVERY_LOCATOR_BYTES * 2) {
+        "workspace recovery locator is invalid"
+    }
+    require(value.all { it in "0123456789abcdefABCDEF" }) {
+        "workspace recovery locator is invalid"
+    }
+}
+
+private fun validateWorkspaceBinding(binding: WiredAdbPersistedWorkspaceBinding) {
+    require(binding.workspaceId.matches(Regex("[A-Za-z0-9][A-Za-z0-9._~-]{0,127}"))) {
+        "workspace id is invalid"
+    }
+    WiredAdbDesktopAbsolutePathPolicy.parse(binding.rootPath)
+    require(binding.scope == "selected_directory" || binding.scope == "full_device_files") {
+        "workspace scope is invalid"
+    }
+    if (binding.fullDevice) require(binding.rootPath == "/" && binding.scope == "full_device_files") {
+        "full-device workspace binding is invalid"
+    }
+    if (!binding.fullDevice) require(binding.rootPath != "/" && binding.scope == "selected_directory") {
+        "selected workspace binding is invalid"
+    }
+}
+
+private fun encodeWorkspaceBinding(
+    recoveryLocator: String,
+    binding: WiredAdbPersistedWorkspaceBinding,
+): ByteArray = ByteArrayOutputStream().also { output ->
+    DataOutputStream(output).use { data ->
+        data.writeInt(WORKSPACE_BINDING_MAGIC)
+        data.writeShort(WORKSPACE_BINDING_FORMAT_VERSION)
+        writeString(data, recoveryLocator)
+        writeString(data, binding.workspaceId)
+        writeString(data, binding.rootPath)
+        writeString(data, binding.scope)
+        data.writeBoolean(binding.fullDevice)
+    }
+}.toByteArray()
+
+private fun decodeWorkspaceBinding(
+    bytes: ByteArray,
+    expectedLocator: String,
+): WiredAdbPersistedWorkspaceBinding {
+    val input = DataInputStream(ByteArrayInputStream(bytes))
+    return try {
+        require(input.readInt() == WORKSPACE_BINDING_MAGIC) { "workspace binding magic is invalid" }
+        require(input.readUnsignedShort() == WORKSPACE_BINDING_FORMAT_VERSION) {
+            "workspace binding version is invalid"
+        }
+        val locator = readString(input)
+        require(locator.equals(expectedLocator, ignoreCase = true)) { "workspace binding locator mismatch" }
+        val binding = WiredAdbPersistedWorkspaceBinding(
+            workspaceId = readString(input),
+            rootPath = readString(input),
+            fullDevice = input.readBoolean(),
+            scope = readString(input),
+        )
+        require(input.available() == 0) { "workspace binding has trailing bytes" }
+        validateWorkspaceBinding(binding)
+        binding
+    } catch (error: Exception) {
+        if (error is DesktopTrustUnavailableException) throw error
+        throw DesktopTrustUnavailableException("workspace binding record is invalid", error)
+    }
 }
 
 private fun encodeRecord(record: DesktopTrustRecord): ByteArray {

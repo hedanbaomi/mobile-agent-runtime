@@ -39,6 +39,7 @@ object OpenAiSse {
         val choice = obj["choices"]?.jsonArray?.firstOrNull()?.jsonObject ?: return emptyList()
         val events = mutableListOf<ModelEvent>()
         val delta = choice["delta"]?.jsonObject
+        reasoningText(delta)?.let { events += ModelEvent.ReasoningDelta(it) }
         delta?.get("content")?.jsonPrimitive?.contentOrNull?.let { events += ModelEvent.TextDelta(it) }
         val toolCalls = delta?.get("tool_calls")?.jsonArray
         toolCalls?.forEach { call ->
@@ -64,6 +65,18 @@ object OpenAiSse {
         }
         return events
     }
+
+    /**
+     * OpenAI-compatible providers use both spellings in the wild. Prefer the
+     * canonical `reasoning_content` field when both are present, and never
+     * infer reasoning from `content`.
+     */
+    private fun reasoningText(delta: kotlinx.serialization.json.JsonObject?): String? =
+        listOf("reasoning_content", "reasoning")
+            .firstNotNullOfOrNull { key ->
+                (delta?.get(key) as? kotlinx.serialization.json.JsonPrimitive)?.contentOrNull
+                    ?.takeIf { it.isNotBlank() }
+            }
 
     /**
      * Tool arguments are withheld until the provider's terminal marker.  A

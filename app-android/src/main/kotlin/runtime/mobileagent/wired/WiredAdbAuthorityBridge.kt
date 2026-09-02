@@ -586,6 +586,12 @@ class WiredAdbAuthorityBridge internal constructor(
         contentUtf8: ByteArray?,
         replaceExisting: Boolean,
         maxBytes: Int,
+        cursor: String?,
+        maxEntries: Int,
+        offsetBytes: Long,
+        patchUtf8: ByteArray?,
+        expectedVersion: Long?,
+        patchFormat: WiredAdbPatchFormat,
     ): WiredAdbFileRequest = WiredAdbFileRequest(
         requestId = newWiredAdbRequestId(),
         operation = operation,
@@ -594,6 +600,12 @@ class WiredAdbAuthorityBridge internal constructor(
         contentUtf8 = contentUtf8?.copyOf(),
         replaceExisting = replaceExisting,
         maxBytes = maxBytes,
+        cursor = cursor,
+        maxEntries = maxEntries,
+        offsetBytes = offsetBytes,
+        patchUtf8 = patchUtf8?.copyOf(),
+        expectedVersion = expectedVersion,
+        patchFormat = patchFormat,
     )
 
     /** Convenience overload; cross-package callers use interface defaults. */
@@ -644,18 +656,8 @@ class WiredAdbAuthorityBridge internal constructor(
                 else -> lifecycleEpoch
             }
         }
-        val bindingBytes = try {
-            random.nextBytes(BridgeProtocol.WORKSPACE_BINDING_BYTES).also {
-                require(it.size == BridgeProtocol.WORKSPACE_BINDING_BYTES)
-            }
-        } catch (_: Throwable) {
-            return WiredAdbResult.Failure(WiredAdbErrorCode.INTERNAL_ERROR)
-        }
-        val binding = try {
-            bindingBytes.toHex()
-        } finally {
-            bindingBytes.fill(0)
-        }
+        val binding = newWorkspaceBinding()
+            ?: return WiredAdbResult.Failure(WiredAdbErrorCode.INTERNAL_ERROR)
         val requestId = newWiredAdbRequestId()
         if (!claimRequest(requestId)) return WiredAdbResult.Failure(WiredAdbErrorCode.REQUEST_INVALID)
         val (operation, payload) = WiredAdbSharedAdapter.workspaceAttachOperation(
@@ -685,14 +687,98 @@ class WiredAdbAuthorityBridge internal constructor(
             return WiredAdbResult.Failure(WiredAdbErrorCode.UNKNOWN_OUTCOME)
         }
         val handle = WiredAdbWorkspaceHandle(this, workspaceId, binding, operationEpoch)
-        val page = WiredAdbWorkspacePage(handle, decoded.relativePath, decoded.entries, decoded.truncated)
-        return WiredAdbResult.Success(WiredAdbWorkspaceAttachment(workspaceId, scope, handle, page))
+        val page = WiredAdbWorkspacePage(
+            handle = handle,
+            relativePath = decoded.relativePath,
+            entries = decoded.entries,
+            truncated = decoded.truncated,
+            nextCursor = decoded.nextCursor,
+            version = decoded.version,
+        )
+        val locator = decoded.recoveryLocator?.let {
+            runCatching { WiredAdbWorkspaceRecoveryLocator.fromEncoded(it) }.getOrNull()
+        } ?: return protocolFailure(WiredAdbErrorCode.PROTOCOL_FRAME_INVALID)
+        return WiredAdbResult.Success(WiredAdbWorkspaceAttachment(workspaceId, scope, handle, page, locator))
+    }
+
+    /**
+     * Reattaches a durable workspace locator to a fresh connection-scoped
+     * binding/handle.  No path is accepted or reconstructed on Android: the
+     * authenticated companion resolves the locator from its protected store.
+     */
+    override suspend fun reopenDirectory(
+        workspaceId: String,
+        recoveryLocator: WiredAdbWorkspaceRecoveryLocator,
+        scope: WiredAdbWorkspaceScope,
+    ): WiredAdbResult<WiredAdbWorkspaceAttachment> {
+        val locator = runCatching { recoveryLocator.encodedCopy() }.getOrNull()
+            ?: return WiredAdbResult.Failure(WiredAdbErrorCode.WORKSPACE_LOCATOR_INVALID)
+        if (!workspaceId.matches(WIRED_WORKSPACE_ID_PATTERN)) {
+            return WiredAdbResult.Failure(WiredAdbErrorCode.REQUEST_INVALID)
+        }
+        val operationEpoch = synchronized(stateLock) {
+            when {
+                closed -> return WiredAdbResult.Failure(WiredAdbErrorCode.BRIDGE_DISCONNECTED)
+                intentPersistenceFailed || _status.value.state != WiredAdbLifecycleState.READY ||
+                    channel == null || session == null ->
+                    return WiredAdbResult.Failure(WiredAdbErrorCode.BRIDGE_DISCONNECTED, retryable = true)
+                else -> lifecycleEpoch
+            }
+        }
+        val binding = newWorkspaceBinding()
+            ?: return WiredAdbResult.Failure(WiredAdbErrorCode.INTERNAL_ERROR)
+        val requestId = newWiredAdbRequestId()
+        if (!claimRequest(requestId)) return WiredAdbResult.Failure(WiredAdbErrorCode.REQUEST_INVALID)
+        val (operation, payload) = try {
+            WiredAdbSharedAdapter.workspaceReopenOperation(workspaceId, binding, locator, scope)
+        } catch (_: Throwable) {
+            return WiredAdbResult.Failure(WiredAdbErrorCode.WORKSPACE_LOCATOR_INVALID)
+        }
+        val outcome = exchange(requestId, WIRED_ADB_FILE_READ_DEADLINE_MS) { active ->
+            WiredAdbSharedAdapter.encodeRequest(active, requestId, operation, payload)
+        }
+        val response = when (outcome) {
+            is WiredAdbResult.Failure -> return outcome
+            is WiredAdbResult.Success -> outcome.value
+        }
+        val decoded = try {
+            WiredAdbSharedAdapter.decodeWorkspaceReopened(response, workspaceId, binding, scope)
+        } catch (_: Throwable) {
+            return protocolFailure(WiredAdbErrorCode.PROTOCOL_FRAME_INVALID)
+        }
+        if (decoded.recoveryLocator != locator) {
+            return protocolFailure(WiredAdbErrorCode.WORKSPACE_LOCATOR_INVALID)
+        }
+        try {
+            revalidateEpoch(operationEpoch)
+        } catch (_: LifecycleInvalidatedException) {
+            return WiredAdbResult.Failure(WiredAdbErrorCode.UNKNOWN_OUTCOME)
+        }
+        val handle = WiredAdbWorkspaceHandle(this, workspaceId, binding, operationEpoch)
+        val page = WiredAdbWorkspacePage(
+            handle = handle,
+            relativePath = decoded.relativePath,
+            entries = decoded.entries,
+            truncated = decoded.truncated,
+            nextCursor = decoded.nextCursor,
+            version = decoded.version,
+        )
+        return WiredAdbResult.Success(
+            WiredAdbWorkspaceAttachment(
+                workspaceId = workspaceId,
+                scope = scope,
+                handle = handle,
+                initialPage = page,
+                recoveryLocator = recoveryLocator,
+            ),
+        )
     }
 
     override suspend fun browseDirectory(
         handle: WiredAdbWorkspaceHandle,
         relativePath: String?,
         maxEntries: Int,
+        cursor: String?,
     ): WiredAdbResult<WiredAdbWorkspacePage> {
         validateWorkspaceHandle(handle)?.let { return WiredAdbResult.Failure(it) }
         if (maxEntries !in 1..WIRED_MAX_DIRECTORY_ENTRIES) {
@@ -704,6 +790,10 @@ class WiredAdbAuthorityBridge internal constructor(
         } catch (_: Throwable) {
             return WiredAdbResult.Failure(WiredAdbErrorCode.REQUEST_INVALID)
         }
+        if (cursor != null && (cursor.length !in 1..WIRED_MAX_CURSOR_BYTES ||
+                cursor.any { it.code !in 0x21..0x7e })) {
+            return WiredAdbResult.Failure(WiredAdbErrorCode.REQUEST_INVALID)
+        }
         val requestId = newWiredAdbRequestId()
         if (!claimRequest(requestId)) return WiredAdbResult.Failure(WiredAdbErrorCode.REQUEST_INVALID)
         val (operation, payload) = WiredAdbSharedAdapter.workspaceBrowseOperation(
@@ -711,6 +801,7 @@ class WiredAdbAuthorityBridge internal constructor(
             binding = handle.binding,
             relativePath = path,
             maxEntries = maxEntries,
+            cursor = cursor,
         )
         val outcome = exchange(requestId, WIRED_ADB_FILE_READ_DEADLINE_MS) { active ->
             WiredAdbSharedAdapter.encodeRequest(active, requestId, operation, payload)
@@ -731,6 +822,8 @@ class WiredAdbAuthorityBridge internal constructor(
                 relativePath = decoded.relativePath,
                 entries = decoded.entries.take(maxEntries),
                 truncated = decoded.truncated || decoded.entries.size > maxEntries,
+                nextCursor = decoded.nextCursor,
+                version = decoded.version,
             ),
         )
     }
@@ -1177,12 +1270,22 @@ class WiredAdbAuthorityBridge internal constructor(
             WiredAdbFileOperation.LIST -> WiredAdbPathPolicy.parse(request.relativePath, allowRoot = true)
             else -> WiredAdbPathPolicy.parse(request.relativePath, allowRoot = false)
         }
+        require(request.maxEntries in 1..WIRED_MAX_DIRECTORY_ENTRIES)
+        require(request.cursor == null || (request.cursor.length in 1..WIRED_MAX_CURSOR_BYTES &&
+            request.cursor.all { it.code in 0x21..0x7e }))
+        require(request.offsetBytes >= 0L)
         if (request.operation == WiredAdbFileOperation.MOVE) {
             WiredAdbPathPolicy.parse(request.destinationRelativePath, allowRoot = false)
         }
         if (request.operation == WiredAdbFileOperation.WRITE_TEXT) {
             val content = request.contentUtf8 ?: return WiredAdbErrorCode.REQUEST_INVALID
             strictUtf8(content)
+        }
+        if (request.operation == WiredAdbFileOperation.APPLY_PATCH) {
+            val patch = request.patchUtf8 ?: return WiredAdbErrorCode.REQUEST_INVALID
+            require(request.expectedVersion != null)
+            require(patch.size <= WIRED_MAX_PATCH_BYTES)
+            strictUtf8(patch)
         }
         null
     } catch (_: Throwable) {
@@ -1196,6 +1299,16 @@ class WiredAdbAuthorityBridge internal constructor(
         if (requestTombstones.size >= WIRED_MAX_REQUEST_TOMBSTONES) return false
         return requestTombstones.add(requestId.value)
     }
+
+    private fun newWorkspaceBinding(): String? = runCatching {
+        val bytes = random.nextBytes(BridgeProtocol.WORKSPACE_BINDING_BYTES)
+        try {
+            require(bytes.size == BridgeProtocol.WORKSPACE_BINDING_BYTES)
+            bytes.toHex()
+        } finally {
+            bytes.fill(0)
+        }
+    }.getOrNull()
 
     private suspend fun storeSecret(record: WiredAdbTrustRecord, secret: ByteArray) {
         val binding = WiredAdbSecretBinding(

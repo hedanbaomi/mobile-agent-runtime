@@ -81,6 +81,8 @@ object AgentTestTags {
     const val WORKSPACE_PRESET_SELECTOR = "agents.editor.workspace_preset.workspace"
     const val WORKSPACE_PRESET_READ_ONLY = "agents.editor.workspace_preset.read_only"
     const val WORKSPACE_PRESET_READ_WRITE = "agents.editor.workspace_preset.read_write"
+    const val WORKSPACE_DEFAULT = "agents.editor.workspace_default"
+    const val WORKSPACE_DEFAULT_SELECTOR = "agents.editor.workspace_default.selector"
     const val WORKSPACE_ACCESS = "agents.workspace_access"
     const val WORKSPACE_ACCESS_SAF = "agents.workspace_access.saf"
     const val WORKSPACE_ACCESS_PRIVILEGED = "agents.workspace_access.privileged"
@@ -225,6 +227,10 @@ data class AgentEditorUi(
     val trustedSkills: List<AgentTrustedSkillUi> = emptyList(),
     val snapshotGrantBindings: List<AgentSnapshotGrantUi> = emptyList(),
     val grantDraft: AgentGrantDraftUi? = null,
+    /** Only the default for future conversations; existing sessions keep their own binding. */
+    val defaultWorkspaceId: String? = null,
+    /** Optimistic-concurrency revision of [defaultWorkspaceId]; zero means no stored row. */
+    val defaultWorkspaceRevision: Long = 0L,
     val workspacePresetWorkspaceId: String? = null,
     val workspaceGrantPreset: AgentWorkspaceGrantPresetUi? = null,
     val workspaceAccess: AgentWorkspaceAccessUi = AgentWorkspaceAccessUi(),
@@ -529,9 +535,9 @@ private fun AgentWorkspaceAccessCard(
             )
             Text(
                 if (access.selectedWorkspaceName.isNullOrBlank()) {
-                    if (zh) "尚未为此智能体选择工作区。所有会话共用这里的选择。" else "No workspace is selected for this Agent. All of its sessions share this choice."
+                    if (zh) "尚未为此智能体选择工作区。每个会话会单独固定自己的工作区。" else "No workspace is selected for this Agent. Each conversation keeps its own workspace binding."
                 } else {
-                    if (zh) "当前工作区：${access.selectedWorkspaceName}" else "Current workspace: ${access.selectedWorkspaceName}"
+                    if (zh) "可用工作区：${access.selectedWorkspaceName}" else "Available workspace: ${access.selectedWorkspaceName}"
                 },
                 style = MaterialTheme.typography.bodyMedium,
             )
@@ -753,6 +759,42 @@ private fun AgentGrantEditor(
             )
         }
         AgentWorkspaceAccessCard(editor.workspaceAccess, actions, zh, modifier = Modifier.padding(top = 8.dp))
+        val defaultWorkspace = editor.workspaces.firstOrNull { it.id == editor.defaultWorkspaceId }
+        Column(
+            Modifier.fillMaxWidth()
+                .padding(vertical = 8.dp)
+                .border(1.dp, MaterialTheme.colorScheme.outlineVariant)
+                .padding(10.dp)
+                .testTag(AgentTestTags.WORKSPACE_DEFAULT),
+            verticalArrangement = Arrangement.spacedBy(6.dp),
+        ) {
+            Text(if (zh) "新会话默认工作区" else "Default workspace for new conversations", fontWeight = FontWeight.SemiBold)
+            Text(
+                if (zh) {
+                    "这里只影响之后创建的新会话；已有会话的工作区不会改变。未设置时，新会话明确保持未绑定，不会自动选择其他工作区。"
+                } else {
+                    "This applies only to conversations created later. Existing conversations never change. When unset, a new conversation stays explicitly unbound; another workspace is never selected automatically."
+                },
+                style = MaterialTheme.typography.bodySmall,
+            )
+            WorkspaceDropdown(
+                selectedId = editor.defaultWorkspaceId,
+                workspaces = editor.workspaces,
+                zh = zh,
+                enabled = grantEditorReady,
+                testTag = AgentTestTags.WORKSPACE_DEFAULT_SELECTOR,
+                allowAgentScope = false,
+                allowClearSelection = true,
+                emptySelectionLabel = if (zh) "不设置默认（新会话不绑定）" else "No default (new conversations unbound)",
+            ) { workspaceId ->
+                actions.onEditorChange(editor.copy(defaultWorkspaceId = workspaceId))
+            }
+            Text(
+                if (zh) "当前默认：${defaultWorkspace?.displayName ?: "未设置"}"
+                else "Current default: ${defaultWorkspace?.displayName ?: "Not set"}",
+                style = MaterialTheme.typography.bodySmall,
+            )
+        }
         val presetWorkspaceId = editor.workspacePresetWorkspaceId
             ?: editor.workspaces.firstOrNull { it.enabled }?.id
         Column(
@@ -1016,18 +1058,26 @@ private fun WorkspaceDropdown(
     enabled: Boolean,
     testTag: String,
     allowAgentScope: Boolean,
+    allowClearSelection: Boolean = false,
+    emptySelectionLabel: String? = null,
     onSelect: (String?) -> Unit,
 ) {
     var expanded by remember { mutableStateOf(false) }
     val selected = workspaces.firstOrNull { it.id == selectedId }
     OutlinedButton(onClick = { expanded = true }, enabled = enabled, modifier = Modifier.fillMaxWidth().testTag(testTag)) {
         Text(
-            if (zh) "工作区：${selected?.displayName ?: if (allowAgentScope) "Agent 级（不限定工作区）" else "请选择工作区"}"
-            else "Workspace: ${selected?.displayName ?: if (allowAgentScope) "Agent scoped (no workspace)" else "Choose a workspace"}",
+            if (zh) "工作区：${selected?.displayName ?: emptySelectionLabel ?: if (allowAgentScope) "Agent 级（不限定工作区）" else "请选择工作区"}"
+            else "Workspace: ${selected?.displayName ?: emptySelectionLabel ?: if (allowAgentScope) "Agent scoped (no workspace)" else "Choose a workspace"}",
             modifier = Modifier.fillMaxWidth(),
         )
     }
     DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
+        if (allowClearSelection) {
+            DropdownMenuItem(
+                text = { Text(emptySelectionLabel ?: if (zh) "不设置默认" else "No default") },
+                onClick = { expanded = false; onSelect(null) },
+            )
+        }
         if (allowAgentScope) {
             DropdownMenuItem(
                 text = { Text(if (zh) "Agent 级（不限定工作区）" else "Agent scoped (no workspace)") },

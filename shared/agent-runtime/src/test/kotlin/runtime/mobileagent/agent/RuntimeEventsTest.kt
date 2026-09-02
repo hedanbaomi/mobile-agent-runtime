@@ -12,6 +12,9 @@ import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertNull
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
+import runtime.mobileagent.domain.DiffPart
+import runtime.mobileagent.domain.ErrorPart
+import runtime.mobileagent.domain.MessageErrorCode
 import runtime.mobileagent.provider.CapabilityReport
 import runtime.mobileagent.provider.ChatMessage
 import runtime.mobileagent.provider.EmbeddingBatch
@@ -27,6 +30,51 @@ import runtime.mobileagent.skills.ToolResult
 import runtime.mobileagent.skills.ToolSpec
 
 class RuntimeEventsTest {
+    @Test
+    fun providerReasoningIsForwardedOnlyAsItsOwnRuntimeEvent() = runBlocking {
+        val adapter = RecordingAdapter(
+            listOf(listOf(ModelEvent.ReasoningDelta("provider thinking"), ModelEvent.TextDelta("answer"), ModelEvent.Completed)),
+        )
+        val events = AgentRuntime(adapter).run(
+            AgentRuntimeRequest(
+                AgentRun("reasoning-run", "s", "c"),
+                EffectivePrompt("contract", "", emptyList(), emptyList(), emptyList(), "hello"),
+                "model",
+                charArrayOf(),
+                toolsEnabled = false,
+            ),
+        ).toList()
+        val modelEvents = events.filterIsInstance<RuntimeEvent.ModelEvent>().map { it.event }
+        assertTrue(modelEvents.contains(ModelEvent.ReasoningDelta("provider thinking")))
+        assertTrue(modelEvents.contains(ModelEvent.TextDelta("answer")))
+    }
+
+    @Test
+    fun messagePartProjectionIsClosedAndDiffRequiresExplicitEnvelope() {
+        val error = ModelEvent.Failed("PROVIDER_UNAUTHORIZED: response body must not be persisted")
+            .toMessagePartOrNull() as ErrorPart
+        assertEquals(MessageErrorCode.PROVIDER_UNAUTHORIZED, error.code)
+        assertEquals("服务商拒绝了请求，请检查授权。", error.message)
+        assertTrue(!error.message.contains("response"))
+
+        val explicitDiff = RuntimeEvent.ToolResultProduced(
+            callId = "call",
+            name = "file.apply_patch",
+            status = "VALUE",
+            resultSummary = "changed",
+            resultJson = "{\"type\":\"diff\",\"summary\":\"updated Main.kt\",\"patch_preview\":\"@@ -1 +1 @@\",\"changed_files\":1}",
+        ).toDiffPartOrNull()
+        assertEquals(DiffPart("updated Main.kt", "@@ -1 +1 @@", 1), explicitDiff)
+
+        val ordinary = RuntimeEvent.ToolResultProduced("call", "file.write", "VALUE", "diff --git a/a b/a")
+        assertNull(ordinary.toDiffPartOrNull())
+        val unsafe = RuntimeEvent.ToolResultProduced(
+            "call", "file.apply_patch", "VALUE", "diff",
+            "{\"kind\":\"diff\",\"summary\":\"updated\",\"patch\":\"C:\\\\private\\\\Main.kt\"}",
+        )
+        assertNull(unsafe.toDiffPartOrNull())
+    }
+
     @Test
     fun structuredRunUsesGenericExecutorAndOptInPreview() = runBlocking {
         val adapter = RecordingAdapter(

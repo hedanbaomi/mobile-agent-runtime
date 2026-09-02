@@ -96,6 +96,7 @@ class ShizukuBridgePolicyTest {
     fun relativePathPolicyRejectsEscapesAndAcceptsOnlyWorkspaceRelativePaths() {
         assertTrue(ShizukuWorkspacePathPolicy.isValid("notes/today.txt", allowRoot = false))
         assertTrue(ShizukuWorkspacePathPolicy.isValid("", allowRoot = true))
+        assertTrue(ShizukuWorkspacePathPolicy.isValid(null, allowRoot = true))
         listOf(
             "/absolute.txt",
             "../escape.txt",

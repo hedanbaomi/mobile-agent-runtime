@@ -49,6 +49,7 @@ import runtime.mobileagent.skills.tooling.ToolExecution
 import runtime.mobileagent.skills.tooling.ToolErrorCode
 import runtime.mobileagent.skills.tooling.ToolInvocation
 import runtime.mobileagent.skills.tooling.WorkspaceBackend
+import runtime.mobileagent.skills.tooling.WorkspaceApplyPatchRequest
 import runtime.mobileagent.skills.tooling.WorkspaceCreateDirectoryRequest
 import runtime.mobileagent.skills.tooling.WorkspaceDeleteRequest
 import runtime.mobileagent.skills.tooling.WorkspaceDescriptor
@@ -58,6 +59,7 @@ import runtime.mobileagent.skills.tooling.WorkspaceListRequest
 import runtime.mobileagent.skills.tooling.WorkspaceListing
 import runtime.mobileagent.skills.tooling.WorkspaceMoveRequest
 import runtime.mobileagent.skills.tooling.WorkspaceMutation
+import runtime.mobileagent.skills.tooling.WorkspacePatchFormat
 import runtime.mobileagent.skills.tooling.WorkspaceReadTextRequest
 import runtime.mobileagent.skills.tooling.WorkspaceResult
 import runtime.mobileagent.skills.tooling.WorkspaceStatRequest
@@ -1847,6 +1849,133 @@ class ToolingOrchestrationTest {
     }
 
     @Test
+    fun workspaceToolProtocolUsesSnakeCaseAndForwardsPaginationChunksAndPatch() = runBlocking {
+        val descriptor = WorkspaceDescriptor(
+            id = "workspace-protocol-v3",
+            displayName = "Protocol v3",
+            backendType = WorkspaceBackendType.INTERNAL,
+            writable = true,
+        )
+        var listRequest: WorkspaceListRequest? = null
+        var readRequest: WorkspaceReadTextRequest? = null
+        var patchRequest: WorkspaceApplyPatchRequest? = null
+        val backend = object : WorkspaceBackend {
+            override val descriptor = descriptor
+
+            override suspend fun list(request: WorkspaceListRequest): WorkspaceResult<WorkspaceListing> {
+                listRequest = request
+                return WorkspaceResult.Success(
+                    WorkspaceListing(
+                        relativePath = request.relativePath ?: ".",
+                        entries = emptyList(),
+                        nextCursor = "opaque-page-2",
+                    ),
+                )
+            }
+
+            override suspend fun readText(request: WorkspaceReadTextRequest): WorkspaceResult<WorkspaceText> {
+                readRequest = request
+                return WorkspaceResult.Success(
+                    WorkspaceText(
+                        relativePath = request.relativePath,
+                        text = "chunk",
+                        offsetBytes = request.offsetBytes,
+                        totalBytes = request.offsetBytes + 10L,
+                        eof = false,
+                    ),
+                )
+            }
+
+            override suspend fun applyPatch(request: WorkspaceApplyPatchRequest): WorkspaceResult<WorkspaceMutation> {
+                patchRequest = request
+                return WorkspaceResult.Success(
+                    WorkspaceMutation(request.relativePath, WorkspaceEntryType.FILE, byteSize = 7L, version = 42L),
+                )
+            }
+        }
+        val registry = WorkspaceRegistry()
+        assertTrue(registry.register(descriptor, backend))
+        val context = workspaceContext(
+            workspaceGrants(
+                grant("grant-list-v3", CapabilityId(CapabilityId.FILE_LIST), descriptor.id),
+                grant("grant-read-v3", CapabilityId(CapabilityId.FILE_READ_TEXT), descriptor.id),
+                grant("grant-patch-v3", CapabilityId("file.apply_patch"), descriptor.id),
+            ),
+        )
+        val executor = UnifiedWorkspaceToolExecutor(
+            registry = registry,
+            approvalEngine = ApprovalEngine(),
+            contextProvider = { context },
+            auditSink = acceptingWorkspaceAuditSink(mutableListOf()),
+        )
+
+        val schemas = executor.toolingSpecs.associateBy { it.name }
+        assertTrue(schemas.getValue(UnifiedWorkspaceToolExecutor.FILE_LIST).inputSchema.contains("\"workspace_id\""))
+        assertTrue(schemas.getValue(UnifiedWorkspaceToolExecutor.FILE_LIST).inputSchema.contains("\"next_cursor\"").not())
+        assertFalse(schemas.getValue(UnifiedWorkspaceToolExecutor.FILE_LIST).inputSchema.contains("\"workspaceId\""))
+        assertTrue(schemas.getValue(UnifiedWorkspaceToolExecutor.FILE_READ_TEXT).inputSchema.contains("\"offset_bytes\""))
+        assertTrue(schemas.getValue(UnifiedWorkspaceToolExecutor.FILE_APPLY_PATCH).inputSchema.contains("\"expected_version\""))
+
+        fun invocation(callId: String, name: String, arguments: String) = ToolInvocation.fromRuntime(
+            callId = callId,
+            snapshotId = context.snapshotId,
+            agentId = context.agentId,
+            name = name,
+            argumentsJson = arguments,
+        )
+
+        val list = executor.invoke(
+            invocation(
+                "model-list-v3",
+                UnifiedWorkspaceToolExecutor.FILE_LIST,
+                """{"workspace_id":"${descriptor.id}","relative_path":"src","max_entries":5,"cursor":"opaque-page-1"}""",
+            ),
+            context,
+        ) as ToolExecution.Value
+        assertEquals("src", listRequest?.relativePath)
+        assertEquals(5, listRequest?.maxEntries)
+        assertEquals("opaque-page-1", listRequest?.cursor)
+        assertTrue(list.json.contains("\"next_cursor\":\"opaque-page-2\""))
+        assertTrue(list.json.contains("\"has_more\":true"))
+
+        val read = executor.invoke(
+            invocation(
+                "model-read-v3",
+                UnifiedWorkspaceToolExecutor.FILE_READ_TEXT,
+                """{"workspace_id":"${descriptor.id}","relative_path":"src/Main.kt","offset_bytes":128,"max_bytes":1024}""",
+            ),
+            context,
+        ) as ToolExecution.Value
+        assertEquals(128L, readRequest?.offsetBytes)
+        assertEquals(1024L, readRequest?.maxBytes)
+        assertTrue(read.json.contains("\"offset_bytes\":128"))
+        assertTrue(read.json.contains("\"next_offset\":133"))
+        assertTrue(read.json.contains("\"eof\":false"))
+
+        val patched = executor.invoke(
+            invocation(
+                "model-patch-v3",
+                UnifiedWorkspaceToolExecutor.FILE_APPLY_PATCH,
+                """{"workspace_id":"${descriptor.id}","relative_path":"src/Main.kt","patch":"replacement","format":"replace","expected_version":41}""",
+            ),
+            context,
+        ) as ToolExecution.Value
+        assertEquals(41L, patchRequest?.expectedVersion)
+        assertEquals(WorkspacePatchFormat.REPLACE, patchRequest?.format)
+        assertTrue(patched.json.contains("\"version\":42"))
+
+        val conflictingAliases = executor.invoke(
+            invocation(
+                "model-conflict-v3",
+                UnifiedWorkspaceToolExecutor.FILE_LIST,
+                """{"workspace_id":"${descriptor.id}","workspaceId":"other"}""",
+            ),
+            context,
+        )
+        assertEquals(ToolErrorCode.INVALID_REQUEST, (conflictingAliases as ToolExecution.Failed).error.code)
+    }
+
+    @Test
     fun factoryIncludesRuntimeMemoryToolsWithoutDuplicatingPublicInventory() {
         val memory = object : ToolExecutor {
             override val specs = listOf(
@@ -1982,6 +2111,7 @@ class ToolingOrchestrationTest {
         CapabilityId(CapabilityId.FILE_CREATE_DIRECTORY),
         CapabilityId(CapabilityId.FILE_MOVE),
         CapabilityId(CapabilityId.FILE_DELETE),
+        CapabilityId("file.apply_patch"),
     )
 
     private fun grant(

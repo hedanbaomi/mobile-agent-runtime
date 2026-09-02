@@ -297,6 +297,10 @@ class AgentRuntime(
                                     assistantText.append(outgoing.text)
                                     emitModel(outgoing)
                                 }
+                                // Reasoning is an independent provider-owned channel.  Forward
+                                // only the explicit event; it never enters assistantText or the
+                                // next model prompt as inferred chain-of-thought.
+                                is ModelEvent.ReasoningDelta -> emitModel(outgoing)
                                 ModelEvent.Completed -> if (terminal !is ModelEvent.Failed) terminal = outgoing
                                 is ModelEvent.Failed -> terminal = outgoing
                                 else -> emitModel(outgoing)

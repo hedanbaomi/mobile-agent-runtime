@@ -11,7 +11,7 @@ import java.nio.charset.StandardCharsets
 /** Pure relative-path validator shared by the Binder adapter and its tests. */
 internal object ShizukuWorkspacePathPolicy {
     fun parse(raw: String?, allowRoot: Boolean): List<String> {
-        val path = raw ?: throw InvalidShizukuPath()
+        val path = raw ?: if (allowRoot) return emptyList() else throw InvalidShizukuPath()
         if (path.isEmpty()) {
             if (allowRoot) return emptyList()
             throw InvalidShizukuPath()

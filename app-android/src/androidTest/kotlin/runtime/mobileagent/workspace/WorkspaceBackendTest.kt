@@ -7,8 +7,10 @@ import android.content.Context
 import android.net.Uri
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
+import java.io.ByteArrayInputStream
 import java.nio.file.Files
 import java.nio.file.Path
+import java.nio.charset.StandardCharsets
 import java.util.Comparator
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -163,6 +165,173 @@ class WorkspaceBackendTest {
                 Files.deleteIfExists(outside)
             }
         }
+    }
+
+    @Test
+    fun internalBackendPaginatesWithoutDuplicatesAndBindsCursorToDirectory() {
+        val limits = InternalWorkspaceLimits(
+            maxFileBytes = 64,
+            quotaBytes = 4 * 1024,
+            maxEntries = 32,
+            maxDirectoryEntries = 3,
+            maxReadBytes = 64,
+        )
+        withInternal(limits) { backend, _ ->
+            val names = (0 until 8).map { "entry-${it.toString().padStart(2, '0')}.txt" }
+            names.forEach { name ->
+                assertSuccess(backend.write(name, byteArrayOf(1), expectedVersion = InternalWorkspaceVersions.MISSING))
+            }
+
+            val observed = mutableListOf<String>()
+            var cursor: String? = null
+            do {
+                val page = backend.list("", maxEntries = 2, cursor = cursor)
+                assertSuccess(page)
+                val value = (page as InternalWorkspaceResult.Success).value
+                observed += value.entries.map { it.path }
+                cursor = value.nextCursor
+            } while (cursor != null)
+
+            assertEquals(names, observed)
+            assertEquals(names.size, observed.toSet().size)
+
+            // A random token cannot address backend state.
+            assertCode(backend.list("", maxEntries = 2, cursor = "forged-cursor"), InternalWorkspaceErrorCode.INVALID_ARGUMENT)
+
+            // A valid token is invalidated by a directory change rather than
+            // silently returning an overlapping or skipped page.
+            val first = (backend.list("", maxEntries = 2) as InternalWorkspaceResult.Success).value
+            assertNotNull(first.nextCursor)
+            assertSuccess(backend.write("new.txt", byteArrayOf(2), expectedVersion = InternalWorkspaceVersions.MISSING))
+            assertCode(
+                backend.list("", maxEntries = 2, cursor = first.nextCursor),
+                InternalWorkspaceErrorCode.INVALID_ARGUMENT,
+            )
+        }
+    }
+
+    @Test
+    fun internalBackendStatsAndReadsLargeFileInBoundedChunks() {
+        val limits = InternalWorkspaceLimits(
+            maxFileBytes = 4 * 1024,
+            quotaBytes = 2 * 1024 * 1024,
+            maxEntries = 8,
+            maxDirectoryEntries = 8,
+            maxReadBytes = 4096,
+        )
+        withInternal(limits) { backend, root ->
+            assertSuccess(backend.createDirectory("seed"))
+            val bytes = ByteArray(1024 * 1024 + 17) { (it % 251).toByte() }
+            Files.write(root.resolve("large.bin"), bytes)
+
+            val stat = backend.stat("large.bin")
+            assertSuccess(stat)
+            assertEquals(bytes.size.toLong(), (stat as InternalWorkspaceResult.Success).value.sizeBytes)
+
+            val first = backend.read("large.bin", maxBytes = 4096, offsetBytes = 0)
+            assertSuccess(first)
+            val firstChunk = (first as InternalWorkspaceResult.Success).value
+            assertEquals(0L, firstChunk.offsetBytes)
+            assertEquals(bytes.size.toLong(), firstChunk.totalBytes)
+            assertFalse(firstChunk.eof)
+            assertTrue(firstChunk.bytes.contentEquals(bytes.copyOfRange(0, 4096)))
+
+            val second = backend.read("large.bin", maxBytes = 4096, offsetBytes = firstChunk.offsetBytes + firstChunk.bytes.size)
+            assertSuccess(second)
+            val secondChunk = (second as InternalWorkspaceResult.Success).value
+            assertEquals(4096L, secondChunk.offsetBytes)
+            assertTrue(secondChunk.bytes.contentEquals(bytes.copyOfRange(4096, 8192)))
+
+            val tailOffset = bytes.size.toLong() - 5L
+            val tail = backend.read("large.bin", maxBytes = 4096, offsetBytes = tailOffset)
+            assertSuccess(tail)
+            val tailChunk = (tail as InternalWorkspaceResult.Success).value
+            assertTrue(tailChunk.eof)
+            assertEquals(5, tailChunk.bytes.size)
+            assertTrue(tailChunk.bytes.contentEquals(bytes.copyOfRange(tailOffset.toInt(), bytes.size)))
+            assertCode(backend.read("large.bin", maxBytes = 4096, offsetBytes = bytes.size.toLong() + 1), InternalWorkspaceErrorCode.OFFSET_OUT_OF_RANGE)
+        }
+    }
+
+    @Test
+    fun safReadChunkStopsAtLimitAndKeepsOffsetEofAndUtf8FailClosed() {
+        val maxBytes = 256 * 1024
+        val bytes = ByteArray(maxBytes + 17) { (it % 251).toByte() }
+        val input = ByteArrayInputStream(bytes)
+        val first = readSafChunk(input, offset = 0L, maximum = maxBytes, declaredSize = bytes.size.toLong())
+
+        assertEquals(maxBytes, first.bytes.size)
+        assertTrue(first.bytes.contentEquals(bytes.copyOfRange(0, maxBytes)))
+        assertEquals(bytes.size.toLong(), first.totalBytes)
+        assertFalse(first.eof)
+        // Regression guard: a bounded read must leave the unread tail in the provider stream.
+        assertEquals(bytes.size - maxBytes, input.available())
+
+        val second = readSafChunk(
+            ByteArrayInputStream(bytes),
+            offset = maxBytes.toLong(),
+            maximum = maxBytes,
+            declaredSize = bytes.size.toLong(),
+        )
+        assertTrue(second.bytes.contentEquals(bytes.copyOfRange(maxBytes, bytes.size)))
+        assertEquals(17, second.bytes.size)
+        assertEquals(bytes.size.toLong(), second.totalBytes)
+        assertTrue(second.eof)
+
+        // Keep the existing strict UTF-8 boundary policy: a chunk that ends inside a code point
+        // is not silently repaired or reassembled by this low-level reader.
+        val utf8Bytes = ByteArray(maxBytes - 1) { 'a'.code.toByte() } +
+            "中".toByteArray(StandardCharsets.UTF_8)
+        val utf8Chunk = readSafChunk(
+            ByteArrayInputStream(utf8Bytes),
+            offset = 0L,
+            maximum = maxBytes,
+            declaredSize = utf8Bytes.size.toLong(),
+        )
+        assertTrue(InternalWorkspaceVersions.decode(utf8Chunk.bytes) is InternalWorkspaceResult.Failure)
+    }
+
+    @Test
+    fun internalBackendApplyPatchIsConditionalAndUsesAtomicReplacement() {
+        withInternal { backend, root ->
+            val initial = backend.write(
+                "note.txt",
+                "one\ntwo\nthree\n".toByteArray(),
+                expectedVersion = InternalWorkspaceVersions.MISSING,
+            )
+            assertSuccess(initial)
+            val version = (initial as InternalWorkspaceResult.Success).value.version
+            val patch = "@@ -2,1 +2,1 @@\n-two\n+TWO\n"
+            val applied = backend.applyPatch(
+                relativePath = "note.txt",
+                patch = patch,
+                expectedVersion = version,
+                format = InternalWorkspacePatchFormat.UNIFIED_DIFF,
+            )
+            assertSuccess(applied)
+            assertEquals(InternalWorkspaceResult.Success("one\nTWO\nthree\n"), backend.readText("note.txt"))
+            assertNoTemporaryArtifacts(root)
+
+            val stale = backend.applyPatch("note.txt", patch, version, InternalWorkspacePatchFormat.UNIFIED_DIFF)
+            assertCode(stale, InternalWorkspaceErrorCode.CONFLICT)
+            assertEquals(InternalWorkspaceResult.Success("one\nTWO\nthree\n"), backend.readText("note.txt"))
+
+            val invalid = backend.applyPatch(
+                "note.txt",
+                "@@ -1,1 +1,1 @@\n-not-this-line\n+replacement\n",
+                (applied as InternalWorkspaceResult.Success).value.version,
+                InternalWorkspacePatchFormat.UNIFIED_DIFF,
+            )
+            assertCode(invalid, InternalWorkspaceErrorCode.INVALID_PATCH)
+        }
+    }
+
+    @Test
+    fun safBackendDoesNotPretendToSupportAtomicPatch() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val backend = SafWorkspaceBackend(context, Uri.parse("content://fixture.provider/tree/opaque"))
+        val result = backend.applyPatch("note.txt", "replacement", "version", InternalWorkspacePatchFormat.REPLACE)
+        assertCode(result, InternalWorkspaceErrorCode.UNSUPPORTED)
     }
 
     @Test

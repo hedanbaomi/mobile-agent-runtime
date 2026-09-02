@@ -14,7 +14,9 @@ import java.nio.file.LinkOption
 import java.nio.file.Path
 import java.nio.file.StandardCopyOption
 import java.nio.file.StandardOpenOption
+import java.nio.file.attribute.BasicFileAttributes
 import java.text.Normalizer
+import java.util.concurrent.TimeUnit
 import java.util.UUID
 
 /**
@@ -49,9 +51,11 @@ internal class InternalWorkspaceBackend(
             InternalWorkspaceCapabilities.CREATE_DIRECTORY,
             InternalWorkspaceCapabilities.MOVE,
             InternalWorkspaceCapabilities.DELETE,
+            InternalWorkspaceCapabilities.APPLY_PATCH,
         ),
     )
     private val lock = Any()
+    private val cursorStore = InternalWorkspaceCursorStore()
     private val rootPath: Path = root.toAbsolutePath().normalize()
     // Android may expose an app-private directory through a stable platform-managed ancestor
     // alias (for example, outside this workspace boundary).  Pin the resolved workspace root on
@@ -59,8 +63,13 @@ internal class InternalWorkspaceBackend(
     // entry below it are still checked with NOFOLLOW_LINKS before canonical containment checks.
     private var pinnedCanonicalRoot: Path? = null
 
-    override fun list(relativePath: String): InternalWorkspaceResult<InternalWorkspaceList> = synchronized(lock) {
+    override fun list(
+        relativePath: String,
+        maxEntries: Int,
+        cursor: String?,
+    ): InternalWorkspaceResult<InternalWorkspaceList> = synchronized(lock) {
         guarded {
+            if (maxEntries < 1) InternalWorkspaceErrorCode.INVALID_ARGUMENT.error()
             val segments = parse(relativePath, allowRoot = true)
             if (!Files.exists(rootPath, LinkOption.NOFOLLOW_LINKS)) {
                 InternalWorkspaceErrorCode.WORKSPACE_NOT_FOUND.error()
@@ -68,10 +77,18 @@ internal class InternalWorkspaceBackend(
             ensureRoot()
             val directory = resolveExisting(segments)
             requireDirectory(directory)
-            val children = safeChildren(directory)
-            if (children.size > limits.maxDirectoryEntries) InternalWorkspaceErrorCode.ENTRY_LIMIT_EXCEEDED.error()
+            val children = safeChildren(directory).sortedBy { it.fileName.toString() }
+            if (children.size > limits.maxEntries) InternalWorkspaceErrorCode.ENTRY_LIMIT_EXCEEDED.error()
+            val fingerprint = directoryVersion(directory)
+            val start = cursor?.let {
+                cursorStore.resolve(it, segments.joinToString("/"), fingerprint)
+                    ?: InternalWorkspaceErrorCode.INVALID_ARGUMENT.error()
+            } ?: 0
+            if (start > children.size) InternalWorkspaceErrorCode.INVALID_ARGUMENT.error()
+            val pageSize = minOf(maxEntries, limits.maxDirectoryEntries)
+            val end = minOf(start + pageSize, children.size)
             val names = HashSet<String>()
-            val entries = children.sortedBy { it.fileName.toString() }.map { child ->
+            val entries = children.subList(start, end).map { child ->
                 rejectLink(child)
                 val name = safeChildName(child.fileName.toString(), names)
                 val childSegments = segments + name
@@ -84,7 +101,6 @@ internal class InternalWorkspaceBackend(
                     )
                     Files.isRegularFile(child, LinkOption.NOFOLLOW_LINKS) -> {
                         val size = Files.size(child)
-                        if (size > limits.maxFileBytes) InternalWorkspaceErrorCode.FILE_TOO_LARGE.error()
                         InternalWorkspaceEntry(
                             path = childSegments.joinToString("/"),
                             type = InternalWorkspaceEntryType.FILE,
@@ -98,7 +114,10 @@ internal class InternalWorkspaceBackend(
             InternalWorkspaceList(
                 path = segments.joinToString("/"),
                 entries = entries,
-                version = directoryVersion(directory),
+                version = fingerprint,
+                nextCursor = if (end < children.size) {
+                    cursorStore.issue(segments.joinToString("/"), fingerprint, end)
+                } else null,
             )
         }
     }
@@ -117,7 +136,6 @@ internal class InternalWorkspaceBackend(
                 )
                 Files.isRegularFile(target, LinkOption.NOFOLLOW_LINKS) -> {
                     val size = Files.size(target)
-                    if (size > limits.maxFileBytes) InternalWorkspaceErrorCode.FILE_TOO_LARGE.error()
                     InternalWorkspaceStat(
                         path = segments.joinToString("/"),
                         type = InternalWorkspaceEntryType.FILE,
@@ -130,19 +148,110 @@ internal class InternalWorkspaceBackend(
         }
     }
 
-    override fun read(relativePath: String, maxBytes: Long): InternalWorkspaceResult<InternalWorkspaceContent> = synchronized(lock) {
+    override fun read(
+        relativePath: String,
+        maxBytes: Long,
+        offsetBytes: Long,
+    ): InternalWorkspaceResult<InternalWorkspaceContent> = synchronized(lock) {
         guarded {
             val segments = parse(relativePath, allowRoot = false)
             if (maxBytes < 1L || maxBytes > limits.maxReadBytes) InternalWorkspaceErrorCode.READ_LIMIT_EXCEEDED.error()
+            if (offsetBytes < 0L) InternalWorkspaceErrorCode.OFFSET_OUT_OF_RANGE.error()
             ensureRoot()
             val file = resolveExisting(segments)
             rejectLink(file)
             if (!Files.isRegularFile(file, LinkOption.NOFOLLOW_LINKS)) InternalWorkspaceErrorCode.ENTRY_UNSUPPORTED.error()
             val size = Files.size(file)
-            if (size > limits.maxFileBytes) InternalWorkspaceErrorCode.FILE_TOO_LARGE.error()
-            if (size > maxBytes) InternalWorkspaceErrorCode.READ_LIMIT_EXCEEDED.error()
-            val bytes = readBounded(file, maxBytes.toInt())
-            InternalWorkspaceContent(segments.joinToString("/"), bytes, InternalWorkspaceVersions.bytes(bytes))
+            if (offsetBytes > size) InternalWorkspaceErrorCode.OFFSET_OUT_OF_RANGE.error()
+            val bytes = readBounded(file, offsetBytes, maxBytes.toInt())
+            InternalWorkspaceContent(
+                path = segments.joinToString("/"),
+                bytes = bytes,
+                version = fileVersion(file),
+                offsetBytes = offsetBytes,
+                totalBytes = size,
+                eof = bytes.size.toLong() >= size - offsetBytes,
+            )
+        }
+    }
+
+    override fun applyPatch(
+        relativePath: String,
+        patch: String,
+        expectedVersion: String?,
+        format: InternalWorkspacePatchFormat,
+    ): InternalWorkspaceResult<InternalWorkspaceWrite> = synchronized(lock) {
+        guarded {
+            val segments = parse(relativePath, allowRoot = false)
+            val expected = expectedVersion ?: InternalWorkspaceErrorCode.INVALID_ARGUMENT.error()
+            ensureRootForMutation()
+            val parent = resolveExisting(segments.dropLast(1))
+            requireDirectory(parent)
+            val canonicalParent = canonicalWorkspaceDirectory(parent)
+            val target = parent.resolve(segments.last())
+            rejectLinkIfPresent(target)
+            if (!Files.exists(target, LinkOption.NOFOLLOW_LINKS) ||
+                !Files.isRegularFile(target, LinkOption.NOFOLLOW_LINKS)
+            ) {
+                InternalWorkspaceErrorCode.ENTRY_NOT_FOUND.error()
+            }
+            val currentBytes = readAll(target)
+            // The public expected version is the same metadata token returned
+            // by stat/read; only the patch mutation's CAS check reads content.
+            val currentVersion = fileVersion(target)
+            val currentContentVersion = InternalWorkspaceVersions.bytes(currentBytes)
+            expectVersion(currentVersion, expected)
+            val currentText = when (val decoded = InternalWorkspaceVersions.decode(currentBytes)) {
+                is InternalWorkspaceResult.Failure -> decoded.error.code.error()
+                is InternalWorkspaceResult.Success -> decoded.value
+            }
+            val patchedText = applyPatchText(currentText, patch, format)
+                ?: InternalWorkspaceErrorCode.INVALID_PATCH.error()
+            val patchedBytes = when (val encoded = InternalWorkspaceVersions.text(patchedText)) {
+                is InternalWorkspaceResult.Failure -> encoded.error.code.error()
+                is InternalWorkspaceResult.Success -> encoded.value
+            }
+            if (patchedBytes.size.toLong() > limits.quotaBytes) {
+                InternalWorkspaceErrorCode.QUOTA_EXCEEDED.error()
+            }
+            if (patchedBytes.contentEquals(currentBytes)) {
+                return@guarded InternalWorkspaceWrite(
+                    path = segments.joinToString("/"),
+                    bytes = patchedBytes.size.toLong(),
+                    created = false,
+                    version = currentVersion,
+                )
+            }
+            val usage = inspectUsage(enforceIndividualFileLimit = false)
+            val retainedBytes = usage.bytes - currentBytes.size.toLong()
+            if (patchedBytes.size.toLong() > limits.quotaBytes - retainedBytes) {
+                InternalWorkspaceErrorCode.QUOTA_EXCEEDED.error()
+            }
+            val temporary = parent.resolve(".mar-workspace-write-${UUID.randomUUID()}.tmp")
+            try {
+                writeAndSync(temporary, patchedBytes)
+                val latestBytes = readAll(target)
+                val latestVersion = fileVersion(target)
+                val latestContentVersion = InternalWorkspaceVersions.bytes(latestBytes)
+                if (latestVersion != currentVersion || latestContentVersion != currentContentVersion) {
+                    InternalWorkspaceErrorCode.CONFLICT.error()
+                }
+                atomicReplace(temporary, target, parent, canonicalParent)
+                rejectLink(target)
+                if (!Files.isRegularFile(target, LinkOption.NOFOLLOW_LINKS) ||
+                    Files.size(target) != patchedBytes.size.toLong()
+                ) {
+                    InternalWorkspaceErrorCode.UNKNOWN_OUTCOME.error()
+                }
+                InternalWorkspaceWrite(
+                    path = segments.joinToString("/"),
+                    bytes = patchedBytes.size.toLong(),
+                    created = false,
+                    version = fileVersion(target),
+                )
+            } finally {
+                deleteTemporaryTree(temporary)
+            }
         }
     }
 
@@ -558,7 +667,7 @@ internal class InternalWorkspaceBackend(
 
     private data class Usage(val files: Int = 0, val bytes: Long = 0L, val entries: Int = 0)
 
-    private fun inspectUsage(root: Path): Usage {
+    private fun inspectUsage(root: Path = rootPath, enforceIndividualFileLimit: Boolean = true): Usage {
         requireDirectory(root)
         var files = 0
         var bytes = 0L
@@ -566,7 +675,6 @@ internal class InternalWorkspaceBackend(
         fun visit(directory: Path, depth: Int) {
             if (depth > limits.maxPathDepth) InternalWorkspaceErrorCode.DEPTH_LIMIT_EXCEEDED.error()
             val children = safeChildren(directory)
-            if (children.size > limits.maxDirectoryEntries) InternalWorkspaceErrorCode.ENTRY_LIMIT_EXCEEDED.error()
             val names = HashSet<String>()
             children.forEach { child ->
                 rejectLink(child)
@@ -577,7 +685,7 @@ internal class InternalWorkspaceBackend(
                     Files.isDirectory(child, LinkOption.NOFOLLOW_LINKS) -> visit(child, depth + 1)
                     Files.isRegularFile(child, LinkOption.NOFOLLOW_LINKS) -> {
                         val size = Files.size(child)
-                        checkFileSize(size)
+                        if (enforceIndividualFileLimit) checkFileSize(size)
                         files++
                         if (size > limits.quotaBytes - bytes) InternalWorkspaceErrorCode.QUOTA_EXCEEDED.error()
                         bytes += size
@@ -594,7 +702,6 @@ internal class InternalWorkspaceBackend(
         rejectLink(node)
         if (Files.isRegularFile(node, LinkOption.NOFOLLOW_LINKS)) {
             val size = Files.size(node)
-            checkFileSize(size)
             return Usage(files = 1, bytes = size, entries = 1)
         }
         if (!Files.isDirectory(node, LinkOption.NOFOLLOW_LINKS)) InternalWorkspaceErrorCode.ENTRY_UNSUPPORTED.error()
@@ -603,7 +710,6 @@ internal class InternalWorkspaceBackend(
             if (depth > limits.maxPathDepth) InternalWorkspaceErrorCode.DEPTH_LIMIT_EXCEEDED.error()
             val names = HashSet<String>()
             val children = safeChildren(directory)
-            if (children.size > limits.maxDirectoryEntries) InternalWorkspaceErrorCode.ENTRY_LIMIT_EXCEEDED.error()
             children.forEach { child ->
                 rejectLink(child)
                 safeChildName(child.fileName.toString(), names)
@@ -614,7 +720,6 @@ internal class InternalWorkspaceBackend(
                     }
                     Files.isRegularFile(child, LinkOption.NOFOLLOW_LINKS) -> {
                         val size = Files.size(child)
-                        checkFileSize(size)
                         if (size > limits.quotaBytes - total.bytes) InternalWorkspaceErrorCode.QUOTA_EXCEEDED.error()
                         total = total.copy(files = total.files + 1, bytes = total.bytes + size)
                     }
@@ -630,6 +735,89 @@ internal class InternalWorkspaceBackend(
         if (size > limits.maxFileBytes) InternalWorkspaceErrorCode.FILE_TOO_LARGE.error()
     }
 
+    private fun readAll(file: Path): ByteArray {
+        val size = Files.size(file)
+        if (size > limits.quotaBytes || size > Int.MAX_VALUE.toLong()) {
+            InternalWorkspaceErrorCode.QUOTA_EXCEEDED.error()
+        }
+        return readBounded(file, 0L, size.toInt())
+    }
+
+    /** Apply a checked, line-oriented patch without accepting arbitrary commands or paths. */
+    private fun applyPatchText(
+        current: String,
+        patch: String,
+        format: InternalWorkspacePatchFormat,
+    ): String? = when (format) {
+        InternalWorkspacePatchFormat.REPLACE -> patch.takeIf { !it.contains('\u0000') }
+        InternalWorkspacePatchFormat.UNIFIED_DIFF -> applyUnifiedDiff(current, patch)
+    }
+
+    private fun applyUnifiedDiff(current: String, patch: String): String? {
+        val source = current.split("\n", ignoreCase = false, limit = Int.MAX_VALUE)
+        val diff = patch.split("\n", ignoreCase = false, limit = Int.MAX_VALUE)
+        if (diff.isEmpty()) return null
+        var index = 0
+        if (diff.getOrNull(0)?.startsWith("--- ") == true) {
+            if (diff.getOrNull(1)?.startsWith("+++ ") != true) return null
+            index = 2
+        }
+        val output = ArrayList<String>(source.size)
+        var sourceIndex = 0
+        var hunkCount = 0
+        val hunkPattern = Regex("^@@ -(\\d+)(?:,(\\d+))? \\+(\\d+)(?:,(\\d+))? @@.*$")
+        while (index < diff.size) {
+            if (diff[index].isEmpty() && index == diff.lastIndex) break
+            val header = hunkPattern.matchEntire(diff[index]) ?: return null
+            index++
+            val oldStart = header.groupValues[1].toIntOrNull() ?: return null
+            val oldCount = header.groupValues[2].takeIf { it.isNotEmpty() }?.toIntOrNull() ?: 1
+            val newCount = header.groupValues[4].takeIf { it.isNotEmpty() }?.toIntOrNull() ?: 1
+            if (oldStart < 0 || oldCount < 0 || newCount < 0) return null
+            val targetIndex = if (oldStart == 0) 0 else oldStart - 1
+            if (targetIndex < sourceIndex || targetIndex > source.size) return null
+            while (sourceIndex < targetIndex) output += source[sourceIndex++]
+            var consumedOld = 0
+            var consumedNew = 0
+            while (index < diff.size && !diff[index].startsWith("@@ ")) {
+                val line = diff[index++]
+                // Kotlin's split retains the final empty element for a patch
+                // that ends with a newline. That delimiter is not a diff
+                // record; an actual empty source line is represented by a
+                // leading context/add/delete marker and is handled below.
+                if (line.isEmpty() && index == diff.size) break
+                if (line == "\\ No newline at end of file") continue
+                if (line.isEmpty()) return null
+                when (line[0]) {
+                    ' ' -> {
+                        if (consumedOld >= oldCount || sourceIndex >= source.size || source[sourceIndex] != line.substring(1)) return null
+                        output += source[sourceIndex++]
+                        consumedOld++
+                        consumedNew++
+                    }
+                    '-' -> {
+                        if (consumedOld >= oldCount || sourceIndex >= source.size || source[sourceIndex] != line.substring(1)) return null
+                        sourceIndex++
+                        consumedOld++
+                    }
+                    '+' -> {
+                        if (consumedNew >= newCount) return null
+                        val added = line.substring(1)
+                        if (added.contains('\u0000')) return null
+                        output += added
+                        consumedNew++
+                    }
+                    else -> return null
+                }
+            }
+            if (consumedOld != oldCount || consumedNew != newCount) return null
+            hunkCount++
+        }
+        if (hunkCount == 0) return null
+        while (sourceIndex < source.size) output += source[sourceIndex++]
+        return output.joinToString("\n")
+    }
+
     private fun nodeType(node: Path): InternalWorkspaceEntryType = when {
         Files.isRegularFile(node, LinkOption.NOFOLLOW_LINKS) -> InternalWorkspaceEntryType.FILE
         Files.isDirectory(node, LinkOption.NOFOLLOW_LINKS) -> InternalWorkspaceEntryType.DIRECTORY
@@ -639,55 +827,82 @@ internal class InternalWorkspaceBackend(
     private fun nodeVersion(node: Path, type: InternalWorkspaceEntryType): String =
         if (type == InternalWorkspaceEntryType.FILE) fileVersion(node) else directoryVersion(node)
 
+    /**
+     * Metadata-only version for list/stat/read. A file tool must not read an
+     * entire large file merely to enumerate or stat it. The opaque digest
+     * keeps platform file keys and timestamps out of the model contract.
+     */
     private fun fileVersion(file: Path): String {
-        val size = Files.size(file)
-        checkFileSize(size)
-        val digest = InternalWorkspaceVersions.digest()
-        Files.newByteChannel(file, StandardOpenOption.READ, LinkOption.NOFOLLOW_LINKS).use { channel ->
-            val buffer = ByteBuffer.allocate(8 * 1024)
-            while (true) {
-                buffer.clear()
-                val count = channel.read(buffer)
-                if (count < 0) break
-                if (count > 0) digest.update(buffer.array(), 0, count)
-            }
-        }
-        return digest.digest().toHex()
+        val attributes = Files.readAttributes(
+            file,
+            BasicFileAttributes::class.java,
+            LinkOption.NOFOLLOW_LINKS,
+        )
+        return InternalWorkspaceVersions.bytes(
+            buildString {
+                append(attributes.size()).append('\u0000')
+                append(attributes.lastModifiedTime().to(TimeUnit.NANOSECONDS)).append('\u0000')
+                append(attributes.creationTime().to(TimeUnit.NANOSECONDS)).append('\u0000')
+                append(attributes.fileKey()?.toString().orEmpty())
+            }.toByteArray(Charsets.UTF_8),
+        )
     }
 
     private fun directoryVersion(directory: Path): String {
         val digest = InternalWorkspaceVersions.digest()
         val children = safeChildren(directory).sortedBy { it.fileName.toString() }
-        if (children.size > limits.maxDirectoryEntries) InternalWorkspaceErrorCode.ENTRY_LIMIT_EXCEEDED.error()
+        if (children.size > limits.maxEntries) InternalWorkspaceErrorCode.ENTRY_LIMIT_EXCEEDED.error()
         val names = HashSet<String>()
         children.forEach { child ->
             rejectLink(child)
             val name = safeChildName(child.fileName.toString(), names)
             val type = nodeType(child)
             val size = if (type == InternalWorkspaceEntryType.FILE) Files.size(child) else -1L
-            checkFileSize(size)
             // A directory version is an optimistic-concurrency token for the complete
             // subtree, not merely for its immediate metadata.  Including the child version
             // means a same-sized file edit and a nested-directory edit both invalidate a
             // previously observed parent version.  Names and types remain part of the input
             // so a rename/type replacement cannot collide with a content-only change.
-            val childVersion = nodeVersion(child, type)
+            val childVersion = if (type == InternalWorkspaceEntryType.FILE) {
+                directoryFileVersion(child)
+            } else {
+                directoryVersion(child)
+            }
             digest.update("$name\u0000${type.name}\u0000$size\u0000$childVersion\u0000".toByteArray(Charsets.UTF_8))
         }
         return digest.digest().toHex()
     }
 
-    private fun readBounded(file: Path, maximum: Int): ByteArray {
-        val output = ByteArrayOutputStream(minOf(Files.size(file).toInt(), maximum) + 1)
+    /**
+     * Use a bounded content fingerprint for files that fit in one model read envelope.  File
+     * metadata remains part of the token for larger files so listing/stat never has to read a
+     * large file body merely to describe it, while same-sized edits to ordinary source files
+     * remain visible even on filesystems with coarse timestamp resolution.
+     */
+    private fun directoryFileVersion(file: Path): String {
+        val metadataVersion = fileVersion(file)
+        val size = Files.size(file)
+        if (size > limits.maxReadBytes) return metadataVersion
+        val contentVersion = InternalWorkspaceVersions.bytes(readBounded(file, 0L, size.toInt()))
+        return "$metadataVersion\u0000$contentVersion"
+    }
+
+    private fun readBounded(file: Path, offset: Long, maximum: Int): ByteArray {
+        val available = (Files.size(file) - offset).coerceAtLeast(0L)
+        val target = minOf(available, maximum.toLong()).coerceAtMost(Int.MAX_VALUE.toLong()).toInt()
+        val output = ByteArrayOutputStream(target)
         Files.newByteChannel(file, StandardOpenOption.READ, LinkOption.NOFOLLOW_LINKS).use { channel ->
-            val buffer = ByteBuffer.allocate(8 * 1024)
-            while (true) {
+            channel.position(offset)
+            val buffer = ByteBuffer.allocate(minOf(8 * 1024, maxOf(1, target)))
+            var remaining = target
+            while (remaining > 0) {
                 buffer.clear()
+                buffer.limit(minOf(buffer.capacity(), remaining))
                 val count = channel.read(buffer)
                 if (count < 0) break
                 if (count == 0) continue
-                if (output.size() + count > maximum) InternalWorkspaceErrorCode.READ_LIMIT_EXCEEDED.error()
                 output.write(buffer.array(), 0, count)
+                remaining -= count
             }
         }
         return output.toByteArray()
@@ -770,7 +985,6 @@ internal class InternalWorkspaceBackend(
     private fun cleanupTemporaryEntries(directory: Path, depth: Int = 0) {
         if (depth > limits.maxPathDepth) InternalWorkspaceErrorCode.DEPTH_LIMIT_EXCEEDED.error()
         val children = safeChildren(directory)
-        if (children.size > limits.maxDirectoryEntries) InternalWorkspaceErrorCode.ENTRY_LIMIT_EXCEEDED.error()
         val names = HashSet<String>()
         children.forEach { child ->
             rejectLink(child)

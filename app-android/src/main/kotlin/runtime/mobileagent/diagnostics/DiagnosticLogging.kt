@@ -271,6 +271,122 @@ enum class DiagnosticBackendProbeState(val wireName: String) {
     UNKNOWN("unknown"),
 }
 
+/** Closed phases for the privileged workspace picker. */
+enum class DiagnosticWorkspaceSelectionPhase(val wireName: String) {
+    STARTED("started"),
+    COMPLETED("completed"),
+}
+
+/** Closed phases for restoring an ephemeral privileged workspace handle. */
+enum class DiagnosticWorkspaceReattachPhase(val wireName: String) {
+    STARTED("started"),
+    COMPLETED("completed"),
+    FAILED("failed"),
+}
+
+/** Only safe, aggregate result codes may enter provider diagnostics. */
+enum class DiagnosticProviderResultCode(val wireName: String) {
+    STARTED("started"),
+    SUCCESS("success"),
+    SUCCEEDED("succeeded"),
+    PARTIAL("partial"),
+    FAILED("failed"),
+    NETWORK_UNREACHABLE("network_unreachable"),
+    TLS_FAILURE("tls_failure"),
+    TIMEOUT("timeout"),
+    AUTH_FAILED("auth_failed"),
+    MODEL_NOT_FOUND("model_not_found"),
+    RATE_LIMITED("rate_limited"),
+    PROVIDER_REJECTED("provider_rejected"),
+    INVALID_RESPONSE("invalid_response"),
+    CONFIG_INVALID("config_invalid"),
+    UNKNOWN("unknown"),
+}
+
+/** HTTP class only; status codes and response bodies are intentionally omitted. */
+enum class DiagnosticHttpClass(val wireName: String) {
+    TWO_HUNDRED("2xx"),
+    FOUR_HUNDRED("4xx"),
+    FIVE_HUNDRED("5xx"),
+    NONE("none"),
+    UNKNOWN("unknown"),
+}
+
+data class PrivilegedWorkspaceSelectionRecord(
+    val phase: DiagnosticWorkspaceSelectionPhase,
+    val authority: DiagnosticAuthority,
+    val workspaceId: String? = null,
+    val requestRef: String? = null,
+    val durationMs: Long = 0,
+    val errorCode: String = "none",
+)
+
+data class PrivilegedWorkspaceBindingPersistedRecord(
+    val workspaceId: String,
+    val authority: DiagnosticAuthority,
+    val bindingRevision: Int,
+    val grantGeneration: Int,
+    val requestRef: String? = null,
+    val errorCode: String = "none",
+)
+
+data class PrivilegedWorkspaceReattachRecord(
+    val phase: DiagnosticWorkspaceReattachPhase,
+    val workspaceId: String,
+    val authority: DiagnosticAuthority,
+    val bindingRevision: Int,
+    val grantGeneration: Int = 0,
+    val requestRef: String? = null,
+    val durationMs: Long? = null,
+    val errorCode: String = "none",
+)
+
+data class ConversationWorkspaceRecord(
+    val event: ConversationWorkspaceEvent,
+    val sessionId: String,
+    val agentId: String,
+    val workspaceId: String,
+    val authority: DiagnosticAuthority,
+    val bindingRevision: Int,
+    val grantGeneration: Int = 0,
+    val snapshotVersion: Int = 0,
+    val previousWorkspaceId: String? = null,
+)
+
+enum class ConversationWorkspaceEvent(val eventName: String) {
+    BOUND("conversation_workspace_bound"),
+    CHANGED("conversation_workspace_changed"),
+    RESOLVED("conversation_workspace_resolved"),
+}
+
+data class WorkspaceToolExposureRecord(
+    val agentId: String,
+    val sessionId: String? = null,
+    val workspaceId: String,
+    val authority: DiagnosticAuthority,
+    val capability: DiagnosticToolCapability,
+    val exposed: DiagnosticExposureState,
+    val grantGeneration: Int = 0,
+    val snapshotVersion: Int = 0,
+    val reasonCode: String = "unknown",
+)
+
+data class ProviderConnectionTestRecord(
+    val providerId: String,
+    val modelId: String,
+    val resultCode: DiagnosticProviderResultCode,
+    val httpClass: DiagnosticHttpClass = DiagnosticHttpClass.NONE,
+    val durationMs: Long = 0,
+)
+
+data class ProviderCapabilityProbeRecord(
+    val providerId: String,
+    val modelId: String,
+    val resultCode: DiagnosticProviderResultCode,
+    val httpClass: DiagnosticHttpClass = DiagnosticHttpClass.NONE,
+    val durationMs: Long = 0,
+)
+
 data class AuthoritySelectionChangedRecord(
     val selectedAuthority: DiagnosticAuthority,
     val previousAuthority: DiagnosticAuthority? = null,
@@ -555,6 +671,7 @@ class RollingDiagnosticLogStore(
         const val MAX_EVENT_BYTES = 4 * 1024
         const val MAX_EXPORT_BYTES = 640 * 1024
         const val MAX_COUNT = 1_000_000
+        const val MAX_DURATION_MS = 24L * 60L * 60L * 1_000L
         const val MAX_REFERENCE_LENGTH = DiagnosticReferenceHasher.REFERENCE_LENGTH
         private val DEBUG_EVENTS = setOf(
             "authority_configuration_state",
@@ -564,6 +681,20 @@ class RollingDiagnosticLogStore(
             "authority_state_changed",
             "workspace_grant_changed",
             "shell_tool_exposure_changed",
+            "privileged_workspace_selection_started",
+            "privileged_workspace_selection_completed",
+            "privileged_workspace_binding_persisted",
+            "privileged_workspace_reattach_started",
+            "privileged_workspace_reattach_completed",
+            "privileged_workspace_reattach_failed",
+            "conversation_workspace_bound",
+            "conversation_workspace_changed",
+            "conversation_workspace_resolved",
+            "workspace_tool_exposure",
+            "provider_connection_test_started",
+            "provider_connection_test_completed",
+            "provider_capability_probe_started",
+            "provider_capability_probe_completed",
         )
 
         private fun currentUtc(): String = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'").apply {
@@ -632,6 +763,40 @@ class RollingDiagnosticLogStore(
             "backendProbeFailureCount", "authorityMismatchWorkspaceCount", "schemaFrozen", "backendProbeState",
             "safOperationCapabilityCount", "safProbeState",
         ),
+        "privileged_workspace_selection_started" to setOf("authority", "requestRef"),
+        "privileged_workspace_selection_completed" to setOf(
+            "authority", "workspaceRef", "requestRef", "durationMs", "errorCode",
+        ),
+        "privileged_workspace_binding_persisted" to setOf(
+            "workspaceRef", "authority", "bindingRevision", "grantGeneration", "requestRef", "errorCode",
+        ),
+        "privileged_workspace_reattach_started" to setOf(
+            "workspaceRef", "authority", "bindingRevision", "grantGeneration", "requestRef",
+        ),
+        "privileged_workspace_reattach_completed" to setOf(
+            "workspaceRef", "authority", "bindingRevision", "grantGeneration", "requestRef", "durationMs", "errorCode",
+        ),
+        "privileged_workspace_reattach_failed" to setOf(
+            "workspaceRef", "authority", "bindingRevision", "grantGeneration", "requestRef", "durationMs", "errorCode",
+        ),
+        "conversation_workspace_bound" to setOf(
+            "sessionRef", "agentRef", "workspaceRef", "authority", "bindingRevision", "grantGeneration", "snapshotVersion",
+        ),
+        "conversation_workspace_changed" to setOf(
+            "sessionRef", "agentRef", "workspaceRef", "previousWorkspaceRef", "authority", "bindingRevision",
+            "grantGeneration", "snapshotVersion",
+        ),
+        "conversation_workspace_resolved" to setOf(
+            "sessionRef", "agentRef", "workspaceRef", "authority", "bindingRevision", "grantGeneration", "snapshotVersion",
+        ),
+        "workspace_tool_exposure" to setOf(
+            "agentRef", "sessionRef", "workspaceRef", "authority", "capability", "exposed", "grantGeneration",
+            "snapshotVersion", "reasonCode",
+        ),
+        "provider_connection_test_started" to setOf("providerRef", "modelRef", "resultCode", "httpClass", "durationMs"),
+        "provider_connection_test_completed" to setOf("providerRef", "modelRef", "resultCode", "httpClass", "durationMs"),
+        "provider_capability_probe_started" to setOf("providerRef", "modelRef", "resultCode", "httpClass", "durationMs"),
+        "provider_capability_probe_completed" to setOf("providerRef", "modelRef", "resultCode", "httpClass", "durationMs"),
     )
 
     private val currentFile get() = File(rootDirectory, CURRENT_FILE_NAME)
@@ -1153,6 +1318,179 @@ class RollingDiagnosticLogStore(
         ).withoutNulls(),
     )
 
+    /** Records privileged picker lifecycle without persisting a directory locator or path. */
+    fun recordPrivilegedWorkspaceSelection(record: PrivilegedWorkspaceSelectionRecord): Boolean {
+        val event = when (record.phase) {
+            DiagnosticWorkspaceSelectionPhase.STARTED -> "privileged_workspace_selection_started"
+            DiagnosticWorkspaceSelectionPhase.COMPLETED -> "privileged_workspace_selection_completed"
+        }
+        val fields: Map<String, Any?> = when (record.phase) {
+            DiagnosticWorkspaceSelectionPhase.STARTED -> linkedMapOf<String, Any?>(
+                "authority" to record.authority.wireName,
+                "requestRef" to record.requestRef,
+            ).withoutNulls()
+            DiagnosticWorkspaceSelectionPhase.COMPLETED -> linkedMapOf<String, Any?>(
+                "authority" to record.authority.wireName,
+                "workspaceRef" to record.workspaceId,
+                "requestRef" to record.requestRef,
+                "durationMs" to record.durationMs,
+                "errorCode" to record.errorCode,
+            ).withoutNulls()
+        }
+        return record(event, fields)
+    }
+
+    fun recordPrivilegedWorkspaceSelectionStarted(
+        authority: DiagnosticAuthority,
+        requestRef: String? = null,
+    ): Boolean = recordPrivilegedWorkspaceSelection(
+        PrivilegedWorkspaceSelectionRecord(
+            phase = DiagnosticWorkspaceSelectionPhase.STARTED,
+            authority = authority,
+            requestRef = requestRef,
+        ),
+    )
+
+    fun recordPrivilegedWorkspaceSelectionCompleted(
+        authority: DiagnosticAuthority,
+        workspaceId: String,
+        durationMs: Long,
+        requestRef: String? = null,
+        errorCode: String = "none",
+    ): Boolean = recordPrivilegedWorkspaceSelection(
+        PrivilegedWorkspaceSelectionRecord(
+            phase = DiagnosticWorkspaceSelectionPhase.COMPLETED,
+            authority = authority,
+            workspaceId = workspaceId,
+            requestRef = requestRef,
+            durationMs = durationMs,
+            errorCode = errorCode,
+        ),
+    )
+
+    fun recordPrivilegedWorkspaceBindingPersisted(record: PrivilegedWorkspaceBindingPersistedRecord): Boolean = record(
+        "privileged_workspace_binding_persisted",
+        linkedMapOf<String, Any?>(
+            "workspaceRef" to record.workspaceId,
+            "authority" to record.authority.wireName,
+            "bindingRevision" to record.bindingRevision.coerceIn(0, MAX_COUNT),
+            "grantGeneration" to record.grantGeneration.coerceIn(0, MAX_COUNT),
+            "requestRef" to record.requestRef,
+            "errorCode" to record.errorCode,
+        ).withoutNulls(),
+    )
+
+    fun recordPrivilegedWorkspaceBindingSaved(record: PrivilegedWorkspaceBindingPersistedRecord): Boolean =
+        recordPrivilegedWorkspaceBindingPersisted(record)
+
+    /** Records a reattach state; a failed state is distinct from an unavailable connection. */
+    fun recordPrivilegedWorkspaceReattach(record: PrivilegedWorkspaceReattachRecord): Boolean {
+        val event = when (record.phase) {
+            DiagnosticWorkspaceReattachPhase.STARTED -> "privileged_workspace_reattach_started"
+            DiagnosticWorkspaceReattachPhase.COMPLETED -> "privileged_workspace_reattach_completed"
+            DiagnosticWorkspaceReattachPhase.FAILED -> "privileged_workspace_reattach_failed"
+        }
+        val fields = linkedMapOf<String, Any?>(
+            "workspaceRef" to record.workspaceId,
+            "authority" to record.authority.wireName,
+            "bindingRevision" to record.bindingRevision.coerceIn(0, MAX_COUNT),
+            "grantGeneration" to record.grantGeneration.coerceIn(0, MAX_COUNT),
+            "requestRef" to record.requestRef,
+            "durationMs" to record.durationMs,
+            "errorCode" to record.errorCode,
+        ).withoutNulls().filterKeys { key ->
+            record.phase != DiagnosticWorkspaceReattachPhase.STARTED ||
+                key in setOf("workspaceRef", "authority", "bindingRevision", "grantGeneration", "requestRef")
+        }
+        return record(event, fields)
+    }
+
+    fun recordPrivilegedWorkspaceReattachStarted(record: PrivilegedWorkspaceReattachRecord): Boolean =
+        recordPrivilegedWorkspaceReattach(record.copy(phase = DiagnosticWorkspaceReattachPhase.STARTED))
+
+    fun recordPrivilegedWorkspaceReattachSucceeded(record: PrivilegedWorkspaceReattachRecord): Boolean =
+        recordPrivilegedWorkspaceReattach(record.copy(phase = DiagnosticWorkspaceReattachPhase.COMPLETED))
+
+    fun recordPrivilegedWorkspaceReattachFailed(record: PrivilegedWorkspaceReattachRecord): Boolean =
+        recordPrivilegedWorkspaceReattach(record.copy(phase = DiagnosticWorkspaceReattachPhase.FAILED))
+
+    fun recordConversationWorkspace(record: ConversationWorkspaceRecord): Boolean {
+        val fields = linkedMapOf<String, Any?>(
+            "sessionRef" to record.sessionId,
+            "agentRef" to record.agentId,
+            "workspaceRef" to record.workspaceId,
+            "authority" to record.authority.wireName,
+            "bindingRevision" to record.bindingRevision.coerceIn(0, MAX_COUNT),
+            "grantGeneration" to record.grantGeneration.coerceIn(0, MAX_COUNT),
+            "snapshotVersion" to record.snapshotVersion.coerceIn(0, MAX_COUNT),
+            "previousWorkspaceRef" to record.previousWorkspaceId,
+        ).withoutNulls()
+        return record(record.event.eventName, fields)
+    }
+
+    fun recordConversationWorkspaceBound(record: ConversationWorkspaceRecord): Boolean =
+        recordConversationWorkspace(record.copy(event = ConversationWorkspaceEvent.BOUND))
+
+    fun recordConversationWorkspaceChanged(record: ConversationWorkspaceRecord): Boolean =
+        recordConversationWorkspace(record.copy(event = ConversationWorkspaceEvent.CHANGED))
+
+    fun recordConversationWorkspaceResolved(record: ConversationWorkspaceRecord): Boolean =
+        recordConversationWorkspace(record.copy(event = ConversationWorkspaceEvent.RESOLVED))
+
+    /** Records only the effective typed capability, never the tool arguments or workspace path. */
+    fun recordWorkspaceToolExposure(record: WorkspaceToolExposureRecord): Boolean = record(
+        "workspace_tool_exposure",
+        linkedMapOf<String, Any?>(
+            "agentRef" to record.agentId,
+            "sessionRef" to record.sessionId,
+            "workspaceRef" to record.workspaceId,
+            "authority" to record.authority.wireName,
+            "capability" to record.capability.wireName,
+            "exposed" to record.exposed.wireName,
+            "grantGeneration" to record.grantGeneration.coerceIn(0, MAX_COUNT),
+            "snapshotVersion" to record.snapshotVersion.coerceIn(0, MAX_COUNT),
+            "reasonCode" to record.reasonCode,
+        ).withoutNulls(),
+    )
+
+    fun recordProviderConnectionTest(record: ProviderConnectionTestRecord): Boolean = record(
+        "provider_connection_test_${if (record.resultCode == DiagnosticProviderResultCode.STARTED) "started" else "completed"}",
+        providerResultFields(record.providerId, record.modelId, record.resultCode, record.httpClass, record.durationMs),
+    )
+
+    fun recordProviderConnectionTestStarted(record: ProviderConnectionTestRecord): Boolean =
+        recordProviderConnectionTest(record.copy(resultCode = DiagnosticProviderResultCode.STARTED))
+
+    fun recordProviderConnectionTestCompleted(record: ProviderConnectionTestRecord): Boolean =
+        recordProviderConnectionTest(record.copy(resultCode = record.resultCode.takeUnless { it == DiagnosticProviderResultCode.STARTED }
+            ?: DiagnosticProviderResultCode.FAILED))
+
+    fun recordProviderCapabilityProbe(record: ProviderCapabilityProbeRecord): Boolean = record(
+        "provider_capability_probe_${if (record.resultCode == DiagnosticProviderResultCode.STARTED) "started" else "completed"}",
+        providerResultFields(record.providerId, record.modelId, record.resultCode, record.httpClass, record.durationMs),
+    )
+
+    fun recordProviderCapabilityProbeStarted(record: ProviderCapabilityProbeRecord): Boolean =
+        recordProviderCapabilityProbe(record.copy(resultCode = DiagnosticProviderResultCode.STARTED))
+
+    fun recordProviderCapabilityProbeCompleted(record: ProviderCapabilityProbeRecord): Boolean =
+        recordProviderCapabilityProbe(record.copy(resultCode = record.resultCode.takeUnless { it == DiagnosticProviderResultCode.STARTED }
+            ?: DiagnosticProviderResultCode.FAILED))
+
+    private fun providerResultFields(
+        providerId: String,
+        modelId: String,
+        resultCode: DiagnosticProviderResultCode,
+        httpClass: DiagnosticHttpClass,
+        durationMs: Long,
+    ): Map<String, Any?> = linkedMapOf(
+        "providerRef" to providerId,
+        "modelRef" to modelId,
+        "resultCode" to resultCode.wireName,
+        "httpClass" to httpClass.wireName,
+        "durationMs" to durationMs.coerceIn(0, MAX_DURATION_MS),
+    )
+
     /** Crash logging never includes Throwable.message, which may contain user content or secrets. */
     fun recordCrash(thread: Thread, throwable: Throwable): Boolean = synchronized(lock) {
         if (!enabledSafely()) return@synchronized false
@@ -1645,6 +1983,134 @@ class RollingDiagnosticLogStore(
                     "safProbeState" to safProbeState,
                 ).withoutNulls()
             }
+            "privileged_workspace_selection_started" -> {
+                val authority = canonicalAuthority(fields["authority"] as? String ?: return null)
+                val requestRef = canonicalOptionalReferenceStrict(fields, "requestRef")
+                linkedMapOf<String, Any?>(
+                    "authority" to authority,
+                    "requestRef" to requestRef,
+                ).withoutNulls()
+            }
+            "privileged_workspace_selection_completed" -> {
+                val authority = canonicalAuthority(fields["authority"] as? String ?: return null)
+                val workspaceRef = canonicalReference(fields["workspaceRef"] as? String ?: return null)
+                val requestRef = canonicalOptionalReferenceStrict(fields, "requestRef")
+                val durationMs = optionalDuration(fields, "durationMs") ?: return null
+                val errorCode = canonicalWorkspaceErrorCode(fields["errorCode"] as? String ?: return null)
+                linkedMapOf<String, Any?>(
+                    "authority" to authority,
+                    "workspaceRef" to workspaceRef,
+                    "requestRef" to requestRef,
+                    "durationMs" to durationMs,
+                    "errorCode" to errorCode,
+                ).withoutNulls()
+            }
+            "privileged_workspace_binding_persisted" -> {
+                val workspaceRef = canonicalReference(fields["workspaceRef"] as? String ?: return null)
+                val authority = canonicalAuthority(fields["authority"] as? String ?: return null)
+                val bindingRevision = fields["bindingRevision"] as? Int ?: return null
+                val grantGeneration = fields["grantGeneration"] as? Int ?: return null
+                val requestRef = canonicalOptionalReferenceStrict(fields, "requestRef")
+                val errorCode = canonicalWorkspaceErrorCode(fields["errorCode"] as? String ?: return null)
+                linkedMapOf<String, Any?>(
+                    "workspaceRef" to workspaceRef,
+                    "authority" to authority,
+                    "bindingRevision" to bindingRevision.coerceIn(0, MAX_COUNT),
+                    "grantGeneration" to grantGeneration.coerceIn(0, MAX_COUNT),
+                    "requestRef" to requestRef,
+                    "errorCode" to errorCode,
+                ).withoutNulls()
+            }
+            "privileged_workspace_reattach_started",
+            "privileged_workspace_reattach_completed",
+            "privileged_workspace_reattach_failed" -> {
+                val workspaceRef = canonicalReference(fields["workspaceRef"] as? String ?: return null)
+                val authority = canonicalAuthority(fields["authority"] as? String ?: return null)
+                val bindingRevision = fields["bindingRevision"] as? Int ?: return null
+                val grantGeneration = fields["grantGeneration"] as? Int ?: return null
+                val requestRef = canonicalOptionalReferenceStrict(fields, "requestRef")
+                val withDuration = event != "privileged_workspace_reattach_started"
+                val durationMs = if (withDuration) optionalDuration(fields, "durationMs") ?: return null else null
+                val errorCode = if (withDuration) {
+                    canonicalWorkspaceErrorCode(fields["errorCode"] as? String ?: return null)
+                } else {
+                    null
+                }
+                linkedMapOf<String, Any?>(
+                    "workspaceRef" to workspaceRef,
+                    "authority" to authority,
+                    "bindingRevision" to bindingRevision.coerceIn(0, MAX_COUNT),
+                    "grantGeneration" to grantGeneration.coerceIn(0, MAX_COUNT),
+                    "requestRef" to requestRef,
+                    "durationMs" to durationMs,
+                    "errorCode" to errorCode,
+                ).withoutNulls()
+            }
+            "conversation_workspace_bound",
+            "conversation_workspace_changed",
+            "conversation_workspace_resolved" -> {
+                val sessionRef = canonicalReference(fields["sessionRef"] as? String ?: return null)
+                val agentRef = canonicalReference(fields["agentRef"] as? String ?: return null)
+                val workspaceRef = canonicalReference(fields["workspaceRef"] as? String ?: return null)
+                val previousWorkspaceRef = if (event == "conversation_workspace_changed") {
+                    canonicalReference(fields["previousWorkspaceRef"] as? String ?: return null)
+                } else {
+                    null
+                }
+                val authority = canonicalAuthority(fields["authority"] as? String ?: return null)
+                val bindingRevision = fields["bindingRevision"] as? Int ?: return null
+                val grantGeneration = fields["grantGeneration"] as? Int ?: return null
+                val snapshotVersion = fields["snapshotVersion"] as? Int ?: return null
+                linkedMapOf<String, Any?>(
+                    "sessionRef" to sessionRef,
+                    "agentRef" to agentRef,
+                    "workspaceRef" to workspaceRef,
+                    "previousWorkspaceRef" to previousWorkspaceRef,
+                    "authority" to authority,
+                    "bindingRevision" to bindingRevision.coerceIn(0, MAX_COUNT),
+                    "grantGeneration" to grantGeneration.coerceIn(0, MAX_COUNT),
+                    "snapshotVersion" to snapshotVersion.coerceIn(0, MAX_COUNT),
+                ).withoutNulls()
+            }
+            "workspace_tool_exposure" -> {
+                val agentRef = canonicalReference(fields["agentRef"] as? String ?: return null)
+                val sessionRef = canonicalOptionalReferenceStrict(fields, "sessionRef")
+                val workspaceRef = canonicalReference(fields["workspaceRef"] as? String ?: return null)
+                val authority = canonicalAuthority(fields["authority"] as? String ?: return null)
+                val capability = canonicalToolCapability(fields["capability"] as? String ?: return null)
+                val exposed = canonicalExposureState(fields["exposed"] as? String ?: return null)
+                val grantGeneration = fields["grantGeneration"] as? Int ?: return null
+                val snapshotVersion = fields["snapshotVersion"] as? Int ?: return null
+                val reasonCode = canonicalWorkspaceErrorCode(fields["reasonCode"] as? String ?: return null)
+                linkedMapOf<String, Any?>(
+                    "agentRef" to agentRef,
+                    "sessionRef" to sessionRef,
+                    "workspaceRef" to workspaceRef,
+                    "authority" to authority,
+                    "capability" to capability,
+                    "exposed" to exposed,
+                    "grantGeneration" to grantGeneration.coerceIn(0, MAX_COUNT),
+                    "snapshotVersion" to snapshotVersion.coerceIn(0, MAX_COUNT),
+                    "reasonCode" to reasonCode,
+                ).withoutNulls()
+            }
+            "provider_connection_test_started",
+            "provider_connection_test_completed",
+            "provider_capability_probe_started",
+            "provider_capability_probe_completed" -> {
+                val providerRef = canonicalReference(fields["providerRef"] as? String ?: return null)
+                val modelRef = canonicalReference(fields["modelRef"] as? String ?: return null)
+                val resultCode = canonicalProviderResultCode(fields["resultCode"] as? String ?: return null) ?: return null
+                val httpClass = canonicalHttpClass(fields["httpClass"] as? String ?: return null) ?: return null
+                val durationMs = fields["durationMs"] as? Long ?: return null
+                linkedMapOf<String, Any?>(
+                    "providerRef" to providerRef,
+                    "modelRef" to modelRef,
+                    "resultCode" to resultCode,
+                    "httpClass" to httpClass,
+                    "durationMs" to durationMs.coerceIn(0, MAX_DURATION_MS),
+                )
+            }
             "uncaught_exception" -> {
                 val type = fields["exceptionType"] as? String ?: return null
                 val stack = fields["stack"] as? String ?: return null
@@ -1805,6 +2271,34 @@ class RollingDiagnosticLogStore(
     /** Optional fields keep old v2 exposure records readable while rejecting bad new values. */
     private fun optionalCount(fields: Map<String, Any?>, key: String): Int? =
         (fields[key] as? Int)?.coerceIn(0, MAX_COUNT) ?: if (fields[key] == null) 0 else null
+
+    /** Optional references are still type-checked; an arbitrary object must never disappear silently. */
+    private fun canonicalOptionalReferenceStrict(fields: Map<String, Any?>, key: String): String? {
+        if (!fields.containsKey(key)) return null
+        val value = fields[key] ?: return null
+        require(value is String) { "diagnostic reference must be text" }
+        return (value as? String)?.let(::canonicalReference)
+    }
+
+    private fun optionalDuration(fields: Map<String, Any?>, key: String): Long? {
+        if (!fields.containsKey(key)) return 0L
+        val value = fields[key]
+        require(value is Long) { "diagnostic duration must be long" }
+        return value.coerceIn(0, MAX_DURATION_MS)
+    }
+
+    private fun canonicalWorkspaceErrorCode(value: String): String = when (value.trim().lowercase()) {
+        "none", "unknown", "workspace_not_found", "permission_denied", "grant_lost",
+        "binding_unrecoverable", "authority_unavailable", "conflict", "cancelled", "invalid_request",
+        "io", "timeout", "unsupported" -> value.trim().lowercase()
+        else -> "unknown"
+    }
+
+    private fun canonicalProviderResultCode(value: String): String? =
+        DiagnosticProviderResultCode.entries.firstOrNull { it.wireName == value.trim().lowercase() }?.wireName
+
+    private fun canonicalHttpClass(value: String): String? =
+        DiagnosticHttpClass.entries.firstOrNull { it.wireName == value.trim().lowercase() }?.wireName
 
     private fun optionalBackendProbeState(fields: Map<String, Any?>, key: String): String? {
         val value = fields[key] as? String ?: return if (fields[key] == null) {

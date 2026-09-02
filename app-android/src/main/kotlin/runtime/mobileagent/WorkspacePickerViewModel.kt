@@ -1,0 +1,634 @@
+// SPDX-FileCopyrightText: 2026 mobileAgentRuntime contributors
+// SPDX-License-Identifier: AGPL-3.0-only
+
+package runtime.mobileagent
+
+import android.app.Application
+import android.net.Uri
+import androidx.lifecycle.AndroidViewModel
+import androidx.lifecycle.viewModelScope
+import java.util.UUID
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import runtime.mobileagent.domain.Authority
+import runtime.mobileagent.feature.agents.WorkspacePickerAttachedUi
+import runtime.mobileagent.feature.agents.WorkspacePickerAttachPhaseUi
+import runtime.mobileagent.feature.agents.WorkspacePickerAuthorityUi
+import runtime.mobileagent.feature.agents.WorkspacePickerBreadcrumbUi
+import runtime.mobileagent.feature.agents.WorkspacePickerEntryUi
+import runtime.mobileagent.feature.agents.WorkspacePickerErrorCodeUi
+import runtime.mobileagent.feature.agents.WorkspacePickerLoadPhaseUi
+import runtime.mobileagent.feature.agents.WorkspacePickerLocationUi
+import runtime.mobileagent.feature.agents.WorkspacePickerModeUi
+import runtime.mobileagent.feature.agents.WorkspacePickerRecentUi
+import runtime.mobileagent.feature.agents.WorkspacePickerUiState
+import runtime.mobileagent.integration.WorkspaceAccessErrorCode
+import runtime.mobileagent.integration.WorkspaceAccessGrantTarget
+import runtime.mobileagent.integration.WorkspaceAccessItem
+import runtime.mobileagent.integration.WorkspaceAccessResult
+import runtime.mobileagent.integration.WorkspaceAccessStatus
+import runtime.mobileagent.skills.tooling.WorkspaceAttachRequest
+import runtime.mobileagent.skills.tooling.WorkspaceBrowseRequest
+import runtime.mobileagent.skills.tooling.WorkspaceDirectoryEntry
+import runtime.mobileagent.skills.tooling.WorkspaceDirectoryHandle
+import runtime.mobileagent.skills.tooling.WorkspaceDirectoryPage
+import runtime.mobileagent.skills.tooling.WorkspaceEntryType
+import runtime.mobileagent.skills.tooling.WorkspaceResult
+import runtime.mobileagent.skills.tooling.ToolErrorCode
+
+/**
+ * Stable foreground state for the privileged workspace picker.
+ *
+ * Opaque directory handles are retained only in this process and never enter
+ * [WorkspacePickerUiState].  A browse operation is single-flight, and a
+ * successful attach consumes the committed result directly rather than
+ * re-reading repositories after the transaction.
+ */
+class WorkspacePickerViewModel(
+    application: Application,
+    private val port: WorkspacePickerPort = UnavailableWorkspacePickerPort,
+) : AndroidViewModel(application) {
+    private val _state = MutableStateFlow(WorkspacePickerUiState())
+    val state: StateFlow<WorkspacePickerUiState> = _state.asStateFlow()
+
+    private var browseJob: Job? = null
+    private var operationGeneration = 0L
+    private var currentPage: WorkspaceDirectoryPage? = null
+    private var currentDirectoryReadable = false
+    private var currentDirectoryWritable = false
+    private val directoryStack = ArrayList<DirectoryLevel>()
+    private val entryHandles = LinkedHashMap<String, WorkspaceDirectoryEntry>()
+    private var target = WorkspacePickerTarget()
+    private var targetLabel = "当前目标"
+    private var selectedAuthority = Authority.NONE
+    private var authorityReady = false
+
+    init {
+        refresh()
+    }
+
+    fun setTarget(target: WorkspacePickerTarget, label: String = "当前目标") {
+        this.target = target
+        targetLabel = label.trim().ifBlank { "当前目标" }.take(128)
+        _state.value = _state.value.copy(targetLabel = targetLabel)
+    }
+
+    fun refresh() {
+        val generation = nextGeneration()
+        browseJob?.cancel()
+        browseJob = viewModelScope.launch {
+            val loaded = withContext(Dispatchers.IO) {
+                runCatching {
+                    val authority = port.authoritySnapshot()
+                    val recent = port.recentWorkspaces(target.agentId)
+                    authority to recent
+                }.getOrElse { WorkspacePickerAuthoritySnapshot() to emptyList() }
+            }
+            if (!isCurrent(generation)) return@launch
+            val authority = loaded.first
+            val recent = loaded.second
+            val mode = modeFor(authority)
+            selectedAuthority = authority.selectedAuthority
+            authorityReady = authority.ready
+            clearDirectoryState()
+            _state.value = _state.value.copy(
+                mode = mode,
+                authority = authority.toUi(),
+                targetLabel = targetLabel,
+                recentWorkspaces = recent.map { it.toRecentUi() },
+                locations = emptyList(),
+                breadcrumbs = emptyList(),
+                currentLabel = "根目录",
+                entries = emptyList(),
+                loadPhase = WorkspacePickerLoadPhaseUi.IDLE,
+                loading = false,
+                listTruncated = false,
+                currentDirectoryReadable = false,
+                currentDirectoryWritable = false,
+                canGoParent = false,
+                canUseCurrentDirectory = false,
+                canUseSafFallback = mode != WorkspacePickerModeUi.SAF_FALLBACK,
+                attachPhase = WorkspacePickerAttachPhaseUi.IDLE,
+                attached = null,
+                errorCode = null,
+                errorMessage = null,
+                statusMessage = null,
+            )
+            if (mode == WorkspacePickerModeUi.PRIVILEGED) {
+                browseRoot(generation, authority.selectedAuthority)
+            } else if (mode == WorkspacePickerModeUi.AUTHORITY_UNAVAILABLE) {
+                _state.value = _state.value.copy(
+                    statusMessage = "${authority.displayLabel()}当前不可用；不会自动切换通道。",
+                )
+            }
+        }
+    }
+
+    /** Explicitly choose the ordinary SAF fallback. */
+    fun chooseSafFallback() {
+        browseJob?.cancel()
+        nextGeneration()
+        clearDirectoryState()
+        _state.value = _state.value.copy(
+            mode = WorkspacePickerModeUi.SAF_FALLBACK,
+            loadPhase = WorkspacePickerLoadPhaseUi.IDLE,
+            loading = false,
+            canUseSafFallback = false,
+            attachPhase = WorkspacePickerAttachPhaseUi.IDLE,
+            attached = null,
+            errorCode = null,
+            errorMessage = null,
+            statusMessage = "请通过系统文件选择器选择工作区。",
+        )
+    }
+
+    fun retry() = refresh()
+
+    fun openLocation(id: String) = openEntry(id)
+
+    fun openEntry(id: String) {
+        val entry = entryHandles[id] ?: return
+        val handle = entry.handle
+        if (entry.type != WorkspaceEntryType.DIRECTORY || handle == null) {
+            showError(WorkspacePickerErrorCodeUi.PERMISSION_DENIED, "该文件夹不可访问。")
+            return
+        }
+        if (entryHandles[id]?.let { it.handle == null || !isReadable(it) } == true) {
+            showError(WorkspacePickerErrorCodeUi.PERMISSION_DENIED, "该文件夹不可访问。")
+            return
+        }
+        val authority = selectedAuthority
+        if (!isElevated(authority) || !authorityReady) {
+            showError(WorkspacePickerErrorCodeUi.AUTHORITY_UNAVAILABLE, "当前增强访问不可用。")
+            return
+        }
+        val generation = nextGeneration()
+        browseJob?.cancel()
+        pendingChildLabel = entry.name
+        browseJob = browseJobFor(generation) {
+            port.browsePrivileged(
+                authority,
+                WorkspaceBrowseRequest(handle, WorkspacePickerPort.DEFAULT_PAGE_SIZE),
+            )
+        }
+    }
+
+    fun openBreadcrumb(id: String) {
+        val index = id.removePrefix("depth:").toIntOrNull() ?: return
+        if (index !in directoryStack.indices || index == directoryStack.lastIndex) return
+        val authority = selectedAuthority
+        if (!isElevated(authority) || !authorityReady) {
+            showError(WorkspacePickerErrorCodeUi.AUTHORITY_UNAVAILABLE, "当前增强访问不可用。")
+            return
+        }
+        val generation = nextGeneration()
+        browseJob?.cancel()
+        val level = directoryStack[index]
+        pendingStackIndex = index
+        browseJob = browseJobFor(generation) {
+            port.browsePrivileged(
+                authority,
+                WorkspaceBrowseRequest(level.handle, WorkspacePickerPort.DEFAULT_PAGE_SIZE),
+            )
+        }
+    }
+
+    fun goParent() {
+        if (directoryStack.size <= 1) return
+        openBreadcrumb("depth:${directoryStack.lastIndex - 1}")
+    }
+
+    /**
+     * Attaches the currently displayed directory.  The model cannot invoke
+     * this method; it is wired only to foreground UI actions.
+     */
+    fun useCurrentDirectory() {
+        if (_state.value.attachPhase == WorkspacePickerAttachPhaseUi.ATTACHING) return
+        if (_state.value.mode != WorkspacePickerModeUi.PRIVILEGED) {
+            showError(WorkspacePickerErrorCodeUi.AUTHORITY_UNAVAILABLE, "请先连接并选择增强访问。")
+            return
+        }
+        val authority = selectedAuthority
+        if (!isElevated(authority) || !authorityReady) {
+            showError(WorkspacePickerErrorCodeUi.AUTHORITY_UNAVAILABLE, "当前增强访问不可用。")
+            return
+        }
+        val page = currentPage
+        val level = directoryStack.lastOrNull()
+        if (page == null || level == null || !currentDirectoryReadable) {
+            showError(WorkspacePickerErrorCodeUi.PERMISSION_DENIED, "当前位置不可访问。")
+            return
+        }
+        attachPrivileged(authority, page.current, level.label)
+    }
+
+    /** Called by the host after the user explicitly selected a SAF tree. */
+    fun onSafUriSelected(uri: Uri, resultFlags: Int = WorkspacePickerPort.DEFAULT_SAF_FLAGS) {
+        if (_state.value.mode != WorkspacePickerModeUi.SAF_FALLBACK) return
+        if (_state.value.attachPhase == WorkspacePickerAttachPhaseUi.ATTACHING) return
+        val name = "文件夹授权"
+        attachSaf(uri, resultFlags, name)
+    }
+
+    fun openRecent(workspaceId: String) {
+        if (workspaceId.isBlank()) return
+        if (_state.value.attachPhase == WorkspacePickerAttachPhaseUi.ATTACHING) return
+        val generation = nextGeneration()
+        browseJob?.cancel()
+        _state.value = _state.value.copy(
+            attachPhase = WorkspacePickerAttachPhaseUi.ATTACHING,
+            errorCode = null,
+            errorMessage = null,
+            statusMessage = "正在打开最近工作区…",
+        )
+        browseJob = viewModelScope.launch {
+            val result = try {
+                withContext(Dispatchers.IO) { port.useRecentWorkspace(workspaceId, target) }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (_: RuntimeException) {
+                WorkspaceAccessResult.Failure(WorkspaceAccessErrorCode.UNKNOWN_OUTCOME)
+            }
+            if (!isCurrent(generation)) return@launch
+            when (result) {
+                is WorkspaceAccessResult.Success -> {
+                    _state.value = _state.value.copy(
+                        attachPhase = WorkspacePickerAttachPhaseUi.SUCCESS,
+                        attached = WorkspacePickerAttachedUi(
+                            workspaceId = result.workspace.workspaceId,
+                            displayName = result.workspace.displayName,
+                            statusLabel = result.workspace.status.toUiLabel(),
+                        ),
+                        statusMessage = "已打开最近工作区。",
+                    )
+                }
+                is WorkspaceAccessResult.Failure -> showError(
+                    result.code.toUiCode(),
+                    result.code.toUiMessage(),
+                    attachFailure = true,
+                )
+            }
+        }
+    }
+
+    fun clearResult() {
+        _state.value = _state.value.copy(
+            attachPhase = WorkspacePickerAttachPhaseUi.IDLE,
+            attached = null,
+            statusMessage = null,
+        )
+    }
+
+    private fun attachPrivileged(authority: Authority, handle: WorkspaceDirectoryHandle, displayName: String) {
+        val generation = nextGeneration()
+        val workspaceId = newWorkspaceId()
+        val request = WorkspaceAttachRequest(workspaceId, displayName, handle)
+        val grant = target.grantForWorkspace()
+        _state.value = _state.value.copy(
+            attachPhase = WorkspacePickerAttachPhaseUi.ATTACHING,
+            errorCode = null,
+            errorMessage = null,
+            statusMessage = null,
+            attached = null,
+        )
+        browseJob?.cancel()
+        browseJob = viewModelScope.launch {
+            val result = try {
+                withContext(Dispatchers.IO) {
+                    port.attachPrivilegedDirectory(authority, request, grant, target)
+                }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (_: RuntimeException) {
+                WorkspaceAccessResult.Failure(WorkspaceAccessErrorCode.UNKNOWN_OUTCOME)
+            }
+            if (!isCurrent(generation)) return@launch
+            applyAttachResult(result)
+        }
+    }
+
+    private fun attachSaf(uri: Uri, resultFlags: Int, displayName: String) {
+        val generation = nextGeneration()
+        val workspaceId = newWorkspaceId()
+        val grant = target.grantForWorkspace()
+        _state.value = _state.value.copy(
+            attachPhase = WorkspacePickerAttachPhaseUi.ATTACHING,
+            errorCode = null,
+            errorMessage = null,
+            statusMessage = null,
+            attached = null,
+        )
+        browseJob?.cancel()
+        browseJob = viewModelScope.launch {
+            val result = try {
+                withContext(Dispatchers.IO) {
+                    port.attachSaf(uri, resultFlags, grant, target)
+                }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (_: RuntimeException) {
+                WorkspaceAccessResult.Failure(WorkspaceAccessErrorCode.UNKNOWN_OUTCOME)
+            }
+            if (!isCurrent(generation)) return@launch
+            applyAttachResult(result)
+        }
+    }
+
+    private fun applyAttachResult(result: WorkspaceAccessResult) {
+        when (result) {
+            is WorkspaceAccessResult.Success -> {
+                // Do not call listWorkspaces or re-read grants here.  The
+                // result is the exact committed transaction projection.
+                _state.value = _state.value.copy(
+                    attachPhase = WorkspacePickerAttachPhaseUi.SUCCESS,
+                    attached = WorkspacePickerAttachedUi(
+                        workspaceId = result.workspace.workspaceId,
+                        displayName = result.workspace.displayName,
+                        statusLabel = result.workspace.status.toUiLabel(),
+                    ),
+                    errorCode = null,
+                    errorMessage = null,
+                    statusMessage = "工作区已添加。",
+                )
+            }
+            is WorkspaceAccessResult.Failure -> showError(
+                result.code.toUiCode(),
+                result.code.toUiMessage(),
+                attachFailure = true,
+            )
+        }
+    }
+
+    private fun browseRoot(generation: Long, authority: Authority) {
+        browseJob = browseJobFor(generation) {
+            port.browsePrivilegedRoot(authority, WorkspacePickerPort.DEFAULT_PAGE_SIZE)
+        }
+    }
+
+    private fun browseJobFor(
+        generation: Long,
+        operation: suspend () -> WorkspaceResult<WorkspaceDirectoryPage>,
+    ): Job = viewModelScope.launch {
+        _state.value = _state.value.copy(
+            loadPhase = WorkspacePickerLoadPhaseUi.LOADING,
+            loading = true,
+            errorCode = null,
+            errorMessage = null,
+        )
+        val result = try {
+            withContext(Dispatchers.IO) { operation() }
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (_: RuntimeException) {
+            WorkspaceResult.Failure(runtime.mobileagent.skills.tooling.ToolError(ToolErrorCode.UNKNOWN_OUTCOME))
+        }
+        if (!isCurrent(generation)) return@launch
+        when (result) {
+            is WorkspaceResult.Success -> applyPage(result.value, generation)
+            is WorkspaceResult.Failure -> {
+                if (currentPage == null) clearDirectoryState()
+                val code = result.error.toPickerErrorCode()
+                _state.value = _state.value.copy(
+                    loadPhase = WorkspacePickerLoadPhaseUi.ERROR,
+                    loading = false,
+                    canUseCurrentDirectory = false,
+                    errorCode = code,
+                    errorMessage = code.toUiMessage(),
+                )
+            }
+        }
+    }
+
+    private fun applyPage(page: WorkspaceDirectoryPage, generation: Long) {
+        currentPage = page
+        val access = runCatching { port.directoryAccess(page) }
+            .getOrDefault(WorkspacePickerDirectoryAccess(readable = true, writable = false))
+        currentDirectoryReadable = access.readable
+        currentDirectoryWritable = access.writable
+
+        if (pendingStackIndex != null) {
+            val index = pendingStackIndex!!
+            while (directoryStack.size > index + 1) directoryStack.removeAt(directoryStack.lastIndex)
+            pendingStackIndex = null
+        } else if (pendingChildLabel != null) {
+            directoryStack += DirectoryLevel(pendingChildLabel!!, page.current)
+            pendingChildLabel = null
+        } else if (directoryStack.isEmpty()) {
+            directoryStack += DirectoryLevel("根目录", page.current)
+        } else {
+            directoryStack[directoryStack.lastIndex] = directoryStack.last().copy(handle = page.current)
+        }
+
+        entryHandles.clear()
+        // Keep the navigation surface predictable even when a provider does
+        // not return a directory-first listing.  The opaque provider handle
+        // remains attached to the VM-only entry map, never to UI state.
+        val entryUi = page.entries
+            .sortedWith(
+                compareByDescending<WorkspaceDirectoryEntry> {
+                    it.type == WorkspaceEntryType.DIRECTORY
+                }.thenBy { it.name.lowercase() },
+            )
+            .mapIndexed { index, entry ->
+                val id = "entry-$index"
+                entryHandles[id] = entry
+                WorkspacePickerEntryUi(
+                    id = id,
+                    name = entry.name,
+                    directory = entry.type == WorkspaceEntryType.DIRECTORY,
+                    sizeBytes = entry.sizeBytes,
+                    readable = entry.readable && entry.handle != null,
+                    writable = entry.writable,
+                )
+            }
+        val rootLanding = directoryStack.size == 1
+        val locations = if (rootLanding) {
+            entryUi.asSequence()
+                .filter { it.directory && isRecommendedPrivilegedRootLocation(it.name) }
+                .sortedBy { privilegedRootLocationPriority(it.name) }
+                .distinctBy { friendlyLocationLabel(it.name) }
+                .map { entry ->
+                    WorkspacePickerLocationUi(entry.id, friendlyLocationLabel(entry.name), entry.readable)
+                }
+                .toList()
+        } else {
+            emptyList()
+        }
+        val breadcrumbs = directoryStack.mapIndexed { index, level ->
+            WorkspacePickerBreadcrumbUi("depth:$index", level.label, enabled = index != directoryStack.lastIndex)
+        }
+        val currentLabel = directoryStack.lastOrNull()?.label ?: "根目录"
+        _state.value = _state.value.copy(
+            loadPhase = WorkspacePickerLoadPhaseUi.CONTENT,
+            loading = false,
+            breadcrumbs = breadcrumbs,
+            currentLabel = currentLabel,
+            // The provider root can contain sensitive/system-only namespaces
+            // such as /data, /proc and /apex.  Keep their opaque handles in
+            // the VM for the explicit advanced flow, but do not expose a raw
+            // root listing in the default picker.  Normal browsing begins at
+            // a small set of friendly storage locations.
+            entries = if (rootLanding) emptyList() else entryUi,
+            locations = locations,
+            listTruncated = page.truncated,
+            currentDirectoryReadable = currentDirectoryReadable,
+            currentDirectoryWritable = currentDirectoryWritable,
+            canGoParent = directoryStack.size > 1 && page.parent != null,
+            canUseCurrentDirectory = currentDirectoryReadable && !rootLanding,
+            errorCode = null,
+            errorMessage = null,
+        )
+    }
+
+    private fun clearDirectoryState() {
+        currentPage = null
+        currentDirectoryReadable = false
+        currentDirectoryWritable = false
+        directoryStack.clear()
+        entryHandles.clear()
+        pendingChildLabel = null
+        pendingStackIndex = null
+    }
+
+    private fun showError(
+        code: WorkspacePickerErrorCodeUi,
+        message: String = code.toUiMessage(),
+        attachFailure: Boolean = false,
+    ) {
+        _state.value = _state.value.copy(
+            loadPhase = if (attachFailure) _state.value.loadPhase else WorkspacePickerLoadPhaseUi.ERROR,
+            loading = false,
+            attachPhase = if (attachFailure) WorkspacePickerAttachPhaseUi.ERROR else _state.value.attachPhase,
+            errorCode = code,
+            errorMessage = message,
+        )
+    }
+
+    private fun nextGeneration(): Long {
+        operationGeneration += 1
+        return operationGeneration
+    }
+
+    private fun isCurrent(generation: Long): Boolean = generation == operationGeneration
+
+    private fun modeFor(authority: WorkspacePickerAuthoritySnapshot): WorkspacePickerModeUi = when {
+        authority.selectedAuthority == Authority.NONE -> WorkspacePickerModeUi.SAF_FALLBACK
+        isElevated(authority.selectedAuthority) && authority.ready -> WorkspacePickerModeUi.PRIVILEGED
+        isElevated(authority.selectedAuthority) -> WorkspacePickerModeUi.AUTHORITY_UNAVAILABLE
+        else -> WorkspacePickerModeUi.AUTHORITY_UNAVAILABLE
+    }
+
+    private fun isElevated(authority: Authority): Boolean =
+        authority == Authority.SHIZUKU || authority == Authority.WIRED_ADB
+
+    private fun newWorkspaceId(): String =
+        "picker-${UUID.randomUUID().toString().replace("-", "").take(32)}"
+
+    private fun WorkspacePickerAuthoritySnapshot.toUi(): WorkspacePickerAuthorityUi =
+        WorkspacePickerAuthorityUi(
+            label = displayLabel(),
+            statusLabel = status.toUiLabel(),
+            selected = selectedAuthority != Authority.NONE,
+            ready = ready,
+        )
+
+    private fun WorkspacePickerAuthoritySnapshot.displayLabel(): String = when (selectedAuthority) {
+        Authority.SHIZUKU -> "Shizuku"
+        Authority.WIRED_ADB -> "Wired ADB"
+        Authority.NONE -> "未选择增强访问"
+    }
+
+    private fun WorkspacePickerAuthorityStatus.toUiLabel(): String = when (this) {
+        WorkspacePickerAuthorityStatus.READY -> "已连接"
+        WorkspacePickerAuthorityStatus.CONNECTING -> "正在连接"
+        WorkspacePickerAuthorityStatus.OFFLINE -> "授权保留，当前未连接"
+        WorkspacePickerAuthorityStatus.NOT_SELECTED -> "未选择"
+        WorkspacePickerAuthorityStatus.UNSUPPORTED -> "不可用"
+    }
+
+    private fun WorkspaceAccessItem.toRecentUi(): WorkspacePickerRecentUi = WorkspacePickerRecentUi(
+        id = workspaceId,
+        displayName = displayName,
+        authorityLabel = authority?.let { if (it == Authority.SHIZUKU) "Shizuku" else "Wired ADB" } ?: "普通文件夹授权",
+        statusLabel = status.toUiLabel(),
+        durablyAuthorized = durablyAuthorized,
+        enabled = status != WorkspaceAccessStatus.REVOKED,
+    )
+
+    private fun WorkspaceAccessStatus.toUiLabel(): String = when (this) {
+        WorkspaceAccessStatus.ACTIVE -> "可用"
+        WorkspaceAccessStatus.GRANT_LOST -> "授权已失效"
+        WorkspaceAccessStatus.REVOKED -> "已撤销"
+        WorkspaceAccessStatus.DISABLED -> "已停用"
+        WorkspaceAccessStatus.UNAVAILABLE -> "授权保留，当前未连接"
+    }
+
+    private fun WorkspaceAccessErrorCode.toUiCode(): WorkspacePickerErrorCodeUi = when (this) {
+        WorkspaceAccessErrorCode.AUTHORITY_NOT_SELECTED -> WorkspacePickerErrorCodeUi.AUTHORITY_NOT_SELECTED
+        WorkspaceAccessErrorCode.AUTHORITY_UNAVAILABLE -> WorkspacePickerErrorCodeUi.AUTHORITY_UNAVAILABLE
+        WorkspaceAccessErrorCode.WORKSPACE_NOT_FOUND -> WorkspacePickerErrorCodeUi.WORKSPACE_NOT_FOUND
+        WorkspaceAccessErrorCode.CAPABILITY_DENIED -> WorkspacePickerErrorCodeUi.PERMISSION_DENIED
+        WorkspaceAccessErrorCode.URI_PERMISSION_REQUIRED -> WorkspacePickerErrorCodeUi.URI_PERMISSION_REQUIRED
+        WorkspaceAccessErrorCode.CONFLICT -> WorkspacePickerErrorCodeUi.CONFLICT
+        WorkspaceAccessErrorCode.UNSUPPORTED -> WorkspacePickerErrorCodeUi.UNSUPPORTED
+        WorkspaceAccessErrorCode.PERSISTENCE_FAILED -> WorkspacePickerErrorCodeUi.PERSISTENCE_FAILED
+        WorkspaceAccessErrorCode.INVALID_REQUEST,
+        WorkspaceAccessErrorCode.UNKNOWN_OUTCOME,
+        -> WorkspacePickerErrorCodeUi.UNKNOWN_OUTCOME
+    }
+
+    private fun WorkspaceAccessErrorCode.toUiMessage(): String = toUiCode().toUiMessage()
+
+    private fun runtime.mobileagent.skills.tooling.ToolError.toPickerErrorCode(): WorkspacePickerErrorCodeUi = when (code) {
+        ToolErrorCode.AUTHORITY_NOT_GRANTED,
+        ToolErrorCode.AUTHORITY_TEMPORARILY_UNAVAILABLE,
+        -> WorkspacePickerErrorCodeUi.AUTHORITY_UNAVAILABLE
+        ToolErrorCode.CAPABILITY_DENIED -> WorkspacePickerErrorCodeUi.PERMISSION_DENIED
+        ToolErrorCode.WORKSPACE_NOT_FOUND -> WorkspacePickerErrorCodeUi.WORKSPACE_NOT_FOUND
+        ToolErrorCode.CONFLICT -> WorkspacePickerErrorCodeUi.CONFLICT
+        else -> WorkspacePickerErrorCodeUi.UNKNOWN_OUTCOME
+    }
+
+    private fun WorkspacePickerErrorCodeUi.toUiMessage(): String = when (this) {
+        WorkspacePickerErrorCodeUi.AUTHORITY_UNAVAILABLE -> "当前增强访问不可用。"
+        WorkspacePickerErrorCodeUi.AUTHORITY_NOT_SELECTED -> "尚未选择增强访问。"
+        WorkspacePickerErrorCodeUi.WORKSPACE_NOT_FOUND -> "工作区不存在或已移除。"
+        WorkspacePickerErrorCodeUi.PERMISSION_DENIED -> "当前目录不可访问。"
+        WorkspacePickerErrorCodeUi.URI_PERMISSION_REQUIRED -> "需要先完成文件夹授权。"
+        WorkspacePickerErrorCodeUi.CONFLICT -> "工作区状态已变化，请刷新后重试。"
+        WorkspacePickerErrorCodeUi.UNSUPPORTED -> "当前权限通道不支持此操作。"
+        WorkspacePickerErrorCodeUi.PERSISTENCE_FAILED -> "工作区保存失败，请稍后重试。"
+        WorkspacePickerErrorCodeUi.UNKNOWN_OUTCOME -> "工作区操作结果未知，请检查状态后再试。"
+    }
+
+    private fun friendlyLocationLabel(name: String): String = when (name.lowercase()) {
+        "storage", "sdcard" -> "内部存储"
+        "download", "downloads" -> "下载"
+        "documents", "document" -> "文档"
+        else -> name
+    }
+
+    private fun isRecommendedPrivilegedRootLocation(name: String): Boolean =
+        name.equals("storage", ignoreCase = true) || name.equals("sdcard", ignoreCase = true)
+
+    private fun privilegedRootLocationPriority(name: String): Int = when {
+        name.equals("storage", ignoreCase = true) -> 0
+        else -> 1
+    }
+
+    private fun isReadable(entry: WorkspaceDirectoryEntry): Boolean = entry.readable && entry.handle != null
+
+    private data class DirectoryLevel(
+        val label: String,
+        val handle: WorkspaceDirectoryHandle,
+    )
+
+    private var pendingChildLabel: String? = null
+    private var pendingStackIndex: Int? = null
+}

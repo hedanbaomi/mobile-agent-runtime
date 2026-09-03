@@ -7,13 +7,56 @@ import android.content.Context
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import org.junit.Assert.assertTrue
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNull
 import org.junit.Test
 import org.junit.runner.RunWith
+import org.json.JSONArray
+import org.json.JSONObject
 import runtime.mobileagent.domain.AgentSnapshot
 import runtime.mobileagent.domain.CapabilityId
+import runtime.mobileagent.skills.tooling.WorkspaceListingWarningCode
 
 @RunWith(AndroidJUnit4::class)
 class ShizukuAuthorityBridgeTest {
+    @Test
+    fun productionAdapterPreservesAndValidatesListingWarnings() {
+        val bridge = ShizukuAuthorityBridge(ApplicationProvider.getApplicationContext<Context>())
+        try {
+            val backend = ShizukuWorkspaceBackendAdapter(bridge)
+            val payload = JSONObject()
+                .put("path", "")
+                .put("entries", JSONArray())
+                .put("truncated", false)
+                .put("nextCursor", JSONObject.NULL)
+                .put("skippedEntries", 1)
+                .put(
+                    "warnings",
+                    JSONArray().put(
+                        JSONObject()
+                            .put("code", WorkspaceListingWarningCode.SYMLINK_SKIPPED.name)
+                            .put("count", 1),
+                    ),
+                )
+
+            val listing = backend.parseListPayload(payload, "", 16)
+            assertEquals(1, listing?.skippedEntries)
+            assertEquals(WorkspaceListingWarningCode.SYMLINK_SKIPPED, listing?.warnings?.single()?.code)
+            assertNull(backend.parseListPayload(JSONObject(payload.toString()).put("skippedEntries", 2), "", 16))
+            assertNull(
+                backend.parseListPayload(
+                    JSONObject(payload.toString())
+                        .put("truncated", true)
+                        .put("nextCursor", "cursor\nwith-path-like-lines"),
+                    "",
+                    16,
+                ),
+            )
+        } finally {
+            bridge.close()
+        }
+    }
+
     @Test
     fun notReadyBridgeExposesNoToolsAndNeverDispatchesImplicitly() {
         val bridge = ShizukuAuthorityBridge(ApplicationProvider.getApplicationContext<Context>())

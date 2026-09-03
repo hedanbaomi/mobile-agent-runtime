@@ -5,6 +5,7 @@ package runtime.mobileagent.workspace
 
 import android.content.Context
 import android.net.Uri
+import android.system.Os
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import java.io.ByteArrayInputStream
@@ -12,6 +13,8 @@ import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.charset.StandardCharsets
 import java.util.Comparator
+import kotlinx.coroutines.runBlocking
+import org.junit.Assume.assumeTrue
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
@@ -19,6 +22,10 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
 import runtime.mobileagent.domain.CapabilityId
+import runtime.mobileagent.skills.tooling.ToolErrorCode
+import runtime.mobileagent.skills.tooling.WorkspaceListRequest
+import runtime.mobileagent.skills.tooling.WorkspaceListingWarningCode
+import runtime.mobileagent.skills.tooling.WorkspaceResult
 
 @RunWith(AndroidJUnit4::class)
 class WorkspaceBackendTest {
@@ -168,6 +175,60 @@ class WorkspaceBackendTest {
     }
 
     @Test
+    fun internalBackendListingSkipsExternalSymlinkAndKeepsNormalEntries() {
+        withInternal { backend, root ->
+            Files.createDirectories(root)
+            Files.write(root.resolve("normal.txt"), byteArrayOf(1, 2, 3))
+            val outside = Files.createTempFile("mar-list-outside", ".txt")
+            try {
+                Files.createSymbolicLink(root.resolve("outside-link.txt"), outside)
+
+                val listing = backend.list("")
+                assertSuccess(listing)
+                val value = (listing as InternalWorkspaceResult.Success).value
+                val entries = value.entries
+                assertTrue(entries.any { it.path == "normal.txt" })
+                assertFalse(entries.any { it.path == "outside-link.txt" })
+                assertTrue(entries.all { !it.path.contains(outside.toString()) })
+                assertEquals(1, value.skippedEntries)
+                assertEquals(
+                    listOf(WorkspaceListingWarningCode.SYMLINK_SKIPPED),
+                    value.warnings.map { it.code },
+                )
+                assertEquals(1, value.warnings.single().count)
+            } finally {
+                Files.deleteIfExists(root.resolve("outside-link.txt"))
+                Files.deleteIfExists(outside)
+            }
+        }
+    }
+
+    @Test
+    fun internalBackendListingSkipsUnsupportedFifoAndKeepsNormalEntries() {
+        withInternal { backend, root ->
+            Files.createDirectories(root)
+            Files.write(root.resolve("normal-with-fifo.txt"), byteArrayOf(1, 2, 3))
+            val fifo = root.resolve("unsupported.fifo")
+            val created = runCatching {
+                Os.mkfifo(fifo.toString(), 0x1A4)
+                true
+            }.getOrDefault(false)
+            assumeTrue("The test filesystem does not support FIFO entries", created)
+
+            val listing = backend.list("")
+            assertSuccess(listing)
+            val value = (listing as InternalWorkspaceResult.Success).value
+            assertEquals(setOf("normal-with-fifo.txt"), value.entries.map { it.path }.toSet())
+            assertEquals(1, value.skippedEntries)
+            assertEquals(
+                listOf(WorkspaceListingWarningCode.UNSUPPORTED_ENTRY_SKIPPED),
+                value.warnings.map { it.code },
+            )
+            assertEquals(1, value.warnings.single().count)
+        }
+    }
+
+    @Test
     fun internalBackendPaginatesWithoutDuplicatesAndBindsCursorToDirectory() {
         val limits = InternalWorkspaceLimits(
             maxFileBytes = 64,
@@ -196,7 +257,7 @@ class WorkspaceBackendTest {
             assertEquals(names.size, observed.toSet().size)
 
             // A random token cannot address backend state.
-            assertCode(backend.list("", maxEntries = 2, cursor = "forged-cursor"), InternalWorkspaceErrorCode.INVALID_ARGUMENT)
+            assertCode(backend.list("", maxEntries = 2, cursor = "forged-cursor"), InternalWorkspaceErrorCode.INVALID_CURSOR)
 
             // A valid token is invalidated by a directory change rather than
             // silently returning an overlapping or skipped page.
@@ -205,7 +266,7 @@ class WorkspaceBackendTest {
             assertSuccess(backend.write("new.txt", byteArrayOf(2), expectedVersion = InternalWorkspaceVersions.MISSING))
             assertCode(
                 backend.list("", maxEntries = 2, cursor = first.nextCursor),
-                InternalWorkspaceErrorCode.INVALID_ARGUMENT,
+                InternalWorkspaceErrorCode.INVALID_CURSOR,
             )
         }
     }
@@ -213,7 +274,7 @@ class WorkspaceBackendTest {
     @Test
     fun internalBackendStatsAndReadsLargeFileInBoundedChunks() {
         val limits = InternalWorkspaceLimits(
-            maxFileBytes = 4 * 1024,
+            maxFileBytes = 2 * 1024 * 1024,
             quotaBytes = 2 * 1024 * 1024,
             maxEntries = 8,
             maxDirectoryEntries = 8,
@@ -223,6 +284,18 @@ class WorkspaceBackendTest {
             assertSuccess(backend.createDirectory("seed"))
             val bytes = ByteArray(1024 * 1024 + 17) { (it % 251).toByte() }
             Files.write(root.resolve("large.bin"), bytes)
+            val hugeBytes = 2 * 1024 * 1024 + 1
+            Files.write(root.resolve("huge.bin"), ByteArray(hugeBytes))
+
+            val listing = backend.list("")
+            assertSuccess(listing)
+            val listedHuge = (listing as InternalWorkspaceResult.Success).value.entries.single { it.path == "huge.bin" }
+            assertEquals(hugeBytes.toLong(), listedHuge.sizeBytes)
+
+            assertCode(
+                backend.read("huge.bin", maxBytes = 4096),
+                InternalWorkspaceErrorCode.FILE_TOO_LARGE,
+            )
 
             val stat = backend.stat("large.bin")
             assertSuccess(stat)
@@ -289,6 +362,25 @@ class WorkspaceBackendTest {
             declaredSize = utf8Bytes.size.toLong(),
         )
         assertTrue(InternalWorkspaceVersions.decode(utf8Chunk.bytes) is InternalWorkspaceResult.Failure)
+    }
+
+    @Test
+    fun safUnknownSizeProbeIsBoundedAndRejectsFilesAboveTheWorkspaceLimit() {
+        val maximum = 16L
+        val exact = ByteArrayInputStream(ByteArray(maximum.toInt()))
+        assertEquals(maximum, probeSafFileSize(exact, maximum))
+        assertEquals(0, exact.available())
+
+        val oversizedBytes = ByteArray(maximum.toInt() + 9)
+        val oversized = ByteArrayInputStream(oversizedBytes)
+        val failure = runCatching { probeSafFileSize(oversized, maximum) }.exceptionOrNull()
+        assertTrue(failure is InternalWorkspaceFailure)
+        assertEquals(
+            InternalWorkspaceErrorCode.FILE_TOO_LARGE,
+            (failure as InternalWorkspaceFailure).error.code,
+        )
+        // The guard reads at most limit + 1 and leaves the remainder untouched.
+        assertEquals(oversizedBytes.size - maximum.toInt() - 1, oversized.available())
     }
 
     @Test
@@ -379,6 +471,18 @@ class WorkspaceBackendTest {
         val failure = result as InternalWorkspaceResult.Failure
         assertFalse(failure.error.userMessage.contains(uri.toString()))
         assertFalse(failure.error.userMessage.contains("secret-file.txt"))
+    }
+
+    @Test
+    fun safGrantLossBecomesBackendNeutralPermissionDenied() = runBlocking {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val backend = SafWorkspaceBackend(context, Uri.parse("content://fixture.provider/tree/no-grant"))
+        val adapter = SharedWorkspaceBackendAdapter(backend)
+
+        val result = adapter.list(WorkspaceListRequest(adapter.descriptor.id, null, 16, null))
+
+        assertTrue(result is WorkspaceResult.Failure)
+        assertEquals(ToolErrorCode.PERMISSION_DENIED, (result as WorkspaceResult.Failure).error.code)
     }
 
     @Test

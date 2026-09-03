@@ -158,6 +158,41 @@ class TransferCodecTest {
     }
 
     @Test
+    fun responsesApiFormatIsPortableAndLegacyFormatRemainsUnchanged() {
+        val provider = ProviderTransfer(
+            id = "provider.responses",
+            name = "Responses",
+            apiFormat = ApiFormat.OPENAI_RESPONSES.name,
+            baseUrl = "https://api.openai.com/v1/",
+            revision = 2,
+        )
+        val model = ModelProfile(
+            id = "model.responses",
+            providerId = provider.id,
+            role = ModelRole.CHAT,
+            modelId = "gpt-responses",
+            capabilities = setOf("stream", "tools"),
+            contextLimit = 4_096,
+            outputLimit = 512,
+            revision = 1,
+        )
+        val bundle = TransferBundle(
+            schemaVersion = SchemaVersion.CURRENT,
+            exportedAt = "now",
+            agent = AgentTransfer(
+                profile = AgentProfile("agent.responses", "Responses", "prompt.responses", model.id, revision = 1),
+                promptRevisions = listOf(PromptRevision("prompt.responses", "agent.responses", template = "hello", createdAt = "now")),
+                providers = listOf(provider),
+                models = listOf(ModelTransfer(model)),
+            ),
+        )
+
+        val decoded = TransferCodec.decode(TransferCodec.encode(bundle))
+        assertEquals(bundle, decoded)
+        assertEquals("OPENAI_COMPATIBLE", ApiFormat.OPENAI_COMPATIBLE.name)
+    }
+
+    @Test
     fun unsafeRelativePathIsRejectedBeforeImport() {
         val bundle = TransferBundle(
             schemaVersion = SchemaVersion.CURRENT,

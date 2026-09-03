@@ -153,6 +153,7 @@ class ToolExecutorFactory(
                         runtime.mobileagent.skills.tooling.ToolErrorCode.INVALID_REQUEST,
                     ),
                 )
+                is ToolResult.Failure -> ToolExecution.Failed(result.error)
                 is ToolResult.UnknownOutcome -> ToolExecution.Unknown()
                 ToolResult.NeedsApproval -> ToolExecution.Failed(
                     runtime.mobileagent.skills.tooling.ToolError(

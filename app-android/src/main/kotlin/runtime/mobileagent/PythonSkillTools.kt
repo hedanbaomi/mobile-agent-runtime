@@ -28,7 +28,7 @@ import runtime.mobileagent.provider.ModelRequest
 import runtime.mobileagent.provider.ParameterLayers
 import runtime.mobileagent.provider.RequestHeaderValue
 import runtime.mobileagent.provider.SecretRedactor
-import runtime.mobileagent.provider.openai.OpenAiCompatibleAdapter
+import runtime.mobileagent.provider.openai.OpenAiAdapterFactory
 import runtime.mobileagent.python.IsolatedPythonRuntime
 import runtime.mobileagent.python.PythonCapabilityBroker
 import runtime.mobileagent.python.PythonExecutionRequest
@@ -544,7 +544,7 @@ private class PythonSkillToolExecutor(
                 val provider = binding.provider
                 val secret = container.secrets.resolveForHost(provider.secretRef).also { secrets += it }
                 if (!authorized(bound)) throw BrokerDenied("PERMISSION_DENIED")
-                val adapter = OpenAiCompatibleAdapter(container.http, provider.baseUrl,
+                val adapter = OpenAiAdapterFactory.create(provider.apiFormat, container.http, provider.baseUrl,
                     HeaderSecretResolver { host, ref ->
                         if (host != URI(provider.baseUrl).host || !authorized(bound)) throw BrokerDenied("PERMISSION_DENIED")
                         container.secrets.resolveForHost(ref).also { secrets += it }

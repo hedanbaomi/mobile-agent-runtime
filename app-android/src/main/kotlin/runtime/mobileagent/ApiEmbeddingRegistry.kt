@@ -11,7 +11,7 @@ import runtime.mobileagent.knowledge.ApiEmbeddingBinding
 import runtime.mobileagent.knowledge.TextEmbedder
 import runtime.mobileagent.provider.HeaderSecretResolver
 import runtime.mobileagent.provider.RequestHeaderValue
-import runtime.mobileagent.provider.openai.OpenAiCompatibleAdapter
+import runtime.mobileagent.provider.openai.OpenAiAdapterFactory
 import runtime.mobileagent.security.AndroidSecretStore
 import java.net.URI
 
@@ -66,8 +66,10 @@ class ApiEmbeddingRegistry(
             provider.nonSecretHeaders.forEach { (name, value) -> put(name, RequestHeaderValue.Plain(value)) }
             provider.headerSecretRefs.forEach { (name, ref) -> put(name, RequestHeaderValue.SecretRef(ref)) }
         }
-        val adapter = OpenAiCompatibleAdapter(
-            http, binding.endpoint,
+        val adapter = OpenAiAdapterFactory.create(
+            provider.apiFormat,
+            http,
+            binding.endpoint,
             headerSecretResolver = HeaderSecretResolver { host, ref ->
                 requireCurrent()
                 require(host.equals(endpoint.host, true) && ref in provider.headerSecretRefs.values) {

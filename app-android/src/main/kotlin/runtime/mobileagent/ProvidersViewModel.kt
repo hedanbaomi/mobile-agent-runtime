@@ -34,6 +34,8 @@ import runtime.mobileagent.provider.CapabilityCheckStatus
 import runtime.mobileagent.provider.CapabilityProbeStatus
 import runtime.mobileagent.provider.CapabilityReport
 import runtime.mobileagent.provider.HeaderSecretResolver
+import runtime.mobileagent.provider.ModelAdapter
+import runtime.mobileagent.provider.openai.OpenAiAdapterFactory
 import runtime.mobileagent.provider.ProviderConnectionErrorCode
 import runtime.mobileagent.provider.ProviderConnectionResult
 import runtime.mobileagent.provider.RequestHeaderValue
@@ -47,6 +49,7 @@ data class ProviderDraft(
     val modelProfileId: String? = null,
     val name: String,
     val baseUrl: String,
+    val apiFormat: String = ApiFormat.OPENAI_COMPATIBLE.name,
     val modelId: String,
     val apiKey: String = "",
     val role: ModelRole = ModelRole.CHAT,
@@ -116,6 +119,8 @@ class ProvidersViewModel @JvmOverloads constructor(
             require(endpoint.host != null && endpoint.rawUserInfo == null && endpoint.rawFragment == null && endpoint.rawQuery == null) { "服务地址必须是有效的 Base URL，不能含凭据、查询或片段。" }
             val debugLocal = BuildConfig.DEBUG && endpoint.host in setOf("localhost", "127.0.0.1", "10.0.2.2", "[::1]")
             require(endpoint.scheme == "https" || (debugLocal && endpoint.scheme == "http")) { "服务地址必须使用 HTTPS。Debug 仅允许本机测试 HTTP。" }
+            val apiFormat = runCatching { ApiFormat.valueOf(draft.apiFormat.trim()) }
+                .getOrElse { throw IllegalArgumentException("API 格式不受支持。") }
             val previous = draft.providerId?.let { app.container.profiles.getProvider(it) }
             require(draft.providerId == null || previous != null) { "服务已被删除，请重新打开表单。" }
             require(previous != null || draft.apiKey.isNotBlank()) { "新服务需要 API Key；密钥只会以 Keystore 密文保存。" }
@@ -143,7 +148,7 @@ class ProvidersViewModel @JvmOverloads constructor(
                 require(modelPrevious == null || modelPrevious.providerId == providerId) { "模型不属于当前服务。" }
             }
             val provider = ProviderProfile(
-                id = providerId, name = draft.name.trim(), apiFormat = ApiFormat.OPENAI_COMPATIBLE,
+                id = providerId, name = draft.name.trim(), apiFormat = apiFormat,
                 baseUrl = endpoint.toASCIIString(), secretRef = if (draft.apiKey.isNotBlank()) "provider:$providerId:${EntityId.random().value}" else previous!!.secretRef,
                 headerSecretRefs = previous?.headerSecretRefs.orEmpty(), nonSecretHeaders = previous?.nonSecretHeaders.orEmpty(),
                 revision = (previous?.revision ?: 0) + 1,
@@ -499,13 +504,14 @@ class ProvidersViewModel @JvmOverloads constructor(
     private fun adapterFor(provider: ProviderProfile): runtime.mobileagent.provider.ModelAdapter =
         adapterFactory?.create(provider) ?: createAdapter(provider)
 
-    private fun createAdapter(provider: ProviderProfile): runtime.mobileagent.provider.openai.OpenAiCompatibleAdapter {
+    private fun createAdapter(provider: ProviderProfile): ModelAdapter {
         val headers = linkedMapOf<String, RequestHeaderValue>()
         provider.nonSecretHeaders.forEach { (name, value) -> headers[name] = RequestHeaderValue.Plain(value) }
         provider.headerSecretRefs.forEach { (name, ref) -> headers[name] = RequestHeaderValue.SecretRef(ref) }
-        return runtime.mobileagent.provider.openai.OpenAiCompatibleAdapter(
-            app.container.http,
-            provider.baseUrl,
+        return OpenAiAdapterFactory.create(
+            format = provider.apiFormat,
+            http = app.container.http,
+            baseUrl = provider.baseUrl,
             headerSecretResolver = HeaderSecretResolver { host, ref ->
                 require(host.equals(URI(provider.baseUrl).host, true) && ref in provider.headerSecretRefs.values) {
                     "Header secret destination mismatch"
@@ -632,8 +638,10 @@ class ProvidersViewModel @JvmOverloads constructor(
             ProviderConnectionErrorCode.TLS_FAILURE -> DiagnosticProviderResultCode.TLS_FAILURE
             ProviderConnectionErrorCode.TIMEOUT -> DiagnosticProviderResultCode.TIMEOUT
             ProviderConnectionErrorCode.AUTH_FAILED -> DiagnosticProviderResultCode.AUTH_FAILED
+            ProviderConnectionErrorCode.ENDPOINT_UNSUPPORTED,
             ProviderConnectionErrorCode.MODEL_NOT_FOUND -> DiagnosticProviderResultCode.MODEL_NOT_FOUND
             ProviderConnectionErrorCode.RATE_LIMITED -> DiagnosticProviderResultCode.RATE_LIMITED
+            ProviderConnectionErrorCode.FEATURE_UNSUPPORTED,
             ProviderConnectionErrorCode.PROVIDER_REJECTED -> DiagnosticProviderResultCode.PROVIDER_REJECTED
             ProviderConnectionErrorCode.INVALID_RESPONSE -> DiagnosticProviderResultCode.INVALID_RESPONSE
             ProviderConnectionErrorCode.CONFIG_INVALID,
@@ -651,8 +659,10 @@ class ProvidersViewModel @JvmOverloads constructor(
             ProviderConnectionErrorCode.TLS_FAILURE -> DiagnosticProviderResultCode.TLS_FAILURE
             ProviderConnectionErrorCode.TIMEOUT -> DiagnosticProviderResultCode.TIMEOUT
             ProviderConnectionErrorCode.AUTH_FAILED -> DiagnosticProviderResultCode.AUTH_FAILED
+            ProviderConnectionErrorCode.ENDPOINT_UNSUPPORTED,
             ProviderConnectionErrorCode.MODEL_NOT_FOUND -> DiagnosticProviderResultCode.MODEL_NOT_FOUND
             ProviderConnectionErrorCode.RATE_LIMITED -> DiagnosticProviderResultCode.RATE_LIMITED
+            ProviderConnectionErrorCode.FEATURE_UNSUPPORTED,
             ProviderConnectionErrorCode.PROVIDER_REJECTED -> DiagnosticProviderResultCode.PROVIDER_REJECTED
             ProviderConnectionErrorCode.INVALID_RESPONSE -> DiagnosticProviderResultCode.INVALID_RESPONSE
             ProviderConnectionErrorCode.CONFIG_INVALID,
@@ -709,8 +719,10 @@ class ProvidersViewModel @JvmOverloads constructor(
         ProviderConnectionErrorCode.TLS_FAILURE -> "安全连接失败"
         ProviderConnectionErrorCode.TIMEOUT -> "请求超时"
         ProviderConnectionErrorCode.AUTH_FAILED -> "认证失败"
+        ProviderConnectionErrorCode.ENDPOINT_UNSUPPORTED -> "Responses 端点不支持"
         ProviderConnectionErrorCode.MODEL_NOT_FOUND -> "模型不存在"
         ProviderConnectionErrorCode.RATE_LIMITED -> "请求受限"
+        ProviderConnectionErrorCode.FEATURE_UNSUPPORTED -> "请求能力不支持"
         ProviderConnectionErrorCode.PROVIDER_REJECTED -> "服务商拒绝请求"
         ProviderConnectionErrorCode.INVALID_RESPONSE -> "响应无效"
         ProviderConnectionErrorCode.CONFIG_INVALID -> "配置无效"
@@ -738,7 +750,7 @@ class ProvidersViewModel @JvmOverloads constructor(
 
     private fun rejectReserved(objectValue: JsonObject) {
         objectValue.forEach { (key, value) ->
-            require(key.lowercase() !in setOf("model", "messages", "tools", "stream", "authorization", "api_key", "headers")) { "参数 $key 由运行时控制，不能覆盖。" }
+            require(key.lowercase() !in setOf("model", "messages", "input", "instructions", "tools", "stream", "authorization", "api_key", "headers")) { "参数 $key 由运行时控制，不能覆盖。" }
             if (value is JsonObject) rejectReserved(value)
         }
     }

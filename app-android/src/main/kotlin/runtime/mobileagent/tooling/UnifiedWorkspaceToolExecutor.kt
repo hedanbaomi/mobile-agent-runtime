@@ -619,6 +619,7 @@ class UnifiedWorkspaceToolExecutor(
                 approvalId = approvalId,
                 operation = parsed.kind.auditOperation,
                 destinationPathSha256 = parsed.destinationPath?.let(::sha256),
+                backendType = auditBackendType(bound, parsed),
             ))
         }.getOrDefault(false)
         if (accepted) {
@@ -668,12 +669,16 @@ class UnifiedWorkspaceToolExecutor(
                 capability = parsed.capability,
                 workspaceId = parsed.workspaceId,
                 relativePathSha256 = sha256(parsed.relativePath),
-                resultCode = outcome.name,
+                // Keep the coarse audit outcome separate from the typed error
+                // code.  The latter is the only actionable reason that can be
+                // safely carried through the diagnostics adapter.
+                resultCode = result.auditResultCode(),
                 durationMs = durationMs.coerceAtLeast(0),
                 approvalId = bound.auditApprovalId ?: bound.approvalGrant?.approvalId ?: bound.pendingApprovalId,
                 operation = parsed.kind.auditOperation,
                 outcome = outcome,
                 destinationPathSha256 = parsed.destinationPath?.let(::sha256),
+                backendType = auditBackendType(bound, parsed),
             ))
         }.getOrDefault(false)
         if (accepted) {
@@ -705,6 +710,7 @@ class UnifiedWorkspaceToolExecutor(
             ToolErrorCode.SHELL_HIGH_RISK_APPROVAL_REQUIRED,
             ToolErrorCode.WORKSPACE_NOT_FOUND,
             ToolErrorCode.WORKSPACE_READ_ONLY,
+            ToolErrorCode.PERMISSION_DENIED,
             ToolErrorCode.PATH_OUT_OF_SCOPE,
             ToolErrorCode.SYMLINK_FORBIDDEN,
             ToolErrorCode.ROOT_OPERATION_FORBIDDEN,
@@ -720,6 +726,31 @@ class UnifiedWorkspaceToolExecutor(
             // outcome without conflating them with approval denial.
             ToolErrorCode.TIMEOUT -> WorkspaceAuditOutcome.DENIED
             else -> WorkspaceAuditOutcome.FAILED
+        }
+    }
+
+    /** Stable terminal result code; never collapse a typed failure to FAILED. */
+    private fun ToolExecution.auditResultCode(): String = when (this) {
+        is ToolExecution.Value -> "SUCCEEDED"
+        is ToolExecution.Failed -> error.code.name
+        is ToolExecution.Unknown -> error.code.name
+    }
+
+    private fun auditBackendType(bound: BoundCall, parsed: ParsedCall): WorkspaceAuditBackendType {
+        val descriptor = parsed.workspaceId.takeIf { it.isNotBlank() }
+            ?.let(registry::registered)
+            ?.descriptor
+            ?: return WorkspaceAuditBackendType.UNKNOWN
+        return when (descriptor.backendType) {
+            WorkspaceBackendType.INTERNAL -> WorkspaceAuditBackendType.INTERNAL
+            WorkspaceBackendType.SAF_TREE -> WorkspaceAuditBackendType.SAF_TREE
+            WorkspaceBackendType.PRIVILEGED -> when (
+                privilegedAuthority(descriptor) ?: currentAuthoritySelection(bound.context)?.selected
+            ) {
+                Authority.SHIZUKU -> WorkspaceAuditBackendType.SHIZUKU
+                Authority.WIRED_ADB -> WorkspaceAuditBackendType.WIRED_ADB
+                else -> WorkspaceAuditBackendType.UNKNOWN
+            }
         }
     }
 
@@ -888,10 +919,24 @@ class UnifiedWorkspaceToolExecutor(
                                 entry.version?.let { put("version", it) }
                             }) }
                         }
-                        value.nextCursor?.let {
-                            put("next_cursor", it)
+                        if (value.skippedEntries > 0 || value.warnings.isNotEmpty()) {
+                            put("skipped_entries", value.skippedEntries)
+                            putJsonArray("warnings") {
+                                value.warnings.forEach { warning ->
+                                    add(buildJsonObject {
+                                        put("code", warning.wireCode)
+                                        put("count", warning.count)
+                                    })
+                                }
+                            }
+                        }
+                        val nextCursor = value.nextCursor
+                        if (nextCursor != null) {
+                            put("next_cursor", nextCursor)
                             put("has_more", true)
-                        } ?: put("has_more", false)
+                        } else {
+                            put("has_more", false)
+                        }
                     }
                     is runtime.mobileagent.skills.tooling.WorkspaceFileStat -> {
                         put("relative_path", WorkspacePathPolicy.normalize(value.relativePath, false))
@@ -939,7 +984,7 @@ class UnifiedWorkspaceToolExecutor(
     private fun ApprovalDecision.toToolResult(): ToolResult = when (this) {
         is ApprovalDecision.Approved -> ToolResult.Invalid(ToolErrorCode.INTERNAL_ERROR.name)
         is ApprovalDecision.Required -> ToolResult.NeedsApproval
-        is ApprovalDecision.Rejected -> ToolResult.Denied(code.name)
+        is ApprovalDecision.Rejected -> ToolResult.Failure(ToolError(code))
     }
 
     private fun ApprovalDecision.toToolExecution(): ToolExecution = when (this) {
@@ -952,6 +997,7 @@ class UnifiedWorkspaceToolExecutor(
         is ToolResult.Value -> ToolExecution.Value(json)
         is ToolResult.Denied -> ToolExecution.Failed(ToolError(reason.toToolErrorCode(ToolErrorCode.CAPABILITY_DENIED)))
         is ToolResult.Invalid -> ToolExecution.Failed(ToolError(reason.toToolErrorCode(ToolErrorCode.INVALID_REQUEST)))
+        is ToolResult.Failure -> ToolExecution.Failed(error)
         is ToolResult.UnknownOutcome -> ToolExecution.Unknown(ToolError(reason.toToolErrorCode(ToolErrorCode.UNKNOWN_OUTCOME)))
         ToolResult.NeedsApproval -> ToolExecution.Failed(ToolError(ToolErrorCode.APPROVAL_REQUIRED))
     }
@@ -961,7 +1007,10 @@ class UnifiedWorkspaceToolExecutor(
 
     private fun ToolExecution.toLegacyResult(): ToolResult = when (this) {
         is ToolExecution.Value -> ToolResult.Value(json)
-        is ToolExecution.Failed -> if (error.code == ToolErrorCode.APPROVAL_REQUIRED) ToolResult.NeedsApproval else ToolResult.Denied(error.code.name)
+        is ToolExecution.Failed -> when {
+            error.code == ToolErrorCode.APPROVAL_REQUIRED -> ToolResult.NeedsApproval
+            else -> ToolResult.Failure(error)
+        }
         is ToolExecution.Unknown -> ToolResult.UnknownOutcome(error.code.name)
     }
 

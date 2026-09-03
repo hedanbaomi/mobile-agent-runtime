@@ -48,6 +48,48 @@ class ToolingContractsTest {
     }
 
     @Test
+    fun workspaceFailuresExposeTypedCursorPermissionAndLargeFileCodes() {
+        assertEquals("INVALID_CURSOR", ToolError(ToolErrorCode.INVALID_CURSOR).wireCode)
+        assertEquals("PERMISSION_DENIED", ToolError(ToolErrorCode.PERMISSION_DENIED).wireCode)
+        assertEquals("FILE_TOO_LARGE", ToolError(ToolErrorCode.FILE_TOO_LARGE).wireCode)
+        assertEquals("UNSUPPORTED_ENTRY", ToolError(ToolErrorCode.UNSUPPORTED_ENTRY).wireCode)
+        assertEquals("OPERATION_UNAVAILABLE", ToolError(ToolErrorCode.OPERATION_UNAVAILABLE).wireCode)
+
+        val failure = ToolError(ToolErrorCode.FILE_TOO_LARGE)
+        assertEquals(ToolErrorCode.FILE_TOO_LARGE, failure.envelope().error)
+        assertEquals("FILE_TOO_LARGE", failure.userMessage)
+    }
+
+    @Test
+    fun workspaceListingCarriesBoundedSafeSkipWarnings() {
+        val listing = WorkspaceListing(
+            relativePath = ".",
+            entries = emptyList(),
+            skippedEntries = 3,
+            warnings = listOf(
+                WorkspaceListingWarning(WorkspaceListingWarningCode.SYMLINK_SKIPPED, count = 2),
+                WorkspaceListingWarning(WorkspaceListingWarningCode.METADATA_UNAVAILABLE, count = 1),
+            ),
+        )
+
+        assertEquals(3, listing.skippedEntries)
+        assertEquals(
+            listOf("SYMLINK_SKIPPED", "METADATA_UNAVAILABLE"),
+            listing.warnings.map(WorkspaceListingWarning::wireCode),
+        )
+        assertThrows(IllegalArgumentException::class.java) {
+            WorkspaceListing(
+                relativePath = ".",
+                entries = emptyList(),
+                skippedEntries = 100_001,
+            )
+        }
+        assertThrows(IllegalArgumentException::class.java) {
+            WorkspaceListingWarning(WorkspaceListingWarningCode.UNSUPPORTED_ENTRY_SKIPPED, count = 0)
+        }
+    }
+
+    @Test
     fun shellRequestAndResultKeepCanonicalCwdAndOutputBounds() {
         val maxCwd = "x".repeat(ShellExecRequest.MAX_CWD_LENGTH)
         val request = ShellExecRequest.fromRuntime(

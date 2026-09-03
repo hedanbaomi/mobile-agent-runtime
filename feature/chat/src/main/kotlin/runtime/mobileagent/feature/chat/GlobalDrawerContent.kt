@@ -292,23 +292,7 @@ fun GlobalDrawerContent(
                     NavigationDrawerItem(
                         selected = session.id == state.selectedSessionId,
                         onClick = { actions.onSelectSession(session.id); onClose() },
-                        label = {
-                            Column {
-                                Text(session.title, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                                val detail = listOf(session.agentName, session.workspaceLabel, session.timeLabel)
-                                    .filter { it.isNotBlank() }
-                                    .joinToString(" · ")
-                                if (detail.isNotBlank()) {
-                                    Text(
-                                        detail,
-                                        style = MaterialTheme.typography.bodySmall,
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                        maxLines = 1,
-                                        overflow = TextOverflow.Ellipsis,
-                                    )
-                                }
-                            }
-                        },
+                        label = { DrawerSessionLabel(session) },
                         modifier = Modifier
                             .fillMaxWidth()
                             .testTag("global.drawer.session.${session.id}"),
@@ -331,7 +315,7 @@ fun GlobalDrawerContent(
                     NavigationDrawerItem(
                         selected = session.id == state.selectedSessionId,
                         onClick = { actions.onSelectSession(session.id); onClose() },
-                        label = { Text(session.title, maxLines = 1, overflow = TextOverflow.Ellipsis) },
+                        label = { DrawerSessionLabel(session) },
                         modifier = Modifier
                             .fillMaxWidth()
                             .testTag("global.drawer.session.${session.id}"),
@@ -365,5 +349,24 @@ fun GlobalDrawerContent(
             }
         }
         item(key = "drawer-bottom-space") { Spacer(Modifier.height(12.dp)) }
+    }
+}
+
+@Composable
+private fun DrawerSessionLabel(session: ChatSessionUi) {
+    Column {
+        Text(session.title, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        val detail = listOf(session.workspaceLabel, session.agentName, session.timeLabel)
+            .filter { it.isNotBlank() }
+            .joinToString(" · ")
+        if (detail.isNotBlank()) {
+            Text(
+                detail,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
     }
 }

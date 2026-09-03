@@ -134,7 +134,7 @@ internal class ShizukuDirectoryHandleStore {
             if (type == "file") {
                 runCatching { Files.size(child) }
                     .getOrNull()
-                    ?.takeIf { it >= 0L && it <= ShizukuWorkspaceFileStore.MAX_FILE_BYTES }
+                    ?.takeIf { it >= 0L }
                     ?.let { entry.put("bytes", it) }
             } else {
                 entry.put("handle", directoryToken(child))

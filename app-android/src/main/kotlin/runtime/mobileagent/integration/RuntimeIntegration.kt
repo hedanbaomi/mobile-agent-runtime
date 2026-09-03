@@ -79,6 +79,7 @@ import runtime.mobileagent.diagnostics.DiagnosticOperation
 import runtime.mobileagent.diagnostics.DiagnosticOperationState
 import runtime.mobileagent.diagnostics.DiagnosticPlatformGrant
 import runtime.mobileagent.diagnostics.DiagnosticTerminalState
+import runtime.mobileagent.diagnostics.DiagnosticWorkspaceBackendType
 import runtime.mobileagent.diagnostics.ShizukuLifecycleRecord
 import runtime.mobileagent.diagnostics.SkillMemoryOperationStateRecord
 import runtime.mobileagent.diagnostics.ShellExecutionStateRecord
@@ -88,6 +89,10 @@ import runtime.mobileagent.diagnostics.WorkspaceGrantChangedRecord
 import runtime.mobileagent.diagnostics.WorkspaceOperationStateRecord
 import runtime.mobileagent.diagnostics.ConversationWorkspaceEvent
 import runtime.mobileagent.diagnostics.ConversationWorkspaceRecord
+import runtime.mobileagent.diagnostics.AgentWorkspaceDefaultChangedRecord
+import runtime.mobileagent.diagnostics.ConversationWorkspaceResolutionRecord
+import runtime.mobileagent.diagnostics.DiagnosticThreadWorkspaceState
+import runtime.mobileagent.diagnostics.DiagnosticWorkspaceDefaultResult
 import runtime.mobileagent.diagnostics.DiagnosticWorkspaceReattachPhase
 import runtime.mobileagent.diagnostics.PrivilegedWorkspaceBindingPersistedRecord
 import runtime.mobileagent.diagnostics.PrivilegedWorkspaceReattachRecord
@@ -185,6 +190,7 @@ import runtime.mobileagent.tooling.ToolExecutorFactory
 import runtime.mobileagent.tooling.ToolingClock
 import runtime.mobileagent.tooling.UnifiedWorkspaceToolExecutor
 import runtime.mobileagent.tooling.WorkspaceAuditEvent
+import runtime.mobileagent.tooling.WorkspaceAuditBackendType
 import runtime.mobileagent.tooling.WorkspaceAuditFuse
 import runtime.mobileagent.tooling.WorkspaceAuditSink
 import runtime.mobileagent.tooling.WorkspaceRegistry
@@ -446,8 +452,34 @@ class RuntimeIntegration(
     override fun resolveNewThreadWorkspace(agentId: String): String? =
         agentWorkspaceDefaultRepository.resolveForNewThread(agentId)
 
-    override fun saveAgentWorkspaceDefault(default: AgentWorkspaceDefault): AgentWorkspaceDefault =
-        agentWorkspaceDefaultRepository.save(default)
+    override fun saveAgentWorkspaceDefault(default: AgentWorkspaceDefault): AgentWorkspaceDefault {
+        val previous = agentWorkspaceDefaultRepository.get(default.agentId)
+        return try {
+            agentWorkspaceDefaultRepository.save(default).also { persisted ->
+                recordAgentWorkspaceDefaultChanged(
+                    previous?.workspaceId,
+                    persisted,
+                    if (persisted.workspaceId == null) {
+                        DiagnosticWorkspaceDefaultResult.CLEARED
+                    } else {
+                        DiagnosticWorkspaceDefaultResult.SET
+                    },
+                )
+            }
+        } catch (failure: RuntimeException) {
+            diagnostics.recordAgentWorkspaceDefaultChanged(
+                AgentWorkspaceDefaultChangedRecord(
+                    agentId = default.agentId,
+                    previousWorkspaceId = previous?.workspaceId,
+                    workspaceId = default.workspaceId,
+                    grantGeneration = defaultGrantGeneration(default.agentId, default.workspaceId),
+                    result = DiagnosticWorkspaceDefaultResult.FAILED,
+                    errorCode = "persistence_failed",
+                ),
+            )
+            throw failure
+        }
+    }
 
     override fun createSnapshotWithWorkspace(
         agentId: String,
@@ -514,6 +546,50 @@ class RuntimeIntegration(
                 skillRevision = skillRevision,
                 trustedSkillEnvelope = trustedSkillEnvelope,
                 authoritySelection = authorityManager.selection.value,
+            ),
+        )
+    }
+
+    override fun recordConversationWorkspaceResolution(sessionId: String, snapshot: AgentSnapshot) {
+        if (sessionId.isBlank() || snapshot.agentId.isBlank()) return
+        val binding = conversationWorkspaceBindingRepository.get(sessionId)
+        // Keep the configured default distinct from the currently resolvable default.  A revoked
+        // or unavailable default is still useful diagnostic context, but it must not be promoted
+        // to UNBOUND_AGENT_DEFAULT_AVAILABLE or used to seed a new Thread.
+        val storedAgentDefaultWorkspaceId = agentWorkspaceDefaultRepository.get(snapshot.agentId)?.workspaceId
+        val resolvedAgentDefaultWorkspaceId = agentWorkspaceDefaultRepository.resolveForNewThread(snapshot.agentId)
+        val snapshotBindings = capabilityGrantRepository.listSnapshotBindings(snapshot.id)
+        val snapshotWorkspaceIds = snapshotBindings.mapNotNull { it.workspaceId }.toSet()
+        val selectedWorkspaceId = binding?.workspaceId
+        val policy = authorityPolicyRepository.getPolicy()
+        val grants = capabilityGrantRepository.forAgent(snapshot.agentId, includeRevoked = true)
+            .filter { grant -> grant.workspaceId == null || grant.workspaceId == selectedWorkspaceId }
+        val selectedBindings = snapshotBindings.filter { item ->
+            item.workspaceId == null || item.workspaceId == selectedWorkspaceId
+        }
+        val effectiveWorkspaceGrantCount = runCatching {
+            effectiveCapabilityResolver.resolveForRun(
+                snapshot = snapshot,
+                grants = grants,
+                snapshotBindings = selectedBindings,
+                currentPolicyVersion = policy.policyVersion,
+                taskIdentity = null,
+                sessionIdentity = sessionId,
+            ).grants.count { it.workspaceId != null }
+        }.getOrDefault(0)
+        diagnostics.recordConversationWorkspaceResolution(
+            ConversationWorkspaceResolutionRecord(
+                sessionId = sessionId,
+                agentId = snapshot.agentId,
+                threadWorkspaceState = when {
+                    binding != null -> DiagnosticThreadWorkspaceState.BOUND
+                    resolvedAgentDefaultWorkspaceId != null -> DiagnosticThreadWorkspaceState.UNBOUND_AGENT_DEFAULT_AVAILABLE
+                    else -> DiagnosticThreadWorkspaceState.UNBOUND_NO_AGENT_DEFAULT
+                },
+                workspaceId = binding?.workspaceId,
+                agentDefaultWorkspaceId = storedAgentDefaultWorkspaceId,
+                snapshotWorkspaceCount = snapshotWorkspaceIds.size,
+                effectiveWorkspaceGrantCount = effectiveWorkspaceGrantCount,
             ),
         )
     }
@@ -885,6 +961,7 @@ class RuntimeIntegration(
         }
         val registered = workspaceRegistry.registered(workspace.id)
             ?: return workspaceAccessFailure(WorkspaceAccessErrorCode.AUTHORITY_UNAVAILABLE)
+        var pickerCommit = PickerBindingCommit()
         val grants = try {
             db.transaction {
                 val committed = persistWorkspaceGrantBundle(
@@ -892,7 +969,7 @@ class RuntimeIntegration(
                     registered.backend,
                     WorkspaceAccessGrantTarget(agentId = agentId),
                 )
-                persistPickerTarget(
+                pickerCommit = persistPickerTarget(
                     workspace = workspace,
                     target = WorkspacePickerTarget(agentId = agentId),
                     grants = committed,
@@ -905,6 +982,13 @@ class RuntimeIntegration(
             return workspaceAccessFailure(failure.accessCode)
         } catch (_: RuntimeException) {
             return workspaceAccessFailure(WorkspaceAccessErrorCode.PERSISTENCE_FAILED)
+        }
+        pickerCommit.agentDefault?.let { persisted ->
+            recordAgentWorkspaceDefaultChanged(
+                previousWorkspaceId = pickerCommit.previousAgentDefaultWorkspaceId,
+                persisted = persisted,
+                result = DiagnosticWorkspaceDefaultResult.SET,
+            )
         }
         return WorkspaceAccessResult.Success(
             committedWorkspaceAccessItem(
@@ -2457,6 +2541,29 @@ class RuntimeIntegration(
         )
     }
 
+    private fun defaultGrantGeneration(agentId: String, workspaceId: String?): Int = workspaceId?.let { id ->
+        capabilityGrantRepository.forAgent(agentId, includeRevoked = false)
+            .filter { it.workspaceId == id }
+            .maxOfOrNull { it.revision }
+            ?.toDiagnosticGeneration()
+    } ?: 0
+
+    private fun recordAgentWorkspaceDefaultChanged(
+        previousWorkspaceId: String?,
+        persisted: AgentWorkspaceDefault,
+        result: DiagnosticWorkspaceDefaultResult,
+    ) {
+        diagnostics.recordAgentWorkspaceDefaultChanged(
+            AgentWorkspaceDefaultChangedRecord(
+                agentId = persisted.agentId,
+                previousWorkspaceId = previousWorkspaceId,
+                workspaceId = persisted.workspaceId,
+                grantGeneration = defaultGrantGeneration(persisted.agentId, persisted.workspaceId),
+                result = result,
+            ),
+        )
+    }
+
     private fun workspaceAccessItem(
         workspace: Workspace,
         ordinal: Int = 1,
@@ -2500,6 +2607,7 @@ class RuntimeIntegration(
         val conversation: ConversationWorkspaceBinding? = null,
         val previousConversationWorkspaceId: String? = null,
         val agentDefault: AgentWorkspaceDefault? = null,
+        val previousAgentDefaultWorkspaceId: String? = null,
         val requiresNewThread: Boolean = false,
     )
 
@@ -2560,6 +2668,7 @@ class RuntimeIntegration(
             conversation = conversation,
             previousConversationWorkspaceId = priorConversation?.workspaceId,
             agentDefault = agentDefault,
+            previousAgentDefaultWorkspaceId = priorDefault?.workspaceId,
             requiresNewThread = requiresNewThread,
         )
     }
@@ -2578,6 +2687,13 @@ class RuntimeIntegration(
                 agentId = pickerTarget?.agentId.orEmpty(),
                 event = ConversationWorkspaceEvent.BOUND,
                 previousWorkspaceId = null,
+            )
+        }
+        pickerCommit.agentDefault?.let { persisted ->
+            recordAgentWorkspaceDefaultChanged(
+                previousWorkspaceId = pickerCommit.previousAgentDefaultWorkspaceId,
+                persisted = persisted,
+                result = DiagnosticWorkspaceDefaultResult.SET,
             )
         }
         val item = committedWorkspaceAccessItem(
@@ -2690,9 +2806,7 @@ class RuntimeIntegration(
         target: WorkspaceAccessGrantTarget,
     ): List<CapabilityGrant> {
         val requestedCapabilities = target.capabilities.ifEmpty {
-            backend.capabilities.filterTo(linkedSetOf()) { capability ->
-                capability.value == CapabilityId.WORKSPACE_ENUMERATE || capability.value.startsWith("file.")
-            }
+            canonicalDefaultWorkspaceGrantCapabilities(backend.capabilities)
         }
         if (requestedCapabilities.isEmpty()) throw WorkspaceAccessException(WorkspaceAccessErrorCode.CAPABILITY_DENIED)
         if (requestedCapabilities.any { it !in backend.capabilities }) {
@@ -4048,6 +4162,7 @@ private class SqliteRuntimeAuditSink(
                     count = if (event.phase == runtime.mobileagent.tooling.WorkspaceAuditPhase.STARTED) 0 else 1,
                     requestRef = event.requestId,
                     errorCode = event.resultCode?.lowercase(Locale.ROOT) ?: "none",
+                    backendType = event.backendType.toDiagnosticWorkspaceBackendType(),
                 ),
             )
             true
@@ -4148,6 +4263,28 @@ private class SqliteRuntimeAuditSink(
     }
 }
 
+/**
+ * Canonical automatic grant plan for an Agent default. The backend remains the source of truth
+ * for READ_ONLY versus READ_WRITE; shell and unrelated capabilities stay excluded.
+ */
+internal fun canonicalDefaultWorkspaceGrantCapabilities(
+    backendCapabilities: Set<CapabilityId>,
+): Set<CapabilityId> = backendCapabilities.filterTo(linkedSetOf()) { capability ->
+    capability.value in CANONICAL_DEFAULT_WORKSPACE_CAPABILITIES
+}
+
+private val CANONICAL_DEFAULT_WORKSPACE_CAPABILITIES = setOf(
+    CapabilityId.WORKSPACE_ENUMERATE,
+    CapabilityId.FILE_LIST,
+    CapabilityId.FILE_STAT,
+    CapabilityId.FILE_READ_TEXT,
+    CapabilityId.FILE_WRITE_TEXT,
+    CapabilityId.FILE_CREATE_DIRECTORY,
+    CapabilityId.FILE_MOVE,
+    CapabilityId.FILE_DELETE,
+    "file.apply_patch",
+)
+
 /** Map the provider-neutral workspace operation into the diagnostics vocabulary. */
 internal fun WorkspaceAuditEvent.toDiagnosticOperation(): DiagnosticOperation = when (operation) {
     runtime.mobileagent.tooling.WorkspaceAuditOperation.ENUMERATE,
@@ -4160,6 +4297,14 @@ internal fun WorkspaceAuditEvent.toDiagnosticOperation(): DiagnosticOperation = 
     runtime.mobileagent.tooling.WorkspaceAuditOperation.MOVE,
         -> DiagnosticOperation.WRITE
     runtime.mobileagent.tooling.WorkspaceAuditOperation.DELETE -> DiagnosticOperation.DELETE
+}
+
+private fun WorkspaceAuditBackendType.toDiagnosticWorkspaceBackendType(): DiagnosticWorkspaceBackendType = when (this) {
+    WorkspaceAuditBackendType.INTERNAL -> DiagnosticWorkspaceBackendType.INTERNAL
+    WorkspaceAuditBackendType.SAF_TREE -> DiagnosticWorkspaceBackendType.SAF_TREE
+    WorkspaceAuditBackendType.SHIZUKU -> DiagnosticWorkspaceBackendType.SHIZUKU
+    WorkspaceAuditBackendType.WIRED_ADB -> DiagnosticWorkspaceBackendType.WIRED_ADB
+    WorkspaceAuditBackendType.UNKNOWN -> DiagnosticWorkspaceBackendType.UNKNOWN
 }
 
 /**
@@ -4176,13 +4321,19 @@ internal fun WorkspaceAuditEvent.toDiagnosticOperationState(): DiagnosticOperati
         "SUCCEEDED", "SUCCESS", "COMPLETED", "COMPLETE" -> DiagnosticOperationState.SUCCEEDED
         "DENIED", "CAPABILITY_DENIED", "APPROVAL_REQUIRED", "APPROVAL_DENIED",
         "AUTHORITY_NOT_GRANTED", "AUTHORITY_PROVIDER_NOT_SELECTED", "AUTHORITY_TEMPORARILY_UNAVAILABLE",
-        "SHIZUKU_PERMISSION_DENIED", "SHIZUKU_SERVICE_UNAVAILABLE", "BRIDGE_NOT_PAIRED",
-        "ADB_DEVICE_UNAUTHORIZED", "DANGEROUS_MODE_DISABLED", "SHELL_CAPABILITY_DENIED",
-        "SHELL_HIGH_RISK_APPROVAL_REQUIRED", "SNAPSHOT_STALE",
+        "PERMISSION_DENIED", "SHIZUKU_PERMISSION_DENIED", "SHIZUKU_SERVICE_UNAVAILABLE", "BRIDGE_NOT_PAIRED",
+        "BRIDGE_DISCONNECTED", "ADB_DEVICE_UNAUTHORIZED", "ADB_DEVICE_OFFLINE", "ADB_DEVICE_DISCONNECTED",
+        "ADB_APP_NOT_INSTALLED", "DANGEROUS_MODE_DISABLED", "SHELL_CAPABILITY_DENIED",
+        "SHELL_HIGH_RISK_APPROVAL_REQUIRED", "WORKSPACE_NOT_FOUND", "WORKSPACE_READ_ONLY",
+        "PATH_OUT_OF_SCOPE", "SYMLINK_FORBIDDEN", "ROOT_OPERATION_FORBIDDEN", "SNAPSHOT_STALE",
             -> DiagnosticOperationState.DENIED
         "CANCELLED", "CANCELED", "SHELL_CANCELLED", "REQUEST_CANCELLED" -> DiagnosticOperationState.CANCELLED
         "UNKNOWN", "UNKNOWN_OUTCOME" -> DiagnosticOperationState.UNKNOWN
-        "FAILED", "ERROR", "IO_ERROR", "TIMEOUT" -> DiagnosticOperationState.FAILED
+        "FAILED", "ERROR", "IO_ERROR", "TIMEOUT", "FILE_TOO_LARGE", "QUOTA_EXCEEDED", "CONFLICT",
+        "INVALID_REQUEST", "INVALID_CURSOR", "INVALID_PATH", "INVALID_ARGUMENT", "INVALID_UTF8",
+        "INVALID_PATCH", "ENTRY_NOT_FOUND", "ENTRY_UNSUPPORTED", "UNSUPPORTED", "UNSUPPORTED_ENTRY",
+        "OPERATION_UNAVAILABLE", "BRIDGE_PROTOCOL_MISMATCH", "INTERNAL_ERROR",
+        "AUDIT_UNAVAILABLE", "AUDIT_FUSE_OPEN" -> DiagnosticOperationState.FAILED
         // resultCode is the redacted provider contract for terminal state.
         // Missing or newly introduced values must fail closed to UNKNOWN;
         // the typed outcome is deliberately not used as a success fallback.

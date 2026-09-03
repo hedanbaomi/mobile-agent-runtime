@@ -57,17 +57,68 @@ data class WorkspaceEntry(
     }
 }
 
+/**
+ * Safe, backend-neutral reasons why a directory child was not returned.
+ *
+ * These values intentionally describe only a bounded category.  They never carry a child path,
+ * provider URI, exception class/message, or any other implementation detail.
+ */
+enum class WorkspaceListingWarningCode {
+    SYMLINK_SKIPPED,
+    UNSUPPORTED_ENTRY_SKIPPED,
+    TRANSIENT_ENTRY_SKIPPED,
+    UNREADABLE_ENTRY_SKIPPED,
+    /** Compatibility bucket for adapters that cannot distinguish transient and unreadable I/O. */
+    METADATA_UNAVAILABLE,
+}
+
+data class WorkspaceListingWarning(
+    val code: WorkspaceListingWarningCode,
+    val count: Int = 1,
+) {
+    init {
+        require(count in 1..MAX_COUNT)
+    }
+
+    /** Stable value used by JSON/tool adapters; it contains no provider-specific text. */
+    val wireCode: String
+        get() = code.name
+
+    companion object {
+        const val MAX_COUNT = 100_000
+    }
+}
+
 data class WorkspaceListing(
     val relativePath: String,
     val entries: List<WorkspaceEntry>,
     val truncated: Boolean = false,
     /** Opaque continuation token owned by the backend.  It contains no path or provider data. */
     val nextCursor: String? = null,
+    /** Number of children omitted from this listing page for a safe, typed reason. */
+    val skippedEntries: Int = 0,
+    /** Bounded category/count pairs for omitted children; never includes paths or exceptions. */
+    val warnings: List<WorkspaceListingWarning> = emptyList(),
 ) {
     init {
         require(relativePath.isNotEmpty())
         require(entries.size <= 100_000)
         require(nextCursor == null || nextCursor.isNotBlank())
+        require(skippedEntries in 0..MAX_SKIPPED_ENTRIES)
+        require(warnings.size <= MAX_WARNING_TYPES)
+        require(warnings.distinctBy { it.code }.size == warnings.size)
+        val warningCount = warnings.sumOf { it.count.toLong() }
+        require(warningCount <= MAX_SKIPPED_ENTRIES)
+        require(warningCount == skippedEntries.toLong())
+    }
+
+    /** Compatibility spelling for callers that used a count-oriented name. */
+    val skippedCount: Int
+        get() = skippedEntries
+
+    companion object {
+        const val MAX_SKIPPED_ENTRIES = 100_000
+        const val MAX_WARNING_TYPES = 8
     }
 }
 

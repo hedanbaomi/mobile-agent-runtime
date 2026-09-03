@@ -37,6 +37,46 @@ import runtime.mobileagent.serialization.TransferOptions
 
 class ProductDataRepositoryTest {
     @Test
+    fun responsesProviderFormatPersistsWithoutChangingLegacyWireName() {
+        JdbcSqlConnection().use { db ->
+            Migrations.apply(db)
+            val profiles = ProfileRepository(db)
+            profiles.createProvider(
+                ProviderProfile(
+                    id = "provider.responses",
+                    name = "Responses",
+                    apiFormat = ApiFormat.OPENAI_RESPONSES,
+                    baseUrl = "https://api.openai.com/v1",
+                    secretRef = "responses-secret",
+                    revision = 1,
+                ),
+            )
+            assertEquals(ApiFormat.OPENAI_RESPONSES, profiles.getProvider("provider.responses")!!.apiFormat)
+            assertEquals(
+                "OPENAI_RESPONSES",
+                db.query("SELECT api_format FROM provider_profiles WHERE id = ?", listOf("provider.responses"))
+                    .single().string("api_format"),
+            )
+
+            profiles.createProvider(
+                ProviderProfile(
+                    id = "provider.compatible",
+                    name = "Compatible",
+                    apiFormat = ApiFormat.OPENAI_COMPATIBLE,
+                    baseUrl = "https://example.invalid/v1",
+                    secretRef = "compatible-secret",
+                    revision = 1,
+                ),
+            )
+            assertEquals(
+                "OPENAI_COMPATIBLE",
+                db.query("SELECT api_format FROM provider_profiles WHERE id = ?", listOf("provider.compatible"))
+                    .single().string("api_format"),
+            )
+        }
+    }
+
+    @Test
     fun agentPromptSnapshotAndConversationUseFrozenTypedData() {
         JdbcSqlConnection().use { db ->
             Migrations.apply(db)

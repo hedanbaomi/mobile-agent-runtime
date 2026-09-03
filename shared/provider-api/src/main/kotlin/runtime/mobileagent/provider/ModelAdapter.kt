@@ -38,8 +38,10 @@ enum class ProviderConnectionErrorCode {
     TLS_FAILURE,
     TIMEOUT,
     AUTH_FAILED,
+    ENDPOINT_UNSUPPORTED,
     MODEL_NOT_FOUND,
     RATE_LIMITED,
+    FEATURE_UNSUPPORTED,
     PROVIDER_REJECTED,
     INVALID_RESPONSE,
     CONFIG_INVALID,
@@ -294,7 +296,9 @@ private fun String.toProviderConnectionErrorCode(): ProviderConnectionErrorCode 
         -> ProviderConnectionErrorCode.AUTH_FAILED
         ProviderConnectionErrorCode.RATE_LIMITED.name -> ProviderConnectionErrorCode.RATE_LIMITED
         ProviderConnectionErrorCode.TIMEOUT.name -> ProviderConnectionErrorCode.TIMEOUT
+        ProviderConnectionErrorCode.ENDPOINT_UNSUPPORTED.name -> ProviderConnectionErrorCode.ENDPOINT_UNSUPPORTED
         ProviderConnectionErrorCode.MODEL_NOT_FOUND.name -> ProviderConnectionErrorCode.MODEL_NOT_FOUND
+        ProviderConnectionErrorCode.FEATURE_UNSUPPORTED.name -> ProviderConnectionErrorCode.FEATURE_UNSUPPORTED
         ProviderConnectionErrorCode.NETWORK_UNREACHABLE.name,
         "NETWORK_UNAVAILABLE",
         -> ProviderConnectionErrorCode.NETWORK_UNREACHABLE

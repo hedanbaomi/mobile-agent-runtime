@@ -3,8 +3,11 @@
 
 package runtime.mobileagent.wired
 
+import android.system.Os
 import java.nio.charset.StandardCharsets
+import java.nio.ByteBuffer
 import java.nio.file.Files
+import java.nio.file.StandardOpenOption
 import java.nio.file.Path
 import java.util.Comparator
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -13,7 +16,10 @@ import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
+import org.junit.Assume.assumeTrue
 import org.junit.Test
+import runtime.mobileagent.bridge.BridgeProtocol
+import runtime.mobileagent.bridge.BridgeResponseEnvelope
 import runtime.mobileagent.domain.Authority
 import runtime.mobileagent.domain.WorkspaceScope
 import runtime.mobileagent.skills.tooling.ToolErrorCode
@@ -23,7 +29,9 @@ import runtime.mobileagent.skills.tooling.WorkspaceDirectoryEntry
 import runtime.mobileagent.skills.tooling.WorkspaceDirectoryHandle
 import runtime.mobileagent.skills.tooling.WorkspaceDirectoryPage
 import runtime.mobileagent.skills.tooling.WorkspaceEntryType
+import runtime.mobileagent.skills.tooling.WorkspaceListingWarningCode
 import runtime.mobileagent.skills.tooling.WorkspaceResult
+import runtime.mobileagent.skills.tooling.WorkspaceStatRequest
 
 class WiredAdbWorkspaceBackendAdapterTest {
     @Test
@@ -120,7 +128,215 @@ class WiredAdbWorkspaceBackendAdapterTest {
         }
     }
 
-    private class FakeAuthority(private val root: Path) : WiredAdbAuthorityPort {
+    @Test
+    fun desktopFileErrorCodesRemainTypedAcrossTheSharedAdapter() {
+        val cases = mapOf(
+            "FILE_INVALID_PATH" to WiredAdbErrorCode.PATH_OUT_OF_SCOPE,
+            "FILE_OUTSIDE_ROOT" to WiredAdbErrorCode.PATH_OUT_OF_SCOPE,
+            "FILE_SYMLINK_FORBIDDEN" to WiredAdbErrorCode.SYMLINK_FORBIDDEN,
+            "FILE_INVALID_CONTENT" to WiredAdbErrorCode.INVALID_CONTENT,
+            "FILE_TARGET_EXISTS" to WiredAdbErrorCode.TARGET_EXISTS,
+            "FILE_NON_EMPTY_DIRECTORY" to WiredAdbErrorCode.NON_EMPTY_DIRECTORY,
+            "FILE_UNSUPPORTED_ENTRY" to WiredAdbErrorCode.UNSUPPORTED_ENTRY,
+            "FILE_TOO_LARGE" to WiredAdbErrorCode.FILE_TOO_LARGE,
+            "FILE_LIMIT" to WiredAdbErrorCode.QUOTA_EXCEEDED,
+            "FILE_PERMISSION_DENIED" to WiredAdbErrorCode.PERMISSION_DENIED,
+            "FILE_OPERATION_UNAVAILABLE" to WiredAdbErrorCode.OPERATION_UNAVAILABLE,
+            "FILE_WRITE_UNVERIFIED" to WiredAdbErrorCode.WRITE_UNVERIFIED,
+            "FILE_INVALID_CURSOR" to WiredAdbErrorCode.INVALID_CURSOR,
+        )
+        cases.forEach { (wireCode, expected) ->
+            val response = BridgeResponseEnvelope(
+                protocolVersion = BridgeProtocol.VERSION,
+                requestId = "typed-error",
+                success = false,
+                errorCode = wireCode,
+            )
+            assertEquals(wireCode, expected, WiredAdbSharedAdapter.mapError(response))
+        }
+    }
+
+    @Test
+    fun wiredBackendPreservesSecurityAndOutcomeErrorsAtTheToolBoundary() = runBlocking {
+        val root = Files.createTempDirectory("mar-wired-error-map-")
+        try {
+            val cases = mapOf(
+                WiredAdbErrorCode.PATH_OUT_OF_SCOPE to ToolErrorCode.PATH_OUT_OF_SCOPE,
+                WiredAdbErrorCode.SYMLINK_FORBIDDEN to ToolErrorCode.SYMLINK_FORBIDDEN,
+                WiredAdbErrorCode.INVALID_CONTENT to ToolErrorCode.INVALID_REQUEST,
+                WiredAdbErrorCode.TARGET_EXISTS to ToolErrorCode.CONFLICT,
+                WiredAdbErrorCode.NON_EMPTY_DIRECTORY to ToolErrorCode.CONFLICT,
+                WiredAdbErrorCode.UNSUPPORTED_ENTRY to ToolErrorCode.UNSUPPORTED_ENTRY,
+                WiredAdbErrorCode.FILE_TOO_LARGE to ToolErrorCode.FILE_TOO_LARGE,
+                WiredAdbErrorCode.QUOTA_EXCEEDED to ToolErrorCode.QUOTA_EXCEEDED,
+                WiredAdbErrorCode.PERMISSION_DENIED to ToolErrorCode.PERMISSION_DENIED,
+                WiredAdbErrorCode.OPERATION_UNAVAILABLE to ToolErrorCode.OPERATION_UNAVAILABLE,
+                WiredAdbErrorCode.WRITE_UNVERIFIED to ToolErrorCode.UNKNOWN_OUTCOME,
+            )
+            cases.forEach { (wiredCode, expected) ->
+                val backend = WiredAdbWorkspaceBackendAdapter(
+                    authority = FakeAuthority(root, wiredCode),
+                    workspaceId = "error-map",
+                )
+                val result = backend.stat(WorkspaceStatRequest("error-map", "item.txt"))
+                assertTrue(result is WorkspaceResult.Failure)
+                assertEquals(wiredCode.name, expected, (result as WorkspaceResult.Failure).error.code)
+            }
+        } finally {
+            deleteTree(root)
+        }
+    }
+
+    @Test
+    fun readDirectoryIsUnsupportedAndDirectoryChangeInvalidatesCursor() {
+        val root = Files.createTempDirectory("mar-wired-directory-read-")
+        try {
+            Files.createDirectories(root.resolve("directory"))
+            Files.write(root.resolve("one.txt"), byteArrayOf(1))
+            Files.write(root.resolve("two.txt"), byteArrayOf(2))
+            val engine = NioPrivilegedFileEngine(root)
+
+            val directoryRead = engine.execute(
+                WiredAdbFileRequest(
+                    requestId = WiredAdbRequestId("read-directory"),
+                    operation = WiredAdbFileOperation.READ_TEXT,
+                    relativePath = "directory",
+                    maxBytes = 16,
+                ),
+            ) as WiredAdbFileEngineResult.Failure
+            assertEquals(NioPrivilegedFileEngine.ERR_UNSUPPORTED_ENTRY, directoryRead.code)
+
+            val first = engine.execute(
+                WiredAdbFileRequest(
+                    requestId = WiredAdbRequestId("cursor-first"),
+                    operation = WiredAdbFileOperation.LIST,
+                    relativePath = null,
+                    maxEntries = 1,
+                ),
+            ) as WiredAdbFileEngineResult.Success
+            assertNotNull(first.result.nextCursor)
+            Files.write(root.resolve("three.txt"), byteArrayOf(3))
+            val stale = engine.execute(
+                WiredAdbFileRequest(
+                    requestId = WiredAdbRequestId("cursor-stale"),
+                    operation = WiredAdbFileOperation.LIST,
+                    relativePath = null,
+                    cursor = first.result.nextCursor,
+                    maxEntries = 1,
+                ),
+            ) as WiredAdbFileEngineResult.Failure
+            assertEquals(NioPrivilegedFileEngine.ERR_INVALID_CURSOR, stale.code)
+        } finally {
+            deleteTree(root)
+        }
+    }
+
+    @Test
+    fun oversizedFileIsListedWithMetadataButReadReturnsTypedLimit() {
+        val root = Files.createTempDirectory("mar-wired-large-")
+        try {
+            Files.newByteChannel(
+                root.resolve("huge.bin"),
+                StandardOpenOption.CREATE_NEW,
+                StandardOpenOption.WRITE,
+            ).use { channel ->
+                channel.position(WIRED_MAX_FILE_BYTES.toLong())
+                channel.write(ByteBuffer.wrap(byteArrayOf(1)))
+            }
+            val engine = NioPrivilegedFileEngine(root)
+
+            val listing = engine.execute(
+                WiredAdbFileRequest(
+                    requestId = WiredAdbRequestId("large-list"),
+                    operation = WiredAdbFileOperation.LIST,
+                    relativePath = null,
+                ),
+            ) as WiredAdbFileEngineResult.Success
+            assertEquals(WIRED_MAX_FILE_BYTES.toLong() + 1L, listing.result.entries.single().bytes)
+
+            val read = engine.execute(
+                WiredAdbFileRequest(
+                    requestId = WiredAdbRequestId("large-read"),
+                    operation = WiredAdbFileOperation.READ_TEXT,
+                    relativePath = "huge.bin",
+                    maxBytes = 1,
+                ),
+            ) as WiredAdbFileEngineResult.Failure
+            assertEquals(NioPrivilegedFileEngine.ERR_FILE_TOO_LARGE, read.code)
+        } finally {
+            deleteTree(root)
+        }
+    }
+
+    @Test
+    fun listingSkipsExternalSymlinkAndKeepsNormalEntries() {
+        val root = Files.createTempDirectory("mar-wired-symlink-")
+        val outside = Files.createTempDirectory("mar-wired-outside-")
+        try {
+            Files.write(root.resolve("normal.txt"), "ok".toByteArray(StandardCharsets.UTF_8))
+            Files.write(outside.resolve("secret.txt"), "secret".toByteArray(StandardCharsets.UTF_8))
+            Files.createSymbolicLink(root.resolve("outside-link"), outside)
+
+            val listing = NioPrivilegedFileEngine(root).execute(
+                WiredAdbFileRequest(
+                    requestId = WiredAdbRequestId("symlink-list"),
+                    operation = WiredAdbFileOperation.LIST,
+                    relativePath = null,
+                ),
+            ) as WiredAdbFileEngineResult.Success
+            assertEquals(setOf("normal.txt"), listing.result.entries.map { it.relativePath }.toSet())
+            assertTrue(listing.result.entries.none { it.relativePath.contains("secret") })
+            assertEquals(1, listing.result.skippedEntries)
+            assertEquals(
+                listOf(WorkspaceListingWarningCode.SYMLINK_SKIPPED),
+                listing.result.listingWarnings.map { it.code },
+            )
+            assertEquals(1, listing.result.listingWarnings.single().count)
+        } finally {
+            deleteTree(root)
+            deleteTree(outside)
+        }
+    }
+
+    @Test
+    fun listingSkipsUnsupportedFifoAndKeepsNormalEntries() {
+        val root = Files.createTempDirectory("mar-wired-fifo-")
+        val normal = root.resolve("normal-with-fifo.txt")
+        val fifo = root.resolve("unsupported.fifo")
+        try {
+            Files.write(normal, "normal".toByteArray(StandardCharsets.UTF_8))
+            val created = runCatching {
+                Os.mkfifo(fifo.toString(), 0x1A4)
+                true
+            }.getOrDefault(false)
+            assumeTrue("The test filesystem does not support FIFO entries", created)
+
+            val result = NioPrivilegedFileEngine(root).execute(
+                WiredAdbFileRequest(
+                    requestId = WiredAdbRequestId("fifo-list"),
+                    operation = WiredAdbFileOperation.LIST,
+                    relativePath = null,
+                ),
+            )
+            assertTrue(result is WiredAdbFileEngineResult.Success)
+            val listing = (result as WiredAdbFileEngineResult.Success).result
+            assertEquals(setOf(normal.fileName.toString()), listing.entries.map { it.relativePath }.toSet())
+            assertTrue(listing.entries.none { it.relativePath.contains(fifo.fileName.toString()) })
+            assertEquals(1, listing.skippedEntries)
+            assertEquals(
+                listOf(WorkspaceListingWarningCode.UNSUPPORTED_ENTRY_SKIPPED),
+                listing.listingWarnings.map { it.code },
+            )
+            assertEquals(1, listing.listingWarnings.single().count)
+        } finally {
+            deleteTree(root)
+        }
+    }
+
+    private class FakeAuthority(
+        private val root: Path,
+        private val fileFailure: WiredAdbErrorCode = WiredAdbErrorCode.AUTHORITY_UNSUPPORTED,
+    ) : WiredAdbAuthorityPort {
         private val owner = Any()
         private val remoteHandle = WiredAdbWorkspaceHandle(owner, "wired-picker-root", "11".repeat(32), 1L)
         private val locator = WiredAdbWorkspaceRecoveryLocator.fromEncoded("22".repeat(32))
@@ -140,7 +356,7 @@ class WiredAdbWorkspaceBackendAdapterTest {
         override val status: StateFlow<WiredAdbStatus> = _status
         override val workspace: WiredAdbWorkspacePort = object : WiredAdbWorkspacePort {
             override suspend fun executeFile(request: WiredAdbFileRequest): WiredAdbResult<WiredAdbFileResult> =
-                WiredAdbResult.Failure(WiredAdbErrorCode.AUTHORITY_UNSUPPORTED)
+                WiredAdbResult.Failure(fileFailure)
 
             override suspend fun attachDirectory(
                 workspaceId: String,

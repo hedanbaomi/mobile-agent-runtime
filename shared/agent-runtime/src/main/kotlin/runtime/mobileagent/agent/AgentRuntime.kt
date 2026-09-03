@@ -33,6 +33,8 @@ import runtime.mobileagent.skills.ToolExecutor
 import runtime.mobileagent.skills.ToolResult
 import runtime.mobileagent.skills.ToolSpec
 import runtime.mobileagent.skills.asToolExecutor
+import runtime.mobileagent.skills.tooling.ToolError
+import runtime.mobileagent.skills.tooling.ToolErrorCode
 
 /**
  * Executes one agent run while keeping model, tool, cancellation and budget
@@ -490,11 +492,12 @@ class AgentRuntime(
                     }
                     activeDispatch = null
 
-                    val (status, summary, modelText) = when (result) {
-                        is ToolResult.Denied -> Triple("DENIED", result.reason, result.reason)
-                        is ToolResult.Invalid -> Triple("INVALID", result.reason, result.reason)
-                        is ToolResult.Value -> Triple("VALUE", result.json, result.json)
-                        is ToolResult.UnknownOutcome -> Triple("UNKNOWN_OUTCOME", result.reason, result.reason)
+                    val (status, modelText) = when (result) {
+                        is ToolResult.Denied -> "DENIED" to result.reason
+                        is ToolResult.Invalid -> "INVALID" to result.reason
+                        is ToolResult.Value -> "VALUE" to result.json
+                        is ToolResult.Failure -> "FAILED" to safeToolFailure(result.error)
+                        is ToolResult.UnknownOutcome -> "UNKNOWN_OUTCOME" to result.reason
                         ToolResult.NeedsApproval -> {
                             run.state = RunState.FAILED
                             emitModel(ModelEvent.Failed("Tool ${call.name} needs user confirmation"))
@@ -614,6 +617,40 @@ class AgentRuntime(
 
     private fun untrustedToolResult(callId: String, text: String): String =
         "<untrusted-tool-result call_id=\"${callId.replace("\"", "") }\">\n$text\n</untrusted-tool-result>"
+
+    /** Stable, actionable JSON for known tool failures; backend messages and paths never cross this boundary. */
+    private fun safeToolFailure(error: ToolError): String {
+        val message = when (error.code) {
+            ToolErrorCode.FILE_TOO_LARGE -> "The selected file is too large to read as text."
+            ToolErrorCode.INVALID_CURSOR -> "The directory changed. Enumerate it again from the first page."
+            ToolErrorCode.PERMISSION_DENIED -> "The workspace provider denied access. Check the workspace permission."
+            ToolErrorCode.SYMLINK_FORBIDDEN -> "Symbolic links cannot be followed from this workspace."
+            ToolErrorCode.PATH_OUT_OF_SCOPE -> "The requested path is outside the authorized workspace."
+            ToolErrorCode.WORKSPACE_NOT_FOUND -> "The selected workspace or entry is no longer available."
+            ToolErrorCode.AUTHORITY_TEMPORARILY_UNAVAILABLE,
+            ToolErrorCode.BRIDGE_DISCONNECTED,
+            ToolErrorCode.ADB_DEVICE_OFFLINE,
+            ToolErrorCode.ADB_DEVICE_DISCONNECTED,
+                -> "The workspace is temporarily unavailable. Try again after reconnecting it."
+            ToolErrorCode.QUOTA_EXCEEDED -> "The workspace operation exceeded a configured size or output limit."
+            ToolErrorCode.CONFLICT -> "The workspace changed. Read the latest state before trying again."
+            ToolErrorCode.UNSUPPORTED_ENTRY -> "The workspace entry type is unsupported and was not opened."
+            ToolErrorCode.OPERATION_UNAVAILABLE -> "This workspace operation is unavailable on the selected backend."
+            else -> "The tool could not complete the request."
+        }
+        return JsonObject(
+            mapOf(
+                "ok" to JsonPrimitive(false),
+                "error" to JsonObject(
+                    mapOf(
+                        "code" to JsonPrimitive(error.code.name),
+                        "message" to JsonPrimitive(message),
+                        "retryable" to JsonPrimitive(error.retryable),
+                    ),
+                ),
+            ),
+        ).toString()
+    }
 
     private fun untrustedToolImages(callId: String): String =
         "<untrusted-tool-images call_id=\"${callId.replace("\"", "") }\">Visual evidence returned by an external tool.</untrusted-tool-images>"

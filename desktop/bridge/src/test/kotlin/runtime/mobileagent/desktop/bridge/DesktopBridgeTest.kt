@@ -47,6 +47,16 @@ class DesktopBridgeTest {
         )
         assertTrue(list.success)
         assertEquals("file_list", list.payload?.get("operation")?.toString()?.trim('"'))
+        assertEquals("1", list.payload?.get("skipped_entries")?.toString())
+        assertEquals(
+            "SYMLINK_SKIPPED",
+            list.payload?.get("warnings")?.let { warnings ->
+                (warnings as kotlinx.serialization.json.JsonArray)[0]
+                    .let { it as kotlinx.serialization.json.JsonObject }["code"]
+                    ?.jsonPrimitive
+                    ?.content
+            },
+        )
 
         val stat = handler.handle(
             typed(
@@ -208,6 +218,42 @@ class DesktopBridgeTest {
         )
         assertFalse(disconnected.success)
         assertEquals(BridgeErrorCodes.UNKNOWN_OUTCOME, disconnected.errorCode)
+    }
+
+    @Test
+    fun typedFileTooLargeErrorSurvivesHelperFrameWithoutUnsafeMessage() {
+        val (configuration, report) = testConfiguration("typed-device", 42_001)
+        val runner = FakeTypedAdbRunner().also { it.failureCode = "FILE_TOO_LARGE" }
+        val executor = WiredAdbTypedFileExecutorImpl(
+            AdbProcessManager.validated(configuration, runner, report, WinTrustVerifier { true }),
+        )
+        val handler = DesktopTypedBridgeRequestHandler(
+            shell = { error("shell is not used by typed FILE_TOO_LARGE test") },
+            typedFiles = { executor },
+        )
+        val request = typed(
+            "typed-too-large",
+            BridgeOperation.FILE_WRITE_TEXT,
+            buildJsonObject {
+                put("workspace_id", "wired-adb")
+                put("relative_path", "too-large.txt")
+                put("content", "content rejected by the device")
+                put("overwrite", false)
+            },
+        )
+
+        val response = handler.handle(request, BridgeCancellation())
+
+        assertFalse(response.success)
+        assertEquals("typed-too-large", response.requestId)
+        assertEquals("FILE_TOO_LARGE", response.errorCode)
+        assertEquals(null, response.payload)
+        assertEquals(null, response.errorMessage)
+        val encoded = BridgeCodec.encodeResponse(response).toString(Charsets.UTF_8)
+        assertTrue(encoded.contains("FILE_TOO_LARGE"))
+        assertFalse(encoded.contains("content rejected by the device"))
+        assertFalse(encoded.contains("typed file outcome is unknown"))
+        assertEquals(1, runner.requests.size)
     }
 
     @Test
@@ -590,6 +636,7 @@ class DesktopBridgeTest {
         val requests = mutableListOf<ProcessRequest>()
         var disconnected = false
         var unknown = false
+        var failureCode: String? = null
         private val files = linkedMapOf("seed.txt" to "seed")
         private val directories = linkedSetOf("dir")
 
@@ -619,7 +666,15 @@ class DesktopBridgeTest {
                 ((frame[2].toInt() and 0xff) shl 8) or
                 (frame[3].toInt() and 0xff)
             val decoded = BridgeCodec.decodeRequest(frame.copyOfRange(4, 4 + length))
-            val response = respond(decoded)
+            val response = failureCode?.let { code ->
+                BridgeResponseEnvelope(
+                    protocolVersion = BridgeProtocol.VERSION,
+                    requestId = decoded.requestId,
+                    success = false,
+                    errorCode = code,
+                    errorMessage = null,
+                )
+            } ?: respond(decoded)
             val body = BridgeCodec.encodeResponse(response)
             val output = byteArrayOf(
                 (body.size ushr 24).toByte(),
@@ -659,6 +714,13 @@ class DesktopBridgeTest {
                                 put("type", "directory")
                             })
                         }
+                    })
+                    put("skipped_entries", 1)
+                    put("warnings", buildJsonArray {
+                        add(buildJsonObject {
+                            put("code", "SYMLINK_SKIPPED")
+                            put("count", 1)
+                        })
                     })
                 }
                 BridgeOperation.FILE_STAT -> buildJsonObject {

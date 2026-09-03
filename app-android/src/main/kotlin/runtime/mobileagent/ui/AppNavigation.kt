@@ -30,6 +30,63 @@ object AppRoutes {
     const val MCP = "mcp"
 }
 
+/** Single shell-owned source of truth for the compact leading navigation affordance. */
+enum class ShellNavigationAffordance { MENU, BACK, NONE }
+
+private val topLevelMenuRoutes = setOf(
+    AppRoutes.CHAT,
+    AppRoutes.AGENTS,
+    AppRoutes.PROVIDERS,
+    AppRoutes.KNOWLEDGE,
+    AppRoutes.SKILLS,
+    AppRoutes.NEWS,
+    AppRoutes.SETTINGS,
+    AppRoutes.MORE,
+)
+
+private val childBackRoutes = setOf(AppRoutes.ABOUT, AppRoutes.INSPECTOR, AppRoutes.MCP)
+
+/**
+ * Pages never independently opt into both Menu and Back. A dialog/detail state can promote an
+ * otherwise top-level route to BACK, while ordinary destinations remain MENU-owned.
+ */
+fun shellNavigationAffordance(
+    route: String,
+    childDetailOpen: Boolean = false,
+): ShellNavigationAffordance = when {
+    childDetailOpen || route in childBackRoutes -> ShellNavigationAffordance.BACK
+    route in topLevelMenuRoutes -> ShellNavigationAffordance.MENU
+    else -> ShellNavigationAffordance.NONE
+}
+
+/**
+ * Single title policy for the application shell. Feature roots keep their
+ * own content labels only when useful inside the page; the shell owns the
+ * visible page title and the corresponding leading navigation action.
+ */
+fun appShellTitle(
+    route: String,
+    chinese: Boolean = true,
+    childDetailOpen: Boolean = false,
+): String = if (childDetailOpen) {
+    if (chinese) "选择工作区" else "Choose workspace"
+} else {
+    when (route) {
+        AppRoutes.CHAT -> if (chinese) "对话" else "Chat"
+        AppRoutes.AGENTS -> if (chinese) "智能体" else "Agents"
+        AppRoutes.PROVIDERS -> if (chinese) "服务商" else "Providers"
+        AppRoutes.KNOWLEDGE -> if (chinese) "知识" else "Knowledge"
+        AppRoutes.SKILLS -> if (chinese) "技能" else "Skills"
+        AppRoutes.NEWS -> if (chinese) "公告" else "News"
+        AppRoutes.SETTINGS -> if (chinese) "设置" else "Settings"
+        AppRoutes.MORE -> if (chinese) "更多" else "More"
+        AppRoutes.ABOUT -> if (chinese) "关于" else "About"
+        AppRoutes.INSPECTOR -> if (chinese) "请求检查器" else "Request inspector"
+        AppRoutes.MCP -> "MCP"
+        else -> if (chinese) "MobileAgentRuntime" else "MobileAgentRuntime"
+    }
+}
+
 /** The seven product destinations in design order. Labels are localized at the shell boundary. */
 fun defaultAppDestinations(chinese: Boolean = true): List<AppNavigationDestination> = listOf(
     AppNavigationDestination(AppRoutes.CHAT, if (chinese) "对话" else "Chat", Icons.Outlined.Chat),
@@ -48,8 +105,7 @@ fun defaultAppDestinations(chinese: Boolean = true): List<AppNavigationDestinati
  */
 fun globalDrawerDestinations(chinese: Boolean = true): List<AppNavigationDestination> =
     defaultAppDestinations(chinese) + listOf(
-        AppNavigationDestination(AppRoutes.MCP, if (chinese) "MCP" else "MCP", Icons.Outlined.Cloud),
-        AppNavigationDestination(AppRoutes.ABOUT, if (chinese) "关于" else "About", Icons.Outlined.Info),
+        AppNavigationDestination(AppRoutes.MORE, if (chinese) "更多" else "More", Icons.Outlined.MoreHoriz),
     )
 
 fun phonePrimaryDestinations(chinese: Boolean = true): List<AppNavigationDestination> = listOf(
@@ -73,9 +129,9 @@ fun moreHubItems(chinese: Boolean = true): List<AppNavigationDestination> = list
 fun isMoreChildRoute(route: String): Boolean = moreHubItems(false).any { it.route == route }
 
 /**
- * Pure back policy for the shell. A More child has a canonical More parent even when
- * the route was restored as the NavHost start destination. Inspector keeps the source
- * selected by the caller so opening it from Chat does not unexpectedly return to More.
+ * Pure back policy for the shell. Navigation history owns ordinary More-child returns;
+ * this avoids redirecting a first-level destination opened directly from the drawer.
+ * Inspector keeps the explicit source selected by the caller.
  */
 fun appBackTarget(
     compact: Boolean,
@@ -86,7 +142,6 @@ fun appBackTarget(
     if (compact && currentRoute == AppRoutes.INSPECTOR) {
         return inspectorReturnRoute.takeUnless { it == AppRoutes.INSPECTOR } ?: AppRoutes.MORE
     }
-    if (compact && isMoreChildRoute(currentRoute)) return AppRoutes.MORE
     if (!hasPreviousEntry && currentRoute != AppRoutes.CHAT) return AppRoutes.CHAT
     return null
 }

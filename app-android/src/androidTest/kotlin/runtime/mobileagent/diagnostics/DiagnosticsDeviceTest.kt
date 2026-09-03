@@ -312,7 +312,26 @@ class DiagnosticsDeviceTest {
             assertTrue(store.recordShizukuLifecycle(DiagnosticLifecycleState.READY, requestRef = "request-2"))
             assertTrue(store.recordWiredAdbLifecycle(DiagnosticLifecycleState.DISCONNECTED, "io", "request-3"))
             assertTrue(store.recordWorkspaceGrantChanged(workspaceId, DiagnosticGrantScope.READ_WRITE, true, "request-4"))
-            assertTrue(store.recordWorkspaceOperationState(workspaceId, DiagnosticOperation.READ, DiagnosticOperationState.SUCCEEDED, 2, "request-5"))
+            assertTrue(
+                store.recordWorkspaceOperationState(
+                    workspaceId = workspaceId,
+                    operation = DiagnosticOperation.READ,
+                    state = DiagnosticOperationState.SUCCEEDED,
+                    count = 2,
+                    requestRef = "request-5",
+                    backendType = DiagnosticWorkspaceBackendType.INTERNAL,
+                ),
+            )
+            assertTrue(
+                store.recordWorkspaceOperationState(
+                    workspaceId = workspaceId,
+                    operation = DiagnosticOperation.READ,
+                    state = DiagnosticOperationState.FAILED,
+                    requestRef = "request-5-large",
+                    errorCode = "FILE_TOO_LARGE",
+                    backendType = DiagnosticWorkspaceBackendType.SHIZUKU,
+                ),
+            )
             assertTrue(store.recordSkillMemoryOperationState(skillId, DiagnosticOperation.APPEND, DiagnosticOperationState.SUCCEEDED, 1, "request-6"))
             assertTrue(store.recordDangerousModeChanged(true, DiagnosticDangerousModePolicy.CONFIRM_HIGH_RISK, "request-7"))
             assertTrue(
@@ -384,6 +403,8 @@ class DiagnosticsDeviceTest {
             assertTrue(allText.contains("\"mcpToolCount\":0"))
             assertTrue(allText.contains("\"pythonToolCount\":0"))
             assertTrue(allText.contains("\"memoryToolCount\":0"))
+            assertTrue(allText.contains("\"errorCode\":\"file_too_large\""))
+            assertTrue(allText.contains("\"backendType\":\"shizuku\""))
             assertTrue(allText.contains("\"registeredWorkspaceCount\":3"))
             assertTrue(allText.contains("\"grantedWorkspaceCount\":1"))
             assertTrue(allText.contains("\"boundWorkspaceCount\":1"))
@@ -749,6 +770,157 @@ class DiagnosticsDeviceTest {
             assertFalse(zipBytes.containsBytes(secret.toByteArray(Charsets.UTF_8)))
             assertFalse(allText.contains("secret-result"))
             assertFalse(allText.contains("\"path\""))
+        }
+    }
+
+    @Test
+    fun defaultWorkspaceAndResolutionEventsAreTypedClosedAndRedacted() {
+        withStore { directory, preferences ->
+            preferences.setEnabled(true)
+            val store = newStore(directory, preferences)
+            val secret = "content://private/${UUID.randomUUID()}-default-secret"
+            val agent = "agent-$secret"
+            val previousWorkspace = "workspace-previous-$secret"
+            val workspace = "workspace-current-$secret"
+            val session = "session-$secret"
+
+            assertTrue(
+                store.recordAgentWorkspaceDefaultChanged(
+                    AgentWorkspaceDefaultChangedRecord(
+                        agentId = agent,
+                        previousWorkspaceId = previousWorkspace,
+                        workspaceId = workspace,
+                        grantGeneration = 4,
+                        result = DiagnosticWorkspaceDefaultResult.SET,
+                    ),
+                ),
+            )
+            assertTrue(
+                store.recordAgentWorkspaceDefaultChanged(
+                    AgentWorkspaceDefaultChangedRecord(
+                        agentId = agent,
+                        previousWorkspaceId = workspace,
+                        workspaceId = null,
+                        grantGeneration = 5,
+                        result = DiagnosticWorkspaceDefaultResult.CLEARED,
+                        errorCode = null,
+                    ),
+                ),
+            )
+            assertTrue(
+                store.recordConversationWorkspaceResolution(
+                    ConversationWorkspaceResolutionRecord(
+                        sessionId = session,
+                        agentId = agent,
+                        threadWorkspaceState = DiagnosticThreadWorkspaceState.UNBOUND_AGENT_DEFAULT_AVAILABLE,
+                        workspaceId = null,
+                        agentDefaultWorkspaceId = workspace,
+                        snapshotWorkspaceCount = 2,
+                        effectiveWorkspaceGrantCount = 8,
+                    ),
+                ),
+            )
+            assertTrue(
+                store.recordConversationWorkspaceResolution(
+                    ConversationWorkspaceResolutionRecord(
+                        sessionId = session,
+                        agentId = agent,
+                        threadWorkspaceState = DiagnosticThreadWorkspaceState.BOUND,
+                        workspaceId = workspace,
+                        agentDefaultWorkspaceId = previousWorkspace,
+                        snapshotWorkspaceCount = 1,
+                        effectiveWorkspaceGrantCount = 4,
+                    ),
+                ),
+            )
+            assertTrue(
+                store.recordConversationWorkspaceResolution(
+                    ConversationWorkspaceResolutionRecord(
+                        sessionId = session,
+                        agentId = agent,
+                        threadWorkspaceState = DiagnosticThreadWorkspaceState.UNBOUND_NO_AGENT_DEFAULT,
+                        workspaceId = null,
+                        // A configured default may still be unusable after revocation.  Preserve
+                        // its opaque reference while keeping the closed state at NO_AGENT_DEFAULT.
+                        agentDefaultWorkspaceId = previousWorkspace,
+                        snapshotWorkspaceCount = 0,
+                        effectiveWorkspaceGrantCount = 0,
+                    ),
+                ),
+            )
+
+            assertFalse(
+                store.record(
+                    "agent_workspace_default_changed",
+                    mapOf(
+                        "agentRef" to agent,
+                        "grantGeneration" to 1,
+                        "result" to "set",
+                        "path" to secret,
+                    ),
+                ),
+            )
+            assertFalse(
+                store.record(
+                    "agent_workspace_default_changed",
+                    mapOf(
+                        "agentRef" to agent,
+                        "grantGeneration" to 1,
+                        "result" to "set",
+                    ),
+                ),
+            )
+            assertFalse(
+                store.record(
+                    "agent_workspace_default_changed",
+                    mapOf(
+                        "agentRef" to agent,
+                        "workspaceRef" to workspace,
+                        "grantGeneration" to 1,
+                        "result" to "cleared",
+                    ),
+                ),
+            )
+            assertFalse(
+                store.record(
+                    "agent_workspace_default_changed",
+                    mapOf(
+                        "agentRef" to agent,
+                        "grantGeneration" to 1,
+                        "result" to "not-a-result",
+                    ),
+                ),
+            )
+            assertFalse(
+                store.record(
+                    "conversation_workspace_resolution",
+                    mapOf(
+                        "sessionRef" to session,
+                        "agentRef" to agent,
+                        "threadWorkspaceState" to "UNBOUND_NO_AGENT_DEFAULT",
+                        "snapshotWorkspaceCount" to "zero",
+                        "effectiveWorkspaceGrantCount" to 0,
+                    ),
+                ),
+            )
+
+            val zipBytes = store.exportBytes()
+            val allText = zipEntries(zipBytes).values.joinToString("\n")
+            assertTrue(allText.contains("\"event\":\"agent_workspace_default_changed\""))
+            assertTrue(allText.contains("\"event\":\"conversation_workspace_resolution\""))
+            assertTrue(allText.contains("\"result\":\"set\""))
+            assertTrue(allText.contains("\"result\":\"cleared\""))
+            assertTrue(allText.contains("\"threadWorkspaceState\":\"UNBOUND_AGENT_DEFAULT_AVAILABLE\""))
+            assertTrue(allText.contains("\"threadWorkspaceState\":\"BOUND\""))
+            assertTrue(allText.contains("\"threadWorkspaceState\":\"UNBOUND_NO_AGENT_DEFAULT\""))
+            assertFalse(zipBytes.containsBytes(secret.toByteArray(Charsets.UTF_8)))
+            assertFalse(allText.contains("\"path\""))
+            val references = Regex("\\\"(?:agentRef|sessionRef|workspaceRef|previousWorkspaceRef|agentDefaultWorkspaceRef)\\\":\\\"([0-9a-f]{32})\\\"")
+                .findAll(allText)
+                .map { it.groupValues[1] }
+                .toList()
+            assertTrue("expected hashed references", references.isNotEmpty())
+            assertTrue(references.all { it.length == RollingDiagnosticLogStore.MAX_REFERENCE_LENGTH })
         }
     }
 

@@ -4,6 +4,7 @@
 package runtime.mobileagent.shizuku
 
 import android.content.Context
+import android.system.Os
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import org.json.JSONObject
@@ -16,8 +17,10 @@ import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
 import java.io.File
+import java.nio.ByteBuffer
 import java.nio.charset.StandardCharsets
 import java.nio.file.Files
+import java.nio.file.StandardOpenOption
 import java.util.UUID
 
 @RunWith(AndroidJUnit4::class)
@@ -83,14 +86,137 @@ class ShizukuWorkspaceFileStoreTest {
     }
 
     @Test
-    fun listReadAndStatRejectOversizedExistingMetadataConsistently() {
+    fun missingDirectoryAndDirectoryReadReturnDistinctTypedErrors() {
+        assertTrue(store.list("missing").contains("\"code\":\"NOT_FOUND\""))
+        assertTrue(store.mkdir("directory").contains("\"ok\":true"))
+        val read = store.readChunk("directory", 1024, 0L)
+        assertEquals(
+            ShizukuWorkspaceFileStore.UNSUPPORTED_ENTRY,
+            (read as ShizukuWorkspaceFileStore.ReadChunkResult.Failure).code,
+        )
+    }
+
+    @Test
+    fun listAndStatExposeOversizedMetadataButReadRemainsBounded() {
         assertTrue(store.mkdir("oversize").contains("\"ok\":true"))
         val oversized = File(root, "Download/MobileAgentRuntime-Shizuku/oversize/large.bin")
-        oversized.writeBytes(ByteArray(ShizukuWorkspaceFileStore.MAX_FILE_BYTES + 1))
+        Files.newByteChannel(
+            oversized.toPath(),
+            StandardOpenOption.CREATE_NEW,
+            StandardOpenOption.WRITE,
+        ).use { channel ->
+            channel.position(ShizukuWorkspaceFileStore.MAX_FILE_BYTES.toLong())
+            channel.write(ByteBuffer.wrap(byteArrayOf(0)))
+        }
 
-        assertTrue(store.list("oversize").contains("\"code\":\"FILE_TOO_LARGE\""))
+        val listing = JSONObject(store.list("oversize"))
+        assertTrue(listing.getBoolean("ok"))
+        assertEquals(1, listing.getJSONArray("entries").length())
+        assertEquals(
+            ShizukuWorkspaceFileStore.MAX_FILE_BYTES.toLong() + 1L,
+            listing.getJSONArray("entries").getJSONObject(0).getLong("bytes"),
+        )
         assertTrue(store.read("oversize/large.bin", ShizukuWorkspaceFileStore.MAX_READ_BYTES).contains("\"code\":\"FILE_TOO_LARGE\""))
-        assertTrue(store.stat("oversize/large.bin").contains("\"code\":\"FILE_TOO_LARGE\""))
+        val stat = JSONObject(store.stat("oversize/large.bin"))
+        assertTrue(stat.getBoolean("ok"))
+        assertEquals(ShizukuWorkspaceFileStore.MAX_FILE_BYTES.toLong() + 1L, stat.getLong("bytes"))
+    }
+
+    @Test
+    fun listingSkipsExternalSymlinkAndKeepsNormalEntries() {
+        val normal = File(root, "Download/MobileAgentRuntime-Shizuku/normal.txt").apply { writeText("normal") }
+        val outside = File(root.parentFile, "outside-${UUID.randomUUID()}.txt").apply { writeText("outside") }
+        val link = File(root, "Download/MobileAgentRuntime-Shizuku/outside-link.txt")
+        val created = runCatching {
+            Files.createSymbolicLink(link.toPath(), outside.toPath())
+            true
+        }.getOrDefault(false)
+        assumeTrue("The test filesystem does not support symlinks", created)
+        try {
+            val listing = JSONObject(store.list(null))
+            assertTrue(listing.getBoolean("ok"))
+            val paths = (0 until listing.getJSONArray("entries").length()).map {
+                listing.getJSONArray("entries").getJSONObject(it).getString("path")
+            }
+            assertTrue(paths.contains("normal.txt"))
+            assertFalse(paths.contains("outside-link.txt"))
+            assertTrue(paths.none { it.contains(outside.absolutePath) })
+            assertEquals(1, listing.getInt("skippedEntries"))
+            assertEquals("SYMLINK_SKIPPED", listing.getJSONArray("warnings").getJSONObject(0).getString("code"))
+            assertEquals(1, listing.getJSONArray("warnings").getJSONObject(0).getInt("count"))
+        } finally {
+            link.delete()
+            outside.delete()
+            assertTrue(normal.exists())
+        }
+    }
+
+    @Test
+    fun listingSkipsUnsupportedEntryAndKeepsNormalEntries() {
+        val directory = File(root, "Download/MobileAgentRuntime-Shizuku")
+        val normal = File(directory, "normal-with-fifo.txt").apply { writeText("normal") }
+        val fifo = File(directory, "unsupported.fifo")
+        val created = runCatching {
+            Os.mkfifo(fifo.absolutePath, 0x1A4)
+            true
+        }.getOrDefault(false)
+        assumeTrue("The test filesystem does not support FIFO entries", created)
+        try {
+            val listing = JSONObject(store.list(null))
+            assertTrue(listing.getBoolean("ok"))
+            val paths = (0 until listing.getJSONArray("entries").length()).map {
+                listing.getJSONArray("entries").getJSONObject(it).getString("path")
+            }
+            assertTrue(paths.contains(normal.name))
+            assertFalse(paths.contains(fifo.name))
+            assertEquals(1, listing.getInt("skippedEntries"))
+            assertEquals(
+                "UNSUPPORTED_ENTRY_SKIPPED",
+                listing.getJSONArray("warnings").getJSONObject(0).getString("code"),
+            )
+        } finally {
+            fifo.delete()
+        }
+    }
+
+    @Test
+    fun directoryLimitIsAppliedAfterUnsafeEntriesAreFilteredAndReportsSkip() {
+        repeat(ShizukuWorkspaceFileStore.MAX_ENTRIES) { index ->
+            File(root, "Download/MobileAgentRuntime-Shizuku/entry-${index.toString().padStart(3, '0')}.txt")
+                .writeText("$index")
+        }
+        val outside = File(root.parentFile, "outside-${UUID.randomUUID()}.txt").apply { writeText("outside") }
+        val link = File(root, "Download/MobileAgentRuntime-Shizuku/unsafe-link.txt")
+        val created = runCatching {
+            Files.createSymbolicLink(link.toPath(), outside.toPath())
+            true
+        }.getOrDefault(false)
+        assumeTrue("The test filesystem does not support symlinks", created)
+        try {
+            // The store caps each page at MAX_DIRECTORY_ENTRIES so that the JSON envelope remains
+            // bounded.  A continuation proves that the raw 513 children (512 safe + 1 link) do
+            // not trip the MAX_ENTRIES check before unsafe filtering.
+            val listing = JSONObject(store.list(null, maxEntries = ShizukuWorkspaceFileStore.MAX_DIRECTORY_ENTRIES))
+            assertTrue(listing.getBoolean("ok"))
+            assertEquals(ShizukuWorkspaceFileStore.MAX_DIRECTORY_ENTRIES, listing.getJSONArray("entries").length())
+            assertEquals(1, listing.getInt("skippedEntries"))
+            assertTrue(listing.getJSONArray("warnings").toString().contains("SYMLINK_SKIPPED"))
+            assertTrue(listing.getBoolean("truncated"))
+            val continuation = listing.getString("nextCursor")
+            val second = JSONObject(
+                store.list(
+                    null,
+                    maxEntries = ShizukuWorkspaceFileStore.MAX_DIRECTORY_ENTRIES,
+                    cursor = continuation,
+                ),
+            )
+            assertTrue(second.getBoolean("ok"))
+            assertEquals(ShizukuWorkspaceFileStore.MAX_DIRECTORY_ENTRIES, second.getJSONArray("entries").length())
+            assertFalse(second.getBoolean("truncated"))
+        } finally {
+            link.delete()
+            outside.delete()
+        }
     }
 
     @Test

@@ -18,6 +18,7 @@ import java.nio.file.attribute.BasicFileAttributes
 import java.text.Normalizer
 import java.util.concurrent.TimeUnit
 import java.util.UUID
+import runtime.mobileagent.skills.tooling.WorkspaceListingWarningCode
 
 /**
  * Backend for a directory owned by this application.  All path components are checked before a
@@ -77,38 +78,68 @@ internal class InternalWorkspaceBackend(
             ensureRoot()
             val directory = resolveExisting(segments)
             requireDirectory(directory)
-            val children = safeChildren(directory).sortedBy { it.fileName.toString() }
+            // Enumeration is best-effort per child: links and filesystem node types that this
+            // backend cannot represent are not followed and must not hide ordinary entries.
+            val warnings = InternalWorkspaceListingWarnings()
+            val children = listableChildren(directory, warnings).sortedBy { it.fileName.toString() }
             if (children.size > limits.maxEntries) InternalWorkspaceErrorCode.ENTRY_LIMIT_EXCEEDED.error()
-            val fingerprint = directoryVersion(directory)
+            val fingerprint = directoryVersion(directory, skipUnsafeChildren = true)
             val start = cursor?.let {
                 cursorStore.resolve(it, segments.joinToString("/"), fingerprint)
-                    ?: InternalWorkspaceErrorCode.INVALID_ARGUMENT.error()
+                    ?: InternalWorkspaceErrorCode.INVALID_CURSOR.error()
             } ?: 0
-            if (start > children.size) InternalWorkspaceErrorCode.INVALID_ARGUMENT.error()
+            if (start > children.size) InternalWorkspaceErrorCode.INVALID_CURSOR.error()
             val pageSize = minOf(maxEntries, limits.maxDirectoryEntries)
             val end = minOf(start + pageSize, children.size)
             val names = HashSet<String>()
-            val entries = children.subList(start, end).map { child ->
-                rejectLink(child)
-                val name = safeChildName(child.fileName.toString(), names)
-                val childSegments = segments + name
-                when {
-                    Files.isDirectory(child, LinkOption.NOFOLLOW_LINKS) -> InternalWorkspaceEntry(
-                        path = childSegments.joinToString("/"),
-                        type = InternalWorkspaceEntryType.DIRECTORY,
-                        sizeBytes = null,
-                        version = directoryVersion(child),
-                    )
-                    Files.isRegularFile(child, LinkOption.NOFOLLOW_LINKS) -> {
-                        val size = Files.size(child)
-                        InternalWorkspaceEntry(
+            val entries = children.subList(start, end).mapNotNull { child ->
+                try {
+                    rejectLink(child)
+                    val name = safeChildName(child.fileName.toString(), names)
+                    val childSegments = segments + name
+                    when {
+                        Files.isDirectory(child, LinkOption.NOFOLLOW_LINKS) -> InternalWorkspaceEntry(
                             path = childSegments.joinToString("/"),
-                            type = InternalWorkspaceEntryType.FILE,
-                            sizeBytes = size,
-                            version = fileVersion(child),
+                            type = InternalWorkspaceEntryType.DIRECTORY,
+                            sizeBytes = null,
+                            version = directoryVersion(child, skipUnsafeChildren = true),
                         )
+                        Files.isRegularFile(child, LinkOption.NOFOLLOW_LINKS) -> {
+                            val size = Files.size(child)
+                            InternalWorkspaceEntry(
+                                path = childSegments.joinToString("/"),
+                                type = InternalWorkspaceEntryType.FILE,
+                                sizeBytes = size,
+                                version = fileVersion(child),
+                            )
+                        }
+                        else -> {
+                            warnings.add(WorkspaceListingWarningCode.UNSUPPORTED_ENTRY_SKIPPED)
+                            null
+                        }
                     }
-                    else -> InternalWorkspaceErrorCode.ENTRY_UNSUPPORTED.error()
+                } catch (failure: InternalWorkspaceFailure) {
+                    when (failure.error.code) {
+                        InternalWorkspaceErrorCode.SYMLINK_FORBIDDEN -> {
+                            warnings.add(WorkspaceListingWarningCode.SYMLINK_SKIPPED)
+                            null
+                        }
+                        InternalWorkspaceErrorCode.ENTRY_UNSUPPORTED -> {
+                            warnings.add(WorkspaceListingWarningCode.UNSUPPORTED_ENTRY_SKIPPED)
+                            null
+                        }
+                        InternalWorkspaceErrorCode.IO_ERROR -> {
+                            warnings.add(WorkspaceListingWarningCode.TRANSIENT_ENTRY_SKIPPED)
+                            null
+                        }
+                        else -> throw failure
+                    }
+                } catch (_: IOException) {
+                    warnings.add(WorkspaceListingWarningCode.TRANSIENT_ENTRY_SKIPPED)
+                    null
+                } catch (_: SecurityException) {
+                    warnings.add(WorkspaceListingWarningCode.UNREADABLE_ENTRY_SKIPPED)
+                    null
                 }
             }
             InternalWorkspaceList(
@@ -118,6 +149,8 @@ internal class InternalWorkspaceBackend(
                 nextCursor = if (end < children.size) {
                     cursorStore.issue(segments.joinToString("/"), fingerprint, end)
                 } else null,
+                skippedEntries = warnings.skippedEntries,
+                warnings = warnings.snapshot(),
             )
         }
     }
@@ -162,6 +195,7 @@ internal class InternalWorkspaceBackend(
             rejectLink(file)
             if (!Files.isRegularFile(file, LinkOption.NOFOLLOW_LINKS)) InternalWorkspaceErrorCode.ENTRY_UNSUPPORTED.error()
             val size = Files.size(file)
+            checkFileSize(size)
             if (offsetBytes > size) InternalWorkspaceErrorCode.OFFSET_OUT_OF_RANGE.error()
             val bytes = readBounded(file, offsetBytes, maxBytes.toInt())
             InternalWorkspaceContent(
@@ -610,6 +644,33 @@ internal class InternalWorkspaceBackend(
         return children
     }
 
+    /** Return only node kinds representable by the model-facing listing contract. */
+    private fun listableChildren(
+        directory: Path,
+        warnings: InternalWorkspaceListingWarnings? = null,
+    ): List<Path> = safeChildren(directory).mapNotNull { child ->
+        try {
+            when {
+                Files.isSymbolicLink(child) -> {
+                    warnings?.add(WorkspaceListingWarningCode.SYMLINK_SKIPPED)
+                    null
+                }
+                Files.isDirectory(child, LinkOption.NOFOLLOW_LINKS) ||
+                    Files.isRegularFile(child, LinkOption.NOFOLLOW_LINKS) -> child
+                else -> {
+                    warnings?.add(WorkspaceListingWarningCode.UNSUPPORTED_ENTRY_SKIPPED)
+                    null
+                }
+            }
+        } catch (_: SecurityException) {
+            warnings?.add(WorkspaceListingWarningCode.UNREADABLE_ENTRY_SKIPPED)
+            null
+        } catch (_: RuntimeException) {
+            warnings?.add(WorkspaceListingWarningCode.TRANSIENT_ENTRY_SKIPPED)
+            null
+        }
+    }
+
     private fun safeChildName(name: String, names: MutableSet<String>): String {
         WorkspacePathPolicy.validateProviderName(name, limits)
         val normalized = Normalizer.normalize(name, Normalizer.Form.NFC)
@@ -848,27 +909,52 @@ internal class InternalWorkspaceBackend(
         )
     }
 
-    private fun directoryVersion(directory: Path): String {
+    private fun directoryVersion(directory: Path, skipUnsafeChildren: Boolean = false): String {
         val digest = InternalWorkspaceVersions.digest()
-        val children = safeChildren(directory).sortedBy { it.fileName.toString() }
+        val children = (if (skipUnsafeChildren) listableChildren(directory) else safeChildren(directory))
+            .sortedBy { it.fileName.toString() }
         if (children.size > limits.maxEntries) InternalWorkspaceErrorCode.ENTRY_LIMIT_EXCEEDED.error()
         val names = HashSet<String>()
         children.forEach { child ->
-            rejectLink(child)
-            val name = safeChildName(child.fileName.toString(), names)
-            val type = nodeType(child)
-            val size = if (type == InternalWorkspaceEntryType.FILE) Files.size(child) else -1L
-            // A directory version is an optimistic-concurrency token for the complete
-            // subtree, not merely for its immediate metadata.  Including the child version
-            // means a same-sized file edit and a nested-directory edit both invalidate a
-            // previously observed parent version.  Names and types remain part of the input
-            // so a rename/type replacement cannot collide with a content-only change.
-            val childVersion = if (type == InternalWorkspaceEntryType.FILE) {
-                directoryFileVersion(child)
-            } else {
-                directoryVersion(child)
+            try {
+                if (skipUnsafeChildren && (!Files.exists(child, LinkOption.NOFOLLOW_LINKS) || Files.isSymbolicLink(child))) {
+                    return@forEach
+                }
+                rejectLink(child)
+                val name = safeChildName(child.fileName.toString(), names)
+                val type = if (skipUnsafeChildren) {
+                    when {
+                        Files.isRegularFile(child, LinkOption.NOFOLLOW_LINKS) -> InternalWorkspaceEntryType.FILE
+                        Files.isDirectory(child, LinkOption.NOFOLLOW_LINKS) -> InternalWorkspaceEntryType.DIRECTORY
+                        else -> return@forEach
+                    }
+                } else nodeType(child)
+                val size = if (type == InternalWorkspaceEntryType.FILE) Files.size(child) else -1L
+                // A directory version is an optimistic-concurrency token for the complete
+                // subtree, not merely for its immediate metadata.  Including the child version
+                // means a same-sized file edit and a nested-directory edit both invalidate a
+                // previously observed parent version.  Names and types remain part of the input
+                // so a rename/type replacement cannot collide with a content-only change.
+                val childVersion = if (type == InternalWorkspaceEntryType.FILE) {
+                    directoryFileVersion(child)
+                } else {
+                    directoryVersion(child, skipUnsafeChildren)
+                }
+                digest.update("$name\u0000${type.name}\u0000$size\u0000$childVersion\u0000".toByteArray(Charsets.UTF_8))
+            } catch (failure: InternalWorkspaceFailure) {
+                if (!skipUnsafeChildren) throw failure
+                when (failure.error.code) {
+                    InternalWorkspaceErrorCode.SYMLINK_FORBIDDEN,
+                    InternalWorkspaceErrorCode.ENTRY_UNSUPPORTED,
+                    InternalWorkspaceErrorCode.IO_ERROR,
+                        -> Unit
+                    else -> throw failure
+                }
+            } catch (failure: IOException) {
+                if (!skipUnsafeChildren) throw failure
+            } catch (failure: SecurityException) {
+                if (!skipUnsafeChildren) throw failure
             }
-            digest.update("$name\u0000${type.name}\u0000$size\u0000$childVersion\u0000".toByteArray(Charsets.UTF_8))
         }
         return digest.digest().toHex()
     }
@@ -987,7 +1073,9 @@ internal class InternalWorkspaceBackend(
         val children = safeChildren(directory)
         val names = HashSet<String>()
         children.forEach { child ->
-            rejectLink(child)
+            // User-created links are intentionally left untouched and are not traversed.  Only
+            // implementation-owned temporary trees are eligible for cleanup.
+            if (Files.isSymbolicLink(child)) return@forEach
             val name = safeChildName(child.fileName.toString(), names)
             if (TEMPORARY_NAME.matches(name)) {
                 deleteTemporaryTree(child)

@@ -9,7 +9,7 @@ import kotlinx.serialization.json.*
 import runtime.mobileagent.data.ProfileRepository
 import runtime.mobileagent.knowledge.*
 import runtime.mobileagent.provider.*
-import runtime.mobileagent.provider.openai.OpenAiCompatibleAdapter
+import runtime.mobileagent.provider.openai.OpenAiAdapterFactory
 import runtime.mobileagent.security.AndroidSecretStore
 import java.net.URI
 import java.util.Base64
@@ -30,7 +30,7 @@ class OpenAiCompatibleVision(
         return runBlocking {
             val key = secrets.resolveForHost(provider.secretRef)
             try {
-                val adapter = OpenAiCompatibleAdapter(http, provider.baseUrl, HeaderSecretResolver { host, ref ->
+                val adapter = OpenAiAdapterFactory.create(provider.apiFormat, http, provider.baseUrl, HeaderSecretResolver { host, ref ->
                     require(host.equals(URI(provider.baseUrl).host, true) && ref in provider.headerSecretRefs.values)
                     secrets.resolveForHost(ref)
                 })

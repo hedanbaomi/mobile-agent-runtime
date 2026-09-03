@@ -187,7 +187,9 @@ object TransferCodec {
             requireId(provider.id, operationId, "provider.id")
             requireText(provider.name, operationId, "provider.name")
             requireText(provider.apiFormat, operationId, "provider.apiFormat")
-            if (provider.apiFormat != "OPENAI_COMPATIBLE") invalid(operationId, "Unsupported provider apiFormat")
+            if (provider.apiFormat !in setOf("OPENAI_COMPATIBLE", "OPENAI_RESPONSES")) {
+                invalid(operationId, "Unsupported provider apiFormat")
+            }
             requireText(provider.baseUrl, operationId, "provider.baseUrl")
             requireNonNegative(provider.revision, operationId, "provider.revision")
             validatePublicHeaders(provider.nonSecretHeaders, operationId)

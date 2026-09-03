@@ -293,6 +293,10 @@ internal object WiredAdbSharedAdapter {
         } ?: emptyList()
         require(entries.size <= WIRED_MAX_ENTRIES)
         val nextCursor = payload.stringOrNull("next_cursor")?.also(::validateCursor)
+        val skippedEntries = payload.int("skipped_entries") ?: 0
+        require(skippedEntries in 0..runtime.mobileagent.skills.tooling.WorkspaceListing.MAX_SKIPPED_ENTRIES)
+        val listingWarnings = decodeListingWarnings(payload.array("warnings"))
+        require(listingWarnings.sumOf { it.count } == skippedEntries)
         val version = payload.long("version")?.also { require(it >= 0L) }
         val offsetBytes = payload.long("offset_bytes") ?: 0L
         require(offsetBytes >= 0L)
@@ -312,11 +316,31 @@ internal object WiredAdbSharedAdapter {
             deleted = payload.boolean("deleted"),
             truncated = payload.boolean("truncated") ?: false,
             nextCursor = nextCursor,
+            skippedEntries = skippedEntries,
+            listingWarnings = listingWarnings,
             version = version,
             offsetBytes = offsetBytes,
             totalBytes = totalBytes,
             eof = eof,
         )
+    }
+
+    private fun decodeListingWarnings(
+        array: JsonArray?,
+    ): List<runtime.mobileagent.skills.tooling.WorkspaceListingWarning> {
+        if (array == null) return emptyList()
+        require(array.size <= runtime.mobileagent.skills.tooling.WorkspaceListing.MAX_WARNING_TYPES)
+        val seen = HashSet<runtime.mobileagent.skills.tooling.WorkspaceListingWarningCode>()
+        return array.map { element ->
+            val item = element as? JsonObject ?: throw BridgeProtocolException("listing warning is invalid")
+            require(item.keys == setOf("code", "count"))
+            val code = runtime.mobileagent.skills.tooling.WorkspaceListingWarningCode.valueOf(
+                item.string("code") ?: throw BridgeProtocolException("listing warning code is missing"),
+            )
+            require(seen.add(code))
+            val count = item.int("count") ?: throw BridgeProtocolException("listing warning count is missing")
+            runtime.mobileagent.skills.tooling.WorkspaceListingWarning(code, count)
+        }
     }
 
     internal data class DecodedWorkspacePage(
@@ -444,6 +468,17 @@ internal object WiredAdbSharedAdapter {
 
     fun mapError(response: BridgeResponseEnvelope): WiredAdbErrorCode = when (response.errorCode) {
         "FILE_NOT_FOUND", BridgeErrorCodes.WORKSPACE_NOT_FOUND -> WiredAdbErrorCode.WORKSPACE_NOT_FOUND
+        "FILE_INVALID_PATH", "FILE_OUTSIDE_ROOT" -> WiredAdbErrorCode.PATH_OUT_OF_SCOPE
+        "FILE_SYMLINK_FORBIDDEN" -> WiredAdbErrorCode.SYMLINK_FORBIDDEN
+        "FILE_INVALID_CONTENT" -> WiredAdbErrorCode.INVALID_CONTENT
+        "FILE_TARGET_EXISTS" -> WiredAdbErrorCode.TARGET_EXISTS
+        "FILE_NON_EMPTY_DIRECTORY" -> WiredAdbErrorCode.NON_EMPTY_DIRECTORY
+        "FILE_UNSUPPORTED_ENTRY" -> WiredAdbErrorCode.UNSUPPORTED_ENTRY
+        "FILE_OPERATION_UNAVAILABLE" -> WiredAdbErrorCode.OPERATION_UNAVAILABLE
+        "FILE_WRITE_UNVERIFIED" -> WiredAdbErrorCode.WRITE_UNVERIFIED
+        "FILE_TOO_LARGE", "WORKSPACE_FILE_TOO_LARGE" -> WiredAdbErrorCode.FILE_TOO_LARGE
+        "FILE_LIMIT" -> WiredAdbErrorCode.QUOTA_EXCEEDED
+        "FILE_PERMISSION_DENIED", "WORKSPACE_PERMISSION_DENIED" -> WiredAdbErrorCode.PERMISSION_DENIED
         "FILE_CONFLICT", BridgeErrorCodes.WORKSPACE_CONFLICT -> WiredAdbErrorCode.CONFLICT
         "FILE_OFFSET_OUT_OF_RANGE", BridgeErrorCodes.WORKSPACE_OFFSET_OUT_OF_RANGE ->
             WiredAdbErrorCode.OFFSET_OUT_OF_RANGE
@@ -542,7 +577,7 @@ internal object WiredAdbSharedAdapter {
 
     private val FILE_RESULT_KEYS = setOf(
         "operation", "relative_path", "entries", "text", "bytes", "created", "replaced", "deleted", "truncated",
-        "next_cursor", "version", "offset_bytes", "total_bytes", "eof",
+        "next_cursor", "skipped_entries", "warnings", "version", "offset_bytes", "total_bytes", "eof",
     )
     private val WORKSPACE_PAGE_RESULT_KEYS = setOf(
         "operation", "workspace_id", "workspace_binding", "relative_path", "entries", "truncated", "next_cursor", "version",

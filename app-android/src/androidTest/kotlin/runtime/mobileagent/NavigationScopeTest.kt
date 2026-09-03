@@ -17,12 +17,53 @@ import runtime.mobileagent.ui.isShellScopedLongRunningRoute
 import runtime.mobileagent.ui.moreHubItems
 import runtime.mobileagent.ui.phonePrimaryDestinations
 import runtime.mobileagent.ui.requestInspectorAvailability
+import runtime.mobileagent.ui.ShellNavigationAffordance
+import runtime.mobileagent.ui.appShellTitle
+import runtime.mobileagent.ui.shellNavigationAffordance
 import runtime.mobileagent.feature.chat.ChatRequestInspectorAvailability
 import runtime.mobileagent.feature.chat.ChatUiState
 
 /** Regression checks for the route shape used by the route-scoped NavHost. */
 @RunWith(AndroidJUnit4::class)
 class NavigationScopeTest {
+    @Test
+    fun shellNavigationPolicyMakesMenuAndBackMutuallyExclusive() {
+        listOf(
+            AppRoutes.CHAT,
+            AppRoutes.AGENTS,
+            AppRoutes.PROVIDERS,
+            AppRoutes.KNOWLEDGE,
+            AppRoutes.SKILLS,
+            AppRoutes.SETTINGS,
+        ).forEach { route ->
+            assertEquals(ShellNavigationAffordance.MENU, shellNavigationAffordance(route))
+        }
+        listOf(AppRoutes.ABOUT, AppRoutes.INSPECTOR).forEach { route ->
+            assertEquals(ShellNavigationAffordance.BACK, shellNavigationAffordance(route))
+        }
+        assertEquals(ShellNavigationAffordance.BACK, shellNavigationAffordance(AppRoutes.MCP))
+        assertEquals(
+            ShellNavigationAffordance.BACK,
+            shellNavigationAffordance(AppRoutes.AGENTS, childDetailOpen = true),
+        )
+        assertEquals(
+            ShellNavigationAffordance.BACK,
+            shellNavigationAffordance(AppRoutes.MCP, childDetailOpen = true),
+        )
+    }
+
+    @Test
+    fun shellTitlePolicyCoversTopLevelChildrenAndWorkspaceDetail() {
+        assertEquals("对话", appShellTitle(AppRoutes.CHAT, chinese = true))
+        assertEquals("Providers", appShellTitle(AppRoutes.PROVIDERS, chinese = false))
+        assertEquals("关于", appShellTitle(AppRoutes.ABOUT, chinese = true))
+        assertEquals("Request inspector", appShellTitle(AppRoutes.INSPECTOR, chinese = false))
+        assertEquals(
+            "选择工作区",
+            appShellTitle(AppRoutes.CHAT, chinese = true, childDetailOpen = true),
+        )
+    }
+
     @Test
     fun phoneNavigationKeepsSecondaryPagesInMore() {
         assertEquals(
@@ -43,12 +84,17 @@ class NavigationScopeTest {
     }
 
     @Test
-    fun phoneMoreChildrenHaveMoreAsTheirBackTargetEvenAfterRestore() {
+    fun phoneMoreChildrenUseHistoryAndRestoredRootsFallBackToChat() {
         listOf(AppRoutes.PROVIDERS, AppRoutes.NEWS, AppRoutes.MCP, AppRoutes.SETTINGS, AppRoutes.ABOUT, AppRoutes.INSPECTOR)
             .forEach { route ->
                 assertTrue(isMoreChildRoute(route))
-                assertEquals(AppRoutes.MORE, appBackTarget(compact = true, currentRoute = route, hasPreviousEntry = true))
-                assertEquals(AppRoutes.MORE, appBackTarget(compact = true, currentRoute = route, hasPreviousEntry = false))
+                if (route == AppRoutes.INSPECTOR) {
+                    assertEquals(AppRoutes.MORE, appBackTarget(compact = true, currentRoute = route, hasPreviousEntry = true))
+                    assertEquals(AppRoutes.MORE, appBackTarget(compact = true, currentRoute = route, hasPreviousEntry = false))
+                } else {
+                    assertNull(appBackTarget(compact = true, currentRoute = route, hasPreviousEntry = true))
+                    assertEquals(AppRoutes.CHAT, appBackTarget(compact = true, currentRoute = route, hasPreviousEntry = false))
+                }
             }
     }
 

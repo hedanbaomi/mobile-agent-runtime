@@ -6,7 +6,12 @@ package runtime.mobileagent.domain
 import kotlinx.serialization.Serializable
 
 @Serializable
-enum class ApiFormat { OPENAI_COMPATIBLE }
+enum class ApiFormat {
+    /** Legacy Chat Completions-compatible providers. */
+    OPENAI_COMPATIBLE,
+    /** OpenAI Responses API providers using POST /responses. */
+    OPENAI_RESPONSES,
+}
 
 @Serializable
 enum class ModelRole { CHAT, VISION, EMBEDDING, RERANKER }

@@ -76,6 +76,8 @@ class SharedWorkspaceBackendAdapter internal constructor(
                         entries = entries,
                         truncated = result.value.nextCursor != null || result.value.entries.size > entries.size,
                         nextCursor = result.value.nextCursor,
+                        skippedEntries = result.value.skippedEntries,
+                        warnings = result.value.warnings,
                     ),
                 )
             }
@@ -309,29 +311,30 @@ class SharedWorkspaceBackendAdapter internal constructor(
             InternalWorkspaceErrorCode.INVALID_PATCH,
             InternalWorkspaceErrorCode.READ_LIMIT_EXCEEDED,
             InternalWorkspaceErrorCode.ENTRY_EXISTS,
-            InternalWorkspaceErrorCode.ENTRY_UNSUPPORTED,
             InternalWorkspaceErrorCode.NON_EMPTY_DIRECTORY,
             InternalWorkspaceErrorCode.DEPTH_LIMIT_EXCEEDED,
-            InternalWorkspaceErrorCode.ENTRY_LIMIT_EXCEEDED,
                 -> ToolErrorCode.INVALID_REQUEST
+            InternalWorkspaceErrorCode.ENTRY_UNSUPPORTED -> ToolErrorCode.UNSUPPORTED_ENTRY
+            InternalWorkspaceErrorCode.ENTRY_LIMIT_EXCEEDED -> ToolErrorCode.QUOTA_EXCEEDED
+            InternalWorkspaceErrorCode.INVALID_CURSOR -> ToolErrorCode.INVALID_CURSOR
             InternalWorkspaceErrorCode.PATH_OUT_OF_SCOPE -> ToolErrorCode.PATH_OUT_OF_SCOPE
             InternalWorkspaceErrorCode.SYMLINK_FORBIDDEN -> ToolErrorCode.SYMLINK_FORBIDDEN
             InternalWorkspaceErrorCode.WORKSPACE_NOT_FOUND,
             InternalWorkspaceErrorCode.ENTRY_NOT_FOUND,
-            InternalWorkspaceErrorCode.GRANT_LOST,
                 -> ToolErrorCode.WORKSPACE_NOT_FOUND
-            InternalWorkspaceErrorCode.READ_ONLY,
+            InternalWorkspaceErrorCode.READ_ONLY -> ToolErrorCode.WORKSPACE_READ_ONLY
+            InternalWorkspaceErrorCode.GRANT_LOST,
             InternalWorkspaceErrorCode.PERMISSION_DENIED,
-                -> ToolErrorCode.WORKSPACE_READ_ONLY
+                -> ToolErrorCode.PERMISSION_DENIED
             InternalWorkspaceErrorCode.ROOT_OPERATION_FORBIDDEN -> ToolErrorCode.ROOT_OPERATION_FORBIDDEN
             InternalWorkspaceErrorCode.FILE_TOO_LARGE -> ToolErrorCode.FILE_TOO_LARGE
             InternalWorkspaceErrorCode.QUOTA_EXCEEDED -> ToolErrorCode.QUOTA_EXCEEDED
             InternalWorkspaceErrorCode.CONFLICT -> ToolErrorCode.CONFLICT
             InternalWorkspaceErrorCode.UNKNOWN_OUTCOME -> ToolErrorCode.UNKNOWN_OUTCOME
             InternalWorkspaceErrorCode.PROVIDER_ALIAS_AMBIGUOUS,
-            InternalWorkspaceErrorCode.UNSUPPORTED,
             InternalWorkspaceErrorCode.IO_ERROR,
                 -> ToolErrorCode.IO_ERROR
+            InternalWorkspaceErrorCode.UNSUPPORTED -> ToolErrorCode.OPERATION_UNAVAILABLE
         }
         return ToolError(sharedCode, message = sharedCode.name, retryable = retryable)
     }

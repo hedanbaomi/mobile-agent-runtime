@@ -153,7 +153,12 @@ data class KnowledgeActions(
 )
 
 @Composable
-fun KnowledgeScreen(state: KnowledgeUiState, actions: KnowledgeActions = KnowledgeActions(), modifier: Modifier = Modifier) {
+fun KnowledgeScreen(
+    state: KnowledgeUiState,
+    actions: KnowledgeActions = KnowledgeActions(),
+    modifier: Modifier = Modifier,
+    showPageTitle: Boolean = true,
+) {
     val zh = state.language.equals("zh-CN", true)
     var selectedUris by remember { mutableStateOf<List<Uri>>(emptyList()) }
     var newBaseName by remember { mutableStateOf("") }
@@ -188,7 +193,7 @@ fun KnowledgeScreen(state: KnowledgeUiState, actions: KnowledgeActions = Knowled
                     embeddingDimension = ""
                     embeddingModelMenu = false
                     embeddingDialog = true
-                }, Modifier.weight(0.32f).fillMaxSize())
+                }, Modifier.weight(0.32f).fillMaxSize(), showPageTitle)
                 KnowledgeContentPane(state, actions, zh, { deleteDocumentId = it }, { rebuildRequested = true }, Modifier.weight(0.68f).fillMaxSize().verticalScroll(rememberScrollState()))
             }
         } else {
@@ -203,7 +208,7 @@ fun KnowledgeScreen(state: KnowledgeUiState, actions: KnowledgeActions = Knowled
                     embeddingDimension = ""
                     embeddingModelMenu = false
                     embeddingDialog = true
-                }, Modifier.fillMaxWidth())
+                }, Modifier.fillMaxWidth(), showPageTitle)
                 KnowledgeContentPane(state, actions, zh, { deleteDocumentId = it }, { rebuildRequested = true }, Modifier.fillMaxWidth())
             }
         }
@@ -387,9 +392,12 @@ private fun KnowledgeBasePane(
     onDeleteBase: (String) -> Unit,
     onConfigureEmbedding: () -> Unit,
     modifier: Modifier,
+    showPageTitle: Boolean,
 ) {
     Column(modifier) {
-        Text(if (zh) "知识" else "Knowledge", style = MaterialTheme.typography.headlineSmall)
+        if (showPageTitle) {
+            Text(if (zh) "知识" else "Knowledge", style = MaterialTheme.typography.headlineSmall)
+        }
         Row(Modifier.fillMaxWidth().padding(top = 8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             Button(onClick = onCreateBase) { Text(if (zh) "新建" else "New") }
         }

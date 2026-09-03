@@ -19,7 +19,7 @@ object ParameterMerger {
     private val json = Json { ignoreUnknownKeys = false }
     val reserved = setOf(
         "model", "messages", "input", "tools", "tool_choice", "stream",
-        "authorization", "api_key",
+        "authorization", "api_key", "instructions",
     )
 
     fun merge(

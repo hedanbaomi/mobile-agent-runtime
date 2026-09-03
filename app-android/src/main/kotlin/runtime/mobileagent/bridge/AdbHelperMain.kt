@@ -125,7 +125,10 @@ class AdbHelperServer(
             .getOrElse { return failure(request.requestId, ERR_REQUEST_INVALID) }
         return when (val result = dispatchEngine.execute(typed)) {
             is WiredAdbFileEngineResult.Success -> success(request.requestId, result.result)
-            is WiredAdbFileEngineResult.Failure -> failure(request.requestId, "FILE_${result.code}")
+            is WiredAdbFileEngineResult.Failure -> failure(
+                request.requestId,
+                result.code.takeIf { it.startsWith("FILE_") } ?: "FILE_${result.code}",
+            )
         }
     }
 
@@ -248,6 +251,17 @@ class AdbHelperServer(
         result.deleted?.let { put("deleted", it) }
         if (result.truncated) put("truncated", true)
         result.nextCursor?.let { put("next_cursor", it) }
+        if (result.skippedEntries > 0) {
+            put("skipped_entries", result.skippedEntries)
+            put("warnings", kotlinx.serialization.json.buildJsonArray {
+                result.listingWarnings.forEach { warning ->
+                    add(buildJsonObject {
+                        put("code", warning.wireCode)
+                        put("count", warning.count)
+                    })
+                }
+            })
+        }
         result.version?.let { put("version", it) }
         if (result.operation == WiredAdbFileOperation.READ_TEXT) {
             put("offset_bytes", result.offsetBytes)

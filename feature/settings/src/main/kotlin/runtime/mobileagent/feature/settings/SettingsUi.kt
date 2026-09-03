@@ -214,12 +214,23 @@ data class SettingsActions(
 
 /** State-driven alias for hosts that still route the settings tab through AboutScreen. */
 @Composable
-fun AboutScreen(state: SettingsUiState, actions: SettingsActions = SettingsActions(), modifier: Modifier = Modifier) {
-    SettingsScreen(state, actions, modifier)
+fun AboutScreen(
+    state: SettingsUiState,
+    actions: SettingsActions = SettingsActions(),
+    modifier: Modifier = Modifier,
+    showPageTitle: Boolean = true,
+) {
+    SettingsScreen(state, actions, modifier, showPageTitle, showAboutSectionTitle = false)
 }
 
 @Composable
-fun SettingsScreen(state: SettingsUiState, actions: SettingsActions = SettingsActions(), modifier: Modifier = Modifier) {
+fun SettingsScreen(
+    state: SettingsUiState,
+    actions: SettingsActions = SettingsActions(),
+    modifier: Modifier = Modifier,
+    showPageTitle: Boolean = true,
+    showAboutSectionTitle: Boolean = true,
+) {
     val zh = state.language.equals("zh-CN", true) || state.language.equals("system", true)
     val context = LocalContext.current
     val clipboard = LocalClipboardManager.current
@@ -242,7 +253,9 @@ fun SettingsScreen(state: SettingsUiState, actions: SettingsActions = SettingsAc
             .testTag("settings.screen"),
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
-        Text(if (zh) "设置" else "Settings", style = MaterialTheme.typography.headlineSmall)
+        if (showPageTitle) {
+            Text(if (zh) "设置" else "Settings", style = MaterialTheme.typography.headlineSmall)
+        }
         if (state.error != null) {
             Card(
                 Modifier.fillMaxWidth(),
@@ -399,7 +412,9 @@ fun SettingsScreen(state: SettingsUiState, actions: SettingsActions = SettingsAc
         }
         Card(Modifier.fillMaxWidth().testTag("settings.about")) {
             Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                Text(if (zh) "关于" else "About", style = MaterialTheme.typography.titleMedium)
+                if (showAboutSectionTitle) {
+                    Text(if (zh) "关于" else "About", style = MaterialTheme.typography.titleMedium)
+                }
                 Text("mobileAgentRuntime")
                 Text("${state.versionName} (${state.gitRevision})", style = MaterialTheme.typography.bodySmall)
                 Text(

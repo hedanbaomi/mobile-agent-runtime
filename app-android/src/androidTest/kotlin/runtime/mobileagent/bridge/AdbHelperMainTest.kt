@@ -20,6 +20,7 @@ import runtime.mobileagent.wired.WiredAdbFileRequest
 import runtime.mobileagent.wired.WiredAdbFileResult
 import runtime.mobileagent.wired.WiredAdbRequestId
 import runtime.mobileagent.wired.NioPrivilegedFileEngine
+import runtime.mobileagent.wired.WIRED_MAX_READ_BYTES
 
 class AdbHelperMainTest {
     @Test
@@ -115,6 +116,33 @@ class AdbHelperMainTest {
         assertEquals("notes.txt", received?.relativePath)
         assertEquals("hello", received?.contentUtf8?.toString(Charsets.UTF_8))
         assertTrue(decodeResponses(output.toByteArray()).single().success)
+    }
+
+    @Test
+    fun existingFileErrorPrefixIsNotDuplicated() {
+        val input = requestFrame(
+            BridgeRequestEnvelope(
+                BridgeProtocol.VERSION,
+                "helper-file-too-large",
+                BridgeOperation.FILE_READ_TEXT.wireName,
+                buildJsonObject {
+                    put("workspace_id", "wired-adb")
+                    put("relative_path", "large.bin")
+                    put("max_bytes", WIRED_MAX_READ_BYTES)
+                    put("offset_bytes", 0L)
+                },
+            ),
+        )
+        val output = ByteArrayOutputStream()
+        val server = AdbHelperServer(
+            ByteArrayInputStream(input),
+            output,
+            engine = PrivilegedFileEngine { WiredAdbFileEngineResult.Failure("FILE_TOO_LARGE") },
+            uidProvider = { android.os.Process.SHELL_UID },
+        )
+
+        assertEquals(AdbHelperServer.EXIT_OK, server.run())
+        assertEquals("FILE_TOO_LARGE", decodeResponses(output.toByteArray()).single().errorCode)
     }
 
     @Test

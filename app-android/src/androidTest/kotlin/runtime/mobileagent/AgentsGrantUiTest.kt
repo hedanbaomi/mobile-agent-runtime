@@ -24,6 +24,7 @@ import androidx.compose.ui.test.performScrollTo
 import androidx.compose.ui.unit.Density
 import androidx.compose.ui.unit.dp
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -48,10 +49,28 @@ import runtime.mobileagent.feature.agents.AgentsScreen
 import runtime.mobileagent.feature.agents.AgentsUiState
 import runtime.mobileagent.integration.WorkspaceAccessItem
 import runtime.mobileagent.integration.WorkspaceAccessStatus
+import runtime.mobileagent.skills.tooling.ToolErrorCode
+import runtime.mobileagent.ui.workspaceToolErrorMessage
 import runtime.mobileagent.ui.selectDurablyAuthorizedWorkspace
 
 /** UI seam checks for the grant editor; these render no Application or repository internals. */
 class AgentsGrantUiTest {
+    @Test
+    fun workspaceBrowserErrorsUseSafeActionableCopyWithoutRawCodes() {
+        assertEquals(
+            "文件太大，无法作为文本读取。",
+            workspaceToolErrorMessage(ToolErrorCode.FILE_TOO_LARGE, chinese = true),
+        )
+        assertEquals(
+            "目录内容已发生变化，请从第一页重新打开。",
+            workspaceToolErrorMessage(ToolErrorCode.INVALID_CURSOR, chinese = true),
+        )
+        assertFalse(
+            workspaceToolErrorMessage(ToolErrorCode.INTERNAL_ERROR, chinese = true)
+                .contains(ToolErrorCode.INTERNAL_ERROR.name),
+        )
+    }
+
     @get:Rule
     val composeRule = createAndroidComposeRule<ComposeTestHostActivity>()
 
@@ -166,31 +185,15 @@ class AgentsGrantUiTest {
     }
 
     @Test
-    fun defaultWorkspaceRequiresAnActivePersistentGrantWithoutChangingOtherGrants() {
+    fun defaultWorkspaceSelectionDoesNotRequireManualAdvancedGrantDraft() {
         val noPersistentGrant = fixtureEditor().copy(defaultWorkspaceId = "workspace.one")
-        val missingGrantFailure = runCatching {
-            validateAgentWorkspaceDefaultDraft(noPersistentGrant)
-        }.exceptionOrNull()
-        assertEquals("默认工作区需要先授予该工作区的长期能力；保存不会自动扩大授权。", missingGrantFailure?.message)
-
-        val persistentGrant = CapabilityGrant(
-            grantId = "grant.persistent",
-            agentId = "agent.one",
-            capability = CapabilityId(CapabilityId.FILE_READ_TEXT),
-            workspaceId = "workspace.one",
-            lifetime = GrantLifetime.PERSISTENT,
-            policyVersion = 4,
-            createdAt = "2026-08-30T00:00:00Z",
-        )
-        val valid = noPersistentGrant.copy(
-            grants = listOf(AgentGrantUi(persistentGrant, workspaceName = "Documents")),
-        )
-        validateAgentWorkspaceDefaultDraft(valid)
+        validateAgentWorkspaceDefaultDraft(noPersistentGrant)
     }
 
     @Test
     fun workspaceDefaultSelectorIsSeparateFromQuickGrantAndCanBeCleared() {
         var editor by mutableStateOf(fixtureEditor())
+        val selectedDefaults = mutableListOf<String?>()
         composeRule.setContent {
             MaterialTheme {
                 AgentsScreen(
@@ -200,7 +203,13 @@ class AgentsGrantUiTest {
                         editor = editor,
                         editorOpen = true,
                     ),
-                    actions = AgentsActions(onEditorChange = { editor = it }),
+                    actions = AgentsActions(
+                        onEditorChange = { editor = it },
+                        onSetDefaultWorkspace = {
+                            selectedDefaults += it
+                            editor = editor.copy(defaultWorkspaceId = it)
+                        },
+                    ),
                 )
             }
         }
@@ -211,9 +220,13 @@ class AgentsGrantUiTest {
         composeRule.onNodeWithTag(AgentTestTags.WORKSPACE_DEFAULT_SELECTOR, useUnmergedTree = true)
             .performScrollTo()
             .performClick()
-        composeRule.onNodeWithText("Documents", useUnmergedTree = true)
+        composeRule.onNodeWithText("Documents（只读）", useUnmergedTree = true)
             .performClick()
         assertEquals("workspace.one", editor.defaultWorkspaceId)
+        assertEquals(listOf("workspace.one"), selectedDefaults)
+        composeRule.onNodeWithText("只读", useUnmergedTree = true)
+            .performScrollTo()
+            .assertIsDisplayed()
 
         composeRule.onNodeWithTag(AgentTestTags.WORKSPACE_DEFAULT_SELECTOR, useUnmergedTree = true)
             .performScrollTo()
@@ -221,6 +234,10 @@ class AgentsGrantUiTest {
         composeRule.onNodeWithText("不设置默认（新会话不绑定）", useUnmergedTree = true)
             .performClick()
         assertNull(editor.defaultWorkspaceId)
+        assertEquals(listOf("workspace.one", null), selectedDefaults)
+        composeRule.onNodeWithText("高级权限", useUnmergedTree = true)
+            .performScrollTo()
+            .assertIsDisplayed()
     }
 
     @Test

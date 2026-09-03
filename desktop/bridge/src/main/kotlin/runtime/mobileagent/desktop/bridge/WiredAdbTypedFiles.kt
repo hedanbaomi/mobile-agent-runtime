@@ -530,6 +530,26 @@ internal object WiredAdbHelperFrameCodec {
             require(it.length in 1..WIRED_MAX_CURSOR_BYTES)
             require(it.all { character -> character.code in 0x21..0x7e })
         }
+        val skippedEntries = payload.longOrNull("skipped_entries") ?: 0L
+        require(skippedEntries in 0..100_000)
+        val warnings = payload.arrayOrNull("warnings")
+        if (warnings != null) {
+            require(warnings.size <= 8)
+            val seen = HashSet<String>()
+            var warningCount = 0L
+            warnings.forEach { element ->
+                val warning = element as? JsonObject ?: throw IllegalArgumentException("listing warning is invalid")
+                require(warning.keys == setOf("code", "count"))
+                val code = warning.stringRequired("code")
+                require(code in LISTING_WARNING_CODES && seen.add(code))
+                val count = warning.longOrNull("count") ?: throw IllegalArgumentException("listing warning count is missing")
+                require(count in 1..100_000)
+                warningCount += count
+            }
+            require(warningCount == skippedEntries)
+        } else {
+            require(skippedEntries == 0L)
+        }
         listOf("created", "replaced", "deleted").forEach { payload.booleanOrNull(it) }
         payload.booleanOrNull("truncated")
         when (request.operation) {
@@ -563,7 +583,9 @@ internal object WiredAdbHelperFrameCodec {
     }
 
     private fun resultKeys(operation: WiredAdbTypedFileOperation): Set<String> = when (operation) {
-        WiredAdbTypedFileOperation.LIST -> setOf("operation", "relative_path", "entries", "truncated", "next_cursor", "version")
+        WiredAdbTypedFileOperation.LIST -> setOf(
+            "operation", "relative_path", "entries", "truncated", "next_cursor", "skipped_entries", "warnings", "version",
+        )
         WiredAdbTypedFileOperation.STAT -> setOf("operation", "relative_path", "entries", "bytes", "version")
         WiredAdbTypedFileOperation.READ_TEXT -> setOf(
             "operation", "relative_path", "text", "bytes", "version", "offset_bytes", "total_bytes", "eof",
@@ -576,6 +598,13 @@ internal object WiredAdbHelperFrameCodec {
     }
 
     private val ENTRY_KEYS = setOf("relative_path", "type", "bytes", "version")
+    private val LISTING_WARNING_CODES = setOf(
+        "SYMLINK_SKIPPED",
+        "UNSUPPORTED_ENTRY_SKIPPED",
+        "TRANSIENT_ENTRY_SKIPPED",
+        "UNREADABLE_ENTRY_SKIPPED",
+        "METADATA_UNAVAILABLE",
+    )
 }
 
 /**
@@ -677,6 +706,7 @@ private val WIRED_ADB_HELPER_ERROR_CODES = setOf(
     "FILE_OPERATION_UNAVAILABLE",
     "FILE_ATOMIC_REPLACE_UNAVAILABLE",
     "FILE_WRITE_UNVERIFIED",
+    "FILE_TOO_LARGE",
     "FILE_CONFLICT",
     "FILE_OFFSET_OUT_OF_RANGE",
     "FILE_INVALID_PATCH",

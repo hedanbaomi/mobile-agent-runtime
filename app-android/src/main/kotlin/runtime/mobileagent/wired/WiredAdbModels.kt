@@ -7,6 +7,7 @@ import java.nio.charset.StandardCharsets
 import java.security.MessageDigest
 import java.util.UUID
 import runtime.mobileagent.bridge.BridgeProtocol
+import runtime.mobileagent.skills.tooling.WorkspaceListingWarning
 
 /**
  * Lifecycle is deliberately independent from trust and transport
@@ -196,6 +197,9 @@ data class WiredAdbFileResult(
     val truncated: Boolean = false,
     /** Opaque continuation token, valid only for the same authenticated workspace binding. */
     val nextCursor: String? = null,
+    /** Bounded, path-free categories for children omitted by a best-effort list. */
+    val skippedEntries: Int = 0,
+    val listingWarnings: List<WorkspaceListingWarning> = emptyList(),
     /** Stable metadata/version token for stat/read/conditional patch. */
     val version: Long? = null,
     /** Byte offset and total size for a chunked text read. */
@@ -252,10 +256,21 @@ enum class WiredAdbErrorCode {
     WORKSPACE_BINDING_REPLAYED,
     WORKSPACE_LOCATOR_INVALID,
     WORKSPACE_NOT_FOUND,
+    PATH_OUT_OF_SCOPE,
+    SYMLINK_FORBIDDEN,
+    INVALID_CONTENT,
+    TARGET_EXISTS,
+    NON_EMPTY_DIRECTORY,
+    FILE_TOO_LARGE,
+    QUOTA_EXCEEDED,
+    PERMISSION_DENIED,
     CONFLICT,
     OFFSET_OUT_OF_RANGE,
     INVALID_PATCH,
     INVALID_CURSOR,
+    UNSUPPORTED_ENTRY,
+    OPERATION_UNAVAILABLE,
+    WRITE_UNVERIFIED,
     ATOMIC_REPLACE_UNAVAILABLE,
     FULL_DEVICE_GRANT_REQUIRED,
     ROOT_BACKEND_UNAVAILABLE,

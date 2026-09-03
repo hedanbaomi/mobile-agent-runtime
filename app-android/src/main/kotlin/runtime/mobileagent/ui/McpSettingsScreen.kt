@@ -62,6 +62,7 @@ fun McpSettingsScreen(
     state: McpUiState,
     actions: McpActions = McpActions(),
     modifier: Modifier = Modifier,
+    showPageTitle: Boolean = true,
 ) {
     var endpoint by remember(state.endpoint) { mutableStateOf(state.endpoint) }
     var namespace by remember(state.namespace) { mutableStateOf(state.namespace.ifBlank { "mcp" }) }
@@ -78,7 +79,9 @@ fun McpSettingsScreen(
             .padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
-        Text(if (zh) "MCP 设置" else "MCP settings", style = MaterialTheme.typography.headlineSmall)
+        if (showPageTitle) {
+            Text(if (zh) "MCP 设置" else "MCP settings", style = MaterialTheme.typography.headlineSmall)
+        }
         Text(
             if (zh) "默认不配置服务器、不联网，也不会启动 stdio。MCP 描述来自远端，仅视为不可信参考。"
             else "No server, network, or stdio process is enabled by default. Remote MCP descriptions are untrusted reference text.",

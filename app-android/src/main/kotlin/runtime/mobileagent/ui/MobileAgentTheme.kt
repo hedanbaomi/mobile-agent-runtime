@@ -35,6 +35,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalView
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.view.WindowCompat
@@ -252,6 +253,10 @@ fun AppNavigationScaffold(
     destinations: List<AppNavigationDestination>,
     selectedRoute: String,
     onRouteSelected: (String) -> Unit,
+    title: String = "",
+    navigationAffordance: ShellNavigationAffordance = ShellNavigationAffordance.NONE,
+    onBack: () -> Unit = {},
+    navigationBackLabel: String = "返回",
     modifier: Modifier = Modifier,
     drawerOpen: Boolean = false,
     onDrawerOpenChange: (Boolean) -> Unit = {},
@@ -261,8 +266,6 @@ fun AppNavigationScaffold(
     drawerContent: (@Composable (onClose: () -> Unit) -> Unit)? = null,
     content: @Composable (PaddingValues) -> Unit,
 ) {
-    val systemInsets = appShellWindowInsets(consumeBottomSystemInsets)
-    val shellModifier = modifier.windowInsetsPadding(systemInsets)
     if (drawerContent == null) {
         GlobalDrawerShell(
             selectedRoute = selectedRoute,
@@ -272,7 +275,12 @@ fun AppNavigationScaffold(
             onDrawerOpenChange = onDrawerOpenChange,
             showCompactOpenButton = showCompactMenuButton,
             compactOpenButtonLabel = compactMenuButtonLabel,
-            modifier = shellModifier,
+            title = title,
+            navigationAffordance = navigationAffordance,
+            onBack = onBack,
+            navigationBackLabel = navigationBackLabel,
+            consumeBottomSystemInsets = consumeBottomSystemInsets,
+            modifier = modifier,
             content = content,
         )
     } else {
@@ -284,7 +292,12 @@ fun AppNavigationScaffold(
             onDrawerOpenChange = onDrawerOpenChange,
             showCompactOpenButton = showCompactMenuButton,
             compactOpenButtonLabel = compactMenuButtonLabel,
-            modifier = shellModifier,
+            title = title,
+            navigationAffordance = navigationAffordance,
+            onBack = onBack,
+            navigationBackLabel = navigationBackLabel,
+            consumeBottomSystemInsets = consumeBottomSystemInsets,
+            modifier = modifier,
             drawerContent = drawerContent,
             content = content,
         )
@@ -294,7 +307,10 @@ fun AppNavigationScaffold(
 /** Stable textual label used by a back affordance without adding decorative glyphs. */
 @Composable
 fun BackLabel(onClick: () -> Unit, label: String, modifier: Modifier = Modifier) {
-    androidx.compose.material3.TextButton(onClick = onClick, modifier = modifier) {
+    androidx.compose.material3.TextButton(
+        onClick = onClick,
+        modifier = modifier.testTag("shell.navigation.back"),
+    ) {
         Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = label)
         Text(label, modifier = Modifier.padding(start = 4.dp))
     }

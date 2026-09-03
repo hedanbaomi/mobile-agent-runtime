@@ -30,6 +30,7 @@ import java.util.concurrent.CancellationException
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicReference
+import runtime.mobileagent.skills.tooling.ToolError
 
 data class ToolSpec(
     val name: String,
@@ -49,6 +50,8 @@ sealed interface ToolResult {
     data class Value(val json: String) : ToolResult
     data class Denied(val reason: String) : ToolResult
     data class Invalid(val reason: String) : ToolResult
+    /** A known, typed operational failure that is safe to project to the model and UI. */
+    data class Failure(val error: ToolError) : ToolResult
     /** A request may have executed externally; only an acknowledged new invocation may retry. */
     data class UnknownOutcome(val reason: String) : ToolResult
     data object NeedsApproval : ToolResult

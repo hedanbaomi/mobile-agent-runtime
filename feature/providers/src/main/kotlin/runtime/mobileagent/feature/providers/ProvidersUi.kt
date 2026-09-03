@@ -198,8 +198,18 @@ data class ProvidersActions(
 )
 
 @Composable
-fun ProvidersScreen(state: ProvidersUiState, actions: ProvidersActions = ProvidersActions(), modifier: Modifier = Modifier) {
+fun ProvidersScreen(
+    state: ProvidersUiState,
+    actions: ProvidersActions = ProvidersActions(),
+    modifier: Modifier = Modifier,
+    showPageTitle: Boolean = true,
+    renderEditorAsPage: Boolean = false,
+) {
     val zh = state.language.equals("zh-CN", true)
+    if (state.editorOpen && renderEditorAsPage) {
+        ProviderEditorPage(state, actions, zh, modifier)
+        return
+    }
     var deleteProviderId by remember { mutableStateOf<String?>(null) }
     var deleteModelId by remember { mutableStateOf<String?>(null) }
     var probeRequested by remember { mutableStateOf(false) }
@@ -208,7 +218,7 @@ fun ProvidersScreen(state: ProvidersUiState, actions: ProvidersActions = Provide
         val wide = maxWidth >= 720.dp
         if (wide) {
             Row(Modifier.fillMaxSize(), horizontalArrangement = Arrangement.spacedBy(16.dp)) {
-                ProviderListPane(state, actions, zh, Modifier.weight(0.42f).fillMaxSize())
+                ProviderListPane(state, actions, zh, showPageTitle, Modifier.weight(0.42f).fillMaxSize())
                 Column(Modifier.weight(0.58f).fillMaxSize().verticalScroll(rememberScrollState())) {
                     ProviderDetail(
                         state,
@@ -223,7 +233,7 @@ fun ProvidersScreen(state: ProvidersUiState, actions: ProvidersActions = Provide
             }
         } else {
             Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                ProviderListPane(state, actions, zh, Modifier.fillMaxWidth())
+                ProviderListPane(state, actions, zh, showPageTitle, Modifier.fillMaxWidth())
                 ProviderDetail(
                     state,
                     actions,
@@ -295,10 +305,20 @@ fun ProvidersScreen(state: ProvidersUiState, actions: ProvidersActions = Provide
 }
 
 @Composable
-private fun ProviderListPane(state: ProvidersUiState, actions: ProvidersActions, zh: Boolean, modifier: Modifier) {
+private fun ProviderListPane(
+    state: ProvidersUiState,
+    actions: ProvidersActions,
+    zh: Boolean,
+    showPageTitle: Boolean,
+    modifier: Modifier,
+) {
     Column(modifier) {
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-            Text(if (zh) "服务商" else "Providers", style = MaterialTheme.typography.headlineSmall, modifier = Modifier.weight(1f))
+            if (showPageTitle) {
+                Text(if (zh) "服务商" else "Providers", style = MaterialTheme.typography.headlineSmall, modifier = Modifier.weight(1f))
+            } else {
+                Spacer(Modifier.weight(1f))
+            }
             Button(onClick = { actions.onOpenEditor(null) }) { Text(if (zh) "添加服务商" else "Add provider") }
         }
         if (state.status.isNotBlank()) ProviderStatus(state.status, Modifier.padding(vertical = 8.dp))
@@ -502,6 +522,71 @@ private fun ProviderEditorDialog(state: ProvidersUiState, actions: ProvidersActi
     val draft = state.draft
     val showModelFields = draft.modelProfileId != null || draft.modelId.isNotBlank() || draft.id == null
     val budgetError = if (showModelFields) providerBudgetError(draft.contextLimit, draft.outputLimit, zh) else null
+    AlertDialog(
+        onDismissRequest = actions.onCloseEditor,
+        title = { Text(providerEditorTitle(draft, zh)) },
+        text = {
+            ProviderEditorFields(
+                state = state,
+                actions = actions,
+                zh = zh,
+                showModelFields = showModelFields,
+                budgetError = budgetError,
+                modifier = Modifier.verticalScroll(rememberScrollState()),
+            )
+        },
+        confirmButton = { Button(onClick = actions.onSave, enabled = budgetError == null) { Text(if (zh) "保存" else "Save") } },
+        dismissButton = { TextButton(onClick = actions.onCloseEditor) { Text(if (zh) "取消" else "Cancel") } },
+    )
+}
+
+@Composable
+private fun ProviderEditorPage(
+    state: ProvidersUiState,
+    actions: ProvidersActions,
+    zh: Boolean,
+    modifier: Modifier,
+) {
+    val draft = state.draft
+    val showModelFields = draft.modelProfileId != null || draft.modelId.isNotBlank() || draft.id == null
+    val budgetError = if (showModelFields) providerBudgetError(draft.contextLimit, draft.outputLimit, zh) else null
+    Surface(modifier.fillMaxSize().testTag("provider.editor.page")) {
+        Column(Modifier.fillMaxSize().padding(horizontal = 16.dp, vertical = 12.dp)) {
+            ProviderEditorFields(
+                state = state,
+                actions = actions,
+                zh = zh,
+                showModelFields = showModelFields,
+                budgetError = budgetError,
+                modifier = Modifier.weight(1f).verticalScroll(rememberScrollState()),
+            )
+            Row(
+                Modifier.fillMaxWidth().padding(top = 12.dp),
+                horizontalArrangement = Arrangement.End,
+            ) {
+                TextButton(onClick = actions.onCloseEditor) { Text(if (zh) "取消" else "Cancel") }
+                Button(onClick = actions.onSave, enabled = budgetError == null) { Text(if (zh) "保存" else "Save") }
+            }
+        }
+    }
+}
+
+private fun providerEditorTitle(draft: ProviderDraft, zh: Boolean): String = when {
+    draft.modelProfileId != null -> if (zh) "编辑模型" else "Edit model"
+    draft.id == null -> if (zh) "添加服务商" else "Add provider"
+    else -> if (zh) "编辑服务商" else "Edit provider"
+}
+
+@Composable
+private fun ProviderEditorFields(
+    state: ProvidersUiState,
+    actions: ProvidersActions,
+    zh: Boolean,
+    showModelFields: Boolean,
+    budgetError: String?,
+    modifier: Modifier = Modifier,
+) {
+    val draft = state.draft
     val noCorrectionText = KeyboardOptions(
         capitalization = KeyboardCapitalization.None,
         autoCorrectEnabled = false,
@@ -517,16 +602,49 @@ private fun ProviderEditorDialog(state: ProvidersUiState, actions: ProvidersActi
         autoCorrectEnabled = false,
         keyboardType = KeyboardType.Uri,
     )
-    AlertDialog(
-        onDismissRequest = actions.onCloseEditor,
-        title = { Text(if (draft.modelProfileId != null) { if (zh) "编辑模型" else "Edit model" } else if (draft.id == null) { if (zh) "添加服务商" else "Add provider" } else { if (zh) "编辑服务商" else "Edit provider" }) },
-        text = {
-            Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+    Column(modifier, verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 state.editorError?.let { Text(it, color = MaterialTheme.colorScheme.error) }
                 budgetError?.let { Text(it, color = MaterialTheme.colorScheme.error) }
                 OutlinedTextField(draft.name, { actions.onDraftChange(draft.copy(name = it)) }, label = { Text(if (zh) "名称" else "Name") }, keyboardOptions = noCorrectionText, modifier = Modifier.fillMaxWidth())
                 OutlinedTextField(draft.baseUrl, { actions.onDraftChange(draft.copy(baseUrl = it)) }, label = { Text(if (zh) "基础地址" else "Base URL") }, keyboardOptions = uriOptions, modifier = Modifier.fillMaxWidth())
-                Text(if (zh) "API 格式：OpenAI Compatible（当前唯一支持的格式）" else "API format: OpenAI Compatible (the only supported format)", style = MaterialTheme.typography.bodySmall)
+                var apiFormatMenuOpen by remember(draft.id) { mutableStateOf(false) }
+                Box {
+                    OutlinedButton(
+                        onClick = { apiFormatMenuOpen = true },
+                        modifier = Modifier.fillMaxWidth().testTag("provider.apiFormat"),
+                    ) {
+                        Text(
+                            if (zh) "API 格式：${providerApiFormatLabel(draft.apiFormat, zh)}"
+                            else "API format: ${providerApiFormatLabel(draft.apiFormat, zh)}",
+                        )
+                    }
+                    DropdownMenu(
+                        expanded = apiFormatMenuOpen,
+                        onDismissRequest = { apiFormatMenuOpen = false },
+                    ) {
+                        DropdownMenuItem(
+                            text = { Text(providerApiFormatLabel("OPENAI_COMPATIBLE", zh)) },
+                            onClick = {
+                                apiFormatMenuOpen = false
+                                actions.onDraftChange(draft.copy(apiFormat = "OPENAI_COMPATIBLE"))
+                            },
+                            modifier = Modifier.testTag("provider.apiFormat.compatible"),
+                        )
+                        DropdownMenuItem(
+                            text = { Text(providerApiFormatLabel("OPENAI_RESPONSES", zh)) },
+                            onClick = {
+                                apiFormatMenuOpen = false
+                                actions.onDraftChange(draft.copy(apiFormat = "OPENAI_RESPONSES"))
+                            },
+                            modifier = Modifier.testTag("provider.apiFormat.responses"),
+                        )
+                    }
+                }
+                Text(
+                    providerApiFormatExplanation(draft.apiFormat, zh),
+                    style = MaterialTheme.typography.bodySmall,
+                    modifier = Modifier.testTag("provider.apiFormat.explanation"),
+                )
                 if (showModelFields) {
                     OutlinedTextField(draft.modelId, { actions.onDraftChange(draft.copy(modelId = it)) }, label = { Text(if (zh) "模型 ID" else "Model id") }, keyboardOptions = noCorrectionAscii, modifier = Modifier.fillMaxWidth())
                     Text(if (zh) "操作：CHAT / EMBEDDING / RERANKER；图片是 Chat 的输入模态，不是独立服务。" else "Operation: CHAT / EMBEDDING / RERANKER. Images are a Chat input modality, not a separate service.", style = MaterialTheme.typography.bodySmall)
@@ -539,11 +657,7 @@ private fun ProviderEditorDialog(state: ProvidersUiState, actions: ProvidersActi
                 }
                 OutlinedTextField(draft.apiKey, { actions.onDraftChange(draft.copy(apiKey = it)) }, label = { Text(if (draft.id == null) { if (zh) "API 密钥" else "API key" } else { if (zh) "替换 API 密钥（可选）" else "Replace API key (optional)" }) }, visualTransformation = PasswordVisualTransformation(), keyboardOptions = noCorrectionAscii, modifier = Modifier.fillMaxWidth())
                 Text(if (zh) "能力探测分别记录用户声明与真实验证，可能产生服务商费用，且只在明确确认后运行。" else "Probes record user-declared vs verified behavior, can incur provider charges, and only run after explicit confirmation.", style = MaterialTheme.typography.bodySmall)
-            }
-        },
-        confirmButton = { Button(onClick = actions.onSave, enabled = budgetError == null) { Text(if (zh) "保存" else "Save") } },
-        dismissButton = { TextButton(onClick = actions.onCloseEditor) { Text(if (zh) "取消" else "Cancel") } },
-    )
+    }
 }
 
 @Composable
@@ -651,11 +765,31 @@ private fun connectionErrorLabel(error: ProviderConnectionErrorCode?, zh: Boolea
     ProviderConnectionErrorCode.TLS_FAILURE -> if (zh) "TLS 安全连接失败" else "TLS failure"
     ProviderConnectionErrorCode.TIMEOUT -> if (zh) "请求超时" else "Timeout"
     ProviderConnectionErrorCode.AUTH_FAILED -> if (zh) "认证失败" else "Authentication failed"
+    ProviderConnectionErrorCode.ENDPOINT_UNSUPPORTED -> if (zh) "Responses 端点不支持" else "Responses endpoint unsupported"
     ProviderConnectionErrorCode.MODEL_NOT_FOUND -> if (zh) "模型不存在" else "Model not found"
     ProviderConnectionErrorCode.RATE_LIMITED -> if (zh) "请求受限" else "Rate limited"
+    ProviderConnectionErrorCode.FEATURE_UNSUPPORTED -> if (zh) "请求能力不支持" else "Requested feature unsupported"
     ProviderConnectionErrorCode.PROVIDER_REJECTED -> if (zh) "服务商拒绝请求" else "Provider rejected request"
     ProviderConnectionErrorCode.INVALID_RESPONSE -> if (zh) "响应无效" else "Invalid response"
     ProviderConnectionErrorCode.CONFIG_INVALID -> if (zh) "配置无效" else "Invalid configuration"
     ProviderConnectionErrorCode.CREDENTIAL_UNAVAILABLE -> if (zh) "凭据不可用" else "Credential unavailable"
     ProviderConnectionErrorCode.UNKNOWN, null -> if (zh) "未知错误" else "Unknown error"
+}
+
+private fun providerApiFormatLabel(format: String, zh: Boolean): String = when (format.uppercase()) {
+    "OPENAI_RESPONSES" -> if (zh) "OpenAI Responses（/responses）" else "OpenAI Responses (/responses)"
+    else -> if (zh) "OpenAI Compatible（/chat/completions）" else "OpenAI Compatible (/chat/completions)"
+}
+
+private fun providerApiFormatExplanation(format: String, zh: Boolean): String = when (format.uppercase()) {
+    "OPENAI_RESPONSES" -> if (zh) {
+        "Responses 使用 input、function_call_output 和独立 SSE 事件；仅适用于支持 POST /responses 的服务。"
+    } else {
+        "Responses uses input, function_call_output, and its own SSE events; choose it only for providers supporting POST /responses."
+    }
+    else -> if (zh) {
+        "Compatible 使用传统 messages 与 /chat/completions；保留用于兼容 OpenAI 风格旧端点。"
+    } else {
+        "Compatible uses traditional messages and /chat/completions for legacy OpenAI-style endpoints."
+    }
 }

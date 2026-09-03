@@ -156,6 +156,12 @@ class RuntimePeerAdaptersTest {
         val cases = listOf(
             "SUCCEEDED" to DiagnosticOperationState.SUCCEEDED,
             "FAILED" to DiagnosticOperationState.FAILED,
+            "FILE_TOO_LARGE" to DiagnosticOperationState.FAILED,
+            "INVALID_CURSOR" to DiagnosticOperationState.FAILED,
+            "UNSUPPORTED_ENTRY" to DiagnosticOperationState.FAILED,
+            "OPERATION_UNAVAILABLE" to DiagnosticOperationState.FAILED,
+            "BRIDGE_PROTOCOL_MISMATCH" to DiagnosticOperationState.FAILED,
+            "PERMISSION_DENIED" to DiagnosticOperationState.DENIED,
             "APPROVAL_DENIED" to DiagnosticOperationState.DENIED,
             "CANCELLED" to DiagnosticOperationState.CANCELLED,
             "UNKNOWN_OUTCOME" to DiagnosticOperationState.UNKNOWN,

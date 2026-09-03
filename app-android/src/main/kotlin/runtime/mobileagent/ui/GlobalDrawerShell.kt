@@ -18,6 +18,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Menu
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -31,6 +32,9 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.material3.Scaffold
+import androidx.compose.material3.TopAppBar
+import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.material3.DrawerValue
 import androidx.compose.material3.rememberDrawerState
 import androidx.compose.runtime.Composable
@@ -50,6 +54,7 @@ import kotlinx.coroutines.launch
  * this component keeps compact and wide layouts identical in information
  * architecture.
  */
+@OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class)
 @Composable
 fun GlobalDrawerShell(
     selectedRoute: String,
@@ -59,6 +64,15 @@ fun GlobalDrawerShell(
     onDrawerOpenChange: (Boolean) -> Unit = {},
     showCompactOpenButton: Boolean = false,
     compactOpenButtonLabel: String = "打开菜单",
+    title: String = "",
+    navigationAffordance: ShellNavigationAffordance = if (showCompactOpenButton) {
+        ShellNavigationAffordance.MENU
+    } else {
+        ShellNavigationAffordance.NONE
+    },
+    onBack: () -> Unit = {},
+    navigationBackLabel: String = "返回",
+    consumeBottomSystemInsets: Boolean = true,
     modifier: Modifier = Modifier,
     drawerWidth: Dp = 304.dp,
     content: @Composable (PaddingValues) -> Unit,
@@ -73,68 +87,101 @@ fun GlobalDrawerShell(
 ) {
     BoxWithConstraints(modifier = modifier.fillMaxSize()) {
         val wide = maxWidth >= 600.dp
-        if (wide) {
-            Row(Modifier.fillMaxSize().testTag("global.shell.wide")) {
-                Surface(
-                    modifier = Modifier
-                        .width(drawerWidth)
-                        .fillMaxHeight()
-                        .testTag("global.drawer.permanent"),
-                    color = MaterialTheme.colorScheme.surface,
-                    tonalElevation = 1.dp,
-                ) {
-                    drawerContent { onDrawerOpenChange(false) }
-                }
-                Surface(Modifier.weight(1f).fillMaxHeight()) {
-                    content(PaddingValues(0.dp))
-                }
-            }
-        } else {
-            val scope = rememberCoroutineScope()
-            val drawerState = rememberDrawerState(
-                if (drawerOpen) DrawerValue.Open else DrawerValue.Closed,
-            )
-            fun closeDrawer() {
-                onDrawerOpenChange(false)
-                scope.launch { drawerState.close() }
-            }
-            LaunchedEffect(drawerOpen) {
-                if (drawerOpen && !drawerState.isOpen) drawerState.open()
-                if (!drawerOpen && drawerState.isOpen) drawerState.close()
-            }
-            LaunchedEffect(drawerState.currentValue) {
-                val open = drawerState.isOpen
-                if (open != drawerOpen) onDrawerOpenChange(open)
-            }
-            BackHandler(enabled = drawerState.isOpen) { closeDrawer() }
-            Box(Modifier.fillMaxSize()) {
-                ModalNavigationDrawer(
-                    drawerState = drawerState,
-                    drawerContent = {
-                        ModalDrawerSheet(
-                            modifier = Modifier
-                                .fillMaxHeight()
-                                .width(drawerWidth)
-                                .testTag("global.drawer.modal"),
-                        ) {
-                            drawerContent(::closeDrawer)
+        val scope = rememberCoroutineScope()
+        val drawerState = rememberDrawerState(
+            if (drawerOpen) DrawerValue.Open else DrawerValue.Closed,
+        )
+        fun closeDrawer() {
+            onDrawerOpenChange(false)
+            scope.launch { drawerState.close() }
+        }
+        LaunchedEffect(drawerOpen) {
+            if (drawerOpen && !drawerState.isOpen) drawerState.open()
+            if (!drawerOpen && drawerState.isOpen) drawerState.close()
+        }
+        LaunchedEffect(drawerState.currentValue) {
+            val open = drawerState.isOpen
+            if (open != drawerOpen) onDrawerOpenChange(open)
+        }
+        BackHandler(enabled = !wide && drawerState.isOpen) { closeDrawer() }
+
+        val windowInsets = appShellWindowInsets(consumeBottomSystemInsets)
+        val showBack = navigationAffordance == ShellNavigationAffordance.BACK
+        val showMenu = !wide && navigationAffordance == ShellNavigationAffordance.MENU
+        Scaffold(
+            modifier = Modifier.fillMaxSize().testTag("global.shell"),
+            contentWindowInsets = windowInsets,
+            topBar = {
+                TopAppBar(
+                    modifier = Modifier.testTag("global.shell.topBar"),
+                    title = {
+                        Text(
+                            text = title,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.testTag("global.shell.title"),
+                        )
+                    },
+                    navigationIcon = {
+                        if (!drawerState.isOpen && !drawerOpen) {
+                            when {
+                                showBack -> IconButton(
+                                    onClick = onBack,
+                                    modifier = Modifier
+                                        .size(48.dp)
+                                        .testTag("global.shell.navigation.back"),
+                                ) {
+                                    Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = navigationBackLabel)
+                                }
+                                showMenu -> IconButton(
+                                    onClick = { onDrawerOpenChange(true) },
+                                    modifier = Modifier
+                                        .size(48.dp)
+                                        .testTag("global.shell.navigation.menu"),
+                                ) {
+                                    Icon(Icons.Filled.Menu, contentDescription = compactOpenButtonLabel)
+                                }
+                            }
                         }
                     },
-                ) {
-                    content(PaddingValues(0.dp))
-                }
-                if (showCompactOpenButton && !drawerState.isOpen) {
-                    IconButton(
-                        onClick = { onDrawerOpenChange(true) },
-                        modifier = Modifier
-                            .align(androidx.compose.ui.Alignment.TopStart)
-                            .size(48.dp)
-                            .testTag("global.drawer.open"),
+                    colors = TopAppBarDefaults.topAppBarColors(
+                        containerColor = MaterialTheme.colorScheme.surface,
+                    ),
+                )
+            },
+        ) { innerPadding ->
+            Box(Modifier.fillMaxSize().padding(innerPadding)) {
+                if (wide) {
+                    Row(Modifier.fillMaxSize().testTag("global.shell.wide")) {
+                        Surface(
+                            modifier = Modifier
+                                .width(drawerWidth)
+                                .fillMaxHeight()
+                                .testTag("global.drawer.permanent"),
+                            color = MaterialTheme.colorScheme.surface,
+                            tonalElevation = 1.dp,
+                        ) {
+                            drawerContent { onDrawerOpenChange(false) }
+                        }
+                        Surface(Modifier.weight(1f).fillMaxHeight()) {
+                            content(PaddingValues(0.dp))
+                        }
+                    }
+                } else {
+                    ModalNavigationDrawer(
+                        drawerState = drawerState,
+                        drawerContent = {
+                            ModalDrawerSheet(
+                                modifier = Modifier
+                                    .fillMaxHeight()
+                                    .width(drawerWidth)
+                                    .testTag("global.drawer.modal"),
+                            ) {
+                                drawerContent(::closeDrawer)
+                            }
+                        },
                     ) {
-                        Icon(
-                            Icons.Filled.Menu,
-                            contentDescription = compactOpenButtonLabel,
-                        )
+                        content(PaddingValues(0.dp))
                     }
                 }
             }

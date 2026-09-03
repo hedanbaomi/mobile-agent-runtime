@@ -7,6 +7,7 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.width
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
@@ -33,6 +34,7 @@ import runtime.mobileagent.feature.providers.ProviderProbeUiState
 import runtime.mobileagent.feature.providers.ProvidersActions
 import runtime.mobileagent.feature.providers.ProvidersScreen
 import runtime.mobileagent.feature.providers.ProvidersUiState
+import runtime.mobileagent.feature.providers.ProviderDraft
 import runtime.mobileagent.provider.CapabilityCheck
 import runtime.mobileagent.provider.CapabilityCheckStatus
 
@@ -147,6 +149,37 @@ class ProvidersTypedUiTest {
             .also { assertEquals(0, it.size) }
         compose.onNodeWithTag("provider.overflow", useUnmergedTree = true).performClick()
         compose.onNodeWithTag("provider.overflow.edit", useUnmergedTree = true).assertIsDisplayed()
+    }
+
+    @Test
+    fun editorExplainsAndAllowsSelectingResponsesFormat() {
+        val uiState = mutableStateOf(
+            state(ProviderProbeUiState()).copy(
+                editorOpen = true,
+                draft = ProviderDraft(
+                    name = "Responses",
+                    baseUrl = "https://example.invalid/v1",
+                    apiFormat = "OPENAI_RESPONSES",
+                    modelId = "gpt-responses",
+                ),
+            ),
+        )
+        compose.setContent {
+            MaterialTheme {
+                ProvidersScreen(
+                    state = uiState.value,
+                    actions = ProvidersActions(
+                        onDraftChange = { uiState.value = uiState.value.copy(draft = it) },
+                    ),
+                )
+            }
+        }
+
+        compose.onNodeWithTag("provider.apiFormat", useUnmergedTree = true).assertIsDisplayed().performClick()
+        compose.onNodeWithTag("provider.apiFormat.compatible", useUnmergedTree = true).assertIsDisplayed()
+        compose.onNodeWithTag("provider.apiFormat.responses", useUnmergedTree = true).assertIsDisplayed()
+        compose.onNodeWithTag("provider.apiFormat.compatible", useUnmergedTree = true).performClick()
+        compose.onNodeWithText("Compatible 使用传统 messages 与 /chat/completions；保留用于兼容 OpenAI 风格旧端点。", useUnmergedTree = true).assertIsDisplayed()
     }
 
     private fun state(probe: ProviderProbeUiState): ProvidersUiState = ProvidersUiState(

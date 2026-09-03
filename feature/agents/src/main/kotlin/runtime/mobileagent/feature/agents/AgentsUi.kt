@@ -34,6 +34,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Switch
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -247,12 +248,16 @@ data class AgentsUiState(
     val query: String = "",
     val language: String = "zh-CN",
     val loading: Boolean = false,
+    /** True while an asynchronous workspace selection belongs to the open editor. */
+    val workspaceSelectionBusy: Boolean = false,
     val error: String? = null,
     val status: String = "",
     /** False only when the VM could not resolve its injected grant port. */
     val grantStoreAvailable: Boolean = true,
     val grantStoreError: String? = null,
 )
+
+enum class AgentCompactPane { BOTH, LIST, DETAIL }
 
 data class AgentsActions(
     val onQuery: (String) -> Unit = {},
@@ -266,23 +271,51 @@ data class AgentsActions(
     val onToggleResource: (String, Boolean) -> Unit = { _, _ -> },
     val onSnapshot: () -> Unit = {},
     /** Workspace selection is owned by the host WorkspaceAccess broker. */
+    val onSetDefaultWorkspace: (String?) -> Unit = {},
     val onChooseSafWorkspace: () -> Unit = {},
     val onBrowsePrivilegedWorkspace: () -> Unit = {},
     val onToggleFullDeviceFiles: (Boolean) -> Unit = {},
 )
 
 @Composable
-fun AgentsScreen(state: AgentsUiState, actions: AgentsActions = AgentsActions(), modifier: Modifier = Modifier) {
+fun AgentsScreen(
+    state: AgentsUiState,
+    actions: AgentsActions = AgentsActions(),
+    modifier: Modifier = Modifier,
+    showPageTitle: Boolean = true,
+    compactPane: AgentCompactPane = AgentCompactPane.BOTH,
+    renderEditorAsPage: Boolean = false,
+) {
+    val zh = state.language.equals("zh-CN", true)
+    if (state.editor != null && renderEditorAsPage) {
+        AgentEditorPage(
+            editor = state.editor,
+            actions = actions,
+            zh = zh,
+            error = state.error,
+            grantStoreAvailable = state.grantStoreAvailable,
+            grantStoreError = state.grantStoreError,
+            workspaceSelectionBusy = state.workspaceSelectionBusy,
+            modifier = modifier,
+        )
+        return
+    }
     BoxWithConstraints(modifier.fillMaxSize().padding(16.dp).testTag(AgentTestTags.SCREEN)) {
         val wide = maxWidth >= 720.dp
         if (wide) {
             Row(Modifier.fillMaxSize(), horizontalArrangement = Arrangement.spacedBy(16.dp)) {
-                AgentListPane(state, actions, Modifier.weight(0.38f).fillMaxSize())
+                AgentListPane(state, actions, Modifier.weight(0.38f).fillMaxSize(), showPageTitle)
                 Column(Modifier.weight(0.62f).fillMaxSize().verticalScroll(rememberScrollState())) { AgentSummary(state, actions) }
+            }
+        } else if (compactPane == AgentCompactPane.DETAIL) {
+            Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState())) { AgentSummary(state, actions) }
+        } else if (compactPane == AgentCompactPane.LIST) {
+            Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState())) {
+                AgentListPane(state, actions, Modifier.fillMaxWidth(), showPageTitle)
             }
         } else {
             Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                AgentListPane(state, actions, Modifier.fillMaxWidth())
+                AgentListPane(state, actions, Modifier.fillMaxWidth(), showPageTitle)
                 AgentSummary(state, actions)
             }
         }
@@ -295,16 +328,21 @@ fun AgentsScreen(state: AgentsUiState, actions: AgentsActions = AgentsActions(),
             error = state.error,
             grantStoreAvailable = state.grantStoreAvailable,
             grantStoreError = state.grantStoreError,
+            workspaceSelectionBusy = state.workspaceSelectionBusy,
         )
     }
 }
 
 @Composable
-private fun AgentListPane(state: AgentsUiState, actions: AgentsActions, modifier: Modifier) {
+private fun AgentListPane(state: AgentsUiState, actions: AgentsActions, modifier: Modifier, showPageTitle: Boolean) {
     val zh = state.language.equals("zh-CN", true)
     Column(modifier.testTag(AgentTestTags.LIST)) {
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-            Text(if (zh) "智能体" else "Agents", style = MaterialTheme.typography.headlineSmall, modifier = Modifier.weight(1f))
+            if (showPageTitle) {
+                Text(if (zh) "智能体" else "Agents", style = MaterialTheme.typography.headlineSmall, modifier = Modifier.weight(1f))
+            } else {
+                Spacer(Modifier.weight(1f))
+            }
             Button(onClick = { actions.onOpenEditor(null) }, modifier = Modifier.testTag(AgentTestTags.NEW)) {
                 Text(if (zh) "新建" else "New agent")
             }
@@ -609,15 +647,104 @@ private fun AgentEditorDialog(
     error: String?,
     grantStoreAvailable: Boolean,
     grantStoreError: String?,
+    workspaceSelectionBusy: Boolean,
 ) {
     AlertDialog(
         onDismissRequest = actions.onCloseEditor,
-        title = { Text(if (editor.id == null) { if (zh) "新建智能体" else "New agent" } else { if (zh) "编辑智能体" else "Edit agent" }) },
+        title = { Text(agentEditorTitle(editor, zh)) },
         text = {
-            Column(
-                Modifier.verticalScroll(rememberScrollState()).testTag(AgentTestTags.EDITOR),
-                verticalArrangement = Arrangement.spacedBy(8.dp),
+            AgentEditorFields(
+                editor = editor,
+                actions = actions,
+                zh = zh,
+                error = error,
+                grantStoreAvailable = grantStoreAvailable,
+                grantStoreError = grantStoreError,
+                workspaceSelectionBusy = workspaceSelectionBusy,
+                modifier = Modifier.verticalScroll(rememberScrollState()).testTag(AgentTestTags.EDITOR),
+            )
+        },
+        confirmButton = {
+            Button(
+                onClick = actions.onSave,
+                enabled = !workspaceSelectionBusy,
+                modifier = Modifier.testTag(AgentTestTags.SAVE),
             ) {
+                Text(if (zh) "保存" else "Save")
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = actions.onCloseEditor, modifier = Modifier.testTag(AgentTestTags.CANCEL)) {
+                Text(if (zh) "取消" else "Cancel")
+            }
+        },
+    )
+}
+
+@Composable
+private fun AgentEditorPage(
+    editor: AgentEditorUi,
+    actions: AgentsActions,
+    zh: Boolean,
+    error: String?,
+    grantStoreAvailable: Boolean,
+    grantStoreError: String?,
+    workspaceSelectionBusy: Boolean,
+    modifier: Modifier,
+) {
+    Surface(modifier.fillMaxSize().testTag("agents.editor.page")) {
+        Column(Modifier.fillMaxSize().padding(horizontal = 16.dp, vertical = 12.dp)) {
+            AgentEditorFields(
+                editor = editor,
+                actions = actions,
+                zh = zh,
+                error = error,
+                grantStoreAvailable = grantStoreAvailable,
+                grantStoreError = grantStoreError,
+                workspaceSelectionBusy = workspaceSelectionBusy,
+                modifier = Modifier.weight(1f).verticalScroll(rememberScrollState()).testTag(AgentTestTags.EDITOR),
+            )
+            Row(
+                Modifier.fillMaxWidth().padding(top = 12.dp),
+                horizontalArrangement = Arrangement.End,
+            ) {
+                TextButton(onClick = actions.onCloseEditor, modifier = Modifier.testTag(AgentTestTags.CANCEL)) {
+                    Text(if (zh) "取消" else "Cancel")
+                }
+                Button(
+                    onClick = actions.onSave,
+                    enabled = !workspaceSelectionBusy,
+                    modifier = Modifier.testTag(AgentTestTags.SAVE),
+                ) {
+                    Text(if (zh) "保存" else "Save")
+                }
+            }
+        }
+    }
+}
+
+private fun agentEditorTitle(editor: AgentEditorUi, zh: Boolean): String =
+    if (editor.id == null) {
+        if (zh) "新建智能体" else "New agent"
+    } else {
+        if (zh) "编辑智能体" else "Edit agent"
+    }
+
+@Composable
+private fun AgentEditorFields(
+    editor: AgentEditorUi,
+    actions: AgentsActions,
+    zh: Boolean,
+    error: String?,
+    grantStoreAvailable: Boolean,
+    grantStoreError: String?,
+    workspaceSelectionBusy: Boolean,
+    modifier: Modifier = Modifier,
+) {
+    Column(
+        modifier,
+        verticalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
                 error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
                 OutlinedTextField(
                     editor.name,
@@ -672,6 +799,13 @@ private fun AgentEditorDialog(
                         }
                     }
                 }
+                AgentWorkspaceAccessCard(editor.workspaceAccess, actions, zh, modifier = Modifier.padding(top = 8.dp))
+                AgentDefaultWorkspaceCard(
+                    editor = editor,
+                    actions = actions,
+                    zh = zh,
+                    enabled = grantStoreAvailable && grantStoreError == null && !workspaceSelectionBusy,
+                )
                 AgentGrantEditor(
                     editor = editor,
                     actions = actions,
@@ -679,19 +813,86 @@ private fun AgentEditorDialog(
                     grantStoreAvailable = grantStoreAvailable,
                     grantStoreError = grantStoreError,
                 )
-            }
-        },
-        confirmButton = {
-            Button(onClick = actions.onSave, modifier = Modifier.testTag(AgentTestTags.SAVE)) {
-                Text(if (zh) "保存" else "Save")
-            }
-        },
-        dismissButton = {
-            TextButton(onClick = actions.onCloseEditor, modifier = Modifier.testTag(AgentTestTags.CANCEL)) {
-                Text(if (zh) "取消" else "Cancel")
-            }
-        },
-    )
+    }
+}
+
+@Composable
+private fun AgentDefaultWorkspaceCard(
+    editor: AgentEditorUi,
+    actions: AgentsActions,
+    zh: Boolean,
+    enabled: Boolean,
+) {
+    val defaultWorkspace = editor.workspaces.firstOrNull { it.id == editor.defaultWorkspaceId }
+    val activeReadGrant = editor.defaultWorkspaceId?.let { workspaceId ->
+        editor.grants.any { item ->
+            item.enabled && !item.grant.revoked && !item.expired && item.skillTrusted &&
+                item.grant.workspaceId == workspaceId &&
+                item.grant.lifetime == GrantLifetime.PERSISTENT &&
+                item.grant.capability.value in setOf(
+                    CapabilityId.WORKSPACE_ENUMERATE,
+                    CapabilityId.FILE_LIST,
+                    CapabilityId.FILE_STAT,
+                    CapabilityId.FILE_READ_TEXT,
+                )
+        }
+    } ?: true
+    Column(
+        Modifier.fillMaxWidth()
+            .padding(vertical = 8.dp)
+            .border(1.dp, MaterialTheme.colorScheme.outlineVariant)
+            .padding(10.dp)
+            .testTag(AgentTestTags.WORKSPACE_DEFAULT),
+        verticalArrangement = Arrangement.spacedBy(6.dp),
+    ) {
+        Text(
+            if (zh) "新会话默认工作区" else "Default workspace for new conversations",
+            fontWeight = FontWeight.SemiBold,
+        )
+        Text(
+            if (zh) {
+                "选择工作区即明确授予此 Agent 长期使用权，并自动配置该工作区支持的读写文件能力；不会授予 shell。已有会话保持原绑定。"
+            } else {
+                "Selecting a workspace explicitly grants this Agent persistent access and configures its supported read/write file capabilities, never shell. Existing conversations keep their binding."
+            },
+            style = MaterialTheme.typography.bodySmall,
+        )
+        WorkspaceDropdown(
+            selectedId = editor.defaultWorkspaceId,
+            workspaces = editor.workspaces,
+            zh = zh,
+            enabled = enabled,
+            testTag = AgentTestTags.WORKSPACE_DEFAULT_SELECTOR,
+            allowAgentScope = false,
+            allowClearSelection = true,
+            emptySelectionLabel = if (zh) "不设置默认（新会话不绑定）" else "No default (new conversations unbound)",
+            onSelect = actions.onSetDefaultWorkspace,
+        )
+        Text(
+            if (zh) "当前默认：${defaultWorkspace?.displayName ?: "未设置"}"
+            else "Current default: ${defaultWorkspace?.displayName ?: "Not set"}",
+            style = MaterialTheme.typography.bodySmall,
+        )
+        defaultWorkspace?.let { workspace ->
+            Text(
+                workspaceAccessModeLabel(workspace, zh),
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+        if (!activeReadGrant) {
+            Text(
+                if (zh) {
+                    "该默认工作区的读取授权已撤销或不可用；系统不会自动恢复。重新选择该工作区可再次授权。"
+                } else {
+                    "Read access for this default is revoked or unavailable and will not be restored automatically. Select it again to authorize it again."
+                },
+                color = MaterialTheme.colorScheme.error,
+                style = MaterialTheme.typography.bodySmall,
+                modifier = Modifier.testTag("agents.editor.workspaceDefault.invalid"),
+            )
+        }
+    }
 }
 
 private val agentCapabilityOptions = listOf(
@@ -747,7 +948,7 @@ private fun AgentGrantEditor(
 ) {
     val grantEditorReady = grantStoreAvailable && grantStoreError == null
     Column(Modifier.fillMaxWidth().testTag(AgentTestTags.GRANTS)) {
-        Text(if (zh) "能力授权" else "Capability grants", style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(top = 8.dp))
+        Text(if (zh) "高级权限" else "Advanced permissions", style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(top = 8.dp))
         grantStoreError?.let {
             Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
         }
@@ -755,43 +956,6 @@ private fun AgentGrantEditor(
             Text(
                 if (zh) "授权存储未就绪；保存不会静默忽略授权变更。" else "Grant storage is unavailable; grant changes will not be silently ignored.",
                 color = MaterialTheme.colorScheme.error,
-                style = MaterialTheme.typography.bodySmall,
-            )
-        }
-        AgentWorkspaceAccessCard(editor.workspaceAccess, actions, zh, modifier = Modifier.padding(top = 8.dp))
-        val defaultWorkspace = editor.workspaces.firstOrNull { it.id == editor.defaultWorkspaceId }
-        Column(
-            Modifier.fillMaxWidth()
-                .padding(vertical = 8.dp)
-                .border(1.dp, MaterialTheme.colorScheme.outlineVariant)
-                .padding(10.dp)
-                .testTag(AgentTestTags.WORKSPACE_DEFAULT),
-            verticalArrangement = Arrangement.spacedBy(6.dp),
-        ) {
-            Text(if (zh) "新会话默认工作区" else "Default workspace for new conversations", fontWeight = FontWeight.SemiBold)
-            Text(
-                if (zh) {
-                    "这里只影响之后创建的新会话；已有会话的工作区不会改变。未设置时，新会话明确保持未绑定，不会自动选择其他工作区。"
-                } else {
-                    "This applies only to conversations created later. Existing conversations never change. When unset, a new conversation stays explicitly unbound; another workspace is never selected automatically."
-                },
-                style = MaterialTheme.typography.bodySmall,
-            )
-            WorkspaceDropdown(
-                selectedId = editor.defaultWorkspaceId,
-                workspaces = editor.workspaces,
-                zh = zh,
-                enabled = grantEditorReady,
-                testTag = AgentTestTags.WORKSPACE_DEFAULT_SELECTOR,
-                allowAgentScope = false,
-                allowClearSelection = true,
-                emptySelectionLabel = if (zh) "不设置默认（新会话不绑定）" else "No default (new conversations unbound)",
-            ) { workspaceId ->
-                actions.onEditorChange(editor.copy(defaultWorkspaceId = workspaceId))
-            }
-            Text(
-                if (zh) "当前默认：${defaultWorkspace?.displayName ?: "未设置"}"
-                else "Current default: ${defaultWorkspace?.displayName ?: "Not set"}",
                 style = MaterialTheme.typography.bodySmall,
             )
         }
@@ -1065,9 +1229,12 @@ private fun WorkspaceDropdown(
     var expanded by remember { mutableStateOf(false) }
     val selected = workspaces.firstOrNull { it.id == selectedId }
     OutlinedButton(onClick = { expanded = true }, enabled = enabled, modifier = Modifier.fillMaxWidth().testTag(testTag)) {
+        val selectedLabel = selected?.let { workspace ->
+            "${workspace.displayName}（${workspaceAccessModeLabel(workspace, zh)}）"
+        }
         Text(
-            if (zh) "工作区：${selected?.displayName ?: emptySelectionLabel ?: if (allowAgentScope) "Agent 级（不限定工作区）" else "请选择工作区"}"
-            else "Workspace: ${selected?.displayName ?: emptySelectionLabel ?: if (allowAgentScope) "Agent scoped (no workspace)" else "Choose a workspace"}",
+            if (zh) "工作区：${selectedLabel ?: emptySelectionLabel ?: if (allowAgentScope) "Agent 级（不限定工作区）" else "请选择工作区"}"
+            else "Workspace: ${selectedLabel ?: emptySelectionLabel ?: if (allowAgentScope) "Agent scoped (no workspace)" else "Choose a workspace"}",
             modifier = Modifier.fillMaxWidth(),
         )
     }
@@ -1088,7 +1255,8 @@ private fun WorkspaceDropdown(
             DropdownMenuItem(
                 text = {
                     Text(
-                        "${workspace.displayName}${if (workspace.enabled) "" else if (zh) "（已停用）" else " (disabled)"}",
+                        "${workspace.displayName}（${workspaceAccessModeLabel(workspace, zh)}）" +
+                            if (workspace.enabled) "" else if (zh) "（已停用）" else " (disabled)",
                     )
                 },
                 onClick = { expanded = false; onSelect(workspace.id) },
@@ -1096,6 +1264,13 @@ private fun WorkspaceDropdown(
             )
         }
     }
+}
+
+private fun workspaceAccessModeLabel(workspace: AgentWorkspaceUi, zh: Boolean): String = when {
+    workspace.readable && workspace.writable -> if (zh) "可读写" else "Read/write"
+    workspace.readable -> if (zh) "只读" else "Read-only"
+    workspace.writable -> if (zh) "仅写" else "Write-only"
+    else -> if (zh) "不可访问" else "Unavailable"
 }
 
 @Composable

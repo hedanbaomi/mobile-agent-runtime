@@ -28,6 +28,8 @@ import runtime.mobileagent.skills.ToolCall
 import runtime.mobileagent.skills.ToolExecutor
 import runtime.mobileagent.skills.ToolResult
 import runtime.mobileagent.skills.ToolSpec
+import runtime.mobileagent.skills.tooling.ToolError
+import runtime.mobileagent.skills.tooling.ToolErrorCode
 
 class RuntimeEventsTest {
     @Test
@@ -190,6 +192,52 @@ class RuntimeEventsTest {
         val imageMessage = adapter.requests.last().messages.single { it.images.isNotEmpty() }
         assertEquals("user", imageMessage.role)
         assertEquals("asset-1", imageMessage.images.single().assetId)
+    }
+
+    @Test
+    fun typedToolFailureReachesTheModelAndUiAsAPathFreeActionableEnvelope() = runBlocking {
+        val adapter = RecordingAdapter(
+            listOf(
+                listOf(ModelEvent.ToolCallDelta("call-large", "external", "{}"), ModelEvent.Completed),
+                listOf(ModelEvent.TextDelta("handled"), ModelEvent.Completed),
+            ),
+        )
+        val executor = object : ToolExecutor {
+            override val specs = FakeExecutor().specs
+            override suspend fun invoke(call: ToolCall): ToolResult = ToolResult.Failure(
+                ToolError(ToolErrorCode.FILE_TOO_LARGE, message = "C:\\private\\huge.bin"),
+            )
+            override suspend fun approve(callId: String): ToolResult = error("unused")
+        }
+
+        val events = AgentRuntime(adapter).run(
+            AgentRuntimeRequest(
+                run = AgentRun("run-large", "s", "c"),
+                prompt = EffectivePrompt("contract", "", emptyList(), emptyList(), emptyList(), "hello"),
+                modelId = "model",
+                secret = charArrayOf(),
+                toolsEnabled = true,
+                executor = executor,
+            ),
+        ).toList()
+
+        val result = events.filterIsInstance<RuntimeEvent.ToolResultProduced>().single()
+        assertEquals("FAILED", result.status)
+        assertTrue(result.resultJson.contains("\"code\":\"FILE_TOO_LARGE\""))
+        assertTrue(result.resultJson.contains("too large to read as text"))
+        assertTrue(!result.resultJson.contains("private"))
+        assertEquals("文件太大，无法作为文本读取。", toolResultUserMessage(result.resultJson))
+        assertEquals(
+            "该工作区条目类型不受支持，未打开该条目。",
+            toolResultUserMessage("{\"error\":{\"code\":\"UNSUPPORTED_ENTRY\"}}"),
+        )
+        assertEquals(
+            "所选工作区后端暂不支持该操作。",
+            toolResultUserMessage("{\"error\":{\"code\":\"OPERATION_UNAVAILABLE\"}}"),
+        )
+        val continuation = adapter.requests.last().messages.single { it.toolCallId == "call-large" }
+        assertTrue(continuation.text.contains("FILE_TOO_LARGE"))
+        assertTrue(!continuation.text.contains("private"))
     }
 
     @Test

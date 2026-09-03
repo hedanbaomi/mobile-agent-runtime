@@ -59,13 +59,20 @@ data class AnnouncementsActions(
 )
 
 @Composable
-fun AnnouncementsScreen(state: AnnouncementsUiState, actions: AnnouncementsActions = AnnouncementsActions(), modifier: Modifier = Modifier) {
+fun AnnouncementsScreen(
+    state: AnnouncementsUiState,
+    actions: AnnouncementsActions = AnnouncementsActions(),
+    modifier: Modifier = Modifier,
+    showPageTitle: Boolean = true,
+) {
     val zh = state.language.equals("zh-CN", true)
     val uriHandler = LocalUriHandler.current
     Column(modifier.fillMaxSize().padding(16.dp)) {
         Row(Modifier.fillMaxWidth()) {
             Column(Modifier.weight(1f)) {
-                Text(if (zh) "公告" else "News", style = MaterialTheme.typography.headlineSmall)
+                if (showPageTitle) {
+                    Text(if (zh) "公告" else "News", style = MaterialTheme.typography.headlineSmall)
+                }
                 if (state.status.isNotBlank()) Text(state.status, style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(top = 4.dp))
             }
             Button(onClick = actions.onRefresh, enabled = !state.loading) { Text(if (zh) "刷新" else "Refresh") }

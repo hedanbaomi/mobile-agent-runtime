@@ -41,7 +41,10 @@ import runtime.mobileagent.domain.WorkspaceScope
 import runtime.mobileagent.domain.WorkspaceTarget
 import runtime.mobileagent.domain.plan
 import runtime.mobileagent.skills.tooling.ToolErrorCode
+import runtime.mobileagent.skills.tooling.WorkspaceBackend
+import runtime.mobileagent.skills.tooling.WorkspaceDescriptor
 import runtime.mobileagent.skills.tooling.WorkspaceResult
+import runtime.mobileagent.tooling.WorkspaceRegistry
 
 /**
  * AppContainer integration coverage for the durable Thread/Agent workspace boundary.
@@ -52,6 +55,102 @@ import runtime.mobileagent.skills.tooling.WorkspaceResult
  */
 @RunWith(AndroidJUnit4::class)
 class RuntimeThreadWorkspaceDeviceTest {
+    @Test
+    fun canonicalDefaultGrantPlanTracksReadOnlyBackendAndNeverIncludesShell() {
+        val readOnly = setOf(
+            CapabilityId(CapabilityId.WORKSPACE_ENUMERATE),
+            CapabilityId(CapabilityId.FILE_LIST),
+            CapabilityId(CapabilityId.FILE_STAT),
+            CapabilityId(CapabilityId.FILE_READ_TEXT),
+        )
+        assertEquals(readOnly, canonicalDefaultWorkspaceGrantCapabilities(readOnly))
+        assertEquals(
+            readOnly,
+            canonicalDefaultWorkspaceGrantCapabilities(
+                readOnly + setOf(
+                    CapabilityId(CapabilityId.SHELL_EXECUTE),
+                    CapabilityId("file.future_mutation"),
+                ),
+            ),
+        )
+    }
+
+    @Test
+    fun setAgentDefaultOnReadOnlyBackendPersistsOnlyReadCapabilities() = runBlocking {
+        val fixture = fixture()
+        val container = fixture.app.container
+        val runtime = container.runtimeIntegration
+        val workspaceId = "workspace-read-only-${fixture.suffix}"
+        val readOnlyCapabilities = linkedSetOf(
+            CapabilityId(CapabilityId.WORKSPACE_ENUMERATE),
+            CapabilityId(CapabilityId.FILE_LIST),
+            CapabilityId(CapabilityId.FILE_STAT),
+            CapabilityId(CapabilityId.FILE_READ_TEXT),
+        )
+        val workspace = WorkspaceRepository(container.db).save(
+            Workspace(
+                id = workspaceId,
+                displayName = "Read-only fixture workspace",
+                backendType = WorkspaceBackendType.INTERNAL,
+                rootReference = "fixture-read-only-root-${fixture.suffix}",
+                readable = true,
+                writable = false,
+                quotaBytes = 4L * 1024L * 1024L,
+                maxFileBytes = 256L * 1024L,
+                enabled = true,
+                scope = WorkspaceScope.SELECTED_DIRECTORY,
+            ),
+        )
+        val backend = object : WorkspaceBackend {
+            override val descriptor = WorkspaceDescriptor(
+                id = workspace.id,
+                displayName = workspace.displayName,
+                backendType = workspace.backendType,
+                rootReference = workspace.rootReference,
+                readable = true,
+                writable = false,
+                quotaBytes = workspace.quotaBytes,
+                maxFileBytes = workspace.maxFileBytes,
+                enabled = true,
+                scope = workspace.scope,
+            )
+            override val capabilities: Set<CapabilityId> = readOnlyCapabilities
+        }
+        registerWorkspaceBackendForTest(runtime, workspace, backend)
+
+        val committed = runtime.useRecentWorkspace(
+            workspaceId = workspace.id,
+            target = WorkspacePickerTarget(agentId = fixture.agentId),
+        ) as? WorkspaceAccessResult.Success ?: error("read-only SET_AGENT_DEFAULT did not commit")
+        assertEquals(workspace.id, committed.workspace.workspaceId)
+        assertEquals(workspace.id, container.threadWorkspacePort.agentWorkspaceDefault(fixture.agentId)?.workspaceId)
+        val activeGrants = container.agentGrantPort.listGrants(fixture.agentId, includeRevoked = false)
+            .filter { it.workspaceId == workspace.id }
+        assertEquals(readOnlyCapabilities, activeGrants.map { it.capability }.toSet())
+        assertTrue(activeGrants.all { it.lifetime == GrantLifetime.PERSISTENT })
+        assertTrue(activeGrants.none { it.capability.value == CapabilityId.SHELL_EXECUTE })
+
+        val chat = ChatViewModel(fixture.app, SavedStateHandle())
+        chat.selectAgent(fixture.agentId)
+        val conversationId = requireNotNull(chat.newSession())
+        assertEquals(workspace.id, container.threadWorkspacePort.conversationWorkspaceBinding(conversationId)?.workspaceId)
+        val conversation = requireNotNull(container.conversations.get(conversationId))
+        val snapshot = requireNotNull(container.agents.getSnapshot(conversation.snapshotId))
+        val context = runtime.createToolExecutionContextForWorkspace(
+            snapshot = snapshot,
+            workspaceId = workspace.id,
+            modelCallId = "model-call-read-only-${fixture.suffix}",
+            sessionIdentity = conversation.id,
+            taskIdentity = "task-read-only-${fixture.suffix}",
+            configSnapshotHash = "config-read-only-${fixture.suffix}",
+        )
+        assertEquals(readOnlyCapabilities, context.canonicalGrants.map { it.capability }.toSet())
+        assertEquals(
+            setOf("workspace_list", "file_list", "file_stat", "file_read_text"),
+            runtime.createToolExecutorFactory(context).toolingSpecs.map { it.name }.toSet(),
+        )
+    }
+
     @Test
     fun pickerCommitBindsThreadAndDefaultAtomicallyAndSiblingGrantsSurvive() = runBlocking {
         val fixture = fixture()
@@ -307,6 +406,16 @@ class RuntimeThreadWorkspaceDeviceTest {
         assertEquals(0, exposure.effectiveAgentWorkspaceCapabilityCount)
         val factory = runtime.createToolExecutorFactory(context)
         assertEquals(0, factory.exposureSummary.ownerToolCounts["workspace"] ?: 0)
+
+        val chat = ChatViewModel(fixture.app, SavedStateHandle())
+        chat.selectAgent(fixture.agentId)
+        chat.selectSession(conversation.id)
+        val newConversationId = requireNotNull(chat.newSession(workspace.id))
+        assertNull(threadPort.conversationWorkspaceBinding(conversation.id))
+        assertEquals(
+            workspace.id,
+            threadPort.conversationWorkspaceBinding(newConversationId)?.workspaceId,
+        )
     }
 
     @Test
@@ -361,6 +470,30 @@ class RuntimeThreadWorkspaceDeviceTest {
             RuntimeIntegration.INTERNAL_WORKSPACE_ID,
             threadPort.agentWorkspaceDefault(fixture.agentId)?.workspaceId,
         )
+        val expectedCapabilities = setOf(
+            CapabilityId.WORKSPACE_ENUMERATE,
+            CapabilityId.FILE_LIST,
+            CapabilityId.FILE_STAT,
+            CapabilityId.FILE_READ_TEXT,
+            CapabilityId.FILE_WRITE_TEXT,
+            CapabilityId.FILE_CREATE_DIRECTORY,
+            CapabilityId.FILE_MOVE,
+            CapabilityId.FILE_DELETE,
+            "file.apply_patch",
+        )
+        val firstBundle = container.agentGrantPort.listGrants(fixture.agentId, includeRevoked = true)
+            .filter { it.workspaceId == RuntimeIntegration.INTERNAL_WORKSPACE_ID && !it.revoked }
+        assertEquals(expectedCapabilities, firstBundle.map { it.capability.value }.toSet())
+        assertTrue(firstBundle.all { it.lifetime == GrantLifetime.PERSISTENT })
+        assertTrue(firstBundle.none { it.capability.value == CapabilityId.SHELL_EXECUTE })
+        val repeated = runtime.useRecentWorkspace(
+            workspaceId = RuntimeIntegration.INTERNAL_WORKSPACE_ID,
+            target = WorkspacePickerTarget(agentId = fixture.agentId),
+        ) as? WorkspaceAccessResult.Success ?: error("repeated SET_AGENT_DEFAULT did not commit")
+        assertEquals(RuntimeIntegration.INTERNAL_WORKSPACE_ID, repeated.workspace.workspaceId)
+        val secondBundle = container.agentGrantPort.listGrants(fixture.agentId, includeRevoked = true)
+            .filter { it.workspaceId == RuntimeIntegration.INTERNAL_WORKSPACE_ID && !it.revoked }
+        assertEquals(firstBundle.map { it.grantId }.toSet(), secondBundle.map { it.grantId }.toSet())
         val chat = ChatViewModel(fixture.app, SavedStateHandle())
         chat.selectAgent(fixture.agentId)
         val conversationId = requireNotNull(chat.newSession()) { "newSession must inherit the Agent default" }
@@ -376,6 +509,45 @@ class RuntimeThreadWorkspaceDeviceTest {
             conversationId = conversationId,
             workspaceId = RuntimeIntegration.INTERNAL_WORKSPACE_ID,
             suffix = fixture.suffix,
+        )
+    }
+
+    @Test
+    fun revokedDefaultGrantsStayRevokedUntilAgentExplicitlySelectsDefaultAgain() = runBlocking {
+        val fixture = fixture()
+        val container = fixture.app.container
+        val runtime = container.runtimeIntegration
+        val threadPort = container.threadWorkspacePort
+
+        runtime.useRecentWorkspace(
+            workspaceId = RuntimeIntegration.INTERNAL_WORKSPACE_ID,
+            target = WorkspacePickerTarget(agentId = fixture.agentId),
+        ) as? WorkspaceAccessResult.Success ?: error("SET_AGENT_DEFAULT did not commit")
+        val activeBundle = container.agentGrantPort.listGrants(fixture.agentId, includeRevoked = false)
+            .filter { it.workspaceId == RuntimeIntegration.INTERNAL_WORKSPACE_ID }
+        assertTrue(activeBundle.isNotEmpty())
+
+        activeBundle.forEach { grant ->
+            container.agentGrantPort.revokeGrant(grant.grantId, grant.revision)
+        }
+
+        assertEquals(
+            RuntimeIntegration.INTERNAL_WORKSPACE_ID,
+            threadPort.agentWorkspaceDefault(fixture.agentId)?.workspaceId,
+        )
+        assertNull(threadPort.resolveNewThreadWorkspace(fixture.agentId))
+        assertTrue(
+            container.agentGrantPort.listGrants(fixture.agentId, includeRevoked = false)
+                .none { it.workspaceId == RuntimeIntegration.INTERNAL_WORKSPACE_ID },
+        )
+
+        runtime.useRecentWorkspace(
+            workspaceId = RuntimeIntegration.INTERNAL_WORKSPACE_ID,
+            target = WorkspacePickerTarget(agentId = fixture.agentId),
+        ) as? WorkspaceAccessResult.Success ?: error("explicit re-selection did not restore grants")
+        assertEquals(
+            RuntimeIntegration.INTERNAL_WORKSPACE_ID,
+            threadPort.resolveNewThreadWorkspace(fixture.agentId),
         )
     }
 
@@ -470,6 +642,30 @@ class RuntimeThreadWorkspaceDeviceTest {
         vm.closeEditor()
         assertNull(vm.pendingWorkspaceDraft())
         assertEquals(agentsBefore, app.container.agents.list().map { it.id }.toSet())
+    }
+
+    @Test
+    fun staleAsyncWorkspaceDraftCannotLeakIntoReopenedAgentEditor() {
+        val app = InstrumentationRegistry.getInstrumentation().targetContext.applicationContext as MobileAgentApp
+        app.ensureHostInitialized()
+        val vm = AgentsViewModel(app, SavedStateHandle())
+        vm.openEditor(null)
+        val staleEditorSession = vm.editorSessionToken()
+        vm.closeEditor()
+        vm.openEditor(null)
+
+        assertFalse(
+            vm.stageWorkspaceDraft(
+                WorkspaceDraft(
+                    workspaceId = RuntimeIntegration.INTERNAL_WORKSPACE_ID,
+                    displayName = "应用私有工作区",
+                    setAsAgentDefault = true,
+                ),
+                expectedEditorSessionToken = staleEditorSession,
+            ),
+        )
+        assertNull(vm.pendingWorkspaceDraft())
+        assertNull(vm.state.value.editor?.defaultWorkspaceId)
     }
 
     @Test
@@ -1004,4 +1200,15 @@ class RuntimeThreadWorkspaceDeviceTest {
             scope = WorkspaceScope.SELECTED_DIRECTORY,
         ),
     )
+
+    private fun registerWorkspaceBackendForTest(
+        runtime: RuntimeIntegration,
+        workspace: Workspace,
+        backend: WorkspaceBackend,
+    ) {
+        val field = RuntimeIntegration::class.java.getDeclaredField("workspaceRegistry")
+        field.isAccessible = true
+        val registry = field.get(runtime) as WorkspaceRegistry
+        registry.registerOrReplace(workspace, backend)
+    }
 }

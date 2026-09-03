@@ -32,6 +32,8 @@ import runtime.mobileagent.skills.tooling.WorkspaceEntryType
 import runtime.mobileagent.skills.tooling.WorkspaceFileStat
 import runtime.mobileagent.skills.tooling.WorkspaceListRequest
 import runtime.mobileagent.skills.tooling.WorkspaceListing
+import runtime.mobileagent.skills.tooling.WorkspaceListingWarning
+import runtime.mobileagent.skills.tooling.WorkspaceListingWarningCode
 import runtime.mobileagent.skills.tooling.WorkspaceMoveRequest
 import runtime.mobileagent.skills.tooling.WorkspaceMutation
 import runtime.mobileagent.skills.tooling.WorkspaceReadTextRequest
@@ -238,7 +240,7 @@ internal class ShizukuDeviceWorkspaceProvider(
             val size = item.opt("bytes")?.takeUnless { it == JSONObject.NULL }?.let {
                 (it as? Number)?.toLong()
             }
-            if (size != null && (size < 0L || size > ShizukuWorkspaceFileStore.MAX_FILE_BYTES)) {
+            if (size != null && size < 0L) {
                 return failure(ToolErrorCode.BRIDGE_PROTOCOL_MISMATCH)
             }
             val childToken = item.optString("handle", "")
@@ -329,7 +331,7 @@ internal class ShizukuDeviceWorkspaceProvider(
     }
 
     private fun mapError(code: String?): ToolErrorCode = when (code) {
-        ShizukuDirectoryHandleStore.PERMISSION_DENIED -> ToolErrorCode.SHIZUKU_PERMISSION_DENIED
+        ShizukuDirectoryHandleStore.PERMISSION_DENIED -> ToolErrorCode.PERMISSION_DENIED
         ShizukuDirectoryHandleStore.INVALID_HANDLE -> ToolErrorCode.INVALID_REQUEST
         ShizukuDirectoryHandleStore.RECOVERY_LOCATOR_INVALID -> ToolErrorCode.BRIDGE_PROTOCOL_MISMATCH
         ShizukuDirectoryHandleStore.WORKSPACE_NOT_FOUND,
@@ -338,9 +340,12 @@ internal class ShizukuDeviceWorkspaceProvider(
         ShizukuWorkspaceFileStore.OUTSIDE_ROOT -> ToolErrorCode.PATH_OUT_OF_SCOPE
         ShizukuWorkspaceFileStore.SYMLINK_REJECTED -> ToolErrorCode.SYMLINK_FORBIDDEN
         ShizukuWorkspaceFileStore.FILE_TOO_LARGE -> ToolErrorCode.FILE_TOO_LARGE
+        ShizukuWorkspaceFileStore.INVALID_CURSOR -> ToolErrorCode.INVALID_CURSOR
         ShizukuWorkspaceFileStore.LIMIT,
         ShizukuWorkspaceFileStore.OUTPUT_LIMIT -> ToolErrorCode.QUOTA_EXCEEDED
         ShizukuWorkspaceFileStore.UNKNOWN_OUTCOME -> ToolErrorCode.UNKNOWN_OUTCOME
+        ShizukuWorkspaceFileStore.UNSUPPORTED_ENTRY -> ToolErrorCode.UNSUPPORTED_ENTRY
+        ShizukuWorkspaceFileStore.OPERATION_UNAVAILABLE -> ToolErrorCode.OPERATION_UNAVAILABLE
         else -> ToolErrorCode.AUTHORITY_TEMPORARILY_UNAVAILABLE
     }
 
@@ -527,7 +532,7 @@ private class ShizukuTokenWorkspaceBackend(
             val bytes = item.optLong("bytes", 0L)
             val version = parseOpaqueVersion(item.optString("version", ""))
                 ?: return failure(ToolErrorCode.BRIDGE_PROTOCOL_MISMATCH)
-            if (bytes < 0L || bytes > ShizukuWorkspaceFileStore.MAX_FILE_BYTES || !isChild(entryPath, path)) return failure(ToolErrorCode.BRIDGE_PROTOCOL_MISMATCH)
+            if (bytes < 0L || !isChild(entryPath, path)) return failure(ToolErrorCode.BRIDGE_PROTOCOL_MISMATCH)
             output += WorkspaceEntry(entryPath, type, bytes, version.publicVersion)
         }
         val nextCursor = payload.optString("nextCursor", "").takeIf { it.isNotBlank() && it != "null" }
@@ -537,8 +542,42 @@ private class ShizukuTokenWorkspaceBackend(
         if (payload.optBoolean("truncated", false) != (nextCursor != null)) {
             return failure(ToolErrorCode.BRIDGE_PROTOCOL_MISMATCH)
         }
+        val skippedEntries = payload.optInt("skippedEntries", 0)
+        if (skippedEntries !in 0..WorkspaceListing.MAX_SKIPPED_ENTRIES) {
+            return failure(ToolErrorCode.BRIDGE_PROTOCOL_MISMATCH)
+        }
+        val warningArray = payload.optJSONArray("warnings")
+        val warnings = ArrayList<WorkspaceListingWarning>()
+        if (warningArray != null) {
+            if (warningArray.length() > WorkspaceListing.MAX_WARNING_TYPES) {
+                return failure(ToolErrorCode.BRIDGE_PROTOCOL_MISMATCH)
+            }
+            val seen = HashSet<WorkspaceListingWarningCode>()
+            for (index in 0 until warningArray.length()) {
+                val warning = warningArray.optJSONObject(index)
+                    ?: return failure(ToolErrorCode.BRIDGE_PROTOCOL_MISMATCH)
+                val code = runCatching {
+                    WorkspaceListingWarningCode.valueOf(warning.optString("code", ""))
+                }.getOrNull() ?: return failure(ToolErrorCode.BRIDGE_PROTOCOL_MISMATCH)
+                val count = warning.optInt("count", 0)
+                if (!seen.add(code) || count !in 1..WorkspaceListingWarning.MAX_COUNT) {
+                    return failure(ToolErrorCode.BRIDGE_PROTOCOL_MISMATCH)
+                }
+                warnings += WorkspaceListingWarning(code, count)
+            }
+        }
+        if (warnings.sumOf { it.count } != skippedEntries) {
+            return failure(ToolErrorCode.BRIDGE_PROTOCOL_MISMATCH)
+        }
         return WorkspaceResult.Success(
-            WorkspaceListing(path.ifEmpty { "." }, output, nextCursor != null, nextCursor),
+            WorkspaceListing(
+                path.ifEmpty { "." },
+                output,
+                nextCursor != null,
+                nextCursor,
+                skippedEntries,
+                warnings,
+            ),
         )
     }
 
@@ -551,7 +590,7 @@ private class ShizukuTokenWorkspaceBackend(
         }
         val bytes = payload.optLong("bytes", -1L)
         val version = parseOpaqueVersion(payload.optString("version", ""))
-        if (payload.optString("path", "") != path || bytes < 0L || bytes > ShizukuWorkspaceFileStore.MAX_FILE_BYTES || version == null) {
+        if (payload.optString("path", "") != path || bytes < 0L || version == null) {
             return failure(ToolErrorCode.BRIDGE_PROTOCOL_MISMATCH)
         }
         return WorkspaceResult.Success(WorkspaceFileStat(path, type, bytes, version.publicVersion))
@@ -672,7 +711,7 @@ private class ShizukuTokenWorkspaceBackend(
     }
 
     private fun mapError(code: String?): ToolErrorCode = when (code) {
-        ShizukuDirectoryHandleStore.PERMISSION_DENIED -> ToolErrorCode.SHIZUKU_PERMISSION_DENIED
+        ShizukuDirectoryHandleStore.PERMISSION_DENIED -> ToolErrorCode.PERMISSION_DENIED
         ShizukuDirectoryHandleStore.INVALID_HANDLE -> ToolErrorCode.INVALID_REQUEST
         ShizukuWorkspaceFileStore.INVALID_PATH,
         ShizukuWorkspaceFileStore.OUTSIDE_ROOT -> ToolErrorCode.PATH_OUT_OF_SCOPE
@@ -683,13 +722,18 @@ private class ShizukuTokenWorkspaceBackend(
         ShizukuWorkspaceFileStore.OUTPUT_LIMIT -> ToolErrorCode.QUOTA_EXCEEDED
         ShizukuWorkspaceFileStore.UNKNOWN_OUTCOME -> ToolErrorCode.UNKNOWN_OUTCOME
         ShizukuWorkspaceFileStore.CONFLICT -> ToolErrorCode.CONFLICT
-        ShizukuWorkspaceFileStore.PERMISSION_DENIED -> ToolErrorCode.SHIZUKU_PERMISSION_DENIED
-        ShizukuWorkspaceFileStore.INVALID_CURSOR,
+        ShizukuWorkspaceFileStore.PERMISSION_DENIED -> ToolErrorCode.PERMISSION_DENIED
+        ShizukuWorkspaceFileStore.INVALID_CURSOR -> ToolErrorCode.INVALID_CURSOR
         ShizukuWorkspaceFileStore.INVALID_VERSION,
         ShizukuWorkspaceFileStore.OFFSET_OUT_OF_RANGE,
         ShizukuWorkspaceFileStore.INVALID_PATCH,
-        ShizukuWorkspaceFileStore.UNSUPPORTED,
         -> ToolErrorCode.INVALID_REQUEST
+        ShizukuWorkspaceFileStore.UNSUPPORTED_ENTRY -> ToolErrorCode.UNSUPPORTED_ENTRY
+        ShizukuWorkspaceFileStore.UNSUPPORTED,
+        ShizukuWorkspaceFileStore.OPERATION_UNAVAILABLE,
+        ShizukuWorkspaceFileStore.ATOMIC_REPLACE_UNAVAILABLE,
+        ShizukuWorkspaceFileStore.WRITE_UNVERIFIED,
+        -> ToolErrorCode.OPERATION_UNAVAILABLE
         else -> ToolErrorCode.IO_ERROR
     }
 

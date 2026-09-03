@@ -19,6 +19,7 @@ import runtime.mobileagent.agent.RuntimeEvent
 import runtime.mobileagent.agent.toDiffPartOrNull
 import runtime.mobileagent.agent.toMessagePartOrNull
 import runtime.mobileagent.agent.toSafeErrorPart
+import runtime.mobileagent.agent.toolResultUserMessage
 import runtime.mobileagent.domain.*
 import runtime.mobileagent.diagnostics.DiagnosticApprovalState
 import runtime.mobileagent.diagnostics.DiagnosticAuthority
@@ -38,7 +39,7 @@ import runtime.mobileagent.provider.ModelEvent
 import runtime.mobileagent.provider.ParameterLayers
 import runtime.mobileagent.provider.RequestHeaderValue
 import runtime.mobileagent.provider.SecretRedactor
-import runtime.mobileagent.provider.openai.OpenAiCompatibleAdapter
+import runtime.mobileagent.provider.openai.OpenAiAdapterFactory
 import runtime.mobileagent.skills.ToolCall
 import runtime.mobileagent.skills.ToolExecutor
 import runtime.mobileagent.skills.ToolSpec
@@ -104,7 +105,11 @@ class ChatViewModel(
             val selected = state.value.selectedSessionId?.takeIf { id -> conversations.any { it.id == id } }
                 ?: savedStateHandle.get<String>(SELECTED_SESSION_KEY)?.takeIf { id -> conversations.any { it.id == id } }
                 ?: container.uiPreferences.getString("selected-conversation", null)?.takeIf { id -> conversations.any { it.id == id } }
-            val agentId = state.value.selectedAgentId
+            val conversationAgentIds = conversations.associate { conversation ->
+                conversation.id to container.agents.getSnapshot(conversation.snapshotId)?.agentId
+            }
+            val agentId = selected?.let(conversationAgentIds::get)
+                ?: state.value.selectedAgentId
                 ?: savedStateHandle.get<String>(SELECTED_AGENT_KEY)
                 ?: container.uiPreferences.getString("selected-agent", null)
                 ?: agents.firstOrNull()?.id
@@ -119,13 +124,24 @@ class ChatViewModel(
             )
             state.value = state.value.copy(
                 sessions = conversations.map { c ->
-                    val snapshotAgentId = container.agents.getSnapshot(c.snapshotId)?.agentId
+                    val snapshotAgentId = conversationAgentIds[c.id]
+                    val workspaceLabel = runCatching {
+                        val threadPort = (container as? ThreadWorkspacePortProvider)?.threadWorkspacePort
+                        val threadBinding = threadPort?.conversationWorkspaceBinding(c.id)
+                        if (threadBinding == null) {
+                            "无工作区"
+                        } else {
+                            container.runtimeIntegration.workspaceUiPresentation(threadBinding.workspaceId)?.title
+                                ?: "已绑定工作区"
+                        }
+                    }.getOrElse { "工作区状态不可用" }
                     ChatSessionUi(
                         id = c.id,
                         title = c.title,
                         timeLabel = c.updatedAt.take(16),
                         agentName = snapshotAgentId?.let { agentNames[it]?.name } ?: "配置快照 " + c.snapshotId.take(8),
                         agentId = snapshotAgentId,
+                        workspaceLabel = workspaceLabel,
                     )
                 }, selectedSessionId = selected,
                 agents = agents.map { ChatAgentOptionUi(it.id, it.name) }, selectedAgentId = agentId,
@@ -300,6 +316,13 @@ class ChatViewModel(
         val threadWorkspaceId = threadWorkspaceBinding?.workspaceId
         val threadWorkspaceRuntimePort =
             (container as? ThreadWorkspaceRuntimePortProvider)?.threadWorkspaceRuntimePort
+        // Aggregate-only, closed-schema evidence is emitted before the run is created. Failure to
+        // write optional diagnostics never changes authorization or message delivery behavior.
+        runCatching {
+            threadWorkspaceRuntimePort
+                ?.takeIf { it.available }
+                ?.recordConversationWorkspaceResolution(conversationId, binding.snapshot)
+        }
         val workspacePreflightStatus = when {
             threadWorkspaceBindingReadFailed -> "会话工作区绑定读取失败；工作区工具已关闭。"
             threadWorkspacePort == null || !threadWorkspacePort.available ->
@@ -582,7 +605,7 @@ class ChatViewModel(
                     "上下文超过保守输入预算单位（$estimated / $inputBudget UTF-8 字节与固定图片预留）。请减少历史/知识范围或新建会话；不会静默丢图。"
                 }
                 secret = withContext(Dispatchers.IO) { container.secrets.resolveForHost(provider.secretRef) }
-                val adapter = OpenAiCompatibleAdapter(container.http, provider.baseUrl, headerSecretResolver = HeaderSecretResolver { host, ref ->
+                val adapter = OpenAiAdapterFactory.create(provider.apiFormat, container.http, provider.baseUrl, headerSecretResolver = HeaderSecretResolver { host, ref ->
                     require(host.equals(URI(provider.baseUrl).host, true) && ref in provider.headerSecretRefs.values) { "Header secret destination mismatch" }
                     container.secrets.resolveForHost(ref)
                 })
@@ -689,7 +712,10 @@ class ChatViewModel(
                                 record = record.copy(state = RunStatus.MODEL_STREAMING, modelRounds = round)
                                 val inspectorEnabled = requestInspectorEnabled()
                                 val requestPreview = event.requestPreview?.takeIf { inspectorEnabled }?.let { ChatRequestPreviewUi("POST",
-                                    provider.baseUrl.trimEnd('/') + "/chat/completions", event.headerNames.joinToString("\n") { "$it: [redacted]" }, it) }
+                                    OpenAiAdapterFactory.requestEndpoint(provider.apiFormat, provider.baseUrl),
+                                    event.headerNames.joinToString("\n") { "$it: [redacted]" },
+                                    it,
+                                ) }
                                 if (requestPreview != null) rememberRequestPreviewHint(conversationId)
                                 state.value = state.value.copy(requestPreview = requestPreview,
                                     requestInspectorAvailability = resolveRequestInspectorAvailability(
@@ -1127,6 +1153,10 @@ class ChatViewModel(
         val reasoningParts = message.parts.filterIsInstance<ReasoningPart>()
         val errorPart = message.parts.filterIsInstance<ErrorPart>().lastOrNull()
         val diffPart = message.parts.filterIsInstance<DiffPart>().lastOrNull()
+        val toolResultPart = message.parts.filterIsInstance<ToolResultPart>().lastOrNull()
+        val toolFailureSummary = toolResultPart
+            ?.takeIf { it.status != "SUCCEEDED" }
+            ?.let { toolResultUserMessage(it.resultJson) }
         return ChatMessageUi(
             id = message.id,
             role = message.role.name.lowercase(),
@@ -1139,6 +1169,7 @@ class ChatViewModel(
             eventSummary = when {
                 errorPart != null -> errorPart.message
                 diffPart != null -> diffPart.summary
+                toolFailureSummary != null -> toolFailureSummary
                 else -> ""
             },
         )
@@ -1470,6 +1501,15 @@ class ChatViewModel(
             runCatching { container.runtimeIntegration.workspaceUiPresentation(workspaceId) }.getOrNull()
         }
         val authority = runCatching { container.runtimeIntegration.snapshot() }.getOrNull()
+        val storedAgentDefault = agentId?.let { id ->
+            runCatching { threadPort?.agentWorkspaceDefault(id) }.getOrNull()
+        }
+        val resolvedAgentDefaultId = agentId?.let { id ->
+            runCatching { threadPort?.resolveNewThreadWorkspace(id) }.getOrNull()
+        }
+        val agentDefaultPresentation = resolvedAgentDefaultId?.let { workspaceId ->
+            runCatching { container.runtimeIntegration.workspaceUiPresentation(workspaceId) }.getOrNull()
+        }
         val systemLabel = when {
             authority == null -> ""
             authority.selectedAuthority == Authority.SHIZUKU -> "Shizuku"
@@ -1477,20 +1517,41 @@ class ChatViewModel(
             else -> ""
         }
         val summary = when {
-            conversationId == null -> "未配置工作区"
-            binding == null -> "未绑定工作区"
-            presentation != null -> presentation.title
-            else -> "已绑定工作区"
+            binding != null && presentation != null -> presentation.title
+            binding != null -> "已绑定工作区"
+            conversationId != null && resolvedAgentDefaultId != null -> "当前会话无工作区"
+            conversationId != null -> "未配置工作区"
+            else -> "未配置工作区"
         }
         val permission = when {
-            binding == null -> "尚未授权此会话"
-            else -> "已绑定"
+            binding != null -> "已绑定"
+            resolvedAgentDefaultId != null -> "当前会话未绑定；默认值仅用于新会话"
+            storedAgentDefault != null -> "默认工作区授权已撤销或不可用"
+            else -> "尚未授权此会话"
+        }
+        val threadWorkspaceState = when {
+            binding != null -> ChatThreadWorkspaceState.BOUND
+            resolvedAgentDefaultId != null -> ChatThreadWorkspaceState.UNBOUND_AGENT_DEFAULT_AVAILABLE
+            else -> ChatThreadWorkspaceState.UNBOUND_NO_AGENT_DEFAULT
         }
         return ChatWorkspaceAccessUi(
             agentLabel = agentName,
             workspaceSummary = summary,
             systemAccessLabel = systemLabel,
             permissionLabel = permission,
+            notice = when (threadWorkspaceState) {
+                ChatThreadWorkspaceState.BOUND -> "会话工作区已固定；Agent 默认值变化不会改动此会话。"
+                ChatThreadWorkspaceState.UNBOUND_AGENT_DEFAULT_AVAILABLE ->
+                    "当前会话保持无工作区；Agent 默认工作区只会用于新建会话。"
+                ChatThreadWorkspaceState.UNBOUND_NO_AGENT_DEFAULT -> if (storedAgentDefault != null) {
+                    "Agent 默认工作区授权已撤销或不可用；系统不会自动恢复。"
+                } else {
+                    "当前会话未绑定工作区。"
+                }
+            },
+            threadWorkspaceState = threadWorkspaceState,
+            agentDefaultWorkspaceId = resolvedAgentDefaultId,
+            agentDefaultWorkspaceLabel = agentDefaultPresentation?.title.orEmpty(),
         )
     }
 

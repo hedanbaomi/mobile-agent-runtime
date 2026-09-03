@@ -26,6 +26,8 @@ import java.nio.file.attribute.BasicFileAttributes
 import java.security.MessageDigest
 import java.security.SecureRandom
 import java.util.Base64
+import java.util.HashSet
+import java.util.LinkedHashMap
 import java.util.UUID
 
 /**
@@ -83,13 +85,16 @@ internal class ShizukuWorkspaceFileStore(
             val segments = parsePath(relativePath, allowRoot = true)
             val directory = resolve(segments)
             if (!Files.exists(directory, LinkOption.NOFOLLOW_LINKS)) {
-                return@guarded success("list", segments).put("entries", JSONArray())
+                throw WorkspaceFailure(NOT_FOUND)
             }
             requireDirectory(directory)
-            val children = directoryEntries(directory).sortedBy { it.fileName.toString() }
+            val warnings = ListingWarnings()
+            val children = listableChildren(directory, warnings)
             if (children.size > MAX_ENTRIES) throw WorkspaceFailure(LIMIT)
             val path = relativePath(segments)
-            val fingerprint = directoryVersion(directory)
+            // Directory fingerprints use the same safe, non-following view as list output so a
+            // symlink or unsupported node cannot poison pagination for normal entries.
+            val fingerprint = directoryVersion(directory, skipUnsafeChildren = true)
             val start = cursor?.let {
                 cursorStore.resolve(it, path, fingerprint) ?: throw WorkspaceFailure(INVALID_CURSOR)
             } ?: 0
@@ -99,50 +104,69 @@ internal class ShizukuWorkspaceFileStore(
             var emittedEnd = start
             for (index in start until end) {
                 val child = children[index]
-                if (Files.isSymbolicLink(child)) {
-                    if (skipSymlinksInList) {
-                        emittedEnd = index + 1
-                        continue
+                try {
+                    val childSegments = segments + child.fileName.toString()
+                    val entry = JSONObject()
+                        .put("path", relativePath(childSegments))
+                    when (classifyChild(child)) {
+                        ChildKind.DIRECTORY -> entry.put("type", "directory")
+                        ChildKind.FILE -> {
+                            val size = Files.size(child)
+                            entry.put("type", "file").put("bytes", size).put("version", fileVersion(child))
+                        }
+                        ChildKind.SYMLINK -> {
+                            warnings.add(child, WARNING_SYMLINK_SKIPPED)
+                            emittedEnd = index + 1
+                            continue
+                        }
+                        ChildKind.UNSUPPORTED -> {
+                            warnings.add(child, WARNING_UNSUPPORTED_ENTRY_SKIPPED)
+                            emittedEnd = index + 1
+                            continue
+                        }
                     }
-                    rejectSymbolicLink(child)
-                }
-                val childSegments = segments + child.fileName.toString()
-                val entry = JSONObject()
-                    .put("path", relativePath(childSegments))
-                when {
-                    Files.isDirectory(child, LinkOption.NOFOLLOW_LINKS) -> entry.put("type", "directory")
-                    Files.isRegularFile(child, LinkOption.NOFOLLOW_LINKS) -> {
-                        val size = Files.size(child)
-                        if (size > MAX_FILE_BYTES) throw WorkspaceFailure(FILE_TOO_LARGE)
-                        entry.put("type", "file").put("bytes", size).put("version", fileVersion(child))
+                    if (entry.optString("type") == "directory") {
+                        entry.put("version", directoryVersion(child, skipUnsafeChildren = true))
                     }
-                    else -> throw WorkspaceFailure(UNSUPPORTED_ENTRY)
+                    entries.put(entry)
+                    // Long but valid names must still make progress without
+                    // exceeding the Binder-safe JSON envelope.  Reserve room
+                    // for a real continuation token before accepting the entry.
+                    val probe = success("list", segments)
+                        .put("entries", entries)
+                        .put("version", fingerprint)
+                        .put("truncated", true)
+                        .put("nextCursor", "x".repeat(CURSOR_DISPLAY_BYTES))
+                    warnings.appendTo(probe)
+                    if (probe.toString().toByteArray(StandardCharsets.UTF_8).size > MAX_OUTPUT_BYTES) {
+                        entries.remove(entries.length() - 1)
+                        break
+                    }
+                    emittedEnd = index + 1
+                } catch (_: SecurityException) {
+                    warnings.add(child, WARNING_UNREADABLE_ENTRY_SKIPPED)
+                    emittedEnd = index + 1
+                } catch (_: IOException) {
+                    warnings.add(child, WARNING_TRANSIENT_ENTRY_SKIPPED)
+                    emittedEnd = index + 1
+                } catch (_: RuntimeException) {
+                    warnings.add(child, WARNING_TRANSIENT_ENTRY_SKIPPED)
+                    emittedEnd = index + 1
                 }
-                if (entry.optString("type") == "directory") {
-                    entry.put("version", directoryVersion(child))
-                }
-                entries.put(entry)
-                // Long but valid names must still make progress without
-                // exceeding the Binder-safe JSON envelope.  Reserve room for
-                // a real continuation token before accepting the entry.
-                val probe = success("list", segments)
-                    .put("entries", entries)
-                    .put("version", fingerprint)
-                    .put("truncated", true)
-                    .put("nextCursor", "x".repeat(CURSOR_DISPLAY_BYTES))
-                if (probe.toString().toByteArray(StandardCharsets.UTF_8).size > MAX_OUTPUT_BYTES) {
-                    entries.remove(entries.length() - 1)
-                    break
-                }
-                emittedEnd = index + 1
             }
-            if (entries.length() == 0 && emittedEnd < children.size) throw WorkspaceFailure(OUTPUT_LIMIT)
+            if (entries.length() == 0 && emittedEnd == start && emittedEnd < children.size) {
+                // A valid but oversized model envelope (for example one very long filename)
+                // cannot make progress; retain the explicit bounded failure in that case.
+                throw WorkspaceFailure(OUTPUT_LIMIT)
+            }
             val nextCursor = if (emittedEnd < children.size) cursorStore.issue(path, fingerprint, emittedEnd) else null
-            success("list", segments)
+            val result = success("list", segments)
                 .put("entries", entries)
                 .put("version", fingerprint)
                 .put("truncated", nextCursor != null)
                 .put("nextCursor", nextCursor ?: JSONObject.NULL)
+            warnings.appendTo(result)
+            result
         }
     }
 
@@ -159,7 +183,6 @@ internal class ShizukuWorkspaceFileStore(
                 else -> throw WorkspaceFailure(UNSUPPORTED_ENTRY)
             }
             val bytes = if (type == "file") Files.size(target) else 0L
-            if (bytes > MAX_FILE_BYTES) throw WorkspaceFailure(FILE_TOO_LARGE)
             success("stat", segments)
                 .put("type", type)
                 .put("bytes", bytes)
@@ -179,7 +202,8 @@ internal class ShizukuWorkspaceFileStore(
             val segments = parsePath(relativePath, allowRoot = false)
             val file = resolve(segments)
             rejectSymbolicLink(file)
-            if (!Files.isRegularFile(file, LinkOption.NOFOLLOW_LINKS)) throw WorkspaceFailure(NOT_FOUND)
+            if (!Files.exists(file, LinkOption.NOFOLLOW_LINKS)) throw WorkspaceFailure(NOT_FOUND)
+            if (!Files.isRegularFile(file, LinkOption.NOFOLLOW_LINKS)) throw WorkspaceFailure(UNSUPPORTED_ENTRY)
             val size = Files.size(file)
             if (size > MAX_FILE_BYTES) throw WorkspaceFailure(FILE_TOO_LARGE)
             if (offsetBytes > size) throw WorkspaceFailure(OFFSET_OUT_OF_RANGE)
@@ -632,6 +656,60 @@ internal class ShizukuWorkspaceFileStore(
         return entries
     }
 
+    private enum class ChildKind {
+        FILE,
+        DIRECTORY,
+        SYMLINK,
+        UNSUPPORTED,
+    }
+
+    /** Classify one child without ever following a symbolic link. */
+    private fun classifyChild(child: Path): ChildKind {
+        if (Files.isSymbolicLink(child)) return ChildKind.SYMLINK
+        val attributes = Files.readAttributes(
+            child,
+            BasicFileAttributes::class.java,
+            LinkOption.NOFOLLOW_LINKS,
+        )
+        return when {
+            attributes.isDirectory -> ChildKind.DIRECTORY
+            attributes.isRegularFile -> ChildKind.FILE
+            else -> ChildKind.UNSUPPORTED
+        }
+    }
+
+    /**
+     * Return only nodes that can be represented by the model-facing listing.  The warning
+     * accumulator is process-local and never serializes a path or an exception message.
+     */
+    private fun listableChildren(directory: Path, warnings: ListingWarnings? = null): List<Path> =
+        directoryEntries(directory).mapNotNull { child ->
+            try {
+                when (classifyChild(child)) {
+                    ChildKind.FILE,
+                    ChildKind.DIRECTORY,
+                        -> child
+                    ChildKind.SYMLINK -> {
+                        warnings?.add(child, WARNING_SYMLINK_SKIPPED)
+                        null
+                    }
+                    ChildKind.UNSUPPORTED -> {
+                        warnings?.add(child, WARNING_UNSUPPORTED_ENTRY_SKIPPED)
+                        null
+                    }
+                }
+            } catch (_: SecurityException) {
+                warnings?.add(child, WARNING_UNREADABLE_ENTRY_SKIPPED)
+                null
+            } catch (_: IOException) {
+                warnings?.add(child, WARNING_TRANSIENT_ENTRY_SKIPPED)
+                null
+            } catch (_: RuntimeException) {
+                warnings?.add(child, WARNING_TRANSIENT_ENTRY_SKIPPED)
+                null
+            }
+        }.sortedBy { it.fileName.toString() }
+
     private fun fileVersion(file: Path): String {
         val attributes = Files.readAttributes(
             file,
@@ -649,26 +727,78 @@ internal class ShizukuWorkspaceFileStore(
     }
 
     /** A metadata-only, opaque directory version suitable for CAS checks. */
-    private fun directoryVersion(directory: Path): String {
+    private fun directoryVersion(
+        directory: Path,
+        skipUnsafeChildren: Boolean = false,
+        warnings: ListingWarnings? = null,
+    ): String {
         val digest = MessageDigest.getInstance("SHA-256")
-        val children = directoryEntries(directory).sortedBy { it.fileName.toString() }
+        // Filter first, then enforce the entry ceiling.  The raw directory may contain many
+        // symlinks or special nodes that are intentionally omitted from the model view; those
+        // nodes must not consume the safe-entry budget or make a normal page fail.
+        val children = if (skipUnsafeChildren) {
+            listableChildren(directory, warnings)
+        } else {
+            directoryEntries(directory).sortedBy { it.fileName.toString() }
+        }
         if (children.size > MAX_ENTRIES) throw WorkspaceFailure(LIMIT)
         children.forEach { child ->
-            if (Files.isSymbolicLink(child)) {
-                if (skipSymlinksInList) return@forEach
-                rejectSymbolicLink(child)
+            try {
+                val kind = classifyChild(child)
+                if (kind == ChildKind.SYMLINK) {
+                    if (skipUnsafeChildren) warnings?.add(child, WARNING_SYMLINK_SKIPPED)
+                    else throw WorkspaceFailure(SYMLINK_REJECTED)
+                } else if (kind == ChildKind.UNSUPPORTED) {
+                    if (skipUnsafeChildren) warnings?.add(child, WARNING_UNSUPPORTED_ENTRY_SKIPPED)
+                    else throw WorkspaceFailure(UNSUPPORTED_ENTRY)
+                } else {
+                    val name = child.fileName.toString()
+                    val type = if (kind == ChildKind.DIRECTORY) "directory" else "file"
+                    val size = if (kind == ChildKind.FILE) Files.size(child) else -1L
+                    val childVersion = if (kind == ChildKind.FILE) {
+                        fileVersion(child)
+                    } else {
+                        directoryVersion(child, skipUnsafeChildren, warnings)
+                    }
+                    digest.update("$name\u0000$type\u0000$size\u0000$childVersion\u0000".toByteArray(StandardCharsets.UTF_8))
+                }
+            } catch (_: SecurityException) {
+                if (!skipUnsafeChildren) throw WorkspaceFailure(PERMISSION_DENIED)
+                warnings?.add(child, WARNING_UNREADABLE_ENTRY_SKIPPED)
+            } catch (_: IOException) {
+                if (!skipUnsafeChildren) throw WorkspaceFailure(OPERATION_UNAVAILABLE)
+                warnings?.add(child, WARNING_TRANSIENT_ENTRY_SKIPPED)
+            } catch (_: RuntimeException) {
+                if (!skipUnsafeChildren) throw WorkspaceFailure(OPERATION_UNAVAILABLE)
+                warnings?.add(child, WARNING_TRANSIENT_ENTRY_SKIPPED)
             }
-            val name = child.fileName.toString()
-            val type = when {
-                Files.isDirectory(child, LinkOption.NOFOLLOW_LINKS) -> "directory"
-                Files.isRegularFile(child, LinkOption.NOFOLLOW_LINKS) -> "file"
-                else -> throw WorkspaceFailure(UNSUPPORTED_ENTRY)
-            }
-            val size = if (type == "file") Files.size(child) else -1L
-            val childVersion = if (type == "file") fileVersion(child) else directoryVersion(child)
-            digest.update("$name\u0000$type\u0000$size\u0000$childVersion\u0000".toByteArray(StandardCharsets.UTF_8))
         }
         return digest.digest().toHex()
+    }
+
+    /** Bounded category counts used only while constructing one list response. */
+    private class ListingWarnings {
+        private val seen = HashSet<String>()
+        private val counts = LinkedHashMap<String, Int>()
+        private var total = 0
+
+        fun add(path: Path, code: String) {
+            if (total >= MAX_REPORTED_SKIPPED_ENTRIES) return
+            val key = path.toString() + '\u0000' + code
+            if (!seen.add(key)) return
+            counts[code] = (counts[code] ?: 0) + 1
+            total++
+        }
+
+        fun appendTo(result: JSONObject) {
+            if (total == 0) return
+            result.put("skippedEntries", total)
+            val warningArray = JSONArray()
+            counts.forEach { (code, count) ->
+                warningArray.put(JSONObject().put("code", code).put("count", count))
+            }
+            result.put("warnings", warningArray)
+        }
     }
 
     private fun sha256(value: ByteArray): String =
@@ -930,6 +1060,12 @@ internal class ShizukuWorkspaceFileStore(
         internal const val MAX_ENTRIES = 512
         internal const val MAX_DIRECTORY_ENTRIES = 256
         internal const val MAX_OUTPUT_BYTES = 32 * 1024
+        private const val MAX_REPORTED_SKIPPED_ENTRIES = 100_000
+
+        private const val WARNING_SYMLINK_SKIPPED = "SYMLINK_SKIPPED"
+        private const val WARNING_UNSUPPORTED_ENTRY_SKIPPED = "UNSUPPORTED_ENTRY_SKIPPED"
+        private const val WARNING_TRANSIENT_ENTRY_SKIPPED = "TRANSIENT_ENTRY_SKIPPED"
+        private const val WARNING_UNREADABLE_ENTRY_SKIPPED = "UNREADABLE_ENTRY_SKIPPED"
 
         const val INVALID_PATH = "INVALID_PATH"
         const val INVALID_CONTENT = "INVALID_CONTENT"

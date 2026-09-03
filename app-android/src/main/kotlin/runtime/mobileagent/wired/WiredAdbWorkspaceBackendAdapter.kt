@@ -97,6 +97,8 @@ class WiredAdbWorkspaceBackendAdapter(
                 },
                 truncated = result.truncated || result.nextCursor != null || result.entries.size > request.maxEntries,
                 nextCursor = result.nextCursor,
+                skippedEntries = result.skippedEntries,
+                warnings = result.listingWarnings,
             )
         }
     }
@@ -277,10 +279,21 @@ class WiredAdbWorkspaceBackendAdapter(
         WiredAdbErrorCode.UNKNOWN_OUTCOME -> ToolErrorCode.UNKNOWN_OUTCOME
         WiredAdbErrorCode.TIMEOUT -> ToolErrorCode.TIMEOUT
         WiredAdbErrorCode.WORKSPACE_NOT_FOUND -> ToolErrorCode.WORKSPACE_NOT_FOUND
+        WiredAdbErrorCode.PATH_OUT_OF_SCOPE -> ToolErrorCode.PATH_OUT_OF_SCOPE
+        WiredAdbErrorCode.SYMLINK_FORBIDDEN -> ToolErrorCode.SYMLINK_FORBIDDEN
+        WiredAdbErrorCode.INVALID_CONTENT -> ToolErrorCode.INVALID_REQUEST
+        WiredAdbErrorCode.TARGET_EXISTS,
+        WiredAdbErrorCode.NON_EMPTY_DIRECTORY -> ToolErrorCode.CONFLICT
+        WiredAdbErrorCode.FILE_TOO_LARGE -> ToolErrorCode.FILE_TOO_LARGE
+        WiredAdbErrorCode.QUOTA_EXCEEDED -> ToolErrorCode.QUOTA_EXCEEDED
+        WiredAdbErrorCode.PERMISSION_DENIED -> ToolErrorCode.PERMISSION_DENIED
         WiredAdbErrorCode.CONFLICT -> ToolErrorCode.CONFLICT
         WiredAdbErrorCode.OFFSET_OUT_OF_RANGE,
-        WiredAdbErrorCode.INVALID_CURSOR,
         WiredAdbErrorCode.INVALID_PATCH -> ToolErrorCode.INVALID_REQUEST
+        WiredAdbErrorCode.INVALID_CURSOR -> ToolErrorCode.INVALID_CURSOR
+        WiredAdbErrorCode.UNSUPPORTED_ENTRY -> ToolErrorCode.UNSUPPORTED_ENTRY
+        WiredAdbErrorCode.OPERATION_UNAVAILABLE -> ToolErrorCode.OPERATION_UNAVAILABLE
+        WiredAdbErrorCode.WRITE_UNVERIFIED -> ToolErrorCode.UNKNOWN_OUTCOME
         WiredAdbErrorCode.ATOMIC_REPLACE_UNAVAILABLE -> ToolErrorCode.IO_ERROR
         WiredAdbErrorCode.IO_ERROR,
         WiredAdbErrorCode.INTERNAL_ERROR -> ToolErrorCode.IO_ERROR
@@ -658,10 +671,21 @@ private fun WiredAdbErrorCode.toToolErrorCode(): ToolErrorCode = when (this) {
     WiredAdbErrorCode.UNKNOWN_OUTCOME -> ToolErrorCode.UNKNOWN_OUTCOME
     WiredAdbErrorCode.TIMEOUT -> ToolErrorCode.TIMEOUT
     WiredAdbErrorCode.WORKSPACE_NOT_FOUND -> ToolErrorCode.WORKSPACE_NOT_FOUND
+    WiredAdbErrorCode.PATH_OUT_OF_SCOPE -> ToolErrorCode.PATH_OUT_OF_SCOPE
+    WiredAdbErrorCode.SYMLINK_FORBIDDEN -> ToolErrorCode.SYMLINK_FORBIDDEN
+    WiredAdbErrorCode.INVALID_CONTENT -> ToolErrorCode.INVALID_REQUEST
+    WiredAdbErrorCode.TARGET_EXISTS,
+    WiredAdbErrorCode.NON_EMPTY_DIRECTORY -> ToolErrorCode.CONFLICT
+    WiredAdbErrorCode.FILE_TOO_LARGE -> ToolErrorCode.FILE_TOO_LARGE
+    WiredAdbErrorCode.QUOTA_EXCEEDED -> ToolErrorCode.QUOTA_EXCEEDED
+    WiredAdbErrorCode.PERMISSION_DENIED -> ToolErrorCode.PERMISSION_DENIED
     WiredAdbErrorCode.CONFLICT -> ToolErrorCode.CONFLICT
     WiredAdbErrorCode.OFFSET_OUT_OF_RANGE,
-    WiredAdbErrorCode.INVALID_CURSOR,
     WiredAdbErrorCode.INVALID_PATCH -> ToolErrorCode.INVALID_REQUEST
+    WiredAdbErrorCode.INVALID_CURSOR -> ToolErrorCode.INVALID_CURSOR
+    WiredAdbErrorCode.UNSUPPORTED_ENTRY -> ToolErrorCode.UNSUPPORTED_ENTRY
+    WiredAdbErrorCode.OPERATION_UNAVAILABLE -> ToolErrorCode.OPERATION_UNAVAILABLE
+    WiredAdbErrorCode.WRITE_UNVERIFIED -> ToolErrorCode.UNKNOWN_OUTCOME
     WiredAdbErrorCode.ATOMIC_REPLACE_UNAVAILABLE -> ToolErrorCode.IO_ERROR
     WiredAdbErrorCode.IO_ERROR,
     WiredAdbErrorCode.INTERNAL_ERROR -> ToolErrorCode.IO_ERROR

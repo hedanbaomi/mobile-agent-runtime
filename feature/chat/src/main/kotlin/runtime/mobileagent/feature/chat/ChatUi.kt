@@ -151,6 +151,12 @@ data class ChatRequestPreviewUi(
 
 data class ChatAgentOptionUi(val id: String, val label: String)
 
+enum class ChatThreadWorkspaceState {
+    BOUND,
+    UNBOUND_AGENT_DEFAULT_AVAILABLE,
+    UNBOUND_NO_AGENT_DEFAULT,
+}
+
 /**
  * UI-only summary of the workspace owned by the selected Agent. Workspace
  * grants are configured in Agent settings and are shared by that Agent's
@@ -162,6 +168,9 @@ data class ChatWorkspaceAccessUi(
     val systemAccessLabel: String = "未启用系统增强访问",
     val permissionLabel: String = "尚未授权",
     val notice: String = "",
+    val threadWorkspaceState: ChatThreadWorkspaceState = ChatThreadWorkspaceState.UNBOUND_NO_AGENT_DEFAULT,
+    val agentDefaultWorkspaceId: String? = null,
+    val agentDefaultWorkspaceLabel: String = "",
 )
 
 /**
@@ -361,6 +370,7 @@ fun ConversationScreen(
     actions: ChatActions = ChatActions(),
     onOpenDrawer: () -> Unit = {},
     onOpenWorkspace: () -> Unit = {},
+    showGlobalMenu: Boolean = true,
     modifier: Modifier = Modifier,
 ) {
     Box(modifier.fillMaxSize()) {
@@ -373,6 +383,7 @@ fun ConversationScreen(
                 .fillMaxSize()
                 .padding(horizontal = 16.dp, vertical = 8.dp),
             minimalHeader = true,
+            showGlobalMenu = showGlobalMenu,
         )
     }
     state.selectedCitationId?.let { id -> state.citations.firstOrNull { it.id == id } }?.let {
@@ -388,6 +399,7 @@ private fun ChatConversationContent(
     onOpenWorkspace: () -> Unit,
     modifier: Modifier,
     minimalHeader: Boolean = false,
+    showGlobalMenu: Boolean = true,
 ) {
     BoxWithConstraints(modifier) {
         // The detail viewport gives up space first when the IME is visible,
@@ -409,7 +421,15 @@ private fun ChatConversationContent(
                     compact = compactApproval,
                 )
             } else {
-                ChatHeader(state, actions, onOpenSidebar, onOpenWorkspace, minimal = minimalHeader)
+                ChatHeader(
+                    state,
+                    actions,
+                    onOpenSidebar,
+                    onOpenWorkspace,
+                    minimal = minimalHeader,
+                    showGlobalMenu = showGlobalMenu,
+                )
+                UnboundWorkspaceDefaultCard(state, actions)
                 if (state.status.isNotBlank()) StatusLine(state.status, state.statusKind)
                 if (state.loading) {
                     CenterState(if (state.language.equals("zh-CN", true)) "正在加载会话…" else "Loading conversations…", true, Modifier.weight(1f))
@@ -435,6 +455,51 @@ private fun ChatConversationContent(
                     }
                 }
                 Composer(state, actions)
+            }
+        }
+    }
+}
+
+@Composable
+private fun UnboundWorkspaceDefaultCard(state: ChatUiState, actions: ChatActions) {
+    if (state.workspaceAccess.threadWorkspaceState != ChatThreadWorkspaceState.UNBOUND_AGENT_DEFAULT_AVAILABLE) return
+    val workspaceId = state.workspaceAccess.agentDefaultWorkspaceId ?: return
+    val zh = state.language.equals("zh-CN", true)
+    Card(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 6.dp)
+            .testTag("conversation.unbound.defaultAvailable"),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.secondaryContainer),
+    ) {
+        Column(
+            Modifier.fillMaxWidth().padding(12.dp),
+            verticalArrangement = Arrangement.spacedBy(6.dp),
+        ) {
+            Text(
+                state.workspaceAccess.notice.ifBlank {
+                    if (zh) "当前会话保持无工作区；不会自动改绑。" else "This conversation stays unbound and is never changed automatically."
+                },
+                style = MaterialTheme.typography.bodySmall,
+            )
+            Text(
+                if (zh) "Agent 默认工作区：${state.workspaceAccess.agentDefaultWorkspaceLabel}"
+                else "Agent default workspace: ${state.workspaceAccess.agentDefaultWorkspaceLabel}",
+                style = MaterialTheme.typography.bodySmall,
+                fontWeight = FontWeight.SemiBold,
+            )
+            Button(
+                onClick = { actions.onNewSessionForWorkspace(workspaceId) },
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(min = 48.dp)
+                    .testTag("conversation.unbound.newAtDefault"),
+            ) {
+                Text(
+                    if (zh) "在此工作区新建会话" else "New conversation in this workspace",
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
+                )
             }
         }
     }
@@ -528,9 +593,16 @@ private fun ChatHeader(
     onOpenSidebar: () -> Unit,
     onOpenWorkspace: () -> Unit,
     minimal: Boolean = false,
+    showGlobalMenu: Boolean = true,
 ) {
     if (minimal) {
-        ConversationTopBar(state, actions, onOpenSidebar, onOpenWorkspace)
+        ConversationTopBar(
+            state,
+            actions,
+            onOpenSidebar,
+            onOpenWorkspace,
+            showGlobalMenu = showGlobalMenu,
+        )
         return
     }
     val zh = state.language.equals("zh-CN", true)
@@ -610,12 +682,13 @@ fun ConversationTopBar(
     actions: ChatActions,
     onOpenDrawer: () -> Unit,
     onOpenWorkspace: () -> Unit,
+    showGlobalMenu: Boolean = true,
     modifier: Modifier = Modifier,
 ) {
     val zh = state.language.equals("zh-CN", true)
     val session = state.sessions.firstOrNull { it.id == state.selectedSessionId }
-    val agent = state.agents.firstOrNull { it.id == state.selectedAgentId }?.label
-        ?: session?.agentName?.takeIf { it.isNotBlank() }
+    val agent = session?.agentName?.takeIf { it.isNotBlank() }
+        ?: state.agents.firstOrNull { it.id == state.selectedAgentId }?.label
         ?: if (zh) "未选择智能体" else "No agent selected"
     val workspace = state.workspaceAccess.workspaceSummary
         .takeIf { it.isNotBlank() }
@@ -630,16 +703,18 @@ fun ConversationTopBar(
             .testTag("conversation.topBar"),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        IconButton(
-            onClick = onOpenDrawer,
-            modifier = Modifier
-                .size(48.dp)
-                .testTag("conversation.drawer.open"),
-        ) {
-            Icon(
-                Icons.Filled.Menu,
-                contentDescription = if (zh) "打开菜单" else "Open menu",
-            )
+        if (showGlobalMenu) {
+            IconButton(
+                onClick = onOpenDrawer,
+                modifier = Modifier
+                    .size(48.dp)
+                    .testTag("conversation.drawer.open"),
+            ) {
+                Icon(
+                    Icons.Filled.Menu,
+                    contentDescription = if (zh) "打开菜单" else "Open menu",
+                )
+            }
         }
         TextButton(
             onClick = { contextOpen = true },
@@ -727,6 +802,10 @@ fun ConversationTopBar(
                 contextOpen = false
                 actions.onNewSession()
             },
+            onNewSessionAtDefault = { workspaceId ->
+                contextOpen = false
+                actions.onNewSessionForWorkspace(workspaceId)
+            },
         )
     }
 }
@@ -740,6 +819,7 @@ fun ConversationContextSheet(
     onOpenWorkspace: () -> Unit,
     onOpenAgentSettings: () -> Unit,
     onNewSession: () -> Unit,
+    onNewSessionAtDefault: (String) -> Unit,
 ) {
     val zh = state.language.equals("zh-CN", true)
     val agent = state.agents.firstOrNull { it.id == state.selectedAgentId }?.label
@@ -761,6 +841,21 @@ fun ConversationContextSheet(
             Text(agent, style = MaterialTheme.typography.bodyLarge)
             Text(if (zh) "工作区" else "Workspace", style = MaterialTheme.typography.labelLarge)
             Text(workspace, style = MaterialTheme.typography.bodyLarge)
+            if (state.workspaceAccess.threadWorkspaceState == ChatThreadWorkspaceState.UNBOUND_AGENT_DEFAULT_AVAILABLE &&
+                state.workspaceAccess.agentDefaultWorkspaceId != null
+            ) {
+                Text(if (zh) "Agent 默认工作区" else "Agent default workspace", style = MaterialTheme.typography.labelLarge)
+                Text(state.workspaceAccess.agentDefaultWorkspaceLabel, style = MaterialTheme.typography.bodyLarge)
+                Button(
+                    onClick = { onNewSessionAtDefault(requireNotNull(state.workspaceAccess.agentDefaultWorkspaceId)) },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(min = 48.dp)
+                        .testTag("conversation.context.newAtDefault"),
+                ) {
+                    Text(if (zh) "在此工作区新建会话" else "New conversation in this workspace")
+                }
+            }
             if (state.workspaceAccess.systemAccessLabel.isNotBlank()) {
                 Text(state.workspaceAccess.systemAccessLabel, style = MaterialTheme.typography.bodySmall)
             }
@@ -1278,12 +1373,17 @@ fun RequestInspectorScreen(
     onClose: () -> Unit,
     zh: Boolean,
     modifier: Modifier = Modifier,
+    showPageTitle: Boolean = true,
     availability: ChatRequestInspectorAvailability = request?.let { ChatRequestInspectorAvailability.READY }
         ?: ChatRequestInspectorAvailability.NOT_PREPARED,
 ) {
     Column(modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp)) {
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-            Text(if (zh) "请求检查器" else "Request inspector", style = MaterialTheme.typography.headlineSmall, modifier = Modifier.weight(1f))
+            if (showPageTitle) {
+                Text(if (zh) "请求检查器" else "Request inspector", style = MaterialTheme.typography.headlineSmall, modifier = Modifier.weight(1f))
+            } else {
+                Spacer(Modifier.weight(1f))
+            }
             Button(onClick = onClose) { Text(if (zh) "关闭" else "Close") }
         }
         // An explicit DISABLED state is authoritative even when a caller still

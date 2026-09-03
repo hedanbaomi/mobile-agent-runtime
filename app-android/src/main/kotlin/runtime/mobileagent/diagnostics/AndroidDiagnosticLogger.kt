@@ -213,6 +213,12 @@ class AndroidDiagnosticLogger private constructor(
     fun recordConversationWorkspaceResolved(record: ConversationWorkspaceRecord): Boolean =
         store.recordConversationWorkspaceResolved(record)
 
+    fun recordAgentWorkspaceDefaultChanged(record: AgentWorkspaceDefaultChangedRecord): Boolean =
+        store.recordAgentWorkspaceDefaultChanged(record)
+
+    fun recordConversationWorkspaceResolution(record: ConversationWorkspaceResolutionRecord): Boolean =
+        store.recordConversationWorkspaceResolution(record)
+
     fun recordWorkspaceToolExposure(record: WorkspaceToolExposureRecord): Boolean =
         store.recordWorkspaceToolExposure(record)
 

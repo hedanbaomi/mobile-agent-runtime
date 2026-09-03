@@ -156,7 +156,12 @@ data class SkillsActions(
 )
 
 @Composable
-fun SkillsScreen(state: SkillsUiState, actions: SkillsActions = SkillsActions(), modifier: Modifier = Modifier) {
+fun SkillsScreen(
+    state: SkillsUiState,
+    actions: SkillsActions = SkillsActions(),
+    modifier: Modifier = Modifier,
+    showPageTitle: Boolean = true,
+) {
     val zh = state.language.equals("zh-CN", true)
     val picker = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
         if (uris.isNotEmpty()) actions.onImport(uris)
@@ -165,12 +170,12 @@ fun SkillsScreen(state: SkillsUiState, actions: SkillsActions = SkillsActions(),
         val wide = maxWidth >= 720.dp
         if (wide) {
             Row(Modifier.fillMaxSize(), horizontalArrangement = Arrangement.spacedBy(16.dp)) {
-                SkillListPane(state, actions, zh, { picker.launch(arrayOf("*/*")) }, Modifier.weight(0.44f).fillMaxSize())
+                SkillListPane(state, actions, zh, { picker.launch(arrayOf("*/*")) }, Modifier.weight(0.44f).fillMaxSize(), showPageTitle)
                 SkillDetailPane(state, actions, zh, Modifier.weight(0.56f).fillMaxSize().verticalScroll(rememberScrollState()).testTag("skills.detail.scroll"))
             }
         } else {
             Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).testTag("skills.narrow.scroll"), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                SkillListPane(state, actions, zh, { picker.launch(arrayOf("*/*")) }, Modifier.fillMaxWidth())
+                SkillListPane(state, actions, zh, { picker.launch(arrayOf("*/*")) }, Modifier.fillMaxWidth(), showPageTitle)
                 SkillDetailPane(state, actions, zh, Modifier.fillMaxWidth())
             }
         }
@@ -180,10 +185,14 @@ fun SkillsScreen(state: SkillsUiState, actions: SkillsActions = SkillsActions(),
 }
 
 @Composable
-private fun SkillListPane(state: SkillsUiState, actions: SkillsActions, zh: Boolean, onImport: () -> Unit, modifier: Modifier) {
+private fun SkillListPane(state: SkillsUiState, actions: SkillsActions, zh: Boolean, onImport: () -> Unit, modifier: Modifier, showPageTitle: Boolean) {
     Column(modifier) {
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-            Text(if (zh) "技能" else "Skills", style = MaterialTheme.typography.headlineSmall, modifier = Modifier.weight(1f))
+            if (showPageTitle) {
+                Text(if (zh) "技能" else "Skills", style = MaterialTheme.typography.headlineSmall, modifier = Modifier.weight(1f))
+            } else {
+                Spacer(Modifier.weight(1f))
+            }
             Button(onClick = onImport) { Text(if (zh) "导入包" else "Import package") }
         }
         Text(

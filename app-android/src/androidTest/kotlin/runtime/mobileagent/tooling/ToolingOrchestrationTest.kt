@@ -46,6 +46,7 @@ import runtime.mobileagent.skills.tooling.ShellExecResult
 import runtime.mobileagent.skills.tooling.ShellExecutor
 import runtime.mobileagent.skills.tooling.ShellLimits
 import runtime.mobileagent.skills.tooling.ToolExecution
+import runtime.mobileagent.skills.tooling.ToolError
 import runtime.mobileagent.skills.tooling.ToolErrorCode
 import runtime.mobileagent.skills.tooling.ToolInvocation
 import runtime.mobileagent.skills.tooling.WorkspaceBackend
@@ -57,6 +58,8 @@ import runtime.mobileagent.skills.tooling.WorkspaceEntryType
 import runtime.mobileagent.skills.tooling.WorkspaceFileStat
 import runtime.mobileagent.skills.tooling.WorkspaceListRequest
 import runtime.mobileagent.skills.tooling.WorkspaceListing
+import runtime.mobileagent.skills.tooling.WorkspaceListingWarning
+import runtime.mobileagent.skills.tooling.WorkspaceListingWarningCode
 import runtime.mobileagent.skills.tooling.WorkspaceMoveRequest
 import runtime.mobileagent.skills.tooling.WorkspaceMutation
 import runtime.mobileagent.skills.tooling.WorkspacePatchFormat
@@ -1174,6 +1177,16 @@ class ToolingOrchestrationTest {
         livePolicyVersion = 2L
         val denied = executor.invoke(invocation("model-policy-v2"), context)
         assertEquals(ToolErrorCode.CAPABILITY_DENIED, (denied as ToolExecution.Failed).error.code)
+        val legacyDenied = executor.invoke(
+            ToolCall(
+                "model-policy-v2-legacy",
+                UnifiedWorkspaceToolExecutor.FILE_READ_TEXT,
+                "{\"workspaceId\":\"${descriptor.id}\",\"relativePath\":\"note.txt\"}",
+            ),
+            context,
+        )
+        assertTrue(legacyDenied is ToolResult.Failure)
+        assertEquals(ToolErrorCode.CAPABILITY_DENIED, (legacyDenied as ToolResult.Failure).error.code)
         assertEquals(1, dispatched.get())
     }
 
@@ -1220,7 +1233,61 @@ class ToolingOrchestrationTest {
         assertEquals(ToolErrorCode.UNKNOWN_OUTCOME, (replay as ToolExecution.Unknown).error.code)
         assertEquals(1, dispatched.get())
         assertEquals(2, auditEvents.size)
-        assertEquals(WorkspaceAuditOutcome.UNKNOWN, auditEvents.single { it.phase == WorkspaceAuditPhase.TERMINAL }.outcome)
+        val terminal = auditEvents.single { it.phase == WorkspaceAuditPhase.TERMINAL }
+        assertEquals(WorkspaceAuditOutcome.UNKNOWN, terminal.outcome)
+        assertEquals(ToolErrorCode.UNKNOWN_OUTCOME.name, terminal.resultCode)
+    }
+
+    @Test
+    fun workspaceBackendErrorCodeReachesTypedLegacyAndAuditResults() = runBlocking {
+        val descriptor = WorkspaceDescriptor(
+            id = "workspace-large-file",
+            displayName = "Large file workspace",
+            backendType = WorkspaceBackendType.INTERNAL,
+        )
+        val backend = object : WorkspaceBackend {
+            override val descriptor: WorkspaceDescriptor = descriptor
+            override val capabilities: Set<CapabilityId> = setOf(CapabilityId(CapabilityId.FILE_READ_TEXT))
+
+            override suspend fun readText(request: WorkspaceReadTextRequest): WorkspaceResult<WorkspaceText> =
+                WorkspaceResult.Failure(ToolError(ToolErrorCode.FILE_TOO_LARGE))
+        }
+        val registry = WorkspaceRegistry()
+        assertTrue(registry.register(descriptor, backend))
+        val context = workspaceContext(
+            workspaceGrants(grant("grant-large-file", CapabilityId(CapabilityId.FILE_READ_TEXT), descriptor.id, "large.txt")),
+        )
+        val auditEvents = mutableListOf<WorkspaceAuditEvent>()
+        val executor = UnifiedWorkspaceToolExecutor(
+            registry = registry,
+            approvalEngine = ApprovalEngine(),
+            contextProvider = { context },
+            auditSink = acceptingWorkspaceAuditSink(auditEvents),
+        )
+        val invocation = ToolInvocation.fromRuntime(
+            callId = "model-large-file",
+            snapshotId = context.snapshotId,
+            agentId = context.agentId,
+            name = UnifiedWorkspaceToolExecutor.FILE_READ_TEXT,
+            argumentsJson = "{\"workspaceId\":\"${descriptor.id}\",\"relativePath\":\"large.txt\"}",
+        )
+
+        val typed = executor.invoke(invocation, context)
+        assertEquals(ToolErrorCode.FILE_TOO_LARGE, (typed as ToolExecution.Failed).error.code)
+        val terminal = auditEvents.single { it.phase == WorkspaceAuditPhase.TERMINAL }
+        assertEquals(WorkspaceAuditOutcome.FAILED, terminal.outcome)
+        assertEquals(ToolErrorCode.FILE_TOO_LARGE.name, terminal.resultCode)
+
+        val legacy = executor.invoke(
+            ToolCall(
+                "model-large-file-legacy",
+                UnifiedWorkspaceToolExecutor.FILE_READ_TEXT,
+                "{\"workspaceId\":\"${descriptor.id}\",\"relativePath\":\"large.txt\"}",
+            ),
+            context,
+        )
+        assertTrue(legacy is ToolResult.Failure)
+        assertEquals(ToolErrorCode.FILE_TOO_LARGE, (legacy as ToolResult.Failure).error.code)
     }
 
     @Test
@@ -1383,8 +1450,8 @@ class ToolingOrchestrationTest {
 
         assertFalse(schemas.getValue(UnifiedWorkspaceToolExecutor.FILE_READ_TEXT).contains("expectedVersion"))
         assertFalse(schemas.getValue(UnifiedWorkspaceToolExecutor.FILE_MOVE).contains("\"replace\""))
-        assertTrue(schemas.getValue(UnifiedWorkspaceToolExecutor.FILE_CREATE_DIRECTORY).contains("expectedVersion"))
-        assertTrue(schemas.getValue(UnifiedWorkspaceToolExecutor.FILE_DELETE).contains("expectedVersion"))
+        assertTrue(schemas.getValue(UnifiedWorkspaceToolExecutor.FILE_CREATE_DIRECTORY).contains("expected_version"))
+        assertTrue(schemas.getValue(UnifiedWorkspaceToolExecutor.FILE_DELETE).contains("expected_version"))
 
         assertTrue(
             executor.invoke(
@@ -1869,6 +1936,11 @@ class ToolingOrchestrationTest {
                         relativePath = request.relativePath ?: ".",
                         entries = emptyList(),
                         nextCursor = "opaque-page-2",
+                        skippedEntries = 2,
+                        warnings = listOf(
+                            WorkspaceListingWarning(WorkspaceListingWarningCode.SYMLINK_SKIPPED, count = 1),
+                            WorkspaceListingWarning(WorkspaceListingWarningCode.METADATA_UNAVAILABLE, count = 1),
+                        ),
                     ),
                 )
             }
@@ -1935,8 +2007,11 @@ class ToolingOrchestrationTest {
         assertEquals("src", listRequest?.relativePath)
         assertEquals(5, listRequest?.maxEntries)
         assertEquals("opaque-page-1", listRequest?.cursor)
-        assertTrue(list.json.contains("\"next_cursor\":\"opaque-page-2\""))
-        assertTrue(list.json.contains("\"has_more\":true"))
+        assertTrue(list.json, list.json.contains("\"next_cursor\":\"opaque-page-2\""))
+        assertTrue(list.json, list.json.contains("\"has_more\":true"))
+        assertTrue(list.json, list.json.contains("\"skipped_entries\":2"))
+        assertTrue(list.json, list.json.contains("SYMLINK_SKIPPED"))
+        assertTrue(list.json, list.json.contains("METADATA_UNAVAILABLE"))
 
         val read = executor.invoke(
             invocation(

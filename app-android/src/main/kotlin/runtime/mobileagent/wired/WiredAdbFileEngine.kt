@@ -25,6 +25,9 @@ import java.security.MessageDigest
 import java.util.UUID
 import javax.crypto.Mac
 import javax.crypto.spec.SecretKeySpec
+import runtime.mobileagent.skills.tooling.WorkspaceListing
+import runtime.mobileagent.skills.tooling.WorkspaceListingWarning
+import runtime.mobileagent.skills.tooling.WorkspaceListingWarningCode
 
 /**
  * Port used by [runtime.mobileagent.bridge.AdbHelperMain].  A production
@@ -198,10 +201,10 @@ class NioPrivilegedFileEngine(
             throw EngineFailure(ERR_NOT_FOUND)
         }
         requireDirectory(directory)
-        val children = entries(directory)
-        val sortedChildren = children.sortedBy { it.fileName.toString() }
+        val warnings = ListingWarnings()
+        val sortedChildren = safeEntries(directory, warnings).sortedBy { it.fileName.toString() }
         if (sortedChildren.size > WIRED_MAX_ENTRIES) throw EngineFailure(ERR_LIMIT)
-        val directoryVersion = versionOf(directory, isDirectory = true)
+        val directoryVersion = versionOf(directory, isDirectory = true, bestEffort = true)
         val start = decodeCursor(request.cursor, pathOf(segments), directoryVersion, request.workspaceBinding)
         if (start > sortedChildren.size) throw EngineFailure(ERR_INVALID_CURSOR)
         val pageSize = minOf(request.maxEntries, WIRED_MAX_DIRECTORY_ENTRIES)
@@ -210,8 +213,7 @@ class NioPrivilegedFileEngine(
             // Symlinks are not traversable entries. Omit them from directory
             // browsing rather than turning a safe directory listing into a
             // path disclosure or an all-or-nothing failure.
-            if (Files.isSymbolicLink(child)) return@mapNotNull null
-            runCatching {
+            try {
                 rejectSymlink(child)
                 val childSegments = segments + child.fileName.toString()
                 when {
@@ -219,7 +221,7 @@ class NioPrivilegedFileEngine(
                         WiredAdbFileEntry(
                             pathOf(childSegments),
                             WiredAdbEntryType.DIRECTORY,
-                            version = versionOf(child, isDirectory = true),
+                            version = versionOf(child, isDirectory = true, bestEffort = true),
                         )
                     Files.isRegularFile(child, LinkOption.NOFOLLOW_LINKS) ->
                         WiredAdbFileEntry(
@@ -228,9 +230,27 @@ class NioPrivilegedFileEngine(
                             Files.size(child),
                             versionOf(child, isDirectory = false),
                         )
-                    else -> null
+                    else -> {
+                        warnings.add(WorkspaceListingWarningCode.UNSUPPORTED_ENTRY_SKIPPED)
+                        null
+                    }
                 }
-            }.getOrNull()
+            } catch (failure: EngineFailure) {
+                warnings.add(
+                    if (failure.code == ERR_SYMLINK_FORBIDDEN) WorkspaceListingWarningCode.SYMLINK_SKIPPED
+                    else WorkspaceListingWarningCode.TRANSIENT_ENTRY_SKIPPED,
+                )
+                null
+            } catch (_: SecurityException) {
+                warnings.add(WorkspaceListingWarningCode.UNREADABLE_ENTRY_SKIPPED)
+                null
+            } catch (_: IOException) {
+                warnings.add(WorkspaceListingWarningCode.TRANSIENT_ENTRY_SKIPPED)
+                null
+            } catch (_: RuntimeException) {
+                warnings.add(WorkspaceListingWarningCode.TRANSIENT_ENTRY_SKIPPED)
+                null
+            }
         }
         return WiredAdbFileResult(
             WiredAdbFileOperation.LIST,
@@ -240,6 +260,8 @@ class NioPrivilegedFileEngine(
             nextCursor = if (end < sortedChildren.size) {
                 encodeCursor(pathOf(segments), directoryVersion, end, request.workspaceBinding)
             } else null,
+            skippedEntries = warnings.skippedEntries,
+            listingWarnings = warnings.snapshot(),
             version = directoryVersion,
         )
     }
@@ -273,8 +295,10 @@ class NioPrivilegedFileEngine(
         val segments = WiredAdbPathPolicy.parse(request.relativePath, allowRoot = false)
         val file = resolve(segments)
         rejectSymlink(file)
-        if (!Files.isRegularFile(file, LinkOption.NOFOLLOW_LINKS)) throw EngineFailure(ERR_NOT_FOUND)
+        if (!Files.exists(file, LinkOption.NOFOLLOW_LINKS)) throw EngineFailure(ERR_NOT_FOUND)
+        if (!Files.isRegularFile(file, LinkOption.NOFOLLOW_LINKS)) throw EngineFailure(ERR_UNSUPPORTED_ENTRY)
         val size = Files.size(file)
+        if (size > WIRED_MAX_FILE_BYTES) throw EngineFailure(ERR_FILE_TOO_LARGE)
         if (request.offsetBytes > size) throw EngineFailure(ERR_OFFSET_OUT_OF_RANGE)
         val bytes = readBounded(file, request.offsetBytes, request.maxBytes)
         val decoded = decodeUtf8Chunk(bytes)
@@ -598,6 +622,46 @@ class NioPrivilegedFileEngine(
         Files.newDirectoryStream(directory).use { stream: DirectoryStream<Path> -> stream.forEach(result::add) }
     }
 
+    private fun safeEntries(directory: Path, warnings: ListingWarnings? = null): List<Path> =
+        entries(directory).mapNotNull { child ->
+            try {
+                when {
+                    Files.isSymbolicLink(child) -> {
+                        warnings?.add(WorkspaceListingWarningCode.SYMLINK_SKIPPED)
+                        null
+                    }
+                    Files.isDirectory(child, LinkOption.NOFOLLOW_LINKS) ||
+                        Files.isRegularFile(child, LinkOption.NOFOLLOW_LINKS) -> child
+                    else -> {
+                        warnings?.add(WorkspaceListingWarningCode.UNSUPPORTED_ENTRY_SKIPPED)
+                        null
+                    }
+                }
+            } catch (_: SecurityException) {
+                warnings?.add(WorkspaceListingWarningCode.UNREADABLE_ENTRY_SKIPPED)
+                null
+            } catch (_: RuntimeException) {
+                warnings?.add(WorkspaceListingWarningCode.TRANSIENT_ENTRY_SKIPPED)
+                null
+            }
+        }
+
+    private class ListingWarnings {
+        private val counts = linkedMapOf<WorkspaceListingWarningCode, Int>()
+
+        fun add(code: WorkspaceListingWarningCode) {
+            if (skippedEntries >= WorkspaceListing.MAX_SKIPPED_ENTRIES) return
+            counts[code] = (counts[code] ?: 0) + 1
+        }
+
+        val skippedEntries: Int
+            get() = counts.values.sum()
+
+        fun snapshot(): List<WorkspaceListingWarning> = counts.map { (code, count) ->
+            WorkspaceListingWarning(code, count)
+        }
+    }
+
     private fun inspectUsage(enforceIndividualFileLimit: Boolean = true): Usage {
         if (fullDevice) return Usage(0, 0L, 0)
         if (!Files.exists(rootPath, LinkOption.NOFOLLOW_LINKS)) return Usage(0, 0L, 0)
@@ -728,21 +792,27 @@ class NioPrivilegedFileEngine(
     private fun pathOf(segments: List<String>): String = segments.joinToString("/")
 
     /** Numeric projection of metadata; the full path and hash never cross the helper boundary. */
-    private fun versionOf(path: Path, isDirectory: Boolean): Long {
+    private fun versionOf(path: Path, isDirectory: Boolean, bestEffort: Boolean = false): Long {
         val digest = MessageDigest.getInstance("SHA-256")
         digest.update(if (isDirectory) 0x44 else 0x46)
         if (isDirectory) {
-            entries(path).sortedBy { it.fileName.toString() }.forEach { child ->
-                val name = child.fileName.toString().toByteArray(StandardCharsets.UTF_8)
-                digest.update(ByteBuffer.allocate(4).putInt(name.size).array())
-                digest.update(name)
-                digest.update(if (Files.isDirectory(child, LinkOption.NOFOLLOW_LINKS)) 0x44 else 0x46)
-                if (Files.isRegularFile(child, LinkOption.NOFOLLOW_LINKS)) {
-                    digest.update(ByteBuffer.allocate(8).putLong(Files.size(child)).array())
+            safeEntries(path).sortedBy { it.fileName.toString() }.forEach { child ->
+                try {
+                    val name = child.fileName.toString().toByteArray(StandardCharsets.UTF_8)
+                    digest.update(ByteBuffer.allocate(4).putInt(name.size).array())
+                    digest.update(name)
+                    digest.update(if (Files.isDirectory(child, LinkOption.NOFOLLOW_LINKS)) 0x44 else 0x46)
+                    if (Files.isRegularFile(child, LinkOption.NOFOLLOW_LINKS)) {
+                        digest.update(ByteBuffer.allocate(8).putLong(Files.size(child)).array())
+                    }
+                    digest.update(ByteBuffer.allocate(8).putLong(
+                        Files.getLastModifiedTime(child, LinkOption.NOFOLLOW_LINKS).toMillis(),
+                    ).array())
+                } catch (failure: RuntimeException) {
+                    if (!bestEffort) throw failure
+                } catch (failure: IOException) {
+                    if (!bestEffort) throw failure
                 }
-                digest.update(ByteBuffer.allocate(8).putLong(
-                    Files.getLastModifiedTime(child, LinkOption.NOFOLLOW_LINKS).toMillis(),
-                ).array())
             }
         } else {
             digest.update(ByteBuffer.allocate(8).putLong(Files.size(path)).array())
@@ -780,7 +850,7 @@ class NioPrivilegedFileEngine(
         val offset = input.long
         val tokenPath = ByteArray(CURSOR_PATH_DIGEST_BYTES).also(input::get)
         if (!MessageDigest.isEqual(tokenPath, pathDigest(path))) throw EngineFailure(ERR_INVALID_CURSOR)
-        if (tokenVersion != version) throw EngineFailure(ERR_CONFLICT)
+        if (tokenVersion != version) throw EngineFailure(ERR_INVALID_CURSOR)
         if (offset !in 0..Int.MAX_VALUE.toLong()) throw EngineFailure(ERR_INVALID_CURSOR)
         return offset.toInt()
     }
@@ -832,6 +902,7 @@ class NioPrivilegedFileEngine(
         const val ERR_TARGET_EXISTS = "TARGET_EXISTS"
         const val ERR_NON_EMPTY_DIRECTORY = "NON_EMPTY_DIRECTORY"
         const val ERR_UNSUPPORTED_ENTRY = "UNSUPPORTED_ENTRY"
+        const val ERR_FILE_TOO_LARGE = "FILE_TOO_LARGE"
         const val ERR_PERMISSION_DENIED = "PERMISSION_DENIED"
         const val ERR_OPERATION_UNAVAILABLE = "OPERATION_UNAVAILABLE"
         const val ERR_ATOMIC_REPLACE_UNAVAILABLE = "ATOMIC_REPLACE_UNAVAILABLE"

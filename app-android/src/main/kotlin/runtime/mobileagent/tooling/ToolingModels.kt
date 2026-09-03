@@ -270,6 +270,15 @@ interface WorkspaceCopyBackend {
     suspend fun copy(request: WorkspaceCopyRequest): runtime.mobileagent.skills.tooling.WorkspaceResult<SharedWorkspaceMutation>
 }
 
+/** Closed backend identities used by the local workspace audit envelope. */
+enum class WorkspaceAuditBackendType(val wireName: String) {
+    INTERNAL("internal"),
+    SAF_TREE("saf_tree"),
+    SHIZUKU("shizuku"),
+    WIRED_ADB("wired_adb"),
+    UNKNOWN("unknown"),
+}
+
 /** Redacted workspace audit; path plaintext is never represented. */
 data class WorkspaceAuditEvent(
     val phase: WorkspaceAuditPhase,
@@ -288,6 +297,8 @@ data class WorkspaceAuditEvent(
     val outcome: WorkspaceAuditOutcome? = null,
     /** Move destination is redacted independently from the source path. */
     val destinationPathSha256: String? = null,
+    /** Closed backend identity; provider/path details remain outside the event. */
+    val backendType: WorkspaceAuditBackendType = WorkspaceAuditBackendType.UNKNOWN,
 ) {
     init {
         require(requestId.isNotBlank() && requestId.length <= 256)

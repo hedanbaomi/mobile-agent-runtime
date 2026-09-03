@@ -194,6 +194,30 @@ fun RuntimeEvent.ToolResultProduced.toDiffPartOrNull(): DiffPart? {
     return runCatching { DiffPart(summary, preview, changedFiles) }.getOrNull()
 }
 
+/** Project only closed workspace/tool error codes into safe, actionable UI copy. */
+fun toolResultUserMessage(resultJson: String): String? {
+    val root = runCatching { Json.parseToJsonElement(resultJson) as? JsonObject }.getOrNull() ?: return null
+    val error = root["error"] as? JsonObject ?: return null
+    return when (error["code"]?.jsonPrimitive?.contentOrNull) {
+        "FILE_TOO_LARGE" -> "文件太大，无法作为文本读取。"
+        "INVALID_CURSOR" -> "目录内容已发生变化，请从第一页重新列举。"
+        "PERMISSION_DENIED" -> "没有权限访问该工作区，请检查工作区授权。"
+        "SYMLINK_FORBIDDEN" -> "不允许从工作区跟随符号链接。"
+        "PATH_OUT_OF_SCOPE" -> "请求路径超出已授权工作区。"
+        "WORKSPACE_NOT_FOUND" -> "工作区或目标条目已不可用。"
+        "AUTHORITY_TEMPORARILY_UNAVAILABLE",
+        "BRIDGE_DISCONNECTED",
+        "ADB_DEVICE_OFFLINE",
+        "ADB_DEVICE_DISCONNECTED",
+            -> "工作区暂时不可用，请重新连接后重试。"
+        "QUOTA_EXCEEDED" -> "操作超过工作区大小或输出限制。"
+        "CONFLICT" -> "工作区内容已变化，请读取最新状态后重试。"
+        "UNSUPPORTED_ENTRY" -> "该工作区条目类型不受支持，未打开该条目。"
+        "OPERATION_UNAVAILABLE" -> "所选工作区后端暂不支持该操作。"
+        else -> null
+    }
+}
+
 private val RETRYABLE_ERROR_CODES = setOf(
     MessageErrorCode.NETWORK_UNAVAILABLE,
     MessageErrorCode.RATE_LIMITED,

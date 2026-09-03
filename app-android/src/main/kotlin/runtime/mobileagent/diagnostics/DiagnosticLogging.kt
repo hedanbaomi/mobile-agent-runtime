@@ -150,6 +150,15 @@ enum class DiagnosticOperationState(val wireName: String) {
     UNKNOWN("unknown"),
 }
 
+/** Closed backend identities for workspace-operation diagnostics. */
+enum class DiagnosticWorkspaceBackendType(val wireName: String) {
+    INTERNAL("internal"),
+    SAF_TREE("saf_tree"),
+    SHIZUKU("shizuku"),
+    WIRED_ADB("wired_adb"),
+    UNKNOWN("unknown"),
+}
+
 enum class DiagnosticDangerousModePolicy(val wireName: String) {
     DISABLED("disabled"),
     CONFIRM_HIGH_RISK("confirm_high_risk"),
@@ -284,6 +293,26 @@ enum class DiagnosticWorkspaceReattachPhase(val wireName: String) {
     FAILED("failed"),
 }
 
+/** Closed outcomes for an Agent default workspace mutation. */
+enum class DiagnosticWorkspaceDefaultResult(val wireName: String) {
+    SET("set"),
+    CLEARED("cleared"),
+    SUCCESS("success"),
+    REJECTED("rejected"),
+    FAILED("failed"),
+    UNKNOWN("unknown"),
+}
+
+/** Closed resolution states for the immutable Thread workspace relation. */
+enum class DiagnosticThreadWorkspaceState(val wireName: String) {
+    BOUND("BOUND"),
+    UNBOUND_AGENT_DEFAULT_AVAILABLE("UNBOUND_AGENT_DEFAULT_AVAILABLE"),
+    UNBOUND_NO_AGENT_DEFAULT("UNBOUND_NO_AGENT_DEFAULT"),
+}
+
+/** Short alias for integrations that refer to the field's domain name directly. */
+typealias ThreadWorkspaceState = DiagnosticThreadWorkspaceState
+
 /** Only safe, aggregate result codes may enter provider diagnostics. */
 enum class DiagnosticProviderResultCode(val wireName: String) {
     STARTED("started"),
@@ -339,6 +368,25 @@ data class PrivilegedWorkspaceReattachRecord(
     val requestRef: String? = null,
     val durationMs: Long? = null,
     val errorCode: String = "none",
+)
+
+data class AgentWorkspaceDefaultChangedRecord(
+    val agentId: String,
+    val previousWorkspaceId: String? = null,
+    val workspaceId: String? = null,
+    val grantGeneration: Int = 0,
+    val result: DiagnosticWorkspaceDefaultResult,
+    val errorCode: String? = null,
+)
+
+data class ConversationWorkspaceResolutionRecord(
+    val sessionId: String,
+    val agentId: String,
+    val threadWorkspaceState: DiagnosticThreadWorkspaceState,
+    val workspaceId: String? = null,
+    val agentDefaultWorkspaceId: String? = null,
+    val snapshotWorkspaceCount: Int,
+    val effectiveWorkspaceGrantCount: Int,
 )
 
 data class ConversationWorkspaceRecord(
@@ -427,6 +475,7 @@ data class WorkspaceOperationStateRecord(
     val count: Int = 0,
     val requestRef: String? = null,
     val errorCode: String = "unknown",
+    val backendType: DiagnosticWorkspaceBackendType = DiagnosticWorkspaceBackendType.UNKNOWN,
 )
 
 data class SkillMemoryOperationStateRecord(
@@ -687,9 +736,11 @@ class RollingDiagnosticLogStore(
             "privileged_workspace_reattach_started",
             "privileged_workspace_reattach_completed",
             "privileged_workspace_reattach_failed",
+            "agent_workspace_default_changed",
             "conversation_workspace_bound",
             "conversation_workspace_changed",
             "conversation_workspace_resolved",
+            "conversation_workspace_resolution",
             "workspace_tool_exposure",
             "provider_connection_test_started",
             "provider_connection_test_completed",
@@ -732,7 +783,9 @@ class RollingDiagnosticLogStore(
         "shizuku_lifecycle" to setOf("state", "errorCode", "requestRef"),
         "wired_adb_lifecycle" to setOf("state", "errorCode", "requestRef"),
         "workspace_grant_changed" to setOf("workspaceRef", "scope", "granted", "requestRef", "errorCode"),
-        "workspace_operation_state" to setOf("workspaceRef", "operation", "state", "count", "requestRef", "errorCode"),
+        "workspace_operation_state" to setOf(
+            "workspaceRef", "operation", "state", "count", "requestRef", "errorCode", "backendType",
+        ),
         "skill_memory_operation_state" to setOf("skillRef", "operation", "state", "count", "requestRef", "errorCode"),
         "dangerous_mode_changed" to setOf("enabled", "policy", "requestRef"),
         "shell_tool_exposure_changed" to setOf("agentRef", "skillRef", "authority", "exposed", "reasonCode", "requestRef"),
@@ -779,6 +832,9 @@ class RollingDiagnosticLogStore(
         "privileged_workspace_reattach_failed" to setOf(
             "workspaceRef", "authority", "bindingRevision", "grantGeneration", "requestRef", "durationMs", "errorCode",
         ),
+        "agent_workspace_default_changed" to setOf(
+            "agentRef", "previousWorkspaceRef", "workspaceRef", "grantGeneration", "result", "errorCode",
+        ),
         "conversation_workspace_bound" to setOf(
             "sessionRef", "agentRef", "workspaceRef", "authority", "bindingRevision", "grantGeneration", "snapshotVersion",
         ),
@@ -788,6 +844,10 @@ class RollingDiagnosticLogStore(
         ),
         "conversation_workspace_resolved" to setOf(
             "sessionRef", "agentRef", "workspaceRef", "authority", "bindingRevision", "grantGeneration", "snapshotVersion",
+        ),
+        "conversation_workspace_resolution" to setOf(
+            "sessionRef", "agentRef", "threadWorkspaceState", "workspaceRef", "agentDefaultWorkspaceRef",
+            "snapshotWorkspaceCount", "effectiveWorkspaceGrantCount",
         ),
         "workspace_tool_exposure" to setOf(
             "agentRef", "sessionRef", "workspaceRef", "authority", "capability", "exposed", "grantGeneration",
@@ -1041,6 +1101,36 @@ class RollingDiagnosticLogStore(
         WorkspaceGrantChangedRecord(workspaceId, scope, granted, requestRef, errorCode),
     )
 
+    fun recordAgentWorkspaceDefaultChanged(record: AgentWorkspaceDefaultChangedRecord): Boolean = record(
+        "agent_workspace_default_changed",
+        linkedMapOf<String, Any?>(
+            "agentRef" to record.agentId,
+            "previousWorkspaceRef" to record.previousWorkspaceId,
+            "workspaceRef" to record.workspaceId,
+            "grantGeneration" to record.grantGeneration.coerceIn(0, MAX_COUNT),
+            "result" to record.result.wireName,
+            "errorCode" to record.errorCode,
+        ).withoutNulls(),
+    )
+
+    fun recordAgentWorkspaceDefaultChanged(
+        agentId: String,
+        previousWorkspaceId: String? = null,
+        workspaceId: String? = null,
+        grantGeneration: Int = 0,
+        result: DiagnosticWorkspaceDefaultResult,
+        errorCode: String? = null,
+    ): Boolean = recordAgentWorkspaceDefaultChanged(
+        AgentWorkspaceDefaultChangedRecord(
+            agentId = agentId,
+            previousWorkspaceId = previousWorkspaceId,
+            workspaceId = workspaceId,
+            grantGeneration = grantGeneration,
+            result = result,
+            errorCode = errorCode,
+        ),
+    )
+
     fun recordWorkspaceOperationState(record: WorkspaceOperationStateRecord): Boolean = record(
         "workspace_operation_state",
         linkedMapOf<String, Any?>(
@@ -1050,6 +1140,7 @@ class RollingDiagnosticLogStore(
             "count" to record.count.coerceIn(0, MAX_COUNT),
             "requestRef" to record.requestRef,
             "errorCode" to record.errorCode,
+            "backendType" to record.backendType.wireName,
         ).withoutNulls(),
     )
 
@@ -1060,8 +1151,9 @@ class RollingDiagnosticLogStore(
         count: Int = 0,
         requestRef: String? = null,
         errorCode: String = "unknown",
+        backendType: DiagnosticWorkspaceBackendType = DiagnosticWorkspaceBackendType.UNKNOWN,
     ): Boolean = recordWorkspaceOperationState(
-        WorkspaceOperationStateRecord(workspaceId, operation, state, count, requestRef, errorCode),
+        WorkspaceOperationStateRecord(workspaceId, operation, state, count, requestRef, errorCode, backendType),
     )
 
     fun recordSkillMemoryOperationState(record: SkillMemoryOperationStateRecord): Boolean = record(
@@ -1437,6 +1529,39 @@ class RollingDiagnosticLogStore(
     fun recordConversationWorkspaceResolved(record: ConversationWorkspaceRecord): Boolean =
         recordConversationWorkspace(record.copy(event = ConversationWorkspaceEvent.RESOLVED))
 
+    fun recordConversationWorkspaceResolution(record: ConversationWorkspaceResolutionRecord): Boolean = record(
+        "conversation_workspace_resolution",
+        linkedMapOf<String, Any?>(
+            "sessionRef" to record.sessionId,
+            "agentRef" to record.agentId,
+            "threadWorkspaceState" to record.threadWorkspaceState.wireName,
+            "workspaceRef" to record.workspaceId,
+            "agentDefaultWorkspaceRef" to record.agentDefaultWorkspaceId,
+            "snapshotWorkspaceCount" to record.snapshotWorkspaceCount.coerceIn(0, MAX_COUNT),
+            "effectiveWorkspaceGrantCount" to record.effectiveWorkspaceGrantCount.coerceIn(0, MAX_COUNT),
+        ).withoutNulls(),
+    )
+
+    fun recordConversationWorkspaceResolution(
+        sessionId: String,
+        agentId: String,
+        threadWorkspaceState: DiagnosticThreadWorkspaceState,
+        workspaceId: String? = null,
+        agentDefaultWorkspaceId: String? = null,
+        snapshotWorkspaceCount: Int,
+        effectiveWorkspaceGrantCount: Int,
+    ): Boolean = recordConversationWorkspaceResolution(
+        ConversationWorkspaceResolutionRecord(
+            sessionId = sessionId,
+            agentId = agentId,
+            threadWorkspaceState = threadWorkspaceState,
+            workspaceId = workspaceId,
+            agentDefaultWorkspaceId = agentDefaultWorkspaceId,
+            snapshotWorkspaceCount = snapshotWorkspaceCount,
+            effectiveWorkspaceGrantCount = effectiveWorkspaceGrantCount,
+        ),
+    )
+
     /** Records only the effective typed capability, never the tool arguments or workspace path. */
     fun recordWorkspaceToolExposure(record: WorkspaceToolExposureRecord): Boolean = record(
         "workspace_tool_exposure",
@@ -1708,6 +1833,11 @@ class RollingDiagnosticLogStore(
                 val count = fields["count"] as? Int ?: return null
                 val requestRef = canonicalOptionalReference(fields["requestRef"])
                 val errorCode = canonicalErrorCode(fields["errorCode"] as? String ?: return null)
+                val backendType = when {
+                    !fields.containsKey("backendType") -> DiagnosticWorkspaceBackendType.UNKNOWN.wireName
+                    fields["backendType"] is String -> canonicalWorkspaceBackendType(fields["backendType"] as String)
+                    else -> return null
+                }
                 linkedMapOf<String, Any?>(
                     "workspaceRef" to workspace,
                     "operation" to operation,
@@ -1715,6 +1845,7 @@ class RollingDiagnosticLogStore(
                     "count" to count.coerceIn(0, MAX_COUNT),
                     "requestRef" to requestRef,
                     "errorCode" to errorCode,
+                    "backendType" to backendType,
                 ).withoutNulls()
             }
             "skill_memory_operation_state" -> {
@@ -2046,6 +2177,26 @@ class RollingDiagnosticLogStore(
                     "errorCode" to errorCode,
                 ).withoutNulls()
             }
+            "agent_workspace_default_changed" -> {
+                val agentRef = canonicalReference(fields["agentRef"] as? String ?: return null)
+                val previousWorkspaceRef = canonicalOptionalReferenceStrict(fields, "previousWorkspaceRef")
+                val workspaceRef = canonicalOptionalReferenceStrict(fields, "workspaceRef")
+                val grantGeneration = fields["grantGeneration"] as? Int ?: return null
+                val result = canonicalWorkspaceDefaultResult(fields["result"] as? String ?: return null) ?: return null
+                val errorCode = canonicalOptionalWorkspaceErrorCode(fields, "errorCode")
+                when (result) {
+                    DiagnosticWorkspaceDefaultResult.SET.wireName -> if (workspaceRef == null) return null
+                    DiagnosticWorkspaceDefaultResult.CLEARED.wireName -> if (workspaceRef != null) return null
+                }
+                linkedMapOf<String, Any?>(
+                    "agentRef" to agentRef,
+                    "previousWorkspaceRef" to previousWorkspaceRef,
+                    "workspaceRef" to workspaceRef,
+                    "grantGeneration" to grantGeneration.coerceIn(0, MAX_COUNT),
+                    "result" to result,
+                    "errorCode" to errorCode,
+                ).withoutNulls()
+            }
             "conversation_workspace_bound",
             "conversation_workspace_changed",
             "conversation_workspace_resolved" -> {
@@ -2070,6 +2221,39 @@ class RollingDiagnosticLogStore(
                     "bindingRevision" to bindingRevision.coerceIn(0, MAX_COUNT),
                     "grantGeneration" to grantGeneration.coerceIn(0, MAX_COUNT),
                     "snapshotVersion" to snapshotVersion.coerceIn(0, MAX_COUNT),
+                ).withoutNulls()
+            }
+            "conversation_workspace_resolution" -> {
+                val sessionRef = canonicalReference(fields["sessionRef"] as? String ?: return null)
+                val agentRef = canonicalReference(fields["agentRef"] as? String ?: return null)
+                val threadWorkspaceState = canonicalThreadWorkspaceState(
+                    fields["threadWorkspaceState"] as? String ?: return null,
+                )
+                val workspaceRef = canonicalOptionalReferenceStrict(fields, "workspaceRef")
+                val agentDefaultWorkspaceRef = canonicalOptionalReferenceStrict(fields, "agentDefaultWorkspaceRef")
+                val snapshotWorkspaceCount = fields["snapshotWorkspaceCount"] as? Int ?: return null
+                val effectiveWorkspaceGrantCount = fields["effectiveWorkspaceGrantCount"] as? Int ?: return null
+                when (threadWorkspaceState) {
+                    DiagnosticThreadWorkspaceState.BOUND.wireName -> if (workspaceRef == null) return null
+                    DiagnosticThreadWorkspaceState.UNBOUND_AGENT_DEFAULT_AVAILABLE.wireName -> {
+                        if (workspaceRef != null || agentDefaultWorkspaceRef == null) return null
+                    }
+                    DiagnosticThreadWorkspaceState.UNBOUND_NO_AGENT_DEFAULT.wireName -> {
+                        // The optional default ref distinguishes "not configured" from
+                        // "configured but currently revoked/unavailable" without inventing a
+                        // fourth wire state.  Either case has no effective Thread workspace.
+                        if (workspaceRef != null) return null
+                    }
+                    else -> return null
+                }
+                linkedMapOf<String, Any?>(
+                    "sessionRef" to sessionRef,
+                    "agentRef" to agentRef,
+                    "threadWorkspaceState" to threadWorkspaceState,
+                    "workspaceRef" to workspaceRef,
+                    "agentDefaultWorkspaceRef" to agentDefaultWorkspaceRef,
+                    "snapshotWorkspaceCount" to snapshotWorkspaceCount.coerceIn(0, MAX_COUNT),
+                    "effectiveWorkspaceGrantCount" to effectiveWorkspaceGrantCount.coerceIn(0, MAX_COUNT),
                 ).withoutNulls()
             }
             "workspace_tool_exposure" -> {
@@ -2290,8 +2474,34 @@ class RollingDiagnosticLogStore(
     private fun canonicalWorkspaceErrorCode(value: String): String = when (value.trim().lowercase()) {
         "none", "unknown", "workspace_not_found", "permission_denied", "grant_lost",
         "binding_unrecoverable", "authority_unavailable", "conflict", "cancelled", "invalid_request",
-        "io", "timeout", "unsupported" -> value.trim().lowercase()
+        "io", "timeout", "unsupported", "persistence_failed", "grant_missing", "default_unavailable",
+        "stale" -> value.trim().lowercase()
         else -> "unknown"
+    }
+
+    private fun canonicalWorkspaceBackendType(value: String): String =
+        DiagnosticWorkspaceBackendType.entries.firstOrNull {
+            it.wireName == value.trim().lowercase()
+        }?.wireName ?: DiagnosticWorkspaceBackendType.UNKNOWN.wireName
+
+    private fun canonicalWorkspaceDefaultResult(value: String): String? {
+        return DiagnosticWorkspaceDefaultResult.entries.firstOrNull {
+            it.wireName == value.trim().lowercase()
+        }?.wireName
+    }
+
+    private fun canonicalThreadWorkspaceState(value: String): String {
+        val normalized = value.trim().uppercase()
+        return DiagnosticThreadWorkspaceState.entries.firstOrNull {
+            it.wireName == normalized || it.name == normalized
+        }?.wireName ?: "unknown"
+    }
+
+    private fun canonicalOptionalWorkspaceErrorCode(fields: Map<String, Any?>, key: String): String? {
+        if (!fields.containsKey(key)) return null
+        val value = fields[key] ?: return null
+        require(value is String) { "diagnostic error code must be text" }
+        return canonicalWorkspaceErrorCode(value)
     }
 
     private fun canonicalProviderResultCode(value: String): String? =
@@ -2470,8 +2680,23 @@ class RollingDiagnosticLogStore(
     }
 
     private fun canonicalErrorCode(value: String): String = when (value.trim().lowercase()) {
-        "cancelled", "permission", "resource_limit", "io", "validation", "rejected", "unknown",
-        "approval_required", "approval_denied", "timeout", "snapshot_stale", "invalid_request", "call_id_replay" ->
+        // Keep the model/runtime's typed workspace codes intact.  These values
+        // are a closed enum, not provider text or an exception message.
+        "cancelled", "permission", "permission_denied", "resource_limit", "io", "io_error",
+        "validation", "rejected", "unknown", "approval_required", "approval_denied", "timeout",
+        "snapshot_stale", "invalid_request", "invalid_cursor", "call_id_replay",
+        "workspace_not_found", "workspace_read_only", "path_out_of_scope", "symlink_forbidden",
+        "root_operation_forbidden", "file_too_large", "quota_exceeded", "conflict",
+        "authority_not_granted", "authority_provider_not_selected", "authority_temporarily_unavailable",
+        "shizuku_permission_denied", "shizuku_service_unavailable", "bridge_not_paired",
+        "bridge_disconnected", "bridge_protocol_mismatch", "adb_device_unauthorized", "adb_device_offline",
+        "adb_device_disconnected", "adb_app_not_installed", "dangerous_mode_disabled", "shell_capability_denied",
+        "shell_high_risk_approval_required", "shell_execution_failed", "shell_timed_out", "shell_cancelled",
+        "shell_output_truncated", "time_out", "internal_error", "unknown_outcome", "audit_unavailable",
+        "audit_fuse_open", "entry_unsupported", "unsupported_entry", "operation_unavailable", "invalid_path", "invalid_argument", "invalid_utf8",
+        "invalid_patch", "entry_not_found", "read_only", "unsupported",
+        "none", "grant_lost", "binding_unrecoverable", "authority_unavailable", "persistence_failed",
+        "grant_missing", "default_unavailable", "stale" ->
             value.trim().lowercase()
         else -> "unknown"
     }

@@ -32,6 +32,8 @@ import runtime.mobileagent.skills.tooling.WorkspaceEntryType
 import runtime.mobileagent.skills.tooling.WorkspaceFileStat
 import runtime.mobileagent.skills.tooling.WorkspaceListRequest
 import runtime.mobileagent.skills.tooling.WorkspaceListing
+import runtime.mobileagent.skills.tooling.WorkspaceListingWarning
+import runtime.mobileagent.skills.tooling.WorkspaceListingWarningCode
 import runtime.mobileagent.skills.tooling.WorkspaceMoveRequest
 import runtime.mobileagent.skills.tooling.WorkspaceMutation
 import runtime.mobileagent.skills.tooling.WorkspaceReadTextRequest
@@ -397,7 +399,7 @@ class ShizukuWorkspaceBackendAdapter(
         )
     }
 
-    private fun parseListPayload(
+    internal fun parseListPayload(
         payload: JSONObject,
         normalized: String,
         maxEntries: Int,
@@ -413,6 +415,7 @@ class ShizukuWorkspaceBackendAdapter(
             val type = when (entry.optString("type", "")) {
                 "file" -> WorkspaceEntryType.FILE
                 "directory" -> WorkspaceEntryType.DIRECTORY
+                "symlink", "unsupported" -> continue
                 else -> return null
             }
             val bytes = if (type == WorkspaceEntryType.FILE) {
@@ -420,18 +423,43 @@ class ShizukuWorkspaceBackendAdapter(
             } else {
                 0L
             }
-            if (bytes < 0L || bytes > ShizukuWorkspaceFileStore.MAX_FILE_BYTES) return null
+            // Listing/stat are metadata operations. A large existing file remains visible so
+            // the caller can choose another action; only read enforces the byte ceiling.
+            if (bytes < 0L) return null
             if (!isChildOf(path, normalized)) return null
             val version = parseOpaqueVersion(entry.optString("version", "")) ?: return null
             if (index < maxEntries) entries += WorkspaceEntry(path, type, bytes, version.publicVersion)
         }
         val nextCursor = payload.optString("nextCursor", "").takeIf { it.isNotEmpty() && it != "null" }
+        if (nextCursor != null && (nextCursor.length > 512 || nextCursor.any { it.code !in 0x21..0x7e })) {
+            return null
+        }
         if (payload.optBoolean("truncated", false) != (nextCursor != null)) return null
+        val skippedEntries = payload.optInt("skippedEntries", 0)
+        if (skippedEntries !in 0..WorkspaceListing.MAX_SKIPPED_ENTRIES) return null
+        val warningArray = payload.optJSONArray("warnings")
+        val warnings = ArrayList<WorkspaceListingWarning>()
+        if (warningArray != null) {
+            if (warningArray.length() > WorkspaceListing.MAX_WARNING_TYPES) return null
+            val seen = HashSet<WorkspaceListingWarningCode>()
+            for (index in 0 until warningArray.length()) {
+                val warning = warningArray.optJSONObject(index) ?: return null
+                val code = runCatching {
+                    WorkspaceListingWarningCode.valueOf(warning.optString("code", ""))
+                }.getOrNull() ?: return null
+                val count = warning.optInt("count", 0)
+                if (!seen.add(code) || count !in 1..WorkspaceListingWarning.MAX_COUNT) return null
+                warnings += WorkspaceListingWarning(code, count)
+            }
+        }
+        if (warnings.sumOf { it.count } != skippedEntries) return null
         return WorkspaceListing(
             relativePath = normalized.ifEmpty { ROOT_PATH },
             entries = entries,
             truncated = nextCursor != null,
             nextCursor = nextCursor,
+            skippedEntries = skippedEntries,
+            warnings = warnings,
         )
     }
 
@@ -444,7 +472,7 @@ class ShizukuWorkspaceBackendAdapter(
         }
         val bytes = payload.optLong("bytes", -1L)
         val version = parseOpaqueVersion(payload.optString("version", ""))
-        if (responsePath != normalized || bytes < 0L || bytes > ShizukuWorkspaceFileStore.MAX_FILE_BYTES || version == null ||
+        if (responsePath != normalized || bytes < 0L || version == null ||
             (type == WorkspaceEntryType.DIRECTORY && bytes != 0L)
         ) return null
         return WorkspaceFileStat(normalized, type, bytes, version.publicVersion)
@@ -657,28 +685,28 @@ class ShizukuWorkspaceBackendAdapter(
             -> ToolErrorCode.PATH_OUT_OF_SCOPE
         ShizukuWorkspaceFileStore.SYMLINK_REJECTED -> ToolErrorCode.SYMLINK_FORBIDDEN
         ShizukuWorkspaceFileStore.NOT_FOUND -> ToolErrorCode.WORKSPACE_NOT_FOUND
-        ShizukuWorkspaceFileStore.PERMISSION_DENIED -> ToolErrorCode.SHIZUKU_PERMISSION_DENIED
+        ShizukuWorkspaceFileStore.PERMISSION_DENIED -> ToolErrorCode.PERMISSION_DENIED
         ShizukuWorkspaceFileStore.FILE_TOO_LARGE -> ToolErrorCode.FILE_TOO_LARGE
         ShizukuWorkspaceFileStore.LIMIT,
         ShizukuWorkspaceFileStore.OUTPUT_LIMIT,
             -> if (operation == "read" || operation == "stat") ToolErrorCode.FILE_TOO_LARGE else ToolErrorCode.QUOTA_EXCEEDED
         ShizukuWorkspaceFileStore.UNKNOWN_OUTCOME -> ToolErrorCode.UNKNOWN_OUTCOME
         ShizukuWorkspaceFileStore.CONFLICT -> ToolErrorCode.CONFLICT
-        ShizukuWorkspaceFileStore.INVALID_CURSOR,
+        ShizukuWorkspaceFileStore.INVALID_CURSOR -> ToolErrorCode.INVALID_CURSOR
         ShizukuWorkspaceFileStore.INVALID_VERSION,
         ShizukuWorkspaceFileStore.OFFSET_OUT_OF_RANGE,
         ShizukuWorkspaceFileStore.INVALID_PATCH,
         ShizukuWorkspaceFileStore.TARGET_EXISTS,
         ShizukuWorkspaceFileStore.NON_EMPTY_DIRECTORY,
         ShizukuWorkspaceFileStore.MOVE_INTO_SELF,
-        ShizukuWorkspaceFileStore.UNSUPPORTED_ENTRY,
         ShizukuWorkspaceFileStore.INVALID_CONTENT,
             -> ToolErrorCode.INVALID_REQUEST
+        ShizukuWorkspaceFileStore.UNSUPPORTED_ENTRY -> ToolErrorCode.UNSUPPORTED_ENTRY
         ShizukuWorkspaceFileStore.ATOMIC_REPLACE_UNAVAILABLE,
         ShizukuWorkspaceFileStore.UNSUPPORTED,
-        ShizukuWorkspaceFileStore.OPERATION_UNAVAILABLE,
         ShizukuWorkspaceFileStore.WRITE_UNVERIFIED,
             -> ToolErrorCode.INTERNAL_ERROR
+        ShizukuWorkspaceFileStore.OPERATION_UNAVAILABLE -> ToolErrorCode.OPERATION_UNAVAILABLE
         else -> ToolErrorCode.IO_ERROR
     }
 

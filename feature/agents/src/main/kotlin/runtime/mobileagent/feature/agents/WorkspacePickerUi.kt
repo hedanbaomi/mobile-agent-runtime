@@ -169,6 +169,7 @@ fun WorkspacePickerScreen(
     state: WorkspacePickerUiState,
     actions: WorkspacePickerActions = WorkspacePickerActions(),
     modifier: Modifier = Modifier,
+    showPageTitle: Boolean = true,
 ) {
     LazyColumn(
         modifier = modifier.fillMaxSize().testTag(WorkspacePickerTestTags.SCREEN),
@@ -179,7 +180,9 @@ fun WorkspacePickerScreen(
             Column(Modifier.fillMaxWidth()) {
                 Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                     Column(Modifier.weight(1f)) {
-                        Text("选择工作区", style = MaterialTheme.typography.headlineSmall)
+                        if (showPageTitle) {
+                            Text("选择工作区", style = MaterialTheme.typography.headlineSmall)
+                        }
                         Text(
                             "目标：${state.targetLabel}",
                             style = MaterialTheme.typography.bodySmall,

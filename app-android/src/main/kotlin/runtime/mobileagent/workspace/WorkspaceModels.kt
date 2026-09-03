@@ -13,6 +13,8 @@ import java.security.SecureRandom
 import java.util.Base64
 import java.util.LinkedHashMap
 import runtime.mobileagent.domain.CapabilityId
+import runtime.mobileagent.skills.tooling.WorkspaceListingWarning
+import runtime.mobileagent.skills.tooling.WorkspaceListingWarningCode
 
 /** The only backend kinds exposed by the typed workspace layer. */
 internal enum class InternalWorkspaceBackendType {
@@ -41,6 +43,7 @@ internal object InternalWorkspaceCapabilities {
 /** Stable, non-path-bearing error codes for model-facing workspace results. */
 internal enum class InternalWorkspaceErrorCode {
     INVALID_ARGUMENT,
+    INVALID_CURSOR,
     INVALID_PATH,
     PATH_OUT_OF_SCOPE,
     SYMLINK_FORBIDDEN,
@@ -80,6 +83,7 @@ internal data class InternalWorkspaceError(
     val userMessage: String
         get() = when (code) {
             InternalWorkspaceErrorCode.INVALID_ARGUMENT -> "Workspace arguments are invalid."
+            InternalWorkspaceErrorCode.INVALID_CURSOR -> "The workspace list cursor is invalid or expired."
             InternalWorkspaceErrorCode.INVALID_PATH -> "Workspace path is invalid."
             InternalWorkspaceErrorCode.PATH_OUT_OF_SCOPE -> "Workspace path is outside the workspace."
             InternalWorkspaceErrorCode.SYMLINK_FORBIDDEN -> "Symbolic links are not allowed in a workspace."
@@ -173,7 +177,27 @@ internal data class InternalWorkspaceList(
     val entries: List<InternalWorkspaceEntry>,
     val version: String,
     val nextCursor: String? = null,
+    /** Safe category/count metadata for children omitted during best-effort enumeration. */
+    val skippedEntries: Int = 0,
+    val warnings: List<WorkspaceListingWarning> = emptyList(),
 )
+
+/** Bounded, path-free warning accumulator shared by Internal and SAF directory listings. */
+internal class InternalWorkspaceListingWarnings {
+    private val counts = linkedMapOf<WorkspaceListingWarningCode, Int>()
+
+    fun add(code: WorkspaceListingWarningCode) {
+        if (skippedEntries >= runtime.mobileagent.skills.tooling.WorkspaceListing.MAX_SKIPPED_ENTRIES) return
+        counts[code] = (counts[code] ?: 0) + 1
+    }
+
+    val skippedEntries: Int
+        get() = counts.values.sum()
+
+    fun snapshot(): List<WorkspaceListingWarning> = counts.map { (code, count) ->
+        WorkspaceListingWarning(code, count)
+    }
+}
 
 internal data class InternalWorkspaceStat(
     val path: String,

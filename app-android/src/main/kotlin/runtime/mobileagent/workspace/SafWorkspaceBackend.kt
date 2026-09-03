@@ -13,6 +13,7 @@ import java.io.InputStream
 import java.text.Normalizer
 import java.util.HashSet
 import runtime.mobileagent.domain.CapabilityId
+import runtime.mobileagent.skills.tooling.WorkspaceListingWarningCode
 
 internal data class SafCapabilityChild(
     val type: InternalWorkspaceEntryType,
@@ -176,6 +177,40 @@ internal fun readSafChunk(
 }
 
 /**
+ * Determines a provider stream's size without ever reading more than the configured file limit
+ * plus one byte. SAF providers may omit COLUMN_SIZE, but that omission must not let a large file
+ * bypass the same model-facing limit enforced by the other workspace backends.
+ */
+internal fun probeSafFileSize(input: InputStream, maximum: Long): Long {
+    if (maximum < 0L) InternalWorkspaceErrorCode.FILE_TOO_LARGE.error()
+    val buffer = ByteArray(8 * 1024)
+    var total = 0L
+    while (total <= maximum) {
+        val remaining = maximum - total
+        val requested = if (remaining >= buffer.size.toLong()) buffer.size else remaining.toInt() + 1
+        val count = try {
+            input.read(buffer, 0, requested)
+        } catch (_: IOException) {
+            InternalWorkspaceErrorCode.IO_ERROR.error()
+        }
+        if (count < 0) return total
+        if (count == 0) {
+            val one = try {
+                input.read()
+            } catch (_: IOException) {
+                InternalWorkspaceErrorCode.IO_ERROR.error()
+            }
+            if (one < 0) return total
+            total++
+        } else {
+            total += count.toLong()
+        }
+        if (total > maximum) InternalWorkspaceErrorCode.FILE_TOO_LARGE.error()
+    }
+    InternalWorkspaceErrorCode.FILE_TOO_LARGE.error()
+}
+
+/**
  * Rebind a provider-returned mutation handle to the user's persisted tree.
  *
  * DocumentsProvider mutation methods are allowed to return an ordinary document URI rather
@@ -262,7 +297,7 @@ internal class SafWorkspaceBackend(
         // proves that the persisted grant still reaches this provider and supplies the flags
         // needed for operation-specific capability decisions without exposing the URI.
         val root = rootChild()
-        val children = children(root.uri)
+        val children = children(root.uri, skipSymlinks = true)
         val capabilitySnapshot = SafWorkspaceCapabilityPolicy.derive(
             readGranted = grant.isReadPermission,
             writeGranted = grant.isWritePermission,
@@ -287,14 +322,15 @@ internal class SafWorkspaceBackend(
             requireGrant(write = false)
             val segments = parse(relativePath, allowRoot = true)
             val directory = resolve(segments)
-            val children = children(directory.uri).sortedBy { it.name }
+            val warnings = InternalWorkspaceListingWarnings()
+            val children = children(directory.uri, skipSymlinks = true, warnings = warnings).sortedBy { it.name }
             if (children.size > limits.maxEntries) InternalWorkspaceErrorCode.ENTRY_LIMIT_EXCEEDED.error()
-            val fingerprint = directoryVersion(directory.uri)
+            val fingerprint = directoryVersion(children)
             val start = cursor?.let {
                 cursorStore.resolve(it, segments.joinToString("/"), fingerprint)
-                    ?: InternalWorkspaceErrorCode.INVALID_ARGUMENT.error()
+                    ?: InternalWorkspaceErrorCode.INVALID_CURSOR.error()
             } ?: 0
-            if (start > children.size) InternalWorkspaceErrorCode.INVALID_ARGUMENT.error()
+            if (start > children.size) InternalWorkspaceErrorCode.INVALID_CURSOR.error()
             val pageSize = minOf(maxEntries, limits.maxDirectoryEntries)
             val end = minOf(start + pageSize, children.size)
             val entries = children.subList(start, end).map { child ->
@@ -309,10 +345,12 @@ internal class SafWorkspaceBackend(
             InternalWorkspaceList(
                 path = segments.joinToString("/"),
                 entries = entries,
-                version = directoryVersion(directory.uri),
+                version = fingerprint,
                 nextCursor = if (end < children.size) {
                     cursorStore.issue(segments.joinToString("/"), fingerprint, end)
                 } else null,
+                skippedEntries = warnings.skippedEntries,
+                warnings = warnings.snapshot(),
             )
         }
     }
@@ -346,9 +384,10 @@ internal class SafWorkspaceBackend(
             if (node.flags and DocumentsContract.Document.FLAG_VIRTUAL_DOCUMENT != 0) {
                 InternalWorkspaceErrorCode.UNSUPPORTED.error()
             }
-            val declaredSize = node.size
-            if (declaredSize != null && offsetBytes > declaredSize) InternalWorkspaceErrorCode.OFFSET_OUT_OF_RANGE.error()
-            val chunk = readChunk(node.uri, offsetBytes, maxBytes.toInt(), declaredSize)
+            val effectiveSize = node.size ?: probeFileSize(node.uri)
+            checkFileSize(effectiveSize)
+            if (offsetBytes > effectiveSize) InternalWorkspaceErrorCode.OFFSET_OUT_OF_RANGE.error()
+            val chunk = readChunk(node.uri, offsetBytes, maxBytes.toInt(), effectiveSize)
             InternalWorkspaceContent(
                 path = segments.joinToString("/"),
                 bytes = chunk.bytes,
@@ -744,7 +783,11 @@ internal class SafWorkspaceBackend(
         return metadata.copy(uri = rootDocument, id = rootId, type = type)
     }
 
-    private fun children(parentUri: Uri): List<Child> {
+    private fun children(
+        parentUri: Uri,
+        skipSymlinks: Boolean = false,
+        warnings: InternalWorkspaceListingWarnings? = null,
+    ): List<Child> {
         if (parentUri.authority != treeUri.authority || parentUri.scheme != ContentResolver.SCHEME_CONTENT) {
             InternalWorkspaceErrorCode.WORKSPACE_NOT_FOUND.error()
         }
@@ -779,30 +822,67 @@ internal class SafWorkspaceBackend(
                     InternalWorkspaceErrorCode.UNSUPPORTED.error()
                 }
                 while (cursor.moveToNext()) {
-                    val id = cursor.getString(idIndex) ?: InternalWorkspaceErrorCode.UNSUPPORTED.error()
-                    if (id.isBlank()) InternalWorkspaceErrorCode.UNSUPPORTED.error()
-                    val name = cursor.getString(nameIndex) ?: InternalWorkspaceErrorCode.UNSUPPORTED.error()
-                    WorkspacePathPolicy.validateProviderName(name, limits)
-                    val normalizedName = Normalizer.normalize(name, Normalizer.Form.NFC)
-                    if (!ids.add(id) || !names.add(normalizedName)) {
+                    val candidate = try {
+                        val id = cursor.getString(idIndex)
+                        if (id.isNullOrBlank()) {
+                            warnings?.add(WorkspaceListingWarningCode.METADATA_UNAVAILABLE)
+                            continue
+                        }
+                        val name = cursor.getString(nameIndex)
+                        if (name == null) {
+                            warnings?.add(WorkspaceListingWarningCode.METADATA_UNAVAILABLE)
+                            continue
+                        }
+                        WorkspacePathPolicy.validateProviderName(name, limits)
+                        val mime = cursor.getString(mimeIndex)
+                        if (mime == null) {
+                            warnings?.add(WorkspaceListingWarningCode.UNSUPPORTED_ENTRY_SKIPPED)
+                            continue
+                        }
+                        val flags = cursor.getInt(flagsIndex)
+                        if (flags and DocumentsContract.Document.FLAG_VIRTUAL_DOCUMENT != 0) {
+                            warnings?.add(WorkspaceListingWarningCode.UNSUPPORTED_ENTRY_SKIPPED)
+                            continue
+                        }
+                        if (mime.lowercase().contains("symlink")) {
+                            if (skipSymlinks) {
+                                warnings?.add(WorkspaceListingWarningCode.SYMLINK_SKIPPED)
+                                continue
+                            }
+                            InternalWorkspaceErrorCode.SYMLINK_FORBIDDEN.error()
+                        }
+                        val type = if (mime == DocumentsContract.Document.MIME_TYPE_DIR) {
+                            InternalWorkspaceEntryType.DIRECTORY
+                        } else {
+                            InternalWorkspaceEntryType.FILE
+                        }
+                        val size = if (type == InternalWorkspaceEntryType.FILE && sizeIndex >= 0 && !cursor.isNull(sizeIndex)) {
+                            cursor.getLong(sizeIndex).takeIf { it >= 0L }
+                        } else null
+                        // buildDocumentUriUsingTree is the Android API operation that turns the
+                        // provider-returned document ID into the provider's child URI. No URI path
+                        // string is concatenated here, and only these returned child URIs are reused.
+                        val childUri = safeDocumentUri(DocumentsContract.buildDocumentUriUsingTree(parentUri, id))
+                        Child(childUri, id, name, type, size, flags)
+                    } catch (security: SecurityException) {
+                        if (warnings == null) throw security
+                        warnings.add(WorkspaceListingWarningCode.UNREADABLE_ENTRY_SKIPPED)
+                        continue
+                    } catch (failure: InternalWorkspaceFailure) {
+                        if (failure.error.code == InternalWorkspaceErrorCode.SYMLINK_FORBIDDEN) throw failure
+                        warnings?.add(WorkspaceListingWarningCode.UNSUPPORTED_ENTRY_SKIPPED)
+                        continue
+                    } catch (_: RuntimeException) {
+                        // One malformed/unsupported provider row must not hide otherwise safe
+                        // siblings. Ambiguous aliases remain a directory-level security failure.
+                        warnings?.add(WorkspaceListingWarningCode.METADATA_UNAVAILABLE)
+                        continue
+                    }
+                    val normalizedName = Normalizer.normalize(candidate.name, Normalizer.Form.NFC)
+                    if (!ids.add(candidate.id) || !names.add(normalizedName)) {
                         InternalWorkspaceErrorCode.PROVIDER_ALIAS_AMBIGUOUS.error()
                     }
-                    val mime = cursor.getString(mimeIndex)
-                    if (mime != null && mime.lowercase().contains("symlink")) InternalWorkspaceErrorCode.SYMLINK_FORBIDDEN.error()
-                    val type = if (mime == DocumentsContract.Document.MIME_TYPE_DIR) {
-                        InternalWorkspaceEntryType.DIRECTORY
-                    } else {
-                        InternalWorkspaceEntryType.FILE
-                    }
-                    val size = if (type == InternalWorkspaceEntryType.FILE && sizeIndex >= 0 && !cursor.isNull(sizeIndex)) {
-                        cursor.getLong(sizeIndex).takeIf { it >= 0L }
-                    } else null
-                    val flags = cursor.getInt(flagsIndex)
-                    // buildDocumentUriUsingTree is the Android API operation that turns the
-                    // provider-returned document ID into the provider's child URI.  No URI path
-                    // string is concatenated here, and only these returned child URIs are reused.
-                    val childUri = safeDocumentUri(DocumentsContract.buildDocumentUriUsingTree(parentUri, id))
-                    result += Child(childUri, id, name, type, size, flags)
+                    result += candidate
                 }
             } ?: InternalWorkspaceErrorCode.WORKSPACE_NOT_FOUND.error()
         } catch (failure: InternalWorkspaceFailure) {
@@ -921,8 +1001,11 @@ internal class SafWorkspaceBackend(
      */
     private fun fileVersion(uri: Uri): String = metadataVersion(queryDocument(safeDocumentUri(uri)))
 
-    private fun directoryVersion(uri: Uri): String {
-        val digestInput = children(uri).sortedBy { it.name }.joinToString("\n") {
+    private fun directoryVersion(uri: Uri, skipSymlinks: Boolean = false): String =
+        directoryVersion(children(uri, skipSymlinks = skipSymlinks))
+
+    private fun directoryVersion(children: List<Child>): String {
+        val digestInput = children.sortedBy { it.name }.joinToString("\n") {
             "${it.id}\u0000${it.name}\u0000${it.type.name}\u0000${it.size ?: -1L}\u0000${it.flags}"
         }
         return InternalWorkspaceVersions.bytes(digestInput.toByteArray(Charsets.UTF_8))
@@ -942,6 +1025,15 @@ internal class SafWorkspaceBackend(
         return input.use {
             readSafChunk(it, offset, maximum, declaredSize)
         }
+    }
+
+    private fun probeFileSize(uri: Uri): Long {
+        val input = try {
+            resolver.openInputStream(uri) ?: InternalWorkspaceErrorCode.IO_ERROR.error()
+        } catch (_: SecurityException) {
+            InternalWorkspaceErrorCode.PERMISSION_DENIED.error()
+        }
+        return input.use { probeSafFileSize(it, limits.maxFileBytes) }
     }
 
     private fun readBounded(uri: Uri, offset: Long, maximum: Int): ByteArray =

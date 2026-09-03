@@ -126,6 +126,19 @@ interface WorkspacePickerPort {
         runtime.mobileagent.integration.WorkspaceAccessErrorCode.UNSUPPORTED,
     )
 
+    /**
+     * Revalidates and commits authorization for switching to a new Thread workspace.
+     * Called only after the user explicitly confirms the new Thread creation.
+     */
+    suspend fun confirmNewThreadWorkspace(
+        agentId: String,
+        currentThreadId: String,
+        currentWorkspaceId: String,
+        requestedWorkspaceId: String,
+    ): WorkspaceAccessResult = WorkspaceAccessResult.Failure(
+        runtime.mobileagent.integration.WorkspaceAccessErrorCode.UNSUPPORTED,
+    )
+
     companion object {
         const val DEFAULT_PAGE_SIZE: Int = 128
         const val DEFAULT_SAF_FLAGS: Int =
@@ -161,6 +174,15 @@ object UnavailableWorkspacePickerPort : WorkspacePickerPort {
         target: WorkspacePickerTarget,
     ): WorkspaceAccessResult = WorkspaceAccessResult.Failure(
         runtime.mobileagent.integration.WorkspaceAccessErrorCode.URI_PERMISSION_REQUIRED,
+    )
+
+    override suspend fun confirmNewThreadWorkspace(
+        agentId: String,
+        currentThreadId: String,
+        currentWorkspaceId: String,
+        requestedWorkspaceId: String,
+    ): WorkspaceAccessResult = WorkspaceAccessResult.Failure(
+        runtime.mobileagent.integration.WorkspaceAccessErrorCode.AUTHORITY_UNAVAILABLE,
     )
 
     private fun unavailableBrowse(): WorkspaceResult<WorkspaceDirectoryPage> = WorkspaceResult.Failure(

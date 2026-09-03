@@ -473,21 +473,33 @@ internal fun MainApp() {
                 text = {
                     Text(
                         if (chinese) {
-                            "工作区属于当前会话上下文，切换将创建新会话。"
+                            if (pending.requiresGrantCommit) {
+                                "工作区属于当前会话上下文，切换将创建新会话并授权该智能体访问此工作区。"
+                            } else {
+                                "工作区属于当前会话上下文，切换将创建新会话。"
+                            }
                         } else {
-                            "This workspace belongs to the current conversation. Switching creates a new conversation."
+                            if (pending.requiresGrantCommit) {
+                                "This workspace belongs to the current conversation. Switching creates a new conversation and authorizes this Agent."
+                            } else {
+                                "This workspace belongs to the current conversation. Switching creates a new conversation."
+                            }
                         },
                     )
                 },
                 confirmButton = {
                     TextButton(
                         onClick = {
-                            chatVm.selectAgent(pending.agentId)
-                            chatVm.newSession(pending.requestedWorkspaceId)
-                            workspacePickerVm.clearResult()
-                            closeWorkspacePicker()
-                            drawerOpen = false
-                            requestRoute(AppRoutes.CHAT)
+                            workspacePickerVm.confirmNewThread(
+                                pending = pending,
+                                onConfirmed = { confirmedWorkspaceId ->
+                                    chatVm.selectAgent(pending.agentId)
+                                    chatVm.newSession(confirmedWorkspaceId)
+                                    closeWorkspacePicker()
+                                    drawerOpen = false
+                                    requestRoute(AppRoutes.CHAT)
+                                },
+                            )
                         },
                     ) { Text(if (chinese) "创建新会话" else "Create conversation") }
                 },

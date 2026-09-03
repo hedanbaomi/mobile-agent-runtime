@@ -110,6 +110,11 @@ data class WorkspaceAccessGrantTarget(
     val pathScope: String? = null,
 )
 
+enum class NewThreadAuthorizationState {
+    ALREADY_GRANTED,
+    REQUIRES_CONFIRMATION_COMMIT,
+}
+
 sealed interface WorkspaceAccessResult {
     data class Success(
         val workspace: WorkspaceAccessItem,
@@ -118,8 +123,8 @@ sealed interface WorkspaceAccessResult {
 
     /**
      * The requested Thread already has an immutable workspace. The workspace
-     * and Agent grants may have been persisted; the current Thread binding was
-     * not rewritten. The foreground UI must confirm and create a new Thread.
+     * may have entered the library, but Agent capability grants are NOT
+     * committed until the user confirms creating the new Thread.
      */
     data class NewThreadRequired(
         val agentId: String,
@@ -128,7 +133,11 @@ sealed interface WorkspaceAccessResult {
         val requestedWorkspaceId: String,
         val workspace: WorkspaceAccessItem,
         val grants: List<WorkspaceAccessGrantSummary> = emptyList(),
-    ) : WorkspaceAccessResult
+        val authorizationState: NewThreadAuthorizationState = NewThreadAuthorizationState.REQUIRES_CONFIRMATION_COMMIT,
+    ) : WorkspaceAccessResult {
+        val requiresGrantCommit: Boolean
+            get() = authorizationState == NewThreadAuthorizationState.REQUIRES_CONFIRMATION_COMMIT
+    }
 
     data class Failure(val code: WorkspaceAccessErrorCode) : WorkspaceAccessResult
 }

@@ -114,7 +114,9 @@ data class WorkspacePickerAttachedUi(
 data class WorkspacePickerNewThreadUi(
     val agentId: String,
     val currentThreadId: String,
+    val currentWorkspaceId: String = "",
     val requestedWorkspaceId: String,
+    val requiresGrantCommit: Boolean = false,
 )
 
 data class WorkspacePickerUiState(

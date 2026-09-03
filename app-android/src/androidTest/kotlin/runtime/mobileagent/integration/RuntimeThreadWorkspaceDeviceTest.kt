@@ -576,6 +576,13 @@ class RuntimeThreadWorkspaceDeviceTest {
             RuntimeIntegration.INTERNAL_WORKSPACE_ID,
             threadPort.agentWorkspaceDefault(fixture.agentId)?.workspaceId,
         )
+        // Zero-side-effect: before confirmation, Agent has 0 grants for other.id
+        assertEquals(0, container.agentGrantPort.listGrants(fixture.agentId, includeRevoked = false).count { it.workspaceId == other.id })
+        assertTrue(required.requiresGrantCommit)
+
+        val confirmed = runtime.confirmNewThreadWorkspace(required)
+        assertTrue("confirmation succeeds: $confirmed", confirmed is WorkspaceAccessResult.Success)
+        assertTrue(container.agentGrantPort.listGrants(fixture.agentId, includeRevoked = false).any { it.workspaceId == other.id })
 
         val chat = ChatViewModel(fixture.app, SavedStateHandle())
         chat.selectAgent(fixture.agentId)
@@ -605,6 +612,243 @@ class RuntimeThreadWorkspaceDeviceTest {
             conversationId = newConversationId,
             workspaceId = other.id,
             suffix = "${fixture.suffix}-new",
+        )
+    }
+
+    @Test
+    fun cancelDoesNotPersistDurableGrant() = runBlocking {
+        val fixture = fixture()
+        val container = fixture.app.container
+        val runtime = container.runtimeIntegration
+        val threadPort = container.threadWorkspacePort
+        val other = runtime.registerAppPrivateWorkspace(
+            workspaceId = "workspace-cancel-${fixture.suffix}",
+            root = File(fixture.app.filesDir, "agent-workspace-cancel-${fixture.suffix}").toPath(),
+        )
+        val snapshot = runtime.createSnapshotWithWorkspace(
+            agentId = fixture.agentId,
+            workspaceId = RuntimeIntegration.INTERNAL_WORKSPACE_ID,
+            snapshotId = "snapshot-cancel-${fixture.suffix}",
+            at = fixture.now,
+        )
+        val conversation = container.conversations.create(
+            snapshotId = snapshot.id,
+            title = "cancel thread",
+            conversationId = "conversation-cancel-${fixture.suffix}",
+            at = fixture.now,
+        )
+        runtime.useRecentWorkspace(
+            workspaceId = RuntimeIntegration.INTERNAL_WORKSPACE_ID,
+            target = WorkspacePickerTarget(agentId = fixture.agentId, threadId = conversation.id),
+        )
+        val initialSnapshots = container.agents.listSnapshots(fixture.agentId).size
+        val initialConversations = container.conversations.list().size
+        val initialDefault = threadPort.agentWorkspaceDefault(fixture.agentId)?.workspaceId
+
+        // Select W2 -> NewThreadRequired
+        val switched = runtime.useRecentWorkspace(
+            workspaceId = other.id,
+            target = WorkspacePickerTarget(agentId = fixture.agentId, threadId = conversation.id),
+        )
+        val required = switched as? WorkspaceAccessResult.NewThreadRequired
+            ?: error("expected NewThreadRequired: $switched")
+        assertTrue(required.requiresGrantCommit)
+
+        // User cancels: no confirm is called
+        // Assert: Thread remains W1
+        assertEquals(
+            RuntimeIntegration.INTERNAL_WORKSPACE_ID,
+            threadPort.conversationWorkspaceBinding(conversation.id)?.workspaceId,
+        )
+        // Agent default unchanged
+        assertEquals(
+            initialDefault,
+            threadPort.agentWorkspaceDefault(fixture.agentId)?.workspaceId,
+        )
+        // Agent W2 grant count remains 0
+        assertEquals(
+            0,
+            container.agentGrantPort.listGrants(fixture.agentId, includeRevoked = false).count { it.workspaceId == other.id },
+        )
+        // No snapshot or conversation created for W2
+        assertEquals(initialSnapshots, container.agents.listSnapshots(fixture.agentId).size)
+        assertEquals(initialConversations, container.conversations.list().size)
+    }
+
+    @Test
+    fun confirmReusesExistingGrantsWithoutDuplicates() = runBlocking {
+        val fixture = fixture()
+        val container = fixture.app.container
+        val runtime = container.runtimeIntegration
+        val threadPort = container.threadWorkspacePort
+        val other = runtime.registerAppPrivateWorkspace(
+            workspaceId = "workspace-reuse-${fixture.suffix}",
+            root = File(fixture.app.filesDir, "agent-workspace-reuse-${fixture.suffix}").toPath(),
+        )
+
+        val snapshot = runtime.createSnapshotWithWorkspace(
+            agentId = fixture.agentId,
+            workspaceId = RuntimeIntegration.INTERNAL_WORKSPACE_ID,
+            snapshotId = "snapshot-reuse-${fixture.suffix}",
+            at = fixture.now,
+        )
+        val conversation = container.conversations.create(
+            snapshotId = snapshot.id,
+            title = "reuse thread",
+            conversationId = "conversation-reuse-${fixture.suffix}",
+            at = fixture.now,
+        )
+        runtime.useRecentWorkspace(
+            workspaceId = RuntimeIntegration.INTERNAL_WORKSPACE_ID,
+            target = WorkspacePickerTarget(agentId = fixture.agentId, threadId = conversation.id),
+        )
+
+        // First attempt: not yet granted -> REQUIRES_CONFIRMATION_COMMIT
+        val switched1 = runtime.useRecentWorkspace(
+            workspaceId = other.id,
+            target = WorkspacePickerTarget(agentId = fixture.agentId, threadId = conversation.id),
+        )
+        val required1 = switched1 as? WorkspaceAccessResult.NewThreadRequired
+            ?: error("expected NewThreadRequired: $switched1")
+        assertEquals(NewThreadAuthorizationState.REQUIRES_CONFIRMATION_COMMIT, required1.authorizationState)
+        assertTrue(required1.requiresGrantCommit)
+
+        // First confirmation commits the capability grants
+        val confirmed1 = runtime.confirmNewThreadWorkspace(required1)
+        assertTrue("first confirmation succeeds: $confirmed1", confirmed1 is WorkspaceAccessResult.Success)
+        val initialGrants = container.agentGrantPort.listGrants(fixture.agentId, includeRevoked = false)
+            .filter { it.workspaceId == other.id }
+        assertTrue(initialGrants.isNotEmpty())
+
+        // Second attempt: already granted -> ALREADY_GRANTED
+        val switched2 = runtime.useRecentWorkspace(
+            workspaceId = other.id,
+            target = WorkspacePickerTarget(agentId = fixture.agentId, threadId = conversation.id),
+        )
+        val required2 = switched2 as? WorkspaceAccessResult.NewThreadRequired
+            ?: error("expected NewThreadRequired: $switched2")
+        assertEquals(NewThreadAuthorizationState.ALREADY_GRANTED, required2.authorizationState)
+        assertFalse(required2.requiresGrantCommit)
+
+        // Second confirmation reuses existing active grants without duplicating
+        val confirmed2 = runtime.confirmNewThreadWorkspace(required2)
+        assertTrue("second confirmation succeeds: $confirmed2", confirmed2 is WorkspaceAccessResult.Success)
+
+        val afterGrants = container.agentGrantPort.listGrants(fixture.agentId, includeRevoked = false)
+            .filter { it.workspaceId == other.id }
+        assertEquals("grant count must not duplicate", initialGrants.size, afterGrants.size)
+    }
+
+    @Test
+    fun staleConfirmationFailsClosed() = runBlocking {
+        val fixture = fixture()
+        val container = fixture.app.container
+        val runtime = container.runtimeIntegration
+        val other = runtime.registerAppPrivateWorkspace(
+            workspaceId = "workspace-stale-${fixture.suffix}",
+            root = File(fixture.app.filesDir, "agent-workspace-stale-${fixture.suffix}").toPath(),
+        )
+        val snapshot = runtime.createSnapshotWithWorkspace(
+            agentId = fixture.agentId,
+            workspaceId = RuntimeIntegration.INTERNAL_WORKSPACE_ID,
+            snapshotId = "snapshot-stale-${fixture.suffix}",
+            at = fixture.now,
+        )
+        val conversation = container.conversations.create(
+            snapshotId = snapshot.id,
+            title = "stale thread",
+            conversationId = "conversation-stale-${fixture.suffix}",
+            at = fixture.now,
+        )
+        runtime.useRecentWorkspace(
+            workspaceId = RuntimeIntegration.INTERNAL_WORKSPACE_ID,
+            target = WorkspacePickerTarget(agentId = fixture.agentId, threadId = conversation.id),
+        )
+
+        val switched = runtime.useRecentWorkspace(
+            workspaceId = other.id,
+            target = WorkspacePickerTarget(agentId = fixture.agentId, threadId = conversation.id),
+        )
+        val required = switched as? WorkspaceAccessResult.NewThreadRequired
+            ?: error("expected NewThreadRequired: $switched")
+
+        // Case A: current thread binding changes (e.g. wrong currentWorkspaceId)
+        val staleWrongWorkspace = runtime.confirmNewThreadWorkspace(
+            agentId = required.agentId,
+            currentThreadId = required.currentThreadId,
+            currentWorkspaceId = "wrong-workspace-id",
+            requestedWorkspaceId = required.requestedWorkspaceId,
+        )
+        assertTrue(
+            "stale workspace fails closed: $staleWrongWorkspace",
+            staleWrongWorkspace is WorkspaceAccessResult.Failure &&
+                staleWrongWorkspace.code == WorkspaceAccessErrorCode.CONFLICT,
+        )
+
+        // Case B: non-existent agent
+        val staleWrongAgent = runtime.confirmNewThreadWorkspace(
+            agentId = "non-existent-agent-id",
+            currentThreadId = required.currentThreadId,
+            currentWorkspaceId = required.currentWorkspaceId,
+            requestedWorkspaceId = required.requestedWorkspaceId,
+        )
+        assertTrue(
+            "stale agent fails closed: $staleWrongAgent",
+            staleWrongAgent is WorkspaceAccessResult.Failure &&
+                staleWrongAgent.code == WorkspaceAccessErrorCode.CONFLICT,
+        )
+    }
+
+    @Test
+    fun authorityUnavailableOnConfirmationFailsClosed() = runBlocking {
+        val fixture = fixture()
+        val container = fixture.app.container
+        val runtime = container.runtimeIntegration
+        val snapshot = runtime.createSnapshotWithWorkspace(
+            agentId = fixture.agentId,
+            workspaceId = RuntimeIntegration.INTERNAL_WORKSPACE_ID,
+            snapshotId = "snapshot-auth-${fixture.suffix}",
+            at = fixture.now,
+        )
+        val conversation = container.conversations.create(
+            snapshotId = snapshot.id,
+            title = "auth thread",
+            conversationId = "conversation-auth-${fixture.suffix}",
+            at = fixture.now,
+        )
+        runtime.useRecentWorkspace(
+            workspaceId = RuntimeIntegration.INTERNAL_WORKSPACE_ID,
+            target = WorkspacePickerTarget(agentId = fixture.agentId, threadId = conversation.id),
+        )
+
+        // Create a privileged workspace in repository
+        val privilegedWs = WorkspaceRepository(container.db).save(
+            Workspace(
+                id = "workspace-shizuku-${fixture.suffix}",
+                displayName = "Shizuku Privileged",
+                backendType = WorkspaceBackendType.PRIVILEGED,
+                rootReference = "authority:SHIZUKU",
+                readable = true,
+                writable = true,
+                quotaBytes = 4L * 1024L * 1024L,
+                maxFileBytes = 256L * 1024L,
+                enabled = true,
+                scope = WorkspaceScope.SELECTED_DIRECTORY,
+            ),
+        )
+        // Select authority NONE
+        runtime.selectAuthority(Authority.NONE)
+        val confirmResult = runtime.confirmNewThreadWorkspace(
+            agentId = fixture.agentId,
+            currentThreadId = conversation.id,
+            currentWorkspaceId = RuntimeIntegration.INTERNAL_WORKSPACE_ID,
+            requestedWorkspaceId = privilegedWs.id,
+        )
+        assertTrue(
+            "authority unavailable on confirm fails closed: $confirmResult",
+            confirmResult is WorkspaceAccessResult.Failure &&
+                (confirmResult.code == WorkspaceAccessErrorCode.AUTHORITY_NOT_SELECTED ||
+                    confirmResult.code == WorkspaceAccessErrorCode.AUTHORITY_UNAVAILABLE),
         )
     }
 

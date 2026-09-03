@@ -376,12 +376,66 @@ class WorkspacePickerViewModel(
             pendingNewThread = WorkspacePickerNewThreadUi(
                 agentId = result.agentId,
                 currentThreadId = result.currentThreadId,
+                currentWorkspaceId = result.currentWorkspaceId,
                 requestedWorkspaceId = result.requestedWorkspaceId,
+                requiresGrantCommit = result.requiresGrantCommit,
             ),
             errorCode = null,
             errorMessage = null,
             statusMessage = "工作区属于当前会话上下文，切换将创建新会话。",
         )
+    }
+
+    fun confirmNewThread(
+        pending: WorkspacePickerNewThreadUi,
+        onConfirmed: (workspaceId: String) -> Unit,
+    ) {
+        if (_state.value.attachPhase == WorkspacePickerAttachPhaseUi.ATTACHING) return
+        val generation = nextGeneration()
+        browseJob?.cancel()
+        _state.value = _state.value.copy(
+            attachPhase = WorkspacePickerAttachPhaseUi.ATTACHING,
+            errorCode = null,
+            errorMessage = null,
+            statusMessage = "正在确认工作区切换…",
+        )
+        browseJob = viewModelScope.launch {
+            val result = try {
+                withContext(Dispatchers.IO) {
+                    port.confirmNewThreadWorkspace(
+                        agentId = pending.agentId,
+                        currentThreadId = pending.currentThreadId,
+                        currentWorkspaceId = pending.currentWorkspaceId,
+                        requestedWorkspaceId = pending.requestedWorkspaceId,
+                    )
+                }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (_: RuntimeException) {
+                WorkspaceAccessResult.Failure(WorkspaceAccessErrorCode.UNKNOWN_OUTCOME)
+            }
+            if (!isCurrent(generation)) return@launch
+            when (result) {
+                is WorkspaceAccessResult.Success -> {
+                    clearResult()
+                    onConfirmed(pending.requestedWorkspaceId)
+                }
+                is WorkspaceAccessResult.Failure -> {
+                    showError(
+                        result.code.toUiCode(),
+                        result.code.toUiMessage(),
+                        attachFailure = true,
+                    )
+                }
+                is WorkspaceAccessResult.NewThreadRequired -> {
+                    showError(
+                        WorkspacePickerErrorCodeUi.CONFLICT,
+                        WorkspaceAccessErrorCode.CONFLICT.toUiMessage(),
+                        attachFailure = true,
+                    )
+                }
+            }
+        }
     }
 
     private fun browseRoot(generation: Long, authority: Authority) {

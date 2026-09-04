@@ -35,6 +35,7 @@ import runtime.mobileagent.skills.tooling.WorkspaceResult
 import runtime.mobileagent.skills.tooling.WorkspaceStatRequest
 import runtime.mobileagent.skills.tooling.WorkspaceText
 import runtime.mobileagent.skills.tooling.WorkspaceWriteTextRequest
+import runtime.mobileagent.skills.tooling.isOpaqueContinuation
 
 /**
  * Public typed workspace adapter for the wired authority.  It intentionally
@@ -462,18 +463,20 @@ class WiredAdbDeviceWorkspaceProvider(
             ?: return failure(ToolErrorCode.INVALID_REQUEST)
         if (handle.owner !== pickerOwner) return failure(ToolErrorCode.INVALID_REQUEST)
         if (handle.virtualRoot) return browseRoot(request.maxEntries)
-        return browseRemote(handle, request.maxEntries)
+        return browseRemote(handle, request.maxEntries, request.continuation)
     }
 
     private suspend fun browseRemote(
         handle: PickerDirectoryHandle,
         maxEntries: Int,
+        continuation: String? = null,
     ): WorkspaceResult<WorkspaceDirectoryPage> {
         val result = try {
             authorityPort.workspace.browseDirectory(
                 handle = handle.remoteHandle,
                 relativePath = handle.relativePath.ifEmpty { null },
                 maxEntries = maxEntries,
+                cursor = continuation,
             )
         } catch (cancelled: kotlinx.coroutines.CancellationException) {
             throw cancelled
@@ -522,7 +525,8 @@ class WiredAdbDeviceWorkspaceProvider(
                 current = handle,
                 parent = handle.parent,
                 entries = entries.take(maxEntries),
-                truncated = page.truncated || entries.size > maxEntries,
+                truncated = page.truncated || page.nextCursor != null || entries.size > maxEntries,
+                continuation = page.nextCursor?.takeIf(::isOpaqueContinuation),
             ),
         )
     }

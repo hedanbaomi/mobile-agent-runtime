@@ -6,11 +6,15 @@ package runtime.mobileagent
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertIsNotEnabled
+import androidx.compose.ui.test.hasTestTag
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
+import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
+import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performScrollTo
+import androidx.compose.ui.test.performScrollToNode
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import org.junit.Assert.assertTrue
 import org.junit.Rule
@@ -67,6 +71,54 @@ class WorkspacePickerUiTest {
 
         composeRule.onNodeWithTag(WorkspacePickerTestTags.BREADCRUMB).assertIsDisplayed()
         composeRule.onNodeWithTag(WorkspacePickerTestTags.USE_FOLDER).assertIsNotEnabled()
+    }
+
+    @Test
+    fun loadMoreButtonAppearsWhenContinuationAvailable() {
+        var loads = 0
+        val dialogState = sampleState(
+            entries = List(8) { index ->
+                WorkspacePickerEntryUi("entry-$index", "module-$index", directory = true)
+            },
+        ).copy(canLoadMore = true, listTruncated = true)
+        composeRule.setContent {
+            MaterialTheme {
+                WorkspacePickerScreen(
+                    state = dialogState,
+                    actions = runtime.mobileagent.feature.agents.WorkspacePickerActions(
+                        onLoadMore = { loads += 1 },
+                    ),
+                )
+            }
+        }
+
+        composeRule.onNodeWithTag(WorkspacePickerTestTags.SCREEN).assertIsDisplayed()
+        // The static notice must be replaced by the load-more action, never duplicated.
+        assertTrue(
+            composeRule.onAllNodesWithText("目录较大，当前仅显示部分项目。").fetchSemanticsNodes().isEmpty(),
+        )
+        // The action sits below the fold in a lazy list: scroll the screen
+        // until the item composes, then interact with it.
+        composeRule.onNodeWithTag(WorkspacePickerTestTags.SCREEN)
+            .performScrollToNode(hasTestTag(WorkspacePickerTestTags.LOAD_MORE))
+        composeRule.onNodeWithTag(WorkspacePickerTestTags.LOAD_MORE).assertIsDisplayed()
+        composeRule.onNodeWithText("加载更多").assertIsDisplayed()
+        composeRule.onNodeWithTag(WorkspacePickerTestTags.LOAD_MORE).performClick()
+        assertTrue(loads == 1)
+    }
+
+    @Test
+    fun staticTruncationNoticeWithoutContinuationHasNoLoadMore() {
+        composeRule.setContent {
+            MaterialTheme {
+                WorkspacePickerScreen(state = sampleState().copy(listTruncated = true))
+            }
+        }
+
+        composeRule.onNodeWithText("目录较大，当前仅显示部分项目。").assertIsDisplayed()
+        assertTrue(
+            composeRule.onAllNodesWithTag(WorkspacePickerTestTags.LOAD_MORE).fetchSemanticsNodes().isEmpty(),
+        )
     }
 
     @Test

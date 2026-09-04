@@ -908,6 +908,35 @@ class OpenAiCompatibleAdapterTest {
     }
 
     @Test
+    fun testConnectionClampsProbeBudgetFarBelowProfileLimit() = runBlocking {
+        var body = ""
+        val engine = MockEngine { request ->
+            body = (request.body as io.ktor.http.content.TextContent).text
+            respond(
+                content = "{\"choices\":[{\"message\":{\"content\":\"ok\"}}]}",
+                status = HttpStatusCode.OK,
+                headers = headersOf(HttpHeaders.ContentType, "application/json"),
+            )
+        }
+        val result = OpenAiCompatibleAdapter(HttpClient(engine), "https://example.invalid/v1").testConnection(
+            ModelProfile(
+                id = "profile-clamped",
+                providerId = "provider-clamped",
+                modelId = "demo",
+                role = ModelRole.CHAT,
+                capabilities = setOf("stream"),
+                contextLimit = 4096,
+                outputLimit = 10240,
+                revision = 1,
+            ),
+            "connection-secret".toCharArray(),
+        )
+        assertTrue(result is ProviderConnectionResult.Success)
+        assertTrue(body.contains("\"max_tokens\":64"), body)
+        assertFalse(body.contains("10240"))
+    }
+
+    @Test
     fun streamWithoutValidPayloadAndDoneIsNotVerified() = runTest {
         var requests = 0
         val engine = MockEngine { request ->

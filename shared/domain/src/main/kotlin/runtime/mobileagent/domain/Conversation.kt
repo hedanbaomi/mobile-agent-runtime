@@ -119,6 +119,28 @@ data class ReasoningPart(
         get() = streaming
 }
 
+/**
+ * A provider-returned refusal.  This is readable assistant output, not a
+ * transport failure and not reasoning: it renders and persists like answer
+ * text and proves the endpoint, auth, and protocol round-trip succeeded.
+ */
+@Serializable
+@SerialName("refusal")
+data class RefusalPart(
+    val text: String,
+) : MessagePart {
+    init {
+        require(text.isNotBlank()) { "Refusal content must not be blank" }
+        require(text.length <= MessagePartLimits.MAX_REASONING_CHARS) {
+            "Refusal content exceeds the durable limit"
+        }
+    }
+
+    /** Alias for callers that use the same value naming as [TextPart]. */
+    val value: String
+        get() = text
+}
+
 @Serializable
 @SerialName("image")
 data class ImagePart(

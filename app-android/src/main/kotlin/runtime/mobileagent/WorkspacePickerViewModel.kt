@@ -60,6 +60,8 @@ class WorkspacePickerViewModel(
     private var browseJob: Job? = null
     private var operationGeneration = 0L
     private var currentPage: WorkspaceDirectoryPage? = null
+    private var currentContinuation: String? = null
+    private var accumulatedEntries = ArrayList<WorkspaceDirectoryEntry>()
     private var currentDirectoryReadable = false
     private var currentDirectoryWritable = false
     private val directoryStack = ArrayList<DirectoryLevel>()
@@ -108,7 +110,9 @@ class WorkspacePickerViewModel(
                 entries = emptyList(),
                 loadPhase = WorkspacePickerLoadPhaseUi.IDLE,
                 loading = false,
+                loadingMore = false,
                 listTruncated = false,
+                canLoadMore = false,
                 currentDirectoryReadable = false,
                 currentDirectoryWritable = false,
                 canGoParent = false,
@@ -202,6 +206,64 @@ class WorkspacePickerViewModel(
     fun goParent() {
         if (directoryStack.size <= 1) return
         openBreadcrumb("depth:${directoryStack.lastIndex - 1}")
+    }
+
+    /**
+     * Loads the next picker page for the currently displayed directory and
+     * appends it.  Directories stay sorted before files across the
+     * accumulated set, so a later page can only add reachability, never move
+     * an already visible entry.  A stale continuation fails closed with a
+     * typed refresh prompt and keeps the entries already shown.
+     */
+    fun loadMore() {
+        val continuation = currentContinuation ?: return
+        if (_state.value.loading || _state.value.loadingMore) return
+        if (currentPage == null) return
+        val level = directoryStack.lastOrNull() ?: return
+        val authority = selectedAuthority
+        if (!isElevated(authority) || !authorityReady) {
+            showError(WorkspacePickerErrorCodeUi.AUTHORITY_UNAVAILABLE, "当前增强访问不可用。")
+            return
+        }
+        val generation = operationGeneration
+        val expectedHandle = level.handle
+        val expectedDepth = directoryStack.size
+        browseJob = viewModelScope.launch {
+            _state.value = _state.value.copy(loadingMore = true, errorCode = null, errorMessage = null)
+            val result = try {
+                withContext(Dispatchers.IO) {
+                    port.browsePrivileged(
+                        authority,
+                        WorkspaceBrowseRequest(expectedHandle, WorkspacePickerPort.DEFAULT_PAGE_SIZE, continuation),
+                    )
+                }
+            } catch (cancelled: CancellationException) {
+                _state.value = _state.value.copy(loadingMore = false)
+                throw cancelled
+            } catch (_: RuntimeException) {
+                WorkspaceResult.Failure(runtime.mobileagent.skills.tooling.ToolError(ToolErrorCode.UNKNOWN_OUTCOME))
+            }
+            if (!isCurrent(generation)) return@launch
+            // The user may have navigated while the page was in flight; never
+            // append a page to a different level.
+            if (directoryStack.size != expectedDepth || directoryStack.lastOrNull()?.handle !== expectedHandle) {
+                _state.value = _state.value.copy(loadingMore = false)
+                return@launch
+            }
+            when (result) {
+                is WorkspaceResult.Success -> applyPage(result.value, generation, append = true)
+                is WorkspaceResult.Failure -> {
+                    val code = result.error.toPickerErrorCode()
+                    currentContinuation = null
+                    _state.value = _state.value.copy(
+                        loadingMore = false,
+                        canLoadMore = false,
+                        errorCode = code,
+                        errorMessage = code.toUiMessage(),
+                    )
+                }
+            }
+        }
     }
 
     /**
@@ -451,6 +513,7 @@ class WorkspacePickerViewModel(
         _state.value = _state.value.copy(
             loadPhase = WorkspacePickerLoadPhaseUi.LOADING,
             loading = true,
+            loadingMore = false,
             errorCode = null,
             errorMessage = null,
         )
@@ -478,31 +541,42 @@ class WorkspacePickerViewModel(
         }
     }
 
-    private fun applyPage(page: WorkspaceDirectoryPage, generation: Long) {
+    private fun applyPage(page: WorkspaceDirectoryPage, generation: Long, append: Boolean = false) {
         currentPage = page
+        currentContinuation = page.continuation
         val access = runCatching { port.directoryAccess(page) }
             .getOrDefault(WorkspacePickerDirectoryAccess(readable = true, writable = false))
         currentDirectoryReadable = access.readable
         currentDirectoryWritable = access.writable
 
-        if (pendingStackIndex != null) {
-            val index = pendingStackIndex!!
-            while (directoryStack.size > index + 1) directoryStack.removeAt(directoryStack.lastIndex)
-            pendingStackIndex = null
-        } else if (pendingChildLabel != null) {
-            directoryStack += DirectoryLevel(pendingChildLabel!!, page.current)
-            pendingChildLabel = null
-        } else if (directoryStack.isEmpty()) {
-            directoryStack += DirectoryLevel("根目录", page.current)
+        if (!append) {
+            accumulatedEntries = ArrayList(page.entries)
+            if (pendingStackIndex != null) {
+                val index = pendingStackIndex!!
+                while (directoryStack.size > index + 1) directoryStack.removeAt(directoryStack.lastIndex)
+                pendingStackIndex = null
+            } else if (pendingChildLabel != null) {
+                directoryStack += DirectoryLevel(pendingChildLabel!!, page.current)
+                pendingChildLabel = null
+            } else if (directoryStack.isEmpty()) {
+                directoryStack += DirectoryLevel("根目录", page.current)
+            } else {
+                directoryStack[directoryStack.lastIndex] = directoryStack.last().copy(handle = page.current)
+            }
         } else {
-            directoryStack[directoryStack.lastIndex] = directoryStack.last().copy(handle = page.current)
+            // Append only genuinely new names; a retried page must not
+            // duplicate entries already shown.
+            val known = accumulatedEntries.map { it.name to it.type }.toSet()
+            page.entries.forEach { entry ->
+                if (!known.contains(entry.name to entry.type)) accumulatedEntries += entry
+            }
         }
 
         entryHandles.clear()
         // Keep the navigation surface predictable even when a provider does
         // not return a directory-first listing.  The opaque provider handle
         // remains attached to the VM-only entry map, never to UI state.
-        val entryUi = page.entries
+        val entryUi = accumulatedEntries
             .sortedWith(
                 compareByDescending<WorkspaceDirectoryEntry> {
                     it.type == WorkspaceEntryType.DIRECTORY
@@ -540,6 +614,7 @@ class WorkspacePickerViewModel(
         _state.value = _state.value.copy(
             loadPhase = WorkspacePickerLoadPhaseUi.CONTENT,
             loading = false,
+            loadingMore = false,
             breadcrumbs = breadcrumbs,
             currentLabel = currentLabel,
             // The provider root can contain sensitive/system-only namespaces
@@ -550,6 +625,7 @@ class WorkspacePickerViewModel(
             entries = if (rootLanding) emptyList() else entryUi,
             locations = locations,
             listTruncated = page.truncated,
+            canLoadMore = page.continuation != null && !rootLanding,
             currentDirectoryReadable = currentDirectoryReadable,
             currentDirectoryWritable = currentDirectoryWritable,
             canGoParent = directoryStack.size > 1 && page.parent != null,
@@ -561,6 +637,8 @@ class WorkspacePickerViewModel(
 
     private fun clearDirectoryState() {
         currentPage = null
+        currentContinuation = null
+        accumulatedEntries = ArrayList()
         currentDirectoryReadable = false
         currentDirectoryWritable = false
         directoryStack.clear()
@@ -664,7 +742,9 @@ class WorkspacePickerViewModel(
         -> WorkspacePickerErrorCodeUi.AUTHORITY_UNAVAILABLE
         ToolErrorCode.CAPABILITY_DENIED -> WorkspacePickerErrorCodeUi.PERMISSION_DENIED
         ToolErrorCode.WORKSPACE_NOT_FOUND -> WorkspacePickerErrorCodeUi.WORKSPACE_NOT_FOUND
-        ToolErrorCode.CONFLICT -> WorkspacePickerErrorCodeUi.CONFLICT
+        ToolErrorCode.CONFLICT,
+        ToolErrorCode.INVALID_CURSOR,
+        -> WorkspacePickerErrorCodeUi.CONFLICT
         else -> WorkspacePickerErrorCodeUi.UNKNOWN_OUTCOME
     }
 

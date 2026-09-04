@@ -88,11 +88,10 @@ internal fun MainApp() {
     val navController = rememberNavController()
     val initialRoute = shellVm.route().takeIf { it in allAppRoutes } ?: AppRoutes.CHAT
     var route by rememberSaveable { mutableStateOf(initialRoute) }
-    var mcpReturnRoute by rememberSaveable { mutableStateOf(AppRoutes.SETTINGS) }
     var pendingRoute by rememberSaveable { mutableStateOf<String?>(null) }
     var pendingAgentId by rememberSaveable { mutableStateOf<String?>(null) }
     var unsavedDialog by rememberSaveable { mutableStateOf(false) }
-    var inspectorReturnRoute by rememberSaveable { mutableStateOf(AppRoutes.MORE) }
+    var inspectorReturnRoute by rememberSaveable { mutableStateOf(AppRoutes.CHAT) }
     var editorOwner by rememberSaveable { mutableStateOf<String?>(null) }
     var editorDirty by rememberSaveable { mutableStateOf(false) }
     var editorDiscard by remember { mutableStateOf<(() -> Unit)?>(null) }
@@ -159,6 +158,11 @@ internal fun MainApp() {
     }
 
     val currentEntry by navController.currentBackStackEntryAsState()
+    // Single source of truth: `route` drives the NavController. The reverse
+    // sync below only observes system-back pops back into `route`; every
+    // top-level destination is a drawer peer, so navigate() always resets to
+    // a single entry and system back deterministically returns to Chat (or
+    // the inspector source) instead of chasing a second state.
     LaunchedEffect(currentEntry?.destination?.route) {
         val destination = currentEntry?.destination?.route?.takeIf { it in allAppRoutes } ?: return@LaunchedEffect
         if (route != destination) route = destination
@@ -377,7 +381,6 @@ internal fun MainApp() {
                     when {
                         workspacePickerOpen -> closeWorkspacePicker()
                         shellDetailOpen -> shellDetailBack?.invoke()
-                        route == AppRoutes.MCP -> requestRoute(if (compact) AppRoutes.MORE else mcpReturnRoute)
                         else -> handleBack(compact)
                     }
                 },
@@ -439,7 +442,7 @@ internal fun MainApp() {
                         composable(AppRoutes.PROVIDERS) {
                             ProvidersRoute(it, chinese, ::requestRoute, ::requestEditorClose, ::registerEditorState,
                                 ::registerShellDetail,
-                                { mcpReturnRoute = AppRoutes.PROVIDERS; requestRoute(AppRoutes.MCP) },
+                                { requestRoute(AppRoutes.MCP) },
                                 navigationAffordance == ShellNavigationAffordance.BACK,
                                 { handleBack(compact) })
                         }
@@ -458,7 +461,7 @@ internal fun MainApp() {
                         }
                         composable(AppRoutes.SETTINGS) {
                             SettingsRoute(it, chinese, ::requestRoute,
-                                { mcpReturnRoute = AppRoutes.SETTINGS; requestRoute(AppRoutes.MCP) },
+                                { requestRoute(AppRoutes.MCP) },
                                 { settingsRevision++ }, autoCheckUpdate = pendingUpdateCheck,
                                 onAutoCheckConsumed = { pendingUpdateCheck = false },
                                 showBack = navigationAffordance == ShellNavigationAffordance.BACK,
@@ -466,13 +469,12 @@ internal fun MainApp() {
                         }
                         composable(AppRoutes.ABOUT) {
                             SettingsRoute(it, chinese, ::requestRoute,
-                                { mcpReturnRoute = AppRoutes.ABOUT; requestRoute(AppRoutes.MCP) },
+                                { requestRoute(AppRoutes.MCP) },
                                 { settingsRevision++ }, aboutOnly = true,
                                 showBack = navigationAffordance == ShellNavigationAffordance.BACK,
                                 onBack = { handleBack(compact) })
                         }
-                        composable(AppRoutes.MORE) { MoreHub(chinese, ::requestRoute, showPageTitle = false) }
-                        composable(AppRoutes.MCP) { McpRoute(it, chinese, if (compact) AppRoutes.MORE else mcpReturnRoute, ::requestRoute) }
+                        composable(AppRoutes.MCP) { McpRoute(it, chinese, ::requestRoute) }
                         composable(AppRoutes.INSPECTOR) {
                             InspectorRoute(
                                 vm = chatVm,
@@ -499,6 +501,7 @@ internal fun MainApp() {
                                     onOpenBreadcrumb = workspacePickerVm::openBreadcrumb,
                                     onOpenEntry = workspacePickerVm::openEntry,
                                     onGoParent = workspacePickerVm::goParent,
+                                    onLoadMore = workspacePickerVm::loadMore,
                                     onUseCurrentDirectory = workspacePickerVm::useCurrentDirectory,
                                     onUseSafFallback = {
                                         workspacePickerVm.chooseSafFallback()
@@ -564,7 +567,7 @@ internal fun MainApp() {
 
 private val allAppRoutes = setOf(
     AppRoutes.CHAT, AppRoutes.AGENTS, AppRoutes.PROVIDERS, AppRoutes.KNOWLEDGE,
-    AppRoutes.SKILLS, AppRoutes.NEWS, AppRoutes.SETTINGS, AppRoutes.MORE,
+    AppRoutes.SKILLS, AppRoutes.NEWS, AppRoutes.SETTINGS,
     AppRoutes.ABOUT, AppRoutes.INSPECTOR, AppRoutes.MCP,
 )
 
@@ -589,23 +592,6 @@ internal fun requestInspectorAvailability(
             else -> runtime.mobileagent.feature.chat.ChatRequestInspectorAvailability.READY
         }
     }
-
-@Composable
-private fun MoreHub(chinese: Boolean, onOpen: (String) -> Unit, showPageTitle: Boolean = true) {
-    Column(Modifier.fillMaxSize().padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-        if (showPageTitle) {
-            Text(if (chinese) "更多" else "More", style = MaterialTheme.typography.headlineSmall)
-        }
-        moreHubItems(chinese).forEach { item ->
-            Card(Modifier.fillMaxWidth().clickable { onOpen(item.route) }) {
-                Row(Modifier.padding(16.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                    Icon(item.icon, contentDescription = item.label)
-                    Text(item.label, style = MaterialTheme.typography.titleMedium)
-                }
-            }
-        }
-    }
-}
 
 @Composable
 private fun ChatRoute(vm: runtime.mobileagent.ChatViewModel, chinese: Boolean, onRoute: (String) -> Unit,
@@ -1652,7 +1638,7 @@ private fun SettingsRoute(entry: NavBackStackEntry, chinese: Boolean, onRoute: (
 }
 
 @Composable
-private fun McpRoute(entry: NavBackStackEntry, chinese: Boolean, returnRoute: String, onRoute: (String) -> Unit) {
+private fun McpRoute(entry: NavBackStackEntry, chinese: Boolean, onRoute: (String) -> Unit) {
     val vm: runtime.mobileagent.McpViewModel = viewModel(viewModelStoreOwner = entry)
     val actions = runtime.mobileagent.ui.McpActions(
         onSaveEndpoint = { endpoint, namespace, password -> vm.saveEndpoint(endpoint, namespace, password) },

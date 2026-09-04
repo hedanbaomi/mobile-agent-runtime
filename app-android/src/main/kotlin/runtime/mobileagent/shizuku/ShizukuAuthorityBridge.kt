@@ -322,12 +322,12 @@ class ShizukuAuthorityBridge(
     }
 
     /** Opens the typed device-root browser; the result contains opaque handles only. */
-    internal fun dispatchDirectoryRoot(maxEntries: Int): ShizukuDispatchResult =
-        dispatch { service, sessionId -> service.openDirectoryRootSession(sessionId, maxEntries) }
+    internal fun dispatchDirectoryRoot(maxEntries: Int, continuation: String? = null): ShizukuDispatchResult =
+        dispatch { service, sessionId -> service.openDirectoryRootPagedSession(sessionId, maxEntries, continuation) }
 
     /** Browses one service-owned opaque directory handle. */
-    internal fun dispatchDirectoryBrowse(handle: String, maxEntries: Int): ShizukuDispatchResult =
-        dispatch { service, sessionId -> service.browseDirectorySession(sessionId, handle, maxEntries) }
+    internal fun dispatchDirectoryBrowse(handle: String, maxEntries: Int, continuation: String? = null): ShizukuDispatchResult =
+        dispatch { service, sessionId -> service.browseDirectoryPagedSession(sessionId, handle, maxEntries, continuation) }
 
     /** Attaches one service-owned opaque directory handle to the agent workspace. */
     internal fun dispatchDirectoryAttach(handle: String): ShizukuDispatchResult =

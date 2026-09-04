@@ -5,10 +5,14 @@ package runtime.mobileagent
 
 import androidx.compose.ui.test.SemanticsNodeInteraction
 import androidx.compose.ui.test.assertHasClickAction
+import androidx.compose.ui.test.assertIsDisplayed
+import androidx.compose.ui.test.hasTestTag
+import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.onAllNodesWithText
+import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performScrollToNode
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
-import androidx.compose.ui.semantics.SemanticsActions
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import io.ktor.client.HttpClient
 import io.ktor.client.engine.mock.MockEngine
@@ -28,10 +32,11 @@ import org.junit.runner.RunWith
 import runtime.mobileagent.announcements.ClientContext
 
 /**
- * Small release-gate smoke for the phone shell. It intentionally stops at the
- * system-picker entry points so the test does not depend on DocumentsUI's
- * OEM-specific surface; the existing import device tests exercise the worker
- * and persistence paths with controlled fixtures.
+ * Release-gate smoke for the single-drawer information architecture. The
+ * drawer is the only top-level navigation surface: every destination is
+ * reachable directly, top-level pages show Menu (never Back), and only
+ * feature-internal detail promotes the bar to Back. Nothing here depends on
+ * the removed More hub or on timing luck.
  */
 @RunWith(AndroidJUnit4::class)
 class ReleaseGateUiDeviceTest {
@@ -39,23 +44,107 @@ class ReleaseGateUiDeviceTest {
     val compose = createAndroidComposeRule<MainActivity>()
 
     @Test
-    fun navigationProviderAnnouncementAndImportEntrypoints_areReachable() {
+    fun drawerReachesEveryTopLevelDestinationDirectly() {
         waitForText("对话", "Chat")
+        listOf(
+            "knowledge" to ("知识" to "Knowledge"),
+            "providers" to ("服务商" to "Providers"),
+            "news" to ("公告" to "News"),
+            "settings" to ("设置" to "Settings"),
+            "mcp" to ("MCP" to "MCP"),
+            "about" to ("关于" to "About"),
+            "inspector" to ("请求检查器" to "Request inspector"),
+        ).forEach { (route, labels) ->
+            openDrawer()
+            compose.onNodeWithTag("global.drawer")
+                .performScrollToNode(hasTestTag("global.drawer.navigation.$route"))
+            compose.onNodeWithTag("global.drawer.navigation.$route")
+                .assertExists().assertHasClickAction().performClick()
+            waitForText(labels.first, labels.second)
+            assertMenuShownAndBackAbsent()
+        }
+    }
 
-        clickText("知识", "Knowledge")
+    @Test
+    fun topLevelShowsMenuWhileAgentEditorShowsBack() {
+        waitForText("对话", "Chat")
+        assertMenuShownAndBackAbsent()
+
+        openDrawer()
+        compose.onNodeWithTag("global.drawer")
+            .performScrollToNode(hasTestTag("global.drawer.navigation.agents"))
+        compose.onNodeWithTag("global.drawer.navigation.agents").performClick()
+        waitForText("智能体", "Agents")
+        assertMenuShownAndBackAbsent()
+
+        // The agent editor is an existing feature-internal detail seam: it
+        // promotes the same top-level route to Back without duplicating Menu.
+        compose.onNodeWithTag("agents.new").assertExists().assertHasClickAction().performClick()
+        compose.waitUntil(15_000) {
+            compose.onAllNodesWithTag("global.shell.navigation.back", useUnmergedTree = true)
+                .fetchSemanticsNodes().isNotEmpty()
+        }
+        compose.onNodeWithTag("global.shell.navigation.back")
+            .assertExists().assertHasClickAction()
+        compose.onAllNodesWithTag("global.shell.navigation.menu", useUnmergedTree = true)
+            .fetchSemanticsNodes().isEmpty().let { assertTrue(it) }
+
+        // Closing the detail returns to the Agents root with Menu restored.
+        compose.onNodeWithTag("agents.editor.cancel")
+            .assertExists().assertHasClickAction().performClick()
+        compose.waitUntil(15_000) {
+            compose.onAllNodesWithTag("global.shell.navigation.menu", useUnmergedTree = true)
+                .fetchSemanticsNodes().isNotEmpty()
+        }
+        waitForText("智能体", "Agents")
+        assertMenuShownAndBackAbsent()
+
+        // System back from a top-level page returns toward Chat and never
+        // finishes the activity.
+        compose.activityRule.scenario.onActivity { activity ->
+            activity.onBackPressedDispatcher.onBackPressed()
+            assertFalse(activity.isFinishing)
+        }
+        waitForText("对话", "Chat")
+    }
+
+    @Test
+    fun systemBackFromTopLevelReturnsTowardChatWithoutFinishingActivity() {
+        waitForText("对话", "Chat")
+        openDrawer()
+        compose.onNodeWithTag("global.drawer")
+            .performScrollToNode(hasTestTag("global.drawer.navigation.providers"))
+        compose.onNodeWithTag("global.drawer.navigation.providers").performClick()
+        waitForText("服务商", "Providers")
+
+        compose.activityRule.scenario.onActivity { activity ->
+            activity.onBackPressedDispatcher.onBackPressed()
+            assertFalse(activity.isFinishing)
+        }
+        waitForText("对话", "Chat")
+    }
+
+    @Test
+    fun knowledgeImportEntrypointsAreReachable() {
+        waitForText("对话", "Chat")
+        openDrawer()
+        compose.onNodeWithTag("global.drawer")
+            .performScrollToNode(hasTestTag("global.drawer.navigation.knowledge"))
+        compose.onNodeWithTag("global.drawer.navigation.knowledge").performClick()
         waitForText("知识", "Knowledge")
         localized("添加文件", "Add files").assertExists().assertHasClickAction()
         localized("导入文件夹", "Import folder").assertExists().assertHasClickAction()
         localized("导入 ZIP", "Import ZIP").assertExists().assertHasClickAction()
+        assertMenuShownAndBackAbsent()
+    }
 
-        clickText("更多", "More")
-        waitForText("更多", "More")
-        clickText("服务商", "Providers")
-        waitForText("服务商", "Providers")
-        localized("返回", "Back").assertExists().assertHasClickAction().performClick()
-        waitForText("更多", "More")
-
-        clickText("公告", "News")
+    @Test
+    fun announcementPageDoesNotLeakFeedConfiguration() {
+        waitForText("对话", "Chat")
+        openDrawer()
+        compose.onNodeWithTag("global.drawer")
+            .performScrollToNode(hasTestTag("global.drawer.navigation.news"))
+        compose.onNodeWithTag("global.drawer.navigation.news").performClick()
         waitForText("公告", "News")
         assertTextAbsent("公告地址", "Feed URL")
         assertTextAbsent("公钥", "Public key")
@@ -63,36 +152,16 @@ class ReleaseGateUiDeviceTest {
     }
 
     @Test
-    fun allMoreDestinationsExposeAnInAppBackAffordance() {
+    fun topBarLeadingActionNeverCoversItsTitle() {
         waitForText("对话", "Chat")
-        listOf(
-            "服务商" to "Providers",
-            "公告" to "News",
-            "MCP" to "MCP",
-            "设置" to "Settings",
-            "关于" to "About",
-            "请求检查器" to "Request inspector",
-        ).forEach { (chinese, english) ->
-            clickText("更多", "More")
-            waitForText("更多", "More")
-            clickText(chinese, english)
-            localized("返回", "Back").assertExists().assertHasClickAction().performClick()
-            waitForText("更多", "More")
-        }
-    }
-
-    @Test
-    fun systemBackFromMoreChildReturnsToMoreWithoutFinishingActivity() {
-        waitForText("对话", "Chat")
-        clickText("更多", "More")
-        clickText("服务商", "Providers")
-        waitForText("服务商", "Providers")
-
-        compose.activityRule.scenario.onActivity { activity ->
-            activity.onBackPressedDispatcher.onBackPressed()
-            assertFalse(activity.isFinishing)
-        }
-        waitForText("更多", "More")
+        val menuBounds = compose.onNodeWithTag("global.shell.navigation.menu")
+            .assertIsDisplayed().fetchSemanticsNode().boundsInRoot
+        val titleBounds = compose.onNodeWithTag("global.shell.title")
+            .assertIsDisplayed().fetchSemanticsNode().boundsInRoot
+        assertTrue(
+            "shell menu must not cover its title",
+            menuBounds.right <= titleBounds.left,
+        )
     }
 
     @Test
@@ -137,20 +206,29 @@ class ReleaseGateUiDeviceTest {
         }
     }
 
-    private fun waitForText(chinese: String, english: String) {
-        compose.waitUntil(15_000) { hasText(chinese, english) }
+    private fun openDrawer() {
+        compose.waitUntil(15_000) {
+            compose.onAllNodesWithTag("global.shell.navigation.menu", useUnmergedTree = true)
+                .fetchSemanticsNodes().isNotEmpty()
+        }
+        compose.onNodeWithTag("global.shell.navigation.menu").performClick()
+        compose.waitUntil(15_000) {
+            compose.onAllNodesWithTag("global.drawer.modal", useUnmergedTree = true)
+                .fetchSemanticsNodes().isNotEmpty()
+        }
     }
 
-    private fun clickText(chinese: String, english: String) {
+    private fun assertMenuShownAndBackAbsent() {
+        compose.onNodeWithTag("global.shell.navigation.menu")
+            .assertExists().assertHasClickAction()
+        assertTrue(
+            compose.onAllNodesWithTag("global.shell.navigation.back", useUnmergedTree = true)
+                .fetchSemanticsNodes().isEmpty(),
+        )
+    }
+
+    private fun waitForText(chinese: String, english: String) {
         compose.waitUntil(15_000) { hasText(chinese, english) }
-        val candidates = if (compose.onAllNodesWithText(chinese).fetchSemanticsNodes().isNotEmpty()) {
-            compose.onAllNodesWithText(chinese)
-        } else {
-            compose.onAllNodesWithText(english)
-        }
-        val index = candidates.fetchSemanticsNodes().indexOfFirst { it.config.contains(SemanticsActions.OnClick) }
-        check(index >= 0) { "Localized navigation target is not clickable" }
-        candidates[index].performClick()
     }
 
     private fun localized(chinese: String, english: String): SemanticsNodeInteraction =

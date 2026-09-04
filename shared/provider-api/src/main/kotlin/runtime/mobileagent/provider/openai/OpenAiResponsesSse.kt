@@ -25,14 +25,19 @@ import runtime.mobileagent.provider.SecretRedactor
  */
 object OpenAiResponsesSse {
     private val json = Json { ignoreUnknownKeys = true }
+    /** Matches the transport bound on provider continuation payloads; oversized blobs are dropped. */
+    private const val ProviderContinuationLimit = 32 * 1024
 
     class State {
         internal val functionCalls = linkedMapOf<String, FunctionCallBuffer>()
         internal val emittedCalls = mutableSetOf<String>()
         internal val text = linkedMapOf<String, StringBuilder>()
         internal val reasoning = linkedMapOf<String, StringBuilder>()
+        internal val refusal = linkedMapOf<String, StringBuilder>()
         internal val finalizedText = mutableSetOf<String>()
         internal val finalizedReasoning = mutableSetOf<String>()
+        internal val finalizedRefusal = mutableSetOf<String>()
+        internal val emittedContinuations = mutableSetOf<String>()
     }
 
     internal data class FunctionCallBuffer(
@@ -54,14 +59,18 @@ object OpenAiResponsesSse {
         val obj = runCatching { json.parseToJsonElement(data).jsonObject }.getOrNull() ?: return emptyList()
         val type = string(obj, "type") ?: return emptyList()
         return when (type) {
-            "response.output_text.delta" -> appendTextDelta(obj, state, reasoning = false)
-            "response.output_text.done" -> finishText(obj, state, reasoning = false)
+            "response.output_text.delta" -> appendTextDelta(obj, state, Channel.TEXT)
+            "response.output_text.done" -> finishText(obj, state, Channel.TEXT)
             "response.reasoning_summary_text.delta",
             "response.reasoning_summary.delta",
-            -> appendTextDelta(obj, state, reasoning = true)
+            "response.reasoning_text.delta",
+            -> appendTextDelta(obj, state, Channel.REASONING)
             "response.reasoning_summary_text.done",
             "response.reasoning_summary.done",
-            -> finishText(obj, state, reasoning = true)
+            "response.reasoning_text.done",
+            -> finishText(obj, state, Channel.REASONING)
+            "response.refusal.delta" -> appendTextDelta(obj, state, Channel.REFUSAL)
+            "response.refusal.done" -> finishText(obj, state, Channel.REFUSAL)
             "response.output_item.added",
             "response.output_item.done",
             -> parseOutputItem(obj, state, extraSecrets, terminal = type.endsWith(".done"))
@@ -99,30 +108,48 @@ object OpenAiResponsesSse {
         }
     }
 
-    private fun appendTextDelta(event: JsonObject, state: State, reasoning: Boolean): List<ModelEvent> {
-        val delta = string(event, "delta")?.takeIf { it.isNotEmpty() } ?: return emptyList()
-        val key = contentKey(event)
-        val buffers = if (reasoning) state.reasoning else state.text
-        val finalized = if (reasoning) state.finalizedReasoning else state.finalizedText
-        if (key in finalized) return listOf(ModelEvent.Failed(ErrorCode.UNKNOWN_OUTCOME.name))
-        buffers.getOrPut(key, ::StringBuilder).append(delta)
-        return listOf(if (reasoning) ModelEvent.ReasoningDelta(delta) else ModelEvent.TextDelta(delta))
+    private enum class Channel { TEXT, REASONING, REFUSAL }
+
+    private fun channelBuffers(state: State, channel: Channel): LinkedHashMap<String, StringBuilder> = when (channel) {
+        Channel.TEXT -> state.text
+        Channel.REASONING -> state.reasoning
+        Channel.REFUSAL -> state.refusal
     }
 
-    private fun finishText(event: JsonObject, state: State, reasoning: Boolean): List<ModelEvent> {
-        val complete = string(event, "text") ?: string(event, "summary_text") ?: return emptyList()
+    private fun channelFinalized(state: State, channel: Channel): MutableSet<String> = when (channel) {
+        Channel.TEXT -> state.finalizedText
+        Channel.REASONING -> state.finalizedReasoning
+        Channel.REFUSAL -> state.finalizedRefusal
+    }
+
+    private fun channelEvent(channel: Channel, text: String): ModelEvent = when (channel) {
+        Channel.TEXT -> ModelEvent.TextDelta(text)
+        Channel.REASONING -> ModelEvent.ReasoningDelta(text)
+        Channel.REFUSAL -> ModelEvent.RefusalDelta(text)
+    }
+
+    private fun appendTextDelta(event: JsonObject, state: State, channel: Channel): List<ModelEvent> {
+        val delta = string(event, "delta")?.takeIf { it.isNotEmpty() } ?: return emptyList()
         val key = contentKey(event)
-        val buffers = if (reasoning) state.reasoning else state.text
-        val finalized = if (reasoning) state.finalizedReasoning else state.finalizedText
+        if (key in channelFinalized(state, channel)) return listOf(ModelEvent.Failed(ErrorCode.UNKNOWN_OUTCOME.name))
+        channelBuffers(state, channel).getOrPut(key, ::StringBuilder).append(delta)
+        return listOf(channelEvent(channel, delta))
+    }
+
+    private fun finishText(event: JsonObject, state: State, channel: Channel): List<ModelEvent> {
+        val complete = string(event, "text") ?: string(event, "summary_text")
+            ?: string(event, "refusal") ?: return emptyList()
+        val key = contentKey(event)
+        val finalized = channelFinalized(state, channel)
         if (!finalized.add(key)) return emptyList()
-        val partial = buffers[key]?.toString().orEmpty()
+        val partial = channelBuffers(state, channel)[key]?.toString().orEmpty()
         val missing = when {
             partial.isEmpty() -> complete
             complete.startsWith(partial) -> complete.removePrefix(partial)
             else -> return listOf(ModelEvent.Failed(ErrorCode.UNKNOWN_OUTCOME.name))
         }
         return missing.takeIf { it.isNotEmpty() }
-            ?.let { listOf(if (reasoning) ModelEvent.ReasoningDelta(it) else ModelEvent.TextDelta(it)) }
+            ?.let { listOf(channelEvent(channel, it)) }
             .orEmpty()
     }
 
@@ -141,6 +168,14 @@ object OpenAiResponsesSse {
         terminal: Boolean,
     ): List<ModelEvent> {
         val item = event["item"]?.let { runCatching { it.jsonObject }.getOrNull() } ?: return emptyList()
+        // A completed reasoning output item carries the provider-private
+        // payload needed for stateless continuation.  It is captured as
+        // transport data only: never rendered, never logged, and never
+        // mistaken for visible chain-of-thought.
+        if (string(item, "type") == "reasoning") {
+            if (!terminal) return emptyList()
+            return captureContinuation(item, state)
+        }
         if (string(item, "type") != "function_call") return emptyList()
         val key = string(item, "id") ?: string(item, "call_id") ?: return emptyList()
         val buffer = state.functionCalls.getOrPut(key) {
@@ -157,6 +192,22 @@ object OpenAiResponsesSse {
             }
         }
         return if (terminal) finishFunctionCall(key, buffer, state, extraSecrets) else emptyList()
+    }
+
+    private fun captureContinuation(item: JsonObject, state: State): List<ModelEvent> =
+        captureContinuation(item, state.emittedContinuations)
+
+    internal fun captureContinuation(item: JsonObject, emitted: MutableSet<String>): List<ModelEvent> {
+        val encrypted = string(item, "encrypted_content")?.takeIf { it.isNotBlank() } ?: return emptyList()
+        if (encrypted.length > ProviderContinuationLimit) return emptyList()
+        val id = string(item, "id")
+        val key = id ?: encrypted
+        if (!emitted.add(key)) return emptyList()
+        return listOf(
+            ModelEvent.ProviderContinuation(
+                runtime.mobileagent.provider.ProviderContinuationItem(itemId = id, encryptedContent = encrypted),
+            ),
+        )
     }
 
     private fun finishFunctionCall(

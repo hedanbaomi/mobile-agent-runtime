@@ -58,6 +58,41 @@ class WorkspaceBrowserTest {
     }
 
     @Test
+    fun browseContinuationIsForwardedAndSurfaced() = runBlocking {
+        val backend = FakeBackend()
+        val provider = TypedAuthorityWorkspaceProvider(Authority.SHIZUKU, backend)
+        val root = assertSuccess(provider.root())
+        val books = root.entries.single { it.name == "books" }
+        val handle = books.handle ?: error("directory entry did not provide a handle")
+
+        val first = assertSuccess(provider.directoryBrowser.browse(WorkspaceBrowseRequest(handle, 1)))
+        assertEquals("opaque-cursor-1", first.continuation)
+        assertTrue(first.truncated)
+        // root() plus the first browse both arrive with a null cursor.
+        assertEquals(listOf("cursor-page-0", "cursor-page-0"), backend.seenCursors)
+
+        val second = assertSuccess(
+            provider.directoryBrowser.browse(WorkspaceBrowseRequest(handle, 1, "opaque-cursor-1")),
+        )
+        assertEquals(null, second.continuation)
+        assertEquals(listOf("cursor-page-0", "cursor-page-0", "opaque-cursor-1"), backend.seenCursors)
+    }
+
+    @Test
+    fun browseRequestAndPageRejectNonOpaqueContinuation() {
+        val handle = FakeBackend().let { backend ->
+            runBlocking { assertSuccess(TypedAuthorityWorkspaceProvider(Authority.SHIZUKU, backend).root()) }
+                .entries.single { it.name == "books" }.handle
+        } ?: error("directory entry did not provide a handle")
+        assertThrows(IllegalArgumentException::class.java) {
+            WorkspaceBrowseRequest(handle, 1, "has space")
+        }
+        assertThrows(IllegalArgumentException::class.java) {
+            WorkspaceBrowseRequest(handle, 1, "has/slash")
+        }
+    }
+
+    @Test
     fun handlesCannotCrossProviderAndClosedProviderFailsClosed() = runBlocking {
         val first = TypedAuthorityWorkspaceProvider(Authority.WIRED_ADB, FakeBackend())
         val second = TypedAuthorityWorkspaceProvider(Authority.WIRED_ADB, FakeBackend())
@@ -122,6 +157,7 @@ class WorkspaceBrowserTest {
     private class FakeBackend(
         id: String = "root-backend",
     ) : WorkspaceBackend {
+        val seenCursors = ArrayList<String?>()
         override val descriptor = WorkspaceDescriptor(
             id = id,
             displayName = "Fake",
@@ -135,6 +171,7 @@ class WorkspaceBrowserTest {
 
         override suspend fun list(request: WorkspaceListRequest): WorkspaceResult<WorkspaceListing> {
             val path = request.relativePath.orEmpty()
+            seenCursors += request.cursor ?: "cursor-page-0"
             val entries = when (path) {
                 "" -> listOf(
                     WorkspaceEntry("books", WorkspaceEntryType.DIRECTORY, 0),
@@ -143,7 +180,14 @@ class WorkspaceBrowserTest {
                 "books" -> listOf(WorkspaceEntry("books/book.md", WorkspaceEntryType.FILE, 5))
                 else -> emptyList()
             }
-            return WorkspaceResult.Success(WorkspaceListing(path.ifEmpty { "." }, entries))
+            return WorkspaceResult.Success(
+                WorkspaceListing(
+                    relativePath = path.ifEmpty { "." },
+                    entries = entries,
+                    truncated = false,
+                    nextCursor = if (request.cursor == null) "opaque-cursor-1" else null,
+                ),
+            )
         }
 
         override suspend fun readText(request: WorkspaceReadTextRequest): WorkspaceResult<WorkspaceText> =

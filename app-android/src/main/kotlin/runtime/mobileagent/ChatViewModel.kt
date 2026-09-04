@@ -747,6 +747,16 @@ class ChatViewModel(
                                         if (System.currentTimeMillis() - lastCheckpoint >= 500) { checkpoint(); lastCheckpoint = System.currentTimeMillis() }
                                     }
                                 }
+                                // A refusal is readable assistant output: it joins the
+                                // answer stream like ordinary text, never reasoning.
+                                is ModelEvent.RefusalDelta -> {
+                                    val projected = e.toMessagePartOrNull() as? RefusalPart
+                                    if (projected != null) {
+                                        answer = SecretRedactor.redact(answer + projected.text, listOf(String(secret!!)))
+                                        flushStreamingAnswer(assistantId, answer, force = false)
+                                        if (System.currentTimeMillis() - lastCheckpoint >= 500) { checkpoint(); lastCheckpoint = System.currentTimeMillis() }
+                                    }
+                                }
                                 is ModelEvent.Failed -> {
                                     val projected = e.toMessagePartOrNull() as? ErrorPart ?: toSafeErrorPart(e.sanitizedMessage)
                                     val safeMessage = projected.message

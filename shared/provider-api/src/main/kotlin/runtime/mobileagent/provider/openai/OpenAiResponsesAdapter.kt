@@ -31,6 +31,7 @@ import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.contentOrNull
@@ -118,7 +119,8 @@ class OpenAiResponsesAdapter(
                 stream = false,
                 parameters = runtime.mobileagent.provider.ParameterLayers(modelParameters = modelParameters),
                 operationId = operationId,
-                outputTokenLimit = configured.outputLimit.coerceAtLeast(1),
+                // Probes never spend the user's full output budget on a two-word answer.
+                outputTokenLimit = minOf(configured.outputLimit.coerceAtLeast(1), CONNECTION_PROBE_MAX_OUTPUT_TOKENS),
             )
             val payload = buildPayload(request, includeImageBytes = true)
             val resolved = resolveHeaders(token, emptyMap())
@@ -137,7 +139,12 @@ class OpenAiResponsesAdapter(
                         connectionFailureForHttp(status, raw)
                     } else {
                         val events = parseResponseBody(raw, response.headers[HttpHeaders.ContentType].orEmpty(), resolved.secrets + token)
-                        if (events.any { it is ModelEvent.Completed } && events.any { it is ModelEvent.TextDelta || it is ModelEvent.ToolCallDelta }) {
+                        // A well-formed completed refusal proves the endpoint,
+                        // auth, and protocol round-trip; it is not a malformed
+                        // response.
+                        if (events.any { it is ModelEvent.Completed } && events.any {
+                                it is ModelEvent.TextDelta || it is ModelEvent.ToolCallDelta || it is ModelEvent.RefusalDelta
+                            }) {
                             ProviderConnectionResult.Success(elapsedMillis(started), charged = true)
                         } else {
                             ProviderConnectionResult.Failure(
@@ -218,7 +225,7 @@ class OpenAiResponsesAdapter(
                     messages = listOf(ChatMessage("user", "Reply with ok.")),
                     stream = false,
                     operationId = operationId,
-                    outputTokenLimit = profile.outputLimit.coerceAtLeast(1),
+                    outputTokenLimit = minOf(profile.outputLimit.coerceAtLeast(1), CONNECTION_PROBE_MAX_OUTPUT_TOKENS),
                 ),
                 require = ProbeRequirement.TEXT,
             )
@@ -282,7 +289,14 @@ class OpenAiResponsesAdapter(
     }
 
     override fun previewRequest(request: ModelRequest): String =
-        SecretRedactor.redact(buildPayload(request, includeImageBytes = false).toString())
+        // Provider-private continuation items are transport-only: the preview
+        // a user inspects must never contain encrypted provider payloads.
+        SecretRedactor.redact(
+            buildPayload(
+                request.copy(messages = request.messages.map { it.copy(providerContinuationItems = emptyList()) }),
+                includeImageBytes = false,
+            ).toString(),
+        )
 
     override fun stream(request: ModelRequest, secret: CharArray): Flow<ModelEvent> = flow {
         if (secret.isEmpty()) {
@@ -376,6 +390,18 @@ class OpenAiResponsesAdapter(
             if (safe.isNotEmpty()) emit(ModelEvent.ReasoningDelta(safe))
             false
         }
+        is ModelEvent.RefusalDelta -> {
+            val safe = redactor.accept(event.text)
+            if (safe.isNotEmpty()) emit(ModelEvent.RefusalDelta(safe))
+            false
+        }
+        // Provider-private continuation bypasses redaction buffering
+        // untouched: it is opaque transport for the owning adapter, and the
+        // runtime — not the UI — consumes it on the next round.
+        is ModelEvent.ProviderContinuation -> {
+            emit(event)
+            false
+        }
         is ModelEvent.ToolCallDelta -> {
             val parsed = runCatching { Json.parseToJsonElement(event.argumentsJson).jsonObject }.getOrNull()
             if (parsed == null || credentialText(event.callId, secrets) ||
@@ -456,6 +482,23 @@ class OpenAiResponsesAdapter(
         )
         val fields = linkedMapOf<String, JsonElement>()
         fields.putAll(merged)
+        // Stateless orchestration stays local by default: the provider must
+        // not retain the conversation unless the user explicitly opts in with
+        // a boolean `store:true` advanced parameter.  A non-boolean store is a
+        // configuration error, never a silent default.
+        val effectiveStore = when (val configured = fields["store"]) {
+            null -> false
+            is JsonPrimitive -> configured.booleanOrNull
+                ?: throw invalidConfig("store must be a boolean", request.operationId)
+            else -> throw invalidConfig("store must be a boolean", request.operationId)
+        }
+        fields["store"] = JsonPrimitive(effectiveStore)
+        // A stateless run replays provider-private reasoning items itself, so
+        // the provider must return them unless the caller already set an
+        // explicit include list.
+        if (!effectiveStore && fields["include"] == null) {
+            fields["include"] = buildJsonArray { add(JsonPrimitive("reasoning.encrypted_content")) }
+        }
         val legacyMaxTokens = fields.remove("max_tokens")
         val legacyMaxCompletionTokens = fields.remove("max_completion_tokens")
         val legacyMax = legacyMaxTokens ?: legacyMaxCompletionTokens
@@ -494,6 +537,16 @@ class OpenAiResponsesAdapter(
                 return@forEach
             }
             if (message.toolCalls.isNotEmpty()) {
+                // Provider-private continuation items replay first, in provider
+                // output order, so a reasoning model can continue statelessly.
+                // They are transport-only and never enter previews or history.
+                message.providerContinuationItems.forEach { continuation ->
+                    add(buildJsonObject {
+                        put("type", JsonPrimitive("reasoning"))
+                        continuation.itemId?.let { put("id", JsonPrimitive(it)) }
+                        put("encrypted_content", JsonPrimitive(continuation.encryptedContent))
+                    })
+                }
                 if (message.text.isNotBlank()) add(messageContent("assistant", message.text, emptyList(), includeImageBytes))
                 message.toolCalls.forEach { call ->
                     add(buildJsonObject {
@@ -544,6 +597,7 @@ class OpenAiResponsesAdapter(
             return listOf(ModelEvent.Failed(SecretRedactor.redact(message, secrets)))
         }
         val events = mutableListOf<ModelEvent>()
+        val emittedContinuations = mutableSetOf<String>()
         root["output"]?.let { output ->
             runCatching { output.jsonArray }.getOrNull()?.forEach { element ->
                 val item = runCatching { element.jsonObject }.getOrNull() ?: return@forEach
@@ -551,13 +605,21 @@ class OpenAiResponsesAdapter(
                     "message" -> item["content"]?.let { content ->
                         runCatching { content.jsonArray }.getOrNull()?.forEach { part ->
                             val partObject = runCatching { part.jsonObject }.getOrNull() ?: return@forEach
-                            if (partObject["type"]?.jsonPrimitive?.contentOrNull == "output_text") {
-                                partObject["text"]?.jsonPrimitive?.contentOrNull?.let {
+                            when (partObject["type"]?.jsonPrimitive?.contentOrNull) {
+                                "output_text" -> partObject["text"]?.jsonPrimitive?.contentOrNull?.let {
                                     events += ModelEvent.TextDelta(SecretRedactor.redact(it, secrets))
+                                }
+                                // A refusal is readable assistant output, not a
+                                // transport failure and not reasoning.
+                                "refusal" -> (
+                                    partObject["refusal"] ?: partObject["text"]
+                                    )?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() }?.let {
+                                    events += ModelEvent.RefusalDelta(SecretRedactor.redact(it, secrets))
                                 }
                             }
                         }
                     }
+                    "reasoning" -> events += OpenAiResponsesSse.captureContinuation(item, emittedContinuations)
                     "function_call" -> {
                         val callId = item["call_id"]?.jsonPrimitive?.contentOrNull.orEmpty()
                         val name = item["name"]?.jsonPrimitive?.contentOrNull.orEmpty()
@@ -637,6 +699,7 @@ class OpenAiResponsesAdapter(
                     val hasTerminal = events.any { it is ModelEvent.Completed }
                     val hasText = events.any { it is ModelEvent.TextDelta }
                     val hasTool = events.any { it is ModelEvent.ToolCallDelta }
+                    val hasRefusal = events.any { it is ModelEvent.RefusalDelta }
                     val supported = hasTerminal && when (require) {
                         ProbeRequirement.TEXT -> hasText
                         ProbeRequirement.STREAM -> hasText
@@ -644,7 +707,14 @@ class OpenAiResponsesAdapter(
                         ProbeRequirement.IMAGE -> hasText
                     }
                     FeatureProbeResult(
-                        summary = if (supported) "verified" else "invalid-response",
+                        // A refusal proves the provider answered, but it does
+                        // not verify the probed text/tool capability.  Keep it
+                        // distinct from a malformed response.
+                        summary = when {
+                            supported -> "verified"
+                            hasRefusal -> "refusal"
+                            else -> "invalid-response"
+                        },
                         supported = supported,
                         charged = true,
                         status = if (supported) CapabilityCheckStatus.VERIFIED else CapabilityCheckStatus.FAILED,
@@ -701,7 +771,13 @@ class OpenAiResponsesAdapter(
             ) else emptyList(),
             stream = feature == ProbeFeature.STREAM,
             operationId = operationId,
-            outputTokenLimit = profile.outputLimit.coerceAtLeast(1),
+            // The forced tool probe still gets a small bounded budget: enough
+            // for a short reasoning trace plus one no-op call on reasoning
+            // models, but far below any real profile output limit.
+            outputTokenLimit = minOf(
+                profile.outputLimit.coerceAtLeast(1),
+                if (feature == ProbeFeature.TOOLS) CAPABILITY_PROBE_MAX_OUTPUT_TOKENS else CONNECTION_PROBE_MAX_OUTPUT_TOKENS,
+            ),
         )
         return probeRequest(profile, headers, token, request, when (feature) {
             ProbeFeature.STREAM -> ProbeRequirement.STREAM
@@ -903,6 +979,17 @@ class OpenAiResponsesAdapter(
 
     companion object {
         private const val PROBE_TOOL_NAME = "mar_probe_noop"
+        /**
+         * Probe output budgets.  Probes only need a two-word answer or one
+         * forced no-op call, so they never spend the profile's full output
+         * budget (which users configure at 10k+).  The tool probe keeps a
+         * slightly larger bound so a reasoning model can still emit its
+         * required trace plus the forced call; both stay far below real
+         * limits.  A probe that fails on budget is reported as-is and is
+         * never retried with a larger paid request.
+         */
+        const val CONNECTION_PROBE_MAX_OUTPUT_TOKENS = 64
+        const val CAPABILITY_PROBE_MAX_OUTPUT_TOKENS = 128
         private const val CONNECTION_TIMEOUT_MS = 15_000L
         private const val MAX_RESPONSE_BYTES = 8_388_608L
         private const val MAX_LINE_BYTES = 1_048_576

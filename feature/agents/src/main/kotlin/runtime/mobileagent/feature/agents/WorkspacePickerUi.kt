@@ -130,7 +130,9 @@ data class WorkspacePickerUiState(
     val entries: List<WorkspacePickerEntryUi> = emptyList(),
     val loadPhase: WorkspacePickerLoadPhaseUi = WorkspacePickerLoadPhaseUi.IDLE,
     val loading: Boolean = false,
+    val loadingMore: Boolean = false,
     val listTruncated: Boolean = false,
+    val canLoadMore: Boolean = false,
     val currentDirectoryReadable: Boolean = false,
     val currentDirectoryWritable: Boolean = false,
     val canGoParent: Boolean = false,
@@ -151,6 +153,7 @@ data class WorkspacePickerActions(
     val onOpenBreadcrumb: (String) -> Unit = {},
     val onOpenEntry: (String) -> Unit = {},
     val onGoParent: () -> Unit = {},
+    val onLoadMore: () -> Unit = {},
     val onUseCurrentDirectory: () -> Unit = {},
     val onUseSafFallback: () -> Unit = {},
     val onOpenRecent: (String) -> Unit = {},
@@ -359,7 +362,27 @@ fun WorkspacePickerScreen(
             items(state.entries, key = { "entry:${it.id}" }) { entry ->
                 WorkspaceEntryRow(entry, actions.onOpenEntry)
             }
-            if (state.listTruncated) {
+            if (state.canLoadMore) {
+                item(key = "load-more") {
+                    Column(Modifier.fillMaxWidth()) {
+                        if (state.listTruncated) {
+                            Text(
+                                "目录较大，已显示部分项目。",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                        OutlinedButton(
+                            onClick = actions.onLoadMore,
+                            enabled = !state.loadingMore,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .heightIn(min = 48.dp)
+                                .testTag(WorkspacePickerTestTags.LOAD_MORE),
+                        ) { Text(if (state.loadingMore) "正在加载…" else "加载更多") }
+                    }
+                }
+            } else if (state.listTruncated) {
                 item(key = "truncated") {
                     Text(
                         "目录较大，当前仅显示部分项目。",
@@ -551,6 +574,7 @@ object WorkspacePickerTestTags {
     const val USE_FOLDER = "workspacePicker.useFolder"
     const val ADVANCED_PATH = "workspacePicker.advancedPath"
     const val LOADING = "workspacePicker.loading"
+    const val LOAD_MORE = "workspacePicker.loadMore"
     const val ERROR = "workspacePicker.error"
     const val STATUS = "workspacePicker.status"
     const val ATTACHING = "workspacePicker.attaching"

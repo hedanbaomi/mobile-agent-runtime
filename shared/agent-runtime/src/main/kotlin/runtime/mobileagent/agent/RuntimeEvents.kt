@@ -18,6 +18,7 @@ import runtime.mobileagent.domain.ErrorPart
 import runtime.mobileagent.domain.MessageErrorCode
 import runtime.mobileagent.domain.MessagePart
 import runtime.mobileagent.domain.ReasoningPart
+import runtime.mobileagent.domain.RefusalPart
 import runtime.mobileagent.skills.ToolCall
 import runtime.mobileagent.skills.ToolExecutor
 import runtime.mobileagent.skills.ToolResult
@@ -135,6 +136,11 @@ internal fun ParameterLayers.allKeys(): List<String> = buildList {
 fun ProviderModelEvent.toMessagePartOrNull(): MessagePart? = when (this) {
     is ProviderModelEvent.ReasoningDelta ->
         text.takeIf { it.isNotBlank() }?.let { ReasoningPart(it, streaming = true) }
+    is ProviderModelEvent.RefusalDelta ->
+        text.takeIf { it.isNotBlank() }?.let { RefusalPart(it) }
+    // Provider-private continuation is transport-only: it never becomes a
+    // visible, previewed, logged, or persisted message part.
+    is ProviderModelEvent.ProviderContinuation -> null
     is ProviderModelEvent.Failed -> toSafeErrorPart(sanitizedMessage)
     else -> null
 }

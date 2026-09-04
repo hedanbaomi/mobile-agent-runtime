@@ -210,6 +210,29 @@ class ShizukuUserService private constructor(
         privilegedDirectories.browse(directoryHandle, maxEntries)
     }
 
+    override fun openDirectoryRootPagedSession(
+        sessionId: String?,
+        maxEntries: Int,
+        continuation: String?,
+    ): String = withSession(sessionId, "open_directory_root") {
+        if (maxEntries !in 1..ShizukuDirectoryHandleStore.MAX_DIRECTORY_ENTRIES) {
+            return@withSession denied("open_directory_root", ShizukuWorkspaceFileStore.LIMIT)
+        }
+        privilegedDirectories.openRoot(maxEntries, continuation?.takeIf { it.isNotEmpty() })
+    }
+
+    override fun browseDirectoryPagedSession(
+        sessionId: String?,
+        directoryHandle: String?,
+        maxEntries: Int,
+        continuation: String?,
+    ): String = withSession(sessionId, "browse_directory") {
+        if (maxEntries !in 1..ShizukuDirectoryHandleStore.MAX_DIRECTORY_ENTRIES) {
+            return@withSession denied("browse_directory", ShizukuWorkspaceFileStore.LIMIT)
+        }
+        privilegedDirectories.browse(directoryHandle, maxEntries, continuation?.takeIf { it.isNotEmpty() })
+    }
+
     override fun attachDirectorySession(sessionId: String?, directoryHandle: String?): String =
         withSession(sessionId, "attach_directory") {
             privilegedDirectories.attach(directoryHandle)

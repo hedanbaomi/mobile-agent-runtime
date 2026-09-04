@@ -12,10 +12,8 @@ import org.junit.runner.RunWith
 import runtime.mobileagent.ui.AppRoutes
 import runtime.mobileagent.ui.appBackTarget
 import runtime.mobileagent.ui.defaultAppDestinations
-import runtime.mobileagent.ui.isMoreChildRoute
+import runtime.mobileagent.ui.globalDrawerDestinations
 import runtime.mobileagent.ui.isShellScopedLongRunningRoute
-import runtime.mobileagent.ui.moreHubItems
-import runtime.mobileagent.ui.phonePrimaryDestinations
 import runtime.mobileagent.ui.requestInspectorAvailability
 import runtime.mobileagent.ui.ShellNavigationAffordance
 import runtime.mobileagent.ui.appShellTitle
@@ -34,22 +32,27 @@ class NavigationScopeTest {
             AppRoutes.PROVIDERS,
             AppRoutes.KNOWLEDGE,
             AppRoutes.SKILLS,
+            AppRoutes.NEWS,
             AppRoutes.SETTINGS,
+            AppRoutes.MCP,
+            AppRoutes.ABOUT,
+            AppRoutes.INSPECTOR,
         ).forEach { route ->
             assertEquals(ShellNavigationAffordance.MENU, shellNavigationAffordance(route))
         }
-        listOf(AppRoutes.ABOUT, AppRoutes.INSPECTOR).forEach { route ->
-            assertEquals(ShellNavigationAffordance.BACK, shellNavigationAffordance(route))
+        // Feature-internal detail and overlays promote the same route to BACK;
+        // a route never shows Menu and Back at the same time.
+        listOf(
+            AppRoutes.CHAT,
+            AppRoutes.AGENTS,
+            AppRoutes.PROVIDERS,
+            AppRoutes.MCP,
+        ).forEach { route ->
+            assertEquals(
+                ShellNavigationAffordance.BACK,
+                shellNavigationAffordance(route, childDetailOpen = true),
+            )
         }
-        assertEquals(ShellNavigationAffordance.BACK, shellNavigationAffordance(AppRoutes.MCP))
-        assertEquals(
-            ShellNavigationAffordance.BACK,
-            shellNavigationAffordance(AppRoutes.AGENTS, childDetailOpen = true),
-        )
-        assertEquals(
-            ShellNavigationAffordance.BACK,
-            shellNavigationAffordance(AppRoutes.MCP, childDetailOpen = true),
-        )
     }
 
     @Test
@@ -65,45 +68,42 @@ class NavigationScopeTest {
     }
 
     @Test
-    fun phoneNavigationKeepsSecondaryPagesInMore() {
+    @Suppress("DEPRECATION")
+    fun drawerListsEveryDestinationDirectlyWithoutMore() {
+        val drawer = globalDrawerDestinations(false).map { it.route }
         assertEquals(
-            listOf(AppRoutes.CHAT, AppRoutes.AGENTS, AppRoutes.KNOWLEDGE, AppRoutes.SKILLS, AppRoutes.MORE),
-            phonePrimaryDestinations(false).map { it.route },
+            listOf(
+                AppRoutes.CHAT, AppRoutes.AGENTS, AppRoutes.PROVIDERS, AppRoutes.KNOWLEDGE,
+                AppRoutes.SKILLS, AppRoutes.NEWS, AppRoutes.SETTINGS,
+                AppRoutes.MCP, AppRoutes.ABOUT, AppRoutes.INSPECTOR,
+            ),
+            drawer,
         )
-        assertTrue(moreHubItems(false).map { it.route }.containsAll(
-            listOf(AppRoutes.PROVIDERS, AppRoutes.NEWS, AppRoutes.MCP, AppRoutes.SETTINGS, AppRoutes.ABOUT, AppRoutes.INSPECTOR),
-        ))
-    }
-
-    @Test
-    fun wideNavigationKeepsSevenProductDestinations() {
-        assertEquals(
-            listOf(AppRoutes.CHAT, AppRoutes.AGENTS, AppRoutes.PROVIDERS, AppRoutes.KNOWLEDGE, AppRoutes.SKILLS, AppRoutes.NEWS, AppRoutes.SETTINGS),
-            defaultAppDestinations(false).map { it.route },
-        )
-    }
-
-    @Test
-    fun phoneMoreChildrenUseHistoryAndRestoredRootsFallBackToChat() {
-        listOf(AppRoutes.PROVIDERS, AppRoutes.NEWS, AppRoutes.MCP, AppRoutes.SETTINGS, AppRoutes.ABOUT, AppRoutes.INSPECTOR)
-            .forEach { route ->
-                assertTrue(isMoreChildRoute(route))
-                if (route == AppRoutes.INSPECTOR) {
-                    assertEquals(AppRoutes.MORE, appBackTarget(compact = true, currentRoute = route, hasPreviousEntry = true))
-                    assertEquals(AppRoutes.MORE, appBackTarget(compact = true, currentRoute = route, hasPreviousEntry = false))
-                } else {
-                    assertNull(appBackTarget(compact = true, currentRoute = route, hasPreviousEntry = true))
-                    assertEquals(AppRoutes.CHAT, appBackTarget(compact = true, currentRoute = route, hasPreviousEntry = false))
-                }
-            }
+        assertTrue(!drawer.contains(AppRoutes.MORE))
+        assertEquals(drawer, defaultAppDestinations(false).map { it.route })
     }
 
     @Test
     fun inspectorBackPreservesItsOpeningSourceAndRootFallbackIsChat() {
         assertEquals(AppRoutes.CHAT, appBackTarget(true, AppRoutes.INSPECTOR, AppRoutes.CHAT, hasPreviousEntry = false))
-        assertEquals(AppRoutes.MORE, appBackTarget(true, AppRoutes.INSPECTOR, AppRoutes.MORE, hasPreviousEntry = false))
+        assertEquals(AppRoutes.CHAT, appBackTarget(true, AppRoutes.INSPECTOR, AppRoutes.CHAT, hasPreviousEntry = true))
         assertEquals(AppRoutes.CHAT, appBackTarget(false, AppRoutes.PROVIDERS, hasPreviousEntry = false))
         assertNull(appBackTarget(true, AppRoutes.CHAT, hasPreviousEntry = false))
+    }
+
+    @Test
+    fun topLevelBackFallsBackToChatWithoutHistory() {
+        // Inspector keeps its explicit opener source and is covered by
+        // inspectorBackPreservesItsOpeningSourceAndRootFallbackIsChat.
+        listOf(
+            AppRoutes.PROVIDERS, AppRoutes.NEWS, AppRoutes.MCP, AppRoutes.SETTINGS,
+            AppRoutes.ABOUT, AppRoutes.AGENTS, AppRoutes.KNOWLEDGE,
+            AppRoutes.SKILLS,
+        ).forEach { route ->
+            assertNull(appBackTarget(compact = true, currentRoute = route, hasPreviousEntry = true))
+            assertEquals(AppRoutes.CHAT, appBackTarget(compact = true, currentRoute = route, hasPreviousEntry = false))
+            assertEquals(AppRoutes.CHAT, appBackTarget(compact = false, currentRoute = route, hasPreviousEntry = false))
+        }
     }
 
     @Test

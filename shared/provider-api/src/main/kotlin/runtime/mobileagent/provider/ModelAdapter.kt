@@ -132,12 +132,46 @@ data class AssistantToolCall(
     val argumentsJson: String,
 )
 
+/**
+ * Provider-private continuation payload for stateless multi-round runs.
+ *
+ * This is transport data, not model output: it carries items such as an
+ * OpenAI Responses `reasoning` output item with `encrypted_content` so the
+ * next tool-loop round can replay them verbatim.  It must never enter
+ * assistant visible text, reasoning summary UI, request previews,
+ * diagnostics, persisted history, or logs.  Adapters that do not understand
+ * the channel (for example Chat Completions) ignore it.
+ */
+data class ProviderContinuationItem(
+    val itemId: String? = null,
+    val encryptedContent: String,
+) {
+    init {
+        require(encryptedContent.isNotBlank()) { "Continuation content must not be blank" }
+        require(encryptedContent.length <= MAX_CONTINUATION_CHARS) {
+            "Continuation content exceeds the transport limit"
+        }
+    }
+
+    override fun toString(): String = "ProviderContinuationItem(<redacted>)"
+
+    companion object {
+        const val MAX_CONTINUATION_CHARS = 32 * 1024
+    }
+}
+
 data class ChatMessage(
     val role: String,
     val text: String = "",
     val images: List<InlineImage> = emptyList(),
     val toolCallId: String? = null,
     val toolCalls: List<AssistantToolCall> = emptyList(),
+    /**
+     * Provider-private continuation items replayed verbatim on the next
+     * request of the same run.  Never rendered, previewed, logged, or
+     * persisted; only the owning provider adapter encodes them.
+     */
+    val providerContinuationItems: List<ProviderContinuationItem> = emptyList(),
 )
 
 data class ModelRequest(
@@ -163,6 +197,18 @@ sealed interface ModelEvent {
      * hidden reasoning from ordinary answer text.
      */
     data class ReasoningDelta(val text: String) : ModelEvent
+    /**
+     * A model refusal is assistant/provider output, not a transport failure.
+     * It renders as readable assistant output and persists like ordinary
+     * answer text; it is never mixed into reasoning.
+     */
+    data class RefusalDelta(val text: String) : ModelEvent
+    /**
+     * Provider-private continuation captured from one round and replayed on
+     * the next request of the same run.  Runtimes forward it to the owning
+     * adapter's transport encoding; it is never user-visible.
+     */
+    data class ProviderContinuation(val item: ProviderContinuationItem) : ModelEvent
     data class ToolCallDelta(val callId: String, val name: String, val argumentsJson: String) : ModelEvent
     data class Usage(val inputTokens: Int, val outputTokens: Int) : ModelEvent
     data class ToolApprovalRequired(val callId: String, val name: String, val argumentsJson: String) : ModelEvent

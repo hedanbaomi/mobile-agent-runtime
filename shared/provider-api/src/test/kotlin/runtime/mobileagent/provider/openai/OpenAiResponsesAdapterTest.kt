@@ -400,6 +400,248 @@ class OpenAiResponsesAdapterTest {
     }
 
     @Test
+    fun storeDefaultsFalseAndAllowsExplicitBooleanOverride() {
+        val adapter = OpenAiResponsesAdapter(HttpClient(MockEngine { error("network must not be called") }), "https://example.invalid/v1")
+        val base = ModelRequest(modelId = "gpt-responses", messages = listOf(ChatMessage("user", "hi")), stream = false)
+        assertTrue(adapter.previewRequest(base).contains("\"store\":false"))
+        assertTrue(adapter.previewRequest(base).contains("\"include\":[\"reasoning.encrypted_content\"]"))
+
+        val explicit = base.copy(parameters = ParameterLayers(customJson = "{\"store\":true}"))
+        val explicitPreview = adapter.previewRequest(explicit)
+        assertTrue(explicitPreview.contains("\"store\":true"))
+        assertFalse(explicitPreview.contains("reasoning.encrypted_content"))
+
+        val customInclude = base.copy(parameters = ParameterLayers(customJson = "{\"include\":[\"code_interpreter_call.outputs\"]}"))
+        val customPreview = adapter.previewRequest(customInclude)
+        assertTrue(customPreview.contains("code_interpreter_call.outputs"))
+        assertFalse(customPreview.contains("reasoning.encrypted_content"))
+
+        assertThrows(AppException::class.java) {
+            adapter.previewRequest(base.copy(parameters = ParameterLayers(customJson = "{\"store\":\"yes\"}")))
+        }
+        assertThrows(AppException::class.java) {
+            adapter.previewRequest(base.copy(parameters = ParameterLayers(customJson = "{\"store\":1}")))
+        }
+    }
+
+    @Test
+    fun refusalStreamingAndNonStreamingSurfaceAsRefusal() {
+        val state = OpenAiResponsesSse.State()
+        assertEquals(
+            listOf(ModelEvent.RefusalDelta("I cannot")),
+            OpenAiResponsesSse.eventsFromLine(
+                "data: {\"type\":\"response.refusal.delta\",\"item_id\":\"msg_1\",\"output_index\":0,\"content_index\":0,\"delta\":\"I cannot\"}",
+                state,
+            ),
+        )
+        // The done marker only supplies the missing tail, like text and reasoning.
+        assertEquals(
+            listOf(ModelEvent.RefusalDelta(" help.")),
+            OpenAiResponsesSse.eventsFromLine(
+                "data: {\"type\":\"response.refusal.done\",\"item_id\":\"msg_1\",\"output_index\":0,\"content_index\":0,\"refusal\":\"I cannot help.\"}",
+                state,
+            ),
+        )
+    }
+
+    @Test
+    fun reasoningTextEventsSurfaceAsReasoningWithoutFabrication() {
+        assertEquals(
+            listOf(ModelEvent.ReasoningDelta("thinking")),
+            OpenAiResponsesSse.eventsFromLine(
+                "data: {\"type\":\"response.reasoning_text.delta\",\"delta\":\"thinking\"}",
+                OpenAiResponsesSse.State(),
+            ),
+        )
+        assertEquals(
+            listOf(ModelEvent.ReasoningDelta("done thinking")),
+            OpenAiResponsesSse.eventsFromLine(
+                "data: {\"type\":\"response.reasoning_text.done\",\"item_id\":\"rs_1\",\"text\":\"done thinking\"}",
+                OpenAiResponsesSse.State(),
+            ),
+        )
+    }
+
+    @Test
+    fun completedReasoningItemIsCapturedAsPrivateContinuation() {
+        val state = OpenAiResponsesSse.State()
+        val added = OpenAiResponsesSse.eventsFromLine(
+            "data: {\"type\":\"response.output_item.added\",\"item\":{\"type\":\"reasoning\",\"id\":\"rs_1\"}}",
+            state,
+        )
+        assertTrue(added.isEmpty())
+        val done = OpenAiResponsesSse.eventsFromLine(
+            "data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"reasoning\",\"id\":\"rs_1\",\"encrypted_content\":\"enc-blob\"}}",
+            state,
+        )
+        assertEquals(1, done.size)
+        val continuation = done.single() as ModelEvent.ProviderContinuation
+        assertEquals("rs_1", continuation.item.itemId)
+        assertEquals("enc-blob", continuation.item.encryptedContent)
+        // Replays and items without payload never surface.
+        assertTrue(
+            OpenAiResponsesSse.eventsFromLine(
+                "data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"reasoning\",\"id\":\"rs_1\",\"encrypted_content\":\"enc-blob\"}}",
+                state,
+            ).isEmpty(),
+        )
+        assertTrue(
+            OpenAiResponsesSse.eventsFromLine(
+                "data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"reasoning\",\"id\":\"rs_2\"}}",
+                OpenAiResponsesSse.State(),
+            ).isEmpty(),
+        )
+    }
+
+    @Test
+    fun continuationIsReplayedOnNextRoundButAbsentFromPreview() = runTest {
+        val bodies = mutableListOf<String>()
+        val engine = MockEngine { request ->
+            bodies += (request.body as io.ktor.http.content.TextContent).text
+            respond(
+                "data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"reasoning\",\"id\":\"rs_9\",\"encrypted_content\":\"enc-9\"}}\n\n" +
+                    "data: {\"type\":\"response.function_call_arguments.done\",\"item_id\":\"fc_9\",\"call_id\":\"call-9\",\"name\":\"lookup\",\"arguments\":\"{}\"}\n\n" +
+                    "data: {\"type\":\"response.completed\",\"response\":{}}\n\n",
+                HttpStatusCode.OK,
+                headersOf(HttpHeaders.ContentType, "text/event-stream"),
+            )
+        }
+        val adapter = OpenAiResponsesAdapter(HttpClient(engine), "https://example.invalid/v1")
+        val first = adapter.stream(
+            ModelRequest("gpt-responses", listOf(ChatMessage("user", "hi"))),
+            "token".toCharArray(),
+        ).toList()
+        val continuation = first.filterIsInstance<ModelEvent.ProviderContinuation>().single()
+        assertEquals("enc-9", continuation.item.encryptedContent)
+
+        val next = ModelRequest(
+            "gpt-responses",
+            listOf(
+                ChatMessage("user", "hi"),
+                ChatMessage(
+                    "assistant",
+                    toolCalls = listOf(AssistantToolCall("call-9", "lookup", "{}")),
+                    providerContinuationItems = listOf(continuation.item),
+                ),
+                ChatMessage("tool", "{}", toolCallId = "call-9"),
+            ),
+        )
+        val preview = adapter.previewRequest(next)
+        // The include directive stays visible; the encrypted blob never does.
+        assertTrue(preview.contains("\"include\":[\"reasoning.encrypted_content\"]"))
+        assertFalse(preview.contains("enc-9"))
+        assertFalse(preview.contains("\"type\":\"reasoning\""))
+
+        adapter.stream(next, "token".toCharArray()).toList()
+        assertEquals(2, bodies.size)
+        val roundTwo = bodies.last()
+        assertTrue(roundTwo.contains("\"type\":\"reasoning\""))
+        assertTrue(roundTwo.contains("\"encrypted_content\":\"enc-9\""))
+        assertTrue(roundTwo.contains("function_call_output"))
+        assertTrue(roundTwo.contains("\"call_id\":\"call-9\""))
+    }
+
+    @Test
+    fun nonStreamingRefusalAndReasoningItemsAreTyped() = runTest {
+        val engine = MockEngine {
+            respond(
+                "{\"status\":\"completed\",\"output\":[" +
+                    "{\"type\":\"reasoning\",\"id\":\"rs_3\",\"encrypted_content\":\"enc-3\"}," +
+                    "{\"type\":\"message\",\"content\":[{\"type\":\"refusal\",\"refusal\":\"I must refuse.\"}]}" +
+                    "]}",
+                HttpStatusCode.OK,
+                headersOf(HttpHeaders.ContentType, ContentType.Application.Json.toString()),
+            )
+        }
+        val events = OpenAiResponsesAdapter(HttpClient(engine), "https://example.invalid/v1").stream(
+            ModelRequest("gpt-responses", listOf(ChatMessage("user", "hi")), stream = false),
+            "token".toCharArray(),
+        ).toList()
+        val continuation = events.filterIsInstance<ModelEvent.ProviderContinuation>().single()
+        assertEquals("enc-3", continuation.item.encryptedContent)
+        assertTrue(events.any { it is ModelEvent.RefusalDelta && it.text == "I must refuse." })
+        assertTrue(events.none { it is ModelEvent.Failed })
+        assertEquals(ModelEvent.Completed, events.last())
+    }
+
+    @Test
+    fun testConnectionAcceptsCompletedRefusalAsProtocolSuccess() = runBlocking {
+        val engine = MockEngine {
+            respond(
+                "{\"status\":\"completed\",\"output\":[{\"type\":\"message\",\"content\":[{\"type\":\"refusal\",\"refusal\":\"no.\"}]}]}",
+                HttpStatusCode.OK,
+                headersOf(HttpHeaders.ContentType, ContentType.Application.Json.toString()),
+            )
+        }
+        val result = OpenAiResponsesAdapter(HttpClient(engine), "https://example.invalid/v1").testConnection(
+            profile(),
+            "token".toCharArray(),
+        )
+        assertTrue(result is runtime.mobileagent.provider.ProviderConnectionResult.Success)
+    }
+
+    @Test
+    fun probeOutputBudgetIsClampedFarBelowProfileLimit() = runBlocking {
+        val bodies = mutableListOf<String>()
+        val engine = MockEngine { request ->
+            bodies += (request.body as io.ktor.http.content.TextContent).text
+            val body = bodies.last()
+            if (body.contains("\"tool_choice\"")) {
+                respond(
+                    "{\"status\":\"completed\",\"output\":[{\"type\":\"function_call\",\"id\":\"fc_p\",\"call_id\":\"c_p\",\"name\":\"mar_probe_noop\",\"arguments\":\"{}\"}]}",
+                    HttpStatusCode.OK,
+                    headersOf(HttpHeaders.ContentType, ContentType.Application.Json.toString()),
+                )
+            } else if (body.contains("\"stream\":true")) {
+                respond(
+                    "data: {\"type\":\"response.output_text.delta\",\"delta\":\"ok\"}\n\n" +
+                        "data: {\"type\":\"response.completed\",\"response\":{}}\n\n",
+                    HttpStatusCode.OK,
+                    headersOf(HttpHeaders.ContentType, "text/event-stream"),
+                )
+            } else {
+                respond(
+                    "{\"status\":\"completed\",\"output_text\":\"ok\"}",
+                    HttpStatusCode.OK,
+                    headersOf(HttpHeaders.ContentType, ContentType.Application.Json.toString()),
+                )
+            }
+        }
+        val adapter = OpenAiResponsesAdapter(HttpClient(engine), "https://example.invalid/v1")
+        val big = profile().copy(outputLimit = 10_240)
+
+        adapter.testConnection(big, "token".toCharArray())
+        val connectionBody = bodies.single()
+        assertTrue(connectionBody.contains("\"max_output_tokens\":64"), connectionBody)
+        assertFalse(connectionBody.contains("10240"))
+        bodies.clear()
+
+        val report = adapter.probe(big, "token".toCharArray(), ProbeConsent.GRANTED)
+        assertTrue(report.status == runtime.mobileagent.provider.CapabilityProbeStatus.SUCCEEDED)
+        val toolBody = bodies.single { it.contains("\"tool_choice\"") }
+        assertTrue(toolBody.contains("\"max_output_tokens\":128"), toolBody)
+        bodies.filter { !it.contains("\"tool_choice\"") }.forEach {
+            assertTrue(it.contains("\"max_output_tokens\":64"), it)
+            assertFalse(it.contains("10240"))
+        }
+    }
+
+    @Test
+    fun probeDistinguishesRefusalFromMalformedResponse() = runBlocking {
+        val engine = MockEngine {
+            respond(
+                "{\"status\":\"completed\",\"output\":[{\"type\":\"message\",\"content\":[{\"type\":\"refusal\",\"refusal\":\"no.\"}]}]}",
+                HttpStatusCode.OK,
+                headersOf(HttpHeaders.ContentType, ContentType.Application.Json.toString()),
+            )
+        }
+        val report = OpenAiResponsesAdapter(HttpClient(engine), "https://example.invalid/v1")
+            .probe(profile(), "token".toCharArray(), ProbeConsent.GRANTED)
+        assertTrue(report.source.contains("metadata=refusal"), report.source)
+        assertFalse(report.source.contains("invalid-response"))
+    }
+
+    @Test
     fun nonStreamingTopLevelOutputTextAndHttpFailuresAreTyped() = runTest {
         val completeEngine = MockEngine {
             respond(

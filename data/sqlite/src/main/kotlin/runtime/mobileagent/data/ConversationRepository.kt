@@ -23,6 +23,7 @@ import runtime.mobileagent.domain.DiffPart
 import runtime.mobileagent.domain.ErrorPart
 import runtime.mobileagent.domain.MessagePartLimits
 import runtime.mobileagent.domain.ReasoningPart
+import runtime.mobileagent.domain.RefusalPart
 import runtime.mobileagent.domain.Utc
 
 /** Conversation and typed message persistence. Message content is append-only; status is mutable. */
@@ -245,6 +246,7 @@ class ConversationRepository(
             when (part) {
                 is TextPart -> if (part.value.length > MAX_TEXT) throw invalid("Text message part is too long")
                 is ReasoningPart -> Unit // Constructor enforces bounded, non-empty provider content.
+                is RefusalPart -> Unit // Constructor enforces bounded, non-empty provider content.
                 is ImagePart -> requireId(part.assetId, "image.assetId")
                 is ToolCallPart -> {
                     requireId(part.callId, "tool.callId")
@@ -272,6 +274,7 @@ class ConversationRepository(
     private fun partType(part: MessagePart): String = when (part) {
         is TextPart -> "text"
         is ReasoningPart -> "reasoning"
+        is RefusalPart -> "refusal"
         is ImagePart -> "image"
         is ToolCallPart -> "tool_call"
         is ToolResultPart -> "tool_result"

@@ -180,7 +180,7 @@ class ShizukuWorkspaceFileStoreTest {
     }
 
     @Test
-    fun directoryLimitIsAppliedAfterUnsafeEntriesAreFilteredAndReportsSkip() {
+    fun listingFiltersUnsafeEntriesBeforePagingAndReportsSkip() {
         repeat(ShizukuWorkspaceFileStore.MAX_ENTRIES) { index ->
             File(root, "Download/MobileAgentRuntime-Shizuku/entry-${index.toString().padStart(3, '0')}.txt")
                 .writeText("$index")
@@ -194,8 +194,8 @@ class ShizukuWorkspaceFileStoreTest {
         assumeTrue("The test filesystem does not support symlinks", created)
         try {
             // The store caps each page at MAX_DIRECTORY_ENTRIES so that the JSON envelope remains
-            // bounded.  A continuation proves that the raw 513 children (512 safe + 1 link) do
-            // not trip the MAX_ENTRIES check before unsafe filtering.
+            // bounded.  A continuation proves that the raw 513 children (512 safe + 1 link) page
+            // through after unsafe filtering instead of failing up front.
             val listing = JSONObject(store.list(null, maxEntries = ShizukuWorkspaceFileStore.MAX_DIRECTORY_ENTRIES))
             assertTrue(listing.getBoolean("ok"))
             assertEquals(ShizukuWorkspaceFileStore.MAX_DIRECTORY_ENTRIES, listing.getJSONArray("entries").length())
@@ -217,6 +217,122 @@ class ShizukuWorkspaceFileStoreTest {
             link.delete()
             outside.delete()
         }
+    }
+
+    @Test
+    fun listPagesThroughOneThousandImmediateEntries() {
+        repeat(1000) { index ->
+            File(root, "Download/MobileAgentRuntime-Shizuku/big-${index.toString().padStart(4, '0')}.txt")
+                .writeText("$index")
+        }
+        val paths = readAllPages(null, 256)
+        assertEquals(1000, paths.size)
+        assertEquals(paths.sorted(), paths)
+        assertEquals(paths.toSet().size, paths.size)
+    }
+
+    @Test
+    fun listPagesThroughFiveThousandImmediateEntries() {
+        repeat(5000) { index ->
+            File(root, "Download/MobileAgentRuntime-Shizuku/huge-${index.toString().padStart(4, '0')}.txt")
+                .writeText("$index")
+        }
+        val paths = readAllPages(null, 256)
+        assertEquals(5000, paths.size)
+        assertEquals(paths.sorted(), paths)
+        assertEquals(paths.toSet().size, paths.size)
+    }
+
+    @Test
+    fun parentListIgnoresHugeChildSubtree() {
+        val base = File(root, "Download/MobileAgentRuntime-Shizuku")
+        File(base, "keep-a.txt").writeText("a")
+        File(base, "keep-b.txt").writeText("b")
+        val child = File(base, "crowded").apply { check(mkdirs()) }
+        // Beyond the historical 512 total-entry ceiling: the parent listing
+        // must never descend into the child to discover this.
+        repeat(700) { index ->
+            File(child, "item-${index.toString().padStart(3, '0')}.txt").writeText("$index")
+        }
+        val parent = JSONObject(store.list(null))
+        assertTrue(parent.toString(), parent.getBoolean("ok"))
+        assertEquals(
+            listOf("crowded", "keep-a.txt", "keep-b.txt"),
+            (0 until parent.getJSONArray("entries").length()).map {
+                parent.getJSONArray("entries").getJSONObject(it).getString("path")
+            },
+        )
+        assertFalse(parent.getBoolean("truncated"))
+        val crowded = readAllPages("crowded", 256)
+        assertEquals(700, crowded.size)
+        assertEquals(crowded.toSet().size, crowded.size)
+    }
+
+    @Test
+    fun parentListIgnoresDeepChildBeyondMaxDepth() {
+        val base = File(root, "Download/MobileAgentRuntime-Shizuku")
+        File(base, "top.txt").writeText("top")
+        var current = File(base, "level-00").apply { check(mkdirs()) }
+        repeat(20) { depth ->
+            current = File(current, "level-${(depth + 1).toString().padStart(2, '0')}").apply { check(mkdirs()) }
+        }
+        File(current, "bottom.txt").writeText("bottom")
+        // The 21-deep chain exceeds MAX_PATH_DEPTH, but the parent listing is
+        // shallow and must not descend into it.
+        val parent = JSONObject(store.list(null))
+        assertTrue(parent.toString(), parent.getBoolean("ok"))
+        val paths = (0 until parent.getJSONArray("entries").length()).map {
+            parent.getJSONArray("entries").getJSONObject(it).getString("path")
+        }
+        assertTrue(paths.contains("top.txt"))
+        assertTrue(paths.contains("level-00"))
+    }
+
+    @Test
+    fun directChildMutationInvalidatesCursor() {
+        val base = File(root, "Download/MobileAgentRuntime-Shizuku")
+        repeat(5) { index -> File(base, "mutable-$index.txt").writeText("$index") }
+
+        var first = JSONObject(store.list(null, maxEntries = 2))
+        assertTrue(first.getBoolean("ok"))
+        File(base, "mutable-added.txt").writeText("added")
+        assertTrue(
+            store.list(null, maxEntries = 2, cursor = first.getString("nextCursor"))
+                .contains("\"code\":\"INVALID_CURSOR\""),
+        )
+
+        first = JSONObject(store.list(null, maxEntries = 2))
+        assertTrue(first.getBoolean("ok"))
+        assertTrue(File(base, "mutable-0.txt").delete())
+        assertTrue(
+            store.list(null, maxEntries = 2, cursor = first.getString("nextCursor"))
+                .contains("\"code\":\"INVALID_CURSOR\""),
+        )
+
+        first = JSONObject(store.list(null, maxEntries = 2))
+        assertTrue(first.getBoolean("ok"))
+        assertTrue(File(base, "mutable-1.txt").renameTo(File(base, "mutable-renamed.txt")))
+        assertTrue(
+            store.list(null, maxEntries = 2, cursor = first.getString("nextCursor"))
+                .contains("\"code\":\"INVALID_CURSOR\""),
+        )
+    }
+
+    @Test
+    fun longFileNameKeepsBoundedResponse() {
+        val name = "n".repeat(200) + ".txt"
+        File(root, "Download/MobileAgentRuntime-Shizuku/$name").writeText("long")
+        val raw = store.list(null)
+        val listing = JSONObject(raw)
+        assertTrue(raw, listing.getBoolean("ok"))
+        val paths = (0 until listing.getJSONArray("entries").length()).map {
+            listing.getJSONArray("entries").getJSONObject(it).getString("path")
+        }
+        assertTrue(paths.contains(name))
+        assertTrue(
+            "list response must stay within the Binder-safe envelope",
+            raw.toByteArray(StandardCharsets.UTF_8).size <= ShizukuWorkspaceFileStore.MAX_OUTPUT_BYTES,
+        )
     }
 
     @Test
@@ -329,5 +445,30 @@ class ShizukuWorkspaceFileStoreTest {
         assertEquals("after", JSONObject(store.read("patch.txt", 1024)).getString("text"))
         assertTrue(store.applyPatch("patch.txt", "stale", version, "REPLACE").contains("\"code\":\"CONFLICT\""))
         assertTrue(root.walkTopDown().none { it.name.startsWith(".mar-shizuku-") })
+    }
+
+    /** Pages through [relativePath] until `truncated` is false and returns every entry path. */
+    private fun readAllPages(relativePath: String?, maxEntries: Int): List<String> {
+        val paths = ArrayList<String>()
+        var cursor: String? = null
+        var pages = 0
+        while (true) {
+            val raw = store.list(relativePath, maxEntries = maxEntries, cursor = cursor)
+            val page = JSONObject(raw)
+            assertTrue(raw, page.getBoolean("ok"))
+            assertTrue(
+                "list page must stay within the Binder-safe envelope",
+                raw.toByteArray(StandardCharsets.UTF_8).size <= ShizukuWorkspaceFileStore.MAX_OUTPUT_BYTES,
+            )
+            (0 until page.getJSONArray("entries").length()).mapTo(paths) {
+                page.getJSONArray("entries").getJSONObject(it).getString("path")
+            }
+            pages++
+            assertTrue("pagination did not terminate", pages <= ShizukuWorkspaceFileStore.MAX_LISTED_ENTRIES)
+            if (!page.getBoolean("truncated")) break
+            cursor = page.getString("nextCursor")
+            assertTrue(cursor.length >= 40)
+        }
+        return paths
     }
 }

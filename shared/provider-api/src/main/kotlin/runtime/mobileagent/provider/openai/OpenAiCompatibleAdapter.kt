@@ -135,7 +135,8 @@ class OpenAiCompatibleAdapter(
                 stream = false,
                 parameters = runtime.mobileagent.provider.ParameterLayers(modelParameters = modelParameters),
                 operationId = operationId,
-                outputTokenLimit = configured.outputLimit.coerceAtLeast(1),
+                // Probes never spend the user's full output budget on a two-word answer.
+                outputTokenLimit = minOf(configured.outputLimit.coerceAtLeast(1), CONNECTION_PROBE_MAX_OUTPUT_TOKENS),
             )
             val payload = buildPayload(request, includeImageBytes = true)
             val resolved = resolveHeaders(token, emptyMap())
@@ -1243,6 +1244,12 @@ class OpenAiCompatibleAdapter(
 
     companion object {
         private const val PROBE_TOOL_NAME = "mar_probe_noop"
+        /**
+         * Probe output budget.  Feature probes already use `max_tokens: 1`;
+         * the connection probe is clamped to the same small bound so a
+         * 10k+ profile output limit never becomes a probe spend.
+         */
+        const val CONNECTION_PROBE_MAX_OUTPUT_TOKENS = 64
         private const val MAX_PROBE_RESPONSE_BYTES = 1_048_576L
         private const val CONNECTION_TIMEOUT_MS = 15_000L
         private const val MAX_EMBEDDING_MODEL_CHARS = 256

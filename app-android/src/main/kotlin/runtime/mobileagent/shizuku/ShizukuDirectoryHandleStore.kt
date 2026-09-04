@@ -31,23 +31,24 @@ internal class ShizukuDirectoryHandleStore {
     private val directoryHandles = LinkedHashMap<String, DirectoryHandle>()
     private val directoryTokensByPath = HashMap<Path, String>()
     private val workspaceHandles = LinkedHashMap<String, WorkspaceHandle>()
+    private val pageStore = PageStore()
 
-    fun openRoot(maxEntries: Int): String = synchronized(lock) {
+    fun openRoot(maxEntries: Int, continuation: String? = null): String = synchronized(lock) {
         runCatching {
             val root = deviceRoot
             validateDirectory(root)
             val token = directoryToken(root)
-            renderDirectory("open_directory_root", token, root, parentToken = null, maxEntries)
+            renderDirectory("open_directory_root", token, root, parentToken = null, maxEntries, continuation)
         }.getOrElse { failureForThrowable("open_directory_root", it) }
     }
 
-    fun browse(token: String?, maxEntries: Int): String = synchronized(lock) {
+    fun browse(token: String?, maxEntries: Int, continuation: String? = null): String = synchronized(lock) {
         runCatching {
             val handle = directoryHandles[token]
                 ?: return@synchronized failure("browse_directory", INVALID_HANDLE)
             validateDirectory(handle.path)
             val parentToken = handle.parentPath?.let { directoryToken(it) }
-            renderDirectory("browse_directory", token.orEmpty(), handle.path, parentToken, maxEntries)
+            renderDirectory("browse_directory", token.orEmpty(), handle.path, parentToken, maxEntries, continuation)
         }.getOrElse { failureForThrowable("browse_directory", it) }
     }
 
@@ -84,14 +85,25 @@ internal class ShizukuDirectoryHandleStore {
         handle
     }
 
+    /**
+     * Renders one bounded picker page.  Directories sort before files so a
+     * large file population can never crowd a directory out of reach, and
+     * every page carries an opaque continuation when entries remain.
+     *
+     * The continuation is a process-local random capability bound to this
+     * directory and its shallow fingerprint (immediate child names and
+     * types).  It encodes no path or offset; a direct-child change, an
+     * unknown token, or a service restart fails closed with
+     * [INVALID_HANDLE] instead of a shifted page.
+     */
     private fun renderDirectory(
         operation: String,
         token: String,
         directory: Path,
         parentToken: String?,
         maxEntries: Int,
+        continuation: String?,
     ): String {
-        val entries = JSONArray()
         val children = try {
             Files.newDirectoryStream(directory).use { stream -> stream.toList() }
         } catch (_: SecurityException) {
@@ -103,28 +115,37 @@ internal class ShizukuDirectoryHandleStore {
         } catch (_: Exception) {
             return failure(operation, DIRECTORY_UNAVAILABLE)
         }
-        val sorted = children.sortedBy { it.fileName.toString() }
-        var returned = 0
-        var skipped = false
-        for (child in sorted) {
+        val fingerprint = pickerFingerprint(children)
+        val start = continuation?.let {
+            if (!isContinuationToken(it)) return failure(operation, INVALID_HANDLE)
+            pageStore.resolve(token, fingerprint, it) ?: return failure(operation, INVALID_HANDLE)
+        } ?: 0
+        // Directories are the selectable picker subject; files never consume
+        // a directory's reachability budget.
+        val ordered = children.sortedWith(
+            compareByDescending<Path> { Files.isDirectory(it, LinkOption.NOFOLLOW_LINKS) }
+                .thenBy { it.fileName.toString() },
+        )
+        if (start > ordered.size) return failure(operation, INVALID_HANDLE)
+        val end = minOf(start + maxEntries, ordered.size)
+        val entries = JSONArray()
+        var unsafeSkipped = false
+        for (index in start until end) {
+            val child = ordered[index]
             // Symlinks are deliberately not offered as selectable entries. A
             // caller must choose the canonical directory reached without
             // crossing a symlink boundary.
             if (Files.isSymbolicLink(child)) {
-                skipped = true
+                unsafeSkipped = true
                 continue
             }
             val type = when {
                 Files.isDirectory(child, LinkOption.NOFOLLOW_LINKS) -> "directory"
                 Files.isRegularFile(child, LinkOption.NOFOLLOW_LINKS) -> "file"
                 else -> {
-                    skipped = true
+                    unsafeSkipped = true
                     continue
                 }
-            }
-            if (returned >= maxEntries) {
-                skipped = true
-                continue
             }
             val entry = JSONObject()
                 .put("name", child.fileName.toString())
@@ -140,8 +161,8 @@ internal class ShizukuDirectoryHandleStore {
                 entry.put("handle", directoryToken(child))
             }
             entries.put(entry)
-            returned++
         }
+        val next = if (end < ordered.size) pageStore.issue(token, fingerprint, end) else null
         return bounded(
             JSONObject()
                 .put("ok", true)
@@ -150,8 +171,54 @@ internal class ShizukuDirectoryHandleStore {
                 .put("parentHandle", parentToken ?: JSONObject.NULL)
                 .put("deviceRoot", directory == deviceRoot && deviceRoot == Paths.get("/"))
                 .put("entries", entries)
-                .put("truncated", skipped),
+                .put("truncated", next != null || unsafeSkipped)
+                .put("continuation", next ?: JSONObject.NULL),
         )
+    }
+
+    /**
+     * Shallow picker fingerprint: immediate child names and node kinds only.
+     * Subdirectories are never descended into, so a huge child subtree cannot
+     * poison the parent's pagination.
+     */
+    private fun pickerFingerprint(children: List<Path>): String {
+        val digest = java.security.MessageDigest.getInstance("SHA-256")
+        children.sortedBy { it.fileName.toString() }.forEach { child ->
+            val kind = when {
+                Files.isSymbolicLink(child) -> "symlink"
+                Files.isDirectory(child, LinkOption.NOFOLLOW_LINKS) -> "directory"
+                Files.isRegularFile(child, LinkOption.NOFOLLOW_LINKS) -> "file"
+                else -> "unsupported"
+            }
+            digest.update(child.fileName.toString().toByteArray(StandardCharsets.UTF_8))
+            digest.update(kind.toByteArray(StandardCharsets.UTF_8))
+        }
+        return Base64.getUrlEncoder().withoutPadding().encodeToString(digest.digest())
+    }
+
+    private fun isContinuationToken(value: String): Boolean =
+        value.length in 1..MAX_CONTINUATION_BYTES && value.all { it.isLetterOrDigit() || it == '-' || it == '_' }
+
+    private class PageStore {
+        private val random = SecureRandom()
+        private val entries = LinkedHashMap<String, PageState>()
+
+        fun issue(directoryToken: String, fingerprint: String, offset: Int): String {
+            val bytes = ByteArray(TOKEN_BYTES)
+            random.nextBytes(bytes)
+            val token = Base64.getUrlEncoder().withoutPadding().encodeToString(bytes)
+            entries[token] = PageState(directoryToken, fingerprint, offset)
+            while (entries.size > MAX_PAGE_CURSORS) entries.remove(entries.keys.first())
+            bytes.fill(0)
+            return token
+        }
+
+        fun resolve(directoryToken: String, fingerprint: String, token: String): Int? {
+            val state = entries[token] ?: return null
+            return state.takeIf { it.directoryToken == directoryToken && it.fingerprint == fingerprint }?.offset
+        }
+
+        private data class PageState(val directoryToken: String, val fingerprint: String, val offset: Int)
     }
 
     private fun directoryToken(path: Path): String {
@@ -169,8 +236,16 @@ internal class ShizukuDirectoryHandleStore {
     private fun validateDirectory(path: Path) {
         val normalized = path.toAbsolutePath().normalize()
         if (!isWithinDeviceRoot(normalized)) throw StoreFailure(OUTSIDE_ROOT)
-        var current = normalized.root ?: Paths.get("/")
-        normalized.iterator().forEach { segment ->
+        // Walk only the segments below the device root.  Platform ancestors
+        // above it (for example /data/user/0, which is a symlink on current
+        // Android releases) are outside this store's threat model; the
+        // per-segment symlink and existence checks below the root still
+        // prevent escape from the browsed tree.  A device-wide root keeps the
+        // previous from-filesystem-root walk unchanged.
+        var current = deviceRoot
+        val relative = runCatching { deviceRoot.relativize(normalized) }.getOrNull()
+            ?: throw StoreFailure(OUTSIDE_ROOT)
+        relative.iterator().forEach { segment ->
             current = current.resolve(segment.toString())
             if (Files.isSymbolicLink(current)) throw StoreFailure(SYMLINK_REJECTED)
             if (!Files.exists(current, LinkOption.NOFOLLOW_LINKS)) throw StoreFailure(WORKSPACE_NOT_FOUND)
@@ -270,5 +345,8 @@ internal class ShizukuDirectoryHandleStore {
         const val MAX_DIRECTORY_HANDLES = 4_096
         const val MAX_WORKSPACE_HANDLES = 512
         const val MAX_OUTPUT_BYTES = 32 * 1024
+        /** Opaque picker continuation tokens share the cursor size envelope. */
+        const val MAX_CONTINUATION_BYTES = 512
+        const val MAX_PAGE_CURSORS = 1_024
     }
 }

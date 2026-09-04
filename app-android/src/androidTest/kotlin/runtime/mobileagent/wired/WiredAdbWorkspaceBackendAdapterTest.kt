@@ -69,6 +69,37 @@ class WiredAdbWorkspaceBackendAdapterTest {
     }
 
     @Test
+    fun pickerContinuationThreadsCursorAndSurfacesNextPage() = runBlocking {
+        val root = Files.createTempDirectory("mar-wired-picker-pages-")
+        try {
+            repeat(5) { index -> Files.write(root.resolve("file-$index.txt"), "$index".toByteArray(StandardCharsets.UTF_8)) }
+            val authority = FakeAuthority(root)
+            val provider = WiredAdbDeviceWorkspaceProvider(authority, fullDeviceGrantStore = null)
+
+            val rootPage = (provider.directoryBrowser.root() as WorkspaceResult.Success).value
+            val storage = rootPage.entries.single().handle ?: error("storage handle missing")
+            val first = (provider.directoryBrowser.browse(
+                WorkspaceBrowseRequest(storage, 2),
+            ) as WorkspaceResult.Success).value
+            assertEquals(2, first.entries.size)
+            assertTrue(first.truncated)
+            val continuation = first.continuation ?: error("continuation missing")
+            assertTrue(continuation.isNotBlank())
+
+            val second = (provider.directoryBrowser.browse(
+                WorkspaceBrowseRequest(storage, 2, continuation),
+            ) as WorkspaceResult.Success).value
+            assertEquals(2, second.entries.size)
+            assertTrue((first.entries + second.entries).map { it.name }.toSet().size == 4)
+
+            val stale = provider.directoryBrowser.browse(WorkspaceBrowseRequest(storage, 2, "stale-cursor"))
+            assertEquals(ToolErrorCode.INVALID_CURSOR, (stale as WorkspaceResult.Failure).error.code)
+        } finally {
+            deleteTree(root)
+        }
+    }
+
+    @Test
     fun readChunkStopsBeforeUtf8TailAndNextOffsetConsumesNoBytesTwice() {
         val root = Files.createTempDirectory("mar-wired-utf8-")
         try {
@@ -401,12 +432,20 @@ class WiredAdbWorkspaceBackendAdapterTest {
                         }
                         .toList()
                 }
+                val start = when (cursor) {
+                    null -> 0
+                    "cursor-page-2" -> maxEntries
+                    else -> return WiredAdbResult.Failure(WiredAdbErrorCode.INVALID_CURSOR)
+                }
+                if (start > entries.size) return WiredAdbResult.Failure(WiredAdbErrorCode.INVALID_CURSOR)
+                val end = minOf(start + maxEntries, entries.size)
                 return WiredAdbResult.Success(
                     WiredAdbWorkspacePage(
                         handle = handle,
                         relativePath = path,
-                        entries = entries.take(maxEntries),
-                        truncated = entries.size > maxEntries,
+                        entries = entries.subList(start, end),
+                        truncated = end < entries.size,
+                        nextCursor = if (end < entries.size) "cursor-page-2" else null,
                     ),
                 )
             }

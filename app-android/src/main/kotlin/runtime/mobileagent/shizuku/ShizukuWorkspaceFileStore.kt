@@ -73,7 +73,14 @@ internal class ShizukuWorkspaceFileStore(
     /**
      * Lists at most one bounded page.  The cursor is a process-local random
      * capability: it contains neither the directory path nor an offset and it
-     * is invalidated by a directory change or UserService restart.
+     * is invalidated by a direct-child change or UserService restart.
+     *
+     * Pagination has no total-entry ceiling other than [MAX_LISTED_ENTRIES],
+     * which is a resource-protection bound (not a pagination capability) and
+     * is deliberately separated from the per-page [MAX_DIRECTORY_ENTRIES]
+     * budget.  The listing fingerprint is shallow: only the directory's own
+     * metadata and its immediate visible children feed it, so a huge or deep
+     * child subtree can never poison the parent listing.
      */
     fun list(
         relativePath: String?,
@@ -90,11 +97,11 @@ internal class ShizukuWorkspaceFileStore(
             requireDirectory(directory)
             val warnings = ListingWarnings()
             val children = listableChildren(directory, warnings)
-            if (children.size > MAX_ENTRIES) throw WorkspaceFailure(LIMIT)
+            if (children.size > MAX_LISTED_ENTRIES) throw WorkspaceFailure(LIMIT)
             val path = relativePath(segments)
             // Directory fingerprints use the same safe, non-following view as list output so a
             // symlink or unsupported node cannot poison pagination for normal entries.
-            val fingerprint = directoryVersion(directory, skipUnsafeChildren = true)
+            val fingerprint = shallowDirectoryFingerprint(directory)
             val start = cursor?.let {
                 cursorStore.resolve(it, path, fingerprint) ?: throw WorkspaceFailure(INVALID_CURSOR)
             } ?: 0
@@ -125,9 +132,9 @@ internal class ShizukuWorkspaceFileStore(
                             continue
                         }
                     }
-                    if (entry.optString("type") == "directory") {
-                        entry.put("version", directoryVersion(child, skipUnsafeChildren = true))
-                    }
+                if (entry.optString("type") == "directory") {
+                    entry.put("version", shallowDirectoryFingerprint(child))
+                }
                     entries.put(entry)
                     // Long but valid names must still make progress without
                     // exceeding the Binder-safe JSON envelope.  Reserve room
@@ -186,7 +193,7 @@ internal class ShizukuWorkspaceFileStore(
             success("stat", segments)
                 .put("type", type)
                 .put("bytes", bytes)
-                .put("version", if (type == "file") fileVersion(target) else directoryVersion(target))
+                .put("version", if (type == "file") fileVersion(target) else shallowDirectoryFingerprint(target))
         }
     }
 
@@ -726,50 +733,52 @@ internal class ShizukuWorkspaceFileStore(
         )
     }
 
-    /** A metadata-only, opaque directory version suitable for CAS checks. */
-    private fun directoryVersion(
+    /**
+     * Shallow directory fingerprint for list pagination and directory entry
+     * versions.  Only the directory's own metadata and its immediate visible
+     * children (name, type, file size, stable file metadata) feed the digest;
+     * child subtrees are never descended into, so a huge or overly deep child
+     * cannot poison the parent listing or its cursors.  File versions keep
+     * their content-backed CAS semantics in [fileVersion].
+     */
+    private fun shallowDirectoryFingerprint(
         directory: Path,
-        skipUnsafeChildren: Boolean = false,
         warnings: ListingWarnings? = null,
     ): String {
         val digest = MessageDigest.getInstance("SHA-256")
-        // Filter first, then enforce the entry ceiling.  The raw directory may contain many
-        // symlinks or special nodes that are intentionally omitted from the model view; those
-        // nodes must not consume the safe-entry budget or make a normal page fail.
-        val children = if (skipUnsafeChildren) {
-            listableChildren(directory, warnings)
-        } else {
-            directoryEntries(directory).sortedBy { it.fileName.toString() }
+        fun feed(text: String) = digest.update(text.toByteArray(StandardCharsets.UTF_8))
+        try {
+            val self = Files.readAttributes(
+                directory,
+                BasicFileAttributes::class.java,
+                LinkOption.NOFOLLOW_LINKS,
+            )
+            feed("dir\u0000${self.lastModifiedTime().toMillis()}\u0000${self.creationTime().toMillis()}\u0000${self.fileKey()}\u0000")
+        } catch (_: SecurityException) {
+            throw WorkspaceFailure(PERMISSION_DENIED)
+        } catch (_: IOException) {
+            throw WorkspaceFailure(OPERATION_UNAVAILABLE)
+        } catch (_: RuntimeException) {
+            throw WorkspaceFailure(OPERATION_UNAVAILABLE)
         }
-        if (children.size > MAX_ENTRIES) throw WorkspaceFailure(LIMIT)
-        children.forEach { child ->
+        listableChildren(directory, warnings).forEach { child ->
             try {
-                val kind = classifyChild(child)
-                if (kind == ChildKind.SYMLINK) {
-                    if (skipUnsafeChildren) warnings?.add(child, WARNING_SYMLINK_SKIPPED)
-                    else throw WorkspaceFailure(SYMLINK_REJECTED)
-                } else if (kind == ChildKind.UNSUPPORTED) {
-                    if (skipUnsafeChildren) warnings?.add(child, WARNING_UNSUPPORTED_ENTRY_SKIPPED)
-                    else throw WorkspaceFailure(UNSUPPORTED_ENTRY)
+                val attributes = Files.readAttributes(
+                    child,
+                    BasicFileAttributes::class.java,
+                    LinkOption.NOFOLLOW_LINKS,
+                )
+                val name = child.fileName.toString()
+                if (attributes.isDirectory) {
+                    feed("$name\u0000directory\u0000${attributes.lastModifiedTime().toMillis()}\u0000${attributes.fileKey()}\u0000")
                 } else {
-                    val name = child.fileName.toString()
-                    val type = if (kind == ChildKind.DIRECTORY) "directory" else "file"
-                    val size = if (kind == ChildKind.FILE) Files.size(child) else -1L
-                    val childVersion = if (kind == ChildKind.FILE) {
-                        fileVersion(child)
-                    } else {
-                        directoryVersion(child, skipUnsafeChildren, warnings)
-                    }
-                    digest.update("$name\u0000$type\u0000$size\u0000$childVersion\u0000".toByteArray(StandardCharsets.UTF_8))
+                    feed("$name\u0000file\u0000${attributes.size()}\u0000${attributes.lastModifiedTime().toMillis()}\u0000${attributes.fileKey()}\u0000")
                 }
             } catch (_: SecurityException) {
-                if (!skipUnsafeChildren) throw WorkspaceFailure(PERMISSION_DENIED)
                 warnings?.add(child, WARNING_UNREADABLE_ENTRY_SKIPPED)
             } catch (_: IOException) {
-                if (!skipUnsafeChildren) throw WorkspaceFailure(OPERATION_UNAVAILABLE)
                 warnings?.add(child, WARNING_TRANSIENT_ENTRY_SKIPPED)
             } catch (_: RuntimeException) {
-                if (!skipUnsafeChildren) throw WorkspaceFailure(OPERATION_UNAVAILABLE)
                 warnings?.add(child, WARNING_TRANSIENT_ENTRY_SKIPPED)
             }
         }
@@ -971,11 +980,17 @@ internal class ShizukuWorkspaceFileStore(
             return token
         }
 
+        /**
+         * Tokens are reusable for retries: a token stays valid until the
+         * directory fingerprint changes, the entry is evicted by the bounded
+         * cache, or the UserService restarts.  All three cases surface as
+         * [INVALID_CURSOR] to the caller.
+         */
         fun resolve(token: String, path: String, version: String): Int? {
             if (token.length !in 1..MAX_CURSOR_BYTES || !token.all { it.isLetterOrDigit() || it == '-' || it == '_' }) {
                 return null
             }
-            val state = entries.remove(token) ?: return null
+            val state = entries[token] ?: return null
             return state.takeIf { it.path == path && it.version == version }?.offset
         }
 
@@ -1059,6 +1074,14 @@ internal class ShizukuWorkspaceFileStore(
         internal const val MAX_FILES = 128
         internal const val MAX_ENTRIES = 512
         internal const val MAX_DIRECTORY_ENTRIES = 256
+        /**
+         * Resource-protection ceiling on the immediate listable children of one
+         * directory.  This is deliberately separated from the per-page
+         * [MAX_DIRECTORY_ENTRIES] budget: pagination must page through every
+         * entry below this ceiling instead of failing up front.  Directories
+         * beyond the ceiling fail with typed `LIMIT`.
+         */
+        internal const val MAX_LISTED_ENTRIES = 8192
         internal const val MAX_OUTPUT_BYTES = 32 * 1024
         private const val MAX_REPORTED_SKIPPED_ENTRIES = 100_000
 

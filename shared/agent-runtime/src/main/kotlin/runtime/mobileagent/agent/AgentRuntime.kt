@@ -26,6 +26,7 @@ import runtime.mobileagent.provider.ChatMessage
 import runtime.mobileagent.provider.ModelAdapter
 import runtime.mobileagent.provider.ModelEvent
 import runtime.mobileagent.provider.ModelRequest
+import runtime.mobileagent.provider.ProviderContinuationItem
 import runtime.mobileagent.provider.SecretRedactor
 import runtime.mobileagent.skills.ToolBroker
 import runtime.mobileagent.skills.ToolCall
@@ -253,6 +254,7 @@ class AgentRuntime(
 
                 val pendingTools = linkedMapOf<String, ToolCall>()
                 val assistantText = StringBuilder()
+                val pendingContinuation = mutableListOf<ProviderContinuationItem>()
                 var terminal: ModelEvent? = null
                 val modelStreamCompleted = try {
                     withTimeoutOrNull(remainingMs(run)) {
@@ -298,6 +300,19 @@ class AgentRuntime(
                                 is ModelEvent.TextDelta -> {
                                     assistantText.append(outgoing.text)
                                     emitModel(outgoing)
+                                }
+                                // A refusal is assistant output: it stays readable and
+                                // persistable like answer text, never reasoning.
+                                is ModelEvent.RefusalDelta -> {
+                                    assistantText.append(outgoing.text)
+                                    emitModel(outgoing)
+                                }
+                                // Provider-private continuation is captured for the next
+                                // request of this run only.  It is never emitted to
+                                // the UI, diagnostics, or persisted history.
+                                is ModelEvent.ProviderContinuation -> {
+                                    pendingContinuation += outgoing.item
+                                    Unit
                                 }
                                 // Reasoning is an independent provider-owned channel.  Forward
                                 // only the explicit event; it never enters assistantText or the
@@ -394,7 +409,12 @@ class AgentRuntime(
                     toolCalls = pendingTools.values.map { call ->
                         AssistantToolCall(call.callId, call.name, call.argumentsJson)
                     },
+                    // Replay captured provider-private items verbatim on the
+                    // next request of this run; the owning adapter encodes
+                    // them, previews and history never see them.
+                    providerContinuationItems = pendingContinuation.toList(),
                 )
+                pendingContinuation.clear()
                 for (call in pendingTools.values) {
                     if (budgetExhausted(run)) {
                         emitBudget()

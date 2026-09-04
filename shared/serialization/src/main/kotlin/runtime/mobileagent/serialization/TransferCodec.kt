@@ -36,6 +36,7 @@ import runtime.mobileagent.domain.RunRecord
 import runtime.mobileagent.domain.ToolInvocation
 import runtime.mobileagent.domain.MessagePartLimits
 import runtime.mobileagent.domain.ReasoningPart
+import runtime.mobileagent.domain.RefusalPart
 import runtime.mobileagent.domain.AppError
 import runtime.mobileagent.domain.ErrorCode
 import runtime.mobileagent.domain.RetryClass
@@ -503,6 +504,7 @@ object TransferCodec {
             when (part) {
                 is TextPart -> if (part.value.length > MAX_TEXT) invalid(operationId, "Message text part is too long")
                 is ReasoningPart -> Unit // The domain constructor enforces real, bounded content.
+                is RefusalPart -> Unit // The domain constructor enforces real, bounded content.
                 is ImagePart -> {
                     requireId(part.assetId, operationId, "image.assetId")
                     requireText(part.mediaType, operationId, "image.mediaType")

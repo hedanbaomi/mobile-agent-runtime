@@ -1095,6 +1095,7 @@ class TransferRepository(
         is runtime.mobileagent.domain.ToolResultPart -> "tool_result"
         is runtime.mobileagent.domain.CitationPart -> "citation"
         is runtime.mobileagent.domain.ReasoningPart -> "reasoning"
+        is runtime.mobileagent.domain.RefusalPart -> "refusal"
         is runtime.mobileagent.domain.DiffPart -> "diff"
         is runtime.mobileagent.domain.ErrorPart -> "error"
     }

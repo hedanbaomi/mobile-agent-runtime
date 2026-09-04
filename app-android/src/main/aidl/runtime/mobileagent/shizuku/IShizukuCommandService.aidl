@@ -139,4 +139,13 @@ interface IShizukuCommandService {
         String expectedVersion,
         String format
     ) = 34;
+
+    /**
+     * Paged variants of the device-root browser (transactions 18/19 stay for
+     * protocol compatibility and return the first page).  The continuation is
+     * a session-bound opaque token; unknown, stale, or restarted tokens fail
+     * closed with DIRECTORY_HANDLE_INVALID instead of a shifted page.
+     */
+    String openDirectoryRootPagedSession(String sessionId, int maxEntries, String continuation) = 35;
+    String browseDirectoryPagedSession(String sessionId, String directoryHandle, int maxEntries, String continuation) = 36;
 }

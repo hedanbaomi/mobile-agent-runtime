@@ -388,32 +388,83 @@ class DesktopBridgeTest {
 
     @Test
     fun cliRequiresExplicitAdbAndSerialForTargetedCommands() {
+        val adbPath = absoluteFixturePath("adb")
+        val trustDir = absoluteFixturePath("trust")
         val parsed = BridgeCliParser.parse(
             arrayOf(
-                "run", "--adb", "C:\\adb.exe", "--serial", "device-1",
+                "run", "--adb", adbPath, "--serial", "device-1",
                 "--desktop-id", "desktop", "--app-instance-id", "app",
-                "--trust-dir", "C:\\trust",
+                "--trust-dir", trustDir,
             ),
         )
         assertTrue(parsed is BridgeCliCommand.Run)
         assertThrows<IllegalArgumentException> {
-            BridgeCliParser.parse(arrayOf("run", "--adb", "C:\\adb.exe"))
+            BridgeCliParser.parse(arrayOf("run", "--adb", adbPath))
         }
         assertThrows<IllegalArgumentException> {
-            BridgeCliParser.parse(arrayOf("connect", "--adb", "C:\\adb.exe", "--serial", "x"))
+            BridgeCliParser.parse(arrayOf("connect", "--adb", adbPath, "--serial", "x"))
+        }
+        assertThrows<IllegalArgumentException> {
+            BridgeCliParser.parse(
+                arrayOf(
+                    "run", "--adb", "relative/adb.exe", "--serial", "device-1",
+                    "--app-instance-id", "app", "--trust-dir", trustDir,
+                ),
+            )
+        }
+        assertThrows<IllegalArgumentException> {
+            BridgeCliParser.parse(
+                arrayOf(
+                    "run", "--adb", adbPath, "--serial", "device-1",
+                    "--app-instance-id", "app", "--trust-dir", trustDir,
+                    "--trust-dir", trustDir,
+                ),
+            )
+        }
+        assertThrows<IllegalArgumentException> {
+            BridgeCliParser.parse(
+                arrayOf(
+                    "run", "--adb", adbPath, "--serial", "device-1",
+                    "--app-instance-id", "app", "--trust-dir", trustDir,
+                    "--unknown-flag", "x",
+                ),
+            )
+        }
+        assertThrows<IllegalArgumentException> {
+            BridgeCliParser.parse(
+                arrayOf(
+                    "status", "--adb", adbPath, "--serial", "device-1",
+                    "--trust-dir", trustDir,
+                ),
+            )
         }
     }
 
     @Test
     fun pairCliRequiresSerialButLearnsAppIdentityFromAndroid() {
+        val adbPath = absoluteFixturePath("adb")
+        val trustDir = absoluteFixturePath("trust")
         val parsed = BridgeCliParser.parse(
-            arrayOf("pair", "--adb", "C:\\adb.exe", "--serial", "device-1", "--trust-dir", "C:\\trust"),
+            arrayOf("pair", "--adb", adbPath, "--serial", "device-1", "--trust-dir", trustDir),
         )
         assertTrue(parsed is BridgeCliCommand.Pair)
         assertTrue((parsed as BridgeCliCommand.Pair).desktopId == null)
         assertThrows<IllegalArgumentException> {
-            BridgeCliParser.parse(arrayOf("pair", "--adb", "C:\\adb.exe"))
+            BridgeCliParser.parse(arrayOf("pair", "--adb", adbPath))
         }
+        assertThrows<IllegalArgumentException> {
+            BridgeCliParser.parse(
+                arrayOf("pair", "--adb", adbPath, "--serial", "device-1", "--serial", "device-2"),
+            )
+        }
+    }
+
+    @Test
+    fun windowsDrivePathIsAbsoluteOnlyOnWindows() {
+        // Documents host Path semantics without asserting cross-platform behavior:
+        // a Windows drive string is absolute only when the host JVM is Windows.
+        val windowsStyle = Path.of("C:\\adb.exe")
+        assertEquals(Platform.isWindows(), windowsStyle.isAbsolute)
     }
 
     @Test
@@ -813,6 +864,19 @@ class DesktopBridgeTest {
         operation = operation.wireName,
         payload = payload,
     )
+
+    /**
+     * Host-platform absolute fixture path. Cross-platform unit tests must not
+     * hard-code `C:\...` as an "absolute path" because the production parser
+     * uses host `Path.of(...).isAbsolute`, which rejects Windows strings on a
+     * Linux JVM. Windows-path string behavior stays covered by the
+     * Windows-only [windowsDrivePathIsAbsoluteOnlyOnWindows] test.
+     */
+    private fun absoluteFixturePath(name: String): String {
+        val directory = Files.createTempDirectory("mar-bridge-cli")
+        directory.toFile().deleteOnExit()
+        return directory.resolve(name).toAbsolutePath().toString()
+    }
 
     private fun testConfiguration(serial: String, hostPort: Int): Pair<AdbConfiguration, AdbDoctorReport> {
         val directory = Files.createTempDirectory("mar-bridge-adb")

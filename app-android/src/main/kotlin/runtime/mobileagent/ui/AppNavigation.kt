@@ -10,7 +10,6 @@ import androidx.compose.material.icons.outlined.Extension
 import androidx.compose.material.icons.outlined.MenuBook
 import androidx.compose.material.icons.outlined.Settings
 import androidx.compose.material.icons.outlined.SmartToy
-import androidx.compose.material.icons.outlined.MoreHoriz
 import androidx.compose.material.icons.outlined.Info
 import androidx.compose.material.icons.outlined.BugReport
 import androidx.compose.material.icons.outlined.Cloud
@@ -24,6 +23,13 @@ object AppRoutes {
     const val SKILLS = "skills"
     const val NEWS = "news"
     const val SETTINGS = "settings"
+    /**
+     * Retained for persisted-route compatibility only. The More hub is no
+     * longer part of the information architecture: it is not shown in the
+     * drawer, no user path leads through it, and unknown/stored "more"
+     * routes fall back to Chat.
+     */
+    @Deprecated("More hub removed from the IA; kept for stored-route compatibility.")
     const val MORE = "more"
     const val ABOUT = "about"
     const val INSPECTOR = "inspector"
@@ -33,6 +39,12 @@ object AppRoutes {
 /** Single shell-owned source of truth for the compact leading navigation affordance. */
 enum class ShellNavigationAffordance { MENU, BACK, NONE }
 
+/**
+ * Every top-level drawer destination shows MENU. Feature-internal detail and
+ * overlays (agent/provider editors, workspace picker, reasoning expansion)
+ * promote the bar to BACK via [childDetailOpen]. Menu and Back are mutually
+ * exclusive by construction.
+ */
 private val topLevelMenuRoutes = setOf(
     AppRoutes.CHAT,
     AppRoutes.AGENTS,
@@ -41,10 +53,10 @@ private val topLevelMenuRoutes = setOf(
     AppRoutes.SKILLS,
     AppRoutes.NEWS,
     AppRoutes.SETTINGS,
-    AppRoutes.MORE,
+    AppRoutes.MCP,
+    AppRoutes.ABOUT,
+    AppRoutes.INSPECTOR,
 )
-
-private val childBackRoutes = setOf(AppRoutes.ABOUT, AppRoutes.INSPECTOR, AppRoutes.MCP)
 
 /**
  * Pages never independently opt into both Menu and Back. A dialog/detail state can promote an
@@ -54,7 +66,7 @@ fun shellNavigationAffordance(
     route: String,
     childDetailOpen: Boolean = false,
 ): ShellNavigationAffordance = when {
-    childDetailOpen || route in childBackRoutes -> ShellNavigationAffordance.BACK
+    childDetailOpen -> ShellNavigationAffordance.BACK
     route in topLevelMenuRoutes -> ShellNavigationAffordance.MENU
     else -> ShellNavigationAffordance.NONE
 }
@@ -87,7 +99,7 @@ fun appShellTitle(
     }
 }
 
-/** The seven product destinations in design order. Labels are localized at the shell boundary. */
+/** The ten top-level product destinations in design order. Labels are localized at the shell boundary. */
 fun defaultAppDestinations(chinese: Boolean = true): List<AppNavigationDestination> = listOf(
     AppNavigationDestination(AppRoutes.CHAT, if (chinese) "对话" else "Chat", Icons.Outlined.Chat),
     AppNavigationDestination(AppRoutes.AGENTS, if (chinese) "智能体" else "Agents", Icons.Outlined.SmartToy),
@@ -96,51 +108,45 @@ fun defaultAppDestinations(chinese: Boolean = true): List<AppNavigationDestinati
     AppNavigationDestination(AppRoutes.SKILLS, if (chinese) "技能" else "Skills", Icons.Outlined.Extension),
     AppNavigationDestination(AppRoutes.NEWS, if (chinese) "公告" else "News", Icons.Outlined.Campaign),
     AppNavigationDestination(AppRoutes.SETTINGS, if (chinese) "设置" else "Settings", Icons.Outlined.Settings),
-)
-
-/**
- * Destinations available from the application-wide drawer.  Compact layouts
- * no longer hide product areas behind a bottom navigation bar; the drawer is
- * the single navigation surface for both compact and wide windows.
- */
-fun globalDrawerDestinations(chinese: Boolean = true): List<AppNavigationDestination> =
-    defaultAppDestinations(chinese) + listOf(
-        AppNavigationDestination(AppRoutes.MORE, if (chinese) "更多" else "More", Icons.Outlined.MoreHoriz),
-    )
-
-fun phonePrimaryDestinations(chinese: Boolean = true): List<AppNavigationDestination> = listOf(
-    AppNavigationDestination(AppRoutes.CHAT, if (chinese) "对话" else "Chat", Icons.Outlined.Chat),
-    AppNavigationDestination(AppRoutes.AGENTS, if (chinese) "智能体" else "Agents", Icons.Outlined.SmartToy),
-    AppNavigationDestination(AppRoutes.KNOWLEDGE, if (chinese) "知识" else "Knowledge", Icons.Outlined.MenuBook),
-    AppNavigationDestination(AppRoutes.SKILLS, if (chinese) "技能" else "Skills", Icons.Outlined.Extension),
-    AppNavigationDestination(AppRoutes.MORE, if (chinese) "更多" else "More", Icons.Outlined.MoreHoriz),
-)
-
-fun moreHubItems(chinese: Boolean = true): List<AppNavigationDestination> = listOf(
-    AppNavigationDestination(AppRoutes.PROVIDERS, if (chinese) "服务商" else "Providers", Icons.Outlined.Tune),
-    AppNavigationDestination(AppRoutes.NEWS, if (chinese) "公告" else "News", Icons.Outlined.Campaign),
-    AppNavigationDestination(AppRoutes.MCP, if (chinese) "MCP" else "MCP", Icons.Outlined.Cloud),
-    AppNavigationDestination(AppRoutes.SETTINGS, if (chinese) "设置" else "Settings", Icons.Outlined.Settings),
+    AppNavigationDestination(AppRoutes.MCP, "MCP", Icons.Outlined.Cloud),
     AppNavigationDestination(AppRoutes.ABOUT, if (chinese) "关于" else "About", Icons.Outlined.Info),
     AppNavigationDestination(AppRoutes.INSPECTOR, if (chinese) "请求检查器" else "Request inspector", Icons.Outlined.BugReport),
 )
 
-/** Returns whether [route] is one of the phone-only destinations opened from More. */
-fun isMoreChildRoute(route: String): Boolean = moreHubItems(false).any { it.route == route }
+/**
+ * Destinations available from the application-wide drawer. The drawer is the
+ * single top-level navigation surface for both compact and wide windows; the
+ * legacy More hub is intentionally not listed here.
+ */
+fun globalDrawerDestinations(chinese: Boolean = true): List<AppNavigationDestination> =
+    defaultAppDestinations(chinese)
+
+@Deprecated("More hub removed from the IA; the drawer lists every destination directly.")
+fun phonePrimaryDestinations(chinese: Boolean = true): List<AppNavigationDestination> =
+    defaultAppDestinations(chinese)
+
+@Deprecated("More hub removed from the IA; kept for source compatibility.")
+fun moreHubItems(chinese: Boolean = true): List<AppNavigationDestination> = emptyList()
+
+/** Returns whether [route] was one of the legacy phone-only destinations opened from More. */
+@Deprecated("More hub removed from the IA; always returns false.")
+fun isMoreChildRoute(route: String): Boolean = false
 
 /**
- * Pure back policy for the shell. Navigation history owns ordinary More-child returns;
- * this avoids redirecting a first-level destination opened directly from the drawer.
+ * Pure back policy for the shell. Every top-level drawer destination is a
+ * peer: with no navigation history the shell returns to Chat, and only the
+ * app root may exit. Overlays and feature details are closed by their own
+ * BackHandler before this policy runs, so this function never swallows them.
  * Inspector keeps the explicit source selected by the caller.
  */
 fun appBackTarget(
     compact: Boolean,
     currentRoute: String,
-    inspectorReturnRoute: String = AppRoutes.MORE,
+    inspectorReturnRoute: String = AppRoutes.CHAT,
     hasPreviousEntry: Boolean,
 ): String? {
     if (compact && currentRoute == AppRoutes.INSPECTOR) {
-        return inspectorReturnRoute.takeUnless { it == AppRoutes.INSPECTOR } ?: AppRoutes.MORE
+        return inspectorReturnRoute.takeUnless { it == AppRoutes.INSPECTOR } ?: AppRoutes.CHAT
     }
     if (!hasPreviousEntry && currentRoute != AppRoutes.CHAT) return AppRoutes.CHAT
     return null

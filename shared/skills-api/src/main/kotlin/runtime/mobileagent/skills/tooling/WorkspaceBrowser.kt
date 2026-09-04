@@ -37,18 +37,35 @@ data class WorkspaceDirectoryPage(
     val parent: WorkspaceDirectoryHandle?,
     val entries: List<WorkspaceDirectoryEntry>,
     val truncated: Boolean = false,
+    /**
+     * Opaque provider-owned continuation for the next page, or null when the
+     * listing is complete.  The token carries no path, offset, or secret and
+     * is fail-closed: a stale, tampered, or restarted token must surface a
+     * typed error instead of a shifted page.
+     */
+    val continuation: String? = null,
 ) {
     init {
         require(entries.size <= 100_000)
+        require(continuation == null || isOpaqueContinuation(continuation))
     }
 }
 
 data class WorkspaceBrowseRequest(
     val handle: WorkspaceDirectoryHandle,
     val maxEntries: Int = 256,
+    /** Opaque continuation from the previous page, or null for the first page. */
+    val continuation: String? = null,
 ) {
-    init { require(maxEntries in 1..100_000) }
+    init {
+        require(maxEntries in 1..100_000)
+        require(continuation == null || isOpaqueContinuation(continuation))
+    }
 }
+
+/** Shared opaque-continuation shape: short visible-ASCII, never a path. */
+fun isOpaqueContinuation(value: String): Boolean =
+    value.length in 1..512 && value.all { it.code in 0x21..0x7E && it != '/' && it != '\\' }
 
 data class WorkspaceAttachRequest(
     val workspaceId: String,
@@ -261,6 +278,7 @@ class TypedAuthorityWorkspaceProvider(
                     workspaceId = rootBackend.descriptor.id,
                     relativePath = handle.relativePath.takeIf { it.isNotEmpty() },
                     maxEntries = request.maxEntries,
+                    cursor = request.continuation,
                 ),
             )
         } catch (_: RuntimeException) {
@@ -361,7 +379,8 @@ class TypedAuthorityWorkspaceProvider(
                 current = handle,
                 parent = handle.parent,
                 entries = output.take(maxEntries),
-                truncated = listing.truncated || output.size > maxEntries,
+                truncated = listing.truncated || listing.nextCursor != null || output.size > maxEntries,
+                continuation = listing.nextCursor?.takeIf(::isOpaqueContinuation),
             ),
         )
     }

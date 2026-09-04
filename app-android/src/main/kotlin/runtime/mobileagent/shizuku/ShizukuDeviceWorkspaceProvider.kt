@@ -203,7 +203,7 @@ internal class ShizukuDeviceWorkspaceProvider(
                 ?: return failure(ToolErrorCode.INVALID_REQUEST)
             if (handle.owner !== owner) return failure(ToolErrorCode.INVALID_REQUEST)
             val dispatch = safeDispatch {
-                bridge.dispatchDirectoryBrowse(handle.token, request.maxEntries)
+                bridge.dispatchDirectoryBrowse(handle.token, request.maxEntries, request.continuation)
             }
             return parseDirectoryPage(dispatch, "browse_directory", request.maxEntries)
         }
@@ -214,7 +214,7 @@ internal class ShizukuDeviceWorkspaceProvider(
         operation: String,
         maxEntries: Int,
     ): WorkspaceResult<WorkspaceDirectoryPage> {
-        val payload = payload(dispatch, operation) ?: return dispatchFailure(dispatch)
+        val payload = payload(dispatch, operation) ?: return typedBrowseFailure(dispatch)
         val token = payload.optString("handle", "")
         if (!isOpaqueToken(token)) return failure(ToolErrorCode.BRIDGE_PROTOCOL_MISMATCH)
         val parent = payload.opt("parentHandle")
@@ -258,12 +258,20 @@ internal class ShizukuDeviceWorkspaceProvider(
                 handle = child,
             )
         }
+        val continuation = payload.opt("continuation")
+            ?.takeUnless { it == JSONObject.NULL }
+            ?.let { it as? String }
+            ?.takeIf(::isOpaqueToken)
+        if (payload.has("continuation") && payload.opt("continuation") != JSONObject.NULL && continuation == null) {
+            return failure(ToolErrorCode.BRIDGE_PROTOCOL_MISMATCH)
+        }
         return WorkspaceResult.Success(
             WorkspaceDirectoryPage(
                 current = RemoteDirectoryHandle(owner, token, payload.optBoolean("deviceRoot", false)),
                 parent = parent?.let { RemoteDirectoryHandle(owner, it, deviceRoot = false) },
                 entries = entries,
                 truncated = payload.optBoolean("truncated", false) || entriesJson.length() > entries.size,
+                continuation = continuation,
             ),
         )
     }
@@ -297,6 +305,27 @@ internal class ShizukuDeviceWorkspaceProvider(
     )
 
     private fun attachFailure(dispatch: ShizukuDispatchResult): WorkspaceResult.Failure = dispatchFailure(dispatch)
+
+    /**
+     * Typed picker-browse failures stay typed: a stale or unknown page
+     * continuation is an invalid cursor (fail-closed, refresh to recover),
+     * never a protocol mismatch.  Unknown shapes keep the previous mismatch
+     * behavior.
+     */
+    private fun typedBrowseFailure(dispatch: ShizukuDispatchResult): WorkspaceResult.Failure {
+        if (dispatch is ShizukuDispatchResult.Success) {
+            val code = runCatching { JSONObject(dispatch.payload).optString("code", "") }.getOrDefault("")
+            val typed = when (code) {
+                ShizukuDirectoryHandleStore.INVALID_HANDLE -> ToolErrorCode.INVALID_CURSOR
+                ShizukuDirectoryHandleStore.PERMISSION_DENIED -> ToolErrorCode.PERMISSION_DENIED
+                ShizukuWorkspaceFileStore.LIMIT,
+                ShizukuWorkspaceFileStore.OUTPUT_LIMIT -> ToolErrorCode.QUOTA_EXCEEDED
+                else -> null
+            }
+            if (typed != null) return WorkspaceResult.Failure(ToolError(typed))
+        }
+        return dispatchFailure(dispatch)
+    }
 
     private fun descriptor(id: String, name: String, scope: WorkspaceScope) =
         runtime.mobileagent.skills.tooling.WorkspaceDescriptor(

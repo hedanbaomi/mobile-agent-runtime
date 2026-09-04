@@ -95,6 +95,57 @@ class OpenAiWorkspaceToolLoopTest {
         }
     }
 
+    @Test
+    fun responsesReasoningContinuationSurvivesTheToolLoopIntoRoundTwo() = runBlocking {
+        val bodies = mutableListOf<String>()
+        val engine = MockEngine { request ->
+            bodies += (request.body as? TextContent)?.text ?: "<${request.body.javaClass.name}>"
+            val response = if (bodies.size == 1) {
+                "data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"reasoning\",\"id\":\"rs_loop\",\"encrypted_content\":\"loop-secret\"}}\n\n" +
+                    "data: {\"type\":\"response.output_item.added\",\"item\":{\"type\":\"function_call\",\"id\":\"fc_1\",\"call_id\":\"workspace-call\",\"name\":\"workspace_list\",\"arguments\":\"\"}}\n\n" +
+                    "data: {\"type\":\"response.function_call_arguments.done\",\"item_id\":\"fc_1\",\"call_id\":\"workspace-call\",\"name\":\"workspace_list\",\"arguments\":\"{}\"}\n\n" +
+                    "data: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}}\n\n"
+            } else {
+                "data: {\"type\":\"response.output_text.delta\",\"delta\":\"workspace complete\"}\n\n" +
+                    "data: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}}\n\n"
+            }
+            respond(
+                response,
+                HttpStatusCode.OK,
+                headersOf(HttpHeaders.ContentType, ContentType.Text.EventStream.toString()),
+            )
+        }
+        val executor = RecordingWorkspaceExecutor()
+        val adapter = OpenAiAdapterFactory.create(ApiFormat.OPENAI_RESPONSES, HttpClient(engine), "https://example.invalid/v1")
+        val run = AgentRun("run-responses-continuation", "session", "conversation")
+
+        val events = AgentRuntime(adapter).run(
+            AgentRuntimeRequest(
+                run = run,
+                prompt = EffectivePrompt("contract", "", emptyList(), emptyList(), emptyList(), "list workspace"),
+                modelId = "model",
+                secret = "test-token".toCharArray(),
+                toolsEnabled = true,
+                executor = executor,
+            ),
+        ).toList()
+
+        assertEquals(RunState.COMPLETED, run.state, "$events; bodies=$bodies")
+        assertEquals(2, bodies.size)
+        val roundTwo = bodies.last()
+        // The encrypted reasoning item is replayed verbatim next to the tool result...
+        assertTrue(roundTwo.contains("\"type\":\"reasoning\""))
+        assertTrue(roundTwo.contains("\"encrypted_content\":\"loop-secret\""))
+        assertTrue(roundTwo.contains("function_call_output"))
+        assertTrue(roundTwo.contains("\"call_id\":\"workspace-call\""))
+        // ...while the provider-private payload never leaks into visible text.
+        val visibleText = events.filterIsInstance<RuntimeEvent.ModelEvent>()
+            .mapNotNull { it.event as? ModelEvent.TextDelta }
+            .joinToString("") { it.text }
+        assertEquals("workspace complete", visibleText)
+        assertTrue(events.filterIsInstance<RuntimeEvent.ModelEvent>().none { it.event is ModelEvent.ProviderContinuation })
+    }
+
     private class RecordingWorkspaceExecutor : ToolExecutor {
         override val specs = listOf(
             ToolSpec(

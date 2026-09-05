@@ -181,6 +181,18 @@ class RunCoordinatorTest {
     }
 
     @Test
+    fun retrievalScopePinCarriesRemoteEmbeddingKbIds() {
+        val coverage = runtime.mobileagent.knowledge.RetrievalCoverage(
+            requested = listOf("kb-a"),
+            searched = listOf("kb-a"),
+        )
+        val pin = RunCoordinator.retrievalScopePin(coverage, listOf("kb-a"))
+        assertEquals(listOf("kb-a"), pin.remoteEmbeddingKbIds)
+        val local = RunCoordinator.retrievalScopePin(coverage)
+        assertTrue(local.remoteEmbeddingKbIds.isEmpty())
+    }
+
+    @Test
     fun modelTokenBudgetDefaultsToDisabled() {
         assertNull(RunCoordinator.modelTokenBudget("{\"maxModelRounds\":8}"))
         assertNull(RunCoordinator.modelTokenBudget("{\"maxModelTokens\":0}"))

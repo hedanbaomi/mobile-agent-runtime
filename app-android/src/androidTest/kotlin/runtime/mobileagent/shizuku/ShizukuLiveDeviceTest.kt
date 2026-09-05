@@ -17,6 +17,7 @@ import org.junit.Test
 import org.junit.runner.RunWith
 import runtime.mobileagent.domain.AgentSnapshot
 import runtime.mobileagent.skills.tooling.WorkspaceEntryType
+import runtime.mobileagent.skills.tooling.ToolErrorCode
 import runtime.mobileagent.skills.tooling.WorkspaceListRequest
 import runtime.mobileagent.skills.tooling.WorkspaceMoveRequest
 import runtime.mobileagent.skills.tooling.WorkspaceResult
@@ -110,16 +111,21 @@ class ShizukuLiveDeviceTest {
                     movedFile,
                 ),
             )
-            assertTrue(moved is WorkspaceResult.Success)
-            assertEquals(movedFile, (moved as WorkspaceResult.Success).value.relativePath)
+            // Scheme A: no-replace move is refused instead of attempting a
+            // copy+delete that could drop concurrent content.
+            assertTrue(moved is WorkspaceResult.Failure)
+            assertEquals(
+                ToolErrorCode.OPERATION_UNAVAILABLE,
+                (moved as WorkspaceResult.Failure).error.code,
+            )
             val listed = approve(
                 executor,
                 "list",
                 "shizuku_workspace_list",
                 "{\"path\":\"$directory\"}",
             ).requireSuccess("list")
-            assertEquals("moved-proof.txt", listed.getJSONArray("entries").getJSONObject(0).getString("path").substringAfterLast('/'))
-            approve(executor, "delete-file", "shizuku_workspace_delete", "{\"path\":\"$movedFile\"}")
+            assertEquals("proof.txt", listed.getJSONArray("entries").getJSONObject(0).getString("path").substringAfterLast('/'))
+            approve(executor, "delete-file", "shizuku_workspace_delete", "{\"path\":\"$file\"}")
                 .requireSuccess("delete")
             approve(executor, "delete-dir", "shizuku_workspace_delete", "{\"path\":\"$directory\"}")
                 .requireSuccess("delete")

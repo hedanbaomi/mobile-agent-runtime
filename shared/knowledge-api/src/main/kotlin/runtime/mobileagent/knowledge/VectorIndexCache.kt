@@ -6,6 +6,15 @@ package runtime.mobileagent.knowledge
 import java.util.concurrent.atomic.AtomicLong
 
 /**
+ * Thrown when a vector-index build finishes after its knowledge base was
+ * invalidated or the cache was closed.  The built handle is already closed
+ * and never published: callers must not serve it, and must not retry
+ * blindly against a moved-on generation.
+ */
+class StaleVectorBuildException(val knowledgeBaseId: String) :
+    IllegalStateException("Vector index build for knowledge base $knowledgeBaseId went stale before publish")
+
+/**
  * Reusable native ANN index lifecycle keyed by
  * `(knowledgeBaseId, embeddingSpaceId, dimension, generationId)`.
  *
@@ -71,7 +80,13 @@ class VectorIndexCache(
         }
     }
 
-    internal data class Entry(
+    /**
+     * Cache entry with identity equality.  This must stay a plain class:
+     * `refCount` and `retired` mutate while the entry sits in the [retired]
+     * set, and data-class equality over mutable fields would corrupt hash
+     * removal and strand closed handles (3f75 finding C).
+     */
+    internal class Entry(
         val index: VectorIndexPort,
         val memberIds: Set<String>,
         var refCount: Int = 0,
@@ -84,9 +99,22 @@ class VectorIndexCache(
     private val retired = linkedSetOf<Entry>()
     /** Per-key build monitors so concurrent misses for one key build once. */
     private val buildLocks = linkedMapOf<Key, Any>()
+    /**
+     * Lifecycle epochs (3f75 finding D).  [closed] is terminal: after
+     * [close], no build may publish and no new entry may appear.
+     * [globalEpoch] moves on [close]; [kbEpochs] moves per knowledge base on
+     * [invalidateKnowledgeBase].  A builder captures both before building and
+     * must observe them unchanged before publishing.
+     */
+    private var closed = false
+    private var globalEpoch = 0L
+    private val kbEpochs = linkedMapOf<String, Long>()
     private val builds = AtomicLong(0)
     private val reuseHits = AtomicLong(0)
     private val evictions = AtomicLong(0)
+
+    /** Test/debugging introspection: retired entries awaiting their last lease. */
+    internal fun retiredCount(): Int = synchronized(lock) { retired.size }
 
     /**
      * Acquire the cached index for [key] when [memberIds] exactly match the
@@ -111,6 +139,7 @@ class VectorIndexCache(
      * LRU eviction retires the same way.
      */
     fun publish(key: Key, memberIds: Set<String>, index: VectorIndexPort) = synchronized(lock) {
+        check(!closed) { "VectorIndexCache is closed" }
         publishLocked(key, memberIds, index)
     }
 
@@ -131,8 +160,18 @@ class VectorIndexCache(
      * [build] result.  The build runs outside the cache lock but under the
      * key monitor; a loser that finds a fresh live entry closes its own
      * surplus handle instead of orphaning the winner's lease.
+     *
+     * Staleness (3f75 finding D): the builder captures the lifecycle epochs
+     * before building.  If the cache was closed or this knowledge base was
+     * invalidated while building, the built handle is closed and never
+     * published — an invalidated generation cannot be resurrected, and a
+     * closed cache stays empty.
      */
     fun getOrBuild(key: Key, memberIds: Set<String>, build: () -> VectorIndexPort): VectorIndexLease {
+        val startEpoch = synchronized(lock) {
+            check(!closed) { "VectorIndexCache is closed" }
+            globalEpoch to (kbEpochs[key.knowledgeBaseId] ?: 0L)
+        }
         acquire(key, memberIds)?.let { return it }
         val monitor = synchronized(lock) { buildLocks.getOrPut(key) { Any() } }
         try {
@@ -142,6 +181,14 @@ class VectorIndexCache(
                 var published = false
                 try {
                     synchronized(lock) {
+                        if (closed) {
+                            throw IllegalStateException("VectorIndexCache is closed")
+                        }
+                        if (globalEpoch != startEpoch.first ||
+                            (kbEpochs[key.knowledgeBaseId] ?: 0L) != startEpoch.second
+                        ) {
+                            throw StaleVectorBuildException(key.knowledgeBaseId)
+                        }
                         // Re-check under the cache lock: a concurrent publish
                         // (invalidation race) may have installed a live entry.
                         val existing = entries[key]
@@ -176,6 +223,7 @@ class VectorIndexCache(
     }
 
     fun invalidateKnowledgeBase(knowledgeBaseId: String) = synchronized(lock) {
+        kbEpochs[knowledgeBaseId] = (kbEpochs[knowledgeBaseId] ?: 0L) + 1
         entries.keys.filter { it.knowledgeBaseId == knowledgeBaseId }.forEach { key ->
             entries.remove(key)?.let(::retireLocked)
         }
@@ -184,10 +232,15 @@ class VectorIndexCache(
     fun stats(): Stats = Stats(builds.get(), reuseHits.get(), evictions.get())
 
     /**
-     * Retire every live entry.  Handles with no active lease close now;
-     * leased handles close when their last lease is released.
+     * Terminal close.  Retires every live entry (leased handles close when
+     * their last lease is released) and forbids every future publish:
+     * in-flight builders observe the epoch move and close their surplus
+     * instead of resurrecting the cache.
      */
     fun close() = synchronized(lock) {
+        if (closed) return@synchronized
+        closed = true
+        globalEpoch++
         entries.values.forEach(::retireLocked)
         entries.clear()
         buildLocks.clear()

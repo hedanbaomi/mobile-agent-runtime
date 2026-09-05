@@ -121,7 +121,9 @@ class WorkspaceBackendTest {
             assertSuccess(backend.write("a/file.txt", byteArrayOf(1, 2, 3), expectedVersion = InternalWorkspaceVersions.MISSING))
             assertSuccess(backend.copy("a/file.txt", "copy.txt"))
             assertNoTemporaryArtifacts(root)
-            assertSuccess(backend.move("copy.txt", "moved.txt"))
+            // No-replace move is UNSUPPORTED (scheme A): the replace path is
+            // the only move this backend proves.
+            assertSuccess(backend.move("copy.txt", "moved.txt", replaceExisting = true))
             assertCode(backend.delete("a"), InternalWorkspaceErrorCode.NON_EMPTY_DIRECTORY)
             assertCode(backend.delete(""), InternalWorkspaceErrorCode.ROOT_OPERATION_FORBIDDEN)
             assertSuccess(backend.delete("moved.txt"))

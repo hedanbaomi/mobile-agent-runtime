@@ -58,34 +58,41 @@ class InternalWorkspaceRaceHookTest {
     }
 
     @Test
-    fun noReplaceMoveRaceInsideCommitWindowNeverOverwrites() {
+    fun noReplaceMoveRaceInsideCommitWindowLosesNothing() {
         val (backend, root) = fixture()
-        check(backend.write("src.txt", "agent".toByteArray(), InternalWorkspaceVersions.MISSING, false)
+        check(backend.write("src.txt", "AAAA".toByteArray(), InternalWorkspaceVersions.MISSING, false)
             is InternalWorkspaceResult.Success)
+        // An external writer lands inside the former commit window (same
+        // length, so a size check could not catch it either).
         backend.afterPreflightBeforeCommit = {
-            Files.write(root.resolve("dst.txt"), "external-owner-data".toByteArray())
+            Files.write(root.resolve("dst.txt"), "BBBB".toByteArray())
         }
         try {
+            // Scheme A: no-replace move is UNSUPPORTED for every node kind —
+            // never success, never a delete of the new content.
             assertEquals(
-                InternalWorkspaceErrorCode.ENTRY_EXISTS,
+                InternalWorkspaceErrorCode.UNSUPPORTED,
                 code(backend.move("src.txt", "dst.txt", null, false)),
             )
         } finally {
             backend.afterPreflightBeforeCommit = null
         }
-        assertEquals("agent", text(root.resolve("src.txt")))
-        assertEquals("external-owner-data", text(root.resolve("dst.txt")))
+        assertEquals("AAAA", text(root.resolve("src.txt")))
+        assertEquals("BBBB", text(root.resolve("dst.txt")))
     }
 
     @Test
-    fun noReplaceFileMoveCommitsWithoutClobberWhenNoRace() {
+    fun noReplaceMoveIsUnsupportedWithoutMutating() {
         val (backend, root) = fixture()
         check(backend.write("src.txt", "agent".toByteArray(), InternalWorkspaceVersions.MISSING, false)
             is InternalWorkspaceResult.Success)
-        val moved = backend.move("src.txt", "dst.txt", null, false)
-        check(moved is InternalWorkspaceResult.Success) { "move failed: ${(moved as InternalWorkspaceResult.Failure).error.code}" }
-        assertFalse(Files.exists(root.resolve("src.txt"), java.nio.file.LinkOption.NOFOLLOW_LINKS))
-        assertEquals("agent", text(root.resolve("dst.txt")))
+        assertEquals(
+            InternalWorkspaceErrorCode.UNSUPPORTED,
+            code(backend.move("src.txt", "dst.txt", null, false)),
+        )
+        assertTrue(Files.exists(root.resolve("src.txt"), java.nio.file.LinkOption.NOFOLLOW_LINKS))
+        assertEquals("agent", text(root.resolve("src.txt")))
+        assertFalse(Files.exists(root.resolve("dst.txt"), java.nio.file.LinkOption.NOFOLLOW_LINKS))
     }
 
     @Test

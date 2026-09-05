@@ -293,9 +293,9 @@ class WiredAdbWorkspaceBackendAdapter(
         WiredAdbErrorCode.INVALID_PATCH -> ToolErrorCode.INVALID_REQUEST
         WiredAdbErrorCode.INVALID_CURSOR -> ToolErrorCode.INVALID_CURSOR
         WiredAdbErrorCode.UNSUPPORTED_ENTRY -> ToolErrorCode.UNSUPPORTED_ENTRY
-        WiredAdbErrorCode.OPERATION_UNAVAILABLE -> ToolErrorCode.OPERATION_UNAVAILABLE
+        WiredAdbErrorCode.OPERATION_UNAVAILABLE,
+        WiredAdbErrorCode.ATOMIC_REPLACE_UNAVAILABLE -> ToolErrorCode.OPERATION_UNAVAILABLE
         WiredAdbErrorCode.WRITE_UNVERIFIED -> ToolErrorCode.UNKNOWN_OUTCOME
-        WiredAdbErrorCode.ATOMIC_REPLACE_UNAVAILABLE -> ToolErrorCode.IO_ERROR
         WiredAdbErrorCode.IO_ERROR,
         WiredAdbErrorCode.INTERNAL_ERROR -> ToolErrorCode.IO_ERROR
         else -> ToolErrorCode.AUTHORITY_TEMPORARILY_UNAVAILABLE
@@ -688,9 +688,9 @@ private fun WiredAdbErrorCode.toToolErrorCode(): ToolErrorCode = when (this) {
     WiredAdbErrorCode.INVALID_PATCH -> ToolErrorCode.INVALID_REQUEST
     WiredAdbErrorCode.INVALID_CURSOR -> ToolErrorCode.INVALID_CURSOR
     WiredAdbErrorCode.UNSUPPORTED_ENTRY -> ToolErrorCode.UNSUPPORTED_ENTRY
-    WiredAdbErrorCode.OPERATION_UNAVAILABLE -> ToolErrorCode.OPERATION_UNAVAILABLE
+    WiredAdbErrorCode.OPERATION_UNAVAILABLE,
+    WiredAdbErrorCode.ATOMIC_REPLACE_UNAVAILABLE -> ToolErrorCode.OPERATION_UNAVAILABLE
     WiredAdbErrorCode.WRITE_UNVERIFIED -> ToolErrorCode.UNKNOWN_OUTCOME
-    WiredAdbErrorCode.ATOMIC_REPLACE_UNAVAILABLE -> ToolErrorCode.IO_ERROR
     WiredAdbErrorCode.IO_ERROR,
     WiredAdbErrorCode.INTERNAL_ERROR -> ToolErrorCode.IO_ERROR
     else -> ToolErrorCode.AUTHORITY_TEMPORARILY_UNAVAILABLE

@@ -53,6 +53,15 @@ data class RetrievalResult(
      * follow-up finding D).  Carries ids only, never query text.
      */
     val usedGenerations: List<KnowledgePin> = emptyList(),
+    /**
+     * Knowledge-base ids for which this retrieval committed a fresh remote
+     * (API embedding) query vector.  A cache hit or a local embedder leaves
+     * the id absent.  Carries ids only — the durable attempt/vector-cache
+     * rows are keyed by SHA-256 query digest, never query text — so the run
+     * manifest can state honestly whether billable external calls happened
+     * before it was stamped (3f75 finding E).
+     */
+    val usedRemoteEmbedding: List<String> = emptyList(),
 )
 
 /** Why a requested knowledge base did not participate in this retrieval. */

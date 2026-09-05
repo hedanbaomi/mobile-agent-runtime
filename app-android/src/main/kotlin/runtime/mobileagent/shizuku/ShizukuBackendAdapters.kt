@@ -702,11 +702,12 @@ class ShizukuWorkspaceBackendAdapter(
         ShizukuWorkspaceFileStore.INVALID_CONTENT,
             -> ToolErrorCode.INVALID_REQUEST
         ShizukuWorkspaceFileStore.UNSUPPORTED_ENTRY -> ToolErrorCode.UNSUPPORTED_ENTRY
-        ShizukuWorkspaceFileStore.ATOMIC_REPLACE_UNAVAILABLE,
         ShizukuWorkspaceFileStore.UNSUPPORTED,
+        ShizukuWorkspaceFileStore.OPERATION_UNAVAILABLE,
+        ShizukuWorkspaceFileStore.ATOMIC_REPLACE_UNAVAILABLE,
+            -> ToolErrorCode.OPERATION_UNAVAILABLE
         ShizukuWorkspaceFileStore.WRITE_UNVERIFIED,
             -> ToolErrorCode.INTERNAL_ERROR
-        ShizukuWorkspaceFileStore.OPERATION_UNAVAILABLE -> ToolErrorCode.OPERATION_UNAVAILABLE
         else -> ToolErrorCode.IO_ERROR
     }
 

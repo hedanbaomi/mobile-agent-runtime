@@ -293,11 +293,11 @@ internal enum class WorkspaceMutationCapability {
  * - no-clobber *publishes* of a complete temporary file go through
  *   [publishNew], which links (atomic, fails when the target exists) or
  *   falls back to an exclusive-create stream copy — never a bare rename.
- * - no-clobber *file moves* go through [moveFileNoReplace] (safe, non-atomic:
- *   an interruption may leave source and destination behind, which callers
- *   must report as UNKNOWN_OUTCOME, never as success).
- * - no-clobber *directory* moves/copies have no portable proving primitive
- *   and must return UNSUPPORTED instead of silently overwriting.
+ * - no-replace *moves* have no safe primitive and are UNSUPPORTED for every
+ *   node kind (scheme A, 3f75 finding B): a non-atomic copy+delete cannot
+ *   prove "the deleted source is the copied source", so it could return
+ *   success while deleting uncopied concurrent content.  Copy + delete stay
+ *   available as two explicit steps.
  */
 internal object WorkspaceAtomicCommit {
     fun publish(temporary: Path, target: Path, replaceExisting: Boolean) {
@@ -338,54 +338,6 @@ internal object WorkspaceAtomicCommit {
         }
         runCatching { Files.deleteIfExists(temporary) }
         writeExclusive(target, content)
-    }
-
-    /**
-     * Move one regular file without overwriting.  Safe but explicitly NOT
-     * atomic: the destination is committed via exclusive create before the
-     * source is deleted, so an interruption (or a failed source delete) may
-     * leave both entries behind.  Callers must map that outcome to
-     * UNKNOWN_OUTCOME, never to success, and must never describe this path
-     * as an atomic move.  Directories are rejected by the caller with
-     * UNSUPPORTED — this function additionally refuses non-files.
-     */
-    fun moveFileNoReplace(source: Path, target: Path) {
-        if (!Files.isRegularFile(source, java.nio.file.LinkOption.NOFOLLOW_LINKS)) {
-            throw java.io.IOException("no-replace move source is not a regular file")
-        }
-        val claim = try {
-            Files.newByteChannel(
-                target,
-                java.nio.file.StandardOpenOption.CREATE_NEW,
-                java.nio.file.StandardOpenOption.WRITE,
-                java.nio.file.LinkOption.NOFOLLOW_LINKS,
-            )
-        } catch (already: java.nio.file.FileAlreadyExistsException) {
-            throw already
-        }
-        val claimKey = runCatching {
-            Files.readAttributes(target, java.nio.file.attribute.BasicFileAttributes::class.java, java.nio.file.LinkOption.NOFOLLOW_LINKS).fileKey()
-        }.getOrNull()
-        try {
-            claim.use { open ->
-                Files.newByteChannel(source, java.nio.file.StandardOpenOption.READ, java.nio.file.LinkOption.NOFOLLOW_LINKS).use { input ->
-                    val buffer = java.nio.ByteBuffer.allocate(32 * 1024)
-                    while (true) {
-                        buffer.clear()
-                        if (input.read(buffer) < 0) break
-                        buffer.flip()
-                        while (buffer.hasRemaining()) open.write(buffer)
-                    }
-                }
-                (open as? java.nio.channels.FileChannel)?.force(true)
-                    ?: throw java.io.IOException("fsync unavailable")
-            }
-            if (Files.size(target) != Files.size(source)) throw java.io.IOException("short move")
-        } catch (failure: java.io.IOException) {
-            removeClaim(target, claimKey)
-            throw failure
-        }
-        Files.delete(source)
     }
 
     /**

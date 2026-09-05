@@ -532,26 +532,22 @@ internal class InternalWorkspaceBackend(
                     InternalWorkspaceErrorCode.NON_EMPTY_DIRECTORY.error()
                 }
             }
-            if (!replaceExisting && type == InternalWorkspaceEntryType.DIRECTORY) {
-                // No portable primitive proves a no-replace directory move:
-                // a bare rename would silently merge/overwrite on every major
-                // platform.  Fail closed instead of overwriting (b07 finding C2).
+            if (!replaceExisting) {
+                // Scheme A (3f75 finding B): no-replace move is UNSUPPORTED
+                // for every node kind.  A non-atomic copy+delete cannot prove
+                // "the deleted source is the copied source": an external
+                // writer can change the source after the copy, and the commit
+                // would then return success while deleting uncopied content.
+                // Copy + delete stay available as two explicit steps.
+                // The hook still runs so race tests can place an external
+                // writer inside the former window and prove nothing is lost.
+                afterPreflightBeforeCommit?.invoke()
                 InternalWorkspaceErrorCode.UNSUPPORTED.error()
             }
             val currentVersion = nodeVersion(resolveExisting(sourceSegments), type)
             if (currentVersion != version) InternalWorkspaceErrorCode.CONFLICT.error()
-            afterPreflightBeforeCommit?.invoke()
             try {
-                // A create-only file move must not silently degrade to
-                // REPLACE_EXISTING: the commit copies through an exclusive
-                // create, so a destination created after the pre-check fails
-                // with ENTRY_EXISTS instead of being overwritten.  This path
-                // is safe but non-atomic (see WorkspaceAtomicCommit).
-                if (replaceExisting) {
-                    Files.move(source, destination, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING)
-                } else {
-                    WorkspaceAtomicCommit.moveFileNoReplace(source, destination)
-                }
+                Files.move(source, destination, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING)
                 verifyStableWorkspaceDirectoryAfterMutation(destinationParent, canonicalDestinationParent)
                 verifyStableWorkspaceDirectoryAfterMutation(sourceParent, canonicalSourceParent)
                 forceDirectory(destinationParent)
@@ -561,8 +557,9 @@ internal class InternalWorkspaceBackend(
             } catch (_: UnsupportedOperationException) {
                 InternalWorkspaceErrorCode.UNSUPPORTED.error()
             } catch (_: FileAlreadyExistsException) {
-                // The destination appeared between the pre-check and the commit.
-                // Report the create-only violation; the existing target is untouched.
+                // Defensive: the replace path passes REPLACE_EXISTING, so a
+                // concurrent destination change surfaces here instead of a
+                // silent merge.  The existing target is untouched.
                 InternalWorkspaceErrorCode.ENTRY_EXISTS.error()
             } catch (_: SecurityException) {
                 InternalWorkspaceErrorCode.UNKNOWN_OUTCOME.error()

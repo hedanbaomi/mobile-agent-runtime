@@ -56,6 +56,12 @@ data class RetrievalScopePin(
     /** Entries look like `kbId:REASON`. */
     val unavailable: List<String> = emptyList(),
     val partial: Boolean = false,
+    /**
+     * KBs whose query vector came from a fresh remote embedding call during
+     * this run's retrieval.  Ids only; the durable attempt/vector-cache rows
+     * are keyed by SHA-256 query digest, never query text.
+     */
+    val remoteEmbeddingKbIds: List<String> = emptyList(),
 )
 
 @Serializable

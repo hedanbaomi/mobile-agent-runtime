@@ -1291,12 +1291,16 @@ class KnowledgeRepository(
                     unavailable = emptyList(),
                 ),
                 usedGenerations = requested.map { runtime.mobileagent.domain.KnowledgePin(it, null, "") },
+                usedRemoteEmbedding = emptyList(),
             )
         }
         val warnings = mutableListOf<String>()
         val bases = (knowledgeBaseIds ?: listKnowledgeBases().map { it.first }).distinct()
         val searched = mutableListOf<String>()
         val unavailable = mutableListOf<UnavailableSource>()
+        // KBs whose query vector came from a fresh remote embedding call
+        // during this retrieval (3f75 finding E).
+        val remoteEmbeddingKbIds = linkedSetOf<String>()
         // Exact generation pins consumed by this call (b07 follow-up finding
         // D): recorded here so the run manifest reflects execution facts,
         // never a later re-read of the active generation.
@@ -1381,8 +1385,14 @@ class KnowledgeRepository(
                             insertQueryVectorCache(space, hash, vector, queryEmbedder.dimension)
                             clearApiQueryAttempt(kbId, space, hash)
                             queryVectorReady = true
+                            // This callback also fires on a cache hit (with
+                            // the cached vector, re-inserted idempotently).
+                            // Only a miss dispatches the provider, so only a
+                            // miss counts as a billable external call.
+                            if (cachedQueryVector == null) remoteEmbeddingKbIds += kbId
                         }
                     },
+                    warnings = warnings,
                 ).rankOrdered()
             } catch (failure: Throwable) {
                 if (apiQueryHash != null && cachedQueryVector == null && !queryVectorReady && isUncertainApiQueryFailure(failure)) {
@@ -1404,6 +1414,7 @@ class KnowledgeRepository(
             warnings,
             coverage,
             usedGenerations = bases.map { usedPins[it] ?: runtime.mobileagent.domain.KnowledgePin(it, null, "") },
+            usedRemoteEmbedding = bases.filter { it in remoteEmbeddingKbIds },
         )
     }
 
@@ -3297,6 +3308,7 @@ class KnowledgeRepository(
         selectedEmbedder: TextEmbedder,
         queryVector: FloatArray? = null,
         onQueryVectorReady: ((FloatArray) -> Unit)? = null,
+        warnings: MutableList<String>,
     ): List<SearchHit> {
         val queryVec = queryVector?.copyOf() ?: selectedEmbedder.embed(query)
         validateEmbeddingVector(queryVec, selectedEmbedder.dimension)
@@ -3336,8 +3348,18 @@ class KnowledgeRepository(
         // eviction/invalidation/replacement cannot free the native handle
         // mid-search (b07 follow-up finding B).  Concurrent misses for one
         // key share a single build.
-        vectorIndexCache.getOrBuild(key, ids) { buildVectorIndex(key, ids, selectedEmbedder) }.use { lease ->
-            return lease.index.search(queryVec, topK).map { (id, score) -> byId.getValue(id).copy(score = score.toDouble()) }
+        //
+        // A build that finishes after this KB was invalidated is stale: its
+        // handle is already closed and never published (3f75 finding D).  The
+        // vector channel then yields nothing while the lexical channel still
+        // serves — a degraded ranking, never resurrected data.
+        try {
+            vectorIndexCache.getOrBuild(key, ids) { buildVectorIndex(key, ids, selectedEmbedder) }.use { lease ->
+                return lease.index.search(queryVec, topK).map { (id, score) -> byId.getValue(id).copy(score = score.toDouble()) }
+            }
+        } catch (_: runtime.mobileagent.knowledge.StaleVectorBuildException) {
+            warnings += "Knowledge base $kbId vector index changed during retrieval; vector matches omitted"
+            return emptyList()
         }
     }
 

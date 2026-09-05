@@ -86,14 +86,14 @@ class ShizukuWorkspaceFileStoreTest {
     }
 
     @Test
-    fun noReplaceMoveRaceNeverOverwritesExternallyCreatedTarget() {
+    fun noReplaceMoveIsRefusedWithoutMutatingEitherSide() {
         assertTrue(store.mkdir("race").contains("\"ok\":true"))
         assertTrue(
             store.write("race/src.txt", "agent".toByteArray(StandardCharsets.UTF_8), replaceExisting = false)
                 .contains("\"ok\":true"),
         )
-        // External destination created after the caller's pre-check: the
-        // no-clobber commit must fail instead of overwriting (b07 finding C2).
+        // External destination created after the caller's pre-check: scheme A
+        // reports the precise pre-check violation here…
         Files.write(
             root.toPath().resolve("Download/MobileAgentRuntime-Shizuku/race/dst.txt"),
             "external-owner-data".toByteArray(StandardCharsets.UTF_8),
@@ -101,6 +101,11 @@ class ShizukuWorkspaceFileStoreTest {
         assertTrue(store.move("race/src.txt", "race/dst.txt", false).contains("\"code\":\"TARGET_EXISTS\""))
         assertTrue(store.read("race/src.txt", 1024).contains("agent"))
         assertTrue(store.read("race/dst.txt", 1024).contains("external-owner-data"))
+        // …and the missing-destination case is refused outright instead of
+        // attempting a copy+delete that could drop concurrent content.
+        assertTrue(store.move("race/src.txt", "race/fresh.txt", false).contains("\"code\":\"ATOMIC_REPLACE_UNAVAILABLE\""))
+        assertTrue(store.read("race/src.txt", 1024).contains("agent"))
+        assertTrue(store.stat("race/fresh.txt").contains("\"code\":\"NOT_FOUND\""))
     }
 
     @Test
@@ -128,7 +133,10 @@ class ShizukuWorkspaceFileStoreTest {
         assertTrue(stat.contains("\"bytes\":7"))
 
         assertTrue(store.mkdir("moved").contains("\"ok\":true"))
-        val moved = store.move("source/item.txt", "moved/item.txt", false)
+        // No-replace move is refused (scheme A); the replace path proves the move.
+        assertTrue(store.move("source/item.txt", "moved/item.txt", false).contains("\"code\":\"ATOMIC_REPLACE_UNAVAILABLE\""))
+        assertTrue(store.stat("source/item.txt").contains("\"type\":\"file\""))
+        val moved = store.move("source/item.txt", "moved/item.txt", true)
         val movedJson = JSONObject(moved)
         assertTrue(movedJson.getBoolean("moved"))
         assertEquals("source/item.txt", movedJson.getString("sourcePath"))

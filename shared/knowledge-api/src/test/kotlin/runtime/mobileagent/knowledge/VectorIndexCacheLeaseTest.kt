@@ -11,16 +11,20 @@ import kotlin.concurrent.thread
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertNull
 import org.junit.jupiter.api.Assertions.assertSame
+import org.junit.jupiter.api.Assertions.assertThrows
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
 
 /**
- * Active-use lifecycle tests for [VectorIndexCache] (b07 follow-up finding B).
+ * Active-use lifecycle tests for [VectorIndexCache] (b07 follow-up finding B,
+ * 3f75 findings C/D).
  *
  * A borrowed handle must never be closed while a search is using it:
  * invalidate, LRU eviction, same-key replacement, and [VectorIndexCache.close]
  * only retire the entry and free the native handle once the last lease is
- * released.  Concurrent misses for one key share a single build.
+ * released.  Concurrent misses for one key share a single build.  Retired
+ * entries leave no residue once released, and a build that finishes after
+ * invalidation/close is discarded instead of resurrecting the cache.
  */
 class VectorIndexCacheLeaseTest {
     private class FakeIndex : VectorIndexPort {
@@ -74,6 +78,7 @@ class VectorIndexCacheLeaseTest {
         assertEquals(1, index.closeCount.get())
         // A later acquire misses: the retired entry is gone.
         assertNull(cache.acquire(key(), ids))
+        assertEquals(0, cache.retiredCount(), "the released entry must leave no residue")
     }
 
     @Test
@@ -174,5 +179,102 @@ class VectorIndexCacheLeaseTest {
         assertEquals(0, index.closeCount.get())
         cache.close()
         assertEquals(1, index.closeCount.get())
+    }
+
+    @Test
+    fun releasedRetiredEntriesLeaveNoResidue() {
+        val cache = VectorIndexCache(null, maxEntries = 4)
+        repeat(1000) {
+            val index = FakeIndex().also { it.searchRelease.countDown() }
+            cache.publish(key(), ids, index)
+            val lease = checkNotNull(cache.acquire(key(), ids))
+            cache.invalidateKnowledgeBase("kbA")
+            lease.close()
+            assertEquals(1, index.closeCount.get())
+        }
+        assertEquals(0, cache.retiredCount(), "released retired entries must not accumulate")
+    }
+
+    @Test
+    fun buildFinishingAfterInvalidateIsDiscarded() {
+        val cache = VectorIndexCache(null, maxEntries = 4)
+        val built = FakeIndex().also { it.searchRelease.countDown() }
+        val entered = CountDownLatch(1)
+        val proceed = CountDownLatch(1)
+        val worker = thread {
+            try {
+                cache.getOrBuild(key(), ids) {
+                    entered.countDown()
+                    check(proceed.await(10, TimeUnit.SECONDS))
+                    built
+                }
+                throw AssertionError("stale build must not return a lease")
+            } catch (stale: StaleVectorBuildException) {
+                assertEquals("kbA", stale.knowledgeBaseId)
+            }
+        }
+        assertTrue(entered.await(10, TimeUnit.SECONDS))
+        cache.invalidateKnowledgeBase("kbA")
+        proceed.countDown()
+        worker.join(10_000)
+        assertEquals(1, built.closeCount.get(), "the stale build must be closed exactly once")
+        assertNull(cache.acquire(key(), ids), "an invalidated generation must not be resurrected")
+    }
+
+    @Test
+    fun buildFinishingAfterCloseNeverPublishes() {
+        val cache = VectorIndexCache(null, maxEntries = 4)
+        val built = FakeIndex().also { it.searchRelease.countDown() }
+        val entered = CountDownLatch(1)
+        val proceed = CountDownLatch(1)
+        val worker = thread {
+            try {
+                cache.getOrBuild(key(), ids) {
+                    entered.countDown()
+                    check(proceed.await(10, TimeUnit.SECONDS))
+                    built
+                }
+                throw AssertionError("build after close must not return a lease")
+            } catch (_: IllegalStateException) {
+                // Either the terminal closed signal or the stale-build signal.
+            }
+        }
+        assertTrue(entered.await(10, TimeUnit.SECONDS))
+        cache.close()
+        proceed.countDown()
+        worker.join(10_000)
+        assertEquals(1, built.closeCount.get())
+        assertNull(cache.acquire(key(), ids))
+        // Future builds fail closed instead of resurrecting the cache.
+        assertThrows(IllegalStateException::class.java) {
+            cache.getOrBuild(key(), ids) { FakeIndex() }
+        }
+        assertThrows(IllegalStateException::class.java) {
+            cache.publish(key(), ids, FakeIndex())
+        }
+    }
+
+    @Test
+    fun invalidateOfOtherKbDoesNotStaleThisBuild() {
+        val cache = VectorIndexCache(null, maxEntries = 4)
+        val built = FakeIndex().also { it.searchRelease.countDown() }
+        val entered = CountDownLatch(1)
+        val proceed = CountDownLatch(1)
+        val lease = AtomicReference<VectorIndexCache.VectorIndexLease?>()
+        val worker = thread {
+            lease.set(cache.getOrBuild(key(), ids) {
+                entered.countDown()
+                check(proceed.await(10, TimeUnit.SECONDS))
+                built
+            })
+        }
+        assertTrue(entered.await(10, TimeUnit.SECONDS))
+        cache.invalidateKnowledgeBase("kbB")
+        proceed.countDown()
+        worker.join(10_000)
+        checkNotNull(lease.get()).use {
+            assertSame(built, it.index)
+        }
+        assertEquals(0, built.closeCount.get())
     }
 }

@@ -144,13 +144,17 @@ class RunCoordinator(private val runs: RunRepository) {
         }
 
         /** Durable retrieval-scope summary: ids and reason codes, never query text. */
-        fun retrievalScopePin(coverage: runtime.mobileagent.knowledge.RetrievalCoverage?): RetrievalScopePin {
-            if (coverage == null) return RetrievalScopePin()
+        fun retrievalScopePin(
+            coverage: runtime.mobileagent.knowledge.RetrievalCoverage?,
+            remoteEmbeddingKbIds: List<String> = emptyList(),
+        ): RetrievalScopePin {
+            if (coverage == null) return RetrievalScopePin(remoteEmbeddingKbIds = remoteEmbeddingKbIds.toList())
             return RetrievalScopePin(
                 requested = coverage.requested.toList(),
                 searched = coverage.searched.toList(),
                 unavailable = coverage.unavailable.map { "${it.knowledgeBaseId}:${it.reason.name}" },
                 partial = coverage.partial,
+                remoteEmbeddingKbIds = remoteEmbeddingKbIds.toList(),
             )
         }
 

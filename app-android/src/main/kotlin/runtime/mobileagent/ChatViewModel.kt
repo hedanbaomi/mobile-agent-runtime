@@ -632,17 +632,19 @@ class ChatViewModel(
                         },
                         grants = frozenGrants,
                         toolSchemaFingerprint = RunCoordinator.toolSchemaFingerprint(toolExecutor.specs),
-                        retrievalScope = RunCoordinator.retrievalScopePin(result.coverage),
+                        retrievalScope = RunCoordinator.retrievalScopePin(result.coverage, result.usedRemoteEmbedding),
                     )
                 }
                 // Freeze the run manifest once dispatch facts are known: tool
                 // schema, KB generations, grants, and provider/model revisions.
                 // Versions and fingerprints only — never secrets or raw paths.
                 //
-                // Strong-manifest policy (方案A, b07 finding D6): the manifest
-                // is an execution-audit fact, not optional diagnostics.  A
-                // stamp failure fails the run closed BEFORE any provider or
-                // tool dispatch below.
+                // Strong-manifest policy, execution-dispatch scope (方案A,
+                // 3f75 finding E): the manifest gates the Chat model + tool
+                // execution phase.  Retrieval preparation runs before it and
+                // may already have dispatched a remote embedding call (see
+                // the manifest's retrieval scope), so the failure text must
+                // not claim zero external requests overall.
                 val manifest = RunCoordinator.assembleManifest(
                     runId = run.runId,
                     conversationId = conversationId,
@@ -679,8 +681,8 @@ class ChatViewModel(
                     )
                     withContext(Dispatchers.IO) { runCatching { container.runs.save(record) } }
                     container.runCoordinator.release(run.runId, runOwnerKey)
-                    persistTerminalError(toSafeErrorPart("运行指纹持久化失败，已停止本次执行；未向模型或工具发送任何请求。"))
-                    state.value = state.value.copy(status = "运行指纹持久化失败，已停止本次执行；未向模型或工具发送任何请求。", statusKind = "error")
+                    persistTerminalError(toSafeErrorPart("运行指纹持久化失败，已阻止后续 Chat 模型与工具执行。检索预处理可能已发生；若使用远程 Embedding，请查看本次检索/费用记录。"))
+                    state.value = state.value.copy(status = "运行指纹持久化失败，已阻止后续 Chat 模型与工具执行。检索预处理可能已发生；若使用远程 Embedding，请查看本次检索/费用记录。", statusKind = "error")
                     return@launch
                 }
                 val history = withContext(Dispatchers.IO) {

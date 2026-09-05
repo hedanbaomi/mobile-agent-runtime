@@ -535,32 +535,28 @@ internal class ShizukuWorkspaceFileStore(
                     }
                 }
 
+                if (!replaceExisting) {
+                    // Scheme A (3f75 finding B): no-replace move is refused
+                    // for every node kind.  A non-atomic copy+delete cannot
+                    // prove "the deleted source is the copied source", so the
+                    // store returns the typed refusal instead of risking a
+                    // success that deletes uncopied content.  Copy + delete
+                    // stay available as two explicit steps.
+                    throw WorkspaceFailure(ATOMIC_REPLACE_UNAVAILABLE)
+                }
+
                 try {
-                    if (replaceExisting) {
-                        Files.move(source, destination, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING)
-                    } else if (type == "directory") {
-                        // No portable primitive proves a no-replace directory
-                        // move: a bare rename silently merges/overwrites on
-                        // every major platform (b07 finding C2).  Fail closed.
-                        throw WorkspaceFailure(ATOMIC_REPLACE_UNAVAILABLE)
-                    } else {
-                        // Safe non-atomic no-clobber file move: a destination
-                        // created after the pre-check fails with TARGET_EXISTS
-                        // instead of being overwritten.  An interruption may
-                        // leave source and destination behind → UNKNOWN_OUTCOME.
-                        runtime.mobileagent.workspace.WorkspaceAtomicCommit.moveFileNoReplace(source, destination)
-                    }
+                    Files.move(source, destination, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING)
                 } catch (_: java.nio.file.FileAlreadyExistsException) {
-                    // The destination appeared between the pre-check and the commit.
+                    // Defensive: the replace path passes REPLACE_EXISTING.
                     throw WorkspaceFailure(TARGET_EXISTS)
                 } catch (_: AtomicMoveNotSupportedException) {
                     throw WorkspaceFailure(ATOMIC_REPLACE_UNAVAILABLE)
                 } catch (_: UnsupportedOperationException) {
                     throw WorkspaceFailure(ATOMIC_REPLACE_UNAVAILABLE)
                 } catch (_: IOException) {
-                    // The no-clobber copy may have committed the destination
-                    // before a later step failed; the outcome is uncertain and
-                    // must not be reported as success or as a clean miss.
+                    // The atomic operation already ran; a failure afterwards
+                    // is ambiguous and must not be reported as success.
                     throw WorkspaceFailure(UNKNOWN_OUTCOME)
                 }
 

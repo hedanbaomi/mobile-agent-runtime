@@ -8,9 +8,11 @@ import kotlin.math.abs
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
+import runtime.mobileagent.knowledge.ImportStage
 import runtime.mobileagent.knowledge.MemoryBlobSink
 import runtime.mobileagent.knowledge.RetrievalUnavailableReason
 import runtime.mobileagent.knowledge.VectorIndexPort
+import runtime.mobileagent.knowledge.sha256Hex
 
 /**
  * Convergence tests for multi-KB retrieval (§5–§7):
@@ -166,7 +168,66 @@ class RetrievalConvergenceTest {
     }
 
     @Test
-    fun deletedKnowledgeBaseInvalidatesCoverageAndIndex() {        val db = JdbcSqlConnection()
+    fun remoteEmbeddingDispatchIsRecordedWithoutQueryText() {
+        val db = JdbcSqlConnection()
+        Migrations.apply(db)
+        val api = CountingQueryEmbedder("api-space-manifest", 8)
+        val repo = KnowledgeRepository(db, MemoryBlobSink(), apiEmbedder = api)
+        val kb = repo.createKnowledgeBase("API library", embeddingSpaceId = api.spaceId)
+        val job = repo.importBytes(
+            "api.txt",
+            "text/plain",
+            "remote embedding manifest evidence".toByteArray(),
+            false,
+            kb,
+            embeddingIsApi = true,
+            embeddingConsent = true,
+        )
+        assertEquals(ImportStage.READY, job.stage)
+        val importCalls = api.calls
+        assertTrue(importCalls > 0)
+
+        // A cache-miss query dispatches the provider exactly once and records it.
+        val query = "remote embedding manifest evidence query"
+        val first = repo.retrieve("run-remote-1", query, 8, listOf(kb))
+        assertEquals(importCalls + 1, api.calls)
+        assertEquals(listOf(kb), first.usedRemoteEmbedding)
+
+        // An identical query reuses the durable vector cache: no new dispatch,
+        // and the flag stays empty (3f75 finding E scope honesty).
+        val second = repo.retrieve("run-remote-2", query, 8, listOf(kb))
+        assertEquals(importCalls + 1, api.calls)
+        assertTrue(second.usedRemoteEmbedding.isEmpty())
+
+        // The durable trace is keyed by digest; no query text is stored.
+        val digest = sha256Hex(query.toByteArray(Charsets.UTF_8))
+        val rows = db.query(
+            "SELECT space_id, query_hash, dimension, created_at FROM embedding_query_vectors WHERE space_id = ?",
+            listOf(api.spaceId),
+        )
+        assertTrue(rows.any { it.string("query_hash") == digest })
+        rows.forEach { row ->
+            listOf(row.string("space_id"), row.string("query_hash"), row.string("created_at")).forEach { value ->
+                assertTrue(!value.contains("remote embedding manifest"), "durable trace must not hold query text")
+            }
+        }
+    }
+
+    @Test
+    fun localEmbeddingRetrievalRecordsNoRemoteDispatch() {
+        val db = JdbcSqlConnection()
+        Migrations.apply(db)
+        val repo = KnowledgeRepository(db, MemoryBlobSink())
+        val kb = repo.createKnowledgeBase("Local library")
+        repo.importBytes("doc.txt", "text/plain", "local retrieval evidence".toByteArray(), false, kb)
+        val result = repo.retrieve("run-local-1", "local retrieval evidence", 8, listOf(kb))
+        assertTrue(result.hits.isNotEmpty())
+        assertTrue(result.usedRemoteEmbedding.isEmpty())
+    }
+
+    @Test
+    fun deletedKnowledgeBaseInvalidatesCoverageAndIndex() {
+        val db = JdbcSqlConnection()
         Migrations.apply(db)
         val repo = KnowledgeRepository(db, MemoryBlobSink())
         val a = repo.createKnowledgeBase("A")
@@ -217,6 +278,18 @@ class RetrievalConvergenceTest {
         val documentId = citation.documentId
         repo.deleteDocument(documentId)
         assertTrue(repo.locateCitation(citation).removed, "deleted source must report removal")
+    }
+
+    private class CountingQueryEmbedder(
+        override val spaceId: String,
+        override val dimension: Int,
+    ) : runtime.mobileagent.knowledge.TextEmbedder {
+        var calls: Int = 0
+
+        override fun embed(text: String): FloatArray {
+            calls += 1
+            return FloatArray(dimension) { index -> (text.hashCode() + index).toFloat() }
+        }
     }
 
     private class CountingIndex(

@@ -133,6 +133,7 @@ class RunTools(
         override suspend fun invoke(call: ToolCall): ToolResult {
             if (call.callId.isBlank()) return ToolResult.Invalid("Tool call ID is missing")
             val routed: RoutedCall
+            val cached: ToolResult?
             val owner: ToolExecutor
             synchronized(callLock) {
                 val previous = callsByModelId[call.callId]?.firstOrNull { it.call == call }
@@ -140,34 +141,52 @@ class RunTools(
                     calls[it.runtimeInvocationId] = it
                     callsByModelId.getOrPut(call.callId) { mutableListOf() }.add(it)
                 }
-                routed.completed?.let { return it }
-                // A pending approval is already the result of this model call;
-                // do not re-enter the provider when a duplicate invoke arrives.
-                // Returning the same authorization signal keeps this call ID
-                // single-use while allowing the existing approval transition.
-                if (routed.needsApproval) return ToolResult.NeedsApproval
-                if (routed.inFlight) {
-                    return ToolResult.UnknownOutcome("Tool call is already executing; use a new call ID")
+                val current = routed.completed
+                if (current != null) {
+                    cached = current
+                    owner = routed.owner ?: return reject(routed, ToolResult.Invalid("Unknown or unavailable tool"))
+                } else {
+                    cached = null
+                    // A pending approval is already the result of this model call;
+                    // do not re-enter the provider when a duplicate invoke arrives.
+                    // Returning the same authorization signal keeps this call ID
+                    // single-use while allowing the existing approval transition.
+                    if (routed.needsApproval) return ToolResult.NeedsApproval
+                    if (routed.inFlight) {
+                        return ToolResult.UnknownOutcome("Tool call is already executing; use a new call ID")
+                    }
+                    owner = routed.owner ?: return reject(routed, ToolResult.Invalid("Unknown or unavailable tool"))
+                    routed.inFlight = true
                 }
-                owner = routed.owner ?: return reject(routed, ToolResult.Invalid("Unknown or unavailable tool"))
-                routed.inFlight = true
             }
+            // A cached result is disclosed only after re-validating the
+            // disclosure authorization; a lapsed grant denies without
+            // re-executing the tool and without leaking the old payload.
+            cached?.let { return discloseCached(routed, it, owner) }
             return execute(routed) { owner.invoke(routed.ownerCall()) }
         }
 
         override suspend fun approve(callId: String): ToolResult {
             val routed: RoutedCall
+            val cached: ToolResult?
             val owner: ToolExecutor
             synchronized(callLock) {
                 routed = routedFor(callId) ?: return ToolResult.Invalid("No pending tool call")
-                routed.completed?.let { return it }
-                owner = routed.owner ?: return ToolResult.Invalid("No pending tool approval")
-                if (!routed.needsApproval || routed.inFlight) return ToolResult.Invalid("No pending tool approval")
-                // Keep this transition short; the external operation is below
-                // and may suspend for the complete provider/backend deadline.
-                routed.needsApproval = false
-                routed.inFlight = true
+                val current = routed.completed
+                if (current != null) {
+                    cached = current
+                    owner = routed.owner ?: return ToolResult.Invalid("No pending tool approval")
+                } else {
+                    cached = null
+                    owner = routed.owner ?: return ToolResult.Invalid("No pending tool approval")
+                    if (!routed.needsApproval || routed.inFlight) return ToolResult.Invalid("No pending tool approval")
+                    // Keep this transition short; the external operation is below
+                    // and may suspend for the complete provider/backend deadline.
+                    routed.needsApproval = false
+                    routed.inFlight = true
+                }
             }
+            cached?.let { return discloseCached(routed, it, owner) }
             return execute(routed) { owner.approve(routed.runtimeInvocationId) }
         }
 
@@ -186,15 +205,23 @@ class RunTools(
         operation: suspend (ToolExecutor, String) -> ToolResult,
     ): ToolResult {
         val routed: RoutedCall
+        val cached: ToolResult?
         val owner: ToolExecutor
         synchronized(callLock) {
             routed = routedFor(callId) ?: return ToolResult.Invalid("No pending tool call")
-            routed.completed?.let { return it }
-            owner = routed.owner ?: return ToolResult.Invalid("No pending tool approval")
-            if (!routed.needsApproval || routed.inFlight) return ToolResult.Invalid("No pending tool approval")
-            routed.needsApproval = false
-            routed.inFlight = true
+            val current = routed.completed
+            if (current != null) {
+                cached = current
+                owner = routed.owner ?: return ToolResult.Invalid("No pending tool approval")
+            } else {
+                cached = null
+                owner = routed.owner ?: return ToolResult.Invalid("No pending tool approval")
+                if (!routed.needsApproval || routed.inFlight) return ToolResult.Invalid("No pending tool approval")
+                routed.needsApproval = false
+                routed.inFlight = true
+            }
         }
+        cached?.let { return discloseCached(routed, it, owner) }
         // Reject/expire are lifecycle mutations, not external execution.  They
         // must still reach ApprovalEngine after AgentRuntime has marked the run
         // BUDGET_EXHAUSTED or CANCELLED, so do not route them through execute(),
@@ -353,6 +380,31 @@ class RunTools(
         // pending route when possible; explicit lifecycle calls use the runtime
         // id and never depend on this compatibility path.
         routes.firstOrNull { it.needsApproval } ?: routes.singleOrNull()
+    }
+
+    /**
+     * Re-validate cached-result disclosure *without* re-executing the tool.
+     * Distinguishes "do not run the side effect again" (always true for a
+     * completed call) from "may the old output be disclosed again" (requires
+     * live authorization): a lapsed grant denies and purges the cache entry,
+     * but the original tool is never re-dispatched because of a revocation.
+     */
+    private suspend fun discloseCached(routed: RoutedCall, cached: ToolResult, owner: ToolExecutor): ToolResult {
+        if (!synchronized(run) { runActive() }) {
+            return reject(routed, ToolResult.Denied("Run is closed; cached tool output is unavailable"))
+        }
+        if (routes[routed.call.name] !== owner) {
+            return reject(routed, ToolResult.Denied("Tool authorization changed; cached tool output is unavailable"))
+        }
+        val allowed = try {
+            owner.authorizeReplay(routed.ownerCall())
+        } catch (_: Exception) {
+            false
+        }
+        if (!allowed) {
+            return reject(routed, ToolResult.Denied("Tool authorization changed; cached tool output is unavailable"))
+        }
+        return cached
     }
 
     private fun RoutedCall.ownerCall(): ToolCall = ToolCall(

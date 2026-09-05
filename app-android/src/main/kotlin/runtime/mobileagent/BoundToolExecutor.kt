@@ -26,6 +26,7 @@ import runtime.mobileagent.skills.ToolContext
 import runtime.mobileagent.skills.ToolExecutor
 import runtime.mobileagent.skills.ToolResult
 import runtime.mobileagent.skills.ToolSpec
+import runtime.mobileagent.skills.tooling.AuthorizationEvaluator
 import java.net.InetAddress
 import java.util.concurrent.CancellationException
 
@@ -77,6 +78,23 @@ private class BoundBuiltinToolExecutor(
             val bound = calls[callId]
                 ?: return@runInterruptible ToolResult.Invalid("No pending side-effect call")
             executeBound(bound) { broker -> broker.approve(callId) }
+        }
+    }
+
+    /**
+     * Disclosure check for RunTools-level cached results.  Re-validates the
+     * frozen call binding against live facts (knowledge scope, pinned Skill
+     * grant incl. expiry) without re-executing the tool and without
+     * disclosing the cached payload when authorization lapsed.
+     */
+    override suspend fun authorizeReplay(call: ToolCall): Boolean = mutex.withLock {
+        runInterruptible(Dispatchers.IO) {
+            val bound = calls[call.callId] ?: return@runInterruptible false
+            if (bound.call != call) return@runInterruptible false
+            // An unknown outcome is never replayable; terminal Denied/Invalid
+            // envelopes carry no sensitive payload and keep their status.
+            if (bound.rejected is ToolResult.UnknownOutcome) return@runInterruptible false
+            bound.authorized()
         }
     }
 
@@ -252,6 +270,8 @@ private class BoundBuiltinToolExecutor(
         if (!installed.enabled || installed.classification == CompatibilityClass.E || installed.packageHash != pinned.packageHash) return null
         val current = container.skills.grantsFor(pinned.installId).singleOrNull { it.grantId == pinned.grantId } ?: return null
         // Includes installId/packageHash/revision and every resource scope; no union helper.
+        // Expiry is time, not scope: an expired grant fails even when the stored row is unchanged.
+        if (AuthorizationEvaluator.isExpired(current.scopesJson)) return null
         return current.takeIf { !it.revoked && it == pinned }
     }
 

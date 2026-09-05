@@ -275,6 +275,13 @@ class SkillMemoryToolExecutor(
     private val snapshotId: String,
     /** Runtime-created trusted Skill envelope.  Null fails closed and exposes no memory tools. */
     private val trustedSkillId: String? = null,
+    /**
+     * Runtime-created trusted Skill envelopes for multi-Skill runs.  The
+     * single [trustedSkillId] is always included.  Each Skill's memory is
+     * exposed under its own runtime-assigned tool namespace
+     * (`memory_<opaque>.<operation>`); the model never supplies the identity.
+     */
+    private val trustedSkillIds: Set<String> = emptySet(),
     /** Frozen per-Skill capabilities; null means the canonical adapter supplies the intersection. */
     private val effectiveCapabilities: Set<String>? = null,
     private val limits: SkillMemoryLimits = SkillMemoryLimits(),
@@ -389,13 +396,28 @@ class SkillMemoryToolExecutor(
     private val callOperations = linkedMapOf<String, SkillMemoryDiagnosticOperation>()
     /** Prevents reject/expire/approve races from emitting more than one terminal event. */
     private val terminalCallIds = linkedSetOf<String>()
+    /** Bindings of terminally completed calls, for replay-disclosure revalidation. */
+    private val completedBindings = linkedMapOf<String, SkillMemoryBinding>()
+    /** Every trusted Skill identity for this run: single envelope plus the multi-Skill set. */
+    private val effectiveTrustedSkillIds: Set<String> =
+        (trustedSkillIds + listOfNotNull(trustedSkillId)).map { it.trim() }.filter { it.isNotBlank() }.toSet()
     private val discovered: Map<String, Discovered> = discover()
 
-    override val specs: List<ToolSpec> = buildSpecs(discovered.values.toList(), limits)
+    override val specs: List<ToolSpec> = buildSpecs(discovered.values.toList(), limits, effectiveTrustedSkillIds)
 
     override suspend fun invoke(call: ToolCall): ToolResult = withContext(Dispatchers.IO) {
         synchronized(lock) {
-            val requestedOperation = operationFor(call.name) ?: SkillMemoryDiagnosticOperation.UNKNOWN
+            // The tool name selects the runtime-assigned Skill namespace; the
+            // handle argument must belong to that same namespace.  The model
+            // never supplies the Skill identity itself.
+            val resolved = resolveTool(call.name)
+                ?: run {
+                    val requestedOperation = SkillMemoryDiagnosticOperation.UNKNOWN
+                    callOperations.putIfAbsent(call.callId, requestedOperation)
+                    emitTerminal(requestedOperation, call, null, errorCode = "unknown_tool")
+                    return@synchronized ToolResult.Invalid("Unknown memory tool")
+                }
+            val requestedOperation = resolved.operation
             if (!SKILL_MEMORY_CALL_ID.matches(call.callId)) {
                 emitTerminal(requestedOperation, call, null, errorCode = "invalid_call_id")
                 return@synchronized ToolResult.Invalid(
@@ -435,7 +457,11 @@ class SkillMemoryToolExecutor(
                     emitTerminal(operation, call, null, errorCode = "binding_unavailable", state = SkillMemoryDiagnosticState.DENIED)
                     return@synchronized ToolResult.Denied("Memory handle is unavailable")
                 }
-            if (!hasCapability(entry.binding, spec.name)) {
+            if (entry.binding.installId !in resolved.installIds) {
+                emitTerminal(operation, call, entry.handle, errorCode = "namespace_mismatch", state = SkillMemoryDiagnosticState.DENIED)
+                return@synchronized ToolResult.Denied("Memory handle does not belong to this Skill")
+            }
+            if (!hasCapability(entry.binding, resolved.legacyName)) {
                 emitTerminal(operation, call, entry.handle, errorCode = "capability_denied", state = SkillMemoryDiagnosticState.DENIED)
                 return@synchronized ToolResult.Denied("Memory capability is not granted")
             }
@@ -739,40 +765,44 @@ class SkillMemoryToolExecutor(
     private fun discover(): Map<String, Discovered> {
         val result = linkedMapOf<String, Discovered>()
         val collisions = mutableSetOf<String>()
-        // A snapshot can bind multiple Skills, but a memory tool invocation is always created
-        // inside one trusted Skill envelope.  Missing or ambiguous identity fails closed rather
-        // than putting an all-Snapshot handle enum into the model-visible schema.
-        val trustedId = trustedSkillId?.takeIf { it.isNotBlank() } ?: return emptyMap()
-        val candidates = runCatching {
-            repository.bindings(agentId, snapshotId, trustedId, effectiveCapabilities)
-        }.getOrElse { emptyList() }
-        candidates.asSequence()
-            .filter { binding ->
-                binding.agentId == agentId && binding.snapshotId == snapshotId &&
-                    binding.installId == trustedId &&
-                    binding.agentId.isNotBlank() && binding.snapshotId.isNotBlank() &&
-                    binding.installId.isNotBlank() && binding.packageHash.isNotBlank() &&
-                    binding.memorySpaceId.isNotBlank() && binding.enabled && binding.grantRevision > 0 &&
-                    binding.capabilities.any {
-                        it == SKILL_MEMORY_READ_CAPABILITY ||
-                            it == SKILL_MEMORY_SEARCH_CAPABILITY ||
-                            it == SKILL_MEMORY_APPEND_CAPABILITY ||
-                            it == SKILL_MEMORY_REPLACE_CAPABILITY
-                    }
-            }
-            .sortedWith(compareBy<SkillMemoryBinding> { it.installId }.thenBy { it.packageHash }.thenBy { it.memorySpaceId })
-            .forEach { binding ->
-                val handle = SkillMemoryHandle.forBinding(binding.installId, binding.packageHash, binding.memorySpaceId)
-                // A collision would make two capabilities ambiguous.  Refuse both entries rather
-                // than allowing a model to select an arbitrary namespace.
-                if (handle in collisions) return@forEach
-                if (handle !in result) {
-                    result[handle] = Discovered(handle, binding)
-                } else {
-                    result.remove(handle)
-                    collisions += handle
+        // A snapshot can bind multiple Skills.  Memory for every trusted Skill
+        // envelope is discovered; each Skill keeps its own opaque namespace and
+        // tool names, so one Skill can never address another Skill's memory.
+        // Missing or empty identity fails closed rather than putting an
+        // all-Snapshot handle enum into the model-visible schema.
+        if (effectiveTrustedSkillIds.isEmpty()) return emptyMap()
+        effectiveTrustedSkillIds.sorted().forEach { trustedId ->
+            val candidates = runCatching {
+                repository.bindings(agentId, snapshotId, trustedId, effectiveCapabilities)
+            }.getOrElse { emptyList() }
+            candidates.asSequence()
+                .filter { binding ->
+                    binding.agentId == agentId && binding.snapshotId == snapshotId &&
+                        binding.installId == trustedId &&
+                        binding.agentId.isNotBlank() && binding.snapshotId.isNotBlank() &&
+                        binding.installId.isNotBlank() && binding.packageHash.isNotBlank() &&
+                        binding.memorySpaceId.isNotBlank() && binding.enabled && binding.grantRevision > 0 &&
+                        binding.capabilities.any {
+                            it == SKILL_MEMORY_READ_CAPABILITY ||
+                                it == SKILL_MEMORY_SEARCH_CAPABILITY ||
+                                it == SKILL_MEMORY_APPEND_CAPABILITY ||
+                                it == SKILL_MEMORY_REPLACE_CAPABILITY
+                        }
                 }
-            }
+                .sortedWith(compareBy<SkillMemoryBinding> { it.installId }.thenBy { it.packageHash }.thenBy { it.memorySpaceId })
+                .forEach { binding ->
+                    val handle = SkillMemoryHandle.forBinding(binding.installId, binding.packageHash, binding.memorySpaceId)
+                    // A collision would make two capabilities ambiguous.  Refuse both entries rather
+                    // than allowing a model to select an arbitrary namespace.
+                    if (handle in collisions) return@forEach
+                    if (handle !in result) {
+                        result[handle] = Discovered(handle, binding)
+                    } else {
+                        result.remove(handle)
+                        collisions += handle
+                    }
+                }
+        }
         return result
     }
 
@@ -780,13 +810,15 @@ class SkillMemoryToolExecutor(
         val current = repository.current(agentId, snapshotId, original, effectiveCapabilities) ?: return false
         current == original && current.agentId == agentId && current.snapshotId == snapshotId &&
             current.enabled && current.grantRevision > 0 && current.packageHash == original.packageHash &&
-            current.memorySpaceId == original.memorySpaceId && current.installId == trustedSkillId
+            current.memorySpaceId == original.memorySpaceId && current.installId in effectiveTrustedSkillIds
     }.getOrDefault(false)
 
     private data class ExecutionResult(val json: String, val count: Int)
 
     private fun execute(name: String, args: JsonObject, binding: SkillMemoryBinding): ExecutionResult {
-        return when (name) {
+        // Namespaced multi-Skill names share their operation's implementation.
+        val legacy = NAMESPACED_TOOL.matchEntire(name)?.let { "memory_${it.destructured.component2()}" } ?: name
+        return when (legacy) {
             MEMORY_READ -> {
                 val maxBytes = args.intValue(MAX_BYTES) ?: limits.maxReadBytes
                 val value = repository.read(binding, args.requiredString(PATH), maxBytes)
@@ -819,6 +851,11 @@ class SkillMemoryToolExecutor(
                 emitTerminal(pendingCall.operation, pendingCall.call, entry.handle, errorCode = "output_limit")
                 return ToolResult.Invalid("Memory output exceeds the limit")
             }
+            // Bind the completed call to its Skill binding for replay-disclosure
+            // revalidation: a later duplicate discloses only while this binding
+            // is still current, and never re-reads memory on revocation.
+            // (Callers already hold the executor lock here.)
+            completedBindings[pendingCall.call.callId] = entry.binding
             emitTerminal(
                 operation = pendingCall.operation,
                 call = pendingCall.call,
@@ -846,6 +883,55 @@ class SkillMemoryToolExecutor(
         MEMORY_APPEND -> SKILL_MEMORY_APPEND_CAPABILITY in binding.capabilities
         MEMORY_REPLACE -> SKILL_MEMORY_REPLACE_CAPABILITY in binding.capabilities
         else -> false
+    }
+
+    /**
+     * Runtime-assigned Skill namespace embedded in multi-Skill tool names.
+     * Opaque digest of the code identity — never the raw install id — so the
+     * model addresses a namespace it cannot mint or confuse.
+     */
+    private data class ResolvedTool(
+        val operation: SkillMemoryDiagnosticOperation,
+        /** Legacy operation name used for capability mapping. */
+        val legacyName: String,
+        /** Skill installs addressable through this tool name. */
+        val installIds: Set<String>,
+        /** Their handles. */
+        val handles: Set<String>,
+    )
+
+    private fun namespaceFor(binding: SkillMemoryBinding): String =
+        memoryNamespace(binding.installId, binding.packageHash)
+
+    private fun resolveTool(name: String): ResolvedTool? {
+        operationFor(name)?.let { operation ->
+            // Legacy shared name, only exposed for single-Skill runs.
+            return ResolvedTool(operation, name, effectiveTrustedSkillIds, discovered.keys)
+        }
+        val match = NAMESPACED_TOOL.matchEntire(name) ?: return null
+        val (namespace, operation) = match.destructured
+        val legacyName = "memory_$operation"
+        val resolvedOperation = operationFor(legacyName) ?: return null
+        val installIds = discovered.values
+            .filter { namespaceFor(it.binding) == namespace }
+            .map { it.binding.installId }
+            .toSet()
+        if (installIds.isEmpty()) return null
+        val handles = discovered.filter { it.value.binding.installId in installIds }.keys
+        return ResolvedTool(resolvedOperation, legacyName, installIds, handles)
+    }
+
+    /**
+     * Disclosure check for RunTools-level cached memory results.  Re-checks
+     * the completed call's binding against live facts (grant, package,
+     * enablement) without re-reading memory and without disclosing when the
+     * Skill was revoked or replaced.
+     */
+    override suspend fun authorizeReplay(call: ToolCall): Boolean = withContext(Dispatchers.IO) {
+        synchronized(lock) {
+            val binding = completedBindings[call.callId] ?: return@synchronized false
+            isCurrent(binding)
+        }
     }
 
     private fun operationFor(name: String): SkillMemoryDiagnosticOperation? = when (name) {
@@ -931,17 +1017,21 @@ class SkillMemoryToolExecutor(
         errorCode.trim().lowercase().takeIf { it.matches(DIAGNOSTIC_ERROR_CODE) } ?: "memory_operation_failed"
 
     private fun validateArguments(name: String, args: JsonObject): String? {
-        val allowed = when (name) {
+        // Namespaced multi-Skill names share their operation's argument contract.
+        // Namespace membership itself is enforced separately as a Denied
+        // decision (not a validation error), so cross-Skill confusion is typed.
+        val legacy = NAMESPACED_TOOL.matchEntire(name)?.let { "memory_${it.destructured.component2()}" } ?: name
+        val allowed = when (legacy) {
             MEMORY_READ -> setOf(HANDLE, PATH, MAX_BYTES)
             MEMORY_SEARCH -> setOf(HANDLE, QUERY, MAX_RESULTS)
             MEMORY_APPEND, MEMORY_REPLACE -> setOf(HANDLE, PATH, TEXT, EXPECTED_VERSION)
-            else -> emptySet()
+            else -> return "Memory tool is unknown"
         }
-        val required = when (name) {
+        val required = when (legacy) {
             MEMORY_READ -> setOf(HANDLE, PATH)
             MEMORY_SEARCH -> setOf(HANDLE, QUERY)
             MEMORY_APPEND, MEMORY_REPLACE -> setOf(HANDLE, PATH, TEXT)
-            else -> emptySet()
+            else -> return "Memory tool is unknown"
         }
         if (args.keys.any { it !in allowed }) return "Memory parameter is unsupported"
         if (required.any { it !in args }) return "Memory parameter is missing"
@@ -1078,7 +1168,17 @@ class SkillMemoryToolExecutor(
         private const val VERSION_BYTES = 128
         private val DIAGNOSTIC_ERROR_CODE = Regex("[a-z0-9][a-z0-9_.-]{0,63}")
 
-        private fun buildSpecs(entries: List<Discovered>, limits: SkillMemoryLimits): List<ToolSpec> {
+        private fun buildSpecs(
+            entries: List<Discovered>,
+            limits: SkillMemoryLimits,
+            trustedIds: Set<String>,
+        ): List<ToolSpec> {
+            if (trustedIds.size > 1) return buildNamespacedSpecs(entries, limits)
+            return buildSharedSpecs(entries, limits)
+        }
+
+        /** Legacy shared names, only for single-Skill runs (no union possible). */
+        private fun buildSharedSpecs(entries: List<Discovered>, limits: SkillMemoryLimits): List<ToolSpec> {
             val readHandles = entries.filter { SKILL_MEMORY_READ_CAPABILITY in it.binding.capabilities }.map { it.handle }
             val searchHandles = entries.filter { SKILL_MEMORY_SEARCH_CAPABILITY in it.binding.capabilities }.map { it.handle }
             val appendHandles = entries.filter { SKILL_MEMORY_APPEND_CAPABILITY in it.binding.capabilities }.map { it.handle }
@@ -1098,6 +1198,47 @@ class SkillMemoryToolExecutor(
                 }
             }
         }
+
+        /**
+         * Per-Skill namespaces for multi-Skill runs.  Each Skill's memory is
+         * addressed only through `memory_<opaque>.<operation>` tools whose
+         * handle enum contains that Skill's handles alone.  A namespace that
+         * would cover two installs is dropped entirely (fail closed).
+         */
+        private fun buildNamespacedSpecs(entries: List<Discovered>, limits: SkillMemoryLimits): List<ToolSpec> {
+            val byNamespace = entries.groupBy { memoryNamespace(it.binding.installId, it.binding.packageHash) }
+            return buildList {
+                byNamespace.entries.sortedBy { it.key }.forEach { (namespace, group) ->
+                    if (group.map { it.binding.installId }.toSet().size != 1) return@forEach
+                    val readHandles = group.filter { SKILL_MEMORY_READ_CAPABILITY in it.binding.capabilities }.map { it.handle }
+                    val searchHandles = group.filter { SKILL_MEMORY_SEARCH_CAPABILITY in it.binding.capabilities }.map { it.handle }
+                    val appendHandles = group.filter { SKILL_MEMORY_APPEND_CAPABILITY in it.binding.capabilities }.map { it.handle }
+                    val replaceHandles = group.filter { SKILL_MEMORY_REPLACE_CAPABILITY in it.binding.capabilities }.map { it.handle }
+                    if (readHandles.isNotEmpty()) {
+                        add(ToolSpec("$MEMORY_NAMESPACE_PREFIX$namespace.read", "读取该 Skill 专属记忆（严格 UTF-8 MEMORY.md 或指定日期 journal）。memoryHandle 只能是本工具列出的句柄；每次调用需要确认。", schema(HANDLE, readHandles, required = listOf(HANDLE, PATH), path = true, maxBytes = true, limits = limits), SKILL_MEMORY_READ_CAPABILITY, true))
+                    }
+                    if (searchHandles.isNotEmpty()) {
+                        add(ToolSpec("$MEMORY_NAMESPACE_PREFIX$namespace.search", "在该 Skill 专属记忆文件中执行有界 literal text 查询。结果只包含相对路径、行号和安全片段；每次调用需要确认。", schema(HANDLE, searchHandles, required = listOf(HANDLE, QUERY), query = true, maxResults = true, limits = limits), SKILL_MEMORY_SEARCH_CAPABILITY, true))
+                    }
+                    if (appendHandles.isNotEmpty()) {
+                        add(ToolSpec("$MEMORY_NAMESPACE_PREFIX$namespace.append", "原子追加到该 Skill 专属 MEMORY.md 或指定日期 journal；使用返回的 version 做乐观并发控制；每次调用需要确认。", schema(HANDLE, appendHandles, required = listOf(HANDLE, PATH, TEXT), path = true, text = true, expected = true, limits = limits), SKILL_MEMORY_APPEND_CAPABILITY, true))
+                    }
+                    if (replaceHandles.isNotEmpty()) {
+                        add(ToolSpec("$MEMORY_NAMESPACE_PREFIX$namespace.replace", "原子创建或整文件替换该 Skill 专属 MEMORY.md 或指定日期 journal；使用返回的 version 做乐观并发控制；每次调用需要确认。", schema(HANDLE, replaceHandles, required = listOf(HANDLE, PATH, TEXT), path = true, text = true, expected = true, limits = limits), SKILL_MEMORY_REPLACE_CAPABILITY, true))
+                    }
+                }
+            }
+        }
+
+        /** Opaque runtime-assigned Skill namespace; the model can use it but never mint it. */
+        fun memoryNamespace(installId: String, packageHash: String): String {
+            val digest = java.security.MessageDigest.getInstance("SHA-256")
+                .digest("$installId\u0000$packageHash".toByteArray(Charsets.UTF_8))
+            return digest.take(6).joinToString("") { "%02x".format(it) }
+        }
+
+        private const val MEMORY_NAMESPACE_PREFIX = "memory_"
+        private val NAMESPACED_TOOL = Regex("memory_([0-9a-f]{12})\\.(read|search|append|replace)")
 
         private fun schema(
             handle: String,

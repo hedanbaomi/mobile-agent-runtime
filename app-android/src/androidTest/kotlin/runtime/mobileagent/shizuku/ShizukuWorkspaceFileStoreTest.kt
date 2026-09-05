@@ -59,6 +59,33 @@ class ShizukuWorkspaceFileStoreTest {
     }
 
     @Test
+    fun createOnlyWriteNeverOverwritesExternallyCreatedTarget() {
+        assertTrue(store.mkdir("race").contains("\"ok\":true"))
+        assertTrue(
+            store.write("race/file.txt", "first".toByteArray(StandardCharsets.UTF_8), replaceExisting = false)
+                .contains("\"created\":true"),
+        )
+        // Second create-only write fails without touching the original.
+        assertTrue(
+            store.write("race/file.txt", "second".toByteArray(StandardCharsets.UTF_8), replaceExisting = false)
+                .contains("\"code\":\"TARGET_EXISTS\""),
+        )
+        assertTrue(store.read("race/file.txt", 1024).contains("first"))
+        // External creation between the caller's check and commit is the same
+        // violation: simulate it by creating the target out of band, then
+        // attempting a create-only write over it.
+        Files.write(
+            root.toPath().resolve("Download/MobileAgentRuntime-Shizuku/race/external.txt"),
+            "external".toByteArray(StandardCharsets.UTF_8),
+        )
+        assertTrue(
+            store.write("race/external.txt", "candidate".toByteArray(StandardCharsets.UTF_8), replaceExisting = false)
+                .contains("\"code\":\"TARGET_EXISTS\""),
+        )
+        assertTrue(store.read("race/external.txt", 1024).contains("external"))
+    }
+
+    @Test
     fun typedStatAndAtomicMoveReportTheDestinationAndRejectReplayLikeTargets() {
         assertTrue(store.mkdir("source").contains("\"ok\":true"))
         assertTrue(store.write("source/item.txt", "payload".toByteArray(StandardCharsets.UTF_8), false).contains("\"ok\":true"))

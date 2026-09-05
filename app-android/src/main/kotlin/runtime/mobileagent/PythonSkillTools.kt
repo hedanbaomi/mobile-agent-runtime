@@ -34,6 +34,12 @@ import runtime.mobileagent.python.PythonCapabilityBroker
 import runtime.mobileagent.python.PythonExecutionRequest
 import runtime.mobileagent.python.PythonPackageSource
 import runtime.mobileagent.skills.*
+import runtime.mobileagent.skills.tooling.AuthorizationCheckpoint
+import runtime.mobileagent.skills.tooling.AuthorizationDecision
+import runtime.mobileagent.skills.tooling.AuthorizationEvaluator
+import runtime.mobileagent.skills.tooling.OwnerView
+import runtime.mobileagent.skills.tooling.PolicyView
+import runtime.mobileagent.skills.tooling.toGrantView
 import java.io.File
 import java.net.InetAddress
 import java.net.URI
@@ -199,6 +205,22 @@ private class PythonSkillToolExecutor(
         }
     }
 
+    /**
+     * Disclosure check for RunTools-level cached results.  Re-validates the
+     * frozen call binding (grant, ownership, expiry, knowledge scope) without
+     * re-entering the interpreter and without disclosing the cached payload
+     * when authorization lapsed.  A revoked grant therefore denies the replay
+     * instead of leaking the earlier output — and never re-executes the tool.
+     */
+    override suspend fun authorizeReplay(call: ToolCall): Boolean = mutex.withLock {
+        withContext(Dispatchers.IO) {
+            val bound = calls[call.callId] ?: return@withContext false
+            if (bound.call != call) return@withContext false
+            if (bound.unknownExternalOutcome) return@withContext false
+            authorized(bound)
+        }
+    }
+
     override suspend fun approve(callId: String): ToolResult = try { mutex.withLock {
         withContext(Dispatchers.IO) {
             if (unknownRun()) return@withContext ToolResult.UnknownOutcome(UNKNOWN_REASON)
@@ -313,18 +335,29 @@ private class PythonSkillToolExecutor(
         val maxRuntime = (objectOrNull(run.budgetJson)?.number("maxRuntimeMs") ?: 180_000).coerceIn(1, 180_000)
         if (Instant.now().toEpochMilli() - Instant.parse(run.startedAt ?: run.createdAt).toEpochMilli() > maxRuntime) return@runCatching false
         val agent = container.agents.get(snapshot.agentId) ?: return@runCatching false
-        if (bound.entry.installId !in snapshot.skillIds || bound.entry.installId !in agent.skillIds) return@runCatching false
-        if (!liveKnowledgeIds(bound.grant).containsAll(bound.knowledgeIds)) return@runCatching false
         val installed = container.skills.get(bound.entry.installId) ?: return@runCatching false
-        if (!installed.enabled || installed.classification != CompatibilityClass.B || installed.packageHash != bound.entry.packageHash) return@runCatching false
         val current = container.skills.grantsFor(installed.installId).singleOrNull { it.grantId == bound.grant.grantId }
             ?: return@runCatching false
-        if (current != bound.grant || current.revoked) return@runCatching false
-        val scopes = objectOrNull(current.scopesJson) ?: return@runCatching false
-        if ("expiresAt" in scopes) {
-            val expiry = scopes.string("expiresAt") ?: return@runCatching false
-            if (!Instant.parse(expiry).isAfter(Instant.now())) return@runCatching false
-        }
+        // Shared grant-validity decision table (revocation, expiry, ownership,
+        // frozen-grant comparison): the same vectors verify built-in and
+        // workspace routes, so one revocation cannot allow a replay here while
+        // denying it there.
+        val decision = AuthorizationEvaluator.evaluate(
+            grant = current.toGrantView(),
+            owner = OwnerView(
+                agentSkillIds = agent.skillIds.toSet(),
+                snapshotSkillIds = snapshot.skillIds.toSet(),
+                installEnabled = installed.enabled && installed.classification == CompatibilityClass.B,
+                installedPackageHash = installed.packageHash,
+            ),
+            resourceSkillId = bound.entry.installId,
+            grantedKnowledgeIds = liveKnowledgeIds(current),
+            resourceKnowledgeIds = bound.knowledgeIds,
+            policy = PolicyView(frozenGrant = bound.grant.toGrantView()),
+            checkpoint = AuthorizationCheckpoint.BEFORE_DISPATCH,
+        )
+        if (decision != AuthorizationDecision.GRANTED) return@runCatching false
+        objectOrNull(current.scopesJson) ?: return@runCatching false
         val inspection = container.skills.inspect(installed.installId)
         inspection.classification == CompatibilityClass.B && inspection.packageHash == bound.entry.packageHash &&
             inspection.manifest == bound.entry.manifest && inspection.rawManifestJson?.let { Json.parseToJsonElement(it) } == bound.entry.raw

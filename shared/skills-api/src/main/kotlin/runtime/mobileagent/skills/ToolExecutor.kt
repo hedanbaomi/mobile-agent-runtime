@@ -21,6 +21,17 @@ interface ToolExecutor {
 
     suspend fun approve(callId: String): ToolResult
 
+    /**
+     * Re-validate disclosure of an already-completed result *without*
+     * re-executing the tool.  Runtimes call this before serving a cached
+     * result for a repeated call id: `true` discloses the cache, `false`
+     * denies without dispatch and without leaking the old payload.
+     *
+     * The default allows disclosure (dispatch-time checks still apply to new
+     * calls).  Owners with live grant/scope facts must override.
+     */
+    suspend fun authorizeReplay(call: ToolCall): Boolean = true
+
     /** Explicitly deny a pending approval; implementations may resolve callId to requestId. */
     suspend fun reject(callId: String): ToolResult = ToolResult.Denied(ToolErrorCode.APPROVAL_DENIED.name)
 
@@ -45,6 +56,9 @@ class BlockingToolExecutor(
 
     override suspend fun approve(callId: String): ToolResult =
         runInterruptible(Dispatchers.IO) { broker.approve(callId) }
+
+    override suspend fun authorizeReplay(call: ToolCall): Boolean =
+        runInterruptible(Dispatchers.IO) { broker.authorizeReplay(call) }
 }
 
 /** Source-compatible descriptive alias for callers that name the bridge. */

@@ -9,6 +9,7 @@ import java.nio.ByteBuffer
 import java.nio.channels.FileChannel
 import java.nio.file.AtomicMoveNotSupportedException
 import java.nio.file.DirectoryStream
+import java.nio.file.FileAlreadyExistsException
 import java.nio.file.Files
 import java.nio.file.LinkOption
 import java.nio.file.Path
@@ -43,6 +44,15 @@ internal class InternalWorkspaceBackend(
         maxDirectoryEntries = limits.maxDirectoryEntries,
         enabled = true,
         supportsAtomicReplace = true,
+        mutationCapabilities = setOf(
+            WorkspaceMutationCapability.ATOMIC_PUBLISH,
+            WorkspaceMutationCapability.CREATE_IF_ABSENT,
+            WorkspaceMutationCapability.COMPARE_AND_REPLACE,
+            WorkspaceMutationCapability.BEST_EFFORT_CONFLICT_DETECTION,
+        ),
+        maxScannedEntries = limits.maxScannedEntries,
+        maxMetadataReads = limits.maxMetadataReads,
+        maxWallTimeMs = limits.maxWallTimeMs,
         operationCapabilities = setOf(
             InternalWorkspaceCapabilities.ENUMERATE,
             InternalWorkspaceCapabilities.LIST,
@@ -63,6 +73,28 @@ internal class InternalWorkspaceBackend(
     // first use instead of rejecting every ancestor up to '/'.  The root entry itself and every
     // entry below it are still checked with NOFOLLOW_LINKS before canonical containment checks.
     private var pinnedCanonicalRoot: Path? = null
+    /**
+     * Per-operation work budget (output limits do not bound execution cost).
+     * Set by [budgeted] for the duration of one public operation; the backend
+     * lock serializes public operations so the budget never leaks across them.
+     */
+    private var workBudget: ScanBudget? = null
+
+    private inline fun <T> budgeted(action: () -> T): T {
+        val previous = workBudget
+        workBudget = ScanBudget(limits)
+        try {
+            return action()
+        } finally {
+            workBudget = previous
+        }
+    }
+
+    /** Attribute read counted against the operation's metadata budget. */
+    private fun meteredSize(path: Path): Long {
+        workBudget?.metadataRead()
+        return Files.size(path)
+    }
 
     override fun list(
         relativePath: String,
@@ -105,12 +137,12 @@ internal class InternalWorkspaceBackend(
                             version = directoryVersion(child, skipUnsafeChildren = true),
                         )
                         Files.isRegularFile(child, LinkOption.NOFOLLOW_LINKS) -> {
-                            val size = Files.size(child)
+                            val size = meteredSize(child)
                             InternalWorkspaceEntry(
                                 path = childSegments.joinToString("/"),
                                 type = InternalWorkspaceEntryType.FILE,
                                 sizeBytes = size,
-                                version = fileVersion(child),
+                                version = casVersion(child),
                             )
                         }
                         else -> {
@@ -168,12 +200,12 @@ internal class InternalWorkspaceBackend(
                     version = directoryVersion(target),
                 )
                 Files.isRegularFile(target, LinkOption.NOFOLLOW_LINKS) -> {
-                    val size = Files.size(target)
+                    val size = meteredSize(target)
                     InternalWorkspaceStat(
                         path = segments.joinToString("/"),
                         type = InternalWorkspaceEntryType.FILE,
                         sizeBytes = size,
-                        version = fileVersion(target),
+                        version = casVersion(target),
                     )
                 }
                 else -> InternalWorkspaceErrorCode.ENTRY_UNSUPPORTED.error()
@@ -194,14 +226,14 @@ internal class InternalWorkspaceBackend(
             val file = resolveExisting(segments)
             rejectLink(file)
             if (!Files.isRegularFile(file, LinkOption.NOFOLLOW_LINKS)) InternalWorkspaceErrorCode.ENTRY_UNSUPPORTED.error()
-            val size = Files.size(file)
+            val size = meteredSize(file)
             checkFileSize(size)
             if (offsetBytes > size) InternalWorkspaceErrorCode.OFFSET_OUT_OF_RANGE.error()
             val bytes = readBounded(file, offsetBytes, maxBytes.toInt())
             InternalWorkspaceContent(
                 path = segments.joinToString("/"),
                 bytes = bytes,
-                version = fileVersion(file),
+                version = casVersion(file),
                 offsetBytes = offsetBytes,
                 totalBytes = size,
                 eof = bytes.size.toLong() >= size - offsetBytes,
@@ -230,11 +262,12 @@ internal class InternalWorkspaceBackend(
                 InternalWorkspaceErrorCode.ENTRY_NOT_FOUND.error()
             }
             val currentBytes = readAll(target)
-            // The public expected version is the same metadata token returned
-            // by stat/read; only the patch mutation's CAS check reads content.
-            val currentVersion = fileVersion(target)
+            // The public expected version is the CAS token returned by
+            // stat/read; the patch mutation additionally compares content so a
+            // same-size rewrite with a restored timestamp still conflicts.
+            val currentVersion = casVersion(target)
             val currentContentVersion = InternalWorkspaceVersions.bytes(currentBytes)
-            expectVersion(currentVersion, expected)
+            expectVersion(currentVersion, expected, legacyFileVersion(target))
             val currentText = when (val decoded = InternalWorkspaceVersions.decode(currentBytes)) {
                 is InternalWorkspaceResult.Failure -> decoded.error.code.error()
                 is InternalWorkspaceResult.Success -> decoded.value
@@ -265,15 +298,15 @@ internal class InternalWorkspaceBackend(
             try {
                 writeAndSync(temporary, patchedBytes)
                 val latestBytes = readAll(target)
-                val latestVersion = fileVersion(target)
+                val latestVersion = casVersion(target)
                 val latestContentVersion = InternalWorkspaceVersions.bytes(latestBytes)
                 if (latestVersion != currentVersion || latestContentVersion != currentContentVersion) {
                     InternalWorkspaceErrorCode.CONFLICT.error()
                 }
-                atomicReplace(temporary, target, parent, canonicalParent)
+                atomicReplace(temporary, target, parent, canonicalParent, replaceExisting = true)
                 rejectLink(target)
                 if (!Files.isRegularFile(target, LinkOption.NOFOLLOW_LINKS) ||
-                    Files.size(target) != patchedBytes.size.toLong()
+                    meteredSize(target) != patchedBytes.size.toLong()
                 ) {
                     InternalWorkspaceErrorCode.UNKNOWN_OUTCOME.error()
                 }
@@ -281,7 +314,7 @@ internal class InternalWorkspaceBackend(
                     path = segments.joinToString("/"),
                     bytes = patchedBytes.size.toLong(),
                     created = false,
-                    version = fileVersion(target),
+                    version = casVersion(target),
                 )
             } finally {
                 deleteTemporaryTree(temporary)
@@ -307,20 +340,55 @@ internal class InternalWorkspaceBackend(
             val existed = Files.exists(target, LinkOption.NOFOLLOW_LINKS)
             val oldVersion = if (existed) {
                 if (!Files.isRegularFile(target, LinkOption.NOFOLLOW_LINKS)) InternalWorkspaceErrorCode.ENTRY_EXISTS.error()
-                fileVersion(target)
+                casVersion(target)
             } else {
                 null
             }
-            expectVersion(oldVersion, expectedVersion)
+            val legacyVersion = if (existed) legacyFileVersion(target) else null
+            // A create-only violation is reported as ENTRY_EXISTS even when the
+            // caller also supplied an expected version: the primary fault is
+            // that the target exists, not that a token mismatched.
             if (existed && !replaceExisting) InternalWorkspaceErrorCode.ENTRY_EXISTS.error()
+            expectVersion(oldVersion, expectedVersion, legacyVersion)
             val usage = inspectUsage(rootPath)
-            val oldBytes = if (existed) Files.size(target) else 0L
+            val oldBytes = if (existed) meteredSize(target) else 0L
             if (usage.entries + (if (existed) 0 else 1) > limits.maxEntries) {
                 InternalWorkspaceErrorCode.ENTRY_LIMIT_EXCEEDED.error()
             }
             val retainedBytes = usage.bytes - oldBytes
             if (content.size.toLong() > limits.quotaBytes - retainedBytes) {
                 InternalWorkspaceErrorCode.QUOTA_EXCEEDED.error()
+            }
+
+            if (!replaceExisting) {
+                // Create-only file content goes through the kernel-atomic
+                // exclusive create: no temporary file, no rename, and no
+                // REPLACE flag anywhere on this path.  The claim either
+                // creates the file with our content or fails with EEXIST on
+                // every platform — a target created concurrently (another
+                // app, editor, git, adb, shell) can never be overwritten.
+                // expectedVersion here only accepts the MISSING sentinel.
+                if (expectedVersion != null && expectedVersion != InternalWorkspaceVersions.MISSING) {
+                    InternalWorkspaceErrorCode.CONFLICT.error()
+                }
+                try {
+                    WorkspaceAtomicCommit.writeExclusive(target, content)
+                } catch (_: FileAlreadyExistsException) {
+                    InternalWorkspaceErrorCode.ENTRY_EXISTS.error()
+                } catch (_: IOException) {
+                    InternalWorkspaceErrorCode.IO_ERROR.error()
+                }
+                verifyStableWorkspaceDirectoryAfterMutation(parent, canonicalParent)
+                rejectLink(target)
+                if (!Files.isRegularFile(target, LinkOption.NOFOLLOW_LINKS) || meteredSize(target) != content.size.toLong()) {
+                    InternalWorkspaceErrorCode.UNKNOWN_OUTCOME.error()
+                }
+                return@guarded InternalWorkspaceWrite(
+                    path = segments.joinToString("/"),
+                    bytes = content.size.toLong(),
+                    created = true,
+                    version = casVersion(target),
+                )
             }
 
             val temporary = parent.resolve(".mar-workspace-write-${UUID.randomUUID()}.tmp")
@@ -331,13 +399,13 @@ internal class InternalWorkspaceBackend(
                 val currentVersion = if (Files.exists(target, LinkOption.NOFOLLOW_LINKS)) {
                     rejectLink(target)
                     if (!Files.isRegularFile(target, LinkOption.NOFOLLOW_LINKS)) InternalWorkspaceErrorCode.CONFLICT.error()
-                    fileVersion(target)
+                    casVersion(target)
                 } else null
                 if (currentVersion != oldVersion) InternalWorkspaceErrorCode.CONFLICT.error()
-                expectVersion(currentVersion, expectedVersion)
-                atomicReplace(temporary, target, parent, canonicalParent)
+                expectVersion(currentVersion, expectedVersion, currentVersion?.let { legacyFileVersion(target) })
+                atomicReplace(temporary, target, parent, canonicalParent, replaceExisting)
                 rejectLink(target)
-                if (!Files.isRegularFile(target, LinkOption.NOFOLLOW_LINKS) || Files.size(target) != content.size.toLong()) {
+                if (!Files.isRegularFile(target, LinkOption.NOFOLLOW_LINKS) || meteredSize(target) != content.size.toLong()) {
                     // The atomic move already ran; a failed postcondition cannot prove whether a
                     // provider changed the target before the observation.  Report the explicit
                     // uncertain state instead of claiming that the old target survived.
@@ -346,8 +414,8 @@ internal class InternalWorkspaceBackend(
                 InternalWorkspaceWrite(
                     path = segments.joinToString("/"),
                     bytes = content.size.toLong(),
-                    created = !existed,
-                    version = fileVersion(target),
+                    created = currentVersion == null,
+                    version = casVersion(target),
                 )
             } finally {
                 deleteTemporaryTree(temporary)
@@ -369,7 +437,7 @@ internal class InternalWorkspaceBackend(
             rejectLinkIfPresent(directory)
             if (Files.exists(directory, LinkOption.NOFOLLOW_LINKS)) {
                 if (!Files.isDirectory(directory, LinkOption.NOFOLLOW_LINKS)) InternalWorkspaceErrorCode.ENTRY_EXISTS.error()
-                expectVersion(directoryVersion(directory), expectedVersion)
+                expectVersion(directoryVersion(directory), expectedVersion, legacyDirectoryVersion(directory))
                 return@guarded InternalWorkspaceDirectoryChange(
                     segments.joinToString("/"),
                     created = false,
@@ -403,8 +471,8 @@ internal class InternalWorkspaceBackend(
                 }
                 else -> InternalWorkspaceErrorCode.ENTRY_UNSUPPORTED.error()
             }
-            val currentVersion = if (type == InternalWorkspaceEntryType.FILE) fileVersion(target) else directoryVersion(target)
-            expectVersion(currentVersion, expectedVersion)
+            val currentVersion = if (type == InternalWorkspaceEntryType.FILE) casVersion(target) else directoryVersion(target)
+            expectVersion(currentVersion, expectedVersion, if (type == InternalWorkspaceEntryType.FILE) legacyFileVersion(target) else legacyDirectoryVersion(target))
             rejectLink(target)
             if (type == InternalWorkspaceEntryType.DIRECTORY && safeChildren(target).isNotEmpty()) {
                 InternalWorkspaceErrorCode.NON_EMPTY_DIRECTORY.error()
@@ -439,7 +507,11 @@ internal class InternalWorkspaceBackend(
                 InternalWorkspaceErrorCode.PATH_OUT_OF_SCOPE.error()
             }
             val version = nodeVersion(source, type)
-            expectVersion(version, expectedVersion)
+            expectVersion(
+                version,
+                expectedVersion,
+                if (type == InternalWorkspaceEntryType.FILE) legacyFileVersion(source) else legacyDirectoryVersion(source),
+            )
             val destination = destinationParent.resolve(destinationSegments.last())
             rejectLinkIfPresent(destination)
             if (Files.exists(destination, LinkOption.NOFOLLOW_LINKS)) {
@@ -451,7 +523,13 @@ internal class InternalWorkspaceBackend(
             val currentVersion = nodeVersion(resolveExisting(sourceSegments), type)
             if (currentVersion != version) InternalWorkspaceErrorCode.CONFLICT.error()
             try {
-                Files.move(source, destination, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING)
+                // A create-only move must not silently degrade to REPLACE_EXISTING:
+                // without the flag the commit fails when the destination appears.
+                if (replaceExisting) {
+                    Files.move(source, destination, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING)
+                } else {
+                    Files.move(source, destination, StandardCopyOption.ATOMIC_MOVE)
+                }
                 verifyStableWorkspaceDirectoryAfterMutation(destinationParent, canonicalDestinationParent)
                 verifyStableWorkspaceDirectoryAfterMutation(sourceParent, canonicalSourceParent)
                 forceDirectory(destinationParent)
@@ -460,6 +538,10 @@ internal class InternalWorkspaceBackend(
                 InternalWorkspaceErrorCode.UNSUPPORTED.error()
             } catch (_: UnsupportedOperationException) {
                 InternalWorkspaceErrorCode.UNSUPPORTED.error()
+            } catch (_: FileAlreadyExistsException) {
+                // The destination appeared between the pre-check and the commit.
+                // Report the create-only violation; the existing target is untouched.
+                InternalWorkspaceErrorCode.ENTRY_EXISTS.error()
             } catch (_: SecurityException) {
                 InternalWorkspaceErrorCode.UNKNOWN_OUTCOME.error()
             } catch (_: IOException) {
@@ -470,7 +552,7 @@ internal class InternalWorkspaceBackend(
                 sourceSegments.joinToString("/"),
                 destinationSegments.joinToString("/"),
                 type,
-                if (type == InternalWorkspaceEntryType.FILE) Files.size(destination) else null,
+                if (type == InternalWorkspaceEntryType.FILE) meteredSize(destination) else null,
                 nodeVersion(destination, type),
             )
         }
@@ -496,7 +578,11 @@ internal class InternalWorkspaceBackend(
                 InternalWorkspaceErrorCode.PATH_OUT_OF_SCOPE.error()
             }
             val version = nodeVersion(source, type)
-            expectVersion(version, expectedVersion)
+            expectVersion(
+                version,
+                expectedVersion,
+                if (type == InternalWorkspaceEntryType.FILE) legacyFileVersion(source) else legacyDirectoryVersion(source),
+            )
             val destination = destinationParent.resolve(destinationSegments.last())
             rejectLinkIfPresent(destination)
             if (Files.exists(destination, LinkOption.NOFOLLOW_LINKS)) {
@@ -519,13 +605,13 @@ internal class InternalWorkspaceBackend(
                 forceDirectory(destinationParent)
                 val currentVersion = nodeVersion(resolveExisting(sourceSegments), type)
                 if (currentVersion != version) InternalWorkspaceErrorCode.CONFLICT.error()
-                atomicReplace(temporary, destination, destinationParent, canonicalDestinationParent)
+                atomicReplace(temporary, destination, destinationParent, canonicalDestinationParent, replaceExisting)
                 rejectLink(destination)
                 InternalWorkspaceTransfer(
                     sourceSegments.joinToString("/"),
                     destinationSegments.joinToString("/"),
                     type,
-                    if (type == InternalWorkspaceEntryType.FILE) Files.size(destination) else null,
+                    if (type == InternalWorkspaceEntryType.FILE) meteredSize(destination) else null,
                     nodeVersion(destination, type),
                 )
             } finally {
@@ -641,6 +727,7 @@ internal class InternalWorkspaceBackend(
         Files.newDirectoryStream(directory).use { stream: DirectoryStream<Path> ->
             stream.forEach(children::add)
         }
+        workBudget?.visitNodes(children.size)
         return children
     }
 
@@ -745,7 +832,7 @@ internal class InternalWorkspaceBackend(
                 when {
                     Files.isDirectory(child, LinkOption.NOFOLLOW_LINKS) -> visit(child, depth + 1)
                     Files.isRegularFile(child, LinkOption.NOFOLLOW_LINKS) -> {
-                        val size = Files.size(child)
+                        val size = meteredSize(child)
                         if (enforceIndividualFileLimit) checkFileSize(size)
                         files++
                         if (size > limits.quotaBytes - bytes) InternalWorkspaceErrorCode.QUOTA_EXCEEDED.error()
@@ -762,7 +849,7 @@ internal class InternalWorkspaceBackend(
     private fun inspectNode(node: Path): Usage {
         rejectLink(node)
         if (Files.isRegularFile(node, LinkOption.NOFOLLOW_LINKS)) {
-            val size = Files.size(node)
+            val size = meteredSize(node)
             return Usage(files = 1, bytes = size, entries = 1)
         }
         if (!Files.isDirectory(node, LinkOption.NOFOLLOW_LINKS)) InternalWorkspaceErrorCode.ENTRY_UNSUPPORTED.error()
@@ -780,7 +867,7 @@ internal class InternalWorkspaceBackend(
                         visit(child, depth + 1)
                     }
                     Files.isRegularFile(child, LinkOption.NOFOLLOW_LINKS) -> {
-                        val size = Files.size(child)
+                        val size = meteredSize(child)
                         if (size > limits.quotaBytes - total.bytes) InternalWorkspaceErrorCode.QUOTA_EXCEEDED.error()
                         total = total.copy(files = total.files + 1, bytes = total.bytes + size)
                     }
@@ -797,7 +884,7 @@ internal class InternalWorkspaceBackend(
     }
 
     private fun readAll(file: Path): ByteArray {
-        val size = Files.size(file)
+        val size = meteredSize(file)
         if (size > limits.quotaBytes || size > Int.MAX_VALUE.toLong()) {
             InternalWorkspaceErrorCode.QUOTA_EXCEEDED.error()
         }
@@ -879,21 +966,33 @@ internal class InternalWorkspaceBackend(
         return output.joinToString("\n")
     }
 
-    private fun nodeType(node: Path): InternalWorkspaceEntryType = when {
-        Files.isRegularFile(node, LinkOption.NOFOLLOW_LINKS) -> InternalWorkspaceEntryType.FILE
-        Files.isDirectory(node, LinkOption.NOFOLLOW_LINKS) -> InternalWorkspaceEntryType.DIRECTORY
-        else -> InternalWorkspaceErrorCode.ENTRY_UNSUPPORTED.error()
+    private fun nodeType(node: Path): InternalWorkspaceEntryType {
+        workBudget?.metadataRead()
+        return when {
+            Files.isRegularFile(node, LinkOption.NOFOLLOW_LINKS) -> InternalWorkspaceEntryType.FILE
+            Files.isDirectory(node, LinkOption.NOFOLLOW_LINKS) -> InternalWorkspaceEntryType.DIRECTORY
+            else -> InternalWorkspaceErrorCode.ENTRY_UNSUPPORTED.error()
+        }
     }
 
     private fun nodeVersion(node: Path, type: InternalWorkspaceEntryType): String =
-        if (type == InternalWorkspaceEntryType.FILE) fileVersion(node) else directoryVersion(node)
+        if (type == InternalWorkspaceEntryType.FILE) casVersion(node) else directoryVersion(node)
+
+    /** Pre-upgrade metadata token accepted for in-flight callers holding an old version. */
+    private fun legacyFileVersion(node: Path): String = metadataVersion(node)
+
+    private fun legacyDirectoryVersion(node: Path): String = directoryDigest(node)
 
     /**
-     * Metadata-only version for list/stat/read. A file tool must not read an
-     * entire large file merely to enumerate or stat it. The opaque digest
-     * keeps platform file keys and timestamps out of the model contract.
+     * Metadata-only version for list/stat/read envelopes. A file tool must not
+     * read an entire large file merely to enumerate or stat it. The opaque
+     * digest keeps platform file keys and timestamps out of the model
+     * contract.  This is explicitly NOT a content version: a same-size rewrite
+     * with a restored timestamp reproduces it, so it must never be described
+     * as a strong content CAS.
      */
-    private fun fileVersion(file: Path): String {
+    private fun metadataVersion(file: Path): String {
+        workBudget?.metadataRead()
         val attributes = Files.readAttributes(
             file,
             BasicFileAttributes::class.java,
@@ -909,7 +1008,33 @@ internal class InternalWorkspaceBackend(
         )
     }
 
-    private fun directoryVersion(directory: Path, skipUnsafeChildren: Boolean = false): String {
+    private fun directoryVersion(directory: Path, skipUnsafeChildren: Boolean = false): String =
+        "d1:" + directoryDigest(directory, skipUnsafeChildren)
+
+    /**
+     * Content version: SHA-256 of the file bytes, available only for files
+     * that fit the bounded read envelope.  Larger files return null and their
+     * CAS token falls back to the metadata version (best-effort).
+     */
+    private fun contentVersion(file: Path): String? {
+        val size = meteredSize(file)
+        if (size > limits.maxReadBytes) return null
+        return InternalWorkspaceVersions.bytes(readBounded(file, 0L, size.toInt()))
+    }
+
+    /**
+     * Compare-and-swap token returned by stat/read/list and accepted as
+     * expectedVersion.  `c1:` tokens are content hashes (strong CAS);
+     * `m1:` tokens are metadata digests (best-effort: same-size rewrites with
+     * restored timestamps are invisible to them).  Callers must treat the
+     * token as opaque and must not infer a guarantee from its presence.
+     */
+    private fun casVersion(file: Path): String {
+        val content = runCatching { contentVersion(file) }.getOrNull()
+        return if (content != null) "c1:$content" else "m1:" + metadataVersion(file)
+    }
+
+    private fun directoryDigest(directory: Path, skipUnsafeChildren: Boolean = false): String {
         val digest = InternalWorkspaceVersions.digest()
         val children = (if (skipUnsafeChildren) listableChildren(directory) else safeChildren(directory))
             .sortedBy { it.fileName.toString() }
@@ -929,7 +1054,7 @@ internal class InternalWorkspaceBackend(
                         else -> return@forEach
                     }
                 } else nodeType(child)
-                val size = if (type == InternalWorkspaceEntryType.FILE) Files.size(child) else -1L
+                val size = if (type == InternalWorkspaceEntryType.FILE) meteredSize(child) else -1L
                 // A directory version is an optimistic-concurrency token for the complete
                 // subtree, not merely for its immediate metadata.  Including the child version
                 // means a same-sized file edit and a nested-directory edit both invalidate a
@@ -938,7 +1063,7 @@ internal class InternalWorkspaceBackend(
                 val childVersion = if (type == InternalWorkspaceEntryType.FILE) {
                     directoryFileVersion(child)
                 } else {
-                    directoryVersion(child, skipUnsafeChildren)
+                    directoryDigest(child, skipUnsafeChildren)
                 }
                 digest.update("$name\u0000${type.name}\u0000$size\u0000$childVersion\u0000".toByteArray(Charsets.UTF_8))
             } catch (failure: InternalWorkspaceFailure) {
@@ -966,15 +1091,15 @@ internal class InternalWorkspaceBackend(
      * remain visible even on filesystems with coarse timestamp resolution.
      */
     private fun directoryFileVersion(file: Path): String {
-        val metadataVersion = fileVersion(file)
-        val size = Files.size(file)
-        if (size > limits.maxReadBytes) return metadataVersion
-        val contentVersion = InternalWorkspaceVersions.bytes(readBounded(file, 0L, size.toInt()))
-        return "$metadataVersion\u0000$contentVersion"
+        val metadata = metadataVersion(file)
+        val size = meteredSize(file)
+        if (size > limits.maxReadBytes) return metadata
+        val content = InternalWorkspaceVersions.bytes(readBounded(file, 0L, size.toInt()))
+        return "$metadata\u0000$content"
     }
 
     private fun readBounded(file: Path, offset: Long, maximum: Int): ByteArray {
-        val available = (Files.size(file) - offset).coerceAtLeast(0L)
+        val available = (meteredSize(file) - offset).coerceAtLeast(0L)
         val target = minOf(available, maximum.toLong()).coerceAtMost(Int.MAX_VALUE.toLong()).toInt()
         val output = ByteArrayOutputStream(target)
         Files.newByteChannel(file, StandardOpenOption.READ, LinkOption.NOFOLLOW_LINKS).use { channel ->
@@ -1005,7 +1130,7 @@ internal class InternalWorkspaceBackend(
             while (buffer.hasRemaining()) channel.write(buffer)
             if (channel is FileChannel) channel.force(true) else InternalWorkspaceErrorCode.UNSUPPORTED.error()
         }
-        if (Files.size(file) != content.size.toLong()) InternalWorkspaceErrorCode.IO_ERROR.error()
+        if (meteredSize(file) != content.size.toLong()) InternalWorkspaceErrorCode.IO_ERROR.error()
     }
 
     private fun atomicReplace(
@@ -1013,18 +1138,24 @@ internal class InternalWorkspaceBackend(
         target: Path,
         parent: Path,
         expectedCanonicalParent: Path,
+        replaceExisting: Boolean,
     ) {
         try {
             // The temporary node has already been created.  If its parent changed before the
             // rename, the exact mutation location is no longer provable and must not be retried.
             verifyStableWorkspaceDirectoryAfterMutation(parent, expectedCanonicalParent)
-            Files.move(temporary, target, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING)
+            // Create-only commits go through the shared primitive without replace
+            // semantics, so a target created after the pre-check fails the commit
+            // instead of being silently overwritten.
+            WorkspaceAtomicCommit.publish(temporary, target, replaceExisting)
             verifyStableWorkspaceDirectoryAfterMutation(parent, expectedCanonicalParent)
             forceDirectory(parent)
         } catch (_: AtomicMoveNotSupportedException) {
             InternalWorkspaceErrorCode.UNSUPPORTED.error()
         } catch (_: UnsupportedOperationException) {
             InternalWorkspaceErrorCode.UNSUPPORTED.error()
+        } catch (_: FileAlreadyExistsException) {
+            InternalWorkspaceErrorCode.ENTRY_EXISTS.error()
         } catch (_: SecurityException) {
             // The move may have completed before a directory-sync permission failure surfaced;
             // never turn that uncertain state into a retryable ordinary permission error.
@@ -1106,7 +1237,10 @@ internal class InternalWorkspaceBackend(
     }
 
     private fun <T> guarded(action: () -> T): InternalWorkspaceResult<T> = try {
-        InternalWorkspaceResult.Success(action())
+        // Every public operation runs under one work budget: output limits do
+        // not bound execution cost (fingerprint recursion, quota walks), so
+        // the budget caps scanned nodes, metadata reads, and wall time here.
+        budgeted { InternalWorkspaceResult.Success(action()) }
     } catch (failure: InternalWorkspaceFailure) {
         InternalWorkspaceResult.Failure(failure.error)
     } catch (_: SecurityException) {

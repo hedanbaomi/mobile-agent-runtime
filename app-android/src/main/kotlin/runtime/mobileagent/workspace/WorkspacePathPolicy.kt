@@ -81,11 +81,24 @@ internal object WorkspacePathPolicy {
     }
 }
 
-internal fun expectVersion(actual: String?, expected: String?) {
+/**
+ * Compare-and-swap check for opaque version tokens.
+ *
+ * @param actual the current token observed immediately before commit.
+ * @param expected the caller-supplied token, or null for no check.
+ * @param legacy an older token encoding still accepted for in-flight callers
+ * (for example metadata digests issued before content-hash tokens existed).
+ * Legacy acceptance preserves old behavior for outstanding tokens only; new
+ * tokens must use the current encoding.  Outstanding tokens are process-local
+ * and expire on restart.
+ */
+internal fun expectVersion(actual: String?, expected: String?, legacy: String? = null) {
     if (expected == null) return
     val matches = when {
         expected == InternalWorkspaceVersions.MISSING -> actual == null
-        else -> expected == actual
+        expected == actual -> true
+        legacy != null && expected == legacy -> true
+        else -> false
     }
     if (!matches) InternalWorkspaceErrorCode.CONFLICT.error()
 }

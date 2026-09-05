@@ -545,6 +545,10 @@ class RuntimeIntegration(
                 skillId = skillId,
                 skillRevision = skillRevision,
                 trustedSkillEnvelope = trustedSkillEnvelope,
+                // Freeze every snapshot Skill identity for namespaced memory
+                // tools.  Discovery still filters by live grant/capability
+                // bindings, so ungranted Skills expose nothing.
+                trustedSkillIds = (snapshot.skillIds.toSet() + listOfNotNull(skillId)).filter { it.isNotBlank() }.toSet(),
                 authoritySelection = authorityManager.selection.value,
             ),
         )
@@ -1226,6 +1230,9 @@ class RuntimeIntegration(
             agentId = frozen.agentId,
             snapshotId = frozen.snapshotId,
             trustedSkillId = frozen.skillId,
+            // Every frozen Skill identity gets its own runtime-assigned tool
+            // namespace; single-Skill runs keep the legacy shared names.
+            trustedSkillIds = frozen.trustedSkillIds,
             effectiveCapabilities = frozen.effectiveCapabilityNames,
             diagnosticSink = skillMemoryDiagnosticSink,
             diagnosticRefProvider = skillMemoryDiagnosticRefProvider,

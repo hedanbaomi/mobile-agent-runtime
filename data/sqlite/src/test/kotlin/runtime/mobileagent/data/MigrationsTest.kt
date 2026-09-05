@@ -615,6 +615,86 @@ class MigrationsTest {
         }
     }
 
+    @Test
+    fun v17RunManifestColumnIsAddedAndOldRowsStayEmpty() {
+        JdbcSqlConnection().use { db ->
+            Migrations.apply(db)
+            assertTrue(
+                db.query("PRAGMA table_info(runs)").any { it.string("name") == "manifest_json" },
+            )
+            val profiles = ProfileRepository(db)
+            profiles.createProvider(
+                ProviderProfile(
+                    id = "provider.manifest.v17",
+                    name = "Manifest v17",
+                    apiFormat = ApiFormat.OPENAI_COMPATIBLE,
+                    baseUrl = "https://manifest-v17.example.invalid/v1",
+                    secretRef = "manifest-secret",
+                    revision = 1,
+                ),
+            )
+            profiles.createModel(
+                ModelProfile(
+                    id = "model.manifest.v17",
+                    providerId = "provider.manifest.v17",
+                    role = ModelRole.CHAT,
+                    modelId = "chat-manifest-v17",
+                    capabilities = emptySet(),
+                    contextLimit = 1_000,
+                    outputLimit = 100,
+                    revision = 1,
+                ),
+            )
+            val agent = AgentRepository(db).saveWithPrompt(
+                AgentProfile(
+                    id = "agent.manifest.v17",
+                    name = "Manifest v17 Agent",
+                    promptRevisionId = "prompt.manifest.v17",
+                    chatProfileId = "model.manifest.v17",
+                    revision = 0,
+                ),
+                "Portable prompt",
+            )
+            val snapshot = AgentRepository(db).createSnapshot(agent.id, "snapshot.manifest.v17")
+            val conversation = ConversationRepository(db).create(snapshot.id, "Manifest v17", "conversation.manifest.v17")
+            val runs = RunRepository(db)
+            // A pre-manifest row keeps the empty object: it must not invent frozen facts.
+            val legacy = runs.save(
+                runtime.mobileagent.domain.RunRecord(
+                    runId = "run.manifest.legacy",
+                    snapshotId = snapshot.id,
+                    conversationId = conversation.id,
+                    createdAt = "2026-09-05T00:00:00Z",
+                ),
+            )
+            assertEquals("{}", legacy.manifestJson)
+            assertEquals("{}", runs.get("run.manifest.legacy")?.manifestJson)
+
+            val manifest = runtime.mobileagent.domain.RunManifest(
+                runId = "run.manifest.v17",
+                conversationId = conversation.id,
+                snapshotId = snapshot.id,
+                agentRevision = 0,
+                promptRevisionId = "prompt.manifest.v17",
+                providerId = "provider.manifest.v17",
+                providerRevision = 1,
+                modelId = "chat-manifest-v17",
+                modelRevision = 1,
+            )
+            val stamped = runs.save(
+                runtime.mobileagent.domain.RunRecord(
+                    runId = "run.manifest.v17",
+                    snapshotId = snapshot.id,
+                    conversationId = conversation.id,
+                    createdAt = "2026-09-05T00:00:01Z",
+                    manifestJson = manifest.toJson(),
+                ),
+            )
+            assertEquals(manifest, runtime.mobileagent.domain.RunManifest.fromJson(stamped.manifestJson))
+            assertEquals(manifest, runs.get("run.manifest.v17")?.let { runtime.mobileagent.domain.RunManifest.fromJson(it.manifestJson) })
+        }
+    }
+
     private fun insertLegacyModel(
         db: SqlConnection,
         id: String,

@@ -36,6 +36,7 @@ import runtime.mobileagent.skills.ToolSpec
 import runtime.mobileagent.skills.asToolExecutor
 import runtime.mobileagent.skills.tooling.ToolError
 import runtime.mobileagent.skills.tooling.ToolErrorCode
+import runtime.mobileagent.skills.tooling.ToolOutcome
 
 /**
  * Executes one agent run while keeping model, tool, cancellation and budget
@@ -513,8 +514,13 @@ class AgentRuntime(
                     activeDispatch = null
 
                     val (status, modelText) = when (result) {
-                        is ToolResult.Denied -> "DENIED" to result.reason
-                        is ToolResult.Invalid -> "INVALID" to result.reason
+                        // Every terminal outcome projects to a JSON-object ToolOutcome
+                        // envelope. Denied/Invalid previously crossed this boundary as
+                        // plain strings, which the conversation store (requiring a JSON
+                        // object) rejected — turning a legitimate denial into a run
+                        // INTERNAL error. They now stay DENIED/INVALID and durable.
+                        is ToolResult.Denied -> "DENIED" to ToolOutcome.denied(message = result.reason)
+                        is ToolResult.Invalid -> "INVALID" to ToolOutcome.invalid(message = result.reason)
                         is ToolResult.Value -> "VALUE" to result.json
                         is ToolResult.Failure -> "FAILED" to safeToolFailure(result.error)
                         is ToolResult.UnknownOutcome -> "UNKNOWN_OUTCOME" to result.reason
@@ -658,18 +664,10 @@ class AgentRuntime(
             ToolErrorCode.OPERATION_UNAVAILABLE -> "This workspace operation is unavailable on the selected backend."
             else -> "The tool could not complete the request."
         }
-        return JsonObject(
-            mapOf(
-                "ok" to JsonPrimitive(false),
-                "error" to JsonObject(
-                    mapOf(
-                        "code" to JsonPrimitive(error.code.name),
-                        "message" to JsonPrimitive(message),
-                        "retryable" to JsonPrimitive(error.retryable),
-                    ),
-                ),
-            ),
-        ).toString()
+        // Unified ToolOutcome envelope: FAILED carries the same ok/status/error
+        // shape as DENIED/INVALID/UNKNOWN_OUTCOME so every durable consumer can
+        // read a typed status/code instead of guessing from free text.
+        return ToolOutcome.failed(error.copy(message = message))
     }
 
     private fun untrustedToolImages(callId: String): String =
@@ -830,7 +828,7 @@ class AgentRuntime(
         const val UNKNOWN_MODEL_OUTCOME = "UNKNOWN_OUTCOME: Model dispatch may have started; do not automatically retry"
         const val UNKNOWN_TOOL_OUTCOME = "UNKNOWN_OUTCOME: Tool dispatch may have started; do not automatically retry"
         const val UNKNOWN_CANCELLED_OUTCOME = "UNKNOWN_OUTCOME: Dispatch may have started before cancellation; do not automatically retry"
-        const val UNKNOWN_TOOL_ENVELOPE = "{\"status\":\"UNKNOWN_OUTCOME\",\"code\":\"UNKNOWN_OUTCOME\",\"automaticReplayAllowed\":false}"
+        const val UNKNOWN_TOOL_ENVELOPE = "{\"ok\":false,\"status\":\"UNKNOWN_OUTCOME\",\"error\":{\"code\":\"UNKNOWN_OUTCOME\",\"message\":\"Tool dispatch may have started; do not automatically retry\",\"retryable\":false},\"automaticReplayAllowed\":false}"
         const val RESULT_SUMMARY_LIMIT = 1024
         const val TOOL_RESULT_MAX_BYTES = 1_048_576
     }

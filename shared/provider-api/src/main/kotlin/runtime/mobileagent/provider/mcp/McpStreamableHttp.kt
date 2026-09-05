@@ -466,7 +466,10 @@ class RemoteMcpAdapter(
         )
         val result = try {
             val root = transport.request(request).responseFor(requestId, this)
-            val error = root["error"]?.jsonObject
+            // A JSON-RPC success may carry an explicit "error":null member;
+            // only a non-null object is a protocol error (?.jsonObject would
+            // throw on JsonNull instead of returning null).
+            val error = root["error"] as? JsonObject
             if (error != null) {
                 McpCallResult.ProtocolError(
                     callId,

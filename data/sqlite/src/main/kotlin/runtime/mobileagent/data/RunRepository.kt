@@ -28,7 +28,7 @@ class RunRepository(
         }
         requireReferences(record)
         db.execute(
-            "INSERT INTO runs(run_id,snapshot_id,conversation_id,state,budget_json,stop_reason,error_code,model_rounds,tool_calls,input_tokens,output_tokens,started_at,finished_at,created_at,updated_at,retry_acknowledged_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "INSERT INTO runs(run_id,snapshot_id,conversation_id,state,budget_json,stop_reason,error_code,model_rounds,tool_calls,input_tokens,output_tokens,started_at,finished_at,created_at,updated_at,retry_acknowledged_at,manifest_json) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             record.args(),
         )
         return record
@@ -49,11 +49,11 @@ class RunRepository(
                 )
             }
             db.execute(
-                "UPDATE runs SET state=?,budget_json=?,stop_reason=?,error_code=?,model_rounds=?,tool_calls=?,input_tokens=?,output_tokens=?,started_at=?,finished_at=?,updated_at=?,retry_acknowledged_at=? WHERE run_id=?",
+                "UPDATE runs SET state=?,budget_json=?,stop_reason=?,error_code=?,model_rounds=?,tool_calls=?,input_tokens=?,output_tokens=?,started_at=?,finished_at=?,updated_at=?,retry_acknowledged_at=?,manifest_json=? WHERE run_id=?",
                 listOf(
                     record.state.name, record.budgetJson, record.stopReason, record.errorCode, record.modelRounds,
                     record.toolCalls, record.inputTokens, record.outputTokens, record.startedAt, record.finishedAt,
-                    record.updatedAt, record.retryAcknowledgedAt, record.runId,
+                    record.updatedAt, record.retryAcknowledgedAt, record.manifestJson, record.runId,
                 ),
             )
             record
@@ -200,6 +200,9 @@ class RunRepository(
         }
         val budget = runCatching { json.parseToJsonElement(record.budgetJson) }.getOrElse { throw invalid("Run budget must be JSON") }
         if (budget !is kotlinx.serialization.json.JsonObject) throw invalid("Run budget must be a JSON object")
+        val manifest = runCatching { json.parseToJsonElement(record.manifestJson) }.getOrElse { throw invalid("Run manifest must be JSON") }
+        if (manifest !is kotlinx.serialization.json.JsonObject) throw invalid("Run manifest must be a JSON object")
+        if (record.manifestJson.toByteArray(Charsets.UTF_8).size > MAX_JSON) throw invalid("Run manifest is too large")
     }
 
     private fun validate(invocation: ToolInvocation) {
@@ -230,6 +233,7 @@ class RunRepository(
         createdAt = string("created_at"),
         updatedAt = string("updated_at"),
         retryAcknowledgedAt = string("retry_acknowledged_at").ifBlank { null },
+        manifestJson = string("manifest_json").ifBlank { "{}" },
     )
 
     private fun SqlRow.toInvocation(): ToolInvocation = ToolInvocation(
@@ -249,6 +253,7 @@ class RunRepository(
     private fun RunRecord.args(): List<Any?> = listOf(
         runId, snapshotId, conversationId, state.name, budgetJson, stopReason, errorCode, modelRounds,
         toolCalls, inputTokens, outputTokens, startedAt, finishedAt, createdAt, updatedAt, retryAcknowledgedAt,
+        manifestJson,
     )
 
     private fun requireId(value: String, field: String) {

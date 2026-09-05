@@ -187,6 +187,70 @@ class BuiltinToolsTest {
     }
 
     @Test
+    fun expiredGrantDeniesFreshDispatchWithoutExecution() {
+        var calls = 0
+        var grant = PermissionGrant("g", "i", "h", setOf("knowledge.read"), knowledgeBaseIds = setOf("kb-a"))
+        val tools = ToolBroker(
+            emptySet(),
+            ToolContext(
+                search = { _, _, _ -> "{}" },
+                readDocument = { _, _ -> calls += 1; "private-A-marker" },
+                grantedKnowledgeBaseIds = setOf("kb-a"),
+                documentKnowledgeBaseId = { "kb-a" },
+            ),
+            liveGrant = { grant },
+        )
+        assertTrue(tools.invoke(ToolCall("r1", "read_document", """{"documentId":"doc-a"}""")) is ToolResult.Value)
+        grant = grant.copy(scopesJson = """{"expiresAt":"2020-01-01T00:00:00Z"}""")
+        val denied = tools.invoke(ToolCall("r2", "read_document", """{"documentId":"doc-a"}"""))
+        assertTrue(denied is ToolResult.Denied)
+        assertEquals(1, calls)
+    }
+
+    @Test
+    fun expiredGrantDeniesCachedReplayWithoutDisclosure() {
+        var grant = PermissionGrant("g", "i", "h", setOf("knowledge.read"), knowledgeBaseIds = setOf("kb-a"))
+        val tools = ToolBroker(
+            emptySet(),
+            ToolContext(
+                search = { _, _, _ -> "{}" },
+                readDocument = { _, _ -> "private-A-marker" },
+                grantedKnowledgeBaseIds = setOf("kb-a"),
+                documentKnowledgeBaseId = { "kb-a" },
+            ),
+            liveGrant = { grant },
+        )
+        val call = ToolCall("r1", "read_document", """{"documentId":"doc-a"}""")
+        assertTrue(tools.invoke(call) is ToolResult.Value)
+        // Same call id, same request: expiry alone (no scope-row change) must
+        // deny the replay instead of disclosing the cached payload.
+        grant = grant.copy(scopesJson = """{"expiresAt":"2020-01-01T00:00:00Z"}""")
+        val replay = tools.invoke(call)
+        assertTrue(replay is ToolResult.Denied)
+        assertTrue(tools.authorizeReplay(call).not())
+    }
+
+    @Test
+    fun healthyGrantAllowsReplayDisclosure() {
+        val grant = PermissionGrant("g", "i", "h", setOf("knowledge.read"), knowledgeBaseIds = setOf("kb-a"))
+        val tools = ToolBroker(
+            emptySet(),
+            ToolContext(
+                search = { _, _, _ -> "{}" },
+                readDocument = { _, _ -> "private-A-marker" },
+                grantedKnowledgeBaseIds = setOf("kb-a"),
+                documentKnowledgeBaseId = { "kb-a" },
+            ),
+            liveGrant = { grant },
+        )
+        val call = ToolCall("r1", "read_document", """{"documentId":"doc-a"}""")
+        val first = tools.invoke(call)
+        assertTrue(first is ToolResult.Value)
+        assertTrue(tools.authorizeReplay(call))
+        assertEquals(first, tools.invoke(call))
+    }
+
+    @Test
     fun pendingHttpApproveAfterRevokeIsDenied() {
         var grant = PermissionGrant(
             "g",

@@ -284,8 +284,12 @@ internal class SafWorkspaceBackend(
             enabled = probe.enabled,
             // SAF providers do not promise atomic replacement for this API.  Existing-file
             // writes, and replacement moves/copies, therefore fail closed as UNSUPPORTED.
+            // Mutation capabilities stay at the default best-effort conflict
+            // detection: SAF versions are metadata tokens, and conditional
+            // creates cannot be proven against a concurrent provider writer.
             supportsAtomicReplace = false,
             operationCapabilities = probe.operationCapabilities,
+            mutationCapabilities = setOf(WorkspaceMutationCapability.BEST_EFFORT_CONFLICT_DETECTION),
         )
     }
 
@@ -998,6 +1002,9 @@ internal class SafWorkspaceBackend(
      * A metadata-only token is used for SAF stat/list/read and conditional
      * mutation checks. Reading a document just to version it would defeat
      * chunked reads and make a large provider file block the file tool.
+     * This is explicitly a best-effort conflict hint, not a content version:
+     * same-size provider rewrites are invisible to it, and conditional creates
+     * cannot be made atomic against another writer (see write/createDirectory).
      */
     private fun fileVersion(uri: Uri): String = metadataVersion(queryDocument(safeDocumentUri(uri)))
 

@@ -30,6 +30,8 @@ import java.util.concurrent.CancellationException
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicReference
+import runtime.mobileagent.skills.tooling.AuthorizationDecision
+import runtime.mobileagent.skills.tooling.AuthorizationEvaluator
 import runtime.mobileagent.skills.tooling.ToolError
 
 data class ToolSpec(
@@ -90,6 +92,21 @@ class ToolBroker(
         caps.toSet(), ctx.grantedKnowledgeBaseIds.toSet(), ctx.allowedHosts.toSet(), ctx.grantedMethods.toSet(), grant,
     )
 
+    /**
+     * Disclosure check for cached results: the completion scope must still
+     * match live facts AND the grant must not have expired since completion.
+     * Scope-equality alone cannot see time, so expiry is evaluated explicitly
+     * at BEFORE_DISCLOSURE.  Never re-executes the tool.
+     */
+    @Synchronized
+    fun authorizeReplay(call: ToolCall): Boolean {
+        val grant = liveGrant?.invoke()
+        if (AuthorizationEvaluator.isExpired(grant?.scopesJson)) return false
+        val remembered = completed[call.callId] ?: return true
+        if (remembered is ToolResult.UnknownOutcome) return false
+        return completionScopes[call.callId] == scope(activeCapabilities(grant), activeContext(grant), grant)
+    }
+
     @Synchronized
     fun invoke(call: ToolCall): ToolResult {
         if (call.callId.isBlank()) return ToolResult.Invalid("Tool call ID is missing")
@@ -97,9 +114,17 @@ class ToolBroker(
             return ToolResult.Invalid("Tool call ID was already used for a different request")
         }
         val grant = liveGrant?.invoke()
+        // Expiry is time, not scope: it must fail both fresh dispatch and
+        // cached disclosure even when the stored scope row is unchanged.
+        if (AuthorizationEvaluator.isExpired(grant?.scopesJson)) {
+            return ToolResult.Denied(AuthorizationEvaluator.deniedReason(AuthorizationDecision.EXPIRED))
+        }
         val caps = activeCapabilities(grant)
         val ctx = activeContext(grant)
         completed[call.callId]?.let { remembered ->
+            if (remembered is ToolResult.UnknownOutcome) {
+                return ToolResult.Denied("Tool outcome is unknown; it cannot be replayed")
+            }
             if (completionScopes[call.callId] != scope(caps, ctx, grant)) {
                 return ToolResult.Denied("Current grant changed; cached tool output is unavailable")
             }
@@ -135,6 +160,9 @@ class ToolBroker(
         val call = pending.remove(callId) ?: return ToolResult.Invalid("No pending side-effect call")
         completed.remove(callId)
         val grant = liveGrant?.invoke()
+        if (AuthorizationEvaluator.isExpired(grant?.scopesJson)) {
+            return ToolResult.Denied(AuthorizationEvaluator.deniedReason(AuthorizationDecision.EXPIRED))
+        }
         val caps = activeCapabilities(grant)
         val ctx = activeContext(grant)
         completionScopes[call.callId] = scope(caps, ctx, grant)

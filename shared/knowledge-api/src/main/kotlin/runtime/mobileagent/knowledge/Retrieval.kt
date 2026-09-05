@@ -41,7 +41,51 @@ data class RetrievalResult(
     val hits: List<SearchHit>,
     val citations: List<Citation>,
     val warnings: List<String> = emptyList(),
+    /** Structured retrieval scope for this run; null only for pre-coverage callers. */
+    val coverage: RetrievalCoverage? = null,
 )
+
+/** Why a requested knowledge base did not participate in this retrieval. */
+enum class RetrievalUnavailableReason {
+    KB_NOT_FOUND,
+    CONSENT_MISSING,
+    EMBEDDING_UNAVAILABLE,
+    GENERATION_NOT_READY,
+    QUERY_NOT_AUTHORIZED,
+    PROVIDER_UNAVAILABLE,
+    RETRIEVAL_DISABLED,
+}
+
+data class UnavailableSource(
+    val knowledgeBaseId: String,
+    val reason: RetrievalUnavailableReason,
+)
+
+/**
+ * Durable retrieval-scope fact for one run: which KBs were requested, which
+ * were actually searched, and why the rest were skipped.  Carries no query
+ * text, so it is safe for diagnostics, prompts, and persistence.
+ */
+data class RetrievalCoverage(
+    val requested: List<String> = emptyList(),
+    val searched: List<String> = emptyList(),
+    val unavailable: List<UnavailableSource> = emptyList(),
+) {
+    val partial: Boolean get() = unavailable.isNotEmpty()
+
+    /**
+     * Short runtime-authored scope note.  It is injected into the model
+     * prompt by the runtime (never by the model) and shown in the UI, so the
+     * model and the user both see that some sources did not participate.
+     * Returns null when coverage is complete.
+     */
+    fun notice(): String? {
+        if (!partial) return null
+        val detail = unavailable.joinToString("; ") { "${it.knowledgeBaseId}: ${it.reason.name}" }
+        return "Partial retrieval scope: searched ${searched.size}/${requested.size} knowledge bases. " +
+            "Unavailable: $detail. Do not claim the missing sources were searched."
+    }
+}
 
 object CitationMap {
     fun bind(runId: String, hits: List<SearchHit>): List<Citation> =
@@ -68,6 +112,19 @@ fun interface KnowledgeSearch {
 }
 
 object ReciprocalRankFusion {
+    /**
+     * Fuse per-source rankings into one order-invariant ranking.
+     *
+     * Each input list must be ONE source ranking (one KB's lexical hits, or
+     * one KB's vector hits) in that source's own rank order.  Callers must
+     * NOT concatenate several KBs into one list first: concatenated positions
+     * depend on KB traversal order and would bias the fusion.  Scores are
+     * rank-based only, so embedding spaces with incomparable cosine scales
+     * are never mixed by raw score.
+     *
+     * Ties break deterministically on (chunkId, knowledgeBaseId), so the
+     * output is identical for any traversal order over the same KB set.
+     */
     fun merge(rankings: List<List<SearchHit>>, k: Int = 60): List<SearchHit> {
         val scores = linkedMapOf<String, Double>()
         val docs = linkedMapOf<String, SearchHit>()
@@ -77,9 +134,13 @@ object ReciprocalRankFusion {
                 docs.putIfAbsent(hit.chunkId, hit)
             }
         }
-        return scores.entries.sortedByDescending { it.value }.map { (id, score) ->
-            docs.getValue(id).copy(score = score)
-        }
+        return scores.keys
+            .sortedWith(
+                compareByDescending<String> { scores.getValue(it) }
+                    .thenBy { docs.getValue(it).chunkId }
+                    .thenBy { docs.getValue(it).knowledgeBaseId },
+            )
+            .map { id -> docs.getValue(id).copy(score = scores.getValue(id)) }
     }
 }
 

@@ -358,6 +358,26 @@ internal class ShizukuWorkspaceFileStore(
                 if (newFiles > MAX_FILES || newBytes > MAX_TOTAL_BYTES) throw WorkspaceFailure(LIMIT)
             }
 
+            if (!replaceExisting) {
+                // Create-only file content goes through the kernel-atomic
+                // exclusive create: no temporary file, no rename, and no
+                // REPLACE flag anywhere on this path, so a concurrently
+                // created target can never be overwritten on any platform.
+                try {
+                    runtime.mobileagent.workspace.WorkspaceAtomicCommit.writeExclusive(target, content)
+                } catch (_: java.nio.file.FileAlreadyExistsException) {
+                    throw WorkspaceFailure(TARGET_EXISTS)
+                }
+                rejectSymbolicLink(parent)
+                rejectSymbolicLink(target)
+                if (!Files.isRegularFile(target, LinkOption.NOFOLLOW_LINKS) || Files.size(target) != content.size.toLong()) {
+                    throw WorkspaceFailure(WRITE_UNVERIFIED)
+                }
+                return@guarded success("write", segments)
+                    .put("bytes", content.size)
+                    .put("created", true)
+            }
+
             val temporary = parent.resolve(".mar-shizuku-${UUID.randomUUID()}.tmp")
             try {
                 createAndSync(temporary, content)
@@ -372,12 +392,9 @@ internal class ShizukuWorkspaceFileStore(
                     }
                 }
                 try {
-                    Files.move(
-                        temporary,
-                        target,
-                        StandardCopyOption.ATOMIC_MOVE,
-                        StandardCopyOption.REPLACE_EXISTING,
-                    )
+                    // Replace path only: create-only content uses the exclusive
+                    // create above and never reaches this rename.
+                    runtime.mobileagent.workspace.WorkspaceAtomicCommit.publish(temporary, target, replaceExisting = true)
                 } catch (_: AtomicMoveNotSupportedException) {
                     throw WorkspaceFailure(ATOMIC_REPLACE_UNAVAILABLE)
                 } catch (_: UnsupportedOperationException) {
@@ -525,6 +542,9 @@ internal class ShizukuWorkspaceFileStore(
                         arrayOf(StandardCopyOption.ATOMIC_MOVE)
                     }
                     Files.move(source, destination, *options)
+                } catch (_: java.nio.file.FileAlreadyExistsException) {
+                    // The destination appeared between the pre-check and the commit.
+                    throw WorkspaceFailure(TARGET_EXISTS)
                 } catch (_: AtomicMoveNotSupportedException) {
                     throw WorkspaceFailure(ATOMIC_REPLACE_UNAVAILABLE)
                 } catch (_: UnsupportedOperationException) {

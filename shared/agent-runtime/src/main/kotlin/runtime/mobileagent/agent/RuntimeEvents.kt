@@ -220,6 +220,8 @@ fun toolResultUserMessage(resultJson: String): String? {
         "CONFLICT" -> "工作区内容已变化，请读取最新状态后重试。"
         "UNSUPPORTED_ENTRY" -> "该工作区条目类型不受支持，未打开该条目。"
         "OPERATION_UNAVAILABLE" -> "所选工作区后端暂不支持该操作。"
+        "INVALID_REQUEST" -> "工具请求参数无效，未执行任何操作。"
+        "APPROVAL_DENIED" -> "该工具调用已被拒绝，未执行任何操作。"
         else -> null
     }
 }

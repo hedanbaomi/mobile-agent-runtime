@@ -8,6 +8,9 @@ import java.nio.CharBuffer
 import java.nio.charset.CharacterCodingException
 import java.nio.charset.CodingErrorAction
 import java.nio.charset.StandardCharsets
+import java.nio.file.Files
+import java.nio.file.Path
+import java.nio.file.StandardCopyOption
 import java.security.MessageDigest
 import java.security.SecureRandom
 import java.util.Base64
@@ -129,6 +132,16 @@ internal data class InternalWorkspaceLimits(
     val maxDirectoryEntries: Int = 256,
     /** Read requests are bounded to the same 256 KiB envelope as text writes/files. */
     val maxReadBytes: Long = 256L * 1024L,
+    /**
+     * Work budget, separate from the output budget: the maximum directory
+     * nodes one operation may *scan* (including fingerprint recursion into
+     * subtrees whose entries are never returned).
+     */
+    val maxScannedEntries: Int = 8192,
+    /** Maximum filesystem metadata reads (attributes, sizes) per operation. */
+    val maxMetadataReads: Int = 8192,
+    /** Wall-clock bound per operation in milliseconds. */
+    val maxWallTimeMs: Long = 15_000L,
 ) {
     init {
         require(maxFileBytes > 0)
@@ -140,6 +153,43 @@ internal data class InternalWorkspaceLimits(
         require(maxEntries > 0)
         require(maxDirectoryEntries > 0)
         require(maxReadBytes > 0 && maxReadBytes <= maxFileBytes)
+        require(maxScannedEntries > 0)
+        require(maxMetadataReads > 0)
+        require(maxWallTimeMs > 0)
+    }
+}
+
+/**
+ * Per-operation execution budget.  Output limits ([InternalWorkspaceLimits.maxDirectoryEntries]
+ * for returned entries) do not bound execution cost: a shallow list fingerprint
+ * recurses into subtrees, and quota checks walk the tree.  This budget caps
+ * the work itself.  Exhaustion reports ENTRY_LIMIT_EXCEEDED — a bounded,
+ * retryable-as-smaller-scope limit, never an internal error.
+ */
+internal class ScanBudget(
+    private val limits: InternalWorkspaceLimits,
+    private val clock: () -> Long = System::currentTimeMillis,
+) {
+    private val deadlineMs = clock() + limits.maxWallTimeMs
+    var scannedEntries: Int = 0
+        private set
+    var metadataReads: Int = 0
+        private set
+
+    fun visitNodes(count: Int = 1) {
+        scannedEntries += count
+        if (scannedEntries > limits.maxScannedEntries) InternalWorkspaceErrorCode.ENTRY_LIMIT_EXCEEDED.error()
+        checkTime()
+    }
+
+    fun metadataRead() {
+        metadataReads += 1
+        if (metadataReads > limits.maxMetadataReads) InternalWorkspaceErrorCode.ENTRY_LIMIT_EXCEEDED.error()
+        checkTime()
+    }
+
+    private fun checkTime() {
+        if (clock() > deadlineMs) InternalWorkspaceErrorCode.ENTRY_LIMIT_EXCEEDED.error()
     }
 }
 
@@ -163,7 +213,129 @@ internal data class InternalWorkspaceDescriptor(
      * exposes this set through the canonical [WorkspaceBackend.capabilities] property.
      */
     val operationCapabilities: Set<CapabilityId> = emptySet(),
+    /**
+     * Honest mutation semantics.  These names are deliberately distinct: not every
+     * backend that can publish a file atomically can also create-if-absent without
+     * a time-of-check/time-of-use race, and a metadata version is not a content
+     * version.  Tool schema and UI copy must reflect this set, never the generic
+     * phrase "atomic write".
+     */
+    val mutationCapabilities: Set<WorkspaceMutationCapability> = setOf(
+        WorkspaceMutationCapability.BEST_EFFORT_CONFLICT_DETECTION,
+    ),
+    /**
+     * Work budget for a single operation, separate from output limits:
+     * scanned nodes, metadata reads, and wall-clock milliseconds.  Listing a
+     * parent may scan more metadata than it returns; these bounds keep that
+     * cost explicit instead of hiding it behind the returned-page size.
+     */
+    val maxScannedEntries: Int = 8192,
+    val maxMetadataReads: Int = 8192,
+    val maxWallTimeMs: Long = 15_000L,
 )
+
+/**
+ * Backend mutation capabilities, from strongest to weakest.  A backend
+ * advertises only the properties its commit primitive can prove:
+ *
+ * - [ATOMIC_PUBLISH]: the final rename is one atomic filesystem operation; a
+ *   crash can leave the old or the new content, never a torn mix.
+ * - [CREATE_IF_ABSENT]: a create-only commit fails with ENTRY_EXISTS/TARGET_EXISTS
+ *   when the target appears before the commit, and never overwrites it.  The
+ *   commit must not silently degrade to REPLACE_EXISTING.
+ * - [COMPARE_AND_REPLACE]: an expected-version write compares a content hash
+ *   (files within the read envelope), so a same-size rewrite with a restored
+ *   timestamp still conflicts.
+ * - [BEST_EFFORT_CONFLICT_DETECTION]: conflicts are detected from metadata or
+ *   re-reads only; no content-hash guarantee is made (large files, directory
+ *   trees, DocumentsProvider backends).
+ * - [RECOVERABLE_EDIT]: the backend retains the pre-edit content/version so a
+ *   failed or unwanted edit can be restored.  No current backend claims this;
+ *   recovery is provided by version tokens plus read-before-write at the tool
+ *   layer.
+ */
+internal enum class WorkspaceMutationCapability {
+    ATOMIC_PUBLISH,
+    CREATE_IF_ABSENT,
+    COMPARE_AND_REPLACE,
+    BEST_EFFORT_CONFLICT_DETECTION,
+    RECOVERABLE_EDIT,
+}
+
+/**
+ * The commit primitives for file publishes and create-only commits.
+ * The temporary file must already be fully written and synced by the caller.
+ *
+ * Platform warning (verified by probe on Windows/NTFS, 2026-09-05): a plain
+ * `Files.move(tmp, target, ATOMIC_MOVE)` *without* `REPLACE_EXISTING`
+ * silently replaces the target on Windows instead of failing.  The rename
+ * therefore cannot prove create-only semantics on every platform — it is
+ * correct on Linux/Android (the product platform) but not portable.
+ *
+ * Consequently create-only *file content* must go through [writeExclusive],
+ * whose kernel-atomic exclusive create (`O_CREAT|O_EXCL` / `CREATE_NEW`)
+ * either creates the file with our content or fails with
+ * [FileAlreadyExistsException] on every platform and filesystem, with no
+ * rename and no `REPLACE` flag anywhere on that path.  There is no silent
+ * downgrade to replace semantics by construction.
+ */
+internal object WorkspaceAtomicCommit {
+    fun publish(temporary: Path, target: Path, replaceExisting: Boolean) {
+        if (replaceExisting) {
+            Files.move(temporary, target, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING)
+        } else {
+            // Correct on Linux/Android (rename fails when the target exists).
+            // File content with create-only semantics must use writeExclusive
+            // instead; this branch remains for moves/copies whose pre-checks
+            // already run under the backend lock.
+            Files.move(temporary, target, StandardCopyOption.ATOMIC_MOVE)
+        }
+    }
+
+    /**
+     * Atomically create [target] with exactly [content], or throw
+     * [FileAlreadyExistsException] leaving any existing target untouched.
+     * Portable across platforms and filesystems (including ones without
+     * hard-link or atomic-rename-if-absent support).  A successfully returned
+     * call has fsynced the complete content; a failed call removes the partial
+     * claim when it can still prove the claim is its own.
+     */
+    fun writeExclusive(target: Path, content: ByteArray) {
+        val channel = try {
+            Files.newByteChannel(
+                target,
+                java.nio.file.StandardOpenOption.CREATE_NEW,
+                java.nio.file.StandardOpenOption.WRITE,
+                java.nio.file.LinkOption.NOFOLLOW_LINKS,
+            )
+        } catch (already: java.nio.file.FileAlreadyExistsException) {
+            throw already
+        }
+        val claimKey = runCatching {
+            Files.readAttributes(target, java.nio.file.attribute.BasicFileAttributes::class.java, java.nio.file.LinkOption.NOFOLLOW_LINKS).fileKey()
+        }.getOrNull()
+        try {
+            channel.use { open ->
+                var buffer = java.nio.ByteBuffer.wrap(content)
+                while (buffer.hasRemaining()) open.write(buffer)
+                (open as? java.nio.channels.FileChannel)?.force(true)
+                    ?: throw java.io.IOException("fsync unavailable")
+            }
+            if (Files.size(target) != content.size.toLong()) throw java.io.IOException("short write")
+        } catch (failure: java.io.IOException) {
+            removeClaim(target, claimKey)
+            throw failure
+        }
+    }
+
+    private fun removeClaim(target: Path, claimKey: Any?) {
+        if (claimKey == null) return // Cannot prove ownership; leave the entry for diagnosis.
+        val current = runCatching {
+            Files.readAttributes(target, java.nio.file.attribute.BasicFileAttributes::class.java, java.nio.file.LinkOption.NOFOLLOW_LINKS).fileKey()
+        }.getOrNull() ?: return
+        if (current == claimKey) runCatching { Files.deleteIfExists(target) }
+    }
+}
 
 internal data class InternalWorkspaceEntry(
     val path: String,

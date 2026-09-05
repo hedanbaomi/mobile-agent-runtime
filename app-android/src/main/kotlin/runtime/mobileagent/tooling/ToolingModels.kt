@@ -239,6 +239,12 @@ data class ToolExecutionContext(
     /** Only Runtime-created skill envelopes may carry a skill grant. */
     val trustedSkillEnvelope: Boolean = false,
     /**
+     * Every trusted Skill identity frozen for this run.  Multi-Skill memory
+     * tools are namespaced per identity from this set; the single [skillId]
+     * envelope (used by shell/workspace approval paths) stays unchanged.
+     */
+    val trustedSkillIds: Set<String> = emptySet(),
+    /**
      * Frozen provider selection for this run.  A missing selection is the
      * safe default and therefore cannot authorize a privileged workspace.
      * The live provider seam in [UnifiedWorkspaceToolExecutor] may provide a
@@ -252,6 +258,8 @@ data class ToolExecutionContext(
         require(policyVersion >= 0)
         require(skillId == null || trustedSkillEnvelope)
         require(skillRevision == null || skillRevision > 0)
+        require(trustedSkillIds.all { it.isNotBlank() })
+        require(skillId == null || trustedSkillIds.isEmpty() || skillId in trustedSkillIds)
     }
 
     val effectiveCapabilityNames: Set<String> get() = effectiveCapabilities.map { it.value }.toSet()

@@ -44,7 +44,10 @@ object Migrations {
     // v16 adds the explicit agent_snapshot_id conversation projection used by
     // the thread/workspace integration. snapshot_id remains for legacy data
     // and repository consumers; both values must describe the same snapshot.
-    const val VERSION = 16
+    // v17 adds the frozen per-run manifest (versions/fingerprints only, never
+    // secrets) to runs.  Existing rows keep the empty object: they predate
+    // frozen facts and must not invent them.
+    const val VERSION = 17
 
     private val statements = listOf(
         "CREATE TABLE IF NOT EXISTS schema_version (version INTEGER NOT NULL PRIMARY KEY)",
@@ -109,7 +112,7 @@ object Migrations {
         "CREATE TABLE IF NOT EXISTS approval_records (approval_id TEXT PRIMARY KEY, request_id TEXT NOT NULL, call_id TEXT NOT NULL, agent_id TEXT NOT NULL, skill_id TEXT, command_hash TEXT, cwd_hash TEXT, selected_authority TEXT NOT NULL CHECK(selected_authority IN('NONE','SHIZUKU','WIRED_ADB')), dangerous_mode TEXT NOT NULL CHECK(dangerous_mode IN('DISABLED','ENABLED_CONFIRM_HIGH_RISK','ENABLED_AUTONOMOUS')), tool_schema_version INTEGER NOT NULL CHECK(tool_schema_version > 0), policy_version INTEGER NOT NULL CHECK(policy_version >= 0), config_snapshot_hash TEXT NOT NULL, decision TEXT NOT NULL CHECK(decision IN('APPROVED','DENIED','EXPIRED','CONSUMED')), created_at TEXT NOT NULL, expires_at TEXT, consumed_at TEXT, UNIQUE(request_id))",
         "CREATE TABLE IF NOT EXISTS tool_audit_details (audit_id TEXT PRIMARY KEY, request_id TEXT NOT NULL, agent_id TEXT NOT NULL, skill_id TEXT, capability TEXT NOT NULL, workspace_id TEXT, relative_path_sha256 TEXT, authority TEXT NOT NULL CHECK(authority IN('NONE','SHIZUKU','WIRED_ADB')), approval_id TEXT, dangerous_mode TEXT, policy_version INTEGER NOT NULL DEFAULT 0 CHECK(policy_version >= 0), cwd_sha256 TEXT, command_sha256 TEXT, exit_code INTEGER, timed_out INTEGER NOT NULL DEFAULT 0 CHECK(timed_out IN(0,1)), cancelled INTEGER NOT NULL DEFAULT 0 CHECK(cancelled IN(0,1)), stdout_truncated INTEGER NOT NULL DEFAULT 0 CHECK(stdout_truncated IN(0,1)), stderr_truncated INTEGER NOT NULL DEFAULT 0 CHECK(stderr_truncated IN(0,1)), stdout_bytes INTEGER NOT NULL DEFAULT 0 CHECK(stdout_bytes >= 0), stderr_bytes INTEGER NOT NULL DEFAULT 0 CHECK(stderr_bytes >= 0), duration_ms INTEGER NOT NULL DEFAULT 0 CHECK(duration_ms >= 0), result TEXT NOT NULL, created_at TEXT NOT NULL, FOREIGN KEY(audit_id) REFERENCES audit_events(id))",
         "CREATE TABLE IF NOT EXISTS skill_invocations (invocation_id TEXT PRIMARY KEY, run_id TEXT, package_hash TEXT, grant_revision INTEGER, state TEXT NOT NULL, created_at TEXT NOT NULL)",
-        "CREATE TABLE IF NOT EXISTS runs (run_id TEXT PRIMARY KEY, snapshot_id TEXT NOT NULL, conversation_id TEXT NOT NULL, state TEXT NOT NULL, budget_json TEXT NOT NULL, stop_reason TEXT, error_code TEXT, model_rounds INTEGER NOT NULL DEFAULT 0, tool_calls INTEGER NOT NULL DEFAULT 0, input_tokens INTEGER NOT NULL DEFAULT 0, output_tokens INTEGER NOT NULL DEFAULT 0, started_at TEXT, finished_at TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, retry_acknowledged_at TEXT, FOREIGN KEY(snapshot_id) REFERENCES agent_snapshots(id), FOREIGN KEY(conversation_id) REFERENCES conversations(id))",
+        "CREATE TABLE IF NOT EXISTS runs (run_id TEXT PRIMARY KEY, snapshot_id TEXT NOT NULL, conversation_id TEXT NOT NULL, state TEXT NOT NULL, budget_json TEXT NOT NULL, stop_reason TEXT, error_code TEXT, model_rounds INTEGER NOT NULL DEFAULT 0, tool_calls INTEGER NOT NULL DEFAULT 0, input_tokens INTEGER NOT NULL DEFAULT 0, output_tokens INTEGER NOT NULL DEFAULT 0, started_at TEXT, finished_at TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, retry_acknowledged_at TEXT, manifest_json TEXT NOT NULL DEFAULT '{}', FOREIGN KEY(snapshot_id) REFERENCES agent_snapshots(id), FOREIGN KEY(conversation_id) REFERENCES conversations(id))",
         "CREATE TABLE IF NOT EXISTS tool_invocations (invocation_id TEXT PRIMARY KEY, run_id TEXT NOT NULL, call_id TEXT NOT NULL, name TEXT NOT NULL, arguments_json TEXT NOT NULL, permission_decision TEXT NOT NULL, state TEXT NOT NULL, result_json TEXT, error_code TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, UNIQUE(run_id, call_id), FOREIGN KEY(run_id) REFERENCES runs(run_id))",
         "CREATE INDEX IF NOT EXISTS idx_prompt_revisions_agent_created ON prompt_revisions(agent_id, created_at)",
         "CREATE INDEX IF NOT EXISTS idx_messages_conversation_created ON messages(conversation_id, created_at)",
@@ -194,6 +197,9 @@ object Migrations {
         // thread/workspace integration. Existing snapshot_id remains the
         // compatibility source and is copied into this projection below.
         Column("conversations", "agent_snapshot_id", "TEXT NOT NULL DEFAULT ''"),
+        // v17 freezes per-run facts (RunManifest) on the run row.  The empty
+        // object marks runs that predate frozen facts.
+        Column("runs", "manifest_json", "TEXT NOT NULL DEFAULT '{}'"),
     )
 
     fun apply(connection: SqlConnection) {

@@ -479,13 +479,39 @@ class NioPrivilegedFileEngine(
         if (usage.files + (if (existed) 0 else 1) > WIRED_MAX_FILES ||
             usage.bytes - oldBytes + content.size > WIRED_MAX_TOTAL_BYTES
         ) throw EngineFailure(ERR_LIMIT)
+        if (!request.replaceExisting) {
+            // Create-only file content goes through the kernel-atomic exclusive
+            // create: no temporary file, no rename, and no REPLACE flag anywhere
+            // on this path, so a concurrently created target can never be
+            // overwritten on any platform.
+            try {
+                runtime.mobileagent.workspace.WorkspaceAtomicCommit.writeExclusive(target, content)
+            } catch (_: java.nio.file.FileAlreadyExistsException) {
+                throw EngineFailure(ERR_TARGET_EXISTS)
+            }
+            rejectSymlink(parent)
+            rejectSymlink(target)
+            if (!Files.isRegularFile(target, LinkOption.NOFOLLOW_LINKS) || Files.size(target) != content.size.toLong()) {
+                throw EngineFailure(ERR_WRITE_UNVERIFIED)
+            }
+            return WiredAdbFileResult(
+                WiredAdbFileOperation.WRITE_TEXT,
+                pathOf(segments),
+                bytes = content.size.toLong(),
+                created = true,
+                replaced = false,
+                version = versionOf(target, isDirectory = false),
+            )
+        }
         val temporary = parent.resolve(".mar-wired-${UUID.randomUUID()}.tmp")
         try {
             createAndSync(temporary, content)
             rejectSymlink(parent)
             if (Files.exists(target, LinkOption.NOFOLLOW_LINKS)) rejectSymlink(target)
             try {
-                Files.move(temporary, target, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING)
+                // Replace path only: create-only content uses the exclusive
+                // create above and never reaches this rename.
+                runtime.mobileagent.workspace.WorkspaceAtomicCommit.publish(temporary, target, replaceExisting = true)
             } catch (_: AtomicMoveNotSupportedException) {
                 throw EngineFailure(ERR_ATOMIC_REPLACE_UNAVAILABLE)
             } catch (_: UnsupportedOperationException) {
@@ -550,6 +576,9 @@ class NioPrivilegedFileEngine(
                 arrayOf(StandardCopyOption.ATOMIC_MOVE)
             }
             Files.move(source, destination, *options)
+        } catch (_: java.nio.file.FileAlreadyExistsException) {
+            // The destination appeared between the pre-check and the commit.
+            throw EngineFailure(ERR_TARGET_EXISTS)
         } catch (_: AtomicMoveNotSupportedException) {
             throw EngineFailure(ERR_ATOMIC_REPLACE_UNAVAILABLE)
         } catch (_: UnsupportedOperationException) {

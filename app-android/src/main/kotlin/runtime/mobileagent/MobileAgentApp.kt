@@ -127,6 +127,12 @@ class AppContainer(app: MobileAgentApp) :
         if (bridge.state.value.permissionGranted) bridge.bindUserService()
     }
     val runs = RunRepository(db)
+    /**
+     * Process-lifetime run ownership seam.  UI pages prepare/release runs
+     * through this coordinator instead of owning durability themselves, so a
+     * page switch never changes a run's owner or its frozen manifest.
+     */
+    val runCoordinator = RunCoordinator(runs)
     val audits = AuditRepository(db)
     val transfer = TransferRepository(db, blobSink = CasBlobSink(File(app.filesDir, "cas")))
     val http: HttpClient = HttpClient(OkHttp) {

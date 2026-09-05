@@ -105,6 +105,13 @@ android {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
     }
+    // Local JVM unit tests cover pure-JVM production code (java.nio workspace
+    // backends, path policy, commit primitive).  Android-framework code stays
+    // in connected androidTest; these unit tests must never touch android.*
+    // APIs (the android.jar stubs throw at runtime).
+    testOptions {
+        unitTests.all { it.useJUnitPlatform() }
+    }
     kotlinOptions {
         jvmTarget = "17"
     }
@@ -210,6 +217,9 @@ dependencies {
     implementation(libs.kotlinx.coroutines.core)
     implementation(libs.kotlinx.serialization.json)
     implementation(libs.bcprov)
+    testImplementation(libs.junit.jupiter)
+    testImplementation(libs.junit.jupiter.engine)
+    testImplementation("org.xerial:sqlite-jdbc:3.47.2.0")
     androidTestImplementation(platform(libs.androidx.compose.bom))
     androidTestImplementation(libs.androidx.compose.ui.test.junit4)
     androidTestImplementation(libs.ktor.client.mock)

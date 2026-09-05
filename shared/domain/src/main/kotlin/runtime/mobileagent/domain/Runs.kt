@@ -46,6 +46,12 @@ data class RunRecord(
     val updatedAt: String = createdAt,
     /** Set only after the user explicitly acknowledges a retry may duplicate a charge. */
     val retryAcknowledgedAt: String? = null,
+    /**
+     * Frozen [RunManifest] JSON for this run.  `"{}"` for runs created before
+     * manifests existed or before dispatch froze the facts.  Versions and
+     * fingerprints only — never secrets, paths, or provider-private data.
+     */
+    val manifestJson: String = "{}",
 )
 
 @Serializable

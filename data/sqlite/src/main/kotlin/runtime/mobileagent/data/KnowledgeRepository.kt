@@ -14,7 +14,8 @@ import runtime.mobileagent.knowledge.CancellableBatchTextEmbedder
 import runtime.mobileagent.knowledge.Citation
 import runtime.mobileagent.knowledge.CitationMap
 import runtime.mobileagent.knowledge.CjkLexical
-import runtime.mobileagent.knowledge.CosineIndex
+import runtime.mobileagent.knowledge.CosineVectorIndexPort
+import runtime.mobileagent.knowledge.VectorIndexPort
 import runtime.mobileagent.knowledge.EmbeddingUnknownOutcomeException
 import runtime.mobileagent.knowledge.EvidenceLocator
 import runtime.mobileagent.knowledge.ExtractedAsset
@@ -35,8 +36,12 @@ import runtime.mobileagent.knowledge.ParsedPublication
 import runtime.mobileagent.knowledge.PdfParser
 import runtime.mobileagent.knowledge.PdfPageRasterizer
 import runtime.mobileagent.knowledge.ReciprocalRankFusion
+import runtime.mobileagent.knowledge.RetrievalCoverage
 import runtime.mobileagent.knowledge.RetrievalResult
+import runtime.mobileagent.knowledge.RetrievalUnavailableReason
 import runtime.mobileagent.knowledge.SearchHit
+import runtime.mobileagent.knowledge.UnavailableSource
+import runtime.mobileagent.knowledge.VectorIndexCache
 import runtime.mobileagent.knowledge.SourceFormat
 import runtime.mobileagent.knowledge.StoredBlob
 import runtime.mobileagent.knowledge.TextChunker
@@ -69,12 +74,18 @@ class KnowledgeRepository(
     private val apiEmbedder: TextEmbedder? = null,
     /** Additional explicitly selected API adapters, keyed by their immutable spaceId. */
     private val apiEmbedders: List<TextEmbedder> = emptyList(),
-    /** Optional Android ANN implementation; JVM callers use CosineIndex. */
+    /** Optional Android ANN implementation; JVM callers use CosineVectorIndexPort. */
     private val vectorIndexFactory: VectorIndexFactory? = null,
     /** Resolves a newly selected API adapter by its exact persisted space id. */
     private val apiEmbedderResolver: (String) -> TextEmbedder? = { null },
 ) {
     private val indexLock = Any()
+    /**
+     * Reusable ANN handles keyed by (KB, space, dimension, generation).
+     * Vectors truth stays in SQLite; this cache is purely derived state, so a
+     * process restart simply rebuilds it on the next query.
+     */
+    private val vectorIndexCache = VectorIndexCache(vectorIndexFactory)
     private val configuredApiEmbedders: List<TextEmbedder> =
         listOfNotNull(apiEmbedder) + apiEmbedders
 
@@ -1242,16 +1253,53 @@ class KnowledgeRepository(
     fun search(query: String, topK: Int = 8, knowledgeBaseIds: List<String>? = null): List<SearchHit> =
         retrieve("search", query, topK, knowledgeBaseIds).hits
 
+    /** Durable run-fact pins: the active READY generation per KB (null when none). */
+    fun generationPins(knowledgeBaseIds: List<String>): Map<String, runtime.mobileagent.domain.KnowledgePin> =
+        knowledgeBaseIds.distinct().associateWith { kbId ->
+            val row = db.query(
+                "SELECT embedding_space_id, deleted_at FROM knowledge_bases WHERE id = ?",
+                listOf(kbId),
+            ).singleOrNull()
+            if (row == null || row.string("deleted_at").isNotBlank()) {
+                runtime.mobileagent.domain.KnowledgePin(kbId, null, "")
+            } else {
+                val space = row.string("embedding_space_id")
+                val generation = pinnedReadyGeneration(kbId)
+                runtime.mobileagent.domain.KnowledgePin(kbId, generation, space)
+            }
+        }
+
+    /** Derived ANN-handle lifecycle counters for performance evidence and tests. */
+    fun vectorIndexStats(): VectorIndexCache.Stats = vectorIndexCache.stats()
+
     fun retrieve(runId: String, query: String, topK: Int = 8, knowledgeBaseIds: List<String>? = null): RetrievalResult {
-        if (query.isBlank()) return RetrievalResult(emptyList(), emptyList(), listOf("empty query"))
+        if (query.isBlank()) {
+            return RetrievalResult(
+                emptyList(),
+                emptyList(),
+                listOf("empty query"),
+                RetrievalCoverage(
+                    requested = (knowledgeBaseIds ?: listKnowledgeBases().map { it.first }).distinct(),
+                    searched = emptyList(),
+                    unavailable = emptyList(),
+                ),
+            )
+        }
         val warnings = mutableListOf<String>()
         val bases = (knowledgeBaseIds ?: listKnowledgeBases().map { it.first }).distinct()
-        val lexical = mutableListOf<SearchHit>()
-        val vector = mutableListOf<SearchHit>()
+        val searched = mutableListOf<String>()
+        val unavailable = mutableListOf<UnavailableSource>()
+        // One ranking per (KB, channel).  KB candidate lists are NEVER
+        // concatenated before fusion: concatenated positions depend on KB
+        // traversal order and would bias ReciprocalRankFusion.  Fusion is
+        // rank-based only, so embedding spaces with incomparable cosine
+        // scales are never mixed by raw score.
+        val sources = mutableListOf<List<SearchHit>>()
         for (kbId in bases) {
             val kb = db.query("SELECT * FROM knowledge_bases WHERE id = ? AND deleted_at IS NULL", listOf(kbId)).singleOrNull()
             if (kb == null) {
                 warnings += "Knowledge base $kbId is missing or deleted"
+                unavailable += UnavailableSource(kbId, RetrievalUnavailableReason.KB_NOT_FOUND)
                 continue
             }
             val space = kb.string("embedding_space_id")
@@ -1260,6 +1308,7 @@ class KnowledgeRepository(
             // keeps a no-consent query from reaching any provider adapter.
             if (space.isNotBlank() && space != embedder.spaceId && !hasApiEmbeddingConsent(kbId)) {
                 warnings += "Knowledge base $kbId uses embedding space $space but has no persisted API embedding consent for query vectors"
+                unavailable += UnavailableSource(kbId, RetrievalUnavailableReason.CONSENT_MISSING)
                 continue
             }
             val apiQueryHash = if (space.isNotBlank() && space != embedder.spaceId) {
@@ -1280,14 +1329,17 @@ class KnowledgeRepository(
             }
             if (queryEmbedder == null) {
                 warnings += "Knowledge base $kbId uses space $space; no matching query embedder is configured"
+                unavailable += UnavailableSource(kbId, RetrievalUnavailableReason.EMBEDDING_UNAVAILABLE)
                 continue
             }
             val pin = pinnedReadyGeneration(kbId)
             if (pin == null) {
                 warnings += "Knowledge base $kbId has no READY generation"
+                unavailable += UnavailableSource(kbId, RetrievalUnavailableReason.GENERATION_NOT_READY)
                 continue
             }
-            lexical += lexicalHits(kbId, query, 40, pin)
+            searched += kbId
+            sources += lexicalHits(kbId, query, 40, pin).rankOrdered()
             if (apiQueryHash != null && cachedQueryVector == null) {
                 // Resolve only after a durable pending-row check.  A previous
                 // UNKNOWN result therefore cannot reach a provider adapter
@@ -1296,7 +1348,7 @@ class KnowledgeRepository(
             }
             var queryVectorReady = cachedQueryVector != null
             try {
-                vector += vectorHits(
+                sources += vectorHits(
                     kbId,
                     query,
                     40,
@@ -1314,7 +1366,7 @@ class KnowledgeRepository(
                             queryVectorReady = true
                         }
                     },
-                )
+                ).rankOrdered()
             } catch (failure: Throwable) {
                 if (apiQueryHash != null && cachedQueryVector == null && !queryVectorReady && isUncertainApiQueryFailure(failure)) {
                     persistApiQueryUnknown(kbId, space, apiQueryHash)
@@ -1325,10 +1377,16 @@ class KnowledgeRepository(
                 throw failure
             }
         }
-        val hits = ReciprocalRankFusion.merge(listOf(lexical, vector)).take(topK)
+        val hits = ReciprocalRankFusion.merge(sources).take(topK)
         if (hits.isEmpty()) warnings += "No in-scope evidence"
-        return RetrievalResult(hits, CitationMap.bind(runId, hits), warnings)
+        val coverage = RetrievalCoverage(requested = bases, searched = searched.toList(), unavailable = unavailable.toList())
+        coverage.notice()?.let { warnings += "部分知识库未参与本次检索（${searched.size}/${bases.size}）：$it" }
+        return RetrievalResult(hits, CitationMap.bind(runId, hits), warnings, coverage)
     }
+
+    /** Deterministic per-source rank order: score first, then stable id order. */
+    private fun List<SearchHit>.rankOrdered(): List<SearchHit> =
+        sortedWith(compareByDescending<SearchHit> { it.score }.thenBy { it.chunkId }.thenBy { it.knowledgeBaseId })
 
     fun waitingForVisionCount(): Int =
         db.query(
@@ -1428,11 +1486,14 @@ class KnowledgeRepository(
                 }
                 db.execute("UPDATE knowledge_bases SET deleted_at = ?, active_generation_id = NULL WHERE id = ?", listOf(Utc.nowIso(), kbId))
                 db.execute(
-                    "UPDATE embedding_operations SET cancel_requested = 1, state = CASE WHEN state = 'DISPATCHED' THEN 'UNKNOWN' WHEN state IN('PREPARED','CACHE_READY') THEN 'CANCELLED' ELSE state END, error = CASE WHEN state = 'DISPATCHED' THEN ? ELSE error END, updated_at = ? WHERE kb_id = ? AND state IN('PREPARED','DISPATCHED','CACHE_READY')",
+                    "UPDATE embedding_operations SET cancel_requested = 1, state = CASE WHEN state = 'DISPATCHED' THEN 'UNKNOWN' WHEN state IN('PREPARED','DISPATCHED','CACHE_READY') THEN 'CANCELLED' ELSE state END, error = CASE WHEN state = 'DISPATCHED' THEN ? ELSE error END, updated_at = ? WHERE kb_id = ? AND state IN('PREPARED','DISPATCHED','CACHE_READY')",
                     listOf(API_EMBEDDING_CANCEL_UNKNOWN_ERROR, Utc.nowIso(), kbId),
                 )
             }
         }
+        // The generation is gone; release any cached ANN handles for this KB
+        // so native memory cannot outlive the data it indexes.
+        vectorIndexCache.invalidateKnowledgeBase(kbId)
     }
 
     fun rebuildIndex(kbId: String, acknowledgeDuplicateCharge: Boolean = false): String {
@@ -1616,6 +1677,11 @@ class KnowledgeRepository(
             "UPDATE knowledge_bases SET active_generation_id = ? WHERE id = ?",
             listOf(generationId, kbId),
         )
+        // A new generation publishes under a new id: drop cached ANN handles
+        // for older generations of this KB.  The next query builds once for
+        // the new generation and reuses it; the switch itself is atomic from
+        // the reader's view because the cache key contains the generation id.
+        vectorIndexCache.invalidateKnowledgeBase(kbId)
         return generationId
     }
 
@@ -3212,13 +3278,14 @@ class KnowledgeRepository(
         val queryVec = queryVector?.copyOf() ?: selectedEmbedder.embed(query)
         validateEmbeddingVector(queryVec, selectedEmbedder.dimension)
         onQueryVectorReady?.invoke(queryVec.copyOf())
+        // Metadata-only member load (no blobs): the id set validates the
+        // cached ANN handle, so repeated queries never re-read vectors.
         val members = db.query(
             """
-            SELECT embeddings.chunk_id AS chunk_id, embeddings.vector_blob AS vector_blob, chunks.text AS text,
-                   documents.id AS document_id, chunks.document_version_id AS version_id,
+            SELECT chunks.id AS chunk_id, documents.id AS document_id, chunks.text AS text,
+                   chunks.document_version_id AS version_id,
                    chunks.page AS page, chunks.asset_ids AS asset_ids, chunks.source_span AS source_span
             FROM generation_members
-            JOIN embeddings ON embeddings.chunk_id = generation_members.chunk_id AND embeddings.space_id = generation_members.space_id
             JOIN chunks ON chunks.id = generation_members.chunk_id
             JOIN documents ON documents.active_version_id = chunks.document_version_id
             WHERE generation_members.generation_id = ? AND documents.kb_id = ? AND documents.deleted_at IS NULL
@@ -3226,16 +3293,7 @@ class KnowledgeRepository(
             listOf(generation, kbId),
         )
         val byId = linkedMapOf<String, SearchHit>()
-        val vectors = mutableListOf<Pair<String, FloatArray>>()
         members.forEach { row ->
-            val blob = row.columns["vector_blob"]
-            val bytes = when (blob) {
-                is ByteArray -> blob
-                is java.sql.Blob -> blob.getBytes(1, blob.length().toInt())
-                else -> return@forEach
-            }
-            if (bytes.size != selectedEmbedder.dimension * 4) return@forEach
-            vectors += row.string("chunk_id") to bytesToFloats(bytes, selectedEmbedder.dimension)
             byId[row.string("chunk_id")] = SearchHit(
                 chunkId = row.string("chunk_id"),
                 documentId = row.string("document_id"),
@@ -3248,20 +3306,57 @@ class KnowledgeRepository(
                 sourceSpan = row.string("source_span").ifBlank { null },
             )
         }
-        if (vectors.isEmpty()) return emptyList()
-        val native = vectorIndexFactory?.create(selectedEmbedder.spaceId, selectedEmbedder.dimension, vectors.size)
-        if (native != null) {
-            return try {
-                vectors.forEach { (id, vector) -> native.add(id, vector) }
-                native.search(queryVec, topK).map { (id, score) -> byId.getValue(id).copy(score = score.toDouble()) }
-            } finally {
-                native.close()
+        if (byId.isEmpty()) return emptyList()
+        val ids = byId.keys.toSet()
+        val key = VectorIndexCache.Key(kbId, selectedEmbedder.spaceId, selectedEmbedder.dimension, generation)
+        val index = vectorIndexCache.get(key, ids) ?: buildVectorIndex(key, ids, selectedEmbedder)
+        return index.search(queryVec, topK).map { (id, score) -> byId.getValue(id).copy(score = score.toDouble()) }
+    }
+
+    /**
+     * Build (or rebuild after drift) the ANN handle for one pinned
+     * generation.  Blobs are read only on this path; cache hits never touch
+     * them.  The SQLite vectors remain the truth — a process restart simply
+     * rebuilds from them.
+     */
+    private fun buildVectorIndex(
+        key: VectorIndexCache.Key,
+        ids: Set<String>,
+        selectedEmbedder: TextEmbedder,
+    ): VectorIndexPort {
+        val rows = db.query(
+            """
+            SELECT embeddings.chunk_id AS chunk_id, embeddings.vector_blob AS vector_blob
+            FROM generation_members
+            JOIN embeddings ON embeddings.chunk_id = generation_members.chunk_id AND embeddings.space_id = generation_members.space_id
+            JOIN chunks ON chunks.id = generation_members.chunk_id
+            JOIN documents ON documents.active_version_id = chunks.document_version_id
+            WHERE generation_members.generation_id = ? AND documents.kb_id = ? AND documents.deleted_at IS NULL
+            """.trimIndent(),
+            listOf(key.generationId, key.knowledgeBaseId),
+        )
+        val index = vectorIndexFactory?.create(key.spaceId, key.dimension, ids.size.coerceAtLeast(1))
+            ?: CosineVectorIndexPort(key.spaceId, key.dimension)
+        try {
+            rows.forEach { row ->
+                val id = row.string("chunk_id")
+                if (id !in ids) return@forEach
+                val blob = row.columns["vector_blob"]
+                val bytes = when (blob) {
+                    is ByteArray -> blob
+                    is java.sql.Blob -> blob.getBytes(1, blob.length().toInt())
+                    else -> return@forEach
+                }
+                if (bytes.size != selectedEmbedder.dimension * 4) return@forEach
+                val vector = bytesToFloats(bytes, selectedEmbedder.dimension)
+                if (vector.any { !it.isFinite() }) return@forEach
+                index.add(id, vector)
             }
-        }
-        val fallback = CosineIndex(selectedEmbedder.dimension)
-        vectors.forEach { (id, vector) -> fallback.add(id, vector) }
-        return fallback.search(queryVec, topK).map { (id, score) ->
-            byId.getValue(id).copy(score = score.toDouble())
+            vectorIndexCache.put(key, ids, index)
+            return index
+        } catch (failure: Throwable) {
+            runCatching { index.close() }
+            throw failure
         }
     }
 

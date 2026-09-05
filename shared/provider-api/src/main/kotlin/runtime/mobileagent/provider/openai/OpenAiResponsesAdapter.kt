@@ -591,8 +591,12 @@ class OpenAiResponsesAdapter(
         }
         val root = runCatching { Json.parseToJsonElement(raw).jsonObject }.getOrNull()
             ?: return listOf(ModelEvent.Failed(ErrorCode.UNKNOWN_OUTCOME.name))
-        root["error"]?.let { error ->
-            val message = runCatching { error.jsonObject["message"]?.jsonPrimitive?.contentOrNull }.getOrNull()
+        // Only a non-null error *object* is a failure. A legitimate success
+        // response may carry an explicit "error":null member (JsonNull, not a
+        // missing key); treating any present key as failure misclassifies
+        // completed responses as UNKNOWN_OUTCOME.
+        (root["error"] as? JsonObject)?.let { error ->
+            val message = runCatching { error["message"]?.jsonPrimitive?.contentOrNull }.getOrNull()
                 ?: ErrorCode.UNKNOWN_OUTCOME.name
             return listOf(ModelEvent.Failed(SecretRedactor.redact(message, secrets)))
         }

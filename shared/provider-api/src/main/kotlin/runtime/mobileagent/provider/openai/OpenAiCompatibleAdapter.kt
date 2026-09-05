@@ -971,7 +971,9 @@ class OpenAiCompatibleAdapter(
 
     private fun parseChatProbe(raw: String, requireToolCall: Boolean): Boolean {
         val root = runCatching { Json.parseToJsonElement(raw).jsonObject }.getOrNull() ?: return false
-        if (root["error"] != null) return false
+        // Only a non-null error object fails the probe; "error":null is JsonNull,
+        // not a missing key, and appears in legitimate success payloads.
+        if (root["error"] is JsonObject) return false
         val message = runCatching {
             root["choices"]?.jsonArray?.firstOrNull()?.jsonObject?.get("message")?.jsonObject
         }.getOrNull() ?: return false
@@ -1171,7 +1173,7 @@ class OpenAiCompatibleAdapter(
                 emit(ModelEvent.Failed(ErrorCode.UNKNOWN_OUTCOME.name))
                 return
             }
-        root["error"]?.jsonObject?.get("message")?.jsonPrimitive?.contentOrNull?.let { message ->
+        (root["error"] as? JsonObject)?.get("message")?.jsonPrimitive?.contentOrNull?.let { message ->
             emit(ModelEvent.Failed(SecretRedactor.redact(message, redactionSecrets)))
             return
         }

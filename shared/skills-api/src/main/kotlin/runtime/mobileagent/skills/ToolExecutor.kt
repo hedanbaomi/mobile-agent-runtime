@@ -27,10 +27,13 @@ interface ToolExecutor {
      * result for a repeated call id: `true` discloses the cache, `false`
      * denies without dispatch and without leaking the old payload.
      *
-     * The default allows disclosure (dispatch-time checks still apply to new
-     * calls).  Owners with live grant/scope facts must override.
+     * The default denies disclosure (fail-closed).  Only a pure,
+     * resource-free computation with no authorization semantics may override
+     * to allow; every resource-backed or external tool must override with an
+     * explicit live revalidation, or inherit this denial.  A forgotten
+     * override therefore denies instead of leaking (b07 follow-up finding A).
      */
-    suspend fun authorizeReplay(call: ToolCall): Boolean = true
+    suspend fun authorizeReplay(call: ToolCall): Boolean = false
 
     /** Explicitly deny a pending approval; implementations may resolve callId to requestId. */
     suspend fun reject(callId: String): ToolResult = ToolResult.Denied(ToolErrorCode.APPROVAL_DENIED.name)

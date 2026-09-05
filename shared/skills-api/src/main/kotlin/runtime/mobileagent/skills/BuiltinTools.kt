@@ -102,7 +102,11 @@ class ToolBroker(
     fun authorizeReplay(call: ToolCall): Boolean {
         val grant = liveGrant?.invoke()
         if (AuthorizationEvaluator.isExpired(grant?.scopesJson)) return false
-        val remembered = completed[call.callId] ?: return true
+        // Fail closed: a call this broker never completed must never disclose.
+        // (Pure-computation tools such as calculator still allow replay once
+        // completed: their empty-capability scope is stable, so the equality
+        // check below returns true without any grant semantics.)
+        val remembered = completed[call.callId] ?: return false
         if (remembered is ToolResult.UnknownOutcome) return false
         return completionScopes[call.callId] == scope(activeCapabilities(grant), activeContext(grant), grant)
     }

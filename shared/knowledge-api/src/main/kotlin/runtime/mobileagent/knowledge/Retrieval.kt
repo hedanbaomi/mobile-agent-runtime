@@ -3,6 +3,8 @@
 
 package runtime.mobileagent.knowledge
 
+import runtime.mobileagent.domain.KnowledgePin
+
 data class Citation(
     val citationId: String,
     val runId: String,
@@ -43,6 +45,14 @@ data class RetrievalResult(
     val warnings: List<String> = emptyList(),
     /** Structured retrieval scope for this run; null only for pre-coverage callers. */
     val coverage: RetrievalCoverage? = null,
+    /**
+     * Exact generation pins consumed by this retrieval (one per requested
+     * KB; null generationId while the KB has no READY generation).  These
+     * come from the retrieve call itself — never from a later re-read — so
+     * the run manifest records execution facts, not nearby state (b07
+     * follow-up finding D).  Carries ids only, never query text.
+     */
+    val usedGenerations: List<KnowledgePin> = emptyList(),
 )
 
 /** Why a requested knowledge base did not participate in this retrieval. */

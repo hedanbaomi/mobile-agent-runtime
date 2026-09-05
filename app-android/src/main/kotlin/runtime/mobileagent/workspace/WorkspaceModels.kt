@@ -239,13 +239,20 @@ internal data class InternalWorkspaceDescriptor(
  * advertises only the properties its commit primitive can prove:
  *
  * - [ATOMIC_PUBLISH]: the final rename is one atomic filesystem operation; a
- *   crash can leave the old or the new content, never a torn mix.
+ *   crash can leave the old or the new content, never a torn mix.  Applies to
+ *   replace-publishes of a fully written temporary file — not to streaming
+ *   create-only writes, whose claim is visible before its content is complete
+ *   (see [WorkspaceAtomicCommit.writeExclusive]).
  * - [CREATE_IF_ABSENT]: a create-only commit fails with ENTRY_EXISTS/TARGET_EXISTS
  *   when the target appears before the commit, and never overwrites it.  The
- *   commit must not silently degrade to REPLACE_EXISTING.
- * - [COMPARE_AND_REPLACE]: an expected-version write compares a content hash
- *   (files within the read envelope), so a same-size rewrite with a restored
- *   timestamp still conflicts.
+ *   commit must not silently degrade to REPLACE_EXISTING.  This is
+ *   create-atomicity, not full-content atomic visibility.
+ * - [COMPARE_AND_REPLACE]: a strict atomic compare-and-swap primitive: the
+ *   expected-version check and the replace commit cannot be separated by an
+ *   external writer.  A read-compare-rewrite sequence under a process lock
+ *   (even with a content hash and a last-moment re-read) does NOT qualify
+ *   across processes; backends without a true CAS primitive must advertise
+ *   only [BEST_EFFORT_CONFLICT_DETECTION.
  * - [BEST_EFFORT_CONFLICT_DETECTION]: conflicts are detected from metadata or
  *   re-reads only; no content-hash guarantee is made (large files, directory
  *   trees, DocumentsProvider backends).
@@ -266,39 +273,136 @@ internal enum class WorkspaceMutationCapability {
  * The commit primitives for file publishes and create-only commits.
  * The temporary file must already be fully written and synced by the caller.
  *
- * Platform warning (verified by probe on Windows/NTFS, 2026-09-05): a plain
- * `Files.move(tmp, target, ATOMIC_MOVE)` *without* `REPLACE_EXISTING`
- * silently replaces the target on Windows instead of failing.  The rename
- * therefore cannot prove create-only semantics on every platform — it is
- * correct on Linux/Android (the product platform) but not portable.
+ * Platform fact (verified by probe on Linux/JDK and Windows/NTFS,
+ * 2026-09-05): a plain `Files.move(tmp, target, ATOMIC_MOVE)` *without*
+ * `REPLACE_EXISTING` silently replaces the target instead of failing — on
+ * Linux/Android as well as Windows.  The rename therefore cannot prove
+ * create-only semantics on any platform.  Earlier comments claiming Linux
+ * rename fails when the target exists were wrong and are withdrawn.
  *
- * Consequently create-only *file content* must go through [writeExclusive],
- * whose kernel-atomic exclusive create (`O_CREAT|O_EXCL` / `CREATE_NEW`)
- * either creates the file with our content or fails with
- * [FileAlreadyExistsException] on every platform and filesystem, with no
- * rename and no `REPLACE` flag anywhere on that path.  There is no silent
- * downgrade to replace semantics by construction.
+ * Consequently:
+ * - create-only *file content* goes through [writeExclusive], whose
+ *   kernel-atomic exclusive create (`O_CREAT|O_EXCL` / `CREATE_NEW`) either
+ *   creates the file with our content or fails with
+ *   [FileAlreadyExistsException] on every platform and filesystem, with no
+ *   rename and no `REPLACE` flag anywhere on that path.  There is no silent
+ *   downgrade to replace semantics by construction.  Note this is
+ *   create-atomicity only: the claim becomes visible (0 bytes, then partial
+ *   content) while the bytes stream in, so it is NOT a full-content atomic
+ *   publish and must never be described as one.
+ * - no-clobber *publishes* of a complete temporary file go through
+ *   [publishNew], which links (atomic, fails when the target exists) or
+ *   falls back to an exclusive-create stream copy — never a bare rename.
+ * - no-clobber *file moves* go through [moveFileNoReplace] (safe, non-atomic:
+ *   an interruption may leave source and destination behind, which callers
+ *   must report as UNKNOWN_OUTCOME, never as success).
+ * - no-clobber *directory* moves/copies have no portable proving primitive
+ *   and must return UNSUPPORTED instead of silently overwriting.
  */
 internal object WorkspaceAtomicCommit {
     fun publish(temporary: Path, target: Path, replaceExisting: Boolean) {
         if (replaceExisting) {
             Files.move(temporary, target, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING)
         } else {
-            // Correct on Linux/Android (rename fails when the target exists).
-            // File content with create-only semantics must use writeExclusive
-            // instead; this branch remains for moves/copies whose pre-checks
-            // already run under the backend lock.
-            Files.move(temporary, target, StandardCopyOption.ATOMIC_MOVE)
+            publishNew(temporary, target)
         }
     }
 
     /**
-     * Atomically create [target] with exactly [content], or throw
-     * [FileAlreadyExistsException] leaving any existing target untouched.
-     * Portable across platforms and filesystems (including ones without
-     * hard-link or atomic-rename-if-absent support).  A successfully returned
-     * call has fsynced the complete content; a failed call removes the partial
-     * claim when it can still prove the claim is its own.
+     * Publish a fully written [temporary] file at [target] without ever
+     * overwriting an existing target.  Prefers a single atomic hard link
+     * (fails with [FileAlreadyExistsException] when the target exists);
+     * filesystems without link support fall back to a kernel-atomic
+     * exclusive-create stream copy.  A racing target always fails the commit
+     * with [FileAlreadyExistsException]; the existing target is untouched.
+     */
+    fun publishNew(temporary: Path, target: Path) {
+        try {
+            Files.createLink(target, temporary)
+            runCatching { Files.deleteIfExists(temporary) }
+            return
+        } catch (already: java.nio.file.FileAlreadyExistsException) {
+            runCatching { Files.deleteIfExists(temporary) }
+            throw already
+        } catch (_: UnsupportedOperationException) {
+            // Fall through to the portable exclusive-create copy below.
+        } catch (_: java.io.IOException) {
+            // Fall through: the copy path re-attempts with the same
+            // no-overwrite guarantee and surfaces residual failures.
+        }
+        val content = try {
+            Files.readAllBytes(temporary)
+        } catch (failure: java.io.IOException) {
+            runCatching { Files.deleteIfExists(temporary) }
+            throw failure
+        }
+        runCatching { Files.deleteIfExists(temporary) }
+        writeExclusive(target, content)
+    }
+
+    /**
+     * Move one regular file without overwriting.  Safe but explicitly NOT
+     * atomic: the destination is committed via exclusive create before the
+     * source is deleted, so an interruption (or a failed source delete) may
+     * leave both entries behind.  Callers must map that outcome to
+     * UNKNOWN_OUTCOME, never to success, and must never describe this path
+     * as an atomic move.  Directories are rejected by the caller with
+     * UNSUPPORTED — this function additionally refuses non-files.
+     */
+    fun moveFileNoReplace(source: Path, target: Path) {
+        if (!Files.isRegularFile(source, java.nio.file.LinkOption.NOFOLLOW_LINKS)) {
+            throw java.io.IOException("no-replace move source is not a regular file")
+        }
+        val claim = try {
+            Files.newByteChannel(
+                target,
+                java.nio.file.StandardOpenOption.CREATE_NEW,
+                java.nio.file.StandardOpenOption.WRITE,
+                java.nio.file.LinkOption.NOFOLLOW_LINKS,
+            )
+        } catch (already: java.nio.file.FileAlreadyExistsException) {
+            throw already
+        }
+        val claimKey = runCatching {
+            Files.readAttributes(target, java.nio.file.attribute.BasicFileAttributes::class.java, java.nio.file.LinkOption.NOFOLLOW_LINKS).fileKey()
+        }.getOrNull()
+        try {
+            claim.use { open ->
+                Files.newByteChannel(source, java.nio.file.StandardOpenOption.READ, java.nio.file.LinkOption.NOFOLLOW_LINKS).use { input ->
+                    val buffer = java.nio.ByteBuffer.allocate(32 * 1024)
+                    while (true) {
+                        buffer.clear()
+                        if (input.read(buffer) < 0) break
+                        buffer.flip()
+                        while (buffer.hasRemaining()) open.write(buffer)
+                    }
+                }
+                (open as? java.nio.channels.FileChannel)?.force(true)
+                    ?: throw java.io.IOException("fsync unavailable")
+            }
+            if (Files.size(target) != Files.size(source)) throw java.io.IOException("short move")
+        } catch (failure: java.io.IOException) {
+            removeClaim(target, claimKey)
+            throw failure
+        }
+        Files.delete(source)
+    }
+
+    /**
+     * Create [target] with exactly [content] via kernel-atomic exclusive
+     * create, or throw [FileAlreadyExistsException] leaving any existing
+     * target untouched.  Portable across platforms and filesystems (including
+     * ones without hard-link or atomic-rename-if-absent support).  A
+     * successfully returned call has fsynced the complete content; a failed
+     * call removes the partial claim when it can still prove the claim is
+     * its own.
+     *
+     * Visibility note: this is create-atomicity, not full-content atomic
+     * publish.  The claim is visible at 0 bytes while the content streams in,
+     * so concurrent readers may observe empty/partial content and a crash may
+     * leave a partial claim.  Only the temp-complete → one-step publish path
+     * ([publish] with `replaceExisting=true`, [publishNew]) owns
+     * ATOMIC_PUBLISH semantics.
      */
     fun writeExclusive(target: Path, content: ByteArray) {
         val channel = try {

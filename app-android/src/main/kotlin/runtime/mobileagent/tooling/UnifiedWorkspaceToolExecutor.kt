@@ -223,6 +223,34 @@ class UnifiedWorkspaceToolExecutor(
         return result
     }
 
+    /**
+     * Disclosure check for a cached workspace result.  Allows only a settled,
+     * non-unknown completion for exactly this call while the workspace, path
+     * scope, and live provider facts still authorize it.  This is read-only:
+     * no backend dispatch, no audit writes, and no ONCE-grant consumption.  A
+     * consumed ONCE grant therefore denies replay fail-closed.
+     */
+    override suspend fun authorizeReplay(call: ToolCall): Boolean {
+        val requestId = resolveRequestId(call.callId)
+        val bound = synchronized(lock) { callsByRequest[requestId] } ?: return false
+        if (bound.call != call) return false
+        val result = synchronized(lock) { bound.result } ?: return false
+        if (result is ToolResult.UnknownOutcome) return false
+        return revalidateReplay(bound)
+    }
+
+    private fun revalidateReplay(bound: BoundCall): Boolean {
+        val context = contextProvider()
+        if (bound.context.agentId != context.agentId || bound.context.snapshotId != context.snapshotId) return false
+        val operation = bound.parsed
+        if (operation.kind == WorkspaceOperation.WORKSPACE_LIST) {
+            return authorizedWorkspaces(context, WorkspaceOperation.WORKSPACE_LIST, requireLiveReady = true).isNotEmpty()
+        }
+        val registered = registry.registered(operation.workspaceId) ?: return false
+        if (!workspaceOperationAvailable(context, registered, operation.kind, requireLiveReady = true)) return false
+        return exactPathAuthorization(context, operation)
+    }
+
     /** Explicitly expire a pending approval keyed by Runtime's internal id. */
     suspend fun expire(requestId: String, context: ToolExecutionContext = contextProvider()): ToolExecution {
         val bound = synchronized(lock) { callsByRequest[requestId] }

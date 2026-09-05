@@ -112,6 +112,40 @@ class AuthorizationEvaluatorTest {
     }
 
     @Test
+    fun unreadableScopeDocumentFailsClosedAsExpired() {
+        // b07 follow-up finding E: an unreadable scope document must never
+        // read as "not expired".  The whole JSON may be malformed, or the
+        // expiresAt value missing/unparseable.
+        listOf(
+            "not-json{{{",
+            "[1,2]",
+            "null",
+            """{"expiresAt":null}""",
+            """{"expiresAt":123}""",
+            """{"expiresAt":""}""",
+        ).forEach { scopes ->
+            assertEquals(
+                setOf(AuthorizationDecision.EXPIRED),
+                evaluateAtAllCheckpoints(grant = grant(scopesJson = scopes)),
+                "scopes=$scopes must fail closed",
+            )
+        }
+    }
+
+    @Test
+    fun isExpiredUnitSemantics() {
+        val now = 1_700_000_000_000L
+        assertTrue(AuthorizationEvaluator.isExpired("not-json{{{", now))
+        assertTrue(AuthorizationEvaluator.isExpired("""{"expiresAt":null}""", now))
+        assertTrue(AuthorizationEvaluator.isExpired("""{"expiresAt":"not-a-time"}""", now))
+        assertTrue(AuthorizationEvaluator.isExpired("""{"expiresAt":"2020-01-01T00:00:00Z"}""", now))
+        assertFalse(AuthorizationEvaluator.isExpired("""{"expiresAt":"2030-01-01T00:00:00Z"}""", now))
+        assertFalse(AuthorizationEvaluator.isExpired("{}", now))
+        assertFalse(AuthorizationEvaluator.isExpired("", now))
+        assertFalse(AuthorizationEvaluator.isExpired(null, now))
+    }
+
+    @Test
     fun futureExpiryRemainsGranted() {
         val decisions = evaluateAtAllCheckpoints(grant = grant(scopesJson = """{"expiresAt":"2030-01-01T00:00:00Z"}"""))
         assertEquals(setOf(AuthorizationDecision.GRANTED), decisions)

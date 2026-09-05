@@ -141,6 +141,31 @@ class RetrievalConvergenceTest {
     }
 
     @Test
+    fun retrievalPinsRecordConsumedGenerationsNotLaterState() {
+        val db = JdbcSqlConnection()
+        Migrations.apply(db)
+        val repo = KnowledgeRepository(db, MemoryBlobSink())
+        val kb = repo.createKnowledgeBase("Library")
+        repo.importBytes("doc.txt", "text/plain", "pinned generation evidence paragraph".toByteArray(), false, kb)
+
+        // The first retrieval consumes generation G1 ...
+        val first = repo.retrieve("run-g1", "pinned generation evidence", 8, listOf(kb))
+        assertTrue(first.hits.isNotEmpty())
+        val g1 = first.usedGenerations.single { it.knowledgeBaseId == kb }.generationId
+        assertTrue(!g1.isNullOrBlank(), "a searched KB must pin its consumed generation")
+
+        // ... a later publish switches the active generation to G2, but the
+        // first result's pins must still describe G1 (execution facts, not a
+        // re-read of the active generation).
+        repo.importBytes("fresh.txt", "text/plain", "pinned generation evidence brand-new chapter".toByteArray(), false, kb)
+        val second = repo.retrieve("run-g2", "pinned generation evidence", 8, listOf(kb))
+        val g2 = second.usedGenerations.single { it.knowledgeBaseId == kb }.generationId
+        assertTrue(!g2.isNullOrBlank())
+        assertTrue(g1 != g2, "expected a generation switch, got g1=$g1 g2=$g2")
+        assertEquals(g1, first.usedGenerations.single { it.knowledgeBaseId == kb }.generationId)
+    }
+
+    @Test
     fun deletedKnowledgeBaseInvalidatesCoverageAndIndex() {        val db = JdbcSqlConnection()
         Migrations.apply(db)
         val repo = KnowledgeRepository(db, MemoryBlobSink())

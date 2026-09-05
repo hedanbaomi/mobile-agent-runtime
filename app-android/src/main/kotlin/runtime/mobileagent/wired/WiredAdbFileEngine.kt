@@ -570,12 +570,26 @@ class NioPrivilegedFileEngine(
             }
         }
         try {
-            val options = if (request.replaceExisting) {
-                arrayOf(StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING)
+            if (request.replaceExisting) {
+                Files.move(
+                    source,
+                    destination,
+                    StandardCopyOption.ATOMIC_MOVE,
+                    StandardCopyOption.REPLACE_EXISTING,
+                )
+            } else if (!Files.isRegularFile(source, LinkOption.NOFOLLOW_LINKS)) {
+                // No portable primitive proves a no-replace directory move:
+                // a bare rename silently merges/overwrites on every major
+                // platform (b07 finding C2).  Fail closed.
+                throw EngineFailure(ERR_ATOMIC_REPLACE_UNAVAILABLE)
             } else {
-                arrayOf(StandardCopyOption.ATOMIC_MOVE)
+                // Safe non-atomic no-clobber file move: a destination created
+                // after the pre-check fails with TARGET_EXISTS instead of
+                // being overwritten.  An interruption may leave source and
+                // destination behind → UNKNOWN_OUTCOME via the IOException
+                // mapping below.
+                runtime.mobileagent.workspace.WorkspaceAtomicCommit.moveFileNoReplace(source, destination)
             }
-            Files.move(source, destination, *options)
         } catch (_: java.nio.file.FileAlreadyExistsException) {
             // The destination appeared between the pre-check and the commit.
             throw EngineFailure(ERR_TARGET_EXISTS)
@@ -583,6 +597,11 @@ class NioPrivilegedFileEngine(
             throw EngineFailure(ERR_ATOMIC_REPLACE_UNAVAILABLE)
         } catch (_: UnsupportedOperationException) {
             throw EngineFailure(ERR_ATOMIC_REPLACE_UNAVAILABLE)
+        } catch (_: IOException) {
+            // The no-clobber copy may have committed the destination before a
+            // later step failed; source and destination may both exist.  The
+            // outcome is uncertain and must not be reported as success.
+            throw EngineFailure(ERR_UNKNOWN_OUTCOME)
         }
         rejectSymlink(destination)
         return WiredAdbFileResult(WiredAdbFileOperation.MOVE, pathOf(sourceSegments), bytes = if (Files.isRegularFile(destination, LinkOption.NOFOLLOW_LINKS)) Files.size(destination) else null, replaced = request.replaceExisting)
@@ -934,6 +953,7 @@ class NioPrivilegedFileEngine(
         const val ERR_FILE_TOO_LARGE = "FILE_TOO_LARGE"
         const val ERR_PERMISSION_DENIED = "PERMISSION_DENIED"
         const val ERR_OPERATION_UNAVAILABLE = "OPERATION_UNAVAILABLE"
+        const val ERR_UNKNOWN_OUTCOME = "UNKNOWN_OUTCOME"
         const val ERR_ATOMIC_REPLACE_UNAVAILABLE = "ATOMIC_REPLACE_UNAVAILABLE"
         const val ERR_WRITE_UNVERIFIED = "WRITE_UNVERIFIED"
         const val ERR_CONFLICT = "CONFLICT"

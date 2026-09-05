@@ -86,6 +86,38 @@ class ShizukuWorkspaceFileStoreTest {
     }
 
     @Test
+    fun noReplaceMoveRaceNeverOverwritesExternallyCreatedTarget() {
+        assertTrue(store.mkdir("race").contains("\"ok\":true"))
+        assertTrue(
+            store.write("race/src.txt", "agent".toByteArray(StandardCharsets.UTF_8), replaceExisting = false)
+                .contains("\"ok\":true"),
+        )
+        // External destination created after the caller's pre-check: the
+        // no-clobber commit must fail instead of overwriting (b07 finding C2).
+        Files.write(
+            root.toPath().resolve("Download/MobileAgentRuntime-Shizuku/race/dst.txt"),
+            "external-owner-data".toByteArray(StandardCharsets.UTF_8),
+        )
+        assertTrue(store.move("race/src.txt", "race/dst.txt", false).contains("\"code\":\"TARGET_EXISTS\""))
+        assertTrue(store.read("race/src.txt", 1024).contains("agent"))
+        assertTrue(store.read("race/dst.txt", 1024).contains("external-owner-data"))
+    }
+
+    @Test
+    fun noReplaceDirectoryMoveIsUnsupportedRatherThanOverwriting() {
+        assertTrue(store.mkdir("dir").contains("\"ok\":true"))
+        assertTrue(
+            store.write("dir/note.txt", "x".toByteArray(StandardCharsets.UTF_8), replaceExisting = false)
+                .contains("\"ok\":true"),
+        )
+        // No portable primitive proves a no-replace directory move; the store
+        // fails closed instead of silently merging (b07 finding C2).
+        assertTrue(store.move("dir", "dir2", false).contains("\"code\":\"ATOMIC_REPLACE_UNAVAILABLE\""))
+        assertTrue(store.stat("dir/note.txt").contains("\"type\":\"file\""))
+        assertTrue(store.stat("dir2").contains("\"code\":\"NOT_FOUND\""))
+    }
+
+    @Test
     fun typedStatAndAtomicMoveReportTheDestinationAndRejectReplayLikeTargets() {
         assertTrue(store.mkdir("source").contains("\"ok\":true"))
         assertTrue(store.write("source/item.txt", "payload".toByteArray(StandardCharsets.UTF_8), false).contains("\"ok\":true"))

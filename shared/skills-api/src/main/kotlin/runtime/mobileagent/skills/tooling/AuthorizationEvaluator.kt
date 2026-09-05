@@ -138,7 +138,10 @@ object AuthorizationEvaluator {
     /** True when an `expiresAt` scope exists and is reached, missing, or malformed. */
     fun isExpired(scopesJson: String?, nowMillis: Long = System.currentTimeMillis()): Boolean {
         if (scopesJson.isNullOrBlank()) return false
-        val root = runCatching { Json.parseToJsonElement(scopesJson).jsonObject }.getOrNull() ?: return false
+        // Fail closed: an unreadable scope document must never read as "not
+        // expired".  Callers treat a malformed authorization state as EXPIRED,
+        // never as GRANTED (b07 follow-up finding E).
+        val root = runCatching { Json.parseToJsonElement(scopesJson).jsonObject }.getOrNull() ?: return true
         if ("expiresAt" !in root) return false
         val raw = root["expiresAt"]?.jsonPrimitive?.contentOrNull ?: return true
         val expiry = runCatching { Instant.parse(raw) }.getOrNull() ?: return true

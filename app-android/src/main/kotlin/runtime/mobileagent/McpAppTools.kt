@@ -214,6 +214,15 @@ private class AppMcpToolExecutor(
         }
     }
 
+    /**
+     * Remote MCP approvals are one-shot: this executor keeps pending calls
+     * only, never a completed-call authorization record, so a cached payload
+     * cannot be revalidated here.  Deny disclosure fail-closed (b07
+     * follow-up finding A: MCP/remote safe-default); the model must issue a
+     * new call id through the approval path.
+     */
+    override suspend fun authorizeReplay(call: ToolCall): Boolean = false
+
     private suspend fun executeApproved(pendingCall: PendingMcpCall): ToolResult {
         val call = pendingCall.modelCall
         val config = McpConfigStore.read(container).value

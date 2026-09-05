@@ -167,6 +167,14 @@ internal class WorkspaceAppTools(
     private fun bindingIsCurrent(): Boolean =
         runCatching { snapshotStillExists() && agentStillExists() }.getOrDefault(false)
 
+    /**
+     * Approval-gated one-shots keep pending calls only, never a completed-call
+     * authorization record, so a cached payload cannot be revalidated here.
+     * Deny disclosure fail-closed (b07 follow-up finding A); the model must
+     * issue a new call id through the approval path.
+     */
+    override suspend fun authorizeReplay(call: ToolCall): Boolean = false
+
     private fun execute(name: String, args: JsonObject): String = when (name) {
         LIST -> list(args)
         READ -> read(args)

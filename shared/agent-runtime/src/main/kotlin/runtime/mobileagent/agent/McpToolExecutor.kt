@@ -52,4 +52,12 @@ class McpToolExecutor(
     /** MCP grants are explicit user approvals; this bridge never auto-approves a second time. */
     override suspend fun approve(callId: String): ToolResult =
         ToolResult.Invalid("MCP tool grant approval is required before invocation")
+
+    /**
+     * Remote MCP tools have no local completed-call store in this bridge, so a
+     * cached payload can never be revalidated here.  Deny disclosure
+     * fail-closed (b07 follow-up finding A: MCP/remote safe-default); the
+     * model must issue a new call id, which passes dispatch-time checks.
+     */
+    override suspend fun authorizeReplay(call: ToolCall): Boolean = false
 }

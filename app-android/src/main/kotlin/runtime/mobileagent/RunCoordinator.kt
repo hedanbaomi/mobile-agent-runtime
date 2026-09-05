@@ -19,6 +19,31 @@ import runtime.mobileagent.domain.SkillPin
 import runtime.mobileagent.skills.ToolSpec
 
 /**
+ * Immutable facts frozen once per run and shared by the prompt build and the
+ * manifest stamp (b07 follow-up finding D).  Every field holds the exact
+ * object/version consumed by execution — never a later re-read — so the
+ * manifest describes what ran, not a nearby database state.
+ */
+data class PreparedRunFacts(
+    /** Exact global-root-prompt text sent to the model. */
+    val rootPrompt: String,
+    /** Hash of [rootPrompt]; the text itself never enters the manifest. */
+    val rootPromptHash: String,
+    /** Skill install/package/revision pins shared by prompt and manifest. */
+    val skillPins: List<SkillPin>,
+    /** Frozen Skill instruction texts used for the prompt build. */
+    val skillInstructions: List<String>,
+    /** Exact generation pins consumed by this run's retrieval. */
+    val knowledgePins: List<KnowledgePin>,
+    /** Grant pins from the run's frozen authorization context. */
+    val grants: List<GrantPin>,
+    /** Fingerprint of the exact model-visible frozen tool specs. */
+    val toolSchemaFingerprint: String,
+    /** Durable retrieval-scope summary (ids and reason codes only). */
+    val retrievalScope: RetrievalScopePin,
+)
+
+/**
  * Owns run execution identity for the process.
  *
  * ChatViewModel today mixes session state, retrieval, tool wiring, approval,

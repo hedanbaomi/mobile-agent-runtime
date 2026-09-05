@@ -218,6 +218,33 @@ class ShellToolExecutor(
         return result
     }
 
+    /**
+     * Disclosure check for a cached shell result.  Allows only a settled,
+     * non-unknown completion for exactly this call while Dangerous Mode, the
+     * shell capability, and the run-selected authority still authorize it.
+     * This is read-only: no backend dispatch and no ONCE-grant consumption.
+     */
+    override suspend fun authorizeReplay(call: ToolCall): Boolean {
+        val requestId = resolveRequestId(call.callId)
+        val bound = synchronized(lock) { callsByRequest[requestId] } ?: return false
+        if (bound.call != call) return false
+        val result = synchronized(lock) { bound.result } ?: return false
+        if (result is ToolResult.UnknownOutcome) return false
+        return revalidateReplay(bound)
+    }
+
+    private fun revalidateReplay(bound: BoundShellCall): Boolean {
+        if (dangerousModeManager.policy() == DangerousMode.DISABLED) return false
+        val context = contextProvider()
+        if (bound.context.agentId != context.agentId || bound.context.snapshotId != context.snapshotId) return false
+        if (!resolver.revalidate(context, CapabilityId(CapabilityId.SHELL_EXECUTE))) return false
+        val selected = authorityManager.selectedAuthorityForExecution()
+        val selectedState = selected?.let { authorityManager.state.value.statuses[it] }
+        if (selected == null || selected != selectedAtRunStart || selectedState == null) return false
+        if (!selectedState.isReady || selectedBackend == null) return false
+        return true
+    }
+
     /** Explicitly deny a pending approval using either model call or request id. */
     override suspend fun reject(callId: String): ToolResult {
         val requestId = resolveRequestId(callId)

@@ -23,6 +23,12 @@ import java.util.concurrent.atomic.AtomicLong
  *   from the SQLite vector truth, so the cache is purely derived state;
  * - the API embedding query-vector cache is a different layer (billable
  *   provider vectors) and is untouched by this cache.
+ *
+ * Active-use safety (b07 follow-up finding B): the cache never hands out a
+ * raw [VectorIndexPort].  Callers hold a [VectorIndexLease]; eviction,
+ * replacement, invalidation, and [close] only *retire* entries with active
+ * leases and free the native handle once the last lease is released.  A
+ * search in progress can therefore never observe a closed/freed index.
  */
 class VectorIndexCache(
     private val factory: VectorIndexFactory?,
@@ -41,51 +47,160 @@ class VectorIndexCache(
         val evictions: Long,
     )
 
-    private data class Entry(val index: VectorIndexPort, val memberIds: Set<String>)
+    /**
+     * Borrowed-handle guard.  The index stays alive at least until [close];
+     * closing is idempotent, so `use { }` blocks and early returns are safe.
+     */
+    inner class VectorIndexLease internal constructor(
+        val index: VectorIndexPort,
+        private val entry: Entry,
+    ) : AutoCloseable {
+        private var released = false
+
+        override fun close() = release()
+
+        fun release() = synchronized(lock) {
+            if (released) return@synchronized
+            released = true
+            entry.refCount--
+            check(entry.refCount >= 0) { "Vector index lease released twice" }
+            if (entry.refCount == 0 && entry.retired) {
+                retired.remove(entry)
+                runCatching { entry.index.close() }
+            }
+        }
+    }
+
+    internal data class Entry(
+        val index: VectorIndexPort,
+        val memberIds: Set<String>,
+        var refCount: Int = 0,
+        var retired: Boolean = false,
+    )
 
     private val lock = Any()
     private val entries = LinkedHashMap<Key, Entry>(maxEntries, 0.75f, true)
+    /** Retired entries with outstanding leases; freed when the last lease ends. */
+    private val retired = linkedSetOf<Entry>()
+    /** Per-key build monitors so concurrent misses for one key build once. */
+    private val buildLocks = linkedMapOf<Key, Any>()
     private val builds = AtomicLong(0)
     private val reuseHits = AtomicLong(0)
     private val evictions = AtomicLong(0)
 
     /**
-     * Return the cached index when [memberIds] exactly match the cached set,
-     * else null.  Callers load vectors and [put] on a miss.
+     * Acquire the cached index for [key] when [memberIds] exactly match the
+     * cached set, else null.  Callers build and [publish] on a miss, or use
+     * [getOrBuild] for single-flight construction.
      */
-    fun get(key: Key, memberIds: Set<String>): VectorIndexPort? = synchronized(lock) {
+    fun acquire(key: Key, memberIds: Set<String>): VectorIndexLease? = synchronized(lock) {
         val entry = entries[key]
-        if (entry == null || entry.memberIds != memberIds) return@synchronized null
+        if (entry == null || entry.retired || entry.memberIds != memberIds) return@synchronized null
         // Touch for access-order LRU.
         entries.remove(key)
         entries[key] = entry
+        entry.refCount++
         reuseHits.incrementAndGet()
-        entry.index
+        VectorIndexLease(entry.index, entry)
     }
 
-    fun put(key: Key, memberIds: Set<String>, index: VectorIndexPort) = synchronized(lock) {
-        entries.remove(key)?.index?.close()
+    /**
+     * Publish a freshly built index.  A live entry for [key] is retired, not
+     * closed: active leases keep working, future [acquire] calls see the new
+     * index, and the old handle is freed when its last lease is released.
+     * LRU eviction retires the same way.
+     */
+    fun publish(key: Key, memberIds: Set<String>, index: VectorIndexPort) = synchronized(lock) {
+        publishLocked(key, memberIds, index)
+    }
+
+    private fun publishLocked(key: Key, memberIds: Set<String>, index: VectorIndexPort) {
+        entries.remove(key)?.let(::retireLocked)
         entries[key] = Entry(index, memberIds)
         while (entries.size > maxEntries) {
             val eldest = entries.entries.iterator().next()
             entries.remove(eldest.key)
-            runCatching { eldest.value.index.close() }
+            retireLocked(eldest.value)
             evictions.incrementAndGet()
         }
         builds.incrementAndGet()
     }
 
+    /**
+     * Single-flight miss path: concurrent callers for one key share a single
+     * [build] result.  The build runs outside the cache lock but under the
+     * key monitor; a loser that finds a fresh live entry closes its own
+     * surplus handle instead of orphaning the winner's lease.
+     */
+    fun getOrBuild(key: Key, memberIds: Set<String>, build: () -> VectorIndexPort): VectorIndexLease {
+        acquire(key, memberIds)?.let { return it }
+        val monitor = synchronized(lock) { buildLocks.getOrPut(key) { Any() } }
+        try {
+            synchronized(monitor) {
+                acquire(key, memberIds)?.let { return it }
+                val index = build()
+                var published = false
+                try {
+                    synchronized(lock) {
+                        // Re-check under the cache lock: a concurrent publish
+                        // (invalidation race) may have installed a live entry.
+                        val existing = entries[key]
+                        if (existing != null && !existing.retired && existing.memberIds == memberIds) {
+                            runCatching { index.close() }
+                            existing.refCount++
+                            reuseHits.incrementAndGet()
+                            return VectorIndexLease(existing.index, existing)
+                        }
+                        publishLocked(key, memberIds, index)
+                        published = true
+                        val installed = checkNotNull(entries[key]) {
+                            "Vector index publish did not install the entry"
+                        }
+                        installed.refCount++
+                        reuseHits.incrementAndGet()
+                        return VectorIndexLease(installed.index, installed)
+                    }
+                } catch (failure: Throwable) {
+                    // Only the unpublished surplus may be closed here: a
+                    // published entry belongs to the cache (and possibly to
+                    // leases acquired above), never to this builder.
+                    if (!published) runCatching { index.close() }
+                    throw failure
+                }
+            }
+        } finally {
+            synchronized(lock) {
+                if (buildLocks[key] === monitor) buildLocks.remove(key)
+            }
+        }
+    }
+
     fun invalidateKnowledgeBase(knowledgeBaseId: String) = synchronized(lock) {
         entries.keys.filter { it.knowledgeBaseId == knowledgeBaseId }.forEach { key ->
-            entries.remove(key)?.index?.close()
+            entries.remove(key)?.let(::retireLocked)
         }
     }
 
     fun stats(): Stats = Stats(builds.get(), reuseHits.get(), evictions.get())
 
+    /**
+     * Retire every live entry.  Handles with no active lease close now;
+     * leased handles close when their last lease is released.
+     */
     fun close() = synchronized(lock) {
-        entries.values.forEach { runCatching { it.index.close() } }
+        entries.values.forEach(::retireLocked)
         entries.clear()
+        buildLocks.clear()
+    }
+
+    private fun retireLocked(entry: Entry) {
+        if (entry.retired) return
+        entry.retired = true
+        if (entry.refCount == 0) {
+            runCatching { entry.index.close() }
+        } else {
+            retired.add(entry)
+        }
     }
 }
 

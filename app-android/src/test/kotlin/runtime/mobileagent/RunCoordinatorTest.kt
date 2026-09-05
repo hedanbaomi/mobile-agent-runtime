@@ -186,4 +186,55 @@ class RunCoordinatorTest {
         assertNull(RunCoordinator.modelTokenBudget("{\"maxModelTokens\":0}"))
         assertEquals(512, RunCoordinator.modelTokenBudget("{\"maxModelTokens\":512}"))
     }
+
+    @Test
+    fun manifestAssembledFromFrozenFactsKeepsExactSources() {
+        // PreparedRunFacts is the single freeze point shared by the prompt
+        // build and the manifest stamp: assembleManifest must propagate its
+        // values verbatim instead of re-reading live state (b07 finding D).
+        val facts = PreparedRunFacts(
+            rootPrompt = "frozen root",
+            rootPromptHash = RunCoordinator.sha256Hex("frozen root".toByteArray(Charsets.UTF_8)),
+            skillPins = listOf(SkillPin("skill-a", "hash-a", 2)),
+            skillInstructions = listOf("frozen instruction"),
+            knowledgePins = listOf(KnowledgePin("kb-a", "gen-1", "space-a")),
+            grants = listOf(GrantPin("grant-a", 4, revoked = true)),
+            toolSchemaFingerprint = "fingerprint",
+            retrievalScope = runtime.mobileagent.domain.RetrievalScopePin(
+                requested = listOf("kb-a"),
+                searched = listOf("kb-a"),
+            ),
+        )
+        val manifest = RunCoordinator.assembleManifest(
+            runId = "run-coord",
+            conversationId = "conversation-coord",
+            snapshotId = "snapshot-coord",
+            agentRevision = 7,
+            promptRevisionId = "initial",
+            globalRootPromptHash = facts.rootPromptHash,
+            providerId = "provider-coord",
+            providerRevision = 1,
+            modelId = "coord-model",
+            modelRevision = 1,
+            skills = facts.skillPins,
+            knowledge = facts.knowledgePins,
+            workspaceId = null,
+            grants = facts.grants,
+            policyVersion = 9,
+            toolSchemaFingerprint = facts.toolSchemaFingerprint,
+            budgetJson = "{\"maxModelRounds\":8}",
+            retrievalPolicy = "automatic",
+            modelTokenBudget = null,
+            retrievalScope = facts.retrievalScope,
+        )
+        assertEquals(facts.rootPromptHash, manifest.globalRootPromptHash)
+        assertEquals(facts.skillPins, manifest.skills)
+        assertEquals(facts.knowledgePins, manifest.knowledge)
+        assertEquals(facts.grants, manifest.grants)
+        assertEquals(facts.toolSchemaFingerprint, manifest.toolSchemaFingerprint)
+        assertEquals(facts.retrievalScope, manifest.retrievalScope)
+        // The frozen prompt text itself never enters the manifest.
+        assertFalse(manifest.toJson().contains("frozen root"))
+        assertFalse(manifest.toJson().contains("frozen instruction"))
+    }
 }

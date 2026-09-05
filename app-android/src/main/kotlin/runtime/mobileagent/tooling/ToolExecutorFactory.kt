@@ -115,6 +115,11 @@ class ToolExecutorFactory(
 
     suspend fun approve(callId: String): ToolResult = executor.approve(callId)
 
+    /**
+     * Disclosure check for a cached result owned by the composite.  This only
+     * routes to [CompositeToolExecutor.authorizeReplay]; it never dispatches.
+     */
+    suspend fun authorizeReplay(call: ToolCall): Boolean = executor.authorizeReplay(call)
     /** Resolve a pending legacy approval through the executor that accepted the call. */
     suspend fun reject(callId: String): ToolResult = executor.reject(callId)
 
@@ -222,6 +227,30 @@ private class CompositeToolExecutor(executors: List<ToolExecutor>) : ToolExecuto
 
     override suspend fun approve(callId: String): ToolResult {
         return settle(callId) { owner -> owner.approve(callId) }
+    }
+
+    /**
+     * Forward cached-result disclosure to the child executor that actually ran
+     * the call.  The composite never discloses from its own default: the
+     * binding must be settled for exactly this call, the tool must still
+     * route to the same owner, and the child revalidates live authorization.
+     * A revoked child, an unknown call id, a reused call id with different
+     * arguments, or a child failure therefore denies without dispatch and
+     * without leaking the cached payload.  This never re-invokes the tool and
+     * never returns the cached result itself (b07 follow-up finding A).
+     */
+    override suspend fun authorizeReplay(call: ToolCall): Boolean {
+        val binding = synchronized(lock) { callsById[call.callId] } ?: return false
+        synchronized(lock) {
+            if (binding.state != LegacyCallState.SETTLED) return false
+            if (binding.call != call) return false
+            if (owners[call.name] !== binding.owner) return false
+        }
+        return try {
+            binding.owner.authorizeReplay(call)
+        } catch (_: Exception) {
+            false
+        }
     }
 
     override suspend fun reject(callId: String): ToolResult {

@@ -90,6 +90,18 @@ class WebSearchToolExecutor(
         }
     }
 
+    /**
+     * Disclosure check for a cached web-search result.  Allows only a settled,
+     * non-unknown completion for exactly this call while the search
+     * configuration is still authorized; never re-dispatches the query.
+     */
+    override suspend fun authorizeReplay(call: ToolCall): Boolean = mutex.withLock {
+        if (requests[call.callId] != call) return@withLock false
+        val remembered = completed[call.callId] ?: return@withLock false
+        if (remembered is ToolResult.UnknownOutcome) return@withLock false
+        authorized()
+    }
+
     private fun parse(call: ToolCall): SearchRequest? {
         val root = runCatching { Json.parseToJsonElement(call.argumentsJson) as? JsonObject }.getOrNull() ?: return null
         if (root.keys.any { it !in setOf("query", "maxResults") }) return null

@@ -47,7 +47,6 @@ internal class InternalWorkspaceBackend(
         mutationCapabilities = setOf(
             WorkspaceMutationCapability.ATOMIC_PUBLISH,
             WorkspaceMutationCapability.CREATE_IF_ABSENT,
-            WorkspaceMutationCapability.COMPARE_AND_REPLACE,
             WorkspaceMutationCapability.BEST_EFFORT_CONFLICT_DETECTION,
         ),
         maxScannedEntries = limits.maxScannedEntries,
@@ -67,6 +66,16 @@ internal class InternalWorkspaceBackend(
     )
     private val lock = Any()
     private val cursorStore = InternalWorkspaceCursorStore()
+    /**
+     * Test-only fault-injection seams for TOCTOU coverage (b07 follow-up
+     * finding C4).  Invoked once between the final pre-commit re-check and
+     * the commit, while the backend lock is held: tests use them to let an
+     * *external* writer (raw `java.nio`, never this backend — re-entering the
+     * backend from a hook deadlocks) mutate the target inside the race
+     * window.  Always null in production.
+     */
+    internal var afterPreflightBeforeCommit: (() -> Unit)? = null
+    internal var afterVersionCheckBeforeReplace: (() -> Unit)? = null
     private val rootPath: Path = root.toAbsolutePath().normalize()
     // Android may expose an app-private directory through a stable platform-managed ancestor
     // alias (for example, outside this workspace boundary).  Pin the resolved workspace root on
@@ -303,6 +312,7 @@ internal class InternalWorkspaceBackend(
                 if (latestVersion != currentVersion || latestContentVersion != currentContentVersion) {
                     InternalWorkspaceErrorCode.CONFLICT.error()
                 }
+                afterVersionCheckBeforeReplace?.invoke()
                 atomicReplace(temporary, target, parent, canonicalParent, replaceExisting = true)
                 rejectLink(target)
                 if (!Files.isRegularFile(target, LinkOption.NOFOLLOW_LINKS) ||
@@ -371,6 +381,7 @@ internal class InternalWorkspaceBackend(
                 if (expectedVersion != null && expectedVersion != InternalWorkspaceVersions.MISSING) {
                     InternalWorkspaceErrorCode.CONFLICT.error()
                 }
+                afterPreflightBeforeCommit?.invoke()
                 try {
                     WorkspaceAtomicCommit.writeExclusive(target, content)
                 } catch (_: FileAlreadyExistsException) {
@@ -403,6 +414,7 @@ internal class InternalWorkspaceBackend(
                 } else null
                 if (currentVersion != oldVersion) InternalWorkspaceErrorCode.CONFLICT.error()
                 expectVersion(currentVersion, expectedVersion, currentVersion?.let { legacyFileVersion(target) })
+                afterVersionCheckBeforeReplace?.invoke()
                 atomicReplace(temporary, target, parent, canonicalParent, replaceExisting)
                 rejectLink(target)
                 if (!Files.isRegularFile(target, LinkOption.NOFOLLOW_LINKS) || meteredSize(target) != content.size.toLong()) {
@@ -520,15 +532,25 @@ internal class InternalWorkspaceBackend(
                     InternalWorkspaceErrorCode.NON_EMPTY_DIRECTORY.error()
                 }
             }
+            if (!replaceExisting && type == InternalWorkspaceEntryType.DIRECTORY) {
+                // No portable primitive proves a no-replace directory move:
+                // a bare rename would silently merge/overwrite on every major
+                // platform.  Fail closed instead of overwriting (b07 finding C2).
+                InternalWorkspaceErrorCode.UNSUPPORTED.error()
+            }
             val currentVersion = nodeVersion(resolveExisting(sourceSegments), type)
             if (currentVersion != version) InternalWorkspaceErrorCode.CONFLICT.error()
+            afterPreflightBeforeCommit?.invoke()
             try {
-                // A create-only move must not silently degrade to REPLACE_EXISTING:
-                // without the flag the commit fails when the destination appears.
+                // A create-only file move must not silently degrade to
+                // REPLACE_EXISTING: the commit copies through an exclusive
+                // create, so a destination created after the pre-check fails
+                // with ENTRY_EXISTS instead of being overwritten.  This path
+                // is safe but non-atomic (see WorkspaceAtomicCommit).
                 if (replaceExisting) {
                     Files.move(source, destination, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING)
                 } else {
-                    Files.move(source, destination, StandardCopyOption.ATOMIC_MOVE)
+                    WorkspaceAtomicCommit.moveFileNoReplace(source, destination)
                 }
                 verifyStableWorkspaceDirectoryAfterMutation(destinationParent, canonicalDestinationParent)
                 verifyStableWorkspaceDirectoryAfterMutation(sourceParent, canonicalSourceParent)
@@ -599,12 +621,18 @@ internal class InternalWorkspaceBackend(
             val newEntries = usage.entries - destinationUsage.entries + sourceUsage.entries
             if (newFiles > limits.maxEntries || newEntries > limits.maxEntries) InternalWorkspaceErrorCode.ENTRY_LIMIT_EXCEEDED.error()
             if (sourceUsage.bytes > limits.quotaBytes - retainedBytes) InternalWorkspaceErrorCode.QUOTA_EXCEEDED.error()
+            if (!replaceExisting && type == InternalWorkspaceEntryType.DIRECTORY) {
+                // Same rationale as no-replace directory move: no portable
+                // proving primitive, so fail closed (b07 finding C2).
+                InternalWorkspaceErrorCode.UNSUPPORTED.error()
+            }
             val temporary = destinationParent.resolve(".mar-workspace-copy-${UUID.randomUUID()}.tmp")
             try {
                 copyNode(source, temporary)
                 forceDirectory(destinationParent)
                 val currentVersion = nodeVersion(resolveExisting(sourceSegments), type)
                 if (currentVersion != version) InternalWorkspaceErrorCode.CONFLICT.error()
+                if (!replaceExisting) afterPreflightBeforeCommit?.invoke() else afterVersionCheckBeforeReplace?.invoke()
                 atomicReplace(temporary, destination, destinationParent, canonicalDestinationParent, replaceExisting)
                 rejectLink(destination)
                 InternalWorkspaceTransfer(

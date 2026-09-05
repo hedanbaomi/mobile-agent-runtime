@@ -1253,7 +1253,13 @@ class KnowledgeRepository(
     fun search(query: String, topK: Int = 8, knowledgeBaseIds: List<String>? = null): List<SearchHit> =
         retrieve("search", query, topK, knowledgeBaseIds).hits
 
-    /** Durable run-fact pins: the active READY generation per KB (null when none). */
+    /**
+     * Durable run-fact pins: the active READY generation per KB (null when none).
+     *
+     * This reads the *current* active generations.  It must NOT feed the run
+     * manifest: manifests use [RetrievalResult.usedGenerations], which records
+     * the pins this retrieval actually consumed (b07 follow-up finding D).
+     */
     fun generationPins(knowledgeBaseIds: List<String>): Map<String, runtime.mobileagent.domain.KnowledgePin> =
         knowledgeBaseIds.distinct().associateWith { kbId ->
             val row = db.query(
@@ -1274,21 +1280,27 @@ class KnowledgeRepository(
 
     fun retrieve(runId: String, query: String, topK: Int = 8, knowledgeBaseIds: List<String>? = null): RetrievalResult {
         if (query.isBlank()) {
+            val requested = (knowledgeBaseIds ?: listKnowledgeBases().map { it.first }).distinct()
             return RetrievalResult(
                 emptyList(),
                 emptyList(),
                 listOf("empty query"),
                 RetrievalCoverage(
-                    requested = (knowledgeBaseIds ?: listKnowledgeBases().map { it.first }).distinct(),
+                    requested = requested,
                     searched = emptyList(),
                     unavailable = emptyList(),
                 ),
+                usedGenerations = requested.map { runtime.mobileagent.domain.KnowledgePin(it, null, "") },
             )
         }
         val warnings = mutableListOf<String>()
         val bases = (knowledgeBaseIds ?: listKnowledgeBases().map { it.first }).distinct()
         val searched = mutableListOf<String>()
         val unavailable = mutableListOf<UnavailableSource>()
+        // Exact generation pins consumed by this call (b07 follow-up finding
+        // D): recorded here so the run manifest reflects execution facts,
+        // never a later re-read of the active generation.
+        val usedPins = linkedMapOf<String, runtime.mobileagent.domain.KnowledgePin>()
         // One ranking per (KB, channel).  KB candidate lists are NEVER
         // concatenated before fusion: concatenated positions depend on KB
         // traversal order and would bias ReciprocalRankFusion.  Fusion is
@@ -1300,6 +1312,7 @@ class KnowledgeRepository(
             if (kb == null) {
                 warnings += "Knowledge base $kbId is missing or deleted"
                 unavailable += UnavailableSource(kbId, RetrievalUnavailableReason.KB_NOT_FOUND)
+                usedPins[kbId] = runtime.mobileagent.domain.KnowledgePin(kbId, null, "")
                 continue
             }
             val space = kb.string("embedding_space_id")
@@ -1309,6 +1322,7 @@ class KnowledgeRepository(
             if (space.isNotBlank() && space != embedder.spaceId && !hasApiEmbeddingConsent(kbId)) {
                 warnings += "Knowledge base $kbId uses embedding space $space but has no persisted API embedding consent for query vectors"
                 unavailable += UnavailableSource(kbId, RetrievalUnavailableReason.CONSENT_MISSING)
+                usedPins[kbId] = runtime.mobileagent.domain.KnowledgePin(kbId, null, space)
                 continue
             }
             val apiQueryHash = if (space.isNotBlank() && space != embedder.spaceId) {
@@ -1330,14 +1344,17 @@ class KnowledgeRepository(
             if (queryEmbedder == null) {
                 warnings += "Knowledge base $kbId uses space $space; no matching query embedder is configured"
                 unavailable += UnavailableSource(kbId, RetrievalUnavailableReason.EMBEDDING_UNAVAILABLE)
+                usedPins[kbId] = runtime.mobileagent.domain.KnowledgePin(kbId, null, space)
                 continue
             }
             val pin = pinnedReadyGeneration(kbId)
             if (pin == null) {
                 warnings += "Knowledge base $kbId has no READY generation"
                 unavailable += UnavailableSource(kbId, RetrievalUnavailableReason.GENERATION_NOT_READY)
+                usedPins[kbId] = runtime.mobileagent.domain.KnowledgePin(kbId, null, space)
                 continue
             }
+            usedPins[kbId] = runtime.mobileagent.domain.KnowledgePin(kbId, pin, space)
             searched += kbId
             sources += lexicalHits(kbId, query, 40, pin).rankOrdered()
             if (apiQueryHash != null && cachedQueryVector == null) {
@@ -1381,7 +1398,13 @@ class KnowledgeRepository(
         if (hits.isEmpty()) warnings += "No in-scope evidence"
         val coverage = RetrievalCoverage(requested = bases, searched = searched.toList(), unavailable = unavailable.toList())
         coverage.notice()?.let { warnings += "部分知识库未参与本次检索（${searched.size}/${bases.size}）：$it" }
-        return RetrievalResult(hits, CitationMap.bind(runId, hits), warnings, coverage)
+        return RetrievalResult(
+            hits,
+            CitationMap.bind(runId, hits),
+            warnings,
+            coverage,
+            usedGenerations = bases.map { usedPins[it] ?: runtime.mobileagent.domain.KnowledgePin(it, null, "") },
+        )
     }
 
     /** Deterministic per-source rank order: score first, then stable id order. */
@@ -3309,15 +3332,21 @@ class KnowledgeRepository(
         if (byId.isEmpty()) return emptyList()
         val ids = byId.keys.toSet()
         val key = VectorIndexCache.Key(kbId, selectedEmbedder.spaceId, selectedEmbedder.dimension, generation)
-        val index = vectorIndexCache.get(key, ids) ?: buildVectorIndex(key, ids, selectedEmbedder)
-        return index.search(queryVec, topK).map { (id, score) -> byId.getValue(id).copy(score = score.toDouble()) }
+        // Borrowed-handle lease: the search runs while the lease is held, so
+        // eviction/invalidation/replacement cannot free the native handle
+        // mid-search (b07 follow-up finding B).  Concurrent misses for one
+        // key share a single build.
+        vectorIndexCache.getOrBuild(key, ids) { buildVectorIndex(key, ids, selectedEmbedder) }.use { lease ->
+            return lease.index.search(queryVec, topK).map { (id, score) -> byId.getValue(id).copy(score = score.toDouble()) }
+        }
     }
 
     /**
      * Build (or rebuild after drift) the ANN handle for one pinned
      * generation.  Blobs are read only on this path; cache hits never touch
      * them.  The SQLite vectors remain the truth — a process restart simply
-     * rebuilds from them.
+     * rebuilds from them.  The caller ([VectorIndexCache.getOrBuild])
+     * publishes the result; this function only constructs it.
      */
     private fun buildVectorIndex(
         key: VectorIndexCache.Key,
@@ -3352,7 +3381,6 @@ class KnowledgeRepository(
                 if (vector.any { !it.isFinite() }) return@forEach
                 index.add(id, vector)
             }
-            vectorIndexCache.put(key, ids, index)
             return index
         } catch (failure: Throwable) {
             runCatching { index.close() }

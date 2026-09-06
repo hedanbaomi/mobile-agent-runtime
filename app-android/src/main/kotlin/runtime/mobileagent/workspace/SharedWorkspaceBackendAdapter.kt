@@ -5,7 +5,6 @@ package runtime.mobileagent.workspace
 
 import android.content.Context
 import android.net.Uri
-import java.lang.Long.parseUnsignedLong
 import java.nio.file.Path
 import runtime.mobileagent.domain.CapabilityId
 import runtime.mobileagent.domain.WorkspaceBackendType as DomainWorkspaceBackendType
@@ -67,9 +66,15 @@ class SharedWorkspaceBackendAdapter internal constructor(
         )) {
             is InternalWorkspaceResult.Failure -> failure(result.error)
             is InternalWorkspaceResult.Success -> {
-                val entries = result.value.entries
-                    .take(request.maxEntries)
-                    .map(::toSharedEntry)
+                val entries = try {
+                    result.value.entries
+                        .take(request.maxEntries)
+                        .map(::toSharedEntry)
+                } catch (_: IllegalArgumentException) {
+                    return failure(ToolErrorCode.IO_ERROR)
+                } catch (_: NumberFormatException) {
+                    return failure(ToolErrorCode.IO_ERROR)
+                }
                 SharedWorkspaceResult.Success(
                     WorkspaceListing(
                         relativePath = result.value.path.ifEmpty { ROOT_PATH },
@@ -88,14 +93,14 @@ class SharedWorkspaceBackendAdapter internal constructor(
         if (request.workspaceId != backend.descriptor.id) return failure(ToolErrorCode.INVALID_REQUEST)
         return when (val result = backend.stat(request.relativePath)) {
             is InternalWorkspaceResult.Failure -> failure(result.error)
-            is InternalWorkspaceResult.Success -> SharedWorkspaceResult.Success(
+            is InternalWorkspaceResult.Success -> mapObserved(result.value.version) { version ->
                 WorkspaceFileStat(
                     relativePath = result.value.path.ifEmpty { ROOT_PATH },
                     type = result.value.type.toShared(),
                     sizeBytes = result.value.sizeBytes ?: 0L,
-                    version = publicVersion(result.value.version),
-                ),
-            )
+                    version = version,
+                )
+            }
         }
     }
 
@@ -111,17 +116,17 @@ class SharedWorkspaceBackendAdapter internal constructor(
             is InternalWorkspaceResult.Failure -> failure(result.error)
             is InternalWorkspaceResult.Success -> when (val decoded = InternalWorkspaceVersions.decode(result.value.bytes)) {
                 is InternalWorkspaceResult.Failure -> failure(decoded.error)
-                is InternalWorkspaceResult.Success -> SharedWorkspaceResult.Success(
+                is InternalWorkspaceResult.Success -> mapObserved(result.value.version) { version ->
                     WorkspaceText(
                         relativePath = request.relativePath,
                         text = decoded.value,
                         byteSize = result.value.bytes.size.toLong(),
-                        version = publicVersion(result.value.version),
+                        version = version,
                         offsetBytes = result.value.offsetBytes,
                         totalBytes = result.value.totalBytes,
                         eof = result.value.eof,
-                    ),
-                )
+                    )
+                }
             }
         }
     }
@@ -139,14 +144,14 @@ class SharedWorkspaceBackendAdapter internal constructor(
         }
         return when (val result = backend.applyPatch(request.relativePath, request.patch, expected, format)) {
             is InternalWorkspaceResult.Failure -> failure(result.error)
-            is InternalWorkspaceResult.Success -> SharedWorkspaceResult.Success(
+            is InternalWorkspaceResult.Success -> mapCommitted(result.value.version) { version ->
                 WorkspaceMutation(
                     relativePath = result.value.path,
                     type = SharedWorkspaceEntryType.FILE,
                     byteSize = result.value.bytes,
-                    version = publicVersion(result.value.version),
-                ),
-            )
+                    version = version,
+                )
+            }
         }
     }
 
@@ -162,14 +167,14 @@ class SharedWorkspaceBackendAdapter internal constructor(
         }
         return when (val result = backend.write(request.relativePath, bytes, expected, request.replace)) {
             is InternalWorkspaceResult.Failure -> failure(result.error)
-            is InternalWorkspaceResult.Success -> SharedWorkspaceResult.Success(
+            is InternalWorkspaceResult.Success -> mapCommitted(result.value.version) { version ->
                 WorkspaceMutation(
                     relativePath = result.value.path,
                     type = SharedWorkspaceEntryType.FILE,
                     byteSize = result.value.bytes,
-                    version = publicVersion(result.value.version),
-                ),
-            )
+                    version = version,
+                )
+            }
         }
     }
 
@@ -181,13 +186,13 @@ class SharedWorkspaceBackendAdapter internal constructor(
         }
         return when (val result = backend.createDirectory(request.relativePath, expected)) {
             is InternalWorkspaceResult.Failure -> failure(result.error)
-            is InternalWorkspaceResult.Success -> SharedWorkspaceResult.Success(
+            is InternalWorkspaceResult.Success -> mapCommitted(result.value.version) { version ->
                 WorkspaceMutation(
                     relativePath = result.value.path,
                     type = SharedWorkspaceEntryType.DIRECTORY,
-                    version = publicVersion(result.value.version),
-                ),
-            )
+                    version = version,
+                )
+            }
         }
     }
 
@@ -199,14 +204,14 @@ class SharedWorkspaceBackendAdapter internal constructor(
         }
         return when (val result = backend.move(request.sourcePath, request.destinationPath, expected, false)) {
             is InternalWorkspaceResult.Failure -> failure(result.error)
-            is InternalWorkspaceResult.Success -> SharedWorkspaceResult.Success(
+            is InternalWorkspaceResult.Success -> mapCommitted(result.value.version) { version ->
                 WorkspaceMutation(
                     relativePath = result.value.destinationPath,
                     type = result.value.type.toShared(),
                     byteSize = result.value.bytes ?: 0L,
-                    version = publicVersion(result.value.version),
-                ),
-            )
+                    version = version,
+                )
+            }
         }
     }
 
@@ -224,14 +229,14 @@ class SharedWorkspaceBackendAdapter internal constructor(
             request.replace,
         )) {
             is InternalWorkspaceResult.Failure -> failure(result.error)
-            is InternalWorkspaceResult.Success -> SharedWorkspaceResult.Success(
+            is InternalWorkspaceResult.Success -> mapCommitted(result.value.version) { version ->
                 WorkspaceMutation(
                     relativePath = result.value.destinationPath,
                     type = result.value.type.toShared(),
                     byteSize = result.value.bytes ?: 0L,
-                    version = publicVersion(result.value.version),
-                ),
-            )
+                    version = version,
+                )
+            }
         }
     }
 
@@ -256,10 +261,13 @@ class SharedWorkspaceBackendAdapter internal constructor(
     private fun implementationVersion(path: String, expected: Long?): InternalWorkspaceResult<String?> {
         if (expected == null) return InternalWorkspaceResult.Success(null)
         return when (val current = backend.stat(path)) {
-            is InternalWorkspaceResult.Success -> current.value.version
-                .takeIf { publicVersion(it) == expected }
-                ?.let { InternalWorkspaceResult.Success(it) }
-                ?: InternalWorkspaceResult.Failure(InternalWorkspaceError(InternalWorkspaceErrorCode.CONFLICT))
+            is InternalWorkspaceResult.Success -> {
+                val projected = runCatching { WorkspaceVersionProjection.toPublic(current.value.version) }.getOrNull()
+                current.value.version
+                    .takeIf { projected == expected }
+                    ?.let { InternalWorkspaceResult.Success(it) }
+                    ?: InternalWorkspaceResult.Failure(InternalWorkspaceError(InternalWorkspaceErrorCode.CONFLICT))
+            }
             is InternalWorkspaceResult.Failure -> current
         }
     }
@@ -268,7 +276,7 @@ class SharedWorkspaceBackendAdapter internal constructor(
         relativePath = entry.path,
         type = entry.type.toShared(),
         sizeBytes = entry.sizeBytes ?: 0L,
-        version = publicVersion(entry.version),
+        version = WorkspaceVersionProjection.toPublic(entry.version),
     )
 
     private fun InternalWorkspaceEntryType.toShared(): SharedWorkspaceEntryType = when (this) {
@@ -339,8 +347,29 @@ class SharedWorkspaceBackendAdapter internal constructor(
         return ToolError(sharedCode, message = sharedCode.name, retryable = retryable)
     }
 
-    private fun publicVersion(version: String): Long =
-        parseUnsignedLong(version.take(16).padEnd(16, '0'), 16)
+    private inline fun <T> mapObserved(version: String, build: (Long) -> T): SharedWorkspaceResult<T> =
+        projectVersion(version, committed = false, build)
+
+    private inline fun <T> mapCommitted(version: String, build: (Long) -> T): SharedWorkspaceResult<T> =
+        projectVersion(version, committed = true, build)
+
+    /**
+     * A version-projection failure must never masquerade as success
+     * (9f5257 finding A).  Read/list/stat have no mutation, so they
+     * surface as IO_ERROR.  Mutation paths have already committed, so
+     * the typed result is UNKNOWN_OUTCOME.
+     */
+    private inline fun <T> projectVersion(
+        version: String,
+        committed: Boolean,
+        build: (Long) -> T,
+    ): SharedWorkspaceResult<T> = try {
+        SharedWorkspaceResult.Success(build(WorkspaceVersionProjection.toPublic(version)))
+    } catch (_: IllegalArgumentException) {
+        failure(if (committed) ToolErrorCode.UNKNOWN_OUTCOME else ToolErrorCode.IO_ERROR)
+    } catch (_: NumberFormatException) {
+        failure(if (committed) ToolErrorCode.UNKNOWN_OUTCOME else ToolErrorCode.IO_ERROR)
+    }
 
     companion object {
         const val ROOT_PATH = "."
@@ -367,5 +396,26 @@ class SharedWorkspaceBackendAdapter internal constructor(
             workspaceId: String = "saf-tree",
         ): SharedWorkspaceBackendAdapter =
             SharedWorkspaceBackendAdapter(SafWorkspaceBackend(context, treeUri, workspaceId = workspaceId))
+    }
+}
+
+/**
+ * Shared numeric projection for workspace version tokens.
+ *
+ * Internal tokens are tagged (`c1:` content hash, `m1:` metadata digest,
+ * `d1:` directory digest).  SAF and legacy tokens are bare hex digests
+ * and pass through unchanged.  Both sides of an expected-version
+ * comparison go through this projection, so equality binding is preserved.
+ */
+internal object WorkspaceVersionProjection {
+    fun toPublic(version: String): Long {
+        val body = when {
+            version.startsWith("c1:") || version.startsWith("m1:") || version.startsWith("d1:") -> version.substring(3)
+            else -> version
+        }
+        require(body.isNotEmpty() && body.take(16).all { it in '0'..'9' || it in 'a'..'f' || it in 'A'..'F' }) {
+            "Workspace version is not a hex digest"
+        }
+        return java.lang.Long.parseUnsignedLong(body.take(16).padEnd(16, '0'), 16)
     }
 }

@@ -16,12 +16,14 @@ class UsearchVectorIndex(
     override val dimension: Int,
     capacity: Int,
 ) : VectorIndex {
+    private val lock = Any()
+    @Volatile
     private var pointer: Long = NativeUsearchIndex.create(dimension, capacity)
     private val keys = linkedMapOf<Long, String>()
     private val vectors = linkedMapOf<Long, FloatArray>()
     private var nextKey = 1L
 
-    override fun add(id: String, vector: FloatArray) {
+    override fun add(id: String, vector: FloatArray) = synchronized(lock) {
         check(pointer != 0L) { "USearch index is closed" }
         require(vector.size == dimension) { "vector dimension mismatch" }
         require(id !in keys.values) { "duplicate vector id: $id" }
@@ -31,7 +33,7 @@ class UsearchVectorIndex(
         vectors[key] = vector.copyOf()
     }
 
-    override fun search(query: FloatArray, topK: Int): List<Pair<String, Float>> {
+    override fun search(query: FloatArray, topK: Int): List<Pair<String, Float>> = synchronized(lock) {
         check(pointer != 0L) { "USearch index is closed" }
         require(query.size == dimension) { "query dimension mismatch" }
         if (topK <= 0 || keys.isEmpty()) return emptyList()
@@ -41,7 +43,7 @@ class UsearchVectorIndex(
         }.toList()
     }
 
-    override fun close() {
+    override fun close() = synchronized(lock) {
         if (pointer == 0L) return
         NativeUsearchIndex.close(pointer)
         pointer = 0L

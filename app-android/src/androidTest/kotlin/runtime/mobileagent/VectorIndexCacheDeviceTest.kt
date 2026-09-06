@@ -7,6 +7,7 @@ import androidx.test.ext.junit.runners.AndroidJUnit4
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicReference
 import kotlin.concurrent.thread
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
@@ -76,11 +77,16 @@ class VectorIndexCacheDeviceTest {
 
     @Test
     fun concurrentSearchAndInvalidateNeverObservesClosedHandle() {
+        // CI job 101318610136 failed here with expected:<0> but was:<1> after
+        // swallowing the IllegalStateException.  Keep the first exception and
+        // require every worker to finish so a closed-handle or native thread-
+        // slot failure cannot hide behind a join timeout.
         val cache = VectorIndexCache(null, maxEntries = 4)
         val failures = AtomicInteger(0)
+        val firstFailure = AtomicReference<Throwable>()
         val stop = CountDownLatch(1)
-        val searchers = (1..4).map {
-            thread {
+        val searchers = (1..4).map { index ->
+            thread(name = "vector-searcher-$index") {
                 while (!stop.await(5, TimeUnit.MILLISECONDS)) {
                     try {
                         val lease = cache.acquire(key(), ids)
@@ -89,13 +95,14 @@ class VectorIndexCacheDeviceTest {
                         } else {
                             lease.use { it.index.search(query, 2) }
                         }
-                    } catch (_: IllegalStateException) {
+                    } catch (failure: Throwable) {
+                        firstFailure.compareAndSet(null, failure)
                         failures.incrementAndGet()
                     }
                 }
             }
         }
-        val invalidator = thread {
+        val invalidator = thread(name = "vector-invalidator") {
             repeat(50) {
                 cache.invalidateKnowledgeBase("kbA")
                 Thread.sleep(5)
@@ -103,8 +110,18 @@ class VectorIndexCacheDeviceTest {
             stop.countDown()
         }
         invalidator.join(30_000)
-        searchers.forEach { it.join(30_000) }
-        assertEquals(0, failures.get())
+        assertTrue("invalidator must finish", !invalidator.isAlive)
+        searchers.forEach { worker ->
+            worker.join(30_000)
+            assertTrue("${worker.name} must finish", !worker.isAlive)
+        }
+        val observed = firstFailure.get()
+        assertEquals(
+            "concurrent search/invalidate must not observe a closed or failed native handle" +
+                (observed?.let { ": ${it.javaClass.name}: ${it.message}\n${it.stackTraceToString()}" } ?: ""),
+            0,
+            failures.get(),
+        )
         cache.close()
     }
 }

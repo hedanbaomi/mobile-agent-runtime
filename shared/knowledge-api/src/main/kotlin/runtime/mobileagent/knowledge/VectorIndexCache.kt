@@ -98,7 +98,7 @@ class VectorIndexCache(
     /** Retired entries with outstanding leases; freed when the last lease ends. */
     private val retired = linkedSetOf<Entry>()
     /** Per-key build monitors so concurrent misses for one key build once. */
-    private val buildLocks = linkedMapOf<Key, Any>()
+    private val buildLocks = linkedMapOf<Key, BuildGate>()
     /**
      * Lifecycle epochs (3f75 finding D).  [closed] is terminal: after
      * [close], no build may publish and no new entry may appear.
@@ -156,9 +156,21 @@ class VectorIndexCache(
     }
 
     /**
+     * Single-flight gate for one key.  [holders] counts every caller that
+     * has taken this gate and not yet left it.  The gate stays in the map
+     * until the last holder leaves, so a failed first build cannot orphan a
+     * waiter on a stale monitor while a newcomer starts a second concurrent
+     * build (9f5257 finding B).  Waiters serialize: after a failure the next
+     * holder retries the build alone.
+     */
+    private class BuildGate {
+        var holders: Int = 0
+    }
+
+    /**
      * Single-flight miss path: concurrent callers for one key share a single
      * [build] result.  The build runs outside the cache lock but under the
-     * key monitor; a loser that finds a fresh live entry closes its own
+     * key gate; a loser that finds a fresh live entry closes its own
      * surplus handle instead of orphaning the winner's lease.
      *
      * Staleness (3f75 finding D): the builder captures the lifecycle epochs
@@ -173,9 +185,13 @@ class VectorIndexCache(
             globalEpoch to (kbEpochs[key.knowledgeBaseId] ?: 0L)
         }
         acquire(key, memberIds)?.let { return it }
-        val monitor = synchronized(lock) { buildLocks.getOrPut(key) { Any() } }
+        val gate = synchronized(lock) {
+            val existing = buildLocks.getOrPut(key) { BuildGate() }
+            existing.holders++
+            existing
+        }
         try {
-            synchronized(monitor) {
+            synchronized(gate) {
                 acquire(key, memberIds)?.let { return it }
                 val index = build()
                 var published = false
@@ -217,7 +233,13 @@ class VectorIndexCache(
             }
         } finally {
             synchronized(lock) {
-                if (buildLocks[key] === monitor) buildLocks.remove(key)
+                // The gate leaves the map only with its last holder: a failed
+                // first build cannot strand a waiter on a stale monitor while
+                // a newcomer opens a second concurrent build.  After close(),
+                // the map is already clear and a fresh gate (if any) belongs
+                // to post-close callers, which the closed check rejects.
+                gate.holders--
+                if (gate.holders == 0 && buildLocks[key] === gate) buildLocks.remove(key)
             }
         }
     }

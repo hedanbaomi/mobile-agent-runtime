@@ -3,10 +3,12 @@
 
 #include <jni.h>
 
+#include <algorithm>
 #include <cstdint>
 #include <exception>
 #include <limits>
 #include <memory>
+#include <thread>
 #include <utility>
 
 #include <usearch/index_dense.hpp>
@@ -50,7 +52,12 @@ Java_runtime_mobileagent_vector_NativeUsearchIndex_nativeCreate(
             return 0;
         }
         if (!result.index.try_reserve(unum::usearch::index_limits_t(
-                static_cast<std::size_t>(capacity), 1))) {
+                static_cast<std::size_t>(capacity),
+                // threads=1 made concurrent search on a leased handle throw
+                // IllegalStateException (CI job 101318610136,
+                // VectorIndexCacheDeviceTest.concurrentSearchAndInvalidateNeverObservesClosedHandle).
+                // Multiple retrieve() calls may search one cached index.
+                std::max<std::size_t>(32, std::thread::hardware_concurrency())))) {
             raise(env, "USearch index reservation failed");
             return 0;
         }

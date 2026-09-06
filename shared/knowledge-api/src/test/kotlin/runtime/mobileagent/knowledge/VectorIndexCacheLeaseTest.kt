@@ -277,4 +277,116 @@ class VectorIndexCacheLeaseTest {
         }
         assertEquals(0, built.closeCount.get())
     }
+
+    @Test
+    fun failedFirstBuildDoesNotSplitSingleFlight() {
+        // 9f5257 finding B: the first builder fails while the second already
+        // waits on the same gate; a third arrival must join the same gate
+        // instead of opening a second concurrent build.
+        val cache = VectorIndexCache(null, maxEntries = 4)
+        val firstEntered = CountDownLatch(1)
+        val failFirst = CountDownLatch(1)
+        val secondEntered = CountDownLatch(1)
+        val releaseSecond = CountDownLatch(1)
+        val thirdEnteredBuild = CountDownLatch(1)
+        val concurrentBuilds = AtomicInteger(0)
+        val maxConcurrentBuilds = AtomicInteger(0)
+        val secondResult = AtomicReference<String>()
+        val thirdResult = AtomicReference<String>()
+        val first = thread {
+            try {
+                cache.getOrBuild(key(), ids) {
+                    firstEntered.countDown()
+                    check(failFirst.await(10, TimeUnit.SECONDS))
+                    throw IllegalStateException("injected build failure")
+                }.close()
+                throw AssertionError("failed build must propagate")
+            } catch (expected: IllegalStateException) {
+                assertEquals("injected build failure", expected.message)
+            }
+        }
+        assertTrue(firstEntered.await(10, TimeUnit.SECONDS))
+        val second = thread {
+            secondResult.set(cache.getOrBuild(key(), ids) {
+                val now = concurrentBuilds.incrementAndGet()
+                maxConcurrentBuilds.accumulateAndGet(now) { a, b -> maxOf(a, b) }
+                try {
+                    secondEntered.countDown()
+                    check(releaseSecond.await(10, TimeUnit.SECONDS))
+                    FakeIndex().also { it.searchRelease.countDown() }
+                } finally {
+                    concurrentBuilds.decrementAndGet()
+                }
+            }.use { "second-ok" })
+        }
+        val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10)
+        while (second.state != Thread.State.BLOCKED && System.nanoTime() < deadline) Thread.sleep(1)
+        assertEquals(Thread.State.BLOCKED, second.state, "second must wait on the first builder's gate")
+        failFirst.countDown()
+        first.join(10_000)
+        assertTrue(secondEntered.await(10, TimeUnit.SECONDS))
+        val third = thread {
+            thirdResult.set(cache.getOrBuild(key(), ids) {
+                thirdEnteredBuild.countDown()
+                FakeIndex().also { it.searchRelease.countDown() }
+            }.use { "third-ok" })
+        }
+        // The third arrival must NOT start a second concurrent build while
+        // the second still builds: it waits on the same gate.
+        assertTrue(!thirdEnteredBuild.await(1, TimeUnit.SECONDS))
+        releaseSecond.countDown()
+        second.join(10_000)
+        third.join(10_000)
+        assertEquals("second-ok", secondResult.get())
+        assertEquals("third-ok", thirdResult.get())
+        assertEquals(1, maxConcurrentBuilds.get(), "at most one build callback may run at a time")
+        assertEquals(1, cache.stats().builds, "one publish for the shared key")
+    }
+
+    @Test
+    fun concurrentSearchAndInvalidateNeverObservesClosedHandle() {
+        val cache = VectorIndexCache(null, maxEntries = 4)
+        val failures = AtomicInteger(0)
+        val firstFailure = AtomicReference<Throwable>()
+        val stop = CountDownLatch(1)
+        val searchers = (1..4).map { index ->
+            thread(name = "lease-searcher-$index") {
+                while (!stop.await(5, TimeUnit.MILLISECONDS)) {
+                    try {
+                        cache.getOrBuild(key(), ids) {
+                            FakeIndex().also { it.searchRelease.countDown() }
+                        }.use { lease ->
+                            lease.index.search(floatArrayOf(1f, 0f), 1)
+                        }
+                    } catch (_: StaleVectorBuildException) {
+                        // In-flight rebuild after invalidate is discarded, not a closed handle.
+                    } catch (failure: Throwable) {
+                        firstFailure.compareAndSet(null, failure)
+                        failures.incrementAndGet()
+                    }
+                }
+            }
+        }
+        val invalidator = thread(name = "lease-invalidator") {
+            repeat(50) {
+                cache.invalidateKnowledgeBase("kbA")
+                Thread.sleep(1)
+            }
+            stop.countDown()
+        }
+        invalidator.join(10_000)
+        assertTrue(!invalidator.isAlive, "invalidator must finish")
+        searchers.forEach { worker ->
+            worker.join(10_000)
+            assertTrue(!worker.isAlive, "${worker.name} must finish")
+        }
+        val observed = firstFailure.get()
+        assertEquals(
+            0,
+            failures.get(),
+            "concurrent search/invalidate must not observe a closed handle" +
+                (observed?.let { ": ${it.javaClass.name}: ${it.message}" } ?: ""),
+        )
+        cache.close()
+    }
 }

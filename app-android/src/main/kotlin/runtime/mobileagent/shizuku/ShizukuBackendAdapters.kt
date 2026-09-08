@@ -41,6 +41,7 @@ import runtime.mobileagent.skills.tooling.WorkspaceResult
 import runtime.mobileagent.skills.tooling.WorkspaceStatRequest
 import runtime.mobileagent.skills.tooling.WorkspaceText
 import runtime.mobileagent.skills.tooling.WorkspaceWriteTextRequest
+import runtime.mobileagent.workspace.WorkspaceVersionProjection
 
 /**
  * Public, backend-neutral shell adapter for the Android container.
@@ -591,11 +592,10 @@ class ShizukuWorkspaceBackendAdapter(
 
     private fun parseOpaqueVersion(raw: String): ParsedVersion? {
         if (raw.length != 64 || raw.any { it !in "0123456789abcdefABCDEF" }) return null
-        return runCatching { ParsedVersion(publicVersion(raw), raw.lowercase()) }.getOrNull()
+        return runCatching {
+            ParsedVersion(WorkspaceVersionProjection.toPublic(raw), raw.lowercase())
+        }.getOrNull()
     }
-
-    private fun publicVersion(raw: String): Long =
-        java.lang.Long.parseUnsignedLong(raw.take(16), 16)
 
     private fun parseWritePayload(
         payload: JSONObject,
@@ -665,21 +665,43 @@ class ShizukuWorkspaceBackendAdapter(
             }
             is ShizukuDispatchResult.Success -> {
                 val payload = runCatching { JSONObject(dispatch.payload) }.getOrNull()
-                    ?: return failure(ToolErrorCode.BRIDGE_PROTOCOL_MISMATCH)
+                    ?: return failure(malformedResponseCode(operation))
                 if (payload.optString("operation", "") != operation) {
-                    return failure(ToolErrorCode.BRIDGE_PROTOCOL_MISMATCH)
+                    return failure(malformedResponseCode(operation))
                 }
-                if (!payload.optBoolean("ok", false)) {
-                    return failure(mapWorkspaceError(payload.optString("code", ""), operation))
+                val ok = payload.opt("ok") as? Boolean
+                    ?: return failure(malformedResponseCode(operation))
+                if (!ok) {
+                    return failure(
+                        mapWorkspaceError(
+                            payload.opt("code") as? String ?: "",
+                            operation,
+                            malformedResponseCode(operation),
+                        ),
+                    )
                 }
                 val value = runCatching { decode(payload) }.getOrNull()
-                    ?: return failure(ToolErrorCode.BRIDGE_PROTOCOL_MISMATCH)
+                    ?: return failure(malformedResponseCode(operation))
                 WorkspaceResult.Success(value)
             }
         }
     }
 
-    private fun mapWorkspaceError(code: String, operation: String): ToolErrorCode = when (code) {
+    private fun malformedResponseCode(operation: String): ToolErrorCode = when (operation) {
+        "apply_patch",
+        "write",
+        "mkdir",
+        "delete",
+        "move",
+        -> ToolErrorCode.UNKNOWN_OUTCOME
+        else -> ToolErrorCode.BRIDGE_PROTOCOL_MISMATCH
+    }
+
+    private fun mapWorkspaceError(
+        code: String,
+        operation: String,
+        fallback: ToolErrorCode = ToolErrorCode.IO_ERROR,
+    ): ToolErrorCode = when (code) {
         ShizukuWorkspaceFileStore.INVALID_PATH,
         ShizukuWorkspaceFileStore.OUTSIDE_ROOT,
             -> ToolErrorCode.PATH_OUT_OF_SCOPE
@@ -708,7 +730,7 @@ class ShizukuWorkspaceBackendAdapter(
             -> ToolErrorCode.OPERATION_UNAVAILABLE
         ShizukuWorkspaceFileStore.WRITE_UNVERIFIED,
             -> ToolErrorCode.INTERNAL_ERROR
-        else -> ToolErrorCode.IO_ERROR
+        else -> fallback
     }
 
     private fun failure(code: ToolErrorCode): WorkspaceResult.Failure =

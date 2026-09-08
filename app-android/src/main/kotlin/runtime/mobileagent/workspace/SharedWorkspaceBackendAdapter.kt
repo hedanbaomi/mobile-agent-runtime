@@ -35,7 +35,7 @@ import runtime.mobileagent.tooling.WorkspaceCopyRequest
  *
  * The implementation DTOs remain internal to this module.  In particular, URI references,
  * provider handles, byte buffers and hash strings never cross this adapter.  Shared versions are
- * the signed 64-bit projection of the implementation SHA-256; the full hash is retained inside
+ * a non-negative 63-bit projection of the implementation SHA-256; the full hash is retained inside
  * the backend for the second optimistic-concurrency check.
  */
 class SharedWorkspaceBackendAdapter internal constructor(
@@ -403,9 +403,12 @@ class SharedWorkspaceBackendAdapter internal constructor(
  * Shared numeric projection for workspace version tokens.
  *
  * Internal tokens are tagged (`c1:` content hash, `m1:` metadata digest,
- * `d1:` directory digest).  SAF and legacy tokens are bare hex digests
- * and pass through unchanged.  Both sides of an expected-version
- * comparison go through this projection, so equality binding is preserved.
+ * `d1:` directory digest). SAF and legacy tokens are bare hex digests.
+ * The low 63 bits of the existing 64-bit projection fit the non-negative
+ * expectedVersion contract while preserving all previously valid positive
+ * versions. Both sides of a comparison use this projection before the
+ * backend rechecks the full token; this remains a bounded digest projection,
+ * not a collision-free or atomic compare-and-swap guarantee.
  */
 internal object WorkspaceVersionProjection {
     fun toPublic(version: String): Long {
@@ -413,9 +416,9 @@ internal object WorkspaceVersionProjection {
             version.startsWith("c1:") || version.startsWith("m1:") || version.startsWith("d1:") -> version.substring(3)
             else -> version
         }
-        require(body.isNotEmpty() && body.take(16).all { it in '0'..'9' || it in 'a'..'f' || it in 'A'..'F' }) {
+        require(body.isNotEmpty() && body.all { it in '0'..'9' || it in 'a'..'f' || it in 'A'..'F' }) {
             "Workspace version is not a hex digest"
         }
-        return java.lang.Long.parseUnsignedLong(body.take(16).padEnd(16, '0'), 16)
+        return java.lang.Long.parseUnsignedLong(body.take(16).padEnd(16, '0'), 16) and Long.MAX_VALUE
     }
 }

@@ -144,7 +144,9 @@ class ToolExecutorFactory(
                 is UnifiedWorkspaceToolExecutor -> return typed.invoke(invocation)
                 is ShellToolExecutor -> return typed.invoke(invocation)
             }
-            val call = ToolCall(invocation.callId, invocation.name, invocation.argumentsJson)
+            // Legacy executors use ToolCall.callId as their execution/cache key.
+            // The typed boundary must pass the runtime ID, never model correlation.
+            val call = ToolCall(invocation.requestId, invocation.name, invocation.argumentsJson)
             val result = executor.invoke(call)
             return when (result) {
                 is ToolResult.Value -> ToolExecution.Value(result.json)
@@ -196,27 +198,40 @@ private class CompositeToolExecutor(executors: List<ToolExecutor>) : ToolExecuto
 
     override suspend fun invoke(call: ToolCall): ToolResult {
         val owner = owners[call.name] ?: return ToolResult.Invalid("Unknown tool")
-        val binding: LegacyCallBinding
+        var newBinding: LegacyCallBinding? = null
+        var settledReplay: SettledReplay? = null
         synchronized(lock) {
             val previous = callsById[call.callId]
             if (previous != null) {
                 if (previous.owner !== owner || previous.call != call) {
                     return ToolResult.Invalid("Tool call ID was already used by another tool")
                 }
-                return when (previous.state) {
-                    LegacyCallState.IN_FLIGHT -> ToolResult.UnknownOutcome("Tool call is already executing")
-                    LegacyCallState.PENDING -> ToolResult.NeedsApproval
-                    LegacyCallState.SETTLING -> ToolResult.UnknownOutcome("Tool call approval settlement is in progress")
-                    LegacyCallState.SETTLED -> previous.result ?: ToolResult.Invalid("Tool call is already settled")
+                when (previous.state) {
+                    LegacyCallState.IN_FLIGHT -> return ToolResult.UnknownOutcome("Tool call is already executing")
+                    LegacyCallState.PENDING -> return ToolResult.NeedsApproval
+                    LegacyCallState.SETTLING -> return ToolResult.UnknownOutcome("Tool call approval settlement is in progress")
+                    LegacyCallState.UNKNOWN_OUTCOME -> return previous.result ?: unknownReplay()
+                    LegacyCallState.SETTLED -> {
+                        val cached = previous.result
+                            ?: return ToolResult.Invalid("Tool call is already settled")
+                        settledReplay = SettledReplay(previous, cached)
+                    }
+                    LegacyCallState.REPLAY_DENIED -> return previous.result ?: replayDenied()
                 }
+            } else {
+                val created = LegacyCallBinding(owner, call)
+                newBinding = created
+                callsById[call.callId] = created
             }
-            binding = LegacyCallBinding(owner, call)
-            callsById[call.callId] = binding
         }
+        settledReplay?.let { return replay(call, it) }
+        val binding = checkNotNull(newBinding)
         return owner.invoke(call).also { result ->
             synchronized(lock) {
-                binding.result = result
-                binding.state = if (result == ToolResult.NeedsApproval) {
+                binding.result = if (result is ToolResult.UnknownOutcome) unknownReplay() else result
+                binding.state = if (result is ToolResult.UnknownOutcome) {
+                    LegacyCallState.UNKNOWN_OUTCOME
+                } else if (result == ToolResult.NeedsApproval) {
                     LegacyCallState.PENDING
                 } else {
                     LegacyCallState.SETTLED
@@ -240,18 +255,64 @@ private class CompositeToolExecutor(executors: List<ToolExecutor>) : ToolExecuto
      * never returns the cached result itself (b07 follow-up finding A).
      */
     override suspend fun authorizeReplay(call: ToolCall): Boolean {
-        val binding = synchronized(lock) { callsById[call.callId] } ?: return false
-        synchronized(lock) {
-            if (binding.state != LegacyCallState.SETTLED) return false
-            if (binding.call != call) return false
-            if (owners[call.name] !== binding.owner) return false
+        val settled = synchronized(lock) {
+            val binding = callsById[call.callId] ?: return@synchronized null
+            if (binding.state != LegacyCallState.SETTLED) return@synchronized null
+            if (binding.call != call) return@synchronized null
+            if (owners[call.name] !== binding.owner) return@synchronized null
+            val cached = binding.result ?: return@synchronized null
+            SettledReplay(binding, cached)
+        } ?: return false
+        return authorizeReplay(call, settled)
+    }
+
+    /**
+     * Revalidate a settled result outside [lock], then verify that the exact
+     * cached object is still the one being disclosed.  A denied or failed
+     * revalidation replaces the payload with a terminal tombstone, so a later
+     * authorization change cannot resurrect the old result.
+     */
+    private suspend fun replay(call: ToolCall, settled: SettledReplay): ToolResult {
+        if (!authorizeReplay(call, settled)) return replayDenied()
+        return synchronized(lock) {
+            if (settled.binding.state == LegacyCallState.SETTLED &&
+                settled.binding.call == call &&
+                owners[call.name] === settled.binding.owner &&
+                settled.binding.result === settled.cached
+            ) {
+                settled.cached
+            } else {
+                replayDenied()
+            }
         }
-        return try {
-            binding.owner.authorizeReplay(call)
+    }
+
+    private suspend fun authorizeReplay(call: ToolCall, settled: SettledReplay): Boolean {
+        val allowed = try {
+            settled.binding.owner.authorizeReplay(call)
         } catch (_: Exception) {
             false
         }
+        if (!allowed) {
+            synchronized(lock) {
+                if (settled.binding.state == LegacyCallState.SETTLED &&
+                    settled.binding.result === settled.cached
+                ) {
+                    settled.binding.state = LegacyCallState.REPLAY_DENIED
+                    settled.binding.result = replayDenied()
+                }
+            }
+            return false
+        }
+        return synchronized(lock) {
+            settled.binding.state == LegacyCallState.SETTLED &&
+                settled.binding.call == call &&
+                owners[call.name] === settled.binding.owner &&
+                settled.binding.result === settled.cached
+        }
     }
+
+    private fun replayDenied(): ToolResult = ToolResult.Denied(REPLAY_DENIED_REASON)
 
     override suspend fun reject(callId: String): ToolResult {
         return settle(callId) { owner -> owner.reject(callId) }
@@ -285,8 +346,13 @@ private class CompositeToolExecutor(executors: List<ToolExecutor>) : ToolExecuto
     private fun completeSettlement(binding: LegacyCallBinding, result: ToolResult) {
         synchronized(lock) {
             if (binding.state == LegacyCallState.SETTLING) {
-                binding.state = LegacyCallState.SETTLED
-                binding.result = result
+                if (result is ToolResult.UnknownOutcome) {
+                    binding.state = LegacyCallState.UNKNOWN_OUTCOME
+                    binding.result = unknownReplay()
+                } else {
+                    binding.state = LegacyCallState.SETTLED
+                    binding.result = result
+                }
             }
         }
     }
@@ -298,5 +364,24 @@ private class CompositeToolExecutor(executors: List<ToolExecutor>) : ToolExecuto
         var result: ToolResult? = null,
     )
 
-    private enum class LegacyCallState { IN_FLIGHT, PENDING, SETTLING, SETTLED }
+    private data class SettledReplay(
+        val binding: LegacyCallBinding,
+        val cached: ToolResult,
+    )
+
+    private enum class LegacyCallState {
+        IN_FLIGHT,
+        PENDING,
+        SETTLING,
+        SETTLED,
+        UNKNOWN_OUTCOME,
+        REPLAY_DENIED,
+    }
+
+    private companion object {
+        const val REPLAY_DENIED_REASON = "Tool authorization changed; cached tool output is unavailable"
+        const val UNKNOWN_REPLAY_REASON = "Tool call outcome is unknown; it cannot be replayed"
+
+        fun unknownReplay(): ToolResult = ToolResult.UnknownOutcome(UNKNOWN_REPLAY_REASON)
+    }
 }

@@ -45,6 +45,7 @@ import runtime.mobileagent.skills.tooling.WorkspaceText
 import runtime.mobileagent.skills.tooling.WorkspaceWriteTextRequest
 import runtime.mobileagent.skills.tooling.ToolError
 import runtime.mobileagent.skills.tooling.ToolErrorCode
+import runtime.mobileagent.workspace.WorkspaceVersionProjection
 
 /**
  * Shizuku provider backed by the UserService's device-root typed RPC.
@@ -476,16 +477,9 @@ private class ShizukuTokenWorkspaceBackend(
                 format = request.format.name,
             )
         }
-        val payload = payload(result, "apply_patch") ?: return dispatchFailure(result)
-        val responsePath = normalize(payload.optString("path", ""), allowRoot = false)
-        val bytes = payload.optLong("bytes", -1L)
-        val version = parseOpaqueVersion(payload.optString("version", ""))
-        if (responsePath != path || payload.optString("type", "") != "file" || bytes < 0L ||
-            bytes > ShizukuWorkspaceFileStore.MAX_FILE_BYTES || payload.optBoolean("created", true) || version == null
-        ) return failure(ToolErrorCode.BRIDGE_PROTOCOL_MISMATCH)
-        return WorkspaceResult.Success(
-            WorkspaceMutation(path, WorkspaceEntryType.FILE, bytes, version.publicVersion),
-        )
+        val payload = payload(result, "apply_patch")
+            ?: return dispatchFailure(result, mutationResponse = true, operation = "apply_patch")
+        return parsePatchPayload(payload, path)
     }
 
     override suspend fun writeText(request: WorkspaceWriteTextRequest): WorkspaceResult<WorkspaceMutation> {
@@ -515,13 +509,14 @@ private class ShizukuTokenWorkspaceBackend(
         if (request.expectedVersion != null) return failure(ToolErrorCode.CONFLICT)
         val path = normalize(request.relativePath, allowRoot = false) ?: return failure(ToolErrorCode.PATH_OUT_OF_SCOPE)
         val result = dispatch { bridge.dispatchWorkspaceDelete(workspaceHandle, path) }
-        val payload = payload(result, "delete") ?: return dispatchFailure(result)
+        val payload = payload(result, "delete")
+            ?: return dispatchFailure(result, mutationResponse = true, operation = "delete")
         val type = when (payload.optString("type", "")) {
             "file" -> WorkspaceEntryType.FILE
             "directory" -> WorkspaceEntryType.DIRECTORY
-            else -> return failure(ToolErrorCode.BRIDGE_PROTOCOL_MISMATCH)
+            else -> return failure(ToolErrorCode.UNKNOWN_OUTCOME)
         }
-        if (payload.optString("path", "") != path || !payload.optBoolean("deleted", false)) return failure(ToolErrorCode.BRIDGE_PROTOCOL_MISMATCH)
+        if (payload.optString("path", "") != path || !payload.optBoolean("deleted", false)) return failure(ToolErrorCode.UNKNOWN_OUTCOME)
         return WorkspaceResult.Success(WorkspaceMutation(path, type))
     }
 
@@ -531,16 +526,17 @@ private class ShizukuTokenWorkspaceBackend(
         val source = normalize(request.sourcePath, allowRoot = false) ?: return failure(ToolErrorCode.PATH_OUT_OF_SCOPE)
         val destination = normalize(request.destinationPath, allowRoot = false) ?: return failure(ToolErrorCode.PATH_OUT_OF_SCOPE)
         val result = dispatch { bridge.dispatchWorkspaceMove(workspaceHandle, source, destination, replaceExisting = false) }
-        val payload = payload(result, "move") ?: return dispatchFailure(result)
+        val payload = payload(result, "move")
+            ?: return dispatchFailure(result, mutationResponse = true, operation = "move")
         val type = when (payload.optString("type", "")) {
             "file" -> WorkspaceEntryType.FILE
             "directory" -> WorkspaceEntryType.DIRECTORY
-            else -> return failure(ToolErrorCode.BRIDGE_PROTOCOL_MISMATCH)
+            else -> return failure(ToolErrorCode.UNKNOWN_OUTCOME)
         }
         val bytes = payload.optLong("bytes", -1L)
         if (payload.optString("sourcePath", "") != source || payload.optString("destinationPath", "") != destination ||
             payload.optString("path", "") != destination || !payload.optBoolean("moved", false) || bytes < 0L
-        ) return failure(ToolErrorCode.BRIDGE_PROTOCOL_MISMATCH)
+        ) return failure(ToolErrorCode.UNKNOWN_OUTCOME)
         return WorkspaceResult.Success(WorkspaceMutation(destination, type, bytes))
     }
 
@@ -625,6 +621,18 @@ private class ShizukuTokenWorkspaceBackend(
         return WorkspaceResult.Success(WorkspaceFileStat(path, type, bytes, version.publicVersion))
     }
 
+    private fun parsePatchPayload(payload: JSONObject, path: String): WorkspaceResult<WorkspaceMutation> {
+        val responsePath = normalize(payload.optString("path", ""), allowRoot = false)
+        val bytes = payload.optLong("bytes", -1L)
+        val version = parseOpaqueVersion(payload.optString("version", ""))
+        if (responsePath != path || payload.optString("type", "") != "file" || bytes < 0L ||
+            bytes > ShizukuWorkspaceFileStore.MAX_FILE_BYTES || payload.optBoolean("created", true) || version == null
+        ) return failure(ToolErrorCode.UNKNOWN_OUTCOME)
+        return WorkspaceResult.Success(
+            WorkspaceMutation(path, WorkspaceEntryType.FILE, bytes, version.publicVersion),
+        )
+    }
+
     private fun readChunk(path: String, offsetBytes: Long, maxBytes: Int): WorkspaceResult<WorkspaceText> {
         val result = safeReadDispatch {
             bridge.dispatchWorkspaceReadChunk(workspaceHandle, path, offsetBytes, maxBytes)
@@ -700,7 +708,7 @@ private class ShizukuTokenWorkspaceBackend(
     private fun parseOpaqueVersion(raw: String): ParsedVersion? {
         if (raw.length != 64 || raw.any { it !in "0123456789abcdefABCDEF" }) return null
         return runCatching {
-            ParsedVersion(java.lang.Long.parseUnsignedLong(raw.take(16), 16), raw.lowercase())
+            ParsedVersion(WorkspaceVersionProjection.toPublic(raw), raw.lowercase())
         }.getOrNull()
     }
 
@@ -718,28 +726,46 @@ private class ShizukuTokenWorkspaceBackend(
     }.getOrNull()
 
     private fun parseMutation(result: ShizukuDispatchResult, operation: String, path: String, type: WorkspaceEntryType, expectedBytes: Long?): WorkspaceResult<WorkspaceMutation> {
-        val payload = payload(result, operation) ?: return dispatchFailure(result)
-        if (payload.optString("path", "") != path) return failure(ToolErrorCode.BRIDGE_PROTOCOL_MISMATCH)
-        if (expectedBytes != null && payload.optLong("bytes", -1L) != expectedBytes) return failure(ToolErrorCode.BRIDGE_PROTOCOL_MISMATCH)
-        if (operation == "mkdir" && !payload.has("created")) return failure(ToolErrorCode.BRIDGE_PROTOCOL_MISMATCH)
+        val payload = payload(result, operation)
+            ?: return dispatchFailure(result, mutationResponse = true, operation = operation)
+        if (payload.optString("path", "") != path) return failure(ToolErrorCode.UNKNOWN_OUTCOME)
+        if (expectedBytes != null && payload.optLong("bytes", -1L) != expectedBytes) return failure(ToolErrorCode.UNKNOWN_OUTCOME)
+        if (operation == "mkdir" && !payload.has("created")) return failure(ToolErrorCode.UNKNOWN_OUTCOME)
         return WorkspaceResult.Success(WorkspaceMutation(path, type, expectedBytes ?: 0L))
     }
 
     private fun payload(result: ShizukuDispatchResult, operation: String): JSONObject? {
         if (result !is ShizukuDispatchResult.Success) return null
         val payload = runCatching { JSONObject(result.payload) }.getOrNull() ?: return null
-        return payload.takeIf { it.optBoolean("ok", false) && it.optString("operation", "") == operation }
+        return payload.takeIf { it.opt("ok") == true && it.optString("operation", "") == operation }
     }
 
-    private fun dispatchFailure(result: ShizukuDispatchResult): WorkspaceResult.Failure = when (result) {
+    private fun dispatchFailure(
+        result: ShizukuDispatchResult,
+        mutationResponse: Boolean = false,
+        operation: String? = null,
+    ): WorkspaceResult.Failure = when (result) {
         is ShizukuDispatchResult.Denied -> WorkspaceResult.Failure(ToolError(ToolErrorCode.SHIZUKU_SERVICE_UNAVAILABLE))
         is ShizukuDispatchResult.Failed -> WorkspaceResult.Failure(
             ToolError(if (result.unknownOutcome) ToolErrorCode.UNKNOWN_OUTCOME else mapError(result.errorCode)),
         )
-        is ShizukuDispatchResult.Success -> WorkspaceResult.Failure(ToolError(ToolErrorCode.BRIDGE_PROTOCOL_MISMATCH))
+        is ShizukuDispatchResult.Success -> {
+            val typedCode = operation?.let { expectedOperation ->
+                runCatching { JSONObject(result.payload) }.getOrNull()?.takeIf { payload ->
+                    payload.opt("ok") == false &&
+                        payload.optString("operation", "") == expectedOperation
+                }?.opt("code") as? String
+            }
+            val malformedCode = if (mutationResponse) ToolErrorCode.UNKNOWN_OUTCOME else ToolErrorCode.BRIDGE_PROTOCOL_MISMATCH
+            WorkspaceResult.Failure(
+                ToolError(
+                    typedCode?.let { mapError(it, malformedCode) } ?: malformedCode,
+                ),
+            )
+        }
     }
 
-    private fun mapError(code: String?): ToolErrorCode = when (code) {
+    private fun mapError(code: String?, fallback: ToolErrorCode = ToolErrorCode.IO_ERROR): ToolErrorCode = when (code) {
         ShizukuDirectoryHandleStore.PERMISSION_DENIED -> ToolErrorCode.PERMISSION_DENIED
         ShizukuDirectoryHandleStore.INVALID_HANDLE -> ToolErrorCode.INVALID_REQUEST
         ShizukuWorkspaceFileStore.INVALID_PATH,
@@ -763,7 +789,7 @@ private class ShizukuTokenWorkspaceBackend(
         ShizukuWorkspaceFileStore.ATOMIC_REPLACE_UNAVAILABLE,
         ShizukuWorkspaceFileStore.WRITE_UNVERIFIED,
         -> ToolErrorCode.OPERATION_UNAVAILABLE
-        else -> ToolErrorCode.IO_ERROR
+        else -> fallback
     }
 
     private fun dispatch(block: () -> ShizukuDispatchResult): ShizukuDispatchResult = try {

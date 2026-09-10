@@ -7,7 +7,7 @@ import java.io.ByteArrayOutputStream
 import java.util.zip.Inflater
 
 object PdfParser {
-    const val FINGERPRINT = "pdf-text-v8-pdfrenderer"
+    const val FINGERPRINT = "pdf-text-v9-pdfrenderer"
 
     private const val MAX_PDF_STREAM_BYTES = 32 * 1024 * 1024
 
@@ -51,7 +51,8 @@ object PdfParser {
             val content = pageContent(objects, pageObj.dict)
             val decoded = content.bytes
             val pageLatin = String(decoded, Charsets.ISO_8859_1)
-            val extracted = extractPdfStrings(decoded)
+            val fonts = pageFonts(objects, objNum, pageObj.dict)
+            val extracted = extractPdfStrings(decoded, fonts)
             val text = extracted.joined()
             val hasInline = hasInlineImage(pageLatin)
             val resolvedXObjects = pageXObjects(objects, objNum, pageObj.dict)
@@ -77,14 +78,16 @@ object PdfParser {
             val content = pageContent(objects, pageObj.dict)
             val decoded = content.bytes
             val pageLatin = String(decoded, Charsets.ISO_8859_1)
-            val extracted = extractPdfStrings(decoded)
+            val fonts = pageFonts(objects, objNum, pageObj.dict)
+            val extracted = extractPdfStrings(decoded, fonts)
             val text = extracted.joined()
             val resolvedXObjects = pageXObjects(objects, objNum, pageObj.dict)
             val xobjects = resolvedXObjects.entries
             val hasUnresolvedXObjects = resolvedXObjects.unresolved ||
                 hasUnresolvedXObjectDo(pageLatin, xobjects)
             val hasDrawing = hasVectorDrawing(pageLatin)
-            var hasUnsupportedPageVisual = hasDrawing || !content.complete || hasUnresolvedXObjects
+            var hasUnsupportedPageVisual = hasDrawing || !content.complete || hasUnresolvedXObjects ||
+                !extracted.complete
             xobjects.forEach { (name, imageObjNum) ->
                 val image = objects[imageObjNum]
                 if (image == null || !isImageDict(image.dict) || image.stream == null) {
@@ -252,6 +255,84 @@ object PdfParser {
         )
     }
 
+    fun writeQuotedCommentShowPdf(literal: String, quoted: String): ByteArray {
+        val escapedLiteral = literal.replace("\\", "\\\\").replace("(", "\\(").replace(")", "\\)")
+        val escapedQuoted = quoted.replace("\\", "\\\\").replace("(", "\\(").replace(")", "\\)")
+        return assemblePages(
+            listOf(
+                PageContent(
+                    "BT /F1 18 Tf 24 TL 72 720 Td ($escapedLiteral) Tj\n($escapedQuoted) % operand and operator may be separated by comments\n'\nET\n",
+                    "/Font << /F1 FONT >>",
+                ),
+            ),
+        )
+    }
+
+    fun writeTwoLiteralTextPdf(first: String, second: String): ByteArray {
+        val escapedFirst = first.replace("\\", "\\\\").replace("(", "\\(").replace(")", "\\)")
+        val escapedSecond = second.replace("\\", "\\\\").replace("(", "\\(").replace(")", "\\)")
+        return assemblePages(
+            listOf(
+                PageContent(
+                    "BT /F1 18 Tf 72 720 Td ($escapedFirst) Tj 0 -30 Td ($escapedSecond) Tj ET\n",
+                    "/Font << /F1 FONT >>",
+                ),
+            ),
+        )
+    }
+
+    fun writeHexWithFontDifferencesPdf(literal: String? = null): ByteArray {
+        val content = if (literal.isNullOrEmpty()) {
+            "BT /F1 18 Tf 72 720 Td <414243> Tj ET\n"
+        } else {
+            val escaped = literal.replace("\\", "\\\\").replace("(", "\\(").replace(")", "\\)")
+            "BT /F1 18 Tf 72 720 Td ($escaped) Tj 0 -30 Td <414243> Tj ET\n"
+        }
+        return assemblePages(
+            pages = listOf(
+                PageContent(content, "/Font << /F1 FONT >>"),
+            ),
+            fontDict = "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding << /Type /Encoding /BaseEncoding /WinAnsiEncoding /Differences [65 /X 66 /Y 67 /Z] >> >>",
+        )
+    }
+
+    fun writeNestedLiteralWithImagePdf(): ByteArray {
+        val jpeg = jpegStub()
+        val imageObj = buildString {
+            append("<< /Type /XObject /Subtype /Image /Width 1 /Height 1 /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /DCTDecode /Length ")
+            append(jpeg.size)
+            append(" >>\nstream\n")
+        }
+        return assemblePages(
+            pages = listOf(
+                PageContent(
+                    "BT /F1 18 Tf 72 720 Td (TITLE) Tj 0 -30 Td (BODY: (nested) KEEP THIS SENTENCE.) Tj ET\nq 40 0 0 40 72 600 cm /Im1 Do Q\n",
+                    "/Font << /F1 FONT >> /XObject << /Im1 IMAGE >>",
+                ),
+            ),
+            extraObjects = listOf(imageObj to jpeg),
+        )
+    }
+
+    fun writeUndecodedHexWithImagePdf(literal: String): ByteArray {
+        val escaped = literal.replace("\\", "\\\\").replace("(", "\\(").replace(")", "\\)")
+        val jpeg = jpegStub()
+        val imageObj = buildString {
+            append("<< /Type /XObject /Subtype /Image /Width 1 /Height 1 /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /DCTDecode /Length ")
+            append(jpeg.size)
+            append(" >>\nstream\n")
+        }
+        return assemblePages(
+            pages = listOf(
+                PageContent(
+                    "BT /F1 12 Tf 72 700 Td ($escaped) Tj 0 -24 Td <zzzz> Tj ET\nq 100 0 0 100 72 400 cm /Im1 Do Q\n",
+                    "/Font << /F1 FONT >> /XObject << /Im1 IMAGE >>",
+                ),
+            ),
+            extraObjects = listOf(imageObj to jpeg),
+        )
+    }
+
     fun writeTextAndVectorPdf(text: String): ByteArray {
         val escaped = text.replace("\\", "\\\\").replace("(", "\\(").replace(")", "\\)")
         return assemblePages(
@@ -318,8 +399,20 @@ object PdfParser {
     )
     private data class ScannedObject(val dict: String, val streamBounds: StreamBounds?)
     private data class PageXObjects(val entries: Map<String, Int>, val unresolved: Boolean)
+    private data class PageFonts(val encodings: Map<String, PdfFontEncoding>, val unresolved: Boolean)
+    private data class PdfFontEncoding(
+        val known: Boolean,
+        val differences: Map<Int, String> = emptyMap(),
+    )
     private data class PdfDictionaryValue(
         val present: Boolean,
+        val dictionary: String? = null,
+        val reference: Int? = null,
+        val malformed: Boolean = false,
+    )
+    private data class PdfNamedValue(
+        val present: Boolean,
+        val name: String? = null,
         val dictionary: String? = null,
         val reference: Int? = null,
         val malformed: Boolean = false,
@@ -327,7 +420,15 @@ object PdfParser {
     private data class ExtractedPdfText(val texts: List<String>, val complete: Boolean) {
         fun joined(): String = texts.joinToString(" ").trim()
     }
-    private data class DecodedTjArray(val text: String, val complete: Boolean)
+    private sealed class PdfContentToken {
+        data class Name(val value: String) : PdfContentToken()
+        data class Number(val value: String) : PdfContentToken()
+        data class Literal(val bytes: ByteArray) : PdfContentToken()
+        data class Hex(val bytes: ByteArray?, val valid: Boolean) : PdfContentToken()
+        data class Array(val items: List<PdfContentToken>) : PdfContentToken()
+        data class Dict(val ignored: Int = 0) : PdfContentToken()
+        data class Operator(val name: String) : PdfContentToken()
+    }
 
     private fun extractIndirectObjects(bytes: ByteArray, latin: String): Map<Int, PdfObject> {
         val scanned = linkedMapOf<Int, ScannedObject>()
@@ -692,6 +793,28 @@ object PdfParser {
         objects: Map<Int, PdfObject>,
         pageNumber: Int,
         dict: String,
+    ): PageXObjects = pageNamedResources(objects, pageNumber, dict, "XObject")
+
+    private fun pageFonts(
+        objects: Map<Int, PdfObject>,
+        pageNumber: Int,
+        dict: String,
+    ): PageFonts {
+        val named = pageNamedResources(objects, pageNumber, dict, "Font")
+        if (named.unresolved) return PageFonts(emptyMap(), unresolved = true)
+        val encodings = linkedMapOf<String, PdfFontEncoding>()
+        named.entries.forEach { (name, objNum) ->
+            val font = objects[objNum] ?: return PageFonts(encodings, unresolved = true)
+            encodings[name] = encodingFromFont(objects, font)
+        }
+        return PageFonts(encodings, unresolved = false)
+    }
+
+    private fun pageNamedResources(
+        objects: Map<Int, PdfObject>,
+        pageNumber: Int,
+        dict: String,
+        key: String,
     ): PageXObjects {
         val visited = mutableSetOf<Int>()
         var currentNumber = pageNumber
@@ -709,7 +832,7 @@ object PdfParser {
                             ?.let { dictionaryBody(it.dict) }
                     }
                     ?: return PageXObjects(emptyMap(), unresolved = true)
-                return xObjectsFromResources(objects, resourceDict)
+                return namedResourcesFrom(objects, resourceDict, key)
             }
 
             val parent = dictionaryOrReference(currentDict, "Parent")
@@ -725,14 +848,15 @@ object PdfParser {
         }
     }
 
-    private fun xObjectsFromResources(
+    private fun namedResourcesFrom(
         objects: Map<Int, PdfObject>,
         resources: String,
+        key: String,
     ): PageXObjects {
-        val xObjectValue = dictionaryOrReference(resources, "XObject")
-        if (!xObjectValue.present) return PageXObjects(emptyMap(), unresolved = false)
-        if (xObjectValue.malformed) return PageXObjects(emptyMap(), unresolved = true)
-        val xObjectDict = xObjectValue.dictionary ?: xObjectValue.reference
+        val value = dictionaryOrReference(resources, key)
+        if (!value.present) return PageXObjects(emptyMap(), unresolved = false)
+        if (value.malformed) return PageXObjects(emptyMap(), unresolved = true)
+        val resourceDict = value.dictionary ?: value.reference
             ?.let { reference ->
                 objects[reference]
                     ?.takeIf { it.stream == null }
@@ -741,12 +865,117 @@ object PdfParser {
             ?: return PageXObjects(emptyMap(), unresolved = true)
         val entries = linkedMapOf<String, Int>()
         Regex("/([^\\s<>\\[\\]()/%]+)\\s+(\\d+)\\s+0\\s+R\\b")
-            .findAll(xObjectDict)
+            .findAll(resourceDict)
             .forEach { match ->
                 entries[match.groupValues[1]] = match.groupValues[2].toInt()
             }
         return PageXObjects(entries, unresolved = false)
     }
+
+    private fun encodingFromFont(objects: Map<Int, PdfObject>, font: PdfObject): PdfFontEncoding {
+        val dict = font.dict
+        val subtype = Regex("/Subtype\\s*/([A-Za-z0-9]+)").find(dict)?.groupValues?.get(1)
+        if (subtype == "Type0" || subtype == "CIDFontType0" || subtype == "CIDFontType2") {
+            return PdfFontEncoding(known = false)
+        }
+        val encoding = namedDictionaryOrReference(dict, "Encoding")
+        if (!encoding.present) return PdfFontEncoding(known = true)
+        if (encoding.malformed) return PdfFontEncoding(known = false)
+        val encodingDict = encoding.dictionary ?: encoding.reference
+            ?.let { reference -> objects[reference]?.let { dictionaryBody(it.dict) } }
+        if (encodingDict != null) {
+            val differencesBody = arrayBody(encodingDict, "Differences")
+            if (differencesBody == null) return PdfFontEncoding(known = true)
+            val mapped = parseDifferences(differencesBody) ?: return PdfFontEncoding(known = false)
+            return PdfFontEncoding(known = true, differences = mapped)
+        }
+        return when (encoding.name) {
+            "WinAnsiEncoding", "MacRomanEncoding", "StandardEncoding" -> PdfFontEncoding(known = true)
+            "Identity-H", "Identity-V" -> PdfFontEncoding(known = false)
+            null -> PdfFontEncoding(known = false)
+            else -> PdfFontEncoding(known = false)
+        }
+    }
+
+    private fun arrayBody(dict: String, name: String): String? {
+        val key = Regex("/" + Regex.escape(name) + "(?![A-Za-z0-9])").find(dict) ?: return null
+        var index = key.range.last + 1
+        while (index < dict.length && isPdfWhitespace(dict[index])) index++
+        if (index >= dict.length || dict[index] != '[') return ""
+        val start = index + 1
+        var depth = 1
+        index++
+        while (index < dict.length && depth > 0) {
+            when (dict[index]) {
+                '[' -> {
+                    depth++
+                    index++
+                }
+                ']' -> {
+                    depth--
+                    index++
+                }
+                else -> index++
+            }
+        }
+        if (depth != 0) return ""
+        return dict.substring(start, index - 1)
+    }
+
+    private fun parseDifferences(body: String): Map<Int, String>? {
+        val mapped = linkedMapOf<Int, String>()
+        var index = 0
+        var nextCode: Int? = null
+        while (index < body.length) {
+            while (index < body.length && (isPdfWhitespace(body[index]) || body[index] == '%')) {
+                if (body[index] == '%') {
+                    while (index < body.length && body[index] != '\n' && body[index] != '\r') index++
+                } else {
+                    index++
+                }
+            }
+            if (index >= body.length) break
+            if (body[index] == '/') {
+                val start = index + 1
+                index++
+                while (index < body.length && !isPdfWhitespace(body[index]) && !isPdfDelimiter(body[index])) index++
+                val glyph = pdfGlyphName(body.substring(start, index)) ?: return null
+                val code = nextCode ?: return null
+                mapped[code] = glyph
+                nextCode = code + 1
+                continue
+            }
+            val start = index
+            if (body[index] == '+' || body[index] == '-') index++
+            if (index >= body.length || body[index] !in '0'..'9') return null
+            while (index < body.length && body[index] in '0'..'9') index++
+            nextCode = body.substring(start, index).toIntOrNull() ?: return null
+        }
+        return mapped
+    }
+
+    private fun pdfGlyphName(name: String): String? = when {
+        name.length == 1 -> name
+        name == "space" -> " "
+        name == "period" -> "."
+        name == "comma" -> ","
+        name == "colon" -> ":"
+        name == "semicolon" -> ";"
+        name == "hyphen" || name == "minus" -> "-"
+        name == "slash" -> "/"
+        name == "backslash" -> "\\"
+        name == "parenleft" -> "("
+        name == "parenright" -> ")"
+        name == "quotesingle" -> "'"
+        name == "quotedbl" -> "\""
+        name == "underscore" -> "_"
+        else -> null
+    }
+
+    private fun isPdfDelimiter(value: Char): Boolean =
+        value == '(' || value == ')' || value == '<' || value == '>' ||
+            value == '[' || value == ']' || value == '{' || value == '}' ||
+            value == '/' || value == '%'
 
     private fun hasUnresolvedXObjectDo(latin: String, entries: Map<String, Int>): Boolean {
         val outsideText = latin.replace(Regex("BT[\\s\\S]*?ET"), " ")
@@ -781,6 +1010,35 @@ object PdfParser {
             )
         } else {
             PdfDictionaryValue(present = true, malformed = true)
+        }
+    }
+
+    private fun namedDictionaryOrReference(dict: String, name: String): PdfNamedValue {
+        val key = Regex("/" + Regex.escape(name) + "(?![A-Za-z0-9])").find(dict)
+            ?: return PdfNamedValue(present = false)
+        var valueStart = key.range.last + 1
+        while (valueStart < dict.length && isPdfWhitespace(dict[valueStart])) valueStart++
+        if (valueStart >= dict.length) return PdfNamedValue(present = true, malformed = true)
+        if (dict.startsWith("<<", valueStart)) {
+            val end = dictionaryEnd(dict, valueStart)
+            return if (end < 0) {
+                PdfNamedValue(present = true, malformed = true)
+            } else {
+                PdfNamedValue(present = true, dictionary = dict.substring(valueStart, end))
+            }
+        }
+        if (dict[valueStart] == '/') {
+            val start = valueStart + 1
+            var index = start
+            while (index < dict.length && !isPdfWhitespace(dict[index]) && !isPdfDelimiter(dict[index])) index++
+            return PdfNamedValue(present = true, name = dict.substring(start, index))
+        }
+        val matcher = Regex("(\\d+)\\s+0\\s+R\\b").toPattern().matcher(dict)
+        matcher.region(valueStart, dict.length)
+        return if (matcher.lookingAt()) {
+            PdfNamedValue(present = true, reference = matcher.group(1).toIntOrNull())
+        } else {
+            PdfNamedValue(present = true, malformed = true)
         }
     }
 
@@ -861,132 +1119,453 @@ object PdfParser {
         hasDrawing: Boolean,
     ): Boolean = hasImages || hasDrawing || text.isEmpty() || !contentComplete || !textComplete
 
-    private fun extractPdfStrings(data: ByteArray): ExtractedPdfText {
+    private fun extractPdfStrings(data: ByteArray, fonts: PageFonts): ExtractedPdfText {
         val latin = String(data, Charsets.ISO_8859_1)
-        val consumed = BooleanArray(latin.length)
+        val lexer = PdfContentLexer(latin)
+        val tokens = lexer.tokenize()
+        var complete = lexer.complete && !fonts.unresolved
         val texts = mutableListOf<String>()
-        var complete = true
+        val stack = mutableListOf<PdfContentToken>()
+        var fontName: String? = null
 
-        fun mark(range: IntRange) {
-            for (index in range) {
-                if (index in consumed.indices) consumed[index] = true
-            }
+        fun encoding(): PdfFontEncoding {
+            val name = fontName
+            if (name == null) return PdfFontEncoding(known = !fonts.unresolved)
+            return fonts.encodings[name] ?: PdfFontEncoding(known = false)
         }
 
-        val operators = buildList {
-            Regex("\\[((?:\\\\.|[^]])*)]\\s*TJ\\b").findAll(latin).forEach { match ->
-                add(0 to match)
-            }
-            Regex("\\((?:\\\\.|[^\\\\)])*\\)\\s*(?:Tj\\b|'|\")").findAll(latin).forEach { match ->
-                add(1 to match)
-            }
-            Regex("<[0-9A-Fa-f \\t\\r\\n]*>\\s*(?:Tj\\b|'|\")").findAll(latin).forEach { match ->
-                add(2 to match)
-            }
-        }.sortedBy { it.second.range.first }
+        fun pop(count: Int): List<PdfContentToken>? {
+            if (count == 0) return emptyList()
+            if (stack.size < count) return null
+            val start = stack.size - count
+            val taken = stack.subList(start, stack.size).toList()
+            repeat(count) { stack.removeAt(stack.lastIndex) }
+            return taken
+        }
 
-        operators.forEach { (kind, match) ->
-            if (match.range.any { it in consumed.indices && consumed[it] }) return@forEach
-            mark(match.range)
-            when (kind) {
-                0 -> {
-                    val decoded = decodeTjArray(match.value.substringBeforeLast("]").removePrefix("["))
-                    if (!decoded.complete) complete = false
-                    if (decoded.text.isNotBlank()) texts += decoded.text
+        tokens.forEach { token ->
+            if (token !is PdfContentToken.Operator) {
+                stack += token
+                return@forEach
+            }
+            when (token.name) {
+                "Tf" -> {
+                    val ops = pop(2)
+                    if (ops == null) {
+                        complete = false
+                    } else {
+                        fontName = (ops[0] as? PdfContentToken.Name)?.value
+                        if (fontName == null) complete = false
+                    }
                 }
-                1 -> {
-                    val decoded = decodePdfLiteral(match.value.substringBeforeLast(")").substringAfter("(", ""))
-                    if (decoded.isNotBlank()) texts += decoded
+                "Tj", "'" -> {
+                    val ops = pop(1)
+                    val shown = ops?.singleOrNull()?.let { decodeShowToken(it, encoding()) }
+                    if (shown == null) {
+                        complete = false
+                    } else {
+                        if (!shown.complete) complete = false
+                        if (shown.text.isNotBlank()) texts += shown.text
+                    }
+                }
+                "\"" -> {
+                    val ops = pop(3)
+                    val shown = ops?.getOrNull(2)?.let { decodeShowToken(it, encoding()) }
+                    if (shown == null) {
+                        complete = false
+                    } else {
+                        if (!shown.complete) complete = false
+                        if (shown.text.isNotBlank()) texts += shown.text
+                    }
+                }
+                "TJ" -> {
+                    val ops = pop(1)
+                    val array = ops?.singleOrNull() as? PdfContentToken.Array
+                    if (array == null) {
+                        complete = false
+                    } else {
+                        val decoded = decodeTjArrayTokens(array.items, encoding())
+                        if (!decoded.complete) complete = false
+                        if (decoded.text.isNotBlank()) texts += decoded.text
+                    }
                 }
                 else -> {
-                    val hex = match.value.substringAfter("<").substringBeforeLast(">")
-                    val decoded = decodePdfHex(hex)
-                    if (decoded == null) {
+                    val count = CONTENT_OPERATOR_OPERANDS[token.name]
+                    if (count == null) {
                         complete = false
-                    } else if (decoded.isNotBlank()) {
-                        texts += decoded
+                    } else if (pop(count) == null) {
+                        complete = false
                     }
                 }
             }
         }
-        if (hasUnconsumedTextShowOperator(latin, consumed)) complete = false
+        if (stack.any {
+                it is PdfContentToken.Literal || it is PdfContentToken.Hex || it is PdfContentToken.Array
+            }
+        ) {
+            complete = false
+        }
         return ExtractedPdfText(texts, complete)
     }
 
-    private fun hasUnconsumedTextShowOperator(latin: String, consumed: BooleanArray): Boolean {
-        return Regex("(?<![A-Za-z])(Tj|TJ)(?![A-Za-z0-9])").findAll(latin).any { match ->
-            match.range.any { it in consumed.indices && !consumed[it] }
+    private data class DecodedShow(val text: String, val complete: Boolean)
+
+    private fun decodeShowToken(token: PdfContentToken, encoding: PdfFontEncoding): DecodedShow? {
+        return when (token) {
+            is PdfContentToken.Literal -> applyEncoding(token.bytes, encoding)
+            is PdfContentToken.Hex -> {
+                if (!token.valid || token.bytes == null) DecodedShow("", complete = false)
+                else applyEncoding(token.bytes, encoding)
+            }
+            else -> null
         }
     }
 
-    private fun decodeTjArray(body: String): DecodedTjArray {
+    private fun applyEncoding(bytes: ByteArray, encoding: PdfFontEncoding): DecodedShow {
+        if (!encoding.known) {
+            return DecodedShow(String(bytes, Charsets.ISO_8859_1), complete = false)
+        }
+        val out = StringBuilder()
+        for (byte in bytes) {
+            val code = byte.toInt() and 0xff
+            val mapped = encoding.differences[code]
+            if (mapped != null) {
+                out.append(mapped)
+            } else {
+                out.append(String(byteArrayOf(byte), Charsets.ISO_8859_1))
+            }
+        }
+        return DecodedShow(out.toString(), complete = true)
+    }
+
+    private fun decodeTjArrayTokens(
+        items: List<PdfContentToken>,
+        encoding: PdfFontEncoding,
+    ): DecodedShow {
         val out = StringBuilder()
         var insertSpace = false
         var complete = true
-        val consumed = BooleanArray(body.length)
-        val token = Regex("\\((?:\\\\.|[^\\\\)])*\\)|<[0-9A-Fa-f \\t\\r\\n]*>|[-+]?(?:\\d+(?:\\.\\d*)?|\\.\\d+)")
-        token.findAll(body).forEach { match ->
-            for (index in match.range) {
-                if (index in consumed.indices) consumed[index] = true
-            }
-            when {
-                match.value.startsWith("(") -> {
-                    val decoded = decodePdfLiteral(match.value.removePrefix("(").removeSuffix(")"))
-                    if (decoded.isEmpty()) return@forEach
-                    if (insertSpace && out.isNotEmpty() && !out.last().isWhitespace() && !decoded.first().isWhitespace()) {
-                        out.append(' ')
-                    }
-                    out.append(decoded)
-                    insertSpace = false
-                }
-                match.value.startsWith("<") -> {
-                    val decoded = decodePdfHex(match.value.removePrefix("<").removeSuffix(">"))
+        items.forEach { item ->
+            when (item) {
+                is PdfContentToken.Literal, is PdfContentToken.Hex -> {
+                    val decoded = decodeShowToken(item, encoding)
                     if (decoded == null) {
                         complete = false
                         return@forEach
                     }
-                    if (decoded.isEmpty()) return@forEach
-                    if (insertSpace && out.isNotEmpty() && !out.last().isWhitespace() && !decoded.first().isWhitespace()) {
+                    if (!decoded.complete) complete = false
+                    if (decoded.text.isEmpty()) return@forEach
+                    if (insertSpace && out.isNotEmpty() && !out.last().isWhitespace() &&
+                        !decoded.text.first().isWhitespace()
+                    ) {
                         out.append(' ')
                     }
-                    out.append(decoded)
+                    out.append(decoded.text)
                     insertSpace = false
                 }
+                is PdfContentToken.Number -> {
+                    insertSpace = (item.value.toDoubleOrNull() ?: 0.0) <= -100.0
+                }
+                else -> complete = false
+            }
+        }
+        return DecodedShow(out.toString(), complete)
+    }
+
+    private class PdfContentLexer(private val latin: String) {
+        var i = 0
+        var complete = true
+
+        fun tokenize(): List<PdfContentToken> {
+            val tokens = mutableListOf<PdfContentToken>()
+            while (true) {
+                skipWsComments()
+                if (i >= latin.length) break
+                if (isBareOperator("BI")) {
+                    i += 2
+                    if (!skipInlineImage()) complete = false
+                    continue
+                }
+                val token = readToken()
+                if (token == null) {
+                    complete = false
+                    break
+                }
+                tokens += token
+            }
+            return tokens
+        }
+
+        private fun skipWsComments() {
+            while (i < latin.length) {
+                val char = latin[i]
+                if (isPdfWhitespace(char)) {
+                    i++
+                    continue
+                }
+                if (char == '%') {
+                    while (i < latin.length && latin[i] != '\n' && latin[i] != '\r') i++
+                    continue
+                }
+                break
+            }
+        }
+
+        private fun isBareOperator(name: String): Boolean {
+            if (!latin.startsWith(name, i)) return false
+            val end = i + name.length
+            if (end < latin.length) {
+                val next = latin[end]
+                if (!isPdfWhitespace(next) && !isPdfDelimiter(next) && next != '\'' && next != '"') {
+                    return false
+                }
+            }
+            return i == 0 || isPdfWhitespace(latin[i - 1]) || isPdfDelimiter(latin[i - 1])
+        }
+
+        private fun skipInlineImage(): Boolean {
+            val idMatch = Regex("(?<![A-Za-z])ID(?![A-Za-z0-9])").find(latin, i) ?: return false
+            val eiMatch = Regex("(?<![A-Za-z])EI(?![A-Za-z0-9])").find(latin, idMatch.range.last + 1)
+                ?: return false
+            i = eiMatch.range.last + 1
+            return true
+        }
+
+        private fun readToken(): PdfContentToken? {
+            if (i >= latin.length) return null
+            return when (latin[i]) {
+                '(' -> readLiteral()?.let { PdfContentToken.Literal(it) }
+                '<' -> if (i + 1 < latin.length && latin[i + 1] == '<') {
+                    if (!skipDict()) return null
+                    PdfContentToken.Dict()
+                } else {
+                    readHex()
+                }
+                '[' -> readArray()?.let { PdfContentToken.Array(it) }
+                '/' -> PdfContentToken.Name(readName())
+                '\'', '"' -> {
+                    val name = latin[i].toString()
+                    i++
+                    PdfContentToken.Operator(name)
+                }
+                ']', ')', '>' -> null
                 else -> {
-                    // In PDF TJ, positive adjustments pull the next glyph left;
-                    // negative adjustments create a word gap. Small kerning
-                    // values, including positive ones, do not become spaces.
-                    insertSpace = (match.value.toDoubleOrNull() ?: 0.0) <= -100.0
+                    val word = readRegular()
+                    if (word.isEmpty()) {
+                        i++
+                        return null
+                    }
+                    if (isPdfNumber(word)) PdfContentToken.Number(word) else PdfContentToken.Operator(word)
                 }
             }
         }
-        val leftover = buildString {
-            body.forEachIndexed { index, char ->
-                if (index !in consumed.indices || !consumed[index]) append(char)
+
+        private fun readName(): String {
+            i++
+            val start = i
+            while (i < latin.length && !isPdfWhitespace(latin[i]) && !isPdfDelimiter(latin[i])) i++
+            return latin.substring(start, i)
+        }
+
+        private fun readRegular(): String {
+            val start = i
+            while (i < latin.length && !isPdfWhitespace(latin[i]) && !isPdfDelimiter(latin[i]) &&
+                latin[i] != '\'' && latin[i] != '"'
+            ) {
+                i++
+            }
+            return latin.substring(start, i)
+        }
+
+        private fun readLiteral(): ByteArray? {
+            if (latin[i] != '(') return null
+            i++
+            val out = ByteArrayOutputStream()
+            var depth = 1
+            while (i < latin.length && depth > 0) {
+                val char = latin[i]
+                if (char == '\\') {
+                    val decoded = readEscape() ?: return null
+                    if (decoded >= 0) out.write(decoded)
+                    continue
+                }
+                if (char == '(') {
+                    depth++
+                    out.write('('.code)
+                    i++
+                    continue
+                }
+                if (char == ')') {
+                    depth--
+                    i++
+                    if (depth == 0) break
+                    out.write(')'.code)
+                    continue
+                }
+                out.write(char.code)
+                i++
+            }
+            return if (depth == 0) out.toByteArray() else null
+        }
+
+        private fun readEscape(): Int? {
+            if (i + 1 >= latin.length) {
+                i++
+                return null
+            }
+            i++
+            return when (val next = latin[i]) {
+                'n' -> {
+                    i++
+                    '\n'.code
+                }
+                'r' -> {
+                    i++
+                    '\r'.code
+                }
+                't' -> {
+                    i++
+                    '\t'.code
+                }
+                'b' -> {
+                    i++
+                    8
+                }
+                'f' -> {
+                    i++
+                    12
+                }
+                '(' -> {
+                    i++
+                    '('.code
+                }
+                ')' -> {
+                    i++
+                    ')'.code
+                }
+                '\\' -> {
+                    i++
+                    '\\'.code
+                }
+                '\n' -> {
+                    i++
+                    if (i < latin.length && latin[i] == '\r') i++
+                    -1
+                }
+                '\r' -> {
+                    i++
+                    if (i < latin.length && latin[i] == '\n') i++
+                    -1
+                }
+                in '0'..'7' -> {
+                    var value = 0
+                    var count = 0
+                    while (count < 3 && i < latin.length && latin[i] in '0'..'7') {
+                        value = value * 8 + (latin[i] - '0')
+                        i++
+                        count++
+                    }
+                    value and 0xff
+                }
+                else -> {
+                    i++
+                    next.code
+                }
             }
         }
-        if (Regex("<[^>]*>|\\(").containsMatchIn(leftover)) complete = false
-        return DecodedTjArray(out.toString(), complete)
-    }
 
-    private fun decodePdfLiteral(inner: String): String = inner
-        .replace("\\n", "\n")
-        .replace("\\r", "\r")
-        .replace("\\t", "\t")
-        .replace("\\(", "(")
-        .replace("\\)", ")")
-        .replace("\\\\", "\\")
-
-    private fun decodePdfHex(inner: String): String? {
-        val hex = inner.filter { !it.isWhitespace() }
-        if (hex.any { it !in "0123456789abcdefABCDEF" }) return null
-        val padded = if (hex.length % 2 == 1) hex + "0" else hex
-        val bytes = ByteArray(padded.length / 2)
-        for (index in bytes.indices) {
-            bytes[index] = padded.substring(index * 2, index * 2 + 2).toInt(16).toByte()
+        private fun readHex(): PdfContentToken.Hex {
+            i++
+            val hex = StringBuilder()
+            var valid = true
+            while (i < latin.length && latin[i] != '>') {
+                val char = latin[i]
+                if (isPdfWhitespace(char)) {
+                    i++
+                    continue
+                }
+                if (char in '0'..'9' || char in 'a'..'f' || char in 'A'..'F') {
+                    hex.append(char)
+                    i++
+                } else {
+                    valid = false
+                    i++
+                }
+            }
+            if (i >= latin.length || latin[i] != '>') {
+                return PdfContentToken.Hex(null, valid = false)
+            }
+            i++
+            if (!valid) return PdfContentToken.Hex(null, valid = false)
+            val padded = if (hex.length % 2 == 1) hex.toString() + "0" else hex.toString()
+            val bytes = ByteArray(padded.length / 2)
+            for (index in bytes.indices) {
+                bytes[index] = padded.substring(index * 2, index * 2 + 2).toInt(16).toByte()
+            }
+            return PdfContentToken.Hex(bytes, valid = true)
         }
-        return String(bytes, Charsets.ISO_8859_1)
+
+        private fun readArray(): List<PdfContentToken>? {
+            i++
+            val items = mutableListOf<PdfContentToken>()
+            while (true) {
+                skipWsComments()
+                if (i >= latin.length) return null
+                if (latin[i] == ']') {
+                    i++
+                    return items
+                }
+                val token = readToken() ?: return null
+                if (token is PdfContentToken.Operator) return null
+                items += token
+            }
+        }
+
+        private fun skipDict(): Boolean {
+            if (!latin.startsWith("<<", i)) return false
+            var depth = 0
+            while (i + 1 < latin.length) {
+                when {
+                    latin.startsWith("<<", i) -> {
+                        depth++
+                        i += 2
+                    }
+                    latin.startsWith(">>", i) -> {
+                        depth--
+                        i += 2
+                        if (depth == 0) return true
+                    }
+                    latin[i] == '(' -> {
+                        if (readLiteral() == null) return false
+                    }
+                    latin[i] == '<' && (i + 1 >= latin.length || latin[i + 1] != '<') -> {
+                        readHex()
+                    }
+                    else -> i++
+                }
+            }
+            return false
+        }
     }
+
+    private fun isPdfNumber(value: String): Boolean =
+        Regex("^[-+]?(?:\\d+(?:\\.\\d*)?|\\.\\d+)$").matches(value)
+
+    private val CONTENT_OPERATOR_OPERANDS = mapOf(
+        "BT" to 0, "ET" to 0,
+        "Td" to 2, "TD" to 2, "Tm" to 6, "T*" to 0,
+        "Tc" to 1, "Tw" to 1, "Tz" to 1, "TL" to 1, "Ts" to 1, "Tr" to 1,
+        "q" to 0, "Q" to 0, "n" to 0, "h" to 0,
+        "S" to 0, "s" to 0, "f" to 0, "F" to 0, "f*" to 0,
+        "B" to 0, "B*" to 0, "b" to 0, "b*" to 0, "W" to 0, "W*" to 0,
+        "cm" to 6, "Do" to 1, "gs" to 1,
+        "re" to 4, "m" to 2, "l" to 2, "c" to 6, "v" to 4, "y" to 4,
+        "w" to 1, "J" to 1, "j" to 1, "M" to 1, "i" to 1, "d" to 2,
+        "G" to 1, "g" to 1, "RG" to 3, "rg" to 3, "K" to 4, "k" to 4,
+        "CS" to 1, "cs" to 1, "ri" to 1, "sh" to 1,
+        "BMC" to 1, "EMC" to 0, "MP" to 1, "BDC" to 2, "DP" to 2,
+        "BX" to 0, "EX" to 0,
+    )
 
     private fun hasVectorDrawing(latin: String): Boolean {
         val stripped = latin.replace(Regex("BT[\\s\\S]*?ET"), " ")
@@ -1030,6 +1609,7 @@ object PdfParser {
     private fun assemblePages(
         pages: List<PageContent>,
         extraObjects: List<Pair<String, ByteArray>> = emptyList(),
+        fontDict: String = "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
     ): ByteArray {
         val n = pages.size
         val objects = mutableListOf<ByteArray>()
@@ -1055,7 +1635,7 @@ object PdfParser {
             objects += obj("$contentObj 0 obj\n<< /Length ${contentBytes.size} >>\nstream\n") +
                 contentBytes + obj("\nendstream\nendobj\n")
         }
-        objects += obj("$fontObj 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>\nendobj\n")
+        objects += obj("$fontObj 0 obj\n$fontDict\nendobj\n")
         extraObjects.forEachIndexed { index, (dictPrefix, payload) ->
             val num = firstExtra + index
             objects += obj("$num 0 obj\n$dictPrefix") + payload + obj("\nendstream\nendobj\n")

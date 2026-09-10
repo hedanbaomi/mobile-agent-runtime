@@ -338,6 +338,55 @@ class DocumentParserTest {
     }
 
     @Test
+    fun quotedCommentBeforeShowOperatorIsExtracted() {
+        val parsed = PdfParser.parse(
+            PdfParser.writeQuotedCommentShowPdf("TITLE", "BODY: KEEP THIS SENTENCE."),
+        )
+        assertEquals("TITLE BODY: KEEP THIS SENTENCE.", parsed.pages.single().text)
+        assertFalse(parsed.needsVision)
+    }
+
+    @Test
+    fun escapedBackslashBeforeNStaysAPathNotANewline() {
+        val parsed = PdfParser.parse(PdfParser.writeTwoLiteralTextPdf("TITLE", "C:\\notes"))
+        assertTrue(parsed.pages.single().text.contains("C:\\notes"), parsed.pages.single().text)
+        assertFalse(parsed.pages.single().text.contains("C:\\\n"), parsed.pages.single().text)
+        assertFalse(parsed.needsVision)
+    }
+
+    @Test
+    fun fontDifferencesMapHexBytesToGlyphNames() {
+        val parsed = PdfParser.parse(PdfParser.writeHexWithFontDifferencesPdf())
+        assertEquals("XYZ", parsed.pages.single().text)
+        assertFalse(parsed.needsVision)
+        val labeled = PdfParser.parse(PdfParser.writeHexWithFontDifferencesPdf("KEEPTOKEN"))
+        assertTrue(labeled.pages.single().text.contains("KEEPTOKEN"), labeled.pages.single().text)
+        assertTrue(labeled.pages.single().text.contains("XYZ"), labeled.pages.single().text)
+        assertFalse(labeled.pages.single().text.contains("ABC"), labeled.pages.single().text)
+    }
+
+    @Test
+    fun nestedLiteralWithImageKeepsInnerText() {
+        val parsed = PdfParser.parse(PdfParser.writeNestedLiteralWithImagePdf())
+        assertTrue(parsed.pages.single().text.contains("TITLE"), parsed.pages.single().text)
+        assertTrue(
+            parsed.pages.single().text.contains("BODY: (nested) KEEP THIS SENTENCE."),
+            parsed.pages.single().text,
+        )
+        assertTrue(parsed.needsVision)
+        assertTrue(parsed.assets.any { it.kind == "IMAGE" && it.bytes.isNotEmpty() })
+    }
+
+    @Test
+    fun incompleteTextWithImageStillCreatesPageBlocker() {
+        val parsed = PdfParser.parse(PdfParser.writeUndecodedHexWithImagePdf("TITLE"))
+        assertEquals("TITLE", parsed.pages.single().text)
+        assertTrue(parsed.needsVision)
+        assertTrue(parsed.assets.any { it.kind == "IMAGE" && it.bytes.isNotEmpty() })
+        assertTrue(parsed.assets.any { it.kind == "PAGE" && it.page == 1 && it.bytes.isEmpty() })
+    }
+
+    @Test
     fun imagePdfRequiresVisionAndKeepsLabel() {
         val pdf = PdfParser.writePdfWithImageXObject("flowchart page")
         val parsed = PdfParser.parse(pdf)

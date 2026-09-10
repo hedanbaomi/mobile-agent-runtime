@@ -2233,8 +2233,13 @@ class KnowledgeRepository(
 
         // Keep source image payloads short-lived.  In particular, do not pass
         // the complete list to processAssets while a large PDF is in flight.
-        processable.forEach { asset ->
-            appendOutcome(processAssets(job, listOf(asset)))?.let { return it }
+        // A PAGE blocker means the extracted text is incomplete or the page
+        // visual cannot be represented by an embedded JPEG; do not send that
+        // JPEG as a substitute for a complete page render.
+        if (pageBlockers.isEmpty()) {
+            processable.forEach { asset ->
+                appendOutcome(processAssets(job, listOf(asset)))?.let { return it }
+            }
         }
 
         if (parsed.format == SourceFormat.PDF && pdfRasterizer != null) {
@@ -3787,10 +3792,12 @@ class KnowledgeRepository(
     private fun isPublishedReady(documentId: String, kbId: String, requestedApi: Boolean = false): Boolean {
         val versionId = db.query("SELECT active_version_id FROM documents WHERE id = ? AND deleted_at IS NULL", listOf(documentId))
             .singleOrNull()?.string("active_version_id")?.ifBlank { null } ?: return false
-        val versionStatus = db.query("SELECT status FROM document_versions WHERE id = ?", listOf(versionId))
-            .singleOrNull()?.string("status")
+        val versionRow = db.query("SELECT status, parser_fingerprint FROM document_versions WHERE id = ?", listOf(versionId))
+            .singleOrNull() ?: return false
+        val versionStatus = versionRow.string("status")
         val versionReady = versionStatus == "READY" || versionStatus == "READY_WITH_VISUAL_GAPS"
         if (!versionReady) return false
+        if (!isCurrentParserFingerprint(documentId, versionRow.string("parser_fingerprint"))) return false
         val chunks = db.query("SELECT COUNT(*) AS n FROM chunks WHERE document_version_id = ?", listOf(versionId)).single().long("n")
         if (chunks == 0L) return false
         val space = db.query("SELECT embedding_space_id FROM knowledge_bases WHERE id = ?", listOf(kbId))
@@ -3811,6 +3818,20 @@ class KnowledgeRepository(
             listOf(pin, versionId),
         ).single().long("n")
         return members == chunks
+    }
+
+    private fun isCurrentParserFingerprint(documentId: String, stored: String): Boolean {
+        if (stored.isBlank()) return false
+        val format = db.query("SELECT format FROM documents WHERE id = ?", listOf(documentId))
+            .singleOrNull()?.string("format").orEmpty()
+        return when (format) {
+            SourceFormat.PDF.name -> stored == PdfParser.FINGERPRINT
+            SourceFormat.TEXT.name, SourceFormat.MARKDOWN.name -> stored == PARSER_FINGERPRINT
+            SourceFormat.IMAGE.name -> stored == "image-v1"
+            SourceFormat.OFFICE_ARCHIVE.name ->
+                stored == OfficeParser.DOCX_FINGERPRINT || stored == OfficeParser.EPUB_FINGERPRINT
+            else -> true
+        }
     }
 
     private fun embedderForJob(job: ImportJob): TextEmbedder {

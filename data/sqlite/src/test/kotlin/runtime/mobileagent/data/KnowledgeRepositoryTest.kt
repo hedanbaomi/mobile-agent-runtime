@@ -1570,6 +1570,79 @@ class KnowledgeRepositoryTest {
     }
 
     @Test
+    fun laterVisionPagesKeepTheJobConsentedTarget() {
+        val db = JdbcSqlConnection()
+        Migrations.apply(db)
+        val consented = runtime.mobileagent.knowledge.VisionBinding("prov-a", "shared-model", "https://a.example.invalid/v1", 1)
+        val switched = runtime.mobileagent.knowledge.VisionBinding("prov-b", "shared-model", "https://b.example.invalid/v1", 1)
+        var binding = consented
+        val requested = mutableListOf<String>()
+        val vision = runtime.mobileagent.knowledge.VisionBackend { input ->
+            requested += input.modelFingerprint
+            if (requested.size == 1) binding = switched
+            runtime.mobileagent.knowledge.VisionOutcome.Success(
+                runtime.mobileagent.knowledge.VisionSuccess("ocr-${requested.size}", "desc-${binding.providerId}"),
+            )
+        }
+        val repo = KnowledgeRepository(
+            db,
+            MemoryBlobSink(),
+            vision = vision,
+            visionBinding = { binding },
+            pdfRasterizer = PdfPageRasterizer { _, pages ->
+                pages.map { page -> RenderedPdfPage(page, byteArrayOf(page.toByte(), 2, 3), "image/png", 2, 2) }
+            },
+        )
+        val job = repo.importBytes(
+            "pages.pdf",
+            "application/pdf",
+            runtime.mobileagent.knowledge.PdfParser.writeTwoPageTextPdf("", ""),
+            visionConfigured = true,
+            visionConsent = true,
+        )
+        assertEquals(listOf(consented.fingerprint), requested)
+        assertEquals(0, requested.count { it == switched.fingerprint })
+        assertEquals(ImportStage.FAILED, job.stage)
+        assertTrue(job.error.orEmpty().contains("destination changed"), job.error)
+        assertFalse(ImportStateMachine.isCompleteSuccess(job))
+        val fingerprints = db.query("SELECT model_fingerprint FROM vision_results", emptyList())
+            .map { it.string("model_fingerprint") }
+        assertEquals(listOf(consented.fingerprint), fingerprints)
+        assertTrue(repo.search("desc-prov-b").isEmpty())
+    }
+
+    @Test
+    fun mixedLiteralAndHexPdfIsSearchableWithoutVision() {
+        val db = JdbcSqlConnection()
+        Migrations.apply(db)
+        val repo = KnowledgeRepository(db, MemoryBlobSink())
+        val job = repo.importBytes(
+            "mixed.pdf",
+            "application/pdf",
+            runtime.mobileagent.knowledge.PdfParser.writeLiteralAndHexTextPdf("TITLE", "BODY: KEEP THIS SENTENCE."),
+            visionConfigured = false,
+        )
+        assertEquals(ImportStage.READY, job.stage)
+        assertTrue(repo.search("KEEP THIS SENTENCE").any { "TITLE" in it.text && "KEEP THIS SENTENCE" in it.text })
+    }
+
+    @Test
+    fun undecodedHexPdfDoesNotPublishPartialTextAsReady() {
+        val db = JdbcSqlConnection()
+        Migrations.apply(db)
+        val repo = KnowledgeRepository(db, MemoryBlobSink())
+        val job = repo.importBytes(
+            "partial.pdf",
+            "application/pdf",
+            runtime.mobileagent.knowledge.PdfParser.writeLiteralAndUndecodedHexShowPdf("TITLE"),
+            visionConfigured = false,
+        )
+        assertTrue(job.stage == ImportStage.WAITING_FOR_VISION_MODEL || job.stage == ImportStage.FAILED)
+        assertFalse(ImportStateMachine.isCompleteSuccess(job))
+        assertTrue(repo.search("TITLE").isEmpty())
+    }
+
+    @Test
     fun visionCacheDoesNotCrossProvidersWithSameModelId() {
         val db = JdbcSqlConnection()
         Migrations.apply(db)

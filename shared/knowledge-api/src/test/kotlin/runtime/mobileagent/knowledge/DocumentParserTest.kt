@@ -309,6 +309,35 @@ class DocumentParserTest {
     }
 
     @Test
+    fun mixedLiteralAndHexStringsAreIndexedAsCompleteText() {
+        val parsed = PdfParser.parse(
+            PdfParser.writeLiteralAndHexTextPdf("TITLE", "BODY: KEEP THIS SENTENCE."),
+        )
+        assertEquals("TITLE BODY: KEEP THIS SENTENCE.", parsed.pages.single().text)
+        assertFalse(parsed.pages.single().needsVision)
+        assertFalse(parsed.needsVision)
+    }
+
+    @Test
+    fun hexStringsInsideTjArrayAreExtracted() {
+        val parsed = PdfParser.parse(
+            PdfParser.writeLiteralAndHexArrayPdf("TITLE", "BODY: KEEP THIS SENTENCE."),
+        )
+        assertTrue(parsed.pages.single().text.contains("TITLE"), parsed.pages.single().text)
+        assertTrue(parsed.pages.single().text.contains("BODY: KEEP THIS SENTENCE."), parsed.pages.single().text)
+        assertFalse(parsed.needsVision)
+    }
+
+    @Test
+    fun undecodedHexShowOperatorDoesNotCountAsCompleteText() {
+        val parsed = PdfParser.parse(PdfParser.writeLiteralAndUndecodedHexShowPdf("TITLE"))
+        assertEquals("TITLE", parsed.pages.single().text)
+        assertTrue(parsed.pages.single().needsVision)
+        assertTrue(parsed.needsVision)
+        assertTrue(parsed.assets.any { it.kind == "PAGE" && it.bytes.isEmpty() })
+    }
+
+    @Test
     fun imagePdfRequiresVisionAndKeepsLabel() {
         val pdf = PdfParser.writePdfWithImageXObject("flowchart page")
         val parsed = PdfParser.parse(pdf)

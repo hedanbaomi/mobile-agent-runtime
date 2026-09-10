@@ -7,7 +7,7 @@ import java.io.ByteArrayOutputStream
 import java.util.zip.Inflater
 
 object PdfParser {
-    const val FINGERPRINT = "pdf-text-v7-pdfrenderer"
+    const val FINGERPRINT = "pdf-text-v8-pdfrenderer"
 
     private const val MAX_PDF_STREAM_BYTES = 32 * 1024 * 1024
 
@@ -51,7 +51,8 @@ object PdfParser {
             val content = pageContent(objects, pageObj.dict)
             val decoded = content.bytes
             val pageLatin = String(decoded, Charsets.ISO_8859_1)
-            val text = extractPdfStrings(decoded).joinToString(" ").trim()
+            val extracted = extractPdfStrings(decoded)
+            val text = extracted.joined()
             val hasInline = hasInlineImage(pageLatin)
             val resolvedXObjects = pageXObjects(objects, objNum, pageObj.dict)
             val hasUnresolvedXObjects = resolvedXObjects.unresolved ||
@@ -59,7 +60,7 @@ object PdfParser {
             val hasImages = resolvedXObjects.entries.isNotEmpty() || hasUnresolvedXObjects || hasInline ||
                 Regex("/Subtype\\s*/Image").containsMatchIn(pageObj.dict)
             val hasDrawing = hasVectorDrawing(pageLatin)
-            if (hasImages || hasDrawing || text.isEmpty() || !content.complete) {
+            if (pageNeedsVision(text, extracted.complete, content.complete, hasImages, hasDrawing)) {
                 pageNumbers.indexOf(objNum) + 1
             } else {
                 null
@@ -76,7 +77,8 @@ object PdfParser {
             val content = pageContent(objects, pageObj.dict)
             val decoded = content.bytes
             val pageLatin = String(decoded, Charsets.ISO_8859_1)
-            val text = extractPdfStrings(decoded).joinToString(" ").trim()
+            val extracted = extractPdfStrings(decoded)
+            val text = extracted.joined()
             val resolvedXObjects = pageXObjects(objects, objNum, pageObj.dict)
             val xobjects = resolvedXObjects.entries
             val hasUnresolvedXObjects = resolvedXObjects.unresolved ||
@@ -139,7 +141,7 @@ object PdfParser {
             val hasInline = hasInlineImage(pageLatin)
             val hasImages = xobjects.isNotEmpty() || hasUnresolvedXObjects || hasInline ||
                 Regex("/Subtype\\s*/Image").containsMatchIn(pageObj.dict)
-            val needsVision = hasImages || hasDrawing || text.isEmpty() || !content.complete
+            val needsVision = pageNeedsVision(text, extracted.complete, content.complete, hasImages, hasDrawing)
             pages += ExtractedPage(pageIndex, text, needsVision)
             val rendered = renderedPages[pageIndex]?.takeIf { it.bytes.isNotEmpty() }
             if (rendered != null) {
@@ -205,6 +207,48 @@ object PdfParser {
         val escaped = text.replace("\\", "\\\\").replace("(", "\\(").replace(")", "\\)")
         return assemblePages(
             listOf(PageContent("BT /F1 12 Tf 72 720 Td ($escaped) Tj ET\n", "/Font << /F1 FONT >>")),
+        )
+    }
+
+    fun writeLiteralAndHexTextPdf(literal: String, hexText: String): ByteArray {
+        val escaped = literal.replace("\\", "\\\\").replace("(", "\\(").replace(")", "\\)")
+        val hex = hexText.toByteArray(Charsets.ISO_8859_1).joinToString("") { byte ->
+            "%02x".format(byte.toInt() and 0xff)
+        }
+        return assemblePages(
+            listOf(
+                PageContent(
+                    "BT /F1 12 Tf 72 720 Td ($escaped) Tj 0 -24 Td <$hex> Tj ET\n",
+                    "/Font << /F1 FONT >>",
+                ),
+            ),
+        )
+    }
+
+    fun writeLiteralAndHexArrayPdf(literal: String, hexText: String): ByteArray {
+        val escaped = literal.replace("\\", "\\\\").replace("(", "\\(").replace(")", "\\)")
+        val hex = hexText.toByteArray(Charsets.ISO_8859_1).joinToString("") { byte ->
+            "%02x".format(byte.toInt() and 0xff)
+        }
+        return assemblePages(
+            listOf(
+                PageContent(
+                    "BT /F1 12 Tf 72 720 Td [($escaped) -200 <$hex>] TJ ET\n",
+                    "/Font << /F1 FONT >>",
+                ),
+            ),
+        )
+    }
+
+    fun writeLiteralAndUndecodedHexShowPdf(literal: String): ByteArray {
+        val escaped = literal.replace("\\", "\\\\").replace("(", "\\(").replace(")", "\\)")
+        return assemblePages(
+            listOf(
+                PageContent(
+                    "BT /F1 12 Tf 72 720 Td ($escaped) Tj 0 -24 Td <zzzz> Tj ET\n",
+                    "/Font << /F1 FONT >>",
+                ),
+            ),
         )
     }
 
@@ -280,6 +324,10 @@ object PdfParser {
         val reference: Int? = null,
         val malformed: Boolean = false,
     )
+    private data class ExtractedPdfText(val texts: List<String>, val complete: Boolean) {
+        fun joined(): String = texts.joinToString(" ").trim()
+    }
+    private data class DecodedTjArray(val text: String, val complete: Boolean)
 
     private fun extractIndirectObjects(bytes: ByteArray, latin: String): Map<Int, PdfObject> {
         val scanned = linkedMapOf<Int, ScannedObject>()
@@ -805,56 +853,120 @@ object PdfParser {
         }
     }
 
-    private fun extractPdfStrings(data: ByteArray): List<String> {
+    private fun pageNeedsVision(
+        text: String,
+        textComplete: Boolean,
+        contentComplete: Boolean,
+        hasImages: Boolean,
+        hasDrawing: Boolean,
+    ): Boolean = hasImages || hasDrawing || text.isEmpty() || !contentComplete || !textComplete
+
+    private fun extractPdfStrings(data: ByteArray): ExtractedPdfText {
         val latin = String(data, Charsets.ISO_8859_1)
+        val consumed = BooleanArray(latin.length)
+        val texts = mutableListOf<String>()
+        var complete = true
+
+        fun mark(range: IntRange) {
+            for (index in range) {
+                if (index in consumed.indices) consumed[index] = true
+            }
+        }
+
         val operators = buildList {
             Regex("\\[((?:\\\\.|[^]])*)]\\s*TJ\\b").findAll(latin).forEach { match ->
                 add(0 to match)
             }
-            Regex("\\((?:\\\\.|[^\\\\)])*\\)\\s*Tj\\b").findAll(latin).forEach { match ->
+            Regex("\\((?:\\\\.|[^\\\\)])*\\)\\s*(?:Tj\\b|'|\")").findAll(latin).forEach { match ->
                 add(1 to match)
             }
-            // PDF also has the single-quote and double-quote text-show
-            // operators.  They carry a literal string just like Tj; the
-            // preceding word/char spacing operands are layout state and are
-            // intentionally not folded into extracted text.
-            Regex("\\((?:\\\\.|[^\\\\)])*\\)\\s*'").findAll(latin).forEach { match ->
-                add(1 to match)
-            }
-            Regex("\\((?:\\\\.|[^\\\\)])*\\)\\s*\\\"").findAll(latin).forEach { match ->
-                add(1 to match)
+            Regex("<[0-9A-Fa-f \\t\\r\\n]*>\\s*(?:Tj\\b|'|\")").findAll(latin).forEach { match ->
+                add(2 to match)
             }
         }.sortedBy { it.second.range.first }
 
-        return operators.mapNotNull { (kind, match) ->
-            if (kind == 0) {
-                decodeTjArray(match.value.substringBeforeLast("]").removePrefix("["))
-            } else {
-                decodePdfLiteral(match.value.substringBeforeLast(")").substringAfter("(", ""))
-            }
-        }.filter { it.isNotBlank() }
-    }
-
-    private fun decodeTjArray(body: String): String {
-        val out = StringBuilder()
-        var insertSpace = false
-        Regex("\\((?:\\\\.|[^\\\\)])*\\)|[-+]?(?:\\d+(?:\\.\\d*)?|\\.\\d+)").findAll(body).forEach { token ->
-            if (token.value.startsWith("(")) {
-                val decoded = decodePdfLiteral(token.value.removePrefix("(").removeSuffix(")"))
-                if (decoded.isEmpty()) return@forEach
-                if (insertSpace && out.isNotEmpty() && !out.last().isWhitespace() && !decoded.first().isWhitespace()) {
-                    out.append(' ')
+        operators.forEach { (kind, match) ->
+            if (match.range.any { it in consumed.indices && consumed[it] }) return@forEach
+            mark(match.range)
+            when (kind) {
+                0 -> {
+                    val decoded = decodeTjArray(match.value.substringBeforeLast("]").removePrefix("["))
+                    if (!decoded.complete) complete = false
+                    if (decoded.text.isNotBlank()) texts += decoded.text
                 }
-                out.append(decoded)
-                insertSpace = false
-            } else {
-                // In PDF TJ, positive adjustments pull the next glyph left;
-                // negative adjustments create a word gap. Small kerning
-                // values, including positive ones, do not become spaces.
-                insertSpace = (token.value.toDoubleOrNull() ?: 0.0) <= -100.0
+                1 -> {
+                    val decoded = decodePdfLiteral(match.value.substringBeforeLast(")").substringAfter("(", ""))
+                    if (decoded.isNotBlank()) texts += decoded
+                }
+                else -> {
+                    val hex = match.value.substringAfter("<").substringBeforeLast(">")
+                    val decoded = decodePdfHex(hex)
+                    if (decoded == null) {
+                        complete = false
+                    } else if (decoded.isNotBlank()) {
+                        texts += decoded
+                    }
+                }
             }
         }
-        return out.toString()
+        if (hasUnconsumedTextShowOperator(latin, consumed)) complete = false
+        return ExtractedPdfText(texts, complete)
+    }
+
+    private fun hasUnconsumedTextShowOperator(latin: String, consumed: BooleanArray): Boolean {
+        return Regex("(?<![A-Za-z])(Tj|TJ)(?![A-Za-z0-9])").findAll(latin).any { match ->
+            match.range.any { it in consumed.indices && !consumed[it] }
+        }
+    }
+
+    private fun decodeTjArray(body: String): DecodedTjArray {
+        val out = StringBuilder()
+        var insertSpace = false
+        var complete = true
+        val consumed = BooleanArray(body.length)
+        val token = Regex("\\((?:\\\\.|[^\\\\)])*\\)|<[0-9A-Fa-f \\t\\r\\n]*>|[-+]?(?:\\d+(?:\\.\\d*)?|\\.\\d+)")
+        token.findAll(body).forEach { match ->
+            for (index in match.range) {
+                if (index in consumed.indices) consumed[index] = true
+            }
+            when {
+                match.value.startsWith("(") -> {
+                    val decoded = decodePdfLiteral(match.value.removePrefix("(").removeSuffix(")"))
+                    if (decoded.isEmpty()) return@forEach
+                    if (insertSpace && out.isNotEmpty() && !out.last().isWhitespace() && !decoded.first().isWhitespace()) {
+                        out.append(' ')
+                    }
+                    out.append(decoded)
+                    insertSpace = false
+                }
+                match.value.startsWith("<") -> {
+                    val decoded = decodePdfHex(match.value.removePrefix("<").removeSuffix(">"))
+                    if (decoded == null) {
+                        complete = false
+                        return@forEach
+                    }
+                    if (decoded.isEmpty()) return@forEach
+                    if (insertSpace && out.isNotEmpty() && !out.last().isWhitespace() && !decoded.first().isWhitespace()) {
+                        out.append(' ')
+                    }
+                    out.append(decoded)
+                    insertSpace = false
+                }
+                else -> {
+                    // In PDF TJ, positive adjustments pull the next glyph left;
+                    // negative adjustments create a word gap. Small kerning
+                    // values, including positive ones, do not become spaces.
+                    insertSpace = (match.value.toDoubleOrNull() ?: 0.0) <= -100.0
+                }
+            }
+        }
+        val leftover = buildString {
+            body.forEachIndexed { index, char ->
+                if (index !in consumed.indices || !consumed[index]) append(char)
+            }
+        }
+        if (Regex("<[^>]*>|\\(").containsMatchIn(leftover)) complete = false
+        return DecodedTjArray(out.toString(), complete)
     }
 
     private fun decodePdfLiteral(inner: String): String = inner
@@ -864,6 +976,17 @@ object PdfParser {
         .replace("\\(", "(")
         .replace("\\)", ")")
         .replace("\\\\", "\\")
+
+    private fun decodePdfHex(inner: String): String? {
+        val hex = inner.filter { !it.isWhitespace() }
+        if (hex.any { it !in "0123456789abcdefABCDEF" }) return null
+        val padded = if (hex.length % 2 == 1) hex + "0" else hex
+        val bytes = ByteArray(padded.length / 2)
+        for (index in bytes.indices) {
+            bytes[index] = padded.substring(index * 2, index * 2 + 2).toInt(16).toByte()
+        }
+        return String(bytes, Charsets.ISO_8859_1)
+    }
 
     private fun hasVectorDrawing(latin: String): Boolean {
         val stripped = latin.replace(Regex("BT[\\s\\S]*?ET"), " ")

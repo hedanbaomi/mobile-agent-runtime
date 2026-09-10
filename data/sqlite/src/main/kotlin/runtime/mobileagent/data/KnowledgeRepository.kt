@@ -1946,7 +1946,9 @@ class KnowledgeRepository(
                 return
             }
             job.visionConsent = true
-            job.consentedVisionFingerprint = visionFingerprint()
+            if (job.consentedVisionFingerprint.isNullOrBlank()) {
+                job.consentedVisionFingerprint = visionFingerprint()
+            }
             advanceThrough(job, ImportStage.VISION_PROCESSING)
             // Persist the externally observable processing state before entering
             // a provider call.  A consent Worker can otherwise appear stuck at
@@ -2127,7 +2129,9 @@ class KnowledgeRepository(
                 return
             }
             job.visionConsent = true
-            job.consentedVisionFingerprint = visionFingerprint()
+            if (job.consentedVisionFingerprint.isNullOrBlank()) {
+                job.consentedVisionFingerprint = visionFingerprint()
+            }
             advanceThrough(job, ImportStage.VISION_PROCESSING)
             // Keep the durable state ahead of the synchronous Vision call so
             // the UI and a restarted process can distinguish processing from
@@ -2275,10 +2279,17 @@ class KnowledgeRepository(
 
     private fun processAssets(job: ImportJob, assets: List<ExtractedAsset>): VisionBatch {
         val backend = vision ?: return VisionBatch.Failed("Vision model is configured in profile but no backend is bound")
+        val requestedFingerprint = job.consentedVisionFingerprint?.takeIf { it.isNotBlank() }
+            ?: return VisionBatch.Failed("Vision destination is not bound to this job")
         val chunks = mutableListOf<IndexedChunk>()
         assets.forEach { asset ->
             if (asset.bytes.isEmpty() || asset.kind != "IMAGE") {
                 return VisionBatch.Failed("Visual asset ${asset.localId} is not rasterizable and was not downloaded")
+            }
+            if (!visionBindingMatches(job) || visionFingerprint() != requestedFingerprint) {
+                return VisionBatch.Failed(
+                    "Vision destination changed. Remaining pages were not sent. Approve upload to the current Provider and model.",
+                )
             }
             val stored = blobs.put(asset.bytes, asset.mediaType)
             upsertBlob(stored)
@@ -2287,7 +2298,7 @@ class KnowledgeRepository(
             val input = VisionInput(
                 assetHash = stored.sha256,
                 contextHash = contextHash,
-                modelFingerprint = visionFingerprint(),
+                modelFingerprint = requestedFingerprint,
                 bytes = asset.bytes,
                 mediaType = asset.mediaType,
                 surroundingText = asset.surroundingText,
@@ -2316,11 +2327,11 @@ class KnowledgeRepository(
             }
             when (outcome) {
                 is VisionOutcome.UnknownOutcome -> {
-                    persistVision(input.cacheKey, stored.sha256, contextHash, "UNKNOWN_OUTCOME", "", "", "", "")
+                    persistVision(input.cacheKey, stored.sha256, contextHash, requestedFingerprint, "UNKNOWN_OUTCOME", "", "", "", "")
                     return VisionBatch.Unknown
                 }
                 is VisionOutcome.Failed -> {
-                    persistVision(input.cacheKey, stored.sha256, contextHash, "FAILED", "", outcome.message, "", "")
+                    persistVision(input.cacheKey, stored.sha256, contextHash, requestedFingerprint, "FAILED", "", outcome.message, "", "")
                     return VisionBatch.Failed(outcome.message)
                 }
                 is VisionOutcome.Success -> {
@@ -2328,6 +2339,7 @@ class KnowledgeRepository(
                         input.cacheKey,
                         stored.sha256,
                         contextHash,
+                        requestedFingerprint,
                         "SUCCESS",
                         outcome.result.ocrText,
                         outcome.result.semanticDescription,
@@ -2363,6 +2375,7 @@ class KnowledgeRepository(
         cacheKey: String,
         assetHash: String,
         contextHash: String,
+        modelFingerprint: String,
         status: String,
         ocr: String,
         description: String,
@@ -2375,7 +2388,7 @@ class KnowledgeRepository(
                 cacheKey,
                 assetHash,
                 contextHash,
-                visionFingerprint(),
+                modelFingerprint,
                 VISION_PROMPT_VERSION,
                 VISION_SCHEMA_VERSION,
                 status,

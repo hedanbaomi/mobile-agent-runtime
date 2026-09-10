@@ -7,7 +7,7 @@ import java.io.ByteArrayOutputStream
 import java.util.zip.Inflater
 
 object PdfParser {
-    const val FINGERPRINT = "pdf-text-v11-pdfrenderer"
+    const val FINGERPRINT = "pdf-text-v12-pdfrenderer"
 
     private const val MAX_PDF_STREAM_BYTES = 32 * 1024 * 1024
 
@@ -345,6 +345,35 @@ object PdfParser {
 
     fun writeZapfDingbatsBuiltinPdf(label: String, dingbatBytes: String = "ab"): ByteArray =
         writeBuiltInFontTextPdf(label, "ZapfDingbats", dingbatBytes)
+
+    /**
+     * Single-page PDF whose font dictionary has no `/Encoding`, so the built-in
+     * encoding is taken from [baseFontName]. The spelling is written verbatim so
+     * escaped name forms such as `Sym#62ol` can be exercised.
+     */
+    fun writeBuiltInFontPdf(label: String, baseFontName: String, glyphBytes: String = "abg"): ByteArray =
+        writeBuiltInFontTextPdf(label, baseFontName, glyphBytes)
+
+    /**
+     * Same layout, but the resource dictionary spells the symbol font as `/F#32`
+     * while the content stream selects `/F2`. Equivalent name spellings must still
+     * resolve to the same font.
+     */
+    fun writeEscapedResourceNamePdf(label: String, glyphBytes: String = "abg"): ByteArray {
+        val escaped = label.replace("\\", "\\\\").replace("(", "\\(").replace(")", "\\)")
+        return assemblePages(
+            pages = listOf(
+                PageContent(
+                    "BT /F1 18 Tf 72 720 Td ($escaped) Tj 0 -30 Td /F2 24 Tf ($glyphBytes) Tj ET\n",
+                    "/Font << /F1 FONT /F#32 FONT2 >>",
+                ),
+            ),
+            fontDicts = listOf(
+                "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+                "<< /Type /Font /Subtype /Type1 /BaseFont /Symbol >>",
+            ),
+        )
+    }
 
     private fun writeBuiltInFontTextPdf(label: String, baseFont: String, glyphBytes: String): ByteArray {
         val escaped = label.replace("\\", "\\\\").replace("(", "\\(").replace(")", "\\)")
@@ -965,7 +994,7 @@ object PdfParser {
         Regex("/([^\\s<>\\[\\]()/%]+)\\s+(\\d+)\\s+0\\s+R\\b")
             .findAll(resourceDict)
             .forEach { match ->
-                entries[match.groupValues[1]] = match.groupValues[2].toInt()
+                entries[decodePdfName(match.groupValues[1])] = match.groupValues[2].toInt()
             }
         return PageXObjects(entries, unresolved = false)
     }
@@ -1013,12 +1042,23 @@ object PdfParser {
         return PdfFontEncoding(known = true, base = base)
     }
 
-    private fun builtInBaseEncoding(dict: String): PdfBaseEncoding? =
-        when (namedDictionaryOrReference(dict, "BaseFont").name?.substringAfterLast('+')) {
-            "Symbol" -> PdfBaseEncoding.SYMBOL
-            "ZapfDingbats" -> null
-            else -> PdfBaseEncoding.STANDARD
+    private fun builtInBaseEncoding(dict: String): PdfBaseEncoding? {
+        val baseFont = namedDictionaryOrReference(dict, "BaseFont").name?.substringAfterLast('+') ?: return null
+        return when {
+            baseFont == "Symbol" -> PdfBaseEncoding.SYMBOL
+            baseFont == "ZapfDingbats" -> null
+            baseFont in BASE_14_TEXT_FONTS -> PdfBaseEncoding.STANDARD
+            else -> null
         }
+    }
+
+    // Adobe base-14 Latin text faces (PDF 32000-1 Table 111); the twelve text faces
+    // have StandardEncoding as their built-in encoding.
+    private val BASE_14_TEXT_FONTS = setOf(
+        "Courier", "Courier-Bold", "Courier-Oblique", "Courier-BoldOblique",
+        "Helvetica", "Helvetica-Bold", "Helvetica-Oblique", "Helvetica-BoldOblique",
+        "Times-Roman", "Times-Bold", "Times-Italic", "Times-BoldItalic",
+    )
 
     private fun encodingByName(name: String?): PdfBaseEncoding? = when (name) {
         "WinAnsiEncoding" -> PdfBaseEncoding.WIN_ANSI
@@ -1070,7 +1110,7 @@ object PdfParser {
                 val start = index + 1
                 index++
                 while (index < body.length && !isPdfWhitespace(body[index]) && !isPdfDelimiter(body[index])) index++
-                val glyph = pdfGlyphName(body.substring(start, index)) ?: return null
+                val glyph = pdfGlyphName(decodePdfName(body.substring(start, index))) ?: return null
                 val code = nextCode ?: return null
                 mapped[code] = glyph
                 nextCode = code + 1
@@ -1110,11 +1150,45 @@ object PdfParser {
             value == '[' || value == ']' || value == '{' || value == '}' ||
             value == '/' || value == '%'
 
+    /**
+     * PDF 32000-1 7.3.5: a name may spell any byte as `#` plus two hex digits, so
+     * `/Sym#62ol` and `/Symbol` name the same font. Names must be decoded before
+     * they are compared or looked up; otherwise an equivalent spelling silently
+     * misses its table and is treated as an unknown font.
+     */
+    private fun decodePdfName(raw: String): String {
+        if (raw.indexOf('#') < 0) return raw
+        val out = StringBuilder(raw.length)
+        var index = 0
+        while (index < raw.length) {
+            val char = raw[index]
+            if (char == '#' && index + 2 < raw.length &&
+                raw[index + 1].isPdfHexDigit() && raw[index + 2].isPdfHexDigit()
+            ) {
+                out.append(((raw[index + 1].pdfHexValue() shl 4) or raw[index + 2].pdfHexValue()).toChar())
+                index += 3
+            } else {
+                out.append(char)
+                index++
+            }
+        }
+        return out.toString()
+    }
+
+    private fun Char.isPdfHexDigit(): Boolean =
+        this in '0'..'9' || this in 'a'..'f' || this in 'A'..'F'
+
+    private fun Char.pdfHexValue(): Int = when (this) {
+        in '0'..'9' -> this - '0'
+        in 'a'..'f' -> this - 'a' + 10
+        else -> this - 'A' + 10
+    }
+
     private fun hasUnresolvedXObjectDo(latin: String, entries: Map<String, Int>): Boolean {
         val outsideText = latin.replace(Regex("BT[\\s\\S]*?ET"), " ")
         return Regex("/([^\\s<>\\[\\]()/%]+)\\s+Do\\b")
             .findAll(outsideText)
-            .any { match -> match.groupValues[1] !in entries }
+            .any { match -> decodePdfName(match.groupValues[1]) !in entries }
     }
 
     private fun dictionaryOrReference(dict: String, name: String): PdfDictionaryValue {
@@ -1164,7 +1238,7 @@ object PdfParser {
             val start = valueStart + 1
             var index = start
             while (index < dict.length && !isPdfWhitespace(dict[index]) && !isPdfDelimiter(dict[index])) index++
-            return PdfNamedValue(present = true, name = dict.substring(start, index))
+            return PdfNamedValue(present = true, name = decodePdfName(dict.substring(start, index)))
         }
         val matcher = Regex("(\\d+)\\s+0\\s+R\\b").toPattern().matcher(dict)
         matcher.region(valueStart, dict.length)
@@ -1640,7 +1714,7 @@ object PdfParser {
             i++
             val start = i
             while (i < latin.length && !isPdfWhitespace(latin[i]) && !isPdfDelimiter(latin[i])) i++
-            return latin.substring(start, i)
+            return decodePdfName(latin.substring(start, i))
         }
 
         private fun readRegular(): String {

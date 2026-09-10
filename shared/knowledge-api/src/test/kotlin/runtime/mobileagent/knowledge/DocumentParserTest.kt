@@ -395,6 +395,43 @@ class DocumentParserTest {
     }
 
     @Test
+    fun escapedBaseFontNameDecodesLikeItsLiteralSpelling() {
+        val parsed = PdfParser.parse(PdfParser.writeBuiltInFontPdf("KEEPTOKEN", "Sym#62ol"))
+        val text = parsed.pages.single().text
+        assertTrue(text.contains("KEEPTOKEN"), text)
+        assertTrue(text.contains("\u03B1\u03B2\u03B3"), text)
+        assertFalse(text.contains("abg"), text)
+        assertFalse(parsed.needsVision, text)
+    }
+
+    @Test
+    fun escapedResourceFontNameMatchesContentStreamName() {
+        val parsed = PdfParser.parse(PdfParser.writeEscapedResourceNamePdf("KEEPTOKEN"))
+        val text = parsed.pages.single().text
+        assertTrue(text.contains("KEEPTOKEN"), text)
+        assertTrue(text.contains("\u03B1\u03B2\u03B3"), text)
+        assertFalse(text.contains("abg"), text)
+        assertFalse(parsed.needsVision, text)
+    }
+
+    @Test
+    fun unknownBuiltInFontFailsClosedInsteadOfAssumingStandardEncoding() {
+        val parsed = PdfParser.parse(PdfParser.writeBuiltInFontPdf("KEEPTOKEN", "ReviewUnknownFont"))
+        assertTrue(parsed.pages.single().text.contains("KEEPTOKEN"), parsed.pages.single().text)
+        assertTrue(parsed.pages.single().needsVision, parsed.pages.single().text)
+        assertTrue(parsed.needsVision)
+        assertTrue(parsed.assets.any { it.kind == "PAGE" && it.page == 1 }, parsed.assets.toString())
+    }
+
+    @Test
+    fun base14LatinFontWithoutEncodingStillPublishesCompleteText() {
+        val parsed = PdfParser.parse(PdfParser.writeBuiltInFontPdf("KEEPTOKEN", "Helvetica"))
+        assertTrue(parsed.pages.single().text.contains("KEEPTOKEN"), parsed.pages.single().text)
+        assertFalse(parsed.pages.single().needsVision, parsed.pages.single().text)
+        assertFalse(parsed.needsVision)
+    }
+
+    @Test
     fun zapfDingbatsBuiltInEncodingFailsClosedInsteadOfPublishingLatin() {
         val parsed = PdfParser.parse(PdfParser.writeZapfDingbatsBuiltinPdf("KEEPTOKEN"))
         assertTrue(parsed.pages.single().text.contains("KEEPTOKEN"), parsed.pages.single().text)

@@ -384,6 +384,26 @@ class DocumentParserTest {
     }
 
     @Test
+    fun symbolBuiltInEncodingMapsGreekInsteadOfLatinBytes() {
+        val parsed = PdfParser.parse(PdfParser.writeSymbolBuiltinPdf("KEEPTOKEN"))
+        val text = parsed.pages.single().text
+        assertTrue(text.contains("KEEPTOKEN"), text)
+        assertTrue(text.contains("\u03B1\u03B2\u03B3"), text)
+        assertFalse(text.contains("abg"), text)
+        assertFalse(parsed.needsVision, text)
+        assertTrue(parsed.assets.none { it.kind == "PAGE" }, parsed.assets.toString())
+    }
+
+    @Test
+    fun zapfDingbatsBuiltInEncodingFailsClosedInsteadOfPublishingLatin() {
+        val parsed = PdfParser.parse(PdfParser.writeZapfDingbatsBuiltinPdf("KEEPTOKEN"))
+        assertTrue(parsed.pages.single().text.contains("KEEPTOKEN"), parsed.pages.single().text)
+        assertTrue(parsed.pages.single().needsVision, parsed.pages.single().text)
+        assertTrue(parsed.needsVision)
+        assertTrue(parsed.assets.any { it.kind == "PAGE" && it.page == 1 }, parsed.assets.toString())
+    }
+
+    @Test
     fun graphicsStateRestoresFontAfterQ() {
         val parsed = PdfParser.parse(PdfParser.writeFontRestorePdf())
         assertTrue(parsed.pages.single().text.contains("KEEPTOKEN"), parsed.pages.single().text)

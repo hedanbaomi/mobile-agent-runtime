@@ -310,17 +310,11 @@ class KnowledgeRepository(
                     persistJob(job, displayName)
                     return job
                 }
-                if (isPublishedReady(existingId, kbId, requestedApi = true)) {
-                    val job = ImportJob(
-                        id = EntityId.random().value,
-                        knowledgeBaseId = kbId,
-                        documentId = existingId,
-                        stage = ImportStage.READY,
-                        visionConfigured = visionConfigured,
-                        visionConsent = visionConsent,
-                        embeddingIsApi = true,
-                        embeddingConsent = embeddingConsent,
-                        localEmbeddingAvailable = true,
+                val reuseStage = publishedReadyStage(existingId, kbId, requestedApi = true)
+                if (reuseStage != null) {
+                    val job = reuseJob(
+                        existingId, kbId, reuseStage, visionConfigured, visionConsent,
+                        embeddingIsApi = true, embeddingConsent = embeddingConsent,
                     )
                     persistJob(job, displayName)
                     return job
@@ -760,17 +754,11 @@ class KnowledgeRepository(
                     persistJob(job, displayName)
                     return job
                 }
-                if (isPublishedReady(existingId, kbId, embeddingIsApi)) {
-                    val job = ImportJob(
-                        id = EntityId.random().value,
-                        knowledgeBaseId = kbId,
-                        documentId = existingId,
-                        stage = ImportStage.READY,
-                        visionConfigured = visionConfigured,
-                        visionConsent = visionConsent,
-                        embeddingIsApi = embeddingIsApi,
-                        embeddingConsent = embeddingConsent,
-                        localEmbeddingAvailable = true,
+                val reuseStage = publishedReadyStage(existingId, kbId, embeddingIsApi)
+                if (reuseStage != null) {
+                    val job = reuseJob(
+                        existingId, kbId, reuseStage, visionConfigured, visionConsent,
+                        embeddingIsApi = embeddingIsApi, embeddingConsent = embeddingConsent,
                     )
                     persistJob(job, displayName)
                     return job
@@ -3783,35 +3771,74 @@ class KnowledgeRepository(
         }
     }
 
-    private fun isPublishedReady(documentId: String, kbId: String, requestedApi: Boolean = false): Boolean {
+    /**
+     * Returns the published stage of an already-indexed, reusable document version,
+     * or null when the stored version cannot be reused as-is.
+     *
+     * A version stored as READY_WITH_VISUAL_GAPS is reusable only as itself: the
+     * exact stage is returned so a same-blob re-import cannot silently upgrade a
+     * text-only version to READY, and the caller preserves [ImportJob.visualGapsAccepted]
+     * instead of uploading to fill the gaps.
+     */
+    private fun publishedReadyStage(documentId: String, kbId: String, requestedApi: Boolean = false): ImportStage? {
         val versionId = db.query("SELECT active_version_id FROM documents WHERE id = ? AND deleted_at IS NULL", listOf(documentId))
-            .singleOrNull()?.string("active_version_id")?.ifBlank { null } ?: return false
+            .singleOrNull()?.string("active_version_id")?.ifBlank { null } ?: return null
         val versionRow = db.query("SELECT status, parser_fingerprint FROM document_versions WHERE id = ?", listOf(versionId))
-            .singleOrNull() ?: return false
+            .singleOrNull() ?: return null
         val versionStatus = versionRow.string("status")
-        val versionReady = versionStatus == "READY" || versionStatus == "READY_WITH_VISUAL_GAPS"
-        if (!versionReady) return false
-        if (!isCurrentParserFingerprint(documentId, versionRow.string("parser_fingerprint"))) return false
+        if (versionStatus != "READY" && versionStatus != "READY_WITH_VISUAL_GAPS") return null
+        if (!isCurrentParserFingerprint(documentId, versionRow.string("parser_fingerprint"))) return null
         val chunks = db.query("SELECT COUNT(*) AS n FROM chunks WHERE document_version_id = ?", listOf(versionId)).single().long("n")
-        if (chunks == 0L) return false
+        if (chunks == 0L) return null
         val space = db.query("SELECT embedding_space_id FROM knowledge_bases WHERE id = ?", listOf(kbId))
             .singleOrNull()?.string("embedding_space_id").orEmpty()
         val selectedEmbedder: TextEmbedder = when {
-            requestedApi -> apiEmbedderForSpace(space) ?: return false
+            requestedApi -> apiEmbedderForSpace(space) ?: return null
             space == embedder.spaceId -> embedder
-            else -> return false
+            else -> return null
         }
         val embeddings = db.query(
             "SELECT COUNT(*) AS n FROM embeddings e JOIN chunks c ON c.id = e.chunk_id WHERE c.document_version_id = ? AND e.space_id = ?",
             listOf(versionId, selectedEmbedder.spaceId),
         ).single().long("n")
-        if (embeddings != chunks) return false
-        val pin = pinnedReadyGeneration(kbId) ?: return false
+        if (embeddings != chunks) return null
+        val pin = pinnedReadyGeneration(kbId) ?: return null
         val members = db.query(
             "SELECT COUNT(*) AS n FROM generation_members WHERE generation_id = ? AND document_version_id = ?",
             listOf(pin, versionId),
         ).single().long("n")
-        return members == chunks
+        if (members != chunks) return null
+        return if (versionStatus == "READY_WITH_VISUAL_GAPS") ImportStage.READY_WITH_VISUAL_GAPS else ImportStage.READY
+    }
+
+    /**
+     * Reuse job for an unchanged, already-published blob. Visual gaps stay gaps:
+     * the returned job is not a completion claim and never triggers a new upload.
+     */
+    private fun reuseJob(
+        documentId: String,
+        kbId: String,
+        stage: ImportStage,
+        visionConfigured: Boolean,
+        visionConsent: Boolean,
+        embeddingIsApi: Boolean,
+        embeddingConsent: Boolean,
+    ): ImportJob {
+        val gapsPreserved = stage == ImportStage.READY_WITH_VISUAL_GAPS
+        return ImportJob(
+            id = EntityId.random().value,
+            knowledgeBaseId = kbId,
+            documentId = documentId,
+            stage = stage,
+            hasImages = gapsPreserved,
+            visionConfigured = visionConfigured,
+            visionConsent = visionConsent,
+            embeddingIsApi = embeddingIsApi,
+            embeddingConsent = embeddingConsent,
+            localEmbeddingAvailable = true,
+            error = if (gapsPreserved) TEXT_ONLY_VISUAL_GAPS_MESSAGE else null,
+            visualGapsAccepted = gapsPreserved,
+        )
     }
 
     private fun isCurrentParserFingerprint(documentId: String, stored: String): Boolean {

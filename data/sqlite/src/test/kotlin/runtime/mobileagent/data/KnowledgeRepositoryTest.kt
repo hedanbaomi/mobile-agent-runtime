@@ -98,6 +98,42 @@ class KnowledgeRepositoryTest {
     }
 
     @Test
+    fun reimportOfTextOnlyGapDocumentKeepsGapStatusInsteadOfSilentlyBecomingReady() {
+        val db = JdbcSqlConnection()
+        Migrations.apply(db)
+        val repo = KnowledgeRepository(db, MemoryBlobSink())
+        val body = "# Recipe\n\nSee the diagram:\n\n![oven](photo.png)\nOven temperature is 180C.\n".toByteArray()
+        val waiting = repo.importBytes("recipe.md", "text/markdown", body, visionConfigured = false)
+        val gapped = repo.acceptTextOnlyVisualGaps(waiting.id)
+        assertEquals(ImportStage.READY_WITH_VISUAL_GAPS, gapped.stage)
+
+        val reimport = repo.importBytes("recipe.md", "text/markdown", body, visionConfigured = false)
+
+        assertEquals(ImportStage.READY_WITH_VISUAL_GAPS, reimport.stage)
+        assertFalse(ImportStateMachine.isCompleteSuccess(reimport))
+        assertTrue(reimport.visualGapsAccepted)
+        assertTrue(reimport.hasImages)
+        assertEquals(1L, db.query("SELECT COUNT(*) AS n FROM document_versions").single().long("n"))
+        assertEquals("READY_WITH_VISUAL_GAPS", db.query("SELECT status FROM document_versions").single().string("status"))
+        assertEquals(2, repo.listJobs().count { it.first.stage == ImportStage.READY_WITH_VISUAL_GAPS })
+    }
+
+    @Test
+    fun reimportOfReadyDocumentStillReusesAsCompleteReady() {
+        val db = JdbcSqlConnection()
+        Migrations.apply(db)
+        val repo = KnowledgeRepository(db, MemoryBlobSink())
+        val payload = "idempotent ready blob".toByteArray()
+        val first = repo.importBytes("ready.txt", "text/plain", payload, visionConfigured = false)
+        assertEquals(ImportStage.READY, first.stage)
+        val second = repo.importBytes("ready.txt", "text/plain", payload, visionConfigured = false)
+        assertEquals(ImportStage.READY, second.stage)
+        assertTrue(ImportStateMachine.isCompleteSuccess(second))
+        assertFalse(second.visualGapsAccepted)
+        assertEquals(1L, db.query("SELECT COUNT(*) AS n FROM document_versions").single().long("n"))
+    }
+
+    @Test
     fun textOnlyImageWithoutTextKeepsWaiting() {
         val db = JdbcSqlConnection()
         Migrations.apply(db)

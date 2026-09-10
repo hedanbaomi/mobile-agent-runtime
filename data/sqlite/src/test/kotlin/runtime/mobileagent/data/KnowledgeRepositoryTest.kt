@@ -20,10 +20,15 @@ import runtime.mobileagent.knowledge.ImportItemState
 import runtime.mobileagent.knowledge.ImportStage
 import runtime.mobileagent.knowledge.ImportStateMachine
 import runtime.mobileagent.knowledge.MemoryBlobSink
+import runtime.mobileagent.knowledge.PdfPageRasterizer
+import runtime.mobileagent.knowledge.RenderedPdfPage
 import runtime.mobileagent.knowledge.sha256Hex
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.runBlocking
 import java.io.ByteArrayOutputStream
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
 import java.util.zip.DeflaterOutputStream
 import java.util.zip.ZipEntry
 import java.util.zip.ZipOutputStream
@@ -506,6 +511,103 @@ class KnowledgeRepositoryTest {
         val again = repo.grantVisionConsent(awaiting.id)
         assertEquals(ImportStage.READY, again.stage)
         assertEquals(1, seen.size)
+    }
+
+    @Test
+    fun pdfDoesNotRasterizeBeforeVisionUploadConsent() {
+        val db = JdbcSqlConnection()
+        Migrations.apply(db)
+        var rasterizedPages = 0
+        val rasterizer = PdfPageRasterizer { _, pages ->
+            rasterizedPages += pages.size
+            pages.map { page -> RenderedPdfPage(page, byteArrayOf(1, 2, 3), "image/png", 2, 2) }
+        }
+        val vision = runtime.mobileagent.knowledge.VisionBackend {
+            runtime.mobileagent.knowledge.VisionOutcome.Success(
+                runtime.mobileagent.knowledge.VisionSuccess("ocr", "diagram"),
+            )
+        }
+        val repo = KnowledgeRepository(
+            db,
+            MemoryBlobSink(),
+            vision = vision,
+            visionModelFingerprint = "vision-test",
+            pdfRasterizer = rasterizer,
+        )
+        val pdf = runtime.mobileagent.knowledge.PdfParser.writePdfWithImageXObject("flowchart")
+
+        val waiting = repo.importBytes("flow.pdf", "application/pdf", pdf, visionConfigured = false)
+        assertEquals(ImportStage.WAITING_FOR_VISION_MODEL, waiting.stage)
+        assertEquals(0, rasterizedPages, "waiting for Vision must not render every page into PNG")
+
+        val awaiting = repo.importBytes(
+            "flow.pdf",
+            "application/pdf",
+            pdf,
+            visionConfigured = true,
+            visionConsent = false,
+        )
+        assertEquals(ImportStage.AWAITING_UPLOAD_CONSENT, awaiting.stage)
+        assertEquals(0, rasterizedPages, "upload consent must precede page rasterization")
+
+        val ready = repo.grantVisionConsent(awaiting.id)
+        assertEquals(ImportStage.READY, ready.stage, ready.error)
+        assertTrue(rasterizedPages > 0)
+    }
+
+    @Test
+    fun visionProcessingStageIsPersistedBeforeBackendReturns() {
+        val db = JdbcSqlConnection()
+        Migrations.apply(db)
+        val enteredBackend = CountDownLatch(1)
+        val releaseBackend = CountDownLatch(1)
+        val vision = runtime.mobileagent.knowledge.VisionBackend {
+            enteredBackend.countDown()
+            check(releaseBackend.await(5, TimeUnit.SECONDS)) { "test backend was not released" }
+            runtime.mobileagent.knowledge.VisionOutcome.Success(
+                runtime.mobileagent.knowledge.VisionSuccess("ocr", "diagram"),
+            )
+        }
+        val repo = KnowledgeRepository(db, MemoryBlobSink(), vision = vision, visionModelFingerprint = "vision-test")
+        val kb = repo.ensureDefaultBase()
+        val batchId = repo.beginBatch(kb, ImportBatchKind.FILES, "vision processing")
+        val png = byteArrayOf(0x89.toByte(), 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A) + ByteArray(16)
+        val copied = repo.importBytes(
+            "scan.png",
+            "image/png",
+            png,
+            visionConfigured = true,
+            knowledgeBaseId = kb,
+            pauseAt = ImportStage.COPYING,
+        )
+        repo.bindJobToBatch(batchId, copied, "scan.png")
+        val awaiting = repo.resumeImport(copied.id, visionConfigured = true)
+        assertEquals(ImportStage.AWAITING_UPLOAD_CONSENT, awaiting.stage)
+
+        val executor = Executors.newSingleThreadExecutor()
+        try {
+            val future = executor.submit<runtime.mobileagent.knowledge.ImportJob> {
+                repo.grantVisionConsent(awaiting.id)
+            }
+            assertTrue(enteredBackend.await(5, TimeUnit.SECONDS))
+            assertEquals(
+                ImportStage.VISION_PROCESSING.name,
+                db.query("SELECT stage FROM import_jobs WHERE id = ?", listOf(awaiting.id)).single().string("stage"),
+            )
+            val processingBatch = repo.listBatches(kb).single()
+            assertEquals(1, processingBatch.processing)
+            assertEquals(0, processingBatch.waiting)
+            assertEquals(ImportBatchState.PROCESSING, processingBatch.state)
+            assertEquals(
+                ImportItemState.PROCESSING.name,
+                db.query("SELECT state FROM import_items WHERE batch_id = ?", listOf(batchId)).single().string("state"),
+            )
+            releaseBackend.countDown()
+            assertEquals(ImportStage.READY, future.get(5, TimeUnit.SECONDS).stage)
+        } finally {
+            releaseBackend.countDown()
+            executor.shutdownNow()
+        }
     }
 
     @Test

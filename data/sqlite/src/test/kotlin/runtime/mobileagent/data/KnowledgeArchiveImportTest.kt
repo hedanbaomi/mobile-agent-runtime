@@ -7,11 +7,13 @@ import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Assertions.assertThrows
 import org.junit.jupiter.api.Test
+import kotlinx.coroutines.CancellationException
 import runtime.mobileagent.knowledge.ImportBatchKind
 import runtime.mobileagent.knowledge.ImportBatchState
 import runtime.mobileagent.knowledge.ImportItemState
 import runtime.mobileagent.knowledge.ImportStage
 import runtime.mobileagent.knowledge.MemoryBlobSink
+import runtime.mobileagent.knowledge.TextEmbedder
 import java.io.ByteArrayOutputStream
 import java.util.zip.ZipEntry
 import java.util.zip.ZipOutputStream
@@ -98,5 +100,102 @@ class KnowledgeArchiveImportTest {
         assertEquals(ImportBatchState.WAITING, repo.listBatches(kb).single().state)
         assertEquals(ImportItemState.WAITING.name, db.query("SELECT state FROM import_items WHERE batch_id = ?", listOf(batchId)).single().string("state"))
         assertTrue(repo.listBatches(kb).single().state != ImportBatchState.COMPLETED)
+    }
+
+    @Test
+    fun cancellingWaitingItemRefreshesBatchAsCancelled() {
+        val db = JdbcSqlConnection()
+        Migrations.apply(db)
+        val repo = KnowledgeRepository(db, MemoryBlobSink())
+        val kb = repo.ensureDefaultBase()
+        val batchId = repo.beginBatch(kb, ImportBatchKind.FILES, "cancel waiting image")
+        val png = byteArrayOf(0x89.toByte(), 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A) + ByteArray(16)
+        val job = repo.importBytes("waiting.png", "image/png", png, false, kb, pauseAt = ImportStage.COPYING)
+        repo.bindJobToBatch(batchId, job, "waiting.png")
+        repo.processBatch(batchId, visionConfigured = false)
+        assertEquals(ImportBatchState.WAITING, repo.listBatches(kb).single().state)
+
+        assertTrue(repo.cancelImport(job.id))
+
+        assertEquals(ImportItemState.CANCELLED.name, db.query("SELECT state FROM import_items WHERE batch_id = ?", listOf(batchId)).single().string("state"))
+        assertEquals(ImportBatchState.CANCELLED, repo.listBatches(kb).single().state)
+    }
+
+    @Test
+    fun cancellingEveryWaitingBatchItemIsTerminalAndCannotBeRecovered() {
+        val db = JdbcSqlConnection()
+        Migrations.apply(db)
+        val repo = KnowledgeRepository(db, MemoryBlobSink())
+        val kb = repo.ensureDefaultBase()
+        val batchId = repo.beginBatch(kb, ImportBatchKind.FILES, "cancel all waiting images")
+        val png = byteArrayOf(0x89.toByte(), 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A) + ByteArray(16)
+        val first = repo.importBytes("first.png", "image/png", png, false, kb, pauseAt = ImportStage.COPYING)
+        val second = repo.importBytes("second.png", "image/png", png + byteArrayOf(1), false, kb, pauseAt = ImportStage.COPYING)
+        repo.bindJobToBatch(batchId, first, "first.png")
+        repo.bindJobToBatch(batchId, second, "second.png")
+        repo.processBatch(batchId, visionConfigured = false)
+        assertEquals(ImportBatchState.WAITING, repo.listBatches(kb).single().state)
+        assertEquals(
+            2L,
+            db.query("SELECT COUNT(*) AS n FROM import_items WHERE batch_id = ? AND state = ?", listOf(batchId, ImportItemState.WAITING.name)).single().long("n"),
+        )
+
+        assertTrue(repo.cancelImport(first.id))
+        assertEquals(ImportBatchState.WAITING, repo.listBatches(kb).single().state)
+        assertEquals(
+            1L,
+            db.query("SELECT COUNT(*) AS n FROM import_items WHERE batch_id = ? AND state = ?", listOf(batchId, ImportItemState.WAITING.name)).single().long("n"),
+        )
+
+        assertTrue(repo.cancelImport(second.id))
+        assertEquals(ImportBatchState.CANCELLED, repo.listBatches(kb).single().state)
+        assertEquals(0, repo.recoverableBatchIds().count { it == batchId })
+
+        repo.processBatch(batchId, visionConfigured = false)
+
+        assertEquals(ImportBatchState.CANCELLED, repo.listBatches(kb).single().state)
+        assertEquals(
+            2L,
+            db.query("SELECT COUNT(*) AS n FROM import_items WHERE batch_id = ? AND state = ?", listOf(batchId, ImportItemState.CANCELLED.name)).single().long("n"),
+        )
+    }
+
+    @Test
+    fun interruptedProcessingCancelsCurrentAndQueuedBatchItems() {
+        val db = JdbcSqlConnection()
+        Migrations.apply(db)
+        val interruptingEmbedder = object : TextEmbedder {
+            override val spaceId = "test-cancellation-space"
+            override val dimension = 1
+
+            override fun embed(text: String): FloatArray =
+                throw CancellationException("batch worker interrupted")
+        }
+        val repo = KnowledgeRepository(db, MemoryBlobSink(), embedder = interruptingEmbedder)
+        val kb = repo.ensureDefaultBase()
+        val batchId = repo.beginBatch(kb, ImportBatchKind.FILES, "cancel interrupted batch")
+        val first = repo.importBytes("first.txt", "text/plain", "first-marker".toByteArray(), false, kb, pauseAt = ImportStage.COPYING)
+        val second = repo.importBytes("second.txt", "text/plain", "second-marker".toByteArray(), false, kb, pauseAt = ImportStage.COPYING)
+        repo.bindJobToBatch(batchId, first, "first.txt")
+        repo.bindJobToBatch(batchId, second, "second.txt")
+
+        assertThrows(CancellationException::class.java) {
+            repo.processBatch(batchId, visionConfigured = false)
+        }
+
+        assertEquals(ImportBatchState.CANCELLED, repo.listBatches(kb).single().state)
+        assertEquals(
+            2L,
+            db.query(
+                "SELECT COUNT(*) AS n FROM import_items WHERE batch_id = ? AND state = ?",
+                listOf(batchId, ImportItemState.CANCELLED.name),
+            ).single().long("n"),
+        )
+        assertTrue(repo.listJobs().filter { it.first.id == first.id || it.first.id == second.id }
+            .all { it.first.stage == ImportStage.CANCELLED })
+        assertTrue(batchId !in repo.recoverableBatchIds())
+
+        repo.processBatch(batchId, visionConfigured = false)
+        assertEquals(ImportBatchState.CANCELLED, repo.listBatches(kb).single().state)
     }
 }

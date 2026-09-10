@@ -49,6 +49,9 @@ import java.net.URI
 import java.time.LocalDate
 import java.util.Base64
 
+private class ChatInputBudgetExceeded(val estimated: Long, val limit: Long) :
+    IllegalArgumentException("CONTEXT_OVERFLOW")
+
 /** UI state projects durable conversations, immutable bindings, and checkpointed partial answers. */
 class ChatViewModel(
     application: Application,
@@ -366,6 +369,7 @@ class ChatViewModel(
             var toolWaitingApproval = false
             var lastCheckpoint = 0L
             var lastUiFlush = 0L
+            var preparationStage: String? = "preflight"
             val observed = linkedMapOf<String, ToolCallPart>()
             val invocations = linkedMapOf<String, ToolInvocation>()
             fun flushStreamingAnswer(id: String?, text: String, force: Boolean, reasoningText: String = reasoning) {
@@ -421,6 +425,7 @@ class ChatViewModel(
                 val kbIds = binding.snapshot.knowledgeBaseIds.intersect(currentAgent.knowledgeBaseIds.toSet())
                     .intersect(container.knowledge.listKnowledgeBases().map { it.first }.toSet()).toList()
                 val skillIds = binding.snapshot.skillIds.intersect(currentAgent.skillIds.toSet())
+                preparationStage = "retrieval"
                 val result = withContext(Dispatchers.IO) {
                     if (binding.retrievalMode == "automatic") container.knowledge.retrieve(run.runId, text, 8, kbIds)
                     else RetrievalResult(
@@ -554,6 +559,7 @@ class ChatViewModel(
                     }
                 }
                 if (toolingContext == null) noteV2ToolingUnavailable(RuntimeToolingUnavailableCode.TOOL_EXECUTION_CONTEXT_UNAVAILABLE)
+                preparationStage = "tooling"
                 val runTools = RunTools(container, getApplication<Application>(), binding.snapshot, run,
                     "image" in model.capabilities, degrade,
                     baseExecutors = listOf(webExecutor, mcpExecutor),
@@ -593,6 +599,7 @@ class ChatViewModel(
                 )
                 val toolExecutor = runTools.executor
                 activeToolExecutor = toolExecutor
+                preparationStage = "prompt"
                 // Freeze-once run facts (b07 follow-up finding D): the global
                 // root prompt, Skill instructions/pins, retrieval generations,
                 // grants, and tool fingerprint are each read a single time and
@@ -668,6 +675,7 @@ class ChatViewModel(
                     modelTokenBudget = RunCoordinator.modelTokenBudget(record.budgetJson),
                     retrievalScope = preparedFacts.retrievalScope,
                 )
+                preparationStage = "manifest"
                 val manifestStamped = runCatching {
                     withContext(Dispatchers.IO) {
                         record = container.runCoordinator.stampManifest(run.runId, manifest, Utc.nowIso())
@@ -705,13 +713,14 @@ class ChatViewModel(
                     history = emptyList(), currentUser = text, currentImages = images, typedHistory = typedHistory,
                     globalRootPrompt = preparedFacts.rootPrompt,
                 )
+                preparationStage = "context_budget"
                 // Conservative UTF-8 byte estimate plus image/schema/output reservations; never falsify token counts.
                 val estimated = prompt.asMessages().sumOf { it.text.toByteArray(Charsets.UTF_8).size.toLong() + it.images.size * 4096L } +
                     if ("tools" in model.capabilities) toolExecutor.specs.sumOf { it.parametersJson.toByteArray().size }.toLong() else 0L
-                require(estimated <= inputBudget) {
-                    "上下文超过保守输入预算单位（$estimated / $inputBudget UTF-8 字节与固定图片预留）。请减少历史/知识范围或新建会话；不会静默丢图。"
-                }
+                if (estimated > inputBudget) throw ChatInputBudgetExceeded(estimated, inputBudget.toLong())
+                preparationStage = "credentials"
                 secret = withContext(Dispatchers.IO) { container.secrets.resolveForHost(provider.secretRef) }
+                preparationStage = "request"
                 val adapter = OpenAiAdapterFactory.create(provider.apiFormat, container.http, provider.baseUrl, headerSecretResolver = HeaderSecretResolver { host, ref ->
                     require(host.equals(URI(provider.baseUrl).host, true) && ref in provider.headerSecretRefs.values) { "Header secret destination mismatch" }
                     container.secrets.resolveForHost(ref)
@@ -810,6 +819,7 @@ class ChatViewModel(
                                 persistRun = true
                             }
                             is RuntimeEvent.RequestPrepared -> {
+                                preparationStage = null
                                 modelInFlight = true
                                 if (assistantId != null) checkpoint("COMPLETE")
                                 observed.clear(); reasoning = ""; terminalError = null
@@ -1083,7 +1093,12 @@ class ChatViewModel(
                 }
             } catch (failure: Exception) {
                 val queryUnknown = failure is ApiQueryUnknownOutcomeException
-                val errorPart = if (queryUnknown) {
+                val errorPart = if (failure is ChatInputBudgetExceeded) {
+                    ErrorPart(
+                        MessageErrorCode.CONTEXT_OVERFLOW,
+                        "上下文预算不足：保守输入估算 ${failure.estimated} 单位，上限 ${failure.limit} 单位（UTF-8 字节与固定图片预留，并非实际 token 数）。请减少已绑定技能、历史或知识范围，或核对模型窗口后提高智能体输入预算并新建会话。未发送模型请求，也未静默移除图片。",
+                    )
+                } else if (queryUnknown) {
                     ErrorPart(
                         MessageErrorCode.UNKNOWN_OUTCOME,
                         "知识库查询结果未知，可能已产生外部影响；不会自动重试。",
@@ -1091,8 +1106,14 @@ class ChatViewModel(
                 } else {
                     toSafeErrorPart(failure.message.orEmpty())
                 }
+                preparationStage?.let { stage ->
+                    runCatching {
+                        (getApplication<Application>() as MobileAgentApp).diagnostics
+                            .recordRunPreparationFailed(stage, errorPart.code, failure)
+                    }
+                }
                 record = record.copy(state = if (queryUnknown) RunStatus.UNKNOWN_OUTCOME else if (record.state in TERMINAL) record.state else RunStatus.FAILED,
-                    errorCode = if (queryUnknown) "UNKNOWN_OUTCOME" else record.errorCode,
+                    errorCode = if (queryUnknown) "UNKNOWN_OUTCOME" else record.errorCode ?: errorPart.code.name,
                     stopReason = errorPart.message)
                 persistTerminalError(errorPart)
                 state.value = state.value.copy(status = errorPart.message, statusKind = "error", error = null)

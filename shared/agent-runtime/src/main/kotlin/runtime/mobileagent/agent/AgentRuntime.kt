@@ -703,9 +703,11 @@ class AgentRuntime(
     private fun validateSchemaDefinition(element: JsonElement, path: String, depth: Int = 0): String? {
         if (depth > MAX_SCHEMA_DEPTH) return "$path is too deeply nested"
         val schema = element as? JsonObject ?: return "$path must be an object"
-        val type = (schema["type"] as? JsonPrimitive)?.contentOrNull
-            ?: return "$path type is missing"
-        if (type !in SCHEMA_TYPES) return "$path has unsupported type"
+        val types = when (val parsed = parseSchemaTypes(schema, path)) {
+            is SchemaTypeResult.Invalid -> return parsed.message
+            is SchemaTypeResult.Valid -> parsed.types
+        }
+        val type = types.firstOrNull { it != "null" } ?: "null"
         schema["required"]?.let { requiredElement ->
             val required = requiredElement as? JsonArray ?: return "$path required must be an array"
             val names = required.map { value ->
@@ -747,8 +749,16 @@ class AgentRuntime(
     private fun validateSchemaValue(schemaElement: JsonElement, value: JsonElement, path: String, depth: Int = 0): String? {
         if (depth > MAX_SCHEMA_DEPTH) return "$path is too deeply nested"
         val schema = schemaElement as? JsonObject ?: return "$path schema is invalid"
-        val type = (schema["type"] as? JsonPrimitive)?.contentOrNull
-            ?: return "$path schema type is missing"
+        val types = when (val parsed = parseSchemaTypes(schema, path)) {
+            is SchemaTypeResult.Invalid -> return parsed.message
+            is SchemaTypeResult.Valid -> parsed.types
+        }
+        val type = if (value is JsonNull && "null" in types) {
+            "null"
+        } else {
+            types.firstOrNull { it != "null" }
+        }
+            ?: return "$path must be null"
         val primitive = value as? JsonPrimitive
         when (type) {
             "object" -> {
@@ -810,7 +820,9 @@ class AgentRuntime(
                     if (number > n) return "$path is above maximum"
                 }
             }
-            "boolean" -> if (primitive?.booleanOrNull == null) return "$path must be boolean"
+            "boolean" -> if (primitive == null || primitive.isString || primitive.booleanOrNull == null) {
+                return "$path must be boolean"
+            }
             "null" -> if (value !is JsonNull) return "$path must be null"
         }
         schema["enum"]?.let { allowed ->
@@ -818,6 +830,55 @@ class AgentRuntime(
             if (value !in values) return "$path is not an allowed value"
         }
         return null
+    }
+
+    /**
+     * Resolve the finite schema type subset used by the runtime.  JSON Schema
+     * permits a type array, but accepting arbitrary unions here would silently
+     * widen model-call argument validation.  The only array form supported is
+     * one value type plus `null`, which is the nullable encoding used by the
+     * shell `cwd` field.
+     */
+    private fun parseSchemaTypes(schema: JsonObject, path: String): SchemaTypeResult {
+        val raw = schema["type"] ?: return SchemaTypeResult.Invalid("$path type is missing")
+        val types = when (raw) {
+            is JsonPrimitive -> {
+                if (!raw.isString) return SchemaTypeResult.Invalid("$path type must be a string or nullable type array")
+                listOf(raw.content)
+            }
+            is JsonArray -> {
+                if (raw.isEmpty()) return SchemaTypeResult.Invalid("$path type array cannot be empty")
+                val values = mutableListOf<String>()
+                raw.forEach { element ->
+                    val primitive = element as? JsonPrimitive
+                    if (primitive == null || !primitive.isString) {
+                        return SchemaTypeResult.Invalid("$path type array must contain only strings")
+                    }
+                    values += primitive.content
+                }
+                values
+            }
+            else -> return SchemaTypeResult.Invalid("$path type must be a string or nullable type array")
+        }
+        if (raw is JsonArray && types.size != types.toSet().size) {
+            return SchemaTypeResult.Invalid("$path type array contains duplicate types")
+        }
+        if (types.any { it !in SCHEMA_TYPES }) {
+            return SchemaTypeResult.Invalid(
+                if (raw is JsonArray) "$path type array contains unsupported type" else "$path has unsupported type",
+            )
+        }
+        if (raw is JsonArray &&
+            (types.size != 2 || "null" !in types || types.count { it != "null" } != 1)
+        ) {
+            return SchemaTypeResult.Invalid("$path type array must contain exactly one value type and null")
+        }
+        return SchemaTypeResult.Valid(types)
+    }
+
+    private sealed interface SchemaTypeResult {
+        data class Valid(val types: List<String>) : SchemaTypeResult
+        data class Invalid(val message: String) : SchemaTypeResult
     }
 
     private companion object {

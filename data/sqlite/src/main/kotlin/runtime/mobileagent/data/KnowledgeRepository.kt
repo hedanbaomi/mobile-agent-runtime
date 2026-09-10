@@ -186,9 +186,11 @@ class KnowledgeRepository(
      * Query text is never persisted or returned; callers receive only the
      * complete target space and its SHA-256 key.
      */
-    fun pendingApiQueries(knowledgeBaseId: String): List<ApiQueryAttempt> = synchronized(indexLock) {
+    fun pendingApiQueries(knowledgeBaseId: String): List<ApiQueryAttempt> {
         requireKb(knowledgeBaseId)
-        db.query(
+        // The SQL layer provides the read snapshot; do not wait behind a
+        // synchronous Vision/provider call guarded by indexLock.
+        return db.query(
             "SELECT kb_id, space_id, query_hash, retry_authorized, error, updated_at FROM embedding_query_attempts WHERE kb_id = ? ORDER BY updated_at, query_hash",
             listOf(knowledgeBaseId),
         ).map(::apiQueryAttempt)
@@ -919,22 +921,46 @@ class KnowledgeRepository(
      * already-cancelled job and never rewrites a READY job.
      */
     fun cancelImport(jobId: String): Boolean = synchronized(indexLock) {
-        val row = db.query("SELECT stage FROM import_jobs WHERE id = ?", listOf(jobId)).singleOrNull() ?: return false
+        val row = db.query("SELECT stage, error, batch_id FROM import_jobs WHERE id = ?", listOf(jobId)).singleOrNull() ?: return false
         val stage = runCatching { ImportStage.valueOf(row.string("stage")) }.getOrNull() ?: return false
         if (ImportStateMachine.isPublished(stage)) return false
+        val persistedError = row.string("error")
+        if (persistedError.contains("UNKNOWN_OUTCOME", ignoreCase = true)) {
+            // A provider/Vision result which is already uncertain is a manual
+            // retry gate.  Cancellation must not turn it into a clean
+            // CANCELLED job, because that would make process recovery replay
+            // an external call whose outcome is not known.
+            if (stage == ImportStage.VISION_PROCESSING) {
+                db.execute(
+                    "UPDATE import_jobs SET stage = ?, error = ?, updated_at = ? WHERE id = ?",
+                    listOf(ImportStage.FAILED.name, persistedError, Utc.nowIso(), jobId),
+                )
+            }
+            syncBatchItemFromJobLocked(jobId)
+            row.string("batch_id").ifBlank { null }?.let(::refreshBatchProgressLocked)
+            return true
+        }
         val operation = requestEmbeddingOperationCancelForJob(jobId)
         if (stage != ImportStage.CANCELLED) {
-            val postDispatchUnknown = operation?.state == "UNKNOWN" && operation.error.contains("UNKNOWN_OUTCOME")
+            val postDispatchUnknown =
+                operation?.state == "UNKNOWN" && operation.error.contains("UNKNOWN_OUTCOME") ||
+                    stage == ImportStage.VISION_PROCESSING
             db.execute(
                 "UPDATE import_jobs SET stage = ?, error = ?, updated_at = ? WHERE id = ?",
                 listOf(
                     if (postDispatchUnknown) ImportStage.FAILED.name else ImportStage.CANCELLED.name,
-                    if (postDispatchUnknown) API_EMBEDDING_CANCEL_UNKNOWN_ERROR else "Cancelled by user",
+                    when {
+                        operation?.state == "UNKNOWN" && operation.error.contains("UNKNOWN_OUTCOME") ->
+                            API_EMBEDDING_CANCEL_UNKNOWN_ERROR
+                        stage == ImportStage.VISION_PROCESSING -> VISION_UNKNOWN_ERROR
+                        else -> "Cancelled by user"
+                    },
                     Utc.nowIso(),
                     jobId,
                 ),
             )
             syncBatchItemFromJobLocked(jobId)
+            row.string("batch_id").ifBlank { null }?.let(::refreshBatchProgressLocked)
         }
         true
     }
@@ -1753,6 +1779,13 @@ class KnowledgeRepository(
         // after process death) and is converted to a durable gate instead of
         // being replayed automatically.
         activeEmbeddingOperationForJob(job.id)?.let { operation ->
+            if (!job.embeddingConsent && operation.state in setOf("PREPARED", "CACHE_READY")) {
+                // Retained operation/cache is not renewed upload or publication
+                // consent. A replayed ticket restores this gate until approval.
+                job.stage = ImportStage.AWAITING_EMBEDDING_CONSENT
+                persistJob(job, displayName)
+                return job
+            }
             when (operation.state) {
                 "CACHE_READY" -> {
                     finalizeEmbeddingOperation(operation.token)
@@ -1783,7 +1816,7 @@ class KnowledgeRepository(
             when (format) {
                 SourceFormat.IMAGE -> indexPublicationCancellable(job, bytes, standaloneImage(bytes, displayName))
                 SourceFormat.TEXT, SourceFormat.MARKDOWN -> indexTextDocumentCancellable(job, bytes, format)
-                SourceFormat.PDF -> indexPublicationCancellable(job, bytes, PdfParser.parse(bytes, pdfRasterizer))
+                SourceFormat.PDF -> indexPublicationCancellable(job, bytes, PdfParser.parse(bytes))
                 SourceFormat.OFFICE_ARCHIVE -> {
                     val inspection = ZipSafety.inspect(bytes)
                     if (!inspection.ok) {
@@ -1914,16 +1947,12 @@ class KnowledgeRepository(
             }
             job.visionConsent = true
             job.consentedVisionFingerprint = visionFingerprint()
-            if (blocked.isNotEmpty()) {
-                fail(job, "Visual pages or external/missing images cannot be processed without local raster bytes. Nothing was downloaded.")
-                return
-            }
-            if (processable.isEmpty()) {
-                fail(job, "needsVision is set but there is no processable page or image asset. The document is not READY.")
-                return
-            }
             advanceThrough(job, ImportStage.VISION_PROCESSING)
-            when (val outcome = processAssets(job, processable)) {
+            // Persist the externally observable processing state before entering
+            // a provider call.  A consent Worker can otherwise appear stuck at
+            // WAITING while Vision is already running.
+            persistJob(job, displayNameForJob(job.id))
+            when (val outcome = processVisualAssets(job, bytes, parsed, processable, blocked)) {
                 is VisionBatch.Failed -> {
                     fail(job, outcome.message)
                     return
@@ -1986,7 +2015,7 @@ class KnowledgeRepository(
             }
             SourceFormat.PDF -> {
                 try {
-                    indexPublication(job, bytes, PdfParser.parse(bytes, pdfRasterizer))
+                    indexPublication(job, bytes, PdfParser.parse(bytes))
                 } catch (cancelled: CancellationException) {
                     throw cancelled
                 } catch (interrupted: InterruptedException) {
@@ -2099,19 +2128,12 @@ class KnowledgeRepository(
             }
             job.visionConsent = true
             job.consentedVisionFingerprint = visionFingerprint()
-            if (blocked.isNotEmpty()) {
-                fail(
-                    job,
-                    "Visual pages or external/missing images cannot be processed without local raster bytes. Nothing was downloaded.",
-                )
-                return
-            }
-            if (processable.isEmpty()) {
-                fail(job, "needsVision is set but there is no processable page or image asset. The document is not READY.")
-                return
-            }
             advanceThrough(job, ImportStage.VISION_PROCESSING)
-            when (val outcome = processAssets(job, processable)) {
+            // Keep the durable state ahead of the synchronous Vision call so
+            // the UI and a restarted process can distinguish processing from
+            // an unconsumed consent request.
+            persistJob(job, displayNameForJob(job.id))
+            when (val outcome = processVisualAssets(job, bytes, parsed, processable, blocked)) {
                 is VisionBatch.Failed -> {
                     fail(job, outcome.message)
                     return
@@ -2145,6 +2167,110 @@ class KnowledgeRepository(
         data class Ok(val chunks: List<IndexedChunk>) : VisionBatch
         data class Failed(val message: String) : VisionBatch
         data object Unknown : VisionBatch
+    }
+
+    /**
+     * Process visual evidence only after the caller has passed the consent and
+     * binding checks.  PDF parsing deliberately runs without a rasterizer so a
+     * waiting import never retains a rendered image for every page.  Once
+     * consent is present, page renders are requested one at a time and handed
+     * directly to Vision; the generated bytes are not accumulated in the
+     * ParsedPublication or a batch list.
+     */
+    private fun processVisualAssets(
+        job: ImportJob,
+        bytes: ByteArray,
+        parsed: ParsedPublication,
+        processable: List<ExtractedAsset>,
+        blocked: List<ExtractedAsset>,
+    ): VisionBatch {
+        val nonPageBlockers = blocked.filter {
+            it.kind == "EXTERNAL" || it.kind == "MISSING" ||
+                (it.kind == "IMAGE" && it.bytes.isEmpty())
+        }
+        if (nonPageBlockers.isNotEmpty()) {
+            return VisionBatch.Failed(
+                "Visual pages or external/missing images cannot be processed without local raster bytes. Nothing was downloaded.",
+            )
+        }
+
+        val pageBlockers = blocked.filter { it.kind == "PAGE" }
+        val pagesNeedingVision = parsed.pages.asSequence()
+            .filter { it.needsVision }
+            .map { it.page }
+            .distinct()
+            .toList()
+        if (processable.isEmpty() && pagesNeedingVision.isEmpty()) {
+            return VisionBatch.Failed(
+                "needsVision is set but there is no processable page or image asset. The document is not READY.",
+            )
+        }
+        val blockerPages = pageBlockers.mapNotNull { it.page }.toSet()
+        if (pageBlockers.any { it.page == null }) {
+            return VisionBatch.Failed(
+                "Visual page evidence could not be rasterized locally. The document is not READY.",
+            )
+        }
+        if (pageBlockers.isNotEmpty() && (parsed.format != SourceFormat.PDF || pdfRasterizer == null)) {
+            return VisionBatch.Failed(
+                "Visual page evidence could not be rasterized locally. The document is not READY.",
+            )
+        }
+
+        val chunks = mutableListOf<IndexedChunk>()
+        fun appendOutcome(outcome: VisionBatch): VisionBatch? = when (outcome) {
+            is VisionBatch.Ok -> {
+                chunks += outcome.chunks
+                null
+            }
+            is VisionBatch.Failed -> outcome
+            VisionBatch.Unknown -> outcome
+        }
+
+        // Keep source image payloads short-lived.  In particular, do not pass
+        // the complete list to processAssets while a large PDF is in flight.
+        processable.forEach { asset ->
+            appendOutcome(processAssets(job, listOf(asset)))?.let { return it }
+        }
+
+        if (parsed.format == SourceFormat.PDF && pdfRasterizer != null) {
+            pagesNeedingVision.forEach { pageNumber ->
+                val rendered = PdfParser.renderPage(bytes, pdfRasterizer, pageNumber)
+                if (rendered == null) {
+                    // Raw embedded images can remain valid evidence when a
+                    // renderer cannot produce a complete page.  A PAGE asset,
+                    // however, is an explicit blocker and must fail closed.
+                    if (pageNumber in blockerPages) {
+                        return VisionBatch.Failed(
+                            "PDF page $pageNumber could not be rasterized locally. The document is not READY.",
+                        )
+                    }
+                    return@forEach
+                }
+                val pageAsset = ExtractedAsset(
+                    localId = "page-rendered-$pageNumber",
+                    kind = "IMAGE",
+                    page = pageNumber,
+                    section = "pdf-page-$pageNumber",
+                    bytes = rendered.bytes,
+                    mediaType = rendered.mediaType.ifBlank { "image/png" },
+                    surroundingText = parsed.pages.firstOrNull { it.page == pageNumber }?.text.orEmpty(),
+                )
+                appendOutcome(processAssets(job, listOf(pageAsset)))?.let { return it }
+            }
+        }
+
+        if (pageBlockers.isNotEmpty()) {
+            // A PDF with PAGE blockers must have produced one complete render
+            // for every blocked page before it can become READY.
+            val renderedPages = pagesNeedingVision.filter { it in blockerPages }
+            if (renderedPages.size != blockerPages.size) {
+                return VisionBatch.Failed(
+                    "Visual page evidence could not be rasterized locally. The document is not READY.",
+                )
+            }
+        }
+        return VisionBatch.Ok(chunks)
     }
 
     private fun processAssets(job: ImportJob, assets: List<ExtractedAsset>): VisionBatch {
@@ -3993,6 +4119,175 @@ class KnowledgeRepository(
         }
     }
 
+    /**
+     * Make a terminal WorkManager consent failure visible in the durable job.
+     * The worker deliberately passes no exception message across this
+     * boundary: provider responses, paths, and other untrusted text must not
+     * become user-facing job state.  An unconsumed ticket leaves the job
+     * waiting so the user can issue a fresh approval; a consumed ticket which
+     * never reached a persisted result is failed and cannot be replayed
+     * automatically.
+     */
+    fun markConsentWorkerFailure(ticketId: String): Boolean = synchronized(indexLock) {
+        val ticket = db.query(
+            "SELECT kind, job_id, consumed FROM consent_tickets WHERE id = ?",
+            listOf(ticketId),
+        ).singleOrNull() ?: return false
+        val kind = ticket.string("kind")
+        if (kind != "VISION" && kind != "API_EMBEDDING") return false
+        val jobId = ticket.string("job_id").ifBlank { null } ?: return false
+        val job = db.query(
+            "SELECT stage, error, batch_id FROM import_jobs WHERE id = ?",
+            listOf(jobId),
+        ).singleOrNull() ?: return false
+        val stage = runCatching { ImportStage.valueOf(job.string("stage")) }.getOrNull() ?: return false
+        if (ImportStateMachine.isPublished(stage) || stage == ImportStage.CANCELLED) return false
+        // A Vision/embedding adapter may already have recorded an uncertain
+        // external result before the Worker itself failed. Preserve that
+        // durable gate and its manual-only retry requirement.
+        if (job.string("error").contains("UNKNOWN_OUTCOME", ignoreCase = true)) {
+            if (stage == ImportStage.VISION_PROCESSING) {
+                persistVisionUnknownOutcomeLocked(jobId)
+            } else {
+                syncBatchItemFromJobLocked(jobId)
+                job.string("batch_id").ifBlank { null }?.let(::refreshBatchProgressLocked)
+            }
+            return true
+        }
+        val consumed = ticket.boolean("consumed")
+        if (kind == "API_EMBEDDING" && consumed && stage != ImportStage.VISION_PROCESSING &&
+            recoverConsumedApiEmbeddingTicketLocked(ticketId)
+        ) return true
+        val operation = latestEmbeddingOperationForJob(jobId)
+        val embeddingOutcomeUnknown = operation?.state == "DISPATCHED" || operation?.state == "UNKNOWN"
+        val error = if (consumed) {
+            when {
+                embeddingOutcomeUnknown -> API_EMBEDDING_UNKNOWN_ERROR
+                kind == "VISION" && stage == ImportStage.VISION_PROCESSING ->
+                    VISION_UNKNOWN_ERROR
+                kind == "API_EMBEDDING" && stage == ImportStage.VISION_PROCESSING ->
+                    "UNKNOWN_OUTCOME: Vision or API Embedding result is uncertain; explicit duplicate-charge acknowledgement is required"
+                kind == "VISION" ->
+                    "Vision consent worker stopped before completion. Retry requires a fresh approval."
+                else ->
+                    "API Embedding consent worker stopped before completion. Retry requires a fresh approval."
+            }
+        } else {
+            if (kind == "VISION") {
+                "Vision consent worker could not start. Approve again to retry."
+            } else {
+                "API Embedding consent worker could not start. Approve again to retry."
+            }
+        }
+        val targetStage = if (consumed) ImportStage.FAILED else stage
+        db.execute(
+            "UPDATE import_jobs SET stage = ?, error = ?, updated_at = ? WHERE id = ?",
+            listOf(targetStage.name, error, Utc.nowIso(), jobId),
+        )
+        syncBatchItemFromJobLocked(jobId)
+        job.string("batch_id").ifBlank { null }?.let(::refreshBatchProgressLocked)
+        true
+    }
+
+    /**
+     * Convert an in-flight Vision call into a durable manual-only outcome.
+     * This is deliberately conservative: once a consent ticket was consumed
+     * and the job reached VISION_PROCESSING, no recovery path may call Vision
+     * again because the original external result is unknowable.
+     */
+    private fun persistVisionUnknownOutcomeLocked(jobId: String): Boolean {
+        val job = db.query(
+            "SELECT stage, error, batch_id FROM import_jobs WHERE id = ?",
+            listOf(jobId),
+        ).singleOrNull() ?: return false
+        val stage = runCatching { ImportStage.valueOf(job.string("stage")) }.getOrNull() ?: return false
+        val persistedError = job.string("error")
+        if (!persistedError.contains("UNKNOWN_OUTCOME", ignoreCase = true) && stage != ImportStage.VISION_PROCESSING) {
+            return false
+        }
+        val error = persistedError.takeIf { it.contains("UNKNOWN_OUTCOME", ignoreCase = true) }
+            ?: VISION_UNKNOWN_ERROR
+        val targetStage = if (stage == ImportStage.VISION_PROCESSING) ImportStage.FAILED else stage
+        if (targetStage != stage || persistedError != error) {
+            db.execute(
+                "UPDATE import_jobs SET stage = ?, error = ?, updated_at = ? WHERE id = ?",
+                listOf(targetStage.name, error, Utc.nowIso(), jobId),
+            )
+        }
+        syncBatchItemFromJobLocked(jobId)
+        job.string("batch_id").ifBlank { null }?.let(::refreshBatchProgressLocked)
+        return true
+    }
+
+    private fun hasConsumedVisionTicketLocked(jobId: String): Boolean = db.query(
+        "SELECT id FROM consent_tickets WHERE kind = 'VISION' AND job_id = ? AND consumed = 1 LIMIT 1",
+        listOf(jobId),
+    ).isNotEmpty()
+
+    /** Recover a consumed Vision consent without re-entering the provider. */
+    private fun recoverConsumedVisionJobLocked(jobId: String): Boolean {
+        if (!hasConsumedVisionTicketLocked(jobId)) return false
+        val job = db.query("SELECT stage, error FROM import_jobs WHERE id = ?", listOf(jobId)).singleOrNull()
+            ?: return false
+        val stage = runCatching { ImportStage.valueOf(job.string("stage")) }.getOrNull() ?: return false
+        if (stage == ImportStage.VISION_PROCESSING || job.string("error").contains("UNKNOWN_OUTCOME", ignoreCase = true)) {
+            return persistVisionUnknownOutcomeLocked(jobId)
+        }
+        return false
+    }
+
+    private fun recoverConsumedVisionTicketLocked(ticketId: String): Boolean {
+        val ticket = db.query(
+            "SELECT kind, job_id, consumed FROM consent_tickets WHERE id = ?",
+            listOf(ticketId),
+        ).singleOrNull() ?: return false
+        if (ticket.string("kind") != "VISION" || !ticket.boolean("consumed")) return false
+        val jobId = ticket.string("job_id").ifBlank { null } ?: return false
+        return recoverConsumedVisionJobLocked(jobId)
+    }
+
+    /** Recover a consumed API embedding consent without replaying its ticket. */
+    private fun recoverConsumedApiEmbeddingTicketLocked(ticketId: String): Boolean {
+        val ticket = db.query(
+            "SELECT kind, job_id, consumed FROM consent_tickets WHERE id = ?",
+            listOf(ticketId),
+        ).singleOrNull() ?: return false
+        if (ticket.string("kind") != "API_EMBEDDING" || !ticket.boolean("consumed")) return false
+        val jobId = ticket.string("job_id").ifBlank { null } ?: return false
+        val job = db.query("SELECT stage, error, batch_id FROM import_jobs WHERE id = ?", listOf(jobId)).singleOrNull()
+            ?: return false
+        if (job.string("stage") in setOf(ImportStage.READY.name, ImportStage.READY_WITH_VISUAL_GAPS.name, ImportStage.CANCELLED.name)) return false
+        if (job.string("stage") == ImportStage.VISION_PROCESSING.name) {
+            return persistVisionUnknownOutcomeLocked(jobId)
+        }
+        val operation = latestEmbeddingOperationForJob(jobId)
+        if (operation == null || operation.state in setOf("PREPARED", "CACHE_READY")) {
+            // The approval was consumed, but no uncertain dispatch is recorded.
+            // Restore a visible consent gate rather than replaying the ticket
+            // or leaving a standalone job stranded. Keep any durable cache for
+            // the next explicit consent; this recovery sends no provider call.
+            if (job.string("error").contains("UNKNOWN_OUTCOME", ignoreCase = true)) return false
+            db.transaction {
+                db.execute(
+                    "UPDATE import_jobs SET stage = ?, embedding_consent = 0, error = NULL, updated_at = ? WHERE id = ?",
+                    listOf(ImportStage.AWAITING_EMBEDDING_CONSENT.name, Utc.nowIso(), jobId),
+                )
+                syncBatchItemFromJobLocked(jobId)
+                job.string("batch_id").takeIf { it.isNotBlank() }?.let(::refreshBatchProgressLocked)
+            }
+            return true
+        }
+        return when (operation.state) {
+            // The provider boundary may already have been crossed. Preserve
+            // the durable unknown-outcome gate instead of dispatching again.
+            "DISPATCHED", "UNKNOWN" -> {
+                markEmbeddingOperationUnknown(operation)
+                true
+            }
+            else -> false
+        }
+    }
+
     fun jobBatchId(jobId: String): String? =
         db.query("SELECT batch_id FROM import_jobs WHERE id = ?", listOf(jobId))
             .singleOrNull()?.string("batch_id")?.ifBlank { null }
@@ -4035,6 +4330,21 @@ class KnowledgeRepository(
             ),
         ).map { it.string("id") }
         ids.forEach { batchId ->
+            // A consumed Vision ticket marks an external call that may have
+            // already reached the provider.  Reduce that job to UNKNOWN before
+            // any PROCESSING item is re-queued; otherwise processBatch could
+            // dispatch the same image again after process death.
+            db.query(
+                "SELECT job_id FROM import_items WHERE batch_id = ? AND job_id IS NOT NULL AND job_id != ''",
+                listOf(batchId),
+            ).forEach { row ->
+                val jobId = row.string("job_id")
+                recoverConsumedVisionJobLocked(jobId)
+                db.query(
+                    "SELECT id FROM consent_tickets WHERE kind = 'API_EMBEDDING' AND job_id = ? AND consumed = 1",
+                    listOf(jobId),
+                ).forEach { ticket -> recoverConsumedApiEmbeddingTicketLocked(ticket.string("id")) }
+            }
             db.execute(
                 "UPDATE import_items SET state = ?, error = NULL WHERE batch_id = ? AND state = ?",
                 listOf(ImportItemState.QUEUED.name, batchId, ImportItemState.PROCESSING.name),
@@ -4133,6 +4443,10 @@ class KnowledgeRepository(
         while (true) {
             val jobId = try {
                 claimNextBatchJob(batchId)
+            } catch (cancelled: CancellationException) {
+                runCatching { cancelBatch(batchId) }
+                    .onFailure { failure -> cancelled.addSuppressed(failure) }
+                throw cancelled
             } catch (failure: Throwable) {
                 synchronized(indexLock) {
                     failBatchLocked(batchId, failure.message ?: BATCH_GENERATION_CHANGED)
@@ -4142,10 +4456,8 @@ class KnowledgeRepository(
             try {
                 resumeImport(jobId, visionConfigured = visionConfigured)
             } catch (cancelled: CancellationException) {
-                synchronized(indexLock) {
-                    syncBatchItemFromJobLocked(jobId)
-                    refreshBatchProgressLocked(batchId)
-                }
+                runCatching { cancelBatch(batchId) }
+                    .onFailure { failure -> cancelled.addSuppressed(failure) }
                 throw cancelled
             } catch (failure: Throwable) {
                 // resumeImport persists UNKNOWN_OUTCOME before throwing when
@@ -4190,6 +4502,77 @@ class KnowledgeRepository(
             "SELECT job_id FROM import_items WHERE batch_id = ? AND job_id IS NOT NULL AND job_id != '' AND state IN (?,?,?) ORDER BY id",
             listOf(batchId, ImportItemState.PENDING.name, ImportItemState.COPYING.name, ImportItemState.QUEUED.name),
         ).map { it.string("job_id") }
+    }
+
+    /**
+     * Persist an explicit user stop for the whole durable batch.  Every local
+     * pre-dispatch item becomes CANCELLED; cancelImport() retains its existing
+     * UNKNOWN_OUTCOME/manual-gate behavior for Vision and provider calls that
+     * may already have crossed an external boundary.
+     */
+    fun cancelBatch(batchId: String): Boolean = synchronized(indexLock) {
+        require(batchId.isNotBlank()) { "batchId must not be blank" }
+        val batch = db.query(
+            "SELECT state FROM import_batches WHERE id = ?",
+            listOf(batchId),
+        ).singleOrNull() ?: return false
+        when (batch.string("state")) {
+            ImportBatchState.COMPLETED.name -> return false
+            ImportBatchState.CANCELLED.name -> return true
+        }
+
+        db.query(
+            "SELECT id, stage FROM import_jobs WHERE batch_id = ? ORDER BY id",
+            listOf(batchId),
+        ).forEach { row ->
+            val stage = runCatching { ImportStage.valueOf(row.string("stage")) }.getOrNull()
+            if (stage != null && stage != ImportStage.FAILED && !ImportStateMachine.isPublished(stage)) {
+                cancelImport(row.string("id"))
+            }
+        }
+
+        // Staging can be cancelled before its first job is bound.  Those
+        // durable items have no import_jobs row for cancelImport() to update.
+        db.execute(
+            "UPDATE import_items SET state = ?, error = ? WHERE batch_id = ? AND (job_id IS NULL OR job_id = '') AND state IN (?,?,?,?,?)",
+            listOf(
+                ImportItemState.CANCELLED.name,
+                "Cancelled by user",
+                batchId,
+                ImportItemState.PENDING.name,
+                ImportItemState.COPYING.name,
+                ImportItemState.QUEUED.name,
+                ImportItemState.PROCESSING.name,
+                ImportItemState.WAITING.name,
+            ),
+        )
+        refreshBatchProgressLocked(batchId)
+
+        // A batch with no items is still a durable user cancellation.  The
+        // normal progress reducer intentionally treats an empty batch as
+        // STAGING, so close this race explicitly after the reducer runs.
+        val itemCount = db.query(
+            "SELECT COUNT(*) AS count FROM import_items WHERE batch_id = ?",
+            listOf(batchId),
+        ).single().long("count")
+        val finalState = db.query(
+            "SELECT state FROM import_batches WHERE id = ?",
+            listOf(batchId),
+        ).singleOrNull()?.string("state")
+        if (itemCount == 0L || finalState == ImportBatchState.CANCELLED.name) {
+            db.execute(
+                "UPDATE import_batches SET state = ?, error = ?, updated_at = ? WHERE id = ? AND state NOT IN (?,?)",
+                listOf(
+                    ImportBatchState.CANCELLED.name,
+                    "Cancelled by user",
+                    Utc.nowIso(),
+                    batchId,
+                    ImportBatchState.COMPLETED.name,
+                    ImportBatchState.FAILED.name,
+                ),
+            )
+        }
+        true
     }
 
     private fun validateConsentTicketLocked(ticket: ConsumedConsentTicket) {
@@ -4389,6 +4772,7 @@ class KnowledgeRepository(
         var processing = 0
         var waiting = 0
         var failed = 0
+        var cancelled = 0
         var pending = 0
         var published = 0
         items.forEach { row ->
@@ -4407,7 +4791,11 @@ class KnowledgeRepository(
                     if (row.string("state") == ImportItemState.WAITING.name) waiting += 1
                 }
                 ImportItemState.PENDING -> pending += 1
-                ImportItemState.FAILED, ImportItemState.CANCELLED -> failed += 1
+                ImportItemState.FAILED -> failed += 1
+                ImportItemState.CANCELLED -> {
+                    failed += 1
+                    cancelled += 1
+                }
                 null -> failed += 1
             }
         }
@@ -4417,6 +4805,7 @@ class KnowledgeRepository(
             items.any { it.string("state") == ImportItemState.COPYING.name || it.string("state") == ImportItemState.QUEUED.name }
         val state = when {
             !generationOk -> ImportBatchState.FAILED
+            cancelled > 0 && !active && waiting == 0 && failed == cancelled -> ImportBatchState.CANCELLED
             failed > 0 && !active && waiting == 0 -> ImportBatchState.FAILED
             waiting > 0 && !active -> ImportBatchState.WAITING
             active -> if (pending > 0 || items.any { it.string("state") == ImportItemState.COPYING.name }) {
@@ -4528,7 +4917,16 @@ class KnowledgeRepository(
     }
 
     fun applyConsentTicket(ticketId: String, visionConfigured: Boolean): ImportJob? {
-        val ticket = consumeConsentTicket(ticketId) ?: return null
+        val ticket = consumeConsentTicket(ticketId) ?: run {
+            // WorkManager may deliver a consumed ticket again after process
+            // death.  It is not safe to treat that as a no-op: an in-flight
+            // Vision or API embedding calls must become UNKNOWN_OUTCOME before
+            // any replay path can enqueue or dispatch them again.
+            synchronized(indexLock) {
+                recoverConsumedVisionTicketLocked(ticketId) || recoverConsumedApiEmbeddingTicketLocked(ticketId)
+            }
+            return null
+        }
         // The ticket was validated before the consumed bit was set.  Repeat
         // the durable checks at the Worker boundary immediately before any
         // action; API operations perform an additional dispatch-time check.
@@ -4730,6 +5128,8 @@ class KnowledgeRepository(
             "UNKNOWN_OUTCOME: API query embedding result is uncertain; explicit retry authorization is required"
         private const val API_EMBEDDING_UNKNOWN_ERROR =
             "UNKNOWN_OUTCOME: API embedding result is uncertain; explicit duplicate-charge acknowledgement is required"
+        private const val VISION_UNKNOWN_ERROR =
+            "UNKNOWN_OUTCOME: Vision result is uncertain; explicit duplicate-charge acknowledgement is required"
         private const val API_EMBEDDING_CANCEL_UNKNOWN_ERROR =
             "UNKNOWN_OUTCOME: API embedding request was cancelled after dispatch; its external outcome is uncertain"
         private const val BATCH_GENERATION_CHANGED =

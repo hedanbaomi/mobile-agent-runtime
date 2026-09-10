@@ -549,36 +549,15 @@ class ShellToolExecutor(
     }.getOrNull()
 
     private fun effectiveCapabilitiesAtRunStart(): Set<CapabilityId> {
-        val canonicalRowsPresent = runContext.canonicalGrants.isNotEmpty() ||
-            runContext.snapshotGrantBindings.isNotEmpty()
-        if (!canonicalRowsPresent) return emptySet()
-
-        val now = clock.nowMillis()
-        val accepted = runContext.canonicalGrants.filter { grant ->
-            grant.agentId == runContext.agentId &&
-                grant.revision > 0 &&
-                !grant.revoked &&
-                grant.policyVersion == runContext.policyVersion &&
-                (grant.expiresAt.isNullOrBlank() || runCatching { java.time.Instant.parse(grant.expiresAt).toEpochMilli() > now }.getOrDefault(false)) &&
-                runContext.snapshotGrantBindings.any { binding ->
-                    binding.snapshotId == runContext.snapshotId &&
-                        binding.grantId == grant.grantId &&
-                        binding.capability == grant.capability &&
-                        binding.policyVersion == runContext.policyVersion &&
-                        binding.workspaceId == grant.workspaceId &&
-                        binding.pathScope == grant.pathScope
-                }
+        val capability = CapabilityId(CapabilityId.SHELL_EXECUTE)
+        if (runContext.effectiveCapabilities.isNotEmpty() && capability !in runContext.effectiveCapabilities) {
+            return emptySet()
         }
-        val agent = accepted.filter { it.skillInstallId == null }.map { it.capability }.toSet()
-        val effective = if (runContext.skillId == null) {
-            agent
-        } else {
-            val skill = accepted.filter { it.skillInstallId == runContext.skillId }
-                .map { it.capability }.toSet()
-            agent intersect skill
-        }
-        return if (runContext.effectiveCapabilities.isEmpty()) effective
-        else effective intersect runContext.effectiveCapabilities
+        // Use the same canonical, frozen-row and live-repository rules as
+        // dispatch. New durable grants need not exist in the older conversation
+        // snapshot, but must already be frozen into this run and still be live.
+        // Context-only adapters retain the resolver's strict binding requirement.
+        return if (resolver.revalidate(runContext, capability)) setOf(capability) else emptySet()
     }
 
     private fun ShellExecResult.toToolExecution(): ToolExecution {

@@ -73,6 +73,12 @@ class AndroidDiagnosticLogger private constructor(
 
     fun recordProcessStarted(): Boolean = store.recordProcessStarted()
 
+    fun recordRunPreparationFailed(
+        stage: String,
+        errorCode: runtime.mobileagent.domain.MessageErrorCode,
+        failure: Throwable,
+    ): Boolean = store.recordRunPreparationFailed(stage, errorCode, failure)
+
     fun recordCapabilityToggle(capability: String, enabled: Boolean): Boolean =
         store.recordCapabilityToggle(capability, enabled)
 

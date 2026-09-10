@@ -17,6 +17,8 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.map
 import runtime.mobileagent.knowledge.ImportJob
 
 /** The process-local bridge from WorkManager to the app's serialized DB owner. */
@@ -30,12 +32,25 @@ fun interface ImportCancellationHandler {
     fun cancel(jobId: String)
 }
 
+/** Explicit user cancellation hook for a durable batch. */
+fun interface ImportBatchCancellationHandler {
+    fun cancel(batchId: String)
+}
+
 fun interface ImportBatchHandler {
     fun process(batchId: String, visionConfigured: Boolean)
 }
 
 fun interface ConsentTicketHandler {
     fun apply(ticketId: String, visionConfigured: Boolean)
+}
+
+/**
+ * Persists a terminal consent-worker failure in the app-owned repository so a
+ * consumed ticket cannot leave its import looking indefinitely active.
+ */
+fun interface ConsentFailureHandler {
+    fun fail(ticketId: String)
 }
 
 object ImportWorkerRegistry {
@@ -46,10 +61,16 @@ object ImportWorkerRegistry {
     var cancellationHandler: ImportCancellationHandler? = null
 
     @Volatile
+    var batchCancellationHandler: ImportBatchCancellationHandler? = null
+
+    @Volatile
     var batchHandler: ImportBatchHandler? = null
 
     @Volatile
     var consentHandler: ConsentTicketHandler? = null
+
+    @Volatile
+    var consentFailureHandler: ConsentFailureHandler? = null
 }
 
 /**
@@ -66,6 +87,10 @@ object ImportWorkScheduler {
     const val INPUT_BATCH_ID = "runtime.mobileagent.import.BATCH_ID"
     const val INPUT_TICKET_ID = "runtime.mobileagent.import.TICKET_ID"
     const val TAG = "runtime.mobileagent.import"
+
+    /** Emits on work-state changes, including a waiting consent starting or finishing. */
+    fun activeWork(context: Context): Flow<Boolean> = WorkManager.getInstance(context)
+        .getWorkInfosByTagFlow(TAG).map { work -> work.any { !it.state.isFinished } }
 
     fun enqueue(
         context: Context,
@@ -86,7 +111,7 @@ object ImportWorkScheduler {
         require(batchId.isNotBlank()) { "batchId must not be blank" }
         val request = batchRequest(batchId, visionConfigured)
         WorkManager.getInstance(context).enqueueUniqueWork(
-            "$TAG:batch:$batchId",
+            batchUniqueName(batchId),
             ExistingWorkPolicy.KEEP,
             request,
         )
@@ -102,16 +127,22 @@ object ImportWorkScheduler {
         require(batchId.isNotBlank()) { "batchId must not be blank" }
         val request = batchRequest(batchId, visionConfigured)
         WorkManager.getInstance(context).enqueueUniqueWork(
-            "$TAG:batch:$batchId",
+            batchUniqueName(batchId),
             ExistingWorkPolicy.APPEND_OR_REPLACE,
             request,
         )
         return request.id
     }
 
-    fun enqueueConsent(context: Context, ticketId: String, visionConfigured: Boolean): UUID {
+    fun enqueueConsent(
+        context: Context,
+        ticketId: String,
+        visionConfigured: Boolean,
+        jobId: String? = null,
+    ): UUID {
         require(ticketId.isNotBlank()) { "ticketId must not be blank" }
-        val request = OneTimeWorkRequestBuilder<ConsentWorker>()
+        require(jobId == null || jobId.isNotBlank()) { "jobId must not be blank" }
+        val requestBuilder = OneTimeWorkRequestBuilder<ConsentWorker>()
             .setInputData(
                 androidx.work.Data.Builder()
                     .putString(INPUT_TICKET_ID, ticketId)
@@ -122,7 +153,8 @@ object ImportWorkScheduler {
             .setBackoffCriteria(BackoffPolicy.EXPONENTIAL, 30, TimeUnit.SECONDS)
             .addTag(TAG)
             .addTag("$TAG:consent:$ticketId")
-            .build()
+        if (jobId != null) requestBuilder.addTag(uniqueName(jobId))
+        val request = requestBuilder.build()
         WorkManager.getInstance(context).enqueueUniqueWork(
             "$TAG:consent:$ticketId",
             ExistingWorkPolicy.KEEP,
@@ -141,8 +173,13 @@ object ImportWorkScheduler {
         val applicationContext = context.applicationContext
         cancellationScope.launch {
             try {
-                // Send the scheduler stop before waiting on repository locks.
-                WorkManager.getInstance(applicationContext).cancelUniqueWork(uniqueName(jobId))
+                // Send the scheduler stop for every worker associated with this job before
+                // waiting on repository locks. This includes consent work, whose unique name
+                // is ticket-scoped rather than job-scoped.
+                WorkManager.getInstance(applicationContext)
+                    .cancelAllWorkByTag(uniqueName(jobId))
+                    .result
+                    .get()
             } catch (failure: Exception) {
                 android.util.Log.e("KnowledgeImport", "Work cancellation failed: ${failure.javaClass.simpleName}")
             }
@@ -155,7 +192,34 @@ object ImportWorkScheduler {
         }
     }
 
+    /**
+     * Stop the unique batch work before entering the serialized repository
+     * cancellation hook.  The hook is process-owned and idempotent; queued
+     * batches have no running worker to perform that durable transition.
+     */
+    fun cancelBatch(context: Context, batchId: String) {
+        require(batchId.isNotBlank()) { "batchId must not be blank" }
+        val applicationContext = context.applicationContext
+        cancellationScope.launch {
+            try {
+                WorkManager.getInstance(applicationContext)
+                    .cancelUniqueWork(batchUniqueName(batchId))
+                    .result
+                    .get()
+            } catch (failure: Exception) {
+                android.util.Log.e("KnowledgeImport", "Batch work cancellation failed: ${failure.javaClass.simpleName}")
+            }
+            try {
+                ImportWorkerRegistry.batchCancellationHandler?.cancel(batchId)
+            } catch (failure: Exception) {
+                android.util.Log.e("KnowledgeImport", "Batch cancellation persistence failed: ${failure.javaClass.simpleName}")
+            }
+        }
+    }
+
     fun uniqueName(jobId: String): String = "${TAG}:$jobId"
+
+    fun batchUniqueName(batchId: String): String = "$TAG:batch:$batchId"
 
     private fun batchRequest(batchId: String, visionConfigured: Boolean): OneTimeWorkRequest =
         OneTimeWorkRequestBuilder<ImportBatchWorker>()
@@ -168,7 +232,7 @@ object ImportWorkScheduler {
             .setConstraints(Constraints.Builder().setRequiredNetworkType(NetworkType.NOT_REQUIRED).build())
             .setBackoffCriteria(BackoffPolicy.EXPONENTIAL, 30, TimeUnit.SECONDS)
             .addTag(TAG)
-            .addTag("$TAG:batch:$batchId")
+            .addTag(batchUniqueName(batchId))
             .build()
 
     private fun request(jobId: String, visionConfigured: Boolean): OneTimeWorkRequest =

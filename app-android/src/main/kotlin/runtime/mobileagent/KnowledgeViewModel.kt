@@ -19,6 +19,14 @@ import runtime.mobileagent.knowledge.sha256Hex
 import androidx.documentfile.provider.DocumentFile
 import android.content.Intent
 import runtime.mobileagent.provider.SecretRedactor
+import runtime.mobileagent.knowledge.VisionBinding
+
+internal data class VisionConsentTarget(val label: String, val fingerprint: String)
+
+internal fun visionConsentTarget(providerName: String, binding: VisionBinding): VisionConsentTarget {
+    val label = "$providerName · ${binding.endpoint} · ${binding.modelId} · provider rev ${binding.providerRevision} / model rev ${binding.modelRevision}"
+    return VisionConsentTarget(label, binding.fingerprint)
+}
 
 data class EmbeddingConfirmation(val target: String, val retry: Boolean, val rebind: Boolean, val documentCount: Int,
     val queryRetry: Boolean = false)
@@ -44,6 +52,7 @@ class KnowledgeViewModel(
     private var refreshJob: Job? = null
     private var refreshRequested = false
     private var activeOperations = 0
+    private var hasActiveImportWork = false
     private val observedImportOperations = mutableSetOf<String>()
 
     private enum class EmbeddingAction { REBIND, REBUILD, GRANT, RETRY, QUERY_RETRY }
@@ -61,9 +70,15 @@ class KnowledgeViewModel(
     init {
         reload()
         viewModelScope.launch {
+            ImportWorkScheduler.activeWork(app).collect { active ->
+                hasActiveImportWork = active
+                reload()
+            }
+        }
+        viewModelScope.launch {
             while (isActive) {
                 delay(2000)
-                if (refreshJob?.isActive != true && state.value.jobs.any { it.stage in ACTIVE }) reload()
+                if (refreshJob?.isActive != true && (hasActiveImportWork || state.value.jobs.any { it.stage in ACTIVE })) reload()
             }
         }
     }
@@ -107,7 +122,7 @@ class KnowledgeViewModel(
             val documents = if (selected == null) emptyList() else app.container.db.query(
                 "SELECT d.id,d.display_name,d.format,d.active_version_id,v.status,b.byte_length FROM documents d LEFT JOIN document_versions v ON v.id=d.active_version_id LEFT JOIN blobs b ON b.hash=d.blob_hash WHERE d.kb_id=? AND d.deleted_at IS NULL ORDER BY d.display_name,d.id", listOf(selected))
             val jobs = repo.listJobs().filter { it.first.knowledgeBaseId == selected }
-            val target = currentVisionTarget()
+            val target = currentVisionTarget()?.label.orEmpty()
             return KnowledgeUiState(
                 bases = bases.map { (id, name) -> KnowledgeBaseUi(id, name,
                     app.container.db.query("SELECT count(*) AS count FROM documents WHERE kb_id=? AND deleted_at IS NULL", listOf(id)).single().long("count").toInt()) },
@@ -279,7 +294,7 @@ class KnowledgeViewModel(
                         pending.knowledgeBaseId,
                         fingerprint,
                     )
-                    ImportWorkScheduler.enqueueConsent(app, ticket, app.container.profiles.visionConfigured())
+                    ImportWorkScheduler.enqueueConsent(app, ticket, app.container.profiles.visionConfigured(), pending.jobId)
                     "已记录一次性授权并转入前台任务；不会在此页面协程中发送文本。"
                 }
             }
@@ -294,10 +309,10 @@ class KnowledgeViewModel(
     private fun requestVision(id: String, retry: Boolean) {
         val revision = ++visionRevision
         val selection = selectionRevision
-        readOnIo({ currentVisionTarget().also { require(it.isNotBlank()) { "请先配置 Vision 模型。" } } },
+        readOnIo({ requireNotNull(currentVisionTarget()) { "请先配置 Vision 模型。" } },
             { revision == visionRevision && selection == selectionRevision }) { target ->
-            visionTarget.value = target
-            consentFingerprint = target
+            visionTarget.value = target.label
+            consentFingerprint = target.fingerprint
             visionRequest.value = id to retry
         }
     }
@@ -307,7 +322,7 @@ class KnowledgeViewModel(
         val fingerprint = consentFingerprint
         dismissVision()
         action {
-            require(currentVisionTarget() == fingerprint) { "Vision 目标已变更，请重新确认。" }
+            require(currentVisionTarget()?.fingerprint == fingerprint) { "Vision 目标已变更，请重新确认。" }
             val job = repo.listJobs().firstOrNull { it.first.id == request.first }?.first
                 ?: error("导入任务不存在。")
             val documentsHash = sha256Hex(documentsFingerprint(job.knowledgeBaseId).toByteArray(Charsets.UTF_8))
@@ -317,7 +332,7 @@ class KnowledgeViewModel(
                 job.knowledgeBaseId,
                 (if (request.second) "RETRY\n" else "GRANT\n") + fingerprint.orEmpty() + "\n" + documentsHash,
             )
-            ImportWorkScheduler.enqueueConsent(app, ticket, app.container.profiles.visionConfigured())
+            ImportWorkScheduler.enqueueConsent(app, ticket, app.container.profiles.visionConfigured(), job.id)
             "已记录一次性授权并转入前台任务；不会在此页面协程中上传图片。"
         }
     }
@@ -474,9 +489,10 @@ class KnowledgeViewModel(
         }
     }
 
-    private fun currentVisionTarget(): String = app.container.profiles.visionBinding()?.let { (provider, model) ->
-        "${provider.name} · ${provider.baseUrl} · ${model.modelId} · provider rev ${provider.revision} / model rev ${model.revision}"
-    }.orEmpty()
+    private fun currentVisionTarget(): VisionConsentTarget? = app.container.profiles.visionBinding()?.let { (provider, model) ->
+        visionConsentTarget(provider.name, VisionBinding(provider.id, model.modelId, provider.baseUrl,
+            maxOf(provider.revision, model.revision), provider.revision, model.revision))
+    }
     private fun displayName(uri: Uri): String {
         app.contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use { cursor ->
             if (cursor.moveToFirst()) cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME).takeIf { it >= 0 }?.let { return cursor.getString(it) }

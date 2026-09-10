@@ -24,6 +24,27 @@ import org.junit.runner.RunWith
 @RunWith(AndroidJUnit4::class)
 class DiagnosticsDeviceTest {
     @Test
+    fun runPreparationFailureIsClosedAndRequiresOptIn() {
+        withStore { directory, preferences ->
+            val store = newStore(directory, preferences)
+            val fields = mapOf(
+                "stage" to "context_budget", "errorCode" to "CONTEXT_OVERFLOW",
+                "exceptionType" to "java.lang.IllegalArgumentException",
+            )
+            assertFalse(store.record("run_preparation_failed", fields))
+            assertEquals(0L, store.status().totalBytes)
+            store.setEnabled(true)
+            assertTrue(store.record("run_preparation_failed", fields))
+            assertFalse(store.record("run_preparation_failed", fields + ("message" to "private prompt")))
+            assertFalse(store.record("run_preparation_failed", fields + ("stage" to "private prompt")))
+            assertFalse(store.record("run_preparation_failed", fields + ("errorCode" to "private prompt")))
+            val text = store.readFile(RollingDiagnosticLogStore.CURRENT_FILE_NAME).toString(Charsets.UTF_8)
+            assertTrue(text.contains("CONTEXT_OVERFLOW"))
+            assertFalse(text.contains("private prompt"))
+        }
+    }
+
+    @Test
     fun defaultDisabledDoesNotWriteAndOptInPersists() {
         withStore { directory, preferences ->
             val store = newStore(directory, preferences)

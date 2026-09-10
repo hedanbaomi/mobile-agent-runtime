@@ -288,80 +288,65 @@ class OpenAiCompatibleAdapter(
         val token = secret.concatToString()
         return try {
             val resolved = resolveHeaders(token, emptyMap())
-            val modelPath = "/models/${URLEncoder.encode(profile.modelId, Charsets.UTF_8.name()).replace("+", "%20")}"
-            http.prepareGet(url(baseUrl, modelPath)) {
-                headers {
-                    resolved.values.forEach { (name, value) -> append(name, value) }
-                }
-            }.execute { response ->
-                val status = response.status.value
-                val metadata = if (status in 200..299) {
-                    val body = readBounded(response.bodyAsChannel())
-                    if (metadataMatches(body, profile.modelId)) {
-                        MetadataProbeResult(
-                            summary = "verified",
-                            verified = true,
-                            status = CapabilityCheckStatus.VERIFIED,
-                        )
-                    } else {
-                        MetadataProbeResult(
-                            summary = "invalid-response",
-                            verified = false,
-                            status = CapabilityCheckStatus.FAILED,
-                        )
-                    }
-                } else {
-                    MetadataProbeResult(
-                        summary = "http-$status",
-                        verified = false,
-                        httpStatus = status,
-                        status = CapabilityCheckStatus.FAILED,
-                    )
-                }
-                if (!metadata.verified) {
-                    profileReport.copy(
-                        supportsStream = false,
-                        supportsTools = false,
-                        supportsImages = false,
-                        source = "metadata=${metadata.summary};stream=not-run;tools=not-run;image=not-run",
-                        status = CapabilityProbeStatus.FAILED,
-                        charged = metadata.charged,
-                        operationId = operationId,
-                        checks = listOf(
-                            CapabilityCheckResult(
-                                capability = CapabilityCheck.METADATA,
-                                status = metadata.status,
-                                httpStatus = metadata.httpStatus,
-                            ),
-                            CapabilityCheckResult(CapabilityCheck.STREAM, CapabilityCheckStatus.NOT_RUN),
-                            CapabilityCheckResult(CapabilityCheck.TOOLS, CapabilityCheckStatus.NOT_RUN),
-                            CapabilityCheckResult(CapabilityCheck.IMAGE, CapabilityCheckStatus.NOT_RUN),
+            val metadata = probeMetadata(profile.modelId, resolved)
+            // A provider which does not implement the optional per-model
+            // metadata route must not prevent the independent chat feature
+            // probes. Authentication, transport and malformed responses do
+            // stop here so we do not spend additional requests after a hard
+            // failure.
+            if (!metadata.verified && metadata.status != CapabilityCheckStatus.UNSUPPORTED) {
+                return profileReport.copy(
+                    supportsStream = false,
+                    supportsTools = false,
+                    supportsImages = false,
+                    source = "metadata=${metadata.summary};stream=not-run;tools=not-run;image=not-run",
+                    status = CapabilityProbeStatus.FAILED,
+                    charged = metadata.charged,
+                    operationId = operationId,
+                    checks = listOf(
+                        CapabilityCheckResult(
+                            capability = CapabilityCheck.METADATA,
+                            status = metadata.status,
+                            httpStatus = metadata.httpStatus,
                         ),
-                    )
-                } else {
-                    val stream = probeDeclaredFeature(profile, resolved, ProbeFeature.STREAM)
-                    val tools = probeDeclaredFeature(profile, resolved, ProbeFeature.TOOLS)
-                    val image = probeDeclaredFeature(profile, resolved, ProbeFeature.IMAGE)
-                    val featureResults = listOf(stream, tools, image)
-                    profileReport.copy(
-                        supportsStream = stream.supported,
-                        supportsTools = tools.supported,
-                        supportsImages = image.supported,
-                        source = "metadata=${metadata.summary};stream=${stream.summary};tools=${tools.summary};image=${image.summary}",
-                        status = capabilityProbeStatus(featureResults),
-                        // A chat capability probe is potentially billable even
-                        // when the provider later rejects or truncates it.
-                        charged = metadata.charged || featureResults.any { it.charged },
-                        operationId = operationId,
-                        checks = listOf(
-                            CapabilityCheckResult(CapabilityCheck.METADATA, metadata.status, metadata.httpStatus),
-                            CapabilityCheckResult(CapabilityCheck.STREAM, stream.status, stream.httpStatus),
-                            CapabilityCheckResult(CapabilityCheck.TOOLS, tools.status, tools.httpStatus),
-                            CapabilityCheckResult(CapabilityCheck.IMAGE, image.status, image.httpStatus),
-                        ),
-                    )
-                }
+                        CapabilityCheckResult(CapabilityCheck.STREAM, CapabilityCheckStatus.NOT_RUN),
+                        CapabilityCheckResult(CapabilityCheck.TOOLS, CapabilityCheckStatus.NOT_RUN),
+                        CapabilityCheckResult(CapabilityCheck.IMAGE, CapabilityCheckStatus.NOT_RUN),
+                    ),
+                )
             }
+
+            val stream = probeDeclaredFeature(profile, resolved, ProbeFeature.STREAM)
+            val tools = probeDeclaredFeature(profile, resolved, ProbeFeature.TOOLS)
+            val image = probeDeclaredFeature(profile, resolved, ProbeFeature.IMAGE)
+            val featureResults = listOf(stream, tools, image)
+            val featureStatus = capabilityProbeStatus(featureResults)
+            val overallStatus = if (metadata.status == CapabilityCheckStatus.UNSUPPORTED &&
+                featureStatus == CapabilityProbeStatus.SUCCEEDED
+            ) {
+                // The declared chat features were verified, but the optional
+                // metadata route remains unavailable.
+                CapabilityProbeStatus.PARTIAL
+            } else {
+                featureStatus
+            }
+            profileReport.copy(
+                supportsStream = stream.supported,
+                supportsTools = tools.supported,
+                supportsImages = image.supported,
+                source = "metadata=${metadata.summary};stream=${stream.summary};tools=${tools.summary};image=${image.summary}",
+                status = overallStatus,
+                // A chat capability probe is potentially billable even when
+                // the provider later rejects or truncates it.
+                charged = metadata.charged || featureResults.any { it.charged },
+                operationId = operationId,
+                checks = listOf(
+                    CapabilityCheckResult(CapabilityCheck.METADATA, metadata.status, metadata.httpStatus),
+                    CapabilityCheckResult(CapabilityCheck.STREAM, stream.status, stream.httpStatus),
+                    CapabilityCheckResult(CapabilityCheck.TOOLS, tools.status, tools.httpStatus),
+                    CapabilityCheckResult(CapabilityCheck.IMAGE, image.status, image.httpStatus),
+                ),
+            )
         } catch (e: kotlinx.coroutines.CancellationException) {
             throw e
         } catch (_: Exception) {
@@ -392,6 +377,7 @@ class OpenAiCompatibleAdapter(
         }
 
         val token = secret.concatToString()
+        val streamState = StreamOutputState()
         try {
             val payload = buildPayload(request, includeImageBytes = true)
             val resolved = resolveHeaders(token, request.headers)
@@ -407,15 +393,18 @@ class OpenAiCompatibleAdapter(
             }.execute { response ->
                 val status = response.status.value
                 if (status == 401) {
-                    emit(ModelEvent.Failed(ErrorCode.PROVIDER_UNAUTHORIZED.name))
+                    emitTerminalFailure(streamState, ErrorCode.PROVIDER_UNAUTHORIZED.name)
                     return@execute
                 }
                 if (status == 429) {
-                    emit(ModelEvent.Failed(ErrorCode.RATE_LIMITED.name))
+                    emitTerminalFailure(streamState, ErrorCode.RATE_LIMITED.name)
                     return@execute
                 }
                 if (status >= 400) {
-                    emit(ModelEvent.Failed(if (status >= 500) "UNKNOWN_OUTCOME: Provider HTTP $status" else "Provider HTTP $status"))
+                    emitTerminalFailure(
+                        streamState,
+                        if (status >= 500) "UNKNOWN_OUTCOME: Provider HTTP $status" else "Provider HTTP $status",
+                    )
                     return@execute
                 }
 
@@ -438,7 +427,7 @@ class OpenAiCompatibleAdapter(
                             indexToId,
                         )
                         for (event in parsedEvents) {
-                            val terminal = emitRedacted(event, streamRedactor, redactionSecrets)
+                            val terminal = emitRedacted(event, streamRedactor, redactionSecrets, streamState)
                             when (terminal) {
                                 ModelEvent.Completed -> sawCompleted = true
                                 is ModelEvent.Failed -> sawFailed = true
@@ -453,22 +442,25 @@ class OpenAiCompatibleAdapter(
                         // EOF is not a successful completion.  In particular, do not flush a
                         // suffix which could still become a credential on a later delta.
                         streamRedactor.discard()
-                        emit(ModelEvent.Failed(ErrorCode.UNKNOWN_OUTCOME.name))
+                        emitTerminalFailure(
+                            streamState,
+                            streamState.deferredFailure ?: ErrorCode.UNKNOWN_OUTCOME.name,
+                        )
                     }
                 } else {
-                    emitJsonResponse(readBounded(response.bodyAsChannel()), redactionSecrets)
+                    emitJsonResponse(readBounded(response.bodyAsChannel()), redactionSecrets, streamState)
                 }
             }
         } catch (e: AppException) {
-            emit(ModelEvent.Failed(e.error.code.name))
+            emitTerminalFailure(streamState, e.error.code.name)
         } catch (_: SecretUnavailableException) {
-            emit(ModelEvent.Failed(ErrorCode.SECRET_UNAVAILABLE.name))
+            emitTerminalFailure(streamState, ErrorCode.SECRET_UNAVAILABLE.name)
         } catch (_: InvalidHeaderException) {
-            emit(ModelEvent.Failed(ErrorCode.INVALID_CONFIG.name))
+            emitTerminalFailure(streamState, ErrorCode.INVALID_CONFIG.name)
         } catch (e: kotlinx.coroutines.CancellationException) {
             throw e
         } catch (_: Exception) {
-            emit(ModelEvent.Failed(ErrorCode.UNKNOWN_OUTCOME.name))
+            emitTerminalFailure(streamState, ErrorCode.UNKNOWN_OUTCOME.name)
         } finally {
             token.toCharArray().fill('\u0000')
         }
@@ -479,11 +471,23 @@ class OpenAiCompatibleAdapter(
         event: ModelEvent,
         redactor: StreamingSecretRedactor,
         secrets: List<String>,
+        state: StreamOutputState,
     ): ModelEvent? {
         return when (event) {
             is ModelEvent.TextDelta -> {
                 val safe = redactor.accept(event.text)
-                if (safe.isNotEmpty()) emit(ModelEvent.TextDelta(safe))
+                if (safe.isNotEmpty()) {
+                    state.hasVisibleOutput = true
+                    emit(ModelEvent.TextDelta(safe))
+                }
+                null
+            }
+            is ModelEvent.RefusalDelta -> {
+                val safe = redactor.accept(event.text)
+                if (safe.isNotEmpty()) {
+                    state.hasVisibleOutput = true
+                    emit(ModelEvent.RefusalDelta(safe))
+                }
                 null
             }
             is ModelEvent.ReasoningDelta -> {
@@ -499,31 +503,75 @@ class OpenAiCompatibleAdapter(
                     (parsed != null && containsCredentialJson(parsed, secrets))
                 if (hasCredential || parsed == null || parsed !is JsonObject) {
                     redactor.discard()
-                    val failure = ModelEvent.Failed(ErrorCode.UNKNOWN_OUTCOME.name)
-                    emit(failure)
-                    failure
+                    emitTerminalFailure(state, ErrorCode.UNKNOWN_OUTCOME.name)
+                    ModelEvent.Failed(ErrorCode.UNKNOWN_OUTCOME.name)
                 } else {
+                    state.hasVisibleOutput = true
                     emit(event)
                     null
                 }
             }
             is ModelEvent.Failed -> {
                 redactor.discard()
-                val failure = ModelEvent.Failed(SecretRedactor.redact(event.sanitizedMessage, secrets))
-                emit(failure)
-                failure
+                val message = SecretRedactor.redact(event.sanitizedMessage, secrets)
+                if (message == ErrorCode.CONTEXT_OVERFLOW.name) {
+                    // Providers sometimes send finish_reason=length before a
+                    // separate usage-only frame. Keep reading until DONE/EOF
+                    // so the final cumulative usage is retained, then emit
+                    // the overflow terminal event exactly once.
+                    state.deferredFailure = message
+                    null
+                } else {
+                    emitTerminalFailure(state, message)
+                    ModelEvent.Failed(message)
+                }
             }
             ModelEvent.Completed -> {
                 val safeTail = redactor.finish()
-                if (safeTail.isNotEmpty()) emit(ModelEvent.TextDelta(safeTail))
-                emit(ModelEvent.Completed)
-                ModelEvent.Completed
+                if (safeTail.isNotEmpty()) {
+                    state.hasVisibleOutput = true
+                    emit(ModelEvent.TextDelta(safeTail))
+                }
+                if (state.deferredFailure != null) {
+                    val failure = state.deferredFailure!!
+                    emitTerminalFailure(state, failure)
+                    ModelEvent.Failed(failure)
+                } else if (!state.hasVisibleOutput) {
+                    emitTerminalFailure(state, INVALID_RESPONSE_MESSAGE)
+                    ModelEvent.Failed(INVALID_RESPONSE_MESSAGE)
+                } else {
+                    emitUsage(state)
+                    state.terminal = true
+                    emit(ModelEvent.Completed)
+                    ModelEvent.Completed
+                }
+            }
+            is ModelEvent.Usage -> {
+                state.latestUsage = event
+                null
             }
             else -> {
                 emit(event)
                 null
             }
         }
+    }
+
+    private suspend fun FlowCollector<ModelEvent>.emitUsage(state: StreamOutputState) {
+        state.latestUsage?.let {
+            emit(it)
+            state.latestUsage = null
+        }
+    }
+
+    private suspend fun FlowCollector<ModelEvent>.emitTerminalFailure(
+        state: StreamOutputState,
+        message: String,
+    ) {
+        if (state.terminal) return
+        state.terminal = true
+        emitUsage(state)
+        emit(ModelEvent.Failed(message))
     }
 
     private suspend fun readBounded(channel: ByteReadChannel): String {
@@ -778,6 +826,87 @@ class OpenAiCompatibleAdapter(
             operationId = "embedding",
         ).asException()
 
+    /**
+     * Metadata is useful when a provider implements it, but it is not a
+     * prerequisite for the independent chat feature checks.  A few OpenAI
+     * compatible gateways reject a slash-containing model id in the path even
+     * though their collection endpoint exposes the exact id, so retry that
+     * narrow case through `/models` and require an exact id match.
+     */
+    private suspend fun probeMetadata(
+        modelId: String,
+        headers: ResolvedHeaders,
+    ): MetadataProbeResult {
+        val encodedModelId = URLEncoder.encode(modelId, Charsets.UTF_8.name()).replace("+", "%20")
+        val direct = probeMetadataPath(
+            path = "/models/$encodedModelId",
+            expectedModelId = modelId,
+            headers = headers,
+            collection = false,
+        )
+        return if (
+            direct.status == CapabilityCheckStatus.UNSUPPORTED &&
+            direct.httpStatus == 404 &&
+            modelId.contains('/')
+        ) {
+            probeMetadataPath(
+                path = "/models",
+                expectedModelId = modelId,
+                headers = headers,
+                collection = true,
+            )
+        } else {
+            direct
+        }
+    }
+
+    private suspend fun probeMetadataPath(
+        path: String,
+        expectedModelId: String,
+        headers: ResolvedHeaders,
+        collection: Boolean,
+    ): MetadataProbeResult = try {
+        http.prepareGet(url(baseUrl, path)) {
+            headers { headers.values.forEach { (name, value) -> append(name, value) } }
+        }.execute { response ->
+            val status = response.status.value
+            if (status in 200..299) {
+                val raw = readBounded(response.bodyAsChannel())
+                val matches = if (collection) {
+                    metadataListMatches(raw, expectedModelId)
+                } else {
+                    metadataMatches(raw, expectedModelId)
+                }
+                MetadataProbeResult(
+                    summary = if (matches) "verified" else "invalid-response",
+                    verified = matches,
+                    status = if (matches) CapabilityCheckStatus.VERIFIED else CapabilityCheckStatus.FAILED,
+                    httpStatus = status.takeUnless { matches },
+                )
+            } else {
+                val checkStatus = when {
+                    status == 404 || status == 405 -> CapabilityCheckStatus.UNSUPPORTED
+                    status in 500..599 -> CapabilityCheckStatus.UNKNOWN
+                    else -> CapabilityCheckStatus.FAILED
+                }
+                MetadataProbeResult(
+                    summary = "http-$status",
+                    verified = false,
+                    httpStatus = status,
+                    status = checkStatus,
+                )
+            }
+        }
+    } catch (e: kotlinx.coroutines.CancellationException) {
+        throw e
+    } catch (_: Exception) {
+        MetadataProbeResult(
+            summary = "unknown-outcome",
+            verified = false,
+            status = CapabilityCheckStatus.UNKNOWN,
+        )
+    }
+
     private suspend fun probeDeclaredFeature(
         profile: ModelProfile,
         headers: ResolvedHeaders,
@@ -798,9 +927,17 @@ class OpenAiCompatibleAdapter(
                 status = CapabilityCheckStatus.NOT_DECLARED,
             )
         }
+        // One token is enough to prove that an endpoint accepted the request,
+        // but it is not enough for a complete no-op function call. Keep the
+        // capability probe useful while retaining a fixed, small spend cap and
+        // never exceeding the configured model output budget.
+        val probeOutputTokens = minOf(
+            profile.outputLimit.coerceAtLeast(1),
+            CONNECTION_PROBE_MAX_OUTPUT_TOKENS,
+        )
         val body = buildJsonObject {
             put("model", JsonPrimitive(profile.modelId))
-            put("max_tokens", JsonPrimitive(1))
+            put("max_tokens", JsonPrimitive(probeOutputTokens))
             put("stream", JsonPrimitive(feature == ProbeFeature.STREAM))
             put(
                 "messages",
@@ -969,6 +1106,22 @@ class OpenAiCompatibleAdapter(
         return id == expectedModelId
     }
 
+    private fun metadataListMatches(raw: String, expectedModelId: String): Boolean {
+        val root = runCatching { Json.parseToJsonElement(raw) }.getOrNull() ?: return false
+        val models = runCatching {
+            when {
+                root is JsonObject -> root["data"]?.jsonArray
+                root is kotlinx.serialization.json.JsonArray -> root
+                else -> null
+            }
+        }.getOrNull() ?: return false
+        return models.any { element ->
+            runCatching {
+                element.jsonObject["id"]?.jsonPrimitive?.contentOrNull == expectedModelId
+            }.getOrDefault(false)
+        }
+    }
+
     private fun parseChatProbe(raw: String, requireToolCall: Boolean): Boolean {
         val root = runCatching { Json.parseToJsonElement(raw).jsonObject }.getOrNull() ?: return false
         // Only a non-null error object fails the probe; "error":null is JsonNull,
@@ -1012,9 +1165,8 @@ class OpenAiCompatibleAdapter(
             OpenAiSse.eventsFromLine(line, toolBuf).forEach { event ->
                 when (event) {
                     is ModelEvent.TextDelta,
-                    is ModelEvent.ReasoningDelta,
+                    is ModelEvent.RefusalDelta,
                     is ModelEvent.ToolCallDelta,
-                    is ModelEvent.Usage,
                     -> sawPayload = true
                     ModelEvent.Completed -> sawCompleted = true
                     is ModelEvent.Failed -> sawFailed = true
@@ -1035,9 +1187,8 @@ class OpenAiCompatibleAdapter(
             OpenAiSse.eventsFromLine(line, toolBuf).forEach { event ->
                 when (event) {
                     is ModelEvent.TextDelta,
-                    is ModelEvent.ReasoningDelta,
+                    is ModelEvent.RefusalDelta,
                     is ModelEvent.ToolCallDelta,
-                    is ModelEvent.Usage,
                     -> sawPayload = true
                     ModelEvent.Completed -> sawCompleted = true
                     is ModelEvent.Failed -> sawFailed = true
@@ -1111,6 +1262,13 @@ class OpenAiCompatibleAdapter(
         val status: CapabilityCheckStatus = CapabilityCheckStatus.FAILED,
     )
 
+    private class StreamOutputState {
+        var latestUsage: ModelEvent.Usage? = null
+        var hasVisibleOutput: Boolean = false
+        var deferredFailure: String? = null
+        var terminal: Boolean = false
+    }
+
     private fun elapsedMillis(started: Long): Long =
         ((System.nanoTime() - started) / 1_000_000L).coerceAtLeast(0L)
 
@@ -1167,19 +1325,30 @@ class OpenAiCompatibleAdapter(
     private suspend fun kotlinx.coroutines.flow.FlowCollector<ModelEvent>.emitJsonResponse(
         raw: String,
         redactionSecrets: List<String>,
+        state: StreamOutputState,
     ) {
         val root = runCatching { Json.parseToJsonElement(raw).jsonObject }.getOrNull()
             ?: run {
-                emit(ModelEvent.Failed(ErrorCode.UNKNOWN_OUTCOME.name))
+                emitTerminalFailure(state, ErrorCode.UNKNOWN_OUTCOME.name)
                 return
             }
-        (root["error"] as? JsonObject)?.get("message")?.jsonPrimitive?.contentOrNull?.let { message ->
-            emit(ModelEvent.Failed(SecretRedactor.redact(message, redactionSecrets)))
+        root["usage"]?.let { usageElement ->
+            runCatching { usageElement.jsonObject }.getOrNull()?.let { usage ->
+                state.latestUsage = ModelEvent.Usage(
+                    usage["prompt_tokens"]?.jsonPrimitive?.contentOrNull?.toIntOrNull() ?: 0,
+                    usage["completion_tokens"]?.jsonPrimitive?.contentOrNull?.toIntOrNull() ?: 0,
+                )
+            }
+        }
+        (root["error"] as? JsonObject)?.get("message")?.let { errorMessage ->
+            val message = runCatching { errorMessage.jsonPrimitive.contentOrNull }.getOrNull()
+                ?: ErrorCode.UNKNOWN_OUTCOME.name
+            emitTerminalFailure(state, SecretRedactor.redact(message, redactionSecrets))
             return
         }
         val choice = root["choices"]?.jsonArray?.firstOrNull()?.jsonObject
             ?: run {
-                emit(ModelEvent.Failed(ErrorCode.UNKNOWN_OUTCOME.name))
+                emitTerminalFailure(state, INVALID_RESPONSE_MESSAGE)
                 return
             }
         val message = choice["message"]?.jsonObject
@@ -1206,23 +1375,58 @@ class OpenAiCompatibleAdapter(
                     containsCredentialText(event.name, redactionSecrets) ||
                     containsCredentialText(event.argumentsJson, redactionSecrets) ||
                     containsCredentialJson(objectArgs, redactionSecrets)
-            }) {
-            emit(ModelEvent.Failed(ErrorCode.UNKNOWN_OUTCOME.name))
+                }) {
+            emitTerminalFailure(state, ErrorCode.UNKNOWN_OUTCOME.name)
             return
         }
-        message?.get("content")?.jsonPrimitive?.contentOrNull?.let {
-            emit(ModelEvent.TextDelta(SecretRedactor.redact(it, redactionSecrets)))
+        val refusal = message?.get("refusal")?.let { element ->
+            runCatching { element.jsonPrimitive.contentOrNull }.getOrNull()
         }
-        toolEvents.forEach { emit(it) }
-        root["usage"]?.jsonObject?.let { usage ->
-            emit(
-                ModelEvent.Usage(
-                    usage["prompt_tokens"]?.jsonPrimitive?.contentOrNull?.toIntOrNull() ?: 0,
-                    usage["completion_tokens"]?.jsonPrimitive?.contentOrNull?.toIntOrNull() ?: 0,
-                ),
-            )
+        refusal?.takeIf { it.isNotBlank() }?.let {
+            val safe = SecretRedactor.redact(it, redactionSecrets)
+            if (safe.isNotEmpty()) {
+                state.hasVisibleOutput = true
+                emit(ModelEvent.RefusalDelta(safe))
+            }
         }
+        messageContentText(message).forEach { text ->
+            val safe = SecretRedactor.redact(text, redactionSecrets)
+            if (safe.isNotEmpty()) {
+                state.hasVisibleOutput = true
+                emit(ModelEvent.TextDelta(safe))
+            }
+        }
+        val finishReason = choice["finish_reason"]?.let { element ->
+            runCatching { element.jsonPrimitive.contentOrNull }.getOrNull()
+        }
+        if (finishReason == "length") {
+            emitTerminalFailure(state, ErrorCode.CONTEXT_OVERFLOW.name)
+            return
+        }
+        toolEvents.forEach {
+            state.hasVisibleOutput = true
+            emit(it)
+        }
+        if (!state.hasVisibleOutput) {
+            emitTerminalFailure(state, INVALID_RESPONSE_MESSAGE)
+            return
+        }
+        emitUsage(state)
+        state.terminal = true
         emit(ModelEvent.Completed)
+    }
+
+    private fun messageContentText(message: JsonObject?): List<String> {
+        val content = message?.get("content") ?: return emptyList()
+        val primitive = content as? JsonPrimitive
+        if (primitive != null) {
+            return listOfNotNull(primitive.contentOrNull?.takeIf { it.isNotBlank() })
+        }
+        return runCatching {
+            content.jsonArray.mapNotNull { part ->
+                part.jsonObject["text"]?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() }
+            }
+        }.getOrDefault(emptyList())
     }
 
     /** Prefer an explicitly supplied reasoning field; never derive one. */
@@ -1245,6 +1449,7 @@ class OpenAiCompatibleAdapter(
     private class InvalidConnectionConfigException : RuntimeException()
 
     companion object {
+        private const val INVALID_RESPONSE_MESSAGE = "INVALID_RESPONSE"
         private const val PROBE_TOOL_NAME = "mar_probe_noop"
         /**
          * Probe output budget.  Feature probes already use `max_tokens: 1`;

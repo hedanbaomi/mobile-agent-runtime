@@ -33,14 +33,27 @@ object OpenAiSse {
             return toolEvents + ModelEvent.Completed
         }
         val obj = runCatching { json.parseToJsonElement(data).jsonObject }.getOrNull() ?: return emptyList()
-        obj["error"]?.jsonObject?.get("message")?.jsonPrimitive?.contentOrNull?.let { msg ->
-            return listOf(ModelEvent.Failed(SecretRedactor.redact(msg, extraSecrets)))
-        }
-        val choice = obj["choices"]?.jsonArray?.firstOrNull()?.jsonObject ?: return emptyList()
         val events = mutableListOf<ModelEvent>()
+        // Some OpenAI-compatible providers put cumulative usage in a final
+        // usage-only frame with `choices: []`. Parse it before looking for a
+        // choice or error so the accounting event is not silently discarded.
+        val usage = obj["usage"]?.let { element ->
+            runCatching { element.jsonObject }.getOrNull()
+        }
+        if (usage != null) {
+            val input = usage["prompt_tokens"]?.jsonPrimitive?.contentOrNull?.toIntOrNull() ?: 0
+            val output = usage["completion_tokens"]?.jsonPrimitive?.contentOrNull?.toIntOrNull() ?: 0
+            events += ModelEvent.Usage(input, output)
+        }
+        (obj["error"] as? kotlinx.serialization.json.JsonObject)?.get("message")?.jsonPrimitive?.contentOrNull?.let { msg ->
+            events += ModelEvent.Failed(SecretRedactor.redact(msg, extraSecrets))
+            return events
+        }
+        val choice = obj["choices"]?.jsonArray?.firstOrNull()?.jsonObject ?: return events
         val delta = choice["delta"]?.jsonObject
         reasoningText(delta)?.let { events += ModelEvent.ReasoningDelta(it) }
         delta?.get("content")?.jsonPrimitive?.contentOrNull?.let { events += ModelEvent.TextDelta(it) }
+        delta?.get("refusal")?.jsonPrimitive?.contentOrNull?.let { events += ModelEvent.RefusalDelta(it) }
         val toolCalls = delta?.get("tool_calls")?.jsonArray
         toolCalls?.forEach { call ->
             val c = call.jsonObject
@@ -57,12 +70,9 @@ object OpenAiSse {
             }
             acc.second.append(args)
         }
-        val usage = obj["usage"]?.jsonObject
-        if (usage != null) {
-            val input = usage["prompt_tokens"]?.jsonPrimitive?.contentOrNull?.toIntOrNull() ?: 0
-            val output = usage["completion_tokens"]?.jsonPrimitive?.contentOrNull?.toIntOrNull() ?: 0
-            events += ModelEvent.Usage(input, output)
-        }
+        choice["finish_reason"]?.jsonPrimitive?.contentOrNull
+            ?.takeIf { it == "length" }
+            ?.let { events += ModelEvent.Failed(ErrorCode.CONTEXT_OVERFLOW.name) }
         return events
     }
 

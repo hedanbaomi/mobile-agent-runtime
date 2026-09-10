@@ -226,5 +226,5 @@ dependencies {
     androidTestImplementation(libs.androidx.test.runner)
     androidTestImplementation(libs.androidx.test.ext.junit)
     androidTestImplementation(libs.junit4)
-    androidTestImplementation("androidx.work:work-testing:2.10.0")
+    androidTestImplementation("androidx.work:work-testing:${libs.versions.workManager.get()}")
 }

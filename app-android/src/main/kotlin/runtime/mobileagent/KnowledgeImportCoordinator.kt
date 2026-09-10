@@ -541,12 +541,11 @@ class AndroidKnowledgeImportPorts(private val app: MobileAgentApp) : KnowledgeIm
     }
 
     override fun cancelBatch(batchId: String, jobIds: List<String>) {
-        val ids = (repo.queuedJobIds(batchId) + jobIds).distinct()
-        ids.forEach { id ->
-            runCatching { repo.cancelImport(id) }
-            ImportWorkScheduler.cancel(app, id)
-        }
-        repo.refreshBatchProgress(batchId)
+        // Cancel the actual unique batch work before the process-owned
+        // repository hook acquires its serialized index lock.  The hook
+        // enumerates every durable item, including jobs not present in the
+        // staging snapshot retained by this coordinator.
+        ImportWorkScheduler.cancelBatch(app, batchId)
     }
 
     private fun apiEmbedding(knowledgeBaseId: String): Boolean =

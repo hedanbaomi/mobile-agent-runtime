@@ -366,6 +366,47 @@ class DocumentParserTest {
     }
 
     @Test
+    fun winAnsiEncodingMapsEuroAndDoesNotClaimLatin1() {
+        val parsed = PdfParser.parse(PdfParser.writeWinAnsiEuroPdf())
+        assertTrue(parsed.pages.single().text.contains("KEEPTOKEN"), parsed.pages.single().text)
+        assertTrue(parsed.pages.single().text.contains("Price: €10"), parsed.pages.single().text)
+        assertFalse(parsed.pages.single().text.contains("\u0080"), parsed.pages.single().text)
+        assertFalse(parsed.needsVision)
+    }
+
+    @Test
+    fun macRomanEncodingMapsEAcute() {
+        val parsed = PdfParser.parse(PdfParser.writeMacRomanCafePdf())
+        assertTrue(parsed.pages.single().text.contains("KEEPTOKEN"), parsed.pages.single().text)
+        assertTrue(parsed.pages.single().text.contains("café"), parsed.pages.single().text)
+        assertFalse(parsed.pages.single().text.contains("\u008E"), parsed.pages.single().text)
+        assertFalse(parsed.needsVision)
+    }
+
+    @Test
+    fun graphicsStateRestoresFontAfterQ() {
+        val parsed = PdfParser.parse(PdfParser.writeFontRestorePdf())
+        assertTrue(parsed.pages.single().text.contains("KEEPTOKEN"), parsed.pages.single().text)
+        assertTrue(parsed.pages.single().text.contains("XYZ"), parsed.pages.single().text)
+        assertTrue(parsed.pages.single().text.contains("ABC"), parsed.pages.single().text)
+        assertFalse(parsed.pages.single().text.matches(Regex(".*XYZ\\s+XYZ.*")), parsed.pages.single().text)
+        assertFalse(parsed.needsVision)
+    }
+
+    @Test
+    fun mixedIncompleteAndImagePagesKeepPageBlockerOnlyOnIncompletePage() {
+        val parsed = PdfParser.parse(PdfParser.writeIncompleteThenImagePagesPdf())
+        assertEquals(listOf(1, 2), parsed.pages.map { it.page })
+        assertEquals("TITLE", parsed.pages[0].text)
+        assertEquals("SECONDPAGEJPEG", parsed.pages[1].text)
+        assertTrue(parsed.pages[0].needsVision)
+        assertTrue(parsed.pages[1].needsVision)
+        assertTrue(parsed.assets.any { it.kind == "PAGE" && it.page == 1 && it.bytes.isEmpty() })
+        assertFalse(parsed.assets.any { it.kind == "PAGE" && it.page == 2 })
+        assertTrue(parsed.assets.any { it.kind == "IMAGE" && it.page == 2 && it.bytes.isNotEmpty() })
+    }
+
+    @Test
     fun nestedLiteralWithImageKeepsInnerText() {
         val parsed = PdfParser.parse(PdfParser.writeNestedLiteralWithImagePdf())
         assertTrue(parsed.pages.single().text.contains("TITLE"), parsed.pages.single().text)

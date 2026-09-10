@@ -7,7 +7,7 @@ import java.io.ByteArrayOutputStream
 import java.util.zip.Inflater
 
 object PdfParser {
-    const val FINGERPRINT = "pdf-text-v9-pdfrenderer"
+    const val FINGERPRINT = "pdf-text-v10-pdfrenderer"
 
     private const val MAX_PDF_STREAM_BYTES = 32 * 1024 * 1024
 
@@ -292,7 +292,9 @@ object PdfParser {
             pages = listOf(
                 PageContent(content, "/Font << /F1 FONT >>"),
             ),
-            fontDict = "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding << /Type /Encoding /BaseEncoding /WinAnsiEncoding /Differences [65 /X 66 /Y 67 /Z] >> >>",
+            fontDicts = listOf(
+                "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding << /Type /Encoding /BaseEncoding /WinAnsiEncoding /Differences [65 /X 66 /Y 67 /Z] >> >>",
+            ),
         )
     }
 
@@ -313,6 +315,78 @@ object PdfParser {
             extraObjects = listOf(imageObj to jpeg),
         )
     }
+
+    fun writeWinAnsiEuroPdf(): ByteArray = assemblePages(
+        pages = listOf(
+            PageContent(
+                "BT /F1 18 Tf 72 720 Td (KEEPTOKEN) Tj 0 -24 Td (Price: \\20010) Tj ET\n",
+                "/Font << /F1 FONT >>",
+            ),
+        ),
+        fontDicts = listOf(
+            "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>",
+        ),
+    )
+
+    fun writeMacRomanCafePdf(): ByteArray = assemblePages(
+        pages = listOf(
+            PageContent(
+                "BT /F1 18 Tf 72 720 Td (KEEPTOKEN) Tj 0 -24 Td (caf\\216) Tj ET\n",
+                "/Font << /F1 FONT >>",
+            ),
+        ),
+        fontDicts = listOf(
+            "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /MacRomanEncoding >>",
+        ),
+    )
+
+    fun writeFontRestorePdf(): ByteArray = assemblePages(
+        pages = listOf(
+            PageContent(
+                "BT /F1 18 Tf 72 720 Td (KEEPTOKEN) Tj q /F2 18 Tf (ABC) Tj Q 0 -30 Td (ABC) Tj ET\n",
+                "/Font << /F1 FONT /F2 FONT2 >>",
+            ),
+        ),
+        fontDicts = listOf(
+            "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+            "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding << /Type /Encoding /BaseEncoding /WinAnsiEncoding /Differences [65 /X 66 /Y 67 /Z] >> >>",
+        ),
+    )
+
+    fun writeIncompleteThenImagePagesPdf(): ByteArray {
+        val jpeg = jpegStub()
+        val imageObj = buildString {
+            append("<< /Type /XObject /Subtype /Image /Width 1 /Height 1 /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /DCTDecode /Length ")
+            append(jpeg.size)
+            append(" >>\nstream\n")
+        }
+        return assemblePages(
+            pages = listOf(
+                PageContent(
+                    "BT /F1 12 Tf 72 720 Td (TITLE) Tj 0 -24 Td <zzzz> Tj ET\n",
+                    "/Font << /F1 FONT >>",
+                ),
+                PageContent(
+                    "BT /F1 12 Tf 72 700 Td (SECONDPAGEJPEG) Tj ET\nq 100 0 0 100 72 400 cm /Im1 Do Q\n",
+                    "/Font << /F1 FONT >> /XObject << /Im1 IMAGE >>",
+                ),
+            ),
+            extraObjects = listOf(imageObj to jpeg),
+        )
+    }
+
+    fun writeIncompleteThenEmptySecondPagePdf(): ByteArray = assemblePages(
+        pages = listOf(
+            PageContent(
+                "BT /F1 12 Tf 72 720 Td (TITLE) Tj 0 -24 Td <zzzz> Tj ET\n",
+                "/Font << /F1 FONT >>",
+            ),
+            PageContent(
+                "BT /F1 12 Tf 72 720 Td ET\n",
+                "/Font << /F1 FONT >>",
+            ),
+        ),
+    )
 
     fun writeUndecodedHexWithImagePdf(literal: String): ByteArray {
         val escaped = literal.replace("\\", "\\\\").replace("(", "\\(").replace(")", "\\)")
@@ -403,7 +477,9 @@ object PdfParser {
     private data class PdfFontEncoding(
         val known: Boolean,
         val differences: Map<Int, String> = emptyMap(),
+        val base: PdfBaseEncoding = PdfBaseEncoding.STANDARD,
     )
+    private enum class PdfBaseEncoding { STANDARD, WIN_ANSI, MAC_ROMAN }
     private data class PdfDictionaryValue(
         val present: Boolean,
         val dictionary: String? = null,
@@ -879,22 +955,35 @@ object PdfParser {
             return PdfFontEncoding(known = false)
         }
         val encoding = namedDictionaryOrReference(dict, "Encoding")
-        if (!encoding.present) return PdfFontEncoding(known = true)
+        if (!encoding.present) return PdfFontEncoding(known = true, base = PdfBaseEncoding.STANDARD)
         if (encoding.malformed) return PdfFontEncoding(known = false)
         val encodingDict = encoding.dictionary ?: encoding.reference
             ?.let { reference -> objects[reference]?.let { dictionaryBody(it.dict) } }
         if (encodingDict != null) {
+            val baseValue = namedDictionaryOrReference(encodingDict, "BaseEncoding")
+            if (baseValue.malformed) return PdfFontEncoding(known = false)
+            val base = if (!baseValue.present) {
+                PdfBaseEncoding.STANDARD
+            } else {
+                encodingByName(baseValue.name) ?: return PdfFontEncoding(known = false)
+            }
             val differencesBody = arrayBody(encodingDict, "Differences")
-            if (differencesBody == null) return PdfFontEncoding(known = true)
+            if (differencesBody == null) return PdfFontEncoding(known = true, base = base)
             val mapped = parseDifferences(differencesBody) ?: return PdfFontEncoding(known = false)
-            return PdfFontEncoding(known = true, differences = mapped)
+            return PdfFontEncoding(known = true, differences = mapped, base = base)
         }
-        return when (encoding.name) {
-            "WinAnsiEncoding", "MacRomanEncoding", "StandardEncoding" -> PdfFontEncoding(known = true)
-            "Identity-H", "Identity-V" -> PdfFontEncoding(known = false)
+        return when (val base = encodingByName(encoding.name)) {
             null -> PdfFontEncoding(known = false)
-            else -> PdfFontEncoding(known = false)
+            else -> PdfFontEncoding(known = true, base = base)
         }
+    }
+
+    private fun encodingByName(name: String?): PdfBaseEncoding? = when (name) {
+        "WinAnsiEncoding" -> PdfBaseEncoding.WIN_ANSI
+        "MacRomanEncoding" -> PdfBaseEncoding.MAC_ROMAN
+        "StandardEncoding" -> PdfBaseEncoding.STANDARD
+        null -> null
+        else -> null
     }
 
     private fun arrayBody(dict: String, name: String): String? {
@@ -969,6 +1058,8 @@ object PdfParser {
         name == "quotesingle" -> "'"
         name == "quotedbl" -> "\""
         name == "underscore" -> "_"
+        name == "Euro" -> "€"
+        name == "eacute" -> "é"
         else -> null
     }
 
@@ -1127,6 +1218,7 @@ object PdfParser {
         val texts = mutableListOf<String>()
         val stack = mutableListOf<PdfContentToken>()
         var fontName: String? = null
+        val graphicsFonts = mutableListOf<String?>()
 
         fun encoding(): PdfFontEncoding {
             val name = fontName
@@ -1149,6 +1241,18 @@ object PdfParser {
                 return@forEach
             }
             when (token.name) {
+                "q" -> {
+                    if (pop(0) == null) complete = false
+                    graphicsFonts += fontName
+                }
+                "Q" -> {
+                    if (pop(0) == null) complete = false
+                    if (graphicsFonts.isEmpty()) {
+                        complete = false
+                    } else {
+                        fontName = graphicsFonts.removeAt(graphicsFonts.lastIndex)
+                    }
+                }
                 "Tf" -> {
                     val ops = pop(2)
                     if (ops == null) {
@@ -1226,17 +1330,87 @@ object PdfParser {
             return DecodedShow(String(bytes, Charsets.ISO_8859_1), complete = false)
         }
         val out = StringBuilder()
+        var complete = true
         for (byte in bytes) {
             val code = byte.toInt() and 0xff
-            val mapped = encoding.differences[code]
-            if (mapped != null) {
-                out.append(mapped)
-            } else {
+            val mapped = encoding.differences[code] ?: mapBaseByte(encoding.base, code)
+            if (mapped == null) {
+                complete = false
                 out.append(String(byteArrayOf(byte), Charsets.ISO_8859_1))
+            } else {
+                out.append(mapped)
             }
         }
-        return DecodedShow(out.toString(), complete = true)
+        return DecodedShow(out.toString(), complete)
     }
+
+    private fun mapBaseByte(base: PdfBaseEncoding, code: Int): String? {
+        if (code in 0x20..0x7E) return code.toChar().toString()
+        return when (base) {
+            PdfBaseEncoding.STANDARD -> null
+            PdfBaseEncoding.WIN_ANSI -> winAnsiChar(code)
+            PdfBaseEncoding.MAC_ROMAN -> macRomanChar(code)
+        }
+    }
+
+    private fun winAnsiChar(code: Int): String? {
+        if (code in 0xA0..0xFF) return String(byteArrayOf(code.toByte()), Charsets.ISO_8859_1)
+        return when (code) {
+            0x80 -> "€"
+            0x82 -> "‚"
+            0x83 -> "ƒ"
+            0x84 -> "„"
+            0x85 -> "…"
+            0x86 -> "†"
+            0x87 -> "‡"
+            0x88 -> "ˆ"
+            0x89 -> "‰"
+            0x8A -> "Š"
+            0x8B -> "‹"
+            0x8C -> "Œ"
+            0x8E -> "Ž"
+            0x91 -> "‘"
+            0x92 -> "’"
+            0x93 -> "“"
+            0x94 -> "”"
+            0x95 -> "•"
+            0x96 -> "–"
+            0x97 -> "—"
+            0x98 -> "˜"
+            0x99 -> "™"
+            0x9A -> "š"
+            0x9B -> "›"
+            0x9C -> "œ"
+            0x9E -> "ž"
+            0x9F -> "Ÿ"
+            else -> null
+        }
+    }
+
+    private fun macRomanChar(code: Int): String? {
+        val mapped = MAC_ROMAN_80.getOrNull(code - 0x80) ?: return null
+        return mapped.takeIf { it.isNotEmpty() }
+    }
+
+    // PDF MacRomanEncoding 0x80–0xFF. Empty slots are undefined and fail closed.
+    private val MAC_ROMAN_80 = arrayOf(
+        "Ä", "Å", "Ç", "É", "Ñ", "Ö", "Ü", "á",
+        "à", "â", "ä", "ã", "å", "ç", "é", "è",
+        "ê", "ë", "í", "ì", "î", "ï", "ñ", "ó",
+        "ò", "ô", "ö", "õ", "ú", "ù", "û", "ü",
+        "†", "°", "¢", "£", "§", "•", "¶", "ß",
+        "®", "©", "™", "´", "¨", "≠", "Æ", "Ø",
+        "∞", "±", "≤", "≥", "¥", "µ", "∂", "∑",
+        "∏", "π", "∫", "ª", "º", "Ω", "æ", "ø",
+        "¿", "¡", "¬", "√", "ƒ", "≈", "∆", "«",
+        "»", "…", "\u00A0", "À", "Ã", "Õ", "Œ", "œ",
+        "–", "—", "“", "”", "‘", "’", "÷", "◊",
+        "ÿ", "Ÿ", "⁄", "€", "‹", "›", "ﬁ", "ﬂ",
+        "‡", "·", "‚", "„", "‰", "Â", "Ê", "Á",
+        "Ë", "È", "Í", "Î", "Ï", "Ì", "Ó", "Ô",
+        "", "Ò", "Ú", "Û", "Ù", "ı", "ˆ", "˜",
+        "¯", "˘", "˙", "˚", "¸", "˝", "˛", "ˇ",
+    )
 
     private fun decodeTjArrayTokens(
         items: List<PdfContentToken>,
@@ -1609,13 +1783,13 @@ object PdfParser {
     private fun assemblePages(
         pages: List<PageContent>,
         extraObjects: List<Pair<String, ByteArray>> = emptyList(),
-        fontDict: String = "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+        fontDicts: List<String> = listOf("<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>"),
     ): ByteArray {
         val n = pages.size
         val objects = mutableListOf<ByteArray>()
         fun obj(body: String) = body.toByteArray(Charsets.ISO_8859_1)
         val fontObj = 3 + (2 * n)
-        val firstExtra = fontObj + 1
+        val firstExtra = fontObj + fontDicts.size
         objects += obj("1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n")
         val kids = (0 until n).joinToString(" ") { "${3 + it} 0 R" }
         objects += obj("2 0 obj\n<< /Type /Pages /Kids [$kids] /Count $n >>\nendobj\n")
@@ -1623,6 +1797,7 @@ object PdfParser {
             val pageObj = 3 + index
             val contentObj = 3 + n + index
             val resources = page.resources
+                .replace("FONT2", "${fontObj + 1} 0 R")
                 .replace("FONT", "$fontObj 0 R")
                 .replace("IMAGE", "$firstExtra 0 R")
             objects += obj(
@@ -1635,7 +1810,9 @@ object PdfParser {
             objects += obj("$contentObj 0 obj\n<< /Length ${contentBytes.size} >>\nstream\n") +
                 contentBytes + obj("\nendstream\nendobj\n")
         }
-        objects += obj("$fontObj 0 obj\n$fontDict\nendobj\n")
+        fontDicts.forEachIndexed { index, fontDict ->
+            objects += obj("${fontObj + index} 0 obj\n$fontDict\nendobj\n")
+        }
         extraObjects.forEachIndexed { index, (dictPrefix, payload) ->
             val num = firstExtra + index
             objects += obj("$num 0 obj\n$dictPrefix") + payload + obj("\nendstream\nendobj\n")

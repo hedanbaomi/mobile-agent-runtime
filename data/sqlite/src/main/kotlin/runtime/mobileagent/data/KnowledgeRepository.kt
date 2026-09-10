@@ -2233,23 +2233,21 @@ class KnowledgeRepository(
 
         // Keep source image payloads short-lived.  In particular, do not pass
         // the complete list to processAssets while a large PDF is in flight.
-        // A PAGE blocker means the extracted text is incomplete or the page
-        // visual cannot be represented by an embedded JPEG; do not send that
-        // JPEG as a substitute for a complete page render.
-        if (pageBlockers.isEmpty()) {
-            processable.forEach { asset ->
-                appendOutcome(processAssets(job, listOf(asset)))?.let { return it }
-            }
+        // A PAGE blocker means that page's embedded JPEG is not complete
+        // evidence. Other pages may still have usable images.
+        val coveredPages = mutableSetOf<Int>()
+        processable.forEach { asset ->
+            val page = asset.page
+            if (page != null && page in blockerPages) return@forEach
+            appendOutcome(processAssets(job, listOf(asset)))?.let { return it }
+            if (page != null) coveredPages += page
         }
 
         if (parsed.format == SourceFormat.PDF && pdfRasterizer != null) {
             pagesNeedingVision.forEach { pageNumber ->
                 val rendered = PdfParser.renderPage(bytes, pdfRasterizer, pageNumber)
                 if (rendered == null) {
-                    // Raw embedded images can remain valid evidence when a
-                    // renderer cannot produce a complete page.  A PAGE asset,
-                    // however, is an explicit blocker and must fail closed.
-                    if (pageNumber in blockerPages) {
+                    if (pageNumber in blockerPages || pageNumber !in coveredPages) {
                         return VisionBatch.Failed(
                             "PDF page $pageNumber could not be rasterized locally. The document is not READY.",
                         )
@@ -2266,18 +2264,14 @@ class KnowledgeRepository(
                     surroundingText = parsed.pages.firstOrNull { it.page == pageNumber }?.text.orEmpty(),
                 )
                 appendOutcome(processAssets(job, listOf(pageAsset)))?.let { return it }
+                coveredPages += pageNumber
             }
         }
 
-        if (pageBlockers.isNotEmpty()) {
-            // A PDF with PAGE blockers must have produced one complete render
-            // for every blocked page before it can become READY.
-            val renderedPages = pagesNeedingVision.filter { it in blockerPages }
-            if (renderedPages.size != blockerPages.size) {
-                return VisionBatch.Failed(
-                    "Visual page evidence could not be rasterized locally. The document is not READY.",
-                )
-            }
+        if (blockerPages.any { it !in coveredPages } || pagesNeedingVision.any { it !in coveredPages }) {
+            return VisionBatch.Failed(
+                "Visual page evidence could not be rasterized locally. The document is not READY.",
+            )
         }
         return VisionBatch.Ok(chunks)
     }

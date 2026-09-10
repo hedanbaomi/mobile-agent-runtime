@@ -1754,6 +1754,129 @@ class KnowledgeRepositoryTest {
     }
 
     @Test
+    fun winAnsiEuroPdfIsSearchableWithoutVision() {
+        val db = JdbcSqlConnection()
+        Migrations.apply(db)
+        val repo = KnowledgeRepository(db, MemoryBlobSink())
+        val job = repo.importBytes(
+            "winansi.pdf",
+            "application/pdf",
+            runtime.mobileagent.knowledge.PdfParser.writeWinAnsiEuroPdf(),
+            visionConfigured = false,
+        )
+        assertEquals(ImportStage.READY, job.stage, job.error)
+        val hits = repo.search("KEEPTOKEN")
+        assertTrue(hits.any { "KEEPTOKEN" in it.text && "Price: €10" in it.text }, hits.map { it.text }.toString())
+    }
+
+    @Test
+    fun macRomanCafePdfIsSearchableWithoutVision() {
+        val db = JdbcSqlConnection()
+        Migrations.apply(db)
+        val repo = KnowledgeRepository(db, MemoryBlobSink())
+        val job = repo.importBytes(
+            "macroman.pdf",
+            "application/pdf",
+            runtime.mobileagent.knowledge.PdfParser.writeMacRomanCafePdf(),
+            visionConfigured = false,
+        )
+        assertEquals(ImportStage.READY, job.stage, job.error)
+        val hits = repo.search("KEEPTOKEN")
+        assertTrue(hits.any { "KEEPTOKEN" in it.text && "café" in it.text }, hits.map { it.text }.toString())
+    }
+
+    @Test
+    fun graphicsStateFontRestorePdfIsSearchableAsBothFonts() {
+        val db = JdbcSqlConnection()
+        Migrations.apply(db)
+        val repo = KnowledgeRepository(db, MemoryBlobSink())
+        val job = repo.importBytes(
+            "font-restore.pdf",
+            "application/pdf",
+            runtime.mobileagent.knowledge.PdfParser.writeFontRestorePdf(),
+            visionConfigured = false,
+        )
+        assertEquals(ImportStage.READY, job.stage, job.error)
+        val hits = repo.search("KEEPTOKEN")
+        assertTrue(
+            hits.any { "KEEPTOKEN" in it.text && "XYZ" in it.text && "ABC" in it.text },
+            hits.map { it.text }.toString(),
+        )
+    }
+
+    @Test
+    fun mixedPageJpegIsProcessedWhenAnotherPageHasAPageBlocker() {
+        val db = JdbcSqlConnection()
+        Migrations.apply(db)
+        val seenPages = mutableListOf<Int?>()
+        val vision = runtime.mobileagent.knowledge.VisionBackend { input ->
+            seenPages += input.page
+            runtime.mobileagent.knowledge.VisionOutcome.Success(
+                runtime.mobileagent.knowledge.VisionSuccess("ocr-${input.page}", "desc-page-${input.page}"),
+            )
+        }
+        val repo = KnowledgeRepository(
+            db,
+            MemoryBlobSink(),
+            vision = vision,
+            visionBinding = {
+                runtime.mobileagent.knowledge.VisionBinding("prov-a", "vision-model", "https://a.example.invalid/v1", 1)
+            },
+            pdfRasterizer = PdfPageRasterizer { _, pages ->
+                pages.filter { it == 1 }.map { page ->
+                    RenderedPdfPage(page, byteArrayOf(page.toByte(), 2, 3), "image/png", 2, 2)
+                }
+            },
+        )
+        val job = repo.importBytes(
+            "mixed-pages.pdf",
+            "application/pdf",
+            runtime.mobileagent.knowledge.PdfParser.writeIncompleteThenImagePagesPdf(),
+            visionConfigured = true,
+            visionConsent = true,
+        )
+        assertEquals(ImportStage.READY, job.stage, job.error)
+        assertTrue(seenPages.containsAll(listOf(1, 2)), seenPages.toString())
+        assertTrue(repo.search("desc-page-1").isNotEmpty())
+        assertTrue(repo.search("desc-page-2").isNotEmpty())
+        assertTrue(repo.search("SECONDPAGEJPEG").isNotEmpty())
+    }
+
+    @Test
+    fun uncoveredNeedsVisionPageFailsWhenRasterizerMissesIt() {
+        val db = JdbcSqlConnection()
+        Migrations.apply(db)
+        val vision = runtime.mobileagent.knowledge.VisionBackend {
+            runtime.mobileagent.knowledge.VisionOutcome.Success(
+                runtime.mobileagent.knowledge.VisionSuccess("ocr", "partial-cover"),
+            )
+        }
+        val repo = KnowledgeRepository(
+            db,
+            MemoryBlobSink(),
+            vision = vision,
+            visionBinding = {
+                runtime.mobileagent.knowledge.VisionBinding("prov-a", "vision-model", "https://a.example.invalid/v1", 1)
+            },
+            pdfRasterizer = PdfPageRasterizer { _, pages ->
+                pages.filter { it == 1 }.map { page ->
+                    RenderedPdfPage(page, byteArrayOf(page.toByte(), 2, 3), "image/png", 2, 2)
+                }
+            },
+        )
+        val job = repo.importBytes(
+            "uncovered.pdf",
+            "application/pdf",
+            runtime.mobileagent.knowledge.PdfParser.writeIncompleteThenEmptySecondPagePdf(),
+            visionConfigured = true,
+            visionConsent = true,
+        )
+        assertEquals(ImportStage.FAILED, job.stage)
+        assertFalse(ImportStateMachine.isCompleteSuccess(job))
+        assertTrue(repo.search("partial-cover").isEmpty())
+    }
+
+    @Test
     fun staleParserFingerprintReimportsTheSameBlob() {
         val db = JdbcSqlConnection()
         Migrations.apply(db)

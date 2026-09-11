@@ -394,6 +394,45 @@ class DocumentParserTest {
         assertTrue(parsed.assets.none { it.kind == "PAGE" }, parsed.assets.toString())
     }
 
+    /**
+     * Dictionary lexicon shapes that a flat `/Name` scan mis-reads: a comment
+     * between the key and its value, a `]` or `>>` inside a comment or string, a
+     * same-named key in a nested dictionary, and `/Differences` used as a name
+     * value before the real key. Each one previously dropped the declared mapping
+     * and published the undeclared bytes as complete text.
+     */
+    @Test
+    fun differencesIsFoundAcrossLexiconShapesOtherwiseDiscardedByAFlatScan() {
+        val base = "/Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding << /BaseEncoding /WinAnsiEncoding"
+        val tail = "/Differences [65 /X 66 /Y 67 /Z] >> >>"
+        val cases = mapOf(
+            "comment after key" to "$base /Differences % harmless comment\n [65 /X 66 /Y 67 /Z] >> >>",
+            "comment containing array closer" to "$base /Differences [ % ] harmless comment\n 65 /X 66 /Y 67 /Z] >> >>",
+            "comment containing dict closer" to "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding << /BaseEncoding /WinAnsiEncoding % >> harmless comment\n $tail",
+            "string containing dict closer" to "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding << /BaseEncoding /WinAnsiEncoding /Note (>>) $tail",
+            "same name in nested dictionary" to "$base /Private << /Differences [] >> $tail",
+            "name value before the real key" to "$base /Custom /Differences $tail",
+        )
+        cases.forEach { (label, fontDict) ->
+            val parsed = PdfParser.parse(PdfParser.writeVerbatimFontDictPdf(fontDict, literal = "KEEPTOKEN"))
+            val text = parsed.pages.single().text
+            assertTrue(text.contains("KEEPTOKEN"), "$label: $text")
+            assertTrue(text.contains("XYZ"), "$label: $text")
+            assertFalse(text.contains("ABC"), "$label: $text")
+            assertFalse(parsed.needsVision, "$label: $text")
+        }
+    }
+
+    @Test
+    fun malformedDifferencesValueFailsClosedInsteadOfPublishingUnmappedText() {
+        val fontDict = "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding " +
+            "<< /BaseEncoding /WinAnsiEncoding /Differences 5 >> >>"
+        val parsed = PdfParser.parse(PdfParser.writeVerbatimFontDictPdf(fontDict, literal = "KEEPTOKEN"))
+        assertTrue(parsed.pages.single().text.contains("KEEPTOKEN"), parsed.pages.single().text)
+        assertTrue(parsed.pages.single().needsVision, parsed.pages.single().text)
+        assertTrue(parsed.needsVision)
+        assertTrue(parsed.assets.any { it.kind == "PAGE" && it.page == 1 }, parsed.assets.toString())
+    }
     @Test
     fun escapedEncodingAndDifferencesKeysDecodeLikeTheirLiteralSpelling() {
         val literal = PdfParser.parse(PdfParser.writeDifferencesWithKeySpellingsPdf(literal = "KEEPTOKEN"))

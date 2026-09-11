@@ -8,7 +8,7 @@ import java.util.zip.DeflaterOutputStream
 import java.util.zip.Inflater
 
 object PdfParser {
-    const val FINGERPRINT = "pdf-text-v13-pdfrenderer"
+    const val FINGERPRINT = "pdf-text-v14-pdfrenderer"
 
     private const val MAX_PDF_STREAM_BYTES = 32 * 1024 * 1024
 
@@ -348,6 +348,24 @@ object PdfParser {
         writeBuiltInFontTextPdf(label, "ZapfDingbats", dingbatBytes)
 
     /**
+     * Font fixture with a verbatim font dictionary, so dictionary-lexicon shapes
+     * (comments inside the encoding dictionary, `>>` inside a value string, a
+     * same-named key in a nested dictionary, `/Differences` used as a name value)
+     * can be exercised without hand-building each PDF.
+     */
+    fun writeVerbatimFontDictPdf(fontDict: String, literal: String? = null): ByteArray {
+        val content = if (literal.isNullOrEmpty()) {
+            "BT /F1 18 Tf 72 720 Td <414243> Tj ET\n"
+        } else {
+            val escaped = literal.replace("\\", "\\\\").replace("(", "\\(").replace(")", "\\)")
+            "BT /F1 18 Tf 72 720 Td ($escaped) Tj 0 -30 Td <414243> Tj ET\n"
+        }
+        return assemblePages(
+            pages = listOf(PageContent(content, "/Font << /F1 FONT >>")),
+            fontDicts = listOf(fontDict),
+        )
+    }
+    /**
      * Differences mapping fixture whose `/Encoding` and `/Differences` keys are
      * written with the given spellings, so escaped forms such as `/Enc#6Fding` can
      * be compared against the literal key.
@@ -574,6 +592,11 @@ object PdfParser {
         val present: Boolean,
         val dictionary: String? = null,
         val reference: Int? = null,
+        val malformed: Boolean = false,
+    )
+    private data class PdfArrayValue(
+        val present: Boolean,
+        val body: String? = null,
         val malformed: Boolean = false,
     )
     private data class PdfNamedValue(
@@ -1057,9 +1080,10 @@ object PdfParser {
             } else {
                 encodingByName(baseValue.name) ?: return PdfFontEncoding(known = false)
             }
-            val differencesBody = arrayBody(encodingDict, "Differences")
-            if (differencesBody == null) return PdfFontEncoding(known = true, base = base)
-            val mapped = parseDifferences(differencesBody) ?: return PdfFontEncoding(known = false)
+            val differences = arrayBody(encodingDict, "Differences")
+            if (!differences.present) return PdfFontEncoding(known = true, base = base)
+            if (differences.malformed) return PdfFontEncoding(known = false)
+            val mapped = parseDifferences(differences.body.orEmpty()) ?: return PdfFontEncoding(known = false)
             return PdfFontEncoding(known = true, differences = mapped, base = base)
         }
         return when (val base = encodingByName(encoding.name)) {
@@ -1107,30 +1131,52 @@ object PdfParser {
         else -> null
     }
 
-    private fun arrayBody(dict: String, name: String): String? {
-        val keyEnd = findPdfKeyEnd(dict, name)
-        if (keyEnd < 0) return null
-        var index = keyEnd
-        while (index < dict.length && isPdfWhitespace(dict[index])) index++
-        if (index >= dict.length || dict[index] != '[') return ""
-        val start = index + 1
-        var depth = 1
-        index++
-        while (index < dict.length && depth > 0) {
-            when (dict[index]) {
-                '[' -> {
+    /**
+     * Locate a top-level array value. Absent, malformed and legitimately empty are
+     * three different answers: collapsing them would let a malformed `/Differences`
+     * silently degrade to "no differences", which republishes the undeclared bytes
+     * as complete text.
+     */
+    private fun arrayBody(dict: String, name: String): PdfArrayValue {
+        val valueStart = findTopLevelValueStart(dict, name)
+        if (valueStart < 0) return PdfArrayValue(present = false)
+        if (valueStart >= dict.length || dict[valueStart] != '[') return PdfArrayValue(present = true, malformed = true)
+        val end = arrayEnd(dict, valueStart)
+        if (end < 0) return PdfArrayValue(present = true, malformed = true)
+        return PdfArrayValue(present = true, body = dict.substring(valueStart + 1, end - 1))
+    }
+
+    /**
+     * Index just past the `]` closing the array that starts at [start], skipping
+     * comments, literal strings, hex strings and nested structures. A `]` inside
+     * any of those does not close the array.
+     */
+    private fun arrayEnd(text: String, start: Int): Int {
+        if (start >= text.length || text[start] != '[') return -1
+        var index = start
+        var depth = 0
+        while (index < text.length) {
+            val char = text[index]
+            val next = when {
+                char == '%' -> endOfPdfComment(text, index)
+                char == '(' -> endOfLiteralString(text, index)
+                char == '<' && text.startsWith("<<", index) -> dictionaryEnd(text, index)
+                char == '<' -> endOfHexString(text, index)
+                char == '[' -> {
                     depth++
-                    index++
+                    index + 1
                 }
-                ']' -> {
+                char == ']' -> {
                     depth--
-                    index++
+                    index + 1
                 }
-                else -> index++
+                else -> index + 1
             }
+            if (next < 0) return -1
+            if (char == ']' && depth == 0) return next
+            index = next
         }
-        if (depth != 0) return ""
-        return dict.substring(start, index - 1)
+        return -1
     }
 
     private fun parseDifferences(body: String): Map<Int, String>? {
@@ -1191,44 +1237,101 @@ object PdfParser {
             value == '/' || value == '%'
 
     /**
-     * Index just past the value-name token for [name] in a dictionary body, or -1
-     * when the decoded key is absent.
+     * Index of the value token for the *top-level* [name] key of a dictionary body,
+     * or -1 when that key is absent.
      *
      * PDF 32000-1 7.3.5 allows any byte of a name to be escaped as `#` plus two
-     * hex digits, so `/Enc#6Fding` and `/Encoding` are the same key. Decoding the
-     * key instead of matching its raw spelling matters for correctness: a key that
-     * looks absent silently selects a weaker default, for example dropping a
-     * declared `/Differences` map or treating a Flate content stream as unfiltered
-     * text, and the wrong bytes are then published as complete text.
+     * hex digits, so `/Enc#6Fding` and `/Encoding` are the same key; keys must be
+     * decoded before they are compared.
      *
-     * Literal strings and comments are skipped so a `/Name` inside them is never
-     * mistaken for a key. Nested dictionaries and arrays are scanned, matching the
-     * flat depth-first lookup the callers rely on.
+     * Key lookup walks the body as a token stream instead of scanning for `/Name`
+     * substrings and instead of matching wherever a name happens to appear. A flat
+     * scan cannot tell three different things apart — a name used as a *value*
+     * (`/Custom /Differences [...]`), a same-named key inside a nested dictionary
+     * (`/Private << /Differences [] >>`), and a `/Name` that only occurs inside a
+     * comment or string. Any of those makes a declared key look absent, which
+     * silently selects a weaker default (for example dropping the `/Differences`
+     * map) and publishes the wrong bytes as complete text.
      */
-    private fun findPdfKeyEnd(dict: String, name: String): Int {
-        var index = 0
+    private fun findTopLevelValueStart(dict: String, name: String): Int {
+        var index = skipPdfSpaceAndComments(dict, 0)
+        if (dict.startsWith("<<", index)) index = skipPdfSpaceAndComments(dict, index + 2)
+        var expectKey = true
         while (index < dict.length) {
-            when (dict[index]) {
-                '%' -> while (index < dict.length && dict[index] != '\n' && dict[index] != '\r') index++
-                '(' -> index = skipLiteralString(dict, index)
-                '/' -> {
-                    val start = index + 1
-                    var end = start
-                    while (end < dict.length && !isPdfWhitespace(dict[end]) && !isPdfDelimiter(dict[end])) end++
-                    if (decodePdfName(dict.substring(start, end)) == name) return end
-                    index = end
-                }
-                else -> index++
+            index = skipPdfSpaceAndComments(dict, index)
+            if (index >= dict.length || dict.startsWith(">>", index)) return -1
+            if (expectKey) {
+                if (dict[index] != '/') return -1
+                val nameEnd = endOfPdfName(dict, index)
+                val matched = decodePdfName(dict.substring(index + 1, nameEnd)) == name
+                index = nameEnd
+                if (matched) return skipPdfSpaceAndComments(dict, index)
+                expectKey = false
+            } else {
+                val valueEnd = skipPdfValue(dict, index)
+                if (valueEnd < 0) return -1
+                index = valueEnd
+                expectKey = true
             }
         }
         return -1
     }
 
-    /** Index just past the closing `)` of the literal string starting at [start]. */
-    private fun skipLiteralString(text: String, start: Int): Int {
+    /** Index just past one value token, or -1 when it is malformed. */
+    private fun skipPdfValue(text: String, start: Int): Int {
+        if (start >= text.length) return -1
+        return when {
+            text.startsWith("<<", start) -> dictionaryEnd(text, start)
+            text[start] == '[' -> arrayEnd(text, start)
+            text[start] == '(' -> endOfLiteralString(text, start)
+            text[start] == '<' -> endOfHexString(text, start)
+            text[start] == '/' -> endOfPdfName(text, start)
+            else -> endOfPdfSimpleValue(text, start)
+        }
+    }
+
+    /**
+     * A number, boolean, null, or an indirect reference `n 0 R`. The reference form
+     * spans three tokens, so a caller that stops after the first integer would
+     * mistake the object number for a key and abandon the rest of the dictionary.
+     */
+    private fun endOfPdfSimpleValue(text: String, start: Int): Int {
+        val first = endOfRegularToken(text, start)
+        if (first < 0) return -1
+        if (text.substring(start, first).toLongOrNull() == null) return first
+        val second = skipPdfSpaceAndComments(text, first)
+        if (second >= text.length || !text[second].isDigit()) return first
+        val secondEnd = endOfRegularToken(text, second)
+        if (secondEnd < 0) return first
+        val marker = skipPdfSpaceAndComments(text, secondEnd)
+        if (marker < text.length && text[marker] == 'R' && isPdfTokenEnd(text, marker + 1)) return marker + 1
+        return first
+    }
+
+    private fun skipPdfSpaceAndComments(text: String, start: Int): Int {
+        var index = start
+        while (index < text.length) {
+            when {
+                isPdfWhitespace(text[index]) -> index++
+                text[index] == '%' -> index = endOfPdfComment(text, index)
+                else -> return index
+            }
+        }
+        return index
+    }
+
+    private fun endOfPdfComment(text: String, start: Int): Int {
+        var index = start
+        while (index < text.length && text[index] != '\n' && text[index] != '\r') index++
+        return index
+    }
+
+    /** Index just past the `)` closing the literal string at [start], or -1. */
+    private fun endOfLiteralString(text: String, start: Int): Int {
+        if (start >= text.length || text[start] != '(') return -1
         var index = start + 1
         var depth = 1
-        while (index < text.length && depth > 0) {
+        while (index < text.length) {
             when (text[index]) {
                 '\\' -> index += 2
                 '(' -> {
@@ -1238,12 +1341,44 @@ object PdfParser {
                 ')' -> {
                     depth--
                     index++
+                    if (depth == 0) return index
                 }
                 else -> index++
             }
         }
-        return if (depth == 0) index else text.length
+        return -1
     }
+
+    /** Index just past the `>` closing the hex string at [start], or -1. */
+    private fun endOfHexString(text: String, start: Int): Int {
+        if (start >= text.length || text[start] != '<') return -1
+        var index = start + 1
+        while (index < text.length) {
+            if (text[index] == '>') return index + 1
+            index++
+        }
+        return -1
+    }
+
+    /**
+     * Index just past the name token that starts with `/` at [start]. `/` is itself
+     * a PDF delimiter, so the scan must begin one character after it.
+     */
+    private fun endOfPdfName(text: String, start: Int): Int {
+        if (start >= text.length || text[start] != '/') return -1
+        var index = start + 1
+        while (index < text.length && !isPdfWhitespace(text[index]) && !isPdfDelimiter(text[index])) index++
+        return index
+    }
+
+    private fun endOfRegularToken(text: String, start: Int): Int {
+        var index = start
+        while (index < text.length && !isPdfWhitespace(text[index]) && !isPdfDelimiter(text[index])) index++
+        return if (index > start) index else -1
+    }
+
+    private fun isPdfTokenEnd(text: String, index: Int): Boolean =
+        index >= text.length || isPdfWhitespace(text[index]) || isPdfDelimiter(text[index])
 
     /**
      * PDF 32000-1 7.3.5: a name may spell any byte as `#` plus two hex digits, so
@@ -1287,10 +1422,8 @@ object PdfParser {
     }
 
     private fun dictionaryOrReference(dict: String, name: String): PdfDictionaryValue {
-        val keyEnd = findPdfKeyEnd(dict, name)
-        if (keyEnd < 0) return PdfDictionaryValue(present = false)
-        var valueStart = keyEnd
-        while (valueStart < dict.length && isPdfWhitespace(dict[valueStart])) valueStart++
+        val valueStart = findTopLevelValueStart(dict, name)
+        if (valueStart < 0) return PdfDictionaryValue(present = false)
         if (valueStart >= dict.length) return PdfDictionaryValue(present = true, malformed = true)
         if (dict.startsWith("<<", valueStart)) {
             val end = dictionaryEnd(dict, valueStart)
@@ -1316,10 +1449,8 @@ object PdfParser {
     }
 
     private fun namedDictionaryOrReference(dict: String, name: String): PdfNamedValue {
-        val keyEnd = findPdfKeyEnd(dict, name)
-        if (keyEnd < 0) return PdfNamedValue(present = false)
-        var valueStart = keyEnd
-        while (valueStart < dict.length && isPdfWhitespace(dict[valueStart])) valueStart++
+        val valueStart = findTopLevelValueStart(dict, name)
+        if (valueStart < 0) return PdfNamedValue(present = false)
         if (valueStart >= dict.length) return PdfNamedValue(present = true, malformed = true)
         if (dict.startsWith("<<", valueStart)) {
             val end = dictionaryEnd(dict, valueStart)
@@ -1351,11 +1482,17 @@ object PdfParser {
         return end.takeIf { it >= 0 }?.let { body.substring(start, it) }
     }
 
+    /**
+     * Index just past the `>>` closing the dictionary that starts at [start], or -1.
+     * Comments, literal strings and hex strings are skipped: a `>>` inside any of
+     * them does not close the dictionary, and counting raw `>>` occurrences would
+     * truncate the dictionary and hide the keys declared after it.
+     */
     private fun dictionaryEnd(text: String, start: Int): Int {
-        if (start < 0 || start + 1 >= text.length || !text.startsWith("<<", start)) return -1
+        if (start < 0 || !text.startsWith("<<", start)) return -1
         var depth = 0
         var index = start
-        while (index + 1 < text.length) {
+        while (index < text.length) {
             when {
                 text.startsWith("<<", index) -> {
                     depth++
@@ -1366,6 +1503,17 @@ object PdfParser {
                     index += 2
                     if (depth == 0) return index
                 }
+                text[index] == '%' -> {
+                    index = endOfPdfComment(text, index)
+                }
+                text[index] == '(' -> {
+                    index = endOfLiteralString(text, index)
+                    if (index < 0) return -1
+                }
+                text[index] == '<' -> {
+                    index = endOfHexString(text, index)
+                    if (index < 0) return -1
+                }
                 else -> index++
             }
         }
@@ -1373,23 +1521,19 @@ object PdfParser {
     }
 
     private fun streamFilters(dict: String): List<String> {
-        val keyEnd = findPdfKeyEnd(dict, "Filter")
-        if (keyEnd < 0) return emptyList()
-        var index = keyEnd
-        while (index < dict.length && isPdfWhitespace(dict[index])) index++
-        if (index >= dict.length) return emptyList()
-        if (dict[index] == '[') {
+        val valueStart = findTopLevelValueStart(dict, "Filter")
+        if (valueStart < 0 || valueStart >= dict.length) return emptyList()
+        if (dict[valueStart] == '[') {
             val body = arrayBody(dict, "Filter")
-            if (body.isNullOrEmpty()) return emptyList()
-            return Regex("/([^\\s<>\\[\\]()/%]+)").findAll(body)
+            if (!body.present || body.malformed) return emptyList()
+            return Regex("/([^\\s<>\\[\\]()/%]+)").findAll(body.body.orEmpty())
                 .map { decodePdfName(it.groupValues[1]) }
                 .toList()
         }
-        if (dict[index] != '/') return emptyList()
-        val start = index + 1
-        var end = start
-        while (end < dict.length && !isPdfWhitespace(dict[end]) && !isPdfDelimiter(dict[end])) end++
-        return listOf(decodePdfName(dict.substring(start, end)))
+        if (dict[valueStart] != '/') return emptyList()
+        val end = endOfPdfName(dict, valueStart)
+        if (end < 0) return emptyList()
+        return listOf(decodePdfName(dict.substring(valueStart + 1, end)))
     }
 
     private fun decodeContentStream(obj: PdfObject): DecodedPageContent {

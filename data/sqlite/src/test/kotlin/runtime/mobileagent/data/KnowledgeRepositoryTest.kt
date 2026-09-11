@@ -26,6 +26,7 @@ import runtime.mobileagent.knowledge.sha256Hex
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.runBlocking
 import java.io.ByteArrayOutputStream
+import java.io.File
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
@@ -230,6 +231,94 @@ class KnowledgeRepositoryTest {
         assertTrue(hits.any { "target-marker" in it.text })
     }
 
+    /**
+     * Both ZIP headers carry the CRC of the stored body, so an archive whose bytes
+     * were altered after the fact still passes the header comparison. The file-backed
+     * import path must verify the decompressed body before any entry reaches the
+     * repository, otherwise altered content is published as if it were intact.
+     */
+    /** Repository publishing regression for the dictionary lexicon shapes. */
+    @Test
+    fun pdfWithDifferencesBehindCommentsAndNestingPublishesMappedGlyphsAsReady() {
+        val lexiconShapes = listOf(
+            "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding << /BaseEncoding /WinAnsiEncoding" +
+                " /Differences % harmless comment\n [65 /X 66 /Y 67 /Z] >> >>",
+            "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding << /BaseEncoding /WinAnsiEncoding /Note (>>)" +
+                " /Differences [65 /X 66 /Y 67 /Z] >> >>",
+            "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding << /BaseEncoding /WinAnsiEncoding" +
+                " /Private << /Differences [] >> /Differences [65 /X 66 /Y 67 /Z] >> >>",
+            "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding << /BaseEncoding /WinAnsiEncoding" +
+                " /Custom /Differences /Differences [65 /X 66 /Y 67 /Z] >> >>",
+        )
+        lexiconShapes.forEachIndexed { index, fontDict ->
+            val db = JdbcSqlConnection()
+            Migrations.apply(db)
+            val repo = KnowledgeRepository(db, MemoryBlobSink())
+            val job = repo.importBytes(
+                "lexicon-$index.pdf",
+                "application/pdf",
+                runtime.mobileagent.knowledge.PdfParser.writeVerbatimFontDictPdf(fontDict, literal = "KEEPTOKEN"),
+                visionConfigured = false,
+            )
+            assertEquals(ImportStage.READY, job.stage, "shape $index: ${job.error}")
+            val hits = repo.search("KEEPTOKEN")
+            assertTrue(
+                hits.any { "KEEPTOKEN" in it.text && "XYZ" in it.text && "ABC" !in it.text },
+                "shape $index: ${hits.map { it.text }}",
+            )
+            val status = db.query("SELECT status FROM document_versions WHERE document_id = ?", listOf(job.documentId))
+                .single().string("status")
+            assertEquals("READY", status, "shape $index")
+        }
+    }
+
+    /** A malformed mapping must not be published as complete text. */
+    @Test
+    fun malformedDifferencesPdfDoesNotPublishAsReady() {
+        val db = JdbcSqlConnection()
+        Migrations.apply(db)
+        val repo = KnowledgeRepository(db, MemoryBlobSink())
+        val fontDict = "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding " +
+            "<< /BaseEncoding /WinAnsiEncoding /Differences 5 >> >>"
+        val job = repo.importBytes(
+            "malformed-differences.pdf",
+            "application/pdf",
+            runtime.mobileagent.knowledge.PdfParser.writeVerbatimFontDictPdf(fontDict, literal = "KEEPTOKEN"),
+            visionConfigured = false,
+        )
+        assertEquals(ImportStage.WAITING_FOR_VISION_MODEL, job.stage, job.error)
+        assertFalse(ImportStateMachine.isCompleteSuccess(job))
+        assertTrue(repo.search("ABC").isEmpty())
+    }
+    @Test
+    fun corruptedArchiveBodyFailsImportWithoutPublishingAnyEntry() {
+        val db = JdbcSqlConnection()
+        Migrations.apply(db)
+        val repo = KnowledgeRepository(db, MemoryBlobSink())
+        val corrupt = File.createTempFile("knowledge-corrupt", ".zip").apply {
+            writeBytes(corruptStoredZipPayload("note.txt", "VALUE=100\n", "VALUE=900\n"))
+            deleteOnExit()
+        }
+        val failure = assertThrows(IllegalStateException::class.java) {
+            repo.importKnowledgeArchiveFile("dataset.zip", corrupt, visionConfigured = false)
+        }
+        assertTrue(failure.message.orEmpty().contains("CRC"), failure.message.orEmpty())
+        assertEquals(0, repo.listJobs().count { it.first.stage == ImportStage.READY })
+        assertTrue(repo.search("VALUE").isEmpty())
+    }
+
+    @Test
+    fun intactArchiveBodyImportsWhenHeadersAndBodyAgree() {
+        val db = JdbcSqlConnection()
+        Migrations.apply(db)
+        val repo = KnowledgeRepository(db, MemoryBlobSink())
+        val good = File.createTempFile("knowledge-good", ".zip").apply {
+            writeBytes(storedZipPayload("note.txt", "VALUE=100\n"))
+            deleteOnExit()
+        }
+        repo.importKnowledgeArchiveFile("dataset.zip", good, visionConfigured = false)
+        assertTrue(repo.search("VALUE").any { "100" in it.text })
+    }
     @Test
     fun zipSlipIsRejectedAndNotExtracted() {
         val db = JdbcSqlConnection()
@@ -2060,6 +2149,43 @@ class KnowledgeRepositoryTest {
     private fun zipSlip(): ByteArray = zipBytes("../evil.txt", "no")
 
     private fun validZip(name: String): ByteArray = zipBytes(name, "application/epub+zip")
+
+    /** Stored (uncompressed) entry so the payload bytes appear verbatim in the file. */
+    private fun storedZipPayload(name: String, payload: String): ByteArray {
+        val data = payload.toByteArray()
+        val out = ByteArrayOutputStream()
+        ZipOutputStream(out).use { zip ->
+            zip.setMethod(ZipOutputStream.STORED)
+            val entry = ZipEntry(name).apply {
+                method = ZipEntry.STORED
+                size = data.size.toLong()
+                compressedSize = data.size.toLong()
+                crc = java.util.zip.CRC32().apply { update(data) }.value
+            }
+            zip.putNextEntry(entry)
+            zip.write(data)
+            zip.closeEntry()
+        }
+        return out.toByteArray()
+    }
+
+    /**
+     * Flip the stored payload to [replacement] while leaving both headers untouched,
+     * so declared sizes and CRCs still describe the original bytes.
+     */
+    private fun corruptStoredZipPayload(name: String, payload: String, replacement: String): ByteArray {
+        require(payload.toByteArray().size == replacement.toByteArray().size) { "same-length replacement required" }
+        val archive = storedZipPayload(name, payload)
+        val original = payload.toByteArray()
+        val swapped = replacement.toByteArray()
+        for (start in 0..archive.size - original.size) {
+            if (original.indices.all { archive[start + it] == original[it] }) {
+                swapped.copyInto(archive, start)
+                return archive
+            }
+        }
+        error("stored payload not found in archive")
+    }
 
     private fun zipBytes(name: String, payload: String): ByteArray {
         val out = ByteArrayOutputStream()

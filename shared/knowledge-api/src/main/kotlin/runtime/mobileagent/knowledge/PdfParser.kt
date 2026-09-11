@@ -4,10 +4,11 @@
 package runtime.mobileagent.knowledge
 
 import java.io.ByteArrayOutputStream
+import java.util.zip.DeflaterOutputStream
 import java.util.zip.Inflater
 
 object PdfParser {
-    const val FINGERPRINT = "pdf-text-v12-pdfrenderer"
+    const val FINGERPRINT = "pdf-text-v13-pdfrenderer"
 
     private const val MAX_PDF_STREAM_BYTES = 32 * 1024 * 1024
 
@@ -346,6 +347,44 @@ object PdfParser {
     fun writeZapfDingbatsBuiltinPdf(label: String, dingbatBytes: String = "ab"): ByteArray =
         writeBuiltInFontTextPdf(label, "ZapfDingbats", dingbatBytes)
 
+    /**
+     * Differences mapping fixture whose `/Encoding` and `/Differences` keys are
+     * written with the given spellings, so escaped forms such as `/Enc#6Fding` can
+     * be compared against the literal key.
+     */
+    fun writeDifferencesWithKeySpellingsPdf(
+        encodingKey: String = "/Encoding",
+        differencesKey: String = "/Differences",
+        literal: String? = null,
+    ): ByteArray {
+        val content = if (literal.isNullOrEmpty()) {
+            "BT /F1 18 Tf 72 720 Td <414243> Tj ET\n"
+        } else {
+            val escaped = literal.replace("\\", "\\\\").replace("(", "\\(").replace(")", "\\)")
+            "BT /F1 18 Tf 72 720 Td ($escaped) Tj 0 -30 Td <414243> Tj ET\n"
+        }
+        return assemblePages(
+            pages = listOf(PageContent(content, "/Font << /F1 FONT >>")),
+            fontDicts = listOf(
+                "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica $encodingKey " +
+                    "<< /Type /Encoding /BaseEncoding /WinAnsiEncoding $differencesKey [65 /X 66 /Y 67 /Z] >> >>",
+            ),
+        )
+    }
+
+    /**
+     * Flate-compressed text page whose stream dictionary spells the filter key as
+     * [filterKey]. An undecoded key would leave the compressed bytes looking
+     * unfiltered and publish them as complete text.
+     */
+    fun writeFlateTextPdf(text: String, filterKey: String = "/Filter"): ByteArray {
+        val escaped = text.replace("\\", "\\\\").replace("(", "\\(").replace(")", "\\)")
+        return assemblePages(
+            pages = listOf(PageContent("BT /F1 12 Tf 72 720 Td ($escaped) Tj ET\n", "/Font << /F1 FONT >>")),
+            contentDictSuffix = " $filterKey /FlateDecode",
+            deflateContent = true,
+        )
+    }
     /**
      * Single-page PDF whose font dictionary has no `/Encoding`, so the built-in
      * encoding is taken from [baseFontName]. The spelling is written verbatim so
@@ -1069,8 +1108,9 @@ object PdfParser {
     }
 
     private fun arrayBody(dict: String, name: String): String? {
-        val key = Regex("/" + Regex.escape(name) + "(?![A-Za-z0-9])").find(dict) ?: return null
-        var index = key.range.last + 1
+        val keyEnd = findPdfKeyEnd(dict, name)
+        if (keyEnd < 0) return null
+        var index = keyEnd
         while (index < dict.length && isPdfWhitespace(dict[index])) index++
         if (index >= dict.length || dict[index] != '[') return ""
         val start = index + 1
@@ -1151,6 +1191,61 @@ object PdfParser {
             value == '/' || value == '%'
 
     /**
+     * Index just past the value-name token for [name] in a dictionary body, or -1
+     * when the decoded key is absent.
+     *
+     * PDF 32000-1 7.3.5 allows any byte of a name to be escaped as `#` plus two
+     * hex digits, so `/Enc#6Fding` and `/Encoding` are the same key. Decoding the
+     * key instead of matching its raw spelling matters for correctness: a key that
+     * looks absent silently selects a weaker default, for example dropping a
+     * declared `/Differences` map or treating a Flate content stream as unfiltered
+     * text, and the wrong bytes are then published as complete text.
+     *
+     * Literal strings and comments are skipped so a `/Name` inside them is never
+     * mistaken for a key. Nested dictionaries and arrays are scanned, matching the
+     * flat depth-first lookup the callers rely on.
+     */
+    private fun findPdfKeyEnd(dict: String, name: String): Int {
+        var index = 0
+        while (index < dict.length) {
+            when (dict[index]) {
+                '%' -> while (index < dict.length && dict[index] != '\n' && dict[index] != '\r') index++
+                '(' -> index = skipLiteralString(dict, index)
+                '/' -> {
+                    val start = index + 1
+                    var end = start
+                    while (end < dict.length && !isPdfWhitespace(dict[end]) && !isPdfDelimiter(dict[end])) end++
+                    if (decodePdfName(dict.substring(start, end)) == name) return end
+                    index = end
+                }
+                else -> index++
+            }
+        }
+        return -1
+    }
+
+    /** Index just past the closing `)` of the literal string starting at [start]. */
+    private fun skipLiteralString(text: String, start: Int): Int {
+        var index = start + 1
+        var depth = 1
+        while (index < text.length && depth > 0) {
+            when (text[index]) {
+                '\\' -> index += 2
+                '(' -> {
+                    depth++
+                    index++
+                }
+                ')' -> {
+                    depth--
+                    index++
+                }
+                else -> index++
+            }
+        }
+        return if (depth == 0) index else text.length
+    }
+
+    /**
      * PDF 32000-1 7.3.5: a name may spell any byte as `#` plus two hex digits, so
      * `/Sym#62ol` and `/Symbol` name the same font. Names must be decoded before
      * they are compared or looked up; otherwise an equivalent spelling silently
@@ -1192,9 +1287,9 @@ object PdfParser {
     }
 
     private fun dictionaryOrReference(dict: String, name: String): PdfDictionaryValue {
-        val key = Regex("/" + Regex.escape(name) + "(?![A-Za-z0-9])").find(dict)
-            ?: return PdfDictionaryValue(present = false)
-        var valueStart = key.range.last + 1
+        val keyEnd = findPdfKeyEnd(dict, name)
+        if (keyEnd < 0) return PdfDictionaryValue(present = false)
+        var valueStart = keyEnd
         while (valueStart < dict.length && isPdfWhitespace(dict[valueStart])) valueStart++
         if (valueStart >= dict.length) return PdfDictionaryValue(present = true, malformed = true)
         if (dict.startsWith("<<", valueStart)) {
@@ -1221,9 +1316,9 @@ object PdfParser {
     }
 
     private fun namedDictionaryOrReference(dict: String, name: String): PdfNamedValue {
-        val key = Regex("/" + Regex.escape(name) + "(?![A-Za-z0-9])").find(dict)
-            ?: return PdfNamedValue(present = false)
-        var valueStart = key.range.last + 1
+        val keyEnd = findPdfKeyEnd(dict, name)
+        if (keyEnd < 0) return PdfNamedValue(present = false)
+        var valueStart = keyEnd
         while (valueStart < dict.length && isPdfWhitespace(dict[valueStart])) valueStart++
         if (valueStart >= dict.length) return PdfNamedValue(present = true, malformed = true)
         if (dict.startsWith("<<", valueStart)) {
@@ -1278,15 +1373,23 @@ object PdfParser {
     }
 
     private fun streamFilters(dict: String): List<String> {
-        val array = Regex("/Filter\\s*\\[([^]]*)]").find(dict)?.groupValues?.get(1)
-        if (array != null) {
-            return Regex("/([A-Za-z0-9]+)").findAll(array).map { it.groupValues[1] }.toList()
+        val keyEnd = findPdfKeyEnd(dict, "Filter")
+        if (keyEnd < 0) return emptyList()
+        var index = keyEnd
+        while (index < dict.length && isPdfWhitespace(dict[index])) index++
+        if (index >= dict.length) return emptyList()
+        if (dict[index] == '[') {
+            val body = arrayBody(dict, "Filter")
+            if (body.isNullOrEmpty()) return emptyList()
+            return Regex("/([^\\s<>\\[\\]()/%]+)").findAll(body)
+                .map { decodePdfName(it.groupValues[1]) }
+                .toList()
         }
-        return Regex("/Filter\\s*/([A-Za-z0-9]+)").find(dict)
-            ?.groupValues
-            ?.get(1)
-            ?.let(::listOf)
-            .orEmpty()
+        if (dict[index] != '/') return emptyList()
+        val start = index + 1
+        var end = start
+        while (end < dict.length && !isPdfWhitespace(dict[end]) && !isPdfDelimiter(dict[end])) end++
+        return listOf(decodePdfName(dict.substring(start, end)))
     }
 
     private fun decodeContentStream(obj: PdfObject): DecodedPageContent {
@@ -1951,6 +2054,12 @@ object PdfParser {
     private fun ByteArray.startsWith(prefix: ByteArray): Boolean =
         size >= prefix.size && prefix.indices.all { this[it] == prefix[it] }
 
+    private fun deflateBytes(bytes: ByteArray): ByteArray {
+        val out = ByteArrayOutputStream()
+        DeflaterOutputStream(out).use { it.write(bytes) }
+        return out.toByteArray()
+    }
+
     private fun jpegStub(): ByteArray {
         val header = byteArrayOf(0xFF.toByte(), 0xD8.toByte(), 0xFF.toByte(), 0xD9.toByte())
         return header
@@ -1960,6 +2069,8 @@ object PdfParser {
         pages: List<PageContent>,
         extraObjects: List<Pair<String, ByteArray>> = emptyList(),
         fontDicts: List<String> = listOf("<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>"),
+        contentDictSuffix: String = "",
+        deflateContent: Boolean = false,
     ): ByteArray {
         val n = pages.size
         val objects = mutableListOf<ByteArray>()
@@ -1982,8 +2093,9 @@ object PdfParser {
         }
         pages.forEachIndexed { index, page ->
             val contentObj = 3 + n + index
-            val contentBytes = page.content.toByteArray(Charsets.ISO_8859_1)
-            objects += obj("$contentObj 0 obj\n<< /Length ${contentBytes.size} >>\nstream\n") +
+            val plain = page.content.toByteArray(Charsets.ISO_8859_1)
+            val contentBytes = if (deflateContent) deflateBytes(plain) else plain
+            objects += obj("$contentObj 0 obj\n<< /Length ${contentBytes.size}$contentDictSuffix >>\nstream\n") +
                 contentBytes + obj("\nendstream\nendobj\n")
         }
         fontDicts.forEachIndexed { index, fontDict ->

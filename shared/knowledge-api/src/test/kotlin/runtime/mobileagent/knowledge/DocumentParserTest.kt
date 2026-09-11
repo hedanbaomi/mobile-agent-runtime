@@ -395,6 +395,41 @@ class DocumentParserTest {
     }
 
     @Test
+    fun escapedEncodingAndDifferencesKeysDecodeLikeTheirLiteralSpelling() {
+        val literal = PdfParser.parse(PdfParser.writeDifferencesWithKeySpellingsPdf(literal = "KEEPTOKEN"))
+        val escapedEncodingOnly = PdfParser.parse(
+            PdfParser.writeDifferencesWithKeySpellingsPdf(encodingKey = "/Enc#6Fding", literal = "KEEPTOKEN"),
+        )
+        val escapedDifferencesOnly = PdfParser.parse(
+            PdfParser.writeDifferencesWithKeySpellingsPdf(differencesKey = "/Diff#65rences", literal = "KEEPTOKEN"),
+        )
+        val escapedBoth = PdfParser.parse(
+            PdfParser.writeDifferencesWithKeySpellingsPdf(
+                encodingKey = "/Enc#6Fding",
+                differencesKey = "/Diff#65rences",
+                literal = "KEEPTOKEN",
+            ),
+        )
+        val decoded = listOf(literal, escapedEncodingOnly, escapedDifferencesOnly, escapedBoth)
+        decoded.forEach { parsed ->
+            val text = parsed.pages.single().text
+            assertTrue(text.contains("KEEPTOKEN"), text)
+            assertTrue(text.contains("XYZ"), text)
+            assertFalse(text.contains("ABC"), text)
+            assertFalse(parsed.needsVision, text)
+            assertEquals(literal.pages.single().text, text)
+        }
+    }
+
+    @Test
+    fun escapedFilterKeyStillAppliesFlateDecode() {
+        val literal = PdfParser.parse(PdfParser.writeFlateTextPdf("Alpha torque 12Nm"))
+        val escaped = PdfParser.parse(PdfParser.writeFlateTextPdf("Alpha torque 12Nm", filterKey = "/Fil#74er"))
+        assertEquals("Alpha torque 12Nm", literal.pages.single().text)
+        assertEquals(literal.pages.single().text, escaped.pages.single().text)
+        assertFalse(escaped.needsVision, escaped.pages.single().text)
+    }
+    @Test
     fun escapedBaseFontNameDecodesLikeItsLiteralSpelling() {
         val parsed = PdfParser.parse(PdfParser.writeBuiltInFontPdf("KEEPTOKEN", "Sym#62ol"))
         val text = parsed.pages.single().text

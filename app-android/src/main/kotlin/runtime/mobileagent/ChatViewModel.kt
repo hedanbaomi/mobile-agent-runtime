@@ -357,7 +357,7 @@ class ChatViewModel(
         )
         runJob = viewModelScope.launch {
             val run = AgentRun(EntityId.random().value, binding.snapshot.id, conversationId,
-                budget = RunBudget(maxModelRounds = if (contextPolicy.autoCompact) contextPolicy.maxModelRequestsPerRun else 8))
+                budget = RunBudget(maxModelRounds = contextPolicy.maxModelRequestsPerRun))
             // The run owner outlives any single UI page: only this owner key
             // may cancel/terminalize the run through the RunCoordinator.
             val runOwnerKey = "chat:$conversationId"
@@ -365,6 +365,7 @@ class ChatViewModel(
             var record = RunRecord(run.runId, run.snapshotId, conversationId, createdAt = createdAt, startedAt = createdAt,
                 budgetJson = "{\"maxModelRounds\":${run.budget.maxModelRounds},\"maxToolCalls\":20,\"maxRuntimeMs\":180000,\"maxModelRoundsPerSegment\":${contextPolicy.maxModelRoundsPerSegment},\"maxCompactionsPerRun\":${contextPolicy.maxCompactionsPerRun}}")
             var secret: CharArray? = null
+            val compactionUsage = RunCompactionUsage()
             var assistantId: String? = null
             var answer = ""
             var reasoning = ""
@@ -906,6 +907,7 @@ class ChatViewModel(
                                 persistRun = true
                             }
                             is RuntimeEvent.ContextCompactionChanged -> {
+                                record = compactionUsage.reconcile(record, listOf(event.record))
                                 if (event.record.state == ContextCompactionState.PREPARED) {
                                     // Finish the prior assistant checkpoint before releasing its id. A
                                     // summary failure must get its own error row, never rewrite it.
@@ -1286,6 +1288,11 @@ class ChatViewModel(
                             }
                         }
                         checkpoint(if (record.state == RunStatus.COMPLETED) "COMPLETE" else record.state.name)
+                        // The cancelled producer can persist an attempt without delivering its
+                        // final event. Reconcile known usage by attempt id exactly once.
+                        record = compactionUsage.reconcile(record, withContext(Dispatchers.IO) {
+                            container.contextCompactions.list(conversationId)
+                        })
                         record = record.copy(finishedAt = Utc.nowIso(), updatedAt = Utc.nowIso())
                         withContext(Dispatchers.IO) { container.runs.save(record) }
                         container.runCoordinator.release(run.runId, runOwnerKey)

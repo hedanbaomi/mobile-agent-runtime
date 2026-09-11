@@ -98,6 +98,32 @@ class ChatContextCompactionDeviceTest {
         assertTrue(server.requests.last().toString().contains("Conversation summary:"))
     }
 
+    @Test fun requestCapStopsTheToolLoopWhenAutoCompactIsOff() = fixture(toolRounds = true, requestCap = true) { app, server, conversation ->
+        val store = app.container.conversations
+        store.append(conversation, MessageRole.USER, "Original constraint: preserve this exact wording.")
+        val original = store.messages(conversation)
+        val vm = viewModel(app, conversation)
+        send(vm, "Calculate until the request budget stops you.")
+        val run = app.container.runs.list(conversation).last()
+        // The explicit per-run request cap is honored even with compaction disabled.
+        assertEquals(2, run.modelRounds)
+        assertEquals(2, server.requests.size)
+        assertEquals(RunStatus.BUDGET_EXHAUSTED, run.state)
+        assertEquals("model-rounds", run.stopReason)
+        // Both admitted dispatches issued a calculator tool call, so two real tool calls ran.
+        assertEquals(2, run.toolCalls)
+        val messages = store.messages(conversation)
+        val calls = messages.flatMap { it.parts }.filterIsInstance<ToolCallPart>()
+        val results = messages.flatMap { it.parts }.filterIsInstance<ToolResultPart>()
+        assertEquals(2, calls.size)
+        assertEquals(2, results.size)
+        assertEquals(2, calls.map { it.callId }.distinct().size)
+        assertEquals(calls.map { it.callId }.sorted(), results.map { it.callId }.distinct().sorted())
+        // Compaction stayed off: no summary stored or injected, original rows untouched.
+        assertTrue(app.container.contextCompactions.list(conversation).isEmpty())
+        assertEquals(original, messages.filter { it.id in original.map { row -> row.id } })
+    }
+
     private fun viewModel(app: MobileAgentApp, conversation: String): ChatViewModel {
         lateinit var vm: ChatViewModel
         InstrumentationRegistry.getInstrumentation().runOnMainSync {
@@ -114,7 +140,7 @@ class ChatContextCompactionDeviceTest {
         assertFalse("Fixture run failed to settle: ${vm.state.value.status}", vm.state.value.streaming)
     }
 
-    private fun fixture(invalidSummary: Boolean = false, toolRounds: Boolean = false, body: (MobileAgentApp, LoopbackChat, String) -> Unit) {
+    private fun fixture(invalidSummary: Boolean = false, toolRounds: Boolean = false, requestCap: Boolean = false, body: (MobileAgentApp, LoopbackChat, String) -> Unit) {
         check(BuildConfig.DEBUG)
         val app = InstrumentationRegistry.getInstrumentation().targetContext.applicationContext as MobileAgentApp
         app.ensureHostInitialized()
@@ -129,7 +155,7 @@ class ChatContextCompactionDeviceTest {
                 if (toolRounds) setOf("stream", "tools") else setOf("stream"), contextLimit = 64_000, outputLimit = 1024, revision = 1)
             container.profiles.createProvider(provider); container.profiles.createModel(model)
             container.agents.saveWithPrompt(AgentProfile("context-agent-$id", "Context fixture", "pending", model.id,
-                revision = 0, contextPolicyJson = "{\"maxHistoryMessages\":20,\"maxHistoryTurns\":10,\"keepRecentTurns\":2,\"maxModelRoundsPerSegment\":${if (toolRounds) 2 else 8}}"), "Answer the fixture briefly.")
+                revision = 0, contextPolicyJson = "{\"maxHistoryMessages\":20,\"maxHistoryTurns\":10,\"keepRecentTurns\":2,\"maxModelRoundsPerSegment\":${if (toolRounds) 2 else 8}${if (requestCap) ",\"autoCompact\":false,\"maxModelRequestsPerRun\":2" else ""}}"), "Answer the fixture briefly.")
             val snapshot = container.agents.createSnapshot("context-agent-$id")
             val conversation = container.conversations.create(snapshot.id, "Synthetic context fixture")
             repeat(if (toolRounds) 0 else 12) { index ->

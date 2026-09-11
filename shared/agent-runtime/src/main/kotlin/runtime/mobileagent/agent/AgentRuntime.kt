@@ -292,8 +292,6 @@ class AgentRuntime(
                         checkpoint = saveCompaction(checkpoint.copy(state = ContextCompactionState.DISPATCHED))
                         val summaryText = StringBuilder()
                         var summaryTerminal: ModelEvent? = null
-                        var summaryInput = 0
-                        var summaryOutput = 0
                         var summaryTooLarge = false
                         val summaryCompleted = withTimeoutOrNull(remainingMs(run)) {
                             activeDispatch = DispatchKind.MODEL
@@ -309,8 +307,10 @@ class AgentRuntime(
                                     }
                                     is ModelEvent.Usage -> {
                                         // Usage is one cumulative completion snapshot, not a sequence of increments.
-                                        summaryInput = maxOf(0, event.inputTokens)
-                                        summaryOutput = maxOf(0, event.outputTokens)
+                                        // Update the interruption checkpoint before any further suspension.
+                                        checkpoint = checkpoint.copy(inputTokens = maxOf(0, event.inputTokens),
+                                            outputTokens = maxOf(0, event.outputTokens))
+                                        activeCompaction = checkpoint
                                     }
                                     is ModelEvent.Failed -> summaryTerminal = ModelEvent.Failed(redact(event.sanitizedMessage, secret))
                                     ModelEvent.Completed -> if (summaryTerminal !is ModelEvent.Failed) summaryTerminal = event
@@ -321,8 +321,8 @@ class AgentRuntime(
                             }
                             true
                         }
-                        checkpoint = checkpoint.copy(inputTokens = summaryInput, outputTokens = summaryOutput)
-                        if (summaryInput != 0 || summaryOutput != 0) emitModel(ModelEvent.Usage(summaryInput, summaryOutput))
+                        // Compaction usage travels with its durable attempt, not the ordinary
+                        // model Usage stream. Consumers reconcile by id, including on cancellation.
                         if (summaryCompleted != true || summaryTerminal == null ||
                             (summaryTerminal as? ModelEvent.Failed)?.sanitizedMessage?.contains("UNKNOWN_OUTCOME") == true
                         ) {

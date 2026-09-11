@@ -61,6 +61,7 @@ import runtime.mobileagent.provider.EmbeddingBatch
 import runtime.mobileagent.provider.EmbeddingRequest
 import runtime.mobileagent.provider.HeaderSecretResolver
 import runtime.mobileagent.provider.InlineImage
+import runtime.mobileagent.provider.InputBudgetEstimate
 import runtime.mobileagent.provider.ModelAdapter
 import runtime.mobileagent.provider.ModelEvent
 import runtime.mobileagent.provider.ModelRequest
@@ -69,6 +70,7 @@ import runtime.mobileagent.provider.ProbeConsent
 import runtime.mobileagent.provider.ProviderConnectionErrorCode
 import runtime.mobileagent.provider.ProviderConnectionResult
 import runtime.mobileagent.provider.RequestHeaderValue
+import runtime.mobileagent.provider.RequestInputBudget
 import runtime.mobileagent.provider.SecretRedactor
 
 /**
@@ -297,6 +299,15 @@ class OpenAiResponsesAdapter(
                 includeImageBytes = false,
             ).toString(),
         )
+
+    /**
+     * The Responses transport replays provider-private encrypted continuation
+     * items verbatim on the wire (`encodeInput`), so the shared conservative
+     * estimate reserves for their replayed payload size. The estimate never
+     * carries, previews or logs the encrypted content itself.
+     */
+    override fun estimateInput(request: ModelRequest): InputBudgetEstimate =
+        RequestInputBudget.estimate(request, includeProviderContinuation = true)
 
     override fun stream(request: ModelRequest, secret: CharArray): Flow<ModelEvent> = flow {
         if (secret.isEmpty()) {

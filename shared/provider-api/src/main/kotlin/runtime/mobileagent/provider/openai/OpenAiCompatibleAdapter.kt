@@ -61,6 +61,7 @@ import runtime.mobileagent.provider.ChatMessage
 import runtime.mobileagent.provider.EmbeddingBatch
 import runtime.mobileagent.provider.EmbeddingRequest
 import runtime.mobileagent.provider.HeaderSecretResolver
+import runtime.mobileagent.provider.InputBudgetEstimate
 import runtime.mobileagent.provider.ModelAdapter
 import runtime.mobileagent.provider.ModelEvent
 import runtime.mobileagent.provider.ModelRequest
@@ -69,6 +70,7 @@ import runtime.mobileagent.provider.ProbeConsent
 import runtime.mobileagent.provider.ProviderConnectionErrorCode
 import runtime.mobileagent.provider.ProviderConnectionResult
 import runtime.mobileagent.provider.RequestHeaderValue
+import runtime.mobileagent.provider.RequestInputBudget
 import runtime.mobileagent.provider.SecretRedactor
 
 /**
@@ -644,6 +646,15 @@ class OpenAiCompatibleAdapter(
      */
     override fun previewRequest(request: ModelRequest): String =
         SecretRedactor.redact(buildPayload(request, includeImageBytes = false).toString())
+
+    /**
+     * Chat Completions never encodes [ChatMessage.providerContinuationItems]
+     * (see the private `encodeMessage`), so that provider-private channel must
+     * not be reserved. The remaining request shape uses the shared
+     * conservative estimate and stays labelled as such.
+     */
+    override fun estimateInput(request: ModelRequest): InputBudgetEstimate =
+        RequestInputBudget.estimate(request, includeProviderContinuation = false)
 
     private fun buildPayload(request: ModelRequest, includeImageBytes: Boolean): JsonObject {
         val runtimeFields = linkedMapOf<String, JsonElement>(

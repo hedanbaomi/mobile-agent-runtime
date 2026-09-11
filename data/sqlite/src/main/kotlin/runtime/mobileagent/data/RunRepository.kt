@@ -78,7 +78,8 @@ class RunRepository(
      * Converts every non-terminal run and invocation to UNKNOWN_OUTCOME after process death. This
      * is an explicit state transition; no model or tool is replayed by this method.
      */
-    fun markInFlightUnknown(at: String = clock()): List<String> = db.transaction {
+    fun markInFlightUnknown(at: String = clock()): List<String> {
+        val ids = db.transaction {
         val rows = db.query(
             "SELECT run_id FROM runs WHERE state NOT IN (?,?,?,?,?)",
             listOf(
@@ -120,6 +121,13 @@ class RunRepository(
             )
         }
         ids
+        }
+
+        // Context compaction attempts are recovered by their own repository
+        // (PREPARED -> CANCELLED, DISPATCHED -> UNKNOWN_OUTCOME).  This sends no summary
+        // request and keeps the original run/UNKNOWN_OUTCOME semantics.
+        ContextCompactionRepository(db).markInFlightUnknown(at)
+        return ids
     }
 
     fun recoverInterruptedRuns(at: String = clock()): List<String> = markInFlightUnknown(at)

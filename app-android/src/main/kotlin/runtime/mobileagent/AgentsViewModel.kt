@@ -526,6 +526,9 @@ class AgentsViewModel(
                     require(workspace.writable) { "该工作区仅有读取权限，不能授予读写工具。" }
                 }
             }
+            // Validate and merge the context draft before any persistence mutates the profile;
+            // unknown keys previously stored in contextPolicyJson are preserved.
+            val contextPolicyJson = editor.contextPolicyDraft.toCanonicalJson(editor.contextPolicyJson)
             val parameters = JsonObject(editor.parameters.filterValues { it.isNotBlank() }.mapValues { Json.parseToJsonElement(it.value) })
             val profile = AgentProfile(
                 id = previous?.id ?: EntityId.random().value, name = editor.name.trim(),
@@ -535,7 +538,7 @@ class AgentsViewModel(
                 knowledgeBaseIds = editor.resourceBindings.filter { it.type == "knowledge" && it.enabled }.map { it.id },
                 skillIds = editor.resourceBindings.filter { it.type == "skill" && it.enabled }.map { it.id },
                 retrievalMode = editor.retrievalMode, revision = (previous?.revision ?: 0) + 1,
-                parameterOverridesJson = parameters.toString(), contextPolicyJson = previous?.contextPolicyJson ?: "{}",
+                parameterOverridesJson = parameters.toString(), contextPolicyJson = contextPolicyJson,
                 permissionSettingsJson = previous?.permissionSettingsJson ?: "{}",
             )
             val createdNew = previous == null
@@ -782,6 +785,8 @@ class AgentsViewModel(
             workspacePresetWorkspaceId = grantData.workspaces.firstOrNull { it.enabled }?.id,
             retrievalMode = agent?.retrievalMode ?: "explicit",
             snapshotLabel = "用此智能体新建会话时会冻结当前配置和能力授权；现有会话不会新增工具，撤权仍立即生效。",
+            contextPolicyJson = agent?.contextPolicyJson ?: "{}",
+            contextPolicyDraft = AgentContextPolicyDraftUi.fromJson(agent?.contextPolicyJson ?: "{}"),
             revision = agent?.revision ?: 0,
         )
     }

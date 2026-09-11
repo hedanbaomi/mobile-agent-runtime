@@ -119,6 +119,7 @@ class AppContainer(app: MobileAgentApp) :
     val profiles = ProfileRepository(db)
     val agents = AgentRepository(db)
     val conversations = ConversationRepository(db)
+    val contextCompactions = runtime.mobileagent.data.ContextCompactionRepository(db)
     val settings = SettingsRepository(db)
     val shizuku = ShizukuAuthorityBridge(app).also { bridge ->
         // A persisted Shizuku grant represents the user's earlier explicit consent. Re-bind the

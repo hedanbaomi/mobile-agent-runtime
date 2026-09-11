@@ -4,6 +4,8 @@
 package runtime.mobileagent.agent
 
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.cancellable
 import kotlinx.coroutines.flow.collect
@@ -19,6 +21,9 @@ import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonPrimitive
 import runtime.mobileagent.domain.AppError
+import runtime.mobileagent.domain.ContextCompactionRecord
+import runtime.mobileagent.domain.ContextCompactionState
+import runtime.mobileagent.domain.EntityId
 import runtime.mobileagent.domain.ErrorCode
 import runtime.mobileagent.domain.RetryClass
 import runtime.mobileagent.provider.AssistantToolCall
@@ -85,6 +90,28 @@ class AgentRuntime(
         val toolExecutor = request.executor ?: executor ?: tools?.asToolExecutor()
         var finishedEmitted = false
         var activeDispatch: DispatchKind? = null
+        var activeCompaction: ContextCompactionRecord? = null
+
+        suspend fun saveCompaction(record: ContextCompactionRecord): ContextCompactionRecord {
+            val saved = request.context?.persist?.invoke(record) ?: record
+            activeCompaction = saved.takeIf { it.state == ContextCompactionState.PREPARED || it.state == ContextCompactionState.DISPATCHED }
+            emit(RuntimeEvent.ContextCompactionChanged(saved))
+            return saved
+        }
+
+        suspend fun settleInterruptedCompaction(cancelled: Boolean) {
+            val record = activeCompaction ?: return
+            val state = when {
+                activeDispatch != null -> ContextCompactionState.UNKNOWN_OUTCOME
+                cancelled && record.state == ContextCompactionState.PREPARED -> ContextCompactionState.CANCELLED
+                else -> ContextCompactionState.FAILED
+            }
+            // Durable recovery remains authoritative if the process dies during this write.
+            withContext(NonCancellable) {
+                request.context?.persist?.invoke(record.copy(state = state))
+            }
+            activeCompaction = null
+        }
 
         suspend fun emitModel(event: ModelEvent) {
             emit(RuntimeEvent.ModelEvent(event))
@@ -100,6 +127,7 @@ class AgentRuntime(
                     stopReason = run.stopReason,
                     modelRounds = run.modelRounds,
                     toolCalls = run.toolCalls,
+                    compactionRequests = run.compactionRequests,
                 ),
             )
         }
@@ -159,7 +187,8 @@ class AgentRuntime(
             }
 
             run.state = RunState.ASSEMBLING
-            val messages = request.prompt.asMessages().toMutableList()
+            val window = ContextWindow(request.prompt, request.context)
+            var segmentRounds = 0
             val toolSpecs = if (request.toolsEnabled && toolExecutor != null) {
                 toolExecutor.specs.toList()
             } else {
@@ -192,21 +221,9 @@ class AgentRuntime(
                     emitBudget()
                     return@flow
                 }
-                val modelReserved = synchronized(run) {
-                    if (run.modelRounds >= run.budget.maxModelRounds) false else { run.modelRounds += 1; true }
-                }
-                if (!modelReserved) {
-                    run.state = RunState.BUDGET_EXHAUSTED
-                    run.stopReason = "model-rounds"
-                    emitModel(ModelEvent.Failed("Model round budget exhausted"))
-                    finish()
-                    return@flow
-                }
-
-                run.state = RunState.MODEL_STREAMING
-                val modelRequest = ModelRequest(
+                var modelRequest = ModelRequest(
                     modelId = request.modelId,
-                    messages = messages.toList(),
+                    messages = window.messages(),
                     tools = toolMaps,
                     stream = true,
                     parameters = request.parameters,
@@ -214,13 +231,146 @@ class AgentRuntime(
                     operationId = request.operationId,
                     outputTokenLimit = request.outputTokenLimit,
                 )
-                val imageCount = modelRequest.messages.sumOf { it.images.size }
-                val inputUnits = modelRequest.messages.sumOf { it.text.toByteArray(Charsets.UTF_8).size.toLong() + it.images.size * 4096L } +
-                    toolMaps.sumOf { it.toString().toByteArray(Charsets.UTF_8).size.toLong() }
-                if (imageCount > request.maxImagesPerRequest || request.maxInputBudgetUnits?.let { inputUnits > it } == true) {
+                val inputLimit = request.maxInputBudgetUnits
+                val context = request.context?.takeIf { it.policy.autoCompact && inputLimit != null }
+                if (context != null) {
+                    val minimum = adapter.estimateInput(window.minimumRequest(modelRequest))
+                    if (minimum.units > inputLimit!! || minimum.imageCount > request.maxImagesPerRequest) {
+                        run.state = RunState.BUDGET_EXHAUSTED
+                        run.stopReason = "CONTEXT_OVERFLOW: protected context exceeds the input or image limit"
+                        emitModel(ModelEvent.Failed(run.stopReason!!))
+                        finish()
+                        return@flow
+                    }
+                    var reason = window.trigger(modelRequest, adapter, inputLimit, segmentRounds)
+                    while (reason != null) {
+                        val plan = window.plan(modelRequest, adapter, inputLimit, reason)
+                        if (plan == null) {
+                            if (reason == "model-rounds") {
+                                run.state = RunState.BUDGET_EXHAUSTED
+                                run.stopReason = "CONTEXT_OVERFLOW: no complete compressible exchange is available at the round limit"
+                                emitModel(ModelEvent.Failed(run.stopReason!!))
+                                finish()
+                                return@flow
+                            }
+                            break // Soft pressure alone is not a reason to discard protected evidence.
+                        }
+                        if (run.compactionRequests >= context.policy.maxCompactionsPerRun ||
+                            synchronized(run) { run.modelRounds + 2 > run.budget.maxModelRounds }
+                        ) {
+                            run.state = RunState.BUDGET_EXHAUSTED
+                            run.stopReason = "context-compaction-request-budget"
+                            emitModel(ModelEvent.Failed("BUDGET_EXHAUSTED: context compaction request limit reached"))
+                            finish()
+                            return@flow
+                        }
+                        if (budgetExhausted(run)) { emitBudget(); return@flow }
+                        var checkpoint = saveCompaction(ContextCompactionRecord(
+                            id = EntityId.random().value, conversationId = run.conversationId, snapshotId = run.snapshotId,
+                            runId = run.runId, sourceMessageIds = plan.coveredMessageIds, inputHash = plan.inputHash,
+                            modelId = request.modelId, modelFingerprint = context.modelFingerprint,
+                            authorizationFingerprint = context.authorizationFingerprint, reason = plan.reason,
+                            parentId = window.parentId, beforeUnits = plan.beforeUnits,
+                        ))
+                        val beforeSummary = withTimeoutOrNull(remainingMs(run)) { request.beforeModelRequest(); true }
+                        if (beforeSummary != true || budgetExhausted(run)) {
+                            saveCompaction(checkpoint.copy(state = ContextCompactionState.CANCELLED))
+                            emitBudget(); return@flow
+                        }
+                        val reserved = synchronized(run) {
+                            if (run.modelRounds + 2 > run.budget.maxModelRounds) false
+                            else { run.modelRounds++; run.compactionRequests++; true }
+                        }
+                        if (!reserved) {
+                            saveCompaction(checkpoint.copy(state = ContextCompactionState.CANCELLED))
+                            run.state = RunState.BUDGET_EXHAUSTED
+                            run.stopReason = "model-rounds"
+                            emitModel(ModelEvent.Failed("BUDGET_EXHAUSTED: total model request limit reached"))
+                            finish(); return@flow
+                        }
+                        run.state = RunState.MODEL_STREAMING
+                        checkpoint = saveCompaction(checkpoint.copy(state = ContextCompactionState.DISPATCHED))
+                        val summaryText = StringBuilder()
+                        var summaryTerminal: ModelEvent? = null
+                        var summaryInput = 0
+                        var summaryOutput = 0
+                        var summaryTooLarge = false
+                        val summaryCompleted = withTimeoutOrNull(remainingMs(run)) {
+                            activeDispatch = DispatchKind.MODEL
+                            adapter.stream(plan.request.copy(operationId = checkpoint.id), secret).cancellable().collect { event ->
+                                when (event) {
+                                    is ModelEvent.TextDelta -> {
+                                        if (!summaryTooLarge) {
+                                            summaryText.append(event.text)
+                                            if (summaryText.length > context.policy.summaryMaxUnits ||
+                                                summaryText.toString().toByteArray(Charsets.UTF_8).size > context.policy.summaryMaxUnits
+                                            ) summaryTooLarge = true
+                                        }
+                                    }
+                                    is ModelEvent.Usage -> {
+                                        // Usage is one cumulative completion snapshot, not a sequence of increments.
+                                        summaryInput = maxOf(0, event.inputTokens)
+                                        summaryOutput = maxOf(0, event.outputTokens)
+                                    }
+                                    is ModelEvent.Failed -> summaryTerminal = ModelEvent.Failed(redact(event.sanitizedMessage, secret))
+                                    ModelEvent.Completed -> if (summaryTerminal !is ModelEvent.Failed) summaryTerminal = event
+                                    is ModelEvent.ToolCallDelta, is ModelEvent.ToolApprovalRequired, is ModelEvent.RefusalDelta ->
+                                        summaryTerminal = ModelEvent.Failed("CONTEXT_COMPACTION_FAILED: summary was not a data-only response")
+                                    else -> Unit // Neither private continuation nor reasoning enters a durable summary.
+                                }
+                            }
+                            true
+                        }
+                        checkpoint = checkpoint.copy(inputTokens = summaryInput, outputTokens = summaryOutput)
+                        if (summaryInput != 0 || summaryOutput != 0) emitModel(ModelEvent.Usage(summaryInput, summaryOutput))
+                        if (summaryCompleted != true || summaryTerminal == null ||
+                            (summaryTerminal as? ModelEvent.Failed)?.sanitizedMessage?.contains("UNKNOWN_OUTCOME") == true
+                        ) {
+                            saveCompaction(checkpoint.copy(state = ContextCompactionState.UNKNOWN_OUTCOME))
+                            emitUnknownModel(); return@flow
+                        }
+                        activeDispatch = null
+                        if (summaryTerminal is ModelEvent.Failed || summaryTooLarge) {
+                            saveCompaction(checkpoint.copy(state = ContextCompactionState.FAILED))
+                            run.state = RunState.FAILED
+                            run.stopReason = "CONTEXT_COMPACTION_FAILED: summary failed; original history retained, no automatic retry"
+                            emitModel(ModelEvent.Failed(run.stopReason!!)); finish(); return@flow
+                        }
+                        val summaryJson = try {
+                            ContextSummaryFormat.validate(redact(summaryText.toString(), secret), context.policy.summaryMaxUnits)
+                        } catch (_: Exception) {
+                            saveCompaction(checkpoint.copy(state = ContextCompactionState.FAILED))
+                            run.state = RunState.FAILED
+                            run.stopReason = "CONTEXT_COMPACTION_FAILED: invalid summary; original history retained, no automatic retry"
+                            emitModel(ModelEvent.Failed(run.stopReason!!)); finish(); return@flow
+                        }
+                        val replacement = window.replacementRequest(modelRequest, plan, summaryJson)
+                        val after = adapter.estimateInput(replacement)
+                        if (plan.reason == "input-budget" && after.units >= plan.beforeUnits) {
+                            saveCompaction(checkpoint.copy(state = ContextCompactionState.FAILED))
+                            run.state = RunState.BUDGET_EXHAUSTED
+                            run.stopReason = "CONTEXT_OVERFLOW: summary did not reduce the request; no automatic retry"
+                            emitModel(ModelEvent.Failed(run.stopReason!!)); finish(); return@flow
+                        }
+                        val stillAuthorized = withTimeoutOrNull(remainingMs(run)) { request.beforeModelRequest(); true }
+                        if (stillAuthorized != true || budgetExhausted(run)) {
+                            saveCompaction(checkpoint.copy(state = ContextCompactionState.FAILED))
+                            emitBudget(); return@flow
+                        }
+                        checkpoint = saveCompaction(checkpoint.copy(
+                            state = ContextCompactionState.SUCCEEDED, summaryJson = summaryJson, afterUnits = after.units,
+                        ))
+                        window.commit(plan, checkpoint)
+                        segmentRounds = 0
+                        modelRequest = replacement
+                        reason = window.trigger(modelRequest, adapter, inputLimit, segmentRounds)
+                    }
+                }
+                val estimate = adapter.estimateInput(modelRequest)
+                if (estimate.imageCount > request.maxImagesPerRequest || inputLimit?.let { estimate.units > it } == true) {
                     run.state = RunState.BUDGET_EXHAUSTED
                     run.stopReason = "context-or-image-budget"
-                    emitModel(ModelEvent.Failed("Context or image budget exceeded; no images were silently removed"))
+                    emitModel(ModelEvent.Failed("CONTEXT_OVERFLOW: Context or image budget exceeded; no images were silently removed"))
                     finish()
                     return@flow
                 }
@@ -237,6 +387,19 @@ class AgentRuntime(
                     emitBudget()
                     return@flow
                 }
+                val modelReserved = synchronized(run) {
+                    if (run.modelRounds >= run.budget.maxModelRounds) false else { run.modelRounds += 1; true }
+                }
+                if (!modelReserved) {
+                    run.state = RunState.BUDGET_EXHAUSTED
+                    run.stopReason = "model-rounds"
+                    emitModel(ModelEvent.Failed("Model round budget exhausted"))
+                    finish()
+                    return@flow
+                }
+                segmentRounds++
+                val modelRequestNumber = run.modelRounds
+                run.state = RunState.MODEL_STREAMING
                 emit(
                     RuntimeEvent.RequestPrepared(
                         operationId = request.operationId,
@@ -250,6 +413,8 @@ class AgentRuntime(
                         } else {
                             null
                         },
+                        assistantMessageId = RuntimeMessageIds.assistant(run.runId, modelRequestNumber),
+                        estimatedInputUnits = estimate.units,
                     ),
                 )
 
@@ -404,7 +569,7 @@ class AgentRuntime(
                     return@flow
                 }
 
-                messages += ChatMessage(
+                window.append(ChatMessage(
                     role = "assistant",
                     text = assistantText.toString(),
                     toolCalls = pendingTools.values.map { call ->
@@ -414,7 +579,7 @@ class AgentRuntime(
                     // next request of this run; the owning adapter encodes
                     // them, previews and history never see them.
                     providerContinuationItems = pendingContinuation.toList(),
-                )
+                ), RuntimeMessageIds.assistant(run.runId, modelRequestNumber))
                 pendingContinuation.clear()
                 for (call in pendingTools.values) {
                     if (budgetExhausted(run)) {
@@ -553,6 +718,7 @@ class AgentRuntime(
                             status = status,
                             resultSummary = safeText.take(RESULT_SUMMARY_LIMIT),
                             resultJson = safeText,
+                            messageId = RuntimeMessageIds.tool(run.runId, modelRequestNumber, call.callId),
                         ),
                     )
                     if (result is ToolResult.UnknownOutcome) {
@@ -562,11 +728,11 @@ class AgentRuntime(
                         finish()
                         return@flow
                     }
-                    messages += ChatMessage(
+                    window.append(ChatMessage(
                         role = "tool",
                         text = untrustedToolResult(call.callId, safeText),
                         toolCallId = call.callId,
-                    )
+                    ), RuntimeMessageIds.tool(run.runId, modelRequestNumber, call.callId))
                     val images = try {
                         if (budgetExhausted(run)) {
                             emitBudget()
@@ -598,16 +764,18 @@ class AgentRuntime(
                     }
                     if (images.isNotEmpty()) {
                         emit(RuntimeEvent.ToolImagesAttached(call.callId,
-                            images.mapNotNull { image -> image.assetId?.let { RuntimeImageReference(it, image.mediaType) } }))
-                        messages += ChatMessage(
+                            images.mapNotNull { image -> image.assetId?.let { RuntimeImageReference(it, image.mediaType) } },
+                            RuntimeMessageIds.images(run.runId, modelRequestNumber, call.callId)))
+                        window.append(ChatMessage(
                             role = "user",
                             text = untrustedToolImages(call.callId),
                             images = images,
-                        )
+                        ), RuntimeMessageIds.images(run.runId, modelRequestNumber, call.callId))
                     }
                 }
             }
         } catch (e: CancellationException) {
+            runCatching { settleInterruptedCompaction(cancelled = true) }
             // A caller cancellation is terminal and must never be translated
             // into a retryable model/tool result.  The provider/transport sees
             // the same cancellation through its suspend boundary.
@@ -619,6 +787,7 @@ class AgentRuntime(
             }
             throw e
         } catch (e: Exception) {
+            runCatching { settleInterruptedCompaction(cancelled = false) }
             if (activeDispatch != null) {
                 run.state = RunState.UNKNOWN_OUTCOME
                 run.stopReason = if (activeDispatch == DispatchKind.MODEL) UNKNOWN_MODEL_OUTCOME else UNKNOWN_TOOL_OUTCOME

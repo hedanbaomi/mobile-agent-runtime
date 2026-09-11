@@ -27,6 +27,7 @@ android {
 }
 
 dependencies {
+    implementation(libs.kotlinx.serialization.json)
     implementation(project(":shared:domain"))
     implementation(project(":data:sqlite"))
     implementation(libs.androidx.lifecycle.viewmodel.compose)

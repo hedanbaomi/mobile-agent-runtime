@@ -22,8 +22,12 @@ import runtime.mobileagent.provider.EmbeddingRequest
 import runtime.mobileagent.provider.ModelAdapter
 import runtime.mobileagent.provider.ModelEvent
 import runtime.mobileagent.provider.ModelRequest
+import runtime.mobileagent.skills.ToolCall
 import runtime.mobileagent.skills.ToolBroker
 import runtime.mobileagent.skills.ToolContext
+import runtime.mobileagent.skills.ToolExecutor
+import runtime.mobileagent.skills.ToolResult
+import runtime.mobileagent.skills.ToolSpec
 
 class AgentRuntimeTest {
     @Test
@@ -162,6 +166,126 @@ class AgentRuntimeTest {
         assertEquals(RunState.BUDGET_EXHAUSTED, run.state)
         assertTrue(events.any { it is RuntimeEvent.ModelEvent && it.event is ModelEvent.Failed })
         assertTrue(adapter.requests.isEmpty())
+    }
+
+    @Test
+    fun nullableStringTypeSchemaReachesRequestPreparedAndValidatesCwd() = runTest {
+        suspend fun runShellLike(
+            argumentsJson: String,
+            schema: String = nullableCwdSchema(),
+        ): ShellLikeRun {
+            val adapter = ShellLikeAdapter(argumentsJson)
+            val executor = ShellLikeExecutor(schema)
+            val run = AgentRun("shell-schema", "s", "c")
+            val events = AgentRuntime(adapter).run(
+                AgentRuntimeRequest(
+                    run = run,
+                    prompt = prompt(),
+                    modelId = "model",
+                    secret = charArrayOf('s'),
+                    toolsEnabled = true,
+                    executor = executor,
+                    emitRequestPreview = true,
+                ),
+            ).toList()
+            return ShellLikeRun(run, events, adapter, executor)
+        }
+
+        val nullCwd = runShellLike("""{"command":"pwd","cwd":null}""")
+        assertEquals(RunState.COMPLETED, nullCwd.run.state)
+        assertTrue(nullCwd.events.any { it is RuntimeEvent.RequestPrepared })
+        assertEquals(2, nullCwd.adapter.previewCalls)
+        assertEquals(2, nullCwd.adapter.streamCalls)
+        assertEquals(1, nullCwd.executor.invocations)
+
+        val stringCwd = runShellLike("""{"command":"pwd","cwd":"/tmp"}""")
+        assertEquals(RunState.COMPLETED, stringCwd.run.state)
+        assertTrue(stringCwd.events.any { it is RuntimeEvent.RequestPrepared })
+        assertEquals(1, stringCwd.executor.invocations)
+
+        val reverseUnion = runShellLike(
+            """{"command":"pwd","cwd":"/tmp"}""",
+            nullableCwdSchema("[\"null\",\"string\"]"),
+        )
+        assertEquals(RunState.COMPLETED, reverseUnion.run.state)
+        assertEquals(1, reverseUnion.executor.invocations)
+
+        val numericCwd = runShellLike("""{"command":"pwd","cwd":1}""")
+        assertEquals(RunState.FAILED, numericCwd.run.state)
+        assertTrue(numericCwd.events.any {
+            it is RuntimeEvent.ModelEvent &&
+                it.event is ModelEvent.Failed &&
+                it.event.sanitizedMessage.contains("cwd must be a string")
+        })
+        assertTrue(numericCwd.events.any { it is RuntimeEvent.RequestPrepared })
+        assertEquals(1, numericCwd.adapter.previewCalls)
+        assertEquals(1, numericCwd.adapter.streamCalls)
+        assertEquals(0, numericCwd.executor.invocations)
+
+        val stringBoolean = runShellLike(
+            """{"flag":"true"}""",
+            nullableBooleanSchema(),
+        )
+        assertEquals(RunState.FAILED, stringBoolean.run.state)
+        assertTrue(stringBoolean.events.any {
+            it is RuntimeEvent.ModelEvent &&
+                it.event is ModelEvent.Failed &&
+                it.event.sanitizedMessage.contains("flag must be boolean")
+        })
+        assertEquals(0, stringBoolean.executor.invocations)
+
+        val enumNull = runShellLike(
+            """{"command":"pwd","cwd":null}""",
+            nullableCwdEnumSchema(),
+        )
+        assertEquals(RunState.FAILED, enumNull.run.state)
+        assertTrue(enumNull.events.any {
+            it is RuntimeEvent.ModelEvent &&
+                it.event is ModelEvent.Failed &&
+                it.event.sanitizedMessage.contains("is not an allowed value")
+        })
+        assertEquals(0, enumNull.executor.invocations)
+    }
+
+    @Test
+    fun schemaTypeArraysRejectMalformedAndNonNullableUnionsBeforeDispatch() = runTest {
+        val cases = listOf(
+            "[]" to "type array cannot be empty",
+            "[1,\"null\"]" to "type array must contain only strings",
+            "[\"string\",\"string\"]" to "type array contains duplicate types",
+            "[\"string\",\"integer\"]" to "type array must contain exactly one value type and null",
+            "[\"string\"]" to "type array must contain exactly one value type and null",
+            "[\"string\",\"null\",\"integer\"]" to "type array must contain exactly one value type and null",
+            "[\"string\",\"unknown\"]" to "type array contains unsupported type",
+        )
+        cases.forEachIndexed { index, (typeJson, message) ->
+            val adapter = ShellLikeAdapter("""{"command":"pwd"}""")
+            val executor = ShellLikeExecutor(nullableCwdSchema(typeJson))
+            val run = AgentRun("invalid-shell-schema-$index", "s", "c")
+            val events = AgentRuntime(adapter).run(
+                AgentRuntimeRequest(
+                    run = run,
+                    prompt = prompt(),
+                    modelId = "model",
+                    secret = charArrayOf('s'),
+                    toolsEnabled = true,
+                    executor = executor,
+                ),
+            ).toList()
+
+            assertEquals(RunState.FAILED, run.state, "case $index")
+            assertTrue(
+                events.any {
+                    it is RuntimeEvent.ModelEvent &&
+                        it.event is ModelEvent.Failed &&
+                        it.event.sanitizedMessage.contains(message)
+                },
+                "case $index",
+            )
+            assertEquals(0, adapter.previewCalls, "case $index")
+            assertEquals(0, adapter.streamCalls, "case $index")
+            assertEquals(0, executor.invocations, "case $index")
+        }
     }
 
     @Test
@@ -337,6 +461,59 @@ class AgentRuntimeTest {
     }
 
     private fun prompt() = EffectivePrompt("contract", "", emptyList(), emptyList(), emptyList(), "hello")
+
+    private fun nullableCwdSchema(typeJson: String = "[\"string\",\"null\"]"): String =
+        """{"type":"object","additionalProperties":false,"required":["command"],"properties":{"command":{"type":"string","minLength":1},"cwd":{"type":$typeJson,"maxLength":4096}}}"""
+
+    private fun nullableCwdEnumSchema(): String =
+        """{"type":"object","additionalProperties":false,"required":["command"],"properties":{"command":{"type":"string","minLength":1},"cwd":{"type":["string","null"],"enum":["/tmp"]}}}"""
+
+    private fun nullableBooleanSchema(): String =
+        """{"type":"object","additionalProperties":false,"required":["flag"],"properties":{"flag":{"type":["boolean","null"]}}}"""
+
+    private data class ShellLikeRun(
+        val run: AgentRun,
+        val events: List<RuntimeEvent>,
+        val adapter: ShellLikeAdapter,
+        val executor: ShellLikeExecutor,
+    )
+
+    private class ShellLikeExecutor(schema: String) : ToolExecutor {
+        override val specs = listOf(ToolSpec("shell_like", "shell-like test tool", schema, "shell.execute", sideEffect = false))
+        var invocations = 0
+
+        override suspend fun invoke(call: ToolCall): ToolResult {
+            invocations += 1
+            return ToolResult.Value("""{"ok":true}""")
+        }
+
+        override suspend fun approve(callId: String): ToolResult = error("approval is not used")
+    }
+
+    private class ShellLikeAdapter(private val argumentsJson: String) : ModelAdapter {
+        var previewCalls = 0
+        var streamCalls = 0
+
+        override suspend fun probe(profile: runtime.mobileagent.domain.ModelProfile): CapabilityReport = error("not used")
+
+        override fun previewRequest(request: ModelRequest): String {
+            previewCalls += 1
+            return "preview"
+        }
+
+        override fun stream(request: ModelRequest, secret: CharArray): Flow<ModelEvent> = flow {
+            streamCalls += 1
+            if (streamCalls == 1) {
+                emit(ModelEvent.ToolCallDelta("shell-call", "shell_like", argumentsJson))
+                emit(ModelEvent.Completed)
+            } else {
+                emit(ModelEvent.TextDelta("done"))
+                emit(ModelEvent.Completed)
+            }
+        }
+
+        override suspend fun embed(request: EmbeddingRequest, secret: CharArray): EmbeddingBatch = error("not used")
+    }
 
     private class ScriptedAdapter(
         private val scripts: List<List<ModelEvent>>,

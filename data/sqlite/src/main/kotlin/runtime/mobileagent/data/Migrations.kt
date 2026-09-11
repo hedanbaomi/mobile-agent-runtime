@@ -3,6 +3,7 @@
 
 package runtime.mobileagent.data
 
+import kotlinx.serialization.decodeFromString
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
@@ -12,6 +13,8 @@ import java.security.MessageDigest
 import java.time.Instant
 import runtime.mobileagent.domain.AppError
 import runtime.mobileagent.domain.CapabilityId
+import runtime.mobileagent.domain.ContextCompactionState
+import runtime.mobileagent.domain.ContextSummary
 import runtime.mobileagent.domain.ErrorCode
 import runtime.mobileagent.domain.RetryClass
 import runtime.mobileagent.domain.Authority
@@ -47,7 +50,12 @@ object Migrations {
     // v17 adds the frozen per-run manifest (versions/fingerprints only, never
     // secrets) to runs.  Existing rows keep the empty object: they predate
     // frozen facts and must not invent them.
-    const val VERSION = 17
+    // v18 adds durable session-context compaction attempts: an explicit state
+    // machine, a per-attempt source digest, at most one active attempt per
+    // conversation, and a summary that only a
+    // verified SUCCEEDED row may carry.  No transcript row is deleted or
+    // rewritten by a summary, and no summary is ever re-sent from the database.
+    const val VERSION = 18
 
     private val statements = listOf(
         "CREATE TABLE IF NOT EXISTS schema_version (version INTEGER NOT NULL PRIMARY KEY)",
@@ -129,7 +137,14 @@ object Migrations {
         "CREATE INDEX IF NOT EXISTS idx_memory_entries_space ON skill_memory_entries(space_id, path)",
         "CREATE INDEX IF NOT EXISTS idx_approval_records_call ON approval_records(call_id, created_at)",
         "CREATE INDEX IF NOT EXISTS idx_tool_audit_details_request ON tool_audit_details(request_id, created_at)",
-    )
+        // v18: durable conversation compaction.  The triple (conversation, snapshot, run) is
+        // bound by foreign keys; the CHECKs keep a damaged row from looking like a committed
+        // summary, and the partial unique index allows only one active attempt per scope.
+        "CREATE TABLE IF NOT EXISTS context_compactions (id TEXT PRIMARY KEY, conversation_id TEXT NOT NULL, snapshot_id TEXT NOT NULL, run_id TEXT NOT NULL, source_message_ids_json TEXT NOT NULL CHECK(length(source_message_ids_json) >= 2 AND substr(source_message_ids_json,1,1) = '[' AND substr(source_message_ids_json,-1,1) = ']'), source_content_hash TEXT NOT NULL CHECK(length(source_content_hash) > 0), input_hash TEXT NOT NULL CHECK(length(input_hash) > 0), model_id TEXT NOT NULL, model_fingerprint TEXT NOT NULL, authorization_fingerprint TEXT NOT NULL, reason TEXT NOT NULL, state TEXT NOT NULL CHECK(state IN('PREPARED','DISPATCHED','SUCCEEDED','FAILED','CANCELLED','UNKNOWN_OUTCOME')), summary_json TEXT, parent_id TEXT, version INTEGER NOT NULL CHECK(version > 0), before_units INTEGER NOT NULL CHECK(before_units >= 0), after_units INTEGER NOT NULL CHECK(after_units >= 0), input_tokens INTEGER NOT NULL CHECK(input_tokens >= 0), output_tokens INTEGER NOT NULL CHECK(output_tokens >= 0), created_at TEXT NOT NULL, updated_at TEXT NOT NULL, CHECK((state = 'SUCCEEDED' AND summary_json IS NOT NULL) OR (state <> 'SUCCEEDED' AND summary_json IS NULL)), FOREIGN KEY(conversation_id) REFERENCES conversations(id), FOREIGN KEY(snapshot_id) REFERENCES agent_snapshots(id), FOREIGN KEY(run_id) REFERENCES runs(run_id), FOREIGN KEY(parent_id) REFERENCES context_compactions(id))",
+        "CREATE UNIQUE INDEX IF NOT EXISTS uq_context_compactions_active ON context_compactions(conversation_id) WHERE state IN('PREPARED','DISPATCHED')",
+        "CREATE INDEX IF NOT EXISTS idx_context_compactions_scope ON context_compactions(conversation_id, snapshot_id, state, updated_at)",
+        "CREATE INDEX IF NOT EXISTS idx_context_compactions_parent ON context_compactions(parent_id)",
+        "CREATE INDEX IF NOT EXISTS idx_context_compactions_run ON context_compactions(run_id)",    )
 
     private val columns = listOf(
         // Columns introduced by the v1-v8 migrations.  Keep these checks explicit so a partially
@@ -228,6 +243,7 @@ object Migrations {
             if (current < VERSION) migrateExistingConversationWorkspaceBindings(connection)
             ensureDefaultAuthorityRows(connection)
             validateSnapshotManifests(connection)
+            validateContextCompactions(connection)
             validateAuthoritySchema(connection)
             validateWorkspaceScopes(connection)
             validateWorkspaceBindings(connection)
@@ -633,6 +649,7 @@ object Migrations {
         "full_device_files_grants", "snapshot_grant_bindings", "saf_workspace_grants", "privileged_workspace_bindings",
         "conversation_workspace_bindings", "agent_workspace_defaults", "desktop_identity", "desktop_trust",
         "skill_memory_spaces", "skill_memory_entries", "approval_records", "tool_audit_details",
+        "context_compactions",
     )
 
     private val REQUIRED_COLUMNS = listOf(
@@ -743,6 +760,18 @@ object Migrations {
         "tool_audit_details" to "cwd_sha256",
         "tool_audit_details" to "stdout_bytes",
         "tool_audit_details" to "stderr_bytes",
+        "context_compactions" to "id",
+        "context_compactions" to "conversation_id",
+        "context_compactions" to "snapshot_id",
+        "context_compactions" to "run_id",
+        "context_compactions" to "source_message_ids_json",
+        "context_compactions" to "source_content_hash",
+        "context_compactions" to "input_hash",
+        "context_compactions" to "state",
+        "context_compactions" to "summary_json",
+        "context_compactions" to "parent_id",
+        "context_compactions" to "version",
+        "context_compactions" to "updated_at",
     )
 
     /**
@@ -1167,6 +1196,7 @@ object Migrations {
         "authority_policy", "authority_preferences", "workspaces", "capability_grants",
         "snapshot_grant_bindings", "saf_workspace_grants", "desktop_identity", "desktop_trust",
         "skill_memory_spaces", "skill_memory_entries", "approval_records", "tool_audit_details",
+        "context_compactions",
     )
 
     private fun authorityForTable(table: String): Authority? = when {
@@ -1983,4 +2013,45 @@ object Migrations {
 
     private val SNAPSHOT_MODEL_KEYS = listOf("chatModel", "visionModel", "embeddingModel", "rerankerModel")
     private val SNAPSHOT_PROVIDER_KEYS = listOf("provider", "visionProvider", "embeddingProvider", "rerankerProvider")
+
+    /**
+     * v18 rows are checked one by one so a malformed attempt aborts the migration instead of being
+     * adopted as reusable context.  A summary exists only on SUCCEEDED rows and must satisfy the
+     * same strict shape the repository enforces; source ids are unique and non-empty.
+     */
+    private fun validateContextCompactions(connection: SqlConnection) {
+        val json = Json { ignoreUnknownKeys = false; explicitNulls = false }
+        connection.query("SELECT * FROM context_compactions").forEach { row ->
+            val id = row.string("id")
+            val state = runCatching { ContextCompactionState.valueOf(row.string("state")) }.getOrElse {
+                invalid("context_compactions[$id] has an invalid state")
+            }
+            val summary = row.columns["summary_json"] as? String
+            if (state == ContextCompactionState.SUCCEEDED) {
+                val text = summary ?: invalid("context_compactions[$id] is SUCCEEDED without a summary")
+                if (runCatching { ContextSummary.canonicalize(text) }.isFailure) {
+                    invalid("context_compactions[$id] has an invalid summary")
+                }
+            } else if (summary != null) {
+                invalid("context_compactions[$id] carries a summary while ${state.name}")
+            }
+            val ids = runCatching { json.decodeFromString<List<String>>(row.string("source_message_ids_json")) }
+                .getOrElse { invalid("context_compactions[$id] has an invalid source id list") }
+            if (ids.isEmpty() || ids.distinct().size != ids.size) {
+                invalid("context_compactions[$id] source ids must be unique and non-empty")
+            }
+            if (row.string("source_content_hash").isBlank()) {
+                invalid("context_compactions[$id] has no source content digest")
+            }
+            listOf("before_units", "after_units", "input_tokens", "output_tokens").forEach { field ->
+                if (row.long(field) < 0) invalid("context_compactions[$id].$field is negative")
+            }
+            listOf(
+                "conversation_id", "snapshot_id", "run_id", "input_hash", "model_id",
+                "model_fingerprint", "authorization_fingerprint", "reason", "created_at", "updated_at",
+            ).forEach { field ->
+                if (row.string(field).isBlank()) invalid("context_compactions[$id].$field is blank")
+            }
+        }
+    }
 }

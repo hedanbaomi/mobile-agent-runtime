@@ -88,6 +88,18 @@ object AgentTestTags {
     const val WORKSPACE_ACCESS_SAF = "agents.workspace_access.saf"
     const val WORKSPACE_ACCESS_PRIVILEGED = "agents.workspace_access.privileged"
     const val WORKSPACE_ACCESS_FULL_DEVICE = "agents.workspace_access.full_device"
+    const val CONTEXT_POLICY = "agents.editor.context_policy"
+    const val CONTEXT_POLICY_AUTO = "agents.editor.context_policy.auto"
+    const val CONTEXT_POLICY_INPUT_BUDGET = "agents.editor.context_policy.input_budget"
+    const val CONTEXT_POLICY_HISTORY_MESSAGES = "agents.editor.context_policy.history_messages"
+    const val CONTEXT_POLICY_HISTORY_TURNS = "agents.editor.context_policy.history_turns"
+    const val CONTEXT_POLICY_ROUNDS = "agents.editor.context_policy.rounds"
+    const val CONTEXT_POLICY_REQUESTS = "agents.editor.context_policy.requests"
+    const val CONTEXT_POLICY_ADVANCED = "agents.editor.context_policy.advanced"
+    const val CONTEXT_POLICY_KEEP_RECENT = "agents.editor.context_policy.keep_recent"
+    const val CONTEXT_POLICY_SOFT_LIMIT = "agents.editor.context_policy.soft_limit"
+    const val CONTEXT_POLICY_TARGET = "agents.editor.context_policy.target"
+    const val CONTEXT_POLICY_MAX_COMPACTIONS = "agents.editor.context_policy.max_compactions"
     const val SNAPSHOT = "agents.snapshot"
 }
 
@@ -219,6 +231,10 @@ data class AgentEditorUi(
     val promptRevisions: List<PromptRevisionUi> = emptyList(),
     val parameters: Map<String, String> = emptyMap(),
     val parameterSchema: List<String> = emptyList(),
+    /** Canonical JSON stored in AgentProfile.contextPolicyJson; unknown keys survive a save. */
+    val contextPolicyJson: String = "{}",
+    /** Transient text draft for the context/auto-compaction form; never persisted directly. */
+    val contextPolicyDraft: AgentContextPolicyDraftUi = AgentContextPolicyDraftUi(),
     val resourceBindings: List<AgentResourceBindingUi> = emptyList(),
     val retrievalMode: String = "explicit",
     val snapshotLabel: String = "",
@@ -469,6 +485,12 @@ private fun AgentSummary(state: AgentsUiState, actions: AgentsActions) {
         Text(if (zh) "参数" else "Parameters", style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(top = 16.dp))
         if (editor.parameters.isEmpty()) Text(if (zh) "没有参数覆盖。" else "No parameter overrides.", style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(top = 6.dp))
         editor.parameters.forEach { (name, value) -> Text("$name: $value", style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(top = 4.dp)) }
+        Text(if (zh) "上下文与自动压缩" else "Context & auto-compaction", style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(top = 16.dp))
+        Text(
+            editor.contextPolicyDraft.summary(zh),
+            style = MaterialTheme.typography.bodySmall,
+            modifier = Modifier.padding(top = 6.dp),
+        )
         Text(if (zh) "资源" else "Resources", style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(top = 16.dp))
         if (editor.resourceBindings.isEmpty()) Text(if (zh) "没有绑定知识库或技能。" else "No knowledge bases or skills are bound.", style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(top = 6.dp))
         editor.resourceBindings.forEach { binding ->
@@ -782,6 +804,7 @@ private fun AgentEditorFields(
                         modifier = Modifier.fillMaxWidth(),
                     )
                 }
+                AgentContextPolicyCard(editor = editor, actions = actions, zh = zh, modifier = Modifier.padding(top = 8.dp))
                 Column(Modifier.fillMaxWidth().testTag(AgentTestTags.RESOURCES)) {
                     Text(if (zh) "资源绑定" else "Resource bindings", style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(top = 8.dp))
                     if (editor.resourceBindings.isEmpty()) Text(if (zh) "暂无可绑定的知识库或技能。" else "No knowledge bases or skills are available to bind.", style = MaterialTheme.typography.bodySmall)
@@ -814,6 +837,143 @@ private fun AgentEditorFields(
                     grantStoreError = grantStoreError,
                 )
     }
+}
+
+@Composable
+private fun AgentContextPolicyCard(
+    editor: AgentEditorUi,
+    actions: AgentsActions,
+    zh: Boolean,
+    modifier: Modifier = Modifier,
+) {
+    val draft = editor.contextPolicyDraft
+    val error = runCatching { draft.toCanonicalJson(editor.contextPolicyJson) }.exceptionOrNull()?.message
+    var advanced by remember { mutableStateOf(false) }
+    fun update(updated: AgentContextPolicyDraftUi) {
+        actions.onEditorChange(editor.copy(contextPolicyDraft = updated))
+    }
+    Column(
+        modifier.fillMaxWidth()
+            .padding(vertical = 8.dp)
+            .border(1.dp, MaterialTheme.colorScheme.outlineVariant)
+            .padding(10.dp)
+            .testTag(AgentTestTags.CONTEXT_POLICY),
+        verticalArrangement = Arrangement.spacedBy(6.dp),
+    ) {
+        Text(if (zh) "上下文与自动压缩" else "Context & auto-compaction", fontWeight = FontWeight.SemiBold)
+        Text(
+            if (zh) {
+                "压缩使用当前会话模型并可能产生额外费用，保留原始聊天记录；设置只应用于新会话。" +
+                    "上下文预算是保守计量，并非实际 tokenizer。每段模型轮达到阈值会压缩继续，" +
+                    "但同一次运行的总请求、工具次数和耗时有独立硬上限；总请求含摘要调用。"
+            } else {
+                "Compaction uses the current session model and may incur extra cost while keeping the original chat history; " +
+                    "settings apply to new sessions only. The context budget is a conservative estimate, not a real tokenizer. " +
+                    "A segment compacts and continues when it reaches the threshold, while total requests, tool calls and runtime " +
+                    "have separate hard caps per run; the request cap includes summary calls."
+            },
+            style = MaterialTheme.typography.bodySmall,
+        )
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            Column(Modifier.weight(1f)) {
+                Text(if (zh) "自动压缩" else "Auto-compaction", style = MaterialTheme.typography.labelLarge)
+                Text(
+                    if (zh) "关闭后不自动压缩，仍受运行硬上限约束。"
+                    else "Off disables auto-compaction; hard run caps still apply.",
+                    style = MaterialTheme.typography.bodySmall,
+                )
+            }
+            Switch(
+                checked = draft.autoCompact,
+                onCheckedChange = { update(draft.copy(autoCompact = it)) },
+                modifier = Modifier.testTag(AgentTestTags.CONTEXT_POLICY_AUTO),
+            )
+        }
+        ContextPolicyField(
+            label = if (zh) "输入预算（保守估算单位）" else "Input budget (conservative estimate)",
+            value = draft.maxInputTokens,
+            testTag = AgentTestTags.CONTEXT_POLICY_INPUT_BUDGET,
+            isError = error != null && draft.maxInputTokens.isNotBlank(),
+            placeholder = if (zh) "留空 = 模型可用窗口" else "Blank = model's available window",
+        ) { update(draft.copy(maxInputTokens = it)) }
+        ContextPolicyField(
+            label = if (zh) "最大历史消息数" else "Max history messages",
+            value = draft.maxHistoryMessages,
+            testTag = AgentTestTags.CONTEXT_POLICY_HISTORY_MESSAGES,
+            isError = error != null,
+        ) { update(draft.copy(maxHistoryMessages = it)) }
+        ContextPolicyField(
+            label = if (zh) "最大历史轮数" else "Max history turns",
+            value = draft.maxHistoryTurns,
+            testTag = AgentTestTags.CONTEXT_POLICY_HISTORY_TURNS,
+            isError = error != null,
+        ) { update(draft.copy(maxHistoryTurns = it)) }
+        ContextPolicyField(
+            label = if (zh) "每段模型轮上限" else "Max model rounds per segment",
+            value = draft.maxModelRoundsPerSegment,
+            testTag = AgentTestTags.CONTEXT_POLICY_ROUNDS,
+            isError = error != null,
+        ) { update(draft.copy(maxModelRoundsPerSegment = it)) }
+        ContextPolicyField(
+            label = if (zh) "每次运行模型请求上限（含摘要）" else "Max model requests per run (incl. summaries)",
+            value = draft.maxModelRequestsPerRun,
+            testTag = AgentTestTags.CONTEXT_POLICY_REQUESTS,
+            isError = error != null,
+        ) { update(draft.copy(maxModelRequestsPerRun = it)) }
+        TextButton(
+            onClick = { advanced = !advanced },
+            modifier = Modifier.testTag(AgentTestTags.CONTEXT_POLICY_ADVANCED),
+        ) {
+            Text(if (advanced) (if (zh) "收起高级设置" else "Hide advanced") else (if (zh) "高级设置" else "Advanced"))
+        }
+        if (advanced) {
+            ContextPolicyField(
+                label = if (zh) "保留最近轮数" else "Keep recent turns",
+                value = draft.keepRecentTurns,
+                testTag = AgentTestTags.CONTEXT_POLICY_KEEP_RECENT,
+                isError = error != null,
+            ) { update(draft.copy(keepRecentTurns = it)) }
+            ContextPolicyField(
+                label = if (zh) "软阈值百分比" else "Soft limit percent",
+                value = draft.softLimitPercent,
+                testTag = AgentTestTags.CONTEXT_POLICY_SOFT_LIMIT,
+                isError = error != null,
+            ) { update(draft.copy(softLimitPercent = it)) }
+            ContextPolicyField(
+                label = if (zh) "目标压缩百分比" else "Target percent",
+                value = draft.targetPercent,
+                testTag = AgentTestTags.CONTEXT_POLICY_TARGET,
+                isError = error != null,
+            ) { update(draft.copy(targetPercent = it)) }
+            ContextPolicyField(
+                label = if (zh) "每次运行压缩次数上限" else "Max compactions per run",
+                value = draft.maxCompactionsPerRun,
+                testTag = AgentTestTags.CONTEXT_POLICY_MAX_COMPACTIONS,
+                isError = error != null,
+            ) { update(draft.copy(maxCompactionsPerRun = it)) }
+        }
+        error?.let { Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall) }
+    }
+}
+
+@Composable
+private fun ContextPolicyField(
+    label: String,
+    value: String,
+    testTag: String,
+    isError: Boolean,
+    placeholder: String? = null,
+    onValueChange: (String) -> Unit,
+) {
+    OutlinedTextField(
+        value = value,
+        onValueChange = onValueChange,
+        label = { Text(label) },
+        placeholder = { placeholder?.let { Text(it) } },
+        singleLine = true,
+        isError = isError,
+        modifier = Modifier.fillMaxWidth().testTag(testTag),
+    )
 }
 
 @Composable

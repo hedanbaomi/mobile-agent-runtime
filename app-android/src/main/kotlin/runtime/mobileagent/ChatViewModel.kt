@@ -9,6 +9,7 @@ import androidx.lifecycle.SavedStateHandle
 import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.flowOn
+import kotlinx.coroutines.flow.buffer
 import kotlinx.serialization.json.*
 import runtime.mobileagent.agent.AgentRun
 import runtime.mobileagent.agent.AgentRuntime
@@ -16,6 +17,10 @@ import runtime.mobileagent.agent.AgentRuntimeRequest
 import runtime.mobileagent.agent.EffectivePrompt
 import runtime.mobileagent.agent.PromptTemplates
 import runtime.mobileagent.agent.RuntimeEvent
+import runtime.mobileagent.agent.ContextPreflight
+import runtime.mobileagent.agent.ContextSource
+import runtime.mobileagent.agent.RuntimeContext
+import runtime.mobileagent.agent.RunBudget
 import runtime.mobileagent.agent.toDiffPartOrNull
 import runtime.mobileagent.agent.toMessagePartOrNull
 import runtime.mobileagent.agent.toSafeErrorPart
@@ -36,6 +41,7 @@ import runtime.mobileagent.provider.ChatMessage
 import runtime.mobileagent.provider.HeaderSecretResolver
 import runtime.mobileagent.provider.InlineImage
 import runtime.mobileagent.provider.ModelEvent
+import runtime.mobileagent.provider.ModelRequest
 import runtime.mobileagent.provider.ParameterLayers
 import runtime.mobileagent.provider.RequestHeaderValue
 import runtime.mobileagent.provider.SecretRedactor
@@ -48,6 +54,9 @@ import runtime.mobileagent.skills.tooling.InternalRequestIds
 import java.net.URI
 import java.time.LocalDate
 import java.util.Base64
+
+private class ChatInputBudgetExceeded(val estimated: Long, val limit: Long) :
+    IllegalArgumentException("CONTEXT_OVERFLOW")
 
 /** UI state projects durable conversations, immutable bindings, and checkpointed partial answers. */
 class ChatViewModel(
@@ -146,6 +155,7 @@ class ChatViewModel(
                 }, selectedSessionId = selected,
                 agents = agents.map { ChatAgentOptionUi(it.id, it.name) }, selectedAgentId = agentId,
                 messages = messages.map(::messageUi), citations = citationUis(),
+                compactions = selected?.let { container.contextCompactions.list(it).map(::compactionUi) }.orEmpty(),
                 requestPreview = state.value.requestPreview?.takeIf { inspectorEnabled },
                 requestInspectorAvailability = resolveRequestInspectorAvailability(
                     inspectorEnabled = inspectorEnabled,
@@ -307,6 +317,7 @@ class ChatViewModel(
             input = "",
         )
         val binding = try { container.agents.resolveSnapshot(conversation.snapshotId) } catch (failure: Exception) { fail(failure); return }
+        val contextPolicy = try { AgentContextPolicy.fromJson(binding.snapshot.contextPolicyJson) } catch (failure: Exception) { fail(failure); return }
         val degrade = state.value.textDegradation
         val threadWorkspacePort = (container as? ThreadWorkspacePortProvider)?.threadWorkspacePort
         var threadWorkspaceBindingReadFailed = false
@@ -345,14 +356,16 @@ class ChatViewModel(
             statusKind = "",
         )
         runJob = viewModelScope.launch {
-            val run = AgentRun(EntityId.random().value, binding.snapshot.id, conversationId)
+            val run = AgentRun(EntityId.random().value, binding.snapshot.id, conversationId,
+                budget = RunBudget(maxModelRounds = contextPolicy.maxModelRequestsPerRun))
             // The run owner outlives any single UI page: only this owner key
             // may cancel/terminalize the run through the RunCoordinator.
             val runOwnerKey = "chat:$conversationId"
             val createdAt = Utc.nowIso()
             var record = RunRecord(run.runId, run.snapshotId, conversationId, createdAt = createdAt, startedAt = createdAt,
-                budgetJson = "{\"maxModelRounds\":8,\"maxToolCalls\":20,\"maxRuntimeMs\":180000}")
+                budgetJson = "{\"maxModelRounds\":${run.budget.maxModelRounds},\"maxToolCalls\":20,\"maxRuntimeMs\":180000,\"maxModelRoundsPerSegment\":${contextPolicy.maxModelRoundsPerSegment},\"maxCompactionsPerRun\":${contextPolicy.maxCompactionsPerRun}}")
             var secret: CharArray? = null
+            val compactionUsage = RunCompactionUsage()
             var assistantId: String? = null
             var answer = ""
             var reasoning = ""
@@ -366,6 +379,7 @@ class ChatViewModel(
             var toolWaitingApproval = false
             var lastCheckpoint = 0L
             var lastUiFlush = 0L
+            var preparationStage: String? = "preflight"
             val observed = linkedMapOf<String, ToolCallPart>()
             val invocations = linkedMapOf<String, ToolInvocation>()
             fun flushStreamingAnswer(id: String?, text: String, force: Boolean, reasoningText: String = reasoning) {
@@ -421,6 +435,7 @@ class ChatViewModel(
                 val kbIds = binding.snapshot.knowledgeBaseIds.intersect(currentAgent.knowledgeBaseIds.toSet())
                     .intersect(container.knowledge.listKnowledgeBases().map { it.first }.toSet()).toList()
                 val skillIds = binding.snapshot.skillIds.intersect(currentAgent.skillIds.toSet())
+                preparationStage = "retrieval"
                 val result = withContext(Dispatchers.IO) {
                     if (binding.retrievalMode == "automatic") container.knowledge.retrieve(run.runId, text, 8, kbIds)
                     else RetrievalResult(
@@ -436,7 +451,7 @@ class ChatViewModel(
                 }
                 val policy = Json.parseToJsonElement(binding.snapshot.contextPolicyJson).jsonObject
                 fun limit(key: String, default: Int, max: Int) = (policy[key]?.jsonPrimitive?.intOrNull ?: default).coerceIn(1, max.coerceAtLeast(1))
-                val inputBudget = limit("maxInputTokens", (model.contextLimit - model.outputLimit).coerceAtLeast(1), (model.contextLimit - model.outputLimit).coerceAtLeast(1))
+                val inputBudget = contextPolicy.inputLimit(model.contextLimit, model.outputLimit).toInt()
                 val hits = RetrievalBudget.clip(result.hits, limit("knowledgeTokenBudget", 3000, inputBudget))
                 val bound = CitationMap.bind(run.runId, hits).map { it.copy(citationId = run.runId + "-" + it.citationId) }
                 bound.zip(hits).forEach { (citation, hit) -> citations[citation.citationId] = citation to hit.text }
@@ -554,6 +569,7 @@ class ChatViewModel(
                     }
                 }
                 if (toolingContext == null) noteV2ToolingUnavailable(RuntimeToolingUnavailableCode.TOOL_EXECUTION_CONTEXT_UNAVAILABLE)
+                preparationStage = "tooling"
                 val runTools = RunTools(container, getApplication<Application>(), binding.snapshot, run,
                     "image" in model.capabilities, degrade,
                     baseExecutors = listOf(webExecutor, mcpExecutor),
@@ -593,6 +609,7 @@ class ChatViewModel(
                 )
                 val toolExecutor = runTools.executor
                 activeToolExecutor = toolExecutor
+                preparationStage = "prompt"
                 // Freeze-once run facts (b07 follow-up finding D): the global
                 // root prompt, Skill instructions/pins, retrieval generations,
                 // grants, and tool fingerprint are each read a single time and
@@ -668,6 +685,7 @@ class ChatViewModel(
                     modelTokenBudget = RunCoordinator.modelTokenBudget(record.budgetJson),
                     retrievalScope = preparedFacts.retrievalScope,
                 )
+                preparationStage = "manifest"
                 val manifestStamped = runCatching {
                     withContext(Dispatchers.IO) {
                         record = container.runCoordinator.stampManifest(run.runId, manifest, Utc.nowIso())
@@ -688,7 +706,14 @@ class ChatViewModel(
                 val history = withContext(Dispatchers.IO) {
                     container.conversations.messages(conversationId).filterNot { it.id == userMessage.id }
                 }
-                val typedHistory = boundedHistory(history, limit("maxHistoryMessages", 20, 200), kbIds.toSet())
+                val contextHistory = boundedHistory(history,
+                    if (contextPolicy.autoCompact) Int.MAX_VALUE else contextPolicy.maxHistoryMessages, kbIds.toSet())
+                val typedHistory = contextHistory.messages
+                val historicalSourceIds = contextHistory.sources.map { it.messageId }.toSet()
+                val historicalCitations = history.filter { it.id in historicalSourceIds }.flatMap { message ->
+                    val metadata = Json.parseToJsonElement(message.metadataJson).jsonObject
+                    metadata["citations"]?.jsonArray.orEmpty().map { it.jsonObject["id"]!!.jsonPrimitive.content }
+                }.distinct()
                 val availableToolNames = if ("tools" in model.capabilities) {
                     toolExecutor.specs.map { it.name }
                 } else {
@@ -705,13 +730,7 @@ class ChatViewModel(
                     history = emptyList(), currentUser = text, currentImages = images, typedHistory = typedHistory,
                     globalRootPrompt = preparedFacts.rootPrompt,
                 )
-                // Conservative UTF-8 byte estimate plus image/schema/output reservations; never falsify token counts.
-                val estimated = prompt.asMessages().sumOf { it.text.toByteArray(Charsets.UTF_8).size.toLong() + it.images.size * 4096L } +
-                    if ("tools" in model.capabilities) toolExecutor.specs.sumOf { it.parametersJson.toByteArray().size }.toLong() else 0L
-                require(estimated <= inputBudget) {
-                    "上下文超过保守输入预算单位（$estimated / $inputBudget UTF-8 字节与固定图片预留）。请减少历史/知识范围或新建会话；不会静默丢图。"
-                }
-                secret = withContext(Dispatchers.IO) { container.secrets.resolveForHost(provider.secretRef) }
+                preparationStage = "context_budget"
                 val adapter = OpenAiAdapterFactory.create(provider.apiFormat, container.http, provider.baseUrl, headerSecretResolver = HeaderSecretResolver { host, ref ->
                     require(host.equals(URI(provider.baseUrl).host, true) && ref in provider.headerSecretRefs.values) { "Header secret destination mismatch" }
                     container.secrets.resolveForHost(ref)
@@ -719,6 +738,74 @@ class ChatViewModel(
                 val headers = mutableMapOf<String, RequestHeaderValue>()
                 provider.nonSecretHeaders.forEach { (name, value) -> headers[name] = RequestHeaderValue.Plain(value) }
                 provider.headerSecretRefs.forEach { (name, ref) -> headers[name] = RequestHeaderValue.SecretRef(ref) }
+                val layers = ParameterLayers(adapterDefaults = mapOf("max_tokens" to JsonPrimitive(model.outputLimit)),
+                    modelParameters = Json.parseToJsonElement(model.parametersJson).jsonObject,
+                    agentOverrides = Json.parseToJsonElement(binding.snapshot.parameterOverridesJson).jsonObject)
+                val trackedGrantIds = preparedFacts.grants.map { it.grantId }.toSet()
+                fun contextAuthorizationFingerprint(): String {
+                    val live = container.agents.get(binding.snapshot.agentId) ?: error("Agent authorization was removed")
+                    val liveKbs = container.knowledge.listKnowledgeBases().map { it.first }.toSet()
+                    val stamp = buildJsonObject {
+                        put("agent", live.id)
+                        put("policy", container.agentGrantPort.currentPolicyVersion())
+                        put("knowledge", JsonArray(kbIds.sorted().map { id -> JsonPrimitive("$id:${id in live.knowledgeBaseIds && id in liveKbs}") }))
+                        put("skills", JsonArray(skillIds.sorted().map { id ->
+                            val installed = container.skills.get(id)
+                            JsonPrimitive("$id:${id in live.skillIds}:${installed?.packageHash}:${installed?.enabled}:" +
+                                container.skills.grantsFor(id).sortedBy { it.grantId }.joinToString { "${it.grantId}:${it.revision}:${it.revoked}" })
+                        }))
+                        put("grants", JsonArray(container.agentGrantPort.listGrants(live.id, includeRevoked = true)
+                            .filter { it.grantId in trackedGrantIds }.sortedBy { it.grantId }
+                            .map { grant ->
+                                // Consuming an ONCE grant is an expected consequence of a completed
+                                // tool, not permission to invoke it again. Ignore only that bookkeeping
+                                // change here; execution still revalidates the consumed marker.
+                                JsonPrimitive(grant.copy(revision = 1, consumedAt = null).toString() +
+                                    ":expired=" + (grant.expiresAt?.let { it <= Utc.nowIso() } ?: false))
+                            }))
+                    }
+                    return sha256Hex(stamp.toString().toByteArray(Charsets.UTF_8))
+                }
+                val authorizationFingerprint = withContext(Dispatchers.IO) { contextAuthorizationFingerprint() }
+                val modelFingerprint = sha256Hex(buildJsonObject {
+                    put("provider", provider.id); put("providerRevision", provider.revision)
+                    put("endpoint", provider.baseUrl); put("format", provider.apiFormat.name)
+                    put("model", model.modelId); put("modelRevision", model.revision)
+                    put("snapshot", binding.snapshot.id); put("rootPrompt", preparedFacts.rootPromptHash)
+                    put("parameters", model.parametersJson); put("contextPolicy", binding.snapshot.contextPolicyJson)
+                }.toString().toByteArray(Charsets.UTF_8))
+                val previousCheckpoints = withContext(Dispatchers.IO) { container.contextCompactions.list(conversationId) }
+                val previous = previousCheckpoints.lastOrNull { it.state == ContextCompactionState.SUCCEEDED }
+                val initialSummary = if (contextPolicy.autoCompact) withContext(Dispatchers.IO) {
+                    container.contextCompactions.latestSucceeded(conversationId, binding.snapshot.id, modelFingerprint, authorizationFingerprint)
+                        ?.takeIf { it.id == previous?.id && it.sourceMessageIds.all(historicalSourceIds::contains) }
+                } else null
+                val runtimeContext = RuntimeContext(
+                    policy = contextPolicy, historySources = contextHistory.sources, currentUserMessageId = userMessage.id,
+                    modelFingerprint = modelFingerprint, authorizationFingerprint = authorizationFingerprint,
+                    initialSummary = initialSummary, parentCheckpointId = previous?.id,
+                    persist = { checkpoint ->
+                        withContext(Dispatchers.IO) {
+                            if (checkpoint.state == ContextCompactionState.PREPARED) container.contextCompactions.create(checkpoint)
+                            else container.contextCompactions.transition(checkpoint.id, checkpoint.state, checkpoint.summaryJson,
+                                checkpoint.afterUnits, checkpoint.inputTokens, checkpoint.outputTokens)
+                        }
+                    },
+                )
+                val preparedRequest = ModelRequest(model.modelId, prompt.asMessages(),
+                    tools = if ("tools" in model.capabilities) toolExecutor.specs.map {
+                        mapOf("name" to it.name, "description" to it.description, "parameters" to it.parametersJson)
+                    } else emptyList(), parameters = layers, headers = headers, outputTokenLimit = model.outputLimit)
+                // The same complete adapter budgeter serves this pre-credential check and every Runtime round.
+                val preflight = adapter.estimateInput(if (contextPolicy.autoCompact) {
+                    ContextPreflight.minimumRequest(prompt, runtimeContext, preparedRequest)
+                } else preparedRequest)
+                if (preflight.units > inputBudget || preflight.imageCount > contextPolicy.imageBudget) {
+                    throw ChatInputBudgetExceeded(preflight.units, inputBudget.toLong())
+                }
+                preparationStage = "credentials"
+                secret = withContext(Dispatchers.IO) { container.secrets.resolveForHost(provider.secretRef) }
+                preparationStage = "request"
                 state.value = state.value.copy(promptLayers = prompt.assemble().blocks.map { ChatPromptLayerUi(it.trust.name, it.text) },
                     citations = citationUis(), status = listOfNotNull(
                         "发送至 ${URI(provider.baseUrl).host} · ${model.modelId}。",
@@ -788,35 +875,71 @@ class ChatViewModel(
                 }, secretsForRedaction = {
                     secret?.let { listOf(String(it)) }.orEmpty()
                 })
-                val layers = ParameterLayers(adapterDefaults = mapOf("max_tokens" to JsonPrimitive(model.outputLimit)),
-                    modelParameters = Json.parseToJsonElement(model.parametersJson).jsonObject,
-                    agentOverrides = Json.parseToJsonElement(binding.snapshot.parameterOverridesJson).jsonObject)
                 runtime.run(AgentRuntimeRequest(run, prompt, model.modelId, secret!!, "tools" in model.capabilities,
                     parameters = layers, headers = headers, emitRequestPreview = container.uiPreferences.getBoolean("request-inspector", true),
                     toolImages = runTools::toolImages, maxInputBudgetUnits = inputBudget.toLong(),
                     outputTokenLimit = model.outputLimit,
+                    maxImagesPerRequest = contextPolicy.imageBudget,
+                    context = runtimeContext,
                     beforeModelRequest = {
+                        require(contextAuthorizationFingerprint() == authorizationFingerprint) {
+                            "PERMISSION_DENIED: authorization changed before model request; context summary cannot restore access"
+                        }
                         val live = container.agents.get(binding.snapshot.agentId) ?: error("Agent authorization was removed")
                         val allowed = kbIds.intersect(live.knowledgeBaseIds.toSet())
                         require(bound.all { it.knowledgeBaseId in allowed && !container.knowledge.locateCitation(it).removed }) {
                             "Knowledge authorization or source changed before request"
                         }
+                        require(historicalCitations.all { id -> citations[id]?.first?.let { citation ->
+                            citation.knowledgeBaseId in allowed && !container.knowledge.locateCitation(citation).removed
+                        } == true }) { "PERMISSION_DENIED: historical knowledge was removed or revoked; start a new conversation" }
+                        val historyAssetIds = typedHistory.flatMap { it.images }.mapNotNull { it.assetId }.toSet()
+                        require(historyAssetIds.all { assetId -> citations.values.any { (citation, _) ->
+                            citation.assetId == assetId && citation.knowledgeBaseId in allowed && !container.knowledge.locateCitation(citation).removed
+                        } }) { "PERMISSION_DENIED: historical visual evidence was removed or revoked" }
                     }))
-                    .flowOn(Dispatchers.IO).collect { event ->
+                    // Rendezvous keeps durable old exchanges ahead of a later compaction checkpoint.
+                    .flowOn(Dispatchers.IO).buffer(0).collect { event ->
                         var persistRun = false
                         when (event) {
                             is RuntimeEvent.RunStarted -> {
                                 record = record.copy(state = RunStatus.VALIDATING)
                                 persistRun = true
                             }
+                            is RuntimeEvent.ContextCompactionChanged -> {
+                                record = compactionUsage.reconcile(record, listOf(event.record))
+                                if (event.record.state == ContextCompactionState.PREPARED) {
+                                    // Finish the prior assistant checkpoint before releasing its id. A
+                                    // summary failure must get its own error row, never rewrite it.
+                                    if (assistantId != null) checkpoint("COMPLETE")
+                                    assistantId = null; answer = ""; reasoning = ""; observed.clear(); terminalError = null
+                                }
+                                modelInFlight = event.record.state == ContextCompactionState.DISPATCHED
+                                record = record.copy(
+                                    state = if (modelInFlight) RunStatus.MODEL_STREAMING else RunStatus.ASSEMBLING,
+                                    modelRounds = run.modelRounds,
+                                )
+                                state.value = state.value.copy(
+                                    compactions = withContext(Dispatchers.IO) { container.contextCompactions.list(conversationId) }.map(::compactionUi),
+                                    status = when (event.record.state) {
+                                        ContextCompactionState.PREPARED, ContextCompactionState.DISPATCHED -> "正在压缩较早上下文，完成后继续当前任务…"
+                                        ContextCompactionState.SUCCEEDED -> "上下文已压缩，正在继续；原始记录已保留。"
+                                        ContextCompactionState.UNKNOWN_OUTCOME -> "压缩请求结果未知；不会自动重试。"
+                                        else -> "上下文压缩未完成，原始记录已保留。"
+                                    },
+                                )
+                                persistRun = true
+                            }
                             is RuntimeEvent.RequestPrepared -> {
+                                preparationStage = null
                                 modelInFlight = true
                                 if (assistantId != null) checkpoint("COMPLETE")
                                 observed.clear(); reasoning = ""; terminalError = null
                                 answer = if (round++ == 0 && warning != null) "$warning\n\n" else ""
                                 assistantId = withContext(Dispatchers.IO) { container.conversations.append(conversationId, MessageRole.ASSISTANT,
-                                    answer, status = "STREAMING", metadataJson = metadata).id }
-                                record = record.copy(state = RunStatus.MODEL_STREAMING, modelRounds = round)
+                                    answer, status = "STREAMING", metadataJson = metadata,
+                                    messageId = event.assistantMessageId ?: EntityId.random().value).id }
+                                record = record.copy(state = RunStatus.MODEL_STREAMING, modelRounds = run.modelRounds)
                                 val inspectorEnabled = requestInspectorEnabled()
                                 val requestPreview = event.requestPreview?.takeIf { inspectorEnabled }?.let { ChatRequestPreviewUi("POST",
                                     OpenAiAdapterFactory.requestEndpoint(provider.apiFormat, provider.baseUrl),
@@ -870,7 +993,8 @@ class ChatViewModel(
                                     answer = if (answer.isBlank()) safeMessage else answer.trimEnd() + "\n" + safeMessage
                                     terminalError = projected
                                     flushStreamingAnswer(assistantId, answer, force = true)
-                                    checkpoint("ERROR")
+                                    if (assistantId == null) persistTerminalError(projected) else checkpoint("ERROR")
+                                    record = record.copy(errorCode = projected.code.name)
                                     state.value = state.value.copy(status = safeMessage, statusKind = "error")
                                     persistRun = true
                                 }
@@ -938,6 +1062,7 @@ class ChatViewModel(
                                     if (runtimeInvocationId in invocations) container.runs.updateInvocation(invocation) else container.runs.recordInvocation(invocation)
                                     val diffPart = event.toDiffPartOrNull()
                                     container.conversations.append(conversationId, MessageRole.TOOL, event.resultJson,
+                                        messageId = event.messageId ?: EntityId.random().value,
                                         parts = buildList {
                                             add(ToolResultPart(event.callId, event.resultJson, invocation.state))
                                             // A diff is persisted only when the tool returned an
@@ -953,7 +1078,8 @@ class ChatViewModel(
                             }
                             is RuntimeEvent.ToolImagesAttached -> withContext(Dispatchers.IO) {
                                 container.conversations.append(conversationId, MessageRole.USER, "Tool visual evidence: ${event.callId}",
-                                    parts = event.assets.map { ImagePart(it.assetId, it.mediaType) }, metadataJson = "{\"toolEvidence\":true}")
+                                    parts = event.assets.map { ImagePart(it.assetId, it.mediaType) }, metadataJson = "{\"toolEvidence\":true}",
+                                    messageId = event.messageId ?: EntityId.random().value)
                             }
                             is RuntimeEvent.RunFinished -> {
                                 pendingApprovalFor(run.runId)?.let { pending ->
@@ -1005,7 +1131,8 @@ class ChatViewModel(
                     }
                 if (record.state !in TERMINAL) record = record.copy(state = RunStatus.FAILED, stopReason = "No terminal outcome")
                 state.value = state.value.copy(status = when (record.state) {
-                    RunStatus.COMPLETED -> "已完成。输入 ${record.inputTokens} / 输出 ${record.outputTokens} tokens。"
+                    RunStatus.COMPLETED -> "已完成。输入 ${record.inputTokens} / 输出 ${record.outputTokens} tokens。" +
+                        if (run.compactionRequests > 0) "包含 ${run.compactionRequests} 次上下文摘要请求。" else ""
                     RunStatus.BUDGET_EXHAUSTED -> "已达到执行预算；未自动重试。"
                     else -> state.value.status
                 })
@@ -1083,7 +1210,12 @@ class ChatViewModel(
                 }
             } catch (failure: Exception) {
                 val queryUnknown = failure is ApiQueryUnknownOutcomeException
-                val errorPart = if (queryUnknown) {
+                val errorPart = if (failure is ChatInputBudgetExceeded) {
+                    ErrorPart(
+                        MessageErrorCode.CONTEXT_OVERFLOW,
+                        "上下文预算不足：保守输入估算 ${failure.estimated} 单位，上限 ${failure.limit} 单位（含文本、工具参数和协议/图片预留，并非实际 token 数）。必须保留的内容已超限；请缩短当前输入或减少已绑定技能、知识范围，或核对模型窗口后调整输入预算并新建会话。未发送对话或摘要模型请求。",
+                    )
+                } else if (queryUnknown) {
                     ErrorPart(
                         MessageErrorCode.UNKNOWN_OUTCOME,
                         "知识库查询结果未知，可能已产生外部影响；不会自动重试。",
@@ -1091,8 +1223,14 @@ class ChatViewModel(
                 } else {
                     toSafeErrorPart(failure.message.orEmpty())
                 }
+                preparationStage?.let { stage ->
+                    runCatching {
+                        (getApplication<Application>() as MobileAgentApp).diagnostics
+                            .recordRunPreparationFailed(stage, errorPart.code, failure)
+                    }
+                }
                 record = record.copy(state = if (queryUnknown) RunStatus.UNKNOWN_OUTCOME else if (record.state in TERMINAL) record.state else RunStatus.FAILED,
-                    errorCode = if (queryUnknown) "UNKNOWN_OUTCOME" else record.errorCode,
+                    errorCode = if (queryUnknown) "UNKNOWN_OUTCOME" else record.errorCode ?: errorPart.code.name,
                     stopReason = errorPart.message)
                 persistTerminalError(errorPart)
                 state.value = state.value.copy(status = errorPart.message, statusKind = "error", error = null)
@@ -1150,6 +1288,11 @@ class ChatViewModel(
                             }
                         }
                         checkpoint(if (record.state == RunStatus.COMPLETED) "COMPLETE" else record.state.name)
+                        // The cancelled producer can persist an attempt without delivering its
+                        // final event. Reconcile known usage by attempt id exactly once.
+                        record = compactionUsage.reconcile(record, withContext(Dispatchers.IO) {
+                            container.contextCompactions.list(conversationId)
+                        })
                         record = record.copy(finishedAt = Utc.nowIso(), updatedAt = Utc.nowIso())
                         withContext(Dispatchers.IO) { container.runs.save(record) }
                         container.runCoordinator.release(run.runId, runOwnerKey)
@@ -1595,7 +1738,9 @@ class ChatViewModel(
             citations[citation.citationId] = citation to value("excerpt")
         }
     }
-    private fun boundedHistory(messages: List<Message>, max: Int, allowedKbs: Set<String>): List<ChatMessage> {
+    private data class ChatHistory(val messages: List<ChatMessage>, val sources: List<ContextSource>)
+
+    private fun boundedHistory(messages: List<Message>, max: Int, allowedKbs: Set<String>): ChatHistory {
         val groups = mutableListOf<MutableList<Message>>()
         messages.forEach { message ->
             val toolEvidence = runCatching { Json.parseToJsonElement(message.metadataJson).jsonObject["toolEvidence"]?.jsonPrimitive?.booleanOrNull }.getOrNull() == true
@@ -1603,19 +1748,27 @@ class ChatViewModel(
             groups.last().add(message)
         }
         val selected = mutableListOf<Message>()
+        val turnIds = mutableMapOf<String, String>()
         for (group in groups.asReversed()) {
-            if (group.any { it.status != "COMPLETE" }) continue
             val pending = linkedSetOf<String>()
             var valid = true
-            for (message in group) {
+            var completeEnd = 0
+            for ((index, message) in group.withIndex()) {
+                if (message.status != "COMPLETE") break
                 message.parts.filterIsInstance<ToolCallPart>().forEach { if (!pending.add(it.callId)) valid = false }
                 message.parts.filterIsInstance<ToolResultPart>().forEach { if (!pending.remove(it.callId)) valid = false }
+                if (!valid) break
+                if (pending.isEmpty()) completeEnd = index + 1
             }
-            if (!valid || pending.isNotEmpty()) continue
-            if (selected.size + group.size > max) break
-            selected.addAll(0, group)
+            // A later cancelled/error response must not erase complete exchanges already
+            // summarized earlier in this same run. Exclude only the incomplete suffix.
+            val complete = group.take(completeEnd)
+            if (complete.isEmpty()) continue
+            if (selected.size + complete.size > max) break
+            selected.addAll(0, complete)
+            complete.forEach { turnIds[it.id] = group.first().id }
         }
-        return selected.map { message ->
+        val projected = selected.map { message ->
             val assets = message.parts.filterIsInstance<ImagePart>()
             val images = if (assets.isEmpty()) emptyList() else {
                 require(assets.all { asset -> citations.values.any { (citation, _) -> citation.assetId == asset.assetId &&
@@ -1628,7 +1781,16 @@ class ChatViewModel(
             ChatMessage(message.role.name.lowercase(), message.text, images, message.parts.filterIsInstance<ToolResultPart>().singleOrNull()?.callId,
                 message.parts.filterIsInstance<ToolCallPart>().map { AssistantToolCall(it.callId, it.name, it.argumentsJson) })
         }
+        return ChatHistory(projected, selected.map { ContextSource(it.id, turnIds.getValue(it.id)) })
     }
+
+    private fun compactionUi(record: ContextCompactionRecord): ChatCompactionUi = ChatCompactionUi(
+        id = record.id, state = record.state.name, sourceMessageIds = record.sourceMessageIds,
+        summaryJson = record.summaryJson, modelId = record.modelId, reason = record.reason,
+        beforeUnits = record.beforeUnits, afterUnits = record.afterUnits,
+        inputTokens = record.inputTokens, outputTokens = record.outputTokens,
+        inputHash = record.inputHash, createdAt = record.createdAt,
+    )
 
     private fun projectWorkspaceAccess(
         conversationId: String?,

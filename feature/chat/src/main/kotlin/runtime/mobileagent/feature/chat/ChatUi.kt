@@ -151,6 +151,13 @@ data class ChatRequestPreviewUi(
 
 data class ChatAgentOptionUi(val id: String, val label: String)
 
+data class ChatCompactionUi(
+    val id: String, val state: String, val sourceMessageIds: List<String>,
+    val summaryJson: String?, val modelId: String, val reason: String,
+    val beforeUnits: Long, val afterUnits: Long, val inputTokens: Int, val outputTokens: Int,
+    val inputHash: String, val createdAt: String,
+)
+
 enum class ChatThreadWorkspaceState {
     BOUND,
     UNBOUND_AGENT_DEFAULT_AVAILABLE,
@@ -223,6 +230,7 @@ data class ChatUiState(
     val currentAuthorityLabel: String = "",
     val drawerDestinations: List<ChatDrawerDestinationUi> = emptyList(),
     val modelLabel: String = "",
+    val compactions: List<ChatCompactionUi> = emptyList(),
 )
 
 data class ChatActions(
@@ -431,6 +439,15 @@ private fun ChatConversationContent(
                 )
                 UnboundWorkspaceDefaultCard(state, actions)
                 if (state.status.isNotBlank()) StatusLine(state.status, state.statusKind)
+                val listState = rememberLazyListState()
+                val scrollScope = rememberCoroutineScope()
+                val coveredIds = remember(state.compactions) {
+                    state.compactions.lastOrNull { it.state == "SUCCEEDED" }?.sourceMessageIds.orEmpty().toSet()
+                }
+                ContextCompactionHistory(state.compactions, state.messages, state.language.equals("zh-CN", true)) { id ->
+                    val index = state.messages.indexOfFirst { it.id == id }
+                    if (index >= 0) scrollScope.launch { listState.scrollToItem(index) }
+                }
                 if (state.loading) {
                     CenterState(if (state.language.equals("zh-CN", true)) "正在加载会话…" else "Loading conversations…", true, Modifier.weight(1f))
                 } else if (state.error != null) {
@@ -438,12 +455,16 @@ private fun ChatConversationContent(
                 } else if (state.messages.isEmpty()) {
                     CenterState(emptyConversationMessage(state, state.language.equals("zh-CN", true)), false, Modifier.weight(1f))
                 } else {
-                    val listState = rememberLazyListState()
                     LaunchedEffect(state.messages.size, state.streaming) {
                         if (state.messages.isNotEmpty()) listState.animateScrollToItem(state.messages.lastIndex)
                     }
                     LazyColumn(state = listState, modifier = Modifier.weight(1f).fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                         items(state.messages, key = { it.id }) {
+                            if (it.id in coveredIds) {
+                                Text(if (state.language.equals("zh-CN", true)) "已纳入上下文摘要 · 原文保留" else "Included in a context summary · original retained",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    modifier = Modifier.testTag("conversation.summarized.${it.id}"))
+                            }
                             MessageBubble(
                                 message = it,
                                 citations = state.citations,
@@ -952,6 +973,61 @@ private fun StatusLine(status: String, kind: String) {
         else -> MaterialTheme.colorScheme.onSurfaceVariant
     }
     Text(status, color = color, style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(vertical = 6.dp))
+}
+
+@Composable
+private fun ContextCompactionHistory(records: List<ChatCompactionUi>, messages: List<ChatMessageUi>, zh: Boolean, onSource: (String) -> Unit) {
+    if (records.isEmpty()) return
+    var open by remember { mutableStateOf(false) }
+    TextButton(onClick = { open = true }, modifier = Modifier.testTag("conversation.compaction.open")) {
+        Text(if (zh) "上下文摘要 · ${records.count { it.state == "SUCCEEDED" }} 次完成" else
+            "Context summaries · ${records.count { it.state == "SUCCEEDED" }} completed")
+    }
+    if (open) AlertDialog(
+        onDismissRequest = { open = false },
+        title = { Text(if (zh) "上下文压缩记录" else "Context compaction history") },
+        text = {
+            Column(Modifier.heightIn(max = 480.dp).verticalScroll(rememberScrollState()).testTag("conversation.compaction.history"),
+                verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Text(if (zh) "摘要使用本会话模型，额外请求计入运行用量。原始消息仍在对话中；摘要不授予权限，也不会自动重做工具。" else
+                    "Summaries use this session's model and count toward run usage. Original messages remain in the conversation. Summaries grant no permissions and do not replay tools.")
+                records.asReversed().forEach { record ->
+                    val label = when (record.state) {
+                        "PREPARED" -> if (zh) "已准备" else "Prepared"
+                        "DISPATCHED" -> if (zh) "正在压缩" else "Compressing"
+                        "SUCCEEDED" -> if (zh) "已完成" else "Completed"
+                        "UNKNOWN_OUTCOME" -> if (zh) "结果未知，不自动重试" else "Outcome unknown; no automatic retry"
+                        "CANCELLED" -> if (zh) "已取消" else "Cancelled"
+                        else -> if (zh) "未完成，原始上下文保留" else "Failed; original context retained"
+                    }
+                    Text("$label · ${record.createdAt.take(19)}", style = MaterialTheme.typography.titleSmall)
+                    Text(if (zh) "模型：${record.modelId} · 覆盖 ${record.sourceMessageIds.size} 条原始消息" else
+                        "Model: ${record.modelId} · covers ${record.sourceMessageIds.size} original messages")
+                    Text(if (zh) "保守输入估算：${record.beforeUnits} → ${record.afterUnits} 单位（非实际 token）\n摘要用量：输入 ${record.inputTokens} / 输出 ${record.outputTokens} tokens" else
+                        "Conservative input estimate: ${record.beforeUnits} → ${record.afterUnits} units (not actual tokens)\nSummary usage: ${record.inputTokens} input / ${record.outputTokens} output tokens")
+                    record.summaryJson?.let { Text(it, modifier = Modifier.testTag("conversation.compaction.summary.${record.id}")) }
+                    var sourcesOpen by remember(record.id) { mutableStateOf(false) }
+                    var sourceLimit by remember(record.id) { mutableStateOf(50) }
+                    TextButton(onClick = { sourcesOpen = !sourcesOpen }) { Text(if (zh) "查看覆盖的原始消息" else "Inspect covered originals") }
+                    if (sourcesOpen) {
+                        val byId = messages.associateBy { it.id }
+                        record.sourceMessageIds.take(sourceLimit).forEach { id ->
+                            TextButton(onClick = { open = false; onSource(id) },
+                                modifier = Modifier.testTag("conversation.compaction.source.$id")) {
+                                Text(byId[id]?.let { "${it.role}: ${it.text.take(160)}" } ?: id,
+                                    style = MaterialTheme.typography.bodySmall)
+                            }
+                        }
+                        if (sourceLimit < record.sourceMessageIds.size) TextButton(onClick = { sourceLimit += 50 }) {
+                            Text(if (zh) "更多原始消息" else "More originals")
+                        }
+                        Text("SHA-256: ${record.inputHash}", style = MaterialTheme.typography.labelSmall)
+                    }
+                }
+            }
+        },
+        confirmButton = { TextButton(onClick = { open = false }) { Text(if (zh) "关闭" else "Close") } },
+    )
 }
 
 @Composable

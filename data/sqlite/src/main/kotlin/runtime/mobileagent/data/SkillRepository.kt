@@ -54,7 +54,7 @@ class SkillRepository(private val db: SqlConnection) {
                 listOf(
                     inspection.packageHash,
                     manifest?.id ?: "instruction.${inspection.packageHash.take(12)}",
-                    manifest?.name ?: "Instruction-only skill",
+                    manifest?.name ?: inspection.displayName ?: "Instruction-only skill",
                     manifest?.version ?: "0",
                     manifest?.license ?: "unknown",
                     inspection.classification.name,
@@ -141,7 +141,24 @@ class SkillRepository(private val db: SqlConnection) {
                 "Review and approve this package's permissions before enabling it"
             }
         }
-        db.execute("UPDATE skill_installs SET enabled = ? WHERE install_id = ?", listOf(if (enabled) 1 else 0, installId))
+        db.transaction {
+            if (enabled && skill.classification == CompatibilityClass.A) {
+                val now = Utc.nowIso()
+                db.execute(
+                    "UPDATE permission_grants SET revoked = 1, revoked_at = COALESCE(revoked_at, ?), revision = revision + 1 WHERE install_id = ? AND package_hash = ?",
+                    listOf(now, installId, skill.packageHash),
+                )
+                db.execute(
+                    "INSERT INTO permission_grants(grant_id,install_id,package_hash,capabilities,revision,revoked,scopes_json,lifetime,policy_version,created_at,expires_at,revoked_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                    listOf(
+                        EntityId.random().value, installId, skill.packageHash, "", 1, 0,
+                        "{\"capabilities\":[],\"knowledgeBaseIds\":[],\"hosts\":[],\"methods\":[]}",
+                        legacyGrantLifetime, 0, now, null, null,
+                    ),
+                )
+            }
+            db.execute("UPDATE skill_installs SET enabled = ? WHERE install_id = ?", listOf(if (enabled) 1 else 0, installId))
+        }
     }
 
     fun revoke(installId: String) {

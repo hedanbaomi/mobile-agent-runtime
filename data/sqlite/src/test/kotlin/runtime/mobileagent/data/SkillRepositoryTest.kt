@@ -196,6 +196,141 @@ class SkillRepositoryTest {
         assertEquals(listOf(installed.installId), saved.skillIds)
     }
 
+    @Test
+    fun rawInstructionSkillUsesFrontmatterName() = database { db ->
+        val skills = SkillRepository(db)
+        val raw = """
+            ---
+            name: josephine-mccarthy-perspective
+            description: Local instruction fixture
+            ---
+            # Perspective
+            Keep this instruction available to the selected agent.
+        """.trimIndent().toByteArray()
+
+        assertTrue(skills.importPackage(raw).accepted)
+        val installed = skills.list().single()
+        assertEquals(CompatibilityClass.A, installed.classification)
+        assertEquals("josephine-mccarthy-perspective", installed.name)
+    }
+
+    @Test
+    fun enablingRawInstructionSkillRestoresEmptyPersistentGrant() = database { db ->
+        val skills = SkillRepository(db)
+        val raw = """
+            ---
+            name: raw-instruction-fixture
+            ---
+            # Perspective
+            Keep this instruction available to the selected agent.
+        """.trimIndent().toByteArray()
+
+        assertTrue(skills.importPackage(raw).accepted)
+        val installed = skills.list().single()
+        assertEquals(CompatibilityClass.A, installed.classification)
+        assertTrue(skills.grantsFor(installed.installId).single().revoked)
+
+        skills.setEnabled(installed.installId, true)
+
+        val grant = skills.grantsFor(installed.installId).single { !it.revoked && it.packageHash == installed.packageHash }
+        assertFalse(grant.revoked)
+        assertEquals(installed.packageHash, grant.packageHash)
+        assertTrue(grant.capabilities.isEmpty())
+        assertFalse(skills.grantForInvocation(installed.installId, setOf(installed.installId), emptySet()).revoked)
+    }
+
+    @Test
+    fun enablingInstructionSkillRevokesDuplicateCurrentPackageGrants() = database { db ->
+        val skills = SkillRepository(db)
+        assertTrue(skills.importPackage(instructionOnlyPackageBytes()).accepted)
+        val installed = skills.list().single()
+        val now = "2026-09-09T00:00:00Z"
+        db.execute(
+            "DELETE FROM permission_grants WHERE install_id = ? AND package_hash = ?",
+            listOf(installed.installId, installed.packageHash),
+        )
+        listOf(
+            "duplicate-a" to "network.http",
+            "duplicate-b" to "knowledge.search",
+        ).forEach { (grantId, capability) ->
+            db.execute(
+                "INSERT INTO permission_grants(grant_id,install_id,package_hash,capabilities,revision,revoked,scopes_json,lifetime,policy_version,created_at,expires_at,revoked_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                listOf(
+                    grantId, installed.installId, installed.packageHash, capability, 1, 0,
+                    "{\"capabilities\":[\"$capability\"],\"knowledgeBaseIds\":[],\"hosts\":[],\"methods\":[]}",
+                    "PERSISTENT", 0, now, null, null,
+                ),
+            )
+        }
+
+        skills.setEnabled(installed.installId, true)
+
+        val active = db.query(
+            "SELECT * FROM permission_grants WHERE install_id = ? AND package_hash = ? AND lifetime = 'PERSISTENT' AND revoked = 0",
+            listOf(installed.installId, installed.packageHash),
+        )
+        assertEquals(1, active.size)
+        assertEquals("", active.single().string("capabilities"))
+        assertTrue(skills.grantForInvocation(installed.installId, setOf(installed.installId), emptySet()).capabilities.isEmpty())
+    }
+
+    @Test
+    fun enablingInstructionSkillReplacesMalformedCurrentPackageScope() = database { db ->
+        val skills = SkillRepository(db)
+        assertTrue(skills.importPackage(instructionOnlyPackageBytes()).accepted)
+        val installed = skills.list().single()
+        val now = "2026-09-09T00:00:00Z"
+        db.execute(
+            "DELETE FROM permission_grants WHERE install_id = ? AND package_hash = ?",
+            listOf(installed.installId, installed.packageHash),
+        )
+        db.execute(
+            "INSERT INTO permission_grants(grant_id,install_id,package_hash,capabilities,revision,revoked,scopes_json,lifetime,policy_version,created_at,expires_at,revoked_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+            listOf(
+                "malformed-scope", installed.installId, installed.packageHash, "", 3, 1,
+                "{not-json", "PERSISTENT", 0, now, null, now,
+            ),
+        )
+
+        skills.setEnabled(installed.installId, true)
+
+        val active = db.query(
+            "SELECT * FROM permission_grants WHERE install_id = ? AND package_hash = ? AND lifetime = 'PERSISTENT' AND revoked = 0",
+            listOf(installed.installId, installed.packageHash),
+        )
+        assertEquals(1, active.size)
+        assertEquals("{\"capabilities\":[],\"knowledgeBaseIds\":[],\"hosts\":[],\"methods\":[]}", active.single().string("scopes_json"))
+    }
+
+    @Test
+    fun enablingInstructionSkillReplacesExpiredEmptyGrant() = database { db ->
+        val skills = SkillRepository(db)
+        assertTrue(skills.importPackage(instructionOnlyPackageBytes()).accepted)
+        val installed = skills.list().single()
+        db.execute(
+            "DELETE FROM permission_grants WHERE install_id = ? AND package_hash = ?",
+            listOf(installed.installId, installed.packageHash),
+        )
+        db.execute(
+            "INSERT INTO permission_grants(grant_id,install_id,package_hash,capabilities,revision,revoked,scopes_json,lifetime,policy_version,created_at,expires_at,revoked_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+            listOf(
+                "expired-empty", installed.installId, installed.packageHash, "", 2, 0,
+                "{\"capabilities\":[],\"knowledgeBaseIds\":[],\"hosts\":[],\"methods\":[]}",
+                "PERSISTENT", 0, "2026-09-01T00:00:00Z", "2000-01-01T00:00:00Z", null,
+            ),
+        )
+
+        skills.setEnabled(installed.installId, true)
+
+        val active = db.query(
+            "SELECT * FROM permission_grants WHERE install_id = ? AND package_hash = ? AND lifetime = 'PERSISTENT' AND revoked = 0",
+            listOf(installed.installId, installed.packageHash),
+        )
+        assertEquals(1, active.size)
+        assertTrue(active.single().string("expires_at").isBlank())
+        assertEquals("{\"capabilities\":[],\"knowledgeBaseIds\":[],\"hosts\":[],\"methods\":[]}", active.single().string("scopes_json"))
+    }
+
     private fun createChatProfile(db: SqlConnection) {
         val profiles = ProfileRepository(db)
         profiles.createProvider(

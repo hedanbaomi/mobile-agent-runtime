@@ -5,6 +5,8 @@ package runtime.mobileagent.feature.settings
 
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.fillMaxSize
@@ -473,6 +475,7 @@ fun SettingsScreen(
 }
 
 @Composable
+@OptIn(ExperimentalLayoutApi::class)
 private fun AuthoritySettingsCard(
     state: SettingsUiState,
     actions: SettingsActions,
@@ -623,7 +626,11 @@ private fun AuthoritySettingsCard(
                     },
                     style = MaterialTheme.typography.bodySmall,
                 )
-                ActionRow {
+                FlowRow(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalArrangement = Arrangement.spacedBy(4.dp),
+                ) {
                     Button(
                         onClick = actions.onSelectSafTree,
                         modifier = Modifier.testTag("settings.saf.authorize"),

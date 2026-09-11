@@ -30,8 +30,10 @@ import java.io.File
 import runtime.mobileagent.background.ImportWorkerRegistry
 import runtime.mobileagent.background.ImportJobHandler
 import runtime.mobileagent.background.ImportCancellationHandler
+import runtime.mobileagent.background.ImportBatchCancellationHandler
 import runtime.mobileagent.background.ImportBatchHandler
 import runtime.mobileagent.background.ConsentTicketHandler
+import runtime.mobileagent.background.ConsentFailureHandler
 import runtime.mobileagent.background.ImportWorkScheduler
 import runtime.mobileagent.embedding.AndroidModelPackLoader
 import runtime.mobileagent.embedding.OnnxTextEmbedder
@@ -117,6 +119,7 @@ class AppContainer(app: MobileAgentApp) :
     val profiles = ProfileRepository(db)
     val agents = AgentRepository(db)
     val conversations = ConversationRepository(db)
+    val contextCompactions = runtime.mobileagent.data.ContextCompactionRepository(db)
     val settings = SettingsRepository(db)
     val shizuku = ShizukuAuthorityBridge(app).also { bridge ->
         // A persisted Shizuku grant represents the user's earlier explicit consent. Re-bind the
@@ -285,6 +288,7 @@ class AppContainer(app: MobileAgentApp) :
         registerSettingsAuthorityPortProvider(app, this)
         ImportWorkerRegistry.handler = ImportJobHandler { id, configured -> knowledge.resumeImport(id, visionConfigured = configured) }
         ImportWorkerRegistry.cancellationHandler = ImportCancellationHandler { id -> knowledge.cancelImport(id); Unit }
+        ImportWorkerRegistry.batchCancellationHandler = ImportBatchCancellationHandler { id -> knowledge.cancelBatch(id); Unit }
         ImportWorkerRegistry.batchHandler = ImportBatchHandler { batchId, configured ->
             runCatching { app.diagnostics.recordBatchWorkerStart() }
             try {
@@ -297,6 +301,10 @@ class AppContainer(app: MobileAgentApp) :
         }
         ImportWorkerRegistry.consentHandler = ConsentTicketHandler { ticketId, configured ->
             knowledge.applyConsentTicket(ticketId, configured)
+            Unit
+        }
+        ImportWorkerRegistry.consentFailureHandler = ConsentFailureHandler { ticketId ->
+            knowledge.markConsentWorkerFailure(ticketId)
             Unit
         }
         // Resume one coordinator per durable batch. Consent and UNKNOWN states

@@ -299,6 +299,19 @@ interface ModelAdapter {
     fun previewRequest(request: ModelRequest): String? = null
 
     /**
+     * Conservative upper bound of the input this adapter would put on the
+     * wire, in the shared abstract units of [RequestInputBudget].  A unit is
+     * not a token; the value must never be presented as provider usage.
+     *
+     * The default estimates the whole request shape, including
+     * [ChatMessage.providerContinuationItems]. An adapter whose transport drops
+     * or transforms parts of the request (for example a Chat Completions
+     * transport that ignores the continuation channel) must override this so
+     * the budget matches what is actually sent.
+     */
+    fun estimateInput(request: ModelRequest): InputBudgetEstimate = RequestInputBudget.estimate(request)
+
+    /**
      * Perform a capability probe only when the caller has explicit consent.
      * Implementations must not send network traffic for [ProbeConsent.NOT_GRANTED].
      * The default preserves compatibility for adapters that only have a static

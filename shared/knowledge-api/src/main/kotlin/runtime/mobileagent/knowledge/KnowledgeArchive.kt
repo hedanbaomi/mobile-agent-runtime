@@ -10,6 +10,7 @@ import java.io.InputStream
 import java.io.RandomAccessFile
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
+import java.util.zip.CRC32
 import java.util.zip.ZipEntry
 import java.util.zip.ZipFile
 import java.util.zip.ZipInputStream
@@ -129,6 +130,7 @@ object KnowledgeArchive {
                         readBounded(input, MAX_ENTRY_BYTES)
                             ?: error("Archive uncompressed size exceeds the limit")
                     }
+                    verifyPayload(payload, expected)
                     total += payload.size
                     if (total > MAX_TOTAL_BYTES) error("Archive uncompressed size exceeds the limit")
                     if (payload.size >= 4 && payload[0] == 0x50.toByte() && payload[1] == 0x4B.toByte() &&
@@ -199,6 +201,8 @@ object KnowledgeArchive {
                 ) {
                     return KnowledgeArchiveSummary(false, "ZIP central/local size or CRC mismatch")
                 }
+                val payloadIssue = payloadIssue(payload, expected)
+                if (payloadIssue != null) return KnowledgeArchiveSummary(false, payloadIssue)
                 total += payload.size
                 if (total > MAX_TOTAL_BYTES) {
                     return KnowledgeArchiveSummary(false, "Archive uncompressed size exceeds the limit")
@@ -476,6 +480,35 @@ object KnowledgeArchive {
 
     private fun readBounded(zip: ZipInputStream, max: Long): ByteArray? {
         return readBounded(zip as InputStream, max)
+    }
+
+    /**
+     * Compare the decompressed bytes against the entry's declared size and CRC-32.
+     *
+     * Both ZIP headers carry the CRC of the *stored* payload, so the header guard
+     * above still accepts an archive whose body was altered after the fact. Java's
+     * `ZipFile.getInputStream` trusts the central directory and does not verify the
+     * body, so an import could publish bytes that neither header describes. CRC is
+     * a corruption check, not an authenticity proof.
+     */
+    private fun verifyPayload(payload: ByteArray, entry: CentralEntry) {
+        payloadIssue(payload, entry)?.let { error(it) }
+    }
+
+    private fun payloadIssue(payload: ByteArray, entry: CentralEntry): String? {
+        if (payload.size.toLong() != entry.uncompressedSize) {
+            return "ZIP entry ${entry.name} decompressed size mismatch"
+        }
+        if (crc32(payload) != entry.crc) {
+            return "ZIP entry ${entry.name} decompressed CRC mismatch"
+        }
+        return null
+    }
+
+    private fun crc32(bytes: ByteArray): Long {
+        val crc = CRC32()
+        crc.update(bytes)
+        return crc.value
     }
 
     private fun readBounded(input: InputStream, max: Long): ByteArray? {

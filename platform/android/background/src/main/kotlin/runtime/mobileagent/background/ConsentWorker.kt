@@ -22,14 +22,28 @@ class ConsentWorker(appContext: Context, params: WorkerParameters) : CoroutineWo
     override suspend fun doWork(): Result {
         val ticketId = inputData.getString(ImportWorkScheduler.INPUT_TICKET_ID) ?: return Result.failure()
         val visionConfigured = inputData.getBoolean(ImportWorkScheduler.INPUT_VISION_CONFIGURED, false)
-        val handler = ImportWorkerRegistry.consentHandler ?: return if (runAttemptCount < 3) Result.retry() else Result.failure()
-        setForeground(foregroundInfo("Continuing after explicit consent"))
+        val handler = ImportWorkerRegistry.consentHandler
+        if (handler == null) {
+            if (runAttemptCount < 3) return Result.retry()
+            persistFailure(ticketId)
+            return Result.failure()
+        }
         return try {
+            setForeground(foregroundInfo("Continuing after explicit consent"))
             runInterruptible(Dispatchers.IO) { handler.apply(ticketId, visionConfigured) }
             Result.success()
         } catch (_: Throwable) {
+            // The repository normally converts provider/Vision uncertainty into
+            // a durable job state. This hook covers failures before that
+            // writeback boundary; process death is handled by the repository's
+            // consumed-ticket recovery gate on the next process start.
+            persistFailure(ticketId)
             Result.failure()
         }
+    }
+
+    private fun persistFailure(ticketId: String) {
+        runCatching { ImportWorkerRegistry.consentFailureHandler?.fail(ticketId) }
     }
 
     private fun foregroundInfo(message: String): ForegroundInfo {

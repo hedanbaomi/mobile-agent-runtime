@@ -765,6 +765,7 @@ class RollingDiagnosticLogStore(
         "provider_model_save_start" to setOf("capabilities", "role"),
         "provider_model_save_success" to setOf("capabilities", "role"),
         "provider_model_save_failed" to setOf("capabilities", "role", "exceptionType"),
+        "run_preparation_failed" to setOf("stage", "errorCode", "exceptionType"),
         "knowledge_import_start" to setOf("kind", "stage", "total"),
         "knowledge_import_progress" to setOf("kind", "stage", "completed", "total"),
         "knowledge_import_enqueued" to setOf("kind", "stage", "count"),
@@ -905,6 +906,15 @@ class RollingDiagnosticLogStore(
     }
 
     fun recordProcessStarted(): Boolean = record("process_started")
+
+    fun recordRunPreparationFailed(
+        stage: String,
+        errorCode: runtime.mobileagent.domain.MessageErrorCode,
+        failure: Throwable,
+    ): Boolean = record(
+        "run_preparation_failed",
+        mapOf("stage" to stage, "errorCode" to errorCode.name, "exceptionType" to failure.javaClass.name),
+    )
 
     fun recordCapabilityToggle(capability: String, enabled: Boolean): Boolean =
         record("capability_toggle", mapOf("capability" to capability, "enabled" to enabled))
@@ -1713,6 +1723,18 @@ class RollingDiagnosticLogStore(
         if (fields.keys.any { it !in allowed }) return null
         return when (event) {
             "process_started" -> if (fields.isEmpty()) emptyMap() else null
+            "run_preparation_failed" -> {
+                val stage = fields["stage"] as? String ?: return null
+                val errorCode = fields["errorCode"] as? String ?: return null
+                val exceptionType = fields["exceptionType"] as? String ?: return null
+                if (stage !in setOf("preflight", "retrieval", "tooling", "prompt", "manifest", "context_budget", "credentials", "request")) return null
+                if (runtime.mobileagent.domain.MessageErrorCode.entries.none { it.name == errorCode }) return null
+                linkedMapOf(
+                    "stage" to stage,
+                    "errorCode" to errorCode,
+                    "exceptionType" to DiagnosticSanitizer.exceptionType(exceptionType),
+                )
+            }
             "diagnostics_toggle" -> {
                 val enabled = fields["enabled"] as? Boolean ?: return null
                 linkedMapOf("enabled" to enabled)

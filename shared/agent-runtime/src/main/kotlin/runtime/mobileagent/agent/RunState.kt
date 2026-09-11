@@ -36,4 +36,6 @@ data class AgentRun(
     var toolCalls: Int = 0,
     var startedAtMs: Long = 0,
     var stopReason: String? = null,
+    /** Included in modelRounds; retained separately so user-visible totals explain extra calls. */
+    var compactionRequests: Int = 0,
 )

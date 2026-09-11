@@ -37,6 +37,8 @@ data class SkillInspection(
     val packageBytes: ByteArray? = null,
     /** Exact verified sources for manifestless CLI compatibility; never model supplied. */
     val legacyProgramSources: Map<String, String> = emptyMap(),
+    /** Name recovered from a verified Claude frontmatter block when no manifest exists. */
+    val displayName: String? = null,
 )
 
 object SkillArchive {
@@ -164,6 +166,7 @@ object SkillArchive {
                 listOf("SKILL.md"),
                 installable = true,
                 packageBytes = bytes,
+                displayName = legacyFrontmatterName(markdown),
             )
         }
         reasons += "Not a skill archive or SKILL.md"
@@ -386,6 +389,7 @@ object SkillArchive {
                 true,
                 null,
                 packageBytes,
+                displayName = legacyFrontmatterName(archive.markdown),
             )
         }
         val obj = runCatching { Json.parseToJsonElement(json).jsonObject }.getOrNull()
@@ -503,11 +507,13 @@ object SkillArchive {
         }
     }
 
-    private fun legacySkillName(markdown: String?): String = markdown
+    private fun legacyFrontmatterName(markdown: String?): String? = markdown
         ?.let { LEGACY_FRONTMATTER_NAME.find(it)?.groupValues?.getOrNull(1) }
         ?.takeIf { it.isNotBlank() }
         ?.take(80)
-        ?: "Imported Claude Skill"
+
+    private fun legacySkillName(markdown: String?): String =
+        legacyFrontmatterName(markdown) ?: "Imported Claude Skill"
 
     private fun legacyManifestJson(hash: String, name: String, programs: List<String>): JsonObject = buildJsonObject {
         put("schemaVersion", 1)

@@ -20,10 +20,16 @@ import runtime.mobileagent.knowledge.ImportItemState
 import runtime.mobileagent.knowledge.ImportStage
 import runtime.mobileagent.knowledge.ImportStateMachine
 import runtime.mobileagent.knowledge.MemoryBlobSink
+import runtime.mobileagent.knowledge.PdfPageRasterizer
+import runtime.mobileagent.knowledge.RenderedPdfPage
 import runtime.mobileagent.knowledge.sha256Hex
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.runBlocking
 import java.io.ByteArrayOutputStream
+import java.io.File
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
 import java.util.zip.DeflaterOutputStream
 import java.util.zip.ZipEntry
 import java.util.zip.ZipOutputStream
@@ -90,6 +96,42 @@ class KnowledgeRepositoryTest {
         assertTrue(repo.search("180C").any { "180C" in it.text })
         val versionStatus = db.query("SELECT status FROM document_versions").single().string("status")
         assertEquals("READY_WITH_VISUAL_GAPS", versionStatus)
+    }
+
+    @Test
+    fun reimportOfTextOnlyGapDocumentKeepsGapStatusInsteadOfSilentlyBecomingReady() {
+        val db = JdbcSqlConnection()
+        Migrations.apply(db)
+        val repo = KnowledgeRepository(db, MemoryBlobSink())
+        val body = "# Recipe\n\nSee the diagram:\n\n![oven](photo.png)\nOven temperature is 180C.\n".toByteArray()
+        val waiting = repo.importBytes("recipe.md", "text/markdown", body, visionConfigured = false)
+        val gapped = repo.acceptTextOnlyVisualGaps(waiting.id)
+        assertEquals(ImportStage.READY_WITH_VISUAL_GAPS, gapped.stage)
+
+        val reimport = repo.importBytes("recipe.md", "text/markdown", body, visionConfigured = false)
+
+        assertEquals(ImportStage.READY_WITH_VISUAL_GAPS, reimport.stage)
+        assertFalse(ImportStateMachine.isCompleteSuccess(reimport))
+        assertTrue(reimport.visualGapsAccepted)
+        assertTrue(reimport.hasImages)
+        assertEquals(1L, db.query("SELECT COUNT(*) AS n FROM document_versions").single().long("n"))
+        assertEquals("READY_WITH_VISUAL_GAPS", db.query("SELECT status FROM document_versions").single().string("status"))
+        assertEquals(2, repo.listJobs().count { it.first.stage == ImportStage.READY_WITH_VISUAL_GAPS })
+    }
+
+    @Test
+    fun reimportOfReadyDocumentStillReusesAsCompleteReady() {
+        val db = JdbcSqlConnection()
+        Migrations.apply(db)
+        val repo = KnowledgeRepository(db, MemoryBlobSink())
+        val payload = "idempotent ready blob".toByteArray()
+        val first = repo.importBytes("ready.txt", "text/plain", payload, visionConfigured = false)
+        assertEquals(ImportStage.READY, first.stage)
+        val second = repo.importBytes("ready.txt", "text/plain", payload, visionConfigured = false)
+        assertEquals(ImportStage.READY, second.stage)
+        assertTrue(ImportStateMachine.isCompleteSuccess(second))
+        assertFalse(second.visualGapsAccepted)
+        assertEquals(1L, db.query("SELECT COUNT(*) AS n FROM document_versions").single().long("n"))
     }
 
     @Test
@@ -189,6 +231,94 @@ class KnowledgeRepositoryTest {
         assertTrue(hits.any { "target-marker" in it.text })
     }
 
+    /**
+     * Both ZIP headers carry the CRC of the stored body, so an archive whose bytes
+     * were altered after the fact still passes the header comparison. The file-backed
+     * import path must verify the decompressed body before any entry reaches the
+     * repository, otherwise altered content is published as if it were intact.
+     */
+    /** Repository publishing regression for the dictionary lexicon shapes. */
+    @Test
+    fun pdfWithDifferencesBehindCommentsAndNestingPublishesMappedGlyphsAsReady() {
+        val lexiconShapes = listOf(
+            "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding << /BaseEncoding /WinAnsiEncoding" +
+                " /Differences % harmless comment\n [65 /X 66 /Y 67 /Z] >> >>",
+            "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding << /BaseEncoding /WinAnsiEncoding /Note (>>)" +
+                " /Differences [65 /X 66 /Y 67 /Z] >> >>",
+            "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding << /BaseEncoding /WinAnsiEncoding" +
+                " /Private << /Differences [] >> /Differences [65 /X 66 /Y 67 /Z] >> >>",
+            "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding << /BaseEncoding /WinAnsiEncoding" +
+                " /Custom /Differences /Differences [65 /X 66 /Y 67 /Z] >> >>",
+        )
+        lexiconShapes.forEachIndexed { index, fontDict ->
+            val db = JdbcSqlConnection()
+            Migrations.apply(db)
+            val repo = KnowledgeRepository(db, MemoryBlobSink())
+            val job = repo.importBytes(
+                "lexicon-$index.pdf",
+                "application/pdf",
+                runtime.mobileagent.knowledge.PdfParser.writeVerbatimFontDictPdf(fontDict, literal = "KEEPTOKEN"),
+                visionConfigured = false,
+            )
+            assertEquals(ImportStage.READY, job.stage, "shape $index: ${job.error}")
+            val hits = repo.search("KEEPTOKEN")
+            assertTrue(
+                hits.any { "KEEPTOKEN" in it.text && "XYZ" in it.text && "ABC" !in it.text },
+                "shape $index: ${hits.map { it.text }}",
+            )
+            val status = db.query("SELECT status FROM document_versions WHERE document_id = ?", listOf(job.documentId))
+                .single().string("status")
+            assertEquals("READY", status, "shape $index")
+        }
+    }
+
+    /** A malformed mapping must not be published as complete text. */
+    @Test
+    fun malformedDifferencesPdfDoesNotPublishAsReady() {
+        val db = JdbcSqlConnection()
+        Migrations.apply(db)
+        val repo = KnowledgeRepository(db, MemoryBlobSink())
+        val fontDict = "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding " +
+            "<< /BaseEncoding /WinAnsiEncoding /Differences 5 >> >>"
+        val job = repo.importBytes(
+            "malformed-differences.pdf",
+            "application/pdf",
+            runtime.mobileagent.knowledge.PdfParser.writeVerbatimFontDictPdf(fontDict, literal = "KEEPTOKEN"),
+            visionConfigured = false,
+        )
+        assertEquals(ImportStage.WAITING_FOR_VISION_MODEL, job.stage, job.error)
+        assertFalse(ImportStateMachine.isCompleteSuccess(job))
+        assertTrue(repo.search("ABC").isEmpty())
+    }
+    @Test
+    fun corruptedArchiveBodyFailsImportWithoutPublishingAnyEntry() {
+        val db = JdbcSqlConnection()
+        Migrations.apply(db)
+        val repo = KnowledgeRepository(db, MemoryBlobSink())
+        val corrupt = File.createTempFile("knowledge-corrupt", ".zip").apply {
+            writeBytes(corruptStoredZipPayload("note.txt", "VALUE=100\n", "VALUE=900\n"))
+            deleteOnExit()
+        }
+        val failure = assertThrows(IllegalStateException::class.java) {
+            repo.importKnowledgeArchiveFile("dataset.zip", corrupt, visionConfigured = false)
+        }
+        assertTrue(failure.message.orEmpty().contains("CRC"), failure.message.orEmpty())
+        assertEquals(0, repo.listJobs().count { it.first.stage == ImportStage.READY })
+        assertTrue(repo.search("VALUE").isEmpty())
+    }
+
+    @Test
+    fun intactArchiveBodyImportsWhenHeadersAndBodyAgree() {
+        val db = JdbcSqlConnection()
+        Migrations.apply(db)
+        val repo = KnowledgeRepository(db, MemoryBlobSink())
+        val good = File.createTempFile("knowledge-good", ".zip").apply {
+            writeBytes(storedZipPayload("note.txt", "VALUE=100\n"))
+            deleteOnExit()
+        }
+        repo.importKnowledgeArchiveFile("dataset.zip", good, visionConfigured = false)
+        assertTrue(repo.search("VALUE").any { "100" in it.text })
+    }
     @Test
     fun zipSlipIsRejectedAndNotExtracted() {
         val db = JdbcSqlConnection()
@@ -506,6 +636,103 @@ class KnowledgeRepositoryTest {
         val again = repo.grantVisionConsent(awaiting.id)
         assertEquals(ImportStage.READY, again.stage)
         assertEquals(1, seen.size)
+    }
+
+    @Test
+    fun pdfDoesNotRasterizeBeforeVisionUploadConsent() {
+        val db = JdbcSqlConnection()
+        Migrations.apply(db)
+        var rasterizedPages = 0
+        val rasterizer = PdfPageRasterizer { _, pages ->
+            rasterizedPages += pages.size
+            pages.map { page -> RenderedPdfPage(page, byteArrayOf(1, 2, 3), "image/png", 2, 2) }
+        }
+        val vision = runtime.mobileagent.knowledge.VisionBackend {
+            runtime.mobileagent.knowledge.VisionOutcome.Success(
+                runtime.mobileagent.knowledge.VisionSuccess("ocr", "diagram"),
+            )
+        }
+        val repo = KnowledgeRepository(
+            db,
+            MemoryBlobSink(),
+            vision = vision,
+            visionModelFingerprint = "vision-test",
+            pdfRasterizer = rasterizer,
+        )
+        val pdf = runtime.mobileagent.knowledge.PdfParser.writePdfWithImageXObject("flowchart")
+
+        val waiting = repo.importBytes("flow.pdf", "application/pdf", pdf, visionConfigured = false)
+        assertEquals(ImportStage.WAITING_FOR_VISION_MODEL, waiting.stage)
+        assertEquals(0, rasterizedPages, "waiting for Vision must not render every page into PNG")
+
+        val awaiting = repo.importBytes(
+            "flow.pdf",
+            "application/pdf",
+            pdf,
+            visionConfigured = true,
+            visionConsent = false,
+        )
+        assertEquals(ImportStage.AWAITING_UPLOAD_CONSENT, awaiting.stage)
+        assertEquals(0, rasterizedPages, "upload consent must precede page rasterization")
+
+        val ready = repo.grantVisionConsent(awaiting.id)
+        assertEquals(ImportStage.READY, ready.stage, ready.error)
+        assertTrue(rasterizedPages > 0)
+    }
+
+    @Test
+    fun visionProcessingStageIsPersistedBeforeBackendReturns() {
+        val db = JdbcSqlConnection()
+        Migrations.apply(db)
+        val enteredBackend = CountDownLatch(1)
+        val releaseBackend = CountDownLatch(1)
+        val vision = runtime.mobileagent.knowledge.VisionBackend {
+            enteredBackend.countDown()
+            check(releaseBackend.await(5, TimeUnit.SECONDS)) { "test backend was not released" }
+            runtime.mobileagent.knowledge.VisionOutcome.Success(
+                runtime.mobileagent.knowledge.VisionSuccess("ocr", "diagram"),
+            )
+        }
+        val repo = KnowledgeRepository(db, MemoryBlobSink(), vision = vision, visionModelFingerprint = "vision-test")
+        val kb = repo.ensureDefaultBase()
+        val batchId = repo.beginBatch(kb, ImportBatchKind.FILES, "vision processing")
+        val png = byteArrayOf(0x89.toByte(), 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A) + ByteArray(16)
+        val copied = repo.importBytes(
+            "scan.png",
+            "image/png",
+            png,
+            visionConfigured = true,
+            knowledgeBaseId = kb,
+            pauseAt = ImportStage.COPYING,
+        )
+        repo.bindJobToBatch(batchId, copied, "scan.png")
+        val awaiting = repo.resumeImport(copied.id, visionConfigured = true)
+        assertEquals(ImportStage.AWAITING_UPLOAD_CONSENT, awaiting.stage)
+
+        val executor = Executors.newSingleThreadExecutor()
+        try {
+            val future = executor.submit<runtime.mobileagent.knowledge.ImportJob> {
+                repo.grantVisionConsent(awaiting.id)
+            }
+            assertTrue(enteredBackend.await(5, TimeUnit.SECONDS))
+            assertEquals(
+                ImportStage.VISION_PROCESSING.name,
+                db.query("SELECT stage FROM import_jobs WHERE id = ?", listOf(awaiting.id)).single().string("stage"),
+            )
+            val processingBatch = repo.listBatches(kb).single()
+            assertEquals(1, processingBatch.processing)
+            assertEquals(0, processingBatch.waiting)
+            assertEquals(ImportBatchState.PROCESSING, processingBatch.state)
+            assertEquals(
+                ImportItemState.PROCESSING.name,
+                db.query("SELECT state FROM import_items WHERE batch_id = ?", listOf(batchId)).single().string("state"),
+            )
+            releaseBackend.countDown()
+            assertEquals(ImportStage.READY, future.get(5, TimeUnit.SECONDS).stage)
+        } finally {
+            releaseBackend.countDown()
+            executor.shutdownNow()
+        }
     }
 
     @Test
@@ -1468,6 +1695,339 @@ class KnowledgeRepositoryTest {
     }
 
     @Test
+    fun laterVisionPagesKeepTheJobConsentedTarget() {
+        val db = JdbcSqlConnection()
+        Migrations.apply(db)
+        val consented = runtime.mobileagent.knowledge.VisionBinding("prov-a", "shared-model", "https://a.example.invalid/v1", 1)
+        val switched = runtime.mobileagent.knowledge.VisionBinding("prov-b", "shared-model", "https://b.example.invalid/v1", 1)
+        var binding = consented
+        val requested = mutableListOf<String>()
+        val vision = runtime.mobileagent.knowledge.VisionBackend { input ->
+            requested += input.modelFingerprint
+            if (requested.size == 1) binding = switched
+            runtime.mobileagent.knowledge.VisionOutcome.Success(
+                runtime.mobileagent.knowledge.VisionSuccess("ocr-${requested.size}", "desc-${binding.providerId}"),
+            )
+        }
+        val repo = KnowledgeRepository(
+            db,
+            MemoryBlobSink(),
+            vision = vision,
+            visionBinding = { binding },
+            pdfRasterizer = PdfPageRasterizer { _, pages ->
+                pages.map { page -> RenderedPdfPage(page, byteArrayOf(page.toByte(), 2, 3), "image/png", 2, 2) }
+            },
+        )
+        val job = repo.importBytes(
+            "pages.pdf",
+            "application/pdf",
+            runtime.mobileagent.knowledge.PdfParser.writeTwoPageTextPdf("", ""),
+            visionConfigured = true,
+            visionConsent = true,
+        )
+        assertEquals(listOf(consented.fingerprint), requested)
+        assertEquals(0, requested.count { it == switched.fingerprint })
+        assertEquals(ImportStage.FAILED, job.stage)
+        assertTrue(job.error.orEmpty().contains("destination changed"), job.error)
+        assertFalse(ImportStateMachine.isCompleteSuccess(job))
+        val fingerprints = db.query("SELECT model_fingerprint FROM vision_results", emptyList())
+            .map { it.string("model_fingerprint") }
+        assertEquals(listOf(consented.fingerprint), fingerprints)
+        assertTrue(repo.search("desc-prov-b").isEmpty())
+    }
+
+    @Test
+    fun mixedLiteralAndHexPdfIsSearchableWithoutVision() {
+        val db = JdbcSqlConnection()
+        Migrations.apply(db)
+        val repo = KnowledgeRepository(db, MemoryBlobSink())
+        val job = repo.importBytes(
+            "mixed.pdf",
+            "application/pdf",
+            runtime.mobileagent.knowledge.PdfParser.writeLiteralAndHexTextPdf("TITLE", "BODY: KEEP THIS SENTENCE."),
+            visionConfigured = false,
+        )
+        assertEquals(ImportStage.READY, job.stage)
+        assertTrue(repo.search("KEEP THIS SENTENCE").any { "TITLE" in it.text && "KEEP THIS SENTENCE" in it.text })
+    }
+
+    @Test
+    fun undecodedHexPdfDoesNotPublishPartialTextAsReady() {
+        val db = JdbcSqlConnection()
+        Migrations.apply(db)
+        val repo = KnowledgeRepository(db, MemoryBlobSink())
+        val job = repo.importBytes(
+            "partial.pdf",
+            "application/pdf",
+            runtime.mobileagent.knowledge.PdfParser.writeLiteralAndUndecodedHexShowPdf("TITLE"),
+            visionConfigured = false,
+        )
+        assertTrue(job.stage == ImportStage.WAITING_FOR_VISION_MODEL || job.stage == ImportStage.FAILED)
+        assertFalse(ImportStateMachine.isCompleteSuccess(job))
+        assertTrue(repo.search("TITLE").isEmpty())
+    }
+
+    @Test
+    fun quotedCommentPdfIsSearchableWithoutVision() {
+        val db = JdbcSqlConnection()
+        Migrations.apply(db)
+        val repo = KnowledgeRepository(db, MemoryBlobSink())
+        val job = repo.importBytes(
+            "quoted.pdf",
+            "application/pdf",
+            runtime.mobileagent.knowledge.PdfParser.writeQuotedCommentShowPdf("TITLE", "BODY: KEEP THIS SENTENCE."),
+            visionConfigured = false,
+        )
+        assertEquals(ImportStage.READY, job.stage)
+        assertTrue(repo.search("KEEP THIS SENTENCE").any { "TITLE" in it.text && "KEEP THIS SENTENCE" in it.text })
+    }
+
+    @Test
+    fun fontDifferencesPdfIsSearchableAsMappedGlyphs() {
+        val db = JdbcSqlConnection()
+        Migrations.apply(db)
+        val repo = KnowledgeRepository(db, MemoryBlobSink())
+        val job = repo.importBytes(
+            "encoded.pdf",
+            "application/pdf",
+            runtime.mobileagent.knowledge.PdfParser.writeHexWithFontDifferencesPdf("KEEPTOKEN"),
+            visionConfigured = false,
+        )
+        assertEquals(ImportStage.READY, job.stage, job.error)
+        val hits = repo.search("KEEPTOKEN")
+        assertTrue(
+            hits.any { "KEEPTOKEN" in it.text && "XYZ" in it.text && "ABC" !in it.text },
+            hits.map { it.text }.toString(),
+        )
+    }
+
+    @Test
+    fun escapedPathPdfIsSearchableWithoutANewline() {
+        val db = JdbcSqlConnection()
+        Migrations.apply(db)
+        val repo = KnowledgeRepository(db, MemoryBlobSink())
+        val job = repo.importBytes(
+            "path.pdf",
+            "application/pdf",
+            runtime.mobileagent.knowledge.PdfParser.writeTwoLiteralTextPdf("TITLE", "C:\\notes"),
+            visionConfigured = false,
+        )
+        assertEquals(ImportStage.READY, job.stage)
+        assertTrue(repo.search("notes").any { it.text.contains("C:\\notes") })
+    }
+
+    @Test
+    fun incompleteTextWithImageDoesNotBecomeReadyFromTheJpegAlone() {
+        val db = JdbcSqlConnection()
+        Migrations.apply(db)
+        val calls = java.util.concurrent.atomic.AtomicInteger(0)
+        val vision = runtime.mobileagent.knowledge.VisionBackend {
+            calls.incrementAndGet()
+            runtime.mobileagent.knowledge.VisionOutcome.Success(
+                runtime.mobileagent.knowledge.VisionSuccess("ocr", "image-only description"),
+            )
+        }
+        val repo = KnowledgeRepository(
+            db,
+            MemoryBlobSink(),
+            vision = vision,
+            visionBinding = {
+                runtime.mobileagent.knowledge.VisionBinding("prov-a", "vision-model", "https://a.example.invalid/v1", 1)
+            },
+        )
+        val job = repo.importBytes(
+            "nested-gap.pdf",
+            "application/pdf",
+            runtime.mobileagent.knowledge.PdfParser.writeUndecodedHexWithImagePdf("TITLE"),
+            visionConfigured = true,
+            visionConsent = true,
+        )
+        assertTrue(job.stage == ImportStage.FAILED || job.stage == ImportStage.WAITING_FOR_VISION_MODEL, job.stage.name)
+        assertFalse(ImportStateMachine.isCompleteSuccess(job))
+        assertTrue(repo.search("KEEP THIS SENTENCE").isEmpty())
+        assertTrue(repo.search("image-only description").isEmpty())
+    }
+
+    @Test
+    fun rasterizerFailureOnIncompleteTextWithImageFailsClosed() {
+        val db = JdbcSqlConnection()
+        Migrations.apply(db)
+        val vision = runtime.mobileagent.knowledge.VisionBackend {
+            runtime.mobileagent.knowledge.VisionOutcome.Success(
+                runtime.mobileagent.knowledge.VisionSuccess("ocr", "image-only description"),
+            )
+        }
+        val repo = KnowledgeRepository(
+            db,
+            MemoryBlobSink(),
+            vision = vision,
+            visionBinding = {
+                runtime.mobileagent.knowledge.VisionBinding("prov-a", "vision-model", "https://a.example.invalid/v1", 1)
+            },
+            pdfRasterizer = PdfPageRasterizer { _, _ -> emptyList() },
+        )
+        val job = repo.importBytes(
+            "gap-render.pdf",
+            "application/pdf",
+            runtime.mobileagent.knowledge.PdfParser.writeUndecodedHexWithImagePdf("TITLE"),
+            visionConfigured = true,
+            visionConsent = true,
+        )
+        assertEquals(ImportStage.FAILED, job.stage)
+        assertFalse(ImportStateMachine.isCompleteSuccess(job))
+        assertTrue(repo.search("image-only description").isEmpty())
+    }
+
+    @Test
+    fun winAnsiEuroPdfIsSearchableWithoutVision() {
+        val db = JdbcSqlConnection()
+        Migrations.apply(db)
+        val repo = KnowledgeRepository(db, MemoryBlobSink())
+        val job = repo.importBytes(
+            "winansi.pdf",
+            "application/pdf",
+            runtime.mobileagent.knowledge.PdfParser.writeWinAnsiEuroPdf(),
+            visionConfigured = false,
+        )
+        assertEquals(ImportStage.READY, job.stage, job.error)
+        val hits = repo.search("KEEPTOKEN")
+        assertTrue(hits.any { "KEEPTOKEN" in it.text && "Price: €10" in it.text }, hits.map { it.text }.toString())
+    }
+
+    @Test
+    fun macRomanCafePdfIsSearchableWithoutVision() {
+        val db = JdbcSqlConnection()
+        Migrations.apply(db)
+        val repo = KnowledgeRepository(db, MemoryBlobSink())
+        val job = repo.importBytes(
+            "macroman.pdf",
+            "application/pdf",
+            runtime.mobileagent.knowledge.PdfParser.writeMacRomanCafePdf(),
+            visionConfigured = false,
+        )
+        assertEquals(ImportStage.READY, job.stage, job.error)
+        val hits = repo.search("KEEPTOKEN")
+        assertTrue(hits.any { "KEEPTOKEN" in it.text && "café" in it.text }, hits.map { it.text }.toString())
+    }
+
+    @Test
+    fun graphicsStateFontRestorePdfIsSearchableAsBothFonts() {
+        val db = JdbcSqlConnection()
+        Migrations.apply(db)
+        val repo = KnowledgeRepository(db, MemoryBlobSink())
+        val job = repo.importBytes(
+            "font-restore.pdf",
+            "application/pdf",
+            runtime.mobileagent.knowledge.PdfParser.writeFontRestorePdf(),
+            visionConfigured = false,
+        )
+        assertEquals(ImportStage.READY, job.stage, job.error)
+        val hits = repo.search("KEEPTOKEN")
+        assertTrue(
+            hits.any { "KEEPTOKEN" in it.text && "XYZ" in it.text && "ABC" in it.text },
+            hits.map { it.text }.toString(),
+        )
+    }
+
+    @Test
+    fun mixedPageJpegIsProcessedWhenAnotherPageHasAPageBlocker() {
+        val db = JdbcSqlConnection()
+        Migrations.apply(db)
+        val seenPages = mutableListOf<Int?>()
+        val vision = runtime.mobileagent.knowledge.VisionBackend { input ->
+            seenPages += input.page
+            runtime.mobileagent.knowledge.VisionOutcome.Success(
+                runtime.mobileagent.knowledge.VisionSuccess("ocr-${input.page}", "desc-page-${input.page}"),
+            )
+        }
+        val repo = KnowledgeRepository(
+            db,
+            MemoryBlobSink(),
+            vision = vision,
+            visionBinding = {
+                runtime.mobileagent.knowledge.VisionBinding("prov-a", "vision-model", "https://a.example.invalid/v1", 1)
+            },
+            pdfRasterizer = PdfPageRasterizer { _, pages ->
+                pages.filter { it == 1 }.map { page ->
+                    RenderedPdfPage(page, byteArrayOf(page.toByte(), 2, 3), "image/png", 2, 2)
+                }
+            },
+        )
+        val job = repo.importBytes(
+            "mixed-pages.pdf",
+            "application/pdf",
+            runtime.mobileagent.knowledge.PdfParser.writeIncompleteThenImagePagesPdf(),
+            visionConfigured = true,
+            visionConsent = true,
+        )
+        assertEquals(ImportStage.READY, job.stage, job.error)
+        assertTrue(seenPages.containsAll(listOf(1, 2)), seenPages.toString())
+        assertTrue(repo.search("desc-page-1").isNotEmpty())
+        assertTrue(repo.search("desc-page-2").isNotEmpty())
+        assertTrue(repo.search("SECONDPAGEJPEG").isNotEmpty())
+    }
+
+    @Test
+    fun uncoveredNeedsVisionPageFailsWhenRasterizerMissesIt() {
+        val db = JdbcSqlConnection()
+        Migrations.apply(db)
+        val vision = runtime.mobileagent.knowledge.VisionBackend {
+            runtime.mobileagent.knowledge.VisionOutcome.Success(
+                runtime.mobileagent.knowledge.VisionSuccess("ocr", "partial-cover"),
+            )
+        }
+        val repo = KnowledgeRepository(
+            db,
+            MemoryBlobSink(),
+            vision = vision,
+            visionBinding = {
+                runtime.mobileagent.knowledge.VisionBinding("prov-a", "vision-model", "https://a.example.invalid/v1", 1)
+            },
+            pdfRasterizer = PdfPageRasterizer { _, pages ->
+                pages.filter { it == 1 }.map { page ->
+                    RenderedPdfPage(page, byteArrayOf(page.toByte(), 2, 3), "image/png", 2, 2)
+                }
+            },
+        )
+        val job = repo.importBytes(
+            "uncovered.pdf",
+            "application/pdf",
+            runtime.mobileagent.knowledge.PdfParser.writeIncompleteThenEmptySecondPagePdf(),
+            visionConfigured = true,
+            visionConsent = true,
+        )
+        assertEquals(ImportStage.FAILED, job.stage)
+        assertFalse(ImportStateMachine.isCompleteSuccess(job))
+        assertTrue(repo.search("partial-cover").isEmpty())
+    }
+
+    @Test
+    fun staleParserFingerprintReimportsTheSameBlob() {
+        val db = JdbcSqlConnection()
+        Migrations.apply(db)
+        val pdf = runtime.mobileagent.knowledge.PdfParser.writeSimpleTextPdf("Alpha widget torque spec is 12Nm.")
+        val repo = KnowledgeRepository(db, MemoryBlobSink())
+        val first = repo.importBytes("spec.pdf", "application/pdf", pdf, visionConfigured = false)
+        assertEquals(ImportStage.READY, first.stage)
+        db.execute("UPDATE document_versions SET parser_fingerprint = 'pdf-text-v7-pdfrenderer'")
+        val second = repo.importBytes("spec.pdf", "application/pdf", pdf, visionConfigured = false)
+        assertEquals(ImportStage.READY, second.stage)
+        val fingerprints = db.query(
+            "SELECT parser_fingerprint FROM document_versions WHERE document_id = ?",
+            listOf(first.documentId),
+        ).map { it.string("parser_fingerprint") }
+        assertTrue(fingerprints.contains(runtime.mobileagent.knowledge.PdfParser.FINGERPRINT), fingerprints.toString())
+        assertTrue(repo.search("12Nm").isNotEmpty())
+        val currentReady = repo.importBytes("spec.pdf", "application/pdf", pdf, visionConfigured = false)
+        assertEquals(ImportStage.READY, currentReady.stage)
+        val versionCount = db.query(
+            "SELECT COUNT(*) AS n FROM document_versions WHERE document_id = ? AND parser_fingerprint = ?",
+            listOf(first.documentId, runtime.mobileagent.knowledge.PdfParser.FINGERPRINT),
+        ).single().long("n")
+        assertEquals(1L, versionCount)
+    }
+
+    @Test
     fun visionCacheDoesNotCrossProvidersWithSameModelId() {
         val db = JdbcSqlConnection()
         Migrations.apply(db)
@@ -1589,6 +2149,43 @@ class KnowledgeRepositoryTest {
     private fun zipSlip(): ByteArray = zipBytes("../evil.txt", "no")
 
     private fun validZip(name: String): ByteArray = zipBytes(name, "application/epub+zip")
+
+    /** Stored (uncompressed) entry so the payload bytes appear verbatim in the file. */
+    private fun storedZipPayload(name: String, payload: String): ByteArray {
+        val data = payload.toByteArray()
+        val out = ByteArrayOutputStream()
+        ZipOutputStream(out).use { zip ->
+            zip.setMethod(ZipOutputStream.STORED)
+            val entry = ZipEntry(name).apply {
+                method = ZipEntry.STORED
+                size = data.size.toLong()
+                compressedSize = data.size.toLong()
+                crc = java.util.zip.CRC32().apply { update(data) }.value
+            }
+            zip.putNextEntry(entry)
+            zip.write(data)
+            zip.closeEntry()
+        }
+        return out.toByteArray()
+    }
+
+    /**
+     * Flip the stored payload to [replacement] while leaving both headers untouched,
+     * so declared sizes and CRCs still describe the original bytes.
+     */
+    private fun corruptStoredZipPayload(name: String, payload: String, replacement: String): ByteArray {
+        require(payload.toByteArray().size == replacement.toByteArray().size) { "same-length replacement required" }
+        val archive = storedZipPayload(name, payload)
+        val original = payload.toByteArray()
+        val swapped = replacement.toByteArray()
+        for (start in 0..archive.size - original.size) {
+            if (original.indices.all { archive[start + it] == original[it] }) {
+                swapped.copyInto(archive, start)
+                return archive
+            }
+        }
+        error("stored payload not found in archive")
+    }
 
     private fun zipBytes(name: String, payload: String): ByteArray {
         val out = ByteArrayOutputStream()

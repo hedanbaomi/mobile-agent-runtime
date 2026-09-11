@@ -27,6 +27,7 @@ import java.net.SocketTimeoutException
 import runtime.mobileagent.domain.ModelProfile
 import runtime.mobileagent.domain.ModelRole
 import runtime.mobileagent.provider.CapabilityProbeStatus
+import runtime.mobileagent.provider.CapabilityCheckStatus
 import runtime.mobileagent.provider.ProviderConnectionErrorCode
 import runtime.mobileagent.provider.ProviderConnectionResult
 import runtime.mobileagent.provider.ParameterLayers
@@ -109,6 +110,184 @@ class OpenAiSseTest {
         val failed = events.single() as ModelEvent.Failed
         assertFalse(failed.sanitizedMessage.contains(secret))
         assertTrue(failed.sanitizedMessage.contains("***"))
+    }
+
+    @Test
+    fun usageOnlyFrameWithEmptyChoicesIsPreserved() {
+        val buf = linkedMapOf<String, Pair<String, StringBuilder>>()
+        val events = OpenAiSse.eventsFromLine(
+            """data: {"choices":[],"usage":{"prompt_tokens":8,"completion_tokens":2}}""",
+            buf,
+        )
+        assertEquals(listOf(ModelEvent.Usage(8, 2)), events)
+    }
+
+    @Test
+    fun cumulativeUsageSnapshotsRemainVisibleAcrossUsageOnlyFrames() = runTest {
+        val engine = MockEngine {
+            respond(
+                content = buildString {
+                    append("data: {\"choices\":[{\"delta\":{\"content\":\"answer\"}}]}\n\n")
+                    listOf(0, 1, 2, 2).forEach { output ->
+                        append("data: {\"choices\":[],\"usage\":{\"prompt_tokens\":8,\"completion_tokens\":$output}}\n\n")
+                    }
+                    append("data: [DONE]\n\n")
+                },
+                status = HttpStatusCode.OK,
+                headers = headersOf(HttpHeaders.ContentType, "text/event-stream"),
+            )
+        }
+        val adapter = OpenAiCompatibleAdapter(HttpClient(engine), "https://example.invalid/v1")
+        val events = adapter.stream(
+            ModelRequest(modelId = "demo", messages = listOf(ChatMessage(role = "user", text = "hi"))),
+            "token".toCharArray(),
+        ).toList()
+        assertEquals(
+            listOf(ModelEvent.Usage(8, 2)),
+            events.filterIsInstance<ModelEvent.Usage>(),
+        )
+        assertEquals(ModelEvent.Completed, events.last())
+    }
+
+    @Test
+    fun contentFreeCompletionIsTerminalFailureAfterRetainingUsage() = runTest {
+        val engine = MockEngine {
+            respond(
+                content = "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":8,\"completion_tokens\":2}}\n\ndata: [DONE]\n\n",
+                status = HttpStatusCode.OK,
+                headers = headersOf(HttpHeaders.ContentType, "text/event-stream"),
+            )
+        }
+        val adapter = OpenAiCompatibleAdapter(HttpClient(engine), "https://example.invalid/v1")
+        val events = adapter.stream(
+            ModelRequest(modelId = "demo", messages = listOf(ChatMessage(role = "user", text = "hi"))),
+            "token".toCharArray(),
+        ).toList()
+        assertEquals(ModelEvent.Usage(8, 2), events.first())
+        assertEquals(ModelEvent.Failed("INVALID_RESPONSE"), events.last())
+        assertTrue(events.none { it == ModelEvent.Completed })
+    }
+
+    @Test
+    fun reasoningOnlyCompletionIsNotPresentedAsSuccessfulAnswer() = runTest {
+        val engine = MockEngine {
+            respond(
+                content = "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"thinking\"}}]}\n\ndata: [DONE]\n\n",
+                status = HttpStatusCode.OK,
+                headers = headersOf(HttpHeaders.ContentType, "text/event-stream"),
+            )
+        }
+        val adapter = OpenAiCompatibleAdapter(HttpClient(engine), "https://example.invalid/v1")
+        val events = adapter.stream(
+            ModelRequest(modelId = "demo", messages = listOf(ChatMessage(role = "user", text = "hi"))),
+            "token".toCharArray(),
+        ).toList()
+        assertTrue(events.contains(ModelEvent.ReasoningDelta("thinking")))
+        assertEquals(ModelEvent.Failed("INVALID_RESPONSE"), events.last())
+        assertTrue(events.none { it == ModelEvent.Completed })
+    }
+
+    @Test
+    fun toolCallOnlyCompletionRemainsSuccessfulForTheNextRuntimeRound() = runTest {
+        val engine = MockEngine {
+            respond(
+                content = "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call-1\",\"function\":{\"name\":\"calculator\",\"arguments\":\"{\\\"expression\\\":\\\"1+1\\\"}\"}}]}}]}\n\ndata: [DONE]\n\n",
+                status = HttpStatusCode.OK,
+                headers = headersOf(HttpHeaders.ContentType, "text/event-stream"),
+            )
+        }
+        val adapter = OpenAiCompatibleAdapter(HttpClient(engine), "https://example.invalid/v1")
+        val events = adapter.stream(
+            ModelRequest(modelId = "demo", messages = listOf(ChatMessage(role = "user", text = "calculate"))),
+            "token".toCharArray(),
+        ).toList()
+        assertTrue(events.any { it is ModelEvent.ToolCallDelta })
+        assertEquals(ModelEvent.Completed, events.last())
+        assertTrue(events.none { it is ModelEvent.Failed })
+    }
+
+    @Test
+    fun refusalOnlyCompletionRemainsReadableAndSuccessful() = runTest {
+        val engine = MockEngine {
+            respond(
+                content = "data: {\"choices\":[{\"delta\":{\"refusal\":\"cannot help\"}}]}\n\ndata: [DONE]\n\n",
+                status = HttpStatusCode.OK,
+                headers = headersOf(HttpHeaders.ContentType, "text/event-stream"),
+            )
+        }
+        val adapter = OpenAiCompatibleAdapter(HttpClient(engine), "https://example.invalid/v1")
+        val events = adapter.stream(
+            ModelRequest(modelId = "demo", messages = listOf(ChatMessage(role = "user", text = "hi"))),
+            "token".toCharArray(),
+        ).toList()
+        assertEquals(listOf(ModelEvent.RefusalDelta("cannot help"), ModelEvent.Completed), events)
+    }
+
+    @Test
+    fun finishReasonLengthIsContextOverflowAndRetainsLatestUsage() = runTest {
+        val engine = MockEngine {
+            respond(
+                content = "data: {\"choices\":[{\"delta\":{\"content\":\"partial\"},\"finish_reason\":\"length\"}],\"usage\":{\"prompt_tokens\":8,\"completion_tokens\":2}}\n\n",
+                status = HttpStatusCode.OK,
+                headers = headersOf(HttpHeaders.ContentType, "text/event-stream"),
+            )
+        }
+        val adapter = OpenAiCompatibleAdapter(HttpClient(engine), "https://example.invalid/v1")
+        val events = adapter.stream(
+            ModelRequest(modelId = "demo", messages = listOf(ChatMessage(role = "user", text = "hi"))),
+            "token".toCharArray(),
+        ).toList()
+        assertEquals(ModelEvent.TextDelta("partial"), events[0])
+        assertEquals(ModelEvent.Usage(8, 2), events[1])
+        assertEquals(ModelEvent.Failed(ErrorCode.CONTEXT_OVERFLOW.name), events.last())
+    }
+
+    @Test
+    fun finishReasonLengthDefersUntilTrailingUsageFrameAndDone() = runTest {
+        val engine = MockEngine {
+            respond(
+                content = buildString {
+                    append("data: {\"choices\":[{\"delta\":{\"content\":\"partial\"},\"finish_reason\":\"length\"}]}\n\n")
+                    append("data: {\"choices\":[],\"usage\":{\"prompt_tokens\":8,\"completion_tokens\":3}}\n\n")
+                    append("data: [DONE]\n\n")
+                },
+                status = HttpStatusCode.OK,
+                headers = headersOf(HttpHeaders.ContentType, "text/event-stream"),
+            )
+        }
+        val adapter = OpenAiCompatibleAdapter(HttpClient(engine), "https://example.invalid/v1")
+        val events = adapter.stream(
+            ModelRequest(modelId = "demo", messages = listOf(ChatMessage(role = "user", text = "hi"))),
+            "token".toCharArray(),
+        ).toList()
+        assertEquals(
+            listOf(
+                ModelEvent.TextDelta("partial"),
+                ModelEvent.Usage(8, 3),
+                ModelEvent.Failed(ErrorCode.CONTEXT_OVERFLOW.name),
+            ),
+            events,
+        )
+    }
+
+    @Test
+    fun sseErrorFrameRetainsUsageBeforeFailure() = runTest {
+        val engine = MockEngine {
+            respond(
+                content = "data: {\"error\":{\"message\":\"provider rejected\"},\"usage\":{\"prompt_tokens\":5,\"completion_tokens\":1}}\n\n",
+                status = HttpStatusCode.OK,
+                headers = headersOf(HttpHeaders.ContentType, "text/event-stream"),
+            )
+        }
+        val adapter = OpenAiCompatibleAdapter(HttpClient(engine), "https://example.invalid/v1")
+        val events = adapter.stream(
+            ModelRequest(modelId = "demo", messages = listOf(ChatMessage(role = "user", text = "hi"))),
+            "token".toCharArray(),
+        ).toList()
+        assertEquals(
+            listOf(ModelEvent.Usage(5, 1), ModelEvent.Failed("provider rejected")),
+            events,
+        )
     }
 }
 
@@ -465,7 +644,11 @@ class OpenAiCompatibleAdapterTest {
         var captured = ""
         val engine = MockEngine { request ->
             captured = (request.body as io.ktor.http.content.TextContent).text
-            respond("data: [DONE]\n\n", HttpStatusCode.OK, headersOf(HttpHeaders.ContentType, "text/event-stream"))
+            respond(
+                "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n\ndata: [DONE]\n\n",
+                HttpStatusCode.OK,
+                headersOf(HttpHeaders.ContentType, "text/event-stream"),
+            )
         }
         val adapter = OpenAiCompatibleAdapter(HttpClient(engine), "https://example.invalid/v1")
         val events = adapter.stream(
@@ -476,7 +659,7 @@ class OpenAiCompatibleAdapterTest {
             ),
             "token".toCharArray(),
         ).toList()
-        assertEquals(listOf(ModelEvent.Completed), events)
+        assertEquals(listOf(ModelEvent.TextDelta("ok"), ModelEvent.Completed), events)
         assertTrue(captured.contains("\"max_tokens\":17"))
     }
 
@@ -661,6 +844,102 @@ class OpenAiCompatibleAdapterTest {
     }
 
     @Test
+    fun metadataProbeFallsBackToModelsListForEncodedSlashModelIds() = runTest {
+        val paths = mutableListOf<String>()
+        val engine = MockEngine { request ->
+            paths += request.url.encodedPath
+            when {
+                request.url.encodedPath.endsWith("/models/deepseek-ai%2FDeepSeek-V3.2") ->
+                    respond("not found", HttpStatusCode.NotFound)
+                request.url.encodedPath.endsWith("/models") ->
+                    respond("{\"object\":\"list\",\"data\":[{\"id\":\"deepseek-ai/DeepSeek-V3.2\"}]}", HttpStatusCode.OK)
+                else -> error("unexpected probe path ${request.url.encodedPath}")
+            }
+        }
+        val adapter = OpenAiCompatibleAdapter(HttpClient(engine), "https://example.invalid/v1")
+        val report = adapter.probe(
+            ModelProfile(
+                id = "profile-siliconflow",
+                providerId = "provider-siliconflow",
+                modelId = "deepseek-ai/DeepSeek-V3.2",
+                role = ModelRole.CHAT,
+                capabilities = emptySet(),
+                contextLimit = 4096,
+                outputLimit = 64,
+                revision = 1,
+            ),
+            "token".toCharArray(),
+            runtime.mobileagent.provider.ProbeConsent.GRANTED,
+        )
+        assertEquals(
+            listOf(
+                "/v1/models/deepseek-ai%2FDeepSeek-V3.2",
+                "/v1/models",
+            ),
+            paths,
+        )
+        assertEquals(CapabilityProbeStatus.SUCCEEDED, report.status)
+        assertEquals(CapabilityCheckStatus.VERIFIED, report.checks.first().status)
+        assertTrue(report.source.contains("metadata=verified"))
+    }
+
+    @Test
+    fun metadataMismatchDoesNotFallBackOrPromoteCapabilities() = runTest {
+        val paths = mutableListOf<String>()
+        val engine = MockEngine { request ->
+            paths += request.url.encodedPath
+            respond("{\"id\":\"different-model\"}", HttpStatusCode.OK)
+        }
+        val adapter = OpenAiCompatibleAdapter(HttpClient(engine), "https://example.invalid/v1")
+        val report = adapter.probe(
+            ModelProfile(
+                id = "profile-mismatch",
+                providerId = "provider",
+                modelId = "vendor/model",
+                role = ModelRole.CHAT,
+                capabilities = setOf("stream"),
+                contextLimit = 4096,
+                outputLimit = 64,
+                revision = 1,
+            ),
+            "token".toCharArray(),
+            runtime.mobileagent.provider.ProbeConsent.GRANTED,
+        )
+        assertEquals(listOf("/v1/models/vendor%2Fmodel"), paths)
+        assertEquals(CapabilityProbeStatus.FAILED, report.status)
+        assertEquals(CapabilityCheckStatus.FAILED, report.checks.first().status)
+        assertFalse(report.supportsStream)
+    }
+
+    @Test
+    fun metadataAuthFailureDoesNotFallBackForSlashModel() = runTest {
+        val paths = mutableListOf<String>()
+        val engine = MockEngine { request ->
+            paths += request.url.encodedPath
+            respond("unauthorized", HttpStatusCode.Unauthorized)
+        }
+        val adapter = OpenAiCompatibleAdapter(HttpClient(engine), "https://example.invalid/v1")
+        val report = adapter.probe(
+            ModelProfile(
+                id = "profile-auth",
+                providerId = "provider",
+                modelId = "vendor/model",
+                role = ModelRole.CHAT,
+                capabilities = setOf("stream"),
+                contextLimit = 4096,
+                outputLimit = 64,
+                revision = 1,
+            ),
+            "token".toCharArray(),
+            runtime.mobileagent.provider.ProbeConsent.GRANTED,
+        )
+        assertEquals(listOf("/v1/models/vendor%2Fmodel"), paths)
+        assertEquals(CapabilityProbeStatus.FAILED, report.status)
+        assertEquals(CapabilityCheckStatus.FAILED, report.checks.first().status)
+        assertEquals(401, report.checks.first().httpStatus)
+    }
+
+    @Test
     fun testConnectionUsesMinimalChatPathAndReturnsTypedSuccess() = runBlocking {
         var requests = 0
         var path = ""
@@ -803,9 +1082,9 @@ class OpenAiCompatibleAdapterTest {
         assertTrue(connection is ProviderConnectionResult.Success)
         assertEquals(1, requests)
         val report = adapter.probe(profile, "secret".toCharArray(), runtime.mobileagent.provider.ProbeConsent.GRANTED)
-        assertEquals(CapabilityProbeStatus.FAILED, report.status)
+        assertEquals(CapabilityProbeStatus.PARTIAL, report.status)
         assertEquals(2, requests)
-        assertEquals(runtime.mobileagent.provider.CapabilityCheckStatus.FAILED, report.checks.first().status)
+        assertEquals(runtime.mobileagent.provider.CapabilityCheckStatus.UNSUPPORTED, report.checks.first().status)
         assertEquals(404, report.checks.first().httpStatus)
     }
 
@@ -905,6 +1184,63 @@ class OpenAiCompatibleAdapterTest {
         assertTrue(report.charged)
         assertTrue(report.source.contains("tools=verified"))
         assertTrue(report.source.contains("image=http-400"))
+    }
+
+    @Test
+    fun toolsCapabilityProbeUsesBoundedBudgetForFunctionCall() = runTest {
+        var requests = 0
+        var toolProbeBudget = 0
+        val engine = MockEngine { request ->
+            requests += 1
+            when {
+                request.url.encodedPath.endsWith("/models/demo") ->
+                    respond("{\"id\":\"demo\"}", HttpStatusCode.OK)
+                else -> {
+                    val body = (request.body as io.ktor.http.content.TextContent).text
+                    assertTrue(body.contains("tool_choice"), body)
+                    toolProbeBudget = Regex("\\\"max_tokens\\\":(\\d+)").find(body)?.groupValues?.get(1)?.toInt()
+                        ?: error("missing max_tokens in $body")
+                    if (toolProbeBudget <= 1) {
+                        // A one-token completion is a realistic truncation:
+                        // the provider never reaches a complete function call.
+                        respond(
+                            "{\"choices\":[{\"message\":{\"content\":\"\"},\"finish_reason\":\"length\"}]}",
+                            HttpStatusCode.OK,
+                            headersOf(HttpHeaders.ContentType, "application/json"),
+                        )
+                    } else {
+                        respond(
+                            "{\"choices\":[{\"message\":{\"tool_calls\":[{\"id\":\"probe\",\"type\":\"function\",\"function\":{\"name\":\"mar_probe_noop\",\"arguments\":\"{}\"}}]},\"finish_reason\":\"tool_calls\"}]}",
+                            HttpStatusCode.OK,
+                            headersOf(HttpHeaders.ContentType, "application/json"),
+                        )
+                    }
+                }
+            }
+        }
+        val adapter = OpenAiCompatibleAdapter(HttpClient(engine), "https://example.invalid/v1")
+        val profile = ModelProfile(
+            id = "profile-tool-budget",
+            providerId = "provider-tool-budget",
+            modelId = "demo",
+            role = ModelRole.CHAT,
+            capabilities = setOf("tools"),
+            contextLimit = 4096,
+            outputLimit = 32,
+            revision = 1,
+        )
+        val report = adapter.probe(
+            profile,
+            "token".toCharArray(),
+            runtime.mobileagent.provider.ProbeConsent.GRANTED,
+            "tool-budget",
+        )
+        assertEquals(2, requests)
+        assertTrue(toolProbeBudget > 1)
+        assertTrue(toolProbeBudget <= profile.outputLimit)
+        assertTrue(report.supportsTools)
+        assertEquals(CapabilityProbeStatus.SUCCEEDED, report.status)
+        assertTrue(report.source.contains("tools=verified"))
     }
 
     @Test

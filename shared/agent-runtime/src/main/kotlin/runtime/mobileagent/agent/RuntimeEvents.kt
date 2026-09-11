@@ -43,11 +43,12 @@ data class AgentRuntimeRequest(
      * budgets remain outside the protocol adapter.
      */
     val toolImages: suspend (ToolCall, ToolResult) -> List<InlineImage> = { _, _ -> emptyList() },
-    /** Conservative text UTF-8 units plus 4096 units per image; checked every round. */
+    /** Complete adapter input estimate, in conservative units rather than tokenizer counts. */
     val maxInputBudgetUnits: Long? = null,
     val maxImagesPerRequest: Int = 4,
     val beforeModelRequest: suspend () -> Unit = {},
     val outputTokenLimit: Int? = null,
+    val context: RuntimeContext? = null,
 )
 
 /** A bounded summary safe for persistence and inspector lists. */
@@ -75,6 +76,8 @@ sealed interface RuntimeEvent {
         val headerNames: List<String>,
         /** Null unless the caller explicitly opts into an in-memory inspector preview. */
         val requestPreview: String? = null,
+        val assistantMessageId: String? = null,
+        val estimatedInputUnits: Long? = null,
     ) : RuntimeEvent
 
     data class ModelEvent(
@@ -100,9 +103,13 @@ sealed interface RuntimeEvent {
         val resultSummary: String,
         /** Complete bounded, redacted result for typed persistence/replay. */
         val resultJson: String = resultSummary,
+        val messageId: String? = null,
     ) : RuntimeEvent
 
-    data class ToolImagesAttached(val callId: String, val assets: List<RuntimeImageReference>) : RuntimeEvent
+    data class ToolImagesAttached(val callId: String, val assets: List<RuntimeImageReference>, val messageId: String? = null) : RuntimeEvent
+
+    /** Local conversation inspector data; never a diagnostic log or a new assistant/tool instruction. */
+    data class ContextCompactionChanged(val record: runtime.mobileagent.domain.ContextCompactionRecord) : RuntimeEvent
 
     data class RunFinished(
         val runId: String,
@@ -110,6 +117,7 @@ sealed interface RuntimeEvent {
         val stopReason: String?,
         val modelRounds: Int,
         val toolCalls: Int,
+        val compactionRequests: Int = 0,
     ) : RuntimeEvent
 }
 
@@ -158,6 +166,9 @@ fun toSafeErrorPart(value: String): ErrorPart {
         token == "PROVIDER_UNAUTHORIZED" || normalized.contains("UNAUTHORIZED") -> MessageErrorCode.PROVIDER_UNAUTHORIZED
         token == "RATE_LIMITED" -> MessageErrorCode.RATE_LIMITED
         token == "NETWORK_UNAVAILABLE" || normalized.contains("NETWORK") -> MessageErrorCode.NETWORK_UNAVAILABLE
+        token == "CONTEXT_COMPACTION_FAILED" -> MessageErrorCode.INVALID_RESPONSE
+        token == "PERMISSION_DENIED" || token == "CAPABILITY_DENIED" -> MessageErrorCode.PERMISSION_DENIED
+        token == "RESOURCE_LIMIT" || token == "BUDGET_EXHAUSTED" -> MessageErrorCode.BUDGET_EXHAUSTED
         token == "CONTEXT_OVERFLOW" || token == "CONTEXT_BUDGET_EXCEEDED" || normalized.contains("CONTEXT") -> MessageErrorCode.CONTEXT_OVERFLOW
         token == "PERMISSION_DENIED" || token == "CAPABILITY_DENIED" -> MessageErrorCode.PERMISSION_DENIED
         token == "RESOURCE_LIMIT" || token == "BUDGET_EXHAUSTED" || normalized.contains("BUDGET") -> MessageErrorCode.BUDGET_EXHAUSTED
@@ -167,7 +178,10 @@ fun toSafeErrorPart(value: String): ErrorPart {
         token == "TOOL_FAILED" || token == "TOOL_ERROR" -> MessageErrorCode.TOOL_FAILED
         else -> MessageErrorCode.INTERNAL
     }
-    return ErrorPart(code, code.safeMessage(), retryable = code in RETRYABLE_ERROR_CODES)
+    val message = if (token == "CONTEXT_COMPACTION_FAILED") {
+        "上下文压缩失败，原始消息已保留；本次不会自动重试。"
+    } else code.safeMessage()
+    return ErrorPart(code, message, retryable = code in RETRYABLE_ERROR_CODES)
 }
 
 /**

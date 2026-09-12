@@ -24,3 +24,48 @@ class ProfilesTest {
         )
     }
 }
+
+class ProviderDestinationBindingTest {
+    private val previous = ProviderProfile(
+        id = "provider.one",
+        name = "One",
+        apiFormat = ApiFormat.OPENAI_COMPATIBLE,
+        baseUrl = "https://provider-a.invalid/v1",
+        headerSecretRefs = mapOf("X-Org-Token" to "aux-a"),
+        secretRef = "primary-a",
+        revision = 1,
+    )
+
+    @Test
+    fun sameDestinationKeepsAuxiliaryHeaderRefs() {
+        assertEquals(
+            previous.headerSecretRefs,
+            ProviderDestinationBinding.headerSecretRefsForSave(previous, previous.baseUrl),
+        )
+    }
+
+    @Test
+    fun destinationChangeDropsInheritedAuxiliaryHeaderRefs() {
+        assertEquals(
+            emptyMap<String, String>(),
+            ProviderDestinationBinding.headerSecretRefsForSave(
+                previous,
+                "https://provider-b.invalid/v1",
+                previous.headerSecretRefs,
+            ),
+        )
+    }
+
+    @Test
+    fun destinationChangeKeepsNewlyConfirmedHeaderRefs() {
+        val confirmed = mapOf("X-Org-Token" to "aux-b")
+        assertEquals(
+            confirmed,
+            ProviderDestinationBinding.headerSecretRefsForSave(
+                previous,
+                "https://provider-b.invalid/v1",
+                confirmed,
+            ),
+        )
+    }
+}

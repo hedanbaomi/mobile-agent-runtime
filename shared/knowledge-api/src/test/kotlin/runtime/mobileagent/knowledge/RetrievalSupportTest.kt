@@ -84,7 +84,7 @@ class ReciprocalRankFusionTest {
 
     @Test
     fun dropsHeadingOnlyHitWhenTheSameDocumentHasABodyHit() {
-        val heading = SearchHit("c-head", "doc-1", "Source: working with the void", 0.9)
+        val heading = SearchHit("c-head", "doc-1", "# Source: working with the void", 0.9, sourceSpan = "heading")
         val body = SearchHit(
             "c-body",
             "doc-1",
@@ -107,21 +107,33 @@ class ReciprocalRankFusionTest {
         val fact = SearchHit("exact-fact", "doc-1", "最大并发数：8", 1.0)
         val assignment = SearchHit("config", "doc-1", "MAX_RETRIES=3", 0.9)
         val bullet = SearchHit("bullet", "doc-1", "- timeout 30s", 0.8)
-        val filtered = ReciprocalRankFusion.preferClaimSupporting(listOf(fact, assignment, bullet, body))
-        assertEquals(listOf("exact-fact", "config", "bullet", "c-body"), filtered.map { it.chunkId })
+        val author = SearchHit("author", "doc-1", "作者：张三", 0.85)
+        val mode = SearchHit("mode", "doc-1", "默认模式：离线", 0.84)
+        val flag = SearchHit("flag", "doc-1", "是否支持图片：是", 0.83)
+        val protocol = SearchHit("protocol", "doc-1", "传输协议：HTTPS", 0.82)
+        val enabled = SearchHit("enabled", "doc-1", "Enabled: true", 0.81)
+        val filtered = ReciprocalRankFusion.preferClaimSupporting(
+            listOf(fact, assignment, bullet, author, mode, flag, protocol, enabled, body),
+        )
+        assertEquals(
+            listOf("exact-fact", "config", "bullet", "author", "mode", "flag", "protocol", "enabled", "c-body"),
+            filtered.map { it.chunkId },
+        )
     }
 
     @Test
     fun stillDropsTitleLikeHeadingsWithoutTreatingThemAsFacts() {
-        val heading = SearchHit("heading", "doc-1", "来源：配置说明", 0.9)
+        val heading = SearchHit("heading", "doc-1", "来源：配置说明", 0.9, sourceSpan = "h1")
+        val markdown = SearchHit("md", "doc-1", "# 配置说明", 0.88)
         val body = SearchHit(
             "c-body",
             "doc-1",
             "本节说明配置文件的读取步骤、加载顺序以及页面的一般操作说明；它不包含具体并发数值。".repeat(3),
             0.3,
         )
-        val filtered = ReciprocalRankFusion.preferClaimSupporting(listOf(heading, body))
-        assertEquals(listOf("c-body"), filtered.map { it.chunkId })
+        val unlabeled = SearchHit("unlabeled", "doc-1", "来源：配置说明", 0.7)
+        val filtered = ReciprocalRankFusion.preferClaimSupporting(listOf(heading, markdown, unlabeled, body))
+        assertEquals(listOf("unlabeled", "c-body"), filtered.map { it.chunkId })
     }
 }
 

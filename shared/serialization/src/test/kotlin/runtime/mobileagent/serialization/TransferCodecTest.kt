@@ -311,4 +311,64 @@ class TransferCodecTest {
         assertEquals(installId, decoded.skills.single().sourceInstallId)
         assertEquals("skill.one", decoded.skills.single().id)
     }
+
+    @Test
+    fun skillPackageIdCollidingWithAnotherSourceInstallIdIsRejected() {
+        val bundle = TransferBundle(
+            schemaVersion = SchemaVersion.CURRENT,
+            exportedAt = "2026-08-29T00:00:00Z",
+            skills = listOf(
+                SkillTransfer(
+                    packageHash = packageHash,
+                    id = "skill.a",
+                    name = "A",
+                    version = "1.0.0",
+                    licenseId = "AGPL-3.0-only",
+                    classification = "safe",
+                    sourceInstallId = "source-install-a",
+                ),
+                SkillTransfer(
+                    packageHash = "1".repeat(64),
+                    id = "source-install-a",
+                    name = "B",
+                    version = "1.0.0",
+                    licenseId = "AGPL-3.0-only",
+                    classification = "safe",
+                    sourceInstallId = "source-install-b",
+                ),
+            ),
+        )
+        val error = assertThrows(AppException::class.java) { TransferCodec.validate(bundle) }
+        assertEquals(ErrorCode.TRANSFER_INVALID, error.error.code)
+        assertTrue(error.message.orEmpty().contains("collides"))
+    }
+
+    @Test
+    fun distinctSkillVersionsMayShareAPackageId() {
+        val bundle = TransferBundle(
+            schemaVersion = SchemaVersion.CURRENT,
+            exportedAt = "2026-08-29T00:00:00Z",
+            skills = listOf(
+                SkillTransfer(
+                    packageHash = packageHash,
+                    id = "skill.shared",
+                    name = "Shared",
+                    version = "1.0.0",
+                    licenseId = "AGPL-3.0-only",
+                    classification = "safe",
+                    sourceInstallId = "install-v1",
+                ),
+                SkillTransfer(
+                    packageHash = "1".repeat(64),
+                    id = "skill.shared",
+                    name = "Shared",
+                    version = "2.0.0",
+                    licenseId = "AGPL-3.0-only",
+                    classification = "safe",
+                    sourceInstallId = "install-v2",
+                ),
+            ),
+        )
+        assertDoesNotThrow { TransferCodec.validate(bundle) }
+    }
 }

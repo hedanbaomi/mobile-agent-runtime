@@ -16,8 +16,10 @@ import java.io.ByteArrayOutputStream
 import java.text.Normalizer
 import java.util.zip.ZipEntry
 import java.util.zip.ZipOutputStream
+import runtime.mobileagent.domain.MessageRole
 import runtime.mobileagent.serialization.TransferCodec
 import runtime.mobileagent.serialization.TransferConflictPolicy
+import runtime.mobileagent.serialization.TransferOptions
 
 class SkillRepositoryTest {
     @Test
@@ -248,6 +250,70 @@ class SkillRepositoryTest {
     }
 
     @Test
+    fun historicalUnboundSkillIsExportedAndRestoredWithoutRebindingTheAgent() = database { source ->
+        val skills = SkillRepository(source)
+        assertTrue(skills.importPackage(instructionOnlyPackageBytes("Skill A")).accepted)
+        val skillA = skills.list().single()
+        assertTrue(skills.importPackage(instructionOnlyPackageBytes("Skill B")).accepted)
+        val skillB = skills.list().single { it.installId != skillA.installId }
+        skills.setEnabled(skillA.installId, true)
+        skills.setEnabled(skillB.installId, true)
+        createChatProfile(source)
+        val agents = AgentRepository(source)
+        val boundA = agents.saveWithPrompt(
+            agentProfile("agent.history-skill", "model.skills.chat", skillA.installId),
+            "Use skill A.",
+        )
+        val snapshot = agents.createSnapshot(boundA.id, "snapshot.history-a", "2026-08-29T00:00:00Z")
+        val conversation = ConversationRepository(source).create(
+            snapshot.id,
+            "Historical A thread",
+            "conversation.history-a",
+            "2026-08-29T00:00:01Z",
+        )
+        ConversationRepository(source).append(
+            conversation.id,
+            MessageRole.USER,
+            "hello from A",
+            messageId = "message.history-a",
+            createdAt = "2026-08-29T00:00:02Z",
+        )
+        val boundB = agents.saveWithPrompt(
+            boundA.copy(skillIds = listOf(skillB.installId), revision = boundA.revision),
+            "Use skill B instead.",
+        )
+        assertEquals(listOf(skillB.installId), boundB.skillIds)
+
+        val output = ByteArrayOutputStream()
+        TransferRepository(source).exportArchive(
+            boundB.id,
+            TransferOptions(includeSkillPackageBytes = true, includeConversations = true),
+            output,
+        )
+        val exported = TransferCodec.decode(readArchiveManifest(output.toByteArray()))
+        assertEquals(listOf(skillB.installId), exported.agent!!.profile.skillIds)
+        assertEquals(2, exported.skills.size)
+        assertTrue(exported.skills.any { it.sourceInstallId == skillA.installId || skillA.installId in it.sourceInstallIds })
+        assertTrue(exported.skills.any { it.sourceInstallId == skillB.installId || skillB.installId in it.sourceInstallIds })
+
+        JdbcSqlConnection("jdbc:sqlite::memory:").use { target ->
+            Migrations.apply(target)
+            val result = TransferRepository(target).importArchive(output.toByteArray(), TransferConflictPolicy.REJECT)
+            val restored = AgentRepository(target).get(boundB.id)!!
+            val restoredSnapshot = AgentRepository(target).getSnapshot(snapshot.id)!!
+            val installs = target.query("SELECT install_id, package_hash, enabled FROM skill_installs")
+            assertEquals(2, installs.size)
+            assertTrue(installs.all { it.long("enabled") == 0L })
+            val localByHash = installs.associate { it.string("package_hash") to it.string("install_id") }
+            assertEquals(listOf(localByHash.getValue(skillB.packageHash)), restored.skillIds)
+            assertEquals(listOf(localByHash.getValue(skillA.packageHash)), restoredSnapshot.skillIds)
+            assertEquals("hello from A", ConversationRepository(target).messages(conversation.id).single().text)
+            assertEquals(0L, target.query("SELECT COUNT(*) AS n FROM permission_grants WHERE revoked=0").single().long("n"))
+            assertTrue(result.warnings.any { it.contains("enable") || it.contains("grant") })
+        }
+    }
+
+    @Test
     fun rawInstructionSkillUsesFrontmatterName() = database { db ->
         val skills = SkillRepository(db)
         val raw = """
@@ -445,11 +511,22 @@ class SkillRepositoryTest {
         return out.toByteArray()
     }
 
-    private fun instructionOnlyPackageBytes(): ByteArray {
+    private fun readArchiveManifest(bytes: ByteArray): String {
+        java.util.zip.ZipInputStream(bytes.inputStream()).use { zip ->
+            var entry = zip.nextEntry
+            while (entry != null) {
+                if (entry.name == "manifest.json") return zip.readBytes().decodeToString()
+                entry = zip.nextEntry
+            }
+        }
+        error("Archive is missing manifest.json")
+    }
+
+    private fun instructionOnlyPackageBytes(title: String = "Instruction-only test skill"): ByteArray {
         val out = ByteArrayOutputStream()
         ZipOutputStream(out).use { zip ->
             zip.putNextEntry(ZipEntry("SKILL.md"))
-            zip.write("# Instruction-only test skill\nUse this local instruction only.\n".toByteArray())
+            zip.write("# $title\nUse this local instruction only.\n".toByteArray())
             zip.closeEntry()
         }
         return out.toByteArray()

@@ -130,6 +130,11 @@ data class SkillTransfer(
      * remap to a new local install without storing package ids in Agent.skillIds.
      */
     val sourceInstallId: String? = null,
+    /**
+     * Additional source install ids that resolve to the same package hash, typically from
+     * historical conversation snapshots after the Agent unbound or replaced the current Skill.
+     */
+    val sourceInstallIds: List<String> = emptyList(),
 )
 
 @Serializable

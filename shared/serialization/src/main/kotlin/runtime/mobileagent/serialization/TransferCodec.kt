@@ -347,13 +347,12 @@ object TransferCodec {
 
     private fun validateSkills(skills: List<SkillTransfer>, operationId: String) {
         val packageHashes = mutableSetOf<String>()
-        val ids = mutableSetOf<String>()
         skills.forEach { skill ->
             requireHash(skill.packageHash, operationId, "skill.packageHash")
             if (!packageHashes.add(skill.packageHash)) invalid(operationId, "Duplicate skill package ${skill.packageHash}")
             requireId(skill.id, operationId, "skill.id")
-            if (!ids.add(skill.id)) invalid(operationId, "Duplicate skill id ${skill.id}")
             skill.sourceInstallId?.let { requireId(it, operationId, "skill.sourceInstallId") }
+            skill.sourceInstallIds.forEach { requireId(it, operationId, "skill.sourceInstallIds") }
             requireText(skill.name, operationId, "skill.name")
             requireText(skill.version, operationId, "skill.version")
             requireText(skill.licenseId, operationId, "skill.licenseId")
@@ -377,7 +376,20 @@ object TransferCodec {
                 invalid(operationId, "Skill package bytes must be a ZIP entry, not manifest base64")
             }
         }
-        requireDistinctIds(skills.mapNotNull { it.sourceInstallId }, operationId, "skill.sourceInstallId")
+        val sourceInstallIds = skills.flatMap { skill ->
+            listOfNotNull(skill.sourceInstallId) + skill.sourceInstallIds
+        }
+        requireDistinctIds(sourceInstallIds, operationId, "skill.sourceInstallId")
+        val sourceInstallIdSet = sourceInstallIds.toSet()
+        skills.forEach { skill ->
+            val ownSourceIds = buildSet {
+                skill.sourceInstallId?.let(::add)
+                addAll(skill.sourceInstallIds)
+            }
+            if (skill.id in sourceInstallIdSet && skill.id !in ownSourceIds) {
+                invalid(operationId, "Skill package id ${skill.id} collides with a source install id")
+            }
+        }
     }
 
     private fun validateConversations(conversations: List<ConversationTransfer>, operationId: String) {

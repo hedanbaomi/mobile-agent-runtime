@@ -286,7 +286,7 @@ object TransferCodec {
                 requireText(version.parserFingerprint, operationId, "documentVersion.parserFingerprint")
                 requireHash(version.contentHash, operationId, "documentVersion.contentHash")
                 requireText(version.status, operationId, "documentVersion.status")
-                if (version.status !in setOf("STAGING", "READY", "FAILED", "CANCELLED")) {
+                if (version.status !in setOf("STAGING", "READY", "READY_WITH_VISUAL_GAPS", "FAILED", "CANCELLED")) {
                     invalid(operationId, "Document version ${version.id} has an unsupported status")
                 }
                 requireText(version.createdAt, operationId, "documentVersion.createdAt")
@@ -353,6 +353,7 @@ object TransferCodec {
             if (!packageHashes.add(skill.packageHash)) invalid(operationId, "Duplicate skill package ${skill.packageHash}")
             requireId(skill.id, operationId, "skill.id")
             if (!ids.add(skill.id)) invalid(operationId, "Duplicate skill id ${skill.id}")
+            skill.sourceInstallId?.let { requireId(it, operationId, "skill.sourceInstallId") }
             requireText(skill.name, operationId, "skill.name")
             requireText(skill.version, operationId, "skill.version")
             requireText(skill.licenseId, operationId, "skill.licenseId")
@@ -376,6 +377,7 @@ object TransferCodec {
                 invalid(operationId, "Skill package bytes must be a ZIP entry, not manifest base64")
             }
         }
+        requireDistinctIds(skills.mapNotNull { it.sourceInstallId }, operationId, "skill.sourceInstallId")
     }
 
     private fun validateConversations(conversations: List<ConversationTransfer>, operationId: String) {

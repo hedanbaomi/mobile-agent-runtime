@@ -125,6 +125,11 @@ data class SkillTransfer(
     val packageBase64: String? = null,
     /** Full archive exports carry package bytes in a ZIP entry, never in this JSON field. */
     val packageIncluded: Boolean = false,
+    /**
+     * Runtime Agent bindings use install ids. This records the source install so restore can
+     * remap to a new local install without storing package ids in Agent.skillIds.
+     */
+    val sourceInstallId: String? = null,
 )
 
 @Serializable

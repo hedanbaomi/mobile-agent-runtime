@@ -16,6 +16,8 @@ import java.io.ByteArrayOutputStream
 import java.text.Normalizer
 import java.util.zip.ZipEntry
 import java.util.zip.ZipOutputStream
+import runtime.mobileagent.serialization.TransferCodec
+import runtime.mobileagent.serialization.TransferConflictPolicy
 
 class SkillRepositoryTest {
     @Test
@@ -210,6 +212,39 @@ class SkillRepositoryTest {
         val raw = TransferRepository(db).exportAgent(saved.id)
         assertTrue(raw.contains(installed.packageHash))
         assertFalse(raw.contains("missing skill"))
+    }
+
+    @Test
+    fun agentSkillBackupRemapsInstallIdentityOnEmptyTarget() = database { source ->
+        val skills = SkillRepository(source)
+        assertTrue(skills.importPackage(instructionOnlyPackageBytes()).accepted)
+        val installed = skills.list().single()
+        skills.setEnabled(installed.installId, true)
+        val packageId = source.query("SELECT id FROM skill_packages WHERE package_hash=?", listOf(installed.packageHash)).single().string("id")
+        createChatProfile(source)
+        val saved = AgentRepository(source).saveWithPrompt(
+            agentProfile("agent.restore-skill", "model.skills.chat", installed.installId),
+            "Export the bound skill.",
+        )
+        val raw = TransferRepository(source).exportAgent(saved.id, includeSkillPackageBytes = true)
+        val exported = TransferCodec.decode(raw)
+        assertEquals(installed.installId, exported.skills.single().sourceInstallId)
+        assertEquals(packageId, exported.skills.single().id)
+        assertEquals(listOf(installed.installId), exported.agent!!.profile.skillIds)
+
+        JdbcSqlConnection("jdbc:sqlite::memory:").use { target ->
+            Migrations.apply(target)
+            val result = TransferRepository(target).importBundle(raw, TransferConflictPolicy.REJECT)
+            val restored = AgentRepository(target).get(saved.id)!!
+            val local = target.query("SELECT install_id, enabled FROM skill_installs").single()
+            val localInstallId = local.string("install_id")
+            assertEquals(listOf(localInstallId), restored.skillIds)
+            assertTrue(localInstallId != installed.installId)
+            assertTrue(localInstallId != packageId)
+            assertEquals(0L, local.long("enabled"))
+            assertEquals(0L, target.query("SELECT COUNT(*) AS n FROM permission_grants WHERE revoked=0").single().long("n"))
+            assertTrue(result.warnings.any { it.contains("enable") || it.contains("grant") })
+        }
     }
 
     @Test

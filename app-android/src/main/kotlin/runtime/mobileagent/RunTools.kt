@@ -22,6 +22,7 @@ import runtime.mobileagent.agent.RunState
 import runtime.mobileagent.data.SqlRow
 import runtime.mobileagent.domain.AgentSnapshot
 import runtime.mobileagent.knowledge.Citation
+import runtime.mobileagent.knowledge.isPublishedCitationVersion
 import runtime.mobileagent.knowledge.LoadedVisual
 import runtime.mobileagent.knowledge.StrictVisualDecision
 import runtime.mobileagent.knowledge.StrictVisualPolicy
@@ -543,7 +544,9 @@ class RunTools(
         ).singleOrNull() ?: throw EvidenceDenied("Citation source is unavailable")
         if (row.string("document_deleted").isNotBlank() || row.string("kb_deleted").isNotBlank() ||
             row.string("kb_id") !in liveKnowledgeIds()) throw EvidenceDenied("Citation is outside live Agent authorization")
-        if (row.string("version_status") != "READY") throw EvidenceInvalid("Citation source version is not published")
+        if (!isPublishedCitationVersion(row.string("version_status"))) {
+            throw EvidenceInvalid("Citation source version is not published")
+        }
         return Chunk(row.string("chunk_id"), row.string("version_id"), row.string("document_id"), row.string("kb_id"),
             row.string("text"), assetIds(row.string("asset_ids")), row.optionalPage(), row.string("source_span").ifBlank { null })
     }

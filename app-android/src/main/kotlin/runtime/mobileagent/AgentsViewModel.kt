@@ -626,6 +626,10 @@ class AgentsViewModel(
             val persisted = port.bindConversationWorkspace(binding)
             require(persisted == binding) { "会话工作区绑定保存返回了不一致的绑定。" }
         }
+        app.container.uiPreferences.edit()
+            .putString("selected-agent", agentId)
+            .putString("selected-conversation", conversation.id)
+            .apply()
         reload()
         conversation.id
     } catch (error: Exception) {

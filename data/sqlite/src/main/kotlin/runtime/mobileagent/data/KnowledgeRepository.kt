@@ -1418,7 +1418,7 @@ class KnowledgeRepository(
                 throw failure
             }
         }
-        val hits = ReciprocalRankFusion.merge(sources).take(topK)
+        val hits = ReciprocalRankFusion.preferClaimSupporting(ReciprocalRankFusion.merge(sources).take(topK))
         if (hits.isEmpty()) warnings += "No in-scope evidence"
         val coverage = RetrievalCoverage(requested = bases, searched = searched.toList(), unavailable = unavailable.toList())
         coverage.notice()?.let { warnings += "部分知识库未参与本次检索（${searched.size}/${bases.size}）：$it" }

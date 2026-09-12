@@ -839,10 +839,12 @@ class OpenAiCompatibleAdapter(
 
     /**
      * Metadata is useful when a provider implements it, but it is not a
-     * prerequisite for the independent chat feature checks.  A few OpenAI
-     * compatible gateways reject a slash-containing model id in the path even
-     * though their collection endpoint exposes the exact id, so retry that
-     * narrow case through `/models` and require an exact id match.
+     * prerequisite for the independent chat feature checks.  Some OpenAI
+     * compatible hosts document only `GET /models` and return 404/405 for
+     * `GET /models/{id}` even when the collection lists the exact id. Retry
+     * that unsupported per-id route through `/models` and require an exact
+     * id match. Authentication failures and mismatched 200 bodies must not
+     * fall through to the list.
      */
     private suspend fun probeMetadata(
         modelId: String,
@@ -857,8 +859,7 @@ class OpenAiCompatibleAdapter(
         )
         return if (
             direct.status == CapabilityCheckStatus.UNSUPPORTED &&
-            direct.httpStatus == 404 &&
-            modelId.contains('/')
+            (direct.httpStatus == 404 || direct.httpStatus == 405)
         ) {
             probeMetadataPath(
                 path = "/models",
@@ -1053,12 +1054,25 @@ class OpenAiCompatibleAdapter(
                         readBounded(response.bodyAsChannel()),
                         requireToolCall = feature == ProbeFeature.TOOLS,
                     )
-                    FeatureProbeResult(
-                        summary = if (supported) "verified" else "invalid-response",
-                        supported = supported,
-                        charged = true,
-                        status = if (supported) CapabilityCheckStatus.VERIFIED else CapabilityCheckStatus.FAILED,
-                    )
+                    // A 200 response that accepted the tools payload but did
+                    // not emit the forced no-op call is inconclusive: the
+                    // probe budget is tiny and live tool calling can still
+                    // succeed. Do not report that as a failed protocol check.
+                    if (feature == ProbeFeature.TOOLS && !supported) {
+                        FeatureProbeResult(
+                            summary = "inconclusive",
+                            supported = false,
+                            charged = true,
+                            status = CapabilityCheckStatus.UNKNOWN,
+                        )
+                    } else {
+                        FeatureProbeResult(
+                            summary = if (supported) "verified" else "invalid-response",
+                            supported = supported,
+                            charged = true,
+                            status = if (supported) CapabilityCheckStatus.VERIFIED else CapabilityCheckStatus.FAILED,
+                        )
+                    }
                 }
             }
         } catch (e: kotlinx.coroutines.CancellationException) {

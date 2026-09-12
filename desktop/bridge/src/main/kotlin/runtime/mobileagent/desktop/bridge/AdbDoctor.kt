@@ -52,8 +52,6 @@ class JnaWinTrustVerifier : WinTrustVerifier {
         widePath.setWideString(0, canonical.toString())
         val fileInfo = WinTrustFileInfo(widePath)
         val data = WinTrustData(fileInfo.pointer)
-        fileInfo.write()
-        data.write()
         return try {
             WinTrust.INSTANCE.WinVerifyTrust(
                 Pointer.NULL,
@@ -73,46 +71,6 @@ class JnaWinTrustVerifier : WinTrustVerifier {
         }
     }
 
-    private class WinTrustFileInfo(private val path: Memory) : Structure() {
-        @JvmField var cbStruct: Int = 0
-        @JvmField var pcwszFilePath: Pointer = path
-        @JvmField var hFile: Pointer? = Pointer.NULL
-        @JvmField var pgKnownSubject: Pointer? = Pointer.NULL
-
-        override fun getFieldOrder(): List<String> = listOf(
-            "cbStruct", "pcwszFilePath", "hFile", "pgKnownSubject",
-        )
-
-        init {
-            cbStruct = size()
-        }
-    }
-
-    private class WinTrustData(private val fileInfo: Pointer) : Structure() {
-        @JvmField var cbStruct: Int = 0
-        @JvmField var pPolicyCallbackData: Pointer? = Pointer.NULL
-        @JvmField var pSIPClientData: Pointer? = Pointer.NULL
-        @JvmField var dwUIChoice: Int = WTD_UI_NONE
-        @JvmField var fdwRevocationChecks: Int = WTD_REVOKE_NONE
-        @JvmField var dwUnionChoice: Int = WTD_CHOICE_FILE
-        @JvmField var pFile: Pointer = fileInfo
-        @JvmField var dwStateAction: Int = WTD_STATEACTION_IGNORE
-        @JvmField var hWVTStateData: Pointer? = Pointer.NULL
-        @JvmField var pwszURLReference: Pointer? = Pointer.NULL
-        @JvmField var dwProvFlags: Int = WTD_REVOCATION_CHECK_END_CERT
-        @JvmField var dwUIContext: Int = WTD_UICONTEXT_EXECUTE
-
-        override fun getFieldOrder(): List<String> = listOf(
-            "cbStruct", "pPolicyCallbackData", "pSIPClientData", "dwUIChoice",
-            "fdwRevocationChecks", "dwUnionChoice", "pFile", "dwStateAction",
-            "hWVTStateData", "pwszURLReference", "dwProvFlags", "dwUIContext",
-        )
-
-        init {
-            cbStruct = size()
-        }
-    }
-
     companion object {
         private val WINTRUST_ACTION_GENERIC_VERIFY_V2 = Guid.GUID("00AAC56B-CD44-11d0-8CC2-00C04FC295EE")
         private const val WTD_UI_NONE = 2
@@ -121,6 +79,49 @@ class JnaWinTrustVerifier : WinTrustVerifier {
         private const val WTD_STATEACTION_IGNORE = 0
         private const val WTD_REVOCATION_CHECK_END_CERT = 0x80
         private const val WTD_UICONTEXT_EXECUTE = 0
+    }
+}
+
+/**
+ * JNA requires these structures to be JVM-visible (not private nested classes)
+ * so field reflection on JDK 16+ does not throw IllegalAccessException before
+ * WinVerifyTrust runs.
+ */
+@Structure.FieldOrder("cbStruct", "pcwszFilePath", "hFile", "pgKnownSubject")
+internal class WinTrustFileInfo() : Structure() {
+    @JvmField var cbStruct: Int = 0
+    @JvmField var pcwszFilePath: Pointer? = Pointer.NULL
+    @JvmField var hFile: Pointer? = Pointer.NULL
+    @JvmField var pgKnownSubject: Pointer? = Pointer.NULL
+
+    constructor(path: Pointer) : this() {
+        pcwszFilePath = path
+        cbStruct = size()
+        write()
+    }
+}
+
+@Structure.FieldOrder("cbStruct", "pPolicyCallbackData", "pSIPClientData", "dwUIChoice",
+    "fdwRevocationChecks", "dwUnionChoice", "pFile", "dwStateAction",
+    "hWVTStateData", "pwszURLReference", "dwProvFlags", "dwUIContext")
+internal class WinTrustData() : Structure() {
+    @JvmField var cbStruct: Int = 0
+    @JvmField var pPolicyCallbackData: Pointer? = Pointer.NULL
+    @JvmField var pSIPClientData: Pointer? = Pointer.NULL
+    @JvmField var dwUIChoice: Int = 2
+    @JvmField var fdwRevocationChecks: Int = 0
+    @JvmField var dwUnionChoice: Int = 1
+    @JvmField var pFile: Pointer? = Pointer.NULL
+    @JvmField var dwStateAction: Int = 0
+    @JvmField var hWVTStateData: Pointer? = Pointer.NULL
+    @JvmField var pwszURLReference: Pointer? = Pointer.NULL
+    @JvmField var dwProvFlags: Int = 0x80
+    @JvmField var dwUIContext: Int = 0
+
+    constructor(fileInfo: Pointer) : this() {
+        pFile = fileInfo
+        cbStruct = size()
+        write()
     }
 }
 

@@ -3,6 +3,7 @@
 
 package runtime.mobileagent.desktop.bridge
 
+import com.sun.jna.Memory
 import com.sun.jna.Platform
 import java.nio.file.Files
 import java.nio.file.Path
@@ -895,5 +896,18 @@ class DesktopBridgeTest {
             identity.lastModifiedMillis,
         )
         return configuration to report
+    }
+
+    @Test
+    fun winTrustStructuresAreAccessibleWithoutIllegalAccess() {
+        val memory = Memory(16)
+        try {
+            val fileInfo = WinTrustFileInfo(memory)
+            assertTrue(fileInfo.cbStruct > 0)
+            val data = WinTrustData(fileInfo.pointer)
+            assertTrue(data.cbStruct > 0)
+        } finally {
+            memory.clear()
+        }
     }
 }

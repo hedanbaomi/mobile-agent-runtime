@@ -21,6 +21,12 @@ data class InputBudgetEstimate(
     val units: Long,
     val imageCount: Int,
     val basis: String = INPUT_BUDGET_BASIS,
+    val protocolUnits: Long = 0L,
+    val messageTextUnits: Long = 0L,
+    val toolCallUnits: Long = 0L,
+    val toolSchemaUnits: Long = 0L,
+    val imageUnits: Long = 0L,
+    val continuationUnits: Long = 0L,
 )
 
 /**
@@ -124,52 +130,77 @@ object RequestInputBudget {
         request: ModelRequest,
         includeProviderContinuation: Boolean = true,
     ): InputBudgetEstimate {
-        var units = PROTOCOL_ENVELOPE_UNITS
+        var protocolUnits = saturatingAddUnits(PROTOCOL_ENVELOPE_UNITS, conservativeUtf8Units(request.modelId))
+        protocolUnits = saturatingAddUnits(protocolUnits, parameterLayerUnits(request.parameters))
+        protocolUnits = saturatingAddUnits(protocolUnits, legacyExtraUnits(request.extra))
+        var messageTextUnits = 0L
+        var toolCallUnits = 0L
+        var toolSchemaUnits = 0L
+        var imageUnits = 0L
+        var continuationUnits = 0L
         var imageCount = 0
-        units = saturatingAddUnits(units, conservativeUtf8Units(request.modelId))
         request.messages.forEach { message ->
-            units = saturatingAddUnits(units, MESSAGE_ENVELOPE_UNITS)
-            units = saturatingAddUnits(units, conservativeUtf8Units(message.role))
-            units = saturatingAddUnits(units, conservativeUtf8Units(message.text))
+            messageTextUnits = saturatingAddUnits(messageTextUnits, MESSAGE_ENVELOPE_UNITS)
+            messageTextUnits = saturatingAddUnits(messageTextUnits, conservativeUtf8Units(message.role))
+            messageTextUnits = saturatingAddUnits(messageTextUnits, conservativeUtf8Units(message.text))
             message.toolCallId?.let { id ->
-                units = saturatingAddUnits(units, TOOL_CALL_ID_ENVELOPE_UNITS)
-                units = saturatingAddUnits(units, conservativeUtf8Units(id))
+                toolCallUnits = saturatingAddUnits(toolCallUnits, TOOL_CALL_ID_ENVELOPE_UNITS)
+                toolCallUnits = saturatingAddUnits(toolCallUnits, conservativeUtf8Units(id))
             }
             message.toolCalls.forEach { call ->
-                units = saturatingAddUnits(units, TOOL_CALL_ENVELOPE_UNITS)
-                units = saturatingAddUnits(units, conservativeUtf8Units(call.id))
-                units = saturatingAddUnits(units, conservativeUtf8Units(call.name))
-                units = saturatingAddUnits(units, conservativeUtf8Units(call.argumentsJson))
+                toolCallUnits = saturatingAddUnits(toolCallUnits, TOOL_CALL_ENVELOPE_UNITS)
+                toolCallUnits = saturatingAddUnits(toolCallUnits, conservativeUtf8Units(call.id))
+                toolCallUnits = saturatingAddUnits(toolCallUnits, conservativeUtf8Units(call.name))
+                toolCallUnits = saturatingAddUnits(toolCallUnits, conservativeUtf8Units(call.argumentsJson))
             }
             imageCount = saturatingAddCount(imageCount, message.images.size)
-            units = saturatingAddUnits(
-                units,
+            imageUnits = saturatingAddUnits(
+                imageUnits,
                 saturatingMultiplyUnits(message.images.size.toLong(), IMAGE_UNITS_PER_IMAGE),
             )
             if (includeProviderContinuation) {
                 message.providerContinuationItems.forEach { item ->
-                    units = saturatingAddUnits(units, CONTINUATION_ENVELOPE_UNITS)
-                    item.itemId?.let { id -> units = saturatingAddUnits(units, conservativeUtf8Units(id)) }
-                    units = saturatingAddUnits(units, conservativeUtf8Units(item.encryptedContent))
+                    continuationUnits = saturatingAddUnits(continuationUnits, CONTINUATION_ENVELOPE_UNITS)
+                    item.itemId?.let { id ->
+                        continuationUnits = saturatingAddUnits(continuationUnits, conservativeUtf8Units(id))
+                    }
+                    continuationUnits = saturatingAddUnits(
+                        continuationUnits,
+                        conservativeUtf8Units(item.encryptedContent),
+                    )
                 }
             }
         }
         request.tools.forEach { spec ->
-            units = saturatingAddUnits(units, TOOL_SCHEMA_ENVELOPE_UNITS)
+            toolSchemaUnits = saturatingAddUnits(toolSchemaUnits, TOOL_SCHEMA_ENVELOPE_UNITS)
             spec.forEach { (key, value) ->
-                units = saturatingAddUnits(units, TOOL_SCHEMA_ENTRY_UNITS)
-                units = saturatingAddUnits(units, conservativeUtf8Units(key))
-                units = saturatingAddUnits(units, conservativeUtf8Units(value))
+                toolSchemaUnits = saturatingAddUnits(toolSchemaUnits, TOOL_SCHEMA_ENTRY_UNITS)
+                toolSchemaUnits = saturatingAddUnits(toolSchemaUnits, conservativeUtf8Units(key))
+                toolSchemaUnits = saturatingAddUnits(toolSchemaUnits, conservativeUtf8Units(value))
             }
         }
-        units = saturatingAddUnits(units, parameterLayerUnits(request.parameters))
-        units = saturatingAddUnits(units, legacyExtraUnits(request.extra))
+        var units = protocolUnits
+        units = saturatingAddUnits(units, messageTextUnits)
+        units = saturatingAddUnits(units, toolCallUnits)
+        units = saturatingAddUnits(units, toolSchemaUnits)
+        units = saturatingAddUnits(units, imageUnits)
+        units = saturatingAddUnits(units, continuationUnits)
         val basis = if (includeProviderContinuation) {
             INPUT_BUDGET_BASIS
         } else {
             INPUT_BUDGET_BASIS_WITHOUT_CONTINUATION
         }
-        return InputBudgetEstimate(units = units, imageCount = imageCount, basis = basis)
+        return InputBudgetEstimate(
+            units = units,
+            imageCount = imageCount,
+            basis = basis,
+            protocolUnits = protocolUnits,
+            messageTextUnits = messageTextUnits,
+            toolCallUnits = toolCallUnits,
+            toolSchemaUnits = toolSchemaUnits,
+            imageUnits = imageUnits,
+            continuationUnits = continuationUnits,
+        )
     }
 
     private fun parameterLayerUnits(layers: ParameterLayers): Long {

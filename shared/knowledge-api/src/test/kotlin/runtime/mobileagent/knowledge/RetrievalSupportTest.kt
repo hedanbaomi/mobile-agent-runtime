@@ -81,4 +81,28 @@ class ReciprocalRankFusionTest {
         assertEquals(setOf("x", "y"), merged.map { it.chunkId }.toSet())
         assertEquals(2, merged.size)
     }
+
+    @Test
+    fun dropsHeadingOnlyHitWhenTheSameDocumentHasABodyHit() {
+        val heading = SearchHit("c-head", "doc-1", "Source: working with the void", 0.9)
+        val body = SearchHit(
+            "c-body",
+            "doc-1",
+            "The void is approached through practice rather than description. ".repeat(3),
+            0.8,
+        )
+        val other = SearchHit("c-other", "doc-2", "short", 0.7)
+        val filtered = ReciprocalRankFusion.preferClaimSupporting(listOf(heading, body, other))
+        assertEquals(listOf("c-body", "c-other"), filtered.map { it.chunkId })
+    }
+}
+
+class PublishedCitationVersionTest {
+    @Test
+    fun visualGapVersionsArePublishedForCitation() {
+        assertTrue(isPublishedCitationVersion("READY"))
+        assertTrue(isPublishedCitationVersion("READY_WITH_VISUAL_GAPS"))
+        assertFalse(isPublishedCitationVersion("WAITING_FOR_VISION_MODEL"))
+        assertFalse(isPublishedCitationVersion("INDEXING"))
+    }
 }

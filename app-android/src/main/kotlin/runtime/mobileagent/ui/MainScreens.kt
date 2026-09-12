@@ -437,6 +437,7 @@ internal fun MainApp() {
                                 compact,
                                 targetAgentId,
                                 onInitialAgentConsumed = { pendingAgentId = null },
+                                onConversationCreated = { conversationId -> chatVm.selectSession(conversationId) },
                             )
                         }
                         composable(AppRoutes.PROVIDERS) {
@@ -639,7 +640,8 @@ private fun ChatRoute(vm: runtime.mobileagent.ChatViewModel, chinese: Boolean, o
 private fun AgentsRoute(entry: NavBackStackEntry, chinese: Boolean, onRoute: (String) -> Unit,
     onRequestEditorClose: () -> Unit, onEditorState: (String, Boolean, (() -> Unit)?) -> Unit,
     onShellDetail: (String, String?, (() -> Unit)?) -> Unit, compact: Boolean,
-    initialAgentId: String? = null, onInitialAgentConsumed: () -> Unit = {}) {
+    initialAgentId: String? = null, onInitialAgentConsumed: () -> Unit = {},
+    onConversationCreated: (String) -> Unit = {}) {
     val vm: runtime.mobileagent.AgentsViewModel = viewModel(viewModelStoreOwner = entry)
     var detailOpen by rememberSaveable { mutableStateOf(false) }
     val app = LocalContext.current.applicationContext as MobileAgentApp
@@ -896,7 +898,13 @@ private fun AgentsRoute(entry: NavBackStackEntry, chinese: Boolean, onRoute: (St
             }
         },
         onRestorePrompt = vm::restorePrompt, onToggleResource = vm::toggleResource,
-        onSnapshot = { if (vm.createConversation() != null) onRoute(AppRoutes.CHAT) },
+        onSnapshot = {
+            val conversationId = vm.createConversation()
+            if (conversationId != null) {
+                onConversationCreated(conversationId)
+                onRoute(AppRoutes.CHAT)
+            }
+        },
         onSetDefaultWorkspace = { workspaceId ->
             if (workspaceId == null) {
                 vm.clearWorkspaceDraft()

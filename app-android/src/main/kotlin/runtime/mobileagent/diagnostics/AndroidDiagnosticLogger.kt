@@ -77,7 +77,8 @@ class AndroidDiagnosticLogger private constructor(
         stage: String,
         errorCode: runtime.mobileagent.domain.MessageErrorCode,
         failure: Throwable,
-    ): Boolean = store.recordRunPreparationFailed(stage, errorCode, failure)
+        extras: Map<String, Long> = emptyMap(),
+    ): Boolean = store.recordRunPreparationFailed(stage, errorCode, failure, extras)
 
     fun recordCapabilityToggle(capability: String, enabled: Boolean): Boolean =
         store.recordCapabilityToggle(capability, enabled)

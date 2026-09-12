@@ -55,8 +55,43 @@ import java.net.URI
 import java.time.LocalDate
 import java.util.Base64
 
-private class ChatInputBudgetExceeded(val estimated: Long, val limit: Long) :
-    IllegalArgumentException("CONTEXT_OVERFLOW")
+private class ChatInputBudgetExceeded(
+    val estimated: Long,
+    val limit: Long,
+    val contextLimit: Int,
+    val outputReserve: Long,
+    val imageCount: Int,
+    val imageBudget: Int,
+    val protocolUnits: Long,
+    val messageTextUnits: Long,
+    val toolCallUnits: Long,
+    val toolSchemaUnits: Long,
+    val imageUnits: Long,
+) : IllegalArgumentException("CONTEXT_OVERFLOW") {
+    fun userMessage(): String = buildString {
+        append("上下文预算不足：保守输入估算 $estimated 单位，上限 $limit 单位")
+        append("（模型窗口 $contextLimit，输出预留 $outputReserve；")
+        append("协议 $protocolUnits，正文 $messageTextUnits，工具调用/参数 $toolCallUnits，")
+        append("工具 schema $toolSchemaUnits，图片预留 $imageUnits；")
+        append("图片 $imageCount/$imageBudget。单位不是实际 token 数）。")
+        append("必须保留的内容已超限；请缩短当前输入或减少已绑定技能、知识范围，")
+        append("或核对模型窗口后调整输入预算并新建会话。未发送对话或摘要模型请求。")
+    }
+
+    fun diagnosticUnits(): Map<String, Long> = mapOf(
+        "configuredContextLimit" to contextLimit.toLong(),
+        "outputReserve" to outputReserve,
+        "inputLimit" to limit,
+        "estimatedUnits" to estimated,
+        "imageCount" to imageCount.toLong(),
+        "imageBudget" to imageBudget.toLong(),
+        "protocolUnits" to protocolUnits,
+        "messageTextUnits" to messageTextUnits,
+        "toolCallUnits" to toolCallUnits,
+        "toolSchemaUnits" to toolSchemaUnits,
+        "imageUnits" to imageUnits,
+    )
+}
 
 /** UI state projects durable conversations, immutable bindings, and checkpointed partial answers. */
 class ChatViewModel(
@@ -801,7 +836,23 @@ class ChatViewModel(
                     ContextPreflight.minimumRequest(prompt, runtimeContext, preparedRequest)
                 } else preparedRequest)
                 if (preflight.units > inputBudget || preflight.imageCount > contextPolicy.imageBudget) {
-                    throw ChatInputBudgetExceeded(preflight.units, inputBudget.toLong())
+                    val outputReserve = maxOf(
+                        model.outputLimit,
+                        contextPolicy.reservedOutputTokens ?: model.outputLimit,
+                    ).toLong()
+                    throw ChatInputBudgetExceeded(
+                        estimated = preflight.units,
+                        limit = inputBudget.toLong(),
+                        contextLimit = model.contextLimit,
+                        outputReserve = outputReserve,
+                        imageCount = preflight.imageCount,
+                        imageBudget = contextPolicy.imageBudget,
+                        protocolUnits = preflight.protocolUnits,
+                        messageTextUnits = preflight.messageTextUnits,
+                        toolCallUnits = preflight.toolCallUnits,
+                        toolSchemaUnits = preflight.toolSchemaUnits,
+                        imageUnits = preflight.imageUnits,
+                    )
                 }
                 preparationStage = "credentials"
                 secret = withContext(Dispatchers.IO) { container.secrets.resolveForHost(provider.secretRef) }
@@ -1213,7 +1264,7 @@ class ChatViewModel(
                 val errorPart = if (failure is ChatInputBudgetExceeded) {
                     ErrorPart(
                         MessageErrorCode.CONTEXT_OVERFLOW,
-                        "上下文预算不足：保守输入估算 ${failure.estimated} 单位，上限 ${failure.limit} 单位（含文本、工具参数和协议/图片预留，并非实际 token 数）。必须保留的内容已超限；请缩短当前输入或减少已绑定技能、知识范围，或核对模型窗口后调整输入预算并新建会话。未发送对话或摘要模型请求。",
+                        failure.userMessage(),
                     )
                 } else if (queryUnknown) {
                     ErrorPart(
@@ -1225,8 +1276,9 @@ class ChatViewModel(
                 }
                 preparationStage?.let { stage ->
                     runCatching {
+                        val extras = (failure as? ChatInputBudgetExceeded)?.diagnosticUnits().orEmpty()
                         (getApplication<Application>() as MobileAgentApp).diagnostics
-                            .recordRunPreparationFailed(stage, errorPart.code, failure)
+                            .recordRunPreparationFailed(stage, errorPart.code, failure, extras)
                     }
                 }
                 record = record.copy(state = if (queryUnknown) RunStatus.UNKNOWN_OUTCOME else if (record.state in TERMINAL) record.state else RunStatus.FAILED,

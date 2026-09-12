@@ -38,6 +38,18 @@ class DiagnosticsDeviceTest {
             assertFalse(store.record("run_preparation_failed", fields + ("message" to "private prompt")))
             assertFalse(store.record("run_preparation_failed", fields + ("stage" to "private prompt")))
             assertFalse(store.record("run_preparation_failed", fields + ("errorCode" to "private prompt")))
+            assertTrue(
+                store.record(
+                    "run_preparation_failed",
+                    fields + ("estimatedUnits" to 82_685L) + ("inputLimit" to 28_672L) +
+                        ("configuredContextLimit" to 32_768L) + ("outputReserve" to 4_096L) +
+                        ("protocolUnits" to 96L) + ("messageTextUnits" to 12_000L) +
+                        ("toolCallUnits" to 40_000L) + ("toolSchemaUnits" to 30_000L) +
+                        ("imageUnits" to 0L),
+                ),
+            )
+            assertFalse(store.record("run_preparation_failed", fields + ("estimatedUnits" to -1L)))
+            assertFalse(store.record("run_preparation_failed", fields + ("protocolUnits" to -8L)))
             val text = store.readFile(RollingDiagnosticLogStore.CURRENT_FILE_NAME).toString(Charsets.UTF_8)
             assertTrue(text.contains("CONTEXT_OVERFLOW"))
             assertFalse(text.contains("private prompt"))

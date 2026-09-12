@@ -105,6 +105,10 @@ class RequestInputBudgetTest {
         )
         assertTrue(withImages.basis.contains("4096"), "image reservation must be stated in the basis")
         assertTrue(withImages.basis.contains("not a tokenizer"), "the basis must not pretend to be a tokenizer")
+        assertEquals(2 * RequestInputBudget.IMAGE_UNITS_PER_IMAGE, withImages.imageUnits)
+        assertEquals(withImages.units, withImages.protocolUnits + withImages.messageTextUnits +
+            withImages.toolCallUnits + withImages.toolSchemaUnits + withImages.imageUnits +
+            withImages.continuationUnits)
     }
 
     @Test

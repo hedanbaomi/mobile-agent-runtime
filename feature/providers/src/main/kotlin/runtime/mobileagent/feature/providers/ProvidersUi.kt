@@ -757,7 +757,7 @@ private fun capabilityStatusLabel(status: CapabilityCheckStatus, zh: Boolean): S
     CapabilityCheckStatus.NOT_DECLARED -> if (zh) "未声明" else "Not declared"
     CapabilityCheckStatus.NOT_RUN -> if (zh) "未测试" else "Not tested"
     CapabilityCheckStatus.FAILED -> if (zh) "检查失败" else "Check failed"
-    CapabilityCheckStatus.UNKNOWN -> if (zh) "未知" else "Unknown"
+    CapabilityCheckStatus.UNKNOWN -> if (zh) "未确认" else "Inconclusive"
 }
 
 private fun connectionErrorLabel(error: ProviderConnectionErrorCode?, zh: Boolean): String = when (error) {

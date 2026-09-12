@@ -208,4 +208,23 @@ class TransferCodecTest {
         val error = assertThrows(AppException::class.java) { TransferCodec.validate(bundle) }
         assertEquals(ErrorCode.TRANSFER_INVALID, error.error.code)
     }
+
+    @Test
+    fun nativeOnnxEmbeddingSpaceIdIsAcceptedWithoutBroadeningOtherIds() {
+        val space = "onnx:all-MiniLM-L6-v2@1110a243fdf4706b3f48f1d95db1a4f5529b4d41:d384:cosine"
+        val bundle = TransferBundle(
+            schemaVersion = SchemaVersion.CURRENT,
+            exportedAt = "now",
+            knowledgeBases = listOf(KnowledgeTransfer(id = "kb.onnx", name = "Onnx", embeddingSpaceId = space)),
+        )
+        assertDoesNotThrow { TransferCodec.encode(bundle) }
+        val decoded = TransferCodec.decode(TransferCodec.encode(bundle))
+        assertEquals(space, decoded.knowledgeBases.single().embeddingSpaceId)
+
+        val slash = bundle.copy(
+            knowledgeBases = listOf(KnowledgeTransfer(id = "kb.onnx", name = "Onnx", embeddingSpaceId = "onnx:bad/id")),
+        )
+        val slashError = assertThrows(AppException::class.java) { TransferCodec.validate(slash) }
+        assertEquals(ErrorCode.TRANSFER_INVALID, slashError.error.code)
+    }
 }

@@ -197,6 +197,22 @@ class SkillRepositoryTest {
     }
 
     @Test
+    fun exportResolvesBoundSkillByInstallId() = database { db ->
+        val skills = SkillRepository(db)
+        assertTrue(skills.importPackage(instructionOnlyPackageBytes()).accepted)
+        val installed = skills.list().single()
+        skills.setEnabled(installed.installId, true)
+        createChatProfile(db)
+        val saved = AgentRepository(db).saveWithPrompt(
+            agentProfile("agent.export-skill", "model.skills.chat", installed.installId),
+            "Export the bound skill.",
+        )
+        val raw = TransferRepository(db).exportAgent(saved.id)
+        assertTrue(raw.contains(installed.packageHash))
+        assertFalse(raw.contains("missing skill"))
+    }
+
+    @Test
     fun rawInstructionSkillUsesFrontmatterName() = database { db ->
         val skills = SkillRepository(db)
         val raw = """

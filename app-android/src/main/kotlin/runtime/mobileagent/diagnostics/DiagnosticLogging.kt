@@ -765,7 +765,12 @@ class RollingDiagnosticLogStore(
         "provider_model_save_start" to setOf("capabilities", "role"),
         "provider_model_save_success" to setOf("capabilities", "role"),
         "provider_model_save_failed" to setOf("capabilities", "role", "exceptionType"),
-        "run_preparation_failed" to setOf("stage", "errorCode", "exceptionType"),
+        "run_preparation_failed" to setOf(
+            "stage", "errorCode", "exceptionType",
+            "configuredContextLimit", "outputReserve", "inputLimit", "estimatedUnits",
+            "imageCount", "imageBudget", "protocolUnits", "messageTextUnits",
+            "toolCallUnits", "toolSchemaUnits", "imageUnits",
+        ),
         "knowledge_import_start" to setOf("kind", "stage", "total"),
         "knowledge_import_progress" to setOf("kind", "stage", "completed", "total"),
         "knowledge_import_enqueued" to setOf("kind", "stage", "count"),
@@ -911,10 +916,18 @@ class RollingDiagnosticLogStore(
         stage: String,
         errorCode: runtime.mobileagent.domain.MessageErrorCode,
         failure: Throwable,
-    ): Boolean = record(
-        "run_preparation_failed",
-        mapOf("stage" to stage, "errorCode" to errorCode.name, "exceptionType" to failure.javaClass.name),
-    )
+        extras: Map<String, Long> = emptyMap(),
+    ): Boolean {
+        val fields = linkedMapOf<String, Any?>(
+            "stage" to stage,
+            "errorCode" to errorCode.name,
+            "exceptionType" to failure.javaClass.name,
+        )
+        extras.forEach { (key, value) ->
+            if (value >= 0L) fields[key] = value
+        }
+        return record("run_preparation_failed", fields)
+    }
 
     fun recordCapabilityToggle(capability: String, enabled: Boolean): Boolean =
         record("capability_toggle", mapOf("capability" to capability, "enabled" to enabled))
@@ -1729,11 +1742,26 @@ class RollingDiagnosticLogStore(
                 val exceptionType = fields["exceptionType"] as? String ?: return null
                 if (stage !in setOf("preflight", "retrieval", "tooling", "prompt", "manifest", "context_budget", "credentials", "request")) return null
                 if (runtime.mobileagent.domain.MessageErrorCode.entries.none { it.name == errorCode }) return null
-                linkedMapOf(
+                val normalized = linkedMapOf<String, Any?>(
                     "stage" to stage,
                     "errorCode" to errorCode,
                     "exceptionType" to DiagnosticSanitizer.exceptionType(exceptionType),
                 )
+                listOf(
+                    "configuredContextLimit", "outputReserve", "inputLimit", "estimatedUnits",
+                    "imageCount", "imageBudget", "protocolUnits", "messageTextUnits",
+                    "toolCallUnits", "toolSchemaUnits", "imageUnits",
+                ).forEach { key ->
+                    val raw = fields[key] ?: return@forEach
+                    val number = when (raw) {
+                        is Long -> raw
+                        is Int -> raw.toLong()
+                        else -> return null
+                    }
+                    if (number < 0L) return null
+                    normalized[key] = number
+                }
+                normalized
             }
             "diagnostics_toggle" -> {
                 val enabled = fields["enabled"] as? Boolean ?: return null

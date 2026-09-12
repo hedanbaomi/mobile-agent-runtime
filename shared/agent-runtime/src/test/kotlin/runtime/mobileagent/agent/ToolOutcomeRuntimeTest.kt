@@ -39,6 +39,17 @@ class ToolOutcomeRuntimeTest {
     }
 
     @Test
+    fun authorityUnavailableDeniedKeepsTypedCode() = runTest {
+        val produced = runSingleTool(ToolResult.Denied("AUTHORITY_TEMPORARILY_UNAVAILABLE"))
+        assertEquals("DENIED", produced.status)
+        assertEquals(ToolErrorCode.AUTHORITY_TEMPORARILY_UNAVAILABLE, ToolOutcome.errorCodeOf(produced.resultJson))
+        assertEquals(
+            "执行通道暂时不可用，请重新连接所选权限通道后重试；这不是工作区授权丢失。",
+            runtime.mobileagent.agent.toolResultUserMessage(produced.resultJson),
+        )
+    }
+
+    @Test
     fun invalidProjectsToDurableInvalidEnvelope() = runTest {
         val produced = runSingleTool(ToolResult.Invalid("Tool arguments are incomplete JSON"))
         assertEquals("INVALID", produced.status)
@@ -88,6 +99,36 @@ class ToolOutcomeRuntimeTest {
             AgentRuntimeRequest(AgentRun("r-outcome", "s", "c"), prompt(), "model", charArrayOf(), toolsEnabled = true, executor = executor),
         ).toList()
         return events.filterIsInstance<RuntimeEvent.ToolResultProduced>().single()
+    }
+
+    @Test
+    fun rejectedApprovalEmitsApprovalDeniedInsteadOfInternalText() = runTest {
+        val adapter = ScriptedAdapter(
+            listOf(listOf(ModelEvent.ToolCallDelta("t1", "external", "{}"), ModelEvent.Completed)),
+        )
+        val executor = object : ToolExecutor {
+            override val specs = listOf(ToolSpec("external", "external tool", "{\"type\":\"object\"}", "", false))
+            override suspend fun invoke(call: ToolCall): ToolResult = ToolResult.NeedsApproval
+            override suspend fun approve(callId: String): ToolResult = error("rejected tools must not execute")
+        }
+        val events = AgentRuntime(adapter, executor = executor, onApprove = { false }).run(
+            AgentRuntimeRequest(
+                AgentRun("r-deny", "s", "c"),
+                prompt(),
+                "model",
+                charArrayOf(),
+                toolsEnabled = true,
+                executor = executor,
+            ),
+        ).toList()
+        val failed = events.filterIsInstance<RuntimeEvent.ModelEvent>()
+            .map { it.event }
+            .filterIsInstance<ModelEvent.Failed>()
+            .single()
+        assertEquals("APPROVAL_DENIED", failed.sanitizedMessage)
+        val part = runtime.mobileagent.agent.toSafeErrorPart(failed.sanitizedMessage)
+        assertEquals(runtime.mobileagent.domain.MessageErrorCode.PERMISSION_DENIED, part.code)
+        assertEquals("该工具调用已被拒绝，未执行任何操作。", part.message)
     }
 
     private fun prompt() = EffectivePrompt("contract", "", emptyList(), emptyList(), emptyList(), "hello")

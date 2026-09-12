@@ -163,10 +163,10 @@ object ReciprocalRankFusion {
     }
 
     /**
-     * Drop heading-only chunks when the same document already contributed a
-     * longer body hit. Short field values, assignments, and list items stay;
-     * length and missing sentence punctuation alone are not enough to drop a hit.
-     * This is not NLI claim verification.
+     * Drop a short hit only when the same document already contributed a longer
+     * body hit and the short hit has reliable heading structure (sourceSpan or
+     * ATX markdown). Length, missing punctuation, and field-like text are not
+     * enough to delete evidence. This is not NLI claim verification.
      */
     fun preferClaimSupporting(hits: List<SearchHit>, minBodyChars: Int = 64): List<SearchHit> {
         if (hits.size <= 1) return hits
@@ -174,26 +174,26 @@ object ReciprocalRankFusion {
         return hits.filter { hit ->
             val siblings = byDocument[hit.documentId].orEmpty()
             val hasBody = siblings.any { it.text.length >= minBodyChars }
-            !(hasBody && looksLikeHeadingOnly(hit.text, minBodyChars))
+            !(hasBody && looksLikeStructuredHeading(hit, minBodyChars))
         }
     }
 
-    private fun looksLikeHeadingOnly(text: String, minBodyChars: Int): Boolean {
-        val trimmed = text.trim()
+    private fun looksLikeStructuredHeading(hit: SearchHit, minBodyChars: Int): Boolean {
+        val trimmed = hit.text.trim()
         if (trimmed.length >= minBodyChars) return false
-        if (trimmed.any { it == '.' || it == '。' }) return false
-        return !looksLikeStructuredFact(trimmed)
+        return headingSourceSpan(hit.sourceSpan) || ATX_HEADING.matches(trimmed)
     }
 
-    private fun looksLikeStructuredFact(text: String): Boolean {
-        if (text.any { it.isDigit() }) return true
-        if (text.contains('=')) return true
-        if (text.startsWith("- ") || text.startsWith("* ") || text.startsWith("•") || text.startsWith("· ")) return true
-        if (NUMBERED_ITEM.containsMatchIn(text)) return true
-        return false
+    private fun headingSourceSpan(span: String?): Boolean {
+        val normalized = span?.trim()?.lowercase().orEmpty()
+        if (normalized.isEmpty()) return false
+        return normalized == "heading" ||
+            normalized.startsWith("heading:") ||
+            HEADING_SPAN.matches(normalized)
     }
 
-    private val NUMBERED_ITEM = Regex("""^\d+[\.\)、]\s""")
+    private val HEADING_SPAN = Regex("""^h[1-6]([:#].*)?$""")
+    private val ATX_HEADING = Regex("""^#{1,6}[ \t]+\S.*""")
 }
 
 object RetrievalBudget {

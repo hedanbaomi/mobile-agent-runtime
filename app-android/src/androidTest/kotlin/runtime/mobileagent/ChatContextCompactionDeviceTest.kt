@@ -105,13 +105,14 @@ class ChatContextCompactionDeviceTest {
         val vm = viewModel(app, conversation)
         send(vm, "Calculate until the request budget stops you.")
         val run = app.container.runs.list(conversation).last()
+        val diagnostic = "run.state=${run.state} stopReason=${run.stopReason} modelRounds=${run.modelRounds} toolCalls=${run.toolCalls} requests=${server.requests.size}"
         // The explicit per-run request cap is honored even with compaction disabled.
-        assertEquals(2, run.modelRounds)
-        assertEquals(2, server.requests.size)
-        assertEquals(RunStatus.BUDGET_EXHAUSTED, run.state)
-        assertEquals("model-rounds", run.stopReason)
+        assertEquals(diagnostic, 2, run.modelRounds)
+        assertEquals(diagnostic, 2, server.requests.size)
+        assertEquals(diagnostic, RunStatus.BUDGET_EXHAUSTED, run.state)
+        assertEquals(diagnostic, "model-rounds", run.stopReason)
         // Both admitted dispatches issued a calculator tool call, so two real tool calls ran.
-        assertEquals(2, run.toolCalls)
+        assertEquals(diagnostic, 2, run.toolCalls)
         val messages = store.messages(conversation)
         val calls = messages.flatMap { it.parts }.filterIsInstance<ToolCallPart>()
         val results = messages.flatMap { it.parts }.filterIsInstance<ToolResultPart>()

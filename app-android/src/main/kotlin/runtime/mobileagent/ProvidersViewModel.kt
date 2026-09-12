@@ -17,6 +17,7 @@ import runtime.mobileagent.domain.ApiFormat
 import runtime.mobileagent.domain.EntityId
 import runtime.mobileagent.domain.ModelProfile
 import runtime.mobileagent.domain.ModelRole
+import runtime.mobileagent.domain.ProviderDestinationBinding
 import runtime.mobileagent.domain.ProviderProfile
 import runtime.mobileagent.domain.withEndpoint
 import runtime.mobileagent.diagnostics.DiagnosticHttpClass
@@ -150,7 +151,8 @@ class ProvidersViewModel @JvmOverloads constructor(
             val provider = ProviderProfile(
                 id = providerId, name = draft.name.trim(), apiFormat = apiFormat,
                 baseUrl = endpoint.toASCIIString(), secretRef = if (draft.apiKey.isNotBlank()) "provider:$providerId:${EntityId.random().value}" else previous!!.secretRef,
-                headerSecretRefs = previous?.headerSecretRefs.orEmpty(), nonSecretHeaders = previous?.nonSecretHeaders.orEmpty(),
+                headerSecretRefs = ProviderDestinationBinding.headerSecretRefsForSave(previous, endpoint.toASCIIString()),
+                nonSecretHeaders = previous?.nonSecretHeaders.orEmpty(),
                 revision = (previous?.revision ?: 0) + 1,
             )
             val model = if (saveModel) ModelProfile(

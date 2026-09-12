@@ -22,6 +22,7 @@ import runtime.mobileagent.domain.ModelFeature
 import runtime.mobileagent.domain.ModelOperation
 import runtime.mobileagent.domain.ModelProfile
 import runtime.mobileagent.domain.ModelRole
+import runtime.mobileagent.domain.ProviderDestinationBinding
 import runtime.mobileagent.domain.ProviderProfile
 import runtime.mobileagent.domain.RetryClass
 import runtime.mobileagent.domain.Utc
@@ -60,25 +61,33 @@ class ProfileRepository(private val db: SqlConnection) {
         return db.transaction {
             val current = getProvider(profile.id)
             requireReference("provider", profile.id, current != null)
-            if (current != null && profile.revision < current.revision) throw invalid("Provider revision is older than the stored revision")
-            val oldRefs = current?.let { providerSecretRefs(it) }.orEmpty()
+            val existing = checkNotNull(current)
+            if (profile.revision < existing.revision) throw invalid("Provider revision is older than the stored revision")
+            val saved = profile.copy(
+                headerSecretRefs = ProviderDestinationBinding.headerSecretRefsForSave(
+                    existing,
+                    profile.baseUrl,
+                    profile.headerSecretRefs,
+                ),
+            )
+            val oldRefs = providerSecretRefs(existing)
             db.execute(
                 "UPDATE provider_profiles SET name=?,api_format=?,base_url=?,header_secret_refs=?,non_secret_headers=?,secret_ref=?,revision=? WHERE id=?",
                 listOf(
-                    profile.name,
-                    profile.apiFormat.name,
-                    profile.baseUrl,
-                    json.encodeToString(profile.headerSecretRefs),
-                    json.encodeToString(profile.nonSecretHeaders),
-                    profile.secretRef,
-                    profile.revision,
-                    profile.id,
+                    saved.name,
+                    saved.apiFormat.name,
+                    saved.baseUrl,
+                    json.encodeToString(saved.headerSecretRefs),
+                    json.encodeToString(saved.nonSecretHeaders),
+                    saved.secretRef,
+                    saved.revision,
+                    saved.id,
                 ),
             )
             // A replaced credential remains alive when another provider/header or immutable
             // snapshot still refers to it; the inventory performs that full reference scan.
             if (oldRefs.isNotEmpty()) SecretInventory(db).retireIfUnreferenced(oldRefs)
-            profile
+            saved
         }
     }
 

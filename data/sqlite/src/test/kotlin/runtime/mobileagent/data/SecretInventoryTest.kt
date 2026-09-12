@@ -232,4 +232,41 @@ class SecretInventoryTest {
             assertEquals(SecretStatus.ACTIVE, inventory.status("bridge:desktop:desktop-2"))
         }
     }
+
+    @Test
+    fun changingProviderDestinationDropsInheritedHeaderSecretRefs() {
+        JdbcSqlConnection().use { db ->
+            Migrations.apply(db)
+            val inventory = SecretInventory(db)
+            val profiles = ProfileRepository(db)
+            profiles.createProvider(
+                ProviderProfile(
+                    id = "p-dest",
+                    name = "Destination",
+                    apiFormat = ApiFormat.OPENAI_COMPATIBLE,
+                    baseUrl = "https://provider-a.invalid/v1",
+                    headerSecretRefs = mapOf("X-Org-Token" to "ref-old-header"),
+                    secretRef = "ref-old-primary",
+                    revision = 1,
+                ),
+            )
+            inventory.putActive("ref-old-primary", byteArrayOf(7))
+            inventory.putActive("ref-old-header", byteArrayOf(8))
+            inventory.putActive("ref-new-primary", byteArrayOf(9))
+
+            val saved = profiles.updateProvider(
+                profiles.getProvider("p-dest")!!.copy(
+                    baseUrl = "https://provider-b.invalid/v1",
+                    secretRef = "ref-new-primary",
+                    headerSecretRefs = mapOf("X-Org-Token" to "ref-old-header"),
+                    revision = 2,
+                ),
+            )
+            assertEquals(emptyMap<String, String>(), saved.headerSecretRefs)
+            assertEquals(emptyMap<String, String>(), profiles.getProvider("p-dest")!!.headerSecretRefs)
+            assertEquals("https://provider-b.invalid/v1", profiles.getProvider("p-dest")!!.baseUrl)
+            assertEquals(SecretStatus.DELETED, inventory.status("ref-old-header"))
+            assertEquals(SecretStatus.ACTIVE, inventory.status("ref-new-primary"))
+        }
+    }
 }

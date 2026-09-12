@@ -184,11 +184,14 @@ class TransferRepository(
         val knowledge = agent.knowledgeBaseIds.map { id ->
             exportKnowledge(id, options.includeKnowledgeContent) ?: throw invalid("Agent references missing knowledge base $id")
         }
-        val skills = agent.skillIds.map { id ->
-            exportSkill(id, includeBytes = options.includeSkillPackageBytes && !forArchive,
-                packageIncluded = options.includeSkillPackageBytes && forArchive) ?: throw invalid("Agent references missing skill $id")
-        }
         val conversations = if (options.includeConversations) exportConversations(agent.id) else emptyList()
+        val historicalSkillIds = conversations.flatMap { it.full.snapshot.skillIds }
+        val skills = exportBoundAndHistoricalSkills(
+            currentIds = agent.skillIds,
+            historicalIds = historicalSkillIds,
+            includeBytes = options.includeSkillPackageBytes && !forArchive,
+            packageIncluded = options.includeSkillPackageBytes && forArchive,
+        )
         val manifestConversations = conversations.map { it.manifest }
         val manifest = TransferBundle(
                 schemaVersion = runtime.mobileagent.serialization.SchemaVersion.CURRENT,
@@ -974,9 +977,17 @@ class TransferRepository(
     }
 
     private fun rememberSkillInstall(skillInstallByRef: MutableMap<String, String>, skill: SkillTransfer, localInstallId: String) {
-        skillInstallByRef[skill.id] = localInstallId
-        skill.sourceInstallId?.let { skillInstallByRef[it] = localInstallId }
-        skillInstallByRef[localInstallId] = localInstallId
+        fun putAlias(alias: String) {
+            val existing = skillInstallByRef[alias]
+            if (existing != null && existing != localInstallId) {
+                throw invalid("Skill identity $alias maps to multiple local installs")
+            }
+            skillInstallByRef[alias] = localInstallId
+        }
+        putAlias(localInstallId)
+        skill.sourceInstallId?.let(::putAlias)
+        skill.sourceInstallIds.forEach(::putAlias)
+        putAlias(skill.id)
     }
 
     private fun importSkill(
@@ -1127,6 +1138,35 @@ class TransferRepository(
         is runtime.mobileagent.domain.ErrorPart -> "error"
     }
 
+    private fun exportBoundAndHistoricalSkills(
+        currentIds: List<String>,
+        historicalIds: List<String>,
+        includeBytes: Boolean,
+        packageIncluded: Boolean,
+    ): List<SkillTransfer> {
+        val byHash = linkedMapOf<String, SkillTransfer>()
+        fun addSkill(id: String, missing: String) {
+            val exported = exportSkill(id, includeBytes, packageIncluded) ?: throw invalid(missing)
+            val existing = byHash[exported.packageHash]
+            if (existing == null) {
+                byHash[exported.packageHash] = exported
+                return
+            }
+            val aliases = (listOfNotNull(existing.sourceInstallId, exported.sourceInstallId) + existing.sourceInstallIds)
+                .distinct()
+            byHash[exported.packageHash] = existing.copy(
+                sourceInstallIds = aliases.filter { it != existing.sourceInstallId },
+            )
+        }
+        currentIds.distinct().forEach { id ->
+            addSkill(id, "Agent references missing skill $id")
+        }
+        historicalIds.distinct().filter { it !in currentIds }.forEach { id ->
+            addSkill(id, "Conversation snapshot references missing skill $id")
+        }
+        return byHash.values.toList()
+    }
+
     private fun exportSkill(id: String, includeBytes: Boolean, packageIncluded: Boolean = false): SkillTransfer? {
         val byInstall = db.query(
             """SELECT p.*, i.install_id AS source_install_id FROM skill_packages p
@@ -1200,6 +1240,7 @@ class TransferRepository(
         buildSet {
             add(skill.id)
             skill.sourceInstallId?.takeIf { it.isNotBlank() }?.let(::add)
+            skill.sourceInstallIds.filter { it.isNotBlank() }.forEach(::add)
         }
 
     private fun localEnabledSkillRefs(): Set<String> =

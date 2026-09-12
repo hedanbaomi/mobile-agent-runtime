@@ -328,6 +328,62 @@ class ProductDataRepositoryTest {
     }
 
     @Test
+    fun fullKnowledgeArchivePreservesVisualGapStatusForLocalRebuild() {
+        val bytes = "Oven temperature is 180C.".toByteArray()
+        val hash = sha256Hex(bytes)
+        val chunkText = "Oven temperature is 180C."
+        val chunkHash = sha256Hex(chunkText.toByteArray())
+        val sourceSink = MemoryBlobSink().also { it.put(bytes, "text/plain") }
+        JdbcSqlConnection().use { source ->
+            Migrations.apply(source)
+            source.execute(
+                "INSERT INTO knowledge_bases(id,name,active_generation_id,embedding_space_id,created_at,deleted_at) VALUES(?,?,?,?,?,NULL)",
+                listOf("kb.gaps", "Gaps", "gen.imported", null, "2026-08-29T00:00:00Z"),
+            )
+            source.execute(
+                "INSERT INTO blobs(hash,byte_length,media_type,local_ref,ref_count) VALUES(?,?,?,?,?)",
+                listOf(hash, bytes.size, "text/plain", "memory:$hash", 1),
+            )
+            source.execute(
+                "INSERT INTO documents(id,kb_id,blob_hash,display_name,format,active_version_id,deleted_at) VALUES(?,?,?,?,?,?,NULL)",
+                listOf("doc.gaps", "kb.gaps", hash, "Document", "text/plain", "ver.gaps"),
+            )
+            source.execute(
+                "INSERT INTO document_versions(id,document_id,parser_fingerprint,content_hash,status,created_at) VALUES(?,?,?,?,?,?)",
+                listOf("ver.gaps", "doc.gaps", "test-parser", hash, "READY_WITH_VISUAL_GAPS", "2026-08-29T00:00:00Z"),
+            )
+            source.execute(
+                "INSERT INTO chunks(id,document_version_id,ordinal,text,content_hash,source_span,asset_ids,page) VALUES(?,?,?,?,?,?,?,?)",
+                listOf("chunk.gaps", "ver.gaps", 0, chunkText, chunkHash, null, "", null),
+            )
+            val profiles = ProfileRepository(source)
+            profiles.createProvider(ProviderProfile("provider.gaps", "Gaps", ApiFormat.OPENAI_COMPATIBLE, "https://example.invalid", secretRef = "host-only", revision = 1))
+            profiles.createModel(ModelProfile("model.gaps", "provider.gaps", ModelRole.CHAT, "chat", emptySet(), contextLimit = 1_000, outputLimit = 100, revision = 1))
+            val agent = AgentRepository(source).saveWithPrompt(
+                runtime.mobileagent.domain.AgentProfile("agent.gaps", "Gaps Agent", "unused", "model.gaps", knowledgeBaseIds = listOf("kb.gaps"), revision = 0),
+                "Gaps prompt",
+            )
+
+            val output = ByteArrayOutputStream()
+            TransferRepository(source, blobSink = sourceSink).exportArchive(
+                agent.id,
+                TransferOptions(includeKnowledgeContent = true),
+                output,
+            )
+
+            JdbcSqlConnection().use { target ->
+                Migrations.apply(target)
+                val imported = TransferRepository(target, blobSink = MemoryBlobSink()).importArchive(output.toByteArray())
+                assertEquals(agent.id, imported.agentId)
+                assertEquals("READY_WITH_VISUAL_GAPS", target.query("SELECT status FROM document_versions").single().string("status"))
+                assertEquals(chunkText, target.query("SELECT text FROM chunks").single().string("text"))
+                assertTrue(target.query("SELECT active_generation_id FROM knowledge_bases WHERE id=?", listOf("kb.gaps")).single().string("active_generation_id").isBlank())
+                assertTrue(imported.warnings.any { it.contains("local rebuild") })
+            }
+        }
+    }
+
+    @Test
     fun fullArchiveRequiresExplicitBlobSink() {
         JdbcSqlConnection().use { db ->
             Migrations.apply(db)

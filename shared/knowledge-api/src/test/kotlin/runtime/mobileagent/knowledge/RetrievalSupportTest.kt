@@ -95,6 +95,34 @@ class ReciprocalRankFusionTest {
         val filtered = ReciprocalRankFusion.preferClaimSupporting(listOf(heading, body, other))
         assertEquals(listOf("c-body", "c-other"), filtered.map { it.chunkId })
     }
+
+    @Test
+    fun keepsShortFieldValuesWhenTheSameDocumentHasABodyHit() {
+        val body = SearchHit(
+            "c-body",
+            "doc-1",
+            "本节说明配置文件的读取步骤、加载顺序以及页面的一般操作说明；它不包含具体并发数值。".repeat(3),
+            0.3,
+        )
+        val fact = SearchHit("exact-fact", "doc-1", "最大并发数：8", 1.0)
+        val assignment = SearchHit("config", "doc-1", "MAX_RETRIES=3", 0.9)
+        val bullet = SearchHit("bullet", "doc-1", "- timeout 30s", 0.8)
+        val filtered = ReciprocalRankFusion.preferClaimSupporting(listOf(fact, assignment, bullet, body))
+        assertEquals(listOf("exact-fact", "config", "bullet", "c-body"), filtered.map { it.chunkId })
+    }
+
+    @Test
+    fun stillDropsTitleLikeHeadingsWithoutTreatingThemAsFacts() {
+        val heading = SearchHit("heading", "doc-1", "来源：配置说明", 0.9)
+        val body = SearchHit(
+            "c-body",
+            "doc-1",
+            "本节说明配置文件的读取步骤、加载顺序以及页面的一般操作说明；它不包含具体并发数值。".repeat(3),
+            0.3,
+        )
+        val filtered = ReciprocalRankFusion.preferClaimSupporting(listOf(heading, body))
+        assertEquals(listOf("c-body"), filtered.map { it.chunkId })
+    }
 }
 
 class PublishedCitationVersionTest {

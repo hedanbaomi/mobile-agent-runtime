@@ -3,9 +3,10 @@
 
 package runtime.mobileagent.serialization
 
+import org.junit.jupiter.api.Assertions.assertDoesNotThrow
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertThrows
-import org.junit.jupiter.api.Assertions.assertDoesNotThrow
+import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
 import runtime.mobileagent.domain.AgentProfile
 import runtime.mobileagent.domain.AgentSnapshot
@@ -226,5 +227,88 @@ class TransferCodecTest {
         )
         val slashError = assertThrows(AppException::class.java) { TransferCodec.validate(slash) }
         assertEquals(ErrorCode.TRANSFER_INVALID, slashError.error.code)
+    }
+
+    @Test
+    fun visualGapDocumentVersionsArePortableAndWaitingIsNot() {
+        val blob = BlobTransfer(packageHash, 1, "text/plain", "doc.txt")
+        val document = DocumentTransfer(
+            id = "doc.gaps",
+            knowledgeBaseId = "kb.gaps",
+            blobHash = packageHash,
+            displayName = "Doc",
+            format = "text/plain",
+            activeVersionId = "ver.gaps",
+            contentHash = packageHash,
+            relativePath = "doc.txt",
+        )
+        val gaps = TransferBundle(
+            schemaVersion = SchemaVersion.CURRENT,
+            exportedAt = "now",
+            knowledgeBases = listOf(
+                KnowledgeTransfer(
+                    id = "kb.gaps",
+                    name = "Gaps",
+                    blobs = listOf(blob),
+                    documents = listOf(document),
+                    contentIncluded = true,
+                    documentVersions = listOf(
+                        DocumentVersionTransfer(
+                            id = "ver.gaps",
+                            documentId = "doc.gaps",
+                            parserFingerprint = "test",
+                            contentHash = packageHash,
+                            status = "READY_WITH_VISUAL_GAPS",
+                            createdAt = "now",
+                        ),
+                    ),
+                ),
+            ),
+        )
+        assertDoesNotThrow { TransferCodec.encode(gaps) }
+        assertEquals("READY_WITH_VISUAL_GAPS", TransferCodec.decode(TransferCodec.encode(gaps)).knowledgeBases.single().documentVersions.single().status)
+
+        val waiting = gaps.copy(
+            knowledgeBases = listOf(
+                gaps.knowledgeBases.single().copy(
+                    documentVersions = listOf(
+                        DocumentVersionTransfer(
+                            id = "ver.gaps",
+                            documentId = "doc.gaps",
+                            parserFingerprint = "test",
+                            contentHash = packageHash,
+                            status = "WAITING_FOR_VISION_MODEL",
+                            createdAt = "now",
+                        ),
+                    ),
+                ),
+            ),
+        )
+        val waitingError = assertThrows(AppException::class.java) { TransferCodec.validate(waiting) }
+        assertEquals(ErrorCode.TRANSFER_INVALID, waitingError.error.code)
+        assertTrue(waitingError.message.orEmpty().contains("unsupported status"))
+    }
+
+    @Test
+    fun skillSourceInstallIdRoundTripsWithoutReplacingPackageId() {
+        val installId = "45c1f8f1-6ed2-45a1-8ba4-4df33e356187"
+        val bundle = TransferBundle(
+            schemaVersion = SchemaVersion.CURRENT,
+            exportedAt = "2026-08-29T00:00:00Z",
+            skills = listOf(
+                SkillTransfer(
+                    packageHash = packageHash,
+                    id = "skill.one",
+                    name = "One",
+                    version = "1.0.0",
+                    licenseId = "AGPL-3.0-only",
+                    classification = "safe",
+                    sourceInstallId = installId,
+                ),
+            ),
+        )
+        val decoded = TransferCodec.decode(TransferCodec.encode(bundle))
+        assertEquals(installId, decoded.skills.single().sourceInstallId)
+        assertEquals("skill.one", decoded.skills.single().id)
     }
 }

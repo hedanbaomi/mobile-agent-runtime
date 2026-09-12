@@ -164,8 +164,9 @@ object ReciprocalRankFusion {
 
     /**
      * Drop heading-only chunks when the same document already contributed a
-     * longer body hit. Resolvable ids that cannot support a claim stay out of
-     * the evidence set without pretending NLI can verify every sentence.
+     * longer body hit. Short field values, assignments, and list items stay;
+     * length and missing sentence punctuation alone are not enough to drop a hit.
+     * This is not NLI claim verification.
      */
     fun preferClaimSupporting(hits: List<SearchHit>, minBodyChars: Int = 64): List<SearchHit> {
         if (hits.size <= 1) return hits
@@ -173,9 +174,26 @@ object ReciprocalRankFusion {
         return hits.filter { hit ->
             val siblings = byDocument[hit.documentId].orEmpty()
             val hasBody = siblings.any { it.text.length >= minBodyChars }
-            !(hasBody && hit.text.length < minBodyChars && hit.text.none { it == '.' || it == '。' })
+            !(hasBody && looksLikeHeadingOnly(hit.text, minBodyChars))
         }
     }
+
+    private fun looksLikeHeadingOnly(text: String, minBodyChars: Int): Boolean {
+        val trimmed = text.trim()
+        if (trimmed.length >= minBodyChars) return false
+        if (trimmed.any { it == '.' || it == '。' }) return false
+        return !looksLikeStructuredFact(trimmed)
+    }
+
+    private fun looksLikeStructuredFact(text: String): Boolean {
+        if (text.any { it.isDigit() }) return true
+        if (text.contains('=')) return true
+        if (text.startsWith("- ") || text.startsWith("* ") || text.startsWith("•") || text.startsWith("· ")) return true
+        if (NUMBERED_ITEM.containsMatchIn(text)) return true
+        return false
+    }
+
+    private val NUMBERED_ITEM = Regex("""^\d+[\.\)、]\s""")
 }
 
 object RetrievalBudget {

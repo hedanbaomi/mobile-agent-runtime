@@ -8,6 +8,7 @@ import org.junit.jupiter.api.Test
 import runtime.mobileagent.domain.AgentProfile
 import runtime.mobileagent.domain.AppException
 import runtime.mobileagent.domain.ApiFormat
+import runtime.mobileagent.domain.ErrorCode
 import runtime.mobileagent.domain.ModelProfile
 import runtime.mobileagent.domain.ModelRole
 import runtime.mobileagent.domain.ProviderProfile
@@ -15,8 +16,10 @@ import runtime.mobileagent.skills.CompatibilityClass
 import java.io.ByteArrayOutputStream
 import java.text.Normalizer
 import java.util.zip.ZipEntry
+import java.util.zip.ZipInputStream
 import java.util.zip.ZipOutputStream
 import runtime.mobileagent.domain.MessageRole
+import runtime.mobileagent.serialization.TransferBundle
 import runtime.mobileagent.serialization.TransferCodec
 import runtime.mobileagent.serialization.TransferConflictPolicy
 import runtime.mobileagent.serialization.TransferOptions
@@ -314,6 +317,45 @@ class SkillRepositoryTest {
     }
 
     @Test
+    fun distinctSkillVersionsWithTheSamePackageIdRestoreByInstallIdentity() = database { source ->
+        val archive = exportSharedPackageVersionHistory(source)
+        assertSharedPackageVersionHistoryRestored(archive)
+    }
+
+    @Test
+    fun distinctSkillVersionsRestoreWhenArchiveSkillOrderIsReversed() = database { source ->
+        val archive = exportSharedPackageVersionHistory(source)
+        val reversedBytes = rewriteArchive(archive.bytes) { it.copy(skills = it.skills.reversed()) }
+        val reversedManifest = TransferCodec.decode(readArchiveManifest(reversedBytes))
+        assertEquals(archive.exported.skills.map { it.packageHash }.reversed(), reversedManifest.skills.map { it.packageHash })
+        assertSharedPackageVersionHistoryRestored(archive.copy(bytes = reversedBytes, exported = reversedManifest))
+    }
+
+    @Test
+    fun ambiguousPackageIdOnlyAgentBindingIsRejectedWhenVersionsShareAnId() = database { source ->
+        val archive = exportSharedPackageVersionHistory(source)
+        val poisoned = rewriteArchive(archive.bytes) { bundle ->
+            val agent = checkNotNull(bundle.agent)
+            bundle.copy(
+                agent = agent.copy(
+                    profile = agent.profile.copy(skillIds = listOf(SHARED_SKILL_PACKAGE_ID)),
+                ),
+            )
+        }
+        JdbcSqlConnection("jdbc:sqlite::memory:").use { target ->
+            Migrations.apply(target)
+            val error = assertThrows(AppException::class.java) {
+                TransferRepository(target).importArchive(poisoned, TransferConflictPolicy.REJECT)
+            }
+            assertEquals(ErrorCode.TRANSFER_INVALID, error.error.code)
+            assertTrue(error.message.orEmpty().contains("ambiguous"))
+            assertEquals(0L, target.query("SELECT COUNT(*) AS n FROM agent_profiles").single().long("n"))
+            assertEquals(0L, target.query("SELECT COUNT(*) AS n FROM skill_installs").single().long("n"))
+            assertEquals(0L, target.query("SELECT COUNT(*) AS n FROM conversations").single().long("n"))
+        }
+    }
+
+    @Test
     fun rawInstructionSkillUsesFrontmatterName() = database { db ->
         val skills = SkillRepository(db)
         val raw = """
@@ -448,6 +490,120 @@ class SkillRepositoryTest {
         assertEquals("{\"capabilities\":[],\"knowledgeBaseIds\":[],\"hosts\":[],\"methods\":[]}", active.single().string("scopes_json"))
     }
 
+    private data class SharedPackageVersionArchive(
+        val bytes: ByteArray,
+        val exported: TransferBundle,
+        val agentId: String,
+        val snapshotId: String,
+        val conversationId: String,
+        val v1Hash: String,
+        val v2Hash: String,
+    )
+
+    private fun exportSharedPackageVersionHistory(source: SqlConnection): SharedPackageVersionArchive {
+        val skills = SkillRepository(source)
+        assertTrue(skills.importPackage(versionedInstructionPackageBytes(SHARED_SKILL_PACKAGE_ID, "1.0.0", "Shared v1")).accepted)
+        val skillV1 = skills.list().single()
+        skills.setEnabled(skillV1.installId, true)
+        createChatProfile(source)
+        val agents = AgentRepository(source)
+        val boundV1 = agents.saveWithPrompt(
+            agentProfile("agent.shared-skill", "model.skills.chat", skillV1.installId),
+            "Use shared skill v1.",
+        )
+        val snapshot = agents.createSnapshot(boundV1.id, "snapshot.shared-v1", "2026-08-29T00:00:00Z")
+        val conversation = ConversationRepository(source).create(
+            snapshot.id,
+            "Historical shared v1 thread",
+            "conversation.shared-v1",
+            "2026-08-29T00:00:01Z",
+        )
+        ConversationRepository(source).append(
+            conversation.id,
+            MessageRole.USER,
+            "hello from shared v1",
+            messageId = "message.shared-v1",
+            createdAt = "2026-08-29T00:00:02Z",
+        )
+        assertTrue(skills.importPackage(versionedInstructionPackageBytes(SHARED_SKILL_PACKAGE_ID, "2.0.0", "Shared v2")).accepted)
+        val skillV2 = skills.list().single { it.installId != skillV1.installId }
+        skills.setEnabled(skillV2.installId, true)
+        val boundV2 = agents.saveWithPrompt(
+            boundV1.copy(skillIds = listOf(skillV2.installId), revision = boundV1.revision),
+            "Use shared skill v2.",
+        )
+        assertEquals(listOf(skillV2.installId), boundV2.skillIds)
+        val packageIds = source.query("SELECT package_hash, id FROM skill_packages").associate { it.string("package_hash") to it.string("id") }
+        assertEquals(SHARED_SKILL_PACKAGE_ID, packageIds.getValue(skillV1.packageHash))
+        assertEquals(SHARED_SKILL_PACKAGE_ID, packageIds.getValue(skillV2.packageHash))
+        assertTrue(skillV1.packageHash != skillV2.packageHash)
+
+        val output = ByteArrayOutputStream()
+        TransferRepository(source).exportArchive(
+            boundV2.id,
+            TransferOptions(includeSkillPackageBytes = true, includeConversations = true),
+            output,
+        )
+        val bytes = output.toByteArray()
+        val exported = TransferCodec.decode(readArchiveManifest(bytes))
+        assertEquals(listOf(skillV2.installId), exported.agent!!.profile.skillIds)
+        assertEquals(2, exported.skills.size)
+        assertTrue(exported.skills.all { it.id == SHARED_SKILL_PACKAGE_ID })
+        assertTrue(exported.skills.any { it.sourceInstallId == skillV1.installId || skillV1.installId in it.sourceInstallIds })
+        assertTrue(exported.skills.any { it.sourceInstallId == skillV2.installId || skillV2.installId in it.sourceInstallIds })
+        return SharedPackageVersionArchive(
+            bytes = bytes,
+            exported = exported,
+            agentId = boundV2.id,
+            snapshotId = snapshot.id,
+            conversationId = conversation.id,
+            v1Hash = skillV1.packageHash,
+            v2Hash = skillV2.packageHash,
+        )
+    }
+
+    private fun assertSharedPackageVersionHistoryRestored(archive: SharedPackageVersionArchive) {
+        JdbcSqlConnection("jdbc:sqlite::memory:").use { target ->
+            Migrations.apply(target)
+            val result = TransferRepository(target).importArchive(archive.bytes, TransferConflictPolicy.REJECT)
+            val restored = AgentRepository(target).get(archive.agentId)!!
+            val restoredSnapshot = AgentRepository(target).getSnapshot(archive.snapshotId)!!
+            val installs = target.query("SELECT install_id, package_hash, enabled FROM skill_installs")
+            assertEquals(2, installs.size)
+            assertTrue(installs.all { it.long("enabled") == 0L })
+            val localByHash = installs.associate { it.string("package_hash") to it.string("install_id") }
+            assertEquals(listOf(localByHash.getValue(archive.v2Hash)), restored.skillIds)
+            assertEquals(listOf(localByHash.getValue(archive.v1Hash)), restoredSnapshot.skillIds)
+            assertTrue(restored.skillIds.single() != SHARED_SKILL_PACKAGE_ID)
+            assertTrue(restoredSnapshot.skillIds.single() != SHARED_SKILL_PACKAGE_ID)
+            assertEquals("hello from shared v1", ConversationRepository(target).messages(archive.conversationId).single().text)
+            assertEquals(0L, target.query("SELECT COUNT(*) AS n FROM permission_grants WHERE revoked=0").single().long("n"))
+            assertTrue(result.warnings.any { it.contains("enable") || it.contains("grant") })
+        }
+    }
+
+    private fun rewriteArchive(bytes: ByteArray, transform: (TransferBundle) -> TransferBundle): ByteArray {
+        val entries = linkedMapOf<String, ByteArray>()
+        ZipInputStream(bytes.inputStream()).use { zip ->
+            var entry = zip.nextEntry
+            while (entry != null) {
+                entries[entry.name] = zip.readBytes()
+                entry = zip.nextEntry
+            }
+        }
+        val original = TransferCodec.decode(entries.getValue("manifest.json").decodeToString())
+        entries["manifest.json"] = TransferCodec.encode(transform(original)).toByteArray()
+        val out = ByteArrayOutputStream()
+        ZipOutputStream(out).use { zip ->
+            entries.forEach { (name, body) ->
+                zip.putNextEntry(ZipEntry(name))
+                zip.write(body)
+                zip.closeEntry()
+            }
+        }
+        return out.toByteArray()
+    }
+
     private fun createChatProfile(db: SqlConnection) {
         val profiles = ProfileRepository(db)
         profiles.createProvider(
@@ -530,5 +686,28 @@ class SkillRepositoryTest {
             zip.closeEntry()
         }
         return out.toByteArray()
+    }
+
+    private fun versionedInstructionPackageBytes(packageId: String, version: String, title: String): ByteArray {
+        val files = mapOf(
+            "SKILL.md" to "# $title\nUse this local instruction only. Version $version.\n",
+            "mobile-skill.json" to """{
+              "schemaVersion":1,"id":"$packageId","name":"$title","version":"$version","license":"AGPL-3.0-only",
+              "runtime":{"kind":"instruction"}
+            }""".trimIndent(),
+        )
+        val out = ByteArrayOutputStream()
+        ZipOutputStream(out).use { zip ->
+            files.forEach { (path, body) ->
+                zip.putNextEntry(ZipEntry(path))
+                zip.write(body.toByteArray())
+                zip.closeEntry()
+            }
+        }
+        return out.toByteArray()
+    }
+
+    private companion object {
+        const val SHARED_SKILL_PACKAGE_ID = "skill.shared"
     }
 }

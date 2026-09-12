@@ -333,15 +333,15 @@ class TransferRepository(
         var importedAgentId: String? = null
         db.transaction {
             bundle.knowledgeBases.forEach { kb -> importKnowledge(kb, conflictPolicy, warnings) }
-            val skillInstallByRef = importSkills(bundle.skills, conflictPolicy, warnings)
+            val skillInstalls = importSkills(bundle.skills, conflictPolicy, warnings)
             bundle.agent?.let { transfer ->
-                importedAgentId = importAgent(transfer, conflictPolicy, warnings, skillInstallByRef)
+                importedAgentId = importAgent(transfer, conflictPolicy, warnings, skillInstalls)
             }
             // Metadata-only conversation transfers still carry the immutable snapshot boundary.
             // Restore that conversation row instead of silently dropping it; full message/run
             // content is handled by importArchive and is rejected by requireMetadataOnly above.
             bundle.conversations.forEach { transfer ->
-                importConversation(transfer, conflictPolicy, warnings, skillInstallByRef)
+                importConversation(transfer, conflictPolicy, warnings, skillInstalls)
             }
         }
         return TransferImportResult(
@@ -426,19 +426,19 @@ class TransferRepository(
                     bundle.knowledgeBases.forEach { kb ->
                         importKnowledge(kb, conflictPolicy, warnings, stagedBlobs)
                     }
-                    val skillInstallByRef = linkedMapOf<String, String>()
+                    val skillInstalls = SkillInstallAliases()
                     bundle.skills.forEach { skill ->
                         val bytes = if (skill.packageIncluded) stagedSkills[skill.packageHash]
                             ?.let { Files.readAllBytes(it) }
                             else null
-                        rememberSkillInstall(skillInstallByRef, skill, importSkill(skill, conflictPolicy, warnings, bytes))
+                        skillInstalls.remember(skill, importSkill(skill, conflictPolicy, warnings, bytes))
                     }
-                    bundle.agent?.let { importedAgentId = importAgent(it, conflictPolicy, warnings, skillInstallByRef) }
+                    bundle.agent?.let { importedAgentId = importAgent(it, conflictPolicy, warnings, skillInstalls) }
                     bundle.conversations.forEach { manifest ->
                         val path = manifest.contentEntry?.let(stagedConversations::get)
                         val full = path?.let { TransferCodec.decodeConversation(Files.readString(it), "transfer-conversation-${manifest.conversation.id}") }
                             ?: throw invalid("Conversation ${manifest.conversation.id} content is missing")
-                        importConversation(full, conflictPolicy, warnings, skillInstallByRef)
+                        importConversation(full, conflictPolicy, warnings, skillInstalls)
                     }
                 }
                 return TransferImportResult(
@@ -754,9 +754,9 @@ class TransferRepository(
         transfer: AgentTransfer,
         policy: TransferConflictPolicy,
         warnings: MutableList<String>,
-        skillInstallByRef: Map<String, String>,
+        skillInstalls: SkillInstallAliases,
     ): String {
-        val profile = remapAgentSkillIds(transfer.profile, skillInstallByRef)
+        val profile = remapAgentSkillIds(transfer.profile, skillInstalls)
         val existing = db.query("SELECT id FROM agent_profiles WHERE id=?", listOf(profile.id)).isNotEmpty()
         if (existing && policy == TransferConflictPolicy.KEEP_EXISTING) {
             warnings += "Agent ${profile.id} already exists; kept local configuration"
@@ -786,7 +786,7 @@ class TransferRepository(
                 profileArgs(profile),
             )
         }
-        transfer.snapshots.forEach { snapshot -> importSnapshot(remapSnapshotSkillIds(snapshot, skillInstallByRef), policy, warnings) }
+        transfer.snapshots.forEach { snapshot -> importSnapshot(remapSnapshotSkillIds(snapshot, skillInstalls), policy, warnings) }
         if (profile.skillIds.isNotEmpty()) warnings += "Imported skill bindings remain subject to local enable/grant approval"
         return profile.id
     }
@@ -968,26 +968,76 @@ class TransferRepository(
         skills: List<SkillTransfer>,
         policy: TransferConflictPolicy,
         warnings: MutableList<String>,
-    ): Map<String, String> {
-        val skillInstallByRef = linkedMapOf<String, String>()
+    ): SkillInstallAliases {
+        val skillInstalls = SkillInstallAliases()
         skills.forEach { skill ->
-            rememberSkillInstall(skillInstallByRef, skill, importSkill(skill, policy, warnings))
+            skillInstalls.remember(skill, importSkill(skill, policy, warnings))
         }
-        return skillInstallByRef
+        return skillInstalls
     }
 
-    private fun rememberSkillInstall(skillInstallByRef: MutableMap<String, String>, skill: SkillTransfer, localInstallId: String) {
-        fun putAlias(alias: String) {
-            val existing = skillInstallByRef[alias]
+    /**
+     * Install-id and source-install aliases are canonical. Package id is only a
+     * legacy fallback and is omitted when two versions share that id, so a valid
+     * v1/v2 backup still restores exact install bindings.
+     */
+    private inner class SkillInstallAliases {
+        private val byRef = linkedMapOf<String, String>()
+        private val required = mutableSetOf<String>()
+        private val ambiguousPackageIds = mutableSetOf<String>()
+
+        fun remember(skill: SkillTransfer, localInstallId: String) {
+            putRequired(localInstallId, localInstallId)
+            skill.sourceInstallId?.let { putRequired(it, localInstallId) }
+            skill.sourceInstallIds.forEach { putRequired(it, localInstallId) }
+            putPackageId(skill.id, localInstallId)
+        }
+
+        fun resolve(id: String): String {
+            byRef[id]?.let { return it }
+            if (id in ambiguousPackageIds) {
+                throw invalid("Skill package id $id is ambiguous across versions; restore by install identity")
+            }
+            if (db.query("SELECT install_id FROM skill_installs WHERE install_id=?", listOf(id)).isNotEmpty()) return id
+            val matches = db.query(
+                """SELECT i.install_id FROM skill_installs i
+                   JOIN skill_packages p ON p.package_hash = i.package_hash
+                   WHERE p.id=?
+                   ORDER BY i.created_at, i.rowid""",
+                listOf(id),
+            ).map { it.string("install_id") }.distinct()
+            if (matches.size > 1) {
+                throw invalid("Skill package id $id is ambiguous across versions; restore by install identity")
+            }
+            return matches.singleOrNull() ?: throw invalid("Agent references missing skill $id")
+        }
+
+        private fun putRequired(alias: String, localInstallId: String) {
+            val existing = byRef[alias]
             if (existing != null && existing != localInstallId) {
                 throw invalid("Skill identity $alias maps to multiple local installs")
             }
-            skillInstallByRef[alias] = localInstallId
+            byRef[alias] = localInstallId
+            required += alias
         }
-        putAlias(localInstallId)
-        skill.sourceInstallId?.let(::putAlias)
-        skill.sourceInstallIds.forEach(::putAlias)
-        putAlias(skill.id)
+
+        private fun putPackageId(packageId: String, localInstallId: String) {
+            if (packageId in ambiguousPackageIds) return
+            if (packageId in required) {
+                val existing = byRef[packageId]
+                if (existing != null && existing != localInstallId) {
+                    throw invalid("Skill identity $packageId maps to multiple local installs")
+                }
+                return
+            }
+            val existing = byRef[packageId]
+            if (existing == null || existing == localInstallId) {
+                byRef[packageId] = localInstallId
+                return
+            }
+            byRef.remove(packageId)
+            ambiguousPackageIds += packageId
+        }
     }
 
     private fun importSkill(
@@ -1074,7 +1124,7 @@ class TransferRepository(
         transfer: ConversationTransfer,
         policy: TransferConflictPolicy,
         warnings: MutableList<String>,
-        skillInstallByRef: Map<String, String> = emptyMap(),
+        skillInstalls: SkillInstallAliases = SkillInstallAliases(),
     ) {
         val conversation = transfer.conversation
         val existing = db.query("SELECT * FROM conversations WHERE id=?", listOf(conversation.id)).singleOrNull()
@@ -1083,7 +1133,7 @@ class TransferRepository(
             warnings += "Conversation ${conversation.id} already exists; kept local history"
             return
         }
-        importSnapshot(remapSnapshotSkillIds(transfer.snapshot, skillInstallByRef), policy, warnings)
+        importSnapshot(remapSnapshotSkillIds(transfer.snapshot, skillInstalls), policy, warnings)
         db.execute(
             "INSERT INTO conversations(id,snapshot_id,agent_snapshot_id,title,created_at,updated_at) VALUES(?,?,?,?,?,?)",
             listOf(conversation.id, conversation.snapshotId, conversation.snapshotId, conversation.title, conversation.createdAt, conversation.updatedAt),
@@ -1269,25 +1319,12 @@ class TransferRepository(
         ).single().string("install_id")
     }
 
-    private fun remapAgentSkillIds(profile: AgentProfile, skillInstallByRef: Map<String, String>): AgentProfile =
-        profile.copy(skillIds = profile.skillIds.map { resolveImportedSkillInstall(it, skillInstallByRef) })
+    private fun remapAgentSkillIds(profile: AgentProfile, skillInstalls: SkillInstallAliases): AgentProfile =
+        profile.copy(skillIds = profile.skillIds.map(skillInstalls::resolve))
 
-    private fun remapSnapshotSkillIds(snapshot: AgentSnapshot, skillInstallByRef: Map<String, String>): AgentSnapshot =
+    private fun remapSnapshotSkillIds(snapshot: AgentSnapshot, skillInstalls: SkillInstallAliases): AgentSnapshot =
         if (snapshot.skillIds.isEmpty()) snapshot
-        else snapshot.copy(skillIds = snapshot.skillIds.map { resolveImportedSkillInstall(it, skillInstallByRef) })
-
-    private fun resolveImportedSkillInstall(id: String, skillInstallByRef: Map<String, String>): String {
-        skillInstallByRef[id]?.let { return it }
-        if (db.query("SELECT install_id FROM skill_installs WHERE install_id=?", listOf(id)).isNotEmpty()) return id
-        val byPackage = db.query(
-            """SELECT i.install_id FROM skill_installs i
-               JOIN skill_packages p ON p.package_hash = i.package_hash
-               WHERE p.id=?
-               ORDER BY CASE WHEN i.enabled=1 THEN 0 ELSE 1 END, i.created_at, i.rowid LIMIT 1""",
-            listOf(id),
-        ).singleOrNull()?.string("install_id")
-        return byPackage ?: throw invalid("Agent references missing skill $id")
-    }
+        else snapshot.copy(skillIds = snapshot.skillIds.map(skillInstalls::resolve))
 
     companion object {
         private const val MANIFEST_ENTRY = "manifest.json"

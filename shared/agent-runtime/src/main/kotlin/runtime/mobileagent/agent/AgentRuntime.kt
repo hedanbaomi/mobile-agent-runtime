@@ -629,7 +629,7 @@ class AgentRuntime(
                                     if (!onApprove(call)) {
                                         approvalRejected = true
                                         run.state = RunState.FAILED
-                                        emitModel(ModelEvent.Failed(redact("Tool ${call.name} was rejected", secret)))
+                                        emitModel(ModelEvent.Failed("APPROVAL_DENIED"))
                                         null
                                     } else {
                                         if (budgetExhausted(run)) throw CancellationException(BUDGET_CANCEL)
@@ -684,7 +684,11 @@ class AgentRuntime(
                         // plain strings, which the conversation store (requiring a JSON
                         // object) rejected — turning a legitimate denial into a run
                         // INTERNAL error. They now stay DENIED/INVALID and durable.
-                        is ToolResult.Denied -> "DENIED" to ToolOutcome.denied(message = result.reason)
+                        is ToolResult.Denied -> {
+                            val code = runCatching { ToolErrorCode.valueOf(result.reason) }
+                                .getOrDefault(ToolErrorCode.PERMISSION_DENIED)
+                            "DENIED" to ToolOutcome.denied(code = code, message = result.reason)
+                        }
                         is ToolResult.Invalid -> "INVALID" to ToolOutcome.invalid(message = result.reason)
                         is ToolResult.Value -> "VALUE" to result.json
                         is ToolResult.Failure -> "FAILED" to safeToolFailure(result.error)

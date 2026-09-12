@@ -161,6 +161,21 @@ object ReciprocalRankFusion {
             )
             .map { id -> docs.getValue(id).copy(score = scores.getValue(id)) }
     }
+
+    /**
+     * Drop heading-only chunks when the same document already contributed a
+     * longer body hit. Resolvable ids that cannot support a claim stay out of
+     * the evidence set without pretending NLI can verify every sentence.
+     */
+    fun preferClaimSupporting(hits: List<SearchHit>, minBodyChars: Int = 64): List<SearchHit> {
+        if (hits.size <= 1) return hits
+        val byDocument = hits.groupBy { it.documentId }
+        return hits.filter { hit ->
+            val siblings = byDocument[hit.documentId].orEmpty()
+            val hasBody = siblings.any { it.text.length >= minBodyChars }
+            !(hasBody && hit.text.length < minBodyChars && hit.text.none { it == '.' || it == '。' })
+        }
+    }
 }
 
 object RetrievalBudget {

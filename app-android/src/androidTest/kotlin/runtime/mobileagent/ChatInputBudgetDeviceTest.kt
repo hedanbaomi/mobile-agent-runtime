@@ -49,6 +49,8 @@ class ChatInputBudgetDeviceTest {
         assertEquals(RunStatus.FAILED, run.state)
         val errors = container.conversations.messages(sessionId).flatMap { it.parts }.filterIsInstance<ErrorPart>()
         assertEquals(MessageErrorCode.CONTEXT_OVERFLOW, errors.single().code)
+        assertTrue(errors.single().message.contains("模型窗口"))
+        assertTrue(errors.single().message.contains("工具 schema") || errors.single().message.contains("工具调用"))
         assertEquals("CONTEXT_OVERFLOW", run.errorCode)
         assertTrue(container.runs.invocations(run.runId).isEmpty())
     }

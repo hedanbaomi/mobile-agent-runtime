@@ -24,6 +24,9 @@ enum class ImportStage {
     CANCELLED,
 }
 
+fun isPublishedCitationVersion(status: String): Boolean =
+    status == ImportStage.READY.name || status == ImportStage.READY_WITH_VISUAL_GAPS.name
+
 data class ImportJob(
     val id: String,
     val knowledgeBaseId: String,

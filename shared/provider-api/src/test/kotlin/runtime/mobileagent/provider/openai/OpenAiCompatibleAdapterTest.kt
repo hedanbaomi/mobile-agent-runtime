@@ -28,6 +28,7 @@ import runtime.mobileagent.domain.ModelProfile
 import runtime.mobileagent.domain.ModelRole
 import runtime.mobileagent.provider.CapabilityProbeStatus
 import runtime.mobileagent.provider.CapabilityCheckStatus
+import runtime.mobileagent.provider.CapabilityCheck
 import runtime.mobileagent.provider.ProviderConnectionErrorCode
 import runtime.mobileagent.provider.ProviderConnectionResult
 import runtime.mobileagent.provider.ParameterLayers
@@ -884,6 +885,72 @@ class OpenAiCompatibleAdapterTest {
     }
 
     @Test
+    fun metadataProbeFallsBackToModelsListForIdsWithoutSlash() = runTest {
+        val paths = mutableListOf<String>()
+        val engine = MockEngine { request ->
+            paths += request.url.encodedPath
+            when {
+                request.url.encodedPath.endsWith("/models/deepseek-v4-flash") ->
+                    respond("not found", HttpStatusCode.NotFound)
+                request.url.encodedPath.endsWith("/models") ->
+                    respond("{\"object\":\"list\",\"data\":[{\"id\":\"deepseek-v4-flash\"}]}", HttpStatusCode.OK)
+                else -> error("unexpected probe path ${request.url.encodedPath}")
+            }
+        }
+        val adapter = OpenAiCompatibleAdapter(HttpClient(engine), "https://api.deepseek.com")
+        val report = adapter.probe(
+            ModelProfile(
+                id = "profile-deepseek",
+                providerId = "provider-deepseek",
+                modelId = "deepseek-v4-flash",
+                role = ModelRole.CHAT,
+                capabilities = emptySet(),
+                contextLimit = 4096,
+                outputLimit = 64,
+                revision = 1,
+            ),
+            "token".toCharArray(),
+            runtime.mobileagent.provider.ProbeConsent.GRANTED,
+        )
+        assertEquals(
+            listOf("/models/deepseek-v4-flash", "/models"),
+            paths,
+        )
+        assertTrue(paths.none { it.contains("/v1") })
+        assertEquals(CapabilityProbeStatus.SUCCEEDED, report.status)
+        assertEquals(CapabilityCheckStatus.VERIFIED, report.checks.first().status)
+        assertTrue(report.source.contains("metadata=verified"))
+    }
+
+    @Test
+    fun officialRootBaseWithTrailingSlashDoesNotInsertV1OnChat() = runBlocking {
+        val urls = mutableListOf<String>()
+        val engine = MockEngine { request ->
+            urls += request.url.toString()
+            respond(
+                "{\"choices\":[{\"message\":{\"content\":\"ok\"}}]}",
+                HttpStatusCode.OK,
+                headersOf(HttpHeaders.ContentType, "application/json"),
+            )
+        }
+        val adapter = OpenAiCompatibleAdapter(HttpClient(engine), "https://api.deepseek.com/")
+        val profile = ModelProfile(
+            id = "profile-root",
+            providerId = "provider-deepseek",
+            modelId = "deepseek-v4-pro",
+            role = ModelRole.CHAT,
+            capabilities = emptySet(),
+            contextLimit = 4096,
+            outputLimit = 64,
+            revision = 1,
+        )
+        val connection = adapter.testConnection(profile, "token".toCharArray())
+        assertTrue(connection is ProviderConnectionResult.Success)
+        assertEquals(listOf("https://api.deepseek.com/chat/completions"), urls)
+        assertTrue(urls.none { it.contains("/v1") })
+    }
+
+    @Test
     fun metadataMismatchDoesNotFallBackOrPromoteCapabilities() = runTest {
         val paths = mutableListOf<String>()
         val engine = MockEngine { request ->
@@ -1060,6 +1127,8 @@ class OpenAiCompatibleAdapterTest {
             requests += 1
             when {
                 request.url.encodedPath.endsWith("/models/demo") -> respond("not found", HttpStatusCode.NotFound)
+                request.url.encodedPath.endsWith("/models") && request.method.value == "GET" ->
+                    respond("not found", HttpStatusCode.NotFound)
                 else -> respond(
                     "{\"choices\":[{\"message\":{\"content\":\"ok\"}}]}",
                     HttpStatusCode.OK,
@@ -1083,7 +1152,7 @@ class OpenAiCompatibleAdapterTest {
         assertEquals(1, requests)
         val report = adapter.probe(profile, "secret".toCharArray(), runtime.mobileagent.provider.ProbeConsent.GRANTED)
         assertEquals(CapabilityProbeStatus.PARTIAL, report.status)
-        assertEquals(2, requests)
+        assertEquals(3, requests)
         assertEquals(runtime.mobileagent.provider.CapabilityCheckStatus.UNSUPPORTED, report.checks.first().status)
         assertEquals(404, report.checks.first().httpStatus)
     }
@@ -1241,6 +1310,40 @@ class OpenAiCompatibleAdapterTest {
         assertTrue(report.supportsTools)
         assertEquals(CapabilityProbeStatus.SUCCEEDED, report.status)
         assertTrue(report.source.contains("tools=verified"))
+    }
+
+    @Test
+    fun toolsCapabilityProbeWithoutAForcedCallIsInconclusiveNotFailed() = runTest {
+        val engine = MockEngine { request ->
+            when {
+                request.url.encodedPath.endsWith("/models/demo") ->
+                    respond("{\"id\":\"demo\"}", HttpStatusCode.OK)
+                else -> respond(
+                    "{\"choices\":[{\"message\":{\"content\":\"ok\"}}]}",
+                    HttpStatusCode.OK,
+                    headersOf(HttpHeaders.ContentType, "application/json"),
+                )
+            }
+        }
+        val adapter = OpenAiCompatibleAdapter(HttpClient(engine), "https://example.invalid/v1")
+        val report = adapter.probe(
+            ModelProfile(
+                id = "profile-tools-inconclusive",
+                providerId = "provider-tools",
+                modelId = "demo",
+                role = ModelRole.CHAT,
+                capabilities = setOf("tools"),
+                contextLimit = 4096,
+                outputLimit = 32,
+                revision = 1,
+            ),
+            "token".toCharArray(),
+            runtime.mobileagent.provider.ProbeConsent.GRANTED,
+        )
+        assertFalse(report.supportsTools)
+        assertEquals(CapabilityProbeStatus.PARTIAL, report.status)
+        assertEquals(CapabilityCheckStatus.UNKNOWN, report.checks.first { it.capability == CapabilityCheck.TOOLS }.status)
+        assertTrue(report.source.contains("tools=inconclusive"))
     }
 
     @Test

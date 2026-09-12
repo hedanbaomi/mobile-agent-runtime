@@ -697,8 +697,8 @@ class ProvidersViewModel @JvmOverloads constructor(
     private fun capabilityStatus(result: CapabilityProbeStatus, charged: Boolean): String =
         when (result) {
             CapabilityProbeStatus.SUCCEEDED -> "能力探测完成。"
-            CapabilityProbeStatus.PARTIAL -> "能力探测完成，部分能力不可用。"
-            CapabilityProbeStatus.FAILED -> "能力探测失败。"
+            CapabilityProbeStatus.PARTIAL -> "能力探测完成，部分项目未确认或不受支持。未确认不代表实际对话或工具不可用。"
+            CapabilityProbeStatus.FAILED -> "能力探测失败。这不是 Base URL 无效；请先看连接测试结果。"
             CapabilityProbeStatus.PROFILE_ONLY -> "仅记录配置声明，未完成真实验证。"
         } + if (charged) "可能产生服务商费用。" else "未发送可能计费请求。"
 

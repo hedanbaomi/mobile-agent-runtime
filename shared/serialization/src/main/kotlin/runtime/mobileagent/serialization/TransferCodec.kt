@@ -652,7 +652,8 @@ object TransferCodec {
 
     private fun requireId(value: String, operationId: String, field: String) {
         requireText(value, operationId, field)
-        if (!SAFE_ID.matches(value)) invalid(operationId, "$field contains an unsafe identifier")
+        val allowed = if (field == "knowledgeBase.embeddingSpaceId") EMBEDDING_SPACE_ID else SAFE_ID
+        if (!allowed.matches(value)) invalid(operationId, "$field contains an unsafe identifier")
     }
 
     private fun requireDistinctIds(values: List<String>, operationId: String, field: String) {
@@ -707,6 +708,8 @@ object TransferCodec {
         .digest(bytes).joinToString("") { "%02x".format(it.toInt() and 0xFF) }
 
     private val SAFE_ID = Regex("[A-Za-z0-9][A-Za-z0-9._:-]{0,255}")
+    /** Canonical ONNX spaces use `onnx:name@sha256:dN:metric`; other ids stay on [SAFE_ID]. */
+    private val EMBEDDING_SPACE_ID = Regex("[A-Za-z0-9][A-Za-z0-9._:@-]{0,255}")
     private val SHA256 = Regex("[0-9a-f]{64}")
     private val SECRET_KEY = Regex("(?i).*(secret|api[_-]?key|authorization|cookie|password|private[_-]?key).*" )
     private val PUBLIC_HEADER_NAME = Regex("[A-Za-z0-9][A-Za-z0-9._-]{0,127}")

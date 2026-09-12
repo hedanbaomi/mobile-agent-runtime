@@ -1101,7 +1101,15 @@ class TransferRepository(
     }
 
     private fun exportSkill(id: String, includeBytes: Boolean, packageIncluded: Boolean = false): SkillTransfer? {
-        val row = db.query("SELECT * FROM skill_packages WHERE id=? ORDER BY created_at DESC LIMIT 1", listOf(id)).singleOrNull() ?: return null
+        val row = db.query(
+            """SELECT p.* FROM skill_packages p
+               JOIN skill_installs i ON i.package_hash = p.package_hash
+               WHERE i.install_id=?
+               ORDER BY p.created_at DESC LIMIT 1""",
+            listOf(id),
+        ).singleOrNull()
+            ?: db.query("SELECT * FROM skill_packages WHERE id=? ORDER BY created_at DESC LIMIT 1", listOf(id)).singleOrNull()
+            ?: return null
         val bytes = if (includeBytes) row.columns["package_bytes"] as? ByteArray else null
         return SkillTransfer(
             packageHash = row.string("package_hash"), id = row.string("id"), name = row.string("name"), version = row.string("version"),

@@ -167,6 +167,12 @@ fun toSafeErrorPart(value: String): ErrorPart {
         token == "RATE_LIMITED" -> MessageErrorCode.RATE_LIMITED
         token == "NETWORK_UNAVAILABLE" || normalized.contains("NETWORK") -> MessageErrorCode.NETWORK_UNAVAILABLE
         token == "CONTEXT_COMPACTION_FAILED" -> MessageErrorCode.INVALID_RESPONSE
+        token == "APPROVAL_DENIED" -> MessageErrorCode.PERMISSION_DENIED
+        token == "AUTHORITY_TEMPORARILY_UNAVAILABLE" ||
+            token == "BRIDGE_DISCONNECTED" ||
+            token == "ADB_DEVICE_OFFLINE" ||
+            token == "ADB_DEVICE_DISCONNECTED" ||
+            token == "SHIZUKU_SERVICE_UNAVAILABLE" -> MessageErrorCode.WORKSPACE_UNAVAILABLE
         token == "PERMISSION_DENIED" || token == "CAPABILITY_DENIED" -> MessageErrorCode.PERMISSION_DENIED
         token == "RESOURCE_LIMIT" || token == "BUDGET_EXHAUSTED" -> MessageErrorCode.BUDGET_EXHAUSTED
         token == "CONTEXT_OVERFLOW" || token == "CONTEXT_BUDGET_EXCEEDED" || normalized.contains("CONTEXT") -> MessageErrorCode.CONTEXT_OVERFLOW
@@ -178,9 +184,17 @@ fun toSafeErrorPart(value: String): ErrorPart {
         token == "TOOL_FAILED" || token == "TOOL_ERROR" -> MessageErrorCode.TOOL_FAILED
         else -> MessageErrorCode.INTERNAL
     }
-    val message = if (token == "CONTEXT_COMPACTION_FAILED") {
-        "上下文压缩失败，原始消息已保留；本次不会自动重试。"
-    } else code.safeMessage()
+    val message = when {
+        token == "CONTEXT_COMPACTION_FAILED" -> "上下文压缩失败，原始消息已保留；本次不会自动重试。"
+        token == "APPROVAL_DENIED" -> "该工具调用已被拒绝，未执行任何操作。"
+        token == "AUTHORITY_TEMPORARILY_UNAVAILABLE" ||
+            token == "BRIDGE_DISCONNECTED" ||
+            token == "ADB_DEVICE_OFFLINE" ||
+            token == "ADB_DEVICE_DISCONNECTED" ||
+            token == "SHIZUKU_SERVICE_UNAVAILABLE" ->
+            "执行通道暂时不可用，请重新连接所选权限通道后重试；这不是工作区授权丢失。"
+        else -> code.safeMessage()
+    }
     return ErrorPart(code, message, retryable = code in RETRYABLE_ERROR_CODES)
 }
 
@@ -229,7 +243,8 @@ fun toolResultUserMessage(resultJson: String): String? {
         "BRIDGE_DISCONNECTED",
         "ADB_DEVICE_OFFLINE",
         "ADB_DEVICE_DISCONNECTED",
-            -> "工作区暂时不可用，请重新连接后重试。"
+        "SHIZUKU_SERVICE_UNAVAILABLE",
+            -> "执行通道暂时不可用，请重新连接所选权限通道后重试；这不是工作区授权丢失。"
         "QUOTA_EXCEEDED" -> "操作超过工作区大小或输出限制。"
         "CONFLICT" -> "工作区内容已变化，请读取最新状态后重试。"
         "UNSUPPORTED_ENTRY" -> "该工作区条目类型不受支持，未打开该条目。"

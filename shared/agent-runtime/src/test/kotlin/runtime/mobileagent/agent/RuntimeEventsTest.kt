@@ -78,6 +78,17 @@ class RuntimeEventsTest {
     }
 
     @Test
+    fun approvalDeniedIsNotAnInternalError() {
+        val error = ModelEvent.Failed("APPROVAL_DENIED")
+            .toMessagePartOrNull() as ErrorPart
+        assertEquals(MessageErrorCode.PERMISSION_DENIED, error.code)
+        assertEquals("该工具调用已被拒绝，未执行任何操作。", error.message)
+        val leftover = ModelEvent.Failed("Tool python was rejected")
+            .toMessagePartOrNull() as ErrorPart
+        assertEquals(MessageErrorCode.INTERNAL, leftover.code)
+    }
+
+    @Test
     fun structuredRunUsesGenericExecutorAndOptInPreview() = runBlocking {
         val adapter = RecordingAdapter(
             listOf(

@@ -127,7 +127,7 @@ jobs:
           disable-animations: true
           script: |
             timeout 120 sh -c 'until adb -s "emulator-${EMULATOR_PORT:-5554}" shell service check package 2>/dev/null | grep -q "found"; do sleep 2; done'
-            ./gradlew :app-android:connectedDebugAndroidTest "-Pandroid.testInstrumentationRunnerArguments.class=runtime.mobileagent.RunToolsReplayDeviceTest,runtime.mobileagent.shizuku.ShizukuWorkspaceFileStoreTest,runtime.mobileagent.VectorIndexCacheDeviceTest,runtime.mobileagent.ChatContextCompactionDeviceTest,runtime.mobileagent.ContextCompactionUiTest,runtime.mobileagent.ChatInputBudgetDeviceTest,runtime.mobileagent.AgentsConversationRoutingDeviceTest" --dependency-verification=strict --no-daemon
+            ./gradlew :app-android:connectedDebugAndroidTest "-Pandroid.testInstrumentationRunnerArguments.class=runtime.mobileagent.RunToolsReplayDeviceTest,runtime.mobileagent.shizuku.ShizukuWorkspaceFileStoreTest,runtime.mobileagent.VectorIndexCacheDeviceTest,runtime.mobileagent.ChatContextCompactionDeviceTest,runtime.mobileagent.ContextCompactionUiTest,runtime.mobileagent.ChatInputBudgetDeviceTest,runtime.mobileagent.AgentsConversationRoutingDeviceTest,runtime.mobileagent.TransferArchiveDeviceTest,runtime.mobileagent.ThirdPartyNoticesDeviceTest,runtime.mobileagent.workspace.WorkspaceBackendTest" --dependency-verification=strict --no-daemon
     # No continue-on-error: a red convergence job blocks the commit.
 
   release:

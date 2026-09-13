@@ -133,14 +133,15 @@ class OpenAiCompatibleAdapter(
             val modelParameters = runCatching {
                 Json.parseToJsonElement(configured.parametersJson).jsonObject
             }.getOrElse { throw InvalidConnectionConfigException() }
+            // Probes never spend the user's full output budget on a two-word answer.
+            val probeOutputTokens = minOf(configured.outputLimit.coerceAtLeast(1), CONNECTION_PROBE_MAX_OUTPUT_TOKENS)
             val request = ModelRequest(
                 modelId = configured.modelId,
                 messages = listOf(ChatMessage(role = "user", text = "Reply with ok.")),
                 stream = false,
-                parameters = runtime.mobileagent.provider.ParameterLayers(modelParameters = modelParameters),
+                parameters = probeParameterLayers(modelParameters, probeOutputTokens),
                 operationId = operationId,
-                // Probes never spend the user's full output budget on a two-word answer.
-                outputTokenLimit = minOf(configured.outputLimit.coerceAtLeast(1), CONNECTION_PROBE_MAX_OUTPUT_TOKENS),
+                outputTokenLimit = probeOutputTokens,
             )
             val payload = buildPayload(request, includeImageBytes = true)
             val resolved = resolveHeaders(token, emptyMap())
@@ -992,7 +993,7 @@ class OpenAiCompatibleAdapter(
                 emptyList()
             },
             stream = feature == ProbeFeature.STREAM,
-            parameters = ParameterLayers(modelParameters = modelParameters),
+            parameters = probeParameterLayers(modelParameters, probeOutputTokens),
             operationId = "capability-probe-${feature.name.lowercase()}",
             outputTokenLimit = probeOutputTokens,
         )
@@ -1013,7 +1014,9 @@ class OpenAiCompatibleAdapter(
         }
         val first = executeFeatureProbe(headers, feature, firstBody)
         val firstStatus = first.httpStatus
-        if (feature != ProbeFeature.TOOLS || firstStatus == null || firstStatus !in 400..499) return first
+        val shapeRejection = feature == ProbeFeature.TOOLS && firstStatus != null &&
+            featureHttpStatus(firstStatus) == CapabilityCheckStatus.UNSUPPORTED
+        if (!shapeRejection) return first
         // Several OpenAI-compatible hosts reject a forced tool_choice for a model that
         // still supports tool calling (DeepSeek thinking mode answers HTTP 400
         // "Thinking mode does not support this tool_choice"). Retry once without the
@@ -1030,6 +1033,36 @@ class OpenAiCompatibleAdapter(
     private fun forcedProbeToolChoice(): JsonObject = buildJsonObject {
         put("type", JsonPrimitive("function"))
         put("function", buildJsonObject { put("name", JsonPrimitive(PROBE_TOOL_NAME)) })
+    }
+
+    /**
+     * Probes keep a fixed, small output cap, but a profile whose validated default is a legal
+     * `max_tokens` (for example 1024 against a 4096 request budget) must not be reported as
+     * invalid configuration merely because the probe spends less. The single output-limit field
+     * the profile already uses is clamped to the probe cap (a cheaper configured default such as
+     * 32 is kept), so the field name a provider requires is preserved and every other parameter
+     * is carried through unchanged. A profile that sets both fields, or a non-positive /
+     * non-numeric value, stays untouched and is rejected by the shared merger exactly as a normal
+     * request would be.
+     */
+    private fun probeParameterLayers(modelParameters: JsonObject, probeOutputCap: Int): ParameterLayers {
+        val hasMaxTokens = modelParameters.containsKey("max_tokens")
+        val hasMaxCompletionTokens = modelParameters.containsKey("max_completion_tokens")
+        if (hasMaxTokens && hasMaxCompletionTokens) return ParameterLayers(modelParameters = modelParameters)
+        val field = when {
+            hasMaxCompletionTokens -> "max_completion_tokens"
+            hasMaxTokens -> "max_tokens"
+            else -> return ParameterLayers(modelParameters = modelParameters)
+        }
+        val configured = (modelParameters[field] as? JsonPrimitive)
+            ?.takeUnless { it.isString }
+            ?.content
+            ?.toLongOrNull()
+            ?: return ParameterLayers(modelParameters = modelParameters)
+        if (configured <= 0L) return ParameterLayers(modelParameters = modelParameters)
+        val adjusted = LinkedHashMap(modelParameters)
+        adjusted[field] = JsonPrimitive(minOf(configured, probeOutputCap.toLong()))
+        return ParameterLayers(modelParameters = adjusted)
     }
 
     private suspend fun executeFeatureProbe(

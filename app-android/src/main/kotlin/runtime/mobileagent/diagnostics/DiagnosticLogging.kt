@@ -780,6 +780,7 @@ class RollingDiagnosticLogStore(
         "skill_inspect_failed" to setOf("kind", "stage", "count", "exceptionType", "errorCode"),
         "skill_install_success" to setOf("kind", "stage", "count"),
         "skill_install_failed" to setOf("kind", "stage", "count", "exceptionType", "errorCode"),
+        "knowledge_batch_event" to setOf("batchRef", "itemRef", "attempt", "phase", "reasonCode", "count"),
         "batch_worker_start" to setOf("kind", "stage", "count"),
         "batch_worker_complete" to setOf("kind", "stage", "count"),
         "batch_worker_failed" to setOf("kind", "stage", "count", "exceptionType", "errorCode"),
@@ -1806,7 +1807,22 @@ class RollingDiagnosticLogStore(
                     "total" to total.coerceIn(0, MAX_COUNT),
                 )
             }
-            "knowledge_import_enqueued", "knowledge_import_staged", "batch_worker_start", "batch_worker_complete", "skill_inspect_success", "skill_install_success" -> {
+            // P1 batch lifecycle: opaque refs plus closed codes only.  No file name, path, URI,
+            // provider credential or document text can be carried by this schema.
+            "knowledge_batch_event" -> {
+                val batchRef = fields["batchRef"] as? String ?: return null
+                val phase = fields["phase"] as? String ?: return null
+                val reasonCode = fields["reasonCode"] as? String ?: return null
+                val attempt = fields["attempt"] as? Int ?: return null
+                val count = fields["count"] as? Int ?: return null
+                linkedMapOf(
+                    "batchRef" to canonicalReference(batchRef),
+                    "phase" to canonicalBatchCode(phase),
+                    "reasonCode" to canonicalBatchCode(reasonCode),
+                    "attempt" to attempt.coerceIn(0, MAX_COUNT),
+                    "count" to count.coerceIn(0, MAX_COUNT),
+                ).apply { (fields["itemRef"] as? String)?.let { put("itemRef", canonicalReference(it)) } }
+            }            "knowledge_import_enqueued", "knowledge_import_staged", "batch_worker_start", "batch_worker_complete", "skill_inspect_success", "skill_install_success" -> {
                 val kind = fields["kind"] as? String ?: return null
                 val stage = fields["stage"] as? String ?: return null
                 val count = fields["count"] as? Int ?: return null
@@ -2723,6 +2739,17 @@ class RollingDiagnosticLogStore(
         if (bytes > 0) droppedByteCount = (droppedByteCount + bytes).coerceAtMost(Long.MAX_VALUE)
     }
 
+    /**
+     * Bounded, closed-code sanitizer for batch lifecycle phases and reason codes.  Anything that is
+     * not a short token of letters, digits, underscore, dash or dot is reduced to "unknown", so a
+     * path, URI, host name or credential-shaped value can never reach a diagnostic record.
+     */
+    private fun canonicalBatchCode(value: String): String {
+        val trimmed = value.trim()
+        if (trimmed.isEmpty() || trimmed.length > 64) return "unknown"
+        if (!trimmed.all { it.isLetterOrDigit() || it == '_' || it == '-' || it == '.' }) return "unknown"
+        return trimmed.lowercase()
+    }
     private fun canonicalStage(value: String): String = when (value.trim().lowercase()) {
         "start", "staging", "copying", "copied", "queued", "processing",
         "staged", "completed", "complete", "failed", "inspect", "install", "success" -> value.trim().lowercase()

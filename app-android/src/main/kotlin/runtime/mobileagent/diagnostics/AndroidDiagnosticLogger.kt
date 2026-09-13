@@ -111,6 +111,29 @@ class AndroidDiagnosticLogger private constructor(
     fun recordSkillInstallFailed(failure: Throwable? = null, errorCode: String = "unknown"): Boolean =
         store.recordSkillInstallFailed(failure, errorCode)
 
+    /**
+     * P1 batch lifecycle event.  Only opaque batch/item references and closed codes are recorded;
+     * the sink must never receive a name, path, URI, body or credential.
+     */
+    fun recordKnowledgeBatchEvent(
+        batchRef: String,
+        itemRef: String?,
+        attempt: Int,
+        phase: String,
+        reasonCode: String,
+        count: Int,
+    ): Boolean = store.record(
+        "knowledge_batch_event",
+        linkedMapOf<String, Any?>(
+            "batchRef" to batchRef,
+            "itemRef" to itemRef,
+            "attempt" to attempt,
+            "phase" to phase,
+            "reasonCode" to reasonCode,
+            "count" to count,
+        ).filterValues { it != null },
+    )
+
     fun recordBatchWorkerStart(): Boolean = store.recordBatchWorkerStart()
 
     fun recordBatchWorkerComplete(): Boolean = store.recordBatchWorkerComplete()

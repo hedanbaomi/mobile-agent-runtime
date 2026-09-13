@@ -8,6 +8,7 @@ import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Assertions.assertThrows
 import org.junit.jupiter.api.Test
 import kotlinx.coroutines.CancellationException
+import runtime.mobileagent.knowledge.ImportBatchBlockReason
 import runtime.mobileagent.knowledge.ImportBatchKind
 import runtime.mobileagent.knowledge.ImportBatchState
 import runtime.mobileagent.knowledge.ImportItemState
@@ -50,7 +51,7 @@ class KnowledgeArchiveImportTest {
         repo.bindJobToBatch(batchId, first, "first.txt")
         repo.bindJobToBatch(batchId, second, "second.txt")
 
-        assertEquals(ImportBatchState.COPYING, repo.listBatches(kb).single().state)
+        assertEquals(ImportBatchState.PROCESSING, repo.listBatches(kb).single().state)
         assertTrue(repo.listBatches(kb).single().state != ImportBatchState.COMPLETED)
         repo.processBatch(batchId, visionConfigured = false)
 
@@ -97,9 +98,13 @@ class KnowledgeArchiveImportTest {
         repo.bindJobToBatch(batchId, job, "waiting.png")
         repo.processBatch(batchId, visionConfigured = false)
 
-        assertEquals(ImportBatchState.WAITING, repo.listBatches(kb).single().state)
+        // P1 product change: a member that needs visual processing while no destination is
+        // confirmed must block the WHOLE batch instead of leaving it silently "waiting".
+        val blocked = repo.listBatches(kb).single()
+        assertEquals(ImportBatchState.BLOCKED, blocked.state)
+        assertEquals(ImportBatchBlockReason.NEEDS_VISION_MODEL, blocked.blockedReason)
         assertEquals(ImportItemState.WAITING.name, db.query("SELECT state FROM import_items WHERE batch_id = ?", listOf(batchId)).single().string("state"))
-        assertTrue(repo.listBatches(kb).single().state != ImportBatchState.COMPLETED)
+        assertTrue(blocked.state != ImportBatchState.COMPLETED)
     }
 
     @Test
@@ -113,7 +118,7 @@ class KnowledgeArchiveImportTest {
         val job = repo.importBytes("waiting.png", "image/png", png, false, kb, pauseAt = ImportStage.COPYING)
         repo.bindJobToBatch(batchId, job, "waiting.png")
         repo.processBatch(batchId, visionConfigured = false)
-        assertEquals(ImportBatchState.WAITING, repo.listBatches(kb).single().state)
+        assertEquals(ImportBatchState.BLOCKED, repo.listBatches(kb).single().state)
 
         assertTrue(repo.cancelImport(job.id))
 
@@ -134,17 +139,24 @@ class KnowledgeArchiveImportTest {
         repo.bindJobToBatch(batchId, first, "first.png")
         repo.bindJobToBatch(batchId, second, "second.png")
         repo.processBatch(batchId, visionConfigured = false)
-        assertEquals(ImportBatchState.WAITING, repo.listBatches(kb).single().state)
-        assertEquals(
-            2L,
-            db.query("SELECT COUNT(*) AS n FROM import_items WHERE batch_id = ? AND state = ?", listOf(batchId, ImportItemState.WAITING.name)).single().long("n"),
-        )
-
-        assertTrue(repo.cancelImport(first.id))
-        assertEquals(ImportBatchState.WAITING, repo.listBatches(kb).single().state)
+        assertEquals(ImportBatchState.BLOCKED, repo.listBatches(kb).single().state)
+        // Only the first visual member is dispatched before the block; later members stay queued
+        // so that a blocked batch never races ahead of an authorization it does not have.
         assertEquals(
             1L,
             db.query("SELECT COUNT(*) AS n FROM import_items WHERE batch_id = ? AND state = ?", listOf(batchId, ImportItemState.WAITING.name)).single().long("n"),
+        )
+        assertEquals(
+            1L,
+            db.query("SELECT COUNT(*) AS n FROM import_items WHERE batch_id = ? AND state = ?", listOf(batchId, ImportItemState.COPYING.name)).single().long("n"),
+        )
+
+        assertTrue(repo.cancelImport(first.id))
+        // The block is still durable while an undecided member remains.
+        assertEquals(ImportBatchState.BLOCKED, repo.listBatches(kb).single().state)
+        assertEquals(
+            1L,
+            db.query("SELECT COUNT(*) AS n FROM import_items WHERE batch_id = ? AND state = ?", listOf(batchId, ImportItemState.CANCELLED.name)).single().long("n"),
         )
 
         assertTrue(repo.cancelImport(second.id))

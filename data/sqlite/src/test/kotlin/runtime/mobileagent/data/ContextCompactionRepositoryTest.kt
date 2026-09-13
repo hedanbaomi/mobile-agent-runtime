@@ -98,7 +98,7 @@ class ContextCompactionRepositoryTest {
         db.execute("DROP TABLE context_compactions")
         db.execute("UPDATE schema_version SET version=17")
         Migrations.apply(db)
-        assertEquals(18L, db.query("SELECT version FROM schema_version").single().long("version"))
+        assertEquals(Migrations.VERSION.toLong(), db.query("SELECT version FROM schema_version").single().long("version"))
         assertEquals(before, ConversationRepository(db).messages("c"))
         repo.create(attempt("saved")); repo.transition("saved", ContextCompactionState.DISPATCHED)
         repo.transition("saved", ContextCompactionState.SUCCEEDED, summary)

@@ -55,7 +55,7 @@ object Migrations {
     // conversation, and a summary that only a
     // verified SUCCEEDED row may carry.  No transcript row is deleted or
     // rewritten by a summary, and no summary is ever re-sent from the database.
-    const val VERSION = 18
+    const val VERSION = 20
 
     private val statements = listOf(
         "CREATE TABLE IF NOT EXISTS schema_version (version INTEGER NOT NULL PRIMARY KEY)",
@@ -215,6 +215,17 @@ object Migrations {
         // v17 freezes per-run facts (RunManifest) on the run row.  The empty
         // object marks runs that predate frozen facts.
         Column("runs", "manifest_json", "TEXT NOT NULL DEFAULT '{}'"),
+        // v19: durable batch-level Vision authorization and explicit pause/block state.
+        Column("import_batches", "vision_target", "TEXT"),
+        Column("import_batches", "vision_scope_hash", "TEXT"),
+        Column("import_batches", "vision_authorized_at", "TEXT"),
+        Column("import_batches", "paused_at", "TEXT"),
+        Column("import_batches", "blocked_reason", "TEXT"),
+        Column("import_batches", "published_items", "INTEGER NOT NULL DEFAULT 0"),
+        Column("import_batches", "unknown_items", "INTEGER NOT NULL DEFAULT 0"),
+        // v20: freeze source selection and fence incomplete URI/archive staging.
+        Column("import_batches", "staging_manifest", "TEXT"),
+        Column("import_batches", "staging_complete", "INTEGER NOT NULL DEFAULT 1 CHECK(staging_complete IN (0,1))"),
     )
 
     fun apply(connection: SqlConnection) {
@@ -689,6 +700,15 @@ object Migrations {
         "model_profiles" to "endpoint_json",
         "secrets" to "status",
         "import_jobs" to "batch_id",
+        "import_batches" to "staging_manifest",
+        "import_batches" to "staging_complete",
+        "import_batches" to "vision_target",
+        "import_batches" to "vision_scope_hash",
+        "import_batches" to "vision_authorized_at",
+        "import_batches" to "paused_at",
+        "import_batches" to "blocked_reason",
+        "import_batches" to "published_items",
+        "import_batches" to "unknown_items",
         "permission_grants" to "lifetime",
         "permission_grants" to "policy_version",
         "permission_grants" to "created_at",

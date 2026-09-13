@@ -15,6 +15,16 @@ import java.util.zip.ZipOutputStream
 
 class DocumentParserTest {
     @Test
+    fun compactDictionaryObjectBoundariesPreserveThePageTree() {
+        // Pillow uses obj<< ... >>endobj. Dictionary delimiters separate the tokens;
+        // neither boundary requires an extra whitespace byte. The helper emits correct xref offsets.
+        val parsed = PdfParser.parse(nestedPageTreePdf(compactObjects = true))
+        assertEquals(listOf("first leaf", "second leaf"), parsed.pages.map { it.text })
+        assertEquals(2, parsed.pages.size)
+        assertTrue(parsed.pages.first().needsVision)
+    }
+
+    @Test
     fun nestedPdfPageTreeUsesCatalogRootAndPreservesEveryLeafInOrder() {
         val parsed = PdfParser.parse(nestedPageTreePdf())
         assertEquals(listOf(1, 2), parsed.pages.map { it.page })
@@ -87,7 +97,7 @@ class DocumentParserTest {
         return out.toByteArray()
     }
 
-    private fun nestedPageTreePdf(branchKids: String = "5 0 R"): ByteArray {
+    private fun nestedPageTreePdf(branchKids: String = "5 0 R", compactObjects: Boolean = false): ByteArray {
         fun stream(text: String) = "<< /Length ${text.length} >>\nstream\n$text\nendstream"
         // The intermediate /Pages object precedes the actual catalog root in
         // file order, as it does in ordinary PDFs using a nested page tree.
@@ -103,7 +113,11 @@ class DocumentParserTest {
         val out = ByteArrayOutputStream()
         out.write("%PDF-1.4\n".toByteArray())
         val offsets = bodies.mapValues { (number, body) ->
-            out.size().also { out.write("$number 0 obj\n$body\nendobj\n".toByteArray()) }
+            out.size().also {
+                val startSeparator = if (compactObjects) "" else "\n"
+                val endSeparator = if (compactObjects && body.endsWith(">>")) "" else "\n"
+                out.write("$number 0 obj$startSeparator$body${endSeparator}endobj\n".toByteArray())
+            }
         }
         val xref = out.size()
         out.write("xref\n0 8\n0000000000 65535 f \n".toByteArray())

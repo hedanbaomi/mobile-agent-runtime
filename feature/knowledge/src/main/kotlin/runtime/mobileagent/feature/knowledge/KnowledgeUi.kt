@@ -31,6 +31,7 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.FilterChip
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
@@ -41,6 +42,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -92,6 +94,24 @@ data class KnowledgeBatchUi(
     val waiting: Int,
     val failed: Int,
     val error: String? = null,
+    /** Published (searchable) items.  The only number that may be shown as finished. */
+    val published: Int = 0,
+    val pending: Int = 0,
+    val unknown: Int = 0,
+    val cancelled: Int = 0,
+    val blockedReason: String? = null,
+    val visionTarget: String? = null,
+    val paused: Boolean = false,
+    val resumeStagingAvailable: Boolean = false,
+    /** Per-item detail.  Rendered only when the user expands the overall progress card. */
+    val items: List<KnowledgeBatchItemUi> = emptyList(),
+)
+
+data class KnowledgeBatchItemUi(
+    val jobId: String?,
+    val displayName: String,
+    val state: String,
+    val error: String? = null,
 )
 
 data class KnowledgeWaitingUi(
@@ -127,12 +147,18 @@ data class KnowledgeUiState(
     val embeddingModels: List<KnowledgeEmbeddingModelUi> = emptyList(),
     val apiQueryAttempts: List<KnowledgeQueryAttemptUi> = emptyList(),
     val batches: List<KnowledgeBatchUi> = emptyList(),
+    /** Human-readable Vision destination shown on the create-and-import step. */
+    val visionTargetLabel: String = "",
+    /** True when an image-capable target exists, so visual work can be authorized at creation. */
+    val visionConfigured: Boolean = false,
+    /** Exact destination identity; display text must never be used as an authorization token. */
+    val visionTargetFingerprint: String? = null,
 )
 
 data class KnowledgeActions(
-    val onImport: (List<Uri>) -> Unit = {},
-    val onImportZip: (Uri) -> Unit = {},
-    val onImportFolder: (Uri) -> Unit = {},
+    val onImport: (List<Uri>, String?) -> Unit = { _, _ -> },
+    val onImportZip: (Uri, String?) -> Unit = { _, _ -> },
+    val onImportFolder: (Uri, String?) -> Unit = { _, _ -> },
     val onSelectBase: (String) -> Unit = {},
     val onOpenEvidence: (String) -> Unit = {},
     val onRebuild: () -> Unit = {},
@@ -150,6 +176,10 @@ data class KnowledgeActions(
     val onGrantEmbedding: (String) -> Unit = {},
     val onRetryEmbedding: (String) -> Unit = {},
     val onAuthorizeQueryRetry: (spaceId: String, queryHash: String) -> Unit = { _, _ -> },
+    val onPauseBatch: (String) -> Unit = {},
+    val onResumeBatch: (String) -> Unit = {},
+    /** "Configure and continue": authorizes this batch against the current Vision destination. */
+    val onAuthorizeBatchVision: (String, String) -> Unit = { _, _ -> },
 )
 
 @Composable
@@ -160,7 +190,9 @@ fun KnowledgeScreen(
     showPageTitle: Boolean = true,
 ) {
     val zh = state.language.equals("zh-CN", true)
-    var selectedUris by remember { mutableStateOf<List<Uri>>(emptyList()) }
+    var pendingImport by remember { mutableStateOf<Pair<List<Uri>, String>?>(null) }
+    var pendingBatchVision by remember { mutableStateOf<String?>(null) }
+    val screenActions = actions.copy(onAuthorizeBatchVision = { id, _ -> pendingBatchVision = id })
     var newBaseName by remember { mutableStateOf("") }
     var newBaseDialog by remember { mutableStateOf(false) }
     var deleteBaseId by remember { mutableStateOf<String?>(null) }
@@ -171,20 +203,20 @@ fun KnowledgeScreen(
     var embeddingModelId by remember { mutableStateOf("") }
     var embeddingDimension by remember { mutableStateOf("") }
     val picker = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
-        if (uris.isNotEmpty()) selectedUris = uris
+        if (uris.isNotEmpty()) pendingImport = uris to "files"
     }
     val zipPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
-        if (uri != null) actions.onImportZip(uri)
+        if (uri != null) pendingImport = listOf(uri) to "zip"
     }
     val folderPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
-        if (uri != null) actions.onImportFolder(uri)
+        if (uri != null) pendingImport = listOf(uri) to "folder"
     }
     BoxWithConstraints(modifier.fillMaxSize().padding(horizontal = 16.dp, vertical = 12.dp)) {
         val wide = maxWidth >= 720.dp
         if (wide) {
             Row(Modifier.fillMaxSize(), horizontalArrangement = Arrangement.spacedBy(16.dp)) {
                 KnowledgeBasePane(
-                    state, actions, zh,
+                    state, screenActions, zh,
                     { picker.launch(arrayOf("*/*")) },
                     { zipPicker.launch(arrayOf("application/zip", "*/*")) },
                     { folderPicker.launch(null) },
@@ -194,12 +226,24 @@ fun KnowledgeScreen(
                     embeddingModelMenu = false
                     embeddingDialog = true
                 }, Modifier.weight(0.32f).fillMaxSize(), showPageTitle)
-                KnowledgeContentPane(state, actions, zh, { deleteDocumentId = it }, { rebuildRequested = true }, Modifier.weight(0.68f).fillMaxSize().verticalScroll(rememberScrollState()))
+                KnowledgeContentPane(state, screenActions, zh, { deleteDocumentId = it }, { rebuildRequested = true }, Modifier.weight(0.68f).fillMaxSize().verticalScroll(rememberScrollState()))
             }
         } else {
+            var manageBases by rememberSaveable(state.selectedBaseId) { mutableStateOf(false) }
+            val hasBatch = state.batches.isNotEmpty()
             Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                if (hasBatch) {
+                    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                        Text(state.bases.firstOrNull { it.id == state.selectedBaseId }?.name.orEmpty(),
+                            style = MaterialTheme.typography.titleMedium, modifier = Modifier.weight(1f))
+                        TextButton(onClick = { manageBases = !manageBases }) {
+                            Text(if (zh) "管理知识库" else "Manage libraries")
+                        }
+                    }
+                }
+                if (!hasBatch || manageBases) {
                 KnowledgeBasePane(
-                    state, actions, zh,
+                    state, screenActions, zh,
                     { picker.launch(arrayOf("*/*")) },
                     { zipPicker.launch(arrayOf("application/zip", "*/*")) },
                     { folderPicker.launch(null) },
@@ -209,7 +253,8 @@ fun KnowledgeScreen(
                     embeddingModelMenu = false
                     embeddingDialog = true
                 }, Modifier.fillMaxWidth(), showPageTitle)
-                KnowledgeContentPane(state, actions, zh, { deleteDocumentId = it }, { rebuildRequested = true }, Modifier.fillMaxWidth())
+                }
+                KnowledgeContentPane(state, screenActions, zh, { deleteDocumentId = it }, { rebuildRequested = true }, Modifier.fillMaxWidth())
             }
         }
     }
@@ -366,15 +411,70 @@ fun KnowledgeScreen(
             },
         )
     }
-    if (selectedUris.isNotEmpty()) {
+    pendingImport?.let { (uris, sourceKind) ->
+        val confirmedTarget = remember(pendingImport) { state.visionTargetFingerprint to state.visionTargetLabel }
+        val selectedBase = state.bases.firstOrNull { it.id == state.selectedBaseId }
+        val selectedName = selectedBase?.name ?: if (zh) "默认知识库" else "the default knowledge base"
         AlertDialog(
-            onDismissRequest = { selectedUris = emptyList() },
-            title = { Text(if (zh) "确认导入" else "Confirm import") },
-            text = { Text(if (zh) "将所选 ${selectedUris.size} 个文件导入当前知识库？" else "Import ${selectedUris.size} selected file(s) into the current knowledge base?") },
-            confirmButton = {
-                Button(onClick = { val uris = selectedUris; selectedUris = emptyList(); actions.onImport(uris) }) { Text(if (zh) "导入" else "Import") }
+            onDismissRequest = { pendingImport = null },
+            title = { Text(if (zh) "创建并开始导入" else "Create and start import") },
+            text = {
+                Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text(
+                        if (zh) "本批次选定 ${uris.size} 项资料，导入到「$selectedName」。" else "${uris.size} selected item(s) will be imported into $selectedName.",
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                    Text(
+                        if (zh) "视觉目标：${confirmedTarget.second.ifBlank { "未配置" }}" else "Vision target: ${confirmedTarget.second.ifBlank { "not configured" }}",
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                    Text(
+                        if (zh) "可能外发的内容：只有本批次中确实包含图片、且本机解析无法覆盖的页面或图片会发送到上面的视觉目标。纯文本资料只在本机处理。" else "What may leave the device: only pages or images in this batch that actually contain visual content the local parser cannot cover. Text-only material stays local.",
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                    Text(
+                        if (zh) "费用提示：视觉处理由服务商计费，金额取决于实际发送的图片数量与所选模型。本次授权只覆盖本批次已选资料，不会扩展到以后新增的文件。" else "Cost: visual processing is billed by the provider and depends on how many images are actually sent. This authorization covers only the material selected now and never widens to files added later.",
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                    if (confirmedTarget.first == null) {
+                        Text(
+                            if (zh) "当前没有可处理图片的视觉目标。纯文本资料不受影响；一旦真正遇到需要视觉的内容，本批次会整体暂停并提示你配置后继续。" else "No image-capable Vision target is configured. Text-only material is unaffected; if visual content is actually found the whole batch pauses and asks you to configure and continue.",
+                            style = MaterialTheme.typography.bodySmall,
+                        )
+                    }
+                }
             },
-            dismissButton = { TextButton(onClick = { selectedUris = emptyList() }) { Text(if (zh) "取消" else "Cancel") } },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        val chosenTarget = confirmedTarget.first
+                        pendingImport = null
+                        when (sourceKind) {
+                            "zip" -> actions.onImportZip(uris.first(), chosenTarget)
+                            "folder" -> actions.onImportFolder(uris.first(), chosenTarget)
+                            else -> actions.onImport(uris, chosenTarget)
+                        }
+                    },
+                ) { Text(if (zh) "创建并开始导入" else "Create and start import") }
+            },
+            dismissButton = { TextButton(onClick = { pendingImport = null }) { Text(if (zh) "取消" else "Cancel") } },
+        )
+    }
+    pendingBatchVision?.let { batchId ->
+        val target = remember(batchId) { state.visionTargetFingerprint to state.visionTargetLabel }
+        AlertDialog(
+            onDismissRequest = { pendingBatchVision = null },
+            title = { Text(if (zh) "确认本批次视觉处理" else "Confirm batch Vision processing") },
+            text = { Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text(if (zh) "目标：${target.second.ifBlank { "未配置" }}" else "Target: ${target.second.ifBlank { "not configured" }}")
+                Text(if (zh) "仅将本批次需要视觉处理的页面或图片发送到此目标。服务商可能收费；后续新增资料不在授权范围内。" else "Send only this batch's required visual pages or images to this destination. Provider charges may apply. Files added later are excluded.")
+                if (target.first == null) Text(if (zh) "请先配置可处理图片的模型，然后返回继续。" else "Configure an image-capable model, then return to continue.")
+            } },
+            confirmButton = { Button(onClick = {
+                pendingBatchVision = null
+                target.first?.let { actions.onAuthorizeBatchVision(batchId, it) } ?: actions.onConfigureVision()
+            }) { Text(if (target.first == null) (if (zh) "配置视觉模型" else "Configure Vision model") else (if (zh) "确认并继续" else "Confirm and continue")) } },
+            dismissButton = { TextButton(onClick = { pendingBatchVision = null }) { Text(if (zh) "取消" else "Cancel") } },
         )
     }
     state.evidence?.let { EvidenceDialog(it, actions.onCloseEvidence) }
@@ -454,7 +554,13 @@ private fun KnowledgeBasePane(
 private fun KnowledgeContentPane(state: KnowledgeUiState, actions: KnowledgeActions, zh: Boolean, onDelete: (String) -> Unit, onRebuild: () -> Unit, modifier: Modifier) {
     Column(modifier) {
         if (state.status.isNotBlank()) StatusCard(state.status)
-        state.waiting.forEach { WaitingCard(it, actions, zh) }
+        // The default surface is exactly one overall progress card per durable batch.  Per-file
+        // cards, technical fields and logs only appear behind the user-opened detail section.
+        state.batches.forEach { batch -> BatchProgressCard(batch, state.jobs, actions, zh, state.loading) }
+        if (state.batches.isEmpty()) {
+            // Legacy single-file imports have no durable batch row and keep their per-item cards.
+            state.waiting.forEach { WaitingCard(it, actions, zh) }
+        }
         val selectedQueryAttempts = state.apiQueryAttempts
         if (selectedQueryAttempts.isNotEmpty()) {
             Text(
@@ -470,32 +576,26 @@ private fun KnowledgeContentPane(state: KnowledgeUiState, actions: KnowledgeActi
                 Text(if (zh) "重建索引" else "Rebuild index")
             }
         }
-        if (knowledgeImportActive(state) || state.jobs.isNotEmpty() || state.loading) {
+        if (state.batches.isEmpty() && (knowledgeImportActive(state) || state.jobs.isNotEmpty() || state.loading)) {
             Text(knowledgeImportSummary(state, zh), style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(top = 8.dp))
         }
         if (state.documents.isEmpty() && !knowledgeImportActive(state) && !state.loading && state.jobs.isEmpty()) {
             Text(if (zh) "此知识库没有文档。" else "No documents in this knowledge base.", style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(top = 12.dp))
         }
-        state.documents.forEach { document -> DocumentCard(document, onDelete, actions, zh) }
+        var showDocuments by rememberSaveable(state.selectedBaseId) { mutableStateOf(false) }
         if (state.batches.isNotEmpty()) {
-            Text(if (zh) "导入批次" else "Import batches", style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(top = 18.dp))
-            state.batches.forEach { batch ->
-                Card(Modifier.fillMaxWidth().padding(top = 8.dp)) {
-                    Column(Modifier.padding(12.dp)) {
-                        Text("${batch.displayName} · ${batch.kind} · ${batch.state}", fontWeight = FontWeight.SemiBold)
-                        Text(
-                            if (zh) "共 ${batch.totalItems}，已复制 ${batch.copied}，处理中 ${batch.processing}，等待 ${batch.waiting}，失败 ${batch.failed}。"
-                            else "${batch.totalItems} items, copied ${batch.copied}, processing ${batch.processing}, waiting ${batch.waiting}, failed ${batch.failed}.",
-                            style = MaterialTheme.typography.bodySmall,
-                        )
-                        batch.error?.let { Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall) }
-                    }
-                }
+            TextButton(onClick = { showDocuments = !showDocuments }) {
+                Text(if (showDocuments) (if (zh) "收起文档" else "Hide documents") else (if (zh) "查看 ${state.documents.size} 个文档" else "Show ${state.documents.size} documents"))
             }
         }
-        if (state.jobs.isNotEmpty()) {
+        if (state.batches.isEmpty() || showDocuments) {
+            state.documents.forEach { document -> DocumentCard(document, onDelete, actions, zh) }
+        }
+        val batchJobIds = state.batches.flatMap { it.items }.mapNotNull { it.jobId }.toSet()
+        val legacyJobs = state.jobs.filter { it.id !in batchJobIds }
+        if (legacyJobs.isNotEmpty()) {
             Text(if (zh) "导入任务" else "Import jobs", style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(top = 18.dp))
-            state.jobs.forEach { job -> JobCard(job, actions, zh) }
+            legacyJobs.forEach { job -> JobCard(job, actions, zh) }
         }
         Spacer(Modifier.height(16.dp))
         Text(if (zh) "未明确配置视觉模型的图片会保持等待，不会标记为已完成。" else "Images without an explicitly configured Vision model remain waiting and are not marked ready.", style = MaterialTheme.typography.bodySmall)
@@ -554,6 +654,152 @@ private fun StatusCard(status: String) {
     }
 }
 
+/**
+ * The single overall progress card for one durable batch.
+ *
+ * It never presents copied bytes as finished work, never calls a queue an upload, and never keeps a
+ * running animation while the batch is paused or blocked.  Everything technical lives behind the
+ * user-opened detail section.
+ */
+@Composable
+private fun BatchProgressCard(batch: KnowledgeBatchUi, jobs: List<KnowledgeImportJobUi>, actions: KnowledgeActions, zh: Boolean, busy: Boolean) {
+    var expanded by rememberSaveable(batch.id) { mutableStateOf(false) }
+    val blocked = batch.blockedReason != null || batch.state.equals("BLOCKED", true)
+    val paused = batch.paused || batch.state.equals("PAUSED", true)
+    val percent = if (batch.totalItems > 0) batch.published * 100 / batch.totalItems else null
+    Card(
+        colors = CardDefaults.cardColors(
+            containerColor = when {
+                blocked -> MaterialTheme.colorScheme.errorContainer
+                paused -> MaterialTheme.colorScheme.secondaryContainer
+                else -> MaterialTheme.colorScheme.surfaceVariant
+            },
+        ),
+        modifier = Modifier.fillMaxWidth().padding(bottom = 10.dp),
+    ) {
+        Column(Modifier.padding(12.dp)) {
+            Text(batch.displayName, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+            Text(
+                when {
+                    batch.state.equals("COMPLETED", true) -> if (zh) "已完成" else "Completed"
+                    blocked -> if (batch.blockedReason == "MISSING_VISUAL_SOURCE") {
+                        if (zh) "已阻塞：资料只包含图片引用，请展开详情处理" else "Blocked: referenced images are missing; open details"
+                    } else if (batch.blockedReason == "VISION_TARGET_CHANGED") {
+                        if (zh) "已阻塞：视觉目标已变更，需要重新确认" else "Blocked: the Vision destination changed and needs re-confirmation"
+                    } else if (zh) "已阻塞：需要视觉模型" else "Blocked: needs a Vision model"
+                    paused -> if (zh) "已暂停" else "Paused"
+                    batch.state.equals("FAILED", true) -> if (zh) "导入失败" else "Import failed"
+                    batch.state.equals("CANCELLED", true) -> if (zh) "已取消" else "Cancelled"
+                    batch.unknown > 0 -> if (zh) "请求结果未知：请展开详情确认是否重试" else "Request outcome unknown: open details to decide whether to retry"
+                    batch.state.equals("WAITING", true) -> if (zh) "等待中" else "Waiting"
+                    batch.resumeStagingAvailable -> if (zh) "复制已中断，可从已保存位置继续" else "Copy interrupted; resume from the saved checkpoint"
+                    batch.state.equals("COPYING", true) -> if (zh) "正在复制本地资料" else "Copying local files"
+                    else -> if (zh) "正在处理" else "Processing"
+                },
+                style = MaterialTheme.typography.bodySmall,
+                modifier = Modifier.padding(top = 4.dp),
+            )
+            // Honest progress: finished means published and searchable, never merely copied.
+            ProgressRow(batch, percent, zh)
+            batch.error?.let { Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall) }
+            Column(Modifier.padding(top = 8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                when {
+                    blocked && batch.blockedReason == "MISSING_VISUAL_SOURCE" -> {
+                        Text(if (zh) "请单独导入图片，或在详情中明确选择仅文本（保留视觉缺口）。" else "Import the images separately, or explicitly accept text only with visual gaps in details.")
+                        TextButton(onClick = { expanded = true }) { Text(if (zh) "查看待处理资料" else "Review affected items") }
+                    }
+                    blocked -> {
+                        Button(onClick = { actions.onAuthorizeBatchVision(batch.id, "") }, enabled = !busy) {
+                            Text(if (zh) "配置并继续" else "Configure and continue")
+                        }
+                        OutlinedButton(onClick = { actions.onConfigureVision() }) {
+                            Text(if (zh) "配置视觉模型" else "Configure Vision model")
+                        }
+                    }
+                    paused || batch.resumeStagingAvailable -> Button(onClick = { actions.onResumeBatch(batch.id) }, enabled = !busy) {
+                        Text(if (zh) "继续导入" else "Resume import")
+                    }
+                    batch.state.uppercase() !in setOf("COMPLETED", "CANCELLED", "FAILED") ->
+                        OutlinedButton(onClick = { actions.onPauseBatch(batch.id) }) {
+                            Text(if (zh) "暂停" else "Pause")
+                        }
+                }
+                TextButton(onClick = { expanded = !expanded }) {
+                    Text(
+                        if (expanded) (if (zh) "收起详情" else "Hide details")
+                        else (if (zh) "展开 ${batch.items.size} 项详情" else "Show ${batch.items.size} item details"),
+                    )
+                }
+            }
+            if (expanded) {
+            Text(
+                if (zh) {
+                    "已复制 ${batch.copied} · 处理中 ${batch.processing} · 排队 ${batch.pending} · 等待 ${batch.waiting} · 失败 ${batch.failed}" +
+                        if (batch.unknown > 0) " · 待确认 ${batch.unknown}" else ""
+                } else {
+                    "Copied ${batch.copied} · processing ${batch.processing} · queued ${batch.pending} · waiting ${batch.waiting} · failed ${batch.failed}" +
+                        if (batch.unknown > 0) " · unknown ${batch.unknown}" else ""
+                },
+                style = MaterialTheme.typography.labelSmall,
+                modifier = Modifier.padding(top = 4.dp),
+            )
+            batch.visionTarget?.let { target ->
+                Text(
+                    if (zh) "本批次视觉目标：$target" else "Batch Vision target: $target",
+                    style = MaterialTheme.typography.labelSmall,
+                    modifier = Modifier.padding(top = 4.dp),
+                )
+            }
+                Column(Modifier.padding(top = 8.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    batch.items.forEach { item ->
+                        val job = jobs.firstOrNull { it.id == item.jobId }
+                        if (job != null) {
+                            JobCard(job.copy(requiresVisionConsent = false), actions, zh)
+                            if (batch.blockedReason == "MISSING_VISUAL_SOURCE" && job.stage == "WAITING_FOR_VISION_MODEL") {
+                                OutlinedButton(onClick = { actions.onTextOnly(job.id) }, enabled = !busy) {
+                                    Text(if (zh) "仅文本继续（保留视觉缺口）" else "Continue with text only (visual gaps remain)")
+                                }
+                            }
+                        }
+                        else BatchItemRow(item, zh)
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun ProgressRow(batch: KnowledgeBatchUi, percent: Int?, zh: Boolean) {
+    if (batch.totalItems <= 0) {
+        Text(
+            if (zh) "本批次文件总量尚未确定。" else "The batch file count is not known yet.",
+            style = MaterialTheme.typography.bodySmall,
+            modifier = Modifier.padding(top = 6.dp),
+        )
+        return
+    }
+    Column(Modifier.padding(top = 6.dp)) {
+        LinearProgressIndicator(
+            progress = { (percent ?: 0).toFloat() / 100f },
+            modifier = Modifier.fillMaxWidth(),
+        )
+        Text(
+            if (zh) "已完成 ${batch.published} / ${batch.totalItems}（${percent ?: 0}%）"
+            else "Finished ${batch.published} / ${batch.totalItems} (${percent ?: 0}%)",
+            style = MaterialTheme.typography.bodySmall,
+            modifier = Modifier.padding(top = 4.dp),
+        )
+    }
+}
+
+@Composable
+private fun BatchItemRow(item: KnowledgeBatchItemUi, zh: Boolean) {
+    Column {
+        Text("${item.displayName} · ${knowledgeStageLabel(item.state, zh)}", style = MaterialTheme.typography.labelMedium)
+        item.error?.let { Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.labelSmall) }
+    }
+}
 @Composable
 private fun WaitingCard(waiting: KnowledgeWaitingUi, actions: KnowledgeActions, zh: Boolean) {
     Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.tertiaryContainer), modifier = Modifier.fillMaxWidth().padding(bottom = 10.dp)) {

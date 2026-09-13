@@ -8,7 +8,7 @@ import java.util.zip.DeflaterOutputStream
 import java.util.zip.Inflater
 
 object PdfParser {
-    const val FINGERPRINT = "pdf-text-v14-pdfrenderer"
+    const val FINGERPRINT = "pdf-text-v15-pdfrenderer"
 
     private const val MAX_PDF_STREAM_BYTES = 32 * 1024 * 1024
 
@@ -874,9 +874,14 @@ object PdfParser {
         var index = latin.indexOf(keyword, fromIndex)
         while (index >= 0) {
             val end = index + keyword.length
-            val beforeIsWhitespace = index == 0 || isPdfWhitespace(latin[index - 1])
+            // A closing PDF dictionary, array or string delimiter also terminates
+            // an object value. Producers such as Pillow legally emit >>endobj.
+            // Keep stream searches whitespace-bound so binary payload markers
+            // do not acquire new fallback boundaries.
+            val beforeIsBoundary = index == 0 || isPdfWhitespace(latin[index - 1]) ||
+                (keyword == "endobj" && latin[index - 1] in ">])")
             val afterIsWhitespace = end >= latin.length || isPdfWhitespace(latin[end])
-            if (beforeIsWhitespace && afterIsWhitespace) return index
+            if (beforeIsBoundary && afterIsWhitespace) return index
             index = latin.indexOf(keyword, index + keyword.length)
         }
         return -1

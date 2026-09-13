@@ -4,6 +4,11 @@
 package runtime.mobileagent
 
 import android.app.Application
+import android.net.Uri
+import kotlinx.serialization.Serializable
+import kotlinx.serialization.encodeToString
+import kotlinx.serialization.decodeFromString
+import kotlinx.serialization.json.Json
 import java.io.ByteArrayOutputStream
 import java.io.File
 import java.io.FileOutputStream
@@ -33,6 +38,7 @@ import runtime.mobileagent.knowledge.ImportJob
 import runtime.mobileagent.knowledge.ImportStage
 import runtime.mobileagent.knowledge.KnowledgeArchive
 import runtime.mobileagent.knowledge.MediaKind
+import runtime.mobileagent.knowledge.VisionBinding
 
 /** A source owned by the application, not by a screen or a ViewModel. */
 data class KnowledgeImportInput(
@@ -50,9 +56,12 @@ data class KnowledgeImportProgress(
     val processing: Int = 0,
     val waiting: Int = 0,
     val failed: Int = 0,
+    /** Items already published to a searchable index version.  Never inferred from `copied`. */
+    val published: Int = 0,
 )
 
 enum class KnowledgeImportTerminal {
+    PAUSED,
     COMPLETED,
     FAILED,
     USER_CANCELLED,
@@ -146,7 +155,53 @@ interface KnowledgeImportPorts {
     fun enqueueBatch(batchId: String, visionConfigured: Boolean)
     fun enqueueBatchFence(batchId: String, visionConfigured: Boolean)
     fun cancelBatch(batchId: String, jobIds: List<String>)
+
+    /** Current Vision destination fingerprint, or null when no image-capable target is configured. */
+    fun visionBindingFingerprint(): String?
+
+    /**
+     * Persist the single batch-level authorization the user gave on the creation page.  Returns
+     * false when the destination or the selected member list is no longer what was confirmed, in
+     * which case nothing was authorized and no image left the device.
+     */
+    fun authorizeBatchVision(batchId: String, expectedTarget: String): Boolean
+
+    fun pauseBatch(batchId: String): Boolean
+
+    fun resumeBatch(batchId: String): Boolean
+
+    fun beginStaging(files: List<KnowledgeImportInput>, kind: ImportBatchKind, label: String,
+        knowledgeBaseId: String, visionTarget: String?): String =
+        beginBatch(knowledgeBaseId, kind, label)
+    fun loadStaging(batchId: String): KnowledgeStagingPlan? = null
+    fun stagingSourceCopied(batchId: String, sourceKey: String): Boolean = false
+    fun stageInput(batchId: String, input: KnowledgeImportInput, kind: ImportBatchKind,
+        knowledgeBaseId: String, checkpoint: () -> Unit): List<String> {
+        checkpoint()
+        val job = importOne(input, kind, knowledgeBaseId, visionConfigured())
+        checkpoint()
+        bindJobToBatch(batchId, job, input.displayName)
+        return listOf(job.id)
+    }
+    fun completeStaging(batchId: String) = Unit
+    fun blockVisionTargetChanged(batchId: String) =
+        failBatch(batchId, "VISION_TARGET_CHANGED")
 }
+
+/** Private durable source selection, excluded from diagnostics. */
+data class KnowledgeStagingPlan(
+    val batchId: String,
+    val files: List<KnowledgeImportInput>,
+    val kind: ImportBatchKind,
+    val label: String,
+    val knowledgeBaseId: String,
+    val visionTarget: String?,
+)
+
+@Serializable
+private data class StagingSource(val displayName: String, val sourceKey: String)
+@Serializable
+private data class StagingManifest(val sources: List<StagingSource>, val visionTarget: String?)
 
 sealed interface KnowledgeImportStart {
     data class Started(val operation: KnowledgeImportOperation) : KnowledgeImportStart
@@ -183,6 +238,7 @@ class KnowledgeImportCoordinator(
         val completion: CompletableDeferred<KnowledgeImportOutcome>,
         val progress: MutableStateFlow<KnowledgeImportProgress>,
         val cancelRequested: AtomicBoolean,
+        val pauseRequested: AtomicBoolean = AtomicBoolean(false),
         var worker: Job? = null,
         var terminal: KnowledgeImportTerminal? = null,
         var outcome: KnowledgeImportOutcome? = null,
@@ -198,7 +254,13 @@ class KnowledgeImportCoordinator(
         kind: ImportBatchKind,
         label: String,
         knowledgeBaseId: String?,
+        visionTarget: String? = null,
+        existingBatchId: String? = null,
     ): KnowledgeImportStart {
+        if (files.map { it.sourceKey }.distinct().size != files.size)
+            return KnowledgeImportStart.Rejected("所选资料重复。")
+        if (kind == ImportBatchKind.ZIP && files.size != 1)
+            return KnowledgeImportStart.Rejected("每批请选择一个 ZIP 文件。")
         if (files.isEmpty()) return KnowledgeImportStart.Rejected("没有可导入的文件。")
         if (files.size > MAX_ITEMS) return KnowledgeImportStart.Rejected("一次最多选择 $MAX_ITEMS 个文件。")
         if (label.isBlank()) return KnowledgeImportStart.Rejected("导入名称不能为空。")
@@ -216,7 +278,7 @@ class KnowledgeImportCoordinator(
             )
             active = record
             val worker = scope.launch {
-                run(record, files, kind, label, knowledgeBaseId)
+                run(record, files, kind, label, knowledgeBaseId, visionTarget, existingBatchId)
             }
             record.worker = worker
             worker.invokeOnCompletion { cause ->
@@ -227,7 +289,8 @@ class KnowledgeImportCoordinator(
                             operationId = record.operationId,
                             batchId = record.progress.value.batchId,
                             knowledgeBaseId = knowledgeBaseId,
-                            terminal = if (record.cancelRequested.get()) KnowledgeImportTerminal.USER_CANCELLED
+                            terminal = if (record.pauseRequested.get()) KnowledgeImportTerminal.PAUSED
+                            else if (record.cancelRequested.get()) KnowledgeImportTerminal.USER_CANCELLED
                             else KnowledgeImportTerminal.SYSTEM_CANCELLED,
                             failureKind = if (record.cancelRequested.get()) KnowledgeImportFailureKind.USER_CANCELLED
                             else KnowledgeImportFailureKind.SYSTEM_CANCELLED,
@@ -239,6 +302,33 @@ class KnowledgeImportCoordinator(
             }
             return KnowledgeImportStart.Started(operationOf(record))
         }
+    }
+
+    fun pauseBatch(batchId: String): Boolean {
+        val record = synchronized(lock) {
+            active?.takeIf { it.progress.value.batchId == batchId && it.terminal == null }
+                ?.also { it.pauseRequested.set(true) }
+        }
+        val paused = ports.pauseBatch(batchId)
+        if (paused) record?.worker?.cancel(CancellationException("staging paused"))
+        else record?.pauseRequested?.set(false)
+        return paused
+    }
+
+    /** Null means membership is complete: resume the ordinary worker instead. */
+    fun resumeStaging(batchId: String): KnowledgeImportStart? {
+        val plan = ports.loadStaging(batchId) ?: return null
+        synchronized(lock) {
+            active?.takeIf { it.terminal == null }?.let {
+                return KnowledgeImportStart.AlreadyRunning(operationOf(it))
+            }
+        }
+        when (ports.readBatchProgress(batchId).state) {
+            "PAUSED" -> if (!ports.resumeBatch(batchId)) return KnowledgeImportStart.Rejected("批次无法继续。")
+            "COPYING", "STAGING" -> Unit // Interrupted process: explicit Resume owns the next copy.
+            else -> return KnowledgeImportStart.Rejected("批次无法继续。")
+        }
+        return start(plan.files, plan.kind, plan.label, plan.knowledgeBaseId, plan.visionTarget, batchId)
     }
 
     fun cancel(operationId: String): Boolean {
@@ -268,8 +358,10 @@ class KnowledgeImportCoordinator(
         kind: ImportBatchKind,
         label: String,
         requestedKnowledgeBaseId: String?,
+        visionTarget: String?,
+        existingBatchId: String?,
     ) {
-        var batchId: String? = null
+        var batchId: String? = existingBatchId
         var knowledgeBaseId: String? = requestedKnowledgeBaseId
         val importedJobIds = mutableListOf<String>()
         var copied = 0
@@ -278,49 +370,59 @@ class KnowledgeImportCoordinator(
         try {
             emit(KnowledgeImportDiagnosticEvent.Started(record.operationId, kind.name, files.size))
             knowledgeBaseId = requestedKnowledgeBaseId ?: io { ports.createKnowledgeBase("我的知识库") }
-            if (kind != ImportBatchKind.ZIP) {
-                batchId = io { ports.beginBatch(requireNotNull(knowledgeBaseId), kind, label) }
-                require(batchId!!.isNotBlank()) { "批次创建失败。" }
-                updateProgress(record, batchId!!, io { ports.readBatchProgress(batchId!!) })
+            if (batchId == null) {
+                batchId = io { ports.beginStaging(files, kind, label, requireNotNull(knowledgeBaseId), visionTarget) }
             }
+            val stagingBatchId = requireNotNull(batchId)
+            require(stagingBatchId.isNotBlank()) { "批次创建失败。" }
+            updateProgress(record, stagingBatchId, io { ports.readBatchProgress(stagingBatchId) })
             files.forEachIndexed { index, input ->
                 ensureActive(record)
+                check(io { ports.generationStillCurrent(stagingBatchId) }) {
+                    "知识库代际已变更，批次无法发布。"
+                }
                 stage = "copying"
                 emitProgress(record, kind, "copying", copied, files.size, progressGate)
-                val job = io {
-                    ports.importOne(input, kind, requireNotNull(knowledgeBaseId), ports.visionConfigured())
-                }
-                importedJobIds += job.id
-                if (batchId == null) batchId = io { ports.jobBatchId(job.id) }
-                val resolvedBatchId = batchId
-                if (resolvedBatchId != null && kind != ImportBatchKind.ZIP) {
-                    io {
-                        ports.bindJobToBatch(resolvedBatchId, job, input.displayName)
-                        check(ports.generationStillCurrent(resolvedBatchId)) {
-                            "知识库代际已变更，批次无法发布。"
+                if (!io { ports.stagingSourceCopied(stagingBatchId, input.sourceKey) }) {
+                    importedJobIds += io {
+                        ports.stageInput(stagingBatchId, input, kind, requireNotNull(knowledgeBaseId)) {
+                            ensureActive(record)
                         }
-                        ports.enqueueBatch(resolvedBatchId, ports.visionConfigured())
                     }
-                    emit(KnowledgeImportDiagnosticEvent.Enqueued(record.operationId, index + 1))
                 }
+                ensureActive(record)
                 copied = index + 1
-                if (resolvedBatchId != null) {
-                    updateProgress(record, resolvedBatchId, io { ports.refreshBatchProgress(resolvedBatchId) })
-                }
+                updateProgress(record, stagingBatchId, io { ports.refreshBatchProgress(stagingBatchId) })
                 emitProgress(record, kind, "copied", copied, files.size, progressGate)
             }
             batchId?.let { durableBatchId ->
                 ensureActive(record)
-                stage = "processing"
-                val progress = io { ports.refreshBatchProgress(durableBatchId) }
-                updateProgress(record, durableBatchId, progress)
+                stage = "authorizing"
                 io {
+                    ensureActive(record)
+                    ports.completeStaging(durableBatchId)
                     check(ports.generationStillCurrent(durableBatchId)) {
                         "知识库代际已变更，批次无法发布。"
                     }
-                    ports.enqueueBatchFence(durableBatchId, ports.visionConfigured())
+                    // "Create and start import" is one action that authorizes this batch's visual
+                    // work against the one destination the user confirmed.  Nothing else turns on
+                    // per-file consent, and a destination that changed meanwhile authorizes nothing.
+                    val confirmedTarget = visionTarget?.takeIf { it.isNotBlank() }
+                    if (confirmedTarget != null) {
+                        if (!ports.authorizeBatchVision(durableBatchId, confirmedTarget)) {
+                            ports.blockVisionTargetChanged(durableBatchId)
+                        }
+                    }
                 }
-                emit(KnowledgeImportDiagnosticEvent.Enqueued(record.operationId, copied))
+                stage = "processing"
+                val progress = io { ports.refreshBatchProgress(durableBatchId) }
+                updateProgress(record, durableBatchId, progress)
+                ensureActive(record)
+                if (progress.state != "BLOCKED") io {
+                    ensureActive(record)
+                    ports.enqueueBatchFence(durableBatchId, ports.visionConfigured())
+                    emit(KnowledgeImportDiagnosticEvent.Enqueued(record.operationId, copied))
+                }
             }
             finishIfNeeded(
                 record,
@@ -334,7 +436,8 @@ class KnowledgeImportCoordinator(
             )
         } catch (cancel: CancellationException) {
             val userCancelled = record.cancelRequested.get()
-            val terminal = if (userCancelled) KnowledgeImportTerminal.USER_CANCELLED
+            val terminal = if (record.pauseRequested.get()) KnowledgeImportTerminal.PAUSED
+            else if (userCancelled) KnowledgeImportTerminal.USER_CANCELLED
             else KnowledgeImportTerminal.SYSTEM_CANCELLED
             val kind = if (userCancelled) KnowledgeImportFailureKind.USER_CANCELLED
             else KnowledgeImportFailureKind.SYSTEM_CANCELLED
@@ -384,6 +487,8 @@ class KnowledgeImportCoordinator(
     private suspend fun <T> io(block: () -> T): T = runInterruptible(ioDispatcher, block)
 
     private fun ensureActive(record: Record) {
+        if (record.pauseRequested.get()) throw CancellationException("staging paused")
+        if (Thread.currentThread().isInterrupted) throw CancellationException("staging interrupted")
         if (record.cancelRequested.get()) throw CancellationException("user cancellation")
     }
 
@@ -483,6 +588,109 @@ class AndroidKnowledgeImportPorts(private val app: MobileAgentApp) : KnowledgeIm
     override fun beginBatch(knowledgeBaseId: String, kind: ImportBatchKind, displayName: String): String =
         repo.beginBatch(knowledgeBaseId, kind, displayName)
 
+    override fun beginStaging(files: List<KnowledgeImportInput>, kind: ImportBatchKind,
+        label: String, knowledgeBaseId: String, visionTarget: String?): String =
+        repo.beginBatch(knowledgeBaseId, kind, label,
+            stagingManifest = Json.encodeToString(StagingManifest(
+                files.map { StagingSource(it.displayName, it.sourceKey) }, visionTarget)),
+            selectedCount = files.size)
+
+    override fun loadStaging(batchId: String): KnowledgeStagingPlan? {
+        val row = app.container.db.query(
+            "SELECT kb_id, kind, display_name, staging_manifest, staging_complete FROM import_batches WHERE id = ?",
+            listOf(batchId)).singleOrNull() ?: return null
+        if (row.long("staging_complete") != 0L) return null
+        val manifest = Json.decodeFromString<StagingManifest>(row.string("staging_manifest"))
+        return KnowledgeStagingPlan(batchId, manifest.sources.map { source ->
+            val uri = Uri.parse(source.sourceKey)
+            KnowledgeImportInput(source.displayName, source.sourceKey,
+                { requireNotNull(app.contentResolver.openInputStream(uri)) { "无法读取所选资料。" } },
+                { app.contentResolver.getType(uri).orEmpty() })
+        }, ImportBatchKind.valueOf(row.string("kind")), row.string("display_name"),
+            row.string("kb_id"), manifest.visionTarget)
+    }
+
+    override fun stagingSourceCopied(batchId: String, sourceKey: String): Boolean =
+        app.container.db.query("SELECT id FROM import_items WHERE batch_id = ? AND item_key = ?",
+            listOf(batchId, sourceKey)).isNotEmpty()
+
+    override fun completeStaging(batchId: String) {
+        repo.completeBatchStaging(batchId)
+        archiveSnapshot(batchId).delete()
+    }
+
+    private fun archiveSnapshot(batchId: String): File {
+        require(batchId.matches(Regex("[a-zA-Z0-9-]+"))) { "Invalid batch reference" }
+        val directory = File(app.filesDir, "import-staging").apply {
+            check(exists() || mkdirs()) { "Cannot create import staging directory" }
+        }
+        return File(directory, "batch-" + batchId + ".zip")
+    }
+
+    override fun blockVisionTargetChanged(batchId: String) {
+        app.container.db.execute(
+            "UPDATE import_batches SET state = 'BLOCKED', blocked_reason = 'VISION_TARGET_CHANGED', " +
+                "error = 'VISION_TARGET_CHANGED' WHERE id = ? AND state NOT IN ('PAUSED','CANCELLED','COMPLETED')",
+            listOf(batchId))
+    }
+
+    override fun stageInput(batchId: String, input: KnowledgeImportInput, kind: ImportBatchKind,
+        knowledgeBaseId: String, checkpoint: () -> Unit): List<String> {
+        fun checkCopy() {
+            checkpoint()
+            check(repo.findBatch(batchId)?.state?.name == "COPYING") { "Batch staging is stopped" }
+        }
+        val checkedInput = input.copy(openStream = {
+            val delegate = input.openStream()
+            object : java.io.FilterInputStream(delegate) {
+                override fun read(): Int { checkCopy(); return super.read() }
+                override fun read(bytes: ByteArray, offset: Int, length: Int): Int {
+                    checkCopy(); return super.read(bytes, offset, length)
+                }
+            }
+        })
+        checkCopy()
+        if (kind != ImportBatchKind.ZIP) {
+            val bytes = readLimited(checkedInput)
+            checkCopy()
+            return listOf(repo.stageBatchBytes(batchId, input.sourceKey, input.displayName,
+                input.mediaType(), bytes, knowledgeBaseId, visionConfigured(), apiEmbedding(knowledgeBaseId)).id)
+        }
+        val archive = archiveSnapshot(batchId)
+        if (!archive.isFile) {
+            val temporary = stageArchive(checkedInput)
+            try {
+                checkCopy()
+                check(temporary.renameTo(archive)) { "Cannot publish archive snapshot" }
+            } finally {
+                temporary.delete()
+            }
+        }
+        // This immutable private snapshot survives pause and process death. Reopening the
+        // external URI after any child was bound could silently mix two different archives.
+        run {
+            // Establish the full child count before binding any member; payloads remain bounded.
+            var expected = 0
+            val scan = KnowledgeArchive.forEachEntry(archive) { _, _ -> checkCopy(); expected++ }
+            checkCopy()
+            require(scan.ok && expected > 0) { "Archive is invalid or empty" }
+            app.container.db.execute("UPDATE import_batches SET total_items = ? WHERE id = ? AND staging_complete = 0",
+                listOf(expected, batchId))
+            val ids = mutableListOf<String>()
+            val result = KnowledgeArchive.forEachEntry(archive) { entry, payload ->
+                checkCopy()
+                val key = input.sourceKey + "#" + entry.name
+                if (!stagingSourceCopied(batchId, key)) {
+                    ids += repo.stageBatchBytes(batchId, key, entry.name, "", payload,
+                        knowledgeBaseId, visionConfigured(), apiEmbedding(knowledgeBaseId)).id
+                }
+            }
+            checkCopy()
+            require(result.ok) { "Archive expansion failed" }
+            return ids
+        }
+    }
+
     override fun importOne(
         input: KnowledgeImportInput,
         kind: ImportBatchKind,
@@ -548,12 +756,40 @@ class AndroidKnowledgeImportPorts(private val app: MobileAgentApp) : KnowledgeIm
         ImportWorkScheduler.cancelBatch(app, batchId)
     }
 
+    override fun visionBindingFingerprint(): String? = app.container.profiles.visionBinding()
+        ?.let { (provider, model) ->
+            VisionBinding(
+                providerId = provider.id,
+                modelId = model.modelId,
+                endpoint = provider.baseUrl,
+                revision = maxOf(provider.revision, model.revision),
+                providerRevision = provider.revision,
+                modelRevision = model.revision,
+            ).fingerprint
+        }
+
+    override fun authorizeBatchVision(batchId: String, expectedTarget: String): Boolean = runCatching {
+        val binding = visionBindingFingerprint()
+        check(binding != null && binding == expectedTarget) { "Vision destination changed; nothing was authorized." }
+        repo.authorizeBatchVision(batchId, expectedTarget)
+        true
+    }.getOrDefault(false)
+
+    override fun pauseBatch(batchId: String): Boolean = runCatching {
+        if (repo.pauseBatch(batchId) == null) false
+        else {
+            true
+        }
+    }.getOrDefault(false)
+
+    override fun resumeBatch(batchId: String): Boolean = repo.resumeBatch(batchId) != null
+
     private fun apiEmbedding(knowledgeBaseId: String): Boolean =
         repo.embeddingSpaceId(knowledgeBaseId)?.let(ApiEmbeddingBinding::parseSpaceId) != null
 
     private fun progress(batchId: String): KnowledgeImportProgress {
         val row = app.container.db.query(
-            "SELECT state,total_items,copied,processing,waiting,failed FROM import_batches WHERE id=?",
+            "SELECT state,total_items,copied,processing,waiting,failed,published_items FROM import_batches WHERE id=?",
             listOf(batchId),
         ).singleOrNull() ?: return KnowledgeImportProgress(batchId = batchId)
         return KnowledgeImportProgress(
@@ -564,6 +800,7 @@ class AndroidKnowledgeImportPorts(private val app: MobileAgentApp) : KnowledgeIm
             processing = row.long("processing").toInt(),
             waiting = row.long("waiting").toInt(),
             failed = row.long("failed").toInt(),
+            published = row.long("published_items").toInt(),
         )
     }
 
@@ -634,6 +871,7 @@ class AndroidKnowledgeImportDiagnosticSink(
                     event.completed,
                     IllegalStateException(event.failureKind.name),
                 )
+                KnowledgeImportTerminal.PAUSED -> Unit
                 KnowledgeImportTerminal.USER_CANCELLED,
                 KnowledgeImportTerminal.SYSTEM_CANCELLED -> logger.recordKnowledgeImportFailed(
                     "batch",

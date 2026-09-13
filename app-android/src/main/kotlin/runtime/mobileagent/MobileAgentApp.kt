@@ -187,6 +187,19 @@ class AppContainer(app: MobileAgentApp) :
             }
         },
         apiEmbedderResolver = apiEmbeddings::resolve,
+        // P1: the durable batch lifecycle emits only opaque refs and closed reason codes.
+        importEvents = { event ->
+            runCatching {
+                app.diagnostics.recordKnowledgeBatchEvent(
+                    batchRef = event.batchRef,
+                    itemRef = event.itemRef,
+                    attempt = event.attempt,
+                    phase = event.phase.name,
+                    reasonCode = event.reasonCode,
+                    count = event.count,
+                )
+            }
+        },
     )
     val skills = SkillRepository(db)
     /**

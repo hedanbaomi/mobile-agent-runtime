@@ -14,6 +14,7 @@ import runtime.mobileagent.background.ImportWorkScheduler
 import runtime.mobileagent.feature.knowledge.*
 import runtime.mobileagent.knowledge.ApiEmbeddingBinding
 import runtime.mobileagent.knowledge.ImportBatchKind
+import runtime.mobileagent.knowledge.ImportBatchState
 import runtime.mobileagent.knowledge.ImportStage
 import runtime.mobileagent.knowledge.sha256Hex
 import androidx.documentfile.provider.DocumentFile
@@ -106,6 +107,9 @@ class KnowledgeViewModel(
                                 embeddingSpaceLabel = snapshot.embeddingSpaceLabel,
                                 embeddingModels = snapshot.embeddingModels, apiQueryAttempts = snapshot.apiQueryAttempts,
                                 batches = snapshot.batches,
+                                visionConfigured = snapshot.visionConfigured,
+                                visionTargetLabel = snapshot.visionTargetLabel,
+                                visionTargetFingerprint = snapshot.visionTargetFingerprint,
                             )
                         } else refreshRequested = true
                     } catch (cancelled: CancellationException) { throw cancelled }
@@ -122,7 +126,8 @@ class KnowledgeViewModel(
             val documents = if (selected == null) emptyList() else app.container.db.query(
                 "SELECT d.id,d.display_name,d.format,d.active_version_id,v.status,b.byte_length FROM documents d LEFT JOIN document_versions v ON v.id=d.active_version_id LEFT JOIN blobs b ON b.hash=d.blob_hash WHERE d.kb_id=? AND d.deleted_at IS NULL ORDER BY d.display_name,d.id", listOf(selected))
             val jobs = repo.listJobs().filter { it.first.knowledgeBaseId == selected }
-            val target = currentVisionTarget()?.label.orEmpty()
+            val vision = currentVisionTarget()
+            val target = vision?.label.orEmpty()
             return KnowledgeUiState(
                 bases = bases.map { (id, name) -> KnowledgeBaseUi(id, name,
                     app.container.db.query("SELECT count(*) AS count FROM documents WHERE kb_id=? AND deleted_at IS NULL", listOf(id)).single().long("count").toInt()) },
@@ -148,18 +153,41 @@ class KnowledgeViewModel(
                         ApiEmbeddingBinding.parseSpaceId(attempt.spaceId)?.let(app.container.apiEmbeddings::label)
                             ?: attempt.spaceId, attempt.retryAuthorized)
                 },
+                visionTargetLabel = target,
+                visionConfigured = vision != null,
+                visionTargetFingerprint = vision?.fingerprint,
                 batches = selected?.let(repo::listBatches).orEmpty().map { batch ->
+                    val progress = repo.batchProgress(batch.id)
                     KnowledgeBatchUi(
                         id = batch.id,
                         displayName = batch.displayName,
                         kind = batch.kind.name,
                         state = batch.state.name,
                         totalItems = batch.totalItems,
-                        copied = batch.copied,
-                        processing = batch.processing,
-                        waiting = batch.waiting,
-                        failed = batch.failed,
+                        copied = progress.copied,
+                        processing = progress.processing,
+                        waiting = progress.waiting,
+                        failed = progress.failed,
                         error = batch.error,
+                        published = progress.published,
+                        pending = progress.pending + progress.queued,
+                        unknown = progress.unknown,
+                        cancelled = progress.cancelled,
+                        blockedReason = batch.blockedReason?.name,
+                        visionTarget = batch.visionTarget,
+                        paused = batch.state == ImportBatchState.PAUSED,
+                        resumeStagingAvailable = batch.state in setOf(ImportBatchState.COPYING, ImportBatchState.STAGING) &&
+                            importCoordinator.activeOperation()?.progress?.value?.batchId != batch.id &&
+                            app.container.db.query("SELECT staging_complete FROM import_batches WHERE id=?", listOf(batch.id))
+                                .singleOrNull()?.long("staging_complete") == 0L,
+                        items = repo.listBatchItemViews(batch.id).map { view ->
+                            KnowledgeBatchItemUi(
+                                jobId = view.jobId,
+                                displayName = view.displayName,
+                                state = view.state,
+                                error = view.error,
+                            )
+                        },
                     )
                 },
             )
@@ -336,17 +364,66 @@ class KnowledgeViewModel(
             "已记录一次性授权并转入前台任务；不会在此页面协程中上传图片。"
         }
     }
+    /** Pause is durable: the flag is written before the scheduled worker is stopped. */
+    fun pauseBatch(batchId: String) = action {
+        check(importCoordinator.pauseBatch(batchId)) { "批次不存在或已结束。" }
+        "已暂停；不再派发新任务，已完成的成果保留。"
+    }
+
+    fun resumeBatch(batchId: String) {
+        operation({ importCoordinator.resumeStaging(batchId) }) { started ->
+            when (started) {
+                is KnowledgeImportStart.Started -> observeImport(started.operation)
+                is KnowledgeImportStart.AlreadyRunning -> observeImport(started.operation)
+                is KnowledgeImportStart.Rejected -> state.value = state.value.copy(error = started.reason)
+                null -> action {
+                    repo.resumeBatch(batchId) ?: error("批次不在暂停状态。")
+                    ImportWorkScheduler.enqueueBatchFence(app, batchId, app.container.profiles.visionConfigured())
+                    "已继续导入。"
+                }
+            }
+        }
+    }
+
+    /**
+     * "Configure and continue": one action authorizes this whole batch against the Vision target the
+     * user just selected, then resumes it in place.  It never widens to files added later, because
+     * the authorization is bound to the batch's own member list.
+     */
+    fun authorizeBatchVision(batchId: String, expectedTarget: String) = action {
+        val target = requireNotNull(currentVisionTarget()) { "请先配置可处理图片的视觉目标。" }
+        check(target.fingerprint == expectedTarget) { "视觉目标已变更，请重新确认本批次目标。" }
+        repo.authorizeBatchVision(batchId, expectedTarget)
+        ImportWorkScheduler.enqueueBatchFence(app, batchId, app.container.profiles.visionConfigured())
+        "已授权本批次的视觉处理并继续导入；此授权仅限本批次已选资料。"
+    }
     fun keepWaiting() { state.value = state.value.copy(status = "继续保留本地原件，不会自动上传或标记完成。") }
     fun textOnly(id: String) = action {
         val job = repo.acceptTextOnlyVisualGaps(id)
+        repo.jobBatchId(id)?.let { batchId ->
+            ImportWorkScheduler.enqueueBatchFence(app, batchId, app.container.profiles.visionConfigured())
+        }
         job.error ?: "已建立仅文本版本；图片仍在本地，未标为完整导入。"
     }
 
-    fun importUris(uris: List<Uri>) = importNamedUris(uris.map { displayName(it) to it }, ImportBatchKind.FILES, "files")
+    /**
+     * The creation page already showed the selected batch, the Vision destination, what may leave
+     * the device and the cost note.  Passing that confirmed destination here is the one action that
+     * authorizes this batch's visual work; passing null means "text only unless something really
+     * needs vision", in which case the batch blocks and asks to configure and continue.
+     */
+    fun importUris(uris: List<Uri>, visionTarget: String?) {
+        if (uris.size == 1 && displayName(uris.single()).endsWith(".zip", ignoreCase = true)) {
+            importZip(uris.single(), visionTarget)
+        } else {
+            importNamedUris(uris.map { displayName(it) to it }, ImportBatchKind.FILES, "files", visionTarget)
+        }
+    }
 
-    fun importZip(uri: Uri) = importNamedUris(listOf(displayName(uri) to uri), ImportBatchKind.ZIP, displayName(uri))
+    fun importZip(uri: Uri, visionTarget: String?) =
+        importNamedUris(listOf(displayName(uri) to uri), ImportBatchKind.ZIP, displayName(uri), visionTarget)
 
-    fun importTree(treeUri: Uri) {
+    fun importTree(treeUri: Uri, visionTarget: String? = null) {
         viewModelScope.launch {
             try {
                 runCatching {
@@ -361,7 +438,7 @@ class KnowledgeViewModel(
                 }
                 require(files.size <= 500) { "一次最多选择 500 个文件。" }
                 val label = DocumentFile.fromTreeUri(app, treeUri)?.name ?: "folder"
-                importNamedUris(files, ImportBatchKind.FOLDER, label)
+                importNamedUris(files, ImportBatchKind.FOLDER, label, visionTarget)
             } catch (cancel: CancellationException) { throw cancel }
             catch (failure: Exception) { fail(failure) }
         }
@@ -377,11 +454,15 @@ class KnowledgeViewModel(
         return out
     }
 
-    private fun importNamedUris(files: List<Pair<String, Uri>>, kind: ImportBatchKind, label: String) {
+    private fun importNamedUris(files: List<Pair<String, Uri>>, kind: ImportBatchKind, label: String, visionTarget: String? = null) {
         if (files.isEmpty()) return
         if (files.size > 500) { state.value = state.value.copy(error = "一次最多选择 500 个文件。"); return }
+        if (kind != ImportBatchKind.ZIP && files.any { it.first.endsWith(".zip", ignoreCase = true) }) {
+            state.value = state.value.copy(error = "请将 ZIP 单独导入，其余文件可作为另一批次导入。"); return
+        }
         val requestedBase = state.value.selectedBaseId
         val inputs = files.map { (name, uri) ->
+            runCatching { app.contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION) }
             KnowledgeImportInput(
                 displayName = name,
                 sourceKey = uri.toString(),
@@ -389,7 +470,7 @@ class KnowledgeViewModel(
                 mediaType = { app.contentResolver.getType(uri).orEmpty() },
             )
         }
-        when (val started = importCoordinator.start(inputs, kind, label, requestedBase)) {
+        when (val started = importCoordinator.start(inputs, kind, label, requestedBase, visionTarget)) {
             is KnowledgeImportStart.Started -> observeImport(started.operation)
             is KnowledgeImportStart.AlreadyRunning -> observeImport(started.operation)
             is KnowledgeImportStart.Rejected -> state.value = state.value.copy(error = started.reason)
@@ -403,9 +484,19 @@ class KnowledgeViewModel(
         viewModelScope.launch {
             val progressJob = launch {
                 operation.progress.collect { progress ->
+                    progress.batchId?.let { batchId ->
+                        if (state.value.selectedBaseId == null) {
+                            val baseId = runInterruptible(Dispatchers.IO) { app.container.db.query("SELECT kb_id FROM import_batches WHERE id=?", listOf(batchId)).singleOrNull()?.string("kb_id") }
+                            if (state.value.selectedBaseId == null && baseId != null) {
+                                selectionRevision += 1
+                                state.value = state.value.copy(selectedBaseId = baseId)
+                            }
+                        }
+                        reload()
+                    }
                     if (progress.totalItems > 0) {
                         state.value = state.value.copy(
-                            status = "导入进度 ${progress.copied}/${progress.totalItems}；处理 ${progress.processing}，等待 ${progress.waiting}。",
+                            status = "导入进度：已完成 ${progress.published}/${progress.totalItems}，已复制 ${progress.copied}，处理 ${progress.processing}，等待 ${progress.waiting}。",
                         )
                     }
                 }
@@ -414,14 +505,16 @@ class KnowledgeViewModel(
                 val outcome = operation.completion.await()
                 when (outcome.terminal) {
                     KnowledgeImportTerminal.COMPLETED -> state.value = state.value.copy(
-                        status = "原件已复制到本地；批次任务将继续处理，可离开此页。图片及 API Embedding 文本不会未经同意上传。",
+                        status = if (outcome.progress.state == "BLOCKED") "原件已保存；批次已阻塞，请查看进度卡并确认视觉目标后继续。"
+                        else "原件已复制到本地；批次将按已确认的目标继续处理，可离开此页。",
                     )
                     KnowledgeImportTerminal.USER_CANCELLED -> state.value = state.value.copy(
                         status = "已按用户请求取消导入；已复制的本地原件仍保留，可稍后重新导入。",
                     )
                     KnowledgeImportTerminal.SYSTEM_CANCELLED -> state.value = state.value.copy(
-                        status = "导入暂时停止；持久化检查点已保留，应用恢复后将继续处理。",
+                        status = "导入暂时停止；检查点与剩余选择已保留，请点击继续导入。",
                     )
+                    KnowledgeImportTerminal.PAUSED -> state.value = state.value.copy(status = "已暂停；已复制资料和未完成的选择均已保存，可继续导入。")
                     KnowledgeImportTerminal.FAILED -> state.value = state.value.copy(error = "导入失败，请查看批次状态后重试。")
                 }
                 outcome.knowledgeBaseId?.let { id ->

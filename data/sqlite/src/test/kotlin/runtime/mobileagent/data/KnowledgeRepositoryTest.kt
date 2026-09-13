@@ -708,6 +708,7 @@ class KnowledgeRepositoryTest {
         repo.bindJobToBatch(batchId, copied, "scan.png")
         val awaiting = repo.resumeImport(copied.id, visionConfigured = true)
         assertEquals(ImportStage.AWAITING_UPLOAD_CONSENT, awaiting.stage)
+        repo.authorizeBatchVision(batchId, "vision-test")
 
         val executor = Executors.newSingleThreadExecutor()
         try {

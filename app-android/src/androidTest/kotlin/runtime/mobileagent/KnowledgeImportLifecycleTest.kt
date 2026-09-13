@@ -96,6 +96,56 @@ class KnowledgeImportLifecycleTest {
         assertFalse(systemPorts.fenceEnqueued)
     }
 
+    @Test
+    fun pauseDuringCopyPreservesManifestAndResumesOnlyRemainingSources() = runBlocking {
+        val firstScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        val ports = LifecyclePorts(blockSecond = true)
+        val first = KnowledgeImportCoordinator(firstScope, ports)
+        val operation = started(first, ports)
+        assertTrue(first.pauseBatch("batch"))
+        val stopped = withTimeout(5_000) { operation.completion.await() }
+        assertEquals(KnowledgeImportTerminal.PAUSED, stopped.terminal)
+        assertEquals(1, ports.bound.size)
+        assertFalse(ports.fenceEnqueued)
+        assertTrue(ports.paused)
+        firstScope.cancel()
+
+        val secondScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        ports.releaseSecond.countDown()
+        val restarted = KnowledgeImportCoordinator(secondScope, ports)
+        val resumed = restarted.resumeStaging("batch") as KnowledgeImportStart.Started
+        val done = withTimeout(5_000) { resumed.operation.completion.await() }
+        assertEquals(KnowledgeImportTerminal.COMPLETED, done.terminal)
+        assertEquals(listOf("one.txt", "two.txt"), ports.bound.toList())
+        assertEquals(3, ports.importCalls.get()) // first completed, second interrupted, second resumed
+        assertEquals(1, ports.fenceCount.get())
+        assertTrue(ports.stagingComplete)
+        secondScope.cancel()
+    }
+
+    @Test
+    fun processRecreationRetainsUncopiedMembershipAndOriginalTarget() = runBlocking {
+        val firstScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        val ports = LifecyclePorts(blockSecond = true)
+        val coordinator = KnowledgeImportCoordinator(firstScope, ports)
+        val operation = (coordinator.start(inputs(), ImportBatchKind.FILES, "fixture", "kb",
+            visionTarget = "vision-test") as KnowledgeImportStart.Started).operation
+        assertTrue(ports.secondEntered.await(3, TimeUnit.SECONDS))
+        firstScope.cancel()
+        withTimeout(5_000) { operation.completion.await() }
+        assertFalse(ports.stagingComplete)
+        assertEquals(2, ports.plan!!.files.size)
+        assertEquals("vision-test", ports.plan!!.visionTarget)
+        ports.releaseSecond.countDown()
+        val secondScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        val restarted = KnowledgeImportCoordinator(secondScope, ports)
+        val resumed = restarted.resumeStaging("batch") as KnowledgeImportStart.Started
+        withTimeout(5_000) { resumed.operation.completion.await() }
+        assertEquals(listOf("one.txt", "two.txt"), ports.bound.toList())
+        assertEquals("vision-test", ports.authorizedTarget)
+        secondScope.cancel()
+    }
+
     private suspend fun started(
         coordinator: KnowledgeImportCoordinator,
         ports: LifecyclePorts,
@@ -126,6 +176,26 @@ private class LifecyclePorts(private val blockSecond: Boolean) : KnowledgeImport
     @Volatile var fenceEnqueued: Boolean = false
     private val jobs = mutableMapOf<String, String>()
 
+    var plan: KnowledgeStagingPlan? = null
+    var stagingComplete = false
+    private val stagedKeys = mutableSetOf<String>()
+
+    override fun beginStaging(files: List<KnowledgeImportInput>, kind: ImportBatchKind,
+        label: String, knowledgeBaseId: String, visionTarget: String?): String {
+        plan = KnowledgeStagingPlan("batch", files, kind, label, knowledgeBaseId, visionTarget)
+        return "batch"
+    }
+    override fun loadStaging(batchId: String) = plan?.takeUnless { stagingComplete }
+    override fun stagingSourceCopied(batchId: String, sourceKey: String) = sourceKey in stagedKeys
+    override fun stageInput(batchId: String, input: KnowledgeImportInput, kind: ImportBatchKind,
+        knowledgeBaseId: String, checkpoint: () -> Unit): List<String> {
+        val job = importOne(input, kind, knowledgeBaseId, false)
+        checkpoint()
+        bindJobToBatch(batchId, job, input.displayName)
+        stagedKeys += input.sourceKey
+        return listOf(job.id)
+    }
+    override fun completeStaging(batchId: String) { stagingComplete = true }
     override fun visionConfigured() = false
     override fun createKnowledgeBase(name: String) = "kb"
     override fun beginBatch(knowledgeBaseId: String, kind: ImportBatchKind, displayName: String) = "batch"
@@ -168,10 +238,30 @@ private class LifecyclePorts(private val blockSecond: Boolean) : KnowledgeImport
         cancelCalls.incrementAndGet()
     }
 
+    override fun visionBindingFingerprint(): String? = "vision-test"
+
+    override fun authorizeBatchVision(batchId: String, expectedTarget: String): Boolean {
+        authorizedTarget = expectedTarget
+        return authorizedTarget == visionBindingFingerprint()
+    }
+
+    override fun pauseBatch(batchId: String): Boolean {
+        paused = true
+        return true
+    }
+
+    override fun resumeBatch(batchId: String): Boolean {
+        paused = false
+        return true
+    }
+
+    @Volatile var authorizedTarget: String? = null
+    @Volatile var paused: Boolean = false
+
     private fun progress() = KnowledgeImportProgress(
         batchId = "batch",
-        state = if (fenceEnqueued) "COMPLETED" else "COPYING",
-        totalItems = bound.size,
+        state = if (paused) "PAUSED" else if (fenceEnqueued) "COMPLETED" else "COPYING",
+        totalItems = plan?.files?.size ?: bound.size,
         copied = persistentCopied,
     )
 }

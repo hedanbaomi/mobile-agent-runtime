@@ -338,10 +338,10 @@ class AgentRuntime(
                         }
                         val summaryJson = try {
                             ContextSummaryFormat.validate(redact(summaryText.toString(), secret), context.policy.summaryMaxUnits)
-                        } catch (_: Exception) {
+                        } catch (error: Exception) {
                             saveCompaction(checkpoint.copy(state = ContextCompactionState.FAILED))
                             run.state = RunState.FAILED
-                            run.stopReason = "CONTEXT_COMPACTION_FAILED: invalid summary; original history retained, no automatic retry"
+                            run.stopReason = "CONTEXT_COMPACTION_FAILED: invalid summary (${summaryFailureClassification(error)}); original history retained, no automatic retry"
                             emitModel(ModelEvent.Failed(run.stopReason!!)); finish(); return@flow
                         }
                         val replacement = window.replacementRequest(modelRequest, plan, summaryJson)
@@ -1060,6 +1060,27 @@ class AgentRuntime(
         const val MAX_SCHEMA_DEPTH = 16
         const val BUDGET_CANCEL = "agent-runtime-budget"
         const val UNKNOWN_MODEL_OUTCOME = "UNKNOWN_OUTCOME: Model dispatch may have started; do not automatically retry"
+        /**
+         * Bounded, non-sensitive classification for a rejected summary. The user-facing message
+         * stays fixed in RuntimeEvents; this only sharpens the durable run stop reason so an
+         * empty summary and a schema-invalid one can be told apart in diagnostics.
+         */
+        internal fun summaryFailureClassification(error: Exception): String {
+            val detail = error.message.orEmpty()
+                .removePrefix("CONTEXT_COMPACTION_FAILED:")
+                .replace(Regex("[\\r\\n\\t]+"), " ")
+                .trim()
+            return when {
+                detail.contains("at least one non-blank entry") -> "empty summary"
+                detail.contains("must contain exactly") -> "unexpected summary schema"
+                detail.contains("must be an array") -> "invalid summary section"
+                detail.contains("must contain only strings") -> "invalid summary entry"
+                detail.contains("exceeds") -> "summary exceeds limit"
+                detail.isBlank() -> "invalid summary"
+                else -> detail.take(120)
+            }
+        }
+
         const val UNKNOWN_TOOL_OUTCOME = "UNKNOWN_OUTCOME: Tool dispatch may have started; do not automatically retry"
         const val UNKNOWN_CANCELLED_OUTCOME = "UNKNOWN_OUTCOME: Dispatch may have started before cancellation; do not automatically retry"
         const val UNKNOWN_TOOL_ENVELOPE = "{\"ok\":false,\"status\":\"UNKNOWN_OUTCOME\",\"error\":{\"code\":\"UNKNOWN_OUTCOME\",\"message\":\"Tool dispatch may have started; do not automatically retry\",\"retryable\":false},\"automaticReplayAllowed\":false}"

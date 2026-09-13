@@ -429,15 +429,24 @@ class TransferRepository(
                     val skillInstalls = SkillInstallAliases()
                     bundle.skills.forEach { skill ->
                         val bytes = if (skill.packageIncluded) stagedSkills[skill.packageHash]
-                            ?.let { Files.readAllBytes(it) }
+                            ?.let { readStagedBytes(it, TransferArchiveLimits.MAX_ENTRY_BYTES, "Skill package") }
                             else null
                         skillInstalls.remember(skill, importSkill(skill, conflictPolicy, warnings, bytes))
                     }
                     bundle.agent?.let { importedAgentId = importAgent(it, conflictPolicy, warnings, skillInstalls) }
                     bundle.conversations.forEach { manifest ->
                         val path = manifest.contentEntry?.let(stagedConversations::get)
-                        val full = path?.let { TransferCodec.decodeConversation(Files.readString(it), "transfer-conversation-${manifest.conversation.id}") }
-                            ?: throw invalid("Conversation ${manifest.conversation.id} content is missing")
+                        // The staged bytes were already bounded and CRC-checked while unzipping;
+                        // read them back through the stream API because Android's
+                        // java.nio.file.Files does not implement readString(Path) on every
+                        // supported platform (a valid conversation archive crashed with
+                        // NoSuchMethodError on an API 36 device).
+                        val full = path?.let {
+                            TransferCodec.decodeConversation(
+                                readStagedUtf8(it, TransferArchiveLimits.MAX_METADATA_BYTES, "conversation"),
+                                "transfer-conversation-${manifest.conversation.id}",
+                            )
+                        } ?: throw invalid("Conversation ${manifest.conversation.id} content is missing")
                         importConversation(full, conflictPolicy, warnings, skillInstalls)
                     }
                 }
@@ -536,6 +545,47 @@ class TransferRepository(
             throw invalid("Could not stage transfer $kind content")
         }
     }
+
+    /**
+     * Read a staged transfer entry back with an explicit byte ceiling.
+     *
+     * `java.nio.file.Files.readString(Path)` is compiled against the JDK but is not implemented
+     * by Android's `java.nio.file` on every supported API level; importing a valid archive that
+     * contained conversations crashed with `NoSuchMethodError`. The stream API below has been
+     * available since the module's minimum SDK and keeps the same bounded-memory contract.
+     */
+    private fun readStagedBytes(path: Path, maxBytes: Long, kind: String): ByteArray {
+        val expected = try {
+            Files.size(path)
+        } catch (error: Exception) {
+            throw invalid("Could not read staged $kind content")
+        }
+        if (expected > maxBytes) throw invalid("Staged $kind content exceeds the transfer limit")
+        val bytes = try {
+            Files.newInputStream(path).use { input ->
+                val output = ByteArrayOutputStream(minOf(expected, 64L * 1024L).toInt())
+                val buffer = ByteArray(8 * 1024)
+                var total = 0L
+                while (true) {
+                    val read = input.read(buffer)
+                    if (read < 0) break
+                    total += read.toLong()
+                    if (total > maxBytes) throw invalid("Staged $kind content exceeds the transfer limit")
+                    output.write(buffer, 0, read)
+                }
+                output.toByteArray()
+            }
+        } catch (error: AppException) {
+            throw error
+        } catch (error: Exception) {
+            throw invalid("Could not read staged $kind content")
+        }
+        if (bytes.size.toLong() != expected) throw invalid("Staged $kind content changed while importing")
+        return bytes
+    }
+
+    private fun readStagedUtf8(path: Path, maxBytes: Long, kind: String): String =
+        readStagedBytes(path, maxBytes, kind).toString(Charsets.UTF_8)
 
     private fun nextArchiveEntry(zip: ZipInputStream, operationId: String, counter: ArchiveCounter): ZipEntry? {
         val entry = try {

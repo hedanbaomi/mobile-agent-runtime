@@ -533,6 +533,23 @@ class WorkspaceBackendTest {
         assertTrue(createCapable.operationCapabilities.contains(InternalWorkspaceCapabilities.CREATE_DIRECTORY))
         assertFalse(createCapable.operationCapabilities.contains(InternalWorkspaceCapabilities.DELETE))
         assertFalse(createCapable.operationCapabilities.contains(InternalWorkspaceCapabilities.MOVE))
+        // Regression: an empty (or all-virtual) readable tree must still advertise text reads,
+        // otherwise the first authorization exposes write tools without `file_read_text`.
+        assertTrue(createCapable.operationCapabilities.contains(InternalWorkspaceCapabilities.READ_TEXT))
+
+        val virtualOnly = SafWorkspaceCapabilityPolicy.derive(
+            readGranted = true,
+            writeGranted = false,
+            rootFlags = 0,
+            children = listOf(
+                SafCapabilityChild(
+                    InternalWorkspaceEntryType.FILE,
+                    android.provider.DocumentsContract.Document.FLAG_VIRTUAL_DOCUMENT,
+                ),
+            ),
+        )
+        assertTrue(virtualOnly.operationCapabilities.contains(InternalWorkspaceCapabilities.READ_TEXT))
+        assertFalse(virtualOnly.writable)
     }
 
     @Test

@@ -10,6 +10,8 @@ import com.sun.jna.Pointer
 import com.sun.jna.Structure
 import com.sun.jna.platform.win32.Guid
 import com.sun.jna.platform.win32.Kernel32
+import com.sun.jna.platform.win32.WinBase
+import com.sun.jna.platform.win32.WinDef
 import com.sun.jna.platform.win32.WinNT
 import com.sun.jna.win32.W32APIOptions
 import com.sun.jna.win32.StdCallLibrary
@@ -17,6 +19,7 @@ import java.nio.charset.StandardCharsets
 import java.nio.file.LinkOption
 import java.nio.file.Files
 import java.nio.file.Path
+import java.nio.file.attribute.BasicFileAttributes
 import java.security.MessageDigest
 import java.util.Arrays
 import runtime.mobileagent.bridge.BridgeEncoding
@@ -209,6 +212,70 @@ class AdbDoctor internal constructor(
     }
 }
 
+/**
+ * Portable executable identity for the validated adb.exe.
+ *
+ * `BasicFileAttributes.fileKey()` is optional by contract and the JDK's Windows provider
+ * returns `null` on current builds, which previously made the spawn guard fail closed with
+ * "adb.exe file identity is unavailable" and blocked `devices`/`pair`/`run` on an otherwise
+ * trusted host. Prefer the provider key, then the Win32 handle identity (volume serial + file
+ * index), and keep a bounded path/size/mtime tuple as the last resort so the guard can still
+ * run. The content SHA-256 re-check in [AdbExecutableGuard] remains the authoritative
+ * replacement check in every case.
+ */
+internal object AdbFileIdentity {
+    fun read(path: Path, fileSize: Long, lastModifiedMillis: Long): String {
+        providerFileKey(path)?.let { return it }
+        if (Platform.isWindows()) windowsFileKey(path)?.let { return it }
+        return "fallback:$path|$fileSize|$lastModifiedMillis"
+    }
+
+    private fun providerFileKey(path: Path): String? = runCatching {
+        Files.readAttributes(path, BasicFileAttributes::class.java, LinkOption.NOFOLLOW_LINKS)
+            .fileKey()
+            ?.toString()
+            ?.takeIf { it.isNotBlank() }
+    }.getOrNull()
+
+    /**
+     * Win32 identity (volume serial + 128-bit file id) read through the handle API. The JDK's
+     * Windows provider can return a null `fileKey`, but the OS handle identity is stable across
+     * metadata changes and detects a replacement file.
+     */
+    private fun windowsFileKey(path: Path): String? = runCatching {
+        val handle = Kernel32.INSTANCE.CreateFile(
+            path.toString(),
+            WinNT.GENERIC_READ,
+            WinNT.FILE_SHARE_READ or WinNT.FILE_SHARE_WRITE or WinNT.FILE_SHARE_DELETE,
+            null,
+            WinNT.OPEN_EXISTING,
+            WinNT.FILE_ATTRIBUTE_NORMAL,
+            null,
+        )
+        if (handle == null || handle == WinBase.INVALID_HANDLE_VALUE) return@runCatching null
+        try {
+            val information = WinBase.FILE_ID_INFO()
+            val read = Kernel32.INSTANCE.GetFileInformationByHandleEx(
+                handle,
+                FILE_ID_INFO_CLASS,
+                information.pointer,
+                WinDef.DWORD(information.size().toLong()),
+            )
+            if (!read) return@runCatching null
+            information.read()
+            val identifier = information.FileId.Identifier.joinToString("") { byte ->
+                "%02x".format(byte.toInt() and 0xff)
+            }
+            val volume = java.lang.Long.toUnsignedString(information.VolumeSerialNumber, 16)
+            "win32:$volume:$identifier"
+        } finally {
+            Kernel32.INSTANCE.CloseHandle(handle)
+        }
+    }.getOrNull()
+
+    private const val FILE_ID_INFO_CLASS = 18
+}
+
 /** File identity bound to the validated executable, not just its pathname. */
 internal data class AdbExecutableFileIdentity(
     val canonicalPath: Path,
@@ -228,14 +295,16 @@ internal data class AdbExecutableFileIdentity(
             }
             val attrs = Files.readAttributes(
                 canonical,
-                java.nio.file.attribute.BasicFileAttributes::class.java,
+                BasicFileAttributes::class.java,
                 LinkOption.NOFOLLOW_LINKS,
             )
+            val fileSize = attrs.size()
+            val lastModifiedMillis = attrs.lastModifiedTime().toMillis()
             return AdbExecutableFileIdentity(
                 canonical,
-                attrs.fileKey()?.toString(),
-                attrs.size(),
-                attrs.lastModifiedTime().toMillis(),
+                AdbFileIdentity.read(canonical, fileSize, lastModifiedMillis),
+                fileSize,
+                lastModifiedMillis,
             )
         }
 
@@ -262,9 +331,15 @@ internal class AdbExecutableGuard(
         val current = AdbExecutableFileIdentity.read(report.canonicalPath)
         require(current.canonicalPath == report.canonicalPath) { "adb.exe canonical path changed" }
         if (verifier.requiresWindows) {
-            require(report.fileKey != null && current.fileKey != null) { "adb.exe file identity is unavailable" }
+            // Production Windows validation must keep a real file identity; only the
+            // degraded path/size/mtime tuple is rejected as unavailable.
+            require(current.fileKey != null && !current.fileKey.startsWith("fallback:")) {
+                "adb.exe file identity is unavailable"
+            }
         }
-        require(current.fileKey == report.fileKey) { "adb.exe file identity changed" }
+        require(current.fileKey != null && current.fileKey == report.fileKey) {
+            "adb.exe file identity changed"
+        }
         require(current.fileSize == report.fileSize && current.lastModifiedMillis == report.lastModifiedMillis) {
             "adb.exe file metadata changed"
         }

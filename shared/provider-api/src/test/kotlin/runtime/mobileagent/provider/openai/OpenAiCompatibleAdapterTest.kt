@@ -1347,6 +1347,101 @@ class OpenAiCompatibleAdapterTest {
     }
 
     @Test
+    fun toolsProbeRetriesWithoutForcedToolChoiceWhenTheProviderRejectsTheShape() = runTest {
+        var forcedRequests = 0
+        var plainRequests = 0
+        val engine = MockEngine { request ->
+            when {
+                request.url.encodedPath.endsWith("/models/demo") ->
+                    respond("{\"id\":\"demo\"}", HttpStatusCode.OK)
+                else -> {
+                    val body = (request.body as io.ktor.http.content.TextContent).text
+                    if (body.contains("\"tool_choice\"")) {
+                        // DeepSeek thinking mode rejects a forced tool choice while still
+                        // supporting live tool calling.
+                        forcedRequests += 1
+                        respond(
+                            "{\"error\":{\"message\":\"Thinking mode does not support this tool_choice\"}}",
+                            HttpStatusCode.BadRequest,
+                            headersOf(HttpHeaders.ContentType, "application/json"),
+                        )
+                    } else {
+                        plainRequests += 1
+                        respond(
+                            "{\"choices\":[{\"message\":{\"tool_calls\":[{\"id\":\"probe\",\"type\":\"function\",\"function\":{\"name\":\"mar_probe_noop\",\"arguments\":\"{}\"}}]}}]}",
+                            HttpStatusCode.OK,
+                            headersOf(HttpHeaders.ContentType, "application/json"),
+                        )
+                    }
+                }
+            }
+        }
+        val adapter = OpenAiCompatibleAdapter(HttpClient(engine), "https://example.invalid/v1")
+        val report = adapter.probe(
+            ModelProfile(
+                id = "profile-forced-choice",
+                providerId = "provider-forced-choice",
+                modelId = "demo",
+                role = ModelRole.CHAT,
+                capabilities = setOf("tools"),
+                contextLimit = 4096,
+                outputLimit = 64,
+                revision = 1,
+            ),
+            "token".toCharArray(),
+            runtime.mobileagent.provider.ProbeConsent.GRANTED,
+        )
+        assertEquals(1, forcedRequests)
+        assertEquals(1, plainRequests)
+        assertTrue(report.supportsTools)
+        assertEquals(
+            CapabilityCheckStatus.VERIFIED,
+            report.checks.first { it.capability == CapabilityCheck.TOOLS }.status,
+        )
+        assertTrue(report.source.contains("tools=verified-without-forced-tool-choice"))
+    }
+
+    @Test
+    fun featureProbePayloadCarriesValidatedModelParameters() = runTest {
+        val bodies = mutableListOf<String>()
+        val engine = MockEngine { request ->
+            when {
+                request.url.encodedPath.endsWith("/models/demo") ->
+                    respond("{\"id\":\"demo\"}", HttpStatusCode.OK)
+                else -> {
+                    bodies += (request.body as io.ktor.http.content.TextContent).text
+                    respond(
+                        "{\"choices\":[{\"message\":{\"content\":\"ok\"}}]}",
+                        HttpStatusCode.OK,
+                        headersOf(HttpHeaders.ContentType, "application/json"),
+                    )
+                }
+            }
+        }
+        val adapter = OpenAiCompatibleAdapter(HttpClient(engine), "https://example.invalid/v1")
+        adapter.probe(
+            ModelProfile(
+                id = "profile-parameters",
+                providerId = "provider-parameters",
+                modelId = "demo",
+                role = ModelRole.CHAT,
+                capabilities = setOf("tools", "stream"),
+                contextLimit = 4096,
+                outputLimit = 64,
+                revision = 1,
+                parametersJson = "{\"thinking\":{\"type\":\"disabled\"},\"temperature\":0.2}",
+            ),
+            "token".toCharArray(),
+            runtime.mobileagent.provider.ProbeConsent.GRANTED,
+        )
+        assertTrue(bodies.isNotEmpty())
+        bodies.forEach { body ->
+            assertTrue(body.contains("\"thinking\""), body)
+            assertTrue(body.contains("\"type\":\"disabled\""), body)
+            assertTrue(body.contains("\"temperature\":0.2"), body)
+        }
+    }
+    @Test
     fun testConnectionClampsProbeBudgetFarBelowProfileLimit() = runBlocking {
         var body = ""
         val engine = MockEngine { request ->

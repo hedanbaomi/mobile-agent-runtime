@@ -44,13 +44,13 @@ internal object SafWorkspaceCapabilityPolicy {
             InternalWorkspaceCapabilities.LIST,
             InternalWorkspaceCapabilities.STAT,
         )
-        if (children.any {
-                it.type == InternalWorkspaceEntryType.FILE &&
-                    it.flags and DocumentsContract.Document.FLAG_VIRTUAL_DOCUMENT == 0
-            }
-        ) {
-            capabilities += InternalWorkspaceCapabilities.READ_TEXT
-        }
+        // A readable tree grant means document reads are supported; whether any document
+        // exists right now is not part of that contract. Deriving the capability from the
+        // current child list silently dropped `file_read_text` for a freshly authorized empty
+        // directory (whose later content was still writable), so the write tools were exposed
+        // while the read tool was not. Missing or virtual documents still fail closed inside
+        // the read operation itself.
+        capabilities += InternalWorkspaceCapabilities.READ_TEXT
 
         val canCreate = writeGranted &&
             rootFlags and DocumentsContract.Document.FLAG_DIR_SUPPORTS_CREATE != 0

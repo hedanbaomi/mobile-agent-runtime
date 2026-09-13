@@ -553,6 +553,64 @@ class ContextCompactionRuntimeTest {
             .messages.last().text.contains("previous_summary"))
     }
 
+    /**
+     * Regression for the ACK-only history failure: the first user message is pinned as the
+     * original goal and the most recent turns are retained, so a bare atomic-unit selection left
+     * only an orphan assistant reply. Summarizing it produced a structurally valid but
+     * content-less summary, which was recorded as FAILED and aborted the run. Complete-turn
+     * selection must skip that candidate instead of paying for it.
+     */
+    @Test
+    fun uninformativeOnlyHistoryNeverSummarizesAnOrphanAssistantReply() = runTest {
+        val history = listOf(
+            ChatMessage("user", "Remember token ALPHA."),
+            ChatMessage("assistant", "ACK one"),
+            ChatMessage("user", "Remember place BETA."),
+            ChatMessage("assistant", "ACK two"),
+            ChatMessage("user", "Remember provider GAMMA."),
+            ChatMessage("assistant", "ACK three"),
+        )
+        val turnIds = listOf("turn-1", "turn-1", "turn-2", "turn-2", "turn-3", "turn-3")
+        val summaryTranscripts = mutableListOf<String>()
+        val adapter = RecordingAdapter { request, _ ->
+            if (request.isCompaction()) {
+                val transcript = request.messages.last().text
+                summaryTranscripts += transcript
+                // A transcript with no user request can only yield a content-less summary.
+                emit(ModelEvent.TextDelta(if ("\"role\":\"user\"" in transcript) VALID_SUMMARY else EMPTY_SUMMARY))
+                emit(ModelEvent.Completed)
+            } else {
+                emit(ModelEvent.TextDelta("done"))
+                emit(ModelEvent.Completed)
+            }
+        }
+        val run = AgentRun("ack-only-history", "snapshot", "conversation")
+        val events = AgentRuntime(adapter).run(
+            request(
+                run = run,
+                prompt = prompt(history = history, currentUser = "carry on"),
+                context = context(
+                    history = history,
+                    policy = AgentContextPolicy(maxHistoryMessages = 4, keepRecentTurns = 2),
+                    turnIds = turnIds,
+                ),
+                maxInputBudgetUnits = 200_000,
+            ),
+        ).toList()
+
+        assertEquals(RunState.COMPLETED, run.state, run.stopReason)
+        assertFalse(events.hasFailureContaining("CONTEXT_COMPACTION_FAILED"))
+        assertTrue(
+            events.filterIsInstance<RuntimeEvent.ContextCompactionChanged>()
+                .none { it.record.state == ContextCompactionState.FAILED },
+        )
+        summaryTranscripts.forEach { transcript ->
+            assertTrue(
+                "\"role\":\"user\"" in transcript,
+                "a compaction candidate must be a complete turn: $transcript",
+            )
+        }
+    }
     private fun request(
         run: AgentRun,
         prompt: EffectivePrompt,
@@ -683,5 +741,7 @@ class ContextCompactionRuntimeTest {
     private companion object {
         const val VALID_SUMMARY =
             "{\"goals\":[\"goal\"],\"constraints\":[\"constraint\"],\"decisions\":[\"decision\"],\"pending\":[\"pending\"],\"results\":[\"result\"]}"
+        const val EMPTY_SUMMARY =
+            "{\"goals\":[],\"constraints\":[],\"decisions\":[],\"pending\":[],\"results\":[]}"
     }
 }

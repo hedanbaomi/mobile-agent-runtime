@@ -61,10 +61,12 @@ import runtime.mobileagent.provider.ChatMessage
 import runtime.mobileagent.provider.EmbeddingBatch
 import runtime.mobileagent.provider.EmbeddingRequest
 import runtime.mobileagent.provider.HeaderSecretResolver
+import runtime.mobileagent.provider.InlineImage
 import runtime.mobileagent.provider.InputBudgetEstimate
 import runtime.mobileagent.provider.ModelAdapter
 import runtime.mobileagent.provider.ModelEvent
 import runtime.mobileagent.provider.ModelRequest
+import runtime.mobileagent.provider.ParameterLayers
 import runtime.mobileagent.provider.ParameterMerger
 import runtime.mobileagent.provider.ProbeConsent
 import runtime.mobileagent.provider.ProviderConnectionErrorCode
@@ -947,73 +949,94 @@ class OpenAiCompatibleAdapter(
             profile.outputLimit.coerceAtLeast(1),
             CONNECTION_PROBE_MAX_OUTPUT_TOKENS,
         )
-        val body = buildJsonObject {
-            put("model", JsonPrimitive(profile.modelId))
-            put("max_tokens", JsonPrimitive(probeOutputTokens))
-            put("stream", JsonPrimitive(feature == ProbeFeature.STREAM))
-            put(
-                "messages",
-                buildJsonArray {
-                    add(
-                        buildJsonObject {
-                            put("role", JsonPrimitive("user"))
-                            if (feature == ProbeFeature.IMAGE) {
-                                put(
-                                    "content",
-                                    buildJsonArray {
-                                        add(buildJsonObject {
-                                            put("type", JsonPrimitive("text"))
-                                            put("text", JsonPrimitive("Describe the image in one word."))
-                                        })
-                                        add(buildJsonObject {
-                                            put("type", JsonPrimitive("image_url"))
-                                            put("image_url", buildJsonObject {
-                                                put("url", JsonPrimitive("data:image/png;base64,$PROBE_PNG"))
-                                            })
-                                        })
-                                    },
-                                )
-                            } else {
-                                put("content", JsonPrimitive("Reply with ok."))
-                            }
-                        },
-                    )
-                },
+        val modelParameters = runCatching {
+            Json.parseToJsonElement(profile.parametersJson).jsonObject
+        }.getOrElse {
+            return FeatureProbeResult(
+                summary = "invalid-model-parameters",
+                supported = false,
+                charged = false,
+                status = CapabilityCheckStatus.FAILED,
             )
-            if (feature == ProbeFeature.TOOLS) {
-                put(
-                    "tools",
-                    buildJsonArray {
-                        add(
-                            buildJsonObject {
-                                put("type", JsonPrimitive("function"))
-                                put(
-                                    "function",
-                                    buildJsonObject {
-                                        put("name", JsonPrimitive(PROBE_TOOL_NAME))
-                                        put("description", JsonPrimitive("Call this no-op probe exactly once."))
-                                        put(
-                                            "parameters",
-                                            buildJsonObject {
-                                                put("type", JsonPrimitive("object"))
-                                                put("properties", buildJsonObject { })
-                                            },
-                                        )
-                                    },
-                                )
-                            },
-                        )
-                    },
-                )
-                put(
-                    "tool_choice",
-                    buildJsonObject {
-                        put("type", JsonPrimitive("function"))
-                        put("function", buildJsonObject { put("name", JsonPrimitive(PROBE_TOOL_NAME)) })
-                    },
-                )
-            }
         }
+        // The probe must exercise the same payload the run will send: the profile's
+        // validated model parameters (for example DeepSeek thinking mode), the same
+        // image encoding, and never a hard-coded image_url shape.
+        val probeRequest = ModelRequest(
+            modelId = profile.modelId,
+            messages = listOf(
+                ChatMessage(
+                    role = "user",
+                    text = when (feature) {
+                        ProbeFeature.IMAGE -> "Describe the image in one word."
+                        ProbeFeature.TOOLS ->
+                            "Call the $PROBE_TOOL_NAME function exactly once. Do not answer in text."
+                        ProbeFeature.STREAM -> "Reply with ok."
+                    },
+                    images = if (feature == ProbeFeature.IMAGE) {
+                        listOf(InlineImage(mediaType = "image/png", base64 = PROBE_PNG))
+                    } else {
+                        emptyList()
+                    },
+                ),
+            ),
+            tools = if (feature == ProbeFeature.TOOLS) {
+                listOf(
+                    mapOf(
+                        "name" to PROBE_TOOL_NAME,
+                        "description" to "Call this no-op probe exactly once.",
+                        "parameters" to "{\"type\":\"object\",\"properties\":{}}",
+                    ),
+                )
+            } else {
+                emptyList()
+            },
+            stream = feature == ProbeFeature.STREAM,
+            parameters = ParameterLayers(modelParameters = modelParameters),
+            operationId = "capability-probe-${feature.name.lowercase()}",
+            outputTokenLimit = probeOutputTokens,
+        )
+        // Defensive: a profile whose stored parameters are rejected by the shared merger
+        // must surface as an explicit probe classification, not abort every feature probe.
+        val payload = runCatching { buildPayload(probeRequest, includeImageBytes = true) }.getOrElse {
+            return FeatureProbeResult(
+                summary = "invalid-model-parameters",
+                supported = false,
+                charged = false,
+                status = CapabilityCheckStatus.FAILED,
+            )
+        }
+        val firstBody = if (feature == ProbeFeature.TOOLS) {
+            JsonObject(payload + ("tool_choice" to forcedProbeToolChoice()))
+        } else {
+            payload
+        }
+        val first = executeFeatureProbe(headers, feature, firstBody)
+        val firstStatus = first.httpStatus
+        if (feature != ProbeFeature.TOOLS || firstStatus == null || firstStatus !in 400..499) return first
+        // Several OpenAI-compatible hosts reject a forced tool_choice for a model that
+        // still supports tool calling (DeepSeek thinking mode answers HTTP 400
+        // "Thinking mode does not support this tool_choice"). Retry once without the
+        // forced choice so that "probe shape incompatible" is not reported as
+        // "the model cannot call tools".
+        val retry = executeFeatureProbe(headers, feature, payload)
+        return when {
+            retry.supported -> retry.copy(summary = "verified-without-forced-tool-choice", charged = true)
+            retry.status == CapabilityCheckStatus.UNKNOWN -> retry.copy(summary = "inconclusive", charged = true)
+            else -> retry.copy(charged = true)
+        }
+    }
+
+    private fun forcedProbeToolChoice(): JsonObject = buildJsonObject {
+        put("type", JsonPrimitive("function"))
+        put("function", buildJsonObject { put("name", JsonPrimitive(PROBE_TOOL_NAME)) })
+    }
+
+    private suspend fun executeFeatureProbe(
+        headers: ResolvedHeaders,
+        feature: ProbeFeature,
+        body: JsonObject,
+    ): FeatureProbeResult {
         return try {
             http.preparePost(url(baseUrl, "/chat/completions")) {
                 contentType(ContentType.Application.Json)
@@ -1089,7 +1112,6 @@ class OpenAiCompatibleAdapter(
             )
         }
     }
-
     private fun featureHttpStatus(status: Int): CapabilityCheckStatus = when {
         status in 400..499 && status !in setOf(401, 403, 408, 429) -> CapabilityCheckStatus.UNSUPPORTED
         status in 500..599 -> CapabilityCheckStatus.UNKNOWN

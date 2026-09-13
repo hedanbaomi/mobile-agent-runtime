@@ -142,7 +142,7 @@ internal class ContextWindow(prompt: EffectivePrompt, val context: RuntimeContex
     fun plan(request: ModelRequest, adapter: ModelAdapter, inputLimit: Long, reason: String): CompactionPlan? {
         val policy = context?.policy ?: return null
         val protected = protectedEntries().map { it.source.messageId }.toSet()
-        val candidates = units().filter { group -> group.none { it.source.messageId in protected } }
+        val candidates = compactibleGroups(protected)
         if (candidates.isEmpty()) return null
         val selected = mutableListOf<ContextEntry>()
         var summaryRequest: ModelRequest? = null
@@ -197,6 +197,43 @@ internal class ContextWindow(prompt: EffectivePrompt, val context: RuntimeContex
             it.fixed || it.source.turnId in oldTurnIds || it.message.images.isNotEmpty() || it.message.providerContinuationItems.isNotEmpty()
         }.map { it.source.messageId }.toSet() + latestCurrentExchange.orEmpty().map { it.source.messageId }
         return atomic.filter { group -> group.any { it.source.messageId in directlyPinned } }.flatten()
+    }
+
+    /**
+     * Choose the compactible replacement groups.
+     *
+     * An unprotected turn is replaced as one unit: selecting bare atomic units split a turn whose
+     * user message is pinned as the original goal, leaving an orphan assistant reply as the whole
+     * candidate. The summarizer then produced a structurally valid but content-less summary that
+     * was recorded as a failure. Inside a partly pinned turn (the current turn keeps its user
+     * message and its newest tool exchange) a self-contained tool exchange stays compactible so
+     * long tool loops can still be summarized by the model-rounds trigger.
+     */
+    private fun compactibleGroups(protected: Set<String>): List<List<ContextEntry>> {
+        val result = mutableListOf<List<ContextEntry>>()
+        var index = 0
+        val groups = units()
+        while (index < groups.size) {
+            val turnId = groups[index].firstOrNull()?.source?.turnId ?: break
+            val turn = mutableListOf<List<ContextEntry>>()
+            while (index < groups.size && groups[index].firstOrNull()?.source?.turnId == turnId) {
+                turn += groups[index]
+                index += 1
+            }
+            val fullyCompactible = turn.none { unit -> unit.any { it.source.messageId in protected } }
+            if (fullyCompactible) {
+                // Requires a user message: a leading orphan assistant group carries no request.
+                if (turn.flatten().any { it.message.role == "user" }) result += turn.flatten()
+                continue
+            }
+            turn.forEach { unit ->
+                if (unit.any { it.source.messageId in protected }) return@forEach
+                val selfContained = unit.first().message.toolCalls.isNotEmpty() ||
+                    unit.any { it.message.role == "tool" }
+                if (selfContained) result += unit
+            }
+        }
+        return result
     }
 
     private fun units(): List<List<ContextEntry>> {

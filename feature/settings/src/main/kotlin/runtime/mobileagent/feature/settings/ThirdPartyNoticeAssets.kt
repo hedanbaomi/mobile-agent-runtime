@@ -19,8 +19,14 @@ object ThirdPartyNoticeAssets {
     private const val AGPL_PATH = "AGPL-3.0-only.txt"
     private const val OVERVIEW_PATH = "THIRD_PARTY_NOTICES.md"
     private const val INDEX_PATH = "licenses/index.json"
-    private const val MODEL_LICENSE_PATH = "modelpacks/all-MiniLM-L6-v2/LICENSES/Apache-2.0.txt"
     private const val LICENSE_PREFIX = "licenses/"
+    /**
+     * The generated index (`tools/runtime-notices.py`) and every packaged notice file live under
+     * `licenses/` or `modelpacks/`. Keeping the two lists aligned is what makes the bundled
+     * `modelpacks/all-MiniLM-L6-v2/LICENSE-NOTICE.txt` readable instead of rejecting the whole
+     * catalog.
+     */
+    private const val MODEL_PACK_PREFIX = "modelpacks/"
     private const val MAX_OVERVIEW_BYTES = 2L * 1024L * 1024L
     private const val MAX_AGPL_BYTES = 2L * 1024L * 1024L
     private const val MAX_INDEX_BYTES = 512L * 1024L
@@ -57,26 +63,45 @@ object ThirdPartyNoticeAssets {
             require(items.length() <= MAX_COMPONENTS) { "第三方声明组件数量超过上限。" }
             val components = ArrayList<ThirdPartyNoticeUi>(items.length())
             val ids = HashSet<String>()
+            // One malformed or disallowed entry must not blank the whole catalog: skip it,
+            // keep every readable component, and report the bounded skip count.
+            var skipped = 0
             for (index in 0 until items.length()) {
-                val item = items.optJSONObject(index) ?: error("第三方声明组件格式无效。")
+                val item = items.optJSONObject(index)
+                if (item == null) {
+                    skipped++
+                    continue
+                }
                 val id = item.optString("id").trim()
                 val name = item.optString("name").trim()
-                require(id.isNotBlank() && id.length <= 256) { "第三方声明组件 id 无效。" }
-                require(name.isNotBlank() && name.length <= 512) { "第三方声明组件名称无效。" }
-                require(ids.add(id)) { "第三方声明组件 id 重复。" }
+                if (id.isBlank() || id.length > 256 || name.isBlank() || name.length > 512 || !ids.add(id)) {
+                    skipped++
+                    continue
+                }
                 val filesJson = item.optJSONArray("files") ?: JSONArray()
-                require(filesJson.length() in 1..MAX_FILES_PER_COMPONENT) {
-                    "第三方声明文件清单无效。"
+                if (filesJson.length() !in 1..MAX_FILES_PER_COMPONENT) {
+                    skipped++
+                    continue
                 }
                 val files = ArrayList<ThirdPartyNoticeFileUi>(filesJson.length())
                 val paths = HashSet<String>()
                 for (fileIndex in 0 until filesJson.length()) {
-                    val file = filesJson.optJSONObject(fileIndex) ?: error("第三方声明文件格式无效。")
+                    val file = filesJson.optJSONObject(fileIndex)
+                    if (file == null) {
+                        skipped++
+                        continue
+                    }
                     val label = file.optString("label").trim()
-                    val path = allowedLicensePath(file.optString("path"))
-                    require(label.isNotBlank() && label.length <= 512) { "第三方声明文件标签无效。" }
-                    require(paths.add(path)) { "第三方声明文件路径重复。" }
+                    val path = file.optString("path").trim()
+                    if (label.isBlank() || label.length > 512 || !isAllowedLicensePath(path) || !paths.add(path)) {
+                        skipped++
+                        continue
+                    }
                     files += ThirdPartyNoticeFileUi(label = label, path = path)
+                }
+                if (files.isEmpty()) {
+                    skipped++
+                    continue
                 }
                 components += ThirdPartyNoticeUi(
                     id = id,
@@ -90,6 +115,7 @@ object ThirdPartyNoticeAssets {
             ThirdPartyNoticesUiState(
                 overview = overviewText,
                 components = components,
+                error = if (skipped > 0) "第三方声明清单中有 $skipped 项无法在本地查看。" else null,
             )
         } catch (cancelled: CancellationException) {
             throw cancelled
@@ -106,7 +132,8 @@ object ThirdPartyNoticeAssets {
         try {
             var total = 0L
             val combined = component.files.joinToString("\n\n") { file ->
-                val path = allowedLicensePath(file.path)
+                val path = file.path
+                require(isAllowedLicensePath(path)) { "第三方声明路径不在允许范围内。" }
                 val bytes = readBytes(context, path, MAX_LICENSE_FILE_BYTES) { isAllowedLicensePath(it) }
                 total += bytes.size.toLong()
                 require(total <= MAX_COMPONENT_BYTES) { "组件声明内容超过大小上限。" }
@@ -142,16 +169,11 @@ object ThirdPartyNoticeAssets {
         }
     }
 
-    private fun allowedLicensePath(raw: String): String {
-        val path = raw.trim()
-        require(isAllowedLicensePath(path)) { "第三方声明路径不在允许范围内。" }
-        return path
-    }
 
     private fun isAllowedLicensePath(path: String): Boolean {
         if (path.isBlank() || path.length > 1024) return false
         if (path.startsWith('/') || path.contains('\\') || path.contains("..")) return false
-        if (path != MODEL_LICENSE_PATH && !path.startsWith(LICENSE_PREFIX)) return false
+        if (!path.startsWith(LICENSE_PREFIX) && !path.startsWith(MODEL_PACK_PREFIX)) return false
         return path.split('/').all { it.isNotBlank() && it != "." && it != ".." }
     }
 

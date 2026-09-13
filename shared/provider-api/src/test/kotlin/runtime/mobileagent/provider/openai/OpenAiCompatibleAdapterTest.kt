@@ -1442,6 +1442,263 @@ class OpenAiCompatibleAdapterTest {
         }
     }
     @Test
+    fun toolsProbeRewritesALegalProfileOutputLimitToTheProbeCap() = runTest {
+        var chatBody = ""
+        val engine = MockEngine { request ->
+            when {
+                request.url.encodedPath.endsWith("/models/demo") ->
+                    respond("{\"id\":\"demo\"}", HttpStatusCode.OK)
+                else -> {
+                    chatBody = (request.body as io.ktor.http.content.TextContent).text
+                    respond(
+                        "{\"choices\":[{\"message\":{\"tool_calls\":[{\"id\":\"probe\",\"type\":\"function\",\"function\":{\"name\":\"mar_probe_noop\",\"arguments\":\"{}\"}}]}}]}",
+                        HttpStatusCode.OK,
+                        headersOf(HttpHeaders.ContentType, "application/json"),
+                    )
+                }
+            }
+        }
+        val adapter = OpenAiCompatibleAdapter(HttpClient(engine), "https://example.invalid/v1")
+        val report = adapter.probe(
+            ModelProfile(
+                id = "profile-legal-limit",
+                providerId = "provider-legal-limit",
+                modelId = "demo",
+                role = ModelRole.CHAT,
+                capabilities = setOf("tools"),
+                contextLimit = 4096,
+                outputLimit = 4096,
+                revision = 1,
+                parametersJson = "{\"max_tokens\":1024,\"temperature\":0.3}",
+            ),
+            "token".toCharArray(),
+            runtime.mobileagent.provider.ProbeConsent.GRANTED,
+        )
+        assertTrue(report.supportsTools)
+        assertEquals(
+            CapabilityCheckStatus.VERIFIED,
+            report.checks.first { it.capability == CapabilityCheck.TOOLS }.status,
+        )
+        assertTrue(chatBody.contains("\"max_tokens\":64"), chatBody)
+        assertFalse(chatBody.contains("\"max_tokens\":1024"), chatBody)
+        assertTrue(chatBody.contains("\"temperature\":0.3"), chatBody)
+    }
+
+    @Test
+    fun toolsProbePreservesMaxCompletionTokensFieldNameAtTheProbeCap() = runTest {
+        var chatBody = ""
+        val engine = MockEngine { request ->
+            when {
+                request.url.encodedPath.endsWith("/models/demo") ->
+                    respond("{\"id\":\"demo\"}", HttpStatusCode.OK)
+                else -> {
+                    chatBody = (request.body as io.ktor.http.content.TextContent).text
+                    respond(
+                        "{\"choices\":[{\"message\":{\"tool_calls\":[{\"id\":\"probe\",\"type\":\"function\",\"function\":{\"name\":\"mar_probe_noop\",\"arguments\":\"{}\"}}]}}]}",
+                        HttpStatusCode.OK,
+                        headersOf(HttpHeaders.ContentType, "application/json"),
+                    )
+                }
+            }
+        }
+        val adapter = OpenAiCompatibleAdapter(HttpClient(engine), "https://example.invalid/v1")
+        val report = adapter.probe(
+            ModelProfile(
+                id = "profile-completion-limit",
+                providerId = "provider-completion-limit",
+                modelId = "demo",
+                role = ModelRole.CHAT,
+                capabilities = setOf("tools"),
+                contextLimit = 4096,
+                outputLimit = 4096,
+                revision = 1,
+                parametersJson = "{\"max_completion_tokens\":1024}",
+            ),
+            "token".toCharArray(),
+            runtime.mobileagent.provider.ProbeConsent.GRANTED,
+        )
+        assertTrue(report.supportsTools)
+        assertTrue(chatBody.contains("\"max_completion_tokens\":64"), chatBody)
+        assertFalse(chatBody.contains("\"max_tokens\""), chatBody)
+    }
+
+    @Test
+    fun toolsProbeKeepsACheaperProfileOutputLimitBelowTheProbeCap() = runTest {
+        var chatBody = ""
+        val engine = MockEngine { request ->
+            when {
+                request.url.encodedPath.endsWith("/models/demo") ->
+                    respond("{\"id\":\"demo\"}", HttpStatusCode.OK)
+                else -> {
+                    chatBody = (request.body as io.ktor.http.content.TextContent).text
+                    respond(
+                        "{\"choices\":[{\"message\":{\"tool_calls\":[{\"id\":\"probe\",\"type\":\"function\",\"function\":{\"name\":\"mar_probe_noop\",\"arguments\":\"{}\"}}]}}]}",
+                        HttpStatusCode.OK,
+                        headersOf(HttpHeaders.ContentType, "application/json"),
+                    )
+                }
+            }
+        }
+        val adapter = OpenAiCompatibleAdapter(HttpClient(engine), "https://example.invalid/v1")
+        val report = adapter.probe(
+            ModelProfile(
+                id = "profile-cheap-limit",
+                providerId = "provider-cheap-limit",
+                modelId = "demo",
+                role = ModelRole.CHAT,
+                capabilities = setOf("tools"),
+                contextLimit = 4096,
+                outputLimit = 4096,
+                revision = 1,
+                parametersJson = "{\"max_tokens\":32}",
+            ),
+            "token".toCharArray(),
+            runtime.mobileagent.provider.ProbeConsent.GRANTED,
+        )
+        assertTrue(report.supportsTools)
+        assertTrue(chatBody.contains("\"max_tokens\":32"), chatBody)
+        assertFalse(chatBody.contains("\"max_tokens\":64"), chatBody)
+    }
+
+    @Test
+    fun toolsProbeRejectsAProfileThatSetsBothOutputFieldsWithoutDispatch() = runTest {
+        var chatRequests = 0
+        val engine = MockEngine { request ->
+            when {
+                request.url.encodedPath.endsWith("/models/demo") ->
+                    respond("{\"id\":\"demo\"}", HttpStatusCode.OK)
+                else -> {
+                    chatRequests += 1
+                    respond(
+                        "{\"choices\":[{\"message\":{\"content\":\"ok\"}}]}",
+                        HttpStatusCode.OK,
+                        headersOf(HttpHeaders.ContentType, "application/json"),
+                    )
+                }
+            }
+        }
+        val adapter = OpenAiCompatibleAdapter(HttpClient(engine), "https://example.invalid/v1")
+        val report = adapter.probe(
+            ModelProfile(
+                id = "profile-conflicting-limits",
+                providerId = "provider-conflicting-limits",
+                modelId = "demo",
+                role = ModelRole.CHAT,
+                capabilities = setOf("tools"),
+                contextLimit = 4096,
+                outputLimit = 4096,
+                revision = 1,
+                parametersJson = "{\"max_tokens\":1024,\"max_completion_tokens\":1024}",
+            ),
+            "token".toCharArray(),
+            runtime.mobileagent.provider.ProbeConsent.GRANTED,
+        )
+        assertEquals(0, chatRequests)
+        assertFalse(report.supportsTools)
+        assertEquals(
+            CapabilityCheckStatus.FAILED,
+            report.checks.first { it.capability == CapabilityCheck.TOOLS }.status,
+        )
+    }
+
+    @Test
+    fun toolsProbeDoesNotRetryTerminalClientErrorsWithoutForcedChoice() = runTest {
+        val terminal = listOf(
+            HttpStatusCode.Unauthorized,
+            HttpStatusCode.Forbidden,
+            HttpStatusCode.RequestTimeout,
+            HttpStatusCode.TooManyRequests,
+        )
+        for (status in terminal) {
+            var chatRequests = 0
+            val engine = MockEngine { request ->
+                when {
+                    request.url.encodedPath.endsWith("/models/demo") ->
+                        respond("{\"id\":\"demo\"}", HttpStatusCode.OK)
+                    else -> {
+                        chatRequests += 1
+                        respond(
+                            "{\"error\":{\"message\":\"rejected\"}}",
+                            status,
+                            headersOf(HttpHeaders.ContentType, "application/json"),
+                        )
+                    }
+                }
+            }
+            val adapter = OpenAiCompatibleAdapter(HttpClient(engine), "https://example.invalid/v1")
+            val report = adapter.probe(
+                ModelProfile(
+                    id = "profile-terminal-$($status.value)",
+                    providerId = "provider-terminal",
+                    modelId = "demo",
+                    role = ModelRole.CHAT,
+                    capabilities = setOf("tools"),
+                    contextLimit = 4096,
+                    outputLimit = 64,
+                    revision = 1,
+                ),
+                "token".toCharArray(),
+                runtime.mobileagent.provider.ProbeConsent.GRANTED,
+            )
+            assertEquals(1, chatRequests, "one attempt for ${status.value}")
+            assertFalse(report.supportsTools, "no tools promotion for ${status.value}")
+            assertEquals(
+                CapabilityCheckStatus.FAILED,
+                report.checks.first { it.capability == CapabilityCheck.TOOLS }.status,
+            )
+        }
+    }
+
+    @Test
+    fun toolsProbeRetriesAnUnprocessableShapeRejectionWithoutForcedChoice() = runTest {
+        var forcedRequests = 0
+        var plainRequests = 0
+        val engine = MockEngine { request ->
+            when {
+                request.url.encodedPath.endsWith("/models/demo") ->
+                    respond("{\"id\":\"demo\"}", HttpStatusCode.OK)
+                else -> {
+                    val body = (request.body as io.ktor.http.content.TextContent).text
+                    if (body.contains("\"tool_choice\"")) {
+                        forcedRequests += 1
+                        respond(
+                            "{\"error\":{\"message\":\"tool_choice is not supported\"}}",
+                            HttpStatusCode.UnprocessableEntity,
+                            headersOf(HttpHeaders.ContentType, "application/json"),
+                        )
+                    } else {
+                        plainRequests += 1
+                        respond(
+                            "{\"choices\":[{\"message\":{\"tool_calls\":[{\"id\":\"probe\",\"type\":\"function\",\"function\":{\"name\":\"mar_probe_noop\",\"arguments\":\"{}\"}}]}}]}",
+                            HttpStatusCode.OK,
+                            headersOf(HttpHeaders.ContentType, "application/json"),
+                        )
+                    }
+                }
+            }
+        }
+        val adapter = OpenAiCompatibleAdapter(HttpClient(engine), "https://example.invalid/v1")
+        val report = adapter.probe(
+            ModelProfile(
+                id = "profile-422",
+                providerId = "provider-422",
+                modelId = "demo",
+                role = ModelRole.CHAT,
+                capabilities = setOf("tools"),
+                contextLimit = 4096,
+                outputLimit = 64,
+                revision = 1,
+            ),
+            "token".toCharArray(),
+            runtime.mobileagent.provider.ProbeConsent.GRANTED,
+        )
+        assertEquals(1, forcedRequests)
+        assertEquals(1, plainRequests)
+        assertTrue(report.supportsTools)
+        assertTrue(report.source.contains("tools=verified-without-forced-tool-choice"))
+    }
+
+    @Test
     fun testConnectionClampsProbeBudgetFarBelowProfileLimit() = runBlocking {
         var body = ""
         val engine = MockEngine { request ->

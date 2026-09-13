@@ -899,6 +899,42 @@ class DesktopBridgeTest {
     }
 
     @Test
+    fun adbExecutableIdentityIsStableAndNeverUsesTheDegradedTupleWhenARealOneExists() {
+        val directory = Files.createTempDirectory("mar-bridge-identity")
+        directory.toFile().deleteOnExit()
+        val executable = directory.resolve("adb.exe")
+        Files.write(executable, byteArrayOf(0x41, 0x44, 0x42))
+
+        val first = AdbExecutableFileIdentity.read(executable)
+        val second = AdbExecutableFileIdentity.read(executable)
+
+        assertEquals(first, second)
+        val fileKey = first.fileKey
+        assertTrue(!fileKey.isNullOrBlank(), "the executable identity must never be blank")
+        if (Platform.isWindows()) {
+            // Exercises the real Win32 FILE_ID_INFO handle path: a Windows host must keep a real
+            // file identity instead of the path/size/mtime tuple (which the spawn guard rejects).
+            val providerKey = runCatching {
+                Files.readAttributes(
+                    executable,
+                    java.nio.file.attribute.BasicFileAttributes::class.java,
+                    java.nio.file.LinkOption.NOFOLLOW_LINKS,
+                ).fileKey()?.toString()
+            }.getOrNull()
+            if (providerKey.isNullOrBlank()) {
+                assertTrue(
+                    fileKey!!.startsWith("win32:"),
+                    "the Windows provider has no fileKey, so the native Win32 id must be used: $fileKey",
+                )
+            }
+            assertFalse(
+                fileKey!!.startsWith("fallback:"),
+                "Windows must resolve a stable file identity: $fileKey",
+            )
+        }
+    }
+
+    @Test
     fun winTrustStructuresAreAccessibleWithoutIllegalAccess() {
         val memory = Memory(16)
         try {

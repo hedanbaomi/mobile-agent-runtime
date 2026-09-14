@@ -21,12 +21,42 @@ import androidx.documentfile.provider.DocumentFile
 import android.content.Intent
 import runtime.mobileagent.provider.SecretRedactor
 import runtime.mobileagent.knowledge.VisionBinding
+import runtime.mobileagent.domain.ModelProfile
+import runtime.mobileagent.domain.ProviderProfile
+import runtime.mobileagent.domain.acceptsImages
 
 internal data class VisionConsentTarget(val label: String, val fingerprint: String)
 
 internal fun visionConsentTarget(providerName: String, binding: VisionBinding): VisionConsentTarget {
     val label = "$providerName · ${binding.endpoint} · ${binding.modelId} · provider rev ${binding.providerRevision} / model rev ${binding.modelRevision}"
     return VisionConsentTarget(label, binding.fingerprint)
+}
+
+/**
+ * Enumerate every configured image-capable model and bind it to the provider
+ * row that owns it.  The first item is only a deterministic UI default; its
+ * fingerprint is never used as an implicit execution target.
+ */
+internal fun visionTargetOptions(
+    providers: List<ProviderProfile>,
+    models: List<ModelProfile>,
+): List<KnowledgeVisionTargetUi> {
+    val providersById = providers.associateBy { it.id }
+    return models.asSequence()
+        .filter { it.acceptsImages() }
+        .mapNotNull { model ->
+            val provider = providersById[model.providerId] ?: return@mapNotNull null
+            val binding = visionProfileBinding(provider, model)
+            KnowledgeVisionTargetUi(
+                fingerprint = binding.fingerprint,
+                label = visionConsentTarget(provider.name, binding).label,
+                providerId = provider.id,
+                modelProfileId = model.id,
+                modelId = model.modelId,
+            )
+        }
+        .sortedWith(compareBy<KnowledgeVisionTargetUi>({ it.label }, { it.fingerprint }))
+        .toList()
 }
 
 data class EmbeddingConfirmation(val target: String, val retry: Boolean, val rebind: Boolean, val documentCount: Int,
@@ -40,7 +70,7 @@ class KnowledgeViewModel(
 
     private val app = application as MobileAgentApp
     private val repo get() = app.container.knowledge
-    val state = mutableStateOf(KnowledgeUiState())
+    val state = mutableStateOf(KnowledgeUiState(visionTargetsLoading = true))
     val visionRequest = mutableStateOf<Pair<String, Boolean>?>(null)
     val visionTarget = mutableStateOf("")
     val embeddingRequest = mutableStateOf<EmbeddingConfirmation?>(null)
@@ -110,13 +140,26 @@ class KnowledgeViewModel(
                                 visionConfigured = snapshot.visionConfigured,
                                 visionTargetLabel = snapshot.visionTargetLabel,
                                 visionTargetFingerprint = snapshot.visionTargetFingerprint,
+                                visionTargets = snapshot.visionTargets,
+                                visionTargetsLoading = false,
                             )
                         } else refreshRequested = true
                     } catch (cancelled: CancellationException) { throw cancelled }
-                    catch (failure: Exception) { if (revision == selectionRevision) fail(failure) }
+                    catch (failure: Exception) {
+                        if (revision == selectionRevision) {
+                            state.value = state.value.copy(visionTargetsLoading = false)
+                            fail(failure)
+                        }
+                    }
                 }
             } finally { refreshJob = null }
         }
+    }
+
+    /** Refresh provider/model targets after returning from Provider settings. */
+    fun refreshVisionTargets() {
+        state.value = state.value.copy(visionTargetsLoading = true)
+        reload()
     }
 
     /** IO only. No Compose state is read or written while repository locks may wait. */
@@ -126,8 +169,12 @@ class KnowledgeViewModel(
             val documents = if (selected == null) emptyList() else app.container.db.query(
                 "SELECT d.id,d.display_name,d.format,d.active_version_id,v.status,b.byte_length FROM documents d LEFT JOIN document_versions v ON v.id=d.active_version_id LEFT JOIN blobs b ON b.hash=d.blob_hash WHERE d.kb_id=? AND d.deleted_at IS NULL ORDER BY d.display_name,d.id", listOf(selected))
             val jobs = repo.listJobs().filter { it.first.knowledgeBaseId == selected }
-            val vision = currentVisionTarget()
-            val target = vision?.label.orEmpty()
+            val visionTargets = visionTargetOptions(
+                app.container.profiles.listProviders(),
+                app.container.profiles.listModels(),
+            )
+            val defaultVisionTarget = visionTargets.firstOrNull()
+            val target = defaultVisionTarget?.label.orEmpty()
             return KnowledgeUiState(
                 bases = bases.map { (id, name) -> KnowledgeBaseUi(id, name,
                     app.container.db.query("SELECT count(*) AS count FROM documents WHERE kb_id=? AND deleted_at IS NULL", listOf(id)).single().long("count").toInt()) },
@@ -142,7 +189,14 @@ class KnowledgeViewModel(
                     embeddingIsApi = job.embeddingIsApi && !(job.error?.contains("UNKNOWN_OUTCOME") == true && job.error?.contains("embedding", true) != true),
                     requiresEmbeddingConsent = job.stage == ImportStage.AWAITING_EMBEDDING_CONSENT) },
                 waiting = jobs.filter { it.first.stage in setOf(ImportStage.WAITING_FOR_VISION_MODEL, ImportStage.AWAITING_UPLOAD_CONSENT) }
-                    .map { (job, name, _) -> KnowledgeWaitingUi(job.id, name, job.error ?: "图片留在本地；需要明确同意上传后才会继续。", target) },
+                    .map { (job, name, _) ->
+                        val fingerprint = repo.jobBatchId(job.id)?.let(repo::findBatch)?.visionTarget
+                            ?: job.consentedVisionFingerprint
+                        val label = if (fingerprint != null) {
+                            visionTargets.singleOrNull { it.fingerprint == fingerprint }?.label ?: "原 Vision 目标已变更，请重新确认"
+                        } else visionTargets.singleOrNull()?.label ?: "请选择本批次 Vision 目标"
+                        KnowledgeWaitingUi(job.id, name, job.error ?: "图片留在本地；需要明确同意上传后才会继续。", label)
+                    },
                 rebuildEnabled = selected != null,
                 embeddingSpaceLabel = selected?.let { kb -> repo.embeddingSpaceId(kb)?.let { space ->
                     ApiEmbeddingBinding.parseSpaceId(space)?.let(app.container.apiEmbeddings::label) ?: "本机模型 · $space"
@@ -154,8 +208,9 @@ class KnowledgeViewModel(
                             ?: attempt.spaceId, attempt.retryAuthorized)
                 },
                 visionTargetLabel = target,
-                visionConfigured = vision != null,
-                visionTargetFingerprint = vision?.fingerprint,
+                visionConfigured = visionTargets.isNotEmpty(),
+                visionTargetFingerprint = defaultVisionTarget?.fingerprint,
+                visionTargets = visionTargets,
                 batches = selected?.let(repo::listBatches).orEmpty().map { batch ->
                     val progress = repo.batchProgress(batch.id)
                     KnowledgeBatchUi(
@@ -170,11 +225,17 @@ class KnowledgeViewModel(
                         failed = progress.failed,
                         error = batch.error,
                         published = progress.published,
-                        pending = progress.pending + progress.queued,
+                        // "已复制" already counts every member whose bytes are local, so the queued
+                        // share must never be added again: copied + pending stays equal to total.
+                        pending = progress.pending,
                         unknown = progress.unknown,
                         cancelled = progress.cancelled,
                         blockedReason = batch.blockedReason?.name,
                         visionTarget = batch.visionTarget,
+                        // Presentation only: the raw fingerprint stays the authorization identity.
+                        visionTargetLabel = batch.visionTarget?.let { fingerprint ->
+                            visionTargets.firstOrNull { it.fingerprint == fingerprint }?.label
+                        },
                         paused = batch.state == ImportBatchState.PAUSED,
                         resumeStagingAvailable = batch.state in setOf(ImportBatchState.COPYING, ImportBatchState.STAGING) &&
                             importCoordinator.activeOperation()?.progress?.value?.batchId != batch.id &&
@@ -197,6 +258,66 @@ class KnowledgeViewModel(
         closeEvidence(); dismissEmbedding(); dismissVision()
         state.value = state.value.copy(selectedBaseId = id, documents = emptyList(), jobs = emptyList(), waiting = emptyList())
         reload()
+    }
+
+    /**
+     * Keep the SAF selection in the shell-scoped state while the user visits
+     * Provider settings.  Persistable URI grants are taken before navigation
+     * so the selection remains readable when the confirmation dialog returns.
+     */
+    fun stageImport(uris: List<Uri>, sourceKind: String) {
+        if (uris.isEmpty()) return
+        uris.forEach { uri ->
+            runCatching {
+                app.contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            }
+        }
+        val id = sha256Hex(
+            (sourceKind + "\n" + uris.joinToString("\n") { it.toString() }).toByteArray(Charsets.UTF_8),
+        )
+        state.value = state.value.copy(
+            pendingImport = KnowledgePendingImportUi(id = id, uris = uris, sourceKind = sourceKind),
+            error = null,
+            visionTargetsLoading = true,
+        )
+        reload()
+    }
+
+    fun clearPendingImport() {
+        state.value = state.value.copy(pendingImport = null)
+    }
+
+    fun selectPendingVisionTarget(fingerprint: String?) {
+        val pending = state.value.pendingImport ?: return
+        state.value = state.value.copy(
+            pendingImport = pending.copy(
+                selectedVisionTargetFingerprint = fingerprint,
+                visionTargetSelectionInitialized = true,
+            ),
+        )
+    }
+
+    fun beginBatchVision(batchId: String) {
+        if (batchId.isBlank()) return
+        state.value = state.value.copy(
+            pendingBatchVision = KnowledgeBatchVisionUi(batchId = batchId),
+            visionTargetsLoading = true,
+        )
+        reload()
+    }
+
+    fun dismissBatchVision() {
+        state.value = state.value.copy(pendingBatchVision = null)
+    }
+
+    fun selectBatchVisionTarget(fingerprint: String?) {
+        val pending = state.value.pendingBatchVision ?: return
+        state.value = state.value.copy(
+            pendingBatchVision = pending.copy(
+                selectedVisionTargetFingerprint = fingerprint,
+                visionTargetSelectionInitialized = true,
+            ),
+        )
     }
     fun createBase(name: String) {
         val revision = selectionRevision
@@ -337,7 +458,16 @@ class KnowledgeViewModel(
     private fun requestVision(id: String, retry: Boolean) {
         val revision = ++visionRevision
         val selection = selectionRevision
-        readOnIo({ requireNotNull(currentVisionTarget()) { "请先配置 Vision 模型。" } },
+        readOnIo({
+            val batchTarget = repo.jobBatchId(id)?.let(repo::findBatch)?.visionTarget
+            if (!batchTarget.isNullOrBlank()) {
+                requireNotNull(currentVisionTarget(batchTarget)) { "原 Vision 目标已变更，请在本批次确认卡中重新选择并确认。" }
+            } else {
+                val targets = currentVisionTargets()
+                require(targets.size == 1) { "请在本批次确认卡中选择一个 Vision 目标。" }
+                targets.single()
+            }
+        },
             { revision == visionRevision && selection == selectionRevision }) { target ->
             visionTarget.value = target.label
             consentFingerprint = target.fingerprint
@@ -350,7 +480,7 @@ class KnowledgeViewModel(
         val fingerprint = consentFingerprint
         dismissVision()
         action {
-            require(currentVisionTarget()?.fingerprint == fingerprint) { "Vision 目标已变更，请重新确认。" }
+            require(fingerprint != null && currentVisionTarget(fingerprint)?.fingerprint == fingerprint) { "Vision 目标已变更，请重新确认。" }
             val job = repo.listJobs().firstOrNull { it.first.id == request.first }?.first
                 ?: error("导入任务不存在。")
             val documentsHash = sha256Hex(documentsFingerprint(job.knowledgeBaseId).toByteArray(Charsets.UTF_8))
@@ -391,8 +521,7 @@ class KnowledgeViewModel(
      * the authorization is bound to the batch's own member list.
      */
     fun authorizeBatchVision(batchId: String, expectedTarget: String) = action {
-        val target = requireNotNull(currentVisionTarget()) { "请先配置可处理图片的视觉目标。" }
-        check(target.fingerprint == expectedTarget) { "视觉目标已变更，请重新确认本批次目标。" }
+        requireNotNull(currentVisionTarget(expectedTarget)) { "视觉目标已变更或不可用，请重新选择本批次目标。" }
         repo.authorizeBatchVision(batchId, expectedTarget)
         ImportWorkScheduler.enqueueBatchFence(app, batchId, app.container.profiles.visionConfigured())
         "已授权本批次的视觉处理并继续导入；此授权仅限本批次已选资料。"
@@ -582,9 +711,16 @@ class KnowledgeViewModel(
         }
     }
 
-    private fun currentVisionTarget(): VisionConsentTarget? = app.container.profiles.visionBinding()?.let { (provider, model) ->
-        visionConsentTarget(provider.name, VisionBinding(provider.id, model.modelId, provider.baseUrl,
-            maxOf(provider.revision, model.revision), provider.revision, model.revision))
+    private fun currentVisionTargets(): List<VisionConsentTarget> = visionTargetOptions(
+        app.container.profiles.listProviders(),
+        app.container.profiles.listModels(),
+    ).map { target -> VisionConsentTarget(target.label, target.fingerprint) }
+
+    /** Resolve an exact target fingerprint; an omitted fingerprint is safe only for one target. */
+    private fun currentVisionTarget(fingerprint: String? = null): VisionConsentTarget? {
+        val targets = currentVisionTargets()
+        return if (fingerprint == null) targets.singleOrNull()
+        else targets.singleOrNull { it.fingerprint == fingerprint }
     }
     private fun displayName(uri: Uri): String {
         app.contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use { cursor ->

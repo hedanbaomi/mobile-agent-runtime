@@ -367,8 +367,8 @@ fun SettingsScreen(
                     style = MaterialTheme.typography.bodySmall,
                 )
                 Text(
-                    if (zh) "仅记录有限的设备/错误元数据与匿名能力开关 breadcrumbs，不含聊天正文、Prompt、知识文件名/路径、密钥、请求头或请求正文。导出可能包含设备/错误元数据；原生崩溃或系统强杀仍可能需要 ADB Logcat。"
-                    else "Only bounded device/error metadata and anonymous capability breadcrumbs are recorded; chat text, prompts, knowledge filenames/paths, keys, headers, and request bodies are excluded. Export may contain device/error metadata; native crashes or system kills may still require ADB Logcat.",
+                    if (zh) "开启后记录详细 DEBUG，包括视觉请求中的图片与上下文、响应正文、派发阶段、HTTP 状态和错误。凭据值仍会过滤。日志滚动保留最近约 16 MiB，较早内容会被覆盖；系统崩溃仍可能需要 ADB Logcat。"
+                    else "Detailed DEBUG includes Vision images and context, response bodies, dispatch stages, HTTP status and errors. Credential values are filtered. The log retains a rolling window of about 16 MiB; older content is overwritten. System crashes may still require ADB Logcat.",
                     style = MaterialTheme.typography.bodySmall,
                 )
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {

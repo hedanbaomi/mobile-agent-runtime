@@ -76,6 +76,16 @@ object OpenAiSse {
         return events
     }
 
+    /** Structural terminal metadata only; never returns provider text. */
+    internal fun finishReasonFromLine(line: String): String? {
+        val data = line.trim().takeIf { it.startsWith("data:") }?.removePrefix("data:")?.trim()
+            ?: return null
+        if (data == "[DONE]") return "done"
+        val obj = runCatching { json.parseToJsonElement(data).jsonObject }.getOrNull() ?: return null
+        return obj["choices"]?.let { runCatching { it.jsonArray.firstOrNull()?.jsonObject }.getOrNull() }
+            ?.get("finish_reason")?.jsonPrimitive?.contentOrNull
+    }
+
     /**
      * OpenAI-compatible providers use both spellings in the wild. Prefer the
      * canonical `reasoning_content` field when both are present, and never

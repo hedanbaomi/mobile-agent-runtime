@@ -21,6 +21,7 @@ import runtime.mobileagent.domain.ModelRole
 import runtime.mobileagent.provider.ChatMessage
 import runtime.mobileagent.provider.ModelEvent
 import runtime.mobileagent.provider.ModelRequest
+import runtime.mobileagent.provider.ProviderConnectionErrorCode
 
 /**
  * Real protocol-shape fixtures for the non-streaming Responses parser.
@@ -85,14 +86,14 @@ class OpenAiResponsesErrorNullTest {
     fun incompleteStatusIsTypedFailure() = runTest {
         val events = nonStreaming("{\"status\":\"incomplete\",\"error\":null,\"output\":[]}")
         val failed = events.filterIsInstance<ModelEvent.Failed>().single()
-        assertEquals(ErrorCode.UNKNOWN_OUTCOME.name, failed.sanitizedMessage)
+        assertEquals(ProviderConnectionErrorCode.INVALID_RESPONSE.name, failed.sanitizedMessage)
     }
 
     @Test
     fun failedStatusIsTypedFailure() = runTest {
         val events = nonStreaming("{\"status\":\"failed\",\"error\":null,\"output\":[]}")
         val failed = events.filterIsInstance<ModelEvent.Failed>().single()
-        assertEquals(ErrorCode.UNKNOWN_OUTCOME.name, failed.sanitizedMessage)
+        assertEquals(ProviderConnectionErrorCode.PROVIDER_REJECTED.name, failed.sanitizedMessage)
     }
 
     @Test

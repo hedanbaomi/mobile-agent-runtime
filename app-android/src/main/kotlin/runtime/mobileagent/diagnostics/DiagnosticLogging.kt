@@ -714,11 +714,11 @@ class RollingDiagnosticLogStore(
         const val CURRENT_FILE_NAME = "current.ndjson"
         const val PREVIOUS_FILE_NAME = "previous.ndjson"
         const val LAST_CRASH_FILE_NAME = "last-crash.ndjson"
-        const val MAX_CURRENT_BYTES = 256 * 1024
-        const val MAX_PREVIOUS_BYTES = 256 * 1024
+        const val MAX_CURRENT_BYTES = 8 * 1024 * 1024
+        const val MAX_PREVIOUS_BYTES = 8 * 1024 * 1024
         const val MAX_LAST_CRASH_BYTES = 32 * 1024
-        const val MAX_EVENT_BYTES = 4 * 1024
-        const val MAX_EXPORT_BYTES = 640 * 1024
+        const val MAX_EVENT_BYTES = 64 * 1024
+        const val MAX_EXPORT_BYTES = 20 * 1024 * 1024
         const val MAX_COUNT = 1_000_000
         const val MAX_DURATION_MS = 24L * 60L * 60L * 1_000L
         const val MAX_REFERENCE_LENGTH = DiagnosticReferenceHasher.REFERENCE_LENGTH
@@ -780,7 +780,11 @@ class RollingDiagnosticLogStore(
         "skill_inspect_failed" to setOf("kind", "stage", "count", "exceptionType", "errorCode"),
         "skill_install_success" to setOf("kind", "stage", "count"),
         "skill_install_failed" to setOf("kind", "stage", "count", "exceptionType", "errorCode"),
-        "knowledge_batch_event" to setOf("batchRef", "itemRef", "attempt", "phase", "reasonCode", "count"),
+        "vision_debug_content" to setOf("requestRef", "kind", "chunk", "chunks", "originalChars", "capturedChars", "truncated", "content"),
+        "knowledge_batch_event" to setOf("batchRef", "itemRef", "attempt", "phase", "reasonCode", "count",
+            "requestRef", "cacheRef", "assetRef", "page", "stage", "dispatched", "responseReceived", "httpStatus",
+            "durationMs", "errorCode", "exceptionType", "finishReason", "inputTokens", "outputTokens",
+            "contentKind", "contentChars", "contentBytes", "originalContentChars", "originalContentBytes", "contentPresent", "contentTruncated"),
         "batch_worker_start" to setOf("kind", "stage", "count"),
         "batch_worker_complete" to setOf("kind", "stage", "count"),
         "batch_worker_failed" to setOf("kind", "stage", "count", "exceptionType", "errorCode"),
@@ -1696,7 +1700,7 @@ class RollingDiagnosticLogStore(
             LAST_CRASH_FILE_NAME to readBounded(lastCrashFile, MAX_LAST_CRASH_BYTES),
         )
         val manifest = renderManifest(files)
-        val output = ByteArrayOutputStream(MAX_EXPORT_BYTES)
+        val output = ByteArrayOutputStream(8 * 1024)
         val bounded = LimitOutputStream(output, MAX_EXPORT_BYTES)
         ZipOutputStream(bounded).use { zip ->
             zip.putNextEntry(ZipEntry("manifest.json"))
@@ -1807,8 +1811,23 @@ class RollingDiagnosticLogStore(
                     "total" to total.coerceIn(0, MAX_COUNT),
                 )
             }
-            // P1 batch lifecycle: opaque refs plus closed codes only.  No file name, path, URI,
-            // provider credential or document text can be carried by this schema.
+            // Explicit DEBUG payload capture. Credential filtering occurs before this sink.
+            "vision_debug_content" -> {
+                val content = fields["content"] as? String ?: return null
+                if (content.length > 4_000) return null
+                linkedMapOf<String, Any?>(
+                    "requestRef" to stableKnowledgeReference(fields["requestRef"] as? String ?: return null),
+                    "kind" to canonicalBatchCode(fields["kind"] as? String ?: return null),
+                    "truncated" to (fields["truncated"] as? Boolean ?: return null),
+                    // Local verbose traces are enabled explicitly by the user. Credentials and
+                    // private continuation must be removed before entering this API.
+                    "content" to content,
+                ).apply {
+                    listOf("chunk", "chunks", "originalChars", "capturedChars").forEach { key ->
+                        put(key, (fields[key] as? Int ?: return null).coerceAtLeast(0))
+                    }
+                }
+            }
             "knowledge_batch_event" -> {
                 val batchRef = fields["batchRef"] as? String ?: return null
                 val phase = fields["phase"] as? String ?: return null
@@ -1816,13 +1835,32 @@ class RollingDiagnosticLogStore(
                 val attempt = fields["attempt"] as? Int ?: return null
                 val count = fields["count"] as? Int ?: return null
                 linkedMapOf(
-                    "batchRef" to canonicalReference(batchRef),
+                    "batchRef" to stableKnowledgeReference(batchRef),
                     "phase" to canonicalBatchCode(phase),
                     "reasonCode" to canonicalBatchCode(reasonCode),
                     "attempt" to attempt.coerceIn(0, MAX_COUNT),
                     "count" to count.coerceIn(0, MAX_COUNT),
-                ).apply { (fields["itemRef"] as? String)?.let { put("itemRef", canonicalReference(it)) } }
-            }            "knowledge_import_enqueued", "knowledge_import_staged", "batch_worker_start", "batch_worker_complete", "skill_inspect_success", "skill_install_success" -> {
+                ).apply {
+                    listOf("itemRef", "requestRef", "cacheRef", "assetRef").forEach { key ->
+                        (fields[key] as? String)?.let { put(key, stableKnowledgeReference(it)) }
+                    }
+                    listOf("page", "httpStatus", "inputTokens", "outputTokens").forEach { key ->
+                        (fields[key] as? Int)?.let { put(key, it.coerceAtLeast(0)) }
+                    }
+                    (fields["durationMs"] as? Long)?.let { put("durationMs", it.coerceIn(0, MAX_DURATION_MS)) }
+                    listOf("stage", "errorCode", "finishReason", "contentKind").forEach { key ->
+                        (fields[key] as? String)?.let { put(key, canonicalBatchCode(it)) }
+                    }
+                    (fields["exceptionType"] as? String)?.let { put("exceptionType", DiagnosticSanitizer.exceptionType(it)) }
+                    listOf("contentChars", "contentBytes", "originalContentChars", "originalContentBytes").forEach { key ->
+                        (fields[key] as? Long)?.let { put(key, it.coerceAtLeast(0)) }
+                    }
+                    listOf("dispatched", "responseReceived", "contentPresent", "contentTruncated").forEach { key ->
+                        (fields[key] as? Boolean)?.let { put(key, it) }
+                    }
+                }
+            }
+            "knowledge_import_enqueued", "knowledge_import_staged", "batch_worker_start", "batch_worker_complete", "skill_inspect_success", "skill_install_success" -> {
                 val kind = fields["kind"] as? String ?: return null
                 val stage = fields["stage"] as? String ?: return null
                 val count = fields["count"] as? Int ?: return null
@@ -2376,8 +2414,7 @@ class RollingDiagnosticLogStore(
     private fun levelFor(event: String): DiagnosticLevel = when {
         event.endsWith("_failed") || event == "uncaught_exception" || event == "runtime_tooling_unavailable" ->
             DiagnosticLevel.ERROR
-        event in DEBUG_EVENTS -> DiagnosticLevel.DEBUG
-        else -> DiagnosticLevel.INFO
+        else -> DiagnosticLevel.DEBUG
     }
 
     private fun renderLine(
@@ -2426,6 +2463,8 @@ class RollingDiagnosticLogStore(
             "failureCount" to currentStatus.writeFailureCount,
             "droppedEvents" to currentStatus.droppedEventCount,
             "droppedBytes" to currentStatus.droppedByteCount,
+            "retention" to "Rolling window: older segments are overwritten; this export is not a complete task history.",
+            "visionContent" to "Opt-in request/response JSON and SSE frames in numbered chunks; credential values and private continuation fields removed; malformed JSON content omitted.",
             "limits" to linkedMapOf<String, Any?>(
                 "currentBytes" to MAX_CURRENT_BYTES,
                 "previousBytes" to MAX_PREVIOUS_BYTES,
@@ -2512,6 +2551,11 @@ class RollingDiagnosticLogStore(
     }
 
     private fun canonicalReference(value: String): String = referenceHasher.hash(value.ifBlank { "unknown" })
+
+    /** App-generated request/cache identifiers must remain joinable across process restarts. */
+    private fun stableKnowledgeReference(value: String): String =
+        java.security.MessageDigest.getInstance("SHA-256").digest(value.toByteArray(StandardCharsets.UTF_8))
+            .take(16).joinToString("") { "%02x".format(it.toInt() and 255) }
 
     private fun canonicalOptionalReference(value: Any?): String? {
         if (value == null) return null

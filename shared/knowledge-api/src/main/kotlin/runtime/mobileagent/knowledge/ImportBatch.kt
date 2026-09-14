@@ -148,12 +148,9 @@ object ImportBatchScope {
 }
 
 /**
- * Minimal, redacted batch lifecycle event.
- *
- * Only opaque, app-generated references and closed reason codes are carried.  File names, paths,
- * URIs, provider credentials and any document text are deliberately absent, and the event carries
- * no provider body.  [batchRef]/[itemRef] are the durable batch/job identifiers, which are random
- * and referential rather than descriptive, so a log can be correlated without exposing content.
+ * Batch lifecycle and request correlation. References identify durable batch/job/attempt records.
+ * [diagnostic] includes structured transport details and may include content only under the
+ * explicit DEBUG capture switch. Credential filtering belongs to the provider capture boundary.
  */
 data class ImportBatchEvent(
     val batchRef: String,
@@ -162,6 +159,11 @@ data class ImportBatchEvent(
     val phase: ImportBatchEventPhase,
     val reasonCode: String,
     val count: Int = 0,
+    val requestRef: String? = null,
+    val cacheRef: String? = null,
+    val assetRef: String? = null,
+    val page: Int? = null,
+    val diagnostic: VisionDiagnosticMetadata? = null,
 )
 
 enum class ImportBatchEventPhase {

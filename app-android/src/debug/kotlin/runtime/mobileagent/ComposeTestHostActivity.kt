@@ -5,5 +5,5 @@ package runtime.mobileagent
 
 import androidx.activity.ComponentActivity
 
-/** Empty debug-only activity that lets instrumentation render one isolated Compose surface. */
+/** Empty internal debug/review activity for isolated Compose instrumentation; absent from release. */
 class ComposeTestHostActivity : ComponentActivity()

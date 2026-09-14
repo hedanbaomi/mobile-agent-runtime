@@ -60,6 +60,8 @@ import runtime.mobileagent.knowledge.VisionBinding
 import runtime.mobileagent.knowledge.VisionCacheKey
 import runtime.mobileagent.knowledge.VisionInput
 import runtime.mobileagent.knowledge.VisionOutcome
+import runtime.mobileagent.knowledge.VisionDiagnosticMetadata
+import runtime.mobileagent.knowledge.VisionDiagnosticPhase
 import runtime.mobileagent.knowledge.VectorIndexFactory
 import runtime.mobileagent.knowledge.ZipSafety
 import runtime.mobileagent.knowledge.sha256Hex
@@ -68,6 +70,9 @@ import java.nio.ByteOrder
 import java.io.File
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.runBlocking
+
+/** Legacy cache identity may be adopted only when it maps to one current destination. */
+data class LegacyVisionCacheTarget(val fingerprint: String, val unambiguous: Boolean)
 
 class KnowledgeRepository(
     private val db: SqlConnection,
@@ -87,6 +92,10 @@ class KnowledgeRepository(
     private val importEvents: (ImportBatchEvent) -> Unit = {},
     /** Resolves a newly selected API adapter by its exact persisted space id. */
     private val apiEmbedderResolver: (String) -> TextEmbedder? = { null },
+    /** Resolve the exact authorized target, independent of the global default. */
+    private val visionTargetResolver: ((String) -> VisionBinding?)? = null,
+    private val captureVisionContent: () -> Boolean = { false },
+    private val legacyVisionCacheTarget: (String) -> LegacyVisionCacheTarget? = { null },
 ) {
     private val indexLock = Any()
     /**
@@ -428,7 +437,7 @@ class KnowledgeRepository(
             "The suspending Vision bridge is reserved for API embedding jobs"
         }
         expectedVisionFingerprint?.let {
-            check(it == visionFingerprint()) { "Vision destination changed; no image was sent" }
+            check(visionTargetAvailable(it)) { "Vision destination changed; no image was sent" }
         }
         expectedDocumentsFingerprintHash?.let {
             check(it == documentsFingerprintHash(row.string("kb_id"))) {
@@ -977,7 +986,7 @@ class KnowledgeRepository(
         val row = db.query("SELECT * FROM import_jobs WHERE id = ?", listOf(jobId)).singleOrNull()
             ?: error("import job not found")
         expectedVisionFingerprint?.let {
-            check(it == visionFingerprint()) { "Vision destination changed; no image was sent" }
+            check(visionTargetAvailable(it)) { "Vision destination changed; no image was sent" }
         }
         expectedDocumentsFingerprintHash?.let {
             check(it == documentsFingerprintHash(row.string("kb_id"))) {
@@ -1089,20 +1098,32 @@ class KnowledgeRepository(
         check(acknowledgeDuplicateCharge) {
             "Retry may bill the Vision provider twice. Acknowledge the duplicate-charge risk."
         }
-        val row = db.query("SELECT * FROM import_jobs WHERE id = ?", listOf(jobId)).singleOrNull()
-            ?: error("import job not found")
-        expectedVisionFingerprint?.let {
-            check(it == visionFingerprint()) { "Vision destination changed; no image was sent" }
+        val target = synchronized(indexLock) {
+            val row = db.query("SELECT * FROM import_jobs WHERE id = ?", listOf(jobId)).singleOrNull()
+                ?: error("import job not found")
+            check(row.string("error").contains("UNKNOWN_OUTCOME")) { "This job has no unknown Vision result to retry" }
+            val selected = expectedVisionFingerprint ?: row.string("vision_binding_json").ifBlank { visionFingerprint() }
+            check(visionTargetAvailable(selected)) { "Vision destination changed; no image was sent" }
+            val original = row.string("vision_binding_json")
+            val legacy = legacyVisionCacheTarget(selected)?.takeIf { it.unambiguous }
+            check(original == selected || legacy?.fingerprint == original) { "Retry must acknowledge the original Vision target" }
+            if (jobBatchId(jobId) != null) {
+                check(authorizedVisionTargetLocked(jobId) == selected) { "Vision batch authorization changed" }
+            }
+            expectedDocumentsFingerprintHash?.let {
+                check(it == documentsFingerprintHash(row.string("kb_id"))) { "Vision consent documents changed; no image was sent" }
+            }
+            val retryTargets = mutableListOf(selected)
+            legacyVisionCacheTarget(selected)?.takeIf { it.unambiguous }?.let { retryTargets += it.fingerprint }
+            retryTargets.forEach { retryTarget -> db.execute(
+                "DELETE FROM vision_results WHERE status = ? AND model_fingerprint = ? AND EXISTS " +
+                    "(SELECT 1 FROM assets a WHERE a.document_id = ? AND a.blob_hash = vision_results.asset_hash " +
+                    "AND a.surrounding_text_hash = vision_results.context_hash)",
+                listOf("UNKNOWN_OUTCOME", retryTarget, row.string("document_id")),
+            ) }
+            selected
         }
-        expectedDocumentsFingerprintHash?.let {
-            check(it == documentsFingerprintHash(row.string("kb_id"))) { "Vision consent documents changed; no image was sent" }
-        }
-        val documentId = row.string("document_id")
-        db.execute(
-            "DELETE FROM vision_results WHERE status = ? AND asset_hash IN (SELECT blob_hash FROM assets WHERE document_id = ?)",
-            listOf("UNKNOWN_OUTCOME", documentId),
-        )
-        return grantVisionConsent(jobId, expectedVisionFingerprint, expectedDocumentsFingerprintHash)
+        return grantVisionConsent(jobId, target, expectedDocumentsFingerprintHash)
     }
 
     /**
@@ -1479,6 +1500,7 @@ class KnowledgeRepository(
                     stage = stage,
                     hasImages = row.boolean("has_images"),
                     visionConsent = row.boolean("vision_consent"),
+                    consentedVisionFingerprint = row.string("vision_binding_json").ifBlank { null },
                     embeddingIsApi = row.boolean("embedding_is_api"),
                     embeddingConsent = row.boolean("embedding_consent"),
                     error = row.string("error").ifBlank { null },
@@ -1972,14 +1994,17 @@ class KnowledgeRepository(
             // WAITING while Vision is already running.
             persistJob(job, displayNameForJob(job.id))
             when (val outcome = processVisualAssets(job, bytes, parsed, processable, blocked)) {
-                is VisionBatch.Deferred -> return
+                is VisionBatch.Deferred -> {
+                    persistJob(job, displayNameForJob(job.id))
+                    return
+                }
                 is VisionBatch.Failed -> {
                     fail(job, outcome.message)
                     return
                 }
                 is VisionBatch.Unknown -> {
                     job.stage = ImportStage.FAILED
-                    job.error = "UNKNOWN_OUTCOME: Vision result is uncertain and was not billed as success. Retry is manual."
+                    job.error = outcome.message
                     return
                 }
                 is VisionBatch.Ok -> visionTexts += outcome.chunks
@@ -2159,14 +2184,17 @@ class KnowledgeRepository(
             // an unconsumed consent request.
             persistJob(job, displayNameForJob(job.id))
             when (val outcome = processVisualAssets(job, bytes, parsed, processable, blocked)) {
-                is VisionBatch.Deferred -> return
+                is VisionBatch.Deferred -> {
+                    persistJob(job, displayNameForJob(job.id))
+                    return
+                }
                 is VisionBatch.Failed -> {
                     fail(job, outcome.message)
                     return
                 }
                 is VisionBatch.Unknown -> {
                     job.stage = ImportStage.FAILED
-                    job.error = "UNKNOWN_OUTCOME: Vision result is uncertain and was not billed as success. Retry is manual."
+                    job.error = outcome.message
                     return
                 }
                 is VisionBatch.Ok -> visionTexts += outcome.chunks
@@ -2192,7 +2220,7 @@ class KnowledgeRepository(
     private sealed interface VisionBatch {
         data class Ok(val chunks: List<IndexedChunk>) : VisionBatch
         data class Failed(val message: String) : VisionBatch
-        data object Unknown : VisionBatch
+        data class Unknown(val message: String = "UNKNOWN_OUTCOME: Vision 结果未确认，可能已计费。请明确确认后手动重试。") : VisionBatch
         data object Deferred : VisionBatch
     }
 
@@ -2251,7 +2279,7 @@ class KnowledgeRepository(
                 null
             }
             is VisionBatch.Failed -> outcome
-            VisionBatch.Unknown -> outcome
+            is VisionBatch.Unknown -> outcome
             VisionBatch.Deferred -> outcome
         }
 
@@ -2309,7 +2337,13 @@ class KnowledgeRepository(
             if (asset.bytes.isEmpty() || asset.kind != "IMAGE") {
                 return VisionBatch.Failed("Visual asset ${asset.localId} is not rasterizable and was not downloaded")
             }
-            if (!visionBindingMatches(job) || visionFingerprint() != requestedFingerprint) {
+            val stopped = jobBatchId(job.id)?.let(::findBatch)?.state
+            if (stopped == ImportBatchState.PAUSED || stopped == ImportBatchState.CANCELLED) {
+                job.stage = if (stopped == ImportBatchState.PAUSED) ImportStage.PAUSED else ImportStage.CANCELLED
+                job.error = "Vision batch is stopped. No new image was sent."
+                return VisionBatch.Deferred
+            }
+            if (!visionBindingMatches(job) || !visionTargetAvailable(requestedFingerprint)) {
                 if (jobBatchId(job.id) != null) {
                     job.stage = ImportStage.AWAITING_UPLOAD_CONSENT
                     job.visionConsent = false
@@ -2333,11 +2367,15 @@ class KnowledgeRepository(
                 surroundingText = asset.surroundingText,
                 page = asset.page,
                 section = asset.section,
+                captureDiagnosticContent = captureVisionContent(),
             )
             db.execute(
                 "INSERT OR REPLACE INTO assets(id,document_id,document_version_id,blob_hash,page,section,kind,surrounding_text_hash) VALUES (?,?,?,?,?,?,?,?)",
                 listOf(assetId, job.documentId, null, stored.sha256, asset.page, asset.section, asset.kind, contextHash),
             )
+            var dispatchInput = input
+            var latestDiagnostic = VisionDiagnosticMetadata()
+            var dispatchRejected = false
             val cached = synchronized(indexLock) {
                 val batchId = jobBatchId(job.id)
                 if (batchId != null) {
@@ -2345,26 +2383,80 @@ class KnowledgeRepository(
                     if (state == ImportBatchState.PAUSED || state == ImportBatchState.CANCELLED ||
                         authorizedVisionTargetLocked(job.id) != requestedFingerprint
                     ) {
-                        job.stage = if (state == ImportBatchState.PAUSED) ImportStage.PAUSED else ImportStage.AWAITING_UPLOAD_CONSENT
-                        job.visionConsent = false
+                        job.stage = when (state) {
+                            ImportBatchState.PAUSED -> ImportStage.PAUSED
+                            ImportBatchState.CANCELLED -> ImportStage.CANCELLED
+                            else -> ImportStage.AWAITING_UPLOAD_CONSENT
+                        }
+                        if (job.stage == ImportStage.AWAITING_UPLOAD_CONSENT) job.visionConsent = false
                         job.error = "Vision batch is paused or its authorization changed. No new image was sent."
                         return VisionBatch.Deferred
                     }
                 }
-                val result = db.query(
+                var result = db.query(
                 "SELECT status, ocr_text, description, table_markdown, result_type FROM vision_results WHERE cache_key = ?",
                 listOf(input.cacheKey),
                 ).singleOrNull()
+                if (result == null) {
+                    legacyVisionCacheTarget(requestedFingerprint)?.let { legacy ->
+                        val legacyKey = input.copy(modelFingerprint = legacy.fingerprint).cacheKey
+                        val legacyResult = db.query(
+                            "SELECT status, ocr_text, description, table_markdown, result_type FROM vision_results WHERE cache_key = ?",
+                            listOf(legacyKey),
+                        ).singleOrNull()
+                        if (legacyResult?.string("status") in setOf("SUCCESS", "UNKNOWN_OUTCOME")) {
+                            if (!legacy.unambiguous) return VisionBatch.Failed(
+                                "LEGACY_VISION_TARGET_AMBIGUOUS: 旧视觉检查点对应多个模型配置；请先消除重复目标，现有结果已保留，未派发新请求。",
+                            )
+                            persistVision(input.cacheKey, stored.sha256, contextHash, requestedFingerprint,
+                                legacyResult!!.string("status"), legacyResult.string("ocr_text"),
+                                legacyResult.string("description"), legacyResult.string("table_markdown"), legacyResult.string("result_type"))
+                            result = legacyResult
+                        }
+                    }
+                }
                 if (result?.string("status") !in setOf("SUCCESS", "UNKNOWN_OUTCOME")) {
                     // Commit before entering the backend. A dead process can only recover this
                     // call as uncertain; a completed response replaces it with a reusable cache.
-                    persistVision(input.cacheKey, stored.sha256, contextHash, requestedFingerprint, "UNKNOWN_OUTCOME", "", "", "", "")
+                    val requestId = EntityId.random().value
+                    val attempt = db.query("SELECT COALESCE(MAX(attempt_no),0) AS n FROM vision_attempts WHERE cache_key = ?",
+                        listOf(input.cacheKey)).single().long("n").toInt() + 1
+                    db.transaction {
+                        persistVision(input.cacheKey, stored.sha256, contextHash, requestedFingerprint, "UNKNOWN_OUTCOME", "", "", "", "")
+                        db.execute(
+                            "INSERT INTO vision_attempts(request_id,cache_key,job_id,asset_hash,attempt_no,status,stage,dispatch_status,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                            listOf(requestId,input.cacheKey,job.id,stored.sha256,attempt,"PREPARED","VALIDATION","NOT_DISPATCHED",Utc.nowIso(),Utc.nowIso()))
+                    }
+                    dispatchInput = input.copy(requestId = requestId, attempt = attempt, beforeDispatch = {
+                        synchronized(indexLock) {
+                            val currentBatchId = jobBatchId(job.id)
+                            val currentStage = db.query("SELECT stage FROM import_jobs WHERE id = ?", listOf(job.id))
+                                .singleOrNull()?.string("stage")
+                            val allowed = currentStage != null && currentStage !in setOf("PAUSED", "CANCELLED") &&
+                                visionTargetAvailable(requestedFingerprint) &&
+                                (currentBatchId == null || (findBatch(currentBatchId)?.state !in
+                                    setOf(ImportBatchState.PAUSED, ImportBatchState.CANCELLED) &&
+                                    authorizedVisionTargetLocked(job.id) == requestedFingerprint))
+                            dispatchRejected = !allowed
+                            allowed
+                        }
+                    }, diagnostics = { metadata ->
+                        latestDiagnostic = metadata
+                        runCatching { recordVisionAttempt(requestId, metadata, "IN_PROGRESS") }
+                        jobBatchId(job.id)?.let { id ->
+                            runCatching { importEvents(ImportBatchEvent(id, job.id, attempt,
+                                if (metadata.phase == VisionDiagnosticPhase.DISPATCH) ImportBatchEventPhase.DISPATCHED
+                                else ImportBatchEventPhase.CHECKPOINT,
+                                "vision_transport", 1, requestId, input.cacheKey, stored.sha256, asset.page, metadata)) }
+                        }
+                    })
                 }
                 result
             }
             fun diagnostic(phase: ImportBatchEventPhase, code: String) {
                 jobBatchId(job.id)?.let { batchId ->
-                    emitBatchEvent(phase, batchId, job.id, 0, reasonCode = code, count = 1)
+                    runCatching { importEvents(ImportBatchEvent(batchId, job.id, dispatchInput.attempt, phase, code, 1,
+                        dispatchInput.requestId.ifBlank { null }, input.cacheKey, stored.sha256, asset.page)) }
                 }
             }
             val outcome = when (cached?.string("status")) {
@@ -2378,28 +2470,78 @@ class KnowledgeRepository(
                 )
                 "UNKNOWN_OUTCOME" -> VisionOutcome.UnknownOutcome
                 else -> try {
-                    diagnostic(ImportBatchEventPhase.DISPATCHED, "vision_backend")
-                    backend.process(input).also { result ->
+                    if (input.captureDiagnosticContent) {
+                        val source = kotlinx.serialization.json.JsonObject(mapOf(
+                            "documentId" to kotlinx.serialization.json.JsonPrimitive(job.documentId),
+                            "displayName" to kotlinx.serialization.json.JsonPrimitive(displayNameForJob(job.id)),
+                            "assetHash" to kotlinx.serialization.json.JsonPrimitive(stored.sha256),
+                            "contextHash" to kotlinx.serialization.json.JsonPrimitive(contextHash),
+                            "page" to kotlinx.serialization.json.JsonPrimitive(asset.page),
+                            "section" to kotlinx.serialization.json.JsonPrimitive(asset.section),
+                            "mediaType" to kotlinx.serialization.json.JsonPrimitive(asset.mediaType),
+                            "bytes" to kotlinx.serialization.json.JsonPrimitive(asset.bytes.size),
+                        )).toString()
+                        runCatching { dispatchInput.diagnostics(VisionDiagnosticMetadata(
+                            phase = VisionDiagnosticPhase.REQUEST_READY, stage = "ASSET_PREPARATION",
+                            requestId = dispatchInput.requestId, attempt = dispatchInput.attempt,
+                            contentKind = "source.metadata.json", content = source,
+                            contentChars = source.length.toLong(), contentBytes = source.toByteArray(Charsets.UTF_8).size.toLong())) }
+                    }
+                    diagnostic(ImportBatchEventPhase.STARTED, "vision_backend")
+                    backend.process(dispatchInput).also { result ->
                         diagnostic(ImportBatchEventPhase.RESPONDED, when (result) {
                             is VisionOutcome.Success -> "vision_success"
                             is VisionOutcome.Failed -> "vision_failed"
-                            is VisionOutcome.UnknownOutcome -> "vision_unknown"
+                            is VisionOutcome.UnknownOutcome, is VisionOutcome.Unknown -> "vision_unknown"
                         })
                     }
                 } catch (failure: Exception) {
                     diagnostic(ImportBatchEventPhase.RESPONDED, "vision_unknown")
-                    VisionOutcome.UnknownOutcome
+                    VisionOutcome.Unknown(latestDiagnostic.copy(errorCode = "UNKNOWN_OUTCOME", stage = "backend",
+                        exceptionType = failure.javaClass.simpleName))
+                }
+            }
+            if (dispatchInput.requestId.isNotBlank()) {
+                val metadata = when (outcome) {
+                    is VisionOutcome.Failed -> outcome.metadata
+                    is VisionOutcome.Unknown -> outcome.metadata
+                    else -> latestDiagnostic
+                }
+                // Diagnostics must never discard a paid successful response before its cache save.
+                runCatching {
+                    recordVisionAttempt(dispatchInput.requestId, metadata, when (outcome) {
+                        is VisionOutcome.Success -> "SUCCESS"
+                        is VisionOutcome.Failed -> "FAILED"
+                        else -> "UNKNOWN_OUTCOME"
+                    })
                 }
             }
             when (outcome) {
-                is VisionOutcome.UnknownOutcome -> {
+                is VisionOutcome.UnknownOutcome, is VisionOutcome.Unknown -> {
                     // The pre-dispatch marker is already durable. Do not overwrite a success
                     // that another in-flight owner may have checkpointed after our cache read.
-                    return VisionBatch.Unknown
+                    val detail = (outcome as? VisionOutcome.Unknown)?.metadata
+                    val prior = db.query("SELECT error_code,stage FROM vision_attempts WHERE cache_key = ? ORDER BY attempt_no DESC LIMIT 1",
+                        listOf(input.cacheKey)).singleOrNull()
+                    val reason = detail?.errorCode ?: prior?.string("error_code")?.ifBlank { null } ?: "UNKNOWN_OUTCOME"
+                    val stage = detail?.stage ?: prior?.string("stage")?.ifBlank { null } ?: "recovery"
+                    return VisionBatch.Unknown("UNKNOWN_OUTCOME: Vision 结果未确认，可能已计费。原因=$reason；阶段=$stage；请明确确认后手动重试。")
                 }
                 is VisionOutcome.Failed -> {
-                    persistVision(input.cacheKey, stored.sha256, contextHash, requestedFingerprint, "FAILED", "", outcome.message, "", "")
-                    return VisionBatch.Failed(outcome.message)
+                    if (dispatchRejected && !outcome.metadata.dispatched) {
+                        persistVision(input.cacheKey, stored.sha256, contextHash, requestedFingerprint,
+                            "FAILED", "", "REQUEST_CANCELLED: 本地未派发。", "", "")
+                        job.stage = when (jobBatchId(job.id)?.let(::findBatch)?.state) {
+                            ImportBatchState.PAUSED -> ImportStage.PAUSED
+                            ImportBatchState.CANCELLED -> ImportStage.CANCELLED
+                            else -> ImportStage.AWAITING_UPLOAD_CONSENT
+                        }
+                        job.error = "REQUEST_CANCELLED: 本地未派发；批次已暂停、取消或授权发生变化。"
+                        return VisionBatch.Deferred
+                    }
+                    val message = visionFailureMessage(outcome)
+                    persistVision(input.cacheKey, stored.sha256, contextHash, requestedFingerprint, "FAILED", "", message, "", "")
+                    return VisionBatch.Failed(message)
                 }
                 is VisionOutcome.Success -> {
                     persistVision(
@@ -2438,6 +2580,22 @@ class KnowledgeRepository(
             }
         }
         return VisionBatch.Ok(chunks)
+    }
+
+    private fun visionFailureMessage(outcome: VisionOutcome.Failed): String = buildString {
+        append(outcome.metadata.errorCode ?: outcome.message)
+        outcome.metadata.stage?.let { append("; stage=").append(it) }
+        outcome.metadata.httpStatus?.let { append("; HTTP=").append(it) }
+        append(if (outcome.metadata.dispatched) "; 可能已计费。" else "; 本地未派发。")
+    }
+
+    private fun recordVisionAttempt(requestId: String, metadata: VisionDiagnosticMetadata, status: String) {
+        db.execute(
+            "UPDATE vision_attempts SET status=?,stage=?,dispatch_status=?,error_code=?,http_status=?,duration_ms=?,finish_reason=?,input_tokens=?,output_tokens=?,exception_type=?,updated_at=? WHERE request_id=?",
+            listOf(status,metadata.stage ?: metadata.phase.name,
+                when { metadata.responseReceived -> "RESPONSE_RECEIVED"; metadata.dispatched -> "DISPATCHED"; else -> "NOT_DISPATCHED" },
+                metadata.errorCode,metadata.httpStatus,metadata.durationMs,metadata.finishReason,metadata.inputTokens,metadata.outputTokens,
+                metadata.exceptionType,Utc.nowIso(),requestId))
     }
 
     private fun persistVision(
@@ -4181,12 +4339,16 @@ class KnowledgeRepository(
 
     private fun visionFingerprint(): String = visionBinding()?.fingerprint ?: visionModelFingerprint
 
+    private fun visionTargetAvailable(target: String): Boolean =
+        if (visionTargetResolver != null) visionTargetResolver.invoke(target)?.fingerprint == target
+        else target == visionFingerprint() && (target != "vision-unconfigured" || vision != null)
+
     private fun visionBindingMatches(job: ImportJob): Boolean {
         val current = visionFingerprint()
         val consented = job.consentedVisionFingerprint
         if (jobBatchId(job.id) != null && authorizedVisionTargetLocked(job.id) != consented) return false
         if (consented.isNullOrBlank()) return current == "vision-unconfigured"
-        return consented == current
+        return visionTargetAvailable(consented)
     }
 
     private fun existingDocument(kbId: String, hash: String): String? =
@@ -4578,6 +4740,7 @@ class KnowledgeRepository(
         val count = db.query("SELECT COUNT(*) AS n FROM import_items WHERE batch_id = ?", listOf(batchId)).single().long("n")
         check(count == row.long("total_items") && count > 0) { "Selected membership is incomplete" }
         db.execute("UPDATE import_batches SET staging_complete = 1 WHERE id = ?", listOf(batchId))
+        db.execute("UPDATE import_items SET state = 'QUEUED' WHERE batch_id = ? AND state IN ('PENDING','COPYING') AND job_id IS NOT NULL", listOf(batchId))
         refreshBatchProgressLocked(batchId)
     }
 
@@ -4867,6 +5030,8 @@ class KnowledgeRepository(
 
     /** Per-item detail for the user-opened batch section.  Not wired to diagnostics. */
     fun listBatchItemViews(batchId: String): List<ImportBatchItemView> = synchronized(indexLock) {
+        val fullyStaged = db.query("SELECT staging_complete FROM import_batches WHERE id = ?", listOf(batchId))
+            .singleOrNull()?.long("staging_complete") == 1L
         db.query(
             "SELECT i.job_id AS job_id, COALESCE(NULLIF(j.display_name, ''), i.relative_path) AS display_name, " +
                 "i.state AS state, i.error AS error FROM import_items i " +
@@ -4876,7 +5041,8 @@ class KnowledgeRepository(
             ImportBatchItemView(
                 jobId = row.string("job_id").ifBlank { null },
                 displayName = row.string("display_name"),
-                state = row.string("state"),
+                state = if (fullyStaged && row.string("job_id").isNotBlank() &&
+                    row.string("state") in setOf("PENDING", "COPYING")) "QUEUED" else row.string("state"),
                 error = row.string("error").ifBlank { null },
             )
         }
@@ -4885,6 +5051,8 @@ class KnowledgeRepository(
     fun batchProgress(batchId: String): ImportBatchProgress = synchronized(indexLock) { batchProgressLocked(batchId) }
 
     private fun batchProgressLocked(batchId: String): ImportBatchProgress {
+        val fullyStaged = db.query("SELECT staging_complete FROM import_batches WHERE id = ?", listOf(batchId))
+            .singleOrNull()?.long("staging_complete") == 1L
         val items = db.query("SELECT state, job_id FROM import_items WHERE batch_id = ?", listOf(batchId))
         var published = 0
         var pending = 0
@@ -4899,7 +5067,7 @@ class KnowledgeRepository(
             when (runCatching { ImportItemState.valueOf(row.string("state")) }.getOrNull()) {
                 ImportItemState.PUBLISHED -> published += 1
                 ImportItemState.PENDING -> pending += 1
-                ImportItemState.COPYING -> copying += 1
+                ImportItemState.COPYING -> if (fullyStaged) queued += 1 else copying += 1
                 ImportItemState.QUEUED -> queued += 1
                 ImportItemState.PROCESSING -> processing += 1
                 ImportItemState.WAITING -> {
@@ -4956,7 +5124,7 @@ class KnowledgeRepository(
         if (batch.string("state") == ImportBatchState.CANCELLED.name) return null
         if (batch.string("vision_authorized_at").isBlank()) return null
         val target = batch.string("vision_target").ifBlank { null } ?: return null
-        if (target != visionFingerprint()) return null
+        if (!visionTargetAvailable(target)) return null
         if (batch.string("vision_scope_hash") != batchScopeHashLocked(batchId)) return null
         return target
     }
@@ -4972,7 +5140,7 @@ class KnowledgeRepository(
         // this job during this invocation. Consumed tickets never re-arm recovery.
         val legacy = activeLegacyVisionTickets[jobId]?.split('\n') ?: return null
         return legacy.getOrNull(1)?.takeIf {
-            it == visionFingerprint() && legacy.getOrNull(2) == documentsFingerprintHash(job.string("kb_id"))
+            visionTargetAvailable(it) && legacy.getOrNull(2) == documentsFingerprintHash(job.string("kb_id"))
         }
     }
 
@@ -5007,11 +5175,8 @@ class KnowledgeRepository(
         val state = ImportBatchState.valueOf(batch.string("state"))
         check(state != ImportBatchState.CANCELLED) { "Batch was cancelled; no image was sent." }
         check(state != ImportBatchState.COMPLETED) { "Batch is already complete." }
-        val current = visionFingerprint()
-        check(current != "vision-unconfigured") { "请先配置可处理图片的视觉目标。" }
-        if (expectedTarget != null && expectedTarget.isNotBlank()) {
-            check(expectedTarget == current) { "Vision destination changed; nothing was authorized." }
-        }
+        val current = expectedTarget?.takeIf { it.isNotBlank() } ?: visionFingerprint()
+        check(visionTargetAvailable(current)) { "Vision destination changed or is unavailable; nothing was authorized." }
         val scope = batchScopeHashLocked(batchId)
         val now = Utc.nowIso()
         db.transaction {
@@ -5105,25 +5270,34 @@ class KnowledgeRepository(
         if (row.string("state") != ImportBatchState.PAUSED.name) {
             return null
         }
-        db.execute(
-            "UPDATE import_batches SET state = ?, paused_at = NULL, error = NULL, updated_at = ? WHERE id = ?",
-            listOf(ImportBatchState.PROCESSING.name, Utc.nowIso(), batchId),
-        )
-        if (batchId !in activeBatchWorkers) {
-            // A paused process may have died with a claimed job. Reconstruct it from CAS;
-            // the durable Vision marker still prevents replay of an uncertain call.
+        db.transaction {
             db.execute(
-                "UPDATE import_items SET state = ? WHERE batch_id = ? AND state = ?",
-                listOf(ImportItemState.QUEUED.name, batchId, ImportItemState.PROCESSING.name),
+                "UPDATE import_batches SET state = ?, paused_at = NULL, error = NULL, updated_at = ? WHERE id = ?",
+                listOf(ImportBatchState.PROCESSING.name, Utc.nowIso(), batchId),
             )
+            if (batchId !in activeBatchWorkers) {
+                // A paused process may have died with a claimed job. Reconstruct it from CAS;
+                // the durable Vision marker still prevents replay of an uncertain call.
+                db.execute(
+                    "UPDATE import_items SET state = ? WHERE batch_id = ? AND state = ?",
+                    listOf(ImportItemState.QUEUED.name, batchId, ImportItemState.PROCESSING.name),
+                )
+            }
+            db.execute(
+                "UPDATE import_items SET state = ?, error = NULL WHERE batch_id = ? AND state IN (?,?) AND job_id IN (" +
+                    "SELECT id FROM import_jobs WHERE batch_id = ? AND stage = ?)",
+                listOf(ImportItemState.QUEUED.name, batchId, ImportItemState.PROCESSING.name, ImportItemState.WAITING.name,
+                    batchId, ImportStage.PAUSED.name),
+            )
+            // A persisted PAUSED job cannot advance through the ordinary state machine and is
+            // rejected by the final dispatch gate. Explicit resume re-arms only these local stops;
+            // cached successes and UNKNOWN results remain intact and are consulted on reconstruction.
+            db.execute(
+                "UPDATE import_jobs SET stage = ?, error = NULL, updated_at = ? WHERE batch_id = ? AND stage = ?",
+                listOf(ImportStage.COPYING.name, Utc.nowIso(), batchId, ImportStage.PAUSED.name),
+            )
+            refreshBatchProgressLocked(batchId)
         }
-        db.execute(
-            "UPDATE import_items SET state = ?, error = NULL WHERE batch_id = ? AND state IN (?,?) AND job_id IN (" +
-                "SELECT id FROM import_jobs WHERE batch_id = ? AND stage = ?)",
-            listOf(ImportItemState.QUEUED.name, batchId, ImportItemState.PROCESSING.name, ImportItemState.WAITING.name,
-                batchId, ImportStage.PAUSED.name),
-        )
-        refreshBatchProgressLocked(batchId)
         emitBatchEvent(ImportBatchEventPhase.STATE_CHANGED, batchId, null, 0, reasonCode = "resumed", count = 1)
         batchFromRow(requireNotNull(db.query("SELECT * FROM import_batches WHERE id = ?", listOf(batchId)).singleOrNull()))
     }
@@ -5226,7 +5400,7 @@ class KnowledgeRepository(
                     db.query("SELECT hash FROM blobs WHERE hash = ?", listOf(document.string("blob_hash"))).isNotEmpty()) {
                     "Vision consent ticket source bytes are unavailable"
                 }
-                check(lines.size == 3 && lines[1].isNotBlank() && lines[1] == visionFingerprint()) {
+                check(lines.size == 3 && lines[1].isNotBlank() && visionTargetAvailable(lines[1])) {
                     "Vision destination changed; no image was sent"
                 }
                 if (action == "RETRY") {

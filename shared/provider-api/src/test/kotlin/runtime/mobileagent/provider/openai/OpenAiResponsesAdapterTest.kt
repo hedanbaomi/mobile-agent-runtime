@@ -396,7 +396,7 @@ class OpenAiResponsesAdapterTest {
             ModelRequest("gpt-responses", listOf(ChatMessage("user", "hi"))),
             "token".toCharArray(),
         ).toList()
-        assertEquals(ModelEvent.Failed(ErrorCode.UNKNOWN_OUTCOME.name), incomplete.last())
+        assertEquals(ModelEvent.Failed(ProviderConnectionErrorCode.INVALID_RESPONSE.name), incomplete.last())
     }
 
     @Test

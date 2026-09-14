@@ -3,6 +3,8 @@
 
 package runtime.mobileagent
 
+import runtime.mobileagent.domain.acceptsImages
+
 import android.app.Application
 import io.ktor.client.HttpClient
 import io.ktor.client.engine.okhttp.OkHttp
@@ -149,7 +151,7 @@ class AppContainer(app: MobileAgentApp) :
                     val response = chain.proceed(chain.request())
                     if (response.code == 503) {
                         response.close()
-                        throw java.io.IOException("Provider unavailable; outcome unknown; automatic replay disabled")
+                        throw runtime.mobileagent.provider.ProviderHttpResponseException(503)
                     }
                     response
                 }
@@ -175,18 +177,25 @@ class AppContainer(app: MobileAgentApp) :
         vectorIndexFactory = UsearchVectorIndexFactory(),
         vision = OpenAiCompatibleVision(http, profiles, secrets),
         visionBinding = {
-            profiles.visionBinding()?.let { (provider, model) ->
-                runtime.mobileagent.knowledge.VisionBinding(
-                    providerId = provider.id,
-                    modelId = model.modelId,
-                    endpoint = provider.baseUrl,
-                    revision = maxOf(provider.revision, model.revision),
-                    providerRevision = provider.revision,
-                    modelRevision = model.revision,
-                )
+            profiles.visionBinding()?.let { (provider, model) -> visionProfileBinding(provider, model) }
+        },
+        visionTargetResolver = { target ->
+            profiles.listModels().filter { it.acceptsImages() }.mapNotNull { model ->
+                profiles.getProvider(model.providerId)?.let { provider -> visionProfileBinding(provider, model) }
+            }.singleOrNull { it.fingerprint == target }
+        },
+        legacyVisionCacheTarget = { target ->
+            val bindings = profiles.listModels().filter { it.acceptsImages() }.mapNotNull { model ->
+                profiles.getProvider(model.providerId)?.let { provider -> visionProfileBinding(provider, model) }
+            }
+            bindings.singleOrNull { it.fingerprint == target }?.let { selected ->
+                val legacy = selected.copy(modelProfileId = null, configurationHash = null).fingerprint
+                runtime.mobileagent.data.LegacyVisionCacheTarget(legacy,
+                    bindings.count { it.copy(modelProfileId = null, configurationHash = null).fingerprint == legacy } == 1)
             }
         },
         apiEmbedderResolver = apiEmbeddings::resolve,
+        captureVisionContent = { app.diagnostics.status().enabled },
         // P1: the durable batch lifecycle emits only opaque refs and closed reason codes.
         importEvents = { event ->
             runCatching {
@@ -197,7 +206,19 @@ class AppContainer(app: MobileAgentApp) :
                     phase = event.phase.name,
                     reasonCode = event.reasonCode,
                     count = event.count,
+                    requestRef = event.requestRef,
+                    cacheRef = event.cacheRef,
+                    assetRef = event.assetRef,
+                    page = event.page,
+                    diagnostic = event.diagnostic,
                 )
+                event.diagnostic?.let { diagnostic ->
+                    diagnostic.content?.let { content ->
+                        app.diagnostics.recordVisionContent(event.requestRef.orEmpty(), diagnostic.contentKind ?: "unknown",
+                            content, diagnostic.contentTruncated, (diagnostic.originalContentChars ?: diagnostic.contentChars ?: content.length.toLong())
+                                .coerceAtMost(Int.MAX_VALUE.toLong()).toInt())
+                    }
+                }
             }
         },
     )

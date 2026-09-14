@@ -6,6 +6,7 @@ package runtime.mobileagent.provider
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.toList
 import kotlinx.serialization.json.JsonElement
+import java.io.IOException
 import runtime.mobileagent.domain.ModelProfile
 
 /**
@@ -187,7 +188,144 @@ data class ModelRequest(
     val operationId: String = "model-request",
     /** Optional runtime output budget.  Kept last with a default for source compatibility. */
     val outputTokenLimit: Int? = null,
+    /** Optional fixed-schema transport diagnostics. A failing sink never affects the request. */
+    val diagnostics: ModelDiagnosticSink? = null,
+    /** Final fail-closed control gate, invoked exactly once immediately before HTTP dispatch. */
+    val beforeDispatch: () -> Boolean = { true },
 )
+
+fun interface ModelDiagnosticSink {
+    fun record(event: ModelDiagnosticEvent)
+
+    /** Explicit opt-in because content traces can be large and user-sensitive. */
+    val captureContent: Boolean get() = false
+}
+
+/**
+ * Carries a response status across an HTTP-engine interceptor without retaining
+ * the URL, headers, response body, or provider message.
+ */
+class ProviderHttpResponseException(val httpStatus: Int) : IOException("Provider returned an HTTP error response")
+
+enum class ModelDiagnosticStage {
+    REQUEST_VALIDATION,
+    REQUEST_READY,
+    REQUEST_DISPATCH,
+    RESPONSE_HEADERS,
+    RESPONSE_BODY,
+    STREAM_EVENT,
+    TERMINAL,
+}
+
+enum class ModelDispatchStatus {
+    NOT_DISPATCHED,
+    DISPATCHED,
+    RESPONSE_RECEIVED,
+    UNKNOWN_AFTER_DISPATCH,
+}
+
+/**
+ * Provider-neutral request diagnostics. Content is present only for an
+ * explicitly opted-in sink and never contains credential/header values or
+ * provider-private continuation data.
+ */
+data class ModelDiagnosticEvent(
+    val stage: ModelDiagnosticStage,
+    val dispatchStatus: ModelDispatchStatus,
+    val elapsedMillis: Long,
+    val responseReceived: Boolean = dispatchStatus == ModelDispatchStatus.RESPONSE_RECEIVED,
+    val httpStatus: Int? = null,
+    val errorCode: String? = null,
+    val exceptionClass: String? = null,
+    val finishReason: String? = null,
+    val inputTokens: Int? = null,
+    val outputTokens: Int? = null,
+    val responseContentType: String? = null,
+    val responseBytes: Long? = null,
+    val eventType: String? = null,
+    val requestMethod: String = "POST",
+    val endpointKind: String? = null,
+    val streaming: Boolean? = null,
+    val messageCount: Int? = null,
+    val imageCount: Int? = null,
+    val imageBytes: Long? = null,
+    val toolCount: Int? = null,
+    val headerNames: List<String> = emptyList(),
+    val contentKind: String? = null,
+    val content: String? = null,
+    val contentChars: Long? = null,
+    val contentBytes: Long? = null,
+    val originalContentChars: Long? = null,
+    val originalContentBytes: Long? = null,
+    val contentTruncated: Boolean = false,
+)
+
+/** Diagnostic sinks are observability only and cannot change provider behavior. */
+fun ModelRequest.reportDiagnostic(event: ModelDiagnosticEvent) {
+    try {
+        diagnostics?.record(event)
+    } catch (_: Throwable) {
+        // Deliberately isolated: diagnostics must never change transport outcome.
+    }
+}
+
+fun ModelRequest.reportDiagnostic(
+    stage: ModelDiagnosticStage,
+    dispatchStatus: ModelDispatchStatus,
+    startedNanos: Long,
+    endpointKind: String,
+    httpStatus: Int? = null,
+    errorCode: String? = null,
+    exception: Throwable? = null,
+    finishReason: String? = null,
+    usage: ModelEvent.Usage? = null,
+    responseContentType: String? = null,
+    responseBytes: Long? = null,
+    eventType: String? = null,
+    contentKind: String? = null,
+    content: String? = null,
+    originalContentChars: Long? = null,
+    originalContentBytes: Long? = null,
+    contentTruncated: Boolean = false,
+) {
+    reportDiagnostic(
+        ModelDiagnosticEvent(
+            stage = stage,
+            dispatchStatus = dispatchStatus,
+            elapsedMillis = ((System.nanoTime() - startedNanos) / 1_000_000L).coerceAtLeast(0L),
+            responseReceived = httpStatus != null || dispatchStatus == ModelDispatchStatus.RESPONSE_RECEIVED,
+            httpStatus = httpStatus,
+            errorCode = errorCode,
+            exceptionClass = exception?.javaClass?.name,
+            finishReason = finishReason,
+            inputTokens = usage?.inputTokens,
+            outputTokens = usage?.outputTokens,
+            responseContentType = responseContentType?.take(128),
+            responseBytes = responseBytes,
+            eventType = eventType,
+            endpointKind = endpointKind,
+            streaming = stream,
+            messageCount = messages.size,
+            imageCount = messages.sumOf { it.images.size },
+            imageBytes = messages.sumOf { message -> message.images.sumOf { it.base64.length.toLong() } },
+            toolCount = tools.size,
+            headerNames = headers.keys.map { it.lowercase() }.sorted(),
+            contentKind = contentKind,
+            content = content,
+            contentChars = content?.length?.toLong(),
+            contentBytes = content?.toByteArray(Charsets.UTF_8)?.size?.toLong(),
+            originalContentChars = originalContentChars,
+            originalContentBytes = originalContentBytes,
+            contentTruncated = contentTruncated,
+        ),
+    )
+}
+
+fun ModelRequest.wantsDiagnosticContent(): Boolean = try {
+    diagnostics?.captureContent == true
+} catch (_: Throwable) {
+    false
+}
 
 sealed interface ModelEvent {
     data class TextDelta(val text: String) : ModelEvent

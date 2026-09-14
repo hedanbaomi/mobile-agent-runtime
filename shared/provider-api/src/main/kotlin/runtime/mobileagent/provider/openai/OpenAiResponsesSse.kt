@@ -108,6 +108,20 @@ object OpenAiResponsesSse {
         }
     }
 
+    /** Responses equivalent of a terminal finish reason, without output text. */
+    internal fun finishReasonFromLine(line: String): String? {
+        val data = line.trim().takeIf { it.startsWith("data:") }?.removePrefix("data:")?.trim()
+            ?: return null
+        if (data == "[DONE]") return "done"
+        val obj = runCatching { json.parseToJsonElement(data).jsonObject }.getOrNull() ?: return null
+        val type = string(obj, "type") ?: return null
+        if (type !in setOf("response.completed", "response.failed", "response.incomplete")) return null
+        val response = obj["response"]?.let { runCatching { it.jsonObject }.getOrNull() }
+        val incomplete = response?.get("incomplete_details")?.let { runCatching { it.jsonObject }.getOrNull() }
+            ?.get("reason")?.jsonPrimitive?.contentOrNull
+        return incomplete ?: response?.get("status")?.jsonPrimitive?.contentOrNull ?: type.removePrefix("response.")
+    }
+
     private enum class Channel { TEXT, REASONING, REFUSAL }
 
     private fun channelBuffers(state: State, channel: Channel): LinkedHashMap<String, StringBuilder> = when (channel) {

@@ -419,7 +419,7 @@ class OpenAiCompatibleAdapterTest {
         val text = events.filterIsInstance<ModelEvent.TextDelta>().joinToString("") { it.text }
         assertEquals("safe-", text)
         assertFalse(text.contains("main-secr"))
-        assertEquals(ModelEvent.Failed(ErrorCode.UNKNOWN_OUTCOME.name), events.last())
+        assertEquals(ModelEvent.Failed(ProviderConnectionErrorCode.INVALID_RESPONSE.name), events.last())
     }
 
     @Test
@@ -521,7 +521,7 @@ class OpenAiCompatibleAdapterTest {
             "test-secret-token".toCharArray(),
         ).toList()
         assertEquals(ModelEvent.TextDelta("partial"), events.first())
-        assertEquals(ModelEvent.Failed("UNKNOWN_OUTCOME"), events.last())
+        assertEquals(ModelEvent.Failed(ProviderConnectionErrorCode.INVALID_RESPONSE.name), events.last())
         assertTrue(events.none { it is ModelEvent.Completed })
     }
 
@@ -560,7 +560,7 @@ class OpenAiCompatibleAdapterTest {
             ModelRequest(modelId = "demo", messages = listOf(ChatMessage(role = "user", text = "hi"))),
             "test-secret-token".toCharArray(),
         ).toList()
-        assertEquals(listOf(ModelEvent.Failed("UNKNOWN_OUTCOME")), events)
+        assertEquals(listOf(ModelEvent.Failed(ProviderConnectionErrorCode.INVALID_RESPONSE.name)), events)
     }
 
     @Test

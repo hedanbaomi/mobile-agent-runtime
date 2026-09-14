@@ -55,7 +55,7 @@ object Migrations {
     // conversation, and a summary that only a
     // verified SUCCEEDED row may carry.  No transcript row is deleted or
     // rewritten by a summary, and no summary is ever re-sent from the database.
-    const val VERSION = 20
+    const val VERSION = 21
 
     private val statements = listOf(
         "CREATE TABLE IF NOT EXISTS schema_version (version INTEGER NOT NULL PRIMARY KEY)",
@@ -91,6 +91,8 @@ object Migrations {
         "CREATE TABLE IF NOT EXISTS index_generations (id TEXT PRIMARY KEY, kb_id TEXT NOT NULL, space_id TEXT NOT NULL, manifest_hash TEXT NOT NULL, state TEXT NOT NULL, vector_count INTEGER NOT NULL, fts_version INTEGER NOT NULL, created_at TEXT NOT NULL)",
         "CREATE TABLE IF NOT EXISTS generation_members (generation_id TEXT NOT NULL, chunk_id TEXT NOT NULL, space_id TEXT NOT NULL, document_version_id TEXT NOT NULL, PRIMARY KEY(generation_id, chunk_id))",
         "CREATE TABLE IF NOT EXISTS assets (id TEXT PRIMARY KEY, document_id TEXT NOT NULL, document_version_id TEXT, blob_hash TEXT NOT NULL, page INTEGER, section TEXT, kind TEXT NOT NULL, surrounding_text_hash TEXT NOT NULL)",
+        // v21: one durable request identity per explicit Vision attempt; survives process death.
+        "CREATE TABLE IF NOT EXISTS vision_attempts (request_id TEXT PRIMARY KEY, cache_key TEXT NOT NULL, job_id TEXT NOT NULL, asset_hash TEXT NOT NULL, attempt_no INTEGER NOT NULL CHECK(attempt_no > 0), status TEXT NOT NULL, stage TEXT NOT NULL, dispatch_status TEXT NOT NULL, error_code TEXT, http_status INTEGER, duration_ms INTEGER, finish_reason TEXT, input_tokens INTEGER, output_tokens INTEGER, exception_type TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, UNIQUE(cache_key, attempt_no))",
         "CREATE TABLE IF NOT EXISTS vision_results (cache_key TEXT PRIMARY KEY, asset_hash TEXT NOT NULL, context_hash TEXT NOT NULL, model_fingerprint TEXT NOT NULL, prompt_version TEXT NOT NULL, schema_version TEXT NOT NULL, status TEXT NOT NULL, ocr_text TEXT NOT NULL, description TEXT NOT NULL, table_markdown TEXT NOT NULL DEFAULT '', result_type TEXT NOT NULL DEFAULT '', processed_at TEXT NOT NULL)",
         "CREATE TABLE IF NOT EXISTS skill_packages (package_hash TEXT PRIMARY KEY, id TEXT NOT NULL, name TEXT NOT NULL, version TEXT NOT NULL, license_id TEXT NOT NULL, classification TEXT NOT NULL, manifest_json TEXT, skill_markdown TEXT, reasons TEXT NOT NULL, created_at TEXT NOT NULL, package_bytes BLOB, source_hash TEXT)",
         "CREATE TABLE IF NOT EXISTS skill_installs (install_id TEXT PRIMARY KEY, package_hash TEXT NOT NULL, enabled INTEGER NOT NULL, created_at TEXT NOT NULL)",
@@ -654,7 +656,7 @@ object Migrations {
         "chunks_fts", "announcement_state", "announcement_feed_cache", "announcement_items",
         "documents", "chunks", "embeddings", "secrets", "app_prefs", "audit_events", "import_jobs",
         "import_batches", "import_items", "consent_tickets", "capability_probes",
-        "document_versions", "embedding_operations", "embedding_query_vectors", "index_generations", "generation_members", "assets", "vision_results",
+        "document_versions", "embedding_operations", "embedding_query_vectors", "index_generations", "generation_members", "assets", "vision_results", "vision_attempts",
         "skill_packages", "skill_installs", "permission_grants", "skill_invocations", "runs", "tool_invocations",
         "authority_policy", "authority_preferences", "workspaces", "workspace_acl", "capability_grants",
         "full_device_files_grants", "snapshot_grant_bindings", "saf_workspace_grants", "privileged_workspace_bindings",
@@ -697,6 +699,8 @@ object Migrations {
         "embedding_query_vectors" to "vector_blob",
         "embedding_query_vectors" to "dimension",
         "embedding_query_vectors" to "created_at",
+        "vision_attempts" to "request_id",
+        "vision_attempts" to "dispatch_status",
         "model_profiles" to "endpoint_json",
         "secrets" to "status",
         "import_jobs" to "batch_id",

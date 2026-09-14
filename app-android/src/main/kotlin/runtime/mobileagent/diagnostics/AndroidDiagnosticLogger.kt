@@ -112,8 +112,7 @@ class AndroidDiagnosticLogger private constructor(
         store.recordSkillInstallFailed(failure, errorCode)
 
     /**
-     * P1 batch lifecycle event.  Only opaque batch/item references and closed codes are recorded;
-     * the sink must never receive a name, path, URI, body or credential.
+     * Batch lifecycle and transport metadata. Opt-in payloads use recordVisionContent separately.
      */
     fun recordKnowledgeBatchEvent(
         batchRef: String,
@@ -122,6 +121,11 @@ class AndroidDiagnosticLogger private constructor(
         phase: String,
         reasonCode: String,
         count: Int,
+        requestRef: String? = null,
+        cacheRef: String? = null,
+        assetRef: String? = null,
+        page: Int? = null,
+        diagnostic: runtime.mobileagent.knowledge.VisionDiagnosticMetadata? = null,
     ): Boolean = store.record(
         "knowledge_batch_event",
         linkedMapOf<String, Any?>(
@@ -131,10 +135,55 @@ class AndroidDiagnosticLogger private constructor(
             "phase" to phase,
             "reasonCode" to reasonCode,
             "count" to count,
+            "requestRef" to requestRef,
+            "cacheRef" to cacheRef,
+            "assetRef" to assetRef,
+            "page" to page,
+            "stage" to diagnostic?.stage,
+            "dispatched" to diagnostic?.dispatched,
+            "responseReceived" to diagnostic?.responseReceived,
+            "httpStatus" to diagnostic?.httpStatus,
+            "durationMs" to diagnostic?.durationMs,
+            "errorCode" to diagnostic?.errorCode,
+            "exceptionType" to diagnostic?.exceptionType,
+            "finishReason" to diagnostic?.finishReason,
+            "inputTokens" to diagnostic?.inputTokens,
+            "outputTokens" to diagnostic?.outputTokens,
+            "contentKind" to diagnostic?.contentKind,
+            "contentChars" to diagnostic?.contentChars,
+            "contentBytes" to diagnostic?.contentBytes,
+            "originalContentChars" to diagnostic?.originalContentChars,
+            "originalContentBytes" to diagnostic?.originalContentBytes,
+            "contentPresent" to diagnostic?.content?.let { true },
+            "contentTruncated" to diagnostic?.contentTruncated,
         ).filterValues { it != null },
     )
 
     fun recordBatchWorkerStart(): Boolean = store.recordBatchWorkerStart()
+
+    /** Content is supplied only after provider-side credential/continuation redaction. */
+    fun recordVisionContent(requestRef: String, kind: String, content: String, truncated: Boolean, originalChars: Int) {
+        if (!store.status().enabled) return
+        val chunkSize = 4_000
+        val chunks = buildList {
+            var start = 0
+            while (start < content.length) {
+                var end = (start + chunkSize).coerceAtMost(content.length)
+                if (end < content.length && content[end - 1].isHighSurrogate() && content[end].isLowSurrogate()) end--
+                add(content.substring(start, end))
+                start = end
+            }
+            if (isEmpty()) add("")
+        }
+        for ((index, chunk) in chunks.withIndex()) {
+            store.record("vision_debug_content", mapOf(
+                "requestRef" to requestRef, "kind" to kind, "chunk" to index,
+                "chunks" to chunks.size, "originalChars" to originalChars,
+                "capturedChars" to content.length, "truncated" to truncated,
+                "content" to chunk,
+            ))
+        }
+    }
 
     fun recordBatchWorkerComplete(): Boolean = store.recordBatchWorkerComplete()
 

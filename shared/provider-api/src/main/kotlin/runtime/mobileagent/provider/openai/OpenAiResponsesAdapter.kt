@@ -63,15 +63,20 @@ import runtime.mobileagent.provider.HeaderSecretResolver
 import runtime.mobileagent.provider.InlineImage
 import runtime.mobileagent.provider.InputBudgetEstimate
 import runtime.mobileagent.provider.ModelAdapter
+import runtime.mobileagent.provider.ModelDiagnosticStage
+import runtime.mobileagent.provider.ModelDispatchStatus
 import runtime.mobileagent.provider.ModelEvent
 import runtime.mobileagent.provider.ModelRequest
 import runtime.mobileagent.provider.ParameterMerger
 import runtime.mobileagent.provider.ProbeConsent
 import runtime.mobileagent.provider.ProviderConnectionErrorCode
 import runtime.mobileagent.provider.ProviderConnectionResult
+import runtime.mobileagent.provider.ProviderHttpResponseException
 import runtime.mobileagent.provider.RequestHeaderValue
 import runtime.mobileagent.provider.RequestInputBudget
 import runtime.mobileagent.provider.SecretRedactor
+import runtime.mobileagent.provider.reportDiagnostic
+import runtime.mobileagent.provider.wantsDiagnosticContent
 
 /**
  * Native OpenAI Responses adapter. It intentionally owns a separate request
@@ -310,16 +315,62 @@ class OpenAiResponsesAdapter(
         RequestInputBudget.estimate(request, includeProviderContinuation = true)
 
     override fun stream(request: ModelRequest, secret: CharArray): Flow<ModelEvent> = flow {
+        val started = System.nanoTime()
+        var dispatchStatus = ModelDispatchStatus.NOT_DISPATCHED
+        var httpStatus: Int? = null
+        var responseContentType: String? = null
+        var terminalError: String? = null
+        var finishReason: String? = null
+        var lastUsage: ModelEvent.Usage? = null
+        request.reportDiagnostic(ModelDiagnosticStage.REQUEST_VALIDATION, dispatchStatus, started, "responses")
         if (secret.isEmpty()) {
             emit(ModelEvent.Failed(ErrorCode.SECRET_UNAVAILABLE.name))
+            request.reportDiagnostic(ModelDiagnosticStage.TERMINAL, dispatchStatus, started, "responses", errorCode = ErrorCode.SECRET_UNAVAILABLE.name)
             return@flow
         }
         val token = secret.concatToString()
         try {
             val payload = buildPayload(request, includeImageBytes = true)
+            val payloadText = payload.toString()
             val resolved = resolveHeaders(token, request.headers)
             val redactionSecrets = listOf(token) + resolved.secrets
             val redactor = StreamingSecretRedactor(redactionSecrets)
+            request.reportDiagnostic(
+                ModelDiagnosticStage.REQUEST_READY, dispatchStatus, started, "responses",
+                contentKind = "request.json",
+                content = if (request.wantsDiagnosticContent()) {
+                    val traceRequest = request.copy(
+                        messages = request.messages.map { it.copy(providerContinuationItems = emptyList()) },
+                        diagnostics = null,
+                    )
+                    DiagnosticJsonSanitizer.sanitize(
+                        buildPayload(traceRequest, includeImageBytes = true).toString(),
+                        redactionSecrets,
+                    )
+                } else null,
+                originalContentChars = payloadText.length.toLong(),
+                originalContentBytes = payloadText.toByteArray(Charsets.UTF_8).size.toLong(),
+            )
+            val dispatchAllowed = try {
+                request.beforeDispatch()
+            } catch (error: Exception) {
+                emit(ModelEvent.Failed(ErrorCode.INVALID_CONFIG.name))
+                request.reportDiagnostic(
+                    ModelDiagnosticStage.TERMINAL, dispatchStatus, started, "responses",
+                    errorCode = ErrorCode.INVALID_CONFIG.name, exception = error,
+                )
+                return@flow
+            }
+            if (!dispatchAllowed) {
+                emit(ModelEvent.Failed(REQUEST_CANCELLED))
+                request.reportDiagnostic(
+                    ModelDiagnosticStage.TERMINAL, dispatchStatus, started, "responses",
+                    errorCode = REQUEST_CANCELLED,
+                )
+                return@flow
+            }
+            dispatchStatus = ModelDispatchStatus.DISPATCHED
+            request.reportDiagnostic(ModelDiagnosticStage.REQUEST_DISPATCH, dispatchStatus, started, "responses")
             http.preparePost(url(baseUrl, "/responses")) {
                 contentType(ContentType.Application.Json)
                 headers {
@@ -329,12 +380,25 @@ class OpenAiResponsesAdapter(
                 setBody(payload.toString())
             }.execute { response ->
                 val status = response.status.value
+                httpStatus = status
+                dispatchStatus = ModelDispatchStatus.RESPONSE_RECEIVED
+                responseContentType = response.headers[HttpHeaders.ContentType].orEmpty().lowercase()
+                request.reportDiagnostic(
+                    ModelDiagnosticStage.RESPONSE_HEADERS, dispatchStatus, started, "responses",
+                    httpStatus = status, responseContentType = responseContentType,
+                )
                 if (status !in 200..299) {
                     val raw = readBounded(response.bodyAsChannel())
-                    emit(ModelEvent.Failed(httpFailureMessage(status, raw)))
+                    terminalError = httpFailureMessage(status, raw)
+                    emit(ModelEvent.Failed(terminalError!!))
+                    request.reportDiagnostic(
+                        ModelDiagnosticStage.TERMINAL, dispatchStatus, started, "responses",
+                        httpStatus = status, errorCode = terminalError, responseContentType = responseContentType,
+                        responseBytes = raw.toByteArray(Charsets.UTF_8).size.toLong(),
+                    )
                     return@execute
                 }
-                val responseType = response.headers[HttpHeaders.ContentType].orEmpty().lowercase()
+                val responseType = responseContentType.orEmpty()
                 if (responseType.contains("text/event-stream")) {
                     val channel = response.bodyAsChannel()
                     val state = OpenAiResponsesSse.State()
@@ -344,39 +408,126 @@ class OpenAiResponsesAdapter(
                         val line = channel.readUTF8Line(MAX_LINE_BYTES) ?: break
                         bytes += line.toByteArray(Charsets.UTF_8).size + 1L
                         require(bytes <= MAX_RESPONSE_BYTES) { "Provider response exceeds limit" }
+                        val captureLine = request.wantsDiagnosticContent()
+                        request.reportDiagnostic(
+                            ModelDiagnosticStage.STREAM_EVENT, dispatchStatus, started, "responses",
+                            httpStatus = status, responseContentType = responseType,
+                            responseBytes = bytes, eventType = "sse.event",
+                            contentKind = if (captureLine) "response.sse.event" else null,
+                            content = if (captureLine) DiagnosticJsonSanitizer.sanitizeSseLine(line, redactionSecrets) else null,
+                            originalContentChars = line.length.toLong(),
+                            originalContentBytes = line.toByteArray(Charsets.UTF_8).size.toLong(),
+                        )
+                        OpenAiResponsesSse.finishReasonFromLine(line)?.let { finishReason = it }
                         OpenAiResponsesSse.eventsFromLine(line, state, redactionSecrets).forEach { event ->
-                            val safeTerminal = emitSafe(event, redactor, redactionSecrets)
+                            if (event is ModelEvent.Usage) lastUsage = event
+                            if (event is ModelEvent.Failed) terminalError = event.sanitizedMessage
+                            request.reportDiagnostic(
+                                ModelDiagnosticStage.STREAM_EVENT, dispatchStatus, started, "responses",
+                                httpStatus = status, errorCode = (event as? ModelEvent.Failed)?.sanitizedMessage,
+                                finishReason = finishReason, usage = event as? ModelEvent.Usage,
+                                responseContentType = responseType, responseBytes = bytes,
+                                eventType = event::class.simpleName,
+                            )
+                            val safeTerminal = emitSafe(event, redactor, redactionSecrets) { safeEvent ->
+                                request.reportDiagnostic(
+                                    ModelDiagnosticStage.STREAM_EVENT, dispatchStatus, started, "responses",
+                                    httpStatus = status, responseContentType = responseType,
+                                    responseBytes = bytes, eventType = safeEvent::class.simpleName,
+                                    contentKind = if (request.wantsDiagnosticContent()) "response.sse.model_event" else null,
+                                    content = if (request.wantsDiagnosticContent()) {
+                                        DiagnosticJsonSanitizer.sanitizeModelEvent(safeEvent, redactionSecrets)
+                                    } else null,
+                                )
+                            }
                             if (safeTerminal) terminal = true
                         }
                     }
                     if (!terminal) {
                         redactor.discard()
-                        emit(ModelEvent.Failed(ErrorCode.UNKNOWN_OUTCOME.name))
+                        terminalError = ProviderConnectionErrorCode.INVALID_RESPONSE.name
+                        emit(ModelEvent.Failed(terminalError!!))
                     }
+                    request.reportDiagnostic(
+                        ModelDiagnosticStage.RESPONSE_BODY, dispatchStatus, started, "responses",
+                        httpStatus = status, errorCode = terminalError, finishReason = finishReason,
+                        usage = lastUsage, responseContentType = responseType, responseBytes = bytes,
+                    )
                 } else {
-                    parseResponseBody(readBounded(response.bodyAsChannel()), responseType, redactionSecrets).forEach { emit(it) }
+                    val raw = readBounded(response.bodyAsChannel())
+                    val parsed = parseResponseBody(raw, responseType, redactionSecrets)
+                    parsed.forEach { event ->
+                        if (event is ModelEvent.Usage) lastUsage = event
+                        if (event is ModelEvent.Failed) terminalError = event.sanitizedMessage
+                        emit(event)
+                    }
+                    finishReason = responseFinishReason(raw)
+                    request.reportDiagnostic(
+                        ModelDiagnosticStage.RESPONSE_BODY, dispatchStatus, started, "responses",
+                        httpStatus = status, errorCode = terminalError, finishReason = finishReason,
+                        usage = lastUsage, responseContentType = responseType,
+                        responseBytes = raw.toByteArray(Charsets.UTF_8).size.toLong(),
+                        contentKind = "response.json",
+                        content = if (request.wantsDiagnosticContent()) diagnosticResponseContent(raw, redactionSecrets) else null,
+                        originalContentChars = raw.length.toLong(),
+                        originalContentBytes = raw.toByteArray(Charsets.UTF_8).size.toLong(),
+                    )
                 }
+                request.reportDiagnostic(
+                    ModelDiagnosticStage.TERMINAL, dispatchStatus, started, "responses",
+                    httpStatus = status, errorCode = terminalError, finishReason = finishReason,
+                    usage = lastUsage, responseContentType = responseType,
+                )
             }
         } catch (e: AppException) {
             emit(ModelEvent.Failed(e.error.code.name))
+            request.reportDiagnostic(ModelDiagnosticStage.TERMINAL, dispatchStatus, started, "responses", httpStatus, e.error.code.name, e, responseContentType = responseContentType)
         } catch (_: SecretUnavailableException) {
             emit(ModelEvent.Failed(ErrorCode.SECRET_UNAVAILABLE.name))
+            request.reportDiagnostic(ModelDiagnosticStage.TERMINAL, dispatchStatus, started, "responses", httpStatus, ErrorCode.SECRET_UNAVAILABLE.name, responseContentType = responseContentType)
         } catch (_: InvalidHeaderException) {
             emit(ModelEvent.Failed(ErrorCode.INVALID_CONFIG.name))
+            request.reportDiagnostic(ModelDiagnosticStage.TERMINAL, dispatchStatus, started, "responses", httpStatus, ErrorCode.INVALID_CONFIG.name, responseContentType = responseContentType)
+        } catch (error: ProviderHttpResponseException) {
+            httpStatus = error.httpStatus
+            dispatchStatus = ModelDispatchStatus.RESPONSE_RECEIVED
+            val code = when (error.httpStatus) {
+                401, 403 -> ErrorCode.PROVIDER_UNAUTHORIZED.name
+                429 -> ErrorCode.RATE_LIMITED.name
+                else -> ProviderConnectionErrorCode.PROVIDER_REJECTED.name
+            }
+            emit(ModelEvent.Failed(code))
+            request.reportDiagnostic(ModelDiagnosticStage.TERMINAL, dispatchStatus, started, "responses", httpStatus, code, error)
         } catch (cancel: CancellationException) {
             throw cancel
-        } catch (_: TimeoutCancellationException) {
+        } catch (error: TimeoutCancellationException) {
+            dispatchStatus = ModelDispatchStatus.UNKNOWN_AFTER_DISPATCH
             emit(ModelEvent.Failed(ErrorCode.UNKNOWN_OUTCOME.name))
-        } catch (_: SSLException) {
-            emit(ModelEvent.Failed(ErrorCode.NETWORK_UNAVAILABLE.name))
-        } catch (_: UnknownHostException) {
-            emit(ModelEvent.Failed(ErrorCode.NETWORK_UNAVAILABLE.name))
-        } catch (_: ConnectException) {
-            emit(ModelEvent.Failed(ErrorCode.NETWORK_UNAVAILABLE.name))
-        } catch (_: IOException) {
-            emit(ModelEvent.Failed(ErrorCode.NETWORK_UNAVAILABLE.name))
-        } catch (_: Exception) {
+            request.reportDiagnostic(ModelDiagnosticStage.TERMINAL, dispatchStatus, started, "responses", httpStatus, ErrorCode.UNKNOWN_OUTCOME.name, error, responseContentType = responseContentType)
+        } catch (error: SSLException) {
+            val code = if (dispatchStatus == ModelDispatchStatus.NOT_DISPATCHED) ErrorCode.NETWORK_UNAVAILABLE.name else ErrorCode.UNKNOWN_OUTCOME.name
+            if (dispatchStatus != ModelDispatchStatus.NOT_DISPATCHED) dispatchStatus = ModelDispatchStatus.UNKNOWN_AFTER_DISPATCH
+            emit(ModelEvent.Failed(code))
+            request.reportDiagnostic(ModelDiagnosticStage.TERMINAL, dispatchStatus, started, "responses", httpStatus, code, error, responseContentType = responseContentType)
+        } catch (error: UnknownHostException) {
+            val code = if (dispatchStatus == ModelDispatchStatus.NOT_DISPATCHED) ErrorCode.NETWORK_UNAVAILABLE.name else ErrorCode.UNKNOWN_OUTCOME.name
+            if (dispatchStatus != ModelDispatchStatus.NOT_DISPATCHED) dispatchStatus = ModelDispatchStatus.UNKNOWN_AFTER_DISPATCH
+            emit(ModelEvent.Failed(code))
+            request.reportDiagnostic(ModelDiagnosticStage.TERMINAL, dispatchStatus, started, "responses", httpStatus, code, error, responseContentType = responseContentType)
+        } catch (error: ConnectException) {
+            val code = if (dispatchStatus == ModelDispatchStatus.NOT_DISPATCHED) ErrorCode.NETWORK_UNAVAILABLE.name else ErrorCode.UNKNOWN_OUTCOME.name
+            if (dispatchStatus != ModelDispatchStatus.NOT_DISPATCHED) dispatchStatus = ModelDispatchStatus.UNKNOWN_AFTER_DISPATCH
+            emit(ModelEvent.Failed(code))
+            request.reportDiagnostic(ModelDiagnosticStage.TERMINAL, dispatchStatus, started, "responses", httpStatus, code, error, responseContentType = responseContentType)
+        } catch (error: IOException) {
+            val code = if (dispatchStatus == ModelDispatchStatus.NOT_DISPATCHED) ErrorCode.NETWORK_UNAVAILABLE.name else ErrorCode.UNKNOWN_OUTCOME.name
+            if (dispatchStatus != ModelDispatchStatus.NOT_DISPATCHED) dispatchStatus = ModelDispatchStatus.UNKNOWN_AFTER_DISPATCH
+            emit(ModelEvent.Failed(code))
+            request.reportDiagnostic(ModelDiagnosticStage.TERMINAL, dispatchStatus, started, "responses", httpStatus, code, error, responseContentType = responseContentType)
+        } catch (error: Exception) {
+            if (dispatchStatus != ModelDispatchStatus.NOT_DISPATCHED) dispatchStatus = ModelDispatchStatus.UNKNOWN_AFTER_DISPATCH
             emit(ModelEvent.Failed(ErrorCode.UNKNOWN_OUTCOME.name))
+            request.reportDiagnostic(ModelDiagnosticStage.TERMINAL, dispatchStatus, started, "responses", httpStatus, ErrorCode.UNKNOWN_OUTCOME.name, error, responseContentType = responseContentType)
         } finally {
             token.toCharArray().fill('\u0000')
         }
@@ -390,20 +541,33 @@ class OpenAiResponsesAdapter(
         event: ModelEvent,
         redactor: StreamingSecretRedactor,
         secrets: List<String>,
+        onSafeDiagnostic: (ModelEvent) -> Unit = {},
     ): Boolean = when (event) {
         is ModelEvent.TextDelta -> {
             val safe = redactor.accept(event.text)
-            if (safe.isNotEmpty()) emit(ModelEvent.TextDelta(safe))
+            if (safe.isNotEmpty()) {
+                val safeEvent = ModelEvent.TextDelta(safe)
+                emit(safeEvent)
+                onSafeDiagnostic(safeEvent)
+            }
             false
         }
         is ModelEvent.ReasoningDelta -> {
             val safe = redactor.accept(event.text)
-            if (safe.isNotEmpty()) emit(ModelEvent.ReasoningDelta(safe))
+            if (safe.isNotEmpty()) {
+                val safeEvent = ModelEvent.ReasoningDelta(safe)
+                emit(safeEvent)
+                onSafeDiagnostic(safeEvent)
+            }
             false
         }
         is ModelEvent.RefusalDelta -> {
             val safe = redactor.accept(event.text)
-            if (safe.isNotEmpty()) emit(ModelEvent.RefusalDelta(safe))
+            if (safe.isNotEmpty()) {
+                val safeEvent = ModelEvent.RefusalDelta(safe)
+                emit(safeEvent)
+                onSafeDiagnostic(safeEvent)
+            }
             false
         }
         // Provider-private continuation bypasses redaction buffering
@@ -424,17 +588,24 @@ class OpenAiResponsesAdapter(
                 true
             } else {
                 emit(event)
+                onSafeDiagnostic(event)
                 false
             }
         }
         is ModelEvent.Failed -> {
             redactor.discard()
-            emit(ModelEvent.Failed(SecretRedactor.redact(event.sanitizedMessage, secrets)))
+            val safeEvent = ModelEvent.Failed(SecretRedactor.redact(event.sanitizedMessage, secrets))
+            emit(safeEvent)
+            onSafeDiagnostic(safeEvent)
             true
         }
         ModelEvent.Completed -> {
             val safeTail = redactor.finish()
-            if (safeTail.isNotEmpty()) emit(ModelEvent.TextDelta(safeTail))
+            if (safeTail.isNotEmpty()) {
+                val safeEvent = ModelEvent.TextDelta(safeTail)
+                emit(safeEvent)
+                onSafeDiagnostic(safeEvent)
+            }
             emit(ModelEvent.Completed)
             true
         }
@@ -601,7 +772,7 @@ class OpenAiResponsesAdapter(
             return raw.lineSequence().flatMap { OpenAiResponsesSse.eventsFromLine(it, state, secrets).asSequence() }.toList()
         }
         val root = runCatching { Json.parseToJsonElement(raw).jsonObject }.getOrNull()
-            ?: return listOf(ModelEvent.Failed(ErrorCode.UNKNOWN_OUTCOME.name))
+            ?: return listOf(ModelEvent.Failed(ProviderConnectionErrorCode.INVALID_RESPONSE.name))
         // Only a non-null error *object* is a failure. A legitimate success
         // response may carry an explicit "error":null member (JsonNull, not a
         // missing key); treating any present key as failure misclassifies
@@ -666,9 +837,29 @@ class OpenAiResponsesAdapter(
         }
         val status = root["status"]?.jsonPrimitive?.contentOrNull
         if (status == null || status == "completed") events += ModelEvent.Completed
-        else if (status == "failed" || status == "incomplete") events += ModelEvent.Failed(ErrorCode.UNKNOWN_OUTCOME.name)
+        else if (status == "failed") events += ModelEvent.Failed(ProviderConnectionErrorCode.PROVIDER_REJECTED.name)
+        else if (status == "incomplete") {
+            val reason = root["incomplete_details"]?.let { runCatching { it.jsonObject }.getOrNull() }
+                ?.get("reason")?.jsonPrimitive?.contentOrNull
+            events += ModelEvent.Failed(
+                if (reason == "max_output_tokens") ErrorCode.CONTEXT_OVERFLOW.name
+                else ProviderConnectionErrorCode.INVALID_RESPONSE.name,
+            )
+        }
         else return listOf(ModelEvent.Failed(ErrorCode.UNKNOWN_OUTCOME.name))
         return events
+    }
+
+    private fun responseFinishReason(raw: String): String? {
+        val root = runCatching { Json.parseToJsonElement(raw).jsonObject }.getOrNull() ?: return null
+        val status = root["status"]?.jsonPrimitive?.contentOrNull
+        val incomplete = root["incomplete_details"]?.let { runCatching { it.jsonObject }.getOrNull() }
+            ?.get("reason")?.jsonPrimitive?.contentOrNull
+        return incomplete ?: status
+    }
+
+    private fun diagnosticResponseContent(raw: String, secrets: List<String>): String? {
+        return DiagnosticJsonSanitizer.sanitize(raw, secrets)
     }
 
     private suspend fun probeRequest(
@@ -993,6 +1184,7 @@ class OpenAiResponsesAdapter(
     private class InvalidConnectionConfigException : RuntimeException()
 
     companion object {
+        private const val REQUEST_CANCELLED = "REQUEST_CANCELLED"
         private const val PROBE_TOOL_NAME = "mar_probe_noop"
         /**
          * Probe output budgets.  Probes only need a two-word answer or one

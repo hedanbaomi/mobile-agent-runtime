@@ -38,7 +38,6 @@ import runtime.mobileagent.knowledge.ImportJob
 import runtime.mobileagent.knowledge.ImportStage
 import runtime.mobileagent.knowledge.KnowledgeArchive
 import runtime.mobileagent.knowledge.MediaKind
-import runtime.mobileagent.knowledge.VisionBinding
 
 /** A source owned by the application, not by a screen or a ViewModel. */
 data class KnowledgeImportInput(
@@ -757,20 +756,11 @@ class AndroidKnowledgeImportPorts(private val app: MobileAgentApp) : KnowledgeIm
     }
 
     override fun visionBindingFingerprint(): String? = app.container.profiles.visionBinding()
-        ?.let { (provider, model) ->
-            VisionBinding(
-                providerId = provider.id,
-                modelId = model.modelId,
-                endpoint = provider.baseUrl,
-                revision = maxOf(provider.revision, model.revision),
-                providerRevision = provider.revision,
-                modelRevision = model.revision,
-            ).fingerprint
-        }
+        ?.let { (provider, model) -> visionProfileBinding(provider, model).fingerprint }
 
     override fun authorizeBatchVision(batchId: String, expectedTarget: String): Boolean = runCatching {
-        val binding = visionBindingFingerprint()
-        check(binding != null && binding == expectedTarget) { "Vision destination changed; nothing was authorized." }
+        // The repository resolves the exact selected profile/configuration against all image
+        // targets. Comparing to the default here would reject every non-default destination.
         repo.authorizeBatchVision(batchId, expectedTarget)
         true
     }.getOrDefault(false)

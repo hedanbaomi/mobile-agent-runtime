@@ -112,6 +112,10 @@ android {
     testOptions {
         unitTests.all { it.useJUnitPlatform() }
     }
+    // Build instrumentation against the same Kotlin module/variant as the installed APK.
+    testBuildType = providers.gradleProperty("marTestBuildType").orElse("debug").get().also {
+        require(it in setOf("debug", "review")) { "Instrumentation supports debug or local review builds only" }
+    }
     kotlinOptions {
         jvmTarget = "17"
     }
@@ -150,6 +154,8 @@ android {
             isDebuggable = false
             signingConfig = signingConfigs.getByName("debug")
             matchingFallbacks += "debug"
+            // Reuse only the empty test Activity, not debug resources/network policy.
+            sourceSets.getByName("review").java.srcDir("src/debug/kotlin")
             buildConfigField("boolean", "HIGH_PRIVILEGE_CONTROL_PLANE_ENABLED", "true")
             ndk {
                 abiFilters.clear()
@@ -218,11 +224,13 @@ dependencies {
     implementation(libs.kotlinx.serialization.json)
     implementation(libs.bcprov)
     testImplementation(libs.junit.jupiter)
+    testImplementation(libs.ktor.client.mock)
     testImplementation(libs.junit.jupiter.engine)
     testImplementation("org.xerial:sqlite-jdbc:3.47.2.0")
     androidTestImplementation(platform(libs.androidx.compose.bom))
     androidTestImplementation(libs.androidx.compose.ui.test.junit4)
     androidTestImplementation(libs.ktor.client.mock)
+    androidTestImplementation(libs.kotlinx.coroutines.test)
     androidTestImplementation(libs.androidx.test.runner)
     androidTestImplementation(libs.androidx.test.ext.junit)
     androidTestImplementation(libs.junit4)

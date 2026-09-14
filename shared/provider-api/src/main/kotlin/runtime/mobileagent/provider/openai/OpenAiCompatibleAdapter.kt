@@ -64,6 +64,8 @@ import runtime.mobileagent.provider.HeaderSecretResolver
 import runtime.mobileagent.provider.InlineImage
 import runtime.mobileagent.provider.InputBudgetEstimate
 import runtime.mobileagent.provider.ModelAdapter
+import runtime.mobileagent.provider.ModelDiagnosticStage
+import runtime.mobileagent.provider.ModelDispatchStatus
 import runtime.mobileagent.provider.ModelEvent
 import runtime.mobileagent.provider.ModelRequest
 import runtime.mobileagent.provider.ParameterLayers
@@ -71,9 +73,12 @@ import runtime.mobileagent.provider.ParameterMerger
 import runtime.mobileagent.provider.ProbeConsent
 import runtime.mobileagent.provider.ProviderConnectionErrorCode
 import runtime.mobileagent.provider.ProviderConnectionResult
+import runtime.mobileagent.provider.ProviderHttpResponseException
 import runtime.mobileagent.provider.RequestHeaderValue
 import runtime.mobileagent.provider.RequestInputBudget
 import runtime.mobileagent.provider.SecretRedactor
+import runtime.mobileagent.provider.reportDiagnostic
+import runtime.mobileagent.provider.wantsDiagnosticContent
 
 /**
  * OpenAI-compatible adapter with an intentionally small, explicit wire surface.
@@ -376,8 +381,17 @@ class OpenAiCompatibleAdapter(
     }
 
     override fun stream(request: ModelRequest, secret: CharArray): Flow<ModelEvent> = flow {
+        val started = System.nanoTime()
+        var dispatchStatus = ModelDispatchStatus.NOT_DISPATCHED
+        var httpStatus: Int? = null
+        var responseContentType: String? = null
+        request.reportDiagnostic(ModelDiagnosticStage.REQUEST_VALIDATION, dispatchStatus, started, "chat.completions")
         if (secret.isEmpty()) {
             emit(ModelEvent.Failed(ErrorCode.SECRET_UNAVAILABLE.name))
+            request.reportDiagnostic(
+                ModelDiagnosticStage.TERMINAL, dispatchStatus, started, "chat.completions",
+                errorCode = ErrorCode.SECRET_UNAVAILABLE.name,
+            )
             return@flow
         }
 
@@ -385,9 +399,37 @@ class OpenAiCompatibleAdapter(
         val streamState = StreamOutputState()
         try {
             val payload = buildPayload(request, includeImageBytes = true)
+            val payloadText = payload.toString()
             val resolved = resolveHeaders(token, request.headers)
             val redactionSecrets = listOf(token) + resolved.secrets
             val streamRedactor = StreamingSecretRedactor(redactionSecrets)
+            request.reportDiagnostic(
+                ModelDiagnosticStage.REQUEST_READY, dispatchStatus, started, "chat.completions",
+                contentKind = "request.json",
+                content = if (request.wantsDiagnosticContent()) DiagnosticJsonSanitizer.sanitize(payloadText, redactionSecrets) else null,
+                originalContentChars = payloadText.length.toLong(),
+                originalContentBytes = payloadText.toByteArray(Charsets.UTF_8).size.toLong(),
+            )
+            val dispatchAllowed = try {
+                request.beforeDispatch()
+            } catch (error: Exception) {
+                emitTerminalFailure(streamState, ErrorCode.INVALID_CONFIG.name)
+                request.reportDiagnostic(
+                    ModelDiagnosticStage.TERMINAL, dispatchStatus, started, "chat.completions",
+                    errorCode = ErrorCode.INVALID_CONFIG.name, exception = error,
+                )
+                return@flow
+            }
+            if (!dispatchAllowed) {
+                emitTerminalFailure(streamState, REQUEST_CANCELLED)
+                request.reportDiagnostic(
+                    ModelDiagnosticStage.TERMINAL, dispatchStatus, started, "chat.completions",
+                    errorCode = REQUEST_CANCELLED,
+                )
+                return@flow
+            }
+            dispatchStatus = ModelDispatchStatus.DISPATCHED
+            request.reportDiagnostic(ModelDiagnosticStage.REQUEST_DISPATCH, dispatchStatus, started, "chat.completions")
             http.preparePost(url(baseUrl, "/chat/completions")) {
                 contentType(ContentType.Application.Json)
                 headers {
@@ -397,23 +439,34 @@ class OpenAiCompatibleAdapter(
                 setBody(payload.toString())
             }.execute { response ->
                 val status = response.status.value
+                httpStatus = status
+                dispatchStatus = ModelDispatchStatus.RESPONSE_RECEIVED
+                responseContentType = response.headers[HttpHeaders.ContentType].orEmpty().lowercase()
+                request.reportDiagnostic(
+                    ModelDiagnosticStage.RESPONSE_HEADERS, dispatchStatus, started, "chat.completions",
+                    httpStatus = status, responseContentType = responseContentType,
+                )
                 if (status == 401) {
                     emitTerminalFailure(streamState, ErrorCode.PROVIDER_UNAUTHORIZED.name)
+                    request.reportDiagnostic(ModelDiagnosticStage.TERMINAL, dispatchStatus, started, "chat.completions", status, ErrorCode.PROVIDER_UNAUTHORIZED.name)
                     return@execute
                 }
                 if (status == 429) {
                     emitTerminalFailure(streamState, ErrorCode.RATE_LIMITED.name)
+                    request.reportDiagnostic(ModelDiagnosticStage.TERMINAL, dispatchStatus, started, "chat.completions", status, ErrorCode.RATE_LIMITED.name)
                     return@execute
                 }
                 if (status >= 400) {
+                    val error = ProviderConnectionErrorCode.PROVIDER_REJECTED.name
                     emitTerminalFailure(
                         streamState,
-                        if (status >= 500) "UNKNOWN_OUTCOME: Provider HTTP $status" else "Provider HTTP $status",
+                        error,
                     )
+                    request.reportDiagnostic(ModelDiagnosticStage.TERMINAL, dispatchStatus, started, "chat.completions", status, error)
                     return@execute
                 }
 
-                val responseType = response.headers[HttpHeaders.ContentType].orEmpty().lowercase()
+                val responseType = responseContentType.orEmpty()
                 if (responseType.contains("text/event-stream")) {
                     val channel = response.bodyAsChannel()
                     val toolBuf = linkedMapOf<String, Pair<String, StringBuilder>>()
@@ -425,14 +478,43 @@ class OpenAiCompatibleAdapter(
                         val line = channel.readUTF8Line(1_048_576) ?: break
                         receivedBytes += line.toByteArray(Charsets.UTF_8).size + 1L
                         require(receivedBytes <= 8_388_608L) { "Provider response exceeds limit" }
+                        val captureLine = request.wantsDiagnosticContent()
+                        request.reportDiagnostic(
+                            ModelDiagnosticStage.STREAM_EVENT, dispatchStatus, started, "chat.completions",
+                            httpStatus = status, responseContentType = responseType,
+                            responseBytes = receivedBytes, eventType = "sse.event",
+                            contentKind = if (captureLine) "response.sse.event" else null,
+                            content = if (captureLine) DiagnosticJsonSanitizer.sanitizeSseLine(line, redactionSecrets) else null,
+                            originalContentChars = line.length.toLong(),
+                            originalContentBytes = line.toByteArray(Charsets.UTF_8).size.toLong(),
+                        )
                         val parsedEvents = OpenAiSse.eventsFromLine(
                             line,
                             toolBuf,
                             redactionSecrets,
                             indexToId,
                         )
+                        OpenAiSse.finishReasonFromLine(line)?.let { streamState.finishReason = it }
                         for (event in parsedEvents) {
+                            val usage = event as? ModelEvent.Usage
+                            request.reportDiagnostic(
+                                ModelDiagnosticStage.STREAM_EVENT, dispatchStatus, started, "chat.completions",
+                                httpStatus = status, usage = usage, responseContentType = responseType,
+                                responseBytes = receivedBytes, eventType = event::class.simpleName,
+                            )
                             val terminal = emitRedacted(event, streamRedactor, redactionSecrets, streamState)
+                            streamState.diagnosticEvents.forEach { safeEvent ->
+                                request.reportDiagnostic(
+                                    ModelDiagnosticStage.STREAM_EVENT, dispatchStatus, started, "chat.completions",
+                                    httpStatus = status, responseContentType = responseType,
+                                    responseBytes = receivedBytes, eventType = safeEvent::class.simpleName,
+                                    contentKind = if (request.wantsDiagnosticContent()) "response.sse.model_event" else null,
+                                    content = if (request.wantsDiagnosticContent()) {
+                                        DiagnosticJsonSanitizer.sanitizeModelEvent(safeEvent, redactionSecrets)
+                                    } else null,
+                                )
+                            }
+                            streamState.diagnosticEvents.clear()
                             when (terminal) {
                                 ModelEvent.Completed -> sawCompleted = true
                                 is ModelEvent.Failed -> sawFailed = true
@@ -449,23 +531,61 @@ class OpenAiCompatibleAdapter(
                         streamRedactor.discard()
                         emitTerminalFailure(
                             streamState,
-                            streamState.deferredFailure ?: ErrorCode.UNKNOWN_OUTCOME.name,
+                            streamState.deferredFailure ?: INVALID_RESPONSE_MESSAGE,
                         )
                     }
+                    request.reportDiagnostic(
+                        ModelDiagnosticStage.RESPONSE_BODY, dispatchStatus, started, "chat.completions",
+                        httpStatus = status, errorCode = streamState.terminalError,
+                        finishReason = streamState.finishReason, usage = streamState.lastUsage,
+                        responseContentType = responseType, responseBytes = receivedBytes,
+                    )
                 } else {
-                    emitJsonResponse(readBounded(response.bodyAsChannel()), redactionSecrets, streamState)
+                    val raw = readBounded(response.bodyAsChannel())
+                    emitJsonResponse(raw, redactionSecrets, streamState)
+                    request.reportDiagnostic(
+                        ModelDiagnosticStage.RESPONSE_BODY, dispatchStatus, started, "chat.completions",
+                        httpStatus = status, errorCode = streamState.terminalError,
+                        finishReason = streamState.finishReason, usage = streamState.lastUsage,
+                        responseContentType = responseType, responseBytes = raw.toByteArray(Charsets.UTF_8).size.toLong(),
+                        contentKind = "response.json",
+                        content = if (request.wantsDiagnosticContent()) DiagnosticJsonSanitizer.sanitize(raw, redactionSecrets) else null,
+                        originalContentChars = raw.length.toLong(),
+                        originalContentBytes = raw.toByteArray(Charsets.UTF_8).size.toLong(),
+                    )
                 }
+                request.reportDiagnostic(
+                    ModelDiagnosticStage.TERMINAL, dispatchStatus, started, "chat.completions",
+                    httpStatus = status, errorCode = streamState.terminalError,
+                    finishReason = streamState.finishReason, usage = streamState.lastUsage,
+                    responseContentType = responseType,
+                )
             }
         } catch (e: AppException) {
             emitTerminalFailure(streamState, e.error.code.name)
+            request.reportDiagnostic(ModelDiagnosticStage.TERMINAL, dispatchStatus, started, "chat.completions", httpStatus, e.error.code.name, e, responseContentType = responseContentType)
         } catch (_: SecretUnavailableException) {
             emitTerminalFailure(streamState, ErrorCode.SECRET_UNAVAILABLE.name)
+            request.reportDiagnostic(ModelDiagnosticStage.TERMINAL, dispatchStatus, started, "chat.completions", httpStatus, ErrorCode.SECRET_UNAVAILABLE.name, responseContentType = responseContentType)
         } catch (_: InvalidHeaderException) {
             emitTerminalFailure(streamState, ErrorCode.INVALID_CONFIG.name)
+            request.reportDiagnostic(ModelDiagnosticStage.TERMINAL, dispatchStatus, started, "chat.completions", httpStatus, ErrorCode.INVALID_CONFIG.name, responseContentType = responseContentType)
+        } catch (error: ProviderHttpResponseException) {
+            httpStatus = error.httpStatus
+            dispatchStatus = ModelDispatchStatus.RESPONSE_RECEIVED
+            val code = when (error.httpStatus) {
+                401, 403 -> ErrorCode.PROVIDER_UNAUTHORIZED.name
+                429 -> ErrorCode.RATE_LIMITED.name
+                else -> ProviderConnectionErrorCode.PROVIDER_REJECTED.name
+            }
+            emitTerminalFailure(streamState, code)
+            request.reportDiagnostic(ModelDiagnosticStage.TERMINAL, dispatchStatus, started, "chat.completions", httpStatus, code, error)
         } catch (e: kotlinx.coroutines.CancellationException) {
             throw e
-        } catch (_: Exception) {
+        } catch (error: Exception) {
+            if (dispatchStatus != ModelDispatchStatus.NOT_DISPATCHED) dispatchStatus = ModelDispatchStatus.UNKNOWN_AFTER_DISPATCH
             emitTerminalFailure(streamState, ErrorCode.UNKNOWN_OUTCOME.name)
+            request.reportDiagnostic(ModelDiagnosticStage.TERMINAL, dispatchStatus, started, "chat.completions", httpStatus, ErrorCode.UNKNOWN_OUTCOME.name, error, responseContentType = responseContentType)
         } finally {
             token.toCharArray().fill('\u0000')
         }
@@ -483,7 +603,9 @@ class OpenAiCompatibleAdapter(
                 val safe = redactor.accept(event.text)
                 if (safe.isNotEmpty()) {
                     state.hasVisibleOutput = true
-                    emit(ModelEvent.TextDelta(safe))
+                    val safeEvent = ModelEvent.TextDelta(safe)
+                    emit(safeEvent)
+                    state.diagnosticEvents += safeEvent
                 }
                 null
             }
@@ -491,13 +613,19 @@ class OpenAiCompatibleAdapter(
                 val safe = redactor.accept(event.text)
                 if (safe.isNotEmpty()) {
                     state.hasVisibleOutput = true
-                    emit(ModelEvent.RefusalDelta(safe))
+                    val safeEvent = ModelEvent.RefusalDelta(safe)
+                    emit(safeEvent)
+                    state.diagnosticEvents += safeEvent
                 }
                 null
             }
             is ModelEvent.ReasoningDelta -> {
                 val safe = redactor.accept(event.text)
-                if (safe.isNotEmpty()) emit(ModelEvent.ReasoningDelta(safe))
+                if (safe.isNotEmpty()) {
+                    val safeEvent = ModelEvent.ReasoningDelta(safe)
+                    emit(safeEvent)
+                    state.diagnosticEvents += safeEvent
+                }
                 null
             }
             is ModelEvent.ToolCallDelta -> {
@@ -513,6 +641,7 @@ class OpenAiCompatibleAdapter(
                 } else {
                     state.hasVisibleOutput = true
                     emit(event)
+                    state.diagnosticEvents += event
                     null
                 }
             }
@@ -535,7 +664,9 @@ class OpenAiCompatibleAdapter(
                 val safeTail = redactor.finish()
                 if (safeTail.isNotEmpty()) {
                     state.hasVisibleOutput = true
-                    emit(ModelEvent.TextDelta(safeTail))
+                    val safeEvent = ModelEvent.TextDelta(safeTail)
+                    emit(safeEvent)
+                    state.diagnosticEvents += safeEvent
                 }
                 if (state.deferredFailure != null) {
                     val failure = state.deferredFailure!!
@@ -553,6 +684,7 @@ class OpenAiCompatibleAdapter(
             }
             is ModelEvent.Usage -> {
                 state.latestUsage = event
+                state.lastUsage = event
                 null
             }
             else -> {
@@ -575,6 +707,7 @@ class OpenAiCompatibleAdapter(
     ) {
         if (state.terminal) return
         state.terminal = true
+        state.terminalError = message
         emitUsage(state)
         emit(ModelEvent.Failed(message))
     }
@@ -1344,8 +1477,12 @@ class OpenAiCompatibleAdapter(
 
     private class StreamOutputState {
         var latestUsage: ModelEvent.Usage? = null
+        var lastUsage: ModelEvent.Usage? = null
         var hasVisibleOutput: Boolean = false
         var deferredFailure: String? = null
+        var terminalError: String? = null
+        var finishReason: String? = null
+        val diagnosticEvents = mutableListOf<ModelEvent>()
         var terminal: Boolean = false
     }
 
@@ -1409,7 +1546,7 @@ class OpenAiCompatibleAdapter(
     ) {
         val root = runCatching { Json.parseToJsonElement(raw).jsonObject }.getOrNull()
             ?: run {
-                emitTerminalFailure(state, ErrorCode.UNKNOWN_OUTCOME.name)
+                emitTerminalFailure(state, INVALID_RESPONSE_MESSAGE)
                 return
             }
         root["usage"]?.let { usageElement ->
@@ -1418,6 +1555,7 @@ class OpenAiCompatibleAdapter(
                     usage["prompt_tokens"]?.jsonPrimitive?.contentOrNull?.toIntOrNull() ?: 0,
                     usage["completion_tokens"]?.jsonPrimitive?.contentOrNull?.toIntOrNull() ?: 0,
                 )
+                state.lastUsage = state.latestUsage
             }
         }
         (root["error"] as? JsonObject)?.get("message")?.let { errorMessage ->
@@ -1479,6 +1617,7 @@ class OpenAiCompatibleAdapter(
         val finishReason = choice["finish_reason"]?.let { element ->
             runCatching { element.jsonPrimitive.contentOrNull }.getOrNull()
         }
+        state.finishReason = finishReason
         if (finishReason == "length") {
             emitTerminalFailure(state, ErrorCode.CONTEXT_OVERFLOW.name)
             return
@@ -1529,6 +1668,7 @@ class OpenAiCompatibleAdapter(
     private class InvalidConnectionConfigException : RuntimeException()
 
     companion object {
+        private const val REQUEST_CANCELLED = "REQUEST_CANCELLED"
         private const val INVALID_RESPONSE_MESSAGE = "INVALID_RESPONSE"
         private const val PROBE_TOOL_NAME = "mar_probe_noop"
         /**

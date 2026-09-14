@@ -1465,8 +1465,15 @@ private fun ProvidersRoute(entry: NavBackStackEntry, chinese: Boolean, onRoute: 
 
 @Composable
 private fun KnowledgeRoute(vm: runtime.mobileagent.KnowledgeViewModel, chinese: Boolean, onRoute: (String) -> Unit) {
+    LifecycleEventEffect(Lifecycle.Event.ON_RESUME) { vm.refreshVisionTargets() }
     val state = vm.state.value.copy(language = if (chinese) "zh-CN" else "en-US")
     val actions = runtime.mobileagent.feature.knowledge.KnowledgeActions(
+        onStageImport = vm::stageImport,
+        onClearPendingImport = vm::clearPendingImport,
+        onSelectPendingVisionTarget = vm::selectPendingVisionTarget,
+        onBeginBatchVision = vm::beginBatchVision,
+        onDismissBatchVision = vm::dismissBatchVision,
+        onSelectBatchVisionTarget = vm::selectBatchVisionTarget,
         onImport = vm::importUris, onImportZip = vm::importZip, onImportFolder = vm::importTree,
         onSelectBase = vm::selectBase, onOpenEvidence = vm::openEvidence, onRebuild = vm::rebuild,
         onGrantVision = vm::grantVision, onRetryVision = vm::retryVision, onTextOnly = vm::textOnly,

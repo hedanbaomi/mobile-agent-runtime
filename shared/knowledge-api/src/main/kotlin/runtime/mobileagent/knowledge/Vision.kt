@@ -16,6 +16,16 @@ data class VisionInput(
     val surroundingText: String,
     val page: Int?,
     val section: String?,
+    /** Correlation only; deliberately excluded from [cacheKey]. */
+    val requestId: String = "",
+    /** One-based external dispatch attempt; deliberately excluded from [cacheKey]. */
+    val attempt: Int = 1,
+    /** Progress/terminal diagnostics. Sink failures never affect vision processing. */
+    val diagnostics: (VisionDiagnosticMetadata) -> Unit = {},
+    /** Explicit local DEBUG opt-in; excluded from [cacheKey]. */
+    val captureDiagnosticContent: Boolean = false,
+    /** Final pause/cancel gate, invoked immediately before external dispatch; excluded from [cacheKey]. */
+    val beforeDispatch: () -> Boolean = { true },
 ) {
     val cacheKey: String
         get() = sha256Hex(
@@ -34,8 +44,52 @@ data class VisionSuccess(
 sealed interface VisionOutcome {
     data class Success(val result: VisionSuccess) : VisionOutcome
     data object UnknownOutcome : VisionOutcome
-    data class Failed(val message: String) : VisionOutcome
+    /** Detailed unknown result for a request that may have reached the provider. */
+    data class Unknown(val metadata: VisionDiagnosticMetadata) : VisionOutcome
+    data class Failed(
+        val message: String,
+        val metadata: VisionDiagnosticMetadata = VisionDiagnosticMetadata(errorCode = message),
+    ) : VisionOutcome
 }
+
+enum class VisionDiagnosticPhase {
+    VALIDATION,
+    REQUEST_READY,
+    DISPATCH,
+    RESPONSE,
+    PARSE,
+    TERMINAL,
+}
+
+/**
+ * Fixed, provider-neutral vision diagnostics. Opt-in [content] may contain the
+ * request or response body, but never header/credential values or
+ * provider-private reasoning continuation.
+ */
+data class VisionDiagnosticMetadata(
+    val phase: VisionDiagnosticPhase = VisionDiagnosticPhase.VALIDATION,
+    val dispatched: Boolean = false,
+    val responseReceived: Boolean = false,
+    val httpStatus: Int? = null,
+    val durationMs: Long = 0,
+    val errorCode: String? = null,
+    val stage: String? = null,
+    val exceptionType: String? = null,
+    val finishReason: String? = null,
+    val inputTokens: Int? = null,
+    val outputTokens: Int? = null,
+    val requestId: String = "",
+    val attempt: Int = 1,
+    val assetHash: String? = null,
+    val modelFingerprint: String? = null,
+    val contentKind: String? = null,
+    val content: String? = null,
+    val contentChars: Long? = null,
+    val contentBytes: Long? = null,
+    val originalContentChars: Long? = null,
+    val originalContentBytes: Long? = null,
+    val contentTruncated: Boolean = false,
+)
 
 fun interface VisionBackend {
     fun process(input: VisionInput): VisionOutcome
@@ -55,12 +109,24 @@ data class VisionBinding(
     val providerRevision: Int = revision,
     /** Model profile revision; defaults to the legacy combined revision. */
     val modelRevision: Int = revision,
+    /** Stable row identity; absent for legacy bindings. */
+    val modelProfileId: String? = null,
+    /** Hash of the effective non-secret provider/model transport configuration. */
+    val configurationHash: String? = null,
 ) {
     val fingerprint: String
         // Keep path spelling significant.  Only discard redundant trailing
         // separators; callers that want scheme/host canonicalization must do
         // so before constructing the binding.
-        get() = "$providerId|$modelId|${endpoint.trimEnd('/')}|provider:$providerRevision|model:$modelRevision"
+        get() = buildString {
+            append("$providerId|$modelId|${endpoint.trimEnd('/')}|provider:$providerRevision|model:$modelRevision")
+            if (modelProfileId != null || configurationHash != null) {
+                append("|profile:")
+                append(modelProfileId.orEmpty())
+                append("|config:")
+                append(configurationHash.orEmpty())
+            }
+        }
 }
 
 data class LoadedVisual(

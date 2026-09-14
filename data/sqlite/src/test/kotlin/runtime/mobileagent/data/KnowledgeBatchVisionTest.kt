@@ -44,6 +44,105 @@ import runtime.mobileagent.knowledge.sha256Hex
  */
 class KnowledgeBatchVisionTest {
     @Test
+    fun diagnosticUpdateFailureCannotDiscardSuccessfulVisionCheckpoint() {
+        val db = JdbcSqlConnection()
+        Migrations.apply(db)
+        db.execute("CREATE TRIGGER reject_audit_update BEFORE UPDATE ON vision_attempts BEGIN SELECT RAISE(FAIL, 'audit unavailable'); END")
+        val repo = KnowledgeRepository(db, MemoryBlobSink(), visionModelFingerprint = "vision-test",
+            vision = VisionBackend { VisionOutcome.Success(VisionSuccess("saved ocr", "saved result")) })
+        val batch = stagedBatch(repo, "diagnostic failure", listOf(Triple("one.pdf", "application/pdf", visionPdf("audit"))))
+        repo.authorizeBatchVision(batch, "vision-test")
+        repo.processBatch(batch, true)
+        assertEquals(1, repo.batchProgress(batch).published)
+        assertEquals("SUCCESS", db.query("SELECT status FROM vision_results").single().string("status"))
+    }
+
+    @Test
+    fun successfulPagesSurviveRestartAndExplicitRetryOnlyReplaysUnknownPage() {
+        val db = JdbcSqlConnection()
+        Migrations.apply(db)
+        val blobs = MemoryBlobSink()
+        val calls = mutableListOf<Int>()
+        var failThird = true
+        val rasterizer = runtime.mobileagent.knowledge.PdfPageRasterizer { _, pages -> pages.map { page ->
+            runtime.mobileagent.knowledge.RenderedPdfPage(page, byteArrayOf(page.toByte()), "image/png", 1, 1)
+        } }
+        val backend = VisionBackend { input ->
+            calls += input.page!!
+            val metadata = runtime.mobileagent.knowledge.VisionDiagnosticMetadata(
+                phase = runtime.mobileagent.knowledge.VisionDiagnosticPhase.DISPATCH, dispatched = true,
+                stage = "REQUEST_DISPATCH", requestId = input.requestId, attempt = input.attempt)
+            input.diagnostics(metadata)
+            if (input.page == 3 && failThird) VisionOutcome.Unknown(metadata.copy(errorCode = "NETWORK_DISCONNECTED"))
+            else VisionOutcome.Success(VisionSuccess("page ${input.page}", "diagram ${input.page}"))
+        }
+        fun repository() = KnowledgeRepository(db, blobs, visionModelFingerprint = "vision-test", vision = backend, pdfRasterizer = rasterizer)
+        val drawing = "0 0 100 100 re f\n"
+        val pdf = buildString {
+            append("%PDF-1.4\n1 0 obj << /Type /Catalog /Pages 2 0 R >> endobj\n")
+            append("2 0 obj << /Type /Pages /Count 3 /Kids [3 0 R 4 0 R 5 0 R] >> endobj\n")
+            for (page in 1..3) {
+                append("${page + 2} 0 obj << /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] /Resources << >> /Contents ${page + 5} 0 R >> endobj\n")
+                append("${page + 5} 0 obj << /Length ${drawing.length} >>\nstream\n${drawing}endstream\nendobj\n")
+            }
+            append("trailer << /Root 1 0 R >>\n%%EOF")
+        }.toByteArray()
+        val repo = repository()
+        val batch = stagedBatch(repo, "multi-page", listOf(Triple("three.pdf", "application/pdf", pdf)))
+        repo.authorizeBatchVision(batch, "vision-test")
+        repo.processBatch(batch, true)
+        assertEquals(listOf(1, 2, 3), calls)
+        assertEquals(2, db.query("SELECT status FROM vision_results WHERE status='SUCCESS'").size)
+        assertEquals(1, repo.batchProgress(batch).unknown)
+        val restarted = repository()
+        restarted.recoverableBatchIds().forEach { restarted.processBatch(it, true) }
+        assertEquals(listOf(1, 2, 3), calls)
+        assertEquals(3, db.query("SELECT request_id FROM vision_attempts").size)
+        failThird = false
+        val job = repo.listBatchItemViews(batch).single().jobId!!
+        assertThrows(IllegalStateException::class.java) { restarted.retryUnknownVision(job, false, "vision-test") }
+        assertEquals(ImportStage.READY, restarted.retryUnknownVision(job, true, "vision-test").stage)
+        assertEquals(listOf(1, 2, 3, 3), calls, "successful pages must not be uploaded again")
+        val attempts = db.query("SELECT attempt_no FROM vision_attempts ORDER BY created_at, rowid")
+        assertEquals(listOf(1L, 1L, 1L, 2L), attempts.map { it.long("attempt_no") })
+    }
+
+    @Test
+    fun explicitlySelectedNonDefaultVisionSurvivesDefaultChangeAndRejectsTargetChange() {
+        val db = JdbcSqlConnection()
+        Migrations.apply(db)
+        val blobs = MemoryBlobSink()
+        val first = runtime.mobileagent.knowledge.VisionBinding("p1", "first", "https://first.invalid", 1)
+        val second = runtime.mobileagent.knowledge.VisionBinding("p2", "second", "https://second.invalid", 1)
+        var selectedAvailable = true
+        var global = first
+        val requests = mutableListOf<String>()
+        val backend = VisionBackend { input ->
+            requests += input.modelFingerprint
+            VisionOutcome.Success(VisionSuccess("selected ocr", "selected image"))
+        }
+        fun repository() = KnowledgeRepository(db, blobs, vision = backend,
+            visionBinding = { global },
+            visionTargetResolver = { target -> listOfNotNull(first, second.takeIf { selectedAvailable }).singleOrNull { it.fingerprint == target } })
+        val repo = repository()
+        val batch = stagedBatch(repo, "selected", listOf(
+            Triple("one.pdf", "application/pdf", visionPdf("selected-one")),
+            Triple("two.pdf", "application/pdf", visionPdf("selected-two")),
+        ))
+        repo.authorizeBatchVision(batch, second.fingerprint)
+        global = first.copy(revision = 2, providerRevision = 2)
+        repository().processBatch(batch, true)
+        assertEquals(listOf(second.fingerprint, second.fingerprint), requests)
+        assertEquals(2, repo.batchProgress(batch).published)
+        val changed = stagedBatch(repo, "changed", listOf(Triple("changed.pdf", "application/pdf", visionPdf("changed"))))
+        repo.authorizeBatchVision(changed, second.fingerprint)
+        selectedAvailable = false
+        repository().processBatch(changed, true)
+        assertEquals(2, requests.size, "a changed selected target never falls back to the default")
+        assertEquals(ImportBatchBlockReason.VISION_TARGET_CHANGED, repo.findBatch(changed)!!.blockedReason)
+    }
+
+    @Test
     fun unresolvedMarkdownImagesNeedSourcesAndExplicitTextOnlyResumesWithoutOverridingPause() {
         listOf(false, true).forEach { pauseBeforeTextOnly ->
             val db = JdbcSqlConnection()
@@ -250,6 +349,8 @@ class KnowledgeBatchVisionTest {
             connection.connectTimeout = 5_000
             connection.readTimeout = 5_000
             connection.setRequestProperty("Content-Type", input.mediaType.ifBlank { "application/octet-stream" })
+            input.diagnostics(runtime.mobileagent.knowledge.VisionDiagnosticMetadata(
+                phase = runtime.mobileagent.knowledge.VisionDiagnosticPhase.DISPATCH, dispatched = true, stage = "REQUEST_DISPATCH"))
             connection.outputStream.use { it.write(input.bytes) }
             val code = connection.responseCode
             connection.inputStream.use { it.readBytes() }
@@ -353,7 +454,8 @@ class KnowledgeBatchVisionTest {
         val items = repo.listBatchItemViews(batchId)
         assertEquals(ImportItemState.PUBLISHED.name, items[0].state, "the checkpoint keeps finished work")
         assertEquals(ImportItemState.WAITING.name, items[1].state)
-        assertEquals(ImportItemState.COPYING.name, items[2].state, "no later member is dispatched while blocked")
+        assertEquals(ImportItemState.QUEUED.name, items[2].state, "staged later members remain queued while blocked")
+        assertEquals(1, repo.batchProgress(batchId).queued)
 
         // "Configure and continue" is one action for the whole batch: authorize, then keep going.
         repo.authorizeBatchVision(batchId, "vision-test")
@@ -556,8 +658,8 @@ class KnowledgeBatchVisionTest {
             db,
             MemoryBlobSink(),
             vision = VisionBackend { input ->
-                assertEquals(backendStarts.incrementAndGet(), events.count { it.phase == ImportBatchEventPhase.DISPATCHED },
-                    "the sink must receive DISPATCHED before the backend receives image bytes")
+                assertEquals(backendStarts.incrementAndGet() - 1, events.count { it.phase == ImportBatchEventPhase.DISPATCHED },
+                    "entering the backend is not an actual transport dispatch")
                 assertEquals("UNKNOWN_OUTCOME", db.query("SELECT status FROM vision_results WHERE cache_key = ?", listOf(input.cacheKey))
                     .single().string("status"), "the dispatch checkpoint must already be durable")
                 backend.process(input)

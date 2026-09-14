@@ -39,6 +39,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -76,6 +77,38 @@ data class KnowledgeImportJobUi(
 
 data class KnowledgeEmbeddingModelUi(val id: String, val label: String)
 
+/**
+ * A user-selectable Vision destination.  The fingerprint is the immutable
+ * authorization identity; [label] is presentation only.
+ */
+data class KnowledgeVisionTargetUi(
+    val fingerprint: String,
+    val label: String,
+    val providerId: String = "",
+    val modelProfileId: String = "",
+    val modelId: String = "",
+)
+
+/**
+ * Import selection kept by the shell-scoped ViewModel while the user visits
+ * Provider settings.  Uri values are persisted by the ViewModel before this
+ * object is exposed, so leaving the Knowledge route does not discard the
+ * staged selection.
+ */
+data class KnowledgePendingImportUi(
+    val id: String,
+    val uris: List<Uri>,
+    val sourceKind: String,
+    val selectedVisionTargetFingerprint: String? = null,
+    val visionTargetSelectionInitialized: Boolean = false,
+)
+
+data class KnowledgeBatchVisionUi(
+    val batchId: String,
+    val selectedVisionTargetFingerprint: String? = null,
+    val visionTargetSelectionInitialized: Boolean = false,
+)
+
 data class KnowledgeQueryAttemptUi(
     val spaceId: String,
     val queryHash: String,
@@ -100,7 +133,10 @@ data class KnowledgeBatchUi(
     val unknown: Int = 0,
     val cancelled: Int = 0,
     val blockedReason: String? = null,
+    /** Exact authorization identity of the confirmed destination, when one was confirmed. */
     val visionTarget: String? = null,
+    /** Presentation-only label for [visionTarget]; it is never an authorization token. */
+    val visionTargetLabel: String? = null,
     val paused: Boolean = false,
     val resumeStagingAvailable: Boolean = false,
     /** Per-item detail.  Rendered only when the user expands the overall progress card. */
@@ -153,9 +189,23 @@ data class KnowledgeUiState(
     val visionConfigured: Boolean = false,
     /** Exact destination identity; display text must never be used as an authorization token. */
     val visionTargetFingerprint: String? = null,
+    /** Every configured image-capable model, ordered deterministically for the default choice. */
+    val visionTargets: List<KnowledgeVisionTargetUi> = emptyList(),
+    /** True while the asynchronous profile refresh is resolving Vision targets. */
+    val visionTargetsLoading: Boolean = false,
+    /** Import selection survives route disposal and provider configuration navigation. */
+    val pendingImport: KnowledgePendingImportUi? = null,
+    /** Blocked batch target selection also survives provider configuration navigation. */
+    val pendingBatchVision: KnowledgeBatchVisionUi? = null,
 )
 
 data class KnowledgeActions(
+    val onStageImport: (List<Uri>, String) -> Unit = { _, _ -> },
+    val onClearPendingImport: () -> Unit = {},
+    val onSelectPendingVisionTarget: (String?) -> Unit = {},
+    val onBeginBatchVision: (String) -> Unit = {},
+    val onDismissBatchVision: () -> Unit = {},
+    val onSelectBatchVisionTarget: (String?) -> Unit = {},
     val onImport: (List<Uri>, String?) -> Unit = { _, _ -> },
     val onImportZip: (Uri, String?) -> Unit = { _, _ -> },
     val onImportFolder: (Uri, String?) -> Unit = { _, _ -> },
@@ -190,9 +240,35 @@ fun KnowledgeScreen(
     showPageTitle: Boolean = true,
 ) {
     val zh = state.language.equals("zh-CN", true)
-    var pendingImport by remember { mutableStateOf<Pair<List<Uri>, String>?>(null) }
-    var pendingBatchVision by remember { mutableStateOf<String?>(null) }
-    val screenActions = actions.copy(onAuthorizeBatchVision = { id, _ -> pendingBatchVision = id })
+    // Previews and lightweight harnesses that only wire onImport keep a local staging fallback.
+    // The shell-scoped ViewModel (state.pendingImport) is the production owner and always wins,
+    // so a route change, provider round trip or process restart can never drop the staged selection.
+    var localPendingImport by remember { mutableStateOf<KnowledgePendingImportUi?>(null) }
+    // The legacy in-composition path keeps the destination list it saw when the picker returned.
+    var localPendingTargets by remember { mutableStateOf<List<KnowledgeVisionTargetUi>>(emptyList()) }
+    val pendingImport = state.pendingImport ?: localPendingImport
+    val pendingBatchVision = state.pendingBatchVision
+    // A snapshot may carry only the legacy display pair (label + fingerprint).  Keep that exact
+    // destination selectable instead of silently dropping it; the fingerprint stays the identity.
+    val availableTargets = remember(state.visionTargets, state.visionTargetFingerprint, state.visionTargetLabel) {
+        if (state.visionTargets.isNotEmpty()) state.visionTargets
+        else listOfNotNull(
+            state.visionTargetFingerprint?.takeIf { it.isNotBlank() }
+                ?.let { KnowledgeVisionTargetUi(fingerprint = it, label = state.visionTargetLabel) },
+        )
+    }
+    // The shell-scoped ViewModel resolves the staged selection against the live destination list.
+    // Only the legacy in-composition fallback uses its own snapshot, so a late profile refresh can
+    // never rewrite the destination the user already saw in the confirmation dialog.
+    val importTargets = if (state.pendingImport != null) availableTargets else localPendingTargets
+    val clearStagedImport: () -> Unit = {
+        actions.onClearPendingImport()
+        localPendingImport = null
+        localPendingTargets = emptyList()
+    }
+    var visionTargetMenu by rememberSaveable { mutableStateOf(false) }
+    var batchVisionTargetMenu by rememberSaveable { mutableStateOf(false) }
+    val screenActions = actions.copy(onAuthorizeBatchVision = { id, _ -> actions.onBeginBatchVision(id) })
     var newBaseName by remember { mutableStateOf("") }
     var newBaseDialog by remember { mutableStateOf(false) }
     var deleteBaseId by remember { mutableStateOf<String?>(null) }
@@ -203,13 +279,64 @@ fun KnowledgeScreen(
     var embeddingModelId by remember { mutableStateOf("") }
     var embeddingDimension by remember { mutableStateOf("") }
     val picker = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
-        if (uris.isNotEmpty()) pendingImport = uris to "files"
+        if (uris.isNotEmpty()) {
+            actions.onStageImport(uris, "files")
+            localPendingTargets = availableTargets
+            localPendingImport = KnowledgePendingImportUi(
+                id = "local:files:" + uris.joinToString("\n") { it.toString() },
+                uris = uris,
+                sourceKind = "files",
+                selectedVisionTargetFingerprint = availableTargets.firstOrNull()?.fingerprint,
+                visionTargetSelectionInitialized = true,
+            )
+        }
     }
     val zipPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
-        if (uri != null) pendingImport = listOf(uri) to "zip"
+        if (uri != null) {
+            actions.onStageImport(listOf(uri), "zip")
+            localPendingTargets = availableTargets
+            localPendingImport = KnowledgePendingImportUi(
+                id = "local:zip:" + uri.toString(),
+                uris = listOf(uri),
+                sourceKind = "zip",
+                selectedVisionTargetFingerprint = availableTargets.firstOrNull()?.fingerprint,
+                visionTargetSelectionInitialized = true,
+            )
+        }
     }
     val folderPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
-        if (uri != null) pendingImport = listOf(uri) to "folder"
+        if (uri != null) {
+            actions.onStageImport(listOf(uri), "folder")
+            localPendingTargets = availableTargets
+            localPendingImport = KnowledgePendingImportUi(
+                id = "local:folder:" + uri.toString(),
+                uris = listOf(uri),
+                sourceKind = "folder",
+                selectedVisionTargetFingerprint = availableTargets.firstOrNull()?.fingerprint,
+                visionTargetSelectionInitialized = true,
+            )
+        }
+    }
+    LaunchedEffect(pendingImport?.id, state.visionTargetsLoading, importTargets) {
+        val pending = state.pendingImport ?: localPendingImport ?: return@LaunchedEffect
+        if (!pending.visionTargetSelectionInitialized && !state.visionTargetsLoading) {
+            // Only a deterministic initial default, and only before the user chose anything.
+            val fingerprint = importTargets.firstOrNull()?.fingerprint
+            if (state.pendingImport != null) {
+                actions.onSelectPendingVisionTarget(fingerprint)
+            } else {
+                localPendingImport = pending.copy(
+                    selectedVisionTargetFingerprint = fingerprint,
+                    visionTargetSelectionInitialized = true,
+                )
+            }
+        }
+    }
+    LaunchedEffect(pendingBatchVision?.batchId, state.visionTargetsLoading, availableTargets) {
+        val pending = state.pendingBatchVision ?: return@LaunchedEffect
+        if (!pending.visionTargetSelectionInitialized && !state.visionTargetsLoading) {
+            actions.onSelectBatchVisionTarget(availableTargets.firstOrNull()?.fingerprint)
+        }
     }
     BoxWithConstraints(modifier.fillMaxSize().padding(horizontal = 16.dp, vertical = 12.dp)) {
         val wide = maxWidth >= 720.dp
@@ -411,12 +538,16 @@ fun KnowledgeScreen(
             },
         )
     }
-    pendingImport?.let { (uris, sourceKind) ->
-        val confirmedTarget = remember(pendingImport) { state.visionTargetFingerprint to state.visionTargetLabel }
+    pendingImport?.let { pending ->
+        val uris = pending.uris
+        val sourceKind = pending.sourceKind
+        val selectedTarget = importTargets.firstOrNull { it.fingerprint == pending.selectedVisionTargetFingerprint }
+        val selectedTargetMissing = pending.visionTargetSelectionInitialized &&
+            pending.selectedVisionTargetFingerprint != null && selectedTarget == null
         val selectedBase = state.bases.firstOrNull { it.id == state.selectedBaseId }
         val selectedName = selectedBase?.name ?: if (zh) "默认知识库" else "the default knowledge base"
         AlertDialog(
-            onDismissRequest = { pendingImport = null },
+            onDismissRequest = clearStagedImport,
             title = { Text(if (zh) "创建并开始导入" else "Create and start import") },
             text = {
                 Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -425,9 +556,65 @@ fun KnowledgeScreen(
                         style = MaterialTheme.typography.bodySmall,
                     )
                     Text(
-                        if (zh) "视觉目标：${confirmedTarget.second.ifBlank { "未配置" }}" else "Vision target: ${confirmedTarget.second.ifBlank { "not configured" }}",
+                        if (zh) "视觉目标：${selectedTarget?.label ?: if (pending.visionTargetSelectionInitialized) "未选择" else "正在读取配置…" }"
+                        else "Vision target: ${selectedTarget?.label ?: if (pending.visionTargetSelectionInitialized) "none selected" else "loading configuration…"}",
                         style = MaterialTheme.typography.bodySmall,
                     )
+                    Text(
+                        if (zh) "创建前选择本批次的视觉服务商和模型。目标会按完整配置指纹固定，不会因为返回配置页或默认值变化而静默切换。"
+                        else "Choose the Vision provider and model for this batch before it starts. The full configuration fingerprint is fixed for the batch and will not silently change after a settings round trip.",
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                    if (state.visionTargetsLoading) {
+                        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            CircularProgressIndicator()
+                            Text(if (zh) "正在刷新可用视觉模型…" else "Refreshing available Vision models…")
+                        }
+                    } else if (importTargets.isNotEmpty()) {
+                        Box {
+                            OutlinedButton(
+                                onClick = { visionTargetMenu = true },
+                                modifier = Modifier.fillMaxWidth(),
+                            ) {
+                                Text(selectedTarget?.label ?: if (zh) "选择视觉目标" else "Choose Vision target")
+                            }
+                            DropdownMenu(
+                                expanded = visionTargetMenu,
+                                onDismissRequest = { visionTargetMenu = false },
+                            ) {
+                                importTargets.forEach { target ->
+                                    DropdownMenuItem(
+                                        text = { Text(target.label) },
+                                        onClick = {
+                                            visionTargetMenu = false
+                                            actions.onSelectPendingVisionTarget(target.fingerprint)
+                                        },
+                                    )
+                                }
+                                DropdownMenuItem(
+                                    text = { Text(if (zh) "不选择视觉目标（遇到图片时暂停）" else "No Vision target (pause if images need processing)") },
+                                    onClick = {
+                                        visionTargetMenu = false
+                                        actions.onSelectPendingVisionTarget(null)
+                                    },
+                                )
+                            }
+                        }
+                        if (selectedTargetMissing) {
+                            Text(
+                                if (zh) "之前选择的视觉目标已不可用。请选择新的目标，或明确选择不使用视觉目标。"
+                                else "The previously selected Vision target is no longer available. Choose another target or explicitly continue without one.",
+                                color = MaterialTheme.colorScheme.error,
+                                style = MaterialTheme.typography.bodySmall,
+                            )
+                        }
+                    } else {
+                        Text(
+                            if (zh) "当前没有可处理图片的视觉模型。纯文本资料可以继续；如果遇到图片，批次会暂停并显示配置入口。"
+                            else "No image-capable Vision model is configured. Text-only material can continue; a batch pauses with a configuration action if it reaches an image.",
+                            style = MaterialTheme.typography.bodySmall,
+                        )
+                    }
                     Text(
                         if (zh) "可能外发的内容：只有本批次中确实包含图片、且本机解析无法覆盖的页面或图片会发送到上面的视觉目标。纯文本资料只在本机处理。" else "What may leave the device: only pages or images in this batch that actually contain visual content the local parser cannot cover. Text-only material stays local.",
                         style = MaterialTheme.typography.bodySmall,
@@ -436,7 +623,7 @@ fun KnowledgeScreen(
                         if (zh) "费用提示：视觉处理由服务商计费，金额取决于实际发送的图片数量与所选模型。本次授权只覆盖本批次已选资料，不会扩展到以后新增的文件。" else "Cost: visual processing is billed by the provider and depends on how many images are actually sent. This authorization covers only the material selected now and never widens to files added later.",
                         style = MaterialTheme.typography.bodySmall,
                     )
-                    if (confirmedTarget.first == null) {
+                    if (pending.visionTargetSelectionInitialized && pending.selectedVisionTargetFingerprint == null) {
                         Text(
                             if (zh) "当前没有可处理图片的视觉目标。纯文本资料不受影响；一旦真正遇到需要视觉的内容，本批次会整体暂停并提示你配置后继续。" else "No image-capable Vision target is configured. Text-only material is unaffected; if visual content is actually found the whole batch pauses and asks you to configure and continue.",
                             style = MaterialTheme.typography.bodySmall,
@@ -447,34 +634,84 @@ fun KnowledgeScreen(
             confirmButton = {
                 Button(
                     onClick = {
-                        val chosenTarget = confirmedTarget.first
-                        pendingImport = null
+                        val chosenTarget = pending.selectedVisionTargetFingerprint
+                        clearStagedImport()
                         when (sourceKind) {
                             "zip" -> actions.onImportZip(uris.first(), chosenTarget)
                             "folder" -> actions.onImportFolder(uris.first(), chosenTarget)
                             else -> actions.onImport(uris, chosenTarget)
                         }
                     },
+                    enabled = !state.visionTargetsLoading && pending.visionTargetSelectionInitialized && !selectedTargetMissing,
                 ) { Text(if (zh) "创建并开始导入" else "Create and start import") }
             },
-            dismissButton = { TextButton(onClick = { pendingImport = null }) { Text(if (zh) "取消" else "Cancel") } },
+            dismissButton = { TextButton(onClick = clearStagedImport) { Text(if (zh) "取消" else "Cancel") } },
         )
     }
-    pendingBatchVision?.let { batchId ->
-        val target = remember(batchId) { state.visionTargetFingerprint to state.visionTargetLabel }
+    pendingBatchVision?.let { pending ->
+        val batchId = pending.batchId
+        val selectedTarget = availableTargets.firstOrNull { it.fingerprint == pending.selectedVisionTargetFingerprint }
+        val selectedTargetMissing = pending.visionTargetSelectionInitialized &&
+            pending.selectedVisionTargetFingerprint != null && selectedTarget == null
         AlertDialog(
-            onDismissRequest = { pendingBatchVision = null },
+            onDismissRequest = actions.onDismissBatchVision,
             title = { Text(if (zh) "确认本批次视觉处理" else "Confirm batch Vision processing") },
-            text = { Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                Text(if (zh) "目标：${target.second.ifBlank { "未配置" }}" else "Target: ${target.second.ifBlank { "not configured" }}")
+            text = { Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text(if (zh) "目标：${selectedTarget?.label ?: if (pending.visionTargetSelectionInitialized) "未选择" else "正在读取配置…" }" else "Target: ${selectedTarget?.label ?: if (pending.visionTargetSelectionInitialized) "none selected" else "loading configuration…"}")
+                if (state.visionTargetsLoading) {
+                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        CircularProgressIndicator()
+                        Text(if (zh) "正在刷新可用视觉模型…" else "Refreshing available Vision models…")
+                    }
+                } else if (availableTargets.isNotEmpty()) {
+                    Box {
+                        OutlinedButton(onClick = { batchVisionTargetMenu = true }, modifier = Modifier.fillMaxWidth()) {
+                            Text(selectedTarget?.label ?: if (zh) "选择视觉目标" else "Choose Vision target")
+                        }
+                        DropdownMenu(
+                            expanded = batchVisionTargetMenu,
+                            onDismissRequest = { batchVisionTargetMenu = false },
+                        ) {
+                            availableTargets.forEach { target ->
+                                DropdownMenuItem(
+                                    text = { Text(target.label) },
+                                    onClick = {
+                                        batchVisionTargetMenu = false
+                                        actions.onSelectBatchVisionTarget(target.fingerprint)
+                                    },
+                                )
+                            }
+                            DropdownMenuItem(
+                                text = { Text(if (zh) "不选择视觉目标（继续后遇到图片会再次暂停）" else "No Vision target (pause again if images need processing)") },
+                                onClick = {
+                                    batchVisionTargetMenu = false
+                                    actions.onSelectBatchVisionTarget(null)
+                                },
+                            )
+                        }
+                    }
+                    if (selectedTargetMissing) {
+                        Text(
+                            if (zh) "之前选择的视觉目标已不可用，请重新选择。" else "The previously selected Vision target is no longer available; choose another target.",
+                            color = MaterialTheme.colorScheme.error,
+                            style = MaterialTheme.typography.bodySmall,
+                        )
+                    }
+                } else {
+                    Text(if (zh) "当前没有可处理图片的视觉模型。请先配置后返回。" else "No image-capable Vision model is configured. Configure one and return.")
+                }
                 Text(if (zh) "仅将本批次需要视觉处理的页面或图片发送到此目标。服务商可能收费；后续新增资料不在授权范围内。" else "Send only this batch's required visual pages or images to this destination. Provider charges may apply. Files added later are excluded.")
-                if (target.first == null) Text(if (zh) "请先配置可处理图片的模型，然后返回继续。" else "Configure an image-capable model, then return to continue.")
+                if (pending.visionTargetSelectionInitialized && pending.selectedVisionTargetFingerprint == null) Text(if (zh) "请先选择可处理图片的模型，然后返回继续。" else "Choose an image-capable model before continuing.")
             } },
             confirmButton = { Button(onClick = {
-                pendingBatchVision = null
-                target.first?.let { actions.onAuthorizeBatchVision(batchId, it) } ?: actions.onConfigureVision()
-            }) { Text(if (target.first == null) (if (zh) "配置视觉模型" else "Configure Vision model") else (if (zh) "确认并继续" else "Confirm and continue")) } },
-            dismissButton = { TextButton(onClick = { pendingBatchVision = null }) { Text(if (zh) "取消" else "Cancel") } },
+                if (pending.selectedVisionTargetFingerprint != null && !selectedTargetMissing) {
+                    actions.onDismissBatchVision()
+                    actions.onAuthorizeBatchVision(batchId, pending.selectedVisionTargetFingerprint)
+                } else actions.onConfigureVision()
+            }, enabled = !state.visionTargetsLoading && pending.visionTargetSelectionInitialized && !selectedTargetMissing) {
+                Text(if (pending.selectedVisionTargetFingerprint == null) (if (zh) "配置视觉模型" else "Configure Vision model") else (if (zh) "确认并继续" else "Confirm and continue"))
+            } },
+            dismissButton = { TextButton(onClick = actions.onDismissBatchVision) { Text(if (zh) "取消" else "Cancel") } },
         )
     }
     state.evidence?.let { EvidenceDialog(it, actions.onCloseEvidence) }
@@ -688,9 +925,9 @@ private fun BatchProgressCard(batch: KnowledgeBatchUi, jobs: List<KnowledgeImpor
                         if (zh) "已阻塞：视觉目标已变更，需要重新确认" else "Blocked: the Vision destination changed and needs re-confirmation"
                     } else if (zh) "已阻塞：需要视觉模型" else "Blocked: needs a Vision model"
                     paused -> if (zh) "已暂停" else "Paused"
+                    batch.unknown > 0 -> if (zh) "请求结果未知：请展开详情确认是否重试" else "Request outcome unknown: open details to decide whether to retry"
                     batch.state.equals("FAILED", true) -> if (zh) "导入失败" else "Import failed"
                     batch.state.equals("CANCELLED", true) -> if (zh) "已取消" else "Cancelled"
-                    batch.unknown > 0 -> if (zh) "请求结果未知：请展开详情确认是否重试" else "Request outcome unknown: open details to decide whether to retry"
                     batch.state.equals("WAITING", true) -> if (zh) "等待中" else "Waiting"
                     batch.resumeStagingAvailable -> if (zh) "复制已中断，可从已保存位置继续" else "Copy interrupted; resume from the saved checkpoint"
                     batch.state.equals("COPYING", true) -> if (zh) "正在复制本地资料" else "Copying local files"
@@ -699,6 +936,17 @@ private fun BatchProgressCard(batch: KnowledgeBatchUi, jobs: List<KnowledgeImpor
                 style = MaterialTheme.typography.bodySmall,
                 modifier = Modifier.padding(top = 4.dp),
             )
+            // The unknown reason must be visible on the card itself, not only behind "details".
+            val unknownReason = batch.items.asSequence().mapNotNull { it.error }
+                .firstOrNull { it.contains("UNKNOWN_OUTCOME") }?.take(300)
+            if (unknownReason != null) {
+                Text(
+                    if (zh) "未知原因：$unknownReason" else "Unknown reason: $unknownReason",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.error,
+                    modifier = Modifier.padding(top = 4.dp),
+                )
+            }
             // Honest progress: finished means published and searchable, never merely copied.
             ProgressRow(batch, percent, zh)
             batch.error?.let { Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall) }
@@ -734,18 +982,18 @@ private fun BatchProgressCard(batch: KnowledgeBatchUi, jobs: List<KnowledgeImpor
             if (expanded) {
             Text(
                 if (zh) {
-                    "已复制 ${batch.copied} · 处理中 ${batch.processing} · 排队 ${batch.pending} · 等待 ${batch.waiting} · 失败 ${batch.failed}" +
+                    "已复制 ${batch.copied} / ${batch.totalItems} · 待复制 ${batch.pending} · 处理中 ${batch.processing} · 等待 ${batch.waiting} · 失败 ${batch.failed}" +
                         if (batch.unknown > 0) " · 待确认 ${batch.unknown}" else ""
                 } else {
-                    "Copied ${batch.copied} · processing ${batch.processing} · queued ${batch.pending} · waiting ${batch.waiting} · failed ${batch.failed}" +
+                    "Copied ${batch.copied} / ${batch.totalItems} · pending ${batch.pending} · processing ${batch.processing} · waiting ${batch.waiting} · failed ${batch.failed}" +
                         if (batch.unknown > 0) " · unknown ${batch.unknown}" else ""
                 },
                 style = MaterialTheme.typography.labelSmall,
                 modifier = Modifier.padding(top = 4.dp),
             )
-            batch.visionTarget?.let { target ->
+            batch.visionTarget?.let { fingerprint ->
                 Text(
-                    if (zh) "本批次视觉目标：$target" else "Batch Vision target: $target",
+                    if (zh) "本批次视觉目标：${batch.visionTargetLabel ?: fingerprint}" else "Batch Vision target: ${batch.visionTargetLabel ?: fingerprint}",
                     style = MaterialTheme.typography.labelSmall,
                     modifier = Modifier.padding(top = 4.dp),
                 )

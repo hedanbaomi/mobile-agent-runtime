@@ -24,6 +24,34 @@ import org.junit.runner.RunWith
 @RunWith(AndroidJUnit4::class)
 class DiagnosticsDeviceTest {
     @Test
+    fun verboseVisionTraceAndStableAttemptReferencesSurviveLoggerRecreation() {
+        withStore { directory, preferences ->
+            val store = newStore(directory, preferences)
+            val event = mapOf<String, Any?>("batchRef" to "generated-batch", "itemRef" to "generated-job",
+                "requestRef" to "generated-request", "cacheRef" to "cache-key", "assetRef" to "asset-hash",
+                "attempt" to 2, "phase" to "RESPONDED", "reasonCode" to "vision_transport", "count" to 1,
+                "httpStatus" to 429, "durationMs" to 32123L, "dispatched" to true, "responseReceived" to true,
+                "errorCode" to "RATE_LIMITED", "stage" to "RESPONSE_BODY", "page" to 3)
+            assertFalse(store.record("knowledge_batch_event", event))
+            store.setEnabled(true)
+            assertTrue(store.record("knowledge_batch_event", event))
+            val restarted = newStore(directory, preferences)
+            assertTrue(restarted.record("knowledge_batch_event", event))
+            assertTrue(restarted.record("vision_debug_content", mapOf(
+                "requestRef" to "generated-request", "kind" to "response_json", "chunk" to 0, "chunks" to 1,
+                "originalChars" to 25, "capturedChars" to 25, "truncated" to false,
+                "content" to "正文 filename.pdf /context/")))
+            val log = zipEntries(restarted.exportBytes()).getValue("current.ndjson")
+            val refs = Regex("\\\"requestRef\\\":\\\"([a-f0-9]{32})\\\"").findAll(log).map { it.groupValues[1] }.toList()
+            assertEquals(3, refs.size)
+            assertEquals(1, refs.toSet().size)
+            assertTrue(log.contains("filename.pdf /context/"))
+            assertTrue(log.contains("\"httpStatus\":429"))
+            assertTrue(log.contains("\"level\":\"DEBUG\""))
+        }
+    }
+
+    @Test
     fun runPreparationFailureIsClosedAndRequiresOptIn() {
         withStore { directory, preferences ->
             val store = newStore(directory, preferences)
@@ -1012,6 +1040,14 @@ class DiagnosticsDeviceTest {
             assertFalse(first.isEnabled)
             first.setEnabled(true)
             first.recordCapabilityToggle("image", true)
+            val payload = "a".repeat(3_999) + "🙂" + "文".repeat(4_001)
+            first.recordVisionContent("unicode-request", "response_json", payload, false, payload.length)
+            val chunks = first.store.readFile(RollingDiagnosticLogStore.CURRENT_FILE_NAME).toString(Charsets.UTF_8)
+                .lineSequence().filter { it.isNotBlank() }.map { org.json.JSONObject(it) }
+                .filter { it.getString("event") == "vision_debug_content" }
+                .map { it.getJSONObject("fields") }.toList()
+            assertEquals(3, chunks.size)
+            assertEquals(payload, chunks.joinToString("") { it.getString("content") })
             val second = AndroidDiagnosticLogger(context, directory, preferencesName)
             assertTrue(second.isEnabled)
             assertTrue(second.status().sizeBytes > 0)

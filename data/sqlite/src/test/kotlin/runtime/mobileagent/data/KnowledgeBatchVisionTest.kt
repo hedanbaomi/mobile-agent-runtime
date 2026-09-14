@@ -329,10 +329,12 @@ class KnowledgeBatchVisionTest {
         val server = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
         server.createContext("/vision") { exchange ->
             exchange.requestBody.use { it.readBytes() }
+            // Publish receipt before responding: after responseBody.close() the client may
+            // already have returned and asserted the count while this handler is still running.
+            requests.incrementAndGet()
             val body = "{\"ok\":true}".toByteArray()
             exchange.sendResponseHeaders(200, body.size.toLong())
             exchange.responseBody.use { it.write(body) }
-            requests.incrementAndGet()
         }
         server.executor = null
         server.start()

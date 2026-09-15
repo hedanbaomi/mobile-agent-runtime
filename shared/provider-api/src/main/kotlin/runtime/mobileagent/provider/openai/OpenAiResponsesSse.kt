@@ -14,6 +14,7 @@ import runtime.mobileagent.domain.ErrorCode
 import runtime.mobileagent.domain.LengthStopKind
 import runtime.mobileagent.domain.classifyLengthStop
 import runtime.mobileagent.provider.ModelEvent
+import runtime.mobileagent.provider.ProviderConnectionErrorCode
 import runtime.mobileagent.provider.SecretRedactor
 
 /**
@@ -102,16 +103,13 @@ object OpenAiResponsesSse {
             }
             "response.incomplete" -> buildList {
                 // A length stop is an output-budget outcome, never an input
-                // window rejection.  Reasoning is only blamed when it was
-                // actually observed; the terminal payload's usage must survive
-                // this failure path because it is the spend being reported.
+                // window rejection.  The terminal payload carries the usage that
+                // must survive this failure path -- it is added exactly once.
                 val response = obj["response"]?.let { runCatching { it.jsonObject }.getOrNull() }
-                usage(response ?: obj)?.let(::add)
+                val reportedUsage = usage(response ?: obj)
+                reportedUsage?.let(::add)
                 val reason = (response ?: obj)["incomplete_details"]?.jsonObject?.get("reason")?.jsonPrimitive?.contentOrNull
                     ?: string(obj, "reason")
-                // One shared rule with the Chat and Responses-JSON paths; the
-                // terminal usage is always carried through this failure.
-                val reportedUsage = usage(response ?: obj)
                 val failure = when {
                     reason != "max_output_tokens" -> SecretRedactor.redact(errorMessage(obj), extraSecrets)
                     else -> when (classifyLengthStop(
@@ -121,13 +119,14 @@ object OpenAiResponsesSse {
                     )) {
                         LengthStopKind.OUTPUT_TRUNCATED -> ErrorCode.OUTPUT_TRUNCATED.name
                         LengthStopKind.REASONING_EXHAUSTED -> ErrorCode.REASONING_EXHAUSTED.name
-                        LengthStopKind.EMPTY_RESPONSE -> ErrorCode.OUTPUT_TRUNCATED.name
+                        // Same mapping as the Chat and Responses-JSON paths: an
+                        // empty response with no reported reasoning is an
+                        // unusable result, not a truncation of real output.
+                        LengthStopKind.EMPTY_RESPONSE -> ProviderConnectionErrorCode.INVALID_RESPONSE.name
                     }
                 }
-                if (reportedUsage != null) add(reportedUsage)
                 add(ModelEvent.Failed(failure))
-            }
-            "response.failed",
+            }            "response.failed",
             "error",
             -> listOf(ModelEvent.Failed(SecretRedactor.redact(errorMessage(obj), extraSecrets)))
             // created/in_progress/queued/output annotation and future event

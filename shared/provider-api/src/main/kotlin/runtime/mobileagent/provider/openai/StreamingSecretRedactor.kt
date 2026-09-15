@@ -26,20 +26,15 @@ internal class StreamingSecretRedactor(secrets: List<String>) {
         .filter { it.isNotEmpty() }
         .distinct()
         .sortedByDescending { it.length }
-    private var pending = ""
-    private var pendingChannel: Channel? = null
+    // One pending suffix per channel: reasoning, answer text and refusals must
+    // not share a buffer, or a withheld suffix would be re-emitted on another
+    // channel and an interleaved legitimate answer would lose characters.
+    private val pending = linkedMapOf<Channel, String>()
 
     fun accept(input: String, channel: Channel = Channel.TEXT): String {
         if (input.isEmpty()) return ""
-        if (pending.isNotEmpty() && pendingChannel != channel) {
-            // The withheld suffix may only continue on its own channel.  Mixing
-            // makes its destination ambiguous, so drop it rather than let a
-            // reasoning prefix surface as the answer.
-            pending = ""
-        }
-        pendingChannel = channel
-        val combined = pending + input
-        pending = ""
+        val combined = pending[channel].orEmpty() + input
+        pending[channel] = ""
         val output = StringBuilder(combined.length)
         var cursor = 0
         while (cursor < combined.length) {
@@ -55,7 +50,7 @@ internal class StreamingSecretRedactor(secrets: List<String>) {
                     combined.regionMatches(cursor, secretValue, 0, remaining)
             }
             if (isPossiblePrefix) {
-                pending = combined.substring(cursor)
+                pending[channel] = combined.substring(cursor)
                 break
             }
             output.append(combined[cursor])
@@ -65,20 +60,19 @@ internal class StreamingSecretRedactor(secrets: List<String>) {
     }
 
     /** Channel that owns the withheld suffix, if any. */
-    fun pendingChannel(): Channel? = if (pending.isEmpty()) null else pendingChannel
+    fun pendingChannel(): Channel? = pending.entries.firstOrNull { it.value.isNotEmpty() }?.key
 
-    /** Flush is only valid after a confirmed normal completion. */
-    fun finish(): String {
-        val tail = pending
-        pending = ""
-        pendingChannel = null
-        return SecretRedactor.redact(tail, secrets)
+    /** Flush every channel's withheld suffix; only valid after normal completion. */
+    fun finish(): List<Pair<Channel, String>> {
+        val tails = pending.entries
+            .filter { it.value.isNotEmpty() }
+            .map { it.key to SecretRedactor.redact(it.value, secrets) }
+        pending.clear()
+        return tails
     }
-
     /** Drop an unconfirmed suffix on error, cancellation, or an incomplete EOF. */
     fun discard() {
-        pending = ""
-        pendingChannel = null
+        pending.clear()
     }
 }
 

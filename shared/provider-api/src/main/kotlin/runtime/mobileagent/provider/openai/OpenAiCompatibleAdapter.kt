@@ -465,7 +465,10 @@ class OpenAiCompatibleAdapter(
                     val raw = runCatching { readBounded(response.bodyAsChannel()) }.getOrDefault("")
                     val error = InputOverflowSignal.failureCode(
                         raw,
-                        if (status >= 500) "UNKNOWN_OUTCOME: Provider HTTP $status" else ProviderConnectionErrorCode.PROVIDER_REJECTED.name,
+                        // Canonical code only: consumers must not have to parse a
+                        // decorated string, and the HTTP status already travels in
+                        // the diagnostic metadata.
+                        if (status >= 500) ErrorCode.UNKNOWN_OUTCOME.name else ProviderConnectionErrorCode.PROVIDER_REJECTED.name,
                     )
                     emitTerminalFailure(
                         streamState,
@@ -679,12 +682,11 @@ class OpenAiCompatibleAdapter(
                 emitTerminalFailure(state, failure)
                 ModelEvent.Failed(failure)
             } else {
-                val tailChannel = redactor.pendingChannel()
-                val safeTail = redactor.finish()
-                if (safeTail.isNotEmpty()) {
-                    // The withheld suffix belongs to the channel that produced it:
-                    // a reasoning prefix must never surface as the answer.
-                    val safeEvent = when (tailChannel) {
+                // Every channel flushes its own withheld suffix as its own event
+                // type: a reasoning prefix can never surface as the answer, and
+                // no channel loses characters because another channel advanced.
+                redactor.finish().forEach { (channel, safeTail) ->
+                    val safeEvent = when (channel) {
                         StreamingSecretRedactor.Channel.REASONING -> ModelEvent.ReasoningDelta(safeTail)
                         StreamingSecretRedactor.Channel.REFUSAL -> ModelEvent.RefusalDelta(safeTail)
                         else -> ModelEvent.TextDelta(safeTail)

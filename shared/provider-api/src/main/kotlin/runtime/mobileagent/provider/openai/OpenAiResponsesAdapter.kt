@@ -602,12 +602,9 @@ class OpenAiResponsesAdapter(
             true
         }
         ModelEvent.Completed -> {
-            val tailChannel = redactor.pendingChannel()
-            val safeTail = redactor.finish()
-            if (safeTail.isNotEmpty()) {
-                // The withheld suffix keeps its source channel; a reasoning tail
-                // must never be presented as the answer.
-                val safeEvent = when (tailChannel) {
+            // Each channel flushes its own withheld suffix as its own event type.
+            redactor.finish().forEach { (channel, safeTail) ->
+                val safeEvent = when (channel) {
                     StreamingSecretRedactor.Channel.REASONING -> ModelEvent.ReasoningDelta(safeTail)
                     StreamingSecretRedactor.Channel.REFUSAL -> ModelEvent.RefusalDelta(safeTail)
                     else -> ModelEvent.TextDelta(safeTail)

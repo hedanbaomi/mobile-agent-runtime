@@ -19,6 +19,8 @@ package runtime.mobileagent.knowledge
  *   least once (overlap intentionally duplicates a bounded suffix).
  */
 object TextChunker {
+    /** Below this much spare room an overlap copy is skipped rather than clipped. */
+    private const val MIN_OVERLAP_ROOM = 8
     fun chunk(text: String, targetChars: Int = 1800, overlapChars: Int = 200): List<String> {
         val target = targetChars.coerceAtLeast(1)
         val normalized = text.replace("\r\n", "\n").trim()
@@ -57,11 +59,11 @@ object TextChunker {
             // Recomputed after a flush: the previous fragment is now the one the
             // next fragment must overlap without exceeding the bound.
             if (buf.isEmpty()) {
-                // The overlap may only use room the paragraph does not need; the
-                // suffix is trimmed to the budget here, never afterwards, so a
-                // surrogate pair or combining cluster is never cut in half.
-                val room = (target - para.length - 2).coerceAtLeast(0)
-                val overlap = tail(lastChunk, overlapBudget, room)
+                // Overlap is optional context.  If the paragraph already needs
+                // essentially the whole target there is no room for it, and
+                // emitting target + separator + overlap is never acceptable.
+                val room = target - para.length - 2
+                val overlap = if (room >= MIN_OVERLAP_ROOM) tail(lastChunk, overlapBudget, room) else ""
                 if (overlap.isNotEmpty()) buf.append(overlap)
             }
             if (buf.isNotEmpty()) buf.append("\n\n")
@@ -81,7 +83,11 @@ object TextChunker {
         val lines = text.replace("\r\n", "\n").split('\n').map { it.trimEnd() }
         val content = lines.filter { it.isNotBlank() }
         if (content.isEmpty()) return emptyList()
-        val header = if (repeatHeader) headerLines(content) else emptyList()
+        // A header longer than the whole target cannot be repeated on every
+        // fragment without breaking the bound: drop it instead of overshooting.
+        val rawHeader = if (repeatHeader) headerLines(content) else emptyList()
+        val rawHeaderSize = if (rawHeader.isEmpty()) 0 else rawHeader.sumOf { it.length } + rawHeader.size
+        val header = if (rawHeaderSize + 1 <= target / 2) rawHeader else emptyList()
         val headerSize = if (header.isEmpty()) 0 else header.sumOf { it.length } + header.size
         val bodyBudget = (target - headerSize).coerceAtLeast(1)
         val chunks = mutableListOf<String>()
@@ -152,7 +158,9 @@ object TextChunker {
             // Step back inside the fragment so the next one re-states context.
             // Never leave a surrogate pair on the boundary.
             var next = (end - overlap.length).coerceAtLeast(start + 1)
-            while (next < end && Character.isLowSurrogate(para[next])) next += 1
+            // Land on a legal cluster boundary: never inside a surrogate pair and
+            // never on a combining mark whose base character is left behind.
+            while (next < end && (Character.isLowSurrogate(para[next]) || isCombining(para[next]))) next += 1
             start = if (next > start) next else end
         }
         return parts.ifEmpty { listOf(para) }
@@ -178,10 +186,10 @@ object TextChunker {
     private fun safeTail(text: String, budget: Int): String {
         if (budget >= text.length) return text
         var start = text.length - budget
-        if (start > 0 && Character.isLowSurrogate(text[start]) && Character.isHighSurrogate(text[start - 1])) {
-            start -= 1
-        }
-        while (start > 0 && isCombining(text[start])) start -= 1
+        // Only ever move the start *forward* (shrinking the suffix).  Moving it
+        // backward to keep a cluster whole would exceed the caller's room and
+        // break the hard bound the caller relies on.
+        while (start < text.length && Character.isLowSurrogate(text[start])) start += 1
         while (start < text.length && isCombining(text[start])) start += 1
         return if (start >= text.length) "" else text.substring(start)
     }

@@ -40,6 +40,8 @@ import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import runtime.mobileagent.domain.ErrorCode
+import runtime.mobileagent.domain.LengthStopKind
+import runtime.mobileagent.domain.classifyLengthStop
 import runtime.mobileagent.domain.AppError
 import runtime.mobileagent.domain.ModelProfile
 import runtime.mobileagent.domain.RetryClass
@@ -1655,27 +1657,16 @@ class OpenAiCompatibleAdapter(
      *   its budget is unknown, which is not evidence of hidden reasoning.
      */
     private fun lengthFailureCode(state: StreamOutputState): String =
-        if (state.hasVisibleOutput) {
-            // Visible text or refusal already arrived: the budget ran out on an
-            // answer that exists, regardless of how the provider split tokens.
-            ErrorCode.OUTPUT_TRUNCATED.name
-        } else {
-            val usage = state.latestUsage
-            when {
-                // All reported completion tokens were reported reasoning: hidden
-                // thinking consumed the allowance and retrying unchanged cannot
-                // produce OCR text.
-                usage != null && usage.reasoningTokens != null &&
-                    usage.reasoningTokens >= usage.outputTokens && usage.outputTokens > 0 ->
-                    ErrorCode.REASONING_EXHAUSTED.name
-                // No visible output and no reasoning report: the budget is
-                // unknown, and the response carries nothing usable.
-                // A zero/absent reasoning report is not evidence of hidden reasoning.
-                usage == null || usage.reasoningTokens == null || usage.reasoningTokens == 0 -> INVALID_RESPONSE_MESSAGE
-                // A positive, reported reasoning spend that did not fill the
-                // whole allowance: the provider stopped early -- truncation.
-                else -> ErrorCode.OUTPUT_TRUNCATED.name
-            }
+        // One shared rule for every protocol so a truncated page cannot be
+        // reported differently depending on which adapter saw it.
+        when (classifyLengthStop(
+            visibleAnswer = state.hasVisibleOutput,
+            reasoningTokens = state.latestUsage?.reasoningTokens,
+            outputTokens = state.latestUsage?.outputTokens,
+        )) {
+            LengthStopKind.OUTPUT_TRUNCATED -> ErrorCode.OUTPUT_TRUNCATED.name
+            LengthStopKind.REASONING_EXHAUSTED -> ErrorCode.REASONING_EXHAUSTED.name
+            LengthStopKind.EMPTY_RESPONSE -> INVALID_RESPONSE_MESSAGE
         }
 
     private fun messageContentText(message: JsonObject?): List<String> {

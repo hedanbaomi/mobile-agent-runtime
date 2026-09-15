@@ -41,6 +41,8 @@ import kotlinx.serialization.json.jsonPrimitive
 import runtime.mobileagent.domain.AppError
 import runtime.mobileagent.domain.AppException
 import runtime.mobileagent.domain.ErrorCode
+import runtime.mobileagent.domain.LengthStopKind
+import runtime.mobileagent.domain.classifyLengthStop
 import runtime.mobileagent.domain.InputModality
 import runtime.mobileagent.domain.ModelFeature
 import runtime.mobileagent.domain.ModelOperation
@@ -544,7 +546,7 @@ class OpenAiResponsesAdapter(
         onSafeDiagnostic: (ModelEvent) -> Unit = {},
     ): Boolean = when (event) {
         is ModelEvent.TextDelta -> {
-            val safe = redactor.accept(event.text)
+            val safe = redactor.accept(event.text, StreamingSecretRedactor.Channel.TEXT)
             if (safe.isNotEmpty()) {
                 val safeEvent = ModelEvent.TextDelta(safe)
                 emit(safeEvent)
@@ -553,7 +555,7 @@ class OpenAiResponsesAdapter(
             false
         }
         is ModelEvent.ReasoningDelta -> {
-            val safe = redactor.accept(event.text)
+            val safe = redactor.accept(event.text, StreamingSecretRedactor.Channel.REASONING)
             if (safe.isNotEmpty()) {
                 val safeEvent = ModelEvent.ReasoningDelta(safe)
                 emit(safeEvent)
@@ -562,7 +564,7 @@ class OpenAiResponsesAdapter(
             false
         }
         is ModelEvent.RefusalDelta -> {
-            val safe = redactor.accept(event.text)
+            val safe = redactor.accept(event.text, StreamingSecretRedactor.Channel.REFUSAL)
             if (safe.isNotEmpty()) {
                 val safeEvent = ModelEvent.RefusalDelta(safe)
                 emit(safeEvent)
@@ -600,9 +602,16 @@ class OpenAiResponsesAdapter(
             true
         }
         ModelEvent.Completed -> {
+            val tailChannel = redactor.pendingChannel()
             val safeTail = redactor.finish()
             if (safeTail.isNotEmpty()) {
-                val safeEvent = ModelEvent.TextDelta(safeTail)
+                // The withheld suffix keeps its source channel; a reasoning tail
+                // must never be presented as the answer.
+                val safeEvent = when (tailChannel) {
+                    StreamingSecretRedactor.Channel.REASONING -> ModelEvent.ReasoningDelta(safeTail)
+                    StreamingSecretRedactor.Channel.REFUSAL -> ModelEvent.RefusalDelta(safeTail)
+                    else -> ModelEvent.TextDelta(safeTail)
+                }
                 emit(safeEvent)
                 onSafeDiagnostic(safeEvent)
             }
@@ -838,26 +847,32 @@ class OpenAiResponsesAdapter(
         }
         val status = root["status"]?.jsonPrimitive?.contentOrNull
         val hasText = events.any { it is ModelEvent.TextDelta || it is ModelEvent.RefusalDelta }
-        val reportedReasoning = events.filterIsInstance<ModelEvent.Usage>().lastOrNull()?.reasoningTokens
+        val reportedUsage = events.filterIsInstance<ModelEvent.Usage>().lastOrNull()
         if (status == null || status == "completed") events += ModelEvent.Completed
         else if (status == "failed") events += ModelEvent.Failed(ProviderConnectionErrorCode.PROVIDER_REJECTED.name)
         else if (status == "incomplete") {
-            // `incomplete_details.reason=max_output_tokens` is an output budget
-            // exhaustion, not an input window rejection, and it is never a
-            // usable OCR result.  Reasoning is only blamed when the response
-            // actually reported reasoning tokens.
+            // Output-budget exhaustion, never an input window rejection, and
+            // never a usable OCR result.  Classification is the same shared rule
+            // the Chat and Responses-SSE paths use, so one truncated page is
+            // reported identically everywhere.
             val reason = root["incomplete_details"]?.let { runCatching { it.jsonObject }.getOrNull() }
                 ?.get("reason")?.jsonPrimitive?.contentOrNull
             events += ModelEvent.Failed(
-                when {
-                    reason != "max_output_tokens" -> ProviderConnectionErrorCode.INVALID_RESPONSE.name
-                    hasText -> ErrorCode.OUTPUT_TRUNCATED.name
-                    reportedReasoning != null && reportedReasoning > 0 -> ErrorCode.REASONING_EXHAUSTED.name
-                    else -> ErrorCode.OUTPUT_TRUNCATED.name
+                if (reason != "max_output_tokens") {
+                    ProviderConnectionErrorCode.INVALID_RESPONSE.name
+                } else {
+                    when (classifyLengthStop(
+                        visibleAnswer = hasText,
+                        reasoningTokens = reportedUsage?.reasoningTokens,
+                        outputTokens = reportedUsage?.outputTokens,
+                    )) {
+                        LengthStopKind.OUTPUT_TRUNCATED -> ErrorCode.OUTPUT_TRUNCATED.name
+                        LengthStopKind.REASONING_EXHAUSTED -> ErrorCode.REASONING_EXHAUSTED.name
+                        LengthStopKind.EMPTY_RESPONSE -> ProviderConnectionErrorCode.INVALID_RESPONSE.name
+                    }
                 },
             )
-        }
-        else return listOf(ModelEvent.Failed(ErrorCode.UNKNOWN_OUTCOME.name))
+        }        else return listOf(ModelEvent.Failed(ErrorCode.UNKNOWN_OUTCOME.name))
         return events
     }
 

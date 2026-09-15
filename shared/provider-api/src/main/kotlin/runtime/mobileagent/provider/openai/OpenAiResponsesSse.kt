@@ -11,6 +11,8 @@ import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import runtime.mobileagent.domain.ErrorCode
+import runtime.mobileagent.domain.LengthStopKind
+import runtime.mobileagent.domain.classifyLengthStop
 import runtime.mobileagent.provider.ModelEvent
 import runtime.mobileagent.provider.SecretRedactor
 
@@ -107,13 +109,22 @@ object OpenAiResponsesSse {
                 usage(response ?: obj)?.let(::add)
                 val reason = (response ?: obj)["incomplete_details"]?.jsonObject?.get("reason")?.jsonPrimitive?.contentOrNull
                     ?: string(obj, "reason")
-                val reasoningOnly = state.reasoning.isNotEmpty() && state.text.isEmpty() && state.refusal.isEmpty()
+                // One shared rule with the Chat and Responses-JSON paths; the
+                // terminal usage is always carried through this failure.
+                val reportedUsage = usage(response ?: obj)
                 val failure = when {
                     reason != "max_output_tokens" -> SecretRedactor.redact(errorMessage(obj), extraSecrets)
-                    state.text.isNotEmpty() || state.refusal.isNotEmpty() -> ErrorCode.OUTPUT_TRUNCATED.name
-                    reasoningOnly -> ErrorCode.REASONING_EXHAUSTED.name
-                    else -> ErrorCode.OUTPUT_TRUNCATED.name
+                    else -> when (classifyLengthStop(
+                        visibleAnswer = state.text.isNotEmpty() || state.refusal.isNotEmpty(),
+                        reasoningTokens = reportedUsage?.reasoningTokens,
+                        outputTokens = reportedUsage?.outputTokens,
+                    )) {
+                        LengthStopKind.OUTPUT_TRUNCATED -> ErrorCode.OUTPUT_TRUNCATED.name
+                        LengthStopKind.REASONING_EXHAUSTED -> ErrorCode.REASONING_EXHAUSTED.name
+                        LengthStopKind.EMPTY_RESPONSE -> ErrorCode.OUTPUT_TRUNCATED.name
+                    }
                 }
+                if (reportedUsage != null) add(reportedUsage)
                 add(ModelEvent.Failed(failure))
             }
             "response.failed",

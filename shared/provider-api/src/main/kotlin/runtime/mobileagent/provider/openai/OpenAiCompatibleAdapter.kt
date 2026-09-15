@@ -459,7 +459,14 @@ class OpenAiCompatibleAdapter(
                     return@execute
                 }
                 if (status >= 400) {
-                    val error = ProviderConnectionErrorCode.PROVIDER_REJECTED.name
+                    // Read the error body so an explicit input-window rejection
+                    // is not reported as a generic rejection.  The body itself
+                    // is never surfaced verbatim.
+                    val raw = runCatching { readBounded(response.bodyAsChannel()) }.getOrDefault("")
+                    val error = InputOverflowSignal.failureCode(
+                        raw,
+                        if (status >= 500) "UNKNOWN_OUTCOME: Provider HTTP $status" else ProviderConnectionErrorCode.PROVIDER_REJECTED.name,
+                    )
                     emitTerminalFailure(
                         streamState,
                         error,
@@ -467,7 +474,6 @@ class OpenAiCompatibleAdapter(
                     request.reportDiagnostic(ModelDiagnosticStage.TERMINAL, dispatchStatus, started, "chat.completions", status, error)
                     return@execute
                 }
-
                 val responseType = responseContentType.orEmpty()
                 if (responseType.contains("text/event-stream")) {
                     val channel = response.bodyAsChannel()
@@ -602,7 +608,7 @@ class OpenAiCompatibleAdapter(
     ): ModelEvent? {
         return when (event) {
             is ModelEvent.TextDelta -> {
-                val safe = redactor.accept(event.text)
+                val safe = redactor.accept(event.text, StreamingSecretRedactor.Channel.TEXT)
                 if (safe.isNotEmpty()) {
                     state.hasVisibleOutput = true
                     val safeEvent = ModelEvent.TextDelta(safe)
@@ -612,7 +618,7 @@ class OpenAiCompatibleAdapter(
                 null
             }
             is ModelEvent.RefusalDelta -> {
-                val safe = redactor.accept(event.text)
+                val safe = redactor.accept(event.text, StreamingSecretRedactor.Channel.REFUSAL)
                 if (safe.isNotEmpty()) {
                     state.hasVisibleOutput = true
                     val safeEvent = ModelEvent.RefusalDelta(safe)
@@ -622,7 +628,7 @@ class OpenAiCompatibleAdapter(
                 null
             }
             is ModelEvent.ReasoningDelta -> {
-                val safe = redactor.accept(event.text)
+                val safe = redactor.accept(event.text, StreamingSecretRedactor.Channel.REASONING)
                 if (safe.isNotEmpty()) {
                     val safeEvent = ModelEvent.ReasoningDelta(safe)
                     emit(safeEvent)
@@ -673,10 +679,17 @@ class OpenAiCompatibleAdapter(
                 emitTerminalFailure(state, failure)
                 ModelEvent.Failed(failure)
             } else {
+                val tailChannel = redactor.pendingChannel()
                 val safeTail = redactor.finish()
                 if (safeTail.isNotEmpty()) {
-                    state.hasVisibleOutput = true
-                    val safeEvent = ModelEvent.TextDelta(safeTail)
+                    // The withheld suffix belongs to the channel that produced it:
+                    // a reasoning prefix must never surface as the answer.
+                    val safeEvent = when (tailChannel) {
+                        StreamingSecretRedactor.Channel.REASONING -> ModelEvent.ReasoningDelta(safeTail)
+                        StreamingSecretRedactor.Channel.REFUSAL -> ModelEvent.RefusalDelta(safeTail)
+                        else -> ModelEvent.TextDelta(safeTail)
+                    }
+                    if (safeEvent !is ModelEvent.ReasoningDelta) state.hasVisibleOutput = true
                     emit(safeEvent)
                     state.diagnosticEvents += safeEvent
                 }

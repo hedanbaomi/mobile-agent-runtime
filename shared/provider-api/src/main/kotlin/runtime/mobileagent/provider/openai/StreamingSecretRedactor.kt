@@ -15,14 +15,29 @@ import runtime.mobileagent.provider.SecretRedactor
  * prefix of a known credential is retained between calls.
  */
 internal class StreamingSecretRedactor(secrets: List<String>) {
+    /**
+     * The content channel that owns the pending suffix.  Reasoning, answer text
+     * and refusals must not share one pending buffer: a suffix withheld from
+     * reasoning would otherwise be re-emitted as answer text.
+     */
+    enum class Channel { TEXT, REASONING, REFUSAL }
+
     private val secrets = secrets
         .filter { it.isNotEmpty() }
         .distinct()
         .sortedByDescending { it.length }
     private var pending = ""
+    private var pendingChannel: Channel? = null
 
-    fun accept(input: String): String {
+    fun accept(input: String, channel: Channel = Channel.TEXT): String {
         if (input.isEmpty()) return ""
+        if (pending.isNotEmpty() && pendingChannel != channel) {
+            // The withheld suffix may only continue on its own channel.  Mixing
+            // makes its destination ambiguous, so drop it rather than let a
+            // reasoning prefix surface as the answer.
+            pending = ""
+        }
+        pendingChannel = channel
         val combined = pending + input
         pending = ""
         val output = StringBuilder(combined.length)
@@ -49,16 +64,21 @@ internal class StreamingSecretRedactor(secrets: List<String>) {
         return SecretRedactor.redact(output.toString(), secrets)
     }
 
+    /** Channel that owns the withheld suffix, if any. */
+    fun pendingChannel(): Channel? = if (pending.isEmpty()) null else pendingChannel
+
     /** Flush is only valid after a confirmed normal completion. */
     fun finish(): String {
         val tail = pending
         pending = ""
+        pendingChannel = null
         return SecretRedactor.redact(tail, secrets)
     }
 
     /** Drop an unconfirmed suffix on error, cancellation, or an incomplete EOF. */
     fun discard() {
         pending = ""
+        pendingChannel = null
     }
 }
 

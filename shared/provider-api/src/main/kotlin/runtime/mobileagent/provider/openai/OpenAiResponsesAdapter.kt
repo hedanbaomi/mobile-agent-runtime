@@ -828,22 +828,33 @@ class OpenAiResponsesAdapter(
             }
         }
         root["usage"]?.let { usage ->
-            runCatching { usage.jsonObject }.getOrNull()?.let {
-                events += ModelEvent.Usage(
-                    it["input_tokens"]?.jsonPrimitive?.contentOrNull?.toIntOrNull() ?: 0,
-                    it["output_tokens"]?.jsonPrimitive?.contentOrNull?.toIntOrNull() ?: 0,
-                )
+            runCatching { usage.jsonObject }.getOrNull()?.let { parsed ->
+                val input = parsed["input_tokens"]?.jsonPrimitive?.contentOrNull?.toIntOrNull() ?: 0
+                val output = parsed["output_tokens"]?.jsonPrimitive?.contentOrNull?.toIntOrNull() ?: 0
+                val details = parsed["output_tokens_details"]?.let { runCatching { it.jsonObject }.getOrNull() }
+                val reasoning = details?.get("reasoning_tokens")?.jsonPrimitive?.contentOrNull?.toIntOrNull()
+                events += ModelEvent.Usage(input, output, reasoning?.coerceIn(0, output))
             }
         }
         val status = root["status"]?.jsonPrimitive?.contentOrNull
+        val hasText = events.any { it is ModelEvent.TextDelta || it is ModelEvent.RefusalDelta }
+        val reportedReasoning = events.filterIsInstance<ModelEvent.Usage>().lastOrNull()?.reasoningTokens
         if (status == null || status == "completed") events += ModelEvent.Completed
         else if (status == "failed") events += ModelEvent.Failed(ProviderConnectionErrorCode.PROVIDER_REJECTED.name)
         else if (status == "incomplete") {
+            // `incomplete_details.reason=max_output_tokens` is an output budget
+            // exhaustion, not an input window rejection, and it is never a
+            // usable OCR result.  Reasoning is only blamed when the response
+            // actually reported reasoning tokens.
             val reason = root["incomplete_details"]?.let { runCatching { it.jsonObject }.getOrNull() }
                 ?.get("reason")?.jsonPrimitive?.contentOrNull
             events += ModelEvent.Failed(
-                if (reason == "max_output_tokens") ErrorCode.CONTEXT_OVERFLOW.name
-                else ProviderConnectionErrorCode.INVALID_RESPONSE.name,
+                when {
+                    reason != "max_output_tokens" -> ProviderConnectionErrorCode.INVALID_RESPONSE.name
+                    hasText -> ErrorCode.OUTPUT_TRUNCATED.name
+                    reportedReasoning != null && reportedReasoning > 0 -> ErrorCode.REASONING_EXHAUSTED.name
+                    else -> ErrorCode.OUTPUT_TRUNCATED.name
+                },
             )
         }
         else return listOf(ModelEvent.Failed(ErrorCode.UNKNOWN_OUTCOME.name))

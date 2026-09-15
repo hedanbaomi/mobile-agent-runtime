@@ -648,11 +648,12 @@ class OpenAiCompatibleAdapter(
             is ModelEvent.Failed -> {
                 redactor.discard()
                 val message = SecretRedactor.redact(event.sanitizedMessage, secrets)
-                if (message == ErrorCode.CONTEXT_OVERFLOW.name) {
+                if (message == ErrorCode.OUTPUT_TRUNCATED.name) {
                     // Providers sometimes send finish_reason=length before a
-                    // separate usage-only frame. Keep reading until DONE/EOF
-                    // so the final cumulative usage is retained, then emit
-                    // the overflow terminal event exactly once.
+                    // separate usage-only frame. Keep reading until DONE/EOF so
+                    // the final cumulative usage is retained, then emit the
+                    // truncation terminal event exactly once.  The label is
+                    // refined below from what actually came back.
                     state.deferredFailure = message
                     null
                 } else {
@@ -660,7 +661,16 @@ class OpenAiCompatibleAdapter(
                     ModelEvent.Failed(message)
                 }
             }
-            ModelEvent.Completed -> {
+            ModelEvent.Completed -> if (state.finishReason == "length") {
+                // Classify a length stop *before* flushing the redaction buffer:
+                // the buffered tail may hold reasoning text, and presenting it as
+                // the answer would both mislabel the failure and leak hidden
+                // reasoning into the transcript.
+                redactor.discard()
+                val failure = lengthFailureCode(state)
+                emitTerminalFailure(state, failure)
+                ModelEvent.Failed(failure)
+            } else {
                 val safeTail = redactor.finish()
                 if (safeTail.isNotEmpty()) {
                     state.hasVisibleOutput = true
@@ -1551,10 +1561,7 @@ class OpenAiCompatibleAdapter(
             }
         root["usage"]?.let { usageElement ->
             runCatching { usageElement.jsonObject }.getOrNull()?.let { usage ->
-                state.latestUsage = ModelEvent.Usage(
-                    usage["prompt_tokens"]?.jsonPrimitive?.contentOrNull?.toIntOrNull() ?: 0,
-                    usage["completion_tokens"]?.jsonPrimitive?.contentOrNull?.toIntOrNull() ?: 0,
-                )
+                state.latestUsage = OpenAiSse.usageFromJson(usage)
                 state.lastUsage = state.latestUsage
             }
         }
@@ -1619,7 +1626,7 @@ class OpenAiCompatibleAdapter(
         }
         state.finishReason = finishReason
         if (finishReason == "length") {
-            emitTerminalFailure(state, ErrorCode.CONTEXT_OVERFLOW.name)
+            emitTerminalFailure(state, lengthFailureCode(state))
             return
         }
         toolEvents.forEach {
@@ -1634,6 +1641,42 @@ class OpenAiCompatibleAdapter(
         state.terminal = true
         emit(ModelEvent.Completed)
     }
+
+    /**
+     * Classify a provider `finish_reason=length` from what the stream actually
+     * produced.  The old adapter collapsed every truncation into
+     * `CONTEXT_OVERFLOW`, which told a user whose *input* fit comfortably that
+     * their document was too large.
+     *
+     * - visible text/refusal -> OUTPUT_TRUNCATED;
+     * - no visible output but reasoning was actually reported -> the hidden
+     *   budget consumed the allowance (REASONING_EXHAUSTED);
+     * - no visible output and no reasoning report -> the response is empty and
+     *   its budget is unknown, which is not evidence of hidden reasoning.
+     */
+    private fun lengthFailureCode(state: StreamOutputState): String =
+        if (state.hasVisibleOutput) {
+            // Visible text or refusal already arrived: the budget ran out on an
+            // answer that exists, regardless of how the provider split tokens.
+            ErrorCode.OUTPUT_TRUNCATED.name
+        } else {
+            val usage = state.latestUsage
+            when {
+                // All reported completion tokens were reported reasoning: hidden
+                // thinking consumed the allowance and retrying unchanged cannot
+                // produce OCR text.
+                usage != null && usage.reasoningTokens != null &&
+                    usage.reasoningTokens >= usage.outputTokens && usage.outputTokens > 0 ->
+                    ErrorCode.REASONING_EXHAUSTED.name
+                // No visible output and no reasoning report: the budget is
+                // unknown, and the response carries nothing usable.
+                // A zero/absent reasoning report is not evidence of hidden reasoning.
+                usage == null || usage.reasoningTokens == null || usage.reasoningTokens == 0 -> INVALID_RESPONSE_MESSAGE
+                // A positive, reported reasoning spend that did not fill the
+                // whole allowance: the provider stopped early -- truncation.
+                else -> ErrorCode.OUTPUT_TRUNCATED.name
+            }
+        }
 
     private fun messageContentText(message: JsonObject?): List<String> {
         val content = message?.get("content") ?: return emptyList()

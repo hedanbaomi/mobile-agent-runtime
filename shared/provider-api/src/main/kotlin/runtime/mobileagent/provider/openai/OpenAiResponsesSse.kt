@@ -98,8 +98,25 @@ object OpenAiResponsesSse {
                 usage(response ?: obj)?.let(::add)
                 add(ModelEvent.Completed)
             }
+            "response.incomplete" -> buildList {
+                // A length stop is an output-budget outcome, never an input
+                // window rejection.  Reasoning is only blamed when it was
+                // actually observed; the terminal payload's usage must survive
+                // this failure path because it is the spend being reported.
+                val response = obj["response"]?.let { runCatching { it.jsonObject }.getOrNull() }
+                usage(response ?: obj)?.let(::add)
+                val reason = (response ?: obj)["incomplete_details"]?.jsonObject?.get("reason")?.jsonPrimitive?.contentOrNull
+                    ?: string(obj, "reason")
+                val reasoningOnly = state.reasoning.isNotEmpty() && state.text.isEmpty() && state.refusal.isEmpty()
+                val failure = when {
+                    reason != "max_output_tokens" -> SecretRedactor.redact(errorMessage(obj), extraSecrets)
+                    state.text.isNotEmpty() || state.refusal.isNotEmpty() -> ErrorCode.OUTPUT_TRUNCATED.name
+                    reasoningOnly -> ErrorCode.REASONING_EXHAUSTED.name
+                    else -> ErrorCode.OUTPUT_TRUNCATED.name
+                }
+                add(ModelEvent.Failed(failure))
+            }
             "response.failed",
-            "response.incomplete",
             "error",
             -> listOf(ModelEvent.Failed(SecretRedactor.redact(errorMessage(obj), extraSecrets)))
             // created/in_progress/queued/output annotation and future event
@@ -250,7 +267,11 @@ object OpenAiResponsesSse {
         val usage = root["usage"]?.let { runCatching { it.jsonObject }.getOrNull() } ?: return null
         val input = number(usage, "input_tokens") ?: number(usage, "prompt_tokens") ?: 0
         val output = number(usage, "output_tokens") ?: number(usage, "completion_tokens") ?: 0
-        return ModelEvent.Usage(input, output)
+        val details = usage["output_tokens_details"]?.let { runCatching { it.jsonObject }.getOrNull() }
+        val reasoning = details?.let { detail ->
+            number(detail, "reasoning_tokens") ?: number(detail, "reasoningTokens")
+        }
+        return ModelEvent.Usage(input, output, reasoning?.coerceIn(0, output))
     }
 
     private fun number(obj: JsonObject, key: String): Int? =

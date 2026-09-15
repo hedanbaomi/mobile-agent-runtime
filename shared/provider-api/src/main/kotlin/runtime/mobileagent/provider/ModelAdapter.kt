@@ -348,7 +348,19 @@ sealed interface ModelEvent {
      */
     data class ProviderContinuation(val item: ProviderContinuationItem) : ModelEvent
     data class ToolCallDelta(val callId: String, val name: String, val argumentsJson: String) : ModelEvent
-    data class Usage(val inputTokens: Int, val outputTokens: Int) : ModelEvent
+    data class Usage(
+        val inputTokens: Int,
+        val outputTokens: Int,
+        /**
+         * Provider-reported reasoning tokens, a *subset* of [outputTokens] and
+         * never an additional charge.  
+ull means the provider did not report
+         * it -- unknown is not zero, and a failed request that actually spent
+         * its budget on reasoning must stay distinguishable from one that never
+         * reported any reasoning at all.
+         */
+        val reasoningTokens: Int? = null,
+    ) : ModelEvent
     data class ToolApprovalRequired(val callId: String, val name: String, val argumentsJson: String) : ModelEvent
     data object Completed : ModelEvent
     data class Failed(val sanitizedMessage: String) : ModelEvent

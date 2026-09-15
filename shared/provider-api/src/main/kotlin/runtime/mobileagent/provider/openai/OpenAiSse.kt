@@ -41,9 +41,7 @@ object OpenAiSse {
             runCatching { element.jsonObject }.getOrNull()
         }
         if (usage != null) {
-            val input = usage["prompt_tokens"]?.jsonPrimitive?.contentOrNull?.toIntOrNull() ?: 0
-            val output = usage["completion_tokens"]?.jsonPrimitive?.contentOrNull?.toIntOrNull() ?: 0
-            events += ModelEvent.Usage(input, output)
+            events += usageFromJson(usage)
         }
         (obj["error"] as? kotlinx.serialization.json.JsonObject)?.get("message")?.jsonPrimitive?.contentOrNull?.let { msg ->
             events += ModelEvent.Failed(SecretRedactor.redact(msg, extraSecrets))
@@ -70,17 +68,49 @@ object OpenAiSse {
             }
             acc.second.append(args)
         }
+        // Truncation is an output-budget signal; the adapter re-labels it from
+        // what actually arrived (text vs reasoning).  Never call it an input
+        // window overflow here.
         choice["finish_reason"]?.jsonPrimitive?.contentOrNull
             ?.takeIf { it == "length" }
-            ?.let { events += ModelEvent.Failed(ErrorCode.CONTEXT_OVERFLOW.name) }
+            ?.let { events += ModelEvent.Failed(ErrorCode.OUTPUT_TRUNCATED.name) }
         return events
+    }
+
+    /**
+     * Parse a Chat Completions `usage` object.  Reasoning is a subset of the
+     * completion tokens and stays null when the provider omits it.
+     */
+    internal fun usageFromJson(usage: kotlinx.serialization.json.JsonObject): ModelEvent.Usage {
+        val input = usage["prompt_tokens"]?.jsonPrimitive?.contentOrNull?.toIntOrNull() ?: 0
+        val output = usage["completion_tokens"]?.jsonPrimitive?.contentOrNull?.toIntOrNull() ?: 0
+        val details = usage["completion_tokens_details"]?.let { element ->
+            runCatching { element.jsonObject }.getOrNull()
+        }
+        val reasoning = details?.let { detail ->
+            listOf("reasoning_tokens", "reasoningTokens")
+                .firstNotNullOfOrNull { key -> detail[key]?.jsonPrimitive?.contentOrNull?.toIntOrNull() }
+        }
+        return ModelEvent.Usage(input, output, reasoning?.coerceIn(0, output))
+    }
+
+    /** Structural usage metadata only; never returns provider text. */
+    internal fun usageFromLine(line: String): ModelEvent.Usage? {
+        val data = line.trim().takeIf { it.startsWith("data:") }?.removePrefix("data:")?.trim()
+            ?: return null
+        if (data == "[DONE]") return null
+        val obj = runCatching { json.parseToJsonElement(data).jsonObject }.getOrNull() ?: return null
+        val usage = obj["usage"]?.let { runCatching { it.jsonObject }.getOrNull() } ?: return null
+        return usageFromJson(usage)
     }
 
     /** Structural terminal metadata only; never returns provider text. */
     internal fun finishReasonFromLine(line: String): String? {
         val data = line.trim().takeIf { it.startsWith("data:") }?.removePrefix("data:")?.trim()
             ?: return null
-        if (data == "[DONE]") return "done"
+        // `[DONE]` is the transport end marker, not a finish reason: a preceding
+        // `finish_reason=length` must survive it or the truncation is lost.
+        if (data == "[DONE]") return null
         val obj = runCatching { json.parseToJsonElement(data).jsonObject }.getOrNull() ?: return null
         return obj["choices"]?.let { runCatching { it.jsonArray.firstOrNull()?.jsonObject }.getOrNull() }
             ?.get("finish_reason")?.jsonPrimitive?.contentOrNull

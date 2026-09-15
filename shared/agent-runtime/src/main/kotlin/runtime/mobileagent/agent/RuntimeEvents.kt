@@ -175,6 +175,9 @@ fun toSafeErrorPart(value: String): ErrorPart {
             token == "SHIZUKU_SERVICE_UNAVAILABLE" -> MessageErrorCode.WORKSPACE_UNAVAILABLE
         token == "PERMISSION_DENIED" || token == "CAPABILITY_DENIED" -> MessageErrorCode.PERMISSION_DENIED
         token == "RESOURCE_LIMIT" || token == "BUDGET_EXHAUSTED" -> MessageErrorCode.BUDGET_EXHAUSTED
+        token == "INPUT_OVERFLOW" || token == "INPUT_BUDGET_EXCEEDED" -> MessageErrorCode.INPUT_OVERFLOW
+        token == "OUTPUT_TRUNCATED" || token == "OUTPUT_LIMIT_REACHED" -> MessageErrorCode.OUTPUT_TRUNCATED
+        token == "REASONING_EXHAUSTED" || token == "REASONING_LIMIT_REACHED" -> MessageErrorCode.REASONING_EXHAUSTED
         token == "CONTEXT_OVERFLOW" || token == "CONTEXT_BUDGET_EXCEEDED" || normalized.contains("CONTEXT") -> MessageErrorCode.CONTEXT_OVERFLOW
         token == "PERMISSION_DENIED" || token == "CAPABILITY_DENIED" -> MessageErrorCode.PERMISSION_DENIED
         token == "RESOURCE_LIMIT" || token == "BUDGET_EXHAUSTED" || normalized.contains("BUDGET") -> MessageErrorCode.BUDGET_EXHAUSTED
@@ -268,6 +271,9 @@ private fun MessageErrorCode.safeMessage(): String = when (this) {
     MessageErrorCode.RATE_LIMITED -> "服务商暂时限流，请稍后再试。"
     MessageErrorCode.NETWORK_UNAVAILABLE -> "网络不可用，未能完成请求。"
     MessageErrorCode.CONTEXT_OVERFLOW -> "上下文或输出预算不足。"
+    MessageErrorCode.INPUT_OVERFLOW -> "输入超过模型窗口，请缩短历史或检索结果后重试；重发同一请求不会成功。"
+    MessageErrorCode.OUTPUT_TRUNCATED -> "输出被截断：已达到输出上限，部分结果可能不完整，请提高输出上限或缩短任务。"
+    MessageErrorCode.REASONING_EXHAUSTED -> "推理占满了输出预算且没有返回正文，请提高输出上限或调整推理设置后重试。"
     MessageErrorCode.PERMISSION_DENIED -> "当前权限不允许执行该操作。"
     MessageErrorCode.WORKSPACE_UNAVAILABLE -> "工作区当前不可用。"
     MessageErrorCode.RESOURCE_LIMIT -> "已达到运行资源限制。"

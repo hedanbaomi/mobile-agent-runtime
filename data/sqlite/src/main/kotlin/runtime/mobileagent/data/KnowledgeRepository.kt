@@ -58,6 +58,7 @@ import runtime.mobileagent.knowledge.VISION_SCHEMA_VERSION
 import runtime.mobileagent.knowledge.VisionBackend
 import runtime.mobileagent.knowledge.VisionBinding
 import runtime.mobileagent.knowledge.VisionCacheKey
+import runtime.mobileagent.knowledge.VisionChunkBuilder
 import runtime.mobileagent.knowledge.VisionInput
 import runtime.mobileagent.knowledge.VisionOutcome
 import runtime.mobileagent.knowledge.VisionDiagnosticMetadata
@@ -2557,25 +2558,21 @@ class KnowledgeRepository(
                     )
                     diagnostic(ImportBatchEventPhase.CHECKPOINT,
                         if (cached?.string("status") == "SUCCESS") "vision_cache_reused" else "vision_result_saved")
-                    val body = buildString {
-                        append("Visual evidence")
-                        asset.page?.let { append(" page $it") }
-                        append(": ")
-                        append(outcome.result.semanticDescription)
-                        if (outcome.result.ocrText.isNotBlank()) {
-                            append('\n')
-                            append(outcome.result.ocrText)
-                        }
-                        if (outcome.result.tableMarkdown.isNotBlank()) {
-                            append('\n')
-                            append(outcome.result.tableMarkdown)
-                        }
-                        if (asset.surroundingText.isNotBlank()) {
-                            append('\n')
-                            append(asset.surroundingText)
-                        }
+                    // Route every Vision component through the shared chunker:
+                    // one long OCR/description/table must not become a single
+                    // unbounded retrieval chunk.  The extracted page text is
+                    // published as its own `context` component because the
+                    // normal text path deliberately skips pages that need
+                    // Vision, so this is the only place that text can be kept.
+                    VisionChunkBuilder.build(
+                        result = outcome.result,
+                        page = asset.page,
+                        assetId = assetId,
+                        section = asset.section,
+                        surroundingText = asset.surroundingText,
+                    ).forEach { part ->
+                        chunks += IndexedChunk(part.text, part.page, part.assetIds, part.span)
                     }
-                    chunks += IndexedChunk(body, asset.page, listOf(assetId), asset.section)
                 }
             }
         }

@@ -11,6 +11,12 @@ enum class ErrorCode {
     RATE_LIMITED,
     NETWORK_UNAVAILABLE,
     CONTEXT_OVERFLOW,
+    /** The provider rejected the request because the input window is too small. */
+    INPUT_OVERFLOW,
+    /** The output budget ran out with text already produced (partial or complete). */
+    OUTPUT_TRUNCATED,
+    /** The output budget was consumed by reasoning with no final content. */
+    REASONING_EXHAUSTED,
     PERMISSION_DENIED,
     UNSUPPORTED_DEPENDENCY,
     RESOURCE_LIMIT,

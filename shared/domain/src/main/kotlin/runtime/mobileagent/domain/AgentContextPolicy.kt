@@ -10,6 +10,9 @@ import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.intOrNull
 
 /** Session-snapshotted context settings. Units are conservative estimates, not tokenizer counts. */
+/** Smallest input allowance kept when the upstream window is unknown. */
+private const val LOCAL_FLOOR_INPUT_UNITS = 1_024
+
 data class AgentContextPolicy(
     val autoCompact: Boolean = true,
     val maxInputTokens: Int? = null,
@@ -62,6 +65,8 @@ data class AgentContextPolicy(
      * and the local policy reserve (used when the cap is unknown) are separate
      * concepts: only the former is ever sent upstream as an output limit.
      */
+    /** Smallest input allowance kept when the upstream window is unknown. */
+
     fun outputReserve(outputLimit: Int?): Long {
         val providerReserve = outputLimit?.toLong() ?: 0L
         val localReserve = (reservedOutputTokens ?: localOutputReserve).toLong()
@@ -77,7 +82,11 @@ data class AgentContextPolicy(
         val reserve = outputReserve(outputLimit)
         // An unknown upstream window is not unlimited: the local protection
         // ceiling keeps the input budget finite so compaction still runs.
-        val window = (contextWindow ?: localUnknownWindow).toLong()
+        // Unknown upstream window is NOT a known 16k window: the local
+        // protection floor grows so a user's manual output cap cannot make the
+        // input budget arithmetic fail.  This is local policy, never sent upstream
+        // and never presented as the provider's window.
+        val window = (contextWindow ?: maxOf(localUnknownWindow, reserve.toInt() + LOCAL_FLOOR_INPUT_UNITS)).toLong()
         val available = window - reserve
         require(available > 0) { "Model window must leave space after the output reservation" }
         return minOf(maxInputTokens?.toLong() ?: available, available)

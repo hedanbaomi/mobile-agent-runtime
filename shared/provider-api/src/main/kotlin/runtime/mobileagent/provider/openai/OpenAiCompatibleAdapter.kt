@@ -39,6 +39,7 @@ import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
+import runtime.mobileagent.domain.probeOutputTokenLimit
 import runtime.mobileagent.domain.ErrorCode
 import runtime.mobileagent.domain.LengthStopKind
 import runtime.mobileagent.domain.classifyLengthStop
@@ -141,7 +142,9 @@ class OpenAiCompatibleAdapter(
                 Json.parseToJsonElement(configured.parametersJson).jsonObject
             }.getOrElse { throw InvalidConnectionConfigException() }
             // Probes never spend the user's full output budget on a two-word answer.
-            val probeOutputTokens = minOf(configured.outputLimit.coerceAtLeast(1), CONNECTION_PROBE_MAX_OUTPUT_TOKENS)
+            // A probe has its own task-local cap: never read the numeric column that
+            // the selected mode declares ignored (AUTO stores 0 there).
+            val probeOutputTokens = probeOutputTokenLimit(configured.outputLimitMode, configured.outputLimit, CONNECTION_PROBE_MAX_OUTPUT_TOKENS)
             val request = ModelRequest(
                 modelId = configured.modelId,
                 messages = listOf(ChatMessage(role = "user", text = "Reply with ok.")),
@@ -1111,10 +1114,7 @@ class OpenAiCompatibleAdapter(
         // but it is not enough for a complete no-op function call. Keep the
         // capability probe useful while retaining a fixed, small spend cap and
         // never exceeding the configured model output budget.
-        val probeOutputTokens = minOf(
-            profile.outputLimit.coerceAtLeast(1),
-            CONNECTION_PROBE_MAX_OUTPUT_TOKENS,
-        )
+            val probeOutputTokens = probeOutputTokenLimit(profile.outputLimitMode, profile.outputLimit, CONNECTION_PROBE_MAX_OUTPUT_TOKENS)
         val modelParameters = runCatching {
             Json.parseToJsonElement(profile.parametersJson).jsonObject
         }.getOrElse {

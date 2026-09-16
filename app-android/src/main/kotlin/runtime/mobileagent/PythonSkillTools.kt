@@ -14,6 +14,7 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.*
+import runtime.mobileagent.domain.resolveEffectiveOutputCap
 import runtime.mobileagent.domain.hasAdvancedOutputLimitOverride
 import runtime.mobileagent.domain.AgentSnapshot
 import runtime.mobileagent.domain.AuditEvent
@@ -575,16 +576,15 @@ private class PythonSkillToolExecutor(
             // The provider cap (MANUAL) and this tool's own local accounting cap are
 // separate: under AUTO we still bound memory/time locally but send no
 // output-limit field, so the provider default applies.
-            val providerCap = binding.chatModel.effectiveOutputTokenLimit()
+            val modelOutputDecision = resolveEffectiveOutputCap(binding.chatModel.outputLimitMode, binding.chatModel.outputLimit, binding.chatModel.parametersJson)
             val requestedCap = payload.number("maxOutputTokens")
-            val localCap = minOf(2048, providerCap ?: 2048)
-            val accountingCap = when {
-                requestedCap != null -> requestedCap.coerceIn(1, localCap)
-                providerCap != null -> 512.coerceIn(1, localCap)
-                else -> localCap
-            }
-            val outputLimit = accountingCap.coerceIn(1, localCap)
-            val sendOutputLimit = if (requestedCap != null || providerCap != null) outputLimit else null
+            val localCap = minOf(2048, modelOutputDecision.value ?: 2048)
+            // The tool argument is the most specific override, then the model decision;
+            // the same value is sent, reserved and settled.
+            val wireCap = requestedCap ?: modelOutputDecision.value
+            val accountingCap = wireCap?.coerceIn(1, localCap) ?: localCap
+            val outputLimit = accountingCap
+            val sendOutputLimit = wireCap
             val maxCalls = minOf(scopes.number("maxModelCalls") ?: 0, declared.number("maxModelCalls") ?: 0, 3)
             val maxTokens = minOf(scopes.number("maxModelTokens") ?: 0, declared.number("maxModelTokens") ?: 0)
             val run = container.runs.get(runId) ?: throw BrokerDenied("RESOURCE_LIMIT")
@@ -614,7 +614,8 @@ private class PythonSkillToolExecutor(
                 effectDispatched()
                 // Same precedence as Chat/Vision: an explicit advanced override replaces
                 // the app default instead of being merged as a second alias.
-                val pythonSendCap = if (hasAdvancedOutputLimitOverride(binding.chatModel.parametersJson)) null else sendOutputLimit
+                val pythonSendCap = wireCap
+                try {
                 adapter.stream(ModelRequest(binding.chatModel.modelId, listOf(ChatMessage("user", prompt)),
                     // AUTO sends no cap: this tool's local accounting cap above is not a
                     // hidden provider limit.  An explicit tool argument or a MANUAL
@@ -641,15 +642,28 @@ private class PythonSkillToolExecutor(
                             // no cap: this booking is only an estimate and must not
                             // fail a legitimate, already-paid response.  The run
                             // budget still bounds the next dispatch.
-                            if (sendOutputLimit != null && event.inputTokens.toLong() + event.outputTokens > reserved) {
-                                throw BrokerDenied("RESOURCE_LIMIT")
-                            }
+                            // A known overrun is settled into the ledger (which blocks the
+                            // next dispatch); a paid, valid result is never discarded here.
                         }
                     is ModelEvent.RefusalDelta,
                         is ModelEvent.Failed, is ModelEvent.ToolCallDelta, is ModelEvent.ToolApprovalRequired -> throw BrokerDenied("UNKNOWN_OUTCOME")
                     }
                 }
                 if (!completed) throw BrokerDenied("UNKNOWN_OUTCOME")
+                } catch (denied: BrokerDenied) {
+                    // A terminal failure may still carry the provider's usage: settle the
+                    // known spend before the failure leaves this tool (unknown keeps the
+                    // reservation).  The paid response itself is never replayed.
+                    val failureActual = if (reportedInputTokens != null && reportedOutputTokens != null) {
+                        reportedInputTokens!! + reportedOutputTokens!!
+                    } else {
+                        null
+                    }
+                    budget?.settleModelCall(reserved, failureActual)
+                    bound.reservedModelTokens = (bound.reservedModelTokens - reserved + (failureActual ?: reserved)).coerceAtLeast(0)
+                    reservedModelTokens = (reservedModelTokens - reserved + (failureActual ?: reserved)).coerceAtLeast(0)
+                    throw denied
+                }
                 // Settle the reservation with the provider's own final usage.  Unknown
                 // usage keeps the reservation, and a larger actual raises the ledger so the
                 // next model.invoke is refused by the shared Run budget.

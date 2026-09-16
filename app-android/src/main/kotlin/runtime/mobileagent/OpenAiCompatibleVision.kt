@@ -15,6 +15,7 @@ import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import runtime.mobileagent.data.ProfileRepository
+import runtime.mobileagent.domain.resolveEffectiveOutputCap
 import runtime.mobileagent.domain.ModelProfile
 import runtime.mobileagent.domain.hasAdvancedOutputLimitOverride
 import runtime.mobileagent.domain.ProviderProfile
@@ -70,7 +71,7 @@ internal fun visionConfigurationIdentity(provider: ProviderProfile, model: Model
     // fingerprints (and their paid page caches) stay valid.  AUTO uses an
     // explicit marker, so a mode switch is a real target change instead of
     // silently reusing results produced under a different setting.
-    model.effectiveOutputTokenLimit()?.toString() ?: "auto",
+    resolveEffectiveOutputCap(model.outputLimitMode, model.outputLimit, model.parametersJson).value?.toString() ?: "auto",
     canonicalParts(*model.capabilities.sorted().toTypedArray()),
     canonicalParts(*model.endpoint.operations.map { it.name }.sorted().toTypedArray()),
     canonicalParts(*model.endpoint.inputModalities.map { it.name }.sorted().toTypedArray()),
@@ -201,7 +202,10 @@ class OpenAiCompatibleVision(
                         emitDiagnostic(input, latest)
                     }
                 }
-                val visionSendCap = if (hasAdvancedOutputLimitOverride(model.parametersJson)) null else model.effectiveOutputTokenLimit()
+                val visionOutputDecision = resolveEffectiveOutputCap(
+                    model.outputLimitMode, model.outputLimit, model.parametersJson,
+                )
+                val visionSendCap = visionOutputDecision.value
                 val request = ModelRequest(
                     modelId = model.modelId,
                     messages = listOf(
@@ -224,7 +228,7 @@ class OpenAiCompatibleVision(
                     parameters = ParameterLayers(
                         // AUTO sends no output field at all; the adapter adds the
                         // protocol-specific cap only when outputTokenLimit is set.
-                        adapterDefaults = visionSendCap?.let { mapOf("max_tokens" to JsonPrimitive(it)) } ?: emptyMap(),
+                        adapterDefaults = if (visionOutputDecision.isAdvancedOverride) emptyMap() else visionSendCap?.let { mapOf("max_tokens" to JsonPrimitive(it)) } ?: emptyMap(),
                         modelParameters = Json.parseToJsonElement(model.parametersJson).jsonObject,
                     ),
                     headers = headers,

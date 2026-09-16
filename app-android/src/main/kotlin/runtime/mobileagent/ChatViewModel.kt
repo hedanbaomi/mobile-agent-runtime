@@ -25,6 +25,8 @@ import runtime.mobileagent.agent.toDiffPartOrNull
 import runtime.mobileagent.agent.toMessagePartOrNull
 import runtime.mobileagent.agent.toSafeErrorPart
 import runtime.mobileagent.agent.toolResultUserMessage
+import runtime.mobileagent.domain.contextWindowTarget
+import runtime.mobileagent.domain.resolveEffectiveOutputCap
 import runtime.mobileagent.domain.*
 import runtime.mobileagent.diagnostics.DiagnosticApprovalState
 import runtime.mobileagent.diagnostics.DiagnosticAuthority
@@ -487,10 +489,10 @@ class ChatViewModel(
                 val policy = Json.parseToJsonElement(binding.snapshot.contextPolicyJson).jsonObject
                 fun limit(key: String, default: Int, max: Int) = (policy[key]?.jsonPrimitive?.intOrNull ?: default).coerceIn(1, max.coerceAtLeast(1))
                 // AUTO resolves against the frozen target; unknown stays unknown and the policy
-                // still yields a finite local budget, so compaction is never disabled.
-                val contextWindowTarget = contextWindowTargetKey(model.providerId, model.revision, provider.baseUrl, model.modelId)
-                val contextWindow = model.resolvedContextWindow(contextWindowTarget)
-                val inputBudget = contextPolicy.inputLimit(contextWindow, model.effectiveOutputTokenLimit()).toInt()
+                val outputDecision = resolveEffectiveOutputCap(model.outputLimitMode, model.outputLimit, model.parametersJson, binding.snapshot.parameterOverridesJson)
+                val windowTarget = contextWindowTarget(model.providerId, provider.baseUrl, model.modelId)
+                val contextWindow = model.resolvedContextWindow(windowTarget)
+                val inputBudget = contextPolicy.inputLimit(contextWindow, outputDecision.value).toInt()
                 val hits = RetrievalBudget.clip(result.hits, limit("knowledgeTokenBudget", 3000, inputBudget))
                 val bound = CitationMap.bind(run.runId, hits).map { it.copy(citationId = run.runId + "-" + it.citationId) }
                 bound.zip(hits).forEach { (citation, hit) -> citations[citation.citationId] = citation to hit.text }
@@ -780,7 +782,7 @@ class ChatViewModel(
                 // AUTO must not inject any output field: the adapter itself adds a protocol-specific
                 // cap only when outputTokenLimit is set, so an empty default map is what makes
                 // "follow the provider" real on the wire.
-                val outputCap = model.effectiveOutputTokenLimit()
+                val outputCap = outputDecision.value
                 // An explicit advanced-parameter cap is the user's own override: the app
                 // must not add a second alias for the same protocol, which the adapter
                 // would reject as a conflict.  Only the injected default is suppressed;
@@ -789,8 +791,8 @@ class ChatViewModel(
                     model.parametersJson,
                     binding.snapshot.parameterOverridesJson,
                 )
-                val sendCap = if (advancedOverride) null else outputCap
-                val layers = ParameterLayers(adapterDefaults = sendCap?.let { mapOf("max_tokens" to JsonPrimitive(it)) } ?: emptyMap(),
+                val sendCap = outputDecision.value
+                val layers = ParameterLayers(adapterDefaults = if (outputDecision.isAdvancedOverride) emptyMap() else sendCap?.let { mapOf("max_tokens" to JsonPrimitive(it)) } ?: emptyMap(),
                     modelParameters = Json.parseToJsonElement(model.parametersJson).jsonObject,
                     agentOverrides = Json.parseToJsonElement(binding.snapshot.parameterOverridesJson).jsonObject)
                 val trackedGrantIds = preparedFacts.grants.map { it.grantId }.toSet()
@@ -855,7 +857,7 @@ class ChatViewModel(
                 if (preflight.units > inputBudget || preflight.imageCount > contextPolicy.imageBudget) {
                     // Local reserve only: under AUTO this protects the context budget
                     // without pretending to know the provider cap.
-                    val outputReserve = contextPolicy.outputReserve(outputCap)
+                    val outputReserve = contextPolicy.outputReserve(sendCap)
                     throw ChatInputBudgetExceeded(
                         estimated = preflight.units,
                         limit = inputBudget.toLong(),

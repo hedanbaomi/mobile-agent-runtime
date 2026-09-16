@@ -38,6 +38,7 @@ import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
+import runtime.mobileagent.domain.probeOutputTokenLimit
 import runtime.mobileagent.domain.AppError
 import runtime.mobileagent.domain.AppException
 import runtime.mobileagent.domain.ErrorCode
@@ -129,7 +130,7 @@ class OpenAiResponsesAdapter(
                 parameters = runtime.mobileagent.provider.ParameterLayers(modelParameters = modelParameters),
                 operationId = operationId,
                 // Probes never spend the user's full output budget on a two-word answer.
-                outputTokenLimit = minOf(configured.outputLimit.coerceAtLeast(1), CONNECTION_PROBE_MAX_OUTPUT_TOKENS),
+                outputTokenLimit = probeOutputTokenLimit(configured.outputLimitMode, configured.outputLimit, CONNECTION_PROBE_MAX_OUTPUT_TOKENS),
             )
             val payload = buildPayload(request, includeImageBytes = true)
             val resolved = resolveHeaders(token, emptyMap())
@@ -234,7 +235,7 @@ class OpenAiResponsesAdapter(
                     messages = listOf(ChatMessage("user", "Reply with ok.")),
                     stream = false,
                     operationId = operationId,
-                    outputTokenLimit = minOf(profile.outputLimit.coerceAtLeast(1), CONNECTION_PROBE_MAX_OUTPUT_TOKENS),
+                    outputTokenLimit = probeOutputTokenLimit(profile.outputLimitMode, profile.outputLimit, CONNECTION_PROBE_MAX_OUTPUT_TOKENS),
                 ),
                 require = ProbeRequirement.TEXT,
             )

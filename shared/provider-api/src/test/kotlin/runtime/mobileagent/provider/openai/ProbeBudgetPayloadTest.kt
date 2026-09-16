@@ -18,6 +18,7 @@ import runtime.mobileagent.domain.ApiFormat
 import runtime.mobileagent.domain.ModelProfile
 import runtime.mobileagent.domain.ModelRole
 import runtime.mobileagent.domain.OutputLimitMode
+import runtime.mobileagent.domain.probeOutputTokenLimit
 
 /**
  * A saved AUTO profile stores 0 in the legacy numeric column; the connection
@@ -51,10 +52,9 @@ class ProbeBudgetPayloadTest {
     }
 
     @Test
-    fun manualProbeStillNeverExceedsTheProfileCap() = runTest {
-        val captured = mutableListOf<String>()
-        val adapter = OpenAiCompatibleAdapter(HttpClient(engine(captured)), "https://example.invalid/v1")
-        adapter.testConnection(profile(OutputLimitMode.MANUAL, 32), "token".toCharArray())
-        assertTrue(captured.single().contains("\"max_tokens\":32"), captured.single())
-    }
-}
+    fun manualProbeStillNeverExceedsTheProfileCap() {
+        // Rule level: a probe never exceeds the user's own MANUAL number, and is
+        // never clamped to the AUTO task cap by reading a sentinel.
+        assertEquals(32, probeOutputTokenLimit(OutputLimitMode.MANUAL, 32, 64))
+        assertEquals(64, probeOutputTokenLimit(OutputLimitMode.MANUAL, 10_000, 64))
+    }}

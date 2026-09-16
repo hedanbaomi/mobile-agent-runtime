@@ -1724,7 +1724,7 @@ private fun providerCardFrom(profile: runtime.mobileagent.domain.ProviderProfile
 
 private fun providerModelFrom(model: runtime.mobileagent.domain.ModelProfile) = runtime.mobileagent.feature.providers.ProviderModelUi(
     id = model.id, modelId = model.modelId, role = model.role.name, capabilities = model.capabilities,
-    contextLimit = model.contextLimit, outputLimit = model.effectiveOutputTokenLimit(), outputLimitMode = model.outputLimitMode.name)
+    contextLimit = model.contextLimit, outputLimit = model.effectiveOutputTokenLimit(), outputLimitMode = model.outputLimitMode.name, contextLimitMode = model.contextLimitMode.name)
 
 private fun providerDraftFrom(provider: runtime.mobileagent.domain.ProviderProfile?, model: runtime.mobileagent.domain.ModelProfile?) =
     runtime.mobileagent.feature.providers.ProviderDraft(id = provider?.id, modelProfileId = model?.id,

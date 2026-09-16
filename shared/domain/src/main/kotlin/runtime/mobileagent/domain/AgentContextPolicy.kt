@@ -32,6 +32,13 @@ data class AgentContextPolicy(
      * and history compaction and is never sent upstream as an output cap.
      */
     val localOutputReserve: Int = 1024,
+    /**
+     * Local protection ceiling used while the upstream context window is
+     * unknown.  It is a *local* policy, not a claim about the model: it keeps
+     * the input budget finite and history compaction enabled, and it is never
+     * sent to the provider (which does not accept a window parameter).
+     */
+    val localUnknownWindow: Int = 16_384,
 ) {
     init {
         require(maxInputTokens == null || maxInputTokens > 0) { "maxInputTokens must be positive" }
@@ -66,9 +73,12 @@ data class AgentContextPolicy(
      * (AUTO) must not disable compaction or make the input window look
      * unlimited: the local reserve still applies.
      */
-    fun inputLimit(contextLimit: Int, outputLimit: Int?): Long {
+    fun inputLimit(contextWindow: Int?, outputLimit: Int?): Long {
         val reserve = outputReserve(outputLimit)
-        val available = contextLimit.toLong() - reserve
+        // An unknown upstream window is not unlimited: the local protection
+        // ceiling keeps the input budget finite so compaction still runs.
+        val window = (contextWindow ?: localUnknownWindow).toLong()
+        val available = window - reserve
         require(available > 0) { "Model window must leave space after the output reservation" }
         return minOf(maxInputTokens?.toLong() ?: available, available)
     }
@@ -98,6 +108,7 @@ data class AgentContextPolicy(
                 summaryOutputTokens = int("summaryOutputTokens", 1024), summaryMaxUnits = int("summaryMaxUnits", 8192),
                 reservedOutputTokens = optional("reservedOutputTokens"), knowledgeTokenBudget = int("knowledgeTokenBudget", 3000),
                 imageBudget = int("imageBudget", 4), localOutputReserve = int("localOutputReserve", 1024),
+                localUnknownWindow = int("localUnknownWindow", 16_384),
             )
         }
     }

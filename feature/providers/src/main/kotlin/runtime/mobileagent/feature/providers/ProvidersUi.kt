@@ -3,6 +3,7 @@
 
 package runtime.mobileagent.feature.providers
 
+import runtime.mobileagent.domain.ContextLimitMode
 import runtime.mobileagent.domain.OutputLimitMode
 import runtime.mobileagent.domain.advancedOutputLimitOverride
 import androidx.compose.foundation.clickable
@@ -80,6 +81,10 @@ data class ProviderModelUi(
     val outputLimit: Int? = null,
     /** AUTO means the app sends no output cap of its own. */
     val outputLimitMode: String = OutputLimitMode.MANUAL.name,
+    /** AUTO means use the upstream window when known; unknown stays unknown. */
+    val contextLimitMode: String = ContextLimitMode.AUTO.name,
+    /** Optional externally known window (provider documentation) for AUTO. */
+    val contextWindowValue: String = "",
 )
 
 data class ProviderDraft(
@@ -102,6 +107,10 @@ data class ProviderDraft(
     // the manual path, never a hidden default: an AUTO profile sends no cap.
     val outputLimit: String = "4096",
     val outputLimitMode: String = OutputLimitMode.AUTO.name,
+    /** New configurations try the upstream capability first. */
+    val contextLimitMode: String = ContextLimitMode.AUTO.name,
+    /** Optional window value taken from provider documentation (USER_DECLARED). */
+    val contextWindowValue: String = "",
     val mcpConfigured: Boolean = false,
 )
 
@@ -144,6 +153,30 @@ fun providerBudgetError(
     }
 }
 
+fun parseContextLimitMode(raw: String): ContextLimitMode =
+    runCatching { ContextLimitMode.valueOf(raw.trim().uppercase()) }.getOrDefault(ContextLimitMode.MANUAL)
+
+/**
+ * What the next request will actually rely on for the context window.  A user
+ * must never see "automatic" while a fabricated number is in force: unknown is
+ * shown as unknown, and the local protection ceiling is described as local.
+ */
+fun effectiveContextWindowSource(draft: ProviderDraft, zh: Boolean): String {
+    if (parseContextLimitMode(draft.contextLimitMode) == ContextLimitMode.MANUAL) {
+        val value = parsePositiveProviderBudget(draft.contextLimit)
+        return if (value == null) {
+            if (zh) "实际来源：手动窗口（尚未填写有效数字，无法保存）" else "Effective source: manual window (no valid number yet; cannot save)"
+        } else {
+            if (zh) "实际来源：手动窗口 $value（用户覆盖）" else "Effective source: manual window $value (user override)"
+        }
+    }
+    val declared = parsePositiveProviderBudget(draft.contextWindowValue)
+    return if (declared == null) {
+        if (zh) "实际来源：未知（未识别到可信窗口；本地保护上限仍生效，不当作无限）" else "Effective source: unknown (no trusted window found; local protection still applies, not unlimited)"
+    } else {
+        if (zh) "实际来源：用户填写 $declared（来源 USER_DECLARED，仅对该 Provider/端点/模型生效）" else "Effective source: user-declared $declared (USER_DECLARED, applies to this provider/endpoint/model only)"
+    }
+}
 fun parseOutputLimitMode(raw: String): OutputLimitMode =
     runCatching { OutputLimitMode.valueOf(raw.trim().uppercase()) }.getOrDefault(OutputLimitMode.MANUAL)
 
@@ -552,7 +585,7 @@ private fun ProviderDetail(
                     if (zh) "能力：${model.capabilities.sorted().joinToString()}" else "Capabilities: ${model.capabilities.sorted().joinToString()}"
                 }
                 Text(capabilityLabel, style = MaterialTheme.typography.bodySmall)
-                val limits = listOfNotNull(model.contextLimit?.let { "context $it" }, if (parseOutputLimitMode(model.outputLimitMode) == OutputLimitMode.AUTO) "output auto" else model.outputLimit?.let { "output $it" })
+                val limits = listOfNotNull(if (parseContextLimitMode(model.contextLimitMode) == ContextLimitMode.AUTO) "context auto" else model.contextLimit?.let { "context $it" }, if (parseOutputLimitMode(model.outputLimitMode) == OutputLimitMode.AUTO) "output auto" else model.outputLimit?.let { "output $it" })
                 if (limits.isNotEmpty()) Text(limits.joinToString(" · "), style = MaterialTheme.typography.labelSmall)
             }
         }
@@ -698,7 +731,27 @@ private fun ProviderEditorFields(
                     Text(if (zh) "操作：CHAT / EMBEDDING / RERANKER；图片是 Chat 的输入模态，不是独立服务。" else "Operation: CHAT / EMBEDDING / RERANKER. Images are a Chat input modality, not a separate service.", style = MaterialTheme.typography.bodySmall)
                     OutlinedTextField(draft.role, { actions.onDraftChange(draft.copy(role = it)) }, label = { Text(if (zh) "操作/角色" else "Operation / role") }, keyboardOptions = noCorrectionAscii, modifier = Modifier.fillMaxWidth())
                     OutlinedTextField(draft.parametersJson, { actions.onDraftChange(draft.copy(parametersJson = it)) }, label = { Text(if (zh) "参数 JSON" else "Parameters JSON") }, keyboardOptions = noCorrectionText, minLines = 2, modifier = Modifier.fillMaxWidth())
-                    OutlinedTextField(draft.contextLimit, { actions.onDraftChange(draft.copy(contextLimit = it)) }, label = { Text(if (zh) "上下文预算" else "Context budget") }, keyboardOptions = noCorrectionAscii, modifier = Modifier.fillMaxWidth(), isError = budgetError != null && parsePositiveProviderBudget(draft.contextLimit) == null)
+                    Text(if (zh) "上下文窗口" else "Context window", style = MaterialTheme.typography.titleSmall, modifier = Modifier.testTag("provider.contextLimit.title"))
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        FilterChip(
+                            selected = parseContextLimitMode(draft.contextLimitMode) == ContextLimitMode.AUTO,
+                            onClick = { actions.onDraftChange(draft.copy(contextLimitMode = ContextLimitMode.AUTO.name)) },
+                            label = { Text(if (zh) "自动（识别不到则未知）" else "Automatic (unknown if not detected)") },
+                            modifier = Modifier.testTag("provider.contextLimitMode.auto"),
+                        )
+                        FilterChip(
+                            selected = parseContextLimitMode(draft.contextLimitMode) == ContextLimitMode.MANUAL,
+                            onClick = { actions.onDraftChange(draft.copy(contextLimitMode = ContextLimitMode.MANUAL.name)) },
+                            label = { Text(if (zh) "手动覆盖" else "Manual override") },
+                            modifier = Modifier.testTag("provider.contextLimitMode.manual"),
+                        )
+                    }
+                    Text(effectiveContextWindowSource(draft, zh), style = MaterialTheme.typography.bodySmall, modifier = Modifier.testTag("provider.contextLimit.effectiveSource"))
+                    if (parseContextLimitMode(draft.contextLimitMode) == ContextLimitMode.AUTO) {
+                        OutlinedTextField(draft.contextWindowValue, { actions.onDraftChange(draft.copy(contextWindowValue = it)) }, label = { Text(if (zh) "已知窗口（可选，来自服务商文档）" else "Known window (optional, from provider docs)") }, keyboardOptions = noCorrectionAscii, modifier = Modifier.fillMaxWidth().testTag("provider.contextWindowValue"))
+                    } else {
+                        OutlinedTextField(draft.contextLimit, { actions.onDraftChange(draft.copy(contextLimit = it)) }, label = { Text(if (zh) "上下文窗口（手动）" else "Context window (manual)") }, keyboardOptions = noCorrectionAscii, modifier = Modifier.fillMaxWidth(), isError = budgetError != null && parsePositiveProviderBudget(draft.contextLimit) == null)
+                    }
                     Text(if (zh) "最大输出" else "Maximum output", style = MaterialTheme.typography.titleSmall, modifier = Modifier.testTag("provider.outputLimit.title"))
                     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         FilterChip(

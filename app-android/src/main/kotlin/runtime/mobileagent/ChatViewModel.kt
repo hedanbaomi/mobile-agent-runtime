@@ -486,7 +486,11 @@ class ChatViewModel(
                 }
                 val policy = Json.parseToJsonElement(binding.snapshot.contextPolicyJson).jsonObject
                 fun limit(key: String, default: Int, max: Int) = (policy[key]?.jsonPrimitive?.intOrNull ?: default).coerceIn(1, max.coerceAtLeast(1))
-                val inputBudget = contextPolicy.inputLimit(model.contextLimit, model.effectiveOutputTokenLimit()).toInt()
+                // AUTO resolves against the frozen target; unknown stays unknown and the policy
+                // still yields a finite local budget, so compaction is never disabled.
+                val contextWindowTarget = contextWindowTargetKey(model.providerId, model.revision, provider.baseUrl, model.modelId)
+                val contextWindow = model.resolvedContextWindow(contextWindowTarget)
+                val inputBudget = contextPolicy.inputLimit(contextWindow, model.effectiveOutputTokenLimit()).toInt()
                 val hits = RetrievalBudget.clip(result.hits, limit("knowledgeTokenBudget", 3000, inputBudget))
                 val bound = CitationMap.bind(run.runId, hits).map { it.copy(citationId = run.runId + "-" + it.citationId) }
                 bound.zip(hits).forEach { (citation, hit) -> citations[citation.citationId] = citation to hit.text }

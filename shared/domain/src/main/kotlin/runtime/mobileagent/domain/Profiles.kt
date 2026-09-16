@@ -34,6 +34,31 @@ enum class ModelRole { CHAT, VISION, EMBEDDING, RERANKER }
 @Serializable
 enum class OutputLimitMode { AUTO, MANUAL }
 
+/**
+ * How a model's context window is configured.
+ *
+ * AUTO means "use the upstream capability when one is known": the app shows the
+ * value, its source and the target it was recorded for, and treats an unknown
+ * window as unknown instead of inventing a number.  MANUAL keeps the stored
+ * [ModelProfile.contextLimit] as the user's explicit override (legacy rows).
+ */
+@Serializable
+enum class ContextLimitMode { AUTO, MANUAL }
+
+/**
+ * Where an AUTO context window came from.  UNKNOWN is a first-class state: no
+ * value is claimed, and local protection still applies.
+ */
+@Serializable
+enum class ContextLimitSource { UNKNOWN, USER_DECLARED, PROVIDER_METADATA }
+
+/**
+ * Frozen identity of the target a recorded window belongs to.  A recorded value
+ * stops applying as soon as the provider, endpoint, model or revision changes.
+ */
+fun contextWindowTargetKey(providerId: String, providerRevision: Int, endpoint: String, modelId: String): String =
+    "$providerId|$providerRevision|${endpoint.trimEnd('/')}|$modelId"
+
 /** Advanced-parameter keys that are themselves an explicit output-cap override. */
 val ADVANCED_OUTPUT_LIMIT_KEYS = listOf("max_tokens", "max_completion_tokens", "max_output_tokens")
 
@@ -82,6 +107,13 @@ data class ModelProfile(
     val endpoint: ModelEndpoint = ModelEndpoint.fromLegacy(role, capabilities),
     /** Automatic vs manual output cap; appended last so positional call sites keep working. */
     val outputLimitMode: OutputLimitMode = OutputLimitMode.MANUAL,
+    /** Automatic vs manual context window (legacy rows are MANUAL, so nothing is lost). */
+    val contextLimitMode: ContextLimitMode = ContextLimitMode.MANUAL,
+    /** Window recorded for [contextWindowTarget]; null while unknown. */
+    val contextWindowValue: Int? = null,
+    val contextWindowSource: ContextLimitSource = ContextLimitSource.UNKNOWN,
+    val contextWindowTarget: String? = null,
+    val contextWindowCheckedAt: String? = null,
 ) {
     /** The cap that must be sent upstream, or `null` when the provider default applies. */
     fun effectiveOutputTokenLimit(): Int? =
@@ -89,6 +121,26 @@ data class ModelProfile(
 
     /** True when the app will not add an output-limit field of its own. */
     val followsProviderOutputLimit: Boolean get() = outputLimitMode == OutputLimitMode.AUTO
+
+    /**
+     * The context window the next request may rely on, or null when it must be
+     * treated as unknown.  A recorded value only applies while the frozen target
+     * still matches, so a provider/model/endpoint change degrades to unknown
+     * instead of silently reusing a stale number.
+     */
+    fun resolvedContextWindow(currentTargetKey: String): Int? = when {
+        contextLimitMode == ContextLimitMode.MANUAL -> contextLimit
+        contextWindowSource == ContextLimitSource.UNKNOWN -> null
+        contextWindowTarget != currentTargetKey -> null
+        contextWindowValue == null || contextWindowValue <= 0 -> null
+        else -> contextWindowValue
+    }
+
+    /** True when a previously recorded AUTO window no longer matches this target. */
+    fun contextWindowIsStale(currentTargetKey: String): Boolean =
+        contextLimitMode == ContextLimitMode.AUTO &&
+            contextWindowSource != ContextLimitSource.UNKNOWN &&
+            contextWindowTarget != currentTargetKey
 }
 
 @Serializable

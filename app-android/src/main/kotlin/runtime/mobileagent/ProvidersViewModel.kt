@@ -16,7 +16,11 @@ import kotlinx.serialization.json.JsonObject
 import runtime.mobileagent.domain.ApiFormat
 import runtime.mobileagent.domain.EntityId
 import runtime.mobileagent.domain.ModelProfile
+import runtime.mobileagent.domain.ContextLimitMode
+import runtime.mobileagent.domain.ContextLimitSource
 import runtime.mobileagent.domain.OutputLimitMode
+import runtime.mobileagent.domain.Utc
+import runtime.mobileagent.domain.contextWindowTargetKey
 import runtime.mobileagent.domain.ModelRole
 import runtime.mobileagent.domain.ProviderDestinationBinding
 import runtime.mobileagent.domain.ProviderProfile
@@ -65,6 +69,10 @@ data class ProviderDraft(
     val outputLimit: String = "4096",
     /** New profiles follow the provider unless the user switches to manual. */
     val outputLimitMode: OutputLimitMode = OutputLimitMode.AUTO,
+    /** New profiles try the upstream context window first. */
+    val contextLimitMode: ContextLimitMode = ContextLimitMode.AUTO,
+    /** Optional externally known window (provider docs) recorded as USER_DECLARED. */
+    val contextWindowValue: String = "",
 )
 
 fun interface ProviderAdapterFactory {
@@ -141,6 +149,7 @@ class ProvidersViewModel @JvmOverloads constructor(
             var modelPrevious: ModelProfile? = null
             var contextLimit = 0
             var outputLimit = 0
+            var declaredWindow: Int? = null
             if (saveModel) {
                 require(draft.modelId.isNotBlank()) { "请填写模型 ID。" }
                 contextLimit = parsePositiveProviderBudget(draft.contextLimit)
@@ -156,6 +165,15 @@ class ProvidersViewModel @JvmOverloads constructor(
                 }
                 if (draft.outputLimitMode == OutputLimitMode.MANUAL) {
                     require(outputLimit <= contextLimit) { "输出预算不能超过上下文预算。" }
+                }
+// AUTO keeps whatever window the user declared from provider documentation;
+// without one the capability stays UNKNOWN (never a fabricated number).
+                declaredWindow = if (draft.contextLimitMode == ContextLimitMode.AUTO) {
+                    draft.contextWindowValue.trim().takeIf { it.isNotEmpty() }?.let {
+                        parsePositiveProviderBudget(it) ?: error("已知上下文窗口必须是正整数。")
+                    }
+                } else {
+                    null
                 }
                 val parsed = Json.parseToJsonElement(draft.parametersJson)
                 require(parsed is JsonObject) { "模型参数必须是 JSON 对象。" }
@@ -177,6 +195,13 @@ class ProvidersViewModel @JvmOverloads constructor(
                 parameterSchemaJson = modelPrevious?.parameterSchemaJson ?: "{}",
                 parametersJson = parameters.toString(), contextLimit = contextLimit, outputLimit = outputLimit,
                 outputLimitMode = draft.outputLimitMode,
+                contextLimitMode = draft.contextLimitMode,
+                contextWindowValue = declaredWindow,
+                contextWindowSource = if (declaredWindow != null) ContextLimitSource.USER_DECLARED else ContextLimitSource.UNKNOWN,
+                contextWindowTarget = declaredWindow?.let {
+                    contextWindowTargetKey(providerId, (previous?.revision ?: 0) + 1, endpoint.toASCIIString(), draft.modelId.trim())
+                },
+                contextWindowCheckedAt = declaredWindow?.let { Utc.nowIso() },
                 revision = (modelPrevious?.revision ?: 0) + 1,
             ).withEndpoint() else null
             app.container.db.transaction {

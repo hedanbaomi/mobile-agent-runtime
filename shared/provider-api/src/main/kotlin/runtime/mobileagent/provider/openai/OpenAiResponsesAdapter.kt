@@ -688,19 +688,13 @@ class OpenAiResponsesAdapter(
         if (!effectiveStore && fields["include"] == null) {
             fields["include"] = buildJsonArray { add(JsonPrimitive("reasoning.encrypted_content")) }
         }
-        val legacyMaxTokens = fields.remove("max_tokens")
-        val legacyMaxCompletionTokens = fields.remove("max_completion_tokens")
-        val legacyMax = legacyMaxTokens ?: legacyMaxCompletionTokens
-        if ((legacyMaxTokens != null && legacyMaxCompletionTokens != null) ||
-            (legacyMax != null && fields["max_output_tokens"] != null)
-        ) {
-            throw invalidConfig("legacy output token fields cannot be combined with max_output_tokens", request.operationId)
-        }
-        if (legacyMax != null) fields["max_output_tokens"] = legacyMax
         val budget = request.outputTokenLimit
-        // Normalize to one protocol field: the resolved decision wins over the
-        // other alias a different layer may have supplied.
-        request.outputTokenField?.let { chosen ->
+        if (budget != null && budget <= 0) throw invalidConfig("outputTokenLimit must be positive", request.operationId)
+        // Normalize before any alias-conflict check: the resolved decision (tool argument,
+        // then agent override, then model parameter, then profile default) wins, and only
+        // a genuine same-layer ambiguity without a decision stays an error.
+        if (request.outputTokenField != null) {
+            val chosen = request.outputTokenField
             if (chosen !in listOf("max_tokens", "max_completion_tokens", "max_output_tokens")) {
                 throw invalidConfig("Unsupported output token field", request.operationId)
             }
@@ -708,7 +702,16 @@ class OpenAiResponsesAdapter(
             fields.remove("max_completion_tokens")
             fields.remove("max_output_tokens")
         }
-        if (budget != null && budget <= 0) throw invalidConfig("outputTokenLimit must be positive", request.operationId)
+        val legacyMaxTokens = fields.remove("max_tokens")
+        val legacyMaxCompletionTokens = fields.remove("max_completion_tokens")
+        val legacyMax = legacyMaxTokens ?: legacyMaxCompletionTokens
+        if (legacyMaxTokens != null && legacyMaxCompletionTokens != null) {
+            throw invalidConfig("legacy output token fields cannot be combined with max_output_tokens", request.operationId)
+        }
+        if (legacyMax != null && fields["max_output_tokens"] != null) {
+            throw invalidConfig("legacy output token fields cannot be combined with max_output_tokens", request.operationId)
+        }
+        if (legacyMax != null) fields["max_output_tokens"] = legacyMax
         val maxOutput = fields["max_output_tokens"]
         if (maxOutput != null) {
             val primitive = maxOutput as? JsonPrimitive

@@ -48,6 +48,8 @@ data class AgentRuntimeRequest(
     val maxImagesPerRequest: Int = 4,
     val beforeModelRequest: suspend () -> Unit = {},
     val outputTokenLimit: Int? = null,
+    /** Alias the resolved output decision came from (null = profile default / AUTO). */
+    val outputTokenField: String? = null,
     val context: RuntimeContext? = null,
 )
 

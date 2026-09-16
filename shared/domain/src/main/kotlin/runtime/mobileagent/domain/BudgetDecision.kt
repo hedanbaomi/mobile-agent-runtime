@@ -3,6 +3,11 @@
 
 package runtime.mobileagent.domain
 
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.longOrNull
+
 /** Where the output cap that will actually be sent comes from. */
 enum class OutputCapSource {
     /** An explicit advanced-parameter (or per-call) override; it replaces the profile default. */
@@ -34,6 +39,41 @@ data class EffectiveOutputCap(
  * specific last (agent overrides win over model parameters, as the parameter
  * merger does).
  */
+/** Why an output-cap layer cannot be trusted as written. */
+enum class OutputCapValidationError {
+    NOT_AN_INTEGER,
+    NON_POSITIVE,
+    OUT_OF_RANGE,
+    AMBIGUOUS_ALIASES,
+}
+
+/**
+ * Validate the raw advanced-parameter values *before* any decision narrows or
+ * normalizes them.  A layer that states two different output aliases is an
+ * ambiguity; a value that is not a positive Int-range integer must be rejected
+ * rather than silently narrowed (4294975488 must not become 8192).
+ */
+fun validateOutputCapLayers(vararg parameterJsonLayers: String?): OutputCapValidationError? {
+    parameterJsonLayers.forEach { layer ->
+        if (layer.isNullOrBlank()) return@forEach
+        val root = runCatching { Json.parseToJsonElement(layer) as? JsonObject }.getOrNull() ?: return@forEach
+        val stated = ADVANCED_OUTPUT_LIMIT_KEYS.mapNotNull { key ->
+            root[key]?.let { element -> key to element }
+        }
+        if (stated.isEmpty()) return@forEach
+        val values = mutableListOf<Pair<String, Long>>()
+        for ((key, element) in stated) {
+            val primitive = element as? JsonPrimitive
+            if (primitive == null || primitive.isString) return OutputCapValidationError.NOT_AN_INTEGER
+            val value = primitive.longOrNull ?: return OutputCapValidationError.NOT_AN_INTEGER
+            if (value <= 0L) return OutputCapValidationError.NON_POSITIVE
+            if (value > Int.MAX_VALUE.toLong()) return OutputCapValidationError.OUT_OF_RANGE
+            values += key to value
+        }
+        if (values.map { it.second }.distinct().size > 1) return OutputCapValidationError.AMBIGUOUS_ALIASES
+    }
+    return null
+}
 fun resolveEffectiveOutputCap(
     mode: OutputLimitMode,
     profileLimit: Int,
@@ -43,7 +83,9 @@ fun resolveEffectiveOutputCap(
     val override = listOf(agentOverridesJson, modelParametersJson)
         .firstNotNullOfOrNull { layer -> layer?.let { advancedOutputLimitOverride(it) } }
     if (override != null) {
-        return EffectiveOutputCap(override.second.toInt(), OutputCapSource.ADVANCED_OVERRIDE, override.first)
+        val value = override.second
+        require(value in 1..Int.MAX_VALUE.toLong()) { "Advanced output cap is out of range" }
+        return EffectiveOutputCap(value.toInt(), OutputCapSource.ADVANCED_OVERRIDE, override.first)
     }
     return if (mode == OutputLimitMode.MANUAL) {
         EffectiveOutputCap(profileLimit, OutputCapSource.PROFILE_MANUAL)

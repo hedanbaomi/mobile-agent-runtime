@@ -9,7 +9,7 @@ import io.ktor.client.engine.mock.respond
 import io.ktor.http.HttpHeaders
 import io.ktor.http.HttpStatusCode
 import io.ktor.http.headersOf
-import kotlinx.coroutines.test.runTest
+import kotlinx.coroutines.runBlocking
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertFalse
 import org.junit.jupiter.api.Assertions.assertTrue
@@ -42,7 +42,7 @@ class ProbeBudgetPayloadTest {
     }
 
     @Test
-    fun autoProbeUsesTheTaskLocalCapNotTheSentinel() = runTest {
+    fun autoProbeUsesTheTaskLocalCapNotTheSentinel() = runBlocking {
         val captured = mutableListOf<String>()
         val adapter = OpenAiCompatibleAdapter(HttpClient(engine(captured)), "https://example.invalid/v1")
         adapter.testConnection(profile(OutputLimitMode.AUTO, 0), "token".toCharArray())
@@ -51,10 +51,19 @@ class ProbeBudgetPayloadTest {
         assertFalse(body.contains("\"max_tokens\":1,"), body)
     }
 
+    /**
+     * Real MANUAL probe: assert the returned result, the dispatch count and the
+     * body so a non-dispatch is diagnosed from the transport result instead of
+     * being hidden behind a helper assertion.
+     */
     @Test
-    fun manualProbeStillNeverExceedsTheProfileCap() {
-        // Rule level: a probe never exceeds the user's own MANUAL number, and is
-        // never clamped to the AUTO task cap by reading a sentinel.
-        assertEquals(32, probeOutputTokenLimit(OutputLimitMode.MANUAL, 32, 64))
-        assertEquals(64, probeOutputTokenLimit(OutputLimitMode.MANUAL, 10_000, 64))
-    }}
+    fun manualProbeStillNeverExceedsTheProfileCap() = runBlocking {
+        val captured = mutableListOf<String>()
+        val adapter = OpenAiCompatibleAdapter(HttpClient(engine(captured)), "https://example.invalid/v1")
+        val result = adapter.testConnection(profile(OutputLimitMode.MANUAL, 32), "token".toCharArray())
+        println("MANUAL_PROBE_RESULT=$result broadcasts=${captured.size}")
+        assertTrue(result is runtime.mobileagent.provider.ProviderConnectionResult.Success, result.toString())
+        assertEquals(1, captured.size, result.toString())
+        assertTrue(captured.single().contains("\"max_tokens\":32"), captured.single())
+    }
+}

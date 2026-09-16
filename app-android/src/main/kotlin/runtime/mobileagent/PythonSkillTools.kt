@@ -14,6 +14,7 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.*
+import runtime.mobileagent.domain.validateOutputCapLayers
 import runtime.mobileagent.domain.resolveEffectiveOutputCap
 import runtime.mobileagent.domain.hasAdvancedOutputLimitOverride
 import runtime.mobileagent.domain.AgentSnapshot
@@ -576,6 +577,9 @@ private class PythonSkillToolExecutor(
             // The provider cap (MANUAL) and this tool's own local accounting cap are
 // separate: under AUTO we still bound memory/time locally but send no
 // output-limit field, so the provider default applies.
+            validateOutputCapLayers(binding.chatModel.parametersJson)?.let {
+                throw BrokerDenied("INVALID_ARGUMENTS")
+            }
             val modelOutputDecision = resolveEffectiveOutputCap(binding.chatModel.outputLimitMode, binding.chatModel.outputLimit, binding.chatModel.parametersJson)
             val requestedCap = payload.number("maxOutputTokens")
             val localCap = minOf(2048, modelOutputDecision.value ?: 2048)

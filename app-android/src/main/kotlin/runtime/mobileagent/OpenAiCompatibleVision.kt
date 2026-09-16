@@ -15,6 +15,7 @@ import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import runtime.mobileagent.data.ProfileRepository
+import runtime.mobileagent.domain.validateOutputCapLayers
 import runtime.mobileagent.domain.resolveEffectiveOutputCap
 import runtime.mobileagent.domain.ModelProfile
 import runtime.mobileagent.domain.hasAdvancedOutputLimitOverride
@@ -201,6 +202,9 @@ class OpenAiCompatibleVision(
                         }
                         emitDiagnostic(input, latest)
                     }
+                }
+                if (validateOutputCapLayers(model.parametersJson) != null) {
+                    return@runBlocking failed(input, latest, started, "INVALID_CONFIG")
                 }
                 val visionOutputDecision = resolveEffectiveOutputCap(
                     model.outputLimitMode, model.outputLimit, model.parametersJson,

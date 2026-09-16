@@ -4,6 +4,8 @@
 package runtime.mobileagent.domain
 
 import org.junit.jupiter.api.Assertions.assertEquals
+import org.junit.jupiter.api.Assertions.assertThrows
+import org.junit.jupiter.api.Assertions.assertNull
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
 
@@ -64,6 +66,26 @@ class EffectiveOutputDecisionTest {
     }
 
     /** R4: only provider/endpoint/model select the upstream capability. */
+    @Test
+    /** D4: an out-of-range raw value must be rejected, never silently narrowed. */
+    fun outOfRangeRawValueIsRejectedInsteadOfNarrowed() {
+        assertEquals(
+            OutputCapValidationError.OUT_OF_RANGE,
+            validateOutputCapLayers("{\"max_tokens\":4294975488}"),
+        )
+        assertEquals(OutputCapValidationError.NON_POSITIVE, validateOutputCapLayers("{\"max_tokens\":0}"))
+        assertEquals(OutputCapValidationError.NOT_AN_INTEGER, validateOutputCapLayers("{\"max_tokens\":\"8192\"}"))
+        assertEquals(
+            OutputCapValidationError.AMBIGUOUS_ALIASES,
+            validateOutputCapLayers("{\"max_tokens\":3000,\"max_completion_tokens\":5000}"),
+        )
+        assertNull(validateOutputCapLayers("{\"max_tokens\":8192}"))
+        // The resolver refuses to narrow even when called directly.
+        assertThrows(IllegalArgumentException::class.java) {
+            resolveEffectiveOutputCap(OutputLimitMode.MANUAL, 8192, "{\"max_tokens\":4294975488}")
+        }
+    }
+
     @Test
     fun localRevisionsDoNotChangeTheCapabilityTarget() {
         assertEquals(

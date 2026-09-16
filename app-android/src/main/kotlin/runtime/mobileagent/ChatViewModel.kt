@@ -25,6 +25,7 @@ import runtime.mobileagent.agent.toDiffPartOrNull
 import runtime.mobileagent.agent.toMessagePartOrNull
 import runtime.mobileagent.agent.toSafeErrorPart
 import runtime.mobileagent.agent.toolResultUserMessage
+import runtime.mobileagent.domain.validateOutputCapLayers
 import runtime.mobileagent.domain.contextWindowTarget
 import runtime.mobileagent.domain.resolveEffectiveOutputCap
 import runtime.mobileagent.domain.*
@@ -489,6 +490,10 @@ class ChatViewModel(
                 val policy = Json.parseToJsonElement(binding.snapshot.contextPolicyJson).jsonObject
                 fun limit(key: String, default: Int, max: Int) = (policy[key]?.jsonPrimitive?.intOrNull ?: default).coerceIn(1, max.coerceAtLeast(1))
                 // AUTO resolves against the frozen target; unknown stays unknown and the policy
+                // Reject an invalid raw advanced value before anything is dispatched.
+                validateOutputCapLayers(model.parametersJson, binding.snapshot.parameterOverridesJson)?.let {
+                    error("高级输出上限参数无效：$it")
+                }
                 val outputDecision = resolveEffectiveOutputCap(model.outputLimitMode, model.outputLimit, model.parametersJson, binding.snapshot.parameterOverridesJson)
                 val windowTarget = contextWindowTarget(model.providerId, provider.baseUrl, model.modelId)
                 val contextWindow = model.resolvedContextWindow(windowTarget)
@@ -949,6 +954,7 @@ class ChatViewModel(
                     parameters = layers, headers = headers, emitRequestPreview = container.uiPreferences.getBoolean("request-inspector", true),
                     toolImages = runTools::toolImages, maxInputBudgetUnits = inputBudget.toLong(),
                     outputTokenLimit = sendCap,
+                    outputTokenField = if (outputDecision.isAdvancedOverride) outputDecision.key else null,
                     maxImagesPerRequest = contextPolicy.imageBudget,
                     context = runtimeContext,
                     beforeModelRequest = {

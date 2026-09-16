@@ -189,9 +189,13 @@ object OpenAiResponsesSse {
             complete.startsWith(partial) -> complete.removePrefix(partial)
             else -> return listOf(ModelEvent.Failed(ErrorCode.UNKNOWN_OUTCOME.name))
         }
-        return missing.takeIf { it.isNotEmpty() }
-            ?.let { listOf(channelEvent(channel, it)) }
-            .orEmpty()
+        if (missing.isEmpty()) return emptyList()
+        // Record the completed text in the channel buffer.  A done-only stream
+        // emits text without prior deltas, and the failure classifier reads
+        // `state.text`/`state.refusal` to decide whether a later `incomplete`
+        // stop truncated real content or produced nothing.
+        channelBuffers(state, channel)[key] = StringBuilder(complete)
+        return listOf(channelEvent(channel, missing))
     }
 
     private fun contentKey(event: JsonObject): String = buildString {

@@ -587,6 +587,11 @@ class OpenAiCompatibleAdapter(
             val code = when (error.httpStatus) {
                 401, 403 -> ErrorCode.PROVIDER_UNAUTHORIZED.name
                 429 -> ErrorCode.RATE_LIMITED.name
+                // The HTTP-engine interceptor path and the ordinary response
+                // path must obey one recovery policy: a 5xx is an unknown
+                // outcome (possibly dispatched, never auto-retried), not a
+                // decided rejection.
+                in 500..599 -> ErrorCode.UNKNOWN_OUTCOME.name
                 else -> ProviderConnectionErrorCode.PROVIDER_REJECTED.name
             }
             emitTerminalFailure(streamState, code)

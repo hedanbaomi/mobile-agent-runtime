@@ -21,6 +21,7 @@ import runtime.mobileagent.domain.ModelEndpoint
 import runtime.mobileagent.domain.ModelFeature
 import runtime.mobileagent.domain.ModelOperation
 import runtime.mobileagent.domain.ModelProfile
+import runtime.mobileagent.domain.OutputLimitMode
 import runtime.mobileagent.domain.ModelRole
 import runtime.mobileagent.domain.ProviderDestinationBinding
 import runtime.mobileagent.domain.ProviderProfile
@@ -156,7 +157,7 @@ class ProfileRepository(private val db: SqlConnection) {
         requireReference("model", profile.id, getModel(profile.id) == null)
         requireReference("provider", profile.providerId, getProvider(profile.providerId) != null)
         db.execute(
-            "INSERT INTO model_profiles (id,provider_id,role,model_id,capabilities,parameter_schema_json,parameters_json,context_limit,output_limit,revision,endpoint_json) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            "INSERT INTO model_profiles (id,provider_id,role,model_id,capabilities,parameter_schema_json,parameters_json,context_limit,output_limit,revision,output_limit_mode,endpoint_json) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
             profile.modelArgs(json),
         )
         return profile
@@ -170,7 +171,7 @@ class ProfileRepository(private val db: SqlConnection) {
         requireReference("provider", profile.providerId, getProvider(profile.providerId) != null)
         val endpoint = resolveEndpoint(profile)
         db.execute(
-            "UPDATE model_profiles SET provider_id=?,role=?,model_id=?,capabilities=?,parameter_schema_json=?,parameters_json=?,context_limit=?,output_limit=?,revision=?,endpoint_json=? WHERE id=?",
+            "UPDATE model_profiles SET provider_id=?,role=?,model_id=?,capabilities=?,parameter_schema_json=?,parameters_json=?,context_limit=?,output_limit=?,revision=?,output_limit_mode=?,endpoint_json=? WHERE id=?",
             listOf(
                 profile.providerId,
                 profile.role.name,
@@ -181,6 +182,10 @@ class ProfileRepository(private val db: SqlConnection) {
                 profile.contextLimit,
                 profile.outputLimit,
                 profile.revision,
+                // Column/argument order must stay in lockstep with the SQL above:
+                // omitting this value shifts every later binding by one and
+                // silently corrupts endpoint_json.
+                profile.outputLimitMode.name,
                 json.encodeToString(runtime.mobileagent.domain.ModelEndpoint.serializer(), endpoint),
                 profile.id,
             ),
@@ -333,6 +338,7 @@ class ProfileRepository(private val db: SqlConnection) {
             parameterSchemaJson = string("m_parameter_schema_json").ifBlank { "{}" },
             contextLimit = long("m_context_limit").toInt(),
             outputLimit = long("m_output_limit").toInt(),
+            outputLimitMode = decodeOutputLimitMode(string("m_output_limit_mode")),
             revision = long("m_revision").toInt(),
             parametersJson = string("m_parameters_json").ifBlank { "{}" },
             endpoint = decodeEndpoint(role, caps, persistedString("m_endpoint_json", modelId), modelId),
@@ -363,7 +369,7 @@ class ProfileRepository(private val db: SqlConnection) {
         requireId(profile.providerId, "model.providerId")
         requireText(profile.modelId, "model.modelId")
         requirePositive(profile.contextLimit, "model.contextLimit")
-        requirePositive(profile.outputLimit, "model.outputLimit")
+        requireOutputLimit(profile)
         requireNonNegative(profile.revision, "model.revision")
         parseJsonObject(profile.parameterSchemaJson, "model.parameterSchemaJson")
         parseJsonObject(profile.parametersJson, "model.parametersJson")
@@ -397,6 +403,20 @@ class ProfileRepository(private val db: SqlConnection) {
     private fun requirePositive(value: Int, field: String) {
         if (value <= 0) throw invalid("$field must be positive")
     }
+
+    /**
+     * A MANUAL cap must be a real positive number.  An AUTO cap stores 0 in the
+     * legacy numeric column because that column is NOT NULL; the value is
+     * ignored and is never sent upstream.
+     */
+    private fun requireOutputLimit(profile: ModelProfile) {
+        if (profile.outputLimitMode == OutputLimitMode.MANUAL) {
+            requirePositive(profile.outputLimit, "model.outputLimit")
+        }
+    }
+
+    private fun decodeOutputLimitMode(raw: String): OutputLimitMode =
+        runCatching { OutputLimitMode.valueOf(raw.trim().uppercase()) }.getOrDefault(OutputLimitMode.MANUAL)
 
     private fun requireNonNegative(value: Int, field: String) {
         if (value < 0) throw invalid("$field must not be negative")
@@ -448,6 +468,7 @@ class ProfileRepository(private val db: SqlConnection) {
             parameterSchemaJson = string("parameter_schema_json").ifBlank { "{}" },
             contextLimit = long("context_limit").toInt(),
             outputLimit = long("output_limit").toInt(),
+            outputLimitMode = decodeOutputLimitMode(string("output_limit_mode")),
             revision = long("revision").toInt(),
             parametersJson = string("parameters_json").ifBlank { "{}" },
             endpoint = decodeEndpoint(role, caps, persistedString("endpoint_json", modelId), modelId),
@@ -465,7 +486,7 @@ class ProfileRepository(private val db: SqlConnection) {
         val resolved = copy(endpoint = resolveEndpoint(this))
         return listOf(
             id, providerId, role.name, modelId, json.encodeToString(capabilities.toList().sorted()),
-            parameterSchemaJson, parametersJson, contextLimit, outputLimit, revision,
+            parameterSchemaJson, parametersJson, contextLimit, outputLimit, revision, outputLimitMode.name,
             json.encodeToString(ModelEndpoint.serializer(), resolved.endpoint),
         )
     }

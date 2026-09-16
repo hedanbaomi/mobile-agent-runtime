@@ -1724,24 +1724,24 @@ private fun providerCardFrom(profile: runtime.mobileagent.domain.ProviderProfile
 
 private fun providerModelFrom(model: runtime.mobileagent.domain.ModelProfile) = runtime.mobileagent.feature.providers.ProviderModelUi(
     id = model.id, modelId = model.modelId, role = model.role.name, capabilities = model.capabilities,
-    contextLimit = model.contextLimit, outputLimit = model.outputLimit)
+    contextLimit = model.contextLimit, outputLimit = model.effectiveOutputTokenLimit(), outputLimitMode = model.outputLimitMode.name)
 
 private fun providerDraftFrom(provider: runtime.mobileagent.domain.ProviderProfile?, model: runtime.mobileagent.domain.ModelProfile?) =
     runtime.mobileagent.feature.providers.ProviderDraft(id = provider?.id, modelProfileId = model?.id,
         name = provider?.name.orEmpty(), baseUrl = provider?.baseUrl.orEmpty(), apiFormat = provider?.apiFormat?.name ?: "OPENAI_COMPATIBLE",
         modelId = model?.modelId.orEmpty(), role = model?.role?.name ?: "CHAT", parametersJson = model?.parametersJson ?: "{}",
-        contextLimit = model?.contextLimit?.toString() ?: "32768", outputLimit = model?.outputLimit?.toString() ?: "4096",
+        contextLimit = model?.contextLimit?.toString() ?: "32768", outputLimit = model?.effectiveOutputTokenLimit()?.toString() ?: "4096",
         vision = model?.capabilities?.contains("image") == true, tools = model?.capabilities?.contains("tools") == true)
 
 private val providerDraftSaver: Saver<runtime.mobileagent.feature.providers.ProviderDraft, List<Any?>> = Saver(
     save = { draft -> listOf(draft.id, draft.modelProfileId, draft.name, draft.baseUrl, draft.apiFormat, draft.modelId,
-        draft.vision, draft.tools, draft.role, draft.parametersJson, draft.contextLimit, draft.outputLimit) },
+        draft.vision, draft.tools, draft.role, draft.parametersJson, draft.contextLimit, draft.outputLimit, draft.outputLimitMode) },
     restore = { value -> runtime.mobileagent.feature.providers.ProviderDraft(
         id = value[0] as String?, modelProfileId = value[1] as String?, name = value[2] as String,
         baseUrl = value[3] as String, apiFormat = value[4] as String, modelId = value[5] as String,
         vision = value[6] as Boolean, tools = value[7] as Boolean, role = value[8] as String,
         parametersJson = value[9] as String, contextLimit = value[10]?.toString() ?: "32768",
-        outputLimit = value[11]?.toString() ?: "4096") },
+        outputLimit = value[11]?.toString() ?: "4096", outputLimitMode = value[12]?.toString() ?: "AUTO") },
 )
 
 private fun thirdPartyNoticeError(failure: Throwable, chinese: Boolean): String {

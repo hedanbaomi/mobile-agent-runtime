@@ -16,6 +16,7 @@ import kotlinx.serialization.json.JsonObject
 import runtime.mobileagent.domain.ApiFormat
 import runtime.mobileagent.domain.EntityId
 import runtime.mobileagent.domain.ModelProfile
+import runtime.mobileagent.domain.OutputLimitMode
 import runtime.mobileagent.domain.ModelRole
 import runtime.mobileagent.domain.ProviderDestinationBinding
 import runtime.mobileagent.domain.ProviderProfile
@@ -60,7 +61,10 @@ data class ProviderDraft(
     // malformed input must reach save validation instead of falling back to a
     // previous persisted value.
     val contextLimit: String = "32768",
+    // Suggested manual value; ignored while the mode is AUTO.
     val outputLimit: String = "4096",
+    /** New profiles follow the provider unless the user switches to manual. */
+    val outputLimitMode: OutputLimitMode = OutputLimitMode.AUTO,
 )
 
 fun interface ProviderAdapterFactory {
@@ -100,6 +104,9 @@ class ProvidersViewModel @JvmOverloads constructor(
         saveDraft(ProviderDraft(
             name = name, baseUrl = baseUrl, modelId = modelId, apiKey = apiKey,
             capabilities = buildSet { add("stream"); if (vision) add("image"); if (tools) add("tools") },
+            // Legacy convenience entry point keeps its historical contract: an
+            // explicit 4096 manual cap.  The editor path defaults to AUTO.
+            outputLimitMode = OutputLimitMode.MANUAL,
         ))
 
     fun saveDraft(draft: ProviderDraft): Boolean {
@@ -138,9 +145,18 @@ class ProvidersViewModel @JvmOverloads constructor(
                 require(draft.modelId.isNotBlank()) { "请填写模型 ID。" }
                 contextLimit = parsePositiveProviderBudget(draft.contextLimit)
                     ?: error("上下文预算必须是正整数。")
-                outputLimit = parsePositiveProviderBudget(draft.outputLimit)
-                    ?: error("输出预算必须是正整数。")
-                require(outputLimit <= contextLimit) { "输出预算不能超过上下文预算。" }
+                // AUTO stores 0 in the legacy NOT NULL column; the value is
+                // ignored and no output cap is derived from it.  MANUAL keeps the
+                // exact previous contract.
+                outputLimit = if (draft.outputLimitMode == OutputLimitMode.MANUAL) {
+                    parsePositiveProviderBudget(draft.outputLimit)
+                        ?: error("手动输出预算必须是正整数。")
+                } else {
+                    0
+                }
+                if (draft.outputLimitMode == OutputLimitMode.MANUAL) {
+                    require(outputLimit <= contextLimit) { "输出预算不能超过上下文预算。" }
+                }
                 val parsed = Json.parseToJsonElement(draft.parametersJson)
                 require(parsed is JsonObject) { "模型参数必须是 JSON 对象。" }
                 rejectReserved(parsed)
@@ -160,6 +176,7 @@ class ProvidersViewModel @JvmOverloads constructor(
                 role = draft.role, modelId = draft.modelId.trim(), capabilities = draft.capabilities,
                 parameterSchemaJson = modelPrevious?.parameterSchemaJson ?: "{}",
                 parametersJson = parameters.toString(), contextLimit = contextLimit, outputLimit = outputLimit,
+                outputLimitMode = draft.outputLimitMode,
                 revision = (modelPrevious?.revision ?: 0) + 1,
             ).withEndpoint() else null
             app.container.db.transaction {

@@ -560,12 +560,26 @@ private class PythonSkillToolExecutor(
             val payload = args["request"] as? JsonObject ?: throw BrokerDenied("INVALID_ARGUMENTS")
             if (payload.keys.any { it !in setOf("prompt", "maxOutputTokens") }) throw BrokerDenied("INVALID_ARGUMENTS")
             val prompt = payload.requiredString("prompt", 8192)
-            val outputLimit = (payload.number("maxOutputTokens") ?: 512).coerceIn(1, minOf(2048, binding.chatModel.outputLimit.coerceAtLeast(1)))
+            // The provider cap (MANUAL) and this tool's own local accounting cap are
+// separate: under AUTO we still bound memory/time locally but send no
+// output-limit field, so the provider default applies.
+            val providerCap = binding.chatModel.effectiveOutputTokenLimit()
+            val requestedCap = payload.number("maxOutputTokens")
+            val localCap = minOf(2048, providerCap ?: 2048)
+            val accountingCap = when {
+                requestedCap != null -> requestedCap.coerceIn(1, localCap)
+                providerCap != null -> 512.coerceIn(1, localCap)
+                else -> localCap
+            }
+            val outputLimit = accountingCap.coerceIn(1, localCap)
+            val sendOutputLimit = if (requestedCap != null || providerCap != null) outputLimit else null
             val maxCalls = minOf(scopes.number("maxModelCalls") ?: 0, declared.number("maxModelCalls") ?: 0, 3)
             val maxTokens = minOf(scopes.number("maxModelTokens") ?: 0, declared.number("maxModelTokens") ?: 0)
             val run = container.runs.get(runId) ?: throw BrokerDenied("RESOURCE_LIMIT")
             val runMaxTokens = objectOrNull(run.budgetJson)?.number("maxModelTokens") ?: throw BrokerDenied("RESOURCE_LIMIT")
             // UTF-8 bytes form a conservative input allowance; reserve before a possibly billable send.
+            var reportedInputTokens: Int? = null
+            var reportedOutputTokens: Int? = null
             val reserved = prompt.toByteArray().size + outputLimit + 256
             if (++bound.modelCalls > maxCalls || bound.reservedModelTokens.toLong() + reserved > maxTokens ||
                 run.inputTokens.toLong() + run.outputTokens + reservedModelTokens + reserved > runMaxTokens) throw BrokerDenied("RESOURCE_LIMIT")
@@ -587,7 +601,11 @@ private class PythonSkillToolExecutor(
                 var completed = false
                 effectDispatched()
                 adapter.stream(ModelRequest(binding.chatModel.modelId, listOf(ChatMessage("user", prompt)),
-                    parameters = ParameterLayers(adapterDefaults = mapOf("max_tokens" to JsonPrimitive(outputLimit))),
+                    // AUTO sends no cap: this tool's local accounting cap above is not a
+                    // hidden provider limit.  An explicit tool argument or a MANUAL
+                    // profile cap is an explicit override and is sent.
+                    parameters = ParameterLayers(adapterDefaults = sendOutputLimit?.let { mapOf("max_tokens" to JsonPrimitive(it)) } ?: emptyMap()),
+                    outputTokenLimit = sendOutputLimit,
                     operationId = bound.ticket.invocationId), secret).collect { event ->
                     if (!authorized(bound)) throw BrokerDenied("PERMISSION_DENIED")
                     when (event) {
@@ -597,15 +615,35 @@ private class PythonSkillToolExecutor(
                         }
                         is ModelEvent.ReasoningDelta -> Unit
                         is ModelEvent.ProviderContinuation -> Unit
-                        is ModelEvent.Usage -> if (event.inputTokens.toLong() + event.outputTokens > reserved) throw BrokerDenied("RESOURCE_LIMIT")
                         ModelEvent.Completed -> completed = true
-                        is ModelEvent.RefusalDelta,
+                        is ModelEvent.Usage -> {
+                            reportedInputTokens = event.inputTokens
+                            reportedOutputTokens = event.outputTokens
+                            // An explicit cap (MANUAL profile or the tool's own
+                            // maxOutputTokens) is a hard local commitment, so an
+                            // overrun is a real violation.  Under AUTO the app sends
+                            // no cap: this booking is only an estimate and must not
+                            // fail a legitimate, already-paid response.  The run
+                            // budget still bounds the next dispatch.
+                            if (sendOutputLimit != null && event.inputTokens.toLong() + event.outputTokens > reserved) {
+                                throw BrokerDenied("RESOURCE_LIMIT")
+                            }
+                        }
+                    is ModelEvent.RefusalDelta,
                         is ModelEvent.Failed, is ModelEvent.ToolCallDelta, is ModelEvent.ToolApprovalRequired -> throw BrokerDenied("UNKNOWN_OUTCOME")
                     }
                 }
                 if (!completed) throw BrokerDenied("UNKNOWN_OUTCOME")
                 val redacted = SecretRedactor.redact(text.toString(), secrets.map { it.concatToString() })
-                return buildJsonObject { put("text", redacted); put("reservedTokens", reserved) }
+                // `reservedTokens` is the admission reservation, never presented as
+        // measured consumption.  Actual usage is reported only when the
+        // provider supplied it; otherwise it stays unknown.
+        return buildJsonObject {
+            put("text", redacted)
+            put("reservedTokens", reserved)
+            reportedInputTokens?.let { put("inputTokens", it) }
+            reportedOutputTokens?.let { put("outputTokens", it) }
+        }
             } catch (cancelled: CancellationException) {
                 throw cancelled
             } catch (failure: BrokerDenied) {

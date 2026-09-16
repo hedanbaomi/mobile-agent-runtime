@@ -26,6 +26,12 @@ data class AgentContextPolicy(
     val reservedOutputTokens: Int? = null,
     val knowledgeTokenBudget: Int = 3000,
     val imageBudget: Int = 4,
+    /**
+     * Local context-protection reserve used when the provider output cap is
+     * unknown (AUTO).  It is a local policy number: it protects the input budget
+     * and history compaction and is never sent upstream as an output cap.
+     */
+    val localOutputReserve: Int = 1024,
 ) {
     init {
         require(maxInputTokens == null || maxInputTokens > 0) { "maxInputTokens must be positive" }
@@ -44,8 +50,24 @@ data class AgentContextPolicy(
         require(imageBudget in 1..32) { "imageBudget must be 1..32" }
     }
 
-    fun inputLimit(contextLimit: Int, outputLimit: Int): Long {
-        val reserve = maxOf(outputLimit, reservedOutputTokens ?: outputLimit).toLong()
+    /**
+     * The reserve subtracted from the context window.  A provider cap (MANUAL)
+     * and the local policy reserve (used when the cap is unknown) are separate
+     * concepts: only the former is ever sent upstream as an output limit.
+     */
+    fun outputReserve(outputLimit: Int?): Long {
+        val providerReserve = outputLimit?.toLong() ?: 0L
+        val localReserve = (reservedOutputTokens ?: localOutputReserve).toLong()
+        return maxOf(providerReserve, localReserve)
+    }
+
+    /**
+     * Input budget under the current output settings.  An absent provider cap
+     * (AUTO) must not disable compaction or make the input window look
+     * unlimited: the local reserve still applies.
+     */
+    fun inputLimit(contextLimit: Int, outputLimit: Int?): Long {
+        val reserve = outputReserve(outputLimit)
         val available = contextLimit.toLong() - reserve
         require(available > 0) { "Model window must leave space after the output reservation" }
         return minOf(maxInputTokens?.toLong() ?: available, available)
@@ -75,7 +97,7 @@ data class AgentContextPolicy(
                 maxModelRequestsPerRun = int("maxModelRequestsPerRun", 32), maxCompactionsPerRun = int("maxCompactionsPerRun", 8),
                 summaryOutputTokens = int("summaryOutputTokens", 1024), summaryMaxUnits = int("summaryMaxUnits", 8192),
                 reservedOutputTokens = optional("reservedOutputTokens"), knowledgeTokenBudget = int("knowledgeTokenBudget", 3000),
-                imageBudget = int("imageBudget", 4),
+                imageBudget = int("imageBudget", 4), localOutputReserve = int("localOutputReserve", 1024),
             )
         }
     }

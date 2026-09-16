@@ -20,6 +20,7 @@ import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
 import runtime.mobileagent.domain.ApiFormat
 import runtime.mobileagent.domain.ModelProfile
+import runtime.mobileagent.domain.OutputLimitMode
 import runtime.mobileagent.domain.ModelRole
 import runtime.mobileagent.domain.ProviderProfile
 import runtime.mobileagent.knowledge.VisionDiagnosticMetadata
@@ -291,6 +292,64 @@ class OpenAiCompatibleVisionTest {
         diagnostics = diagnostics,
         captureDiagnosticContent = capture,
     )
+
+    /**
+     * AUTO (follow the provider) must not put any output cap on the Vision
+     * request; MANUAL keeps sending exactly the configured number.
+     */
+    @Test
+    fun automaticOutputLimitSendsNoCapOnTheVisionRequest() {
+        var body = ""
+        val auto = target("auto", "model-auto")
+        val autoTarget = auto.first to auto.second.copy(outputLimit = 0, outputLimitMode = OutputLimitMode.AUTO)
+        val backend = backend(
+            targets = listOf(autoTarget),
+            engine = MockEngine { request ->
+                body = (request.body as io.ktor.http.content.TextContent).text
+                respond(successBody(), HttpStatusCode.OK, jsonHeaders())
+            },
+        )
+
+        val outcome = backend.process(input(autoTarget))
+
+        assertTrue(outcome is VisionOutcome.Success, outcome.toString())
+        assertFalse(body.contains("\"max_tokens\""), body)
+        assertFalse(body.contains("\"max_completion_tokens\""), body)
+        assertFalse(body.contains("\"max_output_tokens\""), body)
+    }
+
+    @Test
+    fun manualOutputLimitIsSentOnTheVisionRequest() {
+        var body = ""
+        val manual = target("manual", "model-manual")
+        val manualTarget = manual.first to manual.second.copy(outputLimit = 8192, outputLimitMode = OutputLimitMode.MANUAL)
+        val backend = backend(
+            targets = listOf(manualTarget),
+            engine = MockEngine { request ->
+                body = (request.body as io.ktor.http.content.TextContent).text
+                respond(successBody(), HttpStatusCode.OK, jsonHeaders())
+            },
+        )
+
+        val outcome = backend.process(input(manualTarget))
+
+        assertTrue(outcome is VisionOutcome.Success, outcome.toString())
+        assertTrue(body.contains("\"max_tokens\":8192"), body)
+    }
+
+    @Test
+    fun modeChangeInvalidatesTheFrozenFingerprintWithoutDispatch() {
+        var httpCalls = 0
+        val manual = target("fp", "model-fp")
+        val autoTarget = manual.first to manual.second.copy(outputLimit = 0, outputLimitMode = OutputLimitMode.AUTO)
+        val backend = backend(
+            targets = listOf(autoTarget),
+            engine = MockEngine { httpCalls++; error("must not dispatch") },
+        )
+        val outcome = backend.process(input(manual))
+        assertTrue(outcome is VisionOutcome.Failed, outcome.toString())
+        assertEquals(0, httpCalls)
+    }
 
     private fun successBody() =
         """{"choices":[{"message":{"content":"{\"ocrText\":\"ocr\",\"semanticDescription\":\"description\",\"tableMarkdown\":\"\",\"type\":\"image\"}"},"finish_reason":"stop"}],"usage":{"prompt_tokens":9,"completion_tokens":3}}"""

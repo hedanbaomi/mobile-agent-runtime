@@ -4,6 +4,10 @@
 package runtime.mobileagent.domain
 
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.longOrNull
 
 @Serializable
 enum class ApiFormat {
@@ -15,6 +19,39 @@ enum class ApiFormat {
 
 @Serializable
 enum class ModelRole { CHAT, VISION, EMBEDDING, RERANKER }
+
+/**
+ * How a model's maximum output cap is configured.
+ *
+ * AUTO means "follow the provider": unless an explicit advanced-JSON override
+ * supplies a cap, no output-limit field is added to the outbound request -- the
+ * app does not send 0, null, an enormous value, or a restored 4096/10240.
+ * MANUAL keeps [ModelProfile.outputLimit] as the effective cap.
+ *
+ * Legacy rows and imported snapshots without this field are MANUAL, so an
+ * upgrade never silently discards a number the user configured.
+ */
+@Serializable
+enum class OutputLimitMode { AUTO, MANUAL }
+
+/** Advanced-parameter keys that are themselves an explicit output-cap override. */
+val ADVANCED_OUTPUT_LIMIT_KEYS = listOf("max_tokens", "max_completion_tokens", "max_output_tokens")
+
+/**
+ * The explicit output cap carried by advanced parameters, or null when the JSON
+ * does not set one.
+ *
+ * An explicit advanced value is a manual override: it wins over AUTO, which is
+ * why the UI must display it as the effective source instead of claiming
+ * "follow the provider" while a fixed cap is sent.
+ */
+fun advancedOutputLimitOverride(parametersJson: String): Pair<String, Long>? {
+    val root = runCatching { Json.parseToJsonElement(parametersJson) as? JsonObject }.getOrNull() ?: return null
+    return ADVANCED_OUTPUT_LIMIT_KEYS.firstNotNullOfOrNull { key ->
+        val value = (root[key] as? JsonPrimitive)?.longOrNull ?: return@firstNotNullOfOrNull null
+        key to value
+    }
+}
 
 @Serializable
 data class ProviderProfile(
@@ -43,7 +80,16 @@ data class ModelProfile(
     /** Validated model defaults; the schema above describes allowed values. */
     val parametersJson: String = "{}",
     val endpoint: ModelEndpoint = ModelEndpoint.fromLegacy(role, capabilities),
-)
+    /** Automatic vs manual output cap; appended last so positional call sites keep working. */
+    val outputLimitMode: OutputLimitMode = OutputLimitMode.MANUAL,
+) {
+    /** The cap that must be sent upstream, or `null` when the provider default applies. */
+    fun effectiveOutputTokenLimit(): Int? =
+        if (outputLimitMode == OutputLimitMode.AUTO) null else outputLimit
+
+    /** True when the app will not add an output-limit field of its own. */
+    val followsProviderOutputLimit: Boolean get() = outputLimitMode == OutputLimitMode.AUTO
+}
 
 @Serializable
 data class AgentProfile(

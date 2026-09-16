@@ -54,7 +54,7 @@ fun visionProfileBinding(provider: ProviderProfile, model: ModelProfile): Vision
         configurationHash = sha256Hex(visionConfigurationIdentity(provider, model).toByteArray(Charsets.UTF_8)),
     )
 
-private fun visionConfigurationIdentity(provider: ProviderProfile, model: ModelProfile): String = canonicalParts(
+internal fun visionConfigurationIdentity(provider: ProviderProfile, model: ModelProfile): String = canonicalParts(
     provider.apiFormat.name,
     provider.baseUrl.trimEnd('/'),
     canonicalMap(provider.nonSecretHeaders),
@@ -65,7 +65,11 @@ private fun visionConfigurationIdentity(provider: ProviderProfile, model: ModelP
     canonicalJson(model.parametersJson),
     canonicalJson(model.parameterSchemaJson),
     model.contextLimit.toString(),
-    model.outputLimit.toString(),
+    // MANUAL keeps the legacy decimal slot byte-for-byte so existing Vision
+    // fingerprints (and their paid page caches) stay valid.  AUTO uses an
+    // explicit marker, so a mode switch is a real target change instead of
+    // silently reusing results produced under a different setting.
+    model.effectiveOutputTokenLimit()?.toString() ?: "auto",
     canonicalParts(*model.capabilities.sorted().toTypedArray()),
     canonicalParts(*model.endpoint.operations.map { it.name }.sorted().toTypedArray()),
     canonicalParts(*model.endpoint.inputModalities.map { it.name }.sorted().toTypedArray()),
@@ -156,7 +160,10 @@ class OpenAiCompatibleVision(
                         "endpoint" to text(safeEndpoint), "apiFormat" to text(provider.apiFormat.name),
                         "modelProfileId" to text(model.id), "modelId" to text(model.modelId), "role" to text(model.role.name),
                         "providerRevision" to JsonPrimitive(provider.revision), "modelRevision" to JsonPrimitive(model.revision),
-                        "contextLimit" to JsonPrimitive(model.contextLimit), "outputLimit" to JsonPrimitive(model.outputLimit),
+                        "contextLimit" to JsonPrimitive(model.contextLimit),
+                        // MANUAL keeps the legacy numeric field so an existing profile hash is
+                        // unchanged; AUTO adds an explicit marker instead of a fabricated cap.
+                        "outputLimit" to (model.effectiveOutputTokenLimit()?.let { JsonPrimitive(it) } ?: text("provider-default")),
                         "capabilities" to JsonArray(model.capabilities.sorted().map(::text)),
                     )).toString()
                     emitDiagnostic(input, latest.copy(stage = "TARGET_CONFIGURATION", contentKind = "target.configuration.json",
@@ -210,12 +217,14 @@ class OpenAiCompatibleVision(
                     ),
                     stream = false,
                     parameters = ParameterLayers(
-                        adapterDefaults = mapOf("max_tokens" to JsonPrimitive(model.outputLimit)),
+                        // AUTO sends no output field at all; the adapter adds the
+                        // protocol-specific cap only when outputTokenLimit is set.
+                        adapterDefaults = model.effectiveOutputTokenLimit()?.let { mapOf("max_tokens" to JsonPrimitive(it)) } ?: emptyMap(),
                         modelParameters = Json.parseToJsonElement(model.parametersJson).jsonObject,
                     ),
                     headers = headers,
                     operationId = input.requestId.ifBlank { "vision-${input.assetHash.take(24)}" },
-                    outputTokenLimit = model.outputLimit,
+                    outputTokenLimit = model.effectiveOutputTokenLimit(),
                     diagnostics = diagnostics,
                     beforeDispatch = {
                         val repositoryAllowsDispatch = input.beforeDispatch()

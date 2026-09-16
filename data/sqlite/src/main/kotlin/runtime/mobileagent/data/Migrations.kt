@@ -55,12 +55,12 @@ object Migrations {
     // conversation, and a summary that only a
     // verified SUCCEEDED row may carry.  No transcript row is deleted or
     // rewritten by a summary, and no summary is ever re-sent from the database.
-    const val VERSION = 21
+    const val VERSION = 22
 
     private val statements = listOf(
         "CREATE TABLE IF NOT EXISTS schema_version (version INTEGER NOT NULL PRIMARY KEY)",
         "CREATE TABLE IF NOT EXISTS provider_profiles (id TEXT PRIMARY KEY, name TEXT NOT NULL, api_format TEXT NOT NULL, base_url TEXT NOT NULL, header_secret_refs TEXT NOT NULL, non_secret_headers TEXT NOT NULL, secret_ref TEXT NOT NULL, revision INTEGER NOT NULL)",
-        "CREATE TABLE IF NOT EXISTS model_profiles (id TEXT PRIMARY KEY, provider_id TEXT NOT NULL, role TEXT NOT NULL, model_id TEXT NOT NULL, capabilities TEXT NOT NULL, parameter_schema_json TEXT NOT NULL, parameters_json TEXT NOT NULL DEFAULT '{}', context_limit INTEGER NOT NULL, output_limit INTEGER NOT NULL, revision INTEGER NOT NULL, endpoint_json TEXT NOT NULL DEFAULT '{}', FOREIGN KEY(provider_id) REFERENCES provider_profiles(id))",
+        "CREATE TABLE IF NOT EXISTS model_profiles (id TEXT PRIMARY KEY, provider_id TEXT NOT NULL, role TEXT NOT NULL, model_id TEXT NOT NULL, capabilities TEXT NOT NULL, parameter_schema_json TEXT NOT NULL, parameters_json TEXT NOT NULL DEFAULT '{}', context_limit INTEGER NOT NULL, output_limit INTEGER NOT NULL, revision INTEGER NOT NULL, endpoint_json TEXT NOT NULL DEFAULT '{}', output_limit_mode TEXT NOT NULL DEFAULT 'MANUAL' CHECK(output_limit_mode IN ('AUTO','MANUAL')), FOREIGN KEY(provider_id) REFERENCES provider_profiles(id))",
         "CREATE TABLE IF NOT EXISTS agent_profiles (id TEXT PRIMARY KEY, name TEXT NOT NULL, prompt_revision_id TEXT NOT NULL, chat_profile_id TEXT NOT NULL, vision_profile_id TEXT, embedding_profile_id TEXT, reranker_profile_id TEXT, knowledge_base_ids TEXT NOT NULL, skill_ids TEXT NOT NULL, retrieval_mode TEXT NOT NULL, revision INTEGER NOT NULL, parameter_overrides_json TEXT NOT NULL DEFAULT '{}', context_policy_json TEXT NOT NULL DEFAULT '{}', permission_settings_json TEXT NOT NULL DEFAULT '{}')",
         "CREATE TABLE IF NOT EXISTS prompt_revisions (id TEXT PRIMARY KEY, agent_id TEXT NOT NULL, parent_revision_id TEXT, template TEXT NOT NULL, allowed_variables TEXT NOT NULL, created_at TEXT NOT NULL)",
         "CREATE TABLE IF NOT EXISTS conversations (id TEXT PRIMARY KEY, snapshot_id TEXT NOT NULL, agent_snapshot_id TEXT NOT NULL DEFAULT '', title TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL)",
@@ -228,6 +228,10 @@ object Migrations {
         // v20: freeze source selection and fence incomplete URI/archive staging.
         Column("import_batches", "staging_manifest", "TEXT"),
         Column("import_batches", "staging_complete", "INTEGER NOT NULL DEFAULT 1 CHECK(staging_complete IN (0,1))"),
+        // v22: automatic (follow-provider) output cap.  Existing rows keep their
+        // configured number and are treated as MANUAL, so the upgrade never
+        // silently drops a user's cap.
+        Column("model_profiles", "output_limit_mode", "TEXT NOT NULL DEFAULT 'MANUAL' CHECK(output_limit_mode IN ('AUTO','MANUAL'))"),
     )
 
     fun apply(connection: SqlConnection) {

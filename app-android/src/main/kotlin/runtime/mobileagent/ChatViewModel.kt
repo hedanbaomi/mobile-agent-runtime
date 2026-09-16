@@ -486,7 +486,7 @@ class ChatViewModel(
                 }
                 val policy = Json.parseToJsonElement(binding.snapshot.contextPolicyJson).jsonObject
                 fun limit(key: String, default: Int, max: Int) = (policy[key]?.jsonPrimitive?.intOrNull ?: default).coerceIn(1, max.coerceAtLeast(1))
-                val inputBudget = contextPolicy.inputLimit(model.contextLimit, model.outputLimit).toInt()
+                val inputBudget = contextPolicy.inputLimit(model.contextLimit, model.effectiveOutputTokenLimit()).toInt()
                 val hits = RetrievalBudget.clip(result.hits, limit("knowledgeTokenBudget", 3000, inputBudget))
                 val bound = CitationMap.bind(run.runId, hits).map { it.copy(citationId = run.runId + "-" + it.citationId) }
                 bound.zip(hits).forEach { (citation, hit) -> citations[citation.citationId] = citation to hit.text }
@@ -773,7 +773,11 @@ class ChatViewModel(
                 val headers = mutableMapOf<String, RequestHeaderValue>()
                 provider.nonSecretHeaders.forEach { (name, value) -> headers[name] = RequestHeaderValue.Plain(value) }
                 provider.headerSecretRefs.forEach { (name, ref) -> headers[name] = RequestHeaderValue.SecretRef(ref) }
-                val layers = ParameterLayers(adapterDefaults = mapOf("max_tokens" to JsonPrimitive(model.outputLimit)),
+                // AUTO must not inject any output field: the adapter itself adds a protocol-specific
+                // cap only when outputTokenLimit is set, so an empty default map is what makes
+                // "follow the provider" real on the wire.
+                val outputCap = model.effectiveOutputTokenLimit()
+                val layers = ParameterLayers(adapterDefaults = outputCap?.let { mapOf("max_tokens" to JsonPrimitive(it)) } ?: emptyMap(),
                     modelParameters = Json.parseToJsonElement(model.parametersJson).jsonObject,
                     agentOverrides = Json.parseToJsonElement(binding.snapshot.parameterOverridesJson).jsonObject)
                 val trackedGrantIds = preparedFacts.grants.map { it.grantId }.toSet()
@@ -830,16 +834,15 @@ class ChatViewModel(
                 val preparedRequest = ModelRequest(model.modelId, prompt.asMessages(),
                     tools = if ("tools" in model.capabilities) toolExecutor.specs.map {
                         mapOf("name" to it.name, "description" to it.description, "parameters" to it.parametersJson)
-                    } else emptyList(), parameters = layers, headers = headers, outputTokenLimit = model.outputLimit)
+                    } else emptyList(), parameters = layers, headers = headers, outputTokenLimit = outputCap)
                 // The same complete adapter budgeter serves this pre-credential check and every Runtime round.
                 val preflight = adapter.estimateInput(if (contextPolicy.autoCompact) {
                     ContextPreflight.minimumRequest(prompt, runtimeContext, preparedRequest)
                 } else preparedRequest)
                 if (preflight.units > inputBudget || preflight.imageCount > contextPolicy.imageBudget) {
-                    val outputReserve = maxOf(
-                        model.outputLimit,
-                        contextPolicy.reservedOutputTokens ?: model.outputLimit,
-                    ).toLong()
+                    // Local reserve only: under AUTO this protects the context budget
+                    // without pretending to know the provider cap.
+                    val outputReserve = contextPolicy.outputReserve(outputCap)
                     throw ChatInputBudgetExceeded(
                         estimated = preflight.units,
                         limit = inputBudget.toLong(),
@@ -929,7 +932,7 @@ class ChatViewModel(
                 runtime.run(AgentRuntimeRequest(run, prompt, model.modelId, secret!!, "tools" in model.capabilities,
                     parameters = layers, headers = headers, emitRequestPreview = container.uiPreferences.getBoolean("request-inspector", true),
                     toolImages = runTools::toolImages, maxInputBudgetUnits = inputBudget.toLong(),
-                    outputTokenLimit = model.outputLimit,
+                    outputTokenLimit = outputCap,
                     maxImagesPerRequest = contextPolicy.imageBudget,
                     context = runtimeContext,
                     beforeModelRequest = {

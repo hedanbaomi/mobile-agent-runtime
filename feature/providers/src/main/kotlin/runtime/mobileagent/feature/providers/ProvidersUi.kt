@@ -3,6 +3,8 @@
 
 package runtime.mobileagent.feature.providers
 
+import runtime.mobileagent.domain.OutputLimitMode
+import runtime.mobileagent.domain.advancedOutputLimitOverride
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -76,6 +78,8 @@ data class ProviderModelUi(
     val capabilities: Set<String> = emptySet(),
     val contextLimit: Int? = null,
     val outputLimit: Int? = null,
+    /** AUTO means the app sends no output cap of its own. */
+    val outputLimitMode: String = OutputLimitMode.MANUAL.name,
 )
 
 data class ProviderDraft(
@@ -94,7 +98,10 @@ data class ProviderDraft(
     // immediately restore the previous value.  Persistence validation
     // happens when the draft is submitted.
     val contextLimit: String = "32768",
+    // Only used when [outputLimitMode] is MANUAL.  It is a suggested value for
+    // the manual path, never a hidden default: an AUTO profile sends no cap.
     val outputLimit: String = "4096",
+    val outputLimitMode: String = OutputLimitMode.AUTO.name,
     val mcpConfigured: Boolean = false,
 )
 
@@ -111,15 +118,56 @@ fun parsePositiveProviderBudget(raw: String): Int? {
         ?.toInt()
 }
 
-fun providerBudgetError(contextLimit: String, outputLimit: String, zh: Boolean): String? {
+fun providerBudgetError(contextLimit: String, outputLimit: String, zh: Boolean): String? =
+    providerBudgetError(contextLimit, outputLimit, OutputLimitMode.MANUAL.name, zh)
+
+/**
+ * AUTO validates only the context budget: following the provider means the app
+ * has no output number to validate and will not send one.  MANUAL keeps the
+ * exact positive-integer and `output <= context` contract.
+ */
+fun providerBudgetError(
+    contextLimit: String,
+    outputLimit: String,
+    outputLimitMode: String,
+    zh: Boolean,
+): String? {
     val context = parsePositiveProviderBudget(contextLimit)
         ?: return if (zh) "上下文预算必须是正整数。" else "Context budget must be a positive integer."
+    if (parseOutputLimitMode(outputLimitMode) == OutputLimitMode.AUTO) return null
     val output = parsePositiveProviderBudget(outputLimit)
-        ?: return if (zh) "输出预算必须是正整数。" else "Output budget must be a positive integer."
+        ?: return if (zh) "手动输出预算必须是正整数。" else "A manual output budget must be a positive integer."
     return if (output > context) {
         if (zh) "输出预算不能超过上下文预算。" else "Output budget cannot exceed the context budget."
     } else {
         null
+    }
+}
+
+fun parseOutputLimitMode(raw: String): OutputLimitMode =
+    runCatching { OutputLimitMode.valueOf(raw.trim().uppercase()) }.getOrDefault(OutputLimitMode.MANUAL)
+
+
+
+/**
+ * What the next request will actually use.  A user must never see "follow the
+ * provider" while an advanced-parameter cap is silently sent.
+ */
+fun effectiveOutputLimitSource(draft: ProviderDraft, zh: Boolean): String {
+    advancedOutputLimitOverride(draft.parametersJson)?.let { (key, value) ->
+        return if (zh) "实际来源：高级参数 $key=$value（覆盖模式设置）" else "Effective source: advanced parameter $key=$value (overrides the mode)"
+    }
+    return when (parseOutputLimitMode(draft.outputLimitMode)) {
+        OutputLimitMode.MANUAL -> {
+            val value = parsePositiveProviderBudget(draft.outputLimit)
+            if (value == null) {
+                if (zh) "实际来源：手动限制（尚未填写有效数字，无法保存）" else "Effective source: manual (no valid number yet; cannot save)"
+            } else {
+                if (zh) "实际来源：手动限制 $value" else "Effective source: manual limit $value"
+            }
+        }
+        OutputLimitMode.AUTO ->
+            if (zh) "实际来源：跟随服务商（应用不发送输出上限）" else "Effective source: follow the provider (no output cap is sent)"
     }
 }
 
@@ -504,7 +552,7 @@ private fun ProviderDetail(
                     if (zh) "能力：${model.capabilities.sorted().joinToString()}" else "Capabilities: ${model.capabilities.sorted().joinToString()}"
                 }
                 Text(capabilityLabel, style = MaterialTheme.typography.bodySmall)
-                val limits = listOfNotNull(model.contextLimit?.let { "context $it" }, model.outputLimit?.let { "output $it" })
+                val limits = listOfNotNull(model.contextLimit?.let { "context $it" }, if (parseOutputLimitMode(model.outputLimitMode) == OutputLimitMode.AUTO) "output auto" else model.outputLimit?.let { "output $it" })
                 if (limits.isNotEmpty()) Text(limits.joinToString(" · "), style = MaterialTheme.typography.labelSmall)
             }
         }
@@ -521,7 +569,7 @@ private fun ProviderDetail(
 private fun ProviderEditorDialog(state: ProvidersUiState, actions: ProvidersActions, zh: Boolean) {
     val draft = state.draft
     val showModelFields = draft.modelProfileId != null || draft.modelId.isNotBlank() || draft.id == null
-    val budgetError = if (showModelFields) providerBudgetError(draft.contextLimit, draft.outputLimit, zh) else null
+    val budgetError = if (showModelFields) providerBudgetError(draft.contextLimit, draft.outputLimit, draft.outputLimitMode, zh) else null
     AlertDialog(
         onDismissRequest = actions.onCloseEditor,
         title = { Text(providerEditorTitle(draft, zh)) },
@@ -549,7 +597,7 @@ private fun ProviderEditorPage(
 ) {
     val draft = state.draft
     val showModelFields = draft.modelProfileId != null || draft.modelId.isNotBlank() || draft.id == null
-    val budgetError = if (showModelFields) providerBudgetError(draft.contextLimit, draft.outputLimit, zh) else null
+    val budgetError = if (showModelFields) providerBudgetError(draft.contextLimit, draft.outputLimit, draft.outputLimitMode, zh) else null
     Surface(modifier.fillMaxSize().testTag("provider.editor.page")) {
         Column(Modifier.fillMaxSize().padding(horizontal = 16.dp, vertical = 12.dp)) {
             ProviderEditorFields(
@@ -651,6 +699,30 @@ private fun ProviderEditorFields(
                     OutlinedTextField(draft.role, { actions.onDraftChange(draft.copy(role = it)) }, label = { Text(if (zh) "操作/角色" else "Operation / role") }, keyboardOptions = noCorrectionAscii, modifier = Modifier.fillMaxWidth())
                     OutlinedTextField(draft.parametersJson, { actions.onDraftChange(draft.copy(parametersJson = it)) }, label = { Text(if (zh) "参数 JSON" else "Parameters JSON") }, keyboardOptions = noCorrectionText, minLines = 2, modifier = Modifier.fillMaxWidth())
                     OutlinedTextField(draft.contextLimit, { actions.onDraftChange(draft.copy(contextLimit = it)) }, label = { Text(if (zh) "上下文预算" else "Context budget") }, keyboardOptions = noCorrectionAscii, modifier = Modifier.fillMaxWidth(), isError = budgetError != null && parsePositiveProviderBudget(draft.contextLimit) == null)
+                    Text(if (zh) "最大输出" else "Maximum output", style = MaterialTheme.typography.titleSmall, modifier = Modifier.testTag("provider.outputLimit.title"))
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        FilterChip(
+                            selected = parseOutputLimitMode(draft.outputLimitMode) == OutputLimitMode.AUTO,
+                            onClick = { actions.onDraftChange(draft.copy(outputLimitMode = OutputLimitMode.AUTO.name)) },
+                            label = { Text(if (zh) "跟随服务商" else "Follow provider") },
+                            modifier = Modifier.testTag("provider.outputLimitMode.auto"),
+                        )
+                        FilterChip(
+                            selected = parseOutputLimitMode(draft.outputLimitMode) == OutputLimitMode.MANUAL,
+                            onClick = { actions.onDraftChange(draft.copy(outputLimitMode = OutputLimitMode.MANUAL.name)) },
+                            label = { Text(if (zh) "手动设置" else "Manual") },
+                            modifier = Modifier.testTag("provider.outputLimitMode.manual"),
+                        )
+                    }
+                    Text(
+                        effectiveOutputLimitSource(draft, zh),
+                        style = MaterialTheme.typography.bodySmall,
+                        modifier = Modifier.testTag("provider.outputLimit.effectiveSource"),
+                    )
+                    if (parseOutputLimitMode(draft.outputLimitMode) == OutputLimitMode.MANUAL) {
+                        OutlinedTextField(draft.outputLimit, { actions.onDraftChange(draft.copy(outputLimit = it)) }, label = { Text(if (zh) "输出预算" else "Output budget") }, keyboardOptions = noCorrectionAscii, modifier = Modifier.fillMaxWidth(), isError = budgetError != null && (parsePositiveProviderBudget(draft.outputLimit) == null || (parsePositiveProviderBudget(draft.contextLimit)?.let { context -> parsePositiveProviderBudget(draft.outputLimit)?.let { output -> output > context } } == true)))
+                    }
+                    Text(if (zh) "自动只表示应用不额外指定输出上限；不是无限输出，也不改变推理模式或服务商。" else "Automatic only means the app adds no output cap; it is not unlimited output and does not change reasoning mode or provider.", style = MaterialTheme.typography.labelSmall)
                     OutlinedTextField(draft.outputLimit, { actions.onDraftChange(draft.copy(outputLimit = it)) }, label = { Text(if (zh) "输出预算" else "Output budget") }, keyboardOptions = noCorrectionAscii, modifier = Modifier.fillMaxWidth(), isError = budgetError != null && (parsePositiveProviderBudget(draft.outputLimit) == null || (parsePositiveProviderBudget(draft.contextLimit)?.let { context -> parsePositiveProviderBudget(draft.outputLimit)?.let { output -> output > context } } == true)))
                     CheckRow(if (zh) "输入包含图片" else "Input includes images", draft.vision) { actions.onDraftChange(draft.copy(vision = it)) }
                     CheckRow(if (zh) "可调用工具" else "Can call tools", draft.tools) { actions.onDraftChange(draft.copy(tools = it)) }

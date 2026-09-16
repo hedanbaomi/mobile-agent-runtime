@@ -582,7 +582,9 @@ private class PythonSkillToolExecutor(
             // The tool argument is the most specific override, then the model decision;
             // the same value is sent, reserved and settled.
             val wireCap = requestedCap ?: modelOutputDecision.value
-            val accountingCap = wireCap?.coerceIn(1, localCap) ?: localCap
+            // Known cap: the reservation equals what will be sent (an unaffordable cap
+            // is refused before dispatch).  Unknown output uses an explicit local estimate.
+            val accountingCap = wireCap ?: localCap
             val outputLimit = accountingCap
             val sendOutputLimit = wireCap
             val maxCalls = minOf(scopes.number("maxModelCalls") ?: 0, declared.number("maxModelCalls") ?: 0, 3)
@@ -615,14 +617,24 @@ private class PythonSkillToolExecutor(
                 // Same precedence as Chat/Vision: an explicit advanced override replaces
                 // the app default instead of being merged as a second alias.
                 val pythonSendCap = wireCap
+                // One terminal semantics for every outcome: known usage reaches the ledger
+                // (blocking later dispatches), unknown keeps the reservation, and the
+                // paid result is never replayed.
+                fun settlePythonUsage(input: Int?, output: Int?) {
+                    val actual = if (input != null && output != null) input + output else null
+                    budget?.settleModelCall(reserved, actual)
+                    bound.reservedModelTokens = (bound.reservedModelTokens - reserved + (actual ?: reserved)).coerceAtLeast(0)
+                    reservedModelTokens = (reservedModelTokens - reserved + (actual ?: reserved)).coerceAtLeast(0)
+                }
                 try {
                 adapter.stream(ModelRequest(binding.chatModel.modelId, listOf(ChatMessage("user", prompt)),
                     // AUTO sends no cap: this tool's local accounting cap above is not a
                     // hidden provider limit.  An explicit tool argument or a MANUAL
                     // profile cap is an explicit override and is sent.
-                    parameters = ParameterLayers(adapterDefaults = pythonSendCap?.let { mapOf("max_tokens" to JsonPrimitive(it)) } ?: emptyMap(),
+                    parameters = ParameterLayers(
                         modelParameters = Json.parseToJsonElement(binding.chatModel.parametersJson).jsonObject),
                     outputTokenLimit = pythonSendCap,
+                    outputTokenField = if (requestedCap != null) "max_tokens" else modelOutputDecision.key,
                     operationId = bound.ticket.invocationId), secret).collect { event ->
                     if (!authorized(bound)) throw BrokerDenied("PERMISSION_DENIED")
                     when (event) {
@@ -663,6 +675,12 @@ private class PythonSkillToolExecutor(
                     bound.reservedModelTokens = (bound.reservedModelTokens - reserved + (failureActual ?: reserved)).coerceAtLeast(0)
                     reservedModelTokens = (reservedModelTokens - reserved + (failureActual ?: reserved)).coerceAtLeast(0)
                     throw denied
+                } catch (cancel: kotlinx.coroutines.CancellationException) {
+                    settlePythonUsage(reportedInputTokens, reportedOutputTokens)
+                    throw cancel
+                } catch (other: Exception) {
+                    settlePythonUsage(reportedInputTokens, reportedOutputTokens)
+                    throw other
                 }
                 // Settle the reservation with the provider's own final usage.  Unknown
                 // usage keeps the reservation, and a larger actual raises the ledger so the

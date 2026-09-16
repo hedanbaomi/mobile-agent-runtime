@@ -872,6 +872,23 @@ class OpenAiCompatibleAdapter(
 
     private fun applyOutputTokenLimit(merged: JsonObject, request: ModelRequest): JsonObject {
         val budget = request.outputTokenLimit
+        // The resolved decision wins: keep exactly one output alias in the payload
+        // instead of letting a model-level alias collide with an agent-level one.
+        val chosenField = request.outputTokenField
+        if (chosenField != null) {
+            val effectiveBudget = budget
+                ?: throw invalidConfig("outputTokenField requires an output budget", request.operationId)
+            if (effectiveBudget <= 0) throw invalidConfig("outputTokenLimit must be positive", request.operationId)
+            if (chosenField !in listOf("max_tokens", "max_completion_tokens")) {
+                throw invalidConfig("Unsupported output token field", request.operationId)
+            }
+            val normalized = linkedMapOf<String, JsonElement>()
+            normalized.putAll(merged)
+            normalized.remove("max_tokens")
+            normalized.remove("max_completion_tokens")
+            normalized[chosenField] = JsonPrimitive(effectiveBudget)
+            return JsonObject(normalized)
+        }
         if (budget != null && budget <= 0) {
             throw invalidConfig("outputTokenLimit must be positive", request.operationId)
         }

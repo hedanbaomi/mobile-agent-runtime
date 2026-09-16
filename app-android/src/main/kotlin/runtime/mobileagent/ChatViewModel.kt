@@ -849,7 +849,8 @@ class ChatViewModel(
                 val preparedRequest = ModelRequest(model.modelId, prompt.asMessages(),
                     tools = if ("tools" in model.capabilities) toolExecutor.specs.map {
                         mapOf("name" to it.name, "description" to it.description, "parameters" to it.parametersJson)
-                    } else emptyList(), parameters = layers, headers = headers, outputTokenLimit = sendCap)
+                    } else emptyList(), parameters = layers, headers = headers, outputTokenLimit = sendCap,
+                    outputTokenField = if (outputDecision.isAdvancedOverride) outputDecision.key else null)
                 // The same complete adapter budgeter serves this pre-credential check and every Runtime round.
                 val preflight = adapter.estimateInput(if (contextPolicy.autoCompact) {
                     ContextPreflight.minimumRequest(prompt, runtimeContext, preparedRequest)

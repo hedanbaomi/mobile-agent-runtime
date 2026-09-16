@@ -67,5 +67,20 @@ fun probeOutputTokenLimit(mode: OutputLimitMode, profileLimit: Int, probeMax: In
  * profile revisions (parameter edits, capability-probe bookkeeping) must not
  * invalidate a window the user declared for the same target.
  */
+/**
+ * Does a recorded target still describe the live upstream capability?
+ *
+ * Accepts both the canonical key and the legacy `provider|revision|endpoint|model`
+ * form (the revision segment is dropped): a local profile revision must not
+ * invalidate a window the user declared for the same provider/endpoint/model,
+ * while a changed endpoint or model id still does.
+ */
+fun contextWindowTargetMatches(storedTarget: String?, currentTarget: String): Boolean {
+    if (storedTarget.isNullOrBlank()) return false
+    if (storedTarget == currentTarget) return true
+    val parts = storedTarget.split('|')
+    if (parts.size != 4) return false
+    return "${parts[0]}|${parts[2]}|${parts[3]}" == currentTarget
+}
 fun contextWindowTarget(providerId: String, endpoint: String, modelId: String): String =
     "$providerId|${endpoint.trimEnd('/')}|$modelId"

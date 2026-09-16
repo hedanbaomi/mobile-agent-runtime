@@ -195,7 +195,7 @@ data class ModelProfile(
     fun resolvedContextWindow(currentTargetKey: String): Int? = when {
         contextLimitMode == ContextLimitMode.MANUAL -> contextLimit
         contextWindowSource == ContextLimitSource.UNKNOWN -> null
-        contextWindowTarget != currentTargetKey -> null
+        !contextWindowTargetMatches(contextWindowTarget, currentTargetKey) -> null
         contextWindowValue == null || contextWindowValue <= 0 -> null
         else -> contextWindowValue
     }
@@ -204,7 +204,7 @@ data class ModelProfile(
     fun contextWindowIsStale(currentTargetKey: String): Boolean =
         contextLimitMode == ContextLimitMode.AUTO &&
             contextWindowSource != ContextLimitSource.UNKNOWN &&
-            contextWindowTarget != currentTargetKey
+            !contextWindowTargetMatches(contextWindowTarget, currentTargetKey)
 }
 
 @Serializable

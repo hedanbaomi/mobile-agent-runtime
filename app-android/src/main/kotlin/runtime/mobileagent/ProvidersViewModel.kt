@@ -22,7 +22,7 @@ import runtime.mobileagent.domain.validateBudgetSelection
 import runtime.mobileagent.domain.ContextLimitSource
 import runtime.mobileagent.domain.OutputLimitMode
 import runtime.mobileagent.domain.Utc
-import runtime.mobileagent.domain.contextWindowTargetKey
+import runtime.mobileagent.domain.contextWindowTarget
 import runtime.mobileagent.domain.ModelRole
 import runtime.mobileagent.domain.ProviderDestinationBinding
 import runtime.mobileagent.domain.ProviderProfile
@@ -217,7 +217,7 @@ class ProvidersViewModel @JvmOverloads constructor(
                 contextWindowValue = declaredWindow,
                 contextWindowSource = if (declaredWindow != null) ContextLimitSource.USER_DECLARED else ContextLimitSource.UNKNOWN,
                 contextWindowTarget = declaredWindow?.let {
-                    contextWindowTargetKey(providerId, (modelPrevious?.revision ?: 0) + 1, endpoint.toASCIIString(), draft.modelId.trim())
+                    contextWindowTarget(providerId, endpoint.toASCIIString(), draft.modelId.trim())
                 },
                 contextWindowCheckedAt = declaredWindow?.let { Utc.nowIso() },
                 revision = (modelPrevious?.revision ?: 0) + 1,

@@ -71,7 +71,7 @@ internal fun visionConfigurationIdentity(provider: ProviderProfile, model: Model
     // fingerprints (and their paid page caches) stay valid.  AUTO uses an
     // explicit marker, so a mode switch is a real target change instead of
     // silently reusing results produced under a different setting.
-    resolveEffectiveOutputCap(model.outputLimitMode, model.outputLimit, model.parametersJson).value?.toString() ?: "auto",
+    model.effectiveOutputTokenLimit()?.toString() ?: "auto",
     canonicalParts(*model.capabilities.sorted().toTypedArray()),
     canonicalParts(*model.endpoint.operations.map { it.name }.sorted().toTypedArray()),
     canonicalParts(*model.endpoint.inputModalities.map { it.name }.sorted().toTypedArray()),
@@ -234,6 +234,7 @@ class OpenAiCompatibleVision(
                     headers = headers,
                     operationId = input.requestId.ifBlank { "vision-${input.assetHash.take(24)}" },
                     outputTokenLimit = visionSendCap,
+                    outputTokenField = if (visionOutputDecision.isAdvancedOverride) visionOutputDecision.key else null,
                     diagnostics = diagnostics,
                     beforeDispatch = {
                         val repositoryAllowsDispatch = input.beforeDispatch()

@@ -188,6 +188,12 @@ data class ModelRequest(
     val operationId: String = "model-request",
     /** Optional runtime output budget.  Kept last with a default for source compatibility. */
     val outputTokenLimit: Int? = null,
+    /**
+     * The output-limit alias the resolved decision came from, when an explicit
+     * override won.  Adapters normalize the final payload to this single alias
+     * instead of rejecting a second one the app itself would have added.
+     */
+    val outputTokenField: String? = null,
     /** Optional fixed-schema transport diagnostics. A failing sink never affects the request. */
     val diagnostics: ModelDiagnosticSink? = null,
     /** Final fail-closed control gate, invoked exactly once immediately before HTTP dispatch. */

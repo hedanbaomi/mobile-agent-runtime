@@ -16,6 +16,7 @@ import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import runtime.mobileagent.data.ProfileRepository
 import runtime.mobileagent.domain.ModelProfile
+import runtime.mobileagent.domain.hasAdvancedOutputLimitOverride
 import runtime.mobileagent.domain.ProviderProfile
 import runtime.mobileagent.domain.acceptsImages
 import runtime.mobileagent.knowledge.VisionBackend
@@ -200,6 +201,7 @@ class OpenAiCompatibleVision(
                         emitDiagnostic(input, latest)
                     }
                 }
+                val visionSendCap = if (hasAdvancedOutputLimitOverride(model.parametersJson)) null else model.effectiveOutputTokenLimit()
                 val request = ModelRequest(
                     modelId = model.modelId,
                     messages = listOf(
@@ -215,16 +217,19 @@ class OpenAiCompatibleVision(
                             ),
                         ),
                     ),
+                    // The profile cap is the wrapper's default; an explicit advanced
+                    // override (e.g. a protocol-native max_output_tokens) replaces it
+                    // instead of being merged alongside it and rejected as a conflict.
                     stream = false,
                     parameters = ParameterLayers(
                         // AUTO sends no output field at all; the adapter adds the
                         // protocol-specific cap only when outputTokenLimit is set.
-                        adapterDefaults = model.effectiveOutputTokenLimit()?.let { mapOf("max_tokens" to JsonPrimitive(it)) } ?: emptyMap(),
+                        adapterDefaults = visionSendCap?.let { mapOf("max_tokens" to JsonPrimitive(it)) } ?: emptyMap(),
                         modelParameters = Json.parseToJsonElement(model.parametersJson).jsonObject,
                     ),
                     headers = headers,
                     operationId = input.requestId.ifBlank { "vision-${input.assetHash.take(24)}" },
-                    outputTokenLimit = model.effectiveOutputTokenLimit(),
+                    outputTokenLimit = visionSendCap,
                     diagnostics = diagnostics,
                     beforeDispatch = {
                         val repositoryAllowsDispatch = input.beforeDispatch()

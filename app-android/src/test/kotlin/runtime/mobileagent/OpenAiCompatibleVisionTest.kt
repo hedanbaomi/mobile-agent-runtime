@@ -351,6 +351,35 @@ class OpenAiCompatibleVisionTest {
         assertEquals(0, httpCalls)
     }
 
+
+    /**
+     * A MANUAL profile plus a lower native advanced cap must not produce two
+     * conflicting aliases: the user wrote one legal override and it wins.
+     */
+    @Test
+    fun nativeAdvancedCapReplacesTheProfileCapOnTheVisionRequest() {
+        var body = ""
+        val manual = target("adv", "model-adv")
+        val manualTarget = manual.first to manual.second.copy(
+            outputLimit = 8192,
+            outputLimitMode = OutputLimitMode.MANUAL,
+            parametersJson = "{\"max_completion_tokens\":4096}",
+        )
+        val backend = backend(
+            targets = listOf(manualTarget),
+            engine = MockEngine { request ->
+                body = (request.body as io.ktor.http.content.TextContent).text
+                respond(successBody(), HttpStatusCode.OK, jsonHeaders())
+            },
+        )
+
+        val outcome = backend.process(input(manualTarget))
+
+        assertTrue(outcome is VisionOutcome.Success, outcome.toString())
+        assertTrue(body.contains("\"max_completion_tokens\":4096"), body)
+        assertFalse(body.contains("\"max_tokens\":8192"), body)
+    }
+
     private fun successBody() =
         """{"choices":[{"message":{"content":"{\"ocrText\":\"ocr\",\"semanticDescription\":\"description\",\"tableMarkdown\":\"\",\"type\":\"image\"}"},"finish_reason":"stop"}],"usage":{"prompt_tokens":9,"completion_tokens":3}}"""
 

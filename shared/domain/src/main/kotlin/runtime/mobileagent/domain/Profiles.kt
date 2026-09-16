@@ -70,6 +70,70 @@ val ADVANCED_OUTPUT_LIMIT_KEYS = listOf("max_tokens", "max_completion_tokens", "
  * why the UI must display it as the effective source instead of claiming
  * "follow the provider" while a fixed cap is sent.
  */
+/** True when any supplied JSON layer already sets an explicit output cap. */
+/** Why a budget selection cannot be saved; the UI localizes it, the ViewModel rejects on it. */
+enum class BudgetValidationError {
+    MANUAL_CONTEXT_REQUIRED,
+    DECLARED_WINDOW_INVALID,
+    MANUAL_OUTPUT_REQUIRED,
+    OUTPUT_EXCEEDS_WINDOW,
+}
+
+/**
+ * Single source of truth for the editor and the save path.
+ *
+ * Validation follows the selected mode and the sources the user can see: an
+ * AUTO context window may be unknown (and never borrows a hidden legacy
+ * number), while a manual output cap is only compared against a window that is
+ * actually effective.
+ */
+/**
+ * Correct a reservation ledger with the provider's final usage.
+ *
+ * `actualTokens == null` means the provider reported nothing: the conservative
+ * reservation is kept and the real consumption stays unknown.  The caller must
+ * settle one request at most once.
+ */
+fun settleReservedTokens(ledger: Long, reservation: Int, actualTokens: Int?): Long {
+    if (actualTokens == null || reservation <= 0) return ledger
+    return (ledger - reservation + actualTokens.coerceAtLeast(0)).coerceAtLeast(0L)
+}
+
+/**
+ * Admission rule for an explicitly budgeted model invocation: persisted usage
+ * plus the unsettled ledger plus this reservation must stay inside the ceiling.
+ */
+fun admitsModelInvocation(storedTokens: Long, ledger: Long, reservation: Int, ceiling: Int): Boolean =
+    reservation > 0 && ceiling > 0 && storedTokens + ledger + reservation <= ceiling.toLong()
+fun validateBudgetSelection(
+    manualContext: Int?,
+    manualOutput: Int?,
+    contextMode: ContextLimitMode,
+    outputMode: OutputLimitMode,
+    declaredWindow: Int?,
+    declaredWindowRawFilled: Boolean,
+): BudgetValidationError? = when {
+    contextMode == ContextLimitMode.MANUAL && manualContext == null -> BudgetValidationError.MANUAL_CONTEXT_REQUIRED
+    contextMode == ContextLimitMode.AUTO && declaredWindowRawFilled && declaredWindow == null ->
+        BudgetValidationError.DECLARED_WINDOW_INVALID
+    outputMode == OutputLimitMode.MANUAL && manualOutput == null -> BudgetValidationError.MANUAL_OUTPUT_REQUIRED
+    else -> {
+        val effectiveWindow = if (contextMode == ContextLimitMode.MANUAL) manualContext else declaredWindow
+        if (outputMode == OutputLimitMode.MANUAL && effectiveWindow != null && manualOutput != null &&
+            manualOutput > effectiveWindow
+        ) {
+            BudgetValidationError.OUTPUT_EXCEEDS_WINDOW
+        } else {
+            null
+        }
+    }
+}
+fun hasAdvancedOutputLimitOverride(vararg parameterJsonLayers: String?): Boolean =
+    parameterJsonLayers.any { layer ->
+        if (layer.isNullOrBlank()) return@any false
+        val root = runCatching { Json.parseToJsonElement(layer) as? JsonObject }.getOrNull() ?: return@any false
+        ADVANCED_OUTPUT_LIMIT_KEYS.any { key -> root[key] is JsonPrimitive }
+    }
 fun advancedOutputLimitOverride(parametersJson: String): Pair<String, Long>? {
     val root = runCatching { Json.parseToJsonElement(parametersJson) as? JsonObject }.getOrNull() ?: return null
     return ADVANCED_OUTPUT_LIMIT_KEYS.firstNotNullOfOrNull { key ->

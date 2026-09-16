@@ -338,6 +338,9 @@ class ProfileRepository(private val db: SqlConnection) {
                 "m.role AS m_role,m.model_id AS m_model_id,m.capabilities AS m_capabilities," +
                 "m.parameter_schema_json AS m_parameter_schema_json,m.parameters_json AS m_parameters_json," +
                 "m.context_limit AS m_context_limit,m.output_limit AS m_output_limit,m.revision AS m_revision," +
+            "m.output_limit_mode AS m_output_limit_mode,m.context_limit_mode AS m_context_limit_mode," +
+            "m.context_window_value AS m_context_window_value,m.context_window_source AS m_context_window_source," +
+            "m.context_window_target AS m_context_window_target,m.context_window_checked_at AS m_context_window_checked_at," +
                 "m.endpoint_json AS m_endpoint_json " +
                 "FROM provider_profiles p JOIN model_profiles m ON m.provider_id=p.id$where " +
                 "ORDER BY p.name,p.id,m.model_id,m.id",

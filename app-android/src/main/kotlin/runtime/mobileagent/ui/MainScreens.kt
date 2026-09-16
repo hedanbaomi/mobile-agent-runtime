@@ -1422,6 +1422,9 @@ private fun ProvidersRoute(entry: NavBackStackEntry, chinese: Boolean, onRoute: 
                             .filter { it !in setOf("image", "tools") }.forEach(::add)
                     }, parametersJson = providerDraft.parametersJson, contextLimit = providerDraft.contextLimit,
                     outputLimit = providerDraft.outputLimit,
+                outputLimitMode = runtime.mobileagent.domain.OutputLimitMode.valueOf(providerDraft.outputLimitMode),
+                contextLimitMode = runtime.mobileagent.domain.ContextLimitMode.valueOf(providerDraft.contextLimitMode),
+                contextWindowValue = providerDraft.contextWindowValue,
             ))) {
                 editorOpen = false; providerDraft = providerDraft.copy(apiKey = ""); providerBaseline = providerDraft
                 providerError = null; selectedProviderId = providerDraft.id ?: providers.firstOrNull { it.name == providerDraft.name.trim() }?.id
@@ -1731,17 +1734,22 @@ private fun providerDraftFrom(provider: runtime.mobileagent.domain.ProviderProfi
         name = provider?.name.orEmpty(), baseUrl = provider?.baseUrl.orEmpty(), apiFormat = provider?.apiFormat?.name ?: "OPENAI_COMPATIBLE",
         modelId = model?.modelId.orEmpty(), role = model?.role?.name ?: "CHAT", parametersJson = model?.parametersJson ?: "{}",
         contextLimit = model?.contextLimit?.toString() ?: "32768", outputLimit = model?.effectiveOutputTokenLimit()?.toString() ?: "4096",
+        outputLimitMode = (model?.outputLimitMode ?: runtime.mobileagent.domain.OutputLimitMode.AUTO).name,
+        contextLimitMode = (model?.contextLimitMode ?: runtime.mobileagent.domain.ContextLimitMode.AUTO).name,
+        contextWindowValue = model?.contextWindowValue?.toString() ?: "",
         vision = model?.capabilities?.contains("image") == true, tools = model?.capabilities?.contains("tools") == true)
 
 private val providerDraftSaver: Saver<runtime.mobileagent.feature.providers.ProviderDraft, List<Any?>> = Saver(
     save = { draft -> listOf(draft.id, draft.modelProfileId, draft.name, draft.baseUrl, draft.apiFormat, draft.modelId,
-        draft.vision, draft.tools, draft.role, draft.parametersJson, draft.contextLimit, draft.outputLimit, draft.outputLimitMode) },
+        draft.vision, draft.tools, draft.role, draft.parametersJson, draft.contextLimit, draft.outputLimit, draft.outputLimitMode, draft.contextLimitMode, draft.contextWindowValue) },
     restore = { value -> runtime.mobileagent.feature.providers.ProviderDraft(
         id = value[0] as String?, modelProfileId = value[1] as String?, name = value[2] as String,
         baseUrl = value[3] as String, apiFormat = value[4] as String, modelId = value[5] as String,
         vision = value[6] as Boolean, tools = value[7] as Boolean, role = value[8] as String,
         parametersJson = value[9] as String, contextLimit = value[10]?.toString() ?: "32768",
-        outputLimit = value[11]?.toString() ?: "4096", outputLimitMode = value[12]?.toString() ?: "AUTO") },
+        outputLimit = value[11]?.toString() ?: "4096", outputLimitMode = value[12]?.toString() ?: "AUTO",
+        contextLimitMode = value[13]?.toString() ?: "AUTO",
+        contextWindowValue = value[14]?.toString() ?: "") },
 )
 
 private fun thirdPartyNoticeError(failure: Throwable, chinese: Boolean): String {

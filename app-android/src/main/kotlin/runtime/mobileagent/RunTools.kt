@@ -20,6 +20,8 @@ import kotlinx.serialization.json.put
 import runtime.mobileagent.agent.AgentRun
 import runtime.mobileagent.agent.RunState
 import runtime.mobileagent.data.SqlRow
+import runtime.mobileagent.domain.admitsModelInvocation
+import runtime.mobileagent.domain.settleReservedTokens
 import runtime.mobileagent.domain.AgentSnapshot
 import runtime.mobileagent.knowledge.Citation
 import runtime.mobileagent.knowledge.isPublishedCitationVersion
@@ -95,10 +97,21 @@ class RunTools(
             val tokenLimit = objectOrNull(stored.budgetJson)?.integer("maxModelTokens")
                 ?.takeIf { it > 0 } ?: return@synchronized false
             val used = stored.inputTokens.toLong() + stored.outputTokens + reservedModelTokens
-            if (used < 0 || used + maxTokens > tokenLimit.toLong()) return@synchronized false
+            if (!admitsModelInvocation(used, 0L, maxTokens, tokenLimit)) return@synchronized false
             run.modelRounds += 1
             reservedModelTokens += maxTokens
+
             true
+
+        }
+
+        override fun settleModelCall(reservation: Int, actualTokens: Int?) = synchronized(run) {
+            // Only the provider's own final usage may replace a conservative
+            // reservation.  Unknown usage keeps the reservation, so a silent
+            // provider cannot buy extra dispatches.
+            if (actualTokens == null || reservation <= 0) return@synchronized
+            val actual = actualTokens.coerceAtLeast(0)
+            reservedModelTokens = settleReservedTokens(reservedModelTokens, reservation, actual)
         }
     }
 

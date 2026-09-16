@@ -3,7 +3,9 @@
 
 package runtime.mobileagent.feature.providers
 
+import runtime.mobileagent.domain.BudgetValidationError
 import runtime.mobileagent.domain.ContextLimitMode
+import runtime.mobileagent.domain.validateBudgetSelection
 import runtime.mobileagent.domain.OutputLimitMode
 import runtime.mobileagent.domain.advancedOutputLimitOverride
 import androidx.compose.foundation.clickable
@@ -153,6 +155,44 @@ fun providerBudgetError(
     }
 }
 
+/**
+ * Mode-aware budget validation.  Only the *effective* sources decide:
+ * - a MANUAL context window must be a positive number;
+ * - an AUTO window may be absent (unknown) and never borrows the hidden legacy
+ *   number the editor does not show;
+ * - a manual output cap is compared against the effective window only when one
+ *   is actually known.
+ */
+fun providerBudgetError(
+    contextLimit: String,
+    outputLimit: String,
+    outputLimitMode: String,
+    contextLimitMode: String,
+    contextWindowValue: String,
+    zh: Boolean,
+): String? {
+    // Shared semantics with ProvidersViewModel: the same domain decision decides
+    // whether the editor may save.
+    val error = validateBudgetSelection(
+        manualContext = parsePositiveProviderBudget(contextLimit),
+        manualOutput = parsePositiveProviderBudget(outputLimit),
+        contextMode = parseContextLimitMode(contextLimitMode),
+        outputMode = parseOutputLimitMode(outputLimitMode),
+        declaredWindow = parsePositiveProviderBudget(contextWindowValue),
+        declaredWindowRawFilled = contextWindowValue.isNotBlank(),
+    )
+    return when (error) {
+        null -> null
+        BudgetValidationError.MANUAL_CONTEXT_REQUIRED ->
+            if (zh) "手动上下文窗口必须是正整数。" else "A manual context window must be a positive integer."
+        BudgetValidationError.DECLARED_WINDOW_INVALID ->
+            if (zh) "已知上下文窗口必须是正整数。" else "The known context window must be a positive integer."
+        BudgetValidationError.MANUAL_OUTPUT_REQUIRED ->
+            if (zh) "手动输出预算必须是正整数。" else "A manual output budget must be a positive integer."
+        BudgetValidationError.OUTPUT_EXCEEDS_WINDOW ->
+            if (zh) "输出预算不能超过已知的上下文窗口。" else "Output budget cannot exceed the known context window."
+    }
+}
 fun parseContextLimitMode(raw: String): ContextLimitMode =
     runCatching { ContextLimitMode.valueOf(raw.trim().uppercase()) }.getOrDefault(ContextLimitMode.MANUAL)
 
@@ -602,7 +642,7 @@ private fun ProviderDetail(
 private fun ProviderEditorDialog(state: ProvidersUiState, actions: ProvidersActions, zh: Boolean) {
     val draft = state.draft
     val showModelFields = draft.modelProfileId != null || draft.modelId.isNotBlank() || draft.id == null
-    val budgetError = if (showModelFields) providerBudgetError(draft.contextLimit, draft.outputLimit, draft.outputLimitMode, zh) else null
+    val budgetError = if (showModelFields) providerBudgetError(draft.contextLimit, draft.outputLimit, draft.outputLimitMode, draft.contextLimitMode, draft.contextWindowValue, zh) else null
     AlertDialog(
         onDismissRequest = actions.onCloseEditor,
         title = { Text(providerEditorTitle(draft, zh)) },
@@ -630,7 +670,7 @@ private fun ProviderEditorPage(
 ) {
     val draft = state.draft
     val showModelFields = draft.modelProfileId != null || draft.modelId.isNotBlank() || draft.id == null
-    val budgetError = if (showModelFields) providerBudgetError(draft.contextLimit, draft.outputLimit, draft.outputLimitMode, zh) else null
+    val budgetError = if (showModelFields) providerBudgetError(draft.contextLimit, draft.outputLimit, draft.outputLimitMode, draft.contextLimitMode, draft.contextWindowValue, zh) else null
     Surface(modifier.fillMaxSize().testTag("provider.editor.page")) {
         Column(Modifier.fillMaxSize().padding(horizontal = 16.dp, vertical = 12.dp)) {
             ProviderEditorFields(
@@ -776,7 +816,6 @@ private fun ProviderEditorFields(
                         OutlinedTextField(draft.outputLimit, { actions.onDraftChange(draft.copy(outputLimit = it)) }, label = { Text(if (zh) "输出预算" else "Output budget") }, keyboardOptions = noCorrectionAscii, modifier = Modifier.fillMaxWidth(), isError = budgetError != null && (parsePositiveProviderBudget(draft.outputLimit) == null || (parsePositiveProviderBudget(draft.contextLimit)?.let { context -> parsePositiveProviderBudget(draft.outputLimit)?.let { output -> output > context } } == true)))
                     }
                     Text(if (zh) "自动只表示应用不额外指定输出上限；不是无限输出，也不改变推理模式或服务商。" else "Automatic only means the app adds no output cap; it is not unlimited output and does not change reasoning mode or provider.", style = MaterialTheme.typography.labelSmall)
-                    OutlinedTextField(draft.outputLimit, { actions.onDraftChange(draft.copy(outputLimit = it)) }, label = { Text(if (zh) "输出预算" else "Output budget") }, keyboardOptions = noCorrectionAscii, modifier = Modifier.fillMaxWidth(), isError = budgetError != null && (parsePositiveProviderBudget(draft.outputLimit) == null || (parsePositiveProviderBudget(draft.contextLimit)?.let { context -> parsePositiveProviderBudget(draft.outputLimit)?.let { output -> output > context } } == true)))
                     CheckRow(if (zh) "输入包含图片" else "Input includes images", draft.vision) { actions.onDraftChange(draft.copy(vision = it)) }
                     CheckRow(if (zh) "可调用工具" else "Can call tools", draft.tools) { actions.onDraftChange(draft.copy(tools = it)) }
                 }

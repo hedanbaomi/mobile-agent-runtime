@@ -14,6 +14,7 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.*
+import runtime.mobileagent.domain.hasAdvancedOutputLimitOverride
 import runtime.mobileagent.domain.AgentSnapshot
 import runtime.mobileagent.domain.AuditEvent
 import runtime.mobileagent.domain.RunStatus
@@ -57,6 +58,17 @@ interface PythonRunBudget {
 
     /** Atomically consume a model round and a conservative maximum token reservation. No refund/retry. */
     fun reserveModelCall(maxTokens: Int): Boolean
+
+    /**
+     * Settle a reservation with the provider's final usage for that request.
+     *
+     * - actualTokens = reported input + output; the ledger is corrected to the real
+     *   spend, so a larger actual can block the next dispatch;
+     * - null means the provider reported nothing: the conservative reservation is
+     *   kept and real consumption stays unknown;
+     * - one request must settle at most once.
+     */
+    fun settleModelCall(reservation: Int, actualTokens: Int?)
 }
 
 /** Run-local discovery and execution. No interpreter is loaded into the application process. */
@@ -600,12 +612,16 @@ private class PythonSkillToolExecutor(
                 val text = StringBuilder()
                 var completed = false
                 effectDispatched()
+                // Same precedence as Chat/Vision: an explicit advanced override replaces
+                // the app default instead of being merged as a second alias.
+                val pythonSendCap = if (hasAdvancedOutputLimitOverride(binding.chatModel.parametersJson)) null else sendOutputLimit
                 adapter.stream(ModelRequest(binding.chatModel.modelId, listOf(ChatMessage("user", prompt)),
                     // AUTO sends no cap: this tool's local accounting cap above is not a
                     // hidden provider limit.  An explicit tool argument or a MANUAL
                     // profile cap is an explicit override and is sent.
-                    parameters = ParameterLayers(adapterDefaults = sendOutputLimit?.let { mapOf("max_tokens" to JsonPrimitive(it)) } ?: emptyMap()),
-                    outputTokenLimit = sendOutputLimit,
+                    parameters = ParameterLayers(adapterDefaults = pythonSendCap?.let { mapOf("max_tokens" to JsonPrimitive(it)) } ?: emptyMap(),
+                        modelParameters = Json.parseToJsonElement(binding.chatModel.parametersJson).jsonObject),
+                    outputTokenLimit = pythonSendCap,
                     operationId = bound.ticket.invocationId), secret).collect { event ->
                     if (!authorized(bound)) throw BrokerDenied("PERMISSION_DENIED")
                     when (event) {
@@ -634,6 +650,17 @@ private class PythonSkillToolExecutor(
                     }
                 }
                 if (!completed) throw BrokerDenied("UNKNOWN_OUTCOME")
+                // Settle the reservation with the provider's own final usage.  Unknown
+                // usage keeps the reservation, and a larger actual raises the ledger so the
+                // next model.invoke is refused by the shared Run budget.
+                val settledActual = if (reportedInputTokens != null && reportedOutputTokens != null) {
+                    reportedInputTokens!! + reportedOutputTokens!!
+                } else {
+                    null
+                }
+                budget?.settleModelCall(reserved, settledActual)
+                bound.reservedModelTokens = (bound.reservedModelTokens - reserved + (settledActual ?: reserved)).coerceAtLeast(0)
+                reservedModelTokens = (reservedModelTokens - reserved + (settledActual ?: reserved)).coerceAtLeast(0)
                 val redacted = SecretRedactor.redact(text.toString(), secrets.map { it.concatToString() })
                 // `reservedTokens` is the admission reservation, never presented as
         // measured consumption.  Actual usage is reported only when the

@@ -781,7 +781,16 @@ class ChatViewModel(
                 // cap only when outputTokenLimit is set, so an empty default map is what makes
                 // "follow the provider" real on the wire.
                 val outputCap = model.effectiveOutputTokenLimit()
-                val layers = ParameterLayers(adapterDefaults = outputCap?.let { mapOf("max_tokens" to JsonPrimitive(it)) } ?: emptyMap(),
+                // An explicit advanced-parameter cap is the user's own override: the app
+                // must not add a second alias for the same protocol, which the adapter
+                // would reject as a conflict.  Only the injected default is suppressed;
+                // the user's value still flows through the parameter merge.
+                val advancedOverride = hasAdvancedOutputLimitOverride(
+                    model.parametersJson,
+                    binding.snapshot.parameterOverridesJson,
+                )
+                val sendCap = if (advancedOverride) null else outputCap
+                val layers = ParameterLayers(adapterDefaults = sendCap?.let { mapOf("max_tokens" to JsonPrimitive(it)) } ?: emptyMap(),
                     modelParameters = Json.parseToJsonElement(model.parametersJson).jsonObject,
                     agentOverrides = Json.parseToJsonElement(binding.snapshot.parameterOverridesJson).jsonObject)
                 val trackedGrantIds = preparedFacts.grants.map { it.grantId }.toSet()
@@ -838,7 +847,7 @@ class ChatViewModel(
                 val preparedRequest = ModelRequest(model.modelId, prompt.asMessages(),
                     tools = if ("tools" in model.capabilities) toolExecutor.specs.map {
                         mapOf("name" to it.name, "description" to it.description, "parameters" to it.parametersJson)
-                    } else emptyList(), parameters = layers, headers = headers, outputTokenLimit = outputCap)
+                    } else emptyList(), parameters = layers, headers = headers, outputTokenLimit = sendCap)
                 // The same complete adapter budgeter serves this pre-credential check and every Runtime round.
                 val preflight = adapter.estimateInput(if (contextPolicy.autoCompact) {
                     ContextPreflight.minimumRequest(prompt, runtimeContext, preparedRequest)
@@ -936,7 +945,7 @@ class ChatViewModel(
                 runtime.run(AgentRuntimeRequest(run, prompt, model.modelId, secret!!, "tools" in model.capabilities,
                     parameters = layers, headers = headers, emitRequestPreview = container.uiPreferences.getBoolean("request-inspector", true),
                     toolImages = runTools::toolImages, maxInputBudgetUnits = inputBudget.toLong(),
-                    outputTokenLimit = outputCap,
+                    outputTokenLimit = sendCap,
                     maxImagesPerRequest = contextPolicy.imageBudget,
                     context = runtimeContext,
                     beforeModelRequest = {

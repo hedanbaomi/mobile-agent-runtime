@@ -16,7 +16,9 @@ import kotlinx.serialization.json.JsonObject
 import runtime.mobileagent.domain.ApiFormat
 import runtime.mobileagent.domain.EntityId
 import runtime.mobileagent.domain.ModelProfile
+import runtime.mobileagent.domain.BudgetValidationError
 import runtime.mobileagent.domain.ContextLimitMode
+import runtime.mobileagent.domain.validateBudgetSelection
 import runtime.mobileagent.domain.ContextLimitSource
 import runtime.mobileagent.domain.OutputLimitMode
 import runtime.mobileagent.domain.Utc
@@ -152,22 +154,38 @@ class ProvidersViewModel @JvmOverloads constructor(
             var declaredWindow: Int? = null
             if (saveModel) {
                 require(draft.modelId.isNotBlank()) { "请填写模型 ID。" }
-                contextLimit = parsePositiveProviderBudget(draft.contextLimit)
-                    ?: error("上下文预算必须是正整数。")
-                // AUTO stores 0 in the legacy NOT NULL column; the value is
-                // ignored and no output cap is derived from it.  MANUAL keeps the
-                // exact previous contract.
+                // Validation follows the selected mode and the sources the user can
+                // actually see: a hidden legacy number must never decide the result.
+                val manualWindow = parsePositiveProviderBudget(draft.contextLimit)
+                val declaredWindowRaw = if (draft.contextLimitMode == ContextLimitMode.AUTO) {
+                    draft.contextWindowValue.trim().takeIf { it.isNotEmpty() }?.let {
+                        parsePositiveProviderBudget(it)
+                    }
+                } else {
+                    null
+                }
+                when (validateBudgetSelection(
+                    manualContext = manualWindow,
+                    manualOutput = parsePositiveProviderBudget(draft.outputLimit),
+                    contextMode = draft.contextLimitMode,
+                    outputMode = draft.outputLimitMode,
+                    declaredWindow = declaredWindowRaw,
+                    declaredWindowRawFilled = draft.contextLimitMode == ContextLimitMode.AUTO && draft.contextWindowValue.isNotBlank(),
+                )) {
+                    BudgetValidationError.MANUAL_CONTEXT_REQUIRED -> error("手动上下文窗口必须是正整数。")
+                    BudgetValidationError.DECLARED_WINDOW_INVALID -> error("已知上下文窗口必须是正整数。")
+                    BudgetValidationError.MANUAL_OUTPUT_REQUIRED -> error("手动输出预算必须是正整数。")
+                    BudgetValidationError.OUTPUT_EXCEEDS_WINDOW -> error("输出预算不能超过已知的上下文窗口。")
+                    null -> Unit
+                }
+                // Persisted values: MANUAL keeps its number, AUTO stores 0 for the
+                // ignored numeric columns (the mode is the source of truth).
+                contextLimit = manualWindow ?: 0
                 outputLimit = if (draft.outputLimitMode == OutputLimitMode.MANUAL) {
-                    parsePositiveProviderBudget(draft.outputLimit)
-                        ?: error("手动输出预算必须是正整数。")
+                    parsePositiveProviderBudget(draft.outputLimit) ?: 0
                 } else {
                     0
                 }
-                if (draft.outputLimitMode == OutputLimitMode.MANUAL) {
-                    require(outputLimit <= contextLimit) { "输出预算不能超过上下文预算。" }
-                }
-// AUTO keeps whatever window the user declared from provider documentation;
-// without one the capability stays UNKNOWN (never a fabricated number).
                 declaredWindow = if (draft.contextLimitMode == ContextLimitMode.AUTO) {
                     draft.contextWindowValue.trim().takeIf { it.isNotEmpty() }?.let {
                         parsePositiveProviderBudget(it) ?: error("已知上下文窗口必须是正整数。")
@@ -199,7 +217,7 @@ class ProvidersViewModel @JvmOverloads constructor(
                 contextWindowValue = declaredWindow,
                 contextWindowSource = if (declaredWindow != null) ContextLimitSource.USER_DECLARED else ContextLimitSource.UNKNOWN,
                 contextWindowTarget = declaredWindow?.let {
-                    contextWindowTargetKey(providerId, (previous?.revision ?: 0) + 1, endpoint.toASCIIString(), draft.modelId.trim())
+                    contextWindowTargetKey(providerId, (modelPrevious?.revision ?: 0) + 1, endpoint.toASCIIString(), draft.modelId.trim())
                 },
                 contextWindowCheckedAt = declaredWindow?.let { Utc.nowIso() },
                 revision = (modelPrevious?.revision ?: 0) + 1,

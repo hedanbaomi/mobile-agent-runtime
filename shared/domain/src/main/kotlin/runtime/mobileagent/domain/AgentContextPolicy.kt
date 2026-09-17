@@ -27,6 +27,13 @@ data class AgentContextPolicy(
     val summaryOutputTokens: Int = 1024,
     val summaryMaxUnits: Int = 8192,
     val reservedOutputTokens: Int? = null,
+    /**
+     * The user's own per-Run fee ceiling for Python `model.invoke`.  Absent means
+     * the Run carries no model-token authorization at all, so a bound skill with
+     * an approved `model.invoke` grant still cannot spend: the install approval
+     * and the Run authorization are separate decisions.
+     */
+    val pythonModelRunTokens: Int? = null,
     val knowledgeTokenBudget: Int = 3000,
     val imageBudget: Int = 4,
     /**
@@ -56,6 +63,9 @@ data class AgentContextPolicy(
         require(summaryOutputTokens in 128..8192) { "summaryOutputTokens must be 128..8192" }
         require(summaryMaxUnits in 512..65_536) { "summaryMaxUnits must be 512..65536" }
         require(reservedOutputTokens == null || reservedOutputTokens > 0) { "reservedOutputTokens must be positive" }
+        require(pythonModelRunTokens == null || pythonModelRunTokens in 1..10_000_000) {
+            "pythonModelRunTokens must be 1..10000000"
+        }
         require(knowledgeTokenBudget > 0) { "knowledgeTokenBudget must be positive" }
         require(imageBudget in 1..32) { "imageBudget must be 1..32" }
     }
@@ -115,7 +125,8 @@ data class AgentContextPolicy(
                 targetPercent = int("targetPercent", 60), maxModelRoundsPerSegment = int("maxModelRoundsPerSegment", 8),
                 maxModelRequestsPerRun = int("maxModelRequestsPerRun", 32), maxCompactionsPerRun = int("maxCompactionsPerRun", 8),
                 summaryOutputTokens = int("summaryOutputTokens", 1024), summaryMaxUnits = int("summaryMaxUnits", 8192),
-                reservedOutputTokens = optional("reservedOutputTokens"), knowledgeTokenBudget = int("knowledgeTokenBudget", 3000),
+                reservedOutputTokens = optional("reservedOutputTokens"),
+                pythonModelRunTokens = optional("pythonModelRunTokens"), knowledgeTokenBudget = int("knowledgeTokenBudget", 3000),
                 imageBudget = int("imageBudget", 4), localOutputReserve = int("localOutputReserve", 1024),
                 localUnknownWindow = int("localUnknownWindow", 16_384),
             )

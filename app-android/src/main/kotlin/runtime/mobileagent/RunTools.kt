@@ -4,6 +4,7 @@
 package runtime.mobileagent
 
 import android.content.Context
+import io.ktor.client.HttpClient
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.runInterruptible
@@ -61,6 +62,12 @@ class RunTools(
      * before the factory receives it.
      */
     private val runExecutorFactory: ((python: ToolExecutor) -> ToolExecutor?)? = null,
+    /**
+     * Provider transport for the Python `model.invoke` route.  Production passes
+     * nothing and the container's client is used; the broker regression injects a
+     * MockEngine so the real assembly, budget and adapter run without network.
+     */
+    private val providerHttp: HttpClient? = null,
 ) {
     init {
         require(run.runId.isNotBlank() && run.snapshotId == snapshot.id) { "Run and snapshot binding must match" }
@@ -120,7 +127,7 @@ class RunTools(
     // and context used by the legacy path.  A factory-owned executor contains
     // Python/workspace/memory/shell; it replaces, rather than supplements, the
     // legacy provider list to prevent duplicate names or fallback routes.
-    private val python: ToolExecutor = pythonSkillTools(container, context, snapshot, run.runId, pythonBudget)
+    private val python: ToolExecutor = pythonSkillTools(container, context, snapshot, run.runId, pythonBudget, providerHttp)
     private val providerExecutor: ToolExecutor? = runExecutor ?: runExecutorFactory?.invoke(python)
     private val routeOwners: List<ToolExecutor> = when {
         providerExecutor != null -> listOf(builtins, providerExecutor)

@@ -400,8 +400,21 @@ class ChatViewModel(
             // may cancel/terminalize the run through the RunCoordinator.
             val runOwnerKey = "chat:$conversationId"
             val createdAt = Utc.nowIso()
+            // The Run's own model.invoke fee authorization: the user's per-run number
+            // (Agent policy), clamped to what the approved package scopes allow.  An
+            // approved install grant alone is not a Run permission.
+            val approvedModelCeilings = binding.snapshot.skillIds.mapNotNull { installId ->
+                container.skills.grantsFor(installId)
+                    .firstOrNull { !it.revoked && "model.invoke" in it.capabilities }?.maxModelTokens
+            }
+            val runModelTokens = modelInvokeRunTokens(contextPolicy.pythonModelRunTokens, approvedModelCeilings)
             var record = RunRecord(run.runId, run.snapshotId, conversationId, createdAt = createdAt, startedAt = createdAt,
-                budgetJson = "{\"maxModelRounds\":${run.budget.maxModelRounds},\"maxToolCalls\":20,\"maxRuntimeMs\":180000,\"maxModelRoundsPerSegment\":${contextPolicy.maxModelRoundsPerSegment},\"maxCompactionsPerRun\":${contextPolicy.maxCompactionsPerRun}}")
+                budgetJson = runBudgetJson(
+                    maxModelRounds = run.budget.maxModelRounds,
+                    maxModelRoundsPerSegment = contextPolicy.maxModelRoundsPerSegment,
+                    maxCompactionsPerRun = contextPolicy.maxCompactionsPerRun,
+                    modelInvokeTokens = runModelTokens,
+                ))
             var secret: CharArray? = null
             val compactionUsage = RunCompactionUsage()
             var assistantId: String? = null

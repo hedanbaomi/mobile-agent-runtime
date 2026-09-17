@@ -145,7 +145,12 @@ class SkillsViewModel(
         state.value = state.value.copy(install = pending?.let { (name, inspection) ->
             SkillInstallUi(name, inspection.packageHash, inspection.classification.name, inspection.reasons,
                 permissions = inspection.manifest?.permissionSpecs.orEmpty().map { spec ->
-                    SkillPermissionUi(spec.capability, scopeLabel(spec.knowledgeBaseIds, spec.hosts, spec.methods), false)
+                    SkillPermissionUi(
+                        spec.capability,
+                        scopeLabel(spec.knowledgeBaseIds, spec.hosts, spec.methods,
+                            spec.modelProfileIds, spec.maxModelCalls ?: 0, spec.maxModelTokens ?: 0),
+                        false,
+                    )
                 }, installable = inspection.installable,
                 status = "原包字节保持不变；兼容清单只在本机按包哈希生成。安装仅保存到本机，逐资源授权和启用需另行确认。")
         })
@@ -277,10 +282,21 @@ class SkillsViewModel(
         state.value = state.value.copy(status = status.value)
     }
 
-    private fun scopeLabel(kbs: Set<String>, hosts: Set<String>, methods: Set<String>): String =
+    private fun scopeLabel(
+        kbs: Set<String>,
+        hosts: Set<String>,
+        methods: Set<String>,
+        models: Set<String> = emptySet(),
+        maxModelCalls: Int = 0,
+        maxModelTokens: Int = 0,
+    ): String =
         listOfNotNull(kbs.takeIf { it.isNotEmpty() }?.let { "已选择知识库（${it.size} 个）" },
             hosts.takeIf { it.isNotEmpty() }?.let { "已配置目的域名（${it.size} 个）" },
-            methods.takeIf { it.isNotEmpty() }?.let { "HTTP 方法：${it.sorted().joinToString("、")}" })
+            methods.takeIf { it.isNotEmpty() }?.let { "HTTP 方法：${it.sorted().joinToString("、")}" },
+            // The approved scope is the user's decision: show the model identity and
+            // the fee-related ceilings instead of a generic "no resource selected".
+            models.takeIf { it.isNotEmpty() }?.let { "模型：${it.sorted().joinToString("、")}" },
+            models.takeIf { it.isNotEmpty() }?.let { "调用 ≤$maxModelCalls 次 · token ≤$maxModelTokens（每次运行另需 Run 费用上限）" })
             .joinToString("；").ifBlank { "需要用户选择资源，默认无权限" }
 
     private fun displayName(uri: Uri): String {

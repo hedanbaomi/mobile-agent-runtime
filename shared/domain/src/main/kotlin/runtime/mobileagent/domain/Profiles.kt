@@ -105,6 +105,21 @@ fun settleReservedTokens(ledger: Long, reservation: Int, actualTokens: Int?): Lo
  */
 fun admitsModelInvocation(storedTokens: Long, ledger: Long, reservation: Int, ceiling: Int): Boolean =
     reservation > 0 && ceiling > 0 && storedTokens + ledger + reservation <= ceiling.toLong()
+
+/**
+ * The Run fee authorization for Python `model.invoke`.
+ *
+ * The install grant is *not* a Run permission: only the user's own per-run number
+ * ([userTokens]) authorizes spending inside one Run, and the Run ceiling is
+ * additionally clamped to what the approved package actually allows
+ * ([grantedCeilings], the `model.invoke` scope ceiling of every bound skill).
+ * A missing user number or a missing approved ceiling stays a refusal.
+ */
+fun modelInvokeRunTokens(userTokens: Int?, grantedCeilings: Collection<Int>): Int? {
+    val policy = userTokens?.takeIf { it > 0 } ?: return null
+    val approved = grantedCeilings.filter { it > 0 }.minOrNull() ?: return null
+    return minOf(policy, approved)
+}
 fun validateBudgetSelection(
     manualContext: Int?,
     manualOutput: Int?,

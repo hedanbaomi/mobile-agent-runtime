@@ -38,6 +38,7 @@ import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
+import runtime.mobileagent.domain.stripOutputCapAliases
 import runtime.mobileagent.domain.probeOutputTokenLimit
 import runtime.mobileagent.domain.AppError
 import runtime.mobileagent.domain.AppException
@@ -121,8 +122,11 @@ class OpenAiResponsesAdapter(
         val started = System.nanoTime()
         val token = secret.concatToString()
         return try {
-            val modelParameters = runCatching { Json.parseToJsonElement(configured.parametersJson).jsonObject }
-                .getOrElse { throw InvalidConnectionConfigException() }
+            // A probe uses its own task cap: strip the business output aliases so a
+            // legitimate large cap is not judged as an invalid probe configuration.
+            val modelParameters = runCatching {
+                Json.parseToJsonElement(stripOutputCapAliases(configured.parametersJson)).jsonObject
+            }.getOrElse { throw InvalidConnectionConfigException() }
             val request = ModelRequest(
                 modelId = configured.modelId,
                 messages = listOf(ChatMessage(role = "user", text = "Reply with ok.")),
@@ -1017,8 +1021,9 @@ class OpenAiResponsesAdapter(
             // The forced tool probe still gets a small bounded budget: enough
             // for a short reasoning trace plus one no-op call on reasoning
             // models, but far below any real profile output limit.
-            outputTokenLimit = minOf(
-                profile.outputLimit.coerceAtLeast(1),
+            outputTokenLimit = probeOutputTokenLimit(
+                profile.outputLimitMode,
+                profile.outputLimit,
                 if (feature == ProbeFeature.TOOLS) CAPABILITY_PROBE_MAX_OUTPUT_TOKENS else CONNECTION_PROBE_MAX_OUTPUT_TOKENS,
             ),
         )

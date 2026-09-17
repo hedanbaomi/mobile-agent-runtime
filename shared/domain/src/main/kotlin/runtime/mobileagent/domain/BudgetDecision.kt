@@ -53,6 +53,18 @@ enum class OutputCapValidationError {
  * ambiguity; a value that is not a positive Int-range integer must be rejected
  * rather than silently narrowed (4294975488 must not become 8192).
  */
+/**
+ * Model parameters without any output-cap alias.  A probe supplies its own
+ * task-local cap, so a legitimate business cap (8192) must not be seen as an
+ * invalid probe configuration; every other parameter is preserved.
+ */
+fun stripOutputCapAliases(parametersJson: String): String {
+    val root = runCatching { Json.parseToJsonElement(parametersJson) as? JsonObject }.getOrNull()
+        ?: return parametersJson
+    if (ADVANCED_OUTPUT_LIMIT_KEYS.none { root.containsKey(it) }) return parametersJson
+    return JsonObject(root.filterKeys { it !in ADVANCED_OUTPUT_LIMIT_KEYS }).toString()
+}
+
 fun validateOutputCapLayers(vararg parameterJsonLayers: String?): OutputCapValidationError? {
     parameterJsonLayers.forEach { layer ->
         if (layer.isNullOrBlank()) return@forEach
@@ -124,5 +136,6 @@ fun contextWindowTargetMatches(storedTarget: String?, currentTarget: String): Bo
     if (parts.size != 4) return false
     return "${parts[0]}|${parts[2]}|${parts[3]}" == currentTarget
 }
-fun contextWindowTarget(providerId: String, endpoint: String, modelId: String): String =
-    "$providerId|${endpoint.trimEnd('/')}|$modelId"
+fun contextWindowTarget(providerId: String, endpoint: String, modelId: String): String {
+    return "$providerId|${endpoint.trimEnd('/')}|$modelId"
+}

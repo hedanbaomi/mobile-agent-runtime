@@ -577,10 +577,13 @@ private class PythonSkillToolExecutor(
             // The provider cap (MANUAL) and this tool's own local accounting cap are
 // separate: under AUTO we still bound memory/time locally but send no
 // output-limit field, so the provider default applies.
-            validateOutputCapLayers(binding.chatModel.parametersJson)?.let {
+            validateOutputCapLayers(binding.chatModel.parametersJson, snapshot.parameterOverridesJson)?.let {
                 throw BrokerDenied("INVALID_ARGUMENTS")
             }
-            val modelOutputDecision = resolveEffectiveOutputCap(binding.chatModel.outputLimitMode, binding.chatModel.outputLimit, binding.chatModel.parametersJson)
+            val modelOutputDecision = resolveEffectiveOutputCap(
+                binding.chatModel.outputLimitMode, binding.chatModel.outputLimit, binding.chatModel.parametersJson,
+                snapshot.parameterOverridesJson,
+            )
             val requestedCap = payload.number("maxOutputTokens")
             val localCap = minOf(2048, modelOutputDecision.value ?: 2048)
             // The tool argument is the most specific override, then the model decision;
@@ -636,8 +639,9 @@ private class PythonSkillToolExecutor(
                     // hidden provider limit.  An explicit tool argument or a MANUAL
                     // profile cap is an explicit override and is sent.
                     parameters = ParameterLayers(
-                        modelParameters = Json.parseToJsonElement(binding.chatModel.parametersJson).jsonObject),
-                    outputTokenLimit = pythonSendCap,
+                        modelParameters = Json.parseToJsonElement(binding.chatModel.parametersJson).jsonObject,
+                        agentOverrides = Json.parseToJsonElement(snapshot.parameterOverridesJson).jsonObject,
+                    ),
                     outputTokenField = if (requestedCap != null) "max_tokens" else modelOutputDecision.key,
                     operationId = bound.ticket.invocationId), secret).collect { event ->
                     if (!authorized(bound)) throw BrokerDenied("PERMISSION_DENIED")

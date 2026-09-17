@@ -3,6 +3,13 @@
 
 package runtime.mobileagent.agent
 
+import io.ktor.client.HttpClient
+import io.ktor.client.engine.mock.MockEngine
+import io.ktor.client.engine.mock.respond
+import io.ktor.http.HttpHeaders
+import io.ktor.http.HttpStatusCode
+import io.ktor.http.content.TextContent
+import io.ktor.http.headersOf
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.awaitCancellation
@@ -13,6 +20,7 @@ import kotlinx.coroutines.flow.FlowCollector
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.toList
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.test.runTest
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertFalse
@@ -743,5 +751,64 @@ class ContextCompactionRuntimeTest {
             "{\"goals\":[\"goal\"],\"constraints\":[\"constraint\"],\"decisions\":[\"decision\"],\"pending\":[\"pending\"],\"results\":[\"result\"]}"
         const val EMPTY_SUMMARY =
             "{\"goals\":[],\"constraints\":[],\"decisions\":[],\"pending\":[],\"results\":[]}"
+    }
+
+    /**
+     * The resolved output decision must survive every runtime round: the first
+     * request and the follow-up tool round are built by different code paths, so
+     * only the real adapter payload proves the decision reached the wire.
+     */
+    @Test
+fun runtimeRoundsKeepTheSameOutputDecisionOnTheWire() = runBlocking {
+        val bodies = mutableListOf<String>()
+        val engine = MockEngine { request ->
+            bodies += when (val body = request.body) {
+                is TextContent -> body.text
+                else -> body.toString()
+            }
+            val index = bodies.size - 1
+            val payload = if (index == 0) {
+                "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call-1\"," +
+                    "\"function\":{\"name\":\"external\",\"arguments\":\"{}\"}}]},\"finish_reason\":\"tool_calls\"}]}\n\n" +
+                    "data: [DONE]\n\n"
+            } else {
+                "data: {\"choices\":[{\"delta\":{\"content\":\"final\"}}]}\n\ndata: [DONE]\n\n"
+            }
+            respond(
+                payload,
+                HttpStatusCode.OK,
+                headersOf(HttpHeaders.ContentType, "text/event-stream"),
+            )
+        }
+        val adapter = runtime.mobileagent.provider.openai.OpenAiCompatibleAdapter(
+            HttpClient(engine),
+            "https://example.invalid/v1",
+        )
+        val executor = ValueExecutor()
+        val run = AgentRun("output-decision-rounds", "snapshot", "conversation")
+        val events = AgentRuntime(adapter).run(
+            AgentRuntimeRequest(
+                run = run,
+                prompt = prompt(currentUser = "execute once"),
+                modelId = "model",
+                secret = "synthetic-output-decision-secret".toCharArray(),
+                toolsEnabled = true,
+                executor = executor,
+                maxInputBudgetUnits = 64_000,
+                context = context(emptyList(), AgentContextPolicy(autoCompact = false)),
+                outputTokenLimit = 5000,
+                outputTokenField = "max_completion_tokens",
+            ),
+        ).toList()
+
+        assertTrue(
+            bodies.size >= 2,
+            "state=${run.state} stop=${run.stopReason} events=$events bodies=$bodies",
+        )
+        bodies.forEach { body ->
+            assertTrue(body.contains("\"max_completion_tokens\":5000"), body)
+            assertFalse(body.contains("\"max_tokens\""), body)
+            assertFalse(body.contains("\"max_output_tokens\""), body)
+        }
     }
 }

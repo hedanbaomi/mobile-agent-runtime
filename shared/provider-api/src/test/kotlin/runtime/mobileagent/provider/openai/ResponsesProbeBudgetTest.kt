@@ -110,4 +110,23 @@ class ResponsesProbeBudgetTest {
         assertEquals(8192, runtime.mobileagent.domain
             .advancedOutputLimitOverride(persisted)?.second?.toInt())
     }
+
+    /**
+     * Public granted probe: STREAM/TOOLS/IMAGE really dispatch and every request
+     * carries the task-local cap instead of the AUTO zero sentinel.
+     */
+    @Test
+    fun grantedPublicProbeDispatchesWithTaskCaps() = runBlocking {
+        val captured = mutableListOf<String>()
+        val rich = profile(OutputLimitMode.AUTO, 0).copy(capabilities = setOf("stream", "tools", "image"))
+        val report = adapter(captured).probe(rich, "token".toCharArray(), runtime.mobileagent.provider.ProbeConsent.GRANTED)
+        assertTrue(captured.isNotEmpty(), "a granted probe must dispatch: $report")
+        assertTrue(
+            captured.all { body ->
+                body.contains("\"max_output_tokens\":64") || body.contains("\"max_output_tokens\":128")
+            },
+            captured.toString(),
+        )
+        assertTrue(captured.none { it.contains("\"max_output_tokens\":1,") }, captured.toString())
+    }
 }

@@ -64,6 +64,8 @@ class PythonModelInvokeBrokerTest {
         /** Skip the derived Run ceiling to model "this Run carries no authorization". */
         val omitRunAuthorization: Boolean = false,
         val requestedToolCap: Int? = null,
+        /** The frozen Agent parameter-override layer for this snapshot. */
+        val agentOverridesJson: String = "{}",
     ) {
         lateinit var hostApp: MobileAgentApp
         lateinit var container: AppContainer
@@ -167,6 +169,7 @@ class PythonModelInvokeBrokerTest {
                 chatProfileId = modelId,
                 skillIds = listOf(installId),
                 contextPolicyJson = policyTokens?.let { "{\"pythonModelRunTokens\":$it}" } ?: "{}",
+                parameterOverridesJson = agentOverridesJson,
                 revision = 0,
             ), "Use the explicitly bound local Skill.")
             snapshot = container.agents.createSnapshot(agentId)
@@ -337,6 +340,59 @@ class PythonModelInvokeBrokerTest {
         val retry = fixture.approve("call-unknown")
         assertTrue("an unknown outcome must not be replayed: $retry", retry !is ToolResult.Value)
         assertEquals(fixture.bodies.toString(), 1, fixture.bodies.size)
+    }
+
+    private val allOutputAliases = listOf("max_tokens", "max_completion_tokens", "max_output_tokens")
+
+    @Test(timeout = 120_000)
+    fun autoProfileSendsNoOutputFieldThroughTheBroker() {
+        val fixture = Harness(ApiFormat.OPENAI_COMPATIBLE, OutputLimitMode.AUTO, 0, 1, 4_096, 4_096)
+        fixture.start(chatSuccess(), "text/event-stream")
+
+        val result = fixture.run("call-auto")
+        assertTrue("expected a paid result, got $result; audit=${fixture.auditTrail()}", result is ToolResult.Value)
+        assertEquals(fixture.bodies.toString(), 1, fixture.bodies.size)
+        val body = fixture.bodies.single()
+        assertTrue(
+            "AUTO must not invent an output cap: $body",
+            allOutputAliases.none { body.contains("\"$it\"") },
+        )
+    }
+
+    @Test(timeout = 120_000)
+    fun frozenAgentOverrideBeatsTheManualProfileCap() {
+        // The Run ceiling must cover the reservation of the stronger agent cap
+        // (prompt bytes + 4096 + overhead), otherwise the broker correctly
+        // refuses before dispatch and this case would prove nothing.
+        val fixture = Harness(
+            ApiFormat.OPENAI_COMPATIBLE, OutputLimitMode.MANUAL, 512, 1, 8_192, 8_192,
+            agentOverridesJson = "{\"max_completion_tokens\":4096}",
+        )
+        fixture.start(chatSuccess(), "text/event-stream")
+
+        val result = fixture.run("call-agent")
+        assertTrue("expected a paid result, got $result; audit=${fixture.auditTrail()}", result is ToolResult.Value)
+        assertEquals(1, fixture.bodies.size)
+        val body = fixture.bodies.single()
+        assertEquals(4096, aliasOf(body, "max_completion_tokens"))
+        assertTrue(body, !body.contains("\"max_tokens\""))
+    }
+
+    @Test(timeout = 120_000)
+    fun theToolArgumentBeatsTheFrozenAgentOverride() {
+        val fixture = Harness(
+            ApiFormat.OPENAI_COMPATIBLE, OutputLimitMode.AUTO, 0, 1, 4_096, 4_096,
+            requestedToolCap = 300,
+            agentOverridesJson = "{\"max_completion_tokens\":4096}",
+        )
+        fixture.start(chatSuccess(), "text/event-stream")
+
+        val result = fixture.run("call-tool")
+        assertTrue("expected a paid result, got $result; audit=${fixture.auditTrail()}", result is ToolResult.Value)
+        assertEquals(1, fixture.bodies.size)
+        val body = fixture.bodies.single()
+        assertEquals(300, aliasOf(body, "max_tokens"))
+        assertTrue(body, !body.contains("\"max_completion_tokens\""))
     }
 
     private fun skillZip(manifest: String, source: String): ByteArray {

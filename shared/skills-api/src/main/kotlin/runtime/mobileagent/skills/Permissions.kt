@@ -8,6 +8,14 @@ data class PermissionSpec(
     val knowledgeBaseIds: Set<String> = emptySet(),
     val hosts: Set<String> = emptySet(),
     val methods: Set<String> = emptySet(),
+    /**
+     * `model.invoke` sub-model scope: which frozen Chat profiles the package may
+     * call and how many calls/tokens it declares.  The grant stores what the
+     * reviewer accepted, never a wider set than this declaration.
+     */
+    val modelProfileIds: Set<String> = emptySet(),
+    val maxModelCalls: Int? = null,
+    val maxModelTokens: Int? = null,
 )
 
 data class SkillManifest(
@@ -34,6 +42,10 @@ data class PermissionGrant(
     val knowledgeBaseIds: Set<String> = emptySet(),
     val hosts: Set<String> = emptySet(),
     val methods: Set<String> = emptySet(),
+    /** Scope of a `model.invoke` grant; empty/zero means the capability is unusable. */
+    val modelProfileIds: Set<String> = emptySet(),
+    val maxModelCalls: Int = 0,
+    val maxModelTokens: Int = 0,
     val scopesJson: String = "{}",
 )
 

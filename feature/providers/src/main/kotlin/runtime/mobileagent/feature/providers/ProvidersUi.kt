@@ -5,6 +5,8 @@ package runtime.mobileagent.feature.providers
 
 import runtime.mobileagent.domain.BudgetValidationError
 import runtime.mobileagent.domain.ContextLimitMode
+import runtime.mobileagent.domain.contextWindowTarget
+import runtime.mobileagent.domain.contextWindowTargetMatches
 import runtime.mobileagent.domain.validateBudgetSelection
 import runtime.mobileagent.domain.OutputLimitMode
 import runtime.mobileagent.domain.advancedOutputLimitOverride
@@ -87,7 +89,50 @@ data class ProviderModelUi(
     val contextLimitMode: String = ContextLimitMode.AUTO.name,
     /** Optional externally known window (provider documentation) for AUTO. */
     val contextWindowValue: String = "",
+    /**
+     * The target the recorded window was declared for, and whether a window was
+     * recorded at all.  The row re-validates against the live target, so a window
+     * recorded for another endpoint or model is shown as stale, never as if it
+     * were in force.
+     */
+    val contextWindowTarget: String = "",
+    val contextWindowRecorded: Boolean = false,
 )
+
+/** What the context window column says: no fabricated, no silently stale number. */
+enum class ContextWindowDisplayState { MANUAL, EFFECTIVE, STALE, UNKNOWN }
+
+/**
+ * The row label.  It reuses `contextWindowTargetMatches`, the same decision the
+ * runtime budget applies, so the UI can never advertise a window the next
+ * request would refuse to rely on.
+ */
+fun contextWindowLabel(model: ProviderModelUi, currentTarget: String, zh: Boolean): String = when {
+    parseContextLimitMode(model.contextLimitMode) == ContextLimitMode.MANUAL -> {
+        val value = model.contextLimit
+        if (zh) "上下文 手动 $value" else "context manual $value"
+    }
+    !model.contextWindowRecorded ->
+        if (zh) "上下文 未知（未识别到可信窗口）" else "context unknown (no trusted window)"
+    !contextWindowTargetMatches(model.contextWindowTarget, currentTarget) -> {
+        val recorded = model.contextWindowValue
+        if (zh) "上下文 失效（$recorded 记录的 provider/端点/模型已变；当前未知）"
+        else "context stale ($recorded was recorded for another provider/endpoint/model; current unknown)"
+    }
+    parsePositiveProviderBudget(model.contextWindowValue) == null ->
+        if (zh) "上下文 未知（已记录窗口无效）" else "context unknown (recorded window is not a valid number)"
+    else -> {
+        val value = model.contextWindowValue
+        if (zh) "上下文 有效 $value（用户声明，仅对该目标）" else "context effective $value (user declared, this target only)"
+    }
+}
+
+fun outputLimitLabel(model: ProviderModelUi, zh: Boolean): String {
+    if (parseOutputLimitMode(model.outputLimitMode) == OutputLimitMode.AUTO) {
+        return if (zh) "输出 跟随服务商" else "output follow provider"
+    }
+    return if (zh) "输出 手动 ${model.outputLimit}" else "output manual ${model.outputLimit}"
+}
 
 data class ProviderDraft(
     val id: String? = null,
@@ -523,6 +568,9 @@ private fun ProviderDetail(
         Text(if (zh) "选择服务商以查看模型和能力。" else "Select a provider to inspect models and capabilities.", style = MaterialTheme.typography.bodyMedium, modifier = Modifier.padding(24.dp))
         return
     }
+    // The window state is judged against the live target of this provider, exactly
+    // as the runtime budget does; a recorded window for another endpoint is stale.
+
     Text(provider.name, style = MaterialTheme.typography.headlineSmall, maxLines = 2, overflow = TextOverflow.Ellipsis)
     Text(
         provider.baseUrl,
@@ -625,8 +673,16 @@ private fun ProviderDetail(
                     if (zh) "能力：${model.capabilities.sorted().joinToString()}" else "Capabilities: ${model.capabilities.sorted().joinToString()}"
                 }
                 Text(capabilityLabel, style = MaterialTheme.typography.bodySmall)
-                val limits = listOfNotNull(if (parseContextLimitMode(model.contextLimitMode) == ContextLimitMode.AUTO) "context auto" else model.contextLimit?.let { "context $it" }, if (parseOutputLimitMode(model.outputLimitMode) == OutputLimitMode.AUTO) "output auto" else model.outputLimit?.let { "output $it" })
-                if (limits.isNotEmpty()) Text(limits.joinToString(" · "), style = MaterialTheme.typography.labelSmall)
+                // The effective/unknown/stale state comes from the same target match the
+                // runtime applies; the raw legacy number is never shown as if it were in force.
+                Text(
+                    listOf(
+                        contextWindowLabel(model, contextWindowTarget(provider.id, provider.baseUrl, model.modelId), zh),
+                        outputLimitLabel(model, zh),
+                    ).joinToString(" · "),
+                    style = MaterialTheme.typography.labelSmall,
+                    modifier = Modifier.testTag("provider.model.${model.id}.limits"),
+                )
             }
         }
     }

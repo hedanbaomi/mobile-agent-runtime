@@ -94,6 +94,56 @@ class SkillRepositoryTest {
         assertTrue(repository.grantForInvocation(id, setOf(id), emptySet()).knowledgeBaseIds.isEmpty())
     }
 
+    /**
+     * A `model.invoke` grant must store the declared sub-model scope: without it
+     * the capability would be unusable, and the review must never be able to
+     * widen the package's own ceilings.
+     */
+    @Test
+    fun modelInvokeGrantStoresTheDeclaredScopeAndRejectsAWiderOne() = database { db ->
+        val repository = SkillRepository(db)
+        repository.importPackage(packageBytes(mapOf(
+            "mobile-skill.json" to """{
+              "schemaVersion":1,"id":"test.model","name":"Model scope test","version":"1.0.0","license":"AGPL-3.0-only",
+              "runtime":{"kind":"python","python":"3.14","entrypoint":"scripts.main:run","mode":"pure-python"},
+              "permissions":{"model.invoke":{"modelProfileIds":["model.scope"],"maxModelCalls":2,"maxModelTokens":200000}}
+            }""".trimIndent(),
+        )))
+        val installId = repository.list().single().installId
+
+        // The declaration is the ceiling: a wider call/token scope or an
+        // undeclared profile is refused before anything is stored.
+        assertThrows(IllegalArgumentException::class.java) {
+            repository.approvePermissions(installId, setOf("model.invoke"), modelProfileIds = setOf("model.scope"), maxModelCalls = 3, maxModelTokens = 200000)
+        }
+        assertThrows(IllegalArgumentException::class.java) {
+            repository.approvePermissions(installId, setOf("model.invoke"), modelProfileIds = setOf("model.other"), maxModelCalls = 2, maxModelTokens = 4096)
+        }
+        assertThrows(IllegalArgumentException::class.java) {
+            repository.approvePermissions(installId, setOf("model.invoke"), modelProfileIds = setOf("model.scope"), maxModelCalls = 2, maxModelTokens = 200001)
+        }
+        assertThrows(IllegalArgumentException::class.java) {
+            repository.approvePermissions(installId, setOf("model.invoke"), maxModelCalls = 2, maxModelTokens = 4096)
+        }
+
+        val grant = repository.approvePermissions(
+            installId, setOf("model.invoke"),
+            modelProfileIds = setOf("model.scope"), maxModelCalls = 2, maxModelTokens = 200000,
+        )
+        assertEquals(setOf("model.scope"), grant.modelProfileIds)
+        assertEquals(2, grant.maxModelCalls)
+        assertEquals(200000, grant.maxModelTokens)
+        // A re-read from SQLite keeps the same scope (the document, not the cache).
+        val reloaded = repository.grantsFor(installId).single()
+        assertEquals(setOf("model.scope"), reloaded.modelProfileIds)
+        assertEquals(2, reloaded.maxModelCalls)
+        assertEquals(200000, reloaded.maxModelTokens)
+        // Revoking the capability drops the dedicated scope with it.
+        val revoked = repository.approvePermissions(installId, emptySet())
+        assertTrue(revoked.modelProfileIds.isEmpty())
+        assertEquals(0, revoked.maxModelCalls)
+    }
+
     @Test
     fun sourceViewerIsPackageBoundAndChecksStoredHash() = database { db ->
         val repository = SkillRepository(db)

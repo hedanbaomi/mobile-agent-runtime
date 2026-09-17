@@ -1725,9 +1725,23 @@ private fun providerCardFrom(profile: runtime.mobileagent.domain.ProviderProfile
     runtime.mobileagent.feature.providers.ProviderCardUi(profile.id, profile.name, profile.baseUrl, profile.apiFormat.name,
         modelCount = models.count { it.providerId == profile.id }, secretConfigured = profile.secretRef.isNotBlank())
 
-private fun providerModelFrom(model: runtime.mobileagent.domain.ModelProfile) = runtime.mobileagent.feature.providers.ProviderModelUi(
-    id = model.id, modelId = model.modelId, role = model.role.name, capabilities = model.capabilities,
-    contextLimit = model.contextLimit, outputLimit = model.effectiveOutputTokenLimit(), outputLimitMode = model.outputLimitMode.name, contextLimitMode = model.contextLimitMode.name)
+private fun providerModelFrom(model: runtime.mobileagent.domain.ModelProfile) =
+    runtime.mobileagent.feature.providers.ProviderModelUi(
+        id = model.id,
+        modelId = model.modelId,
+        role = model.role.name,
+        capabilities = model.capabilities,
+        contextLimit = model.contextLimit,
+        outputLimit = model.effectiveOutputTokenLimit(),
+        outputLimitMode = model.outputLimitMode.name,
+        contextLimitMode = model.contextLimitMode.name,
+        contextWindowValue = model.contextWindowValue?.toString().orEmpty(),
+        // The row re-validates against the live target so a recorded window is
+        // never shown as effective on a different provider/endpoint/model.
+        contextWindowTarget = model.contextWindowTarget.orEmpty(),
+        contextWindowRecorded = model.contextWindowValue != null &&
+            model.contextWindowSource != runtime.mobileagent.domain.ContextLimitSource.UNKNOWN,
+    )
 
 private fun providerDraftFrom(provider: runtime.mobileagent.domain.ProviderProfile?, model: runtime.mobileagent.domain.ModelProfile?) =
     runtime.mobileagent.feature.providers.ProviderDraft(id = provider?.id, modelProfileId = model?.id,

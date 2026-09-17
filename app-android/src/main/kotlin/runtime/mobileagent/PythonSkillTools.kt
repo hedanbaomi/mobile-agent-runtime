@@ -5,6 +5,7 @@ package runtime.mobileagent
 
 import android.content.Context
 import android.util.AtomicFile
+import io.ktor.client.HttpClient
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.NonCancellable
@@ -14,11 +15,13 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.*
-import runtime.mobileagent.domain.validateOutputCapLayers
+import runtime.mobileagent.domain.pythonModelWireDecision
 import runtime.mobileagent.domain.resolveEffectiveOutputCap
+import runtime.mobileagent.domain.validateOutputCapLayers
 import runtime.mobileagent.domain.hasAdvancedOutputLimitOverride
 import runtime.mobileagent.domain.AgentSnapshot
 import runtime.mobileagent.domain.AuditEvent
+import runtime.mobileagent.domain.ModelProfile
 import runtime.mobileagent.domain.RunStatus
 import runtime.mobileagent.domain.ToolInvocation
 import runtime.mobileagent.domain.Utc
@@ -73,6 +76,35 @@ interface PythonRunBudget {
     fun settleModelCall(reservation: Int, actualTokens: Int?)
 }
 
+/**
+ * Map one resolved Python `model.invoke` decision onto the production
+ * `ModelRequest`.  The decision itself comes from the domain
+ * (`pythonModelWireDecision`) so the exact production rule can be asserted
+ * through the real adapters; this mapper never invents a second alias and never
+ * drops the value of the chosen one.
+ */
+internal fun pythonModelRequest(
+    model: ModelProfile,
+    agentOverridesJson: String,
+    prompt: String,
+    outputTokenLimit: Int?,
+    outputTokenField: String?,
+    operationId: String,
+): ModelRequest = ModelRequest(
+    model.modelId,
+    listOf(ChatMessage("user", prompt)),
+    parameters = ParameterLayers(
+        modelParameters = jsonObjectOrEmpty(model.parametersJson),
+        agentOverrides = jsonObjectOrEmpty(agentOverridesJson),
+    ),
+    outputTokenLimit = outputTokenLimit,
+    outputTokenField = outputTokenField,
+    operationId = operationId,
+)
+
+private fun jsonObjectOrEmpty(raw: String?): JsonObject =
+    runCatching { Json.parseToJsonElement(raw ?: "").jsonObject }.getOrNull() ?: JsonObject(emptyMap())
+
 /** Run-local discovery and execution. No interpreter is loaded into the application process. */
 fun pythonSkillTools(
     container: AppContainer,
@@ -80,7 +112,8 @@ fun pythonSkillTools(
     snapshot: AgentSnapshot,
     runId: String,
     budget: PythonRunBudget? = null,
-): ToolExecutor = PythonSkillToolExecutor(container, context.applicationContext, snapshot, runId, budget)
+    providerHttp: HttpClient? = null,
+): ToolExecutor = PythonSkillToolExecutor(container, context.applicationContext, snapshot, runId, budget, providerHttp ?: container.http)
 
 private class PythonSkillToolExecutor(
     private val container: AppContainer,
@@ -88,6 +121,12 @@ private class PythonSkillToolExecutor(
     private val snapshot: AgentSnapshot,
     private val runId: String,
     private val budget: PythonRunBudget?,
+    /**
+     * The provider transport this executor dispatches `model.invoke` on.  It is
+     * `container.http` in production; the regression suite injects a MockEngine
+     * so the real broker handler, adapter and ledger are driven with no network.
+     */
+    private val providerHttp: HttpClient = container.http,
 ) : ToolExecutor {
     private val mutex = Mutex()
     private val calls = ConcurrentHashMap<String, BoundPythonCall>()
@@ -580,20 +619,26 @@ private class PythonSkillToolExecutor(
             validateOutputCapLayers(binding.chatModel.parametersJson, snapshot.parameterOverridesJson)?.let {
                 throw BrokerDenied("INVALID_ARGUMENTS")
             }
-            val modelOutputDecision = resolveEffectiveOutputCap(
-                binding.chatModel.outputLimitMode, binding.chatModel.outputLimit, binding.chatModel.parametersJson,
-                snapshot.parameterOverridesJson,
-            )
             val requestedCap = payload.number("maxOutputTokens")
-            val localCap = minOf(2048, modelOutputDecision.value ?: 2048)
-            // The tool argument is the most specific override, then the model decision;
-            // the same value is sent, reserved and settled.
-            val wireCap = requestedCap ?: modelOutputDecision.value
+            // One resolution drives the reservation, the alias and the value on the
+            // wire: per-call tool argument, then frozen agent override, then the model
+            // advanced parameters, then the profile default.
+            val outputDecision = try {
+                pythonModelWireDecision(
+                    outputLimitMode = binding.chatModel.outputLimitMode,
+                    outputLimit = binding.chatModel.outputLimit,
+                    modelParametersJson = binding.chatModel.parametersJson,
+                    agentOverridesJson = snapshot.parameterOverridesJson,
+                    requestedCap = requestedCap,
+                )
+            } catch (_: IllegalArgumentException) {
+                throw BrokerDenied("INVALID_ARGUMENTS")
+            }
+            val wireCap = outputDecision.outputTokenLimit
             // Known cap: the reservation equals what will be sent (an unaffordable cap
             // is refused before dispatch).  Unknown output uses an explicit local estimate.
-            val accountingCap = wireCap ?: localCap
-            val outputLimit = accountingCap
-            val sendOutputLimit = wireCap
+            val localCap = minOf(2048, wireCap ?: 2048)
+            val outputLimit = wireCap ?: localCap
             val maxCalls = minOf(scopes.number("maxModelCalls") ?: 0, declared.number("maxModelCalls") ?: 0, 3)
             val maxTokens = minOf(scopes.number("maxModelTokens") ?: 0, declared.number("maxModelTokens") ?: 0)
             val run = container.runs.get(runId) ?: throw BrokerDenied("RESOURCE_LIMIT")
@@ -603,7 +648,9 @@ private class PythonSkillToolExecutor(
             var reportedOutputTokens: Int? = null
             val reserved = prompt.toByteArray().size + outputLimit + 256
             if (++bound.modelCalls > maxCalls || bound.reservedModelTokens.toLong() + reserved > maxTokens ||
-                run.inputTokens.toLong() + run.outputTokens + reservedModelTokens + reserved > runMaxTokens) throw BrokerDenied("RESOURCE_LIMIT")
+                run.inputTokens.toLong() + run.outputTokens + reservedModelTokens + reserved > runMaxTokens) {
+                throw BrokerDenied("RESOURCE_LIMIT")
+            }
             if (budget?.reserveModelCall(reserved) != true) throw BrokerDenied("RESOURCE_LIMIT")
             reservedModelTokens += reserved
             bound.reservedModelTokens += reserved
@@ -612,7 +659,7 @@ private class PythonSkillToolExecutor(
                 val provider = binding.provider
                 val secret = container.secrets.resolveForHost(provider.secretRef).also { secrets += it }
                 if (!authorized(bound)) throw BrokerDenied("PERMISSION_DENIED")
-                val adapter = OpenAiAdapterFactory.create(provider.apiFormat, container.http, provider.baseUrl,
+                val adapter = OpenAiAdapterFactory.create(provider.apiFormat, providerHttp, provider.baseUrl,
                     HeaderSecretResolver { host, ref ->
                         if (host != URI(provider.baseUrl).host || !authorized(bound)) throw BrokerDenied("PERMISSION_DENIED")
                         container.secrets.resolveForHost(ref).also { secrets += it }
@@ -621,9 +668,6 @@ private class PythonSkillToolExecutor(
                 val text = StringBuilder()
                 var completed = false
                 effectDispatched()
-                // Same precedence as Chat/Vision: an explicit advanced override replaces
-                // the app default instead of being merged as a second alias.
-                val pythonSendCap = wireCap
                 // One terminal semantics for every outcome: known usage reaches the ledger
                 // (blocking later dispatches), unknown keeps the reservation, and the
                 // paid result is never replayed.
@@ -634,17 +678,16 @@ private class PythonSkillToolExecutor(
                     reservedModelTokens = (reservedModelTokens - reserved + (actual ?: reserved)).coerceAtLeast(0)
                 }
                 try {
-                adapter.stream(ModelRequest(binding.chatModel.modelId, listOf(ChatMessage("user", prompt)),
-                    // AUTO sends no cap: this tool's local accounting cap above is not a
-                    // hidden provider limit.  An explicit tool argument or a MANUAL
-                    // profile cap is an explicit override and is sent.
-                    parameters = ParameterLayers(
-                        modelParameters = Json.parseToJsonElement(binding.chatModel.parametersJson).jsonObject,
-                        agentOverrides = Json.parseToJsonElement(snapshot.parameterOverridesJson).jsonObject,
-                    ),
-                    outputTokenLimit = pythonSendCap,
-                    outputTokenField = if (requestedCap != null) "max_tokens" else modelOutputDecision.key,
-                    operationId = bound.ticket.invocationId), secret).collect { event ->
+                // Same precedence as Chat/Vision: an explicit advanced override replaces
+                // the app default instead of being merged as a second alias.
+                adapter.stream(pythonModelRequest(
+                    model = binding.chatModel,
+                    agentOverridesJson = snapshot.parameterOverridesJson,
+                    prompt = prompt,
+                    outputTokenLimit = outputDecision.outputTokenLimit,
+                    outputTokenField = outputDecision.outputTokenField,
+                    operationId = bound.ticket.invocationId,
+                ), secret).collect { event ->
                     if (!authorized(bound)) throw BrokerDenied("PERMISSION_DENIED")
                     when (event) {
                         is ModelEvent.TextDelta -> {

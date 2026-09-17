@@ -31,13 +31,28 @@ class ResponsesProbeBudgetTest {
         outputLimitMode = mode, parametersJson = parametersJson,
     )
 
+    private val jsonProbeBody =
+        "{\"status\":\"completed\",\"output_text\":\"ok\",\"output\":[{\"type\":\"message\",\"content\":[{\"type\":\"output_text\",\"text\":\"ok\"}]}]}"
+
+    /** A streamed probe must answer in the transport it asked for. */
+    private val streamProbeBody =
+        "data: {\"type\":\"response.output_text.delta\",\"delta\":\"ok\"}\n\n" +
+            "data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\"}}\n\n"
+
+    /** The forced no-op tool probe needs a real tool call in the response. */
+    private val toolProbeBody =
+        "{\"status\":\"completed\",\"output\":[{\"type\":\"function_call\",\"call_id\":\"call-1\",\"name\":\"mar_probe_noop\",\"arguments\":\"{}\"}]}"
+
     private fun engine(captured: MutableList<String>) = MockEngine { request ->
-        captured += (request.body as io.ktor.http.content.TextContent).text
-        respond(
-            "{\"status\":\"completed\",\"output\":[{\"type\":\"message\",\"content\":[{\"type\":\"output_text\",\"text\":\"ok\"}]}]}",
-            HttpStatusCode.OK,
-            headersOf(HttpHeaders.ContentType, "application/json"),
-        )
+        val body = (request.body as io.ktor.http.content.TextContent).text
+        captured += body
+        val (payload, contentType) = when {
+            body.contains("mar_probe_noop") -> toolProbeBody to "application/json"
+            body.contains("\"input_image\"") -> jsonProbeBody to "application/json"
+            body.contains("\"stream\":true") -> streamProbeBody to "text/event-stream"
+            else -> jsonProbeBody to "application/json"
+        }
+        respond(payload, HttpStatusCode.OK, headersOf(HttpHeaders.ContentType, contentType))
     }
 
     private fun adapter(captured: MutableList<String>) =
@@ -72,20 +87,17 @@ class ResponsesProbeBudgetTest {
         assertFalse(body.contains("\"max_output_tokens\":8192"), body)
     }
 
-    /** The same applies to the legacy alias form and to the capability probes. */
+    /** The legacy alias form keeps the task-local cap too. */
     @Test
-    fun legacyAliasAndCapabilityProbeKeepTheTaskCap() = runBlocking {
+    fun legacyAliasConnectionProbeKeepsTheTaskCap() = runBlocking {
         val captured = mutableListOf<String>()
         val result = adapter(captured).testConnection(
             profile(OutputLimitMode.MANUAL, 8000, "{\"max_tokens\":8192}"),
             "token".toCharArray(),
         )
         assertTrue(result is ProviderConnectionResult.Success, result.toString())
+        assertEquals(1, captured.size, result.toString())
         assertTrue(captured.single().contains("\"max_output_tokens\":64"), captured.single())
-
-        // The capability probe (TOOLS) uses its own 128-unit task cap by the same rule;
-        // the shared helper is asserted here because probeFeature is not public.
-        assertEquals(128, runtime.mobileagent.domain.probeOutputTokenLimit(OutputLimitMode.AUTO, 0, 128))
     }
 
     /** Public profile-only probe: it classifies without spending anything. */
@@ -98,35 +110,61 @@ class ResponsesProbeBudgetTest {
         // The capability probe (TOOLS) is covered through the public probe entry below.
     }
 
-    /** The persisted profile is never rewritten by a probe. */
+    /**
+     * The tested profile is a value object that no transport layer can rewrite:
+     * the probe still must not be the reason a profile changes, so the test
+     * drives the public entry and asserts the two observable halves - the
+     * instance the caller owns is untouched, and the preserved business
+     * parameter is on the wire while the business cap is not.
+     */
     @Test
     fun probeDoesNotMutateThePersistedParameters() = runBlocking {
         val persisted = "{\"max_output_tokens\":8192,\"temperature\":0.3}"
-        val captured = mutableListOf<String>()
-        adapter(captured).testConnection(profile(OutputLimitMode.MANUAL, 8000, persisted), "token".toCharArray())
-        // The tested profile instance is unchanged and the payload kept the other parameter.
         val tested = profile(OutputLimitMode.MANUAL, 8000, persisted)
-        assertEquals(persisted, tested.parametersJson)
-        assertEquals(8192, runtime.mobileagent.domain
-            .advancedOutputLimitOverride(persisted)?.second?.toInt())
+        val captured = mutableListOf<String>()
+        val result = adapter(captured).testConnection(tested, "token".toCharArray())
+        assertTrue(result is ProviderConnectionResult.Success, result.toString())
+        assertEquals(persisted, tested.parametersJson, "the tested instance must not be rewritten")
+        val body = captured.single()
+        assertTrue(body.contains("\"temperature\":0.3"), body)
+        assertFalse(body.contains("\"max_output_tokens\":8192"), body)
     }
 
     /**
-     * Public granted probe: STREAM/TOOLS/IMAGE really dispatch and every request
-     * carries the task-local cap instead of the AUTO zero sentinel.
+     * Public granted probe: every declared feature really dispatches, each
+     * request carries its own task-local cap, and the reported capabilities come
+     * from those responses.  `probeFeature` is private, so the only honest proof
+     * is the public `probe(profile, secret, consent)` entry.
      */
     @Test
-    fun grantedPublicProbeDispatchesWithTaskCaps() = runBlocking {
+    fun grantedPublicProbeDispatchesEachFeatureAndClassifiesTheResponses() = runBlocking {
         val captured = mutableListOf<String>()
         val rich = profile(OutputLimitMode.AUTO, 0).copy(capabilities = setOf("stream", "tools", "image"))
-        val report = adapter(captured).probe(rich, "token".toCharArray(), runtime.mobileagent.provider.ProbeConsent.GRANTED)
-        assertTrue(captured.isNotEmpty(), "a granted probe must dispatch: $report")
-        assertTrue(
-            captured.all { body ->
-                body.contains("\"max_output_tokens\":64") || body.contains("\"max_output_tokens\":128")
-            },
-            captured.toString(),
-        )
-        assertTrue(captured.none { it.contains("\"max_output_tokens\":1,") }, captured.toString())
+        val report = adapter(captured).probe(rich, "token".toCharArray(), runtime.mobileagent.provider.ProbeConsent.GRANTED, "probe-public-test")
+
+        // metadata, STREAM, TOOLS, IMAGE - one real request each.
+        assertEquals(4, captured.size, "captured=$captured report=$report")
+        val caps = captured.map { body ->
+            Regex("\"max_output_tokens\":(\\d+)").find(body)?.groupValues?.get(1)?.toInt()
+        }
+        assertEquals(listOf(64, 64, 128, 64), caps, captured.toString())
+        assertTrue(captured[1].contains("\"stream\":true"), captured[1])
+        assertTrue(captured[2].contains("tool_choice"), captured[2])
+        assertTrue(captured[3].contains("input_image"), captured[3])
+
+        assertTrue(report.charged, report.toString())
+        assertTrue(report.supportsStream, report.toString())
+        assertTrue(report.supportsTools, report.toString())
+        assertTrue(report.supportsImages, report.toString())
+        assertEquals(runtime.mobileagent.provider.CapabilityProbeStatus.SUCCEEDED, report.status, report.toString())
+    }
+
+    /** Without consent the probe must classify from metadata only - no spend. */
+    @Test
+    fun publicProbeWithoutConsentDoesNotDispatch() = runBlocking {
+        val captured = mutableListOf<String>()
+        val rich = profile(OutputLimitMode.AUTO, 0).copy(capabilities = setOf("stream", "tools", "image"))
+        val report = adapter(captured).probe(rich, "token".toCharArray(), runtime.mobileagent.provider.ProbeConsent.NOT_GRANTED, "probe-no-consent")
+        assertTrue(captured.isEmpty(), "consent is required before any request: $report")
     }
 }

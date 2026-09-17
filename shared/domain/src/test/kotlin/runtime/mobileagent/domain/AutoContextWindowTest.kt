@@ -79,4 +79,48 @@ class AutoContextWindowTest {
     fun targetKeyIsStableForTrailingSlashes() {
         assertEquals(target, contextWindowTargetKey("provider", 2, "https://api.example/v1/", "model-x"))
     }
+
+    @Test
+    fun stateNamesWhatTheRuntimeWillActuallyRelyOn() {
+        // MANUAL is the user's own number regardless of a recorded capability.
+        assertEquals(ContextWindowState.Mode.MANUAL, model(ContextLimitMode.MANUAL, limit = 65_536).resolvedContextWindowState(target).mode)
+        assertEquals(65_536, model(ContextLimitMode.MANUAL, limit = 65_536).resolvedContextWindowState(target).value)
+
+        // AUTO without any recorded window stays unknown - never a fabricated number.
+        assertEquals(ContextWindowState.Mode.UNKNOWN, model(ContextLimitMode.AUTO).resolvedContextWindowState(target).mode)
+
+        val effective = model(
+            ContextLimitMode.AUTO, value = 131_072,
+            source = ContextLimitSource.PROVIDER_METADATA, recordedFor = target,
+        ).resolvedContextWindowState(target)
+        assertEquals(ContextWindowState.Mode.AUTO_EFFECTIVE, effective.mode)
+        assertEquals(131_072, effective.value)
+
+        // A target change is reported as stale, and the stale value is not "effective".
+        val stale = model(
+            ContextLimitMode.AUTO, value = 131_072,
+            source = ContextLimitSource.USER_DECLARED, recordedFor = contextWindowTargetKey("provider", 1, "https://api.example/v1", "model-x"),
+        ).resolvedContextWindowState(target)
+        assertEquals(ContextWindowState.Mode.STALE, stale.mode)
+        assertNull(stale.value)
+        assertEquals(131_072, stale.recordedValue)
+    }
+
+    /**
+     * The UI and the runtime must judge the same recorded row the same way: a
+     * canonical target written by the editor and a legacy revision target read
+     * from an older row both resolve to the same effective window.
+     */
+    @Test
+    fun canonicalAndLegacyTargetsAgreeForTheSameRow() {
+        val canonical = contextWindowTarget("provider", "https://api.example/v1", "model-x")
+        val legacy = contextWindowTargetKey("provider", 2, "https://api.example/v1", "model-x")
+        assertTrue(contextWindowTargetMatches(legacy, canonical))
+        assertEquals(
+            model(ContextLimitMode.AUTO, value = 131_072, source = ContextLimitSource.USER_DECLARED, recordedFor = legacy)
+                .resolvedContextWindowState(canonical),
+            model(ContextLimitMode.AUTO, value = 131_072, source = ContextLimitSource.USER_DECLARED, recordedFor = canonical)
+                .resolvedContextWindowState(canonical),
+        )
+    }
 }

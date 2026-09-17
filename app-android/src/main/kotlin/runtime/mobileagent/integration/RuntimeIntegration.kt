@@ -3786,6 +3786,9 @@ class RuntimeIntegration(
                 knowledgeBaseIds = grant.knowledgeBaseIds,
                 hosts = grant.hosts,
                 methods = grant.methods,
+                modelProfileIds = grant.modelProfileIds,
+                maxModelCalls = grant.maxModelCalls,
+                maxModelTokens = grant.maxModelTokens,
             )
         }
 

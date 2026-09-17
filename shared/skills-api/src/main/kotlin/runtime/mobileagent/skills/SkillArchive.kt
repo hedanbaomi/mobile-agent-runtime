@@ -447,6 +447,9 @@ object SkillArchive {
                 knowledgeBaseIds = nested.stringSet("knowledgeBaseIds"),
                 hosts = nested.stringSet("hosts"),
                 methods = nested.stringSet("methods"),
+                modelProfileIds = nested.stringSet("modelProfileIds"),
+                maxModelCalls = nested.positiveInt("maxModelCalls"),
+                maxModelTokens = nested.positiveInt("maxModelTokens"),
             )
         }.orEmpty()
         val manifest = SkillManifest(
@@ -588,6 +591,10 @@ object SkillArchive {
             put("maxLogKiB", 128)
         }
     }
+
+    /** A declared positive integer scope; anything else is treated as "not declared". */
+    private fun JsonObject?.positiveInt(key: String): Int? =
+        this?.get(key)?.jsonPrimitive?.contentOrNull?.toIntOrNull()?.takeIf { it > 0 }
 
     private fun JsonObject?.stringSet(key: String): Set<String> {
         val element = this?.get(key) ?: return emptySet()

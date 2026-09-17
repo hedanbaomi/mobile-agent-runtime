@@ -24,6 +24,9 @@ android {
     buildFeatures {
         compose = true
     }
+    testOptions {
+        unitTests.all { it.useJUnitPlatform() }
+    }
 }
 
 dependencies {
@@ -37,5 +40,9 @@ dependencies {
     implementation(libs.androidx.compose.ui)
     implementation(libs.androidx.compose.material3)
     implementation(libs.androidx.activity.compose)
+
+    // Pure-JVM tests for the provider list labels: no android.* API is touched.
+    testImplementation(libs.junit.jupiter)
+    testImplementation(libs.junit.jupiter.engine)
 
 }

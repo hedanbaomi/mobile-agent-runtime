@@ -5,7 +5,9 @@ package runtime.mobileagent.data
 
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonPrimitive
@@ -198,6 +200,11 @@ class SkillRepository(private val db: SqlConnection) {
             },
             hosts = grants.flatMap { it.hosts }.toSet(),
             methods = grants.flatMap { it.methods }.toSet(),
+            // A union of sub-model scopes would turn N installs into N times the
+            // allowed calls; the combined grant keeps the tightest ceiling.
+            modelProfileIds = grants.map { it.modelProfileIds }.reduceOrNull { left, right -> left intersect right }.orEmpty(),
+            maxModelCalls = grants.filter { it.maxModelCalls > 0 }.minOfOrNull { it.maxModelCalls } ?: 0,
+            maxModelTokens = grants.filter { it.maxModelTokens > 0 }.minOfOrNull { it.maxModelTokens } ?: 0,
         )
     }
 
@@ -221,6 +228,9 @@ class SkillRepository(private val db: SqlConnection) {
         knowledgeBaseIds: Set<String> = emptySet(),
         hosts: Set<String> = emptySet(),
         methods: Set<String> = emptySet(),
+        modelProfileIds: Set<String> = emptySet(),
+        maxModelCalls: Int = 0,
+        maxModelTokens: Int = 0,
     ): PermissionGrant {
         val inspection = inspect(installId)
         val declared = inspection.manifest?.permissions.orEmpty()
@@ -242,10 +252,34 @@ class SkillRepository(private val db: SqlConnection) {
         val declaredMethods = specs.flatMap { it.methods }.map { it.uppercase() }.toSet().ifEmpty { setOf("GET") }
         require(normalizedMethods.all { it in declaredMethods }) { "Network method exceeds declaration" }
         require((normalizedHosts.isEmpty() && normalizedMethods.isEmpty()) || "network.http" in capabilities) { "Network capability is not selected" }
-        val scopes = json.encodeToString(mapOf(
-            "capabilities" to capabilities.sorted(), "knowledgeBaseIds" to knowledgeBaseIds.sorted(),
-            "hosts" to normalizedHosts.sorted(), "methods" to normalizedMethods.sorted(),
-        ))
+        // A sub-model grant is only meaningful with its own scope: the package must
+        // declare the profile and call/token ceilings, and the review must not widen
+        // them.  Without the scope the capability stays unusable rather than unbounded.
+        val modelSpec = specs.singleOrNull { it.capability == "model.invoke" }
+        require(modelProfileIds.isEmpty() || "model.invoke" in capabilities) { "Model scope is not selected" }
+        require(maxModelCalls >= 0 && maxModelTokens >= 0) { "Model scope must not be negative" }
+        if ("model.invoke" in capabilities) {
+            val declaredModelSpec = modelSpec ?: error("The package does not declare model.invoke scope")
+            require(modelProfileIds.isNotEmpty()) { "A model.invoke grant needs at least one declared model profile" }
+            require(modelProfileIds.all { it in declaredModelSpec.modelProfileIds }) { "Model scope exceeds declaration" }
+            val declaredCalls = declaredModelSpec.maxModelCalls ?: 0
+            val declaredTokens = declaredModelSpec.maxModelTokens ?: 0
+            require(maxModelCalls in 1..declaredCalls) { "Model call scope exceeds declaration" }
+            require(maxModelTokens in 1..declaredTokens) { "Model token scope exceeds declaration" }
+        }
+        // The scope document mixes string arrays and integers, so it is built as a
+        // JSON object explicitly: one writer that cannot serialise an `Any`.
+        fun arrayOf(values: Collection<String>) = JsonArray(values.sorted().map { JsonPrimitive(it) })
+        val scopes = JsonObject(
+            mapOf(
+                "capabilities" to arrayOf(capabilities), "knowledgeBaseIds" to arrayOf(knowledgeBaseIds),
+                "hosts" to arrayOf(normalizedHosts), "methods" to arrayOf(normalizedMethods),
+                // `model.invoke` is enforced from this scope; it never widens the package.
+                "modelProfileIds" to arrayOf(modelProfileIds),
+                "maxModelCalls" to JsonPrimitive(maxModelCalls),
+                "maxModelTokens" to JsonPrimitive(maxModelTokens),
+            ),
+        ).toString()
         db.transaction {
             val skill = get(installId) ?: error("Skill was removed")
             require(skill.packageHash == inspection.packageHash) { "Package changed during permission review" }
@@ -320,6 +354,9 @@ class SkillRepository(private val db: SqlConnection) {
             knowledgeBaseIds = scopeValues("knowledgeBaseIds"),
             hosts = scopeValues("hosts"),
             methods = scopeValues("methods"),
+            modelProfileIds = scopeValues("modelProfileIds"),
+            maxModelCalls = parsed?.get("maxModelCalls")?.jsonPrimitive?.contentOrNull?.toIntOrNull() ?: 0,
+            maxModelTokens = parsed?.get("maxModelTokens")?.jsonPrimitive?.contentOrNull?.toIntOrNull() ?: 0,
             scopesJson = scopes,
         )
     }

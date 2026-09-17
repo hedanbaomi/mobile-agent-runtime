@@ -107,6 +107,49 @@ fun resolveEffectiveOutputCap(
 }
 
 /**
+ * The per-call `model.invoke` wire request, built once for the production
+ * Python broker and the payload regressions that drive it.
+ *
+ * The reservation, the chosen alias and the value actually sent must be one
+ * decision: an explicit per-call tool argument wins, then a frozen agent
+ * override, then the model advanced parameters, then the profile default, and
+ * AUTO sends nothing because it never invents a cap.  The parameter layers come
+ * from the frozen snapshot, not from live profile rows.
+ *
+ * A chosen alias without a value is a programming error here; the adapters also
+ * refuse that combination instead of silently turning it back into AUTO.
+ */
+fun pythonModelWireDecision(
+    outputLimitMode: OutputLimitMode,
+    outputLimit: Int,
+    modelParametersJson: String,
+    agentOverridesJson: String,
+    requestedCap: Int?,
+): PythonModelWireDecision {
+    require(requestedCap == null || requestedCap > 0) { "A per-call output cap must be positive" }
+    val decision = resolveEffectiveOutputCap(outputLimitMode, outputLimit, modelParametersJson, agentOverridesJson)
+    val wireCap = requestedCap ?: decision.value
+    // The per-call argument is the most specific override, so its own alias wins.
+    val field = if (requestedCap != null) "max_tokens" else decision.key
+    require(field == null || wireCap != null) { "An output alias always carries a budget" }
+    return PythonModelWireDecision(
+        outputTokenLimit = wireCap,
+        outputTokenField = field,
+        source = decision.source,
+    )
+}
+
+/**
+ * One Python `model.invoke` output decision.  It is provider-independent so the
+ * domain does not depend on the provider module; the caller maps it onto its own
+ * `ModelRequest` with the frozen parameter layers it already holds.
+ */
+data class PythonModelWireDecision(
+    val outputTokenLimit: Int?,
+    val outputTokenField: String?,
+    val source: OutputCapSource,
+)
+/**
  * Independent probe budget.  A probe never reads the numeric column that the
  * mode declares ignored: AUTO uses its own task-local cap, MANUAL still refuses
  * to exceed the user's own number.

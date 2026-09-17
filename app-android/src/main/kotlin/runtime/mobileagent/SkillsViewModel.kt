@@ -238,7 +238,12 @@ class SkillsViewModel(
             val kbs = if (capability in setOf("knowledge.search", "knowledge.read", "document.read")) selectedKnowledgeBaseIds else current?.knowledgeBaseIds.orEmpty()
             val hosts = if (capability == "network.http") spec.hosts else current?.hosts.orEmpty()
             val methods = if (capability == "network.http") spec.methods.ifEmpty { setOf("GET") } else current?.methods.orEmpty()
-            app.container.skills.approvePermissions(id, caps, kbs, hosts, methods)
+            // A model.invoke grant carries the declared profile/call/token scope; the
+            // review never stores a wider sub-model budget than the package asked for.
+            val models = if (capability == "model.invoke") spec.modelProfileIds else current?.modelProfileIds.orEmpty()
+            val maxCalls = if (capability == "model.invoke") spec.maxModelCalls ?: 0 else current?.maxModelCalls ?: 0
+            val maxTokens = if (capability == "model.invoke") spec.maxModelTokens ?: 0 else current?.maxModelTokens ?: 0
+            app.container.skills.approvePermissions(id, caps, kbs, hosts, methods, models, maxCalls, maxTokens)
             permissionRequest.value = null
             message("权限已保存到本机并绑定当前包哈希。执行时仍受 Agent 绑定范围限制。")
             openDetail(id)
@@ -252,7 +257,10 @@ class SkillsViewModel(
             app.container.skills.approvePermissions(installId, caps,
                 if (caps.any { it in setOf("knowledge.search", "knowledge.read", "document.read") }) current.knowledgeBaseIds else emptySet(),
                 if ("network.http" in caps) current.hosts else emptySet(),
-                if ("network.http" in caps) current.methods else emptySet())
+                if ("network.http" in caps) current.methods else emptySet(),
+                if ("model.invoke" in caps) current.modelProfileIds else emptySet(),
+                if ("model.invoke" in caps) current.maxModelCalls else 0,
+                if ("model.invoke" in caps) current.maxModelTokens else 0)
             message("已撤销 $capability；新的能力请求立即生效。")
             openDetail(installId)
         } catch (error: Exception) { message(error.message ?: "撤权失败。") }

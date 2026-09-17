@@ -192,19 +192,51 @@ data class ModelProfile(
      * still matches, so a provider/model/endpoint change degrades to unknown
      * instead of silently reusing a stale number.
      */
-    fun resolvedContextWindow(currentTargetKey: String): Int? = when {
-        contextLimitMode == ContextLimitMode.MANUAL -> contextLimit
-        contextWindowSource == ContextLimitSource.UNKNOWN -> null
-        !contextWindowTargetMatches(contextWindowTarget, currentTargetKey) -> null
-        contextWindowValue == null || contextWindowValue <= 0 -> null
-        else -> contextWindowValue
-    }
+    fun resolvedContextWindow(currentTargetKey: String): Int? =
+        resolvedContextWindowState(currentTargetKey).value
 
     /** True when a previously recorded AUTO window no longer matches this target. */
     fun contextWindowIsStale(currentTargetKey: String): Boolean =
         contextLimitMode == ContextLimitMode.AUTO &&
             contextWindowSource != ContextLimitSource.UNKNOWN &&
             !contextWindowTargetMatches(contextWindowTarget, currentTargetKey)
+
+    /**
+     * The one validity decision for a context window: the runtime budget, the
+     * window column and the editor all ask this question, so none of them can
+     * show an effective number the others would refuse.
+     */
+    fun resolvedContextWindowState(currentTargetKey: String): ContextWindowState = when {
+        contextLimitMode == ContextLimitMode.MANUAL -> ContextWindowState(
+            mode = ContextWindowState.Mode.MANUAL, value = contextLimit,
+        )
+        contextWindowSource == ContextLimitSource.UNKNOWN -> ContextWindowState.UNKNOWN
+        !contextWindowTargetMatches(contextWindowTarget, currentTargetKey) -> ContextWindowState(
+            mode = ContextWindowState.Mode.STALE, value = null, recordedValue = contextWindowValue,
+        )
+        contextWindowValue == null || contextWindowValue <= 0 -> ContextWindowState.UNKNOWN
+        else -> ContextWindowState(
+            mode = ContextWindowState.Mode.AUTO_EFFECTIVE, value = contextWindowValue,
+            recordedValue = contextWindowValue, source = contextWindowSource,
+        )
+    }
+}
+
+/**
+ * Result of [ModelProfile.resolvedContextWindowState]: which window the next
+ * request may rely on, and whether the recorded one is merely stale.
+ */
+data class ContextWindowState(
+    val mode: Mode,
+    val value: Int?,
+    val recordedValue: Int? = null,
+    val source: ContextLimitSource = ContextLimitSource.UNKNOWN,
+) {
+    enum class Mode { MANUAL, AUTO_EFFECTIVE, STALE, UNKNOWN }
+
+    companion object {
+        val UNKNOWN = ContextWindowState(Mode.UNKNOWN, null)
+    }
 }
 
 @Serializable

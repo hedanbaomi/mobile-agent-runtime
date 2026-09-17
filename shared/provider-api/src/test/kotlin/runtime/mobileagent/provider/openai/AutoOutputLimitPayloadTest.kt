@@ -136,6 +136,54 @@ class AutoOutputLimitPayloadTest {
         assertTrue(events.last() is ModelEvent.Failed, events.toString())
     }
 
+    /**
+     * The internal contract is "a chosen alias always carries a budget".  A
+     * request that names an output field without a value is a programming
+     * error, not a silent fall back to AUTO: neither protocol may invent a cap
+     * and neither may drop the field the caller asked for.
+     */
+    @Test
+    fun chatRejectsAnOutputFieldWithoutABudgetInsteadOfBecomingAuto() = runTest {
+        val captured = mutableListOf<String>()
+        val adapter = OpenAiCompatibleAdapter(HttpClient(capturingEngine(captured)), "https://example.invalid/v1")
+        val events = adapter.stream(
+            ModelRequest(
+                modelId = "demo",
+                messages = listOf(ChatMessage(role = "user", text = "hi")),
+                outputTokenLimit = null,
+                outputTokenField = "max_completion_tokens",
+            ),
+            "token".toCharArray(),
+        ).toList()
+        assertTrue(captured.isEmpty(), "a field without a budget must not reach the provider")
+        val failure = events.lastOrNull()
+        assertTrue(failure is ModelEvent.Failed, events.toString())
+        // The transports publish the typed code; the detailed sentence stays in
+        // diagnostics, so the regression asserts the classification it exposes.
+        assertEquals("INVALID_CONFIG", (failure as ModelEvent.Failed).sanitizedMessage)
+    }
+
+    @Test
+    fun responsesRejectsAnOutputFieldWithoutABudgetInsteadOfDroppingTheCap() = runTest {
+        val captured = mutableListOf<String>()
+        val adapter = OpenAiResponsesAdapter(HttpClient(capturingEngine(captured)), "https://example.invalid/v1")
+        val events = adapter.stream(
+            ModelRequest(
+                modelId = "gpt-responses",
+                messages = listOf(ChatMessage(role = "user", text = "hi")),
+                outputTokenLimit = null,
+                outputTokenField = "max_output_tokens",
+            ),
+            "token".toCharArray(),
+        ).toList()
+        assertTrue(captured.isEmpty(), "a field without a budget must not reach the provider")
+        val failure = events.lastOrNull()
+        assertTrue(failure is ModelEvent.Failed, events.toString())
+        // The transports publish the typed code; the detailed sentence stays in
+        // diagnostics, so the regression asserts the classification it exposes.
+        assertEquals("INVALID_CONFIG", (failure as ModelEvent.Failed).sanitizedMessage)
+    }
+
     /** A matching advanced value is the same explicit cap, not a second field. */
     @Test
     fun advancedParameterEqualToTheManualCapSendsOneField() = runTest {

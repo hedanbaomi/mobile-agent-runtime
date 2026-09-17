@@ -642,6 +642,7 @@ private class PythonSkillToolExecutor(
                         modelParameters = Json.parseToJsonElement(binding.chatModel.parametersJson).jsonObject,
                         agentOverrides = Json.parseToJsonElement(snapshot.parameterOverridesJson).jsonObject,
                     ),
+                    outputTokenLimit = pythonSendCap,
                     outputTokenField = if (requestedCap != null) "max_tokens" else modelOutputDecision.key,
                     operationId = bound.ticket.invocationId), secret).collect { event ->
                     if (!authorized(bound)) throw BrokerDenied("PERMISSION_DENIED")

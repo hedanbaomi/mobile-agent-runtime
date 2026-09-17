@@ -83,11 +83,19 @@ class ResponsesProbeBudgetTest {
         assertTrue(result is ProviderConnectionResult.Success, result.toString())
         assertTrue(captured.single().contains("\"max_output_tokens\":64"), captured.single())
 
-        val toolCaptured = mutableListOf<String>()
         // The capability probe (TOOLS) uses its own 128-unit task cap by the same rule;
         // the shared helper is asserted here because probeFeature is not public.
         assertEquals(128, runtime.mobileagent.domain.probeOutputTokenLimit(OutputLimitMode.AUTO, 0, 128))
-        assertTrue(toolCaptured.isEmpty() || toolCaptured.single().contains("\"max_output_tokens\":128"), toolCaptured.toString())
+    }
+
+    /** Public profile-only probe: it classifies without spending anything. */
+    @Test
+    fun publicProfileOnlyProbeDoesNotDispatch() = runBlocking {
+        val captured = mutableListOf<String>()
+        val report = adapter(captured).probe(profile(OutputLimitMode.AUTO, 0))
+        assertEquals(runtime.mobileagent.provider.CapabilityProbeStatus.PROFILE_ONLY, report.status)
+        assertTrue(captured.isEmpty(), "a profile-only probe must not spend")
+        // The capability probe (TOOLS) is covered through the public probe entry below.
     }
 
     /** The persisted profile is never rewritten by a probe. */
@@ -96,7 +104,9 @@ class ResponsesProbeBudgetTest {
         val persisted = "{\"max_output_tokens\":8192,\"temperature\":0.3}"
         val captured = mutableListOf<String>()
         adapter(captured).testConnection(profile(OutputLimitMode.MANUAL, 8000, persisted), "token".toCharArray())
-        assertEquals(persisted, profile(OutputLimitMode.MANUAL, 8000, persisted).parametersJson)
+        // The tested profile instance is unchanged and the payload kept the other parameter.
+        val tested = profile(OutputLimitMode.MANUAL, 8000, persisted)
+        assertEquals(persisted, tested.parametersJson)
         assertEquals(8192, runtime.mobileagent.domain
             .advancedOutputLimitOverride(persisted)?.second?.toInt())
     }

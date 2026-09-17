@@ -1227,6 +1227,11 @@ class OpenAiCompatibleAdapter(
      * non-numeric value, stays untouched and is rejected by the shared merger exactly as a normal
      * request would be.
      */
+    /**
+     * Probe parameters never carry the business output aliases: a legitimate large
+     * cap must not be judged as an invalid probe configuration, and the probe
+     * supplies its own task-local cap through [ModelRequest.outputTokenLimit].
+     */
     private fun probeParameterLayers(modelParameters: JsonObject, probeOutputCap: Int): ParameterLayers {
         val hasMaxTokens = modelParameters.containsKey("max_tokens")
         val hasMaxCompletionTokens = modelParameters.containsKey("max_completion_tokens")

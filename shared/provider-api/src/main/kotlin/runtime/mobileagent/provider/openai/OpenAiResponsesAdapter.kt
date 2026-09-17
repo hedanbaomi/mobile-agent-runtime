@@ -699,6 +699,9 @@ class OpenAiResponsesAdapter(
         // a genuine same-layer ambiguity without a decision stays an error.
         if (request.outputTokenField != null) {
             val chosen = request.outputTokenField
+            if (request.outputTokenLimit == null) {
+                throw invalidConfig("outputTokenField requires an output budget", request.operationId)
+            }
             if (chosen !in listOf("max_tokens", "max_completion_tokens", "max_output_tokens")) {
                 throw invalidConfig("Unsupported output token field", request.operationId)
             }

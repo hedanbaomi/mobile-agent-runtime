@@ -3,8 +3,18 @@
 
 # 项目交接
 
-最后更新：2026-09-01T16:27:07+08:00（Asia/Taipei）。项目根目录：`E:\mobileAgentRuntime`。
+最后更新：2026-09-17（Asia/Taipei）。项目根目录：`E:\mobileAgentRuntime`；本轮工作树 `E:\mobileAgentRuntime\.tmp-budget-work\wt-f`。
 
+## 0. 2026-09-17 f7a9152 复核收口（本轮）
+
+- 基线：`codex/user-qa-fixes` 的 `a9686af`（含复核包指认的 P1-01 修复 `e84ec68` 与两条入口测试）。本轮在同一分支续做，未触碰根工作区 `b1a77c6` 的 docs/WIP，未推 main、未部署、未发收费请求。
+- 修复与新增（源码/测试）：
+  - Python 出站决策收敛到 domain 的 `pythonModelWireDecision`（tool > 冻结 Agent > 模型高级 > profile 默认，AUTO 不发明 cap），broker 的预留、别名与实发值使用同一决策，不再有机会只传 field 不传 cap。
+  - `model.invoke` 的 manifest/授权现在真正支持 `modelProfileIds`/`maxModelCalls`/`maxModelTokens`：`PermissionSpec`/`PermissionGrant`/`SkillArchive`/`SkillRepository`/SkillsViewModel/RuntimeIntegration 贯通；仓储拒绝超出声明的范围，合并授权取交集与最小值。
+  - 两个协议对 `outputTokenField` 非空而 `outputTokenLimit` 为空一律前置拒绝（`INVALID_CONFIG`），不再静默退回 AUTO 或丢掉显式上限。
+  - 上下文窗口“有效/未知/失效”状态统一为 `ModelProfile.resolvedContextWindowState`，Provider 列表复用 `contextWindowTargetMatches` 的同一判定，不再显示裸 legacy 数值。
+  - 新增真实入口回归：`PythonModelInvokePayloadTest`（生产决策 + 真实 Adapter + MockEngine，两协议最终字段矩阵）、`PythonModelInvokeBrokerTest`（真实 Python 技能 → broker → MockEngine 出站，含预留/结算与拒绝重放）、Runtime 多轮与摘要独立预算、公开 `probe()` 的 STREAM/TOOLS/IMAGE 派发与 64/128 cap。
+- 未完成/边界见本轮证据报告 `docs/evidence/2026-09-17/f7a9152-next-round-closeout.md`；真实收费 Provider、真机与 294 份收费验收仍不在本轮授权内。
 > 本文件只保存当前事实、未决边界和接手动作。已完成工作的详细过程保存在 [证据目录](docs/evidence/) 和 Git 历史中，不再在这里重复流水账。
 
 接手者必须依次阅读 [agent.md](agent.md)、本文件和 [技术实现方案](docs/IMPLEMENTATION_PLAN.md)。修改完成、受阻或中断前必须同步本文件及受影响的专题文档。

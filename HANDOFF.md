@@ -5,6 +5,17 @@
 
 最后更新：2026-09-17（Asia/Taipei）。项目根目录：`E:\mobileAgentRuntime`；本轮工作树 `E:\mobileAgentRuntime\.tmp-budget-work\wt-f`。
 
+## 0b. 2026-09-17 d487c98 复核收口（本轮，接续 0）
+
+- 基线 `d487c98`，本轮交付 `698933c`（已推送 `origin/codex/user-qa-fixes`）。未推 main、未 force、未部署、未发收费请求。
+- 关闭复核发现：
+  - F0：`feature/providers/gradle.lockfile` 补齐 release 单测 classpath，`generateReleaseUnitTestStubRFile` 可解析；未关闭测试、未放宽严格门禁。
+  - F1：新增受控入口 Agent 策略 `pythonModelRunTokens`（Agent 编辑器字段，留空即未授权）；`modelInvokeRunTokens` 把用户数字限制在已批准范围；`runBudgetJson` 是唯一持久 Run 预算构造器，ChatViewModel 建 Run 时写入 maxModelTokens，由共享 `RunTools.pythonBudget` 与 broker 读回。安装授权不会自动变成 Run 许可，普通聊天不暗加额度。
+  - F2：Skill 授权确认摘要展示模型身份、调用上限与 token 上限，并注明另需 Run 费用上限。
+  - G1：`app-android/src/androidTest/.../PythonModelInvokeBrokerTest`（7/7 PASS，mar_api36）经真实导入、真实授权、生产 `RunTools`、真实 CPython 与 IPC、真实 broker、真实 Adapter、MockEngine，覆盖 MANUAL/Responses 字段、无 Run 授权的零派发、超上限派发前拒绝、超预留阻断、撤权阻断、未知不重放。
+- 本地完整门禁通过：licenseGuard、licenseGuardReverse、verifyCiPins、verifyDependencyLock、verifyDependencyVerification、debugEvidenceGate、reviewGate（7m10s，1103 tasks）。远端 license-guard 对 698933c 成功；ci 结果见交接正文。
+- 证据：`docs/evidence/2026-09-17/d487c98-closeout.md`。
+
 ## 0. 2026-09-17 f7a9152 复核收口（本轮）
 
 - 基线：`codex/user-qa-fixes` 的 `a9686af`（含复核包指认的 P1-01 修复 `e84ec68` 与两条入口测试）。本轮在同一分支续做，未触碰根工作区 `b1a77c6` 的 docs/WIP，未推 main、未部署、未发收费请求。

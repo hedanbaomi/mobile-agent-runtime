@@ -56,13 +56,29 @@ EMBEDDING → INDEXING → READY
 
 `WAITING_FOR_VISION_MODEL`是可恢复等待，不是导入成功；配置好模型后回到原检查点。用户可在等待卡片选择「仅使用文本」，这会索引已有文字并留下可审计的 `READY_WITH_VISUAL_GAPS` 版本；没有可索引文本时任务保持等待。纯文本也必须经过Embedding后端选择；API分支在外发前进入`AWAITING_EMBEDDING_CONSENT`，未授权只暂停，不发请求。有效授权可跳过重复弹窗但不能跳过本地校验；绑定Provider、规范化目的域名、模型ID/版本、数据类型/范围和用途，任一变化须重新确认。用户拒绝时保留检查点，不能自动换Provider；本地模型失败不能自动回退API。视觉同意不自动授权把全部文本发送给Embedding。
 
-首版默认整份文档原子就绪：存在待视觉处理项时，不把该文档标为 READY。`READY_WITH_VISUAL_GAPS` 是明确的文本降级，不能伪装完整成功。其他已就绪文档仍可查询。
+首版默认整份文档原子就绪：存在待视觉处理项时，不把该文档标为 READY。`READY_WITH_VISUAL_GAPS` 是明确的文本降级，不能伪装完整成功。用户接受视觉缺口后，`knowledge_search`/`read_document` 可将该版本作为已发布引用源消费；引用校验不得再要求 `version_status == READY`。完整知识内容备份必须原样携带该状态，导入后仍显示缺口并要求本地重建索引，不得自动 Vision 外发、继承同意或升级为完整 READY。其他已就绪文档仍可查询。
 
 TXT/Markdown、PDF、DOCX、EPUB、常见图片分阶段实现，但最终首版范围不能仅用纯文本替代。DOCX/EPUB为不可信归档，不执行宏/脚本/外部资源，不自动访问包内URL。限制解压文件数、总大小、膨胀比和路径；拒绝 Zip Slip、链接和压缩炸弹。
 
 ## 3. 图片与页面的完整性
 
 PDF同时提取文本、图片和页面结构，并保留可渲染页。流程图/公式可能是矢量绘制，仅扫描嵌入图片不足以证明“无视觉内容”。首版可保守地将有图形/布局不确定的页面送视觉处理；不能证明可跳过的页面应进入待处理而不是静默过滤。用户可看到页/图数量、计划发送内容和费用估计，取消不会自动降级。
+
+2026-09-10 修复约束：PDF 对象流与页树按引用恢复；stream 边界优先使用经过验证的直接或间接 `/Length`，不能把 payload 中的字面量标记当作对象结束。解码内容流设单流与同页聚合 32 MiB 上限，未压缩流同样受限。页资源必须解析继承和间接引用，无法解析的 XObject `Do` 不得静默当作纯文本完整页。Vision 确认界面的可读标签与 canonical fingerprint 分离，票据和派发复核使用后者。真实材料与边界验证状态见[本轮证据](evidence/2026-09-09/a933b11-user-qa-fixes.md)，不是所有 PDF 特性的支持承诺。
+
+2026-09-10 复审补充：parser fingerprint 为 `pdf-text-v8-pdfrenderer`。`Tj`/`TJ`/`'`/`"` 同时提取字面量 `(...)` 与十六进制 `<...>` 操作数。内容流解码成功不能单独证明文字已经提取完整；未能覆盖的 text-show 操作数使该页需要 Vision，不得把部分标题发布为完整文本页。同一 Vision job 的每次外发与 `vision_results.model_fingerprint` 使用该 job 已确认 fingerprint，处理中途更换 Provider/模型不得把后续页或结果记到新目标。JVM 证据见 [review P1](evidence/2026-09-10/review-p1-vision-pdf.md)。
+
+2026-09-10 f24f5ae 复审补充：parser fingerprint 为 `pdf-text-v9-pdfrenderer`。内容流按词法读取 text-show，注释不能隔开操作数，嵌套括号与 `\\n` 转义按 PDF 规则解码，页内 `/Encoding` `/Differences` 映射十六进制字节。文字提取不完整必须留下 PAGE 阻断；已有 JPEG 不能当作整页证据。已发布文档的 parser fingerprint 与当前格式不一致时，同 blob 再导入必须重新解析，不得直接 READY。`rebuildIndex` 仍从已存 chunks 重建。JVM 证据见 [f24f5ae 复审](evidence/2026-09-10/review-f24f5ae-pdf-text.md)。
+
+2026-09-10 fd87a80 复审补充：parser fingerprint 为 `pdf-text-v10-pdfrenderer`。`/WinAnsiEncoding`、`/MacRomanEncoding`、`/StandardEncoding` 及编码字典的 `/BaseEncoding` 使用对应基表，未映射字节不得标为完整。内容流 `q`/`Q` 保存并恢复当前字体。PAGE 阻断只禁止把该页 JPEG 当整页证据，不得因此丢掉其它 needsVision 页的可用图；每个阻断页和每个 needsVision 页在发布前都必须有视觉证据。不承诺全部 PDF 字体。JVM 证据见 [fd87a80 复审](evidence/2026-09-10/review-fd87a80-pdf-encoding-coverage.md)。
+
+2026-09-10 903c33e 复审补充：parser fingerprint 为 `pdf-text-v11-pdfrenderer`。简单字体没有显式 (Base)Encoding 时使用 `/BaseFont` 的内置编码：`Symbol` 按 Adobe Symbol 基表映射到 Unicode（`αβγ` 等），ZapfDingbats 与无法可靠映射的内置编码 fail closed，让该页进入 Vision 而不是发布 Latin 假文本。同 blob 再导入复用已发布 `READY_WITH_VISUAL_GAPS` 版本时必须保留缺口状态与 `visualGapsAccepted`，不得静默升级为完整 READY 或上传补图；完整 READY 复用行为不变。JVM 证据见 [903c33e 复审](evidence/2026-09-10/review-903c33e-symbol-builtin-and-gap-reuse.md)。
+
+2026-09-10 dbceaa2 复审补充：parser fingerprint 为 `pdf-text-v12-pdfrenderer`。PDF 名称按 32000-1 7.3.5 解码 `#xx`，`/Sym#62ol` 等等价拼写、资源字典名与内容流名必须一致解析。无 (Base)Encoding 的简单字体不再有 catch-all 默认：base-14 十二个拉丁文字面按 StandardEncoding 完整发布，`Symbol` 用 Symbol 基表，`ZapfDingbats` 与任何其它未知 `/BaseFont` 显式判为不完整并保留 PAGE 阻断进入 Vision。代价是非 base-14 且未声明编码的页面从「静默完整」变为「待视觉处理」或需用户显式选择仅文本降级；声明 `/WinAnsiEncoding`、`/MacRomanEncoding`、`/StandardEncoding` 或 `/Differences` 的文档不受影响。JVM 证据见 [dbceaa2 复审](evidence/2026-09-10/review-dbceaa2-builtin-font-boundary.md)。
+
+2026-09-10 7500ad3 终轮复审补充：parser fingerprint 为 `pdf-text-v13-pdfrenderer`。字典的**键**与名称值一样按 32000-1 7.3.5 解码 `#xx` 后再匹配：`/Enc#6Fding`、`/Diff#65rences`、`/Fil#74er` 与字面写法等效。键被误判为缺失时后果比缺值更重——会静默丢弃声明的 `/Differences`，或把 Flate 压缩流当作未压缩字节发布为「完整文本」。JVM 证据见 [7500ad3 终轮复审](evidence/2026-09-10/review-7500ad3-final-keys-and-ci.md)。
+
+2026-09-11 4f0556d 复审补充：parser fingerprint 为 `pdf-text-v14-pdfrenderer`。PDF 字典按词法解析：键只在当前层级识别，键与值交替推进，注释、字面量串、十六进制串、嵌套字典/数组与间接引用整体跳过。这样键才是被「找到」而不是被「扫描到」，注释或字符串里的 `/Differences`、嵌套字典的同名键、作为名称值的 `/Differences` 都不会再让真正的映射看起来缺失。`/Differences` 缺失、畸形与合法空必须区分：畸形一律 fail closed 进入 Vision，不得退化成「无映射」后把未声明字节发布为完整文本。知识库 ZIP 在交给入库前核对每项实际解压字节的尺寸与 CRC-32；两个头声明一致不能证明正文未被改动。JVM 证据见 [4f0556d 复审](evidence/2026-09-11/review-4f0556d-dictionary-lexicon-and-zip-crc.md)。
 
 DOCX/EPUB关联图片与所在段落/章节；独立图片保留原始像素内容。可缩放/压缩的处理副本与原图分别哈希，记录转换参数；模型能力不支持时提示，不能以缩略图代替完整证据却不说明。
 
@@ -96,7 +112,7 @@ FTS5能力不等于中文分词质量。必须建立中文专名、英文术语�
 
 ## 5. 查询、预算和引用
 
-查询顺序：验证Agent授权与KB状态 → 按space生成query向量 → FTS5与USearch候选 → metadata和有效代际过滤 → 去重 → RRF → 可选重排 → 扩展父/邻块/图片 → 预算截取 → CitationMap。
+查询顺序：验证Agent授权与KB状态 → 按space生成query向量 → FTS5与USearch候选 → metadata和有效代际过滤 → 去重 → RRF → 可选重排 → 扩展父/邻块/图片 → 预算截取 → CitationMap。同文档已有较长正文命中时，只删除带可靠标题结构（`sourceSpan` 为 heading/`h1`–`h6`，或 ATX `#` 标记）的短块；作者、模式、布尔值和协议等短字段不得仅因无句号或无数字被丢掉。
 
 过滤条件采用结构化字段，不拼接用户SQL；授权过滤在候选阶段和返回阶段都执行。无命中返回空证据，回答不得捏造引用。
 
@@ -109,6 +125,8 @@ FTS5能力不等于中文分词质量。必须建立中文专名、英文术语�
 ## 6. 长任务、恢复和删除
 
 用户主动导入由前台可见任务执行，持久化检查点。WorkManager负责失败恢复/补偿/清理，不能依赖Activity常驻或无限后台执行。必须处理用户取消、进程死亡、系统重启、空间不足、网络变化、服务时限和电量/温控约束。
+
+同意后的 WorkManager 任务保留票据唯一身份，并关联文档 job 标签。用户取消 job 时先停止该标签下的普通导入与同意任务，再调用仓储取消 hook；批次取消也先停止 batch work。已外发但结果未确认的 Vision/API 操作保留 UNKNOWN，不变成可自动重放的普通取消。前台页同时观察活动 work 和持久 job 状态；只读查询尝试列表不得等待整个视觉请求持有的索引锁，避免阻塞完整界面快照。
 
 每份文档、每张图片、每批embedding独立记录状态；重启恢复检查文件hash、schema和处理指纹，已成功步骤不重复。导入重试不重复建Document或引用；取消保留可恢复部分并向用户说明磁盘占用，彻底删除需确认。
 
@@ -187,7 +205,7 @@ PDF 页光栅化、ONNX、设备原图查看器仍未做。独立复审前不把
 
 - PDF 内容流 `BI/ID/EI` inline image 计入 needsVision；可提取则保存为 IMAGE，否则等待/失败，不再把带图页标 READY。
 - 严格模式比较命中图与可附图集合；超限、缺失 CAS、超过 4 张均阻止，除非用户显式文本降级并在回答中保留警告。
-- Vision 同意与缓存绑定 `providerId|modelId|endpoint|revision`。换 Provider/域名/版本后零外发直至重确认；同 modelId 跨 Provider 不再共用缓存。schema v7 增加 `import_jobs.vision_binding_json`。
+- Vision 同意与缓存绑定 `providerId|modelId|endpoint|revision`。换 Provider/域名/版本后零外发直至重确认；同 modelId 跨 Provider 不再共用缓存。同一 job 处理期间每次外发与结果记录使用该 job 已确认 fingerprint，不得改绑到当前全局配置。schema v7 增加 `import_jobs.vision_binding_json`。
 - EPUB 按章节目录解析相对 `src`，同名文件不再错章绑定。
 
 ## 13. PDF XObject 媒体真实性修复（2026-08-29）
@@ -211,3 +229,15 @@ PDF 页光栅化、ONNX、设备原图查看器仍未做。独立复审前不把
 - 批次不再等待 294 个文件全部复制后才第一次调度。每个 item 完成 CAS/job 持久化后立即发出幂等 `KEEP` 唤醒；全部 staging 完成后用 `APPEND_OR_REPLACE` 添加尾栅栏，覆盖现有 worker 正处于结束窗口的竞态。
 - 诊断将复制/入队完成记为 `knowledge_import_staged`，实际完成只由 batch worker 终态事件表达；进度事件仅含 stage 与匿名计数，不记录文件名、路径或内容。
 - 上述修改通过共享归档/SQLite测试、API31 定向设备回归与全仓 check。用户实际 294 个 PDF 的完整耗时和最终索引分布仍待人工终审，不把代码路径修复写成 K06 性能 PASS。
+
+## 2026-09-13：知识库批次导入复核修订（本地同步）
+
+正常导入在开始时一次确认批次资料和固定视觉目标。已有支持 image 的 CHAT 模型可以被选中；显示标签与授权指纹分离，页面异步刷新必须同时发布 visionConfigured、visionTargetLabel、visionTargetFingerprint。窄屏有批次时默认显示整体进度，知识库管理与逐文件信息由用户展开。
+
+Schema 20 在 19 的批次授权字段之上新增 staging_manifest 与 staging_complete；旧批次默认完整，新批次先持久化有序来源清单与选定目标。所有成员落地并通过数量校验之前，禁止恢复 Worker、处理或保存批次授权。来源 URI 为暂存成员幂等键，不以同名文件合并。ZIP 先同步写入应用私有快照，再解析；暂停恢复使用同一快照，避免外部归档变化混入已授权批次。
+
+暂停保存 PAUSED 并阻止新派发，不取消已发出的网络请求；回来的明确成功结果仍保存。恢复复用已完成页和索引。派发前持久化 UNKNOWN_OUTCOME，进程死于网络边界时不自动重放；重试必须重新核验目标、资料及可能重复收费的确认。未完成暂存的 COPYING/STAGING 在重启后显示继续入口，用户 PAUSED 不自动启动。无视觉模型只在实际发现视觉需求时整批阻塞；缺少原图的 Markdown 引用显示资料缺口，允许用户显式选择文字降级。
+
+PDF 解析支持合法紧凑关闭分隔符后紧接 endobj 的对象，保持 stream 数据区长度和 endstream 边界校验；解析指纹升级 v15。诊断在真实 backend 前后记录脱敏派发、响应、保存与复用事件，可按 batch/job 不透明标识关联。
+
+验收和证据以 [本轮复核报告](evidence/2026-09-13/p1-batch-import-review.md) 为准；这段替代旧报告中取消 Worker 实现暂停、schema 19 为当前版本的描述。

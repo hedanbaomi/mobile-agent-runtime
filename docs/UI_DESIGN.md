@@ -5,6 +5,12 @@
 
 本文件为 mobileAgentRuntime Android 客户端软件的完整 UI 设计规范。涵盖设计原则、色彩与排版系统、导航架构、七类核心软件页面的逐屏高保真布局与状态规范、安全交互流程以及响应式无障碍标准。
 
+> **v3.0 Responses / 全局导航 Chrome 修订（2026-09-04，本地实现，NO COMMIT, NO PUSH, NO DEPLOY）**：`GlobalDrawerShell` 是页面级 TopAppBar、状态栏/刘海 inset 与唯一 leading navigation action 的所有者；Feature 根页面不再重复绘制一级标题。一级目的地显示 Menu，Provider/Agent 编辑与详情、Workspace picker 等子页面显示 Back，同一时刻严格互斥。紧凑布局使用 modal drawer，宽屏使用永久 drawer，二者共享同一目的地与会话内容。Provider 编辑器的 API 格式现在可在保持旧数据兼容的 `OpenAI Compatible` 与真实 `/responses` 的 `OpenAI Responses` 间切换；测试连接和能力探测跟随所选协议，工具探测强制调用声明的 no-op tool。特权工作区浏览失败按稳定 typed code 映射为可操作文案；未知内部异常只显示通用错误，不在 UI 暴露原始枚举、路径或异常正文。
+
+> **v2.4 产品修正（2026-09-01，现行）**：工作区只在完整 Agent 设置中配置，同一 Agent 的所有 Session 共用一个当前工作区；Session 与 Chat 只显示摘要并可跳转 Agent 设置，不复制授权流程。设置页只负责 Shizuku/Wired ADB 两种 ADB 级连接的配置与选择，Agent 设置负责 SAF/设备目录/完整设备文件。下方较早的 v2.4 初稿中“Agent、Session 与 Chat 共用授权面板”的表述已被本条覆盖。
+
+> **v2.4 修订（2026-09-01，本地验证完成）**：主导航改为稳定的 Agent→Session 会话侧栏；手机使用抽屉，宽屏使用永久侧栏。工作区与完整设备授权只在 Agent 设置中配置，Session 与 Chat 只显示安全摘要并跳转该 Agent 设置。设置页只负责 Shizuku/Wired ADB 两种 ADB 级连接的配置与选择。浅色是首次启动默认，`66ccff` 保留为可选彩蛋。ADB 级授权与实时连接分离，断联只显示暂时不可用，不撤权或隐藏授权。本文后续旧逐屏布局在与 [ADR-0006](adr/0006-conversation-sidebar-workspace-access.md) 冲突时以该 ADR 和实际 v2.4 组件为准；API 31 自动化与真实 Shizuku 证据见 [v2.4 记录](evidence/2026-09-01/conversation-workspace-v2-4.md)，物理 USB/OEM 差异仍不得冒充设备验收通过。
+
 页面设计遵循 Material Design 3 规范，采用现代、严谨、工程化视觉风格。全套界面禁用 Emoji 表情符号，统一使用纯文本标签、标准矢量图标及状态色阶表达界面意图。
 
 ## 1. 设计系统基础
@@ -85,31 +91,33 @@
 
 ```text
 +-------------------------------------------------------------+
-| [Top App Bar] 页面标题 / 状态指示器 / 辅助操作按钮           |
+| [Top App Bar] [Menu 或 Back] 页面标题 / 辅助操作按钮         |
 +-------------------------------------------------------------+
-|                                                             |
-|                      [主内容区域 Content]                   |
-|           (根据当前所选 Tab 显示列表、表单、详情或对话流)    |
-|                                                             |
-+-------------------------------------------------------------+
-| [Bottom Navigation Bar] 7个核心入口                         |
-| [Chat] [Agents] [Providers] [Knowledge] [Skills] [News] [About]
+| [全局 Drawer / 宽屏永久侧栏] | [主内容区域 Content]          |
+| Agent→Session + 产品目的地  | 列表、表单、详情或对话流       |
 +-------------------------------------------------------------+
 ```
 
-### 2.1 底部导航栏 (Bottom Navigation Bar)
-包含 7 个一级入口：
+### 2.1 全局 Drawer 与页面 Header
+
+全局 Drawer 是唯一的一级导航入口，直接包含 10 个产品目的地（无 More 中转页）：
+
 1. **Chat (对话)**: 实时问答、流式输出、工具确认、引用追溯。
 2. **Agents (智能体)**: Agent 配置、Prompt 版本控制、参数与资源绑定。
 3. **Providers (模型源)**: BYOK 服务商管理、API Key 安全存储、连通性探测。
 4. **Knowledge (知识库)**: 本地文档导入、状态跟踪、视觉等待横幅、索引管理。
 5. **Skills (技能)**: 本地 Python/Native 技能清单、权限管理、审计日志。
 6. **News (公告)**: 强制公告、更新通知、离线缓存、阅读确认。
-7. **About (关于与设置)**: 隐私设置、数据备份导出、AGPL 许可与版本信息。
+7. **Settings (设置)**: 隐私设置、数据备份导出、Authority 与诊断配置。
+8. **MCP**: MCP 服务发现、工具授权与调用。
+9. **About (关于)**: 版本、许可证与第三方声明入口。
+10. **Request inspector (请求检查器)**: 有效请求审查与密钥脱敏面板。
+
+`AppRoutes.MORE` 常量仅为已持久化 route 的兼容保留，不在 Drawer 展示，不再有正常用户路径经过。Shell 根据 route 与当前 detail/editor 状态决定唯一的 leading action：一级 Drawer 目的地一律使用 Menu；Agent/Provider 编辑器与详情、Workspace picker 等 feature 内部 detail/overlay 将同一位置提升为 Back；同一 TopAppBar 永不同时出现 Menu + Back；Drawer 打开时底层 leading action 不可点击、不重复渲染。TopAppBar 通过 Material/Compose window insets 消费状态栏与 display cutout，Feature 内容只接收 Scaffold content padding，不使用固定顶部间距。
 
 ### 2.2 响应式适配规范
-- **紧凑竖屏 (Phone Portrait, < 600dp)**: 采用标准底部导航栏与单列滚动卡片。
-- **宽屏/横屏/平板 (Landscape / Tablet, >= 600dp)**: 底部导航栏自动转为左侧导航轨 (Navigation Rail)，主内容区采用 Master-Detail 双栏布局（左侧列表，右侧详情）。
+- **紧凑竖屏 (Phone Portrait, < 600dp)**: 使用 modal drawer、Shell TopAppBar 与单列滚动内容；drawer 打开时不存在第二个浮动 Menu hit target。
+- **宽屏/横屏/平板 (Landscape / Tablet, >= 600dp)**: 使用永久侧栏与 Shell TopAppBar；主内容区可采用 Master-Detail 双栏布局。
 - **软键盘遮挡自适应**: 输入框悬浮在输入法上方 (IME Inset Padding)，聊天列表自动滚动至最新消息。
 
 ---
@@ -228,14 +236,14 @@
 #### SCR-PROV-01: Provider 列表 (Providers Overview)
 - **卡片列表**:
   - 服务商名称（如 `DeepSeek Official`, `OpenAI`, `Self-hosted vLLM`）。
-  - API 格式（OpenAI Compatible 等）。
+  - API 格式（`OpenAI Compatible` 或 `OpenAI Responses`）。
   - 状态指示标：`[Active]`、`[Error: 401 Unauthorized]`、`[Untested]`。
   - 关联模型数量统计。
 
 #### SCR-PROV-02: Provider 编辑与密钥存储 (Provider Editor & Secrets)
 - **表单字段**:
   - Provider 名称。
-  - API 格式选择（默认 `Custom OpenAI-Compatible`）。
+  - API 格式选择：旧记录和新建默认保持 `OpenAI Compatible`；用户可切换为使用真实 `/responses` 请求、独立流事件解析和同一 Runtime ToolExecutor 的 `OpenAI Responses`。
   - Base URL (例如 `https://api.deepseek.com/v1`)。
   - **API Key 输入框**:
     - 采用密码遮蔽模式显示 `***`。
@@ -422,7 +430,7 @@
 ### 3.8 人工终审导航与配置修正（2026-08-30）
 
 - Chat 顶部“无智能体”采用与相邻操作一致的按钮外形和最小 48 dp 高度、112 dp 宽度；disabled 只表示尚未选择 Agent，不缩小触控/视觉占位。
-- More 下 Provider、公告、MCP、设置、关于、请求检查器六个二级页面都有应用内返回操作；Android 系统返回回到 More，不直接退出应用。
+- （2026-09-04 修订：More Hub 已从信息架构移除，被 §2.1 的十目的地 Drawer 取代。）此前 More 下六个页面的返回语义由统一规则代替：一级 Drawer 页面之间按导航历史返回、无历史时回到 Chat；Inspector 保留显式来源返回；Agent/Provider 编辑器与详情等 feature 内部页显示 Back 并回到所属 feature 根。直接从全局 Drawer 打开的一级页面不被强制重定向；无历史的非 Chat 页面安全回到 Chat。
 - 公告地址、key id 与公钥是应用构建时固定信任根，不作为运营者或普通用户字段展示，不提供保存/编辑操作。
 - Agent 编辑页中禁用或缺失的已绑定 Skill 明确标红且只能取消；只有已安装并启用的 install ID 可选择和保存。
 

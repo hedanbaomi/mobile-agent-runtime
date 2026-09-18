@@ -3,9 +3,44 @@
 
 # 技术实现方案
 
-版本：v2.3 权限、工具暴露与诊断可用性修复，2026-09-01。状态：**[v2 单一规范](mobile-agent-runtime-authority-tooling-codex-prompt-v2.md) 的统一 Capability/Workspace/Authority/Approval/Audit、Internal/SAF/selected privileged workspace、Skill Memory、Shizuku、Windows 有线 USB ADB Companion、持久 Dangerous Mode、受控 `shell_exec`、Settings/Agent/Chat/Skills/diagnostics 已完成实现与本地自动化收敛；API 31 x86_64 的系统 SAF provider 与官方 Shizuku 13.6.0 shell UserService 已完成真实 E2E，物理 USB Companion、物理断连恢复和非模拟器设备差异保持 `E2E BLOCKED`**。有效 canonical grant 与 snapshot binding 已授权的 typed workspace 调用不再在 Chat 重复询问，仍逐次复核撤销、过期、live policy revision、workspace/path scope、selected Authority 与 ONCE CAS；高风险 Shell 的策略确认不变。合法空工具集、模型 tools transport 关闭与 factory 故障已分离，`runtime_tool_exposure` 只记录安全聚合状态。Debug 继续拒绝 Dangerous Mode，控制面使用 `debuggable=false` Review 构建；Root、应用内无线 ADB、DPC、Termux、PTY、Accessibility、宿主 PowerShell/宿主 shell 继续排除。当前 dirty Debug APK 为 212,754,194 bytes、SHA-256 `ED6571CC4AE98101D6F049EC57FF9EE3EA6BA8F030CDFE2FD41C64A11E96FAD4`；Review APK 为 204,289,319 bytes、SHA-256 `E8289EE1DB02ADBF1C3F9C2AD8BF7B97FC07E676140EF5347AA2395C9F2AB477`。API 31 首次无预热 Shizuku bind 1/1、SAF 2/2、模型侧 Shizuku 1/1、Shizuku UserService 2/2，完整 connected matrix 235 tests 全通过（另有 1 个未显式启用的受控大负载 Knowledge skip）；全仓 strict 1084-task gate、两份 171-component SBOM、Review provenance、REUSE 516/516、许可与供应链门禁通过。准确命令、哈希和边界见 [2026-09-01 真实工作区 E2E 证据](evidence/2026-09-01/workspace-tool-real-e2e.md)。它们是未提交 dirty-source 的本地证据，不是正式 release；本轮尚未 commit/push、未部署、未调用付费服务。App 元数据仍为 `versionName=0.1.0`/`versionCode=1`。F-001 保持 `candidate_intermittent`；用户实际 294 个 PDF、Android 15/16 长时配额、ENOSPC 等 K06 边界仍未完成，不能标完整 K06 或正式 release PASS。
+> **v3.12 复审 PDF 字典词法与 ZIP 正文 CRC（2026-09-11，JVM 定向修复已落地）**：键查找改为词法走 token 流（`findTopLevelValueStart`），只认当前层级键、按键值交替推进、整体跳过注释/字面量串/嵌套结构/间接引用，`dictionaryEnd`/`arrayEnd` 同步跳过这些；`arrayBody` 区分「缺失/畸形/合法空」，畸形 `/Differences` fail closed 进入 Vision。文件型 ZIP 在交给 `onEntry` 前核对实际解压字节的尺寸与 CRC-32。fingerprint `pdf-text-v14-pdfrenderer`。证据见 [4f0556d 复审](evidence/2026-09-11/review-4f0556d-dictionary-lexicon-and-zip-crc.md)。
+> **v3.11 终轮复审字典键解码与 CI 内存门禁（2026-09-10，JVM 定向修复已落地）**：字典键按 32000-1 7.3.5 解码后再匹配，`/Enc#6Fding`、`/Diff#65rences`、`/Fil#74er` 与字面写法等价，不再因键「看似缺失」而丢弃 `/Differences` 或跳过 FlateDecode；fingerprint `pdf-text-v13-pdfrenderer`。主 CI `check` 失败根因是 review 变体 D8 外部 dex 合并 `OutOfMemoryError`，`org.gradle.jvmargs` 提升到 `-Xmx4g`，门禁步骤未减。证据见 [7500ad3 终轮复审](evidence/2026-09-10/review-7500ad3-final-keys-and-ci.md)。
+> **v3.10 独立复审内置字体编码边界（2026-09-10，JVM 定向修复已落地，本地未提交）**：PDF 名称按 32000-1 7.3.5 解码 `#xx`（`Sym#62ol` 与 `Symbol` 等价，资源名与内容流名同样解码）；无 (Base)Encoding 的简单字体只对 Symbol、ZapfDingbats（fail closed）与 base-14 十二个拉丁文字面（StandardEncoding）判定，其余未知名称 fail closed 进入 Vision，取消 catch-all 猜测。fingerprint `pdf-text-v12-pdfrenderer`。证据见 [dbceaa2 复审](evidence/2026-09-10/review-dbceaa2-builtin-font-boundary.md)。
+> **v3.9 独立复审 Symbol 内置编码与视觉缺口复用（2026-09-10，JVM 定向修复已落地）**：简单字体无 (Base)Encoding 时按 `/BaseFont` 解析内置编码，`/Symbol` 走 Adobe Symbol 基表（`αβγ` 等），`ZapfDingbats` 与未知内置编码 fail closed 进入 Vision。parser fingerprint `pdf-text-v11-pdfrenderer`。同 blob 再导入复用已发布 `READY_WITH_VISUAL_GAPS` 版本时保留该状态、`visualGapsAccepted` 与 `hasImages`，不再静默升级为 READY 或上传补图。证据见 [903c33e 复审](evidence/2026-09-10/review-903c33e-symbol-builtin-and-gap-reuse.md)。
+> **v3.8 独立复审 PDF 编码与混合页覆盖（2026-09-10，源码已推送 `903c33e`，docs 仅本地提交）**：WinAnsi/MacRoman/Standard 基表加 `/Differences`，未映射字节 fail-closed；`q`/`Q` 保存/恢复字体。PAGE 阻断只约束该页 JPEG，其它 needsVision 页仍可处理；发布前每个阻断页和 needsVision 页都要有证据。fingerprint `pdf-text-v10-pdfrenderer`。证据见 [fd87a80 复审](evidence/2026-09-10/review-fd87a80-pdf-encoding-coverage.md)。
 
-开工入口：[agent.md](../agent.md) → [HANDOFF.md](../HANDOFF.md) → 本文。范围依据见 [REQUIREMENTS.md](REQUIREMENTS.md)。含图知识库、Python 隔离和公告分别详见专题，不能只实现本文概要。
+> **v3.7 独立复审 PDF 文字（2026-09-10，源码已推送 `fd87a80`，docs 仅本地提交）**：PDF 内容流按词法提取 `Tj`/`TJ`/`'`/`"`，处理注释、嵌套括号、转义与 `/Differences`；文字不完整必须保留 PAGE 阻断，内嵌 JPEG 不能代替整页。同 blob 再导入在 parser fingerprint 过期时重新解析。fingerprint `pdf-text-v9-pdfrenderer`。证据见 [f24f5ae 复审](evidence/2026-09-10/review-f24f5ae-pdf-text.md)。
+
+> **v3.6 独立复审 P1（2026-09-10，源码已推送 `f24f5ae`，docs 仅本地提交）**：Vision 每个 asset 外发使用 Job 已确认 fingerprint，结果行也记录该值，处理中途改 Provider 不得把后续页送到新目标。PDF `Tj`/`TJ` 识别十六进制字符串；未能覆盖的 text-show 操作数不再把部分文字页标为完整。parser fingerprint `pdf-text-v8-pdfrenderer`。证据见 [review P1](evidence/2026-09-10/review-p1-vision-pdf.md)。
+
+> **v3.5 用户验收问题修复（2026-09-10，本地已验证，未提交/发布）**：PDF 对象扫描复用 Matcher，按真实 stream 边界、对象流、页树与继承 Resources 解析，解码/未压缩内容流维持 32 MiB 单流及单页限制；同意前不栅格化，WorkManager 升至 2.10.5 修复连续前台交接竞态。A 类 Skill 显式启用创建当前 package 的空能力信任授权；新 shell 持久 grant 使用同一 resolver，保持策略版本和当前 Run 冻结。工具 schema 仅增加受限 nullable 二成员类型，声明/参数共同校验；boolean 字符串和任意 union 拒绝。Provider metadata 使用列表兼容路径，探测输出上限为 min(用户预算,64)，SSE 累计 usage 只结算一次，空完成/长度截断明确失败。Vision 授权使用 canonical fingerprint，consent work 关联 job，取消先停止 work 再持久化 UNKNOWN；只读快照不等待同步 Vision 索引锁。准备预算错误与固定字段诊断、英文 SAF FlowRow 一并修正。门禁、真实材料与限制见 [最终证据](evidence/2026-09-09/a933b11-user-qa-fixes.md)。
+
+
+> **v3.4 Workspace version 往返与直接缓存重放（2026-09-08，本地实现，NO COMMIT, NO PUSH, NO DEPLOY）**：Internal 的 c1/m1/d1/legacy 及 Shizuku 两个 adapter 统一投影到 `0..Long.MAX_VALUE`，保留原合法非负值、完整内部 token 与既有冲突检查。真实 Backend → Adapter → Executor 返回的 JSON version 可原样回送 write/patch；stale version 保持 `CONFLICT`。提交后返回值无法映射或 Shizuku mutation 响应损坏均为 `UNKNOWN_OUTCOME`，有效结构化冲突不升级。Composite 的直接重复 invoke 也重验缓存披露权，撤销/重验异常使旧缓存永久失效；未知结果只保留安全标记且不重新执行。远端 `7ef48f1` 的 convergence-device 已确认 30/30 PASS，本轮不再修改 USearch。设计取舍见 [ADR-0009](adr/0009-workspace-version-request-range.md)，验证状态与限制以 [2026-09-08 证据](evidence/2026-09-08/7ef48f1-version-contract.md) 为准。
+
+> **v3.3 9f5257 follow-up（2026-09-06，本地实现，NO COMMIT, NO PUSH, NO DEPLOY）**：Internal `c1:/m1:/d1:` CAS token 经 `WorkspaceVersionProjection` 投影到 Shared numeric 契约，写入已提交但投影失败为 `UNKNOWN_OUTCOME`；`VectorIndexCache` 失败后的 single-flight 以 `BuildGate.holders` 保持同一把锁；USearch JNI `try_reserve` 并发线程从 1 提到至少 32（CI `convergence-device` 失败根因）。详见 [本轮证据](evidence/2026-09-06/9f5257-version-projection-device-gate.md) 与 [ACCEPTANCE W21/K12](ACCEPTANCE.md#33-架构收敛2026-09-05)。
+
+> **v3.2 架构收敛（2026-09-05，本地实现，NO COMMIT, NO PUSH, NO DEPLOY）**：围绕 RunManifest / RunCoordinator / ToolOutcome / AuthorizationDecision 四个统一契约收敛。ToolOutcome 统一终态信封（Denied/Invalid 永不升级 INTERNAL）；Responses 仅非 null object `error` 进入失败；文件后端能力拆分为 ATOMIC_PUBLISH/CREATE_IF_ABSENT/COMPARE_AND_REPLACE/BEST_EFFORT_CONFLICT_DETECTION/RECOVERABLE_EDIT，版本拆分为 metadata/content/cas（`c1:/m1:/d1:`），create-only 经内核原子 exclusive create（Windows rename 语义经实测不可信）；检索改为每 KB 每通道独立 ranking + 确定性 tie，ANN 按 generation 缓存复用并回收，coverage 进 result/prompt/UI/持久化/manifest；缓存重放经 `authorizeReplay` 重验披露权（不重执行）；Python/Built-in/Python 复用同一授权决策表；`RunManifest` 随 run 持久化（DB v17）；`RunCoordinator` 拥有 run 所有权；多 Skill 记忆按 `memory_<opaque>` 命名空间隔离；model.invoke 默认禁用且配额进 manifest；Internal 工作预算四限分离。详见 [ADR-0007](adr/0007-architecture-convergence.md)、[ACCEPTANCE §3.3](ACCEPTANCE.md#33-架构收敛2026-09-05) 与本轮证据。
+
+> **v3.1 人工测试前收口（2026-09-04，本地实现，NO COMMIT, NO PUSH, NO DEPLOY）**：Desktop Bridge CLI 测试改用宿主平台绝对路径 fixture（`C:\` 硬编码只保留 Windows-only 语义用例），生产 `isAbsolute` 校验不变。全局 Drawer 成为唯一一级导航（对话/智能体/服务商/知识/技能/公告/设置/MCP/关于/请求检查器），More Hub 移除，`AppRoutes.MORE` 仅兼容保留；一级页一律 Menu、feature 内部 detail/overlay 一律 Back、系统 Back 逐级回 Chat；`ReleaseGateUiDeviceTest` 按新 IA 重写。Shizuku `list()` 取消 512 总量前置限制（`MAX_LISTED_ENTRIES=8192` 仅为资源保护上限），fingerprint 与子目录 entry version 改为浅层（本目录元数据 + 直属可见子项），cursor 可复用、 bounded 1024，突变/淘汰/重启一律 `INVALID_CURSOR`。Workspace Picker 在 Shizuku 与 Wired 双端支持 opaque continuation + UI“加载更多”，目录优先累积渲染，stale continuation 为 typed `INVALID_CURSOR`。Responses 默认 `store:false`（boolean 覆盖，非 boolean 拒收）并在 stateless 下请求 `reasoning.encrypted_content`；加密 reasoning 经 provider-private 通道在同 run tool 循环回送，不进 UI/预览/诊断/持久化/日志；refusal 为独立可显示可持久化的 assistant 输出；reasoning text 事件与 summary 同通道；探测预算夹紧为 64/128 tokens。详见 [ACCEPTANCE §3.2](ACCEPTANCE.md#32-人工测试前收口2026-09-04) 与本轮证据。
+
+> **v3.0 OpenAI Responses / Shell-owned Header / Workspace typed error（2026-09-04，本地实现，NO COMMIT, NO PUSH, NO DEPLOY）**：保留持久化值 `OPENAI_COMPATIBLE` 并新增 `OPENAI_RESPONSES`；所有生产调用点通过 `OpenAiAdapterFactory` 按格式选择 `/chat/completions` 或真实 `/responses` adapter。Responses 具备独立 request mapper 与 SSE parser，覆盖 instruction、文本/图片输入、参数、工具定义、function call 参数增量、tool output continuation、可展示 reasoning summary、completed/failed/error 及未知事件前向兼容；两种格式共同进入现有 `AgentRuntime` / `ToolExecutor` 循环，tools capability probe 强制已声明的 no-op tool，不能因模型返回普通文本而误判协议不支持工具。全局 `GlobalDrawerShell` 改为 Scaffold + Shell-owned TopAppBar，统一 Menu/Back/title/insets，Feature 根页关闭重复标题，Provider/Agent editor/detail 使用页面级返回语义；特权工作区浏览各级失败保留 typed code 并映射为安全可操作 UI 文案。Workspace list 在 Internal/SAF/Shizuku/Wired 下统一为元数据枚举：超大文件仍可列出、读取时返回 `FILE_TOO_LARGE`，symlink/特殊/瞬时不可读条目不跟随并安全跳过；返回值含有界、无路径的 `skippedEntries` 与分类计数 `warnings`，所有 adapter（含生产 Shizuku）均校验并透传，旧协议缺字段时兼容为零值。Opaque cursor 的路径、指纹、偏移及字符/长度边界均 fail closed，变更返回 `INVALID_CURSOR`；SAF 缺失 `COLUMN_SIZE` 时最多探测 `maxFileBytes + 1`，grant 丢失映射为 `PERMISSION_DENIED`。Wired helper 对已有 `FILE_*` code 不重复加前缀，桌面 frame decoder 允许 `FILE_TOO_LARGE` 原样穿透而不降为 `UNKNOWN_OUTCOME`；diagnostics 把 `BRIDGE_PROTOCOL_MISMATCH` 等已知错误保持为 FAILED。题设 Workspace Cases A-E 具备直接回归测试，包括 Internal/Shizuku/Wired 真实 FIFO unsupported entry、permission failure、desktop warning payload 与 framed `FILE_TOO_LARGE`；所有层不暴露真实路径或异常正文。API 36 定向矩阵 179/179、聚合 JVM 65 suites / 463 tests、1021-task strict gate 均通过，独立复核 `APPROVE`。
+
+> **v2.9 Agent 默认工作区 / Unbound Thread UX / Menu-Back XOR / diagnostics（2026-09-03，本地实现，NO COMMIT, NO PUSH, NO DEPLOY）**：Agent 编辑页选择默认工作区统一进入 `CanonicalWorkspaceCoordinator` 与 `WorkspaceIntent.SET_AGENT_DEFAULT`。运行时以 backend capability 为真值、通过显式 canonical allowlist 自动生成精确的 PERSISTENT grant：只读后端只有 enumerate/list/stat/read，读写后端再包含 write/mkdir/move/delete/apply-patch，任何路径均不自动授予 `shell.execute`；重复选择复用既有 grant ID。高级权限继续允许显式逐项撤销，撤销后 default 变为不可用且不得静默恢复，只有用户重新选择该 workspace 才重新授权。新 Agent 在实体存在前只保存 `WorkspaceDraft`；保存串行提交 Agent+grant+default，取消、关闭或异步过期结果不生成 grant、不泄漏到下一编辑器。Thread binding 仍不可变：旧 unbound Thread 不因 Agent default 改变而绑定；Chat 显示 `BOUND` / `UNBOUND_AGENT_DEFAULT_AVAILABLE` / `UNBOUND_NO_AGENT_DEFAULT`，显式“在默认工作区新建会话”才创建绑定的新 Thread，Drawer secondary text 为「workspace · agent」。顶层 Chat/Agents/Providers/Knowledge/Skills/Settings 使用 Menu，About/Inspector/MCP/detail/editor 使用 Back，单一 route policy 与 overlay suppression 保证 Menu/Back XOR，不用 padding 规避。新增闭合集合、HMAC ref 的 `agent_workspace_default_changed` 与 `conversation_workspace_resolution`；后者在 Run 建立/发送前记录，configured-but-revoked default 保留匿名 default ref 但不能被判为 available，日志不含 path/URI/locator/secret。API 36 模拟器相关批次 46/46、最后竞态与只读 UI 批次 33/33、Provider 回归 7/7 均通过；最终 strict gate 1021 tasks `BUILD SUCCESSFUL`，Debug SBOM 171 components，独立标准复审 `APPROVE`。本轮变更文件 REUSE 18/18 PASS；全目录 REUSE 仅被任务前已有且禁止触碰的 `.tmp-diag3/` / `.workbuddy/` 5 个 untracked 文件阻断。真实刘海/打孔设备保持 `REAL CUTOUT VERIFY REQUIRED`，物理 Wired USB 保持 `E2E_BLOCKED`。
+
+> **v2.4 工作区访问与交互语言重构（2026-09-01，已实现并完成本地验证、未提交）**：v2.3 的 Capability/Workspace/Authority/Approval/Audit 安全边界继续有效；本轮新增稳定 Agent→Session 侧边栏、统一 WorkspaceAccess 门面、多 SAF 工作区、后续 Run 权限热更新、selected Authority 下的设备目录选择，以及显式高风险且可撤销的“完整设备文件（ADB 可见范围）”。Shizuku 与 Wired ADB 只在 UI 中归为 ADB 级系统访问，内部仍是两个独立且不自动回退的 Authority；完整设备文件不是 Root，也不自动授予 `shell.execute`。API 31 真实 SAF/Shizuku、95 项聚合设备回归、lint、全仓 strict gate、REUSE 与供应链门禁均已通过；物理 Wired ADB 和 OEM/真机断连恢复仍为设备阻塞。未经新授权不得 commit/push、部署或正式发布。
+
+> **v2.5 Workspace/UI/Provider 修正（2026-09-02，被 v2.6 覆盖；v2.6 源码已推送 `2d35933`，文档仅本地）**：一个 Agent 可以持有多个 workspace Grant，并有一个只影响新 Thread 的默认 workspace；每个 Thread 持久绑定自己的 workspace，默认值变化不改写旧 Thread。Shizuku/Wired directory handle 继续是临时值，真实 locator 以 Android Keystore AES-GCM 加密持久化，并在同一 Authority 恢复后重建新 handle；断联不撤 Grant、不自动 fallback。真实仓库文件工具增加分页、stat、offset 分块读取和 expected-version/hash 原子 patch。手机外壳改为单一全局 Drawer、宽屏永久侧栏，不再叠加底部导航与 Chat 私有 Drawer。Provider Test Connection 与 Capability Probe 拆成 typed 状态并覆盖 HTTP/timeout/partial 回归。本轮不得 commit/push、部署、发布或调用真实付费 Provider；设备和独立复核结果必须在完成后分栏记录。
+
+> **v2.8 NewThreadRequired 零副作用确认与运行时授权收口（2026-09-03，本地修改，NO NEW COMMIT, NO PUSH, NO DEPLOY）**：彻底清除切换已绑定 Thread 工作区时提前落盘 Agent capability grant 的语义副作用。在用户明确确认“创建新会话”之前（取消或关闭弹窗），不得产生任何新的持久 Agent capability grant；原 Thread 继续保持 W1，Agent default 不变，Agent W2 persistent grant count 保持 0，无 Snapshot W2，无 Conversation W2。确认流程收口到 Runtime canonical seam `WorkspacePickerPort.confirmNewThreadWorkspace`：执行严格 revalidation（Agent 存在、Thread 绑定未发生 TOCTOU、工作区有效及 SAF/Privileged 权限验证，特权失效 fail-closed 不 fallback），在事务内原子持久化 `persistWorkspaceGrantBundle`（自动复用既有活跃 grant 不产生重复）。UI 弹窗确认按钮接入 `confirmNewThread`，成功后再分发新会话。
+
+> **v2.7 Thread workspace 不可变 / Provider 连接集成 / 全局 Menu 与 Insets（2026-09-03，源码已推送 `17a695e`；HANDOFF/`docs` 仅本地）**：已绑定 Thread 的 workspace 在首次 bind 后不可变；再选其他 workspace 不改写 binding/snapshot，UI 确认后以同一 Agent 创建新 Thread。Provider `testConnection()` 经最窄 `ProviderAdapterFactory` 做 ViewModel/adapter 集成回归，生产 HTTP 仍走同一 `OpenAiCompatibleAdapter`。compact 全局菜单为 48dp Menu IconButton，不再显示文字「菜单」。Insets 为 `IMPLEMENTED / AUTOMATED TESTED / REAL CUTOUT VERIFY REQUIRED`。`WorkspaceUiPresentationStore` 是显示元数据，不是授权/恢复 source of truth。普通模式不暴露 arbitrary shell；用户显式开启 Dangerous Mode 且具备 `shell.execute` capability 后，仍允许真正的 Android shell。Root/Wireless ADB 仍不实现。
+
+> **v2.6 Workspace canonical flow（2026-09-02，源码已推送 `2d35933`；HANDOFF/`docs` 仅本地）**：产品选择只解析为 `ADD_TO_LIBRARY` / `SET_AGENT_DEFAULT` / `BIND_THREAD` 之一。Agent 编辑页走 `CanonicalWorkspaceCoordinator`；Global Picker 走 `WorkspacePickerPort`，由 `planFor` 推导同一 intent。两者都进入 `RuntimeIntegration` 单事务，UI 不再自行拼 attach/grant/default。新建 Agent 可在保存前暂存 draft；保存时再 grant+default，失败回滚新建 Agent。Conversation 选 workspace 只 `BIND_THREAD`。新会话若 Agent 有合法 default 则冻结该 workspace 的 grants 并写 `ConversationWorkspaceBinding`，否则 unbound 且不 fallback。显示层可对用户展示特权路径与 SAF 目录名，但 raw path/URI/locator 不得进入 `AgentWorkspaceUi`、tool schema、prompt 或 diagnostics。Authority 仍由用户明确选择，禁止自动 Shizuku/ADB/SAF fallback。
+
+版本：v2.3 权限、工具暴露与诊断可用性修复，2026-09-01。状态：**[v2 单一规范](mobile-agent-runtime-authority-tooling-codex-prompt-v2.md) 的统一 Capability/Workspace/Authority/Approval/Audit、Internal/SAF/selected privileged workspace、Skill Memory、Shizuku、Windows 有线 USB ADB Companion、持久 Dangerous Mode、受控 `shell_exec`、Settings/Agent/Chat/Skills/diagnostics 已完成实现与本地自动化收敛；API 31 x86_64 的系统 SAF provider 与官方 Shizuku 13.6.0 shell UserService 已完成真实 E2E，物理 USB Companion、物理断连恢复和非模拟器设备差异保持 `E2E_BLOCKED`**。有效 canonical grant 与 snapshot binding 已授权的 typed workspace 调用不再在 Chat 重复询问，仍逐次复核撤销、过期、live policy revision、workspace/path scope、selected Authority 与 ONCE CAS；高风险 Shell 的策略确认不变。合法空工具集、模型 tools transport 关闭与 factory 故障已分离，`runtime_tool_exposure` 只记录安全聚合状态。Debug 继续拒绝 Dangerous Mode，控制面使用 `debuggable=false` Review 构建；Root、应用内无线 ADB、DPC、Termux、PTY、Accessibility、宿主 PowerShell/宿主 shell 继续排除。当前 dirty Debug APK 为 212,754,194 bytes、SHA-256 `ED6571CC4AE98101D6F049EC57FF9EE3EA6BA8F030CDFE2FD41C64A11E96FAD4`；Review APK 为 204,289,319 bytes、SHA-256 `E8289EE1DB02ADBF1C3F9C2AD8BF7B97FC07E676140EF5347AA2395C9F2AB477`。API 31 首次无预热 Shizuku bind 1/1、SAF 2/2、模型侧 Shizuku 1/1、Shizuku UserService 2/2，完整 connected matrix 235 tests 全通过（另有 1 个未显式启用的受控大负载 Knowledge skip）；全仓 strict 1084-task gate、两份 171-component SBOM、Review provenance、REUSE 516/516、许可与供应链门禁通过。准确命令、哈希和边界见 [2026-09-01 真实工作区 E2E 证据](evidence/2026-09-01/workspace-tool-real-e2e.md)。它们是未提交 dirty-source 的本地证据，不是正式 release；本轮尚未 commit/push、未部署、未调用付费服务。App 元数据仍为 `versionName=0.1.0`/`versionCode=1`。F-001 保持 `candidate_intermittent`；用户实际 294 个 PDF、Android 15/16 长时配额、ENOSPC 等 K06 边界仍未完成，不能标完整 K06 或正式 release PASS。
+
+开工按 [agent.md 第 1 节](../agent.md#1-按任务读取与开工) 分级读取：项目修改核对 [HANDOFF.md](../HANDOFF.md) 现行摘要，再读取本文及 [REQUIREMENTS.md](REQUIREMENTS.md) 的相关章节；纯咨询不要求通读实现历史。本文带日期的版本记录只说明当时任务，不提供新任务授权。涉及含图知识库、Python 隔离或公告的实现仍须读取对应完整契约，不能只实现本文概要。
 
 ## 1. 不可变更要求
 
@@ -109,7 +144,7 @@ docs/evidence/                脱敏的验证结果，按任务分目录
 
 | 实体/逻辑表 | 必要字段与约束 |
 | --- | --- |
-| ProviderProfile | id、name、apiFormat、baseUrl、headerSecretRefs、nonSecretHeaders、secretRef、revision；没有明文密钥 |
+| ProviderProfile | id、name、apiFormat、baseUrl、headerSecretRefs、nonSecretHeaders、secretRef、revision；没有明文密钥。更换 baseUrl 时不得继承旧目标的 headerSecretRefs |
 | ModelProfile | id、providerId、role、modelId、capabilities、parameterSchema、context/output limits、revision |
 | AgentProfile | id、name、promptRevisionId、chat/vision/embedding/rerankerProfileId、retrieval/context/permission settings、revision |
 | agent_knowledge / agent_skills | agentId + resourceId 联合唯一；引用不能隐式扩大资源权限 |
@@ -150,6 +185,8 @@ interface SecretStore {
 
 `ModelEvent` 最少包含 TextDelta、ToolCallDelta、Usage、Completed、Failed。流式 tool call 按 provider call ID 聚合，完整 JSON 和 schema 校验后才执行；残缺、未知工具或重复 call ID不执行。取消关闭流和关联工作，不把半截回答当完整成功。
 
+Chat Completions 的 usage 是单次 completion 累计快照：adapter 只在终态前提交最后一份，`choices=[]` 的 usage 仍有效；Runtime 可累加不同模型轮次。空正文且无工具调用/拒绝内容的完成明确失败；长度截断保留 `CONTEXT_OVERFLOW`。可选单模型 metadata 路由返回 404/405 时，无论 model id 是否含 `/`，均可用 `GET /models` 按完整 ID 精确匹配；metadata 不支持不得提前阻断独立能力探测，也不得把认证失败或模型不匹配当成成功。官方 OpenAI 兼容根地址（例如 `https://api.deepseek.com`）join 相对路径时不得插入 `/v1`。工具探测在 HTTP 200 但未发出强制 tool call 时记为未确认，不得据此判定实际对话工具不可用或 Base URL 无效。
+
 能力可由模型清单、用户手动配置和轻量测试共同形成，记录来源和时间。能力测试会向用户 Provider 发请求并可能计费，须明确告知；不自动遍历所有模型收费探测。
 
 ### 6.2 参数合并
@@ -166,7 +203,11 @@ Effective Prompt分层显示：Runtime Contract（用户可见只读）→ User 
 
 模板变量仅允许固定白名单，如 date、agent_name、knowledge_bases；不执行表达式、脚本、路径读取或递归模板。Skill 指令与知识块不得成为权限来源。Request Inspector 默认不持久化正文，明确列出将离开设备的片段/图片和目标 Provider；导出单独确认并脱敏。
 
-ContextPolicy至少包含 maxHistoryMessages、knowledgeTokenBudget、maxInputTokens、reservedOutputTokens、imageBudget。优先保留当前消息和工具配对，裁剪旧历史和低相关证据，不截断工具 JSON；能力缺失时采用明确的保守预算并提示。不能通过调低计算结果绕过 Provider真实窗口限制。
+ContextPolicy 采用 [ADR-0010](adr/0010-conversation-context-compaction.md)：默认自动压缩，输入软阈值 85%/目标 60%、历史 20 条/10 轮、最近保留 2 轮。准备阶段和每次请求统一通过 `ModelAdapter.estimateInput` 计算正文、完整工具参数/关联字段/schema、协议/参数/图片及适配器私有续接预留。上限取 Agent 输入预算与模型窗口扣除输出预留的较小值。原始历史完整保留，模型只接收摘要及保留的完整轮；不得截断工具 JSON 或静默删除图片，无法压缩的固定内容明确失败。估算单位不是实际 token 数。
+
+数据库 v18 在现行 v17 基础上增加 `context_compactions`，不改变旧消息。记录会话/快照/Run、来源 ID/hash、模型/授权指纹、摘要输入 hash、parentId/version、状态/时间/usage；先持久化派发、后验证并原子发布成功摘要。PREPARED 重启取消，DISPATCHED 重启 UNKNOWN，不自动重发。界面可查看摘要和来源；撤权/来源删除优先于任何历史摘要。版本 v12—v17 的既有迁移以 `Migrations.kt` 为准，上文 v11 描述保留其历史功能范围。
+
+请求准备阶段超过保守输入预算时，在调用 Provider 前持久化 `CONTEXT_OVERFLOW`，显示估计量、模型窗口、输出预留、协议/正文/工具参数/schema/图片预留拆解及可执行调整建议；UTF-8 保守计量不得冒充模型实际 token 数。开启诊断后写入固定准备阶段、错误码、安全异常类型和闭合非负整数拆解，遵守 [诊断白名单](DIAGNOSTICS.md)。
 
 ## 7. Agent 执行契约
 
@@ -187,7 +228,7 @@ CREATED → VALIDATING → RETRIEVING → ASSEMBLING → MODEL_STREAMING
 
 RAG 可由用户设置为自动检索或显式 knowledge_search；不得无条件把整个库加入上下文。每个 Run固定快照，实时撤销授权优先于旧快照中的授权，旧 grant不能恢复新近撤销的权限。
 
-工程默认：最多 8 个模型交互轮、20 次工具调用、总运行 180 秒；Python 单次限额另见专题。所有预算由本地 Runtime限制；Skill内部模型调用计入子预算和总预算。参数可在明确上限内调整，不能通过 Skill或远程公告修改。
+工程默认：自动压缩开启时每段最多 8 次普通模型请求，成功摘要后续跑；每 Run 总模型请求最多 32（含摘要与 Skill 内调用），摘要最多 8 次，工具最多 20 次、总运行 180 秒。压缩只重置段轮数，不重置总请求、工具或时间预算；总请求上限始终采用会话策略配置（默认 32），不随自动压缩开关改变。摘要采用当前模型、无工具、独立输出限额，已观察到的 usage 随摘要尝试保存并按 ID 差额计入 Run；取消/异常由不可取消收尾补齐落库记录，未知用量不估算、不重发。Python 单次限额另见专题。所有预算由本地 Runtime 限制，不允许 Skill、模型摘要或远程公告修改。
 
 ### 7.2 Tool Loop
 
@@ -347,3 +388,15 @@ python -m reuse lint
 ```
 
 远程 owner和保护能力未确认时停留在 M0未完成，不伪造 CODEOWNERS 身份，不申请过宽权限。后续按 [ACCEPTANCE.md](ACCEPTANCE.md) 验证，任何实现变化在同一轮维护本方案、专题文档和交接。
+
+## 2026-09-13：知识库批次导入复核修订（本地同步）
+
+正常导入在开始时一次确认批次资料和固定视觉目标。已有支持 image 的 CHAT 模型可以被选中；显示标签与授权指纹分离，页面异步刷新必须同时发布 visionConfigured、visionTargetLabel、visionTargetFingerprint。窄屏有批次时默认显示整体进度，知识库管理与逐文件信息由用户展开。
+
+Schema 20 在 19 的批次授权字段之上新增 staging_manifest 与 staging_complete；旧批次默认完整，新批次先持久化有序来源清单与选定目标。所有成员落地并通过数量校验之前，禁止恢复 Worker、处理或保存批次授权。来源 URI 为暂存成员幂等键，不以同名文件合并。ZIP 先同步写入应用私有快照，再解析；暂停恢复使用同一快照，避免外部归档变化混入已授权批次。
+
+暂停保存 PAUSED 并阻止新派发，不取消已发出的网络请求；回来的明确成功结果仍保存。恢复复用已完成页和索引。派发前持久化 UNKNOWN_OUTCOME，进程死于网络边界时不自动重放；重试必须重新核验目标、资料及可能重复收费的确认。未完成暂存的 COPYING/STAGING 在重启后显示继续入口，用户 PAUSED 不自动启动。无视觉模型只在实际发现视觉需求时整批阻塞；缺少原图的 Markdown 引用显示资料缺口，允许用户显式选择文字降级。
+
+PDF 解析支持合法紧凑关闭分隔符后紧接 endobj 的对象，保持 stream 数据区长度和 endstream 边界校验；解析指纹升级 v15。诊断在真实 backend 前后记录脱敏派发、响应、保存与复用事件，可按 batch/job 不透明标识关联。
+
+验收和证据以 [本轮复核报告](evidence/2026-09-13/p1-batch-import-review.md) 为准；这段替代旧报告中取消 Worker 实现暂停、schema 19 为当前版本的描述。

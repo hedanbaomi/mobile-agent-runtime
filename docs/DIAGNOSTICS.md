@@ -17,8 +17,8 @@
 ## 2. 记录范围与上限
 
 - 固定公共字段：schema、session、pid、thread类别、UTC时间、level、event、Git revision、dirty、数据库schema、构建时间。`thread` 只能是 `main`、`worker` 或 `other`，不保存任意线程名。
-- 固定事件：诊断启停、Provider模型tools/image能力开关、Provider模型保存开始/成功/失败、知识导入开始/进度/入队/staged/失败、Skill检查/安装、批次worker开始/进度/完成/失败、未捕获异常，以及权限选择/状态、权限配置维度、Shizuku/有线ADB生命期、工作区授权/操作、Skill memory操作、危险模式决策、runtime工具暴露、shell暴露、tool approval、shell执行、bridge请求、runtime tooling 不可用和诊断丢弃摘要。知识导入的“staged”仅表示文件已复制并入队，只有worker到达真实终态才记录完成。
-- 本轮权限与工具排障事件使用 `DEBUG` 级别，但仍只有用户主动开启“应用内诊断记录”后才落盘。`authority_configuration_state` 分开记录 user intent、selected、platform grant、availability、connection 与 configured；`dangerous_mode_decision` 记录构建是否允许及固定拒绝原因；`runtime_tool_exposure` 只记录注册、已授权、快照绑定和三者交集的工作区数量、Provider 实际可见的工具总数与所有者分桶、模型 tools transport 开关、selected Authority/ready 状态、SAF grant/backend 布尔值和固定原因。它们不写权限对象、workspace ID、文件夹、URI、路径、命令、参数或模型正文。
+- 固定事件：诊断启停、Provider模型tools/image能力开关、Provider模型保存开始/成功/失败、知识导入开始/进度/入队/staged/失败、Skill检查/安装、批次worker开始/进度/完成/失败、未捕获异常，以及权限选择/状态、权限配置维度、Shizuku/有线ADB生命期、工作区授权/操作、特权工作区选择/加密 binding/reattach、Conversation workspace binding/resolution、workspace tool exposure、Provider connection test/capability probe、Skill memory操作、危险模式决策、runtime工具暴露、shell暴露、tool approval、shell执行、bridge请求、runtime tooling 不可用和诊断丢弃摘要。知识导入的“staged”仅表示文件已复制并入队，只有worker到达真实终态才记录完成。
+- 本轮权限与工具排障事件使用 `DEBUG` 级别，但仍只有用户主动开启“应用内诊断记录”后才落盘。`authority_configuration_state` 分开记录 user intent、selected、platform grant、availability、connection 与 configured；`dangerous_mode_decision` 记录构建是否允许及固定拒绝原因；`runtime_tool_exposure` 只记录注册、已授权、run/session 绑定和交集工作区数量、Provider 实际可见的工具总数与所有者分桶、Agent/Skill 有效能力计数、backend ready/失败/Authority mismatch 计数、schema frozen、模型 tools transport、selected Authority/ready、SAF grant/backend/探测状态和固定原因。它们不写权限对象、workspace ID、Grant/Skill ID、文件夹、URI、路径、serial、命令、参数或模型正文。
 - v2 新事件采用强类型 record API 和闭合字段白名单；未知事件或字段整条拒绝。允许的值只来自固定枚举、布尔值、桶化限制、有限计数、异常类型、错误类别和终态。Provider名称、模型ID、Base URL、知识/Skill文件名与秘密不进入字段。
 - `runtime_tooling_unavailable` 只接受 `TOOL_EXECUTION_CONTEXT_UNAVAILABLE` 或 `TOOL_EXECUTOR_FACTORY_UNAVAILABLE`，并可带 HMAC 化的 session/run 引用；`tool_approval_state` 的 capability、authority 为固定枚举，sessionRef 同样只写 HMAC 化引用。审批原因只保留闭合的安全码；正常发起和超时分别为 `approval_required`、`timeout`，拒绝/失效可使用 `approval_denied`、`snapshot_stale`、`invalid_request` 或 `call_id_replay`，不会退化成无法定位的异常文本。
 - 模型或用户可控的 agent、skill、workspace、call、approval 引用只写固定长度（32 个十六进制字符）的 app-local HMAC 截断值；Runtime 随机 requestRef 也归一化为同样长度。当前实现使用稳定会话 HMAC，密钥只在进程内存中生成，绝不写普通文件；可用受保护持久密钥时由平台适配器替换。
@@ -28,9 +28,13 @@
 
 ## 3. 隐私与崩溃边界
 
+`run_preparation_failed` 只允许固定准备阶段（preflight、retrieval、tooling、prompt、manifest、context_budget、credentials、request）、`MessageErrorCode` 枚举、安全异常类型，以及可选的闭合非负整数（`configuredContextLimit`、`outputReserve`、`inputLimit`、`estimatedUnits`、`imageCount`、`imageBudget`、`protocolUnits`、`messageTextUnits`、`toolCallUnits`、`toolSchemaUnits`、`imageUnits`）。它用于区分请求准备失败并给出预算拆解数字，不记录异常消息、输入/Skill 内容、估算全文或任何凭据；默认关闭与原有大小限制不变。实际请求准备成功后不再把后续流式错误记为准备失败。
+
 字段白名单之后仍执行 `SecretRedactor` 与URL/query、Windows/Unix路径、换行/控制字符、长度清洗。不得保存聊天、System Prompt、模型参数正文、知识库文件名/内容、Skill输入输出、API Key/Header/Cookie、请求或响应正文、异常message。
 
 第四轮新增的应用私有工作区不增加路径或文件内容诊断事件；相对路径、真实 Android 路径、读写正文和目录列表都不能进入诊断 ZIP。v2 事件同样禁止 filename、path、cwd、URI、ADB serial、adb path、host、IP、port、Binder 参数、token、session key、API secret、prompt、exception message 和任意自由文本。当前只为 SAF workspace、Shizuku 和有线 ADB Companion 定义事件；无线 ADB、Termux、DPC、Root 与 PTY 是排除项，不得以诊断事件暗示它们已接线。
+
+Responses provider-private continuation（`reasoning.encrypted_content` 等）是传输数据，绝不进入诊断：不记录事件类别之外的任何原文、不记录 URI/绝对路径/serial/locator/token/secret/raw provider response；`RequestPrepared` 的请求预览在构造前已剥离 continuation。模型 refusal 按正常 assistant 输出记录：允许记录安全的事件类别与终态，不把 Provider 原始敏感正文塞进诊断；`skippedEntries`/`warnings` 保持闭合 schema（计数与类别），Shizuku picker 的 stale continuation 按 typed `INVALID_CURSOR` 记录，不降格为协议 mismatch 或 unknown。
 
 诊断写入失败和被白名单拒绝的事件只增加内存中的 failure/drop 计数，并将健康状态标为 degraded；不会递归写入失败日志。`diagnostic_drop_summary` 只在显式调用时记录一份固定字段快照，摘要自身失败也不会再次产生日志。
 
@@ -44,10 +48,13 @@
 | --- | --- | --- |
 | `authority_configuration_state` | authority、user intent、selected、grant/availability/connection、configured 的固定枚举或布尔值 | 初始快照、refresh、显式启用/选择、平台状态变化；六个维度必须独立，连接成功不能冒充用户意图或选择 |
 | `dangerous_mode_decision` | requested/current mode、selected authority、buildKnown/buildAdmitted、固定 decision reason | enable、disable、构建拒绝、Authority拒绝；Debug 拒绝必须可诊断，不能降低构建门禁 |
-| `runtime_tool_exposure` | HMAC session/run 引用、注册/授权/快照绑定/交集工作区计数、Provider 可见工具总数、固定 owner 计数、model tool transport、selected Authority/ready、SAF active/registered、固定 reason | exposed、模型 tools transport 未启用、无有效 Agent grant、无快照绑定、合法空工具集合、factory unavailable；模型能力关闭和合法空集合都不能误报 factory failure |
+| `runtime_tool_exposure` | HMAC session/run 引用、注册/授权/run 绑定/交集工作区计数、Provider 可见工具总数、固定 owner 计数、Agent/Skill 有效能力、backend ready/failure/mismatch、schema frozen、model tool transport、selected Authority/ready、SAF active/registered/operation count/probe state、固定 reason | exposed、模型 tools transport 未启用、无 Agent grant、Session binding 缺失、Skill 交集为空、backend probe 失败、schema 已冻结、Authority mismatch、合法空工具集合、factory unavailable；各层原因不得再合并为无法行动的单一错误 |
 | `authority_state` | selected authority、grant/availability/connection 的固定枚举、revision、错误类别 | configured、permission、connected、ready、temporarily unavailable、revoked、recovered；不得把 grant 与当前连接混成一个布尔值 |
 | `tool_exposure` / `tool_approval` | capability bucket、tool snapshot hash、approval result、reason enum | exposure、approval、revalidation、dispatch；审批必须绑定当前 Agent/快照/Authority/危险模式 revision |
 | `workspace_operation` / `memory_operation` | backend enum、operation bucket、字节/条目计数桶、终态 | read/list/write/move/delete、cancel、timeout、denied、unknown；不记录相对路径或正文 |
+| `privileged_workspace_selection_*` / `privileged_workspace_binding_persisted` / `privileged_workspace_reattach_*` | HMAC workspace/request 引用、authority、binding revision、grant generation、duration、闭合错误码 | picker start/complete、密文已持久化、reattach start/complete/fail；不记录 locator、绝对路径、URI、handle、serial 或异常文本 |
+| `conversation_workspace_*` / `workspace_tool_exposure` | HMAC agent/session/workspace/previous-workspace 引用、authority、binding revision、grant generation、snapshot version、capability/exposure/reason 枚举 | Thread bind/change/resolve 与 run 工具暴露；默认 workspace 变化不能伪装成旧 Thread 改绑 |
+| `provider_connection_test_*` / `provider_capability_probe_*` | HMAC provider/model 引用、result enum、HTTP class、duration | started/completed；连接与能力结果分开，允许 connection success + capability partial；不记录 URL、model 名、secret、状态码、payload 或 response |
 | `shell_exposure` / `shell_execution` | `commandSha256`、authority、dangerous policy、timeout/output buckets、stdout/stderr 字节数桶 | registered、revalidation、dispatch、started、completed、failed、cancelled、timed out、truncated、disconnected、unknown；不记录 command、cwd、argv、preview、stdout/stderr 或 result |
 | `bridge_request` | bridge phase、protocol version、transport enum、固定错误类别、计数桶 | doctor、pair、reverse、session、request、recovery、disconnected；不记录配对码、HMAC、serial、路径、host、IP、port |
 | `diagnostic_drop_summary` | drop/failure 计数、degraded 标志、固定原因枚举 | 显式导出时最多一条摘要；写入失败不得递归写日志 |

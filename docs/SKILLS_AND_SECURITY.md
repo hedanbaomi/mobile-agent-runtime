@@ -157,7 +157,7 @@ Keystore生成不可导出的加密key，Provider/Skill秘密作为密文保存�
 
 诊断包经 Storage Access Framework 写到用户选择的位置，manifest包含构建和设备fingerprint以绑定复现环境；导出失败不得清除原始日志，清除只删除应用自有诊断文件。应用不申请`READ_LOGS`，不能捕获native崩溃、内核/系统强杀或被杀前未落盘的Android系统日志，这些场景仍需用户提供相同APK SHA对应的ADB Logcat。完整操作和字段契约见[诊断日志](DIAGNOSTICS.md)。
 
-备份策略排除秘密和设备绑定key相关状态，恢复后要求重新输入密钥；不要把自动备份当作跨设备秘密迁移。默认导出Agent/Prompt/模型非秘密参数、KB元数据和Skill配置，不含Key/Header/Cookie/敏感附件。用户显式选择完整KB/对话/Skill包导出时展示体积和隐私范围，保留原权利信息并重新导入验证；未选的blob和源码不得夹带。
+备份策略排除秘密和设备绑定key相关状态，恢复后要求重新输入密钥；不要把自动备份当作跨设备秘密迁移。默认导出Agent/Prompt/模型非秘密参数、KB元数据和Skill配置，不含Key/Header/Cookie/敏感附件。用户显式选择完整KB/对话/Skill包导出时展示体积和隐私范围，保留原权利信息并重新导入验证；未选的blob和源码不得夹带。Agent 运行时绑定仍是本地 `install_id`：导出记录来源安装身份，含会话备份还带上历史快照仍引用、但当前 Agent 已解绑或替换的 Skill；导入到空库时重映射到新的本地安装记录并保持禁用，不把旧 Skill 擅自加回当前 Agent，不把 package id 写入运行时绑定，也不携带原授权。同一清单 id 的不同版本/哈希按各自安装身份恢复；package id 只在无歧义时作为可选别名。package id 与来源 install id 不得在同一映射里互相覆盖；仅有歧义 package id 的遗留绑定必须拒绝，不得按迭代顺序选版本。
 
 schema未知、包hash错误或无权限的导入必须拒绝；迁移失败不清库。秘密丢失时返回明确配置错误，不自动调用其他key。
 

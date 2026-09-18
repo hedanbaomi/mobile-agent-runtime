@@ -21,6 +21,8 @@
 | S8 | 当前任务：落地技术文档、根交接、强制工作规则；补充初始化 Git/CodeGraph | 本工作任务 |
 | S9 | 2026-08-28 后续要求：在 M0—M7 中增加一步，专门设计前端页面；用户澄清即设计软件页面 | 本工作任务后续用户消息；M0.5 编号及交付细则为实施补充 |
 | S10 | 2026-08-29 后续要求：增加抓取日志功能，用于定位无法稳定复现的移动端故障 | 本工作任务后续用户消息；隐私、大小和导出边界为实施补充 |
+| S11 | 2026-09-01 后续要求：重构为 Agent→Session 稳定侧边栏；可选择 SAF 或 ADB 级目录；下一 Run 热更新权限；Shizuku 与有线 ADB 作为同类连接方式但不限制工作区；显式“完整设备文件”可访问所选 ADB 身份实际可达范围 | 本工作任务后续用户消息；其中“单 Agent 单当前工作区、全部 Session 共用”已被 S12 覆盖，安全解释见 ADR-0006 |
+| S12 | 2026-09-02 Workspace/UI/Provider 修复规范：Agent 可持有多个工作区 Grant 和一个只影响新 Thread 的默认工作区；每个 Thread 持久绑定自己的工作区；privileged locator 加密持久化并在 Authority 恢复后重建临时 handle；全局 Drawer、真实仓库分页/分块/patch 工具和 typed Provider 连接/能力探测 | 用户指定 `mobile-agent-runtime-codex-workspace-ui-provider-fix-prompt.md` 为本轮 canonical 任务；覆盖 S11 中冲突的工作区生命周期语义 |
 | V2 | 权限工具与受控执行 v2 规范：统一 typed tools、Shizuku/Wired ADB 双 Authority、持久危险模式、Windows USB Companion、shell_exec、诊断与 E2E 边界 | `docs/mobile-agent-runtime-authority-tooling-codex-prompt-v2.md` |
 
 来源分三层：**用户明确要求**必须保留；**对话方案基线**按用户本次“依照方案”要求落实；**实施补充**用于填补原讨论的接口、事务和边界细节，不冒称用户亲自选定。后续讨论覆盖前面的冲突建议：S5 的受限纯 Python 优先于 S4 的 Full Python 探讨；S6 的早期公告优先于 S1 的四项极简 MVP；S5 的严格视觉聊天优先于早期默认文本降级。
@@ -39,7 +41,7 @@
 | R06 | 含图片必须配置 Vision；处理图表、公式、矢量页面；不得静默丢失 | 用户要求 S4 + 方案 S5 | K03、K04 |
 | R07 | 默认本地 Embedding，支持 API；本地 FTS5+向量+过滤+RRF，可选重排 | 方案 S1/S5 | K05、K07 |
 | R08 | 引用可定位原文/原图，Token 预算，视觉证据说明 | 方案 S5 | K04、K08 |
-| R09 | SKILL.md、资源、Python；兼容性检测、源码查看、安装授权；无清单 Claude Skill 中可兼容的标准库 CLI 必须能在启用/授权/Agent 绑定后成为实际模型工具，不能只展示说明 | 用户要求 S1/S4 + 2026-08-30 人工反馈 | S01、S02、S12 |
+| R09 | SKILL.md、资源、Python；兼容性检测、源码查看、安装授权；纯指令 Skill 显式启用后须具备可绑定的空权限信任，不继承旧授权能力；无清单 Claude Skill 中可兼容的标准库 CLI 必须能在启用/授权/Agent 绑定后成为实际模型工具，不能只展示说明 | 用户要求 S1/S4 + 2026-08-30 人工反馈 | S01、S02、S12 |
 | R10 | Python 隔离进程和 Broker；每次新进程；纯 Python；不运行 pip/任意原生代码；程序只能读取本次调用虚拟文件或显式短期句柄，不能直接开放 PowerShell、宿主 Shell 或任意宿主文件系统 | 方案 S5 + 2026-08-30 人工反馈 | S03—S07、S12 |
 | R11 | Native/HTTP 工具及 Tool Loop；未来 JS/MCP/Remote 可扩展；工具对 Agent 暴露 provider-neutral wire name，不暴露 backend 名称 | 方案 S1/S3/S5 + V2 | S08、S09、S13、S14 |
 | R12 | API 密钥保护、最小数据外发、审计脱敏、导出排除秘密 | 方案 S5 | A03、S10 |
@@ -47,7 +49,7 @@
 | R14 | 公告平台/版本/渠道/语言/稳定灰度、离线/已读/确认、ETag | 方案 S6 | N02—N05 |
 | R15 | 公告独立 Worker+D1+管理端；匿名统计可关闭；不得上传用户内容或下发代码 | 方案 S6 | N06—N09 |
 | R16 | 全部第一方代码/文档/公告服务 AGPL-3.0-only，保护防误改 | 用户要求 S5 + 方案 S6 | L01—L04 |
-| R17 | 开工读交接，收工维护；本地 Git 和 CodeGraph 初始化 | 当前明确要求 S8 | D01、D02 |
+| R17 | 按 agent.md 的任务分级读取交接和相关规范；项目代码、配置、决策或待办变化时维护交接，纯咨询/只读审查按例外交付；本地 Git 和 CodeGraph 初始化 | 用户要求 S8；2026-09-05 用户授权调整读取与交接适用范围 | D01、D02 |
 | R18 | 独立软件页面 UI 设计阶段；逐屏设计布局、视觉样式和控件，交付高保真页面稿及可编辑源稿，再落实到软件 UI | 用户要求 S9及澄清；阶段细则为实施补充 | U01—U06 |
 | R19 | 用户主动开启的本地诊断日志；有界滚动、字段白名单和秘密/URL/路径脱敏；支持 SAF 导出与清除，用于间歇性故障取证 | 用户要求 S10；隐私和崩溃处理边界为实施补充 | A08、S10、U05 |
 | R20 | Agent 在逐次确认、Agent/快照复核与硬配额下使用 provider-neutral typed tools 访问应用私有工作区或用户明确选择的 SAF tree；不得泄露 Android 真实路径、跨 Agent/快照访问或借此获得 shell。SAF 是 workspace backend，不是 elevated Authority | V2 + 2026-08-30 第四轮人工反馈 | S13、S14、S19 |
@@ -55,6 +57,16 @@
 | R22 | Windows Desktop Companion 仅作为有线 USB ADB 的受控 backend：官方 adb、`adb reverse`、loopback、一次性配对/挑战、会话序号/HMAC、固定 protocol；不接受 host shell、PowerShell、serial、端口或 raw command 由 Agent 指定 | V2 | S17、S21 |
 | R23 | Dangerous Mode 持久保存至用户显式关闭；提供 `ENABLED_CONFIRM_HIGH_RISK` 与 `ENABLED_AUTONOMOUS` 两档；仅在选定 Authority、Agent capability 和策略均允许时暴露 `shell_exec`，执行 Android 端一次性 `/system/bin/sh`，不做 PTY，不把风险检测器伪装成 allowlist | V2 | S15、S17、S18 |
 | R24 | 权限与危险模式安全证据必须在 `debuggable=false` 的 review-like build 上复核；debug/JVM/automated evidence 不得替代真实 Shizuku/USB E2E；硬件或 Companion 缺失统一标为 `E2E BLOCKED`，不虚报 `DEVICE_PASS`/`RELEASED` | V2 | A09、S20、S21 |
+| R25 | 应用使用单一全局 Agent→Thread Drawer：手机为可关闭抽屉、宽屏为永久侧栏；不再保留手机底部一级导航或 Chat 私有第二 Drawer；从侧栏选择 Agent/工作区新建 Thread，切换页面不得取消或隐藏正在进行的流式任务 | 用户要求 S11/S12 | U07、S23 |
+| R26 | 每个 Agent 可持有多个相互独立的 opaque workspace Grant，并有一个只影响新 Thread 的默认工作区；每个 Thread 创建时持久绑定一个 workspace，之后不会因 Agent 默认值变化而改写。系统持久权限与 Agent 工具权限保持分层，但 picker 流程一次完成 backend、binding、Grant 与 Thread/default 选择并明确状态 | 用户要求 S12 + V2 | S24、S25 |
+| R27 | Shizuku 与 Wired ADB 在用户界面统一描述为 ADB 级系统访问的两种连接方式，内部仍为不自动 fallback 的独立 Authority；任一连接可承载多个用户选择的 privileged workspace，连接方式不决定工作区 | 用户要求 S11 + V2 | S16、S26 |
+| R28 | Agent Grant 热更新仅在下一 Run 生效，当前 Run 不扩权；默认 workspace 变化只影响新 Thread，既有 Thread 保持原 binding。撤权、过期、policy、path scope 与 Authority 在派发前继续复核；历史 snapshot 与 Thread binding 不因默认值变化而重写 | 用户要求 S12 + V2 | S25 |
+| R29 | “完整设备文件”仅表示所选 ADB Authority 在 UID/SELinux 下实际可达的范围，不等于 Root、不承诺全部 `/data`、不自动授予 `shell.execute`；必须显式高风险确认、持久可撤销且模型只见 opaque workspace + 相对路径 | 用户要求 S11 + V2 | S27 |
+| R30 | ADB 级用户意图、配对信任、Agent 当前工作区及“完整设备文件”授权必须持久保存；断联、无 Wi-Fi、Binder/USB 暂时不可达只改变 availability/connection 并阻止当次派发，不得自行关闭或撤销。只有用户显式撤销、底层平台授权已被明确撤销，或受信身份/协议绑定校验明确失败时才进入失效/重新授权状态 | 用户 2026-09-01 明确修正 | S28 |
+| R31 | Shizuku/Wired privileged workspace 的真实目录 locator 必须以 Android Keystore AES-GCM 加密持久化，AAD 绑定 app instance、workspace、Authority 与 locator 版本；启动或连接恢复时必须用同一 workspaceId 重建新的临时 handle。暂时不可用不撤权、不删除 binding、不 fallback，密文不可恢复时进入明确的 `BINDING_UNRECOVERABLE` | 用户要求 S12 + V2 | S29 |
+| R32 | 真实代码仓库文件工具必须支持有界分页、`stat` 大文件、offset 分块读取和 expected-version/hash 的原子 `apply_patch`；路径继续限制在 Thread workspace 相对范围内，非原子 backend 明确返回 `UNSUPPORTED`，冲突不覆盖 | 用户要求 S12 + V2 | S30 |
+| R33 | Provider“测试连接”与“能力探测”是两个 typed 操作：使用正常请求相同 adapter/endpoint/auth/serialization，区分 success、401、404、429、timeout、partial；UI、持久化与诊断不得再解析自由格式摘要或用 `busy=false` 推断成功 | 用户要求 S12 | A10 |
+| R34 | 会话在用户输入预算、模型可用窗口或单段轮次接近上限时自动压缩并继续；完整计入工具参数，保留原文和完整工具关系，摘要持久化可追溯且不恢复权限、不重放操作；摘要费用与总请求/时间/工具硬预算透明 | 用户 2026-09-11；ADR-0010 | C20—C25 |
 
 ## 3. 对话技术基线
 

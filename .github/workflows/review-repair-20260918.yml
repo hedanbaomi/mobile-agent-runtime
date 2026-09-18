@@ -1,0 +1,57 @@
+# SPDX-FileCopyrightText: 2026 mobileAgentRuntime contributors
+# SPDX-License-Identifier: AGPL-3.0-only
+
+name: Isolated R1-R5 repair verification
+on:
+  push:
+    branches: [codex/review-r1-r5-20260918-remote]
+permissions:
+  contents: write
+jobs:
+  verify:
+    if: github.repository == 'hedanbaomi/mobile-agent-runtime' && github.ref == 'refs/heads/codex/review-r1-r5-20260918-remote'
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          fetch-depth: 2
+      - uses: actions/setup-java@c5195efecf7bdfc987ee8bae7a71cb8b11521c00
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: actions/setup-python@42375524e23c412d93fb67b49958b491fce71c38
+        with:
+          python-version: '3.11'
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '20'
+      - name: Apply exact reviewed patch and remove verification scaffold
+        run: python tools/review-repair-20260918/apply.py
+      - name: License and supply-chain gates plus full affected JVM suites
+        run: |
+          bash ./gradlew licenseGuard licenseGuardReverse verifyCiPins verifyDependencyLock verifyDependencyVerification :shared:knowledge-api:test :data:sqlite:test :app-android:testDebugUnitTest --dependency-verification=strict --no-daemon
+          python -m pip install 'reuse==6.2.0'
+          python -m reuse lint
+          git diff --check
+      - name: Commit only the verified candidate on the isolated branch
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -- shared/knowledge-api/src/main/kotlin/runtime/mobileagent/knowledge/ProcessingUnit.kt data/sqlite/src/main/kotlin/runtime/mobileagent/data/KnowledgeRepository.kt data/sqlite/src/main/kotlin/runtime/mobileagent/data/DocumentPipelineStore.kt shared/knowledge-api/src/test/kotlin/runtime/mobileagent/knowledge/DocumentUnitPlannerReviewRegressionTest.kt data/sqlite/src/test/kotlin/runtime/mobileagent/data/DocumentPipelineReviewRegressionTest.kt app-android/src/test/kotlin/runtime/mobileagent/OpenAiCompatibleVisionTest.kt
+          git add -u -- tools/review-repair-20260918 .github/workflows/review-repair-20260918.yml
+          git commit -m 'fix(knowledge): close R1-R5 request slicing and target-state regressions'
+          git push origin HEAD:refs/heads/codex/review-r1-r5-20260918-remote
+          echo "Verified candidate: $(git rev-parse HEAD)" >> "$GITHUB_STEP_SUMMARY"
+          echo "Verified tree: $(git rev-parse HEAD^{tree})" >> "$GITHUB_STEP_SUMMARY"
+          git diff --stat aaace272b16df11a231df7ed61fbe926b2a32b5f HEAD
+      - name: Upload actual test XML, including failures
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: r1-r5-remote-verification
+          path: |
+            shared/knowledge-api/build/test-results/test/*.xml
+            data/sqlite/build/test-results/test/*.xml
+            app-android/build/test-results/testDebugUnitTest/*.xml

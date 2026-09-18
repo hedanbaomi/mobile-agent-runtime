@@ -37,9 +37,10 @@ internal class DocumentPipelineStore(private val db: SqlConnection) {
         units(jobId).forEach { unit ->
             val saved = !unit.requiresVision || result(jobId,unit.unitId,target) != null
             val attempt = db.query("SELECT state FROM pipeline_attempts WHERE job_id=? AND unit_id=? AND target=? ORDER BY ordinal DESC LIMIT 1",listOf(jobId,unit.unitId,target)).singleOrNull()
-            val unitRow = db.query("SELECT state FROM pipeline_units WHERE job_id=? AND unit_id=?",listOf(jobId,unit.unitId)).singleOrNull()
-            val priorUnitState = unitRow?.string("state")
-            val state = if(saved) "SUCCEEDED" else if(unknown(jobId,unit.unitId,unit.page)) "UNKNOWN_OUTCOME" else attempt?.string("state") ?: priorUnitState?.takeIf { it != "FAILED" } ?: "PLANNED"
+            // Unit state is a projection for the selected target. An old target's
+            // success (or an attempt without a current-version result) cannot prove it.
+            val state = if(saved) "SUCCEEDED" else if(unknown(jobId,unit.unitId,unit.page)) "UNKNOWN_OUTCOME"
+                else attempt?.string("state")?.takeIf { it != "SUCCEEDED" } ?: "PLANNED"
             db.execute("UPDATE pipeline_units SET state=?,published=CASE WHEN ?=1 THEN published ELSE 0 END,failure_code=CASE WHEN ?='PLANNED' THEN NULL ELSE failure_code END,failure_phase=CASE WHEN ?='PLANNED' THEN NULL ELSE failure_phase END WHERE job_id=? AND unit_id=?",listOf(state,if(saved && !targetChanged) 1 else 0,state,state,jobId,unit.unitId))
         }
     }

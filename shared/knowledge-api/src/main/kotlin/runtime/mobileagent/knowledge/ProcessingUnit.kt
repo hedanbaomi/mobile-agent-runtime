@@ -45,9 +45,21 @@ data class ProcessingUnit(
     val sourceAssetId: String? = null,
     /** Canonical hash of extraction/input provenance; independent from a provider attempt. */
     val sourceInputIdentity: String = "",
-    val requestText: String = "",
+    /** Null means a legacy row without an explicit request slice; empty/blank is valid text. */
+    val requestText: String? = null,
 ) {
-    fun effectiveRequestText(): String = requestText.ifBlank { nativeText }
+    fun effectiveRequestText(): String {
+        requestText?.let { return it }
+        // Earlier serializers omitted empty requestText values. Nonzero offsets still
+        // prove an explicit slice, including an empty trailing slice at end-of-page.
+        if (coverage.textStart != 0 || coverage.textEnd != 0) {
+            require(coverage.textStart >= 0 && coverage.textEnd in coverage.textStart..nativeText.length) {
+                "PIPELINE_INVALID_TEXT_COVERAGE: invalid persisted text offsets"
+            }
+            return nativeText.substring(coverage.textStart, coverage.textEnd)
+        }
+        return nativeText
+    }
 }
 
 data class PlanningPage(
@@ -120,7 +132,10 @@ class DocumentUnitPlanner(val version: String = VERSION) {
                     group.orEmpty(), continuation?.toString().orEmpty(), page.needsVision.toString(),
                     page.width.toString(), page.height.toString())
                 val regions = if (!page.needsVision) listOf(UnitRegion.FULL) else split(page)
-                val textSlices = splitTextSlices(page.nativeText, regions.size)
+                // Native-only pages never produce a Vision request; local chunking has
+                // its own limits and must not inherit the Vision dispatch bound.
+                val textSlices = if (page.needsVision) splitTextSlices(page.nativeText, regions.size)
+                    else listOf(0 to page.nativeText.length)
                 regions.forEachIndexed { rIndex, area ->
                     val kind = if (regions.size == 1) ProcessingUnitKind.PAGE else ProcessingUnitKind.REGION
                     val order = size
@@ -140,7 +155,11 @@ class DocumentUnitPlanner(val version: String = VERSION) {
     }
 
     private fun split(page: PlanningPage): List<UnitRegion> {
-        val textParts = ((page.nativeText.length + DENSE_CHARACTERS - 1) / DENSE_CHARACTERS).coerceIn(1, MAX_UNITS_PER_PAGE)
+        require(page.nativeText.length.toLong() <= MAX_REQUEST_TEXT_CHARS.toLong() * MAX_UNITS_PER_PAGE) {
+            "PIPELINE_TEXT_LIMIT_EXCEEDED: page text cannot fit in $MAX_UNITS_PER_PAGE bounded requests; no text was truncated"
+        }
+        val textParts = ((page.nativeText.length.toLong() + DENSE_CHARACTERS - 1) / DENSE_CHARACTERS)
+            .coerceIn(1L, MAX_UNITS_PER_PAGE.toLong()).toInt()
         val densityParts = maxOf(if (page.dense || page.complexLayout || page.tableHeader != null) 2 else 1, textParts)
         val parts = if (densityParts <= 1) {
             mutableListOf(UnitRegion.FULL)
@@ -162,9 +181,19 @@ class DocumentUnitPlanner(val version: String = VERSION) {
             val height = page.height.toDouble() * (region.bottom - region.top) / UnitRegion.SCALE
             val overLimit = width > MAX_REGION_DIMENSION || height > MAX_REGION_DIMENSION || width * height > MAX_REGION_PIXELS
             if (overLimit) {
-                // Horizontal bands preserve table columns and reading order; exceptionally wide pages split vertically.
-                val horizontal = height >= width || page.tableHeader != null
-                val middle = if (horizontal) (region.top + region.bottom) / 2 else (region.left + region.right) / 2
+                // A table header is a preference, never a reason to keep splitting
+                // height while the unchanged width is the dimension over the limit.
+                val horizontal = when {
+                    width > MAX_REGION_DIMENSION -> false
+                    height > MAX_REGION_DIMENSION -> true
+                    else -> height >= width || page.tableHeader != null
+                }
+                val start = if (horizontal) region.top else region.left
+                val end = if (horizontal) region.bottom else region.right
+                val middle = start + (end - start) / 2
+                require(middle > start && middle < end) {
+                    "PIPELINE_REGION_LIMIT_EXCEEDED: region cannot be subdivided without losing coverage"
+                }
                 val first = if (horizontal) region.copy(bottom = middle) else region.copy(right = middle)
                 val second = if (horizontal) region.copy(top = middle) else region.copy(left = middle)
                 parts[index] = first
@@ -180,16 +209,36 @@ class DocumentUnitPlanner(val version: String = VERSION) {
         const val MAX_REGION_DIMENSION = 2048
         const val MAX_REGION_PIXELS = 4_000_000
         const val MAX_UNITS_PER_PAGE = 64
+        /** Local UTF-16 character bound, not a claim about a provider's token window. */
+        const val MAX_REQUEST_TEXT_CHARS = 8_500
 
         fun splitTextSlices(text: String, parts: Int): List<Pair<Int, Int>> {
-            require(parts > 0)
+            require(parts in 1..MAX_UNITS_PER_PAGE)
+            require(text.length.toLong() <= parts.toLong() * MAX_REQUEST_TEXT_CHARS) {
+                "PIPELINE_TEXT_LIMIT_EXCEEDED: text cannot fit in $parts bounded requests; no text was truncated"
+            }
+            // Validate before any request. A malformed source must not silently turn
+            // into replacement characters when each independently sent slice is encoded.
+            var offset = 0
+            var codePoints = 0
+            while (offset < text.length) {
+                val c = text[offset]
+                require(!Character.isLowSurrogate(c) &&
+                    (!Character.isHighSurrogate(c) ||
+                        (offset + 1 < text.length && Character.isLowSurrogate(text[offset + 1])))) {
+                    "PIPELINE_INVALID_TEXT: unpaired UTF-16 surrogate in page text"
+                }
+                offset += if (Character.isHighSurrogate(c)) 2 else 1
+                codePoints++
+            }
             if (text.isEmpty()) return List(parts) { 0 to 0 }
             if (parts == 1) return listOf(0 to text.length)
-            if (text.length <= parts) {
-                return (0 until parts).map { i ->
-                    val start = minOf(i, text.length)
-                    val end = minOf(i + 1, text.length)
-                    start to end
+            if (codePoints <= parts) {
+                var cursor = 0
+                return List(parts) {
+                    val start = cursor
+                    if (cursor < text.length) cursor += Character.charCount(text.codePointAt(cursor))
+                    start to cursor
                 }
             }
             val length = text.length
@@ -199,6 +248,7 @@ class DocumentUnitPlanner(val version: String = VERSION) {
                 val windowStart = maxOf(boundaries.last() + 1, ideal - 200)
                 val windowEnd = minOf(length - (parts - i), ideal + 200)
                 var best = ideal
+                // Preserve existing safe boundaries and therefore paid unit identities.
                 if (windowStart < windowEnd) {
                     val nlIndex = text.lastIndexOf('\n', minOf(ideal + 100, windowEnd))
                     if (nlIndex in windowStart..windowEnd) {
@@ -215,11 +265,33 @@ class DocumentUnitPlanner(val version: String = VERSION) {
                         }
                     }
                 }
-                boundaries.add(best.coerceIn(boundaries.last() + 1, length - (parts - i)))
+                val remainingParts = parts - i
+                val lower = maxOf(boundaries.last(), length - remainingParts * MAX_REQUEST_TEXT_CHARS)
+                val upper = minOf(length, boundaries.last() + MAX_REQUEST_TEXT_CHARS)
+                var boundary = best.coerceIn(lower, upper)
+                if (!isCharacterBoundary(text, boundary)) {
+                    boundary = when {
+                        boundary + 1 <= upper -> boundary + 1
+                        boundary - 1 >= lower -> boundary - 1
+                        else -> throw IllegalArgumentException(
+                            "PIPELINE_TEXT_LIMIT_EXCEEDED: Unicode-safe slices need more request capacity; no text was truncated")
+                    }
+                }
+                boundaries.add(boundary)
             }
             boundaries.add(length)
-            return (0 until parts).map { boundaries[it] to boundaries[it + 1] }
+            return (0 until parts).map { boundaries[it] to boundaries[it + 1] }.also { slices ->
+                require(slices.all { (start, end) ->
+                    end - start <= MAX_REQUEST_TEXT_CHARS &&
+                        isCharacterBoundary(text, start) && isCharacterBoundary(text, end)
+                }) { "PIPELINE_TEXT_LIMIT_EXCEEDED: unable to make bounded Unicode-safe requests" }
+            }
         }
+
+        private fun isCharacterBoundary(text: String, offset: Int): Boolean =
+            offset == 0 || offset == text.length ||
+                !(Character.isHighSurrogate(text[offset - 1]) && Character.isLowSurrogate(text[offset]))
+
         private fun identity(vararg fields: String): String {
             val canonical = fields.joinToString("") { "${it.length}:$it" }
             return MessageDigest.getInstance("SHA-256").digest(canonical.toByteArray(Charsets.UTF_8))

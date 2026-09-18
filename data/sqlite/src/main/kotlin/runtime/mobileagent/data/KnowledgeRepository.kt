@@ -2449,6 +2449,10 @@ class KnowledgeRepository(
                 job.stage = if(stop == ImportBatchState.PAUSED) ImportStage.PAUSED else ImportStage.CANCELLED
                 return VisionBatch.Deferred
             }
+            if (unit.effectiveRequestText().length > DocumentUnitPlanner.MAX_REQUEST_TEXT_CHARS) {
+                pipeline.failUnit(job.id, unit.unitId, "PIPELINE_TEXT_LIMIT_EXCEEDED", "LOCAL_PREPARE")
+                return VisionBatch.Failed("PIPELINE_TEXT_LIMIT_EXCEEDED: request text exceeds the local bound; no request was sent")
+            }
             val asset = if (parsed.format == SourceFormat.PDF && pdfRasterizer != null) {
                 val rendered = (pdfRasterizer as? PdfUnitRasterizer)?.renderUnit(bytes,unit)
                     ?: if(unit.region == null) PdfParser.renderPage(bytes,pdfRasterizer,unit.page) else null
@@ -2459,10 +2463,10 @@ class KnowledgeRepository(
                         pipeline.failUnit(job.id, unit.unitId, "RENDER_FAILED", "LOCAL_RENDER")
                         return VisionBatch.Failed("PDF unit could not be rendered within local limits")
                     }
-                    fallback.single()
+                    fallback.single().copy(surroundingText = unit.effectiveRequestText())
                 } else ExtractedAsset("unit-${unit.unitId}","IMAGE",unit.page,
                     if(unit.region == null) "pdf-page-${unit.page}" else "pdf-unit-${unit.unitId}",
-                    rendered.bytes,rendered.mediaType,unit.requestText.ifBlank { unit.nativeText })
+                    rendered.bytes,rendered.mediaType,unit.effectiveRequestText())
             } else {
                 val source = processable.firstOrNull { it.localId == unit.sourceAssetId }
                     ?: processable.firstOrNull { it.page == unit.page }
@@ -2482,13 +2486,13 @@ class KnowledgeRepository(
                     }
                     source.copy(bytes=rendered.bytes,mediaType=rendered.mediaType,
                         section=if(unit.region == null) source.section else "image-unit-${unit.unitId}",
-                        surroundingText=unit.requestText.ifBlank { unit.nativeText })
+                        surroundingText=unit.effectiveRequestText())
                 } else {
                     if(unit.region != null || source.bytes.size > runtime.mobileagent.knowledge.UnitRenderLimits().maxEncodedBytes) {
                         pipeline.failUnit(job.id, unit.unitId, "RENDER_LIMIT_EXCEEDED", "LOCAL_RENDER")
                         return VisionBatch.Failed("Region rendering is unavailable or image exceeds local byte limit")
                     }
-                    source.copy(surroundingText=unit.requestText.ifBlank { unit.nativeText })
+                    source.copy(surroundingText=unit.effectiveRequestText())
                 }
             }
             when(val outcome = processAssets(job,listOf(asset),unit)) {
@@ -2509,7 +2513,7 @@ class KnowledgeRepository(
     private fun unitChunks(unit: ProcessingUnit, assetId: String, result: runtime.mobileagent.knowledge.VisionSuccess, section: String?): List<IndexedChunk> {
         // Planner coverage page 1 does not invent a source page for unassigned Office images.
         val sourcePage=db.query("SELECT page FROM assets WHERE id=?",listOf(assetId)).singleOrNull()?.longOrNull("page")?.toInt()
-        return VisionChunkBuilder.build(result,sourcePage,assetId,section,unit.requestText.ifBlank { unit.nativeText })
+        return VisionChunkBuilder.build(result,sourcePage,assetId,section,unit.effectiveRequestText())
             .map { IndexedChunk(it.text,it.page,it.assetIds,it.span) }
     }
 

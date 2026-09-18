@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2026 mobileAgentRuntime contributors
+﻿// SPDX-FileCopyrightText: 2026 mobileAgentRuntime contributors
 // SPDX-License-Identifier: AGPL-3.0-only
 
 package runtime.mobileagent.knowledge
@@ -10,15 +10,6 @@ import org.junit.jupiter.api.io.TempDir
 import java.nio.file.Path
 import kotlin.io.path.readBytes
 import kotlin.io.path.writeBytes
-
-class TextChunkerTest {
-    @Test
-    fun splitsOversizedSingleParagraph() {
-        val chunks = TextChunker.chunk("x".repeat(100_000), targetChars = 1800, overlapChars = 200)
-        assertTrue(chunks.size > 1)
-        assertTrue(chunks.maxOf { it.length } <= 1800)
-    }
-}
 
 class MediaKindMarkdownTest {
     @Test

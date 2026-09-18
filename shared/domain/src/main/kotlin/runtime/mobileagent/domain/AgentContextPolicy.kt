@@ -10,6 +10,9 @@ import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.intOrNull
 
 /** Session-snapshotted context settings. Units are conservative estimates, not tokenizer counts. */
+/** Smallest input allowance kept when the upstream window is unknown. */
+private const val LOCAL_FLOOR_INPUT_UNITS = 1_024
+
 data class AgentContextPolicy(
     val autoCompact: Boolean = true,
     val maxInputTokens: Int? = null,
@@ -24,8 +27,28 @@ data class AgentContextPolicy(
     val summaryOutputTokens: Int = 1024,
     val summaryMaxUnits: Int = 8192,
     val reservedOutputTokens: Int? = null,
+    /**
+     * The user's own per-Run fee ceiling for Python `model.invoke`.  Absent means
+     * the Run carries no model-token authorization at all, so a bound skill with
+     * an approved `model.invoke` grant still cannot spend: the install approval
+     * and the Run authorization are separate decisions.
+     */
+    val pythonModelRunTokens: Int? = null,
     val knowledgeTokenBudget: Int = 3000,
     val imageBudget: Int = 4,
+    /**
+     * Local context-protection reserve used when the provider output cap is
+     * unknown (AUTO).  It is a local policy number: it protects the input budget
+     * and history compaction and is never sent upstream as an output cap.
+     */
+    val localOutputReserve: Int = 1024,
+    /**
+     * Local protection ceiling used while the upstream context window is
+     * unknown.  It is a *local* policy, not a claim about the model: it keeps
+     * the input budget finite and history compaction enabled, and it is never
+     * sent to the provider (which does not accept a window parameter).
+     */
+    val localUnknownWindow: Int = 16_384,
 ) {
     init {
         require(maxInputTokens == null || maxInputTokens > 0) { "maxInputTokens must be positive" }
@@ -40,13 +63,41 @@ data class AgentContextPolicy(
         require(summaryOutputTokens in 128..8192) { "summaryOutputTokens must be 128..8192" }
         require(summaryMaxUnits in 512..65_536) { "summaryMaxUnits must be 512..65536" }
         require(reservedOutputTokens == null || reservedOutputTokens > 0) { "reservedOutputTokens must be positive" }
+        require(pythonModelRunTokens == null || pythonModelRunTokens in 1..10_000_000) {
+            "pythonModelRunTokens must be 1..10000000"
+        }
         require(knowledgeTokenBudget > 0) { "knowledgeTokenBudget must be positive" }
         require(imageBudget in 1..32) { "imageBudget must be 1..32" }
     }
 
-    fun inputLimit(contextLimit: Int, outputLimit: Int): Long {
-        val reserve = maxOf(outputLimit, reservedOutputTokens ?: outputLimit).toLong()
-        val available = contextLimit.toLong() - reserve
+    /**
+     * The reserve subtracted from the context window.  A provider cap (MANUAL)
+     * and the local policy reserve (used when the cap is unknown) are separate
+     * concepts: only the former is ever sent upstream as an output limit.
+     */
+    /** Smallest input allowance kept when the upstream window is unknown. */
+
+    fun outputReserve(outputLimit: Int?): Long {
+        val providerReserve = outputLimit?.toLong() ?: 0L
+        val localReserve = (reservedOutputTokens ?: localOutputReserve).toLong()
+        return maxOf(providerReserve, localReserve)
+    }
+
+    /**
+     * Input budget under the current output settings.  An absent provider cap
+     * (AUTO) must not disable compaction or make the input window look
+     * unlimited: the local reserve still applies.
+     */
+    fun inputLimit(contextWindow: Int?, outputLimit: Int?): Long {
+        val reserve = outputReserve(outputLimit)
+        // An unknown upstream window is not unlimited: the local protection
+        // ceiling keeps the input budget finite so compaction still runs.
+        // Unknown upstream window is NOT a known 16k window: the local
+        // protection floor grows so a user's manual output cap cannot make the
+        // input budget arithmetic fail.  This is local policy, never sent upstream
+        // and never presented as the provider's window.
+        val window = (contextWindow ?: maxOf(localUnknownWindow, reserve.toInt() + LOCAL_FLOOR_INPUT_UNITS)).toLong()
+        val available = window - reserve
         require(available > 0) { "Model window must leave space after the output reservation" }
         return minOf(maxInputTokens?.toLong() ?: available, available)
     }
@@ -74,8 +125,10 @@ data class AgentContextPolicy(
                 targetPercent = int("targetPercent", 60), maxModelRoundsPerSegment = int("maxModelRoundsPerSegment", 8),
                 maxModelRequestsPerRun = int("maxModelRequestsPerRun", 32), maxCompactionsPerRun = int("maxCompactionsPerRun", 8),
                 summaryOutputTokens = int("summaryOutputTokens", 1024), summaryMaxUnits = int("summaryMaxUnits", 8192),
-                reservedOutputTokens = optional("reservedOutputTokens"), knowledgeTokenBudget = int("knowledgeTokenBudget", 3000),
-                imageBudget = int("imageBudget", 4),
+                reservedOutputTokens = optional("reservedOutputTokens"),
+                pythonModelRunTokens = optional("pythonModelRunTokens"), knowledgeTokenBudget = int("knowledgeTokenBudget", 3000),
+                imageBudget = int("imageBudget", 4), localOutputReserve = int("localOutputReserve", 1024),
+                localUnknownWindow = int("localUnknownWindow", 16_384),
             )
         }
     }

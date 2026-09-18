@@ -58,6 +58,7 @@ import runtime.mobileagent.knowledge.VISION_SCHEMA_VERSION
 import runtime.mobileagent.knowledge.VisionBackend
 import runtime.mobileagent.knowledge.VisionBinding
 import runtime.mobileagent.knowledge.VisionCacheKey
+import runtime.mobileagent.knowledge.VisionChunkBuilder
 import runtime.mobileagent.knowledge.VisionInput
 import runtime.mobileagent.knowledge.VisionOutcome
 import runtime.mobileagent.knowledge.VisionDiagnosticMetadata
@@ -65,6 +66,15 @@ import runtime.mobileagent.knowledge.VisionDiagnosticPhase
 import runtime.mobileagent.knowledge.VectorIndexFactory
 import runtime.mobileagent.knowledge.ZipSafety
 import runtime.mobileagent.knowledge.sha256Hex
+import runtime.mobileagent.knowledge.DocumentUnitPlanner
+import runtime.mobileagent.knowledge.ProcessingUnit
+import runtime.mobileagent.knowledge.PdfUnitRasterizer
+import runtime.mobileagent.knowledge.ImageUnitRasterizer
+import runtime.mobileagent.knowledge.PipelineAttemptState
+import runtime.mobileagent.knowledge.PipelinePolicy
+import runtime.mobileagent.knowledge.PipelineProgress
+import runtime.mobileagent.knowledge.PipelineReuseSummary
+import runtime.mobileagent.knowledge.PIPELINE_CHUNK_VERSION
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.io.File
@@ -96,8 +106,142 @@ class KnowledgeRepository(
     private val visionTargetResolver: ((String) -> VisionBinding?)? = null,
     private val captureVisionContent: () -> Boolean = { false },
     private val legacyVisionCacheTarget: (String) -> LegacyVisionCacheTarget? = { null },
+    private val plannerVersion: String = DocumentUnitPlanner.VERSION,
+    private val chunkVersion: String = PIPELINE_CHUNK_VERSION,
 ) {
     private val indexLock = Any()
+    private val pipeline = DocumentPipelineStore(db)
+    private val unitPlanner = DocumentUnitPlanner(plannerVersion)
+
+    fun batchPipelineProgress(batchId: String): PipelineProgress = pipeline.progress(batchId)
+
+    fun batchPipelinePolicy(batchId: String): PipelinePolicy = pipeline.policy(batchId)
+
+    /** Rebuild derived chunks from persisted results. Reject any path needing a model. */
+    fun rebuildBatchLocalChunks(batchId: String): Int = synchronized(indexLock) {
+        val diff = batchReuseSummary(batchId)
+        check(diff.newRequests == 0 && diff.unknown == 0 && diff.unplannedFiles == 0) { "Batch requires provider requests or has unresolved outcomes" }
+        val rows = db.query("SELECT j.*,d.format,d.blob_hash FROM import_jobs j JOIN documents d ON d.id=j.document_id WHERE j.batch_id=?",listOf(batchId))
+        check(rows.none { it.boolean("embedding_is_api") }) { "API embedding requires separate upload consent; local-only rebuild is unavailable" }
+        var rebuilt = 0
+        rows.forEach { row ->
+            if (pipeline.publication(row.string("id"),chunkVersion) == null) {
+                val job = importJobFromRow(row,visionConfigured=true,stage=ImportStage.COPYING)
+                val bytes = blobs.get(row.string("blob_hash")) ?: error("CAS source is missing")
+                continueImport(job,row.string("display_name"),bytes,SourceFormat.valueOf(row.string("format")))
+                if (ImportStateMachine.isPublished(job.stage)) rebuilt++
+            }
+        }
+        rebuilt
+    }
+
+    fun configureBatchPipeline(batchId: String, policy: PipelinePolicy) = synchronized(indexLock) {
+        check(findBatch(batchId) != null) { "Batch not found" }
+        db.transaction {
+            if (policy.tokenDispatchCeiling != null) check(db.query(
+                "SELECT v.cache_key FROM vision_results v JOIN assets a ON a.blob_hash=v.asset_hash AND a.surrounding_text_hash=v.context_hash JOIN import_jobs j ON j.document_id=a.document_id WHERE j.batch_id=? AND v.status='UNKNOWN_OUTCOME' AND NOT EXISTS(SELECT 1 FROM pipeline_attempts p WHERE p.cache_key=v.cache_key AND p.reservation_tokens>0) LIMIT 1",listOf(batchId)).isEmpty()) {
+                "Cannot assign a finite ceiling while legacy Vision charges are unknown and unreserved"
+            }
+            if (policy.tokenDispatchCeiling != null) check(db.query(
+                "SELECT a.request_id FROM vision_attempts a JOIN import_jobs j ON j.id=a.job_id WHERE j.batch_id=? AND a.dispatch_status IN ('DISPATCHED','RESPONSE_RECEIVED') AND (a.status='UNKNOWN_OUTCOME' OR a.input_tokens IS NULL OR a.output_tokens IS NULL) AND NOT EXISTS(SELECT 1 FROM pipeline_attempts p WHERE p.request_id=a.request_id) LIMIT 1",listOf(batchId)).isEmpty()) {
+                "Cannot assign a finite ceiling after legacy dispatches with unreported usage"
+            }
+            pipeline.configure(batchId, policy)
+        }
+    }
+
+    /** Explicitly commit a reviewed configuration diff; old results/attempts remain intact. */
+    fun reconfigureBatchPipeline(batchId: String, targetFingerprint: String, reviewedSummary: PipelineReuseSummary,
+        acknowledgeDuplicateCharge: Boolean = false,
+    ): ImportBatch = synchronized(indexLock) {
+        check(findBatch(batchId) != null) { "Batch not found" }
+        check(db.query("SELECT staging_complete FROM import_batches WHERE id=?",listOf(batchId)).single().boolean("staging_complete")) { "Batch membership is still being staged" }
+        check(batchReuseSummary(batchId,targetFingerprint) == reviewedSummary) { "Reuse preview changed; review it again" }
+        check(reviewedSummary.unknown == 0 || acknowledgeDuplicateCharge) { "UNKNOWN_OUTCOME requires separate duplicate-charge acknowledgement" }
+        check(visionTargetAvailable(targetFingerprint)) { "Vision destination changed" }
+        check(batchId !in activeBatchWorkers) { "Pause and wait for current work before reconfiguration" }
+        check(pipeline.stopReason(batchId) != "PIPELINE_MAX_CONCURRENCY") { "Wait for in-flight work" }
+        check(findBatch(batchId)?.state != ImportBatchState.CANCELLED) { "Cancelled batch cannot be restarted" }
+        db.transaction {
+            check(pipeline.stopReason(batchId) != "PIPELINE_MAX_CONCURRENCY") { "Wait for in-flight work" }
+            db.query("SELECT j.id,j.document_id,j.vision_binding_json,j.display_name,d.format,d.blob_hash FROM import_jobs j JOIN documents d ON d.id=j.document_id WHERE j.batch_id=?",listOf(batchId)).forEach { row ->
+                val bytes=blobs.get(row.string("blob_hash")) ?: error("CAS source missing")
+                val units=planSource(bytes,row.string("format"),row.string("display_name"))
+                val diff=pipeline.reuse(row.string("id"),units,targetFingerprint,chunkVersion)
+                if(diff.newRequests>0 || diff.localRebuild>0 || diff.unknown>0 || (acknowledgeDuplicateCharge && units.any { hasLegacyVisionUnknown(row.string("id"),row.string("document_id"),it.page,targetFingerprint) })) {
+                    if (acknowledgeDuplicateCharge) {
+                        pipeline.authorizeUnknown(row.string("id"))
+                        db.execute("DELETE FROM vision_results WHERE status='UNKNOWN_OUTCOME' AND EXISTS(SELECT 1 FROM assets a WHERE a.document_id=? AND a.blob_hash=vision_results.asset_hash AND a.surrounding_text_hash=vision_results.context_hash) AND (model_fingerprint=? OR model_fingerprint=? OR EXISTS(SELECT 1 FROM vision_attempts old WHERE old.job_id=? AND old.cache_key=vision_results.cache_key))",
+                            listOf(row.string("document_id"),row.string("vision_binding_json"),targetFingerprint,row.string("id")))
+                    }
+                    pipeline.materialize(row.string("id"),row.string("blob_hash"),plannerVersion,units)
+                    pipeline.selectTarget(row.string("id"),targetFingerprint)
+                    db.execute("UPDATE import_jobs SET stage='COPYING',error=NULL,vision_binding_json=?,vision_consent=1 WHERE id=?",listOf(targetFingerprint,row.string("id")))
+                    db.execute("UPDATE import_items SET state='QUEUED',error=NULL WHERE batch_id=? AND job_id=?",listOf(batchId,row.string("id")))
+                }
+            }
+            db.execute("UPDATE import_batches SET state='PROCESSING',error=NULL,blocked_reason=NULL,paused_at=NULL WHERE id=?",listOf(batchId))
+            authorizeBatchVision(batchId,targetFingerprint)
+        }
+    }
+
+    /** Read-only preview. Reparse source mapping locally when the planner version changes. */
+    fun batchReuseSummary(batchId: String, targetFingerprint: String? = null, refreshPlan: Boolean = true): PipelineReuseSummary {
+        var summary = PipelineReuseSummary(plannerVersion = plannerVersion, chunkVersion = chunkVersion)
+        db.query("SELECT j.id,j.document_id,j.vision_binding_json,d.blob_hash,d.format,j.display_name FROM import_jobs j JOIN documents d ON d.id=j.document_id WHERE j.batch_id=?",listOf(batchId)).forEach { row ->
+            // Re-extract metadata only: source-input/parser changes can alter identities even
+            // when the split algorithm version is unchanged. No bitmap or provider work here.
+            val candidates = if (refreshPlan) {
+                val bytes = blobs.get(row.string("blob_hash"))
+                bytes?.let { runCatching { planSource(it,row.string("format"),row.string("display_name")) }.getOrNull() }.orEmpty()
+            } else pipeline.units(row.string("id")).takeIf { units -> units.all { it.plannerVersion==plannerVersion } }.orEmpty()
+            if (candidates.isEmpty()) summary = summary.copy(unplannedFiles=summary.unplannedFiles+1)
+            else {
+                val target=targetFingerprint ?: row.string("vision_binding_json").ifBlank { visionFingerprint() }
+                val legacyUnknown=candidates.filter { it.requiresVision && hasLegacyVisionUnknown(row.string("id"),row.string("document_id"),it.page,target) }
+                val result = pipeline.reuse(row.string("id"),candidates-legacyUnknown.toSet(),target,chunkVersion)
+                summary = summary.copy(directReuse=summary.directReuse+result.directReuse,localRebuild=summary.localRebuild+result.localRebuild,
+                    newRequests=summary.newRequests+result.newRequests,unknown=summary.unknown+result.unknown+legacyUnknown.size)
+            }
+        }
+        return summary
+    }
+
+    private fun planSource(bytes: ByteArray, format: String, name: String): List<ProcessingUnit> {
+        val parsed = when (format) {
+            SourceFormat.PDF.name -> PdfParser.parse(bytes)
+            SourceFormat.IMAGE.name -> standaloneImage(bytes,name)
+            SourceFormat.OFFICE_ARCHIVE.name -> OfficeParser.parse(name,bytes)
+            else -> ParsedPublication(SourceFormat.TEXT, String(bytes,Charsets.UTF_8),
+                listOf(ExtractedPage(1,String(bytes,Charsets.UTF_8),false)),emptyList(),false,PARSER_FINGERPRINT)
+        }
+        return planPublication(bytes,parsed)
+    }
+
+    private fun planPublication(bytes: ByteArray, parsed: ParsedPublication): List<ProcessingUnit> {
+        val imageRenderer = pdfRasterizer as? ImageUnitRasterizer
+        val dimensions = if(imageRenderer == null) emptyMap() else parsed.assets.mapNotNull { asset ->
+            imageRenderer.imageDimensions(asset.bytes)?.let { asset.localId to it }
+        }.toMap()
+        return unitPlanner.planPublication(sha256Hex(bytes),parsed,dimensions)
+    }
+
+    private fun materializePlan(job: ImportJob, bytes: ByteArray, units: List<ProcessingUnit>): Boolean {
+        val prior=pipeline.units(job.id)
+        val plannerChanged=prior.isNotEmpty() && prior.map { it.unitId }.toSet()!=units.map { it.unitId }.toSet()
+        val resultChanged=db.query("SELECT result_version FROM pipeline_plans WHERE job_id=?",listOf(job.id)).singleOrNull()
+            ?.string("result_version")?.let { it!=DocumentPipelineStore.resultVersion } == true
+        val legacyCoverageChanged=prior.isEmpty() && units.any { it.requiresVision && it.region!=null } &&
+            db.query("SELECT a.id FROM assets a JOIN vision_results v ON a.blob_hash=v.asset_hash AND a.surrounding_text_hash=v.context_hash WHERE a.document_id=? AND v.status IN ('SUCCESS','UNKNOWN_OUTCOME') LIMIT 1",listOf(job.documentId)).isNotEmpty()
+        if ((plannerChanged || resultChanged || legacyCoverageChanged) && units.any { it.requiresVision }) {
+            job.stage=ImportStage.AWAITING_UPLOAD_CONSENT
+            job.visionConsent=false
+            job.error="PIPELINE_PLAN_CHANGED: Review the new unit plan and additional requests before continuing."
+            return false
+        }
+        pipeline.materialize(job.id,sha256Hex(bytes),plannerVersion,units)
+        return true
+    }
     /**
      * Reusable ANN handles keyed by (KB, space, dimension, generation).
      * Vectors truth stays in SQLite; this cache is purely derived state, so a
@@ -395,6 +539,7 @@ class KnowledgeRepository(
         bytes: ByteArray? = null,
         visionConfigured: Boolean,
     ): ImportJob {
+        recoverPipelineJob(jobId)
         val row = db.query("SELECT * FROM import_jobs WHERE id = ?", listOf(jobId)).singleOrNull()
             ?: error("import job not found")
         val documentId = row.string("document_id")
@@ -420,7 +565,23 @@ class KnowledgeRepository(
         val recordedFormat = document.string("format")
         val format = recordedFormat.takeIf { it.isNotBlank() }?.let { runCatching { SourceFormat.valueOf(it) }.getOrNull() }
             ?: MediaKind.detect(displayName, "", payload.copyOf(minOf(payload.size, 64)))
-        val job = importJobFromRow(row, visionConfigured, stage, documentId, kbId)
+        val effectiveStage = if (stage == ImportStage.FAILED) ImportStage.COPYING else stage
+        val job = importJobFromRow(row, visionConfigured, effectiveStage, documentId, kbId).apply {
+            if (stage == ImportStage.FAILED) error = null
+        }
+        val batchId = row.string("batch_id").ifBlank { null }
+        if (stage == ImportStage.FAILED && batchId != null) {
+            synchronized(indexLock) {
+                db.execute(
+                    "UPDATE import_batches SET state = ?, error = NULL, updated_at = ? WHERE id = ? AND state = ?",
+                    listOf(ImportBatchState.PROCESSING.name, Utc.nowIso(), batchId, ImportBatchState.FAILED.name),
+                )
+                db.execute(
+                    "UPDATE import_items SET state = ?, error = NULL WHERE batch_id = ? AND job_id = ? AND state = ?",
+                    listOf(ImportItemState.PROCESSING.name, batchId, jobId, ImportItemState.FAILED.name),
+                )
+            }
+        }
         validateRequestedEmbeddingSelection(kbId, api = job.embeddingIsApi, consent = job.embeddingConsent)
         return continueImportCancellable(job, displayName, payload, format)
     }
@@ -871,6 +1032,7 @@ class KnowledgeRepository(
             return runBlocking { resumeImportCancellable(jobId, bytes, visionConfigured) }
         }
         return synchronized(indexLock) {
+        recoverPipelineJob(jobId)
         val row = db.query("SELECT * FROM import_jobs WHERE id = ?", listOf(jobId)).singleOrNull()
             ?: error("import job not found")
         val documentId = row.string("document_id")
@@ -897,11 +1059,12 @@ class KnowledgeRepository(
         val recordedFormat = document.string("format")
         val format = recordedFormat.takeIf { it.isNotBlank() }?.let { runCatching { SourceFormat.valueOf(it) }.getOrNull() }
             ?: MediaKind.detect(displayName, "", payload.copyOf(minOf(payload.size, 64)))
+        val effectiveStage = if (stage == ImportStage.FAILED) ImportStage.COPYING else stage
         val job = ImportJob(
             id = jobId,
             knowledgeBaseId = kbId,
             documentId = documentId,
-            stage = stage,
+            stage = effectiveStage,
             hasImages = row.boolean("has_images"),
             visionConfigured = visionConfigured,
             visionConsent = row.string("vision_consent").let { it == "1" || it.equals("true", true) } ||
@@ -909,9 +1072,20 @@ class KnowledgeRepository(
             embeddingIsApi = row.boolean("embedding_is_api"),
             embeddingConsent = row.boolean("embedding_consent"),
             localEmbeddingAvailable = true,
-            error = row.string("error").ifBlank { null },
+            error = if (stage == ImportStage.FAILED) null else row.string("error").ifBlank { null },
             consentedVisionFingerprint = runCatching { row.string("vision_binding_json") }.getOrNull()?.ifBlank { null },
         )
+        val batchId = row.string("batch_id").ifBlank { null }
+        if (stage == ImportStage.FAILED && batchId != null) {
+            db.execute(
+                "UPDATE import_batches SET state = ?, error = NULL, updated_at = ? WHERE id = ? AND state = ?",
+                listOf(ImportBatchState.PROCESSING.name, Utc.nowIso(), batchId, ImportBatchState.FAILED.name),
+            )
+            db.execute(
+                "UPDATE import_items SET state = ?, error = NULL WHERE batch_id = ? AND job_id = ? AND state = ?",
+                listOf(ImportItemState.PROCESSING.name, batchId, jobId, ImportItemState.FAILED.name),
+            )
+        }
         validateRequestedEmbeddingSelection(kbId, job.embeddingIsApi, job.embeddingConsent)
         return continueImport(job, displayName, payload, format)
         }
@@ -1121,6 +1295,7 @@ class KnowledgeRepository(
                     "AND a.surrounding_text_hash = vision_results.context_hash)",
                 listOf("UNKNOWN_OUTCOME", retryTarget, row.string("document_id")),
             ) }
+            pipeline.authorizeUnknown(jobId)
             selected
         }
         return grantVisionConsent(jobId, target, expectedDocumentsFingerprintHash)
@@ -1922,6 +2097,7 @@ class KnowledgeRepository(
             .singleOrNull()?.string("display_name")?.ifBlank { jobId } ?: jobId
 
     private suspend fun indexTextDocumentCancellable(job: ImportJob, bytes: ByteArray, format: SourceFormat) {
+        if (!materializePlan(job,bytes,planSource(bytes,format.name,displayNameForJob(job.id)))) return
         val text = String(bytes, Charsets.UTF_8)
         job.hasImages = format == SourceFormat.MARKDOWN && MediaKind.markdownReferencesImages(text)
         if (job.hasImages && !job.visualGapsAccepted) {
@@ -1950,6 +2126,7 @@ class KnowledgeRepository(
     }
 
     private suspend fun indexPublicationCancellable(job: ImportJob, bytes: ByteArray, parsed: ParsedPublication) {
+        if (!materializePlan(job,bytes,planPublication(bytes,parsed))) return
         val processable = parsed.assets.filter { it.kind == "IMAGE" && it.bytes.isNotEmpty() }
         val blocked = parsed.assets.filter {
             it.kind == "EXTERNAL" || it.kind == "MISSING" || it.kind == "PAGE" ||
@@ -1959,6 +2136,7 @@ class KnowledgeRepository(
         // A durable batch authorization is not a blanket consent: it is re-validated against the
         // current destination and this batch's own member scope before it can arm this job.
         applyBatchVisionAuthorization(job)
+        pipeline.selectTarget(job.id,job.consentedVisionFingerprint)
         val visionTexts = mutableListOf<IndexedChunk>()
         if (job.hasImages && job.visualGapsAccepted) {
             val chunks = textChunksSkippingVision(parsed)
@@ -2117,6 +2295,7 @@ class KnowledgeRepository(
     }
 
     private fun indexTextDocument(job: ImportJob, bytes: ByteArray, format: SourceFormat) {
+        if (!materializePlan(job,bytes,planSource(bytes,format.name,displayNameForJob(job.id)))) return
         val text = String(bytes, Charsets.UTF_8)
         job.hasImages = format == SourceFormat.MARKDOWN && MediaKind.markdownReferencesImages(text)
         if (job.hasImages && !job.visualGapsAccepted) {
@@ -2140,6 +2319,7 @@ class KnowledgeRepository(
     }
 
     private fun indexPublication(job: ImportJob, bytes: ByteArray, parsed: ParsedPublication) {
+        if (!materializePlan(job,bytes,planPublication(bytes,parsed))) return
         val processable = parsed.assets.filter { it.kind == "IMAGE" && it.bytes.isNotEmpty() }
         val blocked = parsed.assets.filter {
             it.kind == "EXTERNAL" || it.kind == "MISSING" || it.kind == "PAGE" ||
@@ -2149,6 +2329,7 @@ class KnowledgeRepository(
         // A durable batch authorization is not a blanket consent: it is re-validated against the
         // current destination and this batch's own member scope before it can arm this job.
         applyBatchVisionAuthorization(job)
+        pipeline.selectTarget(job.id,job.consentedVisionFingerprint)
         val visionTexts = mutableListOf<IndexedChunk>()
         if (job.hasImages && job.visualGapsAccepted) {
             val chunks = textChunksSkippingVision(parsed)
@@ -2239,96 +2420,113 @@ class KnowledgeRepository(
         processable: List<ExtractedAsset>,
         blocked: List<ExtractedAsset>,
     ): VisionBatch {
-        val nonPageBlockers = blocked.filter {
-            it.kind == "EXTERNAL" || it.kind == "MISSING" ||
-                (it.kind == "IMAGE" && it.bytes.isEmpty())
+        if (blocked.any { it.kind == "EXTERNAL" || it.kind == "MISSING" || (it.kind == "IMAGE" && it.bytes.isEmpty()) }) {
+            return VisionBatch.Failed("Visual sources are missing or external. Nothing was downloaded.")
         }
-        if (nonPageBlockers.isNotEmpty()) {
-            return VisionBatch.Failed(
-                "Visual pages or external/missing images cannot be processed without local raster bytes. Nothing was downloaded.",
-            )
-        }
-
-        val pageBlockers = blocked.filter { it.kind == "PAGE" }
-        val pagesNeedingVision = parsed.pages.asSequence()
-            .filter { it.needsVision }
-            .map { it.page }
-            .distinct()
-            .toList()
-        if (processable.isEmpty() && pagesNeedingVision.isEmpty()) {
-            return VisionBatch.Failed(
-                "needsVision is set but there is no processable page or image asset. The document is not READY.",
-            )
-        }
-        val blockerPages = pageBlockers.mapNotNull { it.page }.toSet()
-        if (pageBlockers.any { it.page == null }) {
-            return VisionBatch.Failed(
-                "Visual page evidence could not be rasterized locally. The document is not READY.",
-            )
-        }
-        if (pageBlockers.isNotEmpty() && (parsed.format != SourceFormat.PDF || pdfRasterizer == null)) {
-            return VisionBatch.Failed(
-                "Visual page evidence could not be rasterized locally. The document is not READY.",
-            )
-        }
-
+        val pageBlockers=blocked.filter { it.kind=="PAGE" }
+        if(pageBlockers.any { it.page==null } || (pageBlockers.isNotEmpty() && pdfRasterizer==null))
+            return VisionBatch.Failed("Incomplete page evidence requires a complete local page render")
+        val target = job.consentedVisionFingerprint ?: return VisionBatch.Failed("Vision destination is not bound")
         val chunks = mutableListOf<IndexedChunk>()
-        fun appendOutcome(outcome: VisionBatch): VisionBatch? = when (outcome) {
-            is VisionBatch.Ok -> {
-                chunks += outcome.chunks
-                null
+        val units = pipeline.units(job.id).filter { it.requiresVision }
+        if (units.isEmpty()) return VisionBatch.Failed("No visual processing units could be planned")
+        for (unit in units) {
+            // A persisted success is consumed before rendering: resume never repeats image work or upload.
+            val saved = pipeline.result(job.id,unit.unitId,target)
+            if (saved != null) {
+                chunks += unitChunks(unit,saved.assetId,saved.result,saved.section)
+                continue
             }
-            is VisionBatch.Failed -> outcome
-            is VisionBatch.Unknown -> outcome
-            VisionBatch.Deferred -> outcome
-        }
-
-        // Keep source image payloads short-lived.  In particular, do not pass
-        // the complete list to processAssets while a large PDF is in flight.
-        // A PAGE blocker means that page's embedded JPEG is not complete
-        // evidence. Other pages may still have usable images.
-        val coveredPages = mutableSetOf<Int>()
-        processable.forEach { asset ->
-            val page = asset.page
-            if (page != null && page in blockerPages) return@forEach
-            appendOutcome(processAssets(job, listOf(asset)))?.let { return it }
-            if (page != null) coveredPages += page
-        }
-
-        if (parsed.format == SourceFormat.PDF && pdfRasterizer != null) {
-            pagesNeedingVision.forEach { pageNumber ->
-                val rendered = PdfParser.renderPage(bytes, pdfRasterizer, pageNumber)
-                if (rendered == null) {
-                    if (pageNumber in blockerPages || pageNumber !in coveredPages) {
-                        return VisionBatch.Failed(
-                            "PDF page $pageNumber could not be rasterized locally. The document is not READY.",
-                        )
+            if (pipeline.unknown(job.id,unit.unitId,unit.page)) {
+                return VisionBatch.Unknown("UNKNOWN_OUTCOME: this unit may already have been billed; explicit confirmation is required.")
+            }
+            if (hasLegacyVisionUnknown(job.id,job.documentId,unit.page,target)) {
+                db.execute("UPDATE pipeline_units SET state='UNKNOWN_OUTCOME' WHERE job_id=? AND unit_id=?",listOf(job.id,unit.unitId))
+                return VisionBatch.Unknown("UNKNOWN_OUTCOME: an earlier visual request covers this page; explicit confirmation is required.")
+            }
+            val stop = jobBatchId(job.id)?.let(::findBatch)?.state
+            if (stop in setOf(ImportBatchState.PAUSED,ImportBatchState.CANCELLED)) {
+                job.stage = if(stop == ImportBatchState.PAUSED) ImportStage.PAUSED else ImportStage.CANCELLED
+                return VisionBatch.Deferred
+            }
+            if (unit.effectiveRequestText().length > DocumentUnitPlanner.MAX_REQUEST_TEXT_CHARS) {
+                pipeline.failUnit(job.id, unit.unitId, "PIPELINE_TEXT_LIMIT_EXCEEDED", "LOCAL_PREPARE")
+                return VisionBatch.Failed("PIPELINE_TEXT_LIMIT_EXCEEDED: request text exceeds the local bound; no request was sent")
+            }
+            val asset = if (parsed.format == SourceFormat.PDF && pdfRasterizer != null) {
+                val rendered = (pdfRasterizer as? PdfUnitRasterizer)?.renderUnit(bytes,unit)
+                    ?: if(unit.region == null) PdfParser.renderPage(bytes,pdfRasterizer,unit.page) else null
+                if(rendered == null) {
+                    // Embedded image evidence is sufficient only when extraction proved no page gaps.
+                    val fallback=processable.filter { it.page==unit.page }
+                    if(unit.region!=null || pageBlockers.any { it.page==unit.page } || fallback.size!=1) {
+                        pipeline.failUnit(job.id, unit.unitId, "RENDER_FAILED", "LOCAL_RENDER")
+                        return VisionBatch.Failed("PDF unit could not be rendered within local limits")
                     }
-                    return@forEach
+                    fallback.single().copy(surroundingText = unit.effectiveRequestText())
+                } else ExtractedAsset("unit-${unit.unitId}","IMAGE",unit.page,
+                    if(unit.region == null) "pdf-page-${unit.page}" else "pdf-unit-${unit.unitId}",
+                    rendered.bytes,rendered.mediaType,unit.effectiveRequestText())
+            } else {
+                val source = processable.firstOrNull { it.localId == unit.sourceAssetId }
+                    ?: processable.firstOrNull { it.page == unit.page }
+                if (source == null) {
+                    pipeline.failUnit(job.id, unit.unitId, "MISSING_LOCAL_RASTER_SOURCE", "LOCAL_PREPARE")
+                    return VisionBatch.Failed("Unit has no local raster source")
                 }
-                val pageAsset = ExtractedAsset(
-                    localId = "page-rendered-$pageNumber",
-                    kind = "IMAGE",
-                    page = pageNumber,
-                    section = "pdf-page-$pageNumber",
-                    bytes = rendered.bytes,
-                    mediaType = rendered.mediaType.ifBlank { "image/png" },
-                    surroundingText = parsed.pages.firstOrNull { it.page == pageNumber }?.text.orEmpty(),
-                )
-                appendOutcome(processAssets(job, listOf(pageAsset)))?.let { return it }
-                coveredPages += pageNumber
+                val imageRenderer = pdfRasterizer as? ImageUnitRasterizer
+                val dimensions = imageRenderer?.imageDimensions(source.bytes)
+                val limits = runtime.mobileagent.knowledge.UnitRenderLimits()
+                val oversized = dimensions != null && (dimensions.first > limits.maxDimension || dimensions.second > limits.maxDimension || dimensions.first.toLong()*dimensions.second > limits.maxPixels)
+                if(imageRenderer != null && (unit.region != null || oversized || source.bytes.size > limits.maxEncodedBytes)) {
+                    val rendered = imageRenderer.renderImageUnit(source.bytes,unit)
+                    if (rendered == null) {
+                        pipeline.failUnit(job.id, unit.unitId, "RENDER_FAILED", "LOCAL_RENDER")
+                        return VisionBatch.Failed("Image unit could not be rendered within local limits")
+                    }
+                    source.copy(bytes=rendered.bytes,mediaType=rendered.mediaType,
+                        section=if(unit.region == null) source.section else "image-unit-${unit.unitId}",
+                        surroundingText=unit.effectiveRequestText())
+                } else {
+                    if(unit.region != null || source.bytes.size > runtime.mobileagent.knowledge.UnitRenderLimits().maxEncodedBytes) {
+                        pipeline.failUnit(job.id, unit.unitId, "RENDER_LIMIT_EXCEEDED", "LOCAL_RENDER")
+                        return VisionBatch.Failed("Region rendering is unavailable or image exceeds local byte limit")
+                    }
+                    source.copy(surroundingText=unit.effectiveRequestText())
+                }
             }
-        }
-
-        if (blockerPages.any { it !in coveredPages } || pagesNeedingVision.any { it !in coveredPages }) {
-            return VisionBatch.Failed(
-                "Visual page evidence could not be rasterized locally. The document is not READY.",
-            )
+            when(val outcome = processAssets(job,listOf(asset),unit)) {
+                is VisionBatch.Ok -> chunks += outcome.chunks
+                else -> return outcome
+            }
         }
         return VisionBatch.Ok(chunks)
     }
 
-    private fun processAssets(job: ImportJob, assets: List<ExtractedAsset>): VisionBatch {
+    private fun hasLegacyVisionUnknown(jobId: String, documentId: String, page: Int, target: String): Boolean {
+        val legacy=legacyVisionCacheTarget(target)?.fingerprint
+        return db.query(
+            "SELECT v.cache_key FROM vision_results v JOIN assets a ON a.blob_hash=v.asset_hash AND a.surrounding_text_hash=v.context_hash WHERE a.document_id=? AND (a.page=? OR a.page IS NULL) AND v.status='UNKNOWN_OUTCOME' AND (v.model_fingerprint=? OR v.model_fingerprint=? OR v.model_fingerprint=(SELECT vision_binding_json FROM import_jobs WHERE id=?) OR EXISTS(SELECT 1 FROM vision_attempts old WHERE old.job_id=? AND old.cache_key=v.cache_key)) LIMIT 1",
+            listOf(documentId,page,target,legacy,jobId,jobId)).isNotEmpty()
+    }
+
+    private fun unitChunks(unit: ProcessingUnit, assetId: String, result: runtime.mobileagent.knowledge.VisionSuccess, section: String?): List<IndexedChunk> {
+        // Planner coverage page 1 does not invent a source page for unassigned Office images.
+        val sourcePage=db.query("SELECT page FROM assets WHERE id=?",listOf(assetId)).singleOrNull()?.longOrNull("page")?.toInt()
+        return VisionChunkBuilder.build(result,sourcePage,assetId,section,unit.effectiveRequestText())
+            .map { IndexedChunk(it.text,it.page,it.assetIds,it.span) }
+    }
+
+    private fun recoverPipelineJob(jobId: String) = synchronized(livePipelineJobs) {
+        if (jobId !in livePipelineJobs) pipeline.recover(jobId)
+    }
+
+    private fun processAssets(job: ImportJob, assets: List<ExtractedAsset>, unit: ProcessingUnit): VisionBatch {
+        if (!synchronized(livePipelineJobs) { livePipelineJobs.add(job.id) }) return VisionBatch.Deferred
+        return try { processAssetsOwned(job,assets,unit) } finally { synchronized(livePipelineJobs) { livePipelineJobs.remove(job.id) } }
+    }
+
+    private fun processAssetsOwned(job: ImportJob, assets: List<ExtractedAsset>, unit: ProcessingUnit): VisionBatch {
         val backend = vision ?: return VisionBatch.Failed("Vision model is configured in profile but no backend is bound")
         val requestedFingerprint = job.consentedVisionFingerprint?.takeIf { it.isNotBlank() }
             ?: return VisionBatch.Failed("Vision destination is not bound to this job")
@@ -2416,12 +2614,19 @@ class KnowledgeRepository(
                     }
                 }
                 if (result?.string("status") !in setOf("SUCCESS", "UNKNOWN_OUTCOME")) {
+                    pipeline.stopReason(batchId)?.let { reason ->
+                        if (batchId != null) pauseBatch(batchId)
+                        job.stage = ImportStage.PAUSED
+                        job.error = reason
+                        return VisionBatch.Deferred
+                    }
                     // Commit before entering the backend. A dead process can only recover this
                     // call as uncertain; a completed response replaces it with a reusable cache.
                     val requestId = EntityId.random().value
                     val attempt = db.query("SELECT COALESCE(MAX(attempt_no),0) AS n FROM vision_attempts WHERE cache_key = ?",
                         listOf(input.cacheKey)).single().long("n").toInt() + 1
                     db.transaction {
+                        pipeline.prepare(job.id,unit,batchId,requestedFingerprint,input.cacheKey,requestId)
                         persistVision(input.cacheKey, stored.sha256, contextHash, requestedFingerprint, "UNKNOWN_OUTCOME", "", "", "", "")
                         db.execute(
                             "INSERT INTO vision_attempts(request_id,cache_key,job_id,asset_hash,attempt_no,status,stage,dispatch_status,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
@@ -2437,11 +2642,20 @@ class KnowledgeRepository(
                                 (currentBatchId == null || (findBatch(currentBatchId)?.state !in
                                     setOf(ImportBatchState.PAUSED, ImportBatchState.CANCELLED) &&
                                     authorizedVisionTargetLocked(job.id) == requestedFingerprint))
-                            dispatchRejected = !allowed
-                            allowed
+                            // Critical checkpoint, not best-effort diagnostics: persisted before network I/O.
+                            val admitted = allowed && pipeline.dispatched(requestId)
+                            dispatchRejected = !admitted
+                            admitted
                         }
                     }, diagnostics = { metadata ->
-                        latestDiagnostic = metadata
+                        latestDiagnostic = metadata.copy(
+                            dispatched=metadata.dispatched || latestDiagnostic.dispatched,
+                            responseReceived=metadata.responseReceived || latestDiagnostic.responseReceived,
+                            inputTokens=metadata.inputTokens ?: latestDiagnostic.inputTokens,
+                            outputTokens=metadata.outputTokens ?: latestDiagnostic.outputTokens,
+                            reasoningTokens=metadata.reasoningTokens ?: latestDiagnostic.reasoningTokens)
+                        if (metadata.dispatched) pipeline.dispatched(requestId)
+                        pipeline.recordUsage(requestId, metadata.inputTokens?.toLong(), metadata.outputTokens?.toLong(), metadata.reasoningTokens?.toLong())
                         runCatching { recordVisionAttempt(requestId, metadata, "IN_PROGRESS") }
                         jobBatchId(job.id)?.let { id ->
                             runCatching { importEvents(ImportBatchEvent(id, job.id, attempt,
@@ -2501,15 +2715,36 @@ class KnowledgeRepository(
                         exceptionType = failure.javaClass.simpleName))
                 }
             }
-            if (dispatchInput.requestId.isNotBlank()) {
-                val metadata = when (outcome) {
+            val terminalMetadata = when (outcome) {
+                    is VisionOutcome.Success -> outcome.metadata
                     is VisionOutcome.Failed -> outcome.metadata
                     is VisionOutcome.Unknown -> outcome.metadata
                     else -> latestDiagnostic
+                }.let { metadata -> metadata.copy(
+                    dispatched=metadata.dispatched || latestDiagnostic.dispatched,
+                    responseReceived=metadata.responseReceived || latestDiagnostic.responseReceived,
+                    inputTokens=metadata.inputTokens ?: latestDiagnostic.inputTokens,
+                    outputTokens=metadata.outputTokens ?: latestDiagnostic.outputTokens,
+                    reasoningTokens=metadata.reasoningTokens ?: latestDiagnostic.reasoningTokens) }
+            if (dispatchInput.requestId.isNotBlank()) {
+                val terminal = when(outcome) {
+                    is VisionOutcome.Success -> PipelineAttemptState.SUCCEEDED
+                    is VisionOutcome.Failed -> if(dispatchRejected && !terminalMetadata.dispatched) PipelineAttemptState.CANCELLED else PipelineAttemptState.FAILED
+                    else -> PipelineAttemptState.UNKNOWN_OUTCOME
                 }
+                val accepted = db.transaction {
+                    val accepted = pipeline.settle(dispatchInput.requestId,terminal,terminalMetadata)
+                    if (accepted && outcome is VisionOutcome.Success) {
+                        persistVision(input.cacheKey,stored.sha256,contextHash,requestedFingerprint,"SUCCESS",
+                            outcome.result.ocrText,outcome.result.semanticDescription,outcome.result.tableMarkdown,outcome.result.type)
+                        pipeline.saveResult(job.id,unit,requestedFingerprint,input.cacheKey,assetId,outcome.result,asset.section)
+                    }
+                    accepted
+                }
+                if (!accepted) return VisionBatch.Unknown("UNKNOWN_OUTCOME: the immutable attempt already settled; no callback was replayed.")
                 // Diagnostics must never discard a paid successful response before its cache save.
                 runCatching {
-                    recordVisionAttempt(dispatchInput.requestId, metadata, when (outcome) {
+                    recordVisionAttempt(dispatchInput.requestId, terminalMetadata, when (outcome) {
                         is VisionOutcome.Success -> "SUCCESS"
                         is VisionOutcome.Failed -> "FAILED"
                         else -> "UNKNOWN_OUTCOME"
@@ -2544,7 +2779,9 @@ class KnowledgeRepository(
                     return VisionBatch.Failed(message)
                 }
                 is VisionOutcome.Success -> {
-                    persistVision(
+                    if (dispatchInput.requestId.isBlank()) db.transaction {
+                        pipeline.saveResult(job.id,unit,requestedFingerprint,input.cacheKey,assetId,outcome.result,asset.section)
+                        persistVision(
                         input.cacheKey,
                         stored.sha256,
                         contextHash,
@@ -2554,28 +2791,25 @@ class KnowledgeRepository(
                         outcome.result.semanticDescription,
                         outcome.result.tableMarkdown,
                         outcome.result.type,
-                    )
+                        )
+                    }
                     diagnostic(ImportBatchEventPhase.CHECKPOINT,
                         if (cached?.string("status") == "SUCCESS") "vision_cache_reused" else "vision_result_saved")
-                    val body = buildString {
-                        append("Visual evidence")
-                        asset.page?.let { append(" page $it") }
-                        append(": ")
-                        append(outcome.result.semanticDescription)
-                        if (outcome.result.ocrText.isNotBlank()) {
-                            append('\n')
-                            append(outcome.result.ocrText)
-                        }
-                        if (outcome.result.tableMarkdown.isNotBlank()) {
-                            append('\n')
-                            append(outcome.result.tableMarkdown)
-                        }
-                        if (asset.surroundingText.isNotBlank()) {
-                            append('\n')
-                            append(asset.surroundingText)
-                        }
+                    // Route every Vision component through the shared chunker:
+                    // one long OCR/description/table must not become a single
+                    // unbounded retrieval chunk.  The extracted page text is
+                    // published as its own `context` component because the
+                    // normal text path deliberately skips pages that need
+                    // Vision, so this is the only place that text can be kept.
+                    VisionChunkBuilder.build(
+                        result = outcome.result,
+                        page = asset.page,
+                        assetId = assetId,
+                        section = asset.section,
+                        surroundingText = asset.surroundingText,
+                    ).forEach { part ->
+                        chunks += IndexedChunk(part.text, part.page, part.assetIds, part.span)
                     }
-                    chunks += IndexedChunk(body, asset.page, listOf(assetId), asset.section)
                 }
             }
         }
@@ -2591,7 +2825,7 @@ class KnowledgeRepository(
 
     private fun recordVisionAttempt(requestId: String, metadata: VisionDiagnosticMetadata, status: String) {
         db.execute(
-            "UPDATE vision_attempts SET status=?,stage=?,dispatch_status=?,error_code=?,http_status=?,duration_ms=?,finish_reason=?,input_tokens=?,output_tokens=?,exception_type=?,updated_at=? WHERE request_id=?",
+            "UPDATE vision_attempts SET status=?,stage=?,dispatch_status=?,error_code=?,http_status=?,duration_ms=?,finish_reason=?,input_tokens=?,output_tokens=?,exception_type=?,updated_at=? WHERE request_id=? AND status IN ('PREPARED','IN_PROGRESS')",
             listOf(status,metadata.stage ?: metadata.phase.name,
                 when { metadata.responseReceived -> "RESPONSE_RECEIVED"; metadata.dispatched -> "DISPATCHED"; else -> "NOT_DISPATCHED" },
                 metadata.errorCode,metadata.httpStatus,metadata.durationMs,metadata.finishReason,metadata.inputTokens,metadata.outputTokens,
@@ -3256,6 +3490,7 @@ class KnowledgeRepository(
                             if (after?.string("active_version_id") != versionId) {
                                 throw OperationAborted("document active pointer changed while publishing")
                             }
+                            operation.jobId?.let { pipeline.recordPublication(it,chunkVersion,versionId) }
                         }
                         "REBIND" -> {
                             db.execute(
@@ -3322,6 +3557,10 @@ class KnowledgeRepository(
         fingerprint: String,
         assets: List<ExtractedAsset> = emptyList(),
     ) {
+        if (pipeline.publication(job.id,chunkVersion) != null) {
+            finishPublished(job)
+            return
+        }
         if (!job.embeddingIsApi) {
             publishChunks(job, bytes, textChunks, fingerprint, assets)
             return
@@ -3419,6 +3658,10 @@ class KnowledgeRepository(
         fingerprint: String,
         assets: List<ExtractedAsset> = emptyList(),
     ) {
+        if (pipeline.publication(job.id,chunkVersion) != null) {
+            finishPublished(job)
+            return
+        }
         if (job.embeddingIsApi && !job.embeddingConsent) {
             advanceThrough(job, ImportStage.AWAITING_EMBEDDING_CONSENT)
             if (job.stage == ImportStage.AWAITING_EMBEDDING_CONSENT) {
@@ -3454,6 +3697,7 @@ class KnowledgeRepository(
                     apiConsentGrantedForOperation = job.embeddingIsApi && job.embeddingConsent,
                 )
                 advanceBatchGenerationAfterPublicationLocked(job.id, generation)
+                if (!job.visualGapsAccepted) pipeline.recordPublication(job.id,chunkVersion,versionId)
             }
         }
         finishPublished(job)
@@ -4286,6 +4530,7 @@ class KnowledgeRepository(
         if (job.visualGapsAccepted) TEXT_ONLY_VISUAL_GAPS_PREFIX + note else note
 
     private fun finishPublished(job: ImportJob) {
+        if (!job.visualGapsAccepted) pipeline.published(job.id,chunkVersion)
         // Publication is a jump to a published terminal, including resume from FAILED
         // after CACHE_READY. Walking the state machine cannot leave FAILED/PAUSED.
         if (job.visualGapsAccepted) {
@@ -4646,6 +4891,7 @@ class KnowledgeRepository(
             ),
         ).map { it.string("id") }
         ids.forEach { batchId ->
+            if (batchId in activeBatchWorkers) return@forEach
             // A consumed Vision ticket marks an external call that may have
             // already reached the provider.  Reduce that job to UNKNOWN before
             // any PROCESSING item is re-queued; otherwise processBatch could
@@ -4655,6 +4901,7 @@ class KnowledgeRepository(
                 listOf(batchId),
             ).forEach { row ->
                 val jobId = row.string("job_id")
+                recoverPipelineJob(jobId)
                 recoverConsumedVisionJobLocked(jobId)
                 db.query(
                     "SELECT id FROM consent_tickets WHERE kind = 'API_EMBEDDING' AND job_id = ? AND consumed = 1",
@@ -5276,6 +5523,9 @@ class KnowledgeRepository(
                 listOf(ImportBatchState.PROCESSING.name, Utc.nowIso(), batchId),
             )
             if (batchId !in activeBatchWorkers) {
+                db.query("SELECT id FROM import_jobs WHERE batch_id=?",listOf(batchId)).forEach {
+                    recoverPipelineJob(it.string("id"))
+                }
                 // A paused process may have died with a claimed job. Reconstruct it from CAS;
                 // the durable Vision marker still prevents replay of an uncertain call.
                 db.execute(
@@ -5957,6 +6207,7 @@ class KnowledgeRepository(
     }
 
     companion object {
+        private val livePipelineJobs = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
         const val DEFAULT_KB_ID = "kb-default"
         const val PARSER_FINGERPRINT = "text-utf8-v1"
         private const val UNKNOWN_REBIND_PREFIX = "__api_rebind_unknown__:"

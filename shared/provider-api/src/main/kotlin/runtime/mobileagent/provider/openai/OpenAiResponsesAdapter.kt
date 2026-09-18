@@ -38,9 +38,13 @@ import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
+import runtime.mobileagent.domain.stripOutputCapAliases
+import runtime.mobileagent.domain.probeOutputTokenLimit
 import runtime.mobileagent.domain.AppError
 import runtime.mobileagent.domain.AppException
 import runtime.mobileagent.domain.ErrorCode
+import runtime.mobileagent.domain.LengthStopKind
+import runtime.mobileagent.domain.classifyLengthStop
 import runtime.mobileagent.domain.InputModality
 import runtime.mobileagent.domain.ModelFeature
 import runtime.mobileagent.domain.ModelOperation
@@ -118,8 +122,11 @@ class OpenAiResponsesAdapter(
         val started = System.nanoTime()
         val token = secret.concatToString()
         return try {
-            val modelParameters = runCatching { Json.parseToJsonElement(configured.parametersJson).jsonObject }
-                .getOrElse { throw InvalidConnectionConfigException() }
+            // A probe uses its own task cap: strip the business output aliases so a
+            // legitimate large cap is not judged as an invalid probe configuration.
+            val modelParameters = runCatching {
+                Json.parseToJsonElement(stripOutputCapAliases(configured.parametersJson)).jsonObject
+            }.getOrElse { throw InvalidConnectionConfigException() }
             val request = ModelRequest(
                 modelId = configured.modelId,
                 messages = listOf(ChatMessage(role = "user", text = "Reply with ok.")),
@@ -127,7 +134,7 @@ class OpenAiResponsesAdapter(
                 parameters = runtime.mobileagent.provider.ParameterLayers(modelParameters = modelParameters),
                 operationId = operationId,
                 // Probes never spend the user's full output budget on a two-word answer.
-                outputTokenLimit = minOf(configured.outputLimit.coerceAtLeast(1), CONNECTION_PROBE_MAX_OUTPUT_TOKENS),
+                outputTokenLimit = probeOutputTokenLimit(configured.outputLimitMode, configured.outputLimit, CONNECTION_PROBE_MAX_OUTPUT_TOKENS),
             )
             val payload = buildPayload(request, includeImageBytes = true)
             val resolved = resolveHeaders(token, emptyMap())
@@ -232,7 +239,7 @@ class OpenAiResponsesAdapter(
                     messages = listOf(ChatMessage("user", "Reply with ok.")),
                     stream = false,
                     operationId = operationId,
-                    outputTokenLimit = minOf(profile.outputLimit.coerceAtLeast(1), CONNECTION_PROBE_MAX_OUTPUT_TOKENS),
+                    outputTokenLimit = probeOutputTokenLimit(profile.outputLimitMode, profile.outputLimit, CONNECTION_PROBE_MAX_OUTPUT_TOKENS),
                 ),
                 require = ProbeRequirement.TEXT,
             )
@@ -390,11 +397,14 @@ class OpenAiResponsesAdapter(
                 if (status !in 200..299) {
                     val raw = readBounded(response.bodyAsChannel())
                     terminalError = httpFailureMessage(status, raw)
+                    lastUsage = reportedUsage(raw)
+                    lastUsage?.let { emit(it) }
                     emit(ModelEvent.Failed(terminalError!!))
                     request.reportDiagnostic(
                         ModelDiagnosticStage.TERMINAL, dispatchStatus, started, "responses",
                         httpStatus = status, errorCode = terminalError, responseContentType = responseContentType,
                         responseBytes = raw.toByteArray(Charsets.UTF_8).size.toLong(),
+                        usage = lastUsage,
                     )
                     return@execute
                 }
@@ -544,7 +554,7 @@ class OpenAiResponsesAdapter(
         onSafeDiagnostic: (ModelEvent) -> Unit = {},
     ): Boolean = when (event) {
         is ModelEvent.TextDelta -> {
-            val safe = redactor.accept(event.text)
+            val safe = redactor.accept(event.text, StreamingSecretRedactor.Channel.TEXT)
             if (safe.isNotEmpty()) {
                 val safeEvent = ModelEvent.TextDelta(safe)
                 emit(safeEvent)
@@ -553,7 +563,7 @@ class OpenAiResponsesAdapter(
             false
         }
         is ModelEvent.ReasoningDelta -> {
-            val safe = redactor.accept(event.text)
+            val safe = redactor.accept(event.text, StreamingSecretRedactor.Channel.REASONING)
             if (safe.isNotEmpty()) {
                 val safeEvent = ModelEvent.ReasoningDelta(safe)
                 emit(safeEvent)
@@ -562,7 +572,7 @@ class OpenAiResponsesAdapter(
             false
         }
         is ModelEvent.RefusalDelta -> {
-            val safe = redactor.accept(event.text)
+            val safe = redactor.accept(event.text, StreamingSecretRedactor.Channel.REFUSAL)
             if (safe.isNotEmpty()) {
                 val safeEvent = ModelEvent.RefusalDelta(safe)
                 emit(safeEvent)
@@ -600,9 +610,13 @@ class OpenAiResponsesAdapter(
             true
         }
         ModelEvent.Completed -> {
-            val safeTail = redactor.finish()
-            if (safeTail.isNotEmpty()) {
-                val safeEvent = ModelEvent.TextDelta(safeTail)
+            // Each channel flushes its own withheld suffix as its own event type.
+            redactor.finish().forEach { (channel, safeTail) ->
+                val safeEvent = when (channel) {
+                    StreamingSecretRedactor.Channel.REASONING -> ModelEvent.ReasoningDelta(safeTail)
+                    StreamingSecretRedactor.Channel.REFUSAL -> ModelEvent.RefusalDelta(safeTail)
+                    else -> ModelEvent.TextDelta(safeTail)
+                }
                 emit(safeEvent)
                 onSafeDiagnostic(safeEvent)
             }
@@ -681,17 +695,33 @@ class OpenAiResponsesAdapter(
         if (!effectiveStore && fields["include"] == null) {
             fields["include"] = buildJsonArray { add(JsonPrimitive("reasoning.encrypted_content")) }
         }
+        val budget = request.outputTokenLimit
+        if (budget != null && budget <= 0) throw invalidConfig("outputTokenLimit must be positive", request.operationId)
+        // Normalize before any alias-conflict check: the resolved decision (tool argument,
+        // then agent override, then model parameter, then profile default) wins, and only
+        // a genuine same-layer ambiguity without a decision stays an error.
+        if (request.outputTokenField != null) {
+            val chosen = request.outputTokenField
+            if (request.outputTokenLimit == null) {
+                throw invalidConfig("outputTokenField requires an output budget", request.operationId)
+            }
+            if (chosen !in listOf("max_tokens", "max_completion_tokens", "max_output_tokens")) {
+                throw invalidConfig("Unsupported output token field", request.operationId)
+            }
+            fields.remove("max_tokens")
+            fields.remove("max_completion_tokens")
+            fields.remove("max_output_tokens")
+        }
         val legacyMaxTokens = fields.remove("max_tokens")
         val legacyMaxCompletionTokens = fields.remove("max_completion_tokens")
         val legacyMax = legacyMaxTokens ?: legacyMaxCompletionTokens
-        if ((legacyMaxTokens != null && legacyMaxCompletionTokens != null) ||
-            (legacyMax != null && fields["max_output_tokens"] != null)
-        ) {
+        if (legacyMaxTokens != null && legacyMaxCompletionTokens != null) {
+            throw invalidConfig("legacy output token fields cannot be combined with max_output_tokens", request.operationId)
+        }
+        if (legacyMax != null && fields["max_output_tokens"] != null) {
             throw invalidConfig("legacy output token fields cannot be combined with max_output_tokens", request.operationId)
         }
         if (legacyMax != null) fields["max_output_tokens"] = legacyMax
-        val budget = request.outputTokenLimit
-        if (budget != null && budget <= 0) throw invalidConfig("outputTokenLimit must be positive", request.operationId)
         val maxOutput = fields["max_output_tokens"]
         if (maxOutput != null) {
             val primitive = maxOutput as? JsonPrimitive
@@ -828,25 +858,43 @@ class OpenAiResponsesAdapter(
             }
         }
         root["usage"]?.let { usage ->
-            runCatching { usage.jsonObject }.getOrNull()?.let {
-                events += ModelEvent.Usage(
-                    it["input_tokens"]?.jsonPrimitive?.contentOrNull?.toIntOrNull() ?: 0,
-                    it["output_tokens"]?.jsonPrimitive?.contentOrNull?.toIntOrNull() ?: 0,
-                )
+            runCatching { usage.jsonObject }.getOrNull()?.let { parsed ->
+                val input = parsed["input_tokens"]?.jsonPrimitive?.contentOrNull?.toIntOrNull()?.takeIf { it >= 0 }
+                val output = parsed["output_tokens"]?.jsonPrimitive?.contentOrNull?.toIntOrNull()?.takeIf { it >= 0 }
+                val details = parsed["output_tokens_details"]?.let { runCatching { it.jsonObject }.getOrNull() }
+                val reasoning = details?.get("reasoning_tokens")?.jsonPrimitive?.contentOrNull?.toIntOrNull()
+                events += ModelEvent.Usage(input ?: 0, output ?: 0,
+                    reasoning?.takeIf { it >= 0 && (output == null || it <= output) }, input, output)
             }
         }
         val status = root["status"]?.jsonPrimitive?.contentOrNull
+        val hasText = events.any { it is ModelEvent.TextDelta || it is ModelEvent.RefusalDelta }
+        val reportedUsage = events.filterIsInstance<ModelEvent.Usage>().lastOrNull()
         if (status == null || status == "completed") events += ModelEvent.Completed
         else if (status == "failed") events += ModelEvent.Failed(ProviderConnectionErrorCode.PROVIDER_REJECTED.name)
         else if (status == "incomplete") {
+            // Output-budget exhaustion, never an input window rejection, and
+            // never a usable OCR result.  Classification is the same shared rule
+            // the Chat and Responses-SSE paths use, so one truncated page is
+            // reported identically everywhere.
             val reason = root["incomplete_details"]?.let { runCatching { it.jsonObject }.getOrNull() }
                 ?.get("reason")?.jsonPrimitive?.contentOrNull
             events += ModelEvent.Failed(
-                if (reason == "max_output_tokens") ErrorCode.CONTEXT_OVERFLOW.name
-                else ProviderConnectionErrorCode.INVALID_RESPONSE.name,
+                if (reason != "max_output_tokens") {
+                    ProviderConnectionErrorCode.INVALID_RESPONSE.name
+                } else {
+                    when (classifyLengthStop(
+                        visibleAnswer = hasText,
+                        reasoningTokens = reportedUsage?.reasoningTokens,
+                        outputTokens = reportedUsage?.outputTokens,
+                    )) {
+                        LengthStopKind.OUTPUT_TRUNCATED -> ErrorCode.OUTPUT_TRUNCATED.name
+                        LengthStopKind.REASONING_EXHAUSTED -> ErrorCode.REASONING_EXHAUSTED.name
+                        LengthStopKind.EMPTY_RESPONSE -> ProviderConnectionErrorCode.INVALID_RESPONSE.name
+                    }
+                },
             )
-        }
-        else return listOf(ModelEvent.Failed(ErrorCode.UNKNOWN_OUTCOME.name))
+        }        else return listOf(ModelEvent.Failed(ErrorCode.UNKNOWN_OUTCOME.name))
         return events
     }
 
@@ -980,8 +1028,9 @@ class OpenAiResponsesAdapter(
             // The forced tool probe still gets a small bounded budget: enough
             // for a short reasoning trace plus one no-op call on reasoning
             // models, but far below any real profile output limit.
-            outputTokenLimit = minOf(
-                profile.outputLimit.coerceAtLeast(1),
+            outputTokenLimit = probeOutputTokenLimit(
+                profile.outputLimitMode,
+                profile.outputLimit,
                 if (feature == ProbeFeature.TOOLS) CAPABILITY_PROBE_MAX_OUTPUT_TOKENS else CONNECTION_PROBE_MAX_OUTPUT_TOKENS,
             ),
         )

@@ -95,6 +95,7 @@ object AgentTestTags {
     const val CONTEXT_POLICY_HISTORY_TURNS = "agents.editor.context_policy.history_turns"
     const val CONTEXT_POLICY_ROUNDS = "agents.editor.context_policy.rounds"
     const val CONTEXT_POLICY_REQUESTS = "agents.editor.context_policy.requests"
+    const val CONTEXT_POLICY_MODEL_TOKENS = "agents.editor.context_policy.model_tokens"
     const val CONTEXT_POLICY_ADVANCED = "agents.editor.context_policy.advanced"
     const val CONTEXT_POLICY_KEEP_RECENT = "agents.editor.context_policy.keep_recent"
     const val CONTEXT_POLICY_SOFT_LIMIT = "agents.editor.context_policy.soft_limit"
@@ -920,6 +921,13 @@ private fun AgentContextPolicyCard(
             testTag = AgentTestTags.CONTEXT_POLICY_REQUESTS,
             isError = error != null,
         ) { update(draft.copy(maxModelRequestsPerRun = it)) }
+        ContextPolicyField(
+            label = if (zh) "Python 模型调用费用上限（每次运行，token）" else "Python model.invoke fee ceiling (per run, tokens)",
+            value = draft.pythonModelRunTokens,
+            testTag = AgentTestTags.CONTEXT_POLICY_MODEL_TOKENS,
+            isError = error != null && draft.pythonModelRunTokens.isNotBlank(),
+            placeholder = if (zh) "留空 = 不允许 Python 技能调用模型" else "Blank = Python skills may not call models",
+        ) { update(draft.copy(pythonModelRunTokens = it)) }
         TextButton(
             onClick = { advanced = !advanced },
             modifier = Modifier.testTag(AgentTestTags.CONTEXT_POLICY_ADVANCED),

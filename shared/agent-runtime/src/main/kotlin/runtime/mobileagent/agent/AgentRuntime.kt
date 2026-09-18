@@ -230,6 +230,7 @@ class AgentRuntime(
                     headers = request.headers,
                     operationId = request.operationId,
                     outputTokenLimit = request.outputTokenLimit,
+                    outputTokenField = request.outputTokenField,
                 )
                 val inputLimit = request.maxInputBudgetUnits
                 val context = request.context?.takeIf { it.policy.autoCompact && inputLimit != null }

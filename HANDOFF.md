@@ -3,8 +3,29 @@
 
 # 项目交接
 
-最后更新：2026-09-01T16:27:07+08:00（Asia/Taipei）。项目根目录：`E:\mobileAgentRuntime`。
+最后更新：2026-09-17（Asia/Taipei）。项目根目录：`E:\mobileAgentRuntime`；本轮工作树 `E:\mobileAgentRuntime\.tmp-budget-work\wt-f`。
 
+## 0b. 2026-09-17 d487c98 复核收口（本轮，接续 0）
+
+- 基线 `d487c98`，本轮交付 `698933c`（已推送 `origin/codex/user-qa-fixes`）。未推 main、未 force、未部署、未发收费请求。
+- 关闭复核发现：
+  - F0：`feature/providers/gradle.lockfile` 补齐 release 单测 classpath，`generateReleaseUnitTestStubRFile` 可解析；未关闭测试、未放宽严格门禁。
+  - F1：新增受控入口 Agent 策略 `pythonModelRunTokens`（Agent 编辑器字段，留空即未授权）；`modelInvokeRunTokens` 把用户数字限制在已批准范围；`runBudgetJson` 是唯一持久 Run 预算构造器，ChatViewModel 建 Run 时写入 maxModelTokens，由共享 `RunTools.pythonBudget` 与 broker 读回。安装授权不会自动变成 Run 许可，普通聊天不暗加额度。
+  - F2：Skill 授权确认摘要展示模型身份、调用上限与 token 上限，并注明另需 Run 费用上限。
+  - G1：`app-android/src/androidTest/.../PythonModelInvokeBrokerTest`（7/7 PASS，mar_api36）经真实导入、真实授权、生产 `RunTools`、真实 CPython 与 IPC、真实 broker、真实 Adapter、MockEngine，覆盖 MANUAL/Responses 字段、无 Run 授权的零派发、超上限派发前拒绝、超预留阻断、撤权阻断、未知不重放。
+- 本地完整门禁通过：licenseGuard、licenseGuardReverse、verifyCiPins、verifyDependencyLock、verifyDependencyVerification、debugEvidenceGate、reviewGate（7m10s，1103 tasks）。远端 license-guard 对 698933c 成功；ci 结果见交接正文。
+- 证据：`docs/evidence/2026-09-17/d487c98-closeout.md`。
+
+## 0. 2026-09-17 f7a9152 复核收口（本轮）
+
+- 基线：`codex/user-qa-fixes` 的 `a9686af`（含复核包指认的 P1-01 修复 `e84ec68` 与两条入口测试）。本轮在同一分支续做，未触碰根工作区 `b1a77c6` 的 docs/WIP，未推 main、未部署、未发收费请求。
+- 修复与新增（源码/测试）：
+  - Python 出站决策收敛到 domain 的 `pythonModelWireDecision`（tool > 冻结 Agent > 模型高级 > profile 默认，AUTO 不发明 cap），broker 的预留、别名与实发值使用同一决策，不再有机会只传 field 不传 cap。
+  - `model.invoke` 的 manifest/授权现在真正支持 `modelProfileIds`/`maxModelCalls`/`maxModelTokens`：`PermissionSpec`/`PermissionGrant`/`SkillArchive`/`SkillRepository`/SkillsViewModel/RuntimeIntegration 贯通；仓储拒绝超出声明的范围，合并授权取交集与最小值。
+  - 两个协议对 `outputTokenField` 非空而 `outputTokenLimit` 为空一律前置拒绝（`INVALID_CONFIG`），不再静默退回 AUTO 或丢掉显式上限。
+  - 上下文窗口“有效/未知/失效”状态统一为 `ModelProfile.resolvedContextWindowState`，Provider 列表复用 `contextWindowTargetMatches` 的同一判定，不再显示裸 legacy 数值。
+  - 新增真实入口回归：`PythonModelInvokePayloadTest`（生产决策 + 真实 Adapter + MockEngine，两协议最终字段矩阵）、`PythonModelInvokeBrokerTest`（真实 Python 技能 → broker → MockEngine 出站，含预留/结算与拒绝重放）、Runtime 多轮与摘要独立预算、公开 `probe()` 的 STREAM/TOOLS/IMAGE 派发与 64/128 cap。
+- 未完成/边界见本轮证据报告 `docs/evidence/2026-09-17/f7a9152-next-round-closeout.md`；真实收费 Provider、真机与 294 份收费验收仍不在本轮授权内。
 > 本文件只保存当前事实、未决边界和接手动作。已完成工作的详细过程保存在 [证据目录](docs/evidence/) 和 Git 历史中，不再在这里重复流水账。
 
 接手者必须依次阅读 [agent.md](agent.md)、本文件和 [技术实现方案](docs/IMPLEMENTATION_PLAN.md)。修改完成、受阻或中断前必须同步本文件及受影响的专题文档。

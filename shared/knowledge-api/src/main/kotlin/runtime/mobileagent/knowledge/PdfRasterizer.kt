@@ -29,3 +29,22 @@ data class RenderedPdfPage(
 fun interface PdfPageRasterizer {
     fun render(pdfBytes: ByteArray, pages: List<Int>): List<RenderedPdfPage>
 }
+
+data class UnitRenderLimits(
+    val maxDimension: Int = 2048,
+    val maxPixels: Long = 4_000_000,
+    val maxEncodedBytes: Int = 8 * 1024 * 1024,
+) {
+    init { require(maxDimension > 0 && maxPixels > 0 && maxEncodedBytes > 0) }
+}
+
+/** One call allocates only one bounded crop; the caller consumes and releases it before the next call. */
+interface PdfUnitRasterizer {
+    fun renderUnit(pdfBytes: ByteArray, unit: ProcessingUnit, limits: UnitRenderLimits = UnitRenderLimits()): RenderedPdfPage?
+}
+
+interface ImageUnitRasterizer {
+    /** Bounds-only decode; no complete image bitmap allocation. */
+    fun imageDimensions(bytes: ByteArray): Pair<Int, Int>?
+    fun renderImageUnit(bytes: ByteArray, unit: ProcessingUnit, limits: UnitRenderLimits = UnitRenderLimits()): RenderedPdfPage?
+}

@@ -4,6 +4,8 @@
 package runtime.mobileagent.domain
 
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
 
 /** Persisted run state. The runtime's in-memory state is mapped to this enum by the data layer. */
 @Serializable
@@ -26,6 +28,39 @@ enum class RunStatus {
 
 /** A compatibility alias for clients that use the domain term RunState. */
 typealias RunState = RunStatus
+
+/**
+ * The one persisted Run budget.  It is fixed before the Run is created and read
+ * back by `RunTools`/the Python broker, so the in-memory caps and the durable
+ * ledger cannot drift.
+ *
+ * [modelInvokeTokens] is the Run's own `model.invoke` authorization resolved by
+ * [modelInvokeRunTokens]; a null value means the Run carries no such
+ * authorization and every model call from a Skill stays refused.
+ */
+fun runBudgetJson(
+    maxModelRounds: Int,
+    maxModelRoundsPerSegment: Int,
+    maxCompactionsPerRun: Int,
+    maxToolCalls: Int = 20,
+    maxRuntimeMs: Int = 180_000,
+    modelInvokeTokens: Int? = null,
+): String {
+    require(maxModelRounds > 0 && maxModelRoundsPerSegment > 0 && maxCompactionsPerRun > 0) {
+        "Run budget caps must be positive"
+    }
+    require(maxToolCalls > 0 && maxRuntimeMs > 0) { "Run budget caps must be positive" }
+    require(modelInvokeTokens == null || modelInvokeTokens > 0) { "A Run fee ceiling must be positive" }
+    val fields = linkedMapOf<String, JsonPrimitive>(
+        "maxModelRounds" to JsonPrimitive(maxModelRounds),
+        "maxToolCalls" to JsonPrimitive(maxToolCalls),
+        "maxRuntimeMs" to JsonPrimitive(maxRuntimeMs),
+        "maxModelRoundsPerSegment" to JsonPrimitive(maxModelRoundsPerSegment),
+        "maxCompactionsPerRun" to JsonPrimitive(maxCompactionsPerRun),
+    )
+    if (modelInvokeTokens != null) fields["maxModelTokens"] = JsonPrimitive(modelInvokeTokens)
+    return JsonObject(fields).toString()
+}
 
 @Serializable
 data class RunRecord(

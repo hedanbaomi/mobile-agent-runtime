@@ -28,6 +28,8 @@ data class AgentContextPolicyDraftUi(
     val maxHistoryTurns: String = "10",
     val maxModelRoundsPerSegment: String = "8",
     val maxModelRequestsPerRun: String = "32",
+    /** Blank means "no Run fee authorization for Python model.invoke". */
+    val pythonModelRunTokens: String = "",
     val keepRecentTurns: String = "2",
     val softLimitPercent: String = "85",
     val targetPercent: String = "60",
@@ -61,6 +63,13 @@ data class AgentContextPolicyDraftUi(
         base["maxHistoryTurns"] = JsonPrimitive(intText("最大历史轮数", maxHistoryTurns))
         base["maxModelRoundsPerSegment"] = JsonPrimitive(intText("每段模型轮上限", maxModelRoundsPerSegment))
         base["maxModelRequestsPerRun"] = JsonPrimitive(intText("每次运行模型请求上限", maxModelRequestsPerRun))
+        val modelTokens = pythonModelRunTokens.trim()
+        if (modelTokens.isEmpty()) {
+            // Absent key = this Run is not authorized to spend on model.invoke.
+            base.remove("pythonModelRunTokens")
+        } else {
+            base["pythonModelRunTokens"] = JsonPrimitive(intText("Python 模型调用上限", modelTokens))
+        }
         base["keepRecentTurns"] = JsonPrimitive(intText("保留最近轮数", keepRecentTurns))
         base["softLimitPercent"] = JsonPrimitive(intText("软阈值百分比", softLimitPercent))
         base["targetPercent"] = JsonPrimitive(intText("目标压缩百分比", targetPercent))
@@ -88,17 +97,20 @@ data class AgentContextPolicyDraftUi(
         val turns = maxHistoryTurns.trim()
         val rounds = maxModelRoundsPerSegment.trim()
         val requests = maxModelRequestsPerRun.trim()
+        val modelTokens = pythonModelRunTokens.trim().ifEmpty { if (zh) "未授权" else "not authorized" }
         val keep = keepRecentTurns.trim()
         val soft = softLimitPercent.trim()
         val target = targetPercent.trim()
         val compactions = maxCompactionsPerRun.trim()
         return if (zh) {
             "自动压缩：$auto；输入预算（保守估算单位）：$input；历史消息 ≤$messages · 历史轮 ≤$turns；" +
-                "每段模型轮 ≤$rounds；每次运行模型请求 ≤$requests（含摘要调用）；保留最近 $keep 轮；" +
+                "每段模型轮 ≤$rounds；每次运行模型请求 ≤$requests（含摘要调用）；" +
+                "Python 模型调用费用上限：$modelTokens token；保留最近 $keep 轮；" +
                 "软阈值 $soft% → 目标 $target%；压缩 ≤$compactions 次。"
         } else {
             "Auto-compaction: $auto; input budget (conservative estimate): $input; history ≤$messages messages / ≤$turns turns; " +
-                "≤$rounds model rounds per segment; ≤$requests model requests per run (includes summary calls); keep $keep turns; " +
+                "≤$rounds model rounds per segment; ≤$requests model requests per run (includes summary calls); " +
+                "Python model.invoke fee ceiling: $modelTokens tokens; keep $keep turns; " +
                 "soft $soft% → target $target%; ≤$compactions compactions."
         }
     }
@@ -129,6 +141,7 @@ data class AgentContextPolicyDraftUi(
                 maxHistoryTurns = text("maxHistoryTurns", defaults.maxHistoryTurns.toString()),
                 maxModelRoundsPerSegment = text("maxModelRoundsPerSegment", defaults.maxModelRoundsPerSegment.toString()),
                 maxModelRequestsPerRun = text("maxModelRequestsPerRun", defaults.maxModelRequestsPerRun.toString()),
+                pythonModelRunTokens = text("pythonModelRunTokens", ""),
                 keepRecentTurns = text("keepRecentTurns", defaults.keepRecentTurns.toString()),
                 softLimitPercent = text("softLimitPercent", defaults.softLimitPercent.toString()),
                 targetPercent = text("targetPercent", defaults.targetPercent.toString()),
@@ -148,6 +161,7 @@ private val contextPolicyFieldLabels = linkedMapOf(
     "targetPercent" to "目标压缩百分比",
     "maxModelRoundsPerSegment" to "每段模型轮上限",
     "maxModelRequestsPerRun" to "每次运行模型请求上限",
+    "pythonModelRunTokens" to "Python 模型调用费用上限",
     "maxCompactionsPerRun" to "每次运行压缩次数上限",
     "summaryOutputTokens" to "摘要输出上限",
     "summaryMaxUnits" to "摘要最大单位",

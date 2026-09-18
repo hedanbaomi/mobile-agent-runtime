@@ -21,6 +21,9 @@ import runtime.mobileagent.domain.ModelEndpoint
 import runtime.mobileagent.domain.ModelFeature
 import runtime.mobileagent.domain.ModelOperation
 import runtime.mobileagent.domain.ModelProfile
+import runtime.mobileagent.domain.ContextLimitMode
+import runtime.mobileagent.domain.ContextLimitSource
+import runtime.mobileagent.domain.OutputLimitMode
 import runtime.mobileagent.domain.ModelRole
 import runtime.mobileagent.domain.ProviderDestinationBinding
 import runtime.mobileagent.domain.ProviderProfile
@@ -156,7 +159,7 @@ class ProfileRepository(private val db: SqlConnection) {
         requireReference("model", profile.id, getModel(profile.id) == null)
         requireReference("provider", profile.providerId, getProvider(profile.providerId) != null)
         db.execute(
-            "INSERT INTO model_profiles (id,provider_id,role,model_id,capabilities,parameter_schema_json,parameters_json,context_limit,output_limit,revision,endpoint_json) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            "INSERT INTO model_profiles (id,provider_id,role,model_id,capabilities,parameter_schema_json,parameters_json,context_limit,output_limit,revision,output_limit_mode,context_limit_mode,context_window_value,context_window_source,context_window_target,context_window_checked_at,endpoint_json) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             profile.modelArgs(json),
         )
         return profile
@@ -170,7 +173,7 @@ class ProfileRepository(private val db: SqlConnection) {
         requireReference("provider", profile.providerId, getProvider(profile.providerId) != null)
         val endpoint = resolveEndpoint(profile)
         db.execute(
-            "UPDATE model_profiles SET provider_id=?,role=?,model_id=?,capabilities=?,parameter_schema_json=?,parameters_json=?,context_limit=?,output_limit=?,revision=?,endpoint_json=? WHERE id=?",
+            "UPDATE model_profiles SET provider_id=?,role=?,model_id=?,capabilities=?,parameter_schema_json=?,parameters_json=?,context_limit=?,output_limit=?,revision=?,output_limit_mode=?,context_limit_mode=?,context_window_value=?,context_window_source=?,context_window_target=?,context_window_checked_at=?,endpoint_json=? WHERE id=?",
             listOf(
                 profile.providerId,
                 profile.role.name,
@@ -181,6 +184,15 @@ class ProfileRepository(private val db: SqlConnection) {
                 profile.contextLimit,
                 profile.outputLimit,
                 profile.revision,
+                // Column/argument order must stay in lockstep with the SQL above:
+                // omitting this value shifts every later binding by one and
+                // silently corrupts endpoint_json.
+                profile.outputLimitMode.name,
+                profile.contextLimitMode.name,
+                profile.contextWindowValue,
+                profile.contextWindowSource.name,
+                profile.contextWindowTarget,
+                profile.contextWindowCheckedAt,
                 json.encodeToString(runtime.mobileagent.domain.ModelEndpoint.serializer(), endpoint),
                 profile.id,
             ),
@@ -188,6 +200,32 @@ class ProfileRepository(private val db: SqlConnection) {
         return profile
     }
 
+    /**
+     * Record an AUTO context window for the exact target it was observed on.
+     *
+     * The value, its source and the frozen target are stored together, so a
+     * later provider/endpoint/model change makes the capability stale (and the
+     * reader reports unknown) instead of silently applying the old number.
+     */
+    fun recordContextWindow(
+        modelId: String,
+        window: Int?,
+        source: ContextLimitSource,
+        targetKey: String?,
+        checkedAt: String?,
+        revision: Int,
+    ): ModelProfile {
+        val current = getModel(modelId) ?: throw invalid("Unknown model $modelId")
+        return updateModel(
+            current.copy(
+                contextWindowValue = window,
+                contextWindowSource = source,
+                contextWindowTarget = targetKey,
+                contextWindowCheckedAt = checkedAt,
+                revision = revision,
+            ),
+        )
+    }
     fun upsertModel(profile: ModelProfile): ModelProfile =
         if (getModel(profile.id) == null) createModel(profile) else updateModel(profile)
 
@@ -300,6 +338,9 @@ class ProfileRepository(private val db: SqlConnection) {
                 "m.role AS m_role,m.model_id AS m_model_id,m.capabilities AS m_capabilities," +
                 "m.parameter_schema_json AS m_parameter_schema_json,m.parameters_json AS m_parameters_json," +
                 "m.context_limit AS m_context_limit,m.output_limit AS m_output_limit,m.revision AS m_revision," +
+            "m.output_limit_mode AS m_output_limit_mode,m.context_limit_mode AS m_context_limit_mode," +
+            "m.context_window_value AS m_context_window_value,m.context_window_source AS m_context_window_source," +
+            "m.context_window_target AS m_context_window_target,m.context_window_checked_at AS m_context_window_checked_at," +
                 "m.endpoint_json AS m_endpoint_json " +
                 "FROM provider_profiles p JOIN model_profiles m ON m.provider_id=p.id$where " +
                 "ORDER BY p.name,p.id,m.model_id,m.id",
@@ -333,6 +374,12 @@ class ProfileRepository(private val db: SqlConnection) {
             parameterSchemaJson = string("m_parameter_schema_json").ifBlank { "{}" },
             contextLimit = long("m_context_limit").toInt(),
             outputLimit = long("m_output_limit").toInt(),
+            outputLimitMode = decodeOutputLimitMode(string("m_output_limit_mode")),
+            contextLimitMode = decodeContextLimitMode(string("m_context_limit_mode")),
+            contextWindowValue = longOrNull("m_context_window_value")?.toInt(),
+            contextWindowSource = decodeContextWindowSource(string("m_context_window_source")),
+            contextWindowTarget = string("m_context_window_target").ifBlank { null },
+            contextWindowCheckedAt = string("m_context_window_checked_at").ifBlank { null },
             revision = long("m_revision").toInt(),
             parametersJson = string("m_parameters_json").ifBlank { "{}" },
             endpoint = decodeEndpoint(role, caps, persistedString("m_endpoint_json", modelId), modelId),
@@ -362,8 +409,8 @@ class ProfileRepository(private val db: SqlConnection) {
         requireId(profile.id, "model.id")
         requireId(profile.providerId, "model.providerId")
         requireText(profile.modelId, "model.modelId")
-        requirePositive(profile.contextLimit, "model.contextLimit")
-        requirePositive(profile.outputLimit, "model.outputLimit")
+        requireContextLimit(profile)
+        requireOutputLimit(profile)
         requireNonNegative(profile.revision, "model.revision")
         parseJsonObject(profile.parameterSchemaJson, "model.parameterSchemaJson")
         parseJsonObject(profile.parametersJson, "model.parametersJson")
@@ -397,6 +444,32 @@ class ProfileRepository(private val db: SqlConnection) {
     private fun requirePositive(value: Int, field: String) {
         if (value <= 0) throw invalid("$field must be positive")
     }
+
+    /**
+     * A MANUAL cap must be a real positive number.  An AUTO cap stores 0 in the
+     * legacy numeric column because that column is NOT NULL; the value is
+     * ignored and is never sent upstream.
+     */
+    private fun requireContextLimit(profile: ModelProfile) {
+        if (profile.contextLimitMode == ContextLimitMode.MANUAL) {
+            requirePositive(profile.contextLimit, "model.contextLimit")
+        }
+    }
+
+    private fun decodeContextLimitMode(raw: String): ContextLimitMode =
+        runCatching { ContextLimitMode.valueOf(raw.trim().uppercase()) }.getOrDefault(ContextLimitMode.MANUAL)
+
+    private fun decodeContextWindowSource(raw: String): ContextLimitSource =
+        runCatching { ContextLimitSource.valueOf(raw.trim().uppercase()) }.getOrDefault(ContextLimitSource.UNKNOWN)
+
+    private fun requireOutputLimit(profile: ModelProfile) {
+        if (profile.outputLimitMode == OutputLimitMode.MANUAL) {
+            requirePositive(profile.outputLimit, "model.outputLimit")
+        }
+    }
+
+    private fun decodeOutputLimitMode(raw: String): OutputLimitMode =
+        runCatching { OutputLimitMode.valueOf(raw.trim().uppercase()) }.getOrDefault(OutputLimitMode.MANUAL)
 
     private fun requireNonNegative(value: Int, field: String) {
         if (value < 0) throw invalid("$field must not be negative")
@@ -448,6 +521,12 @@ class ProfileRepository(private val db: SqlConnection) {
             parameterSchemaJson = string("parameter_schema_json").ifBlank { "{}" },
             contextLimit = long("context_limit").toInt(),
             outputLimit = long("output_limit").toInt(),
+            outputLimitMode = decodeOutputLimitMode(string("output_limit_mode")),
+            contextLimitMode = decodeContextLimitMode(string("context_limit_mode")),
+            contextWindowValue = longOrNull("context_window_value")?.toInt(),
+            contextWindowSource = decodeContextWindowSource(string("context_window_source")),
+            contextWindowTarget = string("context_window_target").ifBlank { null },
+            contextWindowCheckedAt = string("context_window_checked_at").ifBlank { null },
             revision = long("revision").toInt(),
             parametersJson = string("parameters_json").ifBlank { "{}" },
             endpoint = decodeEndpoint(role, caps, persistedString("endpoint_json", modelId), modelId),
@@ -465,7 +544,8 @@ class ProfileRepository(private val db: SqlConnection) {
         val resolved = copy(endpoint = resolveEndpoint(this))
         return listOf(
             id, providerId, role.name, modelId, json.encodeToString(capabilities.toList().sorted()),
-            parameterSchemaJson, parametersJson, contextLimit, outputLimit, revision,
+            parameterSchemaJson, parametersJson, contextLimit, outputLimit, revision, outputLimitMode.name,
+            contextLimitMode.name, contextWindowValue, contextWindowSource.name, contextWindowTarget, contextWindowCheckedAt,
             json.encodeToString(ModelEndpoint.serializer(), resolved.endpoint),
         )
     }

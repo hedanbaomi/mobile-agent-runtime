@@ -5,6 +5,7 @@ package runtime.mobileagent
 
 import android.content.Context
 import android.util.AtomicFile
+import io.ktor.client.HttpClient
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.NonCancellable
@@ -14,8 +15,13 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.*
+import runtime.mobileagent.domain.pythonModelWireDecision
+import runtime.mobileagent.domain.resolveEffectiveOutputCap
+import runtime.mobileagent.domain.validateOutputCapLayers
+import runtime.mobileagent.domain.hasAdvancedOutputLimitOverride
 import runtime.mobileagent.domain.AgentSnapshot
 import runtime.mobileagent.domain.AuditEvent
+import runtime.mobileagent.domain.ModelProfile
 import runtime.mobileagent.domain.RunStatus
 import runtime.mobileagent.domain.ToolInvocation
 import runtime.mobileagent.domain.Utc
@@ -57,7 +63,47 @@ interface PythonRunBudget {
 
     /** Atomically consume a model round and a conservative maximum token reservation. No refund/retry. */
     fun reserveModelCall(maxTokens: Int): Boolean
+
+    /**
+     * Settle a reservation with the provider's final usage for that request.
+     *
+     * - actualTokens = reported input + output; the ledger is corrected to the real
+     *   spend, so a larger actual can block the next dispatch;
+     * - null means the provider reported nothing: the conservative reservation is
+     *   kept and real consumption stays unknown;
+     * - one request must settle at most once.
+     */
+    fun settleModelCall(reservation: Int, actualTokens: Int?)
 }
+
+/**
+ * Map one resolved Python `model.invoke` decision onto the production
+ * `ModelRequest`.  The decision itself comes from the domain
+ * (`pythonModelWireDecision`) so the exact production rule can be asserted
+ * through the real adapters; this mapper never invents a second alias and never
+ * drops the value of the chosen one.
+ */
+internal fun pythonModelRequest(
+    model: ModelProfile,
+    agentOverridesJson: String,
+    prompt: String,
+    outputTokenLimit: Int?,
+    outputTokenField: String?,
+    operationId: String,
+): ModelRequest = ModelRequest(
+    model.modelId,
+    listOf(ChatMessage("user", prompt)),
+    parameters = ParameterLayers(
+        modelParameters = jsonObjectOrEmpty(model.parametersJson),
+        agentOverrides = jsonObjectOrEmpty(agentOverridesJson),
+    ),
+    outputTokenLimit = outputTokenLimit,
+    outputTokenField = outputTokenField,
+    operationId = operationId,
+)
+
+private fun jsonObjectOrEmpty(raw: String?): JsonObject =
+    runCatching { Json.parseToJsonElement(raw ?: "").jsonObject }.getOrNull() ?: JsonObject(emptyMap())
 
 /** Run-local discovery and execution. No interpreter is loaded into the application process. */
 fun pythonSkillTools(
@@ -66,7 +112,8 @@ fun pythonSkillTools(
     snapshot: AgentSnapshot,
     runId: String,
     budget: PythonRunBudget? = null,
-): ToolExecutor = PythonSkillToolExecutor(container, context.applicationContext, snapshot, runId, budget)
+    providerHttp: HttpClient? = null,
+): ToolExecutor = PythonSkillToolExecutor(container, context.applicationContext, snapshot, runId, budget, providerHttp ?: container.http)
 
 private class PythonSkillToolExecutor(
     private val container: AppContainer,
@@ -74,6 +121,12 @@ private class PythonSkillToolExecutor(
     private val snapshot: AgentSnapshot,
     private val runId: String,
     private val budget: PythonRunBudget?,
+    /**
+     * The provider transport this executor dispatches `model.invoke` on.  It is
+     * `container.http` in production; the regression suite injects a MockEngine
+     * so the real broker handler, adapter and ledger are driven with no network.
+     */
+    private val providerHttp: HttpClient = container.http,
 ) : ToolExecutor {
     private val mutex = Mutex()
     private val calls = ConcurrentHashMap<String, BoundPythonCall>()
@@ -560,15 +613,44 @@ private class PythonSkillToolExecutor(
             val payload = args["request"] as? JsonObject ?: throw BrokerDenied("INVALID_ARGUMENTS")
             if (payload.keys.any { it !in setOf("prompt", "maxOutputTokens") }) throw BrokerDenied("INVALID_ARGUMENTS")
             val prompt = payload.requiredString("prompt", 8192)
-            val outputLimit = (payload.number("maxOutputTokens") ?: 512).coerceIn(1, minOf(2048, binding.chatModel.outputLimit.coerceAtLeast(1)))
+            // The provider cap (MANUAL) and this tool's own local accounting cap are
+// separate: under AUTO we still bound memory/time locally but send no
+// output-limit field, so the provider default applies.
+            validateOutputCapLayers(binding.chatModel.parametersJson, snapshot.parameterOverridesJson)?.let {
+                throw BrokerDenied("INVALID_ARGUMENTS")
+            }
+            val requestedCap = payload.number("maxOutputTokens")
+            // One resolution drives the reservation, the alias and the value on the
+            // wire: per-call tool argument, then frozen agent override, then the model
+            // advanced parameters, then the profile default.
+            val outputDecision = try {
+                pythonModelWireDecision(
+                    outputLimitMode = binding.chatModel.outputLimitMode,
+                    outputLimit = binding.chatModel.outputLimit,
+                    modelParametersJson = binding.chatModel.parametersJson,
+                    agentOverridesJson = snapshot.parameterOverridesJson,
+                    requestedCap = requestedCap,
+                )
+            } catch (_: IllegalArgumentException) {
+                throw BrokerDenied("INVALID_ARGUMENTS")
+            }
+            val wireCap = outputDecision.outputTokenLimit
+            // Known cap: the reservation equals what will be sent (an unaffordable cap
+            // is refused before dispatch).  Unknown output uses an explicit local estimate.
+            val localCap = minOf(2048, wireCap ?: 2048)
+            val outputLimit = wireCap ?: localCap
             val maxCalls = minOf(scopes.number("maxModelCalls") ?: 0, declared.number("maxModelCalls") ?: 0, 3)
             val maxTokens = minOf(scopes.number("maxModelTokens") ?: 0, declared.number("maxModelTokens") ?: 0)
             val run = container.runs.get(runId) ?: throw BrokerDenied("RESOURCE_LIMIT")
             val runMaxTokens = objectOrNull(run.budgetJson)?.number("maxModelTokens") ?: throw BrokerDenied("RESOURCE_LIMIT")
             // UTF-8 bytes form a conservative input allowance; reserve before a possibly billable send.
+            var reportedInputTokens: Int? = null
+            var reportedOutputTokens: Int? = null
             val reserved = prompt.toByteArray().size + outputLimit + 256
             if (++bound.modelCalls > maxCalls || bound.reservedModelTokens.toLong() + reserved > maxTokens ||
-                run.inputTokens.toLong() + run.outputTokens + reservedModelTokens + reserved > runMaxTokens) throw BrokerDenied("RESOURCE_LIMIT")
+                run.inputTokens.toLong() + run.outputTokens + reservedModelTokens + reserved > runMaxTokens) {
+                throw BrokerDenied("RESOURCE_LIMIT")
+            }
             if (budget?.reserveModelCall(reserved) != true) throw BrokerDenied("RESOURCE_LIMIT")
             reservedModelTokens += reserved
             bound.reservedModelTokens += reserved
@@ -577,7 +659,7 @@ private class PythonSkillToolExecutor(
                 val provider = binding.provider
                 val secret = container.secrets.resolveForHost(provider.secretRef).also { secrets += it }
                 if (!authorized(bound)) throw BrokerDenied("PERMISSION_DENIED")
-                val adapter = OpenAiAdapterFactory.create(provider.apiFormat, container.http, provider.baseUrl,
+                val adapter = OpenAiAdapterFactory.create(provider.apiFormat, providerHttp, provider.baseUrl,
                     HeaderSecretResolver { host, ref ->
                         if (host != URI(provider.baseUrl).host || !authorized(bound)) throw BrokerDenied("PERMISSION_DENIED")
                         container.secrets.resolveForHost(ref).also { secrets += it }
@@ -586,9 +668,26 @@ private class PythonSkillToolExecutor(
                 val text = StringBuilder()
                 var completed = false
                 effectDispatched()
-                adapter.stream(ModelRequest(binding.chatModel.modelId, listOf(ChatMessage("user", prompt)),
-                    parameters = ParameterLayers(adapterDefaults = mapOf("max_tokens" to JsonPrimitive(outputLimit))),
-                    operationId = bound.ticket.invocationId), secret).collect { event ->
+                // One terminal semantics for every outcome: known usage reaches the ledger
+                // (blocking later dispatches), unknown keeps the reservation, and the
+                // paid result is never replayed.
+                fun settlePythonUsage(input: Int?, output: Int?) {
+                    val actual = if (input != null && output != null) input + output else null
+                    budget?.settleModelCall(reserved, actual)
+                    bound.reservedModelTokens = (bound.reservedModelTokens - reserved + (actual ?: reserved)).coerceAtLeast(0)
+                    reservedModelTokens = (reservedModelTokens - reserved + (actual ?: reserved)).coerceAtLeast(0)
+                }
+                try {
+                // Same precedence as Chat/Vision: an explicit advanced override replaces
+                // the app default instead of being merged as a second alias.
+                adapter.stream(pythonModelRequest(
+                    model = binding.chatModel,
+                    agentOverridesJson = snapshot.parameterOverridesJson,
+                    prompt = prompt,
+                    outputTokenLimit = outputDecision.outputTokenLimit,
+                    outputTokenField = outputDecision.outputTokenField,
+                    operationId = bound.ticket.invocationId,
+                ), secret).collect { event ->
                     if (!authorized(bound)) throw BrokerDenied("PERMISSION_DENIED")
                     when (event) {
                         is ModelEvent.TextDelta -> {
@@ -597,15 +696,65 @@ private class PythonSkillToolExecutor(
                         }
                         is ModelEvent.ReasoningDelta -> Unit
                         is ModelEvent.ProviderContinuation -> Unit
-                        is ModelEvent.Usage -> if (event.inputTokens.toLong() + event.outputTokens > reserved) throw BrokerDenied("RESOURCE_LIMIT")
                         ModelEvent.Completed -> completed = true
-                        is ModelEvent.RefusalDelta,
+                        is ModelEvent.Usage -> {
+                            reportedInputTokens = event.inputTokens
+                            reportedOutputTokens = event.outputTokens
+                            // An explicit cap (MANUAL profile or the tool's own
+                            // maxOutputTokens) is a hard local commitment, so an
+                            // overrun is a real violation.  Under AUTO the app sends
+                            // no cap: this booking is only an estimate and must not
+                            // fail a legitimate, already-paid response.  The run
+                            // budget still bounds the next dispatch.
+                            // A known overrun is settled into the ledger (which blocks the
+                            // next dispatch); a paid, valid result is never discarded here.
+                        }
+                    is ModelEvent.RefusalDelta,
                         is ModelEvent.Failed, is ModelEvent.ToolCallDelta, is ModelEvent.ToolApprovalRequired -> throw BrokerDenied("UNKNOWN_OUTCOME")
                     }
                 }
                 if (!completed) throw BrokerDenied("UNKNOWN_OUTCOME")
+                } catch (denied: BrokerDenied) {
+                    // A terminal failure may still carry the provider's usage: settle the
+                    // known spend before the failure leaves this tool (unknown keeps the
+                    // reservation).  The paid response itself is never replayed.
+                    val failureActual = if (reportedInputTokens != null && reportedOutputTokens != null) {
+                        reportedInputTokens!! + reportedOutputTokens!!
+                    } else {
+                        null
+                    }
+                    budget?.settleModelCall(reserved, failureActual)
+                    bound.reservedModelTokens = (bound.reservedModelTokens - reserved + (failureActual ?: reserved)).coerceAtLeast(0)
+                    reservedModelTokens = (reservedModelTokens - reserved + (failureActual ?: reserved)).coerceAtLeast(0)
+                    throw denied
+                } catch (cancel: kotlinx.coroutines.CancellationException) {
+                    settlePythonUsage(reportedInputTokens, reportedOutputTokens)
+                    throw cancel
+                } catch (other: Exception) {
+                    settlePythonUsage(reportedInputTokens, reportedOutputTokens)
+                    throw other
+                }
+                // Settle the reservation with the provider's own final usage.  Unknown
+                // usage keeps the reservation, and a larger actual raises the ledger so the
+                // next model.invoke is refused by the shared Run budget.
+                val settledActual = if (reportedInputTokens != null && reportedOutputTokens != null) {
+                    reportedInputTokens!! + reportedOutputTokens!!
+                } else {
+                    null
+                }
+                budget?.settleModelCall(reserved, settledActual)
+                bound.reservedModelTokens = (bound.reservedModelTokens - reserved + (settledActual ?: reserved)).coerceAtLeast(0)
+                reservedModelTokens = (reservedModelTokens - reserved + (settledActual ?: reserved)).coerceAtLeast(0)
                 val redacted = SecretRedactor.redact(text.toString(), secrets.map { it.concatToString() })
-                return buildJsonObject { put("text", redacted); put("reservedTokens", reserved) }
+                // `reservedTokens` is the admission reservation, never presented as
+        // measured consumption.  Actual usage is reported only when the
+        // provider supplied it; otherwise it stays unknown.
+        return buildJsonObject {
+            put("text", redacted)
+            put("reservedTokens", reserved)
+            reportedInputTokens?.let { put("inputTokens", it) }
+            reportedOutputTokens?.let { put("outputTokens", it) }
+        }
             } catch (cancelled: CancellationException) {
                 throw cancelled
             } catch (failure: BrokerDenied) {

@@ -146,7 +146,19 @@ object PdfParser {
             val hasImages = xobjects.isNotEmpty() || hasUnresolvedXObjects || hasInline ||
                 Regex("/Subtype\\s*/Image").containsMatchIn(pageObj.dict)
             val needsVision = pageNeedsVision(text, extracted.complete, content.complete, hasImages, hasDrawing)
-            pages += ExtractedPage(pageIndex, text, needsVision)
+            var geometryDict = pageObj.dict
+            val visitedGeometry = mutableSetOf(objNum)
+            while (!geometryDict.contains("/MediaBox")) {
+                val parent = dictionaryOrReference(geometryDict, "Parent").reference ?: break
+                if (!visitedGeometry.add(parent)) break
+                geometryDict = objects[parent]?.dict ?: break
+            }
+            val mediaBox = Regex("/MediaBox\\s*\\[\\s*([-+.0-9]+)\\s+([-+.0-9]+)\\s+([-+.0-9]+)\\s+([-+.0-9]+)\\s*]")
+                .find(geometryDict)?.groupValues?.drop(1)?.mapNotNull { it.toDoubleOrNull() }
+            val pageWidth = mediaBox?.takeIf { it.size == 4 }?.let { kotlin.math.abs(it[2] - it[0]).toInt().coerceAtLeast(1) } ?: 612
+            val pageHeight = mediaBox?.takeIf { it.size == 4 }?.let { kotlin.math.abs(it[3] - it[1]).toInt().coerceAtLeast(1) } ?: 792
+            val complexLayout = hasDrawing && Regex("(?<![A-Za-z])(re|m|l|c|v|y)\\s").findAll(pageLatin).take(12).count() >= 12
+            pages += ExtractedPage(pageIndex, text, needsVision, pageWidth, pageHeight, complexLayout = complexLayout)
             val rendered = renderedPages[pageIndex]?.takeIf { it.bytes.isNotEmpty() }
             if (rendered != null) {
                 assets += ExtractedAsset(

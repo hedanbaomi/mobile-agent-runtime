@@ -17,6 +17,9 @@ data class ExtractedPage(
     val page: Int,
     val text: String,
     val needsVision: Boolean,
+    val width: Int = 612,
+    val height: Int = 792,
+    val complexLayout: Boolean = false,
 )
 
 data class ParsedPublication(

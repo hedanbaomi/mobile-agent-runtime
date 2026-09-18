@@ -11,7 +11,10 @@ import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import runtime.mobileagent.domain.ErrorCode
+import runtime.mobileagent.domain.LengthStopKind
+import runtime.mobileagent.domain.classifyLengthStop
 import runtime.mobileagent.provider.ModelEvent
+import runtime.mobileagent.provider.ProviderConnectionErrorCode
 import runtime.mobileagent.provider.SecretRedactor
 
 /**
@@ -98,8 +101,32 @@ object OpenAiResponsesSse {
                 usage(response ?: obj)?.let(::add)
                 add(ModelEvent.Completed)
             }
-            "response.failed",
-            "response.incomplete",
+            "response.incomplete" -> buildList {
+                // A length stop is an output-budget outcome, never an input
+                // window rejection.  The terminal payload carries the usage that
+                // must survive this failure path -- it is added exactly once.
+                val response = obj["response"]?.let { runCatching { it.jsonObject }.getOrNull() }
+                val reportedUsage = usage(response ?: obj)
+                reportedUsage?.let(::add)
+                val reason = (response ?: obj)["incomplete_details"]?.jsonObject?.get("reason")?.jsonPrimitive?.contentOrNull
+                    ?: string(obj, "reason")
+                val failure = when {
+                    reason != "max_output_tokens" -> SecretRedactor.redact(errorMessage(obj), extraSecrets)
+                    else -> when (classifyLengthStop(
+                        visibleAnswer = state.text.isNotEmpty() || state.refusal.isNotEmpty(),
+                        reasoningTokens = reportedUsage?.reasoningTokens,
+                        outputTokens = reportedUsage?.outputTokens,
+                    )) {
+                        LengthStopKind.OUTPUT_TRUNCATED -> ErrorCode.OUTPUT_TRUNCATED.name
+                        LengthStopKind.REASONING_EXHAUSTED -> ErrorCode.REASONING_EXHAUSTED.name
+                        // Same mapping as the Chat and Responses-JSON paths: an
+                        // empty response with no reported reasoning is an
+                        // unusable result, not a truncation of real output.
+                        LengthStopKind.EMPTY_RESPONSE -> ProviderConnectionErrorCode.INVALID_RESPONSE.name
+                    }
+                }
+                add(ModelEvent.Failed(failure))
+            }            "response.failed",
             "error",
             -> listOf(ModelEvent.Failed(SecretRedactor.redact(errorMessage(obj), extraSecrets)))
             // created/in_progress/queued/output annotation and future event
@@ -162,9 +189,13 @@ object OpenAiResponsesSse {
             complete.startsWith(partial) -> complete.removePrefix(partial)
             else -> return listOf(ModelEvent.Failed(ErrorCode.UNKNOWN_OUTCOME.name))
         }
-        return missing.takeIf { it.isNotEmpty() }
-            ?.let { listOf(channelEvent(channel, it)) }
-            .orEmpty()
+        if (missing.isEmpty()) return emptyList()
+        // Record the completed text in the channel buffer.  A done-only stream
+        // emits text without prior deltas, and the failure classifier reads
+        // `state.text`/`state.refusal` to decide whether a later `incomplete`
+        // stop truncated real content or produced nothing.
+        channelBuffers(state, channel)[key] = StringBuilder(complete)
+        return listOf(channelEvent(channel, missing))
     }
 
     private fun contentKey(event: JsonObject): String = buildString {
@@ -248,9 +279,14 @@ object OpenAiResponsesSse {
 
     private fun usage(root: JsonObject): ModelEvent.Usage? {
         val usage = root["usage"]?.let { runCatching { it.jsonObject }.getOrNull() } ?: return null
-        val input = number(usage, "input_tokens") ?: number(usage, "prompt_tokens") ?: 0
-        val output = number(usage, "output_tokens") ?: number(usage, "completion_tokens") ?: 0
-        return ModelEvent.Usage(input, output)
+        val input = (number(usage, "input_tokens") ?: number(usage, "prompt_tokens"))?.takeIf { it >= 0 }
+        val output = (number(usage, "output_tokens") ?: number(usage, "completion_tokens"))?.takeIf { it >= 0 }
+        val details = usage["output_tokens_details"]?.let { runCatching { it.jsonObject }.getOrNull() }
+        val reasoning = details?.let { detail ->
+            number(detail, "reasoning_tokens") ?: number(detail, "reasoningTokens")
+        }
+        return ModelEvent.Usage(input ?: 0, output ?: 0,
+            reasoning?.takeIf { it >= 0 && (output == null || it <= output) }, input, output)
     }
 
     private fun number(obj: JsonObject, key: String): Int? =

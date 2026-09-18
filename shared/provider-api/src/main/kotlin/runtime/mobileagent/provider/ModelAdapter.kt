@@ -188,6 +188,12 @@ data class ModelRequest(
     val operationId: String = "model-request",
     /** Optional runtime output budget.  Kept last with a default for source compatibility. */
     val outputTokenLimit: Int? = null,
+    /**
+     * The output-limit alias the resolved decision came from, when an explicit
+     * override won.  Adapters normalize the final payload to this single alias
+     * instead of rejecting a second one the app itself would have added.
+     */
+    val outputTokenField: String? = null,
     /** Optional fixed-schema transport diagnostics. A failing sink never affects the request. */
     val diagnostics: ModelDiagnosticSink? = null,
     /** Final fail-closed control gate, invoked exactly once immediately before HTTP dispatch. */
@@ -258,6 +264,7 @@ data class ModelDiagnosticEvent(
     val originalContentChars: Long? = null,
     val originalContentBytes: Long? = null,
     val contentTruncated: Boolean = false,
+    val reasoningTokens: Int? = null,
 )
 
 /** Diagnostic sinks are observability only and cannot change provider behavior. */
@@ -298,8 +305,9 @@ fun ModelRequest.reportDiagnostic(
             errorCode = errorCode,
             exceptionClass = exception?.javaClass?.name,
             finishReason = finishReason,
-            inputTokens = usage?.inputTokens,
-            outputTokens = usage?.outputTokens,
+            inputTokens = usage?.reportedInputTokens,
+            outputTokens = usage?.reportedOutputTokens,
+            reasoningTokens = usage?.reasoningTokens,
             responseContentType = responseContentType?.take(128),
             responseBytes = responseBytes,
             eventType = eventType,
@@ -348,7 +356,22 @@ sealed interface ModelEvent {
      */
     data class ProviderContinuation(val item: ProviderContinuationItem) : ModelEvent
     data class ToolCallDelta(val callId: String, val name: String, val argumentsJson: String) : ModelEvent
-    data class Usage(val inputTokens: Int, val outputTokens: Int) : ModelEvent
+    data class Usage(
+        val inputTokens: Int,
+        val outputTokens: Int,
+        /**
+         * Provider-reported reasoning tokens, a *subset* of [outputTokens] and
+         * never an additional charge.  
+ull means the provider did not report
+         * it -- unknown is not zero, and a failed request that actually spent
+         * its budget on reasoning must stay distinguishable from one that never
+         * reported any reasoning at all.
+         */
+        val reasoningTokens: Int? = null,
+        /** Nullable wire facts, independent of the legacy runtime numeric counters. */
+        val reportedInputTokens: Int? = inputTokens,
+        val reportedOutputTokens: Int? = outputTokens,
+    ) : ModelEvent
     data class ToolApprovalRequired(val callId: String, val name: String, val argumentsJson: String) : ModelEvent
     data object Completed : ModelEvent
     data class Failed(val sanitizedMessage: String) : ModelEvent
@@ -362,6 +385,9 @@ fun interface SecretStore {
 }
 
 interface ModelAdapter {
+    /** Opt-in metadata-only producer. Ordinary OpenAI-compatible /models supplies no trusted window. */
+    suspend fun contextWindowMetadata(profile: ModelProfile): ContextWindowMetadata? = null
+
     suspend fun probe(profile: ModelProfile): CapabilityReport
 
     /**

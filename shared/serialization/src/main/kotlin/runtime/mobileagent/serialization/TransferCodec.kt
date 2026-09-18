@@ -4,6 +4,7 @@
 package runtime.mobileagent.serialization
 
 import java.security.MessageDigest
+import runtime.mobileagent.domain.OutputLimitMode
 import java.util.Base64
 import kotlinx.serialization.SerializationException
 import kotlinx.serialization.decodeFromString
@@ -202,7 +203,10 @@ object TransferCodec {
             requireId(p.providerId, operationId, "model.providerId")
             requireText(p.modelId, operationId, "model.modelId")
             requirePositive(p.contextLimit, operationId, "model.contextLimit")
-            requirePositive(p.outputLimit, operationId, "model.outputLimit")
+            // AUTO stores 0 in the legacy numeric column; only a MANUAL cap must be positive.
+            if (p.outputLimitMode == OutputLimitMode.MANUAL) {
+                requirePositive(p.outputLimit, operationId, "model.outputLimit")
+            }
             requireJsonObject(p.parameterSchemaJson, operationId, "model.parameterSchemaJson")
             requireJsonObject(p.parametersJson, operationId, "model.parametersJson")
             rejectSecretKeys(json.parseToJsonElement(p.parametersJson), operationId)

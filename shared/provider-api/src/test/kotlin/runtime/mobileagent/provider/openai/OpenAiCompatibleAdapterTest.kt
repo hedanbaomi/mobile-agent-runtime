@@ -225,7 +225,7 @@ class OpenAiSseTest {
     }
 
     @Test
-    fun finishReasonLengthIsContextOverflowAndRetainsLatestUsage() = runTest {
+    fun finishReasonLengthWithPartialTextIsOutputTruncationAndRetainsLatestUsage() = runTest {
         val engine = MockEngine {
             respond(
                 content = "data: {\"choices\":[{\"delta\":{\"content\":\"partial\"},\"finish_reason\":\"length\"}],\"usage\":{\"prompt_tokens\":8,\"completion_tokens\":2}}\n\n",
@@ -240,7 +240,7 @@ class OpenAiSseTest {
         ).toList()
         assertEquals(ModelEvent.TextDelta("partial"), events[0])
         assertEquals(ModelEvent.Usage(8, 2), events[1])
-        assertEquals(ModelEvent.Failed(ErrorCode.CONTEXT_OVERFLOW.name), events.last())
+        assertEquals(ModelEvent.Failed(ErrorCode.OUTPUT_TRUNCATED.name), events.last())
     }
 
     @Test
@@ -265,10 +265,83 @@ class OpenAiSseTest {
             listOf(
                 ModelEvent.TextDelta("partial"),
                 ModelEvent.Usage(8, 3),
-                ModelEvent.Failed(ErrorCode.CONTEXT_OVERFLOW.name),
+                ModelEvent.Failed(ErrorCode.OUTPUT_TRUNCATED.name),
             ),
             events,
         )
+    }
+
+    /**
+     * Incident shape: the whole output budget went to reasoning, content is
+     * empty and finish_reason=length.  It must not be reported as an input
+     * window overflow, must not become OCR text and must not complete.
+     */
+    @Test
+    fun reasoningExhaustedLengthIsNotReportedAsInputOverflow() = runTest {
+        val engine = MockEngine {
+            respond(
+                content = "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"thinking\"},\"finish_reason\":\"length\"}]," +
+                    "\"usage\":{\"prompt_tokens\":1326,\"completion_tokens\":10240," +
+                    "\"completion_tokens_details\":{\"reasoning_tokens\":10240}}}\n\ndata: [DONE]\n\n",
+                status = HttpStatusCode.OK,
+                headers = headersOf(HttpHeaders.ContentType, "text/event-stream"),
+            )
+        }
+        val adapter = OpenAiCompatibleAdapter(HttpClient(engine), "https://example.invalid/v1")
+        val events = adapter.stream(
+            ModelRequest(modelId = "demo", messages = listOf(ChatMessage(role = "user", text = "ocr"))),
+            "token".toCharArray(),
+        ).toList()
+
+        val usage = requireNotNull(events.filterIsInstance<ModelEvent.Usage>().singleOrNull())
+        assertEquals(1326, usage.inputTokens)
+        assertEquals(10240, usage.outputTokens)
+        assertEquals(10240, usage.reasoningTokens)
+        assertEquals(ModelEvent.Failed(ErrorCode.REASONING_EXHAUSTED.name), events.filterIsInstance<ModelEvent.Failed>().single())
+        assertTrue(events.none { it == ModelEvent.Completed })
+        assertTrue(events.none { it is ModelEvent.TextDelta })
+    }
+
+    @Test
+    fun lengthWithoutAnyReasoningReportIsNotBlamedOnReasoning() = runTest {
+        val engine = MockEngine {
+            respond(
+                content = "data: {\"choices\":[{\"delta\":{\"content\":\"\"},\"finish_reason\":\"length\"}]," +
+                    "\"usage\":{\"prompt_tokens\":9,\"completion_tokens\":32," +
+                    "\"completion_tokens_details\":{\"reasoning_tokens\":0}}}\n\ndata: [DONE]\n\n",
+                status = HttpStatusCode.OK,
+                headers = headersOf(HttpHeaders.ContentType, "text/event-stream"),
+            )
+        }
+        val adapter = OpenAiCompatibleAdapter(HttpClient(engine), "https://example.invalid/v1")
+        val events = adapter.stream(
+            ModelRequest(modelId = "demo", messages = listOf(ChatMessage(role = "user", text = "hi"))),
+            "token".toCharArray(),
+        ).toList()
+        assertEquals("INVALID_RESPONSE", events.filterIsInstance<ModelEvent.Failed>().single().sanitizedMessage)
+    }
+
+    @Test
+    fun reasoningTokenDetailIsPreservedAndAbsentMeansUnknown() = runTest {
+        val engine = MockEngine {
+            respond(
+                content = "data: {\"choices\":[{\"delta\":{\"content\":\"answer\"}}]," +
+                    "\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":40," +
+                    "\"completion_tokens_details\":{\"reasoning_tokens\":7}}}\n\ndata: [DONE]\n\n",
+                status = HttpStatusCode.OK,
+                headers = headersOf(HttpHeaders.ContentType, "text/event-stream"),
+            )
+        }
+        val adapter = OpenAiCompatibleAdapter(HttpClient(engine), "https://example.invalid/v1")
+        val events = adapter.stream(
+            ModelRequest(modelId = "demo", messages = listOf(ChatMessage(role = "user", text = "hi"))),
+            "token".toCharArray(),
+        ).toList()
+        val usage = events.filterIsInstance<ModelEvent.Usage>().single()
+        assertEquals(40, usage.outputTokens)
+        assertEquals(7, usage.reasoningTokens)
+        assertTrue(usage.reasoningTokens!! <= usage.outputTokens)
+        assertEquals(ModelEvent.Completed, events.last())
     }
 
     @Test

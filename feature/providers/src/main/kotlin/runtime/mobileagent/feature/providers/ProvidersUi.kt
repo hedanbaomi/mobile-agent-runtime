@@ -3,6 +3,13 @@
 
 package runtime.mobileagent.feature.providers
 
+import runtime.mobileagent.domain.BudgetValidationError
+import runtime.mobileagent.domain.ContextLimitMode
+import runtime.mobileagent.domain.contextWindowTarget
+import runtime.mobileagent.domain.contextWindowTargetMatches
+import runtime.mobileagent.domain.validateBudgetSelection
+import runtime.mobileagent.domain.OutputLimitMode
+import runtime.mobileagent.domain.advancedOutputLimitOverride
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -76,7 +83,56 @@ data class ProviderModelUi(
     val capabilities: Set<String> = emptySet(),
     val contextLimit: Int? = null,
     val outputLimit: Int? = null,
+    /** AUTO means the app sends no output cap of its own. */
+    val outputLimitMode: String = OutputLimitMode.MANUAL.name,
+    /** AUTO means use the upstream window when known; unknown stays unknown. */
+    val contextLimitMode: String = ContextLimitMode.AUTO.name,
+    /** Optional externally known window (provider documentation) for AUTO. */
+    val contextWindowValue: String = "",
+    /**
+     * The target the recorded window was declared for, and whether a window was
+     * recorded at all.  The row re-validates against the live target, so a window
+     * recorded for another endpoint or model is shown as stale, never as if it
+     * were in force.
+     */
+    val contextWindowTarget: String = "",
+    val contextWindowRecorded: Boolean = false,
 )
+
+/** What the context window column says: no fabricated, no silently stale number. */
+enum class ContextWindowDisplayState { MANUAL, EFFECTIVE, STALE, UNKNOWN }
+
+/**
+ * The row label.  It reuses `contextWindowTargetMatches`, the same decision the
+ * runtime budget applies, so the UI can never advertise a window the next
+ * request would refuse to rely on.
+ */
+fun contextWindowLabel(model: ProviderModelUi, currentTarget: String, zh: Boolean): String = when {
+    parseContextLimitMode(model.contextLimitMode) == ContextLimitMode.MANUAL -> {
+        val value = model.contextLimit
+        if (zh) "上下文 手动 $value" else "context manual $value"
+    }
+    !model.contextWindowRecorded ->
+        if (zh) "上下文 未知（未识别到可信窗口）" else "context unknown (no trusted window)"
+    !contextWindowTargetMatches(model.contextWindowTarget, currentTarget) -> {
+        val recorded = model.contextWindowValue
+        if (zh) "上下文 失效（$recorded 记录的 provider/端点/模型已变；当前未知）"
+        else "context stale ($recorded was recorded for another provider/endpoint/model; current unknown)"
+    }
+    parsePositiveProviderBudget(model.contextWindowValue) == null ->
+        if (zh) "上下文 未知（已记录窗口无效）" else "context unknown (recorded window is not a valid number)"
+    else -> {
+        val value = model.contextWindowValue
+        if (zh) "上下文 有效 $value（用户声明，仅对该目标）" else "context effective $value (user declared, this target only)"
+    }
+}
+
+fun outputLimitLabel(model: ProviderModelUi, zh: Boolean): String {
+    if (parseOutputLimitMode(model.outputLimitMode) == OutputLimitMode.AUTO) {
+        return if (zh) "输出 跟随服务商" else "output follow provider"
+    }
+    return if (zh) "输出 手动 ${model.outputLimit}" else "output manual ${model.outputLimit}"
+}
 
 data class ProviderDraft(
     val id: String? = null,
@@ -94,7 +150,14 @@ data class ProviderDraft(
     // immediately restore the previous value.  Persistence validation
     // happens when the draft is submitted.
     val contextLimit: String = "32768",
+    // Only used when [outputLimitMode] is MANUAL.  It is a suggested value for
+    // the manual path, never a hidden default: an AUTO profile sends no cap.
     val outputLimit: String = "4096",
+    val outputLimitMode: String = OutputLimitMode.AUTO.name,
+    /** New configurations try the upstream capability first. */
+    val contextLimitMode: String = ContextLimitMode.AUTO.name,
+    /** Optional window value taken from provider documentation (USER_DECLARED). */
+    val contextWindowValue: String = "",
     val mcpConfigured: Boolean = false,
 )
 
@@ -111,15 +174,118 @@ fun parsePositiveProviderBudget(raw: String): Int? {
         ?.toInt()
 }
 
-fun providerBudgetError(contextLimit: String, outputLimit: String, zh: Boolean): String? {
+fun providerBudgetError(contextLimit: String, outputLimit: String, zh: Boolean): String? =
+    providerBudgetError(contextLimit, outputLimit, OutputLimitMode.MANUAL.name, zh)
+
+/**
+ * AUTO validates only the context budget: following the provider means the app
+ * has no output number to validate and will not send one.  MANUAL keeps the
+ * exact positive-integer and `output <= context` contract.
+ */
+fun providerBudgetError(
+    contextLimit: String,
+    outputLimit: String,
+    outputLimitMode: String,
+    zh: Boolean,
+): String? {
     val context = parsePositiveProviderBudget(contextLimit)
         ?: return if (zh) "上下文预算必须是正整数。" else "Context budget must be a positive integer."
+    if (parseOutputLimitMode(outputLimitMode) == OutputLimitMode.AUTO) return null
     val output = parsePositiveProviderBudget(outputLimit)
-        ?: return if (zh) "输出预算必须是正整数。" else "Output budget must be a positive integer."
+        ?: return if (zh) "手动输出预算必须是正整数。" else "A manual output budget must be a positive integer."
     return if (output > context) {
         if (zh) "输出预算不能超过上下文预算。" else "Output budget cannot exceed the context budget."
     } else {
         null
+    }
+}
+
+/**
+ * Mode-aware budget validation.  Only the *effective* sources decide:
+ * - a MANUAL context window must be a positive number;
+ * - an AUTO window may be absent (unknown) and never borrows the hidden legacy
+ *   number the editor does not show;
+ * - a manual output cap is compared against the effective window only when one
+ *   is actually known.
+ */
+fun providerBudgetError(
+    contextLimit: String,
+    outputLimit: String,
+    outputLimitMode: String,
+    contextLimitMode: String,
+    contextWindowValue: String,
+    zh: Boolean,
+): String? {
+    // Shared semantics with ProvidersViewModel: the same domain decision decides
+    // whether the editor may save.
+    val error = validateBudgetSelection(
+        manualContext = parsePositiveProviderBudget(contextLimit),
+        manualOutput = parsePositiveProviderBudget(outputLimit),
+        contextMode = parseContextLimitMode(contextLimitMode),
+        outputMode = parseOutputLimitMode(outputLimitMode),
+        declaredWindow = parsePositiveProviderBudget(contextWindowValue),
+        declaredWindowRawFilled = contextWindowValue.isNotBlank(),
+    )
+    return when (error) {
+        null -> null
+        BudgetValidationError.MANUAL_CONTEXT_REQUIRED ->
+            if (zh) "手动上下文窗口必须是正整数。" else "A manual context window must be a positive integer."
+        BudgetValidationError.DECLARED_WINDOW_INVALID ->
+            if (zh) "已知上下文窗口必须是正整数。" else "The known context window must be a positive integer."
+        BudgetValidationError.MANUAL_OUTPUT_REQUIRED ->
+            if (zh) "手动输出预算必须是正整数。" else "A manual output budget must be a positive integer."
+        BudgetValidationError.OUTPUT_EXCEEDS_WINDOW ->
+            if (zh) "输出预算不能超过已知的上下文窗口。" else "Output budget cannot exceed the known context window."
+    }
+}
+fun parseContextLimitMode(raw: String): ContextLimitMode =
+    runCatching { ContextLimitMode.valueOf(raw.trim().uppercase()) }.getOrDefault(ContextLimitMode.MANUAL)
+
+/**
+ * What the next request will actually rely on for the context window.  A user
+ * must never see "automatic" while a fabricated number is in force: unknown is
+ * shown as unknown, and the local protection ceiling is described as local.
+ */
+fun effectiveContextWindowSource(draft: ProviderDraft, zh: Boolean): String {
+    if (parseContextLimitMode(draft.contextLimitMode) == ContextLimitMode.MANUAL) {
+        val value = parsePositiveProviderBudget(draft.contextLimit)
+        return if (value == null) {
+            if (zh) "实际来源：手动窗口（尚未填写有效数字，无法保存）" else "Effective source: manual window (no valid number yet; cannot save)"
+        } else {
+            if (zh) "实际来源：手动窗口 $value（用户覆盖）" else "Effective source: manual window $value (user override)"
+        }
+    }
+    val declared = parsePositiveProviderBudget(draft.contextWindowValue)
+    return if (declared == null) {
+        if (zh) "实际来源：未知（未识别到可信窗口；本地保护上限仍生效，不当作无限）" else "Effective source: unknown (no trusted window found; local protection still applies, not unlimited)"
+    } else {
+        if (zh) "实际来源：用户填写 $declared（来源 USER_DECLARED，仅对该 Provider/端点/模型生效）" else "Effective source: user-declared $declared (USER_DECLARED, applies to this provider/endpoint/model only)"
+    }
+}
+fun parseOutputLimitMode(raw: String): OutputLimitMode =
+    runCatching { OutputLimitMode.valueOf(raw.trim().uppercase()) }.getOrDefault(OutputLimitMode.MANUAL)
+
+
+
+/**
+ * What the next request will actually use.  A user must never see "follow the
+ * provider" while an advanced-parameter cap is silently sent.
+ */
+fun effectiveOutputLimitSource(draft: ProviderDraft, zh: Boolean): String {
+    advancedOutputLimitOverride(draft.parametersJson)?.let { (key, value) ->
+        return if (zh) "实际来源：高级参数 $key=$value（覆盖模式设置）" else "Effective source: advanced parameter $key=$value (overrides the mode)"
+    }
+    return when (parseOutputLimitMode(draft.outputLimitMode)) {
+        OutputLimitMode.MANUAL -> {
+            val value = parsePositiveProviderBudget(draft.outputLimit)
+            if (value == null) {
+                if (zh) "实际来源：手动限制（尚未填写有效数字，无法保存）" else "Effective source: manual (no valid number yet; cannot save)"
+            } else {
+                if (zh) "实际来源：手动限制 $value" else "Effective source: manual limit $value"
+            }
+        }
+        OutputLimitMode.AUTO ->
+            if (zh) "实际来源：跟随服务商（应用不发送输出上限）" else "Effective source: follow the provider (no output cap is sent)"
     }
 }
 
@@ -402,6 +568,9 @@ private fun ProviderDetail(
         Text(if (zh) "选择服务商以查看模型和能力。" else "Select a provider to inspect models and capabilities.", style = MaterialTheme.typography.bodyMedium, modifier = Modifier.padding(24.dp))
         return
     }
+    // The window state is judged against the live target of this provider, exactly
+    // as the runtime budget does; a recorded window for another endpoint is stale.
+
     Text(provider.name, style = MaterialTheme.typography.headlineSmall, maxLines = 2, overflow = TextOverflow.Ellipsis)
     Text(
         provider.baseUrl,
@@ -504,8 +673,16 @@ private fun ProviderDetail(
                     if (zh) "能力：${model.capabilities.sorted().joinToString()}" else "Capabilities: ${model.capabilities.sorted().joinToString()}"
                 }
                 Text(capabilityLabel, style = MaterialTheme.typography.bodySmall)
-                val limits = listOfNotNull(model.contextLimit?.let { "context $it" }, model.outputLimit?.let { "output $it" })
-                if (limits.isNotEmpty()) Text(limits.joinToString(" · "), style = MaterialTheme.typography.labelSmall)
+                // The effective/unknown/stale state comes from the same target match the
+                // runtime applies; the raw legacy number is never shown as if it were in force.
+                Text(
+                    listOf(
+                        contextWindowLabel(model, contextWindowTarget(provider.id, provider.baseUrl, model.modelId), zh),
+                        outputLimitLabel(model, zh),
+                    ).joinToString(" · "),
+                    style = MaterialTheme.typography.labelSmall,
+                    modifier = Modifier.testTag("provider.model.${model.id}.limits"),
+                )
             }
         }
     }
@@ -521,7 +698,7 @@ private fun ProviderDetail(
 private fun ProviderEditorDialog(state: ProvidersUiState, actions: ProvidersActions, zh: Boolean) {
     val draft = state.draft
     val showModelFields = draft.modelProfileId != null || draft.modelId.isNotBlank() || draft.id == null
-    val budgetError = if (showModelFields) providerBudgetError(draft.contextLimit, draft.outputLimit, zh) else null
+    val budgetError = if (showModelFields) providerBudgetError(draft.contextLimit, draft.outputLimit, draft.outputLimitMode, draft.contextLimitMode, draft.contextWindowValue, zh) else null
     AlertDialog(
         onDismissRequest = actions.onCloseEditor,
         title = { Text(providerEditorTitle(draft, zh)) },
@@ -549,7 +726,7 @@ private fun ProviderEditorPage(
 ) {
     val draft = state.draft
     val showModelFields = draft.modelProfileId != null || draft.modelId.isNotBlank() || draft.id == null
-    val budgetError = if (showModelFields) providerBudgetError(draft.contextLimit, draft.outputLimit, zh) else null
+    val budgetError = if (showModelFields) providerBudgetError(draft.contextLimit, draft.outputLimit, draft.outputLimitMode, draft.contextLimitMode, draft.contextWindowValue, zh) else null
     Surface(modifier.fillMaxSize().testTag("provider.editor.page")) {
         Column(Modifier.fillMaxSize().padding(horizontal = 16.dp, vertical = 12.dp)) {
             ProviderEditorFields(
@@ -650,8 +827,51 @@ private fun ProviderEditorFields(
                     Text(if (zh) "操作：CHAT / EMBEDDING / RERANKER；图片是 Chat 的输入模态，不是独立服务。" else "Operation: CHAT / EMBEDDING / RERANKER. Images are a Chat input modality, not a separate service.", style = MaterialTheme.typography.bodySmall)
                     OutlinedTextField(draft.role, { actions.onDraftChange(draft.copy(role = it)) }, label = { Text(if (zh) "操作/角色" else "Operation / role") }, keyboardOptions = noCorrectionAscii, modifier = Modifier.fillMaxWidth())
                     OutlinedTextField(draft.parametersJson, { actions.onDraftChange(draft.copy(parametersJson = it)) }, label = { Text(if (zh) "参数 JSON" else "Parameters JSON") }, keyboardOptions = noCorrectionText, minLines = 2, modifier = Modifier.fillMaxWidth())
-                    OutlinedTextField(draft.contextLimit, { actions.onDraftChange(draft.copy(contextLimit = it)) }, label = { Text(if (zh) "上下文预算" else "Context budget") }, keyboardOptions = noCorrectionAscii, modifier = Modifier.fillMaxWidth(), isError = budgetError != null && parsePositiveProviderBudget(draft.contextLimit) == null)
-                    OutlinedTextField(draft.outputLimit, { actions.onDraftChange(draft.copy(outputLimit = it)) }, label = { Text(if (zh) "输出预算" else "Output budget") }, keyboardOptions = noCorrectionAscii, modifier = Modifier.fillMaxWidth(), isError = budgetError != null && (parsePositiveProviderBudget(draft.outputLimit) == null || (parsePositiveProviderBudget(draft.contextLimit)?.let { context -> parsePositiveProviderBudget(draft.outputLimit)?.let { output -> output > context } } == true)))
+                    Text(if (zh) "上下文窗口" else "Context window", style = MaterialTheme.typography.titleSmall, modifier = Modifier.testTag("provider.contextLimit.title"))
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        FilterChip(
+                            selected = parseContextLimitMode(draft.contextLimitMode) == ContextLimitMode.AUTO,
+                            onClick = { actions.onDraftChange(draft.copy(contextLimitMode = ContextLimitMode.AUTO.name)) },
+                            label = { Text(if (zh) "自动（识别不到则未知）" else "Automatic (unknown if not detected)") },
+                            modifier = Modifier.testTag("provider.contextLimitMode.auto"),
+                        )
+                        FilterChip(
+                            selected = parseContextLimitMode(draft.contextLimitMode) == ContextLimitMode.MANUAL,
+                            onClick = { actions.onDraftChange(draft.copy(contextLimitMode = ContextLimitMode.MANUAL.name)) },
+                            label = { Text(if (zh) "手动覆盖" else "Manual override") },
+                            modifier = Modifier.testTag("provider.contextLimitMode.manual"),
+                        )
+                    }
+                    Text(effectiveContextWindowSource(draft, zh), style = MaterialTheme.typography.bodySmall, modifier = Modifier.testTag("provider.contextLimit.effectiveSource"))
+                    if (parseContextLimitMode(draft.contextLimitMode) == ContextLimitMode.AUTO) {
+                        OutlinedTextField(draft.contextWindowValue, { actions.onDraftChange(draft.copy(contextWindowValue = it)) }, label = { Text(if (zh) "已知窗口（可选，来自服务商文档）" else "Known window (optional, from provider docs)") }, keyboardOptions = noCorrectionAscii, modifier = Modifier.fillMaxWidth().testTag("provider.contextWindowValue"))
+                    } else {
+                        OutlinedTextField(draft.contextLimit, { actions.onDraftChange(draft.copy(contextLimit = it)) }, label = { Text(if (zh) "上下文窗口（手动）" else "Context window (manual)") }, keyboardOptions = noCorrectionAscii, modifier = Modifier.fillMaxWidth(), isError = budgetError != null && parsePositiveProviderBudget(draft.contextLimit) == null)
+                    }
+                    Text(if (zh) "最大输出" else "Maximum output", style = MaterialTheme.typography.titleSmall, modifier = Modifier.testTag("provider.outputLimit.title"))
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        FilterChip(
+                            selected = parseOutputLimitMode(draft.outputLimitMode) == OutputLimitMode.AUTO,
+                            onClick = { actions.onDraftChange(draft.copy(outputLimitMode = OutputLimitMode.AUTO.name)) },
+                            label = { Text(if (zh) "跟随服务商" else "Follow provider") },
+                            modifier = Modifier.testTag("provider.outputLimitMode.auto"),
+                        )
+                        FilterChip(
+                            selected = parseOutputLimitMode(draft.outputLimitMode) == OutputLimitMode.MANUAL,
+                            onClick = { actions.onDraftChange(draft.copy(outputLimitMode = OutputLimitMode.MANUAL.name)) },
+                            label = { Text(if (zh) "手动设置" else "Manual") },
+                            modifier = Modifier.testTag("provider.outputLimitMode.manual"),
+                        )
+                    }
+                    Text(
+                        effectiveOutputLimitSource(draft, zh),
+                        style = MaterialTheme.typography.bodySmall,
+                        modifier = Modifier.testTag("provider.outputLimit.effectiveSource"),
+                    )
+                    if (parseOutputLimitMode(draft.outputLimitMode) == OutputLimitMode.MANUAL) {
+                        OutlinedTextField(draft.outputLimit, { actions.onDraftChange(draft.copy(outputLimit = it)) }, label = { Text(if (zh) "输出预算" else "Output budget") }, keyboardOptions = noCorrectionAscii, modifier = Modifier.fillMaxWidth(), isError = budgetError != null && (parsePositiveProviderBudget(draft.outputLimit) == null || (parsePositiveProviderBudget(draft.contextLimit)?.let { context -> parsePositiveProviderBudget(draft.outputLimit)?.let { output -> output > context } } == true)))
+                    }
+                    Text(if (zh) "自动只表示应用不额外指定输出上限；不是无限输出，也不改变推理模式或服务商。" else "Automatic only means the app adds no output cap; it is not unlimited output and does not change reasoning mode or provider.", style = MaterialTheme.typography.labelSmall)
                     CheckRow(if (zh) "输入包含图片" else "Input includes images", draft.vision) { actions.onDraftChange(draft.copy(vision = it)) }
                     CheckRow(if (zh) "可调用工具" else "Can call tools", draft.tools) { actions.onDraftChange(draft.copy(tools = it)) }
                 }

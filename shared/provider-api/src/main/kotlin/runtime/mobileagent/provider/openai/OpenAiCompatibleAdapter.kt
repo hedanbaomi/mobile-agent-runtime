@@ -39,7 +39,10 @@ import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
+import runtime.mobileagent.domain.probeOutputTokenLimit
 import runtime.mobileagent.domain.ErrorCode
+import runtime.mobileagent.domain.LengthStopKind
+import runtime.mobileagent.domain.classifyLengthStop
 import runtime.mobileagent.domain.AppError
 import runtime.mobileagent.domain.ModelProfile
 import runtime.mobileagent.domain.RetryClass
@@ -139,7 +142,9 @@ class OpenAiCompatibleAdapter(
                 Json.parseToJsonElement(configured.parametersJson).jsonObject
             }.getOrElse { throw InvalidConnectionConfigException() }
             // Probes never spend the user's full output budget on a two-word answer.
-            val probeOutputTokens = minOf(configured.outputLimit.coerceAtLeast(1), CONNECTION_PROBE_MAX_OUTPUT_TOKENS)
+            // A probe has its own task-local cap: never read the numeric column that
+            // the selected mode declares ignored (AUTO stores 0 there).
+            val probeOutputTokens = probeOutputTokenLimit(configured.outputLimitMode, configured.outputLimit, CONNECTION_PROBE_MAX_OUTPUT_TOKENS)
             val request = ModelRequest(
                 modelId = configured.modelId,
                 messages = listOf(ChatMessage(role = "user", text = "Reply with ok.")),
@@ -446,26 +451,34 @@ class OpenAiCompatibleAdapter(
                     ModelDiagnosticStage.RESPONSE_HEADERS, dispatchStatus, started, "chat.completions",
                     httpStatus = status, responseContentType = responseContentType,
                 )
-                if (status == 401) {
-                    emitTerminalFailure(streamState, ErrorCode.PROVIDER_UNAUTHORIZED.name)
-                    request.reportDiagnostic(ModelDiagnosticStage.TERMINAL, dispatchStatus, started, "chat.completions", status, ErrorCode.PROVIDER_UNAUTHORIZED.name)
-                    return@execute
-                }
-                if (status == 429) {
-                    emitTerminalFailure(streamState, ErrorCode.RATE_LIMITED.name)
-                    request.reportDiagnostic(ModelDiagnosticStage.TERMINAL, dispatchStatus, started, "chat.completions", status, ErrorCode.RATE_LIMITED.name)
-                    return@execute
-                }
                 if (status >= 400) {
-                    val error = ProviderConnectionErrorCode.PROVIDER_REJECTED.name
+                    // Read the error body so an explicit input-window rejection
+                    // is not reported as a generic rejection.  The body itself
+                    // is never surfaced verbatim.
+                    val raw = runCatching { readBounded(response.bodyAsChannel()) }.getOrDefault("")
+                    val usage = reportedUsage(raw)
+                    if (usage != null) {
+                        streamState.lastUsage = usage
+                        emit(usage)
+                    }
+                    val error = when (status) {
+                        401 -> ErrorCode.PROVIDER_UNAUTHORIZED.name
+                        429 -> ErrorCode.RATE_LIMITED.name
+                        else -> InputOverflowSignal.failureCode(
+                        raw,
+                        // Canonical code only: consumers must not have to parse a
+                        // decorated string, and the HTTP status already travels in
+                        // the diagnostic metadata.
+                        if (status >= 500) ErrorCode.UNKNOWN_OUTCOME.name else ProviderConnectionErrorCode.PROVIDER_REJECTED.name,
+                        )
+                    }
                     emitTerminalFailure(
                         streamState,
                         error,
                     )
-                    request.reportDiagnostic(ModelDiagnosticStage.TERMINAL, dispatchStatus, started, "chat.completions", status, error)
+                    request.reportDiagnostic(ModelDiagnosticStage.TERMINAL, dispatchStatus, started, "chat.completions", status, error, usage = usage)
                     return@execute
                 }
-
                 val responseType = responseContentType.orEmpty()
                 if (responseType.contains("text/event-stream")) {
                     val channel = response.bodyAsChannel()
@@ -576,6 +589,11 @@ class OpenAiCompatibleAdapter(
             val code = when (error.httpStatus) {
                 401, 403 -> ErrorCode.PROVIDER_UNAUTHORIZED.name
                 429 -> ErrorCode.RATE_LIMITED.name
+                // The HTTP-engine interceptor path and the ordinary response
+                // path must obey one recovery policy: a 5xx is an unknown
+                // outcome (possibly dispatched, never auto-retried), not a
+                // decided rejection.
+                in 500..599 -> ErrorCode.UNKNOWN_OUTCOME.name
                 else -> ProviderConnectionErrorCode.PROVIDER_REJECTED.name
             }
             emitTerminalFailure(streamState, code)
@@ -600,7 +618,7 @@ class OpenAiCompatibleAdapter(
     ): ModelEvent? {
         return when (event) {
             is ModelEvent.TextDelta -> {
-                val safe = redactor.accept(event.text)
+                val safe = redactor.accept(event.text, StreamingSecretRedactor.Channel.TEXT)
                 if (safe.isNotEmpty()) {
                     state.hasVisibleOutput = true
                     val safeEvent = ModelEvent.TextDelta(safe)
@@ -610,7 +628,7 @@ class OpenAiCompatibleAdapter(
                 null
             }
             is ModelEvent.RefusalDelta -> {
-                val safe = redactor.accept(event.text)
+                val safe = redactor.accept(event.text, StreamingSecretRedactor.Channel.REFUSAL)
                 if (safe.isNotEmpty()) {
                     state.hasVisibleOutput = true
                     val safeEvent = ModelEvent.RefusalDelta(safe)
@@ -620,7 +638,7 @@ class OpenAiCompatibleAdapter(
                 null
             }
             is ModelEvent.ReasoningDelta -> {
-                val safe = redactor.accept(event.text)
+                val safe = redactor.accept(event.text, StreamingSecretRedactor.Channel.REASONING)
                 if (safe.isNotEmpty()) {
                     val safeEvent = ModelEvent.ReasoningDelta(safe)
                     emit(safeEvent)
@@ -648,11 +666,12 @@ class OpenAiCompatibleAdapter(
             is ModelEvent.Failed -> {
                 redactor.discard()
                 val message = SecretRedactor.redact(event.sanitizedMessage, secrets)
-                if (message == ErrorCode.CONTEXT_OVERFLOW.name) {
+                if (message == ErrorCode.OUTPUT_TRUNCATED.name) {
                     // Providers sometimes send finish_reason=length before a
-                    // separate usage-only frame. Keep reading until DONE/EOF
-                    // so the final cumulative usage is retained, then emit
-                    // the overflow terminal event exactly once.
+                    // separate usage-only frame. Keep reading until DONE/EOF so
+                    // the final cumulative usage is retained, then emit the
+                    // truncation terminal event exactly once.  The label is
+                    // refined below from what actually came back.
                     state.deferredFailure = message
                     null
                 } else {
@@ -660,11 +679,26 @@ class OpenAiCompatibleAdapter(
                     ModelEvent.Failed(message)
                 }
             }
-            ModelEvent.Completed -> {
-                val safeTail = redactor.finish()
-                if (safeTail.isNotEmpty()) {
-                    state.hasVisibleOutput = true
-                    val safeEvent = ModelEvent.TextDelta(safeTail)
+            ModelEvent.Completed -> if (state.finishReason == "length") {
+                // Classify a length stop *before* flushing the redaction buffer:
+                // the buffered tail may hold reasoning text, and presenting it as
+                // the answer would both mislabel the failure and leak hidden
+                // reasoning into the transcript.
+                redactor.discard()
+                val failure = lengthFailureCode(state)
+                emitTerminalFailure(state, failure)
+                ModelEvent.Failed(failure)
+            } else {
+                // Every channel flushes its own withheld suffix as its own event
+                // type: a reasoning prefix can never surface as the answer, and
+                // no channel loses characters because another channel advanced.
+                redactor.finish().forEach { (channel, safeTail) ->
+                    val safeEvent = when (channel) {
+                        StreamingSecretRedactor.Channel.REASONING -> ModelEvent.ReasoningDelta(safeTail)
+                        StreamingSecretRedactor.Channel.REFUSAL -> ModelEvent.RefusalDelta(safeTail)
+                        else -> ModelEvent.TextDelta(safeTail)
+                    }
+                    if (safeEvent !is ModelEvent.ReasoningDelta) state.hasVisibleOutput = true
                     emit(safeEvent)
                     state.diagnosticEvents += safeEvent
                 }
@@ -837,6 +871,23 @@ class OpenAiCompatibleAdapter(
 
     private fun applyOutputTokenLimit(merged: JsonObject, request: ModelRequest): JsonObject {
         val budget = request.outputTokenLimit
+        // The resolved decision wins: keep exactly one output alias in the payload
+        // instead of letting a model-level alias collide with an agent-level one.
+        val chosenField = request.outputTokenField
+        if (chosenField != null) {
+            val effectiveBudget = budget
+                ?: throw invalidConfig("outputTokenField requires an output budget", request.operationId)
+            if (effectiveBudget <= 0) throw invalidConfig("outputTokenLimit must be positive", request.operationId)
+            if (chosenField !in listOf("max_tokens", "max_completion_tokens")) {
+                throw invalidConfig("Unsupported output token field", request.operationId)
+            }
+            val normalized = linkedMapOf<String, JsonElement>()
+            normalized.putAll(merged)
+            normalized.remove("max_tokens")
+            normalized.remove("max_completion_tokens")
+            normalized[chosenField] = JsonPrimitive(effectiveBudget)
+            return JsonObject(normalized)
+        }
         if (budget != null && budget <= 0) {
             throw invalidConfig("outputTokenLimit must be positive", request.operationId)
         }
@@ -1079,10 +1130,7 @@ class OpenAiCompatibleAdapter(
         // but it is not enough for a complete no-op function call. Keep the
         // capability probe useful while retaining a fixed, small spend cap and
         // never exceeding the configured model output budget.
-        val probeOutputTokens = minOf(
-            profile.outputLimit.coerceAtLeast(1),
-            CONNECTION_PROBE_MAX_OUTPUT_TOKENS,
-        )
+            val probeOutputTokens = probeOutputTokenLimit(profile.outputLimitMode, profile.outputLimit, CONNECTION_PROBE_MAX_OUTPUT_TOKENS)
         val modelParameters = runCatching {
             Json.parseToJsonElement(profile.parametersJson).jsonObject
         }.getOrElse {
@@ -1177,6 +1225,11 @@ class OpenAiCompatibleAdapter(
      * is carried through unchanged. A profile that sets both fields, or a non-positive /
      * non-numeric value, stays untouched and is rejected by the shared merger exactly as a normal
      * request would be.
+     */
+    /**
+     * Probe parameters never carry the business output aliases: a legitimate large
+     * cap must not be judged as an invalid probe configuration, and the probe
+     * supplies its own task-local cap through [ModelRequest.outputTokenLimit].
      */
     private fun probeParameterLayers(modelParameters: JsonObject, probeOutputCap: Int): ParameterLayers {
         val hasMaxTokens = modelParameters.containsKey("max_tokens")
@@ -1551,10 +1604,7 @@ class OpenAiCompatibleAdapter(
             }
         root["usage"]?.let { usageElement ->
             runCatching { usageElement.jsonObject }.getOrNull()?.let { usage ->
-                state.latestUsage = ModelEvent.Usage(
-                    usage["prompt_tokens"]?.jsonPrimitive?.contentOrNull?.toIntOrNull() ?: 0,
-                    usage["completion_tokens"]?.jsonPrimitive?.contentOrNull?.toIntOrNull() ?: 0,
-                )
+                state.latestUsage = OpenAiSse.usageFromJson(usage)
                 state.lastUsage = state.latestUsage
             }
         }
@@ -1619,7 +1669,7 @@ class OpenAiCompatibleAdapter(
         }
         state.finishReason = finishReason
         if (finishReason == "length") {
-            emitTerminalFailure(state, ErrorCode.CONTEXT_OVERFLOW.name)
+            emitTerminalFailure(state, lengthFailureCode(state))
             return
         }
         toolEvents.forEach {
@@ -1634,6 +1684,31 @@ class OpenAiCompatibleAdapter(
         state.terminal = true
         emit(ModelEvent.Completed)
     }
+
+    /**
+     * Classify a provider `finish_reason=length` from what the stream actually
+     * produced.  The old adapter collapsed every truncation into
+     * `CONTEXT_OVERFLOW`, which told a user whose *input* fit comfortably that
+     * their document was too large.
+     *
+     * - visible text/refusal -> OUTPUT_TRUNCATED;
+     * - no visible output but reasoning was actually reported -> the hidden
+     *   budget consumed the allowance (REASONING_EXHAUSTED);
+     * - no visible output and no reasoning report -> the response is empty and
+     *   its budget is unknown, which is not evidence of hidden reasoning.
+     */
+    private fun lengthFailureCode(state: StreamOutputState): String =
+        // One shared rule for every protocol so a truncated page cannot be
+        // reported differently depending on which adapter saw it.
+        when (classifyLengthStop(
+            visibleAnswer = state.hasVisibleOutput,
+            reasoningTokens = state.latestUsage?.reasoningTokens,
+            outputTokens = state.latestUsage?.outputTokens,
+        )) {
+            LengthStopKind.OUTPUT_TRUNCATED -> ErrorCode.OUTPUT_TRUNCATED.name
+            LengthStopKind.REASONING_EXHAUSTED -> ErrorCode.REASONING_EXHAUSTED.name
+            LengthStopKind.EMPTY_RESPONSE -> INVALID_RESPONSE_MESSAGE
+        }
 
     private fun messageContentText(message: JsonObject?): List<String> {
         val content = message?.get("content") ?: return emptyList()

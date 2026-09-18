@@ -1422,6 +1422,9 @@ private fun ProvidersRoute(entry: NavBackStackEntry, chinese: Boolean, onRoute: 
                             .filter { it !in setOf("image", "tools") }.forEach(::add)
                     }, parametersJson = providerDraft.parametersJson, contextLimit = providerDraft.contextLimit,
                     outputLimit = providerDraft.outputLimit,
+                outputLimitMode = runtime.mobileagent.domain.OutputLimitMode.valueOf(providerDraft.outputLimitMode),
+                contextLimitMode = runtime.mobileagent.domain.ContextLimitMode.valueOf(providerDraft.contextLimitMode),
+                contextWindowValue = providerDraft.contextWindowValue,
             ))) {
                 editorOpen = false; providerDraft = providerDraft.copy(apiKey = ""); providerBaseline = providerDraft
                 providerError = null; selectedProviderId = providerDraft.id ?: providers.firstOrNull { it.name == providerDraft.name.trim() }?.id
@@ -1484,6 +1487,8 @@ private fun KnowledgeRoute(vm: runtime.mobileagent.KnowledgeViewModel, chinese: 
         onRetryEmbedding = vm::retryEmbedding,
         onAuthorizeQueryRetry = { spaceId, queryHash -> vm.requestQueryRetry(spaceId, queryHash) },
         onPauseBatch = vm::pauseBatch, onResumeBatch = vm::resumeBatch,
+        onConfigurePipeline = vm::configurePipeline,
+        onRebuildBatchLocalChunks = vm::rebuildBatchLocalChunks,
         onAuthorizeBatchVision = vm::authorizeBatchVision,
     )
     runtime.mobileagent.feature.knowledge.KnowledgeScreen(state, actions, showPageTitle = false)
@@ -1496,13 +1501,24 @@ private fun KnowledgeRoute(vm: runtime.mobileagent.KnowledgeViewModel, chinese: 
     }
 }
 
+/**
+ * The declared scope the real grant confirmation shows for [capability].
+ *
+ * The detail projection already carries the approved model scope, so the
+ * confirmation dialog and the install preview cannot disagree about what the
+ * user is about to grant.  Shared here so a device test can assert the exact
+ * value the dialog receives.
+ */
+internal fun skillPermissionScope(detail: runtime.mobileagent.feature.skills.SkillDetailUi?, capability: String): String =
+    detail?.permissions?.firstOrNull { it.capability == capability }?.scope.orEmpty()
+
 @Composable
 private fun SkillsRoute(entry: NavBackStackEntry, chinese: Boolean) {
     val vm: runtime.mobileagent.SkillsViewModel = viewModel(viewModelStoreOwner = entry)
     val state = vm.state.value.copy(language = if (chinese) "zh-CN" else "en-US")
     val request = vm.permissionRequest.value
     val capability = request?.second.orEmpty()
-    val scope = state.detail?.permissions?.firstOrNull { it.capability == capability }?.scope.orEmpty()
+    val scope = skillPermissionScope(state.detail, capability)
     val knowledgeScope = capability in setOf("knowledge.search", "knowledge.read", "document.read")
     val actions = runtime.mobileagent.feature.skills.SkillsActions(
         onImport = vm::importUris, onQuery = vm::query, onFilter = vm::filter, onOpenDetail = vm::openDetail,
@@ -1722,26 +1738,45 @@ private fun providerCardFrom(profile: runtime.mobileagent.domain.ProviderProfile
     runtime.mobileagent.feature.providers.ProviderCardUi(profile.id, profile.name, profile.baseUrl, profile.apiFormat.name,
         modelCount = models.count { it.providerId == profile.id }, secretConfigured = profile.secretRef.isNotBlank())
 
-private fun providerModelFrom(model: runtime.mobileagent.domain.ModelProfile) = runtime.mobileagent.feature.providers.ProviderModelUi(
-    id = model.id, modelId = model.modelId, role = model.role.name, capabilities = model.capabilities,
-    contextLimit = model.contextLimit, outputLimit = model.outputLimit)
+private fun providerModelFrom(model: runtime.mobileagent.domain.ModelProfile) =
+    runtime.mobileagent.feature.providers.ProviderModelUi(
+        id = model.id,
+        modelId = model.modelId,
+        role = model.role.name,
+        capabilities = model.capabilities,
+        contextLimit = model.contextLimit,
+        outputLimit = model.effectiveOutputTokenLimit(),
+        outputLimitMode = model.outputLimitMode.name,
+        contextLimitMode = model.contextLimitMode.name,
+        contextWindowValue = model.contextWindowValue?.toString().orEmpty(),
+        // The row re-validates against the live target so a recorded window is
+        // never shown as effective on a different provider/endpoint/model.
+        contextWindowTarget = model.contextWindowTarget.orEmpty(),
+        contextWindowRecorded = model.contextWindowValue != null &&
+            model.contextWindowSource != runtime.mobileagent.domain.ContextLimitSource.UNKNOWN,
+    )
 
 private fun providerDraftFrom(provider: runtime.mobileagent.domain.ProviderProfile?, model: runtime.mobileagent.domain.ModelProfile?) =
     runtime.mobileagent.feature.providers.ProviderDraft(id = provider?.id, modelProfileId = model?.id,
         name = provider?.name.orEmpty(), baseUrl = provider?.baseUrl.orEmpty(), apiFormat = provider?.apiFormat?.name ?: "OPENAI_COMPATIBLE",
         modelId = model?.modelId.orEmpty(), role = model?.role?.name ?: "CHAT", parametersJson = model?.parametersJson ?: "{}",
-        contextLimit = model?.contextLimit?.toString() ?: "32768", outputLimit = model?.outputLimit?.toString() ?: "4096",
+        contextLimit = model?.contextLimit?.toString() ?: "32768", outputLimit = model?.effectiveOutputTokenLimit()?.toString() ?: "4096",
+        outputLimitMode = (model?.outputLimitMode ?: runtime.mobileagent.domain.OutputLimitMode.AUTO).name,
+        contextLimitMode = (model?.contextLimitMode ?: runtime.mobileagent.domain.ContextLimitMode.AUTO).name,
+        contextWindowValue = model?.contextWindowValue?.toString() ?: "",
         vision = model?.capabilities?.contains("image") == true, tools = model?.capabilities?.contains("tools") == true)
 
 private val providerDraftSaver: Saver<runtime.mobileagent.feature.providers.ProviderDraft, List<Any?>> = Saver(
     save = { draft -> listOf(draft.id, draft.modelProfileId, draft.name, draft.baseUrl, draft.apiFormat, draft.modelId,
-        draft.vision, draft.tools, draft.role, draft.parametersJson, draft.contextLimit, draft.outputLimit) },
+        draft.vision, draft.tools, draft.role, draft.parametersJson, draft.contextLimit, draft.outputLimit, draft.outputLimitMode, draft.contextLimitMode, draft.contextWindowValue) },
     restore = { value -> runtime.mobileagent.feature.providers.ProviderDraft(
         id = value[0] as String?, modelProfileId = value[1] as String?, name = value[2] as String,
         baseUrl = value[3] as String, apiFormat = value[4] as String, modelId = value[5] as String,
         vision = value[6] as Boolean, tools = value[7] as Boolean, role = value[8] as String,
         parametersJson = value[9] as String, contextLimit = value[10]?.toString() ?: "32768",
-        outputLimit = value[11]?.toString() ?: "4096") },
+        outputLimit = value[11]?.toString() ?: "4096", outputLimitMode = value[12]?.toString() ?: "AUTO",
+        contextLimitMode = value[13]?.toString() ?: "AUTO",
+        contextWindowValue = value[14]?.toString() ?: "") },
 )
 
 private fun thirdPartyNoticeError(failure: Throwable, chinese: Boolean): String {

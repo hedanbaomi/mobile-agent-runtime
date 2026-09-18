@@ -25,6 +25,9 @@ import runtime.mobileagent.agent.toDiffPartOrNull
 import runtime.mobileagent.agent.toMessagePartOrNull
 import runtime.mobileagent.agent.toSafeErrorPart
 import runtime.mobileagent.agent.toolResultUserMessage
+import runtime.mobileagent.domain.validateOutputCapLayers
+import runtime.mobileagent.domain.contextWindowTarget
+import runtime.mobileagent.domain.resolveEffectiveOutputCap
 import runtime.mobileagent.domain.*
 import runtime.mobileagent.diagnostics.DiagnosticApprovalState
 import runtime.mobileagent.diagnostics.DiagnosticAuthority
@@ -397,8 +400,21 @@ class ChatViewModel(
             // may cancel/terminalize the run through the RunCoordinator.
             val runOwnerKey = "chat:$conversationId"
             val createdAt = Utc.nowIso()
+            // The Run's own model.invoke fee authorization: the user's per-run number
+            // (Agent policy), clamped to what the approved package scopes allow.  An
+            // approved install grant alone is not a Run permission.
+            val approvedModelCeilings = binding.snapshot.skillIds.mapNotNull { installId ->
+                container.skills.grantsFor(installId)
+                    .firstOrNull { !it.revoked && "model.invoke" in it.capabilities }?.maxModelTokens
+            }
+            val runModelTokens = modelInvokeRunTokens(contextPolicy.pythonModelRunTokens, approvedModelCeilings)
             var record = RunRecord(run.runId, run.snapshotId, conversationId, createdAt = createdAt, startedAt = createdAt,
-                budgetJson = "{\"maxModelRounds\":${run.budget.maxModelRounds},\"maxToolCalls\":20,\"maxRuntimeMs\":180000,\"maxModelRoundsPerSegment\":${contextPolicy.maxModelRoundsPerSegment},\"maxCompactionsPerRun\":${contextPolicy.maxCompactionsPerRun}}")
+                budgetJson = runBudgetJson(
+                    maxModelRounds = run.budget.maxModelRounds,
+                    maxModelRoundsPerSegment = contextPolicy.maxModelRoundsPerSegment,
+                    maxCompactionsPerRun = contextPolicy.maxCompactionsPerRun,
+                    modelInvokeTokens = runModelTokens,
+                ))
             var secret: CharArray? = null
             val compactionUsage = RunCompactionUsage()
             var assistantId: String? = null
@@ -486,7 +502,15 @@ class ChatViewModel(
                 }
                 val policy = Json.parseToJsonElement(binding.snapshot.contextPolicyJson).jsonObject
                 fun limit(key: String, default: Int, max: Int) = (policy[key]?.jsonPrimitive?.intOrNull ?: default).coerceIn(1, max.coerceAtLeast(1))
-                val inputBudget = contextPolicy.inputLimit(model.contextLimit, model.outputLimit).toInt()
+                // AUTO resolves against the frozen target; unknown stays unknown and the policy
+                // Reject an invalid raw advanced value before anything is dispatched.
+                validateOutputCapLayers(model.parametersJson, binding.snapshot.parameterOverridesJson)?.let {
+                    error("高级输出上限参数无效：$it")
+                }
+                val outputDecision = resolveEffectiveOutputCap(model.outputLimitMode, model.outputLimit, model.parametersJson, binding.snapshot.parameterOverridesJson)
+                val windowTarget = contextWindowTarget(model.providerId, provider.baseUrl, model.modelId)
+                val contextWindow = model.resolvedContextWindow(windowTarget)
+                val inputBudget = contextPolicy.inputLimit(contextWindow, outputDecision.value).toInt()
                 val hits = RetrievalBudget.clip(result.hits, limit("knowledgeTokenBudget", 3000, inputBudget))
                 val bound = CitationMap.bind(run.runId, hits).map { it.copy(citationId = run.runId + "-" + it.citationId) }
                 bound.zip(hits).forEach { (citation, hit) -> citations[citation.citationId] = citation to hit.text }
@@ -773,7 +797,20 @@ class ChatViewModel(
                 val headers = mutableMapOf<String, RequestHeaderValue>()
                 provider.nonSecretHeaders.forEach { (name, value) -> headers[name] = RequestHeaderValue.Plain(value) }
                 provider.headerSecretRefs.forEach { (name, ref) -> headers[name] = RequestHeaderValue.SecretRef(ref) }
-                val layers = ParameterLayers(adapterDefaults = mapOf("max_tokens" to JsonPrimitive(model.outputLimit)),
+                // AUTO must not inject any output field: the adapter itself adds a protocol-specific
+                // cap only when outputTokenLimit is set, so an empty default map is what makes
+                // "follow the provider" real on the wire.
+                val outputCap = outputDecision.value
+                // An explicit advanced-parameter cap is the user's own override: the app
+                // must not add a second alias for the same protocol, which the adapter
+                // would reject as a conflict.  Only the injected default is suppressed;
+                // the user's value still flows through the parameter merge.
+                val advancedOverride = hasAdvancedOutputLimitOverride(
+                    model.parametersJson,
+                    binding.snapshot.parameterOverridesJson,
+                )
+                val sendCap = outputDecision.value
+                val layers = ParameterLayers(adapterDefaults = if (outputDecision.isAdvancedOverride) emptyMap() else sendCap?.let { mapOf("max_tokens" to JsonPrimitive(it)) } ?: emptyMap(),
                     modelParameters = Json.parseToJsonElement(model.parametersJson).jsonObject,
                     agentOverrides = Json.parseToJsonElement(binding.snapshot.parameterOverridesJson).jsonObject)
                 val trackedGrantIds = preparedFacts.grants.map { it.grantId }.toSet()
@@ -830,16 +867,16 @@ class ChatViewModel(
                 val preparedRequest = ModelRequest(model.modelId, prompt.asMessages(),
                     tools = if ("tools" in model.capabilities) toolExecutor.specs.map {
                         mapOf("name" to it.name, "description" to it.description, "parameters" to it.parametersJson)
-                    } else emptyList(), parameters = layers, headers = headers, outputTokenLimit = model.outputLimit)
+                    } else emptyList(), parameters = layers, headers = headers, outputTokenLimit = sendCap,
+                    outputTokenField = if (outputDecision.isAdvancedOverride) outputDecision.key else null)
                 // The same complete adapter budgeter serves this pre-credential check and every Runtime round.
                 val preflight = adapter.estimateInput(if (contextPolicy.autoCompact) {
                     ContextPreflight.minimumRequest(prompt, runtimeContext, preparedRequest)
                 } else preparedRequest)
                 if (preflight.units > inputBudget || preflight.imageCount > contextPolicy.imageBudget) {
-                    val outputReserve = maxOf(
-                        model.outputLimit,
-                        contextPolicy.reservedOutputTokens ?: model.outputLimit,
-                    ).toLong()
+                    // Local reserve only: under AUTO this protects the context budget
+                    // without pretending to know the provider cap.
+                    val outputReserve = contextPolicy.outputReserve(sendCap)
                     throw ChatInputBudgetExceeded(
                         estimated = preflight.units,
                         limit = inputBudget.toLong(),
@@ -929,7 +966,8 @@ class ChatViewModel(
                 runtime.run(AgentRuntimeRequest(run, prompt, model.modelId, secret!!, "tools" in model.capabilities,
                     parameters = layers, headers = headers, emitRequestPreview = container.uiPreferences.getBoolean("request-inspector", true),
                     toolImages = runTools::toolImages, maxInputBudgetUnits = inputBudget.toLong(),
-                    outputTokenLimit = model.outputLimit,
+                    outputTokenLimit = sendCap,
+                    outputTokenField = if (outputDecision.isAdvancedOverride) outputDecision.key else null,
                     maxImagesPerRequest = contextPolicy.imageBudget,
                     context = runtimeContext,
                     beforeModelRequest = {

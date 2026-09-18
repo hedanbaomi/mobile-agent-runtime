@@ -33,6 +33,8 @@ import runtime.mobileagent.domain.AppError
 import runtime.mobileagent.domain.AppException
 import runtime.mobileagent.domain.ErrorCode
 import runtime.mobileagent.domain.ModelProfile
+import runtime.mobileagent.domain.ContextLimitMode
+import runtime.mobileagent.domain.OutputLimitMode
 import runtime.mobileagent.domain.PromptRevision
 import runtime.mobileagent.domain.RetryClass
 import runtime.mobileagent.domain.Message
@@ -864,8 +866,9 @@ class TransferRepository(
         }
         if (db.query("SELECT id FROM provider_profiles WHERE id=?", listOf(model.providerId)).isEmpty()) throw invalid("Model references missing provider ${model.providerId}")
         db.execute(
-            "INSERT INTO model_profiles(id,provider_id,role,model_id,capabilities,parameter_schema_json,parameters_json,context_limit,output_limit,revision) VALUES(?,?,?,?,?,?,?,?,?,?)",
-            listOf(model.id, model.providerId, model.role.name, model.modelId, json.encodeToString(model.capabilities.toList().sorted()), model.parameterSchemaJson, model.parametersJson, model.contextLimit, model.outputLimit, model.revision),
+            "INSERT INTO model_profiles(id,provider_id,role,model_id,capabilities,parameter_schema_json,parameters_json,context_limit,output_limit,revision,output_limit_mode,context_limit_mode,context_window_value,context_window_source,context_window_target,context_window_checked_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            listOf(model.id, model.providerId, model.role.name, model.modelId, json.encodeToString(model.capabilities.toList().sorted()), model.parameterSchemaJson, model.parametersJson, model.contextLimit, model.outputLimit, model.revision, model.outputLimitMode.name,
+                model.contextLimitMode.name, model.contextWindowValue, model.contextWindowSource.name, model.contextWindowTarget, model.contextWindowCheckedAt),
         )
     }
 
@@ -1297,7 +1300,13 @@ class TransferRepository(
         row.string("provider_id") == model.providerId && row.string("role") == model.role.name && row.string("model_id") == model.modelId &&
             decodeStrings(row.string("capabilities")) == model.capabilities && row.string("parameter_schema_json") == model.parameterSchemaJson &&
             row.string("parameters_json").ifBlank { "{}" } == model.parametersJson && row.long("context_limit").toInt() == model.contextLimit &&
-            row.long("output_limit").toInt() == model.outputLimit && row.long("revision").toInt() == model.revision
+            row.long("output_limit").toInt() == model.outputLimit && row.long("revision").toInt() == model.revision &&
+            runCatching { OutputLimitMode.valueOf(row.string("output_limit_mode").trim().uppercase()) }
+                .getOrDefault(OutputLimitMode.MANUAL) == model.outputLimitMode &&
+            runCatching { ContextLimitMode.valueOf(row.string("context_limit_mode").trim().uppercase()) }
+                .getOrDefault(ContextLimitMode.MANUAL) == model.contextLimitMode &&
+            row.longOrNull("context_window_value")?.toInt() == model.contextWindowValue &&
+            row.string("context_window_target").ifBlank { null } == model.contextWindowTarget
 
     private fun decodeStrings(raw: String): Set<String> = runCatching { json.decodeFromString<List<String>>(raw.ifBlank { "[]" }).toSet() }.getOrDefault(emptySet())
 

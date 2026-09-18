@@ -15,7 +15,10 @@ import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import runtime.mobileagent.data.ProfileRepository
+import runtime.mobileagent.domain.validateOutputCapLayers
+import runtime.mobileagent.domain.resolveEffectiveOutputCap
 import runtime.mobileagent.domain.ModelProfile
+import runtime.mobileagent.domain.hasAdvancedOutputLimitOverride
 import runtime.mobileagent.domain.ProviderProfile
 import runtime.mobileagent.domain.acceptsImages
 import runtime.mobileagent.knowledge.VisionBackend
@@ -54,7 +57,7 @@ fun visionProfileBinding(provider: ProviderProfile, model: ModelProfile): Vision
         configurationHash = sha256Hex(visionConfigurationIdentity(provider, model).toByteArray(Charsets.UTF_8)),
     )
 
-private fun visionConfigurationIdentity(provider: ProviderProfile, model: ModelProfile): String = canonicalParts(
+internal fun visionConfigurationIdentity(provider: ProviderProfile, model: ModelProfile): String = canonicalParts(
     provider.apiFormat.name,
     provider.baseUrl.trimEnd('/'),
     canonicalMap(provider.nonSecretHeaders),
@@ -65,7 +68,11 @@ private fun visionConfigurationIdentity(provider: ProviderProfile, model: ModelP
     canonicalJson(model.parametersJson),
     canonicalJson(model.parameterSchemaJson),
     model.contextLimit.toString(),
-    model.outputLimit.toString(),
+    // MANUAL keeps the legacy decimal slot byte-for-byte so existing Vision
+    // fingerprints (and their paid page caches) stay valid.  AUTO uses an
+    // explicit marker, so a mode switch is a real target change instead of
+    // silently reusing results produced under a different setting.
+    model.effectiveOutputTokenLimit()?.toString() ?: "auto",
     canonicalParts(*model.capabilities.sorted().toTypedArray()),
     canonicalParts(*model.endpoint.operations.map { it.name }.sorted().toTypedArray()),
     canonicalParts(*model.endpoint.inputModalities.map { it.name }.sorted().toTypedArray()),
@@ -156,7 +163,10 @@ class OpenAiCompatibleVision(
                         "endpoint" to text(safeEndpoint), "apiFormat" to text(provider.apiFormat.name),
                         "modelProfileId" to text(model.id), "modelId" to text(model.modelId), "role" to text(model.role.name),
                         "providerRevision" to JsonPrimitive(provider.revision), "modelRevision" to JsonPrimitive(model.revision),
-                        "contextLimit" to JsonPrimitive(model.contextLimit), "outputLimit" to JsonPrimitive(model.outputLimit),
+                        "contextLimit" to JsonPrimitive(model.contextLimit),
+                        // MANUAL keeps the legacy numeric field so an existing profile hash is
+                        // unchanged; AUTO adds an explicit marker instead of a fabricated cap.
+                        "outputLimit" to (model.effectiveOutputTokenLimit()?.let { JsonPrimitive(it) } ?: text("provider-default")),
                         "capabilities" to JsonArray(model.capabilities.sorted().map(::text)),
                     )).toString()
                     emitDiagnostic(input, latest.copy(stage = "TARGET_CONFIGURATION", contentKind = "target.configuration.json",
@@ -184,7 +194,13 @@ class OpenAiCompatibleVision(
                 val diagnostics = object : ModelDiagnosticSink {
                     override val captureContent: Boolean = input.captureDiagnosticContent
                     override fun record(event: ModelDiagnosticEvent) {
-                        val mapped = event.toVisionDiagnostic(input)
+                        val mapped = event.toVisionDiagnostic(input).let { next ->
+                            next.copy(
+                                inputTokens = next.inputTokens ?: latest.inputTokens,
+                                outputTokens = next.outputTokens ?: latest.outputTokens,
+                                reasoningTokens = next.reasoningTokens ?: latest.reasoningTokens,
+                            )
+                        }
                         latest = if (event.stage == ModelDiagnosticStage.TERMINAL) {
                             mapped.copy(stage = latest.stage ?: mapped.stage)
                         } else {
@@ -193,6 +209,13 @@ class OpenAiCompatibleVision(
                         emitDiagnostic(input, latest)
                     }
                 }
+                if (validateOutputCapLayers(model.parametersJson) != null) {
+                    return@runBlocking failed(input, latest, started, "INVALID_CONFIG")
+                }
+                val visionOutputDecision = resolveEffectiveOutputCap(
+                    model.outputLimitMode, model.outputLimit, model.parametersJson,
+                )
+                val visionSendCap = visionOutputDecision.value
                 val request = ModelRequest(
                     modelId = model.modelId,
                     messages = listOf(
@@ -208,14 +231,20 @@ class OpenAiCompatibleVision(
                             ),
                         ),
                     ),
+                    // The profile cap is the wrapper's default; an explicit advanced
+                    // override (e.g. a protocol-native max_output_tokens) replaces it
+                    // instead of being merged alongside it and rejected as a conflict.
                     stream = false,
                     parameters = ParameterLayers(
-                        adapterDefaults = mapOf("max_tokens" to JsonPrimitive(model.outputLimit)),
+                        // AUTO sends no output field at all; the adapter adds the
+                        // protocol-specific cap only when outputTokenLimit is set.
+                        adapterDefaults = if (visionOutputDecision.isAdvancedOverride) emptyMap() else visionSendCap?.let { mapOf("max_tokens" to JsonPrimitive(it)) } ?: emptyMap(),
                         modelParameters = Json.parseToJsonElement(model.parametersJson).jsonObject,
                     ),
                     headers = headers,
                     operationId = input.requestId.ifBlank { "vision-${input.assetHash.take(24)}" },
-                    outputTokenLimit = model.outputLimit,
+                    outputTokenLimit = visionSendCap,
+                    outputTokenField = if (visionOutputDecision.isAdvancedOverride) visionOutputDecision.key else null,
                     diagnostics = diagnostics,
                     beforeDispatch = {
                         val repositoryAllowsDispatch = input.beforeDispatch()
@@ -234,6 +263,11 @@ class OpenAiCompatibleVision(
                             require(content.length <= MAX_VISION_RESPONSE_CHARS) { "Vision response exceeds limit" }
                         }
                         ModelEvent.Completed -> completed = true
+                        is ModelEvent.Usage -> latest = latest.copy(
+                            inputTokens = event.reportedInputTokens,
+                            outputTokens = event.reportedOutputTokens,
+                            reasoningTokens = event.reasoningTokens,
+                        )
                         is ModelEvent.Failed -> failure = event.sanitizedMessage
                         is ModelEvent.ToolCallDelta, is ModelEvent.ToolApprovalRequired -> failure = "VISION_UNEXPECTED_TOOL_REQUEST"
                         else -> Unit
@@ -275,8 +309,7 @@ class OpenAiCompatibleVision(
                 if (result.type.isBlank() || listOf(result.ocrText, result.semanticDescription, result.tableMarkdown).all { it.isBlank() }) {
                     failed(input, latest, started, "VISION_EMPTY_RESULT")
                 } else {
-                    terminal(input, latest, started, null)
-                    VisionOutcome.Success(result)
+                    VisionOutcome.Success(result, terminal(input, latest, started, null))
                 }
             } catch (cancel: CancellationException) {
                 throw cancel
@@ -358,6 +391,7 @@ class OpenAiCompatibleVision(
             finishReason = finishReason,
             inputTokens = inputTokens,
             outputTokens = outputTokens,
+            reasoningTokens = reasoningTokens,
             requestId = input.requestId,
             attempt = input.attempt,
             assetHash = input.assetHash,
@@ -388,6 +422,12 @@ class OpenAiCompatibleVision(
             "RATE_LIMITED",
             "NETWORK_UNAVAILABLE",
             "CONTEXT_OVERFLOW",
+            // Output-budget outcomes are decided provider facts: they must reach
+            // the import state as Failed with their real cause instead of the
+            // blanket UnknownOutcome that forbids automatic retry and hides it.
+            "INPUT_OVERFLOW",
+            "OUTPUT_TRUNCATED",
+            "REASONING_EXHAUSTED",
             "RESOURCE_LIMIT",
             "INVALID_RESPONSE",
             "PROVIDER_REJECTED",

@@ -16,6 +16,13 @@ import kotlinx.serialization.json.JsonObject
 import runtime.mobileagent.domain.ApiFormat
 import runtime.mobileagent.domain.EntityId
 import runtime.mobileagent.domain.ModelProfile
+import runtime.mobileagent.domain.BudgetValidationError
+import runtime.mobileagent.domain.ContextLimitMode
+import runtime.mobileagent.domain.validateBudgetSelection
+import runtime.mobileagent.domain.ContextLimitSource
+import runtime.mobileagent.domain.OutputLimitMode
+import runtime.mobileagent.domain.Utc
+import runtime.mobileagent.domain.contextWindowTarget
 import runtime.mobileagent.domain.ModelRole
 import runtime.mobileagent.domain.ProviderDestinationBinding
 import runtime.mobileagent.domain.ProviderProfile
@@ -36,6 +43,7 @@ import runtime.mobileagent.provider.CapabilityProbeStatus
 import runtime.mobileagent.provider.CapabilityReport
 import runtime.mobileagent.provider.HeaderSecretResolver
 import runtime.mobileagent.provider.ModelAdapter
+import runtime.mobileagent.provider.ContextWindowProducer
 import runtime.mobileagent.provider.openai.OpenAiAdapterFactory
 import runtime.mobileagent.provider.ProviderConnectionErrorCode
 import runtime.mobileagent.provider.ProviderConnectionResult
@@ -60,7 +68,14 @@ data class ProviderDraft(
     // malformed input must reach save validation instead of falling back to a
     // previous persisted value.
     val contextLimit: String = "32768",
+    // Suggested manual value; ignored while the mode is AUTO.
     val outputLimit: String = "4096",
+    /** New profiles follow the provider unless the user switches to manual. */
+    val outputLimitMode: OutputLimitMode = OutputLimitMode.AUTO,
+    /** New profiles try the upstream context window first. */
+    val contextLimitMode: ContextLimitMode = ContextLimitMode.AUTO,
+    /** Optional externally known window (provider docs) recorded as USER_DECLARED. */
+    val contextWindowValue: String = "",
 )
 
 fun interface ProviderAdapterFactory {
@@ -100,6 +115,9 @@ class ProvidersViewModel @JvmOverloads constructor(
         saveDraft(ProviderDraft(
             name = name, baseUrl = baseUrl, modelId = modelId, apiKey = apiKey,
             capabilities = buildSet { add("stream"); if (vision) add("image"); if (tools) add("tools") },
+            // Legacy convenience entry point keeps its historical contract: an
+            // explicit 4096 manual cap.  The editor path defaults to AUTO.
+            outputLimitMode = OutputLimitMode.MANUAL,
         ))
 
     fun saveDraft(draft: ProviderDraft): Boolean {
@@ -134,13 +152,48 @@ class ProvidersViewModel @JvmOverloads constructor(
             var modelPrevious: ModelProfile? = null
             var contextLimit = 0
             var outputLimit = 0
+            var declaredWindow: Int? = null
             if (saveModel) {
                 require(draft.modelId.isNotBlank()) { "请填写模型 ID。" }
-                contextLimit = parsePositiveProviderBudget(draft.contextLimit)
-                    ?: error("上下文预算必须是正整数。")
-                outputLimit = parsePositiveProviderBudget(draft.outputLimit)
-                    ?: error("输出预算必须是正整数。")
-                require(outputLimit <= contextLimit) { "输出预算不能超过上下文预算。" }
+                // Validation follows the selected mode and the sources the user can
+                // actually see: a hidden legacy number must never decide the result.
+                val manualWindow = parsePositiveProviderBudget(draft.contextLimit)
+                val declaredWindowRaw = if (draft.contextLimitMode == ContextLimitMode.AUTO) {
+                    draft.contextWindowValue.trim().takeIf { it.isNotEmpty() }?.let {
+                        parsePositiveProviderBudget(it)
+                    }
+                } else {
+                    null
+                }
+                when (validateBudgetSelection(
+                    manualContext = manualWindow,
+                    manualOutput = parsePositiveProviderBudget(draft.outputLimit),
+                    contextMode = draft.contextLimitMode,
+                    outputMode = draft.outputLimitMode,
+                    declaredWindow = declaredWindowRaw,
+                    declaredWindowRawFilled = draft.contextLimitMode == ContextLimitMode.AUTO && draft.contextWindowValue.isNotBlank(),
+                )) {
+                    BudgetValidationError.MANUAL_CONTEXT_REQUIRED -> error("手动上下文窗口必须是正整数。")
+                    BudgetValidationError.DECLARED_WINDOW_INVALID -> error("已知上下文窗口必须是正整数。")
+                    BudgetValidationError.MANUAL_OUTPUT_REQUIRED -> error("手动输出预算必须是正整数。")
+                    BudgetValidationError.OUTPUT_EXCEEDS_WINDOW -> error("输出预算不能超过已知的上下文窗口。")
+                    null -> Unit
+                }
+                // Persisted values: MANUAL keeps its number, AUTO stores 0 for the
+                // ignored numeric columns (the mode is the source of truth).
+                contextLimit = manualWindow ?: 0
+                outputLimit = if (draft.outputLimitMode == OutputLimitMode.MANUAL) {
+                    parsePositiveProviderBudget(draft.outputLimit) ?: 0
+                } else {
+                    0
+                }
+                declaredWindow = if (draft.contextLimitMode == ContextLimitMode.AUTO) {
+                    draft.contextWindowValue.trim().takeIf { it.isNotEmpty() }?.let {
+                        parsePositiveProviderBudget(it) ?: error("已知上下文窗口必须是正整数。")
+                    }
+                } else {
+                    null
+                }
                 val parsed = Json.parseToJsonElement(draft.parametersJson)
                 require(parsed is JsonObject) { "模型参数必须是 JSON 对象。" }
                 rejectReserved(parsed)
@@ -155,11 +208,20 @@ class ProvidersViewModel @JvmOverloads constructor(
                 nonSecretHeaders = previous?.nonSecretHeaders.orEmpty(),
                 revision = (previous?.revision ?: 0) + 1,
             )
+            val windowFact = ContextWindowProducer().userDeclared(
+                contextWindowTarget(providerId, endpoint.toASCIIString(), draft.modelId.trim()), declaredWindow,
+            )
             val model = if (saveModel) ModelProfile(
                 id = modelPrevious?.id ?: EntityId.random().value, providerId = providerId,
                 role = draft.role, modelId = draft.modelId.trim(), capabilities = draft.capabilities,
                 parameterSchemaJson = modelPrevious?.parameterSchemaJson ?: "{}",
                 parametersJson = parameters.toString(), contextLimit = contextLimit, outputLimit = outputLimit,
+                outputLimitMode = draft.outputLimitMode,
+                contextLimitMode = draft.contextLimitMode,
+                contextWindowValue = windowFact.value,
+                contextWindowSource = windowFact.source,
+                contextWindowTarget = windowFact.target,
+                contextWindowCheckedAt = windowFact.checkedAt,
                 revision = (modelPrevious?.revision ?: 0) + 1,
             ).withEndpoint() else null
             app.container.db.transaction {

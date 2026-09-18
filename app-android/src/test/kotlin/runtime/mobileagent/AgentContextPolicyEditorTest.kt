@@ -139,7 +139,7 @@ class AgentContextPolicyEditorTest {
         assertTrue(parameterLikeKeys.none { it in parsed.keys && it in visiblePolicyKeys })
         // The merge only writes the context-policy keys it owns.
         assertTrue(parsed.keys.all { it in visiblePolicyKeys || it in parameterLikeKeys })
-        assertTrue((visiblePolicyKeys - "maxInputTokens").all { it in parsed.keys })
+        assertTrue((visiblePolicyKeys - setOf("maxInputTokens", "pythonModelRunTokens")).all { it in parsed.keys })
         assertFalse("maxInputTokens" in parsed.keys, "blank optional budget is omitted")
     }
 
@@ -153,6 +153,31 @@ class AgentContextPolicyEditorTest {
         assertTrue(draft.copy(maxInputTokens = "4000").summary(zh = true).contains("4000"))
     }
 
+    /**
+     * The Run fee authorization is an editable policy field: a blank value keeps
+     * the key out entirely (no authorization), a number is persisted and read
+     * back, and a malformed value is rejected instead of being guessed.
+     */
+    @Test
+    fun theRunFeeAuthorizationIsEditableAndBlankMeansNotAuthorized() {
+        val omitted = AgentContextPolicyDraftUi().toCanonicalJson("{}")
+        assertFalse("pythonModelRunTokens" in Json.parseToJsonElement(omitted).jsonObject.keys)
+        assertNull(AgentContextPolicy.fromJson(omitted).pythonModelRunTokens)
+
+        val authorized = AgentContextPolicyDraftUi(pythonModelRunTokens = "65536")
+        val stored = authorized.toCanonicalJson("{}")
+        assertEquals(65536, Json.parseToJsonElement(stored).jsonObject["pythonModelRunTokens"]!!.jsonPrimitive.int)
+        assertEquals(65536, AgentContextPolicy.fromJson(stored).pythonModelRunTokens)
+        assertEquals("65536", AgentContextPolicyDraftUi.fromJson(stored).pythonModelRunTokens)
+
+        assertThrows<IllegalArgumentException> { AgentContextPolicyDraftUi(pythonModelRunTokens = "abc").toCanonicalJson("{}") }
+        assertThrows<IllegalArgumentException> { AgentContextPolicyDraftUi(pythonModelRunTokens = "0").toCanonicalJson("{}") }
+        // A blank field must remove a previously stored authorization.
+        val cleared = AgentContextPolicyDraftUi().toCanonicalJson(stored)
+        assertFalse("pythonModelRunTokens" in Json.parseToJsonElement(cleared).jsonObject.keys)
+        assertTrue(authorized.summary(zh = true).contains("65536"))
+    }
+
     private companion object {
         val visiblePolicyKeys = setOf(
             "autoCompact",
@@ -161,6 +186,7 @@ class AgentContextPolicyEditorTest {
             "maxHistoryTurns",
             "maxModelRoundsPerSegment",
             "maxModelRequestsPerRun",
+            "pythonModelRunTokens",
             "keepRecentTurns",
             "softLimitPercent",
             "targetPercent",

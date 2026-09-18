@@ -1499,13 +1499,24 @@ private fun KnowledgeRoute(vm: runtime.mobileagent.KnowledgeViewModel, chinese: 
     }
 }
 
+/**
+ * The declared scope the real grant confirmation shows for [capability].
+ *
+ * The detail projection already carries the approved model scope, so the
+ * confirmation dialog and the install preview cannot disagree about what the
+ * user is about to grant.  Shared here so a device test can assert the exact
+ * value the dialog receives.
+ */
+internal fun skillPermissionScope(detail: runtime.mobileagent.feature.skills.SkillDetailUi?, capability: String): String =
+    detail?.permissions?.firstOrNull { it.capability == capability }?.scope.orEmpty()
+
 @Composable
 private fun SkillsRoute(entry: NavBackStackEntry, chinese: Boolean) {
     val vm: runtime.mobileagent.SkillsViewModel = viewModel(viewModelStoreOwner = entry)
     val state = vm.state.value.copy(language = if (chinese) "zh-CN" else "en-US")
     val request = vm.permissionRequest.value
     val capability = request?.second.orEmpty()
-    val scope = state.detail?.permissions?.firstOrNull { it.capability == capability }?.scope.orEmpty()
+    val scope = skillPermissionScope(state.detail, capability)
     val knowledgeScope = capability in setOf("knowledge.search", "knowledge.read", "document.read")
     val actions = runtime.mobileagent.feature.skills.SkillsActions(
         onImport = vm::importUris, onQuery = vm::query, onFilter = vm::filter, onOpenDetail = vm::openDetail,

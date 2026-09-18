@@ -171,7 +171,16 @@ class SkillsViewModel(
                             skill.enabled, skill.license, skill.reasons, skill.packageHash, inspection.installable),
                         preview = skill.skillMarkdown.orEmpty(), manifestJson = inspection.rawManifestJson.orEmpty(),
                         permissions = inspection.manifest?.permissionSpecs.orEmpty().map { spec ->
-                            SkillPermissionUi(spec.capability, scopeLabel(spec.knowledgeBaseIds, spec.hosts, spec.methods), spec.capability in caps)
+                            // The detail feeds the real grant confirmation dialog, so it must
+                            // carry the same scope the approval will store.
+                            SkillPermissionUi(
+                                spec.capability,
+                                scopeLabel(
+                                    spec.knowledgeBaseIds, spec.hosts, spec.methods,
+                                    spec.modelProfileIds, spec.maxModelCalls ?: 0, spec.maxModelTokens ?: 0,
+                                ),
+                                spec.capability in caps,
+                            )
                         },
                         files = inspection.files.map { SkillSourceFileUi(it, kind = "纯文本预览，不执行") },
                         binding = SkillBindingUi(

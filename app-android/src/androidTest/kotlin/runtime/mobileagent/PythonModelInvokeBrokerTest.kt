@@ -16,6 +16,7 @@ import java.util.UUID
 import java.util.zip.CRC32
 import java.util.zip.ZipEntry
 import java.util.zip.ZipOutputStream
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.jsonObject
@@ -53,6 +54,17 @@ import runtime.mobileagent.skills.ToolResult
  */
 @RunWith(AndroidJUnit4::class)
 class PythonModelInvokeBrokerTest {
+    /**
+     * Each case starts its own isolated CPython service.  Rapid back-to-back
+     * cases can race the previous service's teardown, which shows up as an
+     * execution failure unrelated to what the case asserts, so the harness
+     * waits for that boundary instead of retrying any assertion.
+     */
+    @org.junit.After
+    fun waitForTheIsolatedServiceToExit() {
+        Thread.sleep(700)
+    }
+
     private inner class Harness(
         val format: ApiFormat,
         val mode: OutputLimitMode,
@@ -66,6 +78,10 @@ class PythonModelInvokeBrokerTest {
         val requestedToolCap: Int? = null,
         /** The frozen Agent parameter-override layer for this snapshot. */
         val agentOverridesJson: String = "{}",
+        /** The prompt the Skill sends; its byte length is part of the reservation. */
+        val prompt: String = "hello",
+        /** When true the transport never answers, so a test can cancel in flight. */
+        val holdTransport: Boolean = false,
     ) {
         lateinit var hostApp: MobileAgentApp
         lateinit var container: AppContainer
@@ -80,8 +96,9 @@ class PythonModelInvokeBrokerTest {
         lateinit var executor: runtime.mobileagent.skills.ToolExecutor
         val bodies = mutableListOf<String>()
 
-        fun engine(response: String, contentType: String) = MockEngine { request ->
+        private fun engine(response: String, contentType: String) = MockEngine { request ->
             bodies += (request.body as io.ktor.http.content.TextContent).text
+            if (holdTransport) kotlinx.coroutines.delay(600_000)
             respond(response, HttpStatusCode.OK, headersOf(HttpHeaders.ContentType, contentType))
         }
 
@@ -143,7 +160,7 @@ class PythonModelInvokeBrokerTest {
                     # `model_invoke` returns the broker's own value; a denied or
                     # unavailable capability raises from the host bridge, so the
                     # failure is never silently turned into a successful answer.
-                    answer = mobileagent_sdk.model_invoke("$providerId", {${capArgument}"prompt": "hello"})
+                    answer = mobileagent_sdk.model_invoke("$providerId", {${capArgument}"prompt": "$prompt"})
                     return {"text": answer["text"]}
             """.trimIndent()
 
@@ -210,7 +227,9 @@ class PythonModelInvokeBrokerTest {
             specName = executor.specs.single { it.name.startsWith("py_") }.name
         }
 
-        fun invoke(callId: String): ToolResult = runBlocking { executor.invoke(ToolCall(callId, specName, "{}")) }
+        fun invoke(callId: String): ToolResult = runBlocking { invokeDirect(callId) }
+        suspend fun invokeDirect(callId: String): ToolResult = executor.invoke(ToolCall(callId, specName, "{}"))
+        suspend fun approveDirect(callId: String): ToolResult = executor.approve(callId)
         fun approve(callId: String): ToolResult = runBlocking { executor.approve(callId) }
         fun run(callId: String): ToolResult {
             val pending = invoke(callId)
@@ -218,6 +237,10 @@ class PythonModelInvokeBrokerTest {
             return approve(callId)
         }
         fun persistedRun(): RunRecord = container.runs.get(runId)!!
+
+        /** One sanitized row per audit event for precise assertions. */
+        fun auditRows(): List<String> = container.audits.list(runId)
+            .map { "${it.component}/${it.action}/${it.result}/${it.errorCode ?: "-"}" }
 
         /** Sanitized audit trail for the failing assertion messages. */
         fun auditTrail(): String {
@@ -297,20 +320,164 @@ class PythonModelInvokeBrokerTest {
         assertEquals("no HTTP request may leave", 0, fixture.bodies.size)
     }
 
+    /**
+     * Discriminating settlement vector: prompt 10 bytes + MANUAL cap 2048 +
+     * 256 overhead = reservation 2314.
+     *
+     * With the Run ceiling at 6000 the first call is admitted; after the
+     * provider reports 7100 the durable ledger can no longer afford a second
+     * reservation (7100 + 2314 > 6000).  If settlement were skipped the ledger
+     * would still hold the first reservation and 2314 + 2314 <= 6000 would admit
+     * the second call, so this vector genuinely distinguishes "replaced the
+     * reservation with measured usage" from "kept the reservation".
+     */
     @Test(timeout = 120_000)
-    fun aMeasuredOverrunBlocksTheNextDispatch() {
-        // Run ceiling 1_000: one call fits, its measured usage blows past it.
-        val fixture = Harness(ApiFormat.OPENAI_COMPATIBLE, OutputLimitMode.MANUAL, 512, 2, 1_000, 1_000)
-        fixture.start(chatSuccess(usageInput = 600, usageOutput = 700), "text/event-stream")
+    fun measuredUsageReplacesTheReservationBeforeTheNextAdmission() {
+        val fixture = Harness(
+            ApiFormat.OPENAI_COMPATIBLE, OutputLimitMode.MANUAL, 2048, 2, 6000, 6000,
+            prompt = "0123456789",
+        )
+        fixture.start(chatSuccess(usageInput = 4000, usageOutput = 3100), "text/event-stream")
 
         val first = fixture.run("call-overrun-1")
         assertTrue("the paid result must be preserved: $first; audit=${fixture.auditTrail()}", first is ToolResult.Value)
         assertEquals(fixture.bodies.toString(), 1, fixture.bodies.size)
 
-        // The same call cannot be replayed, and a new call cannot afford the reservation.
-        val second = fixture.invoke("call-overrun-2")
-        assertTrue("the ledger must block the next dispatch: $second", second !is ToolResult.Value)
+        // The second call must reach the real admission (invoke *and* approve) and
+        // be refused by the budget before any dispatch, with an explicit reason.
+        val second = fixture.run("call-overrun-2")
+        assertTrue(
+            "measured usage must block the next dispatch: $second; audit=${fixture.auditRows()}",
+            second !is ToolResult.Value,
+        )
+        assertTrue(
+            "the refusal must come from the shared budget: ${fixture.auditRows()}",
+            fixture.auditRows().contains("python-broker/broker/DENIED/RESOURCE_LIMIT"),
+        )
+        assertEquals("no HTTP request may leave for the refused call", 1, fixture.bodies.size)
+
+        // A duplicate terminal may disclose the cached paid result, but it must not
+        // dispatch again, and the ledger must stay spent (checked by the third call).
+        val duplicate = fixture.approve("call-overrun-1")
+        assertTrue(
+            "a duplicate terminal must not dispatch again: $duplicate",
+            duplicate == first || duplicate !is ToolResult.Value,
+        )
         assertEquals(fixture.bodies.toString(), 1, fixture.bodies.size)
+        val third = fixture.run("call-overrun-3")
+        assertTrue("the ledger must stay spent after the duplicate: $third", third !is ToolResult.Value)
+        assertEquals(fixture.bodies.toString(), 1, fixture.bodies.size)
+    }
+
+    /**
+     * The positive control for the same reservation: with a 9000 ceiling the
+     * measured 5000 leaves room (5000 + 2314 <= 9000), so the second call must
+     * succeed.  It also proves the settlement runs at most once: a second
+     * settlement would raise the ledger to 7686 and 7686 + 2314 > 9000 would
+     * refuse the second call.
+     */
+    @Test(timeout = 120_000)
+    fun sufficientBalanceAdmitsTheSecondCallAndSettlesAtMostOnce() {
+        val fixture = Harness(
+            ApiFormat.OPENAI_COMPATIBLE, OutputLimitMode.MANUAL, 2048, 2, 9000, 9000,
+            prompt = "0123456789",
+        )
+        fixture.start(chatSuccess(usageInput = 2500, usageOutput = 2500), "text/event-stream")
+
+        val first = fixture.run("call-balance-1")
+        assertTrue("expected a paid result: $first; audit=${fixture.auditTrail()}", first is ToolResult.Value)
+
+        // A duplicate terminal must not settle again: a second settlement would raise
+        // the ledger to 7686 and the 9000 ceiling would refuse the call below.
+        val duplicate = fixture.approve("call-balance-1")
+        assertTrue(
+            "a duplicate terminal must disclose the cached result without a new dispatch: $duplicate",
+            duplicate == first || duplicate !is ToolResult.Value,
+        )
+        assertEquals("the duplicate must not dispatch", 1, fixture.bodies.size)
+
+        val second = fixture.run("call-balance-2")
+        assertTrue(
+            "an affordable second call must succeed: $second; audit=${fixture.auditRows()}",
+            second is ToolResult.Value,
+        )
+        assertEquals("exactly two dispatches", 2, fixture.bodies.size)
+    }
+
+    /**
+     * A failed terminal that already carried authoritative usage must settle that
+     * usage, persist the unknown outcome and never replay the paid request.
+     */
+    @Test(timeout = 120_000)
+    fun aFailedTerminalWithAuthoritativeUsageSettlesOnceAndNeverReplays() {
+        val failed = buildString {
+            append("data: {\"choices\":[{\"delta\":{\"content\":\"partial\"}}]}\n\n")
+            append("data: {\"choices\":[],\"usage\":{\"prompt_tokens\":4000,\"completion_tokens\":3100}}\n\n")
+            append("data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"length\"}]}\n\n")
+        }
+        val fixture = Harness(
+            ApiFormat.OPENAI_COMPATIBLE, OutputLimitMode.MANUAL, 2048, 2, 6000, 6000,
+            prompt = "0123456789",
+        )
+        fixture.start(failed, "text/event-stream")
+
+        val result = fixture.run("call-failed-1")
+        assertTrue("a truncated paid response is an unknown outcome: $result", result is ToolResult.UnknownOutcome)
+        assertEquals(1, fixture.bodies.size)
+        assertEquals(
+            "exactly one unknown audit for the settled failure: ${fixture.auditRows()}",
+            1,
+            fixture.auditRows().count { it.startsWith("python-broker/invoke/UNKNOWN_OUTCOME") },
+        )
+        // The paid request is never replayed: the Run is unknown and the next call
+        // returns immediately without touching the transport.
+        assertEquals("the Run must be stopped as unknown", "UNKNOWN_OUTCOME", fixture.persistedRun().state.name)
+        // The Run is already unknown, so the next call is refused before approval.
+        val retry = fixture.invoke("call-failed-2")
+        assertTrue("an unknown outcome must not be replayed: $retry", retry is ToolResult.UnknownOutcome)
+        assertEquals("no replay dispatch", 1, fixture.bodies.size)
+    }
+
+    /**
+     * Cancelling in flight keeps the reservation (the provider never answered),
+     * stops the Run as unknown and never replays the request.
+     */
+    @Test(timeout = 120_000)
+    fun cancellationInFlightKeepsTheReservationAndNeverReplays() = runBlocking {
+        val fixture = Harness(
+            ApiFormat.OPENAI_COMPATIBLE, OutputLimitMode.MANUAL, 2048, 2, 6000, 6000,
+            prompt = "0123456789",
+            holdTransport = true,
+        )
+        fixture.start("", "text/event-stream")
+        val pending = fixture.invokeDirect("call-cancel")
+        assertTrue("expected approval, got $pending", pending == ToolResult.NeedsApproval)
+
+        var thrown: Throwable? = null
+        val job = launch {
+            thrown = runCatching { fixture.approveDirect("call-cancel") }.exceptionOrNull()
+        }
+        repeat(400) {
+            if (fixture.bodies.isEmpty()) kotlinx.coroutines.delay(25)
+        }
+        assertTrue("the request must have been dispatched", fixture.bodies.isNotEmpty())
+        job.cancel()
+        job.join()
+
+        assertTrue(
+            "cancellation must propagate: $thrown",
+            thrown is kotlinx.coroutines.CancellationException,
+        )
+        val rows = fixture.auditRows()
+        assertEquals(
+            "exactly one unknown audit after cancellation: $rows",
+            1,
+            rows.count { it.startsWith("python-broker/invoke/UNKNOWN_OUTCOME") },
+        )
+        assertEquals("the Run must stay unknown", "UNKNOWN_OUTCOME", fixture.persistedRun().state.name)
+        val retry = fixture.invoke("call-cancel-2")
+        assertTrue("a cancelled unknown outcome must not be replayed: $retry", retry is ToolResult.UnknownOutcome)
+        assertEquals("no replay dispatch", 1, fixture.bodies.size)
     }
 
     @Test(timeout = 120_000)

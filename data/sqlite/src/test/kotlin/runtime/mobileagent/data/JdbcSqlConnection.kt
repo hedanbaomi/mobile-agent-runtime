@@ -37,6 +37,9 @@ class JdbcSqlConnection(url: String = "jdbc:sqlite::memory:") : SqlConnection, A
     }
 
     override fun <T> transaction(block: () -> T): T {
+        // Match Android's enclosing transaction: an inner repository helper must not commit
+        // the outer result/attempt checkpoint independently.
+        if (!connection.autoCommit) return block()
         val prev = connection.autoCommit
         connection.autoCommit = false
         return try {

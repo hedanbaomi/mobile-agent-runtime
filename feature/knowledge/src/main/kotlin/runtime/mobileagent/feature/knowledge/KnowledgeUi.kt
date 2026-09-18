@@ -27,6 +27,7 @@ import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
@@ -51,6 +52,9 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
+import runtime.mobileagent.knowledge.PipelineProgress
+import runtime.mobileagent.knowledge.PipelineReuseSummary
+import runtime.mobileagent.knowledge.PipelinePolicy
 
 data class KnowledgeBaseUi(val id: String, val name: String, val documentCount: Int = 0, val status: String = "")
 
@@ -107,6 +111,7 @@ data class KnowledgeBatchVisionUi(
     val batchId: String,
     val selectedVisionTargetFingerprint: String? = null,
     val visionTargetSelectionInitialized: Boolean = false,
+    val reusePreview: PipelineReuseSummary? = null,
 )
 
 data class KnowledgeQueryAttemptUi(
@@ -141,6 +146,10 @@ data class KnowledgeBatchUi(
     val resumeStagingAvailable: Boolean = false,
     /** Per-item detail.  Rendered only when the user expands the overall progress card. */
     val items: List<KnowledgeBatchItemUi> = emptyList(),
+    val pipeline: PipelineProgress = PipelineProgress(),
+    val reuse: PipelineReuseSummary = PipelineReuseSummary(),
+    val reuseByTarget: Map<String, PipelineReuseSummary> = emptyMap(),
+    val policy: PipelinePolicy = PipelinePolicy(),
 )
 
 data class KnowledgeBatchItemUi(
@@ -229,7 +238,9 @@ data class KnowledgeActions(
     val onPauseBatch: (String) -> Unit = {},
     val onResumeBatch: (String) -> Unit = {},
     /** "Configure and continue": authorizes this batch against the current Vision destination. */
-    val onAuthorizeBatchVision: (String, String) -> Unit = { _, _ -> },
+    val onAuthorizeBatchVision: (String, String, Boolean) -> Unit = { _, _, _ -> },
+    val onConfigurePipeline: (String, PipelinePolicy) -> Unit = { _, _ -> },
+    val onRebuildBatchLocalChunks: (String) -> Unit = {},
 )
 
 @Composable
@@ -268,7 +279,7 @@ fun KnowledgeScreen(
     }
     var visionTargetMenu by rememberSaveable { mutableStateOf(false) }
     var batchVisionTargetMenu by rememberSaveable { mutableStateOf(false) }
-    val screenActions = actions.copy(onAuthorizeBatchVision = { id, _ -> actions.onBeginBatchVision(id) })
+    val screenActions = actions.copy(onAuthorizeBatchVision = { id, _, _ -> actions.onBeginBatchVision(id) })
     var newBaseName by remember { mutableStateOf("") }
     var newBaseDialog by remember { mutableStateOf(false) }
     var deleteBaseId by remember { mutableStateOf<String?>(null) }
@@ -653,6 +664,11 @@ fun KnowledgeScreen(
         val selectedTarget = availableTargets.firstOrNull { it.fingerprint == pending.selectedVisionTargetFingerprint }
         val selectedTargetMissing = pending.visionTargetSelectionInitialized &&
             pending.selectedVisionTargetFingerprint != null && selectedTarget == null
+        val reviewedReuse = pending.reusePreview
+        var acknowledgeDuplicateCharge by remember(batchId, pending.selectedVisionTargetFingerprint, reviewedReuse) {
+            mutableStateOf(false)
+        }
+        val needsUnknownConfirmation = (reviewedReuse?.unknown ?: 0) > 0
         AlertDialog(
             onDismissRequest = actions.onDismissBatchVision,
             title = { Text(if (zh) "确认本批次视觉处理" else "Confirm batch Vision processing") },
@@ -701,14 +717,26 @@ fun KnowledgeScreen(
                     Text(if (zh) "当前没有可处理图片的视觉模型。请先配置后返回。" else "No image-capable Vision model is configured. Configure one and return.")
                 }
                 Text(if (zh) "仅将本批次需要视觉处理的页面或图片发送到此目标。服务商可能收费；后续新增资料不在授权范围内。" else "Send only this batch's required visual pages or images to this destination. Provider charges may apply. Files added later are excluded.")
+                reviewedReuse?.let { ReuseSummaryText(it, zh) }
+                if (pending.selectedVisionTargetFingerprint != null && reviewedReuse == null) {
+                    Text(if (zh) "正在读取本地处理范围，完成后才能确认。" else "Loading the local processing scope before confirmation.")
+                }
+                if (needsUnknownConfirmation) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Checkbox(checked = acknowledgeDuplicateCharge, onCheckedChange = { acknowledgeDuplicateCharge = it })
+                        Text(if (zh) "我确认重试 UNKNOWN；旧请求可能已收费，新请求可能重复收费。" else "I approve retrying UNKNOWN: previous requests may have charged, and new requests may charge again.")
+                    }
+                }
                 if (pending.visionTargetSelectionInitialized && pending.selectedVisionTargetFingerprint == null) Text(if (zh) "请先选择可处理图片的模型，然后返回继续。" else "Choose an image-capable model before continuing.")
             } },
             confirmButton = { Button(onClick = {
                 if (pending.selectedVisionTargetFingerprint != null && !selectedTargetMissing) {
+                    actions.onAuthorizeBatchVision(batchId, pending.selectedVisionTargetFingerprint, acknowledgeDuplicateCharge)
                     actions.onDismissBatchVision()
-                    actions.onAuthorizeBatchVision(batchId, pending.selectedVisionTargetFingerprint)
                 } else actions.onConfigureVision()
-            }, enabled = !state.visionTargetsLoading && pending.visionTargetSelectionInitialized && !selectedTargetMissing) {
+            }, enabled = !state.visionTargetsLoading && pending.visionTargetSelectionInitialized && !selectedTargetMissing &&
+                (pending.selectedVisionTargetFingerprint == null ||
+                    (reviewedReuse != null && (!needsUnknownConfirmation || acknowledgeDuplicateCharge)))) {
                 Text(if (pending.selectedVisionTargetFingerprint == null) (if (zh) "配置视觉模型" else "Configure Vision model") else (if (zh) "确认并继续" else "Confirm and continue"))
             } },
             dismissButton = { TextButton(onClick = actions.onDismissBatchVision) { Text(if (zh) "取消" else "Cancel") } },
@@ -901,6 +929,25 @@ private fun StatusCard(status: String) {
 @Composable
 private fun BatchProgressCard(batch: KnowledgeBatchUi, jobs: List<KnowledgeImportJobUi>, actions: KnowledgeActions, zh: Boolean, busy: Boolean) {
     var expanded by rememberSaveable(batch.id) { mutableStateOf(false) }
+    var confirmResume by rememberSaveable(batch.id) { mutableStateOf(false) }
+    var editPolicy by rememberSaveable(batch.id) { mutableStateOf(false) }
+    if (confirmResume) AlertDialog(
+        onDismissRequest = { confirmResume = false },
+        title = { Text(if (zh) "确认恢复范围" else "Review resume scope") },
+        text = { Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            ReuseSummaryText(batch.reuse, zh)
+            Text(if (zh) "成功单元保留；UNKNOWN 不会自动重试。暂停只停止新增请求，在途请求仍可能完成并收费。取消后保留成果；重新启动仍受相同检查点约束。"
+                else "Successful units are retained; UNKNOWN is never retried automatically. Pause stops new dispatch; in-flight requests may finish and incur charges. Cancel retains results; restarting uses the same checkpoints.")
+        } },
+        confirmButton = { Button(onClick = { confirmResume = false; actions.onResumeBatch(batch.id) }) {
+            Text(if (zh) "确认继续" else "Confirm resume")
+        } },
+        dismissButton = { TextButton(onClick = { confirmResume = false }) { Text(if (zh) "返回" else "Back") } },
+    )
+    if (editPolicy) PipelinePolicyDialog(batch, zh, onDismiss = { editPolicy = false }) { policy ->
+        editPolicy = false
+        actions.onConfigurePipeline(batch.id, policy)
+    }
     val blocked = batch.blockedReason != null || batch.state.equals("BLOCKED", true)
     val paused = batch.paused || batch.state.equals("PAUSED", true)
     val percent = if (batch.totalItems > 0) batch.published * 100 / batch.totalItems else null
@@ -949,6 +996,7 @@ private fun BatchProgressCard(batch: KnowledgeBatchUi, jobs: List<KnowledgeImpor
             }
             // Honest progress: finished means published and searchable, never merely copied.
             ProgressRow(batch, percent, zh)
+            PipelineProgressText(batch.pipeline, zh)
             batch.error?.let { Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall) }
             Column(Modifier.padding(top = 8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 when {
@@ -957,14 +1005,14 @@ private fun BatchProgressCard(batch: KnowledgeBatchUi, jobs: List<KnowledgeImpor
                         TextButton(onClick = { expanded = true }) { Text(if (zh) "查看待处理资料" else "Review affected items") }
                     }
                     blocked -> {
-                        Button(onClick = { actions.onAuthorizeBatchVision(batch.id, "") }, enabled = !busy) {
+                        Button(onClick = { actions.onAuthorizeBatchVision(batch.id, "", false) }, enabled = !busy) {
                             Text(if (zh) "配置并继续" else "Configure and continue")
                         }
                         OutlinedButton(onClick = { actions.onConfigureVision() }) {
                             Text(if (zh) "配置视觉模型" else "Configure Vision model")
                         }
                     }
-                    paused || batch.resumeStagingAvailable -> Button(onClick = { actions.onResumeBatch(batch.id) }, enabled = !busy) {
+                    paused || batch.resumeStagingAvailable -> Button(onClick = { confirmResume = true }, enabled = !busy) {
                         Text(if (zh) "继续导入" else "Resume import")
                     }
                     batch.state.uppercase() !in setOf("COMPLETED", "CANCELLED", "FAILED") ->
@@ -980,6 +1028,19 @@ private fun BatchProgressCard(batch: KnowledgeBatchUi, jobs: List<KnowledgeImpor
                 }
             }
             if (expanded) {
+            ReuseSummaryText(batch.reuse, zh)
+            if (batch.reuse.localRebuild > 0 && batch.reuse.newRequests == 0 && batch.reuse.unknown == 0 && batch.reuse.unplannedFiles == 0) {
+                OutlinedButton(onClick = { actions.onRebuildBatchLocalChunks(batch.id) }, enabled = !busy) {
+                    Text(if (zh) "仅本地重建检索片段" else "Rebuild retrieval chunks locally")
+                }
+            }
+            Text(if (zh) "最大并发 1 · 连续失败停止阈值 ${batch.policy.consecutiveFailureLimit}" else "Concurrency 1 · Stop after ${batch.policy.consecutiveFailureLimit} consecutive failures")
+            TextButton(onClick = { editPolicy = true }, enabled = !busy) {
+                Text(if (zh) "处理限制" else "Processing limits")
+            }
+            TextButton(onClick = { actions.onAuthorizeBatchVision(batch.id, "", false) }, enabled = !busy) {
+                Text(if (zh) "查看更换视觉配置的影响" else "Review Vision configuration change")
+            }
             Text(
                 if (zh) {
                     "已复制 ${batch.copied} / ${batch.totalItems} · 待复制 ${batch.pending} · 处理中 ${batch.processing} · 等待 ${batch.waiting} · 失败 ${batch.failed}" +
@@ -1015,6 +1076,47 @@ private fun BatchProgressCard(batch: KnowledgeBatchUi, jobs: List<KnowledgeImpor
             }
         }
     }
+}
+
+@Composable
+private fun PipelineProgressText(progress: PipelineProgress, zh: Boolean) {
+    Text(if (zh) "页面 ${progress.pages} · 处理单元 ${progress.units}" else "Pages ${progress.pages} · Processing units ${progress.units}", style = MaterialTheme.typography.bodySmall)
+    Text(if (zh) "待处理 ${progress.pending} · 在途 ${progress.inFlight} · 成功 ${progress.succeeded} · 失败 ${progress.failed} · UNKNOWN ${progress.unknown} · 已索引 ${progress.published}"
+        else "Pending ${progress.pending} · In flight ${progress.inFlight} · Succeeded ${progress.succeeded} · Failed ${progress.failed} · UNKNOWN ${progress.unknown} · Indexed ${progress.published}", style = MaterialTheme.typography.bodySmall)
+    val usage = progress.usage
+    Text(if (zh) "Provider token：输入 ${usage.inputTokens ?: "未知"} · 输出 ${usage.outputTokens ?: "未知"} · reasoning ${usage.reasoningTokens ?: "未知"}（包含在输出中）"
+        else "Provider tokens: input ${usage.inputTokens ?: "unknown"} · output ${usage.outputTokens ?: "unknown"} · reasoning ${usage.reasoningTokens ?: "unknown"} (included in output)", style = MaterialTheme.typography.bodySmall)
+    Text(if (zh) "usage 未知请求 ${usage.unknownUsageAttempts} · 安全预留 ${usage.reservedTokens}（不是实际收费）"
+        else "Unknown usage attempts ${usage.unknownUsageAttempts} · Safety reservation ${usage.reservedTokens} (not actual charges)", style = MaterialTheme.typography.bodySmall)
+}
+
+@Composable
+private fun ReuseSummaryText(summary: PipelineReuseSummary, zh: Boolean) {
+    Text(if (zh) "可直接复用 ${summary.directReuse} · 仅本地重建 ${summary.localRebuild} · 新增 Provider 请求 ${summary.newRequests} · UNKNOWN 待确认 ${summary.unknown}"
+        else "Reuse ${summary.directReuse} · Local rebuild ${summary.localRebuild} · New Provider requests ${summary.newRequests} · UNKNOWN needs confirmation ${summary.unknown}", style = MaterialTheme.typography.bodySmall)
+    if (summary.unplannedFiles > 0) Text(if (zh) "尚未规划/旧文件 ${summary.unplannedFiles}：计划完成后才能确定请求数。" else "Unplanned/legacy files ${summary.unplannedFiles}: request count is not yet known.", style = MaterialTheme.typography.bodySmall)
+}
+
+@Composable
+private fun PipelinePolicyDialog(batch: KnowledgeBatchUi, zh: Boolean, onDismiss: () -> Unit, onSave: (PipelinePolicy) -> Unit) {
+    var failures by remember { mutableStateOf(batch.policy.consecutiveFailureLimit.toString()) }
+    var ceiling by remember { mutableStateOf(batch.policy.tokenDispatchCeiling?.toString().orEmpty()) }
+    var reservation by remember { mutableStateOf(batch.policy.reservationTokensPerRequest?.toString().orEmpty()) }
+    val valid = failures.toIntOrNull()?.let { it > 0 } == true &&
+        (ceiling.isBlank() || ceiling.toLongOrNull()?.let { it > 0 } == true) &&
+        (reservation.isBlank() || reservation.toLongOrNull()?.let { it > 0 } == true) &&
+        (ceiling.isBlank() || reservation.isNotBlank())
+    AlertDialog(onDismissRequest = onDismiss,
+        title = { Text(if (zh) "处理限制" else "Processing limits") },
+        text = { Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text(if (zh) "最大并发：1。达到限制只停止新请求；UNKNOWN 保留安全预算。" else "Maximum concurrency: 1. Limits stop new dispatch only; UNKNOWN retains its safety reservation.")
+            OutlinedTextField(failures, { failures = it }, label = { Text(if (zh) "连续失败阈值" else "Consecutive failure limit") }, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number))
+            OutlinedTextField(ceiling, { ceiling = it }, label = { Text(if (zh) "批次 token 派发上限（可留空）" else "Token dispatch ceiling (optional)") }, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number))
+            OutlinedTextField(reservation, { reservation = it }, label = { Text(if (zh) "每请求保守预留" else "Conservative reservation per request") }, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number))
+            Text(if (zh) "预留用于限制后续派发，不是 Provider 实际 token 或货币费用。" else "Reservations limit subsequent dispatch; they are not provider usage or currency charges.")
+        } },
+        confirmButton = { Button(enabled = valid, onClick = { onSave(PipelinePolicy(consecutiveFailureLimit = failures.toInt(), tokenDispatchCeiling = ceiling.toLongOrNull(), reservationTokensPerRequest = reservation.toLongOrNull())) }) { Text(if (zh) "保存" else "Save") } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text(if (zh) "取消" else "Cancel") } })
 }
 
 @Composable

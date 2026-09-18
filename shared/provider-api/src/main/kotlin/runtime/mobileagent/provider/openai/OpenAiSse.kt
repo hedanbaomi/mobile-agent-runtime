@@ -82,8 +82,8 @@ object OpenAiSse {
      * completion tokens and stays null when the provider omits it.
      */
     internal fun usageFromJson(usage: kotlinx.serialization.json.JsonObject): ModelEvent.Usage {
-        val input = usage["prompt_tokens"]?.jsonPrimitive?.contentOrNull?.toIntOrNull() ?: 0
-        val output = usage["completion_tokens"]?.jsonPrimitive?.contentOrNull?.toIntOrNull() ?: 0
+        val input = usage["prompt_tokens"]?.jsonPrimitive?.contentOrNull?.toIntOrNull()?.takeIf { it >= 0 }
+        val output = usage["completion_tokens"]?.jsonPrimitive?.contentOrNull?.toIntOrNull()?.takeIf { it >= 0 }
         val details = usage["completion_tokens_details"]?.let { element ->
             runCatching { element.jsonObject }.getOrNull()
         }
@@ -91,7 +91,8 @@ object OpenAiSse {
             listOf("reasoning_tokens", "reasoningTokens")
                 .firstNotNullOfOrNull { key -> detail[key]?.jsonPrimitive?.contentOrNull?.toIntOrNull() }
         }
-        return ModelEvent.Usage(input, output, reasoning?.coerceIn(0, output))
+        return ModelEvent.Usage(input ?: 0, output ?: 0,
+            reasoning?.takeIf { it >= 0 && (output == null || it <= output) }, input, output)
     }
 
     /** Structural usage metadata only; never returns provider text. */

@@ -194,7 +194,13 @@ class OpenAiCompatibleVision(
                 val diagnostics = object : ModelDiagnosticSink {
                     override val captureContent: Boolean = input.captureDiagnosticContent
                     override fun record(event: ModelDiagnosticEvent) {
-                        val mapped = event.toVisionDiagnostic(input)
+                        val mapped = event.toVisionDiagnostic(input).let { next ->
+                            next.copy(
+                                inputTokens = next.inputTokens ?: latest.inputTokens,
+                                outputTokens = next.outputTokens ?: latest.outputTokens,
+                                reasoningTokens = next.reasoningTokens ?: latest.reasoningTokens,
+                            )
+                        }
                         latest = if (event.stage == ModelDiagnosticStage.TERMINAL) {
                             mapped.copy(stage = latest.stage ?: mapped.stage)
                         } else {
@@ -257,6 +263,11 @@ class OpenAiCompatibleVision(
                             require(content.length <= MAX_VISION_RESPONSE_CHARS) { "Vision response exceeds limit" }
                         }
                         ModelEvent.Completed -> completed = true
+                        is ModelEvent.Usage -> latest = latest.copy(
+                            inputTokens = event.reportedInputTokens,
+                            outputTokens = event.reportedOutputTokens,
+                            reasoningTokens = event.reasoningTokens,
+                        )
                         is ModelEvent.Failed -> failure = event.sanitizedMessage
                         is ModelEvent.ToolCallDelta, is ModelEvent.ToolApprovalRequired -> failure = "VISION_UNEXPECTED_TOOL_REQUEST"
                         else -> Unit
@@ -298,8 +309,7 @@ class OpenAiCompatibleVision(
                 if (result.type.isBlank() || listOf(result.ocrText, result.semanticDescription, result.tableMarkdown).all { it.isBlank() }) {
                     failed(input, latest, started, "VISION_EMPTY_RESULT")
                 } else {
-                    terminal(input, latest, started, null)
-                    VisionOutcome.Success(result)
+                    VisionOutcome.Success(result, terminal(input, latest, started, null))
                 }
             } catch (cancel: CancellationException) {
                 throw cancel
@@ -381,6 +391,7 @@ class OpenAiCompatibleVision(
             finishReason = finishReason,
             inputTokens = inputTokens,
             outputTokens = outputTokens,
+            reasoningTokens = reasoningTokens,
             requestId = input.requestId,
             attempt = input.attempt,
             assetHash = input.assetHash,

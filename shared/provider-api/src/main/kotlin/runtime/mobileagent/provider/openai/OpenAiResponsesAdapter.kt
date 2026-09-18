@@ -397,11 +397,14 @@ class OpenAiResponsesAdapter(
                 if (status !in 200..299) {
                     val raw = readBounded(response.bodyAsChannel())
                     terminalError = httpFailureMessage(status, raw)
+                    lastUsage = reportedUsage(raw)
+                    lastUsage?.let { emit(it) }
                     emit(ModelEvent.Failed(terminalError!!))
                     request.reportDiagnostic(
                         ModelDiagnosticStage.TERMINAL, dispatchStatus, started, "responses",
                         httpStatus = status, errorCode = terminalError, responseContentType = responseContentType,
                         responseBytes = raw.toByteArray(Charsets.UTF_8).size.toLong(),
+                        usage = lastUsage,
                     )
                     return@execute
                 }
@@ -856,11 +859,12 @@ class OpenAiResponsesAdapter(
         }
         root["usage"]?.let { usage ->
             runCatching { usage.jsonObject }.getOrNull()?.let { parsed ->
-                val input = parsed["input_tokens"]?.jsonPrimitive?.contentOrNull?.toIntOrNull() ?: 0
-                val output = parsed["output_tokens"]?.jsonPrimitive?.contentOrNull?.toIntOrNull() ?: 0
+                val input = parsed["input_tokens"]?.jsonPrimitive?.contentOrNull?.toIntOrNull()?.takeIf { it >= 0 }
+                val output = parsed["output_tokens"]?.jsonPrimitive?.contentOrNull?.toIntOrNull()?.takeIf { it >= 0 }
                 val details = parsed["output_tokens_details"]?.let { runCatching { it.jsonObject }.getOrNull() }
                 val reasoning = details?.get("reasoning_tokens")?.jsonPrimitive?.contentOrNull?.toIntOrNull()
-                events += ModelEvent.Usage(input, output, reasoning?.coerceIn(0, output))
+                events += ModelEvent.Usage(input ?: 0, output ?: 0,
+                    reasoning?.takeIf { it >= 0 && (output == null || it <= output) }, input, output)
             }
         }
         val status = root["status"]?.jsonPrimitive?.contentOrNull

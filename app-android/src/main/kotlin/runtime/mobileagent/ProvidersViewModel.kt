@@ -43,6 +43,7 @@ import runtime.mobileagent.provider.CapabilityProbeStatus
 import runtime.mobileagent.provider.CapabilityReport
 import runtime.mobileagent.provider.HeaderSecretResolver
 import runtime.mobileagent.provider.ModelAdapter
+import runtime.mobileagent.provider.ContextWindowProducer
 import runtime.mobileagent.provider.openai.OpenAiAdapterFactory
 import runtime.mobileagent.provider.ProviderConnectionErrorCode
 import runtime.mobileagent.provider.ProviderConnectionResult
@@ -207,6 +208,9 @@ class ProvidersViewModel @JvmOverloads constructor(
                 nonSecretHeaders = previous?.nonSecretHeaders.orEmpty(),
                 revision = (previous?.revision ?: 0) + 1,
             )
+            val windowFact = ContextWindowProducer().userDeclared(
+                contextWindowTarget(providerId, endpoint.toASCIIString(), draft.modelId.trim()), declaredWindow,
+            )
             val model = if (saveModel) ModelProfile(
                 id = modelPrevious?.id ?: EntityId.random().value, providerId = providerId,
                 role = draft.role, modelId = draft.modelId.trim(), capabilities = draft.capabilities,
@@ -214,12 +218,10 @@ class ProvidersViewModel @JvmOverloads constructor(
                 parametersJson = parameters.toString(), contextLimit = contextLimit, outputLimit = outputLimit,
                 outputLimitMode = draft.outputLimitMode,
                 contextLimitMode = draft.contextLimitMode,
-                contextWindowValue = declaredWindow,
-                contextWindowSource = if (declaredWindow != null) ContextLimitSource.USER_DECLARED else ContextLimitSource.UNKNOWN,
-                contextWindowTarget = declaredWindow?.let {
-                    contextWindowTarget(providerId, endpoint.toASCIIString(), draft.modelId.trim())
-                },
-                contextWindowCheckedAt = declaredWindow?.let { Utc.nowIso() },
+                contextWindowValue = windowFact.value,
+                contextWindowSource = windowFact.source,
+                contextWindowTarget = windowFact.target,
+                contextWindowCheckedAt = windowFact.checkedAt,
                 revision = (modelPrevious?.revision ?: 0) + 1,
             ).withEndpoint() else null
             app.container.db.transaction {

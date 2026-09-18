@@ -264,6 +264,7 @@ data class ModelDiagnosticEvent(
     val originalContentChars: Long? = null,
     val originalContentBytes: Long? = null,
     val contentTruncated: Boolean = false,
+    val reasoningTokens: Int? = null,
 )
 
 /** Diagnostic sinks are observability only and cannot change provider behavior. */
@@ -304,8 +305,9 @@ fun ModelRequest.reportDiagnostic(
             errorCode = errorCode,
             exceptionClass = exception?.javaClass?.name,
             finishReason = finishReason,
-            inputTokens = usage?.inputTokens,
-            outputTokens = usage?.outputTokens,
+            inputTokens = usage?.reportedInputTokens,
+            outputTokens = usage?.reportedOutputTokens,
+            reasoningTokens = usage?.reasoningTokens,
             responseContentType = responseContentType?.take(128),
             responseBytes = responseBytes,
             eventType = eventType,
@@ -366,6 +368,9 @@ ull means the provider did not report
          * reported any reasoning at all.
          */
         val reasoningTokens: Int? = null,
+        /** Nullable wire facts, independent of the legacy runtime numeric counters. */
+        val reportedInputTokens: Int? = inputTokens,
+        val reportedOutputTokens: Int? = outputTokens,
     ) : ModelEvent
     data class ToolApprovalRequired(val callId: String, val name: String, val argumentsJson: String) : ModelEvent
     data object Completed : ModelEvent
@@ -380,6 +385,9 @@ fun interface SecretStore {
 }
 
 interface ModelAdapter {
+    /** Opt-in metadata-only producer. Ordinary OpenAI-compatible /models supplies no trusted window. */
+    suspend fun contextWindowMetadata(profile: ModelProfile): ContextWindowMetadata? = null
+
     suspend fun probe(profile: ModelProfile): CapabilityReport
 
     /**

@@ -29,6 +29,51 @@ import runtime.mobileagent.knowledge.VisionInput
 import runtime.mobileagent.knowledge.VisionOutcome
 
 class OpenAiCompatibleVisionTest {
+    @Test fun httpErrorKeepsReportedUsageOnBothProtocols() {
+        for (format in ApiFormat.entries) {
+            val pair = target("error-usage", "vision")
+            val selected = pair.first.copy(apiFormat = format) to pair.second
+            val response = """{"error":{"message":"rejected"},"usage":{"input_tokens":8,"output_tokens":5,"output_tokens_details":{"reasoning_tokens":3}}}"""
+            val result = backend(listOf(selected), MockEngine {
+                respond(response, HttpStatusCode.BadRequest, jsonHeaders())
+            }).process(input(selected)) as VisionOutcome.Failed
+            assertEquals(8, result.metadata.inputTokens)
+            assertEquals(5, result.metadata.outputTokens)
+            assertEquals(3, result.metadata.reasoningTokens)
+        }
+    }
+
+    @Test
+    fun successCarriesNullableUsageFactsAndReasoningSubset() {
+        val selected = target("usage", "vision")
+        val prefix = successBody().substringBefore(",\"usage\"")
+        listOf(
+            "}" to Triple<Int?, Int?, Int?>(null, null, null),
+            ",\"usage\":{\"prompt_tokens\":9}}" to Triple(9, null, null),
+            ",\"usage\":{\"prompt_tokens\":9,\"completion_tokens\":3,\"completion_tokens_details\":{\"reasoning_tokens\":2}}}" to Triple(9, 3, 2),
+        ).forEach { (suffix, expected) ->
+            val result = backend(listOf(selected), MockEngine {
+                respond(prefix + suffix, HttpStatusCode.OK, jsonHeaders())
+            }).process(input(selected)) as VisionOutcome.Success
+            assertEquals(expected.first, result.metadata.inputTokens)
+            assertEquals(expected.second, result.metadata.outputTokens)
+            assertEquals(expected.third, result.metadata.reasoningTokens)
+        }
+    }
+
+    @Test
+    fun truncatedResultRetainsProviderUsageIncludingReasoning() {
+        val selected = target("spent", "vision")
+        val body = """{"choices":[{"message":{"content":""},"finish_reason":"length"}],"usage":{"prompt_tokens":12,"completion_tokens":7,"completion_tokens_details":{"reasoning_tokens":7}}}"""
+        val result = backend(listOf(selected), MockEngine {
+            respond(body, HttpStatusCode.OK, jsonHeaders())
+        }).process(input(selected)) as VisionOutcome.Failed
+        assertEquals("REASONING_EXHAUSTED", result.metadata.errorCode)
+        assertEquals(12, result.metadata.inputTokens)
+        assertEquals(7, result.metadata.outputTokens)
+        assertEquals(7, result.metadata.reasoningTokens)
+    }
+
     @Test
     fun resolvesExactNondefaultFingerprintAndReturnsSuccessWithMetadata() {
         var body = ""

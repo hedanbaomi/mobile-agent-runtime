@@ -79,6 +79,7 @@ class KnowledgeViewModel(
     private var selectionRevision = 0L
     private var embeddingRevision = 0L
     private var visionRevision = 0L
+    private var batchPreviewRevision = 0L
     private var evidenceRevision = 0L
     private var refreshJob: Job? = null
     private var refreshRequested = false
@@ -249,6 +250,9 @@ class KnowledgeViewModel(
                                 error = view.error,
                             )
                         },
+                        pipeline = repo.batchPipelineProgress(batch.id),
+                        reuse = repo.batchReuseSummary(batch.id, refreshPlan = false),
+                        policy = repo.batchPipelinePolicy(batch.id),
                     )
                 },
             )
@@ -299,6 +303,7 @@ class KnowledgeViewModel(
 
     fun beginBatchVision(batchId: String) {
         if (batchId.isBlank()) return
+        batchPreviewRevision++
         state.value = state.value.copy(
             pendingBatchVision = KnowledgeBatchVisionUi(batchId = batchId),
             visionTargetsLoading = true,
@@ -307,17 +312,27 @@ class KnowledgeViewModel(
     }
 
     fun dismissBatchVision() {
+        batchPreviewRevision++
         state.value = state.value.copy(pendingBatchVision = null)
     }
 
     fun selectBatchVisionTarget(fingerprint: String?) {
         val pending = state.value.pendingBatchVision ?: return
+        val revision = ++batchPreviewRevision
         state.value = state.value.copy(
             pendingBatchVision = pending.copy(
                 selectedVisionTargetFingerprint = fingerprint,
                 visionTargetSelectionInitialized = true,
+                reusePreview = null,
             ),
         )
+        if (fingerprint != null) operation({ repo.batchReuseSummary(pending.batchId, fingerprint) }) { preview ->
+            val current = state.value.pendingBatchVision
+            if (revision == batchPreviewRevision && current?.batchId == pending.batchId &&
+                current.selectedVisionTargetFingerprint == fingerprint) {
+                state.value = state.value.copy(pendingBatchVision = current.copy(reusePreview = preview))
+            }
+        }
     }
     fun createBase(name: String) {
         val revision = selectionRevision
@@ -500,6 +515,16 @@ class KnowledgeViewModel(
         "已暂停；不再派发新任务，已完成的成果保留。"
     }
 
+    fun configurePipeline(batchId: String, policy: runtime.mobileagent.knowledge.PipelinePolicy) = action {
+        repo.configureBatchPipeline(batchId, policy)
+        "处理限制已保存；不会取消已在途请求。"
+    }
+
+    fun rebuildBatchLocalChunks(batchId: String) = action {
+        val rebuilt = repo.rebuildBatchLocalChunks(batchId)
+        "已在本地重建 $rebuilt 份资料的检索片段，未新增 Provider 请求。"
+    }
+
     fun resumeBatch(batchId: String) {
         operation({ importCoordinator.resumeStaging(batchId) }) { started ->
             when (started) {
@@ -520,11 +545,20 @@ class KnowledgeViewModel(
      * user just selected, then resumes it in place.  It never widens to files added later, because
      * the authorization is bound to the batch's own member list.
      */
-    fun authorizeBatchVision(batchId: String, expectedTarget: String) = action {
-        requireNotNull(currentVisionTarget(expectedTarget)) { "视觉目标已变更或不可用，请重新选择本批次目标。" }
-        repo.authorizeBatchVision(batchId, expectedTarget)
-        ImportWorkScheduler.enqueueBatchFence(app, batchId, app.container.profiles.visionConfigured())
-        "已授权本批次的视觉处理并继续导入；此授权仅限本批次已选资料。"
+    fun authorizeBatchVision(batchId: String, expectedTarget: String, acknowledgeDuplicateCharge: Boolean) {
+        val reviewed = state.value.pendingBatchVision?.takeIf {
+            it.batchId == batchId && it.selectedVisionTargetFingerprint == expectedTarget
+        }?.reusePreview
+        if (reviewed == null) {
+            state.value = state.value.copy(error = "处理范围尚未加载，请重新打开批次确认。")
+            return
+        }
+        action {
+            requireNotNull(currentVisionTarget(expectedTarget)) { "视觉目标已变更或不可用，请重新选择本批次目标。" }
+            repo.reconfigureBatchPipeline(batchId, expectedTarget, reviewed, acknowledgeDuplicateCharge)
+            ImportWorkScheduler.enqueueBatchFence(app, batchId, app.container.profiles.visionConfigured())
+            "已按确认的复用范围继续本批次。"
+        }
     }
     fun keepWaiting() { state.value = state.value.copy(status = "继续保留本地原件，不会自动上传或标记完成。") }
     fun textOnly(id: String) = action {

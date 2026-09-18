@@ -1487,6 +1487,8 @@ private fun KnowledgeRoute(vm: runtime.mobileagent.KnowledgeViewModel, chinese: 
         onRetryEmbedding = vm::retryEmbedding,
         onAuthorizeQueryRetry = { spaceId, queryHash -> vm.requestQueryRetry(spaceId, queryHash) },
         onPauseBatch = vm::pauseBatch, onResumeBatch = vm::resumeBatch,
+        onConfigurePipeline = vm::configurePipeline,
+        onRebuildBatchLocalChunks = vm::rebuildBatchLocalChunks,
         onAuthorizeBatchVision = vm::authorizeBatchVision,
     )
     runtime.mobileagent.feature.knowledge.KnowledgeScreen(state, actions, showPageTitle = false)

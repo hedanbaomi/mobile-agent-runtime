@@ -279,13 +279,14 @@ object OpenAiResponsesSse {
 
     private fun usage(root: JsonObject): ModelEvent.Usage? {
         val usage = root["usage"]?.let { runCatching { it.jsonObject }.getOrNull() } ?: return null
-        val input = number(usage, "input_tokens") ?: number(usage, "prompt_tokens") ?: 0
-        val output = number(usage, "output_tokens") ?: number(usage, "completion_tokens") ?: 0
+        val input = (number(usage, "input_tokens") ?: number(usage, "prompt_tokens"))?.takeIf { it >= 0 }
+        val output = (number(usage, "output_tokens") ?: number(usage, "completion_tokens"))?.takeIf { it >= 0 }
         val details = usage["output_tokens_details"]?.let { runCatching { it.jsonObject }.getOrNull() }
         val reasoning = details?.let { detail ->
             number(detail, "reasoning_tokens") ?: number(detail, "reasoningTokens")
         }
-        return ModelEvent.Usage(input, output, reasoning?.coerceIn(0, output))
+        return ModelEvent.Usage(input ?: 0, output ?: 0,
+            reasoning?.takeIf { it >= 0 && (output == null || it <= output) }, input, output)
     }
 
     private fun number(obj: JsonObject, key: String): Int? =

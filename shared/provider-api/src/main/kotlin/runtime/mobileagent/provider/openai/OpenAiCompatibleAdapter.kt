@@ -451,33 +451,32 @@ class OpenAiCompatibleAdapter(
                     ModelDiagnosticStage.RESPONSE_HEADERS, dispatchStatus, started, "chat.completions",
                     httpStatus = status, responseContentType = responseContentType,
                 )
-                if (status == 401) {
-                    emitTerminalFailure(streamState, ErrorCode.PROVIDER_UNAUTHORIZED.name)
-                    request.reportDiagnostic(ModelDiagnosticStage.TERMINAL, dispatchStatus, started, "chat.completions", status, ErrorCode.PROVIDER_UNAUTHORIZED.name)
-                    return@execute
-                }
-                if (status == 429) {
-                    emitTerminalFailure(streamState, ErrorCode.RATE_LIMITED.name)
-                    request.reportDiagnostic(ModelDiagnosticStage.TERMINAL, dispatchStatus, started, "chat.completions", status, ErrorCode.RATE_LIMITED.name)
-                    return@execute
-                }
                 if (status >= 400) {
                     // Read the error body so an explicit input-window rejection
                     // is not reported as a generic rejection.  The body itself
                     // is never surfaced verbatim.
                     val raw = runCatching { readBounded(response.bodyAsChannel()) }.getOrDefault("")
-                    val error = InputOverflowSignal.failureCode(
+                    val usage = reportedUsage(raw)
+                    if (usage != null) {
+                        streamState.lastUsage = usage
+                        emit(usage)
+                    }
+                    val error = when (status) {
+                        401 -> ErrorCode.PROVIDER_UNAUTHORIZED.name
+                        429 -> ErrorCode.RATE_LIMITED.name
+                        else -> InputOverflowSignal.failureCode(
                         raw,
                         // Canonical code only: consumers must not have to parse a
                         // decorated string, and the HTTP status already travels in
                         // the diagnostic metadata.
                         if (status >= 500) ErrorCode.UNKNOWN_OUTCOME.name else ProviderConnectionErrorCode.PROVIDER_REJECTED.name,
-                    )
+                        )
+                    }
                     emitTerminalFailure(
                         streamState,
                         error,
                     )
-                    request.reportDiagnostic(ModelDiagnosticStage.TERMINAL, dispatchStatus, started, "chat.completions", status, error)
+                    request.reportDiagnostic(ModelDiagnosticStage.TERMINAL, dispatchStatus, started, "chat.completions", status, error, usage = usage)
                     return@execute
                 }
                 val responseType = responseContentType.orEmpty()

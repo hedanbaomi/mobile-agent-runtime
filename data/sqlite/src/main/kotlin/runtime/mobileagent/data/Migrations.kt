@@ -55,7 +55,7 @@ object Migrations {
     // conversation, and a summary that only a
     // verified SUCCEEDED row may carry.  No transcript row is deleted or
     // rewritten by a summary, and no summary is ever re-sent from the database.
-    const val VERSION = 23
+    const val VERSION = 24
 
     private val statements = listOf(
         "CREATE TABLE IF NOT EXISTS schema_version (version INTEGER NOT NULL PRIMARY KEY)",
@@ -260,6 +260,8 @@ object Migrations {
                 connection.execute("DROP VIEW workspace_acl")
             }
             statements.drop(1).forEach { sql -> connection.execute(sql) }
+            // v24 is additive and lazy: legacy jobs/cache rows are not guessed into unit plans.
+            DocumentPipelineStore.schema.forEach { sql -> connection.execute(sql) }
             columns.forEach { column -> ensureColumn(connection, column) }
             backfillConversationSnapshotIds(connection)
             backfillV11(connection)
@@ -674,7 +676,8 @@ object Migrations {
         "full_device_files_grants", "snapshot_grant_bindings", "saf_workspace_grants", "privileged_workspace_bindings",
         "conversation_workspace_bindings", "agent_workspace_defaults", "desktop_identity", "desktop_trust",
         "skill_memory_spaces", "skill_memory_entries", "approval_records", "tool_audit_details",
-        "context_compactions",
+        "context_compactions", "pipeline_plans", "pipeline_units", "pipeline_results", "pipeline_attempts",
+        "pipeline_retry_permits", "pipeline_policies",
     )
 
     private val REQUIRED_COLUMNS = listOf(

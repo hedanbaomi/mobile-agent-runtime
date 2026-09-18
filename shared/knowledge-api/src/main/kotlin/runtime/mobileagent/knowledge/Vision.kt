@@ -42,7 +42,10 @@ data class VisionSuccess(
 )
 
 sealed interface VisionOutcome {
-    data class Success(val result: VisionSuccess) : VisionOutcome
+    data class Success(
+        val result: VisionSuccess,
+        val metadata: VisionDiagnosticMetadata = VisionDiagnosticMetadata(),
+    ) : VisionOutcome
     data object UnknownOutcome : VisionOutcome
     /** Detailed unknown result for a request that may have reached the provider. */
     data class Unknown(val metadata: VisionDiagnosticMetadata) : VisionOutcome
@@ -89,6 +92,8 @@ data class VisionDiagnosticMetadata(
     val originalContentChars: Long? = null,
     val originalContentBytes: Long? = null,
     val contentTruncated: Boolean = false,
+    /** Provider fact; a subset of output, never added to it. Absent stays unknown. */
+    val reasoningTokens: Int? = null,
 )
 
 fun interface VisionBackend {

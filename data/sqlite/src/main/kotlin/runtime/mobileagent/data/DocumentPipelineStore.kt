@@ -37,8 +37,10 @@ internal class DocumentPipelineStore(private val db: SqlConnection) {
         units(jobId).forEach { unit ->
             val saved = !unit.requiresVision || result(jobId,unit.unitId,target) != null
             val attempt = db.query("SELECT state FROM pipeline_attempts WHERE job_id=? AND unit_id=? AND target=? ORDER BY ordinal DESC LIMIT 1",listOf(jobId,unit.unitId,target)).singleOrNull()
-            val state = if(saved) "SUCCEEDED" else if(unknown(jobId,unit.unitId,unit.page)) "UNKNOWN_OUTCOME" else attempt?.string("state") ?: "PLANNED"
-            db.execute("UPDATE pipeline_units SET state=?,published=CASE WHEN ?=1 THEN published ELSE 0 END WHERE job_id=? AND unit_id=?",listOf(state,if(saved && !targetChanged) 1 else 0,jobId,unit.unitId))
+            val unitRow = db.query("SELECT state FROM pipeline_units WHERE job_id=? AND unit_id=?",listOf(jobId,unit.unitId)).singleOrNull()
+            val priorUnitState = unitRow?.string("state")
+            val state = if(saved) "SUCCEEDED" else if(unknown(jobId,unit.unitId,unit.page)) "UNKNOWN_OUTCOME" else attempt?.string("state") ?: priorUnitState?.takeIf { it != "FAILED" } ?: "PLANNED"
+            db.execute("UPDATE pipeline_units SET state=?,published=CASE WHEN ?=1 THEN published ELSE 0 END,failure_code=CASE WHEN ?='PLANNED' THEN NULL ELSE failure_code END,failure_phase=CASE WHEN ?='PLANNED' THEN NULL ELSE failure_phase END WHERE job_id=? AND unit_id=?",listOf(state,if(saved && !targetChanged) 1 else 0,state,state,jobId,unit.unitId))
         }
     }
 
@@ -67,8 +69,43 @@ internal class DocumentPipelineStore(private val db: SqlConnection) {
 
     /** Only process-death recovery calls this; a live request must retain its terminal-write right. */
     fun recover(jobId: String) = db.transaction {
-        db.execute("UPDATE pipeline_units SET state='UNKNOWN_OUTCOME' WHERE job_id=? AND unit_id IN (SELECT unit_id FROM pipeline_attempts WHERE job_id=? AND state IN ('READY','DISPATCHED'))",listOf(jobId,jobId))
-        db.execute("UPDATE pipeline_attempts SET state='UNKNOWN_OUTCOME',failure_code='PROCESS_INTERRUPTED',terminal_at=? WHERE job_id=? AND state IN ('READY','DISPATCHED')",listOf(Utc.nowIso(),jobId))
+        db.execute(
+            """
+            UPDATE pipeline_units 
+            SET state='UNKNOWN_OUTCOME',
+                failure_code='PROCESS_INTERRUPTED',
+                failure_phase='PROVIDER'
+            WHERE job_id=? AND unit_id IN (SELECT unit_id FROM pipeline_attempts WHERE job_id=? AND state IN ('READY','DISPATCHED'))
+            """.trimIndent(),
+            listOf(jobId,jobId)
+        )
+        db.execute(
+            """
+            UPDATE pipeline_attempts 
+            SET state='UNKNOWN_OUTCOME',
+                failure_code='PROCESS_INTERRUPTED',
+                terminal_at=?,
+                input_tokens=COALESCE(input_tokens, (SELECT v.input_tokens FROM vision_attempts v WHERE v.request_id=pipeline_attempts.request_id)),
+                output_tokens=COALESCE(output_tokens, (SELECT v.output_tokens FROM vision_attempts v WHERE v.request_id=pipeline_attempts.request_id))
+            WHERE job_id=? AND state IN ('READY','DISPATCHED')
+            """.trimIndent(),
+            listOf(Utc.nowIso(),jobId)
+        )
+    }
+
+    fun recordUsage(requestId: String, inputTokens: Long?, outputTokens: Long?, reasoningTokens: Long?) {
+        if (inputTokens == null && outputTokens == null && reasoningTokens == null) return
+        db.execute(
+            "UPDATE pipeline_attempts SET input_tokens=COALESCE(?,input_tokens), output_tokens=COALESCE(?,output_tokens), reasoning_tokens=COALESCE(?,reasoning_tokens) WHERE request_id=? AND state IN ('READY','DISPATCHED')",
+            listOf(inputTokens, outputTokens, reasoningTokens, requestId)
+        )
+    }
+
+    fun failUnit(jobId: String, unitId: String, failureCode: String, failurePhase: String = "LOCAL_RENDER") {
+        db.execute(
+            "UPDATE pipeline_units SET state='FAILED', failure_code=?, failure_phase=? WHERE job_id=? AND unit_id=?",
+            listOf(failureCode, failurePhase, jobId, unitId)
+        )
     }
 
     fun policy(batchId: String?): PipelinePolicy {
@@ -93,7 +130,18 @@ internal class DocumentPipelineStore(private val db: SqlConnection) {
         if (db.query("SELECT request_id FROM pipeline_attempts WHERE state IN ('READY','DISPATCHED') LIMIT 1").isNotEmpty()) return "PIPELINE_MAX_CONCURRENCY"
         if (batchId == null) return null
         val policy = policy(batchId)
-        val attempts = db.query("SELECT state,reservation_tokens,input_tokens,output_tokens,dispatched_at FROM pipeline_attempts WHERE batch_id=? ORDER BY rowid DESC",listOf(batchId))
+        val attempts = db.query(
+            """
+            SELECT p.state, p.reservation_tokens,
+                   COALESCE(p.input_tokens, v.input_tokens) AS input_tokens,
+                   COALESCE(p.output_tokens, v.output_tokens) AS output_tokens,
+                   p.dispatched_at
+            FROM pipeline_attempts p
+            LEFT JOIN vision_attempts v ON v.request_id = p.request_id
+            WHERE p.batch_id=? ORDER BY p.rowid DESC
+            """.trimIndent(),
+            listOf(batchId)
+        )
         if (attempts.any { it.string("state") in setOf("READY","DISPATCHED") }) return "PIPELINE_MAX_CONCURRENCY"
         if (attempts.takeWhile { it.string("state") == "FAILED" }.size >= policy.consecutiveFailureLimit) return "PIPELINE_FAILURE_LIMIT"
         val ceiling = policy.tokenDispatchCeiling ?: return null
@@ -106,9 +154,11 @@ internal class DocumentPipelineStore(private val db: SqlConnection) {
         if (row.string("state") == "CANCELLED" && row.string("dispatched_at").isBlank()) return 0
         val input = row.longOrNull("input_tokens")
         val output = row.longOrNull("output_tokens")
-        // Unknown may have incurred more work than a partial usage fragment reports.
+        val reservation = row.long("reservation_tokens")
+        val observed = (input ?: 0L) + (output ?: 0L)
+        // Unknown or incomplete usage must not fall below observed tokens or safety reservation.
         if (row.string("state") in setOf("UNKNOWN_OUTCOME","READY","DISPATCHED") || input == null || output == null)
-            return row.long("reservation_tokens")
+            return maxOf(reservation, observed)
         return input + output
     }
 
@@ -125,7 +175,7 @@ internal class DocumentPipelineStore(private val db: SqlConnection) {
         }
         db.execute("INSERT INTO pipeline_attempts(request_id,job_id,batch_id,unit_id,ordinal,target,config_fingerprint,planner_version,result_version,cache_key,state,reservation_tokens,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
             listOf(requestId,jobId,batchId,unit.unitId,ordinal,target,sha256Hex("$target|$resultVersion|${unit.unitId}".toByteArray()),unit.plannerVersion,resultVersion,cacheKey,"READY",policy(batchId).reservationTokensPerRequest ?: 0,Utc.nowIso()))
-        db.execute("UPDATE pipeline_units SET state='READY' WHERE job_id=? AND unit_id=?",listOf(jobId,unit.unitId))
+        db.execute("UPDATE pipeline_units SET state='READY',failure_code=NULL,failure_phase=NULL WHERE job_id=? AND unit_id=?",listOf(jobId,unit.unitId))
         ordinal
     }
 
@@ -141,16 +191,18 @@ internal class DocumentPipelineStore(private val db: SqlConnection) {
         require(state !in setOf(PipelineAttemptState.READY,PipelineAttemptState.DISPATCHED))
         val row = db.query("SELECT * FROM pipeline_attempts WHERE request_id=?",listOf(requestId)).singleOrNull() ?: return@transaction false
         if (row.string("state") !in setOf("READY","DISPATCHED")) return@transaction false
-        db.execute("UPDATE pipeline_attempts SET state=?,failure_code=?,input_tokens=?,output_tokens=?,reasoning_tokens=?,terminal_at=?,dispatched_at=CASE WHEN ?=1 THEN COALESCE(dispatched_at,?) ELSE dispatched_at END WHERE request_id=? AND state IN ('READY','DISPATCHED')",
+        db.execute("UPDATE pipeline_attempts SET state=?,failure_code=?,input_tokens=COALESCE(?,input_tokens),output_tokens=COALESCE(?,output_tokens),reasoning_tokens=COALESCE(?,reasoning_tokens),terminal_at=?,dispatched_at=CASE WHEN ?=1 THEN COALESCE(dispatched_at,?) ELSE dispatched_at END WHERE request_id=? AND state IN ('READY','DISPATCHED')",
             listOf(state.name,metadata.errorCode,metadata.inputTokens,metadata.outputTokens,metadata.reasoningTokens,Utc.nowIso(),if(metadata.dispatched) 1 else 0,Utc.nowIso(),requestId))
-        db.execute("UPDATE pipeline_units SET state=? WHERE job_id=? AND unit_id=?",listOf(state.name,row.string("job_id"),row.string("unit_id")))
+        val failurePhase = if (state == PipelineAttemptState.FAILED) "PROVIDER" else null
+        db.execute("UPDATE pipeline_units SET state=?,failure_code=?,failure_phase=? WHERE job_id=? AND unit_id=?",
+            listOf(state.name, if (state == PipelineAttemptState.FAILED) metadata.errorCode else null, failurePhase, row.string("job_id"), row.string("unit_id")))
         true
     }
 
     fun saveResult(jobId: String, unit: ProcessingUnit, target: String, cacheKey: String, assetId: String, result: VisionSuccess, section: String? = null) {
         db.execute("INSERT OR IGNORE INTO pipeline_results(job_id,unit_id,target,result_version,cache_key,asset_id,ocr,description,table_markdown,result_type,section) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
             listOf(jobId,unit.unitId,target,resultVersion,cacheKey,assetId,result.ocrText,result.semanticDescription,result.tableMarkdown,result.type,section))
-        db.execute("UPDATE pipeline_units SET state='SUCCEEDED' WHERE job_id=? AND unit_id=?",listOf(jobId,unit.unitId))
+        db.execute("UPDATE pipeline_units SET state='SUCCEEDED',failure_code=NULL,failure_phase=NULL WHERE job_id=? AND unit_id=?",listOf(jobId,unit.unitId))
     }
 
     fun published(jobId: String, chunkVersion: String) {
@@ -169,7 +221,20 @@ internal class DocumentPipelineStore(private val db: SqlConnection) {
     fun progress(batchId: String): PipelineProgress {
         val jobs = db.query("SELECT id FROM import_jobs WHERE batch_id=?",listOf(batchId))
         val rows = db.query("SELECT u.* FROM pipeline_units u JOIN pipeline_plans p ON p.job_id=u.job_id AND p.planner_version=u.planner_version JOIN import_jobs j ON j.id=u.job_id WHERE j.batch_id=? AND u.active=1",listOf(batchId))
-        val attempts = db.query("SELECT * FROM pipeline_attempts WHERE batch_id=?",listOf(batchId)) + legacyAttempts(batchId)
+        val attempts = db.query(
+            """
+            SELECT p.request_id, p.job_id, p.batch_id, p.unit_id, p.ordinal, p.target,
+                   p.config_fingerprint, p.planner_version, p.result_version, p.cache_key,
+                   p.state, p.reservation_tokens,
+                   COALESCE(p.input_tokens, v.input_tokens) AS input_tokens,
+                   COALESCE(p.output_tokens, v.output_tokens) AS output_tokens,
+                   p.reasoning_tokens, p.failure_code, p.created_at, p.dispatched_at, p.terminal_at
+            FROM pipeline_attempts p
+            LEFT JOIN vision_attempts v ON v.request_id = p.request_id
+            WHERE p.batch_id=?
+            """.trimIndent(),
+            listOf(batchId)
+        ) + legacyAttempts(batchId)
         fun sum(field: String): Long? = attempts.mapNotNull { it.longOrNull(field) }.takeIf { it.isNotEmpty() }?.sum()
         val planned = rows.map { it.string("job_id") }.toSet()
         val completed = rows.groupBy { it.string("job_id") }.count { (_, units) -> units.all { it.long("published") == 1L } }
@@ -199,7 +264,7 @@ internal class DocumentPipelineStore(private val db: SqlConnection) {
         val resultVersion = "$VISION_PROMPT_VERSION|$VISION_SCHEMA_VERSION|$VISION_PREPROCESS_VERSION"
         val schema = listOf(
             "CREATE TABLE IF NOT EXISTS pipeline_plans(job_id TEXT PRIMARY KEY,content_hash TEXT NOT NULL,planner_version TEXT NOT NULL,result_version TEXT NOT NULL,plan_hash TEXT NOT NULL)",
-            "CREATE TABLE IF NOT EXISTS pipeline_units(job_id TEXT NOT NULL,unit_id TEXT NOT NULL,planner_version TEXT NOT NULL,page INTEGER NOT NULL,requires_vision INTEGER NOT NULL,unit_json TEXT NOT NULL,state TEXT NOT NULL,active INTEGER NOT NULL DEFAULT 1,published INTEGER NOT NULL DEFAULT 0,chunk_version TEXT,PRIMARY KEY(job_id,unit_id))",
+            "CREATE TABLE IF NOT EXISTS pipeline_units(job_id TEXT NOT NULL,unit_id TEXT NOT NULL,planner_version TEXT NOT NULL,page INTEGER NOT NULL,requires_vision INTEGER NOT NULL,unit_json TEXT NOT NULL,state TEXT NOT NULL,active INTEGER NOT NULL DEFAULT 1,published INTEGER NOT NULL DEFAULT 0,chunk_version TEXT,failure_code TEXT,failure_phase TEXT,PRIMARY KEY(job_id,unit_id))",
             "CREATE TABLE IF NOT EXISTS pipeline_results(job_id TEXT NOT NULL,unit_id TEXT NOT NULL,target TEXT NOT NULL,result_version TEXT NOT NULL,cache_key TEXT NOT NULL,asset_id TEXT NOT NULL,ocr TEXT NOT NULL,description TEXT NOT NULL,table_markdown TEXT NOT NULL,result_type TEXT NOT NULL,section TEXT,PRIMARY KEY(job_id,unit_id,target,result_version))",
             "CREATE TABLE IF NOT EXISTS pipeline_attempts(request_id TEXT PRIMARY KEY,job_id TEXT NOT NULL,batch_id TEXT,unit_id TEXT NOT NULL,ordinal INTEGER NOT NULL CHECK(ordinal>0),target TEXT NOT NULL,config_fingerprint TEXT NOT NULL,planner_version TEXT NOT NULL,result_version TEXT NOT NULL,cache_key TEXT NOT NULL,state TEXT NOT NULL CHECK(state IN ('READY','DISPATCHED','SUCCEEDED','FAILED','CANCELLED','UNKNOWN_OUTCOME')),reservation_tokens INTEGER NOT NULL DEFAULT 0,input_tokens INTEGER,output_tokens INTEGER,reasoning_tokens INTEGER,failure_code TEXT,created_at TEXT NOT NULL,dispatched_at TEXT,terminal_at TEXT,UNIQUE(job_id,unit_id,ordinal))",
             "CREATE INDEX IF NOT EXISTS pipeline_attempts_batch ON pipeline_attempts(batch_id)",

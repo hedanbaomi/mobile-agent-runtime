@@ -17,7 +17,13 @@ data class UnitRegion(val left: Int, val top: Int, val right: Int, val bottom: I
 }
 
 @Serializable
-data class UnitCoverage(val page: Int, val region: UnitRegion, val nativeTextSource: String = "page-extraction")
+data class UnitCoverage(
+    val page: Int,
+    val region: UnitRegion,
+    val nativeTextSource: String = "page-extraction",
+    val textStart: Int = 0,
+    val textEnd: Int = 0,
+)
 
 @Serializable
 data class ProcessingUnit(
@@ -39,7 +45,10 @@ data class ProcessingUnit(
     val sourceAssetId: String? = null,
     /** Canonical hash of extraction/input provenance; independent from a provider attempt. */
     val sourceInputIdentity: String = "",
-)
+    val requestText: String = "",
+) {
+    fun effectiveRequestText(): String = requestText.ifBlank { nativeText }
+}
 
 data class PlanningPage(
     val page: Int,
@@ -111,31 +120,50 @@ class DocumentUnitPlanner(val version: String = VERSION) {
                     group.orEmpty(), continuation?.toString().orEmpty(), page.needsVision.toString(),
                     page.width.toString(), page.height.toString())
                 val regions = if (!page.needsVision) listOf(UnitRegion.FULL) else split(page)
-                regions.forEach { area ->
+                val textSlices = splitTextSlices(page.nativeText, regions.size)
+                regions.forEachIndexed { rIndex, area ->
                     val kind = if (regions.size == 1) ProcessingUnitKind.PAGE else ProcessingUnitKind.REGION
                     val order = size
-                    val id = identity(contentHash, page.page.toString(), kind.name, area.toString(), order.toString(), version, inputIdentity)
+                    val sliceRange = textSlices[rIndex]
+                    val slice = if (page.nativeText.isNotEmpty()) page.nativeText.substring(sliceRange.first, sliceRange.second) else ""
+                    val unitInputIdentity = identity("source-input-v2", inputIdentity, slice, sliceRange.first.toString(), sliceRange.second.toString())
+                    val id = identity(contentHash, page.page.toString(), kind.name, area.toString(), order.toString(), version, unitInputIdentity)
                     add(ProcessingUnit(contentHash, page.page, kind, id, parent, order,
-                        area.takeIf { kind == ProcessingUnitKind.REGION }, UnitCoverage(page.page, area),
+                        area.takeIf { kind == ProcessingUnitKind.REGION },
+                        UnitCoverage(page.page, area, textStart = sliceRange.first, textEnd = sliceRange.second),
                         page.nativeText, page.needsVision, version, group, continuation, page.tableHeader,
-                        sourceInputIdentity = inputIdentity))
+                        sourceInputIdentity = unitInputIdentity,
+                        requestText = slice))
                 }
             }
         }
     }
 
     private fun split(page: PlanningPage): List<UnitRegion> {
-        val parts = mutableListOf(UnitRegion.FULL)
+        val textParts = ((page.nativeText.length + DENSE_CHARACTERS - 1) / DENSE_CHARACTERS).coerceIn(1, MAX_UNITS_PER_PAGE)
+        val densityParts = maxOf(if (page.dense || page.complexLayout || page.tableHeader != null) 2 else 1, textParts)
+        val parts = if (densityParts <= 1) {
+            mutableListOf(UnitRegion.FULL)
+        } else {
+            val n = densityParts.coerceIn(1, MAX_UNITS_PER_PAGE)
+            (0 until n).map { i ->
+                UnitRegion(
+                    0,
+                    (i.toLong() * UnitRegion.SCALE / n).toInt(),
+                    UnitRegion.SCALE,
+                    ((i + 1).toLong() * UnitRegion.SCALE / n).toInt()
+                )
+            }.toMutableList()
+        }
         var index = 0
-        while (index < parts.size) {
+        while (index < parts.size && parts.size < MAX_UNITS_PER_PAGE) {
             val region = parts[index]
             val width = page.width.toDouble() * (region.right - region.left) / UnitRegion.SCALE
             val height = page.height.toDouble() * (region.bottom - region.top) / UnitRegion.SCALE
-            val densityParts = if (page.dense || page.complexLayout || page.tableHeader != null) 2 else 1
             val overLimit = width > MAX_REGION_DIMENSION || height > MAX_REGION_DIMENSION || width * height > MAX_REGION_PIXELS
-            if ((overLimit || parts.size < densityParts) && parts.size < MAX_UNITS_PER_PAGE) {
+            if (overLimit) {
                 // Horizontal bands preserve table columns and reading order; exceptionally wide pages split vertically.
-                val horizontal = height >= width || (!overLimit && page.tableHeader != null)
+                val horizontal = height >= width || page.tableHeader != null
                 val middle = if (horizontal) (region.top + region.bottom) / 2 else (region.left + region.right) / 2
                 val first = if (horizontal) region.copy(bottom = middle) else region.copy(right = middle)
                 val second = if (horizontal) region.copy(top = middle) else region.copy(left = middle)
@@ -152,6 +180,46 @@ class DocumentUnitPlanner(val version: String = VERSION) {
         const val MAX_REGION_DIMENSION = 2048
         const val MAX_REGION_PIXELS = 4_000_000
         const val MAX_UNITS_PER_PAGE = 64
+
+        fun splitTextSlices(text: String, parts: Int): List<Pair<Int, Int>> {
+            require(parts > 0)
+            if (text.isEmpty()) return List(parts) { 0 to 0 }
+            if (parts == 1) return listOf(0 to text.length)
+            if (text.length <= parts) {
+                return (0 until parts).map { i ->
+                    val start = minOf(i, text.length)
+                    val end = minOf(i + 1, text.length)
+                    start to end
+                }
+            }
+            val length = text.length
+            val boundaries = mutableListOf(0)
+            for (i in 1 until parts) {
+                val ideal = (i.toLong() * length / parts).toInt()
+                val windowStart = maxOf(boundaries.last() + 1, ideal - 200)
+                val windowEnd = minOf(length - (parts - i), ideal + 200)
+                var best = ideal
+                if (windowStart < windowEnd) {
+                    val nlIndex = text.lastIndexOf('\n', minOf(ideal + 100, windowEnd))
+                    if (nlIndex in windowStart..windowEnd) {
+                        best = nlIndex + 1
+                    } else {
+                        val punctIndex = text.lastIndexOf('。', minOf(ideal + 50, windowEnd))
+                        if (punctIndex in maxOf(boundaries.last() + 1, ideal - 50)..windowEnd) {
+                            best = punctIndex + 1
+                        } else {
+                            val spIndex = text.lastIndexOf(' ', minOf(ideal + 25, windowEnd))
+                            if (spIndex in maxOf(boundaries.last() + 1, ideal - 50)..windowEnd) {
+                                best = spIndex + 1
+                            }
+                        }
+                    }
+                }
+                boundaries.add(best.coerceIn(boundaries.last() + 1, length - (parts - i)))
+            }
+            boundaries.add(length)
+            return (0 until parts).map { boundaries[it] to boundaries[it + 1] }
+        }
         private fun identity(vararg fields: String): String {
             val canonical = fields.joinToString("") { "${it.length}:$it" }
             return MessageDigest.getInstance("SHA-256").digest(canonical.toByteArray(Charsets.UTF_8))

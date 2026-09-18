@@ -7,3 +7,4 @@
 # Preserve license bytes for the future licenseGuard hash on every platform.
 /LICENSE -text
 /LICENSES/AGPL-3.0-only.txt -text
+app-android/src/main/assets/licenses/** -text

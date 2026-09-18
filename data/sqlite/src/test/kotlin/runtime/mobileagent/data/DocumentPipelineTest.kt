@@ -5,6 +5,7 @@ package runtime.mobileagent.data
 
 import org.junit.jupiter.api.Assertions.*
 import org.junit.jupiter.api.Test
+import runtime.mobileagent.domain.Utc
 import runtime.mobileagent.knowledge.*
 
 class DocumentPipelineTest {
@@ -367,6 +368,7 @@ class DocumentPipelineTest {
             "5 0 obj << /Type /Font /Subtype /Type1 /BaseFont /Helvetica >> endobj\ntrailer << /Root 1 0 R >>\n%%EOF").toByteArray()
     }
 
+
     private fun stage(repo:KnowledgeRepository,bytes:ByteArray):String {
         val kb=repo.ensureDefaultBase();val batch=repo.beginBatch(kb,ImportBatchKind.FILES,"synthetic pipeline")
         val job=repo.importBytes("ten.pdf","application/pdf",bytes,false,kb,pauseAt=ImportStage.COPYING)
@@ -382,6 +384,255 @@ class DocumentPipelineTest {
             append("${page+2} 0 obj << /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] /Resources << >> /Contents ${page+12} 0 R >> endobj\n")
             append("${page+12} 0 obj << /Length ${drawing.length} >>\nstream\n${drawing}endstream\nendobj\n")
         }
+        append("trailer << /Root 1 0 R >>\n%%EOF")
+    }.toByteArray()
+
+    @Test fun f1_chargedReservationAccountsForObservedTokensAndBlocksCeiling() {
+        database().use { db ->
+            val store = DocumentPipelineStore(db)
+            val unit1 = units().single()
+            val unit2 = DocumentUnitPlanner(DocumentUnitPlanner.VERSION).plan("synthetic-document-2", listOf(PlanningPage(2, "", true))).single()
+            val unit3 = DocumentUnitPlanner(DocumentUnitPlanner.VERSION).plan("synthetic-document-3", listOf(PlanningPage(3, "", true))).single()
+            val unit4 = DocumentUnitPlanner(DocumentUnitPlanner.VERSION).plan("synthetic-document-4", listOf(PlanningPage(4, "", true))).single()
+            store.materialize("j1", "synthetic-document", unit1.plannerVersion, listOf(unit1))
+            store.materialize("j2", "synthetic-document-2", unit2.plannerVersion, listOf(unit2))
+            store.materialize("j3", "synthetic-document-3", unit3.plannerVersion, listOf(unit3))
+            store.materialize("j4", "synthetic-document-4", unit4.plannerVersion, listOf(unit4))
+            store.configure("b", PipelinePolicy(tokenDispatchCeiling = 100, reservationTokensPerRequest = 20))
+
+            // Case A: UNKNOWN with input=90, output=30 (total 120) and reservation=20
+            store.prepare("j1", unit1, "b", "target", "cache-1", "req-1")
+            assertTrue(store.dispatched("req-1"))
+            val unknownMetadata = VisionDiagnosticMetadata(dispatched = true, inputTokens = 90, outputTokens = 30, reasoningTokens = 20)
+            assertTrue(store.settle("req-1", PipelineAttemptState.UNKNOWN_OUTCOME, unknownMetadata))
+
+            // Verify chargedReservation accounts for observed tokens (120 >= 20 reservation)
+            // Ceiling is 100, spent is 120, next reservation is 20 -> 20 > 100 - 120 (-20) -> BLOCKED
+            assertEquals("PIPELINE_TOKEN_DISPATCH_CEILING", store.stopReason("b"))
+            assertThrows(IllegalStateException::class.java) {
+                store.prepare("j2", unit2, "b", "target", "cache-2", "req-2")
+            }
+
+            // Verify reasoning tokens are NOT double-counted in usage: 90 + 30 = 120 (not 140)
+            assertEquals(120L, store.progress("b").usage.reservedTokens)
+            assertEquals(90L, store.progress("b").usage.inputTokens)
+            assertEquals(30L, store.progress("b").usage.outputTokens)
+
+            // Case B: In a new batch with ceiling 130, FAILED with partial usage: input=120, output=null, reservation=20
+            store.configure("b2", PipelinePolicy(tokenDispatchCeiling = 130, reservationTokensPerRequest = 20))
+            store.prepare("j3", unit3, "b2", "target", "cache-3", "req-failed-partial")
+            assertTrue(store.dispatched("req-failed-partial"))
+            assertTrue(store.settle("req-failed-partial", PipelineAttemptState.FAILED, VisionDiagnosticMetadata(dispatched = true, inputTokens = 120)))
+            // Observed lower bound is 120, reservation is 20 -> charged is 120.
+            // 20 > 130 - 120 (10) -> BLOCKED
+            assertEquals("PIPELINE_TOKEN_DISPATCH_CEILING", store.stopReason("b2"))
+
+            // Case C: UNKNOWN with input=null, output=null, reservation=20 -> charged is reservation (20)
+            store.configure("b3", PipelinePolicy(tokenDispatchCeiling = 100, reservationTokensPerRequest = 20))
+            store.prepare("j4", unit4, "b3", "target", "cache-4", "req-unknown-null")
+            assertTrue(store.dispatched("req-unknown-null"))
+            assertTrue(store.settle("req-unknown-null", PipelineAttemptState.UNKNOWN_OUTCOME, VisionDiagnosticMetadata(dispatched = true)))
+            // Spent is 20, remaining is 80, next reservation 20 <= 80 -> NOT blocked by ceiling
+            assertNull(store.stopReason("b3"))
+        }
+    }
+
+    @Test fun f2_persistedDiagnosticUsageSurvivesCrashAndReopenBeforeSettle() {
+        val file = java.nio.file.Files.createTempFile("pipeline-f2-", ".sqlite").toFile()
+        var db = JdbcSqlConnection("jdbc:sqlite:${file.absolutePath}")
+        try {
+            Migrations.apply(db)
+            val store = DocumentPipelineStore(db)
+            val unit = units().single()
+            store.materialize("j", "synthetic-document", unit.plannerVersion, listOf(unit))
+            db.execute("INSERT INTO knowledge_bases(id,name,created_at) VALUES ('kb','kb-name','now')")
+            db.execute("INSERT INTO documents(id,kb_id,blob_hash,display_name,format) VALUES ('doc','kb','asset','doc','PDF')")
+            db.execute("INSERT INTO import_jobs(id,kb_id,document_id,display_name,stage,has_images,updated_at,batch_id) VALUES ('j','kb','doc','name','VISION_PROCESSING',1,'now','b')")
+            store.configure("b", PipelinePolicy(tokenDispatchCeiling = 200, reservationTokensPerRequest = 20))
+            store.prepare("j", unit, "b", "target", "cache-crash", "req-crash")
+            assertTrue(store.dispatched("req-crash"))
+
+            // Fault Injection Window: diagnostics has written durable usage to vision_attempts,
+            // but pipeline.settle has NOT been called and pipeline_attempts has null usage.
+            db.execute(
+                "INSERT INTO vision_attempts(request_id,cache_key,job_id,asset_hash,attempt_no,status,stage,dispatch_status,input_tokens,output_tokens,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                listOf("req-crash", "cache-crash", "j", "asset", 1, "IN_PROGRESS", "NETWORK", "DISPATCHED", 90, 30, Utc.nowIso(), Utc.nowIso())
+            )
+            val preCrashAttempt = db.query("SELECT * FROM pipeline_attempts WHERE request_id='req-crash'").single()
+            assertNull(preCrashAttempt.longOrNull("input_tokens"))
+            assertNull(preCrashAttempt.longOrNull("output_tokens"))
+
+            // Simulate crash: close db and reopen
+            db.close()
+            db = JdbcSqlConnection("jdbc:sqlite:${file.absolutePath}")
+            Migrations.apply(db)
+            val restartedStore = DocumentPipelineStore(db)
+
+            // Before recover() is called, progress already coalesces durable usage facts from vision_attempts
+            assertEquals(120L, restartedStore.progress("b").usage.reservedTokens)
+
+            // Crash recovery
+            restartedStore.recover("j")
+
+            // 1. Attempt state must be UNKNOWN_OUTCOME
+            val attempt = db.query("SELECT * FROM pipeline_attempts WHERE request_id='req-crash'").single()
+            assertEquals("UNKNOWN_OUTCOME", attempt.string("state"))
+
+            // 2. Known usage facts must NOT be dropped or zeroed: 90 input, 30 output coalesced into pipeline_attempts
+            assertEquals(90L, attempt.long("input_tokens"))
+            assertEquals(30L, attempt.long("output_tokens"))
+
+            // 3. Charged tokens reflects 120 (not fallen back to 20 reservation, not double-counted 240)
+            assertEquals(120L, restartedStore.progress("b").usage.reservedTokens)
+            assertEquals(90L, restartedStore.progress("b").usage.inputTokens)
+            assertEquals(30L, restartedStore.progress("b").usage.outputTokens)
+            assertEquals(120L, restartedStore.progress("b").usage.totalTokens)
+            assertEquals(1, restartedStore.progress("b").unknown)
+
+            // 4. Terminal attempt is immutable: late response cannot settle or rewrite
+            assertFalse(restartedStore.settle("req-crash", PipelineAttemptState.SUCCEEDED, VisionDiagnosticMetadata(dispatched = true, inputTokens = 999)))
+            assertFalse(restartedStore.dispatched("req-crash"))
+            assertEquals("UNKNOWN_OUTCOME", db.query("SELECT state FROM pipeline_attempts WHERE request_id='req-crash'").single().string("state"))
+        } finally {
+            db.close()
+            file.delete()
+        }
+    }
+
+    @Test fun f3_densePageSplitsRequestTextWithinBoundsAndCoversFullOriginalText() {
+        database().use { db ->
+            val blobs = MemoryBlobSink()
+            val capturedPrompts = mutableListOf<String>()
+            val originalText = buildString {
+                for (i in 1..2000) {
+                    append("Section $i: This is detailed domain content paragraph $i with analysis and observations.\n")
+                }
+            } // ~180,000 characters
+            assertTrue(originalText.length > 50_000)
+
+            val rasterizer = object : PdfPageRasterizer, PdfUnitRasterizer {
+                override fun render(pdfBytes: ByteArray, pages: List<Int>): List<RenderedPdfPage> =
+                    pages.map { RenderedPdfPage(it, byteArrayOf(1), "image/png", 100, 100) }
+                override fun renderUnit(pdfBytes: ByteArray, unit: ProcessingUnit, limits: UnitRenderLimits): RenderedPdfPage =
+                    RenderedPdfPage(unit.page, byteArrayOf(1, 2, 3), "image/png", 100, 100)
+            }
+
+            val backend = VisionBackend { input ->
+                capturedPrompts += input.surroundingText
+                VisionOutcome.Success(
+                    VisionSuccess(ocrText = "OCR: " + input.surroundingText.take(50), semanticDescription = "Diagram", tableMarkdown = ""),
+                    VisionDiagnosticMetadata(dispatched = true, inputTokens = 50, outputTokens = 20)
+                )
+            }
+
+            val repo = KnowledgeRepository(db, blobs, pdfRasterizer = rasterizer, vision = backend, visionModelFingerprint = "target")
+            val batch = stage(repo, complexPage(originalText))
+            repo.authorizeBatchVision(batch, "target")
+            repo.processBatch(batch, true)
+
+            // Assertions:
+            // 1. Multiple units planned for the dense page
+            assertTrue(capturedPrompts.size >= 2)
+
+            // 2. Each request's surrounding text is strictly bounded (<= 8,500 characters)
+            assertTrue(capturedPrompts.all { it.length <= 8_500 }, "Request text must be bounded to <= 8,500 chars, got: ${capturedPrompts.map { it.length }}")
+
+            // 3. Complete text coverage: concatenation of all surroundingText equals the original text exactly!
+            val reconstructed = capturedPrompts.joinToString("")
+            assertEquals(originalText.trim(), reconstructed, "Slices must cover original text exactly without gaps or overlaps")
+
+            // 4. Geometric sanity: no degenerate 0-height slivers; full coverage without gaps
+            val plannedUnits = db.query("SELECT unit_json FROM pipeline_units WHERE active=1")
+                .map { kotlinx.serialization.json.Json.decodeFromString<ProcessingUnit>(it.string("unit_json")) }
+            assertEquals(capturedPrompts.size, plannedUnits.size)
+            assertTrue(plannedUnits.all { it.coverage.region.bottom > it.coverage.region.top && it.coverage.region.right > it.coverage.region.left }, "All regions must have positive dimensions")
+            val totalArea = plannedUnits.sumOf { (it.coverage.region.right - it.coverage.region.left).toLong() * (it.coverage.region.bottom - it.coverage.region.top) }
+            assertEquals(UnitRegion.SCALE.toLong() * UnitRegion.SCALE, totalArea, "Regions must cover the full page area exactly")
+
+            // 5. Recovery / re-run does NOT resend already completed units
+            val promptsCount = capturedPrompts.size
+            repo.processBatch(batch, true)
+            assertEquals(promptsCount, capturedPrompts.size, "Already succeeded units must not be re-dispatched")
+        }
+    }
+
+    @Test fun f4_localRenderFailureMarksUnitFailedWithoutDispatchAndRecovers() {
+        database().use { db ->
+            val blobs = MemoryBlobSink()
+            var networkDispatches = 0
+            var renderAttempts = 0
+            var shouldFailPage2Render = true
+
+            val rasterizer = object : PdfPageRasterizer, PdfUnitRasterizer {
+                override fun render(pdfBytes: ByteArray, pages: List<Int>): List<RenderedPdfPage> =
+                    pages.filterNot { it == 2 && shouldFailPage2Render }
+                        .map { RenderedPdfPage(it, byteArrayOf(1), "image/png", 100, 100) }
+                override fun renderUnit(pdfBytes: ByteArray, unit: ProcessingUnit, limits: UnitRenderLimits): RenderedPdfPage? {
+                    renderAttempts++
+                    if (unit.page == 2 && shouldFailPage2Render) return null
+                    return RenderedPdfPage(unit.page, byteArrayOf(1, 2, 3), "image/png", 100, 100)
+                }
+            }
+
+            val backend = VisionBackend { input ->
+                networkDispatches++
+                VisionOutcome.Success(VisionSuccess("ocr result", "desc"), VisionDiagnosticMetadata(dispatched = true, inputTokens = 10, outputTokens = 5))
+            }
+
+            val repo = KnowledgeRepository(db, blobs, pdfRasterizer = rasterizer, vision = backend, visionModelFingerprint = "target")
+            val batch = stage(repo, twoPagesPdf())
+            repo.authorizeBatchVision(batch, "target")
+
+            // First run: Page 1 succeeds with network dispatch; Page 2 renderer fails locally
+            repo.processBatch(batch, true)
+
+            // Assert: Only 1 network dispatch occurred (for Page 1); Page 2 had 0 network attempts
+            assertEquals(1, networkDispatches)
+
+            val units = db.query("SELECT page, state, failure_code, failure_phase FROM pipeline_units WHERE active=1 ORDER BY page")
+            assertEquals(2, units.size)
+            assertEquals("SUCCEEDED", units[0].string("state"))
+            assertNull(units[0].string("failure_code").ifBlank { null })
+
+            assertEquals("FAILED", units[1].string("state"))
+            assertEquals("RENDER_FAILED", units[1].string("failure_code"))
+            assertEquals("LOCAL_RENDER", units[1].string("failure_phase"))
+
+            // Assert: Pipeline progress reflects succeeded=1, failed=1, inFlight=0
+            val progress = repo.batchPipelineProgress(batch)
+            assertEquals(1, progress.succeeded)
+            assertEquals(1, progress.failed)
+            assertEquals(0, progress.inFlight)
+
+            // Repair renderer for Page 2
+            shouldFailPage2Render = false
+
+            // Re-run: resume the job
+            val job = repo.listBatchItemViews(batch).single().jobId!!
+            repo.resumeImport(job, visionConfigured = true)
+
+            // Assert: Page 1 was REUSED (0 new network dispatches), Page 2 succeeded
+            assertEquals(2, networkDispatches, "Prior succeeded unit must not be re-dispatched; only repaired unit dispatches")
+            val progressAfterResume = repo.batchPipelineProgress(batch)
+            assertEquals(2, progressAfterResume.units)
+            assertEquals(2, progressAfterResume.published)
+            assertEquals(2, progressAfterResume.succeeded)
+            assertEquals(0, progressAfterResume.failed)
+
+            // Running again reuses all saved results with 0 new network dispatches
+            repo.processBatch(batch, true)
+            assertEquals(2, networkDispatches)
+        }
+    }
+
+    private fun twoPagesPdf(): ByteArray = buildString {
+        val drawing = "0 0 100 100 re f\n"
+        append("%PDF-1.4\n1 0 obj << /Type /Catalog /Pages 2 0 R >> endobj\n")
+        append("2 0 obj << /Type /Pages /Count 2 /Kids [3 0 R 5 0 R] >> endobj\n")
+        append("3 0 obj << /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] /Contents 4 0 R >> endobj\n")
+        append("4 0 obj << /Length ${drawing.toByteArray().size} >>\nstream\n${drawing}endstream\nendobj\n")
+        append("5 0 obj << /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] /Contents 6 0 R >> endobj\n")
+        append("6 0 obj << /Length ${drawing.toByteArray().size} >>\nstream\n${drawing}endstream\nendobj\n")
         append("trailer << /Root 1 0 R >>\n%%EOF")
     }.toByteArray()
 }

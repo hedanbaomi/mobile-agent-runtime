@@ -565,7 +565,23 @@ class KnowledgeRepository(
         val recordedFormat = document.string("format")
         val format = recordedFormat.takeIf { it.isNotBlank() }?.let { runCatching { SourceFormat.valueOf(it) }.getOrNull() }
             ?: MediaKind.detect(displayName, "", payload.copyOf(minOf(payload.size, 64)))
-        val job = importJobFromRow(row, visionConfigured, stage, documentId, kbId)
+        val effectiveStage = if (stage == ImportStage.FAILED) ImportStage.COPYING else stage
+        val job = importJobFromRow(row, visionConfigured, effectiveStage, documentId, kbId).apply {
+            if (stage == ImportStage.FAILED) error = null
+        }
+        val batchId = row.string("batch_id").ifBlank { null }
+        if (stage == ImportStage.FAILED && batchId != null) {
+            synchronized(indexLock) {
+                db.execute(
+                    "UPDATE import_batches SET state = ?, error = NULL, updated_at = ? WHERE id = ? AND state = ?",
+                    listOf(ImportBatchState.PROCESSING.name, Utc.nowIso(), batchId, ImportBatchState.FAILED.name),
+                )
+                db.execute(
+                    "UPDATE import_items SET state = ?, error = NULL WHERE batch_id = ? AND job_id = ? AND state = ?",
+                    listOf(ImportItemState.PROCESSING.name, batchId, jobId, ImportItemState.FAILED.name),
+                )
+            }
+        }
         validateRequestedEmbeddingSelection(kbId, api = job.embeddingIsApi, consent = job.embeddingConsent)
         return continueImportCancellable(job, displayName, payload, format)
     }
@@ -1043,11 +1059,12 @@ class KnowledgeRepository(
         val recordedFormat = document.string("format")
         val format = recordedFormat.takeIf { it.isNotBlank() }?.let { runCatching { SourceFormat.valueOf(it) }.getOrNull() }
             ?: MediaKind.detect(displayName, "", payload.copyOf(minOf(payload.size, 64)))
+        val effectiveStage = if (stage == ImportStage.FAILED) ImportStage.COPYING else stage
         val job = ImportJob(
             id = jobId,
             knowledgeBaseId = kbId,
             documentId = documentId,
-            stage = stage,
+            stage = effectiveStage,
             hasImages = row.boolean("has_images"),
             visionConfigured = visionConfigured,
             visionConsent = row.string("vision_consent").let { it == "1" || it.equals("true", true) } ||
@@ -1055,9 +1072,20 @@ class KnowledgeRepository(
             embeddingIsApi = row.boolean("embedding_is_api"),
             embeddingConsent = row.boolean("embedding_consent"),
             localEmbeddingAvailable = true,
-            error = row.string("error").ifBlank { null },
+            error = if (stage == ImportStage.FAILED) null else row.string("error").ifBlank { null },
             consentedVisionFingerprint = runCatching { row.string("vision_binding_json") }.getOrNull()?.ifBlank { null },
         )
+        val batchId = row.string("batch_id").ifBlank { null }
+        if (stage == ImportStage.FAILED && batchId != null) {
+            db.execute(
+                "UPDATE import_batches SET state = ?, error = NULL, updated_at = ? WHERE id = ? AND state = ?",
+                listOf(ImportBatchState.PROCESSING.name, Utc.nowIso(), batchId, ImportBatchState.FAILED.name),
+            )
+            db.execute(
+                "UPDATE import_items SET state = ?, error = NULL WHERE batch_id = ? AND job_id = ? AND state = ?",
+                listOf(ImportItemState.PROCESSING.name, batchId, jobId, ImportItemState.FAILED.name),
+            )
+        }
         validateRequestedEmbeddingSelection(kbId, job.embeddingIsApi, job.embeddingConsent)
         return continueImport(job, displayName, payload, format)
         }
@@ -2427,29 +2455,40 @@ class KnowledgeRepository(
                 if(rendered == null) {
                     // Embedded image evidence is sufficient only when extraction proved no page gaps.
                     val fallback=processable.filter { it.page==unit.page }
-                    if(unit.region!=null || pageBlockers.any { it.page==unit.page } || fallback.size!=1)
+                    if(unit.region!=null || pageBlockers.any { it.page==unit.page } || fallback.size!=1) {
+                        pipeline.failUnit(job.id, unit.unitId, "RENDER_FAILED", "LOCAL_RENDER")
                         return VisionBatch.Failed("PDF unit could not be rendered within local limits")
+                    }
                     fallback.single()
                 } else ExtractedAsset("unit-${unit.unitId}","IMAGE",unit.page,
                     if(unit.region == null) "pdf-page-${unit.page}" else "pdf-unit-${unit.unitId}",
-                    rendered.bytes,rendered.mediaType,unit.nativeText)
+                    rendered.bytes,rendered.mediaType,unit.requestText.ifBlank { unit.nativeText })
             } else {
                 val source = processable.firstOrNull { it.localId == unit.sourceAssetId }
                     ?: processable.firstOrNull { it.page == unit.page }
-                    ?: return VisionBatch.Failed("Unit has no local raster source")
+                if (source == null) {
+                    pipeline.failUnit(job.id, unit.unitId, "MISSING_LOCAL_RASTER_SOURCE", "LOCAL_PREPARE")
+                    return VisionBatch.Failed("Unit has no local raster source")
+                }
                 val imageRenderer = pdfRasterizer as? ImageUnitRasterizer
                 val dimensions = imageRenderer?.imageDimensions(source.bytes)
                 val limits = runtime.mobileagent.knowledge.UnitRenderLimits()
                 val oversized = dimensions != null && (dimensions.first > limits.maxDimension || dimensions.second > limits.maxDimension || dimensions.first.toLong()*dimensions.second > limits.maxPixels)
                 if(imageRenderer != null && (unit.region != null || oversized || source.bytes.size > limits.maxEncodedBytes)) {
                     val rendered = imageRenderer.renderImageUnit(source.bytes,unit)
-                        ?: return VisionBatch.Failed("Image unit could not be rendered within local limits")
+                    if (rendered == null) {
+                        pipeline.failUnit(job.id, unit.unitId, "RENDER_FAILED", "LOCAL_RENDER")
+                        return VisionBatch.Failed("Image unit could not be rendered within local limits")
+                    }
                     source.copy(bytes=rendered.bytes,mediaType=rendered.mediaType,
-                        section=if(unit.region == null) source.section else "image-unit-${unit.unitId}")
+                        section=if(unit.region == null) source.section else "image-unit-${unit.unitId}",
+                        surroundingText=unit.requestText.ifBlank { unit.nativeText })
                 } else {
-                    if(unit.region != null || source.bytes.size > runtime.mobileagent.knowledge.UnitRenderLimits().maxEncodedBytes)
+                    if(unit.region != null || source.bytes.size > runtime.mobileagent.knowledge.UnitRenderLimits().maxEncodedBytes) {
+                        pipeline.failUnit(job.id, unit.unitId, "RENDER_LIMIT_EXCEEDED", "LOCAL_RENDER")
                         return VisionBatch.Failed("Region rendering is unavailable or image exceeds local byte limit")
-                    source
+                    }
+                    source.copy(surroundingText=unit.requestText.ifBlank { unit.nativeText })
                 }
             }
             when(val outcome = processAssets(job,listOf(asset),unit)) {
@@ -2470,7 +2509,7 @@ class KnowledgeRepository(
     private fun unitChunks(unit: ProcessingUnit, assetId: String, result: runtime.mobileagent.knowledge.VisionSuccess, section: String?): List<IndexedChunk> {
         // Planner coverage page 1 does not invent a source page for unassigned Office images.
         val sourcePage=db.query("SELECT page FROM assets WHERE id=?",listOf(assetId)).singleOrNull()?.longOrNull("page")?.toInt()
-        return VisionChunkBuilder.build(result,sourcePage,assetId,section,unit.nativeText)
+        return VisionChunkBuilder.build(result,sourcePage,assetId,section,unit.requestText.ifBlank { unit.nativeText })
             .map { IndexedChunk(it.text,it.page,it.assetIds,it.span) }
     }
 
@@ -2612,6 +2651,7 @@ class KnowledgeRepository(
                             outputTokens=metadata.outputTokens ?: latestDiagnostic.outputTokens,
                             reasoningTokens=metadata.reasoningTokens ?: latestDiagnostic.reasoningTokens)
                         if (metadata.dispatched) pipeline.dispatched(requestId)
+                        pipeline.recordUsage(requestId, metadata.inputTokens?.toLong(), metadata.outputTokens?.toLong(), metadata.reasoningTokens?.toLong())
                         runCatching { recordVisionAttempt(requestId, metadata, "IN_PROGRESS") }
                         jobBatchId(job.id)?.let { id ->
                             runCatching { importEvents(ImportBatchEvent(id, job.id, attempt,

@@ -240,6 +240,9 @@ object Migrations {
         Column("model_profiles", "context_window_source", "TEXT NOT NULL DEFAULT 'UNKNOWN' CHECK(context_window_source IN ('UNKNOWN','USER_DECLARED','PROVIDER_METADATA'))"),
         Column("model_profiles", "context_window_target", "TEXT"),
         Column("model_profiles", "context_window_checked_at", "TEXT"),
+        // v24: unit-level local failure reporting and phase
+        Column("pipeline_units", "failure_code", "TEXT"),
+        Column("pipeline_units", "failure_phase", "TEXT"),
     )
 
     fun apply(connection: SqlConnection) {

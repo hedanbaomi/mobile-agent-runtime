@@ -27,6 +27,22 @@ import runtime.mobileagent.knowledge.VisionDiagnosticMetadata
 import runtime.mobileagent.knowledge.VisionDiagnosticPhase
 import runtime.mobileagent.knowledge.VisionInput
 import runtime.mobileagent.knowledge.VisionOutcome
+import runtime.mobileagent.data.KnowledgeRepository
+import runtime.mobileagent.data.Migrations
+import runtime.mobileagent.data.SqlConnection
+import runtime.mobileagent.data.SqlRow
+import runtime.mobileagent.knowledge.ImportBatchKind
+import runtime.mobileagent.knowledge.ImportStage
+import runtime.mobileagent.knowledge.PdfPageRasterizer
+import runtime.mobileagent.knowledge.PdfUnitRasterizer
+import runtime.mobileagent.knowledge.ProcessingUnit
+import runtime.mobileagent.knowledge.RenderedPdfPage
+import runtime.mobileagent.knowledge.UnitRenderLimits
+import runtime.mobileagent.knowledge.MemoryBlobSink
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.jsonArray
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 
 class OpenAiCompatibleVisionTest {
     @Test fun httpErrorKeepsReportedUsageOnBothProtocols() {
@@ -429,4 +445,280 @@ class OpenAiCompatibleVisionTest {
         """{"choices":[{"message":{"content":"{\"ocrText\":\"ocr\",\"semanticDescription\":\"description\",\"tableMarkdown\":\"\",\"type\":\"image\"}"},"finish_reason":"stop"}],"usage":{"prompt_tokens":9,"completion_tokens":3}}"""
 
     private fun jsonHeaders() = headersOf(HttpHeaders.ContentType, "application/json")
+
+    @Test
+    fun f3_endToEndDensePageWirePayloadsAreBoundedAndReconstructOriginalDocument() {
+        val originalText = buildString {
+            for (i in 1..2000) {
+                append("Section $i: This is detailed domain content paragraph $i with analysis and observations.\n")
+            }
+        }
+        assertTrue(originalText.length > 50_000)
+
+        val interceptedContexts = mutableListOf<String>()
+        var httpRequestsCount = 0
+
+        val selected = target("dense-e2e", "model-dense-e2e")
+        val targetFingerprint = visionProfileBinding(selected.first, selected.second).fingerprint
+
+        val mockEngine = MockEngine { request ->
+            httpRequestsCount++
+            val body = (request.body as io.ktor.http.content.TextContent).text
+            val root = Json.parseToJsonElement(body).jsonObject
+            val messages = root["messages"]!!.jsonArray
+            val firstMessage = messages[0].jsonObject
+            val content = firstMessage["content"]!!.jsonArray
+            val textPart = content.first { it.jsonObject["type"]?.jsonPrimitive?.content == "text" }.jsonObject["text"]!!.jsonPrimitive.content
+            val extractedContext = textPart.substringAfter("<context>").substringBefore("</context>")
+            interceptedContexts += extractedContext
+
+            respond(
+                """{"choices":[{"message":{"content":"{\"ocrText\":\"ocr\",\"semanticDescription\":\"description\",\"tableMarkdown\":\"\",\"type\":\"image\"}"},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":5}}""",
+                HttpStatusCode.OK,
+                jsonHeaders(),
+            )
+        }
+
+        val visionBackend = backend(listOf(selected), mockEngine)
+
+        val rasterizer = object : PdfPageRasterizer, PdfUnitRasterizer {
+            override fun render(pdfBytes: ByteArray, pages: List<Int>): List<RenderedPdfPage> =
+                pages.map { RenderedPdfPage(it, byteArrayOf(1), "image/png", 100, 100) }
+            override fun renderUnit(pdfBytes: ByteArray, unit: ProcessingUnit, limits: UnitRenderLimits): RenderedPdfPage =
+                RenderedPdfPage(unit.page, byteArrayOf(1, 2, 3), "image/png", 100, 100)
+        }
+
+        JdbcConnection().use { db ->
+            Migrations.apply(db)
+            val blobs = MemoryBlobSink()
+            val repo = KnowledgeRepository(
+                db = db,
+                blobs = blobs,
+                pdfRasterizer = rasterizer,
+                vision = visionBackend,
+                visionModelFingerprint = targetFingerprint,
+                visionBinding = { visionProfileBinding(selected.first, selected.second) },
+            )
+
+            val kb = repo.ensureDefaultBase()
+            val batch = repo.beginBatch(kb, ImportBatchKind.FILES, "f3-e2e-batch")
+            val pdfBytes = complexPagePdf(originalText)
+            val job = repo.importBytes("dense.pdf", "application/pdf", pdfBytes, false, kb, pauseAt = ImportStage.COPYING)
+            repo.bindJobToBatch(batch, job, "dense.pdf")
+            repo.authorizeBatchVision(batch, targetFingerprint)
+
+            // First run
+            repo.processBatch(batch, true)
+
+            // Assertions on intercepted wire payloads:
+            // 1. Multiple units planned for the dense page
+            assertTrue(interceptedContexts.size >= 2, "Expected multiple units, got: ${interceptedContexts.size}")
+
+            // 2. Each wire payload's <context> is strictly bounded (<= 8,500 characters)
+            assertTrue(
+                interceptedContexts.all { it.length <= 8_500 },
+                "Wire <context> text must be bounded to <= 8,500 chars, got: ${interceptedContexts.map { it.length }}"
+            )
+
+            // 3. Complete text coverage: concatenation of all intercepted contexts equals original text exactly
+            val reconstructed = interceptedContexts.joinToString("")
+            assertEquals(originalText.trim(), reconstructed, "Wire context slices must reconstruct original text exactly")
+
+            // 4. Recovery/re-run sends 0 additional HTTP requests for already processed units
+            val requestsAfterFirstRun = httpRequestsCount
+            repo.processBatch(batch, true)
+            assertEquals(requestsAfterFirstRun, httpRequestsCount, "Re-run must send 0 additional HTTP requests")
+        }
+    }
+
+    @Test
+    fun f3_endToEndOrdinaryNativeAndScannedPageWireVerification() {
+        val selected = target("ord-e2e", "model-ord-e2e")
+        val targetFingerprint = visionProfileBinding(selected.first, selected.second).fingerprint
+        var httpRequestsCount = 0
+        val interceptedContexts = mutableListOf<String>()
+
+        val mockEngine = MockEngine { request ->
+            httpRequestsCount++
+            val body = (request.body as io.ktor.http.content.TextContent).text
+            val root = Json.parseToJsonElement(body).jsonObject
+            val messages = root["messages"]!!.jsonArray
+            val firstMessage = messages[0].jsonObject
+            val content = firstMessage["content"]!!.jsonArray
+            val textPart = content.first { it.jsonObject["type"]?.jsonPrimitive?.content == "text" }.jsonObject["text"]!!.jsonPrimitive.content
+            val extractedContext = textPart.substringAfter("<context>").substringBefore("</context>")
+            interceptedContexts += extractedContext
+
+            respond(
+                """{"choices":[{"message":{"content":"{\"ocrText\":\"scanned content\",\"semanticDescription\":\"scanned page\",\"tableMarkdown\":\"\",\"type\":\"image\"}"},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":5}}""",
+                HttpStatusCode.OK,
+                jsonHeaders(),
+            )
+        }
+
+        val visionBackend = backend(listOf(selected), mockEngine)
+        val rasterizer = object : PdfPageRasterizer, PdfUnitRasterizer {
+            override fun render(pdfBytes: ByteArray, pages: List<Int>): List<RenderedPdfPage> =
+                pages.map { RenderedPdfPage(it, byteArrayOf(1), "image/png", 100, 100) }
+            override fun renderUnit(pdfBytes: ByteArray, unit: ProcessingUnit, limits: UnitRenderLimits): RenderedPdfPage =
+                RenderedPdfPage(unit.page, byteArrayOf(1, 2, 3), "image/png", 100, 100)
+        }
+
+        JdbcConnection().use { db ->
+            Migrations.apply(db)
+            val blobs = MemoryBlobSink()
+            val repo = KnowledgeRepository(
+                db = db,
+                blobs = blobs,
+                pdfRasterizer = rasterizer,
+                vision = visionBackend,
+                visionModelFingerprint = targetFingerprint,
+                visionBinding = { visionProfileBinding(selected.first, selected.second) },
+            )
+
+            // 1. Ordinary native page (text only, needsVision = false)
+            val kb = repo.ensureDefaultBase()
+            val nativeBatch = repo.beginBatch(kb, ImportBatchKind.FILES, "native-batch")
+            val nativePdf = runtime.mobileagent.knowledge.PdfParser.writeSimpleTextPdf("Pure native text document without visual elements.")
+            val nativeJob = repo.importBytes("native.pdf", "application/pdf", nativePdf, false, kb, pauseAt = ImportStage.COPYING)
+            repo.bindJobToBatch(nativeBatch, nativeJob, "native.pdf")
+            repo.authorizeBatchVision(nativeBatch, targetFingerprint)
+            repo.processBatch(nativeBatch, true)
+
+            // Pure native page must NOT dispatch any HTTP requests to vision provider!
+            assertEquals(0, httpRequestsCount, "Native page without visual elements must produce 0 vision requests")
+            assertEquals(1, repo.batchPipelineProgress(nativeBatch).published)
+
+            // 2. Scanned page (image only, needsVision = true)
+            val scannedBatch = repo.beginBatch(kb, ImportBatchKind.FILES, "scanned-batch")
+            val scannedPdf = runtime.mobileagent.knowledge.PdfParser.writePdfWithImageXObject("")
+            val scannedJob = repo.importBytes("scan.pdf", "application/pdf", scannedPdf, false, kb, pauseAt = ImportStage.COPYING)
+            repo.bindJobToBatch(scannedBatch, scannedJob, "scan.pdf")
+            repo.authorizeBatchVision(scannedBatch, targetFingerprint)
+            repo.processBatch(scannedBatch, true)
+
+            // Scanned page dispatches exactly 1 bounded wire request
+            assertEquals(1, httpRequestsCount, "Scanned page must dispatch exactly 1 vision request")
+            assertEquals(1, interceptedContexts.size)
+            assertTrue(interceptedContexts[0].isEmpty(), "Scanned page wire context should have empty surrounding text")
+            assertEquals(1, repo.batchPipelineProgress(scannedBatch).published)
+
+            // Recovery/re-run sends 0 additional HTTP requests
+            repo.processBatch(scannedBatch, true)
+            assertEquals(1, httpRequestsCount, "Re-run of scanned page must send 0 additional HTTP requests")
+        }
+    }
+
+    @Test
+    fun f3_endToEndMixedPageWireVerification() {
+        val selected = target("mixed-e2e", "model-mixed-e2e")
+        val targetFingerprint = visionProfileBinding(selected.first, selected.second).fingerprint
+        var httpRequestsCount = 0
+        val interceptedContexts = mutableListOf<String>()
+
+        val mockEngine = MockEngine { request ->
+            httpRequestsCount++
+            val body = (request.body as io.ktor.http.content.TextContent).text
+            val root = Json.parseToJsonElement(body).jsonObject
+            val messages = root["messages"]!!.jsonArray
+            val firstMessage = messages[0].jsonObject
+            val content = firstMessage["content"]!!.jsonArray
+            val textPart = content.first { it.jsonObject["type"]?.jsonPrimitive?.content == "text" }.jsonObject["text"]!!.jsonPrimitive.content
+            val extractedContext = textPart.substringAfter("<context>").substringBefore("</context>")
+            interceptedContexts += extractedContext
+
+            respond(
+                """{"choices":[{"message":{"content":"{\"ocrText\":\"mixed content\",\"semanticDescription\":\"chart with caption\",\"tableMarkdown\":\"\",\"type\":\"image\"}"},"finish_reason":"stop"}],"usage":{"prompt_tokens":15,"completion_tokens":8}}""",
+                HttpStatusCode.OK,
+                jsonHeaders(),
+            )
+        }
+
+        val visionBackend = backend(listOf(selected), mockEngine)
+        val rasterizer = object : PdfPageRasterizer, PdfUnitRasterizer {
+            override fun render(pdfBytes: ByteArray, pages: List<Int>): List<RenderedPdfPage> =
+                pages.map { RenderedPdfPage(it, byteArrayOf(1), "image/png", 100, 100) }
+            override fun renderUnit(pdfBytes: ByteArray, unit: ProcessingUnit, limits: UnitRenderLimits): RenderedPdfPage =
+                RenderedPdfPage(unit.page, byteArrayOf(1, 2, 3), "image/png", 100, 100)
+        }
+
+        JdbcConnection().use { db ->
+            Migrations.apply(db)
+            val blobs = MemoryBlobSink()
+            val repo = KnowledgeRepository(
+                db = db,
+                blobs = blobs,
+                pdfRasterizer = rasterizer,
+                vision = visionBackend,
+                visionModelFingerprint = targetFingerprint,
+                visionBinding = { visionProfileBinding(selected.first, selected.second) },
+            )
+
+            val kb = repo.ensureDefaultBase()
+            val batch = repo.beginBatch(kb, ImportBatchKind.FILES, "mixed-batch")
+            val mixedPdf = runtime.mobileagent.knowledge.PdfParser.writeTextAndInlineImagePdf("Figure 1: Quarterly revenue trends.")
+            val job = repo.importBytes("mixed.pdf", "application/pdf", mixedPdf, false, kb, pauseAt = ImportStage.COPYING)
+            repo.bindJobToBatch(batch, job, "mixed.pdf")
+            repo.authorizeBatchVision(batch, targetFingerprint)
+            repo.processBatch(batch, true)
+
+            // Mixed page dispatches 1 HTTP request with native caption in <context>
+            assertEquals(1, httpRequestsCount, "Mixed page must dispatch exactly 1 vision request")
+            assertEquals(1, interceptedContexts.size)
+            assertTrue(interceptedContexts[0].contains("Figure 1: Quarterly revenue trends."), "Wire context must contain native caption")
+            assertEquals(1, repo.batchPipelineProgress(batch).published)
+
+            // Recovery/re-run sends 0 additional HTTP requests
+            repo.processBatch(batch, true)
+            assertEquals(1, httpRequestsCount, "Re-run of mixed page must send 0 additional HTTP requests")
+        }
+    }
+
+    private fun complexPagePdf(text: String): ByteArray {
+        val escaped = text.replace("\\", "\\\\").replace("(", "\\(").replace(")", "\\)")
+        val content = "BT /F1 12 Tf 10 10 Td ($escaped) Tj ET\n" + "0 0 10 10 re f\n".repeat(12)
+        return ("%PDF-1.4\n1 0 obj << /Type /Catalog /Pages 2 0 R >> endobj\n" +
+            "2 0 obj << /Type /Pages /Count 1 /Kids [3 0 R] >> endobj\n" +
+            "3 0 obj << /Type /Page /Parent 2 0 R /MediaBox [0 0 600 800] /Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >> endobj\n" +
+            "4 0 obj << /Length ${content.toByteArray().size} >>\nstream\n${content}endstream\nendobj\n" +
+            "5 0 obj << /Type /Font /Subtype /Type1 /BaseFont /Helvetica >> endobj\ntrailer << /Root 1 0 R >>\n%%EOF").toByteArray()
+    }
+
+    private class JdbcConnection : SqlConnection, AutoCloseable {
+        private val connection = java.sql.DriverManager.getConnection("jdbc:sqlite::memory:").apply {
+            createStatement().use { it.execute("PRAGMA foreign_keys=ON") }
+        }
+        override fun execute(sql: String, args: List<Any?>) {
+            connection.prepareStatement(sql).use { statement ->
+                args.forEachIndexed { index, value -> statement.setObject(index + 1, value) }
+                statement.execute()
+            }
+        }
+        override fun query(sql: String, args: List<Any?>): List<SqlRow> = connection.prepareStatement(sql).use { statement ->
+            args.forEachIndexed { index, value -> statement.setObject(index + 1, value) }
+            statement.executeQuery().use { result ->
+                buildList {
+                    while (result.next()) add(SqlRow((1..result.metaData.columnCount).associate {
+                        result.metaData.getColumnLabel(it) to result.getObject(it)
+                    }))
+                }
+            }
+        }
+        override fun <T> transaction(block: () -> T): T {
+            if (!connection.autoCommit) return block()
+            val prev = connection.autoCommit
+            connection.autoCommit = false
+            return try {
+                val result = block()
+                connection.commit()
+                result
+            } catch (t: Throwable) {
+                connection.rollback()
+                throw t
+            } finally {
+                connection.autoCommit = prev
+            }
+        }
+        override fun close() = connection.close()
+    }
 }

@@ -6,7 +6,10 @@
 .gradle/
 **/build/
 **/build/**
-.tmp-kotlin-check/
+# Local scratch trees, caches and tooling artifacts; never part of the product.
+.tmp-*/
+%SystemDrive%/
+.workbuddy/
 **/__pycache__/
 local.properties
 .idea/

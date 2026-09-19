@@ -60,7 +60,10 @@ class KnowledgeIndexScaleDeviceTest {
     @Test(timeout = 420_000)
     fun scale10k() = runScale(10_000)
 
-    @Test(timeout = 1_200_000)
+    // Includes three full constructions (initial, rebuild, cache miss).
+    // Unoptimized Debug JNI on an emulator can exceed 20 minutes at 50k;
+    // timings are recorded rather than treated as a performance threshold.
+    @Test(timeout = 3_600_000)
     fun scale50k() = runScale(50_000)
 
     /**
@@ -87,6 +90,7 @@ class KnowledgeIndexScaleDeviceTest {
         var identity: VectorIndexSnapshotIdentity? = null
         var javaAfterBuild = 0L
         var nativeAfterBuild = 0L
+        val memoryAfterBuild = Debug.MemoryInfo()
         try {
             assertThrows(IllegalArgumentException::class.java) { built.add("rejected-nan", FloatArray(dim) { Float.NaN }) }
             val buildMs = elapsed {
@@ -103,6 +107,7 @@ class KnowledgeIndexScaleDeviceTest {
             queryP95 = queryTimings[(queryTimings.size * 95) / 100]
             javaAfterBuild = usedHeapBytes()
             nativeAfterBuild = nativeHeapBytes()
+            Debug.getMemoryInfo(memoryAfterBuild)
             saveMs = elapsed { identity = built.saveSnapshot(snapshot) }
             Log.i(TAG, "PHASE chunks=$count saveMs=$saveMs")
             snapshotBytes = snapshot.length()
@@ -184,6 +189,12 @@ class KnowledgeIndexScaleDeviceTest {
                     "snapshotBytes" to snapshotBytes,
                     "javaHeapBuildDeltaBytes" to (javaAfterBuild - heapBefore),
                     "nativeHeapBuildDeltaBytes" to (nativeAfterBuild - nativeBefore),
+                    // Absolute samples make GC-sensitive deltas interpretable.
+                    // PSS is process-wide and is not an index-only peak.
+                    "javaHeapAfterBuildBytes" to javaAfterBuild,
+                    "nativeHeapAfterBuildBytes" to nativeAfterBuild,
+                    "processPssAfterBuildKiB" to memoryAfterBuild.totalPss,
+                    "nativePssAfterBuildKiB" to memoryAfterBuild.nativePss,
                     "snapshotHashVerified" to true,
                     "corruptRejected" to true,
                     "missingRejected" to true,

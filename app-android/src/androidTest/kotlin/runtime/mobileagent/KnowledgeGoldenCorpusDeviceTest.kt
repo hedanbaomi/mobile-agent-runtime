@@ -6,6 +6,10 @@ package runtime.mobileagent
 import android.content.Context
 import android.content.ContextWrapper
 import android.graphics.BitmapFactory
+import android.graphics.Bitmap
+import android.graphics.Canvas
+import android.graphics.Color
+import android.graphics.Paint
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import java.io.File
@@ -370,7 +374,24 @@ private fun deviceWideTableMarkdown(): String {
 
 /** Deterministic, self-authored PDF writer mirroring the project's own test writer shape. */
 private object DeviceGoldenPdf {
-    private val JPEG_STUB = byteArrayOf(0xFF.toByte(), 0xD8.toByte(), 0xFF.toByte(), 0xD9.toByte())
+    // A valid, visible raster page: an SOI/EOI-only JPEG can silently render
+    // blank and would exercise broken-image handling instead of a scan.
+    private val scanJpeg: ByteArray by lazy {
+        val bitmap = Bitmap.createBitmap(600, 600, Bitmap.Config.ARGB_8888)
+        try {
+            bitmap.eraseColor(Color.WHITE)
+            val canvas = Canvas(bitmap)
+            val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.BLACK; textSize = 24f }
+            listOf("Scanned knowledge page", "Item       Quantity       Note", "Cobalt     12             retained",
+                "Amber      30             evidence", "E = mc^2", "Original raster text and table").forEachIndexed { index, line ->
+                canvas.drawText(line, 20f, 50f + index * 65f, paint)
+            }
+            java.io.ByteArrayOutputStream().use { output ->
+                check(bitmap.compress(Bitmap.CompressFormat.JPEG, 95, output))
+                output.toByteArray()
+            }
+        } finally { bitmap.recycle() }
+    }
 
     data class Page(
         val runs: List<String> = emptyList(),
@@ -410,9 +431,9 @@ private object DeviceGoldenPdf {
         objects += text("$fontObject 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>\nendobj\n")
         if (pages.any { it.image }) {
             objects += text(
-                "$imageObject 0 obj\n<< /Type /XObject /Subtype /Image /Width 1 /Height 1 " +
-                    "/ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /DCTDecode /Length ${JPEG_STUB.size} >>\nstream\n",
-            ) + JPEG_STUB + text("\nendstream\nendobj\n")
+                "$imageObject 0 obj\n<< /Type /XObject /Subtype /Image /Width 600 /Height 600 " +
+                    "/ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /DCTDecode /Length ${scanJpeg.size} >>\nstream\n",
+            ) + scanJpeg + text("\nendstream\nendobj\n")
         }
         val out = java.io.ByteArrayOutputStream()
         out.write(text("%PDF-1.4\n"))
@@ -443,7 +464,7 @@ private object DeviceGoldenPdf {
             }
             builder.append("ET\n")
         }
-        if (page.image) builder.append("q 100 0 0 100 72 400 cm /Im1 Do Q\n")
+        if (page.image) builder.append("q 480 0 0 480 72 180 cm /Im1 Do Q\n")
         if (page.vector) builder.append("0 0 100 100 re f\n")
         return builder.toString().toByteArray(Charsets.ISO_8859_1)
     }

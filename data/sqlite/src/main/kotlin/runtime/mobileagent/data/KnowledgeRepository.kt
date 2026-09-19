@@ -4001,36 +4001,20 @@ class KnowledgeRepository(
         val queryVec = queryVector?.copyOf() ?: selectedEmbedder.embed(query)
         validateEmbeddingVector(queryVec, selectedEmbedder.dimension)
         onQueryVectorReady?.invoke(queryVec.copyOf())
-        // Metadata-only member load (no blobs): the id set validates the
-        // cached ANN handle, so repeated queries never re-read vectors.
-        val members = db.query(
+        // Membership needs IDs only. Retaining every chunk body here can be
+        // larger than the index itself (50k ordinary 1800-char chunks).
+        // Fetch text/provenance only for native matches, under the same pin.
+        val ids = db.query(
             """
-            SELECT chunks.id AS chunk_id, documents.id AS document_id, chunks.text AS text,
-                   chunks.document_version_id AS version_id,
-                   chunks.page AS page, chunks.asset_ids AS asset_ids, chunks.source_span AS source_span
+            SELECT chunks.id AS chunk_id
             FROM generation_members
             JOIN chunks ON chunks.id = generation_members.chunk_id
             JOIN documents ON documents.active_version_id = chunks.document_version_id
             WHERE generation_members.generation_id = ? AND documents.kb_id = ? AND documents.deleted_at IS NULL
             """.trimIndent(),
             listOf(generation, kbId),
-        )
-        val byId = linkedMapOf<String, SearchHit>()
-        members.forEach { row ->
-            byId[row.string("chunk_id")] = SearchHit(
-                chunkId = row.string("chunk_id"),
-                documentId = row.string("document_id"),
-                text = row.string("text"),
-                score = 0.0,
-                knowledgeBaseId = kbId,
-                documentVersionId = row.string("version_id"),
-                assetId = sourceAssetForHit(row),
-                page = row.string("page").toIntOrNull(),
-                sourceSpan = row.string("source_span").ifBlank { null },
-            )
-        }
-        if (byId.isEmpty()) return emptyList()
-        val ids = byId.keys.toSet()
+        ).mapTo(linkedSetOf()) { it.string("chunk_id") }
+        if (ids.isEmpty()) return emptyList()
         val key = VectorIndexCache.Key(kbId, selectedEmbedder.spaceId, selectedEmbedder.dimension, generation)
         // Borrowed-handle lease: the search runs while the lease is held, so
         // eviction/invalidation/replacement cannot free the native handle
@@ -4043,7 +4027,31 @@ class KnowledgeRepository(
         // serves — a degraded ranking, never resurrected data.
         try {
             vectorIndexCache.getOrBuild(key, ids) { buildVectorIndex(key, ids, selectedEmbedder) }.use { lease ->
-                return lease.index.search(queryVec, topK).map { (id, score) -> byId.getValue(id).copy(score = score.toDouble()) }
+                val matches = lease.index.search(queryVec, topK)
+                if (matches.isEmpty()) return emptyList()
+                val placeholders = matches.joinToString(",") { "?" }
+                val byId = db.query(
+                    """
+                    SELECT chunks.id AS chunk_id, documents.id AS document_id, chunks.text AS text,
+                           chunks.document_version_id AS version_id,
+                           chunks.page AS page, chunks.asset_ids AS asset_ids, chunks.source_span AS source_span
+                    FROM generation_members
+                    JOIN chunks ON chunks.id = generation_members.chunk_id
+                    JOIN documents ON documents.active_version_id = chunks.document_version_id
+                    WHERE generation_members.generation_id = ? AND documents.kb_id = ? AND documents.deleted_at IS NULL
+                      AND chunks.id IN ($placeholders)
+                    """.trimIndent(),
+                    listOf(generation, kbId) + matches.map { it.first },
+                ).associateBy { it.string("chunk_id") }
+                // A concurrent removal may hide a match; never resurrect it
+                // from a body read before the native query began.
+                return matches.mapNotNull { (id, score) ->
+                    val row = byId[id] ?: return@mapNotNull null
+                    SearchHit(id, row.string("document_id"), row.string("text"), score.toDouble(),
+                        knowledgeBaseId = kbId, documentVersionId = row.string("version_id"),
+                        assetId = sourceAssetForHit(row), page = row.string("page").toIntOrNull(),
+                        sourceSpan = row.string("source_span").ifBlank { null })
+                }
             }
         } catch (_: runtime.mobileagent.knowledge.StaleVectorBuildException) {
             warnings += "Knowledge base $kbId vector index changed during retrieval; vector matches omitted"
@@ -4063,41 +4071,65 @@ class KnowledgeRepository(
         ids: Set<String>,
         selectedEmbedder: TextEmbedder,
     ): VectorIndexPort {
-        val rows = db.query(
-            """
-            SELECT embeddings.chunk_id AS chunk_id, embeddings.vector_blob AS vector_blob,
-                   embeddings.content_hash AS embedding_hash, chunks.content_hash AS chunk_hash
+        val memberJoin = """
             FROM generation_members
             JOIN embeddings ON embeddings.chunk_id = generation_members.chunk_id AND embeddings.space_id = generation_members.space_id
             JOIN chunks ON chunks.id = generation_members.chunk_id
             JOIN documents ON documents.active_version_id = chunks.document_version_id
             WHERE generation_members.generation_id = ? AND documents.kb_id = ? AND documents.deleted_at IS NULL
-            """.trimIndent(),
-            listOf(key.generationId, key.knowledgeBaseId),
-        )
+        """.trimIndent()
+        val memberArgs = listOf(key.generationId, key.knowledgeBaseId)
+        // Never retain the entire SQLite vector set alongside the native index
+        // and its Kotlin scoring vectors. 50k x 384 exhausted a 192 MiB heap.
+        // Keyset batches bound temporary BLOBs even when restoring a snapshot.
+        fun scanVectors(consume: (SqlRow, ByteArray) -> Unit) {
+            var afterId: String? = null
+            while (true) {
+                val afterClause = if (afterId == null) "" else " AND generation_members.chunk_id > ?"
+                val rows = db.query(
+                    "SELECT embeddings.chunk_id AS chunk_id, embeddings.vector_blob AS vector_blob, " +
+                        "embeddings.content_hash AS embedding_hash, chunks.content_hash AS chunk_hash, " +
+                        "generation_members.space_id AS member_space " + memberJoin + afterClause +
+                        " ORDER BY generation_members.chunk_id LIMIT ?",
+                    memberArgs + listOfNotNull(afterId) + listOf(512),
+                )
+                if (rows.isEmpty()) break
+                rows.forEach { row ->
+                    check(row.string("member_space") == key.spaceId) { "INDEX_VECTOR_SPACE_MISMATCH" }
+                    check(row.string("embedding_hash") == row.string("chunk_hash")) { "INDEX_VECTOR_CONTENT_MISMATCH" }
+                    val bytes = embeddingBytes(row)
+                    validateEmbeddingBytes(bytes, selectedEmbedder.dimension)
+                    consume(row, bytes)
+                }
+                afterId = rows.last().string("chunk_id")
+                if (rows.size < 512) break
+            }
+        }
         fun freshIndex() = vectorIndexFactory?.create(key.spaceId, key.dimension, ids.size.coerceAtLeast(1))
             ?: CosineVectorIndexPort(key.spaceId, key.dimension)
         var index = freshIndex()
         try {
-            check(rows.map { it.string("chunk_id") }.toSet() == ids && rows.size == ids.size) {
+            check(db.query("SELECT COUNT(*) AS n " + memberJoin, memberArgs).single().long("n") == ids.size.toLong()) {
                 "INDEX_VECTOR_MEMBERSHIP_MISMATCH: SQLite generation is incomplete"
             }
-            val ordered = rows.sortedBy { it.string("chunk_id") }
+            val remainingIds = ids.toMutableSet()
+            val orderedIds = ArrayList<String>(ids.size)
             // The disposable file identity includes SQLite vector bytes, not just
             // count/IDs, so even an in-place truth change cannot load a stale graph.
             val digest = java.security.MessageDigest.getInstance("SHA-256")
             digest.update("${key.knowledgeBaseId}|${key.spaceId}|${key.dimension}|${key.generationId}".toByteArray(Charsets.UTF_8))
-            ordered.forEach { row ->
-                check(row.string("embedding_hash") == row.string("chunk_hash")) { "INDEX_VECTOR_CONTENT_MISMATCH" }
-                val bytes = embeddingBytes(row)
-                validateEmbeddingBytes(bytes, selectedEmbedder.dimension)
-                digest.update(row.string("chunk_id").toByteArray(Charsets.UTF_8))
+            scanVectors { row, bytes ->
+                val id = row.string("chunk_id")
+                check(remainingIds.remove(id)) { "INDEX_VECTOR_MEMBERSHIP_MISMATCH" }
+                orderedIds += id
+                digest.update(id.toByteArray(Charsets.UTF_8))
                 digest.update(bytes)
             }
+            check(remainingIds.isEmpty()) { "INDEX_VECTOR_MEMBERSHIP_MISMATCH" }
             val kbPrefix = sha256Hex(key.knowledgeBaseId.toByteArray(Charsets.UTF_8)) + "-"
             val fingerprint = digest.digest().joinToString("") { "%02x".format(it.toInt() and 255) }
             val snapshot = vectorIndexDirectory?.let { File(it, "$kbPrefix$fingerprint.idx") }
-            val identity = runtime.mobileagent.knowledge.VectorIndexSnapshotIdentity(key.spaceId, key.dimension, ordered.map { it.string("chunk_id") })
+            val identity = runtime.mobileagent.knowledge.VectorIndexSnapshotIdentity(key.spaceId, key.dimension, orderedIds)
             if (snapshot?.isFile == true && index is runtime.mobileagent.knowledge.VectorIndexSnapshotPort) {
                 try {
                     (index as runtime.mobileagent.knowledge.VectorIndexSnapshotPort).loadSnapshot(snapshot, identity)
@@ -4110,13 +4142,21 @@ class KnowledgeRepository(
                     index = freshIndex()
                 }
             }
-            ordered.forEach { row ->
+            var inserted = 0
+            val buildDigest = java.security.MessageDigest.getInstance("SHA-256")
+            buildDigest.update("${key.knowledgeBaseId}|${key.spaceId}|${key.dimension}|${key.generationId}".toByteArray(Charsets.UTF_8))
+            scanVectors { row, bytes ->
                 val id = row.string("chunk_id")
-                check(row.string("embedding_hash") == row.string("chunk_hash")) { "INDEX_VECTOR_CONTENT_MISMATCH" }
-                val bytes = embeddingBytes(row)
-                validateEmbeddingBytes(bytes, selectedEmbedder.dimension)
+                check(orderedIds.getOrNull(inserted) == id) { "INDEX_VECTOR_MEMBERSHIP_MISMATCH" }
+                buildDigest.update(id.toByteArray(Charsets.UTF_8))
+                buildDigest.update(bytes)
                 val vector = bytesToFloats(bytes, selectedEmbedder.dimension)
                 index.add(id, vector)
+                inserted++
+            }
+            check(inserted == ids.size) { "INDEX_VECTOR_MEMBERSHIP_MISMATCH" }
+            check(buildDigest.digest().joinToString("") { "%02x".format(it.toInt() and 255) } == fingerprint) {
+                "INDEX_VECTOR_CONTENT_CHANGED_DURING_BUILD"
             }
             indexSnapshotRebuilds.incrementAndGet()
             if (snapshot != null && index is runtime.mobileagent.knowledge.VectorIndexSnapshotPort) {

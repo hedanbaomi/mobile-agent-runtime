@@ -10,6 +10,12 @@ endif()
 
 add_library(usearch_jni SHARED UsearchJni.cpp)
 target_compile_features(usearch_jni PRIVATE cxx_std_17)
+# USearch is header-only, so its distance/search loops inherit this target's
+# flags. Debug is also the native fallback for the local review APK. Keep -g
+# and ordinary safety checks, but avoid minutes-long scalar index builds in
+# those app variants. No fast-math or assertion changes; Release keeps its
+# toolchain optimization settings.
+target_compile_options(usearch_jni PRIVATE "$<$<CONFIG:Debug>:-O2>")
 target_compile_definitions(
     usearch_jni PRIVATE
     USEARCH_USE_OPENMP=0

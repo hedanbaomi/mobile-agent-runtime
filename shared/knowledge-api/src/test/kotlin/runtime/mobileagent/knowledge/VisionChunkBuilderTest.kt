@@ -41,8 +41,9 @@ class VisionChunkBuilderTest {
         assertTrue(parts.all { it.text.length <= VisionChunkBuilder.TARGET_CHARS }, "lengths=${parts.map { it.text.length }}")
         assertTrue(parts.all { it.text.isNotBlank() })
         // Every fragment stays traceable to the original page/asset/section.
-        assertTrue(parts.all { it.page == 71 && it.assetIds == listOf("asset-71") })
-        assertTrue(parts.all { it.span?.contains("page:71") == true && it.span?.contains("section:chapter-3") == true })
+        assertTrue(parts.all { it.page == 71 })
+        assertTrue(parts.filter { it.part != "context" }.all { it.assetIds == listOf("asset-71") && it.span?.contains("section:chapter-3") == true })
+        assertTrue(parts.filter { it.part == "context" }.all { it.assetIds.isEmpty() && it.span?.contains("association:PAGE_CONTEXT") == true })
         // The components stay distinguishable instead of being fused.
         assertEquals(setOf("description", "ocr", "table", "context"), parts.map { it.part }.toSet())
     }

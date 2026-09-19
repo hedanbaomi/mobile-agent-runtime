@@ -175,6 +175,7 @@ class AppContainer(app: MobileAgentApp) :
         },
         pdfRasterizer = AndroidPdfRendererAdapter(app),
         vectorIndexFactory = UsearchVectorIndexFactory(),
+        vectorIndexDirectory = File(app.cacheDir, "knowledge-index"),
         vision = OpenAiCompatibleVision(http, profiles, secrets),
         visionBinding = {
             profiles.visionBinding()?.let { (provider, model) -> visionProfileBinding(provider, model) }

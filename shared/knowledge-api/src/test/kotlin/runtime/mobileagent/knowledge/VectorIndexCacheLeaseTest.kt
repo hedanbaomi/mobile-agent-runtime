@@ -389,4 +389,84 @@ class VectorIndexCacheLeaseTest {
         )
         cache.close()
     }
+    /**
+     * An index that reports a vector count different from the member set it
+     * claims is a partial build.  It must be closed and never published, so no
+     * query can ever be answered from an incomplete generation.
+     */
+    @Test
+    fun publishRejectsIncompleteIndexAndClosesItOnce() {
+        val cache = VectorIndexCache(null, maxEntries = 4)
+        val partial = ReportedIndex(reported = 1)
+        val failure = assertThrows(IncompleteVectorIndexException::class.java) {
+            cache.publish(key(), setOf("doc1", "doc2"), partial)
+        }
+        assertEquals("kbA", failure.knowledgeBaseId)
+        assertEquals(2, failure.expectedVectors)
+        assertEquals(1, failure.actualVectors)
+        assertEquals(1, partial.closeCount.get())
+        assertEquals(1L, cache.stats().incompleteRejects)
+        assertEquals(0L, cache.stats().builds)
+        assertNull(cache.acquire(key(), setOf("doc1", "doc2")))
+        cache.close()
+    }
+
+    @Test
+    fun getOrBuildRejectsIncompleteIndexAndClosesItOnce() {
+        val cache = VectorIndexCache(null, maxEntries = 4)
+        val partial = ReportedIndex(reported = 1)
+        assertThrows(IncompleteVectorIndexException::class.java) {
+            cache.getOrBuild(key(), setOf("doc1", "doc2")) { partial }
+        }
+        assertEquals(1, partial.closeCount.get())
+        assertEquals(1L, cache.stats().incompleteRejects)
+        assertEquals(0L, cache.stats().builds)
+        assertNull(cache.acquire(key(), setOf("doc1", "doc2")))
+        cache.close()
+    }
+
+    /**
+     * The repository's publish-path catch handles a stale build by degrading to
+     * lexical-only.  An incomplete index must take that same fail-closed path
+     * instead of reaching the caller as a partial success.
+     */
+    @Test
+    fun incompleteIndexIsHandledByTheStaleBuildCatch() {
+        val cache = VectorIndexCache(null, maxEntries = 4)
+        val failure = assertThrows(StaleVectorBuildException::class.java) {
+            cache.publish(key(), setOf("doc1", "doc2"), ReportedIndex(reported = 0))
+        }
+        assertTrue(failure is IncompleteVectorIndexException)
+        cache.close()
+    }
+
+    @Test
+    fun completeCountIsPublishedAndReused() {
+        val cache = VectorIndexCache(null, maxEntries = 4)
+        val index = ReportedIndex(reported = 2)
+        cache.publish(key(), setOf("doc1", "doc2"), index)
+        cache.acquire(key(), setOf("doc1", "doc2"))!!.use { lease -> assertSame(index, lease.index) }
+        assertEquals(1L, cache.stats().builds)
+        assertEquals(1L, cache.stats().reuseHits)
+        assertEquals(0L, cache.stats().incompleteRejects)
+        cache.close()
+        assertEquals(1, index.closeCount.get())
+    }
+
+    /** Minimal port with a reported count; ports that report -1 keep legacy behaviour. */
+    private class ReportedIndex(private val reported: Int) : VectorIndexPort {
+        override val spaceId: String = "space"
+        override val dimension: Int = 2
+        override val vectorCount: Int get() = reported
+        val closeCount = AtomicInteger(0)
+
+        override fun add(id: String, vector: FloatArray) = Unit
+
+        override fun search(query: FloatArray, topK: Int): List<Pair<String, Float>> =
+            listOf("doc1" to 1.0f)
+
+        override fun close() {
+            closeCount.incrementAndGet()
+        }
+    }
 }

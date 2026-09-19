@@ -84,6 +84,8 @@ import kotlinx.coroutines.runBlocking
 /** Legacy cache identity may be adopted only when it maps to one current destination. */
 data class LegacyVisionCacheTarget(val fingerprint: String, val unambiguous: Boolean)
 
+data class KnowledgeDocumentRange(val text: String, val offset: Int, val nextOffset: Int?, val totalChars: Int)
+
 class KnowledgeRepository(
     private val db: SqlConnection,
     private val blobs: BlobSink,
@@ -108,6 +110,8 @@ class KnowledgeRepository(
     private val legacyVisionCacheTarget: (String) -> LegacyVisionCacheTarget? = { null },
     private val plannerVersion: String = DocumentUnitPlanner.VERSION,
     private val chunkVersion: String = PIPELINE_CHUNK_VERSION,
+    /** Disposable ANN files only. SQLite/CAS remain authoritative. */
+    private val vectorIndexDirectory: File? = null,
 ) {
     private val indexLock = Any()
     private val pipeline = DocumentPipelineStore(db)
@@ -166,7 +170,7 @@ class KnowledgeRepository(
             check(pipeline.stopReason(batchId) != "PIPELINE_MAX_CONCURRENCY") { "Wait for in-flight work" }
             db.query("SELECT j.id,j.document_id,j.vision_binding_json,j.display_name,d.format,d.blob_hash FROM import_jobs j JOIN documents d ON d.id=j.document_id WHERE j.batch_id=?",listOf(batchId)).forEach { row ->
                 val bytes=blobs.get(row.string("blob_hash")) ?: error("CAS source missing")
-                val units=planSource(bytes,row.string("format"),row.string("display_name"))
+                val units=planSource(bytes,row.string("format"),row.string("display_name"),targetFingerprint)
                 val diff=pipeline.reuse(row.string("id"),units,targetFingerprint,chunkVersion)
                 if(diff.newRequests>0 || diff.localRebuild>0 || diff.unknown>0 || (acknowledgeDuplicateCharge && units.any { hasLegacyVisionUnknown(row.string("id"),row.string("document_id"),it.page,targetFingerprint) })) {
                     if (acknowledgeDuplicateCharge) {
@@ -193,7 +197,7 @@ class KnowledgeRepository(
             // when the split algorithm version is unchanged. No bitmap or provider work here.
             val candidates = if (refreshPlan) {
                 val bytes = blobs.get(row.string("blob_hash"))
-                bytes?.let { runCatching { planSource(it,row.string("format"),row.string("display_name")) }.getOrNull() }.orEmpty()
+                bytes?.let { runCatching { planSource(it,row.string("format"),row.string("display_name"),targetFingerprint ?: row.string("vision_binding_json")) }.getOrNull() }.orEmpty()
             } else pipeline.units(row.string("id")).takeIf { units -> units.all { it.plannerVersion==plannerVersion } }.orEmpty()
             if (candidates.isEmpty()) summary = summary.copy(unplannedFiles=summary.unplannedFiles+1)
             else {
@@ -207,7 +211,7 @@ class KnowledgeRepository(
         return summary
     }
 
-    private fun planSource(bytes: ByteArray, format: String, name: String): List<ProcessingUnit> {
+    private fun planSource(bytes: ByteArray, format: String, name: String, targetFingerprint: String? = null): List<ProcessingUnit> {
         val parsed = when (format) {
             SourceFormat.PDF.name -> PdfParser.parse(bytes)
             SourceFormat.IMAGE.name -> standaloneImage(bytes,name)
@@ -215,15 +219,20 @@ class KnowledgeRepository(
             else -> ParsedPublication(SourceFormat.TEXT, String(bytes,Charsets.UTF_8),
                 listOf(ExtractedPage(1,String(bytes,Charsets.UTF_8),false)),emptyList(),false,PARSER_FINGERPRINT)
         }
-        return planPublication(bytes,parsed)
+        return planPublication(bytes,parsed,targetFingerprint)
     }
 
-    private fun planPublication(bytes: ByteArray, parsed: ParsedPublication): List<ProcessingUnit> {
+    private fun planPublication(bytes: ByteArray, parsed: ParsedPublication, targetFingerprint: String? = null): List<ProcessingUnit> {
         val imageRenderer = pdfRasterizer as? ImageUnitRasterizer
         val dimensions = if(imageRenderer == null) emptyMap() else parsed.assets.mapNotNull { asset ->
             imageRenderer.imageDimensions(asset.bytes)?.let { asset.localId to it }
         }.toMap()
-        return unitPlanner.planPublication(sha256Hex(bytes),parsed,dimensions)
+        val target = targetFingerprint?.takeIf { it.isNotBlank() }
+        val binding = if (target == null) visionBinding() else
+            visionTargetResolver?.invoke(target)?.takeIf { it.fingerprint == target }
+                ?: visionBinding()?.takeIf { it.fingerprint == target }
+        return unitPlanner.planPublication(sha256Hex(bytes),parsed,dimensions,
+            budget = binding?.requestBudget ?: runtime.mobileagent.knowledge.VisionRequestBudget())
     }
 
     private fun materializePlan(job: ImportJob, bytes: ByteArray, units: List<ProcessingUnit>): Boolean {
@@ -242,12 +251,28 @@ class KnowledgeRepository(
         pipeline.materialize(job.id,sha256Hex(bytes),plannerVersion,units)
         return true
     }
+
+    /** Only an explicit consent action can replace a plan held at the review gate.
+     * Old attempts/results remain immutable, including unknown-charge gates. */
+    private fun acceptReviewedPlan(row: SqlRow, job: ImportJob, bytes: ByteArray, format: SourceFormat) {
+        if (!row.string("error").startsWith("PIPELINE_PLAN_CHANGED:")) return
+        val units = planSource(bytes, format.name, row.string("display_name"), job.consentedVisionFingerprint)
+        pipeline.materialize(job.id, sha256Hex(bytes), plannerVersion, units)
+        pipeline.selectTarget(job.id, job.consentedVisionFingerprint)
+    }
     /**
      * Reusable ANN handles keyed by (KB, space, dimension, generation).
      * Vectors truth stays in SQLite; this cache is purely derived state, so a
      * process restart simply rebuilds it on the next query.
      */
     private val vectorIndexCache = VectorIndexCache(vectorIndexFactory)
+    data class IndexSnapshotStats(val loads: Long, val rebuilds: Long, val rejectedSnapshots: Long)
+    private val indexSnapshotLoads = java.util.concurrent.atomic.AtomicLong()
+    private val indexSnapshotRebuilds = java.util.concurrent.atomic.AtomicLong()
+    private val indexSnapshotRejected = java.util.concurrent.atomic.AtomicLong()
+    fun vectorIndexSnapshotStats() = IndexSnapshotStats(indexSnapshotLoads.get(), indexSnapshotRebuilds.get(), indexSnapshotRejected.get())
+    /** Release disposable native handles; does not close caller-owned SQLite or delete content. */
+    fun closeVectorIndexes() = vectorIndexCache.close()
     private val configuredApiEmbedders: List<TextEmbedder> =
         listOfNotNull(apiEmbedder) + apiEmbedders
 
@@ -623,6 +648,7 @@ class KnowledgeRepository(
             localEmbeddingAvailable = true,
             consentedVisionFingerprint = expectedVisionFingerprint ?: visionFingerprint(),
         )
+        acceptReviewedPlan(row, job, bytes, format)
         return continueImportCancellable(job, row.string("display_name"), bytes, format)
     }
 
@@ -1185,6 +1211,7 @@ class KnowledgeRepository(
             localEmbeddingAvailable = true,
             consentedVisionFingerprint = expectedVisionFingerprint ?: visionFingerprint(),
         )
+        acceptReviewedPlan(row, job, bytes, format)
         return continueImport(job, row.string("display_name"), bytes, format)
         }
     }
@@ -1424,12 +1451,16 @@ class KnowledgeRepository(
         if (version == null) return missing
         if (citation.chunkId.isNotBlank()) {
             val chunk = db.query(
-                "SELECT id, page, asset_ids FROM chunks WHERE id = ? AND document_version_id = ?",
+                "SELECT id, page, asset_ids, source_span FROM chunks WHERE id = ? AND document_version_id = ?",
                 listOf(citation.chunkId, versionId),
             ).singleOrNull() ?: return missing
             val chunkAssets = chunk.string("asset_ids").split(',').filter { it.isNotBlank() }
             if (citation.assetId != null && citation.assetId !in chunkAssets) return missing
-            val page = chunk.string("page").toIntOrNull() ?: citation.page
+            if (citation.assetId != null && isPageContextSpan(chunk.string("source_span"))) return missing
+            // Location comes from the immutable chunk, never caller/model supplied hints.
+            val page = chunk.string("page").toIntOrNull()
+            val sourceSpan = chunk.string("source_span").ifBlank { null }
+            if (citation.page != page || citation.sourceSpan != sourceSpan) return missing
             if (citation.assetId != null) {
                 val asset = db.query(
                     "SELECT blob_hash, page, document_version_id FROM assets WHERE id = ? AND document_id = ?",
@@ -1442,7 +1473,7 @@ class KnowledgeRepository(
                     displayName = document.string("display_name"),
                     page = asset.string("page").toIntOrNull() ?: page,
                     assetId = citation.assetId,
-                    sourceSpan = citation.sourceSpan,
+                    sourceSpan = sourceSpan,
                     blobHash = asset.string("blob_hash"),
                     removed = false,
                 )
@@ -1452,7 +1483,7 @@ class KnowledgeRepository(
                 displayName = document.string("display_name"),
                 page = page,
                 assetId = null,
-                sourceSpan = citation.sourceSpan,
+                sourceSpan = sourceSpan,
                 blobHash = document.string("blob_hash"),
                 removed = false,
             )
@@ -1691,17 +1722,32 @@ class KnowledgeRepository(
         db.query("SELECT ref_count FROM blobs WHERE hash = ?", listOf(hash)).singleOrNull()?.long("ref_count") ?: 0L
 
     fun readDocumentText(documentId: String, maxChars: Int, allowedKnowledgeBaseIds: Set<String>? = null): String {
+        return readDocumentRange(documentId, maxChars, 0, allowedKnowledgeBaseIds).text
+    }
+
+    /** Offset is in the published text's UTF-16 units; nextOffset never bisects a scalar. */
+    fun readDocumentRange(documentId: String, maxChars: Int, offset: Int = 0,
+        allowedKnowledgeBaseIds: Set<String>? = null): KnowledgeDocumentRange {
+        require(offset >= 0) { "Document offset must be nonnegative" }
+        val empty = KnowledgeDocumentRange("", offset, null, 0)
         val document = db.query("SELECT active_version_id, deleted_at, kb_id FROM documents WHERE id = ?", listOf(documentId)).singleOrNull()
-            ?: return ""
-        if (document.string("deleted_at").isNotBlank()) return ""
-        if (allowedKnowledgeBaseIds != null && document.string("kb_id") !in allowedKnowledgeBaseIds) return ""
+            ?: return empty
+        if (document.string("deleted_at").isNotBlank()) return empty
+        if (allowedKnowledgeBaseIds != null && document.string("kb_id") !in allowedKnowledgeBaseIds) return empty
         val version = document.string("active_version_id")
         val text = db.query(
             "SELECT text FROM chunks WHERE document_version_id = ? ORDER BY ordinal",
             listOf(version),
         ).joinToString("\n") { it.string("text") }
         val cap = maxChars.coerceIn(0, 16_384)
-        return text.take(cap)
+        val start = offset.coerceAtMost(text.length)
+        require(start == 0 || start == text.length || !(text[start].isLowSurrogate() && text[start-1].isHighSurrogate())) {
+            "Document offset splits a Unicode scalar; use the returned nextOffset"
+        }
+        var end = (start.toLong()+cap).coerceAtMost(text.length.toLong()).toInt()
+        if (end < text.length && end > start && text[end].isLowSurrogate() && text[end-1].isHighSurrogate()) end--
+        require(end > start || start == text.length || cap == 0) { "maxChars cannot fit the next Unicode scalar" }
+        return KnowledgeDocumentRange(text.substring(start,end), start, end.takeIf { it < text.length }, text.length)
     }
 
     fun documentKnowledgeBaseId(documentId: String): String? {
@@ -2126,7 +2172,7 @@ class KnowledgeRepository(
     }
 
     private suspend fun indexPublicationCancellable(job: ImportJob, bytes: ByteArray, parsed: ParsedPublication) {
-        if (!materializePlan(job,bytes,planPublication(bytes,parsed))) return
+        if (!materializePlan(job,bytes,planPublication(bytes,parsed,job.consentedVisionFingerprint))) return
         val processable = parsed.assets.filter { it.kind == "IMAGE" && it.bytes.isNotEmpty() }
         val blocked = parsed.assets.filter {
             it.kind == "EXTERNAL" || it.kind == "MISSING" || it.kind == "PAGE" ||
@@ -2188,9 +2234,7 @@ class KnowledgeRepository(
                 is VisionBatch.Ok -> visionTexts += outcome.chunks
             }
         }
-        val pageChunks = parsed.pages.filter { it.text.isNotBlank() && !it.needsVision }.flatMap { page ->
-            TextChunker.chunk(page.text).map { IndexedChunk(it, page.page, emptyList(), "page:${page.page}") }
-        }
+        val pageChunks = nativePageChunks(parsed)
         val chunks = (pageChunks + visionTexts).ifEmpty {
             if (!parsed.needsVision && parsed.text.isNotBlank()) {
                 TextChunker.chunk(parsed.text).map { IndexedChunk(it, 1, emptyList(), null) }
@@ -2319,7 +2363,7 @@ class KnowledgeRepository(
     }
 
     private fun indexPublication(job: ImportJob, bytes: ByteArray, parsed: ParsedPublication) {
-        if (!materializePlan(job,bytes,planPublication(bytes,parsed))) return
+        if (!materializePlan(job,bytes,planPublication(bytes,parsed,job.consentedVisionFingerprint))) return
         val processable = parsed.assets.filter { it.kind == "IMAGE" && it.bytes.isNotEmpty() }
         val blocked = parsed.assets.filter {
             it.kind == "EXTERNAL" || it.kind == "MISSING" || it.kind == "PAGE" ||
@@ -2381,9 +2425,7 @@ class KnowledgeRepository(
                 is VisionBatch.Ok -> visionTexts += outcome.chunks
             }
         }
-        val pageChunks = parsed.pages.filter { it.text.isNotBlank() && !it.needsVision }.flatMap { page ->
-            TextChunker.chunk(page.text).map { IndexedChunk(it, page.page, emptyList(), "page:${page.page}") }
-        }
+        val pageChunks = nativePageChunks(parsed)
         val chunks = (pageChunks + visionTexts).ifEmpty {
             if (!parsed.needsVision && parsed.text.isNotBlank()) {
                 TextChunker.chunk(parsed.text).map { IndexedChunk(it, 1, emptyList(), null) }
@@ -2495,7 +2537,10 @@ class KnowledgeRepository(
                     source.copy(surroundingText=unit.effectiveRequestText())
                 }
             }
-            when(val outcome = processAssets(job,listOf(asset),unit)) {
+            // DOCX paragraphs and EPUB sections are structural ordinals, not
+            // physical pages. Keep the section locator without inventing a page.
+            val locatedAsset = if (parsed.format == SourceFormat.OFFICE_ARCHIVE) asset.copy(page = null) else asset
+            when(val outcome = processAssets(job,listOf(locatedAsset),unit)) {
                 is VisionBatch.Ok -> chunks += outcome.chunks
                 else -> return outcome
             }
@@ -2513,9 +2558,20 @@ class KnowledgeRepository(
     private fun unitChunks(unit: ProcessingUnit, assetId: String, result: runtime.mobileagent.knowledge.VisionSuccess, section: String?): List<IndexedChunk> {
         // Planner coverage page 1 does not invent a source page for unassigned Office images.
         val sourcePage=db.query("SELECT page FROM assets WHERE id=?",listOf(assetId)).singleOrNull()?.longOrNull("page")?.toInt()
-        return VisionChunkBuilder.build(result,sourcePage,assetId,section,unit.effectiveRequestText())
-            .map { IndexedChunk(it.text,it.page,it.assetIds,it.span) }
+        val region = unit.region?.let { "|image-region:${it.left},${it.top},${it.right},${it.bottom}/1000000" }.orEmpty()
+        return VisionChunkBuilder.build(result,sourcePage,assetId,section)
+            .map { IndexedChunk(it.text,it.page,it.assetIds,it.span.orEmpty()+region) }
     }
+
+    /** Native extraction is page evidence, independent of crops and model-generated OCR. */
+    private fun nativePageChunks(parsed: ParsedPublication): List<IndexedChunk> =
+        parsed.pages.filter { it.text.isNotBlank() }.flatMap { page ->
+            TextChunker.chunk(page.text).map {
+                val location = if (parsed.format == SourceFormat.OFFICE_ARCHIVE) "section-ordinal:${page.page}" else "page:${page.page}"
+                IndexedChunk(it, page.page.takeUnless { parsed.format == SourceFormat.OFFICE_ARCHIVE }, emptyList(),
+                    "$location|source:parser-native|association:PAGE_CONTEXT")
+            }
+        }
 
     private fun recoverPipelineJob(jobId: String) = synchronized(livePipelineJobs) {
         if (jobId !in livePipelineJobs) pipeline.recover(jobId)
@@ -2566,6 +2622,13 @@ class KnowledgeRepository(
                 page = asset.page,
                 section = asset.section,
                 captureDiagnosticContent = captureVisionContent(),
+                tableHeader = unit.tableHeader,
+                continuationGroupId = unit.continuationGroupId,
+                continuationIndex = unit.continuationIndex,
+                imageRegion = unit.region,
+                textImageAssociation = unit.textImageAssociation,
+                layoutDegradation = unit.layoutDegradation,
+                pageNativeTextChars = unit.nativeText.length,
             )
             db.execute(
                 "INSERT OR REPLACE INTO assets(id,document_id,document_version_id,blob_hash,page,section,kind,surrounding_text_hash) VALUES (?,?,?,?,?,?,?,?)",
@@ -2795,21 +2858,7 @@ class KnowledgeRepository(
                     }
                     diagnostic(ImportBatchEventPhase.CHECKPOINT,
                         if (cached?.string("status") == "SUCCESS") "vision_cache_reused" else "vision_result_saved")
-                    // Route every Vision component through the shared chunker:
-                    // one long OCR/description/table must not become a single
-                    // unbounded retrieval chunk.  The extracted page text is
-                    // published as its own `context` component because the
-                    // normal text path deliberately skips pages that need
-                    // Vision, so this is the only place that text can be kept.
-                    VisionChunkBuilder.build(
-                        result = outcome.result,
-                        page = asset.page,
-                        assetId = assetId,
-                        section = asset.section,
-                        surroundingText = asset.surroundingText,
-                    ).forEach { part ->
-                        chunks += IndexedChunk(part.text, part.page, part.assetIds, part.span)
-                    }
+                    chunks += unitChunks(unit, assetId, outcome.result, asset.section)
                 }
             }
         }
@@ -3704,6 +3753,23 @@ class KnowledgeRepository(
     }
 
     private fun persistChunks(documentVersionId: String, chunks: List<IndexedChunk>) {
+        val documentId = db.query("SELECT document_id FROM document_versions WHERE id=?", listOf(documentVersionId)).single().string("document_id")
+        val versionAssets = mutableMapOf<String, String>()
+        // A local chunk rebuild may reuse a paid Vision result from an older
+        // version. Copy the asset reference, not its bytes or remote request;
+        // rebinding the old row would invalidate previously issued citations.
+        chunks.flatMap { it.assetIds }.distinct().forEach { assetId ->
+            val asset = db.query("SELECT * FROM assets WHERE id=? AND document_id=?", listOf(assetId, documentId)).singleOrNull()
+                ?: error("CHUNK_ASSET_SOURCE_MISSING")
+            val priorVersion = asset.string("document_version_id")
+            if (priorVersion.isNotBlank() && priorVersion != documentVersionId) {
+                val copyId = EntityId.random().value
+                db.execute("INSERT INTO assets(id,document_id,document_version_id,blob_hash,page,section,kind,surrounding_text_hash) VALUES(?,?,?,?,?,?,?,?)",
+                    listOf(copyId,documentId,documentVersionId,asset.string("blob_hash"),asset.longOrNull("page"),
+                        asset.string("section"),asset.string("kind"),asset.string("surrounding_text_hash")))
+                versionAssets[assetId] = copyId
+            } else versionAssets[assetId] = assetId
+        }
         val existing = db.query("SELECT id, rowid AS rid FROM chunks WHERE document_version_id = ?", listOf(documentVersionId))
         existing.forEach { row ->
             runCatching { db.execute("DELETE FROM chunks_fts WHERE rowid = ?", listOf(row.long("rid"))) }
@@ -3721,7 +3787,7 @@ class KnowledgeRepository(
                     chunk.text,
                     hash,
                     chunk.span,
-                    chunk.assetIds.joinToString(","),
+                    chunk.assetIds.map { versionAssets.getValue(it) }.joinToString(","),
                     chunk.page,
                 ),
             )
@@ -3907,12 +3973,20 @@ class KnowledgeRepository(
                 score = 1.0 / (index + 1),
                 knowledgeBaseId = kbId,
                 documentVersionId = row.string("version_id"),
-                assetId = row.string("asset_ids").split(',').firstOrNull { it.isNotBlank() },
+                assetId = sourceAssetForHit(row),
                 page = row.string("page").toIntOrNull(),
                 sourceSpan = row.string("source_span").ifBlank { null },
             )
         }
     }
+
+    private fun isPageContextSpan(span: String): Boolean =
+        span.split('|').any { it == "part:context" || it == "association:PAGE_CONTEXT" }
+
+    /** Legacy context rows remain searchable without claiming their crop as the source. */
+    private fun sourceAssetForHit(row: SqlRow): String? =
+        if (isPageContextSpan(row.string("source_span"))) null
+        else row.string("asset_ids").split(',').firstOrNull { it.isNotBlank() }
 
     private fun vectorHits(
         kbId: String,
@@ -3927,36 +4001,20 @@ class KnowledgeRepository(
         val queryVec = queryVector?.copyOf() ?: selectedEmbedder.embed(query)
         validateEmbeddingVector(queryVec, selectedEmbedder.dimension)
         onQueryVectorReady?.invoke(queryVec.copyOf())
-        // Metadata-only member load (no blobs): the id set validates the
-        // cached ANN handle, so repeated queries never re-read vectors.
-        val members = db.query(
+        // Membership needs IDs only. Retaining every chunk body here can be
+        // larger than the index itself (50k ordinary 1800-char chunks).
+        // Fetch text/provenance only for native matches, under the same pin.
+        val ids = db.query(
             """
-            SELECT chunks.id AS chunk_id, documents.id AS document_id, chunks.text AS text,
-                   chunks.document_version_id AS version_id,
-                   chunks.page AS page, chunks.asset_ids AS asset_ids, chunks.source_span AS source_span
+            SELECT chunks.id AS chunk_id
             FROM generation_members
             JOIN chunks ON chunks.id = generation_members.chunk_id
             JOIN documents ON documents.active_version_id = chunks.document_version_id
             WHERE generation_members.generation_id = ? AND documents.kb_id = ? AND documents.deleted_at IS NULL
             """.trimIndent(),
             listOf(generation, kbId),
-        )
-        val byId = linkedMapOf<String, SearchHit>()
-        members.forEach { row ->
-            byId[row.string("chunk_id")] = SearchHit(
-                chunkId = row.string("chunk_id"),
-                documentId = row.string("document_id"),
-                text = row.string("text"),
-                score = 0.0,
-                knowledgeBaseId = kbId,
-                documentVersionId = row.string("version_id"),
-                assetId = row.string("asset_ids").split(',').firstOrNull { it.isNotBlank() },
-                page = row.string("page").toIntOrNull(),
-                sourceSpan = row.string("source_span").ifBlank { null },
-            )
-        }
-        if (byId.isEmpty()) return emptyList()
-        val ids = byId.keys.toSet()
+        ).mapTo(linkedSetOf()) { it.string("chunk_id") }
+        if (ids.isEmpty()) return emptyList()
         val key = VectorIndexCache.Key(kbId, selectedEmbedder.spaceId, selectedEmbedder.dimension, generation)
         // Borrowed-handle lease: the search runs while the lease is held, so
         // eviction/invalidation/replacement cannot free the native handle
@@ -3969,7 +4027,31 @@ class KnowledgeRepository(
         // serves — a degraded ranking, never resurrected data.
         try {
             vectorIndexCache.getOrBuild(key, ids) { buildVectorIndex(key, ids, selectedEmbedder) }.use { lease ->
-                return lease.index.search(queryVec, topK).map { (id, score) -> byId.getValue(id).copy(score = score.toDouble()) }
+                val matches = lease.index.search(queryVec, topK)
+                if (matches.isEmpty()) return emptyList()
+                val placeholders = matches.joinToString(",") { "?" }
+                val byId = db.query(
+                    """
+                    SELECT chunks.id AS chunk_id, documents.id AS document_id, chunks.text AS text,
+                           chunks.document_version_id AS version_id,
+                           chunks.page AS page, chunks.asset_ids AS asset_ids, chunks.source_span AS source_span
+                    FROM generation_members
+                    JOIN chunks ON chunks.id = generation_members.chunk_id
+                    JOIN documents ON documents.active_version_id = chunks.document_version_id
+                    WHERE generation_members.generation_id = ? AND documents.kb_id = ? AND documents.deleted_at IS NULL
+                      AND chunks.id IN ($placeholders)
+                    """.trimIndent(),
+                    listOf(generation, kbId) + matches.map { it.first },
+                ).associateBy { it.string("chunk_id") }
+                // A concurrent removal may hide a match; never resurrect it
+                // from a body read before the native query began.
+                return matches.mapNotNull { (id, score) ->
+                    val row = byId[id] ?: return@mapNotNull null
+                    SearchHit(id, row.string("document_id"), row.string("text"), score.toDouble(),
+                        knowledgeBaseId = kbId, documentVersionId = row.string("version_id"),
+                        assetId = sourceAssetForHit(row), page = row.string("page").toIntOrNull(),
+                        sourceSpan = row.string("source_span").ifBlank { null })
+                }
             }
         } catch (_: runtime.mobileagent.knowledge.StaleVectorBuildException) {
             warnings += "Knowledge base $kbId vector index changed during retrieval; vector matches omitted"
@@ -3989,33 +4071,114 @@ class KnowledgeRepository(
         ids: Set<String>,
         selectedEmbedder: TextEmbedder,
     ): VectorIndexPort {
-        val rows = db.query(
-            """
-            SELECT embeddings.chunk_id AS chunk_id, embeddings.vector_blob AS vector_blob
+        val memberJoin = """
             FROM generation_members
             JOIN embeddings ON embeddings.chunk_id = generation_members.chunk_id AND embeddings.space_id = generation_members.space_id
             JOIN chunks ON chunks.id = generation_members.chunk_id
             JOIN documents ON documents.active_version_id = chunks.document_version_id
             WHERE generation_members.generation_id = ? AND documents.kb_id = ? AND documents.deleted_at IS NULL
-            """.trimIndent(),
-            listOf(key.generationId, key.knowledgeBaseId),
-        )
-        val index = vectorIndexFactory?.create(key.spaceId, key.dimension, ids.size.coerceAtLeast(1))
-            ?: CosineVectorIndexPort(key.spaceId, key.dimension)
-        try {
-            rows.forEach { row ->
-                val id = row.string("chunk_id")
-                if (id !in ids) return@forEach
-                val blob = row.columns["vector_blob"]
-                val bytes = when (blob) {
-                    is ByteArray -> blob
-                    is java.sql.Blob -> blob.getBytes(1, blob.length().toInt())
-                    else -> return@forEach
+        """.trimIndent()
+        val memberArgs = listOf(key.generationId, key.knowledgeBaseId)
+        // Never retain the entire SQLite vector set alongside the native index
+        // and its Kotlin scoring vectors. 50k x 384 exhausted a 192 MiB heap.
+        // Keyset batches bound temporary BLOBs even when restoring a snapshot.
+        fun scanVectors(consume: (SqlRow, ByteArray) -> Unit) {
+            var afterId: String? = null
+            while (true) {
+                val afterClause = if (afterId == null) "" else " AND generation_members.chunk_id > ?"
+                val rows = db.query(
+                    "SELECT embeddings.chunk_id AS chunk_id, embeddings.vector_blob AS vector_blob, " +
+                        "embeddings.content_hash AS embedding_hash, chunks.content_hash AS chunk_hash, " +
+                        "generation_members.space_id AS member_space " + memberJoin + afterClause +
+                        " ORDER BY generation_members.chunk_id LIMIT ?",
+                    memberArgs + listOfNotNull(afterId) + listOf(512),
+                )
+                if (rows.isEmpty()) break
+                rows.forEach { row ->
+                    check(row.string("member_space") == key.spaceId) { "INDEX_VECTOR_SPACE_MISMATCH" }
+                    check(row.string("embedding_hash") == row.string("chunk_hash")) { "INDEX_VECTOR_CONTENT_MISMATCH" }
+                    val bytes = embeddingBytes(row)
+                    validateEmbeddingBytes(bytes, selectedEmbedder.dimension)
+                    consume(row, bytes)
                 }
-                if (bytes.size != selectedEmbedder.dimension * 4) return@forEach
+                afterId = rows.last().string("chunk_id")
+                if (rows.size < 512) break
+            }
+        }
+        fun freshIndex() = vectorIndexFactory?.create(key.spaceId, key.dimension, ids.size.coerceAtLeast(1))
+            ?: CosineVectorIndexPort(key.spaceId, key.dimension)
+        var index = freshIndex()
+        try {
+            check(db.query("SELECT COUNT(*) AS n " + memberJoin, memberArgs).single().long("n") == ids.size.toLong()) {
+                "INDEX_VECTOR_MEMBERSHIP_MISMATCH: SQLite generation is incomplete"
+            }
+            val remainingIds = ids.toMutableSet()
+            val orderedIds = ArrayList<String>(ids.size)
+            // The disposable file identity includes SQLite vector bytes, not just
+            // count/IDs, so even an in-place truth change cannot load a stale graph.
+            val digest = java.security.MessageDigest.getInstance("SHA-256")
+            digest.update("${key.knowledgeBaseId}|${key.spaceId}|${key.dimension}|${key.generationId}".toByteArray(Charsets.UTF_8))
+            scanVectors { row, bytes ->
+                val id = row.string("chunk_id")
+                check(remainingIds.remove(id)) { "INDEX_VECTOR_MEMBERSHIP_MISMATCH" }
+                orderedIds += id
+                digest.update(id.toByteArray(Charsets.UTF_8))
+                digest.update(bytes)
+            }
+            check(remainingIds.isEmpty()) { "INDEX_VECTOR_MEMBERSHIP_MISMATCH" }
+            val kbPrefix = sha256Hex(key.knowledgeBaseId.toByteArray(Charsets.UTF_8)) + "-"
+            val fingerprint = digest.digest().joinToString("") { "%02x".format(it.toInt() and 255) }
+            val snapshot = vectorIndexDirectory?.let { File(it, "$kbPrefix$fingerprint.idx") }
+            val identity = runtime.mobileagent.knowledge.VectorIndexSnapshotIdentity(key.spaceId, key.dimension, orderedIds)
+            if (snapshot?.isFile == true && index is runtime.mobileagent.knowledge.VectorIndexSnapshotPort) {
+                try {
+                    (index as runtime.mobileagent.knowledge.VectorIndexSnapshotPort).loadSnapshot(snapshot, identity)
+                    check(index.vectorCount == ids.size) { "INDEX_SNAPSHOT_MEMBERSHIP_MISMATCH" }
+                    indexSnapshotLoads.incrementAndGet()
+                    return index
+                } catch (failure: Exception) {
+                    indexSnapshotRejected.incrementAndGet()
+                    runCatching { index.close() }
+                    index = freshIndex()
+                }
+            }
+            var inserted = 0
+            val buildDigest = java.security.MessageDigest.getInstance("SHA-256")
+            buildDigest.update("${key.knowledgeBaseId}|${key.spaceId}|${key.dimension}|${key.generationId}".toByteArray(Charsets.UTF_8))
+            scanVectors { row, bytes ->
+                val id = row.string("chunk_id")
+                check(orderedIds.getOrNull(inserted) == id) { "INDEX_VECTOR_MEMBERSHIP_MISMATCH" }
+                buildDigest.update(id.toByteArray(Charsets.UTF_8))
+                buildDigest.update(bytes)
                 val vector = bytesToFloats(bytes, selectedEmbedder.dimension)
-                if (vector.any { !it.isFinite() }) return@forEach
                 index.add(id, vector)
+                inserted++
+            }
+            check(inserted == ids.size) { "INDEX_VECTOR_MEMBERSHIP_MISMATCH" }
+            check(buildDigest.digest().joinToString("") { "%02x".format(it.toInt() and 255) } == fingerprint) {
+                "INDEX_VECTOR_CONTENT_CHANGED_DURING_BUILD"
+            }
+            indexSnapshotRebuilds.incrementAndGet()
+            if (snapshot != null && index is runtime.mobileagent.knowledge.VectorIndexSnapshotPort) {
+                // Cache write failure never discards validated truth or a usable handle.
+                runCatching {
+                    check(snapshot.parentFile.isDirectory || snapshot.parentFile.mkdirs())
+                    val temporary = File.createTempFile("ann-", ".tmp", snapshot.parentFile)
+                    try {
+                        val saved = (index as runtime.mobileagent.knowledge.VectorIndexSnapshotPort).saveSnapshot(temporary)
+                        check(saved == identity) { "INDEX_SNAPSHOT_IDENTITY_MISMATCH" }
+                        try {
+                            java.nio.file.Files.move(temporary.toPath(), snapshot.toPath(),
+                                java.nio.file.StandardCopyOption.ATOMIC_MOVE, java.nio.file.StandardCopyOption.REPLACE_EXISTING)
+                        } catch (_: java.nio.file.AtomicMoveNotSupportedException) {
+                            java.nio.file.Files.move(temporary.toPath(), snapshot.toPath(), java.nio.file.StandardCopyOption.REPLACE_EXISTING)
+                        }
+                        snapshot.parentFile.listFiles()?.filter { it != snapshot && it.name.startsWith(kbPrefix) && it.name.endsWith(".idx") }
+                            ?.forEach { old -> runCatching { java.nio.file.Files.deleteIfExists(old.toPath()) } }
+                    } finally {
+                        java.nio.file.Files.deleteIfExists(temporary.toPath())
+                    }
+                }
             }
             return index
         } catch (failure: Throwable) {

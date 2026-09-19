@@ -11,8 +11,36 @@ import java.util.concurrent.atomic.AtomicLong
  * and never published: callers must not serve it, and must not retry
  * blindly against a moved-on generation.
  */
-class StaleVectorBuildException(val knowledgeBaseId: String) :
-    IllegalStateException("Vector index build for knowledge base $knowledgeBaseId went stale before publish")
+open class StaleVectorBuildException(
+    val knowledgeBaseId: String,
+    detail: String? = null,
+) : IllegalStateException(
+    if (detail == null) {
+        "Vector index build for knowledge base $knowledgeBaseId went stale before publish"
+    } else {
+        "Vector index build for knowledge base $knowledgeBaseId $detail"
+    },
+)
+
+/**
+ * Thrown when a build was about to publish an index holding fewer vectors than
+ * the member set it claims (a silently skipped or corrupt embedding).  The
+ * handle has already been closed and is never published: serving it would
+ * answer queries from an incomplete generation.
+ *
+ * This extends [StaleVectorBuildException] on purpose.  Existing publish-path
+ * callers (see `KnowledgeRepository` retrieval) already degrade the vector
+ * channel to lexical-only for a stale build, and an incomplete index deserves
+ * exactly the same fail-closed treatment instead of a partial "success".
+ */
+class IncompleteVectorIndexException(
+    knowledgeBaseId: String,
+    val expectedVectors: Int,
+    val actualVectors: Int,
+) : StaleVectorBuildException(
+    knowledgeBaseId,
+    "was built with $actualVectors of $expectedVectors vectors; refusing to publish a partial index",
+)
 
 /**
  * Reusable native ANN index lifecycle keyed by
@@ -54,6 +82,8 @@ class VectorIndexCache(
         val builds: Long,
         val reuseHits: Long,
         val evictions: Long,
+        /** Builds rejected because they did not cover their claimed member set. */
+        val incompleteRejects: Long = 0,
     )
 
     /**
@@ -112,6 +142,7 @@ class VectorIndexCache(
     private val builds = AtomicLong(0)
     private val reuseHits = AtomicLong(0)
     private val evictions = AtomicLong(0)
+    private val incompleteRejects = AtomicLong(0)
 
     /** Test/debugging introspection: retired entries awaiting their last lease. */
     internal fun retiredCount(): Int = synchronized(lock) { retired.size }
@@ -140,7 +171,32 @@ class VectorIndexCache(
      */
     fun publish(key: Key, memberIds: Set<String>, index: VectorIndexPort) = synchronized(lock) {
         check(!closed) { "VectorIndexCache is closed" }
+        incompleteness(key, index, memberIds)?.let { failure ->
+            runCatching { index.close() }
+            throw failure
+        }
         publishLocked(key, memberIds, index)
+    }
+
+    /**
+     * Fail-closed completeness gate.  An index that reports a vector count
+     * different from [memberIds] is a partial build (for example a skipped or
+     * corrupt embedding blob); callers close it and never publish it, so no
+     * query can be answered from an incomplete generation.  Ports that report
+     * `-1` (count unknown) are trusted as before.
+     *
+     * Returns the failure to throw, or null when the index is complete.  The
+     * caller owns closing the surplus handle exactly once.
+     */
+    private fun incompleteness(
+        key: Key,
+        index: VectorIndexPort,
+        memberIds: Set<String>,
+    ): IncompleteVectorIndexException? {
+        val reported = index.vectorCount
+        if (reported < 0 || reported == memberIds.size) return null
+        incompleteRejects.incrementAndGet()
+        return IncompleteVectorIndexException(key.knowledgeBaseId, memberIds.size, reported)
     }
 
     private fun publishLocked(key: Key, memberIds: Set<String>, index: VectorIndexPort) {
@@ -195,7 +251,13 @@ class VectorIndexCache(
                 acquire(key, memberIds)?.let { return it }
                 val index = build()
                 var published = false
+                var surplusClosed = false
                 try {
+                    incompleteness(key, index, memberIds)?.let { failure ->
+                        surplusClosed = true
+                        runCatching { index.close() }
+                        throw failure
+                    }
                     synchronized(lock) {
                         if (closed) {
                             throw IllegalStateException("VectorIndexCache is closed")
@@ -227,7 +289,7 @@ class VectorIndexCache(
                     // Only the unpublished surplus may be closed here: a
                     // published entry belongs to the cache (and possibly to
                     // leases acquired above), never to this builder.
-                    if (!published) runCatching { index.close() }
+                    if (!published && !surplusClosed) runCatching { index.close() }
                     throw failure
                 }
             }
@@ -251,7 +313,7 @@ class VectorIndexCache(
         }
     }
 
-    fun stats(): Stats = Stats(builds.get(), reuseHits.get(), evictions.get())
+    fun stats(): Stats = Stats(builds.get(), reuseHits.get(), evictions.get(), incompleteRejects.get())
 
     /**
      * Terminal close.  Retires every live entry (leased handles close when
@@ -285,8 +347,15 @@ class CosineVectorIndexPort(
     override val dimension: Int,
 ) : VectorIndexPort {
     private val delegate = CosineIndex(dimension)
+    private val uniqueIds = linkedSetOf<String>()
 
-    override fun add(id: String, vector: FloatArray) = delegate.add(id, vector)
+    /** Exact count: [CosineIndex] keeps one row per unique id. */
+    override val vectorCount: Int get() = uniqueIds.size
+
+    override fun add(id: String, vector: FloatArray) {
+        delegate.add(id, vector)
+        uniqueIds.add(id)
+    }
 
     override fun search(query: FloatArray, topK: Int): List<Pair<String, Float>> =
         // Secondary id order keeps fusion input deterministic across runs.

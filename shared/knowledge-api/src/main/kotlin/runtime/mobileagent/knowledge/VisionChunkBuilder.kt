@@ -71,7 +71,8 @@ object VisionChunkBuilder {
         // as its own `context` component (never merged into OCR, so a fuzzy hit
         // cannot masquerade as recognition) to keep provenance and coverage.
         if (context.isNotEmpty()) {
-            parts += chunkPart(context, "context", page, assetId, section, targetChars)
+            parts += chunkPart(context, "context", page, assetId, null, targetChars)
+                .map { it.copy(assetIds = emptyList(), span = it.span + "|association:PAGE_CONTEXT") }
         }
         if (parts.isEmpty()) {
             parts += VisionTextPart("Visual evidence page ${page ?: "?"} (no text recognized)", "label", page, listOf(assetId), span(section, page, "label", 0, 1))

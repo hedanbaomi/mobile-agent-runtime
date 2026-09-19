@@ -30,6 +30,37 @@ Index* getIndex(JNIEnv* env, jlong pointer) {
     return reinterpret_cast<Index*>(pointer);
 }
 
+/**
+ * Releases a pinned jfloatArray exactly once, including when USearch or a
+ * later allocation throws.  nativeSearch used to release the query elements
+ * right after search() and then release the same pointer again from its catch
+ * blocks; releasing a jfloat* twice is JNI undefined behaviour and aborts under
+ * CheckJNI, which matters exactly when memory pressure makes those paths run.
+ */
+class ScopedFloatArray {
+  public:
+    ScopedFloatArray(JNIEnv* env, jfloatArray array, jfloat* values) noexcept
+        : env_(env), array_(array), values_(values) {}
+    ~ScopedFloatArray() noexcept { release(); }
+
+    ScopedFloatArray(ScopedFloatArray const&) = delete;
+    ScopedFloatArray& operator=(ScopedFloatArray const&) = delete;
+
+    jfloat* get() const noexcept { return values_; }
+
+    void release() noexcept {
+        if (values_ != nullptr) {
+            env_->ReleaseFloatArrayElements(array_, values_, JNI_ABORT);
+            values_ = nullptr;
+        }
+    }
+
+  private:
+    JNIEnv* env_;
+    jfloatArray array_;
+    jfloat* values_;
+};
+
 } // namespace
 
 extern "C" JNIEXPORT jlong JNICALL
@@ -110,9 +141,9 @@ Java_runtime_mobileagent_vector_NativeUsearchIndex_nativeSearch(
     }
     jfloat* values = env->GetFloatArrayElements(query, nullptr);
     if (values == nullptr) return nullptr;
+    ScopedFloatArray pinned(env, query, values);
     try {
-        auto result = index->search(values, static_cast<std::size_t>(topK));
-        env->ReleaseFloatArrayElements(query, values, JNI_ABORT);
+        auto result = index->search(pinned.get(), static_cast<std::size_t>(topK));
         if (!result) {
             const char* message = result.error.what();
             result.error.release();
@@ -127,13 +158,100 @@ Java_runtime_mobileagent_vector_NativeUsearchIndex_nativeSearch(
         env->SetLongArrayRegion(output, 0, count, reinterpret_cast<const jlong*>(keys.get()));
         return output;
     } catch (const std::exception& error) {
-        env->ReleaseFloatArrayElements(query, values, JNI_ABORT);
         raise(env, error.what());
     } catch (...) {
-        env->ReleaseFloatArrayElements(query, values, JNI_ABORT);
         raise(env, "USearch vector search failed");
     }
     return nullptr;
+}
+
+/**
+ * Persists the whole index (graph + vectors + u64 keys) to `path`.
+ * USearch validates the format on load; the Kotlin wrapper additionally
+ * persists the chunkId<->key mapping, which the binary format does not carry.
+ */
+extern "C" JNIEXPORT void JNICALL
+Java_runtime_mobileagent_vector_NativeUsearchIndex_nativeSave(
+    JNIEnv* env, jclass, jlong pointer, jstring path) {
+    Index* index = getIndex(env, pointer);
+    if (index == nullptr || path == nullptr) return;
+    const char* chars = env->GetStringUTFChars(path, nullptr);
+    if (chars == nullptr) return;
+    try {
+        auto result = index->save(chars);
+        if (!result) {
+            const char* message = result.error.what();
+            result.error.release();
+            raise(env, message);
+        }
+    } catch (const std::exception& error) {
+        raise(env, error.what());
+    } catch (...) {
+        raise(env, "USearch index save failed");
+    }
+    env->ReleaseStringUTFChars(path, chars);
+}
+
+/**
+ * Restores a new handle from a persisted index file.  Returns 0 and raises on
+ * a truncated, foreign or otherwise invalid file: a partially loaded index is
+ * never returned, so callers can only fall back to rebuilding from SQLite.
+ */
+extern "C" JNIEXPORT jlong JNICALL
+Java_runtime_mobileagent_vector_NativeUsearchIndex_nativeRestore(
+    JNIEnv* env, jclass, jstring path) {
+    if (path == nullptr) return 0;
+    const char* chars = env->GetStringUTFChars(path, nullptr);
+    if (chars == nullptr) return 0;
+    jlong handle = 0;
+    try {
+        auto result = Index::make(chars, false);
+        if (!result) {
+            const char* message = result.error.what();
+            result.error.release();
+            raise(env, message);
+        } else {
+            handle = reinterpret_cast<jlong>(new Index(std::move(result.index)));
+        }
+    } catch (const std::exception& error) {
+        raise(env, error.what());
+    } catch (...) {
+        raise(env, "USearch index restore failed");
+    }
+    env->ReleaseStringUTFChars(path, chars);
+    return handle;
+}
+
+extern "C" JNIEXPORT jint JNICALL
+Java_runtime_mobileagent_vector_NativeUsearchIndex_nativeSize(
+    JNIEnv* env, jclass, jlong pointer) {
+    Index* index = getIndex(env, pointer);
+    if (index == nullptr) return -1;
+    return static_cast<jint>(index->size());
+}
+
+extern "C" JNIEXPORT jint JNICALL
+Java_runtime_mobileagent_vector_NativeUsearchIndex_nativeDimensions(
+    JNIEnv* env, jclass, jlong pointer) {
+    Index* index = getIndex(env, pointer);
+    if (index == nullptr) return -1;
+    return static_cast<jint>(index->dimensions());
+}
+extern "C" JNIEXPORT jboolean JNICALL
+Java_runtime_mobileagent_vector_NativeUsearchIndex_nativeHasSequentialKeys(
+    JNIEnv* env, jclass, jlong pointer, jint count) {
+    Index* index = getIndex(env, pointer);
+    if (index == nullptr || count < 0 || index->size() != static_cast<std::size_t>(count)) return JNI_FALSE;
+    try {
+        for (std::uint64_t key = 1; key <= static_cast<std::uint64_t>(count); ++key)
+            if (!index->contains(key)) return JNI_FALSE;
+        return JNI_TRUE;
+    } catch (const std::exception& error) {
+        raise(env, error.what());
+    } catch (...) {
+        raise(env, "USearch key validation failed");
+    }
+    return JNI_FALSE;
 }
 
 extern "C" JNIEXPORT void JNICALL

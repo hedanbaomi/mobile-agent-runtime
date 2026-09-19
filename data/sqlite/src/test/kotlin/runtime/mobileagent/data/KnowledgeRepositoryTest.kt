@@ -1582,7 +1582,7 @@ class KnowledgeRepositoryTest {
         val repo = KnowledgeRepository(db, MemoryBlobSink(), vision = vision, visionModelFingerprint = "vision-test")
         val job = repo.importBytes("flow.pdf", "application/pdf", pdf, visionConfigured = true, visionConsent = true)
         assertEquals(ImportStage.READY, job.stage)
-        val hits = repo.search("flowchart")
+        val hits = repo.search("flowchart").filter { it.assetId != null }
         val bound = CitationMap.bind("run", hits)
         val locator = repo.locateCitation(bound.first())
         assertFalse(locator.removed)

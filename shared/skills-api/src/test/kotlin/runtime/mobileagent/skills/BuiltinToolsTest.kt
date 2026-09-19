@@ -10,6 +10,23 @@ import org.junit.jupiter.api.Test
 import kotlinx.coroutines.runBlocking
 
 class BuiltinToolsTest {
+    @Test fun paginatedReadKeepsOffsetAndChecksKnowledgeGrantBeforeCallback() {
+        var calls = 0
+        val context = ToolContext(search = { _, _, _ -> "{}" }, readDocument = { _, _ -> error("legacy callback") },
+            grantedKnowledgeBaseIds = setOf("kb"), documentKnowledgeBaseId = { if (it == "doc") "kb" else "other" },
+            readDocumentRange = { _, maxChars, offset ->
+                calls++
+                assertEquals(100, maxChars); assertEquals(20000, offset)
+                """{"text":"tail","offset":20000,"nextOffset":null}"""
+            })
+        val broker = ToolBroker(setOf("knowledge.read"), context)
+        val result = broker.invoke(ToolCall("range", "read_document", """{"documentId":"doc","offset":20000,"maxChars":100}"""))
+        assertTrue(result is ToolResult.Value)
+        assertTrue(broker.invoke(ToolCall("wrong", "read_document", """{"documentId":"other","offset":20000}""")) is ToolResult.Denied)
+        assertTrue(broker.invoke(ToolCall("negative", "read_document", """{"documentId":"doc","offset":-1}""")) is ToolResult.Invalid)
+        assertEquals(1, calls)
+    }
+
     private fun broker(
         caps: Set<String> = setOf("knowledge.search", "knowledge.read", "network.http"),
         autoApprove: Boolean = false,

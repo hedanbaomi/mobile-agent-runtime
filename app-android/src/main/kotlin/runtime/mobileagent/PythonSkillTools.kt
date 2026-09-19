@@ -569,9 +569,17 @@ private class PythonSkillToolExecutor(
             val ids = permittedKnowledge(permission)
             if (container.knowledge.documentKnowledgeBaseId(id) !in ids) throw BrokerDenied("PERMISSION_DENIED")
             val max = (args.number("maxBytes") ?: 16_384).coerceIn(1, 24_000)
-            val text = container.knowledge.readDocumentText(id, max, ids)
+            val offset = args.number("offset") ?: 0
+            if (offset < 0 || ("offset" in args && args.number("offset") == null)) throw BrokerDenied("INVALID_ARGUMENT")
+            val range = container.knowledge.readDocumentRange(id, minOf(max, 5000), offset, ids)
+            val text = utf8Prefix(range.text, max)
+            check(text.isNotEmpty() || range.text.isEmpty()) { "Read budget cannot fit the next Unicode scalar" }
             if (container.knowledge.documentKnowledgeBaseId(id) !in permittedKnowledge(permission)) throw BrokerDenied("PERMISSION_DENIED")
-            return buildJsonObject { put("documentId", id); put("text", utf8Prefix(text, max)) }
+            return buildJsonObject {
+                put("documentId", id); put("text", text); put("offset", range.offset)
+                put("nextOffset", (range.offset + text.length).takeIf { it < range.totalChars }?.let { JsonPrimitive(it) } ?: kotlinx.serialization.json.JsonNull)
+                put("totalChars", range.totalChars)
+            }
         }
 
         private suspend fun http(args: JsonObject, permission: String): JsonElement {

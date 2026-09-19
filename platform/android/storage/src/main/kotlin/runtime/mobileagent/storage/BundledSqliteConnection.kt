@@ -18,7 +18,7 @@ import runtime.mobileagent.data.SqlRow
 class AndroidContextSqlite(
     context: Context,
     name: String = "mobile-agent.db",
-) : SqlConnection {
+) : SqlConnection, AutoCloseable {
     private val lock = Any()
     private val connection: SQLiteConnection = BundledSQLiteDriver().open(
         context.getDatabasePath(name).absolutePath,
@@ -29,6 +29,15 @@ class AndroidContextSqlite(
     // savepoints instead of issuing a second BEGIN.
     private var transactionDepth = 0
     private var savepointSequence = 0L
+    private var closed = false
+
+    override fun close() = synchronized(lock) {
+        check(transactionDepth == 0) { "Cannot close SQLite inside a transaction" }
+        if (!closed) {
+            connection.close()
+            closed = true
+        }
+    }
 
     override fun execute(sql: String, args: List<Any?>) {
         synchronized(lock) {

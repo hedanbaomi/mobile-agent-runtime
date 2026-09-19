@@ -4,7 +4,7 @@
 package runtime.mobileagent.knowledge
 
 /** Local retrieval representation version, independent of planner and provider result versions. */
-const val PIPELINE_CHUNK_VERSION = "retrieval-chunks-v1"
+const val PIPELINE_CHUNK_VERSION = "retrieval-chunks-v2-page-provenance"
 
 enum class PipelineAttemptState { READY, DISPATCHED, SUCCEEDED, FAILED, CANCELLED, UNKNOWN_OUTCOME }
 

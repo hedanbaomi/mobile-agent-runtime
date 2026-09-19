@@ -537,14 +537,17 @@ class DocumentPipelineTest {
             // 2. Each request's surrounding text is strictly bounded (<= 8,500 characters)
             assertTrue(capturedPrompts.all { it.length <= 8_500 }, "Request text must be bounded to <= 8,500 chars, got: ${capturedPrompts.map { it.length }}")
 
-            // 3. Complete text coverage: concatenation of all surroundingText equals the original text exactly!
-            val reconstructed = capturedPrompts.joinToString("")
-            assertEquals(originalText.trim(), reconstructed, "Slices must cover original text exactly without gaps or overlaps")
+            // No coordinates prove a crop/text relation: long text stays local.
+            assertTrue(capturedPrompts.all { it.isEmpty() })
 
             // 4. Geometric sanity: no degenerate 0-height slivers; full coverage without gaps
             val plannedUnits = db.query("SELECT unit_json FROM pipeline_units WHERE active=1")
                 .map { kotlinx.serialization.json.Json.decodeFromString<ProcessingUnit>(it.string("unit_json")) }
             assertEquals(capturedPrompts.size, plannedUnits.size)
+            assertTrue(plannedUnits.all { it.nativeText == originalText.trim() })
+            val published = db.query("SELECT text FROM chunks WHERE source_span LIKE '%source:parser-native%' ORDER BY ordinal")
+                .map { it.string("text") }
+            assertEquals(TextChunker.chunk(originalText.trim()), published, "All native chunks, including the tail, must survive independently of crops")
             assertTrue(plannedUnits.all { it.coverage.region.bottom > it.coverage.region.top && it.coverage.region.right > it.coverage.region.left }, "All regions must have positive dimensions")
             val totalArea = plannedUnits.sumOf { (it.coverage.region.right - it.coverage.region.left).toLong() * (it.coverage.region.bottom - it.coverage.region.top) }
             assertEquals(UnitRegion.SCALE.toLong() * UnitRegion.SCALE, totalArea, "Regions must cover the full page area exactly")

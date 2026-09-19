@@ -67,6 +67,7 @@ data class ToolContext(
     val grantedKnowledgeBaseIds: Set<String> = emptySet(),
     val grantedMethods: Set<String> = emptySet(),
     val documentKnowledgeBaseId: (documentId: String) -> String? = { null },
+    val readDocumentRange: ((documentId: String, maxChars: Int, offset: Int) -> String)? = null,
 )
 
 class ToolBroker(
@@ -252,7 +253,12 @@ class ToolBroker(
         }
         "read_document" -> {
             val maxChars = args["maxChars"]?.jsonPrimitive?.intOrNull ?: 4000
-            capOutput(ctx.readDocument(args.string("documentId"), maxChars))
+            val offset = args["offset"]?.jsonPrimitive?.intOrNull ?: 0
+            val range = ctx.readDocumentRange
+            capOutput(if (range != null) range(args.string("documentId"), maxChars, offset) else {
+                require(offset == 0) { "Document pagination is unavailable in this context" }
+                ctx.readDocument(args.string("documentId"), maxChars)
+            })
         }
         "calculator" -> {
             val value = Calculator.eval(args.string("expression"))
@@ -320,8 +326,8 @@ object BuiltinTools {
     )
     val readDocument = ToolSpec(
         name = "read_document",
-        description = "Read a document that belongs to an authorized knowledge base",
-        parametersJson = """{"type":"object","additionalProperties":false,"required":["documentId"],"properties":{"documentId":{"type":"string","minLength":1},"maxChars":{"type":"integer","minimum":1,"maximum":16384}}}""",
+        description = "Read published text from an authorized document. Responses may be shorter than maxChars to fit encoded output limits. Continue using returned nextOffset until it is null; offsets count UTF-16 units.",
+        parametersJson = """{"type":"object","additionalProperties":false,"required":["documentId"],"properties":{"documentId":{"type":"string","minLength":1},"maxChars":{"type":"integer","minimum":1,"maximum":16384},"offset":{"type":"integer","minimum":0,"maximum":2147483647}}}""",
         capability = "knowledge.read",
         sideEffect = false,
     )

@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2026 mobileAgentRuntime contributors
+﻿// SPDX-FileCopyrightText: 2026 mobileAgentRuntime contributors
 // SPDX-License-Identifier: AGPL-3.0-only
 
 package runtime.mobileagent.knowledge
@@ -12,25 +12,35 @@ import org.junit.jupiter.api.Assertions.*
 import org.junit.jupiter.api.Test
 
 class DocumentUnitPlannerReviewRegressionTest {
-    private fun plan(text: String) = DocumentUnitPlanner().plan(
-        "review-synthetic", listOf(PlanningPage(1, text, true)),
-    )
+    private fun plan(text: String, budget: VisionRequestBudget = VisionRequestBudget()) =
+        DocumentUnitPlanner().plan("review-synthetic", listOf(PlanningPage(1, text, true)), budget)
 
-    private fun assertCoverage(source: String, units: List<ProcessingUnit>) {
-        val outgoing = units.map { it.effectiveRequestText() }
-        assertTrue(outgoing.all { it.length <= DocumentUnitPlanner.MAX_REQUEST_TEXT_CHARS })
-        assertEquals(source, outgoing.joinToString(""))
-        assertEquals(source, outgoing.joinToString("") { it.toByteArray(Charsets.UTF_8).toString(Charsets.UTF_8) })
-        assertEquals(0, units.first().coverage.textStart)
-        assertEquals(source.length, units.last().coverage.textEnd)
-        assertTrue(units.zipWithNext().all { (a, b) -> a.coverage.textEnd == b.coverage.textStart })
+    /**
+     * The whole page text must survive on `nativeText`; at most one Vision
+     * request may carry it, and only as explicit whole-page PAGE_CONTEXT. No
+     * text slice may be paired with an image stripe by list position.
+     */
+    private fun assertLosslessNoFabrication(source: String, units: List<ProcessingUnit>) {
+        assertTrue(units.isNotEmpty())
+        assertTrue(units.all { it.nativeText == source }, "native text must be retained in full")
+        val carrying = units.filter { it.effectiveRequestText().isNotEmpty() }
+        assertTrue(carrying.size <= 1, "at most one request may carry page text; no cartesian repetition")
+        carrying.forEach {
+            assertEquals(source, it.effectiveRequestText())
+            assertEquals(TextImageAssociation.PAGE_CONTEXT, it.textImageAssociation)
+            assertTrue(it.textLayoutEvidence.isEmpty())
+        }
+        assertTrue(units.filter { it.requiresVision }
+            .all { it.effectiveRequestText().length <= DocumentUnitPlanner.MAX_REQUEST_TEXT_CHARS })
     }
 
     @Test fun blankSlicesDoNotExpandToPageText() {
         val source = "A" + " ".repeat(30_000) + "B"
         val units = plan(source)
         assertTrue(units.any { it.effectiveRequestText().isBlank() })
-        assertCoverage(source, units)
+        assertTrue(units.all { it.effectiveRequestText().isEmpty() })
+        assertTrue(units.all { it.layoutDegradation == LayoutDegradation.PAGE_TEXT_LOCAL_ONLY })
+        assertLosslessNoFabrication(source, units)
     }
 
     @Test fun explicitEmptyAndWhitespaceSurviveSerialization() {
@@ -57,33 +67,40 @@ class DocumentUnitPlannerReviewRegressionTest {
         }
     }
 
-    @Test fun overCapacityFailsLocallyRatherThanTruncatingOrEnlargingRequests() {
-        val error = assertThrows(IllegalArgumentException::class.java) { plan("x".repeat(600_000)) }
-        assertTrue(error.message.orEmpty().startsWith("PIPELINE_TEXT_LIMIT_EXCEEDED"))
+    @Test fun overCapacityKeepsOriginalLocalOnlyInsteadOfTruncatingOrSlicing() {
+        val source = "x".repeat(600_000)
+        val units = plan(source)
+        assertLosslessNoFabrication(source, units)
+        assertTrue(units.all { it.effectiveRequestText().isEmpty() })
+        assertTrue(units.all { it.layoutDegradation == LayoutDegradation.PAGE_TEXT_LOCAL_ONLY })
+        // The 8500 UTF-16 bound still guards any slice that is actually attached.
         assertThrows(IllegalArgumentException::class.java) {
             DocumentUnitPlanner.splitTextSlices("x".repeat(8_501), 1)
         }
     }
 
-    @Test fun exactCapacityStillPreservesEveryCharacter() {
+    @Test fun capacitySizedTextIsPreservedLocallyWithoutFabricatedSlices() {
         val source = "x".repeat(DocumentUnitPlanner.MAX_UNITS_PER_PAGE * DocumentUnitPlanner.MAX_REQUEST_TEXT_CHARS)
-        assertCoverage(source, plan(source))
+        val units = plan(source)
+        assertLosslessNoFabrication(source, units)
+        assertTrue(units.all { it.effectiveRequestText().isEmpty() })
     }
 
     @Test fun individualRequestsPreserveUnicodeAcrossEncodingAndJsonRoundTrips() {
         val source = "甲".repeat(4_000) + "😀" + "乙".repeat(4_000)
-        val units = plan(source)
-        assertCoverage(source, units)
-        assertEquals(source, units.joinToString("") {
-            Json.decodeFromString<String>(Json.encodeToString(it.effectiveRequestText()))
-        })
+        val units = plan(source, VisionRequestBudget(contextWindowTokens = 131_072))
+        assertLosslessNoFabrication(source, units)
+        val carrying = units.filter { it.effectiveRequestText().isNotEmpty() }
+        assertEquals(1, carrying.size)
+        assertEquals(source, Json.decodeFromString<String>(Json.encodeToString(carrying.single().effectiveRequestText())))
+        units.forEach { assertEquals(source, Json.decodeFromString<String>(Json.encodeToString(it.nativeText))) }
     }
 
     @Test fun tinyUnicodeTextAllowsEmptySlicesForAdditionalImageRegions() {
         val source = "😀"
         val units = DocumentUnitPlanner().plan("tiny", listOf(PlanningPage(1, source, true, 4_096, 4_096)))
         assertTrue(units.size > 1)
-        assertCoverage(source, units)
+        assertLosslessNoFabrication(source, units)
         assertEquals(1, units.count { it.effectiveRequestText().isNotEmpty() })
     }
 
@@ -110,7 +127,7 @@ class DocumentUnitPlannerReviewRegressionTest {
             val b = units[j].coverage.region
             assertTrue(a.right <= b.left || b.right <= a.left || a.bottom <= b.top || b.bottom <= a.top)
         }
-        assertCoverage("a|b|c\n1|2|3", units)
+        assertLosslessNoFabrication("a|b|c\n1|2|3", units)
     }
 
     @Test fun nativeOnlyLongTextDoesNotAcquireVisionLimitsOrRequests() {
@@ -127,7 +144,7 @@ class DocumentUnitPlannerReviewRegressionTest {
             val source = buildString {
                 repeat(random.nextInt(20_000) + 1) { append(alphabet[random.nextInt(alphabet.size)]) }
             }
-            assertCoverage(source, plan(source))
+            assertLosslessNoFabrication(source, plan(source))
         }
     }
 }

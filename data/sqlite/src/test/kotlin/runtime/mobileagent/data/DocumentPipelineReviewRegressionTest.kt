@@ -83,32 +83,65 @@ class DocumentPipelineReviewRegressionTest {
             val (batch, _) = stage(repo, complexPdf(source))
             repo.processBatch(batch, true)
             assertTrue(contexts.size > 1)
-            assertEquals(source, contexts.joinToString(""))
+            assertTrue(contexts.all { it.isEmpty() }, "Unlocated long text is retained locally, never paired with arbitrary crops")
             assertTrue(contexts.all { it.length <= DocumentUnitPlanner.MAX_REQUEST_TEXT_CHARS })
-            fun contextChunks() = db.query("SELECT c.text FROM chunks c JOIN documents d ON d.active_version_id=c.document_version_id WHERE c.source_span LIKE '%part:context%' ORDER BY c.text").map { it.string("text") }
+            fun contextChunks() = db.query("SELECT c.text FROM chunks c JOIN documents d ON d.active_version_id=c.document_version_id WHERE c.source_span LIKE '%source:parser-native%' AND c.asset_ids='' ORDER BY c.ordinal")
+                .map { it.string("text").trim() }.filter { it.isNotEmpty() }
             assertEquals(listOf("A", "B"), contextChunks())
             val count = contexts.size
+            val oldCitations = repo.retrieve("before", "ocr", 100).citations.filter { it.assetId != null }
+            assertTrue(oldCitations.isNotEmpty())
             assertEquals(1, repository("review-rebuild-v2").rebuildBatchLocalChunks(batch))
             assertEquals(count, contexts.size)
             assertEquals(listOf("A", "B"), contextChunks())
+            val newCitations = repo.retrieve("after", "ocr", 100).citations.filter { it.assetId != null }
+            assertTrue(newCitations.isNotEmpty())
+            (oldCitations + newCitations).forEach {
+                assertFalse(repo.locateCitation(it).removed, "Local rebuild must preserve both old and new visual references")
+                assertArrayEquals(byteArrayOf(1, 2, 3), repo.evidenceBytes(it)?.second)
+            }
         }
     }
 
-    @Test fun textOverCapacityProducesFailedJobWithZeroRenderingOrProviderAttempts() {
+    @Test fun explicitConsentAcceptsChangedPlanWithoutRepeatingTheReviewGate() {
+        JdbcSqlConnection().use { db ->
+            Migrations.apply(db)
+            var requests = 0
+            val repo = KnowledgeRepository(db, MemoryBlobSink(), visionModelFingerprint = "target",
+                pdfRasterizer = renderer(), vision = VisionBackend {
+                    assertTrue(it.beforeDispatch())
+                    requests++
+                    VisionOutcome.Success(VisionSuccess("cobalt", "diagram"))
+                })
+            val job = repo.importBytes("source.pdf", "application/pdf", complexPdf("page context"), true)
+            assertEquals(ImportStage.AWAITING_UPLOAD_CONSENT, job.stage)
+            db.execute("UPDATE pipeline_plans SET result_version='old-result' WHERE job_id=?", listOf(job.id))
+            val held = repo.grantVisionConsent(job.id, "target")
+            assertEquals(ImportStage.AWAITING_UPLOAD_CONSENT, held.stage)
+            assertTrue(held.error.orEmpty().startsWith("PIPELINE_PLAN_CHANGED:"))
+            assertEquals(0, requests)
+            assertEquals(ImportStage.READY, repo.grantVisionConsent(job.id, "target").stage)
+            assertTrue(requests > 0)
+        }
+    }
+
+    @Test fun modelBudgetTooSmallProducesFailedJobWithZeroRenderingOrProviderAttempts() {
         JdbcSqlConnection().use { db ->
             Migrations.apply(db)
             val blobs = MemoryBlobSink()
             var renders = 0
             var requests = 0
+            val binding = VisionBinding("p", "m", "https://fixture.invalid", 1,
+                requestBudget = VisionRequestBudget(contextWindowTokens = 4096))
             val repo = KnowledgeRepository(db, blobs, vision = VisionBackend {
                 requests++
                 error("Over-capacity page must not reach provider")
-            }, pdfRasterizer = renderer { renders++ }, visionModelFingerprint = "target")
-            val (batch, job) = stage(repo, complexPdf("x".repeat(600_000)))
+            }, pdfRasterizer = renderer { renders++ }, visionBinding = { binding })
+            val (batch, job) = stage(repo, complexPdf("x".repeat(600_000)), binding.fingerprint)
             repo.processBatch(batch, true)
             val saved = db.query("SELECT stage,error FROM import_jobs WHERE id=?", listOf(job)).single()
             assertEquals("FAILED", saved.string("stage"))
-            assertTrue(saved.string("error").contains("PIPELINE_TEXT_LIMIT_EXCEEDED"))
+            assertTrue(saved.string("error").contains("PIPELINE_VISION_BUDGET_EXCEEDED"))
             assertEquals(0, renders)
             assertEquals(0, requests)
             assertTrue(db.query("SELECT * FROM pipeline_attempts").isEmpty())
@@ -117,12 +150,12 @@ class DocumentPipelineReviewRegressionTest {
         }
     }
 
-    private fun stage(repo: KnowledgeRepository, bytes: ByteArray): Pair<String, String> {
+    private fun stage(repo: KnowledgeRepository, bytes: ByteArray, target: String = "target"): Pair<String, String> {
         val kb = repo.ensureDefaultBase()
         val batch = repo.beginBatch(kb, ImportBatchKind.FILES, "review-synthetic")
         val job = repo.importBytes("review.pdf", "application/pdf", bytes, false, kb, pauseAt = ImportStage.COPYING)
         repo.bindJobToBatch(batch, job, "review.pdf")
-        repo.authorizeBatchVision(batch, "target")
+        repo.authorizeBatchVision(batch, target)
         return batch to job.id
     }
 

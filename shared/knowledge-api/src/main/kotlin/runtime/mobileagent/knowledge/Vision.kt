@@ -3,7 +3,7 @@
 
 package runtime.mobileagent.knowledge
 
-const val VISION_PROMPT_VERSION = "vision-prompt-v1"
+const val VISION_PROMPT_VERSION = "vision-prompt-v2-provenance"
 const val VISION_SCHEMA_VERSION = "vision-result-v2"
 const val VISION_PREPROCESS_VERSION = "vision-pre-v1"
 
@@ -26,12 +26,29 @@ data class VisionInput(
     val captureDiagnosticContent: Boolean = false,
     /** Final pause/cancel gate, invoked immediately before external dispatch; excluded from [cacheKey]. */
     val beforeDispatch: () -> Boolean = { true },
+    /** Document-derived hints; all are untrusted data, never model instructions. */
+    val tableHeader: String? = null,
+    val continuationGroupId: String? = null,
+    val continuationIndex: Int? = null,
+    /** PAGE_CONTEXT makes no claim that the text belongs to this image crop. */
+    val textImageAssociation: String = "PAGE_CONTEXT",
+    val imageRegion: UnitRegion? = null,
+    val layoutDegradation: String? = null,
+    val pageNativeTextChars: Int? = null,
 ) {
     val cacheKey: String
         get() = sha256Hex(
-            "$assetHash|$contextHash|$modelFingerprint|$VISION_PROMPT_VERSION|$VISION_SCHEMA_VERSION|$VISION_PREPROCESS_VERSION"
+            "$assetHash|$contextHash|$modelFingerprint|$VISION_PROMPT_VERSION|$VISION_SCHEMA_VERSION|$VISION_PREPROCESS_VERSION|$provenanceHash"
                 .toByteArray(Charsets.UTF_8),
         )
+
+    private val provenanceHash: String
+        get() = sha256Hex(buildString {
+            listOf(tableHeader, continuationGroupId, continuationIndex?.toString(), textImageAssociation,
+                imageRegion?.toString(), layoutDegradation, pageNativeTextChars?.toString()).forEach { value ->
+                append(value?.length ?: -1).append(':').append(value.orEmpty())
+            }
+        }.toByteArray(Charsets.UTF_8))
 }
 
 data class VisionSuccess(
@@ -118,6 +135,8 @@ data class VisionBinding(
     val modelProfileId: String? = null,
     /** Hash of the effective non-secret provider/model transport configuration. */
     val configurationHash: String? = null,
+    /** Request planning only; target configuration already participates in fingerprint. */
+    val requestBudget: VisionRequestBudget = VisionRequestBudget(),
 ) {
     val fingerprint: String
         // Keep path spelling significant.  Only discard redundant trailing

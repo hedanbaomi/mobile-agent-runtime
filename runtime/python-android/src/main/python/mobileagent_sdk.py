@@ -36,12 +36,18 @@ def knowledge_search(query: str, limit: int = 10) -> object:
     return _request("knowledge.search", {"query": query, "limit": limit})
 
 
-def knowledge_read(document_id: str, max_bytes: int = 256 * 1024) -> object:
+def knowledge_read(document_id: str, max_bytes: int = 256 * 1024, offset: int = 0) -> object:
+    """Read up to max_bytes of UTF-8 text, subject to smaller broker limits.
+
+    Pass the returned UTF-16 nextOffset to continue until it is None.
+    """
     if not isinstance(document_id, str) or not document_id or len(document_id) > 256:
         raise ValueError("invalid document id")
     if not isinstance(max_bytes, int) or max_bytes < 1 or max_bytes > 8 * 1024 * 1024:
         raise ValueError("invalid document limit")
-    return _request("knowledge.read", {"documentId": document_id, "maxBytes": max_bytes})
+    if not isinstance(offset, int) or isinstance(offset, bool) or offset < 0 or offset > 2147483647:
+        raise ValueError("invalid document offset")
+    return _request("knowledge.read", {"documentId": document_id, "maxBytes": max_bytes, "offset": offset})
 
 
 def http_request(url: str, method: str = "GET", headers: dict | None = None, body: object = None) -> object:

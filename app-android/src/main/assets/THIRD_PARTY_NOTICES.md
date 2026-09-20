@@ -42,11 +42,11 @@ asset boundary; it fails closed when a boundary or material is missing:
   and pinned source archive `30dd99efab891a6385a89ecd3a3a8a85ed7d3f064b7657588fc3ef5ccd2d52e3`.
 - ONNX Runtime 1.29.0: `LICENSE.txt` `2f07c72751aed99790b8a4869cf2311df85a860b22ded05fa22803587a48922c`,
   `NOTICE.txt` `af50216ba6c698e64b3a91f63278543d79f963938ca14fd23df45f2d6de3491c`.
-- all-MiniLM-L6-v2: Apache text `9bf4e882bdd75e8d10fc788c53d0a787ef0f59cead1fe1f0878c240896fc8610`,
-  provenance notice `e4870c1e6fe1a4652eb6912c1df83a097653dd337560ac63c6a211a50a1f0333`,
-  model `6fd5d72fe4589f189f8ebc006442dbb529bb7ce38f8082112682524616046452`,
-  tokenizer `be50c3628f2bf5bb5e3a7f17b1f74611b2561a3a27eeab05e5aa30f411572037`,
-  and manifest `e7ac456cccf4def26d7599afe0c200ff8900599776f970b4b7b8881fd17bf6e5`.
+- distiluse-base-multilingual-cased-v2: Apache-2.0; pinned Xenova int8 ONNX and upstream Sentence Transformers Dense Tanh projection.
+  Exact weights, tokenizer, projection and manifest SHA256 values and pinned source revisions are recorded in `licenses/index.json` and the packaged `LICENSE-NOTICE.txt`.
+
+
+
 
 This asset notice is generated alongside the repository notice and is intended
 to remain readable from the installed APK without network access.

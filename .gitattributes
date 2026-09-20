@@ -7,4 +7,8 @@
 # Preserve license bytes for the future licenseGuard hash on every platform.
 /LICENSE -text
 /LICENSES/AGPL-3.0-only.txt -text
+/LICENSES/Apache-2.0.txt text eol=lf
 app-android/src/main/assets/licenses/** -text
+# These bytes enter pinned generated assets; Windows checkout must not change them.
+runtime/embedding-onnx/third-party/** text eol=lf
+runtime/python-android/src/main/python/** text eol=lf

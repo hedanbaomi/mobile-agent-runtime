@@ -29,16 +29,18 @@ android {
     }
 
     // The generated directory is populated by a pinned, hash-checked task
-    // below.  Keeping the 90 MiB weights out of Git still makes every clean
+    // below. Keeping the quantized multilingual weights out of Git makes every clean
     // build package the same official model pack or fail closed.
     sourceSets["main"].assets.srcDir(layout.buildDirectory.dir("generated/embedding-assets"))
 }
 
-val modelPackId = "all-MiniLM-L6-v2"
-val modelPackRevision = "1110a243fdf4706b3f48f1d95db1a4f5529b4d41"
-val modelPackSource = "https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/"
-val modelPackModelSha256 = "6fd5d72fe4589f189f8ebc006442dbb529bb7ce38f8082112682524616046452"
-val modelPackTokenizerSha256 = "be50c3628f2bf5bb5e3a7f17b1f74611b2561a3a27eeab05e5aa30f411572037"
+val modelPackId = "distiluse-base-multilingual-cased-v2"
+val modelPackRevision = "cad454171d918d9873a2701ba245054b6c1760dd"
+val modelPackSource = "https://huggingface.co/Xenova/distiluse-base-multilingual-cased-v2/"
+val modelPackModelSha256 = "1724c10ba3b33b58afb6ce73bbf3e0528921bd4d4e1bf5a569b6d73f234e72bf"
+val modelPackTokenizerSha256 = "bf1b59b7b11c95f194f51708d918eea378e09d05f84c0e1656dc5180e8117088"
+val projectionSha256 = "0a21b1ce908e772ebf09f93c20ca09524c32706e9918d9c0169a3f0663b191ed"
+val projectionSource = "https://huggingface.co/sentence-transformers/distiluse-base-multilingual-cased-v2/resolve/bfe45d0732ca50787611c0fe107ba278c7f3f889/2_Dense/model.safetensors"
 val onnxRuntimeVersion = "1.29.0"
 val onnxRuntimeLicenseUrl = "https://github.com/microsoft/onnxruntime/blob/v$onnxRuntimeVersion/LICENSE"
 val onnxRuntimeLicenseSource = rootProject.file("runtime/embedding-onnx/third-party/onnxruntime-$onnxRuntimeVersion/LICENSE.txt")
@@ -104,7 +106,10 @@ val prepareModelPack = tasks.register("prepareModelPack") {
     inputs.property("modelPackModelSha256", modelPackModelSha256)
     inputs.property("modelPackTokenizerSha256", modelPackTokenizerSha256)
     inputs.property("onnxRuntimeVersion", onnxRuntimeVersion)
+    inputs.property("projectionSha256", projectionSha256)
+    inputs.property("windowStrategy", "sentence-bounded-coverage-mean-v3")
     inputs.file(onnxRuntimeLicenseSource)
+    inputs.file(rootProject.file("LICENSES/Apache-2.0.txt"))
     outputs.dir(modelPackGenerated)
     outputs.dir(embeddingAssetsGenerated)
     outputs.file(onnxRuntimeLicenseGenerated)
@@ -115,7 +120,7 @@ val prepareModelPack = tasks.register("prepareModelPack") {
         val model = cache.resolve("model.onnx")
         val tokenizer = cache.resolve("tokenizer.json")
         downloadPinned(
-            "${modelPackSource}resolve/$modelPackRevision/onnx/model.onnx?download=true",
+            "${modelPackSource}resolve/$modelPackRevision/onnx/model_quantized.onnx?download=true",
             model,
             modelPackModelSha256,
         )
@@ -124,16 +129,26 @@ val prepareModelPack = tasks.register("prepareModelPack") {
             tokenizer,
             modelPackTokenizerSha256,
         )
-        generated.deleteRecursively()
+        val projection = cache.resolve("dense.safetensors")
+        downloadPinned(projectionSource, projection, projectionSha256)
+        // This task owns modelpacks; remove retired generated packs so an incremental
+        // build cannot accidentally ship the obsolete model alongside the replacement.
+        generated.parentFile.deleteRecursively()
         generated.mkdirs()
         Files.copy(model.toPath(), generated.resolve("model.onnx").toPath(), StandardCopyOption.REPLACE_EXISTING)
         Files.copy(tokenizer.toPath(), generated.resolve("tokenizer.json").toPath(), StandardCopyOption.REPLACE_EXISTING)
+        Files.copy(projection.toPath(), generated.resolve("dense.safetensors").toPath(), StandardCopyOption.REPLACE_EXISTING)
         generated.resolve("manifest.json").writeText(
             """
             {
               "id": "$modelPackId",
-              "spaceId": "onnx:$modelPackId@$modelPackRevision:d384:cosine",
-              "dimension": 384,
+              "spaceId": "onnx:distiluse-base-multilingual-cased-v2@cad454171d918d9873a2701ba245054b6c1760dd:int8:d512:cosine:wp-v2:mean-dense-tanh:sentence126-bounded-mean-v3:tbf1b59b7b11c95f194f51708d918eea378e09d05f84c0e1656dc5180e8117088:p0a21b1ce908e772ebf09f93c20ca09524c32706e9918d9c0169a3f0663b191ed",
+              "dimension": 512,
+              "hiddenDimension": 768,
+              "projectionFile": "dense.safetensors",
+              "projectionSha256": "$projectionSha256",
+              "windowStrategy": "sentence-bounded-coverage-mean-v3",
+              "tokenizerStrategy": "bert-wordpiece-v2",
               "sha256": "$modelPackModelSha256",
               "tokenizerSha256": "$modelPackTokenizerSha256",
               "license": "Apache-2.0",
@@ -151,10 +166,12 @@ val prepareModelPack = tasks.register("prepareModelPack") {
             """.trimIndent(),
         )
         generated.resolve("LICENSE-NOTICE.txt").writeText(
-            "Model: sentence-transformers/all-MiniLM-L6-v2\n" +
+            "Model: sentence-transformers/distiluse-base-multilingual-cased-v2\n" +
                 "Source: $modelPackSource\n" +
+                "Projection source: $projectionSource\n" +
+                "Projection SHA256: $projectionSha256\n" +
                 "Revision: $modelPackRevision\n" +
-                "Model card: ${modelPackSource}blob/$modelPackRevision/README.md\n" +
+                "Model card: https://huggingface.co/sentence-transformers/distiluse-base-multilingual-cased-v2/blob/bfe45d0732ca50787611c0fe107ba278c7f3f889/README.md\n" +
                 "License: Apache-2.0 (verified from the official model card metadata)\n" +
                 "Runtime: com.microsoft.onnxruntime:onnxruntime-android:1.29.0\n" +
                 "Runtime license: MIT (verified from the Maven POM)\n",
@@ -195,5 +212,6 @@ dependencies {
     implementation(project(":shared:provider-api"))
     implementation(libs.kotlinx.serialization.json)
     implementation(libs.kotlinx.coroutines.core)
+    testImplementation(libs.junit4)
     implementation("com.microsoft.onnxruntime:onnxruntime-android:$onnxRuntimeVersion")
 }

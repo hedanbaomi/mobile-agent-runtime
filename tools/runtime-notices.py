@@ -115,7 +115,7 @@ NATIVE_MODEL_ENTRIES = [
             {
                 "label": "CPython standard library archive",
                 "path": "python/python3.14.zip",
-                "sha256": "8aa6768b2585279a566bef9f2b5c0568f3199c940fe77b2d84b240b97474e351",
+                "sha256": "9b08aa1e63dd6669c8e5d0b8a95887f978a3c21d8af27357b72ec96c631694ba",
             },
         ],
         "provenance": {
@@ -196,49 +196,55 @@ NATIVE_MODEL_ENTRIES = [
         "managedBy": "embedding-runtime owner",
     },
     {
-        "id": "asset:all-MiniLM-L6-v2",
-        "name": "all-MiniLM-L6-v2 model pack",
-        "version": "all-MiniLM-L6-v2",
+        "id": "asset:distiluse-base-multilingual-cased-v2",
+        "name": "distiluse-base-multilingual-cased-v2 model pack",
+        "version": "distiluse-base-multilingual-cased-v2",
         "license": "Apache-2.0",
-        "source": "https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/",
-        "licenseSource": "https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/blob/1110a243fdf4706b3f48f1d95db1a4f5529b4d41/README.md",
+        "source": "https://huggingface.co/Xenova/distiluse-base-multilingual-cased-v2/",
+        "licenseSource": "https://huggingface.co/sentence-transformers/distiluse-base-multilingual-cased-v2/blob/bfe45d0732ca50787611c0fe107ba278c7f3f889/README.md",
         "files": [
             {
                 "label": "model pack license",
-                "path": "modelpacks/all-MiniLM-L6-v2/LICENSES/Apache-2.0.txt",
-                "sha256": "9bf4e882bdd75e8d10fc788c53d0a787ef0f59cead1fe1f0878c240896fc8610",
+                "path": "modelpacks/distiluse-base-multilingual-cased-v2/LICENSES/Apache-2.0.txt",
+                "sha256": "074e6e32c86a4c0ef8b3ed25b721ca23aca83df277cd88106ef7177c354615ff"
             },
             {
                 "label": "model pack provenance notice",
-                "path": "modelpacks/all-MiniLM-L6-v2/LICENSE-NOTICE.txt",
-                "sha256": "e4870c1e6fe1a4652eb6912c1df83a097653dd337560ac63c6a211a50a1f0333",
-            },
+                "path": "modelpacks/distiluse-base-multilingual-cased-v2/LICENSE-NOTICE.txt",
+                "sha256": "2dec2fa539fdeba87f7c5a081d5b24427119e859845abb4a7769628cf0e41abb"
+            }
         ],
         "payloads": [
             {
                 "label": "ONNX model weights",
-                "path": "modelpacks/all-MiniLM-L6-v2/model.onnx",
-                "sha256": "6fd5d72fe4589f189f8ebc006442dbb529bb7ce38f8082112682524616046452",
+                "path": "modelpacks/distiluse-base-multilingual-cased-v2/model.onnx",
+                "sha256": "1724c10ba3b33b58afb6ce73bbf3e0528921bd4d4e1bf5a569b6d73f234e72bf"
             },
             {
                 "label": "tokenizer",
-                "path": "modelpacks/all-MiniLM-L6-v2/tokenizer.json",
-                "sha256": "be50c3628f2bf5bb5e3a7f17b1f74611b2561a3a27eeab05e5aa30f411572037",
+                "path": "modelpacks/distiluse-base-multilingual-cased-v2/tokenizer.json",
+                "sha256": "bf1b59b7b11c95f194f51708d918eea378e09d05f84c0e1656dc5180e8117088"
             },
             {
                 "label": "model manifest",
-                "path": "modelpacks/all-MiniLM-L6-v2/manifest.json",
-                "sha256": "e7ac456cccf4def26d7599afe0c200ff8900599776f970b4b7b8881fd17bf6e5",
+                "path": "modelpacks/distiluse-base-multilingual-cased-v2/manifest.json",
+                "sha256": "020fcc86ef3c7fd74836f9360abc78d5bc8adc6431d05166167ee1e9ff21d869"
             },
+            {
+                "label": "Sentence Transformers Dense Tanh projection",
+                "path": "modelpacks/distiluse-base-multilingual-cased-v2/dense.safetensors",
+                "sha256": "0a21b1ce908e772ebf09f93c20ca09524c32706e9918d9c0169a3f0663b191ed"
+            }
         ],
         "provenance": {
             "generatedAssetBoundary": "runtime/embedding-onnx/build/generated/embedding-assets",
-            "revision": "1110a243fdf4706b3f48f1d95db1a4f5529b4d41",
-            "modelSource": "https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/1110a243fdf4706b3f48f1d95db1a4f5529b4d41/onnx/model.onnx?download=true",
-            "tokenizerSource": "https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/1110a243fdf4706b3f48f1d95db1a4f5529b4d41/tokenizer.json?download=true",
+            "revision": "cad454171d918d9873a2701ba245054b6c1760dd",
+            "modelSource": "https://huggingface.co/Xenova/distiluse-base-multilingual-cased-v2/resolve/cad454171d918d9873a2701ba245054b6c1760dd/onnx/model_quantized.onnx?download=true",
+            "tokenizerSource": "https://huggingface.co/Xenova/distiluse-base-multilingual-cased-v2/resolve/cad454171d918d9873a2701ba245054b6c1760dd/tokenizer.json?download=true",
+            "projectionSource": "https://huggingface.co/sentence-transformers/distiluse-base-multilingual-cased-v2/resolve/bfe45d0732ca50787611c0fe107ba278c7f3f889/2_Dense/model.safetensors"
         },
         "verification": "generated-assets-or-artifact",
-        "managedBy": "model-pack owner",
+        "managedBy": "model-pack owner"
     },
 ]
 
@@ -1084,6 +1090,7 @@ def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--write", action="store_true", help="generate APK assets, index, and evidence")
     parser.add_argument("--check", action="store_true", help="verify generated assets without writing")
+    parser.add_argument("--check-artifact", action="store_true", help="verify packaged bytes against the committed inventory without requiring a dependency report")
     parser.add_argument("--log", type=Path, default=DEFAULT_LOG)
     parser.add_argument("--gradle-cache", type=Path, default=DEFAULT_CACHE)
     parser.add_argument(
@@ -1106,8 +1113,16 @@ def main(argv: list[str]) -> int:
             print(f"runtime-notices write PASS: {len(coordinates)} coordinates, {len(components)} Maven assets")
         if args.check:
             verify(args.log, args.gradle_cache, args.generated_assets, args.artifact)
-        if not args.write and not args.check:
-            parser.error("choose --write or --check")
+        if args.check_artifact:
+            if not args.artifact:
+                parser.error("--check-artifact requires --artifact")
+            components = json.loads(INDEX_PATH.read_text(encoding="utf-8"))["components"]
+            verify_native_index_entries(components)
+            for artifact in args.artifact:
+                verify_artifact(artifact, components)
+            print("runtime-notices artifact check PASS: all indexed packaged bytes verified")
+        if not args.write and not args.check and not args.check_artifact:
+            parser.error("choose --write, --check or --check-artifact")
     except (OSError, ElementTree.ParseError, RuntimeError, ValueError, urllib.error.URLError) as error:
         print(f"runtime-notices ERROR: {error}", file=sys.stderr)
         return 1

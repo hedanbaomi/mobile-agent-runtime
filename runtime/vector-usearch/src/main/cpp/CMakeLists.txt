@@ -25,3 +25,19 @@ target_include_directories(usearch_jni PRIVATE "${USEARCH_ROOT}/include")
 
 find_library(log-lib log)
 target_link_libraries(usearch_jni PRIVATE ${log-lib})
+# 16 KB page-size readiness.  Google Play requires native libraries to be
+# loadable on Android 15+ devices that run with 16 KB memory pages.  AGP already
+# zipaligns the packaged .so entries to 16 KB, but the ELF program headers still
+# described 4 KB pages, so the dynamic linker rejected the mapping.
+#
+# -z max-page-size widens PT_LOAD p_align from 4096 to 16384 and keeps
+# p_vaddr - p_offset congruent modulo the page size.  It is not sufficient on
+# its own: lld rounds the end of GNU_RELRO up to the *common* page size, so
+# without -z common-page-size the GNU_RELRO segment still ends mid-page.  The
+# loader then protects part of .data read-only and the library crashes on a
+# 16 KB device even though every PT_LOAD looks correct.  Both options are
+# additive; RELRO, BIND_NOW and the existing hardening flags stay in place.
+target_link_options(usearch_jni PRIVATE
+    "-Wl,-z,max-page-size=16384"
+    "-Wl,-z,common-page-size=16384"
+)

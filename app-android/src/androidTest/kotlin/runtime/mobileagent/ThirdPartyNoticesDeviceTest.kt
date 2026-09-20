@@ -14,7 +14,7 @@ import runtime.mobileagent.feature.settings.ThirdPartyNoticesUiState
 /**
  * Loads the notice catalog from the same signed-in-package assets the UI reads.
  *
- * The index references `modelpacks/all-MiniLM-L6-v2/LICENSE-NOTICE.txt`; the previous
+ * The index references `modelpacks/distiluse-base-multilingual-cased-v2/LICENSE-NOTICE.txt`; the previous
  * allow-list only accepted `licenses/` plus one hard-coded path, and one rejected entry blanked
  * the whole component list.
  */
@@ -28,9 +28,9 @@ class ThirdPartyNoticesDeviceTest {
         assertTrue("the bundled index must expose components", state.components.size > 100)
         assertTrue(state.overview.isNotBlank())
 
-        val modelPack = state.components.firstOrNull { it.id == "asset:all-MiniLM-L6-v2" }
+        val modelPack = state.components.firstOrNull { it.id == "asset:distiluse-base-multilingual-cased-v2" }
         assertTrue("the bundled model pack component must survive loading", modelPack != null)
-        val noticePath = "modelpacks/all-MiniLM-L6-v2/LICENSE-NOTICE.txt"
+        val noticePath = "modelpacks/distiluse-base-multilingual-cased-v2/LICENSE-NOTICE.txt"
         assertTrue(
             "the model pack notice path must be part of the component: ${modelPack!!.files}",
             modelPack.files.any { it.path == noticePath },

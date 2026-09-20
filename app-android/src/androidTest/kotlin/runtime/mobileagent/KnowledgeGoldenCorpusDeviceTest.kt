@@ -209,7 +209,7 @@ class KnowledgeGoldenCorpusDeviceTest {
                 assertTrue(repo.search("GOLDENONNXBREAD", 8, listOf(kb)).any { it.documentId == cooking.documentId })
                 val first = embedder.embed("Astronomers observe distant galaxies with a telescope.")
                 val second = embedder.embed("A sourdough baker kneads flour and bakes bread.")
-                assertEquals(384, first.size)
+                assertEquals(AndroidModelPackLoader.DEFAULT_DIMENSION, first.size)
                 assertTrue("real embedding must not collapse unrelated texts", cosine(first, second) < 0.999)
             } finally {
                 repo.closeVectorIndexes()

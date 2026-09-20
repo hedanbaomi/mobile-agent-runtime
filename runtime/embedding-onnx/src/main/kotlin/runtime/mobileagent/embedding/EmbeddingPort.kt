@@ -15,6 +15,7 @@ import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.int
+import kotlinx.serialization.json.booleanOrNull
 
 /**
  * Immutable metadata for a verified local model pack.
@@ -42,7 +43,12 @@ data class ModelPackManifest(
     val normalize: Boolean = true,
     val distance: String = "cosine",
     val tokenizerType: String = "bert-wordpiece",
+    val tokenizerStrategy: String = "bert-wordpiece-v2",
     val outputName: String = "last_hidden_state",
+    val windowStrategy: String = "sentence-bounded-coverage-mean-v3",
+    val hiddenDimension: Int = dimension,
+    val projectionFile: String? = null,
+    val projectionSha256: String? = null,
 )
 
 interface EmbeddingPort {
@@ -69,6 +75,7 @@ data class OnnxModelPack(
     val manifest: ModelPackManifest,
     val modelFile: File,
     val tokenizerFile: File,
+    val projectionFile: File? = null,
 )
 
 /**
@@ -89,10 +96,18 @@ internal class BertWordPieceTokenizer(
     private val sepId: Int
     private val padId: Int
     private val unknownId: Int
+    private val lowercase: Boolean
+    private val stripAccents: Boolean
 
     init {
         require(maxSequenceLength >= 3) { "Model pack maxSequenceLength must be at least 3" }
         val root = Json.parseToJsonElement(tokenizerJson).jsonObject
+        val normalizer = root["normalizer"]?.jsonObject ?: error("Missing BERT normalizer")
+        require(normalizer["type"]?.jsonPrimitive?.content == "BertNormalizer")
+        require(normalizer["clean_text"]?.jsonPrimitive?.booleanOrNull == true)
+        require(normalizer["handle_chinese_chars"]?.jsonPrimitive?.booleanOrNull == true)
+        lowercase = normalizer["lowercase"]?.jsonPrimitive?.booleanOrNull ?: false
+        stripAccents = normalizer["strip_accents"]?.jsonPrimitive?.booleanOrNull ?: lowercase
         val model = root["model"]?.jsonObject ?: error("tokenizer.json has no WordPiece model")
         require(model["type"]?.jsonPrimitive?.content == "WordPiece") {
             "Unsupported tokenizer model; expected WordPiece"
@@ -115,12 +130,38 @@ internal class BertWordPieceTokenizer(
     )
 
     fun encode(text: String): Encoded {
-        val wordPieces = basicTokens(text).flatMap(::wordPiece)
-        val available = maxSequenceLength - 2
-        val pieces = wordPieces.take(available)
-        val ids = LongArray(maxSequenceLength) { padId.toLong() }
-        val mask = LongArray(maxSequenceLength)
-        val types = LongArray(maxSequenceLength)
+        val windows = encodeWindows(text)
+        require(windows.size == 1) { "LOCAL_EMBEDDING_WINDOW_REQUIRED: text must not be truncated" }
+        return windows.single()
+    }
+
+    /** Every WordPiece is assigned exactly once; limits fail before any inference. */
+    fun encodeWindows(text: String): List<Encoded> {
+        require(text.length <= 65_536) { "LOCAL_EMBEDDING_INPUT_TOO_LARGE" }
+        // Keep independent sentences independent: a long boilerplate prefix must not
+        // change the contextual representation of a short final fact. Long sentences
+        // still receive complete bounded windows. Only whitespace separators disappear,
+        // exactly as in BERT normalization; every resulting WordPiece participates.
+        val sentences = text.split(Regex("(?<=[.!?])(?=\\s|$)|(?<=[。！？])|[\\r\\n]+"))
+            .flatMap { sentence -> basicTokens(sentence).flatMap(::wordPiece).chunked(maxSequenceLength - 2) }
+            .ifEmpty { listOf(emptyList()) }
+        require(sentences.all { it.isEmpty() } || sentences.any { row -> row.any { it != unknownToken } }) {
+            "LOCAL_EMBEDDING_UNSUPPORTED_TEXT"
+        }
+        require(sentences.sumOf { it.size } <= 128 * (maxSequenceLength - 2)) { "LOCAL_EMBEDDING_TOO_MANY_WINDOWS" }
+        // Dense OCR lines / lists must not fail merely because they have many
+        // short sentences. Pack them in order only when sentence isolation
+        // would exceed the inference budget; never discard any pieces.
+        val windows = if (sentences.size <= 128) sentences
+            else sentences.flatten().chunked(maxSequenceLength - 2)
+        return windows.map(::encodePieces)
+    }
+
+    private fun encodePieces(pieces: List<String>): Encoded {
+        val size = pieces.size + 2
+        val ids = LongArray(size) { padId.toLong() }
+        val mask = LongArray(size)
+        val types = LongArray(size)
         var cursor = 0
         ids[cursor] = clsId.toLong()
         mask[cursor++] = 1
@@ -143,18 +184,18 @@ internal class BertWordPieceTokenizer(
                 current.setLength(0)
             }
         }
-        normalized.forEach { char ->
+        normalized.codePoints().forEach { code ->
             when {
-                char.isWhitespace() -> flush()
-                isChineseChar(char.code) -> {
+                Character.isWhitespace(code) || Character.isSpaceChar(code) -> flush()
+                isChineseChar(code) -> {
                     flush()
-                    result += char.toString()
+                    result += String(Character.toChars(code))
                 }
-                isPunctuation(char) -> {
+                isPunctuation(code) -> {
                     flush()
-                    result += char.toString()
+                    result += String(Character.toChars(code))
                 }
-                else -> current.append(char)
+                else -> current.appendCodePoint(code)
             }
         }
         flush()
@@ -162,7 +203,7 @@ internal class BertWordPieceTokenizer(
     }
 
     private fun wordPiece(token: String): List<String> {
-        if (token.length > maxInputCharsPerWord) return listOf(unknownToken)
+        if (token.codePointCount(0, token.length) > maxInputCharsPerWord) return listOf(unknownToken)
         val pieces = mutableListOf<String>()
         var start = 0
         while (start < token.length) {
@@ -175,7 +216,7 @@ internal class BertWordPieceTokenizer(
                     match = lookup
                     break
                 }
-                end--
+                end = token.offsetByCodePoints(end, -1)
             }
             if (match == null) return listOf(unknownToken)
             pieces += match
@@ -186,32 +227,26 @@ internal class BertWordPieceTokenizer(
 
     private fun normalize(text: String): String {
         val cleaned = buildString(text.length) {
-            text.forEach { char ->
+            text.codePoints().forEach { code ->
                 when {
-                    char.code == 0 || char.code == 0xFFFD || isControl(char) -> Unit
-                    char.isWhitespace() -> append(' ')
-                    else -> append(char)
+                    code == 0 || code == 0xFFFD || isControl(code) -> Unit
+                    Character.isWhitespace(code) || Character.isSpaceChar(code) -> append(' ')
+                    else -> appendCodePoint(code)
                 }
             }
         }
-        val withChineseBoundaries = buildString(cleaned.length + 8) {
-            cleaned.forEach { char ->
-                if (isChineseChar(char.code)) append(' ')
-                append(char)
-                if (isChineseChar(char.code)) append(' ')
-            }
-        }
-        val lower = withChineseBoundaries.lowercase(Locale.ROOT)
-        return Normalizer.normalize(lower, Normalizer.Form.NFD)
-            .filterNot { Character.getType(it) == Character.NON_SPACING_MARK.toInt() }
+        val cased = if (lowercase) cleaned.lowercase(Locale.ROOT) else cleaned
+        return if (stripAccents) Normalizer.normalize(cased, Normalizer.Form.NFD)
+            .filterNot { Character.getType(it) == Character.NON_SPACING_MARK.toInt() } else cased
     }
 
-    private fun isControl(char: Char): Boolean =
-        char != '\t' && char != '\n' && char != '\r' && Character.getType(char) == Character.CONTROL.toInt()
+    private fun isControl(code: Int): Boolean =
+        code !in listOf(9, 10, 13) && Character.getType(code) in listOf(
+            Character.CONTROL.toInt(), Character.FORMAT.toInt())
 
-    private fun isPunctuation(char: Char): Boolean =
-        char.code in 33..47 || char.code in 58..64 || char.code in 91..96 || char.code in 123..126 ||
-            Character.getType(char) in setOf<Int>(
+    private fun isPunctuation(code: Int): Boolean =
+        code in 33..47 || code in 58..64 || code in 91..96 || code in 123..126 ||
+            Character.getType(code) in setOf<Int>(
                 Character.CONNECTOR_PUNCTUATION.toInt(),
                 Character.DASH_PUNCTUATION.toInt(),
                 Character.START_PUNCTUATION.toInt(),
@@ -248,7 +283,12 @@ class OnnxTextEmbedder(
         pack.manifest.maxSequenceLength,
     )
     private val environment = ai.onnxruntime.OrtEnvironment.getEnvironment()
+    private val projection = pack.projectionFile?.let {
+        DenseProjection(it.readBytes(), pack.manifest.hiddenDimension, dimension)
+    }
     private val session = ai.onnxruntime.OrtSession.SessionOptions().use { options ->
+        options.setIntraOpNumThreads(2)
+        options.setInterOpNumThreads(1)
         environment.createSession(pack.modelFile.absolutePath, options)
     }
 
@@ -260,21 +300,35 @@ class OnnxTextEmbedder(
             "Only cosine distance is supported by the Android local embedder"
         }
         require(dimension > 0) { "Model pack dimension must be positive" }
+        require(pack.manifest.windowStrategy == "sentence-bounded-coverage-mean-v3")
+        require(projection != null || pack.manifest.hiddenDimension == dimension)
     }
 
     override fun embed(text: String): FloatArray {
-        val encoded = tokenizer.encode(text)
+        val windows = tokenizer.encodeWindows(text)
+        val pooled = FloatArray(dimension)
+        windows.forEach { window ->
+            val vector = embedWindow(window)
+            for (i in pooled.indices) pooled[i] += vector[i] / windows.size
+        }
+        return normalize(pooled)
+    }
+
+    private fun embedWindow(encoded: BertWordPieceTokenizer.Encoded): FloatArray {
         val inputs = linkedMapOf<String, ai.onnxruntime.OnnxTensor>()
         return try {
             inputs["input_ids"] = ai.onnxruntime.OnnxTensor.createTensor(environment, arrayOf(encoded.inputIds))
             inputs["attention_mask"] = ai.onnxruntime.OnnxTensor.createTensor(environment, arrayOf(encoded.attentionMask))
-            inputs["token_type_ids"] = ai.onnxruntime.OnnxTensor.createTensor(environment, arrayOf(encoded.tokenTypeIds))
+            if ("token_type_ids" in session.inputNames) {
+                inputs["token_type_ids"] = ai.onnxruntime.OnnxTensor.createTensor(environment, arrayOf(encoded.tokenTypeIds))
+            }
             synchronized(session) {
                 session.run(inputs).use { result ->
                     val output = result[pack.manifest.outputName].orElseThrow {
                         IllegalStateException("ONNX output ${pack.manifest.outputName} is missing")
                     }.value
-                    normalize(meanPool(output, encoded.attentionMask))
+                    val pooled = meanPool(output, encoded.attentionMask)
+                    normalize(projection?.apply(pooled) ?: pooled)
                 }
             }
         } finally {
@@ -292,12 +346,12 @@ class OnnxTextEmbedder(
         val batch = output as? Array<*> ?: error("ONNX output is not a tensor batch")
         val rows = batch.firstOrNull() as? Array<*> ?: error("ONNX output has no sequence rows")
         require(rows.size == mask.size) { "ONNX output sequence length differs from tokenizer" }
-        val pooled = FloatArray(dimension)
+        val pooled = FloatArray(pack.manifest.hiddenDimension)
         var count = 0L
         rows.forEachIndexed { index, rowValue ->
             if (mask[index] == 0L) return@forEachIndexed
             val row = rowValue as? FloatArray ?: error("ONNX output row is not float32")
-            require(row.size == dimension) { "ONNX output dimension differs from manifest" }
+            require(row.size == pooled.size) { "ONNX output dimension differs from manifest" }
             for (i in row.indices) pooled[i] += row[i]
             count++
         }

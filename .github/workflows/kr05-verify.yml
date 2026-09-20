@@ -1,0 +1,88 @@
+# SPDX-FileCopyrightText: 2026 mobileAgentRuntime contributors
+# SPDX-License-Identifier: AGPL-3.0-only
+name: KR05 isolated verification
+on:
+  push:
+    branches: [codex/kr05-verify-20260920]
+    paths: [.github/workflows/kr05-verify.yml]
+permissions:
+  contents: write
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: e57187c238bfd004d3e181dc5c64fc15c936d09f
+      - uses: actions/setup-java@c5195efecf7bdfc987ee8bae7a71cb8b11521c00
+        with:
+          distribution: temurin
+          java-version: "17"
+      - uses: actions/setup-python@42375524e23c412d93fb67b49958b491fce71c38
+        with:
+          python-version: "3.11"
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: "20"
+      - name: Apply scoped fix to the pinned clean base
+        env:
+          KR05_PAYLOAD: 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
+        run: |
+          git rev-parse --show-toplevel
+          git status --short --branch
+          test -z "$(git status --porcelain)"
+          python - <<'PY'
+          import os, json, gzip, base64, subprocess
+          from pathlib import Path
+          payload = json.loads(gzip.decompress(base64.b64decode(os.environ['KR05_PAYLOAD'])))
+          for name, text in payload['files'].items():
+              path = Path(name)
+              assert not path.exists(), name
+              path.parent.mkdir(parents=True, exist_ok=True)
+              path.write_text(text, encoding='utf-8')
+          patch = Path(os.environ['RUNNER_TEMP']) / 'kr05-apply.py'
+          patch.write_text(payload['patch'], encoding='utf-8')
+          subprocess.run(['python',str(patch)],check=True)
+          PY
+          chmod +x gradlew
+          mkdir -p build/kr05
+          git diff --check
+          git diff --stat | tee build/kr05/diff-stat.txt
+      - name: Targeted regression including 50k fake API and existing UNKNOWN recovery
+        run: |
+          set -o pipefail
+          ./gradlew :data:sqlite:test --tests runtime.mobileagent.data.EmbeddingLinearDispatchTest --tests runtime.mobileagent.data.KnowledgeReviewRegressionTest --dependency-verification=strict --no-daemon 2>&1 | tee build/kr05/targeted.log
+      - name: Full pre-commit evidence and license gates
+        run: |
+          set -o pipefail
+          python -m pip install "reuse==6.2.0" "pyyaml==6.0.2"
+          ./gradlew licenseGuard licenseGuardReverse verifyCiPins verifyDependencyLock verifyDependencyVerification verifyWorkflowYaml debugEvidenceGate --dependency-verification=strict --no-daemon 2>&1 | tee build/kr05/gates.log
+          python -m reuse lint | tee build/kr05/reuse.log
+          git diff --check
+      - name: Publish only validated source and tests to a separate branch
+        run: |
+          set -euo pipefail
+          branch=codex/kr05-linear-dispatch-20260920
+          test "$(git rev-parse HEAD)" = e57187c238bfd004d3e181dc5c64fc15c936d09f
+          git switch -c "$branch"
+          git add data/sqlite/src/main/kotlin/runtime/mobileagent/data/EmbeddingInputRevision.kt data/sqlite/src/main/kotlin/runtime/mobileagent/data/KnowledgeRepository.kt data/sqlite/src/main/kotlin/runtime/mobileagent/data/Migrations.kt data/sqlite/src/test/kotlin/runtime/mobileagent/data/EmbeddingLinearDispatchTest.kt data/sqlite/src/test/kotlin/runtime/mobileagent/data/DocumentPipelineTest.kt data/sqlite/src/test/kotlin/runtime/mobileagent/data/KnowledgeBatchStagingTest.kt
+          test "$(git diff --cached --name-only | wc -l)" -eq 6
+          git config user.name 'ChatGPT'
+          git config user.email 'noreply@openai.com'
+          git commit -m 'fix(knowledge): make API batch manifest validation linear' -m "Preserve live dispatch authorization and immutable successful caches. Validate the canonical manifest once per execution and use transactional per-KB source revisions between batches. Add 1k/10k/50k fake-API complexity, mutation, cross-connection and rollback regressions. Verified by KR05 isolated run $GITHUB_RUN_ID; no paid provider calls or release."
+          git rev-parse HEAD | tee build/kr05/source-sha.txt
+          git show --stat HEAD | tee build/kr05/commit.txt
+          git push origin "HEAD:refs/heads/$branch"
+      - name: Preserve verification evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: kr05-verification
+          path: |
+            build/kr05/
+            data/sqlite/build/test-results/test/
+            data/sqlite/src/main/kotlin/runtime/mobileagent/data/EmbeddingInputRevision.kt
+            data/sqlite/src/main/kotlin/runtime/mobileagent/data/KnowledgeRepository.kt
+            data/sqlite/src/main/kotlin/runtime/mobileagent/data/Migrations.kt
+            data/sqlite/src/test/kotlin/runtime/mobileagent/data/EmbeddingLinearDispatchTest.kt

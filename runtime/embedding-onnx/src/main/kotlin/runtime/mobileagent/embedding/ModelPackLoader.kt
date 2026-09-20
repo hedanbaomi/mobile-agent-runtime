@@ -41,7 +41,8 @@ class AndroidModelPackLoader(
             destination = File(destination, safeAssetName(manifest.tokenizerFile)),
             expectedSha256 = manifest.tokenizerSha256,
         )
-        return OnnxModelPack(manifest, model, tokenizer)
+        val projection = copyAndVerify("$assetRoot/dense.safetensors", File(destination, "dense.safetensors"), DEFAULT_PROJECTION_SHA256)
+        return OnnxModelPack(manifest, model, tokenizer, projection)
     }
 
     private fun copyAndVerify(assetPath: String, destination: File, expectedSha256: String): File {
@@ -90,11 +91,17 @@ class AndroidModelPackLoader(
         }
         require(manifest.revision == DEFAULT_REVISION) { "Unexpected model revision" }
         require(manifest.license.equals("Apache-2.0", ignoreCase = true)) { "Model license is not Apache-2.0" }
-        require(manifest.maxSequenceLength in 3..512) { "Unsupported model sequence length" }
+        require(manifest.maxSequenceLength == 128) { "Unsupported model sequence length" }
         require(manifest.pooling.equals("mean", ignoreCase = true)) { "Unsupported model pooling" }
+        require(manifest.hiddenDimension == 768 && manifest.projectionFile == "dense.safetensors")
+        require(manifest.projectionSha256 == DEFAULT_PROJECTION_SHA256)
+        require(manifest.windowStrategy == "sentence-bounded-coverage-mean-v3")
+        require(manifest.outputName == "last_hidden_state")
         require(manifest.normalize) { "The bundled model must use normalized vectors" }
         require(manifest.distance.equals("cosine", ignoreCase = true)) { "Unsupported model distance" }
         require(manifest.tokenizerType == "bert-wordpiece") { "Unsupported model tokenizer" }
+        require(manifest.tokenizerStrategy == "bert-wordpiece-v2") { "Unsupported tokenizer strategy" }
+        require(manifest.spaceId.endsWith(":t${manifest.tokenizerSha256}:p${manifest.projectionSha256}"))
         require(manifest.source.startsWith(DEFAULT_SOURCE_PREFIX)) { "Untrusted model source" }
     }
 
@@ -119,14 +126,16 @@ class AndroidModelPackLoader(
     }
 
     companion object {
-        const val DEFAULT_MODEL_ID = "all-MiniLM-L6-v2"
-        const val DEFAULT_ASSET_ROOT = "modelpacks/all-MiniLM-L6-v2"
-        const val DEFAULT_DIMENSION = 384
-        const val DEFAULT_REVISION = "1110a243fdf4706b3f48f1d95db1a4f5529b4d41"
-        const val DEFAULT_SPACE_ID = "onnx:all-MiniLM-L6-v2@1110a243fdf4706b3f48f1d95db1a4f5529b4d41:d384:cosine"
-        const val DEFAULT_MODEL_SHA256 = "6fd5d72fe4589f189f8ebc006442dbb529bb7ce38f8082112682524616046452"
-        const val DEFAULT_TOKENIZER_SHA256 = "be50c3628f2bf5bb5e3a7f17b1f74611b2561a3a27eeab05e5aa30f411572037"
-        const val DEFAULT_SOURCE_PREFIX = "https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/"
+        val LEGACY_LOCAL_SPACE_IDS = setOf("onnx:all-MiniLM-L6-v2@1110a243fdf4706b3f48f1d95db1a4f5529b4d41:d384:cosine")
+        const val DEFAULT_PROJECTION_SHA256 = "0a21b1ce908e772ebf09f93c20ca09524c32706e9918d9c0169a3f0663b191ed"
+        const val DEFAULT_MODEL_ID = "distiluse-base-multilingual-cased-v2"
+        const val DEFAULT_ASSET_ROOT = "modelpacks/distiluse-base-multilingual-cased-v2"
+        const val DEFAULT_DIMENSION = 512
+        const val DEFAULT_REVISION = "cad454171d918d9873a2701ba245054b6c1760dd"
+        const val DEFAULT_SPACE_ID = "onnx:distiluse-base-multilingual-cased-v2@cad454171d918d9873a2701ba245054b6c1760dd:int8:d512:cosine:wp-v2:mean-dense-tanh:sentence126-bounded-mean-v3:tbf1b59b7b11c95f194f51708d918eea378e09d05f84c0e1656dc5180e8117088:p0a21b1ce908e772ebf09f93c20ca09524c32706e9918d9c0169a3f0663b191ed"
+        const val DEFAULT_MODEL_SHA256 = "1724c10ba3b33b58afb6ce73bbf3e0528921bd4d4e1bf5a569b6d73f234e72bf"
+        const val DEFAULT_TOKENIZER_SHA256 = "bf1b59b7b11c95f194f51708d918eea378e09d05f84c0e1656dc5180e8117088"
+        const val DEFAULT_SOURCE_PREFIX = "https://huggingface.co/Xenova/distiluse-base-multilingual-cased-v2/"
         const val COPY_BUFFER_SIZE = 64 * 1024
         val SHA256_PATTERN = Regex("[0-9a-fA-F]{64}")
     }

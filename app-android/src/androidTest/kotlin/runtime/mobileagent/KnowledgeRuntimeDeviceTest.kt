@@ -63,7 +63,7 @@ class KnowledgeRuntimeDeviceTest {
         assertEquals(AndroidModelPackLoader.DEFAULT_MODEL_ID, manifest.id)
         assertEquals(AndroidModelPackLoader.DEFAULT_REVISION, manifest.revision)
         assertEquals(AndroidModelPackLoader.DEFAULT_SPACE_ID, manifest.spaceId)
-        assertEquals(384, manifest.dimension)
+        assertEquals(AndroidModelPackLoader.DEFAULT_DIMENSION, manifest.dimension)
         assertEquals(AndroidModelPackLoader.DEFAULT_MODEL_SHA256, manifest.sha256)
         assertEquals(AndroidModelPackLoader.DEFAULT_TOKENIZER_SHA256, manifest.tokenizerSha256)
         assertEquals(manifest.sha256, context.assets.open("$assetRoot/${manifest.modelFile}").use(::sha256))
@@ -73,7 +73,7 @@ class KnowledgeRuntimeDeviceTest {
         assertTrue(pack.modelFile.canonicalPath.startsWith(context.noBackupFilesDir.canonicalPath + File.separator))
         OnnxTextEmbedder(pack).use { embedder ->
             assertEquals(manifest.spaceId, embedder.spaceId)
-            assertEquals(384, embedder.dimension)
+            assertEquals(AndroidModelPackLoader.DEFAULT_DIMENSION, embedder.dimension)
             val first = embedder.embed(ASTRONOMY)
             val repeated = embedder.embed(ASTRONOMY)
             val unrelated = embedder.embed(COOKING)
@@ -230,7 +230,7 @@ class KnowledgeRuntimeDeviceTest {
     }
 
     private fun assertNormalized(vector: FloatArray) {
-        assertEquals(384, vector.size)
+        assertEquals(AndroidModelPackLoader.DEFAULT_DIMENSION, vector.size)
         assertTrue(vector.all { it.isFinite() })
         val norm = sqrt(vector.sumOf { it.toDouble() * it.toDouble() })
         assertEquals(1.0, norm, 0.0001)

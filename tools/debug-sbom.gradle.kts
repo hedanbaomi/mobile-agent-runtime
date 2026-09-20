@@ -588,12 +588,28 @@ fun verifyVariantProvenance(
 val debugSbom = layout.buildDirectory.file("reports/sbom/debug.cdx.json")
 val debugProvenance = layout.buildDirectory.file("reports/provenance/debug.provenance.json")
 
+fun verifyNativePageAlignment(apk: File) {
+    val python = if (System.getProperty("os.name").startsWith("Windows")) "python" else "python3"
+    val process = ProcessBuilder(python, rootProject.file("tools/verify_native_alignment.py").absolutePath,
+        apk.absolutePath).redirectErrorStream(true).start()
+    val output = process.inputStream.bufferedReader().use { it.readText() }
+    check(process.waitFor() == 0) { "Native 16 KB alignment validation failed:\n$output" }
+    logger.lifecycle("Native LOAD/RELRO/ZIP 16 KB validation passed: ${apk.name}")
+    val notices = ProcessBuilder(python, rootProject.file("tools/runtime-notices.py").absolutePath,
+        "--check-artifact", "--artifact", apk.absolutePath)
+        .directory(rootProject.projectDir).redirectErrorStream(true).start()
+    val noticeOutput = notices.inputStream.bufferedReader().use { it.readText() }
+    check(notices.waitFor() == 0) { "Packaged notices/payload validation failed:\n$noticeOutput" }
+    logger.lifecycle(noticeOutput.trim())
+}
+
 val verifyDebugArtifact = tasks.register("verifyDebugArtifact") {
     group = "verification"
     description = "Verify the debug APK is debuggable and excluded from the elevated control plane."
     dependsOn("assembleDebug")
     doLast {
         verifyVariantSecurity("debug", variantApkFile("debug"), expectedDebuggable = true, expectedControlPlaneEnabled = false)
+        verifyNativePageAlignment(variantApkFile("debug"))
     }
 }
 
@@ -694,6 +710,7 @@ val verifyReviewArtifact = tasks.register("verifyReviewArtifact") {
     dependsOn("assembleReview")
     doLast {
         verifyVariantSecurity("review", variantApkFile("review"), expectedDebuggable = false, expectedControlPlaneEnabled = true)
+        verifyNativePageAlignment(variantApkFile("review"))
     }
 }
 

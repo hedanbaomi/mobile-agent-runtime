@@ -112,6 +112,8 @@ class KnowledgeRepository(
     private val chunkVersion: String = PIPELINE_CHUNK_VERSION,
     /** Disposable ANN files only. SQLite/CAS remain authoritative. */
     private val vectorIndexDirectory: File? = null,
+    /** Exact retired bundled spaces only; never infer an upgrade from an unknown or API space. */
+    private val legacyLocalEmbeddingSpaces: Set<String> = emptySet(),
 ) {
     private val indexLock = Any()
     private val pipeline = DocumentPipelineStore(db)
@@ -277,6 +279,8 @@ class KnowledgeRepository(
         listOfNotNull(apiEmbedder) + apiEmbedders
 
     init {
+        require(legacyLocalEmbeddingSpaces.all { it.startsWith("onnx:") && it != embedder.spaceId })
+        require(configuredApiEmbedders.none { it.spaceId in legacyLocalEmbeddingSpaces })
         require(configuredApiEmbedders.none { it.spaceId == embedder.spaceId }) {
             "An API embedding adapter must not reuse the local embedding spaceId"
         }
@@ -1579,6 +1583,19 @@ class KnowledgeRepository(
         // scales are never mixed by raw score.
         val sources = mutableListOf<List<SearchHit>>()
         for (kbId in bases) {
+            try {
+                upgradeLocalEmbeddingSpace(kbId)
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (interrupted: InterruptedException) {
+                Thread.currentThread().interrupt()
+                throw interrupted
+            } catch (_: Exception) {
+                warnings += "Knowledge base $kbId local embedding upgrade is incomplete; retry after resolving the local model failure"
+                unavailable += UnavailableSource(kbId, RetrievalUnavailableReason.EMBEDDING_UNAVAILABLE)
+                usedPins[kbId] = runtime.mobileagent.domain.KnowledgePin(kbId, null, "")
+                continue
+            }
             val kb = db.query("SELECT * FROM knowledge_bases WHERE id = ? AND deleted_at IS NULL", listOf(kbId)).singleOrNull()
             if (kb == null) {
                 warnings += "Knowledge base $kbId is missing or deleted"
@@ -1808,6 +1825,7 @@ class KnowledgeRepository(
     }
 
     fun rebuildIndex(kbId: String, acknowledgeDuplicateCharge: Boolean = false): String {
+        upgradeLocalEmbeddingSpace(kbId)?.let { return it }
         if (isApiKnowledgeBase(kbId)) {
             return runBlocking { rebuildIndexCancellable(kbId, acknowledgeDuplicateCharge) }
         }
@@ -1818,6 +1836,8 @@ class KnowledgeRepository(
     }
 
     fun repairIndexes() {
+        // Model-space upgrades are lazy at query/import/rebuild boundaries.
+        // Schema repair must not depend on a model pack or one KB's upgrade.
         // API rebuilds must leave the repository monitor before awaiting the
         // adapter.  The legacy local repair below remains serialized exactly
         // as before and explicitly skips API spaces.
@@ -1876,6 +1896,30 @@ class KnowledgeRepository(
                     db.transaction { rebuildUnlocked(kbId) }
                 }
             }
+        }
+    }
+
+    /**
+     * Re-embed authoritative active chunks locally, preserving chunk IDs, pages and Vision caches.
+     * Completed batches survive interruption; only the final binding/generation switch is atomic.
+     * No parser, Vision adapter or API adapter is reachable from this upgrade.
+     */
+    fun upgradeLocalEmbeddingSpace(kbId: String): String? = synchronized(indexLock) {
+        val row = db.query("SELECT embedding_space_id, deleted_at FROM knowledge_bases WHERE id = ?", listOf(kbId))
+            .singleOrNull() ?: return@synchronized null
+        val oldSpace = row.string("embedding_space_id")
+        if (row.string("deleted_at").isNotBlank() || oldSpace !in legacyLocalEmbeddingSpaces) return@synchronized null
+        val inputs = embeddingInputsByVersionForKnowledgeBase(kbId)
+        inputs.values.forEach { source -> source.chunked(128).forEach { batch ->
+            db.transaction { ensureEmbeddings(batch, embedder) }
+        } }
+        db.transaction {
+            val current = db.query("SELECT embedding_space_id, deleted_at FROM knowledge_bases WHERE id = ?", listOf(kbId)).single()
+            check(current.string("embedding_space_id") == oldSpace && current.string("deleted_at").isBlank())
+            check(embeddingInputsByVersionForKnowledgeBase(kbId).keys == inputs.keys) { "Document versions changed during local upgrade" }
+            val generation = buildGenerationFromCachedUnlocked(kbId, embedder, inputs)
+            db.execute("UPDATE knowledge_bases SET embedding_space_id = ? WHERE id = ?", listOf(embedder.spaceId, kbId))
+            generation
         }
     }
 
@@ -4460,6 +4504,7 @@ class KnowledgeRepository(
     }
 
     private fun embedderForJob(job: ImportJob): TextEmbedder {
+        if (!job.embeddingIsApi) upgradeLocalEmbeddingSpace(job.knowledgeBaseId)
         val space = db.query(
             "SELECT embedding_space_id FROM knowledge_bases WHERE id = ?",
             listOf(job.knowledgeBaseId),
@@ -4489,7 +4534,7 @@ class KnowledgeRepository(
             "SELECT embedding_space_id FROM knowledge_bases WHERE id = ? AND deleted_at IS NULL",
             listOf(knowledgeBaseId),
         ).singleOrNull()?.string("embedding_space_id").orEmpty()
-        return space.isNotBlank() && space != embedder.spaceId
+        return space.isNotBlank() && space != embedder.spaceId && space !in legacyLocalEmbeddingSpaces
     }
 
     private fun apiEmbedderForSpace(spaceId: String): TextEmbedder? =
@@ -4562,6 +4607,7 @@ class KnowledgeRepository(
     }
 
     private fun validateRequestedEmbeddingSelection(kbId: String, api: Boolean, consent: Boolean) {
+        if (!api) upgradeLocalEmbeddingSpace(kbId)
         val space = db.query(
             "SELECT embedding_space_id FROM knowledge_bases WHERE id = ?",
             listOf(kbId),

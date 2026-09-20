@@ -198,6 +198,11 @@ val packagePythonStdlib = tasks.register<Zip>("packagePythonStdlib") {
     duplicatesStrategy = DuplicatesStrategy.FAIL
     isReproducibleFileOrder = true
     isPreserveFileTimestamps = false
+    // ZIP imports do not need executable bits. The upstream archive has two
+    // executable .py files; Windows extraction loses those bits, while Linux
+    // preserves them. Pin both modes so the packaged inventory is portable.
+    filePermissions { unix("0644") }
+    dirPermissions { unix("0755") }
     entryCompression = ZipEntryCompression.STORED
     from(prefixFor("aarch64").resolve("lib/python3.14")) {
         // Keep the PSF license/notice alongside the standard library asset.

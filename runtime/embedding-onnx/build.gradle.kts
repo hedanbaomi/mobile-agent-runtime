@@ -109,6 +109,7 @@ val prepareModelPack = tasks.register("prepareModelPack") {
     inputs.property("projectionSha256", projectionSha256)
     inputs.property("windowStrategy", "sentence-bounded-coverage-mean-v3")
     inputs.file(onnxRuntimeLicenseSource)
+    inputs.file(rootProject.file("LICENSES/Apache-2.0.txt"))
     outputs.dir(modelPackGenerated)
     outputs.dir(embeddingAssetsGenerated)
     outputs.file(onnxRuntimeLicenseGenerated)

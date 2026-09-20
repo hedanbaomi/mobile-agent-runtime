@@ -5275,7 +5275,7 @@
         {
           "label": "model pack license",
           "path": "modelpacks/distiluse-base-multilingual-cased-v2/LICENSES/Apache-2.0.txt",
-          "sha256": "9bf4e882bdd75e8d10fc788c53d0a787ef0f59cead1fe1f0878c240896fc8610"
+          "sha256": "074e6e32c86a4c0ef8b3ed25b721ca23aca83df277cd88106ef7177c354615ff"
         },
         {
           "label": "model pack provenance notice",

@@ -3190,7 +3190,7 @@ class KnowledgeRepository(
      * concurrent cancel/delete/revoke can win without ever sending text.  No
      * provider code is called from this transaction.
      */
-    private fun verifyEmbeddingOperationBeforeProvider(operation: EmbeddingOperationRecord): EmbeddingOperationRecord =
+    private fun verifyEmbeddingOperationBeforeProvider(operation: EmbeddingOperationRecord, validatedRevision: Long?): Long =
         synchronized(indexLock) {
             db.transaction {
                 val current = operationByToken(operation.token) ?: error("embedding operation not found")
@@ -3220,18 +3220,35 @@ class KnowledgeRepository(
                 check(current.bindingFingerprint == current.spaceId) {
                     "embedding operation binding fingerprint changed before provider request"
                 }
-                val sourceSpace = if (current.kind == "REBIND") currentSpace else current.spaceId
-                check(
-                    operationManifestHash(
+                check(current.kind == operation.kind && current.knowledgeBaseId == operation.knowledgeBaseId &&
+                    current.spaceId == operation.spaceId && current.documentId == operation.documentId &&
+                    current.documentVersionId == operation.documentVersionId && current.jobId == operation.jobId &&
+                    current.inputManifestHash == operation.inputManifestHash &&
+                    current.consentFingerprint == operation.consentFingerprint) {
+                    "embedding operation identity changed before provider request"
+                }
+                val revision = EmbeddingInputRevision.current(db, current.knowledgeBaseId)
+                if (validatedRevision == null) {
+                    // One full validation per live execution, captured with the source
+                    // revision in the same transaction. Preserve the persisted manifest
+                    // format, including resumable operations created before schema v26.
+                    val sourceSpace = if (current.kind == "REBIND") currentSpace else current.spaceId
+                    check(operationManifestHash(
                         kind = current.kind,
                         knowledgeBaseId = current.knowledgeBaseId,
                         targetSpace = current.spaceId,
                         sourceSpace = sourceSpace,
                         inputsByVersion = operationInputsByVersion(current),
                         activePointers = activeDocumentPointers(current.knowledgeBaseId),
-                    ) == current.inputManifestHash,
-                ) {
-                    "knowledge base inputs or active document pointers changed before provider request"
+                    ) == current.inputManifestHash) {
+                        "knowledge base inputs or active document pointers changed before provider request"
+                    }
+                } else {
+                    // O(1) per batch: source mutations advance a transactional per-KB
+                    // revision; embedding cache commits and unrelated KBs do not.
+                    check(revision == validatedRevision) {
+                        "knowledge base inputs or active document pointers changed before provider request"
+                    }
                 }
                 current.documentId?.let { documentId ->
                     val document = db.query(
@@ -3254,7 +3271,7 @@ class KnowledgeRepository(
                         "API embedding job was cancelled before provider request"
                     }
                 }
-                current
+                revision
             }
         }
 
@@ -3263,6 +3280,7 @@ class KnowledgeRepository(
         selectedEmbedder: TextEmbedder,
     ): EmbeddingOperationRecord {
         var dispatched: EmbeddingOperationRecord? = null
+        var validatedRevision: Long? = null
         try {
             // Validate all existing cache rows before the first paid batch, but
             // discard each bounded list of misses instead of retaining the corpus.
@@ -3285,7 +3303,7 @@ class KnowledgeRepository(
                 }
                 if (pending.isEmpty()) continue
                 val currentDispatch = dispatched ?: dispatchEmbeddingOperation(operation).also { dispatched = it }
-                verifyEmbeddingOperationBeforeProvider(currentDispatch)
+                validatedRevision = verifyEmbeddingOperationBeforeProvider(currentDispatch, validatedRevision)
                 val representatives = pending.values.map { it.first() }
                 val vectors = when (selectedEmbedder) {
                     is CancellableBatchTextEmbedder -> selectedEmbedder.embedBatchCancellable(representatives.map { it.text })

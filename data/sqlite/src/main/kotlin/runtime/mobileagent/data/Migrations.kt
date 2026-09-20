@@ -56,7 +56,8 @@ object Migrations {
     // verified SUCCEEDED row may carry.  No transcript row is deleted or
     // rewritten by a summary, and no summary is ever re-sent from the database.
     // v25 stores bounded-read UTF-16 lengths; body and existing references are unchanged.
-    const val VERSION = 25
+    // v26: transactional source revisions for linear API batch validation.
+    const val VERSION = 26
 
     private val statements = listOf(
         "CREATE TABLE IF NOT EXISTS schema_version (version INTEGER NOT NULL PRIMARY KEY)",
@@ -271,6 +272,10 @@ object Migrations {
             connection.execute("CREATE INDEX IF NOT EXISTS chunk_read_lengths ON chunks(document_version_id,ordinal,text_utf16_length,id)")
             connection.execute("CREATE INDEX IF NOT EXISTS chunk_missing_lengths ON chunks(document_version_id,id) WHERE text_utf16_length < 0")
             ChunkTextMetadata.backfill(connection)
+            EmbeddingInputRevision.install(connection)
+            // Bounded result pages also need bounded SQL access paths.
+            connection.execute("CREATE INDEX IF NOT EXISTS chunk_embedding_keyset ON chunks(document_version_id,id)")
+            connection.execute("CREATE INDEX IF NOT EXISTS embedding_content_lookup ON embeddings(space_id,content_hash,chunk_id)")
             backfillConversationSnapshotIds(connection)
             backfillV11(connection)
             backfillV12(connection)

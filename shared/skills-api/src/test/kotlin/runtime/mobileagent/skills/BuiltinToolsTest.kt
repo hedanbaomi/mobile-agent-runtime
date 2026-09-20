@@ -14,15 +14,15 @@ class BuiltinToolsTest {
         var calls = 0
         val context = ToolContext(search = { _, _, _ -> "{}" }, readDocument = { _, _ -> error("legacy callback") },
             grantedKnowledgeBaseIds = setOf("kb"), documentKnowledgeBaseId = { if (it == "doc") "kb" else "other" },
-            readDocumentRange = { _, maxChars, offset ->
+            readDocumentRange = { _, maxChars, offset, expectedVersion ->
                 calls++
-                assertEquals(100, maxChars); assertEquals(20000, offset)
-                """{"text":"tail","offset":20000,"nextOffset":null}"""
+                assertEquals(100, maxChars); assertEquals(20000, offset); assertEquals("v-20000", expectedVersion)
+                """{"text":"tail","offset":20000,"nextOffset":null,"documentVersionId":"v-20000"}"""
             })
         val broker = ToolBroker(setOf("knowledge.read"), context)
-        val result = broker.invoke(ToolCall("range", "read_document", """{"documentId":"doc","offset":20000,"maxChars":100}"""))
+        val result = broker.invoke(ToolCall("range", "read_document", """{"documentId":"doc","offset":20000,"maxChars":100,"expectedVersion":"v-20000"}"""))
         assertTrue(result is ToolResult.Value)
-        assertTrue(broker.invoke(ToolCall("wrong", "read_document", """{"documentId":"other","offset":20000}""")) is ToolResult.Denied)
+        assertTrue(broker.invoke(ToolCall("wrong", "read_document", """{"documentId":"other","offset":20000,"expectedVersion":"v-20000"}""")) is ToolResult.Denied)
         assertTrue(broker.invoke(ToolCall("negative", "read_document", """{"documentId":"doc","offset":-1}""")) is ToolResult.Invalid)
         assertEquals(1, calls)
     }
@@ -41,6 +41,67 @@ class BuiltinToolsTest {
         ),
         autoApproveSideEffects = autoApprove,
     )
+
+    @Test fun versionedReadKeepsFirstPageCompatibleAndRejectsContinuationWithoutVersion() {
+        val observed = mutableListOf<Pair<Int, String?>>()
+        val context = ToolContext(
+            search = { _, _, _ -> "{}" },
+            readDocument = { _, _ -> error("legacy callback must not serve pagination") },
+            grantedKnowledgeBaseIds = setOf("kb"),
+            documentKnowledgeBaseId = { "kb" },
+            readDocumentRange = { _, _, offset, expectedVersion ->
+                observed += offset to expectedVersion
+                """{"text":"page","offset":$offset,"nextOffset":null,"documentVersionId":"v1"}"""
+            },
+        )
+        val broker = ToolBroker(setOf("knowledge.read"), context)
+        val first = broker.invoke(ToolCall("p0", "read_document", """{"documentId":"doc"}"""))
+        assertTrue(first is ToolResult.Value, first.toString())
+        assertTrue((first as ToolResult.Value).json.contains("\"documentVersionId\":\"v1\""))
+        val continuation = broker.invoke(ToolCall("p1", "read_document", """{"documentId":"doc","offset":240,"expectedVersion":"v1"}"""))
+        assertTrue(continuation is ToolResult.Value, continuation.toString())
+        assertEquals(listOf(0 to null, 240 to "v1"), observed)
+        val missing = broker.invoke(ToolCall("p2", "read_document", """{"documentId":"doc","offset":480}"""))
+        assertTrue(missing is ToolResult.Invalid, missing.toString())
+        assertTrue((missing as ToolResult.Invalid).reason.contains("DOCUMENT_VERSION_REQUIRED"))
+        assertEquals(2, observed.size)
+    }
+
+    @Test fun legacyReadDocumentCannotFabricatePaginationOrVersionBinding() {
+        var legacyCalls = 0
+        val context = ToolContext(
+            search = { _, _, _ -> "{}" },
+            readDocument = { _, _ -> legacyCalls += 1; """{"documentId":"doc","text":"legacy"}""" },
+            grantedKnowledgeBaseIds = setOf("kb"),
+            documentKnowledgeBaseId = { "kb" },
+        )
+        val broker = ToolBroker(setOf("knowledge.read"), context)
+        assertTrue(broker.invoke(ToolCall("l0", "read_document", """{"documentId":"doc"}""")) is ToolResult.Value)
+        val paginated = broker.invoke(ToolCall("l1", "read_document", """{"documentId":"doc","offset":10}"""))
+        assertTrue(paginated is ToolResult.Invalid, paginated.toString())
+        val pinned = broker.invoke(ToolCall("l2", "read_document", """{"documentId":"doc","expectedVersion":"v1"}"""))
+        assertTrue(pinned is ToolResult.Invalid, pinned.toString())
+        assertTrue((pinned as ToolResult.Invalid).reason.contains("DOCUMENT_VERSION_UNAVAILABLE"))
+        assertEquals(1, legacyCalls)
+    }
+
+    @Test fun revokedGrantDeniesContinuationBeforeVersionedCallback() {
+        var grant = PermissionGrant("g", "i", "h", setOf("knowledge.read"), knowledgeBaseIds = setOf("kb"))
+        var calls = 0
+        val tools = ToolBroker(emptySet(), ToolContext(
+            search = { _, _, _ -> "{}" },
+            readDocument = { _, _ -> "{}" },
+            grantedKnowledgeBaseIds = setOf("kb"),
+            documentKnowledgeBaseId = { "kb" },
+            readDocumentRange = { _, _, _, _ -> calls += 1; """{"text":"","offset":0,"nextOffset":null}""" },
+        ), liveGrant = { grant })
+        val first = tools.invoke(ToolCall("v0", "read_document", """{"documentId":"doc","expectedVersion":"v1"}"""))
+        assertTrue(first is ToolResult.Value, first.toString())
+        grant = grant.copy(revoked = true, capabilities = emptySet(), knowledgeBaseIds = emptySet())
+        val denied = tools.invoke(ToolCall("v1", "read_document", """{"documentId":"doc","offset":400,"expectedVersion":"v1"}"""))
+        assertTrue(denied is ToolResult.Denied, denied.toString())
+        assertEquals(1, calls)
+    }
 
     @Test
     fun incompleteJsonDoesNotExecute() {
@@ -359,6 +420,9 @@ class BuiltinToolsTest {
             "knowledge_search" to """{"query":"q","extra":true}""",
             "read_document" to """{"documentId":[]}""",
             "read_document" to """{"documentId":"doc","maxChars":16385}""",
+            "read_document" to """{"documentId":"doc","expectedVersion":7}""",
+            "read_document" to """{"documentId":"doc","expectedVersion":""}""",
+            "read_document" to """{"documentId":"doc","offset":1,"expectedVersion":null}""",
             "http_request" to """{"url":null}""",
             "http_request" to """{"url":"https://api.example.com/","method":{}}""",
             "calculator" to """{"expression":true}""",

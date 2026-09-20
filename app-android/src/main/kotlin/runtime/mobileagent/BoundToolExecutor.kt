@@ -187,19 +187,22 @@ private class BoundBuiltinToolExecutor(
             },
             grantedKnowledgeBaseIds = knowledgeIds,
             documentKnowledgeBaseId = { id -> container.knowledge.documentKnowledgeBaseId(id) },
-            readDocumentRange = { documentId, maxChars, offset ->
+            readDocumentRange = { documentId, maxChars, offset, expectedVersion ->
                 check(authorized()) { "Knowledge authorization changed" }
                 val permitted = knowledgeIds intersect liveKnowledgeIds()
                 check(container.knowledge.documentKnowledgeBaseId(documentId) in permitted) { "Document is not in an authorized knowledge base" }
                 // JSON control characters can expand sixfold. Leave room for
                 // metadata under the tool output cap; nextOffset resumes exactly.
-                val range = container.knowledge.readDocumentRange(documentId, minOf(maxChars, 5000), offset, permitted)
+                // expectedVersion pins the published version for continuations;
+                // the repository re-checks deletion/authorization on every read.
+                val range = container.knowledge.readDocumentRange(documentId, minOf(maxChars, 5000), offset, permitted, expectedVersion)
                 check(authorized() && container.knowledge.documentKnowledgeBaseId(documentId) in permitted) { "Document authorization changed" }
                 returnedDocuments[documentId] = checkNotNull(container.knowledge.documentKnowledgeBaseId(documentId))
                 buildJsonObject {
                     put("documentId", documentId); put("text", range.text); put("offset", range.offset)
                     put("nextOffset", range.nextOffset?.let { JsonPrimitive(it) } ?: kotlinx.serialization.json.JsonNull)
                     put("totalChars", range.totalChars)
+                    range.documentVersionId?.let { put("documentVersionId", it) }
                 }.toString()
             },
         )

@@ -84,7 +84,7 @@ import kotlinx.coroutines.runBlocking
 /** Legacy cache identity may be adopted only when it maps to one current destination. */
 data class LegacyVisionCacheTarget(val fingerprint: String, val unambiguous: Boolean)
 
-data class KnowledgeDocumentRange(val text: String, val offset: Int, val nextOffset: Int?, val totalChars: Int)
+data class KnowledgeDocumentRange(val text: String, val offset: Int, val nextOffset: Int?, val totalChars: Int, val documentVersionId: String? = null)
 
 class KnowledgeRepository(
     private val db: SqlConnection,
@@ -1725,29 +1725,23 @@ class KnowledgeRepository(
         return readDocumentRange(documentId, maxChars, 0, allowedKnowledgeBaseIds).text
     }
 
-    /** Offset is in the published text's UTF-16 units; nextOffset never bisects a scalar. */
+    /** Version pins identify content, never authority; deletion and KB scope are checked on every page. */
     fun readDocumentRange(documentId: String, maxChars: Int, offset: Int = 0,
-        allowedKnowledgeBaseIds: Set<String>? = null): KnowledgeDocumentRange {
+        allowedKnowledgeBaseIds: Set<String>? = null, expectedVersion: String? = null): KnowledgeDocumentRange = db.transaction {
         require(offset >= 0) { "Document offset must be nonnegative" }
+        require(offset == 0 || !expectedVersion.isNullOrBlank()) { "DOCUMENT_VERSION_REQUIRED: continuation requires expectedVersion" }
         val empty = KnowledgeDocumentRange("", offset, null, 0)
         val document = db.query("SELECT active_version_id, deleted_at, kb_id FROM documents WHERE id = ?", listOf(documentId)).singleOrNull()
-            ?: return empty
-        if (document.string("deleted_at").isNotBlank()) return empty
-        if (allowedKnowledgeBaseIds != null && document.string("kb_id") !in allowedKnowledgeBaseIds) return empty
-        val version = document.string("active_version_id")
-        val text = db.query(
-            "SELECT text FROM chunks WHERE document_version_id = ? ORDER BY ordinal",
-            listOf(version),
-        ).joinToString("\n") { it.string("text") }
-        val cap = maxChars.coerceIn(0, 16_384)
-        val start = offset.coerceAtMost(text.length)
-        require(start == 0 || start == text.length || !(text[start].isLowSurrogate() && text[start-1].isHighSurrogate())) {
-            "Document offset splits a Unicode scalar; use the returned nextOffset"
-        }
-        var end = (start.toLong()+cap).coerceAtMost(text.length.toLong()).toInt()
-        if (end < text.length && end > start && text[end].isLowSurrogate() && text[end-1].isHighSurrogate()) end--
-        require(end > start || start == text.length || cap == 0) { "maxChars cannot fit the next Unicode scalar" }
-        return KnowledgeDocumentRange(text.substring(start,end), start, end.takeIf { it < text.length }, text.length)
+            ?: return@transaction empty
+        if (document.string("deleted_at").isNotBlank()) return@transaction empty
+        if (allowedKnowledgeBaseIds != null && document.string("kb_id") !in allowedKnowledgeBaseIds) return@transaction empty
+        val version = expectedVersion ?: document.string("active_version_id")
+        if (version.isBlank()) return@transaction empty
+        val published = db.query("SELECT document_id, status FROM document_versions WHERE id = ?", listOf(version)).singleOrNull()
+        require(published != null && published.string("document_id") == documentId &&
+            published.string("status") in setOf("READY", "READY_WITH_VISUAL_GAPS")) { "DOCUMENT_VERSION_UNAVAILABLE" }
+        val range = ChunkTextMetadata.read(db, version, maxChars, offset)
+        KnowledgeDocumentRange(range.text, range.offset, range.nextOffset, range.totalChars, version)
     }
 
     fun documentKnowledgeBaseId(documentId: String): String? {
@@ -1885,32 +1879,16 @@ class KnowledgeRepository(
         }
     }
 
-    private fun embeddingInputsForKnowledgeBase(kbId: String): List<EmbeddingInput> =
-        embeddingInputsByVersionForKnowledgeBase(kbId).values.flatten()
-
-    private fun embeddingInputsByVersionForKnowledgeBase(kbId: String): LinkedHashMap<String, List<EmbeddingInput>> {
-        val versions = db.query(
-            "SELECT id, active_version_id FROM documents WHERE kb_id = ? AND deleted_at IS NULL AND active_version_id IS NOT NULL",
-            listOf(kbId),
-        )
-        return linkedMapOf<String, List<EmbeddingInput>>().also { chunksByVersion ->
-            versions.forEach { doc ->
-                val versionId = doc.string("active_version_id")
-                chunksByVersion[versionId] = db.query(
-                    "SELECT id, ordinal, text, content_hash FROM chunks WHERE document_version_id = ? ORDER BY ordinal",
-                    listOf(versionId),
-                ).map { row ->
-                    EmbeddingInput(
-                        chunkId = row.string("id"),
-                        text = row.string("text"),
-                        contentHash = row.string("content_hash").ifBlank {
-                            sha256Hex(row.string("text").toByteArray(Charsets.UTF_8))
-                        },
-                    )
-                }
+    // Only version identifiers live across batches. Reiterating a source performs a fresh
+    // keyset scan; publication/finalize callers hold the existing SQLite transaction.
+    private fun embeddingInputsByVersionForKnowledgeBase(kbId: String): LinkedHashMap<String, Sequence<EmbeddingInput>> =
+        linkedMapOf<String, Sequence<EmbeddingInput>>().also { versions ->
+            db.query("SELECT active_version_id FROM documents WHERE kb_id = ? AND deleted_at IS NULL AND active_version_id IS NOT NULL",
+                listOf(kbId)).forEach { row ->
+                val version = row.string("active_version_id")
+                versions[version] = inputsForVersion(version)
             }
         }
-    }
 
     private fun rebuildUnlocked(
         kbId: String,
@@ -1934,7 +1912,7 @@ class KnowledgeRepository(
             "Knowledge base $kbId binding changed while rebuilding; refusing a mixed-space generation"
         }
         val chunksByVersion = embeddingInputsByVersionForKnowledgeBase(kbId)
-        ensureEmbeddings(chunksByVersion.values.flatten(), indexEmbedder)
+        chunksByVersion.values.forEach { source -> source.chunked(128).forEach { ensureEmbeddings(it, indexEmbedder) } }
         return buildGenerationFromCachedUnlocked(kbId, indexEmbedder, chunksByVersion)
     }
 
@@ -1947,7 +1925,7 @@ class KnowledgeRepository(
     private fun buildGenerationFromCachedUnlocked(
         kbId: String,
         indexEmbedder: TextEmbedder,
-        chunksByVersion: LinkedHashMap<String, List<EmbeddingInput>> = embeddingInputsByVersionForKnowledgeBase(kbId),
+        chunksByVersion: LinkedHashMap<String, Sequence<EmbeddingInput>> = embeddingInputsByVersionForKnowledgeBase(kbId),
     ): String {
         val generationId = EntityId.random().value
         var vectors = 0
@@ -2940,11 +2918,6 @@ class KnowledgeRepository(
         val error: String,
     )
 
-    private data class PreparedEmbeddingOperation(
-        val record: EmbeddingOperationRecord,
-        val inputsByVersion: LinkedHashMap<String, List<EmbeddingInput>>,
-    )
-
     private class OperationAborted(message: String) : IllegalStateException(message)
 
     private fun activeDocumentPointers(knowledgeBaseId: String): LinkedHashMap<String, String> =
@@ -2967,29 +2940,20 @@ class KnowledgeRepository(
         knowledgeBaseId: String,
         targetSpace: String,
         sourceSpace: String,
-        inputsByVersion: Map<String, List<EmbeddingInput>>,
+        inputsByVersion: Map<String, Sequence<EmbeddingInput>>,
         activePointers: Map<String, String>,
     ): String {
-        val canonical = buildString {
-            append("kind=").append(kind)
-            append("|kb=").append(knowledgeBaseId)
-            append("|target=").append(targetSpace)
-            append("|source=").append(sourceSpace)
-            activePointers.toSortedMap().forEach { (documentId, versionId) ->
-                append("|active=").append(documentId).append(':').append(versionId)
-            }
-            inputsByVersion.toSortedMap().forEach { (versionId, inputs) ->
-                append("|version=").append(versionId)
-                inputs.sortedWith(compareBy<EmbeddingInput> { it.chunkId }.thenBy { it.contentHash })
-                    .forEach { input ->
-                        val hash = input.contentHash.ifBlank {
-                            sha256Hex(input.text.toByteArray(Charsets.UTF_8))
-                        }
-                        append('|').append(input.chunkId).append('=').append(hash)
-                    }
-            }
+        // Preserve the v24 canonical byte stream without retaining all chunk text or
+        // a second full manifest String. inputsForVersion is ordered by unique chunk id.
+        val digest = java.security.MessageDigest.getInstance("SHA-256")
+        fun append(value: String) { digest.update(value.toByteArray(Charsets.UTF_8)) }
+        append("kind=$kind|kb=$knowledgeBaseId|target=$targetSpace|source=$sourceSpace")
+        activePointers.toSortedMap().forEach { (documentId, versionId) -> append("|active=$documentId:$versionId") }
+        inputsByVersion.toSortedMap().forEach { (versionId, inputs) ->
+            append("|version=$versionId")
+            inputs.forEach { input -> append("|${input.chunkId}=${input.contentHash}") }
         }
-        return sha256Hex(canonical.toByteArray(Charsets.UTF_8))
+        return digest.digest().joinToString("") { "%02x".format(it) }
     }
 
     private fun apiConsentFingerprint(
@@ -3047,21 +3011,23 @@ class KnowledgeRepository(
             listOf(jobId),
         ).singleOrNull()?.let(::embeddingOperation)
 
-    private fun inputsForVersion(documentVersionId: String): List<EmbeddingInput> =
-        db.query(
-            "SELECT id, ordinal, text, content_hash FROM chunks WHERE document_version_id = ? ORDER BY ordinal",
-            listOf(documentVersionId),
-        ).map { row ->
-            EmbeddingInput(
-                chunkId = row.string("id"),
-                text = row.string("text"),
-                contentHash = row.string("content_hash").ifBlank {
-                    sha256Hex(row.string("text").toByteArray(Charsets.UTF_8))
-                },
-            )
+    private fun inputsForVersion(documentVersionId: String): Sequence<EmbeddingInput> = sequence {
+        var after: String? = null
+        while (true) {
+            val predicate = if (after == null) "" else " AND id > ?"
+            val args = if (after == null) listOf(documentVersionId) else listOf(documentVersionId, after)
+            val rows = db.query("SELECT id, text, content_hash FROM chunks WHERE document_version_id = ?$predicate ORDER BY id LIMIT 128", args)
+            if (rows.isEmpty()) break
+            for (row in rows) {
+                val text = row.string("text")
+                yield(EmbeddingInput(row.string("id"), text,
+                    row.string("content_hash").ifBlank { sha256Hex(text.toByteArray(Charsets.UTF_8)) }))
+            }
+            after = rows.last().string("id")
         }
+    }
 
-    private fun operationInputsByVersion(operation: EmbeddingOperationRecord): LinkedHashMap<String, List<EmbeddingInput>> {
+    private fun operationInputsByVersion(operation: EmbeddingOperationRecord): LinkedHashMap<String, Sequence<EmbeddingInput>> {
         val versionId = operation.documentVersionId
         if (!versionId.isNullOrBlank()) {
             return linkedMapOf(versionId to inputsForVersion(versionId))
@@ -3136,12 +3102,12 @@ class KnowledgeRepository(
     }
 
     private fun stageEmbeddingCacheHits(
-        inputsByVersion: LinkedHashMap<String, List<EmbeddingInput>>,
+        inputs: List<EmbeddingInput>,
         spaceId: String,
         dimension: Int,
     ): LinkedHashMap<String, MutableList<EmbeddingInput>> {
         val pending = linkedMapOf<String, MutableList<EmbeddingInput>>()
-        inputsByVersion.values.flatten().forEach { input ->
+        inputs.forEach { input ->
             val contentHash = input.contentHash.ifBlank {
                 sha256Hex(input.text.toByteArray(Charsets.UTF_8))
             }
@@ -3296,91 +3262,69 @@ class KnowledgeRepository(
         operation: EmbeddingOperationRecord,
         selectedEmbedder: TextEmbedder,
     ): EmbeddingOperationRecord {
-        val inputsByVersion = try {
-            operationInputsByVersion(operation)
-        } catch (failure: Throwable) {
-            // No provider request has been dispatched yet.  Keep this local
-            // preparation failure distinct from an uncertain external result.
-            markEmbeddingOperation(operation.token, "FAILED", API_EMBEDDING_FAILED_ERROR, onlyIfActive = true)
-            throw failure
-        }
-        val pending = try {
-            synchronized(indexLock) {
-                db.transaction {
-                    stageEmbeddingCacheHits(inputsByVersion, operation.spaceId, selectedEmbedder.dimension)
+        var dispatched: EmbeddingOperationRecord? = null
+        try {
+            // Validate all existing cache rows before the first paid batch, but
+            // discard each bounded list of misses instead of retaining the corpus.
+            var hasMisses = false
+            operationInputsByVersion(operation).values.asSequence().flatMap { it }.chunked(128).forEach { batch ->
+                synchronized(indexLock) {
+                    db.transaction {
+                        if (stageEmbeddingCacheHits(batch, operation.spaceId, selectedEmbedder.dimension).isNotEmpty()) hasMisses = true
+                    }
                 }
             }
-        } catch (failure: Throwable) {
-            markEmbeddingOperation(operation.token, "FAILED", API_EMBEDDING_FAILED_ERROR, onlyIfActive = true)
-            throw failure
-        }
-        if (pending.isEmpty()) {
-            val current = operationByToken(operation.token) ?: error("embedding operation not found")
-            if (current.state == "PREPARED") {
-                return markEmbeddingOperation(current.token, "CACHE_READY", onlyIfActive = true)
-            }
-            return current
-        }
-        val dispatched = dispatchEmbeddingOperation(operation)
-        try {
-            val readyToSend = verifyEmbeddingOperationBeforeProvider(dispatched)
-            val representatives = pending.values.map { it.first() }
-            val vectors = when (selectedEmbedder) {
-                is CancellableBatchTextEmbedder ->
-                    selectedEmbedder.embedBatchCancellable(representatives.map { it.text })
-                is BatchTextEmbedder -> selectedEmbedder.embedBatch(representatives.map { it.text })
-                else -> representatives.map { selectedEmbedder.embed(it.text) }
-            }
-            check(vectors.size == representatives.size) {
-                "embedding backend returned ${vectors.size} vectors for ${representatives.size} cache misses"
-            }
-            val bytesByHash = pending.keys.zip(vectors).associate { (contentHash, vector) ->
-                validateEmbeddingVector(vector, selectedEmbedder.dimension)
-                contentHash to floatsToBytes(vector)
-            }
-            // This is the independent successful-cache commit.  It is kept
-            // separate from generation publication so a later SQL/JNI failure
-            // cannot make the provider request run again.
-            synchronized(indexLock) {
-                db.transaction {
-                    val current = operationByToken(dispatched.token) ?: error("embedding operation not found")
-                    check(current.state == "DISPATCHED" || current.state == "UNKNOWN") {
-                        "embedding operation changed while provider request was in flight"
-                    }
-                    pending.forEach { (contentHash, inputs) ->
-                        val bytes = bytesByHash.getValue(contentHash)
-                        inputs.forEach { input ->
-                            insertEmbedding(input.chunkId, dispatched.spaceId, bytes, contentHash)
+            // At most one input page, one provider batch and its returned vectors are
+            // retained. Successful batches commit independently; later failures retain
+            // their cache and the existing UNKNOWN/no-automatic-replay boundary.
+            val batches = if (hasMisses) operationInputsByVersion(operation).values.asSequence().flatMap { it }.chunked(128)
+                else emptySequence()
+            for (batch in batches) {
+                val pending = synchronized(indexLock) {
+                    db.transaction { stageEmbeddingCacheHits(batch, operation.spaceId, selectedEmbedder.dimension) }
+                }
+                if (pending.isEmpty()) continue
+                val currentDispatch = dispatched ?: dispatchEmbeddingOperation(operation).also { dispatched = it }
+                verifyEmbeddingOperationBeforeProvider(currentDispatch)
+                val representatives = pending.values.map { it.first() }
+                val vectors = when (selectedEmbedder) {
+                    is CancellableBatchTextEmbedder -> selectedEmbedder.embedBatchCancellable(representatives.map { it.text })
+                    is BatchTextEmbedder -> selectedEmbedder.embedBatch(representatives.map { it.text })
+                    else -> representatives.map { selectedEmbedder.embed(it.text) }
+                }
+                check(vectors.size == representatives.size) { "embedding backend returned ${vectors.size} vectors for ${representatives.size} cache misses" }
+                val bytesByHash = pending.keys.zip(vectors).associate { (hash, vector) ->
+                    validateEmbeddingVector(vector, selectedEmbedder.dimension)
+                    hash to floatsToBytes(vector)
+                }
+                synchronized(indexLock) {
+                    db.transaction {
+                        val current = operationByToken(operation.token) ?: error("embedding operation not found")
+                        check(current.state == "DISPATCHED" || current.state == "UNKNOWN") { "embedding operation changed while provider request was in flight" }
+                        pending.forEach { (hash, inputs) ->
+                            inputs.forEach { input -> insertEmbedding(input.chunkId, operation.spaceId, bytesByHash.getValue(hash), hash) }
                         }
                     }
-                    if (current.state == "DISPATCHED" && !current.cancelRequested) {
-                        db.execute(
-                            "UPDATE embedding_operations SET state = 'CACHE_READY', error = '', updated_at = ? WHERE token = ? AND state = 'DISPATCHED' AND cancel_requested = 0",
-                            listOf(Utc.nowIso(), dispatched.token),
-                        )
-                    }
                 }
             }
-            return operationByToken(readyToSend.token) ?: error("embedding operation disappeared")
-        } catch (cancelled: CancellationException) {
-            markEmbeddingOperationUnknown(dispatched)
-            throw cancelled
-        } catch (interrupted: InterruptedException) {
-            Thread.currentThread().interrupt()
-            markEmbeddingOperationUnknown(dispatched)
-            throw interrupted
+            return synchronized(indexLock) {
+                db.transaction {
+                    db.execute("UPDATE embedding_operations SET state = 'CACHE_READY', error = '', updated_at = ? WHERE token = ? AND state IN ('PREPARED','DISPATCHED') AND cancel_requested = 0",
+                        listOf(Utc.nowIso(), operation.token))
+                    operationByToken(operation.token) ?: error("embedding operation disappeared")
+                }
+            }
         } catch (failure: Throwable) {
-            // Once DISPATCHED was durably recorded, every subsequent failure
-            // has an uncertain external outcome, including malformed output,
-            // local cache commit errors, and ordinary transport exceptions.
-            // Never classify it as a retryable FAILED operation.
-            markEmbeddingOperationUnknown(dispatched)
+            if (failure is InterruptedException) Thread.currentThread().interrupt()
+            val sent = dispatched
+            if (sent != null) markEmbeddingOperationUnknown(sent)
+            else markEmbeddingOperation(operation.token, "FAILED", API_EMBEDDING_FAILED_ERROR, onlyIfActive = true)
             throw failure
         }
     }
 
-    private fun validateOperationCache(operation: EmbeddingOperationRecord, inputsByVersion: LinkedHashMap<String, List<EmbeddingInput>>, dimension: Int) {
-        inputsByVersion.values.flatten().forEach { input ->
+    private fun validateOperationCache(operation: EmbeddingOperationRecord, inputsByVersion: LinkedHashMap<String, Sequence<EmbeddingInput>>, dimension: Int) {
+        inputsByVersion.values.asSequence().flatMap { it }.forEach { input ->
             val expectedHash = input.contentHash.ifBlank {
                 sha256Hex(input.text.toByteArray(Charsets.UTF_8))
             }
@@ -3779,7 +3723,7 @@ class KnowledgeRepository(
             val id = EntityId.random().value
             val hash = sha256Hex(chunk.text.toByteArray(Charsets.UTF_8))
             db.execute(
-                "INSERT INTO chunks(id,document_version_id,ordinal,text,content_hash,source_span,asset_ids,page) VALUES (?,?,?,?,?,?,?,?)",
+                "INSERT INTO chunks(id,document_version_id,ordinal,text,content_hash,source_span,asset_ids,page,text_utf16_length) VALUES (?,?,?,?,?,?,?,?,?)",
                 listOf(
                     id,
                     documentVersionId,
@@ -3789,6 +3733,7 @@ class KnowledgeRepository(
                     chunk.span,
                     chunk.assetIds.map { versionAssets.getValue(it) }.joinToString(","),
                     chunk.page,
+                    chunk.text.length,
                 ),
             )
             val rowid = db.query("SELECT rowid AS rid FROM chunks WHERE id = ?", listOf(id)).single().long("rid")
@@ -3799,19 +3744,7 @@ class KnowledgeRepository(
     }
 
     private fun persistEmbeddings(documentVersionId: String, selectedEmbedder: TextEmbedder) {
-        val inputs = db.query(
-            "SELECT id, ordinal, text, content_hash FROM chunks WHERE document_version_id = ? ORDER BY ordinal",
-            listOf(documentVersionId),
-        ).map { row ->
-            EmbeddingInput(
-                chunkId = row.string("id"),
-                text = row.string("text"),
-                contentHash = row.string("content_hash").ifBlank {
-                    sha256Hex(row.string("text").toByteArray(Charsets.UTF_8))
-                },
-            )
-        }
-        ensureEmbeddings(inputs, selectedEmbedder)
+        inputsForVersion(documentVersionId).chunked(128).forEach { ensureEmbeddings(it, selectedEmbedder) }
     }
 
     /**
@@ -3981,7 +3914,9 @@ class KnowledgeRepository(
     }
 
     private fun isPageContextSpan(span: String): Boolean =
-        span.split('|').any { it == "part:context" || it == "association:PAGE_CONTEXT" }
+        runCatching {
+            runtime.mobileagent.knowledge.decodeSourceSpan(span)?.isPageContext ?: span.startsWith("v2|")
+        }.getOrDefault(true) // Invalid structured provenance must never expose a guessed image.
 
     /** Legacy context rows remain searchable without claiming their crop as the source. */
     private fun sourceAssetForHit(row: SqlRow): String? =

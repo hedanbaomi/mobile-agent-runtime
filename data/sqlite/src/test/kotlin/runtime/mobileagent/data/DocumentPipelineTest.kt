@@ -90,7 +90,7 @@ class DocumentPipelineTest {
             }
             assertTrue(db.query("SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'pipeline_%'").isEmpty())
             Migrations.apply(db)
-            assertEquals(24L,db.query("SELECT version FROM schema_version").single().long("version"))
+            assertEquals(25L,db.query("SELECT version FROM schema_version").single().long("version"))
             assertEquals("saved",db.query("SELECT ocr_text FROM vision_results WHERE cache_key='legacy'").single().string("ocr_text"))
             assertTrue(db.query("SELECT * FROM pipeline_plans").isEmpty())
             assertEquals(7,db.query("SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'pipeline_%'").size)

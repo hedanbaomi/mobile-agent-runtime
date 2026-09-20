@@ -39,11 +39,13 @@ class KnowledgeCitationProvenanceTest {
         val repo = KnowledgeRepository(db, MemoryBlobSink())
         val job = repo.importBytes("long.txt", "text/plain", ("abcd😀漢".repeat(4000)+"TAIL_COMPLETE").toByteArray(), false)
         var offset = 0
+        var version: String? = null
         val combined = StringBuilder()
         do {
-            val range = repo.readDocumentRange(job.documentId, 127, offset, setOf(job.knowledgeBaseId))
+            val range = repo.readDocumentRange(job.documentId, 127, offset, setOf(job.knowledgeBaseId), version)
             assertEquals(range.text, String(range.text.toByteArray(Charsets.UTF_8), Charsets.UTF_8))
             combined.append(range.text)
+            version = range.documentVersionId
             val next = range.nextOffset ?: break
             assertTrue(next > offset)
             offset = next

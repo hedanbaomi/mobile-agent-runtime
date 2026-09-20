@@ -55,7 +55,8 @@ object Migrations {
     // conversation, and a summary that only a
     // verified SUCCEEDED row may carry.  No transcript row is deleted or
     // rewritten by a summary, and no summary is ever re-sent from the database.
-    const val VERSION = 24
+    // v25 stores bounded-read UTF-16 lengths; body and existing references are unchanged.
+    const val VERSION = 25
 
     private val statements = listOf(
         "CREATE TABLE IF NOT EXISTS schema_version (version INTEGER NOT NULL PRIMARY KEY)",
@@ -243,6 +244,7 @@ object Migrations {
         // v24: unit-level local failure reporting and phase
         Column("pipeline_units", "failure_code", "TEXT"),
         Column("pipeline_units", "failure_phase", "TEXT"),
+        Column("chunks", "text_utf16_length", "INTEGER NOT NULL DEFAULT -1 CHECK(text_utf16_length >= -1)"),
     )
 
     fun apply(connection: SqlConnection) {
@@ -266,6 +268,9 @@ object Migrations {
             // v24 is additive and lazy: legacy jobs/cache rows are not guessed into unit plans.
             DocumentPipelineStore.schema.forEach { sql -> connection.execute(sql) }
             columns.forEach { column -> ensureColumn(connection, column) }
+            connection.execute("CREATE INDEX IF NOT EXISTS chunk_read_lengths ON chunks(document_version_id,ordinal,text_utf16_length,id)")
+            connection.execute("CREATE INDEX IF NOT EXISTS chunk_missing_lengths ON chunks(document_version_id,id) WHERE text_utf16_length < 0")
+            ChunkTextMetadata.backfill(connection)
             backfillConversationSnapshotIds(connection)
             backfillV11(connection)
             backfillV12(connection)

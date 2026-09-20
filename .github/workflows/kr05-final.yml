@@ -1,0 +1,121 @@
+# SPDX-FileCopyrightText: 2026 mobileAgentRuntime contributors
+# SPDX-License-Identifier: AGPL-3.0-only
+name: KR05 final verification
+on:
+  push:
+    branches: [codex/kr05-verify-20260920]
+    paths: [.github/workflows/kr05-final.yml]
+permissions:
+  contents: write
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: 5fb6924d18e90aef9e79906f528baa0b8c8e7f35
+      - uses: actions/setup-java@c5195efecf7bdfc987ee8bae7a71cb8b11521c00
+        with:
+          distribution: temurin
+          java-version: "17"
+      - uses: actions/setup-python@42375524e23c412d93fb67b49958b491fce71c38
+        with:
+          python-version: "3.11"
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: "20"
+      - name: Materialize reviewed payload plus indexed access paths
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import os, re, json, gzip, base64, subprocess
+          from pathlib import Path
+          workflow = Path('.github/workflows/kr05-verify.yml').read_text()
+          encoded = re.search(r'^          KR05_PAYLOAD: (.+)$', workflow, re.M).group(1)
+          payload = json.loads(gzip.decompress(base64.b64decode(encoded)))
+          assert not subprocess.check_output(['git','status','--porcelain'], text=True).strip()
+          base = 'e57187c238bfd004d3e181dc5c64fc15c936d09f'
+          subprocess.run(['git','fetch','origin',base,'--depth=1'], check=True)
+          subprocess.run(['git','checkout','--detach',base], check=True)
+          for name, text in payload['files'].items():
+              p = Path(name)
+              assert not p.exists(), name
+              p.parent.mkdir(parents=True, exist_ok=True)
+              p.write_text(text, encoding='utf-8')
+          patch = Path(os.environ['RUNNER_TEMP']) / 'kr05-apply.py'
+          patch.write_text(payload['patch'], encoding='utf-8')
+          subprocess.run(['python',str(patch)],check=True)
+          p = Path('data/sqlite/src/main/kotlin/runtime/mobileagent/data/Migrations.kt')
+          text = p.read_text()
+          anchor = '            EmbeddingInputRevision.install(connection)'
+          assert text.count(anchor) == 1
+          text = text.replace(anchor, anchor + '\n' + '\n'.join([
+              '            // Bounded result pages also need bounded SQL access paths.',
+              '            connection.execute("CREATE INDEX IF NOT EXISTS chunk_embedding_keyset ON chunks(document_version_id,id)")',
+              '            connection.execute("CREATE INDEX IF NOT EXISTS embedding_content_lookup ON embeddings(space_id,content_hash,chunk_id)")',
+          ]))
+          p.write_text(text)
+          p = Path('data/sqlite/src/test/kotlin/runtime/mobileagent/data/EmbeddingLinearDispatchTest.kt')
+          text = p.read_text()
+          extra = '''
+              @Test fun sqlAccessPathsDoNotHideFullScansBehindBoundedResultPages() {
+                  JdbcSqlConnection().use { db ->
+                      Migrations.apply(db)
+                      val page = db.query("EXPLAIN QUERY PLAN SELECT id,text,content_hash FROM chunks WHERE document_version_id=? AND id>? ORDER BY id LIMIT 128", listOf("v","id"))
+                          .joinToString("\n") { it.string("detail") }
+                      assertTrue(page.contains("chunk_embedding_keyset"), page)
+                      assertFalse(page.contains("TEMP B-TREE"), page)
+                      val cache = db.query("EXPLAIN QUERY PLAN SELECT e.content_hash,e.vector_blob FROM embeddings e JOIN chunks c ON c.id=e.chunk_id WHERE e.space_id=? AND e.content_hash=? AND c.content_hash=? LIMIT 1", listOf("s","h","h"))
+                          .joinToString("\n") { it.string("detail") }
+                      assertTrue(cache.contains("embedding_content_lookup"), cache)
+                      assertFalse(cache.contains("SCAN e"), cache)
+                  }
+              }
+          '''.replace('"\n"', '"\\n"')
+          anchor = '    private fun binding()'
+          assert text.count(anchor) == 1
+          p.write_text(text.replace(anchor, extra + '\n' + anchor))
+          PY
+          chmod +x gradlew
+          mkdir -p build/kr05
+          git diff --check
+          git diff --stat | tee build/kr05/diff-stat.txt
+      - name: Focused scale and safety regressions
+        run: |
+          set -o pipefail
+          ./gradlew :data:sqlite:test --tests runtime.mobileagent.data.EmbeddingLinearDispatchTest --tests runtime.mobileagent.data.KnowledgeReviewRegressionTest --dependency-verification=strict --no-daemon 2>&1 | tee build/kr05/targeted.log
+          cp -r data/sqlite/build/test-results/test build/kr05/focused-junit
+      - name: Full pre-commit evidence and license gates
+        run: |
+          set -o pipefail
+          python -m pip install "reuse==6.2.0" "pyyaml==6.0.2"
+          ./gradlew licenseGuard licenseGuardReverse verifyCiPins verifyDependencyLock verifyDependencyVerification verifyWorkflowYaml debugEvidenceGate --dependency-verification=strict --no-daemon 2>&1 | tee build/kr05/gates.log
+          python -m reuse lint | tee build/kr05/reuse.log
+          git diff --check
+      - name: Commit and push the validated source-only branch
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = e57187c238bfd004d3e181dc5c64fc15c936d09f
+          git switch -c codex/kr05-linear-dispatch-final-20260920
+          git add data/sqlite/src/main/kotlin/runtime/mobileagent/data/EmbeddingInputRevision.kt data/sqlite/src/main/kotlin/runtime/mobileagent/data/KnowledgeRepository.kt data/sqlite/src/main/kotlin/runtime/mobileagent/data/Migrations.kt data/sqlite/src/test/kotlin/runtime/mobileagent/data/EmbeddingLinearDispatchTest.kt data/sqlite/src/test/kotlin/runtime/mobileagent/data/DocumentPipelineTest.kt data/sqlite/src/test/kotlin/runtime/mobileagent/data/KnowledgeBatchStagingTest.kt
+          test "$(git diff --cached --name-only | wc -l)" -eq 6
+          git config user.name 'ChatGPT'
+          git config user.email 'noreply@openai.com'
+          git commit -m 'fix(knowledge): bound API manifest validation and SQL access paths' -m "Validate the canonical manifest once per execution, then use transactional per-KB source revisions while retaining every live dispatch gate. Index keyset reads and content-cache lookups. Add fake-API 1k/10k/50k complexity, mutation, revocation, cross-connection and rollback coverage. Full pre-commit gates verified by isolated run $GITHUB_RUN_ID; no paid provider or release."
+          git rev-parse HEAD | tee build/kr05/source-sha.txt
+          git diff HEAD^ HEAD --binary > build/kr05/source.patch
+          git show --stat HEAD | tee build/kr05/commit.txt
+          git push origin HEAD:refs/heads/codex/kr05-linear-dispatch-final-20260920
+      - name: Preserve exact test and source evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: kr05-final-verification
+          path: |
+            build/kr05/
+            data/sqlite/build/test-results/test/
+            data/sqlite/src/main/kotlin/runtime/mobileagent/data/EmbeddingInputRevision.kt
+            data/sqlite/src/main/kotlin/runtime/mobileagent/data/KnowledgeRepository.kt
+            data/sqlite/src/main/kotlin/runtime/mobileagent/data/Migrations.kt
+            data/sqlite/src/test/kotlin/runtime/mobileagent/data/EmbeddingLinearDispatchTest.kt

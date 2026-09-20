@@ -36,10 +36,12 @@ def knowledge_search(query: str, limit: int = 10) -> object:
     return _request("knowledge.search", {"query": query, "limit": limit})
 
 
-def knowledge_read(document_id: str, max_bytes: int = 256 * 1024, offset: int = 0) -> object:
+def knowledge_read(document_id: str, max_bytes: int = 256 * 1024, offset: int = 0, expected_version: str | None = None) -> object:
     """Read up to max_bytes of UTF-8 text, subject to smaller broker limits.
 
-    Pass the returned UTF-16 nextOffset to continue until it is None.
+    Pass the returned UTF-16 nextOffset and documentVersionId to continue until
+    nextOffset is None. expected_version is optional on the first page and
+    required when offset > 0.
     """
     if not isinstance(document_id, str) or not document_id or len(document_id) > 256:
         raise ValueError("invalid document id")
@@ -47,7 +49,14 @@ def knowledge_read(document_id: str, max_bytes: int = 256 * 1024, offset: int = 
         raise ValueError("invalid document limit")
     if not isinstance(offset, int) or isinstance(offset, bool) or offset < 0 or offset > 2147483647:
         raise ValueError("invalid document offset")
-    return _request("knowledge.read", {"documentId": document_id, "maxBytes": max_bytes, "offset": offset})
+    if expected_version is not None and (not isinstance(expected_version, str) or not expected_version.strip() or len(expected_version) > 256):
+        raise ValueError("invalid document version")
+    if offset > 0 and expected_version is None:
+        raise ValueError("expected_version is required when offset is greater than zero")
+    arguments = {"documentId": document_id, "maxBytes": max_bytes, "offset": offset}
+    if expected_version is not None:
+        arguments["expectedVersion"] = expected_version
+    return _request("knowledge.read", arguments)
 
 
 def http_request(url: str, method: str = "GET", headers: dict | None = None, body: object = None) -> object:

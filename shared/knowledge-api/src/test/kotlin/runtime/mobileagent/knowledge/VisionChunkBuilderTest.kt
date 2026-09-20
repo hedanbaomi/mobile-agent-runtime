@@ -43,7 +43,7 @@ class VisionChunkBuilderTest {
         // Every fragment stays traceable to the original page/asset/section.
         assertTrue(parts.all { it.page == 71 })
         assertTrue(parts.filter { it.part != "context" }.all { it.assetIds == listOf("asset-71") && it.span?.contains("section:chapter-3") == true })
-        assertTrue(parts.filter { it.part == "context" }.all { it.assetIds.isEmpty() && it.span?.contains("association:PAGE_CONTEXT") == true })
+        assertTrue(parts.filter { it.part == "context" }.all { it.assetIds.isEmpty() && decodeSourceSpan(it.span!!)?.isPageContext == true })
         // The components stay distinguishable instead of being fused.
         assertEquals(setOf("description", "ocr", "table", "context"), parts.map { it.part }.toSet())
     }
@@ -68,7 +68,7 @@ class VisionChunkBuilderTest {
         // fuzzy hit cannot be presented as recognition.
         assertTrue(parts.filter { it.part == "ocr" }.none { it.text.contains("SYNTHETIC_NATIVE_ONLY_CLAUSE_71") })
         assertTrue(parts.all { it.text.length <= VisionChunkBuilder.TARGET_CHARS })
-        assertTrue(context.all { it.span?.contains("part:context") == true && it.span?.contains("page:71") == true })
+        assertTrue(context.all { decodeSourceSpan(it.span!!)?.isPageContext == true })
     }
 
     @Test
@@ -84,6 +84,76 @@ class VisionChunkBuilderTest {
         assertTrue(parts.isNotEmpty())
         assertTrue(parts.all { it.part == "context" })
         assertTrue(parts.all { it.text.length <= VisionChunkBuilder.TARGET_CHARS })
+        assertTrue(parts.all { decodeSourceSpan(it.span!!)?.isPageContext == true })
+    }
+
+    /**
+     * KR-04 regression: a legal parser label may contain `|` and even the exact
+     * tokens the old classifier searched for. It must stay inert data, so a real
+     * OCR fragment keeps its image reference.
+     */
+    @Test
+    fun injectedAssociationSectionDoesNotDemoteRealOcr() {
+        val section = "photo|association:PAGE_CONTEXT|.png"
+        val parts = VisionChunkBuilder.build(
+            result = VisionSuccess(ocrText = "recognized", semanticDescription = "diagram"),
+            page = 5,
+            assetId = "asset-5",
+            section = section,
+        )
+
+        assertTrue(parts.isNotEmpty())
+        assertTrue(parts.all { it.assetIds == listOf("asset-5") })
+        assertTrue(parts.all { decodeSourceSpan(it.span!!)?.isPageContext == false })
+        assertEquals(section, decodeSourceSpan(parts.first().span!!)!!.section)
+    }
+
+    @Test
+    fun injectedPartContextSectionDoesNotDemoteRealOcr() {
+        val section = "photo|part:context|.png"
+        val parts = VisionChunkBuilder.build(
+            result = VisionSuccess(ocrText = "recognized", semanticDescription = "diagram"),
+            page = 6,
+            assetId = "asset-6",
+            section = section,
+        )
+
+        assertTrue(parts.all { it.assetIds == listOf("asset-6") })
+        assertTrue(parts.all { decodeSourceSpan(it.span!!)?.isPageContext == false })
+        assertEquals(section, decodeSourceSpan(parts.first().span!!)!!.section)
+    }
+
+    @Test
+    fun realContextFragmentStaysImageFreeAndDecodesAsContext() {
+        val parts = VisionChunkBuilder.build(
+            result = VisionSuccess(ocrText = "recognized", semanticDescription = "diagram"),
+            page = 8,
+            assetId = "asset-8",
+            section = "photo|association:PAGE_CONTEXT|.png",
+            surroundingText = "extracted page text",
+        )
+
+        val context = parts.filter { it.part == SourceSpan.PART_CONTEXT }
+        assertTrue(context.isNotEmpty())
+        assertTrue(context.all { it.assetIds.isEmpty() })
+        assertTrue(context.all { decodeSourceSpan(it.span!!)?.isPageContext == true })
+        assertTrue(parts.filter { it.part == SourceSpan.PART_OCR }.all { it.assetIds == listOf("asset-8") })
+    }
+
+    @Test
+    fun sectionNameWithCrLfAndPercentRoundTripsExactly() {
+        val section = "line1\r\nline2|100%"
+        val parts = VisionChunkBuilder.build(
+            result = VisionSuccess(ocrText = "recognized", semanticDescription = "diagram"),
+            page = 3,
+            assetId = "asset-3",
+            section = section,
+        )
+
+        assertTrue(parts.isNotEmpty())
+        assertTrue(parts.all { decodeSourceSpan(it.span!!)?.isPageContext == false })
+        assertEquals(section, decodeSourceSpan(parts.first().span!!)!!.section)
+        assertTrue(parts.all { it.assetIds == listOf("asset-3") })
     }
 
     @Test
@@ -93,6 +163,7 @@ class VisionChunkBuilderTest {
         assertEquals(1, parts.size)
         assertEquals("label", parts.single().part)
         assertTrue(parts.single().text.contains("page 12"))
+        assertFalse(decodeSourceSpan(parts.single().span!!)?.isPageContext == true)
     }
 
     @Test
@@ -133,5 +204,3 @@ class VisionChunkBuilderTest {
         assertEquals(longest.length, parts.filter { it.part == "ocr" }.sumOf { it.text.length })
     }
 }
-
-

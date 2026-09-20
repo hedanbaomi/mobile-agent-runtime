@@ -559,7 +559,7 @@ private class PythonSkillToolExecutor(
                 hits.filter { it.knowledgeBaseId in selected && container.knowledge.documentKnowledgeBaseId(it.documentId) == it.knowledgeBaseId }
                     .forEach { hit -> add(buildJsonObject {
                         put("knowledgeBaseId", hit.knowledgeBaseId); put("documentId", hit.documentId)
-                        put("chunkId", hit.chunkId); put("text", utf8Prefix(hit.text, 2048))
+                        put("documentVersionId", hit.documentVersionId); put("chunkId", hit.chunkId); put("text", utf8Prefix(hit.text, 2048))
                     }) }
             }) }
         }
@@ -571,14 +571,27 @@ private class PythonSkillToolExecutor(
             val max = (args.number("maxBytes") ?: 16_384).coerceIn(1, 24_000)
             val offset = args.number("offset") ?: 0
             if (offset < 0 || ("offset" in args && args.number("offset") == null)) throw BrokerDenied("INVALID_ARGUMENT")
-            val range = container.knowledge.readDocumentRange(id, minOf(max, 5000), offset, ids)
+            val expectedVersion = args.string("expectedVersion")
+            if ("expectedVersion" in args && (expectedVersion == null || expectedVersion.isBlank() || expectedVersion.length > 256)) {
+                throw BrokerDenied("INVALID_ARGUMENT")
+            }
+            if (offset > 0 && expectedVersion == null) throw BrokerDenied("DOCUMENT_VERSION_REQUIRED")
+            val range = try {
+                container.knowledge.readDocumentRange(id, minOf(max, 5000), offset, ids, expectedVersion)
+            } catch (denied: BrokerDenied) {
+                throw denied
+            } catch (failure: IllegalArgumentException) {
+                // An unpinned/missing/stale pinned revision is rejected explicitly, never
+                // silently rebound to the current active version.
+                throw BrokerDenied(if (failure.message.orEmpty().startsWith("DOCUMENT_VERSION")) "DOCUMENT_VERSION_UNAVAILABLE" else "INVALID_ARGUMENT")
+            }
             val text = utf8Prefix(range.text, max)
             check(text.isNotEmpty() || range.text.isEmpty()) { "Read budget cannot fit the next Unicode scalar" }
             if (container.knowledge.documentKnowledgeBaseId(id) !in permittedKnowledge(permission)) throw BrokerDenied("PERMISSION_DENIED")
             return buildJsonObject {
                 put("documentId", id); put("text", text); put("offset", range.offset)
                 put("nextOffset", (range.offset + text.length).takeIf { it < range.totalChars }?.let { JsonPrimitive(it) } ?: kotlinx.serialization.json.JsonNull)
-                put("totalChars", range.totalChars)
+                put("totalChars", range.totalChars); range.documentVersionId?.let { put("documentVersionId", it) }
             }
         }
 

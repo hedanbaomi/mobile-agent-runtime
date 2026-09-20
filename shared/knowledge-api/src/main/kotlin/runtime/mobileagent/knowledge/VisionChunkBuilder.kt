@@ -28,6 +28,12 @@ data class VisionTextPart(
  * [TextChunker], keeps the original page/asset/section span on each fragment,
  * and emits the surrounding page text at most once so overlap is not counted
  * as independent evidence.
+ *
+ * Every span is built through [encodeSourceSpan], so a `section` value that
+ * itself contains `|`, `%` or structural-looking text such as
+ * `photo|part:context|.png` stays inert data instead of becoming a readable
+ * provenance field. See [SourceSpan] for the reading rules and the legacy
+ * compatibility contract.
  */
 object VisionChunkBuilder {
     const val TARGET_CHARS = 1800
@@ -50,19 +56,21 @@ object VisionChunkBuilder {
         val context = surroundingText.trim()
 
         if (description.isNotEmpty()) {
-            parts += chunkPart(description, "description", page, assetId, section, targetChars)
+            parts += chunkPart(description, SourceSpan.PART_DESCRIPTION, page, assetId, section, targetChars)
         }
         if (ocr.isNotEmpty()) {
             // A row-aware split keeps Markdown tables and OCR line order intact.
             val lines = TextChunker.splitLines(ocr, targetChars)
             parts += lines.mapIndexed { index, text ->
-                VisionTextPart(text, "ocr", page, listOf(assetId), span(section, page, "ocr", index, lines.size))
+                VisionTextPart(text, SourceSpan.PART_OCR, page, listOf(assetId),
+                    span(section, page, SourceSpan.PART_OCR, index, lines.size))
             }
         }
         if (table.isNotEmpty()) {
             val lines = TextChunker.splitLines(table, targetChars)
             parts += lines.mapIndexed { index, text ->
-                VisionTextPart(text, "table", page, listOf(assetId), span(section, page, "table", index, lines.size))
+                VisionTextPart(text, SourceSpan.PART_TABLE, page, listOf(assetId),
+                    span(section, page, SourceSpan.PART_TABLE, index, lines.size))
             }
         }
         // Pages that reach Vision are exactly the pages the normal text path
@@ -71,11 +79,19 @@ object VisionChunkBuilder {
         // as its own `context` component (never merged into OCR, so a fuzzy hit
         // cannot masquerade as recognition) to keep provenance and coverage.
         if (context.isNotEmpty()) {
-            parts += chunkPart(context, "context", page, assetId, null, targetChars)
-                .map { it.copy(assetIds = emptyList(), span = it.span + "|association:PAGE_CONTEXT") }
+            val chunks = chunksOf(context, targetChars)
+            parts += chunks.mapIndexed { index, text ->
+                // Context text is page-level provenance: it carries no asset and
+                // an explicit PAGE_CONTEXT association so no reader can treat it
+                // as crop evidence.
+                VisionTextPart(text, SourceSpan.PART_CONTEXT, page, emptyList(),
+                    span(null, page, SourceSpan.PART_CONTEXT, index, chunks.size,
+                        association = SourceSpan.ASSOCIATION_PAGE_CONTEXT))
+            }
         }
         if (parts.isEmpty()) {
-            parts += VisionTextPart("Visual evidence page ${page ?: "?"} (no text recognized)", "label", page, listOf(assetId), span(section, page, "label", 0, 1))
+            parts += VisionTextPart("Visual evidence page ${page ?: "?"} (no text recognized)", SourceSpan.PART_LABEL,
+                page, listOf(assetId), span(section, page, SourceSpan.PART_LABEL, 0, 1))
         }
         return parts
     }
@@ -88,16 +104,27 @@ object VisionChunkBuilder {
         section: String?,
         targetChars: Int,
     ): List<VisionTextPart> {
-        val chunks = TextChunker.chunk(text, targetChars)
+        val chunks = chunksOf(text, targetChars)
         return chunks.mapIndexed { index, chunk ->
             VisionTextPart(chunk, part, page, listOf(assetId), span(section, page, part, index, chunks.size))
         }
     }
 
-    private fun span(section: String?, page: Int?, part: String, index: Int, total: Int): String {
-        val pageLabel = page?.let { "page:$it" } ?: "page:?"
-        val sectionLabel = section?.takeIf { it.isNotBlank() }?.let { "section:$it" }
-        val parts = listOfNotNull(pageLabel, sectionLabel, "part:$part", if (total > 1) "segment:${index + 1}/$total" else null)
-        return parts.joinToString("|")
-    }
+    private fun chunksOf(text: String, targetChars: Int): List<String> = TextChunker.chunk(text, targetChars)
+
+    private fun span(
+        section: String?,
+        page: Int?,
+        part: String,
+        index: Int,
+        total: Int,
+        association: String? = null,
+    ): String = encodeSourceSpan(
+        page = page,
+        section = section,
+        part = part,
+        segmentIndex = index + 1,
+        segmentTotal = total,
+        association = association,
+    )
 }

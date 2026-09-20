@@ -67,7 +67,14 @@ data class ToolContext(
     val grantedKnowledgeBaseIds: Set<String> = emptySet(),
     val grantedMethods: Set<String> = emptySet(),
     val documentKnowledgeBaseId: (documentId: String) -> String? = { null },
-    val readDocumentRange: ((documentId: String, maxChars: Int, offset: Int) -> String)? = null,
+    /**
+     * Version-pinned pagination callback. [expectedVersion] is null on an
+     * unpinned first page and must be echoed by the caller for every
+     * continuation (offset > 0). The returned JSON must carry the
+     * documentVersionId the page was read from so a continuation cannot be
+     * silently rebound to a newer published version.
+     */
+    val readDocumentRange: ((documentId: String, maxChars: Int, offset: Int, expectedVersion: String?) -> String)? = null,
 )
 
 class ToolBroker(
@@ -252,12 +259,26 @@ class ToolBroker(
             }
         }
         "read_document" -> {
+            val documentId = args.string("documentId")
             val maxChars = args["maxChars"]?.jsonPrimitive?.intOrNull ?: 4000
             val offset = args["offset"]?.jsonPrimitive?.intOrNull ?: 0
+            val expectedVersion = args["expectedVersion"]?.jsonPrimitive?.contentOrNull
+            require("expectedVersion" !in args || (expectedVersion != null && expectedVersion.isNotBlank() && expectedVersion.length <= 256)) {
+                "INVALID_ARGUMENT: expectedVersion must be a nonblank version identifier"
+            }
+            if (offset > 0 && expectedVersion == null) {
+                error("DOCUMENT_VERSION_REQUIRED: continuation requires the documentVersionId returned by the first page")
+            }
             val range = ctx.readDocumentRange
-            capOutput(if (range != null) range(args.string("documentId"), maxChars, offset) else {
+            capOutput(if (range != null) {
+                range(documentId, maxChars, offset, expectedVersion)
+            } else {
+                // The legacy non-paginated callback may serve only an unpinned
+                // first page. It must never pretend to paginate or to bind a
+                // version it cannot read from.
                 require(offset == 0) { "Document pagination is unavailable in this context" }
-                ctx.readDocument(args.string("documentId"), maxChars)
+                require(expectedVersion == null) { "DOCUMENT_VERSION_UNAVAILABLE: this context cannot bind a document version" }
+                ctx.readDocument(documentId, maxChars)
             })
         }
         "calculator" -> {
@@ -326,8 +347,8 @@ object BuiltinTools {
     )
     val readDocument = ToolSpec(
         name = "read_document",
-        description = "Read published text from an authorized document. Responses may be shorter than maxChars to fit encoded output limits. Continue using returned nextOffset until it is null; offsets count UTF-16 units.",
-        parametersJson = """{"type":"object","additionalProperties":false,"required":["documentId"],"properties":{"documentId":{"type":"string","minLength":1},"maxChars":{"type":"integer","minimum":1,"maximum":16384},"offset":{"type":"integer","minimum":0,"maximum":2147483647}}}""",
+        description = "Read published text from an authorized document. Responses may be shorter than maxChars to fit encoded output limits. Continue using the returned nextOffset and documentVersionId until nextOffset is null; offsets count UTF-16 units. expectedVersion is optional on the first page and required for every continuation.",
+        parametersJson = """{"type":"object","additionalProperties":false,"required":["documentId"],"properties":{"documentId":{"type":"string","minLength":1},"maxChars":{"type":"integer","minimum":1,"maximum":16384},"offset":{"type":"integer","minimum":0,"maximum":2147483647},"expectedVersion":{"type":"string","minLength":1}}}""",
         capability = "knowledge.read",
         sideEffect = false,
     )

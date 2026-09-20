@@ -57,7 +57,16 @@ class KnowledgeRepositoryScaleDeviceTest {
     fun repositoryScaleBuildReloadAndSnapshotRecovery() {
         val requested = InstrumentationRegistry.getArguments().getString("repositoryScaleCount")?.toIntOrNull() ?: 1_000
         require(requested in setOf(1_000, 10_000, 50_000)) { "repositoryScaleCount must be 1000, 10000 or 50000" }
-        val embedder = HashingTextEmbedder(dimension = dimension)
+        val reviewLifecycle = InstrumentationRegistry.getArguments().getString("reviewLifecycle") == "true"
+        var embeddingCalls = 0
+        val hashing = HashingTextEmbedder(dimension = dimension)
+        val embedder = object : runtime.mobileagent.knowledge.TextEmbedder by hashing {
+            override fun embed(text: String): FloatArray { embeddingCalls++; return hashing.embed(text) }
+        }
+        var failPublication = false
+        var maxInputRows = 0
+        var countReadBodies = false
+        var readBodies = 0
         val chunkChars = 1_800
         val padding = "证据段落 with unicode context. ".repeat(100)
         val root = File(context.filesDir, "repository-scale-${UUID.randomUUID()}").apply { mkdirs() }
@@ -77,8 +86,24 @@ class KnowledgeRepositoryScaleDeviceTest {
         fun openSession(): Pair<KnowledgeRepository, AndroidContextSqlite> {
             val connection = AndroidContextSqlite(context, dbName)
             Migrations.apply(connection)
+            val observed = object : runtime.mobileagent.data.SqlConnection by connection {
+                override fun query(sql: String, args: List<Any?>): List<runtime.mobileagent.data.SqlRow> = connection.query(sql, args).also { rows ->
+                    if (sql.startsWith("SELECT id, text, content_hash FROM chunks")) {
+                        maxInputRows = maxOf(maxInputRows, rows.size)
+                        assertTrue("generation reads must be bounded", rows.size <= 128 && sql.contains("LIMIT 128"))
+                    }
+                    if (countReadBodies) readBodies += rows.count { it.columns.containsKey("text") }
+                }
+                override fun execute(sql: String, args: List<Any?>) {
+                    if (failPublication && sql.startsWith("UPDATE knowledge_bases SET active_generation_id")) {
+                        failPublication = false
+                        error("injected generation publication failure")
+                    }
+                    connection.execute(sql, args)
+                }
+            }
             val repository = KnowledgeRepository(
-                connection,
+                observed,
                 CasBlobSink(casDir),
                 embedder,
                 vectorIndexFactory = VectorIndexFactory { spaceId, dim, capacity ->
@@ -169,6 +194,9 @@ class KnowledgeRepositoryScaleDeviceTest {
                     listOf(requested.toLong(), generation),
                 )
             }
+            // This synthetic fixture contains BMP characters only. Production writes
+            // UTF-16 lengths in persistChunks; legacy rows are migrated in bounded pages.
+            connection.execute("UPDATE chunks SET text_utf16_length = length(text) WHERE text_utf16_length < 0")
             val fixtureMs = SystemClock.elapsedRealtime() - fixtureStart
 
             // Precondition before any cache build: SQLite is exactly and consistently N members.
@@ -219,6 +247,56 @@ class KnowledgeRepositoryScaleDeviceTest {
                 "the snapshot must carry all $requested members, was $snapshotBytes bytes",
                 snapshotBytes >= requested.toLong() * dimension * 4L,
             )
+
+            if (reviewLifecycle) {
+                // These are actual public publication/rebuild/read entry points after a
+                // real native index has been loaded. Seeded data remains synthetic truth.
+                val pinned = repository.readDocumentRange(imported.documentId, 1000)
+                assertTrue(pinned.totalChars > requested * 1000)
+                countReadBodies = true
+                var offset = pinned.nextOffset!!
+                repeat(100) {
+                    val page = repository.readDocumentRange(imported.documentId, 1000, offset, expectedVersion = pinned.documentVersionId)
+                    assertEquals(pinned.documentVersionId, page.documentVersionId)
+                    offset = page.nextOffset!!
+                }
+                val tail = repository.readDocumentRange(imported.documentId, 100, pinned.totalChars - 70, expectedVersion = pinned.documentVersionId)
+                assertEquals(70, tail.text.length)
+                assertEquals(null, tail.nextOffset)
+                countReadBodies = false
+                assertTrue("101 small pages must not read the whole corpus", readBodies <= 205)
+
+                failPublication = true
+                val failed = repository.importBytes("rollback.txt", "text/plain", "failed publication keeps the previous generation".toByteArray(), false, kb)
+                assertEquals(ImportStage.FAILED, failed.stage)
+                assertEquals(generation, connection.query("SELECT active_generation_id FROM knowledge_bases WHERE id=?", listOf(kb)).single().string("active_generation_id"))
+                assertEquals(expectedIds, repository.retrieve("after-failed-publication", query, topK, listOf(kb)).hits.map { it.chunkId })
+
+                val beforeAdd = embeddingCalls
+                val (added, publicationMs) = timed { repository.importBytes("incremental.txt", "text/plain", "incremental axolotl publication".toByteArray(), false, kb) }
+                assertEquals("incremental publication error: ${added.error}", ImportStage.READY, added.stage)
+                assertEquals("only the new chunk may embed", beforeAdd + 1, embeddingCalls)
+                val newGeneration = connection.query("SELECT active_generation_id FROM knowledge_bases WHERE id=?", listOf(kb)).single().string("active_generation_id")
+                assertTrue(newGeneration != generation)
+                assertEquals(requested.toLong() + 1, connection.query("SELECT COUNT(*) AS n FROM generation_members WHERE generation_id=?", listOf(newGeneration)).single().long("n"))
+                val addedHits = repository.retrieve("added-publication", "axolotl", topK, listOf(kb))
+                assertTrue(addedHits.hits.any { it.documentId == added.documentId })
+                assertEquals(requested + 1, nativeIndexes.last().vectorCount)
+                val beforeRebuild = embeddingCalls
+                val (rebuilt, generationRebuildMs) = timed { repository.rebuildIndex(kb) }
+                assertTrue(rebuilt != newGeneration)
+                assertEquals("explicit rebuild must reuse every embedding", beforeRebuild, embeddingCalls)
+                assertEquals(requested.toLong() + 1, connection.query("SELECT COUNT(*) AS n FROM generation_members WHERE generation_id=?", listOf(rebuilt)).single().long("n"))
+                val final = repository.retrieve("rebuilt-publication", "axolotl", topK, listOf(kb))
+                assertTrue(final.hits.any { it.documentId == added.documentId })
+                assertEquals(requested + 1, nativeIndexes.last().vectorCount)
+                assertTrue((first.citations + addedHits.citations + final.citations).all { !repository.locateCitation(it).removed })
+                val memory = Debug.MemoryInfo().also { Debug.getMemoryInfo(it) }
+                val metrics = "{\"scenario\":\"warm-publication-rebuild\",\"membersBefore\":$requested,\"membersAfter\":${requested + 1},\"publicationMs\":$publicationMs,\"generationRebuildMs\":$generationRebuildMs,\"maxInputRows\":$maxInputRows,\"pagedBodyRows\":$readBodies,\"pageRequests\":101,\"finalPssKiB\":${memory.totalPss},\"failureRollbackVerified\":true,\"existingEmbeddingsRecomputed\":0}"
+                File(context.filesDir, "knowledge-review-lifecycle-metrics.jsonl").appendText(metrics + "\n")
+                Log.i(TAG, metrics)
+                return
+            }
 
             // 1) Close native indexes AND the SQLite handle, then reopen the same db/cacheDir.
             repository.closeVectorIndexes()

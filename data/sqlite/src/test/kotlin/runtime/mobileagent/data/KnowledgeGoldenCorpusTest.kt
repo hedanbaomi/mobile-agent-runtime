@@ -114,9 +114,11 @@ class KnowledgeGoldenCorpusTest {
                 }
                 val full = buildString {
                     var offset = 0
+                    var version: String? = null
                     do {
-                        val range = repo.readDocumentRange(job.documentId, 4000, offset)
+                        val range = repo.readDocumentRange(job.documentId, 4000, offset, expectedVersion = version)
                         append(range.text)
+                        version = range.documentVersionId
                         offset = range.nextOffset ?: break
                     } while (true)
                 }
@@ -308,9 +310,11 @@ class KnowledgeGoldenCorpusTest {
         assertEquals(expected.length, repo.readDocumentRange(job.documentId, 0).totalChars)
         val rebuilt = StringBuilder()
         var offset = 0
+        var version: String? = null
         while (true) {
-            val range = repo.readDocumentRange(job.documentId, 7, offset)
+            val range = repo.readDocumentRange(job.documentId, 7, offset, expectedVersion = version)
             rebuilt.append(range.text)
+            version = range.documentVersionId
             val next = range.nextOffset ?: break
             offset = next
         }
@@ -352,10 +356,10 @@ class KnowledgeGoldenCorpusTest {
                 buildJsonObject { put("citations", JsonArray(result.citations.map { JsonPrimitive(it.citationId) })) }.toString()
             },
             readDocument = { _, _ -> error("Pagination callback must be used") },
-            readDocumentRange = { id, max, offset ->
-                val range = repo.readDocumentRange(id, minOf(max, 5000), offset, setOf(kbId))
+            readDocumentRange = { id, max, offset, expectedVersion ->
+                val range = repo.readDocumentRange(id, minOf(max, 5000), offset, setOf(kbId), expectedVersion)
                 buildJsonObject {
-                    put("text", range.text); put("nextOffset", range.nextOffset?.let(::JsonPrimitive) ?: JsonNull)
+                    put("documentVersionId", range.documentVersionId); put("text", range.text); put("nextOffset", range.nextOffset?.let(::JsonPrimitive) ?: JsonNull)
                 }.toString()
             },
         ))
@@ -364,14 +368,17 @@ class KnowledgeGoldenCorpusTest {
         assertTrue(Json.parseToJsonElement((search as ToolResult.Value).json).jsonObject.getValue("citations").jsonArray.isNotEmpty())
         val actual = StringBuilder()
         var offset = 0
+        var version: String? = null
         do {
             val call = ToolCall("read-$offset", "read_document", buildJsonObject {
                 put("documentId", documentId); put("offset", offset); put("maxChars", 4000)
+                version?.let { put("expectedVersion", it) }
             }.toString())
             val result = broker.invoke(call)
             assertTrue(result is ToolResult.Value, result.toString())
             val value = Json.parseToJsonElement((result as ToolResult.Value).json).jsonObject
             actual.append(value.getValue("text").jsonPrimitive.content)
+            version = value.getValue("documentVersionId").jsonPrimitive.content
             val next = value.getValue("nextOffset").jsonPrimitive.intOrNull ?: break
             assertTrue(next > offset)
             offset = next

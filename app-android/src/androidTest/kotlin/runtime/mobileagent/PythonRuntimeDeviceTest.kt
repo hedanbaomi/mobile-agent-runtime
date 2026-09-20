@@ -23,6 +23,7 @@ import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.boolean
 import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.int
@@ -328,6 +329,21 @@ class PythonRuntimeDeviceTest {
     }
 
     @Test(timeout = 60_000)
+    fun sdkKnowledgeReadCarriesExpectedVersionAndRejectsUnpinnedContinuation() = runBlocking {
+        val fixture = skillZip(READ_SOURCE)
+        val ticket = ticket(fixture)
+        val broker = TicketGateBroker(ticket, echoArguments = true)
+        val result = withTimeout(20_000) { IsolatedPythonRuntime(context, broker).execute(request(fixture, ticket)) }
+        val value = succeeded(result)
+        assertEquals("doc-a", value.getValue("documentId").jsonPrimitive.content)
+        assertEquals(0, value.getValue("offset").jsonPrimitive.int)
+        assertEquals("ver-1", value.getValue("expectedVersion").jsonPrimitive.content)
+        assertTrue("A continuation without expected_version must be rejected", value.getValue("unpinnedRejected").jsonPrimitive.boolean)
+        assertEquals(1, broker.requests.count { it.capability == "knowledge.read" })
+        awaitProcessGone(checkNotNull(result.isolatedPid))
+    }
+
+    @Test(timeout = 60_000)
     fun rawDescriptorsCannotInjectBrokerRequestsOrForgeSuccessfulResults() = runBlocking {
         val fixture = skillZip(RAW_FD_SOURCE)
         // Probe each wire type in a fresh worker; the first private-channel injection ends a worker.
@@ -575,6 +591,7 @@ class PythonRuntimeDeviceTest {
         private val expected: InvocationTicket,
         private val revokeAfterFirst: Boolean = false,
         private val valueJson: String = "{\"granted\":true}",
+        private val echoArguments: Boolean = false,
     ) : PythonCapabilityBroker {
         val authorizationChecks = AtomicInteger()
         val requests = ConcurrentLinkedQueue<PythonIpcProtocol.BrokerRequest>()
@@ -593,7 +610,7 @@ class PythonRuntimeDeviceTest {
             requests.add(request)
             if (request.capability == "test.ready") ready.complete(request)
             if (revokeAfterFirst) enabled.set(false)
-            return PythonIpcProtocol.BrokerResponse(request.requestId, "OK", valueJson)
+            return PythonIpcProtocol.BrokerResponse(request.requestId, "OK", if (echoArguments) request.argumentsJson else valueJson)
         }
     }
 
@@ -658,6 +675,19 @@ class PythonRuntimeDeviceTest {
             def run(value):
                 mobileagent_sdk._request('test.ready', {'pid': os.getpid()})
                 os._exit(91)
+        """.trimIndent()
+
+        val READ_SOURCE = """
+            import mobileagent_sdk
+            def run(value):
+                page = mobileagent_sdk.knowledge_read('doc-a', 100, 0, 'ver-1')
+                unpinned_rejected = False
+                try:
+                    mobileagent_sdk.knowledge_read('doc-a', 100, 5)
+                except ValueError:
+                    unpinned_rejected = True
+                return {'documentId': page.get('documentId'), 'offset': page.get('offset'),
+                        'expectedVersion': page.get('expectedVersion'), 'unpinnedRejected': unpinned_rejected}
         """.trimIndent()
 
         val RESTRICTED_SOURCE = """

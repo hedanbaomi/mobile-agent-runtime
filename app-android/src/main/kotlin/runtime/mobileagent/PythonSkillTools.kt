@@ -869,17 +869,21 @@ private class PythonSkillToolExecutor(
     /**
      * A FAILED worker result is an execution outcome, never a malformed request:
      * the isolated interpreter already ran and may have completed broker calls.
-     * Only genuinely oversized request input stays INVALID; every other code is
-     * projected as a typed failure with a fixed safe message (the worker's raw
-     * error text must not cross into UI/model surfaces).  Broker denials arrive
-     * with the host's own code on the raised PermissionError, so RESOURCE_LIMIT
-     * stays RESOURCE_LIMIT instead of collapsing into python_error.
+     * INVALID is reserved for input rejected before dispatch was accepted; once
+     * the worker acknowledged dispatch, no error code may claim nothing ran.
+     * Every other code is projected as a typed failure with a fixed safe
+     * message (the worker's raw error text must not cross into UI/model
+     * surfaces).  Broker denials arrive with the host-recorded code bound to
+     * the raised PermissionError, so RESOURCE_LIMIT stays RESOURCE_LIMIT
+     * instead of collapsing into python_error.
      */
-    private fun pythonFailureResult(result: PythonExecutionResult): ToolResult = when (result.errorCode) {
-        "input_limit" -> ToolResult.Invalid("Python input exceeds the isolated runtime limit")
-        else -> ToolResult.Failure(ToolError(
+    private fun pythonFailureResult(result: PythonExecutionResult): ToolResult {
+        if (result.errorCode == "input_limit" && !result.dispatchAccepted) {
+            return ToolResult.Invalid("Python input exceeds the isolated runtime limit")
+        }
+        return ToolResult.Failure(ToolError(
             code = when (result.errorCode) {
-                "broker_limit", "RESOURCE_LIMIT" -> ToolErrorCode.RESOURCE_LIMIT
+                "broker_limit", "RESOURCE_LIMIT", "input_limit" -> ToolErrorCode.RESOURCE_LIMIT
                 "permission_denied", "denied", "PERMISSION_DENIED", "REPLAY_DENIED" ->
                     ToolErrorCode.PERMISSION_DENIED
                 "UNKNOWN_OUTCOME" -> ToolErrorCode.UNKNOWN_OUTCOME

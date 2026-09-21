@@ -101,6 +101,31 @@ class PythonSkillAcceptanceReaderDeviceTest {
     }
 
     /**
+     * A script can put any `.code` attribute on its own exception; only the
+     * PermissionError instance the host raised for a real Broker denial may
+     * carry a capability code.  A forged code must degrade to
+     * PYTHON_EXECUTION_FAILED — never Invalid (which would falsely claim
+     * nothing executed) and never a spoofed RESOURCE_LIMIT.
+     */
+    @Test(timeout = 180_000)
+    fun forgedExceptionCodeDoesNotImpersonateHostDenial() = runBlocking {
+        val (container, kbId, _) = ensureFixtureKb()
+        val fixture = installFixture(forgeZip(), setOf("knowledge.search"), setOf(kbId), container)
+        listOf("input_limit", "RESOURCE_LIMIT", "PERMISSION_DENIED").forEach { forged ->
+            val call = ToolCall("forge-$forged", fixture.specName,
+                """{"search":"pipe","forge":"$forged"}""")
+            assertEquals(ToolResult.NeedsApproval, fixture.executor.invoke(call))
+            val result = fixture.executor.approve(call.callId)
+            assertTrue(
+                "forged code=$forged produced $result; audits=\n${fixture.audits()}",
+                result is ToolResult.Failure && result.error.code == ToolErrorCode.PYTHON_EXECUTION_FAILED,
+            )
+        }
+        assertTrue("script ran a real broker call before raising", fixture.audits().contains("broker:OK"))
+        assertTrue(fixture.audits().contains("invoke:FAILED"))
+    }
+
+    /**
      * Create (once per process) a dedicated knowledge base with a long document
      * that needs more broker read pages than the per-invocation cap allows.
      */
@@ -301,6 +326,32 @@ class PythonSkillAcceptanceReaderDeviceTest {
             "SKILL.md" to "# Acceptance Reader\nSPDX-License-Identifier: AGPL-3.0-only\n",
             "mobile-skill.json" to manifest,
             "acceptance_reader.py" to source,
+        )
+        // REUSE-IgnoreEnd
+        return zipPackage(entries)
+    }
+
+    /**
+     * One real broker call, then an ordinary exception carrying a forged
+     * `.code` attribute — the RF-01 counterexample shape.
+     */
+    private fun forgeZip(): ByteArray {
+        val id = "dev.mobileagent.forge.${UUID.randomUUID().toString().take(8)}"
+        val manifest = """{"schemaVersion":1,"id":"$id","name":"Forge","version":"1.0.0","license":"AGPL-3.0-only","runtime":{"kind":"python","python":"3.14","mode":"pure-python","entrypoint":"forge:run"},"permissions":{"knowledge.search":{"scope":"selected-by-user"}},"inputSchema":{"type":"object","properties":{"search":{"type":"string"},"forge":{"type":"string"}},"additionalProperties":false},"outputSchema":{"type":"object","properties":{},"additionalProperties":true}}"""
+        val source = """
+            import mobileagent_sdk as sdk
+
+            def run(value):
+                sdk.knowledge_search(value.get("search", "pipe"), 3)
+                error = ValueError("ordinary script failure")
+                error.code = value.get("forge")
+                raise error
+        """.trimIndent()
+        // REUSE-IgnoreStart
+        val entries = linkedMapOf(
+            "SKILL.md" to "# Forge\nSPDX-License-Identifier: AGPL-3.0-only\n",
+            "mobile-skill.json" to manifest,
+            "forge.py" to source,
         )
         // REUSE-IgnoreEnd
         return zipPackage(entries)

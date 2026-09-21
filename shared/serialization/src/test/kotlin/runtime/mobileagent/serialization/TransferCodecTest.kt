@@ -231,12 +231,14 @@ class TransferCodecTest {
 
     @Test
     fun provenanceEmbeddingSpaceIdIsAcceptedWithoutBroadeningOtherIds() {
-        // The shipped wp-v2 local space id carries multiple provenance hashes
-        // and is 290 chars — longer than the generic 256-char id bound.
+        // The shipped wp-v2 local space id (ModelPackLoader.DEFAULT_SPACE_ID)
+        // carries multiple provenance hashes and is 281 chars — longer than
+        // the generic 256-char id bound.  The literal must stay identical to
+        // the shipped constant.
         val space = "onnx:distiluse-base-multilingual-cased-v2@cad454171d918d9873a2701ba245054b6c1760dd" +
             ":int8:d512:cosine:wp-v2:mean-dense-tanh:sentence126-bounded-mean-v3" +
             ":tbf1b59b7b11c95f194f51708d918eea378e09d05f84c0e1656dc5180e8117088" +
-            ":e8117088:p0a21b1ce908e772ebf09f93c20ca09524c32706e9918d9c0169a3f0663b191ed"
+            ":p0a21b1ce908e772ebf09f93c20ca09524c32706e9918d9c0169a3f0663b191ed"
         val bundle = TransferBundle(
             schemaVersion = SchemaVersion.CURRENT,
             exportedAt = "now",
@@ -252,8 +254,12 @@ class TransferCodecTest {
             knowledgeBases = listOf(KnowledgeTransfer(id = "k".repeat(300), name = "Onnx", embeddingSpaceId = space)),
         )
         assertThrows(AppException::class.java) { TransferCodec.validate(longKbId) }
+        val atLimit = bundle.copy(
+            knowledgeBases = listOf(KnowledgeTransfer(id = "kb.onnx", name = "Onnx", embeddingSpaceId = "o" + "a".repeat(1022))),
+        )
+        assertDoesNotThrow { TransferCodec.validate(atLimit) }
         val overLimit = bundle.copy(
-            knowledgeBases = listOf(KnowledgeTransfer(id = "kb.onnx", name = "Onnx", embeddingSpaceId = "onnx:" + "a".repeat(1024))),
+            knowledgeBases = listOf(KnowledgeTransfer(id = "kb.onnx", name = "Onnx", embeddingSpaceId = "o" + "a".repeat(1023))),
         )
         assertThrows(AppException::class.java) { TransferCodec.validate(overLimit) }
     }

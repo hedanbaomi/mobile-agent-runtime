@@ -822,9 +822,12 @@ class OpenAiResponsesAdapter(
                         runCatching { content.jsonArray }.getOrNull()?.forEach { part ->
                             val partObject = runCatching { part.jsonObject }.getOrNull() ?: return@forEach
                             when (partObject["type"]?.jsonPrimitive?.contentOrNull) {
-                                "output_text" -> partObject["text"]?.jsonPrimitive?.contentOrNull?.let {
-                                    events += ModelEvent.TextDelta(SecretRedactor.redact(it, secrets))
-                                }
+                                // An empty output_text part is not visible
+                                // answer content; only non-empty text counts.
+                                "output_text" -> partObject["text"]?.jsonPrimitive?.contentOrNull
+                                    ?.takeIf { it.isNotEmpty() }?.let {
+                                        events += ModelEvent.TextDelta(SecretRedactor.redact(it, secrets))
+                                    }
                                 // A refusal is readable assistant output, not a
                                 // transport failure and not reasoning.
                                 "refusal" -> (
@@ -835,7 +838,23 @@ class OpenAiResponsesAdapter(
                             }
                         }
                     }
-                    "reasoning" -> events += OpenAiResponsesSse.captureContinuation(item, emittedContinuations)
+                    "reasoning" -> {
+                        events += OpenAiResponsesSse.captureContinuation(item, emittedContinuations)
+                        // Non-empty reasoning summary/content text is reasoning
+                        // evidence for terminal classification, separate from a
+                        // replayable encrypted continuation.  It is surfaced on
+                        // the reasoning channel only — never the answer.
+                        listOf("summary", "content").forEach { key ->
+                            runCatching { item[key]?.jsonArray }.getOrNull()?.forEach { part ->
+                                val text = runCatching {
+                                    part.jsonObject["text"]?.jsonPrimitive?.contentOrNull
+                                }.getOrNull()?.takeIf { it.isNotEmpty() }
+                                if (text != null) {
+                                    events += ModelEvent.ReasoningDelta(SecretRedactor.redact(text, secrets))
+                                }
+                            }
+                        }
+                    }
                     "function_call" -> {
                         val callId = item["call_id"]?.jsonPrimitive?.contentOrNull.orEmpty()
                         val name = item["name"]?.jsonPrimitive?.contentOrNull.orEmpty()
@@ -868,7 +887,12 @@ class OpenAiResponsesAdapter(
             }
         }
         val status = root["status"]?.jsonPrimitive?.contentOrNull
-        val hasText = events.any { it is ModelEvent.TextDelta || it is ModelEvent.RefusalDelta }
+        // "Visible" means at least one non-empty answer/refusal delta — the same
+        // content-based rule the SSE terminal uses, not merely event presence.
+        val hasText = events.any {
+            (it as? ModelEvent.TextDelta)?.text?.isNotEmpty() == true ||
+                (it as? ModelEvent.RefusalDelta)?.text?.isNotEmpty() == true
+        }
         val reportedUsage = events.filterIsInstance<ModelEvent.Usage>().lastOrNull()
         if (status == null || status == "completed") {
             // A completed reasoning-only response (no text, refusal or tool
@@ -876,6 +900,7 @@ class OpenAiResponsesAdapter(
             // the answer channel.
             val hasVisible = hasText || events.any { it is ModelEvent.ToolCallDelta }
             val hasReasoning = emittedContinuations.isNotEmpty() ||
+                events.any { it is ModelEvent.ReasoningDelta } ||
                 (reportedUsage?.reasoningTokens ?: 0) > 0
             if (!hasVisible) {
                 events += ModelEvent.Failed(

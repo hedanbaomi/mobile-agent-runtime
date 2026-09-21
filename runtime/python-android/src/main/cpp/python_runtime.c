@@ -54,6 +54,17 @@ typedef struct {
     volatile sig_atomic_t cancelled;
     int broker_calls;
     int request_sequence;
+    /* Host-recorded Broker denial code, written by python_request itself when
+     * a denial response arrives.  It is only reported when the uncaught
+     * exception is the exact PermissionError instance this runtime raised for
+     * that denial; script-controlled attributes are never a code source. */
+    char capability_error[MAX_ERROR_BYTES + 1];
+    /* Strong reference to the PermissionError instance raised for the most
+     * recent Broker denial.  Object identity is the source-of-truth check:
+     * re-raising that same instance keeps its host code, while any other
+     * exception (including a forged one carrying a writable .code attribute)
+     * falls back to python_error. */
+    PyObject *denial_exception;
     _Atomic(size_t) log_bytes;
     _Atomic int log_limit_exceeded;
     /* Strong reference acquired from the already loaded built-in _io module.
@@ -103,6 +114,17 @@ static void set_stage_diagnostic(char *destination, size_t capacity, const char 
     (void)snprintf(destination, capacity, "stage=%s", stage != NULL ? stage : "unknown");
 }
 
+/* Copy a host-produced error token into a fixed buffer, falling back when the
+ * value is empty, oversized or outside the diagnostic token alphabet. */
+static void copy_host_token(char *destination, size_t capacity, const char *source, const char *fallback) {
+    size_t length = source != NULL ? strlen(source) : 0;
+    int ok = length > 0 && length < capacity;
+    for (size_t index = 0; ok && index < length; index++) {
+        if (!diagnostic_token_char((unsigned char)source[index], 0)) ok = 0;
+    }
+    (void)snprintf(destination, capacity, "%s", ok ? source : fallback);
+}
+
 /* Keep diagnostics useful for local verification without returning Python
  * messages, tracebacks, arguments, paths, tickets or nonce material. */
 static void capture_python_diagnostic(char *destination, size_t capacity, const char *stage) {
@@ -130,6 +152,17 @@ static void capture_python_diagnostic(char *destination, size_t capacity, const 
         if (written >= 0 && (size_t)written < capacity && missing_module[0] != '\0') {
             (void)snprintf(destination + written, capacity - (size_t)written,
                 " missing=%s", missing_module);
+        }
+    }
+    /* Only the host-raised Broker denial may carry a capability errorCode.
+     * The uncaught exception must be the identical object python_request
+     * created for the denial; any other exception — including a script-made
+     * one with a forged .code attribute — reverts to python_error. */
+    if (exception_value != NULL) {
+        RuntimeState *state = current_state();
+        if (state != NULL && state->capability_error[0] != '\0' &&
+            exception_value != state->denial_exception) {
+            state->capability_error[0] = '\0';
         }
     }
     Py_XDECREF(exception_type);
@@ -773,7 +806,35 @@ static PyObject *python_request(PyObject *module, PyObject *arguments) {
         if (strcmp(error_code, "cancelled") == 0) {
             PyErr_SetString(PyExc_KeyboardInterrupt, "Invocation cancelled");
         } else {
-            PyErr_Format(PyExc_PermissionError, "%s", error_message[0] ? error_message : "Capability denied");
+            /* Record the host's denial code and the exact exception object
+             * raised for it.  The result boundary only trusts this code when
+             * the uncaught exception is this same instance, so a script can
+             * neither inject an arbitrary code nor mask a real denial with a
+             * fabricated attribute.  The .code attribute stays on the raised
+             * exception as a convenience for skill-side error handling. */
+            PyObject *args = Py_BuildValue("(s)", error_message[0] ? error_message : "Capability denied");
+            PyObject *exception = args == NULL ? NULL : PyObject_Call(PyExc_PermissionError, args, NULL);
+            Py_XDECREF(args);
+            if (exception != NULL) {
+                PyObject *code = PyUnicode_FromString(error_code);
+                if (code != NULL) {
+                    (void)PyObject_SetAttrString(exception, "code", code);
+                    Py_DECREF(code);
+                }
+                RuntimeState *state = current_state();
+                if (state != NULL) {
+                    copy_host_token(state->capability_error, sizeof(state->capability_error),
+                        error_code, "denied");
+                    Py_INCREF(exception);
+                    Py_XDECREF(state->denial_exception);
+                    state->denial_exception = exception;
+                }
+                PyErr_SetObject(PyExc_PermissionError, exception);
+                Py_DECREF(exception);
+            } else {
+                PyErr_Clear();
+                PyErr_SetString(PyExc_PermissionError, error_message[0] ? error_message : "Capability denied");
+            }
         }
         return NULL;
     }
@@ -1668,6 +1729,7 @@ Java_runtime_mobileagent_python_PythonNative_nativeRun(
     }
     if (Py_IsInitialized()) {
         clear_code_bytes_io_type(state);
+        Py_CLEAR(state->denial_exception);
         (void)Py_FinalizeEx();
     }
     if (cancelled()) {
@@ -1677,7 +1739,11 @@ Java_runtime_mobileagent_python_PythonNative_nativeRun(
     } else if (result_code == RESULT_OUTPUT_LIMIT) {
         set_result_fd(state, "FAILED", "output_limit", "Python output limit exceeded", NULL, 0);
     } else if (result_code != 0) {
-        set_result_fd(state, "FAILED", "python_error", diagnostic[0] != '\0' ? diagnostic : "stage=unknown", NULL, 0);
+        /* A Broker denial carries its structured code (RESOURCE_LIMIT etc.);
+         * only a script failure without one is a plain python_error. */
+        set_result_fd(state, "FAILED",
+            state->capability_error[0] != '\0' ? state->capability_error : "python_error",
+            diagnostic[0] != '\0' ? diagnostic : "stage=unknown", NULL, 0);
     } else {
         set_result_fd(state, "SUCCEEDED", NULL, NULL, output, output_length);
     }

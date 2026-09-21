@@ -726,8 +726,15 @@ object TransferCodec {
         .digest(bytes).joinToString("") { "%02x".format(it.toInt() and 0xFF) }
 
     private val SAFE_ID = Regex("[A-Za-z0-9][A-Za-z0-9._:-]{0,255}")
-    /** Canonical ONNX spaces use `onnx:name@sha256:dN:metric`; other ids stay on [SAFE_ID]. */
-    private val EMBEDDING_SPACE_ID = Regex("[A-Za-z0-9][A-Za-z0-9._:@-]{0,255}")
+    /**
+     * Canonical ONNX spaces use `onnx:name@sha256:dN:metric` plus provenance
+     * segments; the current wp-v2 identifier is 281 chars.  Keep the same
+     * restricted alphabet as [SAFE_ID] plus `@`, with headroom for future
+     * provenance segments.  Other ids stay on [SAFE_ID].
+     * Total length bound is 1023 chars: one leading alphanumeric plus up to
+     * 1022 continuation characters.
+     */
+    private val EMBEDDING_SPACE_ID = Regex("[A-Za-z0-9][A-Za-z0-9._:@-]{0,1022}")
     private val SHA256 = Regex("[0-9a-f]{64}")
     private val SECRET_KEY = Regex("(?i).*(secret|api[_-]?key|authorization|cookie|password|private[_-]?key).*" )
     private val PUBLIC_HEADER_NAME = Regex("[A-Za-z0-9][A-Za-z0-9._-]{0,127}")

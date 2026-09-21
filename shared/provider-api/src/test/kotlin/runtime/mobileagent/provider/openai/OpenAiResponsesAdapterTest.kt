@@ -108,6 +108,10 @@ class OpenAiResponsesSseTest {
     @Test
     fun emitsCompletionUsageAndSanitizedFailure() {
         val state = OpenAiResponsesSse.State()
+        OpenAiResponsesSse.eventsFromLine(
+            "data: {\"type\":\"response.output_text.delta\",\"delta\":\"answer\"}",
+            state,
+        )
         val completed = OpenAiResponsesSse.eventsFromLine(
             "data: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":3,\"output_tokens\":2}}}",
             state,
@@ -126,6 +130,30 @@ class OpenAiResponsesSseTest {
             OpenAiResponsesSse.State(),
         )
         assertEquals(listOf(ModelEvent.Failed("nested failure")), nestedFailed)
+    }
+
+    @Test
+    fun streamingReasoningOnlyCompletedIsReasoningOnly() {
+        val state = OpenAiResponsesSse.State()
+        OpenAiResponsesSse.eventsFromLine(
+            "data: {\"type\":\"response.reasoning_text.delta\",\"delta\":\"thinking\"}",
+            state,
+        )
+        val completed = OpenAiResponsesSse.eventsFromLine(
+            "data: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":9,\"output_tokens\":40,\"output_tokens_details\":{\"reasoning_tokens\":40}}}}",
+            state,
+        )
+        assertEquals(ModelEvent.Failed(ErrorCode.REASONING_ONLY.name), completed.last())
+        assertTrue(completed.none { it == ModelEvent.Completed })
+    }
+
+    @Test
+    fun streamingEmptyCompletedIsInvalidResponse() {
+        val completed = OpenAiResponsesSse.eventsFromLine(
+            "data: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":3,\"output_tokens\":0}}}",
+            OpenAiResponsesSse.State(),
+        )
+        assertEquals(ModelEvent.Failed(ProviderConnectionErrorCode.INVALID_RESPONSE.name), completed.last())
     }
 
     @Test
@@ -565,6 +593,43 @@ class OpenAiResponsesAdapterTest {
     }
 
     @Test
+    fun nonStreamingReasoningOnlyCompletedIsReasoningOnly() = runTest {
+        val engine = MockEngine {
+            respond(
+                "{\"status\":\"completed\",\"output\":[" +
+                    "{\"type\":\"reasoning\",\"id\":\"rs_4\",\"encrypted_content\":\"enc-4\"}]," +
+                    "\"usage\":{\"input_tokens\":9,\"output_tokens\":40,\"output_tokens_details\":{\"reasoning_tokens\":40}}}",
+                HttpStatusCode.OK,
+                headersOf(HttpHeaders.ContentType, ContentType.Application.Json.toString()),
+            )
+        }
+        val events = OpenAiResponsesAdapter(HttpClient(engine), "https://example.invalid/v1").stream(
+            ModelRequest("gpt-responses", listOf(ChatMessage("user", "hi")), stream = false),
+            "token".toCharArray(),
+        ).toList()
+        assertTrue(events.filterIsInstance<ModelEvent.ProviderContinuation>().isNotEmpty())
+        assertTrue(events.none { it is ModelEvent.TextDelta })
+        assertEquals(ModelEvent.Failed(ErrorCode.REASONING_ONLY.name), events.last())
+        assertTrue(events.none { it == ModelEvent.Completed })
+    }
+
+    @Test
+    fun nonStreamingEmptyCompletedIsInvalidResponse() = runTest {
+        val engine = MockEngine {
+            respond(
+                "{\"status\":\"completed\",\"output\":[]}",
+                HttpStatusCode.OK,
+                headersOf(HttpHeaders.ContentType, ContentType.Application.Json.toString()),
+            )
+        }
+        val events = OpenAiResponsesAdapter(HttpClient(engine), "https://example.invalid/v1").stream(
+            ModelRequest("gpt-responses", listOf(ChatMessage(role = "user", text = "hi")), stream = false),
+            "token".toCharArray(),
+        ).toList()
+        assertEquals(ModelEvent.Failed(ProviderConnectionErrorCode.INVALID_RESPONSE.name), events.last())
+    }
+
+    @Test
     fun testConnectionAcceptsCompletedRefusalAsProtocolSuccess() = runBlocking {
         val engine = MockEngine {
             respond(
@@ -666,5 +731,55 @@ class OpenAiResponsesAdapterTest {
             ).toList().single() as ModelEvent.Failed
             assertEquals(ProviderConnectionErrorCode.PROVIDER_REJECTED.name, failure.sanitizedMessage)
         }
+    }
+
+    private fun jsonEvents(body: String): List<ModelEvent> = runBlocking {
+        val engine = MockEngine {
+            respond(body, HttpStatusCode.OK, headersOf(HttpHeaders.ContentType, ContentType.Application.Json.toString()))
+        }
+        OpenAiResponsesAdapter(HttpClient(engine), "https://example.invalid/v1").stream(
+            ModelRequest("gpt-responses", listOf(ChatMessage("user", "hi")), stream = false),
+            "token".toCharArray(),
+        ).toList()
+    }
+
+    @Test
+    fun emptyOutputTextIsNotVisibleContent() {
+        val events = jsonEvents(
+            "{\"status\":\"completed\",\"output\":[{\"type\":\"message\",\"content\":[{\"type\":\"output_text\",\"text\":\"\"}]}]}",
+        )
+        assertEquals(ModelEvent.Failed(ProviderConnectionErrorCode.INVALID_RESPONSE.name), events.last())
+        assertTrue(events.none { it == ModelEvent.Completed })
+    }
+
+    @Test
+    fun emptyOutputTextWithReasoningUsageIsReasoningOnly() {
+        val events = jsonEvents(
+            "{\"status\":\"completed\",\"output\":[{\"type\":\"message\",\"content\":[{\"type\":\"output_text\",\"text\":\"\"}]}]," +
+                "\"usage\":{\"input_tokens\":9,\"output_tokens\":40,\"output_tokens_details\":{\"reasoning_tokens\":40}}}",
+        )
+        assertEquals(ModelEvent.Failed(ErrorCode.REASONING_ONLY.name), events.last())
+        assertTrue(events.none { it == ModelEvent.Completed })
+    }
+
+    @Test
+    fun reasoningSummaryWithoutEncryptedContentIsReasoningOnly() {
+        val events = jsonEvents(
+            "{\"status\":\"completed\",\"output\":[{\"type\":\"reasoning\",\"id\":\"rs_test\"," +
+                "\"summary\":[{\"type\":\"summary_text\",\"text\":\"checking the inputs\"}]}]}",
+        )
+        assertTrue(events.contains(ModelEvent.ReasoningDelta("checking the inputs")))
+        assertEquals(ModelEvent.Failed(ErrorCode.REASONING_ONLY.name), events.last())
+        assertTrue(events.none { it == ModelEvent.Completed })
+    }
+
+    @Test
+    fun reasoningContentPartsCountAsReasoningEvidence() {
+        val events = jsonEvents(
+            "{\"status\":\"completed\",\"output\":[{\"type\":\"reasoning\",\"id\":\"rs_c\"," +
+                "\"content\":[{\"type\":\"reasoning_text\",\"text\":\"raw reasoning\"}]}]}",
+        )
+        assertTrue(events.contains(ModelEvent.ReasoningDelta("raw reasoning")))
+        assertEquals(ModelEvent.Failed(ErrorCode.REASONING_ONLY.name), events.last())
     }
 }

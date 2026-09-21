@@ -568,9 +568,21 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
                 }
                 exportStatus.value = "ZIP 已保存。跨设备导入后需重新配置凭据与权限；历史会话保留但不自动继续执行。"
                 error.value = null
+            } catch (cancelled: CancellationException) {
+                // A cancelled export must not leave a zero-byte or truncated ZIP
+                // behind either; the SAF document was created before streaming ran.
+                runCatching {
+                    android.provider.DocumentsContract.deleteDocument(app.contentResolver, uri)
+                }
+                throw cancelled
             } catch (failure: Exception) {
+                // The SAF document was created before validation/streaming ran.  A failed
+                // export must not leave a zero-byte or truncated ZIP behind.
+                runCatching {
+                    android.provider.DocumentsContract.deleteDocument(app.contentResolver, uri)
+                }
                 exportStatus.value = "导出失败。"
-                error.value = "导出未完成，所选文件可能不完整：" + SecretRedactor.redact(failure.message ?: "写入失败。")
+                error.value = "导出未完成：" + SecretRedactor.redact(failure.message ?: "写入失败。")
             } finally { transferRunning = false }
         }
     }

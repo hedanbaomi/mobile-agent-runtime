@@ -640,6 +640,7 @@ class OpenAiCompatibleAdapter(
             is ModelEvent.ReasoningDelta -> {
                 val safe = redactor.accept(event.text, StreamingSecretRedactor.Channel.REASONING)
                 if (safe.isNotEmpty()) {
+                    state.hasReasoningOutput = true
                     val safeEvent = ModelEvent.ReasoningDelta(safe)
                     emit(safeEvent)
                     state.diagnosticEvents += safeEvent
@@ -698,7 +699,8 @@ class OpenAiCompatibleAdapter(
                         StreamingSecretRedactor.Channel.REFUSAL -> ModelEvent.RefusalDelta(safeTail)
                         else -> ModelEvent.TextDelta(safeTail)
                     }
-                    if (safeEvent !is ModelEvent.ReasoningDelta) state.hasVisibleOutput = true
+                    if (safeEvent is ModelEvent.ReasoningDelta) state.hasReasoningOutput = true
+                    else state.hasVisibleOutput = true
                     emit(safeEvent)
                     state.diagnosticEvents += safeEvent
                 }
@@ -707,8 +709,9 @@ class OpenAiCompatibleAdapter(
                     emitTerminalFailure(state, failure)
                     ModelEvent.Failed(failure)
                 } else if (!state.hasVisibleOutput) {
-                    emitTerminalFailure(state, INVALID_RESPONSE_MESSAGE)
-                    ModelEvent.Failed(INVALID_RESPONSE_MESSAGE)
+                    val failure = reasoningOnlyTerminal(state)
+                    emitTerminalFailure(state, failure)
+                    ModelEvent.Failed(failure)
                 } else {
                     emitUsage(state)
                     state.terminal = true
@@ -1532,6 +1535,7 @@ class OpenAiCompatibleAdapter(
         var latestUsage: ModelEvent.Usage? = null
         var lastUsage: ModelEvent.Usage? = null
         var hasVisibleOutput: Boolean = false
+        var hasReasoningOutput: Boolean = false
         var deferredFailure: String? = null
         var terminalError: String? = null
         var finishReason: String? = null
@@ -1621,6 +1625,7 @@ class OpenAiCompatibleAdapter(
             }
         val message = choice["message"]?.jsonObject
         messageReasoningText(message)?.let {
+            state.hasReasoningOutput = true
             emit(ModelEvent.ReasoningDelta(SecretRedactor.redact(it, redactionSecrets)))
         }
         val toolEvents = mutableListOf<ModelEvent.ToolCallDelta>()
@@ -1677,7 +1682,7 @@ class OpenAiCompatibleAdapter(
             emit(it)
         }
         if (!state.hasVisibleOutput) {
-            emitTerminalFailure(state, INVALID_RESPONSE_MESSAGE)
+            emitTerminalFailure(state, reasoningOnlyTerminal(state))
             return
         }
         emitUsage(state)
@@ -1708,6 +1713,20 @@ class OpenAiCompatibleAdapter(
             LengthStopKind.OUTPUT_TRUNCATED -> ErrorCode.OUTPUT_TRUNCATED.name
             LengthStopKind.REASONING_EXHAUSTED -> ErrorCode.REASONING_EXHAUSTED.name
             LengthStopKind.EMPTY_RESPONSE -> INVALID_RESPONSE_MESSAGE
+        }
+
+    /**
+     * A normal-stop terminal with no visible output but observed reasoning is a
+     * reasoning-only answer (REASONING_ONLY), not an unrecognizable response and
+     * not necessarily an exhausted budget — the provider may simply have placed
+     * the whole reply in the reasoning channel.  Only output that never produced
+     * reasoning keeps INVALID_RESPONSE.
+     */
+    private fun reasoningOnlyTerminal(state: StreamOutputState): String =
+        if (state.hasReasoningOutput || (state.latestUsage?.reasoningTokens ?: 0) > 0) {
+            ErrorCode.REASONING_ONLY.name
+        } else {
+            INVALID_RESPONSE_MESSAGE
         }
 
     private fun messageContentText(message: JsonObject?): List<String> {

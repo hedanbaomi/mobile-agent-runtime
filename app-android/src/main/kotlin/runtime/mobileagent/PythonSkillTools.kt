@@ -38,6 +38,7 @@ import runtime.mobileagent.provider.openai.OpenAiAdapterFactory
 import runtime.mobileagent.python.IsolatedPythonRuntime
 import runtime.mobileagent.python.PythonCapabilityBroker
 import runtime.mobileagent.python.PythonExecutionRequest
+import runtime.mobileagent.python.PythonExecutionResult
 import runtime.mobileagent.python.PythonPackageSource
 import runtime.mobileagent.skills.*
 import runtime.mobileagent.skills.tooling.AuthorizationCheckpoint
@@ -45,6 +46,8 @@ import runtime.mobileagent.skills.tooling.AuthorizationDecision
 import runtime.mobileagent.skills.tooling.AuthorizationEvaluator
 import runtime.mobileagent.skills.tooling.OwnerView
 import runtime.mobileagent.skills.tooling.PolicyView
+import runtime.mobileagent.skills.tooling.ToolError
+import runtime.mobileagent.skills.tooling.ToolErrorCode
 import runtime.mobileagent.skills.tooling.toGrantView
 import java.io.File
 import java.net.InetAddress
@@ -334,7 +337,7 @@ private class PythonSkillToolExecutor(
                     when (result.status) {
                         PythonIpcProtocol.RESULT_CANCELLED -> ToolResult.Denied("Python invocation cancelled before dispatch")
                         PythonIpcProtocol.RESULT_TIMED_OUT -> ToolResult.Denied("Python invocation timed out before dispatch")
-                        else -> ToolResult.Invalid("Python execution failed; this call cannot be replayed")
+                        else -> pythonFailureResult(result)
                     }
                 }
             } catch (cancelled: CancellationException) {
@@ -344,7 +347,7 @@ private class PythonSkillToolExecutor(
                     markUnknown(bound, "PYTHON_EXECUTION_UNCERTAIN")
                 } else {
                     audit(bound, "invoke", "FAILED", "FAILED_BEFORE_DISPATCH")
-                    ToolResult.Invalid("Python preparation failed before dispatch; this call cannot be replayed")
+                    ToolResult.Failure(ToolError(ToolErrorCode.INTERNAL_ERROR))
                 }
             } finally {
                 bound.active = false
@@ -861,6 +864,33 @@ private class PythonSkillToolExecutor(
             return PythonIpcProtocol.BrokerResponse(request.requestId, "DENIED", errorCode = code,
                 errorMessage = "Capability unavailable under this invocation's authorization and budget")
         }
+    }
+
+    /**
+     * A FAILED worker result is an execution outcome, never a malformed request:
+     * the isolated interpreter already ran and may have completed broker calls.
+     * INVALID is reserved for input rejected before dispatch was accepted; once
+     * the worker acknowledged dispatch, no error code may claim nothing ran.
+     * Every other code is projected as a typed failure with a fixed safe
+     * message (the worker's raw error text must not cross into UI/model
+     * surfaces).  Broker denials arrive with the host-recorded code bound to
+     * the raised PermissionError, so RESOURCE_LIMIT stays RESOURCE_LIMIT
+     * instead of collapsing into python_error.
+     */
+    private fun pythonFailureResult(result: PythonExecutionResult): ToolResult {
+        if (result.errorCode == "input_limit" && !result.dispatchAccepted) {
+            return ToolResult.Invalid("Python input exceeds the isolated runtime limit")
+        }
+        return ToolResult.Failure(ToolError(
+            code = when (result.errorCode) {
+                "broker_limit", "RESOURCE_LIMIT", "input_limit" -> ToolErrorCode.RESOURCE_LIMIT
+                "permission_denied", "denied", "PERMISSION_DENIED", "REPLAY_DENIED" ->
+                    ToolErrorCode.PERMISSION_DENIED
+                "UNKNOWN_OUTCOME" -> ToolErrorCode.UNKNOWN_OUTCOME
+                "python_error" -> ToolErrorCode.PYTHON_EXECUTION_FAILED
+                else -> ToolErrorCode.INTERNAL_ERROR
+            },
+        ))
     }
 
     private fun audit(bound: BoundPythonCall, action: String, result: String, code: String? = null,

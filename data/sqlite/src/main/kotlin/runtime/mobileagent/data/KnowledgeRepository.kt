@@ -612,6 +612,33 @@ class KnowledgeRepository(
             }
         }
         validateRequestedEmbeddingSelection(kbId, api = job.embeddingIsApi, consent = job.embeddingConsent)
+        // A job staged while its document was still in-flight (for example a batch with two
+        // byte-identical members) reaches this resume boundary after another job already
+        // published the document.  Re-running the pipeline would duplicate vision uploads and
+        // document versions, so the durable reuse check is applied again here: same document,
+        // current parser fingerprint, complete embeddings and generation membership all have
+        // to hold before the job can complete without doing any work.  Jobs that already
+        // planned or dispatched pipeline work (including a vision-target reconfiguration)
+        // keep their own durable plan and are never collapsed into another job's result.
+        val hasPipelineWork = db.query(
+            "SELECT 1 AS x FROM pipeline_units WHERE job_id = ? LIMIT 1", listOf(jobId),
+        ).isNotEmpty() || db.query(
+            "SELECT 1 AS x FROM pipeline_attempts WHERE job_id = ? LIMIT 1", listOf(jobId),
+        ).isNotEmpty()
+        val reuseStage = if (hasPipelineWork) null
+            else publishedReadyStage(documentId, kbId, requestedApi = job.embeddingIsApi)
+        if (reuseStage != null) {
+            job.stage = reuseStage
+            job.error = if (reuseStage == ImportStage.READY_WITH_VISUAL_GAPS) TEXT_ONLY_VISUAL_GAPS_MESSAGE else null
+            job.visualGapsAccepted = reuseStage == ImportStage.READY_WITH_VISUAL_GAPS
+            job.localEmbeddingAvailable = true
+            persistJob(job, displayName)
+            synchronized(indexLock) {
+                syncBatchItemFromJobLocked(job.id)
+                batchId?.let { refreshBatchProgressLocked(it) }
+            }
+            return job
+        }
         return continueImportCancellable(job, displayName, payload, format)
     }
 

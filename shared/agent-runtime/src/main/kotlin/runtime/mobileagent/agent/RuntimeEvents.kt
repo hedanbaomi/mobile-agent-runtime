@@ -255,6 +255,9 @@ fun toolResultUserMessage(resultJson: String): String? {
         "UNSUPPORTED_ENTRY" -> "该工作区条目类型不受支持，未打开该条目。"
         "OPERATION_UNAVAILABLE" -> "所选工作区后端暂不支持该操作。"
         "INVALID_REQUEST" -> "工具请求参数无效，未执行任何操作。"
+        "RESOURCE_LIMIT" -> "已达到运行资源限制。"
+        "PYTHON_EXECUTION_FAILED" -> "Skill 脚本执行失败；本次调用已审计，不会自动重试。"
+        "INTERNAL_ERROR" -> "运行时发生内部错误。"
         "APPROVAL_DENIED" -> "该工具调用已被拒绝，未执行任何操作。"
         else -> null
     }

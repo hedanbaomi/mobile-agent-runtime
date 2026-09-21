@@ -170,7 +170,7 @@ class OpenAiSseTest {
     }
 
     @Test
-    fun reasoningOnlyCompletionIsNotPresentedAsSuccessfulAnswer() = runTest {
+    fun reasoningOnlyCompletionTerminatesAsReasoningExhausted() = runTest {
         val engine = MockEngine {
             respond(
                 content = "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"thinking\"}}]}\n\ndata: [DONE]\n\n",
@@ -184,8 +184,65 @@ class OpenAiSseTest {
             "token".toCharArray(),
         ).toList()
         assertTrue(events.contains(ModelEvent.ReasoningDelta("thinking")))
+        assertEquals(ModelEvent.Failed("REASONING_EXHAUSTED"), events.last())
+        assertTrue(events.none { it == ModelEvent.Completed })
+        assertTrue(events.none { it is ModelEvent.TextDelta })
+    }
+
+    @Test
+    fun reasoningOnlyWithUsageTerminatesAsReasoningExhausted() = runTest {
+        val engine = MockEngine {
+            respond(
+                content = "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"think\"}}],\"usage\":{\"prompt_tokens\":9,\"completion_tokens\":40,\"completion_tokens_details\":{\"reasoning_tokens\":40}}}\n\ndata: [DONE]\n\n",
+                status = HttpStatusCode.OK,
+                headers = headersOf(HttpHeaders.ContentType, "text/event-stream"),
+            )
+        }
+        val adapter = OpenAiCompatibleAdapter(HttpClient(engine), "https://example.invalid/v1")
+        val events = adapter.stream(
+            ModelRequest(modelId = "demo", messages = listOf(ChatMessage(role = "user", text = "hi"))),
+            "token".toCharArray(),
+        ).toList()
+        assertEquals(ModelEvent.Failed("REASONING_EXHAUSTED"), events.last())
+        assertTrue(events.none { it == ModelEvent.Completed })
+    }
+
+    @Test
+    fun emptyResponseWithoutReasoningRemainsInvalid() = runTest {
+        val engine = MockEngine {
+            respond(
+                content = "data: {\"choices\":[{\"delta\":{}}]}\n\ndata: [DONE]\n\n",
+                status = HttpStatusCode.OK,
+                headers = headersOf(HttpHeaders.ContentType, "text/event-stream"),
+            )
+        }
+        val adapter = OpenAiCompatibleAdapter(HttpClient(engine), "https://example.invalid/v1")
+        val events = adapter.stream(
+            ModelRequest(modelId = "demo", messages = listOf(ChatMessage(role = "user", text = "hi"))),
+            "token".toCharArray(),
+        ).toList()
         assertEquals(ModelEvent.Failed("INVALID_RESPONSE"), events.last())
         assertTrue(events.none { it == ModelEvent.Completed })
+    }
+
+    @Test
+    fun reasoningOnlyJsonResponseTerminatesAsReasoningExhausted() = runTest {
+        val engine = MockEngine {
+            respond(
+                content = """{"choices":[{"message":{"reasoning_content":"think"}}],"usage":{"prompt_tokens":9,"completion_tokens":40,"completion_tokens_details":{"reasoning_tokens":40}}}""",
+                status = HttpStatusCode.OK,
+                headers = headersOf(HttpHeaders.ContentType, "application/json"),
+            )
+        }
+        val adapter = OpenAiCompatibleAdapter(HttpClient(engine), "https://example.invalid/v1")
+        val events = adapter.stream(
+            ModelRequest(modelId = "demo", messages = listOf(ChatMessage(role = "user", text = "hi"))),
+            "token".toCharArray(),
+        ).toList()
+        assertTrue(events.contains(ModelEvent.ReasoningDelta("think")))
+        assertEquals(ModelEvent.Failed("REASONING_EXHAUSTED"), events.last())
+        assertTrue(events.none { it == ModelEvent.Completed })
+        assertTrue(events.none { it is ModelEvent.TextDelta })
     }
 
     @Test

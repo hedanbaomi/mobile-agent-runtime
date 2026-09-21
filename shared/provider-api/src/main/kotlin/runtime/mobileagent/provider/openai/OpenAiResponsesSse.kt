@@ -98,8 +98,27 @@ object OpenAiResponsesSse {
             }
             "response.completed" -> buildList {
                 val response = obj["response"]?.let { runCatching { it.jsonObject }.getOrNull() }
-                usage(response ?: obj)?.let(::add)
-                add(ModelEvent.Completed)
+                val reportedUsage = usage(response ?: obj)
+                reportedUsage?.let(::add)
+                // A completed response that produced no text, refusal or tool
+                // call is reasoning-only when reasoning items or reasoning
+                // usage were observed — a diagnosable terminal, not a silent
+                // empty answer.  Reasoning content itself is never promoted to
+                // the answer channel.
+                val hasVisible = state.emittedCalls.isNotEmpty() ||
+                    state.text.values.any { it.isNotEmpty() } ||
+                    state.refusal.values.any { it.isNotEmpty() }
+                if (!hasVisible) {
+                    val hasReasoning = state.reasoning.isNotEmpty() ||
+                        state.emittedContinuations.isNotEmpty() ||
+                        (reportedUsage?.reasoningTokens ?: 0) > 0
+                    add(ModelEvent.Failed(
+                        if (hasReasoning) ErrorCode.REASONING_EXHAUSTED.name
+                        else ProviderConnectionErrorCode.INVALID_RESPONSE.name,
+                    ))
+                } else {
+                    add(ModelEvent.Completed)
+                }
             }
             "response.incomplete" -> buildList {
                 // A length stop is an output-budget outcome, never an input

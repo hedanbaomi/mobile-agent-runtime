@@ -230,6 +230,35 @@ class TransferCodecTest {
     }
 
     @Test
+    fun provenanceEmbeddingSpaceIdIsAcceptedWithoutBroadeningOtherIds() {
+        // The shipped wp-v2 local space id carries multiple provenance hashes
+        // and is 290 chars — longer than the generic 256-char id bound.
+        val space = "onnx:distiluse-base-multilingual-cased-v2@cad454171d918d9873a2701ba245054b6c1760dd" +
+            ":int8:d512:cosine:wp-v2:mean-dense-tanh:sentence126-bounded-mean-v3" +
+            ":tbf1b59b7b11c95f194f51708d918eea378e09d05f84c0e1656dc5180e8117088" +
+            ":e8117088:p0a21b1ce908e772ebf09f93c20ca09524c32706e9918d9c0169a3f0663b191ed"
+        val bundle = TransferBundle(
+            schemaVersion = SchemaVersion.CURRENT,
+            exportedAt = "now",
+            knowledgeBases = listOf(KnowledgeTransfer(id = "kb.onnx", name = "Onnx", embeddingSpaceId = space)),
+        )
+        assertDoesNotThrow { TransferCodec.encode(bundle) }
+        val decoded = TransferCodec.decode(TransferCodec.encode(bundle))
+        assertEquals(space, decoded.knowledgeBases.single().embeddingSpaceId)
+
+        // The widened bound is scoped to embeddingSpaceId only; other id fields
+        // keep the 256-char limit.
+        val longKbId = bundle.copy(
+            knowledgeBases = listOf(KnowledgeTransfer(id = "k".repeat(300), name = "Onnx", embeddingSpaceId = space)),
+        )
+        assertThrows(AppException::class.java) { TransferCodec.validate(longKbId) }
+        val overLimit = bundle.copy(
+            knowledgeBases = listOf(KnowledgeTransfer(id = "kb.onnx", name = "Onnx", embeddingSpaceId = "onnx:" + "a".repeat(1024))),
+        )
+        assertThrows(AppException::class.java) { TransferCodec.validate(overLimit) }
+    }
+
+    @Test
     fun visualGapDocumentVersionsArePortableAndWaitingIsNot() {
         val blob = BlobTransfer(packageHash, 1, "text/plain", "doc.txt")
         val document = DocumentTransfer(

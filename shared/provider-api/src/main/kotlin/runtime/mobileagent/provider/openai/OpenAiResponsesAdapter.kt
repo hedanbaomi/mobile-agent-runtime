@@ -870,7 +870,22 @@ class OpenAiResponsesAdapter(
         val status = root["status"]?.jsonPrimitive?.contentOrNull
         val hasText = events.any { it is ModelEvent.TextDelta || it is ModelEvent.RefusalDelta }
         val reportedUsage = events.filterIsInstance<ModelEvent.Usage>().lastOrNull()
-        if (status == null || status == "completed") events += ModelEvent.Completed
+        if (status == null || status == "completed") {
+            // A completed reasoning-only response (no text, refusal or tool
+            // call) is a diagnosable terminal — reasoning is never promoted to
+            // the answer channel.
+            val hasVisible = hasText || events.any { it is ModelEvent.ToolCallDelta }
+            val hasReasoning = emittedContinuations.isNotEmpty() ||
+                (reportedUsage?.reasoningTokens ?: 0) > 0
+            if (!hasVisible) {
+                events += ModelEvent.Failed(
+                    if (hasReasoning) ErrorCode.REASONING_EXHAUSTED.name
+                    else ProviderConnectionErrorCode.INVALID_RESPONSE.name,
+                )
+            } else {
+                events += ModelEvent.Completed
+            }
+        }
         else if (status == "failed") events += ModelEvent.Failed(ProviderConnectionErrorCode.PROVIDER_REJECTED.name)
         else if (status == "incomplete") {
             // Output-budget exhaustion, never an input window rejection, and

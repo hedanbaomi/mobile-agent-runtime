@@ -871,14 +871,18 @@ private class PythonSkillToolExecutor(
      * the isolated interpreter already ran and may have completed broker calls.
      * Only genuinely oversized request input stays INVALID; every other code is
      * projected as a typed failure with a fixed safe message (the worker's raw
-     * error text must not cross into UI/model surfaces).
+     * error text must not cross into UI/model surfaces).  Broker denials arrive
+     * with the host's own code on the raised PermissionError, so RESOURCE_LIMIT
+     * stays RESOURCE_LIMIT instead of collapsing into python_error.
      */
     private fun pythonFailureResult(result: PythonExecutionResult): ToolResult = when (result.errorCode) {
         "input_limit" -> ToolResult.Invalid("Python input exceeds the isolated runtime limit")
         else -> ToolResult.Failure(ToolError(
             code = when (result.errorCode) {
                 "broker_limit", "RESOURCE_LIMIT" -> ToolErrorCode.RESOURCE_LIMIT
-                "permission_denied", "denied" -> ToolErrorCode.PERMISSION_DENIED
+                "permission_denied", "denied", "PERMISSION_DENIED", "REPLAY_DENIED" ->
+                    ToolErrorCode.PERMISSION_DENIED
+                "UNKNOWN_OUTCOME" -> ToolErrorCode.UNKNOWN_OUTCOME
                 "python_error" -> ToolErrorCode.PYTHON_EXECUTION_FAILED
                 else -> ToolErrorCode.INTERNAL_ERROR
             },

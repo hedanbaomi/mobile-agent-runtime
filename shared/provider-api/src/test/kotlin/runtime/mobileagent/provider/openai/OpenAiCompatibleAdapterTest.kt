@@ -170,7 +170,7 @@ class OpenAiSseTest {
     }
 
     @Test
-    fun reasoningOnlyCompletionTerminatesAsReasoningExhausted() = runTest {
+    fun reasoningOnlyCompletionTerminatesAsReasoningOnly() = runTest {
         val engine = MockEngine {
             respond(
                 content = "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"thinking\"}}]}\n\ndata: [DONE]\n\n",
@@ -184,13 +184,13 @@ class OpenAiSseTest {
             "token".toCharArray(),
         ).toList()
         assertTrue(events.contains(ModelEvent.ReasoningDelta("thinking")))
-        assertEquals(ModelEvent.Failed("REASONING_EXHAUSTED"), events.last())
+        assertEquals(ModelEvent.Failed("REASONING_ONLY"), events.last())
         assertTrue(events.none { it == ModelEvent.Completed })
         assertTrue(events.none { it is ModelEvent.TextDelta })
     }
 
     @Test
-    fun reasoningOnlyWithUsageTerminatesAsReasoningExhausted() = runTest {
+    fun reasoningOnlyWithUsageTerminatesAsReasoningOnly() = runTest {
         val engine = MockEngine {
             respond(
                 content = "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"think\"}}],\"usage\":{\"prompt_tokens\":9,\"completion_tokens\":40,\"completion_tokens_details\":{\"reasoning_tokens\":40}}}\n\ndata: [DONE]\n\n",
@@ -203,7 +203,7 @@ class OpenAiSseTest {
             ModelRequest(modelId = "demo", messages = listOf(ChatMessage(role = "user", text = "hi"))),
             "token".toCharArray(),
         ).toList()
-        assertEquals(ModelEvent.Failed("REASONING_EXHAUSTED"), events.last())
+        assertEquals(ModelEvent.Failed("REASONING_ONLY"), events.last())
         assertTrue(events.none { it == ModelEvent.Completed })
     }
 
@@ -226,7 +226,7 @@ class OpenAiSseTest {
     }
 
     @Test
-    fun reasoningOnlyJsonResponseTerminatesAsReasoningExhausted() = runTest {
+    fun reasoningOnlyJsonResponseTerminatesAsReasoningOnly() = runTest {
         val engine = MockEngine {
             respond(
                 content = """{"choices":[{"message":{"reasoning_content":"think"}}],"usage":{"prompt_tokens":9,"completion_tokens":40,"completion_tokens_details":{"reasoning_tokens":40}}}""",
@@ -240,7 +240,7 @@ class OpenAiSseTest {
             "token".toCharArray(),
         ).toList()
         assertTrue(events.contains(ModelEvent.ReasoningDelta("think")))
-        assertEquals(ModelEvent.Failed("REASONING_EXHAUSTED"), events.last())
+        assertEquals(ModelEvent.Failed("REASONING_ONLY"), events.last())
         assertTrue(events.none { it == ModelEvent.Completed })
         assertTrue(events.none { it is ModelEvent.TextDelta })
     }

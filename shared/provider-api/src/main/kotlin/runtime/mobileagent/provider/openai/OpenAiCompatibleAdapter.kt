@@ -1703,13 +1703,15 @@ class OpenAiCompatibleAdapter(
      *   its budget is unknown, which is not evidence of hidden reasoning.
      */
     /**
-     * A terminal with no visible output but observed reasoning is a reasoning-
-     * only answer (REASONING_EXHAUSTED), not an unrecognizable response.  Only
-     * output that never produced reasoning keeps INVALID_RESPONSE.
+     * A normal-stop terminal with no visible output but observed reasoning is a
+     * reasoning-only answer (REASONING_ONLY), not an unrecognizable response and
+     * not necessarily an exhausted budget — the provider may simply have placed
+     * the whole reply in the reasoning channel.  Only output that never produced
+     * reasoning keeps INVALID_RESPONSE.
      */
     private fun reasoningOnlyTerminal(state: StreamOutputState): String =
         if (state.hasReasoningOutput || (state.latestUsage?.reasoningTokens ?: 0) > 0) {
-            ErrorCode.REASONING_EXHAUSTED.name
+            ErrorCode.REASONING_ONLY.name
         } else {
             INVALID_RESPONSE_MESSAGE
         }

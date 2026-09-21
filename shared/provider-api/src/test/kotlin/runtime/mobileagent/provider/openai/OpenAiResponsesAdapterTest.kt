@@ -133,7 +133,7 @@ class OpenAiResponsesSseTest {
     }
 
     @Test
-    fun streamingReasoningOnlyCompletedIsReasoningExhausted() {
+    fun streamingReasoningOnlyCompletedIsReasoningOnly() {
         val state = OpenAiResponsesSse.State()
         OpenAiResponsesSse.eventsFromLine(
             "data: {\"type\":\"response.reasoning_text.delta\",\"delta\":\"thinking\"}",
@@ -143,7 +143,7 @@ class OpenAiResponsesSseTest {
             "data: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":9,\"output_tokens\":40,\"output_tokens_details\":{\"reasoning_tokens\":40}}}}",
             state,
         )
-        assertEquals(ModelEvent.Failed(ErrorCode.REASONING_EXHAUSTED.name), completed.last())
+        assertEquals(ModelEvent.Failed(ErrorCode.REASONING_ONLY.name), completed.last())
         assertTrue(completed.none { it == ModelEvent.Completed })
     }
 
@@ -593,7 +593,7 @@ class OpenAiResponsesAdapterTest {
     }
 
     @Test
-    fun nonStreamingReasoningOnlyCompletedIsReasoningExhausted() = runTest {
+    fun nonStreamingReasoningOnlyCompletedIsReasoningOnly() = runTest {
         val engine = MockEngine {
             respond(
                 "{\"status\":\"completed\",\"output\":[" +
@@ -609,7 +609,7 @@ class OpenAiResponsesAdapterTest {
         ).toList()
         assertTrue(events.filterIsInstance<ModelEvent.ProviderContinuation>().isNotEmpty())
         assertTrue(events.none { it is ModelEvent.TextDelta })
-        assertEquals(ModelEvent.Failed(ErrorCode.REASONING_EXHAUSTED.name), events.last())
+        assertEquals(ModelEvent.Failed(ErrorCode.REASONING_ONLY.name), events.last())
         assertTrue(events.none { it == ModelEvent.Completed })
     }
 

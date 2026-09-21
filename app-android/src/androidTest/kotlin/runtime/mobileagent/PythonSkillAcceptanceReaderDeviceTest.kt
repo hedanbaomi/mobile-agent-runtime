@@ -6,7 +6,6 @@ package runtime.mobileagent
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import java.io.ByteArrayOutputStream
-import java.io.File
 import java.util.UUID
 import java.util.zip.CRC32
 import java.util.zip.ZipEntry
@@ -26,6 +25,7 @@ import runtime.mobileagent.domain.ModelRole
 import runtime.mobileagent.domain.ProviderProfile
 import runtime.mobileagent.domain.RunRecord
 import runtime.mobileagent.domain.Utc
+import runtime.mobileagent.knowledge.ImportStage
 import runtime.mobileagent.skills.ToolCall
 import runtime.mobileagent.skills.ToolExecutor
 import runtime.mobileagent.skills.ToolResult
@@ -33,22 +33,23 @@ import runtime.mobileagent.skills.tooling.ToolErrorCode
 
 /**
  * Drives the production Python skill path on device: executor entrypoint →
- * approval → InvocationBroker → isolated CPython → result.  Covers the
- * non-legacy manifest form (`module:function`, custom inputSchema) used by the
- * acceptance "Acceptance Reader" package, which is also reproduced for the
- * broker-call cap regression.
+ * approval → InvocationBroker → isolated CPython → result.  The test is fully
+ * self-contained: the skill package is built in memory, and the knowledge base
+ * plus its long document are imported here instead of relying on pre-staged
+ * device state.
  */
 @RunWith(AndroidJUnit4::class)
 class PythonSkillAcceptanceReaderDeviceTest {
     private companion object {
-        /** acc-long.txt in the AcceptBak base on the acceptance device (~1000 lines). */
-        const val ACCEPTANCE_LONG_DOC_ID = "327a05d9-30ea-4dbf-a5be-256bc6012406"
+        private val fixtureLock = Any()
+        @Volatile private var fixtureKbId: String? = null
+        @Volatile private var fixtureDocumentId: String? = null
     }
 
     /** Pure isolated execution: no broker calls, result must reach the caller. */
     @Test(timeout = 90_000)
     fun manifestSkillExecutesIsolatedAndReturnsValue() = runBlocking {
-        val fixture = installFixture(probeZip(withKnowledge = false), emptySet())
+        val fixture = installFixture(probeZip(withKnowledge = false), emptySet(), emptySet())
         val call = ToolCall("probe-plain", fixture.specName, """{"echo":"hello"}""")
         assertEquals(ToolResult.NeedsApproval, fixture.executor.invoke(call))
         val result = fixture.executor.approve(call.callId)
@@ -61,9 +62,10 @@ class PythonSkillAcceptanceReaderDeviceTest {
     }
 
     /** One granted knowledge.search broker round-trip must return OK. */
-    @Test(timeout = 90_000)
+    @Test(timeout = 180_000)
     fun manifestSkillBrokerSearchRoundTrips() = runBlocking {
-        val fixture = installFixture(probeZip(withKnowledge = true), setOf("knowledge.search"))
+        val (container, kbId, _) = ensureFixtureKb()
+        val fixture = installFixture(probeZip(withKnowledge = true), setOf("knowledge.search"), setOf(kbId), container)
         val call = ToolCall("probe-search", fixture.specName, """{"search":"pipe"}""")
         assertEquals(ToolResult.NeedsApproval, fixture.executor.invoke(call))
         val result = fixture.executor.approve(call.callId)
@@ -75,24 +77,65 @@ class PythonSkillAcceptanceReaderDeviceTest {
     }
 
     /**
-     * The acceptance "Acceptance Reader" package paginates a long document and
-     * exceeds the per-invocation broker cap (native or host side).  The worker
-     * result is FAILED and must surface as a typed Failure — never as
-     * INVALID_REQUEST, which falsely claims nothing was executed.
+     * A reader that paginates a long document exceeds the per-invocation broker
+     * cap.  The worker result is FAILED with the Broker's own RESOURCE_LIMIT
+     * code — a typed failure, never INVALID_REQUEST, which falsely claims
+     * nothing was executed.
      */
-    @Test(timeout = 90_000)
+    @Test(timeout = 180_000)
     fun acceptanceReaderPaginationCapIsTypedFailure() = runBlocking {
-        val packageBytes = File("/data/local/tmp/acceptance-reader.zip").readBytes()
-        val fixture = installFixture(packageBytes, setOf("knowledge.search", "knowledge.read"))
+        val (container, kbId, documentId) = ensureFixtureKb()
+        val fixture = installFixture(
+            readerZip(), setOf("knowledge.search", "knowledge.read"), setOf(kbId), container,
+        )
         val call = ToolCall("acc-reader-paged", fixture.specName,
-            """{"query":"pipe","documentId":"$ACCEPTANCE_LONG_DOC_ID"}""")
+            """{"query":"pipe","documentId":"$documentId"}""")
         assertEquals(ToolResult.NeedsApproval, fixture.executor.invoke(call))
         val result = fixture.executor.approve(call.callId)
         assertTrue(
             "expected typed Failure, got $result; audits=\n${fixture.audits()}",
-            result is ToolResult.Failure && result.error.code == ToolErrorCode.PYTHON_EXECUTION_FAILED,
+            result is ToolResult.Failure && result.error.code == ToolErrorCode.RESOURCE_LIMIT,
         )
         assertTrue("expected invoke:FAILED audit", fixture.audits().contains("invoke:FAILED"))
+        assertTrue("expected real broker traffic before the cap", fixture.audits().contains("broker:OK"))
+    }
+
+    /**
+     * Create (once per process) a dedicated knowledge base with a long document
+     * that needs more broker read pages than the per-invocation cap allows.
+     */
+    private fun ensureFixtureKb(): Triple<AppContainer, String, String> {
+        val existingKb = fixtureKbId
+        val existingDoc = fixtureDocumentId
+        val app = InstrumentationRegistry.getInstrumentation().targetContext.applicationContext as MobileAgentApp
+        app.ensureHostInitialized()
+        if (existingKb != null && existingDoc != null) return Triple(app.container, existingKb, existingDoc)
+        synchronized(fixtureLock) {
+            val kb = fixtureKbId
+            val doc = fixtureDocumentId
+            if (kb != null && doc != null) return Triple(app.container, kb, doc)
+            val kbId = app.container.knowledge.createKnowledgeBase("python-skill-fixture-${UUID.randomUUID().toString().take(8)}")
+            // ~8k chars is comfortably more than the 20-call broker cap at
+            // 127 bytes per knowledge.read page.
+            val marker = "zebra-pipe-marker"
+            val text = buildString {
+                repeat(400) { append("line $it the pipe experiment uses $marker for retrieval checks. ") }
+            }
+            val job = app.container.knowledge.importBytes(
+                displayName = "acc-long.txt",
+                mediaType = "text/plain",
+                bytes = text.toByteArray(Charsets.UTF_8),
+                visionConfigured = false,
+                knowledgeBaseId = kbId,
+            )
+            assertEquals(
+                "fixture document must publish locally; error=${job.error}",
+                ImportStage.READY, job.stage,
+            )
+            fixtureKbId = kbId
+            fixtureDocumentId = job.documentId
+            return Triple(app.container, kbId, job.documentId)
+        }
     }
 
     private data class Fixture(
@@ -106,22 +149,20 @@ class PythonSkillAcceptanceReaderDeviceTest {
         }
     }
 
-    private fun installFixture(packageBytes: ByteArray, capabilities: Set<String>): Fixture {
+    private fun installFixture(
+        packageBytes: ByteArray,
+        capabilities: Set<String>,
+        kbIds: Set<String>,
+        existingContainer: AppContainer? = null,
+    ): Fixture {
         val app = InstrumentationRegistry.getInstrumentation().targetContext.applicationContext as MobileAgentApp
         app.ensureHostInitialized()
-        val container = app.container
+        val container = existingContainer ?: app.container
         val suffix = UUID.randomUUID().toString().replace("-", "")
 
         val imported = container.skills.importPackage(packageBytes)
         assertTrue("skill import rejected: ${imported.inspection}", imported.accepted)
         val install = container.skills.list().last { it.packageHash == imported.inspection.packageHash }
-        val kbIds = if (capabilities.any { it.startsWith("knowledge.") }) {
-            val kbId = container.knowledge.listKnowledgeBases().firstOrNull()?.first
-                ?: error("No knowledge base installed on this device")
-            setOf(kbId)
-        } else {
-            emptySet()
-        }
         container.skills.approvePermissions(install.installId, capabilities, knowledgeBaseIds = kbIds)
         container.skills.setEnabled(install.installId, true)
 
@@ -182,13 +223,33 @@ class PythonSkillAcceptanceReaderDeviceTest {
         return Fixture(container, executor, spec.name, runId)
     }
 
+    private fun zipPackage(entries: Map<String, String>): ByteArray =
+        ByteArrayOutputStream().also { output ->
+            ZipOutputStream(output).use { zip ->
+                entries.forEach { (name, content) ->
+                    val payload = content.toByteArray(Charsets.UTF_8)
+                    val entry = ZipEntry(name).apply {
+                        method = ZipEntry.STORED
+                        size = payload.size.toLong()
+                        compressedSize = size
+                        crc = CRC32().apply { update(payload) }.value
+                        time = 0L
+                    }
+                    zip.putNextEntry(entry)
+                    zip.write(payload)
+                    zip.closeEntry()
+                }
+            }
+        }.toByteArray()
+
     private fun probeZip(withKnowledge: Boolean): ByteArray {
+        val id = "dev.mobileagent.probe.${UUID.randomUUID().toString().take(8)}"
         val permissions = if (withKnowledge) {
             """"permissions":{"knowledge.search":{"scope":"selected-by-user"}},"""
         } else {
             ""
         }
-        val manifest = """{"schemaVersion":1,"id":"dev.mobileagent.probe","name":"Probe","version":"1.0.0","license":"AGPL-3.0-only","runtime":{"kind":"python","python":"3.14","mode":"pure-python","entrypoint":"probe:run"},${permissions}"inputSchema":{"type":"object","properties":{"echo":{"type":"string"},"search":{"type":"string"}},"additionalProperties":false},"outputSchema":{"type":"object","properties":{},"additionalProperties":true}}"""
+        val manifest = """{"schemaVersion":1,"id":"$id","name":"Probe","version":"1.0.0","license":"AGPL-3.0-only","runtime":{"kind":"python","python":"3.14","mode":"pure-python","entrypoint":"probe:run"},${permissions}"inputSchema":{"type":"object","properties":{"echo":{"type":"string"},"search":{"type":"string"}},"additionalProperties":false},"outputSchema":{"type":"object","properties":{},"additionalProperties":true}}"""
         val source = """
             import os
             import sys
@@ -207,22 +268,41 @@ class PythonSkillAcceptanceReaderDeviceTest {
             "probe.py" to source,
         )
         // REUSE-IgnoreEnd
-        return ByteArrayOutputStream().also { output ->
-            ZipOutputStream(output).use { zip ->
-                entries.forEach { (name, content) ->
-                    val payload = content.toByteArray(Charsets.UTF_8)
-                    val entry = ZipEntry(name).apply {
-                        method = ZipEntry.STORED
-                        size = payload.size.toLong()
-                        compressedSize = size
-                        crc = CRC32().apply { update(payload) }.value
-                        time = 0L
-                    }
-                    zip.putNextEntry(entry)
-                    zip.write(payload)
-                    zip.closeEntry()
-                }
-            }
-        }.toByteArray()
+        return zipPackage(entries)
+    }
+
+    /**
+     * In-memory equivalent of the acceptance "Acceptance Reader" package:
+     * search once, then paginate the whole document through knowledge.read.
+     * The page size stays small enough that a long document crosses the
+     * per-invocation broker cap.
+     */
+    private fun readerZip(): ByteArray {
+        val id = "dev.mobileagent.acceptance_reader.${UUID.randomUUID().toString().take(8)}"
+        val manifest = """{"schemaVersion":1,"id":"$id","name":"Acceptance Reader","version":"1.0.0","license":"AGPL-3.0-only","runtime":{"kind":"python","python":"3.14","mode":"pure-python","entrypoint":"acceptance_reader:run"},"permissions":{"knowledge.search":{"scope":"selected-by-user"},"knowledge.read":{"scope":"selected-by-user"}},"inputSchema":{"type":"object","properties":{"query":{"type":"string"},"documentId":{"type":"string"}},"additionalProperties":false},"outputSchema":{"type":"object","properties":{},"additionalProperties":true}}"""
+        val source = """
+            import os,sys,hashlib
+            import mobileagent_sdk as sdk
+            def run(value):
+                hits=sdk.knowledge_search(value.get("query","pipe"),8)["hits"]
+                if not hits:return {"hits":[],"pid":os.getpid()}
+                doc=value.get("documentId") or hits[0]["documentId"]
+                offset=0;version=None;parts=[]
+                for _ in range(2000):
+                    page=sdk.knowledge_read(doc,127,offset,version)
+                    version=page["documentVersionId"];parts.append(page["text"])
+                    nxt=page.get("nextOffset")
+                    if nxt is None:break
+                    offset=nxt
+                return {"pid":os.getpid(),"implementation":sys.implementation.name,"pages":len(parts),"chars":len("".join(parts)),"hits":len(hits)}
+        """.trimIndent()
+        // REUSE-IgnoreStart
+        val entries = linkedMapOf(
+            "SKILL.md" to "# Acceptance Reader\nSPDX-License-Identifier: AGPL-3.0-only\n",
+            "mobile-skill.json" to manifest,
+            "acceptance_reader.py" to source,
+        )
+        // REUSE-IgnoreEnd
+        return zipPackage(entries)
     }
 }

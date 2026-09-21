@@ -879,7 +879,7 @@ class OpenAiResponsesAdapter(
                 (reportedUsage?.reasoningTokens ?: 0) > 0
             if (!hasVisible) {
                 events += ModelEvent.Failed(
-                    if (hasReasoning) ErrorCode.REASONING_EXHAUSTED.name
+                    if (hasReasoning) ErrorCode.REASONING_ONLY.name
                     else ProviderConnectionErrorCode.INVALID_RESPONSE.name,
                 )
             } else {

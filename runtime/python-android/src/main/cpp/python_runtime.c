@@ -54,6 +54,9 @@ typedef struct {
     volatile sig_atomic_t cancelled;
     int broker_calls;
     int request_sequence;
+    /* Sanitized Broker denial code captured from the raised exception so a
+     * capability rejection is reported as its own errorCode, not python_error. */
+    char capability_error[MAX_ERROR_BYTES + 1];
     _Atomic(size_t) log_bytes;
     _Atomic int log_limit_exceeded;
     /* Strong reference acquired from the already loaded built-in _io module.
@@ -131,6 +134,18 @@ static void capture_python_diagnostic(char *destination, size_t capacity, const 
             (void)snprintf(destination + written, capacity - (size_t)written,
                 " missing=%s", missing_module);
         }
+    }
+    /* A Broker denial surfaces as PermissionError carrying the host's code;
+     * only the sanitized token is retained, never the message text. */
+    if (exception_value != NULL) {
+        PyObject *code = PyObject_GetAttrString(exception_value, "code");
+        RuntimeState *state = current_state();
+        if (code != NULL && state != NULL) {
+            (void)copy_diagnostic_token(code, state->capability_error,
+                sizeof(state->capability_error), 0);
+        }
+        Py_XDECREF(code);
+        PyErr_Clear();
     }
     Py_XDECREF(exception_type);
     Py_XDECREF(exception_value);
@@ -773,7 +788,23 @@ static PyObject *python_request(PyObject *module, PyObject *arguments) {
         if (strcmp(error_code, "cancelled") == 0) {
             PyErr_SetString(PyExc_KeyboardInterrupt, "Invocation cancelled");
         } else {
-            PyErr_Format(PyExc_PermissionError, "%s", error_message[0] ? error_message : "Capability denied");
+            /* Keep the structured denial code on the exception so the result
+             * boundary can report RESOURCE_LIMIT instead of python_error. */
+            PyObject *args = Py_BuildValue("(s)", error_message[0] ? error_message : "Capability denied");
+            PyObject *exception = args == NULL ? NULL : PyObject_Call(PyExc_PermissionError, args, NULL);
+            Py_XDECREF(args);
+            if (exception != NULL) {
+                PyObject *code = PyUnicode_FromString(error_code);
+                if (code != NULL) {
+                    (void)PyObject_SetAttrString(exception, "code", code);
+                    Py_DECREF(code);
+                }
+                PyErr_SetObject(PyExc_PermissionError, exception);
+                Py_DECREF(exception);
+            } else {
+                PyErr_Clear();
+                PyErr_SetString(PyExc_PermissionError, error_message[0] ? error_message : "Capability denied");
+            }
         }
         return NULL;
     }
@@ -1677,7 +1708,11 @@ Java_runtime_mobileagent_python_PythonNative_nativeRun(
     } else if (result_code == RESULT_OUTPUT_LIMIT) {
         set_result_fd(state, "FAILED", "output_limit", "Python output limit exceeded", NULL, 0);
     } else if (result_code != 0) {
-        set_result_fd(state, "FAILED", "python_error", diagnostic[0] != '\0' ? diagnostic : "stage=unknown", NULL, 0);
+        /* A Broker denial carries its structured code (RESOURCE_LIMIT etc.);
+         * only a script failure without one is a plain python_error. */
+        set_result_fd(state, "FAILED",
+            state->capability_error[0] != '\0' ? state->capability_error : "python_error",
+            diagnostic[0] != '\0' ? diagnostic : "stage=unknown", NULL, 0);
     } else {
         set_result_fd(state, "SUCCEEDED", NULL, NULL, output, output_length);
     }

@@ -17,6 +17,8 @@ enum class ErrorCode {
     OUTPUT_TRUNCATED,
     /** The output budget was consumed by reasoning with no final content. */
     REASONING_EXHAUSTED,
+    /** The provider ended normally but returned only reasoning, no answer text. */
+    REASONING_ONLY,
     PERMISSION_DENIED,
     UNSUPPORTED_DEPENDENCY,
     RESOURCE_LIMIT,

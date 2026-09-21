@@ -113,7 +113,7 @@ object OpenAiResponsesSse {
                         state.emittedContinuations.isNotEmpty() ||
                         (reportedUsage?.reasoningTokens ?: 0) > 0
                     add(ModelEvent.Failed(
-                        if (hasReasoning) ErrorCode.REASONING_EXHAUSTED.name
+                        if (hasReasoning) ErrorCode.REASONING_ONLY.name
                         else ProviderConnectionErrorCode.INVALID_RESPONSE.name,
                     ))
                 } else {

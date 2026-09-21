@@ -1702,6 +1702,19 @@ class OpenAiCompatibleAdapter(
      * - no visible output and no reasoning report -> the response is empty and
      *   its budget is unknown, which is not evidence of hidden reasoning.
      */
+    private fun lengthFailureCode(state: StreamOutputState): String =
+        // One shared rule for every protocol so a truncated page cannot be
+        // reported differently depending on which adapter saw it.
+        when (classifyLengthStop(
+            visibleAnswer = state.hasVisibleOutput,
+            reasoningTokens = state.latestUsage?.reasoningTokens,
+            outputTokens = state.latestUsage?.outputTokens,
+        )) {
+            LengthStopKind.OUTPUT_TRUNCATED -> ErrorCode.OUTPUT_TRUNCATED.name
+            LengthStopKind.REASONING_EXHAUSTED -> ErrorCode.REASONING_EXHAUSTED.name
+            LengthStopKind.EMPTY_RESPONSE -> INVALID_RESPONSE_MESSAGE
+        }
+
     /**
      * A normal-stop terminal with no visible output but observed reasoning is a
      * reasoning-only answer (REASONING_ONLY), not an unrecognizable response and
@@ -1714,19 +1727,6 @@ class OpenAiCompatibleAdapter(
             ErrorCode.REASONING_ONLY.name
         } else {
             INVALID_RESPONSE_MESSAGE
-        }
-
-    private fun lengthFailureCode(state: StreamOutputState): String =
-        // One shared rule for every protocol so a truncated page cannot be
-        // reported differently depending on which adapter saw it.
-        when (classifyLengthStop(
-            visibleAnswer = state.hasVisibleOutput,
-            reasoningTokens = state.latestUsage?.reasoningTokens,
-            outputTokens = state.latestUsage?.outputTokens,
-        )) {
-            LengthStopKind.OUTPUT_TRUNCATED -> ErrorCode.OUTPUT_TRUNCATED.name
-            LengthStopKind.REASONING_EXHAUSTED -> ErrorCode.REASONING_EXHAUSTED.name
-            LengthStopKind.EMPTY_RESPONSE -> INVALID_RESPONSE_MESSAGE
         }
 
     private fun messageContentText(message: JsonObject?): List<String> {

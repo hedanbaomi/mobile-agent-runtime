@@ -92,9 +92,39 @@ class RetrievalConvergenceTest {
         val byId = coverage.unavailable.associate { it.knowledgeBaseId to it.reason }
         assertEquals(RetrievalUnavailableReason.GENERATION_NOT_READY, byId[empty])
         assertEquals(RetrievalUnavailableReason.KB_NOT_FOUND, byId["kb-missing"])
-        assertTrue(result.warnings.any { "部分知识库未参与本次检索" in it }, result.warnings.toString())
+        // Unambiguous wording: N/M with N = number NOT participating and
+        // M = total requested (2 of 3 skipped here), never "searched/total".
         val notice = coverage.notice()
-        assertTrue(notice != null && empty in notice && "kb-missing" in notice)
+        assertTrue(notice != null, "expected a coverage notice")
+        val text = notice!!
+        assertTrue(
+            "本次检索有 2/3 个知识库未参与" in text && empty in text && "kb-missing" in text,
+            "notice must state 2/3 missing with the reason tail, got $text",
+        )
+        assertTrue(
+            "GENERATION_NOT_READY" in text && "KB_NOT_FOUND" in text,
+            "notice must keep the per-source reason tail, got $text",
+        )
+        // The warning uses the shared formatter verbatim (no drift).
+        assertTrue(text in result.warnings, result.warnings.toString())
+    }
+
+    @Test
+    fun completeCoverageEmitsNoNoticeOrCoverageWarning() {
+        val db = JdbcSqlConnection()
+        Migrations.apply(db)
+        val repo = KnowledgeRepository(db, MemoryBlobSink())
+        val ready = repo.createKnowledgeBase("Ready")
+        repo.importBytes("doc.txt", "text/plain", "complete coverage evidence".toByteArray(), false, ready)
+
+        val result = repo.retrieve("run-complete", "complete coverage evidence", 8, listOf(ready))
+        val coverage = result.coverage!!
+        assertEquals(listOf(ready), coverage.searched)
+        assertTrue(coverage.unavailable.isEmpty())
+        assertTrue(!coverage.partial)
+        assertTrue(coverage.notice() == null)
+        // Every knowledge base participated: no coverage notice/warning at all.
+        assertTrue(result.warnings.none { "未参与" in it }, result.warnings.toString())
     }
 
     @Test

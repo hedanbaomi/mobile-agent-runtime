@@ -360,7 +360,7 @@ internal class InternalWorkspaceBackend(
             // that the target exists, not that a token mismatched.
             if (existed && !replaceExisting) InternalWorkspaceErrorCode.ENTRY_EXISTS.error()
             expectVersion(oldVersion, expectedVersion, legacyVersion)
-            val usage = inspectUsage(rootPath)
+            val usage = inspectUsage(rootPath, enforceIndividualFileLimit = false)
             val oldBytes = if (existed) meteredSize(target) else 0L
             if (usage.entries + (if (existed) 0 else 1) > limits.maxEntries) {
                 InternalWorkspaceErrorCode.ENTRY_LIMIT_EXCEEDED.error()
@@ -457,7 +457,7 @@ internal class InternalWorkspaceBackend(
                 )
             }
             expectVersion(null, expectedVersion)
-            val usage = inspectUsage(rootPath)
+            val usage = inspectUsage(rootPath, enforceIndividualFileLimit = false)
             if (usage.entries + 1 > limits.maxEntries) InternalWorkspaceErrorCode.ENTRY_LIMIT_EXCEEDED.error()
             Files.createDirectory(directory)
             verifyStableWorkspaceDirectoryAfterMutation(parent, canonicalParent)
@@ -611,8 +611,8 @@ internal class InternalWorkspaceBackend(
                 }
             }
             val sourceUsage = inspectNode(source)
-            val destinationUsage = if (Files.exists(destination, LinkOption.NOFOLLOW_LINKS)) inspectNode(destination) else Usage()
-            val usage = inspectUsage(rootPath)
+            val destinationUsage = if (Files.exists(destination, LinkOption.NOFOLLOW_LINKS)) inspectNode(destination) else WorkspaceUsage()
+            val usage = inspectUsage(rootPath, enforceIndividualFileLimit = false)
             val newFiles = usage.files - destinationUsage.files + sourceUsage.files
             val retainedBytes = usage.bytes - destinationUsage.bytes
             val newEntries = usage.entries - destinationUsage.entries + sourceUsage.entries
@@ -838,63 +838,57 @@ internal class InternalWorkspaceBackend(
         }
     }
 
-    private data class Usage(val files: Int = 0, val bytes: Long = 0L, val entries: Int = 0)
-
-    private fun inspectUsage(root: Path = rootPath, enforceIndividualFileLimit: Boolean = true): Usage {
+    private fun inspectUsage(root: Path = rootPath, enforceIndividualFileLimit: Boolean = true): WorkspaceUsage {
         requireDirectory(root)
-        var files = 0
-        var bytes = 0L
-        var entries = 0
+        // Usage accounting is shared with SafWorkspaceBackend through
+        // WorkspaceUsageAccounting so the two backends cannot drift apart.
+        var usage = WorkspaceUsage()
         fun visit(directory: Path, depth: Int) {
-            if (depth > limits.maxPathDepth) InternalWorkspaceErrorCode.DEPTH_LIMIT_EXCEEDED.error()
+            WorkspaceUsageAccounting.enterDirectory(limits, depth)
             val children = safeChildren(directory)
             val names = HashSet<String>()
             children.forEach { child ->
                 rejectLink(child)
                 safeChildName(child.fileName.toString(), names)
-                entries++
-                if (entries > limits.maxEntries) InternalWorkspaceErrorCode.ENTRY_LIMIT_EXCEEDED.error()
+                usage = WorkspaceUsageAccounting.countEntry(usage, limits)
                 when {
                     Files.isDirectory(child, LinkOption.NOFOLLOW_LINKS) -> visit(child, depth + 1)
                     Files.isRegularFile(child, LinkOption.NOFOLLOW_LINKS) -> {
                         val size = meteredSize(child)
                         if (enforceIndividualFileLimit) checkFileSize(size)
-                        files++
-                        if (size > limits.quotaBytes - bytes) InternalWorkspaceErrorCode.QUOTA_EXCEEDED.error()
-                        bytes += size
+                        usage = WorkspaceUsageAccounting.countFile(usage, size, limits)
                     }
                     else -> InternalWorkspaceErrorCode.ENTRY_UNSUPPORTED.error()
                 }
             }
         }
         visit(root, 0)
-        return Usage(files, bytes, entries)
+        return usage
     }
 
-    private fun inspectNode(node: Path): Usage {
+    private fun inspectNode(node: Path): WorkspaceUsage {
         rejectLink(node)
         if (Files.isRegularFile(node, LinkOption.NOFOLLOW_LINKS)) {
             val size = meteredSize(node)
-            return Usage(files = 1, bytes = size, entries = 1)
+            return WorkspaceUsage(files = 1, bytes = size, entries = 1)
         }
         if (!Files.isDirectory(node, LinkOption.NOFOLLOW_LINKS)) InternalWorkspaceErrorCode.ENTRY_UNSUPPORTED.error()
-        var total = Usage(entries = 1)
+        var total = WorkspaceUsage(entries = 1)
         fun visit(directory: Path, depth: Int) {
-            if (depth > limits.maxPathDepth) InternalWorkspaceErrorCode.DEPTH_LIMIT_EXCEEDED.error()
+            WorkspaceUsageAccounting.enterDirectory(limits, depth)
             val names = HashSet<String>()
             val children = safeChildren(directory)
             children.forEach { child ->
                 rejectLink(child)
                 safeChildName(child.fileName.toString(), names)
-                total = total.copy(entries = total.entries + 1)
+                total = WorkspaceUsageAccounting.countEntry(total, limits)
                 when {
                     Files.isDirectory(child, LinkOption.NOFOLLOW_LINKS) -> {
                         visit(child, depth + 1)
                     }
                     Files.isRegularFile(child, LinkOption.NOFOLLOW_LINKS) -> {
                         val size = meteredSize(child)
-                        if (size > limits.quotaBytes - total.bytes) InternalWorkspaceErrorCode.QUOTA_EXCEEDED.error()
-                        total = total.copy(files = total.files + 1, bytes = total.bytes + size)
+                        total = WorkspaceUsageAccounting.countFile(total, size, limits)
                     }
                     else -> InternalWorkspaceErrorCode.ENTRY_UNSUPPORTED.error()
                 }

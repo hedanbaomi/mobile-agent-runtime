@@ -557,6 +557,91 @@ data class RuntimeToolingUnavailableRecord(
     val runRef: String? = null,
 )
 
+/** Tool dispatch/result lifecycle as observed at the runtime boundary. */
+enum class DiagnosticToolRunState(val wireName: String) {
+    DISPATCHED("dispatched"),
+    WAITING_APPROVAL("waiting_approval"),
+    VALUE("value"),
+    DENIED("denied"),
+    INVALID("invalid"),
+    FAILED("failed"),
+    UNKNOWN_OUTCOME("unknown_outcome"),
+}
+
+data class ToolInvocationStateRecord(
+    val callId: String,
+    val state: DiagnosticToolRunState,
+    val requestRef: String? = null,
+    val sessionRef: String? = null,
+    val agentId: String? = null,
+    val capability: DiagnosticToolCapability = DiagnosticToolCapability.UNKNOWN,
+    val authority: DiagnosticAuthority = DiagnosticAuthority.NONE,
+    val errorCode: String? = null,
+)
+
+/** Model transport stages; wire names mirror provider-api's ModelDiagnosticStage. */
+enum class DiagnosticModelStage(val wireName: String) {
+    REQUEST_VALIDATION("request_validation"),
+    REQUEST_READY("request_ready"),
+    REQUEST_DISPATCH("request_dispatch"),
+    RESPONSE_HEADERS("response_headers"),
+    RESPONSE_BODY("response_body"),
+    STREAM_EVENT("stream_event"),
+    TERMINAL("terminal"),
+}
+
+enum class DiagnosticModelDispatchState(val wireName: String) {
+    NOT_DISPATCHED("not_dispatched"),
+    DISPATCHED("dispatched"),
+    RESPONSE_RECEIVED("response_received"),
+    UNKNOWN_AFTER_DISPATCH("unknown_after_dispatch"),
+}
+
+/** Typed model transport evidence.  Bodies, URLs and provider text never enter it. */
+data class ModelRequestStateRecord(
+    val stage: DiagnosticModelStage,
+    val dispatchState: DiagnosticModelDispatchState,
+    val requestRef: String? = null,
+    val sessionRef: String? = null,
+    val endpointKind: String? = null,
+    val httpStatus: Int? = null,
+    val errorCode: String? = null,
+    val exceptionType: String? = null,
+    val durationMs: Long = 0,
+    val responseBytes: Long = 0,
+    val streaming: Boolean? = null,
+    val messageCount: Int = 0,
+    val imageCount: Int = 0,
+    val toolCount: Int = 0,
+    val eventType: String? = null,
+)
+
+data class RunStateRecord(
+    val state: DiagnosticTerminalState,
+    val requestRef: String? = null,
+    val sessionRef: String? = null,
+    val reasonCode: String = "unknown",
+    val modelRounds: Int = 0,
+    val toolCalls: Int = 0,
+)
+
+/** Compaction lifecycle so a failed/unknown summary is never only a UI string. */
+enum class DiagnosticCompactionState(val wireName: String) {
+    PREPARED("prepared"),
+    DISPATCHED("dispatched"),
+    SUCCEEDED("succeeded"),
+    FAILED("failed"),
+    CANCELLED("cancelled"),
+    UNKNOWN_OUTCOME("unknown_outcome"),
+}
+
+data class ContextCompactionStateRecord(
+    val state: DiagnosticCompactionState,
+    val requestRef: String? = null,
+    val sessionRef: String? = null,
+    val reasonCode: String = "unknown",
+)
+
 data class AuthorityConfigurationStateRecord(
     val authority: DiagnosticAuthority,
     val userIntentEnabled: Boolean,
@@ -811,6 +896,16 @@ class RollingDiagnosticLogStore(
         "bridge_request_state" to setOf("requestRef", "authority", "state", "errorCode", "durationBucket", "count"),
         "diagnostic_drop_summary" to setOf("droppedEvents", "droppedBytes", "failureCount", "health", "reasonCode"),
         "runtime_tooling_unavailable" to setOf("errorCode", "sessionRef", "runRef"),
+        "tool_invocation_state" to setOf(
+            "callRef", "requestRef", "sessionRef", "agentRef", "capability", "authority", "state", "errorCode",
+        ),
+        "model_request_state" to setOf(
+            "stage", "dispatchState", "requestRef", "sessionRef", "endpointKind", "httpStatus", "errorCode",
+            "exceptionType", "durationMs", "responseBytes", "streaming", "messageCount", "imageCount",
+            "toolCount", "eventType",
+        ),
+        "run_state" to setOf("requestRef", "sessionRef", "state", "reasonCode", "modelRounds", "toolCalls"),
+        "context_compaction_state" to setOf("requestRef", "sessionRef", "state", "reasonCode"),
         "authority_configuration_state" to setOf(
             "authority", "userIntentEnabled", "selected", "platformGrant", "availability", "connection",
             "configured", "reasonCode",
@@ -1276,6 +1371,65 @@ class RollingDiagnosticLogStore(
         ToolApprovalStateRecord(
             callId, state, approvalId, agentId, skillId, requestRef, reasonCode, capability, authority, sessionRef,
         ),
+    )
+
+    /** Tool dispatch/result/UNKNOWN_OUTCOME evidence for the run's tool layer. */
+    fun recordToolInvocationState(record: ToolInvocationStateRecord): Boolean = record(
+        "tool_invocation_state",
+        linkedMapOf<String, Any?>(
+            "callRef" to record.callId,
+            "requestRef" to record.requestRef,
+            "sessionRef" to record.sessionRef,
+            "agentRef" to record.agentId,
+            "capability" to record.capability.wireName,
+            "authority" to record.authority.wireName,
+            "state" to record.state.wireName,
+            "errorCode" to record.errorCode,
+        ).withoutNulls(),
+    )
+
+    /** Typed chat/model transport stages; content capture stays opt-in elsewhere. */
+    fun recordModelRequestState(record: ModelRequestStateRecord): Boolean = record(
+        "model_request_state",
+        linkedMapOf<String, Any?>(
+            "stage" to record.stage.wireName,
+            "dispatchState" to record.dispatchState.wireName,
+            "requestRef" to record.requestRef,
+            "sessionRef" to record.sessionRef,
+            "endpointKind" to record.endpointKind,
+            "httpStatus" to record.httpStatus,
+            "errorCode" to record.errorCode,
+            "exceptionType" to record.exceptionType,
+            "durationMs" to record.durationMs,
+            "responseBytes" to record.responseBytes,
+            "streaming" to record.streaming,
+            "messageCount" to record.messageCount,
+            "imageCount" to record.imageCount,
+            "toolCount" to record.toolCount,
+            "eventType" to record.eventType,
+        ).withoutNulls(),
+    )
+
+    fun recordRunState(record: RunStateRecord): Boolean = record(
+        "run_state",
+        linkedMapOf<String, Any?>(
+            "requestRef" to record.requestRef,
+            "sessionRef" to record.sessionRef,
+            "state" to record.state.wireName,
+            "reasonCode" to record.reasonCode,
+            "modelRounds" to record.modelRounds,
+            "toolCalls" to record.toolCalls,
+        ).withoutNulls(),
+    )
+
+    fun recordContextCompactionState(record: ContextCompactionStateRecord): Boolean = record(
+        "context_compaction_state",
+        linkedMapOf<String, Any?>(
+            "requestRef" to record.requestRef,
+            "sessionRef" to record.sessionRef,
+            "state" to record.state.wireName,
+            "reasonCode" to record.reasonCode,
+        ).withoutNulls(),
     )
 
     fun recordShellExecutionState(record: ShellExecutionStateRecord): Boolean = record(
@@ -1767,6 +1921,70 @@ class RollingDiagnosticLogStore(
                     normalized[key] = number
                 }
                 normalized
+            }
+            "tool_invocation_state" -> {
+                val state = DiagnosticToolRunState.entries.firstOrNull { it.wireName == fields["state"] as? String } ?: return null
+                val callRef = (fields["callRef"] as? String)?.takeIf { it.isNotBlank() }?.let(::canonicalReference) ?: return null
+                linkedMapOf<String, Any?>(
+                    "callRef" to callRef,
+                    "state" to state.wireName,
+                    "capability" to canonicalToolCapability(fields["capability"] as? String ?: "unknown"),
+                    "authority" to canonicalAuthority(fields["authority"] as? String ?: "none"),
+                ).apply {
+                    (fields["requestRef"] as? String)?.takeIf { it.isNotBlank() }?.let { put("requestRef", canonicalReference(it)) }
+                    (fields["sessionRef"] as? String)?.takeIf { it.isNotBlank() }?.let { put("sessionRef", canonicalReference(it)) }
+                    (fields["agentRef"] as? String)?.takeIf { it.isNotBlank() }?.let { put("agentRef", canonicalReference(it)) }
+                    (fields["errorCode"] as? String)?.takeIf { it.isNotBlank() }?.let { put("errorCode", canonicalTypedCode(it)) }
+                }
+            }
+            "model_request_state" -> {
+                val stage = DiagnosticModelStage.entries.firstOrNull { it.wireName == fields["stage"] as? String } ?: return null
+                val dispatchState = DiagnosticModelDispatchState.entries
+                    .firstOrNull { it.wireName == fields["dispatchState"] as? String } ?: return null
+                linkedMapOf<String, Any?>(
+                    "stage" to stage.wireName,
+                    "dispatchState" to dispatchState.wireName,
+                    "durationMs" to ((fields["durationMs"] as? Long) ?: 0L).coerceIn(0L, MAX_DURATION_MS),
+                    "responseBytes" to ((fields["responseBytes"] as? Long) ?: 0L).coerceIn(0L, MAX_COUNT.toLong()),
+                    "messageCount" to ((fields["messageCount"] as? Int) ?: 0).coerceIn(0, MAX_COUNT),
+                    "imageCount" to ((fields["imageCount"] as? Int) ?: 0).coerceIn(0, MAX_COUNT),
+                    "toolCount" to ((fields["toolCount"] as? Int) ?: 0).coerceIn(0, MAX_COUNT),
+                ).apply {
+                    (fields["requestRef"] as? String)?.takeIf { it.isNotBlank() }?.let { put("requestRef", canonicalReference(it)) }
+                    (fields["sessionRef"] as? String)?.takeIf { it.isNotBlank() }?.let { put("sessionRef", canonicalReference(it)) }
+                    (fields["endpointKind"] as? String)?.takeIf { it.isNotBlank() }
+                        ?.let { put("endpointKind", DiagnosticSanitizer.text(it, 32)) }
+                    (fields["eventType"] as? String)?.takeIf { it.isNotBlank() }
+                        ?.let { put("eventType", DiagnosticSanitizer.text(it, 32)) }
+                    (fields["errorCode"] as? String)?.takeIf { it.isNotBlank() }?.let { put("errorCode", canonicalTypedCode(it)) }
+                    (fields["exceptionType"] as? String)?.takeIf { it.isNotBlank() }
+                        ?.let { put("exceptionType", DiagnosticSanitizer.exceptionType(it)) }
+                    (fields["httpStatus"] as? Int)?.let { put("httpStatus", it.coerceIn(0, 599)) }
+                    (fields["streaming"] as? Boolean)?.let { put("streaming", it) }
+                }
+            }
+            "run_state" -> {
+                val state = canonicalTerminalState(fields["state"] as? String ?: return null)
+                linkedMapOf<String, Any?>(
+                    "state" to state,
+                    "reasonCode" to canonicalTypedCode(fields["reasonCode"] as? String ?: "unknown"),
+                    "modelRounds" to ((fields["modelRounds"] as? Int) ?: 0).coerceIn(0, MAX_COUNT),
+                    "toolCalls" to ((fields["toolCalls"] as? Int) ?: 0).coerceIn(0, MAX_COUNT),
+                ).apply {
+                    (fields["requestRef"] as? String)?.takeIf { it.isNotBlank() }?.let { put("requestRef", canonicalReference(it)) }
+                    (fields["sessionRef"] as? String)?.takeIf { it.isNotBlank() }?.let { put("sessionRef", canonicalReference(it)) }
+                }
+            }
+            "context_compaction_state" -> {
+                val state = DiagnosticCompactionState.entries.firstOrNull { it.wireName == fields["state"] as? String }
+                    ?: return null
+                linkedMapOf<String, Any?>(
+                    "state" to state.wireName,
+                    "reasonCode" to canonicalTypedCode(fields["reasonCode"] as? String ?: "unknown"),
+                ).apply {
+                    (fields["requestRef"] as? String)?.takeIf { it.isNotBlank() }?.let { put("requestRef", canonicalReference(it)) }
+                    (fields["sessionRef"] as? String)?.takeIf { it.isNotBlank() }?.let { put("sessionRef", canonicalReference(it)) }
+                }
             }
             "diagnostics_toggle" -> {
                 val enabled = fields["enabled"] as? Boolean ?: return null
@@ -2716,6 +2934,10 @@ class RollingDiagnosticLogStore(
         "invalidated", "invalid" -> DiagnosticApprovalState.INVALIDATED.wireName
         else -> DiagnosticApprovalState.UNKNOWN.wireName
     }
+
+    /** Closed vocabulary for typed error/reason codes: enum-style tokens only. */
+    private fun canonicalTypedCode(value: String): String =
+        value.trim().uppercase().filter { it.isLetterOrDigit() || it == '_' }.take(48).ifBlank { "unknown" }
 
     private fun canonicalTerminalState(value: String): String = when (value.trim().lowercase()) {
         "running", "started" -> DiagnosticTerminalState.RUNNING.wireName

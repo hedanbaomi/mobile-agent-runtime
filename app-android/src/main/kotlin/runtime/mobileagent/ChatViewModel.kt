@@ -31,18 +31,30 @@ import runtime.mobileagent.domain.resolveEffectiveOutputCap
 import runtime.mobileagent.domain.*
 import runtime.mobileagent.diagnostics.DiagnosticApprovalState
 import runtime.mobileagent.diagnostics.DiagnosticAuthority
+import runtime.mobileagent.diagnostics.DiagnosticCompactionState
+import runtime.mobileagent.diagnostics.DiagnosticModelDispatchState
+import runtime.mobileagent.diagnostics.DiagnosticModelStage
+import runtime.mobileagent.diagnostics.DiagnosticTerminalState
 import runtime.mobileagent.diagnostics.DiagnosticToolCapability
+import runtime.mobileagent.diagnostics.DiagnosticToolRunState
+import runtime.mobileagent.diagnostics.ContextCompactionStateRecord
+import runtime.mobileagent.diagnostics.ModelRequestStateRecord
+import runtime.mobileagent.diagnostics.RunStateRecord
 import runtime.mobileagent.diagnostics.RuntimeToolingUnavailableCode
 import runtime.mobileagent.diagnostics.RuntimeToolingUnavailableRecord
 import runtime.mobileagent.diagnostics.RuntimeToolExposureReason
 import runtime.mobileagent.diagnostics.RuntimeToolExposureRecord
 import runtime.mobileagent.diagnostics.ToolApprovalStateRecord
+import runtime.mobileagent.diagnostics.ToolInvocationStateRecord
 import runtime.mobileagent.feature.chat.*
 import runtime.mobileagent.knowledge.*
 import runtime.mobileagent.provider.AssistantToolCall
 import runtime.mobileagent.provider.ChatMessage
 import runtime.mobileagent.provider.HeaderSecretResolver
 import runtime.mobileagent.provider.InlineImage
+import runtime.mobileagent.provider.ModelDiagnosticSink
+import runtime.mobileagent.provider.ModelDiagnosticStage
+import runtime.mobileagent.provider.ModelDispatchStatus
 import runtime.mobileagent.provider.ModelEvent
 import runtime.mobileagent.provider.ModelRequest
 import runtime.mobileagent.provider.ParameterLayers
@@ -417,6 +429,50 @@ class ChatViewModel(
                 ))
             var secret: CharArray? = null
             val compactionUsage = RunCompactionUsage()
+            // Last-resort watchdog (review-APK QA P1 "对话轮次静默挂死"): every
+            // terminal outcome of the run pipeline is delivered through one
+            // collector, so a blocked store write or transport can leave the user
+            // with a grey card and no feedback at all.  This coroutine is
+            // independent of that pipeline: past the run deadline plus grace it
+            // always surfaces a visible terminal status, records typed evidence,
+            // and best-effort terminalizes the durable record afterwards.
+            val watchdogJob = viewModelScope.launch {
+                delay(run.budget.maxRuntimeMs + RUN_WATCHDOG_GRACE_MS)
+                if (record.state in TERMINAL) return@launch
+                state.value = state.value.copy(
+                    streaming = false,
+                    pendingTool = null,
+                    status = "运行无响应：已超过运行时限仍未收到终态事件，已停止等待。外部结果可能未知，如需继续请重试或新建会话。",
+                    statusKind = "error",
+                )
+                runCatching {
+                    (getApplication<Application>() as MobileAgentApp).diagnostics.recordRunState(
+                        RunStateRecord(
+                            state = DiagnosticTerminalState.TIMED_OUT,
+                            requestRef = run.runId,
+                            sessionRef = conversationId,
+                            reasonCode = "watchdog_timeout",
+                            modelRounds = run.modelRounds,
+                            toolCalls = run.toolCalls,
+                        ),
+                    )
+                }
+                viewModelScope.launch(Dispatchers.IO) {
+                    withContext(NonCancellable) {
+                        runCatching {
+                            if (record.state !in TERMINAL) {
+                                container.runs.save(record.copy(
+                                    state = RunStatus.UNKNOWN_OUTCOME,
+                                    errorCode = "UNKNOWN_OUTCOME",
+                                    stopReason = "watchdog: no terminal event before the run deadline",
+                                    finishedAt = Utc.nowIso(),
+                                    updatedAt = Utc.nowIso(),
+                                ))
+                            }
+                        }
+                    }
+                }
+            }
             var assistantId: String? = null
             var answer = ""
             var reasoning = ""
@@ -511,22 +567,39 @@ class ChatViewModel(
                 val windowTarget = contextWindowTarget(model.providerId, provider.baseUrl, model.modelId)
                 val contextWindow = model.resolvedContextWindow(windowTarget)
                 val inputBudget = contextPolicy.inputLimit(contextWindow, outputDecision.value).toInt()
-                val hits = RetrievalBudget.clip(result.hits, limit("knowledgeTokenBudget", 3000, inputBudget))
-                val bound = CitationMap.bind(run.runId, hits).map { it.copy(citationId = run.runId + "-" + it.citationId) }
-                bound.zip(hits).forEach { (citation, hit) -> citations[citation.citationId] = citation to hit.text }
+                val clipped = RetrievalBudget.clip(result.hits, limit("knowledgeTokenBudget", 3000, inputBudget))
                 val images = mutableListOf<InlineImage>()
                 var warning: String? = null
-                when (val decision = StrictVisualPolicy.allow(hits.any { it.assetId != null }, "image" in model.capabilities, degrade)) {
-                    is StrictVisualDecision.Reject -> error(decision.reason)
-                    is StrictVisualDecision.Allow -> warning = decision.warning
+                // Narrowed strict-visual policy (review-APK QA P2): one visual hit
+                // no longer rejects the whole retrieval, and a policy decision is
+                // never surfaced as "invalid parameters".  Visual hits are withheld
+                // with a typed, runtime-authored notice — never silently dropped —
+                // and the model is told not to claim it examined those images.
+                val visualDecision = StrictVisualPolicy.allow(
+                    clipped.any { it.assetId != null }, "image" in model.capabilities, degrade,
+                )
+                val withheldVisuals = clipped.count { it.assetId != null }
+                val hits: List<SearchHit> = when (visualDecision) {
+                    is StrictVisualDecision.Reject -> {
+                        warning = withheldVisualEvidenceNotice(withheldVisuals, policy = visualDecision)
+                        clipped.filter { it.assetId == null }
+                    }
+                    is StrictVisualDecision.Allow -> {
+                        warning = visualDecision.warning
+                        clipped
+                    }
                 }
-                if (warning == null && hits.any { it.assetId != null }) {
+                if (visualDecision is StrictVisualDecision.Allow && !degrade && hits.any { it.assetId != null }) {
                     when (val plan = withContext(Dispatchers.IO) { VisualAttachmentPolicy.plan(hits.mapNotNull { it.assetId }, container.knowledge::assetBytes) }) {
-                        is VisualAttachmentPlan.Incomplete -> if (!degrade) error(plan.reason) else warning = plan.reason
+                        is VisualAttachmentPlan.Incomplete -> warning = withheldVisualEvidenceNotice(
+                            hits.count { it.assetId != null }, detail = "VISUAL_ATTACHMENT_INCOMPLETE",
+                        )
                         is VisualAttachmentPlan.Complete -> plan.images.forEach { images += InlineImage(it.mediaType, Base64.getEncoder().encodeToString(it.bytes), it.assetId) }
                     }
                 }
                 if (degrade && hits.any { it.assetId != null }) warning = "未提供原始图片，视觉证据可能不完整。"
+                val bound = CitationMap.bind(run.runId, hits).map { it.copy(citationId = run.runId + "-" + it.citationId) }
+                bound.zip(hits).forEach { (citation, hit) -> citations[citation.citationId] = citation to hit.text }
                 metadata = citationMetadata(bound, warning, result.coverage)
                 val system = PromptTemplates.render(binding.prompt.template, mapOf("date" to LocalDate.now().toString(),
                     "agent_name" to binding.agentName, "knowledge_bases" to kbIds.joinToString(",")))
@@ -668,6 +741,31 @@ class ChatViewModel(
                 )
                 val toolExecutor = runTools.executor
                 activeToolExecutor = toolExecutor
+                // Tool dispatch/result evidence (review-APK QA P2): dispatch,
+                // result and UNKNOWN_OUTCOME previously wrote zero diagnostic
+                // events, so a failed tool left no trace to diagnose.  Typed and
+                // bounded only — arguments and result bodies never enter it.
+                fun recordToolInvocation(
+                    callId: String,
+                    name: String,
+                    state: DiagnosticToolRunState,
+                    requestRef: String,
+                    errorCode: String? = null,
+                ) {
+                    runCatching {
+                        (getApplication<Application>() as MobileAgentApp).diagnostics.recordToolInvocationState(
+                            ToolInvocationStateRecord(
+                                callId = callId,
+                                state = state,
+                                requestRef = requestRef,
+                                sessionRef = conversationId,
+                                capability = diagnosticToolCapability(name, toolExecutor.specs),
+                                authority = currentDiagnosticAuthority(),
+                                errorCode = errorCode,
+                            ),
+                        )
+                    }
+                }
                 preparationStage = "prompt"
                 // Freeze-once run facts (b07 follow-up finding D): the global
                 // root prompt, Skill instructions/pins, retrieval generations,
@@ -916,6 +1014,47 @@ class ChatViewModel(
                         } else null,
                         result.warnings.joinToString(" ").takeIf { it.isNotBlank() },
                     ).joinToString(" "))
+                // Model transport observability (review-APK QA P2): the chat run
+                // previously wrote no model request evidence at all, so a stalled
+                // or failed dispatch left nothing to diagnose.  Observability
+                // only and typed; request/response bodies never enter it.
+                val modelDiagnostics = ModelDiagnosticSink { event ->
+                    runCatching {
+                        (getApplication<Application>() as MobileAgentApp).diagnostics.recordModelRequestState(
+                            ModelRequestStateRecord(
+                                stage = when (event.stage) {
+                                    ModelDiagnosticStage.REQUEST_VALIDATION -> DiagnosticModelStage.REQUEST_VALIDATION
+                                    ModelDiagnosticStage.REQUEST_READY -> DiagnosticModelStage.REQUEST_READY
+                                    ModelDiagnosticStage.REQUEST_DISPATCH -> DiagnosticModelStage.REQUEST_DISPATCH
+                                    ModelDiagnosticStage.RESPONSE_HEADERS -> DiagnosticModelStage.RESPONSE_HEADERS
+                                    ModelDiagnosticStage.RESPONSE_BODY -> DiagnosticModelStage.RESPONSE_BODY
+                                    ModelDiagnosticStage.STREAM_EVENT -> DiagnosticModelStage.STREAM_EVENT
+                                    ModelDiagnosticStage.TERMINAL -> DiagnosticModelStage.TERMINAL
+                                },
+                                dispatchState = when (event.dispatchStatus) {
+                                    ModelDispatchStatus.NOT_DISPATCHED -> DiagnosticModelDispatchState.NOT_DISPATCHED
+                                    ModelDispatchStatus.DISPATCHED -> DiagnosticModelDispatchState.DISPATCHED
+                                    ModelDispatchStatus.RESPONSE_RECEIVED -> DiagnosticModelDispatchState.RESPONSE_RECEIVED
+                                    ModelDispatchStatus.UNKNOWN_AFTER_DISPATCH ->
+                                        DiagnosticModelDispatchState.UNKNOWN_AFTER_DISPATCH
+                                },
+                                requestRef = run.runId,
+                                sessionRef = conversationId,
+                                endpointKind = event.endpointKind,
+                                httpStatus = event.httpStatus,
+                                errorCode = event.errorCode,
+                                exceptionType = event.exceptionClass,
+                                durationMs = event.elapsedMillis,
+                                responseBytes = event.responseBytes ?: 0L,
+                                streaming = event.streaming,
+                                messageCount = event.messageCount ?: 0,
+                                imageCount = event.imageCount ?: 0,
+                                toolCount = event.toolCount ?: 0,
+                                eventType = event.eventType,
+                            ),
+                        )
+                    }
+                }
                 val runtime = AgentRuntime(adapter, executor = toolExecutor, onApprove = { call ->
                     val deferred = CompletableDeferred<Boolean>()
                     // RuntimeIntegration.snapshot() is the canonical, UI-safe
@@ -986,7 +1125,9 @@ class ChatViewModel(
                         require(historyAssetIds.all { assetId -> citations.values.any { (citation, _) ->
                             citation.assetId == assetId && citation.knowledgeBaseId in allowed && !container.knowledge.locateCitation(citation).removed
                         } }) { "PERMISSION_DENIED: historical visual evidence was removed or revoked" }
-                    }))
+                    },
+                    diagnostics = modelDiagnostics,
+                ))
                     // Rendezvous keeps durable old exchanges ahead of a later compaction checkpoint.
                     .flowOn(Dispatchers.IO).buffer(0).collect { event ->
                         var persistRun = false
@@ -997,6 +1138,18 @@ class ChatViewModel(
                             }
                             is RuntimeEvent.ContextCompactionChanged -> {
                                 record = compactionUsage.reconcile(record, listOf(event.record))
+                                runCatching {
+                                    (getApplication<Application>() as MobileAgentApp).diagnostics.recordContextCompactionState(
+                                        ContextCompactionStateRecord(
+                                            state = DiagnosticCompactionState.entries.firstOrNull {
+                                                it.name == event.record.state.name
+                                            } ?: DiagnosticCompactionState.FAILED,
+                                            requestRef = run.runId,
+                                            sessionRef = conversationId,
+                                            reasonCode = event.record.state.name.lowercase(),
+                                        ),
+                                    )
+                                }
                                 if (event.record.state == ContextCompactionState.PREPARED) {
                                     // Finish the prior assistant checkpoint before releasing its id. A
                                     // summary failure must get its own error row, never rewrite it.
@@ -1095,11 +1248,15 @@ class ChatViewModel(
                             }
                             is RuntimeEvent.ToolCallObserved -> {
                                 toolCallInFlight = true
+                                recordToolInvocation(event.callId, event.name, DiagnosticToolRunState.DISPATCHED, run.runId)
                                 if (runCatching { Json.parseToJsonElement(event.argumentsJson) is JsonObject }.getOrDefault(false))
                                     observed[event.callId] = ToolCallPart(event.callId, event.name, event.argumentsJson)
                             }
                             is RuntimeEvent.ToolApprovalRequested -> {
                                 toolWaitingApproval = true
+                                recordToolInvocation(
+                                    event.callId, event.name, DiagnosticToolRunState.WAITING_APPROVAL, run.runId,
+                                )
                                 record = record.copy(state = RunStatus.WAITING_TOOL_APPROVAL)
                                 val runtimeInvocationId = runTools.runtimeInvocationId(event.callId)
                                     ?: InternalRequestIds.new()
@@ -1122,6 +1279,22 @@ class ChatViewModel(
                                 persistRun = true
                             }
                             is RuntimeEvent.ToolResultProduced -> {
+                                recordToolInvocation(
+                                    event.callId,
+                                    event.name,
+                                    when (event.status) {
+                                        "VALUE" -> DiagnosticToolRunState.VALUE
+                                        "DENIED" -> DiagnosticToolRunState.DENIED
+                                        "INVALID" -> DiagnosticToolRunState.INVALID
+                                        "UNKNOWN_OUTCOME" -> DiagnosticToolRunState.UNKNOWN_OUTCOME
+                                        else -> DiagnosticToolRunState.FAILED
+                                    },
+                                    run.runId,
+                                    errorCode = runCatching {
+                                        Json.parseToJsonElement(event.resultJson).jsonObject["errorCode"]
+                                            ?.jsonPrimitive?.contentOrNull
+                                    }.getOrNull(),
+                                )
                                 val approvalAudit = pendingApprovalForCall(event.callId)
                                 when (event.status) {
                                     "DENIED" -> approvalAudit?.let {
@@ -1171,6 +1344,24 @@ class ChatViewModel(
                                     messageId = event.messageId ?: EntityId.random().value)
                             }
                             is RuntimeEvent.RunFinished -> {
+                                runCatching {
+                                    (getApplication<Application>() as MobileAgentApp).diagnostics.recordRunState(
+                                        RunStateRecord(
+                                            state = when (event.state.name) {
+                                                "COMPLETED" -> DiagnosticTerminalState.SUCCEEDED
+                                                "CANCELLED" -> DiagnosticTerminalState.CANCELLED
+                                                "BUDGET_EXHAUSTED" -> DiagnosticTerminalState.TIMED_OUT
+                                                "UNKNOWN_OUTCOME" -> DiagnosticTerminalState.UNKNOWN
+                                                else -> DiagnosticTerminalState.FAILED
+                                            },
+                                            requestRef = run.runId,
+                                            sessionRef = conversationId,
+                                            reasonCode = event.state.name.lowercase(),
+                                            modelRounds = event.modelRounds,
+                                            toolCalls = event.toolCalls,
+                                        ),
+                                    )
+                                }
                                 pendingApprovalFor(run.runId)?.let { pending ->
                                     when (event.state.name) {
                                         RunStatus.BUDGET_EXHAUSTED.name -> settleActiveApproval(pending.invocationId ?: pending.callId, expired = true)
@@ -1325,6 +1516,7 @@ class ChatViewModel(
                 persistTerminalError(errorPart)
                 state.value = state.value.copy(status = errorPart.message, statusKind = "error", error = null)
             } finally {
+                watchdogJob.cancel()
                 // Shield the whole cleanup, including dispatcher returns. Individually shielding
                 // an IO block can still throw while returning to this already-cancelled UI job.
                 withContext(NonCancellable) {
@@ -1534,7 +1726,7 @@ class ChatViewModel(
         val coverage = root["retrievalCoverage"]?.jsonObject ?: return null
         if (coverage["partial"]?.jsonPrimitive?.booleanOrNull != true) return null
         return coverage["noticeUi"]?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() }
-            ?: "部分知识库未参与本次检索。"
+            ?: "本次检索有知识库未参与；不要声称已检索这些未参与的来源。"
     }
 
     /**
@@ -1808,8 +2000,10 @@ class ChatViewModel(
                     put("kb", source.knowledgeBaseId); put("reason", source.reason.name)
                 }) } }
                 put("partial", it.partial)
-                it.notice()?.let { notice -> put("notice", notice) }
-                if (it.partial) put("noticeUi", "部分知识库未参与本次检索（${it.searched.size}/${it.requested.size}）。")
+                it.notice()?.let { notice ->
+                    put("notice", notice)
+                    put("noticeUi", notice)
+                }
             }
         }
         putJsonArray("citations") { bound.forEach { c -> add(buildJsonObject {
@@ -1958,6 +2152,7 @@ class ChatViewModel(
         private val PENDING_APPROVAL_LOCK = Any()
         private val processPendingApprovals = linkedMapOf<String, PendingApprovalAudit>()
         private const val REQUEST_PREVIEW_HINT_PREFIX = "request-inspector.preview-hint."
+        private const val RUN_WATCHDOG_GRACE_MS = 60_000L
         val TERMINAL = setOf(RunStatus.COMPLETED, RunStatus.FAILED, RunStatus.CANCELLED, RunStatus.BUDGET_EXHAUSTED, RunStatus.UNKNOWN_OUTCOME)
     }
 }

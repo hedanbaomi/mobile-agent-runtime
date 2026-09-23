@@ -51,6 +51,14 @@ data class AgentRuntimeRequest(
     /** Alias the resolved output decision came from (null = profile default / AUTO). */
     val outputTokenField: String? = null,
     val context: RuntimeContext? = null,
+    /**
+     * Optional transport observability sink.  It rides every model request this
+     * run dispatches (including compaction), so a run that stalls or fails on
+     * the wire leaves typed stage evidence even when no model event arrives.
+     * Observability only: it can never change transport outcome or capture
+     * request/response bodies unless the sink explicitly opts in.
+     */
+    val diagnostics: runtime.mobileagent.provider.ModelDiagnosticSink? = null,
 )
 
 /** A bounded summary safe for persistence and inspector lists. */

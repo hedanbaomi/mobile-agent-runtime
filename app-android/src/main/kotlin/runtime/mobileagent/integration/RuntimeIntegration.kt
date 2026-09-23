@@ -4290,7 +4290,10 @@ private val CANONICAL_DEFAULT_WORKSPACE_CAPABILITIES = setOf(
     CapabilityId.FILE_READ_TEXT,
     CapabilityId.FILE_WRITE_TEXT,
     CapabilityId.FILE_CREATE_DIRECTORY,
-    CapabilityId.FILE_MOVE,
+    // file.move is deliberately absent: the model-visible schema never exposes
+    // file_move (fail-closed OPERATION_UNAVAILABLE), so an automatic grant must
+    // not declare a capability that can never execute. Backend move() remains
+    // available to privileged/bridge transports under their own grants.
     CapabilityId.FILE_DELETE,
     "file.apply_patch",
 )

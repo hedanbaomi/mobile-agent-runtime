@@ -44,6 +44,27 @@ import java.security.MessageDigest
 import java.util.Base64
 import java.util.UUID
 
+/**
+ * Runtime-authored disclosure for withheld visual originals (review-APK QA P2).
+ * Typed codes only — no asset ids, paths or provider text — and never silent:
+ * the model is told exactly what it did not receive and must not claim it
+ * examined those images.
+ */
+internal fun withheldVisualEvidenceNotice(
+    count: Int,
+    policy: StrictVisualDecision.Reject? = null,
+    detail: String? = null,
+): String {
+    val reason = policy?.code?.name ?: detail ?: "VISUAL_ATTACHMENT_UNAVAILABLE"
+    val guidance = if (policy != null) {
+        "如需原图，请新建会话改用支持图像的对话模型；启用纯文本模式可在明知没有原图的情况下继续。"
+    } else {
+        ""
+    }
+    return "本次结果有 $count 处视觉证据未提供原图（原因：$reason）。" +
+        "不得声称已查看这些图片，也不得只凭文本回答这些来源的问题。$guidance"
+}
+
 /** Run-local routing, provider composition, and verified knowledge evidence. */
 class RunTools(
     private val container: AppContainer,
@@ -592,8 +613,13 @@ class RunTools(
         verifyAll(evidence)
         val assets = evidence.mapNotNull { it.citation.assetId }.distinct()
         if (assets.isEmpty()) return Visuals(emptyList())
+        // Narrowed strict-visual policy (review-APK QA P2): visual evidence never
+        // fails the whole call as "invalid parameters" and is never silently
+        // dropped.  Originals are withheld with a typed, runtime-authored notice
+        // so the model cannot claim it examined an image it never received.
         when (val decision = StrictVisualPolicy.allow(true, supportsImages, textDegradation)) {
-            is StrictVisualDecision.Reject -> throw EvidenceInvalid(decision.reason)
+            is StrictVisualDecision.Reject ->
+                return Visuals(emptyList(), withheldVisualEvidenceNotice(assets.size, policy = decision))
             is StrictVisualDecision.Allow -> Unit
         }
         if (textDegradation) return Visuals(emptyList(), TEXT_DEGRADATION_WARNING)
@@ -602,7 +628,7 @@ class RunTools(
         // also cap the combined automatic-RAG and tool image set at attachment.
         val previousAssets = synchronized(registryLock) { registry.values.mapNotNull { it.citation.assetId } }
         if ((previousAssets + assets).toSet().size > VisualAttachmentPolicy.MAX_IMAGES) {
-            throw EvidenceInvalid("Run tool evidence exceeds the image count limit")
+            return Visuals(emptyList(), withheldVisualEvidenceNotice(assets.size, detail = "RUN_IMAGE_BUDGET_EXCEEDED"))
         }
         val byAsset = evidence.filter { it.citation.assetId != null }.associateBy { it.citation.assetId!! }
         return when (val plan = VisualAttachmentPolicy.plan(assets) { id ->
@@ -614,7 +640,8 @@ class RunTools(
             if (locator.removed || locator.blobHash != digest || source.first !in IMAGE_MEDIA_TYPES || source.second.isEmpty()) return@plan null
             source
         }) {
-            is VisualAttachmentPlan.Incomplete -> throw EvidenceInvalid(plan.reason)
+            is VisualAttachmentPlan.Incomplete ->
+                Visuals(emptyList(), withheldVisualEvidenceNotice(assets.size, detail = "VISUAL_ATTACHMENT_INCOMPLETE"))
             is VisualAttachmentPlan.Complete -> Visuals(plan.images)
         }
     }

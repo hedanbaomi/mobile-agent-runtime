@@ -107,7 +107,7 @@ private val TYPED_WORKSPACE_FILE_TOOLS = setOf(
     "file_read_text",
     "file_write_text",
     "file_create_directory",
-    "file_move",
+    // file_move is intentionally absent: it is never exposed to the model.
     "file_delete",
 )
 

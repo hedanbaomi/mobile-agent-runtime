@@ -193,6 +193,48 @@ internal class ScanBudget(
     }
 }
 
+/**
+ * Usage totals for one workspace tree scan (or one copy/move node): counted entries,
+ * regular files, and the file bytes charged against the workspace quota.
+ */
+internal data class WorkspaceUsage(
+    val files: Int = 0,
+    val bytes: Long = 0L,
+    val entries: Int = 0,
+)
+
+/**
+ * Shared, Android-free usage accounting for workspace tree scans.  Both the internal
+ * filesystem backend and the SAF backend account through these rules, so their
+ * quota / entry / depth semantics cannot drift apart again.
+ *
+ * The helper deliberately has NO per-file ([InternalWorkspaceLimits.maxFileBytes]) rule.
+ * That limit binds the *subject* of an operation (the file being written or read as
+ * text), never pre-existing neighbours met while accounting: a directory that already
+ * contains an oversized photo must stay writeable.  Pre-existing files are still counted
+ * byte for byte against [InternalWorkspaceLimits.quotaBytes], and the entry and depth
+ * ceilings are enforced exactly as before.
+ */
+internal object WorkspaceUsageAccounting {
+    /** One directory visit in a scan; [depth] is 0 at the scanned root. */
+    fun enterDirectory(limits: InternalWorkspaceLimits, depth: Int) {
+        if (depth > limits.maxPathDepth) InternalWorkspaceErrorCode.DEPTH_LIMIT_EXCEEDED.error()
+    }
+
+    /** Count one enumerated child entry (file or directory) against the entry ceiling. */
+    fun countEntry(usage: WorkspaceUsage, limits: InternalWorkspaceLimits): WorkspaceUsage {
+        val entries = usage.entries + 1
+        if (entries > limits.maxEntries) InternalWorkspaceErrorCode.ENTRY_LIMIT_EXCEEDED.error()
+        return usage.copy(entries = entries)
+    }
+
+    /** Count one regular file's [size] against the quota; the per-file limit never applies here. */
+    fun countFile(usage: WorkspaceUsage, size: Long, limits: InternalWorkspaceLimits): WorkspaceUsage {
+        if (size > limits.quotaBytes - usage.bytes) InternalWorkspaceErrorCode.QUOTA_EXCEEDED.error()
+        return usage.copy(files = usage.files + 1, bytes = usage.bytes + size)
+    }
+}
+
 internal data class InternalWorkspaceDescriptor(
     val id: String,
     val displayName: String,

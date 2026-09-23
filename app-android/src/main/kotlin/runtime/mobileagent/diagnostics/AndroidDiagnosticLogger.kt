@@ -219,6 +219,15 @@ class AndroidDiagnosticLogger private constructor(
 
     fun recordToolApprovalState(record: ToolApprovalStateRecord): Boolean = store.recordToolApprovalState(record)
 
+    fun recordToolInvocationState(record: ToolInvocationStateRecord): Boolean = store.recordToolInvocationState(record)
+
+    fun recordModelRequestState(record: ModelRequestStateRecord): Boolean = store.recordModelRequestState(record)
+
+    fun recordRunState(record: RunStateRecord): Boolean = store.recordRunState(record)
+
+    fun recordContextCompactionState(record: ContextCompactionStateRecord): Boolean =
+        store.recordContextCompactionState(record)
+
     fun recordShellExecutionState(record: ShellExecutionStateRecord): Boolean =
         store.recordShellExecutionState(record)
 

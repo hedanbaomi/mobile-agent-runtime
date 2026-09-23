@@ -46,6 +46,7 @@ import runtime.mobileagent.knowledge.ReciprocalRankFusion
 import runtime.mobileagent.knowledge.RetrievalCoverage
 import runtime.mobileagent.knowledge.RetrievalResult
 import runtime.mobileagent.knowledge.RetrievalUnavailableReason
+import runtime.mobileagent.knowledge.formatRetrievalCoverageNotice
 import runtime.mobileagent.knowledge.SearchHit
 import runtime.mobileagent.knowledge.UnavailableSource
 import runtime.mobileagent.knowledge.VectorIndexCache
@@ -1718,7 +1719,12 @@ class KnowledgeRepository(
         val hits = ReciprocalRankFusion.preferClaimSupporting(ReciprocalRankFusion.merge(sources).take(topK))
         if (hits.isEmpty()) warnings += "No in-scope evidence"
         val coverage = RetrievalCoverage(requested = bases, searched = searched.toList(), unavailable = unavailable.toList())
-        coverage.notice()?.let { warnings += "部分知识库未参与本次检索（${searched.size}/${bases.size}）：$it" }
+        // Shared formatter (formatRetrievalCoverageNotice) produces this
+        // warning and RetrievalCoverage.notice() alike, so the wording cannot
+        // drift. It is null — no warning at all — when every knowledge base
+        // participated, and otherwise states "N/M 未参与" with N = missing,
+        // M = total requested. Runtime-authored reason codes only; no query text.
+        formatRetrievalCoverageNotice(coverage)?.let { warnings += it }
         return RetrievalResult(
             hits,
             CitationMap.bind(runId, hits),
@@ -1856,10 +1862,8 @@ class KnowledgeRepository(
         if (isApiKnowledgeBase(kbId)) {
             return runBlocking { rebuildIndexCancellable(kbId, acknowledgeDuplicateCharge) }
         }
-        return synchronized(indexLock) {
-            requireKb(kbId)
-            db.transaction { rebuildUnlocked(kbId) }
-        }
+        synchronized(indexLock) { requireKb(kbId) }
+        return rebuildIndexPhased(kbId)
     }
 
     fun repairIndexes() {
@@ -1879,6 +1883,7 @@ class KnowledgeRepository(
                     ).singleOrNull()?.string("embedding_space_id")?.let { space -> apiEmbedderForSpace(space) != null } == true
             }
             .forEach { runBlocking { rebuildIndexCancellable(it) } }
+        val pendingLocalRebuild = mutableListOf<String>()
         synchronized(indexLock) {
             db.query("SELECT id, active_version_id, blob_hash FROM documents WHERE deleted_at IS NULL AND active_version_id IS NOT NULL").forEach { doc ->
                 val versionId = doc.string("active_version_id")
@@ -1920,10 +1925,13 @@ class KnowledgeRepository(
                     db.query("SELECT COUNT(*) AS n FROM generation_members WHERE generation_id = ?", listOf(pin)).single().long("n")
                 }
                 if (pin == null || members == 0L) {
-                    db.transaction { rebuildUnlocked(kbId) }
+                    pendingLocalRebuild += kbId
                 }
             }
         }
+        // Long rebuild phases run outside the index lock so a repair can never
+        // freeze retrieval for the whole scan.
+        pendingLocalRebuild.forEach { rebuildIndexPhased(it) }
     }
 
     /**
@@ -1931,22 +1939,53 @@ class KnowledgeRepository(
      * Completed batches survive interruption; only the final binding/generation switch is atomic.
      * No parser, Vision adapter or API adapter is reachable from this upgrade.
      */
-    fun upgradeLocalEmbeddingSpace(kbId: String): String? = synchronized(indexLock) {
-        val row = db.query("SELECT embedding_space_id, deleted_at FROM knowledge_bases WHERE id = ?", listOf(kbId))
-            .singleOrNull() ?: return@synchronized null
-        val oldSpace = row.string("embedding_space_id")
-        if (row.string("deleted_at").isNotBlank() || oldSpace !in legacyLocalEmbeddingSpaces) return@synchronized null
-        val inputs = embeddingInputsByVersionForKnowledgeBase(kbId)
-        inputs.values.forEach { source -> source.chunked(128).forEach { batch ->
-            db.transaction { ensureEmbeddings(batch, embedder) }
-        } }
-        db.transaction {
-            val current = db.query("SELECT embedding_space_id, deleted_at FROM knowledge_bases WHERE id = ?", listOf(kbId)).single()
-            check(current.string("embedding_space_id") == oldSpace && current.string("deleted_at").isBlank())
-            check(embeddingInputsByVersionForKnowledgeBase(kbId).keys == inputs.keys) { "Document versions changed during local upgrade" }
-            val generation = buildGenerationFromCachedUnlocked(kbId, embedder, inputs)
-            db.execute("UPDATE knowledge_bases SET embedding_space_id = ? WHERE id = ?", listOf(embedder.spaceId, kbId))
-            generation
+    /** The active version set changed under an unlocked upgrade embed phase. */
+    private class VersionsChangedDuringUpgradeException :
+        IllegalStateException("Document versions changed during local upgrade")
+
+    fun upgradeLocalEmbeddingSpace(kbId: String): String? {
+        // The embed phase below runs unlocked, so a concurrent publish can
+        // legitimately change the version set mid-upgrade.  Replan once: rows
+        // already embedded are cache hits, so a retry only pays for the new
+        // versions.  A persistent change still fails loudly.
+        var replansLeft = 1
+        while (true) {
+            val planned = synchronized(indexLock) {
+                val row = db.query("SELECT embedding_space_id, deleted_at FROM knowledge_bases WHERE id = ?", listOf(kbId))
+                    .singleOrNull() ?: return@synchronized null
+                val oldSpace = row.string("embedding_space_id")
+                if (row.string("deleted_at").isNotBlank() || oldSpace !in legacyLocalEmbeddingSpaces) return@synchronized null
+                oldSpace to embeddingInputsByVersionForKnowledgeBase(kbId)
+            } ?: return null
+            val (oldSpace, inputs) = planned
+            // Long phase (NO index lock, NO transaction): re-embedding a legacy
+            // space runs minutes of inference and must not freeze retrieval or any
+            // other repository user while it does (review follow-up).
+            inputs.values.forEach { source -> source.chunked(128).forEach { batch ->
+                // ensureEmbeddings owns its own short transactions and runs
+                // inference with none open.
+                ensureEmbeddings(batch, embedder)
+            } }
+            try {
+                // Repair wraps the lock, never the reverse: a commit-time miss
+                // must be embedded with no index lock held (review follow-up).
+                return withEmbeddingRepair(embedder) {
+                    synchronized(indexLock) {
+                        db.transaction {
+                            val current = db.query("SELECT embedding_space_id, deleted_at FROM knowledge_bases WHERE id = ?", listOf(kbId)).single()
+                            check(current.string("embedding_space_id") == oldSpace && current.string("deleted_at").isBlank())
+                            if (embeddingInputsByVersionForKnowledgeBase(kbId).keys != inputs.keys) {
+                                throw VersionsChangedDuringUpgradeException()
+                            }
+                            val generation = buildGenerationFromCachedUnlocked(kbId, embedder)
+                            db.execute("UPDATE knowledge_bases SET embedding_space_id = ? WHERE id = ?", listOf(embedder.spaceId, kbId))
+                            generation
+                        }
+                    }
+                }
+            } catch (changed: VersionsChangedDuringUpgradeException) {
+                if (replansLeft-- <= 0) throw changed
+            }
         }
     }
 
@@ -1961,10 +2000,22 @@ class KnowledgeRepository(
             }
         }
 
-    private fun rebuildUnlocked(
+    /** Immutable inputs and binding facts for one index rebuild. */
+    private data class RebuildPlan(
+        val knowledgeBaseId: String,
+        val indexEmbedder: TextEmbedder,
+        val chunksByVersion: LinkedHashMap<String, Sequence<EmbeddingInput>>,
+    )
+
+    /**
+     * Database-only preflight for a rebuild: binding/consent checks plus the
+     * bounded input scan.  Never runs an embedding backend, so it is safe
+     * inside a transaction and cheap to fail fast before any slow phase.
+     */
+    private fun planRebuild(
         kbId: String,
         apiConsentGrantedForOperation: Boolean = false,
-    ): String {
+    ): RebuildPlan {
         val boundSpace = db.query(
             "SELECT embedding_space_id FROM knowledge_bases WHERE id = ?",
             listOf(kbId),
@@ -1982,9 +2033,84 @@ class KnowledgeRepository(
         check(boundSpace == indexEmbedder.spaceId) {
             "Knowledge base $kbId binding changed while rebuilding; refusing a mixed-space generation"
         }
-        val chunksByVersion = embeddingInputsByVersionForKnowledgeBase(kbId)
-        chunksByVersion.values.forEach { source -> source.chunked(128).forEach { ensureEmbeddings(it, indexEmbedder) } }
-        return buildGenerationFromCachedUnlocked(kbId, indexEmbedder, chunksByVersion)
+        return RebuildPlan(kbId, indexEmbedder, embeddingInputsByVersionForKnowledgeBase(kbId))
+    }
+
+    /**
+     * Long phase of a rebuild: embedding inference/provider calls.  Must run
+     * with NO database transaction open — see [ensureEmbeddings] for why.
+     */
+    private fun embedRebuild(plan: RebuildPlan) {
+        plan.chunksByVersion.values.forEach { source ->
+            source.chunked(128).forEach { ensureEmbeddings(it, plan.indexEmbedder) }
+        }
+    }
+
+    /**
+     * Short transaction: derive the generation from the immutable embedding
+     * cache only.  Never invokes a backend (see [buildGenerationFromCachedUnlocked]),
+     * so it may run inside a transaction and stays the atomic publication switch.
+     * The bound space is re-verified here: the plan phase runs unlocked, so a
+     * rebind could interleave between plan and commit — publishing anyway
+     * would label the generation with a stale embedding space.
+     */
+    private fun commitRebuild(plan: RebuildPlan): String {
+        val boundSpace = db.query(
+            "SELECT embedding_space_id FROM knowledge_bases WHERE id = ?",
+            listOf(plan.knowledgeBaseId),
+        ).singleOrNull()?.string("embedding_space_id")
+        check(boundSpace == plan.indexEmbedder.spaceId) {
+            "Knowledge base ${plan.knowledgeBaseId} binding changed while rebuilding; refusing a mixed-space generation"
+        }
+        return buildGenerationFromCachedUnlocked(plan.knowledgeBaseId, plan.indexEmbedder)
+    }
+
+    /**
+     * A commit-time rescan found an input without a cached vector — an
+     * activation racing its embedding write.  Callers repair it with no
+     * transaction open and retry (bounded) instead of failing a publication
+     * whose own embeddings are already durable (review follow-up: accept the
+     * authoritative rescan, self-heal on a miss rather than erroring).
+     */
+    private class MissingEmbeddingException(val input: EmbeddingInput) :
+        IllegalStateException("embedding missing after rebuild")
+
+    /**
+     * Run one atomic commit attempt.  On [MissingEmbeddingException] the single
+     * missing input is embedded outside the transaction (short transactions
+     * only, see [ensureEmbeddings]) and the attempt retried, at most [attempts]
+     * times; a persistent miss still fails loudly.
+     */
+    private fun <T> withEmbeddingRepair(
+        selectedEmbedder: TextEmbedder,
+        attempts: Int = 3,
+        attempt: () -> T,
+    ): T {
+        var last: MissingEmbeddingException? = null
+        for (round in 1..attempts) {
+            try {
+                return attempt()
+            } catch (missing: MissingEmbeddingException) {
+                last = missing
+                ensureEmbeddings(listOf(missing.input), selectedEmbedder)
+            }
+        }
+        throw checkNotNull(last)
+    }
+
+    /**
+     * Plan, embed, then commit.  The long embedding phase holds NEITHER the
+     * index lock NOR a database transaction; the commit holds the index lock
+     * and runs one short transaction (with [withEmbeddingRepair] self-healing).
+     */
+    private fun rebuildIndexPhased(kbId: String, apiConsentGrantedForOperation: Boolean = false): String {
+        val plan = planRebuild(kbId, apiConsentGrantedForOperation)
+        embedRebuild(plan)
+        // The repair loop stays outside the index lock: a commit attempt is a
+        // short locked transaction, while a miss is embedded lock-free.
+        return withEmbeddingRepair(plan.indexEmbedder) {
+            synchronized(indexLock) { db.transaction { commitRebuild(plan) } }
+        }
     }
 
     /**
@@ -2014,7 +2140,7 @@ class KnowledgeRepository(
                 val stored = db.query(
                     "SELECT content_hash, vector_blob FROM embeddings WHERE chunk_id = ? AND space_id = ?",
                     listOf(chunkId, indexEmbedder.spaceId),
-                ).singleOrNull() ?: error("embedding missing after rebuild")
+                ).singleOrNull() ?: throw MissingEmbeddingException(chunk)
                 check(stored.string("content_hash") == chunk.contentHash) {
                     "embedding content hash changed for chunk $chunkId"
                 }
@@ -3757,29 +3883,67 @@ class KnowledgeRepository(
             fail(job, "The file is empty")
             return
         }
-        val versionId = EntityId.random().value
         val contentHash = sha256Hex(bytes)
-        synchronized(indexLock) {
+        // Publication is phased so the slow embedding phase can never hold a
+        // database transaction (the store-wide monitor) or the repository index
+        // lock open: a long import would otherwise starve every other
+        // repository user — including chat retrieval and run feedback.
+        // Phase 0 is database-only and fails fast before anything is staged.
+        val rebuild = planRebuild(
+            job.knowledgeBaseId,
+            apiConsentGrantedForOperation = job.embeddingIsApi && job.embeddingConsent,
+        )
+        // Phase 1 (indexLock, short transaction): stage the version rows.  Readers
+        // only follow `documents.active_version_id`, so nothing staged is
+        // visible.  A previous attempt interrupted before the publish
+        // transaction leaves exactly one such row; reuse it instead of
+        // accumulating duplicates.
+        val versionId = synchronized(indexLock) {
             db.transaction {
-                db.execute(
-                    "INSERT INTO document_versions(id,document_id,parser_fingerprint,content_hash,status,created_at) VALUES (?,?,?,?,?,?)",
-                    listOf(versionId, job.documentId, fingerprint, contentHash, "STAGING", Utc.nowIso()),
-                )
-                persistChunks(versionId, chunks)
-                persistEmbeddings(versionId, selectedEmbedder)
-                db.execute("UPDATE assets SET document_version_id = ? WHERE document_id = ? AND (document_version_id IS NULL OR document_version_id = '')", listOf(versionId, job.documentId))
-                db.execute(
-                    "UPDATE document_versions SET status = ? WHERE id = ?",
-                    listOf(if (job.visualGapsAccepted) "READY_WITH_VISUAL_GAPS" else "READY", versionId),
-                )
-                db.execute("UPDATE documents SET active_version_id = ?, deleted_at = NULL WHERE id = ?", listOf(versionId, job.documentId))
-                ensureBatchGenerationCurrentLocked(job.id)
-                val generation = rebuildUnlocked(
-                    job.knowledgeBaseId,
-                    apiConsentGrantedForOperation = job.embeddingIsApi && job.embeddingConsent,
-                )
-                advanceBatchGenerationAfterPublicationLocked(job.id, generation)
-                if (!job.visualGapsAccepted) pipeline.recordPublication(job.id,chunkVersion,versionId)
+                val staged = db.query(
+                    "SELECT id FROM document_versions WHERE document_id = ? AND content_hash = ? AND status = 'STAGING' ORDER BY created_at DESC LIMIT 1",
+                    listOf(job.documentId, contentHash),
+                ).singleOrNull()?.string("id")
+                val id = staged ?: EntityId.random().value
+                if (staged == null) {
+                    db.execute(
+                        "INSERT INTO document_versions(id,document_id,parser_fingerprint,content_hash,status,created_at) VALUES (?,?,?,?,?,?)",
+                        listOf(id, job.documentId, fingerprint, contentHash, "STAGING", Utc.nowIso()),
+                    )
+                }
+                persistChunks(id, chunks)
+                id
+            }
+        }
+        // Phase 2 (NO indexLock, NO transaction): embedding inference/provider
+        // calls.  Retrieval and concurrent publications keep running during
+        // minutes of inference (see ensureEmbeddings for the transaction rule).
+        persistEmbeddings(versionId, selectedEmbedder)
+        val inputsWithNewVersion = linkedMapOf<String, Sequence<EmbeddingInput>>(
+            versionId to inputsForVersion(versionId),
+        )
+        inputsWithNewVersion.putAll(rebuild.chunksByVersion)
+        embedRebuild(rebuild.copy(chunksByVersion = inputsWithNewVersion))
+        // Phase 3 (indexLock, short transaction): the atomic visibility switch
+        // and the derived generation switch, from the immutable cache only.
+        // The build re-scans the authoritative active set, so a version another
+        // import published during phase 2 is never dropped from the generation.
+        // Repair wraps the lock, never the reverse: a commit-time miss is
+        // embedded with no index lock held (review follow-up).
+        withEmbeddingRepair(rebuild.indexEmbedder) {
+            synchronized(indexLock) {
+                db.transaction {
+                    db.execute("UPDATE assets SET document_version_id = ? WHERE document_id = ? AND (document_version_id IS NULL OR document_version_id = '')", listOf(versionId, job.documentId))
+                    db.execute(
+                        "UPDATE document_versions SET status = ? WHERE id = ?",
+                        listOf(if (job.visualGapsAccepted) "READY_WITH_VISUAL_GAPS" else "READY", versionId),
+                    )
+                    db.execute("UPDATE documents SET active_version_id = ?, deleted_at = NULL WHERE id = ?", listOf(versionId, job.documentId))
+                    ensureBatchGenerationCurrentLocked(job.id)
+                    val generation = commitRebuild(rebuild)
+                    advanceBatchGenerationAfterPublicationLocked(job.id, generation)
+                    if (!job.visualGapsAccepted) pipeline.recordPublication(job.id,chunkVersion,versionId)
+                }
             }
         }
         finishPublished(job)
@@ -3841,29 +4005,21 @@ class KnowledgeRepository(
      * copied by content hash into the new chunk key; only cache misses call
      * the selected backend.  Duplicate texts within one version are batched
      * once as well.
+     *
+     * The backend call is the slow step (local ONNX inference or a remote
+     * batch can run for minutes).  The store connection serializes every
+     * statement behind one monitor and holds that monitor for a whole
+     * transaction, so an embedding call made inside a transaction freezes
+     * every other repository user — including the chat pipeline that renders
+     * run feedback.  Each phase below therefore opens its own short
+     * transaction, and the backend call runs with no transaction open on the
+     * calling thread.  Callers must uphold the same invariant: never call
+     * this from inside `db.transaction { ... }`.
      */
     private fun ensureEmbeddings(inputs: List<EmbeddingInput>, selectedEmbedder: TextEmbedder) {
         if (inputs.isEmpty()) return
-        val pending = linkedMapOf<String, MutableList<EmbeddingInput>>()
-        inputs.forEach { input ->
-            val expectedHash = input.contentHash.ifBlank {
-                sha256Hex(input.text.toByteArray(Charsets.UTF_8))
-            }
-            val existing = storedEmbedding(input.chunkId, selectedEmbedder.spaceId)
-            if (existing != null) {
-                check(existing.contentHash == expectedHash) {
-                    "embedding content hash changed for chunk ${input.chunkId}"
-                }
-                validateEmbeddingBytes(existing.bytes, selectedEmbedder.dimension)
-                return@forEach
-            }
-            val cached = cachedEmbedding(selectedEmbedder.spaceId, expectedHash)
-            if (cached != null) {
-                validateEmbeddingBytes(cached.bytes, selectedEmbedder.dimension)
-                insertEmbedding(input.chunkId, selectedEmbedder.spaceId, cached.bytes, expectedHash)
-            } else {
-                pending.getOrPut(expectedHash) { mutableListOf() }.add(input.copy(contentHash = expectedHash))
-            }
+        val pending = db.transaction {
+            stageEmbeddingCacheHits(inputs, selectedEmbedder.spaceId, selectedEmbedder.dimension)
         }
         if (pending.isEmpty()) return
 
@@ -3876,12 +4032,14 @@ class KnowledgeRepository(
         check(vectors.size == representatives.size) {
             "embedding backend returned ${vectors.size} vectors for ${representatives.size} cache misses"
         }
-        pending.entries.zip(vectors).forEach { (entry, vector) ->
-            val contentHash = entry.key
-            validateEmbeddingVector(vector, selectedEmbedder.dimension)
-            val bytes = floatsToBytes(vector)
-            entry.value.forEach { input ->
-                insertEmbedding(input.chunkId, selectedEmbedder.spaceId, bytes, contentHash)
+        db.transaction {
+            pending.entries.zip(vectors).forEach { (entry, vector) ->
+                val contentHash = entry.key
+                validateEmbeddingVector(vector, selectedEmbedder.dimension)
+                val bytes = floatsToBytes(vector)
+                entry.value.forEach { input ->
+                    insertEmbedding(input.chunkId, selectedEmbedder.spaceId, bytes, contentHash)
+                }
             }
         }
     }

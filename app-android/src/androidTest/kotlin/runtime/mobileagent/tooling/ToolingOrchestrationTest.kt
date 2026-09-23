@@ -67,6 +67,7 @@ import runtime.mobileagent.skills.tooling.WorkspaceReadTextRequest
 import runtime.mobileagent.skills.tooling.WorkspaceResult
 import runtime.mobileagent.skills.tooling.WorkspaceStatRequest
 import runtime.mobileagent.skills.tooling.WorkspaceText
+import runtime.mobileagent.skills.tooling.WorkspaceWriteTextRequest
 
 class ToolingOrchestrationTest {
     @Test
@@ -1449,7 +1450,9 @@ class ToolingOrchestrationTest {
         val schemas = executor.toolingSpecs.associate { it.name to it.inputSchema }
 
         assertFalse(schemas.getValue(UnifiedWorkspaceToolExecutor.FILE_READ_TEXT).contains("expectedVersion"))
-        assertFalse(schemas.getValue(UnifiedWorkspaceToolExecutor.FILE_MOVE).contains("\"replace\""))
+        // file_move is never model-exposed, even with a live file.move grant
+        // and a move-capable backend.
+        assertFalse(schemas.containsKey(UnifiedWorkspaceToolExecutor.FILE_MOVE))
         assertTrue(schemas.getValue(UnifiedWorkspaceToolExecutor.FILE_CREATE_DIRECTORY).contains("expected_version"))
         assertTrue(schemas.getValue(UnifiedWorkspaceToolExecutor.FILE_DELETE).contains("expected_version"))
 
@@ -1463,17 +1466,92 @@ class ToolingOrchestrationTest {
                 context,
             ) is ToolResult.Invalid,
         )
-        assertTrue(
-            executor.invoke(
-                ToolCall(
-                    "move-unsupported-replace",
-                    UnifiedWorkspaceToolExecutor.FILE_MOVE,
-                    "{\"workspaceId\":\"${descriptor.id}\",\"relativePath\":\"from.txt\",\"destinationRelativePath\":\"to.txt\",\"replace\":true}",
-                ),
-                context,
-            ) is ToolResult.Invalid,
+        // A stale schema call for the retired move tool fails closed with the
+        // typed OPERATION_UNAVAILABLE result instead of parsing arguments.
+        val staleMove = executor.invoke(
+            ToolCall(
+                "move-unsupported-replace",
+                UnifiedWorkspaceToolExecutor.FILE_MOVE,
+                "{\"workspaceId\":\"${descriptor.id}\",\"relativePath\":\"from.txt\",\"destinationRelativePath\":\"to.txt\",\"replace\":true}",
+            ),
+            context,
         )
+        assertTrue(staleMove is ToolResult.Failure)
+        assertEquals(ToolErrorCode.OPERATION_UNAVAILABLE, (staleMove as ToolResult.Failure).error.code)
         assertEquals(0, dispatched.get())
+    }
+
+    @Test
+    fun fileMoveIsNeverExposedAndStaleCallsFailClosedWithoutTouchingBackend() = runBlocking {
+        val descriptor = WorkspaceDescriptor(
+            id = "workspace-move-retired",
+            displayName = "Move retired workspace",
+            backendType = WorkspaceBackendType.INTERNAL,
+            writable = true,
+        )
+        val touched = AtomicInteger(0)
+        fun <T> touchedBackend(): WorkspaceResult<T> {
+            touched.incrementAndGet()
+            throw AssertionError("a stale file_move call must never reach the workspace backend")
+        }
+        val backend = object : WorkspaceBackend {
+            override val descriptor: WorkspaceDescriptor = descriptor
+
+            override val capabilities: Set<CapabilityId> = workspaceCapabilities()
+
+            override suspend fun list(request: WorkspaceListRequest): WorkspaceResult<WorkspaceListing> = touchedBackend()
+            override suspend fun stat(request: WorkspaceStatRequest): WorkspaceResult<WorkspaceFileStat> = touchedBackend()
+            override suspend fun readText(request: WorkspaceReadTextRequest): WorkspaceResult<WorkspaceText> = touchedBackend()
+            override suspend fun applyPatch(request: WorkspaceApplyPatchRequest): WorkspaceResult<WorkspaceMutation> = touchedBackend()
+            override suspend fun writeText(request: WorkspaceWriteTextRequest): WorkspaceResult<WorkspaceMutation> = touchedBackend()
+            override suspend fun createDirectory(request: WorkspaceCreateDirectoryRequest): WorkspaceResult<WorkspaceMutation> = touchedBackend()
+            override suspend fun move(request: WorkspaceMoveRequest): WorkspaceResult<WorkspaceMutation> = touchedBackend()
+            override suspend fun delete(request: WorkspaceDeleteRequest): WorkspaceResult<WorkspaceMutation> = touchedBackend()
+        }
+        val registry = WorkspaceRegistry()
+        assertTrue(registry.register(descriptor, backend))
+        val context = workspaceContext(
+            workspaceGrants(
+                grant("grant-move-retired", CapabilityId(CapabilityId.FILE_MOVE), descriptor.id),
+            ),
+        )
+        val executor = UnifiedWorkspaceToolExecutor(
+            registry = registry,
+            approvalEngine = ApprovalEngine(),
+            contextProvider = { context },
+        )
+
+        // file_move never enters the model-visible schema, even with a live
+        // file.move grant and a move-capable backend.
+        assertTrue(executor.toolingSpecs.none { it.name == UnifiedWorkspaceToolExecutor.FILE_MOVE })
+        assertTrue(executor.specs.none { it.name == UnifiedWorkspaceToolExecutor.FILE_MOVE })
+
+        val arguments =
+            "{\"workspace_id\":\"${descriptor.id}\",\"relative_path\":\"from.txt\",\"destination_relative_path\":\"to.txt\"}"
+        val legacy = executor.invoke(
+            ToolCall("move-stale-legacy", UnifiedWorkspaceToolExecutor.FILE_MOVE, arguments),
+            context,
+        )
+        assertTrue(legacy is ToolResult.Failure)
+        val legacyError = (legacy as ToolResult.Failure).error
+        assertEquals(ToolErrorCode.OPERATION_UNAVAILABLE, legacyError.code)
+        assertTrue(legacyError.message.contains("file_copy"))
+        assertTrue(legacyError.message.contains("file_delete"))
+
+        val typed = executor.invoke(
+            ToolInvocation.fromRuntime(
+                callId = "move-stale-typed",
+                snapshotId = context.snapshotId,
+                agentId = context.agentId,
+                name = UnifiedWorkspaceToolExecutor.FILE_MOVE,
+                argumentsJson = arguments,
+            ),
+            context,
+        )
+        assertTrue(typed is ToolExecution.Failed)
+        assertEquals(ToolErrorCode.OPERATION_UNAVAILABLE, (typed as ToolExecution.Failed).error.code)
+
+        assertEquals(0, touched.get())
     }
 
     @Test

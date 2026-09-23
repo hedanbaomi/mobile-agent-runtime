@@ -213,5 +213,25 @@ object StrictVisualPolicy {
 
 sealed interface StrictVisualDecision {
     data class Allow(val warning: String?) : StrictVisualDecision
-    data class Reject(val reason: String) : StrictVisualDecision
+
+    /**
+     * A POLICY decision, not a parameter-validation failure: callers must not
+     * surface [reason] as if the tool/request parameters were invalid.  [code]
+     * is the stable machine-readable policy code for narrowed/disclosed
+     * handling; [reason] stays human-readable and keeps its first position so
+     * existing call sites compile unchanged.
+     */
+    data class Reject(
+        val reason: String,
+        val code: StrictVisualRejectCode = StrictVisualRejectCode.VISUAL_EVIDENCE_REQUIRES_IMAGE_MODEL,
+    ) : StrictVisualDecision
+}
+
+/** Stable machine-readable codes for [StrictVisualDecision.Reject]. */
+enum class StrictVisualRejectCode {
+    /**
+     * Visual evidence is in scope, but the chat model cannot accept images and
+     * no text-only degradation was enabled.
+     */
+    VISUAL_EVIDENCE_REQUIRES_IMAGE_MODEL,
 }

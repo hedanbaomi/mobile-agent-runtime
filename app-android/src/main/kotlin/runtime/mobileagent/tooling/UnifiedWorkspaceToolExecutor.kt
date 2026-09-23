@@ -99,6 +99,11 @@ class UnifiedWorkspaceToolExecutor(
         context: ToolExecutionContext,
         requestId: String,
     ): ToolResult {
+        // Fail-closed backstop for stale model schemas: file_move is never
+        // exposed, and the Android workspace backends cannot honor a move.
+        // Return the typed failure before any registry, audit, or backend
+        // work and direct the model to the supported explicit steps.
+        if (call.name == FILE_MOVE) return ToolResult.Failure(FILE_MOVE_UNAVAILABLE)
         val parsed = parse(call) ?: return ToolResult.Invalid(ToolErrorCode.INVALID_REQUEST.name)
         val candidate = bind(requestId, call, parsed, context)
         val existingReservation = synchronized(lock) {
@@ -1124,7 +1129,9 @@ class UnifiedWorkspaceToolExecutor(
         FILE_WRITE_TEXT -> WorkspaceOperation.WRITE
         FILE_CREATE_DIRECTORY -> WorkspaceOperation.CREATE_DIRECTORY
         FILE_DELETE -> WorkspaceOperation.DELETE
-        FILE_MOVE -> WorkspaceOperation.MOVE
+        // FILE_MOVE intentionally has no exposure mapping: file_move is never
+        // produced in the model schema.  Its parse/dispatch code stays only to
+        // fail closed for stale schemas.
         FILE_APPLY_PATCH -> WorkspaceOperation.APPLY_PATCH
         else -> null
     }
@@ -1238,6 +1245,11 @@ class UnifiedWorkspaceToolExecutor(
         const val FILE_WRITE_TEXT = "file_write_text"
         const val FILE_CREATE_DIRECTORY = "file_create_directory"
         const val FILE_DELETE = "file_delete"
+        /**
+         * Input-only legacy name.  It is absent from [TOOL_SPECS]; a stale
+         * model schema that still calls it fails closed with
+         * [ToolErrorCode.OPERATION_UNAVAILABLE] before any backend is touched.
+         */
         const val FILE_MOVE = "file_move"
         const val FILE_APPLY_PATCH = "file_apply_patch"
         /** Compatibility alias accepted on input; only [FILE_APPLY_PATCH] is exposed. */
@@ -1254,6 +1266,14 @@ class UnifiedWorkspaceToolExecutor(
             FILE_CREATE_DIRECTORY, FILE_DELETE, FILE_MOVE, FILE_APPLY_PATCH, APPLY_PATCH,
         )
 
+        /** Typed fail-closed answer for a stale schema that still names [FILE_MOVE]. */
+        private val FILE_MOVE_UNAVAILABLE = ToolError(
+            ToolErrorCode.OPERATION_UNAVAILABLE,
+            message = "file_move is not available in this run; use the supported explicit " +
+                "steps instead: copy the entry first (file_copy where exposed, otherwise " +
+                "file_read_text + file_write_text), then file_delete the source.",
+        )
+
         private val FILE_SCHEMA = """{"type":"object","additionalProperties":false,"required":["workspace_id","relative_path"],"properties":{"workspace_id":{"type":"string","minLength":1,"maxLength":128},"relative_path":{"type":"string","minLength":1,"maxLength":512}}}"""
         private val VERSIONED_FILE_SCHEMA = """{"type":"object","additionalProperties":false,"required":["workspace_id","relative_path"],"properties":{"workspace_id":{"type":"string","minLength":1,"maxLength":128},"relative_path":{"type":"string","minLength":1,"maxLength":512},"expected_version":{"type":"integer","minimum":0}}}"""
         private val TOOL_SPECS = listOf(
@@ -1264,7 +1284,9 @@ class UnifiedWorkspaceToolExecutor(
             ToolSpec(FILE_WRITE_TEXT, "Create or replace UTF-8 text in an authorized workspace.", """{"type":"object","additionalProperties":false,"required":["workspace_id","relative_path","text"],"properties":{"workspace_id":{"type":"string","minLength":1,"maxLength":128},"relative_path":{"type":"string","minLength":1,"maxLength":512},"text":{"type":"string","maxLength":262144},"replace":{"type":"boolean"},"expected_version":{"type":"integer","minimum":0}}}""", CapabilityId(CapabilityId.FILE_WRITE_TEXT), true, TOOL_SCHEMA_VERSION),
             ToolSpec(FILE_CREATE_DIRECTORY, "Create a directory in an authorized workspace.", VERSIONED_FILE_SCHEMA, CapabilityId(CapabilityId.FILE_CREATE_DIRECTORY), true, TOOL_SCHEMA_VERSION),
             ToolSpec(FILE_DELETE, "Delete one authorized workspace file or empty directory.", VERSIONED_FILE_SCHEMA, CapabilityId(CapabilityId.FILE_DELETE), true, TOOL_SCHEMA_VERSION),
-            ToolSpec(FILE_MOVE, "Move an entry within an authorized workspace.", """{"type":"object","additionalProperties":false,"required":["workspace_id","relative_path","destination_relative_path"],"properties":{"workspace_id":{"type":"string","minLength":1,"maxLength":128},"relative_path":{"type":"string","minLength":1,"maxLength":512},"destination_relative_path":{"type":"string","minLength":1,"maxLength":512},"expected_version":{"type":"integer","minimum":0}}}""", CapabilityId(CapabilityId.FILE_MOVE), true, TOOL_SCHEMA_VERSION),
+            // file_move has no model-visible spec: the Android workspace
+            // backends cannot honor a move.  Supported explicit steps are a
+            // copy followed by file_delete; stale calls fail closed above.
             ToolSpec(FILE_APPLY_PATCH, "Apply a conditional text patch in an authorized workspace.", """{"type":"object","additionalProperties":false,"required":["workspace_id","relative_path","patch","expected_version"],"properties":{"workspace_id":{"type":"string","minLength":1,"maxLength":128},"relative_path":{"type":"string","minLength":1,"maxLength":512},"patch":{"type":"string","minLength":1,"maxLength":262144},"expected_version":{"type":"integer","minimum":0},"format":{"type":"string","enum":["unified_diff","replace"]}}}""", CapabilityId("file.apply_patch"), true, TOOL_SCHEMA_VERSION),
         )
 

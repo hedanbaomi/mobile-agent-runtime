@@ -385,6 +385,64 @@ class WorkspaceBackendTest {
         assertEquals(oversizedBytes.size - maximum.toInt() - 1, oversized.available())
     }
 
+    /**
+     * Regression (P1): a SAF tree that already contains a file above `maxFileBytes` must
+     * stay writeable.  The per-file limit binds only the subject of an operation; an
+     * already-present neighbour is quota-accounted, never size-rejected, so a photo or
+     * document folder cannot become unwriteable.
+     *
+     * SAF device coverage is live-provider, like RuntimeSafToolExposureDeviceTest: this
+     * repo has no fake ContentResolver (query/call/openOutputStream are final,
+     * system-routed plumbing and persisted grants are ActivityManager-mediated with no
+     * public UriPermission constructor), so the scenario skips without a host-granted tree.
+     */
+    @Test
+    fun safWriteSucceedsWhenTreeAlreadyContainsFileAboveMaxFileBytes() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val grant = context.contentResolver.persistedUriPermissions.firstOrNull {
+            it.isReadPermission && it.isWritePermission
+        }
+        assumeTrue("Grant a writable SAF directory before this live-provider regression scenario", grant != null)
+        val tree = requireNotNull(grant).uri
+        val limits = InternalWorkspaceLimits(
+            maxFileBytes = 4 * 1024,
+            quotaBytes = 1024 * 1024,
+            maxReadBytes = 4 * 1024,
+        )
+        val backend = SafWorkspaceBackend(context, tree, limits)
+        val suffix = System.nanoTime()
+        val largeName = "mar-qa-large-$suffix.bin"
+        val smallName = "mar-qa-small-$suffix.txt"
+        val rootDocument = android.provider.DocumentsContract.buildDocumentUriUsingTree(
+            tree,
+            android.provider.DocumentsContract.getTreeDocumentId(tree),
+        )
+        val created = android.provider.DocumentsContract.createDocument(
+            context.contentResolver,
+            rootDocument,
+            "application/octet-stream",
+            largeName,
+        )
+        assertNotNull("the provider must let this scenario seed its fixture", created)
+        val largeDocument = requireNotNull(rebindSafMutationDocumentUri(tree, requireNotNull(created)))
+        context.contentResolver.openOutputStream(largeDocument, "w")!!.use {
+            it.write(ByteArray(8 * 1024)) // Twice maxFileBytes: an ordinary photo-sized neighbour.
+        }
+        try {
+            // Before the fix this failed FILE_TOO_LARGE because inspectUsage() applied
+            // maxFileBytes to the pre-existing oversized neighbour during write accounting.
+            assertSuccess(backend.write(smallName, "small".toByteArray(), expectedVersion = null, replaceExisting = false))
+            // The per-file limit still binds the subject of a write.
+            assertCode(
+                backend.write("$smallName-oversized", ByteArray(8 * 1024), expectedVersion = null, replaceExisting = false),
+                InternalWorkspaceErrorCode.FILE_TOO_LARGE,
+            )
+        } finally {
+            runCatching { android.provider.DocumentsContract.deleteDocument(context.contentResolver, largeDocument) }
+            deleteTreeChildByName(context, tree, smallName)
+        }
+    }
+
     @Test
     fun internalBackendApplyPatchIsConditionalAndUsesAtomicReplacement() {
         withInternal { backend, root ->
@@ -580,6 +638,34 @@ class WorkspaceBackendTest {
     private fun deleteTreeIfExists(root: Path) {
         if (!Files.exists(root, java.nio.file.LinkOption.NOFOLLOW_LINKS)) return
         Files.walk(root).use { stream -> stream.sorted(Comparator.reverseOrder()).forEach { Files.deleteIfExists(it) } }
+    }
+
+    /** Best-effort cleanup of one live-provider fixture document, addressed by display name. */
+    private fun deleteTreeChildByName(context: Context, tree: Uri, name: String) {
+        runCatching {
+            val children = android.provider.DocumentsContract.buildChildDocumentsUriUsingTree(
+                tree,
+                android.provider.DocumentsContract.getTreeDocumentId(tree),
+            )
+            context.contentResolver.query(
+                children,
+                arrayOf(
+                    android.provider.DocumentsContract.Document.COLUMN_DOCUMENT_ID,
+                    android.provider.DocumentsContract.Document.COLUMN_DISPLAY_NAME,
+                ),
+                null,
+                null,
+                null,
+            )?.use { cursor ->
+                while (cursor.moveToNext()) {
+                    if (cursor.getString(1) != name) continue
+                    android.provider.DocumentsContract.deleteDocument(
+                        context.contentResolver,
+                        android.provider.DocumentsContract.buildDocumentUriUsingTree(tree, cursor.getString(0)),
+                    )
+                }
+            }
+        }
     }
 
     private fun assertCode(result: InternalWorkspaceResult<*>, expected: InternalWorkspaceErrorCode) {

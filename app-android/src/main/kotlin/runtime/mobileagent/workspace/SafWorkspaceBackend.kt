@@ -682,7 +682,7 @@ internal class SafWorkspaceBackend(
             }
             val sourceUsage = inspectNode(source)
             val usage = inspectUsage()
-            val destinationUsage = destinationExisting?.let(::inspectNode) ?: Usage()
+            val destinationUsage = destinationExisting?.let(::inspectNode) ?: WorkspaceUsage()
             if (usage.entries - destinationUsage.entries + sourceUsage.entries > limits.maxEntries) {
                 InternalWorkspaceErrorCode.ENTRY_LIMIT_EXCEEDED.error()
             }
@@ -732,8 +732,6 @@ internal class SafWorkspaceBackend(
         val size: Long?,
         val flags: Int,
     )
-
-    private data class Usage(val files: Int = 0, val bytes: Long = 0L, val entries: Int = 0)
 
     private fun parse(raw: String?, allowRoot: Boolean): List<String> =
         WorkspacePathPolicy.parse(raw, allowRoot, limits)
@@ -1048,69 +1046,71 @@ internal class SafWorkspaceBackend(
 
     private fun readBounded(uri: Uri, maximum: Int): ByteArray = readBounded(uri, 0L, maximum)
 
-    private fun inspectUsage(): Usage {
+    private fun inspectUsage(): WorkspaceUsage {
         val visited = HashSet<String>()
-        fun scan(directory: Uri, depth: Int): Usage {
-            if (depth > limits.maxPathDepth) InternalWorkspaceErrorCode.DEPTH_LIMIT_EXCEEDED.error()
+        var usage = WorkspaceUsage()
+        fun scan(directory: Uri, depth: Int) {
+            WorkspaceUsageAccounting.enterDirectory(limits, depth)
             val directoryId = DocumentsContract.getDocumentId(directory)
             if (!visited.add(directoryId)) InternalWorkspaceErrorCode.PROVIDER_ALIAS_AMBIGUOUS.error()
-            var usage = Usage()
             children(directory).forEach { child ->
-                usage = usage.copy(entries = usage.entries + 1)
-                if (usage.entries > limits.maxEntries) InternalWorkspaceErrorCode.ENTRY_LIMIT_EXCEEDED.error()
+                // Quota / entry / depth accounting only, matching
+                // InternalWorkspaceBackend.inspectUsage.  The per-file limit binds the
+                // subject of an operation, never these pre-existing neighbours: one
+                // oversized photo must not make the whole tree unwriteable.
+                usage = WorkspaceUsageAccounting.countEntry(usage, limits)
                 if (child.type == InternalWorkspaceEntryType.DIRECTORY) {
-                    val nested = scan(child.uri, depth + 1)
-                    if (nested.bytes > limits.quotaBytes - usage.bytes) {
-                        InternalWorkspaceErrorCode.QUOTA_EXCEEDED.error()
-                    }
-                    usage = usage.copy(
-                        files = usage.files + nested.files,
-                        bytes = usage.bytes + nested.bytes,
-                        entries = usage.entries + nested.entries,
-                    )
-                    if (usage.entries > limits.maxEntries) InternalWorkspaceErrorCode.ENTRY_LIMIT_EXCEEDED.error()
+                    scan(child.uri, depth + 1)
                 } else {
-                    val bytes = child.size ?: readBounded(child.uri, maxFileProbeBytes()).size.toLong()
-                    if (bytes > limits.maxFileBytes) InternalWorkspaceErrorCode.FILE_TOO_LARGE.error()
-                    if (bytes > limits.quotaBytes - usage.bytes) InternalWorkspaceErrorCode.QUOTA_EXCEEDED.error()
-                    usage = usage.copy(files = usage.files + 1, bytes = usage.bytes + bytes)
-                    if (usage.bytes > limits.quotaBytes) InternalWorkspaceErrorCode.QUOTA_EXCEEDED.error()
+                    val bytes = child.size ?: readBounded(child.uri, usageProbeBytes()).size.toLong()
+                    usage = WorkspaceUsageAccounting.countFile(usage, bytes, limits)
                 }
             }
-            return usage
         }
         // A persisted tree grant URI (`.../tree/<id>`) is not itself a document URI on every
         // DocumentsProvider.  Traverse from the verified root document URI so getDocumentId()
         // and child queries use the provider's canonical tree-bound document form.
-        return scan(rootChild().uri, 0)
+        scan(rootChild().uri, 0)
+        return usage
     }
 
-    private fun inspectNode(node: Child): Usage {
+    private fun inspectNode(node: Child): WorkspaceUsage {
         if (node.type == InternalWorkspaceEntryType.FILE) {
-            val size = node.size ?: readBounded(node.uri, maxFileProbeBytes()).size.toLong()
-            checkFileSize(size)
-            return Usage(1, size, 1)
+            val size = node.size ?: readBounded(node.uri, usageProbeBytes()).size.toLong()
+            // Mirrors InternalWorkspaceBackend.inspectNode: a copy/move source is counted
+            // toward quota and entries, never rejected by the per-file limit — it is an
+            // already-present file, not the subject of a read or write.
+            return WorkspaceUsage(1, size, 1)
         }
-        var result = Usage(entries = 1)
-        children(node.uri).forEach { child ->
-            val nested = inspectNode(child)
-            if (nested.bytes > limits.quotaBytes - result.bytes) InternalWorkspaceErrorCode.QUOTA_EXCEEDED.error()
-            result = result.copy(
-                files = result.files + nested.files,
-                bytes = result.bytes + nested.bytes,
-                entries = result.entries + nested.entries,
-            )
+        var total = WorkspaceUsage(entries = 1)
+        fun visit(directory: Uri, depth: Int) {
+            WorkspaceUsageAccounting.enterDirectory(limits, depth)
+            children(directory).forEach { child ->
+                total = WorkspaceUsageAccounting.countEntry(total, limits)
+                if (child.type == InternalWorkspaceEntryType.DIRECTORY) {
+                    visit(child.uri, depth + 1)
+                } else {
+                    val size = child.size ?: readBounded(child.uri, usageProbeBytes()).size.toLong()
+                    total = WorkspaceUsageAccounting.countFile(total, size, limits)
+                }
+            }
         }
-        return result
+        visit(node.uri, 0)
+        return total
     }
 
     private fun checkFileSize(size: Long) {
         if (size > limits.maxFileBytes) InternalWorkspaceErrorCode.FILE_TOO_LARGE.error()
     }
 
-    /** Read one byte beyond the per-file limit when a provider does not report a size. */
-    private fun maxFileProbeBytes(): Int =
-        if (limits.maxFileBytes < Int.MAX_VALUE.toLong()) limits.maxFileBytes.toInt() + 1 else Int.MAX_VALUE
+    /**
+     * Size probe for usage accounting when a provider omits COLUMN_SIZE.  The bound follows
+     * the quota, never the per-file limit: accounting needs a file's real size, and a probe
+     * that fills this bound proves the file alone exceeds the quota, so the accounting fails
+     * closed with QUOTA_EXCEEDED instead of misreporting FILE_TOO_LARGE.
+     */
+    private fun usageProbeBytes(): Int =
+        if (limits.quotaBytes >= Int.MAX_VALUE.toLong()) Int.MAX_VALUE else (limits.quotaBytes + 1).toInt()
 
     private fun isPathPrefix(prefix: List<String>, path: List<String>): Boolean =
         prefix.size <= path.size && path.subList(0, prefix.size) == prefix

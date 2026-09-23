@@ -96,14 +96,38 @@ data class RetrievalCoverage(
      * Short runtime-authored scope note.  It is injected into the model
      * prompt by the runtime (never by the model) and shown in the UI, so the
      * model and the user both see that some sources did not participate.
-     * Returns null when coverage is complete.
+     * Returns null when coverage is complete (zero knowledge bases missing) —
+     * a complete retrieval emits no notice at all.
+     *
+     * Delegates to [formatRetrievalCoverageNotice], the single shared
+     * formatter that KnowledgeRepository's warning also uses, so the wording
+     * cannot drift.
      */
-    fun notice(): String? {
-        if (!partial) return null
-        val detail = unavailable.joinToString("; ") { "${it.knowledgeBaseId}: ${it.reason.name}" }
-        return "Partial retrieval scope: searched ${searched.size}/${requested.size} knowledge bases. " +
-            "Unavailable: $detail. Do not claim the missing sources were searched."
-    }
+    fun notice(): String? = formatRetrievalCoverageNotice(this)
+}
+
+/**
+ * Single shared formatter for the retrieval-coverage notice.  Both
+ * [RetrievalCoverage.notice] and KnowledgeRepository's retrieval warning use
+ * this function verbatim, so the user-facing wording cannot drift.
+ *
+ * The wording states how many knowledge bases did NOT participate out of how
+ * many were requested (N/M with N = missing, M = total — never "searched/
+ * requested", which reads as participation), then keeps the per-source reason
+ * tail.  Carries only runtime-authored reason codes and KB ids — never query
+ * text.  Returns null when zero knowledge bases are missing/unavailable, so
+ * complete retrievals emit no notice or warning at all.
+ */
+fun formatRetrievalCoverageNotice(coverage: RetrievalCoverage): String? {
+    if (!coverage.partial) return null
+    val total = coverage.requested.size
+    // Requested KBs that did not participate.  By construction this equals
+    // unavailable.size (every requested KB is either searched or unavailable);
+    // the coerce keeps the count consistent with the enumerated reason tail
+    // even for a hand-built coverage.
+    val missing = (total - coverage.searched.size).coerceAtLeast(coverage.unavailable.size)
+    val detail = coverage.unavailable.joinToString("；") { "${it.knowledgeBaseId}: ${it.reason.name}" }
+    return "本次检索有 $missing/$total 个知识库未参与（原因：$detail）。不要声称已检索这些未参与的来源。"
 }
 
 object CitationMap {

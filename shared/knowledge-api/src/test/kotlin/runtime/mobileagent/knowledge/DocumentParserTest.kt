@@ -815,11 +815,34 @@ class DocumentParserTest {
     fun strictModeRejectsVisualHitsOnTextChatUntilDegraded() {
         val reject = StrictVisualPolicy.allow(true, chatSupportsImages = false, textDegradationEnabled = false)
         assertTrue(reject is StrictVisualDecision.Reject)
+        // The rejection is a typed POLICY decision, not an "invalid parameters"
+        // style error: call sites narrow on the code instead of parsing reason.
+        assertEquals(
+            StrictVisualRejectCode.VISUAL_EVIDENCE_REQUIRES_IMAGE_MODEL,
+            (reject as StrictVisualDecision.Reject).code,
+        )
+        assertTrue(reject.reason.isNotBlank())
         val degraded = StrictVisualPolicy.allow(true, chatSupportsImages = false, textDegradationEnabled = true)
         assertEquals(
             "Original images were not sent. Visual evidence may be incomplete.",
             (degraded as StrictVisualDecision.Allow).warning,
         )
+    }
+
+    @Test
+    fun strictModeAllowsWithoutVisualEvidenceOrOnImageCapableChat() {
+        val noEvidence = StrictVisualPolicy.allow(
+            hasVisualEvidence = false,
+            chatSupportsImages = false,
+            textDegradationEnabled = false,
+        )
+        assertEquals(StrictVisualDecision.Allow(warning = null), noEvidence)
+        val imageCapable = StrictVisualPolicy.allow(
+            hasVisualEvidence = true,
+            chatSupportsImages = true,
+            textDegradationEnabled = false,
+        )
+        assertEquals(StrictVisualDecision.Allow(warning = null), imageCapable)
     }
 
     @Test

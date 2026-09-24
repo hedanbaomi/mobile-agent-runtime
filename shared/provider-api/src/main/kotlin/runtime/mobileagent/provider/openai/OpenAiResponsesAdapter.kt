@@ -595,12 +595,19 @@ class OpenAiResponsesAdapter(
                 redactor.discard()
                 emit(ModelEvent.Failed(ErrorCode.UNKNOWN_OUTCOME.name))
                 true
-            } else if (parsed == null) {
-                // Locally unusable arguments were never dispatched; the terminal
-                // must not claim a possibly-external outcome.
+            } else if (parsed == null && event.callId.isBlank()) {
+                // A blank call id cannot be paired with a fed-back tool result;
+                // it stays a decided invalid response.
                 redactor.discard()
                 emit(ModelEvent.Failed(ProviderConnectionErrorCode.INVALID_RESPONSE.name))
                 true
+            } else if (parsed == null) {
+                // Locally unusable arguments were never dispatched: forward them
+                // so the runtime rejects the call and feeds a bounded INVALID
+                // result back for a corrected resend.
+                emit(event)
+                onSafeDiagnostic(event)
+                false
             } else if (credentialJson(parsed.json, secrets)) {
                 redactor.discard()
                 emit(ModelEvent.Failed(ErrorCode.UNKNOWN_OUTCOME.name))
@@ -875,15 +882,21 @@ class OpenAiResponsesAdapter(
                         ) {
                             return listOf(ModelEvent.Failed(ErrorCode.UNKNOWN_OUTCOME.name))
                         }
-                        // Structural defects and unusable arguments are local
-                        // decisions: the call was never dispatched.
-                        if (callId.isBlank() || name.isBlank() || parsed == null) {
+                        // A blank call id cannot be paired with a fed-back tool
+                        // result; it stays a decided invalid response.
+                        if (callId.isBlank()) {
                             return listOf(ModelEvent.Failed(ProviderConnectionErrorCode.INVALID_RESPONSE.name))
                         }
-                        if (credentialJson(parsed.json, secrets)) {
+                        // Unusable arguments were never dispatched: forward the
+                        // raw text so the runtime rejects the call and feeds a
+                        // bounded INVALID result back for a corrected resend.
+                        if (parsed == null) {
+                            events += ModelEvent.ToolCallDelta(callId, name, args)
+                        } else if (credentialJson(parsed.json, secrets)) {
                             return listOf(ModelEvent.Failed(ErrorCode.UNKNOWN_OUTCOME.name))
+                        } else {
+                            events += ModelEvent.ToolCallDelta(callId, name, parsed.text)
                         }
-                        events += ModelEvent.ToolCallDelta(callId, name, parsed.text)
                     }
                 }
             }

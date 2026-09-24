@@ -156,13 +156,18 @@ object OpenAiSse {
                 containsCredentialText(call.first, secrets) ||
                 containsCredentialText(arguments, secrets)
             ) return listOf(ModelEvent.Failed(ErrorCode.UNKNOWN_OUTCOME.name))
-            if (parsed == null) {
-                // Truncated, malformed or non-object arguments: a local decision,
-                // never a dispatch, so never an external-outcome unknown.
+            if (callId.isBlank()) {
+                // A blank call id cannot be paired with a fed-back tool result;
+                // it stays a decided invalid response.
                 return listOf(ModelEvent.Failed(ProviderConnectionErrorCode.INVALID_RESPONSE.name))
             }
-            if (callId.isBlank() || call.first.isBlank()) {
-                return listOf(ModelEvent.Failed(ProviderConnectionErrorCode.INVALID_RESPONSE.name))
+            if (parsed == null) {
+                // Truncated, malformed or non-object arguments: a local decision,
+                // never a dispatch.  Forward the raw text so the runtime rejects
+                // the call and feeds a bounded INVALID result back for a
+                // corrected resend instead of ending the run outright.
+                events += ModelEvent.ToolCallDelta(callId, call.first, arguments)
+                continue
             }
             if (containsCredentialJson(parsed.json, secrets)) {
                 return listOf(ModelEvent.Failed(ErrorCode.UNKNOWN_OUTCOME.name))

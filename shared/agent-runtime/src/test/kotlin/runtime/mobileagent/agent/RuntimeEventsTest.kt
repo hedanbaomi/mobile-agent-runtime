@@ -271,9 +271,13 @@ class RuntimeEventsTest {
             ),
         ).toList()
 
+        // The invalid call never reaches the executor; it is fed back as an
+        // INVALID result so the next round can resend, and the run completes.
         assertEquals(0, executor.invocations)
-        assertTrue(events.any { it is RuntimeEvent.ModelEvent && it.event is ModelEvent.Failed })
-        assertEquals(RunState.FAILED, run.state)
+        val feedback = events.filterIsInstance<RuntimeEvent.ToolResultProduced>().single()
+        assertEquals("INVALID", feedback.status)
+        assertEquals(RunState.COMPLETED, run.state)
+        assertEquals(2, adapter.requests.size)
     }
 
     @Test

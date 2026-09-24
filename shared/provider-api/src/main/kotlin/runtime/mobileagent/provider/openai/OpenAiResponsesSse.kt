@@ -293,11 +293,16 @@ object OpenAiResponsesSse {
             // seen the secret, so the outcome is genuinely unknown.
             return listOf(ModelEvent.Failed(ErrorCode.UNKNOWN_OUTCOME.name))
         }
-        // Blank call_id/name and unusable arguments are structural defects of a
-        // call that was never dispatched: an unusable response, not an unknown
-        // external outcome.
-        if (buffer.callId.isBlank() || buffer.name.isBlank() || parsed == null) {
+        // A blank call id cannot be paired with a fed-back tool result; it stays
+        // a decided invalid response.
+        if (buffer.callId.isBlank()) {
             return listOf(ModelEvent.Failed(ProviderConnectionErrorCode.INVALID_RESPONSE.name))
+        }
+        // Unusable arguments were never dispatched: forward the raw text so the
+        // runtime rejects the call and feeds a bounded INVALID result back for a
+        // corrected resend instead of ending the run outright.
+        if (parsed == null) {
+            return listOf(ModelEvent.ToolCallDelta(buffer.callId, buffer.name, arguments))
         }
         if (credentialJson(parsed.json, extraSecrets)) {
             return listOf(ModelEvent.Failed(ErrorCode.UNKNOWN_OUTCOME.name))

@@ -1030,6 +1030,22 @@ private fun ContextCompactionHistory(records: List<ChatCompactionUi>, messages: 
     )
 }
 
+/**
+ * Whether a message renders as a compact tool event row.  Only a tool message does: an
+ * assistant message always keeps its answer bubble even when it carries a summary
+ * (R3 QA P3 — a retrieval-coverage notice used to REPLACE the answer text through the
+ * row's `eventSummary.ifBlank { text }`, capped at two lines).
+ */
+fun isToolEventRow(role: String): Boolean = role.equals("tool", ignoreCase = true)
+
+/**
+ * The supplementary disclosure to show under a message, or null when it adds nothing:
+ * blank, or already contained in the visible answer text (a terminal error message is
+ * part of both and must not be printed twice).
+ */
+fun secondaryNoticeOf(message: ChatMessageUi): String? =
+    message.eventSummary.takeIf { it.isNotBlank() && !message.text.contains(it) }
+
 @Composable
 @OptIn(ExperimentalLayoutApi::class)
 private fun MessageBubble(
@@ -1040,7 +1056,12 @@ private fun MessageBubble(
     minimal: Boolean = false,
 ) {
     val user = message.role.equals("user", ignoreCase = true)
-    val tool = message.role.equals("tool", ignoreCase = true) || message.eventSummary.isNotBlank()
+    // Only a tool message becomes a compact event row.  An assistant message keeps
+    // its answer bubble even when it carries an event summary: R3 QA P3 showed a
+    // retrieval-coverage notice REPLACING the answer text (the row renders
+    // `eventSummary.ifBlank { text }`, capped at two lines), so a real reply looked
+    // like a bare notice card.
+    val tool = isToolEventRow(message.role)
     Row(Modifier.fillMaxWidth(), horizontalArrangement = if (user) Arrangement.End else Arrangement.Start) {
         if (tool) {
             ToolEventRow(message = message, zh = zh, modifier = Modifier.fillMaxWidth())
@@ -1064,6 +1085,18 @@ private fun MessageBubble(
                         )
                     }
                     Text(message.text, Modifier.padding(top = 4.dp))
+                    // Supplementary disclosure, never a substitute for the answer:
+                    // shown only when it adds information the answer text does not
+                    // already carry (an error message is already part of the text).
+                    val notice = secondaryNoticeOf(message)
+                    if (notice != null) {
+                        Text(
+                            notice,
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.padding(top = 6.dp).testTag("conversation.notice.${message.id}"),
+                        )
+                    }
                     if (message.streaming) Text(if (zh) "正在流式输出…" else "Streaming…", style = MaterialTheme.typography.labelSmall, modifier = Modifier.padding(top = 4.dp))
                     if (message.timeLabel.isNotBlank()) Text(message.timeLabel, style = MaterialTheme.typography.labelSmall)
                     val known = message.citationIds.mapNotNull { id -> citations.firstOrNull { it.id == id } }

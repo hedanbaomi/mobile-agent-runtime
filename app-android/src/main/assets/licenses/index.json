@@ -3319,26 +3319,26 @@
       }
     },
     {
-      "id": "maven:androidx.work:work-runtime-ktx:2.10.0",
+      "id": "maven:androidx.work:work-runtime-ktx:2.10.5",
       "name": "work-runtime-ktx",
-      "version": "2.10.0",
+      "version": "2.10.5",
       "license": "Apache-2.0",
-      "source": "https://dl.google.com/dl/android/maven2/androidx/work/work-runtime-ktx/2.10.0/work-runtime-ktx-2.10.0.pom",
+      "source": "https://dl.google.com/dl/android/maven2/androidx/work/work-runtime-ktx/2.10.5/work-runtime-ktx-2.10.5.pom",
       "licenseSource": "https://www.apache.org/licenses/LICENSE-2.0.txt",
       "files": [
         {
           "label": "license: META-INF/androidx/work/work-runtime-ktx/LICENSE.txt",
-          "path": "licenses/maven/androidx.work__work-runtime-ktx__2.10.0/LICENSE.txt",
+          "path": "licenses/maven/androidx.work__work-runtime-ktx__2.10.5/LICENSE.txt",
           "sha256": "809fa1ed21450f59827d1e9aec720bbc4b687434fa22283c6cb5dd82a47ab9c0",
-          "origin": "work-runtime-ktx-2.10.0.aar!META-INF/androidx/work/work-runtime-ktx/LICENSE.txt"
+          "origin": "work-runtime-ktx-2.10.5.aar!META-INF/androidx/work/work-runtime-ktx/LICENSE.txt"
         }
       ],
       "provenance": {
-        "pomSha256": "127377f175877ec97282f98dd23e71e3c1f7ec949aa0c2d02a450db4dd0584bd",
+        "pomSha256": "3cd5f104492a6006b2af578d03fcc15a6c3128217fd1ab7f5a2d4e62ab837cc0",
         "cachedArtifacts": [
           {
-            "file": "work-runtime-ktx-2.10.0.aar",
-            "sha256": "8273692ccc17094d746cafd04b679f259cbf501b2ea8475e349fba24ed3976b9"
+            "file": "work-runtime-ktx-2.10.5.aar",
+            "sha256": "229f2c58cc511766519cadfa2ede5b000f8f7f4e14eaa19d483a15c5d210d461"
           }
         ],
         "pomLicenseNames": [
@@ -3348,32 +3348,32 @@
           "http://www.apache.org/licenses/LICENSE-2.0.txt"
         ],
         "parent": null,
-        "projectUrl": "https://developer.android.com/jetpack/androidx/releases/work#2.10.0",
+        "projectUrl": "https://developer.android.com/jetpack/androidx/releases/work#2.10.5",
         "scmUrl": "https://cs.android.com/androidx/platform/frameworks/support",
         "resolution": "cached POM metadata plus complete standard text"
       }
     },
     {
-      "id": "maven:androidx.work:work-runtime:2.10.0",
+      "id": "maven:androidx.work:work-runtime:2.10.5",
       "name": "work-runtime",
-      "version": "2.10.0",
+      "version": "2.10.5",
       "license": "Apache-2.0",
-      "source": "https://dl.google.com/dl/android/maven2/androidx/work/work-runtime/2.10.0/work-runtime-2.10.0.pom",
+      "source": "https://dl.google.com/dl/android/maven2/androidx/work/work-runtime/2.10.5/work-runtime-2.10.5.pom",
       "licenseSource": "https://www.apache.org/licenses/LICENSE-2.0.txt",
       "files": [
         {
           "label": "license: META-INF/androidx/work/work-runtime/LICENSE.txt",
-          "path": "licenses/maven/androidx.work__work-runtime__2.10.0/LICENSE.txt",
+          "path": "licenses/maven/androidx.work__work-runtime__2.10.5/LICENSE.txt",
           "sha256": "809fa1ed21450f59827d1e9aec720bbc4b687434fa22283c6cb5dd82a47ab9c0",
-          "origin": "work-runtime-2.10.0.aar!META-INF/androidx/work/work-runtime/LICENSE.txt"
+          "origin": "work-runtime-2.10.5.aar!META-INF/androidx/work/work-runtime/LICENSE.txt"
         }
       ],
       "provenance": {
-        "pomSha256": "1aecc515671afc84b5ff5b28d5895efb443dddab49dd5cc7400976a1cfc510c9",
+        "pomSha256": "1fe53371dc58672a2d0b1b4c9a48b847203c214478f90ff3fd9110906f467c72",
         "cachedArtifacts": [
           {
-            "file": "work-runtime-2.10.0.aar",
-            "sha256": "2ee10cd3345a7e6e37d50898fd0ebdd91e4a59267aa928effa8e507dae85c88b"
+            "file": "work-runtime-2.10.5.aar",
+            "sha256": "6c72e877bfed9fa8382b13856af9bf2086b886210f4c6ed5810880831bc85bc7"
           }
         ],
         "pomLicenseNames": [
@@ -3383,7 +3383,7 @@
           "http://www.apache.org/licenses/LICENSE-2.0.txt"
         ],
         "parent": null,
-        "projectUrl": "https://developer.android.com/jetpack/androidx/releases/work#2.10.0",
+        "projectUrl": "https://developer.android.com/jetpack/androidx/releases/work#2.10.5",
         "scmUrl": "https://cs.android.com/androidx/platform/frameworks/support",
         "resolution": "cached POM metadata plus complete standard text"
       }

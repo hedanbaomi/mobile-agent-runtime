@@ -42,6 +42,8 @@ jobs:
           ./gradlew verifyWorkflowYaml --dependency-verification=strict --no-daemon
       - name: Native page alignment checker regression tests
         run: python tools/test_verify_native_alignment.py
+      - name: Packaged notice inventory regression tests
+        run: python tools/test_runtime_notices.py
       - name: Unit tests and Android debug APK/SBOM
         run: ./gradlew debugEvidenceGate --dependency-verification=strict --no-daemon
       - name: Upload debug artifact evidence

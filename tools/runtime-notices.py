@@ -32,7 +32,7 @@ import urllib.request
 import zipfile
 from collections import Counter
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from xml.etree import ElementTree
 
 
@@ -552,6 +552,51 @@ def indexed_asset_records(component: dict) -> list[dict]:
     return records
 
 
+def license_asset_key(path: str) -> str | None:
+    """Map an indexed `licenses/...` path to its asset directory key (e.g. `maven/<slug>`)."""
+    parts = PurePosixPath(path).parts
+    if len(parts) < 2 or parts[0] != "licenses":
+        return None
+    if parts[1] == "maven":
+        return f"maven/{parts[2]}" if len(parts) >= 3 else None
+    return parts[1]
+
+
+def assert_no_unindexed_license_dirs(entries: list[str], components: list[dict], context: str) -> None:
+    """Reject `licenses/` directories no indexed component references.
+
+    The generator only writes: it never prunes.  A regenerated index (a dependency
+    version bump, a swapped model pack) therefore leaves the previous version's
+    directory behind, and that stale legal text ships in the APK even though the
+    index — the advertised complete inventory — no longer mentions it.
+    """
+    referenced = {
+        key
+        for component in components
+        for record in indexed_asset_records(component)
+        for key in [license_asset_key(str(record.get("path", "")))]
+        if key is not None
+    }
+    present: set[str] = set()
+    for entry in entries:
+        relative = next((entry[len(prefix):] for prefix in ARTIFACT_ASSET_PREFIXES if entry.startswith(prefix)), None)
+        if relative is None:
+            continue
+        # Both APK assets/ and AAB base/assets/ use the same indexed asset paths.
+        parts = PurePosixPath(relative).parts
+        if len(parts) >= 3 and parts[0] == "licenses":
+            key = license_asset_key("/".join(parts[:3]) if parts[1] == "maven" else "/".join(parts[:2]))
+            if key is not None:
+                present.add(key)
+    stale = sorted(present - referenced)
+    if stale:
+        raise RuntimeError(
+            f"verify: {context} carries licenses/ director(ies) no indexed component references: "
+            + ", ".join(stale)
+            + " — prune the stale generated assets or regenerate the index"
+        )
+
+
 def validate_asset_path(path: object, context: str, allow_runtime_payload: bool = False) -> str:
     allowed_prefixes = ("licenses/", "modelpacks/")
     if allow_runtime_payload:
@@ -565,6 +610,45 @@ def validate_asset_path(path: object, context: str, allow_runtime_payload: bool 
     ):
         raise RuntimeError(f"verify: invalid asset path for {context}: {path}")
     return path
+
+
+NOTICE_HASH_PATTERN = re.compile(r"\b[0-9a-f]{64}\b", re.IGNORECASE)
+
+
+def index_sha256_values(value: object) -> set[str]:
+    """Every 64-hex string carried anywhere in the index (files, payloads, provenance)."""
+    found: set[str] = set()
+    stack: list[object] = [value]
+    while stack:
+        current = stack.pop()
+        if isinstance(current, dict):
+            stack.extend(current.values())
+        elif isinstance(current, list):
+            stack.extend(current)
+        elif isinstance(current, str) and NOTICE_HASH_PATTERN.fullmatch(current):
+            found.add(current.lower())
+    return found
+
+
+def assert_notice_hashes_are_indexed(notice: bytes, components: list[dict], context: str) -> None:
+    """Reject notice prose that prints a SHA-256 no indexed record carries.
+
+    The human-readable notice is hand-maintained while the machine-readable index is
+    regenerated from the resolved classpath and the generated asset boundaries.  A
+    layer hash copied into the prose therefore goes stale as soon as that layer is
+    rebuilt: an earlier round advertised a repacked CPython stdlib zip hash that
+    matched none of the copies in the tree, and every existing check passed because
+    only the index was verified.
+    """
+    text = notice.decode("utf-8", errors="replace")
+    indexed = index_sha256_values(components)
+    stale = sorted({value.lower() for value in NOTICE_HASH_PATTERN.findall(text) if value.lower() not in indexed})
+    if stale:
+        raise RuntimeError(
+            f"verify: {context} prints SHA-256 value(s) that no indexed record carries: "
+            + ", ".join(stale)
+            + " — regenerate the notice from licenses/index.json instead of pinning it by hand"
+        )
 
 
 def validate_sha256(value: object, context: str) -> str:
@@ -715,6 +799,8 @@ def verify_artifact(artifact_path: Path, components: list[dict]) -> None:
             )
             if packaged_notice != source_notice.read_bytes():
                 raise RuntimeError("verify: packaged THIRD_PARTY_NOTICES.md differs from source")
+            assert_notice_hashes_are_indexed(packaged_notice, components, "THIRD_PARTY_NOTICES.md")
+        assert_no_unindexed_license_dirs(names, components, str(artifact_path.name))
 
         for component in components:
             component_id = component.get("id")
@@ -1065,6 +1151,9 @@ def verify(
             if not sidecar.is_file():
                 raise RuntimeError(f"verify: missing REUSE sidecar {sidecar}")
     native_entries = verify_native_index_entries(components)
+    source_notice = ASSETS_ROOT / "THIRD_PARTY_NOTICES.md"
+    if source_notice.is_file():
+        assert_notice_hashes_are_indexed(source_notice.read_bytes(), components, "source THIRD_PARTY_NOTICES.md")
     if artifacts:
         for artifact in artifacts:
             verify_artifact(artifact, components)

@@ -3,8 +3,9 @@
 
 # Third-party notices
 
-This debug APK carries the original notices for its resolved
-`debugRuntimeClasspath` dependencies. First-party code remains
+This APK carries the original notices for the application's resolved dependency
+set (generated from the captured `debugRuntimeClasspath` report, which the
+non-debuggable review variant resolves identically). First-party code remains
 `AGPL-3.0-only`; these third-party texts retain their upstream licenses.
 
 The complete, versioned index is `licenses/index.json`. It contains 148
@@ -35,8 +36,11 @@ verifies the module-generated roots or an explicitly supplied APK/AAB/ZIP
 asset boundary; it fails closed when a boundary or material is missing:
 
 - CPython 3.14.7: `LICENSE.txt` `b0e25a78cffb43f4d92de8b61ccfa1f1f98ecbc22330b54b5251e7b6ba010231`,
-  `NOTICE.txt` `87e76594ca56bd6b1116d2ee9b902b98c0940863762f9ef822de9a3cec31fcb3`,
-  and `python/python3.14.zip` `8aa6768b2585279a566bef9f2b5c0568f3199c940fe77b2d84b240b97474e351`.
+  `NOTICE.txt` `87e76594ca56bd6b1116d2ee9b902b98c0940863762f9ef822de9a3cec31fcb3`.
+  The standard-library payload `python/python3.14.zip` is recorded and verified by
+  its exact SHA-256 in `licenses/index.json` (`payloads[]`); it is deliberately not
+  repeated here, because its bytes can change when the archive's inputs or generator
+  change and this prose must not pin a value that can become stale.
 - USearch 2.25.1: `LICENSE.txt` `c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4`,
   `NOTICE.txt` `145493df94feaef58efd5f5fcedc9d4d3c08a285dbbf87a9eefae3455cb475a4`,
   and pinned source archive `30dd99efab891a6385a89ecd3a3a8a85ed7d3f064b7657588fc3ef5ccd2d52e3`.

@@ -147,12 +147,13 @@ class IncidentRegressionTest {
     /**
      * R2: a ~60KB SSE answer whose tail tool call carries unusable arguments —
      * the observed shape is an accumulated `function.arguments` string that is
-     * not parseable JSON, typically a truncated tail — must terminate as a typed
-     * local failure.  Nothing was dispatched, so UNKNOWN_OUTCOME and its forced
-     * retry-confirmation dialog would be factually wrong.
+     * not parseable JSON, typically a truncated tail — is forwarded so the
+     * runtime rejects it and feeds a bounded INVALID result back for a
+     * corrected resend.  Nothing was dispatched, so UNKNOWN_OUTCOME and its
+     * forced retry-confirmation dialog would be factually wrong.
      */
     @Test
-    fun largeResponseTailToolCallWithUnusableArgumentsIsInvalidResponse() = runTest {
+    fun largeResponseTailToolCallWithUnusableArgumentsIsForwardedForRetry() = runTest {
         val chunk = "x".repeat(140)
         val filler = buildString {
             repeat(300) { append("data: {\"choices\":[{\"delta\":{\"content\":\"$chunk\"}}]}\n") }
@@ -168,10 +169,11 @@ class IncidentRegressionTest {
             .stream(ModelRequest("demo", listOf(ChatMessage("user", "hi"))), "token".toCharArray())
             .toList()
         assertTrue(events.any { it is ModelEvent.TextDelta }, events.toString())
-        assertTrue(events.none { it is ModelEvent.ToolCallDelta }, events.toString())
-        assertTrue(events.none { it == ModelEvent.Completed })
-        assertEquals(ProviderConnectionErrorCode.INVALID_RESPONSE.name, lastFailure(events))
-        assertTrue(lastFailure(events) != ErrorCode.UNKNOWN_OUTCOME.name, lastFailure(events))
+        val call = events.filterIsInstance<ModelEvent.ToolCallDelta>().single()
+        assertEquals("call-tail", call.callId)
+        assertEquals("{\"code\":\"print(1)", call.argumentsJson)
+        assertEquals(ModelEvent.Completed, events.last())
+        assertTrue(events.none { it is ModelEvent.Failed }, events.toString())
     }
 
     /** C3: interleaved channels keep their own withheld suffix and stay intact. */

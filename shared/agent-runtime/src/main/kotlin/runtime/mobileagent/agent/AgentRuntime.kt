@@ -189,6 +189,10 @@ class AgentRuntime(
             run.state = RunState.ASSEMBLING
             val window = ContextWindow(request.prompt, request.context)
             var segmentRounds = 0
+            // Run-scoped bound on "rejected before dispatch" tool results fed
+            // back to the model.  Each rejection costs one model round; the cap
+            // keeps a model that cannot emit a valid call from looping forever.
+            var undispatchedToolFeedback = 0
             val toolSpecs = if (request.toolsEnabled && toolExecutor != null) {
                 toolExecutor.specs.toList()
             } else {
@@ -421,6 +425,11 @@ class AgentRuntime(
                 )
 
                 val pendingTools = linkedMapOf<String, ToolCall>()
+                // Calls that failed local validation before dispatch.  They are
+                // still recorded on the assistant message (the model did emit
+                // them) and get a synthetic INVALID tool result so the model can
+                // resend a corrected call on the next round.
+                val rejectedCalls = linkedMapOf<String, Pair<ToolCall, String>>()
                 val assistantText = StringBuilder()
                 val pendingContinuation = mutableListOf<ProviderContinuationItem>()
                 var terminal: ModelEvent? = null
@@ -452,11 +461,19 @@ class AgentRuntime(
                                         )
                                         val validationError = validateToolCall(call, toolSpecs, pendingTools)
                                         if (validationError != null) {
-                                            // Typed prefix so a tool-call validation failure is
-                                            // distinguishable from a truncated provider stream in
-                                            // run_state (R2 QA P2); the detail stays in stopReason.
-                                            terminal = ModelEvent.Failed("TOOL_FAILED: $validationError")
+                                            if (undispatchedToolFeedback < MAX_UNDISPATCHED_TOOL_FEEDBACK) {
+                                                undispatchedToolFeedback++
+                                                rejectedCalls[outgoing.callId] = call to validationError
+                                            } else {
+                                                // Typed prefix so a tool-call validation failure is
+                                                // distinguishable from a truncated provider stream in
+                                                // run_state (R2 QA P2); the detail stays in stopReason.
+                                                terminal = ModelEvent.Failed(
+                                                    "${rejectedTerminalCode(validationError)}: $validationError",
+                                                )
+                                            }
                                         } else {
+                                            rejectedCalls.remove(outgoing.callId)
                                             pendingTools[outgoing.callId] = call
                                             emit(
                                                 RuntimeEvent.ToolCallObserved(
@@ -541,7 +558,7 @@ class AgentRuntime(
                     finish()
                     return@flow
                 }
-                if (pendingTools.isEmpty()) {
+                if (pendingTools.isEmpty() && rejectedCalls.isEmpty()) {
                     if (ended == ModelEvent.Completed) {
                         run.state = RunState.COMPLETED
                         run.stopReason = run.stopReason ?: "completed"
@@ -581,7 +598,7 @@ class AgentRuntime(
                 window.append(ChatMessage(
                     role = "assistant",
                     text = assistantText.toString(),
-                    toolCalls = pendingTools.values.map { call ->
+                    toolCalls = (pendingTools.values + rejectedCalls.values.map { it.first }).map { call ->
                         AssistantToolCall(call.callId, call.name, call.argumentsJson)
                     },
                     // Replay captured provider-private items verbatim on the
@@ -590,6 +607,34 @@ class AgentRuntime(
                     providerContinuationItems = pendingContinuation.toList(),
                 ), RuntimeMessageIds.assistant(run.runId, modelRequestNumber))
                 pendingContinuation.clear()
+                // Rejected calls never reached the executor; feed each one back as
+                // a typed INVALID tool result (paired with the assistant tool_call
+                // above) so the model sees the local validation error and can
+                // resend corrected arguments on the next round.
+                for ((rejectedCall, validationError) in rejectedCalls.values) {
+                    val rejectedJson = redact(
+                        ToolOutcome.invalid(message = validationError),
+                        secret,
+                    )
+                    emit(
+                        RuntimeEvent.ToolResultProduced(
+                            callId = rejectedCall.callId,
+                            name = rejectedCall.name,
+                            status = "INVALID",
+                            resultSummary = rejectedJson.take(RESULT_SUMMARY_LIMIT),
+                            resultJson = rejectedJson,
+                            messageId = RuntimeMessageIds.tool(run.runId, modelRequestNumber, rejectedCall.callId),
+                        ),
+                    )
+                    window.append(
+                        ChatMessage(
+                            role = "tool",
+                            text = untrustedToolResult(rejectedCall.callId, rejectedJson),
+                            toolCallId = rejectedCall.callId,
+                        ),
+                        RuntimeMessageIds.tool(run.runId, modelRequestNumber, rejectedCall.callId),
+                    )
+                }
                 for (call in pendingTools.values) {
                     if (budgetExhausted(run)) {
                         emitBudget()
@@ -872,9 +917,9 @@ class AgentRuntime(
         val spec = specs.firstOrNull { it.name == call.name }
             ?: return "Unknown tool ${call.name}"
         val arguments = runCatching { json.parseToJsonElement(call.argumentsJson) }.getOrNull()
-            ?: return "Tool arguments are invalid JSON"
+            ?: return TOOL_ARGS_INVALID_JSON
         val objectArguments = arguments as? JsonObject
-            ?: return "Tool arguments must be a JSON object"
+            ?: return TOOL_ARGS_NOT_OBJECT
         return validateSchemaValue(parseSchema(spec.parametersJson), objectArguments, "tool ${call.name} arguments")
     }
 
@@ -1095,6 +1140,18 @@ class AgentRuntime(
         const val UNKNOWN_TOOL_ENVELOPE = "{\"ok\":false,\"status\":\"UNKNOWN_OUTCOME\",\"error\":{\"code\":\"UNKNOWN_OUTCOME\",\"message\":\"Tool dispatch may have started; do not automatically retry\",\"retryable\":false},\"automaticReplayAllowed\":false}"
         const val RESULT_SUMMARY_LIMIT = 1024
         const val TOOL_RESULT_MAX_BYTES = 1_048_576
+        const val TOOL_ARGS_INVALID_JSON = "Tool arguments are invalid JSON"
+        const val TOOL_ARGS_NOT_OBJECT = "Tool arguments must be a JSON object"
+        const val MAX_UNDISPATCHED_TOOL_FEEDBACK = 3
+
+        /** Arguments that provably never reached dispatch are INVALID_RESPONSE;
+         * other validation rejections stay TOOL_FAILED. */
+        internal fun rejectedTerminalCode(validationError: String): String =
+            if (validationError == TOOL_ARGS_INVALID_JSON || validationError == TOOL_ARGS_NOT_OBJECT) {
+                "INVALID_RESPONSE"
+            } else {
+                "TOOL_FAILED"
+            }
     }
 
     private enum class DispatchKind { MODEL, TOOL }

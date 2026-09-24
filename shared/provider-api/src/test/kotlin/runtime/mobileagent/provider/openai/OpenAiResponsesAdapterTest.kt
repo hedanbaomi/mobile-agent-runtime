@@ -166,20 +166,29 @@ class OpenAiResponsesSseTest {
     }
 
     @Test
-    fun unusableFunctionArgumentsDoneAreInvalidResponseNotUnknownOutcome() {
-        // A truncated argument tail and a nameless call were both decided
-        // locally: neither can have reached the provider.
+    fun unusableFunctionArgumentsDoneAreForwardedForRuntimeFeedback() {
+        // A truncated argument tail and a nameless call both pair a call id, so
+        // they are forwarded for the runtime's bounded INVALID feedback instead
+        // of ending the stream; only a missing call id stays a decided invalid
+        // response.
         assertEquals(
-            listOf(ModelEvent.Failed(ProviderConnectionErrorCode.INVALID_RESPONSE.name)),
+            listOf(ModelEvent.ToolCallDelta("call_3", "lookup", "{\"city\":")),
             OpenAiResponsesSse.eventsFromLine(
                 "data: {\"type\":\"response.function_call_arguments.done\",\"item_id\":\"fc_3\",\"call_id\":\"call_3\",\"name\":\"lookup\",\"arguments\":\"{\\\"city\\\":\"}",
                 OpenAiResponsesSse.State(),
             ),
         )
         assertEquals(
-            listOf(ModelEvent.Failed(ProviderConnectionErrorCode.INVALID_RESPONSE.name)),
+            listOf(ModelEvent.ToolCallDelta("call_4", "", "{}")),
             OpenAiResponsesSse.eventsFromLine(
                 "data: {\"type\":\"response.function_call_arguments.done\",\"item_id\":\"fc_4\",\"call_id\":\"call_4\",\"name\":\"\",\"arguments\":\"{}\"}",
+                OpenAiResponsesSse.State(),
+            ),
+        )
+        assertEquals(
+            listOf(ModelEvent.Failed(ProviderConnectionErrorCode.INVALID_RESPONSE.name)),
+            OpenAiResponsesSse.eventsFromLine(
+                "data: {\"type\":\"response.function_call_arguments.done\",\"item_id\":\"fc_5\",\"name\":\"lookup\",\"arguments\":\"{\\\"city\\\":\"}",
                 OpenAiResponsesSse.State(),
             ),
         )
@@ -461,7 +470,7 @@ class OpenAiResponsesAdapterTest {
     }
 
     @Test
-    fun nonStreamingFunctionCallWithUnusableArgumentsIsInvalidResponseNotUnknownOutcome() = runTest {
+    fun nonStreamingFunctionCallWithUnusableArgumentsIsForwardedForRuntimeFeedback() = runTest {
         val engine = MockEngine {
             respond(
                 "{\"status\":\"completed\",\"output\":[{\"type\":\"function_call\",\"call_id\":\"call-1\",\"name\":\"lookup\",\"arguments\":\"{bad\"}]}",
@@ -473,9 +482,11 @@ class OpenAiResponsesAdapterTest {
             ModelRequest("gpt-responses", listOf(ChatMessage("user", "hi"))),
             "token".toCharArray(),
         ).toList()
-        assertTrue(events.none { it is ModelEvent.ToolCallDelta })
-        assertTrue(events.none { it == ModelEvent.Completed })
-        assertEquals(listOf(ModelEvent.Failed(ProviderConnectionErrorCode.INVALID_RESPONSE.name)), events)
+        val call = events.filterIsInstance<ModelEvent.ToolCallDelta>().single()
+        assertEquals("call-1", call.callId)
+        assertEquals("{bad", call.argumentsJson)
+        assertTrue(events.none { it is ModelEvent.Failed })
+        assertEquals(ModelEvent.Completed, events.last())
     }
 
     @Test

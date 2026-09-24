@@ -1899,8 +1899,12 @@ internal fun decideToolCallDelta(
     ) {
         return ToolCallDecision.Terminal(ErrorCode.UNKNOWN_OUTCOME.name)
     }
-    if (parsed == null) {
+    // A blank call id cannot be paired with a fed-back tool result; keep it a
+    // decided invalid response.  Other unusable arguments are still forwarded:
+    // the runtime rejects them before dispatch and feeds a bounded INVALID
+    // result back so the model can resend corrected arguments.
+    if (callId.isBlank()) {
         return ToolCallDecision.Terminal(ProviderConnectionErrorCode.INVALID_RESPONSE.name)
     }
-    return ToolCallDecision.Forward(parsed.text)
+    return ToolCallDecision.Forward(parsed?.text ?: argumentsJson)
 }

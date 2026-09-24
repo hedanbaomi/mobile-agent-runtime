@@ -210,40 +210,39 @@ class AgentRuntimeTest {
         assertEquals(RunState.COMPLETED, reverseUnion.run.state)
         assertEquals(1, reverseUnion.executor.invocations)
 
+        // Schema rejections before dispatch are fed back as INVALID results for
+        // a corrected resend; the second scripted round completes the run.
         val numericCwd = runShellLike("""{"command":"pwd","cwd":1}""")
-        assertEquals(RunState.FAILED, numericCwd.run.state)
-        assertTrue(numericCwd.events.any {
-            it is RuntimeEvent.ModelEvent &&
-                it.event is ModelEvent.Failed &&
-                it.event.sanitizedMessage.contains("cwd must be a string")
-        })
+        assertEquals(RunState.COMPLETED, numericCwd.run.state)
+        val numericCwdFeedback = numericCwd.events
+            .filterIsInstance<RuntimeEvent.ToolResultProduced>().single()
+        assertEquals("INVALID", numericCwdFeedback.status)
+        assertTrue(numericCwdFeedback.resultJson.contains("cwd"))
         assertTrue(numericCwd.events.any { it is RuntimeEvent.RequestPrepared })
-        assertEquals(1, numericCwd.adapter.previewCalls)
-        assertEquals(1, numericCwd.adapter.streamCalls)
+        assertEquals(2, numericCwd.adapter.previewCalls)
+        assertEquals(2, numericCwd.adapter.streamCalls)
         assertEquals(0, numericCwd.executor.invocations)
 
         val stringBoolean = runShellLike(
             """{"flag":"true"}""",
             nullableBooleanSchema(),
         )
-        assertEquals(RunState.FAILED, stringBoolean.run.state)
-        assertTrue(stringBoolean.events.any {
-            it is RuntimeEvent.ModelEvent &&
-                it.event is ModelEvent.Failed &&
-                it.event.sanitizedMessage.contains("flag must be boolean")
-        })
+        assertEquals(RunState.COMPLETED, stringBoolean.run.state)
+        val stringBooleanFeedback = stringBoolean.events
+            .filterIsInstance<RuntimeEvent.ToolResultProduced>().single()
+        assertEquals("INVALID", stringBooleanFeedback.status)
+        assertTrue(stringBooleanFeedback.resultJson.contains("flag"))
         assertEquals(0, stringBoolean.executor.invocations)
 
         val enumNull = runShellLike(
             """{"command":"pwd","cwd":null}""",
             nullableCwdEnumSchema(),
         )
-        assertEquals(RunState.FAILED, enumNull.run.state)
-        assertTrue(enumNull.events.any {
-            it is RuntimeEvent.ModelEvent &&
-                it.event is ModelEvent.Failed &&
-                it.event.sanitizedMessage.contains("is not an allowed value")
-        })
+        assertEquals(RunState.COMPLETED, enumNull.run.state)
+        val enumNullFeedback = enumNull.events
+            .filterIsInstance<RuntimeEvent.ToolResultProduced>().single()
+        assertEquals("INVALID", enumNullFeedback.status)
+        assertTrue(enumNullFeedback.resultJson.contains("allowed value"))
         assertEquals(0, enumNull.executor.invocations)
     }
 

@@ -39,8 +39,8 @@ asset boundary; it fails closed when a boundary or material is missing:
   `NOTICE.txt` `87e76594ca56bd6b1116d2ee9b902b98c0940863762f9ef822de9a3cec31fcb3`.
   The standard-library payload `python/python3.14.zip` is recorded and verified by
   its exact SHA-256 in `licenses/index.json` (`payloads[]`); it is deliberately not
-  repeated here, because the archive is repacked by every build and this prose must
-  not pin a value a rebuild can change.
+  repeated here, because its bytes can change when the archive's inputs or generator
+  change and this prose must not pin a value that can become stale.
 - USearch 2.25.1: `LICENSE.txt` `c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4`,
   `NOTICE.txt` `145493df94feaef58efd5f5fcedc9d4d3c08a285dbbf87a9eefae3455cb475a4`,
   and pinned source archive `30dd99efab891a6385a89ecd3a3a8a85ed7d3f064b7657588fc3ef5ccd2d52e3`.

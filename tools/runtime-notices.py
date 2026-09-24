@@ -579,16 +579,15 @@ def assert_no_unindexed_license_dirs(entries: list[str], components: list[dict],
     }
     present: set[str] = set()
     for entry in entries:
-        parts = PurePosixPath(entry).parts
-        # assets/licenses/<pack>/<file...>          -> <pack>
-        # assets/licenses/maven/<slug>/<file...>    -> maven/<slug>
-        if len(parts) < 4 or parts[0] != "assets" or parts[1] != "licenses":
+        relative = next((entry[len(prefix):] for prefix in ARTIFACT_ASSET_PREFIXES if entry.startswith(prefix)), None)
+        if relative is None:
             continue
-        if parts[2] == "maven":
-            if len(parts) >= 5:
-                present.add(f"maven/{parts[3]}")
-        else:
-            present.add(parts[2])
+        # Both APK assets/ and AAB base/assets/ use the same indexed asset paths.
+        parts = PurePosixPath(relative).parts
+        if len(parts) >= 3 and parts[0] == "licenses":
+            key = license_asset_key("/".join(parts[:3]) if parts[1] == "maven" else "/".join(parts[:2]))
+            if key is not None:
+                present.add(key)
     stale = sorted(present - referenced)
     if stale:
         raise RuntimeError(
@@ -613,7 +612,7 @@ def validate_asset_path(path: object, context: str, allow_runtime_payload: bool 
     return path
 
 
-NOTICE_HASH_PATTERN = re.compile(r"\b[0-9a-f]{64}\b")
+NOTICE_HASH_PATTERN = re.compile(r"\b[0-9a-f]{64}\b", re.IGNORECASE)
 
 
 def index_sha256_values(value: object) -> set[str]:
@@ -627,7 +626,7 @@ def index_sha256_values(value: object) -> set[str]:
         elif isinstance(current, list):
             stack.extend(current)
         elif isinstance(current, str) and NOTICE_HASH_PATTERN.fullmatch(current):
-            found.add(current)
+            found.add(current.lower())
     return found
 
 
@@ -643,7 +642,7 @@ def assert_notice_hashes_are_indexed(notice: bytes, components: list[dict], cont
     """
     text = notice.decode("utf-8", errors="replace")
     indexed = index_sha256_values(components)
-    stale = sorted({value for value in NOTICE_HASH_PATTERN.findall(text) if value not in indexed})
+    stale = sorted({value.lower() for value in NOTICE_HASH_PATTERN.findall(text) if value.lower() not in indexed})
     if stale:
         raise RuntimeError(
             f"verify: {context} prints SHA-256 value(s) that no indexed record carries: "

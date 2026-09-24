@@ -94,8 +94,8 @@ APK/AAB/ZIP 内的 `assets/` 路径，不把缺失的 source `ASSETS_ROOT` 当�
   `NOTICE.txt`
   `87e76594ca56bd6b1116d2ee9b902b98c0940863762f9ef822de9a3cec31fcb3`。
   `python/python3.14.zip` 的 exact SHA-256 只登记在 `licenses/index.json` 的
-  `payloads[]`（校验器按该记录逐字节核对）；该归档每次构建都会重打包，因此本文
-  与随包 notice 都不再钉它的哈希，避免正文声明随重建失效。
+  `payloads[]`（校验器按该记录逐字节核对）；归档输入或生成器变化会改变产物，
+  因此本文与随包 notice 都不再钉它的哈希，避免正文声明过时。
   两个官方 Android archive 及其 Sigstore bundle 的 SHA-256 记录在 index provenance 中。
 - USearch 2.25.1（`runtime/vector-usearch/build/generated/vector-assets`）：
   `LICENSE.txt` `c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4`；

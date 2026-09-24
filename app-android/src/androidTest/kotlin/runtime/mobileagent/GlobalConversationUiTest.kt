@@ -401,6 +401,38 @@ class GlobalConversationUiTest {
     }
 
     @Test
+    fun retrievalCoverageNoticeNeverReplacesTheAssistantAnswer() {
+        // R3 QA P3: a non-blank event summary made the assistant message render as a tool
+        // row that displayed `eventSummary.ifBlank { text }` — the coverage notice replaced
+        // the answer, and a real reply looked like a bare notice card.
+        val state = ChatUiState(
+            agents = listOf(ChatAgentOptionUi("agent-a", "研究助手")),
+            sessions = listOf(ChatSessionUi("session-a", "当前对话", agentName = "研究助手", agentId = "agent-a")),
+            selectedAgentId = "agent-a",
+            selectedSessionId = "session-a",
+            messages = listOf(
+                ChatMessageUi(
+                    id = "assistant-notice",
+                    role = "assistant",
+                    text = "图表显示季度增长，照片里是一台设备。",
+                    eventSummary = "本次检索有 1/1 个知识库未参与（原因：kb: RETRIEVAL_DISABLED）。",
+                ),
+            ),
+        )
+        compose.setContent {
+            MaterialTheme {
+                Box(Modifier.width(360.dp).height(640.dp)) {
+                    ConversationScreen(state = state)
+                }
+            }
+        }
+
+        compose.onNodeWithText("图表显示季度增长，照片里是一台设备。").assertIsDisplayed()
+        compose.onNodeWithTag("conversation.notice.assistant-notice", useUnmergedTree = true).assertIsDisplayed()
+        compose.onAllNodesWithTag("conversation.tool.assistant-notice", useUnmergedTree = true).assertCountEquals(0)
+    }
+
+    @Test
     fun composerAcceptsImeTextAndSystemBackClosesCompactDrawer() {
         var input by mutableStateOf("")
         var sent = 0

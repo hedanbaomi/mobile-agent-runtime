@@ -1418,8 +1418,14 @@ class ChatViewModel(
                     }
                 if (record.state !in TERMINAL) record = record.copy(state = RunStatus.FAILED, stopReason = "No terminal outcome")
                 state.value = state.value.copy(status = when (record.state) {
-                    RunStatus.COMPLETED -> "已完成。输入 ${record.inputTokens} / 输出 ${record.outputTokens} tokens。" +
-                        if (run.compactionRequests > 0) "包含 ${run.compactionRequests} 次上下文摘要请求。" else ""
+                    RunStatus.COMPLETED -> buildString {
+                        append("已完成。输入 ${record.inputTokens} / 输出 ${record.outputTokens} tokens。")
+                        if (run.compactionRequests > 0) append("包含 ${run.compactionRequests} 次上下文摘要请求。")
+                        // R3 QA P3: a completed run with no visible answer must not read
+                        // as a silent non-reply.  UI-only notice; fabricated assistant
+                        // text would become durable history and be replayed to the model.
+                        emptyCompletedAnswerNotice(answer)?.let { append(" $it") }
+                    }
                     RunStatus.BUDGET_EXHAUSTED -> "已达到执行预算；未自动重试。"
                     else -> state.value.status
                 })
@@ -2163,6 +2169,21 @@ class ChatViewModel(
         val TERMINAL = setOf(RunStatus.COMPLETED, RunStatus.FAILED, RunStatus.CANCELLED, RunStatus.BUDGET_EXHAUSTED, RunStatus.UNKNOWN_OUTCOME)
     }
 }
+
+/**
+ * R3 QA P3: a run that COMPLETED without any visible answer text used to read as a silent
+ * non-reply (the only surface was the runtime-authored retrieval-coverage notice).  This
+ * returns the additive UI notice, or null when the answer is present.
+ *
+ * It deliberately returns UI copy instead of assistant text: fabricated text would be
+ * persisted as durable history and replayed to the model on the next turn.
+ */
+internal fun emptyCompletedAnswerNotice(answer: String): String? =
+    if (answer.isBlank()) {
+        "模型本轮没有给出可见答复。可重试或换一种问法；若上方提示有知识库未参与本次检索，请先确认该知识库已启用检索。"
+    } else {
+        null
+    }
 
 /**
  * Resolve inspector availability without inspecting or persisting request contents. A prepared

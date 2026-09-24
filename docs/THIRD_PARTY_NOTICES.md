@@ -92,9 +92,10 @@ APK/AAB/ZIP 内的 `assets/` 路径，不把缺失的 source `ASSETS_ROOT` 当�
   `licenses/cpython-3.14.7/LICENSE.txt`
   `b0e25a78cffb43f4d92de8b61ccfa1f1f98ecbc22330b54b5251e7b6ba010231`；
   `NOTICE.txt`
-  `87e76594ca56bd6b1116d2ee9b902b98c0940863762f9ef822de9a3cec31fcb3`；
-  `python/python3.14.zip`
-  `8aa6768b2585279a566bef9f2b5c0568f3199c940fe77b2d84b240b97474e351`。
+  `87e76594ca56bd6b1116d2ee9b902b98c0940863762f9ef822de9a3cec31fcb3`。
+  `python/python3.14.zip` 的 exact SHA-256 只登记在 `licenses/index.json` 的
+  `payloads[]`（校验器按该记录逐字节核对）；该归档每次构建都会重打包，因此本文
+  与随包 notice 都不再钉它的哈希，避免正文声明随重建失效。
   两个官方 Android archive 及其 Sigstore bundle 的 SHA-256 记录在 index provenance 中。
 - USearch 2.25.1（`runtime/vector-usearch/build/generated/vector-assets`）：
   `LICENSE.txt` `c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4`；
@@ -104,12 +105,12 @@ APK/AAB/ZIP 内的 `assets/` 路径，不把缺失的 source `ASSETS_ROOT` 当�
 - ONNX Runtime 1.29.0（`runtime/embedding-onnx/build/generated/embedding-assets`）：
   `LICENSE.txt` `2f07c72751aed99790b8a4869cf2311df85a860b22ded05fa22803587a48922c`；
   `NOTICE.txt` `af50216ba6c698e64b3a91f63278543d79f963938ca14fd23df45f2d6de3491c`。
-- all-MiniLM-L6-v2（同一 embedding generated root）：
-  `LICENSES/Apache-2.0.txt` `9bf4e882bdd75e8d10fc788c53d0a787ef0f59cead1fe1f0878c240896fc8610`；
-  `LICENSE-NOTICE.txt` `e4870c1e6fe1a4652eb6912c1df83a097653dd337560ac63c6a211a50a1f0333`；
-  `model.onnx` `6fd5d72fe4589f189f8ebc006442dbb529bb7ce38f8082112682524616046452`；
-  `tokenizer.json` `be50c3628f2bf5bb5e3a7f17b1f74611b2561a3a27eeab05e5aa30f411572037`；
-  `manifest.json` `e7ac456cccf4def26d7599afe0c200ff8900599776f970b4b7b8881fd17bf6e5`。
+- distiluse-base-multilingual-cased-v2（`runtime/embedding-onnx/build/generated/embedding-assets`，
+  即 `modelPackId` 指定的默认本地 embedding 包；此前文档中的 `all-MiniLM-L6-v2` 已随该项替换下线）：
+  Apache-2.0，Xenova int8 ONNX + 上游 Sentence Transformers Dense Tanh 投影。
+  `model.onnx`／`tokenizer.json`／`dense.safetensors`／`manifest.json` 与
+  `LICENSE-NOTICE.txt`／`LICENSES/Apache-2.0.txt` 的 exact SHA-256 记录在
+  `licenses/index.json` 与随包 `LICENSE-NOTICE.txt`，此处不重复钉值。
 
 这些条目的许可不替代各自原文，也不把全部依赖笼统标为 AGPL。
 

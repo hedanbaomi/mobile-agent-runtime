@@ -647,20 +647,23 @@ class OpenAiCompatibleAdapter(
                 }
                 null
             }
-            is ModelEvent.ToolCallDelta -> {
-                val parsed = runCatching { Json.parseToJsonElement(event.argumentsJson) }.getOrNull()
-                val hasCredential = containsCredentialText(event.callId, secrets) ||
-                    containsCredentialText(event.name, secrets) ||
-                    containsCredentialText(event.argumentsJson, secrets) ||
-                    (parsed != null && containsCredentialJson(parsed, secrets))
-                if (hasCredential || parsed == null || parsed !is JsonObject) {
+            is ModelEvent.ToolCallDelta -> when (
+                val decision = decideToolCallDelta(event.callId, event.name, event.argumentsJson, secrets)
+            ) {
+                is ToolCallDecision.Terminal -> {
+                    // A withheld credential keeps the conservative unknown outcome; a
+                    // locally unusable argument payload is a decided invalid response.
                     redactor.discard()
-                    emitTerminalFailure(state, ErrorCode.UNKNOWN_OUTCOME.name)
-                    ModelEvent.Failed(ErrorCode.UNKNOWN_OUTCOME.name)
-                } else {
+                    emitTerminalFailure(state, decision.code)
+                    ModelEvent.Failed(decision.code)
+                }
+                is ToolCallDecision.Forward -> {
+                    val safeEvent =
+                        if (decision.argumentsJson == event.argumentsJson) event
+                        else event.copy(argumentsJson = decision.argumentsJson)
                     state.hasVisibleOutput = true
-                    emit(event)
-                    state.diagnosticEvents += event
+                    emit(safeEvent)
+                    state.diagnosticEvents += safeEvent
                     null
                 }
             }
@@ -1640,17 +1643,25 @@ class OpenAiCompatibleAdapter(
                     function?.get("arguments")?.jsonPrimitive?.contentOrNull.orEmpty(),
                 )
         }
-        if (toolEvents.any { event ->
-                val parsed = runCatching { Json.parseToJsonElement(event.argumentsJson) }.getOrNull()
-                val objectArgs = parsed as? JsonObject
-                objectArgs == null ||
-                    containsCredentialText(event.callId, redactionSecrets) ||
-                    containsCredentialText(event.name, redactionSecrets) ||
-                    containsCredentialText(event.argumentsJson, redactionSecrets) ||
-                    containsCredentialJson(objectArgs, redactionSecrets)
-                }) {
-            emitTerminalFailure(state, ErrorCode.UNKNOWN_OUTCOME.name)
-            return
+        val safeToolEvents = mutableListOf<ModelEvent.ToolCallDelta>()
+        for (event in toolEvents) {
+            when (
+                val decision = decideToolCallDelta(
+                    event.callId,
+                    event.name,
+                    event.argumentsJson,
+                    redactionSecrets,
+                )
+            ) {
+                // A credential-bearing call is withheld (unknown outcome by
+                // design); unusable arguments were never dispatched at all.
+                is ToolCallDecision.Terminal -> {
+                    emitTerminalFailure(state, decision.code)
+                    return
+                }
+                is ToolCallDecision.Forward -> safeToolEvents +=
+                    ModelEvent.ToolCallDelta(event.callId, event.name, decision.argumentsJson)
+            }
         }
         val refusal = message?.get("refusal")?.let { element ->
             runCatching { element.jsonPrimitive.contentOrNull }.getOrNull()
@@ -1677,7 +1688,7 @@ class OpenAiCompatibleAdapter(
             emitTerminalFailure(state, lengthFailureCode(state))
             return
         }
-        toolEvents.forEach {
+        safeToolEvents.forEach {
             state.hasVisibleOutput = true
             emit(it)
         }
@@ -1851,4 +1862,45 @@ class OpenAiCompatibleAdapter(
             )
         }
     }
+}
+
+/**
+ * Decision for one tool-call delta about to be handed to the caller.
+ *
+ * The two ways a call can be refused are deliberately different failures.  A
+ * credential found in the call (in its id/name, in the raw argument text, or
+ * inside the parsed argument values) keeps the conservative unknown outcome:
+ * the provider may already have seen the secret.  Arguments that are not usable
+ * JSON — or that are not a JSON object at all — are a local, decided failure:
+ * that call was never dispatched anywhere, so calling it an unknown outcome
+ * would wrongly force a retry-confirmation dialog onto the user.
+ */
+internal sealed interface ToolCallDecision {
+    /** Safe to dispatch; [argumentsJson] is the exact text to hand over. */
+    data class Forward(val argumentsJson: String) : ToolCallDecision
+
+    /** Never dispatched; [code] is the terminal error code to report. */
+    data class Terminal(val code: String) : ToolCallDecision
+}
+
+internal fun decideToolCallDelta(
+    callId: String,
+    name: String,
+    argumentsJson: String,
+    secrets: List<String>,
+): ToolCallDecision {
+    // A repair is used only to make an otherwise-unusable string parseable; it
+    // never completes missing structure, so a truncated payload stays a failure.
+    val parsed = ToolArguments.parse(argumentsJson)
+    if (containsCredentialText(callId, secrets) ||
+        containsCredentialText(name, secrets) ||
+        containsCredentialText(argumentsJson, secrets) ||
+        (parsed != null && containsCredentialJson(parsed.json, secrets))
+    ) {
+        return ToolCallDecision.Terminal(ErrorCode.UNKNOWN_OUTCOME.name)
+    }
+    if (parsed == null) {
+        return ToolCallDecision.Terminal(ProviderConnectionErrorCode.INVALID_RESPONSE.name)
+    }
+    return ToolCallDecision.Forward(parsed.text)
 }

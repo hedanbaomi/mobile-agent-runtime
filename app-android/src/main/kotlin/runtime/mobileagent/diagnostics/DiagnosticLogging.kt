@@ -621,6 +621,13 @@ data class RunStateRecord(
     val requestRef: String? = null,
     val sessionRef: String? = null,
     val reasonCode: String = "unknown",
+    /**
+     * Closed failure classification (a `MessageErrorCode` name) so a terminal
+     * run can be told apart from the log alone — stream truncation, malformed
+     * provider response, tool validation failure and unknown outcome all used
+     * to collapse into one opaque row (R2 QA P2).
+     */
+    val failureCode: String? = null,
     val modelRounds: Int = 0,
     val toolCalls: Int = 0,
 )
@@ -904,7 +911,7 @@ class RollingDiagnosticLogStore(
             "exceptionType", "durationMs", "responseBytes", "streaming", "messageCount", "imageCount",
             "toolCount", "eventType",
         ),
-        "run_state" to setOf("requestRef", "sessionRef", "state", "reasonCode", "modelRounds", "toolCalls"),
+        "run_state" to setOf("requestRef", "sessionRef", "state", "reasonCode", "failureCode", "modelRounds", "toolCalls"),
         "context_compaction_state" to setOf("requestRef", "sessionRef", "state", "reasonCode"),
         "authority_configuration_state" to setOf(
             "authority", "userIntentEnabled", "selected", "platformGrant", "availability", "connection",
@@ -1417,6 +1424,7 @@ class RollingDiagnosticLogStore(
             "sessionRef" to record.sessionRef,
             "state" to record.state.wireName,
             "reasonCode" to record.reasonCode,
+            "failureCode" to record.failureCode,
             "modelRounds" to record.modelRounds,
             "toolCalls" to record.toolCalls,
         ).withoutNulls(),
@@ -1971,6 +1979,15 @@ class RollingDiagnosticLogStore(
                     "modelRounds" to ((fields["modelRounds"] as? Int) ?: 0).coerceIn(0, MAX_COUNT),
                     "toolCalls" to ((fields["toolCalls"] as? Int) ?: 0).coerceIn(0, MAX_COUNT),
                 ).apply {
+                    (fields["failureCode"] as? String)?.takeIf { it.isNotBlank() }?.let { raw ->
+                        // Closed vocabulary: only a known MessageErrorCode name is
+                        // written.  An unknown value omits the field instead of
+                        // dropping the whole terminal event.
+                        val code = raw.trim().uppercase()
+                        if (runtime.mobileagent.domain.MessageErrorCode.entries.any { it.name == code }) {
+                            put("failureCode", code)
+                        }
+                    }
                     (fields["requestRef"] as? String)?.takeIf { it.isNotBlank() }?.let { put("requestRef", canonicalReference(it)) }
                     (fields["sessionRef"] as? String)?.takeIf { it.isNotBlank() }?.let { put("sessionRef", canonicalReference(it)) }
                 }

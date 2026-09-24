@@ -18,6 +18,7 @@ import runtime.mobileagent.domain.ErrorCode
 import runtime.mobileagent.provider.ChatMessage
 import runtime.mobileagent.provider.ModelEvent
 import runtime.mobileagent.provider.ModelRequest
+import runtime.mobileagent.provider.ProviderConnectionErrorCode
 import runtime.mobileagent.provider.ProviderHttpResponseException
 
 /**
@@ -141,6 +142,36 @@ class IncidentRegressionTest {
         val code = lastFailure(chatHttp(HttpStatusCode.BadRequest, """{"error":{"message":"unsupported parameter"}}"""))
         assertTrue(code != ErrorCode.INPUT_OVERFLOW.name, code)
         assertTrue(code != ErrorCode.UNKNOWN_OUTCOME.name, code)
+    }
+
+    /**
+     * R2: a ~60KB SSE answer whose tail tool call carries unusable arguments —
+     * the observed shape is an accumulated `function.arguments` string that is
+     * not parseable JSON, typically a truncated tail — must terminate as a typed
+     * local failure.  Nothing was dispatched, so UNKNOWN_OUTCOME and its forced
+     * retry-confirmation dialog would be factually wrong.
+     */
+    @Test
+    fun largeResponseTailToolCallWithUnusableArgumentsIsInvalidResponse() = runTest {
+        val chunk = "x".repeat(140)
+        val filler = buildString {
+            repeat(300) { append("data: {\"choices\":[{\"delta\":{\"content\":\"$chunk\"}}]}\n") }
+        }
+        val tail =
+            "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call-tail\",\"function\":{\"name\":\"python_skill\",\"arguments\":\"{\\\"code\\\":\\\"print(1)\"}}]}}]}\n"
+        val body = filler + tail + "data: [DONE]\n"
+        assertTrue(body.length > 50_000, "evidence shape expected a ~60KB stream, got ${body.length}")
+        val engine = MockEngine {
+            respond(body, HttpStatusCode.OK, headersOf(HttpHeaders.ContentType, "text/event-stream"))
+        }
+        val events = OpenAiCompatibleAdapter(HttpClient(engine), "https://example.invalid/v1")
+            .stream(ModelRequest("demo", listOf(ChatMessage("user", "hi"))), "token".toCharArray())
+            .toList()
+        assertTrue(events.any { it is ModelEvent.TextDelta }, events.toString())
+        assertTrue(events.none { it is ModelEvent.ToolCallDelta }, events.toString())
+        assertTrue(events.none { it == ModelEvent.Completed })
+        assertEquals(ProviderConnectionErrorCode.INVALID_RESPONSE.name, lastFailure(events))
+        assertTrue(lastFailure(events) != ErrorCode.UNKNOWN_OUTCOME.name, lastFailure(events))
     }
 
     /** C3: interleaved channels keep their own withheld suffix and stay intact. */

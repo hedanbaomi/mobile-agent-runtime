@@ -443,7 +443,7 @@ class AgentRuntime(
                             when (outgoing) {
                                 is ModelEvent.ToolCallDelta -> {
                                     if (!request.toolsEnabled || toolExecutor == null) {
-                                        terminal = ModelEvent.Failed("This model cannot execute tools")
+                                        terminal = ModelEvent.Failed("CONFIG_INVALID: model tools are not enabled for this model")
                                     } else {
                                         val call = ToolCall(
                                             callId = outgoing.callId,
@@ -452,7 +452,10 @@ class AgentRuntime(
                                         )
                                         val validationError = validateToolCall(call, toolSpecs, pendingTools)
                                         if (validationError != null) {
-                                            terminal = ModelEvent.Failed(validationError)
+                                            // Typed prefix so a tool-call validation failure is
+                                            // distinguishable from a truncated provider stream in
+                                            // run_state (R2 QA P2); the detail stays in stopReason.
+                                            terminal = ModelEvent.Failed("TOOL_FAILED: $validationError")
                                         } else {
                                             pendingTools[outgoing.callId] = call
                                             emit(
@@ -546,20 +549,24 @@ class AgentRuntime(
                         finish()
                     } else {
                         run.state = RunState.FAILED
-                        emitModel(ModelEvent.Failed("Model stream ended without a terminal event"))
+                        // Typed prefix: the provider's stream ended without its own
+                        // terminal event, which is a malformed/incomplete response and
+                        // not an unknown external outcome (R2 QA P2 made this
+                        // indistinguishable from a tool-validation failure).
+                        emitModel(ModelEvent.Failed("INVALID_RESPONSE: model stream ended without a terminal event"))
                         finish()
                     }
                     return@flow
                 }
                 if (ended != ModelEvent.Completed) {
                     run.state = RunState.FAILED
-                    emitModel(ModelEvent.Failed("Model stream ended before tool calls completed"))
+                    emitModel(ModelEvent.Failed("INVALID_RESPONSE: model stream ended before tool calls completed"))
                     finish()
                     return@flow
                 }
                 if (!request.toolsEnabled || toolExecutor == null) {
                     run.state = RunState.FAILED
-                    emitModel(ModelEvent.Failed("This model cannot execute tools"))
+                    emitModel(ModelEvent.Failed("CONFIG_INVALID: model tools are not enabled for this model"))
                     finish()
                     return@flow
                 }

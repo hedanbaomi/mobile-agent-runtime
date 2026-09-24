@@ -588,17 +588,27 @@ class OpenAiResponsesAdapter(
             false
         }
         is ModelEvent.ToolCallDelta -> {
-            val parsed = runCatching { Json.parseToJsonElement(event.argumentsJson).jsonObject }.getOrNull()
-            if (parsed == null || credentialText(event.callId, secrets) ||
-                credentialText(event.name, secrets) || credentialText(event.argumentsJson, secrets) ||
-                credentialJson(parsed, secrets)
+            val parsed = ToolArguments.parse(event.argumentsJson)
+            if (credentialText(event.callId, secrets) ||
+                credentialText(event.name, secrets) || credentialText(event.argumentsJson, secrets)
             ) {
                 redactor.discard()
                 emit(ModelEvent.Failed(ErrorCode.UNKNOWN_OUTCOME.name))
                 true
+            } else if (parsed == null) {
+                // Locally unusable arguments were never dispatched; the terminal
+                // must not claim a possibly-external outcome.
+                redactor.discard()
+                emit(ModelEvent.Failed(ProviderConnectionErrorCode.INVALID_RESPONSE.name))
+                true
+            } else if (credentialJson(parsed.json, secrets)) {
+                redactor.discard()
+                emit(ModelEvent.Failed(ErrorCode.UNKNOWN_OUTCOME.name))
+                true
             } else {
-                emit(event)
-                onSafeDiagnostic(event)
+                val safeEvent = if (parsed.repaired) event.copy(argumentsJson = parsed.text) else event
+                emit(safeEvent)
+                onSafeDiagnostic(safeEvent)
                 false
             }
         }
@@ -859,14 +869,21 @@ class OpenAiResponsesAdapter(
                         val callId = item["call_id"]?.jsonPrimitive?.contentOrNull.orEmpty()
                         val name = item["name"]?.jsonPrimitive?.contentOrNull.orEmpty()
                         val args = item["arguments"]?.jsonPrimitive?.contentOrNull.orEmpty()
-                        val parsed = runCatching { Json.parseToJsonElement(args).jsonObject }.getOrNull()
-                        if (callId.isBlank() || name.isBlank() || parsed == null ||
-                            credentialText(callId, secrets) || credentialText(name, secrets) ||
-                            credentialText(args, secrets) || credentialJson(parsed, secrets)
+                        val parsed = ToolArguments.parse(args)
+                        if (credentialText(callId, secrets) || credentialText(name, secrets) ||
+                            credentialText(args, secrets)
                         ) {
                             return listOf(ModelEvent.Failed(ErrorCode.UNKNOWN_OUTCOME.name))
                         }
-                        events += ModelEvent.ToolCallDelta(callId, name, args)
+                        // Structural defects and unusable arguments are local
+                        // decisions: the call was never dispatched.
+                        if (callId.isBlank() || name.isBlank() || parsed == null) {
+                            return listOf(ModelEvent.Failed(ProviderConnectionErrorCode.INVALID_RESPONSE.name))
+                        }
+                        if (credentialJson(parsed.json, secrets)) {
+                            return listOf(ModelEvent.Failed(ErrorCode.UNKNOWN_OUTCOME.name))
+                        }
+                        events += ModelEvent.ToolCallDelta(callId, name, parsed.text)
                     }
                 }
             }

@@ -284,16 +284,27 @@ object OpenAiResponsesSse {
         state.emittedCalls += key
         if (buffer.callId.isNotBlank()) state.emittedCalls += buffer.callId
         val arguments = buffer.arguments.toString()
-        val parsed = runCatching { json.parseToJsonElement(arguments).jsonObject }.getOrNull()
-        if (buffer.callId.isBlank() || buffer.name.isBlank() || parsed == null ||
-            credentialText(buffer.callId, extraSecrets) ||
+        val parsed = ToolArguments.parse(arguments)
+        if (credentialText(buffer.callId, extraSecrets) ||
             credentialText(buffer.name, extraSecrets) ||
-            credentialText(arguments, extraSecrets) ||
-            credentialJson(parsed, extraSecrets)
+            credentialText(arguments, extraSecrets)
         ) {
+            // A withheld credential stays conservative: the provider may have
+            // seen the secret, so the outcome is genuinely unknown.
             return listOf(ModelEvent.Failed(ErrorCode.UNKNOWN_OUTCOME.name))
         }
-        return listOf(ModelEvent.ToolCallDelta(buffer.callId, buffer.name, arguments))
+        // Blank call_id/name and unusable arguments are structural defects of a
+        // call that was never dispatched: an unusable response, not an unknown
+        // external outcome.
+        if (buffer.callId.isBlank() || buffer.name.isBlank() || parsed == null) {
+            return listOf(ModelEvent.Failed(ProviderConnectionErrorCode.INVALID_RESPONSE.name))
+        }
+        if (credentialJson(parsed.json, extraSecrets)) {
+            return listOf(ModelEvent.Failed(ErrorCode.UNKNOWN_OUTCOME.name))
+        }
+        // A repaired argument string is forwarded in its repaired form so the
+        // runtime's own re-parse succeeds; otherwise the provider text is unchanged.
+        return listOf(ModelEvent.ToolCallDelta(buffer.callId, buffer.name, parsed.text))
     }
 
     private fun usage(root: JsonObject): ModelEvent.Usage? {

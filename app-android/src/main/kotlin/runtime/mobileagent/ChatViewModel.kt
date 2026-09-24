@@ -452,6 +452,7 @@ class ChatViewModel(
                             requestRef = run.runId,
                             sessionRef = conversationId,
                             reasonCode = "watchdog_timeout",
+                            failureCode = "TIMEOUT",
                             modelRounds = run.modelRounds,
                             toolCalls = run.toolCalls,
                         ),
@@ -1357,6 +1358,12 @@ class ChatViewModel(
                                             requestRef = run.runId,
                                             sessionRef = conversationId,
                                             reasonCode = event.state.name.lowercase(),
+                                            // Typed classification set by the terminal
+                                            // ModelEvent (R2 QA P2): stream truncation,
+                                            // malformed provider response and tool
+                                            // validation failures are distinguishable
+                                            // from the log alone.
+                                            failureCode = record.errorCode,
                                             modelRounds = event.modelRounds,
                                             toolCalls = event.toolCalls,
                                         ),

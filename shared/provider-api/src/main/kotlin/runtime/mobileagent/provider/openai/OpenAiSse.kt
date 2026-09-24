@@ -10,6 +10,7 @@ import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import runtime.mobileagent.domain.ErrorCode
 import runtime.mobileagent.provider.ModelEvent
+import runtime.mobileagent.provider.ProviderConnectionErrorCode
 import runtime.mobileagent.provider.SecretRedactor
 
 object OpenAiSse {
@@ -27,9 +28,12 @@ object OpenAiSse {
         val data = trimmed.removePrefix("data:").trim()
         if (data == "[DONE]") {
             val toolEvents = flushToolCalls(toolBuf, extraSecrets)
-                ?: return listOf(ModelEvent.Failed(ErrorCode.UNKNOWN_OUTCOME.name))
             toolBuf.clear()
             indexToId.clear()
+            // A withheld credential keeps the conservative UNKNOWN_OUTCOME terminal
+            // (the provider may have seen the secret); unusable arguments and
+            // structural defects are decided locally and never complete the run.
+            if (toolEvents.any { it is ModelEvent.Failed }) return toolEvents
             return toolEvents + ModelEvent.Completed
         }
         val obj = runCatching { json.parseToJsonElement(data).jsonObject }.getOrNull() ?: return emptyList()
@@ -133,23 +137,39 @@ object OpenAiSse {
      * Tool arguments are withheld until the provider's terminal marker.  A
      * partial argument cannot be sent to the runtime, and a call containing a
      * credential is rejected without exposing any earlier argument prefix.
+     *
+     * The two failure causes are not the same thing and must not share a code:
+     * arguments that are not usable JSON (or a call missing its id/name) were
+     * locally rejected before any dispatch, while a credential-bearing call is
+     * withheld for safety and keeps the conservative unknown-outcome terminal.
      */
     private fun flushToolCalls(
         toolBuf: LinkedHashMap<String, Pair<String, StringBuilder>>,
         secrets: List<String>,
-    ): List<ModelEvent>? {
+    ): List<ModelEvent> {
         if (toolBuf.isEmpty()) return emptyList()
         val events = mutableListOf<ModelEvent>()
         for ((callId, call) in toolBuf) {
             val arguments = call.second.toString()
-            val parsed = runCatching { json.parseToJsonElement(arguments).jsonObject }.getOrNull()
-                ?: return null
+            val parsed = ToolArguments.parse(arguments)
             if (containsCredentialText(callId, secrets) ||
                 containsCredentialText(call.first, secrets) ||
-                containsCredentialText(arguments, secrets) ||
-                containsCredentialJson(parsed, secrets)
-            ) return null
-            events += ModelEvent.ToolCallDelta(callId, call.first, arguments)
+                containsCredentialText(arguments, secrets)
+            ) return listOf(ModelEvent.Failed(ErrorCode.UNKNOWN_OUTCOME.name))
+            if (parsed == null) {
+                // Truncated, malformed or non-object arguments: a local decision,
+                // never a dispatch, so never an external-outcome unknown.
+                return listOf(ModelEvent.Failed(ProviderConnectionErrorCode.INVALID_RESPONSE.name))
+            }
+            if (callId.isBlank() || call.first.isBlank()) {
+                return listOf(ModelEvent.Failed(ProviderConnectionErrorCode.INVALID_RESPONSE.name))
+            }
+            if (containsCredentialJson(parsed.json, secrets)) {
+                return listOf(ModelEvent.Failed(ErrorCode.UNKNOWN_OUTCOME.name))
+            }
+            // Forward the repaired text when a repair was needed so the runtime
+            // can actually parse and dispatch the call; otherwise the original.
+            events += ModelEvent.ToolCallDelta(callId, call.first, parsed.text)
         }
         return events
     }

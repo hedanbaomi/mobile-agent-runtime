@@ -22,7 +22,10 @@ import io.ktor.client.engine.mock.respond
 import io.ktor.http.HttpHeaders
 import io.ktor.http.HttpStatusCode
 import io.ktor.http.headersOf
+import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 import java.net.SocketTimeoutException
 import runtime.mobileagent.domain.ModelProfile
 import runtime.mobileagent.domain.ModelRole
@@ -91,6 +94,80 @@ class OpenAiSseTest {
         assertEquals("call-b", calls[1].callId)
         assertEquals("""{"y":1}""", calls[1].argumentsJson)
         assertEquals(ModelEvent.Completed, done.last())
+    }
+
+    @Test
+    fun toolArgumentsWithARawControlCharacterStillYieldAParseableCall() {
+        // The provider-escaped `\n` in the frame decodes to a RAW newline inside
+        // the argument text: illegal JSON, but semantically unambiguous.
+        val buf = linkedMapOf<String, Pair<String, StringBuilder>>()
+        OpenAiSse.eventsFromLine(
+            "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call-1\",\"function\":{\"name\":\"run\",\"arguments\":\"{\\\"code\\\":\\\"line one\\nline two\\\"}\"}}]}}]}",
+            buf,
+        )
+        val done = OpenAiSse.eventsFromLine("data: [DONE]", buf)
+        val call = done.filterIsInstance<ModelEvent.ToolCallDelta>().single()
+        assertEquals(
+            "line one\nline two",
+            Json.parseToJsonElement(call.argumentsJson).jsonObject["code"]!!.jsonPrimitive.content,
+        )
+        assertTrue(done.none { it is ModelEvent.Failed })
+        assertEquals(ModelEvent.Completed, done.last())
+    }
+
+    @Test
+    fun truncatedToolArgumentsAtDoneAreInvalidResponseNotUnknownOutcome() {
+        // The tail of a large response lost the closing quote: nothing was ever
+        // dispatched, so the terminal must not claim an unknown external outcome.
+        val buf = linkedMapOf<String, Pair<String, StringBuilder>>()
+        OpenAiSse.eventsFromLine(
+            """data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call-1","function":{"name":"run","arguments":"{\"code\":"}}]}}]}""",
+            buf,
+        )
+        assertEquals(
+            listOf(ModelEvent.Failed(ProviderConnectionErrorCode.INVALID_RESPONSE.name)),
+            OpenAiSse.eventsFromLine("data: [DONE]", buf),
+        )
+    }
+
+    @Test
+    fun nonObjectToolArgumentsAtDoneAreInvalidResponseNotUnknownOutcome() {
+        val buf = linkedMapOf<String, Pair<String, StringBuilder>>()
+        OpenAiSse.eventsFromLine(
+            """data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call-1","function":{"name":"run","arguments":"5"}}]}}]}""",
+            buf,
+        )
+        assertEquals(
+            listOf(ModelEvent.Failed(ProviderConnectionErrorCode.INVALID_RESPONSE.name)),
+            OpenAiSse.eventsFromLine("data: [DONE]", buf),
+        )
+    }
+
+    @Test
+    fun blankToolNameAtDoneIsInvalidResponseNotUnknownOutcome() {
+        val buf = linkedMapOf<String, Pair<String, StringBuilder>>()
+        OpenAiSse.eventsFromLine(
+            """data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call-1","function":{"name":"","arguments":"{\"x\":1}"}}]}}]}""",
+            buf,
+        )
+        assertEquals(
+            listOf(ModelEvent.Failed(ProviderConnectionErrorCode.INVALID_RESPONSE.name)),
+            OpenAiSse.eventsFromLine("data: [DONE]", buf),
+        )
+    }
+
+    @Test
+    fun credentialsInToolArgumentsAtDoneStayUnknownOutcome() {
+        val secret = "synthetic-tool-credential-12345"
+        val buf = linkedMapOf<String, Pair<String, StringBuilder>>()
+        OpenAiSse.eventsFromLine(
+            """data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call-1","function":{"name":"send","arguments":"{\"value\":\"$secret\"}"}}]}}]}""",
+            buf,
+        )
+        assertEquals(
+            listOf(ModelEvent.Failed(ErrorCode.UNKNOWN_OUTCOME.name)),
+            OpenAiSse.eventsFromLine("data: [DONE]", buf, listOf(secret)),
+        )
     }
 
     @Test
@@ -621,6 +698,139 @@ class OpenAiCompatibleAdapterTest {
         assertTrue(events.none { it is ModelEvent.ToolCallDelta })
         assertEquals(listOf(ModelEvent.Failed(ErrorCode.UNKNOWN_OUTCOME.name)), events)
         assertTrue(events.none { it.toString().contains(secret) })
+    }
+
+    @Test
+    fun nonStreamingToolCallWithNonObjectArgumentsIsInvalidResponseNotUnknownOutcome() = runTest {
+        val engine = MockEngine {
+            respond(
+                content = """{"choices":[{"message":{"content":"safe","tool_calls":[{"id":"call-1","type":"function","function":{"name":"send","arguments":"5"}}]}}]}""",
+                status = HttpStatusCode.OK,
+                headers = headersOf(HttpHeaders.ContentType, "application/json"),
+            )
+        }
+        val adapter = OpenAiCompatibleAdapter(HttpClient(engine), "https://example.invalid/v1")
+        val events = adapter.stream(
+            ModelRequest(modelId = "demo", messages = listOf(ChatMessage(role = "user", text = "hi"))),
+            "token".toCharArray(),
+        ).toList()
+        assertTrue(events.none { it is ModelEvent.ToolCallDelta })
+        assertEquals(listOf(ModelEvent.Failed(ProviderConnectionErrorCode.INVALID_RESPONSE.name)), events)
+    }
+
+    @Test
+    fun nonStreamingToolCallWithTruncatedArgumentsIsInvalidResponseNotUnknownOutcome() = runTest {
+        val engine = MockEngine {
+            respond(
+                content = """{"choices":[{"message":{"content":"safe","tool_calls":[{"id":"call-1","type":"function","function":{"name":"send","arguments":"{bad"}}]}}]}""",
+                status = HttpStatusCode.OK,
+                headers = headersOf(HttpHeaders.ContentType, "application/json"),
+            )
+        }
+        val adapter = OpenAiCompatibleAdapter(HttpClient(engine), "https://example.invalid/v1")
+        val events = adapter.stream(
+            ModelRequest(modelId = "demo", messages = listOf(ChatMessage(role = "user", text = "hi"))),
+            "token".toCharArray(),
+        ).toList()
+        assertTrue(events.none { it is ModelEvent.ToolCallDelta })
+        assertEquals(listOf(ModelEvent.Failed(ProviderConnectionErrorCode.INVALID_RESPONSE.name)), events)
+    }
+
+    @Test
+    fun nonStreamingToolCallWithRawControlCharacterInArgumentsStillDispatches() = runTest {
+        val engine = MockEngine {
+            respond(
+                content = "{\"choices\":[{\"message\":{\"tool_calls\":[{\"id\":\"call-1\",\"type\":\"function\",\"function\":{\"name\":\"run\",\"arguments\":\"{\\\"code\\\":\\\"line one\\nline two\\\"}\"}}]}}]}",
+                status = HttpStatusCode.OK,
+                headers = headersOf(HttpHeaders.ContentType, "application/json"),
+            )
+        }
+        val adapter = OpenAiCompatibleAdapter(HttpClient(engine), "https://example.invalid/v1")
+        val events = adapter.stream(
+            ModelRequest(modelId = "demo", messages = listOf(ChatMessage(role = "user", text = "hi"))),
+            "token".toCharArray(),
+        ).toList()
+        val call = events.filterIsInstance<ModelEvent.ToolCallDelta>().single()
+        assertEquals(
+            "line one\nline two",
+            Json.parseToJsonElement(call.argumentsJson).jsonObject["code"]!!.jsonPrimitive.content,
+        )
+        assertTrue(events.none { it is ModelEvent.Failed })
+        assertEquals(ModelEvent.Completed, events.last())
+    }
+
+    @Test
+    fun sseTailToolCallWithTruncatedArgumentsIsInvalidResponseNotUnknownOutcome() = runTest {
+        val engine = MockEngine {
+            respond(
+                content = "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call-1\",\"function\":{\"name\":\"run\",\"arguments\":\"{\\\"code\\\":\\\"print(1)\"}}]}}]}\n\ndata: [DONE]\n\n",
+                status = HttpStatusCode.OK,
+                headers = headersOf(HttpHeaders.ContentType, "text/event-stream"),
+            )
+        }
+        val adapter = OpenAiCompatibleAdapter(HttpClient(engine), "https://example.invalid/v1")
+        val events = adapter.stream(
+            ModelRequest(modelId = "demo", messages = listOf(ChatMessage(role = "user", text = "hi"))),
+            "token".toCharArray(),
+        ).toList()
+        assertTrue(events.none { it is ModelEvent.ToolCallDelta })
+        assertTrue(events.none { it == ModelEvent.Completed })
+        assertEquals(listOf(ModelEvent.Failed(ProviderConnectionErrorCode.INVALID_RESPONSE.name)), events)
+    }
+
+    @Test
+    fun sseTailToolCallWithRawControlCharacterInArgumentsIsStillDispatched() = runTest {
+        val engine = MockEngine {
+            respond(
+                content = "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call-1\",\"function\":{\"name\":\"run\",\"arguments\":\"{\\\"code\\\":\\\"line one\\nline two\\\"}\"}}]}}]}\n\ndata: [DONE]\n\n",
+                status = HttpStatusCode.OK,
+                headers = headersOf(HttpHeaders.ContentType, "text/event-stream"),
+            )
+        }
+        val adapter = OpenAiCompatibleAdapter(HttpClient(engine), "https://example.invalid/v1")
+        val events = adapter.stream(
+            ModelRequest(modelId = "demo", messages = listOf(ChatMessage(role = "user", text = "hi"))),
+            "token".toCharArray(),
+        ).toList()
+        val call = events.filterIsInstance<ModelEvent.ToolCallDelta>().single()
+        assertEquals(
+            "line one\nline two",
+            Json.parseToJsonElement(call.argumentsJson).jsonObject["code"]!!.jsonPrimitive.content,
+        )
+        assertTrue(events.none { it is ModelEvent.Failed })
+        assertEquals(ModelEvent.Completed, events.last())
+    }
+
+    @Test
+    fun toolCallDecisionClassifiesUnusableArgumentsAndCredentialsDifferently() {
+        // Exactly the decision every emitted tool call goes through: a malformed
+        // payload is a local invalid response, a withheld credential keeps the
+        // conservative unknown outcome.
+        assertEquals(
+            ToolCallDecision.Terminal(ProviderConnectionErrorCode.INVALID_RESPONSE.name),
+            decideToolCallDelta("call-1", "run", "5", emptyList()),
+        )
+        assertEquals(
+            ToolCallDecision.Terminal(ProviderConnectionErrorCode.INVALID_RESPONSE.name),
+            decideToolCallDelta("call-1", "run", "{bad", emptyList()),
+        )
+        assertEquals(
+            ToolCallDecision.Terminal(ProviderConnectionErrorCode.INVALID_RESPONSE.name),
+            decideToolCallDelta("call-1", "run", "", emptyList()),
+        )
+        val secret = "synthetic-tool-credential-12345"
+        assertEquals(
+            ToolCallDecision.Terminal(ErrorCode.UNKNOWN_OUTCOME.name),
+            decideToolCallDelta("call-1", "run", """{"token":"$secret"}""", listOf(secret)),
+        )
+        assertEquals(
+            ToolCallDecision.Terminal(ErrorCode.UNKNOWN_OUTCOME.name),
+            decideToolCallDelta("call-1", "run", "{bad $secret", listOf(secret)),
+        )
+        assertEquals(
+            ToolCallDecision.Forward("""{"a":1}"""),
+            decideToolCallDelta("call-1", "run", """{"a":1}""", emptyList()),
+        )
     }
 
     @Test

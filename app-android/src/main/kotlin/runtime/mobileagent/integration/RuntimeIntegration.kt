@@ -565,9 +565,13 @@ class RuntimeIntegration(
         val snapshotBindings = capabilityGrantRepository.listSnapshotBindings(snapshot.id)
         val snapshotWorkspaceIds = snapshotBindings.mapNotNull { it.workspaceId }.toSet()
         val selectedWorkspaceId = binding?.workspaceId
+        val fullDeviceWorkspaceIds = activeFullDeviceWorkspaceIds(snapshot.agentId)
         val policy = authorityPolicyRepository.getPolicy()
         val grants = capabilityGrantRepository.forAgent(snapshot.agentId, includeRevoked = true)
-            .filter { grant -> grant.workspaceId == null || grant.workspaceId == selectedWorkspaceId }
+            .filter { grant ->
+                grant.workspaceId == null || grant.workspaceId == selectedWorkspaceId ||
+                    grant.workspaceId in fullDeviceWorkspaceIds
+            }
         val selectedBindings = snapshotBindings.filter { item ->
             item.workspaceId == null || item.workspaceId == selectedWorkspaceId
         }
@@ -2281,6 +2285,22 @@ class RuntimeIntegration(
         }
     }
 
+    /** Full-device access is an explicit Agent grant, independent of the Thread's directory. */
+    private fun activeFullDeviceWorkspaceIds(agentId: String): Set<String> {
+        if (dangerousModeManager.policy() == DangerousMode.DISABLED) return emptySet()
+        val selectedAuthority = authorityManager.state.value.selectedAuthority ?: return emptySet()
+        return capabilityGrantRepository.forAgent(agentId, includeRevoked = false)
+            .mapNotNull { it.workspaceId }
+            .toSet()
+            .filterTo(mutableSetOf()) { id ->
+                val workspace = workspaceRepository.get(id)
+                workspace?.enabled == true && workspace.readable &&
+                    workspace.scope == WorkspaceScope.FULL_DEVICE_FILES &&
+                    workspace.authorityOrNull()?.toElevated() == selectedAuthority &&
+                    fullDeviceFilesGrantRepository.load(id) != null
+            }
+    }
+
     private fun freezeContext(input: ToolExecutionContext): ToolExecutionContext {
         val snapshot = agents.getSnapshot(input.snapshotId)
             ?: throw IllegalArgumentException("Agent snapshot is unavailable")
@@ -2291,11 +2311,15 @@ class RuntimeIntegration(
         val snapshotWorkspaceIds = bindings.mapNotNull { it.workspaceId }.toSet()
         require(snapshotWorkspaceIds.size <= 1) { "Snapshot contains more than one workspace" }
         val selectedWorkspaceId = conversationWorkspaceId ?: snapshotWorkspaceIds.singleOrNull()
+        val fullDeviceWorkspaceIds = activeFullDeviceWorkspaceIds(input.agentId)
         require(
             conversationWorkspaceId == null || snapshotWorkspaceIds.isEmpty() || conversationWorkspaceId in snapshotWorkspaceIds,
         ) { "Conversation and snapshot workspace bindings do not match" }
         val grants = capabilityGrantRepository.forAgent(input.agentId, includeRevoked = true)
-            .filter { grant -> grant.workspaceId == null || grant.workspaceId == selectedWorkspaceId }
+            .filter { grant ->
+                grant.workspaceId == null || grant.workspaceId == selectedWorkspaceId ||
+                    grant.workspaceId in fullDeviceWorkspaceIds
+            }
         val selectedBindings = bindings.filter { binding ->
             binding.workspaceId == null || binding.workspaceId == selectedWorkspaceId
         }
@@ -3543,6 +3567,85 @@ class RuntimeIntegration(
         )
     }
 
+    private fun renewExistingWorkspaceGrantsInternal(agentId: String, workspaceId: String): WorkspaceAccessResult {
+        val workspace = workspaceRepository.get(workspaceId)
+            ?: return workspaceAccessFailure(WorkspaceAccessErrorCode.WORKSPACE_NOT_FOUND)
+        if (workspace.scope != WorkspaceScope.SELECTED_DIRECTORY || !workspace.enabled) {
+            return workspaceAccessFailure(WorkspaceAccessErrorCode.CAPABILITY_DENIED)
+        }
+        val registered = workspaceRegistry.registered(workspaceId)
+            ?: return workspaceAccessFailure(WorkspaceAccessErrorCode.AUTHORITY_UNAVAILABLE)
+        // System permission/provider checks can block. Complete them before the DB write lock.
+        if (workspace.backendType == WorkspaceBackendType.SAF_TREE) {
+            val saf = safWorkspaceGrantRepository.get(workspaceId)
+                ?: return workspaceAccessFailure(WorkspaceAccessErrorCode.URI_PERMISSION_REQUIRED)
+            val uri = runCatching { Uri.parse(saf.uriReference) }.getOrNull()
+                ?: return workspaceAccessFailure(WorkspaceAccessErrorCode.URI_PERMISSION_REQUIRED)
+            if (saf.status != SafGrantStatus.ACTIVE || !hasPersistedSafGrant(uri, saf)) {
+                return workspaceAccessFailure(WorkspaceAccessErrorCode.URI_PERMISSION_REQUIRED)
+            }
+        } else if (workspace.backendType == WorkspaceBackendType.PRIVILEGED) {
+            val authority = workspace.authorityOrNull()
+                ?: return workspaceAccessFailure(WorkspaceAccessErrorCode.AUTHORITY_UNAVAILABLE)
+            if (authorityProviderFor(authority) == null) {
+                return workspaceAccessFailure(privilegedFailure(authority).toWorkspaceAccessCode())
+            }
+        }
+        val renewed = try {
+            db.transaction {
+                val current = workspaceRepository.get(workspaceId)
+                    ?: throw WorkspaceAccessException(WorkspaceAccessErrorCode.WORKSPACE_NOT_FOUND)
+                if (current != workspace || workspaceRegistry.registered(workspaceId)?.backend !== registered.backend) {
+                    throw WorkspaceAccessException(WorkspaceAccessErrorCode.CONFLICT)
+                }
+                val capabilities = renewableWorkspaceCapabilities(
+                    capabilityGrantRepository.forAgent(agentId, includeRevoked = false),
+                    agentId,
+                    workspaceId,
+                    Instant.ofEpochMilli(System.currentTimeMillis()),
+                )
+                if (capabilities.isEmpty()) throw WorkspaceAccessException(WorkspaceAccessErrorCode.CAPABILITY_DENIED)
+                if (capabilities.any { it !in registered.backend.capabilities }) {
+                    throw WorkspaceAccessException(WorkspaceAccessErrorCode.CAPABILITY_DENIED)
+                }
+                val policyVersion = authorityPolicyRepository.getPolicy().policyVersion
+                val now = Instant.ofEpochMilli(System.currentTimeMillis())
+                val existing = capabilityGrantRepository.forAgent(agentId, includeRevoked = false)
+                    .filter { isWholeDirectoryPersistentGrant(it, agentId, workspaceId) }
+                capabilities.sortedBy { it.value }.map { capability ->
+                    existing.firstOrNull { grant ->
+                        grant.capability == capability && grant.policyVersion == policyVersion &&
+                            grant.isActiveFor(now, null, null)
+                    } ?: run {
+                        // Only retire superseded whole-directory rows for the same capability.
+                        // Path-scoped and short-lived grants remain independent.
+                        existing.filter { it.capability == capability && it.policyVersion != policyVersion }
+                            .forEach { capabilityGrantRepository.revoke(it.grantId, it.revision) }
+                        capabilityGrantRepository.save(
+                            CapabilityGrant(
+                                grantId = EntityId.random().value,
+                                agentId = agentId,
+                                capability = capability,
+                                workspaceId = workspaceId,
+                                lifetime = runtime.mobileagent.domain.GrantLifetime.PERSISTENT,
+                                policyVersion = policyVersion,
+                                createdAt = Utc.nowIso(),
+                            ),
+                        )
+                    }
+                }
+            }
+        } catch (failure: WorkspaceAccessException) {
+            return workspaceAccessFailure(failure.accessCode)
+        } catch (_: RuntimeException) {
+            return workspaceAccessFailure(WorkspaceAccessErrorCode.PERSISTENCE_FAILED)
+        }
+        return WorkspaceAccessResult.Success(
+            workspaceAccessItem(workspace, agentId = agentId),
+            renewed.map { it.toWorkspaceAccessSummary() },
+        )
+    }
+
     private fun revokeGrantInternal(grantId: String, expectedRevision: Long): WorkspaceAccessResult {
         val current = capabilityGrantRepository.get(grantId)
             ?: return workspaceAccessFailure(WorkspaceAccessErrorCode.WORKSPACE_NOT_FOUND)
@@ -3650,6 +3753,9 @@ class RuntimeIntegration(
 
         override fun grantWorkspace(workspaceId: String, grant: WorkspaceAccessGrantTarget): WorkspaceAccessResult =
             grantWorkspaceInternal(workspaceId, grant)
+
+        override fun renewExistingWorkspaceGrants(agentId: String, workspaceId: String): WorkspaceAccessResult =
+            renewExistingWorkspaceGrantsInternal(agentId, workspaceId)
 
         override fun revokeGrant(grantId: String, expectedRevision: Long): WorkspaceAccessResult =
             revokeGrantInternal(grantId, expectedRevision)
@@ -4383,3 +4489,25 @@ private fun Authority.toDiagnosticAuthority(): DiagnosticAuthority = when (this)
     Authority.SHIZUKU -> DiagnosticAuthority.SHIZUKU
     Authority.WIRED_ADB -> DiagnosticAuthority.WIRED_ADB
 }
+
+/** Preserve only the newest surviving policy generation; older unrevoked rows cannot resurrect a later revoke. */
+internal fun renewableWorkspaceCapabilities(
+    grants: Iterable<CapabilityGrant>,
+    agentId: String,
+    workspaceId: String,
+    now: Instant,
+): Set<CapabilityId> {
+    val eligible = grants.asSequence()
+    .filter { grant ->
+        isWholeDirectoryPersistentGrant(grant, agentId, workspaceId) && grant.isActiveFor(now, null, null)
+    }
+    .toList()
+    val newestPolicy = eligible.maxOfOrNull { it.policyVersion } ?: return emptySet()
+    return eligible.asSequence().filter { it.policyVersion == newestPolicy }.map { it.capability }.toSet()
+}
+
+internal fun isWholeDirectoryPersistentGrant(grant: CapabilityGrant, agentId: String, workspaceId: String): Boolean =
+    grant.agentId == agentId && grant.workspaceId == workspaceId && !grant.revoked &&
+        grant.skillInstallId == null && grant.packageHash == null && grant.pathScope == null &&
+        grant.lifetime == runtime.mobileagent.domain.GrantLifetime.PERSISTENT &&
+        grant.taskId == null && grant.sessionId == null

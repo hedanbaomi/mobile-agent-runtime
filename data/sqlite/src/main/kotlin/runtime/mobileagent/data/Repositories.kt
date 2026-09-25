@@ -30,6 +30,7 @@ import runtime.mobileagent.domain.ProviderProfile
 import runtime.mobileagent.domain.RetryClass
 import runtime.mobileagent.domain.Utc
 import runtime.mobileagent.domain.acceptsImages
+import runtime.mobileagent.domain.contextWindowTarget
 import runtime.mobileagent.domain.isChatEndpoint
 
 /**
@@ -213,16 +214,22 @@ class ProfileRepository(private val db: SqlConnection) {
         source: ContextLimitSource,
         targetKey: String?,
         checkedAt: String?,
-        revision: Int,
-    ): ModelProfile {
-        val current = getModel(modelId) ?: throw invalid("Unknown model $modelId")
-        return updateModel(
+        expectedRevision: Int,
+    ): ModelProfile? = db.transaction {
+        val current = getModel(modelId) ?: return@transaction null
+        val provider = getProvider(current.providerId) ?: return@transaction null
+        if (current.revision != expectedRevision || current.contextLimitMode != ContextLimitMode.AUTO ||
+            current.contextWindowValue != null ||
+            contextWindowTarget(current.providerId, provider.baseUrl, current.modelId) != targetKey) {
+            return@transaction null
+        }
+        updateModel(
             current.copy(
                 contextWindowValue = window,
                 contextWindowSource = source,
                 contextWindowTarget = targetKey,
                 contextWindowCheckedAt = checkedAt,
-                revision = revision,
+                revision = current.revision + 1,
             ),
         )
     }

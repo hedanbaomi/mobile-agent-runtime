@@ -107,6 +107,38 @@ class ChatViewModelRestartApprovalTest {
         assertTrue(invocation.resultJson?.contains("\"errorCode\":\"APPROVAL_INVALIDATED\"") == true)
         assertFalse(viewModel.state.value.streaming)
         assertTrue(viewModel.state.value.status.contains("不会自动批准或重放"))
+
+        val approvedRunId = "$runId.approved"
+        container.runs.save(RunRecord(
+            runId = approvedRunId, snapshotId = snapshot.id, conversationId = conversation.id,
+            state = RunStatus.WAITING_TOOL_APPROVAL, budgetJson = "{\"maxRuntimeMs\":60000}",
+            startedAt = now, createdAt = now,
+        ))
+        container.runs.recordInvocation(ToolInvocation(
+            invocationId = "invocation.chat-restart.approved.$suffix", runId = approvedRunId,
+            callId = "model-call.chat-restart.approved.$suffix", name = "shell_exec",
+            argumentsJson = "{}", state = "WAITING_APPROVAL", permissionDecision = "APPROVED",
+            createdAt = now,
+        ))
+        viewModel.reload()
+        assertEquals(RunStatus.UNKNOWN_OUTCOME, container.runs.get(approvedRunId)?.state)
+        assertEquals("UNKNOWN_OUTCOME", container.runs.invocations(approvedRunId).single().errorCode)
+        assertTrue(container.runs.get(approvedRunId)?.stopReason?.contains("outcome unknown") == true)
+
+        val completedToolRunId = "$runId.tool-result"
+        container.runs.save(RunRecord(
+            runId = completedToolRunId, snapshotId = snapshot.id, conversationId = conversation.id,
+            state = RunStatus.WAITING_TOOL_APPROVAL, budgetJson = "{\"maxRuntimeMs\":60000}",
+            startedAt = now, createdAt = now,
+        ))
+        container.runs.recordInvocation(ToolInvocation(
+            invocationId = "invocation.chat-restart.result.$suffix", runId = completedToolRunId,
+            callId = "model-call.chat-restart.result.$suffix", name = "shell_exec",
+            argumentsJson = "{}", state = "SUCCEEDED", createdAt = now,
+        ))
+        viewModel.reload()
+        assertEquals(RunStatus.UNKNOWN_OUTCOME, container.runs.get(completedToolRunId)?.state)
+        assertEquals("SUCCEEDED", container.runs.invocations(completedToolRunId).single().state)
     }
 
     @Test

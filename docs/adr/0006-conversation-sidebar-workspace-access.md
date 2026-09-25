@@ -71,6 +71,8 @@ Agent 设置页面只依赖 provider-neutral 的 `WorkspaceAccessPort`；Chat �
 - 同一 Agent 的不同 Thread 可以绑定不同的已授权 workspace；普通工具仅能访问该 Thread 的 binding，完整设备文件仍需独立高风险 Grant；
 - 撤权、过期、policy revision、path scope 与 selected Authority 在派发前继续实时复核。
 
+2026-09-25 补充：完整设备文件的 Agent Grant 独立于 Thread 所选目录，每次新 Run 可在当前危险模式、策略版本和选定 Authority 有效时将其纳入冻结视图；它仍不得成为 Agent/Thread 默认目录，也不自动授予 Shell。危险模式变更使旧版本 Grant 失效，界面应提示重新授权；再次明确确认完整设备文件时，可只按该 Agent 已选普通默认目录现存、未撤销、未过期的能力集重新确认，避免新会话绑定无效授权且不得恢复被撤销的能力。完整设备授权与默认目录续期各自提交，失败状态须分别显示。
+
 run-local binding 只是冻结视图，不建立第二套权限事实；`CapabilityGrantRepository` 仍为 canonical truth。
 
 ### 6. 设计语言

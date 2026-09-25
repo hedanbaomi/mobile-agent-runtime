@@ -3,6 +3,10 @@
 
 # Skills 执行与安全模型
 
+2026-09-25 当前权限补充：Agent 编辑页的“跳过工具运行确认”由用户显式开启，默认关闭。开关在新会话快照中冻结；旧会话不能因为后来开启而放宽确认，用户关闭开关则实时停止自动跳过。即使自动跳过，工具仍必须先通过当前 grant、Skill/Agent 绑定、选定 Authority、危险模式与预算检查，并在派发前按 call ID 再验证；未知结果不自动重放。下文“每次确认”的表述适用于默认关闭状态，不能替代此现行例外。
+
+2026-09-25 工作区授权补充：危险模式变更会递增策略版本，旧版本的能力授权随即失效；Agent 编辑器显示“策略已变更，需重新授权”，新会话不能继续绑定仅有旧版本授权的默认工作区。用户再次明确确认“完整设备文件”时，应用按当前策略版本重建该独立高风险工作区的能力授权，并只按普通默认工作区最新授权代的未撤销、未过期整目录持久能力集重新确认；更旧版本中未撤销的残留授权也不能补回后来撤销的写入或删除权限。续期只替换这些整目录授权，路径范围、一次性、任务/会话和 Skill 授权行不受影响。两处授权分别提交，默认工作区续期失败时须单独告知，已提交的完整设备授权仍保留。完整设备文件不会成为 Thread 默认工作区，也不会自动授予 shell；每次新 Run 只纳入当前 Agent、当前 Authority、当前危险模式下仍有效的授权，派发前继续实时复核。
+
 状态：M5 工具协议和 M6 官方 CPython 3.14.7 隔离执行已经进入 debug 人工终审基线；工具协议含 assistant.tool_calls、live grant、read_document KB 校验、HTTPS/IP 字面值拒绝、完整 EOCD/central/local ZIP 结构校验、canonical duplicate/symlink class E、预算取消上游。2026-08-30 追加无清单 Claude Skill 的标准库 CLI 兼容层和逐次批准的应用私有文本工作区，但仍不构成正式 release。v2 进一步定义 provider-neutral typed tools、SAF workspace、Shizuku/Wired ADB 双 Authority 与 Dangerous Mode；这些能力按 `IMPLEMENTED`、`AUTOMATED TESTED`、`E2E BLOCKED` 分别报告。对应R09—R12、R20—R24、S01—S22。**知识是数据，Prompt是指令，Skill脚本是可执行代码，三者不共享信任等级。**
 
 ## 1. Skill包与兼容性

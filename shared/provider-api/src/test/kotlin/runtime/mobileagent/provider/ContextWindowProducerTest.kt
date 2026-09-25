@@ -38,6 +38,16 @@ class ContextWindowProducerTest {
         assertNull(producer.metadata(target) { null }.value)
     }
 
+    @Test fun metadataStampedAfterNetworkReadIsAccepted() = runBlocking {
+        var observedTime = now
+        val producer = ContextWindowProducer { observedTime }
+        val fact = ContextWindowMetadata(262144, target, now.plusSeconds(1).toString(), "catalog:contextLen")
+        assertEquals(262144, producer.metadata(target) {
+            observedTime = now.plusSeconds(2)
+            fact
+        }.value)
+    }
+
     @Test fun changedExpiredOrFutureMetadataIsStaleAndNotEffective() = runBlocking {
         val known = ContextWindowMetadata(8192, target, now.minusSeconds(1).toString(), "synthetic:field")
         listOf(known.copy(target = "other"), known.copy(expiresAt = now.toString()),

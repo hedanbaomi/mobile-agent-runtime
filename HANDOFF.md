@@ -3,7 +3,17 @@
 
 # 项目交接
 
-最后更新：2026-09-18T23:40+08:00（Asia/Taipei）。项目根目录：E:/mobileAgentRuntime。
+最后更新：2026-09-25T20:51+08:00（Asia/Taipei）。项目根目录：E:/mobileAgentRuntime。
+
+## 2026-09-25 用户诊断八项与工作区授权回归修复（当前）
+
+- 隔离 worktree：`E:/mobileAgentRuntime/.private/qa-eight-fixes-20260925`，分支 `codex/qa-eight-fixes-20260925`，基线 `origin/main` `ebcbbbf9d9cc5a479af9160331e88aa5d8347dcd`。根工作区 `fix/review-apk-notice-integrity` 的既有主题、图标与文档 WIP 已单独本地提交为 `709b3f796f0dd9cf86feed3fbddab658a73420fe`，不与本分支混合；不得用本分支旧交接整体覆盖根工作区现行交接。诊断 ZIP 仅用于问题归类，未入仓。
+- 源码改动：发送清空输入后将预检移到 IO，预检可取消；助手同一回合的文字、思考和工具按顺序置于一气泡；审批遮罩半透明并保留对话；Agent 可显式开启跳过逐次工具确认，仅新会话快照与实时设置同时允许时生效；普通会话运行增加前台服务；Internal/SAF 已有大文件按单次预算分块读取；硅基流动 `Qwen/Qwen3.8-27B` 从官方目录读取上下文长度并校验目标。
+- 追加诊断 ZIP5 的工作区回归：危险模式切换会递增策略版本，既有 Grant 失效仍保留这一安全语义。默认工作区解析现要求当前策略版本；Agent 编辑页标明旧版本授权且预设可重新授权。完整设备文件的持久授权独立于 Thread 目录，在新 Run 纳入当前 Agent 的有效 Grant，并经危险模式、Authority、后端与实时授权闸门。再次明确确认完整设备访问时，原默认目录仅按最新授权代仍有效的原能力续期，已撤销的写/删能力不可复活；两步部分失败分别显示。工具暴露诊断补齐聚合后端探测和授权计数，未写路径/密钥。
+- 独立只读审查：DSH `DeepSeek V4.1 Flash` 已逐轮审查八项修复和新增授权问题，促成时间戳顺序、快照开关、预检取消、滚动与消息顺序、目录回写 CAS、孤儿工具 UNKNOWN、目录有界读取等修订；新增授权审查又发现默认目录续期可能恢复已撤销能力、误撤路径范围/一次性授权，现改为最新授权代的整目录持久原能力集且仅替换同类旧行。审计 sink 测试与 SAF Binder 持锁问题已修订；末轮只读复核对权限范围、SQLite 唯一约束、旧授权处理和事务原子性未发现确定问题。独立审查未编译或上设备，主 Agent 本地构建/测试证据见下。未调用付费模型或用户原件。
+- 最终受影响模块命令 `./gradlew :app-android:compileDebugKotlin :app-android:compileDebugAndroidTestKotlin :app-android:testDebugUnitTest :data:sqlite:test --offline --no-daemon --quiet` 退出码 0；XML 报告 app-android JVM 130/130、SQLite JVM 313/313，失败/错误/跳过均 0。全仓 `./gradlew licenseGuard licenseGuardReverse check verifyCiPins verifyDependencyLock verifyDependencyVerification --offline --no-daemon --dependency-verification=strict --quiet` 退出码 0；`python -m reuse lint` 769/769，退出码 0；`verify-workflows` 2/2。源码提交 `03e8e329d0b9e8abf8e04f736e3c2d5de1374624` 后工作树清洁，`assembleReview` 严格离线依赖验证退出码 0；人工审查包位于 `.private/manual-test/20260925-review-03e8e32-qa-clean/app-android-review.apk`（SHA-256 `16df79d59b3b3c6d866d6348710bc56c513c6b5edf7401eae28575a634ec8000`，176362679 bytes）。APK 元数据为 `review`，minSdk 26、targetSdk 35；签名为 Android Debug，应用 manifest 未设置 `debuggable`，不可当正式签名发布包。`adb devices -l` 无设备，不能冒称真机验收。
+- 待验证边界：前台服务不保证系统杀进程后自动恢复无查询接口的已派发流式响应；未知收费/副作用结果不得自动重放。SAF 非可寻址云端流可能按 offset 顺序跳过；24 MiB 用户原件与真实服务、真机 IME/后台/审批视觉、完整设备与原目录并行暴露尚未执行端到端验收。默认目录若后端能力集变化导致续期失败，完整设备授权仍可单独成功，界面会明确提示需手动重授默认目录。
+- 文档同步：本节、`docs/IMPLEMENTATION_PLAN.md`、`docs/ACCEPTANCE.md`、`docs/SKILLS_AND_SECURITY.md`、`docs/UI_DESIGN.md` 与 ADR-0006 已更新。后续人工审查应安装上述 review 包，覆盖 IME/后台/审批视觉、完整设备与原目录工具并行、24 MiB 原件读取及真实硅基流动元数据；不得用本 worktree 的旧交接覆盖根工作区或把未验设备项写成通过。
 
 按 [agent.md 第 1 节](agent.md#1-按任务读取与开工) 选择资料。现行规则见 agent.md；本文件记录现场和待办，历史任务中的授权不自动延续。
 

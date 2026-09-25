@@ -14,6 +14,7 @@ import runtime.mobileagent.domain.Authority
 import runtime.mobileagent.domain.CapabilityGrant
 import runtime.mobileagent.domain.CapabilityId
 import runtime.mobileagent.domain.ConversationWorkspaceBinding
+import runtime.mobileagent.domain.DangerousMode
 import runtime.mobileagent.domain.PrivilegedWorkspaceBinding
 import runtime.mobileagent.domain.PrivilegedWorkspaceBindingStatus
 import runtime.mobileagent.domain.GrantLifetime
@@ -228,6 +229,39 @@ class WorkspaceBindingRepositoryTest {
         }
     }
 
+    @Test
+    fun policyChangeDoesNotBindAStaleDefaultUntilItsGrantIsRenewed() {
+        JdbcSqlConnection().use { db ->
+            Migrations.apply(db)
+            seedAgentAndConversation(db, "agent-policy", "snapshot-policy", "conversation-policy")
+            seedWorkspace(db, "workspace-policy")
+            seedGrant(db, "grant-policy-old", "agent-policy", "workspace-policy")
+            val defaults = AgentWorkspaceDefaultRepository(db) { "2026-09-02T00:00:00Z" }
+            defaults.set("agent-policy", "workspace-policy")
+            assertEquals("workspace-policy", defaults.resolveForNewThread("agent-policy"))
+
+            AuthorityPolicyRepository(db).updatePolicy(
+                0,
+                Authority.NONE,
+                DangerousMode.ENABLED_CONFIRM_HIGH_RISK,
+            )
+            assertNull(defaults.resolveForNewThread("agent-policy"))
+
+            CapabilityGrantRepository(db).save(
+                CapabilityGrant(
+                    grantId = "grant-policy-renewed",
+                    agentId = "agent-policy",
+                    capability = CapabilityId(CapabilityId.FILE_READ_TEXT),
+                    workspaceId = "workspace-policy",
+                    lifetime = GrantLifetime.PERSISTENT,
+                    policyVersion = 1,
+                    createdAt = "2026-09-02T00:00:01Z",
+                ),
+            )
+            assertEquals("workspace-policy", defaults.resolveForNewThread("agent-policy"))
+        }
+    }
+
     private fun seedWorkspace(
         db: SqlConnection,
         id: String,
@@ -263,7 +297,7 @@ class WorkspaceBindingRepositoryTest {
                 capability = CapabilityId(CapabilityId.FILE_READ_TEXT),
                 workspaceId = workspaceId,
                 lifetime = GrantLifetime.PERSISTENT,
-                policyVersion = 1,
+                policyVersion = AuthorityPolicyRepository(db).getPolicy().policyVersion,
                 createdAt = "2026-09-02T00:00:00Z",
             ),
         )

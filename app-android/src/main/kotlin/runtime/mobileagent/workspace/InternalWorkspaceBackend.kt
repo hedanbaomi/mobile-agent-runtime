@@ -236,7 +236,8 @@ internal class InternalWorkspaceBackend(
             rejectLink(file)
             if (!Files.isRegularFile(file, LinkOption.NOFOLLOW_LINKS)) InternalWorkspaceErrorCode.ENTRY_UNSUPPORTED.error()
             val size = meteredSize(file)
-            checkFileSize(size)
+            // A read is bounded by maxReadBytes, not by the size of the source.
+            // Large existing documents are consumed through offset-based chunks.
             if (offsetBytes > size) InternalWorkspaceErrorCode.OFFSET_OUT_OF_RANGE.error()
             val bytes = readBounded(file, offsetBytes, maxBytes.toInt())
             InternalWorkspaceContent(

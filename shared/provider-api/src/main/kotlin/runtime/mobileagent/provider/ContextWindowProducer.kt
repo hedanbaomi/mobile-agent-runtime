@@ -61,10 +61,12 @@ class ContextWindowProducer(
 
     suspend fun metadata(target: String, source: ContextWindowMetadataSource): ProducedContextWindow {
         require(target.isNotBlank())
-        val now = clock()
         val candidate = try { source.read(target) } catch (cancel: kotlinx.coroutines.CancellationException) {
             throw cancel
         } catch (_: Exception) { null }
+        // Validate against the time the source finished reading. A fresh metadata
+        // source stamps the verified result after its HTTP response arrives.
+        val now = clock()
         val unknown = ProducedContextWindow(null, ContextLimitSource.UNKNOWN, target, now.toString())
         candidate ?: return unknown
         val checked = runCatching { Instant.parse(candidate.checkedAt) }.getOrNull() ?: return unknown

@@ -294,10 +294,9 @@ class WorkspaceBackendTest {
             val listedHuge = (listing as InternalWorkspaceResult.Success).value.entries.single { it.path == "huge.bin" }
             assertEquals(hugeBytes.toLong(), listedHuge.sizeBytes)
 
-            assertCode(
-                backend.read("huge.bin", maxBytes = 4096),
-                InternalWorkspaceErrorCode.FILE_TOO_LARGE,
-            )
+            val hugeChunk = backend.read("huge.bin", maxBytes = 4096)
+            assertSuccess(hugeChunk)
+            assertEquals(4096, (hugeChunk as InternalWorkspaceResult.Success).value.bytes.size)
 
             val stat = backend.stat("large.bin")
             assertSuccess(stat)

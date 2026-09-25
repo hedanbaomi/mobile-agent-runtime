@@ -163,6 +163,9 @@ interface WorkspaceAccessPort {
     /** Grant an already attached workspace without changing its backend. */
     fun grantWorkspace(workspaceId: String, grant: WorkspaceAccessGrantTarget): WorkspaceAccessResult
 
+    /** Renew only this Agent's still-active capability set for an existing selected directory. */
+    fun renewExistingWorkspaceGrants(agentId: String, workspaceId: String): WorkspaceAccessResult
+
     fun revokeGrant(grantId: String, expectedRevision: Long): WorkspaceAccessResult
 
     /** Revoke all grants for this workspace and disable its backend. */

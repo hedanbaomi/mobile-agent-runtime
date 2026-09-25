@@ -245,6 +245,32 @@ class ProvidersViewModel @JvmOverloads constructor(
                 "已保存 ${provider.name} / ${draft.modelId.trim()}。能力标记来自手动配置，尚未发送探测请求。" +
                     if (oldSecretCleanupFailed) "旧密钥仍保留，引用检查失败；请修复存储后重试回收。" else ""
             }
+            if (model != null && model.contextLimitMode == ContextLimitMode.AUTO &&
+                model.contextWindowValue == null && SiliconFlowContextCatalog.eligible(provider.baseUrl, model.modelId)
+            ) {
+                viewModelScope.launch {
+                    val fact = runCatching {
+                        withContext(Dispatchers.IO) {
+                            ContextWindowProducer().metadata(
+                                contextWindowTarget(provider.id, provider.baseUrl, model.modelId),
+                            ) { target -> SiliconFlowContextCatalog(app.container.announcementHttp).read(model.modelId, target) }
+                        }
+                    }.getOrNull()
+                    if (fact?.value != null) {
+                        val saved = withContext(Dispatchers.IO) {
+                            app.container.profiles.recordContextWindow(
+                                model.id, fact.value, fact.source, fact.target, fact.checkedAt, model.revision,
+                            )
+                        }
+                        if (saved != null) {
+                            reload()
+                            status.value = "已从硅基流动模型目录获取上下文长度：${fact.value} tokens。"
+                        }
+                    } else if (withContext(Dispatchers.IO) { app.container.profiles.getModel(model.id)?.revision } == model.revision) {
+                        status.value = "服务已保存；硅基流动模型目录未返回可核验的上下文长度，可手动填写。"
+                    }
+                }
+            }
             runCatching {
                 app.diagnostics.recordProviderModelSave(
                     ProviderModelSavePhase.SUCCESS,

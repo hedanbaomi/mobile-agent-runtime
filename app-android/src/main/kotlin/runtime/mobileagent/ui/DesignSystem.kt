@@ -19,6 +19,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.sizeIn
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.CheckCircle
@@ -115,7 +116,8 @@ fun AgentCard(
     Card(
         modifier = modifier.fillMaxWidth().then(interaction),
         shape = AgentCardShape,
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerLow),
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
         content = { Column(Modifier.padding(tokens.spacing.card), content = content) },
     )
 }
@@ -145,8 +147,9 @@ fun AgentListRow(
             .heightIn(min = tokens.listRowMinHeight)
             .then(interaction),
         shape = shape,
-        color = if (selected) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceContainerLow,
+        color = if (selected) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surface,
         contentColor = if (selected) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSurface,
+        border = if (selected) null else BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
     ) {
         Row(
             Modifier
@@ -203,8 +206,8 @@ fun AgentTopBar(
     val tokens = LocalAgentDesignTokens.current
     Surface(
         modifier = modifier.fillMaxWidth(),
-        color = MaterialTheme.colorScheme.surface,
-        contentColor = MaterialTheme.colorScheme.onSurface,
+        color = if (LocalAppThemeMode.current == AppThemeMode.CC66FF) Color(0xFF66CCFF) else MaterialTheme.colorScheme.background,
+        contentColor = if (LocalAppThemeMode.current == AppThemeMode.CC66FF) Color(0xFF003B52) else MaterialTheme.colorScheme.onBackground,
         tonalElevation = 0.dp,
     ) {
         Row(
@@ -245,7 +248,18 @@ fun AgentStatusBanner(
     val palette = when (tone) {
         AgentStatusTone.INFO -> Triple(Icons.Filled.Info, MaterialTheme.colorScheme.primaryContainer, MaterialTheme.colorScheme.onPrimaryContainer)
         AgentStatusTone.SUCCESS -> Triple(Icons.Filled.CheckCircle, MaterialTheme.colorScheme.tertiaryContainer, MaterialTheme.colorScheme.onTertiaryContainer)
-        AgentStatusTone.WARNING -> Triple(Icons.Filled.Warning, MaterialTheme.colorScheme.secondaryContainer, MaterialTheme.colorScheme.onSecondaryContainer)
+        AgentStatusTone.WARNING -> {
+            val colors = MaterialTheme.colorScheme
+            val dark = colors.background == Color(0xFF111827)
+            val aqua = LocalAppThemeMode.current == AppThemeMode.CC66FF
+            val background = when {
+                dark -> Color(0xFF45310A)
+                aqua -> Color(0xFFFEF3C7)
+                else -> Color(0xFFFEF08A)
+            }
+            val foreground = if (dark) Color(0xFFFEF08A) else Color(0xFF723B13)
+            Triple(Icons.Filled.Warning, background, foreground)
+        }
         AgentStatusTone.ERROR -> Triple(Icons.Filled.Error, MaterialTheme.colorScheme.errorContainer, MaterialTheme.colorScheme.onErrorContainer)
     }
     val tokens = LocalAgentDesignTokens.current

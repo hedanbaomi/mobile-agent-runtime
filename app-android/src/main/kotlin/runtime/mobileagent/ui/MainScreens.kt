@@ -376,6 +376,14 @@ internal fun MainApp() {
                     chinese = chinese,
                     childDetailOpen = workspacePickerOpen,
                 ),
+                headerSubtitle = if (workspacePickerOpen || shellDetailOpen) "" else when (route) {
+                    AppRoutes.CHAT -> drawerChatState.agents.firstOrNull {
+                        it.id == drawerChatState.selectedAgentId
+                    }?.label ?: if (chinese) "选择智能体开始对话" else "Choose an Agent to start"
+                    AppRoutes.KNOWLEDGE -> "CAS · on-device"
+                    AppRoutes.PROVIDERS -> "BYOK · Keystore"
+                    else -> ""
+                },
                 navigationAffordance = navigationAffordance,
                 onBack = {
                     when {

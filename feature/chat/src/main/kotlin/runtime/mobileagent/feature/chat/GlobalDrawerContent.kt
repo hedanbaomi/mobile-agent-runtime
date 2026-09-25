@@ -4,6 +4,7 @@
 package runtime.mobileagent.feature.chat
 
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
@@ -18,11 +19,13 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.NavigationDrawerItem
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.Immutable
 import androidx.compose.runtime.getValue
@@ -30,6 +33,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -92,6 +96,8 @@ fun GlobalDrawerContent(
         matches(it.label, it.statusLabel, it.authorityLabel)
     }
     val sessionsByAgent = visibleSessions.groupBy { it.agentId }
+    val easterEgg = MaterialTheme.colorScheme.background == Color(0xFFF2F9FD)
+    val headerInk = if (easterEgg) Color(0xFF003B52) else MaterialTheme.colorScheme.onSurface
 
     LazyColumn(
         modifier = modifier
@@ -101,24 +107,33 @@ fun GlobalDrawerContent(
         verticalArrangement = Arrangement.spacedBy(4.dp),
     ) {
         item(key = "drawer-header") {
-            Row(Modifier.fillMaxWidth()) {
+            Row(
+                Modifier.fillMaxWidth()
+                    .background(
+                        if (easterEgg) Color(0xFF66CCFF) else MaterialTheme.colorScheme.surface,
+                        RoundedCornerShape(16.dp),
+                    )
+                    .padding(12.dp),
+            ) {
                 Column(Modifier.weight(1f)) {
                     Text(
                         if (zh) "MobileAgentRuntime" else "MobileAgentRuntime",
                         style = MaterialTheme.typography.titleLarge,
                         fontWeight = FontWeight.SemiBold,
+                        color = headerInk,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
                     )
                     Text(
                         if (zh) "Agent 工作台" else "Agent workspace",
                         style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        color = if (easterEgg) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
                 TextButton(
                     onClick = onClose,
                     modifier = Modifier.testTag("global.drawer.close"),
+                    colors = ButtonDefaults.textButtonColors(contentColor = headerInk),
                 ) {
                     Text(if (zh) "关闭" else "Close")
                 }

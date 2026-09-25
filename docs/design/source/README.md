@@ -25,6 +25,17 @@
 7. `scr-ann-01-light.svg`: 公告中心、置顶横幅与强制确认模态弹窗（浅色）
 8. `scr-sett-01-dark.svg`: 设置主页、隐私保护开关、数据导出与 AGPL 许可证（深色）
 
+### 2.1 应用图标母版（「沙箱火花」S1 定稿，2026-09-25）
+
+108×108 自适应画布，前景约束在中央 Ø72（66%）安全区内；底色 `#66CCFF`，线稿 `#003B52`：
+
+1. `ic-launcher.svg`: 合成预览（背景 + 前景）
+2. `ic-launcher-foreground.svg`: 前景层（框线 4.6、内框 54×54 r15、星芒 30×30 居中，透明底）
+3. `ic-launcher-background.svg`: 背景层（纯色 `#66CCFF`，落地时可用 color 资源替代）
+4. `ic-launcher-monochrome.svg`: themed icon 单色层（与前景同形，运行时仅取 alpha 由系统着色）
+
+概念验证与落选变体（S2 轨道卫星 / S3 负形舱体）见 [icon-board.html](../icon-board.html)。Android 落地资源为 `app-android/src/main/res/drawable/ic_launcher_{foreground,monochrome}.xml`（同形 VectorDrawable）、`values/launcher_icon.xml`（背景色）及 `mipmap-anydpi-v26/ic_launcher.xml`（自适应图标）；manifest 的 `icon` 与 `roundIcon` 均引用该资源。维护时须让 VectorDrawable 几何与本目录 S1 SVG 母版同步。
+
 ## 3. 许可证声明
 
 本目录所有第一方设计源稿及文档均以 `AGPL-3.0-only` 开源。

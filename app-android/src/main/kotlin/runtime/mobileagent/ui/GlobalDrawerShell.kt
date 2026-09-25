@@ -13,9 +13,15 @@ import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBars
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.windowInsetsPadding
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.displayCutout
+import androidx.compose.foundation.layout.union
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
@@ -33,19 +39,22 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.Scaffold
-import androidx.compose.material3.TopAppBar
-import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.material3.DrawerValue
 import androidx.compose.material3.rememberDrawerState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.semantics.heading
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.launch
 
 /**
@@ -65,6 +74,7 @@ fun GlobalDrawerShell(
     showCompactOpenButton: Boolean = false,
     compactOpenButtonLabel: String = "打开菜单",
     title: String = "",
+    headerSubtitle: String = "",
     navigationAffordance: ShellNavigationAffordance = if (showCompactOpenButton) {
         ShellNavigationAffordance.MENU
     } else {
@@ -74,7 +84,7 @@ fun GlobalDrawerShell(
     navigationBackLabel: String = "返回",
     consumeBottomSystemInsets: Boolean = true,
     modifier: Modifier = Modifier,
-    drawerWidth: Dp = 304.dp,
+    drawerWidth: Dp = 280.dp,
     content: @Composable (PaddingValues) -> Unit,
     drawerContent: @Composable (onClose: () -> Unit) -> Unit = { onClose ->
         GlobalDrawerDestinationContent(
@@ -108,46 +118,84 @@ fun GlobalDrawerShell(
         val windowInsets = appShellWindowInsets(consumeBottomSystemInsets)
         val showBack = navigationAffordance == ShellNavigationAffordance.BACK
         val showMenu = !wide && navigationAffordance == ShellNavigationAffordance.MENU
+        val easterEgg = LocalAppThemeMode.current == AppThemeMode.CC66FF
+        val palette = MaterialTheme.colorScheme
+        val headerColor = if (easterEgg) Color(0xFF66CCFF) else palette.background
+        val headerInk = if (easterEgg) Color(0xFF003B52) else palette.onBackground
+        val headerMuted = if (easterEgg) palette.onPrimaryContainer else palette.onSurfaceVariant
+        val headerAccent = if (easterEgg) palette.onPrimaryContainer else palette.primary
+        val eyebrow = when {
+            showBack -> "DETAIL"
+            selectedRoute == AppRoutes.CHAT -> "SESSION"
+            selectedRoute == AppRoutes.KNOWLEDGE -> "LIBRARIES"
+            selectedRoute == AppRoutes.PROVIDERS -> "PROVIDERS"
+            else -> "WORKSPACE"
+        }
+        val shell: @Composable () -> Unit = {
         Scaffold(
             modifier = Modifier.fillMaxSize().testTag("global.shell"),
             contentWindowInsets = windowInsets,
             topBar = {
-                TopAppBar(
-                    modifier = Modifier.testTag("global.shell.topBar"),
-                    title = {
-                        Text(
-                            text = title,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                            modifier = Modifier.testTag("global.shell.title"),
-                        )
-                    },
-                    navigationIcon = {
+                Surface(
+                    modifier = Modifier.fillMaxWidth().testTag("global.shell.topBar"),
+                    color = headerColor,
+                    contentColor = headerInk,
+                ) {
+                    Row(
+                        Modifier
+                            .windowInsetsPadding(WindowInsets.statusBars.union(WindowInsets.displayCutout))
+                            .fillMaxWidth()
+                            .heightIn(min = 76.dp)
+                            .padding(horizontal = 12.dp, vertical = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
                         if (!drawerState.isOpen && !drawerOpen) {
                             when {
                                 showBack -> IconButton(
                                     onClick = onBack,
-                                    modifier = Modifier
-                                        .size(48.dp)
-                                        .testTag("global.shell.navigation.back"),
+                                    modifier = Modifier.size(48.dp).testTag("global.shell.navigation.back"),
                                 ) {
                                     Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = navigationBackLabel)
                                 }
                                 showMenu -> IconButton(
                                     onClick = { onDrawerOpenChange(true) },
-                                    modifier = Modifier
-                                        .size(48.dp)
-                                        .testTag("global.shell.navigation.menu"),
+                                    modifier = Modifier.size(48.dp).testTag("global.shell.navigation.menu"),
                                 ) {
                                     Icon(Icons.Filled.Menu, contentDescription = compactOpenButtonLabel)
                                 }
                             }
+                        } else if (showBack || showMenu) {
+                            Box(Modifier.size(48.dp))
                         }
-                    },
-                    colors = TopAppBarDefaults.topAppBarColors(
-                        containerColor = MaterialTheme.colorScheme.surface,
-                    ),
-                )
+                        Column(Modifier.weight(1f).padding(start = 4.dp)) {
+                            Text(
+                                eyebrow,
+                                style = MaterialTheme.typography.labelSmall,
+                                color = headerMuted,
+                                letterSpacing = 2.sp,
+                                maxLines = 1,
+                            )
+                            Text(
+                                title,
+                                style = MaterialTheme.typography.titleLarge,
+                                fontWeight = FontWeight.Bold,
+                                color = headerInk,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                modifier = Modifier.semantics { heading() }.testTag("global.shell.title"),
+                            )
+                            if (headerSubtitle.isNotBlank()) {
+                                Text(
+                                    headerSubtitle,
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = headerAccent,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                )
+                            }
+                        }
+                    }
+                }
             },
         ) { innerPadding ->
             Box(Modifier.fillMaxSize().padding(innerPadding)) {
@@ -168,23 +216,24 @@ fun GlobalDrawerShell(
                         }
                     }
                 } else {
-                    ModalNavigationDrawer(
-                        drawerState = drawerState,
-                        drawerContent = {
-                            ModalDrawerSheet(
-                                modifier = Modifier
-                                    .fillMaxHeight()
-                                    .width(drawerWidth)
-                                    .testTag("global.drawer.modal"),
-                            ) {
-                                drawerContent(::closeDrawer)
-                            }
-                        },
-                    ) {
-                        content(PaddingValues(0.dp))
-                    }
+                    content(PaddingValues(0.dp))
                 }
             }
+        }
+        }
+        if (wide) {
+            shell()
+        } else {
+            ModalNavigationDrawer(
+                drawerState = drawerState,
+                drawerContent = {
+                    ModalDrawerSheet(
+                        modifier = Modifier.fillMaxHeight().width(drawerWidth).testTag("global.drawer.modal"),
+                    ) {
+                        drawerContent(::closeDrawer)
+                    }
+                },
+            ) { shell() }
         }
     }
 }

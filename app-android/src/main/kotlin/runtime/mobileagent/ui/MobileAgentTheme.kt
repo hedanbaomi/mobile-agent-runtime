@@ -30,6 +30,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.Immutable
 import androidx.compose.runtime.SideEffect
+import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.toArgb
@@ -47,6 +48,9 @@ enum class AppThemeMode {
     DARK,
     CC66FF,
 }
+
+/** Keeps the optional 66ccff header treatment tied to the selected palette. */
+val LocalAppThemeMode = staticCompositionLocalOf { AppThemeMode.LIGHT }
 
 @Immutable
 data class AppNavigationDestination(
@@ -81,15 +85,14 @@ private val LightColors = lightColorScheme(
     onSurfaceVariant = Color(0xFF4B5563),
     outline = Color(0xFFD1D5DB),
     outlineVariant = Color(0xFFE5E7EB),
-    // ui-tokens.json defines the container/inverse values below; the bright/dim
-    // endpoints are derived from this existing neutral surface family.
+    // Calm cards use the same white surface across feature modules.
     surfaceBright = Color(0xFFFFFFFF),
     surfaceDim = Color(0xFFE5E7EB),
     surfaceContainerLowest = Color(0xFFFFFFFF),
-    surfaceContainerLow = Color(0xFFF9FAFB),
+    surfaceContainerLow = Color(0xFFFFFFFF),
     surfaceContainer = Color(0xFFF3F4F6),
-    surfaceContainerHigh = Color(0xFFE5E7EB),
-    surfaceContainerHighest = Color(0xFFD1D5DB),
+    surfaceContainerHigh = Color(0xFFFFFFFF),
+    surfaceContainerHighest = Color(0xFFFFFFFF),
     inverseSurface = Color(0xFF1F2937),
     inverseOnSurface = Color(0xFFF9FAFB),
     inversePrimary = Color(0xFF90CDF4),
@@ -99,8 +102,8 @@ private val LightColors = lightColorScheme(
 
 private val DarkColors = darkColorScheme(
     primary = Color(0xFF76A9FA),
-    onPrimary = Color(0xFF1E429F),
-    primaryContainer = Color(0xFF233876),
+    onPrimary = Color(0xFF111827),
+    primaryContainer = Color(0xFF1E3A8A),
     onPrimaryContainer = Color(0xFFE1EFFE),
     secondary = Color(0xFF9CA3AF),
     onSecondary = Color(0xFF1F2A37),
@@ -122,15 +125,14 @@ private val DarkColors = darkColorScheme(
     onSurfaceVariant = Color(0xFF9CA3AF),
     outline = Color(0xFF4B5563),
     outlineVariant = Color(0xFF374151),
-    // ui-tokens.json defines the container/inverse values below; bright/dim
-    // use the existing dark background and surfaceVariant endpoints.
+    // Dark Calm cards share the dark surface instead of a lighter elevation fill.
     surfaceBright = Color(0xFF374151),
     surfaceDim = Color(0xFF111827),
     surfaceContainerLowest = Color(0xFF0F172A),
-    surfaceContainerLow = Color(0xFF182234),
+    surfaceContainerLow = Color(0xFF1F2937),
     surfaceContainer = Color(0xFF1F2937),
-    surfaceContainerHigh = Color(0xFF283548),
-    surfaceContainerHighest = Color(0xFF374151),
+    surfaceContainerHigh = Color(0xFF1F2937),
+    surfaceContainerHighest = Color(0xFF1F2937),
     inverseSurface = Color(0xFFF9FAFB),
     inverseOnSurface = Color(0xFF111827),
     inversePrimary = Color(0xFF1A56DB),
@@ -140,8 +142,10 @@ private val DarkColors = darkColorScheme(
 
 /** The 66ccff theme remains a light surface system, with the accent as its focus color. */
 private val Cc66ffColors = lightColorScheme(
-    primary = Color(0xFF66CCFF),
-    onPrimary = Color(0xFF003B52),
+    // Interactive text and outlined controls need a readable ink on white.
+    // The 66ccff fill is applied explicitly to the shell, bubbles and send action.
+    primary = Color(0xFF0369A1),
+    onPrimary = Color.White,
     primaryContainer = Color(0xFFE0F4FF),
     onPrimaryContainer = Color(0xFF004863),
     secondary = Color(0xFF4A6069),
@@ -164,15 +168,14 @@ private val Cc66ffColors = lightColorScheme(
     onSurfaceVariant = Color(0xFF3D545E),
     outline = Color(0xFFB8D3E0),
     outlineVariant = Color(0xFFD3E5EE),
-    // ui-tokens.json defines the container/inverse values below; bright/dim
-    // use the existing 66ccff surface and surfaceVariant endpoints.
+    // The 66ccff option keeps white cards on its cool background.
     surfaceBright = Color(0xFFFFFFFF),
     surfaceDim = Color(0xFFD4E9F3),
     surfaceContainerLowest = Color(0xFFFFFFFF),
-    surfaceContainerLow = Color(0xFFF2F9FD),
+    surfaceContainerLow = Color(0xFFFFFFFF),
     surfaceContainer = Color(0xFFE8F4FA),
-    surfaceContainerHigh = Color(0xFFDEEFF7),
-    surfaceContainerHighest = Color(0xFFD4E9F3),
+    surfaceContainerHigh = Color(0xFFFFFFFF),
+    surfaceContainerHighest = Color(0xFFFFFFFF),
     inverseSurface = Color(0xFF1E2B30),
     inverseOnSurface = Color(0xFFF0F7FA),
     inversePrimary = Color(0xFF66CCFF),
@@ -211,7 +214,10 @@ fun MobileAgentTheme(
         }
     }
     val designTokens = AgentDesignDefaults.tokens
-    CompositionLocalProvider(LocalAgentDesignTokens provides designTokens) {
+    CompositionLocalProvider(
+        LocalAgentDesignTokens provides designTokens,
+        LocalAppThemeMode provides mode,
+    ) {
         MaterialTheme(
             colorScheme = colors,
             shapes = MaterialTheme.shapes.copy(
@@ -254,6 +260,7 @@ fun AppNavigationScaffold(
     selectedRoute: String,
     onRouteSelected: (String) -> Unit,
     title: String = "",
+    headerSubtitle: String = "",
     navigationAffordance: ShellNavigationAffordance = ShellNavigationAffordance.NONE,
     onBack: () -> Unit = {},
     navigationBackLabel: String = "返回",
@@ -276,6 +283,7 @@ fun AppNavigationScaffold(
             showCompactOpenButton = showCompactMenuButton,
             compactOpenButtonLabel = compactMenuButtonLabel,
             title = title,
+            headerSubtitle = headerSubtitle,
             navigationAffordance = navigationAffordance,
             onBack = onBack,
             navigationBackLabel = navigationBackLabel,
@@ -293,6 +301,7 @@ fun AppNavigationScaffold(
             showCompactOpenButton = showCompactMenuButton,
             compactOpenButtonLabel = compactMenuButtonLabel,
             title = title,
+            headerSubtitle = headerSubtitle,
             navigationAffordance = navigationAffordance,
             onBack = onBack,
             navigationBackLabel = navigationBackLabel,

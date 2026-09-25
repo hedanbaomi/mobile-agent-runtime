@@ -1,0 +1,9 @@
+<!--
+SPDX-FileCopyrightText: 2026 mobileAgentRuntime contributors
+SPDX-License-Identifier: AGPL-3.0-only
+-->
+<!-- adaptive-icon 前景层:108×108 画布,透明底;框线 4.6,内框 54×54 r15,星芒 30×30 居中 -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 108 108">
+  <rect x="27" y="27" width="54" height="54" rx="15" fill="none" stroke="#003B52" stroke-width="4.6"/>
+  <path d="M54 39l4.6 10.4L69 54l-10.4 4.6L54 69l-4.6-10.4L39 54l10.4-4.6z" fill="#003B52"/>
+</svg>

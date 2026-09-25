@@ -5,7 +5,17 @@
 
 本文件为 mobileAgentRuntime Android 客户端软件的完整 UI 设计规范。涵盖设计原则、色彩与排版系统、导航架构、七类核心软件页面的逐屏高保真布局与状态规范、安全交互流程以及响应式无障碍标准。
 
-> **v3.0 Responses / 全局导航 Chrome 修订（2026-09-04，本地实现，NO COMMIT, NO PUSH, NO DEPLOY）**：`GlobalDrawerShell` 是页面级 TopAppBar、状态栏/刘海 inset 与唯一 leading navigation action 的所有者；Feature 根页面不再重复绘制一级标题。一级目的地显示 Menu，Provider/Agent 编辑与详情、Workspace picker 等子页面显示 Back，同一时刻严格互斥。紧凑布局使用 modal drawer，宽屏使用永久 drawer，二者共享同一目的地与会话内容。Provider 编辑器的 API 格式现在可在保持旧数据兼容的 `OpenAI Compatible` 与真实 `/responses` 的 `OpenAI Responses` 间切换；测试连接和能力探测跟随所选协议，工具探测强制调用声明的 no-op tool。特权工作区浏览失败按稳定 typed code 映射为可操作文案；未知内部异常只显示通用错误，不在 UI 暴露原始枚举、路径或异常正文。
+> **设计稿定稿（2026-09-24，本地设计预览）**：选定「Calm 净空骨架 + 气泡对话」为当前设计方向，同一组三屏（对话流、知识库、模型源）按浅色 / 深色 / 66ccff 三主题并列渲染，见 [design-draft.html](design/design-draft.html)；应用图标选定「沙箱火花」概念（`#66CCFF` 底 + `#003B52` 框线四芒星，**S1 框线火花已定稿**，母版 `docs/design/source/ic-launcher-*.svg`），见 [icon-board.html](design/icon-board.html)。上述 HTML 为设计板，非最终实现稿；落到 Kotlin/Compose 前仍需按本文件逐屏规范细化。
+
+> **2026-09-25 Compose 主题替换**：`design-draft.html` 是当前视觉基线，`ui-tokens.json` v1.2.0 记录 Calm 布局、气泡和三主题语义。全局 Shell 采用小标签／大标题／副标题层级；浅色和深色顶栏随背景，66ccff 顶栏及抽屉头部使用 `#66CCFF`。对话为右侧主色用户气泡、左侧描边表面气泡，工具确认呈底部抽屉；知识库采用大数字行与视觉等待横幅，模型源采用分隔行。实现仅使用现有真实状态字段；设计板上的示例图片数、分块数和连接延迟不作为实际数据展示。图标为「沙箱火花」S1 定稿，母版见 `docs/design/source/ic-launcher-*.svg`。
+
+> **2026-09-25 启动器图标实现**：S1 母版已转换为 Android VectorDrawable：`#66CCFF` 背景、`#003B52` 框线与四芒星；自适应图标在 108dp 画布中保持 72dp 安全区，另提供同形透明单色层供 Android themed icon 着色。`AndroidManifest.xml` 的 `icon` 和 `roundIcon` 均指向 `mipmap-anydpi-v26/ic_launcher.xml`；实际资源及维护映射见 [source/README.md](design/source/README.md)。
+
+> **对比度校正**：深色用户气泡文字用 `#111827`（对 `#76A9FA` 为 7.46:1），浅色视觉等待文字用 `#A34808`（对 `#FEF08A` 为 5.17:1）。66ccff 保留 `#66CCFF` 品牌填充与 `#003B52` 深色文字用于顶栏、用户气泡和发送键；白底交互文字使用 `#0369A1`（对白色为 5.93:1）。设计板、token 与 Compose 值一致。
+
+默认 Material 卡片容器统一到各主题 `surface`，浅色与 66ccff 为白卡，深色为 `#1F2937`；输入与状态区域继续使用相应语义容器色。
+
+> **v3.0 Responses / 全局导航 Chrome 修订（2026-09-04，本地实现，NO COMMIT, NO PUSH, NO DEPLOY）**：`GlobalDrawerShell` 是页面级顶栏、状态栏/刘海 inset 与唯一 leading navigation action 的所有者；Feature 根页面不再重复绘制一级标题。一级目的地显示 Menu，Provider/Agent 编辑与详情、Workspace picker 等子页面显示 Back，同一时刻严格互斥。紧凑布局使用 modal drawer，宽屏使用永久 drawer，二者共享同一目的地与会话内容。Provider 编辑器的 API 格式现在可在保持旧数据兼容的 `OpenAI Compatible` 与真实 `/responses` 的 `OpenAI Responses` 间切换；测试连接和能力探测跟随所选协议，工具探测强制调用声明的 no-op tool。特权工作区浏览失败按稳定 typed code 映射为可操作文案；未知内部异常只显示通用错误，不在 UI 暴露原始枚举、路径或异常正文。
 
 > **v2.4 产品修正（2026-09-01，现行）**：工作区只在完整 Agent 设置中配置，同一 Agent 的所有 Session 共用一个当前工作区；Session 与 Chat 只显示摘要并可跳转 Agent 设置，不复制授权流程。设置页只负责 Shizuku/Wired ADB 两种 ADB 级连接的配置与选择，Agent 设置负责 SAF/设备目录/完整设备文件。下方较早的 v2.4 初稿中“Agent、Session 与 Chat 共用授权面板”的表述已被本条覆盖。
 
@@ -28,15 +38,15 @@
 
 - **主色 (Primary)**:
   - 浅色: `#1A56DB` (深蓝) | 容器: `#E1EFFE` | 文本: `#FFFFFF`
-  - 深色: `#76A9FA` (亮蓝) | 容器: `#233876` | 文本: `#1E429F`
-  - 66ccff 主题: `#66CCFF` (以 66ccff 为主色调的浅色风格主题，在界面色彩与主题选择处直接显示色彩编码 `66ccff`，不显示“蓝色”) | 容器: `#E0F4FF` | 文本: `#003B52`
+  - 深色: `#76A9FA` (亮蓝) | 容器: `#1E3A8A` | 文本: `#111827`（满足正文对比度）
+  - 66ccff 主题: 品牌填充 `#66CCFF` / 填充文字 `#003B52`；白底交互主色 `#0369A1` / 交互文字 `#FFFFFF` (以 66ccff 为主色调的浅色风格主题，在界面色彩与主题选择处直接显示色彩编码 `66ccff`，不显示“蓝色”) | 容器: `#E0F4FF`
 - **中性底色 (Surface & Background)**:
   - 浅色背景: `#F9FAFB` | 浅色卡片: `#FFFFFF` | 描边: `#D1D5DB`
   - 深色背景: `#111827` | 深色卡片: `#1F2937` | 描边: `#4B5563`
   - 66ccff 主题背景: `#F2F9FD` (浅蓝白底色) | 卡片: `#FFFFFF` (纯白卡片) | 描边: `#B8D3E0`
 - **状态语义色阶 (Status Colors)**:
   - **就绪/成功 (Ready/Success)**: `#0E9F6E` (绿) / 容器 `#DEF7EC`
-  - **等待/挂起 (Waiting/Warning)**: `#C27803` (黄褐) / 容器 `#FEF08A`
+  - **等待/挂起 (Waiting/Warning)**: 浅色 `#A34808` / `#FEF08A`，深色 `#FACA15` / `#45310A`，66ccff `#B45309` / `#FEF3C7`
   - **错误/阻断 (Error/Failed)**: `#E02424` (红) / 容器 `#FDE8E8`
   - **运行中 (Running/Streaming)**: `#1C64F2` (蓝) / 容器 `#EBF5FF`
   - **已停用/已撤销 (Revoked/Paused)**: `#6B7280` (灰) / 容器 `#F3F4F6`
@@ -138,8 +148,8 @@
 #### SCR-CHAT-02: 聊天详情与消息流 (Conversation View)
 - **顶部栏**: 显示当前绑定 Agent 名称、当前所用模型代号、请求审查入口按钮 `[Inspect Request]`。
 - **消息气泡**:
-  - **用户消息**: 右对齐，主色容器背景，白色文字。
-  - **Agent 消息**: 左对齐，表面容器背景，深色文字；包含完整 Markdown 渲染（标题、列表、代码块、表格、LaTeX 公式）。
+  - **用户消息**: 右对齐，主题色填充；浅色为 `#1A56DB`/白字，深色为 `#76A9FA`/`#111827`，66ccff 为 `#66CCFF`/`#003B52`。
+  - **Agent 消息**: 左对齐，描边表面卡片与对应主题的表面文字；包含完整 Markdown 渲染（标题、列表、代码块、表格、LaTeX 公式）。
   - **状态徽标**: 消息下方标注 Token 消耗、生成耗时及所用索引代际。
 - **输入区域**:
   - 多行自动扩展文本输入框，带占位提示 `[Ask anything or use attached knowledge...]`。
@@ -165,7 +175,7 @@
   - 工具标识与所属 Skill：`skill_calc / compute_matrix`。
   - 参数预览表格（JSON 格式参数严格对齐展示）。
   - 风险级别提示（例如：`[Risk: Medium - Local Network Access]`）。
-  - 操作按钮组：`[Approve Once]`、`[Approve for Session]`、`[Reject]`。
+  - 底部抽屉固定操作：`[Approve Once]`、`[Reject]`；本界面不创建会话或持久授权。
 
 #### SCR-CHAT-05: 引用卡片与原文回跳 (Citation Card)
 - **表现**:
@@ -234,7 +244,7 @@
 ### 3.3 Providers (模型服务商)
 
 #### SCR-PROV-01: Provider 列表 (Providers Overview)
-- **卡片列表**:
+- **分隔行列表**:
   - 服务商名称（如 `DeepSeek Official`, `OpenAI`, `Self-hosted vLLM`）。
   - API 格式（`OpenAI Compatible` 或 `OpenAI Responses`）。
   - 状态指示标：`[Active]`、`[Error: 401 Unauthorized]`、`[Untested]`。
@@ -270,7 +280,7 @@
 
 #### SCR-KNOW-01: 知识库总览 (Knowledge Base Overview)
 - **页面布局**:
-  - 知识库卡片列表：显示库名称、描述、文档总数、图片总数、分块总数、所用 Embedding 模型空间、索引状态（`[READY]`、`[PROCESSING]`、`[WAITING_VISION]`）。
+  - 知识库大数字行：显示库名称、文档总数与索引状态（`[READY]`、`[PROCESSING]`、`[WAITING_VISION]`）；图片数、分块数与 Embedding 空间只在有真实投影数据时显示，不从示例稿填充。
   - 新建知识库按钮 `[+ New Knowledge Base]`。
 
 #### SCR-KNOW-02: 文档明细列表 (Document Detail & File Management)
@@ -450,6 +460,11 @@
 8. `scr-sett-01-dark.svg`: 设置主页、隐私保护开关、数据导出与 AGPL 许可证（深色主题）
 9. `scr-chat-03-66ccff.svg`: Chat 主对话流、气泡布局、引用与工具确认卡片（66ccff 主题）
 
+定稿方向设计板（HTML 样机板，2026-09-24 定稿）：
+
+10. `design-draft.html`: 对话流（右色左卡气泡 + 底部抽屉审批 + 可点开全局抽屉）、知识库大数字行、模型源词态列表，浅色 / 深色 / 66ccff 三主题并列
+11. `icon-board.html`: 「沙箱火花」应用图标 —— 108 画布构造网格、S1 定稿（S2/S3 未采用）、adaptive-icon 分层与导出规格、themed 单色与深浅桌面语境；母版 `design/source/ic-launcher-*.svg`
+
 ---
 
 ## 5. 本地可点击原型与交互验证
@@ -466,4 +481,7 @@
   6. Provider 密钥遮蔽与连通性探测诊断弹窗。
   7. 公告横幅与强制确认阻断对话框。
   8. 设置隐私开关切换与数据导出模拟。
+
+另附定稿方向设计板 [design-draft.html](design/design-draft.html)：三屏并列展示三个主题（浅色 / 深色 / 66ccff 彩蛋），左上角 ☰ 可点开全局抽屉（Agent→会话 + §2.1 十个一级目的地），对话屏含底部抽屉式工具审批卡。
+
 - **设计保证**: 原型所有数据均为本地 Mock 数据，不发起任何真实付费 API 请求，不读取真实系统密钥，完全离线运行。

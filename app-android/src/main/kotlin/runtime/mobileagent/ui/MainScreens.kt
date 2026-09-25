@@ -700,6 +700,9 @@ private fun AgentsRoute(entry: NavBackStackEntry, chinese: Boolean, onRoute: (St
         workspaceItems,
         runtime.mobileagent.domain.WorkspaceScope.FULL_DEVICE_FILES,
     )
+    val fullDeviceCurrentGrant = fullDeviceWorkspace != null && baseState.editor?.grants.orEmpty().any { grant ->
+        grant.grant.workspaceId == fullDeviceWorkspace.workspaceId && grant.enabled
+    }
     val selectedAuthority = authoritySnapshot.selectedAuthority
     val selectedProvider = when (selectedAuthority) {
         runtime.mobileagent.domain.Authority.SHIZUKU -> authoritySnapshot.shizuku
@@ -726,7 +729,7 @@ private fun AgentsRoute(entry: NavBackStackEntry, chinese: Boolean, onRoute: (St
         },
         canChooseSaf = !workspaceBusy,
         canBrowsePrivileged = authorityReady && !workspaceBusy,
-        fullDeviceFilesEnabled = fullDeviceWorkspace != null,
+        fullDeviceFilesEnabled = fullDeviceCurrentGrant,
         fullDeviceFilesEligible = authorityReady &&
             authoritySnapshot.dangerousModeBuildAllowed &&
             authoritySnapshot.dangerousMode != runtime.mobileagent.domain.DangerousMode.DISABLED && !workspaceBusy,
@@ -734,6 +737,21 @@ private fun AgentsRoute(entry: NavBackStackEntry, chinese: Boolean, onRoute: (St
             workspaceBusy -> if (chinese) "正在更新工作区…" else "Updating workspace…"
             workspaceStatus.isNotBlank() -> workspaceStatus
             workspaceLoad.isFailure -> if (chinese) "读取工作区失败。" else "Unable to read workspaces."
+            fullDeviceWorkspace != null && !fullDeviceCurrentGrant && !authorityReady -> if (chinese) {
+                "完整设备文件授权需重新确认；请先恢复所选通道连接。"
+            } else {
+                "Full-device access needs reconfirmation; reconnect the selected authority first."
+            }
+            fullDeviceWorkspace != null && !fullDeviceCurrentGrant -> if (chinese) {
+                "完整设备文件的能力授权已失效；请在当前策略下重新确认。"
+            } else {
+                "Full-device capabilities need confirmation under the current policy."
+            }
+            fullDeviceCurrentGrant && authoritySnapshot.dangerousMode == runtime.mobileagent.domain.DangerousMode.DISABLED -> if (chinese) {
+                "危险模式已关闭；完整设备文件工具暂停。"
+            } else {
+                "Dangerous mode is off; full-device file tools are paused."
+            }
             fullDeviceWorkspace != null && !authorityReady -> if (chinese) {
                 "完整设备访问授权已保留；当前连接不可用，连接恢复后继续生效。"
             } else {
@@ -811,7 +829,10 @@ private fun AgentsRoute(entry: NavBackStackEntry, chinese: Boolean, onRoute: (St
         }
     }
 
-    fun launchWorkspaceSelection(block: suspend () -> WorkspaceSelectionOutcome) {
+    fun launchWorkspaceSelection(
+        onCompleted: (WorkspaceSelectionOutcome) -> String? = { null },
+        block: suspend () -> WorkspaceSelectionOutcome,
+    ) {
         val expectedEditorSessionToken = vm.editorSessionToken()
         coroutineScope.launch {
             workspaceBusy = true
@@ -824,6 +845,7 @@ private fun AgentsRoute(entry: NavBackStackEntry, chinese: Boolean, onRoute: (St
             }
             workspaceBusy = false
             completeWorkspaceSelection(outcome, expectedEditorSessionToken)
+            onCompleted(outcome)?.let { workspaceStatus = it }
         }
     }
 
@@ -1068,9 +1090,32 @@ private fun AgentsRoute(entry: NavBackStackEntry, chinese: Boolean, onRoute: (St
                 val agentId = editorAgentId ?: return@FullDeviceFilesConfirmationDialog
                 val workspaceId = agentFullDeviceWorkspaceId(agentId, selectedAuthority)
                 val currentRevision = workspacePort.fullDeviceFilesGrantRevision(workspaceId)
-                val nextRevision = (currentRevision ?: 0L) + 1L
-                launchWorkspaceSelection {
-                    workspaceCoordinator.openFullDeviceFiles(
+                // An active confirmation is reused when its capability grants
+                // need renewal after a policy change. A revoked tombstone must
+                // advance to the next durable revision.
+                val nextRevision = if (fullDeviceWorkspace?.workspaceId == workspaceId) {
+                    currentRevision ?: 1L
+                } else {
+                    (currentRevision ?: 0L) + 1L
+                }
+                var defaultRenewal: runtime.mobileagent.integration.WorkspaceAccessResult? = null
+                launchWorkspaceSelection(onCompleted = { outcome ->
+                    if (outcome !is WorkspaceSelectionOutcome.Committed) null
+                    else when (defaultRenewal) {
+                        is runtime.mobileagent.integration.WorkspaceAccessResult.Success -> if (chinese) {
+                            "完整设备文件已开启；原默认工作区仅按原有未撤销能力重新授权。"
+                        } else {
+                            "Full-device files enabled; the default workspace was renewed with its existing capabilities only."
+                        }
+                        is runtime.mobileagent.integration.WorkspaceAccessResult.Failure -> if (chinese) {
+                            "完整设备文件已开启；默认工作区重新授权未成功，请单独确认该工作区。"
+                        } else {
+                            "Full-device files enabled; renew the default workspace separately."
+                        }
+                        else -> if (chinese) "完整设备文件已开启。" else "Full-device files enabled."
+                    }
+                }) {
+                    val fullDevice = workspaceCoordinator.openFullDeviceFiles(
                         authority = selectedAuthority,
                         request = runtime.mobileagent.skills.tooling.FullDeviceFilesRequest(
                             workspaceId = workspaceId,
@@ -1080,6 +1125,15 @@ private fun AgentsRoute(entry: NavBackStackEntry, chinese: Boolean, onRoute: (St
                         ),
                         target = WorkspaceTarget(agentId = agentId),
                     )
+                    if (fullDevice is WorkspaceSelectionOutcome.Committed) {
+                        // This confirmation also renews the existing directory's
+                        // *unrevoked* capability set, never the backend's full set.
+                        val defaultId = integration.agentWorkspaceDefault(agentId)?.workspaceId
+                        if (defaultId != null) {
+                            defaultRenewal = workspacePort.renewExistingWorkspaceGrants(agentId, defaultId)
+                        }
+                    }
+                    fullDevice
                 }
             },
             onClose = { confirmFullDevice = false },
@@ -1222,9 +1276,9 @@ private fun FullDeviceFilesConfirmationDialog(
         text = {
             Text(
                 if (chinese) {
-                    "此授权允许该智能体在当前工作区之外访问所选 ADB 级通道实际可见的文件。它不等于 Root，并会在断网、电脑离线或服务暂时断开时保留，直到你主动关闭或底层授权真正失效。"
+                    "此授权允许该智能体在当前工作区之外访问所选 ADB 级通道实际可见的文件。它不等于 Root，并会在暂时断联时保留。若已设置默认工作区，将仅按该工作区原有且未撤销的能力重新确认授权，不会补回已撤销的写入权限。"
                 } else {
-                    "This lets the Agent access files outside its current workspace that the selected ADB-level authority can actually see. It is not Root and remains authorized through temporary disconnects until you revoke it or the underlying grant is lost."
+                    "This lets the Agent access files outside its current workspace that the selected ADB-level authority can see. It is not Root and survives temporary disconnects. An existing default workspace is renewed only with its unrevoked capabilities; revoked write access stays revoked."
                 },
             )
         },

@@ -388,9 +388,10 @@ internal class SafWorkspaceBackend(
             if (node.flags and DocumentsContract.Document.FLAG_VIRTUAL_DOCUMENT != 0) {
                 InternalWorkspaceErrorCode.UNSUPPORTED.error()
             }
-            val effectiveSize = node.size ?: probeFileSize(node.uri)
-            checkFileSize(effectiveSize)
-            if (offsetBytes > effectiveSize) InternalWorkspaceErrorCode.OFFSET_OUT_OF_RANGE.error()
+            // A provider may omit COLUMN_SIZE. Each response remains bounded;
+            // non-seekable providers may still scan up to the requested offset.
+            val effectiveSize = node.size
+            if (effectiveSize != null && offsetBytes > effectiveSize) InternalWorkspaceErrorCode.OFFSET_OUT_OF_RANGE.error()
             val chunk = readChunk(node.uri, offsetBytes, maxBytes.toInt(), effectiveSize)
             InternalWorkspaceContent(
                 path = segments.joinToString("/"),
@@ -1030,15 +1031,6 @@ internal class SafWorkspaceBackend(
         return input.use {
             readSafChunk(it, offset, maximum, declaredSize)
         }
-    }
-
-    private fun probeFileSize(uri: Uri): Long {
-        val input = try {
-            resolver.openInputStream(uri) ?: InternalWorkspaceErrorCode.IO_ERROR.error()
-        } catch (_: SecurityException) {
-            InternalWorkspaceErrorCode.PERMISSION_DENIED.error()
-        }
-        return input.use { probeSafFileSize(it, limits.maxFileBytes) }
     }
 
     private fun readBounded(uri: Uri, offset: Long, maximum: Int): ByteArray =

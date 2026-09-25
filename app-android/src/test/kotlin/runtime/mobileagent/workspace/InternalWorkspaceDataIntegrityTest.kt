@@ -174,6 +174,25 @@ class InternalWorkspaceDataIntegrityTest {
     }
 
     @Test
+    fun existingTwentyFourMiBDocumentCanBeReadInBoundedChunks() {
+        val limits = InternalWorkspaceLimits(
+            maxFileBytes = 256L * 1024L,
+            quotaBytes = 32L * 1024L * 1024L,
+            maxReadBytes = 256L * 1024L,
+        )
+        val (backend, root) = fixture(limits)
+        val size = 24 * 1024 * 1024
+        Files.createDirectories(root)
+        Files.write(root.resolve("book.txt"), ByteArray(size) { 'a'.code.toByte() })
+        val result = backend.read("book.txt", maxBytes = 256L * 1024L, offsetBytes = (size - 128).toLong())
+        val chunk = (result as? InternalWorkspaceResult.Success)?.value
+            ?: fail("existing large file must be readable by offset")
+        assertEquals(128, chunk.bytes.size)
+        assertEquals(size.toLong(), chunk.totalBytes)
+        assertTrue(chunk.eof)
+    }
+
+    @Test
     fun symlinkTargetSwapFailsClosedWithoutFollowing() {
         val (backend, root) = fixture()
         success(backend.write("link.txt", "original".toByteArray(), InternalWorkspaceVersions.MISSING, false))

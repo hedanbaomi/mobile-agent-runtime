@@ -11,6 +11,7 @@ import org.junit.jupiter.api.Test
 import runtime.mobileagent.feature.chat.ChatMessageUi
 import runtime.mobileagent.feature.chat.isToolEventRow
 import runtime.mobileagent.feature.chat.secondaryNoticeOf
+import runtime.mobileagent.feature.chat.groupConversationMessages
 
 /**
  * R3 QA P3: a non-blank event summary used to turn an assistant message into a compact tool
@@ -20,6 +21,20 @@ import runtime.mobileagent.feature.chat.secondaryNoticeOf
  * `GlobalConversationUiTest.retrievalCoverageNoticeNeverReplacesTheAssistantAnswer`.
  */
 class AssistantAnswerRenderingTest {
+    @Test
+    fun oneUserTurnGroupsAssistantRoundsAndToolEvents() {
+        val timeline = groupConversationMessages(listOf(
+            ChatMessageUi("u", "user", "Question"),
+            ChatMessageUi("a1", "assistant", "Planning", reasoning = "think"),
+            ChatMessageUi("t1", "tool", "result", eventSummary = "ran command"),
+            ChatMessageUi("a2", "assistant", "Answer"),
+        ))
+        assertEquals(2, timeline.size)
+        assertEquals("Planning\n\nAnswer", timeline[1].message.text)
+        assertEquals(listOf("t1"), timeline[1].toolEvents.map { it.id })
+        assertEquals(setOf("a1", "t1", "a2"), timeline[1].sourceIds)
+        assertEquals(listOf("a1", "t1", "a2"), timeline[1].orderedMessages.map { it.id })
+    }
     @Test
     fun onlyToolMessagesRenderAsEventRows() {
         assertFalse(isToolEventRow("assistant"))

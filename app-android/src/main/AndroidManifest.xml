@@ -6,6 +6,8 @@
     </queries>
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
     <application
         android:name=".MobileAgentApp"
         android:allowBackup="false"
@@ -14,6 +16,10 @@
         android:roundIcon="@mipmap/ic_launcher"
         android:supportsRtl="true"
         android:theme="@style/Theme.MobileAgentRuntime">
+        <service
+            android:name=".ChatRunForegroundService"
+            android:exported="false"
+            android:foregroundServiceType="dataSync" />
         <!-- Official Shizuku Binder bootstrap. The cross-user permission prevents ordinary apps
              from calling the exported provider directly. -->
         <provider

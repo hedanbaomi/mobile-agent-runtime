@@ -738,7 +738,8 @@ class AgentWorkspaceDefaultRepository(
         return db.query(
             "SELECT expires_at FROM capability_grants " +
                 "WHERE agent_id = ? AND workspace_id = ? AND lifetime = 'PERSISTENT' " +
-                "AND revoked_at IS NULL AND consumed_at IS NULL",
+                "AND revoked_at IS NULL AND consumed_at IS NULL " +
+                "AND policy_version = (SELECT policy_version FROM authority_policy WHERE id = 1)",
             listOf(agentId, workspaceId),
         ).any { row ->
             val raw = row.columns["expires_at"]

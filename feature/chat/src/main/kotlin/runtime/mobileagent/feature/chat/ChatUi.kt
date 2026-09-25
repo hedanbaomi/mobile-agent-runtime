@@ -8,6 +8,7 @@ import android.graphics.BitmapFactory
 import androidx.compose.foundation.background
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -118,6 +119,57 @@ data class ChatMessageUi(
     /** Optional compact event summary for tool/diff/test rows. */
     val eventSummary: String = "",
 )
+
+/** A display projection only. Durable assistant/tool records keep their protocol order. */
+data class ChatTimelineItem(
+    val message: ChatMessageUi,
+    val toolEvents: List<ChatMessageUi> = emptyList(),
+    val sourceIds: Set<String> = setOf(message.id),
+    val orderedMessages: List<ChatMessageUi> = listOf(message),
+)
+
+fun groupConversationMessages(messages: List<ChatMessageUi>): List<ChatTimelineItem> {
+    val items = mutableListOf<ChatTimelineItem>()
+    var active: ChatTimelineItem? = null
+    fun flush() {
+        active?.let(items::add)
+        active = null
+    }
+    messages.forEach { next ->
+        when (next.role.lowercase()) {
+            "assistant" -> {
+                val current = active
+                active = if (current == null) ChatTimelineItem(next) else current.copy(
+                    message = current.message.copy(
+                        text = listOf(current.message.text, next.text).filter(String::isNotBlank).joinToString("\n\n"),
+                        reasoning = listOf(current.message.reasoning, next.reasoning).filter(String::isNotBlank).joinToString("\n\n"),
+                        reasoningStreaming = next.reasoningStreaming,
+                        eventSummary = listOf(current.message.eventSummary, next.eventSummary).filter(String::isNotBlank).distinct().joinToString("\n"),
+                        citationIds = (current.message.citationIds + next.citationIds).distinct(),
+                        streaming = next.streaming,
+                        timeLabel = next.timeLabel,
+                    ),
+                    sourceIds = current.sourceIds + next.id,
+                    orderedMessages = current.orderedMessages + next,
+                )
+            }
+            "tool" -> {
+                val current = active
+                if (current == null) items += ChatTimelineItem(next) else active = current.copy(
+                    toolEvents = current.toolEvents + next,
+                    sourceIds = current.sourceIds + next.id,
+                    orderedMessages = current.orderedMessages + next,
+                )
+            }
+            else -> {
+                flush()
+                items += ChatTimelineItem(next)
+            }
+        }
+    }
+    flush()
+    return items
+}
 
 data class ChatCitationUi(
     val id: String,
@@ -422,20 +474,6 @@ private fun ChatConversationContent(
         val compactApproval = maxHeight < 360.dp
         val approvalDetailMaxHeight = if (compactApproval) 48.dp else 168.dp
         Column(Modifier.fillMaxSize()) {
-            if (state.pendingTool != null) {
-                // Approval is a blocking interaction.  Give it the whole
-                // conversation viewport so headers and empty-state copy cannot
-                // push the confirmation actions behind the IME or bottom bar.
-                Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.scrim.copy(alpha = 0.30f)), contentAlignment = Alignment.BottomCenter) {
-                    ApprovalCard(
-                        approval = state.pendingTool,
-                        onChoice = actions.onToolApproval,
-                        zh = state.language.equals("zh-CN", true),
-                        detailMaxHeight = approvalDetailMaxHeight,
-                        compact = compactApproval,
-                    )
-                }
-            } else {
                 ChatHeader(
                     state,
                     actions,
@@ -448,11 +486,12 @@ private fun ChatConversationContent(
                 if (state.status.isNotBlank()) StatusLine(state.status, state.statusKind)
                 val listState = rememberLazyListState()
                 val scrollScope = rememberCoroutineScope()
+                val timeline = remember(state.messages) { groupConversationMessages(state.messages) }
                 val coveredIds = remember(state.compactions) {
                     state.compactions.lastOrNull { it.state == "SUCCEEDED" }?.sourceMessageIds.orEmpty().toSet()
                 }
                 ContextCompactionHistory(state.compactions, state.messages, state.language.equals("zh-CN", true)) { id ->
-                    val index = state.messages.indexOfFirst { it.id == id }
+                    val index = timeline.indexOfFirst { id in it.sourceIds }
                     if (index >= 0) scrollScope.launch { listState.scrollToItem(index) }
                 }
                 if (state.loading) {
@@ -462,18 +501,19 @@ private fun ChatConversationContent(
                 } else if (state.messages.isEmpty()) {
                     CenterState(emptyConversationMessage(state, state.language.equals("zh-CN", true)), false, Modifier.weight(1f))
                 } else {
-                    LaunchedEffect(state.messages.size, state.streaming) {
-                        if (state.messages.isNotEmpty()) listState.animateScrollToItem(state.messages.lastIndex)
+                    LaunchedEffect(timeline.size, timeline.lastOrNull()?.sourceIds?.size, state.streaming) {
+                        if (timeline.isNotEmpty()) listState.animateScrollToItem(timeline.lastIndex)
                     }
                     LazyColumn(state = listState, modifier = Modifier.weight(1f).fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                        items(state.messages, key = { it.id }) {
-                            if (it.id in coveredIds) {
+                        items(timeline, key = { it.message.id }) { item ->
+                            item.sourceIds.filter { it in coveredIds }.forEach { sourceId ->
                                 Text(if (state.language.equals("zh-CN", true)) "已纳入上下文摘要 · 原文保留" else "Included in a context summary · original retained",
                                     style = MaterialTheme.typography.labelSmall,
-                                    modifier = Modifier.testTag("conversation.summarized.${it.id}"))
+                                    modifier = Modifier.testTag("conversation.summarized.$sourceId"))
                             }
                             MessageBubble(
-                                message = it,
+                                message = item.message,
+                                orderedMessages = item.orderedMessages,
                                 citations = state.citations,
                                 onCitation = actions.onOpenCitation,
                                 zh = state.language.equals("zh-CN", true),
@@ -482,6 +522,27 @@ private fun ChatConversationContent(
                     }
                 }
                 Composer(state, actions)
+        }
+        state.pendingTool?.let { pending ->
+            // Keep the actual conversation visible behind the blocking sheet.
+            // The full-size scrim intercepts touches on the underlying content.
+            Box(
+                Modifier.fillMaxSize()
+                    .background(MaterialTheme.colorScheme.scrim.copy(alpha = 0.30f))
+                    .clickable(
+                        interactionSource = remember { MutableInteractionSource() },
+                        indication = null,
+                    ) {}
+                    .windowInsetsPadding(WindowInsets.ime.union(WindowInsets.navigationBars)),
+                contentAlignment = Alignment.BottomCenter,
+            ) {
+                ApprovalCard(
+                    approval = pending,
+                    onChoice = actions.onToolApproval,
+                    zh = state.language.equals("zh-CN", true),
+                    detailMaxHeight = approvalDetailMaxHeight,
+                    compact = compactApproval,
+                )
             }
         }
     }
@@ -1056,6 +1117,7 @@ fun secondaryNoticeOf(message: ChatMessageUi): String? =
 @OptIn(ExperimentalLayoutApi::class)
 private fun MessageBubble(
     message: ChatMessageUi,
+    orderedMessages: List<ChatMessageUi> = listOf(message),
     citations: List<ChatCitationUi>,
     onCitation: (String) -> Unit,
     zh: Boolean,
@@ -1091,7 +1153,10 @@ private fun MessageBubble(
                             zh = zh,
                         )
                     }
-                    Text(message.text, Modifier.padding(top = 4.dp))
+                    orderedMessages.forEach { part ->
+                        if (isToolEventRow(part.role)) ToolEventRow(part, zh, Modifier.padding(top = 4.dp))
+                        else if (part.text.isNotBlank()) Text(part.text, Modifier.padding(top = 4.dp))
+                    }
                     // Supplementary disclosure, never a substitute for the answer:
                     // shown only when it adds information the answer text does not
                     // already carry (an error message is already part of the text).
@@ -1320,12 +1385,17 @@ private fun Composer(state: ChatUiState, actions: ChatActions) {
     val aqua = MaterialTheme.colorScheme.background == Color(0xFFF2F9FD)
     val focusManager = LocalFocusManager.current
     val keyboard = LocalSoftwareKeyboardController.current
+    var submitting by remember { mutableStateOf(false) }
     fun submit() {
-        // Keep the first-message path responsive: the host receives the send
-        // action immediately, while the input focus/IME is cleared locally.
-        focusManager.clearFocus(force = true)
-        keyboard?.hide()
-        actions.onSend()
+        if (submitting) return
+        submitting = true
+        try {
+            focusManager.clearFocus(force = true)
+            keyboard?.hide()
+            actions.onSend()
+        } finally {
+            submitting = false
+        }
     }
     Row(
         Modifier

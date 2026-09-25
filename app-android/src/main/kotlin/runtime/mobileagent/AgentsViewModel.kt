@@ -278,10 +278,12 @@ internal fun saveAgentWorkspaceGrantPreset(
         AgentWorkspaceAccessPreset.READ_ONLY -> READ_ONLY_WORKSPACE_CAPABILITIES
         AgentWorkspaceAccessPreset.READ_WRITE -> READ_WRITE_WORKSPACE_CAPABILITIES
     }
+    val policyVersion = grantPort.currentPolicyVersion()
     val existing = editor.grants.asSequence()
         .filter { it.enabled && !it.grant.revoked && !it.expired }
         .map { it.grant }
         .filter {
+            it.policyVersion == policyVersion &&
             it.workspaceId == workspace.id &&
                 it.pathScope == null &&
                 it.skillInstallId == null &&
@@ -291,7 +293,6 @@ internal fun saveAgentWorkspaceGrantPreset(
         .toSet()
     val missing = capabilities.filterNot(existing::contains)
     if (missing.isEmpty()) return emptyList()
-    val policyVersion = grantPort.currentPolicyVersion()
     return missing.map { capability ->
         val grant = CapabilityGrant(
             grantId = EntityId.random().value,
@@ -513,7 +514,7 @@ class AgentsViewModel(
             }
             val previous = editor.id?.let { app.container.agents.get(it) }
             val grantChanges = editor.grantDraft != null || editor.workspaceGrantPreset != null ||
-                editor.grants.any { !it.enabled && !it.grant.revoked && !it.expired }
+                editor.grants.any { !it.enabled && !it.grant.revoked && !it.expired && !it.policyStale }
             require(!grantChanges || grantPort.available) {
                 grantPort.unavailableMessage
             }
@@ -539,7 +540,9 @@ class AgentsViewModel(
                 skillIds = editor.resourceBindings.filter { it.type == "skill" && it.enabled }.map { it.id },
                 retrievalMode = editor.retrievalMode, revision = (previous?.revision ?: 0) + 1,
                 parameterOverridesJson = parameters.toString(), contextPolicyJson = contextPolicyJson,
-                permissionSettingsJson = previous?.permissionSettingsJson ?: "{}",
+                permissionSettingsJson = AgentToolConfirmation.update(
+                    previous?.permissionSettingsJson, editor.skipToolConfirmations,
+                ),
             )
             val createdNew = previous == null
             var savedId: String? = null
@@ -642,7 +645,7 @@ class AgentsViewModel(
         // TASK/SESSION draft must not cause any grant-side mutation from this context-free page.
         if (editor.grantDraft != null) validateAgentGrantDraftForContext(editor)
         editor.grants
-            .filter { !it.grant.revoked && !it.expired && !it.enabled }
+            .filter { !it.grant.revoked && !it.expired && !it.policyStale && !it.enabled }
             .forEach { pending ->
                 val revoked = grantPort.revokeGrant(pending.grant.grantId, pending.grant.revision)
                 require(revoked.revoked) { "Capability grant revoke did not persist" }
@@ -788,6 +791,7 @@ class AgentsViewModel(
             defaultWorkspaceRevision = grantData.workspaceDefault?.revision ?: 0L,
             workspacePresetWorkspaceId = grantData.workspaces.firstOrNull { it.enabled }?.id,
             retrievalMode = agent?.retrievalMode ?: "explicit",
+            skipToolConfirmations = AgentToolConfirmation.skip(agent?.permissionSettingsJson),
             snapshotLabel = "用此智能体新建会话时会冻结当前配置和能力授权；现有会话不会新增工具，撤权仍立即生效。",
             contextPolicyJson = agent?.contextPolicyJson ?: "{}",
             contextPolicyDraft = AgentContextPolicyDraftUi.fromJson(agent?.contextPolicyJson ?: "{}"),
@@ -837,6 +841,7 @@ class AgentsViewModel(
                 )
             }
             val now = Utc.nowIso()
+            val policyVersion = grantPort.currentPolicyVersion()
             val grants = agentId?.let { grantPort.listGrants(it, includeRevoked = true) }.orEmpty().map { grant ->
                 val skill = grant.skillInstallId?.let { installId -> installedSkills.firstOrNull { it.installId == installId } }
                 val skillPermission = skill?.let { installed ->
@@ -847,12 +852,14 @@ class AgentsViewModel(
                 val skillTrusted = grant.skillInstallId == null ||
                     (skill != null && skill.enabled && skillPermission != null && skillPermission.packageHash == grant.packageHash)
                 val expired = isGrantExpired(grant, now)
+                val policyStale = grant.policyVersion != policyVersion
                 AgentGrantUi(
                     grant = grant,
                     workspaceName = grant.workspaceId?.let { workspaceById[it]?.displayName },
                     skillName = skill?.name,
                     expired = expired,
-                    enabled = !grant.revoked && !expired && skillTrusted,
+                    policyStale = policyStale,
+                    enabled = !grant.revoked && !expired && !policyStale && skillTrusted,
                     skillTrusted = skillTrusted,
                 )
             }

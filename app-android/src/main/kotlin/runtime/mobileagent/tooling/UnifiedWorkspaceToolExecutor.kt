@@ -23,6 +23,7 @@ import runtime.mobileagent.domain.CapabilityGrant
 import runtime.mobileagent.domain.DangerousMode
 import runtime.mobileagent.domain.GrantLifetime
 import runtime.mobileagent.domain.Authority
+import runtime.mobileagent.domain.WorkspaceScope
 import runtime.mobileagent.skills.ToolCall
 import runtime.mobileagent.skills.ToolExecutor
 import runtime.mobileagent.skills.ToolResult
@@ -491,6 +492,9 @@ class UnifiedWorkspaceToolExecutor(
     ): Boolean {
         val descriptor = registered.descriptor
         if (!descriptor.enabled) return false
+        if (descriptor.scope == WorkspaceScope.FULL_DEVICE_FILES && dangerousModeProvider() == DangerousMode.DISABLED) {
+            return false
+        }
         if (descriptor.backendType == WorkspaceBackendType.PRIVILEGED) {
             if (!privilegedProviderConfigured(descriptor, context)) return false
             if (requireLiveReady && !privilegedProviderReady(descriptor, context)) return false

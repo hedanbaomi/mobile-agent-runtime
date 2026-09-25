@@ -78,6 +78,7 @@ object AgentTestTags {
     const val GRANT_LIFETIME = "agents.editor.grants.lifetime"
     const val GRANT_LIFETIME_CONTEXT = "agents.editor.grants.lifetime.context"
     const val GRANT_SHELL = "agents.editor.grants.shell.execute"
+    const val SKIP_TOOL_CONFIRMATIONS = "agents.editor.skip_tool_confirmations"
     const val WORKSPACE_PRESET = "agents.editor.workspace_preset"
     const val WORKSPACE_PRESET_SELECTOR = "agents.editor.workspace_preset.workspace"
     const val WORKSPACE_PRESET_READ_ONLY = "agents.editor.workspace_preset.read_only"
@@ -160,7 +161,8 @@ data class AgentGrantUi(
     val workspaceName: String? = null,
     val skillName: String? = null,
     val expired: Boolean = false,
-    val enabled: Boolean = !grant.revoked && !expired,
+    val policyStale: Boolean = false,
+    val enabled: Boolean = !grant.revoked && !expired && !policyStale,
     val skillTrusted: Boolean = true,
 )
 
@@ -238,6 +240,7 @@ data class AgentEditorUi(
     val contextPolicyDraft: AgentContextPolicyDraftUi = AgentContextPolicyDraftUi(),
     val resourceBindings: List<AgentResourceBindingUi> = emptyList(),
     val retrievalMode: String = "explicit",
+    val skipToolConfirmations: Boolean = false,
     val snapshotLabel: String = "",
     val revision: Int = 0,
     val workspaces: List<AgentWorkspaceUi> = emptyList(),
@@ -517,6 +520,7 @@ private fun AgentSummary(state: AgentsUiState, actions: AgentsActions) {
                 val location = listOfNotNull(grant.workspaceName, grant.grant.pathScope?.let { if (zh) "范围：$it" else "Scope: $it" }).joinToString(" · ")
                 val stateLabel = when {
                     grant.grant.revoked -> if (zh) "已撤销" else "Revoked"
+                    grant.policyStale -> if (zh) "策略已变更，需重新授权" else "Policy changed; reauthorize"
                     grant.expired -> if (zh) "已过期" else "Expired"
                     !grant.skillTrusted -> if (zh) "Skill 绑定未验证" else "Skill binding unverified"
                     else -> if (zh) "有效" else "Active"
@@ -788,6 +792,19 @@ private fun AgentEditorFields(
                     }
                 }
                 OutlinedTextField(editor.retrievalMode, { actions.onEditorChange(editor.copy(retrievalMode = it)) }, label = { Text(if (zh) "检索模式" else "Retrieval mode") }, modifier = Modifier.fillMaxWidth())
+                Row(Modifier.fillMaxWidth().testTag(AgentTestTags.SKIP_TOOL_CONFIRMATIONS), verticalAlignment = Alignment.CenterVertically) {
+                    Switch(
+                        checked = editor.skipToolConfirmations,
+                        onCheckedChange = { actions.onEditorChange(editor.copy(skipToolConfirmations = it)) },
+                    )
+                    Column(Modifier.padding(start = 12.dp)) {
+                        Text(if (zh) "跳过工具运行确认" else "Skip tool run confirmations")
+                        Text(
+                            if (zh) "新会话中的工具和程序可免逐次确认；仍须满足授权。关闭后立即恢复确认。" else "New conversations can run tools without per-call prompts; grants still apply. Turning this off takes effect immediately.",
+                            style = MaterialTheme.typography.bodySmall,
+                        )
+                    }
+                }
                 Text(if (zh) "模型角色" else "Model roles", style = MaterialTheme.typography.titleMedium)
                 RoleDropdown(if (zh) "对话" else "Chat", editor.chatModelId, editor.modelOptions, "CHAT", zh) { actions.onEditorChange(editor.copy(chatModelId = it)) }
                 RoleDropdown(if (zh) "视觉（可选）" else "Vision (optional)", editor.visionModelId, editor.modelOptions, "VISION", zh) { actions.onEditorChange(editor.copy(visionModelId = it)) }

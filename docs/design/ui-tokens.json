@@ -1,8 +1,8 @@
 {
   "$comment": "SPDX-FileCopyrightText: 2026 mobileAgentRuntime contributors\nSPDX-License-Identifier: AGPL-3.0-only",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "name": "mobileAgentRuntime Design Tokens",
-  "description": "Design tokens for Android Material 3 implementation across light and dark themes with Simplified Chinese (zh-CN) typography support",
+  "description": "Calm layout and bubble conversation tokens for Android Material 3 light, dark and 66ccff themes",
   "localization": {
     "defaultLocale": "zh-CN",
     "supportedLocales": ["zh-CN", "en-US"],
@@ -26,7 +26,7 @@
       "onError": "#FFFFFF",
       "errorContainer": "#FDE8E8",
       "onErrorContainer": "#9B1C1C",
-      "warning": "#C27803",
+      "warning": "#A34808",
       "onWarning": "#FFFFFF",
       "warningContainer": "#FEF08A",
       "onWarningContainer": "#723B13",
@@ -47,15 +47,15 @@
       "inverseOnSurface": "#F9FAFB",
       "inversePrimary": "#90CDF4",
       "surfaceContainerLowest": "#FFFFFF",
-      "surfaceContainerLow": "#F9FAFB",
+      "surfaceContainerLow": "#FFFFFF",
       "surfaceContainer": "#F3F4F6",
-      "surfaceContainerHigh": "#E5E7EB",
-      "surfaceContainerHighest": "#D1D5DB"
+      "surfaceContainerHigh": "#FFFFFF",
+      "surfaceContainerHighest": "#FFFFFF"
     },
     "dark": {
       "primary": "#76A9FA",
-      "onPrimary": "#1E429F",
-      "primaryContainer": "#233876",
+      "onPrimary": "#111827",
+      "primaryContainer": "#1E3A8A",
       "onPrimaryContainer": "#E1EFFE",
       "secondary": "#9CA3AF",
       "onSecondary": "#1F2A37",
@@ -71,7 +71,7 @@
       "onErrorContainer": "#FDE8E8",
       "warning": "#FACA15",
       "onWarning": "#723B13",
-      "warningContainer": "#633112",
+      "warningContainer": "#45310A",
       "onWarningContainer": "#FEF08A",
       "info": "#76A9FA",
       "onInfo": "#1E429F",
@@ -90,14 +90,16 @@
       "inverseOnSurface": "#111827",
       "inversePrimary": "#1A56DB",
       "surfaceContainerLowest": "#0F172A",
-      "surfaceContainerLow": "#182234",
+      "surfaceContainerLow": "#1F2937",
       "surfaceContainer": "#1F2937",
-      "surfaceContainerHigh": "#283548",
-      "surfaceContainerHighest": "#374151"
+      "surfaceContainerHigh": "#1F2937",
+      "surfaceContainerHighest": "#1F2937"
     },
     "theme66ccff": {
-      "primary": "#66CCFF",
-      "onPrimary": "#003B52",
+      "primary": "#0369A1",
+      "onPrimary": "#FFFFFF",
+      "brandFill": "#66CCFF",
+      "onBrandFill": "#003B52",
       "primaryContainer": "#E0F4FF",
       "onPrimaryContainer": "#004863",
       "secondary": "#4A6069",
@@ -112,9 +114,9 @@
       "onError": "#FFFFFF",
       "errorContainer": "#FDE8E8",
       "onErrorContainer": "#9B1C1C",
-      "warning": "#C27803",
+      "warning": "#B45309",
       "onWarning": "#FFFFFF",
-      "warningContainer": "#FEF08A",
+      "warningContainer": "#FEF3C7",
       "onWarningContainer": "#723B13",
       "info": "#0284C7",
       "onInfo": "#FFFFFF",
@@ -133,10 +135,10 @@
       "inverseOnSurface": "#F0F7FA",
       "inversePrimary": "#66CCFF",
       "surfaceContainerLowest": "#FFFFFF",
-      "surfaceContainerLow": "#F2F9FD",
+      "surfaceContainerLow": "#FFFFFF",
       "surfaceContainer": "#E8F4FA",
-      "surfaceContainerHigh": "#DEEFF7",
-      "surfaceContainerHighest": "#D4E9F3"
+      "surfaceContainerHigh": "#FFFFFF",
+      "surfaceContainerHighest": "#FFFFFF"
     },
     "status": {
       "ready": "#0E9F6E",
@@ -186,6 +188,30 @@
     "large": "16dp",
     "extraLarge": "28dp",
     "full": "9999dp"
+  },
+  "calm": {
+    "shell": {
+      "eyebrow": "10sp",
+      "title": "22sp",
+      "subtitle": "11sp",
+      "minHeight": "76dp",
+      "headerFill": { "light": "background", "dark": "background", "theme66ccff": "brandFill" }
+    },
+    "chat": {
+      "bubbleMaxWidth": "82%",
+      "bubbleRadius": "18dp",
+      "bubbleTailRadius": "5dp",
+      "composerRadius": "24dp",
+      "sendTouchTarget": "48dp",
+      "userFill": { "light": "primary", "dark": "primary", "theme66ccff": "brandFill" },
+      "sendFill": { "light": "primary", "dark": "primary", "theme66ccff": "brandFill" },
+      "assistantFill": "surface",
+      "assistantOutline": "outlineVariant",
+      "approvalPresentation": "bottom-sheet",
+      "approvalTopRadius": "26dp"
+    },
+    "knowledge": { "rowRadius": "20dp", "countSize": "19sp", "waitingFill": "warningContainer" },
+    "providers": { "rowStyle": "divider", "divider": "outlineVariant" }
   },
   "elevation": {
     "level0": "0dp",

@@ -34,11 +34,13 @@ import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.MoreVert
+import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.Button
@@ -66,11 +68,14 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -421,13 +426,15 @@ private fun ChatConversationContent(
                 // Approval is a blocking interaction.  Give it the whole
                 // conversation viewport so headers and empty-state copy cannot
                 // push the confirmation actions behind the IME or bottom bar.
-                ApprovalCard(
-                    approval = state.pendingTool,
-                    onChoice = actions.onToolApproval,
-                    zh = state.language.equals("zh-CN", true),
-                    detailMaxHeight = approvalDetailMaxHeight,
-                    compact = compactApproval,
-                )
+                Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.scrim.copy(alpha = 0.30f)), contentAlignment = Alignment.BottomCenter) {
+                    ApprovalCard(
+                        approval = state.pendingTool,
+                        onChoice = actions.onToolApproval,
+                        zh = state.language.equals("zh-CN", true),
+                        detailMaxHeight = approvalDetailMaxHeight,
+                        compact = compactApproval,
+                    )
+                }
             } else {
                 ChatHeader(
                     state,
@@ -470,7 +477,6 @@ private fun ChatConversationContent(
                                 citations = state.citations,
                                 onCitation = actions.onOpenCitation,
                                 zh = state.language.equals("zh-CN", true),
-                                minimal = minimalHeader,
                             )
                         }
                     }
@@ -1053,9 +1059,10 @@ private fun MessageBubble(
     citations: List<ChatCitationUi>,
     onCitation: (String) -> Unit,
     zh: Boolean,
-    minimal: Boolean = false,
 ) {
     val user = message.role.equals("user", ignoreCase = true)
+    val aqua = MaterialTheme.colorScheme.background == Color(0xFFF2F9FD)
+    val userInk = if (aqua) Color(0xFF003B52) else MaterialTheme.colorScheme.onPrimary
     // Only a tool message becomes a compact event row.  An assistant message keeps
     // its answer bubble even when it carries an event summary: R3 QA P3 showed a
     // retrieval-coverage notice REPLACING the answer text (the row renders
@@ -1067,10 +1074,10 @@ private fun MessageBubble(
             ToolEventRow(message = message, zh = zh, modifier = Modifier.fillMaxWidth())
         } else {
             val bubbleModifier = Modifier
-                .fillMaxWidth(if (user) 0.86f else 0.94f)
+                .fillMaxWidth(0.82f)
                 .testTag("conversation.message.${message.id}")
             val body: @Composable () -> Unit = {
-                Column(Modifier.padding(if (minimal && !user) 4.dp else 12.dp)) {
+                Column(Modifier.padding(12.dp)) {
                     Text(
                         if (user) { if (zh) "你" else "You" } else message.role,
                         style = MaterialTheme.typography.labelMedium,
@@ -1093,7 +1100,7 @@ private fun MessageBubble(
                         Text(
                             notice,
                             style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            color = if (user) userInk else MaterialTheme.colorScheme.onSurfaceVariant,
                             modifier = Modifier.padding(top = 6.dp).testTag("conversation.notice.${message.id}"),
                         )
                     }
@@ -1105,14 +1112,20 @@ private fun MessageBubble(
                     }
                 }
             }
-            if (minimal && !user) {
-                Column(bubbleModifier) { body() }
-            } else {
-                Card(
-                    colors = CardDefaults.cardColors(containerColor = if (user) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceVariant),
-                    modifier = bubbleModifier,
-                ) { body() }
-            }
+            Card(
+                colors = CardDefaults.cardColors(
+                    containerColor = if (user && aqua) Color(0xFF66CCFF) else if (user) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surface,
+                    contentColor = if (user) userInk else MaterialTheme.colorScheme.onSurface,
+                ),
+                shape = RoundedCornerShape(
+                    topStart = 18.dp,
+                    topEnd = 18.dp,
+                    bottomEnd = if (user) 5.dp else 18.dp,
+                    bottomStart = if (user) 18.dp else 5.dp,
+                ),
+                border = if (user) null else BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+                modifier = bubbleModifier,
+            ) { body() }
         }
     }
 }
@@ -1199,10 +1212,14 @@ private fun ApprovalCard(
     compact: Boolean,
 ) {
     Card(
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer),
-        modifier = Modifier.fillMaxWidth().padding(vertical = if (compact) 0.dp else 8.dp),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+        shape = RoundedCornerShape(topStart = 26.dp, topEnd = 26.dp),
+        modifier = Modifier.fillMaxWidth(),
     ) {
-        Column(Modifier.padding(if (compact) 8.dp else 12.dp)) {
+        Column(Modifier.padding(if (compact) 12.dp else 20.dp)) {
+            Box(Modifier.align(Alignment.CenterHorizontally).size(width = 38.dp, height = 4.dp)
+                .background(MaterialTheme.colorScheme.outline, CircleShape))
+            Spacer(Modifier.height(12.dp))
             Text(
                 if (zh) "需要确认" else "Confirmation required",
                 style = if (compact) MaterialTheme.typography.labelLarge else MaterialTheme.typography.titleMedium,
@@ -1262,19 +1279,19 @@ private fun ApprovalCard(
                     modifier = Modifier.fillMaxWidth().padding(top = 4.dp).testTag("chat.approval.actions"),
                     horizontalArrangement = Arrangement.spacedBy(6.dp),
                 ) {
-                    Button(
-                        onClick = { onChoice(ToolApprovalChoice.APPROVE) },
-                        modifier = Modifier.weight(1f).testTag("chat.approval.approve"),
-                        contentPadding = PaddingValues(horizontal = 8.dp),
-                    ) {
-                        Text(if (zh) "允许一次" else "Allow once", style = MaterialTheme.typography.labelMedium, maxLines = 1)
-                    }
                     OutlinedButton(
                         onClick = { onChoice(ToolApprovalChoice.REJECT) },
                         modifier = Modifier.weight(1f).testTag("chat.approval.reject"),
                         contentPadding = PaddingValues(horizontal = 8.dp),
                     ) {
                         Text(if (zh) "拒绝" else "Reject", style = MaterialTheme.typography.labelMedium, maxLines = 1)
+                    }
+                    Button(
+                        onClick = { onChoice(ToolApprovalChoice.APPROVE) },
+                        modifier = Modifier.weight(1f).testTag("chat.approval.approve"),
+                        contentPadding = PaddingValues(horizontal = 8.dp),
+                    ) {
+                        Text(if (zh) "允许一次" else "Allow once", style = MaterialTheme.typography.labelMedium, maxLines = 1)
                     }
                 }
             } else {
@@ -1283,14 +1300,14 @@ private fun ApprovalCard(
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
                     verticalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
-                    Button(
-                        onClick = { onChoice(ToolApprovalChoice.APPROVE) },
-                        modifier = Modifier.testTag("chat.approval.approve"),
-                    ) { Text(if (zh) "允许一次" else "Allow once") }
                     OutlinedButton(
                         onClick = { onChoice(ToolApprovalChoice.REJECT) },
                         modifier = Modifier.testTag("chat.approval.reject"),
                     ) { Text(if (zh) "拒绝" else "Reject") }
+                    Button(
+                        onClick = { onChoice(ToolApprovalChoice.APPROVE) },
+                        modifier = Modifier.testTag("chat.approval.approve"),
+                    ) { Text(if (zh) "允许一次" else "Allow once") }
                 }
             }
         }
@@ -1300,6 +1317,7 @@ private fun ApprovalCard(
 @Composable
 private fun Composer(state: ChatUiState, actions: ChatActions) {
     val zh = state.language.equals("zh-CN", true)
+    val aqua = MaterialTheme.colorScheme.background == Color(0xFFF2F9FD)
     val focusManager = LocalFocusManager.current
     val keyboard = LocalSoftwareKeyboardController.current
     fun submit() {
@@ -1320,12 +1338,14 @@ private fun Composer(state: ChatUiState, actions: ChatActions) {
             value = state.input,
             onValueChange = actions.onInput,
             enabled = !state.streaming && state.pendingTool == null,
-            label = { Text(if (zh) "消息" else "Message") },
-            minLines = 2,
+            placeholder = { Text(if (zh) "继续提问…" else "Ask a follow-up…") },
+            minLines = 1,
             maxLines = 5,
             modifier = Modifier
                 .weight(1f)
+                .semantics { contentDescription = if (zh) "消息" else "Message" }
                 .testTag("conversation.composer.input"),
+            shape = RoundedCornerShape(24.dp),
         )
         Spacer(Modifier.width(8.dp))
         if (state.streaming) {
@@ -1341,8 +1361,14 @@ private fun Composer(state: ChatUiState, actions: ChatActions) {
             Button(
                 onClick = ::submit,
                 enabled = state.input.isNotBlank() && state.pendingTool == null,
-                modifier = Modifier.testTag("conversation.composer.send"),
-            ) { Text(if (zh) "发送" else "Send") }
+                shape = CircleShape,
+                colors = if (aqua) ButtonDefaults.buttonColors(
+                    containerColor = Color(0xFF66CCFF),
+                    contentColor = Color(0xFF003B52),
+                ) else ButtonDefaults.buttonColors(),
+                contentPadding = PaddingValues(0.dp),
+                modifier = Modifier.size(48.dp).testTag("conversation.composer.send"),
+            ) { Icon(Icons.AutoMirrored.Filled.Send, contentDescription = if (zh) "发送" else "Send") }
         }
     }
 }

@@ -71,7 +71,9 @@ class DesignSystemUiTest {
             mode.value = AppThemeMode.CC66FF
         }
         compose.waitForIdle()
-        assertEquals(androidx.compose.ui.graphics.Color(0xFF66CCFF), easterEggPrimary.value)
+        // Text and outlined controls use a readable blue; the 66ccff brand
+        // fill is reserved for the header, user bubbles and send action.
+        assertEquals(androidx.compose.ui.graphics.Color(0xFF0369A1), easterEggPrimary.value)
     }
 
     @Test

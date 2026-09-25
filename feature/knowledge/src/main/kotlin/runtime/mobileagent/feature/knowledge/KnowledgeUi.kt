@@ -7,6 +7,7 @@ import android.net.Uri
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -39,6 +40,7 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -48,10 +50,12 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import runtime.mobileagent.knowledge.PipelineProgress
 import runtime.mobileagent.knowledge.PipelineReuseSummary
 import runtime.mobileagent.knowledge.PipelinePolicy
@@ -787,18 +791,31 @@ private fun KnowledgeBasePane(
             ) { Text(state.error, color = MaterialTheme.colorScheme.onErrorContainer, modifier = Modifier.padding(14.dp)) }
         }
         else if (state.bases.isEmpty()) Text(if (zh) "暂无知识库。" else "No knowledge bases available.", modifier = Modifier.padding(top = 16.dp))
-        else LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.height(280.dp).padding(top = 12.dp)) {
+        else LazyColumn(verticalArrangement = Arrangement.spacedBy(12.dp), modifier = Modifier.height(340.dp).padding(top = 12.dp)) {
             items(state.bases, key = { it.id }) { base ->
                 Card(
                     colors = CardDefaults.cardColors(
-                        containerColor = if (base.id == state.selectedBaseId) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceContainerLow,
+                        containerColor = MaterialTheme.colorScheme.surface,
                     ),
-                    modifier = Modifier.fillMaxWidth().heightIn(min = 56.dp).clickable { actions.onSelectBase(base.id) },
+                    shape = RoundedCornerShape(20.dp),
+                    border = BorderStroke(1.dp, if (base.id == state.selectedBaseId) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outlineVariant),
+                    modifier = Modifier.fillMaxWidth().heightIn(min = 96.dp).clickable { actions.onSelectBase(base.id) },
                 ) {
-                    Column(Modifier.padding(12.dp)) {
-                        Text(base.name, style = MaterialTheme.typography.titleMedium)
-                        Text(if (zh) "${base.documentCount} 个文档" else "${base.documentCount} documents", style = MaterialTheme.typography.bodySmall)
-                        if (base.status.isNotBlank()) Text(base.status, style = MaterialTheme.typography.labelSmall)
+                    Column(Modifier.padding(horizontal = 18.dp, vertical = 16.dp)) {
+                        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                            Text(base.name, style = MaterialTheme.typography.titleMedium,
+                                fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
+                            if (base.status.isNotBlank()) Text(base.status,
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.primary,
+                                fontWeight = FontWeight.SemiBold)
+                        }
+                        Row(Modifier.padding(top = 10.dp), verticalAlignment = Alignment.Bottom) {
+                            Text(base.documentCount.toString(), fontSize = 19.sp, fontWeight = FontWeight.Bold)
+                            Text(if (zh) " 文档" else " documents", style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.padding(bottom = 2.dp))
+                        }
                     }
                 }
             }
@@ -819,6 +836,37 @@ private fun KnowledgeBasePane(
 private fun KnowledgeContentPane(state: KnowledgeUiState, actions: KnowledgeActions, zh: Boolean, onDelete: (String) -> Unit, onRebuild: () -> Unit, modifier: Modifier) {
     Column(modifier) {
         if (state.status.isNotBlank()) StatusCard(state.status)
+        if (state.waiting.isNotEmpty()) {
+            val scheme = MaterialTheme.colorScheme
+            val dark = scheme.background == Color(0xFF111827)
+            val warningBackground = when {
+                dark -> Color(0xFF45310A)
+                scheme.background == Color(0xFFF2F9FD) -> Color(0xFFFEF3C7)
+                else -> Color(0xFFFEF08A)
+            }
+            val warningInk = when {
+                dark -> Color(0xFFFACA15)
+                scheme.background == Color(0xFFF2F9FD) -> Color(0xFFB45309)
+                else -> Color(0xFFA34808)
+            }
+            Card(
+                colors = CardDefaults.cardColors(containerColor = warningBackground),
+                shape = RoundedCornerShape(16.dp),
+                modifier = Modifier.fillMaxWidth().padding(bottom = 12.dp),
+            ) {
+                Column(Modifier.padding(15.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text(
+                        if (zh) "${state.waiting.size} 项资料等待视觉处理，完成前不会标记就绪。"
+                        else "${state.waiting.size} items await Vision processing and will not be marked ready yet.",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = warningInk,
+                    )
+                    OutlinedButton(onClick = actions.onConfigureVision) {
+                        Text(if (zh) "配置视觉模型" else "Configure Vision model")
+                    }
+                }
+            }
+        }
         // The default surface is exactly one overall progress card per durable batch.  Per-file
         // cards, technical fields and logs only appear behind the user-opened detail section.
         state.batches.forEach { batch -> BatchProgressCard(batch, state.jobs, actions, zh, state.loading) }

@@ -41,6 +41,7 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.FilterChip
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -57,11 +58,13 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import runtime.mobileagent.provider.CapabilityCheck
 import runtime.mobileagent.provider.CapabilityCheckStatus
 import runtime.mobileagent.provider.ProviderConnectionErrorCode
@@ -495,7 +498,7 @@ private fun ProviderListPane(
         } else if (state.providers.isEmpty()) {
             EmptyProviderState(zh)
         } else {
-            LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.height(280.dp).padding(top = 12.dp)) {
+            LazyColumn(modifier = Modifier.height(340.dp).padding(top = 12.dp)) {
                 items(state.providers, key = { it.id }) { provider ->
                     ProviderCard(provider, provider.id == state.selectedProviderId, zh) { actions.onSelectProvider(provider.id) }
                 }
@@ -516,21 +519,43 @@ private fun EmptyProviderState(zh: Boolean) {
 
 @Composable
 private fun ProviderCard(provider: ProviderCardUi, selected: Boolean, zh: Boolean, onClick: () -> Unit) {
-    Card(
-        colors = CardDefaults.cardColors(
-            containerColor = if (selected) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceContainerLow,
-        ),
-        modifier = Modifier.fillMaxWidth().heightIn(min = 56.dp).clickable(onClick = onClick),
-    ) {
-        Column(Modifier.padding(14.dp)) {
-            Row(Modifier.fillMaxWidth()) {
-                Text(provider.name, style = MaterialTheme.typography.titleMedium, modifier = Modifier.weight(1f))
-                if (provider.status.isNotBlank()) FilterChip(selected = provider.status.equals("ready", true), onClick = {}, enabled = false, label = { Text(provider.status) })
+    val statusColor = when {
+        provider.status.equals("ready", true) || provider.status.equals("connected", true) -> MaterialTheme.colorScheme.tertiary
+        provider.status.contains("error", true) || provider.status.contains("fail", true) -> MaterialTheme.colorScheme.error
+        else -> MaterialTheme.colorScheme.onSurfaceVariant
+    }
+    Column(Modifier.fillMaxWidth()) {
+        Column(
+            Modifier.fillMaxWidth().heightIn(min = 96.dp).clickable(onClick = onClick)
+                .testTag("providers.row.${provider.id}")
+                .padding(horizontal = 4.dp, vertical = 14.dp),
+        ) {
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                Text(provider.name, style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
+                if (provider.status.isNotBlank()) {
+                    Text(provider.status, style = MaterialTheme.typography.labelSmall,
+                        fontWeight = FontWeight.SemiBold, color = statusColor)
+                }
             }
-            Text(provider.baseUrl, style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(top = 4.dp))
-            Text(if (zh) "${provider.apiFormat} · ${provider.modelCount} 个模型" else "${provider.apiFormat} · ${provider.modelCount} models", style = MaterialTheme.typography.labelSmall, modifier = Modifier.padding(top = 4.dp))
-            Text(if (provider.secretConfigured) { if (zh) "已配置密钥引用" else "Credential reference configured" } else { if (zh) "未配置密钥引用" else "Credential reference missing" }, style = MaterialTheme.typography.labelSmall, modifier = Modifier.padding(top = 4.dp))
+            Text("${provider.apiFormat} · ${provider.baseUrl}", style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 1, overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.padding(top = 3.dp))
+            Row(Modifier.fillMaxWidth().padding(top = 10.dp), verticalAlignment = Alignment.Bottom) {
+                Text(provider.modelCount.toString(), fontSize = 19.sp, fontWeight = FontWeight.Bold,
+                    color = if (selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface)
+                Text(if (zh) " 个模型" else " models", style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(bottom = 2.dp))
+                Spacer(Modifier.weight(1f))
+                Text(if (provider.secretConfigured) { if (zh) "密钥已配置" else "Key configured" }
+                    else { if (zh) "未配置密钥" else "No key" },
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
         }
+        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
     }
 }
 

@@ -9,7 +9,9 @@
     <application
         android:name=".MobileAgentApp"
         android:allowBackup="false"
+        android:icon="@mipmap/ic_launcher"
         android:label="Agent Runtime"
+        android:roundIcon="@mipmap/ic_launcher"
         android:supportsRtl="true"
         android:theme="@style/Theme.MobileAgentRuntime">
         <!-- Official Shizuku Binder bootstrap. The cross-user permission prevents ordinary apps

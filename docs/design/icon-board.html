@@ -1,0 +1,228 @@
+<!DOCTYPE html>
+<!--
+SPDX-FileCopyrightText: 2026 mobileAgentRuntime contributors
+SPDX-License-Identifier: AGPL-3.0-only
+-->
+<!-- 选定图标概念「沙箱火花」精修板:构造网格、3 个精修变体、自适应分层、遮罩/尺寸/单色验证 -->
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<title>沙箱火花 · 图标精修</title>
+<style>
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{
+    background:#151518;font-family:"Segoe UI","Noto Sans SC","Microsoft YaHei",sans-serif;
+    color:#EDEEF0;min-height:100vh;padding:64px 48px 140px;
+  }
+  .wrap{max-width:1180px;margin:0 auto}
+  .kick{font-family:"JetBrains Mono",Consolas,monospace;font-size:11px;letter-spacing:.24em;color:#8a8f98;text-transform:uppercase}
+  h1{font-size:34px;font-weight:700;letter-spacing:-.02em;margin:10px 0 8px}
+  h1 em{font-style:normal;color:#66CCFF}
+  .lead{font-size:13.5px;color:#a7adb6;max-width:78ch;line-height:1.7}
+  .lead b{color:#EDEEF0}
+
+  .sec{margin-top:56px}
+  .sec h2{font-size:13px;letter-spacing:.18em;text-transform:uppercase;color:#8a8f98;font-weight:600;margin-bottom:20px}
+  .sec h2 code{color:#66CCFF;letter-spacing:.05em}
+
+  /* 构造板 */
+  .construct{display:flex;gap:48px;flex-wrap:wrap;align-items:center;background:#1b1c20;border:1px solid #2a2c31;border-radius:18px;padding:34px}
+  .construct .canvas{position:relative;flex:none}
+  .construct .note{flex:1;min-width:280px;font-size:12.5px;color:#a7adb6;line-height:1.9}
+  .construct .note li{margin-left:18px;margin-bottom:4px}
+  .construct .note code{font-family:"JetBrains Mono",Consolas,monospace;color:#66CCFF;font-size:11px}
+
+  /* 变体卡 */
+  .vars{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:20px}
+  .var{background:#1b1c20;border:1px solid #2a2c31;border-radius:18px;padding:22px}
+  .var.rec{border-color:#66CCFF66}
+  .var .row{display:flex;gap:14px;align-items:flex-end}
+  .var h3{font-size:14.5px;font-weight:700;margin-bottom:5px}
+  .var h3 .tag{font-family:"JetBrains Mono",Consolas,monospace;font-size:9px;font-weight:600;color:#003B52;background:#66CCFF;border-radius:4px;padding:2px 7px;margin-left:8px;vertical-align:2px;letter-spacing:.06em}
+  .var p{font-size:11.5px;color:#9aa0a9;line-height:1.6;margin-top:8px}
+  .icon{border-radius:28%}
+  .icon.circle{border-radius:50%}
+  .icon.rounded{border-radius:18%}
+  .mono-tile{background:#26282d;border-radius:999px;display:grid;place-items:center}
+
+  /* 自适应分层 */
+  .layers{display:flex;gap:36px;flex-wrap:wrap;align-items:flex-end;background:#1b1c20;border:1px solid #2a2c31;border-radius:18px;padding:28px}
+  .layers .cell{display:flex;flex-direction:column;align-items:center;gap:9px}
+  .layers .cell small{font-family:"JetBrains Mono",Consolas,monospace;font-size:9.5px;color:#6a6f78;letter-spacing:.08em}
+  .layer-box{width:120px;height:120px;border-radius:14px;border:1px dashed #3a3f4a;display:grid;place-items:center}
+  .checker{background:repeating-conic-gradient(#24262b 0% 25%, #1b1c20 0% 50%) 0 0/20px 20px}
+
+  /* 尺寸验证 */
+  .sizerow{display:flex;gap:26px;align-items:flex-end;flex-wrap:wrap}
+  .sizerow .cell{display:flex;flex-direction:column;align-items:center;gap:7px}
+  .sizerow small{font-family:"JetBrains Mono",Consolas,monospace;font-size:9px;color:#6a6f78}
+
+  .dock{display:flex;gap:24px;flex-wrap:wrap}
+  .dockctx{flex:1;min-width:300px;border-radius:20px;padding:24px;display:flex;align-items:center;gap:24px}
+  .dockctx.light{background:#eef1f4}
+  .dockctx.dark{background:#0b0c0e;border:1px solid #26282d}
+  .dockctx .app{display:flex;flex-direction:column;align-items:center;gap:7px}
+  .dockctx .app span{font-size:10.5px}
+  .dockctx.light .app span{color:#3a3d42}
+  .dockctx.dark .app span{color:#c3c6cc}
+
+  .export{margin-top:56px;background:#1b1c20;border:1px solid #2a2c31;border-radius:18px;padding:24px 28px;font-family:"JetBrains Mono",Consolas,monospace;font-size:11px;color:#9aa0a9;line-height:2}
+  .export b{color:#EDEEF0}
+  .export code{color:#66CCFF}
+  .pal{display:flex;gap:6px}
+  .pal i{width:16px;height:16px;border-radius:5px;border:1px solid rgba(255,255,255,.15)}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<!-- ===== 符号库 ===== -->
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <defs>
+    <!-- S1 框线 + 实心四芒星 -->
+    <g id="sb-a">
+      <rect x="27" y="27" width="54" height="54" rx="15" fill="none" stroke="#003B52" stroke-width="4.6"/>
+      <path d="M54 39l4.6 10.4L69 54l-10.4 4.6L54 69l-4.6-10.4L39 54l10.4-4.6z" fill="#003B52"/>
+    </g>
+    <!-- S2 框线 + 星 + 轨道卫星点(呼应 agent 编排循环) -->
+    <g id="sb-b">
+      <rect x="27" y="27" width="54" height="54" rx="15" fill="none" stroke="#003B52" stroke-width="4.6"/>
+      <path d="M54 41l4.2 8.8L67 54l-8.8 4.2L54 67l-4.2-8.8L41 54l8.8-4.2z" fill="#003B52"/>
+      <circle cx="81" cy="27" r="6" fill="#003B52"/>
+      <circle cx="81" cy="27" r="3.4" fill="#66CCFF"/>
+    </g>
+    <!-- S3 负形:实心深色舱体,星为底色透出 -->
+    <g id="sb-c">
+      <rect x="25" y="25" width="58" height="58" rx="17" fill="#003B52"/>
+      <path d="M54 38l5 11 11 5-11 5-5 11-5-11-11-5 11-5z" fill="#66CCFF"/>
+    </g>
+    <!-- 单色(themed icon)统一用 S1 轮廓 -->
+    <g id="sb-mono" fill="none" stroke="currentColor">
+      <rect x="27" y="27" width="54" height="54" rx="15" stroke-width="4.6"/>
+      <path d="M54 39l4.6 10.4L69 54l-10.4 4.6L54 69l-4.6-10.4L39 54l10.4-4.6z" fill="currentColor" stroke="none"/>
+    </g>
+  </defs>
+</svg>
+
+<header>
+  <div class="kick">Icon · Selected Concept</div>
+  <h1>沙箱火花 <em>Sandbox Spark</em></h1>
+  <p class="lead">隔离框包裹执行火花 —— <b>skill 只在受控边界内运行</b>,正是本产品的核心承诺。底色 #66CCFF 呼应彩蛋主题;单色轮廓版保证 Android themed icon 成立。<b>S1 框线火花已定稿为正式设计稿</b>,母版见 <code style="color:#66CCFF;font-family:Consolas,monospace">docs/design/source/ic-launcher-*.svg</code>。</p>
+</header>
+
+<!-- ===== 构造 ===== -->
+<section class="sec">
+  <h2>Construction · 108 画布与安全区</h2>
+  <div class="construct">
+    <div class="canvas">
+      <svg width="264" height="264" viewBox="0 0 108 108">
+        <rect width="108" height="108" rx="30" fill="#66CCFF"/>
+        <!-- 66% 安全区圆 + 关键线 -->
+        <circle cx="54" cy="54" r="36" fill="none" stroke="#003B52" stroke-opacity=".35" stroke-dasharray="3 3"/>
+        <rect x="27" y="27" width="54" height="54" fill="none" stroke="#003B52" stroke-opacity=".18"/>
+        <line x1="54" y1="8" x2="54" y2="100" stroke="#003B52" stroke-opacity=".15"/>
+        <line x1="8" y1="54" x2="100" y2="54" stroke="#003B52" stroke-opacity=".15"/>
+        <use href="#sb-a"/>
+      </svg>
+    </div>
+    <div class="note">
+      <ul>
+        <li>画布 <code>108×108</code>;前景约束在中央 <code>Ø72(66%)</code> 安全区内,四角遮罩裁切不碰形</li>
+        <li>框线 <code>stroke 4.6</code>、内框 <code>54×54 r15</code>;星芒 <code>30×30</code> 居中,与框留 <code>≈9</code> 呼吸缝</li>
+        <li>双色即可:底色 <code>#66CCFF</code>,线稿 <code>#003B52</code>;不依赖渐变与阴影</li>
+        <li>28px 缩略下星形仍可辨(右侧尺寸验证)</li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<!-- ===== 精修变体 ===== -->
+<section class="sec">
+  <h2>Refinements · 三个精修方向(S1 已定稿)</h2>
+  <div class="vars">
+    <div class="var rec">
+      <div class="row">
+        <svg class="icon squircle" width="96" height="96" viewBox="0 0 108 108" style="border-radius:34%"><rect width="108" height="108" fill="#66CCFF"/><use href="#sb-a"/></svg>
+        <svg class="icon circle" width="64" height="64" viewBox="0 0 108 108"><rect width="108" height="108" fill="#66CCFF"/><use href="#sb-a"/></svg>
+        <svg width="34" height="34" viewBox="0 0 108 108"><rect width="108" height="108" rx="30" fill="#66CCFF"/><use href="#sb-a"/></svg>
+      </div>
+      <h3>S1 · 框线火花<span class="tag">定稿</span></h3>
+      <p>最干净的读法:框 = 沙箱,星 = 执行。28px 仍清晰,单色 themed 完全一致。</p>
+    </div>
+    <div class="var">
+      <div class="row">
+        <svg class="icon squircle" width="96" height="96" viewBox="0 0 108 108" style="border-radius:34%"><rect width="108" height="108" fill="#66CCFF"/><use href="#sb-b"/></svg>
+        <svg class="icon circle" width="64" height="64" viewBox="0 0 108 108"><rect width="108" height="108" fill="#66CCFF"/><use href="#sb-b"/></svg>
+        <svg width="34" height="34" viewBox="0 0 108 108"><rect width="108" height="108" rx="30" fill="#66CCFF"/><use href="#sb-b"/></svg>
+      </div>
+      <h3>S2 · 轨道卫星<span class="tag" style="background:#3a3f4a;color:#9aa0a9">未采用</span></h3>
+      <p>右上角卫星点带出「agent 循环调度」隐喻;代价是小尺寸下卫星点接近噪点。</p>
+    </div>
+    <div class="var">
+      <div class="row">
+        <svg class="icon squircle" width="96" height="96" viewBox="0 0 108 108" style="border-radius:34%"><rect width="108" height="108" fill="#66CCFF"/><use href="#sb-c"/></svg>
+        <svg class="icon circle" width="64" height="64" viewBox="0 0 108 108"><rect width="108" height="108" fill="#66CCFF"/><use href="#sb-c"/></svg>
+        <svg width="34" height="34" viewBox="0 0 108 108"><rect width="108" height="108" rx="30" fill="#66CCFF"/><use href="#sb-c"/></svg>
+      </div>
+      <h3>S3 · 负形舱体<span class="tag" style="background:#3a3f4a;color:#9aa0a9">未采用</span></h3>
+      <p>实心深色舱体、星形透出底色,体量最重;深色壁纸上对比强,但「框」的语义弱于 S1。</p>
+    </div>
+  </div>
+</section>
+
+<!-- ===== 自适应分层 ===== -->
+<section class="sec">
+  <h2>Adaptive Layers · 前景/背景分层</h2>
+  <div class="layers">
+    <div class="cell"><div class="layer-box" style="background:#66CCFF;border-radius:34px"></div><small>background<br/>#66CCFF</small></div>
+    <div class="cell"><div class="layer-box checker"><svg width="84" height="84" viewBox="0 0 108 108"><use href="#sb-a"/></svg></div><small>foreground<br/>108 canvas</small></div>
+    <div class="cell"><svg class="icon squircle" width="120" height="120" viewBox="0 0 108 108" style="border-radius:34%"><rect width="108" height="108" fill="#66CCFF"/><use href="#sb-a"/></svg><small>composed<br/>squircle</small></div>
+    <div class="cell"><svg class="icon circle" width="120" height="120" viewBox="0 0 108 108"><rect width="108" height="108" fill="#66CCFF"/><use href="#sb-a"/></svg><small>composed<br/>circle</small></div>
+    <div class="cell"><svg class="icon rounded" width="120" height="120" viewBox="0 0 108 108"><rect width="108" height="108" fill="#66CCFF"/><use href="#sb-a"/></svg><small>composed<br/>rounded</small></div>
+  </div>
+</section>
+
+<!-- ===== 尺寸与单色 ===== -->
+<section class="sec">
+  <h2>Scale & Themed · 尺寸与单色验证</h2>
+  <div class="layers" style="align-items:center">
+    <div class="sizerow">
+      <div class="cell"><svg class="icon squircle" width="120" height="120" viewBox="0 0 108 108" style="border-radius:34%"><rect width="108" height="108" fill="#66CCFF"/><use href="#sb-a"/></svg><small>192</small></div>
+      <div class="cell"><svg class="icon squircle" width="72" height="72" viewBox="0 0 108 108" style="border-radius:34%"><rect width="108" height="108" fill="#66CCFF"/><use href="#sb-a"/></svg><small>96</small></div>
+      <div class="cell"><svg class="icon squircle" width="44" height="44" viewBox="0 0 108 108" style="border-radius:34%"><rect width="108" height="108" fill="#66CCFF"/><use href="#sb-a"/></svg><small>48</small></div>
+      <div class="cell"><svg class="icon squircle" width="28" height="28" viewBox="0 0 108 108" style="border-radius:34%"><rect width="108" height="108" fill="#66CCFF"/><use href="#sb-a"/></svg><small>28</small></div>
+      <div class="cell"><div class="mono-tile" style="width:56px;height:56px"><svg width="36" height="36" viewBox="0 0 108 108" color="#e8eaee"><use href="#sb-mono"/></svg></div><small>themed<br/>mono</small></div>
+      <div class="cell"><div class="mono-tile" style="width:44px;height:44px;background:#C7E9FA"><svg width="28" height="28" viewBox="0 0 108 108" color="#003B52"><use href="#sb-mono"/></svg></div><small>themed<br/>aqua</small></div>
+    </div>
+  </div>
+</section>
+
+<!-- ===== 桌面语境 ===== -->
+<section class="sec">
+  <h2>Launcher Context</h2>
+  <div class="dock">
+    <div class="dockctx light">
+      <div class="app"><svg class="icon squircle" width="56" height="56" viewBox="0 0 108 108" style="border-radius:34%"><rect width="108" height="108" fill="#66CCFF"/><use href="#sb-a"/></svg><span>AgentRuntime</span></div>
+      <div class="app"><svg class="icon squircle" width="56" height="56" viewBox="0 0 108 108" style="border-radius:34%"><rect width="108" height="108" fill="#66CCFF"/><use href="#sb-b"/></svg><span>AgentRuntime</span></div>
+      <div class="app"><svg class="icon squircle" width="56" height="56" viewBox="0 0 108 108" style="border-radius:34%"><rect width="108" height="108" fill="#66CCFF"/><use href="#sb-c"/></svg><span>AgentRuntime</span></div>
+    </div>
+    <div class="dockctx dark">
+      <div class="app"><svg class="icon squircle" width="56" height="56" viewBox="0 0 108 108" style="border-radius:34%"><rect width="108" height="108" fill="#003B52"/><rect x="27" y="27" width="54" height="54" rx="15" fill="none" stroke="#66CCFF" stroke-width="4.6"/><path d="M54 39l4.6 10.4L69 54l-10.4 4.6L54 69l-4.6-10.4L39 54l10.4-4.6z" fill="#66CCFF"/></svg><span>深色底</span></div>
+      <div class="app"><div class="mono-tile" style="width:56px;height:56px;background:#2a2c31"><svg width="38" height="38" viewBox="0 0 108 108" color="#dfe2e7"><use href="#sb-mono"/></svg></div><span>themed</span></div>
+    </div>
+  </div>
+</section>
+
+<!-- ===== 导出规格 ===== -->
+<div class="export">
+  <b>落地规格(S1 定稿,母版已产出)</b><br/>
+  母版 → <code>docs/design/source/ic-launcher{,-foreground,-background,-monochrome}.svg</code><br/>
+  res/mipmap-anydpi-v26/ic_launcher.xml → <code>&lt;adaptive-icon&gt;</code> 引用<br/>
+  ic_launcher_background → <code>#66CCFF</code>(color 或矢量层)&nbsp;·&nbsp;ic_launcher_foreground → 前景母版转 VectorDrawable,形约束在 Ø72 安全区<br/>
+  ic_launcher_monochrome → 同前景轮廓单色版(S1 与 mono 同形,零额外工作)<br/>
+  palette&nbsp;&nbsp;<span class="pal" style="display:inline-flex;vertical-align:-4px"><i style="background:#66CCFF"></i><i style="background:#003B52"></i></span>&nbsp;&nbsp;#66CCFF / #003B52
+</div>
+
+</div>
+</body>
+</html>

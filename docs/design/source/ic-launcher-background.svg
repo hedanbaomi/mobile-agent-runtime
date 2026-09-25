@@ -1,0 +1,8 @@
+<!--
+SPDX-FileCopyrightText: 2026 mobileAgentRuntime contributors
+SPDX-License-Identifier: AGPL-3.0-only
+-->
+<!-- adaptive-icon 背景层:纯色 #66CCFF(亦可用 res color 直接引用) -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 108 108">
+  <rect width="108" height="108" fill="#66CCFF"/>
+</svg>

@@ -3,7 +3,7 @@
 
 # 项目交接
 
-最后更新：2026-09-26T22:29+08:00（Asia/Taipei）。本轮工作树：C:/Users/32735/.codex/worktrees/skill-uninstall-announcement-layout/mobileAgentRuntime。
+最后更新：2026-09-26T22:34+08:00（Asia/Taipei）。本轮工作树：C:/Users/32735/.codex/worktrees/skill-uninstall-announcement-layout/mobileAgentRuntime。
 
 ## 2026-09-26 设备验收报告修复（当前）
 
@@ -12,7 +12,8 @@
 - 当前验证：最新源码的 `licenseGuard licenseGuardReverse check verifyCiPins verifyDependencyLock verifyDependencyVerification` 严格离线全仓门禁退出 0，`python -m reuse lint` 775/775，工作流 2/2，`git diff --check` 退出 0。API 35 `mar_api35_matrix` 模拟器定向 `connectedDebugAndroidTest` 6/6，含流式取消、只读授权、shell 超时与公告 320dp/大字体；最新源码追加 `TransferArchiveDeviceTest` 1/1，证实 Android 端 ZIP 导入事务可用。导入保护 `TransferRepositoryIsolationTest` 6/6；知识库失败任务、批次恢复和手动重建的定向回归通过。无真机、旧版备份原件及真实 Provider 复测。
 - Z05 阻断：报告称旧版备份导入后无关 Agent「验收A」历史物理消失；当前 `TransferRepository` 无删除该历史的路径，合成旧 JSON/ZIP 导入保留无关快照、会话与消息，异常副作用触发器会在事务内检测并回滚。用户证据 ZIP 只有当前 review 包导出的 3 个有效备份与 1 个失败的部分 ZIP，不含所述 c2eedf6 旧备份原件；用户已确认原件无法取得。因此原设备现象与具体原因尚未复现，不能称设备验收 PASS，也不能据此合并。设置页增加显式结果提示，但需新包重测导入与无关历史的前后状态。
 - DSH：按用户指示用 Computer Use 在系统文件夹选择器中选择准确 worktree 后即退出；DeepSeek V4.1 Flash 验证 Git 根/分支一致。其 Z05 只读调查在模型多次重试且长时间未给结论后已停止；不把它当成独立复核通过。
-- 文档与 Git：`docs/IMPLEMENTATION_PLAN.md`、`docs/ACCEPTANCE.md`、`docs/SKILLS_AND_SECURITY.md` 与 [ADR-0013](docs/adr/0013-imported-history-and-index-recovery.md) 已同步；上一节 Skill 卸载专题与 ADR-0012 同在提交 `eadd8f7d289996bdc3b66ddfabbeb69e64fca5c9`。提交后隔离工作树曾核验清洁，根工作区 WIP 未动；远端 main 核对为 `8d97dc0`。独立只读安全审查最初结论 `NEEDS AMEND` 的两处确定缺口已修正，相关回归与全仓门禁通过；未再次申请独立复核，不冒称最终审查 `PASS`。下一步推送并创建标明 Z05 未闭环的草稿 PR。Z05 安全闭环前不得宣称全部修复或普通合并。
+- 文档与 Git：`docs/IMPLEMENTATION_PLAN.md`、`docs/ACCEPTANCE.md`、`docs/SKILLS_AND_SECURITY.md` 与 [ADR-0013](docs/adr/0013-imported-history-and-index-recovery.md) 已同步；上一节 Skill 卸载专题与 ADR-0012 同在提交 `eadd8f7d289996bdc3b66ddfabbeb69e64fca5c9`，状态交接提交 `17b09425473060170e1b8d07db54e8cc9a2cab14`。两个提交已推送 `origin/codex/skill-uninstall-announcement-layout`，草稿 [PR #28](https://github.com/hedanbaomi/mobile-agent-runtime/pull/28) 已附 Z05 未闭环说明；远端 main 核对为 `8d97dc0`，PR CI 于 22:34+08:00 仍运行。根工作区 WIP 未动。独立只读安全审查最初结论 `NEEDS AMEND` 的两处确定缺口已修正，相关回归与全仓门禁通过；未再次申请独立复核，不冒称最终审查 `PASS`。Z05 安全闭环前不得宣称全部修复或普通合并。
+- 清洁 review 包：从 `17b0942` 且 `git status` 清洁的工作树执行 `:app-android:assembleReview` 严格离线依赖校验退出 0；包及来源清单在 `.private/manual-test/20260926-review-17b0942-clean/`，APK SHA-256 `54b45789d61b4422cf9c8b84110791498c92189ad89821d8348bce03b3d4c3f6`、176379063 bytes、`runtime.mobileagent` 0.1.0 review、minSdk 26/targetSdk 35，Manifest 未设置 `debuggable`，使用 Android Debug 证书签名而非正式签名。自启 API 35 模拟器已关闭。此包供 Z05 替代备份/无关历史前后核对、Z04 真实 Provider 与其他设备缺陷重测；原 c2eedf6 备份不可取得，不能据包构建完成宣称验收通过。
 
 ## 2026-09-26 技能卸载与公告按钮布局（同分支先前工作）
 

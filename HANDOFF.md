@@ -3,7 +3,7 @@
 
 # 项目交接
 
-最后更新：2026-09-26T22:27+08:00（Asia/Taipei）。本轮工作树：C:/Users/32735/.codex/worktrees/skill-uninstall-announcement-layout/mobileAgentRuntime。
+最后更新：2026-09-26T22:29+08:00（Asia/Taipei）。本轮工作树：C:/Users/32735/.codex/worktrees/skill-uninstall-announcement-layout/mobileAgentRuntime。
 
 ## 2026-09-26 设备验收报告修复（当前）
 
@@ -12,7 +12,7 @@
 - 当前验证：最新源码的 `licenseGuard licenseGuardReverse check verifyCiPins verifyDependencyLock verifyDependencyVerification` 严格离线全仓门禁退出 0，`python -m reuse lint` 775/775，工作流 2/2，`git diff --check` 退出 0。API 35 `mar_api35_matrix` 模拟器定向 `connectedDebugAndroidTest` 6/6，含流式取消、只读授权、shell 超时与公告 320dp/大字体；最新源码追加 `TransferArchiveDeviceTest` 1/1，证实 Android 端 ZIP 导入事务可用。导入保护 `TransferRepositoryIsolationTest` 6/6；知识库失败任务、批次恢复和手动重建的定向回归通过。无真机、旧版备份原件及真实 Provider 复测。
 - Z05 阻断：报告称旧版备份导入后无关 Agent「验收A」历史物理消失；当前 `TransferRepository` 无删除该历史的路径，合成旧 JSON/ZIP 导入保留无关快照、会话与消息，异常副作用触发器会在事务内检测并回滚。用户证据 ZIP 只有当前 review 包导出的 3 个有效备份与 1 个失败的部分 ZIP，不含所述 c2eedf6 旧备份原件；用户已确认原件无法取得。因此原设备现象与具体原因尚未复现，不能称设备验收 PASS，也不能据此合并。设置页增加显式结果提示，但需新包重测导入与无关历史的前后状态。
 - DSH：按用户指示用 Computer Use 在系统文件夹选择器中选择准确 worktree 后即退出；DeepSeek V4.1 Flash 验证 Git 根/分支一致。其 Z05 只读调查在模型多次重试且长时间未给结论后已停止；不把它当成独立复核通过。
-- 文档：`docs/IMPLEMENTATION_PLAN.md`、`docs/ACCEPTANCE.md`、`docs/SKILLS_AND_SECURITY.md` 与 [ADR-0013](docs/adr/0013-imported-history-and-index-recovery.md) 已同步；上一节 Skill 卸载专题与 ADR-0012 保留。远端 main 核对为 `8d97dc0`。独立只读安全审查最初结论 `NEEDS AMEND` 的两处确定缺口已修正，且相关回归与全仓门禁通过；未再次申请独立复核，不冒称最终审查 `PASS`。下一步提交本工作树已授权的未提交工作。Z05 安全闭环前不得宣称全部修复或普通合并。当前尚未提交、推送或创建 PR。
+- 文档与 Git：`docs/IMPLEMENTATION_PLAN.md`、`docs/ACCEPTANCE.md`、`docs/SKILLS_AND_SECURITY.md` 与 [ADR-0013](docs/adr/0013-imported-history-and-index-recovery.md) 已同步；上一节 Skill 卸载专题与 ADR-0012 同在提交 `eadd8f7d289996bdc3b66ddfabbeb69e64fca5c9`。提交后隔离工作树曾核验清洁，根工作区 WIP 未动；远端 main 核对为 `8d97dc0`。独立只读安全审查最初结论 `NEEDS AMEND` 的两处确定缺口已修正，相关回归与全仓门禁通过；未再次申请独立复核，不冒称最终审查 `PASS`。下一步推送并创建标明 Z05 未闭环的草稿 PR。Z05 安全闭环前不得宣称全部修复或普通合并。
 
 ## 2026-09-26 技能卸载与公告按钮布局（同分支先前工作）
 
@@ -20,7 +20,7 @@
 - 实现：Skill 详情可请求并确认卸载。事务内解除 Agent 当前绑定、撤销现有授权和能力、使待用审批过期、删除活跃安装；保留会话/审计/记忆，历史快照需要导出时保留包字节及原安装身份；其他场景清除未使用的包字节。重新导入须获新安装身份和新授权。公告页 4 个操作等宽；中文“全部标为已读”按实测字宽缩小字号，单行居中完整显示。相关契约与验收见 `docs/REQUIREMENTS.md`、`docs/SKILLS_AND_SECURITY.md`、`docs/UI_DESIGN.md`、`docs/IMPLEMENTATION_PLAN.md`、`docs/ACCEPTANCE.md`，取舍见 `docs/adr/0012-skill-uninstall-history-boundary.md`。
 - 验证：命令范围 `:data:sqlite:test :app-android:connectedDebugAndroidTest -Pandroid.testInstrumentationRunnerArguments.class=runtime.mobileagent.AnnouncementsLayoutTest`，以 `ANDROID_HOME=/c/Users/32735/AppData/Local/Android/Sdk`、`--offline --no-daemon --dependency-verification=strict --quiet` 运行；SQLite `SkillRepositoryTest` 23/23，最终 API 31 模拟器公告布局 3/3（320dp、360dp、320dp 且字体比例 1.3），失败/错误 0。`:app-android:compileDebugKotlin` 单独通过。`licenseGuard` 退出码 0；`python -m reuse lint` 771/771；`git diff --check` 退出码 0。实机视觉、真机 Skill 卸载/重装尚未验收，不把模拟器结果当真机结果。
 - 独立只读复核：原生 `gpt-6-luna/xhigh` 核对了本工作树 Git 根与分支，审查当前 diff，指出原 12sp 公告文案在 320dp 下会裁切；主 Agent 增加实际文字布局溢出断言并修正字号/内容宽度后，上述 3 项模拟器测试通过。卸载事务、授权撤销、历史导出和重装身份隔离未发现其他确定问题。DSH 的 DeepSeek V4.1 Flash 模型可见，但新会话的独立工作树路径无法核实，故未向其派发。
-- Git 与下一步：本轮代码、测试、文档在上述独立分支内未提交；未推送、未建 PR、未构建交付 APK。根工作区 WIP 受保护。`agent.md` 第 4 节要求无明确请求时不提交/推送；后续若用户要求提交/推送，先核对当前 HEAD 与 WIP，再按许可证与 CI 门禁执行。当前无进行中审查或模拟器任务。
+- Git 与下一步：本节代码、测试和文档已随本轮修复提交 `eadd8f7`；此前“未提交”状态仅为提交前历史。根工作区 WIP 受保护；本次用户已明确授权提交，并要求修复完成后推送合并，Z05 原始设备缺陷仍待验，合并继续受阻。
 
 ## 2026-09-25 用户诊断八项与工作区授权回归修复（历史记录）
 

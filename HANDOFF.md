@@ -3,16 +3,23 @@
 
 # 项目交接
 
-最后更新：2026-09-26T22:34+08:00（Asia/Taipei）。本轮工作树：C:/Users/32735/.codex/worktrees/skill-uninstall-announcement-layout/mobileAgentRuntime。
+最后更新：2026-09-26T23:55+08:00（Asia/Taipei）。本提交在临时 worktree `E:/mobileAgentRuntime/.private/handoff-fix-20260926` 完成，推送后即移除。
 
-## 2026-09-26 设备验收报告修复（当前）
+## 2026-09-26 PR #28 合并、Z05 降级 P2 与新评审包（当前）
+
+- **合并**：按用户明确指令将 draft [PR #28](https://github.com/hedanbaomi/mobile-agent-runtime/pull/28)（head `codex/skill-uninstall-announcement-layout` @ `1e9c81f8`）以 `--no-ff` 合并为 **`3913e231939a84fe8be6d23c728e173a36f6df19`** 并推送；`8d97dc0` 是其 merge-base，合并树与 CI 全绿的 head 树完全一致（`e37ebdb3`）。GitHub 自动标记 PR MERGED。`git ls-remote origin main` 与本地 main 均为 `3913e231`；其 ci run `36251129942` 7/7 job success、license-guard run `36251129936` success。
+- **Z05 定级**：真机曾报告 c2eedf6 时代备份导入删除无关 Agent 历史。用户确认：修复后新版使用当时的旧备份未导致无关 Agent 历史被删除，且旧版本未做复现测试——用户将严重度定为 **P2** 跟踪（未证实的历史报告），不再是合并或验收阻断项；复核路径保留在真机验收流程 PR-09，若复现删除再升级。
+- **评审包**：`8d97dc0` 包已落后 main 一个合并，已在干净 detached worktree 对 `3913e23` 重跑 `reviewGate`（BUILD SUCCESSFUL，构建前后工作树干净）。交付 `.private/manual-test/20260926-review-3913e23-clean/`（APK SHA-256 `b62f175df7c42e894eeadb9a75daf43e07e3cdae6b8d7d05bc047d68d5e4968d`，176,379,063 B，v2 签名同一 Debug 证书，22/22 原生库 16 KB 对齐，notices PASS，provenance `gitDirty=false`、SHA 绑定）。真机验收流程文档更新为 `docs/plans/device-acceptance-3913e23.md`（**仅本地，未入仓**），新增 6.3 节 PR-01–PR-09 覆盖本 PR 改动面。
+- **范围**：本提交仅改本交接文件，无代码变更；真机验收仍未执行；根工作区 `E:/mobileAgentRuntime` 的本地 HANDOFF 与计划文件 WIP 不受影响。
+
+## 2026-09-26 设备验收报告修复（历史记录，同日已按用户指令合并为 `3913e23`，Z05 已由用户定级 P2，见上节当前条目）
 
 - 来源：用户提供 `device-acceptance-8d97dc0.md` 与同名 `-0926.zip`，针对 review APK `8d97dc0` 的 Z04/Z05、E02、H04/H10、I04 等发现。证据包仅本地分析，未入仓；当前工作树仍为 `codex/skill-uninstall-announcement-layout`，基线 main `8d97dc0`，保留上一节 Skill 卸载与公告布局未提交工作。根工作区 `E:/mobileAgentRuntime` 的 `HANDOFF.md` 与计划文件 WIP 未改动。
 - 实现候选：导入的冻结会话只在运行时从同 ID/同格式/同地址本机 Provider 取 secret 引用；知识库修复核对当前活动 chunks 与 READY generation 成员，失败/取消的导入任务不能使手动整库重建假报完整，但正常单文档导入仍可发布其他已就绪内容；导入事务逐项核对已有 Agent 的快照、会话、消息、消息部分、Run、工具记录和审计 ID，减少或同数量替换均回滚；单会话 ZIP 条目从 16 MiB 元数据限制分离至 32 MiB 内容限制，设置页同步显示实际上限。流式取消保留部分正文与终态标记，shell 等待后端明确超时，特权目录浏览器支持 continuation，只读预设撤既有整目录写权限且新附加默认只读，导入有可见进度与成功/失败提示。G04 已派发 Python 的副作用不可证实，仍保持 UNKNOWN 且不自动重放。
 - 当前验证：最新源码的 `licenseGuard licenseGuardReverse check verifyCiPins verifyDependencyLock verifyDependencyVerification` 严格离线全仓门禁退出 0，`python -m reuse lint` 775/775，工作流 2/2，`git diff --check` 退出 0。API 35 `mar_api35_matrix` 模拟器定向 `connectedDebugAndroidTest` 6/6，含流式取消、只读授权、shell 超时与公告 320dp/大字体；最新源码追加 `TransferArchiveDeviceTest` 1/1，证实 Android 端 ZIP 导入事务可用。导入保护 `TransferRepositoryIsolationTest` 6/6；知识库失败任务、批次恢复和手动重建的定向回归通过。无真机、旧版备份原件及真实 Provider 复测。
-- Z05 阻断：报告称旧版备份导入后无关 Agent「验收A」历史物理消失；当前 `TransferRepository` 无删除该历史的路径，合成旧 JSON/ZIP 导入保留无关快照、会话与消息，异常副作用触发器会在事务内检测并回滚。用户证据 ZIP 只有当前 review 包导出的 3 个有效备份与 1 个失败的部分 ZIP，不含所述 c2eedf6 旧备份原件；用户已确认原件无法取得。因此原设备现象与具体原因尚未复现，不能称设备验收 PASS，也不能据此合并。设置页增加显式结果提示，但需新包重测导入与无关历史的前后状态。
+- Z05 阻断：报告称旧版备份导入后无关 Agent「验收A」历史物理消失；当前 `TransferRepository` 无删除该历史的路径，合成旧 JSON/ZIP 导入保留无关快照、会话与消息，异常副作用触发器会在事务内检测并回滚。用户证据 ZIP 只有当前 review 包导出的 3 个有效备份与 1 个失败的部分 ZIP，不含所述 c2eedf6 旧备份原件；用户已确认原件无法取得。因此原设备现象与具体原因尚未复现，不能称设备验收 PASS，也不能据此合并。（2026-09-26 后续：PR 已按用户明确指令合并；用户确认新版用当时旧备份未复现删除、旧版未做复现测试，问题定级 P2 跟踪，不再是阻断项。）设置页增加显式结果提示，但需新包重测导入与无关历史的前后状态。
 - DSH：按用户指示用 Computer Use 在系统文件夹选择器中选择准确 worktree 后即退出；DeepSeek V4.1 Flash 验证 Git 根/分支一致。其 Z05 只读调查在模型多次重试且长时间未给结论后已停止；不把它当成独立复核通过。
-- 文档与 Git：`docs/IMPLEMENTATION_PLAN.md`、`docs/ACCEPTANCE.md`、`docs/SKILLS_AND_SECURITY.md` 与 [ADR-0013](docs/adr/0013-imported-history-and-index-recovery.md) 已同步；上一节 Skill 卸载专题与 ADR-0012 同在提交 `eadd8f7d289996bdc3b66ddfabbeb69e64fca5c9`，状态交接提交 `17b09425473060170e1b8d07db54e8cc9a2cab14`。两个提交已推送 `origin/codex/skill-uninstall-announcement-layout`，草稿 [PR #28](https://github.com/hedanbaomi/mobile-agent-runtime/pull/28) 已附 Z05 未闭环说明；远端 main 核对为 `8d97dc0`，PR CI 于 22:34+08:00 仍运行。根工作区 WIP 未动。独立只读安全审查最初结论 `NEEDS AMEND` 的两处确定缺口已修正，相关回归与全仓门禁通过；未再次申请独立复核，不冒称最终审查 `PASS`。Z05 安全闭环前不得宣称全部修复或普通合并。
+- 文档与 Git：`docs/IMPLEMENTATION_PLAN.md`、`docs/ACCEPTANCE.md`、`docs/SKILLS_AND_SECURITY.md` 与 [ADR-0013](docs/adr/0013-imported-history-and-index-recovery.md) 已同步；上一节 Skill 卸载专题与 ADR-0012 同在提交 `eadd8f7d289996bdc3b66ddfabbeb69e64fca5c9`，状态交接提交 `17b09425473060170e1b8d07db54e8cc9a2cab14`。两个提交已推送 `origin/codex/skill-uninstall-announcement-layout`，草稿 [PR #28](https://github.com/hedanbaomi/mobile-agent-runtime/pull/28) 已附 Z05 未闭环说明；远端 main 核对为 `8d97dc0`，PR CI 于 22:34+08:00 仍运行。根工作区 WIP 未动。独立只读安全审查最初结论 `NEEDS AMEND` 的两处确定缺口已修正，相关回归与全仓门禁通过；未再次申请独立复核，不冒称最终审查 `PASS`。Z05 安全闭环前不得宣称全部修复或普通合并。（已被 2026-09-26 用户指令取代：已合并，Z05 降级 P2。）
 - 清洁 review 包：从 `17b0942` 且 `git status` 清洁的工作树执行 `:app-android:assembleReview` 严格离线依赖校验退出 0；包及来源清单在 `.private/manual-test/20260926-review-17b0942-clean/`，APK SHA-256 `54b45789d61b4422cf9c8b84110791498c92189ad89821d8348bce03b3d4c3f6`、176379063 bytes、`runtime.mobileagent` 0.1.0 review、minSdk 26/targetSdk 35，Manifest 未设置 `debuggable`，使用 Android Debug 证书签名而非正式签名。自启 API 35 模拟器已关闭。此包供 Z05 替代备份/无关历史前后核对、Z04 真实 Provider 与其他设备缺陷重测；原 c2eedf6 备份不可取得，不能据包构建完成宣称验收通过。
 
 ## 2026-09-26 技能卸载与公告按钮布局（同分支先前工作）
@@ -21,7 +28,7 @@
 - 实现：Skill 详情可请求并确认卸载。事务内解除 Agent 当前绑定、撤销现有授权和能力、使待用审批过期、删除活跃安装；保留会话/审计/记忆，历史快照需要导出时保留包字节及原安装身份；其他场景清除未使用的包字节。重新导入须获新安装身份和新授权。公告页 4 个操作等宽；中文“全部标为已读”按实测字宽缩小字号，单行居中完整显示。相关契约与验收见 `docs/REQUIREMENTS.md`、`docs/SKILLS_AND_SECURITY.md`、`docs/UI_DESIGN.md`、`docs/IMPLEMENTATION_PLAN.md`、`docs/ACCEPTANCE.md`，取舍见 `docs/adr/0012-skill-uninstall-history-boundary.md`。
 - 验证：命令范围 `:data:sqlite:test :app-android:connectedDebugAndroidTest -Pandroid.testInstrumentationRunnerArguments.class=runtime.mobileagent.AnnouncementsLayoutTest`，以 `ANDROID_HOME=/c/Users/32735/AppData/Local/Android/Sdk`、`--offline --no-daemon --dependency-verification=strict --quiet` 运行；SQLite `SkillRepositoryTest` 23/23，最终 API 31 模拟器公告布局 3/3（320dp、360dp、320dp 且字体比例 1.3），失败/错误 0。`:app-android:compileDebugKotlin` 单独通过。`licenseGuard` 退出码 0；`python -m reuse lint` 771/771；`git diff --check` 退出码 0。实机视觉、真机 Skill 卸载/重装尚未验收，不把模拟器结果当真机结果。
 - 独立只读复核：原生 `gpt-6-luna/xhigh` 核对了本工作树 Git 根与分支，审查当前 diff，指出原 12sp 公告文案在 320dp 下会裁切；主 Agent 增加实际文字布局溢出断言并修正字号/内容宽度后，上述 3 项模拟器测试通过。卸载事务、授权撤销、历史导出和重装身份隔离未发现其他确定问题。DSH 的 DeepSeek V4.1 Flash 模型可见，但新会话的独立工作树路径无法核实，故未向其派发。
-- Git 与下一步：本节代码、测试和文档已随本轮修复提交 `eadd8f7`；此前“未提交”状态仅为提交前历史。根工作区 WIP 受保护；本次用户已明确授权提交，并要求修复完成后推送合并，Z05 原始设备缺陷仍待验，合并继续受阻。
+- Git 与下一步：本节代码、测试和文档已随本轮修复提交 `eadd8f7`；此前“未提交”状态仅为提交前历史。根工作区 WIP 受保护；本次用户已明确授权提交，并要求修复完成后推送合并，Z05 原始设备缺陷仍待验，合并继续受阻。（2026-09-26 后续：已合并为 `3913e23`，Z05 降级 P2。）
 
 ## 2026-09-25 用户诊断八项与工作区授权回归修复（历史记录）
 

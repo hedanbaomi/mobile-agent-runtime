@@ -10,6 +10,7 @@ import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import org.junit.Assert.assertEquals
@@ -70,6 +71,39 @@ import runtime.mobileagent.skills.tooling.WorkspaceText
 import runtime.mobileagent.skills.tooling.WorkspaceWriteTextRequest
 
 class ToolingOrchestrationTest {
+    @Test
+    fun shellBackendTimeoutEnvelopeWinsOverOuterWaitAndIsNeverReplayed() = runBlocking {
+        val authority = configuredAuthorityManager()
+        val dangerous = DangerousModeManager(
+            InMemoryDangerousModeStateStore(),
+            DangerousBuildPolicy.fromBuildFlags(false, true),
+        )
+        dangerous.setPolicy(DangerousMode.ENABLED_AUTONOMOUS)
+        val dispatched = AtomicInteger()
+        val backend = object : ShellExecutor {
+            override suspend fun execute(request: ShellExecRequest): ShellExecResult {
+                dispatched.incrementAndGet()
+                delay(request.timeoutMs + 80)
+                return ShellExecResult.timedOut(request, request.timeoutMs)
+            }
+            override suspend fun cancel(requestId: String): Boolean = true
+        }
+        val executor = ShellToolExecutor(
+            authority, dangerous, ApprovalEngine(), ::context,
+            mapOf(Authority.SHIZUKU to backend),
+            auditSink = object : ShellAuditSink {
+                override suspend fun recordStarted(event: ShellAuditEvent) = true
+                override suspend fun recordCompleted(event: ShellAuditEvent) = true
+            },
+        )
+        val call = ToolCall("model-known-timeout", "shell_exec", "{\"command\":\"sleep 40\",\"timeout_ms\":100}")
+        val result = executor.invoke(call, context())
+        assertTrue(result is ToolResult.Denied)
+        assertEquals(ToolErrorCode.SHELL_TIMED_OUT.name, (result as ToolResult.Denied).reason)
+        assertEquals(result, executor.invoke(call, context()))
+        assertEquals(1, dispatched.get())
+    }
+
     @Test
     fun emptyFactoryIsAValidNoToolsStateInsteadOfAFactoryFailure() = runBlocking {
         val factory = ToolExecutorFactory()

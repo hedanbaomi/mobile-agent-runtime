@@ -128,6 +128,7 @@ data class SkillInstallUi(
 data class SkillsUiState(
     val skills: List<SkillUi> = emptyList(),
     val selectedInstallId: String? = null,
+    val pendingUninstallId: String? = null,
     val detail: SkillDetailUi? = null,
     val install: SkillInstallUi? = null,
     val sourcePath: String? = null,
@@ -147,6 +148,9 @@ data class SkillsActions(
     val onOpenDetail: (String) -> Unit = {},
     val onCloseDetail: () -> Unit = {},
     val onToggle: (String, Boolean) -> Unit = { _, _ -> },
+    val onRequestUninstall: (String) -> Unit = {},
+    val onConfirmUninstall: () -> Unit = {},
+    val onCancelUninstall: () -> Unit = {},
     val onGrantPermission: (String, String) -> Unit = { _, _ -> },
     val onRevokePermission: (String, String) -> Unit = { _, _ -> },
     val onConfirmInstall: () -> Unit = {},
@@ -181,6 +185,9 @@ fun SkillsScreen(
         }
     }
     state.install?.let { InstallDialog(it, actions, zh) }
+    state.pendingUninstallId?.let { id ->
+        state.skills.firstOrNull { it.installId == id }?.let { UninstallDialog(it, actions, zh) }
+    }
     state.sourcePath?.let { path -> SourceDialog(path, state.sourceText, actions.onCloseSource, zh) }
 }
 
@@ -277,6 +284,10 @@ private fun SkillDetail(detail: SkillDetailUi, actions: SkillsActions, zh: Boole
         }
         Checkbox(skill.enabled, { actions.onToggle(skill.installId, it) })
     }
+    OutlinedButton(
+        onClick = { actions.onRequestUninstall(skill.installId) },
+        modifier = Modifier.padding(top = 8.dp).testTag("skills.uninstall"),
+    ) { Text(if (zh) "卸载技能" else "Uninstall skill") }
     if (detail.preview.isNotBlank()) Text(safeDisplay(detail.preview), modifier = Modifier.padding(top = 12.dp))
     Text(if (zh) "安全边界" else "Security boundary", style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(top = 16.dp))
     Text(
@@ -370,6 +381,26 @@ private fun InstallDialog(install: SkillInstallUi, actions: SkillsActions, zh: B
         },
         confirmButton = { Button(onClick = actions.onConfirmInstall, enabled = install.installable) { Text(if (zh) "安装" else "Install") } },
         dismissButton = { TextButton(onClick = actions.onCancelInstall) { Text(if (zh) "取消" else "Cancel") } },
+    )
+}
+
+@Composable
+private fun UninstallDialog(skill: SkillUi, actions: SkillsActions, zh: Boolean) {
+    AlertDialog(
+        onDismissRequest = actions.onCancelUninstall,
+        title = { Text(if (zh) "卸载技能" else "Uninstall skill") },
+        text = {
+            Column {
+                Text(safeDisplay(skill.name))
+                Text(
+                    if (zh) "将移出已安装列表、撤销授权并从当前智能体解绑。历史对话、审计记录和该技能的持久记忆会保留；若历史对话仍引用原包，包字节也会保留以供导出，否则会清理。重新使用需要重新导入并授权。"
+                    else "This removes the install, revokes grants, and unbinds current agents. Conversation history, audit records, and this skill's persistent memory remain. Package bytes remain only when needed to export historical conversations. Reuse requires a fresh import and approval.",
+                    modifier = Modifier.padding(top = 8.dp),
+                )
+            }
+        },
+        confirmButton = { TextButton(onClick = actions.onConfirmUninstall) { Text(if (zh) "确认卸载" else "Uninstall") } },
+        dismissButton = { TextButton(onClick = actions.onCancelUninstall) { Text(if (zh) "取消" else "Cancel") } },
     )
 }
 

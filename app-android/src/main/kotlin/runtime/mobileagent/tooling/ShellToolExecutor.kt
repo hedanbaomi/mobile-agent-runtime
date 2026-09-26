@@ -412,7 +412,10 @@ class ShellToolExecutor(
                 )
             }
             val result = try {
-                withTimeout(bound.request.timeoutMs) { backend.execute(bound.request) }
+                // The selected backend enforces the command limit and needs time to return its
+                // terminal envelope (Shizuku IPC and Wired ADB both have a delivery grace).
+                // Cancelling at exactly the command deadline discards a proven TIMED_OUT result.
+                withTimeout(bound.request.timeoutMs + BACKEND_RESULT_GRACE_MS) { backend.execute(bound.request) }
             } catch (_: TimeoutCancellationException) {
                 backend.cancel(bound.request.requestId)
                 ShellExecResult.unknownOutcome(bound.request, clock.nowMillis() - started)
@@ -667,6 +670,9 @@ class ShellToolExecutor(
     )
 
     companion object {
+        // Exceeds Wired ADB's 10 s read grace and Shizuku's 5 s IPC/pipe grace.
+        // A backend that still has no terminal result remains UNKNOWN_OUTCOME.
+        private const val BACKEND_RESULT_GRACE_MS = 20_000L
         const val SHELL_EXEC = "shell_exec"
         const val TOOL_SCHEMA_VERSION = 1
         const val MAX_COMMAND_LENGTH = 256 * 1024

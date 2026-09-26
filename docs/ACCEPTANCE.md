@@ -3,6 +3,8 @@
 
 # 验收矩阵与证据要求
 
+2026-09-26 设备报告 `8d97dc0` 修复复测项：分别导入合成旧格式配置与当前 ZIP，前后按 Agent ID 核对 `agent_profiles`、`agent_snapshots`、`conversations`、消息、消息部分、Run、工具及审计 ID，删除正文或同数量替换也必须回滚并显示结果；报告所用 c2eedf6 旧备份原件已无法取得，因此该原始路径不能复现。在历史会话配置本机同目标 Provider 凭据后运行，确认冻结快照未变且错误不再是悬空密钥 `INTERNAL`；导入完整知识内容后启动修复/手动重建应命中已知文本，只有元数据、缺 chunks 或存在失败/取消且无活动版本的文档时，手动整库重建必须给出源内容缺失而非“重建成功”；单文档成功导入不得被其他失败文档阻断，原有可检索内容不得因终态失败任务被清空。>16 MiB 且 ≤32 MiB 的单会话条目应导出导入；发送、取消、30 秒设备命令超时、>256 特权目录、只读预设撤写和默认只读附加分别复测。现有 JVM 与模拟器合成测试通过不等于旧备份、真实 Provider 或真机验收通过。
+
 2026-09-25 人工反馈专项验收：在 `debuggable=false` review 包和真实 Android 设备分别测量发送到 IME 收起时长；验证 assistant→tool→assistant 顺序在单气泡内保留、思考折叠无空白、审批时对话可透过遮罩且键盘抬起时按钮可达；验证开关默认关闭、仅新会话开启、关闭实时生效、撤销 grant/切 Authority/重复 call ID 仍拒绝；将 24 MiB 文件经 Internal 和 SAF 分块读到 EOF 并校验拼接与版本，SAF 云端慢流单列耗时；在后台、锁屏、网络切换、进程被系统回收、服务超时和手动强停下区分可继续与 UNKNOWN，不自动重放；以硅基流动 `Qwen/Qwen3.8-27B` 的官方目录核对 AUTO 上下文值和目标变化时的失效。JVM 测试、编译或静态审查不能代替这些设备与真实服务路径。
 
 2026-09-25 追加权限回归：先授予普通默认工作区，再将危险模式切至“高危命令确认”，确认旧策略授权明确显示需重新授权且新会话不绑定无效默认；在 Agent 内重新确认“完整设备文件”，再新建会话，验证普通目录与完整设备文件的授权工具都可用且两个范围仍分离。分别测试危险模式关闭、Authority 断联/切换、撤销完整设备授权、旧版本 grant、新旧会话和已冻结 Run，确认完整设备工具不越权、不会隐式出现 shell。诊断仅记录授权计数及后端探测状态，不含真实路径或文件内容。
@@ -192,6 +194,7 @@ K06另需前台任务兼容矩阵：Android12+后台启动限制、Android14+服
 | S28 | 在已启用 Shizuku 或已配对 Wired ADB、已设置 Agent 当前工作区及完整设备文件授权后，依次断开 Binder/USB、关闭 Wi-Fi、后台/重建 Activity、重启 App；随后恢复连接，并分别测试离线显式撤销与底层授权真正撤销 | 临时断联期间 selected Authority、用户意图、Wired trust、Agent 当前工作区、普通 capability grant 与完整设备授权保持；只把 availability/connection 标成暂不可用且零 dispatch，恢复同一受信连接后无需重新配置即可继续；离线显式撤销可本地持久化并在恢复后仍生效；只有平台明确拒绝/撤销或 identity/protocol binding 失败才要求重新授权，且绝不 fallback 到另一 Authority |
 | S29 | 分别用 Shizuku/Wired 选择目录，保存后杀 App/UserService/Companion 或断连并重启；篡改密文、AAD、locator version，删除目录或撤销平台权限 | DB/导出/诊断无 locator 明文；恢复时同 workspaceId 生成新 ephemeral handle；暂时断联只进入 UNAVAILABLE/REATTACHING且不撤 Grant；目录不存在、权限拒绝与密文不可恢复使用不同闭合状态；任何失败都不 fallback、不重放旧 handle |
 | S30 | 在真实临时代码仓库创建超过单页上限的目录和大文件；分页 list、stat、offset read、并发外部修改后 apply_patch；尝试 `..`、symlink、超预算与 SAF 非原子覆盖 | 分页无漏项/重复且 cursor 不能跨 workspace/path 重放；stat 不读全文；分块结果含 size/next offset/eof/version；expected hash/version 冲突不覆盖；支持原子 replace 的 backend 才执行 patch，SAF 明确 UNSUPPORTED；所有结果仍受相对路径与序列化预算限制 |
+| S31 | 卸载已启用且已绑定 Agent 的 Skill；同包重新导入、另一个 Skill、旧会话导出与专属记忆 | 安装项消失，当前 Agent 解绑且授权/待用批准失效；旧快照、审计和记忆保留，历史会话仍可导出；同包重装生成新安装 ID 且不得继承旧授权；无历史引用时清理包字节，不删其他 Skill/共享 KB |
 
 ## 6. 公告
 
@@ -200,7 +203,7 @@ K06另需前台任务兼容矩阵：Android12+后台启动限制、Android14+服
 | N01 | 创建draft、定时、发布、修订、撤回、归档；并发编辑/创建第二个待发布修订 | 草稿/未来公告不外泄；数据库唯一约束触发409；新草稿不遮盖旧发布；审计和feed版本一致；撤回后成功同步停止主动展示 |
 | N02 | Android/其他平台、min/maxVersionCode边界、渠道、locale、0/30/100%灰度 | 双端黄金向量一致；同安装稳定；版本用整数；语言回退不绕过受众 |
 | N03 | 同revision多次启动、重要确认、标全部已读、revision+1、App更新 | 确认/关闭持久化；read不等于ack；新修订正确未读；不无穷弹窗 |
-| N04 | 离线、过期、坏图片、长文本、小屏、字体放大、深浅色、接口500 | 缓存可读；不显示过期主动弹窗；正文可读、App不受阻 |
+| N04 | 离线、过期、坏图片、长文本、小屏、字体放大、深浅色、接口500；320dp/360dp 公告筛选栏 | 缓存可读；不显示过期主动弹窗；正文可读、App不受阻；“全部标为已读”单行无裁切，四个控件等宽同高 |
 | N05 | 200/304、无缓存304、换语言/版本/安装ID、签名过期、定时到点 | ETag与target对应；不共享个性化feed；304不延长签名有效期；不会被旧缓存卡住 |
 | N06 | HTML/script、intent/file/javascript/未知route、远程Skill调用载荷 | 内容/动作拒绝；不能执行代码或更改权限；更新必须用户进入独立流程 |
 | N07 | 错key/篡改字节/错audience/旧feed/未知schema、管理员无权限/CSRF | 验签拒绝且保留旧有效缓存；管理API拒绝；APK不含管理secret；不能回退裸JSON |

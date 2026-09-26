@@ -3,9 +3,26 @@
 
 # 项目交接
 
-最后更新：2026-09-25T20:51+08:00（Asia/Taipei）。项目根目录：E:/mobileAgentRuntime。
+最后更新：2026-09-26T22:27+08:00（Asia/Taipei）。本轮工作树：C:/Users/32735/.codex/worktrees/skill-uninstall-announcement-layout/mobileAgentRuntime。
 
-## 2026-09-25 用户诊断八项与工作区授权回归修复（当前）
+## 2026-09-26 设备验收报告修复（当前）
+
+- 来源：用户提供 `device-acceptance-8d97dc0.md` 与同名 `-0926.zip`，针对 review APK `8d97dc0` 的 Z04/Z05、E02、H04/H10、I04 等发现。证据包仅本地分析，未入仓；当前工作树仍为 `codex/skill-uninstall-announcement-layout`，基线 main `8d97dc0`，保留上一节 Skill 卸载与公告布局未提交工作。根工作区 `E:/mobileAgentRuntime` 的 `HANDOFF.md` 与计划文件 WIP 未改动。
+- 实现候选：导入的冻结会话只在运行时从同 ID/同格式/同地址本机 Provider 取 secret 引用；知识库修复核对当前活动 chunks 与 READY generation 成员，失败/取消的导入任务不能使手动整库重建假报完整，但正常单文档导入仍可发布其他已就绪内容；导入事务逐项核对已有 Agent 的快照、会话、消息、消息部分、Run、工具记录和审计 ID，减少或同数量替换均回滚；单会话 ZIP 条目从 16 MiB 元数据限制分离至 32 MiB 内容限制，设置页同步显示实际上限。流式取消保留部分正文与终态标记，shell 等待后端明确超时，特权目录浏览器支持 continuation，只读预设撤既有整目录写权限且新附加默认只读，导入有可见进度与成功/失败提示。G04 已派发 Python 的副作用不可证实，仍保持 UNKNOWN 且不自动重放。
+- 当前验证：最新源码的 `licenseGuard licenseGuardReverse check verifyCiPins verifyDependencyLock verifyDependencyVerification` 严格离线全仓门禁退出 0，`python -m reuse lint` 775/775，工作流 2/2，`git diff --check` 退出 0。API 35 `mar_api35_matrix` 模拟器定向 `connectedDebugAndroidTest` 6/6，含流式取消、只读授权、shell 超时与公告 320dp/大字体；最新源码追加 `TransferArchiveDeviceTest` 1/1，证实 Android 端 ZIP 导入事务可用。导入保护 `TransferRepositoryIsolationTest` 6/6；知识库失败任务、批次恢复和手动重建的定向回归通过。无真机、旧版备份原件及真实 Provider 复测。
+- Z05 阻断：报告称旧版备份导入后无关 Agent「验收A」历史物理消失；当前 `TransferRepository` 无删除该历史的路径，合成旧 JSON/ZIP 导入保留无关快照、会话与消息，异常副作用触发器会在事务内检测并回滚。用户证据 ZIP 只有当前 review 包导出的 3 个有效备份与 1 个失败的部分 ZIP，不含所述 c2eedf6 旧备份原件；用户已确认原件无法取得。因此原设备现象与具体原因尚未复现，不能称设备验收 PASS，也不能据此合并。设置页增加显式结果提示，但需新包重测导入与无关历史的前后状态。
+- DSH：按用户指示用 Computer Use 在系统文件夹选择器中选择准确 worktree 后即退出；DeepSeek V4.1 Flash 验证 Git 根/分支一致。其 Z05 只读调查在模型多次重试且长时间未给结论后已停止；不把它当成独立复核通过。
+- 文档：`docs/IMPLEMENTATION_PLAN.md`、`docs/ACCEPTANCE.md`、`docs/SKILLS_AND_SECURITY.md` 与 [ADR-0013](docs/adr/0013-imported-history-and-index-recovery.md) 已同步；上一节 Skill 卸载专题与 ADR-0012 保留。远端 main 核对为 `8d97dc0`。独立只读安全审查最初结论 `NEEDS AMEND` 的两处确定缺口已修正，且相关回归与全仓门禁通过；未再次申请独立复核，不冒称最终审查 `PASS`。下一步提交本工作树已授权的未提交工作。Z05 安全闭环前不得宣称全部修复或普通合并。当前尚未提交、推送或创建 PR。
+
+## 2026-09-26 技能卸载与公告按钮布局（同分支先前工作）
+
+- 基线：`origin/main` `8d97dc03ea27758e62ea267b73026119632a1bfa`；独立分支 `codex/skill-uninstall-announcement-layout`。根工作区 `E:/mobileAgentRuntime` 的分支 `fix/review-apk-notice-integrity` 与既有 `HANDOFF.md`、计划文件 WIP 未改动；本文件从 main 的交接增量编辑，不得整体覆盖根工作区现行交接。
+- 实现：Skill 详情可请求并确认卸载。事务内解除 Agent 当前绑定、撤销现有授权和能力、使待用审批过期、删除活跃安装；保留会话/审计/记忆，历史快照需要导出时保留包字节及原安装身份；其他场景清除未使用的包字节。重新导入须获新安装身份和新授权。公告页 4 个操作等宽；中文“全部标为已读”按实测字宽缩小字号，单行居中完整显示。相关契约与验收见 `docs/REQUIREMENTS.md`、`docs/SKILLS_AND_SECURITY.md`、`docs/UI_DESIGN.md`、`docs/IMPLEMENTATION_PLAN.md`、`docs/ACCEPTANCE.md`，取舍见 `docs/adr/0012-skill-uninstall-history-boundary.md`。
+- 验证：命令范围 `:data:sqlite:test :app-android:connectedDebugAndroidTest -Pandroid.testInstrumentationRunnerArguments.class=runtime.mobileagent.AnnouncementsLayoutTest`，以 `ANDROID_HOME=/c/Users/32735/AppData/Local/Android/Sdk`、`--offline --no-daemon --dependency-verification=strict --quiet` 运行；SQLite `SkillRepositoryTest` 23/23，最终 API 31 模拟器公告布局 3/3（320dp、360dp、320dp 且字体比例 1.3），失败/错误 0。`:app-android:compileDebugKotlin` 单独通过。`licenseGuard` 退出码 0；`python -m reuse lint` 771/771；`git diff --check` 退出码 0。实机视觉、真机 Skill 卸载/重装尚未验收，不把模拟器结果当真机结果。
+- 独立只读复核：原生 `gpt-6-luna/xhigh` 核对了本工作树 Git 根与分支，审查当前 diff，指出原 12sp 公告文案在 320dp 下会裁切；主 Agent 增加实际文字布局溢出断言并修正字号/内容宽度后，上述 3 项模拟器测试通过。卸载事务、授权撤销、历史导出和重装身份隔离未发现其他确定问题。DSH 的 DeepSeek V4.1 Flash 模型可见，但新会话的独立工作树路径无法核实，故未向其派发。
+- Git 与下一步：本轮代码、测试、文档在上述独立分支内未提交；未推送、未建 PR、未构建交付 APK。根工作区 WIP 受保护。`agent.md` 第 4 节要求无明确请求时不提交/推送；后续若用户要求提交/推送，先核对当前 HEAD 与 WIP，再按许可证与 CI 门禁执行。当前无进行中审查或模拟器任务。
+
+## 2026-09-25 用户诊断八项与工作区授权回归修复（历史记录）
 
 - 隔离 worktree：`E:/mobileAgentRuntime/.private/qa-eight-fixes-20260925`，分支 `codex/qa-eight-fixes-20260925`，基线 `origin/main` `ebcbbbf9d9cc5a479af9160331e88aa5d8347dcd`。根工作区 `fix/review-apk-notice-integrity` 的既有主题、图标与文档 WIP 已单独本地提交为 `709b3f796f0dd9cf86feed3fbddab658a73420fe`，不与本分支混合；不得用本分支旧交接整体覆盖根工作区现行交接。诊断 ZIP 仅用于问题归类，未入仓。
 - 源码改动：发送清空输入后将预检移到 IO，预检可取消；助手同一回合的文字、思考和工具按顺序置于一气泡；审批遮罩半透明并保留对话；Agent 可显式开启跳过逐次工具确认，仅新会话快照与实时设置同时允许时生效；普通会话运行增加前台服务；Internal/SAF 已有大文件按单次预算分块读取；硅基流动 `Qwen/Qwen3.8-27B` 从官方目录读取上下文长度并校验目标。
@@ -52,7 +69,7 @@
 ## 2. 持续保护边界
 
 - 第一方代码、文档和服务保持 `AGPL-3.0-only`，保留 license guard、SPDX、第三方归属及供应链门禁。
-- `HANDOFF.md` 和 `docs/` 按既有约定仅本地保存，不推送。新任务的提交、推送、部署、正式签名、发布和付费调用必须有对应授权。
+- `HANDOFF.md` 和 `docs/` 在历史任务中曾只本地保存；本次用户已明确要求提交未提交工作，并在修复完成后推送合并。新任务的提交、推送、部署、正式签名、发布和付费调用仍须以当次授权为准。
 - 产品范围仍以已确认需求为准：Root、应用内无线 ADB、DPC、Termux、PTY、Accessibility、宿主 PowerShell/宿主 shell 不属于当前产品范围；不得因整理文档扩大范围。
 - SAF 是独立 workspace backend；Shizuku/Wired 是独立 Authority，不自动 fallback。未知外部结果不得自动重放。秘密、URI、设备路径及配对材料的保护沿用当前专题规范。
 - 用户已将 UI 重做留作独立任务；功能修复不能冒充 UI 验收。

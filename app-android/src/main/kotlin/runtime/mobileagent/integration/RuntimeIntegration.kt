@@ -2837,7 +2837,11 @@ class RuntimeIntegration(
         target: WorkspaceAccessGrantTarget,
     ): List<CapabilityGrant> {
         val requestedCapabilities = target.capabilities.ifEmpty {
-            canonicalDefaultWorkspaceGrantCapabilities(backend.capabilities)
+            if (workspace.scope == WorkspaceScope.FULL_DEVICE_FILES) {
+                canonicalFullDeviceWorkspaceGrantCapabilities(backend.capabilities)
+            } else {
+                canonicalDefaultWorkspaceGrantCapabilities(backend.capabilities)
+            }
         }
         if (requestedCapabilities.isEmpty()) throw WorkspaceAccessException(WorkspaceAccessErrorCode.CAPABILITY_DENIED)
         if (requestedCapabilities.any { it !in backend.capabilities }) {
@@ -2858,20 +2862,18 @@ class RuntimeIntegration(
         val policyVersion = authorityPolicyRepository.getPolicy().policyVersion
         val now = Instant.ofEpochMilli(System.currentTimeMillis())
         val existing = capabilityGrantRepository.forAgent(target.agentId, includeRevoked = true)
-        // An Agent may own several workspaces.  Updating one workspace only
-        // retires stale grants for that same workspace; it must never revoke a
-        // sibling workspace merely because both use SELECTED_DIRECTORY.
+        // Reconcile only this bundle's scope. Path-scoped, one-shot, task,
+        // session and Skill grants are independent of an automatic default.
         existing.asSequence()
             .filter { old ->
                 val oldWorkspaceId = old.workspaceId ?: return@filter false
                 if (old.revoked) return@filter false
                 if (old.skillInstallId != null || old.packageHash != null) return@filter false
                 if (oldWorkspaceId != workspace.id) return@filter false
+                if (old.pathScope != normalizedPath || old.lifetime != target.lifetime ||
+                    old.taskId != null || old.sessionId != null
+                ) return@filter false
                 old.capability !in requestedCapabilities ||
-                    old.pathScope != normalizedPath ||
-                    old.lifetime != target.lifetime ||
-                    old.taskId != null ||
-                    old.sessionId != null ||
                     old.policyVersion != policyVersion
             }
             .forEach { old -> capabilityGrantRepository.revoke(old.grantId, old.revision) }
@@ -4380,8 +4382,9 @@ private class SqliteRuntimeAuditSink(
 }
 
 /**
- * Canonical automatic grant plan for an Agent default. The backend remains the source of truth
- * for READ_ONLY versus READ_WRITE; shell and unrelated capabilities stay excluded.
+ * Canonical automatic grant plan for a workspace picker/default. New attachments
+ * start read-only even when the backend can write; the Agent editor has a
+ * separate explicit READ_WRITE preset. Shell and mutations stay excluded.
  */
 internal fun canonicalDefaultWorkspaceGrantCapabilities(
     backendCapabilities: Set<CapabilityId>,
@@ -4394,12 +4397,18 @@ private val CANONICAL_DEFAULT_WORKSPACE_CAPABILITIES = setOf(
     CapabilityId.FILE_LIST,
     CapabilityId.FILE_STAT,
     CapabilityId.FILE_READ_TEXT,
+)
+
+/** Full-device access has its own explicit high-risk confirmation and grant plan. */
+internal fun canonicalFullDeviceWorkspaceGrantCapabilities(
+    backendCapabilities: Set<CapabilityId>,
+): Set<CapabilityId> = backendCapabilities.filterTo(linkedSetOf()) { capability ->
+    capability.value in CANONICAL_FULL_DEVICE_WORKSPACE_CAPABILITIES
+}
+
+private val CANONICAL_FULL_DEVICE_WORKSPACE_CAPABILITIES = CANONICAL_DEFAULT_WORKSPACE_CAPABILITIES + setOf(
     CapabilityId.FILE_WRITE_TEXT,
     CapabilityId.FILE_CREATE_DIRECTORY,
-    // file.move is deliberately absent: the model-visible schema never exposes
-    // file_move (fail-closed OPERATION_UNAVAILABLE), so an automatic grant must
-    // not declare a capability that can never execute. Backend move() remains
-    // available to privileged/bridge transports under their own grants.
     CapabilityId.FILE_DELETE,
     "file.apply_patch",
 )

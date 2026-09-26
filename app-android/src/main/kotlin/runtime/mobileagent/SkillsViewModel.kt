@@ -84,6 +84,34 @@ class SkillsViewModel(
         } catch (error: Exception) { message(error.message ?: "请先检查并确认该包权限。") }
     }
 
+    fun requestUninstall(installId: String) {
+        if (!state.value.loading && state.value.skills.any { it.installId == installId }) {
+            state.value = state.value.copy(pendingUninstallId = installId)
+        }
+    }
+
+    fun cancelUninstall() {
+        state.value = state.value.copy(pendingUninstallId = null)
+    }
+
+    fun confirmUninstall() {
+        val installId = state.value.pendingUninstallId ?: return
+        state.value = state.value.copy(pendingUninstallId = null, loading = true)
+        viewModelScope.launch {
+            try {
+                val removed = withContext(Dispatchers.IO) { app.container.skills.uninstall(installId) }
+                if (state.value.selectedInstallId == installId) closeDetail()
+                if (permissionRequest.value?.first == installId) permissionRequest.value = null
+                reload()
+                message(if (removed) "技能已卸载；历史对话、审计和持久记忆已保留。" else "技能已不在已安装列表。")
+            } catch (error: Exception) {
+                message(error.message ?: "卸载失败，安装状态未改变。")
+            } finally {
+                state.value = state.value.copy(loading = false)
+            }
+        }
+    }
+
     fun importUris(uris: List<Uri>) {
         if (uris.isEmpty()) return
         viewModelScope.launch {
@@ -203,7 +231,8 @@ class SkillsViewModel(
 
     fun closeDetail() {
         savedStateHandle.remove<String>(SELECTED_INSTALL_ID_KEY)
-        state.value = state.value.copy(selectedInstallId = null, detail = null)
+        savedStateHandle.remove<String>(SOURCE_PATH_KEY)
+        state.value = state.value.copy(selectedInstallId = null, detail = null, sourcePath = null, sourceText = null)
     }
 
     /** Read only the canonical, non-sensitive memory projection for the selected Agent snapshot. */

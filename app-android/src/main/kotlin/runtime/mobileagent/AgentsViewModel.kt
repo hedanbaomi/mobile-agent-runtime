@@ -256,9 +256,9 @@ private val READ_WRITE_WORKSPACE_CAPABILITIES = READ_ONLY_WORKSPACE_CAPABILITIES
 )
 
 /**
- * Persist the simple workspace preset as ordinary canonical grants. Existing
- * matching active persistent grants are reused, so repeating the shortcut is
- * idempotent and never broadens a relative-path or Skill-bound grant.
+ * Persist the simple workspace preset as ordinary canonical grants. A read-only
+ * choice must also retire live mutation grants for this workspace; merely
+ * adding the four read grants would leave a previously writable Agent writable.
  */
 internal fun saveAgentWorkspaceGrantPreset(
     editor: AgentEditorUi,
@@ -279,15 +279,30 @@ internal fun saveAgentWorkspaceGrantPreset(
         AgentWorkspaceAccessPreset.READ_WRITE -> READ_WRITE_WORKSPACE_CAPABILITIES
     }
     val policyVersion = grantPort.currentPolicyVersion()
-    val existing = editor.grants.asSequence()
-        .filter { it.enabled && !it.grant.revoked && !it.expired }
-        .map { it.grant }
+    val liveGrants = grantPort.listGrants(agentId, includeRevoked = false)
+        .filter { it.agentId == agentId && it.workspaceId == workspace.id && !it.revoked }
+    if (preset.access == AgentWorkspaceAccessPreset.READ_ONLY) {
+        // The preset owns only ordinary whole-directory persistent grants.
+        // Scoped, one-shot and Skill grants remain separate explicit decisions.
+        liveGrants.filter {
+            it.capability !in READ_ONLY_WORKSPACE_CAPABILITIES &&
+                it.pathScope == null && it.skillInstallId == null && it.packageHash == null &&
+                it.lifetime == GrantLifetime.PERSISTENT && it.taskId == null && it.sessionId == null
+        }
+            .forEach { grant ->
+                val revoked = grantPort.revokeGrant(grant.grantId, grant.revision)
+                require(revoked.revoked) { "Workspace read-only preset revoke did not persist" }
+            }
+    }
+    val existing = liveGrants.asSequence()
         .filter {
             it.policyVersion == policyVersion &&
-            it.workspaceId == workspace.id &&
                 it.pathScope == null &&
                 it.skillInstallId == null &&
-                it.lifetime == GrantLifetime.PERSISTENT
+                it.packageHash == null &&
+                it.lifetime == GrantLifetime.PERSISTENT &&
+                it.taskId == null && it.sessionId == null &&
+                !it.consumed && it.isActiveFor(java.time.Instant.now(), null, null)
         }
         .map { it.capability }
         .toSet()

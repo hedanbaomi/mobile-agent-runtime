@@ -393,7 +393,7 @@ class ChatViewModel(
             messages = state.value.messages + messageUi(userMessage),
             input = "",
         )
-        val binding = try { withContext(Dispatchers.IO) { container.agents.resolveSnapshot(conversation.snapshotId) } }
+        val binding = try { withContext(Dispatchers.IO) { container.transfer.resolveRunBinding(conversation.snapshotId) } }
             catch (failure: Exception) { fail(failure); state.value = state.value.copy(streaming = false); return }
         val contextPolicy = try { AgentContextPolicy.fromJson(binding.snapshot.contextPolicyJson) }
             catch (failure: Exception) { fail(failure); state.value = state.value.copy(streaming = false); return }
@@ -1553,11 +1553,22 @@ class ChatViewModel(
                         }
                     }
                     state.value = state.value.copy(status = when (record.state) {
-                        RunStatus.UNKNOWN_OUTCOME -> "已停止等待，外部结果未知；可能已产生费用或操作，继续前需要再次确认。"
+                        RunStatus.UNKNOWN_OUTCOME -> "已取消接收，部分响应保留；外部结果未知，可能已产生费用或操作，继续前需要再次确认。"
                         RunStatus.COMPLETED -> "已完成。输入 ${record.inputTokens} / 输出 ${record.outputTokens} tokens。"
                         RunStatus.CANCELLED -> "已取消，部分响应保留。"
                         else -> record.stopReason ?: state.value.status
                     })
+                    if (assistantId != null && record.state in setOf(RunStatus.CANCELLED, RunStatus.UNKNOWN_OUTCOME)) {
+                        // The in-memory delta can be newer than the periodic checkpoint. Persist
+                        // it with an explicit terminal marker before reload replaces the UI row.
+                        terminalError = if (record.state == RunStatus.UNKNOWN_OUTCOME) {
+                            ErrorPart(MessageErrorCode.UNKNOWN_OUTCOME,
+                                "已取消接收；以上为部分响应，外部结果未知，不会自动重放。")
+                        } else {
+                            ErrorPart(MessageErrorCode.CANCELLED, "已取消；以上为部分响应。")
+                        }
+                        checkpoint(record.state.name)
+                    }
                 }
             } catch (failure: Exception) {
                 val queryUnknown = failure is ApiQueryUnknownOutcomeException
@@ -1655,6 +1666,14 @@ class ChatViewModel(
                     state.value = state.value.copy(streaming = false, pendingTool = null)
                     if (foregroundStarted) runCatching { ChatRunForegroundService.stop(getApplication()) }
                     reload()
+                    if (state.value.selectedSessionId == conversationId) {
+                        val interruptionStatus = when (record.state) {
+                            RunStatus.UNKNOWN_OUTCOME -> "已取消接收，部分响应保留；外部结果未知，可能已产生费用或操作，继续前需要再次确认。"
+                            RunStatus.CANCELLED -> "已取消，部分响应保留。"
+                            else -> null
+                        }
+                        if (interruptionStatus != null) state.value = state.value.copy(status = interruptionStatus)
+                    }
                 }
             }
         }

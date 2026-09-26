@@ -5,10 +5,13 @@ package runtime.mobileagent.feature.announcements
 
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -27,8 +30,14 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalUriHandler
+import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import runtime.mobileagent.announcements.AnnouncementAction
 import runtime.mobileagent.announcements.AnnouncementActions
 import runtime.mobileagent.announcements.CachedAnnouncement
@@ -67,6 +76,7 @@ fun AnnouncementsScreen(
 ) {
     val zh = state.language.equals("zh-CN", true)
     val uriHandler = LocalUriHandler.current
+    val textMeasurer = rememberTextMeasurer()
     Column(modifier.fillMaxSize().padding(16.dp)) {
         Row(Modifier.fillMaxWidth()) {
             Column(Modifier.weight(1f)) {
@@ -79,9 +89,38 @@ fun AnnouncementsScreen(
         }
         state.error?.let { Text(it, color = MaterialTheme.colorScheme.error, modifier = Modifier.padding(top = 8.dp)) }
         state.banner?.let { BannerCard(it, actions, zh) }
-        Row(Modifier.padding(vertical = 10.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            listOf("unread" to if (zh) "未读" else "Unread", "all" to if (zh) "全部" else "All", "history" to if (zh) "历史" else "History").forEach { (key, label) -> FilterChip(selected = state.filter == key, onClick = { actions.onFilter(key) }, label = { Text(label) }) }
-            OutlinedButton(onClick = actions.onMarkAllRead) { Text(if (zh) "全部标为已读" else "Mark all read") }
+        BoxWithConstraints(Modifier.fillMaxWidth()) {
+            val buttonWidth = (maxWidth.value - 24f) / 4f
+            val markReadLabel = if (zh) "全部标为已读" else "Read all"
+            // Material's button content has insets beyond contentPadding. Reserve enough space
+            // for those insets before measuring the full label, including on 320dp screens.
+            val availableTextWidth = with(LocalDensity.current) { (buttonWidth - 12f).dp.roundToPx() }
+            val buttonTextStyle = MaterialTheme.typography.labelLarge
+            val markReadFontSize = (24 downTo 12).firstOrNull { halfSp ->
+                textMeasurer.measure(
+                    AnnotatedString(markReadLabel),
+                    style = buttonTextStyle.copy(fontSize = (halfSp / 2f).sp),
+                    maxLines = 1,
+                    softWrap = false,
+                ).size.width <= availableTextWidth
+            }?.let { (it / 2f).sp } ?: 6.sp
+            Row(Modifier.fillMaxWidth().padding(vertical = 10.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                listOf("unread" to if (zh) "未读" else "Unread", "all" to if (zh) "全部" else "All", "history" to if (zh) "历史" else "History").forEach { (key, label) ->
+                    FilterChip(
+                        selected = state.filter == key,
+                        onClick = { actions.onFilter(key) },
+                        modifier = Modifier.weight(1f).height(44.dp),
+                        label = { Text(label, maxLines = 1, softWrap = false) },
+                    )
+                }
+                OutlinedButton(
+                    onClick = actions.onMarkAllRead,
+                    modifier = Modifier.weight(1f).height(44.dp).testTag("announcements.markAllRead"),
+                    contentPadding = PaddingValues(horizontal = 0.dp),
+                ) {
+                    Text(markReadLabel, modifier = Modifier.fillMaxWidth(), style = buttonTextStyle, fontSize = markReadFontSize, textAlign = TextAlign.Center, maxLines = 1, softWrap = false)
+                }
+            }
         }
         if (state.loading) {
             CircularProgressIndicator(Modifier.padding(top = 20.dp))

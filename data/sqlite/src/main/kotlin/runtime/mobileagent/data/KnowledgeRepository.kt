@@ -847,6 +847,7 @@ class KnowledgeRepository(
         acknowledgeDuplicateCharge: Boolean = false,
     ): String {
         requireKb(knowledgeBaseId)
+        localRebuildSourceProblem(knowledgeBaseId)?.let { error("INDEX_SOURCE_INCOMPLETE: $it") }
         val currentSpace = db.query("SELECT embedding_space_id FROM knowledge_bases WHERE id = ?", listOf(knowledgeBaseId))
             .singleOrNull()?.string("embedding_space_id").orEmpty()
         check(currentSpace != embedder.spaceId) {
@@ -1858,12 +1859,92 @@ class KnowledgeRepository(
     }
 
     fun rebuildIndex(kbId: String, acknowledgeDuplicateCharge: Boolean = false): String {
+        synchronized(indexLock) {
+            requireKb(kbId)
+            localRebuildSourceProblem(kbId)?.let { error("INDEX_SOURCE_INCOMPLETE: $it") }
+        }
         upgradeLocalEmbeddingSpace(kbId)?.let { return it }
         if (isApiKnowledgeBase(kbId)) {
             return runBlocking { rebuildIndexCancellable(kbId, acknowledgeDuplicateCharge) }
         }
-        synchronized(indexLock) { requireKb(kbId) }
         return rebuildIndexPhased(kbId)
+    }
+
+    /**
+     * A rebuild can only derive an index from complete, locally stored chunks.
+     * Metadata-only restores and placeholder READY versions must not publish a
+     * successful empty generation that looks searchable to the caller.
+     */
+    private fun localRebuildSourceProblem(
+        kbId: String,
+        allowTerminalImports: Boolean = false,
+        publishingDocumentId: String? = null,
+    ): String? {
+        val documents = db.query(
+            """
+            SELECT d.id AS document_id, d.active_version_id AS version_id, v.status AS version_status,
+                   EXISTS(SELECT 1 FROM import_jobs j WHERE j.document_id = d.id
+                          AND j.stage NOT IN (?, ?, ?, ?)) AS has_pending_import,
+                   EXISTS(SELECT 1 FROM import_jobs j WHERE j.document_id = d.id
+                          AND j.stage IN (?, ?)) AS has_terminal_import,
+                   (SELECT COUNT(*) FROM chunks c WHERE c.document_version_id = d.active_version_id) AS chunk_count
+            FROM documents d
+            LEFT JOIN document_versions v ON v.id = d.active_version_id AND v.document_id = d.id
+            WHERE d.kb_id = ? AND d.deleted_at IS NULL
+            ORDER BY d.id
+            """.trimIndent(),
+            listOf(
+                ImportStage.READY.name, ImportStage.READY_WITH_VISUAL_GAPS.name,
+                ImportStage.FAILED.name, ImportStage.CANCELLED.name,
+                ImportStage.FAILED.name, ImportStage.CANCELLED.name, kbId,
+            ),
+        )
+        if (documents.isEmpty()) return null
+        if (documents.any {
+                it.string("version_id").isBlank() && it.string("document_id") != publishingDocumentId &&
+                    !it.boolean("has_pending_import") &&
+                    !(allowTerminalImports && it.boolean("has_terminal_import"))
+            }
+        ) {
+            return "No local document chunks are available; restore the full-content knowledge archive before rebuilding."
+        }
+        val active = documents.filter { it.string("version_id").isNotBlank() }
+        if (active.any {
+                it.string("version_status") !in setOf("READY", "READY_WITH_VISUAL_GAPS") ||
+                    it.long("chunk_count") == 0L
+            }
+        ) {
+            return "An active document version has no complete published local chunks; restore the full-content knowledge archive or re-import the document before rebuilding."
+        }
+        return null
+    }
+
+    /** True only when this READY generation contains exactly the current live chunk set. */
+    private fun generationMatchesActiveChunks(kbId: String, generationId: String): Boolean {
+        val activeChunks = db.query(
+            """
+            SELECT COUNT(*) AS n
+            FROM chunks c
+            JOIN documents d ON d.active_version_id = c.document_version_id
+            WHERE d.kb_id = ? AND d.deleted_at IS NULL
+            """.trimIndent(),
+            listOf(kbId),
+        ).single().long("n")
+        val generationMembers = db.query(
+            "SELECT COUNT(*) AS n FROM generation_members WHERE generation_id = ?",
+            listOf(generationId),
+        ).single().long("n")
+        val currentMembers = db.query(
+            """
+            SELECT COUNT(*) AS n
+            FROM generation_members gm
+            JOIN chunks c ON c.id = gm.chunk_id AND c.document_version_id = gm.document_version_id
+            JOIN documents d ON d.active_version_id = c.document_version_id
+            WHERE gm.generation_id = ? AND d.kb_id = ? AND d.deleted_at IS NULL
+            """.trimIndent(),
+            listOf(generationId, kbId),
+        ).single().long("n")
+        return activeChunks == currentMembers && generationMembers == currentMembers
     }
 
     fun repairIndexes() {
@@ -1876,6 +1957,7 @@ class KnowledgeRepository(
             .map { it.first }
             .filter {
                 isApiKnowledgeBase(it) && hasApiEmbeddingConsent(it) &&
+                    localRebuildSourceProblem(it) == null &&
                     latestUnknownEmbeddingOperation(it, "REBUILD") == null &&
                     db.query(
                         "SELECT embedding_space_id FROM knowledge_bases WHERE id = ? AND deleted_at IS NULL",
@@ -1921,11 +2003,20 @@ class KnowledgeRepository(
                 if (space != embedder.spaceId) return@forEach
                 if (embeddingForSpace(space) == null) return@forEach
                 val pin = pinnedReadyGeneration(kbId)
-                val members = if (pin == null) 0L else {
-                    db.query("SELECT COUNT(*) AS n FROM generation_members WHERE generation_id = ?", listOf(pin)).single().long("n")
-                }
-                if (pin == null || members == 0L) {
-                    pendingLocalRebuild += kbId
+                val generationIsCurrent = pin != null && generationMatchesActiveChunks(kbId, pin)
+                val sourceProblem = localRebuildSourceProblem(kbId)
+                when {
+                    sourceProblem != null && pin != null && !generationIsCurrent -> {
+                        // A stale generation must not stay advertised as READY
+                        // when its active documents no longer have rebuildable
+                        // source chunks.
+                        db.execute(
+                            "UPDATE knowledge_bases SET active_generation_id = NULL WHERE id = ? AND active_generation_id = ?",
+                            listOf(kbId, pin),
+                        )
+                        vectorIndexCache.invalidateKnowledgeBase(kbId)
+                    }
+                    !generationIsCurrent && sourceProblem == null -> pendingLocalRebuild += kbId
                 }
             }
         }
@@ -2005,6 +2096,8 @@ class KnowledgeRepository(
         val knowledgeBaseId: String,
         val indexEmbedder: TextEmbedder,
         val chunksByVersion: LinkedHashMap<String, Sequence<EmbeddingInput>>,
+        val allowTerminalImports: Boolean = false,
+        val publishingDocumentId: String? = null,
     )
 
     /**
@@ -2015,6 +2108,8 @@ class KnowledgeRepository(
     private fun planRebuild(
         kbId: String,
         apiConsentGrantedForOperation: Boolean = false,
+        allowTerminalImports: Boolean = false,
+        publishingDocumentId: String? = null,
     ): RebuildPlan {
         val boundSpace = db.query(
             "SELECT embedding_space_id FROM knowledge_bases WHERE id = ?",
@@ -2023,6 +2118,7 @@ class KnowledgeRepository(
         check(boundSpace.isNotBlank()) {
             "Knowledge base $kbId has no fixed embedding space; refusing to rebuild"
         }
+        localRebuildSourceProblem(kbId, allowTerminalImports, publishingDocumentId)?.let { error("INDEX_SOURCE_INCOMPLETE: $it") }
         if (boundSpace != embedder.spaceId &&
             !apiConsentGrantedForOperation &&
             !hasApiEmbeddingConsent(kbId)
@@ -2033,7 +2129,7 @@ class KnowledgeRepository(
         check(boundSpace == indexEmbedder.spaceId) {
             "Knowledge base $kbId binding changed while rebuilding; refusing a mixed-space generation"
         }
-        return RebuildPlan(kbId, indexEmbedder, embeddingInputsByVersionForKnowledgeBase(kbId))
+        return RebuildPlan(kbId, indexEmbedder, embeddingInputsByVersionForKnowledgeBase(kbId), allowTerminalImports, publishingDocumentId)
     }
 
     /**
@@ -2062,6 +2158,7 @@ class KnowledgeRepository(
         check(boundSpace == plan.indexEmbedder.spaceId) {
             "Knowledge base ${plan.knowledgeBaseId} binding changed while rebuilding; refusing a mixed-space generation"
         }
+        localRebuildSourceProblem(plan.knowledgeBaseId, plan.allowTerminalImports, plan.publishingDocumentId)?.let { error("INDEX_SOURCE_INCOMPLETE: $it") }
         return buildGenerationFromCachedUnlocked(plan.knowledgeBaseId, plan.indexEmbedder)
     }
 
@@ -3892,6 +3989,8 @@ class KnowledgeRepository(
         val rebuild = planRebuild(
             job.knowledgeBaseId,
             apiConsentGrantedForOperation = job.embeddingIsApi && job.embeddingConsent,
+            allowTerminalImports = true,
+            publishingDocumentId = job.documentId,
         )
         // Phase 1 (indexLock, short transaction): stage the version rows.  Readers
         // only follow `documents.active_version_id`, so nothing staged is

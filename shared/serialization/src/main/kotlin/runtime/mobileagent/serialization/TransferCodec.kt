@@ -708,8 +708,9 @@ object TransferCodec {
 
     private fun requireMetadataSize(raw: String, operationId: String, field: String) {
         val size = raw.toByteArray(Charsets.UTF_8).size.toLong()
-        if (size > TransferArchiveLimits.MAX_METADATA_BYTES) {
-            invalid(operationId, "$field exceeds the ${TransferArchiveLimits.MAX_METADATA_BYTES} byte metadata limit")
+        val limit = if (field == "conversation") TransferArchiveLimits.MAX_ENTRY_BYTES else TransferArchiveLimits.MAX_METADATA_BYTES
+        if (size > limit) {
+            invalid(operationId, "$field exceeds the $limit byte transfer limit")
         }
     }
 

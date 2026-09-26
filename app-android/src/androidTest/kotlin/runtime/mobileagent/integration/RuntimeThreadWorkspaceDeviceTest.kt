@@ -64,6 +64,13 @@ class RuntimeThreadWorkspaceDeviceTest {
             CapabilityId(CapabilityId.FILE_READ_TEXT),
         )
         assertEquals(readOnly, canonicalDefaultWorkspaceGrantCapabilities(readOnly))
+        val writable = readOnly + setOf(
+            CapabilityId(CapabilityId.FILE_WRITE_TEXT),
+            CapabilityId(CapabilityId.FILE_DELETE),
+            CapabilityId("file.apply_patch"),
+        )
+        assertEquals(readOnly, canonicalDefaultWorkspaceGrantCapabilities(writable))
+        assertEquals(writable, canonicalFullDeviceWorkspaceGrantCapabilities(writable))
         assertEquals(
             readOnly,
             canonicalDefaultWorkspaceGrantCapabilities(
@@ -475,11 +482,6 @@ class RuntimeThreadWorkspaceDeviceTest {
             CapabilityId.FILE_LIST,
             CapabilityId.FILE_STAT,
             CapabilityId.FILE_READ_TEXT,
-            CapabilityId.FILE_WRITE_TEXT,
-            CapabilityId.FILE_CREATE_DIRECTORY,
-            CapabilityId.FILE_MOVE,
-            CapabilityId.FILE_DELETE,
-            "file.apply_patch",
         )
         val firstBundle = container.agentGrantPort.listGrants(fixture.agentId, includeRevoked = true)
             .filter { it.workspaceId == RuntimeIntegration.INTERNAL_WORKSPACE_ID && !it.revoked }
@@ -494,6 +496,7 @@ class RuntimeThreadWorkspaceDeviceTest {
         val secondBundle = container.agentGrantPort.listGrants(fixture.agentId, includeRevoked = true)
             .filter { it.workspaceId == RuntimeIntegration.INTERNAL_WORKSPACE_ID && !it.revoked }
         assertEquals(firstBundle.map { it.grantId }.toSet(), secondBundle.map { it.grantId }.toSet())
+        assertTrue(secondBundle.none { it.capability.value in setOf(CapabilityId.FILE_WRITE_TEXT, CapabilityId.FILE_DELETE, "file.apply_patch") })
         val chat = ChatViewModel(fixture.app, SavedStateHandle())
         chat.selectAgent(fixture.agentId)
         val conversationId = requireNotNull(chat.newSession()) { "newSession must inherit the Agent default" }
@@ -513,7 +516,7 @@ class RuntimeThreadWorkspaceDeviceTest {
     }
 
     @Test
-    fun revokedDefaultGrantsStayRevokedUntilAgentExplicitlySelectsDefaultAgain() = runBlocking {
+    fun revokedDefaultGrantsStayRevokedUntilReselectionAndReselectionNeverRestoresWrites() = runBlocking {
         val fixture = fixture()
         val container = fixture.app.container
         val runtime = container.runtimeIntegration
@@ -526,6 +529,19 @@ class RuntimeThreadWorkspaceDeviceTest {
         val activeBundle = container.agentGrantPort.listGrants(fixture.agentId, includeRevoked = false)
             .filter { it.workspaceId == RuntimeIntegration.INTERNAL_WORKSPACE_ID }
         assertTrue(activeBundle.isNotEmpty())
+
+        val write = container.agentGrantPort.saveGrant(
+            CapabilityGrant(
+                grantId = "grant-explicit-write-${fixture.suffix}",
+                agentId = fixture.agentId,
+                capability = CapabilityId(CapabilityId.FILE_WRITE_TEXT),
+                workspaceId = RuntimeIntegration.INTERNAL_WORKSPACE_ID,
+                lifetime = GrantLifetime.PERSISTENT,
+                policyVersion = container.agentGrantPort.currentPolicyVersion(),
+                createdAt = fixture.now,
+            ),
+        )
+        container.agentGrantPort.revokeGrant(write.grantId, write.revision)
 
         activeBundle.forEach { grant ->
             container.agentGrantPort.revokeGrant(grant.grantId, grant.revision)
@@ -549,6 +565,45 @@ class RuntimeThreadWorkspaceDeviceTest {
             RuntimeIntegration.INTERNAL_WORKSPACE_ID,
             threadPort.resolveNewThreadWorkspace(fixture.agentId),
         )
+        val afterReselection = container.agentGrantPort.listGrants(fixture.agentId, includeRevoked = false)
+            .filter { it.workspaceId == RuntimeIntegration.INTERNAL_WORKSPACE_ID }
+        assertEquals(
+            setOf(CapabilityId.WORKSPACE_ENUMERATE, CapabilityId.FILE_LIST, CapabilityId.FILE_STAT, CapabilityId.FILE_READ_TEXT),
+            afterReselection.map { it.capability.value }.toSet(),
+        )
+    }
+
+    @Test
+    fun defaultReadOnlyReconfirmationDoesNotRetireIndependentScopedOrOneShotGrants() = runBlocking {
+        val fixture = fixture()
+        val container = fixture.app.container
+        val workspaceId = RuntimeIntegration.INTERNAL_WORKSPACE_ID
+        val policyVersion = container.agentGrantPort.currentPolicyVersion()
+        val scoped = container.agentGrantPort.saveGrant(
+            CapabilityGrant(
+                grantId = "grant-scoped-${fixture.suffix}", agentId = fixture.agentId,
+                capability = CapabilityId(CapabilityId.FILE_WRITE_TEXT), workspaceId = workspaceId,
+                pathScope = "notes", lifetime = GrantLifetime.PERSISTENT,
+                policyVersion = policyVersion, createdAt = fixture.now,
+            ),
+        )
+        val once = container.agentGrantPort.saveGrant(
+            CapabilityGrant(
+                grantId = "grant-once-${fixture.suffix}", agentId = fixture.agentId,
+                capability = CapabilityId(CapabilityId.FILE_DELETE), workspaceId = workspaceId,
+                lifetime = GrantLifetime.ONCE,
+                policyVersion = policyVersion, createdAt = fixture.now,
+            ),
+        )
+
+        assertTrue(container.runtimeIntegration.useRecentWorkspace(
+            workspaceId = workspaceId,
+            target = WorkspacePickerTarget(agentId = fixture.agentId),
+        ) is WorkspaceAccessResult.Success)
+        val currentIds = container.agentGrantPort.listGrants(fixture.agentId, includeRevoked = false)
+            .map { it.grantId }.toSet()
+        assertTrue(scoped.grantId in currentIds)
+        assertTrue(once.grantId in currentIds)
     }
 
     @Test

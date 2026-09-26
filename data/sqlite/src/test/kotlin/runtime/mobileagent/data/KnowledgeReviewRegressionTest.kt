@@ -138,6 +138,9 @@ class KnowledgeReviewRegressionTest {
             assertNotEquals(oldGeneration, newGeneration)
             assertEquals(count + 1, db.query("SELECT COUNT(*) AS n FROM generation_members WHERE generation_id=?", listOf(newGeneration)).single().long("n"))
             assertTrue(repo.search("blossom").any { it.documentId == added.documentId })
+            assertTrue(assertThrows(IllegalStateException::class.java) { repo.rebuildIndex(seed.knowledgeBaseId) }
+                .message.orEmpty().contains("INDEX_SOURCE_INCOMPLETE"))
+            assertEquals(ImportStage.READY, repo.resumeImport(failed.id, visionConfigured = false).stage)
             val beforeRebuild = embeddingCalls
             val rebuilt = repo.rebuildIndex(seed.knowledgeBaseId)
             assertNotEquals(newGeneration, rebuilt)

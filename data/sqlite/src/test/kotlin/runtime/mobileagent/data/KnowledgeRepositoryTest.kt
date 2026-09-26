@@ -595,6 +595,102 @@ class KnowledgeRepositoryTest {
     }
 
     @Test
+    fun failedImportDoesNotAllowPartialKnowledgeBaseRebuild() {
+        val db = JdbcSqlConnection()
+        Migrations.apply(db)
+        val repo = KnowledgeRepository(db, MemoryBlobSink())
+        val kb = repo.ensureDefaultBase()
+        assertEquals(
+            ImportStage.READY,
+            repo.importBytes("ready.txt", "text/plain", "indexed source".toByteArray(), false, kb).stage,
+        )
+        val failed = repo.importBytes("broken.pdf", "application/pdf", "%PDF-1.4 leftover".toByteArray(), false, kb)
+        assertEquals(ImportStage.FAILED, failed.stage)
+
+        val error = assertThrows(IllegalStateException::class.java) { repo.rebuildIndex(kb) }
+        assertTrue(error.message.orEmpty().contains("INDEX_SOURCE_INCOMPLETE"))
+        assertEquals(
+            ImportStage.READY,
+            repo.importBytes("later.txt", "text/plain", "later healthy source".toByteArray(), false, kb).stage,
+        )
+        repo.repairIndexes()
+        assertTrue(
+            db.query("SELECT active_generation_id FROM knowledge_bases WHERE id = ?", listOf(kb))
+                .single().string("active_generation_id").isNotBlank(),
+        )
+        assertTrue(repo.search("later", knowledgeBaseIds = listOf(kb)).any { "healthy" in it.text })
+        assertTrue(assertThrows(IllegalStateException::class.java) { repo.rebuildIndex(kb) }
+            .message.orEmpty().contains("INDEX_SOURCE_INCOMPLETE"))
+    }
+
+    @Test
+    fun repairIndexesRebuildsWhenRestoredActiveVersionIsMissingFromReadyGeneration() {
+        val db = JdbcSqlConnection()
+        Migrations.apply(db)
+        val repo = KnowledgeRepository(db, MemoryBlobSink())
+        val kb = repo.ensureDefaultBase()
+        val original = repo.importBytes("original.txt", "text/plain", "old indexed source".toByteArray(), false, kb)
+        val oldGeneration = db.query(
+            "SELECT active_generation_id FROM knowledge_bases WHERE id = ?",
+            listOf(kb),
+        ).single().string("active_generation_id")
+        val restoredText = "Restored cobalt calibration marker from archive"
+        val restoredVersion = "restore-version-fixture"
+        db.execute(
+            "INSERT INTO document_versions(id,document_id,parser_fingerprint,content_hash,status,created_at) VALUES(?,?,?,?,?,?)",
+            listOf(restoredVersion, original.documentId, "restore-fixture-parser", sha256Hex(restoredText.toByteArray()), "READY", "fixture"),
+        )
+        db.execute(
+            "INSERT INTO chunks(id,document_version_id,ordinal,text,content_hash,source_span,asset_ids,page) VALUES(?,?,?,?,?,?,?,?)",
+            listOf("restore-chunk-fixture", restoredVersion, 0, restoredText, sha256Hex(restoredText.toByteArray()), null, "", null),
+        )
+        db.execute("UPDATE documents SET active_version_id = ? WHERE id = ?", listOf(restoredVersion, original.documentId))
+
+        assertTrue(repo.search("cobalt", knowledgeBaseIds = listOf(kb)).isEmpty())
+        repo.repairIndexes()
+
+        val rebuiltGeneration = db.query(
+            "SELECT active_generation_id FROM knowledge_bases WHERE id = ?",
+            listOf(kb),
+        ).single().string("active_generation_id")
+        assertNotEquals(oldGeneration, rebuiltGeneration)
+        assertTrue(repo.search("cobalt", knowledgeBaseIds = listOf(kb)).any { "calibration" in it.text })
+    }
+
+    @Test
+    fun rebuildRejectsPlaceholderReadyVersionWithoutLocalChunks() {
+        val db = JdbcSqlConnection()
+        Migrations.apply(db)
+        val repo = KnowledgeRepository(db, MemoryBlobSink())
+        val kb = repo.ensureDefaultBase()
+        val original = repo.importBytes("original.txt", "text/plain", "old indexed source".toByteArray(), false, kb)
+        val oldGeneration = db.query(
+            "SELECT active_generation_id FROM knowledge_bases WHERE id = ?",
+            listOf(kb),
+        ).single().string("active_generation_id")
+        val blobHash = db.query("SELECT blob_hash FROM documents WHERE id = ?", listOf(original.documentId)).single().string("blob_hash")
+        val placeholderVersion = "restore-placeholder-fixture"
+        db.execute(
+            "INSERT INTO document_versions(id,document_id,parser_fingerprint,content_hash,status,created_at) VALUES(?,?,?,?,?,?)",
+            listOf(placeholderVersion, original.documentId, "restore-fixture-parser", blobHash, "READY", "fixture"),
+        )
+        db.execute("UPDATE documents SET active_version_id = ? WHERE id = ?", listOf(placeholderVersion, original.documentId))
+
+        repo.repairIndexes()
+        val repairedPointer = db.query(
+            "SELECT active_generation_id FROM knowledge_bases WHERE id = ?",
+            listOf(kb),
+        ).single().string("active_generation_id")
+        val failure = assertThrows(IllegalStateException::class.java) { repo.rebuildIndex(kb) }
+
+        assertTrue(failure.message.orEmpty().contains("INDEX_SOURCE_INCOMPLETE"))
+        assertTrue(oldGeneration.isNotBlank())
+        assertTrue(repairedPointer.isBlank())
+        assertTrue(db.query("SELECT active_generation_id FROM knowledge_bases WHERE id = ?", listOf(kb)).single().string("active_generation_id").isBlank())
+        assertTrue(repo.search("old", knowledgeBaseIds = listOf(kb)).isEmpty())
+    }
+
+    @Test
     fun textPdfIsSearchableWithoutVision() {
         val db = JdbcSqlConnection()
         Migrations.apply(db)

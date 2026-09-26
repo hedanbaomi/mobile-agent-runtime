@@ -632,7 +632,7 @@ private class PythonSkillToolExecutor(
             val declared = declaration(permission)
             if (snapshot.chatModelId !in (scopes.strings("modelProfileIds") intersect declared.strings("modelProfileIds")) ||
                 container.agents.get(snapshot.agentId)?.chatProfileId != snapshot.chatModelId) throw BrokerDenied("PERMISSION_DENIED")
-            val binding = container.agents.resolveSnapshot(snapshot.id)
+            val binding = container.transfer.resolveRunBinding(snapshot.id)
             if (binding.snapshot != snapshot || args.requiredString("provider", 128) != binding.provider.id) throw BrokerDenied("PERMISSION_DENIED")
             val payload = args["request"] as? JsonObject ?: throw BrokerDenied("INVALID_ARGUMENTS")
             if (payload.keys.any { it !in setOf("prompt", "maxOutputTokens") }) throw BrokerDenied("INVALID_ARGUMENTS")

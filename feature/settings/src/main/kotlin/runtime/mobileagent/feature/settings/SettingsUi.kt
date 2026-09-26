@@ -384,9 +384,9 @@ fun SettingsScreen(
                 Text(if (zh) "数据与备份" else "Data and backup", style = MaterialTheme.typography.titleMedium)
                 Text(
                     if (zh) {
-                        "导出为 ZIP，写入你选择的位置；若选择云端文档提供方，该提供方可能上传或同步。应用不另行上传。扩展内容默认关闭，密钥与授权不进入导出；总大小上限 512 MiB，单项上限 50 MiB。"
+                        "导出为 ZIP，写入你选择的位置；若选择云端文档提供方，该提供方可能上传或同步。应用不另行上传。扩展内容默认关闭，密钥与授权不进入导出；总大小上限 512 MiB，单项上限 32 MiB。"
                     } else {
-                        "Export is a ZIP written to the location you choose. If you choose a cloud document provider, that provider may upload or sync it. The app does not upload it separately. Optional content is off by default; keys and authorizations are excluded. Total limit: 512 MiB; each item: 50 MiB."
+                        "Export is a ZIP written to the location you choose. If you choose a cloud document provider, that provider may upload or sync it. The app does not upload it separately. Optional content is off by default; keys and authorizations are excluded. Total limit: 512 MiB; each item: 32 MiB."
                     },
                     style = MaterialTheme.typography.bodySmall,
                 )

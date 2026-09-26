@@ -6,6 +6,7 @@ package runtime.mobileagent
 import android.app.Application
 import android.content.Intent
 import android.net.Uri
+import android.widget.Toast
 import androidx.compose.runtime.mutableStateOf
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
@@ -593,6 +594,7 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
         transferRunning = true
         viewModelScope.launch {
             try {
+                exportStatus.value = "正在校验并导入配置…"
                 val result = withContext(Dispatchers.IO) {
                     val input = app.contentResolver.openInputStream(uri) ?: error("无法读取导入文件。")
                     input.buffered().use { stream ->
@@ -617,9 +619,12 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
                 }
                 result.agentId?.let { app.container.uiPreferences.edit().putString("selected-agent", it).apply() }
                 exportStatus.value = "配置导入成功。${result.warnings.joinToString("；")} 密钥需重新配置，Skill 权限不会自动恢复。"
+                Toast.makeText(app, "配置导入成功，请检查导入结果和密钥配置。", Toast.LENGTH_LONG).show()
                 error.value = null
             } catch (failure: Exception) {
                 error.value = SecretRedactor.redact(failure.message ?: "导入被拒绝；原有数据未清空。")
+                exportStatus.value = "导入失败；现有配置未替换。"
+                Toast.makeText(app, "导入失败，请查看设置页错误信息。", Toast.LENGTH_LONG).show()
             } finally { transferRunning = false }
         }
     }

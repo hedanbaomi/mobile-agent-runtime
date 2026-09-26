@@ -40,6 +40,7 @@ import runtime.mobileagent.domain.RetryClass
 import runtime.mobileagent.domain.Message
 import runtime.mobileagent.domain.MessagePart
 import runtime.mobileagent.domain.RunRecord
+import runtime.mobileagent.domain.SnapshotBinding
 import runtime.mobileagent.domain.ToolInvocation
 import runtime.mobileagent.domain.Utc
 import runtime.mobileagent.knowledge.BlobSink
@@ -147,7 +148,7 @@ class TransferRepository(
             if (options.includeConversations) {
                 payload.conversations.forEach { item ->
                     val content = TransferCodec.encodeConversation(item.full, "export-conversation-${item.full.conversation.id}")
-                    writeBytes(item.entryName, content.toByteArray(Charsets.UTF_8), TransferArchiveLimits.MAX_METADATA_BYTES)
+                    writeBytes(item.entryName, content.toByteArray(Charsets.UTF_8), TransferArchiveLimits.MAX_ENTRY_BYTES)
                 }
             }
             zip.finish()
@@ -316,6 +317,45 @@ class TransferRepository(
 
     fun exportBundle(bundle: TransferBundle): String = TransferCodec.encode(bundle, "transfer-export")
 
+    /**
+     * Resolve an imported conversation for a new run without changing its frozen model, prompt,
+     * resource bindings, or stored history. Only credential references come from this device's
+     * provider row, and only when its identity and destination still match the archived provider.
+     */
+    fun resolveRunBinding(snapshotId: String): SnapshotBinding {
+        val binding = AgentRepository(db).resolveSnapshot(snapshotId)
+        val manifest = runCatching { json.parseToJsonElement(binding.snapshot.bindingManifestJson) as? JsonObject }
+            .getOrNull() ?: throw invalid("Snapshot binding manifest is invalid")
+        val policy = (manifest["snapshotRebindPolicy"] as? JsonPrimitive)?.content ?: return binding
+        if (policy != LOCAL_CREDENTIALS_REQUIRED) throw invalid("Unsupported snapshot credential rebind policy")
+        val profiles = ProfileRepository(db)
+        fun localCredentials(source: runtime.mobileagent.domain.ProviderProfile, required: Boolean): runtime.mobileagent.domain.ProviderProfile {
+            if (source.secretRef.isNotBlank() || source.headerSecretRefs.isNotEmpty()) {
+                throw invalid("Imported conversation contains a non-portable credential reference")
+            }
+            val local = profiles.getProvider(source.id)
+            if (local == null || local.secretRef.isBlank()) {
+                if (required) throw invalid("Imported conversation needs local credentials for its provider")
+                return source
+            }
+            if (local.apiFormat != source.apiFormat || local.baseUrl != source.baseUrl) {
+                if (required) throw invalid("Imported conversation provider destination differs from its historical snapshot")
+                return source
+            }
+            if (local.headerSecretRefs.keys.any { it in source.nonSecretHeaders }) {
+                if (required) throw invalid("Imported conversation credential headers conflict with its historical snapshot")
+                return source
+            }
+            return source.copy(secretRef = local.secretRef, headerSecretRefs = local.headerSecretRefs)
+        }
+        return binding.copy(
+            provider = localCredentials(binding.provider, required = true),
+            visionProvider = binding.visionProvider?.let { localCredentials(it, required = false) },
+            embeddingProvider = binding.embeddingProvider?.let { localCredentials(it, required = false) },
+            rerankerProvider = binding.rerankerProvider?.let { localCredentials(it, required = false) },
+        )
+    }
+
     fun importBundle(raw: String, conflictPolicy: TransferConflictPolicy = TransferConflictPolicy.REJECT): TransferImportResult {
         val bundle = TransferCodec.decode(raw, "transfer-import")
         return importBundle(bundle, conflictPolicy)
@@ -334,6 +374,7 @@ class TransferRepository(
         val warnings = mutableListOf<String>()
         var importedAgentId: String? = null
         db.transaction {
+            captureExistingHistory()
             bundle.knowledgeBases.forEach { kb -> importKnowledge(kb, conflictPolicy, warnings) }
             val skillInstalls = importSkills(bundle.skills, conflictPolicy, warnings)
             bundle.agent?.let { transfer ->
@@ -345,6 +386,10 @@ class TransferRepository(
             bundle.conversations.forEach { transfer ->
                 importConversation(transfer, conflictPolicy, warnings, skillInstalls)
             }
+            assertHistoryPreserved()
+        }
+        if (bundle.conversations.isNotEmpty()) {
+            warnings += "Imported conversation history needs local credentials for the same provider endpoint before it can continue"
         }
         return TransferImportResult(
             agentId = importedAgentId,
@@ -408,7 +453,7 @@ class TransferRepository(
                         entry.name.startsWith(CONVERSATION_PREFIX) -> {
                             val transfer = bundle.conversations.singleOrNull { it.contentEntry == entry.name && it.contentIncluded }
                                 ?: throw invalid("Archive contains an unlisted conversation entry ${entry.name}")
-                            val bytes = readEntryBytes(zip, entry, TransferArchiveLimits.MAX_METADATA_BYTES, counter)
+                            val bytes = readEntryBytes(zip, entry, TransferArchiveLimits.MAX_ENTRY_BYTES, counter)
                             val full = TransferCodec.decodeConversation(bytes.toString(Charsets.UTF_8), "transfer-conversation-${transfer.conversation.id}")
                             if (full.conversation != transfer.conversation || full.snapshot != transfer.snapshot ||
                                 full.snapshotRebindPolicy != transfer.snapshotRebindPolicy || full.contentEntry != transfer.contentEntry
@@ -425,6 +470,7 @@ class TransferRepository(
                 val warnings = mutableListOf<String>()
                 var importedAgentId: String? = null
                 db.transaction {
+                    captureExistingHistory()
                     bundle.knowledgeBases.forEach { kb ->
                         importKnowledge(kb, conflictPolicy, warnings, stagedBlobs)
                     }
@@ -445,12 +491,16 @@ class TransferRepository(
                         // NoSuchMethodError on an API 36 device).
                         val full = path?.let {
                             TransferCodec.decodeConversation(
-                                readStagedUtf8(it, TransferArchiveLimits.MAX_METADATA_BYTES, "conversation"),
+                                readStagedUtf8(it, TransferArchiveLimits.MAX_ENTRY_BYTES, "conversation"),
                                 "transfer-conversation-${manifest.conversation.id}",
                             )
                         } ?: throw invalid("Conversation ${manifest.conversation.id} content is missing")
                         importConversation(full, conflictPolicy, warnings, skillInstalls)
                     }
+                    assertHistoryPreserved()
+                }
+                if (bundle.conversations.isNotEmpty()) {
+                    warnings += "Imported conversation history needs local credentials for the same provider endpoint before it can continue"
                 }
                 return TransferImportResult(
                     agentId = importedAgentId,
@@ -470,6 +520,26 @@ class TransferRepository(
 
     fun importArchive(bytes: ByteArray, conflictPolicy: TransferConflictPolicy = TransferConflictPolicy.REJECT): TransferImportResult =
         importArchive(ByteArrayInputStream(bytes), conflictPolicy)
+
+    /** Capture stable IDs inside the import transaction so even same-count replacements fail. */
+    private fun captureExistingHistory() {
+        db.execute("CREATE TEMP TABLE transfer_import_history_before(kind TEXT NOT NULL, id TEXT NOT NULL, agent_id TEXT NOT NULL, PRIMARY KEY(kind,id))")
+        db.execute("INSERT INTO transfer_import_history_before(kind,id,agent_id) $HISTORY_ROWS_SQL")
+    }
+
+    /** No existing snapshot, conversation, transcript, run, tool result, or audit row may vanish. */
+    private fun assertHistoryPreserved() {
+        val removed = db.query(
+            """
+            WITH current_history AS ($HISTORY_ROWS_SQL)
+            SELECT kind,id,agent_id FROM transfer_import_history_before
+            EXCEPT SELECT kind,id,agent_id FROM current_history
+            LIMIT 1
+            """.trimIndent(),
+        ).isNotEmpty()
+        if (removed) throw invalid("Import would remove existing Agent history; transaction was rolled back")
+        db.execute("DROP TABLE transfer_import_history_before")
+    }
 
     private fun requireMetadataOnly(bundle: TransferBundle) {
         if (bundle.knowledgeBases.any { it.contentIncluded } ||
@@ -1278,7 +1348,15 @@ class TransferRepository(
                ORDER BY p.created_at DESC LIMIT 1""",
             listOf(id),
         ).singleOrNull()
-        val row = byInstall
+        // Uninstalled installs no longer appear in skill_installs. Keep their identity available
+        // for exporting immutable conversation snapshots through the revoked grant history.
+        val byHistoricalGrant = if (byInstall == null) db.query(
+            """SELECT p.*, g.install_id AS source_install_id FROM skill_packages p
+               JOIN permission_grants g ON g.package_hash = p.package_hash
+               WHERE g.install_id=? ORDER BY g.created_at DESC LIMIT 1""",
+            listOf(id),
+        ).singleOrNull() else null
+        val row = byInstall ?: byHistoricalGrant
             ?: db.query("SELECT * FROM skill_packages WHERE id=? ORDER BY created_at DESC LIMIT 1", listOf(id)).singleOrNull()
             ?: return null
         val bytes = if (includeBytes) row.columns["package_bytes"] as? ByteArray else null
@@ -1288,7 +1366,7 @@ class TransferRepository(
             skillMarkdown = row.string("skill_markdown").ifBlank { null }, sourceHash = row.string("source_hash").ifBlank { null },
             packageBase64 = bytes?.let(Base64.getEncoder()::encodeToString),
             packageIncluded = packageIncluded,
-            sourceInstallId = byInstall?.string("source_install_id")?.ifBlank { null },
+            sourceInstallId = (byInstall ?: byHistoricalGrant)?.string("source_install_id")?.ifBlank { null },
         )
     }
 
@@ -1386,6 +1464,26 @@ class TransferRepository(
         else snapshot.copy(skillIds = snapshot.skillIds.map(skillInstalls::resolve))
 
     companion object {
+        private val HISTORY_ROWS_SQL = """
+            SELECT 'snapshot' AS kind, s.id AS id, s.agent_id AS agent_id FROM agent_snapshots s
+            UNION ALL SELECT 'conversation', c.id, s.agent_id
+              FROM conversations c JOIN agent_snapshots s ON s.id = c.snapshot_id
+            UNION ALL SELECT 'message', m.id, s.agent_id
+              FROM messages m JOIN conversations c ON c.id = m.conversation_id
+              JOIN agent_snapshots s ON s.id = c.snapshot_id
+            UNION ALL SELECT 'part', p.id, s.agent_id
+              FROM message_parts p JOIN messages m ON m.id = p.message_id
+              JOIN conversations c ON c.id = m.conversation_id
+              JOIN agent_snapshots s ON s.id = c.snapshot_id
+            UNION ALL SELECT 'run', r.run_id, s.agent_id
+              FROM runs r JOIN agent_snapshots s ON s.id = r.snapshot_id
+            UNION ALL SELECT 'tool', t.invocation_id, s.agent_id
+              FROM tool_invocations t JOIN runs r ON r.run_id = t.run_id
+              JOIN agent_snapshots s ON s.id = r.snapshot_id
+            UNION ALL SELECT 'audit', a.id, s.agent_id
+              FROM audit_events a JOIN runs r ON r.run_id = a.run_id
+              JOIN agent_snapshots s ON s.id = r.snapshot_id
+        """.trimIndent()
         private const val MANIFEST_ENTRY = "manifest.json"
         private const val BLOB_PREFIX = "blobs/"
         private const val SKILL_PREFIX = "skills/"

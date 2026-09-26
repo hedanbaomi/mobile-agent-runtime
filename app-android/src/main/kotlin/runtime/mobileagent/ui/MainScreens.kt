@@ -20,6 +20,8 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
@@ -667,6 +669,7 @@ private fun AgentsRoute(entry: NavBackStackEntry, chinese: Boolean, onRoute: (St
     var browserPage by remember { mutableStateOf<runtime.mobileagent.skills.tooling.WorkspaceDirectoryPage?>(null) }
     var browserTrail by remember { mutableStateOf<List<String>>(emptyList()) }
     var browserOpen by remember { mutableStateOf(false) }
+    var browserError by remember { mutableStateOf("") }
     var wiredPathOpen by remember { mutableStateOf(false) }
     var wiredPath by remember { mutableStateOf("") }
     var confirmFullDevice by remember { mutableStateOf(false) }
@@ -898,6 +901,7 @@ private fun AgentsRoute(entry: NavBackStackEntry, chinese: Boolean, onRoute: (St
                     browserPage = result.value
                     browserTrail = emptyList()
                     browserOpen = true
+                    browserError = ""
                     workspaceStatus = ""
                 }
                 is runtime.mobileagent.skills.tooling.WorkspaceResult.Failure -> {
@@ -989,6 +993,7 @@ private fun AgentsRoute(entry: NavBackStackEntry, chinese: Boolean, onRoute: (St
             page = browserPage,
             currentLabel = browserTrail.lastOrNull() ?: if (chinese) "设备根目录" else "Device root",
             busy = workspaceBusy,
+            error = browserError,
             chinese = chinese,
             onOpenDirectory = { entry ->
                 val handle = entry.handle ?: return@PrivilegedWorkspaceBrowserDialog
@@ -1003,9 +1008,10 @@ private fun AgentsRoute(entry: NavBackStackEntry, chinese: Boolean, onRoute: (St
                         is runtime.mobileagent.skills.tooling.WorkspaceResult.Success -> {
                             browserPage = result.value
                             browserTrail = browserTrail + entry.name
+                            browserError = ""
                         }
                         is runtime.mobileagent.skills.tooling.WorkspaceResult.Failure -> {
-                            workspaceStatus = workspaceToolErrorMessage(result.error.code, chinese)
+                            browserError = workspaceToolErrorMessage(result.error.code, chinese)
                         }
                     }
                     workspaceBusy = false
@@ -1024,9 +1030,35 @@ private fun AgentsRoute(entry: NavBackStackEntry, chinese: Boolean, onRoute: (St
                         is runtime.mobileagent.skills.tooling.WorkspaceResult.Success -> {
                             browserPage = result.value
                             browserTrail = browserTrail.dropLast(1)
+                            browserError = ""
                         }
                         is runtime.mobileagent.skills.tooling.WorkspaceResult.Failure -> {
-                            workspaceStatus = workspaceToolErrorMessage(result.error.code, chinese)
+                            browserError = workspaceToolErrorMessage(result.error.code, chinese)
+                        }
+                    }
+                    workspaceBusy = false
+                }
+            },
+            onLoadMore = {
+                val previous = browserPage ?: return@PrivilegedWorkspaceBrowserDialog
+                val continuation = previous.continuation ?: return@PrivilegedWorkspaceBrowserDialog
+                coroutineScope.launch {
+                    workspaceBusy = true
+                    val result = withContext(Dispatchers.IO) {
+                        workspacePort.browsePrivileged(
+                            selectedAuthority,
+                            runtime.mobileagent.skills.tooling.WorkspaceBrowseRequest(previous.current, continuation = continuation),
+                        )
+                    }
+                    if (browserOpen && browserPage === previous) {
+                        when (result) {
+                            is runtime.mobileagent.skills.tooling.WorkspaceResult.Success -> {
+                                browserPage = appendPrivilegedBrowserPage(previous, result.value)
+                                browserError = ""
+                            }
+                            is runtime.mobileagent.skills.tooling.WorkspaceResult.Failure -> {
+                                browserError = workspaceToolErrorMessage(result.error.code, chinese)
+                            }
                         }
                     }
                     workspaceBusy = false
@@ -1157,14 +1189,29 @@ internal fun selectDurablyAuthorizedWorkspace(
     }
     .maxByOrNull { it.grantRevision ?: 0L }
 
+internal fun appendPrivilegedBrowserPage(
+    previous: runtime.mobileagent.skills.tooling.WorkspaceDirectoryPage,
+    next: runtime.mobileagent.skills.tooling.WorkspaceDirectoryPage,
+): runtime.mobileagent.skills.tooling.WorkspaceDirectoryPage {
+    val merged = (previous.entries + next.entries).distinctBy { it.type to it.name }
+    val limitReached = merged.size >= 100_000
+    return next.copy(
+        entries = merged.take(100_000),
+        continuation = if (limitReached) null else next.continuation,
+        truncated = next.truncated || limitReached,
+    )
+}
+
 @Composable
 private fun PrivilegedWorkspaceBrowserDialog(
     page: runtime.mobileagent.skills.tooling.WorkspaceDirectoryPage?,
     currentLabel: String,
     busy: Boolean,
+    error: String,
     chinese: Boolean,
     onOpenDirectory: (runtime.mobileagent.skills.tooling.WorkspaceDirectoryEntry) -> Unit,
     onUp: () -> Unit,
+    onLoadMore: () -> Unit,
     onAttach: () -> Unit,
     onClose: () -> Unit,
 ) {
@@ -1173,44 +1220,48 @@ private fun PrivilegedWorkspaceBrowserDialog(
         modifier = Modifier.testTag("agents.workspace.browser"),
         title = { Text(if (chinese) "选择设备目录" else "Choose device directory") },
         text = {
-            Column(
-                Modifier.fillMaxWidth().heightIn(max = 480.dp).verticalScroll(rememberScrollState()),
+            LazyColumn(
+                Modifier.fillMaxWidth().heightIn(max = 480.dp),
                 verticalArrangement = Arrangement.spacedBy(8.dp),
             ) {
-                Text(
-                    if (chinese) "当前位置：$currentLabel" else "Current: $currentLabel",
-                    style = MaterialTheme.typography.titleSmall,
-                )
-                Text(
-                    if (chinese) {
-                        "目录名称只在本机界面显示；模型只会得到选中后的工作区标识和相对路径。"
-                    } else {
-                        "Directory names stay in the local UI; the model receives only the attached workspace and relative paths."
-                    },
-                    style = MaterialTheme.typography.bodySmall,
-                )
+                item { Text(if (chinese) "当前位置：$currentLabel" else "Current: $currentLabel", style = MaterialTheme.typography.titleSmall) }
+                item {
+                    Text(
+                        if (chinese) "目录名称只在本机界面显示；模型只会得到选中后的工作区标识和相对路径。"
+                        else "Directory names stay in the local UI; the model receives only the attached workspace and relative paths.",
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                }
+                if (error.isNotBlank()) item { Text(error, color = MaterialTheme.colorScheme.error) }
                 if (busy) {
-                    CircularProgressIndicator(Modifier.size(28.dp))
+                    item { CircularProgressIndicator(Modifier.size(28.dp)) }
                 } else {
-                    page?.entries.orEmpty()
-                        .filter { it.type == runtime.mobileagent.skills.tooling.WorkspaceEntryType.DIRECTORY }
-                        .forEach { entry ->
-                            Card(
-                                Modifier.fillMaxWidth().clickable(enabled = entry.handle != null) { onOpenDirectory(entry) },
-                            ) {
-                                Text(entry.name, Modifier.padding(14.dp), style = MaterialTheme.typography.bodyLarge)
+                    val directories = page?.entries.orEmpty().filter { it.type == runtime.mobileagent.skills.tooling.WorkspaceEntryType.DIRECTORY }
+                    items(directories) { entry ->
+                        Card(
+                            Modifier.fillMaxWidth().clickable(enabled = entry.handle != null) { onOpenDirectory(entry) },
+                        ) {
+                            Text(entry.name, Modifier.padding(14.dp), style = MaterialTheme.typography.bodyLarge)
+                        }
+                    }
+                    if (directories.isEmpty()) {
+                        item { Text(if (chinese) "此处没有可进入的子目录。" else "No child directories are available here.") }
+                    }
+                    if (page?.continuation != null) {
+                        item {
+                            TextButton(onClick = onLoadMore, modifier = Modifier.testTag("agents.workspace.browser.load_more")) {
+                                Text(if (chinese) "加载更多目录" else "Load more directories")
                             }
                         }
-                    if (page?.entries.orEmpty().none { it.type == runtime.mobileagent.skills.tooling.WorkspaceEntryType.DIRECTORY }) {
-                        Text(if (chinese) "此处没有可进入的子目录。" else "No child directories are available here.")
-                    }
-                    if (page?.truncated == true) {
-                        Text(if (chinese) "目录过多，仅显示前一部分。" else "Only the first part of this directory is shown.")
+                    } else if (page?.truncated == true) {
+                        item { Text(if (chinese) "目录列表未完整返回，请重新打开。" else "Directory listing is incomplete; reopen it.") }
                     }
                 }
                 if (page?.parent != null) {
-                    TextButton(onClick = onUp, enabled = !busy) {
-                        Text(if (chinese) "返回上一级" else "Up one level")
+                    item {
+                        TextButton(onClick = onUp, enabled = !busy) {
+                            Text(if (chinese) "返回上一级" else "Up one level")
+                        }
                     }
                 }
             }
@@ -1585,6 +1636,8 @@ private fun SkillsRoute(entry: NavBackStackEntry, chinese: Boolean) {
     val actions = runtime.mobileagent.feature.skills.SkillsActions(
         onImport = vm::importUris, onQuery = vm::query, onFilter = vm::filter, onOpenDetail = vm::openDetail,
         onCloseDetail = vm::closeDetail, onToggle = vm::toggle, onGrantPermission = vm::beginGrant,
+        onRequestUninstall = vm::requestUninstall, onConfirmUninstall = vm::confirmUninstall,
+        onCancelUninstall = vm::cancelUninstall,
         onRevokePermission = vm::revokePermission, onConfirmInstall = vm::confirmInstall,
         onCancelInstall = vm::cancelInstall, onOpenSource = vm::openSource, onCloseSource = vm::closeSource,
     )

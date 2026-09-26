@@ -26,6 +26,78 @@ import runtime.mobileagent.serialization.TransferOptions
 
 class SkillRepositoryTest {
     @Test
+    fun uninstallRevokesLiveAccessButPreservesHistoricalExportAndOtherSkills() = database { db ->
+        val skills = SkillRepository(db)
+        val bytes = packageBytes()
+        assertTrue(skills.importPackage(bytes).accepted)
+        val removed = skills.list().single()
+        skills.approvePermissions(removed.installId, emptySet())
+        skills.setEnabled(removed.installId, true)
+        assertTrue(skills.importPackage(instructionOnlyPackageBytes("Other skill")).accepted)
+        val other = skills.list().single { it.installId != removed.installId }
+        skills.setEnabled(other.installId, true)
+
+        createChatProfile(db)
+        val agents = AgentRepository(db)
+        val agent = agents.saveWithPrompt(
+            agentProfile("agent.uninstall", "model.skills.chat", removed.installId),
+            "Keep historical skill identity.",
+        )
+        val snapshot = agents.createSnapshot(agent.id, "snapshot.uninstall", "2026-09-26T00:00:00Z")
+        val conversation = ConversationRepository(db).create(
+            snapshot.id, "History", "conversation.uninstall", "2026-09-26T00:00:01Z",
+        )
+        ConversationRepository(db).append(
+            conversation.id, MessageRole.USER, "hello", messageId = "message.uninstall",
+            createdAt = "2026-09-26T00:00:02Z",
+        )
+        db.execute(
+            "INSERT INTO skill_memory_spaces(space_id,install_id,package_hash,quota_bytes,max_entries,version,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)",
+            listOf("memory.uninstall", removed.installId, removed.packageHash, 1024, 2, 1, "2026-09-26T00:00:00Z", "2026-09-26T00:00:00Z"),
+        )
+        db.execute(
+            "INSERT INTO capability_grants(grant_id,agent_id,skill_install_id,package_hash,capability,workspace_id,path_scope,lifetime,policy_version,created_at,revision) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+            listOf("grant.uninstall", agent.id, removed.installId, removed.packageHash, "shell.execute", null, null, "PERSISTENT", 0, "2026-09-26T00:00:00Z", 1),
+        )
+
+        assertTrue(skills.uninstall(removed.installId))
+        assertFalse(skills.uninstall(removed.installId))
+        assertEquals(listOf(other.installId), skills.list().map { it.installId })
+        assertTrue(agents.get(agent.id)!!.skillIds.isEmpty())
+        assertTrue(agents.get(agent.id)!!.revision > agent.revision)
+        assertEquals(listOf(removed.installId), agents.getSnapshot(snapshot.id)!!.skillIds)
+        assertTrue(skills.grantForInvocation(removed.installId, setOf(removed.installId), emptySet()).revoked)
+        assertTrue(skills.grantsFor(removed.installId).all { it.revoked })
+        assertTrue(db.query("SELECT revoked_at FROM capability_grants WHERE grant_id='grant.uninstall'").single().string("revoked_at").isNotBlank())
+        assertEquals(1L, db.query("SELECT COUNT(*) AS n FROM skill_memory_spaces WHERE install_id=?", listOf(removed.installId)).single().long("n"))
+        assertNotNull(skills.packageBytes(removed.packageHash))
+        assertFalse(skills.grantForInvocation(other.installId, setOf(other.installId), emptySet()).revoked)
+
+        val output = ByteArrayOutputStream()
+        TransferRepository(db).exportArchive(
+            agent.id, TransferOptions(includeSkillPackageBytes = true, includeConversations = true), output,
+        )
+        val exported = TransferCodec.decode(readArchiveManifest(output.toByteArray()))
+        assertEquals(removed.installId, exported.skills.single().sourceInstallId)
+
+        assertTrue(skills.importPackage(bytes).accepted)
+        val reinstalled = skills.list().single { it.installId != other.installId }
+        assertNotEquals(removed.installId, reinstalled.installId)
+        assertFalse(reinstalled.enabled)
+        assertTrue(skills.grantForInvocation(reinstalled.installId, setOf(reinstalled.installId), emptySet()).revoked)
+    }
+
+    @Test
+    fun uninstallUnusedSkillReleasesPackageBytes() = database { db ->
+        val skills = SkillRepository(db)
+        assertTrue(skills.importPackage(instructionOnlyPackageBytes()).accepted)
+        val skill = skills.list().single()
+        assertTrue(skills.uninstall(skill.installId))
+        assertNull(skills.packageBytes(skill.packageHash))
+        assertTrue(skills.list().isEmpty())
+    }
+
+    @Test
     fun importDoesNotAuthorizeOrExecutePackage() = database { db ->
         val repository = SkillRepository(db)
         assertTrue(repository.importPackage(packageBytes()).accepted)

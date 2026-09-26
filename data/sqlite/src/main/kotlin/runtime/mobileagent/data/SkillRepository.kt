@@ -3,6 +3,7 @@
 
 package runtime.mobileagent.data
 
+import kotlinx.serialization.decodeFromString
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
@@ -169,6 +170,56 @@ class SkillRepository(private val db: SqlConnection) {
             db.execute("UPDATE permission_grants SET revoked = 1, revoked_at = COALESCE(revoked_at, ?), revision = revision + 1 WHERE install_id = ?", listOf(now, installId))
             db.execute("UPDATE skill_installs SET enabled = 0 WHERE install_id = ?", listOf(installId))
         }
+    }
+
+    /** Remove a live installation without rewriting immutable conversation or audit history. */
+    fun uninstall(installId: String): Boolean = db.transaction {
+        val packageHash = db.query(
+            "SELECT package_hash FROM skill_installs WHERE install_id = ?", listOf(installId),
+        ).singleOrNull()?.string("package_hash") ?: return@transaction false
+        val now = Utc.nowIso()
+
+        // New Agent snapshots must not inherit a dangling install id. Existing snapshots remain
+        // immutable, but the live install/grant checks below make their old tools unavailable.
+        db.query("SELECT id, skill_ids FROM agent_profiles").forEach { row ->
+            val skillIds = json.decodeFromString<List<String>>(row.string("skill_ids"))
+            if (installId in skillIds) {
+                db.execute(
+                    "UPDATE agent_profiles SET skill_ids = ?, revision = revision + 1 WHERE id = ?",
+                    listOf(json.encodeToString(skillIds.filterNot { it == installId }), row.string("id")),
+                )
+            }
+        }
+        db.execute(
+            "UPDATE permission_grants SET revoked = 1, revoked_at = COALESCE(revoked_at, ?), revision = revision + 1 WHERE install_id = ? AND revoked = 0",
+            listOf(now, installId),
+        )
+        db.execute(
+            "UPDATE capability_grants SET revoked_at = ?, revision = revision + 1 WHERE skill_install_id = ? AND revoked_at IS NULL",
+            listOf(now, installId),
+        )
+        db.execute(
+            "UPDATE approval_records SET decision = 'EXPIRED' WHERE skill_id = ? AND decision = 'APPROVED'",
+            listOf(installId),
+        )
+        db.execute("DELETE FROM skill_installs WHERE install_id = ?", listOf(installId))
+
+        // Keep the package bytes only when another installation or an immutable conversation
+        // snapshot needs them for a user-requested history export. Memory sidecars and audit rows
+        // are retained, but cannot become an active grant on a later import.
+        val stillInstalled = db.query(
+            "SELECT 1 FROM skill_installs WHERE package_hash = ? LIMIT 1", listOf(packageHash),
+        ).isNotEmpty()
+        val historicalIds = db.query(
+            "SELECT DISTINCT install_id FROM permission_grants WHERE package_hash = ?", listOf(packageHash),
+        ).map { it.string("install_id") }.toSet() + installId
+        val usedInHistory = db.query("SELECT skill_ids FROM agent_snapshots").any { row ->
+            json.decodeFromString<List<String>>(row.string("skill_ids")).any { it in historicalIds }
+        }
+        if (!stillInstalled && !usedInHistory) {
+            db.execute("UPDATE skill_packages SET package_bytes = NULL WHERE package_hash = ?", listOf(packageHash))
+        }
+        true
     }
 
     fun enabledInstructions(installIds: Set<String>? = null): List<String> =

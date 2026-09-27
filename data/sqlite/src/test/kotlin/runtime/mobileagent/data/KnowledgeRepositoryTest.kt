@@ -14,7 +14,9 @@ import runtime.mobileagent.knowledge.ApiEmbeddingBinding
 import runtime.mobileagent.knowledge.ApiQueryUnknownOutcomeException
 import runtime.mobileagent.knowledge.CitationMap
 import runtime.mobileagent.knowledge.EmbeddingUnknownOutcomeException
+import runtime.mobileagent.knowledge.ImportBatch
 import runtime.mobileagent.knowledge.ImportBatchKind
+import runtime.mobileagent.knowledge.ImportBatchProgress
 import runtime.mobileagent.knowledge.ImportBatchState
 import runtime.mobileagent.knowledge.ImportItemState
 import runtime.mobileagent.knowledge.ImportStage
@@ -829,6 +831,107 @@ class KnowledgeRepositoryTest {
         } finally {
             releaseBackend.countDown()
             executor.shutdownNow()
+        }
+    }
+
+    @Test
+    fun consentedVisionCallDoesNotBlockProgressReadsOrPause() {
+        val db = JdbcSqlConnection()
+        Migrations.apply(db)
+        val enteredBackend = CountDownLatch(1)
+        val releaseBackend = CountDownLatch(1)
+        val vision = runtime.mobileagent.knowledge.VisionBackend { input ->
+            check(input.beforeDispatch())
+            enteredBackend.countDown()
+            check(releaseBackend.await(10, TimeUnit.SECONDS)) { "test backend was not released" }
+            runtime.mobileagent.knowledge.VisionOutcome.Success(
+                runtime.mobileagent.knowledge.VisionSuccess("ocr", "diagram"),
+            )
+        }
+        val repo = KnowledgeRepository(db, MemoryBlobSink(), vision = vision, visionModelFingerprint = "vision-test")
+        val kb = repo.ensureDefaultBase()
+        val batchId = repo.beginBatch(kb, ImportBatchKind.FILES, "slow vision")
+        val png = byteArrayOf(0x89.toByte(), 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A) + ByteArray(16)
+        val copied = repo.importBytes(
+            "scan.png",
+            "image/png",
+            png,
+            visionConfigured = true,
+            knowledgeBaseId = kb,
+            pauseAt = ImportStage.COPYING,
+        )
+        repo.bindJobToBatch(batchId, copied, "scan.png")
+        val awaiting = repo.resumeImport(copied.id, visionConfigured = true)
+        repo.authorizeBatchVision(batchId, "vision-test")
+
+        val worker = Executors.newSingleThreadExecutor()
+        val ui = Executors.newSingleThreadExecutor()
+        try {
+            val consent = worker.submit<runtime.mobileagent.knowledge.ImportJob> { repo.grantVisionConsent(awaiting.id) }
+            assertTrue(enteredBackend.await(5, TimeUnit.SECONDS))
+            val progress = ui.submit<ImportBatchProgress> { repo.batchProgress(batchId) }.get(2, TimeUnit.SECONDS)
+            assertEquals(1, progress.processing)
+            val paused = ui.submit<ImportBatch?> { repo.pauseBatch(batchId) }.get(2, TimeUnit.SECONDS)
+            assertEquals(ImportBatchState.PAUSED, paused?.state)
+            releaseBackend.countDown()
+            consent.get(5, TimeUnit.SECONDS)
+            assertEquals(ImportBatchState.PAUSED, repo.findBatch(batchId)?.state)
+        } finally {
+            releaseBackend.countDown()
+            worker.shutdownNow()
+            ui.shutdownNow()
+        }
+    }
+
+    @Test
+    fun concurrentConsentForSameJobIsSerializedWithoutStaleStage() {
+        val db = JdbcSqlConnection()
+        Migrations.apply(db)
+        val enteredBackend = CountDownLatch(1)
+        val releaseBackend = CountDownLatch(1)
+        val calls = java.util.concurrent.atomic.AtomicInteger()
+        val vision = runtime.mobileagent.knowledge.VisionBackend { input ->
+            check(input.beforeDispatch())
+            calls.incrementAndGet()
+            enteredBackend.countDown()
+            check(releaseBackend.await(10, TimeUnit.SECONDS)) { "test backend was not released" }
+            runtime.mobileagent.knowledge.VisionOutcome.Success(
+                runtime.mobileagent.knowledge.VisionSuccess("ocr", "diagram"),
+            )
+        }
+        val repo = KnowledgeRepository(db, MemoryBlobSink(), vision = vision, visionModelFingerprint = "vision-test")
+        val kb = repo.ensureDefaultBase()
+        val batchId = repo.beginBatch(kb, ImportBatchKind.FILES, "duplicate consent")
+        val png = byteArrayOf(0x89.toByte(), 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A) + ByteArray(16)
+        val copied = repo.importBytes(
+            "scan.png",
+            "image/png",
+            png,
+            visionConfigured = true,
+            knowledgeBaseId = kb,
+            pauseAt = ImportStage.COPYING,
+        )
+        repo.bindJobToBatch(batchId, copied, "scan.png")
+        val awaiting = repo.resumeImport(copied.id, visionConfigured = true)
+        repo.authorizeBatchVision(batchId, "vision-test")
+
+        val workers = Executors.newFixedThreadPool(2)
+        try {
+            val first = workers.submit<runtime.mobileagent.knowledge.ImportJob> { repo.grantVisionConsent(awaiting.id) }
+            assertTrue(enteredBackend.await(5, TimeUnit.SECONDS))
+            val second = workers.submit<runtime.mobileagent.knowledge.ImportJob> { repo.grantVisionConsent(awaiting.id) }
+            assertThrows(java.util.concurrent.TimeoutException::class.java) { second.get(500, TimeUnit.MILLISECONDS) }
+            releaseBackend.countDown()
+            assertEquals(ImportStage.READY, first.get(5, TimeUnit.SECONDS).stage)
+            assertEquals(ImportStage.READY, second.get(5, TimeUnit.SECONDS).stage)
+            assertEquals(1, calls.get())
+            assertEquals(
+                ImportStage.READY.name,
+                db.query("SELECT stage FROM import_jobs WHERE id = ?", listOf(awaiting.id)).single().string("stage"),
+            )
+        } finally {
+            releaseBackend.countDown()
+            workers.shutdownNow()
         }
     }
 

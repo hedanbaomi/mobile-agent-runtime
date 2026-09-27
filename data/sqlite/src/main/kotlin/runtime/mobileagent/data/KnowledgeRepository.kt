@@ -1090,7 +1090,7 @@ class KnowledgeRepository(
         if (apiJob) {
             return runBlocking { resumeImportCancellable(jobId, bytes, visionConfigured) }
         }
-        return synchronized(indexLock) {
+        return synchronized(jobRunLock(jobId)) { synchronized(indexLock) {
         recoverPipelineJob(jobId)
         val row = db.query("SELECT * FROM import_jobs WHERE id = ?", listOf(jobId)).singleOrNull()
             ?: error("import job not found")
@@ -1146,9 +1146,23 @@ class KnowledgeRepository(
             )
         }
         validateRequestedEmbeddingSelection(kbId, job.embeddingIsApi, job.embeddingConsent)
-        return continueImport(job, displayName, payload, format)
-        }
+        PreparedImport(job, displayName, payload, format)
+        }.let(::continuePreparedImport) }
     }
+
+    private val jobRunLocks = Array(64) { Any() }
+
+    private fun jobRunLock(jobId: String): Any = jobRunLocks[Math.floorMod(jobId.hashCode(), jobRunLocks.size)]
+
+    private class PreparedImport(
+        val job: ImportJob,
+        val displayName: String,
+        val bytes: ByteArray,
+        val format: SourceFormat,
+    )
+
+    private fun continuePreparedImport(prepared: PreparedImport): ImportJob =
+        continueImport(prepared.job, prepared.displayName, prepared.bytes, prepared.format)
 
     /**
      * Mark an in-flight import cancelled.  The CAS source remains intact so a
@@ -1215,7 +1229,7 @@ class KnowledgeRepository(
                 grantVisionConsentCancellable(jobId, expectedVisionFingerprint, expectedDocumentsFingerprintHash)
             }
         }
-        return synchronized(indexLock) {
+        return synchronized(jobRunLock(jobId)) { synchronized(indexLock) {
         val row = db.query("SELECT * FROM import_jobs WHERE id = ?", listOf(jobId)).singleOrNull()
             ?: error("import job not found")
         expectedVisionFingerprint?.let {
@@ -1245,8 +1259,8 @@ class KnowledgeRepository(
             consentedVisionFingerprint = expectedVisionFingerprint ?: visionFingerprint(),
         )
         acceptReviewedPlan(row, job, bytes, format)
-        return continueImport(job, row.string("display_name"), bytes, format)
-        }
+        PreparedImport(job, row.string("display_name"), bytes, format)
+        }.let(::continuePreparedImport) }
     }
 
     /**

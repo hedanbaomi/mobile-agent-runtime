@@ -11,6 +11,7 @@ import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performScrollTo
 import androidx.compose.ui.test.performScrollToNode
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.test.ext.junit.runners.AndroidJUnit4
@@ -33,10 +34,9 @@ import runtime.mobileagent.announcements.ClientContext
 
 /**
  * Release-gate smoke for the single-drawer information architecture. The
- * drawer is the only top-level navigation surface: every destination is
- * reachable directly, top-level pages show Menu (never Back), and only
- * feature-internal detail promotes the bar to Back. Nothing here depends on
- * the removed More hub or on timing luck.
+ * drawer reaches every top-level destination directly. About is a Settings
+ * detail: top-level pages show Menu and details show Back. Nothing here
+ * depends on the removed More hub or on timing luck.
  */
 @RunWith(AndroidJUnit4::class)
 class ReleaseGateUiDeviceTest {
@@ -52,7 +52,6 @@ class ReleaseGateUiDeviceTest {
             "news" to ("公告" to "News"),
             "settings" to ("设置" to "Settings"),
             "mcp" to ("MCP" to "MCP"),
-            "about" to ("关于" to "About"),
             "inspector" to ("请求检查器" to "Request inspector"),
         ).forEach { (route, labels) ->
             openDrawer()
@@ -63,6 +62,27 @@ class ReleaseGateUiDeviceTest {
             waitForText(labels.first, labels.second)
             assertMenuShownAndBackAbsent()
         }
+    }
+
+    @Test
+    fun aboutIsReachedThroughSettingsAndReturnsThere() {
+        waitForText("对话", "Chat")
+        openDrawer()
+        assertTrue(
+            compose.onAllNodesWithTag("global.drawer.navigation.about", useUnmergedTree = true)
+                .fetchSemanticsNodes().isEmpty(),
+        )
+        compose.onNodeWithTag("global.drawer")
+            .performScrollToNode(hasTestTag("global.drawer.navigation.settings"))
+        compose.onNodeWithTag("global.drawer.navigation.settings").performClick()
+        waitForText("设置", "Settings")
+        compose.onNodeWithTag("settings.open_about")
+            .performScrollTo().assertHasClickAction().performClick()
+        waitForText("关于", "About")
+        compose.onNodeWithTag("global.shell.navigation.back")
+            .assertExists().assertHasClickAction().performClick()
+        waitForText("设置", "Settings")
+        assertMenuShownAndBackAbsent()
     }
 
     @Test

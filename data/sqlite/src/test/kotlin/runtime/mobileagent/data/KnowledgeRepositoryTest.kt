@@ -85,6 +85,58 @@ class KnowledgeRepositoryTest {
     }
 
     @Test
+    fun onlyByteIdenticalIllustrationsReuseOneVisionResult() {
+        val db = JdbcSqlConnection()
+        Migrations.apply(db)
+        fun jpeg(rgb: Int) = ByteArrayOutputStream().also { output ->
+            val image = BufferedImage(8, 8, BufferedImage.TYPE_INT_RGB)
+            for (x in 0 until 8) for (y in 0 until 8) image.setRGB(x, y, 0x3366CC)
+            image.setRGB(7, 7, rgb)
+            assertTrue(ImageIO.write(image, "jpeg", output))
+        }.toByteArray()
+        val logo = jpeg(0x3366CC)
+        val nearlySame = jpeg(0xFFFFFF)
+        assertFalse(logo.contentEquals(nearlySame))
+        val sent = mutableListOf<runtime.mobileagent.knowledge.VisionInput>()
+        val rasterizer = object : PdfPageRasterizer, ImageUnitRasterizer {
+            override fun render(pdfBytes: ByteArray, pages: List<Int>): List<RenderedPdfPage> = emptyList()
+            override fun imageDimensions(bytes: ByteArray): Pair<Int, Int>? = 8 to 8
+            override fun renderImageUnit(bytes: ByteArray, unit: ProcessingUnit, limits: UnitRenderLimits): RenderedPdfPage? =
+                RenderedPdfPage(unit.page, bytes, "image/jpeg", 8, 8)
+        }
+        val repo = KnowledgeRepository(db, MemoryBlobSink(),
+            vision = runtime.mobileagent.knowledge.VisionBackend { input ->
+                sent += input
+                runtime.mobileagent.knowledge.VisionOutcome.Success(
+                    runtime.mobileagent.knowledge.VisionSuccess("QUAREIA", "sigil number ${sent.size}"))
+            },
+            visionModelFingerprint = "vision-test",
+            pdfRasterizer = rasterizer,
+        )
+        val first = repo.importBytes("lesson-1.pdf", "application/pdf",
+            runtime.mobileagent.knowledge.PdfParser.writeTwoPagePdfWithImageXObject(logo),
+            visionConfigured = true, visionConsent = true)
+        assertEquals(ImportStage.READY, first.stage, first.error)
+        assertEquals(1, sent.size, "the same picture on two pages is one request")
+        val second = repo.importBytes("lesson-2.pdf", "application/pdf",
+            runtime.mobileagent.knowledge.PdfParser.writePdfWithImageXObject("Second lesson text", logo),
+            visionConfigured = true, visionConsent = true)
+        assertEquals(ImportStage.READY, second.stage, second.error)
+        assertEquals(1, sent.size, "a later document reuses the identical picture")
+        val third = repo.importBytes("lesson-3.pdf", "application/pdf",
+            runtime.mobileagent.knowledge.PdfParser.writePdfWithImageXObject("Third lesson text", nearlySame),
+            visionConfigured = true, visionConsent = true)
+        assertEquals(ImportStage.READY, third.stage, third.error)
+        assertEquals(2, sent.size, "a picture differing by one pixel is never treated as the same")
+        val reused = repo.search("sigil number 1", topK = 20)
+        assertEquals(setOf(first.documentId, second.documentId),
+            reused.filter { it.text.contains("sigil number 1") }.map { it.documentId }.toSet())
+        assertEquals(setOf(1, 2), reused.filter { it.documentId == first.documentId && it.text.contains("sigil number 1") }
+            .mapNotNull { it.page }.toSet())
+        assertTrue(repo.search("sigil number 2").any { it.documentId == third.documentId })
+    }
+
+    @Test
     fun failedIllustrationDecodeFallsBackToCompletePdfPage() {
         val db = JdbcSqlConnection()
         Migrations.apply(db)

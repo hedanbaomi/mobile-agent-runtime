@@ -2966,6 +2966,7 @@ class KnowledgeRepository(
             var dispatchInput = input
             var latestDiagnostic = VisionDiagnosticMetadata()
             var dispatchRejected = false
+            var reusedDuplicate = false
             val cached = synchronized(indexLock) {
                 val batchId = jobBatchId(job.id)
                 if (batchId != null) {
@@ -3004,6 +3005,17 @@ class KnowledgeRepository(
                             result = legacyResult
                         }
                     }
+                }
+                if (result == null) {
+                    // Exact-identity reuse only: same image bytes, text and hints on another page or document.
+                    result = duplicateVisionResults[input.duplicateKey]?.let { key ->
+                        db.query(
+                            "SELECT status, ocr_text, description, table_markdown, result_type FROM vision_results WHERE cache_key = ? AND status = 'SUCCESS'",
+                            listOf(key),
+                        ).singleOrNull()
+                    }?.also { reusedDuplicate = true }
+                } else if (result?.string("status") == "SUCCESS") {
+                    duplicateVisionResults.putIfAbsent(input.duplicateKey, input.cacheKey)
                 }
                 if (result?.string("status") !in setOf("SUCCESS", "UNKNOWN_OUTCOME")) {
                     pipeline.stopReason(batchId)?.let { reason ->
@@ -3129,6 +3141,7 @@ class KnowledgeRepository(
                     if (accepted && outcome is VisionOutcome.Success) {
                         persistVision(input.cacheKey,stored.sha256,contextHash,requestedFingerprint,"SUCCESS",
                             outcome.result.ocrText,outcome.result.semanticDescription,outcome.result.tableMarkdown,outcome.result.type)
+                        duplicateVisionResults.putIfAbsent(input.duplicateKey, input.cacheKey)
                         pipeline.saveResult(job.id,unit,requestedFingerprint,input.cacheKey,assetId,outcome.result,asset.section)
                     }
                     accepted
@@ -3184,9 +3197,13 @@ class KnowledgeRepository(
                         outcome.result.tableMarkdown,
                         outcome.result.type,
                         )
+                        duplicateVisionResults.putIfAbsent(input.duplicateKey, input.cacheKey)
                     }
-                    diagnostic(ImportBatchEventPhase.CHECKPOINT,
-                        if (cached?.string("status") == "SUCCESS") "vision_cache_reused" else "vision_result_saved")
+                    diagnostic(ImportBatchEventPhase.CHECKPOINT, when {
+                        reusedDuplicate -> "vision_duplicate_reused"
+                        cached?.string("status") == "SUCCESS" -> "vision_cache_reused"
+                        else -> "vision_result_saved"
+                    })
                     chunks += unitChunks(unit, assetId, outcome.result, asset.section)
                 }
             }
@@ -3209,6 +3226,13 @@ class KnowledgeRepository(
                 metadata.errorCode,metadata.httpStatus,metadata.durationMs,metadata.finishReason,metadata.inputTokens,metadata.outputTokens,
                 metadata.exceptionType,Utc.nowIso(),requestId))
     }
+
+    /**
+     * Process-lifetime index from [VisionInput.duplicateKey] to the cache key of
+     * a stored SUCCESS result. The durable result stays in vision_results; after
+     * a restart the index starts empty, so only re-seen identical requests reuse.
+     */
+    private val duplicateVisionResults = java.util.concurrent.ConcurrentHashMap<String, String>()
 
     private fun persistVision(
         cacheKey: String,

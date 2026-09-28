@@ -8,7 +8,7 @@ import java.util.zip.DeflaterOutputStream
 import java.util.zip.Inflater
 
 object PdfParser {
-    const val FINGERPRINT = "pdf-text-v16-pdfrenderer"
+    const val FINGERPRINT = "pdf-text-v19-pdfrenderer"
 
     private const val MAX_PDF_STREAM_BYTES = 32 * 1024 * 1024
 
@@ -61,12 +61,19 @@ object PdfParser {
                 hasUnresolvedXObjectDo(pageLatin, resolvedXObjects.entries)
             val hasImages = resolvedXObjects.entries.isNotEmpty() || hasUnresolvedXObjects || hasInline ||
                 Regex("/Subtype\\s*/Image").containsMatchIn(pageObj.dict)
-            val hasDrawing = hasVectorDrawing(pageLatin)
-            if (pageNeedsVision(text, extracted.complete, content.complete, hasImages, hasDrawing) &&
+            val visibleAnnotations = hasVisibleOrUnknownAnnotations(objects, pageObj.dict)
+            val hasDrawing = hasVectorDrawing(pageLatin) && !(
+                text.isNotBlank() && extracted.complete && content.complete && !hasImages && !visibleAnnotations &&
+                    hasOnlyDecorativeGraphics(pageLatin, pageMediaBox(objects, objNum, pageObj.dict))
+                )
+            val blankPage = isEmptyPageWithoutVisuals(pageObj.dict, content, hasImages || visibleAnnotations)
+            if (!blankPage && pageNeedsVision(text, extracted.complete, content.complete,
+                    hasImages || visibleAnnotations, hasDrawing) &&
                 !canProcessIllustrationsSeparately(text, extracted.complete, content.complete, pageLatin,
-                    resolvedXObjects.entries, objects, hasUnresolvedXObjects, hasInline, hasDrawing,
+                    resolvedXObjects.entries, objects, hasUnresolvedXObjects, hasInline, visibleAnnotations,
                     hasPageAppearanceModifiers(objects, objNum, pageObj.dict),
-                    pageMediaBox(objects, objNum, pageObj.dict))) {
+                    pageMediaBox(objects, objNum, pageObj.dict),
+                    pageNamedResources(objects, objNum, pageObj.dict, "ExtGState"))) {
                 pageNumbers.indexOf(objNum) + 1
             } else {
                 null
@@ -90,9 +97,21 @@ object PdfParser {
             val xobjects = resolvedXObjects.entries
             val hasUnresolvedXObjects = resolvedXObjects.unresolved ||
                 hasUnresolvedXObjectDo(pageLatin, xobjects)
-            val hasDrawing = hasVectorDrawing(pageLatin)
-            var hasUnsupportedPageVisual = hasDrawing || !content.complete || hasUnresolvedXObjects ||
-                !extracted.complete
+            val hasImages = xobjects.isNotEmpty() || hasUnresolvedXObjects || hasInlineImage(pageLatin) ||
+                Regex("/Subtype\\s*/Image").containsMatchIn(pageObj.dict)
+            val visibleAnnotations = hasVisibleOrUnknownAnnotations(objects, pageObj.dict)
+            val hasDrawing = hasVectorDrawing(pageLatin) && !(
+                text.isNotBlank() && extracted.complete && content.complete && !hasImages && !visibleAnnotations &&
+                    hasOnlyDecorativeGraphics(pageLatin, pageMediaBox(objects, objNum, pageObj.dict))
+                )
+            // Decorative marks around illustrations are not missing page evidence.
+            val visualAssetsOnly = canProcessIllustrationsSeparately(text, extracted.complete, content.complete,
+                pageLatin, xobjects, objects, hasUnresolvedXObjects, hasInlineImage(pageLatin), visibleAnnotations,
+                hasPageAppearanceModifiers(objects, objNum, pageObj.dict),
+                pageMediaBox(objects, objNum, pageObj.dict),
+                pageNamedResources(objects, objNum, pageObj.dict, "ExtGState"))
+            var hasUnsupportedPageVisual = (hasDrawing && !visualAssetsOnly) || !content.complete ||
+                hasUnresolvedXObjects || !extracted.complete || visibleAnnotations
             xobjects.forEach { (name, imageObjNum) ->
                 val image = objects[imageObjNum]
                 if (image == null || !isImageDict(image.dict) || image.stream == null) {
@@ -146,10 +165,8 @@ object PdfParser {
                     )
                 }
             }
-            val hasInline = hasInlineImage(pageLatin)
-            val hasImages = xobjects.isNotEmpty() || hasUnresolvedXObjects || hasInline ||
-                Regex("/Subtype\\s*/Image").containsMatchIn(pageObj.dict)
-            val needsVision = pageNeedsVision(text, extracted.complete, content.complete, hasImages, hasDrawing)
+            val needsVision = !isEmptyPageWithoutVisuals(pageObj.dict, content, hasImages || visibleAnnotations) &&
+                pageNeedsVision(text, extracted.complete, content.complete, hasImages || visibleAnnotations, hasDrawing)
             var geometryDict = pageObj.dict
             val visitedGeometry = mutableSetOf(objNum)
             while (!geometryDict.contains("/MediaBox")) {
@@ -162,10 +179,6 @@ object PdfParser {
             val pageWidth = mediaBox?.takeIf { it.size == 4 }?.let { kotlin.math.abs(it[2] - it[0]).toInt().coerceAtLeast(1) } ?: 612
             val pageHeight = mediaBox?.takeIf { it.size == 4 }?.let { kotlin.math.abs(it[3] - it[1]).toInt().coerceAtLeast(1) } ?: 792
             val complexLayout = hasDrawing && Regex("(?<![A-Za-z])(re|m|l|c|v|y)\\s").findAll(pageLatin).take(12).count() >= 12
-            val visualAssetsOnly = canProcessIllustrationsSeparately(text, extracted.complete, content.complete,
-                pageLatin, xobjects, objects, hasUnresolvedXObjects, hasInline, hasDrawing,
-                hasPageAppearanceModifiers(objects, objNum, pageObj.dict),
-                pageMediaBox(objects, objNum, pageObj.dict))
             pages += ExtractedPage(pageIndex, text, needsVision, pageWidth, pageHeight,
                 complexLayout = complexLayout, visualAssetsOnly = visualAssetsOnly)
             val rendered = renderedPages[pageIndex]?.takeIf { it.bytes.isNotEmpty() }
@@ -214,10 +227,13 @@ object PdfParser {
             error("PDF has no extractable pages or text")
         }
         val orderedPages = pages.ifEmpty { listOf(ExtractedPage(1, "", needsVision = true)) }
+        if (orderedPages.all { it.text.isBlank() } && assets.isEmpty()) {
+            error("PDF has no extractable text or visual content")
+        }
         val needsVision = orderedPages.any { it.needsVision } || assets.any { it.kind == "IMAGE" || it.kind == "PAGE" }
         return ParsedPublication(
             format = SourceFormat.PDF,
-            text = orderedPages.joinToString("\n") { page ->
+            text = orderedPages.filter { it.text.isNotBlank() }.joinToString("\n") { page ->
                 val prefix = "Page ${page.page}: "
                 if (page.text.isBlank()) prefix.trim() else prefix + page.text
             },
@@ -623,11 +639,16 @@ object PdfParser {
     )
     private data class ScannedObject(val dict: String, val streamBounds: StreamBounds?)
     private data class PageXObjects(val entries: Map<String, Int>, val unresolved: Boolean)
-    private data class PageFonts(val encodings: Map<String, PdfFontEncoding>, val unresolved: Boolean)
+    private data class PageFonts(
+        val encodings: Map<String, PdfFontEncoding>,
+        val unresolved: Boolean,
+    )
     private data class PdfFontEncoding(
         val known: Boolean,
-        val differences: Map<Int, String> = emptyMap(),
-        val base: PdfBaseEncoding = PdfBaseEncoding.STANDARD,
+        val differences: Map<Int, String?> = emptyMap(),
+        val base: PdfBaseEncoding? = PdfBaseEncoding.STANDARD,
+        val toUnicode: Map<Long, String?>? = null,
+        val codeBytes: Int = 1,
     )
     private enum class PdfBaseEncoding { STANDARD, WIN_ANSI, MAC_ROMAN, SYMBOL }
     private data class PdfDictionaryValue(
@@ -1111,8 +1132,24 @@ object PdfParser {
     private fun encodingFromFont(objects: Map<Int, PdfObject>, font: PdfObject): PdfFontEncoding {
         val dict = font.dict
         val subtype = Regex("/Subtype\\s*/([A-Za-z0-9]+)").find(dict)?.groupValues?.get(1)
-        if (subtype == "Type0" || subtype == "CIDFontType0" || subtype == "CIDFontType2") {
-            return PdfFontEncoding(known = false)
+        if (subtype == "CIDFontType0" || subtype == "CIDFontType2") return PdfFontEncoding(known = false)
+        // /ToUnicode takes precedence over Encoding and Differences. A code the
+        // CMap does not map is unknown; it never falls back to glyph names.
+        val hasToUnicode = findTopLevelValueStart(dict, "ToUnicode") >= 0
+        if (subtype == "Type0") {
+            // Only Identity CID encodings have a fixed two-byte code whose value
+            // the ToUnicode CMap keys directly; other CMaps would need their
+            // own code-space and CID tables.
+            val cidEncoding = namedDictionaryOrReference(dict, "Encoding").name
+            if (!hasToUnicode || (cidEncoding != "Identity-H" && cidEncoding != "Identity-V")) {
+                return PdfFontEncoding(known = false)
+            }
+            val cmap = toUnicodeCMap(objects, dict) ?: return PdfFontEncoding(known = false)
+            return PdfFontEncoding(known = true, base = null, toUnicode = cmap, codeBytes = 2)
+        }
+        if (hasToUnicode) {
+            val cmap = toUnicodeCMap(objects, dict) ?: return PdfFontEncoding(known = false)
+            return PdfFontEncoding(known = true, base = null, toUnicode = cmap, codeBytes = 1)
         }
         val encoding = namedDictionaryOrReference(dict, "Encoding")
         if (!encoding.present) return builtInFontEncoding(dict)
@@ -1123,12 +1160,16 @@ object PdfParser {
             val baseValue = namedDictionaryOrReference(encodingDict, "BaseEncoding")
             if (baseValue.malformed) return PdfFontEncoding(known = false)
             val base = if (!baseValue.present) {
-                builtInBaseEncoding(dict) ?: return PdfFontEncoding(known = false)
+                // A non-base-14 Type1 font can still declare every glyph
+                // used by a page in /Differences. Leave its undeclared base
+                // unknown and validate each shown byte against that table.
+                builtInBaseEncoding(dict)
             } else {
                 encodingByName(baseValue.name) ?: return PdfFontEncoding(known = false)
             }
+            if (base == null && subtype != "Type1") return PdfFontEncoding(known = false)
             val differences = arrayBody(encodingDict, "Differences")
-            if (!differences.present) return PdfFontEncoding(known = true, base = base)
+            if (!differences.present) return PdfFontEncoding(known = base != null, base = base)
             if (differences.malformed) return PdfFontEncoding(known = false)
             val mapped = parseDifferences(differences.body.orEmpty()) ?: return PdfFontEncoding(known = false)
             return PdfFontEncoding(known = true, differences = mapped, base = base)
@@ -1137,6 +1178,123 @@ object PdfParser {
             null -> PdfFontEncoding(known = false)
             else -> PdfFontEncoding(known = true, base = base)
         }
+    }
+
+    private const val MAX_TO_UNICODE_ENTRIES = 65_536
+
+    private class CachedCMap(val entries: Map<Long, String?>?)
+
+    // Pages share font objects; parse each ToUnicode stream once per loaded PDF.
+    private val toUnicodeCache = java.util.Collections.synchronizedMap(java.util.WeakHashMap<ByteArray, CachedCMap>())
+
+    private fun cmapKey(length: Int, code: Long): Long = (length.toLong() shl 40) or code
+
+    /**
+     * Parses the bfchar/bfrange entries of a ToUnicode CMap (PDF 32000-1 9.10.3).
+     * The whole CMap is rejected (null) when it is malformed, references another
+     * CMap through `usecmap`, or is too large. A destination that is not a
+     * well-formed, meaningful Unicode string is kept as an explicit unknown
+     * entry so text showing that code is not certified as complete.
+     */
+    private fun toUnicodeCMap(objects: Map<Int, PdfObject>, fontDict: String): Map<Long, String?>? {
+        val value = dictionaryOrReference(fontDict, "ToUnicode")
+        val stream = value.reference?.let { objects[it] }?.takeIf { it.stream != null } ?: return null
+        toUnicodeCache[stream.stream]?.let { return it.entries }
+        val parsed = parseToUnicodeCMap(stream)
+        toUnicodeCache[stream.stream!!] = CachedCMap(parsed)
+        return parsed
+    }
+
+    private fun parseToUnicodeCMap(stream: PdfObject): Map<Long, String?>? {
+        val decoded = decodeContentStream(stream)
+        if (!decoded.complete) return null
+        val lexer = PdfContentLexer(String(decoded.bytes, Charsets.ISO_8859_1))
+        val tokens = lexer.tokenize()
+        if (!lexer.complete) return null
+        val entries = HashMap<Long, String?>()
+        val operands = mutableListOf<PdfContentToken>()
+        fun code(token: PdfContentToken): Pair<Int, Long>? {
+            val bytes = (token as? PdfContentToken.Hex)?.takeIf { it.valid }?.bytes ?: return null
+            if (bytes.size !in 1..4) return null
+            return bytes.size to bytes.fold(0L) { acc, byte -> (acc shl 8) or (byte.toLong() and 0xff) }
+        }
+        fun units(token: PdfContentToken): IntArray? {
+            val bytes = (token as? PdfContentToken.Hex)?.takeIf { it.valid }?.bytes ?: return null
+            if (bytes.isEmpty() || bytes.size % 2 != 0) return null
+            return IntArray(bytes.size / 2) { ((bytes[it * 2].toInt() and 0xff) shl 8) or (bytes[it * 2 + 1].toInt() and 0xff) }
+        }
+        fun put(length: Int, code: Long, text: String?): Boolean {
+            entries[cmapKey(length, code)] = text?.takeIf(::isMeaningfulUnicode)
+            return entries.size <= MAX_TO_UNICODE_ENTRIES
+        }
+        for (token in tokens) {
+            val op = (token as? PdfContentToken.Operator)?.name
+            if (op == null) {
+                operands += token
+                continue
+            }
+            when (op) {
+                "usecmap", "begincidchar", "begincidrange", "beginnotdefchar", "beginnotdefrange" -> return null
+                "endbfchar" -> {
+                    if (operands.size % 2 != 0) return null
+                    operands.chunked(2).forEach { (source, destination) ->
+                        val (length, value) = code(source) ?: return null
+                        val text = units(destination)?.let { utf16(it) }
+                        if (destination !is PdfContentToken.Hex || !put(length, value, text)) return null
+                    }
+                }
+                "endbfrange" -> {
+                    if (operands.size % 3 != 0) return null
+                    operands.chunked(3).forEach { (lowToken, highToken, destination) ->
+                        val (length, low) = code(lowToken) ?: return null
+                        val (highLength, high) = code(highToken) ?: return null
+                        if (highLength != length || high < low || high - low >= MAX_TO_UNICODE_ENTRIES) return null
+                        when (destination) {
+                            is PdfContentToken.Array -> {
+                                if (destination.items.size.toLong() != high - low + 1) return null
+                                destination.items.forEachIndexed { index, item ->
+                                    val text = units(item)?.let { utf16(it) }
+                                    if (item !is PdfContentToken.Hex || !put(length, low + index, text)) return null
+                                }
+                            }
+                            is PdfContentToken.Hex -> {
+                                val start = units(destination) ?: return null
+                                for (offset in 0..(high - low).toInt()) {
+                                    val next = start.copyOf()
+                                    next[next.lastIndex] += offset
+                                    val text = if (next.last() > 0xFFFF) null else utf16(next)
+                                    if (!put(length, low + offset, text)) return null
+                                }
+                            }
+                            else -> return null
+                        }
+                    }
+                }
+            }
+            operands.clear()
+        }
+        return entries
+    }
+
+    private fun utf16(units: IntArray): String = String(CharArray(units.size) { units[it].toChar() })
+
+    private fun isMeaningfulUnicode(text: String): Boolean {
+        if (text.isEmpty()) return false
+        var index = 0
+        while (index < text.length) {
+            val char = text[index]
+            if (Character.isHighSurrogate(char)) {
+                if (index + 1 >= text.length || !Character.isLowSurrogate(text[index + 1])) return false
+            } else if (Character.isLowSurrogate(char)) {
+                return false
+            }
+            val codePoint = text.codePointAt(index)
+            val allowedControl = codePoint == 0x09 || codePoint == 0x0A || codePoint == 0x0D
+            if ((Character.isISOControl(codePoint) && !allowedControl) || codePoint == 0xFFFD ||
+                codePoint in 0xE000..0xF8FF || codePoint >= 0xF0000 || (codePoint and 0xFFFE) == 0xFFFE) return false
+            index += Character.charCount(codePoint)
+        }
+        return true
     }
 
     /**
@@ -1226,10 +1384,14 @@ object PdfParser {
         return -1
     }
 
-    private fun parseDifferences(body: String): Map<Int, String>? {
-        val mapped = linkedMapOf<Int, String>()
+    private fun parseDifferences(body: String): Map<Int, String?>? {
+        // An unrecognized glyph name is recorded as an explicit unknown code, so
+        // only text that actually shows that byte loses its complete status and
+        // the base encoding is never consulted for a code Differences redefined.
+        val mapped = linkedMapOf<Int, String?>()
         var index = 0
         var nextCode: Int? = null
+        var needsGlyph = false
         while (index < body.length) {
             while (index < body.length && (isPdfWhitespace(body[index]) || body[index] == '%')) {
                 if (body[index] == '%') {
@@ -1243,40 +1405,110 @@ object PdfParser {
                 val start = index + 1
                 index++
                 while (index < body.length && !isPdfWhitespace(body[index]) && !isPdfDelimiter(body[index])) index++
-                val glyph = pdfGlyphName(decodePdfName(body.substring(start, index))) ?: return null
+                val glyph = pdfGlyphName(decodePdfName(body.substring(start, index)))
                 val code = nextCode ?: return null
+                if (code !in 0..255) return null
                 mapped[code] = glyph
                 nextCode = code + 1
+                needsGlyph = false
                 continue
             }
             val start = index
             if (body[index] == '+' || body[index] == '-') index++
             if (index >= body.length || body[index] !in '0'..'9') return null
             while (index < body.length && body[index] in '0'..'9') index++
-            nextCode = body.substring(start, index).toIntOrNull() ?: return null
+            if (needsGlyph) return null
+            nextCode = body.substring(start, index).toIntOrNull()?.takeIf { it in 0..255 } ?: return null
+            needsGlyph = true
         }
-        return mapped
+        return mapped.takeUnless { needsGlyph }
     }
 
-    private fun pdfGlyphName(name: String): String? = when {
-        name.length == 1 -> name
-        name == "space" -> " "
-        name == "period" -> "."
-        name == "comma" -> ","
-        name == "colon" -> ":"
-        name == "semicolon" -> ";"
-        name == "hyphen" || name == "minus" -> "-"
-        name == "slash" -> "/"
-        name == "backslash" -> "\\"
-        name == "parenleft" -> "("
-        name == "parenright" -> ")"
-        name == "quotesingle" -> "'"
-        name == "quotedbl" -> "\""
-        name == "underscore" -> "_"
-        name == "Euro" -> "€"
-        name == "eacute" -> "é"
-        else -> null
+    /**
+     * Glyph name to Unicode following the Adobe Glyph List specification's
+     * algorithm: ignore everything after the first period, split ligature
+     * components on underscores, and accept `uniXXXX` / `uXXXX[XX]` forms with
+     * uppercase hexadecimal scalar values. Names come from the PDF Latin
+     * character set (ISO 32000-1 Annex D); an accented Latin letter is accepted
+     * only when Unicode canonical composition yields a single code point.
+     * Anything else is unknown and returns null.
+     */
+    private fun pdfGlyphName(name: String): String? {
+        val base = name.substringBefore('.')
+        if (base.isEmpty()) return null
+        val parts = base.split('_')
+        if (parts.any { it.isEmpty() }) return null
+        return buildString {
+            parts.forEach { part -> append(glyphComponent(part) ?: return null) }
+        }
     }
+
+    private fun glyphComponent(name: String): String? {
+        if (name.length == 1) return name.takeIf { it[0] in 'A'..'Z' || it[0] in 'a'..'z' }
+        LATIN_GLYPH_NAMES[name]?.let { return it }
+        unicodeGlyphValue(name)?.let { return it }
+        val accent = GLYPH_ACCENTS.entries.firstOrNull { (suffix, _) ->
+            name.length == suffix.length + 1 && name.endsWith(suffix)
+        } ?: return null
+        val letter = name[0].takeIf { it in 'A'..'Z' || it in 'a'..'z' } ?: return null
+        val composed = java.text.Normalizer.normalize("$letter${accent.value}", java.text.Normalizer.Form.NFC)
+        return composed.takeIf { it.codePointCount(0, it.length) == 1 }
+    }
+
+    private fun unicodeGlyphValue(name: String): String? {
+        val hex = when {
+            name.startsWith("uni") -> name.substring(3).takeIf { it.isNotEmpty() && it.length % 4 == 0 }
+            name.startsWith("u") -> name.substring(1).takeIf { it.length in 4..6 }
+            else -> null
+        } ?: return null
+        if (hex.any { it !in '0'..'9' && it !in 'A'..'F' }) return null
+        val values = if (name.startsWith("uni")) hex.chunked(4) else listOf(hex)
+        return buildString {
+            values.forEach { value ->
+                val code = value.toInt(16)
+                if (code in 0xD800..0xDFFF || code > 0x10FFFF) return null
+                appendCodePoint(code)
+            }
+        }
+    }
+
+    private val GLYPH_ACCENTS = mapOf(
+        "acute" to "́", "grave" to "̀", "circumflex" to "̂", "dieresis" to "̈",
+        "tilde" to "̃", "ring" to "̊", "cedilla" to "̧", "caron" to "̌",
+        "macron" to "̄", "breve" to "̆", "ogonek" to "̨", "dotaccent" to "̇",
+        "hungarumlaut" to "̋",
+    )
+
+    // Non-compositional names of the PDF Latin character set (ISO 32000-1 D.2).
+    private val LATIN_GLYPH_NAMES = mapOf(
+        "zero" to "0", "one" to "1", "two" to "2", "three" to "3", "four" to "4",
+        "five" to "5", "six" to "6", "seven" to "7", "eight" to "8", "nine" to "9",
+        "space" to " ", "nbspace" to " ", "exclam" to "!", "quotedbl" to "\"", "numbersign" to "#",
+        "dollar" to "$", "percent" to "%", "ampersand" to "&", "quotesingle" to "'", "parenleft" to "(",
+        "parenright" to ")", "asterisk" to "*", "plus" to "+", "comma" to ",", "hyphen" to "-",
+        "minus" to "-", "period" to ".", "slash" to "/", "colon" to ":", "semicolon" to ";",
+        "less" to "<", "equal" to "=", "greater" to ">", "question" to "?", "at" to "@",
+        "bracketleft" to "[", "backslash" to "\\", "bracketright" to "]", "asciicircum" to "^",
+        "underscore" to "_", "grave" to "`", "braceleft" to "{", "bar" to "|", "braceright" to "}",
+        "asciitilde" to "~", "exclamdown" to "¡", "cent" to "¢", "sterling" to "£", "currency" to "¤",
+        "yen" to "¥", "brokenbar" to "¦", "section" to "§", "dieresis" to "¨", "copyright" to "©",
+        "ordfeminine" to "ª", "guillemotleft" to "«", "logicalnot" to "¬", "registered" to "®",
+        "macron" to "¯", "degree" to "°", "plusminus" to "±", "twosuperior" to "²",
+        "threesuperior" to "³", "acute" to "´", "mu" to "µ", "paragraph" to "¶",
+        "periodcentered" to "·", "cedilla" to "¸", "onesuperior" to "¹", "ordmasculine" to "º",
+        "guillemotright" to "»", "onequarter" to "¼", "onehalf" to "½", "threequarters" to "¾",
+        "questiondown" to "¿", "AE" to "Æ", "Eth" to "Ð", "multiply" to "×", "Oslash" to "Ø",
+        "Thorn" to "Þ", "germandbls" to "ß", "ae" to "æ", "eth" to "ð", "divide" to "÷",
+        "oslash" to "ø", "thorn" to "þ", "dotlessi" to "ı", "Lslash" to "Ł", "lslash" to "ł",
+        "OE" to "Œ", "oe" to "œ", "florin" to "ƒ", "circumflex" to "ˆ", "caron" to "ˇ",
+        "breve" to "˘", "dotaccent" to "˙", "ring" to "˚", "ogonek" to "˛", "tilde" to "˜",
+        "hungarumlaut" to "˝", "endash" to "–", "emdash" to "—", "quoteleft" to "‘",
+        "quoteright" to "’", "quotesinglbase" to "‚", "quotedblleft" to "“", "quotedblright" to "”",
+        "quotedblbase" to "„", "dagger" to "†", "daggerdbl" to "‡", "bullet" to "•",
+        "ellipsis" to "…", "perthousand" to "‰", "guilsinglleft" to "‹", "guilsinglright" to "›",
+        "fraction" to "⁄", "Euro" to "€", "trademark" to "™", "fi" to "fi", "fl" to "fl",
+        "ff" to "ff", "ffi" to "ffi", "ffl" to "ffl",
+    )
 
     private fun isPdfDelimiter(value: Char): Boolean =
         value == '(' || value == ')' || value == '<' || value == '>' ||
@@ -1468,6 +1700,15 @@ object PdfParser {
             .any { match -> decodePdfName(match.groupValues[1]) !in entries }
     }
 
+    /**
+     * Native text plus the embedded pictures is complete page evidence only when
+     * every other mark is decorative (see [decorativeGraphics]), no text acts as
+     * a clip, no visible annotation or page rotation changes the appearance, and
+     * each resource XObject is drawn at least once as an unrotated, unflipped
+     * picture inside the MediaBox. Each picture must be a standalone baseline
+     * JPEG in DeviceRGB, DeviceGray or a one/three-component ICC space, with no
+     * mask, decode array or alternate that would change what the page shows.
+     */
     private fun canProcessIllustrationsSeparately(
         text: String,
         textComplete: Boolean,
@@ -1477,36 +1718,31 @@ object PdfParser {
         objects: Map<Int, PdfObject>,
         unresolved: Boolean,
         hasInline: Boolean,
-        hasDrawing: Boolean,
+        visibleAnnotations: Boolean,
         pageAppearanceModified: Boolean,
         pageBox: List<Double>?,
+        extGStates: PageXObjects,
     ): Boolean {
-        if (text.isBlank() || !textComplete || !contentComplete || unresolved || hasInline || hasDrawing ||
+        if (text.isBlank() || !textComplete || !contentComplete || unresolved || hasInline || visibleAnnotations ||
             pageAppearanceModified || pageBox == null || xobjects.isEmpty()) return false
-        if (!textBlocksUseOnlyTextOperators(pageLatin)) return false
-        val outsideText = pageLatin.replace(Regex("BT[\\s\\S]*?ET"), " ")
-        // Only isolated, axis-aligned images whose *whole* appearance is
-        // visible qualify. Nested transforms or extra drawing operations stay
-        // on the complete-page path.
-        val draw = Regex("q\\s+([-+.0-9]+)\\s+([-+.0-9]+)\\s+([-+.0-9]+)\\s+([-+.0-9]+)\\s+([-+.0-9]+)\\s+([-+.0-9]+)\\s+cm\\s+/([^\\s<>\\[\\]()/%]+)\\s+Do\\s+Q")
-        val draws = draw.findAll(outsideText).toList()
-        if (draws.isEmpty() || outsideText.replace(draw, " ").isNotBlank()) return false
-        if (draws.map { decodePdfName(it.groupValues[7]) }.toSet() != xobjects.keys) return false
-        if (draws.any { match ->
-                val matrix = match.groupValues.drop(1).take(6).map { it.toDoubleOrNull() }
-                if (matrix.any { it == null }) return@any true
-                val scale = matrix[0]!!
-                val x = matrix[4]!!
-                val y = matrix[5]!!
-                scale <= 0.0 || matrix[1] != 0.0 || matrix[2] != 0.0 || matrix[3] != scale ||
-                    x < pageBox[0] || y < pageBox[1] || x + scale > pageBox[2] || y + scale > pageBox[3]
+        val graphics = decorativeGraphics(pageLatin, pageBox) ?: return false
+        if (graphics.textClip || graphics.draws.isEmpty()) return false
+        if (graphics.graphicsStates.any { name ->
+                extGStates.unresolved || !extGStateKeepsImageAppearance(
+                    objects[extGStates.entries[name] ?: return false]?.dict ?: return false)
+            }) return false
+        if (graphics.draws.map { it.name }.toSet() != xobjects.keys) return false
+        val tolerance = AXIS_TOLERANCE
+        if (graphics.draws.any { (_, box) ->
+                box[0] < pageBox[0] - tolerance || box[1] < pageBox[1] - tolerance ||
+                    box[2] > pageBox[2] + tolerance || box[3] > pageBox[3] + tolerance
             }) return false
         return xobjects.values.all { number ->
             val image = objects[number] ?: return@all false
             val payload = image.stream ?: return@all false
             isImageDict(image.dict) && xObjectMediaType(image.dict, payload) == "image/jpeg" &&
-                namedDictionaryOrReference(image.dict, "ColorSpace").name == "DeviceRGB" &&
-                listOf("Mask", "SMask", "Decode", "DecodeParms", "DP", "ImageMask", "Alternates", "Matte", "Interpolate")
+                illustrationColourSpace(objects, image.dict) &&
+                listOf("Mask", "SMask", "Decode", "DecodeParms", "DP", "ImageMask", "Alternates", "Matte")
                     .none { findTopLevelValueStart(image.dict, it) >= 0 } &&
                 payload.size > 64 && payload.takeLast(2) == listOf(0xFF.toByte(), 0xD9.toByte()) &&
                 payload.indices.any { index -> index + 1 < payload.size &&
@@ -1514,19 +1750,34 @@ object PdfParser {
         }
     }
 
-    private fun textBlocksUseOnlyTextOperators(pageLatin: String): Boolean {
-        val lexer = PdfContentLexer(pageLatin)
-        var inText = false
-        for (token in lexer.tokenize()) {
-            val name = (token as? PdfContentToken.Operator)?.name ?: continue
-            when (name) {
-                "BT" -> if (inText) return false else inText = true
-                "ET" -> if (!inText) return false else inText = false
-                else -> if (inText && name !in setOf("Tf", "Td", "TD", "Tm", "T*", "Tj", "TJ",
-                        "'", "\"", "Tc", "Tw", "Tz", "TL", "Ts")) return false
-            }
+    /** Soft masks, transparency, non-normal blending and transfer functions change how a picture looks. */
+    private fun extGStateKeepsImageAppearance(dict: String): Boolean {
+        if (findTopLevelValueStart(dict, "SMask") >= 0 && namedDictionaryOrReference(dict, "SMask").name != "None") return false
+        if (findTopLevelValueStart(dict, "BM") >= 0 &&
+            namedDictionaryOrReference(dict, "BM").name !in setOf("Normal", "Compatible")) return false
+        if (listOf("TR", "TR2").any { findTopLevelValueStart(dict, it) >= 0 }) return false
+        return listOf("CA", "ca").all { key ->
+            val start = findTopLevelValueStart(dict, key)
+            start < 0 || Regex("""[-+]?(?:\d+(?:\.\d*)?|\.\d+)""").matchAt(dict, start)?.value?.toDoubleOrNull()
+                ?.let { it >= 1.0 } == true
         }
-        return lexer.complete && !inText
+    }
+
+    /** CMYK, Lab, indexed and special colour JPEGs may decode differently from the page; keep them on page Vision. */
+    private fun illustrationColourSpace(objects: Map<Int, PdfObject>, imageDict: String): Boolean {
+        val named = namedDictionaryOrReference(imageDict, "ColorSpace")
+        if (named.name == "DeviceRGB" || named.name == "DeviceGray") return true
+        val start = findTopLevelValueStart(imageDict, "ColorSpace")
+        if (start < 0) return false
+        val array = when {
+            imageDict.startsWith("[", start) -> imageDict.substring(start, arrayEnd(imageDict, start).takeIf { it > 0 } ?: return false)
+            named.reference != null -> objects[named.reference]?.takeIf { it.stream == null }?.dict?.trim() ?: return false
+            else -> return false
+        }
+        val match = Regex("""^\[\s*/ICCBased\s+(\d+)\s+0\s+R\s*]$""").find(array.trim()) ?: return false
+        val profile = objects[match.groupValues[1].toInt()]?.takeIf { it.stream != null } ?: return false
+        val components = Regex("""/N\s+(\d+)""").find(profile.dict)?.groupValues?.get(1)?.toIntOrNull()
+        return components == 1 || components == 3
     }
 
     private fun pageMediaBox(objects: Map<Int, PdfObject>, pageNumber: Int, pageDict: String): List<Double>? {
@@ -1554,7 +1805,7 @@ object PdfParser {
         var number = pageNumber
         var dict = pageDict
         while (visited.add(number)) {
-            if (listOf("Annots", "Rotate", "CropBox", "BleedBox", "TrimBox", "ArtBox")
+            if (listOf("Rotate", "CropBox", "BleedBox", "TrimBox", "ArtBox")
                     .any { findTopLevelValueStart(dict, it) >= 0 }) return true
             val parent = dictionaryOrReference(dict, "Parent")
             if (!parent.present) return false
@@ -1694,7 +1945,10 @@ object PdfParser {
             val buf = ByteArray(4096)
             while (!inflater.finished()) {
                 val n = inflater.inflate(buf)
-                if (n <= 0) return DecodedPageContent(raw, complete = false)
+                if (n <= 0) {
+                    if (inflater.finished()) break
+                    return DecodedPageContent(raw, complete = false)
+                }
                 if (n > MAX_PDF_STREAM_BYTES - out.size()) {
                     return DecodedPageContent(ByteArray(0), complete = false)
                 }
@@ -1715,6 +1969,44 @@ object PdfParser {
         hasImages: Boolean,
         hasDrawing: Boolean,
     ): Boolean = hasImages || hasDrawing || text.isEmpty() || !contentComplete || !textComplete
+
+    private fun isEmptyPageWithoutVisuals(
+        dict: String,
+        content: DecodedPageContent,
+        hasVisuals: Boolean,
+    ): Boolean {
+        if (hasVisuals) return false
+        if (findTopLevelValueStart(dict, "Contents") < 0) return content.bytes.isEmpty()
+        if (!content.complete) return false
+        val lexer = PdfContentLexer(String(content.bytes, Charsets.ISO_8859_1))
+        return lexer.tokenize().isEmpty() && lexer.complete
+    }
+
+    private fun hasVisibleOrUnknownAnnotations(objects: Map<Int, PdfObject>, pageDict: String): Boolean {
+        val annots = arrayBody(pageDict, "Annots")
+        if (!annots.present) return false
+        val body = annots.body ?: return true
+        val references = Regex("(\\d+)\\s+0\\s+R\\b").findAll(body).toList()
+        if (body.replace(Regex("(\\d+)\\s+0\\s+R\\b"), " ").isNotBlank()) return true
+        return references.any { reference ->
+            val number = reference.groupValues[1].toIntOrNull() ?: return@any true
+            val annotation = objects[number]?.takeIf { it.stream == null } ?: return@any true
+            if (namedDictionaryOrReference(annotation.dict, "Subtype").name != "Link") return@any true
+            if (findTopLevelValueStart(annotation.dict, "AP") >= 0) return@any true
+            // /BS supersedes /Border (PDF 32000-1 12.5.4); its /W defaults to 1.
+            val borderStyle = dictionaryOrReference(annotation.dict, "BS")
+            if (borderStyle.present) {
+                val style = borderStyle.dictionary?.takeUnless { borderStyle.malformed } ?: return@any true
+                val widthStart = findTopLevelValueStart(style, "W")
+                if (widthStart < 0) return@any true
+                val width = Regex("[-+]?(?:\\d+(?:\\.\\d*)?|\\.\\d+)").matchAt(style, widthStart)?.value?.toDoubleOrNull()
+                return@any width != 0.0
+            }
+            val border = arrayBody(annotation.dict, "Border").body ?: return@any true
+            val values = border.trim().split(Regex("\\s+")).map { it.toDoubleOrNull() }
+            values.size != 3 || values.any { it == null || it != 0.0 }
+        }
+    }
 
     private fun extractPdfStrings(data: ByteArray, fonts: PageFonts): ExtractedPdfText {
         val latin = String(data, Charsets.ISO_8859_1)
@@ -1767,6 +2059,19 @@ object PdfParser {
                         fontName = (ops[0] as? PdfContentToken.Name)?.value
                         if (fontName == null) complete = false
                     }
+                }
+                // Colour operands vary with the current colour space: one to four
+                // components, and for scn/SCN an optional trailing pattern name.
+                "sc", "SC", "scn", "SCN" -> {
+                    val pattern = (token.name == "scn" || token.name == "SCN") &&
+                        stack.lastOrNull() is PdfContentToken.Name
+                    if (pattern) stack.removeAt(stack.lastIndex)
+                    var components = 0
+                    while (stack.lastOrNull() is PdfContentToken.Number) {
+                        stack.removeAt(stack.lastIndex)
+                        components++
+                    }
+                    if (components > 4 || (components == 0 && !pattern)) complete = false
                 }
                 "Tj", "'" -> {
                     val ops = pop(1)
@@ -1837,9 +2142,20 @@ object PdfParser {
         }
         val out = StringBuilder()
         var complete = true
+        encoding.toUnicode?.let { cmap ->
+            val width = encoding.codeBytes
+            if (bytes.size % width != 0) complete = false
+            for (start in 0 until bytes.size - bytes.size % width step width) {
+                var code = 0L
+                for (offset in 0 until width) code = (code shl 8) or (bytes[start + offset].toLong() and 0xff)
+                val mapped = cmap[cmapKey(width, code)]
+                if (mapped == null) complete = false else out.append(mapped)
+            }
+            return DecodedShow(out.toString(), complete)
+        }
         for (byte in bytes) {
             val code = byte.toInt() and 0xff
-            val mapped = encoding.differences[code] ?: mapBaseByte(encoding.base, code)
+            val mapped = if (code in encoding.differences) encoding.differences[code] else mapBaseByte(encoding.base, code)
             if (mapped == null) {
                 complete = false
                 out.append(String(byteArrayOf(byte), Charsets.ISO_8859_1))
@@ -1850,7 +2166,8 @@ object PdfParser {
         return DecodedShow(out.toString(), complete)
     }
 
-    private fun mapBaseByte(base: PdfBaseEncoding, code: Int): String? {
+    private fun mapBaseByte(base: PdfBaseEncoding?, code: Int): String? {
+        if (base == null) return null
         if (base == PdfBaseEncoding.SYMBOL) return symbolChar(code)
         if (code in 0x20..0x7E) return code.toChar().toString()
         return when (base) {
@@ -2309,8 +2626,188 @@ object PdfParser {
 
     private fun hasVectorDrawing(latin: String): Boolean {
         val stripped = latin.replace(Regex("BT[\\s\\S]*?ET"), " ")
-        return Regex("(?<![A-Za-z])(re|m|l|c|v|y)\\s").containsMatchIn(stripped) &&
-            Regex("(?<![A-Za-z])(f|f\\*|F|B|b|S|s)\\s").containsMatchIn(stripped)
+        return (Regex("(?<![A-Za-z])(re|m|l|c|v|y)\\s").containsMatchIn(stripped) &&
+            Regex("(?<![A-Za-z])(f|f\\*|F|B|b|S|s)\\s").containsMatchIn(stripped)) ||
+            Regex("(?<![A-Za-z/])sh(?![A-Za-z0-9])").containsMatchIn(stripped)
+    }
+
+    private const val MAX_DECORATIVE_PAINTED_PATHS = 96
+    private const val THIN_RULE_WIDTH = 2.0
+    private const val AXIS_TOLERANCE = 0.5
+
+    private class GraphicsState(val ctm: DoubleArray, val lineWidth: Double, val fillWhite: Boolean) {
+        fun with(ctm: DoubleArray = this.ctm, lineWidth: Double = this.lineWidth, fillWhite: Boolean = this.fillWhite) =
+            GraphicsState(ctm, lineWidth, fillWhite)
+    }
+
+    /** An XObject painted with an axis-aligned, unflipped transform; [box] is its device-space rectangle. */
+    private data class XObjectDraw(val name: String, val box: List<Double>)
+
+    /**
+     * Page graphics that are decorative apart from [draws]; [textClip] marks text
+     * used as a clip path and [graphicsStates] lists the ExtGState names applied.
+     */
+    private data class DecorativeGraphics(
+        val draws: List<XObjectDraw>,
+        val textClip: Boolean,
+        val graphicsStates: Set<String>,
+    )
+
+    private fun hasOnlyDecorativeGraphics(latin: String, pageBox: List<Double>?): Boolean =
+        decorativeGraphics(latin, pageBox)?.draws?.isEmpty() == true
+
+    /**
+     * Typeset books draw rules (section and footnote separators, underlines,
+     * table and frame lines), white or page-sized background fills and clip
+     * paths that carry no content beyond the text layer. Accept a page's
+     * graphics only when every painted path is, in device space, a thin
+     * axis-aligned straight stroke or rectangle outline, a thin filled rule, a
+     * white filled rectangle, or a rectangle covering most of the page.
+     * Curves, diagonal or thick lines, coloured panels, shadings, rotated or
+     * flipped XObjects, unknown operators and more than a table's worth of
+     * paths keep page Vision (null). XObjects placed without rotation or flip
+     * are reported for the caller to validate.
+     */
+    private fun decorativeGraphics(latin: String, pageBox: List<Double>?): DecorativeGraphics? {
+        if (pageBox == null) return null
+        val pageArea = (pageBox[2] - pageBox[0]) * (pageBox[3] - pageBox[1])
+        if (!pageArea.isFinite() || pageArea <= 0.0) return null
+        val lexer = PdfContentLexer(latin)
+        val tokens = lexer.tokenize()
+        if (!lexer.complete) return null
+        val draws = mutableListOf<XObjectDraw>()
+        val graphicsStates = mutableSetOf<String>()
+        var textClip = false
+        var state = GraphicsState(doubleArrayOf(1.0, 0.0, 0.0, 1.0, 0.0, 0.0), 1.0, fillWhite = false)
+        val saved = ArrayDeque<GraphicsState>()
+        val operands = mutableListOf<PdfContentToken>()
+        val subpaths = mutableListOf<MutableList<Pair<Double, Double>>>()
+        var inText = false
+        var painted = 0
+        fun numbers(count: Int): DoubleArray? {
+            if (operands.size != count) return null
+            return DoubleArray(count) { index ->
+                (operands[index] as? PdfContentToken.Number)?.value?.toDoubleOrNull()
+                    ?.takeIf(Double::isFinite) ?: return null
+            }
+        }
+        fun point(x: Double, y: Double): Pair<Double, Double> {
+            val m = state.ctm
+            return (m[0] * x + m[2] * y + m[4]) to (m[1] * x + m[3] * y + m[5])
+        }
+        fun near(a: Double, b: Double) = kotlin.math.abs(a - b) <= AXIS_TOLERANCE
+        fun axisAligned(a: Pair<Double, Double>, b: Pair<Double, Double>) =
+            near(a.first, b.first) || near(a.second, b.second)
+        fun rectangleSize(points: List<Pair<Double, Double>>): Pair<Double, Double>? {
+            val closed = points.size == 5 && near(points.first().first, points.last().first) &&
+                near(points.first().second, points.last().second)
+            val corners = if (closed) points.dropLast(1) else points
+            if (corners.size != 4 || corners.indices.any { !axisAligned(corners[it], corners[(it + 1) % 4]) }) return null
+            return (corners.maxOf { it.first } - corners.minOf { it.first }) to
+                (corners.maxOf { it.second } - corners.minOf { it.second })
+        }
+        fun paint(stroke: Boolean, fill: Boolean): Boolean {
+            val paths = subpaths.filter { it.size > 1 }
+            subpaths.clear()
+            painted += paths.size
+            if (painted > MAX_DECORATIVE_PAINTED_PATHS) return false
+            val m = state.ctm
+            val deviceWidth = state.lineWidth * kotlin.math.sqrt(kotlin.math.abs(m[0] * m[3] - m[1] * m[2]))
+            return paths.all { points ->
+                val strokeOk = !stroke || (deviceWidth <= THIN_RULE_WIDTH &&
+                    points.zipWithNext().all { (a, b) -> axisAligned(a, b) })
+                val fillOk = !fill || rectangleSize(points)?.let { (width, height) ->
+                    minOf(width, height) <= THIN_RULE_WIDTH || state.fillWhite || width * height >= pageArea * 0.9
+                } == true
+                strokeOk && fillOk
+            }
+        }
+        // Fill colour persists across text objects, so colour set inside BT/ET
+        // decides whether a later rectangle is white.
+        fun colour(op: String): Boolean? = when (op) {
+            "g" -> numbers(1)?.all { it == 1.0 }
+            "rg" -> numbers(3)?.all { it == 1.0 }
+            "k" -> numbers(4)?.all { it == 0.0 }
+            "cs", "sc", "scn" -> false
+            else -> null
+        }
+        for (token in tokens) {
+            val op = (token as? PdfContentToken.Operator)?.name
+            if (op == null) {
+                operands += token
+                continue
+            }
+            if (op in setOf("g", "rg", "k", "cs", "sc", "scn")) {
+                state = state.with(fillWhite = colour(op) ?: return null)
+                operands.clear()
+                continue
+            }
+            if (op == "Tr") {
+                textClip = textClip || (numbers(1)?.get(0) ?: return null) >= 4.0
+                operands.clear()
+                continue
+            }
+            if (op == "gs") {
+                graphicsStates += decodePdfName((operands.singleOrNull() as? PdfContentToken.Name)?.value ?: return null)
+                operands.clear()
+                continue
+            }
+            if (inText) {
+                when (op) {
+                    "ET" -> inText = false
+                    "BT", "m", "l", "c", "v", "y", "re", "h", "S", "s", "f", "F", "f*", "B", "B*", "b", "b*",
+                    "n", "W", "W*", "sh", "Do", "q", "Q", "cm", "d0", "d1" -> return null
+                }
+                operands.clear()
+                continue
+            }
+            when (op) {
+                "BT" -> if (subpaths.isNotEmpty()) return null else inText = true
+                "q" -> saved.addLast(state)
+                "Q" -> state = saved.removeLastOrNull() ?: return null
+                "cm" -> {
+                    val n = numbers(6) ?: return null
+                    val c = state.ctm
+                    state = state.with(ctm = doubleArrayOf(
+                        n[0] * c[0] + n[1] * c[2], n[0] * c[1] + n[1] * c[3],
+                        n[2] * c[0] + n[3] * c[2], n[2] * c[1] + n[3] * c[3],
+                        n[4] * c[0] + n[5] * c[2] + c[4], n[4] * c[1] + n[5] * c[3] + c[5],
+                    ))
+                }
+                "w" -> state = state.with(lineWidth = numbers(1)?.get(0)?.takeIf { it >= 0.0 } ?: return null)
+                "m" -> {
+                    val n = numbers(2) ?: return null
+                    subpaths += mutableListOf(point(n[0], n[1]))
+                }
+                "l" -> {
+                    val n = numbers(2) ?: return null
+                    subpaths.lastOrNull()?.add(point(n[0], n[1])) ?: return null
+                }
+                "re" -> {
+                    val n = numbers(4) ?: return null
+                    subpaths += mutableListOf(point(n[0], n[1]), point(n[0] + n[2], n[1]),
+                        point(n[0] + n[2], n[1] + n[3]), point(n[0], n[1] + n[3]), point(n[0], n[1]))
+                }
+                "h" -> subpaths.lastOrNull()?.let { it.add(it.first()) } ?: return null
+                "S", "s" -> if (!paint(stroke = true, fill = false)) return null
+                "f", "F", "f*" -> if (!paint(stroke = false, fill = true)) return null
+                "B", "B*", "b", "b*" -> if (!paint(stroke = true, fill = true)) return null
+                "n" -> subpaths.clear()
+                "Do" -> {
+                    val name = (operands.singleOrNull() as? PdfContentToken.Name)?.value ?: return null
+                    val m = state.ctm
+                    val scale = maxOf(kotlin.math.abs(m[0]), kotlin.math.abs(m[3]))
+                    if (subpaths.isNotEmpty() || m[0] <= 0.0 || m[3] <= 0.0 ||
+                        kotlin.math.abs(m[1]) > scale * 1e-6 || kotlin.math.abs(m[2]) > scale * 1e-6) return null
+                    draws += XObjectDraw(decodePdfName(name), listOf(m[4], m[5], m[4] + m[0], m[5] + m[3]))
+                }
+                "W", "W*", "G", "RG", "K", "CS", "SC", "SCN", "d", "J", "j", "M", "i", "ri",
+                "BMC", "BDC", "EMC", "MP", "DP", "BX", "EX" -> Unit
+                else -> return null
+            }
+            operands.clear()
+        }
+        return DecorativeGraphics(draws, textClip, graphicsStates).takeIf { !inText && subpaths.isEmpty() }
     }
 
     private fun hasInlineImage(latin: String): Boolean {

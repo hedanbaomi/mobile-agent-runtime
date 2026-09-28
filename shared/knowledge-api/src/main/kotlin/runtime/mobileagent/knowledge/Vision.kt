@@ -42,6 +42,20 @@ data class VisionInput(
                 .toByteArray(Charsets.UTF_8),
         )
 
+    /**
+     * Identity of this request apart from its document locator ([page] and
+     * [section]): byte-identical image payload, identical accompanying text and
+     * provenance hints, same target and prompt/schema/preprocess versions. A
+     * successful result stored under this key answers only a request whose
+     * image bytes are exactly the same; similar-looking images never share it.
+     */
+    val duplicateKey: String
+        get() = sha256Hex(
+            ("duplicate-v1|$assetHash|${sha256Hex(surroundingText.toByteArray(Charsets.UTF_8))}|$modelFingerprint|" +
+                "$VISION_PROMPT_VERSION|$VISION_SCHEMA_VERSION|$VISION_PREPROCESS_VERSION|$provenanceHash")
+                .toByteArray(Charsets.UTF_8),
+        )
+
     private val provenanceHash: String
         get() = sha256Hex(buildString {
             listOf(tableHeader, continuationGroupId, continuationIndex?.toString(), textImageAssociation,

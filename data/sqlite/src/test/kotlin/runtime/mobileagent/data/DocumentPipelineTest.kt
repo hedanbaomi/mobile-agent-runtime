@@ -606,7 +606,8 @@ class DocumentPipelineTest {
                 override fun renderUnit(pdfBytes: ByteArray, unit: ProcessingUnit, limits: UnitRenderLimits): RenderedPdfPage? {
                     renderAttempts++
                     if (unit.page == 2 && shouldFailPage2Render) return null
-                    return RenderedPdfPage(unit.page, byteArrayOf(1, 2, 3), "image/png", 100, 100)
+                    // Distinct renders: byte-identical page requests would legitimately share one result.
+                    return RenderedPdfPage(unit.page, byteArrayOf(1, 2, unit.page.toByte()), "image/png", 100, 100)
                 }
             }
 

@@ -32,7 +32,8 @@ class DocumentUnitPlannerTest {
             assertTrue(ImageIO.write(BufferedImage(2, 2, BufferedImage.TYPE_INT_RGB), "jpeg", output))
         }.toByteArray()
         val variants = listOf(
-            PdfParser.writePdfWithImageXObject("Annotated", jpeg, pageDictSuffix = "/Annots []"),
+            PdfParser.writePdfWithImageXObject("Annotated", jpeg, pageDictSuffix = "/Annots [99 0 R]"),
+            PdfParser.writePdfWithImageXObject("Rotated page", jpeg, pageDictSuffix = "/Rotate 90"),
             PdfParser.writePdfWithImageXObject("Masked", jpeg, imageDictSuffix = " /SMask 8 0 R"),
             PdfParser.writePdfWithImageXObject("Decoded", jpeg, imageDictSuffix = " /Decode [1 0 1 0 1 0]"),
             PdfParser.writePdfWithImageXObject("Decode parameters", jpeg, imageDictSuffix = " /DecodeParms << /ColorTransform 0 >>"),

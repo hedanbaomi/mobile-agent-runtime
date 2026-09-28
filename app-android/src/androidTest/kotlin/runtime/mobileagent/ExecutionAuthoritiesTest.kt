@@ -143,14 +143,14 @@ class ExecutionAuthoritiesTest {
         try {
             val viewModel = SettingsViewModel(app)
             viewModel.requestWiredAdbPairing()
-            val active = viewModel.uiState(statsEnabled = false, noticeCount = 0).wiredPairing
+            val active = viewModel.uiState(noticeCount = 0).wiredPairing
             assertTrue(active.hasToken)
             assertNotNull(viewModel.wiredPairingToken())
             assertEquals(fake.token, viewModel.wiredPairingToken())
             assertEquals(5, active.remainingAttempts)
 
             viewModel.cancelWiredAdbPairing()
-            val cleared = viewModel.uiState(statsEnabled = false, noticeCount = 0).wiredPairing
+            val cleared = viewModel.uiState(noticeCount = 0).wiredPairing
             assertFalse(cleared.hasToken)
             assertNull(viewModel.wiredPairingToken())
             assertTrue(fake.cancelCalls > 0)
@@ -170,8 +170,8 @@ class ExecutionAuthoritiesTest {
             viewModel.enableShizuku()
 
             assertEquals(listOf("intent:true", "select:SHIZUKU", "request"), fake.shizukuCalls)
-            assertEquals(Authority.SHIZUKU.name, viewModel.uiState(false, 0).selectedAuthority)
-            assertTrue(viewModel.uiState(false, 0).shizukuAuthority.userIntentEnabled)
+            assertEquals(Authority.SHIZUKU.name, viewModel.uiState(0).selectedAuthority)
+            assertTrue(viewModel.uiState(0).shizukuAuthority.userIntentEnabled)
         } finally {
             registerSettingsAuthorityPortProvider(app, app.container)
         }

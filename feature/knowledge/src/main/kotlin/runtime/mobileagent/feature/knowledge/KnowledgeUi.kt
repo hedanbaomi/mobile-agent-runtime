@@ -12,6 +12,7 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -52,6 +53,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
@@ -770,10 +772,18 @@ private fun KnowledgeBasePane(
         Row(Modifier.fillMaxWidth().padding(top = 8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             Button(onClick = onCreateBase) { Text(if (zh) "新建" else "New") }
         }
-        Row(Modifier.fillMaxWidth().padding(top = 8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            OutlinedButton(onClick = onImport) { Text(if (zh) "添加文件" else "Add files") }
-            OutlinedButton(onClick = onImportFolder) { Text(if (zh) "导入文件夹" else "Import folder") }
-            OutlinedButton(onClick = onImportZip) { Text(if (zh) "导入 ZIP" else "Import ZIP") }
+        Row(Modifier.fillMaxWidth().padding(top = 8.dp), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            val buttonModifier = Modifier.weight(1f).heightIn(min = 48.dp)
+            val buttonPadding = PaddingValues(horizontal = 4.dp, vertical = 8.dp)
+            OutlinedButton(onClick = onImport, modifier = buttonModifier, contentPadding = buttonPadding) {
+                Text(if (zh) "添加文件" else "Add files", maxLines = 1, softWrap = false, overflow = TextOverflow.Clip)
+            }
+            OutlinedButton(onClick = onImportFolder, modifier = buttonModifier, contentPadding = buttonPadding) {
+                Text(if (zh) "导入文件夹" else "Import folder", maxLines = 1, softWrap = false, overflow = TextOverflow.Clip)
+            }
+            OutlinedButton(onClick = onImportZip, modifier = buttonModifier, contentPadding = buttonPadding) {
+                Text(if (zh) "导入 ZIP" else "Import ZIP", maxLines = 1, softWrap = false, overflow = TextOverflow.Clip)
+            }
         }
         Text(if (zh) "文件、文件夹和知识库 ZIP 通过系统选择器进入应用管理存储；DOCX/EPUB 仍按办公文档解析。" else "Files, folders, and knowledge ZIP archives stay in app-managed storage. DOCX/EPUB remain office documents.", style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(top = 6.dp))
         if (state.embeddingSpaceLabel.isNotBlank()) {
@@ -998,6 +1008,10 @@ private fun BatchProgressCard(batch: KnowledgeBatchUi, jobs: List<KnowledgeImpor
     }
     val blocked = batch.blockedReason != null || batch.state.equals("BLOCKED", true)
     val paused = batch.paused || batch.state.equals("PAUSED", true)
+    val automaticRetryPending = batch.state.equals("PROCESSING", true) && batch.items.any { item ->
+        item.state.uppercase() in setOf("QUEUED", "PROCESSING") &&
+            jobs.any { job -> job.id == item.jobId && job.stage.equals("FAILED", true) }
+    }
     val percent = if (batch.totalItems > 0) batch.published * 100 / batch.totalItems else null
     Card(
         colors = CardDefaults.cardColors(
@@ -1020,6 +1034,7 @@ private fun BatchProgressCard(batch: KnowledgeBatchUi, jobs: List<KnowledgeImpor
                         if (zh) "已阻塞：视觉目标已变更，需要重新确认" else "Blocked: the Vision destination changed and needs re-confirmation"
                     } else if (zh) "已阻塞：需要视觉模型" else "Blocked: needs a Vision model"
                     paused -> if (zh) "已暂停" else "Paused"
+                    automaticRetryPending -> if (zh) "等待自动重试" else "Waiting for automatic retry"
                     batch.unknown > 0 -> if (zh) "请求结果未知：请展开详情确认是否重试" else "Request outcome unknown: open details to decide whether to retry"
                     batch.state.equals("FAILED", true) -> if (zh) "导入失败" else "Import failed"
                     batch.state.equals("CANCELLED", true) -> if (zh) "已取消" else "Cancelled"
@@ -1032,7 +1047,7 @@ private fun BatchProgressCard(batch: KnowledgeBatchUi, jobs: List<KnowledgeImpor
                 modifier = Modifier.padding(top = 4.dp),
             )
             // The unknown reason must be visible on the card itself, not only behind "details".
-            val unknownReason = batch.items.asSequence().mapNotNull { it.error }
+            val unknownReason = if (automaticRetryPending) null else batch.items.asSequence().mapNotNull { it.error }
                 .firstOrNull { it.contains("UNKNOWN_OUTCOME") }?.take(300)
             if (unknownReason != null) {
                 Text(
@@ -1082,7 +1097,7 @@ private fun BatchProgressCard(batch: KnowledgeBatchUi, jobs: List<KnowledgeImpor
                     Text(if (zh) "仅本地重建检索片段" else "Rebuild retrieval chunks locally")
                 }
             }
-            Text(if (zh) "最大并发 1 · 连续失败停止阈值 ${batch.policy.consecutiveFailureLimit}" else "Concurrency 1 · Stop after ${batch.policy.consecutiveFailureLimit} consecutive failures")
+            Text(if (zh) "最大并发 ${batch.policy.maxConcurrency} · 连续失败停止阈值 ${batch.policy.consecutiveFailureLimit}" else "Concurrency ${batch.policy.maxConcurrency} · Stop after ${batch.policy.consecutiveFailureLimit} consecutive failures")
             TextButton(onClick = { editPolicy = true }, enabled = !busy) {
                 Text(if (zh) "处理限制" else "Processing limits")
             }
@@ -1092,10 +1107,10 @@ private fun BatchProgressCard(batch: KnowledgeBatchUi, jobs: List<KnowledgeImpor
             Text(
                 if (zh) {
                     "已复制 ${batch.copied} / ${batch.totalItems} · 待复制 ${batch.pending} · 处理中 ${batch.processing} · 等待 ${batch.waiting} · 失败 ${batch.failed}" +
-                        if (batch.unknown > 0) " · 待确认 ${batch.unknown}" else ""
+                        if (batch.unknown > 0 && !automaticRetryPending) " · 待确认 ${batch.unknown}" else ""
                 } else {
                     "Copied ${batch.copied} / ${batch.totalItems} · pending ${batch.pending} · processing ${batch.processing} · waiting ${batch.waiting} · failed ${batch.failed}" +
-                        if (batch.unknown > 0) " · unknown ${batch.unknown}" else ""
+                        if (batch.unknown > 0 && !automaticRetryPending) " · unknown ${batch.unknown}" else ""
                 },
                 style = MaterialTheme.typography.labelSmall,
                 modifier = Modifier.padding(top = 4.dp),
@@ -1111,7 +1126,15 @@ private fun BatchProgressCard(batch: KnowledgeBatchUi, jobs: List<KnowledgeImpor
                     batch.items.forEach { item ->
                         val job = jobs.firstOrNull { it.id == item.jobId }
                         if (job != null) {
-                            JobCard(job.copy(requiresVisionConsent = false), actions, zh)
+                            val automaticRetry = job.stage.equals("FAILED", true) &&
+                                batch.state.uppercase() in setOf("PROCESSING", "PAUSED") &&
+                                item.state.uppercase() in setOf("QUEUED", "PROCESSING")
+                            JobCard(job.copy(
+                                stage = if (automaticRetry) "RETRY_WAIT" else job.stage,
+                                error = if (automaticRetry) null else job.error,
+                                unknownOutcome = job.unknownOutcome && !automaticRetry,
+                                requiresVisionConsent = false,
+                            ), actions, zh)
                             if (batch.blockedReason == "MISSING_VISUAL_SOURCE" && job.stage == "WAITING_FOR_VISION_MODEL") {
                                 OutlinedButton(onClick = { actions.onTextOnly(job.id) }, enabled = !busy) {
                                     Text(if (zh) "仅文本继续（保留视觉缺口）" else "Continue with text only (visual gaps remain)")
@@ -1147,23 +1170,26 @@ private fun ReuseSummaryText(summary: PipelineReuseSummary, zh: Boolean) {
 
 @Composable
 private fun PipelinePolicyDialog(batch: KnowledgeBatchUi, zh: Boolean, onDismiss: () -> Unit, onSave: (PipelinePolicy) -> Unit) {
+    var concurrency by remember { mutableStateOf(batch.policy.maxConcurrency.toString()) }
     var failures by remember { mutableStateOf(batch.policy.consecutiveFailureLimit.toString()) }
     var ceiling by remember { mutableStateOf(batch.policy.tokenDispatchCeiling?.toString().orEmpty()) }
     var reservation by remember { mutableStateOf(batch.policy.reservationTokensPerRequest?.toString().orEmpty()) }
-    val valid = failures.toIntOrNull()?.let { it > 0 } == true &&
+    val valid = concurrency.toIntOrNull()?.let { it in 1..3 } == true &&
+        failures.toIntOrNull()?.let { it > 0 } == true &&
         (ceiling.isBlank() || ceiling.toLongOrNull()?.let { it > 0 } == true) &&
         (reservation.isBlank() || reservation.toLongOrNull()?.let { it > 0 } == true) &&
         (ceiling.isBlank() || reservation.isNotBlank())
     AlertDialog(onDismissRequest = onDismiss,
         title = { Text(if (zh) "处理限制" else "Processing limits") },
         text = { Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            Text(if (zh) "最大并发：1。达到限制只停止新请求；UNKNOWN 保留安全预算。" else "Maximum concurrency: 1. Limits stop new dispatch only; UNKNOWN retains its safety reservation.")
+            Text(if (zh) "达到限制只停止新请求；UNKNOWN 保留安全预算。" else "Limits stop new dispatch only; UNKNOWN retains its safety reservation.")
+            OutlinedTextField(concurrency, { concurrency = it }, label = { Text(if (zh) "最大并发（1–3）" else "Maximum concurrency (1–3)") }, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number))
             OutlinedTextField(failures, { failures = it }, label = { Text(if (zh) "连续失败阈值" else "Consecutive failure limit") }, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number))
             OutlinedTextField(ceiling, { ceiling = it }, label = { Text(if (zh) "批次 token 派发上限（可留空）" else "Token dispatch ceiling (optional)") }, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number))
             OutlinedTextField(reservation, { reservation = it }, label = { Text(if (zh) "每请求保守预留" else "Conservative reservation per request") }, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number))
             Text(if (zh) "预留用于限制后续派发，不是 Provider 实际 token 或货币费用。" else "Reservations limit subsequent dispatch; they are not provider usage or currency charges.")
         } },
-        confirmButton = { Button(enabled = valid, onClick = { onSave(PipelinePolicy(consecutiveFailureLimit = failures.toInt(), tokenDispatchCeiling = ceiling.toLongOrNull(), reservationTokensPerRequest = reservation.toLongOrNull())) }) { Text(if (zh) "保存" else "Save") } },
+        confirmButton = { Button(enabled = valid, onClick = { onSave(PipelinePolicy(maxConcurrency = concurrency.toInt(), consecutiveFailureLimit = failures.toInt(), tokenDispatchCeiling = ceiling.toLongOrNull(), reservationTokensPerRequest = reservation.toLongOrNull())) }) { Text(if (zh) "保存" else "Save") } },
         dismissButton = { TextButton(onClick = onDismiss) { Text(if (zh) "取消" else "Cancel") } })
 }
 

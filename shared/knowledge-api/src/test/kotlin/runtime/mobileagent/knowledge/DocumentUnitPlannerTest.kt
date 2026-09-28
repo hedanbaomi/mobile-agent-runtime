@@ -5,9 +5,64 @@ package runtime.mobileagent.knowledge
 
 import org.junit.jupiter.api.Assertions.*
 import org.junit.jupiter.api.Test
+import java.awt.image.BufferedImage
+import java.io.ByteArrayOutputStream
+import javax.imageio.ImageIO
 
 class DocumentUnitPlannerTest {
     private val planner = DocumentUnitPlanner()
+
+    @Test fun textLayerWithEmbeddedJpegKeepsTextLocalAndPlansOnlyTheIllustration() {
+        val jpeg = ByteArrayOutputStream().also { output ->
+            assertTrue(ImageIO.write(BufferedImage(2, 2, BufferedImage.TYPE_INT_RGB), "jpeg", output))
+        }.toByteArray()
+        val pdf = PdfParser.writePdfWithImageXObject("Native text layer", jpeg)
+        val parsed = PdfParser.parse(pdf)
+        val units = planner.planPublication("mixed-pdf", parsed)
+
+        assertEquals(2, units.size)
+        assertEquals(1, units.count { !it.requiresVision && it.nativeText.contains("Native text layer") })
+        val illustration = units.single { it.requiresVision }
+        assertEquals(parsed.assets.single { it.kind == "IMAGE" }.localId, illustration.sourceAssetId)
+        assertEquals("", illustration.effectiveRequestText())
+    }
+
+    @Test fun modifiedPdfAppearanceKeepsTheWholePageVisionPath() {
+        val jpeg = ByteArrayOutputStream().also { output ->
+            assertTrue(ImageIO.write(BufferedImage(2, 2, BufferedImage.TYPE_INT_RGB), "jpeg", output))
+        }.toByteArray()
+        val variants = listOf(
+            PdfParser.writePdfWithImageXObject("Annotated", jpeg, pageDictSuffix = "/Annots []"),
+            PdfParser.writePdfWithImageXObject("Masked", jpeg, imageDictSuffix = " /SMask 8 0 R"),
+            PdfParser.writePdfWithImageXObject("Decoded", jpeg, imageDictSuffix = " /Decode [1 0 1 0 1 0]"),
+            PdfParser.writePdfWithImageXObject("Decode parameters", jpeg, imageDictSuffix = " /DecodeParms << /ColorTransform 0 >>"),
+            PdfParser.writePdfWithImageXObject("Rotated", jpeg, imageTransform = "0 100 -100 0 72 400"),
+            PdfParser.writePdfWithImageXObject("Mirrored", jpeg, imageTransform = "-100 0 0 100 72 400"),
+            PdfParser.writePdfWithImageXObject("Partly off page", jpeg, imageTransform = "100 0 0 100 -50 400"),
+            PdfParser.writePdfWithImageXObject("Fully off page", jpeg, imageTransform = "100 0 0 100 900 400"),
+            PdfParser.writePdfWithImageXObject("Text clip", jpeg, textPrelude = "7 Tr "),
+            PdfParser.writePdfWithImageXObject("Text state soft mask", jpeg,
+                textPrelude = "/GS1 gs ", extraResources = "/ExtGState << /GS1 << /ca 0.2 >> >>"),
+        )
+        variants.forEach { bytes ->
+            val parsed = PdfParser.parse(bytes)
+            assertFalse(parsed.pages.single().visualAssetsOnly)
+            assertTrue(planner.planPublication("modified-${bytes.size}-${bytes.contentHashCode()}", parsed)
+                .all { it.requiresVision && it.sourceAssetId == null })
+        }
+    }
+
+    @Test fun illustrationReadingOrderIsUniqueAcrossTextLayerPages() {
+        val jpeg = ByteArrayOutputStream().also { output ->
+            assertTrue(ImageIO.write(BufferedImage(2, 2, BufferedImage.TYPE_INT_RGB), "jpeg", output))
+        }.toByteArray()
+        val parsed = PdfParser.parse(PdfParser.writeTwoPagePdfWithImageXObject(jpeg))
+        val units = planner.planPublication("two-page-illustrations", parsed)
+        assertEquals(2, units.count { !it.requiresVision })
+        assertEquals(2, units.count { it.requiresVision })
+        assertEquals(units.size, units.map { it.readingOrder }.distinct().size)
+        assertEquals(units.size, units.map { it.unitId }.distinct().size)
+    }
 
     @Test fun ordinaryNativeAndScannedPagesUseOneUnitWithDifferentExecutionNeeds() {
         val native = planner.plan("hash", listOf(PlanningPage(1, "Complete text", false))).single()

@@ -14,6 +14,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
@@ -173,6 +174,8 @@ data class SettingsActions(
     val onLanguage: (String) -> Unit = {},
     val onTheme: (String) -> Unit = {},
     val onStats: (Boolean) -> Unit = {},
+    val onOpenAbout: () -> Unit = {},
+    val onOpenSource: () -> Unit = {},
     val onRequestInspection: (Boolean) -> Unit = {},
     val onDiagnosticsEnabled: (Boolean) -> Unit = {},
     val onExportDiagnostics: () -> Unit = {},
@@ -214,40 +217,16 @@ data class SettingsActions(
     val onDisableDangerousMode: () -> Unit = {},
 )
 
-/** State-driven alias for hosts that still route the settings tab through AboutScreen. */
-@Composable
-fun AboutScreen(
-    state: SettingsUiState,
-    actions: SettingsActions = SettingsActions(),
-    modifier: Modifier = Modifier,
-    showPageTitle: Boolean = true,
-) {
-    SettingsScreen(state, actions, modifier, showPageTitle, showAboutSectionTitle = false)
-}
-
 @Composable
 fun SettingsScreen(
     state: SettingsUiState,
     actions: SettingsActions = SettingsActions(),
     modifier: Modifier = Modifier,
     showPageTitle: Boolean = true,
-    showAboutSectionTitle: Boolean = true,
 ) {
     val zh = state.language.equals("zh-CN", true) || state.language.equals("system", true)
-    val context = LocalContext.current
-    val clipboard = LocalClipboardManager.current
     var languageMenu by remember { mutableStateOf(false) }
     var themeMenu by remember { mutableStateOf(false) }
-    var showLicense by remember { mutableStateOf(false) }
-    var showAbout by remember { mutableStateOf(false) }
-    var agplText by remember(state.licenseText) { mutableStateOf(state.licenseText) }
-    LaunchedEffect(showLicense, state.licenseText) {
-        if (showLicense && agplText == null) {
-            agplText = ThirdPartyNoticeAssets.loadAgplText(context).getOrElse {
-                if (zh) "无法读取 AGPL-3.0-only 文本。" else "AGPL-3.0-only text is unavailable."
-            }
-        }
-    }
     Column(
         modifier.fillMaxSize()
             .verticalScroll(rememberScrollState())
@@ -358,7 +337,8 @@ fun SettingsScreen(
         Card(Modifier.fillMaxWidth().testTag("settings.privacy_diagnostics")) {
             Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                 Text(if (zh) "隐私与调试" else "Privacy and diagnostics", style = MaterialTheme.typography.titleMedium)
-                SettingSwitch(if (zh) "匿名使用统计" else "Anonymous usage statistics", state.statsEnabled, actions.onStats)
+                SettingSwitch(if (zh) "匿名使用统计" else "Anonymous usage statistics", state.statsEnabled, actions.onStats,
+                    modifier = Modifier.testTag("settings.stats.switch"), labelClickable = true)
                 SettingSwitch(if (zh) "显示请求检查器" else "Show request inspector", state.requestInspectionEnabled, actions.onRequestInspection)
                 SettingSwitch(if (zh) "应用内诊断记录（默认关闭）" else "In-app diagnostics (off by default)", state.diagnosticsEnabled, actions.onDiagnosticsEnabled)
                 Text(
@@ -414,63 +394,12 @@ fun SettingsScreen(
         }
         Card(Modifier.fillMaxWidth().testTag("settings.about")) {
             Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                if (showAboutSectionTitle) {
-                    Text(if (zh) "关于" else "About", style = MaterialTheme.typography.titleMedium)
+                Text(if (zh) "关于" else "About", style = MaterialTheme.typography.titleMedium)
+                OutlinedButton(onClick = actions.onOpenAbout, modifier = Modifier.testTag("settings.open_about")) {
+                    Text(if (zh) "版本、许可与源码" else "Version, license and source")
                 }
-                Text("mobileAgentRuntime")
-                Text("${state.versionName} (${state.gitRevision})", style = MaterialTheme.typography.bodySmall)
-                Text(
-                    if (zh) "数据库 schema ${state.schemaVersion} · 构建 ${state.buildTimeUtc}"
-                    else "DB schema ${state.schemaVersion} · built ${state.buildTimeUtc}",
-                    style = MaterialTheme.typography.bodySmall,
-                )
-                Text("AGPL-3.0-only", style = MaterialTheme.typography.bodySmall)
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    OutlinedButton(onClick = { showAbout = true }) { Text(if (zh) "查看版本信息" else "Version details") }
-                    OutlinedButton(onClick = { showLicense = true }) { Text(if (zh) "查看许可证" else "License") }
-                    if (state.noticeCount > 0) TextButton(onClick = actions.onOpenAnnouncements) { Text(if (zh) "公告 (${state.noticeCount})" else "News (${state.noticeCount})") }
-                }
-                OutlinedButton(onClick = actions.onOpenThirdPartyNotices) {
-                    Text(if (zh) "第三方声明" else "Third-party notices")
-                }
-                OutlinedButton(onClick = actions.onCheckUpdates) { Text(if (zh) "检查更新" else "Check updates") }
-                if (state.updateState.isNotBlank()) Text(state.updateState, style = MaterialTheme.typography.bodySmall)
             }
         }
-    }
-    if (showAbout) {
-        AlertDialog(
-            onDismissRequest = { showAbout = false },
-            title = { Text("mobileAgentRuntime") },
-            text = {
-                Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                    Text("${state.versionName}\n${state.diagnosticText.trim()}\nAGPL-3.0-only")
-                    Text(
-                        if (zh) "诊断不含密钥。工具能力开关崩溃仍需绑定此 revision 的完整 Logcat。"
-                        else "Diagnostics omit secrets. A tools-capability crash still needs full Logcat bound to this revision.",
-                        style = MaterialTheme.typography.bodySmall,
-                    )
-                }
-            },
-            confirmButton = { Button(onClick = { showAbout = false }) { Text(if (zh) "关闭" else "Close") } },
-            dismissButton = {
-                TextButton(onClick = { clipboard.setText(AnnotatedString(state.diagnosticText)) }) {
-                    Text(if (zh) "复制诊断" else "Copy diagnostics")
-                }
-            },
-        )
-    }
-    if (showLicense) {
-        val license = agplText ?: if (zh) "正在读取 AGPL-3.0-only 文本…" else "Loading AGPL-3.0-only text…"
-        AlertDialog(onDismissRequest = { showLicense = false }, title = { Text("AGPL-3.0-only") }, text = { Text(license, modifier = Modifier.verticalScroll(rememberScrollState())) }, confirmButton = { Button(onClick = { showLicense = false }) { Text(if (zh) "关闭" else "Close") } })
-    }
-    if (state.thirdPartyNotices.opened) {
-        ThirdPartyNoticesDialog(
-            state = state.thirdPartyNotices,
-            chinese = zh,
-            onSelect = actions.onSelectThirdPartyNotice,
-            onClose = actions.onCloseThirdPartyNotices,
-        )
     }
 }
 
@@ -1104,9 +1033,10 @@ private fun SettingSwitch(
     checked: Boolean,
     onChange: (Boolean) -> Unit,
     modifier: Modifier = Modifier,
+    labelClickable: Boolean = false,
 ) {
     Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-        Text(label, Modifier.weight(1f))
+        Text(label, Modifier.weight(1f).then(if (labelClickable) Modifier.clickable { onChange(!checked) } else Modifier))
         Switch(checked = checked, onCheckedChange = onChange, modifier = modifier.heightIn(min = 48.dp))
     }
 }

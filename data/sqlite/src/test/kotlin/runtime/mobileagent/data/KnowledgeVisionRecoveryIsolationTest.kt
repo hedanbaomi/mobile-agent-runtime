@@ -57,7 +57,7 @@ class KnowledgeVisionRecoveryIsolationTest {
         repo.processBatch(batch, false)
 
         val jobId = repo.listBatchItemViews(batch).single().jobId!!
-        assertEquals(1, repo.batchProgress(batch).unknown)
+        assertEquals(0, repo.batchProgress(batch).unknown, "automatic retry is queued")
         val own = db.query("SELECT cache_key, asset_hash, context_hash FROM vision_results WHERE status = 'UNKNOWN_OUTCOME'").single()
 
         // Same asset bytes, another context (for example the same logo used by another document).
@@ -155,27 +155,22 @@ class KnowledgeVisionRecoveryIsolationTest {
         assertEquals(emptyList<Int>(), newCalls, "adopting legacy checkpoints must not dispatch")
         // Publication counts documents, not cached pages: this one document is still incomplete.
         assertEquals(0, repository().batchProgress(adoptedBatch).published)
-        assertEquals(1, repository().batchProgress(adoptedBatch).unknown)
-        val adoptedJob = repository().listBatchItemViews(adoptedBatch).single().jobId!!
+        assertEquals(0, repository().batchProgress(adoptedBatch).unknown, "automatic retry is queued")
         val adoptedRows = db.query("SELECT status FROM vision_results WHERE model_fingerprint = ?", listOf(fullTarget))
         assertEquals(3, adoptedRows.size)
         assertEquals(2, adoptedRows.count { it.string("status") == "SUCCESS" })
         assertEquals(1, adoptedRows.count { it.string("status") == "UNKNOWN_OUTCOME" })
 
-        // A repeated delivery and a process restart must not replay the adopted uncertain page.
+        // The next worker delivery replays only the adopted uncertain page.
         repository().processBatch(adoptedBatch, false)
-        assertEquals(emptyList<Int>(), newCalls)
+        assertEquals(listOf(3), newCalls)
+        assertEquals(1, repository().batchProgress(adoptedBatch).published)
         db.execute("UPDATE import_jobs SET stage = 'VISION_PROCESSING', error = NULL WHERE batch_id = ?", listOf(adoptedBatch))
         db.execute("UPDATE import_items SET state = 'PROCESSING', error = NULL WHERE batch_id = ?", listOf(adoptedBatch))
         db.execute("UPDATE import_batches SET state = 'PROCESSING', error = NULL WHERE id = ?", listOf(adoptedBatch))
         val restarted = repository()
         restarted.recoverableBatchIds().forEach { restarted.processBatch(it, false) }
-        assertEquals(emptyList<Int>(), newCalls, "an adopted legacy UNKNOWN must never be replayed automatically")
-
-        // Only an explicit retry may re-send the unknown page, and it re-sends nothing else.
-        val retried = repository().retryUnknownVision(adoptedJob, true, fullTarget)
-        assertEquals(ImportStage.READY, retried.stage, retried.error)
-        assertEquals(listOf(3), newCalls)
+        assertEquals(listOf(3), newCalls, "a successful checkpoint must not be replayed after restart")
         assertEquals(1, repository().batchProgress(adoptedBatch).published)
         assertEquals(0, repository().batchProgress(adoptedBatch).unknown)
     }

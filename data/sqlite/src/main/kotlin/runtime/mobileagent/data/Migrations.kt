@@ -57,7 +57,8 @@ object Migrations {
     // rewritten by a summary, and no summary is ever re-sent from the database.
     // v25 stores bounded-read UTF-16 lengths; body and existing references are unchanged.
     // v26: transactional source revisions for linear API batch validation.
-    const val VERSION = 26
+    // v27 replaces the single active dispatch index with three durable slots.
+    const val VERSION = 27
 
     private val statements = listOf(
         "CREATE TABLE IF NOT EXISTS schema_version (version INTEGER NOT NULL PRIMARY KEY)",
@@ -245,6 +246,7 @@ object Migrations {
         // v24: unit-level local failure reporting and phase
         Column("pipeline_units", "failure_code", "TEXT"),
         Column("pipeline_units", "failure_phase", "TEXT"),
+        Column("pipeline_attempts", "dispatch_slot", "INTEGER"),
         Column("chunks", "text_utf16_length", "INTEGER NOT NULL DEFAULT -1 CHECK(text_utf16_length >= -1)"),
     )
 
@@ -269,6 +271,14 @@ object Migrations {
             // v24 is additive and lazy: legacy jobs/cache rows are not guessed into unit plans.
             DocumentPipelineStore.schema.forEach { sql -> connection.execute(sql) }
             columns.forEach { column -> ensureColumn(connection, column) }
+            // The v24 unique constant-expression index allowed only one live
+            // request. Existing databases can have at most one active row.
+            connection.execute("DROP INDEX IF EXISTS pipeline_one_dispatch")
+            connection.execute("UPDATE pipeline_attempts SET dispatch_slot = 1 WHERE state IN ('READY','DISPATCHED') AND dispatch_slot IS NULL")
+            connection.execute("CREATE UNIQUE INDEX IF NOT EXISTS pipeline_active_dispatch_slot ON pipeline_attempts(dispatch_slot) WHERE state IN ('READY','DISPATCHED')")
+            connection.execute("CREATE TRIGGER IF NOT EXISTS pipeline_dispatch_slot_required_insert BEFORE INSERT ON pipeline_attempts WHEN NEW.state IN ('READY','DISPATCHED') AND (NEW.dispatch_slot IS NULL OR NEW.dispatch_slot NOT BETWEEN 1 AND 3) BEGIN SELECT RAISE(ABORT,'active dispatch requires a bounded slot'); END")
+            connection.execute("CREATE TRIGGER IF NOT EXISTS pipeline_dispatch_slot_required_update BEFORE UPDATE ON pipeline_attempts WHEN NEW.state IN ('READY','DISPATCHED') AND (NEW.dispatch_slot IS NULL OR NEW.dispatch_slot NOT BETWEEN 1 AND 3) BEGIN SELECT RAISE(ABORT,'active dispatch requires a bounded slot'); END")
+            connection.execute("CREATE TRIGGER IF NOT EXISTS pipeline_dispatch_slot_immutable BEFORE UPDATE ON pipeline_attempts WHEN OLD.dispatch_slot IS NOT NEW.dispatch_slot BEGIN SELECT RAISE(ABORT,'pipeline dispatch slot is immutable'); END")
             connection.execute("CREATE INDEX IF NOT EXISTS chunk_read_lengths ON chunks(document_version_id,ordinal,text_utf16_length,id)")
             connection.execute("CREATE INDEX IF NOT EXISTS chunk_missing_lengths ON chunks(document_version_id,id) WHERE text_utf16_length < 0")
             ChunkTextMetadata.backfill(connection)

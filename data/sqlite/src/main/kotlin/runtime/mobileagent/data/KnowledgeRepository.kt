@@ -80,7 +80,12 @@ import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.io.File
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.runBlocking
+import java.util.concurrent.atomic.AtomicBoolean
 
 /** Legacy cache identity may be adopted only when it maps to one current destination. */
 data class LegacyVisionCacheTarget(val fingerprint: String, val unambiguous: Boolean)
@@ -167,10 +172,10 @@ class KnowledgeRepository(
         check(reviewedSummary.unknown == 0 || acknowledgeDuplicateCharge) { "UNKNOWN_OUTCOME requires separate duplicate-charge acknowledgement" }
         check(visionTargetAvailable(targetFingerprint)) { "Vision destination changed" }
         check(batchId !in activeBatchWorkers) { "Pause and wait for current work before reconfiguration" }
-        check(pipeline.stopReason(batchId) != "PIPELINE_MAX_CONCURRENCY") { "Wait for in-flight work" }
+        check(pipeline.stopReason(null) != "PIPELINE_MAX_CONCURRENCY") { "Wait for in-flight work" }
         check(findBatch(batchId)?.state != ImportBatchState.CANCELLED) { "Cancelled batch cannot be restarted" }
         db.transaction {
-            check(pipeline.stopReason(batchId) != "PIPELINE_MAX_CONCURRENCY") { "Wait for in-flight work" }
+            check(pipeline.stopReason(null) != "PIPELINE_MAX_CONCURRENCY") { "Wait for in-flight work" }
             db.query("SELECT j.id,j.document_id,j.vision_binding_json,j.display_name,d.format,d.blob_hash FROM import_jobs j JOIN documents d ON d.id=j.document_id WHERE j.batch_id=?",listOf(batchId)).forEach { row ->
                 val bytes=blobs.get(row.string("blob_hash")) ?: error("CAS source missing")
                 val units=planSource(bytes,row.string("format"),row.string("display_name"),targetFingerprint)
@@ -2376,11 +2381,19 @@ class KnowledgeRepository(
             persistJob(job, displayName)
             return job
         } catch (cancelled: CancellationException) {
-            persistApiCancellation(job, displayName)
+            if (jobBatchId(job.id) != null && jobBatchId(job.id)?.let(::findBatch)?.state != ImportBatchState.CANCELLED) {
+                persistBatchInterruption(job, displayName)
+            } else {
+                persistApiCancellation(job, displayName)
+            }
             throw cancelled
         } catch (interrupted: InterruptedException) {
             Thread.currentThread().interrupt()
-            persistApiCancellation(job, displayName)
+            if (jobBatchId(job.id) != null && jobBatchId(job.id)?.let(::findBatch)?.state != ImportBatchState.CANCELLED) {
+                persistBatchInterruption(job, displayName)
+            } else {
+                persistApiCancellation(job, displayName)
+            }
             throw interrupted
         } catch (unavailable: TextOnlyUnavailable) {
             throw unavailable
@@ -2392,6 +2405,19 @@ class KnowledgeRepository(
             persistJob(job, displayName)
             return job
         }
+    }
+
+    private fun persistBatchInterruption(job: ImportJob, displayName: String) {
+        val operation = activeEmbeddingOperationForJob(job.id) ?: latestEmbeddingOperationForJob(job.id)
+        if (operation?.state in setOf("DISPATCHED", "UNKNOWN")) {
+            if (operation?.state == "DISPATCHED") markEmbeddingOperationUnknown(operation)
+            job.stage = ImportStage.FAILED
+            job.error = API_EMBEDDING_CANCEL_UNKNOWN_ERROR
+        } else {
+            job.stage = ImportStage.COPYING
+            job.error = null
+        }
+        persistJob(job, displayName)
     }
 
     private fun persistApiCancellation(job: ImportJob, displayName: String) {
@@ -2781,17 +2807,15 @@ class KnowledgeRepository(
                 pipeline.failUnit(job.id, unit.unitId, "PIPELINE_TEXT_LIMIT_EXCEEDED", "LOCAL_PREPARE")
                 return VisionBatch.Failed("PIPELINE_TEXT_LIMIT_EXCEEDED: request text exceeds the local bound; no request was sent")
             }
-            val asset = if (parsed.format == SourceFormat.PDF && pdfRasterizer != null) {
+            val asset = if (parsed.format == SourceFormat.PDF && pdfRasterizer != null && unit.sourceAssetId == null) {
                 val rendered = (pdfRasterizer as? PdfUnitRasterizer)?.renderUnit(bytes,unit)
                     ?: if(unit.region == null) PdfParser.renderPage(bytes,pdfRasterizer,unit.page) else null
                 if(rendered == null) {
-                    // Embedded image evidence is sufficient only when extraction proved no page gaps.
-                    val fallback=processable.filter { it.page==unit.page }
-                    if(unit.region!=null || pageBlockers.any { it.page==unit.page } || fallback.size!=1) {
-                        pipeline.failUnit(job.id, unit.unitId, "RENDER_FAILED", "LOCAL_RENDER")
-                        return VisionBatch.Failed("PDF unit could not be rendered within local limits")
-                    }
-                    fallback.single().copy(surroundingText = unit.effectiveRequestText())
+                    // A page unit can cover masks, transforms, annotations or
+                    // vector marks. An embedded JPEG is never a substitute for
+                    // the complete rendered appearance of that page.
+                    pipeline.failUnit(job.id, unit.unitId, "RENDER_FAILED", "LOCAL_RENDER")
+                    return VisionBatch.Failed("PDF unit could not be rendered within local limits")
                 } else ExtractedAsset("unit-${unit.unitId}","IMAGE",unit.page,
                     if(unit.region == null) "pdf-page-${unit.page}" else "pdf-unit-${unit.unitId}",
                     rendered.bytes,rendered.mediaType,unit.effectiveRequestText())
@@ -2806,7 +2830,25 @@ class KnowledgeRepository(
                 val dimensions = imageRenderer?.imageDimensions(source.bytes)
                 val limits = runtime.mobileagent.knowledge.UnitRenderLimits()
                 val oversized = dimensions != null && (dimensions.first > limits.maxDimension || dimensions.second > limits.maxDimension || dimensions.first.toLong()*dimensions.second > limits.maxPixels)
-                if(imageRenderer != null && (unit.region != null || oversized || source.bytes.size > limits.maxEncodedBytes)) {
+                if (parsed.format == SourceFormat.PDF && unit.sourceAssetId != null) {
+                    // Decode the independent JPEG before dispatch. A valid header is
+                    // not enough to prove the whole payload is usable. If decoding
+                    // fails, keep the page evidence by rendering the complete page.
+                    val rendered = imageRenderer?.renderImageUnit(source.bytes, unit)
+                    if (rendered != null) {
+                        source.copy(bytes = rendered.bytes, mediaType = rendered.mediaType,
+                            section = if (unit.region == null) source.section else "image-unit-${unit.unitId}",
+                            surroundingText = unit.effectiveRequestText())
+                    } else {
+                        val page = pdfRasterizer?.let { PdfParser.renderPage(bytes, it, unit.page) }
+                        if (page == null) {
+                            pipeline.failUnit(job.id, unit.unitId, "RENDER_FAILED", "LOCAL_RENDER")
+                            return VisionBatch.Failed("PDF illustration and page could not be rendered within local limits")
+                        }
+                        ExtractedAsset("unit-${unit.unitId}", "IMAGE", unit.page, "pdf-page-${unit.page}",
+                            page.bytes, page.mediaType, unit.effectiveRequestText())
+                    }
+                } else if(imageRenderer != null && (unit.region != null || oversized || source.bytes.size > limits.maxEncodedBytes)) {
                     val rendered = imageRenderer.renderImageUnit(source.bytes,unit)
                     if (rendered == null) {
                         pipeline.failUnit(job.id, unit.unitId, "RENDER_FAILED", "LOCAL_RENDER")
@@ -2894,8 +2936,9 @@ class KnowledgeRepository(
                     "Vision destination changed. Remaining pages were not sent. Approve upload to the current Provider and model.",
                 )
             }
-            val stored = blobs.put(asset.bytes, asset.mediaType)
-            upsertBlob(stored)
+            val stored = synchronized(indexLock) {
+                blobs.put(asset.bytes, asset.mediaType).also(::upsertBlob)
+            }
             val assetId = EntityId.random().value
             val contextHash = VisionCacheKey.contextHash(asset.surroundingText, asset.page, asset.section)
             val input = VisionInput(
@@ -5064,7 +5107,7 @@ class KnowledgeRepository(
         val existing = db.query("SELECT ref_count FROM blobs WHERE hash = ?", listOf(stored.sha256)).singleOrNull()
         if (existing == null) {
             db.execute(
-                "INSERT INTO blobs(hash,byte_length,media_type,local_ref,ref_count) VALUES (?,?,?,?,0)",
+                "INSERT OR IGNORE INTO blobs(hash,byte_length,media_type,local_ref,ref_count) VALUES (?,?,?,?,0)",
                 listOf(stored.sha256, stored.byteLength, stored.mediaType, stored.localRef),
             )
         }
@@ -5332,7 +5375,8 @@ class KnowledgeRepository(
     )
 
     /**
-     * Re-arm only durable, non-terminal batches after process recreation.
+     * Reconcile durable batches after process recreation, then re-arm those
+     * with eligible work.
      *
      * A worker may die after claiming an item but before synchronising its
      * terminal job state.  The job/CAS rows remain the source of truth, so a
@@ -5343,15 +5387,38 @@ class KnowledgeRepository(
      */
     fun recoverableBatchIds(): List<String> = synchronized(indexLock) {
         val ids = db.query(
-            "SELECT id FROM import_batches WHERE staging_complete = 1 AND state IN (?,?,?) ORDER BY created_at, id",
+            "SELECT id FROM import_batches WHERE staging_complete = 1 AND state IN (?,?,?,?,?,?,?) ORDER BY created_at, id",
             listOf(
                 ImportBatchState.STAGING.name,
                 ImportBatchState.COPYING.name,
                 ImportBatchState.PROCESSING.name,
+                ImportBatchState.FAILED.name,
+                ImportBatchState.PAUSED.name,
+                ImportBatchState.BLOCKED.name,
+                ImportBatchState.CANCELLED.name,
             ),
         ).map { it.string("id") }
         ids.forEach { batchId ->
             if (batchId in activeBatchWorkers) return@forEach
+            val state = db.query("SELECT state FROM import_batches WHERE id = ?", listOf(batchId))
+                .singleOrNull()?.string("state")
+            if (state in setOf(ImportBatchState.PAUSED.name, ImportBatchState.BLOCKED.name,
+                    ImportBatchState.CANCELLED.name)) {
+                // A user stop can race with process death after a provider
+                // dispatch. Settle the external boundary and release its
+                // durable slot, but never requeue a stopped batch.
+                db.query("SELECT job_id FROM import_items WHERE batch_id = ? AND job_id IS NOT NULL AND job_id != ''",
+                    listOf(batchId)).forEach { row ->
+                    val jobId = row.string("job_id")
+                    recoverPipelineJob(jobId)
+                    persistVisionUnknownOutcomeLocked(jobId)
+                    activeEmbeddingOperationForJob(jobId)?.takeIf { it.state == "DISPATCHED" }
+                        ?.let(::markEmbeddingOperationUnknown)
+                }
+                refreshBatchProgressLocked(batchId)
+                return@forEach
+            }
+            val wasFailed = state == ImportBatchState.FAILED.name
             // A consumed Vision ticket marks an external call that may have
             // already reached the provider.  Reduce that job to UNKNOWN before
             // any PROCESSING item is re-queued; otherwise processBatch could
@@ -5383,7 +5450,19 @@ class KnowledgeRepository(
                 "UPDATE import_items SET state = ?, error = NULL WHERE batch_id = ? AND state = ?",
                 listOf(ImportItemState.QUEUED.name, batchId, ImportItemState.PROCESSING.name),
             )
+            var retryScheduled = false
+            db.query("SELECT job_id FROM import_items WHERE batch_id = ? AND state = ?",
+                listOf(batchId, ImportItemState.FAILED.name)).forEach { row ->
+                retryScheduled = queueAutomaticBatchRetryLocked(batchId, row.string("job_id")) || retryScheduled
+            }
             refreshBatchProgressLocked(batchId)
+            // A previously failed batch may have had another lane in flight.
+            // Reconcile that lane's external outcome, but do not restart the
+            // batch merely because its local item was returned to QUEUED.
+            if (wasFailed && !retryScheduled) {
+                db.execute("UPDATE import_batches SET state = ? WHERE id = ?",
+                    listOf(ImportBatchState.FAILED.name, batchId))
+            }
         }
         ids.filter { batchId ->
             db.query("SELECT state FROM import_batches WHERE id = ?", listOf(batchId))
@@ -5493,30 +5572,102 @@ class KnowledgeRepository(
         refreshBatchProgressLocked(batchId)
     }
 
-    /**
-     * Process a batch in one durable coordinator.  Parallelism is deliberately
-     * bounded to one because the repository owns one serialized SQLite/index
-     * boundary and an API embedding operation is already exclusive per KB.
-     * Each item is claimed before resume, so a duplicate WorkManager delivery
-     * cannot enqueue or process the same job concurrently.
-     */
+    /** Each lane claims a different durable item; SQLite/index mutations still use indexLock. */
     private val activeBatchWorkers = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
 
-    fun processBatch(batchId: String, visionConfigured: Boolean) {
-        if (!activeBatchWorkers.add(batchId)) return
+    private fun queueAutomaticBatchRetry(batchId: String, jobId: String): Boolean = synchronized(indexLock) {
+        queueAutomaticBatchRetryLocked(batchId, jobId)
+    }
+
+    private fun queueAutomaticBatchRetryLocked(batchId: String, jobId: String): Boolean {
+        val batch = db.query("SELECT state FROM import_batches WHERE id = ?", listOf(batchId)).singleOrNull()
+            ?: return false
+        if (batch.string("state") in setOf(ImportBatchState.PAUSED.name, ImportBatchState.BLOCKED.name,
+                ImportBatchState.CANCELLED.name, ImportBatchState.COMPLETED.name)) return false
+        val row = db.query(
+            "SELECT i.state, i.attempt_count, j.stage, j.error, j.embedding_is_api, j.embedding_consent " +
+                "FROM import_items i JOIN import_jobs j ON j.id = i.job_id WHERE i.batch_id = ? AND j.id = ?",
+            listOf(batchId, jobId),
+        ).singleOrNull() ?: return false
+        if (row.string("stage") != ImportStage.FAILED.name) return false
+        val error = row.string("error")
+        val transient = listOf("UNKNOWN_OUTCOME", "TIMEOUT", "RATE_LIMITED", "NETWORK_UNAVAILABLE")
+            .any { error.contains(it, ignoreCase = true) }
+        if (!transient) return false
+        if (row.long("attempt_count") >= MAX_BATCH_ATTEMPTS) {
+            val exhausted = "AUTO_RETRY_EXHAUSTED: $MAX_BATCH_ATTEMPTS attempts; last error: $error"
+            db.execute("UPDATE import_jobs SET error = ? WHERE id = ?", listOf(exhausted, jobId))
+            db.execute("UPDATE import_items SET error = ? WHERE batch_id = ? AND job_id = ?",
+                listOf(exhausted, batchId, jobId))
+            db.execute("UPDATE import_batches SET error = ? WHERE id = ?", listOf(exhausted, batchId))
+            return false
+        }
+        val embedding = error.contains("embedding", ignoreCase = true)
+        if (embedding) {
+            if (!row.boolean("embedding_is_api") || !row.boolean("embedding_consent")) return false
+        } else if (batchVisionAuthorizationLocked(batchId) == null) {
+            return false
+        }
+        db.transaction {
+            db.execute("UPDATE import_items SET state = ?, error = NULL WHERE batch_id = ? AND job_id = ?",
+                listOf(ImportItemState.QUEUED.name, batchId, jobId))
+            db.execute("UPDATE import_batches SET state = ?, error = NULL, updated_at = ? WHERE id = ?",
+                listOf(ImportBatchState.PROCESSING.name, Utc.nowIso(), batchId))
+            refreshBatchProgressLocked(batchId)
+        }
+        emitBatchEvent(ImportBatchEventPhase.CHECKPOINT, batchId, jobId,
+            row.long("attempt_count").toInt(), reasonCode = "auto_retry_scheduled", count = 1)
+        return true
+    }
+
+    /** Returns true only when WorkManager should apply its persisted exponential backoff. */
+    fun processBatch(batchId: String, visionConfigured: Boolean): Boolean {
+        if (!activeBatchWorkers.add(batchId)) return false
         try {
-            processBatchRun(batchId, visionConfigured)
+            val retryPending = AtomicBoolean(false)
+            val parallelism = synchronized(indexLock) {
+                // The API embedding operation is exclusive per KB; local
+                // embedding and independent Vision jobs may use three lanes.
+                val usesApiEmbedding = db.query(
+                    "SELECT id FROM import_jobs WHERE batch_id = ? AND embedding_is_api = 1 LIMIT 1",
+                    listOf(batchId),
+                ).isNotEmpty()
+                val remaining = db.query("SELECT COUNT(*) AS n FROM import_items WHERE batch_id = ? AND state IN (?,?,?)",
+                        listOf(batchId, ImportItemState.PENDING.name, ImportItemState.COPYING.name,
+                            ImportItemState.QUEUED.name)).single().long("n").toInt()
+                // A copied PDF/Office/image has not necessarily been parsed yet,
+                // so has_images is not a reliable pre-dispatch gate.
+                val mayRequireVision = db.query(
+                    "SELECT j.id FROM import_jobs j JOIN documents d ON d.id = j.document_id " +
+                        "WHERE j.batch_id = ? AND d.format NOT IN ('TEXT','MARKDOWN') LIMIT 1",
+                    listOf(batchId),
+                ).isNotEmpty()
+                if (usesApiEmbedding || remaining < 3 ||
+                    (mayRequireVision && batchVisionAuthorizationLocked(batchId) == null)) 1
+                else minOf(MAX_BATCH_PARALLELISM, pipeline.policy(batchId).maxConcurrency, remaining)
+            }
+            runBlocking {
+                coroutineScope {
+                    (1..parallelism).map {
+                        async(Dispatchers.IO) { processBatchRun(batchId, visionConfigured, retryPending) }
+                    }.awaitAll()
+                }
+            }
+            return retryPending.get()
         } finally {
             activeBatchWorkers.remove(batchId)
         }
     }
 
-    private fun processBatchRun(batchId: String, visionConfigured: Boolean) {
+    private fun processBatchRun(batchId: String, visionConfigured: Boolean, retryPending: AtomicBoolean) {
         require(batchId.isNotBlank()) { "batchId must not be blank" }
-        if (db.query("SELECT staging_complete FROM import_batches WHERE id = ?", listOf(batchId))
-                .singleOrNull()?.boolean("staging_complete") != true) return
+        if (synchronized(indexLock) {
+                db.query("SELECT staging_complete FROM import_batches WHERE id = ?", listOf(batchId))
+                    .singleOrNull()?.boolean("staging_complete")
+            } != true) return
         emitBatchEvent(ImportBatchEventPhase.STARTED, batchId, null, 0, reasonCode = "batch_worker", count = 0)
         while (true) {
+            if (retryPending.get()) return
             val durableState = synchronized(indexLock) {
                 db.query("SELECT state FROM import_batches WHERE id = ?", listOf(batchId))
                     .singleOrNull()?.string("state")
@@ -5537,8 +5688,6 @@ class KnowledgeRepository(
             val jobId = try {
                 claimNextBatchJob(batchId)
             } catch (cancelled: CancellationException) {
-                runCatching { cancelBatch(batchId) }
-                    .onFailure { failure -> cancelled.addSuppressed(failure) }
                 throw cancelled
             } catch (failure: Throwable) {
                 synchronized(indexLock) {
@@ -5552,27 +5701,45 @@ class KnowledgeRepository(
             val authorizedTarget = synchronized(indexLock) { batchVisionAuthorizationLocked(batchId) }
             var finishedJob: ImportJob? = null
             try {
-                finishedJob = runBlocking {
-                    resumeImportCancellable(jobId, visionConfigured = visionConfigured || authorizedTarget != null)
+                val priorError = synchronized(indexLock) {
+                    db.query("SELECT error FROM import_jobs WHERE id = ?", listOf(jobId))
+                        .singleOrNull()?.string("error").orEmpty()
+                }
+                finishedJob = when {
+                    priorError.contains("UNKNOWN_OUTCOME", ignoreCase = true) &&
+                        priorError.contains("embedding", ignoreCase = true) ->
+                        retryUnknownEmbedding(jobId, acknowledgeDuplicateCharge = true,
+                            visionConfigured = visionConfigured || authorizedTarget != null)
+                    priorError.contains("UNKNOWN_OUTCOME", ignoreCase = true) ->
+                        retryUnknownVision(jobId, acknowledgeDuplicateCharge = true, expectedVisionFingerprint = authorizedTarget)
+                    else -> runBlocking {
+                        resumeImportCancellable(jobId, visionConfigured = visionConfigured || authorizedTarget != null)
+                    }
                 }
             } catch (cancelled: CancellationException) {
-                runCatching { cancelBatch(batchId) }
-                    .onFailure { failure -> cancelled.addSuppressed(failure) }
                 throw cancelled
             } catch (failure: Throwable) {
                 // resumeImport persists UNKNOWN_OUTCOME before throwing when
-                // a provider call may have been dispatched.  Reflect the
-                // durable job result and leave the batch failed/blocked;
-                // never turn an uncertain external call into an auto-retry.
+                // a provider call may have been dispatched. Reflect that
+                // durable result before deciding whether bounded batch retry
+                // can safely resume with the saved destination authorization.
                 synchronized(indexLock) {
                     syncBatchItemFromJobLocked(jobId, failure.message)
                     refreshBatchProgressLocked(batchId)
+                }
+                if (queueAutomaticBatchRetry(batchId, jobId)) {
+                    retryPending.set(true)
+                    return
                 }
                 if (isUnknownEmbeddingFailure(failure)) {
                     synchronized(indexLock) { failBatchLocked(batchId, failure.message ?: API_EMBEDDING_UNKNOWN_ERROR) }
                     emitBatchEvent(ImportBatchEventPhase.FAILED, batchId, jobId, 0, reasonCode = "embedding_unknown", count = 1)
                     throw failure
                 }
+            }
+            if (queueAutomaticBatchRetry(batchId, jobId)) {
+                retryPending.set(true)
+                return
             }
             // Stop the whole batch the moment one of its own members needs a Vision target that is
             // not authorized.  Remaining items stay queued at the last confirmed checkpoint; no
@@ -5650,6 +5817,11 @@ class KnowledgeRepository(
             ImportBatchState.PAUSED.name -> return true
         }
 
+        // Persist intent before WorkManager is stopped. If the process dies
+        // after that stop, startup recovery must never re-enqueue this batch.
+        db.execute("UPDATE import_batches SET state = ?, error = ?, updated_at = ? WHERE id = ?",
+            listOf(ImportBatchState.CANCELLED.name, "Cancelled by user", Utc.nowIso(), batchId))
+
         db.query(
             "SELECT id, stage FROM import_jobs WHERE batch_id = ? ORDER BY id",
             listOf(batchId),
@@ -5677,30 +5849,11 @@ class KnowledgeRepository(
         )
         refreshBatchProgressLocked(batchId)
 
-        // A batch with no items is still a durable user cancellation.  The
-        // normal progress reducer intentionally treats an empty batch as
-        // STAGING, so close this race explicitly after the reducer runs.
-        val itemCount = db.query(
-            "SELECT COUNT(*) AS count FROM import_items WHERE batch_id = ?",
-            listOf(batchId),
-        ).single().long("count")
-        val finalState = db.query(
-            "SELECT state FROM import_batches WHERE id = ?",
-            listOf(batchId),
-        ).singleOrNull()?.string("state")
-        if (itemCount == 0L || finalState == ImportBatchState.CANCELLED.name) {
-            db.execute(
-                "UPDATE import_batches SET state = ?, error = ?, updated_at = ? WHERE id = ? AND state NOT IN (?,?)",
-                listOf(
-                    ImportBatchState.CANCELLED.name,
-                    "Cancelled by user",
-                    Utc.nowIso(),
-                    batchId,
-                    ImportBatchState.COMPLETED.name,
-                    ImportBatchState.FAILED.name,
-                ),
-            )
-        }
+        // Counter refreshes can derive another state from mixed item outcomes;
+        // the explicit stop remains authoritative even when an earlier item
+        // had already failed or an in-flight request became UNKNOWN.
+        db.execute("UPDATE import_batches SET state = ?, error = ?, updated_at = ? WHERE id = ?",
+            listOf(ImportBatchState.CANCELLED.name, "Cancelled by user", Utc.nowIso(), batchId))
         true
     }
 
@@ -6281,8 +6434,9 @@ class KnowledgeRepository(
             )
             return
         }
-        // An explicit user pause always wins: nothing may un-pause a batch implicitly.
-        if (durableState == ImportBatchState.PAUSED) {
+        // Explicit user stops always win over counters from workers that were
+        // already in flight when the stop was recorded.
+        if (durableState == ImportBatchState.PAUSED || durableState == ImportBatchState.CANCELLED) {
             writeBatchCountersLocked(batchId, batchProgressLocked(batchId))
             return
         }
@@ -6668,6 +6822,8 @@ class KnowledgeRepository(
 
     companion object {
         private val livePipelineJobs = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
+        private const val MAX_BATCH_PARALLELISM = 3
+        private const val MAX_BATCH_ATTEMPTS = 6
         const val DEFAULT_KB_ID = "kb-default"
         const val PARSER_FINGERPRINT = "text-utf8-v1"
         private const val UNKNOWN_REBIND_PREFIX = "__api_rebind_unknown__:"

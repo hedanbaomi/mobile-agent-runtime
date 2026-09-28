@@ -163,6 +163,30 @@ class AppContainer(app: MobileAgentApp) :
             socketTimeoutMillis = 180_000
         }
     }
+    /** Large visual pages can legitimately run past the ordinary chat timeout. */
+    val visionHttp: HttpClient = HttpClient(OkHttp) {
+        followRedirects = false
+        engine {
+            config {
+                followRedirects(false)
+                followSslRedirects(false)
+                retryOnConnectionFailure(false)
+                addNetworkInterceptor { chain ->
+                    val response = chain.proceed(chain.request())
+                    if (response.code == 503) {
+                        response.close()
+                        throw runtime.mobileagent.provider.ProviderHttpResponseException(503)
+                    }
+                    response
+                }
+            }
+        }
+        install(HttpTimeout) {
+            requestTimeoutMillis = 600_000
+            connectTimeoutMillis = 15_000
+            socketTimeoutMillis = 600_000
+        }
+    }
     val apiEmbeddings = ApiEmbeddingRegistry(profiles, secrets, http)
     val knowledge = KnowledgeRepository(
         db,
@@ -177,7 +201,7 @@ class AppContainer(app: MobileAgentApp) :
         vectorIndexFactory = UsearchVectorIndexFactory(),
         vectorIndexDirectory = File(app.cacheDir, "knowledge-index"),
         legacyLocalEmbeddingSpaces = AndroidModelPackLoader.LEGACY_LOCAL_SPACE_IDS,
-        vision = OpenAiCompatibleVision(http, profiles, secrets),
+        vision = OpenAiCompatibleVision(visionHttp, profiles, secrets),
         visionBinding = {
             profiles.visionBinding()?.let { (provider, model) -> visionProfileBinding(provider, model) }
         },
@@ -317,6 +341,7 @@ class AppContainer(app: MobileAgentApp) :
         runCatching { wiredAuthority.close() }
         runCatching { shizuku.close() }
         runCatching { announcementHttp.close() }
+        runCatching { visionHttp.close() }
         runCatching { http.close() }
     }
 
@@ -328,8 +353,9 @@ class AppContainer(app: MobileAgentApp) :
         ImportWorkerRegistry.batchHandler = ImportBatchHandler { batchId, configured ->
             runCatching { app.diagnostics.recordBatchWorkerStart() }
             try {
-                knowledge.processBatch(batchId, configured)
-                runCatching { app.diagnostics.recordBatchWorkerComplete() }
+                val retryPending = knowledge.processBatch(batchId, configured)
+                if (!retryPending) runCatching { app.diagnostics.recordBatchWorkerComplete() }
+                retryPending
             } catch (failure: Throwable) {
                 runCatching { app.diagnostics.recordBatchWorkerFailed(failure) }
                 throw failure

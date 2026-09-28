@@ -4,6 +4,7 @@
 package runtime.mobileagent.data
 
 import org.junit.jupiter.api.Assertions.assertEquals
+import org.junit.jupiter.api.Assertions.assertFalse
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Assertions.assertThrows
 import org.junit.jupiter.api.Test
@@ -173,7 +174,31 @@ class KnowledgeArchiveImportTest {
     }
 
     @Test
-    fun interruptedProcessingCancelsCurrentAndQueuedBatchItems() {
+    fun explicitBatchCancelSurvivesRestartBeforeWorkManagerStopCompletes() {
+        val db = JdbcSqlConnection()
+        Migrations.apply(db)
+        val blobs = MemoryBlobSink()
+        val repo = KnowledgeRepository(db, blobs)
+        val kb = repo.ensureDefaultBase()
+        val batchId = repo.beginBatch(kb, ImportBatchKind.FILES, "cancel before worker stop")
+        val first = repo.importBytes("first.txt", "text/plain", "first".toByteArray(), false, kb,
+            pauseAt = ImportStage.COPYING)
+        val second = repo.importBytes("second.txt", "text/plain", "second".toByteArray(), false, kb,
+            pauseAt = ImportStage.COPYING)
+        repo.bindJobToBatch(batchId, first, "first.txt")
+        repo.bindJobToBatch(batchId, second, "second.txt")
+        // The scheduler now persists this intent synchronously before asking
+        // WorkManager to cancel. Recreate the process at that exact boundary.
+        assertTrue(repo.cancelBatch(batchId))
+        val restarted = KnowledgeRepository(db, blobs)
+        assertEquals(ImportBatchState.CANCELLED, restarted.findBatch(batchId)!!.state)
+        assertFalse(batchId in restarted.recoverableBatchIds())
+        restarted.processBatch(batchId, visionConfigured = false)
+        assertEquals(ImportBatchState.CANCELLED, restarted.findBatch(batchId)!!.state)
+    }
+
+    @Test
+    fun interruptedProcessingKeepsCurrentAndQueuedBatchItemsRecoverable() {
         val db = JdbcSqlConnection()
         Migrations.apply(db)
         val interruptingEmbedder = object : TextEmbedder {
@@ -195,19 +220,17 @@ class KnowledgeArchiveImportTest {
             repo.processBatch(batchId, visionConfigured = false)
         }
 
-        assertEquals(ImportBatchState.CANCELLED, repo.listBatches(kb).single().state)
+        assertEquals(ImportBatchState.PROCESSING, repo.listBatches(kb).single().state)
         assertEquals(
-            2L,
+            0L,
             db.query(
                 "SELECT COUNT(*) AS n FROM import_items WHERE batch_id = ? AND state = ?",
                 listOf(batchId, ImportItemState.CANCELLED.name),
             ).single().long("n"),
         )
         assertTrue(repo.listJobs().filter { it.first.id == first.id || it.first.id == second.id }
-            .all { it.first.stage == ImportStage.CANCELLED })
-        assertTrue(batchId !in repo.recoverableBatchIds())
+            .none { it.first.stage == ImportStage.CANCELLED })
+        assertTrue(batchId in repo.recoverableBatchIds())
 
-        repo.processBatch(batchId, visionConfigured = false)
-        assertEquals(ImportBatchState.CANCELLED, repo.listBatches(kb).single().state)
     }
 }

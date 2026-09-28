@@ -8,6 +8,7 @@ import java.sql.DriverManager
 import java.sql.PreparedStatement
 
 class JdbcSqlConnection(url: String = "jdbc:sqlite::memory:") : SqlConnection, AutoCloseable {
+    private val lock = Any()
     private val connection: Connection = DriverManager.getConnection(url).apply {
         createStatement().use { it.execute("PRAGMA foreign_keys = ON") }
     }
@@ -16,10 +17,10 @@ class JdbcSqlConnection(url: String = "jdbc:sqlite::memory:") : SqlConnection, A
         // Xerial SQLite reports a result set for ALTER TABLE ... ADD COLUMN statements
         // containing CHECK constraints.  executeUpdate() then throws "Query returns results"
         // even though the DDL succeeded; execute() is the JDBC contract for mixed SQLite DDL/DML.
-        prepare(sql, args).use { it.execute() }
+        synchronized(lock) { prepare(sql, args).use { it.execute() } }
     }
 
-    override fun query(sql: String, args: List<Any?>): List<SqlRow> {
+    override fun query(sql: String, args: List<Any?>): List<SqlRow> = synchronized(lock) {
         prepare(sql, args).use { stmt ->
             stmt.executeQuery().use { rs ->
                 val rows = mutableListOf<SqlRow>()
@@ -31,15 +32,15 @@ class JdbcSqlConnection(url: String = "jdbc:sqlite::memory:") : SqlConnection, A
                     }
                     rows += SqlRow(map)
                 }
-                return rows
+                rows
             }
         }
     }
 
-    override fun <T> transaction(block: () -> T): T {
+    override fun <T> transaction(block: () -> T): T = synchronized(lock) {
         // Match Android's enclosing transaction: an inner repository helper must not commit
         // the outer result/attempt checkpoint independently.
-        if (!connection.autoCommit) return block()
+        if (!connection.autoCommit) return@synchronized block()
         val prev = connection.autoCommit
         connection.autoCommit = false
         return try {
@@ -60,5 +61,5 @@ class JdbcSqlConnection(url: String = "jdbc:sqlite::memory:") : SqlConnection, A
         return stmt
     }
 
-    override fun close() = connection.close()
+    override fun close() = synchronized(lock) { connection.close() }
 }

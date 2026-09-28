@@ -128,12 +128,15 @@ internal class DocumentPipelineStore(private val db: SqlConnection) {
     }
 
     fun stopReason(batchId: String?): String? {
-        if (db.query("SELECT request_id FROM pipeline_attempts WHERE state IN ('READY','DISPATCHED') LIMIT 1").isNotEmpty()) return "PIPELINE_MAX_CONCURRENCY"
+        val allowed = if (batchId == null) 1 else policy(batchId).maxConcurrency
+        val active = db.query("SELECT COUNT(*) AS n FROM pipeline_attempts WHERE state IN ('READY','DISPATCHED')")
+            .single().long("n")
+        if (active >= allowed) return "PIPELINE_MAX_CONCURRENCY"
         if (batchId == null) return null
         val policy = policy(batchId)
         val attempts = db.query(
             """
-            SELECT p.state, p.reservation_tokens,
+            SELECT p.state, p.failure_code, p.reservation_tokens,
                    COALESCE(p.input_tokens, v.input_tokens) AS input_tokens,
                    COALESCE(p.output_tokens, v.output_tokens) AS output_tokens,
                    p.dispatched_at
@@ -143,8 +146,11 @@ internal class DocumentPipelineStore(private val db: SqlConnection) {
             """.trimIndent(),
             listOf(batchId)
         )
-        if (attempts.any { it.string("state") in setOf("READY","DISPATCHED") }) return "PIPELINE_MAX_CONCURRENCY"
-        if (attempts.takeWhile { it.string("state") == "FAILED" }.size >= policy.consecutiveFailureLimit) return "PIPELINE_FAILURE_LIMIT"
+        val deterministicFailures = attempts.takeWhile {
+            it.string("state") == "FAILED" && it.string("failure_code") !in
+                setOf("RATE_LIMITED", "NETWORK_UNAVAILABLE", "TIMEOUT")
+        }.size
+        if (deterministicFailures >= policy.consecutiveFailureLimit) return "PIPELINE_FAILURE_LIMIT"
         val ceiling = policy.tokenDispatchCeiling ?: return null
         val spent = attempts.sumOf(::chargedReservation) + legacyAttempts(batchId).sumOf(::chargedReservation)
         if ((policy.reservationTokensPerRequest ?: 0) > ceiling - spent) return "PIPELINE_TOKEN_DISPATCH_CEILING"
@@ -170,12 +176,16 @@ internal class DocumentPipelineStore(private val db: SqlConnection) {
     fun prepare(jobId: String, unit: ProcessingUnit, batchId: String?, target: String, cacheKey: String, requestId: String): Int = db.transaction {
         check(!unknown(jobId,unit.unitId,unit.page)) { "UNKNOWN_OUTCOME: explicit duplicate-charge acknowledgement required" }
         check(stopReason(batchId) == null) { "Pipeline dispatch policy stopped new requests" }
+        val usedSlots = db.query("SELECT dispatch_slot FROM pipeline_attempts WHERE state IN ('READY','DISPATCHED')")
+            .mapNotNull { it.longOrNull("dispatch_slot")?.toInt() }.toSet()
+        val slot = (1..(if (batchId == null) 1 else policy(batchId).maxConcurrency))
+            .firstOrNull { it !in usedSlots } ?: error("Pipeline dispatch policy stopped new requests")
         val ordinal = db.query("SELECT COALESCE(MAX(ordinal),0)+1 AS n FROM pipeline_attempts WHERE job_id=? AND unit_id=?",listOf(jobId,unit.unitId)).single().long("n").toInt()
         unresolved(jobId,unit.unitId,unit.page).forEach { prior ->
             db.execute("UPDATE pipeline_retry_permits SET consumed=1,replacement_request_id=? WHERE unknown_attempt_id=? AND consumed=0",listOf(requestId,prior.string("request_id")))
         }
-        db.execute("INSERT INTO pipeline_attempts(request_id,job_id,batch_id,unit_id,ordinal,target,config_fingerprint,planner_version,result_version,cache_key,state,reservation_tokens,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
-            listOf(requestId,jobId,batchId,unit.unitId,ordinal,target,sha256Hex("$target|$resultVersion|${unit.unitId}".toByteArray()),unit.plannerVersion,resultVersion,cacheKey,"READY",policy(batchId).reservationTokensPerRequest ?: 0,Utc.nowIso()))
+        db.execute("INSERT INTO pipeline_attempts(request_id,job_id,batch_id,unit_id,ordinal,target,config_fingerprint,planner_version,result_version,cache_key,state,dispatch_slot,reservation_tokens,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            listOf(requestId,jobId,batchId,unit.unitId,ordinal,target,sha256Hex("$target|$resultVersion|${unit.unitId}".toByteArray()),unit.plannerVersion,resultVersion,cacheKey,"READY",slot,policy(batchId).reservationTokensPerRequest ?: 0,Utc.nowIso()))
         db.execute("UPDATE pipeline_units SET state='READY',failure_code=NULL,failure_phase=NULL WHERE job_id=? AND unit_id=?",listOf(jobId,unit.unitId))
         ordinal
     }
@@ -269,7 +279,6 @@ internal class DocumentPipelineStore(private val db: SqlConnection) {
             "CREATE TABLE IF NOT EXISTS pipeline_results(job_id TEXT NOT NULL,unit_id TEXT NOT NULL,target TEXT NOT NULL,result_version TEXT NOT NULL,cache_key TEXT NOT NULL,asset_id TEXT NOT NULL,ocr TEXT NOT NULL,description TEXT NOT NULL,table_markdown TEXT NOT NULL,result_type TEXT NOT NULL,section TEXT,PRIMARY KEY(job_id,unit_id,target,result_version))",
             "CREATE TABLE IF NOT EXISTS pipeline_attempts(request_id TEXT PRIMARY KEY,job_id TEXT NOT NULL,batch_id TEXT,unit_id TEXT NOT NULL,ordinal INTEGER NOT NULL CHECK(ordinal>0),target TEXT NOT NULL,config_fingerprint TEXT NOT NULL,planner_version TEXT NOT NULL,result_version TEXT NOT NULL,cache_key TEXT NOT NULL,state TEXT NOT NULL CHECK(state IN ('READY','DISPATCHED','SUCCEEDED','FAILED','CANCELLED','UNKNOWN_OUTCOME')),reservation_tokens INTEGER NOT NULL DEFAULT 0,input_tokens INTEGER,output_tokens INTEGER,reasoning_tokens INTEGER,failure_code TEXT,created_at TEXT NOT NULL,dispatched_at TEXT,terminal_at TEXT,UNIQUE(job_id,unit_id,ordinal))",
             "CREATE INDEX IF NOT EXISTS pipeline_attempts_batch ON pipeline_attempts(batch_id)",
-            "CREATE UNIQUE INDEX IF NOT EXISTS pipeline_one_dispatch ON pipeline_attempts((1)) WHERE state IN ('READY','DISPATCHED')",
             "CREATE TABLE IF NOT EXISTS pipeline_retry_permits(unknown_attempt_id TEXT PRIMARY KEY,consumed INTEGER NOT NULL DEFAULT 0,replacement_request_id TEXT)",
             "CREATE TABLE IF NOT EXISTS pipeline_policies(batch_id TEXT PRIMARY KEY,max_concurrency INTEGER NOT NULL,failure_limit INTEGER NOT NULL,token_ceiling INTEGER,reservation_tokens INTEGER)",
             "CREATE TABLE IF NOT EXISTS pipeline_publications(job_id TEXT NOT NULL,planner_version TEXT NOT NULL,plan_hash TEXT NOT NULL,result_version TEXT NOT NULL,target TEXT NOT NULL,chunk_version TEXT NOT NULL,version_id TEXT NOT NULL,PRIMARY KEY(job_id,plan_hash,result_version,target,chunk_version))",

@@ -38,7 +38,8 @@ fun interface ImportBatchCancellationHandler {
 }
 
 fun interface ImportBatchHandler {
-    fun process(batchId: String, visionConfigured: Boolean)
+    /** True when persisted transient work needs WorkManager's backoff retry. */
+    fun process(batchId: String, visionConfigured: Boolean): Boolean
 }
 
 fun interface ConsentTicketHandler {
@@ -192,13 +193,14 @@ object ImportWorkScheduler {
         }
     }
 
-    /**
-     * Stop the unique batch work before entering the serialized repository
-     * cancellation hook.  The hook is process-owned and idempotent; queued
-     * batches have no running worker to perform that durable transition.
-     */
+    /** Persist explicit user cancellation before stopping WorkManager work. */
     fun cancelBatch(context: Context, batchId: String) {
         require(batchId.isNotBlank()) { "batchId must not be blank" }
+        // A process can die after WorkManager commits CANCELLED. The repository
+        // intent must already be durable so startup cannot re-enqueue the batch.
+        checkNotNull(ImportWorkerRegistry.batchCancellationHandler) {
+            "Batch cancellation handler is unavailable"
+        }.cancel(batchId)
         val applicationContext = context.applicationContext
         cancellationScope.launch {
             try {
@@ -208,11 +210,6 @@ object ImportWorkScheduler {
                     .get()
             } catch (failure: Exception) {
                 android.util.Log.e("KnowledgeImport", "Batch work cancellation failed: ${failure.javaClass.simpleName}")
-            }
-            try {
-                ImportWorkerRegistry.batchCancellationHandler?.cancel(batchId)
-            } catch (failure: Exception) {
-                android.util.Log.e("KnowledgeImport", "Batch cancellation persistence failed: ${failure.javaClass.simpleName}")
             }
         }
     }

@@ -8,7 +8,7 @@ import java.util.zip.DeflaterOutputStream
 import java.util.zip.Inflater
 
 object PdfParser {
-    const val FINGERPRINT = "pdf-text-v15-pdfrenderer"
+    const val FINGERPRINT = "pdf-text-v16-pdfrenderer"
 
     private const val MAX_PDF_STREAM_BYTES = 32 * 1024 * 1024
 
@@ -62,7 +62,11 @@ object PdfParser {
             val hasImages = resolvedXObjects.entries.isNotEmpty() || hasUnresolvedXObjects || hasInline ||
                 Regex("/Subtype\\s*/Image").containsMatchIn(pageObj.dict)
             val hasDrawing = hasVectorDrawing(pageLatin)
-            if (pageNeedsVision(text, extracted.complete, content.complete, hasImages, hasDrawing)) {
+            if (pageNeedsVision(text, extracted.complete, content.complete, hasImages, hasDrawing) &&
+                !canProcessIllustrationsSeparately(text, extracted.complete, content.complete, pageLatin,
+                    resolvedXObjects.entries, objects, hasUnresolvedXObjects, hasInline, hasDrawing,
+                    hasPageAppearanceModifiers(objects, objNum, pageObj.dict),
+                    pageMediaBox(objects, objNum, pageObj.dict))) {
                 pageNumbers.indexOf(objNum) + 1
             } else {
                 null
@@ -158,7 +162,12 @@ object PdfParser {
             val pageWidth = mediaBox?.takeIf { it.size == 4 }?.let { kotlin.math.abs(it[2] - it[0]).toInt().coerceAtLeast(1) } ?: 612
             val pageHeight = mediaBox?.takeIf { it.size == 4 }?.let { kotlin.math.abs(it[3] - it[1]).toInt().coerceAtLeast(1) } ?: 792
             val complexLayout = hasDrawing && Regex("(?<![A-Za-z])(re|m|l|c|v|y)\\s").findAll(pageLatin).take(12).count() >= 12
-            pages += ExtractedPage(pageIndex, text, needsVision, pageWidth, pageHeight, complexLayout = complexLayout)
+            val visualAssetsOnly = canProcessIllustrationsSeparately(text, extracted.complete, content.complete,
+                pageLatin, xobjects, objects, hasUnresolvedXObjects, hasInline, hasDrawing,
+                hasPageAppearanceModifiers(objects, objNum, pageObj.dict),
+                pageMediaBox(objects, objNum, pageObj.dict))
+            pages += ExtractedPage(pageIndex, text, needsVision, pageWidth, pageHeight,
+                complexLayout = complexLayout, visualAssetsOnly = visualAssetsOnly)
             val rendered = renderedPages[pageIndex]?.takeIf { it.bytes.isNotEmpty() }
             if (rendered != null) {
                 assets += ExtractedAsset(
@@ -563,22 +572,43 @@ object PdfParser {
         )
     }
 
-    fun writePdfWithImageXObject(label: String): ByteArray {
+    fun writePdfWithImageXObject(
+        label: String,
+        jpegBytes: ByteArray = jpegStub(),
+        pageDictSuffix: String = "",
+        imageDictSuffix: String = "",
+        imageTransform: String = "100 0 0 100 72 400",
+        textPrelude: String = "",
+        extraResources: String = "",
+    ): ByteArray {
         val escaped = label.replace("\\", "\\\\").replace("(", "\\(").replace(")", "\\)")
-        val jpeg = jpegStub()
+        val jpeg = jpegBytes
         val imageObj = buildString {
             append("<< /Type /XObject /Subtype /Image /Width 1 /Height 1 /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /DCTDecode /Length ")
             append(jpeg.size)
+            append(imageDictSuffix)
             append(" >>\nstream\n")
         }
         return assemblePages(
             pages = listOf(
                 PageContent(
-                    "BT /F1 12 Tf 72 700 Td ($escaped) Tj ET\nq 100 0 0 100 72 400 cm /Im1 Do Q\n",
-                    "/Font << /F1 FONT >> /XObject << /Im1 IMAGE >>",
+                    "BT /F1 12 Tf 72 700 Td $textPrelude($escaped) Tj ET\nq $imageTransform cm /Im1 Do Q\n",
+                    "/Font << /F1 FONT >> /XObject << /Im1 IMAGE >> $extraResources",
                 ),
             ),
             extraObjects = listOf(imageObj to jpeg),
+            pageDictSuffix = pageDictSuffix,
+        )
+    }
+
+    fun writeTwoPagePdfWithImageXObject(jpegBytes: ByteArray): ByteArray {
+        val imageObj = "<< /Type /XObject /Subtype /Image /Width 2 /Height 2 /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /DCTDecode /Length ${jpegBytes.size} >>\nstream\n"
+        return assemblePages(
+            pages = listOf("First native page", "Second native page").map { label ->
+                PageContent("BT /F1 12 Tf 72 700 Td ($label) Tj ET\nq 100 0 0 100 72 400 cm /Im1 Do Q\n",
+                    "/Font << /F1 FONT >> /XObject << /Im1 IMAGE >>")
+            },
+            extraObjects = listOf(imageObj to jpegBytes),
         )
     }
 
@@ -1438,6 +1468,102 @@ object PdfParser {
             .any { match -> decodePdfName(match.groupValues[1]) !in entries }
     }
 
+    private fun canProcessIllustrationsSeparately(
+        text: String,
+        textComplete: Boolean,
+        contentComplete: Boolean,
+        pageLatin: String,
+        xobjects: Map<String, Int>,
+        objects: Map<Int, PdfObject>,
+        unresolved: Boolean,
+        hasInline: Boolean,
+        hasDrawing: Boolean,
+        pageAppearanceModified: Boolean,
+        pageBox: List<Double>?,
+    ): Boolean {
+        if (text.isBlank() || !textComplete || !contentComplete || unresolved || hasInline || hasDrawing ||
+            pageAppearanceModified || pageBox == null || xobjects.isEmpty()) return false
+        if (!textBlocksUseOnlyTextOperators(pageLatin)) return false
+        val outsideText = pageLatin.replace(Regex("BT[\\s\\S]*?ET"), " ")
+        // Only isolated, axis-aligned images whose *whole* appearance is
+        // visible qualify. Nested transforms or extra drawing operations stay
+        // on the complete-page path.
+        val draw = Regex("q\\s+([-+.0-9]+)\\s+([-+.0-9]+)\\s+([-+.0-9]+)\\s+([-+.0-9]+)\\s+([-+.0-9]+)\\s+([-+.0-9]+)\\s+cm\\s+/([^\\s<>\\[\\]()/%]+)\\s+Do\\s+Q")
+        val draws = draw.findAll(outsideText).toList()
+        if (draws.isEmpty() || outsideText.replace(draw, " ").isNotBlank()) return false
+        if (draws.map { decodePdfName(it.groupValues[7]) }.toSet() != xobjects.keys) return false
+        if (draws.any { match ->
+                val matrix = match.groupValues.drop(1).take(6).map { it.toDoubleOrNull() }
+                if (matrix.any { it == null }) return@any true
+                val scale = matrix[0]!!
+                val x = matrix[4]!!
+                val y = matrix[5]!!
+                scale <= 0.0 || matrix[1] != 0.0 || matrix[2] != 0.0 || matrix[3] != scale ||
+                    x < pageBox[0] || y < pageBox[1] || x + scale > pageBox[2] || y + scale > pageBox[3]
+            }) return false
+        return xobjects.values.all { number ->
+            val image = objects[number] ?: return@all false
+            val payload = image.stream ?: return@all false
+            isImageDict(image.dict) && xObjectMediaType(image.dict, payload) == "image/jpeg" &&
+                namedDictionaryOrReference(image.dict, "ColorSpace").name == "DeviceRGB" &&
+                listOf("Mask", "SMask", "Decode", "DecodeParms", "DP", "ImageMask", "Alternates", "Matte", "Interpolate")
+                    .none { findTopLevelValueStart(image.dict, it) >= 0 } &&
+                payload.size > 64 && payload.takeLast(2) == listOf(0xFF.toByte(), 0xD9.toByte()) &&
+                payload.indices.any { index -> index + 1 < payload.size &&
+                    payload[index] == 0xFF.toByte() && payload[index + 1] == 0xDA.toByte() }
+        }
+    }
+
+    private fun textBlocksUseOnlyTextOperators(pageLatin: String): Boolean {
+        val lexer = PdfContentLexer(pageLatin)
+        var inText = false
+        for (token in lexer.tokenize()) {
+            val name = (token as? PdfContentToken.Operator)?.name ?: continue
+            when (name) {
+                "BT" -> if (inText) return false else inText = true
+                "ET" -> if (!inText) return false else inText = false
+                else -> if (inText && name !in setOf("Tf", "Td", "TD", "Tm", "T*", "Tj", "TJ",
+                        "'", "\"", "Tc", "Tw", "Tz", "TL", "Ts")) return false
+            }
+        }
+        return lexer.complete && !inText
+    }
+
+    private fun pageMediaBox(objects: Map<Int, PdfObject>, pageNumber: Int, pageDict: String): List<Double>? {
+        val visited = mutableSetOf<Int>()
+        var number = pageNumber
+        var dict = pageDict
+        while (visited.add(number)) {
+            val box = arrayBody(dict, "MediaBox")
+            if (box.present) {
+                val values = box.body?.trim()?.split(Regex("\\s+"))?.map { it.toDoubleOrNull() } ?: return null
+                if (values.size != 4 || values.any { it == null || !it.isFinite() }) return null
+                val coordinates = values.map { it!! }
+                return coordinates.takeIf { it[0] < it[2] && it[1] < it[3] }
+            }
+            val parent = dictionaryOrReference(dict, "Parent")
+            if (!parent.present) return null
+            number = parent.reference ?: return null
+            dict = objects[number]?.dict ?: return null
+        }
+        return null
+    }
+
+    private fun hasPageAppearanceModifiers(objects: Map<Int, PdfObject>, pageNumber: Int, pageDict: String): Boolean {
+        val visited = mutableSetOf<Int>()
+        var number = pageNumber
+        var dict = pageDict
+        while (visited.add(number)) {
+            if (listOf("Annots", "Rotate", "CropBox", "BleedBox", "TrimBox", "ArtBox")
+                    .any { findTopLevelValueStart(dict, it) >= 0 }) return true
+            val parent = dictionaryOrReference(dict, "Parent")
+            if (!parent.present) return false
+            number = parent.reference ?: return true
+            dict = objects[number]?.dict ?: return true
+        }
+        return true
+    }
+
     private fun dictionaryOrReference(dict: String, name: String): PdfDictionaryValue {
         val valueStart = findTopLevelValueStart(dict, name)
         if (valueStart < 0) return PdfDictionaryValue(present = false)
@@ -2232,6 +2358,7 @@ object PdfParser {
         fontDicts: List<String> = listOf("<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>"),
         contentDictSuffix: String = "",
         deflateContent: Boolean = false,
+        pageDictSuffix: String = "",
     ): ByteArray {
         val n = pages.size
         val objects = mutableListOf<ByteArray>()
@@ -2249,7 +2376,7 @@ object PdfParser {
                 .replace("FONT", "$fontObj 0 R")
                 .replace("IMAGE", "$firstExtra 0 R")
             objects += obj(
-                "$pageObj 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents $contentObj 0 R /Resources << $resources >> >>\nendobj\n",
+                "$pageObj 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents $contentObj 0 R /Resources << $resources >> $pageDictSuffix >>\nendobj\n",
             )
         }
         pages.forEachIndexed { index, page ->

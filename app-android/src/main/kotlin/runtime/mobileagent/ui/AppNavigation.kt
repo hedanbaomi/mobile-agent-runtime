@@ -10,7 +10,6 @@ import androidx.compose.material.icons.outlined.Extension
 import androidx.compose.material.icons.outlined.MenuBook
 import androidx.compose.material.icons.outlined.Settings
 import androidx.compose.material.icons.outlined.SmartToy
-import androidx.compose.material.icons.outlined.Info
 import androidx.compose.material.icons.outlined.BugReport
 import androidx.compose.material.icons.outlined.Cloud
 import androidx.compose.material.icons.outlined.Tune
@@ -54,7 +53,6 @@ private val topLevelMenuRoutes = setOf(
     AppRoutes.NEWS,
     AppRoutes.SETTINGS,
     AppRoutes.MCP,
-    AppRoutes.ABOUT,
     AppRoutes.INSPECTOR,
 )
 
@@ -67,6 +65,7 @@ fun shellNavigationAffordance(
     childDetailOpen: Boolean = false,
 ): ShellNavigationAffordance = when {
     childDetailOpen -> ShellNavigationAffordance.BACK
+    route == AppRoutes.ABOUT -> ShellNavigationAffordance.BACK
     route in topLevelMenuRoutes -> ShellNavigationAffordance.MENU
     else -> ShellNavigationAffordance.NONE
 }
@@ -99,7 +98,7 @@ fun appShellTitle(
     }
 }
 
-/** The ten top-level product destinations in design order. Labels are localized at the shell boundary. */
+/** The nine drawer destinations in design order. About is reached from Settings. */
 fun defaultAppDestinations(chinese: Boolean = true): List<AppNavigationDestination> = listOf(
     AppNavigationDestination(AppRoutes.CHAT, if (chinese) "对话" else "Chat", Icons.Outlined.Chat),
     AppNavigationDestination(AppRoutes.AGENTS, if (chinese) "智能体" else "Agents", Icons.Outlined.SmartToy),
@@ -109,7 +108,6 @@ fun defaultAppDestinations(chinese: Boolean = true): List<AppNavigationDestinati
     AppNavigationDestination(AppRoutes.NEWS, if (chinese) "公告" else "News", Icons.Outlined.Campaign),
     AppNavigationDestination(AppRoutes.SETTINGS, if (chinese) "设置" else "Settings", Icons.Outlined.Settings),
     AppNavigationDestination(AppRoutes.MCP, "MCP", Icons.Outlined.Cloud),
-    AppNavigationDestination(AppRoutes.ABOUT, if (chinese) "关于" else "About", Icons.Outlined.Info),
     AppNavigationDestination(AppRoutes.INSPECTOR, if (chinese) "请求检查器" else "Request inspector", Icons.Outlined.BugReport),
 )
 
@@ -145,6 +143,7 @@ fun appBackTarget(
     inspectorReturnRoute: String = AppRoutes.CHAT,
     hasPreviousEntry: Boolean,
 ): String? {
+    if (currentRoute == AppRoutes.ABOUT) return AppRoutes.SETTINGS
     if (compact && currentRoute == AppRoutes.INSPECTOR) {
         return inspectorReturnRoute.takeUnless { it == AppRoutes.INSPECTOR } ?: AppRoutes.CHAT
     }

@@ -8,15 +8,15 @@ const val PIPELINE_CHUNK_VERSION = "retrieval-chunks-v2-page-provenance"
 
 enum class PipelineAttemptState { READY, DISPATCHED, SUCCEEDED, FAILED, CANCELLED, UNKNOWN_OUTCOME }
 
-/** V1 intentionally executes serially. Reservations are safety limits, never reported usage. */
+/** Bounded batch dispatch. Reservations are safety limits, never reported usage. */
 data class PipelinePolicy(
-    val maxConcurrency: Int = 1,
+    val maxConcurrency: Int = 3,
     val consecutiveFailureLimit: Int = 3,
     val tokenDispatchCeiling: Long? = null,
     val reservationTokensPerRequest: Long? = null,
 ) {
     init {
-        require(maxConcurrency == 1) { "This executor supports maximum concurrency 1" }
+        require(maxConcurrency in 1..3) { "Maximum concurrency must be between 1 and 3" }
         require(consecutiveFailureLimit > 0)
         require(tokenDispatchCeiling == null || tokenDispatchCeiling > 0)
         require(reservationTokensPerRequest == null || reservationTokensPerRequest > 0)

@@ -35,11 +35,11 @@ class NavigationScopeTest {
             AppRoutes.NEWS,
             AppRoutes.SETTINGS,
             AppRoutes.MCP,
-            AppRoutes.ABOUT,
             AppRoutes.INSPECTOR,
         ).forEach { route ->
             assertEquals(ShellNavigationAffordance.MENU, shellNavigationAffordance(route))
         }
+        assertEquals(ShellNavigationAffordance.BACK, shellNavigationAffordance(AppRoutes.ABOUT))
         // Feature-internal detail and overlays promote the same route to BACK;
         // a route never shows Menu and Back at the same time.
         listOf(
@@ -69,17 +69,18 @@ class NavigationScopeTest {
 
     @Test
     @Suppress("DEPRECATION")
-    fun drawerListsEveryDestinationDirectlyWithoutMore() {
+    fun drawerKeepsAboutInsideSettings() {
         val drawer = globalDrawerDestinations(false).map { it.route }
         assertEquals(
             listOf(
                 AppRoutes.CHAT, AppRoutes.AGENTS, AppRoutes.PROVIDERS, AppRoutes.KNOWLEDGE,
                 AppRoutes.SKILLS, AppRoutes.NEWS, AppRoutes.SETTINGS,
-                AppRoutes.MCP, AppRoutes.ABOUT, AppRoutes.INSPECTOR,
+                AppRoutes.MCP, AppRoutes.INSPECTOR,
             ),
             drawer,
         )
         assertTrue(!drawer.contains(AppRoutes.MORE))
+        assertTrue(!drawer.contains(AppRoutes.ABOUT))
         assertEquals(drawer, defaultAppDestinations(false).map { it.route })
     }
 
@@ -97,13 +98,15 @@ class NavigationScopeTest {
         // inspectorBackPreservesItsOpeningSourceAndRootFallbackIsChat.
         listOf(
             AppRoutes.PROVIDERS, AppRoutes.NEWS, AppRoutes.MCP, AppRoutes.SETTINGS,
-            AppRoutes.ABOUT, AppRoutes.AGENTS, AppRoutes.KNOWLEDGE,
+            AppRoutes.AGENTS, AppRoutes.KNOWLEDGE,
             AppRoutes.SKILLS,
         ).forEach { route ->
             assertNull(appBackTarget(compact = true, currentRoute = route, hasPreviousEntry = true))
             assertEquals(AppRoutes.CHAT, appBackTarget(compact = true, currentRoute = route, hasPreviousEntry = false))
             assertEquals(AppRoutes.CHAT, appBackTarget(compact = false, currentRoute = route, hasPreviousEntry = false))
         }
+        assertEquals(AppRoutes.SETTINGS, appBackTarget(true, AppRoutes.ABOUT, hasPreviousEntry = true))
+        assertEquals(AppRoutes.SETTINGS, appBackTarget(false, AppRoutes.ABOUT, hasPreviousEntry = false))
     }
 
     @Test

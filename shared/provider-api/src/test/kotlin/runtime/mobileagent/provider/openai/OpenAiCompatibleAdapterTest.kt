@@ -25,6 +25,7 @@ import io.ktor.http.headersOf
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonPrimitive
 import java.net.SocketTimeoutException
 import runtime.mobileagent.domain.ModelProfile
@@ -1620,10 +1621,49 @@ class OpenAiCompatibleAdapterTest {
         assertEquals(runtime.mobileagent.provider.CapabilityProbeStatus.PARTIAL, report.status)
         assertTrue(report.supportsTools)
         assertFalse(report.supportsImages)
+        assertEquals(CapabilityCheckStatus.UNKNOWN,
+            report.checks.single { it.capability == CapabilityCheck.IMAGE }.status)
         assertFalse(report.supportsStream)
         assertTrue(report.charged)
         assertTrue(report.source.contains("tools=verified"))
         assertTrue(report.source.contains("image=http-400"))
+    }
+
+    @Test
+    fun imageProbeUsesProcessorSizedImageInsteadOfOnePixelFixture() = runTest {
+        var imageWidth = 0
+        val engine = MockEngine { request ->
+            if (request.url.encodedPath.endsWith("/models/demo")) {
+                respond("{\"id\":\"demo\"}", HttpStatusCode.OK)
+            } else {
+                val body = Json.parseToJsonElement((request.body as io.ktor.http.content.TextContent).text).jsonObject
+                val content = body.getValue("messages").jsonArray.single().jsonObject.getValue("content")
+                val image = (content as? kotlinx.serialization.json.JsonArray)?.firstOrNull {
+                    it.jsonObject["type"]?.jsonPrimitive?.content == "image_url"
+                }
+                if (image == null) {
+                    respond("{\"choices\":[{\"message\":{\"content\":\"ok\"}}]}", HttpStatusCode.OK)
+                } else {
+                    val imageUrl = image.jsonObject.getValue("image_url").jsonObject
+                        .getValue("url").jsonPrimitive.content
+                    val png = java.util.Base64.getDecoder().decode(imageUrl.substringAfter(','))
+                    imageWidth = java.nio.ByteBuffer.wrap(png, 16, 4).int
+                    if (imageWidth < 64) respond("image too small", HttpStatusCode.BadRequest)
+                    else respond("{\"choices\":[{\"message\":{\"content\":\"red\"}}]}", HttpStatusCode.OK)
+                }
+            }
+        }
+        val adapter = OpenAiCompatibleAdapter(HttpClient(engine), "https://example.invalid/v1")
+        val profile = ModelProfile(
+            id = "profile-1", providerId = "provider-1", modelId = "demo", role = ModelRole.VISION,
+            capabilities = setOf("image"), contextLimit = 4096, outputLimit = 1024, revision = 1,
+        )
+        val report = adapter.probe(profile, "token".toCharArray(),
+            runtime.mobileagent.provider.ProbeConsent.GRANTED, "sized-image")
+        assertEquals(128, imageWidth)
+        assertTrue(report.supportsImages)
+        assertEquals(CapabilityCheckStatus.VERIFIED,
+            report.checks.single { it.capability == CapabilityCheck.IMAGE }.status)
     }
 
     @Test

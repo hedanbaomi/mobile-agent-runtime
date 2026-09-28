@@ -15,9 +15,7 @@ import androidx.work.ForegroundInfo
 import androidx.work.WorkerParameters
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.runInterruptible
-import kotlinx.coroutines.withContext
 
 class ImportBatchWorker(appContext: Context, params: WorkerParameters) : CoroutineWorker(appContext, params) {
     override suspend fun getForegroundInfo(): ForegroundInfo = foregroundInfo("Preparing import batch…")
@@ -28,22 +26,12 @@ class ImportBatchWorker(appContext: Context, params: WorkerParameters) : Corouti
         val handler = ImportWorkerRegistry.batchHandler ?: return if (runAttemptCount < 3) Result.retry() else Result.failure()
         setForeground(foregroundInfo("Importing knowledge batch"))
         return try {
-            runInterruptible(Dispatchers.IO) { handler.process(batchId, visionConfigured) }
-            Result.success()
+            val retryPending = runInterruptible(Dispatchers.IO) { handler.process(batchId, visionConfigured) }
+            if (retryPending) Result.retry() else Result.success()
         } catch (cancelled: CancellationException) {
-            // A stopped batch worker must persist the same idempotent durable
-            // cancellation as the scheduler path, then preserve WorkManager's
-            // CANCELLED state instead of converting it to FAILED.  The
-            // repository applies its pre-dispatch/unknown-outcome rules per
-            // item, so a provider boundary is never rewritten as clean cancel.
-            withContext(NonCancellable + Dispatchers.IO) {
-                try {
-                    ImportWorkerRegistry.batchCancellationHandler?.cancel(batchId)
-                } catch (failure: Exception) {
-                    android.util.Log.e("KnowledgeImport", "Batch cancellation persistence failed: ${failure.javaClass.simpleName}")
-                    cancelled.addSuppressed(failure)
-                }
-            }
+            // WorkManager may stop a worker for system reasons. Only the
+            // explicit scheduler cancellation path persists CANCELLED; a
+            // stopped worker must leave its checkpoint resumable.
             throw cancelled
         } catch (_: Throwable) {
             Result.failure()

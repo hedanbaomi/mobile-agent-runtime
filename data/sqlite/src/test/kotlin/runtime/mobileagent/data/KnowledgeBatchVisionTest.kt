@@ -36,13 +36,47 @@ import runtime.mobileagent.knowledge.sha256Hex
 /**
  * P1 regression for the 294-file report: creating one batch and confirming one destination must be
  * enough to upload every visual member exactly once and publish real, searchable knowledge - with
- * no per-file consent ticket, no copied-count-as-complete progress, and no automatic replay of an
- * uncertain provider call.
+ * no per-file consent ticket, no copied-count-as-complete progress, and bounded
+ * recovery of transient provider failures.
  *
  * The Vision destination here is a real local HTTP service, so the upload assertions come from
  * request counts observed by the service and from persisted rows - not from a Composable state.
  */
 class KnowledgeBatchVisionTest {
+    @Test
+    fun independentVisualFilesCanRunInParallel() {
+        val entered = CountDownLatch(2)
+        val release = CountDownLatch(1)
+        val db = JdbcSqlConnection()
+        Migrations.apply(db)
+        val repo = KnowledgeRepository(db, MemoryBlobSink(), visionModelFingerprint = "vision-test",
+            vision = VisionBackend {
+                entered.countDown()
+                check(release.await(10, TimeUnit.SECONDS)) { "parallel Vision workers did not finish" }
+                VisionOutcome.Success(VisionSuccess("ocr", "visual"))
+            })
+        val batch = stagedBatch(repo, "parallel visual files", listOf(
+            Triple("one.pdf", "application/pdf", visionPdf("one")),
+            Triple("two.pdf", "application/pdf", visionPdf("two")),
+            Triple("three.pdf", "application/pdf", visionPdf("three")),
+        ))
+        repo.authorizeBatchVision(batch, "vision-test")
+        val executor = Executors.newSingleThreadExecutor()
+        try {
+            val running = executor.submit<Boolean> { repo.processBatch(batch, true) }
+            assertTrue(entered.await(5, TimeUnit.SECONDS),
+                "at least two files must enter Vision together; batch=${repo.findBatch(batch)} " +
+                    "items=${repo.listBatchItemViews(batch).map { it.state to it.error }} " +
+                    "attempts=${db.query("SELECT job_id,unit_id,state FROM pipeline_attempts").map { it.columns }}")
+            release.countDown()
+            assertFalse(running.get(20, TimeUnit.SECONDS))
+            assertEquals(3, repo.batchProgress(batch).published)
+        } finally {
+            release.countDown()
+            executor.shutdownNow()
+        }
+    }
+
     @Test
     fun diagnosticUpdateFailureCannotDiscardSuccessfulVisionCheckpoint() {
         val db = JdbcSqlConnection()
@@ -58,7 +92,7 @@ class KnowledgeBatchVisionTest {
     }
 
     @Test
-    fun successfulPagesSurviveRestartAndExplicitRetryOnlyReplaysUnknownPage() {
+    fun successfulPagesSurviveRestartAndAutomaticRetryOnlyReplaysUnknownPage() {
         val db = JdbcSqlConnection()
         Migrations.apply(db)
         val blobs = MemoryBlobSink()
@@ -90,18 +124,17 @@ class KnowledgeBatchVisionTest {
         val repo = repository()
         val batch = stagedBatch(repo, "multi-page", listOf(Triple("three.pdf", "application/pdf", pdf)))
         repo.authorizeBatchVision(batch, "vision-test")
-        repo.processBatch(batch, true)
+        assertTrue(repo.processBatch(batch, true))
         assertEquals(listOf(1, 2, 3), calls)
-        assertEquals(2, db.query("SELECT status FROM vision_results WHERE status='SUCCESS'").size)
-        assertEquals(1, repo.batchProgress(batch).unknown)
-        val restarted = repository()
-        restarted.recoverableBatchIds().forEach { restarted.processBatch(it, true) }
-        assertEquals(listOf(1, 2, 3), calls)
-        assertEquals(3, db.query("SELECT request_id FROM vision_attempts").size)
+        assertEquals(2, db.query("SELECT status FROM vision_results WHERE status='SUCCESS'").size,
+            "results=${db.query("SELECT cache_key,status FROM vision_results").map { it.columns }} " +
+                "attempts=${db.query("SELECT state FROM pipeline_attempts").map { it.columns }} " +
+                "job=${repo.listBatchItemViews(batch)}")
+        assertEquals(0, repo.batchProgress(batch).unknown, "the uncertain page is queued for automatic retry")
         failThird = false
-        val job = repo.listBatchItemViews(batch).single().jobId!!
-        assertThrows(IllegalStateException::class.java) { restarted.retryUnknownVision(job, false, "vision-test") }
-        assertEquals(ImportStage.READY, restarted.retryUnknownVision(job, true, "vision-test").stage)
+        val restarted = repository()
+        restarted.recoverableBatchIds().forEach { assertFalse(restarted.processBatch(it, true)) }
+        assertEquals(1, restarted.batchProgress(batch).published)
         assertEquals(listOf(1, 2, 3, 3), calls, "successful pages must not be uploaded again")
         val attempts = db.query("SELECT attempt_no FROM vision_attempts ORDER BY created_at, rowid")
         assertEquals(listOf(1L, 1L, 1L, 2L), attempts.map { it.long("attempt_no") })
@@ -239,7 +272,7 @@ class KnowledgeBatchVisionTest {
     }
 
     @Test
-    fun dispatchIsDurablyUnknownBeforeBackendAndRestartCannotReplayIt() {
+    fun dispatchIsDurablyUnknownBeforeBackendAndRestartCanRetryItWithinSameScope() {
         val db = JdbcSqlConnection()
         Migrations.apply(db)
         val blobs = MemoryBlobSink()
@@ -260,9 +293,14 @@ class KnowledgeBatchVisionTest {
         db.execute("UPDATE import_items SET state = 'PROCESSING', error = NULL WHERE batch_id = ?", listOf(batch))
         db.execute("UPDATE import_batches SET state = 'PROCESSING', error = NULL WHERE id = ?", listOf(batch))
         val restarted = KnowledgeRepository(db, blobs, vision = backend, visionModelFingerprint = "vision-test")
-        restarted.recoverableBatchIds().forEach { restarted.processBatch(it, false) }
-        assertEquals(1, attempts.get())
-        assertEquals(1, restarted.batchProgress(batch).unknown)
+        val recovered = restarted.recoverableBatchIds()
+        recovered.forEach { assertTrue(restarted.processBatch(it, false)) }
+        assertTrue(restarted.processBatch(batch, false))
+        assertEquals(2, attempts.get(), "the recovered uncertain request gets one bounded replay; " +
+            "ids=$recovered batch=${restarted.findBatch(batch)} items=${restarted.listBatchItemViews(batch)} " +
+            "jobs=${db.query("SELECT stage,error FROM import_jobs").map { it.columns }}")
+        assertEquals(0, restarted.batchProgress(batch).unknown,
+            "the still uncertain replay remains queued until its retry budget is exhausted")
     }
 
     @Test
@@ -283,6 +321,86 @@ class KnowledgeBatchVisionTest {
         restarted.recoverableBatchIds().forEach { restarted.processBatch(it, false) }
         assertEquals(1, attempts.get(), "completed response cache must survive a worker restart")
         assertEquals(1, restarted.batchProgress(batch).published)
+    }
+
+    @Test
+    fun failedBatchStillReconcilesAnotherLanesDispatchedSlotAfterRestart() {
+        val db = JdbcSqlConnection()
+        Migrations.apply(db)
+        val blobs = MemoryBlobSink()
+        val repo = KnowledgeRepository(db, blobs, visionModelFingerprint = "vision-test",
+            vision = VisionBackend { VisionOutcome.Success(VisionSuccess("ocr", "visual")) })
+        val batch = stagedBatch(repo, "failed in parallel", listOf(
+            Triple("one.pdf", "application/pdf", visionPdf("one")),
+        ))
+        repo.authorizeBatchVision(batch, "vision-test")
+        repo.processBatch(batch, false)
+        // A different lane can fail the batch while this lane is still at the
+        // provider boundary, then the process dies before this lane completes.
+        db.execute(
+            "INSERT INTO pipeline_attempts(request_id,job_id,batch_id,unit_id,ordinal,target,config_fingerprint," +
+                "planner_version,result_version,cache_key,state,dispatch_slot,reservation_tokens,created_at,dispatched_at) " +
+                "SELECT 'crashed-dispatch',job_id,batch_id,unit_id,ordinal+1,target,config_fingerprint," +
+                "planner_version,result_version,cache_key,'DISPATCHED',1,reservation_tokens,created_at,created_at " +
+                "FROM pipeline_attempts WHERE batch_id = ? LIMIT 1",
+            listOf(batch),
+        )
+        db.execute("UPDATE import_jobs SET stage = 'VISION_PROCESSING', error = NULL WHERE batch_id = ?", listOf(batch))
+        db.execute("UPDATE import_items SET state = 'PROCESSING', error = NULL WHERE batch_id = ?", listOf(batch))
+        db.execute("UPDATE import_batches SET state = 'FAILED', error = 'other lane failed' WHERE id = ?", listOf(batch))
+
+        val restarted = KnowledgeRepository(db, blobs, visionModelFingerprint = "vision-test")
+        assertFalse(batch in restarted.recoverableBatchIds())
+        assertEquals("UNKNOWN_OUTCOME", db.query("SELECT state FROM pipeline_attempts WHERE request_id = 'crashed-dispatch'")
+            .single().string("state"))
+        assertEquals(0L, db.query("SELECT COUNT(*) AS n FROM pipeline_attempts WHERE state IN ('READY','DISPATCHED')")
+            .single().long("n"), "the crashed lane must release its active dispatch slot")
+        assertEquals(ImportBatchState.FAILED, restarted.findBatch(batch)!!.state)
+    }
+
+    @Test
+    fun userCancelDuringVisionUnknownRemainsTerminalAfterRestart() {
+        val db = JdbcSqlConnection()
+        Migrations.apply(db)
+        val blobs = MemoryBlobSink()
+        val calls = AtomicInteger()
+        lateinit var repo: KnowledgeRepository
+        lateinit var batch: String
+        repo = KnowledgeRepository(db, blobs, visionModelFingerprint = "vision-test", vision = VisionBackend {
+            calls.incrementAndGet()
+            assertTrue(repo.cancelBatch(batch))
+            VisionOutcome.UnknownOutcome
+        })
+        batch = stagedBatch(repo, "cancel in flight", listOf(
+            Triple("one.pdf", "application/pdf", visionPdf("one")),
+        ))
+        repo.authorizeBatchVision(batch, "vision-test")
+        repo.processBatch(batch, false)
+        assertEquals(ImportBatchState.CANCELLED, repo.findBatch(batch)!!.state)
+        // Recreate death after durable cancel but before the provider lane
+        // records its terminal result. Startup must clear the occupied slot.
+        db.execute(
+            "INSERT INTO pipeline_attempts(request_id,job_id,batch_id,unit_id,ordinal,target,config_fingerprint," +
+                "planner_version,result_version,cache_key,state,dispatch_slot,reservation_tokens,created_at,dispatched_at) " +
+                "SELECT 'cancelled-crash-dispatch',job_id,batch_id,unit_id,ordinal+1,target,config_fingerprint," +
+                "planner_version,result_version,cache_key,'DISPATCHED',1,reservation_tokens,created_at,created_at " +
+                "FROM pipeline_attempts WHERE batch_id = ? LIMIT 1",
+            listOf(batch),
+        )
+        db.execute("UPDATE import_jobs SET stage = 'VISION_PROCESSING', error = NULL WHERE batch_id = ?", listOf(batch))
+        db.execute("UPDATE import_items SET state = 'PROCESSING', error = NULL WHERE batch_id = ?", listOf(batch))
+        val restarted = KnowledgeRepository(db, blobs, visionModelFingerprint = "vision-test",
+            vision = VisionBackend { calls.incrementAndGet(); VisionOutcome.UnknownOutcome })
+        assertFalse(batch in restarted.recoverableBatchIds())
+        assertEquals("UNKNOWN_OUTCOME", db.query("SELECT state FROM pipeline_attempts WHERE request_id = 'cancelled-crash-dispatch'")
+            .single().string("state"))
+        assertEquals(0L, db.query("SELECT COUNT(*) AS n FROM pipeline_attempts WHERE state IN ('READY','DISPATCHED')")
+            .single().long("n"))
+        assertTrue(db.query("SELECT error FROM import_jobs WHERE batch_id = ?", listOf(batch))
+            .single().string("error").contains("UNKNOWN_OUTCOME"))
+        restarted.processBatch(batch, false)
+        assertEquals(1, calls.get(), "explicit user cancellation must never auto replay an uncertain request")
+        assertEquals(ImportBatchState.CANCELLED, restarted.findBatch(batch)!!.state)
     }
 
     @Test
@@ -541,7 +659,7 @@ class KnowledgeBatchVisionTest {
     }
 
     @Test
-    fun uncertainVisionOutcomeIsPersistedAndNeverAutoRetried() {
+    fun uncertainVisionOutcomeIsAutomaticallyRetriedUntilBoundedExhaustion() {
         val db = JdbcSqlConnection()
         Migrations.apply(db)
         val attempts = AtomicInteger()
@@ -553,17 +671,18 @@ class KnowledgeBatchVisionTest {
         )
         val batchId = stagedBatch(repo, "unknown outcome", listOf(Triple("figure.pdf", "application/pdf", visionPdf("figure"))))
         repo.authorizeBatchVision(batchId, "vision-test")
-        repo.processBatch(batchId, visionConfigured = false)
+        repeat(5) { assertTrue(repo.processBatch(batchId, visionConfigured = false)) }
+        assertFalse(repo.processBatch(batchId, visionConfigured = false))
 
         assertEquals(ImportBatchState.FAILED, repo.findBatch(batchId)!!.state)
         val item = repo.listBatchItemViews(batchId).single()
         assertEquals(ImportItemState.FAILED.name, item.state)
         assertTrue(item.error!!.contains("UNKNOWN_OUTCOME"), item.error!!)
         assertEquals(1, repo.batchProgress(batchId).unknown)
-        assertEquals(1, attempts.get())
+        assertEquals(6, attempts.get())
 
         repo.processBatch(batchId, visionConfigured = false)
-        assertEquals(1, attempts.get(), "an uncertain provider call is never replayed automatically")
+        assertEquals(6, attempts.get(), "retry exhaustion must not dispatch a seventh request")
         assertThrows(IllegalStateException::class.java) {
             repo.retryUnknownVision(item.jobId!!, acknowledgeDuplicateCharge = false)
         }

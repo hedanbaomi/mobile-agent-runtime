@@ -4,6 +4,7 @@
 package runtime.mobileagent.ui
 
 import android.content.Intent
+import android.net.Uri
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -1706,12 +1707,12 @@ private fun SettingsRoute(entry: NavBackStackEntry, chinese: Boolean, onRoute: (
     val exportLauncher = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/zip")) { vm.exportTo(it) }
     val diagnosticsExportLauncher = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/zip")) { vm.exportDiagnosticsTo(it) }
     val mcpConfigured = runtime.mobileagent.McpConfigStore.read(app.container).value != null
-    val raw = vm.uiState(app.container.announcements.statsEnabled(), app.container.announcements.records().count { it.state.readAt == null })
+    val raw = vm.uiState(app.container.announcements.records().count { it.state.readAt == null })
     val state = raw.copy(language = if (chinese) "zh-CN" else "en-US",
         mcpConfigured = mcpConfigured, mcpEntryEnabled = true, thirdPartyNotices = thirdParty,
     )
     val context = LocalContext.current
-    LifecycleEventEffect(Lifecycle.Event.ON_RESUME) { vm.refreshAuthorities() }
+    LifecycleEventEffect(Lifecycle.Event.ON_RESUME) { vm.refreshAuthorities(); vm.refreshStatsEnabled() }
     // Pairing tokens are foreground-only. Leaving/backgrounding this route
     // clears the ViewModel's ephemeral token and asks the adapter to cancel.
     LifecycleEventEffect(Lifecycle.Event.ON_PAUSE) { vm.cancelWiredAdbPairing() }
@@ -1740,7 +1741,17 @@ private fun SettingsRoute(entry: NavBackStackEntry, chinese: Boolean, onRoute: (
     }
     val actions = runtime.mobileagent.feature.settings.SettingsActions(
         onLanguage = { vm.language(it); onSettingsChanged() }, onTheme = { vm.theme(it); onSettingsChanged() },
-        onStats = { app.container.announcements.setStatsEnabled(it) }, onRequestInspection = vm::inspector,
+        onStats = vm::setStatsEnabled, onRequestInspection = vm::inspector,
+        onOpenAbout = { onRoute(AppRoutes.ABOUT) },
+        onOpenSource = {
+            runCatching {
+                context.startActivity(Intent(Intent.ACTION_VIEW,
+                    Uri.parse(runtime.mobileagent.feature.settings.SOURCE_REPOSITORY_URL))
+                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+            }.onFailure {
+                vm.error.value = if (chinese) "无法打开 GitHub 源码仓库。" else "Could not open the GitHub source repository."
+            }
+        },
         onDiagnosticsEnabled = vm::setDiagnosticsEnabled,
         onExportDiagnostics = { diagnosticsExportLauncher.launch("mobile-agent-diagnostics.zip") },
         onClearDiagnostics = vm::clearDiagnostics,
@@ -1836,7 +1847,8 @@ private fun InspectorRoute(
 private fun routeFromAnnouncement(appRoute: String): String = when (appRoute) {
     "app://settings/providers" -> AppRoutes.PROVIDERS
     "app://settings/knowledge" -> AppRoutes.KNOWLEDGE
-    "app://about", "app://update" -> AppRoutes.SETTINGS
+    "app://about" -> AppRoutes.ABOUT
+    "app://update" -> AppRoutes.SETTINGS
     "app://announcements" -> AppRoutes.NEWS
     else -> AppRoutes.NEWS
 }

@@ -1156,7 +1156,7 @@ class OpenAiCompatibleAdapter(
                 ChatMessage(
                     role = "user",
                     text = when (feature) {
-                        ProbeFeature.IMAGE -> "Describe the image in one word."
+                        ProbeFeature.IMAGE -> "What color is the left half of the image? Reply with one word."
                         ProbeFeature.TOOLS ->
                             "Call the $PROBE_TOOL_NAME function exactly once. Do not answer in text."
                         ProbeFeature.STREAM -> "Reply with ok."
@@ -1277,7 +1277,11 @@ class OpenAiCompatibleAdapter(
                         supported = false,
                         charged = true,
                         httpStatus = status,
-                        status = featureHttpStatus(status),
+                        // A generic 4xx does not prove the model lacks image
+                        // input: hosts also reject probe shape and image size.
+                        status = if (feature == ProbeFeature.IMAGE &&
+                            featureHttpStatus(status) == CapabilityCheckStatus.UNSUPPORTED)
+                            CapabilityCheckStatus.UNKNOWN else featureHttpStatus(status),
                     )
                 }
                 if (feature == ProbeFeature.STREAM) {
@@ -1790,8 +1794,12 @@ class OpenAiCompatibleAdapter(
         private const val MAX_EMBEDDING_INPUT_BYTES = 512 * 1024
         private const val MAX_EMBEDDING_REQUEST_BYTES = 1_048_576
         private const val MAX_EMBEDDING_DIMENSION = 16_384
+        // A 1x1 PNG is rejected by some multimodal image processors even when
+        // ordinary document images work. Use a small but real 128x128 red/blue
+        // image so a probe rejection is about the configured endpoint, not an
+        // invalid test fixture.
         private const val PROBE_PNG =
-            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
+            "iVBORw0KGgoAAAANSUhEUgAAAIAAAACACAIAAABMXPacAAAA9UlEQVR42u3RAQkAAAzDsPk3vdv4IFABhaTJdOP7DQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA+NABXKjDsvXzzhIAAAAASUVORK5CYII="
 
         private val FORBIDDEN_HEADERS = setOf(
             "host",

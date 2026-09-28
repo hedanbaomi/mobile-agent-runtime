@@ -72,10 +72,47 @@ class DocumentPipelineTest {
             val store=DocumentPipelineStore(db); val unit=units().single()
             store.materialize("j","synthetic-document",unit.plannerVersion,listOf(unit))
             store.prepare("j",unit,"b","t","c","one")
-            assertEquals("PIPELINE_MAX_CONCURRENCY",store.stopReason("other-batch"))
+            assertNull(store.stopReason("other-batch"), "the default batch admits up to three independent requests")
             assertThrows(IllegalStateException::class.java) { store.configure("b",PipelinePolicy(tokenDispatchCeiling=50,reservationTokensPerRequest=10)) }
             store.settle("one",PipelineAttemptState.UNKNOWN_OUTCOME,VisionDiagnosticMetadata(dispatched=true))
             assertThrows(IllegalStateException::class.java) { store.configure("b",PipelinePolicy(tokenDispatchCeiling=50,reservationTokensPerRequest=10)) }
+        }
+    }
+
+    @Test fun threeDispatchSlotsAreBoundedAndReleasedOnSettlement() {
+        database().use { db ->
+            val store = DocumentPipelineStore(db)
+            val unit = units().single()
+            repeat(4) { store.materialize("j$it", "synthetic-$it", unit.plannerVersion, listOf(unit)) }
+            repeat(3) { store.prepare("j$it", unit, "b", "t", "cache-$it", "request-$it") }
+            assertEquals("PIPELINE_MAX_CONCURRENCY", store.stopReason("b"))
+            assertThrows(IllegalStateException::class.java) {
+                store.prepare("j3", unit, "b", "t", "cache-3", "request-3")
+            }
+            assertTrue(store.settle("request-1", PipelineAttemptState.SUCCEEDED,
+                VisionDiagnosticMetadata(dispatched = true)))
+            store.prepare("j3", unit, "b", "t", "cache-3", "request-3")
+            val active = db.query("SELECT dispatch_slot FROM pipeline_attempts WHERE state IN ('READY','DISPATCHED')")
+                .map { it.long("dispatch_slot") }
+            assertEquals(setOf(1L, 2L, 3L), active.toSet())
+            assertEquals(3, active.size)
+        }
+    }
+
+    @Test fun transientProviderFailuresDoNotTripDeterministicFailureLimit() {
+        database().use { db ->
+            val store = DocumentPipelineStore(db)
+            val unit = units().single()
+            store.materialize("j", "synthetic", unit.plannerVersion, listOf(unit))
+            store.configure("b", PipelinePolicy(consecutiveFailureLimit = 2))
+            repeat(3) { index ->
+                val request = "transient-$index"
+                store.prepare("j", unit, "b", "target", "cache", request)
+                store.dispatched(request)
+                store.settle(request, PipelineAttemptState.FAILED,
+                    VisionDiagnosticMetadata(dispatched = true, errorCode = "RATE_LIMITED"))
+                assertNull(store.stopReason("b"))
+            }
         }
     }
 
@@ -116,7 +153,7 @@ class DocumentPipelineTest {
         }
     }
 
-    @Test fun tenUnitResumeRetainsFourSuccessesAndNeverReplaysUnknownWithoutConfirmation() {
+    @Test fun tenUnitResumeRetainsFourSuccessesAndAutomaticallyReplaysOnlyUnknown() {
         val file=java.nio.file.Files.createTempFile("pipeline-restart-", ".sqlite").toFile()
         var db=JdbcSqlConnection("jdbc:sqlite:${file.absolutePath}")
         try {
@@ -138,13 +175,9 @@ class DocumentPipelineTest {
             db.close()
             db=JdbcSqlConnection("jdbc:sqlite:${file.absolutePath}")
             Migrations.apply(db)
+            unknown=false
             val restarted=repo()
             restarted.recoverableBatchIds().forEach { restarted.processBatch(it,true) }
-            assertEquals((1..5).toList(),requests)
-            unknown=false
-            val job=restarted.listBatchItemViews(batch).single().jobId!!
-            assertThrows(IllegalStateException::class.java) { restarted.retryUnknownVision(job,false,"target") }
-            assertEquals(ImportStage.READY,restarted.retryUnknownVision(job,true,"target").stage)
             assertEquals((1..5).toList()+(5..10).toList(),requests)
             assertEquals((1..5).toList()+(5..10).toList(),renders,"successful units reuse results before rasterization")
             assertEquals(10,restarted.batchPipelineProgress(batch).published)

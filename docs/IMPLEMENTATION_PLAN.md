@@ -3,6 +3,8 @@
 
 # 技术实现方案
 
+> **2026-09-27 知识库恢复与并发**：Schema v27 把视觉请求单槽唯一索引迁移为三个持久派发槽。已确认固定目标的批次对暂时性 UNKNOWN/超时按最多六次、WorkManager 退避自动重试，进程重启后从检查点续接；仅无法恢复时显示失败。不同文件最多三路并行，API Embedding 保持单路；批次策略可配置一至三路。视觉 HTTP 超时独立提高到 600 秒，能力探测使用 128×128 有效 PNG。此前正文中的「UNKNOWN 一律人工确认」适用于普通模型/工具、单文档及查询；批次以此条和 [KNOWLEDGE §6](KNOWLEDGE.md#6-长任务恢复和删除) 为现行规则。设计见 [ADR-0014](adr/0014-knowledge-batch-retry-and-concurrency.md)。
+
 > **2026-09-26 设备验收修复候选**：导入的历史快照仍冻结模型、提示词、资源和权限；运行时仅在本机同 ID、同 API 格式、同 Base URL 的 Provider 已配置凭据时，将本机 secret 引用叠加到内存绑定，不改写快照。知识库启动修复比较 READY generation 成员与当前活动版本 chunks；失败/取消的导入任务不能放行手动整库重建，正常单文档发布仍允许其他已就绪文档可检索；缺源 chunks 时不发布空索引，手动/API 重建在派发前返回 `INDEX_SOURCE_INCOMPLETE`。导入事务逐项核对已有 Agent 快照、会话、消息、消息部分、Run、工具和审计记录的 ID 及归属，记录减少或同数量替换则回滚。会话 ZIP 内容条目上限为 32 MiB，manifest 上限仍为 16 MiB。普通工作区只读预设撤销既有整目录写授权，新附加/默认选择只授读取；路径限定、一次性和 Skill 授权不受此预设撤销。流式取消保留已显示正文和取消标记；设备 shell 等待后端明确 `TIMED_OUT` 的结果而不抢先记未知；特权目录浏览器支持 continuation。旧备份导致无关会话物理消失的设备现象尚未由合成导入复现，保全校验为防御边界，不能代替该路径复测。取舍见 [ADR-0013](adr/0013-imported-history-and-index-recovery.md)。
 
 > **2026-09-25 人工反馈修复（本分支）**：Chat 发送先收起输入法并把运行预检移到 IO；预检与模型运行均可取消。同一用户回合的助手文字、思考与工具事件投影到一个气泡，文字与工具按原顺序显示。底部工具确认使用 30% 不透明度遮罩，保留对话可见。Agent 的 `skipToolConfirmations` 默认关闭，仅新会话的授权快照为 true 且实时 Agent 设置仍为 true 时跳过逐次点击；执行器的 grant、Authority、预算、call ID 与运行状态复核仍生效。普通聊天运行使用 `dataSync` 前台服务及持续通知维持后台执行；Android 配额、系统杀进程及服务商不提供已派发流式响应查询时，不能保证自动取回未知结果，也不自动重放可能收费或有副作用的请求。重启时已批准而派发结果未明的工具运行记录为 `UNKNOWN_OUTCOME`。Internal/SAF 工作区的**读取**改为每次最多 `maxReadBytes` 的分块操作，已有大文件不再因 `maxFileBytes` 被整体拒绝；写入仍受单文件限制，SAF 非可寻址流按 offset 顺序跳过，可能较慢。此前 v3.0 的 `FILE_TOO_LARGE` 读侧描述是历史行为，以本条为现行契约。硅基流动精确 Base URL 的 AUTO 模型读取公开目录中的精确 `modelName/contextLen`，校验目标、时间戳和事务内 revision 后记录为 Provider 元数据；目录响应按 2 MiB 截断拒绝，失败仍保留手动输入。

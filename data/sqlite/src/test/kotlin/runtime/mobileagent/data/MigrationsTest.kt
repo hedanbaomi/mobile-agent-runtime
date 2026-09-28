@@ -21,6 +21,28 @@ import runtime.mobileagent.domain.ProviderProfile
 
 class MigrationsTest {
     @Test
+    fun v26SingleDispatchIndexMigratesToBoundedSlotsWithoutLosingActiveAttempt() {
+        val db = JdbcSqlConnection()
+        Migrations.apply(db)
+        db.execute("INSERT INTO pipeline_attempts(request_id,job_id,unit_id,ordinal,target,config_fingerprint,planner_version,result_version,cache_key,state,dispatch_slot,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+            listOf("old-request", "old-job", "unit", 1, "target", "config", "planner", "result", "cache", "READY", 1, "2026-09-27T00:00:00Z"))
+        db.execute("DROP TRIGGER pipeline_dispatch_slot_immutable")
+        db.execute("DROP TRIGGER pipeline_dispatch_slot_required_update")
+        db.execute("DROP INDEX pipeline_active_dispatch_slot")
+        db.execute("UPDATE pipeline_attempts SET dispatch_slot = NULL WHERE request_id = 'old-request'")
+        db.execute("CREATE UNIQUE INDEX pipeline_one_dispatch ON pipeline_attempts((1)) WHERE state IN ('READY','DISPATCHED')")
+        db.execute("UPDATE schema_version SET version = 26")
+
+        Migrations.apply(db)
+
+        assertEquals(27L, db.query("SELECT version FROM schema_version").single().long("version"))
+        assertEquals(1L, db.query("SELECT dispatch_slot FROM pipeline_attempts WHERE request_id = 'old-request'")
+            .single().long("dispatch_slot"))
+        assertTrue(db.query("SELECT name FROM sqlite_master WHERE type='index' AND name='pipeline_one_dispatch'").isEmpty())
+        assertEquals(1, db.query("SELECT name FROM sqlite_master WHERE type='index' AND name='pipeline_active_dispatch_slot'").size)
+    }
+
+    @Test
     fun schemaAndProviderRoundTrip() {
         val db = JdbcSqlConnection()
         Migrations.apply(db)

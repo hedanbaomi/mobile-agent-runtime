@@ -67,6 +67,8 @@ data class ExtractedPage(
      * page provenance and is never sliced across image stripes.
      */
     val textRegions: List<LayoutTextEvidence> = emptyList(),
+    /** Complete native text plus independently processable referenced images. */
+    val visualAssetsOnly: Boolean = false,
 )
 
 data class ParsedPublication(

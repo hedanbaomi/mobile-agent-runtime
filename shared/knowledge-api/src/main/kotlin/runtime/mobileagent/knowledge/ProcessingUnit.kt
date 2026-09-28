@@ -181,18 +181,32 @@ class DocumentUnitPlanner(val version: String = VERSION) {
             }
         }
         var groupStart = 0
-        return plan(contentHash, pages.mapIndexed { index, page ->
+        val pageUnits = plan(contentHash, pages.mapIndexed { index, page ->
             val header = headers[index]
             val previousMatches = index > 0 && pages[index - 1].page + 1 == page.page && header != null && header == headers[index - 1]
             val nextMatches = index + 1 < pages.size && page.page + 1 == pages[index + 1].page && header != null && header == headers[index + 1]
             if (!previousMatches) groupStart = page.page
-            PlanningPage(page.page, page.text, page.needsVision, page.width, page.height,
+            PlanningPage(page.page, page.text, page.needsVision && !page.visualAssetsOnly, page.width, page.height,
                 dense = page.text.length > DENSE_CHARACTERS, complexLayout = page.complexLayout,
                 tableHeader = header,
                 continuationKey = if (previousMatches || nextMatches) "explicit-table:$groupStart:$header" else null,
                 parserFingerprint = publication.parserFingerprint,
                 textRegions = page.textRegions)
         }, budget)
+        val illustrationUnits = buildList {
+            pages.filter { it.visualAssetsOnly }.forEach { page ->
+                publication.assets.filter { it.kind == "IMAGE" && it.page == page.page }.forEach { asset ->
+                val dimensions = imageDimensions[asset.localId] ?: (page.width to page.height)
+                plan(contentHash, listOf(PlanningPage(page.page, "", true, dimensions.first, dimensions.second,
+                    parserFingerprint = publication.parserFingerprint)), budget).forEach { unit ->
+                    val order = pageUnits.size + size
+                    add(unit.copy(unitId = identity(contentHash, asset.localId, unit.unitId, order.toString()),
+                        readingOrder = order, sourceAssetId = asset.localId))
+                }
+                }
+            }
+        }
+        return pageUnits + illustrationUnits
     }
 
     fun plan(
@@ -445,7 +459,7 @@ class DocumentUnitPlanner(val version: String = VERSION) {
     )
 
     companion object {
-        const val VERSION = "document-units-v3"
+        const val VERSION = "document-units-v4"
         const val DENSE_CHARACTERS = 8_000
         const val MAX_REGION_DIMENSION = 2048
         const val MAX_REGION_PIXELS = 4_000_000

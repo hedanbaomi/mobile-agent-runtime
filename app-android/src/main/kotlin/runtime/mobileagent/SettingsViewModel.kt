@@ -39,8 +39,13 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
     val authorityState = mutableStateOf(authorityPort.snapshot())
     val preferences = mutableStateOf(app.container.settings.get())
     val exportStatus = mutableStateOf("")
-    val updateStatus = mutableStateOf("当前为 debug 验证版，正式 release 将由用户另行确认。")
+    val updateStatus = mutableStateOf(
+        if (BuildConfig.BUILD_TYPE == "release") "" else
+            "当前为 ${BuildConfig.BUILD_TYPE} 验证版，正式 release 将由用户另行确认。"
+    )
     val inspectorEnabled = mutableStateOf(app.container.uiPreferences.getBoolean("request-inspector", true))
+    /** Compose observes consent changes instead of waiting for another settings recomposition. */
+    val statsEnabled = mutableStateOf(app.container.announcements.statsEnabled())
     val diagnosticsStatus = mutableStateOf("")
     val webSearchStatus = mutableStateOf("")
     val error = mutableStateOf<String?>(null)
@@ -56,7 +61,7 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
     private var wiredPairingExpiryJob: Job? = null
     private val wiredPairingUiState = mutableStateOf(WiredPairingUiState())
 
-    fun uiState(statsEnabled: Boolean, noticeCount: Int): SettingsUiState {
+    fun uiState(noticeCount: Int): SettingsUiState {
         val diagnosticFiles = app.diagnostics.status()
         val searchRef = app.container.settings.webSearchSecretRef()
         val searchConfigured = searchRef != null && app.container.secrets.inventory().status(searchRef) == SecretStatus.ACTIVE
@@ -81,7 +86,7 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
         language = when (preferences.value.locale) {
             LocalePreference.SYSTEM -> "system"; LocalePreference.ZH_CN -> "zh-CN"; LocalePreference.EN_US -> "en-US"
         },
-        statsEnabled = statsEnabled, requestInspectionEnabled = inspectorEnabled.value,
+        statsEnabled = statsEnabled.value, requestInspectionEnabled = inspectorEnabled.value,
         diagnosticsEnabled = diagnosticFiles.enabled,
         diagnosticsSizeBytes = diagnosticFiles.sizeBytes,
         diagnosticsLimitBytes = diagnosticFiles.totalLimitBytes,
@@ -109,6 +114,15 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
         dangerousModeBuildKnown = authority.dangerousModeBuildKnown,
         dangerousModeReason = authority.dangerousModeReason,
         )
+    }
+
+    fun refreshStatsEnabled() {
+        statsEnabled.value = app.container.announcements.statsEnabled()
+    }
+
+    fun setStatsEnabled(enabled: Boolean) {
+        app.container.announcementRefreshCoordinator.setStatsEnabled(enabled)
+        refreshStatsEnabled()
     }
 
     /** Revalidates ephemeral provider state and persisted SAF grants on resume. */

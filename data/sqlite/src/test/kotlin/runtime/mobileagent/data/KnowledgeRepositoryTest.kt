@@ -23,12 +23,18 @@ import runtime.mobileagent.knowledge.ImportStage
 import runtime.mobileagent.knowledge.ImportStateMachine
 import runtime.mobileagent.knowledge.MemoryBlobSink
 import runtime.mobileagent.knowledge.PdfPageRasterizer
+import runtime.mobileagent.knowledge.ImageUnitRasterizer
+import runtime.mobileagent.knowledge.ProcessingUnit
 import runtime.mobileagent.knowledge.RenderedPdfPage
+import runtime.mobileagent.knowledge.UnitRenderLimits
 import runtime.mobileagent.knowledge.sha256Hex
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.runBlocking
 import java.io.ByteArrayOutputStream
+import java.io.ByteArrayInputStream
 import java.io.File
+import java.awt.image.BufferedImage
+import javax.imageio.ImageIO
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
@@ -37,6 +43,111 @@ import java.util.zip.ZipEntry
 import java.util.zip.ZipOutputStream
 
 class KnowledgeRepositoryTest {
+    @Test
+    fun completeTextPdfSendsOnlyEmbeddedIllustrationAndIndexesNativeText() {
+        val db = JdbcSqlConnection()
+        Migrations.apply(db)
+        val jpeg = ByteArrayOutputStream().also { output ->
+            assertTrue(ImageIO.write(BufferedImage(2, 2, BufferedImage.TYPE_INT_RGB), "jpeg", output))
+        }.toByteArray()
+        var renderedPages = 0
+        val sent = mutableListOf<runtime.mobileagent.knowledge.VisionInput>()
+        val rasterizer = object : PdfPageRasterizer, ImageUnitRasterizer {
+            override fun render(pdfBytes: ByteArray, pages: List<Int>): List<RenderedPdfPage> {
+                renderedPages++
+                return emptyList()
+            }
+            override fun imageDimensions(bytes: ByteArray): Pair<Int, Int>? = 2 to 2
+            override fun renderImageUnit(bytes: ByteArray, unit: ProcessingUnit, limits: UnitRenderLimits): RenderedPdfPage? {
+                if (ImageIO.read(ByteArrayInputStream(bytes)) == null) return null
+                return RenderedPdfPage(unit.page, bytes, "image/jpeg", 2, 2)
+            }
+        }
+        val repo = KnowledgeRepository(db, MemoryBlobSink(),
+            vision = runtime.mobileagent.knowledge.VisionBackend { input ->
+                sent += input
+                runtime.mobileagent.knowledge.VisionOutcome.Success(
+                    runtime.mobileagent.knowledge.VisionSuccess("illustration", "blue diagram"))
+            },
+            visionModelFingerprint = "vision-test",
+            pdfRasterizer = rasterizer,
+        )
+        val job = repo.importBytes("mixed.pdf", "application/pdf",
+            runtime.mobileagent.knowledge.PdfParser.writePdfWithImageXObject("Native text layer", jpeg),
+            visionConfigured = true, visionConsent = true)
+        assertEquals(ImportStage.READY, job.stage, job.error)
+        assertEquals(0, renderedPages)
+        assertEquals(1, sent.size)
+        assertTrue(sent.single().bytes.contentEquals(jpeg))
+        assertTrue(sent.single().surroundingText.isEmpty())
+        assertTrue(repo.search("Native text layer").isNotEmpty())
+        assertTrue(repo.search("blue diagram").isNotEmpty())
+    }
+
+    @Test
+    fun failedIllustrationDecodeFallsBackToCompletePdfPage() {
+        val db = JdbcSqlConnection()
+        Migrations.apply(db)
+        val jpeg = ByteArrayOutputStream().also { output ->
+            assertTrue(ImageIO.write(BufferedImage(2, 2, BufferedImage.TYPE_INT_RGB), "jpeg", output))
+        }.toByteArray()
+        val pageBytes = byteArrayOf(0x89.toByte(), 0x50, 0x4E, 0x47, 1, 2, 3, 4)
+        var pageRenders = 0
+        val rasterizer = object : PdfPageRasterizer, ImageUnitRasterizer {
+            override fun render(pdfBytes: ByteArray, pages: List<Int>): List<RenderedPdfPage> {
+                pageRenders++
+                return pages.map { RenderedPdfPage(it, pageBytes, "image/png", 2, 2) }
+            }
+            override fun imageDimensions(bytes: ByteArray): Pair<Int, Int>? = 2 to 2
+            override fun renderImageUnit(bytes: ByteArray, unit: ProcessingUnit, limits: UnitRenderLimits): RenderedPdfPage? = null
+        }
+        val sent = mutableListOf<runtime.mobileagent.knowledge.VisionInput>()
+        val repo = KnowledgeRepository(db, MemoryBlobSink(),
+            vision = runtime.mobileagent.knowledge.VisionBackend { input ->
+                sent += input
+                runtime.mobileagent.knowledge.VisionOutcome.Success(
+                    runtime.mobileagent.knowledge.VisionSuccess("fallback", "page diagram"))
+            }, visionModelFingerprint = "vision-test", pdfRasterizer = rasterizer)
+        val job = repo.importBytes("fallback.pdf", "application/pdf",
+            runtime.mobileagent.knowledge.PdfParser.writePdfWithImageXObject("Native fallback text", jpeg),
+            visionConfigured = true, visionConsent = true)
+        assertEquals(ImportStage.READY, job.stage, job.error)
+        assertEquals(1, pageRenders)
+        assertEquals(1, sent.size)
+        assertTrue(sent.single().bytes.contentEquals(pageBytes))
+        assertEquals("image/png", sent.single().mediaType)
+        assertTrue(repo.search("Native fallback text").isNotEmpty())
+    }
+
+    @Test
+    fun pageOnlyRasterizerNeverDispatchesUncheckedEmbeddedJpeg() {
+        val db = JdbcSqlConnection()
+        Migrations.apply(db)
+        val jpeg = ByteArrayOutputStream().also { output ->
+            assertTrue(ImageIO.write(BufferedImage(2, 2, BufferedImage.TYPE_INT_RGB), "jpeg", output))
+        }.toByteArray()
+        val pageBytes = byteArrayOf(0x89.toByte(), 0x50, 0x4E, 0x47, 5, 6, 7, 8)
+        var renders = 0
+        val sent = mutableListOf<runtime.mobileagent.knowledge.VisionInput>()
+        val repo = KnowledgeRepository(db, MemoryBlobSink(),
+            vision = runtime.mobileagent.knowledge.VisionBackend { input ->
+                sent += input
+                runtime.mobileagent.knowledge.VisionOutcome.Success(
+                    runtime.mobileagent.knowledge.VisionSuccess("fallback", "page illustration"))
+            }, visionModelFingerprint = "vision-test",
+            pdfRasterizer = PdfPageRasterizer { _, pages ->
+                renders++
+                pages.map { RenderedPdfPage(it, pageBytes, "image/png", 2, 2) }
+            })
+        val job = repo.importBytes("page-only.pdf", "application/pdf",
+            runtime.mobileagent.knowledge.PdfParser.writePdfWithImageXObject("Native page-only text", jpeg),
+            visionConfigured = true, visionConsent = true)
+        assertEquals(ImportStage.READY, job.stage, job.error)
+        assertEquals(1, renders)
+        assertEquals(1, sent.size)
+        assertTrue(sent.single().bytes.contentEquals(pageBytes))
+    }
+
     @Test
     fun textImportIndexesAndIsSearchable() {
         val db = JdbcSqlConnection()
@@ -2148,7 +2259,7 @@ class KnowledgeRepositoryTest {
                 runtime.mobileagent.knowledge.VisionBinding("prov-a", "vision-model", "https://a.example.invalid/v1", 1)
             },
             pdfRasterizer = PdfPageRasterizer { _, pages ->
-                pages.filter { it == 1 }.map { page ->
+                pages.map { page ->
                     RenderedPdfPage(page, byteArrayOf(page.toByte(), 2, 3), "image/png", 2, 2)
                 }
             },

@@ -1174,7 +1174,7 @@ private fun PipelinePolicyDialog(batch: KnowledgeBatchUi, zh: Boolean, onDismiss
     var failures by remember { mutableStateOf(batch.policy.consecutiveFailureLimit.toString()) }
     var ceiling by remember { mutableStateOf(batch.policy.tokenDispatchCeiling?.toString().orEmpty()) }
     var reservation by remember { mutableStateOf(batch.policy.reservationTokensPerRequest?.toString().orEmpty()) }
-    val valid = concurrency.toIntOrNull()?.let { it in 1..3 } == true &&
+    val valid = concurrency.toIntOrNull()?.let { it in 1..6 } == true &&
         failures.toIntOrNull()?.let { it > 0 } == true &&
         (ceiling.isBlank() || ceiling.toLongOrNull()?.let { it > 0 } == true) &&
         (reservation.isBlank() || reservation.toLongOrNull()?.let { it > 0 } == true) &&
@@ -1183,7 +1183,7 @@ private fun PipelinePolicyDialog(batch: KnowledgeBatchUi, zh: Boolean, onDismiss
         title = { Text(if (zh) "处理限制" else "Processing limits") },
         text = { Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Text(if (zh) "达到限制只停止新请求；UNKNOWN 保留安全预算。" else "Limits stop new dispatch only; UNKNOWN retains its safety reservation.")
-            OutlinedTextField(concurrency, { concurrency = it }, label = { Text(if (zh) "最大并发（1–3）" else "Maximum concurrency (1–3)") }, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number))
+            OutlinedTextField(concurrency, { concurrency = it }, label = { Text(if (zh) "最大并发（1–6）" else "Maximum concurrency (1–6)") }, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number))
             OutlinedTextField(failures, { failures = it }, label = { Text(if (zh) "连续失败阈值" else "Consecutive failure limit") }, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number))
             OutlinedTextField(ceiling, { ceiling = it }, label = { Text(if (zh) "批次 token 派发上限（可留空）" else "Token dispatch ceiling (optional)") }, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number))
             OutlinedTextField(reservation, { reservation = it }, label = { Text(if (zh) "每请求保守预留" else "Conservative reservation per request") }, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number))

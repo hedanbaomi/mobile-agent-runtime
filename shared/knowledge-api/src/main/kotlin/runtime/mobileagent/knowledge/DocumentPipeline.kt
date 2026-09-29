@@ -10,13 +10,13 @@ enum class PipelineAttemptState { READY, DISPATCHED, SUCCEEDED, FAILED, CANCELLE
 
 /** Bounded batch dispatch. Reservations are safety limits, never reported usage. */
 data class PipelinePolicy(
-    val maxConcurrency: Int = 3,
+    val maxConcurrency: Int = 4,
     val consecutiveFailureLimit: Int = 3,
     val tokenDispatchCeiling: Long? = null,
     val reservationTokensPerRequest: Long? = null,
 ) {
     init {
-        require(maxConcurrency in 1..3) { "Maximum concurrency must be between 1 and 3" }
+        require(maxConcurrency in 1..6) { "Maximum concurrency must be between 1 and 6" }
         require(consecutiveFailureLimit > 0)
         require(tokenDispatchCeiling == null || tokenDispatchCeiling > 0)
         require(reservationTokensPerRequest == null || reservationTokensPerRequest > 0)

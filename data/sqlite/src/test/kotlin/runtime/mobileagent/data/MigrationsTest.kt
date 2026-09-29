@@ -35,11 +35,46 @@ class MigrationsTest {
 
         Migrations.apply(db)
 
-        assertEquals(27L, db.query("SELECT version FROM schema_version").single().long("version"))
+        assertEquals(28L, db.query("SELECT version FROM schema_version").single().long("version"))
         assertEquals(1L, db.query("SELECT dispatch_slot FROM pipeline_attempts WHERE request_id = 'old-request'")
             .single().long("dispatch_slot"))
         assertTrue(db.query("SELECT name FROM sqlite_master WHERE type='index' AND name='pipeline_one_dispatch'").isEmpty())
         assertEquals(1, db.query("SELECT name FROM sqlite_master WHERE type='index' AND name='pipeline_active_dispatch_slot'").size)
+    }
+
+    @Test
+    fun v27BatchPolicyAndActiveAttemptSurviveSixSlotMigration() {
+        val db = JdbcSqlConnection()
+        Migrations.apply(db)
+        db.execute("INSERT INTO knowledge_bases(id,name,embedding_space_id,created_at) VALUES (?,?,?,?)",
+            listOf("kb", "Migration test", "local", "2026-09-27T00:00:00Z"))
+        db.execute("INSERT INTO import_batches(id,kb_id,generation_id,kind,display_name,state,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?)",
+            listOf("old-batch", "kb", "generation", "FILES", "Old", "PAUSED", "2026-09-27T00:00:00Z", "2026-09-27T00:00:00Z"))
+        db.execute("INSERT INTO import_batches(id,kb_id,generation_id,kind,display_name,state,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?)",
+            listOf("custom-batch", "kb", "generation", "FILES", "Custom", "PAUSED", "2026-09-27T00:00:00Z", "2026-09-27T00:00:00Z"))
+        db.execute("INSERT INTO pipeline_policies(batch_id,max_concurrency,failure_limit,token_ceiling,reservation_tokens) VALUES (?,?,?,?,?)",
+            listOf("custom-batch", 1, 3, null, null))
+        db.execute("INSERT INTO pipeline_attempts(request_id,job_id,batch_id,unit_id,ordinal,target,config_fingerprint,planner_version,result_version,cache_key,state,dispatch_slot,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            listOf("old-active", "old-job", "old-batch", "unit", 1, "target", "config", "planner", "result", "old-cache", "DISPATCHED", 3, "2026-09-27T00:00:00Z"))
+        db.execute("DROP TRIGGER pipeline_dispatch_slot_required_insert")
+        db.execute("DROP TRIGGER pipeline_dispatch_slot_required_update")
+        db.execute("CREATE TRIGGER pipeline_dispatch_slot_required_insert BEFORE INSERT ON pipeline_attempts WHEN NEW.state IN ('READY','DISPATCHED') AND (NEW.dispatch_slot IS NULL OR NEW.dispatch_slot NOT BETWEEN 1 AND 3) BEGIN SELECT RAISE(ABORT,'active dispatch requires a bounded slot'); END")
+        db.execute("CREATE TRIGGER pipeline_dispatch_slot_required_update BEFORE UPDATE ON pipeline_attempts WHEN NEW.state IN ('READY','DISPATCHED') AND (NEW.dispatch_slot IS NULL OR NEW.dispatch_slot NOT BETWEEN 1 AND 3) BEGIN SELECT RAISE(ABORT,'active dispatch requires a bounded slot'); END")
+        db.execute("UPDATE schema_version SET version = 27")
+
+        Migrations.apply(db)
+
+        assertEquals(28L, db.query("SELECT version FROM schema_version").single().long("version"))
+        assertEquals(3L, db.query("SELECT max_concurrency FROM pipeline_policies WHERE batch_id='old-batch'").single().long("max_concurrency"))
+        assertEquals(1L, db.query("SELECT max_concurrency FROM pipeline_policies WHERE batch_id='custom-batch'").single().long("max_concurrency"))
+        assertEquals(3L, db.query("SELECT dispatch_slot FROM pipeline_attempts WHERE request_id='old-active'").single().long("dispatch_slot"))
+        db.execute("INSERT INTO pipeline_attempts(request_id,job_id,unit_id,ordinal,target,config_fingerprint,planner_version,result_version,cache_key,state,dispatch_slot,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+            listOf("new-request", "new-job", "unit", 1, "target", "config", "planner", "result", "cache", "READY", 6, "2026-09-29T00:00:00Z"))
+        assertEquals(6L, db.query("SELECT dispatch_slot FROM pipeline_attempts WHERE request_id='new-request'").single().long("dispatch_slot"))
+        assertThrows(Exception::class.java) {
+            db.execute("INSERT INTO pipeline_attempts(request_id,job_id,unit_id,ordinal,target,config_fingerprint,planner_version,result_version,cache_key,state,dispatch_slot,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                listOf("invalid-request", "new-job", "other", 1, "target", "config", "planner", "result", "other-cache", "READY", 7, "2026-09-29T00:00:00Z"))
+        }
     }
 
     @Test

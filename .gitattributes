@@ -9,6 +9,8 @@
 /LICENSES/AGPL-3.0-only.txt -text
 /LICENSES/Apache-2.0.txt text eol=lf
 app-android/src/main/assets/licenses/** -text
+# Encrypted PDF test streams have byte-counted lengths and must survive checkout verbatim.
+shared/knowledge-api/src/test/resources/pdf/*.pdf -text -diff
 # These bytes enter pinned generated assets; Windows checkout must not change them.
 runtime/embedding-onnx/third-party/** text eol=lf
 runtime/python-android/src/main/python/** text eol=lf

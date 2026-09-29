@@ -5,6 +5,8 @@
 
 > **2026-09-28 插图单独视觉与重复图片复用**：`pdf-text-v19-pdfrenderer` 让“原生文字 + 只发插图”路径接受装饰图形、嵌套变换、非方形缩放、DeviceGray/ICCBased 图片与安全 ExtGState；`VisionInput.duplicateKey`（发送字节 SHA-256 + 随附文字 + 提示 + 目标与版本，不含页码/小节）让同一进程内字节完全相同的请求复用 SUCCESS 结果，不做近似判重。整包估算视觉请求约 2,941 → 2,630。取舍见 [ADR-0016](adr/0016-vision-exact-duplicate-reuse.md)。
 
+> **2026-09-29 导入吞吐修订（本地实现，待设备验收）**：单文档视觉单元改为有界并行，原生文字和本地向量准备与视觉请求重叠，发布仍以全部视觉证据齐备为条件；PDF 解析增加空密码 Standard V4/R4 和实际调用的 Form XObject，对无法证明可见或字体正确的 Form 字串不作原生索引。Schema v28 将持久派发槽上限扩至六路，新批次默认四路，旧批次保留原三路默认或显式策略。具体测试、离线语料效果与未验收范围见[专项证据](evidence/2026-09-29/knowledge-import-throughput.md)；不涉及多图合批、独立更快视觉模型或跨进程重复图片缓存。
+
 > **2026-09-28 PDF 文字快路径**：`pdf-text-v18-pdfrenderer` 按 Adobe Glyph List 规范算法解析 `/Differences` 字形名，未知名称只使对应字节未知；解析 ToUnicode CMap（简单字体与 Identity 编码 `Type0`），补登变长 `sc`/`scn` 颜色算子；文字完整且只有细轴对齐线、矩形边框、白色或整页背景及裁剪路径的页不再请求整页 Vision，零宽 `/BS` 的 Link 批注视为不可见。曲线、斜线、粗线、彩色面板、渐变、图片、可见批注、未映射代码和加密 PDF 仍保留视觉。用户 294 个 PDF 的本地解析视觉页由 9,437 降至 2,941（指定 174 页 PDF 由 174 降至 6），转为文字路径的 8,908 个非空白页与独立解析器逐页比对，8,899 页规范化字符序列完全相同，其余 9 页相似度不低于 0.988（最低一页为希伯来文字序差异）；尚未验证真实 Provider、物理设备或整包耗时。取舍见 [ADR-0015](adr/0015-pdf-text-layer-trust.md)，另见 [KNOWLEDGE](KNOWLEDGE.md#2026-09-28嵌入字体的文字快路径与装饰线识别) 与 [专项证据](evidence/2026-09-28/pdf-text-fast-path.md)。
 
 > **2026-09-27 知识库恢复与并发**：Schema v27 把视觉请求单槽唯一索引迁移为三个持久派发槽。已确认固定目标的批次对暂时性 UNKNOWN/超时按最多六次、WorkManager 退避自动重试，进程重启后从检查点续接；仅无法恢复时显示失败。不同文件最多三路并行，API Embedding 保持单路；批次策略可配置一至三路。视觉 HTTP 超时独立提高到 600 秒，能力探测使用 128×128 有效 PNG。此前正文中的「UNKNOWN 一律人工确认」适用于普通模型/工具、单文档及查询；批次以此条和 [KNOWLEDGE §6](KNOWLEDGE.md#6-长任务恢复和删除) 为现行规则。设计见 [ADR-0014](adr/0014-knowledge-batch-retry-and-concurrency.md)。

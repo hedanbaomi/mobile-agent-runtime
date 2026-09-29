@@ -3,7 +3,7 @@
 
 # 项目交接
 
-最后更新：2026-09-28T23:40+08:00（Asia/Taipei；PDF v19 插图单独视觉与重复图片复用、本地 review 包；根工作区为 main）。项目根目录：E:/mobileAgentRuntime。
+最后更新：2026-09-29T13:28+08:00（Asia/Taipei；知识库导入提速 PR #31 首轮 CI 的顺序回归已补修，待最新提交检查；根工作区仍为 main）。项目根目录：E:/mobileAgentRuntime。
 
 按 [agent.md 第 1 节](agent.md#1-按任务读取与开工) 选择资料。现行规则见 agent.md；本文件记录现场和待办，历史任务中的授权不自动延续。
 
@@ -23,6 +23,10 @@
 - 完整证据：[2026-09-18 文档管线复审 R1–R5 收口](docs/evidence/2026-09-18/document-pipeline-r1-r5-closeout.md)。
 
 ## 1. 现行状态与当前任务
+
+- **2026-09-29 PR #31 首轮 CI 顺序回归补修**：首个提交 `ddb4d345` 的 push CI `check` 在 Linux 上有两个旧测试失败：`DocumentPipelineTest.pausePreservesInFlightSuccessAndCeilingStopsOnlyNewDispatch` 与 `KnowledgeGoldenCorpusTest.pauseResumeOfAScannedBatchNeverRepeatsASuccessfulVisionCall`。两项均断言单路派发顺序，却继承了本轮新批次默认四路策略；现为其显式指定 `maxConcurrency=1`，并保留 `KnowledgeDocumentConcurrencyTest` 验证多路行为。定向两项与完整 `:data:sqlite:test --no-build-cache` 本地通过；PR 最新提交的远端 CI 仍须按实际结果核对，不沿用首轮失败或本地通过作结论。未改产品并发默认值，设备与真实 Provider 边界不变。
+
+- **2026-09-29 知识库导入提速（本地实现与独立复审通过；待设备验收）**：在独立工作树 `C:/Users/32735/.codex/worktrees/knowledge-import-throughput/mobileAgentRuntime`、基线 `9d6ea66c` 实施用户选择的三项：同文档视觉单元至多两路并行并用持久结果续接、原生文字与本地嵌入同视觉请求重叠、空密码 Standard V4/R4 与实际调用的 Form XObject 解析。Schema v28 将全批次持久派发槽扩至一至六路，新批次默认四路，旧批次未存策略回填三路；不做多图合批、专用视觉模型或跨进程重复缓存。独立只读审查先指出 Form 不可见/裁剪文字与继承字体会误判完整，后指出不可信字串仍可混入原生索引；修复并加入反例后最终复审 **PASS**。`:shared:knowledge-api:test :data:sqlite:test`、全仓 `reviewGate`（1085 tasks，review APK 原生 16 KB、notices、SBOM/provenance 校验）均通过，REUSE 785/785、`git diff --check` 通过。交付 debug 签名但不可调试的 [review APK](.private/manual-test/20260929-review-throughput-9d6ea66-dirty/mobile-agent-runtime-review-throughput-9d6ea66-dirty-debug-signed.apk)（SHA-256 `19790fb280db52d48b5f8b9f0dc6974f2e48165fd84afd4cd8589039eaeee522`，证书 `31514893…b788`，`gitDirty=true`）；详见[专项证据](docs/evidence/2026-09-29/knowledge-import-throughput.md)和 [ADR-0017](docs/adr/0017-knowledge-import-throughput.md)。真实 Provider、真机杀进程恢复与 `books.zip` 整包耗时未验收，不把 308 页初版离线探针算作最终整包结果。本轮交付分支为 `codex/knowledge-import-throughput-20260929`，按用户授权提交并推送至 `origin`，只经 PR #31 合并 `main`；最终 SHA 以远端分支 HEAD 核对。根工作区用户未跟踪的 `docs/plans/device-acceptance-20260926.md` 未动。
 
 - **2026-09-28 重复图片复用与插图单独视觉（v19，已提交推送，当前任务已收尾）**：用户要求处理重复图片，且相似度低于 95% 的图片不得视为同一张。探针显示 v18 下 893 次图片出现只有 410 种内容（两张图各跨 162 个课程文件），但“原生文字 + 只发插图”路径整包 0 页生效，所有含图页都整页渲染、无法复用。现 `pdf-text-v19-pdfrenderer`：插图路径接受装饰图形、嵌套变换、非方形缩放、DeviceGray/ICCBased(N=1/3) JPEG 与可解析且不改外观的 ExtGState，仍排除翻转/旋转/越界、可见批注、页面旋转/裁切框、文字裁剪、遮罩与 CMYK；修正其原先忽略可见批注的问题（旧条件用“有无 Annots”判断，改为可见性判断）。`VisionInput.duplicateKey`（发送图片字节 SHA-256 + 随附文字 + 溯源提示 + 目标与版本，不含页码/小节）让同一进程内字节完全相同的请求复用 SUCCESS 结果，诊断码 `vision_duplicate_reused`；不做近似比较，只差一个像素也分别请求。复用索引在进程内存中，重启后重新积累（持久化需新表与迁移，未做）。整包估算：521 页改为只发插图，593 次插图请求仅 210 种内容，视觉请求约 2,941 → 2,630。取舍见 [ADR-0016](docs/adr/0016-vision-exact-duplicate-reuse.md)。
   - **修改文件**：`PdfParser.kt`（装饰图形遍历器返回图片位置与 ExtGState、插图条件重写、指纹 v19）、`Vision.kt`（`duplicateKey`）、`KnowledgeRepository.kt`（进程内复用索引与诊断码）；测试 `DocumentParserTest`（插图正反例、ExtGState）、`KnowledgeRepositoryTest`（新复用测试）、`DocumentPipelineTest.f4`（夹具两页渲染字节与文字完全相同，改为按页不同以保持原意图）、`DocumentUnitPlannerTest`（空 `Annots []` 反例改为无法解析的批注，新增页面旋转反例）；文档 `KNOWLEDGE.md`、`ACCEPTANCE.md`、`IMPLEMENTATION_PLAN.md`、ADR-0015 替代方案一行、专项证据。

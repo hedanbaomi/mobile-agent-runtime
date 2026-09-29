@@ -24,6 +24,7 @@ import runtime.mobileagent.knowledge.MemoryBlobSink
 import runtime.mobileagent.knowledge.PdfPageRasterizer
 import runtime.mobileagent.knowledge.PdfParser
 import runtime.mobileagent.knowledge.PdfUnitRasterizer
+import runtime.mobileagent.knowledge.PipelinePolicy
 import runtime.mobileagent.knowledge.ProcessingUnit
 import runtime.mobileagent.knowledge.RenderedPdfPage
 import runtime.mobileagent.knowledge.SourceFormat
@@ -265,6 +266,9 @@ class KnowledgeGoldenCorpusTest {
             pauseAt = ImportStage.COPYING,
         )
         repo.bindJobToBatch(batchId, copied, case.displayName)
+        // This regression isolates a single in-flight call across pause/resume.
+        // Concurrent dispatch is covered by KnowledgeDocumentConcurrencyTest.
+        repo.configureBatchPipeline(batchId, PipelinePolicy(maxConcurrency = 1))
         repo.authorizeBatchVision(batchId, null)
         repo.processBatch(batchId, visionConfigured = false)
         assertEquals(listOf(1), calls, "pause must land after the first in-flight page")

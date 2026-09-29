@@ -33,6 +33,8 @@
 
 ## 收口记录
 
+- PR #31 首轮 push CI 的 `check` 在 Linux 上有两个旧测试失败：`DocumentPipelineTest.pausePreservesInFlightSuccessAndCeilingStopsOnlyNewDispatch` 与 `KnowledgeGoldenCorpusTest.pauseResumeOfAScannedBatchNeverRepeatsASuccessfulVisionCall`。两者原本检查单路暂停/恢复顺序，却继承了新默认四路；现在各自显式设为一路，多路行为由新增并发测试覆盖。两项定向测试 `BUILD SUCCESSFUL in 29s`，完整 `:data:sqlite:test --no-build-cache` `BUILD SUCCESSFUL in 52s`。最终远端 CI 仍以最新提交的实际检查为准。
+
 - 最终补修后执行 `:shared:knowledge-api:test --tests runtime.mobileagent.knowledge.DocumentParserTest :data:sqlite:test --offline --dependency-verification=strict --no-build-cache --no-daemon`：`BUILD SUCCESSFUL in 1m 12s`，24 tasks。全仓 `reviewGate --offline --dependency-verification=strict --no-daemon`：`BUILD SUCCESSFUL in 2m 34s`，1085 tasks；review APK 的原生 LOAD/RELRO/ZIP 16 KB 对齐、runtime notices、CycloneDX SBOM 与 provenance 校验均通过。
 - `python -B -m reuse lint`：785/785 合规；`git diff --check` 退出 0。独立审查最终 `PASS`。
 - [人工核验 review APK](../../../.private/manual-test/20260929-review-throughput-9d6ea66-dirty/mobile-agent-runtime-review-throughput-9d6ea66-dirty-debug-signed.apk)：176,411,831 字节，SHA-256 `19790fb280db52d48b5f8b9f0dc6974f2e48165fd84afd4cd8589039eaeee522`；`apksigner verify --print-certs` 通过，Android Debug 证书 SHA-256 `315148930a70085176f864d43de4c7bf3469bca4e912a5ac84b057259350b788`。review 构型不可调试；同目录保存 SBOM、provenance。构建基线 `9d6ea66c` 加本地改动，provenance 为 `gitDirty=true`，不是干净提交或正式发布。

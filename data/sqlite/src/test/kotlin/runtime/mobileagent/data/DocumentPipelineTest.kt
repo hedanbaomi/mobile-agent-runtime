@@ -247,7 +247,7 @@ class DocumentPipelineTest {
                 assertTrue(input.beforeDispatch());requests++;repo.pauseBatch(batch)
                 VisionOutcome.Success(VisionSuccess("kept","paid"),VisionDiagnosticMetadata(dispatched=true,inputTokens=20,outputTokens=10))
             })
-            batch=stage(repo,tenPages());repo.configureBatchPipeline(batch,PipelinePolicy(tokenDispatchCeiling=60,reservationTokensPerRequest=40))
+            batch=stage(repo,tenPages());repo.configureBatchPipeline(batch,PipelinePolicy(maxConcurrency=1,tokenDispatchCeiling=60,reservationTokensPerRequest=40))
             repo.authorizeBatchVision(batch,"target");repo.processBatch(batch,true)
             assertEquals(1,requests);assertEquals(1,repo.batchPipelineProgress(batch).succeeded)
             repo.resumeBatch(batch);repo.processBatch(batch,true)

@@ -1176,7 +1176,8 @@ class DocumentParserTest {
 
         val parsed = PdfParser.parse(pdf)
 
-        assertEquals(1, parsed.assets.count { it.kind == "IMAGE" && it.mediaType == "image/jpeg" })
+        // The broken content stream cannot prove that the declared JPEG was painted.
+        assertEquals(0, parsed.assets.count { it.kind == "IMAGE" && it.mediaType == "image/jpeg" })
         assertTrue(parsed.assets.any { it.kind == "PAGE" && it.page == 1 && it.bytes.isEmpty() })
     }
 
@@ -1402,4 +1403,107 @@ class DocumentParserTest {
         out.write("trailer\n<< /Size 8 /Root 1 0 R >>\nstartxref\n$xref\n%%EOF\n".toByteArray(Charsets.ISO_8859_1))
         return out.toByteArray()
     }
+
+    private fun formPdf(pageContent: String, formContent: String, formResources: String,
+                        extraObjects: Map<Int, ByteArray> = emptyMap(),
+                        pageResources: String = ""): ByteArray = finishPdf(mapOf(
+        1 to plainPdfObject(1, "<< /Type /Catalog /Pages 2 0 R >>"),
+        2 to plainPdfObject(2, "<< /Type /Pages /Kids [3 0 R] /Count 1 >>"),
+        3 to plainPdfObject(3, "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] " +
+            "/Contents 4 0 R /Resources << /XObject << /Fx 5 0 R /Unused 9 0 R >> $pageResources >> >>"),
+        4 to streamPdfObject(4, "", pageContent.toByteArray(Charsets.ISO_8859_1)),
+        5 to streamPdfObject(5, "/Type /XObject /Subtype /Form /BBox [0 0 612 792] " +
+            "/Resources << $formResources >>", formContent.toByteArray(Charsets.ISO_8859_1)),
+        6 to plainPdfObject(6, "<< >>"),
+        7 to plainPdfObject(7, "<< >>"),
+        8 to plainPdfObject(8, "<< >>"),
+        9 to streamPdfObject(9, "/Type /XObject /Subtype /Form /BBox [0 0 612 792]",
+            "BT (UNUSED_FORM_TEXT) Tj ET".toByteArray(Charsets.ISO_8859_1)),
+    ) + extraObjects)
+
+    @Test
+    fun usedFormTextIsReadWithItsOwnFontsAndUnusedFormIsIgnored() {
+        val pdf = formPdf("/Fx Do", "BT /F1 12 Tf 30 700 Td (VISIBLE_FORM_TEXT) Tj ET",
+            "/Font << /F1 6 0 R >>", mapOf(6 to plainPdfObject(6,
+                "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>")))
+        val parsed = PdfParser.parse(pdf)
+        assertEquals("VISIBLE_FORM_TEXT", parsed.pages.single().text)
+        assertFalse(parsed.pages.single().needsVision)
+        assertTrue(parsed.assets.isEmpty())
+    }
+
+    @Test
+    fun invisibleFormTextKeepsWholePageVision() {
+        val pdf = formPdf("/Fx Do", "BT /F1 12 Tf 3 Tr (HIDDEN) Tj ET",
+            "/Font << /F1 6 0 R >>", mapOf(6 to plainPdfObject(6,
+                "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>")))
+        val parsed = PdfParser.parse(pdf)
+        assertTrue(parsed.pages.single().needsVision)
+        assertFalse(parsed.pages.single().text.contains("HIDDEN"))
+        assertTrue(parsed.assets.any { it.kind == "PAGE" && it.page == 1 })
+    }
+
+    @Test
+    fun clippedFormTextKeepsWholePageVision() {
+        val pdf = formPdf("/Fx Do", "0 0 0 0 re W n BT /F1 12 Tf (HIDDEN) Tj ET",
+            "/Font << /F1 6 0 R >>", mapOf(6 to plainPdfObject(6,
+                "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>")))
+        val parsed = PdfParser.parse(pdf)
+        assertTrue(parsed.pages.single().needsVision)
+        assertFalse(parsed.pages.single().text.contains("HIDDEN"))
+        assertTrue(parsed.assets.any { it.kind == "PAGE" && it.page == 1 })
+    }
+
+    @Test
+    fun formTextWithoutExplicitFontKeepsWholePageVision() {
+        val pdf = formPdf("BT /F1 12 Tf ET /Fx Do", "BT (abg) Tj ET",
+            "/Font << /Unused 6 0 R >>", mapOf(6 to plainPdfObject(6,
+                "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>"),
+                7 to plainPdfObject(7, "<< /Type /Font /Subtype /Type1 /BaseFont /Symbol >>")),
+            pageResources = "/Font << /F1 7 0 R >>")
+        val parsed = PdfParser.parse(pdf)
+        assertTrue(parsed.pages.single().needsVision)
+        assertFalse(parsed.pages.single().text.contains("abg"))
+        assertTrue(parsed.assets.any { it.kind == "PAGE" && it.page == 1 })
+    }
+
+    @Test
+    fun usedNestedFormImageKeepsWholePageVisionAndDoesNotInventUnusedText() {
+        val pdf = formPdf("/Fx Do", "/Im1 Do", "/XObject << /Im1 6 0 R >>",
+            mapOf(6 to streamPdfObject(6, "/Type /XObject /Subtype /Image /Width 16 /Height 16 " +
+                "/ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /DCTDecode", testJpeg)))
+        val parsed = PdfParser.parse(pdf)
+        assertFalse(parsed.text.contains("UNUSED_FORM_TEXT"))
+        assertTrue(parsed.pages.single().needsVision)
+        assertTrue(parsed.assets.any { it.kind == "IMAGE" && it.page == 1 })
+        assertTrue(parsed.assets.any { it.kind == "PAGE" && it.page == 1 })
+    }
+
+    @Test
+    fun cyclicFormReferenceRetainsPageBlocker() {
+        val pdf = formPdf("/Fx Do", "/Again Do", "/XObject << /Again 5 0 R >>")
+        val parsed = PdfParser.parse(pdf)
+        assertTrue(parsed.pages.single().needsVision)
+        assertTrue(parsed.assets.any { it.kind == "PAGE" && it.page == 1 })
+    }
+
+    @Test
+    fun authenticatedEmptyPasswordAesV2PublishesNativeText() {
+        val parsed = PdfParser.parse(syntheticEncryptedFixture("standard-v4-r4-empty-aesv2.pdf"))
+        assertEquals("ENCRYPTED_NATIVE_TEXT", parsed.pages.single().text.trim())
+        assertFalse(parsed.pages.single().needsVision)
+        assertTrue(parsed.assets.isEmpty())
+    }
+
+    @Test
+    fun nonemptyPasswordAesV2CannotBeMistakenForCompleteNativeText() {
+        assertThrows(IllegalArgumentException::class.java) {
+            PdfParser.parse(syntheticEncryptedFixture("standard-v4-r4-locked-aesv2.pdf"))
+        }
+    }
+
+    private fun syntheticEncryptedFixture(name: String): ByteArray =
+        requireNotNull(javaClass.getResourceAsStream("/pdf/$name")) { "missing synthetic PDF fixture: $name" }
+            .use { it.readBytes() }
+
 }

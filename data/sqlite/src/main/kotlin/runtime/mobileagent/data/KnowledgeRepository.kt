@@ -86,6 +86,9 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.runBlocking
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicReference
+import java.util.concurrent.CompletableFuture
 
 /** Legacy cache identity may be adopted only when it maps to one current destination. */
 data class LegacyVisionCacheTarget(val fingerprint: String, val unambiguous: Boolean)
@@ -2496,6 +2499,7 @@ class KnowledgeRepository(
         applyBatchVisionAuthorization(job)
         pipeline.selectTarget(job.id,job.consentedVisionFingerprint)
         val visionTexts = mutableListOf<IndexedChunk>()
+        var nativePreparation: NativePreparationHandle? = null
         if (job.hasImages && job.visualGapsAccepted) {
             val chunks = textChunksSkippingVision(parsed)
             if (chunks.isEmpty()) {
@@ -2529,7 +2533,11 @@ class KnowledgeRepository(
             // a provider call.  A consent Worker can otherwise appear stuck at
             // WAITING while Vision is already running.
             persistJob(job, displayNameForJob(job.id))
-            when (val outcome = processVisualAssets(job, bytes, parsed, processable, blocked)) {
+            nativePreparation = startNativePreparation(job, parsed)
+            val outcome = try { processVisualAssets(job, bytes, parsed, processable, blocked) }
+                catch (error: Throwable) { nativePreparation.cancel(); throw error }
+            if (outcome !is VisionBatch.Ok) nativePreparation.cancel()
+            when (outcome) {
                 is VisionBatch.Deferred -> {
                     persistJob(job, displayNameForJob(job.id))
                     return
@@ -2546,7 +2554,8 @@ class KnowledgeRepository(
                 is VisionBatch.Ok -> visionTexts += outcome.chunks
             }
         }
-        val pageChunks = nativePageChunks(parsed)
+        val native = nativePreparation?.join()
+        val pageChunks = native?.chunks ?: nativePageChunks(parsed)
         val chunks = (pageChunks + visionTexts).ifEmpty {
             if (!parsed.needsVision && parsed.text.isNotBlank()) {
                 TextChunker.chunk(parsed.text).map { IndexedChunk(it, 1, emptyList(), null) }
@@ -2558,7 +2567,8 @@ class KnowledgeRepository(
             fail(job, "The file produced no indexable text. Visual items were not dropped.")
             return
         }
-        publishChunksCancellable(job, bytes, chunks, parsed.parserFingerprint, processable)
+        publishChunksCancellable(job, bytes, chunks, parsed.parserFingerprint, processable,
+            native?.vectors.orEmpty())
     }
 
     private fun continueImport(job: ImportJob, displayName: String, bytes: ByteArray, format: SourceFormat): ImportJob {
@@ -2687,6 +2697,7 @@ class KnowledgeRepository(
         applyBatchVisionAuthorization(job)
         pipeline.selectTarget(job.id,job.consentedVisionFingerprint)
         val visionTexts = mutableListOf<IndexedChunk>()
+        var nativePreparation: NativePreparationHandle? = null
         if (job.hasImages && job.visualGapsAccepted) {
             val chunks = textChunksSkippingVision(parsed)
             if (chunks.isEmpty()) {
@@ -2720,7 +2731,11 @@ class KnowledgeRepository(
             // the UI and a restarted process can distinguish processing from
             // an unconsumed consent request.
             persistJob(job, displayNameForJob(job.id))
-            when (val outcome = processVisualAssets(job, bytes, parsed, processable, blocked)) {
+            nativePreparation = startNativePreparation(job, parsed)
+            val outcome = try { processVisualAssets(job, bytes, parsed, processable, blocked) }
+                catch (error: Throwable) { nativePreparation.cancel(); throw error }
+            if (outcome !is VisionBatch.Ok) nativePreparation.cancel()
+            when (outcome) {
                 is VisionBatch.Deferred -> {
                     persistJob(job, displayNameForJob(job.id))
                     return
@@ -2737,7 +2752,8 @@ class KnowledgeRepository(
                 is VisionBatch.Ok -> visionTexts += outcome.chunks
             }
         }
-        val pageChunks = nativePageChunks(parsed)
+        val native = nativePreparation?.join()
+        val pageChunks = native?.chunks ?: nativePageChunks(parsed)
         val chunks = (pageChunks + visionTexts).ifEmpty {
             if (!parsed.needsVision && parsed.text.isNotBlank()) {
                 TextChunker.chunk(parsed.text).map { IndexedChunk(it, 1, emptyList(), null) }
@@ -2749,7 +2765,7 @@ class KnowledgeRepository(
             fail(job, "The file produced no indexable text. Visual items were not dropped.")
             return
         }
-        publishChunks(job, bytes, chunks, parsed.parserFingerprint, processable)
+        publishChunks(job, bytes, chunks, parsed.parserFingerprint, processable, native?.vectors.orEmpty())
     }
 
     private sealed interface VisionBatch {
@@ -2763,9 +2779,8 @@ class KnowledgeRepository(
      * Process visual evidence only after the caller has passed the consent and
      * binding checks.  PDF parsing deliberately runs without a rasterizer so a
      * waiting import never retains a rendered image for every page.  Once
-     * consent is present, page renders are requested one at a time and handed
-     * directly to Vision; the generated bytes are not accumulated in the
-     * ParsedPublication or a batch list.
+     * consent is present, at most two units of one document render and enter
+     * Vision concurrently. The rendered bytes remain scoped to each worker.
      */
     private fun processVisualAssets(
         job: ImportJob,
@@ -2781,15 +2796,82 @@ class KnowledgeRepository(
         if(pageBlockers.any { it.page==null } || (pageBlockers.isNotEmpty() && pdfRasterizer==null))
             return VisionBatch.Failed("Incomplete page evidence requires a complete local page render")
         val target = job.consentedVisionFingerprint ?: return VisionBatch.Failed("Vision destination is not bound")
-        val chunks = mutableListOf<IndexedChunk>()
         val units = pipeline.units(job.id).filter { it.requiresVision }
         if (units.isEmpty()) return VisionBatch.Failed("No visual processing units could be planned")
-        for (unit in units) {
+        if (!synchronized(livePipelineJobs) { livePipelineJobs.add(job.id) }) return VisionBatch.Deferred
+        try {
+            val completed = arrayOfNulls<VisionBatch>(units.size)
+            // The durable UNKNOWN guard covers the entire source page. Keep
+            // regions of one page sequential while independent pages overlap.
+            val pageGroups = units.indices.groupBy { units[it].page }.values.toList()
+            val next = AtomicInteger(0)
+            val firstTerminalIndex = AtomicInteger(Int.MAX_VALUE)
+            val failure = AtomicReference<Throwable?>(null)
+            val duplicateFailures = java.util.concurrent.ConcurrentHashMap<String, VisionBatch>()
+            val batchId = jobBatchId(job.id)
+            val workers = minOf(MAX_DOCUMENT_VISION_PARALLELISM, pageGroups.size,
+                if (batchId == null) 1 else pipeline.policy(batchId).maxConcurrency)
+            runBlocking {
+                coroutineScope {
+                    (1..workers).map {
+                        async(Dispatchers.IO) {
+                            while (firstTerminalIndex.get() == Int.MAX_VALUE) {
+                                val groupIndex = next.getAndIncrement()
+                                if (groupIndex >= pageGroups.size) break
+                                for (index in pageGroups[groupIndex]) {
+                                    if (index >= firstTerminalIndex.get()) break
+                                    try {
+                                        val outcome = processVisualUnit(job, bytes, parsed, processable,
+                                            units[index], duplicateFailures, firstTerminalIndex, index)
+                                        completed[index] = outcome
+                                        if (outcome !is VisionBatch.Ok) firstTerminalIndex.accumulateAndGet(index, ::minOf)
+                                    } catch (error: Throwable) {
+                                        failure.compareAndSet(null, error)
+                                        firstTerminalIndex.accumulateAndGet(index, ::minOf)
+                                    }
+                                }
+                            }
+                        }
+                    }.awaitAll()
+                }
+            }
+            failure.get()?.let { throw it }
+            completed.firstOrNull { it != null && it !is VisionBatch.Ok }?.let { return it }
+            val batchState = jobBatchId(job.id)?.let(::findBatch)?.state
+            val persisted = db.query("SELECT stage,error FROM import_jobs WHERE id=?", listOf(job.id)).singleOrNull()
+            if (batchState in setOf(ImportBatchState.PAUSED, ImportBatchState.CANCELLED) ||
+                persisted?.string("stage") in setOf(ImportStage.PAUSED.name, ImportStage.CANCELLED.name)) {
+                job.stage = if (batchState == ImportBatchState.CANCELLED ||
+                    persisted?.string("stage") == ImportStage.CANCELLED.name) ImportStage.CANCELLED else ImportStage.PAUSED
+                job.error = "Vision batch stopped before publication"
+                return VisionBatch.Deferred
+            }
+            if (persisted?.string("stage") == ImportStage.FAILED.name) {
+                job.stage = ImportStage.FAILED
+                job.error = persisted.string("error")
+                return VisionBatch.Unknown(job.error ?: "UNKNOWN_OUTCOME: import stopped before publication")
+            }
+            return VisionBatch.Ok(completed.filterIsInstance<VisionBatch.Ok>().flatMap { it.chunks })
+        } finally {
+            synchronized(livePipelineJobs) { livePipelineJobs.remove(job.id) }
+        }
+    }
+
+    private fun processVisualUnit(
+        job: ImportJob,
+        bytes: ByteArray,
+        parsed: ParsedPublication,
+        processable: List<ExtractedAsset>,
+        unit: ProcessingUnit,
+        duplicateFailures: java.util.concurrent.ConcurrentHashMap<String, VisionBatch>,
+        firstTerminalIndex: AtomicInteger,
+        index: Int,
+    ): VisionBatch {
             // A persisted success is consumed before rendering: resume never repeats image work or upload.
+            val target = job.consentedVisionFingerprint ?: return VisionBatch.Failed("Vision destination is not bound")
             val saved = pipeline.result(job.id,unit.unitId,target)
             if (saved != null) {
-                chunks += unitChunks(unit,saved.assetId,saved.result,saved.section)
-                continue
+                return VisionBatch.Ok(unitChunks(unit,saved.assetId,saved.result,saved.section))
             }
             if (pipeline.unknown(job.id,unit.unitId,unit.page)) {
                 return VisionBatch.Unknown("UNKNOWN_OUTCOME: this unit may already have been billed; explicit confirmation is required.")
@@ -2868,12 +2950,7 @@ class KnowledgeRepository(
             // DOCX paragraphs and EPUB sections are structural ordinals, not
             // physical pages. Keep the section locator without inventing a page.
             val locatedAsset = if (parsed.format == SourceFormat.OFFICE_ARCHIVE) asset.copy(page = null) else asset
-            when(val outcome = processAssets(job,listOf(locatedAsset),unit)) {
-                is VisionBatch.Ok -> chunks += outcome.chunks
-                else -> return outcome
-            }
-        }
-        return VisionBatch.Ok(chunks)
+            return processAssets(job,listOf(locatedAsset),unit,duplicateFailures,firstTerminalIndex,index)
     }
 
     private fun hasLegacyVisionUnknown(jobId: String, documentId: String, page: Int, target: String): Boolean {
@@ -2901,13 +2978,124 @@ class KnowledgeRepository(
             }
         }
 
+    private data class NativePreparation(
+        val chunks: List<IndexedChunk>,
+        val vectors: Map<String, ByteArray>,
+    )
+
+    private class NativePreparationHandle(
+        val future: CompletableFuture<NativePreparation>,
+        val cancelled: AtomicBoolean,
+    ) {
+        fun cancel() {
+            cancelled.set(true)
+            future.cancel(true)
+        }
+
+        fun join(): NativePreparation = future.join()
+    }
+
+    /** Prepare only local, unpublished data while the remote Vision units run. */
+    private fun startNativePreparation(job: ImportJob, parsed: ParsedPublication): NativePreparationHandle {
+        val cancelled = AtomicBoolean(false)
+        val future = CompletableFuture.supplyAsync {
+            val chunks = nativePageChunks(parsed)
+            if (job.embeddingIsApi || chunks.isEmpty()) return@supplyAsync NativePreparation(chunks, emptyMap())
+            val selected = embedder
+            val maxVectors = (MAX_EARLY_VECTOR_BYTES / (selected.dimension.toLong().coerceAtLeast(1L) * 4L))
+                .coerceAtMost(chunks.size.toLong()).toInt()
+            val unique = linkedMapOf<String, String>()
+            chunks.forEach { chunk ->
+                if (unique.size < maxVectors) unique.putIfAbsent(sha256Hex(chunk.text.toByteArray(Charsets.UTF_8)), chunk.text)
+            }
+            val vectors = linkedMapOf<String, ByteArray>()
+            unique.forEach { (hash, text) ->
+                if (cancelled.get() || Thread.currentThread().isInterrupted)
+                    return@supplyAsync NativePreparation(chunks, emptyMap())
+                if (cachedEmbedding(selected.spaceId, hash) == null) {
+                    val vector = selected.embed(text)
+                    validateEmbeddingVector(vector, selected.dimension)
+                    vectors[hash] = floatsToBytes(vector)
+                }
+            }
+            NativePreparation(chunks, vectors)
+        }
+        return NativePreparationHandle(future, cancelled)
+    }
+
     private fun recoverPipelineJob(jobId: String) = synchronized(livePipelineJobs) {
         if (jobId !in livePipelineJobs) pipeline.recover(jobId)
     }
 
-    private fun processAssets(job: ImportJob, assets: List<ExtractedAsset>, unit: ProcessingUnit): VisionBatch {
-        if (!synchronized(livePipelineJobs) { livePipelineJobs.add(job.id) }) return VisionBatch.Deferred
-        return try { processAssetsOwned(job,assets,unit) } finally { synchronized(livePipelineJobs) { livePipelineJobs.remove(job.id) } }
+    private val visionLaneMonitor = Object()
+    private var activeVisionLanes = 0
+    private val duplicateVisionLocks = Array(64) { Any() }
+
+    private fun processAssets(
+        job: ImportJob,
+        assets: List<ExtractedAsset>,
+        unit: ProcessingUnit,
+        duplicateFailures: java.util.concurrent.ConcurrentHashMap<String, VisionBatch>,
+        firstTerminalIndex: AtomicInteger,
+        index: Int,
+    ): VisionBatch {
+        val asset = assets.single()
+        val identity = VisionInput(
+            assetHash = sha256Hex(asset.bytes),
+            contextHash = VisionCacheKey.contextHash(asset.surroundingText, asset.page, asset.section),
+            modelFingerprint = job.consentedVisionFingerprint ?: return VisionBatch.Failed("Vision destination is not bound"),
+            bytes = asset.bytes, mediaType = asset.mediaType, surroundingText = asset.surroundingText,
+            page = asset.page, section = asset.section, tableHeader = unit.tableHeader,
+            continuationGroupId = unit.continuationGroupId, continuationIndex = unit.continuationIndex,
+            imageRegion = unit.region, textImageAssociation = unit.textImageAssociation,
+            layoutDegradation = unit.layoutDegradation, pageNativeTextChars = unit.nativeText.length,
+        ).duplicateKey
+        // A striped single-flight lock keeps identical requests from both missing
+        // the success cache. It is acquired before the provider lane, so a waiter
+        // for the same image never consumes one of the bounded dispatch slots.
+        val lock = duplicateVisionLocks[Math.floorMod(identity.hashCode(), duplicateVisionLocks.size)]
+        return synchronized(lock) {
+            if (index >= firstTerminalIndex.get()) return@synchronized VisionBatch.Deferred
+            duplicateFailures[identity]?.let { return@synchronized it }
+            if (!acquireVisionLane(job)) return@synchronized VisionBatch.Deferred
+            try {
+                if (index >= firstTerminalIndex.get()) return@synchronized VisionBatch.Deferred
+                processAssetsOwned(job, assets, unit).also { outcome ->
+                    if (outcome !is VisionBatch.Ok) {
+                        firstTerminalIndex.accumulateAndGet(index, ::minOf)
+                        duplicateFailures.putIfAbsent(identity, outcome)
+                    }
+                }
+            } finally {
+                synchronized(visionLaneMonitor) {
+                    activeVisionLanes--
+                    visionLaneMonitor.notifyAll()
+                }
+            }
+        }
+    }
+
+    private fun acquireVisionLane(job: ImportJob): Boolean {
+        val batchId = jobBatchId(job.id)
+        synchronized(visionLaneMonitor) {
+            while (true) {
+                val state = batchId?.let(::findBatch)?.state
+                if (state == ImportBatchState.PAUSED || state == ImportBatchState.CANCELLED) {
+                    job.stage = if (state == ImportBatchState.PAUSED) ImportStage.PAUSED else ImportStage.CANCELLED
+                    job.error = "Vision batch is stopped. No new image was sent."
+                    return false
+                }
+                val allowed = minOf(MAX_BATCH_PARALLELISM, if (batchId == null) 1 else pipeline.policy(batchId).maxConcurrency)
+                // Durable READY/DISPATCHED slots remain authoritative after a
+                // process restart. A full slot pool is backpressure, not a
+                // reason to pause the user's batch.
+                if (activeVisionLanes < allowed && pipeline.stopReason(batchId) != "PIPELINE_MAX_CONCURRENCY") {
+                    activeVisionLanes++
+                    return true
+                }
+                visionLaneMonitor.wait(200)
+            }
+        }
     }
 
     private fun processAssetsOwned(job: ImportJob, assets: List<ExtractedAsset>, unit: ProcessingUnit): VisionBatch {
@@ -3942,13 +4130,14 @@ class KnowledgeRepository(
         textChunks: List<IndexedChunk>,
         fingerprint: String,
         assets: List<ExtractedAsset> = emptyList(),
+        preparedVectors: Map<String, ByteArray> = emptyMap(),
     ) {
         if (pipeline.publication(job.id,chunkVersion) != null) {
             finishPublished(job)
             return
         }
         if (!job.embeddingIsApi) {
-            publishChunks(job, bytes, textChunks, fingerprint, assets)
+            publishChunks(job, bytes, textChunks, fingerprint, assets, preparedVectors)
             return
         }
         if (!job.embeddingConsent) {
@@ -4043,6 +4232,7 @@ class KnowledgeRepository(
         textChunks: List<IndexedChunk>,
         fingerprint: String,
         assets: List<ExtractedAsset> = emptyList(),
+        preparedVectors: Map<String, ByteArray> = emptyMap(),
     ) {
         if (pipeline.publication(job.id,chunkVersion) != null) {
             finishPublished(job)
@@ -4098,6 +4288,7 @@ class KnowledgeRepository(
         // Phase 2 (NO indexLock, NO transaction): embedding inference/provider
         // calls.  Retrieval and concurrent publications keep running during
         // minutes of inference (see ensureEmbeddings for the transaction rule).
+        persistPreparedEmbeddings(versionId, selectedEmbedder, preparedVectors)
         persistEmbeddings(versionId, selectedEmbedder)
         val inputsWithNewVersion = linkedMapOf<String, Sequence<EmbeddingInput>>(
             versionId to inputsForVersion(versionId),
@@ -4178,6 +4369,25 @@ class KnowledgeRepository(
 
     private fun persistEmbeddings(documentVersionId: String, selectedEmbedder: TextEmbedder) {
         inputsForVersion(documentVersionId).chunked(128).forEach { ensureEmbeddings(it, selectedEmbedder) }
+    }
+
+    private fun persistPreparedEmbeddings(
+        documentVersionId: String,
+        selectedEmbedder: TextEmbedder,
+        vectors: Map<String, ByteArray>,
+    ) {
+        if (vectors.isEmpty()) return
+        check(selectedEmbedder.spaceId == embedder.spaceId) { "Prepared vectors must use the local embedding space" }
+        inputsForVersion(documentVersionId).chunked(128).forEach { batch ->
+            db.transaction {
+                batch.forEach { input ->
+                    val prepared = vectors[input.contentHash] ?: return@forEach
+                    val canonical = cachedEmbedding(selectedEmbedder.spaceId, input.contentHash)?.bytes ?: prepared
+                    validateEmbeddingBytes(canonical, selectedEmbedder.dimension)
+                    insertEmbedding(input.chunkId, selectedEmbedder.spaceId, canonical, input.contentHash)
+                }
+            }
+        }
     }
 
     /**
@@ -5651,7 +5861,7 @@ class KnowledgeRepository(
             val retryPending = AtomicBoolean(false)
             val parallelism = synchronized(indexLock) {
                 // The API embedding operation is exclusive per KB; local
-                // embedding and independent Vision jobs may use three lanes.
+                // embedding and independent Vision jobs use the saved policy's lanes.
                 val usesApiEmbedding = db.query(
                     "SELECT id FROM import_jobs WHERE batch_id = ? AND embedding_is_api = 1 LIMIT 1",
                     listOf(batchId),
@@ -6846,7 +7056,9 @@ class KnowledgeRepository(
 
     companion object {
         private val livePipelineJobs = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
-        private const val MAX_BATCH_PARALLELISM = 3
+        private const val MAX_BATCH_PARALLELISM = 6
+        private const val MAX_DOCUMENT_VISION_PARALLELISM = 2
+        private const val MAX_EARLY_VECTOR_BYTES = 8L * 1024L * 1024L
         private const val MAX_BATCH_ATTEMPTS = 6
         const val DEFAULT_KB_ID = "kb-default"
         const val PARSER_FINGERPRINT = "text-utf8-v1"

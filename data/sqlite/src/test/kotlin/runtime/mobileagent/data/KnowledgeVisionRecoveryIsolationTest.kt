@@ -99,7 +99,7 @@ class KnowledgeVisionRecoveryIsolationTest {
         val pdf = threePagePdf()
         val legacyTarget = "legacy-vision-target"
         val fullTarget = "vision-target-full|profile:model|config:hash"
-        val legacyCalls = mutableListOf<Int>()
+        val legacyCalls = java.util.Collections.synchronizedList(mutableListOf<Int>())
         val legacyBackend = VisionBackend { input ->
             legacyCalls += input.page ?: -1
             if (input.page == 3) VisionOutcome.UnknownOutcome
@@ -121,7 +121,7 @@ class KnowledgeVisionRecoveryIsolationTest {
         )
         legacyRepo.authorizeBatchVision(sourceBatch, legacyTarget)
         legacyRepo.processBatch(sourceBatch, false)
-        assertEquals(listOf(1, 2, 3), legacyCalls)
+        assertEquals(setOf(1, 2, 3), legacyCalls.toSet())
         assertEquals(2, countWhere(db, "vision_results", "model_fingerprint = '$legacyTarget' AND status = 'SUCCESS'"))
         assertEquals(1, countWhere(db, "vision_results", "model_fingerprint = '$legacyTarget' AND status = 'UNKNOWN_OUTCOME'"))
 

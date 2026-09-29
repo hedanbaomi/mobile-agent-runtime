@@ -96,7 +96,7 @@ class KnowledgeBatchVisionTest {
         val db = JdbcSqlConnection()
         Migrations.apply(db)
         val blobs = MemoryBlobSink()
-        val calls = mutableListOf<Int>()
+        val calls = java.util.Collections.synchronizedList(mutableListOf<Int>())
         var failThird = true
         val rasterizer = runtime.mobileagent.knowledge.PdfPageRasterizer { _, pages -> pages.map { page ->
             runtime.mobileagent.knowledge.RenderedPdfPage(page, byteArrayOf(page.toByte()), "image/png", 1, 1)
@@ -125,7 +125,7 @@ class KnowledgeBatchVisionTest {
         val batch = stagedBatch(repo, "multi-page", listOf(Triple("three.pdf", "application/pdf", pdf)))
         repo.authorizeBatchVision(batch, "vision-test")
         assertTrue(repo.processBatch(batch, true))
-        assertEquals(listOf(1, 2, 3), calls)
+        assertEquals(setOf(1, 2, 3), calls.toSet())
         assertEquals(2, db.query("SELECT status FROM vision_results WHERE status='SUCCESS'").size,
             "results=${db.query("SELECT cache_key,status FROM vision_results").map { it.columns }} " +
                 "attempts=${db.query("SELECT state FROM pipeline_attempts").map { it.columns }} " +
@@ -135,7 +135,9 @@ class KnowledgeBatchVisionTest {
         val restarted = repository()
         restarted.recoverableBatchIds().forEach { assertFalse(restarted.processBatch(it, true)) }
         assertEquals(1, restarted.batchProgress(batch).published)
-        assertEquals(listOf(1, 2, 3, 3), calls, "successful pages must not be uploaded again")
+        assertEquals(4, calls.size)
+        assertEquals(mapOf(1 to 1, 2 to 1, 3 to 2), calls.groupingBy { it }.eachCount(),
+            "successful pages must not be uploaded again")
         val attempts = db.query("SELECT attempt_no FROM vision_attempts ORDER BY created_at, rowid")
         assertEquals(listOf(1L, 1L, 1L, 2L), attempts.map { it.long("attempt_no") })
     }

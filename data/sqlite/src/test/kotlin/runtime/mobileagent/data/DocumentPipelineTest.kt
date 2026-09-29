@@ -72,7 +72,7 @@ class DocumentPipelineTest {
             val store=DocumentPipelineStore(db); val unit=units().single()
             store.materialize("j","synthetic-document",unit.plannerVersion,listOf(unit))
             store.prepare("j",unit,"b","t","c","one")
-            assertNull(store.stopReason("other-batch"), "the default batch admits up to three independent requests")
+            assertNull(store.stopReason("other-batch"), "the default batch admits up to four independent requests")
             assertThrows(IllegalStateException::class.java) { store.configure("b",PipelinePolicy(tokenDispatchCeiling=50,reservationTokensPerRequest=10)) }
             store.settle("one",PipelineAttemptState.UNKNOWN_OUTCOME,VisionDiagnosticMetadata(dispatched=true))
             assertThrows(IllegalStateException::class.java) { store.configure("b",PipelinePolicy(tokenDispatchCeiling=50,reservationTokensPerRequest=10)) }
@@ -82,6 +82,7 @@ class DocumentPipelineTest {
     @Test fun threeDispatchSlotsAreBoundedAndReleasedOnSettlement() {
         database().use { db ->
             val store = DocumentPipelineStore(db)
+            store.configure("b", PipelinePolicy(maxConcurrency = 3))
             val unit = units().single()
             repeat(4) { store.materialize("j$it", "synthetic-$it", unit.plannerVersion, listOf(unit)) }
             repeat(3) { store.prepare("j$it", unit, "b", "t", "cache-$it", "request-$it") }
@@ -96,6 +97,29 @@ class DocumentPipelineTest {
                 .map { it.long("dispatch_slot") }
             assertEquals(setOf(1L, 2L, 3L), active.toSet())
             assertEquals(3, active.size)
+        }
+    }
+
+    @Test fun newBatchDefaultsToFourAndCanUseSixDurableSlots() {
+        database().use { db ->
+            val store = DocumentPipelineStore(db)
+            val unit = units().single()
+            assertEquals(4, store.policy("new-batch").maxConcurrency)
+            assertThrows(IllegalArgumentException::class.java) { PipelinePolicy(maxConcurrency = 7) }
+            store.configure("new-batch", PipelinePolicy(maxConcurrency = 6))
+            repeat(7) { store.materialize("six-$it", "synthetic-$it", unit.plannerVersion, listOf(unit)) }
+            repeat(6) { index ->
+                store.prepare("six-$index", unit, "new-batch", "target", "cache-$index", "request-$index")
+            }
+            assertEquals("PIPELINE_MAX_CONCURRENCY", store.stopReason("new-batch"))
+            assertEquals((1L..6L).toSet(), db.query("SELECT dispatch_slot FROM pipeline_attempts WHERE state IN ('READY','DISPATCHED')")
+                .map { it.long("dispatch_slot") }.toSet())
+            assertThrows(IllegalStateException::class.java) {
+                store.prepare("six-6", unit, "new-batch", "target", "cache-6", "request-6")
+            }
+            assertTrue(store.settle("request-0", PipelineAttemptState.SUCCEEDED,
+                VisionDiagnosticMetadata(dispatched = true)))
+            store.prepare("six-6", unit, "new-batch", "target", "cache-6", "request-6")
         }
     }
 
@@ -167,6 +191,8 @@ class DocumentPipelineTest {
             }
             fun repo(chunk: String=PIPELINE_CHUNK_VERSION,target:String="target")=KnowledgeRepository(db,blobs,vision=backend,visionModelFingerprint=target,pdfRasterizer=raster,chunkVersion=chunk)
             val first=repo();val batch=stage(first,tenPages())
+            // This test isolates ordered restart checkpoints; concurrency is covered separately.
+            first.configureBatchPipeline(batch, PipelinePolicy(maxConcurrency = 1))
             first.authorizeBatchVision(batch,"target");first.processBatch(batch,true)
             assertEquals((1..5).toList(),requests)
             assertEquals(4,first.batchPipelineProgress(batch).succeeded)
@@ -234,7 +260,8 @@ class DocumentPipelineTest {
         database().use { db ->
             val repo=KnowledgeRepository(db,MemoryBlobSink(),visionModelFingerprint="target",vision=VisionBackend { VisionOutcome.UnknownOutcome },
                 pdfRasterizer=PdfPageRasterizer { _,pages -> pages.map { RenderedPdfPage(it,byteArrayOf(it.toByte()),"image/png",1,1) } })
-            val batch=stage(repo,tenPages());repo.authorizeBatchVision(batch,"target");repo.processBatch(batch,true)
+            val batch=stage(repo,tenPages());repo.configureBatchPipeline(batch, PipelinePolicy(maxConcurrency = 1))
+            repo.authorizeBatchVision(batch,"target");repo.processBatch(batch,true)
             // Synthetic pre-v24 checkpoint has a cache barrier but no new attempt/reservation ledger.
             db.execute("DELETE FROM pipeline_attempts")
             assertEquals(1,db.query("SELECT * FROM vision_results WHERE status='UNKNOWN_OUTCOME'").size)
@@ -285,7 +312,8 @@ class DocumentPipelineTest {
                 VisionOutcome.Success(VisionSuccess("kept","page"))
             }
             first=KnowledgeRepository(db,blobs,vision=backend,visionModelFingerprint="target",pdfRasterizer=raster,plannerVersion="planner-v1")
-            batch=stage(first,tenPages());first.authorizeBatchVision(batch,"target");first.processBatch(batch,true)
+            batch=stage(first,tenPages());first.configureBatchPipeline(batch, PipelinePolicy(maxConcurrency = 1))
+            first.authorizeBatchVision(batch,"target");first.processBatch(batch,true)
             assertEquals(1,requests)
             val next=KnowledgeRepository(db,blobs,vision=backend,visionModelFingerprint="target",pdfRasterizer=raster,plannerVersion="planner-v2")
             next.resumeBatch(batch);next.processBatch(batch,true)
@@ -305,7 +333,8 @@ class DocumentPipelineTest {
             val original=KnowledgeRepository(db,blobs,pdfRasterizer=raster,visionModelFingerprint="target-A",vision=VisionBackend { input ->
                 assertTrue(input.beforeDispatch());requests++;VisionOutcome.UnknownOutcome
             })
-            val batch=stage(original,tenPages());original.authorizeBatchVision(batch,"target-A");original.processBatch(batch,true)
+            val batch=stage(original,tenPages());original.configureBatchPipeline(batch, PipelinePolicy(maxConcurrency = 1))
+            original.authorizeBatchVision(batch,"target-A");original.processBatch(batch,true)
             assertEquals(1,requests)
             db.execute("INSERT INTO vision_results SELECT 'unrelated-target',asset_hash,context_hash,'target-C',prompt_version,schema_version,status,ocr_text,description,table_markdown,result_type,processed_at FROM vision_results LIMIT 1")
             val changed=KnowledgeRepository(db,blobs,pdfRasterizer=raster,visionModelFingerprint="target-B",plannerVersion="next-plan",vision=VisionBackend { input ->

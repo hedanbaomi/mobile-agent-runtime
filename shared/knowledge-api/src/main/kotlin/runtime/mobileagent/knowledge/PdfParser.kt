@@ -4,11 +4,15 @@
 package runtime.mobileagent.knowledge
 
 import java.io.ByteArrayOutputStream
+import java.security.MessageDigest
+import javax.crypto.Cipher
+import javax.crypto.spec.IvParameterSpec
+import javax.crypto.spec.SecretKeySpec
 import java.util.zip.DeflaterOutputStream
 import java.util.zip.Inflater
 
 object PdfParser {
-    const val FINGERPRINT = "pdf-text-v19-pdfrenderer"
+    const val FINGERPRINT = "pdf-text-v20-pdfrenderer"
 
     private const val MAX_PDF_STREAM_BYTES = 32 * 1024 * 1024
 
@@ -38,11 +42,9 @@ object PdfParser {
         val pageNumbers = pageKids(objects).ifEmpty {
             objects.filter { (_, obj) -> isPageDict(obj.dict) }.keys.sorted()
         }
-        val imageObjects = objects.filter { (_, obj) -> isImageDict(obj.dict) }
         val assets = mutableListOf<ExtractedAsset>()
         val pages = mutableListOf<ExtractedPage>()
         var imageOrdinal = 0
-        val assignedImages = mutableSetOf<Int>()
 
         // Text extraction and visual classification happen before rasterizing.
         // Rendering only the pages that need visual evidence keeps a text-only
@@ -53,27 +55,30 @@ object PdfParser {
             val decoded = content.bytes
             val pageLatin = String(decoded, Charsets.ISO_8859_1)
             val fonts = pageFonts(objects, objNum, pageObj.dict)
-            val extracted = extractPdfStrings(decoded, fonts)
+            val resolvedXObjects = pageXObjects(objects, objNum, pageObj.dict)
+            val discovery = discoverForms(objects, decoded, resolvedXObjects,
+                pageBox = pageMediaBox(objects, objNum, pageObj.dict))
+            val pageText = extractPdfStrings(decoded, fonts)
+            val extracted = ExtractedPdfText(pageText.texts + discovery.texts,
+                pageText.complete && discovery.complete)
             val text = extracted.joined()
             val hasInline = hasInlineImage(pageLatin)
-            val resolvedXObjects = pageXObjects(objects, objNum, pageObj.dict)
-            val hasUnresolvedXObjects = resolvedXObjects.unresolved ||
-                hasUnresolvedXObjectDo(pageLatin, resolvedXObjects.entries)
-            val hasImages = resolvedXObjects.entries.isNotEmpty() || hasUnresolvedXObjects || hasInline ||
+            val hasUnresolvedXObjects = !discovery.complete
+            val hasImages = discovery.images.isNotEmpty() || hasUnresolvedXObjects || hasInline ||
                 Regex("/Subtype\\s*/Image").containsMatchIn(pageObj.dict)
             val visibleAnnotations = hasVisibleOrUnknownAnnotations(objects, pageObj.dict)
-            val hasDrawing = hasVectorDrawing(pageLatin) && !(
+            val hasDrawing = discovery.hasDrawing || hasVectorDrawing(pageLatin) && !(
                 text.isNotBlank() && extracted.complete && content.complete && !hasImages && !visibleAnnotations &&
                     hasOnlyDecorativeGraphics(pageLatin, pageMediaBox(objects, objNum, pageObj.dict))
                 )
             val blankPage = isEmptyPageWithoutVisuals(pageObj.dict, content, hasImages || visibleAnnotations)
             if (!blankPage && pageNeedsVision(text, extracted.complete, content.complete,
                     hasImages || visibleAnnotations, hasDrawing) &&
-                !canProcessIllustrationsSeparately(text, extracted.complete, content.complete, pageLatin,
-                    resolvedXObjects.entries, objects, hasUnresolvedXObjects, hasInline, visibleAnnotations,
+                !(discovery.usedForm.not() && canProcessIllustrationsSeparately(text, extracted.complete, content.complete, pageLatin,
+                    discovery.images, objects, hasUnresolvedXObjects, hasInline, visibleAnnotations,
                     hasPageAppearanceModifiers(objects, objNum, pageObj.dict),
                     pageMediaBox(objects, objNum, pageObj.dict),
-                    pageNamedResources(objects, objNum, pageObj.dict, "ExtGState"))) {
+                    pageNamedResources(objects, objNum, pageObj.dict, "ExtGState")))) {
                 pageNumbers.indexOf(objNum) + 1
             } else {
                 null
@@ -91,34 +96,37 @@ object PdfParser {
             val decoded = content.bytes
             val pageLatin = String(decoded, Charsets.ISO_8859_1)
             val fonts = pageFonts(objects, objNum, pageObj.dict)
-            val extracted = extractPdfStrings(decoded, fonts)
-            val text = extracted.joined()
             val resolvedXObjects = pageXObjects(objects, objNum, pageObj.dict)
-            val xobjects = resolvedXObjects.entries
-            val hasUnresolvedXObjects = resolvedXObjects.unresolved ||
-                hasUnresolvedXObjectDo(pageLatin, xobjects)
+            val discovery = discoverForms(objects, decoded, resolvedXObjects,
+                pageBox = pageMediaBox(objects, objNum, pageObj.dict))
+            val pageText = extractPdfStrings(decoded, fonts)
+            val extracted = ExtractedPdfText(pageText.texts + discovery.texts,
+                pageText.complete && discovery.complete)
+            val text = extracted.joined()
+            val xobjects = discovery.images
+            val hasUnresolvedXObjects = !discovery.complete
             val hasImages = xobjects.isNotEmpty() || hasUnresolvedXObjects || hasInlineImage(pageLatin) ||
                 Regex("/Subtype\\s*/Image").containsMatchIn(pageObj.dict)
             val visibleAnnotations = hasVisibleOrUnknownAnnotations(objects, pageObj.dict)
-            val hasDrawing = hasVectorDrawing(pageLatin) && !(
+            val hasDrawing = discovery.hasDrawing || hasVectorDrawing(pageLatin) && !(
                 text.isNotBlank() && extracted.complete && content.complete && !hasImages && !visibleAnnotations &&
                     hasOnlyDecorativeGraphics(pageLatin, pageMediaBox(objects, objNum, pageObj.dict))
                 )
             // Decorative marks around illustrations are not missing page evidence.
-            val visualAssetsOnly = canProcessIllustrationsSeparately(text, extracted.complete, content.complete,
+            val visualAssetsOnly = !discovery.usedForm && canProcessIllustrationsSeparately(text, extracted.complete, content.complete,
                 pageLatin, xobjects, objects, hasUnresolvedXObjects, hasInlineImage(pageLatin), visibleAnnotations,
                 hasPageAppearanceModifiers(objects, objNum, pageObj.dict),
                 pageMediaBox(objects, objNum, pageObj.dict),
                 pageNamedResources(objects, objNum, pageObj.dict, "ExtGState"))
             var hasUnsupportedPageVisual = (hasDrawing && !visualAssetsOnly) || !content.complete ||
-                hasUnresolvedXObjects || !extracted.complete || visibleAnnotations
+                hasUnresolvedXObjects || !extracted.complete || visibleAnnotations ||
+                (discovery.usedForm && discovery.images.isNotEmpty())
             xobjects.forEach { (name, imageObjNum) ->
                 val image = objects[imageObjNum]
                 if (image == null || !isImageDict(image.dict) || image.stream == null) {
                     hasUnsupportedPageVisual = true
                     return@forEach
                 }
-                assignedImages += imageObjNum
                 val payload = image.stream
                 val mediaType = xObjectMediaType(image.dict, payload)
                 if (mediaType == null) {
@@ -207,21 +215,6 @@ object PdfParser {
                     surroundingText = text,
                 )
             }
-        }
-        imageObjects.forEach { (num, image) ->
-            if (num in assignedImages || image.stream == null) return@forEach
-            val payload = image.stream
-            val mediaType = xObjectMediaType(image.dict, payload) ?: return@forEach
-            imageOrdinal += 1
-            assets += ExtractedAsset(
-                localId = "img-$imageOrdinal",
-                kind = "IMAGE",
-                page = null,
-                section = null,
-                bytes = payload,
-                mediaType = mediaType,
-                surroundingText = "",
-            )
         }
         if (pages.isEmpty() && assets.isEmpty()) {
             error("PDF has no extractable pages or text")
@@ -629,6 +622,8 @@ object PdfParser {
     }
 
     private data class PdfObject(val dict: String, val stream: ByteArray?)
+    private enum class PdfCrypt { IDENTITY, RC4, AES }
+    private data class PdfSecurity(val key: ByteArray, val streamCrypt: PdfCrypt, val encryptMetadata: Boolean)
     private data class DecodedPageContent(val bytes: ByteArray, val complete: Boolean)
     private data class PageContent(val content: String, val resources: String)
     private data class StreamBounds(val dataStart: Int, val dataEnd: Int, val objectEnd: Int)
@@ -639,6 +634,126 @@ object PdfParser {
     )
     private data class ScannedObject(val dict: String, val streamBounds: StreamBounds?)
     private data class PageXObjects(val entries: Map<String, Int>, val unresolved: Boolean)
+    private data class FormDiscovery(
+        val texts: List<String>,
+        val images: Map<String, Int>,
+        val complete: Boolean,
+        val hasDrawing: Boolean,
+        val usedForm: Boolean,
+    )
+
+    private fun invokedXObjects(content: ByteArray): Pair<List<String>, Boolean> {
+        val lexer = PdfContentLexer(String(content, Charsets.ISO_8859_1))
+        val tokens = lexer.tokenize()
+        val result = mutableListOf<String>()
+        var complete = lexer.complete
+        var operands = mutableListOf<PdfContentToken>()
+        var inText = false
+        tokens.forEach { token ->
+            if (token !is PdfContentToken.Operator) {
+                operands += token
+            } else {
+                when (token.name) {
+                    "BT" -> inText = true
+                    "ET" -> inText = false
+                    "Do" -> {
+                        val name = (operands.singleOrNull() as? PdfContentToken.Name)?.value
+                        if (name == null || inText) complete = false else result += name
+                    }
+                }
+                operands.clear()
+            }
+        }
+        return result to (complete && !inText)
+    }
+
+    /** Follow only painted forms. A failed branch still contributes any safe text, but forces page Vision. */
+    private fun discoverForms(
+        objects: Map<Int, PdfObject>,
+        content: ByteArray,
+        resources: PageXObjects,
+        pageBox: List<Double>?,
+        depth: Int = 0,
+        active: Set<Int> = emptySet(),
+        budget: IntArray = intArrayOf(0),
+    ): FormDiscovery {
+        val (uses, syntaxComplete) = invokedXObjects(content)
+        val images = linkedMapOf<String, Int>()
+        val texts = mutableListOf<String>()
+        var complete = syntaxComplete && !resources.unresolved
+        var drawing = false
+        var usedForm = false
+        uses.forEach { name ->
+            val number = resources.entries[name]
+            val obj = number?.let(objects::get)
+            if (obj == null) { complete = false; return@forEach }
+            when (namedDictionaryOrReference(obj.dict, "Subtype").name) {
+                "Image" -> images[name] = number
+                "Form" -> {
+                    usedForm = true
+                    if (depth >= 12 || number in active || obj.stream == null) {
+                        complete = false
+                        return@forEach
+                    }
+                    val decoded = decodeContentStream(obj)
+                    if (!decoded.complete || decoded.bytes.size > MAX_PDF_STREAM_BYTES - budget[0]) {
+                        complete = false
+                        return@forEach
+                    }
+                    budget[0] += decoded.bytes.size
+                    // A Form's own resources define its names. No guessing from
+                    // the page's dictionary when they are absent or malformed.
+                    val fonts = pageFonts(objects, number, obj.dict)
+                    // A Form starts with the caller's graphics state. Without
+                    // its own Tf we cannot know the inherited font encoding.
+                    val extracted = extractPdfStrings(decoded.bytes, fonts,
+                        requireExplicitFont = true)
+                    var formComplete = extracted.complete &&
+                        (extracted.texts.isEmpty() || fonts.encodings.isNotEmpty())
+                    // Appearance operators inside the Form can hide or alter
+                    // text just as they can in its calling content stream.
+                    if (hasUnsafeFormPlacement(decoded.bytes)) formComplete = false
+                    val formResources = pageXObjects(objects, number, obj.dict)
+                    val nested = discoverForms(objects, decoded.bytes, formResources, pageBox,
+                        depth + 1, active + number, budget)
+                    nested.images.forEach { (nestedName, imageNumber) -> images["$name/$nestedName"] = imageNumber }
+                    if (!nested.complete) formComplete = false
+                    drawing = drawing || nested.hasDrawing ||
+                        hasVectorDrawing(String(decoded.bytes, Charsets.ISO_8859_1))
+                    // Transparency, optional visibility and clipping can make
+                    // extracted strings differ from what the page displays.
+                    if (listOf("Group", "OC", "SMask", "Ref", "Subtype2")
+                            .any { findTopLevelValueStart(obj.dict, it) >= 0 }) formComplete = false
+                    val box = arrayBody(obj.dict, "BBox").body?.trim()?.split(Regex("\\s+"))
+                        ?.mapNotNull(String::toDoubleOrNull)
+                    if (pageBox == null || box?.size != 4 || box.zip(pageBox).any { (a, b) ->
+                            kotlin.math.abs(a - b) > AXIS_TOLERANCE }) formComplete = false
+                    val matrix = arrayBody(obj.dict, "Matrix")
+                    if (matrix.present) {
+                        val values = matrix.body?.trim()?.split(Regex("\\s+"))?.mapNotNull(String::toDoubleOrNull)
+                        if (values != listOf(1.0, 0.0, 0.0, 1.0, 0.0, 0.0)) formComplete = false
+                    }
+                    // Unproven Form strings must never enter native chunks;
+                    // the whole-page Vision evidence supplies their replacement.
+                    if (formComplete) texts += extracted.texts + nested.texts else complete = false
+                }
+                else -> complete = false
+            }
+        }
+        if (usedForm && hasUnsafeFormPlacement(content)) {
+            complete = false
+            texts.clear()
+        }
+        return FormDiscovery(texts, images, complete, drawing, usedForm)
+    }
+
+    private fun hasUnsafeFormPlacement(content: ByteArray): Boolean {
+        val lexer = PdfContentLexer(String(content, Charsets.ISO_8859_1))
+        val tokens = lexer.tokenize()
+        return !lexer.complete || tokens.any { token ->
+            (token as? PdfContentToken.Operator)?.name in setOf("cm", "W", "W*", "gs", "Tr", "sh")
+        }
+    }
     private data class PageFonts(
         val encodings: Map<String, PdfFontEncoding>,
         val unresolved: Boolean,
@@ -765,6 +880,18 @@ object PdfParser {
             out[number] = PdfObject(candidate.dict, raw)
         }
 
+        val security = pdfSecurity(latin, out)
+        if (security != null && security.second.streamCrypt != PdfCrypt.IDENTITY) {
+            out.toMap().forEach { (number, obj) ->
+                if (obj.stream != null && number != security.first &&
+                    !Regex("/Type\\s*/XRef\\b").containsMatchIn(obj.dict) &&
+                    (security.second.encryptMetadata || !Regex("/Type\\s*/Metadata\\b").containsMatchIn(obj.dict))) {
+                    val plain = decryptPdfStream(obj.stream, security.second, number)
+                    out[number] = obj.copy(stream = plain)
+                }
+            }
+        }
+
         // PDF 1.5 object streams contain object values, without obj/endobj
         // delimiters. Expand them before traversing the catalog's page tree.
         out.values.toList().filter { Regex("/Type\\s*/ObjStm\\b").containsMatchIn(it.dict) }.forEach { container ->
@@ -799,6 +926,138 @@ object PdfParser {
             }
         }
         return out
+    }
+
+    /** Authenticate the empty user password before any encrypted stream is interpreted as PDF syntax. */
+    private fun pdfSecurity(latin: String, objects: Map<Int, PdfObject>): Pair<Int, PdfSecurity>? {
+        val trailerStart = latin.lastIndexOf("trailer")
+        val trailer = if (trailerStart >= 0) dictionaryBody(latin.substring(trailerStart)) else
+            objects.values.firstOrNull { Regex("/Type\\s*/XRef\\b").containsMatchIn(it.dict) }?.dict
+        if (trailer == null) {
+            require(!Regex("/Encrypt\\s+\\d+\\s+0\\s+R").containsMatchIn(latin)) { "Unsupported PDF encryption trailer" }
+            return null
+        }
+        val reference = dictionaryOrReference(trailer, "Encrypt")
+        if (!reference.present) return null
+        require(!reference.malformed && reference.reference != null) { "Unsupported PDF encryption dictionary" }
+        val encryptNumber = reference.reference
+        val dict = requireNotNull(objects[encryptNumber]?.dict) { "Missing PDF encryption dictionary" }
+        require(namedDictionaryOrReference(dict, "Filter").name == "Standard" &&
+            Regex("/V\\s+4\\b").containsMatchIn(dict) && Regex("/R\\s+4\\b").containsMatchIn(dict) &&
+            Regex("/Length\\s+128\\b").containsMatchIn(dict)) { "Unsupported PDF encryption" }
+        val idBody = arrayBody(trailer, "ID").body ?: error("Missing encrypted PDF file identifier")
+        val id = pdfStringAt(idBody, 0) ?: error("Unsupported encrypted PDF file identifier")
+        require(id.isNotEmpty()) { "Empty encrypted PDF file identifier" }
+        val owner = pdfBytesValue(dict, "O", 32)
+        val user = pdfBytesValue(dict, "U", 32)
+        val permissionsStart = findTopLevelValueStart(dict, "P")
+        val permissions = if (permissionsStart >= 0) Regex("[-+]?\\d+").matchAt(dict, permissionsStart)
+            ?.value?.toLongOrNull()?.takeIf { it in Int.MIN_VALUE.toLong()..0xFFFFFFFFL }?.toInt() else null
+        require(permissions != null) { "Invalid PDF permissions" }
+        val metadataStart = findTopLevelValueStart(dict, "EncryptMetadata")
+        val encryptMetadata = when {
+            metadataStart < 0 -> true
+            Regex("true\\b").matchAt(dict, metadataStart) != null -> true
+            Regex("false\\b").matchAt(dict, metadataStart) != null -> false
+            else -> error("Invalid PDF metadata encryption flag")
+        }
+        val digest = MessageDigest.getInstance("MD5")
+        digest.update(PDF_PASSWORD_PADDING)
+        digest.update(owner)
+        digest.update(byteArrayOf(permissions.toByte(), (permissions ushr 8).toByte(),
+            (permissions ushr 16).toByte(), (permissions ushr 24).toByte()))
+        digest.update(id)
+        if (!encryptMetadata) digest.update(byteArrayOf(-1, -1, -1, -1))
+        var key = digest.digest()
+        repeat(50) { key = MessageDigest.getInstance("MD5").digest(key) }
+        val seed = MessageDigest.getInstance("MD5").digest(PDF_PASSWORD_PADDING + id)
+        var check = seed
+        for (round in 0..19) check = rc4(check, key.map { (it.toInt() xor round).toByte() }.toByteArray())
+        require(check.copyOfRange(0, 16).contentEquals(user.copyOfRange(0, 16))) {
+            "Encrypted PDF requires a non-empty user password"
+        }
+        val streamFilter = namedDictionaryOrReference(dict, "StmF").let { if (it.present) it.name else "Identity" }
+        val stringFilter = namedDictionaryOrReference(dict, "StrF").let { if (it.present) it.name else "Identity" }
+        require(streamFilter == stringFilter) { "Unsupported mixed PDF crypt filters" }
+        val crypt = when (streamFilter) {
+            "Identity" -> PdfCrypt.IDENTITY
+            "StdCF" -> {
+                val cf = dictionaryOrReference(dict, "CF").dictionary ?: error("Missing PDF crypt filter")
+                val std = dictionaryOrReference(cf, "StdCF").dictionary ?: error("Missing standard PDF crypt filter")
+                when (namedDictionaryOrReference(std, "CFM").name) {
+                    "V2" -> PdfCrypt.RC4
+                    "AESV2" -> PdfCrypt.AES
+                    else -> error("Unsupported PDF crypt method")
+                }
+            }
+            else -> error("Unsupported PDF crypt filter")
+        }
+        val embeddedFilter = namedDictionaryOrReference(dict, "EFF")
+        require(!embeddedFilter.present || embeddedFilter.name == streamFilter) {
+            "Unsupported embedded-file crypt filter"
+        }
+        return encryptNumber to PdfSecurity(key, crypt, encryptMetadata)
+    }
+
+    private val PDF_PASSWORD_PADDING = byteArrayOf(
+        0x28, 0xBF.toByte(), 0x4E, 0x5E, 0x4E, 0x75, 0x8A.toByte(), 0x41,
+        0x64, 0x00, 0x4E, 0x56, 0xFF.toByte(), 0xFA.toByte(), 0x01, 0x08,
+        0x2E, 0x2E, 0x00, 0xB6.toByte(), 0xD0.toByte(), 0x68, 0x3E, 0x80.toByte(), 0x2F,
+        0x0C, 0xA9.toByte(), 0xFE.toByte(), 0x64, 0x53, 0x69, 0x7A,
+    )
+
+    private fun pdfStringAt(text: String, start: Int): ByteArray? {
+        if (start !in 0..text.length) return null
+        return when (val token = PdfContentLexer(text.substring(start)).firstToken()) {
+            is PdfContentToken.Literal -> token.bytes
+            is PdfContentToken.Hex -> token.bytes.takeIf { token.valid }
+            else -> null
+        }
+    }
+
+    private fun pdfBytesValue(dict: String, name: String, size: Int): ByteArray {
+        val start = findTopLevelValueStart(dict, name)
+        val value = pdfStringAt(dict, start)
+        require(value?.size == size) { "Invalid encrypted PDF $name value" }
+        return value
+    }
+
+    private fun rc4(input: ByteArray, key: ByteArray): ByteArray {
+        val state = IntArray(256) { it }
+        var j = 0
+        for (i in 0..255) {
+            j = (j + state[i] + (key[i % key.size].toInt() and 0xff)) and 0xff
+            val old = state[i]; state[i] = state[j]; state[j] = old
+        }
+        val result = ByteArray(input.size)
+        var i = 0
+        j = 0
+        input.indices.forEach { index ->
+            i = (i + 1) and 0xff
+            j = (j + state[i]) and 0xff
+            val old = state[i]; state[i] = state[j]; state[j] = old
+            result[index] = (input[index].toInt() xor state[(state[i] + state[j]) and 0xff]).toByte()
+        }
+        return result
+    }
+
+    private fun decryptPdfStream(input: ByteArray, security: PdfSecurity, number: Int): ByteArray {
+        val salt = if (security.streamCrypt == PdfCrypt.AES) "sAlT".toByteArray(Charsets.US_ASCII) else byteArrayOf()
+        val material = security.key + byteArrayOf(number.toByte(), (number ushr 8).toByte(),
+            (number ushr 16).toByte(), 0, 0) + salt
+        val key = MessageDigest.getInstance("MD5").digest(material).copyOf(minOf(16, security.key.size + 5))
+        val output = when (security.streamCrypt) {
+            PdfCrypt.RC4 -> rc4(input, key)
+            PdfCrypt.AES -> {
+                require(input.size >= 32 && (input.size - 16) % 16 == 0) { "Invalid encrypted PDF stream" }
+                val cipher = Cipher.getInstance("AES/CBC/PKCS5Padding")
+                cipher.init(Cipher.DECRYPT_MODE, SecretKeySpec(key, "AES"), IvParameterSpec(input.copyOfRange(0, 16)))
+                cipher.doFinal(input.copyOfRange(16, input.size))
+            }
+            PdfCrypt.IDENTITY -> input
+        }
+        require(output.size <= MAX_PDF_STREAM_BYTES) { "Decrypted PDF stream too large" }
+        return output
     }
 
     private fun declaredStreamLength(dict: String): DeclaredLength {
@@ -2008,7 +2267,11 @@ object PdfParser {
         }
     }
 
-    private fun extractPdfStrings(data: ByteArray, fonts: PageFonts): ExtractedPdfText {
+    private fun extractPdfStrings(
+        data: ByteArray,
+        fonts: PageFonts,
+        requireExplicitFont: Boolean = false,
+    ): ExtractedPdfText {
         val latin = String(data, Charsets.ISO_8859_1)
         val lexer = PdfContentLexer(latin)
         val tokens = lexer.tokenize()
@@ -2020,7 +2283,7 @@ object PdfParser {
 
         fun encoding(): PdfFontEncoding {
             val name = fontName
-            if (name == null) return PdfFontEncoding(known = !fonts.unresolved)
+            if (name == null) return PdfFontEncoding(known = !fonts.unresolved && !requireExplicitFont)
             return fonts.encodings[name] ?: PdfFontEncoding(known = false)
         }
 
@@ -2332,6 +2595,11 @@ object PdfParser {
     private class PdfContentLexer(private val latin: String) {
         var i = 0
         var complete = true
+
+        fun firstToken(): PdfContentToken? {
+            skipWsComments()
+            return readToken()
+        }
 
         fun tokenize(): List<PdfContentToken> {
             val tokens = mutableListOf<PdfContentToken>()

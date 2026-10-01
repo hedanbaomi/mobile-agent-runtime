@@ -50,10 +50,21 @@ class SafDeadTreeExposureTest {
         var live: WorkspaceDescriptor = frozen
         var listCalls = 0
         override val descriptor: WorkspaceDescriptor get() = live
-        override val capabilities = setOf(
-            CapabilityId(CapabilityId.WORKSPACE_ENUMERATE),
-            CapabilityId(CapabilityId.FILE_LIST),
-        )
+
+        // Mirrors the real adapter contract (SafWorkspaceBackend +
+        // SharedWorkspaceBackendAdapter): when the tree is dead the live probe
+        // fails, so descriptor.enabled is false AND operationCapabilities
+        // empties — not just the flag.  A fixed capability set would mask the
+        // ordering bug where CAPABILITY_DENIED fires before the liveness check.
+        override val capabilities: Set<CapabilityId>
+            get() = if (live.enabled) {
+                setOf(
+                    CapabilityId(CapabilityId.WORKSPACE_ENUMERATE),
+                    CapabilityId(CapabilityId.FILE_LIST),
+                )
+            } else {
+                emptySet()
+            }
 
         override suspend fun list(request: WorkspaceListRequest): WorkspaceResult<WorkspaceListing> {
             listCalls += 1
@@ -179,5 +190,27 @@ class SafDeadTreeExposureTest {
             (fileList as ToolResult.Failure).error.code,
         )
         assertEquals(0, deadBackend.listCalls)
+
+        // The liveness path must never leak availability: a caller without the
+        // durable grant is still CAPABILITY_DENIED on the same dead tree, not
+        // AUTHORITY_TEMPORARILY_UNAVAILABLE (which would reveal the tree is
+        // registered but momentarily unreachable).
+        val (unauthorizedExecutor, unauthorizedContext) = executorFor(
+            registry,
+            grants.filter { it.grantId != "g-list-dead" },
+        )
+        val denied = unauthorizedExecutor.invoke(
+            ToolCall(
+                "call-denied",
+                UnifiedWorkspaceToolExecutor.FILE_LIST,
+                """{"workspace_id":"saf-dead","relative_path":""}""",
+            ),
+            unauthorizedContext,
+        )
+        assertTrue(denied is ToolResult.Failure)
+        assertEquals(
+            ToolErrorCode.CAPABILITY_DENIED,
+            (denied as ToolResult.Failure).error.code,
+        )
     }
 }

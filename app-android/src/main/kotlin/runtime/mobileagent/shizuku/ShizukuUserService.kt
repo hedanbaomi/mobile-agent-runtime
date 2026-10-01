@@ -353,24 +353,38 @@ class ShizukuUserService private constructor(
         workspace.store.move(sourcePath, destinationPath, replaceExisting)
     }
 
+    /**
+     * Test seam replacing `System.exit(0)` so teardown can be observed without
+     * killing the caller's process; production callers leave it null.
+     */
+    @Volatile
+    internal var destroyExitHook: (() -> Unit)? = null
+
     /** Reserved transaction used by Shizuku to tear down a UserService. */
     override fun destroy() {
-        // destroy() has no session-id argument in Shizuku's reserved Binder
-        // transaction.  Legitimate teardown callers are the handshaken app and
-        // the Shizuku server itself — the server runs under this process's own
-        // uid (shell) or as root — never a random Binder holder.  Requiring
-        // the handshake caller here denied every real destroy and leaked this
-        // process on unbind and on client death.  Do not return the session
-        // token or any diagnostic data through this void transaction.
-        val callerUid = Binder.getCallingUid()
-        val handshakeUid = synchronized(callerLock) { handshakeCallerUid }
-        if (!destroyCallerAllowed(callerUid, handshakeUid, serviceUid)) return
+        destroyInternal(Binder.getCallingUid(), serviceUid)
+    }
+
+    /**
+     * destroy() has no session-id argument in Shizuku's reserved Binder
+     * transaction.  A caller is legitimate only when it IS this service's own
+     * privileged uid — the Shizuku server, which runs under the same shell or
+     * root uid the service was spawned with.  An instance embedded in the app
+     * process (service uid = app uid) therefore fails closed for every caller,
+     * matching the checkCaller contract for typed work.  Requiring the
+     * handshake app uid here previously denied every real destroy and leaked
+     * this process on unbind and on client death.  Do not return the session
+     * token or any diagnostic data through this void transaction.
+     */
+    internal fun destroyInternal(callerUid: Int, serviceUid: Int) {
+        if (!destroyCallerAllowed(callerUid, serviceUid)) return
         // Racing or repeated destroy transactions are idempotent: teardown
         // runs once even if a second call lands before exit completes.
         if (!destroyed.compareAndSet(false, true)) return
         runCatching { shellRunner.close() }
         workspaceReadPool.shutdownNow()
-        System.exit(0)
+        val hook = destroyExitHook
+        if (hook != null) hook() else System.exit(0)
     }
 
     private fun readResponse(
@@ -480,5 +494,6 @@ class ShizukuUserService private constructor(
  * session handshake or the Shizuku server — which runs under the service's
  * own uid (shell) or as root.  Any other Binder holder is refused.
  */
-internal fun destroyCallerAllowed(callerUid: Int, handshakeUid: Int?, serviceUid: Int): Boolean =
-    callerUid == handshakeUid || callerUid == serviceUid || callerUid == Process.ROOT_UID
+internal fun destroyCallerAllowed(callerUid: Int, serviceUid: Int): Boolean =
+    callerUid == serviceUid &&
+        (serviceUid == ShizukuBridgePolicy.SHELL_UID || serviceUid == Process.ROOT_UID)

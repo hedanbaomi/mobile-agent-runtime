@@ -342,8 +342,8 @@ class RunTools(
         var processed: Processed? = null,
     )
 
-    private data class Evidence(val citation: Citation, val text: String, val wholeChunk: Boolean)
-    private data class Processed(
+    internal data class Evidence(val citation: Citation, val text: String, val wholeChunk: Boolean)
+    internal data class Processed(
         val rawJson: String,
         val result: ToolResult.Value,
         val evidence: List<Evidence>,
@@ -487,7 +487,7 @@ class RunTools(
         return result
     }
 
-    private fun enrich(call: ToolCall, raw: ToolResult.Value): Processed {
+    internal fun enrich(call: ToolCall, raw: ToolResult.Value): Processed {
         val root = objectOrNull(raw.json) ?: throw EvidenceInvalid("Knowledge result must be a JSON object")
         val evidence = mutableListOf<Evidence>()
         val output = if (call.name == BuiltinTools.knowledgeSearch.name) {

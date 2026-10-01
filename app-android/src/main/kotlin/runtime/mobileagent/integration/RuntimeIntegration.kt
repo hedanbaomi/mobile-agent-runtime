@@ -168,11 +168,13 @@ import runtime.mobileagent.skills.tooling.ApprovalLifecycleEvent
 import runtime.mobileagent.skills.tooling.ApprovalLifecycleSink
 import runtime.mobileagent.skills.tooling.ApprovalLifecycleTransition
 import runtime.mobileagent.skills.tooling.AuthoritySelection
+import runtime.mobileagent.skills.tooling.AuthorityState
 import runtime.mobileagent.skills.tooling.Connection
 import runtime.mobileagent.skills.tooling.ElevatedAuthority
 import runtime.mobileagent.skills.tooling.PlatformGrant
 import runtime.mobileagent.skills.tooling.ShellAuditSink
 import runtime.mobileagent.skills.tooling.ShellExecutor
+import runtime.mobileagent.skills.tooling.WorkspaceBackend
 import runtime.mobileagent.skills.tooling.ToolErrorCode
 import runtime.mobileagent.tooling.ApprovalEngine
 import runtime.mobileagent.tooling.AuthorityManager
@@ -231,6 +233,40 @@ internal fun safRequestedFlags(resultFlags: Int): Int =
     (resultFlags and (Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION))
         .takeIf { it != 0 }
         ?: (Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
+
+/**
+ * Records each authority's latest readiness and returns the authorities whose
+ * own not-ready -> ready edge just fired and therefore hold stale remote
+ * handles to sweep.  The edge is evaluated per authority — including one that
+ * restarts while unselected — and is currently scoped to Shizuku; wired-ADB
+ * workspaces recover through their own bridge reconnect.  Every observed
+ * authority's readiness is recorded on every call so an edge is never
+ * consumed early or missed late.
+ */
+internal fun privilegedReadyEdgeAuthorities(
+    statuses: Map<ElevatedAuthority, AuthorityState>,
+    readySeen: MutableMap<ElevatedAuthority, Boolean>,
+): Set<ElevatedAuthority> {
+    val sweep = mutableSetOf<ElevatedAuthority>()
+    statuses.forEach { (authority, status) ->
+        if (authority == ElevatedAuthority.SHIZUKU &&
+            status.isReady && readySeen[authority] == false
+        ) {
+            sweep += authority
+        }
+        readySeen[authority] = status.isReady
+    }
+    return sweep
+}
+
+/**
+ * Whether a missing privileged binding row makes a registered workspace an
+ * orphan worth unregistering.  Wired-ADB workspaces carry no sealed binding
+ * by contract — they re-establish through the wired bridge — so a missing
+ * binding is normal there, not orphan evidence.
+ */
+internal fun missingBindingIsOrphan(authority: Authority?): Boolean =
+    authority != Authority.WIRED_ADB
 
 /**
  * Non-sensitive counts used to explain why a run did or did not receive workspace tools.
@@ -377,7 +413,9 @@ class RuntimeIntegration(
         get() = workspaceAccessAdapter
 
     private var previousSelection: Authority? = null
-    private val authorityReadySeen = HashMap<Authority, Boolean>()
+    private val authorityReadySeen = HashMap<ElevatedAuthority, Boolean>()
+    private val safLivenessProbeInFlight = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
+    private val safLivenessProbedAt = java.util.concurrent.ConcurrentHashMap<String, Long>()
     private val shizukuPermissionRequestPending = AtomicBoolean(false)
     private val shizukuStateListener: (ShizukuAuthorityState) -> Unit = { state ->
         applyShizukuState(state)
@@ -1642,10 +1680,16 @@ class RuntimeIntegration(
         // Registered privileged workspaces without an active binding carry no
         // recovery locator (for example full-device rows opened before bindings
         // were persisted for that scope).  They can never re-attach, so they
-        // must not stay listed as available.
+        // must not stay listed as available.  Wired-ADB workspaces are exempt:
+        // they carry no sealed binding by contract and recover through their
+        // own bridge reconnect, so a missing binding is normal there.
         workspaceRegistry.descriptors()
             .filter { it.backendType == WorkspaceBackendType.PRIVILEGED }
             .forEach { descriptor ->
+                val authority = workspaceRepository.get(descriptor.id)
+                    ?.rootReference?.removePrefix("authority:")
+                    ?.let { runCatching { Authority.valueOf(it) }.getOrNull() }
+                if (!missingBindingIsOrphan(authority)) return@forEach
                 val binding = privilegedWorkspaceBindingRepository.get(descriptor.id)
                 if (binding == null || binding.status == PrivilegedWorkspaceBindingStatus.REVOKED) {
                     workspaceRegistry.unregister(descriptor.id)
@@ -2239,22 +2283,21 @@ class RuntimeIntegration(
                 recordAuthorityConfigurationSnapshot(DiagnosticAuthorityConfigurationReason.SNAPSHOT, state)
                 // A privileged UserService restart kills every remote workspace
                 // handle while the local registry entries stay registered and
-                // look alive to enumerate.  On a not-ready -> ready edge for the
-                // selected authority, drop those stale entries so the reattach
-                // pass below actually re-opens them instead of skipping them.
-                val selected = state.selectedAuthority
-                if (selected != null) {
-                    val selectedReady = state.statuses[selected]?.isReady == true
-                    if (selectedReady && authorityReadySeen[selected] == false) {
-                        privilegedWorkspaceBindingRepository.forAuthority(selected)
+                // look alive to enumerate.  The edge is evaluated per authority
+                // — including an authority that restarts while unselected,
+                // whose stale handles would otherwise survive the later
+                // switch — and drops that authority's stale entries so the
+                // reattach pass below actually re-opens them instead of
+                // skipping them.  Reattach itself stays selected-only;
+                // wired-ADB workspaces keep their own bridge-reconnect
+                // lifecycle and are never swept here.
+                privilegedReadyEdgeAuthorities(state.statuses, authorityReadySeen)
+                    .forEach { authority ->
+                        privilegedWorkspaceBindingRepository.forAuthority(authority)
                             .asSequence()
                             .filter { it.status != PrivilegedWorkspaceBindingStatus.REVOKED }
                             .forEach { workspaceRegistry.unregister(it.workspaceId) }
                     }
-                }
-                state.statuses.keys.forEach { authority ->
-                    authorityReadySeen[authority] = state.statuses[authority]?.isReady == true
-                }
                 schedulePrivilegedWorkspaceReattach()
             }
         }
@@ -2556,10 +2599,14 @@ class RuntimeIntegration(
         }
         val registered = workspaceRegistry.registered(workspace.id)
         if (registered == null) return WorkspaceAccessStatus.UNAVAILABLE
-        if (workspace.backendType == WorkspaceBackendType.SAF_TREE &&
-            !registered.backend.descriptor.enabled
-        ) {
-            return WorkspaceAccessStatus.UNAVAILABLE
+        if (workspace.backendType == WorkspaceBackendType.SAF_TREE) {
+            // A live SAF probe runs a provider root query + children listing;
+            // doing it here would block the caller — this path runs on the UI
+            // thread via listWorkspaces.  Schedule a bounded, throttled probe
+            // instead: a dead or wedged provider unregisters the tree so the
+            // next listing no longer offers it, while ops already fail
+            // AUTHORITY_TEMPORARILY_UNAVAILABLE through the executor probe.
+            scheduleSafLivenessProbe(workspace.id, registered.backend)
         }
         if (workspace.backendType == WorkspaceBackendType.PRIVILEGED) {
             val authority = workspace.rootReference.removePrefix("authority:")
@@ -2578,6 +2625,36 @@ class RuntimeIntegration(
         }
         return WorkspaceAccessStatus.ACTIVE
     }
+
+    /**
+     * Probe a SAF backend's live descriptor off the calling thread with a
+     * bounded deadline.  A wedged provider makes the query itself hang, so
+     * reaching the deadline is also treated as dead: the tree is unregistered
+     * either way and disappears from the next listing.  Probes are single-
+     * flight per workspace and throttled so list calls cannot re-arm them
+     * faster than the provider can be queried.
+     */
+    private fun scheduleSafLivenessProbe(workspaceId: String, backend: WorkspaceBackend) {
+        val now = System.currentTimeMillis()
+        val last = safLivenessProbedAt[workspaceId]
+        if (last != null && now - last < SAF_LIVENESS_PROBE_INTERVAL_MS) return
+        if (!safLivenessProbeInFlight.add(workspaceId)) return
+        safLivenessProbedAt[workspaceId] = now
+        scope.launch {
+            try {
+                val alive = kotlinx.coroutines.withTimeoutOrNull(SAF_LIVENESS_PROBE_DEADLINE_MS) {
+                    kotlinx.coroutines.runInterruptible(kotlinx.coroutines.Dispatchers.IO) {
+                        runCatching { backend.descriptor.enabled }.getOrDefault(false)
+                    }
+                } ?: false
+                if (!alive) runCatching { workspaceRegistry.unregister(workspaceId) }
+            } finally {
+                safLivenessProbeInFlight.remove(workspaceId)
+            }
+        }
+    }
+
+
 
     private fun safeWorkspaceDisplayName(
         workspace: Workspace,
@@ -3598,56 +3675,65 @@ class RuntimeIntegration(
             scope = WorkspaceScope.FULL_DEVICE_FILES,
         )
         // Persist the sealed recovery locator exactly like a selected-directory
-        // attachment.  The remote file-service handle dies with its process; the
-        // binding is the only material a later reattach can re-open.
+        // attachment — but only when the provider supplies one.  Shizuku
+        // attachments must carry it: the remote file-service handle dies with
+        // its process and the sealed locator is the only material a later
+        // reattach can re-open.  Wired-ADB full-device attachments carry no
+        // locator by contract — the wired bridge re-establishes its own
+        // session on reconnect — so requiring one rejected every wired attach
+        // as UNSUPPORTED.
         val recoveryLocator = value.recoveryLocator
-        if (recoveryLocator == null) {
+        if (recoveryLocator == null && authority != Authority.WIRED_ADB) {
             rollbackNewFullDeviceGrant()?.let { return it }
             return workspaceAccessFailure(WorkspaceAccessErrorCode.UNSUPPORTED)
         }
-        val locatorBytes = runCatching { recoveryLocator.copyBytes() }.getOrNull()
-        if (locatorBytes == null) {
-            recoveryLocator.clear()
-            rollbackNewFullDeviceGrant()?.let { return it }
-            return workspaceAccessFailure(WorkspaceAccessErrorCode.PERSISTENCE_FAILED)
-        }
         val locatorVersion = PRIVILEGED_LOCATOR_VERSION
-        val bindingAad = PrivilegedWorkspaceBindingAad(
-            appInstanceId = appInstanceId,
-            workspaceId = workspace.id,
-            authority = authority,
-            locatorVersion = locatorVersion,
-        )
-        val locatorEnvelope = try {
-            when (val sealed = bindingCipher.seal(locatorBytes, bindingAad)) {
-                is PrivilegedWorkspaceBindingSealResult.Success -> sealed.envelope
-                is PrivilegedWorkspaceBindingSealResult.Failure -> {
-                    rollbackNewFullDeviceGrant()?.let { return it }
-                    return workspaceAccessFailure(WorkspaceAccessErrorCode.PERSISTENCE_FAILED)
-                }
+        val locatorEnvelope = recoveryLocator?.let { locator ->
+            val locatorBytes = runCatching { locator.copyBytes() }.getOrNull()
+            if (locatorBytes == null) {
+                locator.clear()
+                rollbackNewFullDeviceGrant()?.let { return it }
+                return workspaceAccessFailure(WorkspaceAccessErrorCode.PERSISTENCE_FAILED)
             }
-        } finally {
-            locatorBytes.fill(0)
-            recoveryLocator.clear()
+            val bindingAad = PrivilegedWorkspaceBindingAad(
+                appInstanceId = appInstanceId,
+                workspaceId = workspace.id,
+                authority = authority,
+                locatorVersion = locatorVersion,
+            )
+            try {
+                when (val sealed = bindingCipher.seal(locatorBytes, bindingAad)) {
+                    is PrivilegedWorkspaceBindingSealResult.Success -> sealed.envelope
+                    is PrivilegedWorkspaceBindingSealResult.Failure -> {
+                        rollbackNewFullDeviceGrant()?.let { return it }
+                        return workspaceAccessFailure(WorkspaceAccessErrorCode.PERSISTENCE_FAILED)
+                    }
+                }
+            } finally {
+                locatorBytes.fill(0)
+                locator.clear()
+            }
         }
         val previousBinding = privilegedWorkspaceBindingRepository.get(workspace.id)
-        val binding = PrivilegedWorkspaceBinding(
-            workspaceId = workspace.id,
-            authority = authority,
-            encryptedLocator = locatorEnvelope.encryptedLocator,
-            locatorNonce = locatorEnvelope.locatorNonce,
-            locatorVersion = locatorVersion,
-            keyVersion = PRIVILEGED_BINDING_KEY_VERSION,
-            aadAppInstanceId = appInstanceId,
-            scope = WorkspaceScope.FULL_DEVICE_FILES,
-            status = PrivilegedWorkspaceBindingStatus.ACTIVE,
-            revision = (previousBinding?.revision ?: 0L) + 1L,
-            createdAt = previousBinding?.createdAt.orEmpty(),
-        )
+        val binding = locatorEnvelope?.let { envelope ->
+            PrivilegedWorkspaceBinding(
+                workspaceId = workspace.id,
+                authority = authority,
+                encryptedLocator = envelope.encryptedLocator,
+                locatorNonce = envelope.locatorNonce,
+                locatorVersion = locatorVersion,
+                keyVersion = PRIVILEGED_BINDING_KEY_VERSION,
+                aadAppInstanceId = appInstanceId,
+                scope = WorkspaceScope.FULL_DEVICE_FILES,
+                status = PrivilegedWorkspaceBindingStatus.ACTIVE,
+                revision = (previousBinding?.revision ?: 0L) + 1L,
+                createdAt = previousBinding?.createdAt.orEmpty(),
+            )
+        }
         val grants = try {
             db.transaction {
                 workspaceRepository.save(workspace)
-                privilegedWorkspaceBindingRepository.save(binding)
+                binding?.let { privilegedWorkspaceBindingRepository.save(it) }
                 grant?.let { persistWorkspaceGrantBundle(workspace, value.backend, it) }.orEmpty()
             }
         } catch (failure: WorkspaceAccessException) {
@@ -4070,6 +4156,8 @@ class RuntimeIntegration(
         const val SAF_WORKSPACE_ID = "saf-tree"
         private const val PRIVILEGED_LOCATOR_VERSION = 1
         private const val PRIVILEGED_BINDING_KEY_VERSION = 1
+        private const val SAF_LIVENESS_PROBE_INTERVAL_MS = 2_000L
+        private const val SAF_LIVENESS_PROBE_DEADLINE_MS = 800L
     }
 }
 

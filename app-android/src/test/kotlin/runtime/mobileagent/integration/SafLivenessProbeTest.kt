@@ -213,10 +213,20 @@ class SafLivenessProbeTest {
         probe.schedule("w1", old)
         awaitUntil { probe.isDown("w1", old) && oldCalls.get() >= 2 }
         registered.set(fresh)
-        // The replacement's first probe fails too — it goes down on its own
-        // loop, then recovers without any external re-schedule.
-        probe.schedule("w1", fresh)
-        awaitUntil { probe.isDown("w1", fresh) && freshCalls.get() >= 1 }
+        // A controlled admission: the old probe's in-flight slot may not be
+        // released yet at swap time, so the first schedule(fresh) can be
+        // silently dropped by the in-flight gate.  Retry until the first
+        // fresh probe is observably admitted (freshCalls > 0), then stop —
+        // everything after this must be driven by the armed retry loop.
+        var admitted = false
+        repeat(50) {
+            probe.schedule("w1", fresh)
+            admitted = pollUntil({ freshCalls.get() > 0 }, 50)
+            if (admitted) return@repeat
+            Thread.sleep(20)
+        }
+        assertTrue(admitted)
+        awaitUntil { probe.isDown("w1", fresh) }
         freshLive = true
         awaitUntil { !probe.isDown("w1", fresh) && freshCalls.get() >= 2 }
         // Terminal stability: the stale loop is dead — after everything has
@@ -275,6 +285,15 @@ class SafLivenessProbeTest {
             Thread.sleep(5)
         }
         org.junit.jupiter.api.Assertions.fail<Unit>("awaitUntil timed out after 5s")
+    }
+
+    private fun pollUntil(cond: () -> Boolean, timeoutMs: Long): Boolean {
+        val deadline = System.currentTimeMillis() + timeoutMs
+        while (System.currentTimeMillis() < deadline) {
+            if (cond()) return true
+            Thread.sleep(5)
+        }
+        return false
     }
 
     private fun awaitQuietly() = Thread.sleep(300)

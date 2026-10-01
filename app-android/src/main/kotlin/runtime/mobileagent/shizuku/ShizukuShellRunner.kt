@@ -653,7 +653,7 @@ internal fun remoteDescendantsOf(
     val visited = HashSet<Int>()
     visited.add(root.pid)
     val order = ArrayList<RemoteNode>()
-    fun visit(parent: RemoteNode) {
+    fun visit(parent: RemoteNode, out: MutableList<RemoteNode>) {
         if (statOf(parent.pid)?.second != parent.startTime) return
         childrenOf(parent.pid).forEach { childPid ->
             if (childPid in visited) return@forEach
@@ -661,11 +661,19 @@ internal fun remoteDescendantsOf(
             if (ppid != parent.pid) return@forEach
             if (!visited.add(childPid)) return@forEach
             val node = RemoteNode(childPid, start, parent.pid, parent.startTime)
-            visit(node)
-            order.add(node)
+            // Collect this child's branch tentatively.  While it was being
+            // walked the parent may have exited or been recycled — the
+            // children listing that produced it then belongs to a foreign
+            // holder (or an init-reparented stranger) and must be discarded
+            // wholesale rather than attributed to this run's tree.
+            val branch = ArrayList<RemoteNode>()
+            visit(node, branch)
+            if (statOf(parent.pid)?.second != parent.startTime) return
+            branch.add(node)
+            out.addAll(branch)
         }
     }
-    visit(RemoteNode(root.pid, root.startTime, ppid = -1, parentStartTime = -1L))
+    visit(RemoteNode(root.pid, root.startTime, ppid = -1, parentStartTime = -1L), order)
     return order
 }
 
@@ -706,7 +714,12 @@ internal fun sweepRemoteTree(
             var hops = 0
             while (hops++ < 64) {
                 if (ancestor == root.pid) {
-                    vetoed = statOf(root.pid)?.second != root.startTime
+                    // A dead root is the normal case — destroy() already ran
+                    // and its orphans reparent to init.  Only a live root
+                    // whose start-time moved (pid genuinely recycled by a
+                    // foreign process) vetoes the branch.
+                    val rootStat = statOf(root.pid)
+                    vetoed = rootStat != null && rootStat.second != root.startTime
                     break
                 }
                 val parentNode = byPid[ancestor] ?: break

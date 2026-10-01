@@ -101,19 +101,110 @@ class ShizukuRemoteCleanupTest {
 
     @Test
     fun `a recycled parent rejects its whole descendant branch`() {
-        // Parent 101 exited and its pid now holds a foreign process (start 999);
-        // the children listing under it must not be trusted at all.
-        val children = tree(
-            100 to listOf(101),
-            101 to listOf(201, 202),
-        )
-        val stat = statOf(
+        // Pid 101 held our child (start 10) at discovery; before the descent
+        // re-verifies it, the pid is recycled by a foreign process (start
+        // 999).  The second stat read must drop the whole branch — and the
+        // children listing under the foreign holder is never consulted.
+        var statReadsOf101 = 0
+        var listedRecycledChildren = false
+        val children = { pid: Int ->
+            if (pid == 101) listedRecycledChildren = true
+            when (pid) {
+                100 -> sequenceOf(101)
+                101 -> sequenceOf(201, 202)
+                else -> emptySequence()
+            }
+        }
+        val base = statOf(
             100 to (0 to 1L),
-            101 to (100 to 999L), // recycled: start-time moved
             201 to (101 to 20L),
             202 to (101 to 21L),
         )
+        val stat = { pid: Int ->
+            if (pid == 101) {
+                statReadsOf101++
+                if (statReadsOf101 == 1) 100 to 10L else 100 to 999L
+            } else {
+                base(pid)
+            }
+        }
         assertEquals(emptyList<RemoteNode>(), remoteDescendantsOf(root, children, stat))
+        assertFalse(listedRecycledChildren)
+    }
+
+    @Test
+    fun `a parent recycled mid-collection drops the pending branch`() {
+        // Pid 101 verifies at discovery (start 10) and at descent entry, but
+        // is recycled (start 999) while its child subtree is being walked.
+        // The child collected under the doomed listing is discarded wholesale
+        // — a recycled holder's listing (or an init-reparented stranger left
+        // when the holder exits) must never be attributed to this run — while
+        // already-committed siblings and the still-valid node itself stay.
+        var statReadsOf101 = 0
+        var listedChildrenOf101 = false
+        val children = { pid: Int ->
+            if (pid == 101) listedChildrenOf101 = true
+            when (pid) {
+                100 -> sequenceOf(101, 102)
+                101 -> sequenceOf(201)
+                else -> emptySequence()
+            }
+        }
+        val base = statOf(
+            100 to (0 to 1L),
+            102 to (100 to 20L),
+            201 to (101 to 30L),
+        )
+        val stat = { pid: Int ->
+            if (pid == 101) {
+                statReadsOf101++
+                if (statReadsOf101 <= 2) 100 to 10L else 100 to 999L
+            } else {
+                base(pid)
+            }
+        }
+        assertEquals(
+            listOf(101, 102),
+            remoteDescendantsOf(root, children, stat).map { it.pid },
+        )
+        assertTrue(listedChildrenOf101)
+    }
+
+    @Test
+    fun `sweep still signals orphans when the bound root is dead`() {
+        // The bound root was destroyed as asked — statOf returns null for it.
+        // Its captured children reparented to init (ppid 1); they are still
+        // this run's processes and must be swept, not vetoed by the dead root.
+        val signalled = mutableListOf<Int>()
+        sweepRemoteTree(
+            captured = listOf(node(101, 10L, ppid = 100), node(102, 20L, ppid = 100)),
+            root = root,
+            childrenOf = { emptySequence() },
+            statOf = statOf(
+                // 100 absent: exited normally after destroy()
+                101 to (1 to 10L),
+                102 to (1 to 20L),
+            ),
+            signal = { signalled.add(it) },
+        )
+        assertEquals(listOf(101, 102), signalled)
+    }
+
+    @Test
+    fun `a recycled root still vetoes its whole captured tree`() {
+        // Root pid now holds a foreign process — veto everything below it.
+        val signalled = mutableListOf<Int>()
+        sweepRemoteTree(
+            captured = listOf(node(101, 10L, ppid = 100)),
+            root = root,
+            childrenOf = { emptySequence() },
+            statOf = statOf(
+                100 to (0 to 999L), // live but start-time moved: recycled
+                101 to (1 to 10L),
+            ),
+            signal = { signalled.add(it) },
+        )
+        assertEquals(emptyList<Int>(), signalled)
     }
 
     @Test

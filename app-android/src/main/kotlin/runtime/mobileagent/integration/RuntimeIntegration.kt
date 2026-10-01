@@ -18,9 +18,11 @@ import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.async
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.collect
@@ -426,11 +428,12 @@ class RuntimeIntegration(
         probeIntervalMs = SAF_LIVENESS_PROBE_INTERVAL_MS,
         probeDeadlineMs = SAF_LIVENESS_PROBE_DEADLINE_MS,
     )
-    private val safLivenessDown get() = safLivenessProbe.down
+    private fun isSafDown(workspaceId: String, backend: WorkspaceBackend) =
+        safLivenessProbe.isDown(workspaceId, backend)
 
     /** Bumped whenever a SAF probe flips a workspace's health — the UI
      *  collects this to re-run workspace listings without navigation. */
-    val workspaceHealthRevision: StateFlow<Long> = safLivenessProbe.revision
+    override val workspaceHealthRevision: StateFlow<Long> = safLivenessProbe.revision
     private val shizukuPermissionRequestPending = AtomicBoolean(false)
     private val shizukuStateListener: (ShizukuAuthorityState) -> Unit = { state ->
         applyShizukuState(state)
@@ -2622,7 +2625,7 @@ class RuntimeIntegration(
             // down: it stays bound, reports UNAVAILABLE, and the throttled
             // re-probe below restores it automatically once SAF recovers.
             scheduleSafLivenessProbe(workspace.id, registered.backend)
-            if (workspace.id in safLivenessDown) return WorkspaceAccessStatus.UNAVAILABLE
+            if (isSafDown(workspace.id, registered.backend)) return WorkspaceAccessStatus.UNAVAILABLE
         }
         if (workspace.backendType == WorkspaceBackendType.PRIVILEGED) {
             val authority = workspace.rootReference.removePrefix("authority:")
@@ -4755,21 +4758,28 @@ internal fun isWholeDirectoryPersistentGrant(grant: CapabilityGrant, agentId: St
         grant.taskId == null && grant.sessionId == null
 
 /**
- * Bounded SAF liveness probing for workspaceAccessStatus callers.
+ * Bounded, off-thread liveness probes for SAF trees.
  *
  * A wedged documents provider can hang a descriptor read indefinitely, and
  * ContentResolver.query does not respond to coroutine cancellation, so the
- * probe structure isolates each deadline from worker completion: the query
- * runs on a bounded worker pool and the scheduling coroutine only awaits it
- * up to [probeDeadlineMs].  A deadline miss abandons the result — the worker
- * may still occupy a pool slot until the provider answers — but single-flight
- * state is always cleared, so the caller can re-arm probes rather than
- * silently wedging.  A dead or unreachable tree marks the workspace
- * transient-down in [down]; the binding is preserved, status reports
- * unavailable, and the throttled re-probe restores it automatically once
- * the provider recovers.  Results apply only while the registry still holds
- * the very backend instance the probe observed, so a stale probe can never
- * tear down a replacement binding.
+ * deadline is independent of worker completion: the query runs on a bounded
+ * worker and the scheduling coroutine only awaits it up to [probeDeadlineMs].
+ * A deadline miss abandons the result but always clears single-flight state,
+ * so the caller can re-arm probes rather than silently wedging.
+ *
+ * Health is stored per backend *instance* (workspace id → the exact backend
+ * the result belongs to), so a stale result landing after the registry
+ * swapped in a replacement can never mark the replacement down — reads
+ * compare identity, writes are guarded by registration to that same
+ * instance.  A workspace marked down keeps its registration and self-rearms
+ * a retry each [probeIntervalMs] until it reports healthy or is unbound, so
+ * recovery does not depend on another UI refresh.
+ *
+ * Each permit is owned by the probe's real worker, not by the decision
+ * window: a wedged provider that ignores interruption keeps occupying its
+ * slot until it truly finishes, so repeated probes can never exceed
+ * [maxWorkers] live workers.  The decision still lands at the deadline —
+ * `inFlight` is released then — only the slot outlives it.
  */
 internal class SafLivenessProbe(
     private val scope: CoroutineScope,
@@ -4781,10 +4791,15 @@ internal class SafLivenessProbe(
 ) {
     private val inFlight = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
     private val probedAt = java.util.concurrent.ConcurrentHashMap<String, Long>()
-    val down: MutableSet<String> = java.util.concurrent.ConcurrentHashMap.newKeySet()
+    private val down = java.util.concurrent.ConcurrentHashMap<String, WorkspaceBackend>()
+    private val retryJobs = java.util.concurrent.ConcurrentHashMap<String, Job>()
     private val workers = java.util.concurrent.Semaphore(maxWorkers)
     private val _revision = MutableStateFlow(0L)
     val revision: StateFlow<Long> = _revision
+
+    /** Whether [backend] — the currently registered instance — is marked down. */
+    fun isDown(workspaceId: String, backend: WorkspaceBackend): Boolean =
+        down[workspaceId] === backend
 
     fun schedule(workspaceId: String, backend: WorkspaceBackend) {
         val moment = now()
@@ -4801,13 +4816,41 @@ internal class SafLivenessProbe(
                 val worker = async(Dispatchers.IO) {
                     runCatching { backend.descriptor.enabled }.getOrDefault(false)
                 }
-                val alive = withTimeoutOrNull(probeDeadlineMs) { worker.await() } ?: false
-                if (isRegisteredBackend(workspaceId, backend)) {
-                    val changed = if (alive) down.remove(workspaceId) else down.add(workspaceId)
-                    if (changed) _revision.value += 1
+                try {
+                    val alive = withTimeoutOrNull(probeDeadlineMs) { worker.await() } ?: false
+                    if (isRegisteredBackend(workspaceId, backend)) {
+                        val changed = if (alive) {
+                            down.remove(workspaceId, backend)
+                        } else {
+                            down.put(workspaceId, backend) !== backend
+                        }
+                        if (changed) _revision.value += 1
+                        if (alive) {
+                            retryJobs.remove(workspaceId)?.cancel()
+                        } else {
+                            retryJobs.compute(workspaceId) { _, existing ->
+                                if (existing?.isActive == true) {
+                                    existing
+                                } else {
+                                    scope.launch {
+                                        delay(probeIntervalMs)
+                                        if (isRegisteredBackend(workspaceId, backend)) {
+                                            schedule(workspaceId, backend)
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                } finally {
+                    inFlight.remove(workspaceId)
                 }
+                // The permit outlives the decision window: it is released only
+                // when the worker actually finishes — a wedged provider keeps
+                // its slot, bounding live workers at maxWorkers no matter how
+                // often schedule() is called again.
+                worker.await()
             } finally {
-                inFlight.remove(workspaceId)
                 workers.release()
             }
         }

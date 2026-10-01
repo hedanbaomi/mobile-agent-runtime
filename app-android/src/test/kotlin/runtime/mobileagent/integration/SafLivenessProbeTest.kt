@@ -48,12 +48,14 @@ class SafLivenessProbeTest {
         registered: (String, WorkspaceBackend) -> Boolean = { _, _ -> true },
         intervalMs: Long = 0L,
         deadlineMs: Long = 100L,
+        maxWorkers: Int = 4,
         now: () -> Long = { System.currentTimeMillis() },
     ) = SafLivenessProbe(
         scope = scope,
         isRegisteredBackend = registered,
         probeIntervalMs = intervalMs,
         probeDeadlineMs = deadlineMs,
+        maxWorkers = maxWorkers,
         now = now,
     )
 
@@ -62,8 +64,8 @@ class SafLivenessProbeTest {
         val probe = probe()
         val b = backend { false }
         probe.schedule("w1", b)
-        awaitUntil { "w1" in probe.down }
-        assertTrue("w1" in probe.down)
+        awaitUntil { probe.isDown("w1", b) }
+        assertTrue(probe.isDown("w1", b))
         assertEquals(1L, probe.revision.value)
     }
 
@@ -71,13 +73,13 @@ class SafLivenessProbeTest {
     fun `a wedged provider clears in-flight and marks down at the deadline`() {
         val latch = CountDownLatch(1) // never released — provider never answers
         val probe = probe(deadlineMs = 60L)
-        val b = backend { latch.await(10, TimeUnit.SECONDS) }
+        val b = backend { latch.await(10, TimeUnit.SECONDS); false }
         probe.schedule("w1", b)
-        awaitUntil { "w1" in probe.down }
+        awaitUntil { probe.isDown("w1", b) }
         // In-flight must be cleared even though the worker still lingers;
         // a re-schedule must actually run again rather than being dropped.
         probe.schedule("w1", b)
-        awaitUntil { "w1" in probe.down }
+        awaitUntil { probe.isDown("w1", b) }
         assertEquals(1L, probe.revision.value)
     }
 
@@ -87,27 +89,83 @@ class SafLivenessProbeTest {
         val probe = probe(intervalMs = 0L)
         val b = backend { live }
         probe.schedule("w1", b)
-        awaitUntil { "w1" in probe.down }
+        awaitUntil { probe.isDown("w1", b) }
         live = true
         probe.schedule("w1", b)
-        awaitUntil { "w1" !in probe.down && probe.revision.value == 2L }
-        assertFalse("w1" in probe.down)
+        awaitUntil { !probe.isDown("w1", b) && probe.revision.value == 2L }
+        assertFalse(probe.isDown("w1", b))
         assertEquals(2L, probe.revision.value)
     }
 
     @Test
     fun `a stale probe never applies to a replacement backend`() {
         val registered = java.util.concurrent.atomic.AtomicReference<WorkspaceBackend>()
-        val old = backend { false }
+        val release = CountDownLatch(1)
+        val old = backend { release.await(10, TimeUnit.SECONDS); false }
         val fresh = backend { true }
         registered.set(old)
         val probe = probe(registered = { _, backend -> registered.get() === backend })
         probe.schedule("w1", old)
-        // Bind a replacement before the probe result lands, then let it land.
+        // Swap in the replacement strictly BEFORE the old result can land —
+        // the worker is held on the latch until the swap is done.
         registered.set(fresh)
+        release.countDown()
         awaitQuietly()
-        assertFalse("w1" in probe.down)
+        assertFalse(probe.isDown("w1", old))
+        assertFalse(probe.isDown("w1", fresh))
         assertEquals(0L, probe.revision.value)
+    }
+
+    @Test
+    fun `a down verdict self-rearms until the provider recovers`() {
+        var live = false
+        val probe = probe(intervalMs = 60L, deadlineMs = 100L)
+        val b = backend { live }
+        probe.schedule("w1", b)
+        awaitUntil { probe.isDown("w1", b) }
+        // No further schedule() calls — the armed retry itself must observe
+        // the recovery, clear the verdict and bump the revision.
+        live = true
+        awaitUntil { !probe.isDown("w1", b) && probe.revision.value == 2L }
+        assertFalse(probe.isDown("w1", b))
+        assertEquals(2L, probe.revision.value)
+    }
+
+    @Test
+    fun `wedged workers still obey the maxWorkers cap`() {
+        val running = java.util.concurrent.atomic.AtomicInteger()
+        val peak = java.util.concurrent.atomic.AtomicInteger()
+        val release = CountDownLatch(1)
+        val wedged = backend {
+            val n = running.incrementAndGet()
+            peak.updateAndGet { maxOf(it, n) }
+            try {
+                // Ignore interruption: the provider never answers and never
+                // honours cancellation — the permit must track this worker,
+                // not the decision deadline.
+                while (true) {
+                    try {
+                        release.await()
+                        break
+                    } catch (_: InterruptedException) {
+                    }
+                }
+                true
+            } finally {
+                running.decrementAndGet()
+            }
+        }
+        val probe = probe(intervalMs = 0L, deadlineMs = 60L, maxWorkers = 2)
+        val ids = (1..6).map { "w$it" }
+        // Repeated scheduling after each deadline must never spawn more than
+        // maxWorkers live probe workers.
+        repeat(3) {
+            ids.forEach { probe.schedule(it, wedged) }
+            Thread.sleep(140)
+        }
+        assertEquals(2, peak.get())
+        assertEquals(2, running.get())
+        release.countDown()
     }
 
     private fun awaitUntil(cond: () -> Boolean) {

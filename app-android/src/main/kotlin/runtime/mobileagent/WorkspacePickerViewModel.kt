@@ -73,6 +73,28 @@ class WorkspacePickerViewModel(
 
     init {
         refresh()
+        viewModelScope.launch {
+            port.workspaceHealthRevision.collect {
+                if (it > 0) refreshRecent()
+            }
+        }
+    }
+
+    /**
+     * Health bumps refresh only the recent list's access status — the open
+     * browse session, directory stack and selection state are untouched.
+     */
+    private var recentJob: Job? = null
+    private fun refreshRecent() {
+        recentJob?.cancel()
+        recentJob = viewModelScope.launch {
+            val recent = withContext(Dispatchers.IO) {
+                runCatching { port.recentWorkspaces(target.agentId) }.getOrDefault(emptyList())
+            }
+            _state.value = _state.value.copy(
+                recentWorkspaces = recent.map { it.toRecentUi() },
+            )
+        }
     }
 
     fun setTarget(target: WorkspacePickerTarget, label: String = "当前目标") {

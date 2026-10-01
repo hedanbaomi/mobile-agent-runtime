@@ -350,8 +350,8 @@ internal class ProcessShizukuShellRunner : ShizukuShellRunner {
         synchronized(session.terminateLock) {
             val process = session.process.get() ?: return true
             val identity = session.remoteIdentity.get()
-            val captured = if (identity != null && remoteStartTime(identity.pid) == identity.startTime) {
-                remoteDescendantsOf(identity.pid, ::remoteChildrenOf)
+            val captured = if (identity != null) {
+                remoteDescendantsOf(identity, ::remoteChildrenOf, ::remoteStat)
             } else {
                 emptyList()
             }
@@ -361,10 +361,14 @@ internal class ProcessShizukuShellRunner : ShizukuShellRunner {
                 runCatching { process.destroyForcibly() }
                 runCatching { process.waitFor(1, TimeUnit.SECONDS) }
             }
-            sweepRemoteTree(captured, ::remoteChildrenOf, ::remoteStartTime, signal = { pid ->
-                runCatching { android.os.Process.killProcess(pid) }
-            })
-            if (process.isAlive && identity != null && remoteStartTime(identity.pid) == identity.startTime) {
+            if (identity != null) {
+                sweepRemoteTree(captured, identity, ::remoteChildrenOf, ::remoteStat, signal = { pid ->
+                    runCatching { android.os.Process.killProcess(pid) }
+                })
+            }
+            if (process.isAlive && identity != null &&
+                remoteStat(identity.pid)?.second == identity.startTime
+            ) {
                 runCatching { android.os.Process.killProcess(identity.pid) }
                 runCatching { process.waitFor(1, TimeUnit.SECONDS) }
             }
@@ -380,7 +384,7 @@ internal class ProcessShizukuShellRunner : ShizukuShellRunner {
      */
     private fun boundRemoteIdentity(before: Set<Int>, after: Set<Int>): RemoteIdentity? {
         val pid = (after - before).singleOrNull() ?: return null
-        val startTime = remoteStartTime(pid) ?: return null
+        val startTime = remoteStat(pid)?.second ?: return null
         return RemoteIdentity(pid, startTime)
     }
 
@@ -397,19 +401,28 @@ internal class ProcessShizukuShellRunner : ShizukuShellRunner {
         return pids
     }
 
-    private fun remoteStartTime(pid: Int): Long? = runCatching {
+    /**
+     * One atomic /proc/<pid>/stat read → (ppid, start-time).  Pairing both
+     * fields from a single read is what makes lineage checks meaningful: a
+     * recycled pid holder reports a different start-time, and a foreign
+     * process reports a ppid that does not match the verified parent.
+     */
+    private fun remoteStat(pid: Int): Pair<Int, Long>? = runCatching {
         val stat = File("/proc/$pid/stat").readText()
-        // Field 22 after the closing parenthesis of comm is the start-time in
-        // jiffies; comm itself may contain spaces or parentheses.
-        stat.substringAfterLast(')').trim().split(' ')[19].toLong()
+        // Fields after the closing parenthesis of comm: state(3) ppid(4) ...
+        // starttime(22) → indices 0,1,...,19 relative to the split.
+        val fields = stat.substringAfterLast(')').trim().split(' ')
+        fields[1].toInt() to fields[19].toLong()
     }.getOrNull()
 
     /**
-     * Direct children of [pid], each paired with the /proc start-time read at
-     * discovery.  Children whose stat can no longer be read are skipped — a
-     * dead child needs no signal and an unreadable one can never be verified.
+     * Direct child pids of [pid] — bare pids only.  Callers read each child's
+     * own stat atomically and require its ppid to equal the verified parent
+     * pid, so a pid recycled between the children listing and the stat read
+     * is rejected instead of being paired with a foreign process's
+     * start-time.
      */
-    private fun remoteChildrenOf(pid: Int): Sequence<Pair<Int, Long>> {
+    private fun remoteChildrenOf(pid: Int): Sequence<Int> {
         val tasks = runCatching { File("/proc/$pid/task").listFiles() }.getOrNull()
             ?: return emptySequence()
         return tasks.asSequence()
@@ -420,9 +433,6 @@ internal class ProcessShizukuShellRunner : ShizukuShellRunner {
                         .split(' ')
                         .asSequence()
                         .mapNotNull { it.trim().toIntOrNull() }
-                        .mapNotNull { child ->
-                            remoteStartTime(child)?.let { start -> child to start }
-                        }
                 }.getOrDefault(emptySequence())
             }
     }
@@ -607,68 +617,121 @@ internal class ProcessShizukuShellRunner : ShizukuShellRunner {
 }
 
 /**
- * Descendants of [rootPid] in post-order (deepest first).  [childrenOf]
- * supplies a pid's child pids — the production runner reads
- * /proc/<pid>/task/<tid>/children while tests inject a fixed tree.  The root
- * itself is not returned; callers signal it separately.
+ * Spawn-time identity of a remote process: pid plus the /proc start-time
+ * captured in the same moment, so later checks compare against the identity
+ * this run actually created — not whatever happens to hold the pid now. */
+internal data class RemoteIdentity(val pid: Int, val startTime: Long)
+
+/**
+ * A verified descendant node captured at discovery: its own atomic
+ * (ppid, start-time) stat snapshot plus the parent's identity it was
+ * enumerated under.  The recorded ppid is lineage evidence — the node only
+ * entered the tree because its own stat claimed this parent.
+ */
+internal data class RemoteNode(
+    val pid: Int,
+    val startTime: Long,
+    val ppid: Int,
+    val parentStartTime: Long,
+)
+
+/**
+ * Descendants of [root] in post-order (deepest first), verified per level.
+ * [childrenOf] supplies bare child pids; [statOf] reads one proc stat as
+ * (ppid, start-time).  A child is collected only when its own atomic stat
+ * reports ppid == the parent's pid — a pid recycled between the children
+ * listing and the stat read belongs to a foreign process and is rejected —
+ * AND while the parent still holds its recorded start-time, so a recycled
+ * parent's children listing is never trusted and its whole branch is
+ * dropped.  The root itself is not returned; callers signal it separately.
  */
 internal fun remoteDescendantsOf(
-    rootPid: Int,
-    childrenOf: (Int) -> Sequence<Pair<Int, Long>>,
-): List<Pair<Int, Long>> {
+    root: RemoteIdentity,
+    childrenOf: (Int) -> Sequence<Int>,
+    statOf: (Int) -> Pair<Int, Long>?,
+): List<RemoteNode> {
     val visited = HashSet<Int>()
-    val order = ArrayList<Pair<Int, Long>>()
-    fun visit(pid: Int) {
-        if (!visited.add(pid)) return
-        childrenOf(pid).forEach { (childPid, childStart) ->
-            if (childPid !in visited) {
-                visit(childPid)
-                order.add(childPid to childStart)
-            }
+    visited.add(root.pid)
+    val order = ArrayList<RemoteNode>()
+    fun visit(parent: RemoteNode) {
+        if (statOf(parent.pid)?.second != parent.startTime) return
+        childrenOf(parent.pid).forEach { childPid ->
+            if (childPid in visited) return@forEach
+            val (ppid, start) = statOf(childPid) ?: return@forEach
+            if (ppid != parent.pid) return@forEach
+            if (!visited.add(childPid)) return@forEach
+            val node = RemoteNode(childPid, start, parent.pid, parent.startTime)
+            visit(node)
+            order.add(node)
         }
     }
-    visit(rootPid)
+    visit(RemoteNode(root.pid, root.startTime, ppid = -1, parentStartTime = -1L))
     return order
 }
 
 /**
- * Signal every captured (pid, discovery-time start-time) pair whose current
- * start-time still matches the discovery snapshot — a pid reused since then
- * belongs to a different process and is never signalled, and one that exited
- * needs no signal.  Survivors are re-enumerated for up to [maxPasses] passes
- * so descendants forked during the sweep window are still collected; the
- * sweep remains best-effort, which is why callers keep reporting
- * UNKNOWN_OUTCOME rather than claiming the remote tree is gone.
+ * Signal every captured node whose identity still verifies: its own atomic
+ * stat must show the recorded start-time (a recycled pid fails) and its ppid
+ * must equal the recorded parent — or init (1), the normal reparent target
+ * for our tree's orphans.  Ancestors are re-verified up to [root]; an
+ * ancestor that still exists but reports a different start-time (recycled)
+ * vetoes the whole descendant branch, while a dead ancestor doesn't — its
+ * reparented children are legitimately ours.  Survivors are re-enumerated
+ * per pass for [maxPasses] rounds so descendants forked during the sweep
+ * window are still collected; the sweep remains best-effort, which is why
+ * callers keep reporting UNKNOWN_OUTCOME rather than claiming the remote
+ * tree is gone.
  */
 internal fun sweepRemoteTree(
-    captured: List<Pair<Int, Long>>,
-    childrenOf: (Int) -> Sequence<Pair<Int, Long>>,
-    startTimeOf: (Int) -> Long?,
+    captured: List<RemoteNode>,
+    root: RemoteIdentity,
+    childrenOf: (Int) -> Sequence<Int>,
+    statOf: (Int) -> Pair<Int, Long>?,
     signal: (Int) -> Unit,
     maxPasses: Int = 2,
 ) {
-    val seen = HashSet<Int>()
-    captured.forEach { seen.add(it.first) }
+    val byPid = HashMap<Int, RemoteNode>()
+    captured.forEach { byPid[it.pid] = it }
+    val seen = HashSet(byPid.keys)
     var frontier = captured
     var pass = 0
     while (frontier.isNotEmpty() && pass < maxPasses) {
         pass++
-        frontier.forEach { (pid, start) ->
-            if (startTimeOf(pid) == start) signal(pid)
-        }
-        val discovered = ArrayList<Pair<Int, Long>>()
-        frontier.forEach { (pid, start) ->
-            if (startTimeOf(pid) == start) {
-                childrenOf(pid).forEach { child ->
-                    if (seen.add(child.first)) discovered.add(child)
+        for (node in frontier) {
+            val stat = statOf(node.pid) ?: continue
+            if (stat.second != node.startTime) continue
+            if (stat.first != node.ppid && stat.first != 1) continue
+            var vetoed = false
+            var ancestor = node.ppid
+            var hops = 0
+            while (hops++ < 64) {
+                if (ancestor == root.pid) {
+                    vetoed = statOf(root.pid)?.second != root.startTime
+                    break
                 }
+                val parentNode = byPid[ancestor] ?: break
+                val parentStat = statOf(ancestor)
+                if (parentStat != null && parentStat.second != parentNode.startTime) {
+                    vetoed = true
+                    break
+                }
+                ancestor = parentNode.ppid
+            }
+            if (!vetoed) signal(node.pid)
+        }
+        val discovered = ArrayList<RemoteNode>()
+        for (node in frontier) {
+            if (statOf(node.pid)?.second != node.startTime) continue
+            for (childPid in childrenOf(node.pid)) {
+                if (childPid in seen) continue
+                val (ppid, start) = statOf(childPid) ?: continue
+                if (ppid != node.pid) continue
+                if (!seen.add(childPid)) continue
+                val child = RemoteNode(childPid, start, node.pid, node.startTime)
+                byPid[childPid] = child
+                discovered.add(child)
             }
         }
         frontier = discovered
     }
 }
-
-/** Spawn-time identity of a remote process: pid plus the /proc start-time
- * captured in the same moment, so later checks compare against the identity
- * this run actually created — not whatever happens to hold the pid now. */
-internal data class RemoteIdentity(val pid: Int, val startTime: Long)

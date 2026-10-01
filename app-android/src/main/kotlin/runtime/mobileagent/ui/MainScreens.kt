@@ -674,6 +674,13 @@ private fun AgentsRoute(entry: NavBackStackEntry, chinese: Boolean, onRoute: (St
         workspaceRevision++
         vm.reload()
     }
+    // A SAF liveness probe can flip a workspace between available and
+    // transient-unavailable while this screen is up; the health revision
+    // re-runs the listing so the UI tracks it without navigation.
+    val workspaceHealthRevision by integration.workspaceHealthRevision.collectAsState()
+    LaunchedEffect(workspaceHealthRevision) {
+        workspaceRevision++
+    }
     LaunchedEffect(initialAgentId) {
         initialAgentId?.takeIf { it.isNotBlank() }?.let {
             vm.select(it)

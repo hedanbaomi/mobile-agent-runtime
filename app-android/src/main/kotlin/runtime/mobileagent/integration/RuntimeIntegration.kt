@@ -20,8 +20,12 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.async
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
 import runtime.mobileagent.AgentGrantPort
 import runtime.mobileagent.ThreadWorkspacePort
 import runtime.mobileagent.ThreadWorkspaceRuntimePort
@@ -414,8 +418,19 @@ class RuntimeIntegration(
 
     private var previousSelection: Authority? = null
     private val authorityReadySeen = HashMap<ElevatedAuthority, Boolean>()
-    private val safLivenessProbeInFlight = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
-    private val safLivenessProbedAt = java.util.concurrent.ConcurrentHashMap<String, Long>()
+    private val safLivenessProbe = SafLivenessProbe(
+        scope = scope,
+        isRegisteredBackend = { workspaceId, backend ->
+            workspaceRegistry.registered(workspaceId)?.backend === backend
+        },
+        probeIntervalMs = SAF_LIVENESS_PROBE_INTERVAL_MS,
+        probeDeadlineMs = SAF_LIVENESS_PROBE_DEADLINE_MS,
+    )
+    private val safLivenessDown get() = safLivenessProbe.down
+
+    /** Bumped whenever a SAF probe flips a workspace's health — the UI
+     *  collects this to re-run workspace listings without navigation. */
+    val workspaceHealthRevision: StateFlow<Long> = safLivenessProbe.revision
     private val shizukuPermissionRequestPending = AtomicBoolean(false)
     private val shizukuStateListener: (ShizukuAuthorityState) -> Unit = { state ->
         applyShizukuState(state)
@@ -2603,10 +2618,11 @@ class RuntimeIntegration(
             // A live SAF probe runs a provider root query + children listing;
             // doing it here would block the caller — this path runs on the UI
             // thread via listWorkspaces.  Schedule a bounded, throttled probe
-            // instead: a dead or wedged provider unregisters the tree so the
-            // next listing no longer offers it, while ops already fail
-            // AUTHORITY_TEMPORARILY_UNAVAILABLE through the executor probe.
+            // instead.  A dead or wedged provider marks the tree transient-
+            // down: it stays bound, reports UNAVAILABLE, and the throttled
+            // re-probe below restores it automatically once SAF recovers.
             scheduleSafLivenessProbe(workspace.id, registered.backend)
+            if (workspace.id in safLivenessDown) return WorkspaceAccessStatus.UNAVAILABLE
         }
         if (workspace.backendType == WorkspaceBackendType.PRIVILEGED) {
             val authority = workspace.rootReference.removePrefix("authority:")
@@ -2626,32 +2642,8 @@ class RuntimeIntegration(
         return WorkspaceAccessStatus.ACTIVE
     }
 
-    /**
-     * Probe a SAF backend's live descriptor off the calling thread with a
-     * bounded deadline.  A wedged provider makes the query itself hang, so
-     * reaching the deadline is also treated as dead: the tree is unregistered
-     * either way and disappears from the next listing.  Probes are single-
-     * flight per workspace and throttled so list calls cannot re-arm them
-     * faster than the provider can be queried.
-     */
     private fun scheduleSafLivenessProbe(workspaceId: String, backend: WorkspaceBackend) {
-        val now = System.currentTimeMillis()
-        val last = safLivenessProbedAt[workspaceId]
-        if (last != null && now - last < SAF_LIVENESS_PROBE_INTERVAL_MS) return
-        if (!safLivenessProbeInFlight.add(workspaceId)) return
-        safLivenessProbedAt[workspaceId] = now
-        scope.launch {
-            try {
-                val alive = kotlinx.coroutines.withTimeoutOrNull(SAF_LIVENESS_PROBE_DEADLINE_MS) {
-                    kotlinx.coroutines.runInterruptible(kotlinx.coroutines.Dispatchers.IO) {
-                        runCatching { backend.descriptor.enabled }.getOrDefault(false)
-                    }
-                } ?: false
-                if (!alive) runCatching { workspaceRegistry.unregister(workspaceId) }
-            } finally {
-                safLivenessProbeInFlight.remove(workspaceId)
-            }
-        }
+        safLivenessProbe.schedule(workspaceId, backend)
     }
 
 
@@ -4761,3 +4753,63 @@ internal fun isWholeDirectoryPersistentGrant(grant: CapabilityGrant, agentId: St
         grant.skillInstallId == null && grant.packageHash == null && grant.pathScope == null &&
         grant.lifetime == runtime.mobileagent.domain.GrantLifetime.PERSISTENT &&
         grant.taskId == null && grant.sessionId == null
+
+/**
+ * Bounded SAF liveness probing for workspaceAccessStatus callers.
+ *
+ * A wedged documents provider can hang a descriptor read indefinitely, and
+ * ContentResolver.query does not respond to coroutine cancellation, so the
+ * probe structure isolates each deadline from worker completion: the query
+ * runs on a bounded worker pool and the scheduling coroutine only awaits it
+ * up to [probeDeadlineMs].  A deadline miss abandons the result — the worker
+ * may still occupy a pool slot until the provider answers — but single-flight
+ * state is always cleared, so the caller can re-arm probes rather than
+ * silently wedging.  A dead or unreachable tree marks the workspace
+ * transient-down in [down]; the binding is preserved, status reports
+ * unavailable, and the throttled re-probe restores it automatically once
+ * the provider recovers.  Results apply only while the registry still holds
+ * the very backend instance the probe observed, so a stale probe can never
+ * tear down a replacement binding.
+ */
+internal class SafLivenessProbe(
+    private val scope: CoroutineScope,
+    private val isRegisteredBackend: (String, WorkspaceBackend) -> Boolean,
+    private val probeIntervalMs: Long = 2_000L,
+    private val probeDeadlineMs: Long = 800L,
+    private val maxWorkers: Int = 4,
+    private val now: () -> Long = { System.currentTimeMillis() },
+) {
+    private val inFlight = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
+    private val probedAt = java.util.concurrent.ConcurrentHashMap<String, Long>()
+    val down: MutableSet<String> = java.util.concurrent.ConcurrentHashMap.newKeySet()
+    private val workers = java.util.concurrent.Semaphore(maxWorkers)
+    private val _revision = MutableStateFlow(0L)
+    val revision: StateFlow<Long> = _revision
+
+    fun schedule(workspaceId: String, backend: WorkspaceBackend) {
+        val moment = now()
+        val last = probedAt[workspaceId]
+        if (last != null && moment - last < probeIntervalMs) return
+        probedAt[workspaceId] = moment
+        if (!inFlight.add(workspaceId)) return
+        if (!workers.tryAcquire()) {
+            inFlight.remove(workspaceId)
+            return
+        }
+        scope.launch {
+            try {
+                val worker = async(Dispatchers.IO) {
+                    runCatching { backend.descriptor.enabled }.getOrDefault(false)
+                }
+                val alive = withTimeoutOrNull(probeDeadlineMs) { worker.await() } ?: false
+                if (isRegisteredBackend(workspaceId, backend)) {
+                    val changed = if (alive) down.remove(workspaceId) else down.add(workspaceId)
+                    if (changed) _revision.value += 1
+                }
+            } finally {
+                inFlight.remove(workspaceId)
+                workers.release()
+            }
+        }
+    }
+}

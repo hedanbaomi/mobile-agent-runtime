@@ -219,10 +219,12 @@ class SafLivenessProbeTest {
         // fresh probe is observably admitted (freshCalls > 0), then stop —
         // everything after this must be driven by the armed retry loop.
         var admitted = false
-        repeat(50) {
+        for (attempt in 1..50) {
             probe.schedule("w1", fresh)
-            admitted = pollUntil({ freshCalls.get() > 0 }, 50)
-            if (admitted) return@repeat
+            if (pollUntil({ freshCalls.get() > 0 }, 50)) {
+                admitted = true
+                break
+            }
             Thread.sleep(20)
         }
         assertTrue(admitted)

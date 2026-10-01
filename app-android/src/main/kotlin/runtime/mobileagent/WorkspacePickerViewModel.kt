@@ -58,6 +58,8 @@ class WorkspacePickerViewModel(
     val state: StateFlow<WorkspacePickerUiState> = _state.asStateFlow()
 
     private var browseJob: Job? = null
+    private var recentJob: Job? = null
+    private val recentsGate = RecentsFetchGate()
     private var operationGeneration = 0L
     private var currentPage: WorkspaceDirectoryPage? = null
     private var currentContinuation: String? = null
@@ -83,14 +85,12 @@ class WorkspacePickerViewModel(
     /**
      * Health bumps refresh only the recent list's access status — the open
      * browse session, directory stack and selection state are untouched.
-     * [recentFetchGeneration] serialises every writer of `recentWorkspaces`
+     * [RecentsFetchGate] serialises every writer of `recentWorkspaces`
      * (this and [refresh]): a fetch started later always wins, so an older
      * full refresh that resolves late can never overwrite a newer health
      * refresh — and a stale health fetch can never overwrite the picker
      * refresh either.
      */
-    private var recentJob: Job? = null
-    private val recentsGate = RecentsFetchGate()
     private fun refreshRecent() {
         recentJob?.cancel()
         val generation = recentsGate.claim()

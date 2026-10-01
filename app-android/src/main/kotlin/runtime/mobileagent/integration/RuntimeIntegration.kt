@@ -26,7 +26,9 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.collect
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withTimeoutOrNull
 import runtime.mobileagent.AgentGrantPort
 import runtime.mobileagent.ThreadWorkspacePort
@@ -4792,8 +4794,9 @@ internal class SafLivenessProbe(
     private val inFlight = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
     private val probedAt = java.util.concurrent.ConcurrentHashMap<String, Long>()
     private val down = java.util.concurrent.ConcurrentHashMap<String, WorkspaceBackend>()
-    private val retryJobs = java.util.concurrent.ConcurrentHashMap<String, Job>()
-    private val workers = java.util.concurrent.Semaphore(maxWorkers)
+    internal val retryJobs = java.util.concurrent.ConcurrentHashMap<String, Job>()
+    private val retryBackend = java.util.concurrent.ConcurrentHashMap<String, WorkspaceBackend>()
+    private val workers = kotlinx.coroutines.sync.Semaphore(maxWorkers)
     private val _revision = MutableStateFlow(0L)
     val revision: StateFlow<Long> = _revision
 
@@ -4807,12 +4810,11 @@ internal class SafLivenessProbe(
         if (last != null && moment - last < probeIntervalMs) return
         probedAt[workspaceId] = moment
         if (!inFlight.add(workspaceId)) return
-        if (!workers.tryAcquire()) {
-            inFlight.remove(workspaceId)
-            return
-        }
         scope.launch {
-            try {
+            // Acquiring the permit suspends inside the coroutine rather than
+            // abandoning the probe at the caller: a saturated pool only delays
+            // this attempt, it can never silently end the retry loop.
+            workers.withPermit {
                 val worker = async(Dispatchers.IO) {
                     runCatching { backend.descriptor.enabled }.getOrDefault(false)
                 }
@@ -4825,22 +4827,7 @@ internal class SafLivenessProbe(
                             down.put(workspaceId, backend) !== backend
                         }
                         if (changed) _revision.value += 1
-                        if (alive) {
-                            retryJobs.remove(workspaceId)?.cancel()
-                        } else {
-                            retryJobs.compute(workspaceId) { _, existing ->
-                                if (existing?.isActive == true) {
-                                    existing
-                                } else {
-                                    scope.launch {
-                                        delay(probeIntervalMs)
-                                        if (isRegisteredBackend(workspaceId, backend)) {
-                                            schedule(workspaceId, backend)
-                                        }
-                                    }
-                                }
-                            }
-                        }
+                        if (!alive) ensureRetryLoop(workspaceId, backend)
                     }
                 } finally {
                     inFlight.remove(workspaceId)
@@ -4850,8 +4837,35 @@ internal class SafLivenessProbe(
                 // its slot, bounding live workers at maxWorkers no matter how
                 // often schedule() is called again.
                 worker.await()
-            } finally {
-                workers.release()
+            }
+        }
+    }
+
+    /**
+     * One retry loop per backend instance: while the workspace stays down,
+     * each interval re-attempts schedule() — throttle, in-flight rejection
+     * and pool saturation only defer an attempt to the next interval, they
+     * never end the loop.  The loop exits on its own once the entry is
+     * healthy (or taken over by another generation), when the backend is no
+     * longer the registered instance, or when the job is cancelled — a
+     * replacement under the same workspace id never inherits the old
+     * backend's timer.
+     */
+    private fun ensureRetryLoop(workspaceId: String, backend: WorkspaceBackend) {
+        retryJobs.compute(workspaceId) { _, existing ->
+            if (existing?.isActive == true && retryBackend[workspaceId] === backend) {
+                existing
+            } else {
+                existing?.cancel()
+                retryBackend[workspaceId] = backend
+                scope.launch {
+                    while (coroutineContext.isActive) {
+                        delay(probeIntervalMs)
+                        if (!isRegisteredBackend(workspaceId, backend)) break
+                        if (down[workspaceId] !== backend) break
+                        schedule(workspaceId, backend)
+                    }
+                }
             }
         }
     }

@@ -132,6 +132,81 @@ class SafLivenessProbeTest {
     }
 
     @Test
+    fun `a saturated pool only delays recovery — the retry loop keeps probing`() {
+        // One wedged worker holds the only permit while w2 goes down; the
+        // retry loop must not die on pool saturation — once the permit frees,
+        // the next interval probes again and clears the verdict.
+        val hold = CountDownLatch(1)
+        val wedged = backend {
+            while (true) {
+                try {
+                    hold.await()
+                    break
+                } catch (_: InterruptedException) {
+                }
+            }
+            true
+        }
+        var live = false
+        val probe = probe(intervalMs = 40L, deadlineMs = 30L, maxWorkers = 1)
+        probe.schedule("w1", wedged)
+        val b = backend { live }
+        Thread.sleep(60) // let w1 take the only permit slot
+        probe.schedule("w2", b)
+        awaitUntil { probe.isDown("w2", b) }
+        live = true
+        // Without any further schedule() calls the armed loop must survive
+        // the saturated pool and still observe the recovery.
+        hold.countDown()
+        awaitUntil { !probe.isDown("w2", b) && probe.revision.value >= 2L }
+        assertFalse(probe.isDown("w2", b))
+    }
+
+    @Test
+    fun `consecutive fast failures keep the same retry loop alive`() {
+        // Every probe fails several times in a row; the loop armed by the
+        // first verdict must not be consumed by in-flight rejections or
+        // re-armed jobs — it keeps probing until the provider recovers.
+        var live = false
+        var calls = 0
+        val probe = probe(intervalMs = 40L, deadlineMs = 100L)
+        val b = backend { calls++; live }
+        probe.schedule("w1", b)
+        awaitUntil { probe.isDown("w1", b) && calls >= 2 }
+        live = true
+        awaitUntil { !probe.isDown("w1", b) && probe.revision.value == 2L }
+        assertFalse(probe.isDown("w1", b))
+        assertTrue(calls >= 3)
+    }
+
+    @Test
+    fun `a same-id replacement exits the old backend's retry timer`() {
+        // Old backend goes down and arms its loop; a replacement registered
+        // under the same id must get its own loop — the stale one exits
+        // instead of probing a backend that is no longer bound.
+        val registered = java.util.concurrent.atomic.AtomicReference<WorkspaceBackend>()
+        val old = backend { false }
+        val fresh = backend { true }
+        registered.set(old)
+        val probe = probe(
+            registered = { _, backend -> registered.get() === backend },
+            intervalMs = 40L,
+            deadlineMs = 60L,
+        )
+        probe.schedule("w1", old)
+        awaitUntil { probe.isDown("w1", old) }
+        registered.set(fresh)
+        probe.schedule("w1", fresh)
+        // The replacement is healthy on its own probe — the down entry stays
+        // keyed to the old instance (isDown compares identity, so it cannot
+        // leak onto fresh), and the old backend's timer self-exits instead of
+        // probing a backend that is no longer bound.
+        awaitUntil { probe.retryJobs["w1"]?.isActive != true }
+        assertFalse(probe.isDown("w1", fresh))
+        assertEquals(1L, probe.revision.value)
+    }
+
+    @Test
     fun `wedged workers still obey the maxWorkers cap`() {
         val running = java.util.concurrent.atomic.AtomicInteger()
         val peak = java.util.concurrent.atomic.AtomicInteger()

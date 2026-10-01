@@ -649,8 +649,8 @@ internal fun remoteDescendantsOf(
     root: RemoteIdentity,
     childrenOf: (Int) -> Sequence<Int>,
     statOf: (Int) -> Pair<Int, Long>?,
+    visited: MutableSet<Int> = HashSet(),
 ): List<RemoteNode> {
-    val visited = HashSet<Int>()
     visited.add(root.pid)
     val order = ArrayList<RemoteNode>()
     fun visit(parent: RemoteNode, out: MutableList<RemoteNode>) {
@@ -669,6 +669,10 @@ internal fun remoteDescendantsOf(
             val branch = ArrayList<RemoteNode>()
             visit(node, branch)
             if (statOf(parent.pid)?.second != parent.startTime) return
+            // The child's own identity may have flipped while its branch was
+            // walked — a stale node must not enter the result, and neither
+            // may the branch collected beneath it.
+            if (statOf(node.pid)?.second != node.startTime) return@forEach
             branch.add(node)
             out.addAll(branch)
         }
@@ -732,19 +736,20 @@ internal fun sweepRemoteTree(
             }
             if (!vetoed) signal(node.pid)
         }
+        // Re-enumerate survivors with the same verified collection the
+        // initial capture used — a parent recycled during this window must
+        // not let a replacement's children be adopted into our tree.
         val discovered = ArrayList<RemoteNode>()
         for (node in frontier) {
             if (statOf(node.pid)?.second != node.startTime) continue
-            for (childPid in childrenOf(node.pid)) {
-                if (childPid in seen) continue
-                val (ppid, start) = statOf(childPid) ?: continue
-                if (ppid != node.pid) continue
-                if (!seen.add(childPid)) continue
-                val child = RemoteNode(childPid, start, node.pid, node.startTime)
-                byPid[childPid] = child
-                discovered.add(child)
-            }
+            discovered += remoteDescendantsOf(
+                RemoteIdentity(node.pid, node.startTime),
+                childrenOf,
+                statOf,
+                seen,
+            )
         }
+        discovered.forEach { byPid[it.pid] = it }
         frontier = discovered
     }
 }

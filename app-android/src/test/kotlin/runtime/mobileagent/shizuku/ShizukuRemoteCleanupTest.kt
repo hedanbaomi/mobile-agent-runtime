@@ -133,13 +133,12 @@ class ShizukuRemoteCleanupTest {
     }
 
     @Test
-    fun `a parent recycled mid-collection drops the pending branch`() {
+    fun `a node recycled mid-collection drops itself and its pending branch`() {
         // Pid 101 verifies at discovery (start 10) and at descent entry, but
         // is recycled (start 999) while its child subtree is being walked.
-        // The child collected under the doomed listing is discarded wholesale
-        // — a recycled holder's listing (or an init-reparented stranger left
-        // when the holder exits) must never be attributed to this run — while
-        // already-committed siblings and the still-valid node itself stay.
+        // The pending branch (201) collected under the doomed listing is
+        // discarded wholesale, and the stale node itself must not enter the
+        // result either — while already-committed siblings (102) stay.
         var statReadsOf101 = 0
         var listedChildrenOf101 = false
         val children = { pid: Int ->
@@ -164,7 +163,7 @@ class ShizukuRemoteCleanupTest {
             }
         }
         assertEquals(
-            listOf(101, 102),
+            listOf(102),
             remoteDescendantsOf(root, children, stat).map { it.pid },
         )
         assertTrue(listedChildrenOf101)
@@ -334,6 +333,72 @@ class ShizukuRemoteCleanupTest {
             maxPasses = 2,
         )
         assertEquals(listOf(101), signalled)
+    }
+
+    @Test
+    fun `sweep rescan drops children of a frontier node recycled mid-pass`() {
+        // 101 is signalled legitimately in pass one, then exits and its pid is
+        // recycled by a foreign process that already owns child 900.  The
+        // rescan must re-verify 101's identity through the same protected
+        // collection as the initial capture: the replacement's children
+        // listing is foreign and 900 must never be adopted — and when the
+        // replacement exits and 900 reparents to init, a later pass must not
+        // mistake it for one of our orphans.
+        var statReadsOf101 = 0
+        val children = { pid: Int ->
+            when (pid) {
+                101 -> sequenceOf(900) // listing now belongs to the foreign holder
+                else -> emptySequence()
+            }
+        }
+        val stat = { pid: Int ->
+            when (pid) {
+                100 -> 0 to 1L
+                101 -> {
+                    statReadsOf101++
+                    if (statReadsOf101 == 1) 100 to 10L else 999 to 77L // recycled
+                }
+                900 -> 101 to 88L      // foreign child of the replacement
+                else -> null
+            }
+        }
+        val signalled = mutableListOf<Int>()
+        sweepRemoteTree(
+            captured = listOf(node(101, 10L, ppid = 100)),
+            root = root,
+            childrenOf = children,
+            statOf = stat,
+            signal = { signalled.add(it) },
+            maxPasses = 3,
+        )
+        assertEquals(listOf(101), signalled)
+    }
+
+    @Test
+    fun `sweep rescan collects genuinely new children of a live frontier node`() {
+        // 105 forked after capture — the rescan verifies its own ppid plus
+        // 101's unchanged identity before adopting it into the sweep set.
+        val children = { pid: Int ->
+            when (pid) {
+                101 -> sequenceOf(105)
+                else -> emptySequence()
+            }
+        }
+        val stat = statOf(
+            100 to (0 to 1L),
+            101 to (100 to 10L),
+            105 to (101 to 50L),
+        )
+        val signalled = mutableListOf<Int>()
+        sweepRemoteTree(
+            captured = listOf(node(101, 10L, ppid = 100)),
+            root = root,
+            childrenOf = children,
+            statOf = stat,
+            signal = { signalled.add(it) },
+            maxPasses = 3,
+        )
+        assertEquals(listOf(101, 105), signalled)
     }
 
     @Test

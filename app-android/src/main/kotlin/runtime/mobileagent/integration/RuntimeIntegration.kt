@@ -377,6 +377,7 @@ class RuntimeIntegration(
         get() = workspaceAccessAdapter
 
     private var previousSelection: Authority? = null
+    private val authorityReadySeen = HashMap<Authority, Boolean>()
     private val shizukuPermissionRequestPending = AtomicBoolean(false)
     private val shizukuStateListener: (ShizukuAuthorityState) -> Unit = { state ->
         applyShizukuState(state)
@@ -1638,6 +1639,18 @@ class RuntimeIntegration(
         privilegedWorkspaceBindingRepository.list()
             .filter { it.status != PrivilegedWorkspaceBindingStatus.REVOKED }
             .forEach { binding -> workspaceRegistry.unregister(binding.workspaceId) }
+        // Registered privileged workspaces without an active binding carry no
+        // recovery locator (for example full-device rows opened before bindings
+        // were persisted for that scope).  They can never re-attach, so they
+        // must not stay listed as available.
+        workspaceRegistry.descriptors()
+            .filter { it.backendType == WorkspaceBackendType.PRIVILEGED }
+            .forEach { descriptor ->
+                val binding = privilegedWorkspaceBindingRepository.get(descriptor.id)
+                if (binding == null || binding.status == PrivilegedWorkspaceBindingStatus.REVOKED) {
+                    workspaceRegistry.unregister(descriptor.id)
+                }
+            }
         schedulePrivilegedWorkspaceReattach()
     }
 
@@ -1649,14 +1662,17 @@ class RuntimeIntegration(
         privilegedWorkspaceBindingRepository.forAuthority(selected)
             .asSequence()
             .filter { binding ->
-                binding.scope == WorkspaceScope.SELECTED_DIRECTORY &&
-                    binding.status !in setOf(
-                        PrivilegedWorkspaceBindingStatus.REVOKED,
-                        PrivilegedWorkspaceBindingStatus.BINDING_UNRECOVERABLE,
-                        PrivilegedWorkspaceBindingStatus.GRANT_LOST,
-                    ) &&
+                binding.status !in setOf(
+                    PrivilegedWorkspaceBindingStatus.REVOKED,
+                    PrivilegedWorkspaceBindingStatus.BINDING_UNRECOVERABLE,
+                    PrivilegedWorkspaceBindingStatus.GRANT_LOST,
+                ) &&
                     workspaceRegistry.registered(binding.workspaceId) == null &&
-                    workspaceRepository.get(binding.workspaceId)?.enabled == true
+                    workspaceRepository.get(binding.workspaceId)?.enabled == true &&
+                    (
+                        binding.scope != WorkspaceScope.FULL_DEVICE_FILES ||
+                            fullDeviceFilesGrantRepository.load(binding.workspaceId) != null
+                        )
             }
             .forEach { binding ->
                 if (!reattachInFlight.add(binding.workspaceId)) return@forEach
@@ -1718,6 +1734,16 @@ class RuntimeIntegration(
         } finally {
             recovered.fill(0)
         }
+        val fullDeviceGrantRevision = if (binding.scope == WorkspaceScope.FULL_DEVICE_FILES) {
+            val grant = fullDeviceFilesGrantRepository.load(workspaceId)
+            if (grant == null) {
+                failPrivilegedReattach(binding, PrivilegedWorkspaceBindingStatus.GRANT_LOST, "GRANT_LOST", startedAt)
+                return
+            }
+            grant.revision
+        } else {
+            null
+        }
         val reopened = try {
             provider.reopenDirectory(
                 WorkspaceReattachRequest(
@@ -1725,6 +1751,7 @@ class RuntimeIntegration(
                     displayName = workspace.displayName,
                     recoveryLocator = locator,
                     scope = binding.scope,
+                    grantRevision = fullDeviceGrantRevision,
                 ),
             )
         } catch (cancelled: kotlinx.coroutines.CancellationException) {
@@ -2210,6 +2237,24 @@ class RuntimeIntegration(
                     )
                 }
                 recordAuthorityConfigurationSnapshot(DiagnosticAuthorityConfigurationReason.SNAPSHOT, state)
+                // A privileged UserService restart kills every remote workspace
+                // handle while the local registry entries stay registered and
+                // look alive to enumerate.  On a not-ready -> ready edge for the
+                // selected authority, drop those stale entries so the reattach
+                // pass below actually re-opens them instead of skipping them.
+                val selected = state.selectedAuthority
+                if (selected != null) {
+                    val selectedReady = state.statuses[selected]?.isReady == true
+                    if (selectedReady && authorityReadySeen[selected] == false) {
+                        privilegedWorkspaceBindingRepository.forAuthority(selected)
+                            .asSequence()
+                            .filter { it.status != PrivilegedWorkspaceBindingStatus.REVOKED }
+                            .forEach { workspaceRegistry.unregister(it.workspaceId) }
+                    }
+                }
+                state.statuses.keys.forEach { authority ->
+                    authorityReadySeen[authority] = state.statuses[authority]?.isReady == true
+                }
                 schedulePrivilegedWorkspaceReattach()
             }
         }
@@ -2511,6 +2556,11 @@ class RuntimeIntegration(
         }
         val registered = workspaceRegistry.registered(workspace.id)
         if (registered == null) return WorkspaceAccessStatus.UNAVAILABLE
+        if (workspace.backendType == WorkspaceBackendType.SAF_TREE &&
+            !registered.backend.descriptor.enabled
+        ) {
+            return WorkspaceAccessStatus.UNAVAILABLE
+        }
         if (workspace.backendType == WorkspaceBackendType.PRIVILEGED) {
             val authority = workspace.rootReference.removePrefix("authority:")
                 .let { runCatching { Authority.valueOf(it) }.getOrNull() }
@@ -3547,11 +3597,68 @@ class RuntimeIntegration(
             createdAt = existing?.createdAt.orEmpty(),
             scope = WorkspaceScope.FULL_DEVICE_FILES,
         )
+        // Persist the sealed recovery locator exactly like a selected-directory
+        // attachment.  The remote file-service handle dies with its process; the
+        // binding is the only material a later reattach can re-open.
+        val recoveryLocator = value.recoveryLocator
+        if (recoveryLocator == null) {
+            rollbackNewFullDeviceGrant()?.let { return it }
+            return workspaceAccessFailure(WorkspaceAccessErrorCode.UNSUPPORTED)
+        }
+        val locatorBytes = runCatching { recoveryLocator.copyBytes() }.getOrNull()
+        if (locatorBytes == null) {
+            recoveryLocator.clear()
+            rollbackNewFullDeviceGrant()?.let { return it }
+            return workspaceAccessFailure(WorkspaceAccessErrorCode.PERSISTENCE_FAILED)
+        }
+        val locatorVersion = PRIVILEGED_LOCATOR_VERSION
+        val bindingAad = PrivilegedWorkspaceBindingAad(
+            appInstanceId = appInstanceId,
+            workspaceId = workspace.id,
+            authority = authority,
+            locatorVersion = locatorVersion,
+        )
+        val locatorEnvelope = try {
+            when (val sealed = bindingCipher.seal(locatorBytes, bindingAad)) {
+                is PrivilegedWorkspaceBindingSealResult.Success -> sealed.envelope
+                is PrivilegedWorkspaceBindingSealResult.Failure -> {
+                    rollbackNewFullDeviceGrant()?.let { return it }
+                    return workspaceAccessFailure(WorkspaceAccessErrorCode.PERSISTENCE_FAILED)
+                }
+            }
+        } finally {
+            locatorBytes.fill(0)
+            recoveryLocator.clear()
+        }
+        val previousBinding = privilegedWorkspaceBindingRepository.get(workspace.id)
+        val binding = PrivilegedWorkspaceBinding(
+            workspaceId = workspace.id,
+            authority = authority,
+            encryptedLocator = locatorEnvelope.encryptedLocator,
+            locatorNonce = locatorEnvelope.locatorNonce,
+            locatorVersion = locatorVersion,
+            keyVersion = PRIVILEGED_BINDING_KEY_VERSION,
+            aadAppInstanceId = appInstanceId,
+            scope = WorkspaceScope.FULL_DEVICE_FILES,
+            status = PrivilegedWorkspaceBindingStatus.ACTIVE,
+            revision = (previousBinding?.revision ?: 0L) + 1L,
+            createdAt = previousBinding?.createdAt.orEmpty(),
+        )
         val grants = try {
-            persistWorkspaceAndGrants(workspace, value.backend, grant)
+            db.transaction {
+                workspaceRepository.save(workspace)
+                privilegedWorkspaceBindingRepository.save(binding)
+                grant?.let { persistWorkspaceGrantBundle(workspace, value.backend, it) }.orEmpty()
+            }
         } catch (failure: WorkspaceAccessException) {
             rollbackNewFullDeviceGrant()?.let { return it }
             return workspaceAccessFailure(failure.accessCode)
+        } catch (_: AuthorityPolicyConflictException) {
+            rollbackNewFullDeviceGrant()?.let { return it }
+            return workspaceAccessFailure(WorkspaceAccessErrorCode.CONFLICT)
+        } catch (_: RuntimeException) {
+            rollbackNewFullDeviceGrant()?.let { return it }
+            return workspaceAccessFailure(WorkspaceAccessErrorCode.PERSISTENCE_FAILED)
         }
         try {
             workspaceRegistry.registerOrReplace(workspace, value.backend)

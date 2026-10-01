@@ -492,6 +492,11 @@ class UnifiedWorkspaceToolExecutor(
     ): Boolean {
         val descriptor = registered.descriptor
         if (!descriptor.enabled) return false
+        if (descriptor.backendType == WorkspaceBackendType.SAF_TREE && requireLiveReady &&
+            !registered.backend.descriptor.enabled
+        ) {
+            return false
+        }
         if (descriptor.scope == WorkspaceScope.FULL_DEVICE_FILES && dangerousModeProvider() == DangerousMode.DISABLED) {
             return false
         }

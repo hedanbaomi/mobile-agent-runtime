@@ -57,7 +57,10 @@ internal interface ShizukuShellRunner : AutoCloseable {
  *
  * Android's Java Process API does not prove that a shell's pipeline/background
  * descendants are gone.  A dispatched timeout or cancellation is therefore
- * reported as UNKNOWN_OUTCOME even when the shell process itself exits.
+ * reported as UNKNOWN_OUTCOME even when the shell process itself exits.  The
+ * runner still sweeps the remote /proc tree on terminate — descendants have
+ * been observed to outlive destroy() and keep running against the recorded
+ * UNKNOWN outcome.
  */
 internal class ProcessShizukuShellRunner : ShizukuShellRunner {
     private val lock = Any()
@@ -127,7 +130,7 @@ internal class ProcessShizukuShellRunner : ShizukuShellRunner {
             }
         }
         if (!accepted) return false
-        session.process.get()?.let { process -> runCatching { process.destroy() } }
+        session.process.get()?.let { process -> terminate(process) }
         return true
     }
 
@@ -137,7 +140,7 @@ internal class ProcessShizukuShellRunner : ShizukuShellRunner {
             synchronized(session.outcomeLock) {
                 if (!session.processFinishedNormally) session.cancelRequested.set(true)
             }
-            session.process.get()?.let { process -> runCatching { process.destroy() } }
+            session.process.get()?.let { process -> terminate(process) }
         }
         workerPool.shutdownNow()
         pumpPool.shutdownNow()
@@ -275,10 +278,10 @@ internal class ProcessShizukuShellRunner : ShizukuShellRunner {
             if (!processStarted && cancelled) terminated = true
 
             // Java Process can report the shell itself exited while a pipeline
-            // or background child survives.  This runner has no portable
-            // process-group wait/kill primitive on API 26+, so a dispatched
-            // timeout/cancel is deliberately UNKNOWN even after the shell
-            // process was destroyed.  Callers must never replay it.
+            // or background child survives.  The /proc sweep on terminate is a
+            // best effort — it cannot prove the whole remote tree is gone — so
+            // a dispatched timeout/cancel is deliberately UNKNOWN even after
+            // the shell process was destroyed.  Callers must never replay it.
             val remoteTerminationUnproven = processStarted && (timedOut || cancelled)
             val state = when {
                 !terminated -> "UNKNOWN"
@@ -325,12 +328,63 @@ internal class ProcessShizukuShellRunner : ShizukuShellRunner {
     }
 
     private fun terminate(process: Process): Boolean {
+        // destroy() only signals the direct child and has been observed to
+        // leave the remote shell and its descendants running after a timeout.
+        // The tree must be collected before the root dies — its children
+        // reparent to init and become undiscoverable — then descendants are
+        // signalled deepest-first and the root via the Java handle plus an
+        // explicit kill as a last resort.  Every signalled pid is re-verified
+        // against its /proc start-time so a pid recycled between enumeration
+        // and the kill is never hit — only processes this run spawned are in
+        // scope.
+        val rootPid = runCatching { process.pid() }.getOrNull()?.toInt()
+        val rootStartTime = rootPid?.let { remoteStartTime(it) }
+        if (rootPid != null && rootStartTime != null) {
+            val tree = remoteDescendantsOf(rootPid) { remoteChildrenOf(it) }
+            tree.forEach { descendant ->
+                remoteStartTime(descendant)?.let { expected ->
+                    signalIfSameProcess(descendant, expected)
+                }
+            }
+        }
         runCatching { process.destroy() }
         val exited = runCatching { process.waitFor(1, TimeUnit.SECONDS) }.getOrDefault(false)
         if (exited || !process.isAlive) return true
         runCatching { process.destroyForcibly() }
         runCatching { process.waitFor(1, TimeUnit.SECONDS) }
+        if (process.isAlive && rootPid != null && rootStartTime != null) {
+            signalIfSameProcess(rootPid, rootStartTime)
+            runCatching { process.waitFor(1, TimeUnit.SECONDS) }
+        }
         return !process.isAlive
+    }
+
+    private fun signalIfSameProcess(pid: Int, expectedStartTime: Long) {
+        if (remoteStartTime(pid) == expectedStartTime) {
+            runCatching { android.os.Process.killProcess(pid) }
+        }
+    }
+
+    private fun remoteStartTime(pid: Int): Long? = runCatching {
+        val stat = File("/proc/$pid/stat").readText()
+        // Field 22 after the closing parenthesis of comm is the start-time in
+        // jiffies; comm itself may contain spaces or parentheses.
+        stat.substringAfterLast(')').trim().split(' ')[19].toLong()
+    }.getOrNull()
+
+    private fun remoteChildrenOf(pid: Int): Sequence<Int> {
+        val tasks = runCatching { File("/proc/$pid/task").listFiles() }.getOrNull()
+            ?: return emptySequence()
+        return tasks.asSequence()
+            .filter { it.isDirectory }
+            .flatMap { task ->
+                runCatching {
+                    File(task, "children").readText()
+                        .split(' ')
+                        .asSequence()
+                        .mapNotNull { it.trim().toIntOrNull() }
+                }.getOrDefault(emptySequence())
+            }
     }
 
     private fun pump(input: InputStream, descriptor: ParcelFileDescriptor, maximum: Int): PumpStats {
@@ -503,4 +557,23 @@ internal class ProcessShizukuShellRunner : ShizukuShellRunner {
         const val DEFAULT_BUFFER_BYTES = 16 * 1024
         const val MAX_ENVELOPE_BYTES = 16 * 1024
     }
+}
+
+/**
+ * Descendants of [rootPid] in post-order (deepest first).  [childrenOf]
+ * supplies a pid's child pids — the production runner reads
+ * /proc/<pid>/task/<tid>/children while tests inject a fixed tree.  The root
+ * itself is not returned; callers signal it separately.
+ */
+internal fun remoteDescendantsOf(rootPid: Int, childrenOf: (Int) -> Sequence<Int>): List<Int> {
+    val visited = HashSet<Int>()
+    val order = ArrayList<Int>()
+    fun visit(pid: Int) {
+        if (!visited.add(pid)) return
+        childrenOf(pid).forEach { visit(it) }
+        order.add(pid)
+    }
+    visit(rootPid)
+    order.remove(rootPid)
+    return order
 }

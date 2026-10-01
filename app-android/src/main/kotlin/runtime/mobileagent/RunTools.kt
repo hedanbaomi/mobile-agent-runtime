@@ -16,6 +16,7 @@ import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.intOrNull
 import kotlinx.serialization.json.put
 import runtime.mobileagent.agent.AgentRun
@@ -63,6 +64,19 @@ internal fun withheldVisualEvidenceNotice(
     }
     return "本次结果有 $count 处视觉证据未提供原图（原因：$reason）。" +
         "不得声称已查看这些图片，也不得只凭文本回答这些来源的问题。$guidance"
+}
+
+/** Joins a producer-supplied warning with the visual-plan warning so neither is dropped. */
+internal fun mergeWarnings(producer: String?, visual: String): String =
+    listOfNotNull(producer?.takeIf { it.isNotBlank() }, visual).joinToString("; ")
+
+/**
+ * Rebuilds the knowledge-search result with verified hits while preserving every
+ * producer-supplied sibling field (warnings, coverage notices, counts).
+ */
+internal fun rebuildKnowledgeSearchRoot(root: JsonObject, hits: JsonArray): JsonObject = buildJsonObject {
+    for ((key, value) in root) if (key != "hits") put(key, value)
+    put("hits", hits)
 }
 
 /** Run-local routing, provider composition, and verified knowledge evidence. */
@@ -478,8 +492,9 @@ class RunTools(
         val evidence = mutableListOf<Evidence>()
         val output = if (call.name == BuiltinTools.knowledgeSearch.name) {
             val hits = root["hits"] as? JsonArray ?: throw EvidenceInvalid("Knowledge hits must be an array")
-            buildJsonObject {
-                put("hits", buildJsonArray {
+            rebuildKnowledgeSearchRoot(
+                root,
+                buildJsonArray {
                     for (item in hits) {
                         val hit = item as? JsonObject ?: throw EvidenceInvalid("Knowledge hit must be an object")
                         val chunk = loadChunk(hit.requiredString("chunkId"), hit.requiredString("documentVersionId"))
@@ -497,18 +512,19 @@ class RunTools(
                             put("chunkId", chunk.id)
                             put("text", chunk.text)
                             put("citationId", entries.first().citation.citationId)
-                            put("citations", citationJson(entries))
                         })
                     }
-                })
-            }
+                },
+            )
         } else {
             enrichDocument(call, root, evidence)
         }
         verifyAll(evidence)
         val visuals = planVisuals(evidence)
         val enriched = JsonObject(output + if (visuals.warning == null) emptyMap() else mapOf(
-            "warning" to JsonPrimitive(visuals.warning), "textDegradation" to JsonPrimitive(true),
+            "warning" to JsonPrimitive(mergeWarnings(
+                (output["warning"] as? JsonPrimitive)?.contentOrNull, visuals.warning,
+            )), "textDegradation" to JsonPrimitive(true),
         )).toString()
         if (enriched.length > HttpPolicy.MAX_TOOL_OUTPUT_CHARS) throw EvidenceInvalid("Cited tool output exceeds the tool limit")
         verifyAll(evidence)
@@ -663,10 +679,6 @@ class RunTools(
 
     private fun citationId(callId: String, ordinal: Int): String = run.runId + "-tool-" +
         Base64.getUrlEncoder().withoutPadding().encodeToString(callId.toByteArray(Charsets.UTF_8)) + "-$ordinal"
-
-    private fun citationJson(evidence: List<Evidence>): JsonArray = buildJsonArray {
-        evidence.forEach { add(citationObject(it.citation)) }
-    }
 
     private fun citationObject(citation: Citation): JsonObject = buildJsonObject {
         put("citationId", citation.citationId)

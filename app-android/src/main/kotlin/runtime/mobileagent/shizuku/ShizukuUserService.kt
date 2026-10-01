@@ -10,6 +10,7 @@ import org.json.JSONObject
 import java.io.IOException
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.UUID
 
 /**
@@ -47,6 +48,7 @@ class ShizukuUserService private constructor(
     private val sessionId = UUID.randomUUID().toString()
     private val callerLock = Any()
     private var handshakeCallerUid: Int? = null
+    private val destroyed = AtomicBoolean(false)
 
     override fun getStatus(): String {
         val callerUid = Binder.getCallingUid()
@@ -351,17 +353,38 @@ class ShizukuUserService private constructor(
         workspace.store.move(sourcePath, destinationPath, replaceExisting)
     }
 
+    /**
+     * Test seam replacing `System.exit(0)` so teardown can be observed without
+     * killing the caller's process; production callers leave it null.
+     */
+    @Volatile
+    internal var destroyExitHook: (() -> Unit)? = null
+
     /** Reserved transaction used by Shizuku to tear down a UserService. */
     override fun destroy() {
-        // destroy() has no session-id argument in Shizuku's reserved Binder
-        // transaction.  Bind it to the same per-service caller identity as
-        // the session-bound methods; an unauthenticated Binder holder must not
-        // be able to tear down the privileged UserService.  Do not return the
-        // session token or any diagnostic data through this void transaction.
-        if (checkCaller() != null) return
+        destroyInternal(Binder.getCallingUid(), serviceUid)
+    }
+
+    /**
+     * destroy() has no session-id argument in Shizuku's reserved Binder
+     * transaction.  A caller is legitimate only when it IS this service's own
+     * privileged uid — the Shizuku server, which runs under the same shell or
+     * root uid the service was spawned with.  An instance embedded in the app
+     * process (service uid = app uid) therefore fails closed for every caller,
+     * matching the checkCaller contract for typed work.  Requiring the
+     * handshake app uid here previously denied every real destroy and leaked
+     * this process on unbind and on client death.  Do not return the session
+     * token or any diagnostic data through this void transaction.
+     */
+    internal fun destroyInternal(callerUid: Int, serviceUid: Int) {
+        if (!destroyCallerAllowed(callerUid, serviceUid)) return
+        // Racing or repeated destroy transactions are idempotent: teardown
+        // runs once even if a second call lands before exit completes.
+        if (!destroyed.compareAndSet(false, true)) return
         runCatching { shellRunner.close() }
         workspaceReadPool.shutdownNow()
-        System.exit(0)
+        val hook = destroyExitHook
+        if (hook != null) hook() else System.exit(0)
     }
 
     private fun readResponse(
@@ -465,3 +488,12 @@ class ShizukuUserService private constructor(
         .put("code", code)
         .toString()
 }
+
+/**
+ * A destroy() caller is legitimate only when it is the app that performed the
+ * session handshake or the Shizuku server — which runs under the service's
+ * own uid (shell) or as root.  Any other Binder holder is refused.
+ */
+internal fun destroyCallerAllowed(callerUid: Int, serviceUid: Int): Boolean =
+    callerUid == serviceUid &&
+        (serviceUid == ShizukuBridgePolicy.SHELL_UID || serviceUid == Process.ROOT_UID)

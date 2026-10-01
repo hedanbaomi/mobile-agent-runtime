@@ -57,7 +57,10 @@ internal interface ShizukuShellRunner : AutoCloseable {
  *
  * Android's Java Process API does not prove that a shell's pipeline/background
  * descendants are gone.  A dispatched timeout or cancellation is therefore
- * reported as UNKNOWN_OUTCOME even when the shell process itself exits.
+ * reported as UNKNOWN_OUTCOME even when the shell process itself exits.  The
+ * runner still sweeps the remote /proc tree on terminate — descendants have
+ * been observed to outlive destroy() and keep running against the recorded
+ * UNKNOWN outcome.
  */
 internal class ProcessShizukuShellRunner : ShizukuShellRunner {
     private val lock = Any()
@@ -70,6 +73,9 @@ internal class ProcessShizukuShellRunner : ShizukuShellRunner {
         ShizukuShellLimits.MAX_GLOBAL_CONCURRENCY * 2,
     )
     private val closed = AtomicBoolean(false)
+    // Serializes the spawn-time /proc/self children diff so concurrent
+    // sessions can never attribute another spawn's child to their own shell.
+    private val spawnIdentityLock = Any()
 
     override fun start(request: ShizukuShellRunnerRequest): ShizukuShellResponse {
         if (closed.get()) return ShizukuShellResponse.rejected(ShizukuShellLimits.UNAVAILABLE)
@@ -127,7 +133,7 @@ internal class ProcessShizukuShellRunner : ShizukuShellRunner {
             }
         }
         if (!accepted) return false
-        session.process.get()?.let { process -> runCatching { process.destroy() } }
+        terminate(session)
         return true
     }
 
@@ -137,7 +143,7 @@ internal class ProcessShizukuShellRunner : ShizukuShellRunner {
             synchronized(session.outcomeLock) {
                 if (!session.processFinishedNormally) session.cancelRequested.set(true)
             }
-            session.process.get()?.let { process -> runCatching { process.destroy() } }
+            terminate(session)
         }
         workerPool.shutdownNow()
         pumpPool.shutdownNow()
@@ -166,7 +172,12 @@ internal class ProcessShizukuShellRunner : ShizukuShellRunner {
                 val builder = ProcessBuilder(listOf("/system/bin/sh", "-s"))
                     .redirectErrorStream(false)
                 session.request.cwd?.let { cwd -> builder.directory(File(cwd)) }
-                process = builder.start()
+                process = synchronized(spawnIdentityLock) {
+                    val childrenBefore = ownChildren()
+                    val spawned = builder.start()
+                    session.remoteIdentity.set(boundRemoteIdentity(childrenBefore, ownChildren()))
+                    spawned
+                }
                 processStarted = true
                 session.process.set(process)
 
@@ -179,7 +190,7 @@ internal class ProcessShizukuShellRunner : ShizukuShellRunner {
 
                 if (session.cancelRequested.get()) {
                     cancelled = true
-                    terminated = terminate(process)
+                    terminated = terminate(session)
                 } else {
                     try {
                         process.outputStream.use { stdin ->
@@ -193,7 +204,7 @@ internal class ProcessShizukuShellRunner : ShizukuShellRunner {
                         } else {
                             errorCode = ShizukuShellLimits.EXECUTION_FAILED
                         }
-                        terminated = terminate(process)
+                        terminated = terminate(session)
                     }
 
                     if (errorCode == null && process.isAlive) {
@@ -206,7 +217,7 @@ internal class ProcessShizukuShellRunner : ShizukuShellRunner {
                         if (!finished) {
                             timedOut = !session.cancelRequested.get()
                             cancelled = session.cancelRequested.get()
-                            terminated = terminate(process)
+                            terminated = terminate(session)
                         } else {
                             synchronized(session.outcomeLock) {
                                 if (session.cancelRequested.get()) {
@@ -238,28 +249,28 @@ internal class ProcessShizukuShellRunner : ShizukuShellRunner {
             Thread.currentThread().interrupt()
             cancelled = session.cancelRequested.get()
             errorCode = if (cancelled) ShizukuShellLimits.CANCELLED else ShizukuShellLimits.EXECUTION_FAILED
-            process?.let { terminated = terminate(it) }
+            run { terminated = terminate(session) }
         } catch (_: IOException) {
             if (session.cancelRequested.get()) {
                 cancelled = true
             } else {
                 errorCode = ShizukuShellLimits.EXECUTION_FAILED
             }
-            process?.let { terminated = if (it.isAlive) terminate(it) else true }
+            run { terminated = if (process?.isAlive == true) terminate(session) else true }
         } catch (_: SecurityException) {
             if (session.cancelRequested.get()) {
                 cancelled = true
             } else {
                 errorCode = ShizukuShellLimits.EXECUTION_FAILED
             }
-            process?.let { terminated = if (it.isAlive) terminate(it) else true }
+            run { terminated = if (process?.isAlive == true) terminate(session) else true }
         } catch (_: RuntimeException) {
             if (session.cancelRequested.get()) {
                 cancelled = true
             } else {
                 errorCode = ShizukuShellLimits.EXECUTION_FAILED
             }
-            process?.let { terminated = if (it.isAlive) terminate(it) else true }
+            run { terminated = if (process?.isAlive == true) terminate(session) else true }
         } finally {
             session.process.set(null)
             if (session.cancelRequested.get() && !timedOut && errorCode == null && !processFinishedNormally) {
@@ -275,10 +286,10 @@ internal class ProcessShizukuShellRunner : ShizukuShellRunner {
             if (!processStarted && cancelled) terminated = true
 
             // Java Process can report the shell itself exited while a pipeline
-            // or background child survives.  This runner has no portable
-            // process-group wait/kill primitive on API 26+, so a dispatched
-            // timeout/cancel is deliberately UNKNOWN even after the shell
-            // process was destroyed.  Callers must never replay it.
+            // or background child survives.  The /proc sweep on terminate is a
+            // best effort — it cannot prove the whole remote tree is gone — so
+            // a dispatched timeout/cancel is deliberately UNKNOWN even after
+            // the shell process was destroyed.  Callers must never replay it.
             val remoteTerminationUnproven = processStarted && (timedOut || cancelled)
             val state = when {
                 !terminated -> "UNKNOWN"
@@ -324,13 +335,106 @@ internal class ProcessShizukuShellRunner : ShizukuShellRunner {
         }
     }
 
-    private fun terminate(process: Process): Boolean {
-        runCatching { process.destroy() }
-        val exited = runCatching { process.waitFor(1, TimeUnit.SECONDS) }.getOrDefault(false)
-        if (exited || !process.isAlive) return true
-        runCatching { process.destroyForcibly() }
-        runCatching { process.waitFor(1, TimeUnit.SECONDS) }
-        return !process.isAlive
+    private fun terminate(session: RunningShell): Boolean {
+        // destroy() only signals the direct child and has been observed to
+        // leave the remote shell and its descendants running after a timeout.
+        // The tree is enumerated BEFORE the root dies — its children reparent
+        // to init and become undiscoverable — and every (pid, start-time) pair
+        // is captured at discovery, so a pid recycled between enumeration and
+        // the kill compares against the discovery snapshot, not against
+        // itself.  The root identity comes from the spawn-time binding, never
+        // re-derived, so an already-exited or recycled root selects no tree at
+        // all.  Only processes this run spawned are in scope.  The whole sweep
+        // is serialized per session so racing cancel/timeout/close callers
+        // cannot interleave a second enumeration between snapshot and kill.
+        synchronized(session.terminateLock) {
+            val process = session.process.get() ?: return true
+            val identity = session.remoteIdentity.get()
+            val captured = if (identity != null) {
+                remoteDescendantsOf(identity, ::remoteChildrenOf, ::remoteStat)
+            } else {
+                emptyList()
+            }
+            runCatching { process.destroy() }
+            val exited = runCatching { process.waitFor(1, TimeUnit.SECONDS) }.getOrDefault(false)
+            if (!exited && process.isAlive) {
+                runCatching { process.destroyForcibly() }
+                runCatching { process.waitFor(1, TimeUnit.SECONDS) }
+            }
+            if (identity != null) {
+                sweepRemoteTree(captured, identity, ::remoteChildrenOf, ::remoteStat, signal = { pid ->
+                    runCatching { android.os.Process.killProcess(pid) }
+                })
+            }
+            if (process.isAlive && identity != null &&
+                remoteStat(identity.pid)?.second == identity.startTime
+            ) {
+                runCatching { android.os.Process.killProcess(identity.pid) }
+                runCatching { process.waitFor(1, TimeUnit.SECONDS) }
+            }
+            return !process.isAlive
+        }
+    }
+
+    /**
+     * Bind the spawned direct child by diffing this process's own /proc
+     * children across the fork.  Exactly one new child is expected; zero
+     * (already exited) or several (concurrent unrelated spawns) degrade to
+     * null, which skips the remote sweep rather than guessing an identity.
+     */
+    private fun boundRemoteIdentity(before: Set<Int>, after: Set<Int>): RemoteIdentity? {
+        val pid = (after - before).singleOrNull() ?: return null
+        val startTime = remoteStat(pid)?.second ?: return null
+        return RemoteIdentity(pid, startTime)
+    }
+
+    private fun ownChildren(): Set<Int> {
+        val tasks = runCatching { File("/proc/self/task").listFiles() }.getOrNull() ?: return emptySet()
+        val pids = HashSet<Int>()
+        tasks.asSequence().filter { it.isDirectory }.forEach { task ->
+            runCatching {
+                File(task, "children").readText().split(' ').forEach { token ->
+                    token.trim().toIntOrNull()?.let(pids::add)
+                }
+            }
+        }
+        return pids
+    }
+
+    /**
+     * One atomic /proc/<pid>/stat read → (ppid, start-time).  Pairing both
+     * fields from a single read is what makes lineage checks meaningful: a
+     * recycled pid holder reports a different start-time, and a foreign
+     * process reports a ppid that does not match the verified parent.
+     */
+    private fun remoteStat(pid: Int): Pair<Int, Long>? = runCatching {
+        val stat = File("/proc/$pid/stat").readText()
+        // Fields after the closing parenthesis of comm: state(3) ppid(4) ...
+        // starttime(22) → indices 0,1,...,19 relative to the split.
+        val fields = stat.substringAfterLast(')').trim().split(' ')
+        fields[1].toInt() to fields[19].toLong()
+    }.getOrNull()
+
+    /**
+     * Direct child pids of [pid] — bare pids only.  Callers read each child's
+     * own stat atomically and require its ppid to equal the verified parent
+     * pid, so a pid recycled between the children listing and the stat read
+     * is rejected instead of being paired with a foreign process's
+     * start-time.
+     */
+    private fun remoteChildrenOf(pid: Int): Sequence<Int> {
+        val tasks = runCatching { File("/proc/$pid/task").listFiles() }.getOrNull()
+            ?: return emptySequence()
+        return tasks.asSequence()
+            .filter { it.isDirectory }
+            .flatMap { task ->
+                runCatching {
+                    File(task, "children").readText()
+                        .split(' ')
+                        .asSequence()
+                        .mapNotNull { it.trim().toIntOrNull() }
+                }.getOrDefault(emptySequence())
+            }
     }
 
     private fun pump(input: InputStream, descriptor: ParcelFileDescriptor, maximum: Int): PumpStats {
@@ -452,6 +556,13 @@ internal class ProcessShizukuShellRunner : ShizukuShellRunner {
         val request: ShizukuShellRunnerRequest,
         val pipes: PipeSet,
         val process: AtomicReference<Process?> = AtomicReference(null),
+        // Remote identity of the spawned shell, bound at spawn time from the
+        // /proc/self children diff — never re-derived later, so a recycled pid
+        // can never stand in for the process this run actually owns.  Written
+        // before `process` is published so a cancel/close racing spawn sees
+        // both or neither.
+        val remoteIdentity: AtomicReference<RemoteIdentity?> = AtomicReference(null),
+        val terminateLock: Any = Any(),
         val cancelRequested: AtomicBoolean = AtomicBoolean(false),
         val outcomeLock: Any = Any(),
         var processFinishedNormally: Boolean = false,
@@ -502,5 +613,143 @@ internal class ProcessShizukuShellRunner : ShizukuShellRunner {
         const val MAX_RETAINED_CALL_IDS = 2048
         const val DEFAULT_BUFFER_BYTES = 16 * 1024
         const val MAX_ENVELOPE_BYTES = 16 * 1024
+    }
+}
+
+/**
+ * Spawn-time identity of a remote process: pid plus the /proc start-time
+ * captured in the same moment, so later checks compare against the identity
+ * this run actually created — not whatever happens to hold the pid now. */
+internal data class RemoteIdentity(val pid: Int, val startTime: Long)
+
+/**
+ * A verified descendant node captured at discovery: its own atomic
+ * (ppid, start-time) stat snapshot plus the parent's identity it was
+ * enumerated under.  The recorded ppid is lineage evidence — the node only
+ * entered the tree because its own stat claimed this parent.
+ */
+internal data class RemoteNode(
+    val pid: Int,
+    val startTime: Long,
+    val ppid: Int,
+    val parentStartTime: Long,
+)
+
+/**
+ * Descendants of [root] in post-order (deepest first), verified per level.
+ * [childrenOf] supplies bare child pids; [statOf] reads one proc stat as
+ * (ppid, start-time).  A child is collected only when its own atomic stat
+ * reports ppid == the parent's pid — a pid recycled between the children
+ * listing and the stat read belongs to a foreign process and is rejected —
+ * AND while the parent still holds its recorded start-time, so a recycled
+ * parent's children listing is never trusted and its whole branch is
+ * dropped.  The root itself is not returned; callers signal it separately.
+ */
+internal fun remoteDescendantsOf(
+    root: RemoteIdentity,
+    childrenOf: (Int) -> Sequence<Int>,
+    statOf: (Int) -> Pair<Int, Long>?,
+    visited: MutableSet<Int> = HashSet(),
+): List<RemoteNode> {
+    visited.add(root.pid)
+    val order = ArrayList<RemoteNode>()
+    fun visit(parent: RemoteNode, out: MutableList<RemoteNode>) {
+        if (statOf(parent.pid)?.second != parent.startTime) return
+        childrenOf(parent.pid).forEach { childPid ->
+            if (childPid in visited) return@forEach
+            val (ppid, start) = statOf(childPid) ?: return@forEach
+            if (ppid != parent.pid) return@forEach
+            if (!visited.add(childPid)) return@forEach
+            val node = RemoteNode(childPid, start, parent.pid, parent.startTime)
+            // Collect this child's branch tentatively.  While it was being
+            // walked the parent may have exited or been recycled — the
+            // children listing that produced it then belongs to a foreign
+            // holder (or an init-reparented stranger) and must be discarded
+            // wholesale rather than attributed to this run's tree.
+            val branch = ArrayList<RemoteNode>()
+            visit(node, branch)
+            if (statOf(parent.pid)?.second != parent.startTime) return
+            // The child's own identity may have flipped while its branch was
+            // walked — a stale node must not enter the result, and neither
+            // may the branch collected beneath it.
+            if (statOf(node.pid)?.second != node.startTime) return@forEach
+            branch.add(node)
+            out.addAll(branch)
+        }
+    }
+    visit(RemoteNode(root.pid, root.startTime, ppid = -1, parentStartTime = -1L), order)
+    return order
+}
+
+/**
+ * Signal every captured node whose identity still verifies: its own atomic
+ * stat must show the recorded start-time (a recycled pid fails) and its ppid
+ * must equal the recorded parent — or init (1), the normal reparent target
+ * for our tree's orphans.  Ancestors are re-verified up to [root]; an
+ * ancestor that still exists but reports a different start-time (recycled)
+ * vetoes the whole descendant branch, while a dead ancestor doesn't — its
+ * reparented children are legitimately ours.  Survivors are re-enumerated
+ * per pass for [maxPasses] rounds so descendants forked during the sweep
+ * window are still collected; the sweep remains best-effort, which is why
+ * callers keep reporting UNKNOWN_OUTCOME rather than claiming the remote
+ * tree is gone.
+ */
+internal fun sweepRemoteTree(
+    captured: List<RemoteNode>,
+    root: RemoteIdentity,
+    childrenOf: (Int) -> Sequence<Int>,
+    statOf: (Int) -> Pair<Int, Long>?,
+    signal: (Int) -> Unit,
+    maxPasses: Int = 2,
+) {
+    val byPid = HashMap<Int, RemoteNode>()
+    captured.forEach { byPid[it.pid] = it }
+    val seen = HashSet(byPid.keys)
+    var frontier = captured
+    var pass = 0
+    while (frontier.isNotEmpty() && pass < maxPasses) {
+        pass++
+        for (node in frontier) {
+            val stat = statOf(node.pid) ?: continue
+            if (stat.second != node.startTime) continue
+            if (stat.first != node.ppid && stat.first != 1) continue
+            var vetoed = false
+            var ancestor = node.ppid
+            var hops = 0
+            while (hops++ < 64) {
+                if (ancestor == root.pid) {
+                    // A dead root is the normal case — destroy() already ran
+                    // and its orphans reparent to init.  Only a live root
+                    // whose start-time moved (pid genuinely recycled by a
+                    // foreign process) vetoes the branch.
+                    val rootStat = statOf(root.pid)
+                    vetoed = rootStat != null && rootStat.second != root.startTime
+                    break
+                }
+                val parentNode = byPid[ancestor] ?: break
+                val parentStat = statOf(ancestor)
+                if (parentStat != null && parentStat.second != parentNode.startTime) {
+                    vetoed = true
+                    break
+                }
+                ancestor = parentNode.ppid
+            }
+            if (!vetoed) signal(node.pid)
+        }
+        // Re-enumerate survivors with the same verified collection the
+        // initial capture used — a parent recycled during this window must
+        // not let a replacement's children be adopted into our tree.
+        val discovered = ArrayList<RemoteNode>()
+        for (node in frontier) {
+            if (statOf(node.pid)?.second != node.startTime) continue
+            discovered += remoteDescendantsOf(
+                RemoteIdentity(node.pid, node.startTime),
+                childrenOf,
+                statOf,
+                seen,
+            )
+        }
+        discovered.forEach { byPid[it.pid] = it }
+        frontier = discovered
     }
 }

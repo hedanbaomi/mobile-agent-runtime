@@ -58,6 +58,8 @@ class WorkspacePickerViewModel(
     val state: StateFlow<WorkspacePickerUiState> = _state.asStateFlow()
 
     private var browseJob: Job? = null
+    private var recentJob: Job? = null
+    private val recentsGate = RecentsFetchGate()
     private var operationGeneration = 0L
     private var currentPage: WorkspaceDirectoryPage? = null
     private var currentContinuation: String? = null
@@ -73,6 +75,34 @@ class WorkspacePickerViewModel(
 
     init {
         refresh()
+        viewModelScope.launch {
+            port.workspaceHealthRevision.collect {
+                if (it > 0) refreshRecent()
+            }
+        }
+    }
+
+    /**
+     * Health bumps refresh only the recent list's access status — the open
+     * browse session, directory stack and selection state are untouched.
+     * [RecentsFetchGate] serialises every writer of `recentWorkspaces`
+     * (this and [refresh]): a fetch started later always wins, so an older
+     * full refresh that resolves late can never overwrite a newer health
+     * refresh — and a stale health fetch can never overwrite the picker
+     * refresh either.
+     */
+    private fun refreshRecent() {
+        recentJob?.cancel()
+        val generation = recentsGate.claim()
+        recentJob = viewModelScope.launch {
+            val recent = withContext(Dispatchers.IO) {
+                runCatching { port.recentWorkspaces(target.agentId) }.getOrDefault(emptyList())
+            }
+            if (!recentsGate.isLatest(generation)) return@launch
+            _state.value = _state.value.copy(
+                recentWorkspaces = recent.map { it.toRecentUi() },
+            )
+        }
     }
 
     fun setTarget(target: WorkspacePickerTarget, label: String = "当前目标") {
@@ -83,6 +113,7 @@ class WorkspacePickerViewModel(
 
     fun refresh() {
         val generation = nextGeneration()
+        val recentGeneration = recentsGate.claim()
         browseJob?.cancel()
         browseJob = viewModelScope.launch {
             val loaded = withContext(Dispatchers.IO) {
@@ -103,7 +134,14 @@ class WorkspacePickerViewModel(
                 mode = mode,
                 authority = authority.toUi(),
                 targetLabel = targetLabel,
-                recentWorkspaces = recent.map { it.toRecentUi() },
+                // A health refresh that started after this fetch already
+                // owns the recent list — keep its newer statuses instead of
+                // writing this older snapshot back over them.
+                recentWorkspaces = if (recentsGate.isLatest(recentGeneration)) {
+                    recent.map { it.toRecentUi() }
+                } else {
+                    _state.value.recentWorkspaces
+                },
                 locations = emptyList(),
                 breadcrumbs = emptyList(),
                 currentLabel = "根目录",
@@ -796,4 +834,17 @@ class WorkspacePickerViewModel(
 
     private var pendingChildLabel: String? = null
     private var pendingStackIndex: Int? = null
+}
+
+/**
+ * Serialises writers of the picker's recent-workspaces list.  Every fetch
+ * claims a monotonically increasing generation; a writer applies its result
+ * only while it still holds the latest claim, so an older fetch that
+ * resolves late can never overwrite a newer list — regardless of whether
+ * the newer one came from a health bump or a full refresh.
+ */
+internal class RecentsFetchGate {
+    private var generation = 0L
+    fun claim(): Long = ++generation
+    fun isLatest(generation: Long): Boolean = generation == this.generation
 }

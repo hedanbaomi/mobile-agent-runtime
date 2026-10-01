@@ -492,14 +492,32 @@ class UnifiedWorkspaceToolExecutor(
     ): Boolean {
         val descriptor = registered.descriptor
         if (!descriptor.enabled) return false
-        if (descriptor.scope == WorkspaceScope.FULL_DEVICE_FILES && dangerousModeProvider() == DangerousMode.DISABLED) {
-            return false
-        }
-        if (descriptor.backendType == WorkspaceBackendType.PRIVILEGED) {
+        if (descriptor.backendType == WorkspaceBackendType.SAF_TREE) {
+            // A dead SAF root is reported by the real adapter as a disabled
+            // live descriptor plus a cleared operation-capability set.  That
+            // is a live-availability signal, not a persistent capability
+            // denial — the grant-backed evaluation below must still pass at
+            // requireLiveReady=false so callers see
+            // AUTHORITY_TEMPORARILY_UNAVAILABLE, not CAPABILITY_DENIED.
+            val safCapabilitiesCleared = registered.backend.capabilities.isEmpty()
+            if (requireLiveReady &&
+                (!registered.backend.descriptor.enabled || safCapabilitiesCleared)
+            ) {
+                return false
+            }
+            if (!safCapabilitiesCleared && !backendSupports(registered.backend, operation)) return false
+        } else if (descriptor.backendType == WorkspaceBackendType.PRIVILEGED) {
             if (!privilegedProviderConfigured(descriptor, context)) return false
             if (requireLiveReady && !privilegedProviderReady(descriptor, context)) return false
         }
-        if (!backendSupports(registered.backend, operation)) return false
+        if (descriptor.scope == WorkspaceScope.FULL_DEVICE_FILES && dangerousModeProvider() == DangerousMode.DISABLED) {
+            return false
+        }
+        if (descriptor.backendType != WorkspaceBackendType.SAF_TREE &&
+            !backendSupports(registered.backend, operation)
+        ) {
+            return false
+        }
         if (!descriptor.readable && !operation.isMutation) return false
         if (operation.isMutation && !descriptor.writable) return false
         return resolver.revalidate(

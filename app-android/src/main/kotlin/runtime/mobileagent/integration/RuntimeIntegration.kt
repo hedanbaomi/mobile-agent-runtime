@@ -18,10 +18,18 @@ import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.async
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.collect
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.withPermit
+import kotlinx.coroutines.withTimeoutOrNull
 import runtime.mobileagent.AgentGrantPort
 import runtime.mobileagent.ThreadWorkspacePort
 import runtime.mobileagent.ThreadWorkspaceRuntimePort
@@ -168,11 +176,13 @@ import runtime.mobileagent.skills.tooling.ApprovalLifecycleEvent
 import runtime.mobileagent.skills.tooling.ApprovalLifecycleSink
 import runtime.mobileagent.skills.tooling.ApprovalLifecycleTransition
 import runtime.mobileagent.skills.tooling.AuthoritySelection
+import runtime.mobileagent.skills.tooling.AuthorityState
 import runtime.mobileagent.skills.tooling.Connection
 import runtime.mobileagent.skills.tooling.ElevatedAuthority
 import runtime.mobileagent.skills.tooling.PlatformGrant
 import runtime.mobileagent.skills.tooling.ShellAuditSink
 import runtime.mobileagent.skills.tooling.ShellExecutor
+import runtime.mobileagent.skills.tooling.WorkspaceBackend
 import runtime.mobileagent.skills.tooling.ToolErrorCode
 import runtime.mobileagent.tooling.ApprovalEngine
 import runtime.mobileagent.tooling.AuthorityManager
@@ -231,6 +241,40 @@ internal fun safRequestedFlags(resultFlags: Int): Int =
     (resultFlags and (Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION))
         .takeIf { it != 0 }
         ?: (Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
+
+/**
+ * Records each authority's latest readiness and returns the authorities whose
+ * own not-ready -> ready edge just fired and therefore hold stale remote
+ * handles to sweep.  The edge is evaluated per authority — including one that
+ * restarts while unselected — and is currently scoped to Shizuku; wired-ADB
+ * workspaces recover through their own bridge reconnect.  Every observed
+ * authority's readiness is recorded on every call so an edge is never
+ * consumed early or missed late.
+ */
+internal fun privilegedReadyEdgeAuthorities(
+    statuses: Map<ElevatedAuthority, AuthorityState>,
+    readySeen: MutableMap<ElevatedAuthority, Boolean>,
+): Set<ElevatedAuthority> {
+    val sweep = mutableSetOf<ElevatedAuthority>()
+    statuses.forEach { (authority, status) ->
+        if (authority == ElevatedAuthority.SHIZUKU &&
+            status.isReady && readySeen[authority] == false
+        ) {
+            sweep += authority
+        }
+        readySeen[authority] = status.isReady
+    }
+    return sweep
+}
+
+/**
+ * Whether a missing privileged binding row makes a registered workspace an
+ * orphan worth unregistering.  Wired-ADB workspaces carry no sealed binding
+ * by contract — they re-establish through the wired bridge — so a missing
+ * binding is normal there, not orphan evidence.
+ */
+internal fun missingBindingIsOrphan(authority: Authority?): Boolean =
+    authority != Authority.WIRED_ADB
 
 /**
  * Non-sensitive counts used to explain why a run did or did not receive workspace tools.
@@ -377,6 +421,21 @@ class RuntimeIntegration(
         get() = workspaceAccessAdapter
 
     private var previousSelection: Authority? = null
+    private val authorityReadySeen = HashMap<ElevatedAuthority, Boolean>()
+    private val safLivenessProbe = SafLivenessProbe(
+        scope = scope,
+        isRegisteredBackend = { workspaceId, backend ->
+            workspaceRegistry.registered(workspaceId)?.backend === backend
+        },
+        probeIntervalMs = SAF_LIVENESS_PROBE_INTERVAL_MS,
+        probeDeadlineMs = SAF_LIVENESS_PROBE_DEADLINE_MS,
+    )
+    private fun isSafDown(workspaceId: String, backend: WorkspaceBackend) =
+        safLivenessProbe.isDown(workspaceId, backend)
+
+    /** Bumped whenever a SAF probe flips a workspace's health — the UI
+     *  collects this to re-run workspace listings without navigation. */
+    override val workspaceHealthRevision: StateFlow<Long> = safLivenessProbe.revision
     private val shizukuPermissionRequestPending = AtomicBoolean(false)
     private val shizukuStateListener: (ShizukuAuthorityState) -> Unit = { state ->
         applyShizukuState(state)
@@ -1638,6 +1697,24 @@ class RuntimeIntegration(
         privilegedWorkspaceBindingRepository.list()
             .filter { it.status != PrivilegedWorkspaceBindingStatus.REVOKED }
             .forEach { binding -> workspaceRegistry.unregister(binding.workspaceId) }
+        // Registered privileged workspaces without an active binding carry no
+        // recovery locator (for example full-device rows opened before bindings
+        // were persisted for that scope).  They can never re-attach, so they
+        // must not stay listed as available.  Wired-ADB workspaces are exempt:
+        // they carry no sealed binding by contract and recover through their
+        // own bridge reconnect, so a missing binding is normal there.
+        workspaceRegistry.descriptors()
+            .filter { it.backendType == WorkspaceBackendType.PRIVILEGED }
+            .forEach { descriptor ->
+                val authority = workspaceRepository.get(descriptor.id)
+                    ?.rootReference?.removePrefix("authority:")
+                    ?.let { runCatching { Authority.valueOf(it) }.getOrNull() }
+                if (!missingBindingIsOrphan(authority)) return@forEach
+                val binding = privilegedWorkspaceBindingRepository.get(descriptor.id)
+                if (binding == null || binding.status == PrivilegedWorkspaceBindingStatus.REVOKED) {
+                    workspaceRegistry.unregister(descriptor.id)
+                }
+            }
         schedulePrivilegedWorkspaceReattach()
     }
 
@@ -1649,14 +1726,17 @@ class RuntimeIntegration(
         privilegedWorkspaceBindingRepository.forAuthority(selected)
             .asSequence()
             .filter { binding ->
-                binding.scope == WorkspaceScope.SELECTED_DIRECTORY &&
-                    binding.status !in setOf(
-                        PrivilegedWorkspaceBindingStatus.REVOKED,
-                        PrivilegedWorkspaceBindingStatus.BINDING_UNRECOVERABLE,
-                        PrivilegedWorkspaceBindingStatus.GRANT_LOST,
-                    ) &&
+                binding.status !in setOf(
+                    PrivilegedWorkspaceBindingStatus.REVOKED,
+                    PrivilegedWorkspaceBindingStatus.BINDING_UNRECOVERABLE,
+                    PrivilegedWorkspaceBindingStatus.GRANT_LOST,
+                ) &&
                     workspaceRegistry.registered(binding.workspaceId) == null &&
-                    workspaceRepository.get(binding.workspaceId)?.enabled == true
+                    workspaceRepository.get(binding.workspaceId)?.enabled == true &&
+                    (
+                        binding.scope != WorkspaceScope.FULL_DEVICE_FILES ||
+                            fullDeviceFilesGrantRepository.load(binding.workspaceId) != null
+                        )
             }
             .forEach { binding ->
                 if (!reattachInFlight.add(binding.workspaceId)) return@forEach
@@ -1718,6 +1798,16 @@ class RuntimeIntegration(
         } finally {
             recovered.fill(0)
         }
+        val fullDeviceGrantRevision = if (binding.scope == WorkspaceScope.FULL_DEVICE_FILES) {
+            val grant = fullDeviceFilesGrantRepository.load(workspaceId)
+            if (grant == null) {
+                failPrivilegedReattach(binding, PrivilegedWorkspaceBindingStatus.GRANT_LOST, "GRANT_LOST", startedAt)
+                return
+            }
+            grant.revision
+        } else {
+            null
+        }
         val reopened = try {
             provider.reopenDirectory(
                 WorkspaceReattachRequest(
@@ -1725,6 +1815,7 @@ class RuntimeIntegration(
                     displayName = workspace.displayName,
                     recoveryLocator = locator,
                     scope = binding.scope,
+                    grantRevision = fullDeviceGrantRevision,
                 ),
             )
         } catch (cancelled: kotlinx.coroutines.CancellationException) {
@@ -2210,6 +2301,23 @@ class RuntimeIntegration(
                     )
                 }
                 recordAuthorityConfigurationSnapshot(DiagnosticAuthorityConfigurationReason.SNAPSHOT, state)
+                // A privileged UserService restart kills every remote workspace
+                // handle while the local registry entries stay registered and
+                // look alive to enumerate.  The edge is evaluated per authority
+                // — including an authority that restarts while unselected,
+                // whose stale handles would otherwise survive the later
+                // switch — and drops that authority's stale entries so the
+                // reattach pass below actually re-opens them instead of
+                // skipping them.  Reattach itself stays selected-only;
+                // wired-ADB workspaces keep their own bridge-reconnect
+                // lifecycle and are never swept here.
+                privilegedReadyEdgeAuthorities(state.statuses, authorityReadySeen)
+                    .forEach { authority ->
+                        privilegedWorkspaceBindingRepository.forAuthority(authority)
+                            .asSequence()
+                            .filter { it.status != PrivilegedWorkspaceBindingStatus.REVOKED }
+                            .forEach { workspaceRegistry.unregister(it.workspaceId) }
+                    }
                 schedulePrivilegedWorkspaceReattach()
             }
         }
@@ -2511,6 +2619,16 @@ class RuntimeIntegration(
         }
         val registered = workspaceRegistry.registered(workspace.id)
         if (registered == null) return WorkspaceAccessStatus.UNAVAILABLE
+        if (workspace.backendType == WorkspaceBackendType.SAF_TREE) {
+            // A live SAF probe runs a provider root query + children listing;
+            // doing it here would block the caller — this path runs on the UI
+            // thread via listWorkspaces.  Schedule a bounded, throttled probe
+            // instead.  A dead or wedged provider marks the tree transient-
+            // down: it stays bound, reports UNAVAILABLE, and the throttled
+            // re-probe below restores it automatically once SAF recovers.
+            scheduleSafLivenessProbe(workspace.id, registered.backend)
+            if (isSafDown(workspace.id, registered.backend)) return WorkspaceAccessStatus.UNAVAILABLE
+        }
         if (workspace.backendType == WorkspaceBackendType.PRIVILEGED) {
             val authority = workspace.rootReference.removePrefix("authority:")
                 .let { runCatching { Authority.valueOf(it) }.getOrNull() }
@@ -2528,6 +2646,12 @@ class RuntimeIntegration(
         }
         return WorkspaceAccessStatus.ACTIVE
     }
+
+    private fun scheduleSafLivenessProbe(workspaceId: String, backend: WorkspaceBackend) {
+        safLivenessProbe.schedule(workspaceId, backend)
+    }
+
+
 
     private fun safeWorkspaceDisplayName(
         workspace: Workspace,
@@ -3547,11 +3671,77 @@ class RuntimeIntegration(
             createdAt = existing?.createdAt.orEmpty(),
             scope = WorkspaceScope.FULL_DEVICE_FILES,
         )
+        // Persist the sealed recovery locator exactly like a selected-directory
+        // attachment — but only when the provider supplies one.  Shizuku
+        // attachments must carry it: the remote file-service handle dies with
+        // its process and the sealed locator is the only material a later
+        // reattach can re-open.  Wired-ADB full-device attachments carry no
+        // locator by contract — the wired bridge re-establishes its own
+        // session on reconnect — so requiring one rejected every wired attach
+        // as UNSUPPORTED.
+        val recoveryLocator = value.recoveryLocator
+        if (recoveryLocator == null && authority != Authority.WIRED_ADB) {
+            rollbackNewFullDeviceGrant()?.let { return it }
+            return workspaceAccessFailure(WorkspaceAccessErrorCode.UNSUPPORTED)
+        }
+        val locatorVersion = PRIVILEGED_LOCATOR_VERSION
+        val locatorEnvelope = recoveryLocator?.let { locator ->
+            val locatorBytes = runCatching { locator.copyBytes() }.getOrNull()
+            if (locatorBytes == null) {
+                locator.clear()
+                rollbackNewFullDeviceGrant()?.let { return it }
+                return workspaceAccessFailure(WorkspaceAccessErrorCode.PERSISTENCE_FAILED)
+            }
+            val bindingAad = PrivilegedWorkspaceBindingAad(
+                appInstanceId = appInstanceId,
+                workspaceId = workspace.id,
+                authority = authority,
+                locatorVersion = locatorVersion,
+            )
+            try {
+                when (val sealed = bindingCipher.seal(locatorBytes, bindingAad)) {
+                    is PrivilegedWorkspaceBindingSealResult.Success -> sealed.envelope
+                    is PrivilegedWorkspaceBindingSealResult.Failure -> {
+                        rollbackNewFullDeviceGrant()?.let { return it }
+                        return workspaceAccessFailure(WorkspaceAccessErrorCode.PERSISTENCE_FAILED)
+                    }
+                }
+            } finally {
+                locatorBytes.fill(0)
+                locator.clear()
+            }
+        }
+        val previousBinding = privilegedWorkspaceBindingRepository.get(workspace.id)
+        val binding = locatorEnvelope?.let { envelope ->
+            PrivilegedWorkspaceBinding(
+                workspaceId = workspace.id,
+                authority = authority,
+                encryptedLocator = envelope.encryptedLocator,
+                locatorNonce = envelope.locatorNonce,
+                locatorVersion = locatorVersion,
+                keyVersion = PRIVILEGED_BINDING_KEY_VERSION,
+                aadAppInstanceId = appInstanceId,
+                scope = WorkspaceScope.FULL_DEVICE_FILES,
+                status = PrivilegedWorkspaceBindingStatus.ACTIVE,
+                revision = (previousBinding?.revision ?: 0L) + 1L,
+                createdAt = previousBinding?.createdAt.orEmpty(),
+            )
+        }
         val grants = try {
-            persistWorkspaceAndGrants(workspace, value.backend, grant)
+            db.transaction {
+                workspaceRepository.save(workspace)
+                binding?.let { privilegedWorkspaceBindingRepository.save(it) }
+                grant?.let { persistWorkspaceGrantBundle(workspace, value.backend, it) }.orEmpty()
+            }
         } catch (failure: WorkspaceAccessException) {
             rollbackNewFullDeviceGrant()?.let { return it }
             return workspaceAccessFailure(failure.accessCode)
+        } catch (_: AuthorityPolicyConflictException) {
+            rollbackNewFullDeviceGrant()?.let { return it }
+            return workspaceAccessFailure(WorkspaceAccessErrorCode.CONFLICT)
+        } catch (_: RuntimeException) {
+            rollbackNewFullDeviceGrant()?.let { return it }
+            return workspaceAccessFailure(WorkspaceAccessErrorCode.PERSISTENCE_FAILED)
         }
         try {
             workspaceRegistry.registerOrReplace(workspace, value.backend)
@@ -3963,6 +4153,8 @@ class RuntimeIntegration(
         const val SAF_WORKSPACE_ID = "saf-tree"
         private const val PRIVILEGED_LOCATOR_VERSION = 1
         private const val PRIVILEGED_BINDING_KEY_VERSION = 1
+        private const val SAF_LIVENESS_PROBE_INTERVAL_MS = 2_000L
+        private const val SAF_LIVENESS_PROBE_DEADLINE_MS = 800L
     }
 }
 
@@ -4566,3 +4758,115 @@ internal fun isWholeDirectoryPersistentGrant(grant: CapabilityGrant, agentId: St
         grant.skillInstallId == null && grant.packageHash == null && grant.pathScope == null &&
         grant.lifetime == runtime.mobileagent.domain.GrantLifetime.PERSISTENT &&
         grant.taskId == null && grant.sessionId == null
+
+/**
+ * Bounded, off-thread liveness probes for SAF trees.
+ *
+ * A wedged documents provider can hang a descriptor read indefinitely, and
+ * ContentResolver.query does not respond to coroutine cancellation, so the
+ * deadline is independent of worker completion: the query runs on a bounded
+ * worker and the scheduling coroutine only awaits it up to [probeDeadlineMs].
+ * A deadline miss abandons the result but always clears single-flight state,
+ * so the caller can re-arm probes rather than silently wedging.
+ *
+ * Health is stored per backend *instance* (workspace id → the exact backend
+ * the result belongs to), so a stale result landing after the registry
+ * swapped in a replacement can never mark the replacement down — reads
+ * compare identity, writes are guarded by registration to that same
+ * instance.  A workspace marked down keeps its registration and self-rearms
+ * a retry each [probeIntervalMs] until it reports healthy or is unbound, so
+ * recovery does not depend on another UI refresh.
+ *
+ * Each permit is owned by the probe's real worker, not by the decision
+ * window: a wedged provider that ignores interruption keeps occupying its
+ * slot until it truly finishes, so repeated probes can never exceed
+ * [maxWorkers] live workers.  The decision still lands at the deadline —
+ * `inFlight` is released then — only the slot outlives it.
+ */
+internal class SafLivenessProbe(
+    private val scope: CoroutineScope,
+    private val isRegisteredBackend: (String, WorkspaceBackend) -> Boolean,
+    private val probeIntervalMs: Long = 2_000L,
+    private val probeDeadlineMs: Long = 800L,
+    private val maxWorkers: Int = 4,
+    private val now: () -> Long = { System.currentTimeMillis() },
+) {
+    private val inFlight = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
+    private val probedAt = java.util.concurrent.ConcurrentHashMap<String, Long>()
+    private val down = java.util.concurrent.ConcurrentHashMap<String, WorkspaceBackend>()
+    internal val retryJobs = java.util.concurrent.ConcurrentHashMap<String, Job>()
+    private val retryBackend = java.util.concurrent.ConcurrentHashMap<String, WorkspaceBackend>()
+    private val workers = kotlinx.coroutines.sync.Semaphore(maxWorkers)
+    private val _revision = MutableStateFlow(0L)
+    val revision: StateFlow<Long> = _revision
+
+    /** Whether [backend] — the currently registered instance — is marked down. */
+    fun isDown(workspaceId: String, backend: WorkspaceBackend): Boolean =
+        down[workspaceId] === backend
+
+    fun schedule(workspaceId: String, backend: WorkspaceBackend) {
+        val moment = now()
+        val last = probedAt[workspaceId]
+        if (last != null && moment - last < probeIntervalMs) return
+        probedAt[workspaceId] = moment
+        if (!inFlight.add(workspaceId)) return
+        scope.launch {
+            // Acquiring the permit suspends inside the coroutine rather than
+            // abandoning the probe at the caller: a saturated pool only delays
+            // this attempt, it can never silently end the retry loop.
+            workers.withPermit {
+                val worker = async(Dispatchers.IO) {
+                    runCatching { backend.descriptor.enabled }.getOrDefault(false)
+                }
+                try {
+                    val alive = withTimeoutOrNull(probeDeadlineMs) { worker.await() } ?: false
+                    if (isRegisteredBackend(workspaceId, backend)) {
+                        val changed = if (alive) {
+                            down.remove(workspaceId, backend)
+                        } else {
+                            down.put(workspaceId, backend) !== backend
+                        }
+                        if (changed) _revision.value += 1
+                        if (!alive) ensureRetryLoop(workspaceId, backend)
+                    }
+                } finally {
+                    inFlight.remove(workspaceId)
+                }
+                // The permit outlives the decision window: it is released only
+                // when the worker actually finishes — a wedged provider keeps
+                // its slot, bounding live workers at maxWorkers no matter how
+                // often schedule() is called again.
+                worker.await()
+            }
+        }
+    }
+
+    /**
+     * One retry loop per backend instance: while the workspace stays down,
+     * each interval re-attempts schedule() — throttle, in-flight rejection
+     * and pool saturation only defer an attempt to the next interval, they
+     * never end the loop.  The loop exits on its own once the entry is
+     * healthy (or taken over by another generation), when the backend is no
+     * longer the registered instance, or when the job is cancelled — a
+     * replacement under the same workspace id never inherits the old
+     * backend's timer.
+     */
+    private fun ensureRetryLoop(workspaceId: String, backend: WorkspaceBackend) {
+        retryJobs.compute(workspaceId) { _, existing ->
+            if (existing?.isActive == true && retryBackend[workspaceId] === backend) {
+                existing
+            } else {
+                existing?.cancel()
+                retryBackend[workspaceId] = backend
+                scope.launch {
+                    while (coroutineContext.isActive) {
+                        delay(probeIntervalMs)
+                        if (!isRegisteredBackend(workspaceId, backend)) break
+                        if (down[workspaceId] !== backend) break
+                        schedule(workspaceId, backend)
+                    }
+                }
+            }
+        }
+    }
+}

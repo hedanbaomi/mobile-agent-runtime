@@ -286,6 +286,53 @@ class ShizukuShellRunnerTest {
         fake.close()
     }
 
+    @Test
+    fun destroyInternalAllowsPrivilegedCallerOnceAndStillFailsClosedForAppUid() {
+        val fake = RecordingRunner()
+        val exits = java.util.concurrent.atomic.AtomicInteger(0)
+        val service = ShizukuUserService(fake, Unit)
+        service.destroyExitHook = { exits.incrementAndGet() }
+
+        // Unrelated binder holders stay refused before the door opens.
+        service.destroyInternal(10999, 2000)
+        assertEquals(0, exits.get())
+        assertEquals(0, fake.closeCalls)
+
+        // The legitimate server caller (shell uid matching the service uid)
+        // closes the shell runner and runs the exit hook exactly once.
+        service.destroyInternal(2000, 2000)
+        assertEquals(1, exits.get())
+        assertEquals(1, fake.closeCalls)
+
+        // Repeats are idempotent: no second close, no second exit.
+        service.destroyInternal(2000, 2000)
+        assertEquals(1, exits.get())
+        assertEquals(1, fake.closeCalls)
+
+        // An app-embedded service instance (uid is an app uid, not shell or
+        // root) fails closed even when the caller uid matches it.
+        val embeddedFake = RecordingRunner()
+        val embedded = ShizukuUserService(embeddedFake, Unit)
+        embedded.destroyExitHook = { exits.incrementAndGet() }
+        embedded.destroyInternal(android.os.Process.myUid(), android.os.Process.myUid())
+        assertEquals(1, exits.get())
+        assertEquals(0, embeddedFake.closeCalls)
+    }
+
+    @Test
+    fun concurrentDestroyRunsTeardownAndExitExactlyOnce() {
+        val fake = RecordingRunner()
+        val exits = java.util.concurrent.atomic.AtomicInteger(0)
+        val service = ShizukuUserService(fake, Unit)
+        service.destroyExitHook = { exits.incrementAndGet() }
+        val threads = (1..8).map {
+            kotlin.concurrent.thread { service.destroyInternal(2000, 2000) }
+        }
+        threads.forEach { it.join() }
+        assertEquals(1, exits.get())
+        assertEquals(1, fake.closeCalls)
+    }
+
     private fun request(
         callId: String,
         command: String,

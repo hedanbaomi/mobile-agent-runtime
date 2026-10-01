@@ -5,6 +5,8 @@ package runtime.mobileagent
 
 import android.content.Intent
 import android.net.Uri
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.emptyFlow
 import runtime.mobileagent.domain.Authority
 import runtime.mobileagent.integration.WorkspaceAccessItem
 import runtime.mobileagent.integration.WorkspaceAccessResult
@@ -84,6 +86,15 @@ interface WorkspacePickerPort {
     fun authoritySnapshot(): WorkspacePickerAuthoritySnapshot
 
     fun recentWorkspaces(agentId: String? = null): List<WorkspaceAccessItem> = emptyList()
+
+    /**
+     * Bumped whenever a workspace's transient health verdict changes (e.g. a
+     * SAF tree probing down or recovering).  The picker refreshes only its
+     * recent list on a bump — browsing state and the current selection are
+     * left untouched.
+     */
+    val workspaceHealthRevision: Flow<Long>
+        get() = emptyFlow()
 
     suspend fun browsePrivilegedRoot(
         authority: Authority,

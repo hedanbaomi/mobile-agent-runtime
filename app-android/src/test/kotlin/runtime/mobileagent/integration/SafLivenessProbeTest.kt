@@ -133,11 +133,14 @@ class SafLivenessProbeTest {
 
     @Test
     fun `a saturated pool only delays recovery — the retry loop keeps probing`() {
-        // One wedged worker holds the only permit while w2 goes down; the
-        // retry loop must not die on pool saturation — once the permit frees,
-        // the next interval probes again and clears the verdict.
+        // One wedged worker holds the only permit; w2's probe coroutine
+        // suspends on withPermit behind it.  Call counts prove the queue
+        // really waited (zero probes while held) and really ran once freed —
+        // then the armed retry loop observes the recovery on its own.
         val hold = CountDownLatch(1)
+        val wedgedCalls = java.util.concurrent.atomic.AtomicInteger()
         val wedged = backend {
+            wedgedCalls.incrementAndGet()
             while (true) {
                 try {
                     hold.await()
@@ -148,17 +151,20 @@ class SafLivenessProbeTest {
             true
         }
         var live = false
+        val w2Calls = java.util.concurrent.atomic.AtomicInteger()
         val probe = probe(intervalMs = 40L, deadlineMs = 30L, maxWorkers = 1)
         probe.schedule("w1", wedged)
-        val b = backend { live }
-        Thread.sleep(60) // let w1 take the only permit slot
+        val b = backend { w2Calls.incrementAndGet(); live }
+        awaitUntil { wedgedCalls.get() >= 1 } // w1 inside the only slot
         probe.schedule("w2", b)
-        awaitUntil { probe.isDown("w2", b) }
-        live = true
-        // Without any further schedule() calls the armed loop must survive
-        // the saturated pool and still observe the recovery.
+        Thread.sleep(120) // several retry intervals pass while saturated
+        assertEquals(0, w2Calls.get()) // queued behind the held permit, not dropped
         hold.countDown()
-        awaitUntil { !probe.isDown("w2", b) && probe.revision.value >= 2L }
+        // The queued probe now runs, reports w2 down (live=false), and arms
+        // the loop — no further schedule() calls from here.
+        awaitUntil { probe.isDown("w2", b) && w2Calls.get() >= 1 }
+        live = true
+        awaitUntil { !probe.isDown("w2", b) && w2Calls.get() >= 2 && probe.revision.value >= 2L }
         assertFalse(probe.isDown("w2", b))
     }
 
@@ -182,11 +188,15 @@ class SafLivenessProbeTest {
     @Test
     fun `a same-id replacement exits the old backend's retry timer`() {
         // Old backend goes down and arms its loop; a replacement registered
-        // under the same id must get its own loop — the stale one exits
-        // instead of probing a backend that is no longer bound.
+        // under the same id takes over the slot — the stale loop stops
+        // calling the old backend, and the fresh backend goes through its
+        // own down → healthy cycle on its own retry loop.
         val registered = java.util.concurrent.atomic.AtomicReference<WorkspaceBackend>()
-        val old = backend { false }
-        val fresh = backend { true }
+        val oldCalls = java.util.concurrent.atomic.AtomicInteger()
+        var freshLive = false
+        val freshCalls = java.util.concurrent.atomic.AtomicInteger()
+        val old = backend { oldCalls.incrementAndGet(); false }
+        val fresh = backend { freshCalls.incrementAndGet(); freshLive }
         registered.set(old)
         val probe = probe(
             registered = { _, backend -> registered.get() === backend },
@@ -194,16 +204,20 @@ class SafLivenessProbeTest {
             deadlineMs = 60L,
         )
         probe.schedule("w1", old)
-        awaitUntil { probe.isDown("w1", old) }
+        awaitUntil { probe.isDown("w1", old) && oldCalls.get() >= 2 }
         registered.set(fresh)
+        val oldCallsAtSwap = oldCalls.get()
+        // The replacement's first probe fails too — it goes down on its own
+        // loop, then recovers without any external re-schedule.
         probe.schedule("w1", fresh)
-        // The replacement is healthy on its own probe — the down entry stays
-        // keyed to the old instance (isDown compares identity, so it cannot
-        // leak onto fresh), and the old backend's timer self-exits instead of
-        // probing a backend that is no longer bound.
-        awaitUntil { probe.retryJobs["w1"]?.isActive != true }
+        awaitUntil { probe.isDown("w1", fresh) && freshCalls.get() >= 1 }
+        freshLive = true
+        awaitUntil { !probe.isDown("w1", fresh) && freshCalls.get() >= 2 }
+        // The stale loop for the old backend is gone — it neither probes the
+        // old instance nor occupies the retry slot.
+        assertEquals(oldCallsAtSwap, oldCalls.get())
         assertFalse(probe.isDown("w1", fresh))
-        assertEquals(1L, probe.revision.value)
+        assertTrue(probe.revision.value >= 3L) // old down + fresh down + fresh healthy
     }
 
     @Test
@@ -249,6 +263,7 @@ class SafLivenessProbeTest {
             if (cond()) return
             Thread.sleep(5)
         }
+        org.junit.jupiter.api.Assertions.fail<Unit>("awaitUntil timed out after 5s")
     }
 
     private fun awaitQuietly() = Thread.sleep(300)

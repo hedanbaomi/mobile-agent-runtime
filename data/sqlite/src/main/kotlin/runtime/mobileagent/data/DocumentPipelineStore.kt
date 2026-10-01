@@ -70,6 +70,15 @@ internal class DocumentPipelineStore(private val db: SqlConnection) {
 
     /** Only process-death recovery calls this; a live request must retain its terminal-write right. */
     fun recover(jobId: String) = db.transaction {
+        // Transport diagnostics are durable facts too. A lost owner must not
+        // leave PREPARED/IN_PROGRESS rows looking live after its dispatch slot
+        // has been reduced to UNKNOWN. Preserve the recorded dispatch status:
+        // an uncertain result does not prove the request reached the provider.
+        db.execute(
+            "UPDATE vision_attempts SET status='UNKNOWN_OUTCOME',error_code='PROCESS_INTERRUPTED',updated_at=? " +
+                "WHERE job_id=? AND status IN ('PREPARED','IN_PROGRESS')",
+            listOf(Utc.nowIso(), jobId),
+        )
         db.execute(
             """
             UPDATE pipeline_units 

@@ -10,6 +10,7 @@ import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.Image
+import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -484,6 +485,23 @@ private fun ChatConversationContent(
                 )
                 UnboundWorkspaceDefaultCard(state, actions)
                 if (state.status.isNotBlank()) StatusLine(state.status, state.statusKind)
+                if (state.textDegradation) {
+                    Text(if (state.language.equals("zh-CN", true)) "纯文本模式：原始图片不会发送给模型，视觉证据可能不完整。"
+                        else "Text-only mode: original images are not sent to the model; visual evidence may be incomplete.",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.tertiary,
+                        modifier = Modifier.testTag("conversation.visualDegradation"))
+                }
+                if (!state.streaming && (state.status.contains("压缩失败") || state.status.contains("预算不足") ||
+                        state.status.contains("CONTEXT_OVERFLOW") || state.error?.contains("预算不足") == true ||
+                        state.messages.lastOrNull()?.eventSummary?.let { it.contains("压缩失败") || it.contains("预算不足") } == true)) {
+                    Text(if (state.language.equals("zh-CN", true)) "原始历史保留。可在智能体设置调整配置后新建会话；新会话不会自动复制历史或重做工具。"
+                        else "Original history is retained. Adjust the Agent settings and start a new conversation; history and tool actions are not replayed.",
+                        style = MaterialTheme.typography.bodySmall)
+                    OutlinedButton(onClick = actions.onNewSession, modifier = Modifier.testTag("conversation.contextRecovery.new")) {
+                        Text(if (state.language.equals("zh-CN", true)) "保留历史并新建会话" else "Keep history and start a new conversation")
+                    }
+                }
                 val listState = rememberLazyListState()
                 val scrollScope = rememberCoroutineScope()
                 val timeline = remember(state.messages) { groupConversationMessages(state.messages) }
@@ -1155,7 +1173,15 @@ private fun MessageBubble(
                     }
                     orderedMessages.forEach { part ->
                         if (isToolEventRow(part.role)) ToolEventRow(part, zh, Modifier.padding(top = 4.dp))
-                        else if (part.text.isNotBlank()) Text(part.text, Modifier.padding(top = 4.dp))
+                        else if (part.text.isNotBlank()) SelectionContainer {
+                            if (part.role.equals("assistant", true)) MarkdownText(part.text, Modifier.padding(top = 4.dp))
+                            else Text(part.text, Modifier.padding(top = 4.dp))
+                        }
+                    }
+                    if (!user && orderedMessages.none { it.text.isNotBlank() || it.reasoning.isNotBlank() || isToolEventRow(it.role) }) {
+                        Text(if (zh) "尚无可见输出；请查看本轮运行状态，不会自动重发。"
+                            else "No visible output yet. Check the run status; this request is not automatically resent.",
+                            style = MaterialTheme.typography.bodySmall, modifier = Modifier.testTag("conversation.emptyAnswer.${message.id}"))
                     }
                     // Supplementary disclosure, never a substitute for the answer:
                     // shown only when it adds information the answer text does not
@@ -1197,11 +1223,13 @@ private fun MessageBubble(
 
 @Composable
 private fun ToolEventRow(message: ChatMessageUi, zh: Boolean, modifier: Modifier = Modifier) {
+    var expanded by rememberSaveable(message.id) { mutableStateOf(false) }
     Surface(
         color = MaterialTheme.colorScheme.surfaceVariant,
         shape = RoundedCornerShape(8.dp),
         modifier = modifier.testTag("conversation.tool.${message.id}"),
     ) {
+        Column {
         Row(
             Modifier
                 .fillMaxWidth()
@@ -1220,6 +1248,9 @@ private fun ToolEventRow(message: ChatMessageUi, zh: Boolean, modifier: Modifier
                 overflow = TextOverflow.Ellipsis,
                 modifier = Modifier.padding(start = 8.dp),
             )
+        }
+        TextButton(onClick = { expanded = !expanded }) { Text(if (expanded) { if (zh) "收起" else "Collapse" } else { if (zh) "查看并复制工具结果" else "View and copy tool result" }) }
+        if (expanded) SelectionContainer { Text(message.text, modifier = Modifier.padding(12.dp)) }
         }
     }
 }
@@ -1407,7 +1438,7 @@ private fun Composer(state: ChatUiState, actions: ChatActions) {
         OutlinedTextField(
             value = state.input,
             onValueChange = actions.onInput,
-            enabled = !state.streaming && state.pendingTool == null,
+            enabled = state.pendingTool == null,
             placeholder = { Text(if (zh) "继续提问…" else "Ask a follow-up…") },
             minLines = 1,
             maxLines = 5,
@@ -1605,7 +1636,7 @@ fun RequestInspectorScreen(
             val message = when (effectiveAvailability) {
                 ChatRequestInspectorAvailability.DISABLED -> if (zh) "请求检查器已关闭，请到设置开启。" else "Request inspection is disabled. Enable it in Settings."
                 ChatRequestInspectorAvailability.NOT_PREPARED -> if (zh) "请求尚未准备。发送消息并完成请求准备后，这里会显示脱敏请求。" else "The request is not prepared yet. A redacted request will appear after a message is prepared."
-                ChatRequestInspectorAvailability.CONTEXT_LOST -> if (zh) "请求检查器上下文已丢失，请返回对话后重试。" else "The request inspector context was lost. Return to the conversation and try again."
+                ChatRequestInspectorAvailability.CONTEXT_LOST -> if (zh) "此前的请求预览未保留。请求内容仅保存在本次进程内；确认运行状态后主动发送新消息，才能查看新的脱敏请求。不会为检查器自动重发旧请求。" else "The earlier request preview is no longer available. Request contents are kept only in this process. Check the run status before explicitly sending a new message to inspect a new redacted request. Old requests are not resent for inspection."
                 ChatRequestInspectorAvailability.READY -> error("READY without a request is normalized above")
             }
             Text(message, modifier = Modifier.padding(top = 16.dp).testTag("chat.requestInspector.state"))

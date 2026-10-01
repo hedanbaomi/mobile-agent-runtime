@@ -20,7 +20,7 @@ import runtime.mobileagent.provider.ModelRequest
 import runtime.mobileagent.provider.ParameterLayers
 
 /** Durable source identities are separate from provider messages and never sent as protocol fields. */
-data class ContextSource(val messageId: String, val turnId: String)
+data class ContextSource(val messageId: String, val turnId: String, val complete: Boolean = true)
 
 data class RuntimeContext(
     val policy: AgentContextPolicy,
@@ -100,7 +100,7 @@ internal class ContextWindow(prompt: EffectivePrompt, val context: RuntimeContex
             order += source.messageId
             if (source.messageId !in covered) entries += ContextEntry(
                 source, message,
-                fixed = index < prefixSize || source.messageId == currentId || source.messageId == firstUserId,
+                fixed = index < prefixSize || source.messageId == currentId || source.messageId == firstUserId || !source.complete,
             )
         }
         summary?.let {

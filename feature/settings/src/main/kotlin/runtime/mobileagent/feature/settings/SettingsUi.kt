@@ -218,6 +218,7 @@ data class SettingsActions(
 )
 
 @Composable
+@OptIn(ExperimentalLayoutApi::class)
 fun SettingsScreen(
     state: SettingsUiState,
     actions: SettingsActions = SettingsActions(),
@@ -375,21 +376,35 @@ fun SettingsScreen(
                     OutlinedButton(onClick = actions.onImport) { Text(if (zh) "导入" else "Import") }
                 }
                 if (state.exportState.isNotBlank()) Text(state.exportState, style = MaterialTheme.typography.bodySmall)
+                Text(
+                    if (zh) "若导入的会话使用旧 HTTP 地址，请先将服务商改为 HTTPS 并重新输入该目的地密钥，再确认 Agent 配置并显式新建会话。旧会话保留为历史记录，不会修改其冻结目的地或自动转发历史内容。"
+                    else "For an imported conversation using an old HTTP endpoint, configure an HTTPS provider and its credentials, review the Agent, then explicitly start a new conversation. The old conversation remains an archive; its frozen destination and history are not changed or automatically forwarded.",
+                    style = MaterialTheme.typography.bodySmall,
+                )
+                FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedButton(onClick = actions.onOpenProviders) { Text(if (zh) "配置 HTTPS 服务商" else "Configure HTTPS provider") }
+                    OutlinedButton(onClick = actions.onOpenAgents) { Text(if (zh) "确认 Agent 配置" else "Review Agent settings") }
+                }
             }
         }
         Card(Modifier.fillMaxWidth().testTag("settings.feature_entry")) {
             Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 Text(if (zh) "功能入口" else "Feature entry points", style = MaterialTheme.typography.titleMedium)
-                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                FlowRow(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                     FilterChip(selected = false, onClick = actions.onOpenProviders, label = { Text(if (zh) "服务商" else "Providers") })
                     FilterChip(selected = false, onClick = actions.onOpenKnowledge, label = { Text(if (zh) "知识" else "Knowledge") })
                     FilterChip(selected = false, onClick = actions.onOpenSkills, label = { Text(if (zh) "技能" else "Skills") })
                 }
-                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                FlowRow(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                     FilterChip(selected = false, onClick = actions.onOpenAnnouncements, label = { Text(if (zh) "公告" else "News") })
                     OutlinedButton(onClick = actions.onOpenMcpSettings, enabled = state.mcpEntryEnabled) { Text(if (zh) "MCP 设置" else "MCP settings") }
                 }
-                Text(state.mcpDisabledReason, style = MaterialTheme.typography.bodySmall)
+                Text(
+                    if (state.mcpDisabledReason == "适配器报告已配置端点后，MCP 设置才可用。" && !zh)
+                        "MCP settings are available after the adapter reports a configured endpoint."
+                    else state.mcpDisabledReason,
+                    style = MaterialTheme.typography.bodySmall,
+                )
             }
         }
         Card(Modifier.fillMaxWidth().testTag("settings.about")) {

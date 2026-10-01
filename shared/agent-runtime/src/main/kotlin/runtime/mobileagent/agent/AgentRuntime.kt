@@ -880,6 +880,7 @@ class AgentRuntime(
             ToolErrorCode.SYMLINK_FORBIDDEN -> "Symbolic links cannot be followed from this workspace."
             ToolErrorCode.PATH_OUT_OF_SCOPE -> "The requested path is outside the authorized workspace."
             ToolErrorCode.WORKSPACE_NOT_FOUND -> "The selected workspace or entry is no longer available."
+            ToolErrorCode.ENTRY_NOT_FOUND -> "The workspace entry was not found; check the relative path."
             ToolErrorCode.AUTHORITY_TEMPORARILY_UNAVAILABLE,
             ToolErrorCode.BRIDGE_DISCONNECTED,
             ToolErrorCode.ADB_DEVICE_OFFLINE,

@@ -49,6 +49,27 @@ class ShizukuDirectoryHandleStoreTest {
     }
 
     @Test
+    fun directoryPagesFitByteBudgetWithoutLosingNamesOrContinuation() {
+        repeat(300) { index -> File(root, "目录-${index.toString().padStart(3, '0')}-" + "长".repeat(30)).mkdirs() }
+        var encoded = store.openRoot(256)
+        val names = mutableSetOf<String>()
+        var pages = 0
+        while (true) {
+            assertTrue(encoded.toByteArray(Charsets.UTF_8).size <= ShizukuDirectoryHandleStore.MAX_OUTPUT_BYTES)
+            val page = JSONObject(encoded)
+            assertTrue(encoded, page.getBoolean("ok"))
+            val entries = page.getJSONArray("entries")
+            assertTrue(entries.length() > 0)
+            repeat(entries.length()) { index -> assertTrue(names.add(entries.getJSONObject(index).getString("name"))) }
+            assertTrue(++pages <= 20)
+            val cursor = page.optContinuation() ?: break
+            encoded = store.browse(page.getString("handle"), 256, cursor)
+        }
+        assertEquals(302, names.size)
+        assertTrue(pages > 1)
+    }
+
+    @Test
     fun rootAndChildListingUseNamesAndOpaqueHandlesOnly() {
         val rootResponse = JSONObject(store.openRoot(16))
         assertTrue(rootResponse.getBoolean("ok"))

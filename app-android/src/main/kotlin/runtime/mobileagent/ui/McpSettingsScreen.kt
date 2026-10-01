@@ -31,6 +31,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import runtime.mobileagent.McpUiAgent
@@ -63,6 +64,7 @@ fun McpSettingsScreen(
     actions: McpActions = McpActions(),
     modifier: Modifier = Modifier,
     showPageTitle: Boolean = true,
+    chinese: Boolean = true,
 ) {
     var endpoint by remember(state.endpoint) { mutableStateOf(state.endpoint) }
     var namespace by remember(state.namespace) { mutableStateOf(state.namespace.ifBlank { "mcp" }) }
@@ -70,7 +72,7 @@ fun McpSettingsScreen(
     var agentMenu by remember { mutableStateOf(false) }
     var clearRequested by remember { mutableStateOf(false) }
     val selectedAgent = state.agents.firstOrNull { it.id == state.selectedAgentId }
-    val zh = true
+    val zh = chinese
 
     Column(
         modifier = modifier
@@ -143,8 +145,11 @@ fun McpSettingsScreen(
                         style = MaterialTheme.typography.labelSmall,
                     )
                     Text(
-                        if (state.networkApproved) "已完成一次明确的目的地/成本确认；调用仍需逐次批准。"
-                        else "尚未确认目的地/成本；保存配置本身不会联网。",
+                        if (state.networkApproved) {
+                            if (zh) "已完成一次明确的目的地/成本确认；调用仍需逐次批准。" else "Destination and cost were confirmed; each call still needs approval."
+                        } else {
+                            if (zh) "尚未确认目的地/成本；保存配置本身不会联网。" else "Destination and cost are not confirmed; saving configuration does not contact the endpoint."
+                        },
                         style = MaterialTheme.typography.bodySmall,
                     )
                 }
@@ -267,6 +272,7 @@ private fun McpToolRow(tool: McpUiTool, zh: Boolean, onToggle: (String, Boolean)
                 Checkbox(
                     checked = tool.selected,
                     onCheckedChange = { onToggle(tool.namespacedName, it) },
+                    modifier = Modifier.testTag("mcp.tool.${tool.namespacedName}"),
                 )
                 Column(Modifier.weight(1f)) {
                     Text(tool.namespacedName, style = MaterialTheme.typography.titleSmall)

@@ -26,6 +26,8 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
@@ -167,13 +169,18 @@ data class WorkspacePickerActions(
  * locator, or secret.  Directory handles remain in the VM and are referred to
  * by opaque UI ids only.
  */
+private val LocalWorkspaceChinese = staticCompositionLocalOf { true }
+
 @Composable
 fun WorkspacePickerScreen(
     state: WorkspacePickerUiState,
     actions: WorkspacePickerActions = WorkspacePickerActions(),
     modifier: Modifier = Modifier,
     showPageTitle: Boolean = true,
+    chinese: Boolean = true,
 ) {
+    val zh = chinese
+    CompositionLocalProvider(LocalWorkspaceChinese provides chinese) {
     LazyColumn(
         modifier = modifier.fillMaxSize().testTag(WorkspacePickerTestTags.SCREEN),
         contentPadding = PaddingValues(16.dp),
@@ -184,10 +191,10 @@ fun WorkspacePickerScreen(
                 Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                     Column(Modifier.weight(1f)) {
                         if (showPageTitle) {
-                            Text("选择工作区", style = MaterialTheme.typography.headlineSmall)
+                            Text((if (zh) "选择工作区" else "Choose workspace"), style = MaterialTheme.typography.headlineSmall)
                         }
                         Text(
-                            "目标：${state.targetLabel}",
+                            (if (zh) "目标：${state.targetLabel}" else "Target: ${state.targetLabel}"),
                             style = MaterialTheme.typography.bodySmall,
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis,
@@ -198,7 +205,7 @@ fun WorkspacePickerScreen(
                         modifier = Modifier
                             .heightIn(min = 48.dp)
                             .testTag(WorkspacePickerTestTags.REFRESH),
-                    ) { Text("刷新") }
+                    ) { Text((if (zh) "刷新" else "Refresh")) }
                 }
                 Spacer(Modifier.height(8.dp))
                 AuthorityCard(state.authority, state.mode)
@@ -210,7 +217,7 @@ fun WorkspacePickerScreen(
                             .padding(top = 8.dp)
                             .heightIn(min = 48.dp)
                             .testTag(WorkspacePickerTestTags.SAF_FALLBACK),
-                    ) { Text("改用普通文件夹授权（SAF）") }
+                    ) { Text((if (zh) "改用普通文件夹授权（SAF）" else "Use standard folder access (SAF)")) }
                 }
             }
         }
@@ -222,9 +229,9 @@ fun WorkspacePickerScreen(
                     modifier = Modifier.fillMaxWidth(),
                 ) {
                     Column(Modifier.padding(12.dp)) {
-                        Text("增强访问当前不可用", fontWeight = FontWeight.SemiBold)
+                        Text((if (zh) "增强访问当前不可用" else "Enhanced access is unavailable"), fontWeight = FontWeight.SemiBold)
                         Text(
-                            "不会自动切换通道。若要使用普通文件夹授权，请明确选择下方入口。",
+                            (if (zh) "不会自动切换通道。若要使用普通文件夹授权，请明确选择下方入口。" else "The channel will not change automatically. Choose below to use standard folder access."),
                             style = MaterialTheme.typography.bodySmall,
                             modifier = Modifier.padding(top = 4.dp),
                         )
@@ -234,7 +241,7 @@ fun WorkspacePickerScreen(
                                 .padding(top = 8.dp)
                                 .heightIn(min = 48.dp)
                                 .testTag(WorkspacePickerTestTags.SAF_FALLBACK),
-                        ) { Text("改用文件夹授权") }
+                        ) { Text((if (zh) "改用文件夹授权" else "Use folder access")) }
                     }
                 }
             }
@@ -247,9 +254,9 @@ fun WorkspacePickerScreen(
                     modifier = Modifier.fillMaxWidth(),
                 ) {
                     Column(Modifier.padding(12.dp)) {
-                        Text("普通文件夹授权", fontWeight = FontWeight.SemiBold)
+                        Text((if (zh) "普通文件夹授权" else "Standard folder access"), fontWeight = FontWeight.SemiBold)
                         Text(
-                            "请通过系统文件选择器选择文件夹；这是明确的普通权限入口。",
+                            (if (zh) "请通过系统文件选择器选择文件夹；这是明确的普通权限入口。" else "Choose a folder in the system picker to grant standard folder access."),
                             style = MaterialTheme.typography.bodySmall,
                             modifier = Modifier.padding(top = 4.dp),
                         )
@@ -259,7 +266,7 @@ fun WorkspacePickerScreen(
                                 .padding(top = 8.dp)
                                 .heightIn(min = 48.dp)
                                 .testTag(WorkspacePickerTestTags.SAF_FALLBACK),
-                        ) { Text("打开文件选择器") }
+                        ) { Text((if (zh) "打开文件选择器" else "Open system picker")) }
                     }
                 }
             }
@@ -267,7 +274,7 @@ fun WorkspacePickerScreen(
 
         if (state.recentWorkspaces.isNotEmpty()) {
             item(key = "recent-title") {
-                Text("最近使用", style = MaterialTheme.typography.titleMedium)
+                Text((if (zh) "最近使用" else "Recent workspaces"), style = MaterialTheme.typography.titleMedium)
             }
             items(state.recentWorkspaces, key = { "recent:${it.id}" }) { recent ->
                 RecentWorkspaceRow(recent, actions.onOpenRecent)
@@ -276,11 +283,11 @@ fun WorkspacePickerScreen(
 
         if (state.mode == WorkspacePickerModeUi.PRIVILEGED) {
             item(key = "locations-title") {
-                Text("位置", style = MaterialTheme.typography.titleMedium)
+                Text((if (zh) "位置" else "Locations"), style = MaterialTheme.typography.titleMedium)
             }
             if (state.locations.isEmpty()) {
                 item(key = "locations-empty") {
-                    Text("当前没有可用的快捷位置。", style = MaterialTheme.typography.bodySmall)
+                    Text((if (zh) "当前没有可用的快捷位置。" else "No quick locations are available."), style = MaterialTheme.typography.bodySmall)
                 }
             } else {
                 items(state.locations, key = { "location:${it.id}" }) { location ->
@@ -291,7 +298,7 @@ fun WorkspacePickerScreen(
                             .fillMaxWidth()
                             .heightIn(min = 52.dp)
                             .testTag(WorkspacePickerTestTags.location(location.id)),
-                    ) { Text(location.label, maxLines = 1, overflow = TextOverflow.Ellipsis) }
+                    ) { Text(if (!zh && location.label == "内部存储") "Internal storage" else location.label, maxLines = 1, overflow = TextOverflow.Ellipsis) }
                 }
             }
 
@@ -311,7 +318,7 @@ fun WorkspacePickerScreen(
                             .weight(1f)
                             .heightIn(min = 48.dp)
                             .testTag(WorkspacePickerTestTags.PARENT),
-                    ) { Text("上一级") }
+                    ) { Text((if (zh) "上一级" else "Parent folder")) }
                     Button(
                         onClick = actions.onUseCurrentDirectory,
                         enabled = state.canUseCurrentDirectory && !state.loading && state.attachPhase != WorkspacePickerAttachPhaseUi.ATTACHING,
@@ -319,10 +326,10 @@ fun WorkspacePickerScreen(
                             .weight(1f)
                             .heightIn(min = 48.dp)
                             .testTag(WorkspacePickerTestTags.USE_FOLDER),
-                    ) { Text("使用此文件夹") }
+                    ) { Text((if (zh) "使用此文件夹" else "Use this folder")) }
                 }
                 Text(
-                    "当前位置：${state.currentLabel} · ${directoryAccessLabel(state)}",
+                    (if (zh) "当前位置：${state.currentLabel} · ${directoryAccessLabel(state, zh)}" else "Current location: ${workspaceCurrentLabel(state)} · ${directoryAccessLabel(state, zh)}"),
                     style = MaterialTheme.typography.bodySmall,
                     modifier = Modifier.padding(top = 6.dp),
                 )
@@ -335,7 +342,7 @@ fun WorkspacePickerScreen(
                             .fillMaxWidth()
                             .heightIn(min = 48.dp)
                             .testTag(WorkspacePickerTestTags.ADVANCED_PATH),
-                    ) { Text("高级：手动选择设备目录") }
+                    ) { Text((if (zh) "高级：手动选择设备目录" else "Advanced: choose device directory manually")) }
                 }
             }
 
@@ -343,7 +350,7 @@ fun WorkspacePickerScreen(
                 item(key = "loading") {
                     Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                         CircularProgressIndicator(modifier = Modifier.testTag(WorkspacePickerTestTags.LOADING))
-                        Text("正在读取目录…", modifier = Modifier.padding(start = 12.dp))
+                        Text((if (zh) "正在读取目录…" else "Reading directory…"), modifier = Modifier.padding(start = 12.dp))
                     }
                 }
             }
@@ -356,7 +363,7 @@ fun WorkspacePickerScreen(
                 state.loadPhase == WorkspacePickerLoadPhaseUi.CONTENT
             ) {
                 item(key = "empty-directory") {
-                    Text("此文件夹为空。", style = MaterialTheme.typography.bodySmall)
+                    Text((if (zh) "此文件夹为空。" else "This folder is empty."), style = MaterialTheme.typography.bodySmall)
                 }
             }
             items(state.entries, key = { "entry:${it.id}" }) { entry ->
@@ -367,7 +374,7 @@ fun WorkspacePickerScreen(
                     Column(Modifier.fillMaxWidth()) {
                         if (state.listTruncated) {
                             Text(
-                                "目录较大，已显示部分项目。",
+                                (if (zh) "目录较大，已显示部分项目。" else "Some items are shown in this large directory."),
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                             )
@@ -379,13 +386,13 @@ fun WorkspacePickerScreen(
                                 .fillMaxWidth()
                                 .heightIn(min = 48.dp)
                                 .testTag(WorkspacePickerTestTags.LOAD_MORE),
-                        ) { Text(if (state.loadingMore) "正在加载…" else "加载更多") }
+                        ) { Text(if (state.loadingMore) (if (zh) "正在加载…" else "Loading…") else (if (zh) "加载更多" else "Load more")) }
                     }
                 }
             } else if (state.listTruncated) {
                 item(key = "truncated") {
                     Text(
-                        "目录较大，当前仅显示部分项目。",
+                        (if (zh) "目录较大，当前仅显示部分项目。" else "Only some items are shown in this large directory."),
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
@@ -400,7 +407,7 @@ fun WorkspacePickerScreen(
                     modifier = Modifier.fillMaxWidth().testTag(WorkspacePickerTestTags.ERROR),
                 ) {
                     Text(
-                        state.errorMessage,
+                        workspacePickerText(state.errorMessage, zh),
                         color = MaterialTheme.colorScheme.onErrorContainer,
                         modifier = Modifier.padding(12.dp),
                     )
@@ -412,12 +419,12 @@ fun WorkspacePickerScreen(
                 Surface(
                     color = MaterialTheme.colorScheme.primaryContainer,
                     modifier = Modifier.fillMaxWidth().testTag(WorkspacePickerTestTags.STATUS),
-                ) { Text(state.statusMessage, Modifier.padding(12.dp)) }
+                ) { Text(workspacePickerText(state.statusMessage, zh), Modifier.padding(12.dp)) }
             }
         }
         if (state.attachPhase == WorkspacePickerAttachPhaseUi.ATTACHING) {
             item(key = "attaching") {
-                Text("正在保存工作区…", modifier = Modifier.testTag(WorkspacePickerTestTags.ATTACHING))
+                Text((if (zh) "正在保存工作区…" else "Saving workspace…"), modifier = Modifier.testTag(WorkspacePickerTestTags.ATTACHING))
             }
         }
         state.attached?.let { attached ->
@@ -427,9 +434,9 @@ fun WorkspacePickerScreen(
                     modifier = Modifier.fillMaxWidth().testTag(WorkspacePickerTestTags.ATTACHED),
                 ) {
                     Column(Modifier.padding(12.dp)) {
-                        Text("工作区已添加", fontWeight = FontWeight.SemiBold)
+                        Text((if (zh) "工作区已添加" else "Workspace added"), fontWeight = FontWeight.SemiBold)
                         Text(attached.displayName, modifier = Modifier.padding(top = 4.dp))
-                        Text(attached.statusLabel, style = MaterialTheme.typography.bodySmall)
+                        Text(workspacePickerText(attached.statusLabel, zh), style = MaterialTheme.typography.bodySmall)
                     }
                 }
             }
@@ -437,19 +444,22 @@ fun WorkspacePickerScreen(
     }
 }
 
+}
+
 @Composable
 private fun AuthorityCard(authority: WorkspacePickerAuthorityUi, mode: WorkspacePickerModeUi) {
+    val zh = LocalWorkspaceChinese.current
     Card(
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerLow),
         modifier = Modifier.fillMaxWidth().testTag(WorkspacePickerTestTags.AUTHORITY),
     ) {
         Column(Modifier.padding(12.dp)) {
-            Text(authority.label, style = MaterialTheme.typography.titleMedium)
+            Text(workspacePickerText(authority.label, zh), style = MaterialTheme.typography.titleMedium)
             Text(
                 when (mode) {
-                    WorkspacePickerModeUi.PRIVILEGED -> "${authority.statusLabel} · 设备目录浏览"
-                    WorkspacePickerModeUi.AUTHORITY_UNAVAILABLE -> "${authority.statusLabel} · 不会自动切换通道"
-                    WorkspacePickerModeUi.SAF_FALLBACK -> "普通文件夹授权"
+                    WorkspacePickerModeUi.PRIVILEGED -> (if (zh) "${workspacePickerText(authority.statusLabel, zh)} · 设备目录浏览" else "${workspacePickerText(authority.statusLabel, zh)} · Device directory browsing")
+                    WorkspacePickerModeUi.AUTHORITY_UNAVAILABLE -> (if (zh) "${workspacePickerText(authority.statusLabel, zh)} · 不会自动切换通道" else "${workspacePickerText(authority.statusLabel, zh)} · No automatic channel switching")
+                    WorkspacePickerModeUi.SAF_FALLBACK -> (if (zh) "普通文件夹授权" else "Standard folder access")
                 },
                 style = MaterialTheme.typography.bodySmall,
                 modifier = Modifier.padding(top = 4.dp),
@@ -463,10 +473,11 @@ private fun BreadcrumbRow(
     breadcrumbs: List<WorkspacePickerBreadcrumbUi>,
     onOpen: (String) -> Unit,
 ) {
+    val zh = LocalWorkspaceChinese.current
     Column(Modifier.fillMaxWidth().testTag(WorkspacePickerTestTags.BREADCRUMB)) {
-        Text("当前位置", style = MaterialTheme.typography.titleMedium)
+        Text((if (zh) "当前位置" else "Current location"), style = MaterialTheme.typography.titleMedium)
         if (breadcrumbs.isEmpty()) {
-            Text("根目录", style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(top = 4.dp))
+            Text((if (zh) "根目录" else "Root directory"), style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(top = 4.dp))
         } else {
             Row(
                 Modifier.fillMaxWidth().padding(top = 4.dp),
@@ -479,7 +490,7 @@ private fun BreadcrumbRow(
                         onClick = { onOpen(crumb.id) },
                         enabled = crumb.enabled,
                         modifier = Modifier.heightIn(min = 44.dp),
-                    ) { Text(crumb.label, maxLines = 1, overflow = TextOverflow.Ellipsis) }
+                    ) { Text(if (!zh && crumb.id == "depth:0" && crumb.label == "根目录") "Root directory" else crumb.label, maxLines = 1, overflow = TextOverflow.Ellipsis) }
                 }
             }
         }
@@ -492,6 +503,7 @@ private fun RecentWorkspaceRow(
     recent: WorkspacePickerRecentUi,
     onOpen: (String) -> Unit,
 ) {
+    val zh = LocalWorkspaceChinese.current
     Surface(
         color = MaterialTheme.colorScheme.surfaceContainerLow,
         modifier = Modifier
@@ -499,12 +511,12 @@ private fun RecentWorkspaceRow(
             .heightIn(min = 58.dp)
             .clickable(enabled = recent.enabled) { onOpen(recent.id) }
             .testTag(WorkspacePickerTestTags.recent(recent.id))
-            .semantics { contentDescription = "最近工作区 ${recent.displayName}" },
+            .semantics { contentDescription = (if (zh) "最近工作区 ${recent.displayName}" else "Recent workspace ${recent.displayName}") },
     ) {
         Column(Modifier.padding(horizontal = 12.dp, vertical = 9.dp)) {
             Text(recent.displayName, maxLines = 1, overflow = TextOverflow.Ellipsis)
             Text(
-                "${recent.authorityLabel} · ${recent.statusLabel}",
+                "${workspacePickerText(recent.authorityLabel, zh)} · ${workspacePickerText(recent.statusLabel, zh)}",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
@@ -517,10 +529,11 @@ private fun WorkspaceEntryRow(
     entry: WorkspacePickerEntryUi,
     onOpen: (String) -> Unit,
 ) {
+    val zh = LocalWorkspaceChinese.current
     val access = when {
-        !entry.readable -> "不可访问"
-        entry.writable -> "可读写"
-        else -> "只读"
+        !entry.readable -> (if (zh) "不可访问" else "Unavailable")
+        entry.writable -> (if (zh) "可读写" else "Read and write")
+        else -> (if (zh) "只读" else "Read only")
     }
     Surface(
         color = MaterialTheme.colorScheme.surfaceContainerLow,
@@ -540,7 +553,7 @@ private fun WorkspaceEntryRow(
             Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 9.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            Text(if (entry.directory) "文件夹" else "文件", style = MaterialTheme.typography.labelSmall)
+            Text(if (entry.directory) (if (zh) "文件夹" else "Folder") else (if (zh) "文件" else "File"), style = MaterialTheme.typography.labelSmall)
             Column(Modifier.weight(1f).padding(start = 10.dp)) {
                 Text(entry.name, maxLines = 1, overflow = TextOverflow.Ellipsis)
                 Text(access, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -552,11 +565,16 @@ private fun WorkspaceEntryRow(
     }
 }
 
-private fun directoryAccessLabel(state: WorkspacePickerUiState): String = when {
-    !state.currentDirectoryReadable -> "不可访问"
-    state.currentDirectoryWritable -> "可读写"
-    else -> "只读"
+private fun directoryAccessLabel(state: WorkspacePickerUiState, zh: Boolean): String = when {
+    !state.currentDirectoryReadable -> (if (zh) "不可访问" else "Unavailable")
+    state.currentDirectoryWritable -> (if (zh) "可读写" else "Read and write")
+    else -> (if (zh) "只读" else "Read only")
 }
+
+/** Only the VM's synthetic depth-zero root has a localized display name. */
+private fun workspaceCurrentLabel(state: WorkspacePickerUiState): String =
+    if (state.breadcrumbs.lastOrNull()?.id == "depth:0" && state.currentLabel == "根目录") "Root directory"
+    else state.currentLabel
 
 private fun formatBytes(bytes: Long): String = when {
     bytes < 1024L -> "$bytes B"
@@ -583,4 +601,46 @@ object WorkspacePickerTestTags {
     fun location(id: String): String = "workspacePicker.location.$id"
     fun recent(id: String): String = "workspacePicker.recent.$id"
     fun entry(id: String): String = "workspacePicker.entry.$id"
+}
+
+/** Translate only application labels; user names and folder names stay verbatim. */
+internal fun workspacePickerText(value: String, zh: Boolean): String = if (zh) value else when (value) {
+    "未选择增强访问" -> "No enhanced access selected"
+    "未就绪" -> "Not ready"
+    "已连接" -> "Connected"
+    "正在连接" -> "Connecting"
+    "授权保留，当前未连接" -> "Authorized, currently disconnected"
+    "未选择" -> "Not selected"
+    "不可用" -> "Unavailable"
+    "可用" -> "Available"
+    "授权已失效" -> "Authorization expired"
+    "已撤销" -> "Revoked"
+    "已停用" -> "Disabled"
+    "普通文件夹授权" -> "Standard folder access"
+    "当前目标" -> "Current target"
+    "根目录" -> "Root directory"
+    "请通过系统文件选择器选择工作区。" -> "Choose a workspace in the system picker."
+    "正在打开最近工作区…" -> "Opening recent workspace…"
+    "已打开最近工作区。" -> "Recent workspace opened."
+    "工作区已添加。" -> "Workspace added."
+    "工作区属于当前会话上下文，切换将创建新会话。" -> "Changing the workspace creates a new conversation."
+    "正在确认工作区切换…" -> "Confirming workspace change…"
+    "当前增强访问不可用。" -> "Enhanced access is unavailable."
+    "尚未选择增强访问。" -> "No enhanced access is selected."
+    "工作区不存在或已移除。" -> "The workspace no longer exists."
+    "当前目录不可访问。" -> "This directory is unavailable."
+    "需要先完成文件夹授权。" -> "Grant folder access first."
+    "当前权限通道不支持此操作。" -> "The selected access channel does not support this operation."
+    "内部存储" -> "Internal storage"
+    "下载" -> "Downloads"
+    "文档" -> "Documents"
+    "工作区授权已失效，请重新选择文件夹。" -> "Workspace access expired. Select the folder again."
+    "工作区状态已变化，请刷新后重试。" -> "Workspace state changed. Refresh and try again."
+    "当前通道不支持此工作区操作。" -> "This channel does not support this workspace operation."
+    "工作区保存失败，请稍后重试。" -> "Workspace could not be saved. Try again later."
+    "工作区操作结果未知，请检查状态后再试。" -> "Workspace outcome is unknown. Check the state before retrying."
+    else -> when {
+        value.endsWith("当前不可用；不会自动切换通道。") -> value.removeSuffix("当前不可用；不会自动切换通道。") + " is unavailable; the channel will not change automatically."
+        else -> value
+    }
 }

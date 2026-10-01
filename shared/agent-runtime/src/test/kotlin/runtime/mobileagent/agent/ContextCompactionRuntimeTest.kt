@@ -49,6 +49,26 @@ import runtime.mobileagent.skills.ToolSpec
 
 class ContextCompactionRuntimeTest {
     @Test
+    fun checkpointedPartialAnswerIsRetainedButNeverSelectedForSummary() {
+        val history = listOf(ChatMessage("user", "original goal"), ChatMessage("assistant", "original answer"),
+            ChatMessage("user", "interrupted question"), ChatMessage("assistant", "段落0062"),
+            ChatMessage("user", "recent question"), ChatMessage("assistant", "recent answer"))
+        val runtimeContext = context(history, policy = AgentContextPolicy(keepRecentTurns = 1),
+            turnIds = listOf("first", "first", "partial", "partial", "recent", "recent"))
+        val protected = runtimeContext.copy(historySources = runtimeContext.historySources.mapIndexed { index, source ->
+            source.copy(complete = index != 3)
+        })
+        val prompt = prompt(history = history)
+        val request = ModelRequest("model", prompt.asMessages())
+        val window = ContextWindow(prompt, protected)
+        assertTrue(window.minimumRequest(request).messages.any { it.text == "段落0062" })
+        val adapter = RecordingAdapter { _, _ -> emit(ModelEvent.Completed) }
+        val plan = window.plan(request, adapter, 50_000, "history-messages")
+        assertFalse(plan?.entries.orEmpty().any { it.message.text == "段落0062" })
+        assertTrue(window.messages().any { it.text == "段落0062" })
+    }
+
+    @Test
     fun oversizedHistoricalToolArgumentsFailBeforeProviderDispatchWhenAutoCompactionIsDisabled() = runTest {
         val arguments = "{\"payload\":\"${"x".repeat(65_000)}\"}"
         val history = listOf(

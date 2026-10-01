@@ -127,16 +127,28 @@ internal class ShizukuDirectoryHandleStore {
                 .thenBy { it.fileName.toString() },
         )
         if (start > ordered.size) return failure(operation, INVALID_HANDLE)
-        val end = minOf(start + maxEntries, ordered.size)
+        val limit = minOf(start + maxEntries, ordered.size)
+        var end = start
         val entries = JSONArray()
+        // Reserve the complete envelope and worst-case opaque cursor before
+        // filling the page. A count-bounded page can still exceed Binder's
+        // output budget, especially when entries are directories or Unicode.
+        var encodedBytes = JSONObject()
+            .put("ok", true).put("operation", operation).put("handle", token)
+            .put("parentHandle", parentToken ?: JSONObject.NULL)
+            .put("deviceRoot", directory == deviceRoot && deviceRoot == Paths.get("/"))
+            .put("entries", JSONArray()).put("truncated", false)
+            .put("continuation", "x".repeat(MAX_CONTINUATION_BYTES))
+            .toString().toByteArray(StandardCharsets.UTF_8).size
         var unsafeSkipped = false
-        for (index in start until end) {
+        for (index in start until limit) {
             val child = ordered[index]
             // Symlinks are deliberately not offered as selectable entries. A
             // caller must choose the canonical directory reached without
             // crossing a symlink boundary.
             if (Files.isSymbolicLink(child)) {
                 unsafeSkipped = true
+                end = index + 1
                 continue
             }
             val type = when {
@@ -144,6 +156,7 @@ internal class ShizukuDirectoryHandleStore {
                 Files.isRegularFile(child, LinkOption.NOFOLLOW_LINKS) -> "file"
                 else -> {
                     unsafeSkipped = true
+                    end = index + 1
                     continue
                 }
             }
@@ -160,7 +173,14 @@ internal class ShizukuDirectoryHandleStore {
             } else {
                 entry.put("handle", directoryToken(child))
             }
+            val entryBytes = entry.toString().toByteArray(StandardCharsets.UTF_8).size + 1
+            if (encodedBytes + entryBytes > MAX_OUTPUT_BYTES) {
+                if (entries.length() == 0) return failure(operation, OUTPUT_LIMIT)
+                break
+            }
             entries.put(entry)
+            encodedBytes += entryBytes
+            end = index + 1
         }
         val next = if (end < ordered.size) pageStore.issue(token, fingerprint, end) else null
         return bounded(

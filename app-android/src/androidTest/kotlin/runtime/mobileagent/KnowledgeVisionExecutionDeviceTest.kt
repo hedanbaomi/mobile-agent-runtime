@@ -66,7 +66,8 @@ class KnowledgeVisionExecutionDeviceTest {
             assertEquals(selectedBinding.fingerprint, repository.batchVisionAuthorization(batchId))
             repository.processBatch(batchId, visionConfigured = false)
 
-            assertEquals("https://selected.example/v1/chat/completions", requestUrl)
+            assertEquals(checkpoint(repository, db, batchId),
+                "https://selected.example/v1/chat/completions", requestUrl)
             assertEquals("Bearer key-secret-selected", authorization)
             assertEquals(listOf("secret-selected"), secretRefs)
             assertTrue(requestBody.contains("\"model\":\"selected-model\""))
@@ -120,9 +121,9 @@ class KnowledgeVisionExecutionDeviceTest {
             val (batchId, _) = stagedImageBatch(repository, "selected-429")
 
             repository.authorizeBatchVision(batchId, selectedBinding.fingerprint)
-            repository.processBatch(batchId, visionConfigured = false)
+            assertTrue(repository.processBatch(batchId, visionConfigured = false))
 
-            assertEquals(1, requests)
+            assertEquals(checkpoint(repository, db, batchId), 1, requests)
             val result = db.query("SELECT status, description FROM vision_results").single()
             assertEquals("FAILED", result.string("status"))
             assertTrue(result.string("description").contains("RATE_LIMITED"))
@@ -139,11 +140,24 @@ class KnowledgeVisionExecutionDeviceTest {
             assertEquals("RATE_LIMITED", attempt.string("error_code"))
             assertEquals(429L, attempt.long("http_status"))
             assertFalse(db.query("SELECT status FROM vision_results WHERE status='UNKNOWN_OUTCOME'").isNotEmpty())
+            // A fixed, authorized batch schedules a bounded retry. The HTTP
+            // response is known FAILED, not UNKNOWN; later mock deliveries
+            // must still stop at the durable attempt limit.
+            assertEquals(1, repository.batchProgress(batchId).queued)
+            repeat(4) { assertTrue(repository.processBatch(batchId, visionConfigured = false)) }
+            assertFalse(repository.processBatch(batchId, visionConfigured = false))
+            assertEquals(6, requests)
+            assertEquals(6, db.query("SELECT status FROM vision_attempts").size)
             assertEquals(1, repository.batchProgress(batchId).failed)
             assertEquals(ImportBatchState.FAILED, repository.findBatch(batchId)!!.state)
         } finally {
             http.close()
         }
+    }
+
+    private fun checkpoint(repository: KnowledgeRepository, db: AndroidContextSqlite, batchId: String): String {
+        val jobs = db.query("SELECT stage,error FROM import_jobs").map { it.string("stage") to it.string("error") }
+        return "Import checkpoint: ${repository.batchProgress(batchId)}; jobs: $jobs"
     }
 
     private fun repository(
@@ -199,7 +213,10 @@ class KnowledgeVisionExecutionDeviceTest {
             role = ModelRole.CHAT,
             modelId = modelId,
             capabilities = setOf("image"),
-            contextLimit = 4096,
+            // The production visual preflight reserves 6176 conservative
+            // input units for this image before text. This transport fixture
+            // must fit that unchanged budget in order to exercise HTTP.
+            contextLimit = 16384,
             outputLimit = 512,
             revision = 3,
             parametersJson = "{\"temperature\":$temperature}",

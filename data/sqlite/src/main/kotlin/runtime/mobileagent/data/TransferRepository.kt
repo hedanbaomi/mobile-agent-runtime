@@ -110,7 +110,11 @@ class TransferRepository(
         if (options.includeKnowledgeContent && blobSink == null) {
             throw invalid("Full knowledge export requires a BlobSink")
         }
-        val payload = buildAgentBundle(agentId, options, forArchive = true)
+        val archive = db.transaction {
+            val payload = buildAgentBundle(agentId, options, forArchive = true)
+            ArchiveSourceSnapshot(payload, readArchiveSourceVersion())
+        }
+        val payload = archive.payload
         val manifest = TransferCodec.encode(payload.manifest, operationId = "export-archive-$agentId")
         // ZipOutputStream.close() would close the caller's stream as well.  Keep ownership at the
         // API boundary while still releasing the ZIP deflater when the archive is complete.
@@ -147,16 +151,35 @@ class TransferRepository(
             }
             if (options.includeConversations) {
                 payload.conversations.forEach { item ->
-                    val content = TransferCodec.encodeConversation(item.full, "export-conversation-${item.full.conversation.id}")
+                    // Load one conversation at a time. Keeping every transcript, run, tool result,
+                    // and audit row in ArchivePayload made the nominally streaming ZIP path retain
+                    // the entire Agent history in memory before writing its first byte.
+                    val full = exportConversation(item)
+                    val content = TransferCodec.encodeConversation(full, "export-conversation-${full.conversation.id}")
                     writeBytes(item.entryName, content.toByteArray(Charsets.UTF_8), TransferArchiveLimits.MAX_ENTRY_BYTES)
                 }
             }
+            verifyArchiveSourceUnchanged(archive.sourceVersion)
             zip.finish()
         }
     }
 
     fun exportArchive(agentId: String, output: OutputStream) =
         exportArchive(agentId, TransferOptions(), output)
+
+    private fun verifyArchiveSourceUnchanged(expected: ArchiveSourceVersion) {
+        db.transaction {
+            if (readArchiveSourceVersion() != expected) {
+                throw invalid("backup source changed, wait active work/stop edits and retry")
+            }
+        }
+    }
+
+    private fun readArchiveSourceVersion(): ArchiveSourceVersion {
+        val totalChanges = db.query("SELECT total_changes() AS n").single().long("n")
+        val dataVersion = db.query("PRAGMA data_version").single().long("data_version")
+        return ArchiveSourceVersion(totalChanges, dataVersion)
+    }
 
     private fun buildAgentBundle(agentId: String, options: TransferOptions, forArchive: Boolean): ArchivePayload {
         val agent = AgentRepository(db).get(agentId) ?: throw invalid("Agent $agentId does not exist")
@@ -188,7 +211,7 @@ class TransferRepository(
             exportKnowledge(id, options.includeKnowledgeContent) ?: throw invalid("Agent references missing knowledge base $id")
         }
         val conversations = if (options.includeConversations) exportConversations(agent.id) else emptyList()
-        val historicalSkillIds = conversations.flatMap { it.full.snapshot.skillIds }
+        val historicalSkillIds = conversations.flatMap { it.manifest.snapshot.skillIds }
         val skills = exportBoundAndHistoricalSkills(
             currentIds = agent.skillIds,
             historicalIds = historicalSkillIds,
@@ -216,9 +239,6 @@ class TransferRepository(
             "SELECT c.* FROM conversations c JOIN agent_snapshots s ON s.id=c.snapshot_id WHERE s.agent_id=? ORDER BY c.created_at,c.rowid",
             listOf(agentId),
         )
-        val conversationRepo = ConversationRepository(db)
-        val runsRepo = RunRepository(db)
-        val auditRepo = AuditRepository(db)
         return conversations.map { row ->
             val conversation = Conversation(
                 id = row.string("id"),
@@ -233,24 +253,48 @@ class TransferRepository(
                 throw invalid("Conversation ${conversation.id} has no immutable snapshot expansion")
             }
             val portableSnapshot = sanitizeSnapshot(snapshot)
-            val runs = runsRepo.list(conversation.id)
-            val invocations = runs.flatMap { runsRepo.invocations(it.runId) }
-            val audits = runs.flatMap { auditRepo.list(it.runId) }
             val entryName = conversationEntry(conversation.id)
-            val full = ConversationTransfer(
+            val manifest = ConversationTransfer(
                 conversation = conversation,
                 snapshot = portableSnapshot,
                 snapshotRebindPolicy = LOCAL_CREDENTIALS_REQUIRED,
-                messages = conversationRepo.messages(conversation.id),
-                runs = runs,
-                toolInvocations = invocations,
-                auditEvents = audits,
+                messages = emptyList(),
+                runs = emptyList(),
+                toolInvocations = emptyList(),
+                auditEvents = emptyList(),
                 contentIncluded = true,
                 contentEntry = entryName,
             )
-            val manifest = full.copy(messages = emptyList(), runs = emptyList(), toolInvocations = emptyList(), auditEvents = emptyList())
-            ArchiveConversation(manifest, full, entryName)
+            ArchiveConversation(manifest, entryName)
         }
+    }
+
+    /** Read a stable, complete history for a single archive entry. */
+    private fun exportConversation(item: ArchiveConversation): ConversationTransfer = db.transaction {
+        val expected = item.manifest.conversation
+        val current = db.query("SELECT * FROM conversations WHERE id=?", listOf(expected.id)).singleOrNull()
+            ?: throw invalid("Conversation ${expected.id} disappeared during export")
+        if (current.string("snapshot_id") != expected.snapshotId ||
+            current.string("title") != expected.title ||
+            current.string("created_at") != expected.createdAt ||
+            current.string("updated_at") != expected.updatedAt
+        ) {
+            throw invalid("Conversation ${expected.id} changed during export; retry the backup")
+        }
+        val snapshot = AgentRepository(db).getSnapshot(expected.snapshotId)
+            ?: throw invalid("Conversation ${expected.id} references a missing snapshot")
+        if (sanitizeSnapshot(snapshot) != item.manifest.snapshot) {
+            throw invalid("Conversation ${expected.id} snapshot changed during export; retry the backup")
+        }
+        val runsRepo = RunRepository(db)
+        val auditRepo = AuditRepository(db)
+        val runs = runsRepo.list(expected.id)
+        item.manifest.copy(
+            messages = ConversationRepository(db).messages(expected.id),
+            runs = runs,
+            toolInvocations = runs.flatMap { runsRepo.invocations(it.runId) },
+            auditEvents = runs.flatMap { auditRepo.list(it.runId) },
+        )
     }
 
     /** Remove provider secret fields while preserving the immutable value expansion. */
@@ -303,9 +347,18 @@ class TransferRepository(
         val conversations: List<ArchiveConversation>,
     )
 
+    private data class ArchiveSourceSnapshot(
+        val payload: ArchivePayload,
+        val sourceVersion: ArchiveSourceVersion,
+    )
+
+    private data class ArchiveSourceVersion(
+        val totalChanges: Long,
+        val dataVersion: Long,
+    )
+
     private data class ArchiveConversation(
         val manifest: ConversationTransfer,
-        val full: ConversationTransfer,
         val entryName: String,
     )
 
@@ -388,9 +441,7 @@ class TransferRepository(
             }
             assertHistoryPreserved()
         }
-        if (bundle.conversations.isNotEmpty()) {
-            warnings += "Imported conversation history needs local credentials for the same provider endpoint before it can continue"
-        }
+        appendConversationImportWarnings(bundle, warnings)
         return TransferImportResult(
             agentId = importedAgentId,
             knowledgeBaseIds = bundle.knowledgeBases.map { it.id },
@@ -499,9 +550,7 @@ class TransferRepository(
                     }
                     assertHistoryPreserved()
                 }
-                if (bundle.conversations.isNotEmpty()) {
-                    warnings += "Imported conversation history needs local credentials for the same provider endpoint before it can continue"
-                }
+                appendConversationImportWarnings(bundle, warnings)
                 return TransferImportResult(
                     agentId = importedAgentId,
                     knowledgeBaseIds = bundle.knowledgeBases.map { it.id },
@@ -550,6 +599,24 @@ class TransferRepository(
             }
         ) {
             throw invalid("Full transfer content must be imported with importArchive")
+        }
+    }
+
+    private fun appendConversationImportWarnings(bundle: TransferBundle, warnings: MutableList<String>) {
+        if (bundle.conversations.isEmpty()) return
+        warnings += "Imported conversation history needs local credentials for the same provider endpoint before it can continue"
+        if (bundle.conversations.any(::hasHttpHistoricalProvider)) {
+            warnings += "Some imported history is frozen to an HTTP provider destination. Release builds block cleartext requests; configure HTTPS and start a new conversation. The old history is not redirected or sent automatically."
+        }
+    }
+
+    private fun hasHttpHistoricalProvider(conversation: ConversationTransfer): Boolean {
+        val manifest = runCatching { json.parseToJsonElement(conversation.snapshot.bindingManifestJson) as? JsonObject }
+            .getOrNull() ?: return false
+        return listOf("provider", "visionProvider", "embeddingProvider", "rerankerProvider").any { key ->
+            val provider = manifest[key] as? JsonObject ?: return@any false
+            val baseUrl = provider["baseUrl"] as? JsonPrimitive
+            baseUrl?.isString == true && baseUrl.content.trimStart().startsWith("http://", ignoreCase = true)
         }
     }
 

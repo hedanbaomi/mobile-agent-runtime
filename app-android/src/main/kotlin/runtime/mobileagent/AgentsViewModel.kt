@@ -241,6 +241,62 @@ internal fun saveAgentGrantDraft(
     return persisted
 }
 
+/**
+ * Persist an explicit user re-acknowledgement of one policy-stale grant. A
+ * new grant identity keeps snapshots bound to the old policy from becoming
+ * usable again, while copying the original scope, owner, lifetime and expiry
+ * prevents a re-ack from broadening or extending the grant.
+ */
+internal fun reauthorizeStaleAgentGrant(
+    pending: AgentGrantUi,
+    agentId: String,
+    grantPort: AgentGrantPort,
+    createdAt: String = Utc.nowIso(),
+): CapabilityGrant {
+    require(grantPort.available) { grantPort.unavailableMessage }
+    val old = pending.grant
+    require(pending.policyStale && pending.enabled && pending.skillTrusted) {
+        "Policy-stale grant requires an explicit trusted re-authorization"
+    }
+    require(old.agentId == agentId && !old.revoked && !old.consumed) {
+        "Revoked, consumed, or foreign grants cannot be re-authorized"
+    }
+    val now = java.time.Instant.now()
+    val unexpired = old.expiresAt?.let { expiry ->
+        runCatching { java.time.Instant.parse(expiry).isAfter(now) }.getOrDefault(false)
+    } ?: true
+    require(!pending.expired && unexpired) { "Expired grants cannot be re-authorized" }
+
+    val policyVersion = grantPort.currentPolicyVersion()
+    require(old.policyVersion != policyVersion) { "Grant is no longer stale under the current policy" }
+    require(grantPort.listGrants(agentId, includeRevoked = true).firstOrNull { it.grantId == old.grantId } == old) {
+        "Capability grant changed before re-authorization"
+    }
+    old.skillInstallId?.let { installId ->
+        val installed = grantPort.listInstalledSkills().firstOrNull {
+            it.installId == installId && it.enabled && it.packageHash == old.packageHash
+        }
+        val permission = grantPort.listSkillGrants(installId).firstOrNull {
+            !it.revoked && it.packageHash == old.packageHash
+        }
+        require(installed != null && permission != null) { "Skill trust changed before re-authorization" }
+    }
+
+    val renewed = old.copy(
+        grantId = EntityId.random().value,
+        policyVersion = policyVersion,
+        createdAt = createdAt,
+        revision = 1L,
+    )
+    val saved = grantPort.saveGrant(renewed)
+    require(saved == renewed) { "Re-authorized grant save returned an unexpected binding" }
+    val revoked = grantPort.revokeGrant(old.grantId, old.revision)
+    require(revoked.grantId == old.grantId && revoked.revoked && revoked.revision > old.revision) {
+        "Stale capability grant revoke did not persist"
+    }
+    return saved
+}
+
 private val READ_ONLY_WORKSPACE_CAPABILITIES = listOf(
     CapabilityId(CapabilityId.WORKSPACE_ENUMERATE),
     CapabilityId(CapabilityId.FILE_LIST),
@@ -529,7 +585,10 @@ class AgentsViewModel(
             }
             val previous = editor.id?.let { app.container.agents.get(it) }
             val grantChanges = editor.grantDraft != null || editor.workspaceGrantPreset != null ||
-                editor.grants.any { !it.enabled && !it.grant.revoked && !it.expired && !it.policyStale }
+                editor.grants.any {
+                    (!it.enabled && !it.grant.revoked && !it.expired && !it.policyStale) ||
+                        (it.enabled && it.policyStale)
+                }
             require(!grantChanges || grantPort.available) {
                 grantPort.unavailableMessage
             }
@@ -665,6 +724,10 @@ class AgentsViewModel(
                 val revoked = grantPort.revokeGrant(pending.grant.grantId, pending.grant.revision)
                 require(revoked.revoked) { "Capability grant revoke did not persist" }
             }
+
+        editor.grants
+            .filter { it.policyStale && it.enabled }
+            .forEach { pending -> reauthorizeStaleAgentGrant(pending, agentId, grantPort) }
 
         if (editor.grantDraft != null) saveAgentGrantDraft(editor, agentId, grantPort)
         if (editor.workspaceGrantPreset != null) saveAgentWorkspaceGrantPreset(editor, agentId, grantPort)

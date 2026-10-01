@@ -327,9 +327,8 @@ class SharedWorkspaceBackendAdapter internal constructor(
             InternalWorkspaceErrorCode.INVALID_CURSOR -> ToolErrorCode.INVALID_CURSOR
             InternalWorkspaceErrorCode.PATH_OUT_OF_SCOPE -> ToolErrorCode.PATH_OUT_OF_SCOPE
             InternalWorkspaceErrorCode.SYMLINK_FORBIDDEN -> ToolErrorCode.SYMLINK_FORBIDDEN
-            InternalWorkspaceErrorCode.WORKSPACE_NOT_FOUND,
-            InternalWorkspaceErrorCode.ENTRY_NOT_FOUND,
-                -> ToolErrorCode.WORKSPACE_NOT_FOUND
+            InternalWorkspaceErrorCode.WORKSPACE_NOT_FOUND -> ToolErrorCode.WORKSPACE_NOT_FOUND
+            InternalWorkspaceErrorCode.ENTRY_NOT_FOUND -> ToolErrorCode.ENTRY_NOT_FOUND
             InternalWorkspaceErrorCode.READ_ONLY -> ToolErrorCode.WORKSPACE_READ_ONLY
             InternalWorkspaceErrorCode.GRANT_LOST,
             InternalWorkspaceErrorCode.PERMISSION_DENIED,

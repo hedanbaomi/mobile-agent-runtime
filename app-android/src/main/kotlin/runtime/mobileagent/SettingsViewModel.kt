@@ -16,6 +16,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import runtime.mobileagent.domain.AppException
 import runtime.mobileagent.announcements.AnnouncementCategory
 import runtime.mobileagent.announcements.ClientContext
 import runtime.mobileagent.diagnostics.DiagnosticSanitizer
@@ -27,10 +28,21 @@ import runtime.mobileagent.domain.ThemePreference
 import runtime.mobileagent.feature.settings.SettingsUiState
 import runtime.mobileagent.feature.settings.WiredPairingUiState
 import runtime.mobileagent.provider.SecretRedactor
+import runtime.mobileagent.serialization.TransferConflictPolicy
 import runtime.mobileagent.serialization.TransferOptions
 import java.io.ByteArrayOutputStream
+import java.io.IOException
 import java.util.Locale
 import java.util.UUID
+
+internal fun safeExportFailureDetail(failure: Exception): String = when (failure) {
+    is AppException -> SecretRedactor.redact(failure.error.userMessage)
+        .replace(Regex("(?i)(?:content|file)://[^\\s),]+"), "所选保存位置")
+        .take(240)
+    is SecurityException -> "没有保存到所选位置的权限，请重新选择保存位置后重试。"
+    is IOException -> "无法写入所选位置；请检查可用空间和权限，或更换位置后重试。"
+    else -> "本地校验或序列化失败（${failure.javaClass.simpleName}）；原数据未修改，请检查应用日志后重试。"
+}.ifBlank { "本地导出校验失败；原数据未修改，请更换保存位置后重试。" }
 
 class SettingsViewModel(application: Application) : AndroidViewModel(application) {
     private val app = application as MobileAgentApp
@@ -593,16 +605,18 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
             } catch (failure: Exception) {
                 // The SAF document was created before validation/streaming ran.  A failed
                 // export must not leave a zero-byte or truncated ZIP behind.
-                runCatching {
+                val partialFileRemoved = runCatching {
                     android.provider.DocumentsContract.deleteDocument(app.contentResolver, uri)
-                }
-                exportStatus.value = "导出失败。"
-                error.value = "导出未完成：" + SecretRedactor.redact(failure.message ?: "写入失败。")
+                }.getOrDefault(false)
+                val detail = safeExportFailureDetail(failure)
+                exportStatus.value = "导出失败：$detail" +
+                    if (partialFileRemoved) "" else " 未完成文件未能自动删除，请手动移除。"
+                error.value = exportStatus.value
             } finally { transferRunning = false }
         }
     }
 
-    fun importFrom(uri: Uri?) {
+    fun importFrom(uri: Uri?, conflictPolicy: TransferConflictPolicy = TransferConflictPolicy.REJECT) {
         if (uri == null) return
         if (transferRunning) { error.value = "另一项导入或导出尚未结束。"; return }
         transferRunning = true
@@ -617,7 +631,7 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
                         val signatureLength = stream.read(signature)
                         stream.reset()
                         if (signatureLength == 4 && signature.contentEquals(byteArrayOf(0x50, 0x4b, 0x03, 0x04))) {
-                            app.container.transfer.importArchive(stream)
+                            app.container.transfer.importArchive(stream, conflictPolicy)
                         } else {
                         val output = ByteArrayOutputStream()
                         val buffer = ByteArray(8192)
@@ -627,7 +641,7 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
                             require(output.size() + count <= 16 * 1024 * 1024) { "旧 JSON 配置超过 16 MiB 上限；完整内容请使用流式 ZIP。" }
                             output.write(buffer, 0, count)
                         }
-                        app.container.transfer.importBundle(output.toByteArray().toString(Charsets.UTF_8))
+                        app.container.transfer.importBundle(output.toByteArray().toString(Charsets.UTF_8), conflictPolicy)
                         }
                     }
                 }

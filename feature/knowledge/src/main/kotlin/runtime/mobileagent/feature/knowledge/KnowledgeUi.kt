@@ -369,7 +369,7 @@ fun KnowledgeScreen(
                     embeddingDimension = ""
                     embeddingModelMenu = false
                     embeddingDialog = true
-                }, Modifier.weight(0.32f).fillMaxSize(), showPageTitle)
+                }, Modifier.weight(0.32f).fillMaxSize().verticalScroll(rememberScrollState()), showPageTitle)
                 KnowledgeContentPane(state, screenActions, zh, { deleteDocumentId = it }, { rebuildRequested = true }, Modifier.weight(0.68f).fillMaxSize().verticalScroll(rememberScrollState()))
             }
         } else {
@@ -801,8 +801,8 @@ private fun KnowledgeBasePane(
             ) { Text(state.error, color = MaterialTheme.colorScheme.onErrorContainer, modifier = Modifier.padding(14.dp)) }
         }
         else if (state.bases.isEmpty()) Text(if (zh) "暂无知识库。" else "No knowledge bases available.", modifier = Modifier.padding(top = 16.dp))
-        else LazyColumn(verticalArrangement = Arrangement.spacedBy(12.dp), modifier = Modifier.height(340.dp).padding(top = 12.dp)) {
-            items(state.bases, key = { it.id }) { base ->
+        else Column(verticalArrangement = Arrangement.spacedBy(12.dp), modifier = Modifier.padding(top = 12.dp)) {
+            state.bases.forEach { base ->
                 Card(
                     colors = CardDefaults.cardColors(
                         containerColor = MaterialTheme.colorScheme.surface,
@@ -1245,8 +1245,8 @@ private fun WaitingCard(waiting: KnowledgeWaitingUi, actions: KnowledgeActions, 
 private fun DocumentCard(document: KnowledgeDocumentUi, onDelete: (String) -> Unit, actions: KnowledgeActions, zh: Boolean) {
     Card(Modifier.fillMaxWidth().padding(top = 8.dp)) {
         Column(Modifier.padding(12.dp)) {
-            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                Text(document.name, style = MaterialTheme.typography.titleMedium, modifier = Modifier.weight(1f))
+            Column(Modifier.fillMaxWidth()) {
+                Text(document.name, style = MaterialTheme.typography.titleMedium, modifier = Modifier.fillMaxWidth())
                 FilterChip(selected = document.status.equals("READY", true), onClick = {}, enabled = false, label = { Text(knowledgeStageLabel(document.status.ifBlank { "UNKNOWN" }, zh)) })
             }
             if (document.mimeType.isNotBlank()) Text(document.mimeType, style = MaterialTheme.typography.bodySmall)

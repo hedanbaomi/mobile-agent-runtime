@@ -2172,7 +2172,7 @@ class KnowledgeRepository(
      * rebind could interleave between plan and commit — publishing anyway
      * would label the generation with a stale embedding space.
      */
-    private fun commitRebuild(plan: RebuildPlan): String {
+    private fun commitRebuild(plan: RebuildPlan, firstAppend: Boolean = false): String {
         val boundSpace = db.query(
             "SELECT embedding_space_id FROM knowledge_bases WHERE id = ?",
             listOf(plan.knowledgeBaseId),
@@ -2181,7 +2181,7 @@ class KnowledgeRepository(
             "Knowledge base ${plan.knowledgeBaseId} binding changed while rebuilding; refusing a mixed-space generation"
         }
         localRebuildSourceProblem(plan.knowledgeBaseId, plan.allowTerminalImports, plan.publishingDocumentId)?.let { error("INDEX_SOURCE_INCOMPLETE: $it") }
-        return buildGenerationFromCachedUnlocked(plan.knowledgeBaseId, plan.indexEmbedder)
+        return buildGenerationFromCachedUnlocked(plan.knowledgeBaseId, plan.indexEmbedder, firstAppend = firstAppend)
     }
 
     /**
@@ -2242,7 +2242,10 @@ class KnowledgeRepository(
         kbId: String,
         indexEmbedder: TextEmbedder,
         chunksByVersion: LinkedHashMap<String, Sequence<EmbeddingInput>> = embeddingInputsByVersionForKnowledgeBase(kbId),
+        firstAppend: Boolean = false,
     ): String {
+        val previousGeneration = db.query("SELECT active_generation_id FROM knowledge_bases WHERE id=?", listOf(kbId))
+            .singleOrNull()?.string("active_generation_id")?.ifBlank { null }
         val generationId = EntityId.random().value
         var vectors = 0
         db.execute(
@@ -2288,12 +2291,51 @@ class KnowledgeRepository(
             "UPDATE knowledge_bases SET active_generation_id = ? WHERE id = ?",
             listOf(generationId, kbId),
         )
+        if (previousGeneration != null && isAppendOnlyGenerationLocked(previousGeneration, generationId)) {
+            advanceCompatibleBatchGenerationsLocked(kbId, previousGeneration, generationId)
+        } else if (previousGeneration == null && firstAppend) {
+            advanceCompatibleBatchGenerationsLocked(kbId, null, generationId)
+        }
         // A new generation publishes under a new id: drop cached ANN handles
         // for older generations of this KB.  The next query builds once for
         // the new generation and reuses it; the switch itself is atomic from
         // the reader's view because the cache key contains the generation id.
         vectorIndexCache.invalidateKnowledgeBase(kbId)
         return generationId
+    }
+
+    /** A new derived index may add members, but may not remove/replace a frozen source or change its space. */
+    private fun isAppendOnlyGenerationLocked(previous: String, current: String): Boolean {
+        val before = db.query("SELECT kb_id,space_id,state FROM index_generations WHERE id=?", listOf(previous))
+            .singleOrNull() ?: return false
+        val after = db.query("SELECT kb_id,space_id,state FROM index_generations WHERE id=?", listOf(current))
+            .singleOrNull() ?: return false
+        if (before.string("state") != "READY" || after.string("state") != "READY" ||
+            before.string("kb_id") != after.string("kb_id") || before.string("space_id") != after.string("space_id")) return false
+        return db.query(
+            "SELECT 1 AS missing FROM generation_members old WHERE old.generation_id=? AND NOT EXISTS (" +
+                "SELECT 1 FROM generation_members fresh WHERE fresh.generation_id=? AND fresh.chunk_id=old.chunk_id " +
+                "AND fresh.space_id=old.space_id AND fresh.document_version_id=old.document_version_id) LIMIT 1",
+            listOf(previous, current),
+        ).isEmpty()
+    }
+
+    /** Retain durable stop/consent state; an append only advances the derived index fence. */
+    private fun advanceCompatibleBatchGenerationsLocked(kbId: String, previous: String?, current: String) {
+        db.execute(
+            "UPDATE import_batches SET generation_id=?,updated_at=? WHERE kb_id=? AND generation_id IS ? " +
+                "AND state IN ('STAGING','COPYING','PROCESSING','WAITING','PAUSED','BLOCKED')",
+            listOf(current, Utc.nowIso(), kbId, previous),
+        )
+    }
+
+    /** Called before a new document's pointer is published; rebuild/rebind cannot use this proof. */
+    private fun isFirstAppendToEmptyFenceLocked(kbId: String, spaceId: String): Boolean {
+        val base = db.query("SELECT active_generation_id,embedding_space_id FROM knowledge_bases WHERE id=?", listOf(kbId))
+            .singleOrNull() ?: return false
+        if (base.string("active_generation_id").isNotBlank() || base.string("embedding_space_id") != spaceId) return false
+        return db.query("SELECT 1 AS existing FROM documents WHERE kb_id=? AND deleted_at IS NULL " +
+            "AND active_version_id IS NOT NULL AND active_version_id!='' LIMIT 1", listOf(kbId)).isEmpty()
     }
 
     private fun importJobFromRow(
@@ -4017,6 +4059,8 @@ class KnowledgeRepository(
                         }
                     }
                     validateOperationCache(operation, inputsByVersion, selectedEmbedder.dimension)
+                    val firstAppend = operation.kind == "IMPORT" &&
+                        isFirstAppendToEmptyFenceLocked(operation.knowledgeBaseId, selectedEmbedder.spaceId)
                     when (operation.kind) {
                         "IMPORT" -> {
                             val versionId = operation.documentVersionId ?: error("import operation has no document version")
@@ -4094,6 +4138,7 @@ class KnowledgeRepository(
                     val generation = buildGenerationFromCachedUnlocked(
                         operation.knowledgeBaseId,
                         selectedEmbedder,
+                        firstAppend = firstAppend,
                     )
                     operation.jobId?.let { jobId ->
                         advanceBatchGenerationAfterPublicationLocked(jobId, generation)
@@ -4304,6 +4349,7 @@ class KnowledgeRepository(
         withEmbeddingRepair(rebuild.indexEmbedder) {
             synchronized(indexLock) {
                 db.transaction {
+                    val firstAppend = isFirstAppendToEmptyFenceLocked(job.knowledgeBaseId, rebuild.indexEmbedder.spaceId)
                     db.execute("UPDATE assets SET document_version_id = ? WHERE document_id = ? AND (document_version_id IS NULL OR document_version_id = '')", listOf(versionId, job.documentId))
                     db.execute(
                         "UPDATE document_versions SET status = ? WHERE id = ?",
@@ -4311,7 +4357,7 @@ class KnowledgeRepository(
                     )
                     db.execute("UPDATE documents SET active_version_id = ?, deleted_at = NULL WHERE id = ?", listOf(versionId, job.documentId))
                     ensureBatchGenerationCurrentLocked(job.id)
-                    val generation = commitRebuild(rebuild)
+                    val generation = commitRebuild(rebuild, firstAppend)
                     advanceBatchGenerationAfterPublicationLocked(job.id, generation)
                     if (!job.visualGapsAccepted) pipeline.recordPublication(job.id,chunkVersion,versionId)
                 }
@@ -5633,70 +5679,7 @@ class KnowledgeRepository(
             ),
         ).map { it.string("id") }
         ids.forEach { batchId ->
-            if (batchId in activeBatchWorkers) return@forEach
-            val state = db.query("SELECT state FROM import_batches WHERE id = ?", listOf(batchId))
-                .singleOrNull()?.string("state")
-            if (state in setOf(ImportBatchState.PAUSED.name, ImportBatchState.BLOCKED.name,
-                    ImportBatchState.CANCELLED.name)) {
-                // A user stop can race with process death after a provider
-                // dispatch. Settle the external boundary and release its
-                // durable slot, but never requeue a stopped batch.
-                db.query("SELECT job_id FROM import_items WHERE batch_id = ? AND job_id IS NOT NULL AND job_id != ''",
-                    listOf(batchId)).forEach { row ->
-                    val jobId = row.string("job_id")
-                    recoverPipelineJob(jobId)
-                    persistVisionUnknownOutcomeLocked(jobId)
-                    activeEmbeddingOperationForJob(jobId)?.takeIf { it.state == "DISPATCHED" }
-                        ?.let(::markEmbeddingOperationUnknown)
-                }
-                refreshBatchProgressLocked(batchId)
-                return@forEach
-            }
-            val wasFailed = state == ImportBatchState.FAILED.name
-            // A consumed Vision ticket marks an external call that may have
-            // already reached the provider.  Reduce that job to UNKNOWN before
-            // any PROCESSING item is re-queued; otherwise processBatch could
-            // dispatch the same image again after process death.
-            db.query(
-                "SELECT job_id FROM import_items WHERE batch_id = ? AND job_id IS NOT NULL AND job_id != ''",
-                listOf(batchId),
-            ).forEach { row ->
-                val jobId = row.string("job_id")
-                recoverPipelineJob(jobId)
-                recoverConsumedVisionJobLocked(jobId)
-                db.query(
-                    "SELECT id FROM consent_tickets WHERE kind = 'API_EMBEDDING' AND job_id = ? AND consumed = 1",
-                    listOf(jobId),
-                ).forEach { ticket -> recoverConsumedApiEmbeddingTicketLocked(ticket.string("id")) }
-            }
-            db.execute(
-                "UPDATE import_items SET state = ?, error = NULL WHERE batch_id = ? AND state = ?",
-                listOf(ImportItemState.QUEUED.name, batchId, ImportItemState.PROCESSING.name),
-            )
-            db.query(
-                "SELECT job_id FROM import_items WHERE batch_id = ? AND job_id IS NOT NULL AND job_id != ''",
-                listOf(batchId),
-            ).forEach { row -> syncBatchItemFromJobLocked(row.string("job_id")) }
-            // Active local stages are safe to reconstruct from CAS.  Restore
-            // them to QUEUED after the job-derived sync above; external
-            // DISPATCHED state is still checked fail-closed by resumeImport.
-            db.execute(
-                "UPDATE import_items SET state = ?, error = NULL WHERE batch_id = ? AND state = ?",
-                listOf(ImportItemState.QUEUED.name, batchId, ImportItemState.PROCESSING.name),
-            )
-            var retryScheduled = false
-            db.query("SELECT job_id FROM import_items WHERE batch_id = ? AND state = ?",
-                listOf(batchId, ImportItemState.FAILED.name)).forEach { row ->
-                retryScheduled = queueAutomaticBatchRetryLocked(batchId, row.string("job_id")) || retryScheduled
-            }
-            refreshBatchProgressLocked(batchId)
-            // A previously failed batch may have had another lane in flight.
-            // Reconcile that lane's external outcome, but do not restart the
-            // batch merely because its local item was returned to QUEUED.
-            if (wasFailed && !retryScheduled) {
-                db.execute("UPDATE import_batches SET state = ? WHERE id = ?",
-                    listOf(ImportBatchState.FAILED.name, batchId))
-            }
+            if (batchId !in activeBatchWorkers) reconcileBatchDeliveryLocked(batchId)
         }
         ids.filter { batchId ->
             db.query("SELECT state FROM import_batches WHERE id = ?", listOf(batchId))
@@ -5705,6 +5688,86 @@ class KnowledgeRepository(
                     ImportBatchState.PROCESSING.name,
                 )
         }
+    }
+
+    /** Reconcile every delivery, not only Application startup. No provider is invoked here. */
+    private fun reconcileBatchDeliveryLocked(batchId: String) {
+        val state = db.query("SELECT state FROM import_batches WHERE id = ?", listOf(batchId))
+            .singleOrNull()?.string("state")
+        if (state in setOf(ImportBatchState.PAUSED.name, ImportBatchState.BLOCKED.name,
+                ImportBatchState.CANCELLED.name)) {
+            // A user stop can race with process death after a provider
+            // dispatch. Settle the external boundary and release its
+            // durable slot, but never requeue a stopped batch.
+            db.query("SELECT job_id FROM import_items WHERE batch_id = ? AND job_id IS NOT NULL AND job_id != ''",
+                listOf(batchId)).forEach { row ->
+                val jobId = row.string("job_id")
+                recoverPipelineJob(jobId)
+                persistVisionUnknownOutcomeLocked(jobId)
+                activeEmbeddingOperationForJob(jobId)?.takeIf { it.state == "DISPATCHED" }
+                    ?.let(::markEmbeddingOperationUnknown)
+            }
+            refreshBatchProgressLocked(batchId)
+            return
+        }
+        val wasFailed = state == ImportBatchState.FAILED.name
+        // A consumed Vision ticket marks an external call that may have
+        // already reached the provider.  Reduce that job to UNKNOWN before
+        // any PROCESSING item is re-queued; otherwise processBatch could
+        // dispatch the same image again after process death.
+        db.query(
+            "SELECT job_id FROM import_items WHERE batch_id = ? AND job_id IS NOT NULL AND job_id != ''",
+            listOf(batchId),
+        ).forEach { row ->
+            val jobId = row.string("job_id")
+            recoverPipelineJob(jobId)
+            recoverConsumedVisionJobLocked(jobId)
+            db.query(
+                "SELECT id FROM consent_tickets WHERE kind = 'API_EMBEDDING' AND job_id = ? AND consumed = 1",
+                listOf(jobId),
+            ).forEach { ticket -> recoverConsumedApiEmbeddingTicketLocked(ticket.string("id")) }
+        }
+        db.execute(
+            "UPDATE import_items SET state = ?, error = NULL WHERE batch_id = ? AND state = ?",
+            listOf(ImportItemState.QUEUED.name, batchId, ImportItemState.PROCESSING.name),
+        )
+        db.query(
+            "SELECT job_id FROM import_items WHERE batch_id = ? AND job_id IS NOT NULL AND job_id != ''",
+            listOf(batchId),
+        ).forEach { row -> syncBatchItemFromJobLocked(row.string("job_id")) }
+        // Active local stages are safe to reconstruct from CAS.  Restore
+        // them to QUEUED after the job-derived sync above; external
+        // DISPATCHED state is still checked fail-closed by resumeImport.
+        db.execute(
+            "UPDATE import_items SET state = ?, error = NULL WHERE batch_id = ? AND state = ?",
+            listOf(ImportItemState.QUEUED.name, batchId, ImportItemState.PROCESSING.name),
+        )
+        // A confirmed batch destination is already consent for its frozen
+        // visual members. Job-derived WAITING must not undo the coordinator's
+        // explicit authorize-and-continue queue on the next worker delivery.
+        // Embedding consent is separate and is never re-armed here.
+        if (batchVisionAuthorizationLocked(batchId) != null) {
+            db.execute(
+                "UPDATE import_items SET state=? WHERE batch_id=? AND state=? AND job_id IN (" +
+                    "SELECT id FROM import_jobs WHERE batch_id=? AND stage IN (?,?))",
+                listOf(ImportItemState.QUEUED.name, batchId, ImportItemState.WAITING.name, batchId,
+                    ImportStage.WAITING_FOR_VISION_MODEL.name, ImportStage.AWAITING_UPLOAD_CONSENT.name),
+            )
+        }
+        var retryScheduled = false
+        db.query("SELECT job_id FROM import_items WHERE batch_id = ? AND state = ?",
+            listOf(batchId, ImportItemState.FAILED.name)).forEach { row ->
+            retryScheduled = queueAutomaticBatchRetryLocked(batchId, row.string("job_id")) || retryScheduled
+        }
+        refreshBatchProgressLocked(batchId)
+        // A previously failed batch may have had another lane in flight.
+        // Reconcile that lane's external outcome, but do not restart the
+        // batch merely because its local item was returned to QUEUED.
+        if (wasFailed && !retryScheduled) {
+            db.execute("UPDATE import_batches SET state = ? WHERE id = ?",
+                listOf(ImportBatchState.FAILED.name, batchId))
+        }
+
     }
 
     fun beginBatch(knowledgeBaseId: String, kind: ImportBatchKind, displayName: String,
@@ -5807,7 +5870,6 @@ class KnowledgeRepository(
     }
 
     /** Each lane claims a different durable item; SQLite/index mutations still use indexLock. */
-    private val activeBatchWorkers = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
 
     private fun queueAutomaticBatchRetry(batchId: String, jobId: String): Boolean = synchronized(indexLock) {
         queueAutomaticBatchRetryLocked(batchId, jobId)
@@ -5858,6 +5920,7 @@ class KnowledgeRepository(
     fun processBatch(batchId: String, visionConfigured: Boolean): Boolean {
         if (!activeBatchWorkers.add(batchId)) return false
         try {
+            synchronized(indexLock) { reconcileBatchDeliveryLocked(batchId) }
             val retryPending = AtomicBoolean(false)
             val parallelism = synchronized(indexLock) {
                 // The API embedding operation is exclusive per KB; local
@@ -5923,6 +5986,9 @@ class KnowledgeRepository(
                 claimNextBatchJob(batchId)
             } catch (cancelled: CancellationException) {
                 throw cancelled
+            } catch (interrupted: InterruptedException) {
+                Thread.currentThread().interrupt()
+                throw interrupted
             } catch (failure: Throwable) {
                 synchronized(indexLock) {
                     failBatchLocked(batchId, failure.message ?: BATCH_GENERATION_CHANGED)
@@ -5952,13 +6018,17 @@ class KnowledgeRepository(
                 }
             } catch (cancelled: CancellationException) {
                 throw cancelled
+            } catch (interrupted: InterruptedException) {
+                Thread.currentThread().interrupt()
+                throw interrupted
             } catch (failure: Throwable) {
                 // resumeImport persists UNKNOWN_OUTCOME before throwing when
                 // a provider call may have been dispatched. Reflect that
                 // durable result before deciding whether bounded batch retry
                 // can safely resume with the saved destination authorization.
                 synchronized(indexLock) {
-                    syncBatchItemFromJobLocked(jobId, failure.message)
+                    failUnsettledBatchItemLocked(jobId)
+                    syncBatchItemFromJobLocked(jobId)
                     refreshBatchProgressLocked(batchId)
                 }
                 if (queueAutomaticBatchRetry(batchId, jobId)) {
@@ -6010,6 +6080,27 @@ class KnowledgeRepository(
             ImportBatchEventPhase.CHECKPOINT, batchId, null, 0,
             reasonCode = "drain", count = progress.published,
         )
+    }
+
+    /** A preflight exception must not repeatedly reclaim the same nonterminal row forever. */
+    private fun failUnsettledBatchItemLocked(jobId: String) {
+        val row = db.query("SELECT stage FROM import_jobs WHERE id=?", listOf(jobId)).singleOrNull() ?: return
+        val stage = row.string("stage")
+        if (stage in setOf("FAILED", "READY", "READY_WITH_VISUAL_GAPS", "CANCELLED", "PAUSED",
+                "WAITING_FOR_VISION_MODEL", "AWAITING_UPLOAD_CONSENT", "AWAITING_EMBEDDING_CONSENT")) return
+        recoverPipelineJob(jobId)
+        val operation = activeEmbeddingOperationForJob(jobId)
+        val error = when {
+            operation?.state in setOf("DISPATCHED", "UNKNOWN") -> {
+                if (operation?.state == "DISPATCHED") markEmbeddingOperationUnknown(operation)
+                API_EMBEDDING_UNKNOWN_ERROR
+            }
+            db.query("SELECT request_id FROM pipeline_attempts WHERE job_id=? AND state='UNKNOWN_OUTCOME' LIMIT 1",
+                listOf(jobId)).isNotEmpty() -> VISION_UNKNOWN_ERROR
+            else -> "BATCH_ITEM_FAILED: Import source or processing checkpoint is unavailable; retry explicitly."
+        }
+        db.execute("UPDATE import_jobs SET stage='FAILED',error=?,updated_at=? WHERE id=?",
+            listOf(error, Utc.nowIso(), jobId))
     }
     /** Refresh counters from import_items; job state is the source of truth. */
     fun refreshBatchProgress(batchId: String) = synchronized(indexLock) {
@@ -6834,7 +6925,7 @@ class KnowledgeRepository(
     private fun advanceBatchGenerationAfterPublicationLocked(jobId: String, generationId: String) {
         val batchId = db.query("SELECT batch_id FROM import_jobs WHERE id = ?", listOf(jobId))
             .singleOrNull()?.string("batch_id")?.ifBlank { null } ?: return
-        val batch = db.query("SELECT state FROM import_batches WHERE id = ?", listOf(batchId)).singleOrNull()
+        val batch = db.query("SELECT state,kb_id,generation_id FROM import_batches WHERE id = ?", listOf(batchId)).singleOrNull()
             ?: error("import batch not found")
         check(batch.string("state") != ImportBatchState.FAILED.name && batch.string("state") != ImportBatchState.CANCELLED.name) {
             "import batch is no longer publishable"
@@ -7056,6 +7147,7 @@ class KnowledgeRepository(
 
     companion object {
         private val livePipelineJobs = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
+        private val activeBatchWorkers = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
         private const val MAX_BATCH_PARALLELISM = 6
         private const val MAX_DOCUMENT_VISION_PARALLELISM = 2
         private const val MAX_EARLY_VECTOR_BYTES = 8L * 1024L * 1024L

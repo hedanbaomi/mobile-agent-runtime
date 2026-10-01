@@ -85,6 +85,7 @@ class KnowledgeViewModel(
     private var refreshRequested = false
     private var activeOperations = 0
     private var hasActiveImportWork = false
+    private var refreshReadError: String? = null
     private val observedImportOperations = mutableSetOf<String>()
 
     private enum class EmbeddingAction { REBIND, REBUILD, GRANT, RETRY, QUERY_RETRY }
@@ -143,13 +144,16 @@ class KnowledgeViewModel(
                                 visionTargetFingerprint = snapshot.visionTargetFingerprint,
                                 visionTargets = snapshot.visionTargets,
                                 visionTargetsLoading = false,
+                                error = state.value.error.takeUnless { it == refreshReadError },
                             )
+                            refreshReadError = null
                         } else refreshRequested = true
                     } catch (cancelled: CancellationException) { throw cancelled }
                     catch (failure: Exception) {
                         if (revision == selectionRevision) {
                             state.value = state.value.copy(visionTargetsLoading = false)
                             fail(failure)
+                            refreshReadError = state.value.error
                         }
                     }
                 }
@@ -762,7 +766,13 @@ class KnowledgeViewModel(
         }
         return uri.lastPathSegment ?: "file"
     }
-    private fun fail(failure: Exception) { state.value = state.value.copy(error = SecretRedactor.redact(failure.message ?: "操作失败。")) }
+    private fun fail(failure: Exception) {
+        val message = if (failure is android.database.SQLException || failure is java.sql.SQLException) {
+            if (java.util.Locale.getDefault().language == "zh") "本地资料暂时无法读取，请刷新后重试。" else
+                "Local data could not be read. Refresh and try again."
+        } else SecretRedactor.redact(failure.message ?: "操作失败。")
+        state.value = state.value.copy(error = message)
+    }
     private companion object {
         val ACTIVE = setOf(
             "QUEUED", "COPYING", "HASHING", "PARSING", "VISION_PROCESSING", "CHUNKING",

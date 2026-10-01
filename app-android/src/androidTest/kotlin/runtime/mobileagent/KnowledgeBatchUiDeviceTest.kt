@@ -29,7 +29,9 @@ import runtime.mobileagent.knowledge.PipelineUsage
 import runtime.mobileagent.knowledge.PipelineReuseSummary
 
 class KnowledgeBatchUiDeviceTest {
-    @get:Rule val compose = createAndroidComposeRule<MainActivity>()
+    // Component tests own their composition and do not launch the product's
+    // first-run notification permission activity.
+    @get:Rule val compose = createAndroidComposeRule<ComposeTestHostActivity>()
 
     @Test fun pipelineProgressAndResumeScopeRequireExplicitConfirmation() {
         var resumed: String? = null

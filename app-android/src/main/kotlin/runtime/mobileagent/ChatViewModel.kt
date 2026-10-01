@@ -123,6 +123,14 @@ class ChatViewModel(
     private var activeToolExecutor: ToolExecutor? = null
     private val citations = linkedMapOf<String, Pair<Citation, String>>()
     private var selectedImage: Pair<String, ByteArray>? = null
+    private val sessionPreviews = mutableMapOf<String, Pair<ChatRequestPreviewUi, List<ChatPromptLayerUi>>>()
+    private fun draftKey(sessionId: String? = state.value.selectedSessionId) = "chat.draft.${sessionId ?: "new:${state.value.selectedAgentId}"}"
+    private fun saveDraft() { savedStateHandle[draftKey()] = state.value.input }
+    private fun blockedSessionChange(): Boolean {
+        if (!state.value.streaming) return false
+        state.value = state.value.copy(status = "当前会话仍在运行。请等待完成或明确取消后，再切换或新建会话；草稿已保留。")
+        return true
+    }
     /** The deferred and call id are process-local; pending approvals never survive a restart. */
     private var approvalCallId: String? = null
 
@@ -152,6 +160,7 @@ class ChatViewModel(
         // the availability enum is the second, explicit fail-closed guard in
         // the inspector UI.
         if (!inspectorEnabled) {
+            sessionPreviews.clear()
             state.value = state.value.copy(
                 requestPreview = null,
                 requestInspectorAvailability = ChatRequestInspectorAvailability.DISABLED,
@@ -204,8 +213,15 @@ class ChatViewModel(
                         workspaceLabel = workspaceLabel,
                     )
                 }, selectedSessionId = selected,
+                input = savedStateHandle.get<String>("chat.draft.${selected ?: "new:$agentId"}") ?: state.value.input,
                 agents = agents.map { ChatAgentOptionUi(it.id, it.name) }, selectedAgentId = agentId,
-                messages = messages.map(::messageUi), citations = citationUis(),
+                messages = messages.mapIndexed { index, message ->
+                    messageUi(message).let { ui ->
+                        if (index == messages.lastIndex && message.role == MessageRole.USER)
+                            ui.copy(eventSummary = "消息已在本机保存；尚无本轮完成确认，送达与处理结果未确认，不会自动重发。")
+                        else ui
+                    }
+                }, citations = citationUis(),
                 compactions = selected?.let { container.contextCompactions.list(it).map(::compactionUi) }.orEmpty(),
                 requestPreview = state.value.requestPreview?.takeIf { inspectorEnabled },
                 requestInspectorAvailability = resolveRequestInspectorAvailability(
@@ -228,11 +244,15 @@ class ChatViewModel(
     }
 
     fun selectAgent(id: String) {
-        if (state.value.streaming) return
+        if (blockedSessionChange()) return
+        saveDraft()
+        state.value.selectedSessionId?.let { previous ->
+            state.value.requestPreview?.let { sessionPreviews[previous] = it to state.value.promptLayers }
+        }
         container.uiPreferences.edit().putString("selected-agent", id).remove("selected-conversation").apply()
         savedStateHandle[SELECTED_AGENT_KEY] = id
         savedStateHandle.remove<String>(SELECTED_SESSION_KEY)
-        state.value = state.value.copy(selectedAgentId = id, selectedSessionId = null, messages = emptyList(), citations = emptyList(),
+        state.value = state.value.copy(selectedAgentId = id, selectedSessionId = null, input = savedStateHandle.get<String>("chat.draft.new:$id").orEmpty(), messages = emptyList(), citations = emptyList(),
             requestPreview = null,
             requestInspectorAvailability = resolveRequestInspectorAvailability(
                 inspectorEnabled = requestInspectorEnabled(), previewAvailable = false, persistedPreviewHint = false,
@@ -253,7 +273,7 @@ class ChatViewModel(
         createSession(requestedWorkspaceId = workspaceId, useAgentDefault = false)
 
     private fun createSession(requestedWorkspaceId: String?, useAgentDefault: Boolean): String? {
-        if (state.value.streaming) return null
+        if (blockedSessionChange()) return null
         return try {
             val id = state.value.selectedAgentId ?: error("请先创建并选择 Agent。")
             val agent = container.agents.get(id) ?: error("Agent 已不存在。")
@@ -301,25 +321,32 @@ class ChatViewModel(
     }
 
     fun selectSession(id: String) {
-        if (state.value.streaming) return
+        if (blockedSessionChange()) return
+        saveDraft()
+        state.value.selectedSessionId?.let { previous ->
+            state.value.requestPreview?.let { sessionPreviews[previous] = it to state.value.promptLayers }
+        }
+        val cached = sessionPreviews[id].takeIf { requestInspectorEnabled() }
         container.uiPreferences.edit().putString("selected-conversation", id).apply()
         savedStateHandle[SELECTED_SESSION_KEY] = id
         state.value = state.value.copy(
             selectedSessionId = id,
-            requestPreview = null,
+            input = savedStateHandle.get<String>(draftKey(id)).orEmpty(),
+            requestPreview = cached?.first,
             requestInspectorAvailability = resolveRequestInspectorAvailability(
-                inspectorEnabled = requestInspectorEnabled(), previewAvailable = false,
+                inspectorEnabled = requestInspectorEnabled(), previewAvailable = cached != null,
                 persistedPreviewHint = hasPersistedRequestPreviewHint(id),
             ),
-            promptLayers = emptyList(),
+            promptLayers = cached?.second.orEmpty(),
             status = "会话使用已保存的配置快照。",
         )
         reload()
     }
-    fun input(value: String) { state.value = state.value.copy(input = value) }
+    fun input(value: String) { state.value = state.value.copy(input = value); saveDraft() }
     fun degrade(value: Boolean) { if (!state.value.streaming) state.value = state.value.copy(textDegradation = value) }
     fun inspector(open: Boolean) {
         val inspectorEnabled = requestInspectorEnabled()
+        if (!inspectorEnabled) sessionPreviews.clear()
         val requestPreview = state.value.requestPreview?.takeIf { inspectorEnabled }
         savedStateHandle[INSPECTOR_KEY] = open
         state.value = state.value.copy(
@@ -346,6 +373,7 @@ class ChatViewModel(
         val conversationId = state.value.selectedSessionId ?: newSession() ?: return
         if (runJob?.isActive != true) runJob = null
         state.value = state.value.copy(input = "", streaming = true, status = "正在准备会话…", statusKind = "")
+        saveDraft()
         preflightJob = viewModelScope.launch {
             try {
                 sendAfterInput(text, conversationId)
@@ -368,10 +396,11 @@ class ChatViewModel(
         if (unknown != null) {
             unknownRetry.value = unknown.runId
             state.value = state.value.copy(streaming = false, input = text)
+            saveDraft()
             return
         }
         val conversation = withContext(Dispatchers.IO) { container.conversations.get(conversationId) }
-            ?: run { state.value = state.value.copy(streaming = false, input = text); return }
+            ?: run { state.value = state.value.copy(streaming = false, input = text); saveDraft(); return }
         // Persist the user's message before any asynchronous preflight.  A provider, retrieval,
         // workspace, or tooling failure must never make the first message disappear.  The
         // message is also projected immediately so the chat remains responsive while the run is
@@ -387,6 +416,7 @@ class ChatViewModel(
         } catch (failure: Exception) {
             fail(failure)
             state.value = state.value.copy(streaming = false, input = text)
+            saveDraft()
             return
         }
         state.value = state.value.copy(
@@ -1804,13 +1834,20 @@ class ChatViewModel(
             text = message.text,
             timeLabel = message.createdAt.take(16),
             citationIds = message.parts.filterIsInstance<CitationPart>().map { it.citationId },
-            streaming = message.status == "STREAMING",
+            streaming = message.status == "STREAMING" && state.value.streaming,
             reasoning = reasoningParts.joinToString("") { it.text },
-            reasoningStreaming = reasoningParts.lastOrNull()?.streaming == true,
+            reasoningStreaming = reasoningParts.lastOrNull()?.streaming == true && state.value.streaming,
             eventSummary = when {
                 errorPart != null -> errorPart.message
                 diffPart != null -> diffPart.summary
-                else -> listOfNotNull(toolFailureSummary, coverageNotice).joinToString(" ")
+                else -> listOfNotNull(toolFailureSummary, coverageNotice,
+                    if (message.role == MessageRole.ASSISTANT && message.status != "COMPLETE" &&
+                        (message.status != "STREAMING" || !state.value.streaming))
+                        "本轮未完成（${message.status}）；已保留输出，不会自动重发。" else null,
+                    if (toolResultPart?.resultJson?.let { raw ->
+                            runCatching { Json.parseToJsonElement(raw).jsonObject["textDegradation"]?.jsonPrimitive?.booleanOrNull }.getOrNull()
+                        } == true) "视觉证据已降级：未向模型发送原始图片，视觉证据可能不完整。" else null,
+                ).joinToString(" ")
             },
         )
     }
@@ -2139,7 +2176,11 @@ class ChatViewModel(
             var valid = true
             var completeEnd = 0
             for ((index, message) in group.withIndex()) {
-                if (message.status != "COMPLETE") break
+                if (message.status != "COMPLETE" && !canIncludePartialAssistant(
+                        message.role.name.lowercase(), message.status, message.text,
+                        message.parts.any { it is ToolCallPart || it is ToolResultPart ||
+                            (it is ErrorPart && it.code !in setOf(MessageErrorCode.UNKNOWN_OUTCOME, MessageErrorCode.CANCELLED)) },
+                    )) break
                 message.parts.filterIsInstance<ToolCallPart>().forEach { if (!pending.add(it.callId)) valid = false }
                 message.parts.filterIsInstance<ToolResultPart>().forEach { if (!pending.remove(it.callId)) valid = false }
                 if (!valid) break
@@ -2166,7 +2207,7 @@ class ChatViewModel(
             ChatMessage(message.role.name.lowercase(), message.text, images, message.parts.filterIsInstance<ToolResultPart>().singleOrNull()?.callId,
                 message.parts.filterIsInstance<ToolCallPart>().map { AssistantToolCall(it.callId, it.name, it.argumentsJson) })
         }
-        return ChatHistory(projected, selected.map { ContextSource(it.id, turnIds.getValue(it.id)) })
+        return ChatHistory(projected, selected.map { ContextSource(it.id, turnIds.getValue(it.id), complete = it.status == "COMPLETE") })
     }
 
     private fun compactionUi(record: ContextCompactionRecord): ChatCompactionUi = ChatCompactionUi(

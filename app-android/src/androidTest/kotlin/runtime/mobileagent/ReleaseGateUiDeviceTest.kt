@@ -15,6 +15,7 @@ import androidx.compose.ui.test.performScrollTo
 import androidx.compose.ui.test.performScrollToNode
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.test.ext.junit.runners.AndroidJUnit4
+import androidx.test.core.app.ApplicationProvider
 import io.ktor.client.HttpClient
 import io.ktor.client.engine.mock.MockEngine
 import io.ktor.client.engine.mock.respond
@@ -30,6 +31,8 @@ import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
+import org.junit.rules.TestRule
+import org.junit.runners.model.Statement
 import runtime.mobileagent.announcements.ClientContext
 
 /**
@@ -40,7 +43,22 @@ import runtime.mobileagent.announcements.ClientContext
  */
 @RunWith(AndroidJUnit4::class)
 class ReleaseGateUiDeviceTest {
-    @get:Rule
+    // Navigation smoke starts after onboarding. Keep OS notification permission
+    // denied/unchanged and mark only the first-run prompt as already handled in
+    // this disposable test application's preferences before launching Activity.
+    @get:Rule(order = 0)
+    val notificationPromptHandled = TestRule { base, _ ->
+        object : Statement() {
+            override fun evaluate() {
+                ApplicationProvider.getApplicationContext<MobileAgentApp>()
+                    .getSharedPreferences("notification-permission", android.content.Context.MODE_PRIVATE)
+                    .edit().putBoolean("requested", true).commit()
+                base.evaluate()
+            }
+        }
+    }
+
+    @get:Rule(order = 1)
     val compose = createAndroidComposeRule<MainActivity>()
 
     @Test

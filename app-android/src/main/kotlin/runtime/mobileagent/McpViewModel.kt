@@ -278,6 +278,10 @@ class McpViewModel(
         state.value = state.value.copy(
             selectedAgentId = selected,
             selectedToolNames = grant?.toolNames?.toSet().orEmpty(),
+            tools = state.value.tools.map { tool ->
+                val granted = tool.namespacedName in grant?.toolNames.orEmpty()
+                tool.copy(selected = granted, granted = granted)
+            },
             pendingGrantConfirmation = false,
             error = null,
         )
@@ -287,7 +291,10 @@ class McpViewModel(
         if (state.value.tools.none { it.namespacedName == namespacedName }) return
         val names = state.value.selectedToolNames.toMutableSet()
         if (selected) names += namespacedName else names -= namespacedName
-        state.value = state.value.copy(selectedToolNames = names)
+        state.value = state.value.copy(
+            selectedToolNames = names.toSet(),
+            tools = state.value.tools.map { it.copy(selected = it.namespacedName in names) },
+        )
     }
 
     fun requestGrant() {

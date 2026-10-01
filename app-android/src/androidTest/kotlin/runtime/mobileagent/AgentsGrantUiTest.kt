@@ -26,6 +26,7 @@ import androidx.compose.ui.unit.dp
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Rule
@@ -182,6 +183,82 @@ class AgentsGrantUiTest {
 
         assertEquals("该工作区仅有读取权限，不能授予读写工具。", failure?.message)
         assertEquals(0, port.saveCalls)
+    }
+
+    @Test
+    fun explicitSaveReackCreatesFreshGrantWithoutBroadeningOrExtendingIt() {
+        val port = RecordingGrantPort().apply { policyVersion = 9L }
+        val old = CapabilityGrant(
+            grantId = "grant.stale-session",
+            agentId = "agent.one",
+            capability = CapabilityId(CapabilityId.FILE_WRITE_TEXT),
+            workspaceId = "workspace.one",
+            pathScope = "docs",
+            lifetime = GrantLifetime.SESSION,
+            policyVersion = 8L,
+            createdAt = "2026-08-30T00:00:00Z",
+            expiresAt = "2099-01-01T00:00:00Z",
+            sessionId = "session.one",
+        )
+        port.storedGrants += old
+
+        val saved = reauthorizeStaleAgentGrant(
+            pending = AgentGrantUi(old, policyStale = true, enabled = true),
+            agentId = "agent.one",
+            grantPort = port,
+            createdAt = "2026-09-30T00:00:00Z",
+        )
+
+        assertNotEquals(old.grantId, saved.grantId)
+        assertEquals(9L, saved.policyVersion)
+        assertEquals(old.capability, saved.capability)
+        assertEquals(old.workspaceId, saved.workspaceId)
+        assertEquals(old.pathScope, saved.pathScope)
+        assertEquals(old.lifetime, saved.lifetime)
+        assertEquals(old.sessionId, saved.sessionId)
+        assertEquals(old.expiresAt, saved.expiresAt)
+        assertFalse(saved.revoked)
+        assertFalse(saved.consumed)
+        assertTrue(port.storedGrants.single { it.grantId == old.grantId }.revoked)
+        assertEquals(1, port.revokeCalls)
+    }
+
+    @Test
+    fun reackRejectsRevokedConsumedExpiredOrUnselectedStaleGrantWithoutWrites() {
+        val base = CapabilityGrant(
+            grantId = "grant.stale",
+            agentId = "agent.one",
+            capability = CapabilityId(CapabilityId.FILE_READ_TEXT),
+            policyVersion = 8L,
+            createdAt = "2026-08-30T00:00:00Z",
+        )
+        val cases = listOf(
+            AgentGrantUi(base.copy(revokedAt = "2026-09-01T00:00:00Z"), policyStale = true, enabled = true),
+            AgentGrantUi(
+                base.copy(lifetime = GrantLifetime.ONCE, consumedAt = "2026-09-01T00:00:00Z"),
+                policyStale = true,
+                enabled = true,
+            ),
+            AgentGrantUi(
+                base.copy(expiresAt = "2000-01-01T00:00:00Z"),
+                expired = true,
+                policyStale = true,
+                enabled = true,
+            ),
+            AgentGrantUi(base, policyStale = true, enabled = false),
+        )
+
+        cases.forEach { pending ->
+            val port = RecordingGrantPort().apply {
+                policyVersion = 9L
+                storedGrants += pending.grant
+            }
+            assertTrue(runCatching {
+                reauthorizeStaleAgentGrant(pending, "agent.one", port)
+            }.isFailure)
+            assertEquals(0, port.saveCalls)
+            assertEquals(0, port.revokeCalls)
+        }
     }
 
     @Test
@@ -497,15 +574,31 @@ class AgentsGrantUiTest {
         override val available = true
         var policyReads = 0
         var saveCalls = 0
+        var revokeCalls = 0
+        var policyVersion = 9L
+        val storedGrants = mutableListOf<CapabilityGrant>()
 
         override fun currentPolicyVersion(): Long {
             policyReads += 1
-            return 9L
+            return policyVersion
         }
+
+        override fun listGrants(agentId: String, includeRevoked: Boolean): List<CapabilityGrant> =
+            storedGrants.filter { it.agentId == agentId && (includeRevoked || !it.revoked) }
 
         override fun saveGrant(grant: CapabilityGrant): CapabilityGrant {
             saveCalls += 1
+            storedGrants += grant
             return grant
+        }
+
+        override fun revokeGrant(grantId: String, expectedRevision: Long): CapabilityGrant {
+            revokeCalls += 1
+            val current = storedGrants.first { it.grantId == grantId }
+            check(current.revision == expectedRevision)
+            val revoked = current.copy(revokedAt = "2026-09-30T00:00:00Z", revision = current.revision + 1L)
+            storedGrants[storedGrants.indexOf(current)] = revoked
+            return revoked
         }
     }
 

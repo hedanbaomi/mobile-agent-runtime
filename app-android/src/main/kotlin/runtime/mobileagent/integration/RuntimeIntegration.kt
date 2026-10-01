@@ -735,7 +735,14 @@ class RuntimeIntegration(
         var pickerCommit = PickerBindingCommit()
         val grants = try {
             db.transaction {
-                val committed = grant?.let { persistWorkspaceGrantBundle(workspace, registered.backend, it) }.orEmpty()
+                val committed = grant?.let {
+                    persistWorkspaceGrantBundle(
+                        workspace,
+                        registered.backend,
+                        it,
+                        preserveActiveWholeDirectoryCapabilities = plan.bindThread,
+                    )
+                }.orEmpty()
                 pickerCommit = persistPickerTarget(
                     workspace = workspace,
                     target = pickerTarget,
@@ -838,6 +845,7 @@ class RuntimeIntegration(
                     workspace = workspace,
                     backend = registered.backend,
                     target = WorkspaceAccessGrantTarget(agentId = agentId),
+                    preserveActiveWholeDirectoryCapabilities = true,
                 )
             }
         } catch (failure: WorkspaceAccessException) {
@@ -2835,8 +2843,9 @@ class RuntimeIntegration(
         workspace: Workspace,
         backend: runtime.mobileagent.skills.tooling.WorkspaceBackend,
         target: WorkspaceAccessGrantTarget,
+        preserveActiveWholeDirectoryCapabilities: Boolean = false,
     ): List<CapabilityGrant> {
-        val requestedCapabilities = target.capabilities.ifEmpty {
+        var requestedCapabilities = target.capabilities.ifEmpty {
             if (workspace.scope == WorkspaceScope.FULL_DEVICE_FILES) {
                 canonicalFullDeviceWorkspaceGrantCapabilities(backend.capabilities)
             } else {
@@ -2862,6 +2871,29 @@ class RuntimeIntegration(
         val policyVersion = authorityPolicyRepository.getPolicy().policyVersion
         val now = Instant.ofEpochMilli(System.currentTimeMillis())
         val existing = capabilityGrantRepository.forAgent(target.agentId, includeRevoked = true)
+        if (preserveActiveWholeDirectoryCapabilities) {
+            if (normalizedPath != null || target.lifetime != runtime.mobileagent.domain.GrantLifetime.PERSISTENT) {
+                throw WorkspaceAccessException(WorkspaceAccessErrorCode.INVALID_REQUEST)
+            }
+            requestedCapabilities = requestedCapabilities + existing.asSequence()
+                .filter { grant ->
+                    !grant.revoked && !grant.consumed &&
+                        grant.agentId == target.agentId &&
+                        grant.workspaceId == workspace.id &&
+                        grant.pathScope == normalizedPath &&
+                        grant.lifetime == target.lifetime &&
+                        grant.taskId == null && grant.sessionId == null &&
+                        grant.skillInstallId == null && grant.packageHash == null &&
+                        grant.policyVersion == policyVersion &&
+                        grant.capability in backend.capabilities &&
+                        grant.isActiveFor(now, null, null)
+                }
+                .map { it.capability }
+                .toSet()
+        }
+        if (requestedCapabilities.any { it !in backend.capabilities }) {
+            throw WorkspaceAccessException(WorkspaceAccessErrorCode.CAPABILITY_DENIED)
+        }
         // Reconcile only this bundle's scope. Path-scoped, one-shot, task,
         // session and Skill grants are independent of an automatic default.
         existing.asSequence()
@@ -3072,7 +3104,14 @@ class RuntimeIntegration(
             db.transaction {
                 workspaceRepository.save(workspace)
                 safWorkspaceGrantRepository.save(safGrant)
-                val committedGrants = grant?.let { persistWorkspaceGrantBundle(workspace, backend, it) }.orEmpty()
+                val committedGrants = grant?.let {
+                    persistWorkspaceGrantBundle(
+                        workspace,
+                        backend,
+                        it,
+                        preserveActiveWholeDirectoryCapabilities = plan.bindThread,
+                    )
+                }.orEmpty()
                 pickerCommit = persistPickerTarget(
                     workspace = workspace,
                     target = pickerTarget,
@@ -3356,7 +3395,14 @@ class RuntimeIntegration(
             db.transaction {
                 workspaceRepository.save(workspace)
                 privilegedWorkspaceBindingRepository.save(binding)
-                val committedGrants = grant?.let { persistWorkspaceGrantBundle(workspace, value.backend, it) }.orEmpty()
+                val committedGrants = grant?.let {
+                    persistWorkspaceGrantBundle(
+                        workspace,
+                        value.backend,
+                        it,
+                        preserveActiveWholeDirectoryCapabilities = plan.bindThread,
+                    )
+                }.orEmpty()
                 pickerCommit = persistPickerTarget(
                     workspace = workspace,
                     target = pickerTarget,

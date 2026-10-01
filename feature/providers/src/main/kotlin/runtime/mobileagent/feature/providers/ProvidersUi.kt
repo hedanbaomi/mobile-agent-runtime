@@ -18,6 +18,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -753,7 +754,7 @@ private fun ProviderEditorPage(
     val showModelFields = draft.modelProfileId != null || draft.modelId.isNotBlank() || draft.id == null
     val budgetError = if (showModelFields) providerBudgetError(draft.contextLimit, draft.outputLimit, draft.outputLimitMode, draft.contextLimitMode, draft.contextWindowValue, zh) else null
     Surface(modifier.fillMaxSize().testTag("provider.editor.page")) {
-        Column(Modifier.fillMaxSize().padding(horizontal = 16.dp, vertical = 12.dp)) {
+        Column(Modifier.fillMaxSize().imePadding().padding(horizontal = 16.dp, vertical = 12.dp)) {
             ProviderEditorFields(
                 state = state,
                 actions = actions,

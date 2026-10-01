@@ -36,6 +36,32 @@ class SharedWorkspaceBackendAdapterVersionTest {
     lateinit var tempDir: Path
 
     @Test
+    fun missingEntryDoesNotBecomeMissingWorkspace(): Unit = runBlocking {
+        val root = tempDir.resolve("missing-entry").also { Files.createDirectories(it) }
+        val backend = SharedWorkspaceBackendAdapter(InternalWorkspaceBackend(root, workspaceId = "internal"))
+        val missing = backend.list(WorkspaceListRequest("internal", relativePath = "absent"))
+        assertTrue(missing is WorkspaceResult.Failure)
+        assertEquals(ToolErrorCode.ENTRY_NOT_FOUND, (missing as WorkspaceResult.Failure).error.code)
+        assertTrue(backend.list(WorkspaceListRequest("internal")) is WorkspaceResult.Success)
+        Files.delete(root)
+        val unavailable = backend.list(WorkspaceListRequest("internal"))
+        assertTrue(unavailable is WorkspaceResult.Failure)
+        assertEquals(ToolErrorCode.WORKSPACE_NOT_FOUND, (unavailable as WorkspaceResult.Failure).error.code)
+    }
+
+    @Test
+    fun textReadChecksUtf8BytesRatherThanFileExtension(): Unit = runBlocking {
+        val root = tempDir.resolve("text-kind").also { Files.createDirectories(it) }
+        Files.write(root.resolve("text.jpg"), "valid text".toByteArray())
+        Files.write(root.resolve("binary.txt"), byteArrayOf(0xff.toByte(), 0xfe.toByte()))
+        val backend = SharedWorkspaceBackendAdapter(InternalWorkspaceBackend(root, workspaceId = "internal"))
+        assertEquals("valid text", success(backend.readText(WorkspaceReadTextRequest("internal", "text.jpg"))).text)
+        val binary = backend.readText(WorkspaceReadTextRequest("internal", "binary.txt"))
+        assertTrue(binary is WorkspaceResult.Failure)
+        assertEquals(ToolErrorCode.INVALID_REQUEST, (binary as WorkspaceResult.Failure).error.code)
+    }
+
+    @Test
     fun taggedTokensProjectTheSameAsTheirHexBody() {
         val digest = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
         val expected = WorkspaceVersionProjection.toPublic(digest)

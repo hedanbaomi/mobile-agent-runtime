@@ -82,7 +82,7 @@ import kotlinx.coroutines.withContext
  * instances so route changes cannot cancel active work or lose its progress.
  */
 @Composable
-internal fun MainApp() {
+internal fun MainApp(onMoveTaskToBack: () -> Unit = {}) {
     val app = LocalContext.current.applicationContext as MobileAgentApp
     val shellVm: ShellViewModel = viewModel()
     val shellOwner = checkNotNull(LocalViewModelStoreOwner.current) { "MainApp requires a stable shell ViewModelStoreOwner" }
@@ -161,16 +161,8 @@ internal fun MainApp() {
     }
 
     val currentEntry by navController.currentBackStackEntryAsState()
-    // Single source of truth: `route` drives the NavController. The reverse
-    // sync below only observes system-back pops back into `route`; every
-    // top-level destination is a drawer peer, so navigate() always resets to
-    // a single entry and system back deterministically returns to Chat (or
-    // the inspector source) instead of chasing a second state.
-    LaunchedEffect(currentEntry?.destination?.route) {
-        val destination = currentEntry?.destination?.route?.takeIf { it in allAppRoutes } ?: return@LaunchedEffect
-        if (route != destination) route = destination
-        shellVm.setRoute(destination)
-    }
+    // The requested route is authoritative. Observing an older back-stack
+    // entry must never overwrite it while navigate() is still in progress.
     LaunchedEffect(route, currentEntry?.destination?.route) {
         val currentRoute = currentEntry?.destination?.route ?: return@LaunchedEffect
         if (currentRoute == route) return@LaunchedEffect
@@ -252,7 +244,7 @@ internal fun MainApp() {
         )
         if (target != null && target != route) {
             requestRoute(target)
-        } else if (!navController.popBackStack() && route != AppRoutes.CHAT) {
+        } else if (route != AppRoutes.CHAT) {
             requestRoute(AppRoutes.CHAT)
         }
     }
@@ -289,6 +281,7 @@ internal fun MainApp() {
     }
     LaunchedEffect(workspacePickerOpen, workspacePickerState.attachPhase) {
         if (workspacePickerOpen && workspacePickerState.attachPhase == WorkspacePickerAttachPhaseUi.SUCCESS) {
+            chatVm.reload()
             closeWorkspacePicker()
         }
     }
@@ -362,11 +355,12 @@ internal fun MainApp() {
             )
             BackHandler(
                     enabled = !(editorOwner == route && editorDirty) &&
-                        (workspacePickerOpen || shellDetailOpen || route != AppRoutes.CHAT || navController.previousBackStackEntry != null),
+                        (workspacePickerOpen || shellDetailOpen || route != AppRoutes.CHAT || chatVm.state.value.streaming),
             ) {
                 when {
                     workspacePickerOpen -> closeWorkspacePicker()
                     shellDetailOpen -> shellDetailBack?.invoke()
+                    route == AppRoutes.CHAT && chatVm.state.value.streaming -> onMoveTaskToBack()
                     else -> handleBack(compact)
                 }
             }
@@ -523,6 +517,7 @@ internal fun MainApp() {
                                 ),
                                 modifier = Modifier.fillMaxSize(),
                                 showPageTitle = false,
+                                chinese = chinese,
                             )
                         }
                     }
@@ -741,6 +736,11 @@ private fun AgentsRoute(entry: NavBackStackEntry, chinese: Boolean, onRoute: (St
             workspaceBusy -> if (chinese) "正在更新工作区…" else "Updating workspace…"
             workspaceStatus.isNotBlank() -> workspaceStatus
             workspaceLoad.isFailure -> if (chinese) "读取工作区失败。" else "Unable to read workspaces."
+            fullDeviceWorkspace != null && authoritySnapshot.dangerousMode == runtime.mobileagent.domain.DangerousMode.DISABLED -> if (chinese) {
+                "危险模式已关闭；完整设备文件工具暂停。"
+            } else {
+                "Dangerous mode is off; full-device file tools are paused."
+            }
             fullDeviceWorkspace != null && !fullDeviceCurrentGrant && !authorityReady -> if (chinese) {
                 "完整设备文件授权需重新确认；请先恢复所选通道连接。"
             } else {
@@ -750,11 +750,6 @@ private fun AgentsRoute(entry: NavBackStackEntry, chinese: Boolean, onRoute: (St
                 "完整设备文件的能力授权已失效；请在当前策略下重新确认。"
             } else {
                 "Full-device capabilities need confirmation under the current policy."
-            }
-            fullDeviceCurrentGrant && authoritySnapshot.dangerousMode == runtime.mobileagent.domain.DangerousMode.DISABLED -> if (chinese) {
-                "危险模式已关闭；完整设备文件工具暂停。"
-            } else {
-                "Dangerous mode is off; full-device file tools are paused."
             }
             fullDeviceWorkspace != null && !authorityReady -> if (chinese) {
                 "完整设备访问授权已保留；当前连接不可用，连接恢复后继续生效。"
@@ -1688,7 +1683,8 @@ private fun SettingsRoute(entry: NavBackStackEntry, chinese: Boolean, onRoute: (
     var thirdParty by remember { mutableStateOf(runtime.mobileagent.feature.settings.ThirdPartyNoticesUiState()) }
     var exportChooserOpen by remember { mutableStateOf(false) }
     var exportAgents by remember { mutableStateOf<List<Pair<String, String>>>(emptyList()) }
-    val importLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { vm.importFrom(it) }
+    var importUri by remember { mutableStateOf<Uri?>(null) }
+    val importLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { importUri = it }
     // Keep the provider-returned READ/WRITE flags with the URI. Providers are
     // allowed to return a read-only tree even when the chooser was launched
     // with both capabilities requested.
@@ -1794,6 +1790,13 @@ private fun SettingsRoute(entry: NavBackStackEntry, chinese: Boolean, onRoute: (
             exportChooserOpen = false
             vm.prepareExport(agentId, includeSkillPackages, includeKnowledgeContent, includeConversations) { exportLauncher.launch("mobile-agent-$agentId.zip") }
         }, onCancel = { exportChooserOpen = false })
+    importUri?.let { uri ->
+        ImportConflictDialog(
+            chinese = chinese,
+            onConfirm = { policy -> importUri = null; vm.importFrom(uri, policy) },
+            onCancel = { importUri = null },
+        )
+    }
 }
 
 @Composable
@@ -1807,7 +1810,7 @@ private fun McpRoute(entry: NavBackStackEntry, chinese: Boolean, onRoute: (Strin
         onRevokeGrant = { vm.revokeGrant() }, onClearConfig = vm::clearConfig,
     )
     // The app shell owns the route title and back affordance for this child.
-    McpSettingsScreen(vm.state.value, actions, showPageTitle = false)
+    McpSettingsScreen(vm.state.value, actions, showPageTitle = false, chinese = chinese)
 }
 
 @Composable

@@ -324,7 +324,7 @@ fun AgentsScreen(
         val wide = maxWidth >= 720.dp
         if (wide) {
             Row(Modifier.fillMaxSize(), horizontalArrangement = Arrangement.spacedBy(16.dp)) {
-                AgentListPane(state, actions, Modifier.weight(0.38f).fillMaxSize(), showPageTitle)
+                AgentListPane(state, actions, Modifier.weight(0.38f).fillMaxSize().verticalScroll(rememberScrollState()), showPageTitle)
                 Column(Modifier.weight(0.62f).fillMaxSize().verticalScroll(rememberScrollState())) { AgentSummary(state, actions) }
             }
         } else if (compactPane == AgentCompactPane.DETAIL) {
@@ -415,8 +415,8 @@ private fun AgentListPane(state: AgentsUiState, actions: AgentsActions, modifier
                     )
                 }
             }
-            else LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.height(280.dp).padding(top = 12.dp)) {
-                items(visible, key = { it.id }) { agent -> AgentCard(agent, agent.id == state.selectedAgentId) { actions.onSelectAgent(agent.id) } }
+            else Column(verticalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.padding(top = 12.dp)) {
+                visible.forEach { agent -> androidx.compose.runtime.key(agent.id) { AgentCard(agent, agent.id == state.selectedAgentId) { actions.onSelectAgent(agent.id) } } }
             }
         }
     }
@@ -786,7 +786,11 @@ private fun AgentEditorFields(
                     minLines = 5,
                     modifier = Modifier.fillMaxWidth().testTag(AgentTestTags.PROMPT),
                 )
-                editor.promptRevisions.filter { !it.active }.forEach { revision ->
+                var showPromptHistory by androidx.compose.runtime.saveable.rememberSaveable(editor.id) { mutableStateOf(false) }
+                TextButton(onClick = { showPromptHistory = !showPromptHistory }) {
+                    Text(if (zh) "提示词历史（${editor.promptRevisions.size}）" else "Prompt history (${editor.promptRevisions.size})")
+                }
+                if (showPromptHistory) editor.promptRevisions.filter { !it.active }.forEach { revision ->
                     TextButton(onClick = { actions.onRestorePrompt(revision.id) }) {
                         Text(if (zh) "载入 r${revision.revision} ${revision.label}" else "Load r${revision.revision} ${revision.label}")
                     }
@@ -1253,6 +1257,8 @@ private fun AgentGrantEditor(
                     grant.grant.revoked -> if (zh) "已撤销" else "Revoked"
                     grant.expired -> if (zh) "已过期" else "Expired"
                     !grant.skillTrusted -> if (zh) "Skill 绑定未验证" else "Skill binding unverified"
+                    grant.policyStale && grant.enabled -> if (zh) "重新授权待保存" else "Reauthorization pending save"
+                    grant.policyStale -> if (zh) "策略已变更，需重新授权" else "Policy changed; reauthorize"
                     grant.enabled -> if (zh) "有效" else "Active"
                     else -> if (zh) "待撤销" else "Pending revoke"
                 }

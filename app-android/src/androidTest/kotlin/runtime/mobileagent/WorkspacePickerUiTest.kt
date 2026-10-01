@@ -147,6 +147,36 @@ class WorkspacePickerUiTest {
         composeRule.onNodeWithTag(WorkspacePickerTestTags.USE_FOLDER).assertIsNotEnabled()
     }
 
+    @Test
+    fun englishUiPreservesChineseDirectoryAndTargetNames() {
+        composeRule.setContent {
+            MaterialTheme {
+                WorkspacePickerScreen(
+                    state = sampleState(
+                        entries = listOf(
+                            WorkspacePickerEntryUi("documents", "文档", directory = true),
+                            WorkspacePickerEntryUi("downloads", "下载", directory = true),
+                        ),
+                        breadcrumbs = listOf(
+                            WorkspacePickerBreadcrumbUi("depth:0", "根目录"),
+                            WorkspacePickerBreadcrumbUi("depth:1", "文档"),
+                            WorkspacePickerBreadcrumbUi("depth:2", "下载", enabled = false),
+                        ),
+                    ).copy(currentLabel = "下载", targetLabel = "文档"),
+                    chinese = false,
+                )
+            }
+        }
+
+        composeRule.onNodeWithText("Target: 文档").assertIsDisplayed()
+        composeRule.onNodeWithText("Current location: 下载 · Read only").performScrollTo().assertIsDisplayed()
+        // Both breadcrumb and entry labels retain the user's spelling.
+        assertTrue(composeRule.onAllNodesWithText("文档").fetchSemanticsNodes().isNotEmpty())
+        assertTrue(composeRule.onAllNodesWithText("下载").fetchSemanticsNodes().isNotEmpty())
+        assertTrue(composeRule.onAllNodesWithText("Documents").fetchSemanticsNodes().isEmpty())
+        assertTrue(composeRule.onAllNodesWithText("Downloads").fetchSemanticsNodes().isEmpty())
+    }
+
     private fun sampleState(
         entries: List<WorkspacePickerEntryUi> = listOf(
             WorkspacePickerEntryUi("entry-dir", "项目", directory = true),

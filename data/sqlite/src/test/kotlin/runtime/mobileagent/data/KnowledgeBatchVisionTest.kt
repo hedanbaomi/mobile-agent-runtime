@@ -44,6 +44,110 @@ import runtime.mobileagent.knowledge.sha256Hex
  */
 class KnowledgeBatchVisionTest {
     @Test
+    fun firstStandaloneAppendAdvancesPausedEmptyGenerationFence() {
+        val db = JdbcSqlConnection()
+        Migrations.apply(db)
+        val repo = KnowledgeRepository(db, MemoryBlobSink())
+        val kb = repo.ensureDefaultBase()
+        val paused = stagedBatch(repo, "paused empty KB", listOf(Triple("a.txt", "text/plain", "alpha-marker".toByteArray())))
+        repo.pauseBatch(paused)
+        repo.importBytes("peer.txt", "text/plain", "peer-marker".toByteArray(), false, kb)
+        assertEquals(ImportBatchState.PAUSED, repo.findBatch(paused)!!.state)
+        assertTrue(repo.generationStillCurrent(paused))
+        repo.resumeBatch(paused)
+        repo.processBatch(paused, false)
+        assertEquals(ImportBatchState.COMPLETED, repo.findBatch(paused)!!.state)
+        assertTrue(repo.search("alpha-marker", knowledgeBaseIds = listOf(kb)).isNotEmpty())
+        assertTrue(repo.search("peer-marker", knowledgeBaseIds = listOf(kb)).isNotEmpty())
+    }
+
+    @Test
+    fun missingCasPreflightFailsOneItemWithoutAnUnboundedClaimLoop() {
+        val db = JdbcSqlConnection()
+        Migrations.apply(db)
+        val repo = KnowledgeRepository(db, MemoryBlobSink())
+        val batch = stagedBatch(repo, "missing source", listOf(Triple("missing.txt", "text/plain", "source".toByteArray())))
+        db.execute("UPDATE documents SET blob_hash='missing-fixture-blob'")
+        org.junit.jupiter.api.Assertions.assertTimeoutPreemptively(java.time.Duration.ofSeconds(5)) {
+            assertFalse(repo.processBatch(batch, false))
+        }
+        assertEquals(ImportBatchState.FAILED, repo.findBatch(batch)!!.state)
+        assertEquals(1, repo.batchProgress(batch).failed)
+        assertTrue(repo.listBatchItemViews(batch).single().error!!.startsWith("BATCH_ITEM_FAILED"))
+    }
+
+    @Test
+    fun documentDeletionCannotRebasePausedBatchFence() {
+        val db = JdbcSqlConnection()
+        Migrations.apply(db)
+        val repo = KnowledgeRepository(db, MemoryBlobSink())
+        val kb = repo.ensureDefaultBase()
+        val seed = repo.importBytes("seed.txt", "text/plain", "seed-marker".toByteArray(), false, kb)
+        val paused = stagedBatch(repo, "paused", listOf(Triple("a.txt", "text/plain", "alpha-marker".toByteArray())))
+        repo.pauseBatch(paused)
+        repo.deleteDocument(seed.documentId)
+        assertFalse(repo.generationStillCurrent(paused))
+        repo.resumeBatch(paused)
+        assertThrows(IllegalStateException::class.java) { repo.processBatch(paused, false) }
+        assertEquals(0, repo.batchProgress(paused).published)
+    }
+
+    @Test
+    fun nextWorkerDeliveryReconcilesClaimedItemsAndInterruptedVisionDiagnostics() {
+        val db = JdbcSqlConnection()
+        Migrations.apply(db)
+        val blobs = MemoryBlobSink()
+        val uploads = AtomicInteger()
+        val first = KnowledgeRepository(db, blobs, visionModelFingerprint = "vision-test",
+            vision = VisionBackend { uploads.incrementAndGet(); VisionOutcome.UnknownOutcome })
+        val batch = stagedBatch(first, "interrupted delivery", listOf(
+            Triple("figure.pdf", "application/pdf", visionPdf("interrupted delivery")),
+        ))
+        first.authorizeBatchVision(batch, "vision-test")
+        first.processBatch(batch, false)
+        // Durable state left by a lost worker, before its local finalizers ran.
+        db.execute("INSERT INTO vision_attempts(request_id,cache_key,job_id,asset_hash,attempt_no,status,stage,dispatch_status,created_at,updated_at) " +
+            "SELECT 'lost-request',cache_key,job_id,asset_hash,attempt_no+1,'IN_PROGRESS','DISPATCH','DISPATCHED',created_at,updated_at FROM vision_attempts")
+        db.execute("INSERT INTO pipeline_attempts(request_id,job_id,batch_id,unit_id,ordinal,target,config_fingerprint,planner_version,result_version,cache_key,state,dispatch_slot,reservation_tokens,created_at,dispatched_at) " +
+            "SELECT 'lost-request',job_id,batch_id,unit_id,ordinal+1,target,config_fingerprint,planner_version,result_version,cache_key,'DISPATCHED',1,reservation_tokens,created_at,created_at FROM pipeline_attempts")
+        db.execute("UPDATE pipeline_units SET state='DISPATCHED'")
+        db.execute("UPDATE import_jobs SET stage='COPYING',error=NULL WHERE batch_id=?", listOf(batch))
+        db.execute("UPDATE import_items SET state='PROCESSING',error=NULL WHERE batch_id=?", listOf(batch))
+        db.execute("UPDATE import_batches SET state='PROCESSING',error=NULL WHERE id=?", listOf(batch))
+        val next = KnowledgeRepository(db, blobs, visionModelFingerprint = "vision-test",
+            vision = VisionBackend { uploads.incrementAndGet(); VisionOutcome.Success(VisionSuccess("recovered", "visual")) })
+        // WorkManager redelivery need not recreate Application or invoke startup recovery.
+        repeat(3) { next.processBatch(batch, false) }
+        assertEquals(ImportBatchState.COMPLETED, next.findBatch(batch)!!.state)
+        assertEquals(1, next.batchProgress(batch).published)
+        assertEquals(2, uploads.get(), "only the frozen batch destination may replay the uncertain attempt")
+        assertTrue(db.query("SELECT request_id FROM vision_attempts WHERE status IN ('PREPARED','IN_PROGRESS')").isEmpty(),
+            "lost diagnostic attempts must also have a durable terminal outcome")
+    }
+
+    @Test
+    fun peerAppendPublicationDoesNotInvalidatePausedBatch() {
+        val db = JdbcSqlConnection()
+        Migrations.apply(db)
+        val repo = KnowledgeRepository(db, MemoryBlobSink())
+        val kb = repo.ensureDefaultBase()
+        repo.importBytes("seed.txt", "text/plain", "seed-marker".toByteArray(), false, kb)
+        val paused = stagedBatch(repo, "paused", listOf(Triple("a.txt", "text/plain", "alpha-marker".toByteArray())))
+        repo.pauseBatch(paused)
+        val peer = stagedBatch(repo, "peer", listOf(Triple("b.txt", "text/plain", "beta-marker".toByteArray())))
+        repo.processBatch(peer, false)
+        assertEquals(ImportBatchState.PAUSED, repo.findBatch(paused)!!.state)
+        assertTrue(repo.recoverableBatchIds().none { it == paused }, "append rebasing must never unpause work")
+        repo.resumeBatch(paused)
+        repo.processBatch(paused, false)
+        assertEquals(ImportBatchState.COMPLETED, repo.findBatch(paused)!!.state)
+        assertEquals(1, repo.batchProgress(paused).published)
+        assertTrue(repo.search("alpha-marker", knowledgeBaseIds = listOf(kb)).isNotEmpty())
+        assertTrue(repo.search("beta-marker", knowledgeBaseIds = listOf(kb)).isNotEmpty())
+        assertTrue(repo.search("seed-marker", knowledgeBaseIds = listOf(kb)).isNotEmpty())
+    }
+
+    @Test
     fun independentVisualFilesCanRunInParallel() {
         val entered = CountDownLatch(2)
         val release = CountDownLatch(1)

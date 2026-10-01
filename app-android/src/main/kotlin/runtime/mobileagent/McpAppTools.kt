@@ -296,7 +296,10 @@ private data class ModelMcpTool(
  */
 private fun modelMcpTools(snapshot: McpSnapshot): List<ModelMcpTool> =
     snapshot.tools.mapIndexedNotNull { index, tool ->
-        sanitizeMcpInputSchema(tool.inputSchemaJson)?.let { schema ->
+        sanitizeMcpInputSchema(
+            tool.inputSchemaJson,
+            listOf(snapshot.endpoint, snapshot.host, snapshot.namespace, snapshot.grantId),
+        )?.let { schema ->
             ModelMcpTool(
                 modelName = "external_operation_${index + 1}",
                 internalName = tool.namespacedName,
@@ -317,14 +320,14 @@ internal fun modelMcpToolSpecs(snapshot: McpSnapshot): List<ToolSpec> =
         )
     }
 
-private fun sanitizeMcpInputSchema(raw: String): String? = runCatching {
+private fun sanitizeMcpInputSchema(raw: String, blockedValues: List<String>): String? = runCatching {
     val root = MCP_JSON.parseToJsonElement(raw).jsonObject
-    val safe = sanitizeMcpSchemaObject(root, depth = 0) ?: return@runCatching null
+    val safe = sanitizeMcpSchemaObject(root, depth = 0, blockedValues) ?: return@runCatching null
     if (safe["type"]?.jsonPrimitive?.contentOrNull != "object") return@runCatching null
     safe.toString().takeIf { it.toByteArray(Charsets.UTF_8).size <= MAX_MODEL_SCHEMA_BYTES }
 }.getOrNull()
 
-private fun sanitizeMcpSchemaObject(value: JsonObject, depth: Int): JsonObject? {
+private fun sanitizeMcpSchemaObject(value: JsonObject, depth: Int, blockedValues: List<String>): JsonObject? {
     if (depth > MAX_SCHEMA_DEPTH) return null
     val type = (value["type"] as? JsonPrimitive)?.contentOrNull ?: return null
     if (type !in ALLOWED_SCHEMA_TYPES) return null
@@ -335,11 +338,11 @@ private fun sanitizeMcpSchemaObject(value: JsonObject, depth: Int): JsonObject? 
             buildJsonObject {
                 source.entries
                     .asSequence()
-                    .filter { (name, _) -> isSafeMcpFieldName(name) }
+                    .filter { (name, _) -> isSafeMcpSchemaFieldName(name) }
                     .take(MAX_SCHEMA_FIELDS)
                     .forEach { (name, child) ->
                         val childObject = child as? JsonObject
-                        val sanitized = childObject?.let { sanitizeMcpSchemaObject(it, depth + 1) }
+                        val sanitized = childObject?.let { sanitizeMcpSchemaObject(it, depth + 1, blockedValues) }
                         if (sanitized != null) put(name.take(MAX_FIELD_NAME_LENGTH), sanitized)
                     }
             }
@@ -354,7 +357,7 @@ private fun sanitizeMcpSchemaObject(value: JsonObject, depth: Int): JsonObject? 
             required.forEach { add(JsonPrimitive(it)) }
         }
     } else if (type == "array") {
-        val items = (value["items"] as? JsonObject)?.let { sanitizeMcpSchemaObject(it, depth + 1) }
+        val items = (value["items"] as? JsonObject)?.let { sanitizeMcpSchemaObject(it, depth + 1, blockedValues) }
         if (items != null) output["items"] = items
     }
 
@@ -364,7 +367,7 @@ private fun sanitizeMcpSchemaObject(value: JsonObject, depth: Int): JsonObject? 
             output["additionalProperties"] = additional
         }
     } else if (value["additionalProperties"] is JsonObject) {
-        sanitizeMcpSchemaObject(value["additionalProperties"] as JsonObject, depth + 1)?.let {
+        sanitizeMcpSchemaObject(value["additionalProperties"] as JsonObject, depth + 1, blockedValues)?.let {
             output["additionalProperties"] = it
         }
     }
@@ -376,7 +379,8 @@ private fun sanitizeMcpSchemaObject(value: JsonObject, depth: Int): JsonObject? 
     (value["enum"] as? JsonArray)?.let { values ->
         val safe = values.filter { element ->
             val primitive = element as? JsonPrimitive
-            primitive != null && (!primitive.isString || !isSensitiveMcpText(primitive.content))
+            primitive != null && (!primitive.isString || (!isSensitiveMcpText(primitive.content) &&
+                blockedValues.none { it.isNotBlank() && primitive.content.contains(it, ignoreCase = true) }))
         }.take(MAX_SCHEMA_ENUM_VALUES)
         if (safe.isNotEmpty()) output["enum"] = JsonArray(safe)
     }
@@ -387,6 +391,13 @@ private fun isSafeMcpFieldName(name: String): Boolean =
     name.length in 1..MAX_FIELD_NAME_LENGTH &&
         name.all { it.isLetterOrDigit() || it == '_' || it == '-' } &&
         !isSensitiveMcpName(name)
+
+/** Business input names are not runtime metadata. Result filtering remains stricter. */
+private fun isSafeMcpSchemaFieldName(name: String): Boolean =
+    name.length in 1..MAX_FIELD_NAME_LENGTH &&
+        name.all { it.isLetterOrDigit() || it == '_' || it == '-' } &&
+        (name.filter { it.isLetterOrDigit() }.lowercase() in BUSINESS_MCP_INPUT_NAMES ||
+            !isSensitiveMcpName(name))
 
 private fun isSensitiveMcpName(name: String): Boolean {
     val normalized = name.filter { it.isLetterOrDigit() }.lowercase()
@@ -399,7 +410,8 @@ private fun isSensitiveMcpName(name: String): Boolean {
 
 private fun isSensitiveMcpText(value: String): Boolean =
     MCP_URL_PATTERN.containsMatchIn(value) || MCP_GRANT_REF_PATTERN.containsMatchIn(value) ||
-        MCP_SECRET_REF_PATTERN.containsMatchIn(value) || MCP_HOSTNAME_PATTERN.containsMatchIn(value)
+        MCP_SECRET_REF_PATTERN.containsMatchIn(value) || MCP_HOSTNAME_PATTERN.containsMatchIn(value) ||
+        MCP_PRIVATE_PATH_PATTERN.containsMatchIn(value)
 
 internal fun mcpCallResultForModel(result: McpCallResult, blockedValues: List<String>): ToolResult =
     when (result) {
@@ -546,7 +558,11 @@ private val SENSITIVE_MCP_NAMES = setOf(
     "filepath", "filename", "directory", "cwd", "message", "error", "reason", "detail",
     "details", "stack", "stacktrace", "trace", "exception",
 )
-private val MCP_URL_PATTERN = Regex("""(?i)\b(?:https?|wss?)://[^\s\"'<>]+""")
+private val BUSINESS_MCP_INPUT_NAMES = setOf(
+    "message", "error", "reason", "detail", "details", "path", "filepath", "filename", "directory",
+)
+private val MCP_URL_PATTERN = Regex("""(?i)\b(?:https?|wss?|content|file)://[^\s\"'<>]+""")
+private val MCP_PRIVATE_PATH_PATTERN = Regex("""(?:^|\s)(?:[a-zA-Z]:[\\/]|/(?:data|storage|sdcard|home|Users|mnt)/)""")
 private val MCP_GRANT_REF_PATTERN = Regex("""(?i)\bmcp-grant:[a-z0-9-]{1,128}\b""")
 private val MCP_SECRET_REF_PATTERN = Regex("""(?i)\bmcp:[a-z0-9-]{16,128}\b""")
 private val MCP_ERROR_TEXT_PATTERN = Regex(

@@ -33,7 +33,7 @@ import runtime.mobileagent.feature.knowledge.KnowledgeVisionTargetUi
  */
 @RunWith(AndroidJUnit4::class)
 class KnowledgeVisionTargetDeviceTest {
-    @get:Rule val compose = createAndroidComposeRule<MainActivity>()
+    @get:Rule val compose = createAndroidComposeRule<ComposeTestHostActivity>()
 
     private val emptyModelNotice =
         "No image-capable Vision model is configured. Text-only material can continue; " +

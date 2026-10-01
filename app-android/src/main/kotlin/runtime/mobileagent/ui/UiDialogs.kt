@@ -22,10 +22,48 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
+
+@Composable
+internal fun ImportConflictDialog(
+    chinese: Boolean,
+    onConfirm: (runtime.mobileagent.serialization.TransferConflictPolicy) -> Unit,
+    onCancel: () -> Unit,
+) {
+    var keepExisting by rememberSaveable { mutableStateOf(false) }
+    AlertDialog(
+        onDismissRequest = onCancel,
+        title = { Text(if (chinese) "导入冲突处理" else "Import conflicts") },
+        text = {
+            Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text(if (chinese) "选择备份与本机内容具有相同 ID 时的处理方式。" else "Choose what happens when backup IDs already exist locally.")
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    RadioButton(selected = !keepExisting, onClick = { keepExisting = false })
+                    TextButton(onClick = { keepExisting = false }) {
+                        Text(if (chinese) "发现冲突时取消整个导入" else "Reject the import if any IDs conflict")
+                    }
+                }
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    RadioButton(selected = keepExisting, onClick = { keepExisting = true })
+                    TextButton(onClick = { keepExisting = true }) {
+                        Text(if (chinese) "保留本机内容，跳过相同 ID" else "Keep local content and skip matching IDs")
+                    }
+                }
+                Text(if (chinese) "保留本机内容不会替换现有 Agent 配置或会话历史；只导入不冲突的内容。导入结果会列出跳过项。" else "Keeping local content preserves existing Agent settings and conversation history. Only non-conflicting content is imported; the result lists skipped items.")
+            }
+        },
+        confirmButton = {
+            Button(onClick = { onConfirm(if (keepExisting) runtime.mobileagent.serialization.TransferConflictPolicy.KEEP_EXISTING else runtime.mobileagent.serialization.TransferConflictPolicy.REJECT) }) {
+                Text(if (chinese) "开始导入" else "Import")
+            }
+        },
+        dismissButton = { TextButton(onClick = onCancel) { Text(if (chinese) "取消" else "Cancel") } },
+    )
+}
 
 @Composable
 internal fun UnsavedChangesDialog(

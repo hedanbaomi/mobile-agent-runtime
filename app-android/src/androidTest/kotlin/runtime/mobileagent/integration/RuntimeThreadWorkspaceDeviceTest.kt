@@ -194,6 +194,17 @@ class RuntimeThreadWorkspaceDeviceTest {
                 createdAt = fixture.now,
             ),
         )
+        val sameWorkspaceWriteGrant = container.agentGrantPort.saveGrant(
+            CapabilityGrant(
+                grantId = "grant-internal-write-${fixture.suffix}",
+                agentId = fixture.agentId,
+                capability = write,
+                workspaceId = RuntimeIntegration.INTERNAL_WORKSPACE_ID,
+                lifetime = GrantLifetime.PERSISTENT,
+                policyVersion = policyVersion,
+                createdAt = fixture.now,
+            ),
+        )
 
         val pickerResult = runtime.useRecentWorkspace(
             workspaceId = RuntimeIntegration.INTERNAL_WORKSPACE_ID,
@@ -220,6 +231,10 @@ class RuntimeThreadWorkspaceDeviceTest {
         val grantsAfterPicker = container.agentGrantPort.listGrants(fixture.agentId, includeRevoked = false)
         assertTrue(grantsAfterPicker.any { it.grantId == siblingGrant.grantId && !it.revoked })
         assertTrue(grantsAfterPicker.any { it.workspaceId == RuntimeIntegration.INTERNAL_WORKSPACE_ID })
+        assertTrue(
+            "binding a Thread must preserve the Agent's active write grant for the same workspace",
+            grantsAfterPicker.any { it.grantId == sameWorkspaceWriteGrant.grantId && !it.revoked },
+        )
     }
 
     @Test

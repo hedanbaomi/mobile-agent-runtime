@@ -288,8 +288,29 @@ class ProvidersViewModel @JvmOverloads constructor(
                     error,
                 )
             }
-            status.value = SecretRedactor.redact(error.message ?: "保存失败。", listOf(draft.apiKey).filter { it.isNotBlank() })
+            status.value = SecretRedactor.redact(localizedSaveError(error.message ?: "保存失败。"), listOf(draft.apiKey).filter { it.isNotBlank() })
             false
+        }
+    }
+
+    private fun localizedSaveError(message: String): String {
+        val chinese = when (app.container.settings.get().locale) {
+            runtime.mobileagent.domain.LocalePreference.ZH_CN -> true
+            runtime.mobileagent.domain.LocalePreference.EN_US -> false
+            runtime.mobileagent.domain.LocalePreference.SYSTEM -> app.resources.configuration.locales.get(0)?.language == "zh"
+        }
+        if (chinese) return message
+        return when (message) {
+            "请填写名称。" -> "Enter a name."
+            "请填写模型 ID。" -> "Enter a model ID."
+            "服务地址必须是有效的 Base URL，不能含凭据、查询或片段。" -> "Enter a valid base URL without credentials, a query, or a fragment."
+            "服务地址必须使用 HTTPS。Debug 仅允许本机测试 HTTP。" -> "The endpoint must use HTTPS. Debug builds allow HTTP only for local testing."
+            "API 格式不受支持。" -> "The API format is unsupported."
+            "服务已被删除，请重新打开表单。" -> "This provider was deleted. Reopen the form."
+            "新服务需要 API Key；密钥只会以 Keystore 密文保存。" -> "A new provider needs an API key, stored encrypted with Keystore."
+            "服务目标发生变化，请重新填写该目标的 API Key；不会把旧目标的密钥转发到新地址。" -> "The destination changed. Enter its API key; the old destination's key will not be forwarded."
+            "保存失败。" -> "Could not save the provider."
+            else -> message
         }
     }
 

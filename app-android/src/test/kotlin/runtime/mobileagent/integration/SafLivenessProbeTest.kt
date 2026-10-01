@@ -198,10 +198,17 @@ class SafLivenessProbeTest {
         val old = backend { oldCalls.incrementAndGet(); false }
         val fresh = backend { freshCalls.incrementAndGet(); freshLive }
         registered.set(old)
+        // Deterministic clock: every read jumps far ahead so the per-id
+        // throttle never drops a probe — this test exercises the retry
+        // loop's cadence (driven by the real delay), not the throttle.
+        // A schedule() for the replacement right after the old probe would
+        // otherwise be swallowed by the 40 ms throttle window.
+        val clock = java.util.concurrent.atomic.AtomicLong()
         val probe = probe(
             registered = { _, backend -> registered.get() === backend },
             intervalMs = 40L,
             deadlineMs = 60L,
+            now = { clock.addAndGet(1_000_000L) },
         )
         probe.schedule("w1", old)
         awaitUntil { probe.isDown("w1", old) && oldCalls.get() >= 2 }

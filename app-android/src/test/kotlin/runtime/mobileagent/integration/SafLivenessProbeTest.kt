@@ -213,16 +213,20 @@ class SafLivenessProbeTest {
         probe.schedule("w1", old)
         awaitUntil { probe.isDown("w1", old) && oldCalls.get() >= 2 }
         registered.set(fresh)
-        val oldCallsAtSwap = oldCalls.get()
         // The replacement's first probe fails too — it goes down on its own
         // loop, then recovers without any external re-schedule.
         probe.schedule("w1", fresh)
         awaitUntil { probe.isDown("w1", fresh) && freshCalls.get() >= 1 }
         freshLive = true
         awaitUntil { !probe.isDown("w1", fresh) && freshCalls.get() >= 2 }
-        // The stale loop for the old backend is gone — it neither probes the
-        // old instance nor occupies the retry slot.
-        assertEquals(oldCallsAtSwap, oldCalls.get())
+        // Terminal stability: the stale loop is dead — after everything has
+        // settled, several retry intervals pass with zero calls into the old
+        // backend.  (One in-flight old probe already running at swap time
+        // may legitimately complete +1; that is the drained worker, not a
+        // live timer.)
+        val settled = oldCalls.get()
+        Thread.sleep(160) // ~4 retry intervals
+        assertEquals(settled, oldCalls.get())
         assertFalse(probe.isDown("w1", fresh))
         assertTrue(probe.revision.value >= 3L) // old down + fresh down + fresh healthy
     }

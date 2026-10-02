@@ -11,6 +11,7 @@ import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
+import androidx.compose.ui.test.performScrollTo
 import androidx.compose.ui.test.performClick
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import org.junit.Assert.assertEquals
@@ -56,7 +57,7 @@ class ChatRequestInspectorUiTest {
         val states = listOf(
             ChatRequestInspectorAvailability.DISABLED to "请求检查器已关闭，请到设置开启。",
             ChatRequestInspectorAvailability.NOT_PREPARED to "请求尚未准备。发送消息并完成请求准备后，这里会显示脱敏请求。",
-            ChatRequestInspectorAvailability.CONTEXT_LOST to "请求检查器上下文已丢失，请返回对话后重试。",
+            ChatRequestInspectorAvailability.CONTEXT_LOST to "此前的请求预览未保留。请求内容仅保存在本次进程内；确认运行状态后主动发送新消息，才能查看新的脱敏请求。不会为检查器自动重发旧请求。",
             ChatRequestInspectorAvailability.READY to "POST https://api.example.invalid/v1/chat",
         )
         val availability = mutableStateOf(states.first().first)
@@ -87,11 +88,11 @@ class ChatRequestInspectorUiTest {
                 compose.waitForIdle()
             }
             if (nextAvailability == ChatRequestInspectorAvailability.READY) {
-                compose.onNodeWithText(expected, useUnmergedTree = true).assertIsDisplayed()
-                compose.onNodeWithText("敏感请求头与密钥已遮盖；以下内容仅来自脱敏请求检查数据。", useUnmergedTree = true).assertIsDisplayed()
+                compose.onNodeWithText(expected, useUnmergedTree = true).performScrollTo().assertIsDisplayed()
+                compose.onNodeWithText("敏感请求头与密钥已遮盖；以下内容仅来自脱敏请求检查数据。", useUnmergedTree = true).performScrollTo().assertIsDisplayed()
             } else {
-                compose.onNodeWithTag("chat.requestInspector.state").assertIsDisplayed()
-                compose.onNodeWithText(expected, useUnmergedTree = true).assertIsDisplayed()
+                compose.onNodeWithTag("chat.requestInspector.state").performScrollTo().assertIsDisplayed()
+                compose.onNodeWithText(expected, useUnmergedTree = true).performScrollTo().assertIsDisplayed()
             }
         }
     }
@@ -116,7 +117,7 @@ class ChatRequestInspectorUiTest {
             }
         }
 
-        compose.onNodeWithTag("chat.requestInspector.state").assertIsDisplayed()
+        compose.onNodeWithTag("chat.requestInspector.state").performScrollTo().assertIsDisplayed()
         compose.onNodeWithText("请求检查器已关闭，请到设置开启。", useUnmergedTree = true).assertIsDisplayed()
         compose.onAllNodesWithText("POST https://api.example.invalid/v1/stale-preview", useUnmergedTree = true).assertCountEquals(0)
         compose.onAllNodesWithText("Authorization: Bearer stale-secret", useUnmergedTree = true).assertCountEquals(0)

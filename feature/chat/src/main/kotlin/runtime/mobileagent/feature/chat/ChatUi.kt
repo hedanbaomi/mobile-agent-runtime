@@ -228,14 +228,59 @@ enum class ChatThreadWorkspaceState {
  * sessions; the chat surface never mutates them.
  */
 data class ChatWorkspaceAccessUi(
-    val agentLabel: String = "当前智能体",
-    val workspaceSummary: String = "未配置工作区",
-    val systemAccessLabel: String = "未启用系统增强访问",
-    val permissionLabel: String = "尚未授权",
+    val agentLabel: String = "",
+    val workspaceSummary: String = "",
+    val systemAccessLabel: String = "",
+    val permissionLabel: String = "",
     val notice: String = "",
     val threadWorkspaceState: ChatThreadWorkspaceState = ChatThreadWorkspaceState.UNBOUND_NO_AGENT_DEFAULT,
     val agentDefaultWorkspaceId: String? = null,
     val agentDefaultWorkspaceLabel: String = "",
+    val agentDefaultUnavailable: Boolean = false,
+)
+
+/** Fixed copy is resolved at composition time so a language change updates existing sessions. */
+fun ChatWorkspaceAccessUi.localizedWorkspaceSummary(zh: Boolean): String = workspaceSummary.ifBlank {
+    when (threadWorkspaceState) {
+        ChatThreadWorkspaceState.BOUND -> if (zh) "已绑定工作区" else "Bound workspace"
+        ChatThreadWorkspaceState.UNBOUND_AGENT_DEFAULT_AVAILABLE -> if (zh) "当前会话无工作区" else "No workspace for this conversation"
+        ChatThreadWorkspaceState.UNBOUND_NO_AGENT_DEFAULT -> if (zh) "未配置工作区" else "No workspace"
+    }
+}
+
+fun ChatWorkspaceAccessUi.localizedPermission(zh: Boolean): String = permissionLabel.ifBlank {
+    when {
+        threadWorkspaceState == ChatThreadWorkspaceState.BOUND -> if (zh) "已绑定" else "Bound"
+        threadWorkspaceState == ChatThreadWorkspaceState.UNBOUND_AGENT_DEFAULT_AVAILABLE ->
+            if (zh) "当前会话未绑定；默认值仅用于新会话" else "Unbound conversation; the default applies only to new conversations"
+        agentDefaultUnavailable -> if (zh) "默认工作区授权已撤销或不可用" else "Default workspace access was revoked or is unavailable"
+        else -> if (zh) "尚未授权此会话" else "This conversation has no workspace access"
+    }
+}
+
+fun ChatWorkspaceAccessUi.localizedNotice(zh: Boolean): String = notice.ifBlank {
+    when (threadWorkspaceState) {
+        ChatThreadWorkspaceState.BOUND -> if (zh) "会话工作区已固定；Agent 默认值变化不会改动此会话。"
+            else "The conversation workspace is fixed; changes to the Agent default do not change this conversation."
+        ChatThreadWorkspaceState.UNBOUND_AGENT_DEFAULT_AVAILABLE ->
+            if (zh) "当前会话保持无工作区；Agent 默认工作区只会用于新建会话。"
+            else "This conversation stays unbound; the Agent default workspace applies only to new conversations."
+        ChatThreadWorkspaceState.UNBOUND_NO_AGENT_DEFAULT -> if (agentDefaultUnavailable) {
+            if (zh) "Agent 默认工作区授权已撤销或不可用；系统不会自动恢复。"
+            else "Agent default workspace access was revoked or is unavailable; it is never restored automatically."
+        } else {
+            if (zh) "当前会话未绑定工作区。" else "This conversation has no bound workspace."
+        }
+    }
+}
+
+/** Resolve every status field at the rendering boundary, preserving real workspace titles. */
+fun ChatWorkspaceAccessUi.localized(zh: Boolean): ChatWorkspaceAccessUi = copy(
+    agentLabel = agentLabel.ifBlank { if (zh) "当前智能体" else "Current Agent" },
+    workspaceSummary = localizedWorkspaceSummary(zh),
+    permissionLabel = localizedPermission(zh),
+    systemAccessLabel = systemAccessLabel.ifBlank { if (zh) "未启用系统增强访问" else "System access is not enabled" },
+    notice = localizedNotice(zh),
 )
 
 /**
@@ -322,7 +367,7 @@ fun ChatScreen(state: ChatUiState, actions: ChatActions = ChatActions(), modifie
         var drawerOpen by rememberSaveable { mutableStateOf(false) }
         var workspaceOpen by rememberSaveable { mutableStateOf(false) }
         var workspaceTarget by rememberSaveable { mutableStateOf<String?>(null) }
-        var workspaceTargetLabel by rememberSaveable { mutableStateOf("当前智能体") }
+        var workspaceTargetLabel by rememberSaveable { mutableStateOf("") }
         val drawerState = rememberDrawerState(if (drawerOpen) DrawerValue.Open else DrawerValue.Closed)
         val scope = rememberCoroutineScope()
         val closeDrawer: () -> Unit = {
@@ -355,7 +400,7 @@ fun ChatScreen(state: ChatUiState, actions: ChatActions = ChatActions(), modifie
                         state,
                         actions,
                         onOpenSidebar = {},
-                        onOpenWorkspace = { openWorkspace(state.selectedAgentId, state.agents.firstOrNull { it.id == state.selectedAgentId }?.label ?: "当前智能体") },
+                        onOpenWorkspace = { openWorkspace(state.selectedAgentId, state.agents.firstOrNull { it.id == state.selectedAgentId }?.label.orEmpty()) },
                         modifier = Modifier.weight(1f).fillMaxHeight().padding(16.dp),
                     )
                 }
@@ -368,7 +413,7 @@ fun ChatScreen(state: ChatUiState, actions: ChatActions = ChatActions(), modifie
                             drawerOpen = true
                             scope.launch { drawerState.open() }
                         },
-                        onOpenWorkspace = { openWorkspace(state.selectedAgentId, state.agents.firstOrNull { it.id == state.selectedAgentId }?.label ?: "当前智能体") },
+                        onOpenWorkspace = { openWorkspace(state.selectedAgentId, state.agents.firstOrNull { it.id == state.selectedAgentId }?.label.orEmpty()) },
                         modifier = Modifier.weight(1f).fillMaxWidth(),
                     )
                 }
@@ -583,9 +628,7 @@ private fun UnboundWorkspaceDefaultCard(state: ChatUiState, actions: ChatActions
             verticalArrangement = Arrangement.spacedBy(6.dp),
         ) {
             Text(
-                state.workspaceAccess.notice.ifBlank {
-                    if (zh) "当前会话保持无工作区；不会自动改绑。" else "This conversation stays unbound and is never changed automatically."
-                },
+                state.workspaceAccess.localizedNotice(zh),
                 style = MaterialTheme.typography.bodySmall,
             )
             Text(
@@ -796,9 +839,7 @@ fun ConversationTopBar(
     val agent = session?.agentName?.takeIf { it.isNotBlank() }
         ?: state.agents.firstOrNull { it.id == state.selectedAgentId }?.label
         ?: if (zh) "未选择智能体" else "No agent selected"
-    val workspace = state.workspaceAccess.workspaceSummary
-        .takeIf { it.isNotBlank() }
-        ?: if (zh) "未配置工作区" else "No workspace"
+    val workspace = state.workspaceAccess.localizedWorkspaceSummary(zh)
     var contextOpen by rememberSaveable { mutableStateOf(false) }
     var overflowOpen by rememberSaveable { mutableStateOf(false) }
 
@@ -930,9 +971,7 @@ fun ConversationContextSheet(
     val zh = state.language.equals("zh-CN", true)
     val agent = state.agents.firstOrNull { it.id == state.selectedAgentId }?.label
         ?: if (zh) "未选择智能体" else "No agent selected"
-    val workspace = state.workspaceAccess.workspaceSummary.ifBlank {
-        if (zh) "未配置工作区" else "No workspace"
-    }
+    val workspace = state.workspaceAccess.localizedWorkspaceSummary(zh)
     androidx.compose.material3.ModalBottomSheet(onDismissRequest = onDismiss) {
         Column(
             Modifier
@@ -965,9 +1004,9 @@ fun ConversationContextSheet(
             if (state.workspaceAccess.systemAccessLabel.isNotBlank()) {
                 Text(state.workspaceAccess.systemAccessLabel, style = MaterialTheme.typography.bodySmall)
             }
-            if (state.workspaceAccess.permissionLabel.isNotBlank()) {
+            if (state.workspaceAccess.localizedPermission(zh).isNotBlank()) {
                 Text(
-                    if (zh) "权限：${state.workspaceAccess.permissionLabel}" else "Permission: ${state.workspaceAccess.permissionLabel}",
+                    if (zh) "权限：${state.workspaceAccess.localizedPermission(zh)}" else "Permission: ${state.workspaceAccess.localizedPermission(zh)}",
                     style = MaterialTheme.typography.bodySmall,
                 )
             }

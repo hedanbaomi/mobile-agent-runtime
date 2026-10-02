@@ -1125,6 +1125,10 @@ class RuntimeIntegration(
      * revoke a workspace. Fallback titles come from canonical Workspace
      * displayName after rejecting URI/locator markers.
      */
+    /** Attribution only: never grants access or selects a fallback Authority. */
+    internal fun diagnosticWorkspaceAuthority(workspaceId: String?): DiagnosticAuthority =
+        workspaceId?.let(workspaceRepository::get)?.authorityOrNull()?.toDiagnostic() ?: DiagnosticAuthority.NONE
+
     fun workspaceUiPresentation(workspaceId: String, chinese: Boolean = true): WorkspaceUiPresentation? {
         workspaceUiPresentations.get(workspaceId)?.let { return it }
         val workspace = workspaceRepository.get(workspaceId) ?: return null

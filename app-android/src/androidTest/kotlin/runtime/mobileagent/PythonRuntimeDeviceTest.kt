@@ -4,8 +4,14 @@
 package runtime.mobileagent
 
 import android.app.Application
+import android.content.ComponentName
 import android.content.Context
+import android.content.Intent
+import android.content.ServiceConnection
 import android.os.Process
+import android.os.ParcelFileDescriptor
+import android.os.IBinder
+import android.os.Parcel
 import android.os.SystemClock
 import android.system.ErrnoException
 import android.system.Os
@@ -24,6 +30,7 @@ import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.boolean
+import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.int
@@ -33,18 +40,23 @@ import kotlinx.serialization.json.put
 import kotlinx.serialization.json.putJsonArray
 import kotlinx.serialization.json.putJsonObject
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
 import runtime.mobileagent.ipc.InvocationTicket
+import runtime.mobileagent.ipc.PythonBinderCodec
 import runtime.mobileagent.ipc.PythonIpcProtocol
+import runtime.mobileagent.ipc.PythonStartMessage
+import runtime.mobileagent.python.IsolatedPythonService
 import runtime.mobileagent.python.IsolatedPythonRuntime
 import runtime.mobileagent.python.PythonCapabilityBroker
 import runtime.mobileagent.python.PythonExecutionRequest
 import runtime.mobileagent.python.PythonExecutionResult
 import runtime.mobileagent.python.PythonPackageSource
+import runtime.mobileagent.python.PythonRuntimeArtifactIntegrity
 import runtime.mobileagent.skills.CompatibilityClass
 import runtime.mobileagent.skills.SkillArchive
 import java.io.ByteArrayOutputStream
@@ -97,6 +109,192 @@ class PythonRuntimeDeviceTest {
         assertTrue("Each execution must receive a fresh process", first.isolatedPid != second.isolatedPid)
         awaitProcessGone(checkNotNull(first.isolatedPid))
         awaitProcessGone(checkNotNull(second.isolatedPid))
+    }
+
+    @Test(timeout = 90_000)
+    fun storedAndDeflatedPythonPackagesBothExecuteThroughVerifiedStoredStaging() = runBlocking {
+        val source = """
+            import binascii
+            import csv
+            import math
+
+            def run(value):
+                row = next(csv.reader([value["row"]]))
+                return {"row": row, "floor": math.floor(7.9), "hex": binascii.hexlify(row[0].encode()).decode()}
+        """.trimIndent()
+        val stored = skillZip(source, ZipEntry.STORED)
+        val deflated = skillZip(source, ZipEntry.DEFLATED)
+        assertNotEquals("The originals exercise distinct ZIP compression methods", stored.hash, deflated.hash)
+        assertEquals(CompatibilityClass.B, SkillArchive.inspect(stored.bytes, stored.hash).classification)
+        assertEquals(CompatibilityClass.B, SkillArchive.inspect(deflated.bytes, deflated.hash).classification)
+
+        val input = buildJsonObject { put("row", "a,b") }.toString()
+        val storedResult = execute(stored, input)
+        val deflatedResult = execute(deflated, input)
+        val storedValue = succeeded(storedResult)
+        val deflatedValue = succeeded(deflatedResult)
+
+        assertEquals(storedValue, deflatedValue)
+        assertEquals(listOf("a", "b"), storedValue.getValue("row").jsonArray.map { it.jsonPrimitive.content })
+        assertEquals(7, storedValue.getValue("floor").jsonPrimitive.int)
+        assertEquals("61", storedValue.getValue("hex").jsonPrimitive.content)
+        awaitProcessGone(checkNotNull(storedResult.isolatedPid))
+        awaitProcessGone(checkNotNull(deflatedResult.isolatedPid))
+    }
+
+    @Test(timeout = 45_000)
+    fun declaredStdlibSubsetAndInMemoryZipWorkWithoutNativeSkillImports() = runBlocking {
+        val source = """
+            import importlib
+            import io
+            import zipfile
+            import hashlib
+            import unicodedata
+            import random
+            import statistics
+            import decimal
+
+            def run(value):
+                names = ["__future__", "argparse", "bisect", "collections", "contextlib", "csv",
+                         "datetime", "decimal", "enum", "functools", "hashlib", "heapq", "io",
+                         "itertools", "json", "math", "pathlib", "random", "re", "statistics",
+                         "string", "sys", "textwrap", "time", "typing", "unicodedata"]
+                imported = [importlib.import_module(name).__name__ for name in names]
+                native_names = ["math", "_csv", "binascii", "_struct", "_random", "unicodedata",
+                                "_sha1", "_sha2", "_sha3", "_md5", "_blake2", "zlib"]
+                origins = [importlib.import_module(name).__spec__.origin for name in native_names]
+                memory = io.BytesIO()
+                with zipfile.ZipFile(memory, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+                    archive.writestr("unicode.txt", "中文: CSV and math")
+                with zipfile.ZipFile(io.BytesIO(memory.getvalue())) as archive:
+                    restored = archive.read("unicode.txt").decode()
+                return {"imports": imported, "origins": origins, "restored": restored,
+                        "sha256": hashlib.sha256(b"abc").hexdigest(),
+                        "normalized": unicodedata.normalize("NFC", "e\u0301"),
+                        "random": random.Random(42).randrange(100),
+                        "mean": statistics.mean([1, 2, 3]),
+                        "decimal": str(decimal.Decimal("0.1") + decimal.Decimal("0.2"))}
+        """.trimIndent()
+        val result = execute(skillZip(source))
+        val value = succeeded(result)
+        assertEquals(26, value.getValue("imports").jsonArray.size)
+        assertEquals(List(12) { "built-in" }, value.getValue("origins").jsonArray.map { it.jsonPrimitive.content })
+        assertEquals("中文: CSV and math", value.getValue("restored").jsonPrimitive.content)
+        assertEquals("ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad", value.getValue("sha256").jsonPrimitive.content)
+        assertEquals("é", value.getValue("normalized").jsonPrimitive.content)
+        assertEquals(81, value.getValue("random").jsonPrimitive.int)
+        assertEquals(2, value.getValue("mean").jsonPrimitive.int)
+        assertEquals("0.3", value.getValue("decimal").jsonPrimitive.content)
+        awaitProcessGone(checkNotNull(result.isolatedPid))
+    }
+
+    @Test(timeout = 20_000)
+    fun stagedArtifactHashMismatchRejectsATamperedReadOnlyDescriptor() {
+        val archive = skillZip(IDENTITY_SOURCE).bytes
+        val expectedHash = sha256Hex(archive)
+        val file = File(context.cacheDir, "python-artifact-${UUID.randomUUID()}.zip")
+        assertTrue(file.createNewFile())
+        file.writeBytes(archive)
+        val descriptor = ParcelFileDescriptor.open(file, ParcelFileDescriptor.MODE_READ_ONLY)
+        try {
+            assertTrue("The verified staged descriptor should match its host digest",
+                PythonRuntimeArtifactIntegrity.matches(descriptor, expectedHash))
+            file.writeBytes(archive + byteArrayOf(0x41))
+            assertTrue("Changing the staged file after hashing must be detected",
+                !PythonRuntimeArtifactIntegrity.matches(descriptor, expectedHash))
+        } finally {
+            descriptor.close()
+            assertEquals(context.cacheDir.canonicalFile, file.canonicalFile.parentFile)
+            assertTrue("Remove only this test's exact archive", file.delete())
+        }
+    }
+
+    @Test(timeout = 30_000)
+    fun isolatedServiceRejectsTamperedArtifactBeforeAcceptingStart() = runBlocking {
+        val fixture = skillZip(IDENTITY_SOURCE)
+        val expectedArtifactHash = sha256Hex(fixture.bytes)
+        val file = File(context.cacheDir, "python-artifact-tampered-${UUID.randomUUID()}.zip")
+        assertTrue(file.createNewFile())
+        file.writeBytes(fixture.bytes + byteArrayOf(0x41))
+        val packageFd = ParcelFileDescriptor.open(file, ParcelFileDescriptor.MODE_READ_ONLY)
+        val stdlibFd = ParcelFileDescriptor.open(file, ParcelFileDescriptor.MODE_READ_ONLY)
+        val inputFd = ParcelFileDescriptor.open(file, ParcelFileDescriptor.MODE_READ_ONLY)
+        val resultPipe = ParcelFileDescriptor.createPipe()
+        val brokerRequestPipe = ParcelFileDescriptor.createPipe()
+        val brokerResponsePipe = ParcelFileDescriptor.createPipe()
+        val logPipe = ParcelFileDescriptor.createPipe()
+        val connected = CompletableDeferred<IBinder>()
+        val connection = object : ServiceConnection {
+            override fun onServiceConnected(name: ComponentName, service: IBinder) {
+                connected.complete(service)
+            }
+
+            override fun onServiceDisconnected(name: ComponentName) {
+                connected.completeExceptionally(IllegalStateException("isolated service disconnected"))
+            }
+        }
+        var bound = false
+        try {
+            bound = context.bindService(Intent(context, IsolatedPythonService::class.java), connection, Context.BIND_AUTO_CREATE)
+            assertTrue(bound)
+            val binder = withTimeout(5_000) { connected.await() }
+            val data = Parcel.obtain()
+            val reply = Parcel.obtain()
+            try {
+                PythonBinderCodec.writeStart(
+                    data,
+                    PythonStartMessage(
+                        ticket = ticket(fixture),
+                        entrypoint = "device_fixture:run",
+                        limits = PythonIpcProtocol.PythonLimits(),
+                        runtimeArtifactHash = expectedArtifactHash,
+                        packageFd = packageFd,
+                        stdlibFd = stdlibFd,
+                        inputFd = inputFd,
+                        resultFd = resultPipe[1],
+                        brokerRequestFd = brokerRequestPipe[1],
+                        brokerResponseFd = brokerResponsePipe[0],
+                        logFd = logPipe[1],
+                        channelNonce = randomToken(),
+                    ),
+                )
+                assertTrue(binder.transact(PythonIpcProtocol.TRANSACTION_START, data, reply, 0))
+                assertEquals("Artifact hash mismatch must be rejected before dispatch",
+                    PythonIpcProtocol.ACK_REJECTED, reply.readInt())
+                assertNotNull(reply.readString())
+            } finally {
+                data.recycle()
+                reply.recycle()
+            }
+        } finally {
+            if (bound) context.unbindService(connection)
+            listOf(
+                packageFd, stdlibFd, inputFd,
+                resultPipe[0], resultPipe[1],
+                brokerRequestPipe[0], brokerRequestPipe[1],
+                brokerResponsePipe[0], brokerResponsePipe[1],
+                logPipe[0], logPipe[1],
+            ).forEach { runCatching { it.close() } }
+            assertEquals(context.cacheDir.canonicalFile, file.canonicalFile.parentFile)
+            assertTrue("Remove only this test's exact archive", file.delete())
+        }
+    }
+
+    @Test(timeout = 20_000)
+    fun invalidOriginalPackageHashNeverDispatchesStart() = runBlocking {
+        val fixture = skillZip(IDENTITY_SOURCE)
+        val ticket = ticket(fixture).copy(packageHash = "0".repeat(64))
+        val broker = TicketGateBroker(ticket)
+
+        val result = withTimeout(10_000) {
+            IsolatedPythonRuntime(context, broker).execute(request(fixture, ticket))
+        }
+
+        assertEquals(PythonIpcProtocol.RESULT_FAILED, result.status)
+        assertEquals("runtime_unavailable", result.errorCode)
+        assertNull("An invalid original digest must fail before binding the isolated service", result.isolatedPid)
+        assertTrue("An invalid original digest must not dispatch START", !result.dispatchAccepted)
+        assertTrue("No capability request may leave an invalid package preparation", broker.requests.isEmpty())
     }
 
     @Test(timeout = 45_000)
@@ -529,7 +727,7 @@ class PythonRuntimeDeviceTest {
 
     private data class Fixture(val bytes: ByteArray, val hash: String)
 
-    private fun skillZip(source: String): Fixture {
+    private fun skillZip(source: String, compressionMethod: Int = ZipEntry.STORED): Fixture {
         val manifest = """{"schemaVersion":1,"id":"dev.mobileagent.device_fixture","name":"Device fixture","version":"1.0.0","license":"AGPL-3.0-only","runtime":{"kind":"python","python":"3.14","mode":"pure-python","entrypoint":"device_fixture:run"},"permissions":{"log.info":{},"test.ready":{},"test.large":{}},"inputSchema":{"type":"object","properties":{},"additionalProperties":true},"outputSchema":{"type":"object","properties":{},"additionalProperties":true}}"""
         val entries = linkedMapOf(
             "SKILL.md" to "# Device fixture\nSynthetic instrumentation data only.\n",
@@ -540,11 +738,13 @@ class PythonRuntimeDeviceTest {
             ZipOutputStream(output).use { zip -> entries.forEach { (name, content) ->
                 val payload = content.toByteArray(Charsets.UTF_8)
                 val entry = ZipEntry(name).apply {
-                    method = ZipEntry.STORED // No zlib dependency is assumed for zipimport.
-                    size = payload.size.toLong()
-                    compressedSize = size
-                    crc = CRC32().apply { update(payload) }.value
+                    method = compressionMethod
                     time = 0L
+                    if (compressionMethod == ZipEntry.STORED) {
+                        size = payload.size.toLong()
+                        compressedSize = size
+                        crc = CRC32().apply { update(payload) }.value
+                    }
                 }
                 zip.putNextEntry(entry)
                 zip.write(payload)
@@ -558,6 +758,10 @@ class PythonRuntimeDeviceTest {
         assertEquals("device_fixture:run", inspection.manifest?.entrypoint)
         return Fixture(bytes, hash)
     }
+
+    private fun sha256Hex(bytes: ByteArray): String = MessageDigest.getInstance("SHA-256")
+        .digest(bytes)
+        .joinToString("") { "%02x".format(it.toInt() and 0xff) }
 
     private fun legacySkillZip(program: String, source: String): Fixture {
         val entries = linkedMapOf(

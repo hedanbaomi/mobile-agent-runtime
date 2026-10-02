@@ -44,6 +44,7 @@ import runtime.mobileagent.ipc.InvocationTicket
 import runtime.mobileagent.ipc.PythonBinderCodec
 import runtime.mobileagent.ipc.PythonIpcProtocol
 import runtime.mobileagent.ipc.PythonStartMessage
+import runtime.mobileagent.skills.SkillArchive
 
 /** Package material supplied by the verified SkillRepository/CAS layer. */
 sealed interface PythonPackageSource {
@@ -129,14 +130,15 @@ class IsolatedPythonRuntime(
             }
 
             val descriptors = try {
-                val packageFd = preparePackage(request.packageSource, request.ticket.packageHash)
+                val preparedPackage = preparePackage(request.packageSource, request.ticket.packageHash)
                 try {
                     val stdlibFd = prepareStdlib(applicationContext.assets)
                     try {
                         val pipes = PipeSet.create()
                         try {
                             InvocationDescriptors(
-                                packageFd = packageFd,
+                                packageFd = preparedPackage.descriptor,
+                                runtimeArtifactHash = preparedPackage.runtimeArtifactHash,
                                 stdlibFd = stdlibFd,
                                 pipes = pipes,
                             )
@@ -149,7 +151,7 @@ class IsolatedPythonRuntime(
                         throw error
                     }
                 } catch (error: Throwable) {
-                    runCatching { packageFd.close() }
+                    runCatching { preparedPackage.descriptor.close() }
                     throw error
                 }
             } catch (cancelled: CancellationException) {
@@ -555,6 +557,7 @@ class IsolatedPythonRuntime(
                     ticket = request.ticket,
                     entrypoint = request.entrypoint,
                     limits = request.limits,
+                    runtimeArtifactHash = descriptors.runtimeArtifactHash,
                     channelNonce = channelNonce,
                     packageFd = descriptors.packageFd,
                     stdlibFd = descriptors.stdlibFd,
@@ -669,9 +672,15 @@ class IsolatedPythonRuntime(
         }
     }
 
-    private suspend fun preparePackage(source: PythonPackageSource, expectedHash: String): ParcelFileDescriptor =
+    private data class PreparedPackage(
+        val descriptor: ParcelFileDescriptor,
+        val runtimeArtifactHash: String,
+    )
+
+    private suspend fun preparePackage(source: PythonPackageSource, expectedHash: String): PreparedPackage =
         withContext(Dispatchers.IO) {
-            val temp = tempFile("package")
+            val originalTemp = tempFile("package-original")
+            val runtimeTemp = tempFile("package-runtime")
             var success = false
             try {
                 val digest = MessageDigest.getInstance("SHA-256")
@@ -684,17 +693,23 @@ class IsolatedPythonRuntime(
                         )
                 }
                 input.use { stream ->
-                    FileOutputStream(temp).use { output ->
+                    FileOutputStream(originalTemp).use { output ->
                         copyBounded(stream, output, digest, MAX_PACKAGE_BYTES)
                     }
                 }
                 val actual = digest.digest().toHex()
                 if (!actual.equals(expectedHash, ignoreCase = true)) throw IllegalArgumentException("package hash mismatch")
-                val descriptor = ParcelFileDescriptor.open(temp, ParcelFileDescriptor.MODE_READ_ONLY)
+                val originalBytes = originalTemp.readBytes()
+                val runtimeArtifact = FileOutputStream(runtimeTemp).use { output ->
+                    SkillArchive.writeVerifiedPythonRuntimeArtifact(originalBytes, expectedHash, output)
+                }
+                check(runtimeTemp.length() == runtimeArtifact.sizeBytes) { "runtime archive size changed while staging" }
+                val descriptor = ParcelFileDescriptor.open(runtimeTemp, ParcelFileDescriptor.MODE_READ_ONLY)
                 success = true
-                descriptor
+                PreparedPackage(descriptor, runtimeArtifact.sha256)
             } finally {
-                if (!success || !temp.delete()) temp.delete()
+                if (!success || !runtimeTemp.delete()) runtimeTemp.delete()
+                originalTemp.delete()
             }
         }
 
@@ -791,6 +806,7 @@ class IsolatedPythonRuntime(
 
     private class InvocationDescriptors(
         val packageFd: ParcelFileDescriptor,
+        val runtimeArtifactHash: String,
         val stdlibFd: ParcelFileDescriptor,
         val pipes: PipeSet,
     ) {

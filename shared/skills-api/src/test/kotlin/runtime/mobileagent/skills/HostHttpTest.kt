@@ -115,6 +115,32 @@ class HostHttpTest {
     }
 
     @Test
+    fun dnsNamesWithIpv6LookingPrefixesReachValidatedTlsDestinations() {
+        for (name in listOf("fcatalog.example.invalid", "fdroid.example.invalid", "fe80docs.example.invalid")) {
+            LocalTlsFixture(name).use { fixture ->
+                fixture.server.enqueue(MockResponse().setBody("ok"))
+                assertEquals("ok", HostHttp.get("https://$name/", setOf(name), { listOf(publicAddress) }, fixture.client))
+                assertEquals(listOf(InetSocketAddress(publicAddress, 443)), fixture.destinations)
+                assertEquals(name, fixture.server.takeRequest(2, TimeUnit.SECONDS)!!.getHeader("Host"))
+            }
+        }
+    }
+
+    @Test
+    fun ipv6LookingDnsNamesStillRejectPrivateResolvedAddresses() {
+        val name = "fdroid.example.invalid"
+        for (address in listOf("fc00::1", "fd00::1", "fe80::1", "::1", "192.168.1.1")) {
+            LocalTlsFixture(name).use { fixture ->
+                assertThrows(UnknownHostException::class.java) {
+                    HostHttp.get("https://$name/", setOf(name), { listOf(InetAddress.getByName(address)) }, fixture.client)
+                }
+                assertTrue(fixture.destinations.isEmpty(), address)
+                assertEquals(0, fixture.server.requestCount)
+            }
+        }
+    }
+
+    @Test
     fun actualOkHttpDnsAndSocketUseOnlyTheSingleValidatedResolution() = LocalTlsFixture(host).use { fixture ->
         fixture.server.enqueue(MockResponse().setBody("ok"))
         var resolutions = 0

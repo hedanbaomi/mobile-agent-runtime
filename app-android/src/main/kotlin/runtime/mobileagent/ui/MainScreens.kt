@@ -1710,16 +1710,20 @@ private fun SettingsRoute(entry: NavBackStackEntry, chinese: Boolean, onRoute: (
     val exportLauncher = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/zip")) { vm.exportTo(it) }
     val diagnosticsExportLauncher = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/zip")) { vm.exportDiagnosticsTo(it) }
     val mcpConfigured = runtime.mobileagent.McpConfigStore.read(app.container).value != null
-    val raw = vm.uiState(app.container.announcements.records().count { it.state.readAt == null })
+    // Settings facts that need database/asset/diagnostics reads are loaded off the main thread and
+    // cached in the ViewModel; composition only projects that cached state.
+    val raw = vm.uiState(vm.noticeCount.value)
     val state = raw.copy(language = if (chinese) "zh-CN" else "en-US",
         mcpConfigured = mcpConfigured, mcpEntryEnabled = true, thirdPartyNotices = thirdParty,
     )
     val context = LocalContext.current
-    LifecycleEventEffect(Lifecycle.Event.ON_RESUME) { vm.refreshAuthorities(); vm.refreshStatsEnabled() }
+    LifecycleEventEffect(Lifecycle.Event.ON_RESUME) {
+        vm.refreshAuthorities(); vm.refreshStatsEnabled(); vm.refreshRuntimeFacts()
+    }
     // Pairing tokens are foreground-only. Leaving/backgrounding this route
     // clears the ViewModel's ephemeral token and asks the adapter to cancel.
     LifecycleEventEffect(Lifecycle.Event.ON_PAUSE) { vm.cancelWiredAdbPairing() }
-    LaunchedEffect(Unit) { vm.refreshAuthorities() }
+    LaunchedEffect(Unit) { vm.refreshAuthorities(); vm.refreshRuntimeFacts() }
     LaunchedEffect(autoCheckUpdate) {
         if (autoCheckUpdate) {
             onAutoCheckConsumed()

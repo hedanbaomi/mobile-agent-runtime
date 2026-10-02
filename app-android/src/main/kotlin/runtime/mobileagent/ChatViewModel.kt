@@ -70,6 +70,35 @@ import java.net.URI
 import java.time.LocalDate
 import java.util.Base64
 
+/** Diagnostic classification uses the declared contract, never substrings in model tool names. */
+internal fun chatDiagnosticToolCapability(capability: String?): DiagnosticToolCapability = when (capability) {
+    "python.execute" -> DiagnosticToolCapability.PYTHON_EXECUTE
+    CapabilityId.SHELL_EXECUTE -> DiagnosticToolCapability.SHELL_EXECUTE
+    CapabilityId.WORKSPACE_ENUMERATE, CapabilityId.FILE_LIST, CapabilityId.FILE_STAT, CapabilityId.FILE_READ_TEXT,
+    "workspace.read", "shizuku.workspace.read" ->
+        DiagnosticToolCapability.WORKSPACE_READ
+    CapabilityId.FILE_WRITE_TEXT, CapabilityId.FILE_CREATE_DIRECTORY, CapabilityId.FILE_MOVE, CapabilityId.FILE_DELETE,
+    "file.apply_patch", "workspace.write", "shizuku.workspace.write" -> DiagnosticToolCapability.WORKSPACE_WRITE
+    CapabilityId.MEMORY_READ, CapabilityId.MEMORY_SEARCH -> DiagnosticToolCapability.MEMORY_READ
+    CapabilityId.MEMORY_APPEND, CapabilityId.MEMORY_REPLACE -> DiagnosticToolCapability.MEMORY_WRITE
+    "network.search", "knowledge.search" -> DiagnosticToolCapability.SEARCH
+    else -> DiagnosticToolCapability.UNKNOWN
+}
+
+internal fun chatDiagnosticAuthority(
+    capability: DiagnosticToolCapability,
+    selectedAuthority: String,
+    workspaceAuthority: DiagnosticAuthority = DiagnosticAuthority.NONE,
+): DiagnosticAuthority = when (capability) {
+    DiagnosticToolCapability.SHELL_EXECUTE -> when (selectedAuthority) {
+        "SHIZUKU" -> DiagnosticAuthority.SHIZUKU
+        "WIRED_ADB" -> DiagnosticAuthority.WIRED_ADB
+        else -> DiagnosticAuthority.NONE
+    }
+    DiagnosticToolCapability.WORKSPACE_READ, DiagnosticToolCapability.WORKSPACE_WRITE -> workspaceAuthority
+    else -> DiagnosticAuthority.NONE
+}
+
 private class ChatInputBudgetExceeded(
     val estimated: Long,
     val limit: Long,
@@ -832,7 +861,7 @@ class ChatViewModel(
                                 requestRef = requestRef,
                                 sessionRef = conversationId,
                                 capability = diagnosticToolCapability(name, toolExecutor.specs),
-                                authority = currentDiagnosticAuthority(),
+                                authority = diagnosticToolAuthority(name, toolExecutor.specs, threadWorkspaceId),
                                 errorCode = errorCode,
                             ),
                         )
@@ -1147,7 +1176,7 @@ class ChatViewModel(
                         agentId = binding.snapshot.agentId,
                         sessionRef = conversationId,
                         capability = diagnosticToolCapability(call.name, toolExecutor.specs),
-                        authority = diagnosticAuthority(selectedAuthority),
+                        authority = diagnosticToolAuthority(call.name, toolExecutor.specs, threadWorkspaceId, selectedAuthority),
                     )
                     if (rememberPendingApproval(approvalAudit)) {
                         recordToolApprovalState(approvalAudit, DiagnosticApprovalState.REQUESTED, "permission")
@@ -1352,7 +1381,7 @@ class ChatViewModel(
                                     agentId = binding.snapshot.agentId,
                                     sessionRef = conversationId,
                                     capability = diagnosticToolCapability(event.name, toolExecutor.specs),
-                                    authority = currentDiagnosticAuthority(),
+                                    authority = diagnosticToolAuthority(event.name, toolExecutor.specs, threadWorkspaceId),
                                 )
                                 if (rememberPendingApproval(approvalAudit)) {
                                     recordToolApprovalState(approvalAudit, DiagnosticApprovalState.REQUESTED, "permission")
@@ -1979,7 +2008,7 @@ class ChatViewModel(
                             agentId = snapshotAgentId.orEmpty(),
                             sessionRef = persisted.conversationId,
                             capability = diagnosticToolCapability(invocation.name, emptyList()),
-                            authority = currentDiagnosticAuthority(),
+                            authority = DiagnosticAuthority.NONE,
                         ),
                         if (mayHaveDispatched) DiagnosticApprovalState.UNKNOWN else DiagnosticApprovalState.INVALIDATED,
                         if (mayHaveDispatched) "unknown" else "validation",
@@ -2048,32 +2077,24 @@ class ChatViewModel(
         }
     }
 
-    private fun currentDiagnosticAuthority(): DiagnosticAuthority = runCatching {
-        diagnosticAuthority(container.runtimeIntegration.snapshot().selectedAuthority.name)
-    }.getOrDefault(DiagnosticAuthority.NONE)
+    private fun diagnosticToolCapability(name: String, specs: List<ToolSpec>): DiagnosticToolCapability =
+        chatDiagnosticToolCapability(specs.firstOrNull { it.name == name }?.capability)
 
-    private fun diagnosticAuthority(value: String): DiagnosticAuthority = when (value.uppercase()) {
-        DiagnosticAuthority.SHIZUKU.name -> DiagnosticAuthority.SHIZUKU
-        DiagnosticAuthority.WIRED_ADB.name -> DiagnosticAuthority.WIRED_ADB
-        else -> DiagnosticAuthority.NONE
-    }
-
-    private fun diagnosticToolCapability(name: String, specs: List<ToolSpec>): DiagnosticToolCapability {
-        val toolName = name.lowercase()
-        val capability = specs.firstOrNull { it.name == name }?.capability?.lowercase().orEmpty()
-        val value = "$toolName $capability"
-        return when {
-            "shell_exec" in toolName || "shell" in value || "execute" in value -> DiagnosticToolCapability.SHELL_EXECUTE
-            toolName.startsWith("memory_") || "memory" in value -> if (
-                toolName.endsWith("append") || toolName.endsWith("replace") || "write" in value
-            ) DiagnosticToolCapability.MEMORY_WRITE else DiagnosticToolCapability.MEMORY_READ
-            toolName.startsWith("file_") || "file." in value || "workspace" in value -> if (
-                toolName.endsWith("write") || toolName.endsWith("append") || toolName.endsWith("replace") ||
-                    toolName.endsWith("move") || toolName.endsWith("delete") || toolName.endsWith("create_directory") ||
-                    "write" in value || "delete" in value || "move" in value
-            ) DiagnosticToolCapability.WORKSPACE_WRITE else DiagnosticToolCapability.WORKSPACE_READ
-            "search" in value -> DiagnosticToolCapability.SEARCH
-            else -> DiagnosticToolCapability.UNKNOWN
+    private fun diagnosticToolAuthority(
+        name: String,
+        specs: List<ToolSpec>,
+        workspaceId: String?,
+        selectedAuthority: String? = null,
+    ): DiagnosticAuthority {
+        val capability = diagnosticToolCapability(name, specs)
+        return when (capability) {
+            DiagnosticToolCapability.SHELL_EXECUTE -> runCatching {
+                chatDiagnosticAuthority(capability, selectedAuthority ?: container.runtimeIntegration.snapshot().selectedAuthority.name)
+            }.getOrDefault(DiagnosticAuthority.NONE)
+            DiagnosticToolCapability.WORKSPACE_READ, DiagnosticToolCapability.WORKSPACE_WRITE ->
+                runCatching { chatDiagnosticAuthority(capability, "NONE", container.runtimeIntegration.diagnosticWorkspaceAuthority(workspaceId)) }
+                    .getOrDefault(DiagnosticAuthority.NONE)
+            else -> DiagnosticAuthority.NONE
         }
     }
 
@@ -2223,7 +2244,7 @@ class ChatViewModel(
         agentId: String?,
         agentLabel: String?,
     ): ChatWorkspaceAccessUi {
-        val agentName = agentLabel?.takeIf { it.isNotBlank() } ?: "当前智能体"
+        val agentName = agentLabel?.takeIf { it.isNotBlank() }.orEmpty()
         val threadPort = (container as? ThreadWorkspacePortProvider)?.threadWorkspacePort
         val binding = conversationId?.let { id ->
             runCatching { threadPort?.conversationWorkspaceBinding(id) }.getOrNull()
@@ -2247,19 +2268,9 @@ class ChatViewModel(
             authority.selectedAuthority == Authority.WIRED_ADB -> "Wired ADB"
             else -> ""
         }
-        val summary = when {
-            binding != null && presentation != null -> presentation.title
-            binding != null -> "已绑定工作区"
-            conversationId != null && resolvedAgentDefaultId != null -> "当前会话无工作区"
-            conversationId != null -> "未配置工作区"
-            else -> "未配置工作区"
-        }
-        val permission = when {
-            binding != null -> "已绑定"
-            resolvedAgentDefaultId != null -> "当前会话未绑定；默认值仅用于新会话"
-            storedAgentDefault != null -> "默认工作区授权已撤销或不可用"
-            else -> "尚未授权此会话"
-        }
+        // Only user-supplied display metadata belongs in the view model. Fixed
+        // workspace status text is localized by the feature at composition time.
+        val summary = presentation?.title.orEmpty()
         val threadWorkspaceState = when {
             binding != null -> ChatThreadWorkspaceState.BOUND
             resolvedAgentDefaultId != null -> ChatThreadWorkspaceState.UNBOUND_AGENT_DEFAULT_AVAILABLE
@@ -2269,17 +2280,7 @@ class ChatViewModel(
             agentLabel = agentName,
             workspaceSummary = summary,
             systemAccessLabel = systemLabel,
-            permissionLabel = permission,
-            notice = when (threadWorkspaceState) {
-                ChatThreadWorkspaceState.BOUND -> "会话工作区已固定；Agent 默认值变化不会改动此会话。"
-                ChatThreadWorkspaceState.UNBOUND_AGENT_DEFAULT_AVAILABLE ->
-                    "当前会话保持无工作区；Agent 默认工作区只会用于新建会话。"
-                ChatThreadWorkspaceState.UNBOUND_NO_AGENT_DEFAULT -> if (storedAgentDefault != null) {
-                    "Agent 默认工作区授权已撤销或不可用；系统不会自动恢复。"
-                } else {
-                    "当前会话未绑定工作区。"
-                }
-            },
+            agentDefaultUnavailable = storedAgentDefault != null && resolvedAgentDefaultId == null,
             threadWorkspaceState = threadWorkspaceState,
             agentDefaultWorkspaceId = resolvedAgentDefaultId,
             agentDefaultWorkspaceLabel = agentDefaultPresentation?.title.orEmpty(),

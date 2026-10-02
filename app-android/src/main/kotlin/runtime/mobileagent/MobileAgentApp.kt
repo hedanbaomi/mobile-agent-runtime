@@ -13,6 +13,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.launch
 import runtime.mobileagent.announcements.ClientContext
 import runtime.mobileagent.data.AnnouncementRepository
 import runtime.mobileagent.data.KnowledgeRepository
@@ -312,6 +313,11 @@ class AppContainer(app: MobileAgentApp) :
     }
     val announcementFetcher = AnnouncementFetcher(announcementHttp)
     private val announcementScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    /**
+     * App-lifetime scope for storage recovery that must not run on the main thread during
+     * `Application.onCreate`.  Cancelled in [close] together with the other process bridges.
+     */
+    private val recoveryScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     val announcementRefreshCoordinator = AnnouncementRefreshCoordinator(
         store = RepositoryAnnouncementRefreshStore(announcements) {
             ClientContext(
@@ -336,6 +342,7 @@ class AppContainer(app: MobileAgentApp) :
     override fun close() {
         if (!closed.compareAndSet(false, true)) return
         announcementScope.cancel()
+        recoveryScope.cancel()
         runCatching { runtimeIntegration.close() }
         runtimeIntegrationRef.set(null)
         runCatching { wiredAuthority.close() }
@@ -371,16 +378,21 @@ class AppContainer(app: MobileAgentApp) :
         }
         // Resume one coordinator per durable batch. Consent and UNKNOWN states
         // are never enqueued here, and processBatch revalidates every external
-        // operation before dispatch.
-        val recoverableBatches = knowledge.recoverableBatchIds().toSet()
-        recoverableBatches.forEach { batchId ->
-            ImportWorkScheduler.enqueueBatch(app, batchId, profiles.visionConfigured())
-        }
-        // Legacy pre-batch copied jobs remain individually resumable.
-        knowledge.listJobs().filter {
-            it.first.stage == ImportStage.COPYING && knowledge.jobBatchId(it.first.id) == null
-        }.forEach { (job, _, _) ->
-            ImportWorkScheduler.enqueue(app, job.id, profiles.visionConfigured())
+        // operation before dispatch.  The recovery queries are SQLite reads, so they run on the
+        // app-owned IO scope: Application.onCreate must not block the first frame on the database.
+        recoveryScope.launch {
+            runCatching {
+                val configured = profiles.visionConfigured()
+                knowledge.recoverableBatchIds().toSet().forEach { batchId ->
+                    ImportWorkScheduler.enqueueBatch(app, batchId, configured)
+                }
+                // Legacy pre-batch copied jobs remain individually resumable.
+                knowledge.listJobs().filter {
+                    it.first.stage == ImportStage.COPYING && knowledge.jobBatchId(it.first.id) == null
+                }.forEach { (job, _, _) ->
+                    ImportWorkScheduler.enqueue(app, job.id, configured)
+                }
+            }
         }
     }
 }

@@ -58,7 +58,13 @@ object OpenAiResponsesSse {
         if (trimmed.isEmpty() || trimmed.startsWith(":")) return emptyList()
         if (!trimmed.startsWith("data:")) return emptyList()
         val data = trimmed.removePrefix("data:").trim()
-        if (data == "[DONE]") return listOf(ModelEvent.Completed)
+        if (data == "[DONE]") {
+            // `[DONE]` is a transport end marker, not proof of a usable answer: a
+            // compatible endpoint may end the stream here without ever sending
+            // `response.completed`.  It passes through the same terminal guard as
+            // that event, so both end markers decide alike.
+            return terminalForContent(state, reasoningTokens = null)
+        }
         val obj = runCatching { json.parseToJsonElement(data).jsonObject }.getOrNull() ?: return emptyList()
         val type = string(obj, "type") ?: return emptyList()
         return when (type) {
@@ -100,25 +106,12 @@ object OpenAiResponsesSse {
                 val response = obj["response"]?.let { runCatching { it.jsonObject }.getOrNull() }
                 val reportedUsage = usage(response ?: obj)
                 reportedUsage?.let(::add)
-                // A completed response that produced no text, refusal or tool
-                // call is reasoning-only when reasoning items or reasoning
-                // usage were observed — a diagnosable terminal, not a silent
-                // empty answer.  Reasoning content itself is never promoted to
-                // the answer channel.
-                val hasVisible = state.emittedCalls.isNotEmpty() ||
-                    state.text.values.any { it.isNotEmpty() } ||
-                    state.refusal.values.any { it.isNotEmpty() }
-                if (!hasVisible) {
-                    val hasReasoning = state.reasoning.isNotEmpty() ||
-                        state.emittedContinuations.isNotEmpty() ||
-                        (reportedUsage?.reasoningTokens ?: 0) > 0
-                    add(ModelEvent.Failed(
-                        if (hasReasoning) ErrorCode.REASONING_ONLY.name
-                        else ProviderConnectionErrorCode.INVALID_RESPONSE.name,
-                    ))
-                } else {
-                    add(ModelEvent.Completed)
-                }
+                // One terminal decision shared with the `[DONE]` transport marker:
+                // a completed response that produced no text, refusal or confirmed
+                // tool call is reasoning-only when reasoning was observed — a
+                // diagnosable terminal, not a silent empty answer.  Reasoning
+                // content itself is never promoted to the answer channel.
+                addAll(terminalForContent(state, reportedUsage?.reasoningTokens))
             }
             "response.incomplete" -> buildList {
                 // A length stop is an output-budget outcome, never an input
@@ -145,9 +138,14 @@ object OpenAiResponsesSse {
                     }
                 }
                 add(ModelEvent.Failed(failure))
-            }            "response.failed",
+            }
+            "response.failed",
             "error",
-            -> listOf(ModelEvent.Failed(SecretRedactor.redact(errorMessage(obj), extraSecrets)))
+            -> buildList {
+                val response = obj["response"]?.let { runCatching { it.jsonObject }.getOrNull() }
+                usage(response ?: obj)?.let(::add)
+                add(ModelEvent.Failed(SecretRedactor.redact(errorMessage(obj), extraSecrets)))
+            }
             // created/in_progress/queued/output annotation and future event
             // types are lifecycle metadata, not model output.
             else -> emptyList()
@@ -167,6 +165,54 @@ object OpenAiResponsesSse {
             ?.get("reason")?.jsonPrimitive?.contentOrNull
         return incomplete ?: response?.get("status")?.jsonPrimitive?.contentOrNull ?: type.removePrefix("response.")
     }
+
+    /**
+     * The one terminal decision shared by every end-of-stream marker.
+     *
+     * A function call the provider announced (or streamed arguments for) but
+     * never confirmed with an `...arguments.done` / `output_item.done` terminal
+     * is not visible content: releasing it would dispatch a call the provider
+     * never finished, and ignoring it would drop the model's tool call from a
+     * run that still looks successful.  It is a decided invalid response under
+     * every end marker, whatever the answer text already produced.
+     *
+     * Without such a call, visible content is answer text, a refusal, or a
+     * confirmed tool call.  Without it the response is not a success: reasoning
+     * that never produced an answer is [ErrorCode.REASONING_ONLY], and a
+     * response with nothing in it at all is an unusable
+     * [ProviderConnectionErrorCode.INVALID_RESPONSE].  `[DONE]` and
+     * `response.completed` must not disagree about this.
+     */
+    private fun terminalForContent(state: State, reasoningTokens: Int?): List<ModelEvent> {
+        if (hasUnconfirmedToolCall(state)) {
+            return listOf(ModelEvent.Failed(ProviderConnectionErrorCode.INVALID_RESPONSE.name))
+        }
+        val hasVisible = state.emittedCalls.isNotEmpty() ||
+            state.text.values.any { it.isNotEmpty() } ||
+            state.refusal.values.any { it.isNotEmpty() }
+        if (hasVisible) return listOf(ModelEvent.Completed)
+        val hasReasoning = state.reasoning.isNotEmpty() ||
+            state.emittedContinuations.isNotEmpty() ||
+            (reasoningTokens ?: 0) > 0
+        return listOf(
+            ModelEvent.Failed(
+                if (hasReasoning) ErrorCode.REASONING_ONLY.name
+                else ProviderConnectionErrorCode.INVALID_RESPONSE.name,
+            ),
+        )
+    }
+
+    /**
+     * A function call the provider announced or streamed arguments for, but
+     * never confirmed.  A confirmed release records both its buffer key and its
+     * call id in [State.emittedCalls], so an entry that still has neither is an
+     * unfinished call — including one announced with no arguments at all.
+     */
+    private fun hasUnconfirmedToolCall(state: State): Boolean =
+        state.functionCalls.any { (key, buffer) ->
+            key !in state.emittedCalls &&
+                (buffer.callId.isBlank() || buffer.callId !in state.emittedCalls)
+        }
 
     private enum class Channel { TEXT, REASONING, REFUSAL }
 

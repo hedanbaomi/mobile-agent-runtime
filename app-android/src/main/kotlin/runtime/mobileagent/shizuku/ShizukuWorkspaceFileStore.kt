@@ -90,6 +90,12 @@ internal class ShizukuWorkspaceFileStore(
         guarded("list") {
             if (maxEntries !in 1..MAX_DIRECTORY_ENTRIES) throw WorkspaceFailure(LIMIT)
             val segments = parsePath(relativePath, allowRoot = true)
+            // The app-owned fixed workspace is created lazily on its first valid root read.
+            // Attached user directories (quota disabled) must never be recreated by a listing.
+            if (segments.isEmpty() && enforceQuota) {
+                if (cursor == null) ensureRoot()
+                else if (!Files.exists(rootPath, LinkOption.NOFOLLOW_LINKS)) throw WorkspaceFailure(INVALID_CURSOR)
+            }
             val directory = resolve(segments)
             if (!Files.exists(directory, LinkOption.NOFOLLOW_LINKS)) {
                 throw WorkspaceFailure(NOT_FOUND)

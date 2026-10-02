@@ -827,7 +827,14 @@ class OpenAiResponsesAdapter(
         (root["error"] as? JsonObject)?.let { error ->
             val message = runCatching { error["message"]?.jsonPrimitive?.contentOrNull }.getOrNull()
                 ?: ErrorCode.UNKNOWN_OUTCOME.name
-            return listOf(ModelEvent.Failed(SecretRedactor.redact(message, secrets)))
+            return listOfNotNull(reportedUsage(raw), ModelEvent.Failed(SecretRedactor.redact(message, secrets)))
+        }
+        val status = root["status"]?.jsonPrimitive?.contentOrNull
+        if (status != null && status !in listOf("completed", "failed", "incomplete")) {
+            // The provider did not confirm this output. Decide before parsing it:
+            // malformed or credential-bearing body fields must neither become
+            // usable output nor discard independently verified billing facts.
+            return listOfNotNull(reportedUsage(raw), ModelEvent.Failed(ErrorCode.UNKNOWN_OUTCOME.name))
         }
         val events = mutableListOf<ModelEvent>()
         val emittedContinuations = mutableSetOf<String>()
@@ -916,7 +923,6 @@ class OpenAiResponsesAdapter(
                     reasoning?.takeIf { it >= 0 && (output == null || it <= output) }, input, output)
             }
         }
-        val status = root["status"]?.jsonPrimitive?.contentOrNull
         // "Visible" means at least one non-empty answer/refusal delta — the same
         // content-based rule the SSE terminal uses, not merely event presence.
         val hasText = events.any {
@@ -964,7 +970,7 @@ class OpenAiResponsesAdapter(
                     }
                 },
             )
-        }        else return listOf(ModelEvent.Failed(ErrorCode.UNKNOWN_OUTCOME.name))
+        }
         return events
     }
 

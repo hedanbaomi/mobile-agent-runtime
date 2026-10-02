@@ -92,11 +92,14 @@ APK/AAB/ZIP 内的 `assets/` 路径，不把缺失的 source `ASSETS_ROOT` 当�
   `licenses/cpython-3.14.7/LICENSE.txt`
   `b0e25a78cffb43f4d92de8b61ccfa1f1f98ecbc22330b54b5251e7b6ba010231`；
   `NOTICE.txt`
-  `87e76594ca56bd6b1116d2ee9b902b98c0940863762f9ef822de9a3cec31fcb3`。
+  `3ae7058d5b00ca380dbe672986e7c4beb8cdbbb7c9f75da9dfb4d3408adab39f`。
   `python/python3.14.zip` 的 exact SHA-256 只登记在 `licenses/index.json` 的
   `payloads[]`（校验器按该记录逐字节核对）；归档输入或生成器变化会改变产物，
   因此本文与随包 notice 都不再钉它的哈希，避免正文声明过时。
   两个官方 Android archive 及其 Sigstore bundle 的 SHA-256 记录在 index provenance 中。
+  x86_64 核心为原始固定源包的 API26 派生构建（--without-mimalloc）；固定标准库模块注册为 builtins。
+  PSF、HACL MIT、BLAKE2 notice 与完整 CC0 条款随包保留；新增来源/registry 文件由固定 index 校验。
+  provenance 记录经验证的构建输入 SHA；Android stripping 后的实际 native SHA 由最终 APK SBOM 记录。
 - USearch 2.25.1（`runtime/vector-usearch/build/generated/vector-assets`）：
   `LICENSE.txt` `c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4`；
   `NOTICE.txt` `145493df94feaef58efd5f5fcedc9d4d3c08a285dbbf87a9eefae3455cb475a4`；

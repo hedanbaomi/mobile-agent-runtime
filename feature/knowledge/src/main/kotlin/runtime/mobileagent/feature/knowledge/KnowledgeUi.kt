@@ -101,9 +101,8 @@ data class KnowledgeVisionTargetUi(
 
 /**
  * Import selection kept by the shell-scoped ViewModel while the user visits
- * Provider settings.  Uri values are persisted by the ViewModel before this
- * object is exposed, so leaving the Knowledge route does not discard the
- * staged selection.
+ * Provider settings. The ViewModel takes persistable URI grants on IO; leaving
+ * the Knowledge route does not discard this staged selection.
  */
 data class KnowledgePendingImportUi(
     val id: String,
@@ -210,6 +209,8 @@ data class KnowledgeUiState(
     val visionTargetsLoading: Boolean = false,
     /** Import selection survives route disposal and provider configuration navigation. */
     val pendingImport: KnowledgePendingImportUi? = null,
+    /** True while the confirmed selection is being resolved against SAF and the coordinator. */
+    val importSubmitting: Boolean = false,
     /** Blocked batch target selection also survives provider configuration navigation. */
     val pendingBatchVision: KnowledgeBatchVisionUi? = null,
 )
@@ -572,6 +573,20 @@ fun KnowledgeScreen(
                         if (zh) "本批次选定 ${uris.size} 项资料，导入到「$selectedName」。" else "${uris.size} selected item(s) will be imported into $selectedName.",
                         style = MaterialTheme.typography.bodySmall,
                     )
+                    if (state.importSubmitting) {
+                        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            CircularProgressIndicator()
+                            Text(
+                                if (zh) "正在准备本次选择…" else "Preparing the selected items…",
+                                style = MaterialTheme.typography.bodySmall,
+                            )
+                        }
+                    }
+                    // A busy or rejected submission keeps this dialog open with the user's selection
+                    // and the precise reason, so nothing is dropped without an explanation.
+                    state.error?.let { reason ->
+                        Text(reason, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
+                    }
                     Text(
                         if (zh) "视觉目标：${selectedTarget?.label ?: if (pending.visionTargetSelectionInitialized) "未选择" else "正在读取配置…" }"
                         else "Vision target: ${selectedTarget?.label ?: if (pending.visionTargetSelectionInitialized) "none selected" else "loading configuration…"}",
@@ -591,17 +606,19 @@ fun KnowledgeScreen(
                         Box {
                             OutlinedButton(
                                 onClick = { visionTargetMenu = true },
+                                enabled = !state.importSubmitting,
                                 modifier = Modifier.fillMaxWidth(),
                             ) {
                                 Text(selectedTarget?.label ?: if (zh) "选择视觉目标" else "Choose Vision target")
                             }
                             DropdownMenu(
-                                expanded = visionTargetMenu,
+                                expanded = visionTargetMenu && !state.importSubmitting,
                                 onDismissRequest = { visionTargetMenu = false },
                             ) {
                                 importTargets.forEach { target ->
                                     DropdownMenuItem(
                                         text = { Text(target.label) },
+                                        enabled = !state.importSubmitting,
                                         onClick = {
                                             visionTargetMenu = false
                                             actions.onSelectPendingVisionTarget(target.fingerprint)
@@ -610,6 +627,7 @@ fun KnowledgeScreen(
                                 }
                                 DropdownMenuItem(
                                     text = { Text(if (zh) "不选择视觉目标（遇到图片时暂停）" else "No Vision target (pause if images need processing)") },
+                                    enabled = !state.importSubmitting,
                                     onClick = {
                                         visionTargetMenu = false
                                         actions.onSelectPendingVisionTarget(null)
@@ -652,14 +670,20 @@ fun KnowledgeScreen(
                 Button(
                     onClick = {
                         val chosenTarget = pending.selectedVisionTargetFingerprint
-                        clearStagedImport()
+                        // Only the in-composition fallback is dropped here.  A ViewModel-owned
+                        // selection is cleared by the ViewModel once the coordinator actually
+                        // accepted the batch, so a busy, rejected or failed submission keeps the
+                        // user's selection visible together with its reason.
+                        localPendingImport = null
+                        localPendingTargets = emptyList()
                         when (sourceKind) {
                             "zip" -> actions.onImportZip(uris.first(), chosenTarget)
                             "folder" -> actions.onImportFolder(uris.first(), chosenTarget)
                             else -> actions.onImport(uris, chosenTarget)
                         }
                     },
-                    enabled = !state.visionTargetsLoading && pending.visionTargetSelectionInitialized && !selectedTargetMissing,
+                    enabled = !state.visionTargetsLoading && pending.visionTargetSelectionInitialized &&
+                        !selectedTargetMissing && !state.importSubmitting,
                 ) { Text(if (zh) "创建并开始导入" else "Create and start import") }
             },
             dismissButton = { TextButton(onClick = clearStagedImport) { Text(if (zh) "取消" else "Cancel") } },

@@ -242,6 +242,7 @@ internal fun ChatWorkspaceAccessSheet(
     onDismiss: () -> Unit,
     onOpenAgentSettings: () -> Unit,
 ) {
+    val display = state.localized(zh)
     ModalBottomSheet(onDismissRequest = onDismiss) {
         Column(
             Modifier
@@ -252,22 +253,22 @@ internal fun ChatWorkspaceAccessSheet(
             verticalArrangement = Arrangement.spacedBy(10.dp),
         ) {
             Text(if (zh) "工作区与权限" else "Workspace & access", style = MaterialTheme.typography.headlineSmall)
-            Text(state.agentLabel, style = MaterialTheme.typography.titleMedium)
+            Text(display.agentLabel, style = MaterialTheme.typography.titleMedium)
             Text(
-                if (zh) "当前工作区：${state.workspaceSummary}" else "Current workspace: ${state.workspaceSummary}",
+                if (zh) "当前工作区：${display.workspaceSummary}" else "Current workspace: ${display.workspaceSummary}",
                 style = MaterialTheme.typography.bodyMedium,
             )
             Text(
-                if (zh) "系统增强访问：${state.systemAccessLabel}" else "System access: ${state.systemAccessLabel}",
+                if (zh) "系统增强访问：${display.systemAccessLabel}" else "System access: ${display.systemAccessLabel}",
                 style = MaterialTheme.typography.bodySmall,
             )
             Text(
-                if (zh) "权限状态：${state.permissionLabel}" else "Permission: ${state.permissionLabel}",
+                if (zh) "权限状态：${display.permissionLabel}" else "Permission: ${display.permissionLabel}",
                 style = MaterialTheme.typography.bodySmall,
             )
-            if (state.notice.isNotBlank()) {
+            if (display.notice.isNotBlank()) {
                 Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.secondaryContainer)) {
-                    Text(state.notice, Modifier.padding(12.dp))
+                    Text(display.notice, Modifier.padding(12.dp))
                 }
             }
             OutlinedButton(

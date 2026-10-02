@@ -1,0 +1,1162 @@
+{
+  "schema": "mobileagentruntime.attachment-dispositions/1",
+  "originalZipSha256": "07e850171e52117cefb420a69fc1d4920dfcbe1e6dd5fdcd5fb1b4513a98bcdd",
+  "originalRows": 598,
+  "originalStatuses": {
+    "PASS": 498,
+    "FAIL": 81,
+    "BLOCKED": 6,
+    "NOT_RUN": 13
+  },
+  "nonPassRows": 100,
+  "dispositionCounts": {
+    "not_retested": 3,
+    "fixture_corrected": 26,
+    "partial_paid_flow": 2,
+    "blocked_environment": 2,
+    "expected_refusal": 1,
+    "partial_environment": 19,
+    "unreproduced": 2,
+    "fixed_product": 31,
+    "retested_function": 7,
+    "not_run": 7
+  },
+  "rows": [
+    {
+      "index": 1,
+      "originalCaseId": "ANDROID-PYTHON-FILE-001",
+      "originalStatus": "NOT_RUN",
+      "finding": "ANDROID-PAID-FLOW",
+      "disposition": "not_retested",
+      "evidence": [],
+      "boundary": "Original unavailable Skill, expired budget or unresolved authorization predicate retained; no new real Provider/paid replay."
+    },
+    {
+      "index": 2,
+      "originalCaseId": "ANDROID-PYTHON-FILE-002",
+      "originalStatus": "NOT_RUN",
+      "finding": "ANDROID-PAID-FLOW",
+      "disposition": "not_retested",
+      "evidence": [],
+      "boundary": "Original unavailable Skill, expired budget or unresolved authorization predicate retained; no new real Provider/paid replay."
+    },
+    {
+      "index": 3,
+      "originalCaseId": "ANDROID-PYTHON-FILE-003",
+      "originalStatus": "FAIL",
+      "finding": "ANDROID-PAID-FLOW",
+      "disposition": "not_retested",
+      "evidence": [],
+      "boundary": "Original unavailable Skill, expired budget or unresolved authorization predicate retained; no new real Provider/paid replay."
+    },
+    {
+      "index": 4,
+      "originalCaseId": "ANDROID-PYTHON-PURE-004",
+      "originalStatus": "FAIL",
+      "finding": "TEST-003",
+      "disposition": "fixture_corrected",
+      "evidence": [
+        "review-api26-final.json",
+        "review-api31-final.json",
+        "review-api35-16k-final.json"
+      ],
+      "boundary": "Original two-argument external fixture mismatches run(payload); corrected package preserved."
+    },
+    {
+      "index": 5,
+      "originalCaseId": "ANDROID-PYTHON-PURE-005",
+      "originalStatus": "FAIL",
+      "finding": "PY-002",
+      "disposition": "partial_paid_flow",
+      "evidence": [
+        "review-api26-final.json",
+        "review-api31-final.json",
+        "review-api35-16k-final.json"
+      ],
+      "boundary": "Compressed accepted source now staged and runs in direct device regressions; original paid autonomous flow not repeated."
+    },
+    {
+      "index": 6,
+      "originalCaseId": "ANDROID-PYTHON-PROBE-006",
+      "originalStatus": "FAIL",
+      "finding": "PY-002",
+      "disposition": "partial_paid_flow",
+      "evidence": [
+        "review-api26-final.json",
+        "review-api31-final.json",
+        "review-api35-16k-final.json"
+      ],
+      "boundary": "Fixed official standard-library results passed; original paid autonomous probe not repeated."
+    },
+    {
+      "index": 7,
+      "originalCaseId": "ANDROID-PYTHON-PROBE-STORED-16K-001",
+      "originalStatus": "BLOCKED",
+      "finding": "ENV-004",
+      "disposition": "blocked_environment",
+      "evidence": [],
+      "boundary": "Original proxy trust failure is outside native execution; do not weaken TLS."
+    },
+    {
+      "index": 8,
+      "originalCaseId": "ANDROID-CSV-WRITE-001",
+      "originalStatus": "BLOCKED",
+      "finding": "CONFIG-GRANT",
+      "disposition": "expected_refusal",
+      "evidence": [],
+      "boundary": "Per-Skill workspace capability absent; no grant expansion."
+    },
+    {
+      "index": 9,
+      "originalCaseId": "ANDROID-E31-RESOURCE-RESTART-NAV-001",
+      "originalStatus": "BLOCKED",
+      "finding": "ENV/UI-005",
+      "disposition": "blocked_environment",
+      "evidence": [],
+      "boundary": "Original SystemUI navigation ANR not established as product cause."
+    },
+    {
+      "index": 10,
+      "originalCaseId": "E16K-4096M-REV-NATIVE::runtime.mobileagent.PythonRuntimeDeviceTest#logOverflowCannotLoseToAnImmediatelyReturnedValidResult",
+      "originalStatus": "FAIL",
+      "finding": "PY-001/PY-002",
+      "disposition": "partial_environment",
+      "evidence": [
+        "review-api26-final.json",
+        "review-api31-final.json",
+        "review-api35-16k-final.json"
+      ],
+      "boundary": "API26/31 exact methods passed; API35/16K runtime suite passed. Original framework/ART/LMK cause not established; broker 16K case not independently repeated."
+    },
+    {
+      "index": 11,
+      "originalCaseId": "E16K-4096M-REV-NATIVE::runtime.mobileagent.PythonRuntimeDeviceTest#sdkKnowledgeReadCarriesExpectedVersionAndRejectsUnpinnedContinuation",
+      "originalStatus": "FAIL",
+      "finding": "PY-001/PY-002",
+      "disposition": "partial_environment",
+      "evidence": [
+        "review-api26-final.json",
+        "review-api31-final.json",
+        "review-api35-16k-final.json"
+      ],
+      "boundary": "API26/31 exact methods passed; API35/16K runtime suite passed. Original framework/ART/LMK cause not established; broker 16K case not independently repeated."
+    },
+    {
+      "index": 12,
+      "originalCaseId": "E16K-4096M-REV-NATIVE::runtime.mobileagent.PythonRuntimeDeviceTest#officialCpythonExecutesJsonWithFreshPidAndNoPreviousGlobals",
+      "originalStatus": "FAIL",
+      "finding": "PY-001/PY-002",
+      "disposition": "partial_environment",
+      "evidence": [
+        "review-api26-final.json",
+        "review-api31-final.json",
+        "review-api35-16k-final.json"
+      ],
+      "boundary": "API26/31 exact methods passed; API35/16K runtime suite passed. Original framework/ART/LMK cause not established; broker 16K case not independently repeated."
+    },
+    {
+      "index": 13,
+      "originalCaseId": "E16K-4096M-REV-NATIVE::runtime.mobileagent.PythonRuntimeDeviceTest#hostMarkerAndDirectSocketSubprocessAndCtypesAreDenied",
+      "originalStatus": "FAIL",
+      "finding": "PY-001/PY-002",
+      "disposition": "partial_environment",
+      "evidence": [
+        "review-api26-final.json",
+        "review-api31-final.json",
+        "review-api35-16k-final.json"
+      ],
+      "boundary": "API26/31 exact methods passed; API35/16K runtime suite passed. Original framework/ART/LMK cause not established; broker 16K case not independently repeated."
+    },
+    {
+      "index": 14,
+      "originalCaseId": "E16K-4096M-REV-NATIVE::runtime.mobileagent.PythonRuntimeDeviceTest#cancellationBeforeAuthorizationCompletesNeverDispatches",
+      "originalStatus": "FAIL",
+      "finding": "PY-001/PY-002",
+      "disposition": "partial_environment",
+      "evidence": [
+        "review-api26-final.json",
+        "review-api31-final.json",
+        "review-api35-16k-final.json"
+      ],
+      "boundary": "API26/31 exact methods passed; API35/16K runtime suite passed. Original framework/ART/LMK cause not established; broker 16K case not independently repeated."
+    },
+    {
+      "index": 15,
+      "originalCaseId": "E16K-4096M-REV-NATIVE::SUITE",
+      "originalStatus": "BLOCKED",
+      "finding": "ENV-002/ENV-004",
+      "disposition": "partial_environment",
+      "evidence": [],
+      "boundary": "Original incomplete runner terminal count retained; exit 0 was not promoted to PASS."
+    },
+    {
+      "index": 16,
+      "originalCaseId": "E16K-4096M-REV-PYTHON-WARM-SUITE::runtime.mobileagent.PythonRuntimeDeviceTest#infiniteLoopTimesOutDiesAndNextInvocationSucceeds",
+      "originalStatus": "FAIL",
+      "finding": "PY-001/PY-002",
+      "disposition": "partial_environment",
+      "evidence": [
+        "review-api26-final.json",
+        "review-api31-final.json",
+        "review-api35-16k-final.json"
+      ],
+      "boundary": "API26/31 exact methods passed; API35/16K runtime suite passed. Original framework/ART/LMK cause not established; broker 16K case not independently repeated."
+    },
+    {
+      "index": 17,
+      "originalCaseId": "E16K-DBG-HTTP-FIXTURES::SUITE",
+      "originalStatus": "BLOCKED",
+      "finding": "ENV-002/ENV-004",
+      "disposition": "partial_environment",
+      "evidence": [],
+      "boundary": "Original incomplete runner terminal count retained; exit 0 was not promoted to PASS."
+    },
+    {
+      "index": 18,
+      "originalCaseId": "E16K-DBG-UI-FAILURE-DIAGNOSTIC::runtime.mobileagent.ChatApprovalCardUiTest#longChineseDetailsScroll_whileApprovalActionsRemainReachable",
+      "originalStatus": "FAIL",
+      "finding": "UI-002",
+      "disposition": "fixture_corrected",
+      "evidence": [
+        "review-api31-final.json"
+      ],
+      "boundary": "Fixture corrected and API31 Review passed; original API35/16K UI suite not repeated."
+    },
+    {
+      "index": 19,
+      "originalCaseId": "E16K-DBG-UI-FAILURE-DIAGNOSTIC::runtime.mobileagent.ChatRequestInspectorUiTest#inspectorExplainsAllUnavailableStatesWithoutSensitiveFields",
+      "originalStatus": "FAIL",
+      "finding": "UI-002",
+      "disposition": "fixture_corrected",
+      "evidence": [
+        "review-api31-final.json"
+      ],
+      "boundary": "Fixture corrected and API31 Review passed; original API35/16K UI suite not repeated."
+    },
+    {
+      "index": 20,
+      "originalCaseId": "E16K-DBG-UI-FAILURE-DIAGNOSTIC::runtime.mobileagent.ChatToolApprovalDetailUiTest#shellApprovalShowsStructuredDetailsAndKeepsFixedActions",
+      "originalStatus": "FAIL",
+      "finding": "UI-002",
+      "disposition": "fixture_corrected",
+      "evidence": [
+        "review-api31-final.json"
+      ],
+      "boundary": "Fixture corrected and API31 Review passed; original API35/16K UI suite not repeated."
+    },
+    {
+      "index": 21,
+      "originalCaseId": "E16K-DBG-UI-FAILURE-DIAGNOSTIC::runtime.mobileagent.ChatToolApprovalDetailUiTest#shellApprovalActionsRemainReachableAtLargeFontAndImeLikeViewport",
+      "originalStatus": "FAIL",
+      "finding": "UI-002",
+      "disposition": "fixture_corrected",
+      "evidence": [
+        "review-api31-final.json"
+      ],
+      "boundary": "Fixture corrected and API31 Review passed; original API35/16K UI suite not repeated."
+    },
+    {
+      "index": 22,
+      "originalCaseId": "E16K-DBG-UI-FAILURE-DIAGNOSTIC::runtime.mobileagent.ExecutionAuthoritiesUiTest#foregroundPairingShowsInstructionsAndKeepsTokenHiddenUntilRevealed",
+      "originalStatus": "FAIL",
+      "finding": "UI-002",
+      "disposition": "fixture_corrected",
+      "evidence": [
+        "review-api31-final.json"
+      ],
+      "boundary": "Fixture corrected and API31 Review passed; original API35/16K UI suite not repeated."
+    },
+    {
+      "index": 23,
+      "originalCaseId": "E16K-REV-MODEL-INVOKE-BROKER-ISOLATED::runtime.mobileagent.PythonModelInvokeBrokerTest#cancellationInFlightKeepsTheReservationAndNeverReplays",
+      "originalStatus": "FAIL",
+      "finding": "PY-001/PY-002",
+      "disposition": "partial_environment",
+      "evidence": [
+        "review-api26-final.json",
+        "review-api31-final.json",
+        "review-api35-16k-final.json"
+      ],
+      "boundary": "API26/31 exact methods passed; API35/16K runtime suite passed. Original framework/ART/LMK cause not established; broker 16K case not independently repeated."
+    },
+    {
+      "index": 24,
+      "originalCaseId": "E16K-REV-NATIVE::runtime.mobileagent.PythonRuntimeDeviceTest#logOverflowCannotLoseToAnImmediatelyReturnedValidResult",
+      "originalStatus": "FAIL",
+      "finding": "PY-001/PY-002",
+      "disposition": "partial_environment",
+      "evidence": [
+        "review-api26-final.json",
+        "review-api31-final.json",
+        "review-api35-16k-final.json"
+      ],
+      "boundary": "API26/31 exact methods passed; API35/16K runtime suite passed. Original framework/ART/LMK cause not established; broker 16K case not independently repeated."
+    },
+    {
+      "index": 25,
+      "originalCaseId": "E16K-REV-NATIVE::runtime.mobileagent.PythonRuntimeDeviceTest#sdkKnowledgeReadCarriesExpectedVersionAndRejectsUnpinnedContinuation",
+      "originalStatus": "FAIL",
+      "finding": "PY-001/PY-002",
+      "disposition": "partial_environment",
+      "evidence": [
+        "review-api26-final.json",
+        "review-api31-final.json",
+        "review-api35-16k-final.json"
+      ],
+      "boundary": "API26/31 exact methods passed; API35/16K runtime suite passed. Original framework/ART/LMK cause not established; broker 16K case not independently repeated."
+    },
+    {
+      "index": 26,
+      "originalCaseId": "E16K-REV-NATIVE::runtime.mobileagent.PythonRuntimeDeviceTest#officialCpythonExecutesJsonWithFreshPidAndNoPreviousGlobals",
+      "originalStatus": "FAIL",
+      "finding": "PY-001/PY-002",
+      "disposition": "partial_environment",
+      "evidence": [
+        "review-api26-final.json",
+        "review-api31-final.json",
+        "review-api35-16k-final.json"
+      ],
+      "boundary": "API26/31 exact methods passed; API35/16K runtime suite passed. Original framework/ART/LMK cause not established; broker 16K case not independently repeated."
+    },
+    {
+      "index": 27,
+      "originalCaseId": "E16K-REV-NATIVE::runtime.mobileagent.PythonRuntimeDeviceTest#hostMarkerAndDirectSocketSubprocessAndCtypesAreDenied",
+      "originalStatus": "FAIL",
+      "finding": "PY-001/PY-002",
+      "disposition": "partial_environment",
+      "evidence": [
+        "review-api26-final.json",
+        "review-api31-final.json",
+        "review-api35-16k-final.json"
+      ],
+      "boundary": "API26/31 exact methods passed; API35/16K runtime suite passed. Original framework/ART/LMK cause not established; broker 16K case not independently repeated."
+    },
+    {
+      "index": 28,
+      "originalCaseId": "E16K-REV-NATIVE::SUITE",
+      "originalStatus": "BLOCKED",
+      "finding": "ENV-002/ENV-004",
+      "disposition": "partial_environment",
+      "evidence": [],
+      "boundary": "Original incomplete runner terminal count retained; exit 0 was not promoted to PASS."
+    },
+    {
+      "index": 29,
+      "originalCaseId": "E16K-REV-PYTHON-ACCEPTANCE-READER-ISOLATED::runtime.mobileagent.PythonSkillAcceptanceReaderDeviceTest#forgedExceptionCodeDoesNotImpersonateHostDenial",
+      "originalStatus": "FAIL",
+      "finding": "PY-001/PY-002",
+      "disposition": "partial_environment",
+      "evidence": [
+        "review-api26-final.json",
+        "review-api31-final.json",
+        "review-api35-16k-final.json"
+      ],
+      "boundary": "API26/31 exact methods passed; API35/16K runtime suite passed. Original framework/ART/LMK cause not established; broker 16K case not independently repeated."
+    },
+    {
+      "index": 30,
+      "originalCaseId": "E16K-REV-PYTHON-ACCEPTANCE-READER-ISOLATED::runtime.mobileagent.PythonSkillAcceptanceReaderDeviceTest#manifestSkillExecutesIsolatedAndReturnsValue",
+      "originalStatus": "FAIL",
+      "finding": "PY-001/PY-002",
+      "disposition": "partial_environment",
+      "evidence": [
+        "review-api26-final.json",
+        "review-api31-final.json",
+        "review-api35-16k-final.json"
+      ],
+      "boundary": "API26/31 exact methods passed; API35/16K runtime suite passed. Original framework/ART/LMK cause not established; broker 16K case not independently repeated."
+    },
+    {
+      "index": 31,
+      "originalCaseId": "E16K-REV-PYTHON-ACCEPTANCE-READER-ISOLATED::runtime.mobileagent.PythonSkillAcceptanceReaderDeviceTest#manifestSkillBrokerSearchRoundTrips",
+      "originalStatus": "FAIL",
+      "finding": "PY-001/PY-002",
+      "disposition": "partial_environment",
+      "evidence": [
+        "review-api26-final.json",
+        "review-api31-final.json",
+        "review-api35-16k-final.json"
+      ],
+      "boundary": "API26/31 exact methods passed; API35/16K runtime suite passed. Original framework/ART/LMK cause not established; broker 16K case not independently repeated."
+    },
+    {
+      "index": 32,
+      "originalCaseId": "E16K-REV-PYTHON-ACCEPTANCE-READER-ISOLATED::runtime.mobileagent.PythonSkillAcceptanceReaderDeviceTest#acceptanceReaderPaginationCapIsTypedFailure",
+      "originalStatus": "FAIL",
+      "finding": "PY-001/PY-002",
+      "disposition": "partial_environment",
+      "evidence": [
+        "review-api26-final.json",
+        "review-api31-final.json",
+        "review-api35-16k-final.json"
+      ],
+      "boundary": "API26/31 exact methods passed; API35/16K runtime suite passed. Original framework/ART/LMK cause not established; broker 16K case not independently repeated."
+    },
+    {
+      "index": 33,
+      "originalCaseId": "E16K-REV-PYTHON-PURE-FRESH::SUITE",
+      "originalStatus": "NOT_RUN",
+      "finding": "ENV-002/ENV-004",
+      "disposition": "partial_environment",
+      "evidence": [],
+      "boundary": "Original incomplete runner terminal count retained; exit 0 was not promoted to PASS."
+    },
+    {
+      "index": 34,
+      "originalCaseId": "E31-REV-SHIZUKU-FOREGROUND-NORMAL::runtime.mobileagent.shizuku.ShizukuLiveDeviceTest#oneShotShellUsesRealShellUserServiceWhenExplicitlyAvailable",
+      "originalStatus": "FAIL",
+      "finding": "SHIZ-002",
+      "disposition": "unreproduced",
+      "evidence": [],
+      "boundary": "Original isolated normal-clock shell pass retained; full cold-start live-device matrix not repeated."
+    },
+    {
+      "index": 35,
+      "originalCaseId": "E31-REV-SHIZUKU-LIVE::runtime.mobileagent.shizuku.ShizukuLiveDeviceTest#approvalGatedTypedWorkspaceRoundTripUsesRealUserService",
+      "originalStatus": "FAIL",
+      "finding": "SHIZ-001",
+      "disposition": "fixed_product",
+      "evidence": [
+        "python-api26-after.json",
+        "review-api31-final.json"
+      ],
+      "boundary": "Store root regression passed; real Shizuku UID2000 acceptance not repeated."
+    },
+    {
+      "index": 36,
+      "originalCaseId": "E31-REV-SHIZUKU-LIVE::runtime.mobileagent.shizuku.ShizukuLiveDeviceTest#oneShotShellUsesRealShellUserServiceWhenExplicitlyAvailable",
+      "originalStatus": "FAIL",
+      "finding": "SHIZ-002",
+      "disposition": "unreproduced",
+      "evidence": [],
+      "boundary": "Original isolated normal-clock shell pass retained; full cold-start live-device matrix not repeated."
+    },
+    {
+      "index": 37,
+      "originalCaseId": "EMIN-REV-B3-REMAINING::runtime.mobileagent.ApiEmbeddingDeviceTest#queryUnknownSurvivesRepositoryRecreationAndConsumesOneRetryGrant",
+      "originalStatus": "FAIL",
+      "finding": "TEST-PRECONDITION",
+      "disposition": "fixture_corrected",
+      "evidence": [
+        "api-embedding-debug.log"
+      ],
+      "boundary": ""
+    },
+    {
+      "index": 38,
+      "originalCaseId": "EMIN-REV-B3-REMAINING::runtime.mobileagent.ApiEmbeddingDeviceTest#wrongProviderDimensionCannotPublishReadyVectors",
+      "originalStatus": "FAIL",
+      "finding": "TEST-PRECONDITION",
+      "disposition": "fixture_corrected",
+      "evidence": [
+        "api-embedding-debug.log"
+      ],
+      "boundary": ""
+    },
+    {
+      "index": 39,
+      "originalCaseId": "EMIN-REV-B3-REMAINING::runtime.mobileagent.ApiEmbeddingDeviceTest#consentGatesHttpAndSecretsThenUsesTheExactBinding",
+      "originalStatus": "FAIL",
+      "finding": "TEST-PRECONDITION",
+      "disposition": "fixture_corrected",
+      "evidence": [
+        "api-embedding-debug.log"
+      ],
+      "boundary": ""
+    },
+    {
+      "index": 40,
+      "originalCaseId": "EMIN-REV-B3-REMAINING::runtime.mobileagent.ApiEmbeddingDeviceTest#droppedResponseStaysUnknownUntilExplicitDuplicateChargeRetry",
+      "originalStatus": "FAIL",
+      "finding": "TEST-PRECONDITION",
+      "disposition": "fixture_corrected",
+      "evidence": [
+        "api-embedding-debug.log"
+      ],
+      "boundary": ""
+    },
+    {
+      "index": 41,
+      "originalCaseId": "EMIN-REV-B3-REMAINING::runtime.mobileagent.ApiEmbeddingDeviceTest#providerRevisionInvalidatesPendingAndCapturedBindingsBeforeSecretRead",
+      "originalStatus": "FAIL",
+      "finding": "TEST-PRECONDITION",
+      "disposition": "fixture_corrected",
+      "evidence": [
+        "api-embedding-debug.log"
+      ],
+      "boundary": ""
+    },
+    {
+      "index": 42,
+      "originalCaseId": "EMIN-REV-B3-REMAINING::runtime.mobileagent.ChatApprovalCardUiTest#longChineseDetailsScroll_whileApprovalActionsRemainReachable",
+      "originalStatus": "FAIL",
+      "finding": "UI-002",
+      "disposition": "fixture_corrected",
+      "evidence": [
+        "review-api31-final.json"
+      ],
+      "boundary": ""
+    },
+    {
+      "index": 43,
+      "originalCaseId": "EMIN-REV-B3-REMAINING::runtime.mobileagent.ChatContextCompactionDeviceTest#longHistoryCompactsAndNextSendRestoresSummaryWithoutChangingOriginals",
+      "originalStatus": "FAIL",
+      "finding": "TEST-PRECONDITION",
+      "disposition": "fixture_corrected",
+      "evidence": [
+        "context-compaction-debug.log"
+      ],
+      "boundary": ""
+    },
+    {
+      "index": 44,
+      "originalCaseId": "EMIN-REV-B3-REMAINING::runtime.mobileagent.ChatContextCompactionDeviceTest#invalidSummaryPersistsFailureAndObservedUsageWithoutRetry",
+      "originalStatus": "FAIL",
+      "finding": "TEST-PRECONDITION",
+      "disposition": "fixture_corrected",
+      "evidence": [
+        "context-compaction-debug.log"
+      ],
+      "boundary": ""
+    },
+    {
+      "index": 45,
+      "originalCaseId": "EMIN-REV-B3-REMAINING::runtime.mobileagent.ChatContextCompactionDeviceTest#roundLimitCompactsAndContinuesWithoutReplayingToolsOrLosingCheckpoints",
+      "originalStatus": "FAIL",
+      "finding": "TEST-PRECONDITION",
+      "disposition": "fixture_corrected",
+      "evidence": [
+        "context-compaction-debug.log"
+      ],
+      "boundary": ""
+    },
+    {
+      "index": 46,
+      "originalCaseId": "EMIN-REV-B3-REMAINING::runtime.mobileagent.ChatContextCompactionDeviceTest#completedExchangesBeforeAnErrorRemainAvailableToLaterCompaction",
+      "originalStatus": "FAIL",
+      "finding": "TEST-PRECONDITION",
+      "disposition": "fixture_corrected",
+      "evidence": [
+        "context-compaction-debug.log"
+      ],
+      "boundary": ""
+    },
+    {
+      "index": 47,
+      "originalCaseId": "EMIN-REV-B3-REMAINING::runtime.mobileagent.ChatContextCompactionDeviceTest#requestCapStopsTheToolLoopWhenAutoCompactIsOff",
+      "originalStatus": "FAIL",
+      "finding": "TEST-PRECONDITION",
+      "disposition": "fixture_corrected",
+      "evidence": [
+        "context-compaction-debug.log"
+      ],
+      "boundary": ""
+    },
+    {
+      "index": 48,
+      "originalCaseId": "EMIN-REV-B3-REMAINING::runtime.mobileagent.ChatRequestInspectorUiTest#inspectorExplainsAllUnavailableStatesWithoutSensitiveFields",
+      "originalStatus": "FAIL",
+      "finding": "UI-002",
+      "disposition": "fixture_corrected",
+      "evidence": [
+        "review-api31-final.json"
+      ],
+      "boundary": ""
+    },
+    {
+      "index": 49,
+      "originalCaseId": "EMIN-REV-B3-REMAINING::runtime.mobileagent.ChatStreamingCancelDeviceTest#cancellationKeepsLatestPartialTextAndTerminalMarker",
+      "originalStatus": "FAIL",
+      "finding": "ENV/UI",
+      "disposition": "retested_function",
+      "evidence": [
+        "ui-diagnostics-golden-api31-final.json"
+      ],
+      "boundary": ""
+    },
+    {
+      "index": 50,
+      "originalCaseId": "EMIN-REV-B3-REMAINING::runtime.mobileagent.ChatToolApprovalDetailUiTest#shellApprovalShowsStructuredDetailsAndKeepsFixedActions",
+      "originalStatus": "FAIL",
+      "finding": "UI-002",
+      "disposition": "fixture_corrected",
+      "evidence": [
+        "review-api31-final.json"
+      ],
+      "boundary": ""
+    },
+    {
+      "index": 51,
+      "originalCaseId": "EMIN-REV-B3-REMAINING::runtime.mobileagent.ChatToolApprovalDetailUiTest#shellApprovalActionsRemainReachableAtLargeFontAndImeLikeViewport",
+      "originalStatus": "FAIL",
+      "finding": "UI-002",
+      "disposition": "fixture_corrected",
+      "evidence": [
+        "review-api31-final.json"
+      ],
+      "boundary": ""
+    },
+    {
+      "index": 52,
+      "originalCaseId": "EMIN-REV-B3-REMAINING::runtime.mobileagent.ExecutionAuthoritiesUiTest#foregroundPairingShowsInstructionsAndKeepsTokenHiddenUntilRevealed",
+      "originalStatus": "FAIL",
+      "finding": "UI-002",
+      "disposition": "fixture_corrected",
+      "evidence": [
+        "review-api31-final.json"
+      ],
+      "boundary": ""
+    },
+    {
+      "index": 53,
+      "originalCaseId": "EMIN-REV-B3-REMAINING::runtime.mobileagent.ForegroundImportDeviceTest#workManagerWithoutActivityRunsAndReadyWaitingAreTerminalWithoutReplay",
+      "originalStatus": "NOT_RUN",
+      "finding": "TEST-PRECONDITION",
+      "disposition": "retested_function",
+      "evidence": [
+        "ui-diagnostics-golden-api31-final.json"
+      ],
+      "boundary": ""
+    },
+    {
+      "index": 54,
+      "originalCaseId": "EMIN-REV-B3-REMAINING::runtime.mobileagent.ForegroundImportDeviceTest#schedulerCancellationInterruptsWorkerPersistsHookAndDoesNotReplay",
+      "originalStatus": "NOT_RUN",
+      "finding": "TEST-PRECONDITION",
+      "disposition": "retested_function",
+      "evidence": [
+        "ui-diagnostics-golden-api31-final.json"
+      ],
+      "boundary": ""
+    },
+    {
+      "index": 55,
+      "originalCaseId": "EMIN-REV-B3-REMAINING::runtime.mobileagent.ForegroundImportDeviceTest#foregroundInfoAndMergedManifestMatchActualDeviceApi",
+      "originalStatus": "NOT_RUN",
+      "finding": "TEST-PRECONDITION",
+      "disposition": "retested_function",
+      "evidence": [
+        "ui-diagnostics-golden-api31-final.json"
+      ],
+      "boundary": ""
+    },
+    {
+      "index": 56,
+      "originalCaseId": "EMIN-REV-B3-REMAINING::runtime.mobileagent.GlobalConversationUiTest#wideTopLevelDoesNotRenderCompactMenu",
+      "originalStatus": "FAIL",
+      "finding": "UI-002",
+      "disposition": "fixture_corrected",
+      "evidence": [
+        "review-api31-final.json"
+      ],
+      "boundary": ""
+    },
+    {
+      "index": 57,
+      "originalCaseId": "EMIN-REV-B3-REMAINING::runtime.mobileagent.KnowledgeGoldenCorpusDeviceTest#reopeningOnDeviceDoesNotRepeatVisionWork",
+      "originalStatus": "FAIL",
+      "finding": "TEST-001",
+      "disposition": "fixture_corrected",
+      "evidence": [
+        "ui-diagnostics-golden-api31-final.log",
+        "review-api31-final.json"
+      ],
+      "boundary": ""
+    },
+    {
+      "index": 58,
+      "originalCaseId": "EMIN-REV-B3-REMAINING::runtime.mobileagent.KnowledgeGoldenCorpusDeviceTest#goldenCorpusRunsRealAndroidRasterizerAndBundledIndex",
+      "originalStatus": "FAIL",
+      "finding": "TEST-001",
+      "disposition": "fixture_corrected",
+      "evidence": [
+        "ui-diagnostics-golden-api31-final.log",
+        "review-api31-final.json"
+      ],
+      "boundary": ""
+    },
+    {
+      "index": 59,
+      "originalCaseId": "EMIN-REV-B3-REMAINING::runtime.mobileagent.KnowledgeIndexScaleDeviceTest#scale10k",
+      "originalStatus": "FAIL",
+      "finding": "ENV-PERFORMANCE",
+      "disposition": "retested_function",
+      "evidence": [
+        "index-scale1k-debug.log",
+        "index-scale10k-50k-debug.log"
+      ],
+      "boundary": ""
+    },
+    {
+      "index": 60,
+      "originalCaseId": "EMIN-REV-B3-REMAINING::runtime.mobileagent.KnowledgeIndexScaleDeviceTest#scale50k",
+      "originalStatus": "FAIL",
+      "finding": "ENV-PERFORMANCE",
+      "disposition": "retested_function",
+      "evidence": [
+        "index-scale1k-debug.log",
+        "index-scale10k-50k-debug.log"
+      ],
+      "boundary": ""
+    },
+    {
+      "index": 61,
+      "originalCaseId": "EMIN-REV-B3-REMAINING::runtime.mobileagent.KnowledgeIndexScaleDeviceTest#scale1k",
+      "originalStatus": "FAIL",
+      "finding": "ENV-PERFORMANCE",
+      "disposition": "retested_function",
+      "evidence": [
+        "index-scale1k-debug.log",
+        "index-scale10k-50k-debug.log"
+      ],
+      "boundary": ""
+    },
+    {
+      "index": 62,
+      "originalCaseId": "EMIN-REV-B3-REMAINING::runtime.mobileagent.KnowledgeOriginalFailureDeviceTest#localStagesAndResumeForOriginalFailures",
+      "originalStatus": "NOT_RUN",
+      "finding": "COVERAGE",
+      "disposition": "not_run",
+      "evidence": [],
+      "boundary": "External fixture, private original PDF, SAF/USB/Shizuku grant, unsupported API or invalid class selection remains absent."
+    },
+    {
+      "index": 63,
+      "originalCaseId": "EMIN-REV-B3-REMAINING::runtime.mobileagent.PdfParserMemoryDeviceTest#repeatedRealPdfParsingKeepsMemoryBoundedWithoutEmbeddingOrRasterization",
+      "originalStatus": "NOT_RUN",
+      "finding": "COVERAGE",
+      "disposition": "not_run",
+      "evidence": [],
+      "boundary": "External fixture, private original PDF, SAF/USB/Shizuku grant, unsupported API or invalid class selection remains absent."
+    },
+    {
+      "index": 64,
+      "originalCaseId": "EMIN-REV-B3-REMAINING::runtime.mobileagent.PythonModelInvokeBrokerTest#autoProfileSendsNoOutputFieldThroughTheBroker",
+      "originalStatus": "FAIL",
+      "finding": "PY-001/PY-002",
+      "disposition": "fixed_product",
+      "evidence": [
+        "review-api26-final.json",
+        "review-api31-final.json"
+      ],
+      "boundary": ""
+    },
+    {
+      "index": 65,
+      "originalCaseId": "EMIN-REV-B3-REMAINING::runtime.mobileagent.PythonModelInvokeBrokerTest#revocationBlocksTheNextDispatch",
+      "originalStatus": "FAIL",
+      "finding": "PY-001/PY-002",
+      "disposition": "fixed_product",
+      "evidence": [
+        "review-api26-final.json",
+        "review-api31-final.json"
+      ],
+      "boundary": ""
+    },
+    {
+      "index": 66,
+      "originalCaseId": "EMIN-REV-B3-REMAINING::runtime.mobileagent.PythonModelInvokeBrokerTest#anUnknownOutcomeIsNeverReplayed",
+      "originalStatus": "FAIL",
+      "finding": "PY-001/PY-002",
+      "disposition": "fixed_product",
+      "evidence": [
+        "review-api26-final.json",
+        "review-api31-final.json"
+      ],
+      "boundary": ""
+    },
+    {
+      "index": 67,
+      "originalCaseId": "EMIN-REV-B3-REMAINING::runtime.mobileagent.PythonModelInvokeBrokerTest#responsesProtocolKeepsItsNativeFieldOnTheSameRunAuthorization",
+      "originalStatus": "FAIL",
+      "finding": "PY-001/PY-002",
+      "disposition": "fixed_product",
+      "evidence": [
+        "review-api26-final.json",
+        "review-api31-final.json"
+      ],
+      "boundary": ""
+    },
+    {
+      "index": 68,
+      "originalCaseId": "EMIN-REV-B3-REMAINING::runtime.mobileagent.PythonModelInvokeBrokerTest#frozenAgentOverrideBeatsTheManualProfileCap",
+      "originalStatus": "FAIL",
+      "finding": "PY-001/PY-002",
+      "disposition": "fixed_product",
+      "evidence": [
+        "review-api26-final.json",
+        "review-api31-final.json"
+      ],
+      "boundary": ""
+    },
+    {
+      "index": 69,
+      "originalCaseId": "EMIN-REV-B3-REMAINING::runtime.mobileagent.PythonModelInvokeBrokerTest#aFailedTerminalWithAuthoritativeUsageSettlesOnceAndNeverReplays",
+      "originalStatus": "FAIL",
+      "finding": "PY-001/PY-002",
+      "disposition": "fixed_product",
+      "evidence": [
+        "review-api26-final.json",
+        "review-api31-final.json"
+      ],
+      "boundary": ""
+    },
+    {
+      "index": 70,
+      "originalCaseId": "EMIN-REV-B3-REMAINING::runtime.mobileagent.PythonModelInvokeBrokerTest#theToolArgumentBeatsTheFrozenAgentOverride",
+      "originalStatus": "FAIL",
+      "finding": "PY-001/PY-002",
+      "disposition": "fixed_product",
+      "evidence": [
+        "review-api26-final.json",
+        "review-api31-final.json"
+      ],
+      "boundary": ""
+    },
+    {
+      "index": 71,
+      "originalCaseId": "EMIN-REV-B3-REMAINING::runtime.mobileagent.PythonModelInvokeBrokerTest#cancellationInFlightKeepsTheReservationAndNeverReplays",
+      "originalStatus": "FAIL",
+      "finding": "PY-001/PY-002",
+      "disposition": "fixed_product",
+      "evidence": [
+        "review-api26-final.json",
+        "review-api31-final.json"
+      ],
+      "boundary": ""
+    },
+    {
+      "index": 72,
+      "originalCaseId": "EMIN-REV-B3-REMAINING::runtime.mobileagent.PythonModelInvokeBrokerTest#measuredUsageReplacesTheReservationBeforeTheNextAdmission",
+      "originalStatus": "FAIL",
+      "finding": "PY-001/PY-002",
+      "disposition": "fixed_product",
+      "evidence": [
+        "review-api26-final.json",
+        "review-api31-final.json"
+      ],
+      "boundary": ""
+    },
+    {
+      "index": 73,
+      "originalCaseId": "EMIN-REV-B3-REMAINING::runtime.mobileagent.PythonModelInvokeBrokerTest#manualProfileCapUsesTheRunAuthorizationAndSettlesOnce",
+      "originalStatus": "FAIL",
+      "finding": "PY-001/PY-002",
+      "disposition": "fixed_product",
+      "evidence": [
+        "review-api26-final.json",
+        "review-api31-final.json"
+      ],
+      "boundary": ""
+    },
+    {
+      "index": 74,
+      "originalCaseId": "EMIN-REV-B3-REMAINING::runtime.mobileagent.PythonModelInvokeBrokerTest#sufficientBalanceAdmitsTheSecondCallAndSettlesAtMostOnce",
+      "originalStatus": "FAIL",
+      "finding": "PY-001/PY-002",
+      "disposition": "fixed_product",
+      "evidence": [
+        "review-api26-final.json",
+        "review-api31-final.json"
+      ],
+      "boundary": ""
+    },
+    {
+      "index": 75,
+      "originalCaseId": "EMIN-REV-B3-REMAINING::runtime.mobileagent.PythonRuntimeDeviceTestRunner#initializationError",
+      "originalStatus": "NOT_RUN",
+      "finding": "COVERAGE",
+      "disposition": "not_run",
+      "evidence": [],
+      "boundary": "External fixture, private original PDF, SAF/USB/Shizuku grant, unsupported API or invalid class selection remains absent."
+    },
+    {
+      "index": 76,
+      "originalCaseId": "EMIN-REV-B3-REMAINING::runtime.mobileagent.PythonSkillAcceptanceReaderDeviceTest#forgedExceptionCodeDoesNotImpersonateHostDenial",
+      "originalStatus": "FAIL",
+      "finding": "PY-001/PY-002",
+      "disposition": "fixed_product",
+      "evidence": [
+        "review-api26-final.json",
+        "review-api31-final.json"
+      ],
+      "boundary": ""
+    },
+    {
+      "index": 77,
+      "originalCaseId": "EMIN-REV-B3-REMAINING::runtime.mobileagent.PythonSkillAcceptanceReaderDeviceTest#manifestSkillExecutesIsolatedAndReturnsValue",
+      "originalStatus": "FAIL",
+      "finding": "PY-001/PY-002",
+      "disposition": "fixed_product",
+      "evidence": [
+        "review-api26-final.json",
+        "review-api31-final.json"
+      ],
+      "boundary": ""
+    },
+    {
+      "index": 78,
+      "originalCaseId": "EMIN-REV-B3-REMAINING::runtime.mobileagent.PythonSkillAcceptanceReaderDeviceTest#manifestSkillBrokerSearchRoundTrips",
+      "originalStatus": "FAIL",
+      "finding": "PY-001/PY-002",
+      "disposition": "fixed_product",
+      "evidence": [
+        "review-api26-final.json",
+        "review-api31-final.json"
+      ],
+      "boundary": ""
+    },
+    {
+      "index": 79,
+      "originalCaseId": "EMIN-REV-B3-REMAINING::runtime.mobileagent.PythonSkillAcceptanceReaderDeviceTest#acceptanceReaderPaginationCapIsTypedFailure",
+      "originalStatus": "FAIL",
+      "finding": "PY-001/PY-002",
+      "disposition": "fixed_product",
+      "evidence": [
+        "review-api26-final.json",
+        "review-api31-final.json"
+      ],
+      "boundary": ""
+    },
+    {
+      "index": 80,
+      "originalCaseId": "EMIN-REV-B3-REMAINING::runtime.mobileagent.PythonSkillToolDeviceTest#importedBoundClaudeSkillIsDiscoveredApprovedAndExecuted",
+      "originalStatus": "FAIL",
+      "finding": "PY-001/PY-002",
+      "disposition": "fixed_product",
+      "evidence": [
+        "review-api26-final.json",
+        "review-api31-final.json"
+      ],
+      "boundary": ""
+    },
+    {
+      "index": 81,
+      "originalCaseId": "EMIN-REV-B3-REMAINING::runtime.mobileagent.RuntimeSafToolExposureDeviceTest#persistedSafGrantExposesAndExecutesReadWriteToolsForNewSnapshot",
+      "originalStatus": "NOT_RUN",
+      "finding": "COVERAGE",
+      "disposition": "not_run",
+      "evidence": [],
+      "boundary": "External fixture, private original PDF, SAF/USB/Shizuku grant, unsupported API or invalid class selection remains absent."
+    },
+    {
+      "index": 82,
+      "originalCaseId": "EMIN-REV-B3-REMAINING::runtime.mobileagent.RuntimeSafToolExposureDeviceTest#reattachingPersistedSafTreeReturnsTheCommittedAgentWorkspace",
+      "originalStatus": "NOT_RUN",
+      "finding": "COVERAGE",
+      "disposition": "not_run",
+      "evidence": [],
+      "boundary": "External fixture, private original PDF, SAF/USB/Shizuku grant, unsupported API or invalid class selection remains absent."
+    },
+    {
+      "index": 83,
+      "originalCaseId": "EMIN-REV-B3-REMAINING::runtime.mobileagent.RuntimeShizukuToolExposureDeviceTest#selectedAuthorizedShizukuExposesAndExecutesWorkspaceToolsWithoutPerCallApproval",
+      "originalStatus": "NOT_RUN",
+      "finding": "COVERAGE",
+      "disposition": "not_run",
+      "evidence": [],
+      "boundary": "External fixture, private original PDF, SAF/USB/Shizuku grant, unsupported API or invalid class selection remains absent."
+    },
+    {
+      "index": 84,
+      "originalCaseId": "EMIN-REV-B3-REMAINING::runtime.mobileagent.wired.WiredAdbWorkspaceBackendAdapterTest#pickerContinuationThreadsCursorAndSurfacesNextPage",
+      "originalStatus": "FAIL",
+      "finding": "TEST-002",
+      "disposition": "fixture_corrected",
+      "evidence": [
+        "python-api26-after.json",
+        "review-api31-final.json"
+      ],
+      "boundary": ""
+    },
+    {
+      "index": 85,
+      "originalCaseId": "EMIN-REV-B3-REMAINING::runtime.mobileagent.wired.WiredAdbWorkspaceBackendAdapterTest#wiredBrowserUsesTypedRootAndBrowseAndAttachesOpaqueChild",
+      "originalStatus": "FAIL",
+      "finding": "TEST-002",
+      "disposition": "fixture_corrected",
+      "evidence": [
+        "python-api26-after.json",
+        "review-api31-final.json"
+      ],
+      "boundary": ""
+    },
+    {
+      "index": 86,
+      "originalCaseId": "EMIN-REV-B3-REMAINING::runtime.mobileagent.workspace.WorkspaceBackendTest#safWriteSucceedsWhenTreeAlreadyContainsFileAboveMaxFileBytes",
+      "originalStatus": "NOT_RUN",
+      "finding": "COVERAGE",
+      "disposition": "not_run",
+      "evidence": [],
+      "boundary": "External fixture, private original PDF, SAF/USB/Shizuku grant, unsupported API or invalid class selection remains absent."
+    },
+    {
+      "index": 87,
+      "originalCaseId": "EMIN-REV-PYTHON-FRESH::runtime.mobileagent.PythonRuntimeDeviceTest#logOverflowCannotLoseToAnImmediatelyReturnedValidResult",
+      "originalStatus": "FAIL",
+      "finding": "PY-001/PY-002",
+      "disposition": "fixed_product",
+      "evidence": [
+        "review-api26-final.json",
+        "review-api31-final.json"
+      ],
+      "boundary": ""
+    },
+    {
+      "index": 88,
+      "originalCaseId": "EMIN-REV-PYTHON-FRESH::runtime.mobileagent.PythonRuntimeDeviceTest#sdkKnowledgeReadCarriesExpectedVersionAndRejectsUnpinnedContinuation",
+      "originalStatus": "FAIL",
+      "finding": "PY-001/PY-002",
+      "disposition": "fixed_product",
+      "evidence": [
+        "review-api26-final.json",
+        "review-api31-final.json"
+      ],
+      "boundary": ""
+    },
+    {
+      "index": 89,
+      "originalCaseId": "EMIN-REV-PYTHON-FRESH::runtime.mobileagent.PythonRuntimeDeviceTest#officialCpythonExecutesJsonWithFreshPidAndNoPreviousGlobals",
+      "originalStatus": "FAIL",
+      "finding": "PY-001/PY-002",
+      "disposition": "fixed_product",
+      "evidence": [
+        "review-api26-final.json",
+        "review-api31-final.json"
+      ],
+      "boundary": ""
+    },
+    {
+      "index": 90,
+      "originalCaseId": "EMIN-REV-PYTHON-FRESH::runtime.mobileagent.PythonRuntimeDeviceTest#hostMarkerAndDirectSocketSubprocessAndCtypesAreDenied",
+      "originalStatus": "FAIL",
+      "finding": "PY-001/PY-002",
+      "disposition": "fixed_product",
+      "evidence": [
+        "review-api26-final.json",
+        "review-api31-final.json"
+      ],
+      "boundary": ""
+    },
+    {
+      "index": 91,
+      "originalCaseId": "EMIN-REV-PYTHON-FRESH::runtime.mobileagent.PythonRuntimeDeviceTest#cancellationBeforeAuthorizationCompletesNeverDispatches",
+      "originalStatus": "FAIL",
+      "finding": "PY-001/PY-002",
+      "disposition": "fixed_product",
+      "evidence": [
+        "review-api26-final.json",
+        "review-api31-final.json"
+      ],
+      "boundary": ""
+    },
+    {
+      "index": 92,
+      "originalCaseId": "EMIN-REV-PYTHON-FRESH::runtime.mobileagent.PythonRuntimeDeviceTest#realWorkerDeathAfterReadyIsUnknownAndNextInvocationIsFresh",
+      "originalStatus": "FAIL",
+      "finding": "PY-001/PY-002",
+      "disposition": "fixed_product",
+      "evidence": [
+        "review-api26-final.json",
+        "review-api31-final.json"
+      ],
+      "boundary": ""
+    },
+    {
+      "index": 93,
+      "originalCaseId": "EMIN-REV-PYTHON-FRESH::runtime.mobileagent.PythonRuntimeDeviceTest#ticketIdentityAndLiveRevocationAreCheckedBeforeBrokerDispatch",
+      "originalStatus": "FAIL",
+      "finding": "PY-001/PY-002",
+      "disposition": "fixed_product",
+      "evidence": [
+        "review-api26-final.json",
+        "review-api31-final.json"
+      ],
+      "boundary": ""
+    },
+    {
+      "index": 94,
+      "originalCaseId": "EMIN-REV-PYTHON-FRESH::runtime.mobileagent.PythonRuntimeDeviceTest#realSdkRoundTripsBrokerResponseLargerThanOneControlFrame",
+      "originalStatus": "FAIL",
+      "finding": "PY-001/PY-002",
+      "disposition": "fixed_product",
+      "evidence": [
+        "review-api26-final.json",
+        "review-api31-final.json"
+      ],
+      "boundary": ""
+    },
+    {
+      "index": 95,
+      "originalCaseId": "EMIN-REV-PYTHON-FRESH::runtime.mobileagent.PythonRuntimeDeviceTest#rawDescriptorsCannotInjectBrokerRequestsOrForgeSuccessfulResults",
+      "originalStatus": "FAIL",
+      "finding": "PY-001/PY-002",
+      "disposition": "fixed_product",
+      "evidence": [
+        "review-api26-final.json",
+        "review-api31-final.json"
+      ],
+      "boundary": ""
+    },
+    {
+      "index": 96,
+      "originalCaseId": "EMIN-REV-PYTHON-FRESH::runtime.mobileagent.PythonRuntimeDeviceTest#logOverflowStopsTheRealWorkerAndDoesNotBecomeSuccess",
+      "originalStatus": "FAIL",
+      "finding": "PY-001/PY-002",
+      "disposition": "fixed_product",
+      "evidence": [
+        "review-api26-final.json",
+        "review-api31-final.json"
+      ],
+      "boundary": ""
+    },
+    {
+      "index": 97,
+      "originalCaseId": "EMIN-REV-PYTHON-FRESH::runtime.mobileagent.PythonRuntimeDeviceTest#infiniteLoopTimesOutDiesAndNextInvocationSucceeds",
+      "originalStatus": "FAIL",
+      "finding": "PY-001/PY-002",
+      "disposition": "fixed_product",
+      "evidence": [
+        "review-api26-final.json",
+        "review-api31-final.json"
+      ],
+      "boundary": ""
+    },
+    {
+      "index": 98,
+      "originalCaseId": "EMIN-REV-PYTHON-FRESH::runtime.mobileagent.PythonRuntimeDeviceTest#inputAndOutputLimitsAreEnforcedAndLargeOutputUsesTheRealPipe",
+      "originalStatus": "FAIL",
+      "finding": "PY-001/PY-002",
+      "disposition": "fixed_product",
+      "evidence": [
+        "review-api26-final.json",
+        "review-api31-final.json"
+      ],
+      "boundary": ""
+    },
+    {
+      "index": 99,
+      "originalCaseId": "EMIN-REV-PYTHON-FRESH::runtime.mobileagent.PythonRuntimeDeviceTest#legacyClaudeCliProgramRunsAgainstOnlyModelProvidedVirtualFiles",
+      "originalStatus": "FAIL",
+      "finding": "PY-001/PY-002",
+      "disposition": "fixed_product",
+      "evidence": [
+        "review-api26-final.json",
+        "review-api31-final.json"
+      ],
+      "boundary": ""
+    },
+    {
+      "index": 100,
+      "originalCaseId": "EMIN-REV-PYTHON-FRESH::runtime.mobileagent.PythonRuntimeDeviceTest#cancellationAfterReadyKillsWorkerAndNextInvocationSucceeds",
+      "originalStatus": "FAIL",
+      "finding": "PY-001/PY-002",
+      "disposition": "fixed_product",
+      "evidence": [
+        "review-api26-final.json",
+        "review-api31-final.json"
+      ],
+      "boundary": ""
+    }
+  ]
+}

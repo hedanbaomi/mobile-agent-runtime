@@ -46,7 +46,7 @@ class ChatApprovalCardUiTest {
             }
         }
 
-        val details = compose.onNodeWithTag("chat.approval.details")
+        val details = compose.onNodeWithTag("chat.approval.details", useUnmergedTree = true)
         details.assert(hasScrollAction()).performTouchInput { swipeUp() }
         compose.onNodeWithTag("chat.approval.approve").assertIsDisplayed().performClick()
         compose.onNodeWithTag("chat.approval.reject").assertIsDisplayed().performClick()

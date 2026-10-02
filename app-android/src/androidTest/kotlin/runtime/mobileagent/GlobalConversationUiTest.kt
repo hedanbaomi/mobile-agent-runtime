@@ -7,6 +7,7 @@ import android.content.pm.ActivityInfo
 import android.content.res.Configuration
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.requiredWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.width
 import androidx.compose.material.icons.Icons
@@ -277,21 +278,21 @@ class GlobalConversationUiTest {
 
     @Test
     fun wideTopLevelDoesNotRenderCompactMenu() {
-        compose.activity.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE
-        compose.waitUntil(10_000) {
-            compose.activity.resources.configuration.orientation == Configuration.ORIENTATION_LANDSCAPE
-        }
+        // Landscape alone can still be below the 600 dp breakpoint on API 26.
+        // Supply a known wide viewport and keep the wide/menu assertions intact.
         compose.setContent {
             MaterialTheme {
-                GlobalDrawerShell(
-                    selectedRoute = "chat",
-                    destinations = emptyList(),
-                    onRouteSelected = {},
-                    title = "对话",
-                    navigationAffordance = ShellNavigationAffordance.MENU,
-                    modifier = Modifier.fillMaxSize(),
-                    content = { Box(Modifier.fillMaxSize()) },
-                )
+                Box(Modifier.requiredWidth(700.dp).height(400.dp)) {
+                    GlobalDrawerShell(
+                        selectedRoute = "chat",
+                        destinations = emptyList(),
+                        onRouteSelected = {},
+                        title = "对话",
+                        navigationAffordance = ShellNavigationAffordance.MENU,
+                        modifier = Modifier.fillMaxSize(),
+                        content = { Box(Modifier.fillMaxSize()) },
+                    )
+                }
             }
         }
         compose.onNodeWithTag("global.shell.wide").assertIsDisplayed()

@@ -1,0 +1,102 @@
+{
+  "aarch64": {
+    "math": {
+      "source": "math.cpython-314-aarch64-linux-android.so",
+      "sha256": "373b3bdc168a7d2b1d9b87d91da90bc2a19ee9b547fd8ff5ca685c122441284f"
+    },
+    "_csv": {
+      "source": "_csv.cpython-314-aarch64-linux-android.so",
+      "sha256": "a7c069e95f552c843c79984d19c83dec30905e1e50aa898fa567df75d03af76b"
+    },
+    "binascii": {
+      "source": "binascii.cpython-314-aarch64-linux-android.so",
+      "sha256": "d90b13e67647f6828ec93a441e14507a8ce7ba708d4fc94b92124f5b178dcdb0"
+    },
+    "_struct": {
+      "source": "_struct.cpython-314-aarch64-linux-android.so",
+      "sha256": "77ad83a2ca7f87e06a876302decfe0e807b33790ad65ef7c716e6f0418f3a2c4"
+    },
+    "_random": {
+      "source": "_random.cpython-314-aarch64-linux-android.so",
+      "sha256": "fadc8223ec2fe2d496c5c64635857524412209580edd48feddd52914c64f7441"
+    },
+    "unicodedata": {
+      "source": "unicodedata.cpython-314-aarch64-linux-android.so",
+      "sha256": "1068318bf8dc933497793d878a1a0098cbdb6769ea4c99057355bf4f94e092b5"
+    },
+    "_sha1": {
+      "source": "_sha1.cpython-314-aarch64-linux-android.so",
+      "sha256": "76ecb7e716c2cc0e0d2ff1b78339c19b06cf09eb99b49ee8cd33f42e5e648f6a"
+    },
+    "_sha2": {
+      "source": "_sha2.cpython-314-aarch64-linux-android.so",
+      "sha256": "553b92792b1ef030a51a64bf84ab6bd8f1b821318953535229f15fed3490bd98"
+    },
+    "_sha3": {
+      "source": "_sha3.cpython-314-aarch64-linux-android.so",
+      "sha256": "ad4a9d85586a65ecefbe84e9d27b53e5ae37e1ff95627baf1771c80afeb61f91"
+    },
+    "_md5": {
+      "source": "_md5.cpython-314-aarch64-linux-android.so",
+      "sha256": "9179e755633278091c20479aa3a34877d44afb63998cf9643971f5697bc2ff1c"
+    },
+    "_blake2": {
+      "source": "_blake2.cpython-314-aarch64-linux-android.so",
+      "sha256": "f95be1b3c73ea116d829a3f7a10ddb4d5bd28dfdbfb029dd330f89fa9aeebd83"
+    },
+    "zlib": {
+      "source": "zlib.cpython-314-aarch64-linux-android.so",
+      "sha256": "f07859d9032977ef9d471ada7192dc66ed893091a0c910d3ea822bba6edd592a"
+    }
+  },
+  "x86_64": {
+    "math": {
+      "source": "math.cpython-314-x86_64-linux-android.so",
+      "sha256": "f2242263b9feaccc8590598d0dc5fa4ed9717f422941aa2c42d7177ec7a66bc8"
+    },
+    "_csv": {
+      "source": "_csv.cpython-314-x86_64-linux-android.so",
+      "sha256": "588f2c24a0e0bbe545f9d14d805306551e6730276a2d21ea91431f254bc0d402"
+    },
+    "binascii": {
+      "source": "binascii.cpython-314-x86_64-linux-android.so",
+      "sha256": "b2bcb99ba48639ca34e79236ebace7397f62c071b7cdf3f8015eeca9fe7fd1d5"
+    },
+    "_struct": {
+      "source": "_struct.cpython-314-x86_64-linux-android.so",
+      "sha256": "fb2a046e4abea6329359cd2d649639e43bc2037a0f1ad1a5df3a7abde32ccf6f"
+    },
+    "_random": {
+      "source": "_random.cpython-314-x86_64-linux-android.so",
+      "sha256": "91ea50e944db3188e0552ad2d3b314c10c11ebf287666af6fb0f725c68c48672"
+    },
+    "unicodedata": {
+      "source": "unicodedata.cpython-314-x86_64-linux-android.so",
+      "sha256": "89686e3056d3e614fad0735109f00fa9175df22d62d90a81c665c8ac00e53e3f"
+    },
+    "_sha1": {
+      "source": "_sha1.cpython-314-x86_64-linux-android.so",
+      "sha256": "6d55027010a8f59f69254454b427d657ca6de7ca2d9c930ca4af66acd4fc52c1"
+    },
+    "_sha2": {
+      "source": "_sha2.cpython-314-x86_64-linux-android.so",
+      "sha256": "10bc71cc35466b86bedd26a0ec0d4d01cafa49f46eddae0ebc874ab523918220"
+    },
+    "_sha3": {
+      "source": "_sha3.cpython-314-x86_64-linux-android.so",
+      "sha256": "43e08a10fc294481004368aeb1974b823dd34cefcdd5403dcff006761ae02f4d"
+    },
+    "_md5": {
+      "source": "_md5.cpython-314-x86_64-linux-android.so",
+      "sha256": "b5a60e0c8a9a30e2ba84aa0584af37bda593948e0512810450e2e4989afcf9c6"
+    },
+    "_blake2": {
+      "source": "_blake2.cpython-314-x86_64-linux-android.so",
+      "sha256": "df23d4f42b10f22f7864fbe568b0d2a77cde767744fc2e7812022da80f9013ec"
+    },
+    "zlib": {
+      "source": "zlib.cpython-314-x86_64-linux-android.so",
+      "sha256": "1ec3b280cb4c1010ec3c4707fb0666c16b9c374463d527a02fb03e409d6ccb74"
+    }
+  }
+}

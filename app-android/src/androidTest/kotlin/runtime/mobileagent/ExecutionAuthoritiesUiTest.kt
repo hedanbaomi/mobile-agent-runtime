@@ -274,8 +274,8 @@ class ExecutionAuthoritiesUiTest {
         composeRule.onNodeWithTag("settings.wired_adb.pairing.reveal").performClick()
         composeRule.onNodeWithTag("settings.wired_adb.pairing.token").assertIsDisplayed()
         composeRule.onNodeWithTag("settings.wired_adb.pairing.copy").assertIsEnabled()
-        composeRule.onNodeWithTag("settings.wired_adb.pairing.complete").performClick()
-        composeRule.onNodeWithTag("settings.wired_adb.pairing.cancel").performClick()
+        composeRule.onNodeWithTag("settings.wired_adb.pairing.complete").performScrollTo().assertIsDisplayed().performClick()
+        composeRule.onNodeWithTag("settings.wired_adb.pairing.cancel").performScrollTo().assertIsDisplayed().performClick()
         assertTrue(completed)
         assertTrue(cancelled)
     }

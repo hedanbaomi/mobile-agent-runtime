@@ -24,6 +24,84 @@ import org.junit.runner.RunWith
 @RunWith(AndroidJUnit4::class)
 class DiagnosticsDeviceTest {
     @Test
+    fun workspaceContractsRecordPersistedBackendAuthorityInsteadOfGlobalSelection() {
+        val app = InstrumentationRegistry.getInstrumentation().targetContext.applicationContext as runtime.mobileagent.MobileAgentApp
+        app.ensureHostInitialized()
+        val repository = runtime.mobileagent.data.WorkspaceRepository(app.container.db)
+        val suffix = UUID.randomUUID().toString()
+        val fixtures = listOf(
+            runtime.mobileagent.domain.Workspace("diag-internal-$suffix", "Internal fixture", runtime.mobileagent.domain.WorkspaceBackendType.INTERNAL, "internal:fixture"),
+            runtime.mobileagent.domain.Workspace("diag-saf-$suffix", "SAF fixture", runtime.mobileagent.domain.WorkspaceBackendType.SAF_TREE, "content://fixture.invalid/tree/test"),
+            runtime.mobileagent.domain.Workspace("diag-shizuku-$suffix", "Shizuku fixture", runtime.mobileagent.domain.WorkspaceBackendType.PRIVILEGED, "authority:SHIZUKU"),
+            runtime.mobileagent.domain.Workspace("diag-wired-$suffix", "Wired fixture", runtime.mobileagent.domain.WorkspaceBackendType.PRIVILEGED, "authority:WIRED_ADB"),
+        )
+        try {
+            fixtures.forEach(repository::save)
+            withStore { directory, preferences ->
+                val store = newStore(directory, preferences)
+                store.setEnabled(true)
+                fixtures.forEachIndexed { index, workspace ->
+                    val expectedAuthority = listOf(DiagnosticAuthority.NONE, DiagnosticAuthority.NONE,
+                        DiagnosticAuthority.SHIZUKU, DiagnosticAuthority.WIRED_ADB)[index]
+                    val boundAuthority = app.container.runtimeIntegration.diagnosticWorkspaceAuthority(workspace.id)
+                    assertEquals(expectedAuthority, boundAuthority)
+                    mapOf("workspace.read" to DiagnosticToolCapability.WORKSPACE_READ,
+                        "workspace.write" to DiagnosticToolCapability.WORKSPACE_WRITE,
+                        "shizuku.workspace.read" to DiagnosticToolCapability.WORKSPACE_READ,
+                        "shizuku.workspace.write" to DiagnosticToolCapability.WORKSPACE_WRITE).forEach { (contract, expected) ->
+                        val capability = runtime.mobileagent.chatDiagnosticToolCapability(contract)
+                        assertEquals(expected, capability)
+                        val authority = runtime.mobileagent.chatDiagnosticAuthority(capability, "SHIZUKU", boundAuthority)
+                        assertEquals(expectedAuthority, authority)
+                        assertTrue(store.recordToolInvocationState(ToolInvocationStateRecord(
+                            callId = "diag-$suffix", state = DiagnosticToolRunState.VALUE,
+                            capability = capability, authority = authority,
+                        )))
+                    }
+                }
+                val events = zipEntries(store.exportBytes()).getValue("current.ndjson").lineSequence()
+                    .filter { it.contains("tool_invocation_state") }.toList()
+                assertEquals(16, events.size)
+                assertEquals(8, events.count { it.contains("\"authority\":\"none\"") })
+                assertEquals(4, events.count { it.contains("\"authority\":\"shizuku\"") })
+                assertEquals(4, events.count { it.contains("\"authority\":\"wired_adb\"") })
+                assertEquals(8, events.count { it.contains("\"capability\":\"workspace_read\"") })
+                assertEquals(8, events.count { it.contains("\"capability\":\"workspace_write\"") })
+            }
+        } finally {
+            fixtures.forEach { repository.save(it.copy(enabled = false)) }
+        }
+    }
+
+    @Test
+    fun isolatedPythonCapabilitySurvivesApprovalAndInvocationClosedSchema() {
+        withStore { directory, preferences ->
+            val store = newStore(directory, preferences)
+            store.setEnabled(true)
+            val capability = runtime.mobileagent.chatDiagnosticToolCapability("python.execute")
+            val authority = runtime.mobileagent.chatDiagnosticAuthority(capability, "SHIZUKU")
+            assertEquals(DiagnosticAuthority.NONE, authority)
+            assertTrue(store.recordToolApprovalState(ToolApprovalStateRecord(
+                callId = "python-call", state = DiagnosticApprovalState.APPROVED,
+                capability = capability, authority = authority, reasonCode = "approval_required",
+            )))
+            assertTrue(store.recordToolInvocationState(ToolInvocationStateRecord(
+                callId = "python-call", state = DiagnosticToolRunState.VALUE,
+                capability = capability, authority = authority,
+            )))
+            val events = zipEntries(store.exportBytes()).getValue("current.ndjson")
+                .lineSequence().filter { it.contains("tool_approval_state") || it.contains("tool_invocation_state") }.toList()
+            assertEquals(2, events.size)
+            events.forEach {
+                assertTrue(it.contains("\"capability\":\"python_execute\""))
+                assertTrue(it.contains("\"authority\":\"none\""))
+                assertFalse(it.contains("shell_execute"))
+                assertFalse(it.contains("shizuku"))
+            }
+        }
+    }
+
+    @Test
     fun verboseVisionTraceAndStableAttemptReferencesSurviveLoggerRecreation() {
         withStore { directory, preferences ->
             val store = newStore(directory, preferences)

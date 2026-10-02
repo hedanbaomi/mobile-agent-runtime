@@ -11,6 +11,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -25,6 +26,7 @@ import runtime.mobileagent.domain.Authority
 import runtime.mobileagent.domain.DangerousMode
 import runtime.mobileagent.domain.SecretStatus
 import runtime.mobileagent.domain.ThemePreference
+import runtime.mobileagent.feature.settings.SettingsDiagnosticsFeedback
 import runtime.mobileagent.feature.settings.SettingsUiState
 import runtime.mobileagent.feature.settings.WiredPairingUiState
 import runtime.mobileagent.provider.SecretRedactor
@@ -58,7 +60,7 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
     val inspectorEnabled = mutableStateOf(app.container.uiPreferences.getBoolean("request-inspector", true))
     /** Compose observes consent changes instead of waiting for another settings recomposition. */
     val statsEnabled = mutableStateOf(app.container.announcements.statsEnabled())
-    val diagnosticsStatus = mutableStateOf("")
+    val diagnosticsStatus = mutableStateOf(SettingsDiagnosticsFeedback.NONE)
     val webSearchStatus = mutableStateOf("")
     val error = mutableStateOf<String?>(null)
     private var pendingExport: Pair<String, TransferOptions>? = null
@@ -73,10 +75,84 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
     private var wiredPairingExpiryJob: Job? = null
     private val wiredPairingUiState = mutableStateOf(WiredPairingUiState())
 
-    fun uiState(noticeCount: Int): SettingsUiState {
-        val diagnosticFiles = app.diagnostics.status()
+    /**
+     * Facts whose read is I/O-bound: the diagnostics files, the license asset, the secret inventory
+     * and the settings rows.  They are loaded off the main thread and read back from this state, so
+     * `SettingsRoute` composition never queries the database, the keystore inventory or the assets.
+     */
+    private data class SettingsRuntimeFacts(
+        val diagnosticsEnabled: Boolean = false,
+        val diagnosticsSizeBytes: Long = 0L,
+        val diagnosticsLimitBytes: Long = 0L,
+        val licenseText: String = "",
+        val webSearchConfigured: Boolean = false,
+        val webSearchEnabled: Boolean = false,
+        val globalRootPrompt: String = "",
+    )
+
+    private val runtimeFacts = mutableStateOf(SettingsRuntimeFacts())
+
+    /** Unread announcement count for the settings entry; loaded with [refreshRuntimeFacts]. */
+    val noticeCount = mutableStateOf(0)
+
+    private var runtimeFactsJob: Job? = null
+    private var runtimeFactsRevision = 0L
+
+    /**
+     * Load the I/O-bound settings facts on [Dispatchers.IO].  Called from the route's lifecycle
+     * effects and after a mutation that can change them — never from composition.
+     *
+     * Latest wins: a newer refresh cancels the in-flight read and a late result is discarded by its
+     * revision, so a stale snapshot can never overwrite a setting the user just changed.  A storage
+     * failure becomes the existing [error] state instead of an unhandled coroutine exception, while
+     * cancellation still propagates.
+     */
+    fun refreshRuntimeFacts() {
+        val revision = ++runtimeFactsRevision
+        runtimeFactsJob?.cancel()
+        runtimeFactsJob = viewModelScope.launch {
+            try {
+                val facts = withContext(Dispatchers.IO) { loadRuntimeFacts() }
+                if (revision != runtimeFactsRevision) return@launch
+                runtimeFacts.value = facts
+                val notices = withContext(Dispatchers.IO) {
+                    app.container.announcements.records().count { it.state.readAt == null }
+                }
+                if (revision != runtimeFactsRevision) return@launch
+                noticeCount.value = notices
+            } catch (cancel: CancellationException) {
+                throw cancel
+            } catch (failure: Exception) {
+                if (revision == runtimeFactsRevision) {
+                    error.value = DiagnosticSanitizer.text(failure.message ?: "无法读取设置状态。")
+                }
+            } finally {
+                if (runtimeFactsJob === currentCoroutineContext()[Job]) runtimeFactsJob = null
+            }
+        }
+    }
+
+    /** Always called on [Dispatchers.IO]. */
+    private fun loadRuntimeFacts(): SettingsRuntimeFacts {
+        val diagnostics = app.diagnostics.status()
         val searchRef = app.container.settings.webSearchSecretRef()
-        val searchConfigured = searchRef != null && app.container.secrets.inventory().status(searchRef) == SecretStatus.ACTIVE
+        val searchConfigured = searchRef != null &&
+            app.container.secrets.inventory().status(searchRef) == SecretStatus.ACTIVE
+        return SettingsRuntimeFacts(
+            diagnosticsEnabled = diagnostics.enabled,
+            diagnosticsSizeBytes = diagnostics.sizeBytes,
+            diagnosticsLimitBytes = diagnostics.totalLimitBytes,
+            licenseText = runCatching {
+                app.assets.open("AGPL-3.0-only.txt").bufferedReader().use { it.readText() }
+            }.getOrDefault(""),
+            webSearchConfigured = searchConfigured,
+            webSearchEnabled = searchConfigured && app.container.settings.webSearchEnabled(),
+            globalRootPrompt = app.container.settings.effectiveGlobalRootPrompt(),
+        )
+    }
+
+    fun uiState(noticeCount: Int): SettingsUiState {
+        val facts = runtimeFacts.value
         val authority = authorityState.value
         return SettingsUiState(
         versionName = BuildConfig.VERSION_NAME + " ${BuildConfig.BUILD_TYPE}",
@@ -99,20 +175,20 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
             LocalePreference.SYSTEM -> "system"; LocalePreference.ZH_CN -> "zh-CN"; LocalePreference.EN_US -> "en-US"
         },
         statsEnabled = statsEnabled.value, requestInspectionEnabled = inspectorEnabled.value,
-        diagnosticsEnabled = diagnosticFiles.enabled,
-        diagnosticsSizeBytes = diagnosticFiles.sizeBytes,
-        diagnosticsLimitBytes = diagnosticFiles.totalLimitBytes,
-        diagnosticsState = diagnosticsStatus.value,
+        diagnosticsEnabled = facts.diagnosticsEnabled,
+        diagnosticsSizeBytes = facts.diagnosticsSizeBytes,
+        diagnosticsLimitBytes = facts.diagnosticsLimitBytes,
+        diagnosticsFeedback = diagnosticsStatus.value,
         exportState = exportStatus.value, updateState = updateStatus.value, noticeCount = noticeCount,
-        licenseText = app.assets.open("AGPL-3.0-only.txt").bufferedReader().use { it.readText() },
+        licenseText = facts.licenseText.takeIf { it.isNotBlank() },
         error = error.value,
-        globalRootPrompt = app.container.settings.effectiveGlobalRootPrompt(),
+        globalRootPrompt = facts.globalRootPrompt,
         globalRootPromptOverride = preferences.value.globalRootPromptOverride,
         globalRootPromptUnlocked = preferences.value.globalRootPromptUnlocked,
         globalRootPromptRevision = preferences.value.globalRootPromptRevision,
         globalRootPromptUpdatedAt = preferences.value.globalRootPromptUpdatedAt,
-        webSearchConfigured = searchConfigured,
-        webSearchEnabled = searchConfigured && app.container.settings.webSearchEnabled(),
+        webSearchConfigured = facts.webSearchConfigured,
+        webSearchEnabled = facts.webSearchEnabled,
         webSearchState = webSearchStatus.value,
         appPrivateExecutionActive = authority.appPrivateAvailable,
         selectedAuthority = authority.selectedAuthority.name,
@@ -456,6 +532,7 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
             webSearchStatus.value = "联网搜索配置未保存。"
             error.value = "无法安全保存联网搜索凭据。"
         }
+        refreshRuntimeFacts()
     }
 
     fun setWebSearchEnabled(enabled: Boolean) {
@@ -467,6 +544,7 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
         app.container.settings.setWebSearch(ref, enabled)
         webSearchStatus.value = if (enabled) "联网搜索已启用；每次查询仍需单独确认。" else "联网搜索已停用。"
         error.value = null
+        refreshRuntimeFacts()
     }
 
     fun clearWebSearch() {
@@ -480,6 +558,7 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
             webSearchStatus.value = "联网搜索凭据未能完整移除。"
             error.value = "无法安全移除联网搜索凭据。"
         }
+        refreshRuntimeFacts()
     }
 
     fun theme(value: String) {
@@ -506,35 +585,36 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
     fun setDiagnosticsEnabled(value: Boolean) {
         try {
             app.diagnostics.setEnabled(value)
-            diagnosticsStatus.value = if (value) "诊断记录已开启。" else "诊断记录已关闭；已有记录仍可导出或清除。"
+            diagnosticsStatus.value = if (value) SettingsDiagnosticsFeedback.ENABLED else SettingsDiagnosticsFeedback.DISABLED
             error.value = null
         } catch (failure: Exception) {
-            diagnosticsStatus.value = "无法保存诊断开关。"
-            error.value = DiagnosticSanitizer.text(failure.message ?: "无法保存诊断开关。")
+            diagnosticsStatus.value = SettingsDiagnosticsFeedback.SAVE_FAILED
+            error.value = null
         }
+        refreshRuntimeFacts()
     }
 
     fun exportDiagnosticsTo(uri: Uri?) {
         if (uri == null) {
-            diagnosticsStatus.value = "已取消诊断导出。"
+            diagnosticsStatus.value = SettingsDiagnosticsFeedback.EXPORT_CANCELLED
             return
         }
         viewModelScope.launch {
             try {
-                diagnosticsStatus.value = "正在导出诊断 ZIP…"
+                diagnosticsStatus.value = SettingsDiagnosticsFeedback.EXPORTING
                 withContext(Dispatchers.IO) {
                     val output = app.contentResolver.openOutputStream(uri, "wt") ?: error("无法打开导出位置。")
                     output.use { app.diagnostics.exportTo(it) }
                 }
-                diagnosticsStatus.value = "诊断 ZIP 已保存；原生崩溃或系统强杀仍可能需要 ADB Logcat。"
+                diagnosticsStatus.value = SettingsDiagnosticsFeedback.EXPORTED
                 error.value = null
             } catch (cancelled: CancellationException) {
                 throw cancelled
             } catch (failure: Exception) {
                 // Deliberately do not clear records here: a failed SAF write must leave the
                 // evidence available for another destination or a later export attempt.
-                diagnosticsStatus.value = "诊断导出失败；原记录未清除。"
-                error.value = DiagnosticSanitizer.text(failure.message ?: "诊断导出失败。")
+                diagnosticsStatus.value = SettingsDiagnosticsFeedback.EXPORT_FAILED
+                error.value = null
             }
         }
     }
@@ -542,26 +622,31 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
     fun clearDiagnostics() {
         try {
             app.diagnostics.clear()
-            diagnosticsStatus.value = "诊断记录已清除。"
+            diagnosticsStatus.value = SettingsDiagnosticsFeedback.CLEARED
             error.value = null
         } catch (failure: Exception) {
-            error.value = DiagnosticSanitizer.text(failure.message ?: "清除诊断记录失败。")
+            diagnosticsStatus.value = SettingsDiagnosticsFeedback.CLEAR_FAILED
+            error.value = null
         }
+        refreshRuntimeFacts()
     }
 
     fun unlockRootPrompt() {
         app.container.settings.setGlobalRootPrompt(app.container.settings.get().globalRootPromptOverride, unlocked = true)
         preferences.value = app.container.settings.get()
+        refreshRuntimeFacts()
     }
 
     fun saveRootPrompt(text: String) {
         app.container.settings.setGlobalRootPrompt(text, unlocked = true)
         preferences.value = app.container.settings.get()
+        refreshRuntimeFacts()
     }
 
     fun restoreRootPrompt() {
         app.container.settings.restoreDefaultGlobalRootPrompt()
         preferences.value = app.container.settings.get()
+        refreshRuntimeFacts()
     }
 
     fun exportAgents(): List<Pair<String, String>> = app.container.agents.list().map { it.id to it.name }

@@ -3,7 +3,9 @@
 package runtime.mobileagent
 
 import android.app.Application
+import android.content.ContentResolver
 import android.net.Uri
+import android.provider.DocumentsContract
 import android.provider.OpenableColumns
 import androidx.compose.runtime.mutableStateOf
 import androidx.lifecycle.AndroidViewModel
@@ -17,8 +19,8 @@ import runtime.mobileagent.knowledge.ImportBatchKind
 import runtime.mobileagent.knowledge.ImportBatchState
 import runtime.mobileagent.knowledge.ImportStage
 import runtime.mobileagent.knowledge.sha256Hex
-import androidx.documentfile.provider.DocumentFile
 import android.content.Intent
+import java.util.UUID
 import runtime.mobileagent.provider.SecretRedactor
 import runtime.mobileagent.knowledge.VisionBinding
 import runtime.mobileagent.domain.ModelProfile
@@ -62,6 +64,278 @@ internal fun visionTargetOptions(
 data class EmbeddingConfirmation(val target: String, val retry: Boolean, val rebind: Boolean, val documentCount: Int,
     val queryRetry: Boolean = false)
 
+/** One importable file discovered by [KnowledgeFolderWalk]; [relativePath] keeps the folder shape. */
+internal data class KnowledgeFolderEntry(val relativePath: String, val key: String)
+
+/**
+ * Minimal view of a folder node so the traversal contract stays testable without a
+ * DocumentsProvider.  Production supplies the SAF adapter; tests supply plain in-memory trees.
+ */
+internal interface KnowledgeFolderNode {
+    val name: String?
+    val isDirectory: Boolean
+
+    /** Stable provider identity of this node (a document URI string in production). */
+    val key: String
+
+    /**
+     * Read this directory's children **one entry at a time** and never materialize the listing.
+     *
+     * A SAF provider can expose directories that are far larger than any import budget, so the
+     * enumeration itself is bounded: implementations must stop reading rows once [maximum] entries
+     * were handed to [visit], must poll [cancelled] before reading and between rows, and must stop as
+     * soon as [visit] returns false.
+     *
+     * @return [KnowledgeFolderChildRead.COMPLETE] only when every child of the directory was read.
+     *   [KnowledgeFolderChildRead.UNREADABLE] means the listing could not be read faithfully, so the
+     *   caller must fail closed rather than import what happened to be readable.
+     */
+    fun forEachChild(
+        maximum: Int,
+        cancelled: () -> Boolean,
+        visit: (KnowledgeFolderNode) -> Boolean,
+    ): KnowledgeFolderChildRead
+}
+
+/** Outcome of streaming one directory's children. */
+internal enum class KnowledgeFolderChildRead {
+    /** Every child of the directory was handed to the visitor. */
+    COMPLETE,
+
+    /** The read stopped early: cancellation, an exhausted budget, or the visitor asked to stop. */
+    STOPPED,
+
+    /** The directory could not be read faithfully; the caller must fail closed. */
+    UNREADABLE,
+}
+
+internal sealed class KnowledgeFolderWalkResult {
+    data class Files(val files: List<KnowledgeFolderEntry>) : KnowledgeFolderWalkResult()
+    data class Rejected(val reason: KnowledgeFolderWalkReason) : KnowledgeFolderWalkResult()
+    data object Cancelled : KnowledgeFolderWalkResult()
+}
+
+internal enum class KnowledgeFolderWalkReason { EMPTY, FILE_LIMIT, DEPTH_LIMIT, NODE_LIMIT, UNREADABLE }
+
+/**
+ * Bounded, cancellable traversal for SAF folder imports.
+ *
+ * Every limit is enforced *while reading*: a folder with more files, more levels or more visited
+ * entries than the budget is rejected as a whole rather than importing a silent subset, and a
+ * cancelled walk reports [KnowledgeFolderWalkResult.Cancelled] instead of a partial list.  Because
+ * [KnowledgeFolderNode.forEachChild] streams single entries, a single over-wide directory is never
+ * listed in full before the budget applies.  The traversal is iterative, so a pathologically deep
+ * provider tree cannot overflow the stack, and it is a pure function over [KnowledgeFolderNode] so
+ * all boundaries are unit-testable.
+ */
+internal object KnowledgeFolderWalk {
+    /** The same selection budget the multi-file picker enforces. */
+    const val MAX_FILES = 500
+
+    /** SAF trees are user folders, not build trees; anything deeper is treated as a mistake. */
+    const val MAX_DEPTH = 32
+
+    /** Total visited directory entries (files plus directories) for the whole walk. */
+    const val MAX_NODES = 5_000
+
+    /** Rows a single directory may hand over before the walk fails closed. */
+    const val MAX_DIRECTORY_CHILDREN = MAX_NODES
+
+    fun walk(
+        root: KnowledgeFolderNode,
+        cancelled: () -> Boolean = { false },
+    ): KnowledgeFolderWalkResult {
+        val files = ArrayList<KnowledgeFolderEntry>()
+        val stack = ArrayDeque<Pending>()
+        stack.addLast(Pending(root, "", 0))
+        var visited = 0
+        while (stack.isNotEmpty()) {
+            if (cancelled()) return KnowledgeFolderWalkResult.Cancelled
+            val current = stack.removeLast()
+            if (current.depth > MAX_DEPTH) {
+                return KnowledgeFolderWalkResult.Rejected(KnowledgeFolderWalkReason.DEPTH_LIMIT)
+            }
+            var stop: KnowledgeFolderWalkResult? = null
+            val read = current.node.forEachChild(MAX_DIRECTORY_CHILDREN, cancelled) { child ->
+                visited += 1
+                if (visited > MAX_NODES) {
+                    stop = KnowledgeFolderWalkResult.Rejected(KnowledgeFolderWalkReason.NODE_LIMIT)
+                    return@forEachChild false
+                }
+                // Missing metadata makes the listing incomplete; never import only its siblings.
+                val name = child.name?.takeIf { it.isNotBlank() }
+                if (name == null) {
+                    stop = KnowledgeFolderWalkResult.Rejected(KnowledgeFolderWalkReason.UNREADABLE)
+                    false
+                } else if (child.isDirectory) {
+                    stack.addLast(Pending(child, current.prefix + name + "/", current.depth + 1))
+                    true
+                } else {
+                    files += KnowledgeFolderEntry(current.prefix + name, child.key)
+                    if (files.size > MAX_FILES) {
+                        stop = KnowledgeFolderWalkResult.Rejected(KnowledgeFolderWalkReason.FILE_LIMIT)
+                        false
+                    } else {
+                        true
+                    }
+                }
+            }
+            stop?.let { return it }
+            if (cancelled()) return KnowledgeFolderWalkResult.Cancelled
+            when (read) {
+                KnowledgeFolderChildRead.COMPLETE -> Unit
+                // A directory that could not be read to its end within the per-directory budget is a
+                // bounded failure, never a silently truncated import.
+                KnowledgeFolderChildRead.STOPPED ->
+                    return KnowledgeFolderWalkResult.Rejected(KnowledgeFolderWalkReason.NODE_LIMIT)
+                // An unreadable directory (provider failure, missing document id) must abort the whole
+                // selection: importing only the readable siblings would be a partial import.
+                KnowledgeFolderChildRead.UNREADABLE ->
+                    return KnowledgeFolderWalkResult.Rejected(KnowledgeFolderWalkReason.UNREADABLE)
+            }
+        }
+        if (files.isEmpty()) return KnowledgeFolderWalkResult.Rejected(KnowledgeFolderWalkReason.EMPTY)
+        return KnowledgeFolderWalkResult.Files(files)
+    }
+
+    private data class Pending(val node: KnowledgeFolderNode, val prefix: String, val depth: Int)
+}
+
+/**
+ * SAF adapter for [KnowledgeFolderWalk]; the only Android-aware part of a folder import.
+ *
+ * Children come from `DocumentsContract` rows read one at a time from the provider cursor, so a wide
+ * directory is never materialized as a list before the walk budget applies.  A directory that cannot
+ * be read faithfully (no cursor, a provider failure, a row without a document id) reports
+ * [KnowledgeFolderChildRead.UNREADABLE] instead of a complete listing: a partial selection is never
+ * imported and the reason reaches the user.  The cursor is closed on every exit path.
+ */
+private class DocumentFolderNode(
+    private val resolver: ContentResolver,
+    private val treeUri: Uri,
+    private val documentId: String,
+    override val name: String?,
+    override val isDirectory: Boolean,
+    override val key: String,
+) : KnowledgeFolderNode {
+    override fun forEachChild(
+        maximum: Int,
+        cancelled: () -> Boolean,
+        visit: (KnowledgeFolderNode) -> Boolean,
+    ): KnowledgeFolderChildRead {
+        if (cancelled()) return KnowledgeFolderChildRead.STOPPED
+        val childrenUri = DocumentsContract.buildChildDocumentsUriUsingTree(treeUri, documentId)
+        val cursor = try {
+            resolver.query(childrenUri, PROJECTION, null, null, null)
+        } catch (cancelledException: CancellationException) {
+            throw cancelledException
+        } catch (_: RuntimeException) {
+            return KnowledgeFolderChildRead.UNREADABLE
+        } ?: return KnowledgeFolderChildRead.UNREADABLE
+        cursor.use { rows ->
+            var read = 0
+            while (true) {
+                if (cancelled()) return KnowledgeFolderChildRead.STOPPED
+                val hasRow = try {
+                    rows.moveToNext()
+                } catch (cancelledException: CancellationException) {
+                    throw cancelledException
+                } catch (_: RuntimeException) {
+                    return KnowledgeFolderChildRead.UNREADABLE
+                }
+                if (!hasRow) break
+                if (read >= maximum) return KnowledgeFolderChildRead.STOPPED
+                read += 1
+                // A provider row without a usable document id cannot be turned into a readable
+                // child; skipping it would import a partial selection without telling anyone.
+                val childId = try {
+                    rows.getString(0)?.takeIf { it.isNotBlank() }
+                } catch (cancelledException: CancellationException) {
+                    throw cancelledException
+                } catch (_: RuntimeException) {
+                    null
+                } ?: return KnowledgeFolderChildRead.UNREADABLE
+                val (childName, childMime) = try {
+                    rows.getString(1) to rows.getString(2)
+                } catch (cancelledException: CancellationException) {
+                    throw cancelledException
+                } catch (_: RuntimeException) {
+                    return KnowledgeFolderChildRead.UNREADABLE
+                }
+                if (childName.isNullOrBlank() || childMime.isNullOrBlank()) {
+                    return KnowledgeFolderChildRead.UNREADABLE
+                }
+                val childIsDirectory = childMime == DocumentsContract.Document.MIME_TYPE_DIR
+                val childKey = DocumentsContract.buildDocumentUriUsingTree(treeUri, childId).toString()
+                val child = DocumentFolderNode(
+                    resolver = resolver,
+                    treeUri = treeUri,
+                    documentId = childId,
+                    name = childName,
+                    isDirectory = childIsDirectory,
+                    key = childKey,
+                )
+                if (!visit(child)) return KnowledgeFolderChildRead.STOPPED
+            }
+        }
+        return KnowledgeFolderChildRead.COMPLETE
+    }
+
+    private companion object {
+        val PROJECTION = arrayOf(
+            DocumentsContract.Document.COLUMN_DOCUMENT_ID,
+            DocumentsContract.Document.COLUMN_DISPLAY_NAME,
+            DocumentsContract.Document.COLUMN_MIME_TYPE,
+        )
+    }
+}
+
+/**
+ * Root node of a `ACTION_OPEN_DOCUMENT_TREE` selection.  The tree document id is provider metadata,
+ * not a filesystem path, and it is never surfaced to the model or to diagnostics.
+ */
+internal fun folderRootNode(resolver: ContentResolver, treeUri: Uri): KnowledgeFolderNode? {
+    val documentId = runCatching { DocumentsContract.getTreeDocumentId(treeUri) }.getOrNull() ?: return null
+    val documentUri = DocumentsContract.buildDocumentUriUsingTree(treeUri, documentId)
+    val name = runCatching {
+        resolver.query(documentUri, arrayOf(DocumentsContract.Document.COLUMN_DISPLAY_NAME), null, null, null)
+            ?.use { rows -> if (rows.moveToFirst()) rows.getString(0) else null }
+    }.getOrNull()
+    return DocumentFolderNode(
+        resolver = resolver,
+        treeUri = treeUri,
+        documentId = documentId,
+        name = name,
+        isDirectory = true,
+        key = documentUri.toString(),
+    )
+}
+
+/** Update the target of the staged choice before confirmation. */
+internal fun selectKnowledgeImportVisionTarget(state: KnowledgeUiState, fingerprint: String?): KnowledgeUiState {
+    if (state.importSubmitting) return state
+    val pending = state.pendingImport ?: return state
+    return state.copy(pendingImport = pending.copy(
+        selectedVisionTargetFingerprint = fingerprint,
+        visionTargetSelectionInitialized = true,
+    ))
+}
+
+/** Apply the coordinator's acceptance to the current choice, which may have changed during IO. */
+internal fun applyKnowledgeImportStart(
+    state: KnowledgeUiState,
+    start: KnowledgeImportStart,
+    submittedSelectionId: String?,
+): KnowledgeUiState = when (start) {
+    is KnowledgeImportStart.Started -> if (submittedSelectionId != null &&
+        state.pendingImport?.id == submittedSelectionId) state.copy(pendingImport = null) else state
+    is KnowledgeImportStart.AlreadyRunning -> {
+        val reason = "已有导入正在准备或复制原件，请等待其完成后再提交本次选择；本次选择已保留。"
+        state.copy(error = reason, status = reason)
+    }
+    is KnowledgeImportStart.Rejected -> state.copy(error = start.reason, status = start.reason)
+}
+
 class KnowledgeViewModel(
     application: Application,
     private val importCoordinator: KnowledgeImportCoordinator,
@@ -83,6 +357,8 @@ class KnowledgeViewModel(
     private var evidenceRevision = 0L
     private var refreshJob: Job? = null
     private var refreshRequested = false
+    /** Serializes import submissions; the coordinator remains the authoritative staging gate. */
+    private var importSubmission: Job? = null
     private var activeOperations = 0
     private var hasActiveImportWork = false
     private var refreshReadError: String? = null
@@ -270,39 +546,32 @@ class KnowledgeViewModel(
 
     /**
      * Keep the SAF selection in the shell-scoped state while the user visits
-     * Provider settings.  Persistable URI grants are taken before navigation
-     * so the selection remains readable when the confirmation dialog returns.
+     * Provider settings.  Persistable URI grants are still taken before navigation so the selection
+     * remains readable when the confirmation dialog returns, but the per-URI ContentResolver calls
+     * run on [Dispatchers.IO]: a large multi-select must not block the frame that shows the dialog.
      */
     fun stageImport(uris: List<Uri>, sourceKind: String) {
         if (uris.isEmpty()) return
-        uris.forEach { uri ->
-            runCatching {
-                app.contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
-            }
-        }
-        val id = sha256Hex(
-            (sourceKind + "\n" + uris.joinToString("\n") { it.toString() }).toByteArray(Charsets.UTF_8),
-        )
+        // Each picker result is a new choice, even when its URI list matches an older submission.
+        val id = UUID.randomUUID().toString()
         state.value = state.value.copy(
             pendingImport = KnowledgePendingImportUi(id = id, uris = uris, sourceKind = sourceKind),
             error = null,
             visionTargetsLoading = true,
         )
+        viewModelScope.launch { withContext(Dispatchers.IO) { uris.forEach(::persistReadGrant) } }
         reload()
     }
 
     fun clearPendingImport() {
-        state.value = state.value.copy(pendingImport = null)
+        // Cancels preparation only; an accepted batch belongs to the process coordinator.
+        importSubmission?.cancel()
+        importSubmission = null
+        state.value = state.value.copy(pendingImport = null, importSubmitting = false)
     }
 
     fun selectPendingVisionTarget(fingerprint: String?) {
-        val pending = state.value.pendingImport ?: return
-        state.value = state.value.copy(
-            pendingImport = pending.copy(
-                selectedVisionTargetFingerprint = fingerprint,
-                visionTargetSelectionInitialized = true,
-            ),
-        )
+        state.value = selectKnowledgeImportVisionTarget(state.value, fingerprint)
     }
 
     fun beginBatchVision(batchId: String) {
@@ -580,56 +849,141 @@ class KnowledgeViewModel(
      * needs vision", in which case the batch blocks and asks to configure and continue.
      */
     fun importUris(uris: List<Uri>, visionTarget: String?) {
-        if (uris.size == 1 && displayName(uris.single()).endsWith(".zip", ignoreCase = true)) {
-            importZip(uris.single(), visionTarget)
-        } else {
-            importNamedUris(uris.map { displayName(it) to it }, ImportBatchKind.FILES, "files", visionTarget)
-        }
+        if (uris.isEmpty()) return
+        submitImport(uris, ImportSelection.FILES, visionTarget)
     }
 
     fun importZip(uri: Uri, visionTarget: String?) =
-        importNamedUris(listOf(displayName(uri) to uri), ImportBatchKind.ZIP, displayName(uri), visionTarget)
+        submitImport(listOf(uri), ImportSelection.ZIP, visionTarget)
 
     fun importTree(treeUri: Uri, visionTarget: String? = null) {
-        viewModelScope.launch {
-            try {
-                runCatching {
-                    app.contentResolver.takePersistableUriPermission(
-                        treeUri,
-                        Intent.FLAG_GRANT_READ_URI_PERMISSION,
-                    )
-                }
-                val files = runInterruptible(Dispatchers.IO) {
-                    val root = DocumentFile.fromTreeUri(app, treeUri) ?: error("无法打开文件夹。")
-                    walkTree(root, "")
-                }
-                require(files.size <= 500) { "一次最多选择 500 个文件。" }
-                val label = DocumentFile.fromTreeUri(app, treeUri)?.name ?: "folder"
-                importNamedUris(files, ImportBatchKind.FOLDER, label, visionTarget)
-            } catch (cancel: CancellationException) { throw cancel }
-            catch (failure: Exception) { fail(failure) }
-        }
+        submitImport(listOf(treeUri), ImportSelection.FOLDER, visionTarget)
     }
 
-    private fun walkTree(dir: DocumentFile, prefix: String): List<Pair<String, Uri>> {
-        val out = ArrayList<Pair<String, Uri>>()
-        dir.listFiles().forEach { child ->
-            val name = child.name ?: return@forEach
-            if (child.isDirectory) out += walkTree(child, "$prefix$name/")
-            else out += ("$prefix$name" to child.uri)
-        }
-        return out
+    private enum class ImportSelection { FILES, ZIP, FOLDER }
+
+    private sealed class PreparedImport {
+        data class Ready(
+            val files: List<Pair<String, Uri>>,
+            val kind: ImportBatchKind,
+            val label: String,
+        ) : PreparedImport()
+
+        data class Rejected(val reason: String) : PreparedImport()
     }
 
-    private fun importNamedUris(files: List<Pair<String, Uri>>, kind: ImportBatchKind, label: String, visionTarget: String? = null) {
-        if (files.isEmpty()) return
-        if (files.size > 500) { state.value = state.value.copy(error = "一次最多选择 500 个文件。"); return }
-        if (kind != ImportBatchKind.ZIP && files.any { it.first.endsWith(".zip", ignoreCase = true) }) {
-            state.value = state.value.copy(error = "请将 ZIP 单独导入，其余文件可作为另一批次导入。"); return
-        }
+    /**
+     * Resolve one SAF selection and hand it to the process-owned coordinator.
+     *
+     * Every ContentResolver call (display name, persistable grant, stream openers) runs on
+     * [Dispatchers.IO].  The staged selection stays in [KnowledgeUiState.pendingImport] until the
+     * coordinator actually accepted the batch, so a busy staging window, a rejected selection or a
+     * read failure keeps exactly what the user picked and shows the reason instead of silently
+     * importing nothing.  Submissions are serialized so a second confirmation cannot race the first:
+     * a repeated confirmation during preparation does not queue another batch.
+     *
+     * The target knowledge base and the identity of the confirmed selection are frozen here, before
+     * any suspension point.  A selection staged later by the user is therefore neither retargeted nor
+     * cleared by this submission's outcome.
+     */
+    private fun submitImport(uris: List<Uri>, selection: ImportSelection, visionTarget: String?) {
+        if (state.value.importSubmitting) return
+        val selectionId = state.value.pendingImport?.id
         val requestedBase = state.value.selectedBaseId
-        val inputs = files.map { (name, uri) ->
-            runCatching { app.contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION) }
+        // Set synchronously, before launch, to reject a second click in the same UI frame.
+        state.value = state.value.copy(importSubmitting = true, error = null)
+        importSubmission = viewModelScope.launch {
+            try {
+                val prepared = ioInterruptible { cancelled -> prepareImport(uris, selection, cancelled) }
+                when (prepared) {
+                    is PreparedImport.Rejected -> rejectImport(prepared.reason)
+                    is PreparedImport.Ready -> startPreparedImport(prepared, visionTarget, requestedBase, selectionId)
+                }
+            } catch (cancel: CancellationException) {
+                throw cancel
+            } catch (failure: Exception) {
+                // Fail closed: the staged selection survives so the user can retry a readable source.
+                fail(failure)
+            } finally {
+                if (importSubmission === currentCoroutineContext()[Job]) {
+                    importSubmission = null
+                    state.value = state.value.copy(importSubmitting = false)
+                }
+            }
+        }
+    }
+
+    /**
+     * Runs [block] on [Dispatchers.IO] with a cancellation probe tied to this coroutine's own job.
+     *
+     * `withContext(Dispatchers.IO)` alone does not make a blocking provider read observe
+     * cancellation, and `Thread.interrupted` is only set by [runInterruptible]; providers that do not
+     * react to interruption are still stopped by the job-state probe between rows.
+     */
+    private suspend fun <T> ioInterruptible(block: (cancelled: () -> Boolean) -> T): T {
+        val job = currentCoroutineContext()[Job]
+        val cancelled = { job?.isActive != true || Thread.currentThread().isInterrupted }
+        return runInterruptible(Dispatchers.IO) { block(cancelled) }
+    }
+
+    /**
+     * Always called on [Dispatchers.IO] with a live cancellation probe.  A folder is traversed with
+     * the shared bounded walker, so an oversized or too deep selection is rejected as a whole instead
+     * of importing a silent subset.
+     */
+    private fun prepareImport(
+        uris: List<Uri>,
+        selection: ImportSelection,
+        cancelled: () -> Boolean,
+    ): PreparedImport {
+        if (selection != ImportSelection.FOLDER && uris.size > KnowledgeFolderWalk.MAX_FILES) {
+            return PreparedImport.Rejected("一次最多选择 ${KnowledgeFolderWalk.MAX_FILES} 个文件。")
+        }
+        if (selection == ImportSelection.FOLDER) {
+            val treeUri = uris.first()
+            persistReadGrant(treeUri)
+            val root = folderRootNode(app.contentResolver, treeUri)
+                ?: return PreparedImport.Rejected("无法打开文件夹。")
+            val label = root.name ?: "folder"
+            return when (val walked = KnowledgeFolderWalk.walk(root, cancelled)) {
+                is KnowledgeFolderWalkResult.Files -> PreparedImport.Ready(
+                    walked.files.map { entry -> entry.relativePath to Uri.parse(entry.key) },
+                    ImportBatchKind.FOLDER,
+                    label,
+                )
+                is KnowledgeFolderWalkResult.Rejected -> PreparedImport.Rejected(walked.reason.message())
+                KnowledgeFolderWalkResult.Cancelled -> throw CancellationException("folder selection cancelled")
+            }
+        }
+        val named = uris.map { uri ->
+            if (cancelled()) throw CancellationException("selection cancelled")
+            persistReadGrant(uri)
+            displayName(uri) to uri
+        }
+        val asZip = selection == ImportSelection.ZIP ||
+            (named.size == 1 && named.first().first.endsWith(".zip", ignoreCase = true))
+        if (!asZip && named.any { it.first.endsWith(".zip", ignoreCase = true) }) {
+            return PreparedImport.Rejected("请将 ZIP 单独导入，其余文件可作为另一批次导入。")
+        }
+        if (asZip && named.size != 1) return PreparedImport.Rejected("每批请选择一个 ZIP 文件。")
+        return PreparedImport.Ready(
+            files = named,
+            kind = if (asZip) ImportBatchKind.ZIP else ImportBatchKind.FILES,
+            label = if (asZip) named.first().first else "files",
+        )
+    }
+
+    /**
+     * Start the batch, and only then release the staged selection — and only when the still-staged
+     * selection is the one this submission confirmed.
+     */
+    private fun startPreparedImport(
+        prepared: PreparedImport.Ready,
+        visionTarget: String?,
+        requestedBase: String?,
+        selectionId: String?,
+    ) {
+        val inputs = prepared.files.map { (name, uri) ->
             KnowledgeImportInput(
                 displayName = name,
                 sourceKey = uri.toString(),
@@ -637,11 +991,47 @@ class KnowledgeViewModel(
                 mediaType = { app.contentResolver.getType(uri).orEmpty() },
             )
         }
-        when (val started = importCoordinator.start(inputs, kind, label, requestedBase, visionTarget)) {
-            is KnowledgeImportStart.Started -> observeImport(started.operation)
-            is KnowledgeImportStart.AlreadyRunning -> observeImport(started.operation)
-            is KnowledgeImportStart.Rejected -> state.value = state.value.copy(error = started.reason)
+        val started = importCoordinator.start(inputs, prepared.kind, prepared.label, requestedBase, visionTarget)
+        state.value = applyKnowledgeImportStart(state.value, started, selectionId)
+        when (started) {
+            is KnowledgeImportStart.Started -> {
+                // Accepted into the durable batch: staging ownership moved, so the dialog may close.
+                // A selection staged while this submission was preparing belongs to the user and is
+                // left untouched.
+                observeImport(started.operation)
+            }
+            is KnowledgeImportStart.AlreadyRunning -> {
+                // Only an in-process staging window answers this way, and only against a competing
+                // staging operation.  Background batch processing never blocks a new selection, so
+                // this never gates on "the knowledge page is busy".  Keep the user's choice.
+                observeImport(started.operation)
+            }
+            is KnowledgeImportStart.Rejected -> Unit
         }
+    }
+
+    /** Keep every staged choice; only the reason is added. */
+    private fun rejectImport(reason: String) {
+        state.value = state.value.copy(error = reason, status = reason)
+    }
+
+    /** Best-effort persistable read grant; a provider that refuses it must not fail staging. */
+    private fun persistReadGrant(uri: Uri) {
+        runCatching {
+            app.contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        }
+    }
+
+    private fun KnowledgeFolderWalkReason.message(): String = when (this) {
+        KnowledgeFolderWalkReason.EMPTY -> "所选文件夹中没有可导入的文件。"
+        KnowledgeFolderWalkReason.FILE_LIMIT ->
+            "所选文件夹超过 ${KnowledgeFolderWalk.MAX_FILES} 个文件上限；本次未导入任何文件，请缩小范围后重试。"
+        KnowledgeFolderWalkReason.DEPTH_LIMIT ->
+            "所选文件夹层级超过 ${KnowledgeFolderWalk.MAX_DEPTH} 层上限；本次未导入任何文件。"
+        KnowledgeFolderWalkReason.NODE_LIMIT ->
+            "所选文件夹条目过多；本次未导入任何文件，请缩小范围后重试。"
+        KnowledgeFolderWalkReason.UNREADABLE ->
+            "无法完整读取所选文件夹（子目录不可读或条目不完整）；本次未导入任何文件，请重新选择或检查该文件夹的访问权限。"
     }
 
     private fun observeImport(operation: KnowledgeImportOperation) {

@@ -21,6 +21,17 @@ endif()
 set(CPYTHON_PREFIX "${CPYTHON_RELEASE_DIR}/extract-${CPYTHON_ARCH}/prefix")
 set(CPYTHON_INCLUDE "${CPYTHON_PREFIX}/include/python3.14")
 set(CPYTHON_LIBRARY "${CPYTHON_PREFIX}/lib/libpython3.14.so")
+if(CMAKE_ANDROID_ARCH_ABI STREQUAL "x86_64")
+    if(NOT DEFINED CPYTHON_COMPAT_LIBRARY)
+        message(FATAL_ERROR "Verified API26 compatibility CPython library is required")
+    endif()
+    set(CPYTHON_LIBRARY "${CPYTHON_COMPAT_LIBRARY}")
+endif()
+if(NOT DEFINED CPYTHON_STDLIB_DIR)
+    message(FATAL_ERROR "Verified standard-library module directory is required")
+endif()
+include("${CPYTHON_STDLIB_DIR}/safe_stdlib_modules.cmake")
+
 
 foreach(required_path IN ITEMS "${CPYTHON_INCLUDE}/Python.h" "${CPYTHON_LIBRARY}")
     if(NOT EXISTS "${required_path}")
@@ -34,15 +45,15 @@ set_target_properties(cpython PROPERTIES
     INTERFACE_INCLUDE_DIRECTORIES "${CPYTHON_INCLUDE}"
 )
 
-add_library(mobileagent_python SHARED python_runtime.c)
-target_include_directories(mobileagent_python PRIVATE "${CPYTHON_INCLUDE}")
+add_library(mobileagent_python SHARED python_runtime.c sha256_fd.c)
+target_include_directories(mobileagent_python PRIVATE "${CPYTHON_INCLUDE}" "${CPYTHON_STDLIB_DIR}")
 target_compile_features(mobileagent_python PRIVATE c_std_11)
 target_compile_definitions(mobileagent_python PRIVATE
     PY_SSIZE_T_CLEAN
     MOBILEAGENT_PYTHON_VERSION="3.14"
 )
 target_compile_options(mobileagent_python PRIVATE -Wall -Wextra -Werror=return-type)
-target_link_libraries(mobileagent_python PRIVATE cpython log)
+target_link_libraries(mobileagent_python PRIVATE cpython ${CPYTHON_STDLIB_TARGETS} log)
 # 16 KB page-size readiness.  Google Play requires native libraries to be
 # loadable on Android 15+ devices that run with 16 KB memory pages.  AGP already
 # zipaligns the packaged .so entries to 16 KB, but the ELF program headers still
@@ -62,5 +73,5 @@ target_link_options(mobileagent_python PRIVATE
 
 # The official shared library keeps its own SONAME and links only against
 # Android system libraries.  Keeping it as an imported target means Gradle
-# packages the audited upstream binary; user skill archives never contribute
+# packages the verified official/compatibility library and pinned data modules;\n# user skill archives never contribute
 # native code to this target.

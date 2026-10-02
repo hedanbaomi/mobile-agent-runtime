@@ -2,7 +2,9 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 #include <Python.h>
+#include "safe_stdlib_modules.h"
 #include <jni.h>
+#include "sha256_fd.h"
 
 #include <errno.h>
 #include <poll.h>
@@ -21,6 +23,7 @@
 #define MAX_CONTROL_FRAME (64 * 1024)
 #define MAX_OUTPUT_BYTES (1024 * 1024)
 #define MAX_STDLIB_BYTES (16 * 1024 * 1024)
+#define MAX_RUNTIME_ARTIFACT_BYTES (32U * 1024U * 1024U)
 #define MAX_BROKER_CHUNK_BYTES (48 * 1024)
 #define MAX_BROKER_VALUE_BYTES (8 * 1024 * 1024)
 #define MAX_BROKER_CHUNKS 1024
@@ -49,6 +52,7 @@ typedef struct {
     char invocation_id[MAX_IDENTIFIER_BYTES + 1];
     char run_id[MAX_IDENTIFIER_BYTES + 1];
     char package_hash[65];
+    char runtime_artifact_hash[65];
     char one_time_token[MAX_TOKEN_BYTES + 1];
     char channel_nonce[CHANNEL_NONCE_LENGTH + 1];
     volatile sig_atomic_t cancelled;
@@ -1463,6 +1467,10 @@ static int pending_interrupt(void *argument) {
 static int initialize_python(RuntimeState *state, char *diagnostic, size_t diagnostic_capacity) {
     atomic_store_explicit(&g_audit_enabled, 0, memory_order_release);
     if (validate_stdlib_descriptor(state->stdlib_fd, diagnostic, diagnostic_capacity) != 0) return -1;
+    if (PyImport_ExtendInittab(safe_stdlib_modules) != 0) {
+        set_stage_diagnostic(diagnostic, diagnostic_capacity, "python_stdlib_registration");
+        return -1;
+    }
     if (PyImport_AppendInittab("_mobileagent", &PyInit__mobileagent) == -1) {
         set_stage_diagnostic(diagnostic, diagnostic_capacity, "python_init_registration");
         return -1;
@@ -1634,6 +1642,7 @@ fail:
 JNIEXPORT jint JNICALL
 Java_runtime_mobileagent_python_PythonNative_nativeRun(
     JNIEnv *env, jobject object, jstring invocation_id, jstring run_id, jstring package_hash,
+    jstring runtime_artifact_hash,
     jint grant_revision, jstring one_time_token, jstring channel_nonce, jstring entrypoint, jint timeout_ms,
     jint max_output_bytes, jint max_log_bytes, jint max_input_bytes, jint max_broker_calls,
     jint package_fd, jint stdlib_fd, jint input_fd, jint result_fd, jint broker_request_fd,
@@ -1672,6 +1681,7 @@ Java_runtime_mobileagent_python_PythonNative_nativeRun(
         invocation_id,
         run_id,
         package_hash,
+        runtime_artifact_hash,
         one_time_token,
         channel_nonce,
         entrypoint,
@@ -1680,15 +1690,16 @@ Java_runtime_mobileagent_python_PythonNative_nativeRun(
         (*env)->GetStringUTFChars(env, invocation_id, NULL),
         (*env)->GetStringUTFChars(env, run_id, NULL),
         (*env)->GetStringUTFChars(env, package_hash, NULL),
+        (*env)->GetStringUTFChars(env, runtime_artifact_hash, NULL),
         (*env)->GetStringUTFChars(env, one_time_token, NULL),
         (*env)->GetStringUTFChars(env, channel_nonce, NULL),
         (*env)->GetStringUTFChars(env, entrypoint, NULL),
     };
     if (strings[0] == NULL || strings[1] == NULL || strings[2] == NULL || strings[3] == NULL ||
-        strings[4] == NULL || strings[5] == NULL ||
+        strings[4] == NULL || strings[5] == NULL || strings[6] == NULL ||
         strlen(strings[0]) > MAX_IDENTIFIER_BYTES || strlen(strings[1]) > MAX_IDENTIFIER_BYTES ||
-        strlen(strings[2]) != 64 || strlen(strings[3]) > MAX_TOKEN_BYTES ||
-        !valid_channel_nonce(strings[4])) {
+        strlen(strings[2]) != 64 || strlen(strings[3]) != 64 || strlen(strings[4]) > MAX_TOKEN_BYTES ||
+        !valid_channel_nonce(strings[5])) {
         for (size_t i = 0; i < sizeof(strings) / sizeof(strings[0]); i++) {
             if (strings[i] != NULL) (*env)->ReleaseStringUTFChars(env, string_objects[i], strings[i]);
         }
@@ -1698,10 +1709,23 @@ Java_runtime_mobileagent_python_PythonNative_nativeRun(
     (void)snprintf(state->invocation_id, sizeof(state->invocation_id), "%s", strings[0]);
     (void)snprintf(state->run_id, sizeof(state->run_id), "%s", strings[1]);
     (void)snprintf(state->package_hash, sizeof(state->package_hash), "%s", strings[2]);
-    (void)snprintf(state->one_time_token, sizeof(state->one_time_token), "%s", strings[3]);
-    (void)snprintf(state->channel_nonce, sizeof(state->channel_nonce), "%s", strings[4]);
-    const char *entrypoint_text = strings[5];
+    (void)snprintf(state->runtime_artifact_hash, sizeof(state->runtime_artifact_hash), "%s", strings[3]);
+    (void)snprintf(state->one_time_token, sizeof(state->one_time_token), "%s", strings[4]);
+    (void)snprintf(state->channel_nonce, sizeof(state->channel_nonce), "%s", strings[5]);
+    const char *entrypoint_text = strings[6];
     atomic_store_explicit(&g_state, state, memory_order_release);
+
+    if (!mobileagent_sha256_fd_matches(state->package_fd, state->runtime_artifact_hash,
+            MAX_RUNTIME_ARTIFACT_BYTES)) {
+        set_result_fd(state, "FAILED", "package_integrity",
+            "Python runtime package integrity check failed", NULL, 0);
+        close_runtime_fds(state);
+        for (size_t i = 0; i < sizeof(strings) / sizeof(strings[0]); i++) {
+            if (strings[i] != NULL) (*env)->ReleaseStringUTFChars(env, string_objects[i], strings[i]);
+        }
+        atomic_store_explicit(&g_state, NULL, memory_order_release);
+        return -1;
+    }
 
     if (log_fd >= 0) {
         (void)dup2(log_fd, STDOUT_FILENO);

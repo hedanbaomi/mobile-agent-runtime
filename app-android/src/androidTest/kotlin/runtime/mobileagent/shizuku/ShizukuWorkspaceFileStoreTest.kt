@@ -43,6 +43,43 @@ class ShizukuWorkspaceFileStoreTest {
     }
 
     @Test
+    fun firstRootListCreatesOnlyTheFixedWorkspaceAndReturnsAnEmptyPage() {
+        val fixed = File(root, "Download/MobileAgentRuntime-Shizuku")
+        check(fixed.delete())
+        assertFalse(JSONObject(store.status()).getBoolean("rootExists"))
+        assertFalse(fixed.exists()) // status stays an observation, not a mutation.
+        val result = JSONObject(store.list(null))
+        assertTrue(result.getBoolean("ok"))
+        assertTrue(fixed.isDirectory)
+        assertEquals(0, result.getJSONArray("entries").length())
+        assertFalse(result.getBoolean("truncated"))
+        assertEquals(result.getString("version"), JSONObject(store.list("")).getString("version"))
+    }
+
+    @Test
+    fun invalidListDoesNotCreateTheFixedWorkspace() {
+        val fixed = File(root, "Download/MobileAgentRuntime-Shizuku")
+        check(fixed.delete())
+        assertFalse(JSONObject(store.list("../outside")).getBoolean("ok"))
+        assertFalse(fixed.exists())
+        assertFalse(JSONObject(store.list(null, maxEntries = 0)).getBoolean("ok"))
+        assertFalse(fixed.exists())
+        val badCursor = JSONObject(store.list(null, cursor = "not-a-token"))
+        assertEquals(ShizukuWorkspaceFileStore.INVALID_CURSOR, badCursor.getString("code"))
+        assertFalse(fixed.exists())
+    }
+
+    @Test
+    fun missingAttachedDirectoryIsNotRecreatedByList() {
+        val attached = File(root, "missing-user-directory")
+        val attachedStore = ShizukuWorkspaceFileStore(attached, enforceQuota = false)
+        val result = JSONObject(attachedStore.list(null))
+        assertFalse(result.getBoolean("ok"))
+        assertEquals(ShizukuWorkspaceFileStore.NOT_FOUND, result.getString("code"))
+        assertFalse(attached.exists())
+    }
+
+    @Test
     fun createsReadsReplacesAndDeletesOnlyRelativeUtf8Files() {
         assertTrue(store.mkdir("notes").contains("\"ok\":true"))
         assertTrue(

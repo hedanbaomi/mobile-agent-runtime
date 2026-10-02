@@ -1739,7 +1739,7 @@ class KnowledgeRepository(
                 throw failure
             }
         }
-        val hits = ReciprocalRankFusion.preferClaimSupporting(ReciprocalRankFusion.merge(sources).take(topK))
+        val hits = ReciprocalRankFusion.preferClaimSupporting(ReciprocalRankFusion.merge(sources)).take(topK)
         if (hits.isEmpty()) warnings += "No in-scope evidence"
         val coverage = RetrievalCoverage(requested = bases, searched = searched.toList(), unavailable = unavailable.toList())
         // Shared formatter (formatRetrievalCoverageNotice) produces this
@@ -4367,7 +4367,9 @@ class KnowledgeRepository(
     }
 
     private fun persistChunks(documentVersionId: String, chunks: List<IndexedChunk>) {
-        val documentId = db.query("SELECT document_id FROM document_versions WHERE id=?", listOf(documentVersionId)).single().string("document_id")
+        val version = db.query("SELECT document_id, status FROM document_versions WHERE id=?", listOf(documentVersionId)).single()
+        check(version.string("status") == "STAGING") { "Published chunks are immutable" }
+        val documentId = version.string("document_id")
         val versionAssets = mutableMapOf<String, String>()
         // A local chunk rebuild may reuse a paid Vision result from an older
         // version. Copy the asset reference, not its bytes or remote request;
@@ -4384,32 +4386,52 @@ class KnowledgeRepository(
                 versionAssets[assetId] = copyId
             } else versionAssets[assetId] = assetId
         }
-        val existing = db.query("SELECT id, rowid AS rid FROM chunks WHERE document_version_id = ?", listOf(documentVersionId))
+        val existing = db.query("SELECT id, content_hash, rowid AS rid FROM chunks WHERE document_version_id = ? ORDER BY ordinal", listOf(documentVersionId))
+        val reusable = existing.groupBy { it.string("content_hash") }
+            .mapValues { (_, rows) -> ArrayDeque(rows) }
+        val retainedIds = mutableSetOf<String>()
         existing.forEach { row ->
             runCatching { db.execute("DELETE FROM chunks_fts WHERE rowid = ?", listOf(row.long("rid"))) }
         }
-        db.execute("DELETE FROM chunks WHERE document_version_id = ?", listOf(documentVersionId))
+        // STAGING chunks have no issued citations. Preserve immutable vectors by
+        // retaining chunk IDs for equal content, even when a retry reorders it.
+        // Move old ordinals aside before assigning the replacement ordering.
+        db.execute("UPDATE chunks SET ordinal = -ordinal - 1 WHERE document_version_id = ?", listOf(documentVersionId))
         chunks.forEachIndexed { ordinal, chunk ->
-            val id = EntityId.random().value
             val hash = sha256Hex(chunk.text.toByteArray(Charsets.UTF_8))
-            db.execute(
-                "INSERT INTO chunks(id,document_version_id,ordinal,text,content_hash,source_span,asset_ids,page,text_utf16_length) VALUES (?,?,?,?,?,?,?,?,?)",
-                listOf(
-                    id,
-                    documentVersionId,
-                    ordinal,
-                    chunk.text,
-                    hash,
-                    chunk.span,
-                    chunk.assetIds.map { versionAssets.getValue(it) }.joinToString(","),
-                    chunk.page,
-                    chunk.text.length,
-                ),
+            val prior = reusable[hash]?.removeFirstOrNull()
+            val id = prior?.string("id") ?: EntityId.random().value
+            val values = listOf(
+                ordinal,
+                chunk.text,
+                hash,
+                chunk.span,
+                chunk.assetIds.map { versionAssets.getValue(it) }.joinToString(","),
+                chunk.page,
+                chunk.text.length,
             )
+            if (prior != null) {
+                retainedIds += id
+                db.execute(
+                    "UPDATE chunks SET ordinal=?,text=?,content_hash=?,source_span=?,asset_ids=?,page=?,text_utf16_length=? WHERE id=?",
+                    values + id,
+                )
+            } else {
+                db.execute(
+                    "INSERT INTO chunks(ordinal,text,content_hash,source_span,asset_ids,page,text_utf16_length,id,document_version_id) VALUES (?,?,?,?,?,?,?,?,?)",
+                    values + listOf(id, documentVersionId),
+                )
+            }
             val rowid = db.query("SELECT rowid AS rid FROM chunks WHERE id = ?", listOf(id)).single().long("rid")
             runCatching {
                 db.execute("INSERT INTO chunks_fts(rowid, text) VALUES (?, ?)", listOf(rowid, CjkLexical.indexText(chunk.text)))
             }
+        }
+        existing.filter { it.string("id") !in retainedIds }.forEach { row ->
+            // No FK cascade exists. Remove only superseded rows of this staged
+            // version in the same transaction as their chunk replacement.
+            db.execute("DELETE FROM embeddings WHERE chunk_id = ?", listOf(row.string("id")))
+            db.execute("DELETE FROM chunks WHERE id = ?", listOf(row.string("id")))
         }
     }
 

@@ -3,6 +3,15 @@
 
 # 验收矩阵与证据要求
 
+2026-10-02 全面代码 review 修复追加回归（实际结果与未测边界以 [专项记录](evidence/2026-10-02/code-review-repair.md) 为准，不代表中断的全量设备测试已通过）：
+
+- Responses 仅收到 `[DONE]` 时分别验证空响应、推理独占、已确认工具、未确认工具、正文与拒绝；不能虚报空回复成功或释放未确认调用。Chat `length` 的 EOF 与 `[DONE]` 路径保持相同分类与 Usage；未知 Responses JSON 状态只保留校验通过的 Usage。
+- SAF `createDocument` 成功后的开流、部分写入、关闭、授权及别名复核失败均为 `UNKNOWN_OUTCOME`；创建前失败保持原分类。主机故障注入只证明异常归约，真实 DocumentsProvider 行为须单列设备证据。
+- HTTP 的 `fc`、`fd`、`fe80` DNS 名称可通过精确 host 授权及有效 TLS；解析到 ULA、link-local、loopback 或 IPv4 私网仍在建立连接前拒绝。
+- STAGING 重建复用相同正文的 chunk ID 与成功向量，重排无 ordinal 冲突，替换时同事务清理对应向量；其他文档、READY 历史版本和旧引用保持可定位。检索先对完整有界候选池做标题剪枝，再截断或补齐 `topK`。
+- 第一批正在准备或复制原件时提交第二批，必须显示未接受原因并保留第二批选择；已接受后才清除对应选择。设置重组、前台统计、导入 URI 元数据和启动导入恢复的存储访问移出主线程；设备 StrictMode 与实际页面延迟分别记录。
+- 文件夹恰好 500 文件可接受，501 文件、超过目录深度或总条目预算整批拒绝；逐 Cursor 行读取应在预算或取消时停止，不先物化完整超宽目录，不把截断的子集当作成功导入。
+
 2026-10-01 r2 修复追加回归（实际执行与跳过项见 [逐项记录](evidence/2026-10-01/acceptance-r2-repair.md)，本段不代表整体验收通过）：
 
 - 同工作区绑定和新会话保留当前策略有效的整目录持久授权；过期、撤销、已消费、其他 Agent/工作区及 scoped grant 不得被带回。策略过期授权只能由用户明确重新确认后以新 ID 保存，范围和期限不扩大。
@@ -64,7 +73,7 @@ U01—U06 的首次验收对象为设计包，结果仅覆盖设计；后续 M1�
 | A05 | 建会话后修改Prompt/模型/参数；展开Effective Prompt并与测试server接收内容比较 | 旧会话保持快照；显式换配置有新边界；预览与最终真实请求角色/结构一致，secret脱敏 |
 | A06 | 两个Agent共享KB/Skill/Provider；撤权后续跑旧快照 | 不重复向量化；撤权立即优先于旧配置；不存在跨Agent授权泄漏 |
 | A07 | Agent/KB/Skill导入导出往返、旧schema迁移、未知schema/坏hash/部分失败 | 默认不含secret/敏感附件；显式完整导出保留许可；重导入完整且版本匹配；失败不清库 |
-| A08 | 默认关闭诊断后触发能力开关/保存；主动开启后制造滚动量、标记 secret/URL/query/path/换行、权限/审批/断连/超时/取消/未知结果、受控未捕获异常、导出目标失败、清除并重开应用 | 关闭时零日志且偏好可持久化；当前/上一段各不超过256 KiB、最近崩溃不超过32 KiB、单事件不超过4 KiB、ZIP不超过640 KiB；仅固定事件/字段，导出不含标记秘密、命令/argv/cwd、路径/URI/serial、stdout/stderr、聊天/Prompt/知识文件名/请求正文/异常消息；异常记录后委托系统原处理器；失败导出不删除现场；manifest含revision/dirty/schema/build time/设备fingerprint；原生崩溃和系统强杀边界明确提示仍需ADB Logcat |
+| A08 | 默认关闭诊断后触发能力开关/保存；主动开启后制造滚动量、标记 secret/URL/query/path/换行、权限/审批/断连/超时/取消/未知结果、受控未捕获异常、导出目标失败、清除并重开应用 | 关闭时零日志且偏好可持久化；当前/上一段各不超过8 MiB、最近崩溃不超过32 KiB、单事件不超过64 KiB、ZIP不超过20 MiB；仅固定事件/字段，导出不含标记秘密、命令/argv/cwd、路径/URI/serial、stdout/stderr、聊天/Prompt/知识文件名/请求正文/异常消息；异常记录后委托系统原处理器；失败导出不删除现场；manifest含revision/dirty/schema/build time/设备fingerprint；原生崩溃和系统强杀边界明确提示仍需ADB Logcat |
 | A09 | 以 `debuggable=false` 的 review-like build 检查危险模式、工具暴露、审批绑定、选定 Authority 失效和恢复；分别准备真实 Shizuku 服务与 USB Desktop Companion | debug/JVM/静态结果不能作为控制面安全结论；未提供真实 Shizuku/USB 端时记 `E2E BLOCKED`，不记 `DEVICE_PASS`；只有选定 Authority 可派发且无自动 fallback，危险模式关闭时不注册 `shell_exec` |
 | A10 | 对同一测试 Provider 分别执行 Test Connection 与 Capability Probe，覆盖 success、401、404、429、timeout、metadata 不支持但 Chat 成功、tools/image partial、failure→retry→success；切换 Provider 后复核状态隔离 | 两个操作使用正常请求相同 adapter/header/serialization 且 typed 结果互不污染；connection success 可以与 capability partial 同时成立；UI 不以 busy 反推成功，不解析自由字符串；失败不会把 endpoint/capability 误写为 PROBED；无真实付费请求，诊断无 URL/model/secret/body |
 
@@ -193,7 +202,7 @@ K06另需前台任务兼容矩阵：Android12+后台启动限制、Android14+服
 | S19 | SAF 系统选择器、持久 URI grant、撤销、URI 不泄露到模型/日志；授权目录后为 Agent 选择只读/读写快捷预设并新建会话 | SAF 是独立 workspace backend，不是 Authority；只操作用户选定 URI，grant 可撤销；不转成全局路径；平台目录授权不会静默扩大 Agent 权限，快捷预设一次持久化完整只读/读写 capability 集，已有会话快照不被改写；API 31 系统 DocumentsUI 持久授权及 list/read/write/delete `DEVICE E2E PASS`，异常 provider/物理设备差异仍保留边界 |
 | S20 | Shizuku 未安装/未授权/Binder dead/rebind；非 root UID；与 Wired ADB 同时可用 | 仅接受显式 Shizuku grant 与可证明 shell UID 2000；Root/UID0 不属于产品路线；Shizuku 失效不切 Wired ADB；官方 Shizuku 13.6.0、显式用户意图/授权、shell UID UserService 在 API 31 `DEVICE E2E PASS`，物理设备差异仍未验证 |
 | S21 | Windows Companion doctor/pair/reverse/session/request/recovery；官方 adb USB、loopback、会话序号/HMAC、断开与重连 | 只支持有线 USB ADB 平级 backend；不支持无线 ADB/LAN；桥不接受 host PowerShell、raw command、serial/port 由 Agent 指定；Companion/protocol 有 `IMPLEMENTED` 与 `AUTOMATED TESTED` 证据，真实设备时 `E2E BLOCKED` |
-| S22 | 非 debug 控制面、诊断导出/清除与 release gate | `debuggable=false` Review APK、Review SBOM/provenance 与 security gate 已 `LOCAL_PASS`；debug 证据单列；诊断限额固定为 256/256/32/4/640 KiB；API 31 真实 Shizuku/SAF `DEVICE E2E PASS`，物理 USB 与非模拟器差异保持 `E2E BLOCKED` |
+| S22 | 非 debug 控制面、诊断导出/清除与 release gate | `debuggable=false` Review APK、Review SBOM/provenance 与 security gate 已 `LOCAL_PASS`；debug 证据单列；现行诊断限额为 8/8 MiB、32/64 KiB、20 MiB；API 31 真实 Shizuku/SAF `DEVICE E2E PASS`，物理 USB 与非模拟器差异保持 `E2E BLOCKED` |
 
 | S23 | Agent 下多个 Session 的侧栏投影、从侧栏选择 Agent 新建会话、归档/已删除 Agent、切换页面与活跃流、系统返回 | 会话按 canonical snapshot→Agent 关系分组且不复制归属真相；删除/归档 Agent 的历史会话仍可识别；流生命周期不绑定目的地 entry；抽屉/sheet/browser 优先消费返回 |
 | S24 | Agent 1/2 分别选择 SAF 文件夹 A/B；同一 Agent 同时获授 A/B 并把 B 设为默认；分别创建 Thread A/B；撤销 system persisted grant；重启后 hydrate | A/B 使用独立 opaque workspace 且 Grant 不互相撤销；默认值只影响新 Thread；每个 Thread 持久绑定自己的 workspace；选择流程原子完成 backend + Agent Grant + 可选 binding/default，取消无 mutation；只读不虚报写；模型/UI/诊断无 URI |
@@ -303,3 +312,10 @@ K06另需前台任务兼容矩阵：Android12+后台启动限制、Android14+服
 - 原生文字分块与已获授权的本地嵌入可在等待视觉结果时准备，但 API Embedding 未获单独同意不得外发；最终文档版本和索引可见性仍由同一发布屏障控制。用慢视觉假后端与嵌入计数证明实际重叠，失败后无部分发布。
 - 使用自造的 Standard Security V4/R4 空密码 PDF 验证密码认证与文字层提取；错误密码、未支持的密码/crypt filter、损坏内容流均不得被宣布为完整原生文字。实际调用的嵌套 Form XObject 中的文字和图片必须进入页面证据，未调用资源不应引起视觉请求；循环引用、资源缺失、遮罩或不支持的图形状态仍需完整页面视觉或明确阻断。Form 中不可见、被裁剪或缺显式字体的字串不得进入原生索引，即使整页另有视觉识别。
 - 用户 294 个 PDF 的离线解析只用于核对需视觉页、文字完整性和本地耗时；真实 Provider、物理设备及 K06 300—500 文件恢复/耗时矩阵分别记录，不以假后端或桌面 JVM 结果代替。
+
+
+## 2026-10-02 隔离 Python 附件修复增量
+
+S03/S04/S05/S07 增量必须通过真实 isolated worker：API26 JSON/新 PID；STORED 与 DEFLATED 同源结果；固定标准库实际输出；原包 hash 和执行副本 hash 分别篡改拒绝，副本在 ACK 前与 CPython 前校验；取消、超时、日志/输出限额及下一调用新进程恢复；Broker 保留原包与 live grant 校验。禁止用进程未就绪的超时冒充脚本已执行的恢复通过。
+
+详见 [ADR 0019](adr/0019-python-isolated-api26-and-fixed-stdlib.md) 与 [附件修复处置及证据](evidence/2026-10-02/attachment-repair.md)。真实 Provider/真机/USB/Shizuku/长跑验收单独报告。

@@ -5,6 +5,7 @@ package runtime.mobileagent.skills
 
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertFalse
+import org.junit.jupiter.api.Assertions.assertNotEquals
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
 import kotlinx.serialization.json.Json
@@ -14,6 +15,7 @@ import kotlinx.serialization.json.jsonPrimitive
 import java.io.ByteArrayOutputStream
 import java.util.zip.CRC32
 import java.util.zip.ZipEntry
+import java.util.zip.ZipInputStream
 import java.util.zip.ZipOutputStream
 
 class SkillArchiveTest {
@@ -264,6 +266,62 @@ class SkillArchiveTest {
         assertEquals(CompatibilityClass.B, inspection.classification)
         assertEquals("dev.example.knowledge_helper", inspection.manifest?.id)
         assertTrue(SkillInstaller.install(zip).accepted)
+    }
+
+    @Test
+    fun storedAndDeflatedPythonPackagesProduceTheSameVerifiedStoredRuntimeArtifact() {
+        val files = arrayOf(
+            "mobile-skill.json" to validManifest("python").toByteArray(),
+            "SKILL.md" to "# Python helper\n".toByteArray(),
+            "scripts/main.py" to "def run():\n    return {'ok': True}\n".toByteArray(),
+        )
+        val originalStored = storedZip(*files)
+        val originalDeflated = zip(*files)
+        val storedInspection = SkillArchive.inspect(originalStored)
+        val deflatedInspection = SkillArchive.inspect(originalDeflated)
+        assertEquals(CompatibilityClass.B, storedInspection.classification)
+        assertEquals(CompatibilityClass.B, deflatedInspection.classification)
+        assertNotEquals(storedInspection.packageHash, deflatedInspection.packageHash)
+
+        val storedOutput = ByteArrayOutputStream()
+        val storedArtifact = SkillArchive.writeVerifiedPythonRuntimeArtifact(
+            originalStored,
+            storedInspection.packageHash,
+            storedOutput,
+        )
+        val deflatedOutput = ByteArrayOutputStream()
+        val deflatedArtifact = SkillArchive.writeVerifiedPythonRuntimeArtifact(
+            originalDeflated,
+            deflatedInspection.packageHash,
+            deflatedOutput,
+        )
+
+        assertEquals(storedOutput.toByteArray().toList(), deflatedOutput.toByteArray().toList())
+        assertEquals(storedArtifact, deflatedArtifact)
+        assertEquals(storedInspection.packageHash, SkillArchive.inspect(originalStored).packageHash)
+        assertEquals(deflatedInspection.packageHash, SkillArchive.inspect(originalDeflated).packageHash)
+        val stagedInspection = SkillArchive.inspect(storedOutput.toByteArray(), storedArtifact.sha256)
+        assertEquals(CompatibilityClass.B, stagedInspection.classification)
+        assertEquals(storedOutput.size().toLong(), storedArtifact.sizeBytes)
+        assertNotEquals(storedInspection.packageHash, storedArtifact.sha256)
+        assertEquals(files.associate { it.first to it.second.toList() }, storedEntries(storedOutput.toByteArray()))
+        assertTrue(originalStored.contentEquals(storedInspection.packageBytes))
+        assertTrue(originalDeflated.contentEquals(deflatedInspection.packageBytes))
+    }
+
+    @Test
+    fun runtimeArtifactPreparationRejectsAnInvalidOriginalHashBeforeWriting() {
+        val original = zip(
+            "mobile-skill.json" to validManifest("python").toByteArray(),
+            "scripts/main.py" to "def run():\n    return 1\n".toByteArray(),
+        )
+        val output = ByteArrayOutputStream()
+
+        org.junit.jupiter.api.Assertions.assertThrows(IllegalArgumentException::class.java) {
+            SkillArchive.writeVerifiedPythonRuntimeArtifact(original, "0".repeat(64), output)
+        }
+
+        assertEquals(0, output.size())
     }
 
     @Test
@@ -569,6 +627,19 @@ class SkillArchiveTest {
             }
         }
         return out.toByteArray()
+    }
+
+    private fun storedEntries(bytes: ByteArray): Map<String, List<Byte>> {
+        val entries = linkedMapOf<String, List<Byte>>()
+        ZipInputStream(bytes.inputStream()).use { zip ->
+            while (true) {
+                val entry = zip.nextEntry ?: break
+                assertEquals(ZipEntry.STORED, entry.method, entry.name)
+                assertFalse(entry.name in entries, "Runtime staging must not introduce duplicate paths")
+                entries[entry.name] = zip.readBytes().toList()
+            }
+        }
+        return entries
     }
 
     private fun validManifest(kind: String): String = """

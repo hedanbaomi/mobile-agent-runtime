@@ -94,8 +94,11 @@ class KnowledgeGoldenCorpusDeviceTest {
                     assertNotNull("${case.id}: no source bytes for citation", repo.evidenceBytes(citation))
                 }
                 if (case.needsVision) {
-                    assertEquals("${case.id}: Vision request count", case.visionPages.size, stub.calls.size)
-                    assertEquals("${case.id}: Vision pages", case.visionPages.toSet(), stub.calls.toSet())
+                    // ADR-0016 reuses exact successful requests, while both page units
+                    // must retain independent persisted provenance and resolvable citations.
+                    val dispatchedPages = if (case.id == "scanned-2page") listOf(1) else case.visionPages
+                    assertEquals("${case.id}: Vision request count", dispatchedPages.size, stub.calls.size)
+                    assertEquals("${case.id}: Vision pages", dispatchedPages.toSet(), stub.calls.toSet())
                     val visualHits = result.hits.filter { it.assetId != null && it.documentId == job.documentId }
                     assertTrue("${case.id}: no visual citation carried an asset id", visualHits.isNotEmpty())
                     visualHits.forEach { hit ->
@@ -110,6 +113,12 @@ class KnowledgeGoldenCorpusDeviceTest {
                     assertTrue("${case.id}: Vision must not run for text-only input", stub.calls.isEmpty())
                 }
                 when (case.id) {
+                    "scanned-2page" -> {
+                        assertEquals("duplicate pages must both remain retrievable", setOf(1, 2),
+                            result.hits.filter { it.documentId == job.documentId }.mapNotNull { it.page }.toSet())
+                        assertEquals("duplicate pages must both retain resolvable citations", setOf(1, 2),
+                            result.citations.mapNotNull { it.page }.toSet())
+                    }
                     "cross-page-table" -> {
                         val pages = case.nativeMarkers.flatMap { marker ->
                             repo.search(marker, 8, listOf(job.knowledgeBaseId)).filter { it.documentId == job.documentId }.mapNotNull { it.page }
@@ -160,7 +169,8 @@ class KnowledgeGoldenCorpusDeviceTest {
         val marker = requireNotNull(case.visionMarker)
         val before = repo.search(marker, 8, listOf(job.knowledgeBaseId)).map { it.chunkId }.toSet()
         assertTrue(before.isNotEmpty())
-        assertEquals(listOf(1, 2), stub.calls)
+        assertEquals(setOf(1, 2), repo.search(marker, 8, listOf(job.knowledgeBaseId)).mapNotNull { it.page }.toSet())
+        assertEquals(listOf(1), stub.calls)
         repo.closeVectorIndexes()
 
         val reopened = repository()
@@ -169,7 +179,14 @@ class KnowledgeGoldenCorpusDeviceTest {
             before,
             reopened.search(marker, 8, listOf(job.knowledgeBaseId)).map { it.chunkId }.toSet(),
         )
-        assertEquals("reopening must not repeat Vision work", listOf(1, 2), stub.calls)
+        val reopenedEvidence = reopened.retrieve("reopened-duplicate-pages", marker, 8, listOf(job.knowledgeBaseId))
+        assertEquals(setOf(1, 2), reopenedEvidence.hits.mapNotNull { it.page }.toSet())
+        assertEquals(setOf(1, 2), reopenedEvidence.citations.mapNotNull { it.page }.toSet())
+        reopenedEvidence.citations.forEach { citation ->
+            assertFalse(reopened.locateCitation(citation).removed)
+            assertNotNull(reopened.evidenceBytes(citation))
+        }
+        assertEquals("reopening must not repeat Vision work", listOf(1), stub.calls)
         reopened.closeVectorIndexes()
     }
 

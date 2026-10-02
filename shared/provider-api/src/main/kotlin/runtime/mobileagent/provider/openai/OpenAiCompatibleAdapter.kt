@@ -542,9 +542,17 @@ class OpenAiCompatibleAdapter(
                         // EOF is not a successful completion.  In particular, do not flush a
                         // suffix which could still become a credential on a later delta.
                         streamRedactor.discard()
+                        // A length stop is classified from what actually came back, exactly as
+                        // the DONE terminal does.  Reporting the raw deferred label here would
+                        // tell a user whose reasoning consumed the budget that answer text was
+                        // truncated, only because the provider omitted the transport end marker.
                         emitTerminalFailure(
                             streamState,
-                            streamState.deferredFailure ?: INVALID_RESPONSE_MESSAGE,
+                            if (streamState.finishReason == "length") {
+                                lengthFailureCode(streamState)
+                            } else {
+                                streamState.deferredFailure ?: INVALID_RESPONSE_MESSAGE
+                            },
                         )
                     }
                     request.reportDiagnostic(

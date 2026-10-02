@@ -203,8 +203,9 @@ class ChatViewModel(
             val selected = state.value.selectedSessionId?.takeIf { id -> conversations.any { it.id == id } }
                 ?: savedStateHandle.get<String>(SELECTED_SESSION_KEY)?.takeIf { id -> conversations.any { it.id == id } }
                 ?: container.uiPreferences.getString("selected-conversation", null)?.takeIf { id -> conversations.any { it.id == id } }
+            val snapshotAgentIds = container.agents.snapshotAgentIds(conversations.map { it.snapshotId })
             val conversationAgentIds = conversations.associate { conversation ->
-                conversation.id to container.agents.getSnapshot(conversation.snapshotId)?.agentId
+                conversation.id to snapshotAgentIds[conversation.snapshotId]
             }
             val agentId = selected?.let(conversationAgentIds::get)
                 ?: state.value.selectedAgentId

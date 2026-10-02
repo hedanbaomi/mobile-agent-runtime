@@ -119,6 +119,12 @@ Cloudflare 只承载公告及其必要管理/统计，**不是模型代理或知
 - [ONNX Android构建](https://onnxruntime.ai/docs/build/android.html)与[移动端说明](https://onnxruntime.ai/docs/tutorials/mobile/)中的ABI、算子/EP和模型约束必须进入锁文件与真机验证；启用R8时按实际版本保留所需JNI类。
 - [Android前台服务变更](https://developer.android.com/develop/background-work/services/fgs/changes)和[超时规则](https://developer.android.com/develop/background-work/services/fgs/timeout)要求按系统/target SDK适配启动条件、服务类型、通知、超时与配额；不得把前台服务作为无限后台算力。确定服务类型后实现onTimeout、检查点和用户恢复路径。
 
+### 3.2 2026-10-02 构建恢复与会话显示投影
+
+- ModelPack、USearch、官方 CPython 的固定输入共用 included-build 的 `PinnedArtifactDownload`；最多 3 次恢复，默认退避 1/2 秒，连接/读取超时仍为 30/120 秒。只恢复暂时性网络失败、HTTP 408/429/5xx 和声明长度下的截断；摘要不符、TLS/协议、本地 I/O 和取消直接失败。唯一同目录临时文件完整 SHA-256 校验后才替换缓存，失败清理临时文件并保留旧文件；合法缓存零网络/mtime 不变，首次创建目录。固定 URL、版本、摘要、TLS 和官方 CPython 禁重定向来源检查沿用。
+- 会话显示 Agent ID 通过 `AgentRepository.snapshotAgentIds` 只读取快照 `id,agent_id`，去重后每批最多 500 个绑定参数；未知 ID 无结果，空列表不查库。此 API 只提供显示元数据，执行仍走完整 `getSnapshot/resolveSnapshot` 校验，保留同步刷新/生命周期语义。
+- 适用验收和实测边界见 [限时优化证据](evidence/2026-10-02/deadline-optimization.md)。无新依赖、数据库/schema、Provider 协议、执行权限、模型内容或许可变更。
+
 ## 4. 目标目录与单一职责
 
 下列是**计划目录**，本轮不创建空业务模块冒充完成。

@@ -319,3 +319,11 @@ K06另需前台任务兼容矩阵：Android12+后台启动限制、Android14+服
 S03/S04/S05/S07 增量必须通过真实 isolated worker：API26 JSON/新 PID；STORED 与 DEFLATED 同源结果；固定标准库实际输出；原包 hash 和执行副本 hash 分别篡改拒绝，副本在 ACK 前与 CPython 前校验；取消、超时、日志/输出限额及下一调用新进程恢复；Broker 保留原包与 live grant 校验。禁止用进程未就绪的超时冒充脚本已执行的恢复通过。
 
 详见 [ADR 0019](adr/0019-python-isolated-api26-and-fixed-stdlib.md) 与 [附件修复处置及证据](evidence/2026-10-02/attachment-repair.md)。真实 Provider/真机/USB/Shizuku/长跑验收单独报告。
+
+
+## 2026-10-02 限时优化增量
+
+- L01—L04、`check/reviewGate`、严格依赖校验继续作为发布前门禁；输入的固定 URL/SHA/来源限制与 AGPL-3.0-only 不变。
+- 固定摘要下载覆盖合法缓存零网络/mtime 不变、首次空目录、503/连接拒绝/截断恢复、3 次耗尽、摘要/404/TLS/被文件占用的父路径直接失败、旧缓存保护、临时清理、退避与传输取消保留 interrupt 且不发布新文件。
+- 真实迁移后 SQLite 覆盖空输入、重复/未知/类似 SQL 的 ID、1,201 条快照超过旧 999 参数限制的分批查询，与完整快照映射一致且只选两个列。损坏的非显示元数据不妨碍显示投影，但完整读取和执行解析仍拒绝损坏快照。
+- 结果和未测范围见 [限时优化证据](evidence/2026-10-02/deadline-optimization.md)。查询数量不替代设备帧耗时、ANR 根因、长稳或真实收费 Provider 验收。

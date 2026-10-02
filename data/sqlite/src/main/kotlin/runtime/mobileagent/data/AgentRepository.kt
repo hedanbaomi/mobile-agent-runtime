@@ -298,6 +298,23 @@ class AgentRepository(
         db.query("SELECT * FROM agent_snapshots WHERE id=?", listOf(id)).singleOrNull()?.toSnapshot(json)
 
     /**
+     * Display-only projection for conversation lists. Loading a full snapshot for each
+     * row needlessly selects/decodes frozen configuration; execution still uses resolveSnapshot.
+     * Keep batches below SQLite's legacy 999-bind limit and bind every identifier as data.
+     */
+    fun snapshotAgentIds(snapshotIds: Collection<String>): Map<String, String> {
+        val result = linkedMapOf<String, String>()
+        snapshotIds.distinct().chunked(500).forEach { ids ->
+            val placeholders = ids.joinToString(",") { "?" }
+            db.query(
+                "SELECT id,agent_id FROM agent_snapshots WHERE id IN ($placeholders)",
+                ids,
+            ).forEach { row -> result[row.string("id")] = row.string("agent_id") }
+        }
+        return result
+    }
+
+    /**
      * Resolve only the immutable expansion stored with the snapshot.  This method deliberately
      * never reads the current provider/model/prompt rows, so editing or deleting a live profile
      * cannot change an already-created conversation/run boundary.

@@ -1,12 +1,11 @@
 // SPDX-FileCopyrightText: 2026 mobileAgentRuntime contributors
 // SPDX-License-Identifier: AGPL-3.0-only
 
-import java.net.HttpURLConnection
-import java.net.URI
 import java.io.File
 import java.nio.file.Files
 import java.nio.file.StandardCopyOption
-import java.security.MessageDigest
+
+import runtime.mobileagent.build.PinnedArtifactDownload
 
 plugins {
     alias(libs.plugins.android.library)
@@ -54,51 +53,8 @@ val onnxRuntimeNoticeGenerated = layout.buildDirectory.file(
     "generated/embedding-assets/licenses/onnxruntime-$onnxRuntimeVersion/NOTICE.txt",
 )
 
-fun sha256(file: java.io.File): String {
-    val digest = MessageDigest.getInstance("SHA-256")
-    file.inputStream().use { input ->
-        val buffer = ByteArray(64 * 1024)
-        while (true) {
-            val count = input.read(buffer)
-            if (count < 0) break
-            if (count > 0) digest.update(buffer, 0, count)
-        }
-    }
-    return digest.digest().joinToString("") { "%02x".format(it) }
-}
-
 fun downloadPinned(url: String, destination: File, expectedSha256: String) {
-    destination.parentFile.mkdirs()
-    if (!destination.isFile || sha256(destination) != expectedSha256) {
-        val temporary = File(destination.parentFile, ".${destination.name}.download")
-        val connection = URI(url).toURL().openConnection() as HttpURLConnection
-        connection.connectTimeout = 30_000
-        connection.readTimeout = 120_000
-        connection.instanceFollowRedirects = true
-        connection.requestMethod = "GET"
-        try {
-            check(connection.responseCode in 200..299) { "Model pack download failed: HTTP ${connection.responseCode}" }
-            connection.inputStream.use { input ->
-                temporary.outputStream().use { output ->
-                    val buffer = ByteArray(64 * 1024)
-                    while (true) {
-                        val count = input.read(buffer)
-                        if (count < 0) break
-                        if (count > 0) output.write(buffer, 0, count)
-                    }
-                }
-            }
-        } finally {
-            connection.disconnect()
-        }
-        check(sha256(temporary) == expectedSha256) { "Model pack hash mismatch for ${destination.name}" }
-        runCatching {
-            Files.move(temporary.toPath(), destination.toPath(), StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE)
-        }.getOrElse {
-            Files.move(temporary.toPath(), destination.toPath(), StandardCopyOption.REPLACE_EXISTING)
-        }
-    }
-    check(sha256(destination) == expectedSha256) { "Model pack cache is corrupt: ${destination.name}" }
+    PinnedArtifactDownload.download(url, destination, expectedSha256, followRedirects = true)
 }
 
 val prepareModelPack = tasks.register("prepareModelPack") {

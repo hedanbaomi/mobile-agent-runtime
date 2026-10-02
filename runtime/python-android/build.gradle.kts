@@ -3,16 +3,15 @@
 
 import java.io.File
 import groovy.json.JsonSlurper
-import java.net.HttpURLConnection
 import java.net.URI
-import java.nio.file.Files
-import java.nio.file.StandardCopyOption
 import java.security.MessageDigest
 import org.gradle.api.tasks.Copy
 import org.gradle.api.tasks.Sync
 import org.gradle.api.file.DuplicatesStrategy
 import org.gradle.api.tasks.bundling.Zip
 import org.gradle.api.tasks.bundling.ZipEntryCompression
+
+import runtime.mobileagent.build.PinnedArtifactDownload
 
 plugins {
     alias(libs.plugins.android.library)
@@ -61,49 +60,14 @@ fun prefixFor(architecture: String): File =
     officialCpythonDirectory.get().asFile.resolve("extract-$architecture/prefix")
 
 fun downloadPinned(url: String, destination: File, expectedSha256: String) {
-    destination.parentFile.mkdirs()
-    if (!destination.isFile || destination.sha256Hex() != expectedSha256) {
-        val temporary = destination.resolveSibling(".${destination.name}.download")
-        temporary.delete()
-        val source = URI(url)
-        check(
-            source.scheme == "https" &&
-                source.host == "www.python.org" &&
-                source.userInfo == null &&
-                source.port in listOf(-1, 443),
-        ) { "Official CPython source must be https://www.python.org:443" }
-        val connection = source.toURL().openConnection() as HttpURLConnection
-        connection.connectTimeout = 30_000
-        connection.readTimeout = 120_000
-        connection.instanceFollowRedirects = false
-        connection.requestMethod = "GET"
-        try {
-            check(connection.responseCode in 200..299) {
-                "Official CPython download failed for ${destination.name}: HTTP ${connection.responseCode}"
-            }
-            connection.inputStream.use { input ->
-                temporary.outputStream().use { output -> input.copyTo(output) }
-            }
-        } finally {
-            connection.disconnect()
-        }
-        check(temporary.sha256Hex() == expectedSha256) {
-            "Official CPython download hash mismatch for ${destination.name}"
-        }
-        runCatching {
-            Files.move(
-                temporary.toPath(),
-                destination.toPath(),
-                StandardCopyOption.REPLACE_EXISTING,
-                StandardCopyOption.ATOMIC_MOVE,
-            )
-        }.getOrElse {
-            Files.move(temporary.toPath(), destination.toPath(), StandardCopyOption.REPLACE_EXISTING)
-        }
-    }
-    check(destination.sha256Hex() == expectedSha256) {
-        "Official CPython cache is corrupt: ${destination.name}"
-    }
+    val source = URI(url)
+    check(
+        source.scheme == "https" &&
+            source.host == "www.python.org" &&
+            source.userInfo == null &&
+            source.port in listOf(-1, 443),
+    ) { "Official CPython source must be https://www.python.org:443" }
+    PinnedArtifactDownload.download(url, destination, expectedSha256, followRedirects = false)
 }
 
 val prepareOfficialCpython = tasks.register("prepareOfficialCpython") {

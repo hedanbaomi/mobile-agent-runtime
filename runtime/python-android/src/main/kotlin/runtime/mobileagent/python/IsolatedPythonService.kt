@@ -167,6 +167,7 @@ class IsolatedPythonService : Service() {
                     invocationId = message.ticket.invocationId,
                     runId = message.ticket.runId,
                     packageHash = message.ticket.packageHash,
+                    runtimeArtifactHash = message.runtimeArtifactHash,
                     grantRevision = message.ticket.grantRevision,
                     oneTimeToken = message.ticket.oneTimeToken,
                     channelNonce = message.channelNonce,
@@ -222,7 +223,10 @@ class IsolatedPythonService : Service() {
             !isWriteOnly(message.logFd)) {
             return "IPC descriptor directions are invalid"
         }
-        if (message.packageFd.statSize == 0L || message.stdlibFd.statSize == 0L) return "empty runtime descriptor"
+        if (message.stdlibFd.statSize == 0L) return "empty runtime descriptor"
+        if (!PythonRuntimeArtifactIntegrity.matches(message.packageFd, message.runtimeArtifactHash)) {
+            return "runtime package integrity check failed"
+        }
         return null
     }
 

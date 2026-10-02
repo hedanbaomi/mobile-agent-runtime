@@ -3,7 +3,7 @@
 
 # 项目交接
 
-最后更新：2026-09-29T13:28+08:00（Asia/Taipei；知识库导入提速 PR #31 首轮 CI 的顺序回归已补修，待最新提交检查；根工作区仍为 main）。项目根目录：E:/mobileAgentRuntime。
+最后更新：2026-10-02T14:03:20Z（UTC；本轮修复与本地验证收口）。项目根目录：E:/mobileAgentRuntime。
 
 按 [agent.md 第 1 节](agent.md#1-按任务读取与开工) 选择资料。现行规则见 agent.md；本文件记录现场和待办，历史任务中的授权不自动延续。
 
@@ -23,6 +23,8 @@
 - 完整证据：[2026-09-18 文档管线复审 R1–R5 收口](docs/evidence/2026-09-18/document-pipeline-r1-r5-closeout.md)。
 
 ## 1. 现行状态与当前任务
+
+- **当前任务：2026-10-02 代码 review 与附件缺陷修复收口**：第一阶段 10 项修复与本轮附件 PY-001/PY-002、UI/诊断、Shizuku fixed 根、Golden/Wired 夹具和规格修正已实现；原 598 条/100 条非 PASS 逐条分类，不改写原报告。strict reviewGate/check、1768 JVM、REUSE、46/46 native 对齐与 notices artifact 检查通过；API26 Review 37/37、API31 Review 134/134、API35/16K Review 19/19。独立只读审查 APPROVE，原始失败与未验收的真实 Provider/真机/框架 ANR/长跑边界保留。用户已授权普通分支提交、推送、PR/CI 合并与干净 Review debug 签名包交付；本条为提交时验证快照，Git 集成与最终包体由交付 provenance 另证。未提交原报告、测试凭据、两份计划和既存 HANDOFF 历史 WIP；旧 DSH test 恢复新增的重复测试已外部备份移出。详见 [附件处置](docs/evidence/2026-10-02/attachment-repair.md)、[100条清单](docs/evidence/2026-10-02/attachment-case-dispositions.json)、[第一阶段修复](docs/evidence/2026-10-02/code-review-repair.md) 与 [ADR0019](docs/adr/0019-python-isolated-api26-and-fixed-stdlib.md)。
 
 - **2026-10-01 r3 复测修复第三轮独立审查修订（WIP，未合并）**：分支 `devin/1790844765-emu-r3-fixes`（前序 `515b4fd`），基线 `c2994dd`（PR #32）。本轮四项：① 采集期误归属——`remoteDescendantsOf` 每分支暂存、提交前复核父身份，父复用即整支丢弃；sweep 根检查区分"已绑定根已死"（reparented 孤儿照杀）与"根 PID 复用"（live+不同 startTime 否决），补 root-dead/child-to-init 与 mid-collection 丢支确定性测试。② `SafLivenessProbe` permit 改随真实 worker 生命周期释放（deadline 只放决策不伪释放占位），补忽略 interrupt+重复请求的并发上限测试。③ 健康态按 backend identity 存储/原子判定，down 期间按 probeInterval 自续重试（不依赖 UI 刷新），过期结果写不进替换者。④ `WorkspacePickerPort.workspaceHealthRevision` + `WorkspacePickerViewModel` 订阅仅刷新 recent 列表（不动浏览选择）。**状态**：编译通过，定向单测执行中；strict reviewGate 与新 androidTest 设备证据未出，draft PR #33 不合并。
 

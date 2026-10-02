@@ -65,7 +65,7 @@ class ChatToolApprovalDetailUiTest {
             }
         }
 
-        val details = compose.onNodeWithTag("chat.approval.details")
+        val details = compose.onNodeWithTag("chat.approval.details", useUnmergedTree = true)
         details.assert(hasScrollAction())
         compose.onNodeWithText("cat /tmp/example.txt", useUnmergedTree = true).performScrollTo().assertIsDisplayed()
         compose.onNodeWithText("/tmp", useUnmergedTree = true).performScrollTo().assertIsDisplayed()
@@ -108,7 +108,7 @@ class ChatToolApprovalDetailUiTest {
             }
         }
 
-        val details = compose.onNodeWithTag("chat.approval.details")
+        val details = compose.onNodeWithTag("chat.approval.details", useUnmergedTree = true)
         details.assert(hasScrollAction())
         compose.onNodeWithText("cat /tmp/example.txt", useUnmergedTree = true).performScrollTo().assertIsDisplayed()
         compose.onNodeWithText("/tmp", useUnmergedTree = true).performScrollTo().assertIsDisplayed()

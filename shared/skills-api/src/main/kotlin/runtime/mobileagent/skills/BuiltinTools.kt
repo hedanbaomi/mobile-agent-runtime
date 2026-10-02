@@ -497,7 +497,6 @@ object HttpPolicy {
             val second = h.split('.').getOrNull(1)?.toIntOrNull()
             if (second != null && second in 16..31) return true
         }
-        if (h.startsWith("fc") || h.startsWith("fd") || h.startsWith("fe80")) return true
         return false
     }
 

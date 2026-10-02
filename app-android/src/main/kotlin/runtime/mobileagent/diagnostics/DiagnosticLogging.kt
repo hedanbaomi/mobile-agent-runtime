@@ -137,6 +137,7 @@ enum class DiagnosticToolCapability(val wireName: String) {
     MEMORY_READ("memory_read"),
     MEMORY_WRITE("memory_write"),
     SHELL_EXECUTE("shell_execute"),
+    PYTHON_EXECUTE("python_execute"),
     SEARCH("search"),
     UNKNOWN("unknown"),
 }
@@ -2916,6 +2917,7 @@ class RollingDiagnosticLogStore(
         "memory_read", "memory-read" -> DiagnosticToolCapability.MEMORY_READ.wireName
         "memory_write", "memory-write" -> DiagnosticToolCapability.MEMORY_WRITE.wireName
         "shell_execute", "shell-execute", "shell" -> DiagnosticToolCapability.SHELL_EXECUTE.wireName
+        "python_execute", "python-execute" -> DiagnosticToolCapability.PYTHON_EXECUTE.wireName
         "search" -> DiagnosticToolCapability.SEARCH.wireName
         else -> DiagnosticToolCapability.UNKNOWN.wireName
     }

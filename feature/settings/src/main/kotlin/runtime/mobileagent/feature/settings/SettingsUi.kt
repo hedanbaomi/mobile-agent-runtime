@@ -48,6 +48,23 @@ import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import runtime.mobileagent.domain.DangerousMode
 
+enum class SettingsDiagnosticsFeedback {
+    NONE, ENABLED, DISABLED, SAVE_FAILED, EXPORT_CANCELLED, EXPORTING, EXPORTED, EXPORT_FAILED, CLEARED, CLEAR_FAILED;
+
+    fun text(zh: Boolean): String = when (this) {
+        NONE -> ""
+        ENABLED -> if (zh) "诊断记录已开启。" else "Diagnostics enabled."
+        DISABLED -> if (zh) "诊断记录已关闭；已有记录仍可导出或清除。" else "Diagnostics disabled; existing records can still be exported or cleared."
+        SAVE_FAILED -> if (zh) "无法保存诊断开关。" else "Could not save the diagnostics setting."
+        EXPORT_CANCELLED -> if (zh) "已取消诊断导出。" else "Diagnostics export cancelled."
+        EXPORTING -> if (zh) "正在导出诊断 ZIP…" else "Exporting diagnostics ZIP…"
+        EXPORTED -> if (zh) "诊断 ZIP 已保存；原生崩溃或系统强杀仍可能需要 ADB Logcat。" else "Diagnostics ZIP saved; native crashes or system kills may still require ADB Logcat."
+        EXPORT_FAILED -> if (zh) "诊断导出失败；原记录未清除。" else "Diagnostics export failed; existing records were preserved."
+        CLEARED -> if (zh) "诊断记录已清除。" else "Diagnostics cleared."
+        CLEAR_FAILED -> if (zh) "清除诊断记录失败。" else "Could not clear diagnostics."
+    }
+}
+
 data class ThirdPartyNoticeFileUi(
     val label: String,
     val path: String,
@@ -137,6 +154,7 @@ data class SettingsUiState(
     val diagnosticsSizeBytes: Long = 0L,
     val diagnosticsLimitBytes: Long = 0L,
     val diagnosticsState: String = "",
+    val diagnosticsFeedback: SettingsDiagnosticsFeedback = SettingsDiagnosticsFeedback.NONE,
     val exportState: String = "",
     val updateState: String = "",
     val noticeCount: Int = 0,
@@ -352,11 +370,12 @@ fun SettingsScreen(
                     else "Detailed DEBUG includes Vision images and context, response bodies, dispatch stages, HTTP status and errors. Credential values are filtered. The log retains a rolling window of about 16 MiB; older content is overwritten. System crashes may still require ADB Logcat.",
                     style = MaterialTheme.typography.bodySmall,
                 )
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     Button(onClick = actions.onExportDiagnostics) { Text(if (zh) "导出诊断 ZIP" else "Export diagnostics ZIP") }
                     OutlinedButton(onClick = actions.onClearDiagnostics, enabled = state.diagnosticsSizeBytes > 0) { Text(if (zh) "清除诊断" else "Clear diagnostics") }
                 }
-                if (state.diagnosticsState.isNotBlank()) Text(state.diagnosticsState, style = MaterialTheme.typography.bodySmall)
+                val diagnosticsMessage = state.diagnosticsFeedback.text(zh).ifBlank { state.diagnosticsState }
+                if (diagnosticsMessage.isNotBlank()) Text(diagnosticsMessage, style = MaterialTheme.typography.bodySmall, modifier = Modifier.testTag("settings.diagnostics.feedback"))
                 Text(if (zh) "API 密钥不会进入导出文件或请求检查器。" else "API keys never enter exports or the request inspector.", style = MaterialTheme.typography.bodySmall)
             }
         }

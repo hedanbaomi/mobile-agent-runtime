@@ -23,7 +23,7 @@
 - `runtime_tooling_unavailable` 只接受 `TOOL_EXECUTION_CONTEXT_UNAVAILABLE` 或 `TOOL_EXECUTOR_FACTORY_UNAVAILABLE`，并可带 HMAC 化的 session/run 引用；`tool_approval_state` 的 capability、authority 为固定枚举，sessionRef 同样只写 HMAC 化引用。审批原因只保留闭合的安全码；正常发起和超时分别为 `approval_required`、`timeout`，拒绝/失效可使用 `approval_denied`、`snapshot_stale`、`invalid_request` 或 `call_id_replay`，不会退化成无法定位的异常文本。
 - 模型或用户可控的 agent、skill、workspace、call、approval 引用只写固定长度（32 个十六进制字符）的 app-local HMAC 截断值；Runtime 随机 requestRef 也归一化为同样长度。当前实现使用稳定会话 HMAC，密钥只在进程内存中生成，绝不写普通文件；可用受保护持久密钥时由平台适配器替换。
 - shell 事件只写 commandSha256、authority、桶化限制、stdout/stderr 字节计数、duration 桶和终态；不写 command、script、argv、preview、stdout/stderr、result 或 arguments。
-- 当前日志256 KiB、上一段256 KiB、最近崩溃32 KiB、单事件4 KiB、导出ZIP640 KiB，超限按拥有文件滚动或拒绝单条事件。滚动和导出都只保留完整 NDJSON 行。
+- 当前日志8 MiB、上一段8 MiB、最近崩溃32 KiB、单事件64 KiB、导出ZIP20 MiB，超限按拥有文件滚动或拒绝单条事件。滚动和导出都只保留完整 NDJSON 行。
 - 导出manifest补充设备fingerprint，便于区分系统镜像和构建环境。
 
 ## 3. 隐私与崩溃边界
@@ -70,7 +70,7 @@ Responses provider-private continuation（`reasoning.encrypted_content` 等）�
 ## 6. 当前证据状态
 
 - `IMPLEMENTED`：固定事件/字段白名单、app-local HMAC 引用、诊断轮转/导出/清除及失败降级边界已在当前实现中存在。
-- `AUTOMATED TESTED`：API 31 的 `DiagnosticsDeviceTest` 12/12 覆盖关闭零字节、白名单/脱敏、v2 typed 事件、权限配置/危险模式决策/runtime工具暴露的 DEBUG 事件、HMAC 引用、ZIP byte-search、并发 NDJSON、完整行轮转、上限、IO 失败与清除；`runtime_tool_exposure` 的新增聚合字段和 `model_tool_transport_disabled` 原因均有闭合 schema 断言。完整 connected matrix 为 235 tests 全通过，另有 1 个未显式启用的受控 Knowledge load skip。不把历史 64/192 KiB 限额沿用到 v2，当前规范值始终是 256/256/32/4/640 KiB。
+- `AUTOMATED TESTED`：API 31 的 `DiagnosticsDeviceTest` 12/12 覆盖关闭零字节、白名单/脱敏、v2 typed 事件、权限配置/危险模式决策/runtime工具暴露的 DEBUG 事件、HMAC 引用、ZIP byte-search、并发 NDJSON、完整行轮转、上限、IO 失败与清除；`runtime_tool_exposure` 的新增聚合字段和 `model_tool_transport_disabled` 原因均有闭合 schema 断言。完整 connected matrix 为 235 tests 全通过，另有 1 个未显式启用的受控 Knowledge load skip。该历史批次不能证明现行限额；2026-10-02 按当前实现统一规范为 8/8 MiB、32/64 KiB、20 MiB，新的复测证据另列。
 - `DEVICE E2E PASS（API 31 x86_64 emulator）`：系统 DocumentsUI 的真实持久 SAF grant 已完成 AgentRuntime 模型 tool call、workspace list/read/write/delete；官方 Shizuku 13.6.0 通过实际 shell UserService 完成模型侧 workspace list/read/write/delete 与一次 `/system/bin/sh`。该结论证明本模拟器上的真实 Android provider/Binder 服务，不外推到物理设备。
 - `LOCAL_PASS`：`debuggable=false` Review APK 的 security/SBOM/provenance gate 已通过并覆盖安装冷启动；Debug APK 与 Review APK 的 notices 均在实际 ZIP/APK 边界验证。该结论不等于物理 USB 或物理设备高权限操作成功。
 - `E2E BLOCKED`：真实有线 USB Companion、物理断连恢复和非模拟器设备差异仍未执行；不得用 API 31 模拟器结果替代这些边界。

@@ -81,6 +81,8 @@ Agent 资源绑定的稳定标识是 `SkillInstall.installId`，不是清单中�
 
 首选官方CPython Android 3.14.x嵌入包，经测试固定补丁/哈希，arm64-v8a与x86_64均验证。仅允许应用构建时携带的CPython/JNI库；“禁止.so”指用户Skill/动态依赖载荷，不是禁止应用自己的受审查原生运行时。
 
+2026-10-02：x86_64 固定 CPython 3.14.7 核心采用原始源包的 --without-mimalloc 构建以兼容 API26 isolated UID；arm64 保留官方核心。12 个固定上游标准库模块按原归档与逐文件 hash 校验后注册为 builtins，用户 native/动态依赖入口仍拒绝。合法压缩 Skill 经完整校验生成有界 STORED 执行副本，原包身份与副本 runtimeArtifactHash 分离；Service 在 ACK 前、JNI 在 CPython 前分别用只读 FD 校验副本，pread 不改变游标。私有 START 双方随同 APK 发布；旧格式读取失败则拒绝，不保证混合版本互通。构建配方、完整第三方许可和边界见 [ADR 0019](adr/0019-python-isolated-api26-and-fixed-stdlib.md)。
+
 技术验证必须证明：isolated UID下能加载APK内受审查解释器与stdlib；无法读宿主私有文件；只读FD足以访问包；IPC在支持的最低Android版本可工作；取消/超时真的销毁进程；下一次调用无状态污染。无法在隔离身份加载时记录阻塞，不退回主进程。
 
 `stopSelf()`或解除绑定不单独构成“进程已经死亡”的证据，必须证明进程生命周期结束、通道关闭和下一调用状态全新；如果平台不能满足，则该实现不能通过S03。API26使用Java Binder/ParcelFileDescriptor；不能直接采用要求API29+的NDK Binder FD接口并仍宣称支持API26。
@@ -114,6 +116,8 @@ Agent 资源绑定的稳定标识是 `SkillInstall.installId`，不是清单中�
 
 网络默认HTTPS精确host白名单，拒绝IP直连、回环/link-local/内网目标，逐跳重新校验重定向及解析地址；防止凭据跨host转发和DNS重绑定。通配符若支持须限制完整域边界，不用简单suffix匹配。用户自建Provider/MCP的内网端点是独立、显式授权范围，不继承为所有Skill网络权限。
 
+2026-10-02 回归约束：`fc`、`fd`、`fe80` 开头的合法 DNS 名称不能按 IPv6 前缀拒绝；私网判定针对实际 IP 地址字节，精确 host 授权、解析地址固定、逐跳核验与 TLS 主机名验证仍全部适用。
+
 HTTP写操作和文件导出等副作用必须向用户展示目的地与影响；不能因为模型说“用户已批准”而跳过。所有能力有超时和取消传播，调用完成后凭证不可重放。
 
 ### 4.1 Agent 应用私有文本工作区
@@ -128,6 +132,8 @@ HTTP写操作和文件导出等副作用必须向用户展示目的地与影响�
 - Shizuku 与有线 ADB：是两个平级、显式选择的 elevated Authority；selected provider 失效时 fail-closed，绝不自动 fallback。
 - Termux、无线 ADB、Device Owner/Profile Owner、Root：均不属于 v2 当前路线；不得以“外部 CLI”“ADB host”或“设备管理器权限”文案暗示已经接线。
 - PowerShell 是 Windows 宿主能力，不是 Android 能力。Windows Companion 只允许官方 adb、USB、loopback、`adb reverse` 和固定协议；不把 `ProcessBuilder`、`Runtime.exec`、PowerShell 或宿主文件系统暴露给 Agent。
+
+2026-10-02 SAF 新建写入补充：`createDocument` 已返回文档后，开流、写入、关闭、权限复核、别名/大小核验与版本读取的失败均为 `UNKNOWN_OUTCOME`，不能因局部异常回退成可安全重试的 `UNSUPPORTED`、`PERMISSION_DENIED` 或 `IO_ERROR`。未经证实的删除补偿不能假定回滚成功；创建前的校验错误仍保留原分类。
 
 ### 4.2 v2 wire/capability 与执行分层
 
@@ -163,7 +169,7 @@ Keystore生成不可导出的加密key，Provider/Skill秘密作为密文保存�
 
 日志、预览、错误、导出、崩溃信息统一脱敏。Request Inspector为用户本地按需查看，默认不持久化正文；“输入摘要”不能成为明文全文副本。生产日志默认不含聊天、Prompt、文件名、向量文本或Skill输入输出。
 
-应用内诊断日志同样默认关闭，只能由用户在设置页主动开启。实现使用固定事件/字段白名单，只记录会话、进程、`main`/`worker`/`other`线程类别、UTC、等级、构建 revision/dirty/schema/build time，以及匿名的能力开关、保存结果、知识导入/Skill检查安装/批次worker阶段、Authority/approval/revalidation/dispatch/execution/terminal 阶段与计数；不得记录 Provider/模型/Base URL/API Key/Header、聊天/Prompt、知识或Skill文件名/真实路径、命令/argv/cwd、URI/ADB serial、请求正文、stdout/stderr 或异常消息。所有字符串再次经过 secret、URL/query、Windows/Unix 路径、控制字符和长度清洗。当前段与上一段各至多256 KiB，最近崩溃摘要至多32 KiB，单事件至多4 KiB，导出ZIP至多640 KiB；未捕获异常只保留异常类型和有界类/方法/行号，写入后必须委托Android原始崩溃处理器。诊断初始化、轮转和handler安装均为best-effort，失败不能阻止App启动。
+应用内诊断日志同样默认关闭，只能由用户在设置页主动开启。实现使用固定事件/字段白名单，只记录会话、进程、`main`/`worker`/`other`线程类别、UTC、等级、构建 revision/dirty/schema/build time，以及匿名的能力开关、保存结果、知识导入/Skill检查安装/批次worker阶段、Authority/approval/revalidation/dispatch/execution/terminal 阶段与计数；不得记录 Provider/模型/Base URL/API Key/Header、聊天/Prompt、知识或Skill文件名/真实路径、命令/argv/cwd、URI/ADB serial、请求正文、stdout/stderr 或异常消息。所有字符串再次经过 secret、URL/query、Windows/Unix 路径、控制字符和长度清洗。当前段与上一段各至多8 MiB，最近崩溃摘要至多32 KiB，单事件至多64 KiB，导出ZIP至多20 MiB；未捕获异常只保留异常类型和有界类/方法/行号，写入后必须委托Android原始崩溃处理器。诊断初始化、轮转和handler安装均为best-effort，失败不能阻止App启动。
 
 诊断包经 Storage Access Framework 写到用户选择的位置，manifest包含构建和设备fingerprint以绑定复现环境；导出失败不得清除原始日志，清除只删除应用自有诊断文件。应用不申请`READ_LOGS`，不能捕获native崩溃、内核/系统强杀或被杀前未落盘的Android系统日志，这些场景仍需用户提供相同APK SHA对应的ADB Logcat。完整操作和字段契约见[诊断日志](DIAGNOSTICS.md)。
 

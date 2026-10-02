@@ -10,6 +10,8 @@ data class PythonStartMessage(
     val ticket: InvocationTicket,
     val entrypoint: String,
     val limits: PythonIpcProtocol.PythonLimits,
+    /** Digest of the host-staged runtime ZIP; the ticket keeps the original package identity. */
+    val runtimeArtifactHash: String,
     val packageFd: ParcelFileDescriptor,
     val stdlibFd: ParcelFileDescriptor,
     val inputFd: ParcelFileDescriptor,
@@ -29,6 +31,7 @@ object PythonBinderCodec {
     fun writeStart(parcel: Parcel, message: PythonStartMessage) {
         parcel.writeInterfaceToken(PythonIpcProtocol.DESCRIPTOR)
         writeTicket(parcel, message.ticket)
+        parcel.writeString(message.runtimeArtifactHash)
         parcel.writeString(message.entrypoint)
         writeLimits(parcel, message.limits)
         writeFd(parcel, message.packageFd)
@@ -44,12 +47,14 @@ object PythonBinderCodec {
     fun readStart(parcel: Parcel): PythonStartMessage {
         parcel.enforceInterface(PythonIpcProtocol.DESCRIPTOR)
         val ticket = readTicket(parcel)
+        val runtimeArtifactHash = parcel.readString().orEmpty()
         val entrypoint = parcel.readString().orEmpty()
         val limits = readLimits(parcel)
         return PythonStartMessage(
             ticket = ticket,
             entrypoint = entrypoint,
             limits = limits,
+            runtimeArtifactHash = runtimeArtifactHash,
             packageFd = readFd(parcel),
             stdlibFd = readFd(parcel),
             inputFd = readFd(parcel),

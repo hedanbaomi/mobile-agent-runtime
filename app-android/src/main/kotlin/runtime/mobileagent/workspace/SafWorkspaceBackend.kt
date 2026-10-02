@@ -463,39 +463,25 @@ internal class SafWorkspaceBackend(
             } catch (_: IOException) {
                 InternalWorkspaceErrorCode.IO_ERROR.error()
             }
-            val safeUri = postMutationUri(createdUri)
-            val createdId = DocumentsContract.getDocumentId(safeUri)
-            val output = try {
-                resolver.openOutputStream(safeUri, "w") ?: InternalWorkspaceErrorCode.UNSUPPORTED.error()
-            } catch (_: SecurityException) {
-                InternalWorkspaceErrorCode.PERMISSION_DENIED.error()
-            }
-            var streamClosed = false
-            try {
+            completeSafCreatedDocument {
+                val safeUri = postMutationUri(createdUri)
+                val createdId = DocumentsContract.getDocumentId(safeUri)
+                val output = resolver.openOutputStream(safeUri, "w")
+                    ?: InternalWorkspaceErrorCode.UNKNOWN_OUTCOME.error()
                 output.use {
                     it.write(content)
                     it.flush()
                 }
-                streamClosed = true
-            } catch (_: IOException) {
-                // The provider may already have created a partial document.  Its outcome is not
-                // safely retryable, so report the explicit unknown state.
-                InternalWorkspaceErrorCode.UNKNOWN_OUTCOME.error()
-            } catch (_: RuntimeException) {
-                // A provider exception after create may leave a partial document behind.
-                InternalWorkspaceErrorCode.UNKNOWN_OUTCOME.error()
-            } finally {
-                if (!streamClosed) runCatching { output.close() }
+                if (!hasPersistedGrant(write = true)) InternalWorkspaceErrorCode.UNKNOWN_OUTCOME.error()
+                val created = children(parent.uri).firstOrNull { it.id == createdId }
+                    ?: InternalWorkspaceErrorCode.UNKNOWN_OUTCOME.error()
+                if (created.name != segments.last()) InternalWorkspaceErrorCode.UNKNOWN_OUTCOME.error()
+                if (created.type != InternalWorkspaceEntryType.FILE || created.size != null && created.size != content.size.toLong()) {
+                    InternalWorkspaceErrorCode.UNKNOWN_OUTCOME.error()
+                }
+                val version = fileVersion(safeUri)
+                InternalWorkspaceWrite(segments.joinToString("/"), content.size.toLong(), true, version)
             }
-            if (!hasPersistedGrant(write = true)) InternalWorkspaceErrorCode.UNKNOWN_OUTCOME.error()
-            val created = children(parent.uri).firstOrNull { it.id == createdId }
-                ?: InternalWorkspaceErrorCode.UNKNOWN_OUTCOME.error()
-            if (created.name != segments.last()) InternalWorkspaceErrorCode.PROVIDER_ALIAS_AMBIGUOUS.error()
-            if (created.type != InternalWorkspaceEntryType.FILE || created.size != null && created.size != content.size.toLong()) {
-                InternalWorkspaceErrorCode.UNKNOWN_OUTCOME.error()
-            }
-            val version = fileVersion(safeUri)
-            InternalWorkspaceWrite(segments.joinToString("/"), content.size.toLong(), true, version)
         }
     }
 

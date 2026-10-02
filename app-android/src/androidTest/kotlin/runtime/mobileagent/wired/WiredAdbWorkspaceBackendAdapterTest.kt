@@ -430,7 +430,7 @@ class WiredAdbWorkspaceBackendAdapterTest {
                                 bytes = if (Files.isRegularFile(child)) Files.size(child) else null,
                             )
                         }
-                        .toList()
+                        .collect(java.util.stream.Collectors.toList())
                 }
                 val start = when (cursor) {
                     null -> 0

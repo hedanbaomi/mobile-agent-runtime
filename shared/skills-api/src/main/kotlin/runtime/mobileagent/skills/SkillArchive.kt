@@ -18,12 +18,16 @@ import kotlinx.serialization.json.putJsonArray
 import kotlinx.serialization.json.putJsonObject
 import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
+import java.io.OutputStream
 import java.nio.charset.Charset
 import java.text.Normalizer
 import java.security.MessageDigest
+import java.security.DigestOutputStream
 import java.util.Locale
 import java.util.zip.CRC32
+import java.util.zip.ZipEntry
 import java.util.zip.ZipInputStream
+import java.util.zip.ZipOutputStream
 
 data class SkillInspection(
     val classification: CompatibilityClass,
@@ -47,6 +51,8 @@ object SkillArchive {
     const val MAX_ENTRY_BYTES = 32L * 1024 * 1024
     const val MAX_TOTAL_BYTES = 200L * 1024 * 1024
     const val MAX_RATIO = 100
+    /** Native zipimport reads the supplied runtime archive in full under this existing bound. */
+    const val MAX_RUNTIME_ARTIFACT_BYTES = 32L * 1024 * 1024
 
     private const val EOCD_SIGNATURE = 0x06054B50
     private const val CENTRAL_DIRECTORY_SIGNATURE = 0x02014B50
@@ -74,6 +80,8 @@ object SkillArchive {
         "network" to Regex("\\b(?:socket|urllib\\.request|http\\.client)\\b"),
         "native-extension" to Regex("\\b(?:ctypes|cffi)\\b"),
     )
+
+    data class StoredRuntimeArtifact(val sha256: String, val sizeBytes: Long)
 
     fun inspect(bytes: ByteArray, expectedHash: String? = null): SkillInspection {
         val hash = sha256Hex(bytes)
@@ -171,6 +179,78 @@ object SkillArchive {
         }
         reasons += "Not a skill archive or SKILL.md"
         return SkillInspection(CompatibilityClass.E, reasons, null, null, hash, emptyList(), false)
+    }
+
+    /**
+     * Verify the original installed package and write a runtime-only STORED ZIP copy for CPython's
+     * constrained zipimport path. The original bytes and package hash remain the installation and
+     * authorization identity; this digest is only for the staged descriptor sent to the isolated
+     * service. The output stream is closed by this method.
+     */
+    fun writeVerifiedPythonRuntimeArtifact(
+        originalPackage: ByteArray,
+        expectedOriginalHash: String,
+        output: OutputStream,
+    ): StoredRuntimeArtifact {
+        val inspection = inspect(originalPackage, expectedOriginalHash)
+        require(
+            inspection.installable && inspection.classification == CompatibilityClass.B &&
+                inspection.manifest?.runtimeKind == "python",
+        ) { "Original package is not a verified executable Python skill" }
+
+        // inspect() above applies the complete archive budget, canonical path, duplicate path,
+        // symlink, local/central-directory, size, CRC and compression-ratio checks before output.
+        val entries = validateZipStructure(originalPackage).entries.sortedBy { it.localHeaderOffset }
+        val digest = MessageDigest.getInstance("SHA-256")
+        val bounded = LimitedOutputStream(output, MAX_RUNTIME_ARTIFACT_BYTES)
+        val zipOutput = ZipOutputStream(DigestOutputStream(bounded, digest), Charsets.UTF_8)
+        var count = 0
+        var totalUncompressed = 0L
+        try {
+            ZipInputStream(ByteArrayInputStream(originalPackage)).use { zipInput ->
+                while (true) {
+                    val entry = zipInput.nextEntry ?: break
+                    val expected = entries.getOrNull(count)
+                        ?: error("ZIP local headers do not match the central directory")
+                    count += 1
+                    require(count <= MAX_ENTRIES) { "Archive exceeds 5000 files" }
+                    require(entry.name == expected.name && normalizeArchivePath(entry.name) != null) {
+                        "ZIP entry path does not match the verified archive"
+                    }
+                    val payload = readBounded(zipInput, MAX_ENTRY_BYTES.toInt())
+                        ?: error("Entry exceeds size limit")
+                    val crc = CRC32().also { it.update(payload) }.value
+                    require(
+                        payload.size.toLong() == expected.uncompressedSize &&
+                            entry.compressedSize == expected.compressedSize && crc == expected.crc32,
+                    ) { "ZIP entry data does not match the verified central directory" }
+                    totalUncompressed += payload.size
+                    require(totalUncompressed <= MAX_TOTAL_BYTES) { "Uncompressed archive exceeds 200 MiB" }
+
+                    val stored = ZipEntry(entry.name).apply {
+                        method = ZipEntry.STORED
+                        size = payload.size.toLong()
+                        compressedSize = payload.size.toLong()
+                        this.crc = crc
+                        // Normalize metadata so equivalent stored and deflated packages stage to
+                        // the same deterministic runtime bytes without changing the source package.
+                        time = 0L
+                    }
+                    zipOutput.putNextEntry(stored)
+                    zipOutput.write(payload)
+                    zipOutput.closeEntry()
+                    zipInput.closeEntry()
+                }
+            }
+            require(count == entries.size) { "ZIP local headers do not match the central directory" }
+            zipOutput.finish()
+        } finally {
+            zipOutput.close()
+        }
+        return StoredRuntimeArtifact(
+            sha256 = digest.digest().joinToString("") { "%02x".format(it.toInt() and 0xff) },
+            sizeBytes = bounded.bytesWritten,
+        )
     }
 
     private data class ArchiveContent(
@@ -309,6 +389,31 @@ object SkillArchive {
             out.write(buf, 0, n)
         }
         return out.toByteArray()
+    }
+
+    private class LimitedOutputStream(
+        private val delegate: OutputStream,
+        private val maximumBytes: Long,
+    ) : OutputStream() {
+        var bytesWritten: Long = 0
+            private set
+
+        override fun write(value: Int) {
+            require(bytesWritten < maximumBytes) { "Runtime archive exceeds 32 MiB" }
+            delegate.write(value)
+            bytesWritten += 1
+        }
+
+        override fun write(bytes: ByteArray, offset: Int, length: Int) {
+            require(offset >= 0 && length >= 0 && offset <= bytes.size - length) { "Invalid output range" }
+            require(length.toLong() <= maximumBytes - bytesWritten) { "Runtime archive exceeds 32 MiB" }
+            delegate.write(bytes, offset, length)
+            bytesWritten += length
+        }
+
+        override fun flush() = delegate.flush()
+
+        override fun close() = delegate.close()
     }
 
     private fun classify(

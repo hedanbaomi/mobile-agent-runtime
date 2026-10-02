@@ -152,14 +152,24 @@ class AnnouncementRefreshCoordinator(
         foreground()
     }
 
-    /** Trigger an actual foreground cycle and enqueue opt-in activity telemetry. */
+    /**
+     * Trigger an actual foreground cycle and enqueue opt-in activity telemetry.
+     *
+     * The storage reads and writes of this preamble run on the coordinator's own scope, so the
+     * Activity lifecycle callback that calls it never touches the database on the main thread.  A
+     * storage fault stays a telemetry fault: it is contained here and cannot take down the shell.
+     * The single-flight refresh below is unchanged.
+     */
     fun foreground(): Deferred<AnnouncementRefreshResult> {
-        val client = store.client()
-        val now = clock()
-        if (store.statsEnabled()) {
-            store.recordInstallSeen(client, now)
-            store.recordAppActive(client, now)
-            scheduleTelemetryFlush()
+        scope.launch {
+            runCatching {
+                if (!store.statsEnabled()) return@runCatching
+                val client = store.client()
+                val now = clock()
+                store.recordInstallSeen(client, now)
+                store.recordAppActive(client, now)
+                scheduleTelemetryFlush()
+            }
         }
         return refresh(force = false, foreground = true)
     }
@@ -203,18 +213,30 @@ class AnnouncementRefreshCoordinator(
     /** Exposed for deterministic JVM/instrumentation tests and explicit retry after connectivity. */
     fun flushTelemetry(): Job = scheduleTelemetryFlush() ?: completedJob()
 
+    /**
+     * Queue a best-effort telemetry upload.
+     *
+     * Single-flight is still decided under [requestLock], but no storage is touched to decide it:
+     * consent, identity and base URL are read inside the launched coroutine, so a caller on the main
+     * thread never waits on the database.  Consent can be withdrawn before this run really starts;
+     * the withdrawal path cancels the job and [flushTelemetryInternal] re-checks consent before every
+     * batch and before acknowledging anything.
+     */
     private fun scheduleTelemetryFlush(): Job? {
-        if (!store.statsEnabled() || store.telemetryIdentity() == null || store.baseUrl().isBlank()) return null
         synchronized(requestLock) {
-            // Re-check after taking the same lock used by the withdrawal callback. Without this
-            // second check, disable could win between the initial check and launch a new upload.
-            if (!store.statsEnabled() || store.telemetryIdentity() == null || store.baseUrl().isBlank()) {
-                return null
-            }
             val current = telemetryJob
             if (current?.isActive == true) return current
             val created = scope.launch {
-                telemetryMutex.withLock { flushTelemetryInternal() }
+                try {
+                    if (!store.statsEnabled() || store.telemetryIdentity() == null || store.baseUrl().isBlank()) {
+                        return@launch
+                    }
+                    telemetryMutex.withLock { flushTelemetryInternal() }
+                } catch (cancelled: CancellationException) {
+                    throw cancelled
+                } catch (_: Exception) {
+                    // Best-effort telemetry must not crash the process when storage is unavailable.
+                }
             }
             telemetryJob = created
             created.invokeOnCompletion {

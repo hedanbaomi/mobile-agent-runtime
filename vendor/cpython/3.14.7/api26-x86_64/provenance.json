@@ -1,0 +1,24 @@
+{
+  "version": "3.14.7",
+  "architecture": "x86_64",
+  "artifact": "libpython3.14.so",
+  "sha256": "58325117a3352c52827be08ffe602eb7b00d17702996b7fbf031ff51e3667b0f",
+  "sourceUrl": "https://www.python.org/ftp/python/3.14.7/Python-3.14.7.tar.xz",
+  "sourceSha256": "3b48dac8fb59f62eaa67ac83c1eb12bda1b7a08406dd286e252c11a66be27f81",
+  "ndkUrl": "https://dl.google.com/android/repository/android-ndk-r27d-linux.zip",
+  "ndkSha256": "601246087a682d1944e1e16dd85bc6e49560fe8b6d61255be2829178c8ed15d9",
+  "ndkRevision": "27.3.13750724",
+  "androidApi": 26,
+  "buildPython": "3.14.4",
+  "sourceDateEpoch": 1785888000,
+  "sourceChanges": [],
+  "configure": [
+    "--without-mimalloc",
+    "--without-ensurepip",
+    "--enable-shared",
+    "--without-static-libpython",
+    "--disable-test-modules"
+  ],
+  "linkerPageSize": 16384,
+  "recipe": "tools/rebuild_cpython_api26.py"
+}

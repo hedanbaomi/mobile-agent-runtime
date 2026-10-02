@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 import java.io.File
+import groovy.json.JsonSlurper
 import java.net.HttpURLConnection
 import java.net.URI
 import java.nio.file.Files
@@ -32,6 +33,16 @@ val officialCpythonSigstoreSha256 = mapOf(
 val officialCpythonSource = "https://www.python.org/ftp/python/$officialCpythonVersion"
 val pythonAssetSourceDirectory = layout.buildDirectory.dir("generated/pythonAssetSources")
 val pythonAssetDirectory = layout.buildDirectory.dir("generated/pythonAssets")
+val compatibilityDirectory = rootProject.file("vendor/cpython/3.14.7/api26-x86_64")
+val compatibilitySha256 = "58325117a3352c52827be08ffe602eb7b00d17702996b7fbf031ff51e3667b0f"
+val safeStdlibRegistryFile = file("safe-stdlib-modules.json")
+val safeStdlibModules = listOf(
+    "math", "_csv", "binascii", "_struct", "_random", "unicodedata",
+    "_sha1", "_sha2", "_sha3", "_md5", "_blake2", "zlib",
+)
+@Suppress("UNCHECKED_CAST")
+val safeStdlibRegistry = JsonSlurper().parse(safeStdlibRegistryFile) as Map<String, Map<String, Map<String, String>>>
+
 
 fun File.sha256Hex(): String {
     val digest = MessageDigest.getInstance("SHA-256")
@@ -168,8 +179,40 @@ val verifyOfficialCpython = tasks.register("verifyOfficialCpython") {
     }
 }
 
-val stageOfficialCpythonLibraries = tasks.register("stageOfficialCpythonLibraries") {
+val verifyCpythonCompatibility = tasks.register("verifyCpythonCompatibility") {
     dependsOn(verifyOfficialCpython)
+    doLast {
+        check(compatibilityDirectory.resolve("libpython3.14.so").sha256Hex() == compatibilitySha256) {
+            "API26 compatibility CPython library hash mismatch"
+        }
+        check(compatibilityDirectory.resolve("provenance.json").sha256Hex() ==
+            "87ff06f15d0270ae6b3216d2b7d70c0a2846b39dee43ed0e30887904607a8ed7") {
+            "Compatibility CPython provenance mismatch"
+        }
+        check(compatibilityDirectory.resolve("LICENSE.txt").sha256Hex() ==
+            "b0e25a78cffb43f4d92de8b61ccfa1f1f98ecbc22330b54b5251e7b6ba010231") {
+            "Compatibility CPython license mismatch"
+        }
+        check(safeStdlibRegistryFile.sha256Hex() ==
+            "3dd29d5f21ecf5c8d08d4fbbd231e4307186c14101e465ac21ff8fdcb8fc40d6") {
+            "Safe standard-library registry mismatch"
+        }
+        check(safeStdlibRegistry.keys == officialCpythonSha256.keys)
+        safeStdlibRegistry.forEach { (architecture, modules) ->
+            check(modules.keys == safeStdlibModules.toSet())
+            modules.forEach { (name, record) ->
+                check(record["source"] == "$name.cpython-314-$architecture-linux-android.so")
+                val source = prefixFor(architecture).resolve("lib/python3.14/lib-dynload").resolve(record.getValue("source"))
+                check(source.sha256Hex() == record.getValue("sha256")) {
+                    "Official CPython standard-library module hash mismatch: $architecture/$name"
+                }
+            }
+        }
+    }
+}
+
+val stageOfficialCpythonLibraries = tasks.register("stageOfficialCpythonLibraries") {
+    dependsOn(verifyCpythonCompatibility)
     outputs.dir(layout.buildDirectory.dir("generated/cpython-jniLibs"))
     doLast {
         val destinationRoot = layout.buildDirectory.dir("generated/cpython-jniLibs").get().asFile
@@ -185,8 +228,36 @@ val stageOfficialCpythonLibraries = tasks.register("stageOfficialCpythonLibrarie
                         file.name.startsWith("lib") && file.name.endsWith("_python.so"))
                 }
                 ?.forEach { file -> file.copyTo(destination.resolve(file.name), overwrite = true) }
+            if (architecture == "x86_64") {
+                compatibilityDirectory.resolve("libpython3.14.so")
+                    .copyTo(destination.resolve("libpython3.14.so"), overwrite = true)
+            }
+            safeStdlibRegistry.getValue(architecture).forEach { (name, record) ->
+                prefixFor(architecture).resolve("lib/python3.14/lib-dynload").resolve(record.getValue("source"))
+                    .copyTo(destination.resolve("libcpython_$name.so"), overwrite = true)
+            }
             check(destination.resolve("libpython3.14.so").isFile) { "Failed to stage CPython for $abi" }
         }
+        destinationRoot.resolve("safe_stdlib_modules.h").writeText(buildString {
+            appendLine("// SPDX-FileCopyrightText: 2026 mobileAgentRuntime contributors")
+            appendLine("// SPDX-" + "License-Identifier: AGPL-3.0-only")
+            safeStdlibModules.forEach { name -> appendLine("extern PyObject *PyInit_$name(void);") }
+            appendLine("static struct _inittab safe_stdlib_modules[] = {")
+            safeStdlibModules.forEach { name -> appendLine("    {\"$name\", &PyInit_$name},") }
+            appendLine("    {NULL, NULL}")
+            appendLine("};")
+        })
+        destinationRoot.resolve("safe_stdlib_modules.cmake").writeText(buildString {
+            appendLine("# SPDX-FileCopyrightText: 2026 mobileAgentRuntime contributors")
+            appendLine("# SPDX-" + "License-Identifier: AGPL-3.0-only")
+            safeStdlibModules.forEach { name ->
+                appendLine("add_library(cpython_stdlib_$name SHARED IMPORTED GLOBAL)")
+                appendLine("set_target_properties(cpython_stdlib_$name PROPERTIES")
+                appendLine("    IMPORTED_LOCATION \"\${CPYTHON_STDLIB_DIR}/\${CMAKE_ANDROID_ARCH_ABI}/libcpython_$name.so\"")
+                appendLine("    IMPORTED_NO_SONAME TRUE)")
+            }
+            appendLine("set(CPYTHON_STDLIB_TARGETS " + safeStdlibModules.joinToString(" ") { "cpython_stdlib_$it" } + ")")
+        })
     }
 }
 
@@ -223,7 +294,7 @@ val packagePythonLicense = tasks.register<Copy>("packagePythonLicense") {
 }
 
 val packagePythonNotice = tasks.register("packagePythonNotice") {
-    dependsOn(verifyOfficialCpython)
+    dependsOn(verifyCpythonCompatibility)
     val notice = pythonAssetSourceDirectory.map {
         it.file("licenses/cpython-$officialCpythonVersion/NOTICE.txt")
     }
@@ -231,6 +302,11 @@ val packagePythonNotice = tasks.register("packagePythonNotice") {
     doLast {
         val destination = notice.get().asFile
         destination.parentFile.mkdirs()
+        compatibilityDirectory.resolve("provenance.json").copyTo(destination.parentFile.resolve("compatibility-provenance.json"), overwrite = true)
+        compatibilityDirectory.resolve("HACL-LICENSE.txt").copyTo(destination.parentFile.resolve("HACL-LICENSE.txt"), overwrite = true)
+        compatibilityDirectory.resolve("BLAKE2-NOTICE.txt").copyTo(destination.parentFile.resolve("BLAKE2-NOTICE.txt"), overwrite = true)
+        compatibilityDirectory.resolve("CC0-1.0.txt").copyTo(destination.parentFile.resolve("CC0-1.0.txt"), overwrite = true)
+        safeStdlibRegistryFile.copyTo(destination.parentFile.resolve("safe-stdlib-modules.json"), overwrite = true)
         destination.writeText(
             buildString {
                 appendLine("CPython $officialCpythonVersion Android embedded artifacts")
@@ -244,7 +320,18 @@ val packagePythonNotice = tasks.register("packagePythonNotice") {
                 appendLine("https://www.python.org/ftp/python/$officialCpythonVersion/python-$officialCpythonVersion-x86_64-linux-android.tar.gz")
                 appendLine("SHA-256: ${officialCpythonSha256.getValue("x86_64")}")
                 appendLine()
+                appendLine("x86_64 libpython3.14.so is a project-built derivative of the unmodified source release.")
+                appendLine("Source archive: https://www.python.org/ftp/python/3.14.7/Python-3.14.7.tar.xz")
+                appendLine("Source SHA-256: 3b48dac8fb59f62eaa67ac83c1eb12bda1b7a08406dd286e252c11a66be27f81")
+                appendLine("Change: --without-mimalloc removes its constructor's legacy SYS_open on isolated API26.")
+                appendLine("Verified build-input SHA-256: $compatibilitySha256")
+                appendLine("Android packaging may strip debug/symbol tables; packaged hashes are recorded in the APK native SBOM.")
+                appendLine("Recipe: tools/rebuild_cpython_api26.py; provenance: compatibility-provenance.json")
+                appendLine("Other architectures retain the pinned official libpython.")
+                appendLine("Fixed official data-only extension modules are linked and registered as builtins.")
                 appendLine("The adjacent LICENSE.txt is the complete upstream PSF license and notice text.")
+                appendLine("HACL-LICENSE.txt and BLAKE2-NOTICE.txt retain those upstream module notices.")
+                appendLine("CC0-1.0.txt contains the complete dedication terms referenced by the BLAKE2 notice.")
             },
             Charsets.UTF_8,
         )
@@ -273,6 +360,8 @@ android {
         externalNativeBuild {
             cmake {
                 arguments += "-DCPYTHON_RELEASE_DIR=${officialCpythonDirectory.get().asFile.absolutePath.replace('\\', '/')}"
+                arguments += "-DCPYTHON_COMPAT_LIBRARY=${compatibilityDirectory.resolve("libpython3.14.so").absolutePath.replace('\\', '/')}"
+                arguments += "-DCPYTHON_STDLIB_DIR=${layout.buildDirectory.dir("generated/cpython-jniLibs").get().asFile.absolutePath.replace('\\', '/')}"
             }
         }
     }

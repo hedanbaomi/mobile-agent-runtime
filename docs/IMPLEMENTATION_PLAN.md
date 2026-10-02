@@ -201,6 +201,8 @@ interface SecretStore {
 
 `ModelEvent` 最少包含 TextDelta、ToolCallDelta、Usage、Completed、Failed。流式 tool call 按 provider call ID 聚合，完整 JSON 和 schema 校验后才执行；残缺、未知工具或重复 call ID不执行。取消关闭流和关联工作，不把半截回答当完整成功。
 
+2026-10-02 终态补充：Responses 的 `[DONE]` 不能绕过可见输出守卫，也不能将尚未得到协议确认的工具参数释放为成功调用；空响应与推理独占响应须保留各自失败分类。Chat 的 `length` 无论随后收到 `[DONE]` 或 EOF，都按同一正文/推理证据细化截断分类，并保留已知用量。Responses JSON 未知状态须在正文解析前判断，仅保留校验通过的 Usage，再返回 `UNKNOWN_OUTCOME`，不释放该状态的正文或工具。JSON `error` 对象与 SSE `response.failed`/`error` 也须先保留结构有效的 Usage，再发出原脱敏失败终态。
+
 Chat Completions 的 usage 是单次 completion 累计快照：adapter 只在终态前提交最后一份，`choices=[]` 的 usage 仍有效；Runtime 可累加不同模型轮次。空正文且无工具调用/拒绝内容的完成明确失败；长度截断保留 `CONTEXT_OVERFLOW`。可选单模型 metadata 路由返回 404/405 时，无论 model id 是否含 `/`，均可用 `GET /models` 按完整 ID 精确匹配；metadata 不支持不得提前阻断独立能力探测，也不得把认证失败或模型不匹配当成成功。官方 OpenAI 兼容根地址（例如 `https://api.deepseek.com`）join 相对路径时不得插入 `/v1`。工具探测在 HTTP 200 但未发出强制 tool call 时记为未确认，不得据此判定实际对话工具不可用或 Base URL 无效。
 
 能力可由模型清单、用户手动配置和轻量测试共同形成，记录来源和时间。能力测试会向用户 Provider 发请求并可能计费，须明确告知；不自动遍历所有模型收费探测。
@@ -382,7 +384,7 @@ API 31 x86_64 定向验证已覆盖确认卡 2/2、预算 3/3、工作区 6/6；
 - Shizuku 验证 shell UID、caller/session/protocol，typed 文件 RPC 与 shell 输出使用 PFD/有界预算；Wired ADB Companion 使用显式 USB serial、固定 loopback、挑战身份、配对 token、AEAD/序号/tombstone 与 Android Keystore bound secret。两者平级且不 fallback。
 - `shell_exec` 仅在 Dangerous Mode、`shell.execute` capability 和 selected Authority 同时有效时注册；原始 command/cwd 只在用户审批 UI 中显示，不写诊断。inline approval 只授予本次调用；长期 grant 必须在 Agent 设置独立创建。
 - Chat 流和 Knowledge import 使用稳定 owner；跨页面不取消。进程重启后的旧 WAITING_TOOL_APPROVAL 会被终结并标记 invalidated，不能续批或自动重放。
-- v2 diagnostics 默认关闭、闭合 schema、会话 HMAC、固定 256/256/32/4/640 KiB 上限，并覆盖 Authority/Workspace/Memory/Approval/Shell/Bridge 的 started/terminal/unknown 路径。
+- v2 diagnostics 默认关闭、闭合 schema、会话 HMAC、固定 8/8 MiB、32/64 KiB、20 MiB 上限，并覆盖 Authority/Workspace/Memory/Approval/Shell/Bridge 的 started/terminal/unknown 路径。
 
 严格构建、API 31 设备矩阵、Debug/Review APK、SBOM/provenance、许可与 remaining E2E boundary 见 [2026-09-01 真实工作区 E2E 证据](evidence/2026-09-01/workspace-tool-real-e2e.md)。系统 DocumentsUI SAF 与官方 Shizuku UID 2000 UserService 已在 API 31 x86_64 模拟器 `DEVICE E2E PASS`；物理 USB Companion、物理断连恢复、OEM provider 和非模拟器设备差异仍为 `E2E_BLOCKED`。Root、无线 ADB、DPC、Termux、PTY、Accessibility 与宿主 shell 不是待实现分支。
 
@@ -416,3 +418,10 @@ Schema 20 在 19 的批次授权字段之上新增 staging_manifest 与 staging_
 PDF 解析支持合法紧凑关闭分隔符后紧接 endobj 的对象，保持 stream 数据区长度和 endstream 边界校验；解析指纹升级 v15。诊断在真实 backend 前后记录脱敏派发、响应、保存与复用事件，可按 batch/job 不透明标识关联。
 
 验收和证据以 [本轮复核报告](evidence/2026-09-13/p1-batch-import-review.md) 为准；这段替代旧报告中取消 Worker 实现暂停、schema 19 为当前版本的描述。
+
+
+## 2026-10-02 隔离 Python 附件修复增量
+
+固定 CPython 3.14.7 x86_64/API26 派生核心及 12 个固定上游 builtins；保持隔离、权限和原包身份，合法 ZIP 转换为有界 STORED 私有运行副本并双层 FD hash 校验。
+
+详见 [ADR 0019](adr/0019-python-isolated-api26-and-fixed-stdlib.md) 与 [附件修复处置及证据](evidence/2026-10-02/attachment-repair.md)。真实 Provider/真机/USB/Shizuku/长跑验收单独报告。

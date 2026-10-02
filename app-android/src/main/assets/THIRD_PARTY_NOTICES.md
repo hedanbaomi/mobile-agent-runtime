@@ -36,11 +36,16 @@ verifies the module-generated roots or an explicitly supplied APK/AAB/ZIP
 asset boundary; it fails closed when a boundary or material is missing:
 
 - CPython 3.14.7: `LICENSE.txt` `b0e25a78cffb43f4d92de8b61ccfa1f1f98ecbc22330b54b5251e7b6ba010231`,
-  `NOTICE.txt` `87e76594ca56bd6b1116d2ee9b902b98c0940863762f9ef822de9a3cec31fcb3`.
+  `NOTICE.txt` `3ae7058d5b00ca380dbe672986e7c4beb8cdbbb7c9f75da9dfb4d3408adab39f`.
   The standard-library payload `python/python3.14.zip` is recorded and verified by
   its exact SHA-256 in `licenses/index.json` (`payloads[]`); it is deliberately not
   repeated here, because its bytes can change when the archive's inputs or generator
   change and this prose must not pin a value that can become stale.
+  The x86_64 core is a project-built API26 derivative from the unchanged pinned source,
+  configured without mimalloc. Fixed upstream modules are registered as builtins;
+  HACL MIT, BLAKE2 CC0 notices and the complete CC0 terms accompany the PSF license.
+  The adjacent provenance and module registry retain verified build-input hashes;
+  packaged native hashes after Android stripping belong to the APK SBOM.
 - USearch 2.25.1: `LICENSE.txt` `c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4`,
   `NOTICE.txt` `145493df94feaef58efd5f5fcedc9d4d3c08a285dbbf87a9eefae3455cb475a4`,
   and pinned source archive `30dd99efab891a6385a89ecd3a3a8a85ed7d3f064b7657588fc3ef5ccd2d52e3`.

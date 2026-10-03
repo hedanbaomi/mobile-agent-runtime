@@ -396,8 +396,8 @@ class UnifiedWorkspaceToolExecutor(
         val completed = recordTerminal(bound, operation, toolExecution, clock.nowMillis() - startedAt)
         if (!completed) {
             auditFuse.trip()
-            return ToolExecution.Failed(
-                ToolError(ToolErrorCode.AUDIT_UNAVAILABLE, details = mapOf("audit_degraded" to "true")),
+            return ToolExecution.Unknown(
+                ToolError(ToolErrorCode.UNKNOWN_OUTCOME, details = mapOf("audit_degraded" to "true")),
             )
         }
         return toolExecution

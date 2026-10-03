@@ -10,6 +10,8 @@ import io.ktor.http.HttpHeaders
 import io.ktor.http.HttpStatusCode
 import io.ktor.http.headersOf
 import kotlinx.coroutines.test.runTest
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.async
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
 import org.junit.jupiter.api.Assertions.assertEquals
@@ -18,6 +20,41 @@ import org.junit.jupiter.api.Test
 import runtime.mobileagent.provider.RequestHeaderValue
 
 class KtorMcpStreamableHttpTransportTest {
+    @Test
+    fun authorizationIsCheckedAfterSuspendingSecretResolutionAndBeforeHttpDispatch() = runTest {
+        for (resolverOutcome in listOf("header", "throw", "empty")) {
+        var requests = 0
+        var authorized = true
+        val entered = CompletableDeferred<Unit>()
+        val release = CompletableDeferred<Unit>()
+        val client = HttpClient(MockEngine {
+            requests++
+            respond("{}", HttpStatusCode.OK)
+        })
+        try {
+            val transport = KtorMcpStreamableHttpTransport(client, "https://example.invalid/mcp",
+                defaultHeaders = mapOf("X-Executor" to RequestHeaderValue.SecretRef("fixture-reference")),
+                headerSecretResolver = { _, _ ->
+                    entered.complete(Unit); release.await()
+                    when (resolverOutcome) {
+                        "throw" -> throw IllegalStateException("private-resolver-error")
+                        "empty" -> CharArray(0)
+                        else -> "fixture-header".toCharArray()
+                    }
+                },
+                dispatchAuthorized = { authorized })
+            val request = async {
+                runCatching { transport.request(buildJsonObject { put("method", JsonPrimitive("tools/call")) }) }
+            }
+            entered.await(); authorized = false; release.complete(Unit)
+            val denied = request.await().exceptionOrNull()
+            assertTrue(denied is McpDispatchDeniedException)
+            assertTrue(!denied?.message.orEmpty().contains("private-resolver-error"))
+            assertEquals(0, requests)
+        } finally { client.close() }
+        }
+    }
+
     @Test
     fun postsJsonRpcWithSessionAndResolvesSecretHeaderWithoutReplay() = runTest {
         var requests = 0

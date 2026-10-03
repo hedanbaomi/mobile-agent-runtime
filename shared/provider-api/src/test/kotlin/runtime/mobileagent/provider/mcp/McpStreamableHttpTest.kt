@@ -18,6 +18,21 @@ import org.junit.jupiter.api.Test
 
 class McpStreamableHttpTest {
     @Test
+    fun localDispatchDenialIsDefiniteAndStillConsumesTheCallId() = runBlocking {
+        val transport = FakeTransport()
+        val adapter = RemoteMcpAdapter(transport, "demo")
+        adapter.initialize(); adapter.discoverTools()
+        val grant = adapter.freezeGrant("grant", 1, setOf("demo/echo"))
+        transport.denyCall = true
+        val denied = adapter.callTool(grant, "denied-call", "demo/echo", JsonObject(emptyMap()))
+        assertTrue(denied is McpCallResult.Denied)
+        transport.denyCall = false
+        val replay = adapter.callTool(grant, "denied-call", "demo/echo", JsonObject(emptyMap()))
+        assertTrue(replay is McpCallResult.Denied)
+        assertTrue(!transport.callStarted)
+    }
+
+    @Test
     fun initializeDiscoverFreezeAndCallUseNamespacedExplicitGrant() = runBlocking {
         val transport = FakeTransport()
         val adapter = RemoteMcpAdapter(transport, namespace = "demo")
@@ -76,6 +91,7 @@ class McpStreamableHttpTest {
         val messages = mutableListOf<JsonObject>()
         val releaseCall = CompletableDeferred<Unit>()
         var holdCall = false
+        var denyCall = false
         var callStarted = false
         var changedTools = false
 
@@ -115,6 +131,7 @@ class McpStreamableHttpTest {
                     ),
                 )
                 "tools/call" -> {
+                    if (denyCall) throw McpDispatchDeniedException()
                     callStarted = true
                     if (holdCall) releaseCall.await()
                     McpTransportResponse.Messages(

@@ -84,7 +84,7 @@ PDF同时提取文本、图片和页面结构，并保留可渲染页。流程�
 
 2026-09-11 4f0556d 复审补充：parser fingerprint 为 `pdf-text-v14-pdfrenderer`。PDF 字典按词法解析：键只在当前层级识别，键与值交替推进，注释、字面量串、十六进制串、嵌套字典/数组与间接引用整体跳过。这样键才是被「找到」而不是被「扫描到」，注释或字符串里的 `/Differences`、嵌套字典的同名键、作为名称值的 `/Differences` 都不会再让真正的映射看起来缺失。`/Differences` 缺失、畸形与合法空必须区分：畸形一律 fail closed 进入 Vision，不得退化成「无映射」后把未声明字节发布为完整文本。知识库 ZIP 在交给入库前核对每项实际解压字节的尺寸与 CRC-32；两个头声明一致不能证明正文未被改动。JVM 证据见 [4f0556d 复审](evidence/2026-09-11/review-4f0556d-dictionary-lexicon-and-zip-crc.md)。
 
-DOCX/EPUB关联图片与所在段落/章节；独立图片保留原始像素内容。可缩放/压缩的处理副本与原图分别哈希，记录转换参数；模型能力不支持时提示，不能以缩略图代替完整证据却不说明。
+EPUB `epub-xml-v4` 使用有界 XHTML 扫描识别单/双引号图片；仅 prolog 中唯一固定无实体的 `<!DOCTYPE html>` 先剥离；其他 DTD/实体声明、畸形或超深 XML 本地失败且不外联。SVG/object 等未支持视觉项显式保留为 `UNSUPPORTED`，阻止完整 READY；只有明确文本缺口接受才可降级。旧 v3 指纹不得跳过重解析。DOCX/EPUB关联图片与所在段落/章节；独立图片保留原始像素内容。可缩放/压缩的处理副本与原图分别哈希，记录转换参数；模型能力不支持时提示，不能以缩略图代替完整证据却不说明。
 
 视觉结果至少包含 assetId、sourceDocumentId、page/section、type、ocrText、semanticDescription、entities、relationships、tableMarkdown、surroundingText和provenance。模型自报 confidence只是未校准元数据，不得作为“已经准确识别”的保证。
 
@@ -100,7 +100,7 @@ DOCX/EPUB关联图片与所在段落/章节；独立图片保留原始像素内�
 
 API 空间绑定 Provider ID/revision、规范化 endpoint、ModelProfile ID/revision、实际 modelId、维度和 dataScope。确认页面展示完整目的地、模型与数据范围；Vision 同意不能替代此同意。公开 `rebuildIndex`/`repairIndexes` 在缺少该空间的有效同意时必须于解析 API adapter 前拒绝，不能借重建入口外发文本。
 
-schema v9 的 `embedding_query_attempts` 以 `(kb_id, space_id, SHA-256(query UTF-8))` 标识一次查询。调用外部 embedding 前，以短事务新建 pending 行或消费已批准的一次重试；外部结果未知、取消、中断及进程死亡保留该行。schema v10 的 `embedding_query_vectors` 在得到合法、匹配空间的向量后缓存该向量；只有完整 retrieve 成功才清理尝试门禁与缓存。若 generation/chunk/native index 等本地后半段失败，下次提交复用缓存向量，不再次调用外部 API。相同键在未批准且无合法缓存时不得解析 adapter 或发送请求；不同 KB、空间和查询不共享授权。
+schema v9 的 `embedding_query_attempts` 以 `(kb_id, space_id, SHA-256(query UTF-8))` 标识一次查询。调用外部 embedding 前，以短事务新建 pending 行或消费已批准的一次重试；外部结果未知、取消、中断及进程死亡保留该行。schema v10 的 `embedding_query_vectors` 在得到合法、匹配空间的向量后缓存该向量；成功向量入不可变缓存后以本次 owner 清理尝试门禁，缓存不随 retrieve 成功删除。若 generation/chunk/native index 等本地后半段失败，下次提交复用缓存向量，不再次调用外部 API；若仍有并行新 owner 的 pending 行，须明确授权后才能本地收尾。相同键存在未批准 pending 时，不因缓存存在而绕过该门禁，也不得解析 adapter 或发送请求；不同 KB、空间和查询不共享授权。
 
 仓库接口为 `pendingApiQueries(kbId)` 与 `authorizeApiQueryRetry(kbId, spaceId, queryHash, acknowledgeDuplicateCharge)`。后者只记录一次重试许可，不发请求。知识库页显示查询 hash、完整目标与可能重复收费的风险；用户确认后，须回到聊天主动重新提交同一查询。下一次提交在调用前消费许可；再次未知需再次确认。App/内置工具/Python Broker 将 `ApiQueryUnknownOutcomeException` 映射为 UNKNOWN，停止当前 Run，不静默回退本地模型、不自动重放。数据库不保存查询原文来实现该门禁。
 
@@ -279,3 +279,7 @@ PDF 解析支持合法紧凑关闭分隔符后紧接 endobj 的对象，保持 s
 `VisionInput.duplicateKey` 由发送图片字节的 SHA-256、随附文字哈希、溯源提示、目标模型与 prompt/schema/预处理版本组成，不含页码和小节名。同一进程内已有相同键的 SUCCESS 结果时，新单元直接采用该结果并按自身页码保存，不派发请求，诊断事件为 `vision_duplicate_reused`。判重只认字节完全一致，不做近似比较，因此相似度低于 95%（包括只差一个像素）的图片一定分别请求。复用索引不持久化，进程重启后重新积累。
 
 用户整包本地估算：521 页改为只发插图，593 次插图请求中只有 210 种不同内容；在同一进程内处理时，视觉请求约由 2,941 次降至 2,630 次。未做真实 Provider、物理设备或整包耗时验收。
+
+## 2026-10-03 API 查询 attempt 所有权
+
+查询派发前持久化随机 owner token；确定失败、成功清理和 UNKNOWN 更新只对本次 token 且 `retry_authorized=0` 的行作 CAS。旧调用不能覆盖新重试或尚未消费的授权；token 对 UI 隐藏，旧无 token 行仍需明确授权。成功查询向量先进入不可变缓存，后续 ANN 失败不重新外发；已有缓存的明确授权恢复可本地收尾。详见 [五项复审修复](evidence/2026-10-03/five-review-fixes.md)。

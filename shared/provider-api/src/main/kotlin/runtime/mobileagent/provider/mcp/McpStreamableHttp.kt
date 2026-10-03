@@ -50,6 +50,9 @@ class McpTransportException(
     cause: Throwable? = null,
 ) : RuntimeException(message, cause)
 
+/** Raised only by a local authorization gate before any HTTP dispatch. */
+class McpDispatchDeniedException : RuntimeException("MCP dispatch authorization is no longer valid")
+
 /**
  * A transport seam used by [RemoteMcpAdapter].  The production implementation
  * is [KtorMcpStreamableHttpTransport]; tests can provide an in-memory transport
@@ -75,6 +78,7 @@ class KtorMcpStreamableHttpTransport(
     private val defaultHeaders: Map<String, RequestHeaderValue> = emptyMap(),
     private val headerSecretResolver: HeaderSecretResolver? = null,
     private val maxResponseBytes: Long = DEFAULT_MAX_RESPONSE_BYTES,
+    private val dispatchAuthorized: () -> Boolean = { true },
 ) : McpStreamableHttpTransport {
     @Volatile
     private var sessionId: String? = null
@@ -99,9 +103,18 @@ class KtorMcpStreamableHttpTransport(
         )
 
     private suspend fun post(message: JsonObject, expectNotification: Boolean): McpTransportResponse {
-        val resolved = resolveHeaders()
+        val resolved = try {
+            resolveHeaders()
+        } catch (cancelled: kotlinx.coroutines.CancellationException) {
+            throw cancelled
+        } catch (failure: Exception) {
+            // No request has been sent. Revocation must still be checked if the suspended
+            // resolver fails instead of returning a header. Never project its source text.
+            requireDispatchAuthorization()
+            throw failure
+        }
         return try {
-            http.preparePost(endpoint) {
+            val request = http.preparePost(endpoint) {
                 contentType(ContentType.Application.Json)
                 headers {
                     append(HttpHeaders.Accept, "application/json, text/event-stream")
@@ -110,7 +123,10 @@ class KtorMcpStreamableHttpTransport(
                     resolved.values.forEach { (name, value) -> append(name, value) }
                 }
                 setBody(message.toString())
-            }.execute { response ->
+            }
+            // Header resolution can suspend. Recheck the live binding after it, at the send boundary.
+            requireDispatchAuthorization()
+            request.execute { response ->
                 response.headers["MCP-Session-Id"]?.takeIf { it.isNotBlank() }?.let { sessionId = it }
                 val status = response.status.value
                 val body = readBounded(response.bodyAsChannel())
@@ -133,6 +149,8 @@ class KtorMcpStreamableHttpTransport(
                     McpTransportResponse.Messages(messages, sessionId)
                 }
             }
+        } catch (e: McpDispatchDeniedException) {
+            throw e
         } catch (e: McpTransportException) {
             throw e
         } catch (e: kotlinx.coroutines.CancellationException) {
@@ -140,6 +158,10 @@ class KtorMcpStreamableHttpTransport(
         } catch (e: Exception) {
             throw McpTransportException(null, "MCP transport failed", e)
         }
+    }
+
+    private fun requireDispatchAuthorization() {
+        if (!runCatching(dispatchAuthorized).getOrDefault(false)) throw McpDispatchDeniedException()
     }
 
     private suspend fun readBounded(channel: io.ktor.utils.io.ByteReadChannel): String {
@@ -486,6 +508,8 @@ class RemoteMcpAdapter(
                     else McpCallResult.Success(callId, rpcResult)
                 }
             }
+        } catch (_: McpDispatchDeniedException) {
+            McpCallResult.Denied(callId, "MCP dispatch authorization is no longer valid")
         } catch (_: kotlinx.coroutines.CancellationException) {
             throw kotlinx.coroutines.CancellationException("MCP call cancelled")
         } catch (e: Exception) {

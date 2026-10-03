@@ -17,6 +17,32 @@ import org.junit.jupiter.api.io.TempDir
 class SafMutationCompletionTest {
     @TempDir lateinit var directory: Path
 
+    @Test fun directoryCreationKeepsPreCreateFailuresAndPostCreateAmbiguity() {
+        val pre = assertThrows(InternalWorkspaceFailure::class.java) {
+            completeSafCreatedDocument(create = { InternalWorkspaceErrorCode.PERMISSION_DENIED.error() },
+                verify = { _: Path -> "unused" })
+        }
+        assertEquals(InternalWorkspaceErrorCode.PERMISSION_DENIED, pre.error.code)
+        val failures: List<() -> String> = listOf(
+            { throw IOException("query failure") },
+            { throw SecurityException("grant revoked") },
+            { InternalWorkspaceErrorCode.PROVIDER_ALIAS_AMBIGUOUS.error() },
+            { throw IllegalStateException("version unavailable") },
+        )
+        failures.forEachIndexed { index, verify ->
+            val path = directory.resolve("mkdir-$index")
+            val failure = assertThrows(InternalWorkspaceFailure::class.java) {
+                completeSafCreatedDocument(create = { Files.createDirectory(path) }, verify = { verify() })
+            }
+            assertEquals(InternalWorkspaceErrorCode.UNKNOWN_OUTCOME, failure.error.code)
+            assertTrue(Files.isDirectory(path))
+        }
+        val path = directory.resolve("mkdir-ok")
+        assertEquals("verified", completeSafCreatedDocument(create = { Files.createDirectory(path) },
+            verify = { "verified" }))
+        assertTrue(Files.isDirectory(path))
+    }
+
     @Test fun failedOpenLeavesCreatedDocumentAndReportsUnknown() {
         val failures: List<() -> OutputStream?> = listOf(
             { null },

@@ -5,10 +5,17 @@ package runtime.mobileagent.knowledge
 
 import java.io.ByteArrayInputStream
 import java.util.zip.ZipInputStream
+import java.io.StringReader
+import javax.xml.parsers.SAXParserFactory
+import org.xml.sax.Attributes
+import org.xml.sax.InputSource
+import org.xml.sax.SAXException
+import org.xml.sax.SAXParseException
+import org.xml.sax.helpers.DefaultHandler
 
 object OfficeParser {
     const val DOCX_FINGERPRINT = "docx-xml-v2"
-    const val EPUB_FINGERPRINT = "epub-xml-v3"
+    const val EPUB_FINGERPRINT = "epub-xml-v4"
 
     fun parse(fileName: String, bytes: ByteArray): ParsedPublication {
         val inspection = ZipSafety.inspect(bytes)
@@ -91,37 +98,36 @@ object OfficeParser {
         val assets = mutableListOf<ExtractedAsset>()
         val texts = mutableListOf<String>()
         xhtml.entries.sortedBy { it.key }.forEachIndexed { index, (name, bytes) ->
-            val html = String(bytes, Charsets.UTF_8)
-            val stripped = html
-                .replace(Regex("(?is)<script[^>]*>.*?</script>"), " ")
-                .replace(Regex("(?is)<style[^>]*>.*?</style>"), " ")
-                .replace(Regex("(?is)<[^>]+>"), " ")
-                .replace(Regex("&nbsp;"), " ")
-                .replace(Regex("\\s+"), " ")
-                .trim()
+            val chapter = scanEpubChapter(bytes)
+            val stripped = chapter.text
             if (stripped.isNotEmpty()) {
                 texts += stripped
-                pages += ExtractedPage(index + 1, stripped, needsVision = false)
+                pages += ExtractedPage(index + 1, stripped, needsVision = chapter.visuals.isNotEmpty())
             }
-            Regex("(?is)<img[^>]+src\\s*=\\s*\"([^\"]+)\"").findAll(html).forEach { img ->
-                assets += epubImageAsset(entries, img.groupValues[1], index + 1, name, stripped)
+            chapter.visuals.forEachIndexed { visualIndex, visual ->
+                assets += if (visual.supportedImage) {
+                    epubImageAsset(entries, visual.source, index + 1, name, stripped)
+                } else {
+                    ExtractedAsset("$name#visual-$visualIndex", "UNSUPPORTED", index + 1, name,
+                        ByteArray(0), "application/octet-stream", stripped)
+                }
             }
         }
-        entries.filter { it.key.lowercase().contains("/images/") || imageName(it.key) }.forEach { (name, payload) ->
+        entries.filter { it.key.lowercase().contains("/images/") || imageName(it.key) || it.key.lowercase().endsWith(".svg") }.forEach { (name, payload) ->
             if (assets.none { it.bytes.contentEquals(payload) }) {
                 assets += ExtractedAsset(
                     localId = name.substringAfterLast('/'),
-                    kind = "IMAGE",
+                    kind = if (imageName(name)) "IMAGE" else "UNSUPPORTED",
                     page = null,
                     section = name,
-                    bytes = payload,
+                    bytes = if (imageName(name)) payload else ByteArray(0),
                     mediaType = guessImageType(name),
                     surroundingText = texts.lastOrNull().orEmpty(),
                 )
             }
         }
         if (texts.isEmpty() && assets.isEmpty()) error("EPUB has no extractable text or images")
-        val needsVision = assets.any { it.kind == "IMAGE" || it.kind == "EXTERNAL" || it.kind == "MISSING" }
+        val needsVision = assets.any { it.kind == "IMAGE" || it.kind == "EXTERNAL" || it.kind == "MISSING" || it.kind == "UNSUPPORTED" }
         return ParsedPublication(
             format = SourceFormat.OFFICE_ARCHIVE,
             text = texts.joinToString("\n"),
@@ -130,6 +136,61 @@ object OfficeParser {
             needsVision = needsVision,
             parserFingerprint = EPUB_FINGERPRINT,
         )
+    }
+
+    private data class EpubVisual(val source: String, val supportedImage: Boolean)
+    private data class EpubChapter(val text: String, val visuals: List<EpubVisual>)
+
+    /** XHTML is parsed without DTDs, entity resolution or any external resource access. */
+    private fun scanEpubChapter(bytes: ByteArray): EpubChapter {
+        // Strip one harmless declaration only in the XML prolog. Never rewrite document body text.
+        val raw = String(bytes, Charsets.UTF_8).removePrefix("\uFEFF")
+        val fixedDoctype = Regex("""\A([ \t\r\n]*(?:<\?xml[ \t\r\n][^?]*\?>[ \t\r\n]*)?)<!DOCTYPE[ \t\r\n]+html[ \t\r\n]*>""")
+        val xml = fixedDoctype.find(raw)?.let { it.groupValues[1] + raw.substring(it.range.last + 1) } ?: raw
+        if (Regex("(?i)<!\\s*(DOCTYPE|ENTITY)\\b").containsMatchIn(xml)) {
+            error("EPUB HTML contains unsupported XML declarations")
+        }
+        val text = StringBuilder()
+        val visuals = mutableListOf<EpubVisual>()
+        val handler = object : DefaultHandler() {
+            var depth = 0
+            var hiddenDepth = 0
+            override fun startElement(uri: String?, localName: String?, qName: String?, attributes: Attributes) {
+                depth++
+                if (depth > 256) throw SAXException("depth limit")
+                if (hiddenDepth != 0) return
+                val tag = (localName?.takeIf { it.isNotEmpty() } ?: qName.orEmpty().substringAfter(':')).lowercase()
+                text.append(' ')
+                when (tag) {
+                    "script", "style" -> hiddenDepth = depth
+                    "img" -> visuals += EpubVisual(attributes.getValue("src").orEmpty(), true)
+                    "svg", "object", "embed", "canvas", "math", "video", "audio", "iframe" -> {
+                        visuals += EpubVisual("", false)
+                        hiddenDepth = depth
+                    }
+                }
+            }
+            override fun endElement(uri: String?, localName: String?, qName: String?) {
+                if (hiddenDepth == depth) hiddenDepth = 0
+                if (hiddenDepth == 0) text.append(' ')
+                depth--
+            }
+            override fun characters(chars: CharArray, start: Int, length: Int) {
+                if (hiddenDepth == 0) text.append(chars, start, length)
+            }
+            override fun resolveEntity(publicId: String?, systemId: String?): InputSource =
+                throw SAXException("external entities disabled")
+            override fun error(error: SAXParseException): Unit = throw error
+            override fun fatalError(error: SAXParseException): Unit = throw error
+        }
+        try {
+            val factory = SAXParserFactory.newInstance().apply { isNamespaceAware = true; isValidating = false }
+            factory.newSAXParser().parse(InputSource(StringReader(xml.replace("&nbsp;", "&#160;"))), handler)
+        } catch (_: Exception) {
+            // Never retain the parser exception: it may echo document text or an external URI.
+            error("EPUB HTML is malformed or exceeds supported XML limits")
+        }
+        return EpubChapter(text.toString().replace(Regex("[\\s\u00a0]+"), " ").trim(), visuals)
     }
 
     private fun readEntries(bytes: ByteArray): Map<String, ByteArray> {
@@ -191,10 +252,7 @@ object OfficeParser {
         surroundingText: String,
     ): ExtractedAsset {
         val trimmed = src.trim()
-        if (trimmed.startsWith("http://", ignoreCase = true) ||
-            trimmed.startsWith("https://", ignoreCase = true) ||
-            trimmed.startsWith("file:", ignoreCase = true)
-        ) {
+        if (trimmed.startsWith("//") || Regex("^[A-Za-z][A-Za-z0-9+.-]*:").containsMatchIn(trimmed)) {
             return ExtractedAsset(trimmed, "EXTERNAL", page, section, ByteArray(0), "image/*", surroundingText)
         }
         val resolved = resolvePackagePath(section, trimmed)
@@ -202,10 +260,10 @@ object OfficeParser {
         return if (media != null) {
             ExtractedAsset(
                 media.key,
-                "IMAGE",
+                if (imageName(media.key)) "IMAGE" else "UNSUPPORTED",
                 page,
                 section,
-                media.value,
+                if (imageName(media.key)) media.value else ByteArray(0),
                 guessImageType(media.key),
                 surroundingText,
             )

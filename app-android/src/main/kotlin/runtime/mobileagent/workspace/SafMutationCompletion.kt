@@ -17,3 +17,9 @@ internal fun <T> completeSafCreatedDocument(action: () -> T): T = try {
 } catch (_: RuntimeException) {
     InternalWorkspaceErrorCode.UNKNOWN_OUTCOME.error()
 }
+
+/** Creation errors retain their classification; only verification runs inside the ambiguous phase. */
+internal fun <C, T> completeSafCreatedDocument(create: () -> C, verify: (C) -> T): T {
+    val created = create()
+    return completeSafCreatedDocument { verify(created) }
+}

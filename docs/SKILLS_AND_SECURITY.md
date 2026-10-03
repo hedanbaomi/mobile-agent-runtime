@@ -181,7 +181,7 @@ schema未知、包hash错误或无权限的导入必须拒绝；迁移失败不�
 
 M7实现MCP Adapter；首版优先用户显式配置的远程HTTP传输，具体协议版本/transport在该阶段查官方规范并锁定。不在Android自动启动任意stdio/Node/Shell服务器。
 
-适配器执行能力发现、工具schema校验、名称去冲突、调用/取消/错误映射，所有外部调用仍经权限与预算系统。server工具描述是不可信指令；工具列表变更或新增权限需要重新确认。凭据仍通过SecretStore注入；重连不能自动重放副作用。用受控测试server验证，不调用用户未知服务。
+MCP 冻结绑定在初始化/发现之后及 HTTP 发送前重新核验；发送门禁位于挂起的密钥解析之后。派发前失效确定拒绝，可能派发后失效或配置不可读取保持 UNKNOWN 并扣住结果；旧 call ID 消耗及禁止 replay 不变。适配器执行能力发现、工具schema校验、名称去冲突、调用/取消/错误映射，所有外部调用仍经权限与预算系统。server工具描述是不可信指令；工具列表变更或新增权限需要重新确认。凭据仍通过SecretStore注入；重连不能自动重放副作用。用受控测试server验证，不调用用户未知服务。
 
 `RemoteSkillExecutor`保留版本化请求/结果/取消/能力声明接口，用户自托管实现另行授权。不提供默认公共执行服务器，不自动把C/D级Skill上传远程，不上传整个知识库或secret。
 
@@ -246,3 +246,7 @@ App外部导入Python仍涉及动态代码和平台政策约束。首版仅用�
 - Chat 的冻结 Agent snapshot 注入四个结构化工作区工具；Provider 未声明 `tools` 时仍不会发送工具 schema。
 - API 31 x86_64 `WorkspaceAppToolsTest` 6/6 通过：拒绝绝对路径/遍历、逐次批准和 call ID 防重放、UTF-8 原子替换且无临时文件残留、大小上限和 symlink 拒绝、撤销 Agent/快照后 fail-closed、读取/列目录也需要批准。
 - 设备测试只证明应用私有工作区路径。本轮没有执行 SAF、Termux、无线 ADB、DPC、root/Shizuku 或任意 shell 验收，不得以 S13 通过替代这些后续能力的独立设计和用户授权。
+
+## 2026-10-03 文件操作终态边界
+
+工作区 STARTED 审计拒绝保持零派发；派发后的 TERMINAL 审计失败保持 UNKNOWN、标记 `audit_degraded` 并熔断，不覆盖已经生效的副作用或后端 UNKNOWN。SAF mkdir 成功 createDocument 后的 URI/权限/目录/别名/版本核验失败同属 UNKNOWN；创建前及创建调用原有分类保留。JVM 证据不代替真实 DocumentsProvider 验收。详见 [五项复审修复](evidence/2026-10-03/five-review-fixes.md)。

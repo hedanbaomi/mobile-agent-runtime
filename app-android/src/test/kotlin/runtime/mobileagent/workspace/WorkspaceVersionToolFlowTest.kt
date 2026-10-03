@@ -33,6 +33,7 @@ import runtime.mobileagent.tooling.ApprovalEngine
 import runtime.mobileagent.tooling.ToolExecutionContext
 import runtime.mobileagent.tooling.UnifiedWorkspaceToolExecutor
 import runtime.mobileagent.tooling.WorkspaceAuditEvent
+import runtime.mobileagent.tooling.WorkspaceAuditPhase
 import runtime.mobileagent.tooling.WorkspaceAuditSink
 import runtime.mobileagent.tooling.WorkspaceRegistry
 
@@ -149,6 +150,47 @@ class WorkspaceVersionToolFlowTest {
         assertEquals("test", storedText(root))
     }
 
+    @Test
+    fun terminalAuditFailurePreservesMutationAndUnknownAndTripsFuse(): Unit = runBlocking {
+        for (fault in listOf(false, true)) {
+            val root = tempDir.resolve("audit-$fault")
+            val real = InternalWorkspaceBackend(root, workspaceId = WORKSPACE_ID)
+            val backend = if (fault) VersionProjectionFaultBackend(real) else real
+            val sink = object : WorkspaceAuditSink {
+                override suspend fun record(event: WorkspaceAuditEvent): Boolean {
+                    if (event.phase == WorkspaceAuditPhase.STARTED) return true
+                    if (fault) throw IllegalStateException("synthetic audit failure")
+                    return false
+                }
+            }
+            val harness = harness(root, backend, sink)
+            val result = invoke(harness, "audit-write", UnifiedWorkspaceToolExecutor.FILE_WRITE_TEXT,
+                writeArguments("committed", false))
+            assertTrue(result is ToolExecution.Unknown)
+            assertEquals(ToolErrorCode.UNKNOWN_OUTCOME, (result as ToolExecution.Unknown).error.code)
+            assertEquals("committed", storedText(root))
+            val replay = invoke(harness, "audit-write", UnifiedWorkspaceToolExecutor.FILE_WRITE_TEXT,
+                writeArguments("replayed", true))
+            assertTrue(replay is ToolExecution.Failed)
+            val next = invoke(harness, "audit-new", UnifiedWorkspaceToolExecutor.FILE_WRITE_TEXT,
+                writeArguments("replayed", true))
+            assertFailure(next, ToolErrorCode.AUDIT_FUSE_OPEN)
+            assertEquals("committed", storedText(root))
+        }
+    }
+
+    @Test
+    fun rejectedStartAuditNeverCreatesFile(): Unit = runBlocking {
+        val root = tempDir.resolve("audit-start")
+        val harness = harness(root, auditSink = object : WorkspaceAuditSink {
+            override suspend fun record(event: WorkspaceAuditEvent): Boolean = false
+        })
+        val result = invoke(harness, "audit-start", UnifiedWorkspaceToolExecutor.FILE_WRITE_TEXT,
+            writeArguments("never written", false))
+        assertFailure(result, ToolErrorCode.AUDIT_UNAVAILABLE)
+        assertFalse(Files.exists(root.resolve(NOTE_PATH)))
+    }
+
     private data class Harness(
         val root: Path,
         val context: ToolExecutionContext,
@@ -158,6 +200,7 @@ class WorkspaceVersionToolFlowTest {
     private fun harness(
         root: Path,
         backend: InternalWorkspaceBackendApi = InternalWorkspaceBackend(root, workspaceId = WORKSPACE_ID),
+        auditSink: WorkspaceAuditSink = acceptingAuditSink(),
     ): Harness {
         Files.createDirectories(root)
         val adapter = SharedWorkspaceBackendAdapter(backend)
@@ -168,7 +211,7 @@ class WorkspaceVersionToolFlowTest {
             registry = registry,
             approvalEngine = ApprovalEngine(),
             contextProvider = { context },
-            auditSink = acceptingAuditSink(),
+            auditSink = auditSink,
         )
         return Harness(root, context, executor)
     }

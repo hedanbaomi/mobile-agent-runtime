@@ -1707,13 +1707,11 @@ class KnowledgeRepository(
             usedPins[kbId] = runtime.mobileagent.domain.KnowledgePin(kbId, pin, space)
             searched += kbId
             sources += lexicalHits(kbId, query, 40, pin).rankOrdered()
-            if (apiQueryHash != null && cachedQueryVector == null) {
-                // Resolve only after a durable pending-row check.  A previous
-                // UNKNOWN result therefore cannot reach a provider adapter
-                // until the UI explicitly authorizes this exact query key.
-                claimApiQueryAttempt(kbId, space, apiQueryHash)
+            val queryClaim = apiQueryHash?.let {
+                claimApiQueryAttempt(kbId, space, it, createIfAbsent = cachedQueryVector == null)
             }
             var queryVectorReady = cachedQueryVector != null
+            var queryEmbeddingReturned = cachedQueryVector != null
             try {
                 sources += vectorHits(
                     kbId,
@@ -1722,6 +1720,7 @@ class KnowledgeRepository(
                     pin,
                     queryEmbedder,
                     queryVector = cachedQueryVector?.vector,
+                    onQueryEmbeddingReturned = { queryEmbeddingReturned = true },
                     onQueryVectorReady = apiQueryHash?.let { hash ->
                         { vector ->
                             // Commit the successful provider vector before
@@ -1729,8 +1728,8 @@ class KnowledgeRepository(
                             // retrieval fails afterwards, the next identical
                             // query reuses this vector and is never re-billed.
                             insertQueryVectorCache(space, hash, vector, queryEmbedder.dimension)
-                            clearApiQueryAttempt(kbId, space, hash)
                             queryVectorReady = true
+                            queryClaim?.let(::clearApiQueryAttempt)
                             // This callback also fires on a cache hit (with
                             // the cached vector, re-inserted idempotently).
                             // Only a miss dispatches the provider, so only a
@@ -1741,11 +1740,14 @@ class KnowledgeRepository(
                     warnings = warnings,
                 ).rankOrdered()
             } catch (failure: Throwable) {
-                if (apiQueryHash != null && cachedQueryVector == null && !queryVectorReady && isUncertainApiQueryFailure(failure)) {
-                    persistApiQueryUnknown(kbId, space, apiQueryHash)
-                    // Do not attach a provider exception: it may echo the
-                    // original query. The durable row carries only the key.
-                    throw ApiQueryUnknownOutcomeException(kbId, space, apiQueryHash)
+                if (queryClaim != null && !queryVectorReady) {
+                    if (queryEmbeddingReturned || isUncertainApiQueryFailure(failure)) {
+                        persistApiQueryUnknown(queryClaim)
+                        // Only the stable key crosses this boundary, never Provider text.
+                        throw ApiQueryUnknownOutcomeException(kbId, space, queryClaim.queryHash)
+                    }
+                    // A deterministic preflight/Provider rejection does not require a duplicate-charge grant.
+                    clearApiQueryAttempt(queryClaim)
                 }
                 throw failure
             }
@@ -2550,7 +2552,7 @@ class KnowledgeRepository(
         if (!materializePlan(job,bytes,planPublication(bytes,parsed,job.consentedVisionFingerprint))) return
         val processable = parsed.assets.filter { it.kind == "IMAGE" && it.bytes.isNotEmpty() }
         val blocked = parsed.assets.filter {
-            it.kind == "EXTERNAL" || it.kind == "MISSING" || it.kind == "PAGE" ||
+            it.kind == "EXTERNAL" || it.kind == "MISSING" || it.kind == "UNSUPPORTED" || it.kind == "PAGE" ||
                 (it.kind == "IMAGE" && it.bytes.isEmpty())
         }
         job.hasImages = parsed.needsVision || processable.isNotEmpty() || blocked.isNotEmpty()
@@ -2748,7 +2750,7 @@ class KnowledgeRepository(
         if (!materializePlan(job,bytes,planPublication(bytes,parsed,job.consentedVisionFingerprint))) return
         val processable = parsed.assets.filter { it.kind == "IMAGE" && it.bytes.isNotEmpty() }
         val blocked = parsed.assets.filter {
-            it.kind == "EXTERNAL" || it.kind == "MISSING" || it.kind == "PAGE" ||
+            it.kind == "EXTERNAL" || it.kind == "MISSING" || it.kind == "UNSUPPORTED" || it.kind == "PAGE" ||
                 (it.kind == "IMAGE" && it.bytes.isEmpty())
         }
         job.hasImages = parsed.needsVision || processable.isNotEmpty() || blocked.isNotEmpty()
@@ -2849,8 +2851,8 @@ class KnowledgeRepository(
         processable: List<ExtractedAsset>,
         blocked: List<ExtractedAsset>,
     ): VisionBatch {
-        if (blocked.any { it.kind == "EXTERNAL" || it.kind == "MISSING" || (it.kind == "IMAGE" && it.bytes.isEmpty()) }) {
-            return VisionBatch.Failed("Visual sources are missing or external. Nothing was downloaded.")
+        if (blocked.any { it.kind == "EXTERNAL" || it.kind == "MISSING" || it.kind == "UNSUPPORTED" || (it.kind == "IMAGE" && it.bytes.isEmpty()) }) {
+            return VisionBatch.Failed("Visual sources are missing, external or unsupported. Nothing was downloaded.")
         }
         val pageBlockers=blocked.filter { it.kind=="PAGE" }
         if(pageBlockers.any { it.page==null } || (pageBlockers.isNotEmpty() && pdfRasterizer==null))
@@ -4654,9 +4656,11 @@ class KnowledgeRepository(
         selectedEmbedder: TextEmbedder,
         queryVector: FloatArray? = null,
         onQueryVectorReady: ((FloatArray) -> Unit)? = null,
+        onQueryEmbeddingReturned: (() -> Unit)? = null,
         warnings: MutableList<String>,
     ): List<SearchHit> {
         val queryVec = queryVector?.copyOf() ?: selectedEmbedder.embed(query)
+        onQueryEmbeddingReturned?.invoke()
         validateEmbeddingVector(queryVec, selectedEmbedder.dimension)
         onQueryVectorReady?.invoke(queryVec.copyOf())
         // Membership needs IDs only. Retaining every chunk body here can be
@@ -4970,7 +4974,7 @@ class KnowledgeRepository(
         spaceId = row.string("space_id"),
         queryHash = row.string("query_hash"),
         retryAuthorized = row.boolean("retry_authorized"),
-        error = row.string("error"),
+        error = row.string("error").let { if (it.startsWith(API_QUERY_PENDING_ERROR)) API_QUERY_PENDING_ERROR else it },
         updatedAt = row.string("updated_at"),
     )
 
@@ -4998,84 +5002,68 @@ class KnowledgeRepository(
      * The transaction serializes the state transition so two callers cannot
      * reuse one authorization while an adapter call is in flight.
      */
+    private data class ApiQueryClaim(
+        val knowledgeBaseId: String,
+        val spaceId: String,
+        val queryHash: String,
+        val pendingError: String,
+    )
+
     private fun claimApiQueryAttempt(
         knowledgeBaseId: String,
         spaceId: String,
         queryHash: String,
-    ) = synchronized(indexLock) {
+        createIfAbsent: Boolean,
+    ): ApiQueryClaim? = synchronized(indexLock) {
         db.transaction {
             val row = db.query(
                 "SELECT retry_authorized FROM embedding_query_attempts WHERE kb_id = ? AND space_id = ? AND query_hash = ?",
                 listOf(knowledgeBaseId, spaceId, queryHash),
             ).singleOrNull()
-            when {
-                row == null -> db.execute(
-                    "INSERT INTO embedding_query_attempts(kb_id,space_id,query_hash,retry_authorized,error,updated_at) VALUES (?,?,?,?,?,?)",
-                    listOf(
-                        knowledgeBaseId,
-                        spaceId,
-                        queryHash,
-                        0,
-                        API_QUERY_PENDING_ERROR,
-                        Utc.nowIso(),
-                    ),
-                )
-
-                !row.boolean("retry_authorized") ->
-                    throw ApiQueryUnknownOutcomeException(knowledgeBaseId, spaceId, queryHash)
-
-                else -> {
-                    db.execute(
-                        "UPDATE embedding_query_attempts SET retry_authorized = 0, error = ?, updated_at = ? WHERE kb_id = ? AND space_id = ? AND query_hash = ? AND retry_authorized = 1",
-                        listOf(
-                            API_QUERY_PENDING_ERROR,
-                            Utc.nowIso(),
-                            knowledgeBaseId,
-                            spaceId,
-                            queryHash,
-                        ),
-                    )
-                    check(
-                        db.query(
-                            "SELECT retry_authorized FROM embedding_query_attempts WHERE kb_id = ? AND space_id = ? AND query_hash = ?",
-                            listOf(knowledgeBaseId, spaceId, queryHash),
-                        ).singleOrNull()?.boolean("retry_authorized") == false,
-                    ) {
-                        "API query retry authorization was not atomically consumed"
-                    }
-                }
+            if (row == null && !createIfAbsent) return@transaction null
+            if (row != null && !row.boolean("retry_authorized")) {
+                throw ApiQueryUnknownOutcomeException(knowledgeBaseId, spaceId, queryHash)
             }
+            // A random owner token distinguishes overlapping attempts, including legacy rows and
+            // user-authorized retries. It is internal metadata and contains no query or credential.
+            val claim = ApiQueryClaim(knowledgeBaseId, spaceId, queryHash,
+                "$API_QUERY_PENDING_ERROR; owner=${EntityId.random().value}")
+            if (row == null) {
+                db.execute(
+                    "INSERT INTO embedding_query_attempts(kb_id,space_id,query_hash,retry_authorized,error,updated_at) VALUES (?,?,?,?,?,?)",
+                    listOf(knowledgeBaseId, spaceId, queryHash, 0, claim.pendingError, Utc.nowIso()),
+                )
+            } else {
+                db.execute(
+                    "UPDATE embedding_query_attempts SET retry_authorized = 0, error = ?, updated_at = ? WHERE kb_id = ? AND space_id = ? AND query_hash = ? AND retry_authorized = 1",
+                    listOf(claim.pendingError, Utc.nowIso(), knowledgeBaseId, spaceId, queryHash),
+                )
+            }
+            check(db.query(
+                "SELECT error, retry_authorized FROM embedding_query_attempts WHERE kb_id = ? AND space_id = ? AND query_hash = ?",
+                listOf(knowledgeBaseId, spaceId, queryHash),
+            ).singleOrNull()?.let { it.string("error") == claim.pendingError && !it.boolean("retry_authorized") } == true) {
+                "API query retry authorization was not atomically consumed"
+            }
+            claim
         }
     }
 
-    private fun persistApiQueryUnknown(
-        knowledgeBaseId: String,
-        spaceId: String,
-        queryHash: String,
-    ) = synchronized(indexLock) {
+    private fun persistApiQueryUnknown(claim: ApiQueryClaim) = synchronized(indexLock) {
         db.transaction {
             db.execute(
-                "UPDATE embedding_query_attempts SET retry_authorized = 0, error = ?, updated_at = ? WHERE kb_id = ? AND space_id = ? AND query_hash = ?",
-                listOf(
-                    API_QUERY_UNKNOWN_ERROR,
-                    Utc.nowIso(),
-                    knowledgeBaseId,
-                    spaceId,
-                    queryHash,
-                ),
+                "UPDATE embedding_query_attempts SET error = ?, updated_at = ? WHERE kb_id = ? AND space_id = ? AND query_hash = ? AND error = ? AND retry_authorized = 0",
+                listOf(API_QUERY_UNKNOWN_ERROR, Utc.nowIso(), claim.knowledgeBaseId, claim.spaceId,
+                    claim.queryHash, claim.pendingError),
             )
         }
     }
 
-    private fun clearApiQueryAttempt(
-        knowledgeBaseId: String,
-        spaceId: String,
-        queryHash: String,
-    ) = synchronized(indexLock) {
+    private fun clearApiQueryAttempt(claim: ApiQueryClaim) = synchronized(indexLock) {
         db.transaction {
             db.execute(
-                "DELETE FROM embedding_query_attempts WHERE kb_id = ? AND space_id = ? AND query_hash = ?",
-                listOf(knowledgeBaseId, spaceId, queryHash),
+                "DELETE FROM embedding_query_attempts WHERE kb_id = ? AND space_id = ? AND query_hash = ? AND error = ? AND retry_authorized = 0",
+                listOf(claim.knowledgeBaseId, claim.spaceId, claim.queryHash, claim.pendingError),
             )
         }
     }

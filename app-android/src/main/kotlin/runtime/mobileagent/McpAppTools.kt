@@ -21,6 +21,7 @@ import runtime.mobileagent.domain.AgentSnapshot
 import runtime.mobileagent.provider.HeaderSecretResolver
 import runtime.mobileagent.provider.RequestHeaderValue
 import runtime.mobileagent.provider.SecretRedactor
+import runtime.mobileagent.provider.mcp.McpDispatchDeniedException
 import runtime.mobileagent.provider.mcp.McpCallResult
 import runtime.mobileagent.provider.mcp.McpClientInfo
 import runtime.mobileagent.provider.mcp.KtorMcpStreamableHttpTransport
@@ -141,10 +142,20 @@ private fun publicMcpSnapshot(config: McpStoredConfig, stored: McpStoredSnapshot
  * returned empty executor is deliberate for old sessions, revoked grants, or
  * any metadata mismatch.  Construction never performs network I/O.
  */
-fun mcpTools(container: AppContainer, snapshot: McpSnapshot): ToolExecutor {
-    val config = McpConfigStore.read(container).value ?: return EmptyMcpToolExecutor
+fun mcpTools(container: AppContainer, snapshot: McpSnapshot): ToolExecutor = mcpTools(
+    snapshot,
+    readConfig = { McpConfigStore.read(container).value },
+    createAdapter = { config, captureSecret, authorized -> createMcpAdapter(container, config, captureSecret, authorized) },
+)
+
+internal fun mcpTools(
+    snapshot: McpSnapshot,
+    readConfig: () -> McpStoredConfig?,
+    createAdapter: (McpStoredConfig, (CharArray) -> Unit, () -> Boolean) -> RemoteMcpAdapter,
+): ToolExecutor {
+    val config = runCatching(readConfig).getOrNull() ?: return EmptyMcpToolExecutor
     if (!snapshotBindingIsCurrent(config, snapshot)) return EmptyMcpToolExecutor
-    return AppMcpToolExecutor(container, snapshot)
+    return AppMcpToolExecutor(snapshot, readConfig, createAdapter)
 }
 
 /**
@@ -166,8 +177,9 @@ private object EmptyMcpToolExecutor : ToolExecutor {
 }
 
 private class AppMcpToolExecutor(
-    private val container: AppContainer,
     private val snapshot: McpSnapshot,
+    private val readConfig: () -> McpStoredConfig?,
+    private val createAdapter: (McpStoredConfig, (CharArray) -> Unit, () -> Boolean) -> RemoteMcpAdapter,
 ) : ToolExecutor {
     private val usedCallIds = ConcurrentHashMap.newKeySet<String>()
     private val pending = ConcurrentHashMap<String, PendingMcpCall>()
@@ -203,6 +215,8 @@ private class AppMcpToolExecutor(
         val pendingCall = pending.remove(callId) ?: return ToolResult.Invalid("No pending MCP approval")
         return try {
             executeApproved(pendingCall)
+        } catch (_: McpDispatchDeniedException) {
+            ToolResult.Denied(MCP_SNAPSHOT_STALE)
         } catch (error: CancellationException) {
             // The call ID remains consumed; a caller must not replay after an
             // interrupted network operation whose remote outcome is unknown.
@@ -225,20 +239,20 @@ private class AppMcpToolExecutor(
 
     private suspend fun executeApproved(pendingCall: PendingMcpCall): ToolResult {
         val call = pendingCall.modelCall
-        val config = McpConfigStore.read(container).value
+        val config = runCatching(readConfig).getOrNull()
             ?: return ToolResult.Denied(MCP_CONFIGURATION_UNAVAILABLE)
         if (!snapshotBindingIsCurrent(config, snapshot)) {
             return ToolResult.Denied(MCP_SNAPSHOT_STALE)
         }
         val secrets = mutableListOf<String>()
         try {
-            val adapter = createMcpAdapter(container, config) { value ->
-                secrets += value.concatToString()
-            }
+            val adapter = createAdapter(config, { value -> secrets += value.concatToString() }, ::bindingIsCurrent)
             // Re-discover immediately before the approved call.  This one request
             // sequence has no retry or reconnect loop and never adds new tools.
             adapter.initialize()
+            if (!bindingIsCurrent()) return ToolResult.Denied(MCP_SNAPSHOT_STALE)
             val discovered = adapter.discoverTools()
+            if (!bindingIsCurrent()) return ToolResult.Denied(MCP_SNAPSHOT_STALE)
             if (mcpFingerprint(discovered) != snapshot.discoveryFingerprint) {
                 return ToolResult.Denied(MCP_TOOL_LIST_STALE)
             }
@@ -251,12 +265,18 @@ private class AppMcpToolExecutor(
                 revision = snapshot.discoveryRevision,
                 toolNames = snapshot.tools.map { it.namespacedName }.toSet(),
             )
+            if (!bindingIsCurrent()) return ToolResult.Denied(MCP_SNAPSHOT_STALE)
             val result = adapter.callTool(
                 grant = grant,
                 callId = call.callId,
                 toolName = pendingCall.internalToolName,
                 arguments = json.parseToJsonElement(call.argumentsJson).jsonObject,
             )
+            // Once tools/call may have been sent, revoked authorization withholds the result
+            // without claiming the remote action did not execute. A local dispatch denial is definite.
+            if (result !is McpCallResult.Denied && !bindingIsCurrent()) {
+                return ToolResult.UnknownOutcome(MCP_UNKNOWN_OUTCOME)
+            }
             return mcpCallResultForModel(
                 result = result,
                 blockedValues = (listOf(
@@ -276,6 +296,10 @@ private class AppMcpToolExecutor(
             secrets.clear()
         }
     }
+
+    private fun bindingIsCurrent(): Boolean =
+        runCatching { readConfig()?.let { snapshotBindingIsCurrent(it, snapshot) } == true }.getOrDefault(false)
+
 }
 
 private data class PendingMcpCall(
@@ -491,6 +515,7 @@ internal fun createMcpAdapter(
     container: AppContainer,
     config: McpStoredConfig,
     onSecretResolved: (CharArray) -> Unit = {},
+    dispatchAuthorized: () -> Boolean = { true },
 ): RemoteMcpAdapter {
     val secretRef = config.secretRef
     val headers: Map<String, RequestHeaderValue> =
@@ -515,6 +540,7 @@ internal fun createMcpAdapter(
         endpoint = config.endpoint,
         defaultHeaders = headers,
         headerSecretResolver = resolver,
+        dispatchAuthorized = dispatchAuthorized,
     )
     return RemoteMcpAdapter(
         transport = transport,

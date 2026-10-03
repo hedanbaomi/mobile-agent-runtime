@@ -515,27 +515,33 @@ internal class SafWorkspaceBackend(
             }
             val usage = inspectUsage()
             if (usage.entries + 1 > limits.maxEntries) InternalWorkspaceErrorCode.ENTRY_LIMIT_EXCEEDED.error()
-            val createdUri = try {
-                DocumentsContract.createDocument(
-                    resolver,
-                    parent.uri,
-                    DocumentsContract.Document.MIME_TYPE_DIR,
-                    segments.last(),
-                ) ?: InternalWorkspaceErrorCode.UNSUPPORTED.error()
-            } catch (_: SecurityException) {
-                InternalWorkspaceErrorCode.PERMISSION_DENIED.error()
-            } catch (_: IOException) {
-                InternalWorkspaceErrorCode.IO_ERROR.error()
-            }
-            val safeUri = postMutationUri(createdUri)
-            val createdId = DocumentsContract.getDocumentId(safeUri)
-            if (!hasPersistedGrant(write = true)) InternalWorkspaceErrorCode.UNKNOWN_OUTCOME.error()
-            val created = children(parent.uri).firstOrNull { it.id == createdId }
-                ?: InternalWorkspaceErrorCode.UNKNOWN_OUTCOME.error()
-            if (created.name != segments.last() || created.type != InternalWorkspaceEntryType.DIRECTORY) {
-                InternalWorkspaceErrorCode.PROVIDER_ALIAS_AMBIGUOUS.error()
-            }
-            InternalWorkspaceDirectoryChange(segments.joinToString("/"), true, directoryVersion(safeUri))
+            completeSafCreatedDocument(
+                create = {
+                    try {
+                        DocumentsContract.createDocument(
+                            resolver,
+                            parent.uri,
+                            DocumentsContract.Document.MIME_TYPE_DIR,
+                            segments.last(),
+                        ) ?: InternalWorkspaceErrorCode.UNSUPPORTED.error()
+                    } catch (_: SecurityException) {
+                        InternalWorkspaceErrorCode.PERMISSION_DENIED.error()
+                    } catch (_: IOException) {
+                        InternalWorkspaceErrorCode.IO_ERROR.error()
+                    }
+                },
+                verify = { createdUri ->
+                    val safeUri = postMutationUri(createdUri)
+                    val createdId = DocumentsContract.getDocumentId(safeUri)
+                    if (!hasPersistedGrant(write = true)) InternalWorkspaceErrorCode.UNKNOWN_OUTCOME.error()
+                    val created = children(parent.uri).firstOrNull { it.id == createdId }
+                        ?: InternalWorkspaceErrorCode.UNKNOWN_OUTCOME.error()
+                    if (created.name != segments.last() || created.type != InternalWorkspaceEntryType.DIRECTORY) {
+                        InternalWorkspaceErrorCode.PROVIDER_ALIAS_AMBIGUOUS.error()
+                    }
+                    InternalWorkspaceDirectoryChange(segments.joinToString("/"), true, directoryVersion(safeUri))
+                },
+            )
         }
     }
 

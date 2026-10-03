@@ -148,7 +148,7 @@ Typed file tools 仍须 workspace scope、路径/symlink/配额和 canonical gra
 | ID | 场景/操作 | 预期与证据 |
 | --- | --- | --- |
 | K01 | 同文件重复导入，同blob两个KB复用，原文件移动/删除 | CAS不重复存储；托管副本可用；删除一个KB不破坏另一个 |
-| K02 | TXT/MD/PDF/DOCX/EPUB/独立图片、坏文件、超限ZIP/遍历路径 | 支持格式分别给证据；坏/不支持文件显示原因，不外联加载资源；无越界写入；用户接受视觉缺口后 `READY_WITH_VISUAL_GAPS` 可作为 knowledge_search 引用源，不得伪装完整 READY |
+| K02 | TXT/MD/PDF/DOCX/EPUB/独立图片、坏文件、超限ZIP/遍历路径；EPUB 单引号图、SVG/object、旧指纹与不安全 XHTML | 支持格式分别给证据；坏/不支持文件显示原因，不外联加载资源；无越界写入；用户接受视觉缺口后 `READY_WITH_VISUAL_GAPS` 可作为 knowledge_search 引用源，不得伪装完整 READY |
 | K03 | 含扫描图、矢量流程图、公式缺Vision；纯文本选择API Embedding但未同意；换Provider/域名/模型/数据范围 | 视觉和Embedding分别等待授权；拒绝/过期同意时外发请求数为0；变化后重确认；不丢图、不报READY、不自动换Provider |
 | K04 | 原图命中，严格模式配文本Chat；再显式启用文本降级 | 严格模式拒绝；主动降级后回答醒目说明无原图；引用可回页码/图片 |
 | K05 | 中英文专名、表格、代码query；不同space/维度KB；模型不可用 | 词法/向量/过滤/RRF生效；空间不混算；不可用库明确告知；记录召回样例与不足 |
@@ -162,7 +162,7 @@ Typed file tools 仍须 workspace scope、路径/symlink/配额和 canonical gra
 
 2026-09-12 16fe3a4 复审补充：同一 package id 的 v1/v2 Skill 备份必须按来源安装身份恢复到对应本地安装，不能因可选 package-id 别名冲突失败；仅含歧义 package id 的遗留 Agent 绑定必须拒绝。JVM 见 [16fe3a4 复审修订](evidence/2026-09-12/review-16fe3a4-amend.md)。
 
-K03/K06 追加 API 查询门禁反例：外部请求未知后，重启并重复同 KB/完整空间/查询时请求数不增长；知识库页批准只写一次许可、不立即外发；用户重新提交仅放行一次，再次未知重新等待。不同 KB/空间/query hash 不共用许可。取消/中断仍保留未知记录，UI、内置工具、Python Broker 都不得将其当普通可重试失败。无同意调用公开重建/修复入口也必须零外发。检查 schema v8→v9→v10 数据保留、重复迁移、复合主键/外键/布尔 CHECK，原始查询不得写入门禁表。外部 query vector 已成功后若 generation/chunk/vector blob/native index 等本地检索失败，门禁必须保留且下次复用已校验向量，API 请求数不得增长；只有完整 retrieve 成功才清理尝试与缓存。
+K03/K06 追加 API 查询门禁反例：外部请求未知后，重启并重复同 KB/完整空间/查询时请求数不增长；知识库页批准只写一次许可、不立即外发；用户重新提交仅放行一次，再次未知重新等待。不同 KB/空间/query hash 不共用许可。取消/中断仍保留未知记录，UI、内置工具、Python Broker 都不得将其当普通可重试失败。无同意调用公开重建/修复入口也必须零外发。检查 schema v8→v9→v10 数据保留、重复迁移、复合主键/外键/布尔 CHECK，原始查询不得写入门禁表。外部 query vector 成功入不可变缓存后，以本次 owner 清理门禁，缓存不随 retrieve 成功删除；随后 generation/chunk/vector blob/native index 本地失败复用缓存且不增长 API 请求数。存在并行新 owner pending 时，旧调用不能清理，须明确授权后本地收尾。返回后校验或缓存失败保持 UNKNOWN，不能普通重发。
 
 A05/S10 追加取消竞态：流式中途取消保留部分回答并关闭连接，可能已受理的模型/工具调用为 UNKNOWN；在已观察到完成事件后才取消，不得覆盖 COMPLETED。Python 同一次未知结果经过 Broker、runtime teardown、取消多次上报时，仅保留首次具体原因和一条 invocation UNKNOWN 审计。
 
@@ -191,7 +191,7 @@ K06另需前台任务兼容矩阵：Android12+后台启动限制、Android14+服
 | S08 | 内置knowledge_search/read_document/calculator/http_request及碎片tool JSON | 参数schema正确；完整后执行；重复call id不双执行；只读/副作用确认正确 |
 | S09 | Prompt/KB/工具结果要求扩大权限；无tools模型；循环/Token/子模型预算耗尽 | 不能越权；不从自然语言猜命令；终态和耗用可追溯；取消传播 |
 | S10 | 测试secret混入模型错误/Skill输出/日志/导出，模型超时副作用未知 | 全路径脱敏；不无限持久化内容；UNKNOWN_OUTCOME不自动重放 |
-| S11 | 受控MCP server工具发现/新增/重连/取消/错误；Remote接口schema测试 | 不自动授权新增工具、不在手机起任意stdio、不重放副作用；Remote不自动上传用户包或知识库 |
+| S11 | 受控MCP server工具发现/新增/重连/取消/错误；初始化/发现/密钥解析/已派发各窗口撤权与旧 ID 重放；Remote接口schema测试 | 不自动授权新增工具、不在手机起任意stdio、不重放副作用；Remote不自动上传用户包或知识库 |
 | S12 | 导入无 `mobile-skill.json`、含标准库 `main()` CLI 的 Claude Skill；启用、空权限确认、Agent 绑定后由模型按 program enum/argv/虚拟 Markdown 文件调用；同包含重型依赖脚本 | 原 ZIP/hash 不改；只把通过兼容门槛的程序列入 `py_*` 工具；每次调用仍批准且在新 isolated UID 中执行；隐藏已验证源码字段不能由模型声明；虚拟文件无法映射宿主路径。依赖 PyMuPDF/NumPy/PyTorch/Transformers 的 `books_kb.py` 明确不直跑，绑定知识库时由 `knowledge_search`/`read_document` 承接且模型不得伪称原脚本执行 |
 | S13 | Agent 调用应用私有 `workspace_list` 与 provider-neutral `file_*` typed tools；覆盖长路径、绝对路径、`..`、symlink、配额、重复 call ID、授权后撤销 Agent/快照、ONCE 并发消费、替换写中断 | 读、列、写、建目录、移动和受限删除由 backend-neutral schema 表达；已有有效 canonical capability grant 与 snapshot binding 时不再逐次弹出对话批准，但每次派发前仍复核撤销、过期、policy revision、workspace/path scope 与 selected Authority，ONCE grant 原子消费；真实路径不进入模型或错误；Agent+快照命名空间互相隔离；越界/撤权 fail-closed；Internal UTF-8 替换写须原子且无临时残留，SAF 仅在 provider/grant 能力可证明时新建、对既有目标的非原子替换必须拒绝；typed path 不等于 shell |
 | S14 | 对照 wire tool name→capability→backend-neutral 语义矩阵；Provider 无 tools、未知 tool、backend 名称伪装、schema additionalProperties 和重复 call ID | 只发送当前 Provider 声明且经 capability intersection 的中性 schema；未知/后端专用名称拒绝；schema 严格；同一 call 不重复执行；状态：mapping `IMPLEMENTED`，逐项自动化证据按工具记录 |
@@ -335,3 +335,5 @@ S03/S04/S05/S07 增量必须通过真实 isolated worker：API26 JSON/新 PID；
 - Schema v29：合成旧 v28 fixture 升级保持任务逐字段、同时间戳顺序、UNKNOWN_OUTCOME 和同意字段；真实 SQLite 查询计划必须 SEARCH USING idx_import_jobs_kb_updated 且无全表扫描或临时排序。空库/重复升级、索引 DDL 后注入失败回滚旧版本和全部任务、可重试升级、v28 未绑定 Thread 与原 grant 不变均需通过。真实用户原库迁移仍单独验收。
 - A06/U07：1,201 Thread/5 workspace 显示解析 5 次，binding 逐线程保持；空列表、未绑定、null/空标题、绑定读取异常和标题异常、下一刷新重命名/删除/恢复均覆盖。仅显示缓存，不授予任何执行权限。
 - L01—L04、严格 check/reviewGate/REUSE 和常规 CI 持续作为交付门禁。该阶段的设备/Provider/长稳边界与本轮事实见 evidence/2026-10-03/quota-optimization.md。
+
+2026-10-03 五项复审新增边界：K02/K05 检查旧 EPUB v3 不复用为完整 READY、明确文本缺口、查询确定失败释放本次 claim、UNKNOWN/取消仍受明确授权门禁、旧 owner 不覆盖新授权且有效缓存不重发；S11 检查撤权前零工具派发和派发后结果扣留/UNKNOWN；S18/S31 检查 SAF 已创建目录核验失败与工作区 TERMINAL 审计失败均保留 UNKNOWN、内容/目录留存、熔断及防重放。验证状态见 [五项复审修复](evidence/2026-10-03/five-review-fixes.md)，不据此标 §14 全量验收通过。

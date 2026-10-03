@@ -162,7 +162,7 @@ docs/evidence/                脱敏的验证结果，按任务分目录
 
 所有公共导入导出使用 `schemaVersion`，未知主版本明确拒绝；UTC 时间、稳定字符串 ID、数字范围显式验证。数据库升级逐版迁移，失败保留原库，不自动清空重建用户数据。
 
-当前数据库版本为 v11：v8 增加完整 Agent 快照、typed messages/Run/审计和设置持久化；v9 增加 API Embedding 查询未知结果门禁；v10 增加可恢复的 `embedding_operations` 阶段状态与 `embedding_query_vectors` 查询向量缓存；v11 增加模型 endpoint 配置与 secret 退休状态，并对已有配置做 fail-closed 回填。查询向量只在完整 retrieve 成功后清理尝试门禁；本地检索后半段失败可复用已校验向量，不重复外发。细节见 [KNOWLEDGE §4.1](KNOWLEDGE.md#41-api-外发与未知查询的一次性重试)。导出格式的 schemaVersion 与数据库版本相互独立。完整知识库/会话走有界流式 ZIP，默认不包含原文、Skill 包或会话；用户逐项选择后写入 SAF 指定位置，云端文档提供方可能自行同步。导入快照不携带密钥/授权，明确要求本地重新配置，UNKNOWN 不自动重放。
+当前数据库版本为 v11：v8 增加完整 Agent 快照、typed messages/Run/审计和设置持久化；v9 增加 API Embedding 查询未知结果门禁；v10 增加可恢复的 `embedding_operations` 阶段状态与 `embedding_query_vectors` 查询向量缓存；v11 增加模型 endpoint 配置与 secret 退休状态，并对已有配置做 fail-closed 回填。查询向量成功入不可变缓存后仅清理本次 owner 的尝试门禁，缓存不随 retrieve 成功删除；本地检索后半段失败复用缓存，不重复外发。并行新 owner pending 仍需明确授权；已返回但未缓存的失败保持 UNKNOWN。细节见 [KNOWLEDGE §4.1](KNOWLEDGE.md#41-api-外发与未知查询的一次性重试)。导出格式的 schemaVersion 与数据库版本相互独立。完整知识库/会话走有界流式 ZIP，默认不包含原文、Skill 包或会话；用户逐项选择后写入 SAF 指定位置，云端文档提供方可能自行同步。导入快照不携带密钥/授权，明确要求本地重新配置，UNKNOWN 不自动重放。
 
 | 实体/逻辑表 | 必要字段与约束 |
 | --- | --- |

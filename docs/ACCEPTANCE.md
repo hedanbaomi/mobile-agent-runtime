@@ -327,3 +327,11 @@ S03/S04/S05/S07 增量必须通过真实 isolated worker：API26 JSON/新 PID；
 - 固定摘要下载覆盖合法缓存零网络/mtime 不变、首次空目录、503/连接拒绝/截断恢复、3 次耗尽、摘要/404/TLS/被文件占用的父路径直接失败、旧缓存保护、临时清理、退避与传输取消保留 interrupt 且不发布新文件。
 - 真实迁移后 SQLite 覆盖空输入、重复/未知/类似 SQL 的 ID、1,201 条快照超过旧 999 参数限制的分批查询，与完整快照映射一致且只选两个列。损坏的非显示元数据不妨碍显示投影，但完整读取和执行解析仍拒绝损坏快照。
 - 结果和未测范围见 [限时优化证据](evidence/2026-10-02/deadline-optimization.md)。查询数量不替代设备帧耗时、ANR 根因、长稳或真实收费 Provider 验收。
+
+## 2026-10-03 周额度约束优化增量
+
+- K01/K06：真实迁移 SQLite 比对旧 KB 名称/计数与新汇总，覆盖零文档、软删除 KB/文档、重复名称、created_at 排序、256 KB。旧 257 次显示查询对比新 1 次，不替代真机帧耗时或导入吞吐测试。
+- K02：KB 任务筛选结果与全局列表内存过滤逐字段/顺序一致，保留 Vision/Embedding 同意、UNKNOWN_OUTCOME、视觉缺口；2,003 行对比只物化选中 3 行。未知/类似 SQL 的 KB ID 为绑定参数；未选中损坏行不解码，选中/全局损坏行仍拒绝。
+- Schema v29：合成旧 v28 fixture 升级保持任务逐字段、同时间戳顺序、UNKNOWN_OUTCOME 和同意字段；真实 SQLite 查询计划必须 SEARCH USING idx_import_jobs_kb_updated 且无全表扫描或临时排序。空库/重复升级、索引 DDL 后注入失败回滚旧版本和全部任务、可重试升级、v28 未绑定 Thread 与原 grant 不变均需通过。真实用户原库迁移仍单独验收。
+- A06/U07：1,201 Thread/5 workspace 显示解析 5 次，binding 逐线程保持；空列表、未绑定、null/空标题、绑定读取异常和标题异常、下一刷新重命名/删除/恢复均覆盖。仅显示缓存，不授予任何执行权限。
+- L01—L04、严格 check/reviewGate/REUSE 和常规 CI 持续作为交付门禁。该阶段的设备/Provider/长稳边界与本轮事实见 evidence/2026-10-03/quota-optimization.md。

@@ -35,7 +35,7 @@ class MigrationsTest {
 
         Migrations.apply(db)
 
-        assertEquals(28L, db.query("SELECT version FROM schema_version").single().long("version"))
+        assertEquals(Migrations.VERSION.toLong(), db.query("SELECT version FROM schema_version").single().long("version"))
         assertEquals(1L, db.query("SELECT dispatch_slot FROM pipeline_attempts WHERE request_id = 'old-request'")
             .single().long("dispatch_slot"))
         assertTrue(db.query("SELECT name FROM sqlite_master WHERE type='index' AND name='pipeline_one_dispatch'").isEmpty())
@@ -64,7 +64,7 @@ class MigrationsTest {
 
         Migrations.apply(db)
 
-        assertEquals(28L, db.query("SELECT version FROM schema_version").single().long("version"))
+        assertEquals(Migrations.VERSION.toLong(), db.query("SELECT version FROM schema_version").single().long("version"))
         assertEquals(3L, db.query("SELECT max_concurrency FROM pipeline_policies WHERE batch_id='old-batch'").single().long("max_concurrency"))
         assertEquals(1L, db.query("SELECT max_concurrency FROM pipeline_policies WHERE batch_id='custom-batch'").single().long("max_concurrency"))
         assertEquals(3L, db.query("SELECT dispatch_slot FROM pipeline_attempts WHERE request_id='old-active'").single().long("dispatch_slot"))

@@ -24,6 +24,26 @@ import runtime.mobileagent.domain.WorkspaceScope
 
 class WorkspaceBindingRepositoryTest {
     @Test
+    fun v28IndexUpgradeDoesNotRestoreAnUnboundConversation() {
+        JdbcSqlConnection().use { db ->
+            Migrations.apply(db)
+            seedAgentAndConversation(db, "agent-unbound", "snapshot-unbound", "conversation-unbound")
+            seedWorkspace(db, "workspace-unbound")
+            seedGrant(db, "grant-unbound", "agent-unbound", "workspace-unbound")
+            val grantsBefore = CapabilityGrantRepository(db).list(agentId = "agent-unbound")
+            db.execute("DROP INDEX idx_import_jobs_kb_updated")
+            db.execute("UPDATE schema_version SET version = 28")
+            assertTrue(db.query("SELECT * FROM conversation_workspace_bindings").isEmpty())
+
+            Migrations.apply(db)
+
+            assertEquals(Migrations.VERSION.toLong(), db.query("SELECT version FROM schema_version").single().long("version"))
+            assertTrue(db.query("SELECT * FROM conversation_workspace_bindings").isEmpty())
+            assertEquals(grantsBefore, CapabilityGrantRepository(db).list(agentId = "agent-unbound"))
+        }
+    }
+
+    @Test
     fun v14MigrationCreatesBindingTablesAndCompletesCurrentSchema() {
         JdbcSqlConnection().use { db ->
             Migrations.apply(db)

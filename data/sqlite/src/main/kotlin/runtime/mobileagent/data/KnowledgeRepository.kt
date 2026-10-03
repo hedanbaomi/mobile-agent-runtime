@@ -93,6 +93,9 @@ import java.util.concurrent.CompletableFuture
 /** Legacy cache identity may be adopted only when it maps to one current destination. */
 data class LegacyVisionCacheTarget(val fingerprint: String, val unambiguous: Boolean)
 
+/** Display metadata only; import, consent and execution use their full records. */
+data class KnowledgeBaseDisplaySummary(val id: String, val name: String, val documentCount: Int)
+
 data class KnowledgeDocumentRange(val text: String, val offset: Int, val nextOffset: Int?, val totalChars: Int, val documentVersionId: String? = null)
 
 class KnowledgeRepository(
@@ -451,6 +454,14 @@ class KnowledgeRepository(
     fun listKnowledgeBases(): List<Pair<String, String>> =
         db.query("SELECT id, name FROM knowledge_bases WHERE deleted_at IS NULL ORDER BY created_at")
             .map { it.string("id") to it.string("name") }
+
+    /** One read for live KBs and live-document counts, including empty KBs. */
+    fun listKnowledgeBaseDisplaySummaries(): List<KnowledgeBaseDisplaySummary> =
+        db.query(
+            "SELECT kb.id,kb.name,COUNT(d.id) AS document_count FROM knowledge_bases kb " +
+                "LEFT JOIN documents d ON d.kb_id=kb.id AND d.deleted_at IS NULL " +
+                "WHERE kb.deleted_at IS NULL GROUP BY kb.id,kb.name,kb.created_at ORDER BY kb.created_at",
+        ).map { KnowledgeBaseDisplaySummary(it.string("id"), it.string("name"), it.long("document_count").toInt()) }
 
     /**
      * Suspending API import entry point.  Parsing, CAS writes, cache commits,
@@ -1769,7 +1780,14 @@ class KnowledgeRepository(
         ).singleOrNull()?.long("n")?.toInt() ?: 0
 
     fun listJobs(): List<Triple<ImportJob, String, String>> =
-        db.query("SELECT * FROM import_jobs ORDER BY updated_at DESC").map { row ->
+        importJobViews(db.query("SELECT * FROM import_jobs ORDER BY updated_at DESC"))
+
+    /** Filter before sorting/decoding; the global read remains available for recovery. */
+    fun listJobs(knowledgeBaseId: String): List<Triple<ImportJob, String, String>> =
+        importJobViews(db.query("SELECT * FROM import_jobs WHERE kb_id=? ORDER BY updated_at DESC", listOf(knowledgeBaseId)))
+
+    private fun importJobViews(rows: List<SqlRow>): List<Triple<ImportJob, String, String>> =
+        rows.map { row ->
             val stage = ImportStage.valueOf(row.string("stage"))
             Triple(
                 ImportJob(

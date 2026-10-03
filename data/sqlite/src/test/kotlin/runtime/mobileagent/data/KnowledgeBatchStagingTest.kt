@@ -77,7 +77,7 @@ class KnowledgeBatchStagingTest {
         db.execute("ALTER TABLE import_batches DROP COLUMN staging_complete")
         db.execute("UPDATE schema_version SET version = 19")
         Migrations.apply(db)
-        assertEquals(28, Migrations.VERSION)
+        assertEquals(Migrations.VERSION.toLong(), db.query("SELECT version FROM schema_version").single().long("version"))
         assertEquals(1L, db.query("SELECT staging_complete FROM import_batches WHERE id = ?",
             listOf(batch)).single().long("staging_complete"))
     }

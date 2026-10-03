@@ -3,7 +3,7 @@
 
 # 项目交接
 
-最后更新：2026-10-02T15:39:15Z（UTC；本地验证收口，远端/最终包见交付报告）。项目根目录：E:/mobileAgentRuntime。
+最后更新：2026-10-03T18:16:19.647928+08:00（Asia/Taipei；周额度约束优化及独立迁移复审通过，普通Git/Review交付收尾中）。项目根目录：E:/mobileAgentRuntime。
 
 按 [agent.md 第 1 节](agent.md#1-按任务读取与开工) 选择资料。现行规则见 agent.md；本文件记录现场和待办，历史任务中的授权不自动延续。
 
@@ -24,7 +24,9 @@
 
 ## 1. 现行状态与当前任务
 
-- **2026-10-02 限时阶段优化（实现/本地验证完成，本提交为交付前快照）**：附件修复 PR34 已交付；本轮基线 main abe7a908fb1c0f23dbee2b7f6a0e8c9978ac48e2、分支 codex/deadline-optimization-20261002，在独立 C checkout 完成三处固定摘要下载/13 条故障回归与会话显示两列分批查询/4 条真实 SQLite 回归，15:24 UTC冻结新增范围。定向 SQLite/Review 编译、完整 check/reviewGate（9m17s；250 XML/1,790 测试记录，0失败/错误/跳过）、REUSE828/828、许可正反/native16KiB/notices/SBOM/provenance通过；独立源审查 APPROVE且8源摘要一致。技术/验收与 [阶段证据](docs/evidence/2026-10-02/deadline-optimization.md) 已同步，无迁移/协议/权限变更，不需新 ADR。17:00 UTC（10:00 PDT）前普通 CI 合并和 Debug 签名非 debuggable Review APK为交付条件，实际 PR/merge/clean-source APK另记外部 optimization/交付报告；本提交不提前宣称远端或设备验收。所有worker/reviewer已结束；主Agent负责既定发布收尾。原 E 附件、计划与历史 HANDOFF WIP保留，E HEAD仍为附件修复 checkpoint。
+- **2026-10-03 周额度约束优化（本地门禁通过，提交前快照；主 Agent 唯一写入者）**：用户续做优化，周额度接口基线0%、当前1%（共享读数，有延迟/取整），目标新增≤10个百分点、硬上限14个百分点，7个百分点前冻结扩展。独立 C worktree基线 main 343b911，分支 codex/quota-optimization-20261003；本轮 KB 显示计数257→1次查询，选中库任务2003→3行物化并新增Schema v29匹配索引，1201会话/5工作区标题仅解析5次。v28索引升级保留旧绑定迁移截止版本；合成旧库的数据/同时间戳顺序/计划/幂等/DDL失败回滚与未绑定线程/grant保留回归通过。新增16用例共26变体执行记录；255份现存JVM XML/1816记录0失败/错误/跳过，包含up-to-date结果；严格licenseGuard正反/check/reviewGate通过2m47s，REUSE834/834。初始6文件独立源复审及索引增量独立迁移复审均APPROVE，12项源/测试/ADR摘要逐项一致；普通远端CI/提交推送合并及干净Review包待实际收据。技术/验收、ADR0020与[本轮证据](docs/evidence/2026-10-03/quota-optimization.md)已同步。DSH误选python test只读命令均显式cd到正确C checkout；两个同名入口逐一核验，当前默认root已确认为E:/mobileAgentRuntime，未获源码写入授权。E根附件、计划和历史HANDOFF WIP保持保护；真机/真实付费Provider/帧耗时及长稳仍未验收。
+
+- **2026-10-02 限时阶段优化（已交付；以下为当时提交前快照）**：附件修复 PR34 已交付；本轮基线 main abe7a908fb1c0f23dbee2b7f6a0e8c9978ac48e2、分支 codex/deadline-optimization-20261002，在独立 C checkout 完成三处固定摘要下载/13 条故障回归与会话显示两列分批查询/4 条真实 SQLite 回归，15:24 UTC冻结新增范围。定向 SQLite/Review 编译、完整 check/reviewGate（9m17s；250 XML/1,790 测试记录，0失败/错误/跳过）、REUSE828/828、许可正反/native16KiB/notices/SBOM/provenance通过；独立源审查 APPROVE且8源摘要一致。技术/验收与 [阶段证据](docs/evidence/2026-10-02/deadline-optimization.md) 已同步，无迁移/协议/权限变更，不需新 ADR。17:00 UTC（10:00 PDT）前普通 CI 合并和 Debug 签名非 debuggable Review APK为交付条件，实际 PR/merge/clean-source APK另记外部 optimization/交付报告；本提交不提前宣称远端或设备验收。所有worker/reviewer已结束；主Agent负责既定发布收尾。原 E 附件、计划与历史 HANDOFF WIP保留，E HEAD仍为附件修复 checkpoint。
 - **上一轮附件修复已完成交付**：PR #34正常CI/合并 main abe7a90；干净Review APK为178813639 bytes，SHA256 319f04318293c8f67caa7fb172a88a805bda72fae7de9c93623ad007ca136a18，Debug v2签名且debuggable=false，46/46 native及notices通过。100条非PASS原ID/状态/次数保留，31产品修复/26夹具修正/7功能复测，其余边界见 [附件报告](docs/evidence/2026-10-02/attachment-repair.md)。物理设备、真实付费Provider、原框架ANR因果和长跑仍未全验收。
 
 - **2026-10-01 r3 复测修复第三轮独立审查修订（WIP，未合并）**：分支 `devin/1790844765-emu-r3-fixes`（前序 `515b4fd`），基线 `c2994dd`（PR #32）。本轮四项：① 采集期误归属——`remoteDescendantsOf` 每分支暂存、提交前复核父身份，父复用即整支丢弃；sweep 根检查区分"已绑定根已死"（reparented 孤儿照杀）与"根 PID 复用"（live+不同 startTime 否决），补 root-dead/child-to-init 与 mid-collection 丢支确定性测试。② `SafLivenessProbe` permit 改随真实 worker 生命周期释放（deadline 只放决策不伪释放占位），补忽略 interrupt+重复请求的并发上限测试。③ 健康态按 backend identity 存储/原子判定，down 期间按 probeInterval 自续重试（不依赖 UI 刷新），过期结果写不进替换者。④ `WorkspacePickerPort.workspaceHealthRevision` + `WorkspacePickerViewModel` 订阅仅刷新 recent 列表（不动浏览选择）。**状态**：编译通过，定向单测执行中；strict reviewGate 与新 androidTest 设备证据未出，draft PR #33 不合并。

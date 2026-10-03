@@ -445,11 +445,11 @@ class KnowledgeViewModel(
 
     /** IO only. No Compose state is read or written while repository locks may wait. */
     private fun loadSnapshot(selectedId: String?): KnowledgeUiState {
-            val bases = repo.listKnowledgeBases()
-            val selected = selectedId?.takeIf { id -> bases.any { it.first == id } } ?: bases.firstOrNull()?.first
+            val bases = repo.listKnowledgeBaseDisplaySummaries()
+            val selected = selectedId?.takeIf { id -> bases.any { it.id == id } } ?: bases.firstOrNull()?.id
             val documents = if (selected == null) emptyList() else app.container.db.query(
                 "SELECT d.id,d.display_name,d.format,d.active_version_id,v.status,b.byte_length FROM documents d LEFT JOIN document_versions v ON v.id=d.active_version_id LEFT JOIN blobs b ON b.hash=d.blob_hash WHERE d.kb_id=? AND d.deleted_at IS NULL ORDER BY d.display_name,d.id", listOf(selected))
-            val jobs = repo.listJobs().filter { it.first.knowledgeBaseId == selected }
+            val jobs = selected?.let(repo::listJobs).orEmpty()
             val visionTargets = visionTargetOptions(
                 app.container.profiles.listProviders(),
                 app.container.profiles.listModels(),
@@ -457,8 +457,7 @@ class KnowledgeViewModel(
             val defaultVisionTarget = visionTargets.firstOrNull()
             val target = defaultVisionTarget?.label.orEmpty()
             return KnowledgeUiState(
-                bases = bases.map { (id, name) -> KnowledgeBaseUi(id, name,
-                    app.container.db.query("SELECT count(*) AS count FROM documents WHERE kb_id=? AND deleted_at IS NULL", listOf(id)).single().long("count").toInt()) },
+                bases = bases.map { KnowledgeBaseUi(it.id, it.name, it.documentCount) },
                 selectedBaseId = selected,
                 documents = documents.map { row -> KnowledgeDocumentUi(row.string("id"), row.string("display_name"), row.string("format"),
                     row.string("status").ifBlank { "NOT_READY" }, row.long("byte_length").toString() + " B") },

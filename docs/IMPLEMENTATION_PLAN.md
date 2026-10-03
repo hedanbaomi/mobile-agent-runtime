@@ -431,3 +431,10 @@ PDF 解析支持合法紧凑关闭分隔符后紧接 endobj 的对象，保持 s
 固定 CPython 3.14.7 x86_64/API26 派生核心及 12 个固定上游 builtins；保持隔离、权限和原包身份，合法 ZIP 转换为有界 STORED 私有运行副本并双层 FD hash 校验。
 
 详见 [ADR 0019](adr/0019-python-isolated-api26-and-fixed-stdlib.md) 与 [附件修复处置及证据](evidence/2026-10-02/attachment-repair.md)。真实 Provider/真机/USB/Shizuku/长跑验收单独报告。
+
+## 2026-10-03 显示读取优化（R05/R25，K01/K06/A06/U07）
+
+- Knowledge 列表通过 KnowledgeRepository.listKnowledgeBaseDisplaySummaries 一次左联接读取存活 KB 的 id/name/文档计数；软删除文档在联接条件排除，软删除 KB 在 WHERE 排除，零文档 KB 保留，排序仍为 created_at。原 listKnowledgeBases 保留给其它调用者。
+- KnowledgeViewModel 只对实际选中 KB 调用绑定参数的 listJobs(kbId)，无选中 KB 不读任务。原全局 listJobs 与行解码保留，恢复/授权/UNKNOWN_OUTCOME 字段和筛选规则不变；Schema v29 添加非唯一索引 idx_import_jobs_kb_updated(kb_id, updated_at DESC)，匹配选中库筛选与倒序读取；迁移沿用事务和失败回滚，保留旧版绑定迁移的截止版本，不因添加索引恢复用户未绑定线程。
+- Chat 会话 workspace 标题仅在一次 reload 内按 opaque workspace ID 复用，包括错误；逐线程 binding 读取与执行完整校验保留。缓存不跨刷新，下一次重命名、删除或连接恢复会重新解析；null/空标题与未绑定语义不变。
+- 索引迁移决策见 [ADR 0020](adr/0020-scoped-import-job-display-index.md)。权限/Provider 协议、依赖和 UI 设计语言保持现行约定；批次详情联合投影、整个 Chat reload 的 IO 移出主线程与设备帧耗时仍是后续候选。证据见 evidence/2026-10-03/quota-optimization.md。

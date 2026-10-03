@@ -59,7 +59,8 @@ object Migrations {
     // v26: transactional source revisions for linear API batch validation.
     // v27 replaces the single active dispatch index with three durable slots.
     // v28 permits six durable slots and freezes v27 batches at their old default of three.
-    const val VERSION = 28
+    // v29 adds the scoped import-job display index without replaying legacy binding projection.
+    const val VERSION = 29
 
     private val statements = listOf(
         "CREATE TABLE IF NOT EXISTS schema_version (version INTEGER NOT NULL PRIMARY KEY)",
@@ -134,6 +135,7 @@ object Migrations {
         "CREATE INDEX IF NOT EXISTS idx_tool_invocations_run ON tool_invocations(run_id, created_at)",
         "CREATE UNIQUE INDEX IF NOT EXISTS uq_embedding_operations_active_kb ON embedding_operations(kb_id) WHERE state IN('PREPARED','DISPATCHED','CACHE_READY')",
         "CREATE INDEX IF NOT EXISTS idx_embedding_operations_job ON embedding_operations(job_id)",
+        "CREATE INDEX IF NOT EXISTS idx_import_jobs_kb_updated ON import_jobs(kb_id, updated_at DESC)",
         "CREATE INDEX IF NOT EXISTS idx_capability_grants_agent ON capability_grants(agent_id, revoked_at)",
         "CREATE INDEX IF NOT EXISTS idx_capability_grants_workspace ON capability_grants(workspace_id, revoked_at)",
         "CREATE INDEX IF NOT EXISTS idx_snapshot_grant_bindings_snapshot ON snapshot_grant_bindings(snapshot_id)",
@@ -262,7 +264,7 @@ object Migrations {
             // shape.  Preserve such a table under a deterministic legacy name before creating
             // the canonical table; never drop or overwrite it.  A table which already has the
             // canonical shape is left in place so a damaged v2 install still fails validation.
-            if (current < VERSION) prepareLegacyNameCollisions(connection)
+            if (current < 28L) prepareLegacyNameCollisions(connection)
             // workspace_acl is derived state.  Recreate it so a v12 view cannot
             // silently hide the durable lifecycle columns introduced in v13.
             if (connection.query("SELECT type FROM sqlite_master WHERE name = 'workspace_acl'").singleOrNull()?.string("type") == "view") {
@@ -298,7 +300,8 @@ object Migrations {
             backfillV11(connection)
             backfillV12(connection)
             backfillV2ControlPlane(connection)
-            if (current < VERSION) migrateExistingConversationWorkspaceBindings(connection)
+            // Preserve the pre-v29 cutoff: an index upgrade must not bind an unbound thread.
+            if (current < 28L) migrateExistingConversationWorkspaceBindings(connection)
             ensureDefaultAuthorityRows(connection)
             validateSnapshotManifests(connection)
             validateContextCompactions(connection)

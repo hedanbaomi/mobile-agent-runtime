@@ -216,6 +216,12 @@ class ChatViewModel(
             citations.clear()
             messages.forEach { restoreCitations(it.metadataJson) }
             val agentNames = agents.associateBy { it.id }
+            val threadPort = (container as? ThreadWorkspacePortProvider)?.threadWorkspacePort
+            val workspaceLabels = chatSessionWorkspaceLabels(
+                conversations.map { it.id },
+                bindingWorkspaceId = { threadPort?.conversationWorkspaceBinding(it)?.workspaceId },
+                title = { container.runtimeIntegration.workspaceUiPresentation(it)?.title },
+            )
             val workspaceAccess = projectWorkspaceAccess(
                 conversationId = selected,
                 agentId = agentId,
@@ -224,16 +230,7 @@ class ChatViewModel(
             state.value = state.value.copy(
                 sessions = conversations.map { c ->
                     val snapshotAgentId = conversationAgentIds[c.id]
-                    val workspaceLabel = runCatching {
-                        val threadPort = (container as? ThreadWorkspacePortProvider)?.threadWorkspacePort
-                        val threadBinding = threadPort?.conversationWorkspaceBinding(c.id)
-                        if (threadBinding == null) {
-                            "无工作区"
-                        } else {
-                            container.runtimeIntegration.workspaceUiPresentation(threadBinding.workspaceId)?.title
-                                ?: "已绑定工作区"
-                        }
-                    }.getOrElse { "工作区状态不可用" }
+                    val workspaceLabel = workspaceLabels.getValue(c.id)
                     ChatSessionUi(
                         id = c.id,
                         title = c.title,

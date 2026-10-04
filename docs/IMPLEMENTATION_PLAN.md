@@ -189,6 +189,8 @@ Agent 的 embeddingProfileId 是新建/选择索引的偏好，不可覆盖已�
 
 ### 6.1 Provider adapter
 
+2026-10-05 兼容错误补充：Chat 与 Responses 的连接测试统一解析 error 对象。空、null 或非字符串 code 不得阻止 404 的明确模型缺失信息；明确 code 优先于消息，普通 invalid_request_error/param 错误不得因提及 unsupported/stream/tools 被判为功能不支持。消息回退仅消费 error.message 或旧服务的纯文本错误，不扫描有效 JSON 的其他字段；认证、超时、限流及计费标记保持原约定。基础 Chat 连通测试省略所有可选采样、停止与高级参数，仅保留输出预算别名，独立能力探测保留实际模型参数并仅压低探测输出预算。编辑模型 ID 留空时沿用已有 ID，同一 ID 用于持久化与上下文窗口目标。相关回归与设备/真实 Provider 验证边界见 [兼容性修复证据](evidence/2026-10-05/provider-compatibility.md)。
+
 首个可交付适配器为 Custom OpenAI-Compatible。API Format 是明确枚举和能力组合；不假设所有号称 compatible 的服务都支持相同流式、工具、图片或 structured output。其他厂商原生协议、JS按后续范围单独实现；MCP Adapter保留在M7。不得靠伪装兼容实现静默降级。
 
 目标端口（Kotlin 接口示意，相关类型在实现时定义；不是当前可编译代码）：

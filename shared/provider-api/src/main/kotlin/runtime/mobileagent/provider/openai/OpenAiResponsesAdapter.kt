@@ -1169,53 +1169,34 @@ class OpenAiResponsesAdapter(
 
     private fun probeHttpSummary(status: Int, raw: String): String = when {
         status == 401 || status == 403 -> "auth-failed"
-        status == 404 && bodyMentionsModel(raw) -> "model-not-found"
-        status == 404 -> "endpoint-unsupported"
         status == 408 -> "timeout"
         status == 429 -> "rate-limited"
-        status in 400..499 && bodyMentionsFeature(raw) -> "feature-unsupported"
-        status in 400..499 -> "provider-rejected"
+        status in 400..499 -> when (classifyOpenAiClientError(status, raw)) {
+            ProviderConnectionErrorCode.MODEL_NOT_FOUND -> "model-not-found"
+            ProviderConnectionErrorCode.ENDPOINT_UNSUPPORTED -> "endpoint-unsupported"
+            ProviderConnectionErrorCode.FEATURE_UNSUPPORTED -> "feature-unsupported"
+            else -> "provider-rejected"
+        }
         status in 500..599 -> "provider-unavailable"
         else -> "http-$status"
     }
 
     private fun connectionFailureForHttp(status: Int, raw: String): ProviderConnectionResult.Failure = when (status) {
         401, 403 -> ProviderConnectionResult.Failure(ProviderConnectionErrorCode.AUTH_FAILED, status, retryable = false, charged = true)
-        404 -> if (bodyMentionsModel(raw)) {
-            ProviderConnectionResult.Failure(ProviderConnectionErrorCode.MODEL_NOT_FOUND, status, retryable = false, charged = true)
-        } else {
-            ProviderConnectionResult.Failure(ProviderConnectionErrorCode.ENDPOINT_UNSUPPORTED, status, retryable = false, charged = true)
-        }
         408 -> ProviderConnectionResult.Failure(ProviderConnectionErrorCode.TIMEOUT, status, retryable = true, charged = true)
         429 -> ProviderConnectionResult.Failure(ProviderConnectionErrorCode.RATE_LIMITED, status, retryable = true, charged = true)
-        in 400..499 -> ProviderConnectionResult.Failure(
-            if (bodyMentionsFeature(raw)) ProviderConnectionErrorCode.FEATURE_UNSUPPORTED else ProviderConnectionErrorCode.PROVIDER_REJECTED,
-            status,
-            retryable = false,
-            charged = true,
-        )
+        in 400..499 -> ProviderConnectionResult.Failure(classifyOpenAiClientError(status, raw), status, retryable = false, charged = true)
         in 500..599 -> ProviderConnectionResult.Failure(ProviderConnectionErrorCode.PROVIDER_REJECTED, status, retryable = true, charged = true)
         else -> ProviderConnectionResult.Failure(ProviderConnectionErrorCode.UNKNOWN, status, retryable = false, charged = true)
     }
 
     private fun httpFailureMessage(status: Int, raw: String): String = when (status) {
         401, 403 -> ErrorCode.PROVIDER_UNAUTHORIZED.name
-        404 -> if (bodyMentionsModel(raw)) ProviderConnectionErrorCode.MODEL_NOT_FOUND.name else ProviderConnectionErrorCode.ENDPOINT_UNSUPPORTED.name
         408 -> ProviderConnectionErrorCode.TIMEOUT.name
         429 -> ErrorCode.RATE_LIMITED.name
-        in 400..499 -> if (bodyMentionsFeature(raw)) ProviderConnectionErrorCode.FEATURE_UNSUPPORTED.name else ProviderConnectionErrorCode.PROVIDER_REJECTED.name
+        in 400..499 -> classifyOpenAiClientError(status, raw).name
         in 500..599 -> ProviderConnectionErrorCode.PROVIDER_REJECTED.name
         else -> ErrorCode.UNKNOWN_OUTCOME.name
-    }
-
-    private fun bodyMentionsModel(raw: String): Boolean {
-        val lower = raw.lowercase()
-        return lower.contains("model_not_found") || lower.contains("model not found") || lower.contains("unknown model")
-    }
-
-    private fun bodyMentionsFeature(raw: String): Boolean {
-        val lower = raw.lowercase()
-        return lower.contains("unsupported") || lower.contains("not support") || lower.contains("stream") || lower.contains("tool")
     }
 
     private suspend fun readBounded(channel: ByteReadChannel): String {

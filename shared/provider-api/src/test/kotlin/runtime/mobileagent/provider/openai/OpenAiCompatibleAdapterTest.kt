@@ -8,6 +8,7 @@ import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.test.runTest
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertFalse
+import org.junit.jupiter.api.Assertions.assertNotNull
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
 import runtime.mobileagent.domain.AppException
@@ -1420,12 +1421,13 @@ class OpenAiCompatibleAdapterTest {
     @Test
     fun testConnectionMapsAuthModelAndRateLimitFailures() = runBlocking {
         listOf(
-            HttpStatusCode.Unauthorized to ProviderConnectionErrorCode.AUTH_FAILED,
-            HttpStatusCode.NotFound to ProviderConnectionErrorCode.MODEL_NOT_FOUND,
-            HttpStatusCode.TooManyRequests to ProviderConnectionErrorCode.RATE_LIMITED,
-        ).forEach { (httpStatus, expected) ->
+            HttpStatusCode.Unauthorized to ProviderConnectionErrorCode.AUTH_FAILED to "rejected",
+            HttpStatusCode.NotFound to ProviderConnectionErrorCode.MODEL_NOT_FOUND to "model_not_found",
+            HttpStatusCode.TooManyRequests to ProviderConnectionErrorCode.RATE_LIMITED to "rate limited",
+        ).forEach { (statusAndCode, responseBody) ->
+            val (httpStatus, expected) = statusAndCode
             val engine = MockEngine {
-                respond("rejected", httpStatus)
+                respond(responseBody, httpStatus)
             }
             val adapter = OpenAiCompatibleAdapter(HttpClient(engine), "https://example.invalid/v1")
             val result = adapter.testConnection(
@@ -2171,4 +2173,144 @@ class OpenAiCompatibleAdapterTest {
         assertTrue(report.charged)
         assertTrue(report.source.contains("stream=invalid-response"))
     }
+
+    @Test
+    fun testConnection404DistinguishesEndpointFromModel() = runBlocking {
+        // 404 with route_not_found should map to ENDPOINT_UNSUPPORTED
+        val endpointEngine = MockEngine {
+            respond("""{"error":{"code":"route_not_found","message":"Unknown endpoint"}}""", HttpStatusCode.NotFound)
+        }
+        val endpointAdapter = OpenAiCompatibleAdapter(HttpClient(endpointEngine), "https://example.invalid/v1")
+        val endpointResult = endpointAdapter.testConnection(
+            ModelProfile(
+                id = "endpoint-test",
+                providerId = "provider",
+                modelId = "demo",
+                role = ModelRole.CHAT,
+                capabilities = emptySet(),
+                contextLimit = 4096,
+                outputLimit = 64,
+                revision = 1,
+            ),
+            "secret".toCharArray(),
+        ) as ProviderConnectionResult.Failure
+        assertEquals(ProviderConnectionErrorCode.ENDPOINT_UNSUPPORTED, endpointResult.code)
+        assertEquals(404, endpointResult.httpStatus)
+
+        // 404 with model_not_found should map to MODEL_NOT_FOUND
+        val modelEngine = MockEngine {
+            respond("""{"error":{"code":"model_not_found","message":"Model not found"}}""", HttpStatusCode.NotFound)
+        }
+        val modelAdapter = OpenAiCompatibleAdapter(HttpClient(modelEngine), "https://example.invalid/v1")
+        val modelResult = modelAdapter.testConnection(
+            ModelProfile(
+                id = "model-test",
+                providerId = "provider",
+                modelId = "demo",
+                role = ModelRole.CHAT,
+                capabilities = emptySet(),
+                contextLimit = 4096,
+                outputLimit = 64,
+                revision = 1,
+            ),
+            "secret".toCharArray(),
+        ) as ProviderConnectionResult.Failure
+        assertEquals(ProviderConnectionErrorCode.MODEL_NOT_FOUND, modelResult.code)
+        assertEquals(404, modelResult.httpStatus)
+    }
+
+    @Test
+    fun testConnection400RecognizesUnsupportedModel() = runBlocking {
+        // 400 with unsupported_model should map to MODEL_NOT_FOUND
+        val engine = MockEngine {
+            respond("""{"error":{"code":"unsupported_model","message":"The model is not in the provider catalog"}}""", HttpStatusCode.BadRequest)
+        }
+        val adapter = OpenAiCompatibleAdapter(HttpClient(engine), "https://example.invalid/v1")
+        val result = adapter.testConnection(
+            ModelProfile(
+                id = "unsupported-test",
+                providerId = "provider",
+                modelId = "demo",
+                role = ModelRole.CHAT,
+                capabilities = emptySet(),
+                contextLimit = 4096,
+                outputLimit = 64,
+                revision = 1,
+            ),
+            "secret".toCharArray(),
+        ) as ProviderConnectionResult.Failure
+        assertEquals(ProviderConnectionErrorCode.MODEL_NOT_FOUND, result.code)
+        assertEquals(400, result.httpStatus)
+    }
+
+    @Test
+    fun testConnectionProbeFiltersOptionalParameters() = runBlocking {
+        var capturedBody: String? = null
+        val engine = MockEngine { request ->
+            capturedBody = (request.body as io.ktor.http.content.TextContent).text
+            val payload = Json.parseToJsonElement(capturedBody!!).jsonObject
+            val optional = setOf("temperature", "top_p", "top_k", "presence_penalty", "frequency_penalty", "stop", "reasoning_effort", "response_format")
+            if (payload.keys.any { it in optional }) {
+                respond("""{"error":{"code":"unsupported_parameter"}}""", HttpStatusCode.BadRequest)
+            } else {
+                respond("""{"choices":[{"message":{"content":"ok"}}]}""", HttpStatusCode.OK, headersOf(HttpHeaders.ContentType, "application/json"))
+            }
+        }
+        val adapter = OpenAiCompatibleAdapter(HttpClient(engine), "https://example.invalid/v1")
+        val result = adapter.testConnection(
+            ModelProfile(
+                id = "param-test",
+                providerId = "provider",
+                modelId = "demo",
+                role = ModelRole.CHAT,
+                capabilities = setOf("stream"),
+                contextLimit = 4096,
+                outputLimit = 64,
+                parametersJson = """{"reasoning_effort":"high","response_format":{"type":"json_object"},"temperature":0.7,"top_p":0.9,"top_k":20,"presence_penalty":0.1,"frequency_penalty":0.1,"stop":["end"]}""",
+                revision = 1,
+            ),
+            "secret".toCharArray(),
+        )
+        assertTrue(result is ProviderConnectionResult.Success)
+        assertNotNull(capturedBody)
+        val payload = kotlinx.serialization.json.Json.parseToJsonElement(capturedBody!!).jsonObject
+        // Sampling parameters are optional even when they look basic.
+        assertFalse(payload.containsKey("temperature"))
+        // Should NOT include advanced parameters
+        assertFalse(payload.containsKey("reasoning_effort"))
+        assertFalse(payload.containsKey("response_format"))
+    }
+    @Test
+    fun capabilityProbeKeepsOptionalParametersAndOnlyClampsOutputBudget() = runBlocking {
+        var body: kotlinx.serialization.json.JsonObject? = null
+        val engine = MockEngine { request ->
+            if (request.url.encodedPath.contains("/models")) {
+                respond("""{"id":"demo"}""", HttpStatusCode.OK, headersOf(HttpHeaders.ContentType, "application/json"))
+            } else {
+                body = Json.parseToJsonElement((request.body as io.ktor.http.content.TextContent).text).jsonObject
+                respond(
+                    "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n\ndata: [DONE]\n\n",
+                    HttpStatusCode.OK, headersOf(HttpHeaders.ContentType, "text/event-stream"),
+                )
+            }
+        }
+        HttpClient(engine).use { client ->
+            val result = OpenAiCompatibleAdapter(client, "https://example.invalid/v1").probe(
+                ModelProfile(
+                    id = "full-probe", providerId = "provider", modelId = "demo", role = ModelRole.CHAT,
+                    capabilities = setOf("stream"), contextLimit = 4096, outputLimit = 64, revision = 1,
+                    parametersJson = """{"reasoning_effort":"high","response_format":{"type":"json_object"},"temperature":0.7,"max_completion_tokens":1024}""",
+                ),
+                "fixture-secret".toCharArray(), runtime.mobileagent.provider.ProbeConsent.GRANTED,
+            )
+            assertTrue(result.supportsStream)
+            val sent = body!!
+            assertEquals(JsonPrimitive("high"), sent["reasoning_effort"])
+            assertEquals(JsonPrimitive(0.7), sent["temperature"])
+            assertEquals(JsonPrimitive("json_object"), sent["response_format"]!!.jsonObject["type"])
+            assertTrue(sent["max_completion_tokens"]!!.jsonPrimitive.content.toInt() in 1..64)
+            assertFalse(sent.containsKey("max_tokens"))
+        }
+    }
+
 }

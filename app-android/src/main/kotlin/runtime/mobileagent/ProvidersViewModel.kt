@@ -131,9 +131,6 @@ class ProvidersViewModel @JvmOverloads constructor(
         }
         return try {
             require(draft.name.isNotBlank()) { "请填写名称。" }
-            if (draft.modelId.isNotBlank() || draft.modelProfileId != null) {
-                require(draft.modelId.isNotBlank()) { "请填写模型 ID。" }
-            }
             val endpoint = URI(draft.baseUrl.trim().trimEnd('/'))
             require(endpoint.host != null && endpoint.rawUserInfo == null && endpoint.rawFragment == null && endpoint.rawQuery == null) { "服务地址必须是有效的 Base URL，不能含凭据、查询或片段。" }
             val debugLocal = BuildConfig.DEBUG && endpoint.host in setOf("localhost", "127.0.0.1", "10.0.2.2", "[::1]")
@@ -150,11 +147,20 @@ class ProvidersViewModel @JvmOverloads constructor(
             val saveModel = draft.modelId.isNotBlank() || draft.modelProfileId != null
             var parameters: JsonObject = JsonObject(emptyMap())
             var modelPrevious: ModelProfile? = null
+            var effectiveModelId = draft.modelId.trim()
             var contextLimit = 0
             var outputLimit = 0
             var declaredWindow: Int? = null
             if (saveModel) {
-                require(draft.modelId.isNotBlank()) { "请填写模型 ID。" }
+                // Load the existing model first if editing
+                modelPrevious = draft.modelProfileId?.let { app.container.profiles.getModel(it) }
+                require(modelPrevious == null || modelPrevious.providerId == providerId) { "模型不属于当前服务。" }
+
+                // Use modelId from draft or fall back to existing model's modelId
+                effectiveModelId = draft.modelId.trim().takeIf { it.isNotBlank() }
+                    ?: modelPrevious?.modelId
+                    ?: error("请填写模型 ID。")
+
                 // Validation follows the selected mode and the sources the user can
                 // actually see: a hidden legacy number must never decide the result.
                 val manualWindow = parsePositiveProviderBudget(draft.contextLimit)
@@ -198,8 +204,6 @@ class ProvidersViewModel @JvmOverloads constructor(
                 require(parsed is JsonObject) { "模型参数必须是 JSON 对象。" }
                 rejectReserved(parsed)
                 parameters = parsed
-                modelPrevious = draft.modelProfileId?.let { app.container.profiles.getModel(it) }
-                require(modelPrevious == null || modelPrevious.providerId == providerId) { "模型不属于当前服务。" }
             }
             val provider = ProviderProfile(
                 id = providerId, name = draft.name.trim(), apiFormat = apiFormat,
@@ -209,11 +213,11 @@ class ProvidersViewModel @JvmOverloads constructor(
                 revision = (previous?.revision ?: 0) + 1,
             )
             val windowFact = ContextWindowProducer().userDeclared(
-                contextWindowTarget(providerId, endpoint.toASCIIString(), draft.modelId.trim()), declaredWindow,
+                contextWindowTarget(providerId, endpoint.toASCIIString(), effectiveModelId), declaredWindow,
             )
             val model = if (saveModel) ModelProfile(
                 id = modelPrevious?.id ?: EntityId.random().value, providerId = providerId,
-                role = draft.role, modelId = draft.modelId.trim(), capabilities = draft.capabilities,
+                role = draft.role, modelId = effectiveModelId, capabilities = draft.capabilities,
                 parameterSchemaJson = modelPrevious?.parameterSchemaJson ?: "{}",
                 parametersJson = parameters.toString(), contextLimit = contextLimit, outputLimit = outputLimit,
                 outputLimitMode = draft.outputLimitMode,
@@ -239,10 +243,10 @@ class ProvidersViewModel @JvmOverloads constructor(
                     runCatching { app.container.secrets.inventory().retireIfUnreferenced(oldRef) }.isFailure
                 } == true
             reload()
-            status.value = if (draft.modelId.isBlank()) {
+            status.value = if (draft.modelId.isBlank() && modelPrevious == null) {
                 "已保存 ${provider.name}。" + if (oldSecretCleanupFailed) "旧密钥仍保留，引用检查失败；请修复存储后重试回收。" else ""
             } else {
-                "已保存 ${provider.name} / ${draft.modelId.trim()}。能力标记来自手动配置，尚未发送探测请求。" +
+                "已保存 ${provider.name} / ${effectiveModelId}。能力标记来自手动配置，尚未发送探测请求。" +
                     if (oldSecretCleanupFailed) "旧密钥仍保留，引用检查失败；请修复存储后重试回收。" else ""
             }
             if (model != null && model.contextLimitMode == ContextLimitMode.AUTO &&
@@ -830,7 +834,7 @@ class ProvidersViewModel @JvmOverloads constructor(
         ProviderConnectionErrorCode.TLS_FAILURE -> "安全连接失败"
         ProviderConnectionErrorCode.TIMEOUT -> "请求超时"
         ProviderConnectionErrorCode.AUTH_FAILED -> "认证失败"
-        ProviderConnectionErrorCode.ENDPOINT_UNSUPPORTED -> "Responses 端点不支持"
+        ProviderConnectionErrorCode.ENDPOINT_UNSUPPORTED -> "端点不支持"
         ProviderConnectionErrorCode.MODEL_NOT_FOUND -> "模型不存在"
         ProviderConnectionErrorCode.RATE_LIMITED -> "请求受限"
         ProviderConnectionErrorCode.FEATURE_UNSUPPORTED -> "请求能力不支持"

@@ -149,7 +149,7 @@ class OpenAiCompatibleAdapter(
                 modelId = configured.modelId,
                 messages = listOf(ChatMessage(role = "user", text = "Reply with ok.")),
                 stream = false,
-                parameters = probeParameterLayers(modelParameters, probeOutputTokens),
+                parameters = connectionProbeParameterLayers(modelParameters, probeOutputTokens),
                 operationId = operationId,
                 outputTokenLimit = probeOutputTokens,
             )
@@ -165,10 +165,10 @@ class OpenAiCompatibleAdapter(
                     setBody(payload.toString())
                 }.execute { response ->
                     val status = response.status.value
-                    if (status !in 200..299) {
-                        return@execute connectionFailureForHttp(status)
-                    }
                     val raw = readBounded(response.bodyAsChannel())
+                    if (status !in 200..299) {
+                        return@execute connectionFailureForHttp(status, raw)
+                    }
                     val contentType = response.headers[HttpHeaders.ContentType].orEmpty().lowercase()
                     val valid = if (contentType.contains("text/event-stream")) {
                         parseConnectionSse(raw)
@@ -1188,7 +1188,7 @@ class OpenAiCompatibleAdapter(
                 emptyList()
             },
             stream = feature == ProbeFeature.STREAM,
-            parameters = probeParameterLayers(modelParameters, probeOutputTokens),
+            parameters = boundedProbeParameterLayers(modelParameters, probeOutputTokens),
             operationId = "capability-probe-${feature.name.lowercase()}",
             outputTokenLimit = probeOutputTokens,
         )
@@ -1230,22 +1230,19 @@ class OpenAiCompatibleAdapter(
         put("function", buildJsonObject { put("name", JsonPrimitive(PROBE_TOOL_NAME)) })
     }
 
+    /** Basic connection tests omit all optional sampling, stop, and advanced parameters. */
+    private fun connectionProbeParameterLayers(modelParameters: JsonObject, probeOutputCap: Int): ParameterLayers =
+        boundedProbeParameterLayers(
+            JsonObject(modelParameters.filterKeys { it == "max_tokens" || it == "max_completion_tokens" }),
+            probeOutputCap,
+        )
+
     /**
-     * Probes keep a fixed, small output cap, but a profile whose validated default is a legal
-     * `max_tokens` (for example 1024 against a 4096 request budget) must not be reported as
-     * invalid configuration merely because the probe spends less. The single output-limit field
-     * the profile already uses is clamped to the probe cap (a cheaper configured default such as
-     * 32 is kept), so the field name a provider requires is preserved and every other parameter
-     * is carried through unchanged. A profile that sets both fields, or a non-positive /
-     * non-numeric value, stays untouched and is rejected by the shared merger exactly as a normal
-     * request would be.
+     * Clamp the profile's output alias to the probe budget, preserving other supplied fields.
+     * Capability probes pass all model fields; connection tests pass only output aliases.
+     * Conflicting aliases and invalid values stay intact for the shared merger to reject.
      */
-    /**
-     * Probe parameters never carry the business output aliases: a legitimate large
-     * cap must not be judged as an invalid probe configuration, and the probe
-     * supplies its own task-local cap through [ModelRequest.outputTokenLimit].
-     */
-    private fun probeParameterLayers(modelParameters: JsonObject, probeOutputCap: Int): ParameterLayers {
+    private fun boundedProbeParameterLayers(modelParameters: JsonObject, probeOutputCap: Int): ParameterLayers {
         val hasMaxTokens = modelParameters.containsKey("max_tokens")
         val hasMaxCompletionTokens = modelParameters.containsKey("max_completion_tokens")
         if (hasMaxTokens && hasMaxCompletionTokens) return ParameterLayers(modelParameters = modelParameters)
@@ -1483,7 +1480,7 @@ class OpenAiCompatibleAdapter(
         return sawPayload && sawCompleted && !sawFailed
     }
 
-    private fun connectionFailureForHttp(status: Int): ProviderConnectionResult.Failure = when (status) {
+    private fun connectionFailureForHttp(status: Int, raw: String): ProviderConnectionResult.Failure = when (status) {
         401, 403 -> ProviderConnectionResult.Failure(
             code = ProviderConnectionErrorCode.AUTH_FAILED,
             httpStatus = status,
@@ -1491,10 +1488,7 @@ class OpenAiCompatibleAdapter(
             charged = true,
         )
         404 -> ProviderConnectionResult.Failure(
-            code = ProviderConnectionErrorCode.MODEL_NOT_FOUND,
-            httpStatus = status,
-            retryable = false,
-            charged = true,
+            classifyOpenAiClientError(status, raw), status, retryable = false, charged = true,
         )
         408 -> ProviderConnectionResult.Failure(
             code = ProviderConnectionErrorCode.TIMEOUT,
@@ -1509,10 +1503,7 @@ class OpenAiCompatibleAdapter(
             charged = true,
         )
         in 400..499 -> ProviderConnectionResult.Failure(
-            code = ProviderConnectionErrorCode.PROVIDER_REJECTED,
-            httpStatus = status,
-            retryable = false,
-            charged = true,
+            classifyOpenAiClientError(status, raw), status, retryable = false, charged = true,
         )
         in 500..599 -> ProviderConnectionResult.Failure(
             code = ProviderConnectionErrorCode.PROVIDER_REJECTED,

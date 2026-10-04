@@ -1011,7 +1011,7 @@ private fun connectionErrorLabel(error: ProviderConnectionErrorCode?, zh: Boolea
     ProviderConnectionErrorCode.TLS_FAILURE -> if (zh) "TLS 安全连接失败" else "TLS failure"
     ProviderConnectionErrorCode.TIMEOUT -> if (zh) "请求超时" else "Timeout"
     ProviderConnectionErrorCode.AUTH_FAILED -> if (zh) "认证失败" else "Authentication failed"
-    ProviderConnectionErrorCode.ENDPOINT_UNSUPPORTED -> if (zh) "Responses 端点不支持" else "Responses endpoint unsupported"
+    ProviderConnectionErrorCode.ENDPOINT_UNSUPPORTED -> if (zh) "端点不支持" else "Endpoint unsupported"
     ProviderConnectionErrorCode.MODEL_NOT_FOUND -> if (zh) "模型不存在" else "Model not found"
     ProviderConnectionErrorCode.RATE_LIMITED -> if (zh) "请求受限" else "Rate limited"
     ProviderConnectionErrorCode.FEATURE_UNSUPPORTED -> if (zh) "请求能力不支持" else "Requested feature unsupported"

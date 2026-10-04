@@ -337,3 +337,5 @@ S03/S04/S05/S07 增量必须通过真实 isolated worker：API26 JSON/新 PID；
 - L01—L04、严格 check/reviewGate/REUSE 和常规 CI 持续作为交付门禁。该阶段的设备/Provider/长稳边界与本轮事实见 evidence/2026-10-03/quota-optimization.md。
 
 2026-10-03 五项复审新增边界：K02/K05 检查旧 EPUB v3 不复用为完整 READY、明确文本缺口、查询确定失败释放本次 claim、UNKNOWN/取消仍受明确授权门禁、旧 owner 不覆盖新授权且有效缓存不重发；S11 检查撤权前零工具派发和派发后结果扣留/UNKNOWN；S18/S31 检查 SAF 已创建目录核验失败与工作区 TERMINAL 审计失败均保留 UNKNOWN、内容/目录留存、熔断及防重放。验证状态见 [五项复审修复](evidence/2026-10-03/five-review-fixes.md)，不据此标 §14 全量验收通过。
+
+2026-10-05 A10/R02/R03/R12 兼容性补充：分别通过 Chat 和 Responses 的公开连接测试验证 404 的缺失/null/空/非字符串 code、明确模型/路由 code 优先级，以及仅 type/param 的普通 400 参数错误。认证/限流/超时仍优先于响应正文；错误结果不得携带 raw body。基础 Chat 连通请求不带可选采样、停止与高级参数，实际能力探测保留它们；模型编辑空 ID 沿用已有 ID 并保持同一配置身份。实测状态见 [兼容性修复证据](evidence/2026-10-05/provider-compatibility.md)，本地 MockEngine 成功不等同于真实服务连接或全量设备验收。

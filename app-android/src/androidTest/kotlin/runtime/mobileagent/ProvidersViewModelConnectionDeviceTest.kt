@@ -43,11 +43,36 @@ import runtime.mobileagent.provider.ProviderConnectionResult
 @RunWith(AndroidJUnit4::class)
 class ProvidersViewModelConnectionDeviceTest {
     @Test
+    fun editingWithBlankModelIdKeepsIdentityAndPersistsOtherChanges() {
+        val harness = harness(onTest = { error("No provider request expected") })
+        val original = harness.vm.models.single { it.id == harness.modelId }
+        val provider = harness.vm.providers.single { it.id == original.providerId }
+        val modelCount = harness.vm.models.size
+        assertTrue(harness.vm.saveDraft(ProviderDraft(
+            providerId = provider.id, modelProfileId = original.id,
+            name = provider.name, baseUrl = provider.baseUrl, modelId = "  ",
+            parametersJson = """{"temperature":0.5}""",
+            contextLimit = "1024", outputLimit = "64",
+            contextLimitMode = runtime.mobileagent.domain.ContextLimitMode.MANUAL,
+            outputLimitMode = runtime.mobileagent.domain.OutputLimitMode.MANUAL,
+        )))
+        val saved = harness.vm.models.single { it.id == original.id }
+        assertEquals(modelCount, harness.vm.models.size)
+        assertEquals(original.modelId, saved.modelId)
+        assertEquals(original.providerId, saved.providerId)
+        assertEquals(original.revision + 1, saved.revision)
+        assertEquals("""{"temperature":0.5}""", saved.parametersJson)
+        assertEquals(provider.secretRef, harness.vm.providers.single { it.id == provider.id }.secretRef)
+        assertTrue(harness.vm.status.value.contains(original.modelId))
+    }
+
+    @Test
     fun testConnectionMapsTypedAdapterResultsIntoProbeState() {
         val cases = listOf(
             ProviderConnectionResult.Success(latencyMs = 12, charged = true) to ProbePhase.SUCCESS,
             failure(ProviderConnectionErrorCode.AUTH_FAILED, 401) to ProbePhase.FAILURE,
             failure(ProviderConnectionErrorCode.MODEL_NOT_FOUND, 404) to ProbePhase.FAILURE,
+            failure(ProviderConnectionErrorCode.ENDPOINT_UNSUPPORTED, 404) to ProbePhase.FAILURE,
             failure(ProviderConnectionErrorCode.RATE_LIMITED, 429, retryable = true) to ProbePhase.FAILURE,
             failure(ProviderConnectionErrorCode.TIMEOUT, retryable = true, charged = true) to ProbePhase.FAILURE,
             failure(ProviderConnectionErrorCode.NETWORK_UNREACHABLE, retryable = true) to ProbePhase.FAILURE,

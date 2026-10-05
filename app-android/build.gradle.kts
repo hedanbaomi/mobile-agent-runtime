@@ -84,9 +84,8 @@ android {
         versionCode = 2
         versionName = "1.0.0"
         testInstrumentationRunner = "runtime.mobileagent.PythonRuntimeDeviceTestRunner"
-        ndk {
-            abiFilters += listOf("arm64-v8a", "x86_64")
-        }
+        // Build-type ABI filters are merged with defaultConfig, not replaced.
+        // Keep the default empty so release cannot inherit debug's x86_64.
         buildConfigField("String", "SOURCE_URL", "\"https://github.com/hedanbaomi/mobile-agent-runtime\"")
         buildConfigField("String", "GIT_REVISION", buildConfigString(gitRevision))
         buildConfigField("boolean", "GIT_DIRTY", gitDirty.toString())

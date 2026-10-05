@@ -331,6 +331,16 @@ val verifyReleaseProvenance = tasks.register("verifyReleaseProvenance") {
         val git = parsed["git"] as? Map<*, *> ?: error("Provenance git object missing")
         val artifact = parsed["artifact"] as? Map<*, *> ?: error("Provenance artifact object missing")
         val sbom = parsed["sbom"] as? Map<*, *> ?: error("Provenance SBOM object missing")
+        check(artifact["type"] == "android-apk" && artifact["abi"] == listOf("arm64-v8a")) {
+            "Release provenance must describe an arm64-only APK"
+        }
+        check(artifact["path"] == "app-android/build/outputs/apk/release/app-android-release.apk") {
+            "Release provenance must bind the canonical release APK"
+        }
+        check(artifact["debuggable"] == false) { "Release APK must be non-debuggable" }
+        val security = parsed["security"] as? Map<*, *> ?: error("Provenance security object missing")
+        check(security["highPrivilegeControlPlaneEnabled"] == true) { "Release control plane evidence is invalid" }
+        check(sbom["format"] == "CycloneDX-1.6") { "Release SBOM format is invalid" }
         val sourceHash = parsed["sourceArchiveSha256"] as? String ?: error("Provenance source hash missing")
         check(Regex("[0-9a-f]{40}").matches(git["sha"] as? String ?: "")) { "Provenance Git SHA is not complete" }
         listOf(sourceHash, artifact["sha256"], sbom["sha256"]).forEach {
@@ -338,7 +348,7 @@ val verifyReleaseProvenance = tasks.register("verifyReleaseProvenance") {
         }
         val artifactFile = rootProject.file(artifact["path"] as? String ?: "")
         val sbomFile = rootProject.file(sbom["path"] as? String ?: "")
-        check(artifactFile.isFile && sha256(artifactFile) == artifact["sha256"]) { "AAB hash does not match provenance" }
+        check(artifactFile.isFile && sha256(artifactFile) == artifact["sha256"]) { "APK hash does not match provenance" }
         check(sbomFile.isFile && sha256(sbomFile) == sbom["sha256"]) { "SBOM hash does not match provenance" }
         check(sourceHash == sourceArchiveSha256()) { "Source archive hash does not match provenance" }
         check(git["sha"] == gitOutput("rev-parse", "--verify", "HEAD").lowercase()) { "Provenance Git SHA does not match HEAD" }
@@ -368,6 +378,6 @@ tasks.register("releaseGate") {
     dependsOn("check")
     dependsOn(verifyCiPins, verifyDependencyLock, verifyDependencyVerification)
     dependsOn(":app-android:verifyReleaseSigning")
-    dependsOn(":app-android:bundleRelease", ":app-android:generateReleaseSbom", ":app-android:verifyReleaseArtifact", ":app-android:generateReleaseProvenance")
+    dependsOn(":app-android:assembleRelease", ":app-android:generateReleaseSbom", ":app-android:verifyReleaseArtifact", ":app-android:generateReleaseProvenance")
     dependsOn(verifyReleaseProvenance)
 }

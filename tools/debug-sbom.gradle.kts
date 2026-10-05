@@ -161,15 +161,6 @@ fun resolvedComponents(configurationName: String): List<Map<String, Any>> {
         }
 }
 
-fun releaseBundleFile(): File {
-    val directory = layout.buildDirectory.dir("outputs/bundle/release").get().asFile
-    val bundles = directory.listFiles { file -> file.isFile && file.extension == "aab" }.orEmpty()
-    check(bundles.size == 1) {
-        "Expected exactly one release AAB in ${directory.absolutePath}, found ${bundles.size}"
-    }
-    return bundles.single()
-}
-
 fun variantApkFile(variant: String): File {
     val directory = layout.buildDirectory.dir("outputs/apk/$variant").get().asFile
     val candidates = directory.listFiles { file ->
@@ -370,7 +361,9 @@ fun writeSbom(
                 add(
                     mapOf(
                         "name" to "mobileagent:security-build",
-                        "value" to if (!expectedDebuggable && expectedControlPlaneEnabled) {
+                        "value" to if (variant == "release") {
+                            "formal-release"
+                        } else if (!expectedDebuggable && expectedControlPlaneEnabled) {
                             "review-like-non-debuggable"
                         } else {
                             "ordinary-debug"
@@ -802,55 +795,109 @@ tasks.register("reviewGate") {
     dependsOn(verifyReviewProvenance)
 }
 
+fun verifyArm64ReleaseApk(apk: File) {
+    var arm64Entries = 0
+    val nativePath = Regex("""^lib/([^/]+)/[^/]+\.so$""")
+    ZipFile(apk).use { zip ->
+        zip.entries().asSequence().filterNot { it.isDirectory }.forEach { entry ->
+            val name = entry.name
+            if (!name.startsWith("lib/")) {
+                check(!name.endsWith(".so") || !Regex("""(^|/)lib/""").containsMatchIn(name)) {
+                    "Release APK contains a non-canonical native path: $name"
+                }
+                return@forEach
+            }
+            val match = nativePath.matchEntire(name)
+            check(match != null) { "Release APK contains a non-canonical native path: $name" }
+            check(match.groupValues[1] == "arm64-v8a") {
+                "Release APK contains a forbidden native ABI: $name"
+            }
+            check(entry.size > 0) { "Release APK contains an empty native payload: $name" }
+            arm64Entries++
+        }
+    }
+    check(arm64Entries > 0) { "Release APK has no lib/arm64-v8a native payload" }
+}
+
+val verifyReleaseAbiRegression = tasks.register("verifyReleaseAbiRegression") {
+    group = "verification"
+    description = "Exercise the APK ABI guard against canonical, mixed, missing and misleading ZIP payloads."
+    doLast {
+        val fixtures = layout.buildDirectory.dir("tmp/release-abi-regression").get().asFile.apply { mkdirs() }
+        fun fixture(name: String, entries: List<String>, allowed: Boolean, empty: Boolean = false) {
+            val file = File(fixtures, "$name.apk")
+            java.util.zip.ZipOutputStream(file.outputStream()).use { zip ->
+                entries.forEach { path ->
+                    zip.putNextEntry(java.util.zip.ZipEntry(path))
+                    if (!empty && !path.endsWith("/")) zip.write(byteArrayOf(0x7f, 0x45, 0x4c, 0x46))
+                    zip.closeEntry()
+                }
+            }
+            val result = runCatching { verifyArm64ReleaseApk(file) }
+            check(result.isSuccess == allowed) { "Release APK ABI regression failed: $name" }
+            if (!allowed) check(result.exceptionOrNull() is IllegalStateException)
+        }
+        val arm = "lib/arm64-v8a/libfixture.so"
+        fixture("arm64", listOf(arm), true)
+        fixture("multiple-arm64", listOf(arm, "lib/arm64-v8a/libsecond.so"), true)
+        fixture("mixed-x86_64", listOf(arm, "lib/x86_64/libfixture.so"), false)
+        fixture("mixed-x86", listOf(arm, "lib/x86/libfixture.so"), false)
+        fixture("mixed-arm32", listOf(arm, "lib/armeabi-v7a/libfixture.so"), false)
+        fixture("unknown-abi", listOf(arm, "lib/riscv64/libfixture.so"), false)
+        fixture("empty-archive", emptyList(), false)
+        fixture("bundle-prefix", listOf("base/lib/arm64-v8a/libfixture.so"), false)
+        fixture("asset-bait", listOf("assets/lib/arm64-v8a/libfixture.so"), false)
+        fixture("directory-bait", listOf("lib/arm64-v8a/"), false)
+        fixture("empty-native", listOf(arm), false, empty = true)
+        fixture("nested-native", listOf(arm, "lib/arm64-v8a/nested/libfixture.so"), false)
+        logger.lifecycle("Release APK ABI regressions passed: 12 ZIP fixtures")
+    }
+}
+
+tasks.named("check") { dependsOn(verifyReleaseAbiRegression) }
+
+tasks.register("verifyReleaseArtifact") {
+    group = "verification"
+    description = "Verify the signed release APK is non-debuggable, arm64-only and has aligned native/legal payloads."
+    dependsOn("verifyReleaseSigning", "assembleRelease", verifyReleaseAbiRegression)
+    doLast {
+        val apk = variantApkFile("release")
+        verifyArm64ReleaseApk(apk)
+        verifyVariantSecurity("release", apk, expectedDebuggable = false, expectedControlPlaneEnabled = true)
+        verifyNativePageAlignment(apk)
+        logger.lifecycle("Release APK verified: non-debuggable, arm64-v8a only (${apk.length()} bytes)")
+    }
+}
+
 tasks.register("generateReleaseSbom") {
     group = "verification"
-    description = "Write a clean-source CycloneDX SBOM for the signed arm64-v8a release AAB."
-    dependsOn("verifyReleaseSigning", "bundleRelease")
+    description = "Write a clean-source CycloneDX SBOM bound to the signed arm64-v8a release APK."
+    dependsOn("verifyReleaseArtifact")
     val destination = layout.buildDirectory.file("reports/sbom/release.cdx.json")
     outputs.file(destination)
     outputs.upToDateWhen { false }
     doLast {
-        writeSbom("release", "releaseRuntimeClasspath", releaseBundleFile(), destination.get().asFile, requireClean = true)
-    }
-}
-
-tasks.register("verifyReleaseArtifact") {
-    group = "verification"
-    description = "Verify the release AAB contains arm64-v8a only and no x86_64 native payload."
-    dependsOn("verifyReleaseSigning", "bundleRelease")
-    doLast {
-        val bundle = releaseBundleFile()
-        var arm64Entries = 0
-        val x86Entries = mutableListOf<String>()
-        ZipFile(bundle).use { zip ->
-            zip.entries().asSequence().forEach { entry ->
-                val name = entry.name
-                if (name.matches(Regex("(^|/)lib/arm64-v8a(/|$).*"))) arm64Entries++
-                if (name.matches(Regex("(^|/)lib/x86_64(/|$).*"))) x86Entries += name
-            }
-        }
-        check(arm64Entries > 0) { "Release AAB has no arm64-v8a native payload" }
-        check(x86Entries.isEmpty()) { "Release AAB contains forbidden x86_64 entries: $x86Entries" }
-        logger.lifecycle("Release AAB ABI verified: arm64-v8a only (${bundle.length()} bytes)")
+        writeSbom(
+            "release", "releaseRuntimeClasspath", variantApkFile("release"), destination.get().asFile,
+            requireClean = true, expectedDebuggable = false, expectedControlPlaneEnabled = true,
+        )
     }
 }
 
 tasks.register("generateReleaseProvenance") {
     group = "verification"
-    description = "Bind the clean Git SHA, release AAB, SBOM and source archive hash in a provenance manifest."
-    dependsOn("verifyReleaseSigning", "bundleRelease", "generateReleaseSbom", "verifyReleaseArtifact")
+    description = "Bind clean Git, the signed release APK, SBOM, security facts and source archive hash."
+    dependsOn("generateReleaseSbom", "verifyReleaseArtifact")
     val manifest = layout.buildDirectory.file("reports/provenance/release.provenance.json")
     outputs.file(manifest)
     outputs.upToDateWhen { false }
     doLast {
         val (head, dirty) = gitState(requireClean = true)
         check(!dirty) { "Release provenance cannot be generated from a dirty worktree" }
-        val bundle = releaseBundleFile()
+        val apk = variantApkFile("release")
         val sbom = layout.buildDirectory.file("reports/sbom/release.cdx.json").get().asFile
-        check(sbom.isFile) { "Release SBOM is missing: ${sbom.absolutePath}" }
-        val sourceHash = sourceArchiveSha256()
-        val artifactHash = sha256(bundle)
-        val sbomHash = sha256(sbom)
+        verifySbom("release", "releaseRuntimeClasspath", apk, sbom,
+            expectedDebuggable = false, expectedControlPlaneEnabled = true)
         val report = linkedMapOf<String, Any>(
             "schemaVersion" to 1,
             "gitDirty" to false,
@@ -858,17 +905,19 @@ tasks.register("generateReleaseProvenance") {
                 "sha" to head,
                 "sourceUrl" to "https://github.com/hedanbaomi/mobile-agent-runtime",
             ),
-            "sourceArchiveSha256" to sourceHash,
+            "sourceArchiveSha256" to sourceArchiveSha256(),
             "artifact" to mapOf(
-                "type" to "android-app-bundle",
-                "path" to bundle.relativeTo(rootProject.projectDir).invariantSeparatorsPath,
-                "sha256" to artifactHash,
+                "type" to "android-apk",
+                "path" to apk.relativeTo(rootProject.projectDir).invariantSeparatorsPath,
+                "sha256" to sha256(apk),
                 "abi" to listOf("arm64-v8a"),
+                "debuggable" to false,
             ),
+            "security" to mapOf("highPrivilegeControlPlaneEnabled" to true),
             "sbom" to mapOf(
                 "format" to "CycloneDX-1.6",
                 "path" to sbom.relativeTo(rootProject.projectDir).invariantSeparatorsPath,
-                "sha256" to sbomHash,
+                "sha256" to sha256(sbom),
             ),
         )
         val file = manifest.get().asFile

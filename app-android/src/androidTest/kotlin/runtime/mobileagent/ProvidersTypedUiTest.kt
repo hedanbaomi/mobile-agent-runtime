@@ -152,6 +152,77 @@ class ProvidersTypedUiTest {
     }
 
     @Test
+    fun imageProbeConsentShowsBoundAndCancelDoesNotDispatch() {
+        var requests = 0
+        compose.setContent {
+            MaterialTheme {
+                Box(Modifier.width(320.dp).height(640.dp)) {
+                    ProvidersScreen(
+                        state = state(probe = ProviderProbeUiState()).copy(
+                            providers = listOf(ProviderCardUi("provider", "Command Code", "https://api.commandcode.ai/provider/v1", "OPENAI_COMPATIBLE", modelCount = 1, secretConfigured = true)),
+                            models = listOf(ProviderModelUi(
+                                id = "model", modelId = "deepseek/deepseek-v4.1-flash",
+                                contextWindowValue = "1000000", contextWindowRecorded = true,
+                                contextWindowTarget = runtime.mobileagent.domain.contextWindowTarget(
+                                    "provider", "https://api.commandcode.ai/provider/v1", "deepseek/deepseek-v4.1-flash"),
+                                contextWindowSource = runtime.mobileagent.domain.ContextLimitSource.PROVIDER_METADATA,
+                            )),
+                        ),
+                        actions = ProvidersActions(onProbe = { requests++ }),
+                    )
+                }
+            }
+        }
+        compose.onNodeWithTag("provider.capabilityProbe", useUnmergedTree = true).performScrollTo().performClick()
+        assertEquals(0, requests)
+        compose.onNodeWithText("验证连接、流式、工具和图片，可能分别收费。图片请求最多输出 1024 tokens；不会自动重试。", useUnmergedTree = true).assertIsDisplayed()
+        val instrumentation = androidx.test.platform.app.InstrumentationRegistry.getInstrumentation()
+        val screenshot = instrumentation.uiAutomation.takeScreenshot()
+        val output = java.io.File(instrumentation.targetContext.filesDir, "test-evidence").apply { mkdirs() }
+        java.io.FileOutputStream(java.io.File(output, "image-probe-consent-320dp.png")).use {
+            screenshot.compress(android.graphics.Bitmap.CompressFormat.PNG, 100, it)
+        }
+        screenshot.recycle()
+        compose.onNodeWithText("取消", useUnmergedTree = true).performClick()
+        assertEquals(0, requests)
+        compose.onNodeWithTag("provider.capabilityProbe", useUnmergedTree = true).performScrollTo().performClick()
+        compose.onNodeWithText("运行探测", useUnmergedTree = true).performClick()
+        assertEquals(1, requests)
+    }
+
+    @Test
+    fun editorRetainsCatalogWindowDisplayForTheCurrentTargetOnly() {
+        val baseUrl = "https://api.commandcode.ai/provider/v1"
+        val modelId = "deepseek/deepseek-v4.1-flash"
+        val uiState = mutableStateOf(
+            state(ProviderProbeUiState()).copy(
+                editorOpen = true,
+                draft = ProviderDraft(
+                    id = "provider", modelProfileId = "model", name = "Command Code",
+                    baseUrl = baseUrl, modelId = modelId,
+                ),
+                models = listOf(
+                    ProviderModelUi(
+                        id = "model", modelId = modelId, contextWindowValue = "1000000",
+                        contextWindowRecorded = true,
+                        contextWindowSource = runtime.mobileagent.domain.ContextLimitSource.PROVIDER_METADATA,
+                        contextWindowTarget = runtime.mobileagent.domain.contextWindowTarget("provider", baseUrl, modelId),
+                    ),
+                ),
+            ),
+        )
+        compose.setContent {
+            MaterialTheme { ProvidersScreen(uiState.value, renderEditorAsPage = true) }
+        }
+        compose.onNodeWithTag("provider.contextLimit.effectiveSource").performScrollTo()
+        compose.onNodeWithText("窗口：1000000（服务商目录）").assertIsDisplayed()
+        assertEquals("", uiState.value.draft.contextWindowValue)
+        compose.runOnIdle { uiState.value = uiState.value.copy(draft = uiState.value.draft.copy(modelId = "other")) }
+        compose.onNodeWithTag("provider.contextLimit.effectiveSource").performScrollTo()
+        compose.onNodeWithText("窗口未知；本地保护上限仍生效。").assertIsDisplayed()
+    }
+
+    @Test
     fun editorExplainsAndAllowsSelectingResponsesFormat() {
         val uiState = mutableStateOf(
             state(ProviderProbeUiState()).copy(

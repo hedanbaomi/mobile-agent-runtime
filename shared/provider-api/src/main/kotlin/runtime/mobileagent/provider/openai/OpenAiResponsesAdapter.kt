@@ -94,6 +94,9 @@ class OpenAiResponsesAdapter(
     private val defaultHeaders: Map<String, RequestHeaderValue> = emptyMap(),
 ) : ModelAdapter {
 
+    override suspend fun contextWindowMetadata(profile: ModelProfile): runtime.mobileagent.provider.ContextWindowMetadata? =
+        CommandCodeContextCatalog(http).read(baseUrl, profile)
+
     override suspend fun probe(profile: ModelProfile): CapabilityReport =
         CapabilityReport(
             modelId = profile.modelId,
@@ -1013,7 +1016,9 @@ class OpenAiResponsesAdapter(
                         supported = false,
                         charged = true,
                         httpStatus = status,
-                        status = featureHttpStatus(status),
+                        status = if (require == ProbeRequirement.IMAGE &&
+                            featureHttpStatus(status) == CapabilityCheckStatus.UNSUPPORTED)
+                            CapabilityCheckStatus.UNKNOWN else featureHttpStatus(status),
                     )
                 } else {
                     val responseType = response.headers[HttpHeaders.ContentType].orEmpty().lowercase()
@@ -1024,6 +1029,9 @@ class OpenAiResponsesAdapter(
                             charged = true,
                             status = CapabilityCheckStatus.FAILED,
                         )
+                    }
+                    if (require == ProbeRequirement.IMAGE && imageProbeBudgetExhausted(raw, responses = true)) {
+                        return@execute FeatureProbeResult("inconclusive", false, true, status = CapabilityCheckStatus.UNKNOWN)
                     }
                     val events = parseResponseBody(raw, responseType, listOf(token) + headers.secrets)
                     val hasTerminal = events.any { it is ModelEvent.Completed }
@@ -1089,7 +1097,7 @@ class OpenAiResponsesAdapter(
                 ChatMessage(
                     "user",
                     if (feature == ProbeFeature.IMAGE) "Describe the image in one word." else "Reply with ok.",
-                    images = if (feature == ProbeFeature.IMAGE) listOf(InlineImage("image/png", PROBE_PNG)) else emptyList(),
+                    images = if (feature == ProbeFeature.IMAGE) listOf(InlineImage("image/png", CAPABILITY_PROBE_PNG)) else emptyList(),
                 ),
             ),
             tools = if (feature == ProbeFeature.TOOLS) listOf(
@@ -1107,7 +1115,11 @@ class OpenAiResponsesAdapter(
             outputTokenLimit = probeOutputTokenLimit(
                 profile.outputLimitMode,
                 profile.outputLimit,
-                if (feature == ProbeFeature.TOOLS) CAPABILITY_PROBE_MAX_OUTPUT_TOKENS else CONNECTION_PROBE_MAX_OUTPUT_TOKENS,
+                when (feature) {
+                    ProbeFeature.IMAGE -> IMAGE_PROBE_MAX_OUTPUT_TOKENS
+                    ProbeFeature.TOOLS -> CAPABILITY_PROBE_MAX_OUTPUT_TOKENS
+                    ProbeFeature.STREAM -> CONNECTION_PROBE_MAX_OUTPUT_TOKENS
+                },
             ),
         )
         return probeRequest(profile, headers, token, request, when (feature) {
@@ -1306,8 +1318,7 @@ class OpenAiResponsesAdapter(
         private const val CONNECTION_TIMEOUT_MS = 15_000L
         private const val MAX_RESPONSE_BYTES = 8_388_608L
         private const val MAX_LINE_BYTES = 1_048_576
-        private const val PROBE_PNG =
-            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
+
         private val FORBIDDEN_HEADERS = setOf(
             "host", "content-length", "transfer-encoding", "connection", "upgrade", "proxy-authorization",
             "proxy-authenticate", "te", "trailer", "content-type", "accept",

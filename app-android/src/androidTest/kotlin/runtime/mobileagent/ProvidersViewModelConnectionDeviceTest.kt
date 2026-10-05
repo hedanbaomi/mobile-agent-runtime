@@ -211,9 +211,109 @@ class ProvidersViewModelConnectionDeviceTest {
         assertTrue(vm.probeState.value.connection!!.success)
     }
 
+    @Test
+    fun savedAutoWindowUsesAdapterMetadataAndPersistsProvenance() {
+        val harness = harness(
+            onTest = { error("Saving must not send a paid request") },
+            onMetadata = { metadata(it) },
+        )
+        val model = harness.vm.models.single { it.id == harness.modelId }
+        val provider = harness.vm.providers.single { it.id == model.providerId }
+        assertTrue(harness.vm.saveDraft(ProviderDraft(
+            providerId = provider.id, modelProfileId = model.id, name = provider.name,
+            baseUrl = provider.baseUrl, modelId = model.modelId,
+        )))
+        waitUntil { harness.vm.models.single { it.id == model.id }.contextWindowValue == 1000000 }
+        val saved = harness.vm.models.single { it.id == model.id }
+        assertEquals(runtime.mobileagent.domain.ContextLimitSource.PROVIDER_METADATA, saved.contextWindowSource)
+        assertEquals(runtime.mobileagent.domain.contextWindowTarget(provider.id, provider.baseUrl, model.modelId), saved.contextWindowTarget)
+    }
+
+    @Test
+    fun connectionRefreshesPreviouslySavedUnknownWindow() {
+        val harness = harness(
+            onTest = { ProviderConnectionResult.Success(7, true) },
+            onMetadata = { metadata(it) },
+        )
+        harness.vm.testConnection(harness.modelId, approved = true)
+        waitUntil { !harness.vm.busy.value && harness.vm.models.single { it.id == harness.modelId }.contextWindowValue == 1000000 }
+        assertEquals(ProbePhase.SUCCESS, harness.vm.probeState.value.phase)
+    }
+
+    @Test
+    fun delayedCatalogCannotOverwriteManualWindow() {
+        val started = CountDownLatch(1)
+        val harness = harness(
+            onTest = { ProviderConnectionResult.Success(7, true) },
+            onMetadata = { started.countDown(); delay(400); metadata(it) },
+        )
+        harness.vm.testConnection(harness.modelId, approved = true)
+        assertTrue(started.await(2, TimeUnit.SECONDS))
+        waitUntil { !harness.vm.busy.value }
+        val model = harness.vm.models.single { it.id == harness.modelId }
+        val provider = harness.vm.providers.single { it.id == model.providerId }
+        assertTrue(harness.vm.saveDraft(ProviderDraft(
+            providerId = provider.id, modelProfileId = model.id, name = provider.name,
+            baseUrl = provider.baseUrl, modelId = model.modelId,
+            contextLimitMode = runtime.mobileagent.domain.ContextLimitMode.MANUAL, contextLimit = "8192",
+        )))
+        Thread.sleep(500)
+        harness.vm.reload()
+        val saved = harness.vm.models.single { it.id == model.id }
+        assertEquals(runtime.mobileagent.domain.ContextLimitMode.MANUAL, saved.contextLimitMode)
+        assertEquals(8192, saved.contextLimit)
+        assertEquals(null, saved.contextWindowValue)
+    }
+
+    @Test
+    fun unrelatedOfflineSaveKeepsTrustedCatalogWindowAndSource() {
+        var online = true
+        val harness = harness(
+            onTest = { ProviderConnectionResult.Success(7, true) },
+            onMetadata = { if (online) metadata(it) else null },
+        )
+        harness.vm.testConnection(harness.modelId, approved = true)
+        waitUntil { !harness.vm.busy.value && harness.vm.models.single { it.id == harness.modelId }.contextWindowValue == 1000000 }
+        online = false
+        val model = harness.vm.models.single { it.id == harness.modelId }
+        val provider = harness.vm.providers.single { it.id == model.providerId }
+        assertTrue(harness.vm.saveDraft(ProviderDraft(
+            providerId = provider.id, modelProfileId = model.id, name = "Renamed offline",
+            baseUrl = provider.baseUrl, modelId = model.modelId,
+        )))
+        Thread.sleep(100)
+        harness.vm.reload()
+        val saved = harness.vm.models.single { it.id == model.id }
+        assertEquals(1000000, saved.contextWindowValue)
+        assertEquals(runtime.mobileagent.domain.ContextLimitSource.PROVIDER_METADATA, saved.contextWindowSource)
+        assertEquals(model.contextWindowCheckedAt, saved.contextWindowCheckedAt)
+    }
+
+    @Test
+    fun catalogTimeoutDoesNotRewriteSuccessfulConnection() {
+        val returned = CountDownLatch(1)
+        val harness = harness(
+            onTest = { ProviderConnectionResult.Success(7, true) },
+            onMetadata = {
+                try { kotlinx.coroutines.withTimeout(1) { delay(50); metadata(it) } }
+                finally { returned.countDown() }
+            },
+        )
+        harness.vm.testConnection(harness.modelId, approved = true)
+        waitUntil { !harness.vm.busy.value && harness.vm.probeState.value.phase != ProbePhase.IDLE }
+        assertTrue(returned.await(2, TimeUnit.SECONDS))
+        assertEquals(ProbePhase.SUCCESS, harness.vm.probeState.value.phase)
+    }
+
+    private fun metadata(model: ModelProfile) = runtime.mobileagent.provider.ContextWindowMetadata(
+        1000000, runtime.mobileagent.domain.contextWindowTarget(model.providerId, "https://example.invalid/v1", model.modelId),
+        java.time.Instant.now().toString(), "scripted public metadata",
+    )
+
     private fun harness(
         onTest: suspend (ModelProfile) -> ProviderConnectionResult,
         onProbe: suspend (ModelProfile) -> CapabilityReport = { error("probe unused") },
+        onMetadata: suspend (ModelProfile) -> runtime.mobileagent.provider.ContextWindowMetadata? = { null },
     ): Harness {
         val suffix = UUID.randomUUID().toString().replace("-", "")
         val app = InstrumentationRegistry.getInstrumentation().targetContext.applicationContext as MobileAgentApp
@@ -234,6 +334,7 @@ class ProvidersViewModelConnectionDeviceTest {
             role = ModelRole.CHAT,
             modelId = "scripted-model",
             capabilities = setOf("stream", "tools"),
+            contextLimitMode = runtime.mobileagent.domain.ContextLimitMode.AUTO,
             contextLimit = 1024,
             outputLimit = 64,
             revision = 1,
@@ -242,7 +343,7 @@ class ProvidersViewModelConnectionDeviceTest {
         app.container.profiles.createModel(model)
         val vm = ProvidersViewModel(
             app,
-            ProviderAdapterFactory { ScriptedAdapter(onTest, onProbe) },
+            ProviderAdapterFactory { ScriptedAdapter(onTest, onProbe, onMetadata) },
         )
         return Harness(vm, model.id)
     }
@@ -273,7 +374,10 @@ class ProvidersViewModelConnectionDeviceTest {
     private class ScriptedAdapter(
         private val onTest: suspend (ModelProfile) -> ProviderConnectionResult,
         private val onProbe: suspend (ModelProfile) -> CapabilityReport = { error("probe unused") },
+        private val onMetadata: suspend (ModelProfile) -> runtime.mobileagent.provider.ContextWindowMetadata? = { null },
     ) : ModelAdapter {
+        override suspend fun contextWindowMetadata(profile: ModelProfile) = onMetadata(profile)
+
         override suspend fun probe(profile: ModelProfile): CapabilityReport = onProbe(profile)
 
         override suspend fun testConnection(

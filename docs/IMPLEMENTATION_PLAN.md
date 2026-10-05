@@ -440,3 +440,5 @@ PDF 解析支持合法紧凑关闭分隔符后紧接 endobj 的对象，保持 s
 - KnowledgeViewModel 只对实际选中 KB 调用绑定参数的 listJobs(kbId)，无选中 KB 不读任务。原全局 listJobs 与行解码保留，恢复/授权/UNKNOWN_OUTCOME 字段和筛选规则不变；Schema v29 添加非唯一索引 idx_import_jobs_kb_updated(kb_id, updated_at DESC)，匹配选中库筛选与倒序读取；迁移沿用事务和失败回滚，保留旧版绑定迁移的截止版本，不因添加索引恢复用户未绑定线程。
 - Chat 会话 workspace 标题仅在一次 reload 内按 opaque workspace ID 复用，包括错误；逐线程 binding 读取与执行完整校验保留。缓存不跨刷新，下一次重命名、删除或连接恢复会重新解析；null/空标题与未绑定语义不变。
 - 索引迁移决策见 [ADR 0020](adr/0020-scoped-import-job-display-index.md)。权限/Provider 协议、依赖和 UI 设计语言保持现行约定；批次详情联合投影、整个 Chat reload 的 IO 移出主线程与设备帧耗时仍是后续候选。证据见 evidence/2026-10-03/quota-optimization.md。
+
+2026-10-05 Provider 补充（R02/R03/R12/R18）：通过两种 OpenAI adapter 的 metadata 端口接入 Command Code 官方公开目录，Android 保存和显式测试补取未知 AUTO 窗口；目录错误不会污染付费测试结果。图片探测共用标准 PNG，预算上限及 UNKNOWN 分类见 [ADR-0021](adr/0021-provider-catalog-and-image-probe.md)。

@@ -748,7 +748,8 @@ class OpenAiResponsesAdapterTest {
         val toolBody = bodies.single { it.contains("\"tool_choice\"") }
         assertTrue(toolBody.contains("\"max_output_tokens\":128"), toolBody)
         bodies.filter { !it.contains("\"tool_choice\"") }.forEach {
-            assertTrue(it.contains("\"max_output_tokens\":64"), it)
+            val cap = if (it.contains("\"input_image\"")) 1024 else 64
+            assertTrue(it.contains("\"max_output_tokens\":$cap"), it)
             assertFalse(it.contains("10240"))
         }
     }

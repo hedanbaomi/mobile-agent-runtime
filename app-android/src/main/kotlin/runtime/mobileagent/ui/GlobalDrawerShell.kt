@@ -122,15 +122,7 @@ fun GlobalDrawerShell(
         val palette = MaterialTheme.colorScheme
         val headerColor = if (easterEgg) Color(0xFF66CCFF) else palette.background
         val headerInk = if (easterEgg) Color(0xFF003B52) else palette.onBackground
-        val headerMuted = if (easterEgg) palette.onPrimaryContainer else palette.onSurfaceVariant
         val headerAccent = if (easterEgg) palette.onPrimaryContainer else palette.primary
-        val eyebrow = when {
-            showBack -> "DETAIL"
-            selectedRoute == AppRoutes.CHAT -> "SESSION"
-            selectedRoute == AppRoutes.KNOWLEDGE -> "LIBRARIES"
-            selectedRoute == AppRoutes.PROVIDERS -> "PROVIDERS"
-            else -> "WORKSPACE"
-        }
         val shell: @Composable () -> Unit = {
         Scaffold(
             modifier = Modifier.fillMaxSize().testTag("global.shell"),
@@ -145,8 +137,8 @@ fun GlobalDrawerShell(
                         Modifier
                             .windowInsetsPadding(WindowInsets.statusBars.union(WindowInsets.displayCutout))
                             .fillMaxWidth()
-                            .heightIn(min = 76.dp)
-                            .padding(horizontal = 12.dp, vertical = 8.dp),
+                            .heightIn(min = 56.dp)
+                            .padding(horizontal = 12.dp, vertical = 4.dp),
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
                         if (!drawerState.isOpen && !drawerOpen) {
@@ -168,13 +160,6 @@ fun GlobalDrawerShell(
                             Box(Modifier.size(48.dp))
                         }
                         Column(Modifier.weight(1f).padding(start = 4.dp)) {
-                            Text(
-                                eyebrow,
-                                style = MaterialTheme.typography.labelSmall,
-                                color = headerMuted,
-                                letterSpacing = 2.sp,
-                                maxLines = 1,
-                            )
                             Text(
                                 title,
                                 style = MaterialTheme.typography.titleLarge,

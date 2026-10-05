@@ -97,6 +97,9 @@ class OpenAiCompatibleAdapter(
     private val defaultHeaders: Map<String, RequestHeaderValue> = emptyMap(),
 ) : ModelAdapter {
 
+    override suspend fun contextWindowMetadata(profile: ModelProfile): runtime.mobileagent.provider.ContextWindowMetadata? =
+        CommandCodeContextCatalog(http).read(baseUrl, profile)
+
     override suspend fun probe(profile: ModelProfile): CapabilityReport =
         CapabilityReport(
             modelId = profile.modelId,
@@ -1140,11 +1143,10 @@ class OpenAiCompatibleAdapter(
                 status = CapabilityCheckStatus.NOT_DECLARED,
             )
         }
-        // One token is enough to prove that an endpoint accepted the request,
-        // but it is not enough for a complete no-op function call. Keep the
-        // capability probe useful while retaining a fixed, small spend cap and
-        // never exceeding the configured model output budget.
-            val probeOutputTokens = probeOutputTokenLimit(profile.outputLimitMode, profile.outputLimit, CONNECTION_PROBE_MAX_OUTPUT_TOKENS)
+        // Image probes leave bounded room for reasoning while respecting a
+        // smaller explicit model budget. No larger paid replay is dispatched.
+        val probeOutputTokens = probeOutputTokenLimit(profile.outputLimitMode, profile.outputLimit,
+            if (feature == ProbeFeature.IMAGE) IMAGE_PROBE_MAX_OUTPUT_TOKENS else CONNECTION_PROBE_MAX_OUTPUT_TOKENS)
         val modelParameters = runCatching {
             Json.parseToJsonElement(profile.parametersJson).jsonObject
         }.getOrElse {
@@ -1170,7 +1172,7 @@ class OpenAiCompatibleAdapter(
                         ProbeFeature.STREAM -> "Reply with ok."
                     },
                     images = if (feature == ProbeFeature.IMAGE) {
-                        listOf(InlineImage(mediaType = "image/png", base64 = PROBE_PNG))
+                        listOf(InlineImage(mediaType = "image/png", base64 = CAPABILITY_PROBE_PNG))
                     } else {
                         emptyList()
                     },
@@ -1307,8 +1309,12 @@ class OpenAiCompatibleAdapter(
                         status = if (supported) CapabilityCheckStatus.VERIFIED else CapabilityCheckStatus.FAILED,
                     )
                 } else {
+                    val raw = readBounded(response.bodyAsChannel())
+                    if (feature == ProbeFeature.IMAGE && imageProbeBudgetExhausted(raw, responses = false)) {
+                        return@execute FeatureProbeResult("inconclusive", false, true, status = CapabilityCheckStatus.UNKNOWN)
+                    }
                     val supported = parseChatProbe(
-                        readBounded(response.bodyAsChannel()),
+                        raw,
                         requireToolCall = feature == ProbeFeature.TOOLS,
                     )
                     // A 200 response that accepted the tools payload but did
@@ -1797,8 +1803,7 @@ class OpenAiCompatibleAdapter(
         // ordinary document images work. Use a small but real 128x128 red/blue
         // image so a probe rejection is about the configured endpoint, not an
         // invalid test fixture.
-        private const val PROBE_PNG =
-            "iVBORw0KGgoAAAANSUhEUgAAAIAAAACACAIAAABMXPacAAAA9UlEQVR42u3RAQkAAAzDsPk3vdv4IFABhaTJdOP7DQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA+NABXKjDsvXzzhIAAAAASUVORK5CYII="
+
 
         private val FORBIDDEN_HEADERS = setOf(
             "host",

@@ -339,3 +339,5 @@ S03/S04/S05/S07 增量必须通过真实 isolated worker：API26 JSON/新 PID；
 2026-10-03 五项复审新增边界：K02/K05 检查旧 EPUB v3 不复用为完整 READY、明确文本缺口、查询确定失败释放本次 claim、UNKNOWN/取消仍受明确授权门禁、旧 owner 不覆盖新授权且有效缓存不重发；S11 检查撤权前零工具派发和派发后结果扣留/UNKNOWN；S18/S31 检查 SAF 已创建目录核验失败与工作区 TERMINAL 审计失败均保留 UNKNOWN、内容/目录留存、熔断及防重放。验证状态见 [五项复审修复](evidence/2026-10-03/five-review-fixes.md)，不据此标 §14 全量验收通过。
 
 2026-10-05 A10/R02/R03/R12 兼容性补充：分别通过 Chat 和 Responses 的公开连接测试验证 404 的缺失/null/空/非字符串 code、明确模型/路由 code 优先级，以及仅 type/param 的普通 400 参数错误。认证/限流/超时仍优先于响应正文；错误结果不得携带 raw body。基础 Chat 连通请求不带可选采样、停止与高级参数，实际能力探测保留它们；模型编辑空 ID 沿用已有 ID 并保持同一配置身份。实测状态见 [兼容性修复证据](evidence/2026-10-05/provider-compatibility.md)，本地 MockEngine 成功不等同于真实服务连接或全量设备验收。
+
+2026-10-05 回归补充（A03/A04/A10/U02/U05，见 [ADR-0021](adr/0021-provider-catalog-and-image-probe.md)）：Command Code 的 AUTO 窗口通过公开目录精确模型记录得到，来源为 PROVIDER_METADATA；无凭据、无生成调用、错误/重复/畸形/超大目录及相似域名保持未知。保存和旧配置连接测试能写入窗口，晚到目录不能覆盖手动值；目录等待不阻塞编辑，离线改名保留同目标窗口，目录/本地重读失败不改写付费结论。Chat/Responses 图片探测使用可解码 128×128 PNG，上限 1024，较小手动限制仍生效；预算截断 UNKNOWN、畸形 FAILED、不自动收费重试。精简页面后，费用确认、外发目标、授权边界和窗口来源仍可见；离线/模拟器与真实 Provider 结果分别记录。

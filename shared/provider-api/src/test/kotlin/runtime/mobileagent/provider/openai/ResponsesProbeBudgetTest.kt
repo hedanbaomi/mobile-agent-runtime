@@ -147,7 +147,7 @@ class ResponsesProbeBudgetTest {
         val caps = captured.map { body ->
             Regex("\"max_output_tokens\":(\\d+)").find(body)?.groupValues?.get(1)?.toInt()
         }
-        assertEquals(listOf(64, 64, 128, 64), caps, captured.toString())
+        assertEquals(listOf(64, 64, 128, 1024), caps, captured.toString())
         assertTrue(captured[1].contains("\"stream\":true"), captured[1])
         assertTrue(captured[2].contains("tool_choice"), captured[2])
         assertTrue(captured[3].contains("input_image"), captured[3])

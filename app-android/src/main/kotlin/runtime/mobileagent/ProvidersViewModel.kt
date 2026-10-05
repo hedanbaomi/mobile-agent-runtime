@@ -212,9 +212,19 @@ class ProvidersViewModel @JvmOverloads constructor(
                 nonSecretHeaders = previous?.nonSecretHeaders.orEmpty(),
                 revision = (previous?.revision ?: 0) + 1,
             )
-            val windowFact = ContextWindowProducer().userDeclared(
-                contextWindowTarget(providerId, endpoint.toASCIIString(), effectiveModelId), declaredWindow,
-            )
+            val target = contextWindowTarget(providerId, endpoint.toASCIIString(), effectiveModelId)
+            val declaredFact = ContextWindowProducer().userDeclared(target, declaredWindow)
+            // An unrelated edit must retain a verified catalog fact without
+            // relabeling it as a user declaration or requiring a new network read.
+            val windowFact = if (draft.contextLimitMode == ContextLimitMode.AUTO && declaredWindow == null &&
+                modelPrevious?.contextWindowSource == ContextLimitSource.PROVIDER_METADATA &&
+                modelPrevious.contextWindowValue?.let { it > 0 } == true &&
+                runtime.mobileagent.domain.contextWindowTargetMatches(modelPrevious.contextWindowTarget, target)
+            ) {
+                declaredFact.copy(value = modelPrevious.contextWindowValue,
+                    source = ContextLimitSource.PROVIDER_METADATA,
+                    checkedAt = modelPrevious.contextWindowCheckedAt ?: declaredFact.checkedAt)
+            } else declaredFact
             val model = if (saveModel) ModelProfile(
                 id = modelPrevious?.id ?: EntityId.random().value, providerId = providerId,
                 role = draft.role, modelId = effectiveModelId, capabilities = draft.capabilities,
@@ -246,32 +256,16 @@ class ProvidersViewModel @JvmOverloads constructor(
             status.value = if (draft.modelId.isBlank() && modelPrevious == null) {
                 "已保存 ${provider.name}。" + if (oldSecretCleanupFailed) "旧密钥仍保留，引用检查失败；请修复存储后重试回收。" else ""
             } else {
-                "已保存 ${provider.name} / ${effectiveModelId}。能力标记来自手动配置，尚未发送探测请求。" +
+                "已保存 ${provider.name} / ${effectiveModelId}。能力尚未验证。" +
                     if (oldSecretCleanupFailed) "旧密钥仍保留，引用检查失败；请修复存储后重试回收。" else ""
             }
-            if (model != null && model.contextLimitMode == ContextLimitMode.AUTO &&
-                model.contextWindowValue == null && SiliconFlowContextCatalog.eligible(provider.baseUrl, model.modelId)
-            ) {
+            if (model != null && model.contextLimitMode == ContextLimitMode.AUTO && model.contextWindowValue == null) {
+                val savedGeneration = probeGeneration
                 viewModelScope.launch {
-                    val fact = runCatching {
-                        withContext(Dispatchers.IO) {
-                            ContextWindowProducer().metadata(
-                                contextWindowTarget(provider.id, provider.baseUrl, model.modelId),
-                            ) { target -> SiliconFlowContextCatalog(app.container.announcementHttp).read(model.modelId, target) }
-                        }
-                    }.getOrNull()
-                    if (fact?.value != null) {
-                        val saved = withContext(Dispatchers.IO) {
-                            app.container.profiles.recordContextWindow(
-                                model.id, fact.value, fact.source, fact.target, fact.checkedAt, model.revision,
-                            )
-                        }
-                        if (saved != null) {
-                            reload()
-                            status.value = "已从硅基流动模型目录获取上下文长度：${fact.value} tokens。"
-                        }
-                    } else if (withContext(Dispatchers.IO) { app.container.profiles.getModel(model.id)?.revision } == model.revision) {
-                        status.value = "服务已保存；硅基流动模型目录未返回可核验的上下文长度，可手动填写。"
+                    val value = refreshContextWindow(provider, model)
+                    if (value != null && savedGeneration == probeGeneration) {
+                        runCatching { reload() }
+                        status.value = "已保存。上下文窗口：$value tokens（服务商目录）。"
                     }
                 }
             }
@@ -392,6 +386,7 @@ class ProvidersViewModel @JvmOverloads constructor(
                 if (generation == probeGeneration) {
                     applyConnectionResult(result)
                     status.value = connectionStatus(result)
+                    refreshContextWindowLater(provider, model)
                 }
             } catch (error: runtime.mobileagent.domain.AppException) {
                 val failureCode = if (error.error.code == runtime.mobileagent.domain.ErrorCode.SECRET_UNAVAILABLE) {
@@ -541,7 +536,13 @@ class ProvidersViewModel @JvmOverloads constructor(
                         // into a connection failure in the UI.
                         status.value = "能力探测完成，但验证记录未能保存。"
                     }
-                    reload()
+                    val latest = runCatching {
+                        withContext(Dispatchers.IO) { app.container.profiles.getModel(model.id) }
+                    }.getOrNull()
+                    if (latest != null && latest.modelId == model.modelId && latest.providerId == model.providerId) {
+                        refreshContextWindowLater(provider, latest)
+                    }
+                    runCatching { reload() }
                 }
             } catch (error: runtime.mobileagent.domain.AppException) {
                 val failureCode = if (error.error.code == runtime.mobileagent.domain.ErrorCode.SECRET_UNAVAILABLE) {
@@ -614,6 +615,34 @@ class ProvidersViewModel @JvmOverloads constructor(
         probeGeneration += 1
         busy.value = false
         probeState.value = ProviderProbeUiState()
+    }
+
+    private fun refreshContextWindowLater(provider: ProviderProfile, model: ModelProfile) {
+        // Public metadata has a separate lifetime: paid result/charged state and
+        // editing availability must not depend on directory latency or storage.
+        viewModelScope.launch {
+            if (refreshContextWindow(provider, model) != null) runCatching { reload() }
+        }
+    }
+
+    private suspend fun refreshContextWindow(provider: ProviderProfile, model: ModelProfile): Int? {
+        if (model.contextLimitMode != ContextLimitMode.AUTO || model.contextWindowValue != null) return null
+        return withContext(Dispatchers.IO) {
+            val fact = try { ContextWindowProducer().metadata(
+                contextWindowTarget(provider.id, provider.baseUrl, model.modelId),
+            ) { target ->
+                if (SiliconFlowContextCatalog.eligible(provider.baseUrl, model.modelId)) {
+                    SiliconFlowContextCatalog(app.container.announcementHttp).read(model.modelId, target)
+                } else {
+                    adapterFor(provider).contextWindowMetadata(model)
+                }
+            } } catch (_: kotlinx.coroutines.TimeoutCancellationException) { return@withContext null }
+            if (fact.value == null) return@withContext null
+            val saved = runCatching { app.container.profiles.recordContextWindow(
+                model.id, fact.value, fact.source, fact.target, fact.checkedAt, model.revision,
+            ) }.getOrNull()
+            saved?.contextWindowValue
+        }
     }
 
     private fun adapterFor(provider: ProviderProfile): runtime.mobileagent.provider.ModelAdapter =

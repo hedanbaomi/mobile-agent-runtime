@@ -564,6 +564,7 @@ enum class DiagnosticToolRunState(val wireName: String) {
     WAITING_APPROVAL("waiting_approval"),
     VALUE("value"),
     DENIED("denied"),
+    COMPLETED_WITHHELD("completed_withheld"),
     INVALID("invalid"),
     FAILED("failed"),
     UNKNOWN_OUTCOME("unknown_outcome"),

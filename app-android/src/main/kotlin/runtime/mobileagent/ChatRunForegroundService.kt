@@ -45,14 +45,21 @@ class ChatRunForegroundService : Service() {
     companion object {
         private const val CHANNEL = "chat-run"
         private const val NOTIFICATION_ID = 2481
+        private val owners = ChatForegroundOwners()
 
-        fun start(context: Context) {
+        @Synchronized
+        fun start(context: Context, owner: String) {
+            require(owner.isNotBlank())
             val intent = Intent(context, ChatRunForegroundService::class.java)
             if (Build.VERSION.SDK_INT >= 26) context.startForegroundService(intent) else context.startService(intent)
+            owners.register(owner)
         }
 
-        fun stop(context: Context) {
-            context.stopService(Intent(context, ChatRunForegroundService::class.java))
+        @Synchronized
+        fun stop(context: Context, owner: String) {
+            if (owners.release(owner)) {
+                context.stopService(Intent(context, ChatRunForegroundService::class.java))
+            }
         }
     }
 }

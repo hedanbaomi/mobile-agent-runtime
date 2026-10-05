@@ -29,11 +29,13 @@ mobileAgentRuntime 是运行在 Android 上的 Agent 工作台。你可以接入
 
 ### 安装与基本要求
 
-- Android 8.0（API 26）及以上；当前构建覆盖 `arm64-v8a` 和 `x86_64`。
-- 安装已取得的 APK，或按本文的[源码构建](#构建)生成安装包。
+- Android 8.0（API 26）及以上；正式包为 `arm64-v8a`，Debug/Review 另支持 `x86_64`。
+- 从 [GitHub Releases](https://github.com/hedanbaomi/mobile-agent-runtime/releases) 获取正式 APK，或按本文的[源码构建](#构建)生成安装包。
 - 准备可访问的模型端点、模型 ID 和凭据。需要图片输入或工具调用时，确认所选服务与模型支持相应协议能力。
 
 主要页面从全局侧边菜单进入：**对话、智能体、服务商、知识、技能、公告、设置、MCP、请求检查器**。手机上点左上角菜单按钮，宽屏窗口使用常驻侧栏。
+
+Debug/Review 与正式包签名不同，首次切换前先导出并核对需要保留的数据，不能直接覆盖安装。正式版本与发布附件说明见 [发布文档](docs/RELEASING.md)。
 
 ### 建立第一段会话
 

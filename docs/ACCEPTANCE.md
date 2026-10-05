@@ -214,7 +214,7 @@ K06另需前台任务兼容矩阵：Android12+后台启动限制、Android14+服
 | S30 | 在真实临时代码仓库创建超过单页上限的目录和大文件；分页 list、stat、offset read、并发外部修改后 apply_patch；尝试 `..`、symlink、超预算与 SAF 非原子覆盖 | 分页无漏项/重复且 cursor 不能跨 workspace/path 重放；stat 不读全文；分块结果含 size/next offset/eof/version；expected hash/version 冲突不覆盖；支持原子 replace 的 backend 才执行 patch，SAF 明确 UNSUPPORTED；所有结果仍受相对路径与序列化预算限制 |
 | S31 | 卸载已启用且已绑定 Agent 的 Skill；同包重新导入、另一个 Skill、旧会话导出与专属记忆 | 安装项消失，当前 Agent 解绑且授权/待用批准失效；旧快照、审计和记忆保留，历史会话仍可导出；同包重装生成新安装 ID 且不得继承旧授权；无历史引用时清理包字节，不删其他 Skill/共享 KB |
 | S33 | 旧 Brave 配置；选择 Tavily/Exa，分别保存/禁用/删除密钥；切换、重建、秘密回收、异步刷新前的旧 UI 回调；协议 fixture 检查 auth/body、private/shared DNS、302/307/503 | 旧配置兼容，三家凭据隔离且未选中/停用的凭据不误删；旧 UI 回调不跨供应商保存/禁用/删密钥，名称同步变化；未知服务拒绝；固定目标和认证，零跨地址凭据披露，零重定向/自动重试；有界不可信结果；fixture 不记为供应商线上验收 |
-| S34 | Agent 默认关闭、显式开启并新建会话、关闭、关闭再开启；查询后重复 callId；服务切换再切回；发送前/后撤销及失败 | 开启无需逐查询批准，其他工具政策不变；旧快照不扩权；实时撤权阻断旧 executor 和缓存重放，修订变化不复活旧调用；同调用一次派发，未知结果不重放；模拟器/UI/Keystore 与协议 fixture 证据分列 |
+| S34 | Agent 默认关闭、显式开启并新建会话、关闭、关闭再开启；查询后重复 callId；服务切换再切回；发送前/后撤销及失败 | 开启无需逐查询批准，其他工具政策不变；旧快照不扩权；实时撤权阻断旧 executor 和缓存重放，修订变化不复活旧调用；派发前 DENIED、确定完成但扣留 COMPLETED_WITHHELD、派发后未知 UNKNOWN 分别保存，已知完成的工具不被重启恢复改成未知；同调用一次派发，未知结果不重放；模拟器/UI/Keystore 与协议 fixture 证据分列 |
 
 ## 6. 公告
 
@@ -343,3 +343,11 @@ S03/S04/S05/S07 增量必须通过真实 isolated worker：API26 JSON/新 PID；
 2026-10-05 A10/R02/R03/R12 兼容性补充：分别通过 Chat 和 Responses 的公开连接测试验证 404 的缺失/null/空/非字符串 code、明确模型/路由 code 优先级，以及仅 type/param 的普通 400 参数错误。认证/限流/超时仍优先于响应正文；错误结果不得携带 raw body。基础 Chat 连通请求不带可选采样、停止与高级参数，实际能力探测保留它们；模型编辑空 ID 沿用已有 ID 并保持同一配置身份。实测状态见 [兼容性修复证据](evidence/2026-10-05/provider-compatibility.md)，本地 MockEngine 成功不等同于真实服务连接或全量设备验收。
 
 2026-10-05 回归补充（A03/A04/A10/U02/U05，见 [ADR-0021](adr/0021-provider-catalog-and-image-probe.md)）：Command Code 的 AUTO 窗口通过公开目录精确模型记录得到，来源为 PROVIDER_METADATA；无凭据、无生成调用、错误/重复/畸形/超大目录及相似域名保持未知。保存和旧配置连接测试能写入窗口，晚到目录不能覆盖手动值；目录等待不阻塞编辑，离线改名保留同目标窗口，目录/本地重读失败不改写付费结论。Chat/Responses 图片探测使用可解码 128×128 PNG，上限 1024，较小手动限制仍生效；预算截断 UNKNOWN、畸形 FAILED、不自动收费重试。精简页面后，费用确认、外发目标、授权边界和窗口来源仍可见；离线/模拟器与真实 Provider 结果分别记录。
+
+
+## 2026-10-05 464f8f4 复审与正式发布增量
+
+- C22—C25/A06：可控时钟触发 watchdog 后切换 B 或返回 A，再投递迟到 RequestPrepared、错误、真实审批回调与 finally；当前会话 ID、消息、preview、审批和草稿不变，A 的真实结果仍归 A。旧执行未退出前新发送保留输入且零新 Run；旧前台引用不能停止另一所有者。
+- K05：成功 query vector 与本 owner claim 清理同事务；真实 SQLite 插入后中断/删除异常回滚、commit 回执中断恢复、旧 cache+pending、错 space/query/维度/NaN/坏字节、consent 撤销、替换 owner 和多库同空间并发。有效成功缓存本地完成且零 provider 调用；无证据未知仍不自动重试。
+- S33/S34：URL 2048/2049 字符、长查询和签名参数、百分号编码/Unicode、fragment/userinfo/private 过滤；保留 URL 必须等于完整原值。撤权后的安全反馈和 durable invocation 保留已派发/完成/扣留/可能收费，缓存及重启不重派发、不泄露。
+- L01—L04：版本 1.0.0 / code 2，正式证书一致、不可调试、arm64 APK/AAB、native alignment/notice、源码归档/SBOM/provenance/hash 对应干净合并提交；正常 PR/CI 合并、本地 main 同步及 GitHub Release 分别核验。定向测试和正式构建不替代未完成的全量设备/付费服务/长稳验收。见 [修复证据](evidence/2026-10-05/review-464f-fixes.md)。

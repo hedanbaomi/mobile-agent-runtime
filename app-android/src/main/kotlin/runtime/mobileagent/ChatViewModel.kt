@@ -138,18 +138,28 @@ private class ChatInputBudgetExceeded(
 }
 
 /** UI state projects durable conversations, immutable bindings, and checkpointed partial answers. */
-class ChatViewModel(
+class ChatViewModel internal constructor(
     application: Application,
     private val savedStateHandle: SavedStateHandle,
+    private val execution: ChatRunExecution,
 ) : AndroidViewModel(application) {
+    constructor(application: Application, savedStateHandle: SavedStateHandle) :
+        this(application, savedStateHandle, ChatRunExecution())
+
     private val container get() = (getApplication<Application>() as MobileAgentApp).container
     val state = mutableStateOf(ChatUiState())
     val locator = mutableStateOf<EvidenceLocator?>(null)
     val unknownRetry = mutableStateOf<String?>(null)
     private var runJob: Job? = null
     private var preflightJob: Job? = null
-    private var approval: CompletableDeferred<Boolean>? = null
-    private var activeToolExecutor: ToolExecutor? = null
+    private val runOwnership = ChatRunOwnership()
+    private class RunResources(val owner: ChatRunOwner) {
+        var job: Job? = null
+        var approval: CompletableDeferred<Boolean>? = null
+        var approvalCallId: String? = null
+        var executor: ToolExecutor? = null
+    }
+    private var activeRunResources: RunResources? = null
     private val citations = linkedMapOf<String, Pair<Citation, String>>()
     private var selectedImage: Pair<String, ByteArray>? = null
     private val sessionPreviews = mutableMapOf<String, Pair<ChatRequestPreviewUi, List<ChatPromptLayerUi>>>()
@@ -160,9 +170,6 @@ class ChatViewModel(
         state.value = state.value.copy(status = "当前会话仍在运行。请等待完成或明确取消后，再切换或新建会话；草稿已保留。")
         return true
     }
-    /** The deferred and call id are process-local; pending approvals never survive a restart. */
-    private var approvalCallId: String? = null
-
     /**
      * A pending approval is deliberately kept only in process memory.  The run repository stores
      * the fact that a prompt was waiting, but never enough state to restore, approve, or replay it.
@@ -272,6 +279,7 @@ class ChatViewModel(
 
     fun selectAgent(id: String) {
         if (blockedSessionChange()) return
+        detachRunPage()
         saveDraft()
         state.value.selectedSessionId?.let { previous ->
             state.value.requestPreview?.let { sessionPreviews[previous] = it to state.value.promptLayers }
@@ -349,6 +357,7 @@ class ChatViewModel(
 
     fun selectSession(id: String) {
         if (blockedSessionChange()) return
+        detachRunPage()
         saveDraft()
         state.value.selectedSessionId?.let { previous ->
             state.value.requestPreview?.let { sessionPreviews[previous] = it to state.value.promptLayers }
@@ -397,37 +406,51 @@ class ChatViewModel(
     fun send() {
         val text = state.value.input.trim()
         if (text.isBlank() || state.value.streaming) return
+        if (runOwnership.active != null || runJob?.isActive == true || preflightJob?.isActive == true) {
+            state.value = state.value.copy(status = "上一运行仍在收尾，请稍后发送；输入已保留。")
+            return
+        }
         val conversationId = state.value.selectedSessionId ?: newSession() ?: return
-        if (runJob?.isActive != true) runJob = null
-        state.value = state.value.copy(input = "", streaming = true, status = "正在准备会话…", statusKind = "")
-        saveDraft()
+        runJob = null
+        val owner = runOwnership.begin(conversationId)
+        val resources = RunResources(owner)
+        activeRunResources = resources
+        publishRunState(owner, state.value.copy(input = "", streaming = true, status = "正在准备会话…", statusKind = ""))
+        saveRunDraft(owner)
         preflightJob = viewModelScope.launch {
             try {
-                sendAfterInput(text, conversationId)
+                sendAfterInput(text, owner, resources)
             } catch (cancel: CancellationException) {
-                state.value = state.value.copy(streaming = false)
+                publishRunState(owner, state.value.copy(streaming = false))
                 throw cancel
             } catch (failure: Exception) {
-                fail(failure)
-                state.value = state.value.copy(streaming = false)
+                failRun(owner, failure)
+                publishRunState(owner, state.value.copy(streaming = false))
             } finally {
                 if (preflightJob === currentCoroutineContext()[Job]) preflightJob = null
+                if (resources.job == null) {
+                    runOwnership.finish(owner)
+                    if (activeRunResources === resources) activeRunResources = null
+                }
             }
         }
     }
 
-    private suspend fun sendAfterInput(text: String, conversationId: String) {
+    private suspend fun sendAfterInput(text: String, owner: ChatRunOwner, resources: RunResources) {
+        val conversationId = owner.conversationId
+        // Durable data and authorization use this run's own evidence, never the selected page.
+        val runCitations = LinkedHashMap(citations)
         val unknown = withContext(Dispatchers.IO) {
             container.runs.list(conversationId).lastOrNull { it.state == RunStatus.UNKNOWN_OUTCOME && it.retryAcknowledgedAt == null }
         }
         if (unknown != null) {
-            unknownRetry.value = unknown.runId
-            state.value = state.value.copy(streaming = false, input = text)
-            saveDraft()
+            if (canProjectRun(owner)) unknownRetry.value = unknown.runId
+            publishRunState(owner, state.value.copy(streaming = false, input = text))
+            saveRunDraft(owner)
             return
         }
         val conversation = withContext(Dispatchers.IO) { container.conversations.get(conversationId) }
-            ?: run { state.value = state.value.copy(streaming = false, input = text); saveDraft(); return }
+            ?: run { publishRunState(owner, state.value.copy(streaming = false, input = text)); saveRunDraft(owner); return }
         // Persist the user's message before any asynchronous preflight.  A provider, retrieval,
         // workspace, or tooling failure must never make the first message disappear.  The
         // message is also projected immediately so the chat remains responsive while the run is
@@ -441,19 +464,19 @@ class ChatViewModel(
                 parts = listOf(TextPart(text)),
             ) }
         } catch (failure: Exception) {
-            fail(failure)
-            state.value = state.value.copy(streaming = false, input = text)
-            saveDraft()
+            failRun(owner, failure)
+            publishRunState(owner, state.value.copy(streaming = false, input = text))
+            saveRunDraft(owner)
             return
         }
-        state.value = state.value.copy(
+        publishRunState(owner, state.value.copy(
             messages = state.value.messages + messageUi(userMessage),
             input = "",
-        )
+        ))
         val binding = try { withContext(Dispatchers.IO) { container.transfer.resolveRunBinding(conversation.snapshotId) } }
-            catch (failure: Exception) { fail(failure); state.value = state.value.copy(streaming = false); return }
+            catch (failure: Exception) { failRun(owner, failure); publishRunState(owner, state.value.copy(streaming = false)); return }
         val contextPolicy = try { AgentContextPolicy.fromJson(binding.snapshot.contextPolicyJson) }
-            catch (failure: Exception) { fail(failure); state.value = state.value.copy(streaming = false); return }
+            catch (failure: Exception) { failRun(owner, failure); publishRunState(owner, state.value.copy(streaming = false)); return }
         val degrade = state.value.textDegradation
         val threadWorkspacePort = (container as? ThreadWorkspacePortProvider)?.threadWorkspacePort
         var threadWorkspaceBindingReadFailed = false
@@ -479,7 +502,7 @@ class ChatViewModel(
                 "此会话的工作区已固定，但运行时暂不可用；不会切换到其他通道。"
             else -> "会话工作区已固定，正在检查配置、授权与上下文预算…"
         }
-        state.value = state.value.copy(
+        publishRunState(owner, state.value.copy(
             streaming = true,
             input = "",
             requestPreview = null,
@@ -490,11 +513,12 @@ class ChatViewModel(
             error = null,
             status = workspacePreflightStatus,
             statusKind = "",
-        )
+        ))
         currentCoroutineContext().ensureActive()
         runJob = viewModelScope.launch {
+            resources.job = currentCoroutineContext()[Job]
             var foregroundStarted = false
-            val run = AgentRun(EntityId.random().value, binding.snapshot.id, conversationId,
+            val run = AgentRun(owner.runId, binding.snapshot.id, conversationId,
                 budget = RunBudget(maxModelRounds = contextPolicy.maxModelRequestsPerRun))
             // The run owner outlives any single UI page: only this owner key
             // may cancel/terminalize the run through the RunCoordinator.
@@ -522,17 +546,23 @@ class ChatViewModel(
             // collector, so a blocked store write or transport can leave the user
             // with a grey card and no feedback at all.  This coroutine is
             // independent of that pipeline: past the run deadline plus grace it
-            // always surfaces a visible terminal status, records typed evidence,
-            // and best-effort terminalizes the durable record afterwards.
+            // detaches the page and cancels only this execution owner. The run's
+            // collector still owns durable results and terminalization. Process
+            // death recovery marks an unsettled run UNKNOWN without replay.
             val watchdogJob = viewModelScope.launch {
-                delay(run.budget.maxRuntimeMs + RUN_WATCHDOG_GRACE_MS)
+                execution.awaitWatchdog(run.budget.maxRuntimeMs + RUN_WATCHDOG_GRACE_MS)
                 if (record.state in TERMINAL) return@launch
-                state.value = state.value.copy(
+                publishRunState(owner, state.value.copy(
                     streaming = false,
                     pendingTool = null,
                     status = "运行无响应：已超过运行时限仍未收到终态事件，已停止等待。外部结果可能未知，如需继续请重试或新建会话。",
                     statusKind = "error",
-                )
+                ))
+                runOwnership.detach(owner)
+                resources.approval?.complete(false)
+                resources.approval = null
+                resources.approvalCallId = null
+                resources.job?.cancel(CancellationException("Run watchdog deadline exceeded"))
                 runCatching {
                     (getApplication<Application>() as MobileAgentApp).diagnostics.recordRunState(
                         RunStateRecord(
@@ -545,21 +575,6 @@ class ChatViewModel(
                             toolCalls = run.toolCalls,
                         ),
                     )
-                }
-                viewModelScope.launch(Dispatchers.IO) {
-                    withContext(NonCancellable) {
-                        runCatching {
-                            if (record.state !in TERMINAL) {
-                                container.runs.save(record.copy(
-                                    state = RunStatus.UNKNOWN_OUTCOME,
-                                    errorCode = "UNKNOWN_OUTCOME",
-                                    stopReason = "watchdog: no terminal event before the run deadline",
-                                    finishedAt = Utc.nowIso(),
-                                    updatedAt = Utc.nowIso(),
-                                ))
-                            }
-                        }
-                    }
                 }
             }
             var assistantId: String? = null
@@ -582,7 +597,7 @@ class ChatViewModel(
                 val now = System.currentTimeMillis()
                 if (!force && now - lastUiFlush < 50) return
                 lastUiFlush = now
-                state.value = state.value.copy(
+                publishRunState(owner, state.value.copy(
                     messages = state.value.messages.map {
                         if (it.id == id) it.copy(
                             text = text,
@@ -591,7 +606,7 @@ class ChatViewModel(
                             reasoningStreaming = reasoningText.isNotBlank() && !force,
                         ) else it
                     },
-                )
+                ))
             }
             suspend fun checkpoint(status: String = "STREAMING") {
                 val id = assistantId ?: return
@@ -600,7 +615,7 @@ class ChatViewModel(
                     if (reasoning.isNotBlank()) add(ReasoningPart(reasoning, streaming = status == "STREAMING"))
                     terminalError?.let(::add)
                     addAll(observed.values)
-                    addAll(citations.values.filter { it.first.runId == run.runId }.map { CitationPart(it.first.citationId) })
+                    addAll(runCitations.values.filter { it.first.runId == run.runId }.map { CitationPart(it.first.citationId) })
                 }
                 withContext(NonCancellable + Dispatchers.IO) { container.conversations.checkpointAssistant(id, answer, parts, metadata, status) }
             }
@@ -618,13 +633,13 @@ class ChatViewModel(
                         )
                     }
                     assistantId = message.id
-                    state.value = state.value.copy(messages = state.value.messages + messageUi(message))
+                    publishRunState(owner, state.value.copy(messages = state.value.messages + messageUi(message)))
                 } else {
                     checkpoint("ERROR")
                 }
             }
             try {
-                foregroundStarted = runCatching { ChatRunForegroundService.start(getApplication()) }.isSuccess
+                foregroundStarted = runCatching { ChatRunForegroundService.start(getApplication(), owner.runId) }.isSuccess
                 withContext(Dispatchers.IO) { record = container.runCoordinator.prepare(record, runOwnerKey) }
                 val model = binding.chatModel
                 val provider = binding.provider
@@ -689,8 +704,8 @@ class ChatViewModel(
                 }
                 if (degrade && hits.any { it.assetId != null }) warning = "未提供原始图片，视觉证据可能不完整。"
                 val bound = CitationMap.bind(run.runId, hits).map { it.copy(citationId = run.runId + "-" + it.citationId) }
-                bound.zip(hits).forEach { (citation, hit) -> citations[citation.citationId] = citation to hit.text }
-                metadata = citationMetadata(bound, warning, result.coverage)
+                bound.zip(hits).forEach { (citation, hit) -> runCitations[citation.citationId] = citation to hit.text }
+                metadata = citationMetadata(bound, warning, result.coverage, runCitations)
                 val system = PromptTemplates.render(binding.prompt.template, mapOf("date" to LocalDate.now().toString(),
                     "agent_name" to binding.agentName, "knowledge_bases" to kbIds.joinToString(",")))
                 val webExecutor = webSearchTools(container, binding.snapshot)
@@ -839,7 +854,7 @@ class ChatViewModel(
                     },
                 )
                 val toolExecutor = runTools.executor
-                activeToolExecutor = toolExecutor
+                resources.executor = toolExecutor
                 // Tool dispatch/result evidence (review-APK QA P2): dispatch,
                 // result and UNKNOWN_OUTCOME previously wrote zero diagnostic
                 // events, so a failed tool left no trace to diagnose.  Typed and
@@ -956,14 +971,14 @@ class ChatViewModel(
                     withContext(Dispatchers.IO) { runCatching { container.runs.save(record) } }
                     container.runCoordinator.release(run.runId, runOwnerKey)
                     persistTerminalError(toSafeErrorPart("运行指纹持久化失败，已阻止后续 Chat 模型与工具执行。检索预处理可能已发生；若使用远程 Embedding，请查看本次检索/费用记录。"))
-                    state.value = state.value.copy(status = "运行指纹持久化失败，已阻止后续 Chat 模型与工具执行。检索预处理可能已发生；若使用远程 Embedding，请查看本次检索/费用记录。", statusKind = "error")
+                    publishRunState(owner, state.value.copy(status = "运行指纹持久化失败，已阻止后续 Chat 模型与工具执行。检索预处理可能已发生；若使用远程 Embedding，请查看本次检索/费用记录。", statusKind = "error"))
                     return@launch
                 }
                 val history = withContext(Dispatchers.IO) {
                     container.conversations.messages(conversationId).filterNot { it.id == userMessage.id }
                 }
                 val contextHistory = boundedHistory(history,
-                    if (contextPolicy.autoCompact) Int.MAX_VALUE else contextPolicy.maxHistoryMessages, kbIds.toSet())
+                    if (contextPolicy.autoCompact) Int.MAX_VALUE else contextPolicy.maxHistoryMessages, kbIds.toSet(), runCitations)
                 val typedHistory = contextHistory.messages
                 val historicalSourceIds = contextHistory.sources.map { it.messageId }.toSet()
                 val historicalCitations = history.filter { it.id in historicalSourceIds }.flatMap { message ->
@@ -1091,8 +1106,9 @@ class ChatViewModel(
                 preparationStage = "credentials"
                 secret = withContext(Dispatchers.IO) { container.secrets.resolveForHost(provider.secretRef) }
                 preparationStage = "request"
-                state.value = state.value.copy(promptLayers = prompt.assemble().blocks.map { ChatPromptLayerUi(it.trust.name, it.text) },
-                    citations = citationUis(), status = listOfNotNull(
+                publishRunCitations(owner, runCitations)
+                publishRunState(owner, state.value.copy(promptLayers = prompt.assemble().blocks.map { ChatPromptLayerUi(it.trust.name, it.text) },
+                    citations = citationUis(runCitations), status = listOfNotNull(
                         "发送至 ${URI(provider.baseUrl).host} · ${model.modelId}。",
                         when {
                             threadWorkspaceBindingReadFailed -> "会话工作区绑定读取失败；工作区工具已关闭。"
@@ -1112,7 +1128,7 @@ class ChatViewModel(
                             }
                         } else null,
                         result.warnings.joinToString(" ").takeIf { it.isNotBlank() },
-                    ).joinToString(" "))
+                    ).joinToString(" ")))
                 // Model transport observability (review-APK QA P2): the chat run
                 // previously wrote no model request evidence at all, so a stalled
                 // or failed dispatch left nothing to diagnose.  Observability
@@ -1154,7 +1170,8 @@ class ChatViewModel(
                         )
                     }
                 }
-                val runtime = AgentRuntime(adapter, executor = toolExecutor, onApprove = { call ->
+                val onApprove: suspend (ToolCall) -> Boolean = approvalDecision@{ call ->
+                    if (!withContext(Dispatchers.Main) { canProjectRun(owner) }) return@approvalDecision false
                     // RuntimeIntegration.snapshot() is the canonical, UI-safe
                     // projection but reads repositories/content permissions;
                     // collect the two enum labels off the Main dispatcher.
@@ -1179,6 +1196,7 @@ class ChatViewModel(
                     if (rememberPendingApproval(approvalAudit)) {
                         recordToolApprovalState(approvalAudit, DiagnosticApprovalState.REQUESTED, "permission")
                     }
+                    if (!withContext(Dispatchers.Main) { canProjectRun(owner) }) return@approvalDecision false
                     val liveAgent = container.agents.get(binding.snapshot.agentId)
                     if (AgentToolConfirmation.allows(binding.snapshot.permissionSettingsJson,
                             liveAgent?.permissionSettingsJson)) {
@@ -1191,9 +1209,13 @@ class ChatViewModel(
                     } else {
                     val deferred = CompletableDeferred<Boolean>()
                     withContext(Dispatchers.Main) {
-                        approval = deferred
-                        approvalCallId = call.callId
-                        state.value = state.value.copy(
+                        if (!canProjectRun(owner)) {
+                            deferred.complete(false)
+                            return@withContext
+                        }
+                        resources.approval = deferred
+                        resources.approvalCallId = call.callId
+                        publishRunState(owner, state.value.copy(
                             pendingTool = approvalUi(
                                 call = call,
                                 specs = toolExecutor.specs,
@@ -1201,7 +1223,7 @@ class ChatViewModel(
                                 selectedAuthority = selectedAuthority,
                                 dangerousMode = dangerousMode,
                             ),
-                        )
+                        ))
                     }
                     deferred.await().also {
                         approvedToolInFlight = it
@@ -1209,10 +1231,12 @@ class ChatViewModel(
                         toolWaitingApproval = false
                     }
                     }
-                }, secretsForRedaction = {
+                }
+                execution.approvalReady(onApprove)
+                val runtime = AgentRuntime(adapter, executor = toolExecutor, onApprove = onApprove, secretsForRedaction = {
                     secret?.let { listOf(String(it)) }.orEmpty()
                 })
-                runtime.run(AgentRuntimeRequest(run, prompt, model.modelId, secret!!, "tools" in model.capabilities,
+                val runtimeEvents = runtime.run(AgentRuntimeRequest(run, prompt, model.modelId, secret!!, "tools" in model.capabilities,
                     parameters = layers, headers = headers, emitRequestPreview = container.uiPreferences.getBoolean("request-inspector", true),
                     toolImages = runTools::toolImages, maxInputBudgetUnits = inputBudget.toLong(),
                     outputTokenLimit = sendCap,
@@ -1228,18 +1252,19 @@ class ChatViewModel(
                         require(bound.all { it.knowledgeBaseId in allowed && !container.knowledge.locateCitation(it).removed }) {
                             "Knowledge authorization or source changed before request"
                         }
-                        require(historicalCitations.all { id -> citations[id]?.first?.let { citation ->
+                        require(historicalCitations.all { id -> runCitations[id]?.first?.let { citation ->
                             citation.knowledgeBaseId in allowed && !container.knowledge.locateCitation(citation).removed
                         } == true }) { "PERMISSION_DENIED: historical knowledge was removed or revoked; start a new conversation" }
                         val historyAssetIds = typedHistory.flatMap { it.images }.mapNotNull { it.assetId }.toSet()
-                        require(historyAssetIds.all { assetId -> citations.values.any { (citation, _) ->
+                        require(historyAssetIds.all { assetId -> runCitations.values.any { (citation, _) ->
                             citation.assetId == assetId && citation.knowledgeBaseId in allowed && !container.knowledge.locateCitation(citation).removed
                         } }) { "PERMISSION_DENIED: historical visual evidence was removed or revoked" }
                     },
                     diagnostics = modelDiagnostics,
                 ))
                     // Rendezvous keeps durable old exchanges ahead of a later compaction checkpoint.
-                    .flowOn(Dispatchers.IO).buffer(0).collect { event ->
+                    .flowOn(Dispatchers.IO).buffer(0)
+                execution.collectEvents(runtimeEvents) { event ->
                         var persistRun = false
                         when (event) {
                             is RuntimeEvent.RunStarted -> {
@@ -1271,7 +1296,7 @@ class ChatViewModel(
                                     state = if (modelInFlight) RunStatus.MODEL_STREAMING else RunStatus.ASSEMBLING,
                                     modelRounds = run.modelRounds,
                                 )
-                                state.value = state.value.copy(
+                                publishRunState(owner, state.value.copy(
                                     compactions = withContext(Dispatchers.IO) { container.contextCompactions.list(conversationId) }.map(::compactionUi),
                                     status = when (event.record.state) {
                                         ContextCompactionState.PREPARED, ContextCompactionState.DISPATCHED -> "正在压缩较早上下文，完成后继续当前任务…"
@@ -1279,7 +1304,7 @@ class ChatViewModel(
                                         ContextCompactionState.UNKNOWN_OUTCOME -> "压缩请求结果未知；不会自动重试。"
                                         else -> "上下文压缩未完成，原始记录已保留。"
                                     },
-                                )
+                                ))
                                 persistRun = true
                             }
                             is RuntimeEvent.RequestPrepared -> {
@@ -1299,14 +1324,14 @@ class ChatViewModel(
                                     it,
                                 ) }
                                 if (requestPreview != null) rememberRequestPreviewHint(conversationId)
-                                state.value = state.value.copy(requestPreview = requestPreview,
+                                publishRunState(owner, state.value.copy(requestPreview = requestPreview,
                                     requestInspectorAvailability = resolveRequestInspectorAvailability(
                                         inspectorEnabled = inspectorEnabled,
                                         previewAvailable = requestPreview != null,
                                         persistedPreviewHint = hasPersistedRequestPreviewHint(conversationId),
                                     ),
-                                )
-                                refreshMessages(conversationId)
+                                ))
+                                refreshMessages(owner)
                                 persistRun = true
                             }
                             is RuntimeEvent.ModelEvent -> when (val e = event.event) {
@@ -1347,7 +1372,7 @@ class ChatViewModel(
                                     flushStreamingAnswer(assistantId, answer, force = true)
                                     if (assistantId == null) persistTerminalError(projected) else checkpoint("ERROR")
                                     record = record.copy(errorCode = projected.code.name)
-                                    state.value = state.value.copy(status = safeMessage, statusKind = "error")
+                                    publishRunState(owner, state.value.copy(status = safeMessage, statusKind = "error"))
                                     persistRun = true
                                 }
                                 is ModelEvent.Usage -> {
@@ -1395,6 +1420,7 @@ class ChatViewModel(
                                     when (event.status) {
                                         "VALUE" -> DiagnosticToolRunState.VALUE
                                         "DENIED" -> DiagnosticToolRunState.DENIED
+                                        "COMPLETED_WITHHELD" -> DiagnosticToolRunState.COMPLETED_WITHHELD
                                         "INVALID" -> DiagnosticToolRunState.INVALID
                                         "UNKNOWN_OUTCOME" -> DiagnosticToolRunState.UNKNOWN_OUTCOME
                                         else -> DiagnosticToolRunState.FAILED
@@ -1405,7 +1431,7 @@ class ChatViewModel(
                                             ?.jsonPrimitive?.contentOrNull
                                     }.getOrNull(),
                                 )
-                                val approvalAudit = pendingApprovalForCall(event.callId)
+                                val approvalAudit = pendingApprovalFor(run.runId)?.takeIf { it.callId == event.callId }
                                 when (event.status) {
                                     "DENIED" -> approvalAudit?.let {
                                         recordToolApprovalState(it, DiagnosticApprovalState.INVALIDATED, "permission")
@@ -1421,9 +1447,9 @@ class ChatViewModel(
                                 toolWaitingApproval = false
                                 approvedToolInFlight = false
                                 approvedToolCallId = null
-                                runTools.evidence().forEach { (citation, excerpt) -> citations[citation.citationId] = citation to excerpt }
-                                metadata = citationMetadata(citations.values.filter { it.first.runId == run.runId }.map { it.first },
-                                    (listOfNotNull(warning) + runTools.warnings()).joinToString("\n").ifBlank { null })
+                                runTools.evidence().forEach { (citation, excerpt) -> runCitations[citation.citationId] = citation to excerpt }
+                                metadata = citationMetadata(runCitations.values.filter { it.first.runId == run.runId }.map { it.first },
+                                    (listOfNotNull(warning) + runTools.warnings()).joinToString("\n").ifBlank { null }, source = runCitations)
                                 checkpoint()
                                 val runtimeInvocationId = runTools.runtimeInvocationId(event.callId) ?: InternalRequestIds.new()
                                 val persistedDecision = withContext(Dispatchers.IO) {
@@ -1432,7 +1458,7 @@ class ChatViewModel(
                                 }
                                 val invocation = (invocations[runtimeInvocationId] ?: ToolInvocation(runtimeInvocationId, run.runId,
                                     event.callId, event.name, observed[event.callId]?.argumentsJson ?: "{}", createdAt = Utc.nowIso()))
-                                    .copy(state = when (event.status) { "VALUE" -> "SUCCEEDED"; "UNKNOWN_OUTCOME" -> "UNKNOWN_OUTCOME"; else -> "FAILED" },
+                                    .copy(state = when (event.status) { "VALUE" -> "SUCCEEDED"; "COMPLETED_WITHHELD" -> "COMPLETED_WITHHELD"; "UNKNOWN_OUTCOME" -> "UNKNOWN_OUTCOME"; else -> "FAILED" },
                                         resultJson = event.resultJson,
                                         permissionDecision = persistedDecision ?: "NOT_REQUESTED",
                                         updatedAt = Utc.nowIso())
@@ -1451,7 +1477,8 @@ class ChatViewModel(
                                 }
                                 invocations[runtimeInvocationId] = invocation
                                 forgetPendingApproval(run.runId, event.callId)
-                                state.value = state.value.copy(pendingTool = null, citations = citationUis())
+                                publishRunCitations(owner, runCitations)
+                                publishRunState(owner, state.value.copy(pendingTool = null, citations = citationUis(runCitations)))
                                 persistRun = true
                             }
                             is RuntimeEvent.ToolImagesAttached -> withContext(Dispatchers.IO) {
@@ -1486,8 +1513,8 @@ class ChatViewModel(
                                 }
                                 pendingApprovalFor(run.runId)?.let { pending ->
                                     when (event.state.name) {
-                                        RunStatus.BUDGET_EXHAUSTED.name -> settleActiveApproval(pending.invocationId ?: pending.callId, expired = true)
-                                        RunStatus.CANCELLED.name, RunStatus.FAILED.name -> settleActiveApproval(pending.invocationId ?: pending.callId, expired = false)
+                                        RunStatus.BUDGET_EXHAUSTED.name -> settleActiveApproval(resources, pending.invocationId ?: pending.callId, expired = true)
+                                        RunStatus.CANCELLED.name, RunStatus.FAILED.name -> settleActiveApproval(resources, pending.invocationId ?: pending.callId, expired = false)
                                         else -> Unit
                                     }
                                     val transition = when (event.state.name) {
@@ -1532,7 +1559,7 @@ class ChatViewModel(
                         }
                     }
                 if (record.state !in TERMINAL) record = record.copy(state = RunStatus.FAILED, stopReason = "No terminal outcome")
-                state.value = state.value.copy(status = when (record.state) {
+                publishRunState(owner, state.value.copy(status = when (record.state) {
                     RunStatus.COMPLETED -> buildString {
                         append("已完成。输入 ${record.inputTokens} / 输出 ${record.outputTokens} tokens。")
                         if (run.compactionRequests > 0) append("包含 ${run.compactionRequests} 次上下文摘要请求。")
@@ -1543,7 +1570,7 @@ class ChatViewModel(
                     }
                     RunStatus.BUDGET_EXHAUSTED -> "已达到执行预算；未自动重试。"
                     else -> state.value.status
-                })
+                }))
             } catch (cancel: CancellationException) {
                 withContext(NonCancellable) {
                     val persisted = withContext(Dispatchers.IO) { container.runs.get(run.runId) }
@@ -1564,7 +1591,7 @@ class ChatViewModel(
                                 Triple("UNKNOWN_OUTCOME", "APPROVED", "UNKNOWN_OUTCOME")
                                 else -> Triple("CANCELLED", "DENIED", "APPROVAL_INVALIDATED")
                         }
-                        settleActiveApproval(
+                        settleActiveApproval(resources,
                             pending.invocationId ?: pending.callId,
                             expired = terminal.third == "APPROVAL_EXPIRED",
                         )
@@ -1609,12 +1636,12 @@ class ChatViewModel(
                                 errorCode = if (unknown) "UNKNOWN_OUTCOME" else null)
                         }
                     }
-                    state.value = state.value.copy(status = when (record.state) {
+                    publishRunState(owner, state.value.copy(status = when (record.state) {
                         RunStatus.UNKNOWN_OUTCOME -> "已取消接收，部分响应保留；外部结果未知，可能已产生费用或操作，继续前需要再次确认。"
                         RunStatus.COMPLETED -> "已完成。输入 ${record.inputTokens} / 输出 ${record.outputTokens} tokens。"
                         RunStatus.CANCELLED -> "已取消，部分响应保留。"
                         else -> record.stopReason ?: state.value.status
-                    })
+                    }))
                     if (assistantId != null && record.state in setOf(RunStatus.CANCELLED, RunStatus.UNKNOWN_OUTCOME)) {
                         // The in-memory delta can be newer than the periodic checkpoint. Persist
                         // it with an explicit terminal marker before reload replaces the UI row.
@@ -1653,7 +1680,7 @@ class ChatViewModel(
                     errorCode = if (queryUnknown) "UNKNOWN_OUTCOME" else record.errorCode ?: errorPart.code.name,
                     stopReason = errorPart.message)
                 persistTerminalError(errorPart)
-                state.value = state.value.copy(status = errorPart.message, statusKind = "error", error = null)
+                publishRunState(owner, state.value.copy(status = errorPart.message, statusKind = "error", error = null))
             } finally {
                 watchdogJob.cancel()
                 // Shield the whole cleanup, including dispatcher returns. Individually shielding
@@ -1678,7 +1705,7 @@ class ChatViewModel(
                                     Triple("CANCELLED", "DENIED", "APPROVAL_INVALIDATED")
                                 else -> Triple("FAILED", "DENIED", "APPROVAL_DENIED")
                             }
-                            settleActiveApproval(
+                            settleActiveApproval(resources,
                                 pending.invocationId ?: pending.callId,
                                 expired = terminal.third == "APPROVAL_EXPIRED",
                             )
@@ -1717,31 +1744,41 @@ class ChatViewModel(
                         record = record.copy(finishedAt = Utc.nowIso(), updatedAt = Utc.nowIso())
                         withContext(Dispatchers.IO) { container.runs.save(record) }
                         container.runCoordinator.release(run.runId, runOwnerKey)
-                    } catch (failure: Exception) { state.value = state.value.copy(status = "记录保存失败：${SecretRedactor.redact(failure.message.orEmpty())}", statusKind = "error") }
-                    secret?.fill('\u0000'); approval = null; approvalCallId = null; activeToolExecutor = null
+                    } catch (failure: Exception) { publishRunState(owner, state.value.copy(status = "记录保存失败：${SecretRedactor.redact(failure.message.orEmpty())}", statusKind = "error")) }
+                    secret?.fill('\u0000')
+                    resources.approval?.complete(false)
+                    resources.approval = null
+                    resources.approvalCallId = null
+                    resources.executor = null
                     forgetPendingApproval(run.runId)
-                    state.value = state.value.copy(streaming = false, pendingTool = null)
-                    if (foregroundStarted) runCatching { ChatRunForegroundService.stop(getApplication()) }
-                    reload()
-                    if (state.value.selectedSessionId == conversationId) {
+                    container.runCoordinator.release(run.runId, runOwnerKey)
+                    publishRunState(owner, state.value.copy(streaming = false, pendingTool = null))
+                    if (foregroundStarted) runCatching { ChatRunForegroundService.stop(getApplication(), owner.runId) }
+                    if (canProjectRun(owner)) reload()
+                    if (canProjectRun(owner)) {
                         val interruptionStatus = when (record.state) {
                             RunStatus.UNKNOWN_OUTCOME -> "已取消接收，部分响应保留；外部结果未知，可能已产生费用或操作，继续前需要再次确认。"
                             RunStatus.CANCELLED -> "已取消，部分响应保留。"
                             else -> null
                         }
-                        if (interruptionStatus != null) state.value = state.value.copy(status = interruptionStatus)
+                        if (interruptionStatus != null) publishRunState(owner, state.value.copy(status = interruptionStatus))
                     }
+                    runOwnership.finish(owner)
+                    if (activeRunResources === resources) activeRunResources = null
+                    if (runJob === resources.job) runJob = null
                 }
             }
         }
     }
     fun approveTool(approved: Boolean) {
+        val resources = activeRunResources ?: return
+        if (!canProjectRun(resources.owner)) return
         val pending = state.value.pendingTool
-        val deferred = approval
-        if (deferred != null && pending != null && approvalCallId == pending.id) {
-            val audit = pendingApprovalForCall(pending.id)
-            approval = null
-            approvalCallId = null
+        val deferred = resources.approval
+        if (deferred != null && pending != null && resources.approvalCallId == pending.id) {
+            val audit = pendingApprovalFor(resources.owner.runId)?.takeIf { it.callId == pending.id }
+            resources.approval = null
+            resources.approvalCallId = null
             if (approved) {
                 audit?.let {
                     markPendingApprovalDecision(it.runId, it.invocationId, it.callId, "APPROVED")
@@ -1762,7 +1799,7 @@ class ChatViewModel(
                     errorCode = "APPROVAL_DENIED",
                 )
                 recordToolApprovalState(audit, DiagnosticApprovalState.DENIED, "rejected")
-                val executor = activeToolExecutor
+                val executor = resources.executor
                 val runtimeId = audit.invocationId ?: audit.callId
                 viewModelScope.launch(Dispatchers.IO + NonCancellable) {
                     runCatching { executor?.reject(runtimeId) }
@@ -1775,13 +1812,14 @@ class ChatViewModel(
         }
     }
     fun cancel() {
-        val callId = approvalCallId
-        val deferred = approval
-        val executor = activeToolExecutor
+        val resources = activeRunResources ?: return
+        val callId = resources.approvalCallId
+        val deferred = resources.approval
+        val executor = resources.executor
         var explicitRejectScheduled = false
         callId?.let {
-            pendingApprovalForCall(it)?.let { audit ->
-                // Cancellation is terminal for an approval wait.  Persist it before cancelling
+            pendingApprovalFor(resources.owner.runId)?.takeIf { audit -> audit.callId == it }?.let { audit ->
+                // Cancellation is terminal for an approval wait. Persist it before cancelling
                 // the collector so reload cannot present or replay the same request.
                 terminalizePendingApproval(
                     runId = audit.runId,
@@ -1801,12 +1839,12 @@ class ChatViewModel(
             }
         }
         if (deferred != null && !explicitRejectScheduled) deferred.complete(false)
-        approval = null
-        approvalCallId = null
+        resources.approval = null
+        resources.approvalCallId = null
         val preparing = preflightJob?.isActive == true && runJob?.isActive != true
         preflightJob?.cancel()
-        runJob?.cancel()
-        if (preparing) state.value = state.value.copy(streaming = false)
+        resources.job?.cancel()
+        if (preparing) publishRunState(resources.owner, state.value.copy(streaming = false))
     }
 
     /** Settings hold only a boolean hint; request headers/body/secret never enter preferences. */
@@ -1839,9 +1877,38 @@ class ChatViewModel(
             } else state.value = state.value.copy(status = "原图不可用或超过预览上限；未用替代图冒充来源。")
         }
     }
-    private suspend fun refreshMessages(id: String) {
-        val messages = withContext(Dispatchers.IO) { container.conversations.messages(id) }
-        state.value = state.value.copy(messages = messages.map(::messageUi))
+    private fun canProjectRun(owner: ChatRunOwner): Boolean =
+        runOwnership.canProject(owner, state.value.selectedSessionId)
+
+    private fun detachRunPage() {
+        runOwnership.active?.let(runOwnership::detach)
+        selectedImage = null
+        locator.value = null
+        unknownRetry.value = null
+        state.value = state.value.copy(selectedCitationId = null, pendingTool = null)
+    }
+
+    private fun publishRunState(owner: ChatRunOwner, next: ChatUiState) {
+        if (canProjectRun(owner)) state.value = next
+    }
+
+    private fun saveRunDraft(owner: ChatRunOwner) {
+        if (canProjectRun(owner)) saveDraft()
+    }
+
+    private fun failRun(owner: ChatRunOwner, failure: Exception) {
+        publishRunState(owner, state.value.copy(error = SecretRedactor.redact(failure.message ?: "操作失败。")))
+    }
+
+    private fun publishRunCitations(owner: ChatRunOwner, source: Map<String, Pair<Citation, String>>) {
+        if (!canProjectRun(owner)) return
+        citations.clear()
+        citations.putAll(source)
+    }
+
+    private suspend fun refreshMessages(owner: ChatRunOwner) {
+        val messages = withContext(Dispatchers.IO) { container.conversations.messages(owner.conversationId) }
+        publishRunState(owner, state.value.copy(messages = messages.map(::messageUi)))
     }
     private fun messageUi(message: Message): ChatMessageUi {
         val reasoningParts = message.parts.filterIsInstance<ReasoningPart>()
@@ -1923,10 +1990,10 @@ class ChatViewModel(
         return first
     }
 
-    private suspend fun settleActiveApproval(callId: String, expired: Boolean) {
+    private suspend fun settleActiveApproval(resources: RunResources, callId: String, expired: Boolean) {
         withContext(NonCancellable) {
             runCatching {
-                activeToolExecutor?.let { executor ->
+                resources.executor?.let { executor ->
                     if (expired) executor.expire(callId) else executor.reject(callId)
                 }
             }
@@ -2139,13 +2206,13 @@ class ChatViewModel(
         )
     }
 
-    private fun citationUis() = citations.map { (id, value) ->
+    private fun citationUis(source: Map<String, Pair<Citation, String>> = citations) = source.map { (id, value) ->
         val loc = container.knowledge.locateCitation(value.first)
         ChatCitationUi(id, loc.displayName, value.first.documentId, if (loc.removed) "来源已移除或授权失效。" else value.second,
             "页 ${loc.page ?: "—"} · ${loc.assetId ?: loc.sourceSpan.orEmpty()}", !loc.removed,
             imageBytes = selectedImage?.takeIf { it.first == id && !loc.removed }?.second)
     }
-    private fun citationMetadata(bound: List<Citation>, warning: String?, coverage: RetrievalCoverage? = null): String = buildJsonObject {
+    private fun citationMetadata(bound: List<Citation>, warning: String?, coverage: RetrievalCoverage? = null, source: Map<String, Pair<Citation, String>> = citations): String = buildJsonObject {
         warning?.let { put("visualWarning", it) }
         // Durable retrieval-scope fact: no query text, only ids and reason
         // codes, so reload and diagnostics can show partial coverage safely.
@@ -2166,7 +2233,7 @@ class ChatViewModel(
         putJsonArray("citations") { bound.forEach { c -> add(buildJsonObject {
             put("id", c.citationId); put("runId", c.runId); put("kb", c.knowledgeBaseId); put("document", c.documentId)
             put("chunk", c.chunkId); put("version", c.documentVersionId); c.assetId?.let { put("asset", it) }
-            c.page?.let { put("page", it) }; c.sourceSpan?.let { put("span", it) }; put("excerpt", citations[c.citationId]?.second.orEmpty())
+            c.page?.let { put("page", it) }; c.sourceSpan?.let { put("span", it) }; put("excerpt", source[c.citationId]?.second.orEmpty())
         }) } }
     }.toString()
     private fun restoreCitations(raw: String) {
@@ -2181,7 +2248,7 @@ class ChatViewModel(
     }
     private data class ChatHistory(val messages: List<ChatMessage>, val sources: List<ContextSource>)
 
-    private fun boundedHistory(messages: List<Message>, max: Int, allowedKbs: Set<String>): ChatHistory {
+    private fun boundedHistory(messages: List<Message>, max: Int, allowedKbs: Set<String>, source: Map<String, Pair<Citation, String>> = citations): ChatHistory {
         val groups = mutableListOf<MutableList<Message>>()
         messages.forEach { message ->
             val toolEvidence = runCatching { Json.parseToJsonElement(message.metadataJson).jsonObject["toolEvidence"]?.jsonPrimitive?.booleanOrNull }.getOrNull() == true
@@ -2216,7 +2283,7 @@ class ChatViewModel(
         val projected = selected.map { message ->
             val assets = message.parts.filterIsInstance<ImagePart>()
             val images = if (assets.isEmpty()) emptyList() else {
-                require(assets.all { asset -> citations.values.any { (citation, _) -> citation.assetId == asset.assetId &&
+                require(assets.all { asset -> source.values.any { (citation, _) -> citation.assetId == asset.assetId &&
                     citation.knowledgeBaseId in allowedKbs && !container.knowledge.locateCitation(citation).removed } }) { "历史图片来源已撤销；请开启新会话。" }
                 when (val plan = VisualAttachmentPolicy.plan(assets.map { it.assetId }, container.knowledge::assetBytes)) {
                     is VisualAttachmentPlan.Incomplete -> error(plan.reason)

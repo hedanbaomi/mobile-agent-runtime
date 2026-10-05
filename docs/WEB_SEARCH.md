@@ -19,8 +19,8 @@ Agent 编辑页的“允许联网搜索”默认关闭，须保存。开启后�
 
 模型不能选择 URL、Header 或任意请求正文。连接拒绝私有地址解析，不使用代理、Cookie 或跨调用连接池；禁止重定向及自动重试。实际发送前再次检查当前服务、配置修订、有效密钥和 Agent 的冻结及实时授权。Agent 或服务配置修订变化使旧执行器失效，恢复开关也不会复活旧调用。
 
-HTTP 响应最多 1 MiB，工具输出序列化后最多 32,768 字符。三家结果统一为 `provider`、`untrusted: true` 和 `results`（title/url/snippet）；仅保留公开 HTTPS 链接，最多 10 项。不返回服务商 answer/raw content，不自动抓取或打开结果网页。返回前过滤活动密钥；所有正文与外部链接仍是不可信资料。
+HTTP 响应最多 1 MiB，工具输出序列化后最多 32,768 字符。三家结果统一为 `provider`、`untrusted: true` 和 `results`（title/url/snippet）；仅保留公开 HTTPS 链接，最多 10 项。完整 URL 超过 2,048 字符直接拒绝，不能截断成另一地址；含活动密钥、需要脱敏改写的 URL 整条丢弃。标题与摘要解析后先脱敏再限制长度。不返回服务商 answer/raw content，不自动抓取或打开结果网页；所有正文与外部链接仍是不可信资料。
 
-同一执行器的相同调用 ID 与参数只执行一次。已发送但无法确认结果的失败按 `UNKNOWN_OUTCOME` 终结，不自动重放或再次收费；发送前撤权直接拒绝。撤权无法撤回已经送达服务商的查询。
+同一执行器的相同调用 ID 与参数只执行一次。发送前撤权为 `DENIED`；成功响应后撤权为 `COMPLETED_WITHHELD`：查询已经发送并完成、可能收费，但结果内容不再披露。已发送而无法确认结果的失败仍为 `UNKNOWN_OUTCOME`。这三种状态分别保存，缓存复用不重派发，进程恢复不把已知完成的工具改成未知。撤权无法撤回已经送达服务商的查询。
 
 协议及决策见 [ADR-0022](adr/0022-configurable-search-and-agent-permission.md)，回归与尚未验证的线上边界见 [本轮证据](evidence/2026-10-05/logging-and-search.md)。

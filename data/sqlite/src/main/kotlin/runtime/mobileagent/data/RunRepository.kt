@@ -108,10 +108,10 @@ class RunRepository(
                 ),
             )
             db.execute(
-                "UPDATE tool_invocations SET state=?,error_code=?,updated_at=? WHERE run_id IN (SELECT run_id FROM runs WHERE state=?) AND state NOT IN (?, ?, ?, ?)",
+                "UPDATE tool_invocations SET state=?,error_code=?,updated_at=? WHERE run_id IN (SELECT run_id FROM runs WHERE state=?) AND state NOT IN (?, ?, ?, ?, ?)",
                 listOf(
                     "UNKNOWN_OUTCOME", ErrorCode.UNKNOWN_OUTCOME.name, at, RunStatus.UNKNOWN_OUTCOME.name,
-                    "SUCCEEDED", "FAILED", "CANCELLED",
+                    "SUCCEEDED", "FAILED", "CANCELLED", "COMPLETED_WITHHELD",
                     "UNKNOWN_OUTCOME",
                 ),
             )

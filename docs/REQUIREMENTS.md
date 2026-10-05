@@ -98,3 +98,6 @@ Android API 26+；arm64-v8a 正式、x86_64 模拟器；Kotlin + Compose；KMP �
 S8 初始文档任务只创建工程文档、许可说明、Agent 规则，并初始化本地 Git/CodeGraph；后续实现状态以 HANDOFF 为准。S9 本次只修改技术设计文档和阶段/验收安排，不制作实际页面、原型或业务代码，不执行付费模型调用、不自动执行外部 Skills、不访问占卜产品仓库、不改生产，不提交或推送。
 
 首版不承诺：完整 PyPI、宿主 PowerShell/宿主 shell、Node/Docker/Termux 执行、无线 ADB、DPC、Root、PTY、本地完整 LLM、自动 Skill 下载/商店、任意远程代码、跨设备同步、多模型对比。v2 的 Android `shell_exec` 仅是选定 Shizuku 或 Wired ADB Authority 下的显式 Dangerous Mode 能力，不改变 Skill/Python 的宿主隔离边界，也不等于开放宿主 shell。后续扩展必须单独定义范围和验收。
+
+
+2026-10-05 464f8f4 复审补充（R12/R19/R35）：界面超时退出等待后，旧运行的请求预览、消息、审批与资源清理必须隔离；已知成功的查询缓存可在原有授权下本地恢复，禁止因遗留 pending 再次收费。搜索撤权不披露结果，但保留请求已发送并完成、可能收费的事实；未知结果不自动重放。结果 URL 不得截断或经脱敏改成另一地址。实现取舍见 [ADR-0023](adr/0023-run-ownership-and-known-outcome-recovery.md)，正式发布与数据保留说明见 [发布文档](RELEASING.md)。

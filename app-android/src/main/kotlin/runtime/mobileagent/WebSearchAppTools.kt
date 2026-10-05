@@ -78,7 +78,7 @@ internal fun parseBraveSearchResponse(raw: String, maxResults: Int, secrets: Lis
 
 internal fun parseWebSearchResponse(provider: WebSearchProvider, raw: String, maxResults: Int, secrets: List<String> = emptyList()): String {
     require(maxResults in 1..10) { "Invalid result limit" }
-    val root = Json.parseToJsonElement(SecretRedactor.redact(raw, secrets)).jsonObject
+    val root = Json.parseToJsonElement(raw).jsonObject
     val results = when (provider) {
         WebSearchProvider.BRAVE -> (root["web"] as? JsonObject)?.get("results")
         WebSearchProvider.TAVILY, WebSearchProvider.EXA -> root["results"]
@@ -89,8 +89,10 @@ internal fun parseWebSearchResponse(provider: WebSearchProvider, raw: String, ma
     }.toString()
     results.asSequence().mapNotNull { element ->
         val item = element as? JsonObject ?: return@mapNotNull null
-        val title = item.text("title", 512) ?: return@mapNotNull null
-        val url = item.text("url", 2048) ?: return@mapNotNull null
+        val title = item.text("title", 512, secrets) ?: return@mapNotNull null
+        val url = item.url() ?: return@mapNotNull null
+        // Redaction must never rewrite a URL into a different, apparently valid resource.
+        if (SecretRedactor.redact(url, secrets) != url) return@mapNotNull null
         val uri = runCatching { URI(url) }.getOrNull() ?: return@mapNotNull null
         val host = uri.host?.lowercase()?.trimEnd('.') ?: return@mapNotNull null
         if (uri.scheme?.lowercase() != "https" || uri.rawUserInfo != null || uri.rawFragment != null ||
@@ -98,15 +100,15 @@ internal fun parseWebSearchResponse(provider: WebSearchProvider, raw: String, ma
         ) return@mapNotNull null
         if (HttpPolicy.isIpLiteral(host) || HttpPolicy.isForbiddenHost(host)) return@mapNotNull null
         val snippet = when (provider) {
-            WebSearchProvider.BRAVE -> item.text("description", 2048).orEmpty()
-            WebSearchProvider.TAVILY -> item.text("content", 2048).orEmpty()
+            WebSearchProvider.BRAVE -> item.text("description", 2048, secrets).orEmpty()
+            WebSearchProvider.TAVILY -> item.text("content", 2048, secrets).orEmpty()
             WebSearchProvider.EXA -> (item["highlights"] as? JsonArray)?.asSequence()
                 ?.mapNotNull { (it as? JsonPrimitive)?.takeIf { value -> value.isString }?.contentOrNull }
-                ?.take(3)?.joinToString(" ")?.take(2048).orEmpty()
+                ?.take(3)?.joinToString(" ")?.let { SecretRedactor.redact(it, secrets) }?.take(2048).orEmpty()
         }
         buildJsonObject {
             put("title", title)
-            put("url", uri.toASCIIString())
+            put("url", url)
             put("snippet", snippet)
         }
     }.take(maxResults).forEach { item ->
@@ -116,9 +118,14 @@ internal fun parseWebSearchResponse(provider: WebSearchProvider, raw: String, ma
     return payload()
 }
 
-private fun JsonObject.text(key: String, maxLength: Int): String? =
+/** URLs are identifiers: reject excessive input instead of clipping into a different resource. */
+private fun JsonObject.url(): String? =
+    (get("url") as? JsonPrimitive)?.takeIf { it.isString }?.contentOrNull
+        ?.takeIf { it.isNotEmpty() && it.length <= 2048 && it == it.trim() }
+
+private fun JsonObject.text(key: String, maxLength: Int, secrets: List<String> = emptyList()): String? =
     (get(key) as? JsonPrimitive)?.takeIf { it.isString }?.contentOrNull
-        ?.trim()?.takeIf { it.isNotEmpty() }?.take(maxLength)
+        ?.let { SecretRedactor.redact(it, secrets) }?.trim()?.takeIf { it.isNotEmpty() }?.take(maxLength)
 
 private val TYPED_WORKSPACE_FILE_TOOLS = setOf(
     "workspace_list",

@@ -35,6 +35,41 @@ import runtime.mobileagent.tooling.ToolExecutorFactory
  */
 @RunWith(AndroidJUnit4::class)
 class RunToolsReplayDeviceTest {
+    @Test fun searchReplayPreservesCompletedAndUnknownFactsWithoutRedispatch() = runBlocking {
+        for (unknown in listOf(false, true)) {
+            val chain = prepareChain("search-facts")
+            val run = newRun(chain)
+            var allowed = true
+            var dispatches = 0
+            val fake = object : ToolExecutor {
+                override val specs = listOf(runtime.mobileagent.skills.WebSearchTools.webSearch)
+                override suspend fun invoke(call: ToolCall): ToolResult {
+                    dispatches++
+                    return if (unknown) ToolResult.UnknownOutcome("dispatched; unknown")
+                    else ToolResult.Value("""{"results":[{"title":"SEARCH_PRIVATE_BODY"}]}""")
+                }
+                override suspend fun approve(callId: String): ToolResult = ToolResult.Invalid("not pending")
+                override suspend fun authorizeReplay(call: ToolCall): Boolean = allowed
+            }
+            val tools = RunTools(chain.container, chain.app, chain.snapshot, run, false, false, runExecutor = fake)
+            val call = ToolCall("search-replay", "web_search", """{"query":"public"}""")
+            val first = tools.executor.invoke(call)
+            allowed = false
+            val withheld = tools.executor.invoke(call)
+            if (unknown) assertEquals(first, withheld)
+            else {
+                assertTrue(withheld is ToolResult.Denied)
+                assertEquals(ToolResult.Completion.COMPLETED_WITHHELD, (withheld as ToolResult.Denied).completion)
+            }
+            assertFalse(withheld.toString().contains("SEARCH_PRIVATE_BODY"))
+            allowed = true
+            assertEquals(withheld, tools.executor.invoke(call))
+            run.state = RunState.COMPLETED
+            assertEquals(withheld, tools.executor.invoke(call))
+            assertEquals(1, dispatches)
+        }
+    }
+
     private class RevocableEchoExecutor : ToolExecutor {
         override val specs = listOf(ToolSpec("echo", "echo", "{\"type\":\"object\"}", "", false))
         var dispatches = 0

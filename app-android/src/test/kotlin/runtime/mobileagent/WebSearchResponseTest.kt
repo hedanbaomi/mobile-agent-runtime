@@ -50,6 +50,39 @@ class WebSearchResponseTest {
         assertThrows(IllegalStateException::class.java) { parseWebSearchResponse(WebSearchProvider.TAVILY, "{\"error\":\"bad\"}", 5) }
     }
 
+    @Test fun resultUrlBoundariesPreserveExactIdentityAcrossProviders() {
+        val base = "https://example.com/search?q="
+        val atLimit = base + "x".repeat(2048 - base.length)
+        val signed = "https://example.com/a%2Fb?sig=abc%2Fdef%3D&x=1"
+        val unicode = "https://example.com/文😀?q=中文"
+        val accepted = listOf(atLimit, signed, unicode, "https://example.com/a/../b?q=%25", "https://example.com/?q=%E4%B8%AD")
+        val rejected = listOf(
+            atLimit + "x", atLimit + "&sig=tail", "https://example.com/" + "x".repeat(2049),
+            atLimit.dropLast(1) + "%2", atLimit + "#fragment", "https://user@example.com/",
+            "https://localhost/", "https://192.168.1.1/", "https://example.com/#fragment",
+            " " + atLimit, "https://example.com/?q=" + "😀".repeat(1100),
+        )
+        for (provider in WebSearchProvider.entries) {
+            for (url in accepted + rejected) {
+                val results = buildJsonArray { add(buildJsonObject { put("title", "title"); put("url", url) }) }
+                val raw = buildJsonObject {
+                    if (provider == WebSearchProvider.BRAVE) put("web", buildJsonObject { put("results", results) })
+                    else put("results", results)
+                }
+                val output = Json.parseToJsonElement(parseWebSearchResponse(provider, raw.toString(), 10)).jsonObject["results"]!!.jsonArray
+                if (url in accepted) assertEquals(url, output.single().jsonObject["url"]!!.jsonPrimitive.content)
+                else assertTrue(output.isEmpty(), provider.name + ": " + url.take(80))
+            }
+        }
+    }
+
+    @Test fun sensitiveUrlIsDiscardedInsteadOfRewrittenByRedaction() {
+        val raw = """{"results":[{"title":"synthetic-private-token","url":"https://example.com/?token=synthetic-private-token"}]}"""
+        val output = parseWebSearchResponse(WebSearchProvider.TAVILY, raw, 5, listOf("synthetic-private-token"))
+        assertTrue(Json.parseToJsonElement(output).jsonObject["results"]!!.jsonArray.isEmpty())
+        assertFalse(output.contains("synthetic-private-token"))
+    }
+
     @Test fun searchPermissionDefaultsOffAndNeedsBothFrozenAndLiveOptIn() {
         val on = AgentSearchPermission.update("{\"other\":7}", true)
         val off = AgentSearchPermission.update(on, false)

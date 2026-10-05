@@ -446,3 +446,7 @@ PDF 解析支持合法紧凑关闭分隔符后紧接 endobj 的对象，保持 s
 2026-10-05 日志与搜索补充（R12/R19/R35）：日志默认 INFO，用户可持久切换 DEBUG，诊断默认关闭及正文过滤保持；INFO 不再采集 Vision 正文/详细进度，manifest 标明当前级别及保留历史。正式 PKCS12 密钥在用户指定的仓库外目录生成并验证，使用现有环境变量签名配置；密钥及密码未写入仓库，未生成正式 release。
 
 本段替代 9.4 的“固定 Brave、逐调用批准”作为现行搜索行为：Brave/Tavily/Exa 独立加密凭据，逐 Agent 默认关的搜索开关，允许后免逐次批准，冻结快照与实时配置修订/Agent 权限共同约束，撤销或切换使旧 executor 与结果复用失效。协议和安全边界见 [ADR-0022](adr/0022-configurable-search-and-agent-permission.md)，实际验证见 [本轮证据](evidence/2026-10-05/logging-and-search.md)。
+
+2026-10-05 464f8f4 复审修复与正式版本补充：Chat 每次发送冻结运行/会话/generation 所有者，超时后撤销页面发布并取消自身执行；原执行未收尾前保留输入并拒绝新发送，迟到事件仅保存到原会话。成功查询向量与 owner claim 清理同事务提交；在既有 Embedding 同意下优先复用经过完整校验的已知成功缓存，无成功证据的 UNKNOWN 仍需显式重试授权。搜索派发前拒绝、确定完成后扣留、派发后未知分别保留；缓存及重启恢复不抹去执行事实，不重放。URL 完整校验，过长或脱敏会改写的地址整条拒绝；标题/摘要解析后脱敏限长。决定见 [ADR-0023](adr/0023-run-ownership-and-known-outcome-recovery.md)。
+
+应用版本调整为 1.0.0 / code 2，正式产物为现有正式身份签名的 arm64 包；以干净合并源码运行 releaseGate 并记录 APK/AAB、源码、SBOM、provenance 和哈希。GitHub Release 的实际地址与证据在发布完成后记录，不替代未完成的真机/线上服务/长稳验收；[发布约定](RELEASING.md) 替代早期“缺签名、版本 0.1.0”的当前准备状态，历史证据保留其日期。

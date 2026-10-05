@@ -30,6 +30,33 @@ import runtime.mobileagent.skills.ToolResult
 import runtime.mobileagent.skills.ToolSpec
 
 class AgentRuntimeTest {
+    @Test fun completedWithheldSearchProjectsKnownExecutionFactsToEventAndModel() = runTest {
+        val adapter = ScriptedAdapter(listOf(
+            listOf(ModelEvent.ToolCallDelta("s1", "web_search", """{"query":"public"}"""), ModelEvent.Completed),
+            listOf(ModelEvent.TextDelta("done"), ModelEvent.Completed),
+        ))
+        var calls = 0
+        val executor = runtime.mobileagent.skills.WebSearchToolExecutor(true, { calls == 0 }, false) { _, _, dispatch ->
+            calls++; dispatch(); """{"results":[{"title":"PRIVATE_PROVIDER_BODY"}]}"""
+        }
+        val run = AgentRun("withheld", "snapshot", "conversation")
+        val events = AgentRuntime(adapter).run(AgentRuntimeRequest(
+            run = run, prompt = prompt(), modelId = "model", secret = "synthetic-test-secret".toCharArray(),
+            toolsEnabled = true, executor = executor,
+        )).toList()
+        val result = events.filterIsInstance<RuntimeEvent.ToolResultProduced>().single()
+        assertEquals("COMPLETED_WITHHELD", result.status)
+        assertTrue(result.resultJson.contains("\"dispatched\":true"))
+        assertTrue(result.resultJson.contains("\"completed\":true"))
+        assertTrue(result.resultJson.contains("\"automaticReplayAllowed\":false"))
+        assertTrue(!result.resultJson.contains("PRIVATE_PROVIDER_BODY"))
+        val feedback = adapter.requests.last().messages.single { it.role == "tool" }
+        assertTrue(feedback.text.contains("COMPLETED_WITHHELD"))
+        assertTrue(!feedback.text.contains("PRIVATE_PROVIDER_BODY"))
+        assertEquals(RunState.COMPLETED, run.state)
+        assertEquals(1, calls)
+    }
+
     @Test
     fun toolLoopExecutesCalculatorThenCompletes() {
         val adapter = ScriptedAdapter(

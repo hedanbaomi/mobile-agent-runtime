@@ -26,7 +26,7 @@ class AnnouncementsViewModel(application: Application) : AndroidViewModel(applic
     val selected = mutableStateOf<CachedAnnouncement?>(null)
     val baseUrl = mutableStateOf("")
     val publicKeyHex = mutableStateOf("")
-    val statsEnabled = mutableStateOf(false)
+    val statsEnabled = mutableStateOf(app.container.announcements.statsEnabled())
 
     enum class Filter { UNREAD, ALL, HISTORY }
 

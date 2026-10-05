@@ -150,7 +150,7 @@ data class SettingsUiState(
     val language: String = "zh-CN",
     /** Light is the first-install default; 66ccff remains an explicit selectable accent. */
     val themeMode: String = "light",
-    val statsEnabled: Boolean = false,
+    val statsEnabled: Boolean = true,
     val requestInspectionEnabled: Boolean = true,
     val diagnosticsEnabled: Boolean = false,
     val diagnosticsLogLevel: String = "INFO",
@@ -310,8 +310,8 @@ fun SettingsScreen(
                     }
                 }
                 Text(
-                    if (zh) "各服务商分别保存加密密钥。查询可能收费；在智能体中开启搜索后无需逐次确认。"
-                    else "Keys are encrypted and saved per service. Queries may incur charges; enable search per Agent to run without per-query prompts.",
+                    if (zh) "密钥按服务商加密保存。搜索可能收费，需在智能体中开启。"
+                    else "Keys are encrypted per provider. Search may incur charges; enable it in the Agent.",
                     style = MaterialTheme.typography.bodySmall,
                 )
                 OutlinedTextField(
@@ -351,7 +351,7 @@ fun SettingsScreen(
                 Text(if (zh) "全局根提示词" else "Global root prompt", style = MaterialTheme.typography.titleMedium)
                 Text(
                     if (zh) "应用于所有 Agent，不改变工具、网络或文件权限。"
-                    else "Inserted between the immutable runtime contract and the agent prompt. It cannot grant tools, network, files, or Python isolation.",
+                    else "Applies to all Agents without changing tool, network, or file permissions.",
                     style = MaterialTheme.typography.bodySmall,
                 )
                 if (!state.globalRootPromptUnlocked) {
@@ -375,6 +375,11 @@ fun SettingsScreen(
                 Text(if (zh) "隐私与调试" else "Privacy and diagnostics", style = MaterialTheme.typography.titleMedium)
                 SettingSwitch(if (zh) "匿名使用统计" else "Anonymous usage statistics", state.statsEnabled, actions.onStats,
                     modifier = Modifier.testTag("settings.stats.switch"), labelClickable = true)
+                Text(
+                    if (zh) "默认开启，可随时关闭。仅上传安装与公告活动，不上传聊天或文件内容。"
+                    else "On by default; turn off anytime. Sends install and announcement activity, never chat or file content.",
+                    style = MaterialTheme.typography.bodySmall,
+                )
                 SettingSwitch(if (zh) "显示请求检查器" else "Show request inspector", state.requestInspectionEnabled, actions.onRequestInspection)
                 SettingSwitch(if (zh) "应用内诊断记录（默认关闭）" else "In-app diagnostics (off by default)", state.diagnosticsEnabled, actions.onDiagnosticsEnabled)
                 Text(if (zh) "日志级别" else "Log level", style = MaterialTheme.typography.bodyMedium)
@@ -418,13 +423,14 @@ fun SettingsScreen(
             }
         }
         Card(Modifier.fillMaxWidth().testTag("settings.data_backup")) {
+            var importHelpExpanded by remember { mutableStateOf(false) }
             Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 Text(if (zh) "数据与备份" else "Data and backup", style = MaterialTheme.typography.titleMedium)
                 Text(
                     if (zh) {
-                        "导出为 ZIP，写入你选择的位置；若选择云端文档提供方，该提供方可能上传或同步。应用不另行上传。扩展内容默认关闭，密钥与授权不进入导出；总大小上限 512 MiB，单项上限 32 MiB。"
+                        "ZIP 保存到所选位置，提供方可能上传或同步。扩展内容默认关闭，密钥与授权不导出。上限 512 MiB，单项 32 MiB。"
                     } else {
-                        "Export is a ZIP written to the location you choose. If you choose a cloud document provider, that provider may upload or sync it. The app does not upload it separately. Optional content is off by default; keys and authorizations are excluded. Total limit: 512 MiB; each item: 32 MiB."
+                        "Saves a ZIP to your chosen location; its provider may upload or sync it. Optional content is off by default; keys and grants are excluded. Limits: 512 MiB total, 32 MiB per item."
                     },
                     style = MaterialTheme.typography.bodySmall,
                 )
@@ -433,7 +439,10 @@ fun SettingsScreen(
                     OutlinedButton(onClick = actions.onImport) { Text(if (zh) "导入" else "Import") }
                 }
                 if (state.exportState.isNotBlank()) Text(state.exportState, style = MaterialTheme.typography.bodySmall)
-                Text(
+                TextButton(onClick = { importHelpExpanded = !importHelpExpanded }) {
+                    Text(if (importHelpExpanded) { if (zh) "收起导入说明" else "Hide import help" } else { if (zh) "导入兼容说明" else "Import compatibility help" })
+                }
+                if (importHelpExpanded) Text(
                     if (zh) "若导入的会话使用旧 HTTP 地址，请先将服务商改为 HTTPS 并重新输入该目的地密钥，再确认 Agent 配置并显式新建会话。旧会话保留为历史记录，不会修改其冻结目的地或自动转发历史内容。"
                     else "For an imported conversation using an old HTTP endpoint, configure an HTTPS provider and its credentials, review the Agent, then explicitly start a new conversation. The old conversation remains an archive; its frozen destination and history are not changed or automatically forwarded.",
                     style = MaterialTheme.typography.bodySmall,
@@ -512,8 +521,8 @@ private fun AuthoritySettingsCard(
         Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Text(if (chinese) "命令与权限" else "Commands and authorities", style = MaterialTheme.typography.titleMedium)
             Text(
-                if (chinese) "基础工作区始终与系统增强通道隔离。仅支持 Shizuku 与有线 ADB；当前通道不可用时不会自动切换。"
-                else "The basic workspace stays separate from system enhancement. Only Shizuku and wired ADB are supported; an unavailable channel never switches automatically.",
+                if (chinese) "系统增强支持 Shizuku 或有线 ADB，不自动切换。"
+                else "System enhancement uses Shizuku or wired ADB, with no automatic fallback.",
                 style = MaterialTheme.typography.bodySmall,
             )
             SelectorRow(

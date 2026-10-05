@@ -203,15 +203,10 @@ private fun SkillListPane(state: SkillsUiState, actions: SkillsActions, zh: Bool
             Button(onClick = onImport) { Text(if (zh) "导入包" else "Import package") }
         }
         Text(
-            if (zh) {
-                "安装前会检查软件包。缺少 mobile-skill.json 的 Claude Skill 若包含仅使用受支持标准库、带 main 入口的 Python 程序，会生成本机兼容清单并归为 Class B；启用、授权并绑定到当前智能体后，模型可通过隔离的 py_* 工具传入参数和本次调用专用的虚拟 Markdown 文件。依赖 NumPy、PyTorch、PyMuPDF 等组件的脚本会明确保持不可直接执行；知识库检索由应用原生 PDF/ONNX 能力承接。"
-            } else {
-                "Packages are inspected before installation. A manifestless Claude Skill with a main-style Python program using only the supported standard library receives a local compatibility manifest and becomes Class B. Once enabled, granted, and bound to the current agent, the model can pass arguments and invocation-only virtual Markdown files to its isolated py_* tool. Programs requiring NumPy, PyTorch, PyMuPDF, or similar dependencies remain explicitly unavailable; native PDF/ONNX knowledge tools provide the Android retrieval path."
-            },
+            if (zh) "导入技能包，检查兼容性后启用。" else "Import a skill package, check compatibility, then enable it.",
             style = MaterialTheme.typography.bodySmall,
             modifier = Modifier.padding(top = 6.dp),
         )
-        SecurityBoundarySummary(zh)
         Row(Modifier.padding(top = 10.dp), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
             listOf("all" to if (zh) "全部" else "all", "enabled" to if (zh) "已启用" else "enabled", "disabled" to if (zh) "已停用" else "disabled").forEach { (key, label) -> FilterChip(selected = state.filter == key, onClick = { actions.onFilter(key) }, label = { Text(label) }) }
         }
@@ -288,30 +283,23 @@ private fun SkillDetail(detail: SkillDetailUi, actions: SkillsActions, zh: Boole
         onClick = { actions.onRequestUninstall(skill.installId) },
         modifier = Modifier.padding(top = 8.dp).testTag("skills.uninstall"),
     ) { Text(if (zh) "卸载技能" else "Uninstall skill") }
-    if (detail.preview.isNotBlank()) Text(safeDisplay(detail.preview), modifier = Modifier.padding(top = 12.dp))
-    Text(if (zh) "安全边界" else "Security boundary", style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(top = 16.dp))
-    Text(
-        if (zh) "文件访问限于已授权工作区；系统增强使用所选 Shizuku 或有线 ADB，不自动切换。"
-        else "File access is limited to granted workspaces. Elevated access uses the selected Shizuku or wired ADB authority, with no automatic fallback.",
-        style = MaterialTheme.typography.bodySmall,
-        modifier = Modifier.padding(top = 4.dp),
-    )
-    Text(
-        if (zh) "Shell 需危险模式、shell.execute 授权及可用通道，可修改设备；非 Root、非安全沙箱。"
-        else "Shell requires Dangerous Mode, shell.execute grants and an available authority. It may change the device; it is neither Root nor a sandbox.",
-        style = MaterialTheme.typography.bodySmall,
-        modifier = Modifier.padding(top = 4.dp),
-    )
-    Text(if (zh) "授权与持久绑定" else "Grant and persistent binding", style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(top = 16.dp))
+    if (detail.preview.isNotBlank()) {
+        var previewExpanded by remember(skill.installId) { mutableStateOf(false) }
+        TextButton(onClick = { previewExpanded = !previewExpanded }, modifier = Modifier.testTag("skills.instructions.toggle")) {
+            Text(if (previewExpanded) { if (zh) "收起使用说明" else "Hide instructions" } else { if (zh) "查看使用说明" else "View instructions" })
+        }
+        if (previewExpanded) Text(safeDisplay(detail.preview), modifier = Modifier.padding(top = 4.dp))
+    }
+    Text(if (zh) "授权状态" else "Grant status", style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(top = 16.dp))
     Text(
         when {
             detail.binding.packageHashBound && detail.binding.grantRevision != null -> {
-                if (zh) "当前授权已绑定本次安装的包哈希；授权修订 ${detail.binding.grantRevision}。"
-                else "The current grant is bound to this install's package hash; grant revision ${detail.binding.grantRevision}."
+                if (zh) "授权有效 · 修订 ${detail.binding.grantRevision}"
+                else "Grant active · revision ${detail.binding.grantRevision}"
             }
             else -> {
-                if (zh) "当前安装没有可用的包哈希绑定授权。"
-                else "No usable package-hash-bound grant exists for this install."
+                if (zh) "尚未授权"
+                else "No active grant"
             }
         },
         style = MaterialTheme.typography.bodySmall,
@@ -320,7 +308,7 @@ private fun SkillDetail(detail: SkillDetailUi, actions: SkillsActions, zh: Boole
     if (detail.binding.capabilities.isNotEmpty()) {
         Text(if (zh) "当前能力：${safeDisplay(detail.binding.capabilities.joinToString("、"))}" else "Active capabilities: ${safeDisplay(detail.binding.capabilities.joinToString(", "))}", style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(top = 4.dp))
     }
-    Text(if (zh) "持久 Skill memory" else "Persistent Skill memory", style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(top = 16.dp))
+    Text(if (zh) "技能记忆" else "Skill memory", style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(top = 16.dp))
     Text(
         memoryAvailabilityLabel(detail.memory.availability, zh),
         style = MaterialTheme.typography.bodySmall,
@@ -416,31 +404,6 @@ private fun SourceDialog(path: String, text: String?, onClose: () -> Unit, zh: B
     )
 }
 
-@Composable
-private fun SecurityBoundarySummary(zh: Boolean) {
-    Column(Modifier.padding(top = 10.dp)) {
-        Text(if (zh) "访问边界摘要" else "Access boundary summary", style = MaterialTheme.typography.titleMedium)
-        Text(
-            if (zh) "类型化文件工具：应用私有工作区、用户选定的 SAF 工作区，或用户明确选择的 Shizuku/有线 ADB 工作区；不会向 Agent 暴露 URI、真实路径、Binder 或 ADB serial。"
-            else "Typed file tools use the app-private workspace, a user-selected SAF workspace, or the explicitly selected Shizuku/wired ADB workspace; URI, real paths, Binder details, and ADB serials are not exposed to the Agent.",
-            style = MaterialTheme.typography.bodySmall,
-            modifier = Modifier.padding(top = 4.dp),
-        )
-        Text(
-            if (zh) "危险模式：仅在持久 Dangerous Mode、Agent/Skill 的 shell.execute 授权和选定 Authority 同时满足时提供一次性 shell_exec；这是 Android shell escape，不是宿主 Shell 或安全沙箱。"
-            else "Dangerous Mode: one-shot shell_exec requires persistent Dangerous Mode, Agent/Skill shell.execute permission, and the selected authority; it is an Android shell escape, not a host shell or security sandbox.",
-            style = MaterialTheme.typography.bodySmall,
-            modifier = Modifier.padding(top = 4.dp),
-        )
-        Text(
-            if (zh) "未实现/不在路线：Root、无线 ADB、DPC/Device Owner/Profile Owner、Termux；选定 Authority 失效时不会自动回退。"
-            else "Out of scope: Root, wireless ADB, DPC/Device Owner/Profile Owner, and Termux; an unavailable selected authority never silently falls back.",
-            style = MaterialTheme.typography.bodySmall,
-            modifier = Modifier.padding(top = 4.dp),
-        )
-    }
-}
-
 private val sensitiveAssignment = Regex(
     "(?i)\\b(api[_-]?key|authorization|bearer|token|password|secret|cookie|private[_-]?key)\\b\\s*[:=]\\s*(?:bearer\\s+)?[^\\s,;]+",
 )
@@ -464,23 +427,23 @@ private fun safePath(value: String): String {
 
 private fun memoryAvailabilityLabel(availability: SkillMemoryAvailability, zh: Boolean): String = when (availability) {
     SkillMemoryAvailability.ENABLED -> if (zh) {
-        "已启用：持久记忆已绑定当前 Agent 快照和本次授权。"
+        "已启用"
     } else {
-        "Enabled: persistent memory is bound to the current Agent snapshot and grant."
+        "Enabled"
     }
     SkillMemoryAvailability.UNAVAILABLE -> if (zh) {
-        "暂不可用：持久记忆绑定或后端当前不可用。"
+        "暂不可用"
     } else {
-        "Unavailable: the persistent-memory binding or backend is currently unavailable."
+        "Unavailable"
     }
     SkillMemoryAvailability.GRANT_LOST -> if (zh) {
-        "授权已丢失：请重新授予当前 Skill 的 memory 权限。"
+        "授权失效，请重新授权。"
     } else {
-        "Grant lost: grant the Skill's memory permissions again."
+        "Grant lost; grant memory access again."
     }
     SkillMemoryAvailability.EMPTY -> if (zh) {
-        "暂无条目：持久记忆已绑定，但当前没有记忆条目。"
+        "暂无记忆条目"
     } else {
-        "Empty: persistent memory is bound, but it has no entries yet."
+        "No memory entries yet"
     }
 }

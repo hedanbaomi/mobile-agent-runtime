@@ -42,6 +42,16 @@ class AnnouncementRepository(private val db: SqlConnection) {
     private val stateLock = Any()
     @Volatile private var statsChangeListener: ((Boolean) -> Unit)? = null
 
+    init {
+        // A missing preference receives the product default once. An explicit opt-out survives
+        // upgrades and repository recreation. Persist the identity in the same transaction.
+        db.transaction {
+            if (pref(PREF_STATS) == null) {
+                enableStatsUnsafe()
+            }
+        }
+    }
+
     fun installId(): String = synchronized(stateLock) {
         pref(PREF_INSTALL_ID)?.takeIf { it.isNotBlank() } ?: UUID.randomUUID().toString().lowercase().also {
             setPref(PREF_INSTALL_ID, it)
@@ -51,8 +61,8 @@ class AnnouncementRepository(private val db: SqlConnection) {
     fun statsEnabled(): Boolean = synchronized(stateLock) { statsEnabledUnsafe() }
 
     /**
-     * Return the identity used only in opted-in event payloads. It is never created by a feed
-     * read, so a disabled/default installation cannot accidentally acquire a telemetry identity.
+     * Return the identity used only in enabled event payloads. Feed reads never create it,
+     * so an explicitly disabled installation cannot acquire a telemetry identity.
      */
     fun telemetryIdentity(): String? = synchronized(stateLock) {
         if (!statsEnabledUnsafe()) null else pref(PREF_TELEMETRY_ID)?.ifBlank { null }
@@ -62,15 +72,7 @@ class AnnouncementRepository(private val db: SqlConnection) {
         synchronized(stateLock) {
             db.transaction {
                 if (enabled) {
-                    val wasEnabled = statsEnabledUnsafe()
-                    setPref(PREF_STATS, "1")
-                    if (!wasEnabled || pref(PREF_TELEMETRY_ID).isNullOrBlank()) {
-                        setPref(PREF_TELEMETRY_ID, UUID.randomUUID().toString().lowercase())
-                        deletePref(PREF_INSTALL_SEEN_ID)
-                        deletePref(PREF_ACTIVE_ID)
-                        deletePref(PREF_ACTIVE_VERSION)
-                        deletePref(PREF_ACTIVE_AT)
-                    }
+                    enableStatsUnsafe()
                 } else {
                     setPref(PREF_STATS, "0")
                     // A consent withdrawal is a hard boundary: nothing queued can be uploaded later.
@@ -447,6 +449,19 @@ class AnnouncementRepository(private val db: SqlConnection) {
     }
 
     private fun statsEnabledUnsafe(): Boolean = pref(PREF_STATS) == "1"
+
+    /** Called only inside a transaction; never replaces an already valid enabled identity. */
+    private fun enableStatsUnsafe() {
+        val wasEnabled = statsEnabledUnsafe()
+        setPref(PREF_STATS, "1")
+        if (!wasEnabled || pref(PREF_TELEMETRY_ID).isNullOrBlank()) {
+            setPref(PREF_TELEMETRY_ID, UUID.randomUUID().toString().lowercase())
+            deletePref(PREF_INSTALL_SEEN_ID)
+            deletePref(PREF_ACTIVE_ID)
+            deletePref(PREF_ACTIVE_VERSION)
+            deletePref(PREF_ACTIVE_AT)
+        }
+    }
 
     private fun telemetryIdentityUnsafe(): String? = if (statsEnabledUnsafe()) pref(PREF_TELEMETRY_ID)?.ifBlank { null } else null
 

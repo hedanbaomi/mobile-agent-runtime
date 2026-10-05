@@ -34,13 +34,13 @@ class AnnouncementRepositoryTest {
     )
 
     @Test
-    fun statsDefaultOffAndReadIsNotAck() {
+    fun statsDefaultOnAndReadIsNotAck() {
         val db = JdbcSqlConnection()
         Migrations.apply(db)
         val repo = AnnouncementRepository(db)
         repo.setPublicKeyHex(publicKey.joinToString("") { "%02x".format(it.toInt() and 0xFF) })
         repo.setKeyId("test-only-1")
-        assertEquals(false, repo.statsEnabled())
+        assertEquals(true, repo.statsEnabled())
         val payload = """{"feedVersion":1,"issuedAt":"2026-08-28T12:00:00Z","expiresAt":"2036-08-29T12:00:00Z","requestTarget":{"platform":"android","channel":"stable","versionCode":1,"locale":"en"},"audienceHash":"${FeedVerifier.audienceHash(client.installId)}","complete":true,"items":[{"id":"security-demo","revision":1,"category":"SECURITY","severity":"WARNING","displayMode":"MODAL","title":"Notice","summary":"Read","bodyMarkdown":"Body text.","mustAcknowledge":true,"dismissible":false,"pinned":true,"actions":[{"type":"ACKNOWLEDGE","key":"ack","label":"OK"}],"target":{"platform":"android","channel":"stable","rolloutPercent":100,"rolloutSalt":"stable-salt"}}],"withdrawn":[]}"""
         val envelope = sign(payload)
         assertNull(repo.applyEnvelope(envelope, "etag-1", client, Instant.parse("2026-08-28T12:00:00Z")))
@@ -99,6 +99,52 @@ class AnnouncementRepositoryTest {
         repo.markAttempt(client, fetchedAt.plusSeconds(5 * 60 * 60))
         assertTrue(repo.needsFetch(client, fetchedAt.plusSeconds(6 * 60 * 60 + 1)))
         assertEquals(fetchedAt.toString(), repo.lastFetchedAt(client))
+    }
+
+    @Test
+    fun defaultEnabledStatsRecordActivityWithoutOpeningSettingsAndKeepIdentityOnRecreation() {
+        val db = JdbcSqlConnection()
+        Migrations.apply(db)
+        val repo = AnnouncementRepository(db)
+        val identity = repo.telemetryIdentity()
+        assertTrue(!identity.isNullOrBlank())
+        assertNotEquals(repo.installId(), identity)
+        assertNull(repo.pendingTelemetryJson())
+        val at = Instant.parse("2026-10-06T00:00:00Z")
+        repo.recordInstallSeen(client, at)
+        repo.recordAppActive(client, at)
+        val events = Json.parseToJsonElement(repo.pendingTelemetryJson()!!).jsonObject.getValue("events").jsonArray
+        assertEquals(listOf("install_seen", "app_active"), events.map { it.jsonObject.getValue("type").jsonPrimitive.content })
+        assertTrue(events.all { it.jsonObject.getValue("installId").jsonPrimitive.content == identity })
+
+        val recreated = AnnouncementRepository(db)
+        assertTrue(recreated.statsEnabled())
+        assertEquals(identity, recreated.telemetryIdentity())
+        recreated.recordInstallSeen(client, at.plusSeconds(1))
+        recreated.recordAppActive(client, at.plusSeconds(1))
+        assertEquals(repo.pendingTelemetryJson(), recreated.pendingTelemetryJson())
+        assertEquals(2, Json.parseToJsonElement(recreated.pendingTelemetryJson()!!).jsonObject.getValue("events").jsonArray.size)
+    }
+
+    @Test
+    fun persistedOptOutIsNotReenabledOnUpgradeOrRecreation() {
+        val db = JdbcSqlConnection()
+        Migrations.apply(db)
+        db.execute("INSERT INTO app_prefs(key,value) VALUES(?,?)", listOf("stats_enabled", "0"))
+        val repo = AnnouncementRepository(db)
+        assertEquals(false, repo.statsEnabled())
+        assertNull(repo.telemetryIdentity())
+        repo.recordInstallSeen(client, Instant.parse("2026-10-06T00:00:00Z"))
+        repo.recordAppActive(client, Instant.parse("2026-10-06T00:00:00Z"))
+        assertNull(repo.pendingTelemetryJson())
+        assertEquals(false, AnnouncementRepository(db).statsEnabled())
+        repo.setStatsEnabled(true)
+        val identity = repo.telemetryIdentity()
+        assertTrue(!identity.isNullOrBlank())
+        assertEquals(identity, AnnouncementRepository(db).telemetryIdentity())
+        repo.setStatsEnabled(false)
+        assertNull(AnnouncementRepository(db).telemetryIdentity())
+        assertEquals(false, AnnouncementRepository(db).statsEnabled())
     }
 
     @Test

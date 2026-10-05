@@ -35,7 +35,7 @@ class SkillsViewModel(
 ) : AndroidViewModel(application) {
     private val app = application as MobileAgentApp
     val rows = mutableStateListOf<SkillRow>()
-    val status = mutableStateOf("导入本地 ZIP 或 SKILL.md。可兼容的 Claude Skill 标准库程序会以隔离 Python 工具运行；Class E 包会被拒绝。文件能力与危险模式始终按当前授权边界复核。")
+    val status = mutableStateOf("")
     val state = mutableStateOf(SkillsUiState())
     val permissionRequest = mutableStateOf<Pair<String, String>?>(null)
     private val pendingImports = ArrayDeque<Pair<String, SkillInspection>>()
@@ -180,7 +180,7 @@ class SkillsViewModel(
                         false,
                     )
                 }, installable = inspection.installable,
-                status = "原包字节保持不变；兼容清单只在本机按包哈希生成。安装仅保存到本机，逐资源授权和启用需另行确认。")
+                status = "仅安装到本机，启用与授权需另行确认。")
         })
     }
 

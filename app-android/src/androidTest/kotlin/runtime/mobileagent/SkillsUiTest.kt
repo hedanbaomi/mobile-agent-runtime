@@ -19,6 +19,7 @@ import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performScrollTo
+import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performTouchInput
 import androidx.compose.ui.test.swipeUp
 import androidx.compose.ui.unit.Density
@@ -54,11 +55,11 @@ class SkillsUiTest {
         compose.onNodeWithTag("skills.narrow.scroll")
             .assert(hasScrollAction())
             .performTouchInput { swipeUp() }
-        compose.onNodeWithText("持久 Skill memory", useUnmergedTree = true).performScrollTo().assertIsDisplayed()
+        compose.onNodeWithText("技能记忆", useUnmergedTree = true).performScrollTo().assertIsDisplayed()
     }
 
     @Test
-    fun largeFontKeepsSecuritySummaryInScrollableContent() {
+    fun largeFontKeepsPermissionControlsInScrollableContent() {
         compose.setContent {
             CompositionLocalProvider(LocalDensity provides Density(1f, fontScale = 2f)) {
                 Box(Modifier.width(320.dp).height(640.dp)) {
@@ -72,16 +73,16 @@ class SkillsUiTest {
         compose.onNodeWithTag("skills.narrow.scroll")
             .assert(hasScrollAction())
             .performTouchInput { swipeUp() }
-        compose.onNodeWithText("安全边界", useUnmergedTree = true).performScrollTo().assertIsDisplayed()
+        compose.onNodeWithText("权限", useUnmergedTree = true).performScrollTo().assertIsDisplayed()
     }
 
     @Test
     fun memoryStatusUsesExplicitNonSensitiveStates() {
         val states = listOf(
-            SkillMemoryAvailability.ENABLED to "已启用：持久记忆已绑定当前 Agent 快照和本次授权。",
-            SkillMemoryAvailability.UNAVAILABLE to "暂不可用：持久记忆绑定或后端当前不可用。",
-            SkillMemoryAvailability.GRANT_LOST to "授权已丢失：请重新授予当前 Skill 的 memory 权限。",
-            SkillMemoryAvailability.EMPTY to "暂无条目：持久记忆已绑定，但当前没有记忆条目。",
+            SkillMemoryAvailability.ENABLED to "已启用",
+            SkillMemoryAvailability.UNAVAILABLE to "暂不可用",
+            SkillMemoryAvailability.GRANT_LOST to "授权失效，请重新授权。",
+            SkillMemoryAvailability.EMPTY to "暂无记忆条目",
         )
         val availability = mutableStateOf(states.first().first)
 
@@ -101,7 +102,7 @@ class SkillsUiTest {
             compose.onNodeWithTag("skills.memory.status", useUnmergedTree = true)
                 .performScrollTo()
                 .assertIsDisplayed()
-            compose.onNodeWithText(label, useUnmergedTree = true).assertIsDisplayed()
+            compose.onNodeWithTag("skills.memory.status", useUnmergedTree = true).assert(androidx.compose.ui.test.hasText(label))
         }
     }
 
@@ -125,7 +126,7 @@ class SkillsUiTest {
     }
 
     @Test
-    fun securitySummaryDoesNotRenderRawManifestSecretsOrAbsolutePaths() {
+    fun expandedInstructionsAndSourceListDoNotRenderRawSecretsOrAbsolutePaths() {
         val secret = "TOP_SECRET_VALUE_123"
         compose.setContent {
             Box(Modifier.width(320.dp).height(640.dp)) {
@@ -152,6 +153,7 @@ class SkillsUiTest {
             }
         }
 
+        compose.onNodeWithTag("skills.instructions.toggle", useUnmergedTree = true).performScrollTo().performClick()
         assertTrue(
             "Raw Skill secret was rendered",
             compose.onAllNodesWithText(secret, useUnmergedTree = true).fetchSemanticsNodes().isEmpty(),
@@ -160,12 +162,26 @@ class SkillsUiTest {
             "Raw package hash was rendered",
             compose.onAllNodesWithText("aaaaaaaaaaaa", useUnmergedTree = true).fetchSemanticsNodes().isEmpty(),
         )
-        compose.onNodeWithText("仅显示上面的权限、绑定与兼容性安全摘要；原始清单字段不会在此页面展开。", useUnmergedTree = true)
-            .performScrollTo()
-            .assertIsDisplayed()
         compose.onNodeWithText("受限包内文件", useUnmergedTree = true)
             .performScrollTo()
             .assertIsDisplayed()
+    }
+
+    @Test
+    fun skillHomeIsConciseAndInstructionsExpandOnDemand() {
+        compose.setContent {
+            Box(Modifier.width(320.dp).height(640.dp)) {
+                MaterialTheme { SkillsScreen(longState()) }
+            }
+        }
+        compose.onNodeWithText("访问边界摘要", useUnmergedTree = true).assertDoesNotExist()
+        compose.onNodeWithText("mobile-skill.json", substring = true, useUnmergedTree = true).assertDoesNotExist()
+        compose.onNodeWithText("安全边界", useUnmergedTree = true).assertDoesNotExist()
+        compose.onNodeWithText("导入技能包，检查兼容性后启用。", useUnmergedTree = true).assertIsDisplayed()
+        compose.onNodeWithTag("skills.instructions.toggle", useUnmergedTree = true).performScrollTo().performClick()
+        compose.onNodeWithText("收起使用说明", useUnmergedTree = true).assertIsDisplayed()
+        compose.onNodeWithTag("skills.instructions.toggle", useUnmergedTree = true).performClick()
+        compose.onNodeWithText("查看使用说明", useUnmergedTree = true).assertIsDisplayed()
     }
 
     private fun longState(): SkillsUiState = SkillsUiState(

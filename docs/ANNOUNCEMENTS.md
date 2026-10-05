@@ -111,7 +111,7 @@ Markdown关闭原始HTML、脚本、远程嵌入，图片不带Provider认证头
 
 ## 7. 匿名统计与隐私
 
-首次安装生成随机UUID，不使用Android ID、IMEI、广告ID、MAC、联系人、账户或指纹。随机ID仍可关联安装活动，不宣称绝对匿名。统计默认关闭是本轮隐私默认；用户可开启/关闭/重置。关闭统计清除待上传事件，不关闭公告读取。
+首次安装生成随机UUID，不使用Android ID、IMEI、广告ID、MAC、联系人、账户或指纹。随机ID仍可关联安装活动，不宣称绝对匿名。2026-10-06 所有者要求统计默认开启，见 [ADR-0024](adr/0024-announcement-statistics-default-on.md)：只在开关设置缺失时事务初始化开启状态与独立统计身份，已有关闭选择在升级和重建后仍关闭；无效已有设置按关闭处理。设置说明上传安装与公告活动、不上传聊天或文件内容，用户可随时关闭/重置。关闭统计清除待上传事件及统计身份，不关闭公告读取。
 
 关闭统计时GET仍可能携带用于灰度的安装ID，隐私说明须明示用途；服务端不得把此请求自动写入install_state/receipts，也不把原始ID写访问日志。启用统计后才发送install_seen、app_active、announcement_fetched/displayed/opened/acknowledged/action_clicked。服务端存应用域隔离的installIdHash，不跨产品关联。
 
@@ -147,14 +147,14 @@ set MAR_ADMIN_TOKEN=replace-with-local-test-token
 node src/local-server.mjs
 ```
 
-管理页：`http://127.0.0.1:8787/admin/announcements`。进程会打印 `MAR_ANNOUNCE_PUBLIC_KEY_HEX`（公钥，不是私钥）。Android 调试包在公告页填写该 URL 与公钥后手动刷新；debug 构建仅允许 `10.0.2.2`/`127.0.0.1`/`localhost` 明文，release 仍要求 HTTPS。统计开关默认关闭。
+管理页：`http://127.0.0.1:8787/admin/announcements`。进程会打印 `MAR_ANNOUNCE_PUBLIC_KEY_HEX`（公钥，不是私钥）。Android 调试包在公告页填写该 URL 与公钥后手动刷新；debug 构建仅允许 `10.0.2.2`/`127.0.0.1`/`localhost` 明文，release 仍要求 HTTPS。统计开关默认开启，已有关闭选择保持；本地验证应绑定本地公告服务或隔离网络。
 
 协议测试：`node src/rollout.test.mjs` 与 `node src/worker.test.mjs`。
 
 ## 10. GitHub issue #1 客户端与统计增量（2026-08-29）
 
 - `MainActivity.onStart` 触发前台刷新；`AnnouncementRefreshCoordinator` 共享同一 in-flight 请求，自动检查按最后成功时间节流，失败只写 attempt/backoff 且不覆盖已验签缓存。公告页手动刷新可越过客户端节流。
-- feed rollout install ID 与可选 telemetry identity 分离。统计默认关闭；开启后才产生 `install_seen` 与六小时去重的 `app_active`，关闭会清事件队列、telemetry identity 和去重标记，但保留公告缓存与灰度身份。
+- feed rollout install ID 与可关闭的 telemetry identity 分离。统计默认开启；仅开启状态产生 `install_seen` 与六小时去重的 `app_active`，关闭会清事件队列、telemetry identity 和去重标记，但保留公告缓存与灰度身份。
 - Worker/D1 统计只返回同意样本的 `installSeen`、`appActive`、DAU/WAU/MAU 和近 30 日版本/渠道/平台分布，不返回原始 install/event 标识或内容。事件白名单、幂等、retention、Access、CSRF 与 admin fail-closed 边界未放宽。
 - Admin 增加普通公告、重要公告、版本更新三个预设；更新预设固定 `OPEN_APP_ROUTE app://update`。高级字段仍保留完整模型且默认折叠。
 - 本地 `npm test`、`npm run check`、local D1 migration/smoke 及 Android API 31 release UI/公共请求 2/2 均通过。生产后检进一步发现并修复跨 isolate cache 与 Cloudflare 弱 ETag 条件请求问题；最终 source hash 为 `b835d4709d29b1111f1673f19a5a64d5d8ae09c14138c3f363e4d6d5de40ca25`，匹配 ETag 返回 304。

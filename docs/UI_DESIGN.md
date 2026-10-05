@@ -348,7 +348,7 @@
 #### SCR-SKILL-03: Skill 导入与安装向导 (Skill Install Flow)
 - **步骤**:
   1. 选取 ZIP / 目录包。
-  2. 验证 `SKILL.md` 清单与签名哈希。
+  2. 检查 `SKILL.md` 与包完整性，生成本机兼容清单；不要求普通 Skill 自带 `mobile-skill.json`。
   3. 静态安全检查：扫描是否包含未知二进制 `.so`/`.dex`、非法软链接、目录穿越（Zip Slip）。
   4. 权限确认页面：用户明确勾选所授予的最小权限。
   5. 安装完成并就绪。
@@ -408,7 +408,7 @@
 
 #### SCR-SETT-01: 设置与隐私偏好 (Settings & Privacy Preferences)
 - **偏好开关**:
-  - **匿名统计开关**: 默认关闭，文案：`[Anonymous Announcement Metrics: Disabled (No device telemetry is uploaded)]`。
+  - **匿名统计开关**: 默认开启且可随时关闭，已有选择保持。用一句话说明仅上传安装与公告活动、不上传聊天或文件内容；见 ADR-0024。
   - **请求检查模式**: 开启后在发送前默认弹出有效请求检查。
   - **主题与主色调设置**: 提供 `[Follow System]`, `[Light Theme]`, `[Dark Theme]`, `[66ccff]`。在颜色与主题选择处直接显示十六进制编码 `66ccff`，而不使用“蓝色”或“Blue”等字样。
   - **本地缓存清理**: 临时文件、缩略图缓存一键清理。

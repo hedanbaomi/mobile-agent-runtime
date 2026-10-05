@@ -1,0 +1,270 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "mobileAgentRuntime：会话与工具",
+    "locale": "zh-CN",
+    "quality_profile": "showcase",
+    "output": ".private/readme-archify-20261005/project-overview.html",
+    "repository": {
+      "url": "https://github.com/hedanbaomi/mobile-agent-runtime.git",
+      "revision": "6d38ce77961378d28e63601853faa775047a667f",
+      "provider": "github"
+    }
+  },
+  "components": [
+    {
+      "id": "android-ui",
+      "type": "frontend",
+      "label": "Android 界面",
+      "sublabel": "配置 Agent · 发起会话",
+      "pos": [
+        48,
+        80
+      ],
+      "size": [
+        210,
+        82
+      ],
+      "sources": [
+        {
+          "path": "app-android/src/main/kotlin/runtime/mobileagent/ui/AppNavigation.kt",
+          "line": 102,
+          "end_line": 113
+        },
+        {
+          "path": "app-android/src/main/kotlin/runtime/mobileagent/ui/MainScreens.kt",
+          "line": 607,
+          "end_line": 615
+        }
+      ]
+    },
+    {
+      "id": "agent-runtime",
+      "type": "backend",
+      "label": "Agent Runtime",
+      "sublabel": "上下文 · 预算 · 工具循环",
+      "pos": [
+        388,
+        80
+      ],
+      "size": [
+        210,
+        82
+      ],
+      "sources": [
+        {
+          "path": "app-android/src/main/kotlin/runtime/mobileagent/ChatViewModel.kt",
+          "line": 1157,
+          "end_line": 1225
+        },
+        {
+          "path": "app-android/src/main/kotlin/runtime/mobileagent/ChatViewModel.kt",
+          "line": 985,
+          "end_line": 1003
+        }
+      ]
+    },
+    {
+      "id": "model-provider",
+      "type": "external",
+      "label": "用户模型服务",
+      "sublabel": "Chat / Responses / Vision",
+      "pos": [
+        728,
+        80
+      ],
+      "size": [
+        210,
+        82
+      ],
+      "sources": [
+        {
+          "path": "app-android/src/main/kotlin/runtime/mobileagent/ChatViewModel.kt",
+          "line": 990,
+          "end_line": 994
+        },
+        {
+          "path": "app-android/src/main/kotlin/runtime/mobileagent/MobileAgentApp.kt",
+          "line": 195,
+          "end_line": 226
+        }
+      ],
+      "tag": "按配置外发"
+    },
+    {
+      "id": "local-knowledge",
+      "type": "database",
+      "label": "本地知识库",
+      "sublabel": "文档 · SQLite · 检索索引",
+      "pos": [
+        388,
+        330
+      ],
+      "size": [
+        210,
+        82
+      ],
+      "sources": [
+        {
+          "path": "app-android/src/main/kotlin/runtime/mobileagent/MobileAgentApp.kt",
+          "line": 195,
+          "end_line": 242
+        },
+        {
+          "path": "app-android/src/main/kotlin/runtime/mobileagent/ChatViewModel.kt",
+          "line": 631,
+          "end_line": 643
+        }
+      ],
+      "tag": "绑定后检索"
+    },
+    {
+      "id": "tool-policy",
+      "type": "security",
+      "label": "工具授权与路由",
+      "sublabel": "有效权限 · 确认 · 执行",
+      "pos": [
+        728,
+        330
+      ],
+      "size": [
+        210,
+        82
+      ],
+      "sources": [
+        {
+          "path": "app-android/src/main/kotlin/runtime/mobileagent/integration/RuntimeIntegration.kt",
+          "line": 1162,
+          "end_line": 1216
+        },
+        {
+          "path": "app-android/src/main/kotlin/runtime/mobileagent/ChatViewModel.kt",
+          "line": 1157,
+          "end_line": 1225
+        }
+      ]
+    },
+    {
+      "id": "python-skill",
+      "type": "backend",
+      "label": "Python Skill",
+      "sublabel": "隔离运行 · 能力代理",
+      "pos": [
+        558,
+        580
+      ],
+      "size": [
+        210,
+        82
+      ],
+      "sources": [
+        {
+          "path": "app-android/src/main/kotlin/runtime/mobileagent/PythonSkillTools.kt",
+          "line": 294,
+          "end_line": 320
+        }
+      ],
+      "tag": "启用并授权"
+    },
+    {
+      "id": "workspace",
+      "type": "database",
+      "label": "工作区文件",
+      "sublabel": "私有目录 / SAF / 特权目录",
+      "pos": [
+        898,
+        580
+      ],
+      "size": [
+        210,
+        82
+      ],
+      "sources": [
+        {
+          "path": "app-android/src/main/kotlin/runtime/mobileagent/integration/RuntimeIntegration.kt",
+          "line": 1162,
+          "end_line": 1216
+        }
+      ],
+      "tag": "已授权范围"
+    },
+    {
+      "id": "announcements",
+      "type": "external",
+      "label": "独立公告服务",
+      "sublabel": "签名校验 · 本地缓存",
+      "pos": [
+        48,
+        330
+      ],
+      "size": [
+        210,
+        82
+      ],
+      "sources": [
+        {
+          "path": "app-android/src/main/kotlin/runtime/mobileagent/AnnouncementFetcher.kt",
+          "line": 20,
+          "end_line": 39
+        },
+        {
+          "path": "app-android/src/main/kotlin/runtime/mobileagent/AnnouncementsViewModel.kt",
+          "line": 125,
+          "end_line": 150
+        }
+      ],
+      "tag": "不携带模型密钥"
+    }
+  ],
+  "connections": [
+    {
+      "id": "ui-to-runtime",
+      "from": "android-ui",
+      "to": "agent-runtime",
+      "label": "会话输入",
+      "variant": "emphasis"
+    },
+    {
+      "id": "runtime-to-provider",
+      "from": "agent-runtime",
+      "to": "model-provider",
+      "label": "模型请求",
+      "variant": "emphasis"
+    },
+    {
+      "id": "runtime-to-knowledge",
+      "from": "agent-runtime",
+      "to": "local-knowledge",
+      "label": "检索与引用"
+    },
+    {
+      "id": "runtime-to-tools",
+      "from": "agent-runtime",
+      "to": "tool-policy",
+      "label": "工具调用",
+      "variant": "security"
+    },
+    {
+      "id": "tools-to-python",
+      "from": "tool-policy",
+      "to": "python-skill",
+      "label": "授权后执行",
+      "variant": "security"
+    },
+    {
+      "id": "tools-to-workspace",
+      "from": "tool-policy",
+      "to": "workspace",
+      "label": "授权后访问",
+      "variant": "security"
+    },
+    {
+      "id": "ui-to-news",
+      "from": "android-ui",
+      "to": "announcements",
+      "label": "获取公告",
+      "variant": "dashed"
+    }
+  ]
+}

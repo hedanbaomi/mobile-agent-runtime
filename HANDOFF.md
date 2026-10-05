@@ -3,7 +3,7 @@
 
 # 项目交接
 
-最后更新：2026-10-05T09:34:32+08:00（UTC+8；Command Code 窗口与图片探测修复的提交前验证快照，用户实测成功并授权正常发布）。项目根目录：E:/mobileAgentRuntime。
+最后更新：2026-10-05T10:33:03+08:00（UTC+8；README 与图表已获用户提交/推送授权，提交门禁通过）。项目根目录：E:/mobileAgentRuntime。
 
 按 [agent.md 第 1 节](agent.md#1-按任务读取与开工) 选择资料。现行规则见 agent.md；本文件记录现场和待办，历史任务中的授权不自动延续。
 
@@ -23,6 +23,8 @@
 - 完整证据：[2026-09-18 文档管线复审 R1–R5 收口](docs/evidence/2026-09-18/document-pipeline-r1-r5-closeout.md)。
 
 ## 1. 现行状态与当前任务
+
+- **2026-10-05 README 扩充与 Archify 图表（用户已审阅，提交门禁通过）**：主 Agent；源码基线 main@6d38ce77961378d28e63601853faa775047a667f，本轮分支 `codex/readme-usage-archify-20261005`。用户明确授权提交和推送。README 补充首次配置、Chat/Responses、上下文与输出预算、知识导入和恢复、Skill 兼容、工作区与授权、Shizuku/有线 ADB、排障及 Debug/Review 构建；按 writing-polish 完成写作检查。新增 [Archify 会话与工具图及复现说明](docs/diagrams/README.md)，包含 JSON、PNG 和 AGPL-3.0-only sidecar，未复制第三方查看器运行时代码。Archify finalize 全部通过，showcase 9/9、0 错误/警告；浏览器与 PNG 检查通过，14 个本地链接/锚点有效。提交前 `licenseGuard licenseGuardReverse check verifyCiPins verifyDependencyLock verifyDependencyVerification --offline --dependency-verification=strict` 通过（BUILD SUCCESSFUL in 1m 30s；995 actionable tasks: 63 executed, 932 up-to-date）；`reuse lint` 859/859 通过。仅发布 README、图表和本轮交接摘要；原有本地交接历史、用户报告/计划及附件保留，不纳入本次提交。未修改功能源码或重新生成 APK；仅提交/推送并创建普通 PR，合并需本轮另行授权。
 
 - **2026-10-05 Command Code 窗口、图片探测与页面精简（实现与本地验证完成；用户实测成功；提交前快照）**：两 OpenAI adapter 接入无凭据 Command Code 官方目录，精确端点/模型和有界读取；AUTO 保存和显式测试补取窗口，同目标离线编辑保留目录值，目标/revision CAS 拒绝迟到覆盖。图片共用有效128×128 PNG，上限1024且尊重较小手动预算，截断UNKNOWN/畸形FAILED，不自动收费重试；目录与付费结果/busy隔离，编辑页显示目录真实来源。精简全局标题及服务商、Agent、知识库、技能、设置重复说明，保留费用/权限/UNKNOWN/AGPL。Provider272、SQLite375、Provider文案6、Android每变体216与API34模拟器43全部通过；最终strict/offline reviewGate 2m11s/1132任务、licenseGuard、REUSE856/856通过；独立DSH Flash复核PASS且19源完整SHA一致。用户随后确认实测修复成功，明确授权提交、推送、普通PR合并并同步本地main；此为提交前快照，不提前宣称远端CI或合并。需求/验收R02/R03/R12/R18、A03/A04/A10、U02/U05；详见[修复证据](docs/evidence/2026-10-05/commandcode-vision-ui.md)和[ADR-0021](docs/adr/0021-provider-catalog-and-image-probe.md)。基线1400a54，分支codex/commandcode-metadata-vision-ui-20261005；原有附件、计划与本地HANDOFF历史单独保护，不纳入本提交，无活跃源码认领。未新增真实收费调用或部署；本次反馈不扩大成全量/长稳验收。
 

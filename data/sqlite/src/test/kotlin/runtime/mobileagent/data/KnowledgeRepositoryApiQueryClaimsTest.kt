@@ -128,14 +128,156 @@ class KnowledgeRepositoryApiQueryClaimsTest {
         }
     }
 
-    private fun fixture(failQueryCacheWrite: Boolean = false): Fixture {
+    @Test fun committedCacheRecoversLegacyAndUnknownWithoutProviderOrRetryGrant() {
+        for (error in listOf("API_QUERY_PENDING: explicit retry authorization is required",
+            "API_QUERY_UNKNOWN: synthetic unknown", "API_QUERY_PENDING: explicit retry authorization is required; owner=old-process")) {
+            fixture().use { f ->
+                assertTrue(f.retrieve().hits.isNotEmpty())
+                f.pending(error)
+                val restarted = KnowledgeRepository(f.db, MemoryBlobSink())
+                assertTrue(restarted.retrieve("restart", QUERY, knowledgeBaseIds = listOf(f.kb)).hits.isNotEmpty())
+                assertEquals(1, f.api.queryCalls.get())
+                // A token may still belong to a concurrent caller. Do not clean it on its behalf.
+                assertEquals(if (error.contains("owner=")) 1 else 0, restarted.pendingApiQueries(f.kb).size)
+            }
+        }
+    }
+
+    @Test fun cacheAndClaimCleanupRollbackTogetherOnInsertInterruptionOrDeleteFailure() {
+        for (mode in listOf("interrupt-after-insert", "delete")) fixture(failureMode = mode).use { f ->
+            assertThrows(ApiQueryUnknownOutcomeException::class.java) { f.retrieve() }
+            assertEquals(0, f.db.query("SELECT COUNT(*) AS n FROM embedding_query_vectors").single().long("n"))
+            assertFalse(f.repo.pendingApiQueries(f.kb).single().retryAuthorized)
+            assertThrows(ApiQueryUnknownOutcomeException::class.java) { f.retrieve() }
+            assertEquals(1, f.api.queryCalls.get())
+        }
+    }
+
+    @Test fun recoveryCleanupFailureKeepsSuccessAndRetriesLocally() {
+        fixture(failureMode = "recover-delete").use { f ->
+            f.retrieve(); f.pending("API_QUERY_UNKNOWN: synthetic unknown")
+            assertThrows(IllegalStateException::class.java) { f.retrieve() }
+            assertEquals(1, f.repo.pendingApiQueries(f.kb).size)
+            assertEquals(1, f.db.query("SELECT COUNT(*) AS n FROM embedding_query_vectors").single().long("n"))
+            assertTrue(f.retrieve().hits.isNotEmpty())
+            assertTrue(f.repo.pendingApiQueries(f.kb).isEmpty())
+            assertEquals(1, f.api.queryCalls.get())
+        }
+    }
+
+    @Test fun interruptedCommitAcknowledgmentRecoversCommittedSuccessWithoutRebilling() {
+        fixture(failureMode = "commit-ack").use { f ->
+            assertThrows(ApiQueryUnknownOutcomeException::class.java) { f.retrieve() }
+            assertEquals(1, f.db.query("SELECT COUNT(*) AS n FROM embedding_query_vectors").single().long("n"))
+            assertTrue(f.repo.pendingApiQueries(f.kb).isEmpty())
+            assertTrue(f.retrieve().hits.isNotEmpty())
+            assertEquals(1, f.api.queryCalls.get())
+        }
+    }
+
+    @Test fun recoverySnapshotCannotDeleteReplacementLiveOwner() {
+        fixture(failureMode = "replace-recovery-owner").use { f ->
+            f.retrieve(); f.pending("API_QUERY_UNKNOWN: synthetic unknown")
+            assertTrue(f.retrieve().hits.isNotEmpty())
+            assertTrue(f.row().string("error").endsWith("owner=replacement"))
+            assertEquals(0, f.row().long("retry_authorized"))
+            assertEquals(1, f.api.queryCalls.get())
+        }
+    }
+
+    @Test fun corruptedOrMismatchedSuccessNeverClearsPendingOrRebills() {
+        for (mode in listOf("dimension", "overflow-dimension", "bytes", "nonfinite", "space", "query")) fixture().use { f ->
+            f.retrieve()
+            f.pending("API_QUERY_UNKNOWN: synthetic unknown")
+            when (mode) {
+                "dimension" -> f.db.execute("UPDATE embedding_query_vectors SET dimension=7")
+                "overflow-dimension" -> f.db.execute("UPDATE embedding_query_vectors SET dimension=4294967304")
+                "bytes" -> f.db.execute("UPDATE embedding_query_vectors SET vector_blob=?", listOf(ByteArray(1)))
+                "nonfinite" -> f.db.execute("UPDATE embedding_query_vectors SET vector_blob=?", listOf(java.nio.ByteBuffer.allocate(32)
+                    .order(java.nio.ByteOrder.LITTLE_ENDIAN).putFloat(Float.NaN).array()))
+                "space" -> f.db.execute("UPDATE embedding_query_vectors SET space_id='wrong-space'")
+                "query" -> f.db.execute("UPDATE embedding_query_vectors SET query_hash=?", listOf("0".repeat(64)))
+            }
+            assertThrows(Exception::class.java) { f.retrieve() }
+            assertEquals(1, f.repo.pendingApiQueries(f.kb).size)
+            assertEquals(1, f.api.queryCalls.get())
+        }
+    }
+
+    @Test fun cachedSuccessStillRequiresPersistedConsent() {
+        fixture().use { f ->
+            f.retrieve(); f.pending("API_QUERY_UNKNOWN: synthetic unknown")
+            f.db.execute("UPDATE embedding_operations SET consent_fingerprint=''")
+            f.db.execute("UPDATE import_jobs SET embedding_consent=0")
+            val result = f.retrieve()
+            assertTrue(result.hits.isEmpty())
+            assertEquals(1, f.repo.pendingApiQueries(f.kb).size)
+            assertEquals(1, f.api.queryCalls.get())
+        }
+    }
+
+    @Test fun twoKnowledgeBasesInSameSpaceCanFinishConcurrentClaimsAndReuseSuccess() {
+        fixture().use { f ->
+            val binding = ApiEmbeddingBinding("fixture", "https://example.invalid/v1/embeddings", 1, "fixture", 1, 8, "retrieval")
+            val kb2 = f.repo.createApiKnowledgeBase("second", binding)
+            assertEquals(ImportStage.READY, f.repo.importBytes("second.txt", "text/plain", "second source".toByteArray(),
+                false, knowledgeBaseId = kb2, embeddingIsApi = true, embeddingConsent = true).stage)
+            val entered = CountDownLatch(2); val release = CountDownLatch(1)
+            val pool = Executors.newFixedThreadPool(2)
+            f.api.action = { entered.countDown(); check(release.await(5, TimeUnit.SECONDS)); vector() }
+            try {
+                val a = pool.submit<runtime.mobileagent.knowledge.RetrievalResult> { f.retrieve() }
+                val b = pool.submit<runtime.mobileagent.knowledge.RetrievalResult> {
+                    f.repo.retrieve("second", QUERY, knowledgeBaseIds = listOf(kb2))
+                }
+                check(entered.await(5, TimeUnit.SECONDS)); release.countDown()
+                assertTrue(a.get(5, TimeUnit.SECONDS).hits.isNotEmpty()); assertTrue(b.get(5, TimeUnit.SECONDS).hits.isNotEmpty())
+                assertTrue(f.repo.pendingApiQueries(f.kb).isEmpty()); assertTrue(f.repo.pendingApiQueries(kb2).isEmpty())
+                assertEquals(1, f.db.query("SELECT COUNT(*) AS n FROM embedding_query_vectors").single().long("n"))
+                f.repo.retrieve("both", QUERY, knowledgeBaseIds = listOf(f.kb, kb2))
+                assertEquals(2, f.api.queryCalls.get())
+            } finally {
+                release.countDown(); pool.shutdownNow(); check(pool.awaitTermination(5, TimeUnit.SECONDS))
+            }
+        }
+    }
+
+    private fun fixture(failQueryCacheWrite: Boolean = false, failureMode: String = ""): Fixture {
         val db = JdbcSqlConnection(); Migrations.apply(db)
         val binding = ApiEmbeddingBinding("fixture", "https://example.invalid/v1/embeddings", 1, "fixture", 1, 8, "retrieval")
         val api = Api(binding.spaceId)
-        val connection = if (!failQueryCacheWrite) db else object : SqlConnection by db {
+        val connection = if (!failQueryCacheWrite && failureMode.isEmpty()) db else object : SqlConnection by db {
+            var recoveryDeleteFailed = false
+            var cacheInserted = false
+            var commitAcknowledgmentFailed = false
             override fun execute(sql: String, args: List<Any?>) {
-                if (sql.startsWith("INSERT INTO embedding_query_vectors")) error("synthetic cache write failure")
+                if (failQueryCacheWrite && sql.startsWith("INSERT INTO embedding_query_vectors")) error("synthetic cache write failure")
+                if (failureMode == "delete" && sql.startsWith("DELETE FROM embedding_query_attempts")) error("synthetic cleanup failure")
+                if (failureMode == "recover-delete" && args.size == 5 && sql.startsWith("DELETE FROM embedding_query_attempts") && !recoveryDeleteFailed) {
+                    recoveryDeleteFailed = true
+                    error("synthetic recovery cleanup failure")
+                }
                 db.execute(sql, args)
+                if (sql.startsWith("INSERT INTO embedding_query_vectors")) cacheInserted = true
+                if (failureMode == "interrupt-after-insert" && sql.startsWith("INSERT INTO embedding_query_vectors"))
+                    throw InterruptedException("synthetic crash after insert")
+            }
+            override fun query(sql: String, args: List<Any?>): List<SqlRow> {
+                val rows = db.query(sql, args)
+                if (failureMode == "replace-recovery-owner" && sql.startsWith("SELECT error, retry_authorized FROM embedding_query_attempts") &&
+                    rows.singleOrNull()?.string("error") == "API_QUERY_UNKNOWN: synthetic unknown") {
+                    db.execute("UPDATE embedding_query_attempts SET error=?,retry_authorized=0 WHERE kb_id=? AND space_id=? AND query_hash=?",
+                        listOf("API_QUERY_PENDING: explicit retry authorization is required; owner=replacement") + args)
+                }
+                return rows
+            }
+            override fun <T> transaction(block: () -> T): T {
+                val result = db.transaction(block)
+                if (failureMode == "commit-ack" && cacheInserted && !commitAcknowledgmentFailed) {
+                    commitAcknowledgmentFailed = true
+                    throw InterruptedException("synthetic interrupted commit acknowledgment")
+                }
+                return result
             }
         }
         val repo = KnowledgeRepository(connection, MemoryBlobSink(), apiEmbedder = api)
@@ -149,6 +291,9 @@ class KnowledgeRepositoryApiQueryClaimsTest {
         fun retrieve() = repo.retrieve("query-fixture", QUERY, knowledgeBaseIds = listOf(kb))
         fun row() = db.query("SELECT error,retry_authorized FROM embedding_query_attempts WHERE kb_id=? AND space_id=? AND query_hash=?",
             listOf(kb, api.spaceId, HASH)).single()
+        fun pending(error: String) = db.execute(
+            "INSERT INTO embedding_query_attempts(kb_id,space_id,query_hash,error,updated_at) VALUES(?,?,?,?,?)",
+            listOf(kb, api.spaceId, HASH, error, "2026-10-05T00:00:00Z"))
         override fun close() = db.close()
     }
     private class Api(override val spaceId: String) : TextEmbedder {

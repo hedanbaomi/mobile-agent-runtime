@@ -3,7 +3,7 @@
 
 # 项目交接
 
-最后更新：2026-10-05T15:55:54+08:00（UTC+8；日志与搜索实现、独立复核和提交门禁通过，Git 交付按用户授权执行）。项目根目录：E:/mobileAgentRuntime。
+最后更新：2026-10-05T17:58:21+08:00（UTC+8；464f8f4 复审 R-01—R-04 已修复并通过最终本地门禁，正在正常 PR 合并、本地 main 同步与正式 v1.0.0 发布；原有 WIP 保留）。项目根目录：E:/mobileAgentRuntime。
 
 按 [agent.md 第 1 节](agent.md#1-按任务读取与开工) 选择资料。现行规则见 agent.md；本文件记录现场和待办，历史任务中的授权不自动延续。
 
@@ -23,6 +23,8 @@
 - 完整证据：[2026-09-18 文档管线复审 R1–R5 收口](docs/evidence/2026-09-18/document-pipeline-r1-r5-closeout.md)。
 
 ## 1. 现行状态与当前任务
+
+- **2026-10-05 464f8f4 复审修复及正式 v1.0.0 发布（本地修复与验证完成；Git/发布交付进行中）**：真实 E 根基线 464f8f433165258bc8cfb146433825b8b1fe0ff9，分支 codex/review-v1-release-20261005。用户当前明确授权修复附件 R-01—R-04、提交/推送/正常合并/本地 main 同步及现有正式签名发布 GitHub v1.0.0。已实现不可变会话 Run 所有权、超时页面 detach 与本资源取消，引用/审批/executor/前台所有者隔离；query 成功向量和 owner CAS 清理同事务，既有同意下校验成功缓存并本地恢复；搜索 COMPLETED_WITHHELD 执行事实/缓存/重启恢复，以及完整 URL 拒绝超长或脱敏改写。版本 1.0.0 / code 2。独立只读源码复核及实际审批回调增量复核均无阻断；最终 reviewGate/check + strict pins/locks/checksums exit 0（1133 tasks）、REUSE 878/878；API34 定向 22/22 含实际审批回调，Android Debug/Release/Review JVM 各 230/230、SQLite 387/387、skills-api 139/139、agent-runtime 59/59；337 Kotlin 源哈希与检查前快照一致，CodeGraph sync exit 0。ADR-0023、KNOWLEDGE/WEB_SEARCH/RELEASING、技术方案/需求/验收/README 同步，证据入口 docs/evidence/2026-10-05/review-464f-fixes.md。原 HANDOFF 历史 WIP、原报告/计划和附件目录保留且不整文件提交；凭据与正式私钥仅仓库外运行时读取。不将受控/模拟器回归当真机、线上付费服务或长稳验收。下步正常 PR/CI/main 同步后从 E 盘干净临时 checkout 正式签名核验、发布并清除此认领。
 
 - **2026-10-05 日志级别、正式发布密钥及多供应商联网搜索（实现与定向验证完成，Git 交付已获授权）**：真实根 E:/mobileAgentRuntime，main/HEAD 06be7ded44842bea5054c46a89103759f0e688f0；用户本轮已授权提交、推送、合并并同步本地 main；使用 E 根目录的 codex/logging-search-permissions-20261005 分支及 PR，正式密钥和原有附件/交接 WIP 不进入提交；提交前全仓 reviewGate/check 与严格 CI pins/locks/checksums 门禁通过（1086 tasks）；Git 交付通过正常 PR，不绕过检查，不发布 APK。诊断默认关闭、默认 INFO，用户可持久选择 DEBUG；INFO 不采集视觉正文/详细进度，凭据及 private continuation 过滤保留，manifest 标明当前级别及历史 DEBUG 保留。正式 PKCS12 密钥在 C:/Users/32735/Desktop/证书与密钥/mobileagentruntime，RSA4096/SHA256withRSA，30年有效期；目录 ACL 限定当前用户/SYSTEM/Administrators，签名验签及 Gradle verifyReleaseSigning/validateSigningRelease 通过，秘密不进入仓库和日志，未生成正式 release。搜索已接入 Brave/Tavily/Exa，分服务加密密钥、旧 Brave 兼容与全服务引用回收；逐 Agent“允许联网搜索”默认关，允许的新快照免逐次批准，实时撤权/修订复核阻断旧 executor/缓存复用，禁重定向和自动重试，UNKNOWN_OUTCOME 不重放。搜索独立复核发现 P2 切换服务异步标签错位及 P3 共享地址遗漏，已用同步标签+按渲染服务 ID 的保存/启停/删除守卫与 100.64/10 过滤修复，窄范围独立复核确认关闭。最终共享层136、SQLite378、Android单元225，共739/739；API34定向设备29/29，lint/licenseGuard、REUSE871/871、CodeGraph sync 通过，四份受保护附件/计划哈希不变。独立复核为 DSH Flash 日志审查与 Jev 选择的 gpt-6-luna/xhigh 搜索审查；没有真实付费搜索/模型请求，物理设备与线上供应商仍为单独验收。本任务模拟器已关闭并仅清理其隔离 AVD；日志/JUnit XML/源哈希保留于 .private/info-release-key-20261005/ 与 .private/search-providers-20261005/。公开说明/ADR/验收已更新，证据见 docs/evidence/2026-10-05/logging-and-search.md。
 

@@ -100,7 +100,9 @@ EPUB `epub-xml-v4` 使用有界 XHTML 扫描识别单/双引号图片；仅 prol
 
 API 空间绑定 Provider ID/revision、规范化 endpoint、ModelProfile ID/revision、实际 modelId、维度和 dataScope。确认页面展示完整目的地、模型与数据范围；Vision 同意不能替代此同意。公开 `rebuildIndex`/`repairIndexes` 在缺少该空间的有效同意时必须于解析 API adapter 前拒绝，不能借重建入口外发文本。
 
-schema v9 的 `embedding_query_attempts` 以 `(kb_id, space_id, SHA-256(query UTF-8))` 标识一次查询。调用外部 embedding 前，以短事务新建 pending 行或消费已批准的一次重试；外部结果未知、取消、中断及进程死亡保留该行。schema v10 的 `embedding_query_vectors` 在得到合法、匹配空间的向量后缓存该向量；成功向量入不可变缓存后以本次 owner 清理尝试门禁，缓存不随 retrieve 成功删除。若 generation/chunk/native index 等本地后半段失败，下次提交复用缓存向量，不再次调用外部 API；若仍有并行新 owner 的 pending 行，须明确授权后才能本地收尾。相同键存在未批准 pending 时，不因缓存存在而绕过该门禁，也不得解析 adapter 或发送请求；不同 KB、空间和查询不共享授权。
+schema v9 的 `embedding_query_attempts` 以 `(kb_id, space_id, SHA-256(query UTF-8))` 标识一次查询。调用外部 embedding 前，以短事务新建 pending 行或消费已批准的一次重试；外部结果未知、取消、中断及进程死亡保留该行。schema v10 的 `embedding_query_vectors` 缓存合法、匹配空间的成功向量；向量插入与本次 owner claim 的 CAS 删除在同一短事务提交，提交完成后才标记成功。缓存不随 retrieve 成功删除，后续本地检索失败可复用而不再次收费。
+
+恢复先检查当前 KB 的既有 API Embedding 同意，再校验完整 space/query 键、空间绑定维度、向量字节长度及有限数值。有效缓存是已知成功证据，可直接本地检索，不需再批准付费重试，也不解析远端 adapter。遗留无 owner、已授权或 UNKNOWN pending 的清理仍受快照 CAS 约束；不同 live owner 的 pending 保留，不能被缓存恢复删除。无有效缓存的未知尝试继续要求明确重试授权，禁止自动外发；不同 KB、空间和查询不共享外发授权。详见 [ADR-0023](adr/0023-run-ownership-and-known-outcome-recovery.md)。
 
 仓库接口为 `pendingApiQueries(kbId)` 与 `authorizeApiQueryRetry(kbId, spaceId, queryHash, acknowledgeDuplicateCharge)`。后者只记录一次重试许可，不发请求。知识库页显示查询 hash、完整目标与可能重复收费的风险；用户确认后，须回到聊天主动重新提交同一查询。下一次提交在调用前消费许可；再次未知需再次确认。App/内置工具/Python Broker 将 `ApiQueryUnknownOutcomeException` 映射为 UNKNOWN，停止当前 Run，不静默回退本地模型、不自动重放。数据库不保存查询原文来实现该门禁。
 
@@ -282,4 +284,4 @@ PDF 解析支持合法紧凑关闭分隔符后紧接 endobj 的对象，保持 s
 
 ## 2026-10-03 API 查询 attempt 所有权
 
-查询派发前持久化随机 owner token；确定失败、成功清理和 UNKNOWN 更新只对本次 token 且 `retry_authorized=0` 的行作 CAS。旧调用不能覆盖新重试或尚未消费的授权；token 对 UI 隐藏，旧无 token 行仍需明确授权。成功查询向量先进入不可变缓存，后续 ANN 失败不重新外发；已有缓存的明确授权恢复可本地收尾。详见 [五项复审修复](evidence/2026-10-03/five-review-fixes.md)。
+查询派发前持久化随机 owner token；确定失败、成功清理和 UNKNOWN 更新只对本次 token 且 `retry_authorized=0` 的行作 CAS。旧调用不能覆盖新重试或尚未消费的授权；token 对 UI 隐藏。2026-10-05 的 §4.1 成功证据恢复规则替代旧“已有缓存仍需付费重试授权”的约束；无成功证据的旧无 token 尝试仍需明确授权。早期验证见 [五项复审修复](evidence/2026-10-03/five-review-fixes.md)。

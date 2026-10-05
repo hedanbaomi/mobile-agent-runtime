@@ -446,11 +446,23 @@ class RunTools(
      * but the original tool is never re-dispatched because of a revocation.
      */
     private suspend fun discloseCached(routed: RoutedCall, cached: ToolResult, owner: ToolExecutor): ToolResult {
+        // Disclosure checks must not erase an external request's settled execution facts.
+        // These outcomes contain no provider result content and cannot authorize replay.
+        if (routed.call.name == "web_search" &&
+            (cached is ToolResult.UnknownOutcome ||
+                cached is ToolResult.Denied && cached.completion == ToolResult.Completion.COMPLETED_WITHHELD)
+        ) return cached
+        fun unavailable(reason: String): ToolResult = if (routed.call.name == "web_search" && cached is ToolResult.Value) {
+            ToolResult.Denied(
+                "Web search was dispatched and completed; charges may apply. Results are withheld. Do not retry automatically.",
+                ToolResult.Completion.COMPLETED_WITHHELD,
+            )
+        } else ToolResult.Denied(reason)
         if (!synchronized(run) { runActive() }) {
-            return reject(routed, ToolResult.Denied("Run is closed; cached tool output is unavailable"))
+            return reject(routed, unavailable("Run is closed; cached tool output is unavailable"))
         }
         if (routes[routed.call.name] !== owner) {
-            return reject(routed, ToolResult.Denied("Tool authorization changed; cached tool output is unavailable"))
+            return reject(routed, unavailable("Tool authorization changed; cached tool output is unavailable"))
         }
         val allowed = try {
             owner.authorizeReplay(routed.ownerCall())
@@ -458,7 +470,7 @@ class RunTools(
             false
         }
         if (!allowed) {
-            return reject(routed, ToolResult.Denied("Tool authorization changed; cached tool output is unavailable"))
+            return reject(routed, unavailable("Tool authorization changed; cached tool output is unavailable"))
         }
         return cached
     }

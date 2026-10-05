@@ -59,7 +59,13 @@ class WebSearchToolExecutor(
         }
         requests[call.callId]?.let { previous ->
             if (previous != call) return@withLock ToolResult.Invalid("Tool call ID was already used for a different request")
-            completed[call.callId]?.let { return@withLock if (authorized()) it else ToolResult.Denied("Web-search authorization changed") }
+            completed[call.callId]?.let { result ->
+                return@withLock when {
+                    result !is ToolResult.Value -> result
+                    authorized() -> result
+                    else -> remember(call.callId, completedWithheld())
+                }
+            }
             if (pending.containsKey(call.callId)) return@withLock ToolResult.NeedsApproval
         }
         val request = parse(call) ?: return@withLock ToolResult.Invalid("Web-search arguments are invalid")
@@ -81,13 +87,15 @@ class WebSearchToolExecutor(
         var dispatched = false
         return try {
             val raw = search(request.query, request.maxResults) { dispatched = true }
-            if (!authorized()) return remember(callId, ToolResult.Denied("Web-search authorization changed during execution"))
             val validated = validateResult(raw)
                 ?: return remember(callId, if (dispatched) {
                     ToolResult.UnknownOutcome("Web-search response was invalid after dispatch; do not retry automatically")
                 } else {
                     ToolResult.Invalid("Web-search response was invalid")
                 })
+            if (!authorized()) return remember(callId, if (dispatched) completedWithheld() else {
+                ToolResult.Denied("Web-search authorization changed before dispatch")
+            })
             remember(callId, ToolResult.Value(validated))
         } catch (cancelled: CancellationException) {
             if (dispatched) completed[callId] = ToolResult.UnknownOutcome("Web search was cancelled after dispatch; do not retry automatically")
@@ -109,7 +117,7 @@ class WebSearchToolExecutor(
     override suspend fun authorizeReplay(call: ToolCall): Boolean = mutex.withLock {
         if (requests[call.callId] != call) return@withLock false
         val remembered = completed[call.callId] ?: return@withLock false
-        if (remembered is ToolResult.UnknownOutcome) return@withLock false
+        if (remembered !is ToolResult.Value) return@withLock false
         authorized()
     }
 
@@ -132,6 +140,11 @@ class WebSearchToolExecutor(
         if (results.size > 10 || results.any { it !is JsonObject }) return null
         return root.toString()
     }
+
+    private fun completedWithheld() = ToolResult.Denied(
+        "Web search was dispatched and completed; charges may apply. Authorization changed, so results are withheld. Do not retry automatically.",
+        ToolResult.Completion.COMPLETED_WITHHELD,
+    )
 
     private fun remember(callId: String, result: ToolResult): ToolResult {
         completed[callId] = result

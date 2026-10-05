@@ -1676,7 +1676,7 @@ class KnowledgeRepository(
                 continue
             }
             val apiQueryHash = if (space.isNotBlank() && space != embedder.spaceId) {
-                queryHash(query).also { rejectPendingApiQueryBeforeResolver(kbId, space, it) }
+                queryHash(query)
             } else {
                 null
             }
@@ -1685,7 +1685,7 @@ class KnowledgeRepository(
             // restart can finish local retrieval even when that adapter is no
             // longer configured.  The cache is keyed by the complete space id
             // and query digest; it never stores the original query text.
-            val cachedQueryVector = apiQueryHash?.let { queryVectorCache(space, it) }
+            val cachedQueryVector = apiQueryHash?.let { recoverCachedApiQuery(kbId, space, it) }
             val queryEmbedder = if (cachedQueryVector != null) {
                 CachedQueryEmbedder(space, cachedQueryVector.dimension)
             } else {
@@ -1708,7 +1708,7 @@ class KnowledgeRepository(
             searched += kbId
             sources += lexicalHits(kbId, query, 40, pin).rankOrdered()
             val queryClaim = apiQueryHash?.let {
-                claimApiQueryAttempt(kbId, space, it, createIfAbsent = cachedQueryVector == null)
+                if (cachedQueryVector == null) claimApiQueryAttempt(kbId, space, it, createIfAbsent = true) else null
             }
             var queryVectorReady = cachedQueryVector != null
             var queryEmbeddingReturned = cachedQueryVector != null
@@ -1723,13 +1723,12 @@ class KnowledgeRepository(
                     onQueryEmbeddingReturned = { queryEmbeddingReturned = true },
                     onQueryVectorReady = apiQueryHash?.let { hash ->
                         { vector ->
-                            // Commit the successful provider vector before
-                            // deleting the attempt row.  If local SQLite/JNI
+                            // Commit success and matching owner cleanup together.
+                            // If local SQLite/JNI
                             // retrieval fails afterwards, the next identical
                             // query reuses this vector and is never re-billed.
-                            insertQueryVectorCache(space, hash, vector, queryEmbedder.dimension)
+                            insertQueryVectorCache(space, hash, vector, queryEmbedder.dimension, queryClaim)
                             queryVectorReady = true
-                            queryClaim?.let(::clearApiQueryAttempt)
                             // This callback also fires on a cache hit (with
                             // the cached vector, re-inserted idempotently).
                             // Only a miss dispatches the provider, so only a
@@ -4912,8 +4911,9 @@ class KnowledgeRepository(
             "SELECT vector_blob, dimension FROM embedding_query_vectors WHERE space_id = ? AND query_hash = ?",
             listOf(spaceId, queryHash),
         ).singleOrNull() ?: return null
-        val dimension = row.long("dimension").toInt()
-        check(dimension > 0) { "query embedding cache dimension is invalid" }
+        val storedDimension = row.long("dimension")
+        check(storedDimension in 1..(Int.MAX_VALUE / 4).toLong()) { "query embedding cache dimension is invalid" }
+        val dimension = storedDimension.toInt()
         val boundDimension = ApiEmbeddingBinding.parseSpaceId(spaceId)?.dimension
         check(boundDimension == null || boundDimension == dimension) {
             "query embedding cache dimension does not match the bound API space"
@@ -4933,6 +4933,7 @@ class KnowledgeRepository(
         queryHash: String,
         vector: FloatArray,
         dimension: Int,
+        claim: ApiQueryClaim?,
     ) = synchronized(indexLock) {
         requireQueryHash(queryHash)
         validateEmbeddingVector(vector, dimension)
@@ -4951,12 +4952,14 @@ class KnowledgeRepository(
                 check(existingBytes.contentEquals(bytes)) {
                     "query embedding cache vector changed"
                 }
-                return@transaction
+            } else {
+                db.execute(
+                    "INSERT INTO embedding_query_vectors(space_id,query_hash,vector_blob,dimension,created_at) VALUES (?,?,?,?,?)",
+                    listOf(spaceId, queryHash, bytes.copyOf(), dimension, Utc.nowIso()),
+                )
             }
-            db.execute(
-                "INSERT INTO embedding_query_vectors(space_id,query_hash,vector_blob,dimension,created_at) VALUES (?,?,?,?,?)",
-                listOf(spaceId, queryHash, bytes.copyOf(), dimension, Utc.nowIso()),
-            )
+            check(queryVectorCache(spaceId, queryHash) != null)
+            claim?.let(::deleteApiQueryClaim)
         }
     }
 
@@ -4979,21 +4982,35 @@ class KnowledgeRepository(
     )
 
     /**
-     * Reject an unresolved attempt before constructing a dynamic adapter.  A
-     * pending row is the durable billable-call barrier for this exact
-     * knowledge-base, embedding space, and query hash.
+     * Recover a validated success after consent has been checked. No provider
+     * is constructed on a hit. Preserve an unauthorized live owner, and use
+     * snapshot CAS when retiring legacy/unknown or explicitly authorized rows.
      */
-    private fun rejectPendingApiQueryBeforeResolver(
+    private fun recoverCachedApiQuery(
         knowledgeBaseId: String,
         spaceId: String,
         queryHash: String,
-    ) {
-        val row = db.query(
-            "SELECT retry_authorized FROM embedding_query_attempts WHERE kb_id = ? AND space_id = ? AND query_hash = ?",
-            listOf(knowledgeBaseId, spaceId, queryHash),
-        ).singleOrNull() ?: return
-        if (!row.boolean("retry_authorized")) {
-            throw ApiQueryUnknownOutcomeException(knowledgeBaseId, spaceId, queryHash)
+    ): CachedQueryVector? = synchronized(indexLock) {
+        db.transaction {
+            val cached = queryVectorCache(spaceId, queryHash)
+            val row = db.query(
+                "SELECT error, retry_authorized FROM embedding_query_attempts WHERE kb_id = ? AND space_id = ? AND query_hash = ?",
+                listOf(knowledgeBaseId, spaceId, queryHash),
+            ).singleOrNull()
+            if (cached == null && row != null && !row.boolean("retry_authorized")) {
+                throw ApiQueryUnknownOutcomeException(knowledgeBaseId, spaceId, queryHash)
+            }
+            if (cached != null && row != null) {
+                val error = row.string("error")
+                val authorized = row.boolean("retry_authorized")
+                if (authorized || !error.startsWith("$API_QUERY_PENDING_ERROR; owner=")) {
+                    db.execute(
+                        "DELETE FROM embedding_query_attempts WHERE kb_id = ? AND space_id = ? AND query_hash = ? AND error = ? AND retry_authorized = ?",
+                        listOf(knowledgeBaseId, spaceId, queryHash, error, if (authorized) 1 else 0),
+                    )
+                }
+            }
+            cached
         }
     }
 
@@ -5061,11 +5078,16 @@ class KnowledgeRepository(
 
     private fun clearApiQueryAttempt(claim: ApiQueryClaim) = synchronized(indexLock) {
         db.transaction {
-            db.execute(
-                "DELETE FROM embedding_query_attempts WHERE kb_id = ? AND space_id = ? AND query_hash = ? AND error = ? AND retry_authorized = 0",
-                listOf(claim.knowledgeBaseId, claim.spaceId, claim.queryHash, claim.pendingError),
-            )
+            deleteApiQueryClaim(claim)
         }
+    }
+
+    /** Called only inside the transaction that owns the checkpoint. */
+    private fun deleteApiQueryClaim(claim: ApiQueryClaim) {
+        db.execute(
+            "DELETE FROM embedding_query_attempts WHERE kb_id = ? AND space_id = ? AND query_hash = ? AND error = ? AND retry_authorized = 0",
+            listOf(claim.knowledgeBaseId, claim.spaceId, claim.queryHash, claim.pendingError),
+        )
     }
 
     /**

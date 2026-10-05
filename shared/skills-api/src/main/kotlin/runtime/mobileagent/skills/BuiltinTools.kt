@@ -51,7 +51,9 @@ data class ToolCall(
 
 sealed interface ToolResult {
     data class Value(val json: String) : ToolResult
-    data class Denied(val reason: String) : ToolResult
+    /** Completion facts survive disclosure revocation without retaining provider content. */
+    enum class Completion { COMPLETED_WITHHELD }
+    data class Denied(val reason: String, val completion: Completion? = null) : ToolResult
     data class Invalid(val reason: String) : ToolResult
     /** A known, typed operational failure that is safe to project to the model and UI. */
     data class Failure(val error: ToolError) : ToolResult

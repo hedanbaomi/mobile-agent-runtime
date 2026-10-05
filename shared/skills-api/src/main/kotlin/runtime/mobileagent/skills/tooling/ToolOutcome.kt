@@ -31,6 +31,7 @@ import kotlinx.serialization.json.jsonPrimitive
 enum class ToolOutcomeStatus {
     VALUE,
     DENIED,
+    COMPLETED_WITHHELD,
     INVALID,
     FAILED,
     UNKNOWN_OUTCOME,
@@ -51,6 +52,18 @@ object ToolOutcome {
         message: String,
         retryable: Boolean = false,
     ): String = envelope(STATUS_DENIED, code, message, retryable)
+
+    /** Known completed external request, with disclosure withheld and automatic replay forbidden. */
+    fun completedWithheld(message: String): String {
+        val root = Json.parseToJsonElement(envelope("COMPLETED_WITHHELD", ToolErrorCode.PERMISSION_DENIED, message, false))
+            .jsonObject.toMutableMap()
+        root["dispatched"] = JsonPrimitive(true)
+        root["completed"] = JsonPrimitive(true)
+        root["resultWithheld"] = JsonPrimitive(true)
+        root["chargesMayApply"] = JsonPrimitive(true)
+        root["automaticReplayAllowed"] = JsonPrimitive(false)
+        return JsonObject(root).toString()
+    }
 
     /** Invalid outcomes are never retryable and never escalate to INTERNAL. */
     fun invalid(

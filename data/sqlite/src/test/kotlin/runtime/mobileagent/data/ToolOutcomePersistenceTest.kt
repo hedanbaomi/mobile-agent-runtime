@@ -13,6 +13,8 @@ import runtime.mobileagent.domain.ModelProfile
 import runtime.mobileagent.domain.ModelRole
 import runtime.mobileagent.domain.ProviderProfile
 import runtime.mobileagent.domain.ToolResultPart
+import runtime.mobileagent.domain.RunRecord
+import runtime.mobileagent.domain.ToolInvocation
 import runtime.mobileagent.skills.tooling.ToolError
 import runtime.mobileagent.skills.tooling.ToolErrorCode
 import runtime.mobileagent.skills.tooling.ToolOutcome
@@ -45,6 +47,9 @@ class ToolOutcomePersistenceTest {
             ToolOutcome.denied(message = "The original tool authorization is no longer available"),
             ToolOutcomeStatus.DENIED,
         ),
+        Case("COMPLETED_WITHHELD", "COMPLETED_WITHHELD",
+            ToolOutcome.completedWithheld("Search completed; permission was revoked"),
+            ToolOutcomeStatus.COMPLETED_WITHHELD),
         Case(
             "INVALID",
             "FAILED",
@@ -74,10 +79,11 @@ class ToolOutcomePersistenceTest {
             val conversation = conversations.create(snapshot, "Outcomes", "conversation.outcomes")
             val stored = cases().mapIndexed { index, case ->
                 // ChatViewModel mapping: VALUE -> SUCCEEDED, UNKNOWN_OUTCOME ->
-                // UNKNOWN_OUTCOME, everything else -> FAILED.
+                // UNKNOWN_OUTCOME; a known completed but withheld result keeps its own state.
                 val persistedState = when (case.eventStatus) {
                     "VALUE" -> "SUCCEEDED"
                     "UNKNOWN_OUTCOME" -> "UNKNOWN_OUTCOME"
+                    "COMPLETED_WITHHELD" -> "COMPLETED_WITHHELD"
                     else -> "FAILED"
                 }
                 assertEquals(case.invocationState, persistedState, "event mapping for ${case.eventStatus}")
@@ -122,6 +128,26 @@ class ToolOutcomePersistenceTest {
             val code = ToolOutcome.errorCodeOf(json)
             assertTrue(code != null && code != ToolErrorCode.INTERNAL_ERROR)
             assertEquals(false, ToolOutcome.retryableOf(json))
+        }
+    }
+
+    @Test fun completedWithheldInvocationSurvivesInterruptedRunRecovery() {
+        JdbcSqlConnection().use { db ->
+            Migrations.apply(db)
+            val snapshot = createSnapshot(db)
+            val conversation = ConversationRepository(db).create(snapshot, "Recovery", "conversation.recovery")
+            val runs = RunRepository(db)
+            runs.save(RunRecord("run.recovery", snapshot, conversation.id, createdAt = "2026-10-05T00:00:00Z"))
+            val result = ToolOutcome.completedWithheld("Already sent and completed; content withheld")
+            runs.recordInvocation(ToolInvocation("invocation.withheld", "run.recovery", "call.withheld", "web_search", "{}",
+                state = "COMPLETED_WITHHELD", resultJson = result, createdAt = "2026-10-05T00:00:01Z"))
+            runs.recordInvocation(ToolInvocation("invocation.pending", "run.recovery", "call.pending", "web_search", "{}",
+                state = "PENDING", createdAt = "2026-10-05T00:00:01Z"))
+            runs.markInFlightUnknown("2026-10-05T00:00:02Z")
+            val outcomes = runs.invocations("run.recovery").associateBy { it.invocationId }
+            assertEquals("COMPLETED_WITHHELD", outcomes.getValue("invocation.withheld").state)
+            assertEquals(result, outcomes.getValue("invocation.withheld").resultJson)
+            assertEquals("UNKNOWN_OUTCOME", outcomes.getValue("invocation.pending").state)
         }
     }
 

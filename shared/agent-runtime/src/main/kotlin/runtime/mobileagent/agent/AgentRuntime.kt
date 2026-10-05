@@ -741,7 +741,11 @@ class AgentRuntime(
                         is ToolResult.Denied -> {
                             val code = runCatching { ToolErrorCode.valueOf(result.reason) }
                                 .getOrDefault(ToolErrorCode.PERMISSION_DENIED)
-                            "DENIED" to ToolOutcome.denied(code = code, message = result.reason)
+                            if (result.completion == ToolResult.Completion.COMPLETED_WITHHELD) {
+                                "COMPLETED_WITHHELD" to ToolOutcome.completedWithheld(result.reason)
+                            } else {
+                                "DENIED" to ToolOutcome.denied(code = code, message = result.reason)
+                            }
                         }
                         is ToolResult.Invalid -> "INVALID" to ToolOutcome.invalid(message = result.reason)
                         is ToolResult.Value -> "VALUE" to result.json

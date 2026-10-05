@@ -693,7 +693,7 @@ class ChatViewModel(
                 metadata = citationMetadata(bound, warning, result.coverage)
                 val system = PromptTemplates.render(binding.prompt.template, mapOf("date" to LocalDate.now().toString(),
                     "agent_name" to binding.agentName, "knowledge_bases" to kbIds.joinToString(",")))
-                val webExecutor = webSearchTools(container)
+                val webExecutor = webSearchTools(container, binding.snapshot)
                 val mcpExecutor = mcpTools(container, binding.snapshot)
                 // Freeze the run's immutable configuration before tool exposure.  The
                 // integration may re-read live grants/connections at invoke/approval,

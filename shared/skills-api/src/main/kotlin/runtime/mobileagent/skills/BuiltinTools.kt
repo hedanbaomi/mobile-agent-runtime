@@ -33,6 +33,7 @@ import java.util.concurrent.atomic.AtomicReference
 import runtime.mobileagent.skills.tooling.AuthorizationDecision
 import runtime.mobileagent.skills.tooling.AuthorizationEvaluator
 import runtime.mobileagent.skills.tooling.ToolError
+import runtime.mobileagent.domain.WebSearchProvider
 
 data class ToolSpec(
     val name: String,
@@ -507,6 +508,11 @@ object HttpPolicy {
         ) {
             return true
         }
+        if (address is java.net.Inet4Address) {
+            val bytes = address.address
+            // RFC 6598 shared space is not publicly routable, but Java does not classify it as site-local.
+            if ((bytes[0].toInt() and 0xFF) == 100 && (bytes[1].toInt() and 0xFF) in 64..127) return true
+        }
         if (address is java.net.Inet6Address) {
             val first = address.address.firstOrNull()?.toInt()?.and(0xFF) ?: return true
             if (first in 0xfc..0xfd) return true
@@ -519,6 +525,62 @@ object HttpPolicy {
 object HostHttp {
     private const val MAX_TIMEOUT_MILLIS = 30_000L
     private val client by lazy { OkHttpClient() }
+
+    /** One approved search request. Redirects and automatic retries are forbidden for all services. */
+    fun webSearch(
+        provider: WebSearchProvider,
+        query: String,
+        maxResults: Int,
+        key: String,
+        authorized: () -> Boolean,
+        onDispatched: () -> Unit,
+    ): String = webSearch(provider, query, maxResults, key, authorized, onDispatched,
+        { host -> InetAddress.getAllByName(host).toList() }, client)
+
+    internal fun webSearch(
+        provider: WebSearchProvider,
+        query: String,
+        maxResults: Int,
+        key: String,
+        authorized: () -> Boolean,
+        onDispatched: () -> Unit,
+        resolve: (String) -> List<InetAddress>,
+        client: OkHttpClient,
+    ): String {
+        val request = webSearchRequest(provider, query, maxResults, key)
+        val host = request.url.host
+        HttpPolicy.assertRequest(request.url.toString(), setOf(host))
+        val deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(MAX_TIMEOUT_MILLIS)
+        val pool = ConnectionPool(0, 1, TimeUnit.NANOSECONDS)
+        val safeClient = client.newBuilder()
+            .dns(ValidatedDns(host, resolve))
+            .proxy(Proxy.NO_PROXY).cookieJar(CookieJar.NO_COOKIES)
+            .authenticator(Authenticator.NONE).proxyAuthenticator(Authenticator.NONE)
+            .followRedirects(false).followSslRedirects(false).retryOnConnectionFailure(false)
+            .connectionPool(pool)
+            .connectTimeout(10, TimeUnit.SECONDS).readTimeout(20, TimeUnit.SECONDS)
+            .callTimeout(MAX_TIMEOUT_MILLIS, TimeUnit.MILLISECONDS)
+            .addNetworkInterceptor { chain ->
+                // DNS/TLS may have waited while the user changed the selected service or key.
+                if (!authorized()) throw IOException("Web-search authorization changed before dispatch")
+                if (Thread.currentThread().isInterrupted) throw InterruptedIOException("Web search cancelled")
+                onDispatched()
+                val response = chain.proceed(chain.request())
+                // Stop OkHttp's 503 + Retry-After: 0 follow-up before it can charge a second request.
+                if (response.code == 503) {
+                    response.close()
+                    throw IOException("HTTP 503")
+                }
+                response
+            }.build()
+        try {
+            val response = awaitResponse(safeClient.newCall(request), deadline)
+            if (response.code in 300..399) error("Web-search redirects are not allowed")
+            return response.body
+        } finally {
+            pool.evictAll()
+        }
+    }
 
     /** Blocking boundary: callers in coroutines must use runInterruptible(Dispatchers.IO). */
     fun get(

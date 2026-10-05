@@ -6,6 +6,7 @@ package runtime.mobileagent.data
 import runtime.mobileagent.domain.AppSettings
 import runtime.mobileagent.domain.LocalePreference
 import runtime.mobileagent.domain.ThemePreference
+import runtime.mobileagent.domain.WebSearchProvider
 
 /** Small, namespaced preference repository for theme and locale choices. */
 class SettingsRepository(private val db: SqlConnection) {
@@ -51,25 +52,42 @@ class SettingsRepository(private val db: SqlConnection) {
 
     fun restoreDefaultGlobalRootPrompt() = setGlobalRootPrompt(null, unlocked = true)
 
-    fun webSearchSecretRef(): String? = read(KEY_WEB_SEARCH_SECRET_REF)?.takeIf { it.isNotBlank() }
+    fun webSearchProvider(): WebSearchProvider? {
+        val id = read(KEY_WEB_SEARCH_PROVIDER) ?: return WebSearchProvider.BRAVE
+        return WebSearchProvider.fromId(id)
+    }
 
-    fun webSearchEnabled(): Boolean = read(KEY_WEB_SEARCH_ENABLED) == "1" && webSearchSecretRef() != null
+    fun webSearchRevision(): Long = read(KEY_WEB_SEARCH_REVISION)?.toLongOrNull() ?: 0L
+
+    fun selectWebSearchProvider(provider: WebSearchProvider) = db.transaction {
+        put(KEY_WEB_SEARCH_PROVIDER, provider.id)
+        advanceWebSearchRevision()
+    }
+
+    fun webSearchSecretRef(provider: WebSearchProvider? = webSearchProvider()): String? =
+        provider?.let { read(webSearchSecretKey(it)) }?.takeIf { it.isNotBlank() }
+
+    fun webSearchEnabled(provider: WebSearchProvider? = webSearchProvider()): Boolean =
+        provider != null && read(webSearchEnabledKey(provider)) == "1" && webSearchSecretRef(provider) != null
 
     /** Persist only an opaque encrypted-secret reference and the user's explicit enablement. */
-    fun setWebSearch(secretRef: String?, enabled: Boolean) {
+    fun setWebSearch(secretRef: String?, enabled: Boolean, provider: WebSearchProvider = checkNotNull(webSearchProvider())) {
         val normalized = secretRef?.trim()?.takeIf { it.isNotEmpty() }
         require(normalized == null || normalized.matches(Regex("search:[A-Za-z0-9._:-]{1,128}"))) {
             "Invalid web-search secret reference"
         }
         db.transaction {
             if (normalized == null) {
-                db.execute("DELETE FROM app_prefs WHERE key IN (?,?)", listOf(KEY_WEB_SEARCH_SECRET_REF, KEY_WEB_SEARCH_ENABLED))
+                db.execute("DELETE FROM app_prefs WHERE key IN (?,?)", listOf(webSearchSecretKey(provider), webSearchEnabledKey(provider)))
             } else {
-                put(KEY_WEB_SEARCH_SECRET_REF, normalized)
-                put(KEY_WEB_SEARCH_ENABLED, if (enabled) "1" else "0")
+                put(webSearchSecretKey(provider), normalized)
+                put(webSearchEnabledKey(provider), if (enabled) "1" else "0")
             }
+            advanceWebSearchRevision()
         }
     }
+
+    private fun advanceWebSearchRevision() = put(KEY_WEB_SEARCH_REVISION, Math.addExact(webSearchRevision(), 1L).toString())
 
     private fun writeGlobalRoot(settings: AppSettings) {
         put(KEY_ROOT_UNLOCKED, if (settings.globalRootPromptUnlocked) "1" else "0")
@@ -136,6 +154,12 @@ class SettingsRepository(private val db: SqlConnection) {
         private const val KEY_ROOT_UNLOCKED = "settings.globalRootPrompt.unlocked"
         internal const val KEY_WEB_SEARCH_SECRET_REF = "settings.webSearch.secretRef"
         private const val KEY_WEB_SEARCH_ENABLED = "settings.webSearch.enabled"
+        private const val KEY_WEB_SEARCH_PROVIDER = "settings.webSearch.provider"
+        private const val KEY_WEB_SEARCH_REVISION = "settings.webSearch.revision"
+        internal fun webSearchSecretKey(provider: WebSearchProvider): String =
+            if (provider == WebSearchProvider.BRAVE) KEY_WEB_SEARCH_SECRET_REF else "settings.webSearch.${provider.id}.secretRef"
+        private fun webSearchEnabledKey(provider: WebSearchProvider): String =
+            if (provider == WebSearchProvider.BRAVE) KEY_WEB_SEARCH_ENABLED else "settings.webSearch.${provider.id}.enabled"
         const val DEFAULT_GLOBAL_ROOT_PROMPT =
             "Follow the immutable runtime contract. Do not grant tools, network, files, or Python isolation from this prompt."
     }

@@ -442,3 +442,7 @@ PDF 解析支持合法紧凑关闭分隔符后紧接 endobj 的对象，保持 s
 - 索引迁移决策见 [ADR 0020](adr/0020-scoped-import-job-display-index.md)。权限/Provider 协议、依赖和 UI 设计语言保持现行约定；批次详情联合投影、整个 Chat reload 的 IO 移出主线程与设备帧耗时仍是后续候选。证据见 evidence/2026-10-03/quota-optimization.md。
 
 2026-10-05 Provider 补充（R02/R03/R12/R18）：通过两种 OpenAI adapter 的 metadata 端口接入 Command Code 官方公开目录，Android 保存和显式测试补取未知 AUTO 窗口；目录错误不会污染付费测试结果。图片探测共用标准 PNG，预算上限及 UNKNOWN 分类见 [ADR-0021](adr/0021-provider-catalog-and-image-probe.md)。
+
+2026-10-05 日志与搜索补充（R12/R19/R35）：日志默认 INFO，用户可持久切换 DEBUG，诊断默认关闭及正文过滤保持；INFO 不再采集 Vision 正文/详细进度，manifest 标明当前级别及保留历史。正式 PKCS12 密钥在用户指定的仓库外目录生成并验证，使用现有环境变量签名配置；密钥及密码未写入仓库，未生成正式 release。
+
+本段替代 9.4 的“固定 Brave、逐调用批准”作为现行搜索行为：Brave/Tavily/Exa 独立加密凭据，逐 Agent 默认关的搜索开关，允许后免逐次批准，冻结快照与实时配置修订/Agent 权限共同约束，撤销或切换使旧 executor 与结果复用失效。协议和安全边界见 [ADR-0022](adr/0022-configurable-search-and-agent-permission.md)，实际验证见 [本轮证据](evidence/2026-10-05/logging-and-search.md)。

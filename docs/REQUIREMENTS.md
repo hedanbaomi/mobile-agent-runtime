@@ -51,7 +51,7 @@
 | R16 | 全部第一方代码/文档/公告服务 AGPL-3.0-only，保护防误改 | 用户要求 S5 + 方案 S6 | L01—L04 |
 | R17 | 按 agent.md 的任务分级读取交接和相关规范；项目代码、配置、决策或待办变化时维护交接，纯咨询/只读审查按例外交付；本地 Git 和 CodeGraph 初始化 | 用户要求 S8；2026-09-05 用户授权调整读取与交接适用范围 | D01、D02 |
 | R18 | 独立软件页面 UI 设计阶段；逐屏设计布局、视觉样式和控件，交付高保真页面稿及可编辑源稿，再落实到软件 UI | 用户要求 S9及澄清；阶段细则为实施补充 | U01—U06 |
-| R19 | 用户主动开启的本地诊断日志；有界滚动、字段白名单和秘密/URL/路径脱敏；支持 SAF 导出与清除，用于间歇性故障取证 | 用户要求 S10；隐私和崩溃处理边界为实施补充 | A08、S10、U05 |
+| R19 | 用户主动开启的本地诊断日志；默认 INFO，可切换并持久保存 DEBUG；级别不自动开启诊断、不清除旧记录；有界滚动、字段白名单和秘密/URL/路径脱敏；支持 SAF 导出与清除，用于间歇性故障取证 | 用户要求 S10；2026-10-05 用户日志级别要求；隐私和崩溃处理边界为实施补充 | A08、S10、U05 |
 | R20 | Agent 在逐次确认、Agent/快照复核与硬配额下使用 provider-neutral typed tools 访问应用私有工作区或用户明确选择的 SAF tree；不得泄露 Android 真实路径、跨 Agent/快照访问或借此获得 shell。SAF 是 workspace backend，不是 elevated Authority | V2 + 2026-08-30 第四轮人工反馈 | S13、S14、S19 |
 | R21 | 统一 Authority/Capability/Approval/Tool Loop 模型；当前 elevated Authority 仅有 `SHIZUKU` 与 `WIRED_ADB`，持久 grant、availability、connection 和 selected provider 分离；Shizuku 与 Wired ADB 平级，失效时 fail-closed，绝不自动 fallback | V2 | S15、S16、S20、S21 |
 | R22 | Windows Desktop Companion 仅作为有线 USB ADB 的受控 backend：官方 adb、`adb reverse`、loopback、一次性配对/挑战、会话序号/HMAC、固定 protocol；不接受 host shell、PowerShell、serial、端口或 raw command 由 Agent 指定 | V2 | S17、S21 |
@@ -67,6 +67,7 @@
 | R32 | 真实代码仓库文件工具必须支持有界分页、`stat` 大文件、offset 分块读取和 expected-version/hash 的原子 `apply_patch`；路径继续限制在 Thread workspace 相对范围内，非原子 backend 明确返回 `UNSUPPORTED`，冲突不覆盖 | 用户要求 S12 + V2 | S30 |
 | R33 | Provider“测试连接”与“能力探测”是两个 typed 操作：使用正常请求相同 adapter/endpoint/auth/serialization，区分 success、401、404、429、timeout、partial；UI、持久化与诊断不得再解析自由格式摘要或用 `busy=false` 推断成功 | 用户要求 S12 | A10 |
 | R34 | 会话在用户输入预算、模型可用窗口或单段轮次接近上限时自动压缩并继续；完整计入工具参数，保留原文和完整工具关系，摘要持久化可追溯且不恢复权限、不重放操作；摘要费用与总请求/时间/工具硬预算透明 | 用户 2026-09-11；ADR-0010 | C20—C25 |
+| R35 | 联网搜索支持 Brave、Tavily、Exa 等明确接入的服务，独立加密保存凭据；Agent 默认禁止搜索，用户显式开启后无需逐次确认；冻结快照与实时授权共同约束执行和结果重放，撤销/服务切换立即阻断旧执行器 | 用户 2026-10-05；ADR-0022 | S33、S34 |
 
 ## 3. 对话技术基线
 

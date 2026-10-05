@@ -12,6 +12,7 @@ import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.jsonObject
 import runtime.mobileagent.data.InstalledSkill
 import runtime.mobileagent.domain.AgentProfile
+import runtime.mobileagent.domain.AgentSearchPermission
 import runtime.mobileagent.domain.AgentSnapshot
 import runtime.mobileagent.domain.AgentWorkspaceDefault
 import runtime.mobileagent.domain.CapabilityGrant
@@ -614,8 +615,9 @@ class AgentsViewModel(
                 skillIds = editor.resourceBindings.filter { it.type == "skill" && it.enabled }.map { it.id },
                 retrievalMode = editor.retrievalMode, revision = (previous?.revision ?: 0) + 1,
                 parameterOverridesJson = parameters.toString(), contextPolicyJson = contextPolicyJson,
-                permissionSettingsJson = AgentToolConfirmation.update(
-                    previous?.permissionSettingsJson, editor.skipToolConfirmations,
+                permissionSettingsJson = AgentSearchPermission.update(
+                    AgentToolConfirmation.update(previous?.permissionSettingsJson, editor.skipToolConfirmations),
+                    editor.webSearchEnabled,
                 ),
             )
             val createdNew = previous == null
@@ -870,6 +872,7 @@ class AgentsViewModel(
             workspacePresetWorkspaceId = grantData.workspaces.firstOrNull { it.enabled }?.id,
             retrievalMode = agent?.retrievalMode ?: "explicit",
             skipToolConfirmations = AgentToolConfirmation.skip(agent?.permissionSettingsJson),
+            webSearchEnabled = AgentSearchPermission.enabled(agent?.permissionSettingsJson),
             snapshotLabel = "用此智能体新建会话时会冻结当前配置和能力授权；现有会话不会新增工具，撤权仍立即生效。",
             contextPolicyJson = agent?.contextPolicyJson ?: "{}",
             contextPolicyDraft = AgentContextPolicyDraftUi.fromJson(agent?.contextPolicyJson ?: "{}"),

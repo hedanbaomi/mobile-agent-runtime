@@ -29,9 +29,118 @@ import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicReference
 import javax.net.SocketFactory
+import runtime.mobileagent.domain.WebSearchProvider
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 
 /** Only sockets mapped to this process's loopback TLS server can be opened. */
 class HostHttpTest {
+    @Test
+    fun searchServicesUseTheirOwnProtocolAndOnlyOneDispatch() {
+        for (provider in WebSearchProvider.entries) {
+            val name = when (provider) {
+                WebSearchProvider.BRAVE -> "api.search.brave.com"
+                WebSearchProvider.TAVILY -> "api.tavily.com"
+                WebSearchProvider.EXA -> "api.exa.ai"
+            }
+            LocalTlsFixture(name).use { fixture ->
+                fixture.server.enqueue(MockResponse().setBody("{\"results\":[]}"))
+                var dispatched = 0
+                HostHttp.webSearch(provider, "中文 & query", 3, "synthetic-key", { true }, { dispatched++ },
+                    { listOf(publicAddress) }, fixture.client)
+                val request = fixture.server.takeRequest(2, TimeUnit.SECONDS)!!
+                assertEquals(name, request.getHeader("Host"))
+                assertNull(request.getHeader("Cookie"))
+                assertFalse(request.path!!.contains("synthetic-key"))
+                if (provider == WebSearchProvider.BRAVE) {
+                    assertEquals("GET", request.method)
+                    assertEquals("中文 & query", request.requestUrl!!.queryParameter("q"))
+                    assertEquals("strict", request.requestUrl!!.queryParameter("safesearch"))
+                    assertEquals("synthetic-key", request.getHeader("X-Subscription-Token"))
+                    assertNull(request.getHeader("Authorization"))
+                } else {
+                    assertEquals("POST", request.method)
+                    assertEquals("/search", request.path)
+                    val body = Json.parseToJsonElement(request.body.readUtf8()).jsonObject
+                    assertEquals("中文 & query", body["query"]!!.jsonPrimitive.content)
+                    val countKey = if (provider == WebSearchProvider.TAVILY) "max_results" else "numResults"
+                    assertEquals("3", body[countKey]!!.jsonPrimitive.content)
+                    if (provider == WebSearchProvider.TAVILY) {
+                        assertEquals("Bearer synthetic-key", request.getHeader("Authorization"))
+                        assertEquals("false", body["auto_parameters"]!!.jsonPrimitive.content)
+                        assertEquals("false", body["include_raw_content"]!!.jsonPrimitive.content)
+                        assertNull(request.getHeader("x-api-key"))
+                    } else {
+                        assertEquals("synthetic-key", request.getHeader("x-api-key"))
+                        assertNull(request.getHeader("Authorization"))
+                    }
+                }
+                assertEquals(1, dispatched)
+                assertEquals(1, fixture.server.requestCount)
+            }
+        }
+    }
+
+    @Test
+    fun searchRedirectsAnd503AreNeverReplayed() {
+        for (code in listOf(302, 307, 503)) {
+            LocalTlsFixture("api.tavily.com").use { fixture ->
+                fixture.server.enqueue(MockResponse().setResponseCode(code)
+                    .addHeader("Location", "https://api.tavily.com/other").addHeader("Retry-After", "0"))
+                fixture.server.enqueue(MockResponse().setBody("would-be-duplicate"))
+                var dispatched = 0
+                assertThrows(Exception::class.java) {
+                    HostHttp.webSearch(WebSearchProvider.TAVILY, "query", 2, "synthetic-key", { true }, { dispatched++ },
+                        { listOf(publicAddress) }, fixture.client)
+                }
+                assertEquals(1, fixture.server.requestCount)
+                assertEquals(1, dispatched)
+            }
+        }
+    }
+
+    @Test
+    fun searchRevokedWhileResolvingDnsSendsNoQueryOrCredential() = LocalTlsFixture("api.exa.ai").use { fixture ->
+        var allowed = true
+        var dispatched = 0
+        assertThrows(IOException::class.java) {
+            HostHttp.webSearch(WebSearchProvider.EXA, "private query", 2, "synthetic-key", { allowed }, { dispatched++ },
+                { allowed = false; listOf(publicAddress) }, fixture.client)
+        }
+        assertEquals(0, fixture.server.requestCount)
+        assertEquals(0, dispatched)
+    }
+
+    @Test
+    fun searchRejectsPrivateDnsAndInvalidCredentialsBeforeDispatch() = LocalTlsFixture("api.tavily.com").use { fixture ->
+        var dispatched = 0
+        assertThrows(UnknownHostException::class.java) {
+            HostHttp.webSearch(WebSearchProvider.TAVILY, "query", 2, "synthetic-key", { true }, { dispatched++ },
+                { listOf(publicAddress, InetAddress.getLoopbackAddress()) }, fixture.client)
+        }
+        assertThrows(IllegalArgumentException::class.java) {
+            HostHttp.webSearch(WebSearchProvider.TAVILY, "query", 2, "key\r\nInjected: value", { true }, { dispatched++ },
+                { listOf(publicAddress) }, fixture.client)
+        }
+        assertThrows(UnknownHostException::class.java) {
+            HostHttp.webSearch(WebSearchProvider.TAVILY, "query", 2, "synthetic-key", { true }, { dispatched++ },
+                { listOf(InetAddress.getByName("100.64.0.1")) }, fixture.client)
+        }
+        assertEquals(0, fixture.server.requestCount)
+        assertEquals(0, dispatched)
+        assertTrue(fixture.destinations.isEmpty())
+    }
+
+    @Test fun sharedAddressSpaceBoundariesAreRejectedWithoutBlockingAdjacentPublicSpace() {
+        for (address in listOf("100.64.0.0", "100.64.0.1", "100.127.255.255")) {
+            assertTrue(HttpPolicy.isForbiddenAddress(InetAddress.getByName(address)), address)
+        }
+        for (address in listOf("100.63.255.255", "100.128.0.0")) {
+            assertFalse(HttpPolicy.isForbiddenAddress(InetAddress.getByName(address)), address)
+        }
+    }
+
     @Test
     fun reservedSecretHeaderNamesAreRejectedCaseInsensitively() {
         val failure = runCatching {

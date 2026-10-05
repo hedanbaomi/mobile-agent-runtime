@@ -64,7 +64,7 @@ class WebSearchDeviceTest {
     @Test
     fun runtimeCapabilitySummaryReportsPythonWebKnowledgeAndKeepsOrderDeterministic() {
         val summary = runtimeCapabilitySummary(listOf("read_document", "py_fixture_run", "web_search"))
-        assertTrue(summary.contains("web_search=available with per-call approval"))
+        assertTrue(summary.contains("web_search=available under this Agent's explicit search permission without per-call prompts"))
         assertTrue(summary.contains("isolated Python=available only through enabled, granted Class B Skill tools"))
         assertTrue(summary.contains("workspace/file operations=unavailable in this run"))
         assertTrue(summary.contains("Skill memory=unavailable in this run"))

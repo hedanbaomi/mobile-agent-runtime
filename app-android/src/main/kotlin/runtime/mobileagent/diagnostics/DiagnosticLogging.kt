@@ -737,6 +737,8 @@ typealias RuntimeToolExposure = RuntimeToolExposureRecord
 interface DiagnosticPreferenceStore {
     fun isEnabled(): Boolean
     fun setEnabled(enabled: Boolean)
+    fun logLevel(): DiagnosticLevel = DiagnosticLevel.INFO
+    fun setLogLevel(level: DiagnosticLevel): Unit = error("Diagnostic log level cannot be persisted.")
 }
 
 /**
@@ -801,6 +803,7 @@ class RollingDiagnosticLogStore(
     private val processId: () -> Int = { 0 },
     private val threadName: () -> String = { Thread.currentThread().name },
     private val referenceHasher: DiagnosticReferenceHasher = DiagnosticReferenceHasher.session(),
+    private val minimumLevel: DiagnosticLevel? = null,
 ) {
     companion object {
         const val SCHEMA_VERSION = 2
@@ -816,29 +819,8 @@ class RollingDiagnosticLogStore(
         const val MAX_DURATION_MS = 24L * 60L * 60L * 1_000L
         const val MAX_REFERENCE_LENGTH = DiagnosticReferenceHasher.REFERENCE_LENGTH
         private val DEBUG_EVENTS = setOf(
-            "authority_configuration_state",
-            "dangerous_mode_decision",
-            "runtime_tool_exposure",
-            "authority_selection_changed",
-            "authority_state_changed",
-            "workspace_grant_changed",
-            "shell_tool_exposure_changed",
-            "privileged_workspace_selection_started",
-            "privileged_workspace_selection_completed",
-            "privileged_workspace_binding_persisted",
-            "privileged_workspace_reattach_started",
-            "privileged_workspace_reattach_completed",
-            "privileged_workspace_reattach_failed",
-            "agent_workspace_default_changed",
-            "conversation_workspace_bound",
-            "conversation_workspace_changed",
-            "conversation_workspace_resolved",
-            "conversation_workspace_resolution",
-            "workspace_tool_exposure",
-            "provider_connection_test_started",
-            "provider_connection_test_completed",
-            "provider_capability_probe_started",
-            "provider_capability_probe_completed",
+            "knowledge_import_progress",
+            "vision_debug_content",
         )
 
         private fun currentUtc(): String = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'").apply {
@@ -980,17 +962,29 @@ class RollingDiagnosticLogStore(
     val isEnabled: Boolean
         get() = enabledSafely()
 
+    val logLevel: DiagnosticLevel
+        get() = minimumLevel ?: runCatching { preferences.logLevel() }.getOrDefault(DiagnosticLevel.INFO)
+
+    fun setLogLevel(level: DiagnosticLevel) = synchronized(lock) {
+        require(level == DiagnosticLevel.INFO || level == DiagnosticLevel.DEBUG)
+        check(minimumLevel == null) { "A fixed-level diagnostic fixture cannot change its level." }
+        preferences.setLogLevel(level)
+    }
+
+    fun isLevelEnabled(level: DiagnosticLevel): Boolean =
+        enabledSafely() && level.ordinal >= logLevel.ordinal
+
     fun setEnabled(enabled: Boolean) {
         synchronized(lock) {
             if (enabled) {
                 runCatching { preferences.setEnabled(true) }
                     .onFailure { noteWriteFailure(0) }
-                if (enabledSafely()) {
+                if (isLevelEnabled(DiagnosticLevel.INFO)) {
                     val line = renderLine("diagnostics_toggle", DiagnosticLevel.INFO, mapOf("enabled" to true), threadName())
                     if (!appendCurrent(line)) noteWriteFailure(line.toByteArray(StandardCharsets.UTF_8).size)
                 }
             } else {
-                if (enabledSafely()) {
+                if (isLevelEnabled(DiagnosticLevel.INFO)) {
                     val line = renderLine("diagnostics_toggle", DiagnosticLevel.INFO, mapOf("enabled" to false), threadName())
                     if (!appendCurrent(line)) noteWriteFailure(line.toByteArray(StandardCharsets.UTF_8).size)
                 }
@@ -1002,13 +996,15 @@ class RollingDiagnosticLogStore(
 
     /** Record one of the fixed events. Unknown event names or field keys are rejected. */
     fun record(event: String, fields: Map<String, Any?> = emptyMap()): Boolean = synchronized(lock) {
-        if (!enabledSafely()) return@synchronized false
+        val level = levelFor(event)
+        // Filtering is intentional, not a dropped event or a degraded logger.
+        if (!isLevelEnabled(level)) return@synchronized false
         val normalized = runCatching { normalizeFields(event, fields) }.getOrNull()
         if (normalized == null) {
             noteDrop(0)
             return@synchronized false
         }
-        val line = runCatching { renderLine(event, levelFor(event), normalized, threadName()) }
+        val line = runCatching { renderLine(event, level, normalized, threadName()) }
             .getOrElse {
                 noteWriteFailure(0)
                 return@synchronized false
@@ -2650,7 +2646,8 @@ class RollingDiagnosticLogStore(
     private fun levelFor(event: String): DiagnosticLevel = when {
         event.endsWith("_failed") || event == "uncaught_exception" || event == "runtime_tooling_unavailable" ->
             DiagnosticLevel.ERROR
-        else -> DiagnosticLevel.DEBUG
+        event in DEBUG_EVENTS -> DiagnosticLevel.DEBUG
+        else -> DiagnosticLevel.INFO
     }
 
     private fun renderLine(
@@ -2688,6 +2685,7 @@ class RollingDiagnosticLogStore(
             "generatedAtUtc" to DiagnosticSanitizer.text(nowUtc(), 64),
             "sessionId" to DiagnosticSanitizer.text(sessionId, 96),
             "enabled" to currentStatus.enabled,
+            "activeLogLevel" to logLevel.wireName,
             "build" to linkedMapOf<String, Any?>(
                 "revision" to DiagnosticSanitizer.text(buildInfo.revision, 160),
                 "dirty" to buildInfo.dirty,
@@ -2700,6 +2698,7 @@ class RollingDiagnosticLogStore(
             "droppedEvents" to currentStatus.droppedEventCount,
             "droppedBytes" to currentStatus.droppedByteCount,
             "retention" to "Rolling window: older segments are overwritten; this export is not a complete task history.",
+            "logLevelHistory" to "Changing the active level does not clear retained logs; this export may include earlier DEBUG records.",
             "visionContent" to "Opt-in request/response JSON and SSE frames in numbered chunks; credential values and private continuation fields removed; malformed JSON content omitted.",
             "limits" to linkedMapOf<String, Any?>(
                 "currentBytes" to MAX_CURRENT_BYTES,

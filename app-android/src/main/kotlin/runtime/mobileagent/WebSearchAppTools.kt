@@ -4,61 +4,66 @@
 package runtime.mobileagent
 
 import java.net.URI
-import java.net.URLEncoder
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.runInterruptible
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
-import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.contentOrNull
-import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
-import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
 import runtime.mobileagent.domain.SecretStatus
+import runtime.mobileagent.domain.AgentSnapshot
+import runtime.mobileagent.domain.AgentSearchPermission
+import runtime.mobileagent.domain.WebSearchProvider
 import runtime.mobileagent.provider.SecretRedactor
 import runtime.mobileagent.skills.HostHttp
+import runtime.mobileagent.skills.HttpPolicy
 import runtime.mobileagent.skills.ToolExecutor
 import runtime.mobileagent.skills.WebSearchToolExecutor
 
-private const val BRAVE_SEARCH_HOST = "api.search.brave.com"
-private const val BRAVE_SEARCH_ENDPOINT = "https://api.search.brave.com/res/v1/web/search"
-
 /**
  * Build a run-local search executor from the current explicit app setting. The model never
- * controls the destination or headers, and every query still passes through tool approval.
+ * controls the destination or headers. Only a user-authorized Agent may search without prompts.
  */
-fun webSearchTools(container: AppContainer): ToolExecutor {
+fun webSearchTools(container: AppContainer, snapshot: AgentSnapshot): ToolExecutor {
+    val provider = container.settings.webSearchProvider()
+    val configRevision = container.settings.webSearchRevision()
     val configuredRef = container.settings.webSearchSecretRef()
-    val configured = configuredRef != null && container.settings.webSearchEnabled() &&
+    val agent = container.agents.get(snapshot.agentId)
+    val agentRevision = agent?.revision
+    val configured = provider != null && configuredRef != null &&
+        AgentSearchPermission.allows(snapshot.permissionSettingsJson, agent?.permissionSettingsJson) &&
+        container.settings.webSearchEnabled() &&
         container.secrets.inventory().status(configuredRef) == SecretStatus.ACTIVE
     fun authorized(): Boolean = configuredRef != null &&
+        provider != null && container.settings.webSearchProvider() == provider &&
+        container.settings.webSearchRevision() == configRevision &&
         container.settings.webSearchEnabled() &&
         container.settings.webSearchSecretRef() == configuredRef &&
-        container.secrets.inventory().status(configuredRef) == SecretStatus.ACTIVE
+        container.secrets.inventory().status(configuredRef) == SecretStatus.ACTIVE &&
+        container.agents.get(snapshot.agentId)?.let { live ->
+            live.revision == agentRevision &&
+                AgentSearchPermission.allows(snapshot.permissionSettingsJson, live.permissionSettingsJson)
+        } == true
 
     return WebSearchToolExecutor(
         configured = configured,
         authorized = ::authorized,
+        requireApproval = false,
         search = { query, maxResults, onDispatched ->
             checkNotNull(configuredRef) { "Web search is not configured" }
             val secret = container.secrets.resolveForHost(configuredRef)
             try {
-                val encoded = URLEncoder.encode(query, Charsets.UTF_8.name()).replace("+", "%20")
-                val url = "$BRAVE_SEARCH_ENDPOINT?q=$encoded&count=$maxResults&safe_search=strict"
-                onDispatched()
                 val raw = runInterruptible(Dispatchers.IO) {
-                    HostHttp.getWithSecretHeader(
-                        url = url,
-                        allowedHosts = setOf(BRAVE_SEARCH_HOST),
-                        headerName = "X-Subscription-Token",
-                        headerValue = secret.concatToString(),
+                    HostHttp.webSearch(
+                        provider = checkNotNull(provider), query = query, maxResults = maxResults,
+                        key = secret.concatToString(), authorized = ::authorized, onDispatched = onDispatched,
                     )
                 }
-                parseBraveSearchResponse(raw, maxResults, listOf(secret.concatToString()))
+                parseWebSearchResponse(checkNotNull(provider), raw, maxResults, listOf(secret.concatToString()))
             } finally {
                 secret.fill('\u0000')
             }
@@ -68,32 +73,47 @@ fun webSearchTools(container: AppContainer): ToolExecutor {
 
 /** Convert only bounded public HTTPS results into an explicitly untrusted tool payload. */
 internal fun parseBraveSearchResponse(raw: String, maxResults: Int, secrets: List<String> = emptyList()): String {
+    return parseWebSearchResponse(WebSearchProvider.BRAVE, raw, maxResults, secrets)
+}
+
+internal fun parseWebSearchResponse(provider: WebSearchProvider, raw: String, maxResults: Int, secrets: List<String> = emptyList()): String {
     require(maxResults in 1..10) { "Invalid result limit" }
     val root = Json.parseToJsonElement(SecretRedactor.redact(raw, secrets)).jsonObject
-    val results = root["web"]?.jsonObject?.get("results")?.jsonArray ?: JsonArray(emptyList())
-    val safe = buildJsonArray {
-        results.asSequence().mapNotNull { element ->
-            val item = element as? JsonObject ?: return@mapNotNull null
-            val title = item.text("title", 512) ?: return@mapNotNull null
-            val url = item.text("url", 2048) ?: return@mapNotNull null
-            val uri = runCatching { URI(url) }.getOrNull() ?: return@mapNotNull null
-            val host = uri.host?.lowercase()?.trimEnd('.') ?: return@mapNotNull null
-            if (uri.scheme?.lowercase() != "https" || uri.rawUserInfo != null || uri.rawFragment != null ||
-                host.isBlank() || (uri.port != -1 && uri.port != 443)
-            ) return@mapNotNull null
-            val snippet = item.text("description", 2048).orEmpty()
-            buildJsonObject {
-                put("title", title)
-                put("url", uri.toASCIIString())
-                put("snippet", snippet)
-            }
-        }.take(maxResults).forEach(::add)
-    }
-    return buildJsonObject {
-        put("provider", "brave")
-        put("untrusted", true)
-        put("results", safe)
+    val results = when (provider) {
+        WebSearchProvider.BRAVE -> (root["web"] as? JsonObject)?.get("results")
+        WebSearchProvider.TAVILY, WebSearchProvider.EXA -> root["results"]
+    } as? JsonArray ?: error("Search response is missing results")
+    val safe = mutableListOf<JsonObject>()
+    fun payload(): String = buildJsonObject {
+        put("provider", provider.id); put("untrusted", true); put("results", JsonArray(safe))
     }.toString()
+    results.asSequence().mapNotNull { element ->
+        val item = element as? JsonObject ?: return@mapNotNull null
+        val title = item.text("title", 512) ?: return@mapNotNull null
+        val url = item.text("url", 2048) ?: return@mapNotNull null
+        val uri = runCatching { URI(url) }.getOrNull() ?: return@mapNotNull null
+        val host = uri.host?.lowercase()?.trimEnd('.') ?: return@mapNotNull null
+        if (uri.scheme?.lowercase() != "https" || uri.rawUserInfo != null || uri.rawFragment != null ||
+            host.isBlank() || (uri.port != -1 && uri.port != 443)
+        ) return@mapNotNull null
+        if (HttpPolicy.isIpLiteral(host) || HttpPolicy.isForbiddenHost(host)) return@mapNotNull null
+        val snippet = when (provider) {
+            WebSearchProvider.BRAVE -> item.text("description", 2048).orEmpty()
+            WebSearchProvider.TAVILY -> item.text("content", 2048).orEmpty()
+            WebSearchProvider.EXA -> (item["highlights"] as? JsonArray)?.asSequence()
+                ?.mapNotNull { (it as? JsonPrimitive)?.takeIf { value -> value.isString }?.contentOrNull }
+                ?.take(3)?.joinToString(" ")?.take(2048).orEmpty()
+        }
+        buildJsonObject {
+            put("title", title)
+            put("url", uri.toASCIIString())
+            put("snippet", snippet)
+        }
+    }.take(maxResults).forEach { item ->
+        safe += item
+        if (payload().length > HttpPolicy.MAX_TOOL_OUTPUT_CHARS) safe.removeAt(safe.lastIndex)
+    }
+    return payload()
 }
 
 private fun JsonObject.text(key: String, maxLength: Int): String? =
@@ -136,7 +156,7 @@ internal fun runtimeCapabilitySummary(toolNames: Collection<String>): String {
         append("Active tools: ")
         append(names.joinToString(", ").ifBlank { "none" })
         append(". web_search=")
-        append(if (search) "available with per-call approval" else "unavailable in this run")
+        append(if (search) "available under this Agent's explicit search permission without per-call prompts" else "unavailable in this run")
         append("; isolated Python=")
         append(
             if (python) {

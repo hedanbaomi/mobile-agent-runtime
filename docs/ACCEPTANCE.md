@@ -350,4 +350,4 @@ S03/S04/S05/S07 增量必须通过真实 isolated worker：API26 JSON/新 PID；
 - C22—C25/A06：可控时钟触发 watchdog 后切换 B 或返回 A，再投递迟到 RequestPrepared、错误、真实审批回调与 finally；当前会话 ID、消息、preview、审批和草稿不变，A 的真实结果仍归 A。旧执行未退出前新发送保留输入且零新 Run；旧前台引用不能停止另一所有者。
 - K05：成功 query vector 与本 owner claim 清理同事务；真实 SQLite 插入后中断/删除异常回滚、commit 回执中断恢复、旧 cache+pending、错 space/query/维度/NaN/坏字节、consent 撤销、替换 owner 和多库同空间并发。有效成功缓存本地完成且零 provider 调用；无证据未知仍不自动重试。
 - S33/S34：URL 2048/2049 字符、长查询和签名参数、百分号编码/Unicode、fragment/userinfo/private 过滤；保留 URL 必须等于完整原值。撤权后的安全反馈和 durable invocation 保留已派发/完成/扣留/可能收费，缓存及重启不重派发、不泄露。
-- L01—L04：版本 1.0.0 / code 2，正式证书一致、不可调试、arm64 APK/AAB、native alignment/notice、源码归档/SBOM/provenance/hash 对应干净合并提交；正常 PR/CI 合并、本地 main 同步及 GitHub Release 分别核验。定向测试和正式构建不替代未完成的全量设备/付费服务/长稳验收。见 [修复证据](evidence/2026-10-05/review-464f-fixes.md)。
+- L01—L04：版本 1.0.0 / code 2，正式证书一致、不可调试、arm64 APK、native alignment/notice、源码归档/SBOM/provenance/hash 对应干净合并提交；正常 PR/CI 合并、本地 main 同步及 GitHub Release 分别核验。定向测试和正式构建不替代未完成的全量设备/付费服务/长稳验收。见 [修复证据](evidence/2026-10-05/review-464f-fixes.md)。

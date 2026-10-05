@@ -34,6 +34,14 @@ reuse lint
 
 本地原始日志、JUnit XML 和源码快照保存在 `.private/review-464f-v1-20261005/`；公开附件只包含对应源码、产物和核验记录，不上传用户原报告、私密日志或签名输入。远端 PR/main CI、最终合并 SHA 与正式产物核验结果由 Release 核验附件记录。
 
-版本为 `versionName=1.0.0` / `versionCode=2`。正式构建仅使用既有正式身份、干净合并源码和严格依赖验证；APK/AAB、源码、SBOM、provenance、公开证书与哈希以 GitHub Release 附件为准。密钥/密码及用户原始报告不进入仓库或发布附件。
+版本为 `versionName=1.0.0` / `versionCode=2`。正式构建仅使用既有正式身份、干净合并源码和严格依赖验证；APK、源码、SBOM、provenance、公开证书与哈希以 GitHub Release 附件为准。密钥/密码及用户原始报告不进入仓库或发布附件。
+
+## APK 发布门禁补充核验
+
+修复通过 [PR #42](https://github.com/hedanbaomi/mobile-agent-runtime/pull/42) 合并，真实 E 根 main 与 origin/main 同步到 `1eaf09e0d887ef8e447cba9ba507ffd3d949063a`，该合并提交 CI 为 8 success / 1 manual-release skip。
+
+用户随后明确只构建和发布 APK。正式构建暴露出 defaultConfig 的双 ABI 会合入 Release；补充修正将 ABI 限制留在各 build type，Debug/Review 保持双 ABI，Release 仅 ARM64。发布 gate、手动 CI 附件、SBOM 与 provenance 均改为 APK；实际 signer 与既有正式证书的比对作为必要发布步骤独立核验。
+
+补充 `reviewGate verifyCiPins verifyDependencyLock verifyDependencyVerification --offline --dependency-verification=strict --no-daemon --no-configuration-cache` exit 0，3 分 5 秒、1087 个任务；12 个 APK ABI ZIP 正反用例通过，Review 原生对齐、法律资产、安全及来源检查通过。`releaseGate --dry-run` 的任务图无 AAB 生成任务。REUSE exit 0、878/878；337 Kotlin 文件仍与上述设备回归的源码快照完全一致。补充独立只读审阅结论为 APPROVED，无阻断项；结论限于源码、发布核验流程和任务图，不冒充实际正式构建。正式发布只使用通过最终签名与产物门禁的 APK，最终合并 SHA、CI、证书与哈希由 Release 核验附件给出。
 
 契约见 [ADR-0023](../../adr/0023-run-ownership-and-known-outcome-recovery.md)、[知识库](../../KNOWLEDGE.md)、[联网搜索](../../WEB_SEARCH.md) 和 [发布文档](../../RELEASING.md)。本轮受控故障/模拟器回归不等于真实 Android 杀进程、线上付费服务、物理设备/USB/OEM 或长稳验收；应用商店发布未包含在 GitHub Release 交付中。

@@ -189,11 +189,11 @@ jobs:
           java-version: "17"
       - name: Run signed release gate
         run: ./gradlew releaseGate --dependency-verification=strict --no-daemon
-      - name: Upload signed AAB, SBOM and provenance
+      - name: Upload signed APK, SBOM and provenance
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: release-gate-${{ github.sha }}
           path: |
-            app-android/build/outputs/bundle/release/*.aab
+            app-android/build/outputs/apk/release/*.apk
             app-android/build/reports/sbom/release.cdx.json
             app-android/build/reports/provenance/release.provenance.json

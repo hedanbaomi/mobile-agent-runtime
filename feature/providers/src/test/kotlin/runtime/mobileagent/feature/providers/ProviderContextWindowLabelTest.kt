@@ -48,7 +48,18 @@ class ProviderContextWindowLabelTest {
             model(windowValue = "131072", recordedFor = current, recorded = true), current, zh = false,
         )
         assertTrue(label.contains("effective 131072"), label)
-        assertTrue(label.contains("this target only"), label)
+        assertTrue(label.contains("user declared"), label)
+    }
+
+    @Test
+    fun catalogWindowDoesNotClaimUserDeclaration() {
+        val label = contextWindowLabel(
+            model(windowValue = "1000000", recordedFor = current, recorded = true)
+                .copy(contextWindowSource = runtime.mobileagent.domain.ContextLimitSource.PROVIDER_METADATA),
+            current, zh = false,
+        )
+        assertTrue(label.contains("provider catalog"), label)
+        org.junit.jupiter.api.Assertions.assertFalse(label.contains("user declared"), label)
     }
 
     @Test

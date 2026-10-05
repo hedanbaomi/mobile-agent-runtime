@@ -4,6 +4,7 @@
 package runtime.mobileagent.feature.providers
 
 import runtime.mobileagent.domain.BudgetValidationError
+import runtime.mobileagent.domain.ContextLimitSource
 import runtime.mobileagent.domain.ContextLimitMode
 import runtime.mobileagent.domain.contextWindowTarget
 import runtime.mobileagent.domain.contextWindowTargetMatches
@@ -101,6 +102,7 @@ data class ProviderModelUi(
      */
     val contextWindowTarget: String = "",
     val contextWindowRecorded: Boolean = false,
+    val contextWindowSource: ContextLimitSource = ContextLimitSource.USER_DECLARED,
 )
 
 /** What the context window column says: no fabricated, no silently stale number. */
@@ -119,15 +121,19 @@ fun contextWindowLabel(model: ProviderModelUi, currentTarget: String, zh: Boolea
     !model.contextWindowRecorded ->
         if (zh) "上下文 未知（未识别到可信窗口）" else "context unknown (no trusted window)"
     !contextWindowTargetMatches(model.contextWindowTarget, currentTarget) -> {
-        val recorded = model.contextWindowValue
-        if (zh) "上下文 失效（$recorded 记录的 provider/端点/模型已变；当前未知）"
-        else "context stale ($recorded was recorded for another provider/endpoint/model; current unknown)"
+        if (zh) "上下文 失效（目标已变，当前未知）"
+        else "context stale (target changed; current unknown)"
     }
     parsePositiveProviderBudget(model.contextWindowValue) == null ->
         if (zh) "上下文 未知（已记录窗口无效）" else "context unknown (recorded window is not a valid number)"
     else -> {
         val value = model.contextWindowValue
-        if (zh) "上下文 有效 $value（用户声明，仅对该目标）" else "context effective $value (user declared, this target only)"
+        val source = if (model.contextWindowSource == ContextLimitSource.PROVIDER_METADATA) {
+            if (zh) "服务商目录" else "provider catalog"
+        } else {
+            if (zh) "用户声明" else "user declared"
+        }
+        if (zh) "上下文 有效 $value（$source）" else "context effective $value ($source)"
     }
 }
 
@@ -250,7 +256,7 @@ fun parseContextLimitMode(raw: String): ContextLimitMode =
  * must never see "automatic" while a fabricated number is in force: unknown is
  * shown as unknown, and the local protection ceiling is described as local.
  */
-fun effectiveContextWindowSource(draft: ProviderDraft, zh: Boolean): String {
+fun effectiveContextWindowSource(draft: ProviderDraft, zh: Boolean, recordedModel: ProviderModelUi? = null): String {
     if (parseContextLimitMode(draft.contextLimitMode) == ContextLimitMode.MANUAL) {
         val value = parsePositiveProviderBudget(draft.contextLimit)
         return if (value == null) {
@@ -260,10 +266,25 @@ fun effectiveContextWindowSource(draft: ProviderDraft, zh: Boolean): String {
         }
     }
     val declared = parsePositiveProviderBudget(draft.contextWindowValue)
+    if (draft.contextWindowValue.isBlank() && recordedModel != null &&
+        recordedModel.id == draft.modelProfileId &&
+        parseContextLimitMode(recordedModel.contextLimitMode) == ContextLimitMode.AUTO &&
+        recordedModel.contextWindowSource == ContextLimitSource.PROVIDER_METADATA &&
+        recordedModel.contextWindowRecorded
+    ) {
+        val target = contextWindowTarget(
+            draft.id.orEmpty(), draft.baseUrl.trim(),
+            draft.modelId.trim().ifBlank { recordedModel.modelId },
+        )
+        val catalogWindow = parsePositiveProviderBudget(recordedModel.contextWindowValue)
+        if (catalogWindow != null && contextWindowTargetMatches(recordedModel.contextWindowTarget, target)) {
+            return if (zh) "窗口：$catalogWindow（服务商目录）" else "Window: $catalogWindow (provider catalog)"
+        }
+    }
     return if (declared == null) {
-        if (zh) "实际来源：未知（未识别到可信窗口；本地保护上限仍生效，不当作无限）" else "Effective source: unknown (no trusted window found; local protection still applies, not unlimited)"
+        if (zh) "窗口未知；本地保护上限仍生效。" else "Window unknown; local protection still applies."
     } else {
-        if (zh) "实际来源：用户填写 $declared（来源 USER_DECLARED，仅对该 Provider/端点/模型生效）" else "Effective source: user-declared $declared (USER_DECLARED, applies to this provider/endpoint/model only)"
+        if (zh) "窗口：$declared（用户声明，仅对当前目标）" else "Window: $declared (user declared, current target)"
     }
 }
 fun parseOutputLimitMode(raw: String): OutputLimitMode =
@@ -425,9 +446,9 @@ fun ProvidersScreen(
             text = {
                 Text(
                     if (zh) {
-                        "将按当前模型配置发送一次最小对话请求，以确认服务商可以正常响应。请求可能产生极小费用。"
+                        "按当前配置发送一次最小请求，可能收费。"
                     } else {
-                        "One minimal chat request will be sent using the current model configuration. It may incur a very small provider charge."
+                        "Send one minimal request using this configuration. Provider charges may apply."
                     },
                 )
             },
@@ -445,7 +466,7 @@ fun ProvidersScreen(
         AlertDialog(
             onDismissRequest = { probeRequested = false },
             title = { Text(if (zh) "运行服务商探测？" else "Run provider probe?") },
-            text = { Text(if (zh) "能力探测会向已配置端点发送 metadata 请求，并可能分别发送最多 3 个最小 Chat 请求来验证流式、工具与图片能力；这些请求可能分别产生服务商费用。" else "The probe sends a metadata request and may send up to three separate minimal chat requests to verify streaming, tools, and images. Each request may incur provider charges.") },
+            text = { Text(if (zh) "验证连接、流式、工具和图片，可能分别收费。图片请求最多输出 1024 tokens；不会自动重试。" else "Connection, streaming, tools and images may each incur charges. Image output is capped at 1024 tokens; no automatic retry.") },
             confirmButton = { Button(onClick = { probeRequested = false; actions.onProbe() }) { Text(if (zh) "运行探测" else "Run probe") } },
             dismissButton = { TextButton(onClick = { probeRequested = false }) { Text(if (zh) "取消" else "Cancel") } },
         )
@@ -850,7 +871,7 @@ private fun ProviderEditorFields(
                 )
                 if (showModelFields) {
                     OutlinedTextField(draft.modelId, { actions.onDraftChange(draft.copy(modelId = it)) }, label = { Text(if (zh) "模型 ID" else "Model id") }, keyboardOptions = noCorrectionAscii, modifier = Modifier.fillMaxWidth())
-                    Text(if (zh) "操作：CHAT / EMBEDDING / RERANKER；图片是 Chat 的输入模态，不是独立服务。" else "Operation: CHAT / EMBEDDING / RERANKER. Images are a Chat input modality, not a separate service.", style = MaterialTheme.typography.bodySmall)
+                    Text(if (zh) "角色：CHAT / EMBEDDING / RERANKER；Chat 可含图片。" else "Role: CHAT / EMBEDDING / RERANKER; Chat may include images.", style = MaterialTheme.typography.bodySmall)
                     OutlinedTextField(draft.role, { actions.onDraftChange(draft.copy(role = it)) }, label = { Text(if (zh) "操作/角色" else "Operation / role") }, keyboardOptions = noCorrectionAscii, modifier = Modifier.fillMaxWidth())
                     OutlinedTextField(draft.parametersJson, { actions.onDraftChange(draft.copy(parametersJson = it)) }, label = { Text(if (zh) "参数 JSON" else "Parameters JSON") }, keyboardOptions = noCorrectionText, minLines = 2, modifier = Modifier.fillMaxWidth())
                     Text(if (zh) "上下文窗口" else "Context window", style = MaterialTheme.typography.titleSmall, modifier = Modifier.testTag("provider.contextLimit.title"))
@@ -858,7 +879,7 @@ private fun ProviderEditorFields(
                         FilterChip(
                             selected = parseContextLimitMode(draft.contextLimitMode) == ContextLimitMode.AUTO,
                             onClick = { actions.onDraftChange(draft.copy(contextLimitMode = ContextLimitMode.AUTO.name)) },
-                            label = { Text(if (zh) "自动（识别不到则未知）" else "Automatic (unknown if not detected)") },
+                            label = { Text(if (zh) "自动" else "Automatic") },
                             modifier = Modifier.testTag("provider.contextLimitMode.auto"),
                         )
                         FilterChip(
@@ -868,9 +889,9 @@ private fun ProviderEditorFields(
                             modifier = Modifier.testTag("provider.contextLimitMode.manual"),
                         )
                     }
-                    Text(effectiveContextWindowSource(draft, zh), style = MaterialTheme.typography.bodySmall, modifier = Modifier.testTag("provider.contextLimit.effectiveSource"))
+                    Text(effectiveContextWindowSource(draft, zh, state.models.firstOrNull { it.id == draft.modelProfileId }), style = MaterialTheme.typography.bodySmall, modifier = Modifier.testTag("provider.contextLimit.effectiveSource"))
                     if (parseContextLimitMode(draft.contextLimitMode) == ContextLimitMode.AUTO) {
-                        OutlinedTextField(draft.contextWindowValue, { actions.onDraftChange(draft.copy(contextWindowValue = it)) }, label = { Text(if (zh) "已知窗口（可选，来自服务商文档）" else "Known window (optional, from provider docs)") }, keyboardOptions = noCorrectionAscii, modifier = Modifier.fillMaxWidth().testTag("provider.contextWindowValue"))
+                        OutlinedTextField(draft.contextWindowValue, { actions.onDraftChange(draft.copy(contextWindowValue = it)) }, label = { Text(if (zh) "窗口声明（可选，覆盖目录）" else "Declared window (optional, overrides catalog)") }, keyboardOptions = noCorrectionAscii, modifier = Modifier.fillMaxWidth().testTag("provider.contextWindowValue"))
                     } else {
                         OutlinedTextField(draft.contextLimit, { actions.onDraftChange(draft.copy(contextLimit = it)) }, label = { Text(if (zh) "上下文窗口（手动）" else "Context window (manual)") }, keyboardOptions = noCorrectionAscii, modifier = Modifier.fillMaxWidth(), isError = budgetError != null && parsePositiveProviderBudget(draft.contextLimit) == null)
                     }
@@ -897,12 +918,12 @@ private fun ProviderEditorFields(
                     if (parseOutputLimitMode(draft.outputLimitMode) == OutputLimitMode.MANUAL) {
                         OutlinedTextField(draft.outputLimit, { actions.onDraftChange(draft.copy(outputLimit = it)) }, label = { Text(if (zh) "输出预算" else "Output budget") }, keyboardOptions = noCorrectionAscii, modifier = Modifier.fillMaxWidth(), isError = budgetError != null && (parsePositiveProviderBudget(draft.outputLimit) == null || (parsePositiveProviderBudget(draft.contextLimit)?.let { context -> parsePositiveProviderBudget(draft.outputLimit)?.let { output -> output > context } } == true)))
                     }
-                    Text(if (zh) "自动只表示应用不额外指定输出上限；不是无限输出，也不改变推理模式或服务商。" else "Automatic only means the app adds no output cap; it is not unlimited output and does not change reasoning mode or provider.", style = MaterialTheme.typography.labelSmall)
+                    Text(if (zh) "跟随服务商上限，仍受本地运行预算约束。" else "Follow the provider limit; local run budgets still apply.", style = MaterialTheme.typography.labelSmall)
                     CheckRow(if (zh) "输入包含图片" else "Input includes images", draft.vision) { actions.onDraftChange(draft.copy(vision = it)) }
                     CheckRow(if (zh) "可调用工具" else "Can call tools", draft.tools) { actions.onDraftChange(draft.copy(tools = it)) }
                 }
                 OutlinedTextField(draft.apiKey, { actions.onDraftChange(draft.copy(apiKey = it)) }, label = { Text(if (draft.id == null) { if (zh) "API 密钥" else "API key" } else { if (zh) "替换 API 密钥（可选）" else "Replace API key (optional)" }) }, visualTransformation = PasswordVisualTransformation(), keyboardOptions = noCorrectionAscii, modifier = Modifier.fillMaxWidth())
-                Text(if (zh) "能力探测分别记录用户声明与真实验证，可能产生服务商费用，且只在明确确认后运行。" else "Probes record user-declared vs verified behavior, can incur provider charges, and only run after explicit confirmation.", style = MaterialTheme.typography.bodySmall)
+                Text(if (zh) "能力需确认后探测，可能收费。" else "Verify capabilities after confirmation; provider charges may apply.", style = MaterialTheme.typography.bodySmall)
     }
 }
 

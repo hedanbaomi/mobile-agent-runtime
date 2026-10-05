@@ -450,7 +450,7 @@ private fun AgentSummary(state: AgentsUiState, actions: AgentsActions) {
     val zh = state.language.equals("zh-CN", true)
     val editor = state.summary
     if (editor == null) {
-        Text(if (zh) "选择智能体以查看提示词、模型角色和资源绑定。" else "Select an agent to inspect its prompt, model roles, and resource bindings.", modifier = Modifier.padding(24.dp))
+        Text(if (zh) "选择智能体查看配置。" else "Select an agent to view its settings.", modifier = Modifier.padding(24.dp))
         return
     }
     Column(Modifier.fillMaxWidth().testTag(AgentTestTags.SUMMARY)) {
@@ -1040,9 +1040,9 @@ private fun AgentDefaultWorkspaceCard(
         )
         Text(
             if (zh) {
-                "选择工作区即明确授予此 Agent 长期使用权，并自动配置该工作区支持的读写文件能力；不会授予 shell。已有会话保持原绑定。"
+                "选择后长期授予此 Agent 文件读写权限，不含 Shell；已有会话不变。"
             } else {
-                "Selecting a workspace explicitly grants this Agent persistent access and configures its supported read/write file capabilities, never shell. Existing conversations keep their binding."
+                "Grant this Agent persistent file access to the selected workspace, excluding Shell. Existing sessions keep their binding."
             },
             style = MaterialTheme.typography.bodySmall,
         )
@@ -1160,7 +1160,7 @@ private fun AgentGrantEditor(
         ) {
             Text(if (zh) "快捷授权文件工具" else "Quick file tool grant", fontWeight = FontWeight.SemiBold)
             Text(
-                if (zh) "选择一个已由 SAF 或应用创建的工作区，再一次授予常用的读取或读写工具。高级授权仍可在下方逐项设置。"
+                if (zh) "选择工作区并授予读取或读写权限；可在下方逐项调整。"
                 else "Choose a SAF or app workspace, then grant the common read-only or read-write tools at once. Advanced per-capability grants remain below.",
                 style = MaterialTheme.typography.bodySmall,
             )

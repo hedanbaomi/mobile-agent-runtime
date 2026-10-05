@@ -3,7 +3,7 @@
 
 # 项目交接
 
-最后更新：2026-10-03T12:43:21.962229+00:00（UTC；五项复审修复提交前验证快照，普通 PR 收据另行核验）。项目根目录：E:/mobileAgentRuntime。
+最后更新：2026-10-05T09:34:32+08:00（UTC+8；Command Code 窗口与图片探测修复的提交前验证快照，用户实测成功并授权正常发布）。项目根目录：E:/mobileAgentRuntime。
 
 按 [agent.md 第 1 节](agent.md#1-按任务读取与开工) 选择资料。现行规则见 agent.md；本文件记录现场和待办，历史任务中的授权不自动延续。
 
@@ -23,6 +23,8 @@
 - 完整证据：[2026-09-18 文档管线复审 R1–R5 收口](docs/evidence/2026-09-18/document-pipeline-r1-r5-closeout.md)。
 
 ## 1. 现行状态与当前任务
+
+- **2026-10-05 Command Code 窗口、图片探测与页面精简（实现与本地验证完成；用户实测成功；提交前快照）**：两 OpenAI adapter 接入无凭据 Command Code 官方目录，精确端点/模型和有界读取；AUTO 保存和显式测试补取窗口，同目标离线编辑保留目录值，目标/revision CAS 拒绝迟到覆盖。图片共用有效128×128 PNG，上限1024且尊重较小手动预算，截断UNKNOWN/畸形FAILED，不自动收费重试；目录与付费结果/busy隔离，编辑页显示目录真实来源。精简全局标题及服务商、Agent、知识库、技能、设置重复说明，保留费用/权限/UNKNOWN/AGPL。Provider272、SQLite375、Provider文案6、Android每变体216与API34模拟器43全部通过；最终strict/offline reviewGate 2m11s/1132任务、licenseGuard、REUSE856/856通过；独立DSH Flash复核PASS且19源完整SHA一致。用户随后确认实测修复成功，明确授权提交、推送、普通PR合并并同步本地main；此为提交前快照，不提前宣称远端CI或合并。需求/验收R02/R03/R12/R18、A03/A04/A10、U02/U05；详见[修复证据](docs/evidence/2026-10-05/commandcode-vision-ui.md)和[ADR-0021](docs/adr/0021-provider-catalog-and-image-probe.md)。基线1400a54，分支codex/commandcode-metadata-vision-ui-20261005；原有附件、计划与本地HANDOFF历史单独保护，不纳入本提交，无活跃源码认领。未新增真实收费调用或部署；本次反馈不扩大成全量/长稳验收。
 
 - **2026-10-05 Provider 兼容性修复（源码与本地验证完成；提交前证据）**：null code 的模型缺失误判与 type-only 参数错误误判已修复，两协议共享脱敏分类；基础 Chat 连通请求省略可选参数，能力探测完整保参；模型编辑空 ID 保留已有身份；协议中立错误文案、命名模型/模型路由消息边界及准确 KDoc 同步。Provider236/236、Android三变体各216/216、API34脚本化设备5/5；最后strict/offline全门禁995任务成功、REUSE850/850、独立只读复核PASS并核对8源SHA。见[专项证据](docs/evidence/2026-10-05/provider-compatibility.md)。用户授权正常提交/推送/PR合并、同步本地main和Debug签名review APK；本条为提交前验证快照，最终Git/APK身份以交付收据为准，无源码认领。未调用真实Provider、未做真机/全量设备验收；无数据库、权限、依赖或许可变更，无需新ADR。
 

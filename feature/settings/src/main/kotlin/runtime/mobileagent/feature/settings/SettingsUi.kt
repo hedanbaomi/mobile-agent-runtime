@@ -293,8 +293,8 @@ fun SettingsScreen(
             Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 Text(if (zh) "联网搜索（Brave Search API）" else "Web search (Brave Search API)", style = MaterialTheme.typography.titleMedium)
                 Text(
-                    if (zh) "查询只会在每次工具调用得到你的确认后发送给 Brave；API 可能计费。密钥使用 Android Keystore 加密保存，不进入导出、诊断或请求检查器。"
-                    else "Each query is sent to Brave only after your per-call approval; the API may charge. The key is encrypted with Android Keystore and excluded from exports, diagnostics, and the request inspector.",
+                    if (zh) "每次确认后向 Brave 发送查询，可能收费。密钥由 Keystore 加密，不进入导出或诊断。"
+                    else "Each approved query is sent to Brave and may incur charges. Keystore-encrypted keys stay out of exports, diagnostics and the inspector.",
                     style = MaterialTheme.typography.bodySmall,
                 )
                 OutlinedTextField(
@@ -333,7 +333,7 @@ fun SettingsScreen(
             Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 Text(if (zh) "全局根提示词" else "Global root prompt", style = MaterialTheme.typography.titleMedium)
                 Text(
-                    if (zh) "位于不可编辑的运行时协议与 Agent 提示词之间。不能授予工具、网络、文件或 Python 隔离。"
+                    if (zh) "应用于所有 Agent，不改变工具、网络或文件权限。"
                     else "Inserted between the immutable runtime contract and the agent prompt. It cannot grant tools, network, files, or Python isolation.",
                     style = MaterialTheme.typography.bodySmall,
                 )

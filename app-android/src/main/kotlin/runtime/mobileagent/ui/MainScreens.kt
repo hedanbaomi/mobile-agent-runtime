@@ -377,8 +377,6 @@ internal fun MainApp(onMoveTaskToBack: () -> Unit = {}) {
                     AppRoutes.CHAT -> drawerChatState.agents.firstOrNull {
                         it.id == drawerChatState.selectedAgentId
                     }?.label ?: if (chinese) "选择智能体开始对话" else "Choose an Agent to start"
-                    AppRoutes.KNOWLEDGE -> "CAS · on-device"
-                    AppRoutes.PROVIDERS -> "BYOK · Keystore"
                     else -> ""
                 },
                 navigationAffordance = navigationAffordance,
@@ -1890,6 +1888,7 @@ private fun providerModelFrom(model: runtime.mobileagent.domain.ModelProfile) =
         outputLimitMode = model.outputLimitMode.name,
         contextLimitMode = model.contextLimitMode.name,
         contextWindowValue = model.contextWindowValue?.toString().orEmpty(),
+        contextWindowSource = model.contextWindowSource,
         // The row re-validates against the live target so a recorded window is
         // never shown as effective on a different provider/endpoint/model.
         contextWindowTarget = model.contextWindowTarget.orEmpty(),
@@ -1904,7 +1903,7 @@ private fun providerDraftFrom(provider: runtime.mobileagent.domain.ProviderProfi
         contextLimit = model?.contextLimit?.toString() ?: "32768", outputLimit = model?.effectiveOutputTokenLimit()?.toString() ?: "4096",
         outputLimitMode = (model?.outputLimitMode ?: runtime.mobileagent.domain.OutputLimitMode.AUTO).name,
         contextLimitMode = (model?.contextLimitMode ?: runtime.mobileagent.domain.ContextLimitMode.AUTO).name,
-        contextWindowValue = model?.contextWindowValue?.toString() ?: "",
+        contextWindowValue = model?.takeIf { it.contextWindowSource == runtime.mobileagent.domain.ContextLimitSource.USER_DECLARED }?.contextWindowValue?.toString() ?: "",
         vision = model?.capabilities?.contains("image") == true, tools = model?.capabilities?.contains("tools") == true)
 
 private val providerDraftSaver: Saver<runtime.mobileagent.feature.providers.ProviderDraft, List<Any?>> = Saver(

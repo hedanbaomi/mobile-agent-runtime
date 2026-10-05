@@ -454,7 +454,7 @@ fun KnowledgeScreen(
         AlertDialog(
             onDismissRequest = { rebuildRequested = false },
             title = { Text(if (zh) "重建索引？" else "Rebuild index?") },
-            text = { Text(if (zh) "宿主将从本地持久化文档重建当前知识库索引，过程可能需要一些时间。" else "The host will rebuild the selected knowledge base from persisted local documents. This may take time.") },
+            text = { Text(if (zh) "从本地文档重建索引，可能需要一些时间。" else "Rebuild the index from local documents. This may take time.") },
             confirmButton = { Button(onClick = { rebuildRequested = false; actions.onRebuild() }) { Text(if (zh) "重建" else "Rebuild") } },
             dismissButton = { TextButton(onClick = { rebuildRequested = false }) { Text(if (zh) "取消" else "Cancel") } },
         )
@@ -593,8 +593,8 @@ fun KnowledgeScreen(
                         style = MaterialTheme.typography.bodySmall,
                     )
                     Text(
-                        if (zh) "创建前选择本批次的视觉服务商和模型。目标会按完整配置指纹固定，不会因为返回配置页或默认值变化而静默切换。"
-                        else "Choose the Vision provider and model for this batch before it starts. The full configuration fingerprint is fixed for the batch and will not silently change after a settings round trip.",
+                        if (zh) "此批次固定使用所选视觉目标；配置变化后需重新确认。"
+                        else "This batch uses the selected Vision target; configuration changes require confirmation.",
                         style = MaterialTheme.typography.bodySmall,
                     )
                     if (state.visionTargetsLoading) {
@@ -809,7 +809,7 @@ private fun KnowledgeBasePane(
                 Text(if (zh) "导入 ZIP" else "Import ZIP", maxLines = 1, softWrap = false, overflow = TextOverflow.Clip)
             }
         }
-        Text(if (zh) "文件、文件夹和知识库 ZIP 通过系统选择器进入应用管理存储；DOCX/EPUB 仍按办公文档解析。" else "Files, folders, and knowledge ZIP archives stay in app-managed storage. DOCX/EPUB remain office documents.", style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(top = 6.dp))
+        Text(if (zh) "导入文件保存在应用内，文本优先本机解析。" else "Imported files stay in the app; text is parsed locally first.", style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(top = 6.dp))
         if (state.embeddingSpaceLabel.isNotBlank()) {
             Text(
                 if (zh) "当前 Embedding 空间：${state.embeddingSpaceLabel}" else "Current Embedding space: ${state.embeddingSpaceLabel}",

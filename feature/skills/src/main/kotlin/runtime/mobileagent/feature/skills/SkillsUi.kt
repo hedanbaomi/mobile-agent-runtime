@@ -246,7 +246,7 @@ private fun SkillListPane(state: SkillsUiState, actions: SkillsActions, zh: Bool
 private fun SkillDetailPane(state: SkillsUiState, actions: SkillsActions, zh: Boolean, modifier: Modifier) {
     Column(modifier) {
         if (state.status.isNotBlank()) Text(safeDisplay(state.status), style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(bottom = 8.dp))
-        state.detail?.let { SkillDetail(it, actions, zh) } ?: Text(if (zh) "选择技能以查看源码、权限和审计日志。" else "Select a skill to inspect its source, permissions, and audit log.", modifier = Modifier.padding(24.dp))
+        state.detail?.let { SkillDetail(it, actions, zh) } ?: Text(if (zh) "选择技能查看详情。" else "Select a skill to view details.", modifier = Modifier.padding(24.dp))
     }
 }
 
@@ -291,14 +291,14 @@ private fun SkillDetail(detail: SkillDetailUi, actions: SkillsActions, zh: Boole
     if (detail.preview.isNotBlank()) Text(safeDisplay(detail.preview), modifier = Modifier.padding(top = 12.dp))
     Text(if (zh) "安全边界" else "Security boundary", style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(top = 16.dp))
     Text(
-        if (zh) "默认使用受限的类型化文件工具；应用私有工作区与用户在系统选择器选定并持久授权的 SAF 工作区相互独立。系统增强文件工具只使用用户明确选择的 Shizuku 或有线 ADB，选定通道不可用时不会自动切换。"
-        else "Default access uses confined typed file tools. The app-private workspace is separate from a SAF workspace selected and persistently granted by the user. Elevated typed files use only the explicitly selected Shizuku or wired ADB authority; an unavailable selection never silently falls back.",
+        if (zh) "文件访问限于已授权工作区；系统增强使用所选 Shizuku 或有线 ADB，不自动切换。"
+        else "File access is limited to granted workspaces. Elevated access uses the selected Shizuku or wired ADB authority, with no automatic fallback.",
         style = MaterialTheme.typography.bodySmall,
         modifier = Modifier.padding(top = 4.dp),
     )
     Text(
-        if (zh) "Dangerous Mode 开启、当前 Agent/Skill 具有 shell.execute 且选定 Authority 可用时，才提供一次性 shell_exec。它是 Android shell escape，不是安全沙箱，也不是 Root，可能修改设备状态。Root、无线 ADB、DPC/Device Owner/Profile Owner、Termux 不在产品路线。"
-        else "Only when Dangerous Mode is enabled, the current Agent/Skill has shell.execute, and the selected authority is available is one-shot shell_exec exposed. It is an Android shell escape, not a security sandbox or Root, and may change device state. Root, wireless ADB, DPC/Device Owner/Profile Owner, and Termux are out of scope.",
+        if (zh) "Shell 需危险模式、shell.execute 授权及可用通道，可修改设备；非 Root、非安全沙箱。"
+        else "Shell requires Dangerous Mode, shell.execute grants and an available authority. It may change the device; it is neither Root nor a sandbox.",
         style = MaterialTheme.typography.bodySmall,
         modifier = Modifier.padding(top = 4.dp),
     )
@@ -349,8 +349,6 @@ private fun SkillDetail(detail: SkillDetailUi, actions: SkillsActions, zh: Boole
             TextButton(onClick = { actions.onOpenSource(skill.installId, file.path) }) { Text(if (zh) "查看" else "View") }
         }
     }
-    Text(if (zh) "清单" else "Manifest", style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(top = 16.dp))
-    Text(if (zh) "仅显示上面的权限、绑定与兼容性安全摘要；原始清单字段不会在此页面展开。" else "Only the security summary above is shown; raw manifest fields are not expanded on this screen.", style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(top = 4.dp))
     Text(if (zh) "审计日志" else "Audit log", style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(top = 16.dp))
     if (detail.audit.isEmpty()) Text(if (zh) "暂无审计记录。" else "No audit entries available.", style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(top = 6.dp))
     detail.audit.forEach { event -> Text(listOf(event.timestamp, event.event, event.actor, event.detail).filter(String::isNotBlank).joinToString(" · ").let(::safeDisplay), style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(top = 4.dp)) }

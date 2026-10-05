@@ -171,7 +171,11 @@ Keystore生成不可导出的加密key，Provider/Skill秘密作为密文保存�
 
 应用内诊断日志同样默认关闭，只能由用户在设置页主动开启。实现使用固定事件/字段白名单，只记录会话、进程、`main`/`worker`/`other`线程类别、UTC、等级、构建 revision/dirty/schema/build time，以及匿名的能力开关、保存结果、知识导入/Skill检查安装/批次worker阶段、Authority/approval/revalidation/dispatch/execution/terminal 阶段与计数；不得记录 Provider/模型/Base URL/API Key/Header、聊天/Prompt、知识或Skill文件名/真实路径、命令/argv/cwd、URI/ADB serial、请求正文、stdout/stderr 或异常消息。所有字符串再次经过 secret、URL/query、Windows/Unix 路径、控制字符和长度清洗。当前段与上一段各至多8 MiB，最近崩溃摘要至多32 KiB，单事件至多64 KiB，导出ZIP至多20 MiB；未捕获异常只保留异常类型和有界类/方法/行号，写入后必须委托Android原始崩溃处理器。诊断初始化、轮转和handler安装均为best-effort，失败不能阻止App启动。
 
-诊断包经 Storage Access Framework 写到用户选择的位置，manifest包含构建和设备fingerprint以绑定复现环境；导出失败不得清除原始日志，清除只删除应用自有诊断文件。应用不申请`READ_LOGS`，不能捕获native崩溃、内核/系统强杀或被杀前未落盘的Android系统日志，这些场景仍需用户提供相同APK SHA对应的ADB Logcat。完整操作和字段契约见[诊断日志](DIAGNOSTICS.md)。
+日志级别默认 INFO，可在设置页持久切换 DEBUG，选择不自动开启诊断。INFO 不采集视觉正文/详细导入进度；显式 DEBUG 可以记录诊断文档规定的有界 Vision 请求/响应正文，保留凭据及 provider-private continuation 过滤，并提示分享前检查资料。此 DEBUG 正文是上一段“不得记录请求正文”的显式、限定例外，不开放通用自由字段。切回 INFO 不清除历史记录。
+
+诊断包经 Storage Access Framework 写到用户选择的位置，manifest包含构建、设备fingerprint、activeLogLevel 和历史级别说明；导出失败不得清除原始日志，清除只删除应用自有诊断文件。应用不申请`READ_LOGS`，不能捕获native崩溃、内核/系统强杀或被杀前未落盘的Android系统日志，这些场景仍需用户提供相同APK SHA对应的ADB Logcat。完整操作和字段契约见[诊断日志](DIAGNOSTICS.md)。
+
+联网搜索采用独立的 Agent 显式授权，默认关闭；允许后免逐查询确认。仅使用用户所选搜索服务的加密凭据及固定协议，不开放任意 URL/Header，发送前与结果复用前实时撤权检查；禁重定向/自动重试，未知收费结果不重放。详见[联网搜索](WEB_SEARCH.md)和[ADR-0022](adr/0022-configurable-search-and-agent-permission.md)。
 
 备份策略排除秘密和设备绑定key相关状态，恢复后要求重新输入密钥；不要把自动备份当作跨设备秘密迁移。默认导出Agent/Prompt/模型非秘密参数、KB元数据和Skill配置，不含Key/Header/Cookie/敏感附件。用户显式选择完整KB/对话/Skill包导出时展示体积和隐私范围，保留原权利信息并重新导入验证；未选的blob和源码不得夹带。Agent 运行时绑定仍是本地 `install_id`：导出记录来源安装身份，含会话备份还带上历史快照仍引用、但当前 Agent 已解绑或替换的 Skill；导入到空库时重映射到新的本地安装记录并保持禁用，不把旧 Skill 擅自加回当前 Agent，不把 package id 写入运行时绑定，也不携带原授权。同一清单 id 的不同版本/哈希按各自安装身份恢复；package id 只在无歧义时作为可选别名。package id 与来源 install id 不得在同一映射里互相覆盖；仅有歧义 package id 的遗留绑定必须拒绝，不得按迭代顺序选版本。
 

@@ -73,7 +73,7 @@ U01—U06 的首次验收对象为设计包，结果仅覆盖设计；后续 M1�
 | A05 | 建会话后修改Prompt/模型/参数；展开Effective Prompt并与测试server接收内容比较 | 旧会话保持快照；显式换配置有新边界；预览与最终真实请求角色/结构一致，secret脱敏 |
 | A06 | 两个Agent共享KB/Skill/Provider；撤权后续跑旧快照 | 不重复向量化；撤权立即优先于旧配置；不存在跨Agent授权泄漏 |
 | A07 | Agent/KB/Skill导入导出往返、旧schema迁移、未知schema/坏hash/部分失败 | 默认不含secret/敏感附件；显式完整导出保留许可；重导入完整且版本匹配；失败不清库 |
-| A08 | 默认关闭诊断后触发能力开关/保存；主动开启后制造滚动量、标记 secret/URL/query/path/换行、权限/审批/断连/超时/取消/未知结果、受控未捕获异常、导出目标失败、清除并重开应用 | 关闭时零日志且偏好可持久化；当前/上一段各不超过8 MiB、最近崩溃不超过32 KiB、单事件不超过64 KiB、ZIP不超过20 MiB；仅固定事件/字段，导出不含标记秘密、命令/argv/cwd、路径/URI/serial、stdout/stderr、聊天/Prompt/知识文件名/请求正文/异常消息；异常记录后委托系统原处理器；失败导出不删除现场；manifest含revision/dirty/schema/build time/设备fingerprint；原生崩溃和系统强杀边界明确提示仍需ADB Logcat |
+| A08 | 默认关闭诊断；INFO→DEBUG→重建→INFO，分别记录普通/错误/视觉正文/详细进度；主动开启后制造滚动量、标记 secret/URL/query/path/换行、权限/断连/超时/取消/未知结果、受控异常、失败导出、清除 | 默认 INFO；选择级别不自动开启诊断，持久保存；INFO 不采集/分块 Vision 正文与详细进度，跳过不计为丢弃；DEBUG 保留凭据及 private continuation 过滤和正文分享提示，切回 INFO 不清除历史；关闭零日志；8/8 MiB、32/64 KiB、ZIP20 MiB 限额；固定字段与既有脱敏，异常后委托系统处理器，失败导出不删现场；manifest 含构建/fingerprint/activeLogLevel 及历史级别说明；滚动及原生崩溃边界明确；具体证据见 2026-10-05/logging-and-search |
 | A09 | 以 `debuggable=false` 的 review-like build 检查危险模式、工具暴露、审批绑定、选定 Authority 失效和恢复；分别准备真实 Shizuku 服务与 USB Desktop Companion | debug/JVM/静态结果不能作为控制面安全结论；未提供真实 Shizuku/USB 端时记 `E2E BLOCKED`，不记 `DEVICE_PASS`；只有选定 Authority 可派发且无自动 fallback，危险模式关闭时不注册 `shell_exec` |
 | A10 | 对同一测试 Provider 分别执行 Test Connection 与 Capability Probe，覆盖 success、401、404、429、timeout、metadata 不支持但 Chat 成功、tools/image partial、failure→retry→success；切换 Provider 后复核状态隔离 | 两个操作使用正常请求相同 adapter/header/serialization 且 typed 结果互不污染；connection success 可以与 capability partial 同时成立；UI 不以 busy 反推成功，不解析自由字符串；失败不会把 endpoint/capability 误写为 PROBED；无真实付费请求，诊断无 URL/model/secret/body |
 
@@ -213,6 +213,8 @@ K06另需前台任务兼容矩阵：Android12+后台启动限制、Android14+服
 | S29 | 分别用 Shizuku/Wired 选择目录，保存后杀 App/UserService/Companion 或断连并重启；篡改密文、AAD、locator version，删除目录或撤销平台权限 | DB/导出/诊断无 locator 明文；恢复时同 workspaceId 生成新 ephemeral handle；暂时断联只进入 UNAVAILABLE/REATTACHING且不撤 Grant；目录不存在、权限拒绝与密文不可恢复使用不同闭合状态；任何失败都不 fallback、不重放旧 handle |
 | S30 | 在真实临时代码仓库创建超过单页上限的目录和大文件；分页 list、stat、offset read、并发外部修改后 apply_patch；尝试 `..`、symlink、超预算与 SAF 非原子覆盖 | 分页无漏项/重复且 cursor 不能跨 workspace/path 重放；stat 不读全文；分块结果含 size/next offset/eof/version；expected hash/version 冲突不覆盖；支持原子 replace 的 backend 才执行 patch，SAF 明确 UNSUPPORTED；所有结果仍受相对路径与序列化预算限制 |
 | S31 | 卸载已启用且已绑定 Agent 的 Skill；同包重新导入、另一个 Skill、旧会话导出与专属记忆 | 安装项消失，当前 Agent 解绑且授权/待用批准失效；旧快照、审计和记忆保留，历史会话仍可导出；同包重装生成新安装 ID 且不得继承旧授权；无历史引用时清理包字节，不删其他 Skill/共享 KB |
+| S33 | 旧 Brave 配置；选择 Tavily/Exa，分别保存/禁用/删除密钥；切换、重建、秘密回收、异步刷新前的旧 UI 回调；协议 fixture 检查 auth/body、private/shared DNS、302/307/503 | 旧配置兼容，三家凭据隔离且未选中/停用的凭据不误删；旧 UI 回调不跨供应商保存/禁用/删密钥，名称同步变化；未知服务拒绝；固定目标和认证，零跨地址凭据披露，零重定向/自动重试；有界不可信结果；fixture 不记为供应商线上验收 |
+| S34 | Agent 默认关闭、显式开启并新建会话、关闭、关闭再开启；查询后重复 callId；服务切换再切回；发送前/后撤销及失败 | 开启无需逐查询批准，其他工具政策不变；旧快照不扩权；实时撤权阻断旧 executor 和缓存重放，修订变化不复活旧调用；同调用一次派发，未知结果不重放；模拟器/UI/Keystore 与协议 fixture 证据分列 |
 
 ## 6. 公告
 

@@ -16,6 +16,7 @@ class AndroidDiagnosticLogger private constructor(
 ) {
     companion object {
         private const val ENABLED_KEY = "enabled"
+        private const val LOG_LEVEL_KEY = "log-level"
         // Shared by all facades in this app process so the fallback remains a stable session HMAC.
         private val sessionReferenceHasher by lazy { DiagnosticReferenceHasher.session() }
 
@@ -23,6 +24,17 @@ class AndroidDiagnosticLogger private constructor(
             val preferences = context.applicationContext.getSharedPreferences(preferencesName, Context.MODE_PRIVATE)
             val preferenceStore = object : DiagnosticPreferenceStore {
                 override fun isEnabled(): Boolean = preferences.getBoolean(ENABLED_KEY, false)
+
+                override fun logLevel(): DiagnosticLevel = when (preferences.getString(LOG_LEVEL_KEY, null)) {
+                    DiagnosticLevel.DEBUG.wireName -> DiagnosticLevel.DEBUG
+                    else -> DiagnosticLevel.INFO
+                }
+
+                override fun setLogLevel(level: DiagnosticLevel) {
+                    check(preferences.edit().putString(LOG_LEVEL_KEY, level.wireName).commit()) {
+                        "无法保存日志级别。"
+                    }
+                }
 
                 override fun setEnabled(enabled: Boolean) {
                     // commit keeps the user's opt-in across an immediate process death.
@@ -68,8 +80,11 @@ class AndroidDiagnosticLogger private constructor(
     private var installedHandler: DiagnosticUncaughtExceptionHandler? = null
 
     val isEnabled: Boolean get() = store.isEnabled
+    val logLevel: DiagnosticLevel get() = store.logLevel
+    val isDebugEnabled: Boolean get() = store.isLevelEnabled(DiagnosticLevel.DEBUG)
 
     fun setEnabled(enabled: Boolean) = store.setEnabled(enabled)
+    fun setLogLevel(level: DiagnosticLevel) = store.setLogLevel(level)
 
     fun recordProcessStarted(): Boolean = store.recordProcessStarted()
 
@@ -163,7 +178,7 @@ class AndroidDiagnosticLogger private constructor(
 
     /** Content is supplied only after provider-side credential/continuation redaction. */
     fun recordVisionContent(requestRef: String, kind: String, content: String, truncated: Boolean, originalChars: Int) {
-        if (!store.status().enabled) return
+        if (!store.isLevelEnabled(DiagnosticLevel.DEBUG)) return
         val chunkSize = 4_000
         val chunks = buildList {
             var start = 0

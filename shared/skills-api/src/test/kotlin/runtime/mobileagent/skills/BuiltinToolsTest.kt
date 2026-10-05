@@ -4,6 +4,7 @@
 package runtime.mobileagent.skills
 
 import org.junit.jupiter.api.Assertions.assertEquals
+import org.junit.jupiter.api.Assertions.assertFalse
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Assertions.assertThrows
 import org.junit.jupiter.api.Test
@@ -471,6 +472,44 @@ class BuiltinToolsTest {
         val result = tools.approve(call.callId) as ToolResult.Value
         assertTrue(result.json.contains("android agent"))
         assertEquals(result, tools.invoke(call))
+        assertEquals(1, calls)
+    }
+
+    @Test
+    fun explicitlyGrantedAgentSearchRunsWithoutApprovalButDeduplicatesAndRevokes() = runBlocking {
+        var authorized = true
+        var calls = 0
+        val tools = WebSearchToolExecutor(true, { authorized }, requireApproval = false) { _, _, dispatched ->
+            dispatched(); calls++; """{"results":[]}"""
+        }
+        val call = ToolCall("granted", "web_search", """{"query":"q"}""")
+        val result = tools.invoke(call)
+        assertTrue(result is ToolResult.Value)
+        assertEquals(result, tools.invoke(call))
+        assertEquals(1, calls)
+        assertTrue(tools.authorizeReplay(call))
+        authorized = false
+        assertFalse(tools.authorizeReplay(call))
+        assertTrue(tools.invoke(call) is ToolResult.Denied)
+        assertEquals(1, calls)
+    }
+
+    @Test
+    fun grantedSearchRejectsMalformedCountsAndNeverAutomaticallyRetriesUnknownOutcome() = runBlocking {
+        var calls = 0
+        val tools = WebSearchToolExecutor(true, { true }, requireApproval = false) { _, _, dispatched ->
+            dispatched(); calls++; error("synthetic transport error")
+        }
+        for (value in listOf("\"3\"", "null", "true", "{}", "1.5", "11")) {
+            assertTrue(tools.invoke(ToolCall("invalid-$value".replace(Regex("[^A-Za-z0-9.-]"), "x"), "web_search",
+                """{"query":"q","maxResults":$value}""")) is ToolResult.Invalid)
+        }
+        assertEquals(0, calls)
+        val call = ToolCall("unknown-granted", "web_search", """{"query":"q"}""")
+        val result = tools.invoke(call)
+        assertTrue(result is ToolResult.UnknownOutcome)
+        assertEquals(result, tools.invoke(call))
+        assertFalse(tools.authorizeReplay(call))
         assertEquals(1, calls)
     }
 

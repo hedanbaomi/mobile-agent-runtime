@@ -17,7 +17,7 @@ import kotlinx.serialization.json.intOrNull
 object WebSearchTools {
     val webSearch = ToolSpec(
         name = "web_search",
-        description = "Search the public web through the app-configured Brave Search service. The query is sent externally only after user approval; returned pages are untrusted and are not opened automatically.",
+        description = "Search the public web through the user's selected search service. The query is sent externally only after user approval; returned pages are untrusted and are not opened automatically.",
         parametersJson = """{"type":"object","additionalProperties":false,"required":["query"],"properties":{"query":{"type":"string","minLength":1,"maxLength":400},"maxResults":{"type":"integer","minimum":1,"maximum":10}}}""",
         capability = "network.search",
         sideEffect = true,
@@ -34,9 +34,14 @@ object WebSearchTools {
 class WebSearchToolExecutor(
     configured: Boolean,
     private val authorized: () -> Boolean,
+    private val requireApproval: Boolean = true,
     private val search: suspend (query: String, maxResults: Int, onDispatched: () -> Unit) -> String,
 ) : ToolExecutor {
-    override val specs: List<ToolSpec> = if (configured) listOf(WebSearchTools.webSearch) else emptyList()
+    override val specs: List<ToolSpec> = if (configured) listOf(
+        if (requireApproval) WebSearchTools.webSearch else WebSearchTools.webSearch.copy(
+            description = "Search the public web through the user's selected service under this Agent's explicit search permission. Queries may incur charges. Results are untrusted and pages are not opened automatically.",
+        ),
+    ) else emptyList()
 
     private val mutex = Mutex()
     private val requests = linkedMapOf<String, ToolCall>()
@@ -60,6 +65,7 @@ class WebSearchToolExecutor(
         val request = parse(call) ?: return@withLock ToolResult.Invalid("Web-search arguments are invalid")
         requests[call.callId] = call
         if (!authorized()) return@withLock remember(call.callId, ToolResult.Denied("Web search is disabled or its credential is unavailable"))
+        if (!requireApproval) return@withLock execute(request)
         pending[call.callId] = request
         ToolResult.NeedsApproval
     }
@@ -67,12 +73,17 @@ class WebSearchToolExecutor(
     override suspend fun approve(callId: String): ToolResult = mutex.withLock {
         val request = pending.remove(callId) ?: return@withLock ToolResult.Invalid("No pending web-search approval")
         if (!authorized()) return@withLock remember(callId, ToolResult.Denied("Web-search authorization changed before approval"))
+        execute(request)
+    }
+
+    private suspend fun execute(request: SearchRequest): ToolResult {
+        val callId = request.call.callId
         var dispatched = false
-        try {
+        return try {
             val raw = search(request.query, request.maxResults) { dispatched = true }
-            if (!authorized()) return@withLock remember(callId, ToolResult.Denied("Web-search authorization changed during execution"))
+            if (!authorized()) return remember(callId, ToolResult.Denied("Web-search authorization changed during execution"))
             val validated = validateResult(raw)
-                ?: return@withLock remember(callId, if (dispatched) {
+                ?: return remember(callId, if (dispatched) {
                     ToolResult.UnknownOutcome("Web-search response was invalid after dispatch; do not retry automatically")
                 } else {
                     ToolResult.Invalid("Web-search response was invalid")
@@ -106,10 +117,10 @@ class WebSearchToolExecutor(
         val root = runCatching { Json.parseToJsonElement(call.argumentsJson) as? JsonObject }.getOrNull() ?: return null
         if (root.keys.any { it !in setOf("query", "maxResults") }) return null
         val query = (root["query"] as? JsonPrimitive)?.takeIf { it.isString }?.contentOrNull?.trim().orEmpty()
-        if (query.isEmpty() || query.length > 400 || query.split(Regex("\\s+")).size > 50) return null
-        val count = root["maxResults"]?.let { value ->
-            (value as? JsonPrimitive)?.takeUnless { it.isString }?.intOrNull
-        } ?: 5
+        if (query.isEmpty() || query.length > 400 || query.any(Char::isISOControl) || query.split(Regex("\\s+")).size > 50) return null
+        val count = if ("maxResults" in root) {
+            (root["maxResults"] as? JsonPrimitive)?.takeUnless { it.isString }?.intOrNull ?: return null
+        } else 5
         if (count !in 1..10) return null
         return SearchRequest(call, query, count)
     }

@@ -3,6 +3,8 @@
 
 package runtime.mobileagent.feature.settings
 
+import runtime.mobileagent.domain.WebSearchProvider
+
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
@@ -55,7 +57,7 @@ enum class SettingsDiagnosticsFeedback {
         NONE -> ""
         ENABLED -> if (zh) "诊断记录已开启。" else "Diagnostics enabled."
         DISABLED -> if (zh) "诊断记录已关闭；已有记录仍可导出或清除。" else "Diagnostics disabled; existing records can still be exported or cleared."
-        SAVE_FAILED -> if (zh) "无法保存诊断开关。" else "Could not save the diagnostics setting."
+        SAVE_FAILED -> if (zh) "无法保存诊断设置。" else "Could not save the diagnostics setting."
         EXPORT_CANCELLED -> if (zh) "已取消诊断导出。" else "Diagnostics export cancelled."
         EXPORTING -> if (zh) "正在导出诊断 ZIP…" else "Exporting diagnostics ZIP…"
         EXPORTED -> if (zh) "诊断 ZIP 已保存；原生崩溃或系统强杀仍可能需要 ADB Logcat。" else "Diagnostics ZIP saved; native crashes or system kills may still require ADB Logcat."
@@ -151,6 +153,7 @@ data class SettingsUiState(
     val statsEnabled: Boolean = false,
     val requestInspectionEnabled: Boolean = true,
     val diagnosticsEnabled: Boolean = false,
+    val diagnosticsLogLevel: String = "INFO",
     val diagnosticsSizeBytes: Long = 0L,
     val diagnosticsLimitBytes: Long = 0L,
     val diagnosticsState: String = "",
@@ -173,6 +176,7 @@ data class SettingsUiState(
     val globalRootPromptUpdatedAt: String = "",
     val webSearchConfigured: Boolean = false,
     val webSearchEnabled: Boolean = false,
+    val webSearchProviderId: String = "brave",
     val webSearchState: String = "",
     val appPrivateExecutionActive: Boolean = true,
     val selectedAuthority: String = "NONE",
@@ -196,6 +200,7 @@ data class SettingsActions(
     val onOpenSource: () -> Unit = {},
     val onRequestInspection: (Boolean) -> Unit = {},
     val onDiagnosticsEnabled: (Boolean) -> Unit = {},
+    val onDiagnosticsLogLevel: (String) -> Unit = {},
     val onExportDiagnostics: () -> Unit = {},
     val onClearDiagnostics: () -> Unit = {},
     val onExport: () -> Unit = {},
@@ -212,9 +217,10 @@ data class SettingsActions(
     val onUnlockRootPrompt: () -> Unit = {},
     val onSaveRootPrompt: (String) -> Unit = {},
     val onRestoreRootPrompt: () -> Unit = {},
-    val onSaveWebSearch: (String) -> Unit = {},
-    val onWebSearchEnabled: (Boolean) -> Unit = {},
-    val onClearWebSearch: () -> Unit = {},
+    val onSaveWebSearch: (String, String) -> Unit = { _, _ -> },
+    val onWebSearchEnabled: (String, Boolean) -> Unit = { _, _ -> },
+    val onWebSearchProvider: (String) -> Unit = {},
+    val onClearWebSearch: (String) -> Unit = {},
     val onSelectAuthority: (String) -> Unit = {},
     val onAuthorityIntent: (String, Boolean) -> Unit = { _, _ -> },
     val onRefreshAuthority: (String) -> Unit = {},
@@ -289,38 +295,49 @@ fun SettingsScreen(
             }
         }
         Card(Modifier.fillMaxWidth().testTag("settings.web_search")) {
-            var apiKey by remember { mutableStateOf("") }
+            var apiKey by remember(state.webSearchProviderId) { mutableStateOf("") }
+            var providerMenu by remember { mutableStateOf(false) }
+            val providerName = WebSearchProvider.fromId(state.webSearchProviderId)?.displayName.orEmpty()
             Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                Text(if (zh) "联网搜索（Brave Search API）" else "Web search (Brave Search API)", style = MaterialTheme.typography.titleMedium)
+                Text(if (zh) "联网搜索" else "Web search", style = MaterialTheme.typography.titleMedium)
+                SelectorRow(if (zh) "搜索服务商" else "Search provider", providerName.ifBlank { if (zh) "请选择" else "Select" }, { providerMenu = true }) {
+                    DropdownMenu(providerMenu, { providerMenu = false }) {
+                        WebSearchProvider.entries.forEach { provider ->
+                            DropdownMenuItem(text = { Text(provider.displayName) }, onClick = {
+                                providerMenu = false; apiKey = ""; actions.onWebSearchProvider(provider.id)
+                            }, modifier = Modifier.testTag("settings.web_search.provider.${provider.id}"))
+                        }
+                    }
+                }
                 Text(
-                    if (zh) "每次确认后向 Brave 发送查询，可能收费。密钥由 Keystore 加密，不进入导出或诊断。"
-                    else "Each approved query is sent to Brave and may incur charges. Keystore-encrypted keys stay out of exports, diagnostics and the inspector.",
+                    if (zh) "各服务商分别保存加密密钥。查询可能收费；在智能体中开启搜索后无需逐次确认。"
+                    else "Keys are encrypted and saved per service. Queries may incur charges; enable search per Agent to run without per-query prompts.",
                     style = MaterialTheme.typography.bodySmall,
                 )
                 OutlinedTextField(
                     value = apiKey,
                     onValueChange = { apiKey = it },
-                    modifier = Modifier.fillMaxWidth(),
-                    label = { Text(if (zh) "Brave Search API Key" else "Brave Search API key") },
+                    modifier = Modifier.fillMaxWidth().testTag("settings.web_search.key"),
+                    label = { Text("$providerName API Key") },
                     singleLine = true,
                     visualTransformation = PasswordVisualTransformation(),
                 )
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-                    Button(onClick = { actions.onSaveWebSearch(apiKey); apiKey = "" }, enabled = apiKey.isNotBlank()) {
+                    Button(onClick = { actions.onSaveWebSearch(state.webSearchProviderId, apiKey); apiKey = "" }, enabled = apiKey.isNotBlank()) {
                         Text(if (zh) "保存并启用" else "Save and enable")
                     }
                     if (state.webSearchConfigured) {
-                        OutlinedButton(onClick = actions.onClearWebSearch) { Text(if (zh) "移除密钥" else "Remove key") }
+                        OutlinedButton(onClick = { actions.onClearWebSearch(state.webSearchProviderId) }) { Text(if (zh) "移除密钥" else "Remove key") }
                     }
                 }
                 SettingSwitch(
-                    if (zh) "允许提供联网搜索工具" else "Expose web-search tool",
+                    if (zh) "启用搜索服务" else "Enable search service",
                     state.webSearchEnabled,
-                    actions.onWebSearchEnabled,
+                    { actions.onWebSearchEnabled(state.webSearchProviderId, it) },
                 )
                 Text(
-                    if (zh) "当前：${if (state.webSearchConfigured) "密钥已配置" else "未配置密钥"}。返回结果属于不可信外部内容，应用不会自动打开结果页面。"
-                    else "Current: ${if (state.webSearchConfigured) "key configured" else "no key configured"}. Results are untrusted external content and are never opened automatically.",
+                    if (zh) "${providerName}：${if (state.webSearchConfigured) "密钥已保存" else "未配置密钥"}。搜索结果不可信，应用不会自动打开网页。"
+                    else "$providerName: ${if (state.webSearchConfigured) "key saved" else "no key"}. Results are untrusted; pages are not opened automatically.",
                     style = MaterialTheme.typography.bodySmall,
                 )
                 if (state.webSearchState.isNotBlank()) Text(state.webSearchState, style = MaterialTheme.typography.bodySmall)
@@ -360,14 +377,35 @@ fun SettingsScreen(
                     modifier = Modifier.testTag("settings.stats.switch"), labelClickable = true)
                 SettingSwitch(if (zh) "显示请求检查器" else "Show request inspector", state.requestInspectionEnabled, actions.onRequestInspection)
                 SettingSwitch(if (zh) "应用内诊断记录（默认关闭）" else "In-app diagnostics (off by default)", state.diagnosticsEnabled, actions.onDiagnosticsEnabled)
+                Text(if (zh) "日志级别" else "Log level", style = MaterialTheme.typography.bodyMedium)
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    for (level in listOf("INFO", "DEBUG")) {
+                        FilterChip(
+                            selected = state.diagnosticsLogLevel == level,
+                            onClick = { actions.onDiagnosticsLogLevel(level) },
+                            label = { Text(level) },
+                            modifier = Modifier.testTag("settings.diagnostics.level.${level.lowercase()}"),
+                        )
+                    }
+                }
                 Text(
                     if (zh) "${if (state.diagnosticsEnabled) "已开启" else "已关闭"} · ${formatDiagnosticBytes(state.diagnosticsSizeBytes)} / ${formatDiagnosticBytes(state.diagnosticsLimitBytes)}"
                     else "${if (state.diagnosticsEnabled) "On" else "Off"} · ${formatDiagnosticBytes(state.diagnosticsSizeBytes)} / ${formatDiagnosticBytes(state.diagnosticsLimitBytes)}",
                     style = MaterialTheme.typography.bodySmall,
                 )
                 Text(
-                    if (zh) "开启后记录详细 DEBUG，包括视觉请求中的图片与上下文、响应正文、派发阶段、HTTP 状态和错误。凭据值仍会过滤。日志滚动保留最近约 16 MiB，较早内容会被覆盖；系统崩溃仍可能需要 ADB Logcat。"
-                    else "Detailed DEBUG includes Vision images and context, response bodies, dispatch stages, HTTP status and errors. Credential values are filtered. The log retains a rolling window of about 16 MiB; older content is overwritten. System crashes may still require ADB Logcat.",
+                    if (state.diagnosticsLogLevel == "DEBUG") {
+                        if (zh) "DEBUG 记录详细进度和视觉处理文本；凭据会过滤，分享前检查敏感内容。"
+                        else "DEBUG records detailed progress and Vision text. Credentials are filtered; check sensitive content before sharing."
+                    } else {
+                        if (zh) "INFO 记录阶段、结果与错误，不记录视觉处理正文。"
+                        else "INFO records stages, results and errors, without Vision bodies."
+                    },
+                    style = MaterialTheme.typography.bodySmall,
+                )
+                Text(
+                    if (zh) "切换级别不清除旧日志；日志会滚动覆盖，原生崩溃可能仍需 ADB Logcat。"
+                    else "Changing the level keeps old logs. Logs rotate; native crashes may still need ADB Logcat.",
                     style = MaterialTheme.typography.bodySmall,
                 )
                 FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {

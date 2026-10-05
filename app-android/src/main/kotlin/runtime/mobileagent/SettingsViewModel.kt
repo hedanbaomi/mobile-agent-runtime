@@ -21,10 +21,12 @@ import runtime.mobileagent.domain.AppException
 import runtime.mobileagent.announcements.AnnouncementCategory
 import runtime.mobileagent.announcements.ClientContext
 import runtime.mobileagent.diagnostics.DiagnosticSanitizer
+import runtime.mobileagent.diagnostics.DiagnosticLevel
 import runtime.mobileagent.domain.LocalePreference
 import runtime.mobileagent.domain.Authority
 import runtime.mobileagent.domain.DangerousMode
 import runtime.mobileagent.domain.SecretStatus
+import runtime.mobileagent.domain.WebSearchProvider
 import runtime.mobileagent.domain.ThemePreference
 import runtime.mobileagent.feature.settings.SettingsDiagnosticsFeedback
 import runtime.mobileagent.feature.settings.SettingsUiState
@@ -82,11 +84,13 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
      */
     private data class SettingsRuntimeFacts(
         val diagnosticsEnabled: Boolean = false,
+        val diagnosticsLogLevel: String = "INFO",
         val diagnosticsSizeBytes: Long = 0L,
         val diagnosticsLimitBytes: Long = 0L,
         val licenseText: String = "",
         val webSearchConfigured: Boolean = false,
         val webSearchEnabled: Boolean = false,
+        val webSearchProviderId: String = "brave",
         val globalRootPrompt: String = "",
     )
 
@@ -140,6 +144,7 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
             app.container.secrets.inventory().status(searchRef) == SecretStatus.ACTIVE
         return SettingsRuntimeFacts(
             diagnosticsEnabled = diagnostics.enabled,
+            diagnosticsLogLevel = app.diagnostics.logLevel.wireName,
             diagnosticsSizeBytes = diagnostics.sizeBytes,
             diagnosticsLimitBytes = diagnostics.totalLimitBytes,
             licenseText = runCatching {
@@ -147,6 +152,7 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
             }.getOrDefault(""),
             webSearchConfigured = searchConfigured,
             webSearchEnabled = searchConfigured && app.container.settings.webSearchEnabled(),
+            webSearchProviderId = app.container.settings.webSearchProvider()?.id.orEmpty(),
             globalRootPrompt = app.container.settings.effectiveGlobalRootPrompt(),
         )
     }
@@ -176,6 +182,7 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
         },
         statsEnabled = statsEnabled.value, requestInspectionEnabled = inspectorEnabled.value,
         diagnosticsEnabled = facts.diagnosticsEnabled,
+        diagnosticsLogLevel = facts.diagnosticsLogLevel,
         diagnosticsSizeBytes = facts.diagnosticsSizeBytes,
         diagnosticsLimitBytes = facts.diagnosticsLimitBytes,
         diagnosticsFeedback = diagnosticsStatus.value,
@@ -189,6 +196,7 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
         globalRootPromptUpdatedAt = preferences.value.globalRootPromptUpdatedAt,
         webSearchConfigured = facts.webSearchConfigured,
         webSearchEnabled = facts.webSearchEnabled,
+        webSearchProviderId = facts.webSearchProviderId,
         webSearchState = webSearchStatus.value,
         appPrivateExecutionActive = authority.appPrivateAvailable,
         selectedAuthority = authority.selectedAuthority.name,
@@ -511,21 +519,32 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
         super.onCleared()
     }
 
-    fun saveWebSearch(apiKey: String) {
+    private fun searchProviderForAction(expectedId: String): WebSearchProvider? {
+        val provider = WebSearchProvider.fromId(expectedId)
+        if (provider == null || app.container.settings.webSearchProvider() != provider) {
+            error.value = "搜索服务商已变化，请确认当前服务后重试。"
+            refreshRuntimeFacts()
+            return null
+        }
+        return provider
+    }
+
+    fun saveWebSearch(providerId: String, apiKey: String) {
+        val provider = searchProviderForAction(providerId) ?: return
         val normalized = apiKey.trim()
-        if (normalized.isEmpty() || normalized.length > 4096 || normalized.any { it == '\r' || it == '\n' }) {
-            error.value = "请输入有效的 Brave Search API Key。"
+        if (normalized.isEmpty() || normalized.length > 4096 || normalized.any { it.code !in 33..126 }) {
+            error.value = "请输入有效的 ${provider.displayName} API Key。"
             return
         }
-        val oldRef = app.container.settings.webSearchSecretRef()
-        val newRef = "search:brave:${UUID.randomUUID()}"
+        val oldRef = app.container.settings.webSearchSecretRef(provider)
+        val newRef = "search:${provider.id}:${UUID.randomUUID()}"
         try {
             app.container.secrets.put(newRef, normalized.toCharArray())
-            app.container.settings.setWebSearch(newRef, enabled = true)
+            app.container.settings.setWebSearch(newRef, enabled = true, provider = provider)
             oldRef?.takeIf { it != newRef }?.let { old ->
                 runCatching { app.container.secrets.inventory().retireIfUnreferenced(old) }
             }
-            webSearchStatus.value = "联网搜索已配置并启用；每次查询仍需单独确认。"
+            webSearchStatus.value = "${provider.displayName} 已保存并启用。"
             error.value = null
         } catch (_: Exception) {
             runCatching { app.container.secrets.inventory().retireIfUnreferenced(newRef) }
@@ -535,22 +554,38 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
         refreshRuntimeFacts()
     }
 
-    fun setWebSearchEnabled(enabled: Boolean) {
-        val ref = app.container.settings.webSearchSecretRef()
+    fun selectWebSearchProvider(value: String) {
+        val provider = WebSearchProvider.fromId(value) ?: return
+        runCatching { app.container.settings.selectWebSearchProvider(provider) }
+            .onSuccess {
+                // Change the label immediately; async facts never retain the previous key controls.
+                runtimeFacts.value = runtimeFacts.value.copy(
+                    webSearchProviderId = provider.id, webSearchConfigured = false, webSearchEnabled = false,
+                )
+                webSearchStatus.value = ""; error.value = null
+            }
+            .onFailure { error.value = "无法保存搜索服务商。" }
+        refreshRuntimeFacts()
+    }
+
+    fun setWebSearchEnabled(providerId: String, enabled: Boolean) {
+        val provider = searchProviderForAction(providerId) ?: return
+        val ref = app.container.settings.webSearchSecretRef(provider)
         if (ref == null || app.container.secrets.inventory().status(ref) != SecretStatus.ACTIVE) {
-            error.value = "请先保存有效的 Brave Search API Key。"
+            error.value = "请先保存当前服务商的 API Key。"
             return
         }
-        app.container.settings.setWebSearch(ref, enabled)
-        webSearchStatus.value = if (enabled) "联网搜索已启用；每次查询仍需单独确认。" else "联网搜索已停用。"
+        app.container.settings.setWebSearch(ref, enabled, provider)
+        webSearchStatus.value = if (enabled) "联网搜索已启用。" else "联网搜索已停用。"
         error.value = null
         refreshRuntimeFacts()
     }
 
-    fun clearWebSearch() {
-        val oldRef = app.container.settings.webSearchSecretRef()
+    fun clearWebSearch(providerId: String) {
+        val provider = searchProviderForAction(providerId) ?: return
+        val oldRef = app.container.settings.webSearchSecretRef(provider)
         try {
-            app.container.settings.setWebSearch(null, enabled = false)
+            app.container.settings.setWebSearch(null, enabled = false, provider = provider)
             oldRef?.let { app.container.secrets.inventory().retireIfUnreferenced(it) }
             webSearchStatus.value = "联网搜索凭据已移除。"
             error.value = null
@@ -586,6 +621,23 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
         try {
             app.diagnostics.setEnabled(value)
             diagnosticsStatus.value = if (value) SettingsDiagnosticsFeedback.ENABLED else SettingsDiagnosticsFeedback.DISABLED
+            error.value = null
+        } catch (failure: Exception) {
+            diagnosticsStatus.value = SettingsDiagnosticsFeedback.SAVE_FAILED
+            error.value = null
+        }
+        refreshRuntimeFacts()
+    }
+
+    fun setDiagnosticsLogLevel(value: String) {
+        val level = when (value) {
+            "DEBUG" -> DiagnosticLevel.DEBUG
+            "INFO" -> DiagnosticLevel.INFO
+            else -> return
+        }
+        try {
+            app.diagnostics.setLogLevel(level)
+            diagnosticsStatus.value = SettingsDiagnosticsFeedback.NONE
             error.value = null
         } catch (failure: Exception) {
             diagnosticsStatus.value = SettingsDiagnosticsFeedback.SAVE_FAILED

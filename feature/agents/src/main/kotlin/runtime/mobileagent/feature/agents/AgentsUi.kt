@@ -241,6 +241,7 @@ data class AgentEditorUi(
     val resourceBindings: List<AgentResourceBindingUi> = emptyList(),
     val retrievalMode: String = "explicit",
     val skipToolConfirmations: Boolean = false,
+    val webSearchEnabled: Boolean = false,
     val snapshotLabel: String = "",
     val revision: Int = 0,
     val workspaces: List<AgentWorkspaceUi> = emptyList(),
@@ -796,6 +797,21 @@ private fun AgentEditorFields(
                     }
                 }
                 OutlinedTextField(editor.retrievalMode, { actions.onEditorChange(editor.copy(retrievalMode = it)) }, label = { Text(if (zh) "检索模式" else "Retrieval mode") }, modifier = Modifier.fillMaxWidth())
+                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                    Switch(
+                        checked = editor.webSearchEnabled,
+                        onCheckedChange = { actions.onEditorChange(editor.copy(webSearchEnabled = it)) },
+                        modifier = Modifier.testTag("agents.editor.web_search"),
+                    )
+                    Column(Modifier.padding(start = 12.dp)) {
+                        Text(if (zh) "允许联网搜索" else "Allow web search")
+                        Text(
+                            if (zh) "使用设置中的搜索服务，无需逐次确认，可能收费。开启适用于新会话；关闭立即撤权。"
+                            else "Use the configured search service without per-query prompts; charges may apply. Enable for new conversations; disable immediately.",
+                            style = MaterialTheme.typography.bodySmall,
+                        )
+                    }
+                }
                 Row(Modifier.fillMaxWidth().testTag(AgentTestTags.SKIP_TOOL_CONFIRMATIONS), verticalAlignment = Alignment.CenterVertically) {
                     Switch(
                         checked = editor.skipToolConfirmations,

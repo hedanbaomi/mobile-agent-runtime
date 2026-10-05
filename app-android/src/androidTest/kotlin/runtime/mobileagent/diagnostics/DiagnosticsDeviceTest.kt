@@ -535,7 +535,7 @@ class DiagnosticsDeviceTest {
                 "bridge_request_state", "diagnostic_drop_summary", "runtime_tooling_unavailable",
                 "authority_configuration_state", "dangerous_mode_decision", "runtime_tool_exposure",
             ).forEach { event -> assertTrue("missing $event", allText.contains("\"event\":\"$event\"")) }
-            assertTrue(allText.contains("\"level\":\"DEBUG\""))
+            assertTrue(allText.contains("\"level\":\"INFO\""))
             assertTrue(allText.contains("\"workspaceToolCount\":4"))
             assertTrue(allText.contains("\"shellToolCount\":1"))
             assertTrue(allText.contains("\"webToolCount\":0"))
@@ -1109,7 +1109,7 @@ class DiagnosticsDeviceTest {
     }
 
     @Test
-    fun androidPreferenceAdapterPersistsOptIn() {
+    fun androidPreferenceAdapterPersistsOptInAtInfoLevel() {
         val context = InstrumentationRegistry.getInstrumentation().targetContext
         val directory = File(context.cacheDir, "diagnostics-device-${UUID.randomUUID()}")
         val preferencesName = "diagnostics-device-${UUID.randomUUID()}"
@@ -1124,11 +1124,28 @@ class DiagnosticsDeviceTest {
                 .lineSequence().filter { it.isNotBlank() }.map { org.json.JSONObject(it) }
                 .filter { it.getString("event") == "vision_debug_content" }
                 .map { it.getJSONObject("fields") }.toList()
-            assertEquals(3, chunks.size)
-            assertEquals(payload, chunks.joinToString("") { it.getString("content") })
+            assertTrue(chunks.isEmpty())
+            val log = first.store.readFile(RollingDiagnosticLogStore.CURRENT_FILE_NAME).toString(Charsets.UTF_8)
+            assertTrue(log.contains("\"level\":\"INFO\""))
+            assertFalse(log.contains("\"level\":\"DEBUG\""))
+            first.setLogLevel(DiagnosticLevel.DEBUG)
+            first.recordVisionContent("unicode-request", "response_json", payload, false, payload.length)
+            val debugChunks = first.store.readFile(RollingDiagnosticLogStore.CURRENT_FILE_NAME).toString(Charsets.UTF_8)
+                .lineSequence().filter { it.isNotBlank() }.map { org.json.JSONObject(it) }
+                .filter { it.getString("event") == "vision_debug_content" }
+                .map { it.getJSONObject("fields") }.toList()
+            assertEquals(3, debugChunks.size)
+            assertEquals(payload, debugChunks.joinToString("") { it.getString("content") })
             val second = AndroidDiagnosticLogger(context, directory, preferencesName)
             assertTrue(second.isEnabled)
+            assertEquals(DiagnosticLevel.DEBUG, second.logLevel)
             assertTrue(second.status().sizeBytes > 0)
+            second.setLogLevel(DiagnosticLevel.INFO)
+            val third = AndroidDiagnosticLogger(context, directory, preferencesName)
+            assertEquals(DiagnosticLevel.INFO, third.logLevel)
+            val before = third.status().sizeBytes
+            third.recordVisionContent("unicode-request", "response_json", payload, false, payload.length)
+            assertEquals(before, third.status().sizeBytes)
             second.clear()
         } finally {
             context.getSharedPreferences(preferencesName, Context.MODE_PRIVATE).edit().clear().commit()
@@ -1145,6 +1162,8 @@ class DiagnosticsDeviceTest {
             nowUtc = { "2026-01-01T00:00:00.000Z" },
             processId = { 1234 },
             threadName = { "test-thread" },
+            // Exercise serialization/rotation fixtures without changing the production INFO floor.
+            minimumLevel = DiagnosticLevel.DEBUG,
         )
 
     private fun withStore(block: (File, MemoryPreferences) -> Unit) {

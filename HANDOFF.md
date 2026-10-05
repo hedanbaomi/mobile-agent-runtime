@@ -3,7 +3,7 @@
 
 # 项目交接
 
-最后更新：2026-10-05T10:33:03+08:00（UTC+8；README 与图表已获用户提交/推送授权，提交门禁通过）。项目根目录：E:/mobileAgentRuntime。
+最后更新：2026-10-05T15:55:54+08:00（UTC+8；日志与搜索实现、独立复核和提交门禁通过，Git 交付按用户授权执行）。项目根目录：E:/mobileAgentRuntime。
 
 按 [agent.md 第 1 节](agent.md#1-按任务读取与开工) 选择资料。现行规则见 agent.md；本文件记录现场和待办，历史任务中的授权不自动延续。
 
@@ -23,6 +23,8 @@
 - 完整证据：[2026-09-18 文档管线复审 R1–R5 收口](docs/evidence/2026-09-18/document-pipeline-r1-r5-closeout.md)。
 
 ## 1. 现行状态与当前任务
+
+- **2026-10-05 日志级别、正式发布密钥及多供应商联网搜索（实现与定向验证完成，Git 交付已获授权）**：真实根 E:/mobileAgentRuntime，main/HEAD 06be7ded44842bea5054c46a89103759f0e688f0；用户本轮已授权提交、推送、合并并同步本地 main；使用 E 根目录的 codex/logging-search-permissions-20261005 分支及 PR，正式密钥和原有附件/交接 WIP 不进入提交；提交前全仓 reviewGate/check 与严格 CI pins/locks/checksums 门禁通过（1086 tasks）；Git 交付通过正常 PR，不绕过检查，不发布 APK。诊断默认关闭、默认 INFO，用户可持久选择 DEBUG；INFO 不采集视觉正文/详细进度，凭据及 private continuation 过滤保留，manifest 标明当前级别及历史 DEBUG 保留。正式 PKCS12 密钥在 C:/Users/32735/Desktop/证书与密钥/mobileagentruntime，RSA4096/SHA256withRSA，30年有效期；目录 ACL 限定当前用户/SYSTEM/Administrators，签名验签及 Gradle verifyReleaseSigning/validateSigningRelease 通过，秘密不进入仓库和日志，未生成正式 release。搜索已接入 Brave/Tavily/Exa，分服务加密密钥、旧 Brave 兼容与全服务引用回收；逐 Agent“允许联网搜索”默认关，允许的新快照免逐次批准，实时撤权/修订复核阻断旧 executor/缓存复用，禁重定向和自动重试，UNKNOWN_OUTCOME 不重放。搜索独立复核发现 P2 切换服务异步标签错位及 P3 共享地址遗漏，已用同步标签+按渲染服务 ID 的保存/启停/删除守卫与 100.64/10 过滤修复，窄范围独立复核确认关闭。最终共享层136、SQLite378、Android单元225，共739/739；API34定向设备29/29，lint/licenseGuard、REUSE871/871、CodeGraph sync 通过，四份受保护附件/计划哈希不变。独立复核为 DSH Flash 日志审查与 Jev 选择的 gpt-6-luna/xhigh 搜索审查；没有真实付费搜索/模型请求，物理设备与线上供应商仍为单独验收。本任务模拟器已关闭并仅清理其隔离 AVD；日志/JUnit XML/源哈希保留于 .private/info-release-key-20261005/ 与 .private/search-providers-20261005/。公开说明/ADR/验收已更新，证据见 docs/evidence/2026-10-05/logging-and-search.md。
 
 - **2026-10-05 README 扩充与 Archify 图表（用户已审阅，提交门禁通过）**：主 Agent；源码基线 main@6d38ce77961378d28e63601853faa775047a667f，本轮分支 `codex/readme-usage-archify-20261005`。用户明确授权提交和推送。README 补充首次配置、Chat/Responses、上下文与输出预算、知识导入和恢复、Skill 兼容、工作区与授权、Shizuku/有线 ADB、排障及 Debug/Review 构建；按 writing-polish 完成写作检查。新增 [Archify 会话与工具图及复现说明](docs/diagrams/README.md)，包含 JSON、PNG 和 AGPL-3.0-only sidecar，未复制第三方查看器运行时代码。Archify finalize 全部通过，showcase 9/9、0 错误/警告；浏览器与 PNG 检查通过，14 个本地链接/锚点有效。提交前 `licenseGuard licenseGuardReverse check verifyCiPins verifyDependencyLock verifyDependencyVerification --offline --dependency-verification=strict` 通过（BUILD SUCCESSFUL in 1m 30s；995 actionable tasks: 63 executed, 932 up-to-date）；`reuse lint` 859/859 通过。仅发布 README、图表和本轮交接摘要；原有本地交接历史、用户报告/计划及附件保留，不纳入本次提交。未修改功能源码或重新生成 APK；仅提交/推送并创建普通 PR，合并需本轮另行授权。
 

@@ -14,6 +14,7 @@ import runtime.mobileagent.domain.ErrorCode
 import runtime.mobileagent.domain.RetryClass
 import runtime.mobileagent.domain.SecretStatus
 import runtime.mobileagent.domain.Utc
+import runtime.mobileagent.domain.WebSearchProvider
 
 class SecretInventory(private val db: SqlConnection) {
     private val json = Json { ignoreUnknownKeys = false; explicitNulls = false }
@@ -129,8 +130,9 @@ class SecretInventory(private val db: SqlConnection) {
             }
         }
         if (tableExists("app_prefs")) {
-            db.query("SELECT value FROM app_prefs WHERE key = ?", listOf(SettingsRepository.KEY_WEB_SEARCH_SECRET_REF))
-                .singleOrNull()?.let { row ->
+            val searchKeys = WebSearchProvider.entries.map(SettingsRepository::webSearchSecretKey)
+            db.query("SELECT value FROM app_prefs WHERE key IN (?,?,?)", searchKeys)
+                .forEach { row ->
                     val ref = requiredText(row, "value", "web-search secret reference")
                     if (ref.isNotBlank()) refs += ref
                 }

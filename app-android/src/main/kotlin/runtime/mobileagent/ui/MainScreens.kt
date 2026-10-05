@@ -1758,6 +1758,7 @@ private fun SettingsRoute(entry: NavBackStackEntry, chinese: Boolean, onRoute: (
             }
         },
         onDiagnosticsEnabled = vm::setDiagnosticsEnabled,
+        onDiagnosticsLogLevel = vm::setDiagnosticsLogLevel,
         onExportDiagnostics = { diagnosticsExportLauncher.launch("mobile-agent-diagnostics.zip") },
         onClearDiagnostics = vm::clearDiagnostics,
         onExport = { exportAgents = vm.exportAgents(); exportChooserOpen = true },
@@ -1771,6 +1772,7 @@ private fun SettingsRoute(entry: NavBackStackEntry, chinese: Boolean, onRoute: (
         onUnlockRootPrompt = vm::unlockRootPrompt, onSaveRootPrompt = vm::saveRootPrompt, onRestoreRootPrompt = vm::restoreRootPrompt,
         onSaveWebSearch = vm::saveWebSearch, onWebSearchEnabled = vm::setWebSearchEnabled,
         onClearWebSearch = vm::clearWebSearch,
+        onWebSearchProvider = vm::selectWebSearchProvider,
         onSelectAuthority = vm::selectAuthority,
         onAuthorityIntent = vm::setAuthorityIntent,
         onRefreshAuthority = { vm.refreshAuthorities() },

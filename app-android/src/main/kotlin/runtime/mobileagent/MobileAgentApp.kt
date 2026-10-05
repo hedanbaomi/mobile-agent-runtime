@@ -222,7 +222,7 @@ class AppContainer(app: MobileAgentApp) :
             }
         },
         apiEmbedderResolver = apiEmbeddings::resolve,
-        captureVisionContent = { app.diagnostics.status().enabled },
+        captureVisionContent = { app.diagnostics.isDebugEnabled },
         // P1: the durable batch lifecycle emits only opaque refs and closed reason codes.
         importEvents = { event ->
             runCatching {

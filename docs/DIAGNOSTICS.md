@@ -16,15 +16,19 @@
 
 ## 2. 记录范围与上限
 
+日志级别默认 `INFO`，用户可在“设置 → 隐私与调试 → 日志级别”选择 `DEBUG`，选择通过 SharedPreferences 同步保存并在重启后恢复；调整级别不会自动开启诊断。生命周期、配置、权限、请求阶段与结果为 INFO，固定失败事件与未捕获异常为 ERROR。逐项知识导入进度和视觉处理正文为 DEBUG；INFO 会在写入前过滤，并关闭视觉正文的采集，过滤不会增加 drop/failure 计数或将健康状态标为 degraded。诊断开关仍默认关闭。
+
+DEBUG 仅在用户同时开启诊断、选中 DEBUG 后采集经凭据及 provider-private continuation 脱敏的视觉处理文本；按现有 Unicode 分块与大小上限写入。它可能含有用户资料，导出前须检查。切回 INFO、关闭诊断或升级均不清除已有记录；历史 DEBUG 记录保留到正常轮转或用户主动清除。
+
 - 固定公共字段：schema、session、pid、thread类别、UTC时间、level、event、Git revision、dirty、数据库schema、构建时间。`thread` 只能是 `main`、`worker` 或 `other`，不保存任意线程名。
 - 固定事件：诊断启停、Provider模型tools/image能力开关、Provider模型保存开始/成功/失败、知识导入开始/进度/入队/staged/失败、Skill检查/安装、批次worker开始/进度/完成/失败、未捕获异常，以及权限选择/状态、权限配置维度、Shizuku/有线ADB生命期、工作区授权/操作、特权工作区选择/加密 binding/reattach、Conversation workspace binding/resolution、workspace tool exposure、Provider connection test/capability probe、Skill memory操作、危险模式决策、runtime工具暴露、shell暴露、tool approval、shell执行、bridge请求、runtime tooling 不可用和诊断丢弃摘要。知识导入的“staged”仅表示文件已复制并入队，只有worker到达真实终态才记录完成。
-- 本轮权限与工具排障事件使用 `DEBUG` 级别，但仍只有用户主动开启“应用内诊断记录”后才落盘。`authority_configuration_state` 分开记录 user intent、selected、platform grant、availability、connection 与 configured；`dangerous_mode_decision` 记录构建是否允许及固定拒绝原因；`runtime_tool_exposure` 只记录注册、已授权、run/session 绑定和交集工作区数量、Provider 实际可见的工具总数与所有者分桶、Agent/Skill 有效能力计数、backend ready/失败/Authority mismatch 计数、schema frozen、模型 tools transport、selected Authority/ready、SAF grant/backend/探测状态和固定原因。它们不写权限对象、workspace ID、Grant/Skill ID、文件夹、URI、路径、serial、命令、参数或模型正文。
+- 权限与工具排障事件使用 `INFO` 级别，但仍只有用户主动开启“应用内诊断记录”后才落盘。`authority_configuration_state` 分开记录 user intent、selected、platform grant、availability、connection 与 configured；`dangerous_mode_decision` 记录构建是否允许及固定拒绝原因；`runtime_tool_exposure` 只记录注册、已授权、run/session 绑定和交集工作区数量、Provider 实际可见的工具总数与所有者分桶、Agent/Skill 有效能力计数、backend ready/失败/Authority mismatch 计数、schema frozen、模型 tools transport、selected Authority/ready、SAF grant/backend/探测状态和固定原因。它们不写权限对象、workspace ID、Grant/Skill ID、文件夹、URI、路径、serial、命令、参数或模型正文。
 - v2 新事件采用强类型 record API 和闭合字段白名单；未知事件或字段整条拒绝。允许的值只来自固定枚举、布尔值、桶化限制、有限计数、异常类型、错误类别和终态。Provider名称、模型ID、Base URL、知识/Skill文件名与秘密不进入字段。
 - `runtime_tooling_unavailable` 只接受 `TOOL_EXECUTION_CONTEXT_UNAVAILABLE` 或 `TOOL_EXECUTOR_FACTORY_UNAVAILABLE`，并可带 HMAC 化的 session/run 引用；`tool_approval_state` 的 capability、authority 为固定枚举，sessionRef 同样只写 HMAC 化引用。审批原因只保留闭合的安全码；正常发起和超时分别为 `approval_required`、`timeout`，拒绝/失效可使用 `approval_denied`、`snapshot_stale`、`invalid_request` 或 `call_id_replay`，不会退化成无法定位的异常文本。
 - 模型或用户可控的 agent、skill、workspace、call、approval 引用只写固定长度（32 个十六进制字符）的 app-local HMAC 截断值；Runtime 随机 requestRef 也归一化为同样长度。当前实现使用稳定会话 HMAC，密钥只在进程内存中生成，绝不写普通文件；可用受保护持久密钥时由平台适配器替换。
 - shell 事件只写 commandSha256、authority、桶化限制、stdout/stderr 字节计数、duration 桶和终态；不写 command、script、argv、preview、stdout/stderr、result 或 arguments。
 - 当前日志8 MiB、上一段8 MiB、最近崩溃32 KiB、单事件64 KiB、导出ZIP20 MiB，超限按拥有文件滚动或拒绝单条事件。滚动和导出都只保留完整 NDJSON 行。
-- 导出manifest补充设备fingerprint，便于区分系统镜像和构建环境。
+- 导出manifest包含设备fingerprint、当前 `activeLogLevel` 和历史级别说明。切换级别不清除旧日志，INFO 导出的 ZIP 仍可能含以前的 DEBUG 记录；单条记录的 level 说明其采集级别。
 
 ## 3. 隐私与崩溃边界
 

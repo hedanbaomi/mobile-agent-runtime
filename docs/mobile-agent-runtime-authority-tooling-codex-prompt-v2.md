@@ -694,6 +694,8 @@ ShizukuShellExecutor
 
 # 9. Wired USB ADB Desktop Companion
 
+> **2026-10-06 现行修订**：用户明确要求自有设备常驻服务，不依赖 Shizuku。v1.1.2 默认电脑工具仅通过官方 USB ADB 激活手机内的 shell UID 2000 服务，后续 typed 文件与设备 shell 调用走本机认证 Binder。拔线、电脑工具退出及 App 客户端关闭不主动停止服务、撤销 grant 或改变 selected Authority。下文 §9.2–9.4 的持续桌面 loopback、桌面 trust 和 DPAPI 描述保留为旧桥兼容协议；默认激活路径以 [ADR 0029](adr/0029-resident-adb-activation.md) 为准。普通模式不因此获得任意 shell；实际服务死亡会关闭执行入口并显示暂不可用，显式撤销会清除本机凭据并请求服务退出。Root、无线 ADB、LAN、宿主 shell、自动回退继续排除。
+
 ## 9.1 总体要求
 
 Windows 首发，使用官方 adb，不实现 ADB wire protocol。

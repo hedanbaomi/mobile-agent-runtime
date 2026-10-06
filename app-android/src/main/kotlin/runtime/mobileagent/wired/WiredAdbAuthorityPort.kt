@@ -185,17 +185,16 @@ interface WiredAdbAuthorityPort : AutoCloseable {
 }
 
 /**
- * Public construction seam for AppContainer.  It fixes the only transport
- * (ADB reverse loopback) and the shared protocol/session implementation;
- * callers inject only Android persistence and policy ports.  First pairing
- * receives the desktop identity from the authenticated shared challenge; no
- * selected serial or desktop identity is accepted here.
+ * Public construction seam for AppContainer. Production uses the app's
+ * authenticated on-device resident service after explicit USB activation.
+ * Model-facing callers never choose a serial, endpoint or service identity.
+ * The injected overload retains the legacy desktop bridge test seam.
  */
 object WiredAdbAuthorityBridgeFactory {
     /**
-     * Production app-scoped construction.  The dedicated wired app identity
-     * is generated and persisted in the canonical wired metadata namespace;
-     * it is not derived from announcement, telemetry, or Runtime identity.
+     * Production app-scoped construction. Activation credentials remain in
+     * the app's Android Keystore namespace, independent of announcement,
+     * telemetry and Runtime identities.
      */
     @JvmStatic
     fun create(
@@ -203,15 +202,10 @@ object WiredAdbAuthorityBridgeFactory {
         diagnostics: WiredAdbDiagnosticSink = NOOP_WIRED_DIAGNOSTICS,
         shellPermission: () -> Boolean = { false },
     ): WiredAdbAuthorityPort {
-        val metadata = AndroidWiredAdbMetadataStoreFactory.create(context)
-        val appInstanceId = metadata.loadOrCreateAppInstanceId()
-        return create(
-            appInstanceId = appInstanceId,
-            trustStore = metadata.trustStore,
-            secretStore = AndroidKeystoreWiredAdbSecretStoreFactory.create(context),
-            intentStore = metadata.intentStore,
-            diagnostics = diagnostics,
+        return runtime.mobileagent.resident.ResidentAdbAuthorityBridge.create(
+            context = context,
             shellPermission = shellPermission,
+            diagnostics = diagnostics,
         )
     }
 

@@ -377,3 +377,14 @@ S03/S04/S05/S07 增量必须通过真实 isolated worker：API26 JSON/新 PID；
 - C29/R37：Schema 29→30 原子升级、重复升级及 DDL 后失败回滚；所有非终态 Run 阻止归档，归档与 Run 准入事务互斥，新 USER 写入复核；跨仓库与双 ViewModel 准入失败无虚构 Run/助手错误、草稿保留。
 
 验证结果和独立复审、设备/真实 Provider 边界见 [本轮证据](evidence/2026-10-06/kb-and-conversation-archive.md)。这些增量不代表全量产品验收完成。
+
+
+## 2026-10-06 v1.1.2 自有常驻 ADB
+
+| 项目 | 场景 | 预期 |
+| --- | --- | --- |
+| S35/R38 | 官方 ADB 路径核验、显式 USB serial、多设备与不可信 token、首次 App UID 固定、普通 App/错误 UID/过期/耗尽/重放/取消后的 publish | 只有明确用户启动的手机令牌可建立认证服务；秘密只经 stdin 与本机 Binder，无 LAN/宿主模型 shell；失败与取消不提交 grant |
+| S36/R38 | 激活后关闭客户端/电脑工具、无 adb reverse、App 进程重启后重连、服务真正死亡 | 服务继续存活时选定 Authority 与授权保持且重新挑战；服务死亡零执行、用户配置保留，不自动回退 |
+| S37/R38 | 显式撤销、App 重建后未缓存 Binder 立即撤销、替换激活失败、随后重新激活、typed 文件与危险 shell | 撤销结束自身服务并清除凭据，失败不报告假成功；替换失败不破坏现有有效凭据；文件范围与危险模式/能力授权仍独立 |
+
+实施与独立复查、本地设备测试结果见 [常驻 ADB 证据](evidence/2026-10-06/resident-adb-activation.md)。模拟器运行自有 shell 服务不代替物理 USB 拔线、OEM 杀进程或正式 arm64 升级验收。旧桌面桥验收保留为历史边界。

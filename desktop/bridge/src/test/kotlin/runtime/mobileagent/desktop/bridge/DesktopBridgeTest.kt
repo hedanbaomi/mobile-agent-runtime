@@ -7,11 +7,15 @@ import com.sun.jna.Memory
 import com.sun.jna.Platform
 import java.nio.file.Files
 import java.nio.file.Path
+import java.net.Socket
 import java.security.MessageDigest
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 import org.junit.jupiter.api.Assertions.assertArrayEquals
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertFalse
 import org.junit.jupiter.api.Assertions.assertTrue
+import org.junit.jupiter.api.Assumptions.assumeTrue
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.assertThrows
 import kotlinx.serialization.json.buildJsonArray
@@ -276,7 +280,11 @@ class DesktopBridgeTest {
     @Test
     fun shellCommandSpecialCharactersStayInUtf8Stdin() {
         val serial = "USB&|><^%!\u0027\"-serial"
-        val (configuration, report) = testConfiguration(serial, 42_001)
+        val selected = selectQuickstartDevice(
+            serial,
+            listOf(AdbDevice(serial, AdbDeviceState.DEVICE, emptyMap())),
+        )
+        val (configuration, report) = testConfiguration(selected.serial, 42_001)
         val runner = RecordingRunner(
             ProcessCapture(ProcessOutcome.COMPLETE, 0, "shell_v2\n".toByteArray(), ByteArray(0), false, false, 1),
             ProcessCapture(ProcessOutcome.COMPLETE, 0, "ok\n".toByteArray(), ByteArray(0), false, false, 2),
@@ -457,6 +465,274 @@ class DesktopBridgeTest {
             BridgeCliParser.parse(
                 arrayOf("pair", "--adb", adbPath, "--serial", "device-1", "--serial", "device-2"),
             )
+        }
+    }
+
+    @Test
+    fun quickstartPromptsForAdbAndRequiresTheUserToSelectAListedOnlineDevice() {
+        val parsed = BridgeCliParser.parse(arrayOf("quickstart")) as BridgeCliCommand.Quickstart
+        assertEquals(null, parsed.adbPath)
+        assertThrows<IllegalArgumentException> {
+            BridgeCliParser.parse(arrayOf("quickstart", "--adb", "relative/adb.exe"))
+        }
+        assertThrows<IllegalArgumentException> {
+            BridgeCliParser.parse(arrayOf("quickstart", "--serial", "first"))
+        }
+        assertThrows<IllegalArgumentException> {
+            BridgeCliParser.parse(arrayOf("quickstart", "--app-instance-id", "app"))
+        }
+
+        val onlyDevice = listOf(AdbDevice("only-device", AdbDeviceState.DEVICE, emptyMap()))
+        assertThrows<IllegalArgumentException> { selectQuickstartDevice(null, onlyDevice) }
+        assertThrows<IllegalArgumentException> { selectQuickstartDevice("", onlyDevice) }
+        assertEquals("only-device", selectQuickstartDevice("only-device", onlyDevice).serial)
+        assertThrows<IllegalArgumentException> {
+            selectQuickstartDevice(
+                "phone",
+                listOf(AdbDevice("phone", AdbDeviceState.UNAUTHORIZED, emptyMap())),
+            )
+        }
+    }
+
+    @Test
+    fun activateRequiresExplicitOnlineUsbDeviceAndKeepsActivationTokenOffArguments() {
+        val parsed = BridgeCliParser.parse(arrayOf("activate")) as BridgeCliCommand.Activate
+        assertEquals(null, parsed.adbPath)
+        val adbPath = absoluteFixturePath("adb.exe")
+        assertEquals(
+            Path.of(adbPath),
+            (BridgeCliParser.parse(arrayOf("activate", "--adb", adbPath)) as BridgeCliCommand.Activate).adbPath,
+        )
+        assertThrows<IllegalArgumentException> { BridgeCliParser.parse(arrayOf("activate", "--adb", "relative/adb.exe")) }
+        assertThrows<IllegalArgumentException> { BridgeCliParser.parse(arrayOf("activate", "--serial", "first")) }
+        assertThrows<IllegalArgumentException> { BridgeCliParser.parse(arrayOf("activate", "--token", "secret")) }
+
+        val devices = listOf(
+            AdbDevice("phone-usb", AdbDeviceState.DEVICE, emptyMap()),
+            AdbDevice("192.0.2.12:5555", AdbDeviceState.DEVICE, emptyMap()),
+        )
+        assertThrows<IllegalArgumentException> { selectUsbActivationDevice(null, devices) }
+        assertEquals("phone-usb", selectUsbActivationDevice("phone-usb", devices).serial)
+        assertThrows<IllegalArgumentException> { selectUsbActivationDevice("192.0.2.12:5555", devices) }
+        assertThrows<IllegalArgumentException> {
+            selectUsbActivationDevice("emulator-5554", listOf(AdbDevice("emulator-5554", AdbDeviceState.DEVICE, emptyMap())))
+        }
+        assertThrows<IllegalArgumentException> {
+            selectUsbActivationDevice("offline-phone", listOf(AdbDevice("offline-phone", AdbDeviceState.OFFLINE, emptyMap())))
+        }
+    }
+
+    @Test
+    fun residentBootstrapHasFixedBigEndianFrameAndNoTokenInAdbArgv() {
+        val tokenHex = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"
+        val token = ResidentAdbActivation.decodeActivationTokenHex(tokenHex.toCharArray())
+        val secret = ByteArray(ResidentAdbActivation.BOOTSTRAP_SECRET_BYTES) { (it + 32).toByte() }
+        val frame = ResidentAdbActivation.encodeBootstrapFrame(token, secret)
+
+        assertEquals(68, frame.size)
+        assertArrayEquals(byteArrayOf(0x4d, 0x41, 0x52, 0x31), frame.copyOfRange(0, 4))
+        assertArrayEquals(token, frame.copyOfRange(4, 36))
+        assertArrayEquals(secret, frame.copyOfRange(36, 68))
+        assertThrows<IllegalArgumentException> { ResidentAdbActivation.decodeActivationTokenHex("f".repeat(63).toCharArray()) }
+        assertThrows<IllegalArgumentException> {
+            ResidentAdbActivation.decodeActivationTokenHex("z".repeat(64).toCharArray())
+        }
+        assertEquals(10, ResidentAdbActivation.parseCurrentAndroidUser("10\n".toByteArray()))
+        assertThrows<IllegalArgumentException> {
+            ResidentAdbActivation.parseCurrentAndroidUser("10;id".toByteArray())
+        }
+        assertTrue(ResidentAdbActivation.providerReportsReady("Result: Bundle[{ready=true, configured=true}]".toByteArray()))
+        assertFalse(ResidentAdbActivation.providerReportsReady("Result: Bundle[{ready=false}]".toByteArray()))
+        assertFalse(ResidentAdbActivation.providerReportsReady("Result: Bundle[{notready=true}]".toByteArray()))
+        assertFalse(ResidentAdbActivation.providerReportsReady("Result: Bundle[{message=not ready=true}]".toByteArray()))
+
+        val (configuration, report) = testConfiguration("device-1", 42_001)
+        val runner = RecordingRunner(
+            ProcessCapture(ProcessOutcome.COMPLETE, 0, "10\n".toByteArray(), ByteArray(0), false, false, 1),
+            ProcessCapture(ProcessOutcome.COMPLETE, 0, ByteArray(0), ByteArray(0), false, false, 1),
+            ProcessCapture(
+                ProcessOutcome.COMPLETE,
+                0,
+                "Result: Bundle[{ready=true, configured=true}]".toByteArray(),
+                ByteArray(0),
+                false,
+                false,
+                1,
+            ),
+        )
+        val manager = AdbProcessManager.validated(configuration, runner, report, WinTrustVerifier { true })
+        assertEquals(10, ResidentAdbActivation.parseCurrentAndroidUser(manager.currentAndroidUser().process.stdout))
+        val result = manager.startResidentDaemon(10, frame)
+        val status = manager.residentStatus(10).process
+
+        assertEquals(ProcessOutcome.COMPLETE, result.process.outcome)
+        assertTrue(ResidentAdbActivation.providerReportsReady(status.stdout))
+        val userRequest = runner.requests[0]
+        assertEquals(
+            listOf(configuration.adbPath.toString(), "-s", "device-1", "shell", "-T", "am", "get-current-user"),
+            userRequest.argv,
+        )
+        val request = runner.requests[1]
+        val launchScript = ResidentAdbActivation.launchScript(10)
+        assertEquals(
+            listOf(
+                configuration.adbPath.toString(), "-s", "device-1", "shell", "-T", launchScript,
+            ),
+            request.argv,
+        )
+        assertArrayEquals(frame, request.stdin)
+        val argv = request.argv.joinToString(" ")
+        assertFalse(argv.contains(tokenHex))
+        assertFalse(argv.contains(runtime.mobileagent.bridge.BridgeEncoding.hex(secret)))
+        assertTrue(argv.contains("runtime.mobileagent.resident.ResidentAdbMain 10"))
+        assertTrue(argv.contains("exec 3<&0;"))
+        assertTrue(argv.contains("pm path --user 10 runtime.mobileagent </dev/null"))
+        assertTrue(argv.contains("<&3 3<&- >/dev/null 2>&1 &"))
+        val shellArgv = request.argv.drop(request.argv.indexOf("shell") + 2)
+        assertEquals(listOf(launchScript), shellArgv)
+        val shell = findPosixShell()
+        assumeTrue(shell != null, "POSIX shell execution check skipped: no sh or bash is available on PATH")
+        val captureName = "resident-app-process-args.txt"
+        val stdinCaptureName = "resident-app-process-stdin.bin"
+        val releaseName = "release-daemon-stdin"
+        val completionName = "resident-app-process-complete"
+        val completionTempName = "resident-app-process-complete.tmp"
+        val tempDir = Files.createTempDirectory("resident-adb-shell-test")
+        val capture = tempDir.resolve(captureName)
+        val stdinCapture = tempDir.resolve(stdinCaptureName)
+        val release = tempDir.resolve(releaseName)
+        val completion = tempDir.resolve(completionName)
+        val completionTemp = tempDir.resolve(completionTempName)
+        val relativeTempPath = tempDir.fileName.toString().replace('\\', '/')
+        val shellHarness = """
+            pm() { printf '%s\n' 'package:/fake.apk'; }
+            app_process() {
+                printf '%s\n' "${'$'}CLASSPATH" "${'$'}@" > "${'$'}MAR_CAPTURE"
+                while [ ! -e "${'$'}MAR_RELEASE" ]; do sleep 0.01; done
+                cat > "${'$'}MAR_STDIN_CAPTURE"
+                printf complete > "${'$'}MAR_COMPLETION_TMP"
+                mv "${'$'}MAR_COMPLETION_TMP" "${'$'}MAR_COMPLETION"
+            }
+            ${shellArgv.joinToString(" ")}
+        """.trimIndent()
+        var shellProcess: Process? = null
+        try {
+            val launchedProcess = ProcessBuilder(requireNotNull(shell), "-c", shellHarness)
+                .directory(requireNotNull(tempDir.parent).toFile())
+                .redirectErrorStream(true)
+                .apply {
+                    environment()["MAR_CAPTURE"] = "$relativeTempPath/$captureName"
+                    environment()["MAR_STDIN_CAPTURE"] = "$relativeTempPath/$stdinCaptureName"
+                    environment()["MAR_RELEASE"] = "$relativeTempPath/$releaseName"
+                    environment()["MAR_COMPLETION"] = "$relativeTempPath/$completionName"
+                    environment()["MAR_COMPLETION_TMP"] = "$relativeTempPath/$completionTempName"
+                }
+                .start()
+            shellProcess = launchedProcess
+            launchedProcess.outputStream.use { it.write(frame) }
+            val exited = launchedProcess.waitFor(5, TimeUnit.SECONDS)
+            if (!exited) launchedProcess.destroyForcibly()
+            val shellOutput = launchedProcess.inputStream.readAllBytes().toString(Charsets.UTF_8)
+            assertTrue(exited, "POSIX shell did not exit: $shellOutput")
+            assertEquals(0, launchedProcess.exitValue(), "POSIX shell rejected the assembled adb command: $shellOutput")
+            val launchDeadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(2)
+            while (!Files.exists(capture) && System.nanoTime() < launchDeadline) Thread.sleep(10)
+            assertTrue(Files.exists(capture), "device-side launch did not reach app_process: $shellOutput")
+            // Release the fake daemon only after the launcher shell exits. It must still read
+            // the complete ADB bootstrap from the duplicated descriptor it inherited.
+            Files.createFile(release)
+            val completionDeadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(2)
+            while (!Files.exists(completion) && System.nanoTime() < completionDeadline) Thread.sleep(10)
+            assertTrue(Files.exists(completion), "background app_process did not finish reading stdin: $shellOutput")
+            assertEquals(
+                listOf("/fake.apk", "/system/bin", "runtime.mobileagent.resident.ResidentAdbMain", "10"),
+                Files.readAllLines(capture),
+            )
+            assertArrayEquals(frame, Files.readAllBytes(stdinCapture))
+        } finally {
+            if (!Files.exists(release)) runCatching { Files.createFile(release) }
+            val cleanupDeadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(2)
+            while (Files.exists(capture) && !Files.exists(completion) && System.nanoTime() < cleanupDeadline) {
+                Thread.sleep(10)
+            }
+            shellProcess?.takeIf { it.isAlive }?.destroyForcibly()
+            Files.deleteIfExists(capture)
+            Files.deleteIfExists(stdinCapture)
+            Files.deleteIfExists(release)
+            Files.deleteIfExists(completion)
+            Files.deleteIfExists(completionTemp)
+            Files.deleteIfExists(tempDir)
+        }
+        assertEquals(
+            listOf(
+                configuration.adbPath.toString(), "-s", "device-1", "shell", "-T", "content", "call", "--user", "10",
+                "--uri", ResidentAdbActivation.PROVIDER_URI, "--method", "status",
+            ),
+            runner.requests[2].argv,
+        )
+        assertEquals(null, runner.requests[2].stdin)
+        assertFalse(runner.requests[2].argv.joinToString(" ").contains(tokenHex))
+    }
+
+    private fun findPosixShell(): String? {
+        val candidates = if (Platform.isWindows()) listOf("sh.exe", "bash.exe") else listOf("/bin/sh", "sh", "bash")
+        for (candidate in candidates) {
+            val process = runCatching { ProcessBuilder(candidate, "-c", "exit 0").start() }.getOrNull() ?: continue
+            if (process.waitFor(2, TimeUnit.SECONDS) && process.exitValue() == 0) return candidate
+            process.destroyForcibly()
+        }
+        return null
+    }
+
+    @Test
+    fun quickstartRoutesAuthenticatedConnectionsOnlyAfterPairingCommit() {
+        val pairingEntered = CountDownLatch(1)
+        val allowVerifiedCommit = CountDownLatch(1)
+        val authenticatedDispatched = CountDownLatch(1)
+        val switched = PairingThenAuthenticatedConnectionHandler(
+            authenticatedHandler = CompanionConnectionHandler { _, _ -> authenticatedDispatched.countDown() },
+            transitionWaitMs = 2_000,
+            pairingHandlerFactory = { onCommitted ->
+                CompanionConnectionHandler { _, _ ->
+                    pairingEntered.countDown()
+                    check(allowVerifiedCommit.await(2, TimeUnit.SECONDS))
+                    onCommitted()
+                }
+            },
+        )
+        val companion = DesktopCompanion(
+            Path.of("not-started-adb.exe"),
+            "selected-device",
+            null,
+            null,
+            38_765,
+            InMemoryDesktopTrustStore(),
+            ProcessRunner { error("the companion is not started in this handler test") },
+            WinTrustVerifier { true },
+            switched,
+        )
+        val pairingSocket = Socket()
+        val authenticatedSocket = Socket()
+        val pairingThread = Thread { switched.handle(pairingSocket, companion) }
+        val authenticatedThread = Thread { switched.handle(authenticatedSocket, companion) }
+        try {
+            pairingThread.start()
+            assertTrue(pairingEntered.await(1, TimeUnit.SECONDS))
+            authenticatedThread.start()
+            assertFalse(authenticatedDispatched.await(100, TimeUnit.MILLISECONDS))
+
+            allowVerifiedCommit.countDown()
+            assertTrue(authenticatedDispatched.await(1, TimeUnit.SECONDS))
+            assertTrue(switched.awaitPairing(100))
+            pairingThread.join(1_000)
+            authenticatedThread.join(1_000)
+            assertFalse(pairingThread.isAlive)
+            assertFalse(authenticatedThread.isAlive)
+        } finally {
+            allowVerifiedCommit.countDown()
+            pairingSocket.close()
+            authenticatedSocket.close()
+            companion.close()
         }
     }
 

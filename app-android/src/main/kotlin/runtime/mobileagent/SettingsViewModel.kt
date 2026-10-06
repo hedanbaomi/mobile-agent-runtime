@@ -283,7 +283,17 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
 
     fun forgetWiredAdb() {
         clearWiredPairing(notifyPort = true, status = "CANCELLED")
-        mutateAuthority { authorityPort.forgetWiredAdb() }
+        viewModelScope.launch {
+            try {
+                val result = withContext(Dispatchers.IO) { authorityPort.revokeWiredAdb() }
+                authorityState.value = result.snapshot
+                error.value = if (result.accepted) null else authorityReason(result.reason)
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (failure: Exception) {
+                error.value = safeAuthorityError(failure)
+            }
+        }
     }
 
     /**
@@ -294,6 +304,10 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
     fun requestWiredAdbPairing(replaceExistingTrust: Boolean = false) {
         clearWiredPairing(notifyPort = true, status = "")
         val result = runCatching {
+            // The visible foreground action explicitly enables and selects
+            // this provider. Transport/trust discovery must never do so.
+            authorityState.value = authorityPort.setUserIntent(Authority.WIRED_ADB, true)
+            authorityState.value = authorityPort.selectAuthority(Authority.WIRED_ADB)
             authorityPort.requestWiredAdbPairingToken(replaceExistingTrust)
         }.getOrElse { failure ->
             wiredPairingStatus = "FAILED"
@@ -503,6 +517,8 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
         "DANGEROUS_MODE_CONFIRMATION_REQUIRED" -> "请先确认危险模式风险。"
         "DANGEROUS_MODE_ADAPTER_UNAVAILABLE" -> "危险模式适配器尚未接入；Shell 保持关闭。"
         "AUTHORITY_ADAPTER_UNAVAILABLE" -> "权限适配器尚未接入；设置未保存。"
+        "RESIDENT_ADB_REVOKE_FAILED" -> "未能停止设备 ADB 服务，激活凭据已保留，请重试撤销。"
+        "WIRED_ADB_POLICY_SAVE_FAILED" -> "设备 ADB 服务已停止，但权限配置未能保存，请刷新后重试。"
         null, "" -> "权限状态未更新。"
         else -> "权限状态未更新。"
     }

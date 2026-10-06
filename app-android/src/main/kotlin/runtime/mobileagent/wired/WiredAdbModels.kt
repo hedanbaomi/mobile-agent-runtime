@@ -66,6 +66,8 @@ data class WiredAdbStatus(
     val serialFingerprint: String? = null,
     val protocolVersion: Int? = null,
     val lastError: WiredAdbErrorCode? = null,
+    /** Non-secret daemon generation; only used to invalidate ephemeral workspace handles. */
+    val serviceSessionId: String? = null,
 )
 
 /** A foreground-only value; only its redacted display representation crosses the UI port. */

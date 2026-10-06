@@ -51,10 +51,11 @@ import runtime.mobileagent.workspace.WorkspaceVersionProjection
  * model call id as the provider call id and never logs command or output data.
  */
 class ShizukuShellExecutor(
-    private val bridge: ShizukuAuthorityBridge,
+    private val bridge: DeviceServiceBridge,
+    private val authority: Authority = Authority.SHIZUKU,
 ) : ShellExecutor {
     override suspend fun execute(request: ShellExecRequest): ShellExecResult {
-        if (request.selectedAuthority != Authority.SHIZUKU) {
+        if (request.selectedAuthority != authority) {
             return failed(request, ToolErrorCode.AUTHORITY_PROVIDER_NOT_SELECTED)
         }
 
@@ -114,7 +115,7 @@ class ShizukuShellExecutor(
             ShizukuShellResult.State.TIMED_OUT -> ShellExecResult(
                 status = ShellExecutionStatus.TIMED_OUT,
                 timedOut = true,
-                authority = Authority.SHIZUKU,
+                authority = authority,
                 durationMs = duration,
                 requestId = request.requestId,
                 error = ToolError(ToolErrorCode.SHELL_TIMED_OUT),
@@ -122,7 +123,7 @@ class ShizukuShellExecutor(
             ShizukuShellResult.State.CANCELLED -> ShellExecResult(
                 status = ShellExecutionStatus.CANCELLED,
                 cancelled = true,
-                authority = Authority.SHIZUKU,
+                authority = authority,
                 durationMs = duration,
                 requestId = request.requestId,
                 error = ToolError(ToolErrorCode.SHELL_CANCELLED),
@@ -174,7 +175,7 @@ class ShizukuShellExecutor(
             stderr = stderrLimited.text,
             stdoutTruncated = stdoutWasTruncated,
             stderrTruncated = stderrWasTruncated,
-            authority = Authority.SHIZUKU,
+            authority = authority,
             durationMs = duration,
             requestId = request.requestId,
             error = error,
@@ -192,7 +193,7 @@ class ShizukuShellExecutor(
         ShizukuShellLimits.UID_UNTRUSTED,
         ShizukuShellLimits.CALLER_UNTRUSTED,
         ShizukuShellLimits.SESSION_INVALID,
-            -> ToolErrorCode.SHIZUKU_SERVICE_UNAVAILABLE
+            -> bridge.unavailableErrorCode
         else -> ToolErrorCode.SHELL_EXECUTION_FAILED
     }
 
@@ -251,7 +252,7 @@ class ShizukuShellExecutor(
  * conditional transaction below.
  */
 class ShizukuWorkspaceBackendAdapter(
-    private val bridge: ShizukuAuthorityBridge,
+    private val bridge: DeviceServiceBridge,
     workspaceId: String = DEFAULT_WORKSPACE_ID,
     displayName: String = DEFAULT_DISPLAY_NAME,
 ) : WorkspaceBackend {
@@ -488,7 +489,7 @@ class ShizukuWorkspaceBackendAdapter(
             bridge.dispatchReadChunk(normalized, offsetBytes, maxBytes)
         }
         return when (dispatch) {
-            is ShizukuWorkspaceReadDispatchResult.Denied -> failure(ToolErrorCode.SHIZUKU_SERVICE_UNAVAILABLE)
+            is ShizukuWorkspaceReadDispatchResult.Denied -> failure(bridge.unavailableErrorCode)
             is ShizukuWorkspaceReadDispatchResult.Failed -> if (dispatch.unknownOutcome) {
                 failure(ToolErrorCode.UNKNOWN_OUTCOME)
             } else {
@@ -657,7 +658,7 @@ class ShizukuWorkspaceBackendAdapter(
         decode: (JSONObject) -> T?,
     ): WorkspaceResult<T> {
         return when (dispatch) {
-            is ShizukuDispatchResult.Denied -> failure(ToolErrorCode.SHIZUKU_SERVICE_UNAVAILABLE)
+            is ShizukuDispatchResult.Denied -> failure(bridge.unavailableErrorCode)
             is ShizukuDispatchResult.Failed -> if (dispatch.unknownOutcome) {
                 failure(ToolErrorCode.UNKNOWN_OUTCOME)
             } else {

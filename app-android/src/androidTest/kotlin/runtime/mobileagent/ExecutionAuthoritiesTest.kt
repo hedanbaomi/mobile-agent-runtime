@@ -28,6 +28,34 @@ import runtime.mobileagent.integration.safRequestedFlags
 @RunWith(AndroidJUnit4::class)
 class ExecutionAuthoritiesTest {
     @Test
+    fun failedResidentRevokePreservesConfiguredStateAndReportsFailure() {
+        val app = ApplicationProvider.getApplicationContext<MobileAgentApp>()
+        val fake = FakeSettingsAuthorityPort().apply { prepareFailedRevoke() }
+        registerSettingsAuthorityPortProvider(app) { fake }
+        val instrumentation = androidx.test.platform.app.InstrumentationRegistry.getInstrumentation()
+        var viewModel: SettingsViewModel? = null
+        try {
+            instrumentation.runOnMainSync {
+                viewModel = SettingsViewModel(app)
+                viewModel!!.refreshAuthorities()
+                viewModel!!.forgetWiredAdb()
+            }
+            val deadline = android.os.SystemClock.elapsedRealtime() + 5_000L
+            var finished = false
+            while (!finished && android.os.SystemClock.elapsedRealtime() < deadline) {
+                instrumentation.runOnMainSync { finished = viewModel!!.uiState(0).error != null }
+                if (!finished) Thread.sleep(20)
+            }
+            assertTrue("Failed revoke must be visible", finished)
+            instrumentation.runOnMainSync {
+                val state = viewModel!!.uiState(0)
+                assertTrue(state.wiredAdbAuthority.configured)
+                assertTrue(state.error!!.contains("激活凭据已保留"))
+            }
+        } finally { registerSettingsAuthorityPortProvider(app, app.container) }
+    }
+
+    @Test
     fun defaultSnapshotIsFailClosedAndContainsOnlyPeerAuthorities() {
         val snapshot = SettingsAuthoritySnapshot()
 
@@ -148,12 +176,34 @@ class ExecutionAuthoritiesTest {
             assertNotNull(viewModel.wiredPairingToken())
             assertEquals(fake.token, viewModel.wiredPairingToken())
             assertEquals(5, active.remainingAttempts)
+            assertEquals(listOf("intent:true", "select:WIRED_ADB", "pair"), fake.wiredCalls)
+            assertEquals(Authority.WIRED_ADB.name, viewModel.uiState(0).selectedAuthority)
+            assertTrue(viewModel.uiState(0).wiredAdbAuthority.userIntentEnabled)
+            assertEquals(DangerousMode.DISABLED.name, viewModel.uiState(0).dangerousMode)
 
             viewModel.cancelWiredAdbPairing()
             val cleared = viewModel.uiState(noticeCount = 0).wiredPairing
             assertFalse(cleared.hasToken)
             assertNull(viewModel.wiredPairingToken())
             assertTrue(fake.cancelCalls > 0)
+        } finally {
+            registerSettingsAuthorityPortProvider(app, app.container)
+        }
+    }
+
+    @Test
+    fun wiredPairingStopsBeforeMintingTokenWhenSelectionFails() {
+        val app = ApplicationProvider.getApplicationContext<MobileAgentApp>()
+        app.ensureHostInitialized()
+        val fake = FakeSettingsAuthorityPort().apply { failWiredSelection = true }
+        registerSettingsAuthorityPortProvider(app, SettingsAuthorityPortProvider { fake })
+        try {
+            val viewModel = SettingsViewModel(app)
+            viewModel.requestWiredAdbPairing()
+            assertEquals(listOf("intent:true", "select:WIRED_ADB"), fake.wiredCalls)
+            assertFalse(viewModel.uiState(0).wiredPairing.hasToken)
+            assertNull(viewModel.wiredPairingToken())
+            assertEquals(Authority.NONE.name, viewModel.uiState(0).selectedAuthority)
         } finally {
             registerSettingsAuthorityPortProvider(app, app.container)
         }
@@ -184,6 +234,9 @@ private class FakeSettingsAuthorityPort : SettingsAuthorityPort {
     var requestReplaceExistingTrust = false
     var cancelCalls = 0
     val shizukuCalls = mutableListOf<String>()
+    val wiredCalls = mutableListOf<String>()
+    var failWiredSelection = false
+    private var failRevoke = false
     private var current = SettingsAuthoritySnapshot(
         wiredAdb = SettingsAuthorityProviderState(
             authority = Authority.WIRED_ADB,
@@ -199,18 +252,26 @@ private class FakeSettingsAuthorityPort : SettingsAuthorityPort {
     override fun snapshot(): SettingsAuthoritySnapshot = current
     override fun refresh(): SettingsAuthoritySnapshot = current
     override fun selectAuthority(authority: Authority): SettingsAuthoritySnapshot {
-        shizukuCalls += "select:${authority.name}"
+        if (authority == Authority.WIRED_ADB) {
+            wiredCalls += "select:${authority.name}"
+            check(!failWiredSelection) { "AUTHORITY_POLICY_CHANGED" }
+        } else shizukuCalls += "select:${authority.name}"
         current = current.copy(selectedAuthority = authority)
         return current
     }
     override fun setUserIntent(authority: Authority, enabled: Boolean): SettingsAuthoritySnapshot {
-        shizukuCalls += "intent:$enabled"
+        if (authority == Authority.WIRED_ADB) wiredCalls += "intent:$enabled"
+        else shizukuCalls += "intent:$enabled"
         if (authority == Authority.SHIZUKU) {
             current = current.copy(
                 shizuku = current.shizuku.copy(
                     userIntent = if (enabled) AuthorityUserIntent.SHIZUKU else AuthorityUserIntent.NONE,
                 ),
             )
+        } else if (authority == Authority.WIRED_ADB) {
+            current = current.copy(wiredAdb = current.wiredAdb.copy(
+                userIntent = if (enabled) AuthorityUserIntent.WIRED_ADB else AuthorityUserIntent.NONE,
+            ))
         }
         return current
     }
@@ -221,10 +282,19 @@ private class FakeSettingsAuthorityPort : SettingsAuthorityPort {
     override fun openShizuku(): Boolean = false
     override fun reauthorizeWiredAdb(): SettingsAuthoritySnapshot = current
     override fun forgetWiredAdb(): SettingsAuthoritySnapshot = current
+    fun prepareFailedRevoke() {
+        failRevoke = true
+        current = current.copy(selectedAuthority = Authority.WIRED_ADB,
+            wiredAdb = current.wiredAdb.copy(configured = true))
+    }
+    override suspend fun revokeWiredAdb(): SettingsAuthorityMutation =
+        SettingsAuthorityMutation(!failRevoke, current,
+            if (failRevoke) "RESIDENT_ADB_REVOKE_FAILED" else null)
     override fun requestWiredAdbPairingToken(
         replaceExistingTrust: Boolean,
     ): SettingsWiredPairingRequestResult {
         requestReplaceExistingTrust = replaceExistingTrust
+        wiredCalls += "pair"
         return SettingsWiredPairingRequestResult(
             accepted = true,
             prompt = SettingsWiredPairingPrompt(

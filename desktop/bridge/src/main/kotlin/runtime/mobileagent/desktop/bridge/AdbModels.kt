@@ -366,6 +366,9 @@ object AdbDevicesParser {
 enum class AdbOperation {
     VERSION,
     DEVICES,
+    CURRENT_USER,
+    RESIDENT_BOOTSTRAP,
+    RESIDENT_STATUS,
     FEATURES,
     REVERSE_ENSURE,
     REVERSE_LIST,
@@ -397,6 +400,52 @@ class AdbProcessManager private constructor(
         listOf(configuration.adbPath.toString(), "devices", "-l"),
         timeoutMs,
     )
+
+    fun currentAndroidUser(timeoutMs: Long = 10_000): AdbResult = run(
+        AdbOperation.CURRENT_USER,
+        serialArgs("shell", "-T", "am", "get-current-user"),
+        timeoutMs,
+        stdoutCapBytes = 256,
+        stderrCapBytes = 4 * 1024,
+        stderrMayContainAdbDiagnostics = true,
+    )
+
+    /** Starts the fixed in-APK resident entrypoint. Bootstrap bytes travel only on stdin. */
+    fun startResidentDaemon(userId: Int, bootstrapFrame: ByteArray, timeoutMs: Long = 15_000): AdbResult {
+        require(userId >= 0) { "Android user id must be nonnegative" }
+        require(bootstrapFrame.size == ResidentAdbActivation.BOOTSTRAP_BYTES) {
+            "resident bootstrap has an invalid length"
+        }
+        return run(
+            AdbOperation.RESIDENT_BOOTSTRAP,
+            // adb shell joins the remaining host arguments into one remote command. Keep the
+            // entire fixed script in one argument so the device shell evaluates assignments and
+            // the daemon launch in the same shell scope.
+            serialArgs("shell", "-T", ResidentAdbActivation.launchScript(userId)),
+            timeoutMs,
+            stdin = bootstrapFrame,
+            stdoutCapBytes = 1024,
+            stderrCapBytes = 4 * 1024,
+            stderrMayContainAdbDiagnostics = true,
+        )
+    }
+
+    /** Reads only the nonsecret readiness state from the phone's user-bound provider. */
+    fun residentStatus(userId: Int, timeoutMs: Long = 5_000): AdbResult {
+        require(userId >= 0) { "Android user id must be nonnegative" }
+        return run(
+            AdbOperation.RESIDENT_STATUS,
+            serialArgs(
+                "shell", "-T", "content", "call", "--user", userId.toString(),
+                "--uri", ResidentAdbActivation.PROVIDER_URI,
+                "--method", "status",
+            ),
+            timeoutMs,
+            stdoutCapBytes = 4 * 1024,
+            stderrCapBytes = 4 * 1024,
+            stderrMayContainAdbDiagnostics = true,
+        )
+    }
 
     fun features(timeoutMs: Long = 10_000): AdbResult = run(
         AdbOperation.FEATURES,

@@ -23,11 +23,16 @@ License，版权所有 2021 RikkaW。Shizuku 是用户另行安装、启动和�
 ## JNA（Desktop Companion）
 
 Windows 有线 ADB Desktop Companion 使用 `net.java.dev.jna:jna:5.19.1` 和
-`net.java.dev.jna:jna-platform:5.19.1` 调用 Windows DPAPI。这两个组件仅进入
+`net.java.dev.jna:jna-platform:5.19.1` 校验 Windows 官方 adb 签名，并供旧桥调用 DPAPI。这两个组件仅进入
 `desktop:bridge` 分发物，不进入 Android APK。上游为
 [`java-native-access/jna` 5.19.1](https://github.com/java-native-access/jna/tree/1a91122853f6ab6f1fb2a4a284a6cf2ed8af0a4d)，
 按 `Apache-2.0 OR LGPL-2.1-or-later` 双重许可发布；分发 JAR 内保留上游
 `META-INF/LICENSE`，本项目不将其重新许可为 AGPL。
+
+v1.1.2 的 Windows 激活工具选择 JNA 允许的 Apache-2.0 分发选项，同时保留
+上游双许可声明。ZIP 的 `licenses/Apache-2.0.txt` 提供完整原文；
+`README-Windows.md` 列出七项外部 JVM 运行库的坐标、版本与许可，独立桌面
+CycloneDX SBOM 记录全部九个运行 JAR 的 SHA-256（包含两个第一方 JAR）。
 
 ## Android debug runtime
 

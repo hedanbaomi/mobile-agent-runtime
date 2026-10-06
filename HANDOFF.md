@@ -24,7 +24,7 @@
 
 ## 1. 现行状态与当前任务
 
-- **2026-10-06 v1.1.2 知识库续轮与对话归档（验证中，Codex 主协调者）**：用户授权修复、提交推送普通合并及发布。修复同批工具结果/视觉消息顺序、Chat 显式推理重放/空白持久化/预算和诊断隐私、PROVIDER_REJECTED 类型，并投影修复旧完整交换；新增由宿主 action 列表驱动的长按归档、设置查看和恢复、只读与跨实例准入事务、Schema30 与备份兼容。独立生产源码复审 APPROVE；受影响单元、设备及干净源码门禁分开核验，结果见 docs/evidence/2026-10-06/kb-and-conversation-archive.md。用户附件、诊断和私有 receipts 不进入提交。既有后台/CI/视频及共享文档 WIP 保留；本地 main 无需额外同步远端。尚未发布。
+- **2026-10-06 v1.1.2 知识库、对话归档与常驻 ADB（源码与专项验证通过，待发布，Codex 主协调者）**：用户授权修复、提交推送普通合并及发布，并明确要求自有设备常驻服务、不依赖 Shizuku。知识库续轮、推理重放与隐私、Schema30 归档及准入修复已验证；USB 电脑工具负责显式激活，手机自有 shell UID 2000 服务通过固定 App UID、单次令牌、短时挑战与 HMAC/Keystore 认证。本轮不因拔线、电脑退出或客户端关闭主动撤权，实际服务死亡会关闭执行入口；危险模式和能力授权仍独立。独立源码复查 APPROVE；API34 模拟器负向10、生命周期7、非 debug 智能体1、目录代际1与权限回归36均通过；严格完整门禁、JUnit 2119次变体执行零失败/错误/跳过、REUSE 926/926通过；正式发布另行记录，物理 USB/OEM 和真实付费 Provider 未验收。见 docs/evidence/2026-10-06/kb-and-conversation-archive.md 与 resident-adb-activation.md。私人附件与 receipts 不进入提交；既有后台/CI/视频与共享文档 WIP 保留，本地 main 不额外同步远端。尚未发布。
 
 - **2026-10-06 v1.1.1 审查、发布与通用贡献指南（本轮工作交付，Codex 主协调者）**：2026-10-06T16:50:48+08:00。Claude 发送准备/准入截止修复已独立只读复查 APPROVED，并补修事件消费及摘要检查点写入后的两处派发准入竞态；74/275/253 项单元、API34/x86_64 定向25项、完整本地门禁和远端 PR 检查通过。修复已由 [PR #47](https://github.com/hedanbaomi/mobile-agent-runtime/pull/47) 普通合并，正式 [v1.1.1/code6](https://github.com/hedanbaomi/mobile-agent-runtime/releases/tag/v1.1.1) 已发布并设 latest stable，8项附件服务器 digest 与本地 SHA-256 一致，正式签名延续；tag/构建/来源固定于 d523b6c39da9a51a3f1e1cd5be31df1194d8ac41。本提交将 CONTRIBUTING.md 改为面向全部开发者的环境、问题报告、测试、PR 和许可指南，贡献者使用自己的身份，维护者交接不作为普通贡献者开发报告。root 本地 main966a4bf 未额外同步远端，既有后台/CI/视频及私有交接 WIP 保留。真实 OEM 输入帧耗时、真实 Provider 长回复及物理 Shizuku/USB 未验收；验证及发布事实见 [本轮证据](docs/evidence/2026-10-06/send-freeze-and-run-deadline.md)。文档改动遵循普通 PR 门禁，远端状态以对应 PR 为准；无新增产品待办。
 

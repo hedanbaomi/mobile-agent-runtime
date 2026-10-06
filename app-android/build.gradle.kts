@@ -81,8 +81,8 @@ android {
         applicationId = "runtime.mobileagent"
         minSdk = libs.versions.minSdk.get().toInt()
         targetSdk = libs.versions.targetSdk.get().toInt()
-        versionCode = 3
-        versionName = "1.0.1"
+        versionCode = 4
+        versionName = "1.0.2"
         testInstrumentationRunner = "runtime.mobileagent.PythonRuntimeDeviceTestRunner"
         // Build-type ABI filters are merged with defaultConfig, not replaced.
         // Keep the default empty so release cannot inherit debug's x86_64.

@@ -318,6 +318,7 @@ class AppContainer(app: MobileAgentApp) :
      * `Application.onCreate`.  Cancelled in [close] together with the other process bridges.
      */
     private val recoveryScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    internal val appUpdates = runtime.mobileagent.updates.createAppUpdates(app, recoveryScope)
     val announcementRefreshCoordinator = AnnouncementRefreshCoordinator(
         store = RepositoryAnnouncementRefreshStore(announcements) {
             ClientContext(

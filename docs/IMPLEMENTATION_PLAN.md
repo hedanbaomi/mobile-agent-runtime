@@ -105,6 +105,7 @@ Cloudflare 只承载公告及其必要管理/统计，**不是模型代理或知
 | Python | CPython 官方 Android 嵌入包 3.14.x，固定已测版本 | 必须先验证 isolated service 内加载、FD、Binder、销毁；不能用普通子进程冒充 |
 | 后台导入 | 用户可见前台任务；WorkManager 补偿 | 不承诺后台无限运行；适配当期 SDK 的服务类型、启动条件与时限 |
 | 公告 | Worker + D1 + 管理 UI | 独立资源；定向、签名、离线及关闭统计仍可读公告 |
+| 应用更新 | 固定 GitHub stable Release + Android 系统安装器 | R36/ADR-0025：每日首开查询，主动下载，校验哈希/包名/版本/当前签名/设备后由系统确认；独立公告和 Provider，见 [APP_UPDATES.md](APP_UPDATES.md) |
 
 各依赖精确版本、下载来源、校验值、ABI、许可与验证结果记录在版本目录/锁文件及 ADR。Android 最低版本与原生依赖冲突时停止该集成并提出方案，不擅自提高最低系统版本或删除功能。
 

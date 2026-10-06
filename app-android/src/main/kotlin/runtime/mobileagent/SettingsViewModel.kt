@@ -18,8 +18,6 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import runtime.mobileagent.domain.AppException
-import runtime.mobileagent.announcements.AnnouncementCategory
-import runtime.mobileagent.announcements.ClientContext
 import runtime.mobileagent.diagnostics.DiagnosticSanitizer
 import runtime.mobileagent.diagnostics.DiagnosticLevel
 import runtime.mobileagent.domain.LocalePreference
@@ -55,10 +53,6 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
     val authorityState = mutableStateOf(authorityPort.snapshot())
     val preferences = mutableStateOf(app.container.settings.get())
     val exportStatus = mutableStateOf("")
-    val updateStatus = mutableStateOf(
-        if (BuildConfig.BUILD_TYPE == "release") "" else
-            "当前为 ${BuildConfig.BUILD_TYPE} 验证版，正式 release 将由用户另行确认。"
-    )
     val inspectorEnabled = mutableStateOf(app.container.uiPreferences.getBoolean("request-inspector", true))
     /** Compose observes consent changes instead of waiting for another settings recomposition. */
     val statsEnabled = mutableStateOf(app.container.announcements.statsEnabled())
@@ -67,7 +61,6 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
     val error = mutableStateOf<String?>(null)
     private var pendingExport: Pair<String, TransferOptions>? = null
     private var transferRunning = false
-    private var updateCheckRunning = false
     /** The pairing token is intentionally held only in this ViewModel process memory. */
     private var wiredPairingPrompt: SettingsWiredPairingPrompt? = null
     private var wiredPairingAttemptsRemaining = 0
@@ -186,7 +179,7 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
         diagnosticsSizeBytes = facts.diagnosticsSizeBytes,
         diagnosticsLimitBytes = facts.diagnosticsLimitBytes,
         diagnosticsFeedback = diagnosticsStatus.value,
-        exportState = exportStatus.value, updateState = updateStatus.value, noticeCount = noticeCount,
+        exportState = exportStatus.value, updateState = app.container.appUpdates.state.value.message, noticeCount = noticeCount,
         licenseText = facts.licenseText.takeIf { it.isNotBlank() },
         error = error.value,
         globalRootPrompt = facts.globalRootPrompt,
@@ -794,53 +787,9 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
         }
     }
 
-    /**
-     * Check the signed announcement feed for an UPDATE item that applies to this installation.
-     * The app deliberately does not download or install arbitrary announcement content; release
-     * artifacts remain a separately authenticated, user-initiated step.
-     */
+    /** Manual checks bypass daily throttling and share the process-wide release task. */
     fun checkUpdates() {
-        if (updateCheckRunning) return
-        updateCheckRunning = true
-        updateStatus.value = "正在检查签名更新公告…"
-        viewModelScope.launch {
-            try {
-                val result = app.container.announcementRefreshCoordinator.refresh(force = true).await()
-                val client = ClientContext(
-                    platform = "android",
-                    channel = "stable",
-                    versionCode = BuildConfig.VERSION_CODE,
-                    locale = Locale.getDefault().toLanguageTag(),
-                    installId = app.container.announcements.installId(),
-                )
-                val update = app.container.announcements.records(client = client)
-                    .asSequence()
-                    .filter { !it.withdrawn && !it.signatureExpired }
-                    .filter { it.item.category == AnnouncementCategory.UPDATE }
-                    .maxWithOrNull(compareBy({ it.item.publishedAt.orEmpty() }, { it.item.revision }))
-                updateStatus.value = when {
-                    update != null && result is AnnouncementRefreshResult.Failed ->
-                        "本次联网检查失败；仍保留此前已验证的更新公告《${update.item.title}》。请在公告中心查看详情。"
-                    update != null && result is AnnouncementRefreshResult.Rejected ->
-                        "新公告签名未通过验证；仍保留此前已验证的更新公告《${update.item.title}》。请在公告中心查看详情。"
-                    update != null ->
-                        "发现适用于当前设备的签名更新公告《${update.item.title}》。请在公告中心查看发布说明；应用不会自动下载或安装。"
-                    result is AnnouncementRefreshResult.ConfigurationUnavailable ->
-                        "更新公告服务尚未配置完整，无法执行签名检查。"
-                    result is AnnouncementRefreshResult.Failed ->
-                        "更新检查失败；未找到可安全使用的缓存更新公告。${result.message}"
-                    result is AnnouncementRefreshResult.Rejected ->
-                        "更新公告签名未通过验证，已保留原缓存且未执行更新。"
-                    else -> "已完成签名检查，当前没有适用于此设备的更新公告。"
-                }
-            } catch (cancelled: CancellationException) {
-                throw cancelled
-            } catch (_: Throwable) {
-                updateStatus.value = "更新检查暂时不可用；聊天与知识库功能不受影响。"
-            } finally {
-                updateCheckRunning = false
-            }
-        }
+        app.container.appUpdates.check(manual = true)
     }
 }
 

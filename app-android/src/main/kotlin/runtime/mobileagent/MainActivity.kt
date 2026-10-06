@@ -7,6 +7,12 @@ import android.graphics.Color
 import android.os.Bundle
 import android.Manifest
 import android.content.pm.PackageManager
+import android.content.pm.ApplicationInfo
+import android.content.Intent
+import android.content.ComponentName
+import android.net.Uri
+import android.provider.Settings
+import androidx.core.content.FileProvider
 import android.os.Build
 import androidx.activity.ComponentActivity
 import androidx.activity.result.contract.ActivityResultContracts
@@ -24,10 +30,25 @@ import runtime.mobileagent.ui.MainApp
 
 class MainActivity : ComponentActivity() {
     private var importRecovery: Job? = null
+    private var updateInstallRunning = false
+    private var pendingUpdatePermission = false
+    private var installingUpdates: runtime.mobileagent.updates.AppUpdateCoordinator? = null
+    private fun currentUpdates() = installingUpdates ?: (application as MobileAgentApp).container.appUpdates
+    private val updatePermission = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) {
+        if (pendingUpdatePermission) {
+            pendingUpdatePermission = false
+            if (packageManager.canRequestPackageInstalls()) lifecycleScope.launch { openVerifiedUpdateInstaller() }
+            else currentUpdates().installationMessage("未允许安装；可在允许后重试。")
+        }
+    }
+    private val updateInstaller = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
+        currentUpdates().installationMessage(if (result.resultCode == RESULT_OK) "安装已完成，请重新打开应用。" else "安装未完成，可重试安装。")
+    }
     private val notificationPermission = registerForActivityResult(ActivityResultContracts.RequestPermission()) { }
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         (application as? MobileAgentApp)?.ensureHostInitialized()
+        pendingUpdatePermission = savedInstanceState?.getBoolean("pending-update-permission") ?: false
         configureSystemBars()
         setContent { MainApp(onMoveTaskToBack = { moveTaskToBack(true) }) }
         if (Build.VERSION.SDK_INT >= 33 && checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
@@ -45,6 +66,7 @@ class MainActivity : ComponentActivity() {
         // the announcements screen ViewModel. The coordinator handles single-flight and backoff.
         (application as? MobileAgentApp)?.container?.announcementRefreshCoordinator?.foreground()
         val app = application as? MobileAgentApp ?: return
+        app.container.appUpdates.check()
         if (importRecovery?.isActive == true) return
         importRecovery = lifecycleScope.launch {
             try {
@@ -63,6 +85,53 @@ class MainActivity : ComponentActivity() {
                 // not crash navigation or erase any persisted import state.
             }
         }
+    }
+
+    override fun onSaveInstanceState(outState: Bundle) {
+        outState.putBoolean("pending-update-permission", pendingUpdatePermission)
+        super.onSaveInstanceState(outState)
+    }
+
+    internal fun downloadAndInstallUpdate(updates: runtime.mobileagent.updates.AppUpdateCoordinator = (application as MobileAgentApp).container.appUpdates) {
+        if (updateInstallRunning) return
+        updateInstallRunning = true
+        installingUpdates = updates
+        lifecycleScope.launch {
+            try {
+                if (updates.downloadOrReady().await() == null) return@launch
+                if (!packageManager.canRequestPackageInstalls()) {
+                    pendingUpdatePermission = true
+                    updates.installationMessage("请允许此应用安装更新，返回后继续安装。")
+                    updatePermission.launch(Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES, Uri.parse("package:$packageName")))
+                } else openVerifiedUpdateInstaller()
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (_: Exception) {
+                pendingUpdatePermission = false
+                updates.installationMessage("无法打开系统安装程序，请重试。")
+            } finally { updateInstallRunning = false }
+        }
+    }
+
+    @Suppress("DEPRECATION")
+    private suspend fun openVerifiedUpdateInstaller() {
+        val updates = currentUpdates()
+        // Also restores the daily cached candidate after process recreation during permission UI.
+        updates.check().join()
+        val file = updates.readyForInstall() ?: return
+        try {
+            val uri = FileProvider.getUriForFile(this, "$packageName.app-updates", file)
+            val intent = Intent(Intent.ACTION_INSTALL_PACKAGE).setDataAndType(uri, "application/vnd.android.package-archive")
+                .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                .putExtra(Intent.EXTRA_RETURN_RESULT, true)
+            val systemInstaller = packageManager.queryIntentActivities(intent, PackageManager.MATCH_DEFAULT_ONLY)
+                .firstOrNull { it.activityInfo.applicationInfo.flags and
+                    (ApplicationInfo.FLAG_SYSTEM or ApplicationInfo.FLAG_UPDATED_SYSTEM_APP) != 0 }
+                ?: error("No system package installer")
+            intent.component = ComponentName(systemInstaller.activityInfo.packageName, systemInstaller.activityInfo.name)
+            updates.dismiss()
+            updateInstaller.launch(intent)
+        } catch (_: Exception) { updates.installationMessage("无法打开系统安装程序，请重试。") }
     }
 
     private fun configureSystemBars() {

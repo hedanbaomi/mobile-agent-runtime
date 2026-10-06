@@ -24,8 +24,8 @@ data class AgentContextPolicy(
     val maxModelRoundsPerSegment: Int = 8,
     val maxModelRequestsPerRun: Int = 32,
     val maxCompactionsPerRun: Int = 8,
-    val summaryOutputTokens: Int = 1024,
-    val summaryMaxUnits: Int = 8192,
+    val summaryOutputTokens: Int = 4096,
+    val summaryMaxUnits: Int = 16384,
     val reservedOutputTokens: Int? = null,
     /**
      * The user's own per-Run fee ceiling for Python `model.invoke`.  Absent means
@@ -124,7 +124,7 @@ data class AgentContextPolicy(
                 keepRecentTurns = int("keepRecentTurns", 2), softLimitPercent = int("softLimitPercent", 85),
                 targetPercent = int("targetPercent", 60), maxModelRoundsPerSegment = int("maxModelRoundsPerSegment", 8),
                 maxModelRequestsPerRun = int("maxModelRequestsPerRun", 32), maxCompactionsPerRun = int("maxCompactionsPerRun", 8),
-                summaryOutputTokens = int("summaryOutputTokens", 1024), summaryMaxUnits = int("summaryMaxUnits", 8192),
+                summaryOutputTokens = int("summaryOutputTokens", 4096), summaryMaxUnits = int("summaryMaxUnits", 16384),
                 reservedOutputTokens = optional("reservedOutputTokens"),
                 pythonModelRunTokens = optional("pythonModelRunTokens"), knowledgeTokenBudget = int("knowledgeTokenBudget", 3000),
                 imageBudget = int("imageBudget", 4), localOutputReserve = int("localOutputReserve", 1024),

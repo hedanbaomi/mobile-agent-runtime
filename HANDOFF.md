@@ -3,7 +3,7 @@
 
 # 项目交接
 
-最后更新：2026-10-06T09:21:21+08:00（UTC+8；v1.0.2真实更新实现和本地验证完成，正在提交与发布；既有WIP保留）。项目根目录：E:/mobileAgentRuntime。
+最后更新：2026-10-06T11:29:47+08:00（UTC+8；输入、压缩与设备访问修复交付中）。项目根目录：E:/mobileAgentRuntime。
 
 按 [agent.md 第 1 节](agent.md#1-按任务读取与开工) 选择资料。现行规则见 agent.md；本文件记录现场和待办，历史任务中的授权不自动延续。
 
@@ -23,6 +23,8 @@
 - 完整证据：[2026-09-18 文档管线复审 R1–R5 收口](docs/evidence/2026-09-18/document-pipeline-r1-r5-closeout.md)。
 
 ## 1. 现行状态与当前任务
+
+- **2026-10-06 输入、压缩与设备访问修复（修复最终独立复查通过，v1.1.0 提交合并及发布进行中）**：R18/R21/R23/R34，U02/U07、C20—C25、S15/S18。输入草稿隔离并保留 IME composition/光标；已知摘要失败且完整原文符合硬预算时继续，未知/超窗仍停止；设置精简与推荐值。危险模式全局确认直接授权内置 Agent shell，冻结 policy/确认 revision/所选通道并拒绝旧审批/缓存披露；首次 Agent 完整设备确认随保存提交，取消丢弃、失败回滚保留草稿、默认目录不变。API34 定向 18 项与 shell 6 项通过；修复最终独立只读复查 APPROVE；干净检出 strict/offline licenseGuard/Reverse/check/pins/lock/checksums/YAML 全通过，REUSE886/886。root main 基线5a9120c（tree与origin/main869f21c一致），既有后台/CI/视频/私有交接WIP不纳入。用户追加授权发布 v1.1.0/code5，正式发布待执行；真实OEM输入帧耗时、物理Shizuku/USB及Provider未验收。见[本轮证据](docs/evidence/2026-10-06/ime-context-device-access.md)。
 
 - **2026-10-06 应用真实更新与 v1.0.2（实现与本地验证通过，发布待远端门禁）**：R36、UP01—UP06、N06；固定官方 GitHub stable Release，整数版本比较，独立公告；每日首次前台检查与成功缓存持久化，手动强制、失败退避、单飞下载和重试。下载后校验受控 HTTPS 跳转、大小/哈希、包名/递增版本/当前 signer/SDK/ABI，私有只读 FileProvider 进入显式系统安装器，首次未知来源许可返回继续，最终用户确认。strict/offline 完整 check/许可/pins/YAML/Debug/AndroidTest通过；Android三变体738单元零失败，16条更新测试每变体；API34定向3执行成功、1可选联网跳过后单独1/1联网通过。实际隔离AVD中由弹窗下载按钮完成许可返回、系统取消重试和升级，测试数据保留，已恢复debug并停AVD；fixture不是正式资产，目标进程被升级结束不计JUnitPASS。独立只读审阅和补审生产APPROVED。ADR-0025及相关规范/验收同步；正式arm64真机、API26/OEM、全量旋转/杀进程交互和产品长稳未验收。旧1.0.1须先手动安装1.0.2，之后使用每日检查/下载安装。用户授权提交、推送、正常PR合并和正式发布；本地main修改按指令不额外同步，保护原后台/CI/附件/报告/计划及私有交接WIP。[专项证据](docs/evidence/2026-10-06/app-updates-1.0.2.md)，私有日志 .private/app-update-102-20261006/。
 

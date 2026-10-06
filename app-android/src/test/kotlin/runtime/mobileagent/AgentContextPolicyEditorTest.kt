@@ -148,9 +148,21 @@ class AgentContextPolicyEditorTest {
         val draft = AgentContextPolicyDraftUi(maxInputTokens = "")
         val zh = draft.summary(zh = true)
         assertTrue(zh.contains("自动压缩"))
-        assertTrue(zh.contains("输入预算（保守估算单位）"))
+        assertTrue(zh.contains("输入预算"))
         assertTrue(zh.contains("模型可用窗口"))
         assertTrue(draft.copy(maxInputTokens = "4000").summary(zh = true).contains("4000"))
+    }
+
+    @Test
+    fun recommendedSettingsPreservePythonFeeAuthorizationAndUnknownPolicyFields() {
+        val original = """{"maxInputTokens":3000,"pythonModelRunTokens":500,"futureKnob":true,"summaryOutputTokens":2048}"""
+        val updated = AgentContextPolicyDraftUi.fromJson(original).recommended().toCanonicalJson(original)
+        val policy = AgentContextPolicy.fromJson(updated)
+        assertTrue(policy.autoCompact)
+        assertNull(policy.maxInputTokens)
+        assertEquals(500, policy.pythonModelRunTokens)
+        assertEquals(2048, policy.summaryOutputTokens)
+        assertTrue(Json.parseToJsonElement(updated).jsonObject["futureKnob"]!!.jsonPrimitive.boolean)
     }
 
     /**
@@ -175,7 +187,7 @@ class AgentContextPolicyEditorTest {
         // A blank field must remove a previously stored authorization.
         val cleared = AgentContextPolicyDraftUi().toCanonicalJson(stored)
         assertFalse("pythonModelRunTokens" in Json.parseToJsonElement(cleared).jsonObject.keys)
-        assertTrue(authorized.summary(zh = true).contains("65536"))
+        assertEquals("65536", AgentContextPolicyDraftUi.fromJson(stored).pythonModelRunTokens)
     }
 
     private companion object {

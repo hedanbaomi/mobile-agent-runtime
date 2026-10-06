@@ -290,7 +290,8 @@ internal fun MainApp(onMoveTaskToBack: () -> Unit = {}) {
     val drawerDestinationUi = drawerDestinations.map { destination ->
         runtime.mobileagent.feature.chat.ChatDrawerDestinationUi(destination.route, destination.label)
     }
-    val drawerChatState = chatVm.state.value.copy(
+    val chatPresentation by runtime.mobileagent.feature.chat.rememberConversationPresentation(chatVm.state)
+    val drawerChatState = chatPresentation.copy(
         language = if (chinese) "zh-CN" else "en-US",
         drawerDestinations = drawerDestinationUi,
     )
@@ -355,12 +356,12 @@ internal fun MainApp(onMoveTaskToBack: () -> Unit = {}) {
             )
             BackHandler(
                     enabled = !(editorOwner == route && editorDirty) &&
-                        (workspacePickerOpen || shellDetailOpen || route != AppRoutes.CHAT || chatVm.state.value.streaming),
+                        (workspacePickerOpen || shellDetailOpen || route != AppRoutes.CHAT || drawerChatState.streaming),
             ) {
                 when {
                     workspacePickerOpen -> closeWorkspacePicker()
                     shellDetailOpen -> shellDetailBack?.invoke()
-                    route == AppRoutes.CHAT && chatVm.state.value.streaming -> onMoveTaskToBack()
+                    route == AppRoutes.CHAT && drawerChatState.streaming -> onMoveTaskToBack()
                     else -> handleBack(compact)
                 }
             }
@@ -606,7 +607,8 @@ private fun ChatRoute(vm: runtime.mobileagent.ChatViewModel, chinese: Boolean, o
     onOpenWorkspacePicker: (String?, String?, String) -> Unit = { _, _, _ -> },
     onOpenAgentSettings: (String?) -> Unit = {}) {
     LifecycleEventEffect(Lifecycle.Event.ON_RESUME) { vm.reload() }
-    val state = vm.state.value.copy(language = if (chinese) "zh-CN" else "en-US")
+    val presentation by runtime.mobileagent.feature.chat.rememberConversationPresentation(vm.state)
+    val state = presentation.copy(language = if (chinese) "zh-CN" else "en-US")
     val selectedAgentLabel = state.agents.firstOrNull { it.id == state.selectedAgentId }?.label
         ?: if (chinese) "当前智能体" else "Current Agent"
     val actions = runtime.mobileagent.feature.chat.ChatActions(
@@ -630,6 +632,7 @@ private fun ChatRoute(vm: runtime.mobileagent.ChatViewModel, chinese: Boolean, o
     )
     runtime.mobileagent.feature.chat.ConversationScreen(
         state = state,
+        input = { vm.state.value.input },
         actions = actions,
         onOpenDrawer = onOpenDrawer,
         showGlobalMenu = false,
@@ -734,13 +737,14 @@ private fun AgentsRoute(entry: NavBackStackEntry, chinese: Boolean, onRoute: (St
         },
         canChooseSaf = !workspaceBusy,
         canBrowsePrivileged = authorityReady && !workspaceBusy,
-        fullDeviceFilesEnabled = fullDeviceCurrentGrant,
+        fullDeviceFilesEnabled = fullDeviceCurrentGrant || vm.hasPendingFullDeviceFiles(),
         fullDeviceFilesEligible = authorityReady &&
             authoritySnapshot.dangerousModeBuildAllowed &&
             authoritySnapshot.dangerousMode != runtime.mobileagent.domain.DangerousMode.DISABLED && !workspaceBusy,
         status = when {
             workspaceBusy -> if (chinese) "正在更新工作区…" else "Updating workspace…"
             workspaceStatus.isNotBlank() -> workspaceStatus
+            vm.hasPendingFullDeviceFiles() -> if (chinese) "已确认完整设备文件；保存智能体后开启。" else "Full-device files confirmed; enabled after saving the agent."
             workspaceLoad.isFailure -> if (chinese) "读取工作区失败。" else "Unable to read workspaces."
             fullDeviceWorkspace != null && authoritySnapshot.dangerousMode == runtime.mobileagent.domain.DangerousMode.DISABLED -> if (chinese) {
                 "危险模式已关闭；完整设备文件工具暂停。"
@@ -967,6 +971,8 @@ private fun AgentsRoute(entry: NavBackStackEntry, chinese: Boolean, onRoute: (St
             if (enabled) {
                 confirmFullDevice = true
             } else {
+                vm.clearFullDeviceFilesDraft()
+                workspaceStatus = ""
                 val full = fullDeviceWorkspace
                 val revision = full?.let { workspacePort.fullDeviceFilesGrantRevision(it.workspaceId) }
                 if (full != null && revision != null) {
@@ -1121,8 +1127,13 @@ private fun AgentsRoute(entry: NavBackStackEntry, chinese: Boolean, onRoute: (St
             chinese = chinese,
             onConfirm = {
                 confirmFullDevice = false
-                val agentId = editorAgentId ?: return@FullDeviceFilesConfirmationDialog
-                val workspaceId = agentFullDeviceWorkspaceId(agentId, selectedAuthority)
+                val agentId = editorAgentId
+                if (agentId == null) {
+                    vm.stageFullDeviceFiles()
+                    workspaceStatus = ""
+                    return@FullDeviceFilesConfirmationDialog
+                }
+                val workspaceId = runtime.mobileagent.workspace.agentFullDeviceWorkspaceId(agentId, selectedAuthority)
                 val currentRevision = workspacePort.fullDeviceFilesGrantRevision(workspaceId)
                 // An active confirmation is reused when its capability grants
                 // need renewal after a policy change. A revoked tombstone must
@@ -1451,14 +1462,6 @@ private fun workspaceAccessFailureMessage(
 
 private fun newWorkspaceId(prefix: String): String =
     "$prefix-${java.util.UUID.randomUUID().toString().replace("-", "")}".take(128)
-
-private fun agentFullDeviceWorkspaceId(agentId: String, authority: runtime.mobileagent.domain.Authority): String {
-    val digest = java.security.MessageDigest.getInstance("SHA-256")
-        .digest(agentId.toByteArray(Charsets.UTF_8))
-        .take(12)
-        .joinToString("") { "%02x".format(it) }
-    return "full-${authority.name.lowercase()}-$digest"
-}
 
 @Composable
 private fun ProvidersRoute(entry: NavBackStackEntry, chinese: Boolean, onRoute: (String) -> Unit,

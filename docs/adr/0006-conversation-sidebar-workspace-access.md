@@ -100,3 +100,5 @@ run-local binding 只是冻结视图，不建立第二套权限事实；`Capabil
 ## 许可与参考边界
 
 第一方实现和本文保持 `AGPL-3.0-only`。RikkaHub、ChatGPT、Codex Desktop 等只作为交互和信息架构参考；不得复制品牌、素材或未审计的实现代码。
+
+2026-10-06 首次配置修订：新 Agent 尚无 ID 时，完整设备文件确认作为当前编辑器独立草稿保留，显示“保存后开启”，不提前写 grant，不替换已选默认目录。保存 Agent 后经 canonical sink 执行 ADD_TO_LIBRARY 的 grant-only 计划，完整设备 scope 不成为默认或 Thread binding。保存前/提交前重验 Authority、policyVersion、危险模式确认 revision 与 admission；变化须重新确认，backend 不可用时显示稳定错误并回滚新 Agent、保留草稿供显式重试。取消或切换编辑器丢弃确认，过期编辑器 token 不得写入新草稿。

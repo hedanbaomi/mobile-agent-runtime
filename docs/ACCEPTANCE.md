@@ -362,3 +362,6 @@ S03/S04/S05/S07 增量必须通过真实 isolated worker：API26 JSON/新 PID；
 - K05：成功 query vector 与本 owner claim 清理同事务；真实 SQLite 插入后中断/删除异常回滚、commit 回执中断恢复、旧 cache+pending、错 space/query/维度/NaN/坏字节、consent 撤销、替换 owner 和多库同空间并发。有效成功缓存本地完成且零 provider 调用；无证据未知仍不自动重试。
 - S33/S34：URL 2048/2049 字符、长查询和签名参数、百分号编码/Unicode、fragment/userinfo/private 过滤；保留 URL 必须等于完整原值。撤权后的安全反馈和 durable invocation 保留已派发/完成/扣留/可能收费，缓存及重启不重派发、不泄露。
 - L01—L04：版本 1.0.0 / code 2，正式证书一致、不可调试、arm64 APK、native alignment/notice、源码归档/SBOM/provenance/hash 对应干净合并提交；正常 PR/CI 合并、本地 main 同步及 GitHub Release 分别核验。定向测试和正式构建不替代未完成的全量设备/付费服务/长稳验收。见 [修复证据](evidence/2026-10-05/review-464f-fixes.md)。
+
+
+2026-10-06 回归补充（R18/R21/R23/R34；U02/U07、C20—C25、S15/S18）：长历史输入及中文 InputConnection composition/光标不得随每字输入重组 shell；摘要合法单围栏兼容、已知失败且完整原文符合硬预算时继续原文，未知/取消/超窗仍停止，usage 不重复结算且诊断不采集正文；压缩基础/高级及推荐设置保留未知键/Python 预算。全局危险模式直接授权内置 Agent shell，独立 Skill 不继承；policy/Authority/确认 epoch 变化拒绝派发、旧审批和缓存披露，UNKNOWN 不重放。首次 Agent 完整设备确认随保存提交，取消/过期编辑器不授权、失败可见且回滚保留草稿、默认目录不变、完整设备 scope 不成为默认或 Thread binding。验证及真机/Provider 边界见 [本轮证据](evidence/2026-10-06/ime-context-device-access.md)。

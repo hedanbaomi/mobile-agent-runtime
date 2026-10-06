@@ -17,6 +17,12 @@ import runtime.mobileagent.integration.WorkspaceAccessResult
 import runtime.mobileagent.skills.tooling.FullDeviceFilesRequest
 import runtime.mobileagent.skills.tooling.WorkspaceAttachRequest
 
+internal fun agentFullDeviceWorkspaceId(agentId: String, authority: Authority): String {
+    val digest = java.security.MessageDigest.getInstance("SHA-256")
+        .digest(agentId.toByteArray(Charsets.UTF_8)).take(12).joinToString("") { "%02x".format(it) }
+    return "full-${authority.name.lowercase()}-$digest"
+}
+
 /**
  * The only write seam a workspace screen may call.
  *

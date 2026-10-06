@@ -423,6 +423,9 @@ class AgentsViewModel(
      * orphan grant or default behind.
      */
     private var pendingWorkspaceDraft: runtime.mobileagent.domain.WorkspaceDraft? = null
+    private data class FullDeviceDraft(val authority: runtime.mobileagent.domain.Authority, val policyVersion: Long, val consentRevision: Long)
+    private var pendingFullDeviceDraft: FullDeviceDraft? = null
+    private val authorityPort = settingsAuthorityPort(app)
     private var editorSessionToken: Long = 0L
 
     init {
@@ -457,6 +460,7 @@ class AgentsViewModel(
         if (app.container.agents.get(id) == null) return
         editorSessionToken += 1L
         pendingWorkspaceDraft = null
+        pendingFullDeviceDraft = null
         app.container.uiPreferences.edit().putString("selected-agent", id).apply()
         savedStateHandle[SELECTED_AGENT_KEY] = id
         savedStateHandle.remove<String>(EDITOR_ID_KEY)
@@ -475,6 +479,7 @@ class AgentsViewModel(
     fun openEditor(id: String?) {
         editorSessionToken += 1L
         pendingWorkspaceDraft = null
+        pendingFullDeviceDraft = null
         val editor = editorFrom(id)
         editorBaseline = editor
         savedStateHandle[EDITOR_ID_KEY] = id
@@ -489,12 +494,13 @@ class AgentsViewModel(
     }
 
     fun edit(editor: AgentEditorUi) {
-        state.value = state.value.copy(editor = editor, editorDirty = editor != editorBaseline)
+        state.value = state.value.copy(editor = editor, editorDirty = pendingWorkspaceDraft != null || pendingFullDeviceDraft != null || editor != editorBaseline)
     }
     fun closeEditor() {
         editorSessionToken += 1L
         editorBaseline = null
         pendingWorkspaceDraft = null
+        pendingFullDeviceDraft = null
         savedStateHandle.remove<String>(EDITOR_ID_KEY)
         state.value = state.value.copy(editor = null, error = null, editorDirty = false, editorOpen = false)
     }
@@ -522,6 +528,31 @@ class AgentsViewModel(
 
     fun pendingWorkspaceDraft(): runtime.mobileagent.domain.WorkspaceDraft? = pendingWorkspaceDraft
 
+    /** Keep explicit full-device consent in this new-Agent editor only, without granting yet. */
+    fun stageFullDeviceFiles(expectedEditorSessionToken: Long = editorSessionToken): Boolean {
+        if (expectedEditorSessionToken != editorSessionToken || state.value.editor?.id != null || !state.value.editorOpen) return false
+        return try {
+            val snapshot = authorityPort.snapshot()
+            require(snapshot.selectedAuthority != runtime.mobileagent.domain.Authority.NONE &&
+                snapshot.dangerousModeBuildAllowed && snapshot.dangerousMode != runtime.mobileagent.domain.DangerousMode.DISABLED) {
+                "请先连接 ADB 级通道并开启危险模式。"
+            }
+            pendingFullDeviceDraft = FullDeviceDraft(snapshot.selectedAuthority, grantPort.currentPolicyVersion(), snapshot.revision)
+            state.value = state.value.copy(editorDirty = true, error = null)
+            true
+        } catch (failure: Exception) {
+            state.value = state.value.copy(error = SecretRedactor.redact(failure.message ?: "确认完整设备文件失败。"))
+            false
+        }
+    }
+
+    fun hasPendingFullDeviceFiles(): Boolean = pendingFullDeviceDraft != null
+
+    fun clearFullDeviceFilesDraft() {
+        pendingFullDeviceDraft = null
+        state.value = state.value.copy(editorDirty = pendingWorkspaceDraft != null || state.value.editor != editorBaseline)
+    }
+
     /** Identity of the currently open editor; asynchronous draft results must match it. */
     fun editorSessionToken(): Long = editorSessionToken
 
@@ -545,7 +576,7 @@ class AgentsViewModel(
         editorBaseline = editorBaseline?.withWorkspaceConfiguration(data)
         state.value = state.value.copy(
             editor = refreshed,
-            editorDirty = pendingWorkspaceDraft != null || refreshed != editorBaseline,
+            editorDirty = pendingWorkspaceDraft != null || pendingFullDeviceDraft != null || refreshed != editorBaseline,
             grantStoreAvailable = grantPort.available,
             grantStoreError = grantPortError,
         )
@@ -605,6 +636,7 @@ class AgentsViewModel(
             // Validate and merge the context draft before any persistence mutates the profile;
             // unknown keys previously stored in contextPolicyJson are preserved.
             val contextPolicyJson = editor.contextPolicyDraft.toCanonicalJson(editor.contextPolicyJson)
+            validatePendingFullDeviceFiles()
             val parameters = JsonObject(editor.parameters.filterValues { it.isNotBlank() }.mapValues { Json.parseToJsonElement(it.value) })
             val profile = AgentProfile(
                 id = previous?.id ?: EntityId.random().value, name = editor.name.trim(),
@@ -627,8 +659,9 @@ class AgentsViewModel(
                 savedId = saved.id
                 persistGrantChanges(editor, saved.id)
                 if (defaultChanged && !draftOwnsDefault) persistWorkspaceDefault(editor, saved.id)
-                val hadDraft = pendingWorkspaceDraft != null
+                val hadDraft = pendingWorkspaceDraft != null || pendingFullDeviceDraft != null
                 commitPendingWorkspaceDraft(saved.id)
+                commitPendingFullDeviceFiles(saved.id)
                 val workspaceUpdated = defaultChanged || hadDraft ||
                     editor.workspaceGrantPreset != null || editor.grantDraft != null
                 app.container.uiPreferences.edit().putString("selected-agent", saved.id).apply()
@@ -637,6 +670,7 @@ class AgentsViewModel(
                 editorSessionToken += 1L
                 editorBaseline = null
                 pendingWorkspaceDraft = null
+                pendingFullDeviceDraft = null
                 state.value = state.value.copy(
                     selectedAgentId = saved.id,
                     editor = null,
@@ -753,7 +787,36 @@ class AgentsViewModel(
         if (result is runtime.mobileagent.integration.WorkspaceAccessResult.Failure) {
             error("保存工作区授权失败：${result.code.name}")
         }
-        pendingWorkspaceDraft = null
+    }
+
+    private fun validatePendingFullDeviceFiles() {
+        val draft = pendingFullDeviceDraft ?: return
+        val snapshot = authorityPort.snapshot()
+        require(snapshot.selectedAuthority == draft.authority && snapshot.revision == draft.consentRevision &&
+            snapshot.dangerousModeBuildAllowed && snapshot.dangerousMode != runtime.mobileagent.domain.DangerousMode.DISABLED &&
+            grantPort.currentPolicyVersion() == draft.policyVersion) {
+            "设备访问策略已变化，请重新确认完整设备文件后再保存。"
+        }
+    }
+
+    private fun commitPendingFullDeviceFiles(agentId: String) {
+        val draft = pendingFullDeviceDraft ?: return
+        validatePendingFullDeviceFiles()
+        val sink = canonicalWorkspaceSink ?: error("工作区写入通道未就绪。")
+        val target = runtime.mobileagent.domain.WorkspaceTarget(agentId = agentId)
+        val result = kotlinx.coroutines.runBlocking {
+            sink.openFullDeviceFiles(
+                authority = draft.authority,
+                request = runtime.mobileagent.skills.tooling.FullDeviceFilesRequest(
+                    workspaceId = runtime.mobileagent.workspace.agentFullDeviceWorkspaceId(agentId, draft.authority),
+                    displayName = "完整设备文件", grantRevision = 1L, confirmedByUser = true,
+                ),
+                plan = runtime.mobileagent.domain.WorkspaceIntent.ADD_TO_LIBRARY.plan(target), target = target,
+            )
+        }
+        require(result is runtime.mobileagent.integration.WorkspaceAccessResult.Success) {
+            "开启完整设备文件失败：${(result as? runtime.mobileagent.integration.WorkspaceAccessResult.Failure)?.code?.name ?: "CONFLICT"}；请重新确认或取消开启后重试。"
+        }
     }
 
     /**

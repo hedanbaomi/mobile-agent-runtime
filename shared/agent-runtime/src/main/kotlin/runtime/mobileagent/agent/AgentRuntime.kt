@@ -91,6 +91,7 @@ class AgentRuntime(
         var finishedEmitted = false
         var activeDispatch: DispatchKind? = null
         var activeCompaction: ContextCompactionRecord? = null
+        var compactionUnavailable = false
 
         suspend fun saveCompaction(record: ContextCompactionRecord): ContextCompactionRecord {
             val saved = request.context?.persist?.invoke(record) ?: record
@@ -238,7 +239,7 @@ class AgentRuntime(
                     diagnostics = request.diagnostics,
                 )
                 val inputLimit = request.maxInputBudgetUnits
-                val context = request.context?.takeIf { it.policy.autoCompact && inputLimit != null }
+                val context = request.context?.takeIf { it.policy.autoCompact && inputLimit != null && !compactionUnavailable }
                 if (context != null) {
                     val minimum = adapter.estimateInput(window.minimumRequest(modelRequest))
                     if (minimum.units > inputLimit!! || minimum.imageCount > request.maxImagesPerRequest) {
@@ -336,27 +337,38 @@ class AgentRuntime(
                             emitUnknownModel(); return@flow
                         }
                         activeDispatch = null
-                        if (summaryTerminal is ModelEvent.Failed || summaryTooLarge) {
-                            saveCompaction(checkpoint.copy(state = ContextCompactionState.FAILED))
+                        suspend fun rejectSummary(classification: String): Boolean {
+                            saveCompaction(checkpoint.copy(state = ContextCompactionState.FAILED,
+                                reason = plan.reason + ":" + classification))
+                            // A failed optimization must not terminate a request whose original
+                            // evidence still fits. Suppress further summaries in this Run; ordinary
+                            // dispatch still rechecks authority, total requests, tools and deadline.
+                            // Unknown/cancelled dispatches never reach this recovery path.
+                            val original = adapter.estimateInput(modelRequest)
+                            if (inputLimit?.let { original.units <= it } == true && original.imageCount <= request.maxImagesPerRequest) {
+                                compactionUnavailable = true
+                                return true
+                            }
                             run.state = RunState.FAILED
-                            run.stopReason = "CONTEXT_COMPACTION_FAILED: summary failed; original history retained, no automatic retry"
-                            emitModel(ModelEvent.Failed(run.stopReason!!)); finish(); return@flow
+                            run.stopReason = "CONTEXT_COMPACTION_FAILED: $classification; original history retained, no automatic retry"
+                            emitModel(ModelEvent.Failed(run.stopReason!!))
+                            finish()
+                            return false
+                        }
+                        if (summaryTerminal is ModelEvent.Failed || summaryTooLarge) {
+                            val classification = if (summaryTooLarge) "summary-too-large" else
+                                summaryResponseFailure((summaryTerminal as ModelEvent.Failed).sanitizedMessage)
+                            if (rejectSummary(classification)) break else return@flow
                         }
                         val summaryJson = try {
                             ContextSummaryFormat.validate(redact(summaryText.toString(), secret), context.policy.summaryMaxUnits)
                         } catch (error: Exception) {
-                            saveCompaction(checkpoint.copy(state = ContextCompactionState.FAILED))
-                            run.state = RunState.FAILED
-                            run.stopReason = "CONTEXT_COMPACTION_FAILED: invalid summary (${summaryFailureClassification(error)}); original history retained, no automatic retry"
-                            emitModel(ModelEvent.Failed(run.stopReason!!)); finish(); return@flow
+                            if (rejectSummary(summaryFailureClassification(error))) break else return@flow
                         }
                         val replacement = window.replacementRequest(modelRequest, plan, summaryJson)
                         val after = adapter.estimateInput(replacement)
                         if (plan.reason == "input-budget" && after.units >= plan.beforeUnits) {
-                            saveCompaction(checkpoint.copy(state = ContextCompactionState.FAILED))
-                            run.state = RunState.BUDGET_EXHAUSTED
-                            run.stopReason = "CONTEXT_OVERFLOW: summary did not reduce the request; no automatic retry"
-                            emitModel(ModelEvent.Failed(run.stopReason!!)); finish(); return@flow
+                            if (rejectSummary("summary-did-not-reduce")) break else return@flow
                         }
                         val stillAuthorized = withTimeoutOrNull(remainingMs(run)) { request.beforeModelRequest(); true }
                         if (stillAuthorized != true || budgetExhausted(run)) {
@@ -1135,9 +1147,18 @@ class AgentRuntime(
                 detail.contains("must be an array") -> "invalid summary section"
                 detail.contains("must contain only strings") -> "invalid summary entry"
                 detail.contains("exceeds") -> "summary exceeds limit"
-                detail.isBlank() -> "invalid summary"
-                else -> detail.take(120)
+                else -> "invalid summary"
             }
+        }
+
+        internal fun summaryResponseFailure(message: String): String = when {
+            message.contains("REASONING_ONLY") -> "summary-reasoning-only"
+            message.contains("CONTEXT_OVERFLOW") || message.contains("OUTPUT_TRUNCATED") -> "summary-output-truncated"
+            message.contains("AUTH") || message.contains("SECRET_UNAVAILABLE") -> "summary-auth-failed"
+            message.contains("RATE_LIMIT") -> "summary-rate-limited"
+            message.contains("TIMEOUT") -> "summary-timeout"
+            message.contains("not a data-only") -> "summary-not-data-only"
+            else -> "summary-response-failed"
         }
 
         const val UNKNOWN_TOOL_OUTCOME = "UNKNOWN_OUTCOME: Tool dispatch may have started; do not automatically retry"

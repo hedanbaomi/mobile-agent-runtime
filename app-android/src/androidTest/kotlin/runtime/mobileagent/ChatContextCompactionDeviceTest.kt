@@ -47,18 +47,23 @@ class ChatContextCompactionDeviceTest {
         assertEquals(1, vm.state.value.compactions.size)
     }
 
-    @Test fun invalidSummaryPersistsFailureAndObservedUsageWithoutRetry() = fixture(invalidSummary = true) { app, server, conversation ->
+    @Test fun invalidSoftSummaryKeepsUsageAndContinuesWithOriginalHistoryWithoutRetry() = fixture(invalidSummary = true) { app, server, conversation ->
         val original = app.container.conversations.messages(conversation)
         val vm = viewModel(app, conversation)
         send(vm, "Continue.")
-        assertEquals(1, server.requests.size)
+        assertEquals(2, server.requests.size)
         val saved = app.container.contextCompactions.list(conversation).single()
         assertEquals(ContextCompactionState.FAILED, saved.state)
         assertEquals(21, saved.inputTokens)
         assertNull(saved.summaryJson)
-        assertEquals(RunStatus.FAILED, app.container.runs.list(conversation).last().state)
+        val run = app.container.runs.list(conversation).last()
+        assertEquals(RunStatus.COMPLETED, run.state)
+        assertEquals(28, run.inputTokens)
+        assertEquals(14, run.outputTokens)
+        assertTrue(server.requests.last().toString().contains("Old question 4"))
+        assertFalse(server.requests.last().toString().contains("Conversation summary:"))
         assertEquals(original, app.container.conversations.messages(conversation).filter { it.id in original.map { row -> row.id } })
-        assertTrue(vm.state.value.messages.any { it.text.contains("summary", ignoreCase = true) || it.text.contains("压缩") })
+        assertTrue(vm.state.value.compactions.any { it.state == "FAILED" })
     }
 
     @Test fun completedExchangesBeforeAnErrorRemainAvailableToLaterCompaction() = fixture { app, server, conversation ->

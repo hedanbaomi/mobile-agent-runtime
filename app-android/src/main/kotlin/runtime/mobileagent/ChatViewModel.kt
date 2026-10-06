@@ -1279,9 +1279,12 @@ class ChatViewModel internal constructor(
                                             state = DiagnosticCompactionState.entries.firstOrNull {
                                                 it.name == event.record.state.name
                                             } ?: DiagnosticCompactionState.FAILED,
-                                            requestRef = run.runId,
+                                            requestRef = event.record.id,
                                             sessionRef = conversationId,
-                                            reasonCode = event.record.state.name.lowercase(),
+                                            reasonCode = if (event.record.state == ContextCompactionState.FAILED)
+                                                "summary_" + event.record.reason.substringAfter(':', "failed")
+                                                    .removePrefix("summary-").replace(' ', '_').replace('-', '_')
+                                                else event.record.state.name.lowercase(),
                                         ),
                                     )
                                 }

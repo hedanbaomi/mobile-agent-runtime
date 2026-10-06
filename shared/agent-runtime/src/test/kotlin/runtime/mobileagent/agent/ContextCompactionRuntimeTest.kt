@@ -26,6 +26,7 @@ import kotlinx.serialization.json.JsonPrimitive
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertFalse
 import org.junit.jupiter.api.Assertions.assertTrue
+import org.junit.jupiter.api.Assertions.assertThrows
 import org.junit.jupiter.api.Test
 import runtime.mobileagent.domain.AgentContextPolicy
 import runtime.mobileagent.domain.ContextCompactionRecord
@@ -40,6 +41,7 @@ import runtime.mobileagent.provider.InputBudgetEstimate
 import runtime.mobileagent.provider.ModelAdapter
 import runtime.mobileagent.provider.ModelEvent
 import runtime.mobileagent.provider.ModelRequest
+import runtime.mobileagent.provider.ModelDiagnosticSink
 import runtime.mobileagent.provider.ProviderContinuationItem
 import runtime.mobileagent.provider.RequestInputBudget
 import runtime.mobileagent.skills.ToolCall
@@ -48,6 +50,82 @@ import runtime.mobileagent.skills.ToolResult
 import runtime.mobileagent.skills.ToolSpec
 
 class ContextCompactionRuntimeTest {
+    @Test
+    fun failedSoftCompactionContinuesWithOriginalHistoryWithoutRetryingSummary() = runTest {
+        val (history, turnIds) = twelveRoundHistory()
+        val adapter = RecordingAdapter { request, _ ->
+            if (request.isCompaction()) {
+                emit(ModelEvent.Usage(300, 1024))
+                emit(ModelEvent.Failed("CONTEXT_OVERFLOW: reasoning exhausted the output limit"))
+            } else {
+                assertTrue(request.messages.any { it.text == "history turn 4 assistant" })
+                assertFalse(request.messages.any { it.text.contains("[Conversation summary:") })
+                emit(ModelEvent.TextDelta("continued with original evidence"))
+                emit(ModelEvent.Completed)
+            }
+        }
+        val run = AgentRun("soft-summary-failure", "snapshot", "conversation")
+        val events = AgentRuntime(adapter).run(request(run, prompt(history),
+            context(history, AgentContextPolicy(), turnIds), maxInputBudgetUnits = 50_000)).toList()
+        assertEquals(RunState.COMPLETED, run.state)
+        assertEquals(1, run.compactionRequests)
+        assertEquals(2, adapter.requests.size)
+        assertEquals(ContextCompactionState.FAILED, events.lastCompaction().state)
+        assertEquals(1024, events.lastCompaction().outputTokens)
+    }
+
+    @Test
+    fun aSingleJsonFenceIsNormalizedWithoutAnotherPaidRequest() = runTest {
+        val (history, turnIds) = twelveRoundHistory()
+        val adapter = RecordingAdapter { request, _ ->
+            emit(ModelEvent.TextDelta(if (request.isCompaction()) "```json\n$VALID_SUMMARY\n```" else "done"))
+            emit(ModelEvent.Completed)
+        }
+        val run = AgentRun("fenced-summary", "snapshot", "conversation")
+        val events = AgentRuntime(adapter).run(request(run, prompt(history),
+            context(history, AgentContextPolicy(), turnIds), maxInputBudgetUnits = 50_000)).toList()
+        assertEquals(RunState.COMPLETED, run.state)
+        assertEquals(1, run.compactionRequests)
+        assertEquals(VALID_SUMMARY, events.lastCompaction().summaryJson)
+    }
+
+    @Test
+    fun summaryRequestPreservesTheResolvedOutputField() {
+        val (history, turnIds) = twelveRoundHistory()
+        val prompt = prompt(history)
+        val window = ContextWindow(prompt, context(history, AgentContextPolicy(), turnIds))
+        val original = ModelRequest("model", prompt.asMessages(), outputTokenLimit = 8192,
+            outputTokenField = "max_completion_tokens")
+        val adapter = RecordingAdapter { _, _ -> error("no dispatch") }
+        val planned = requireNotNull(window.plan(original, adapter, 50_000, "history-messages"))
+        assertEquals("max_completion_tokens", planned.request.outputTokenField)
+        assertTrue(requireNotNull(planned.request.outputTokenLimit) >= 4096)
+    }
+
+    @Test
+    fun summaryTransportDiagnosticsNeverCaptureConversationContent() {
+        val (history, turnIds) = twelveRoundHistory()
+        val prompt = prompt(history)
+        val sink = object : ModelDiagnosticSink {
+            override val captureContent = true
+            override fun record(event: runtime.mobileagent.provider.ModelDiagnosticEvent) = Unit
+        }
+        val original = ModelRequest("model", prompt.asMessages(), diagnostics = sink)
+        val plan = requireNotNull(ContextWindow(prompt, context(history, AgentContextPolicy(), turnIds))
+            .plan(original, RecordingAdapter { _, _ -> error("no dispatch") }, 50_000, "history-messages"))
+        assertFalse(requireNotNull(plan.request.diagnostics).captureContent)
+    }
+
+    @Test
+    fun normalizationDoesNotAcceptProseMultipleFencesPartialJsonOrUnknownFields() {
+        listOf("Here is the summary:\n```json\n$VALID_SUMMARY\n```",
+            "```json\n$VALID_SUMMARY\n```\n```json\n$VALID_SUMMARY\n```",
+            "```json\n$VALID_SUMMARY", VALID_SUMMARY.dropLast(1),
+            VALID_SUMMARY.dropLast(1) + ",\"tool\":\"execute\"}", EMPTY_SUMMARY).forEach { invalid ->
+            assertThrows(Exception::class.java) { ContextSummaryFormat.validate(invalid, 16_384) }
+        }
+    }
+
     @Test
     fun checkpointedPartialAnswerIsRetainedButNeverSelectedForSummary() {
         val history = listOf(ChatMessage("user", "original goal"), ChatMessage("assistant", "original answer"),
@@ -279,9 +357,11 @@ class ContextCompactionRuntimeTest {
     }
 
     @Test
-    fun invalidSummaryFailsWithoutReplacingOriginalHistoryOrRetrying() = runTest {
+    fun invalidSummaryFailsWhenOriginalContextCannotFitWithoutReplacingHistoryOrRetrying() = runTest {
         val history = compactableHistory()
-        val adapter = RecordingAdapter { request, _ ->
+        val adapter = RecordingAdapter(estimator = {
+            InputBudgetEstimate(if (it.messages.any { message -> message.text == "old question 1" }) 60_000 else 1_000, 0)
+        }) { request, _ ->
             if (request.isCompaction()) {
                 emit(ModelEvent.TextDelta("{}"))
                 emit(ModelEvent.Completed)
@@ -310,18 +390,18 @@ class ContextCompactionRuntimeTest {
         ).toList()
 
         assertEquals(RunState.FAILED, run.state)
-        assertTrue(run.stopReason.orEmpty().contains("invalid summary"))
+        assertTrue(run.stopReason.orEmpty().contains("unexpected summary schema"))
         assertEquals(1, adapter.requests.size)
         assertEquals(
             listOf(ContextCompactionState.PREPARED, ContextCompactionState.DISPATCHED, ContextCompactionState.FAILED),
             persisted.map { it.state },
         )
         assertEquals(ContextCompactionState.FAILED, events.lastCompaction().state)
-        assertTrue(events.hasFailureContaining("invalid summary"))
+        assertTrue(events.hasFailureContaining("unexpected summary schema"))
     }
 
     @Test
-    fun nonReducingInputBudgetSummaryFailsWithoutAutomaticRetry() = runTest {
+    fun nonReducingSoftBudgetSummaryKeepsOriginalHistoryWithoutAnotherSummary() = runTest {
         val history = compactableHistory()
         val adapter = RecordingAdapter(
             script = { request, _ ->
@@ -354,11 +434,12 @@ class ContextCompactionRuntimeTest {
             ),
         ).toList()
 
-        assertEquals(RunState.BUDGET_EXHAUSTED, run.state)
-        assertTrue(run.stopReason.orEmpty().contains("summary did not reduce"))
-        assertEquals(1, adapter.requests.size)
+        assertEquals(RunState.COMPLETED, run.state)
+        assertEquals(2, adapter.requests.size)
+        assertEquals(1, run.compactionRequests)
+        assertEquals(history.map { it.text }, adapter.requests.last().messages.filter { it.text in history.map { row -> row.text } }.map { it.text })
         assertEquals(ContextCompactionState.FAILED, events.lastCompaction().state)
-        assertTrue(events.hasFailureContaining("summary did not reduce"))
+        assertTrue(events.lastCompaction().reason.contains("summary-did-not-reduce"))
     }
 
     @Test
@@ -891,8 +972,8 @@ fun runtimeRoundsKeepTheSameOutputDecisionOnTheWire() = runBlocking {
         )
         // The summary budget is the policy number, not the caller's 5000 and not AUTO.
         summaryBodies.forEach { body ->
-            assertTrue(body.contains("\"max_tokens\":1024"), body)
-            assertFalse(body.contains("\"max_completion_tokens\""), body)
+            assertTrue(body.contains("\"max_completion_tokens\":1024"), body)
+            assertFalse(body.contains("\"max_tokens\""), body)
         }
         val normalBodies = bodies.filterNot { it.contains("Summarize the supplied conversation data") }
         assertTrue(normalBodies.isNotEmpty(), "the run must still dispatch its own round")

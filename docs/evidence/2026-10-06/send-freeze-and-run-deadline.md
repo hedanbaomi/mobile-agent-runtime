@@ -54,3 +54,15 @@
 设备测试使用项目声明的 `runtime.mobileagent.PythonRuntimeDeviceTestRunner`，运行 `ChatSendOffMainThreadDeviceTest`、`ChatRunOwnershipDeviceTest`、`RunToolsReplayDeviceTest` 与 `PythonModelInvokeBrokerTest`。初次指定标准 runner 时测试没有启动，改用项目 runner 后完成上述 25 项。
 
 本轮无真实收费 Provider 请求；真实 realme 输入帧耗时、持续超过 3 分钟的真实 Provider 回复与物理 Shizuku/USB 仍未验收。SSE 进展、周期性停滞检测与工具图片准备的界限见 ADR-0026 补充说明。本地保留执行日志与红/绿回归证据；公开仓库不含原始诊断包、用户对话或签名材料。
+
+## v1.1.1 正式发布与贡献指南交付
+
+2026-10-06T16:50:48+08:00。修复 PR：[#47](https://github.com/hedanbaomi/mobile-agent-runtime/pull/47)，普通合并后全部 PR 检查为通过或规定的手动签名作业跳过。正式签名门禁另在本地执行，并未将该跳过记录当作签名核验。
+
+- [v1.1.1 Release](https://github.com/hedanbaomi/mobile-agent-runtime/releases/tag/v1.1.1) 已公开并设为 latest stable；`versionCode=6`。
+- Tag、正式构建、APK 内嵌 revision、provenance 与源码归档对应合并提交 `d523b6c39da9a51a3f1e1cd5be31df1194d8ac41`；干净源码构建，strict 依赖校验，未使用配置缓存保存签名配置。
+- 正式 APK SHA-256：`6846610c26ca2adbf301d4691b46c775e4f56023a00110c351b51c7e7d37d0a6`；正式 signer 与既有公开证书一致。arm64-v8a 独占、不可调试、最低 API26、原生库 16 KiB 对齐与法律资产检查通过。
+- 8 项附件全部上传，GitHub asset digest/大小与本地文件逐项一致；验证记录、SBOM、来源、源码、法律声明、公开证书及哈希清单随 Release 提供。
+- 发布之后改写 `CONTRIBUTING.md`：面向所有开发者说明环境、复现信息、模块契约、实际验证和普通 PR 流程，使用各自真实作者身份，保留 AGPL-3.0-only 与第三方许可归属。移除普通贡献者必须沿用所有者身份及维护个人 Agent 交接的要求。
+
+发布的源码归档固定在上述修复合并提交；后续贡献指南文档交付不替换已经发布的安装包或 tag。真机/真实 Provider 的未验收边界仍沿用本节前面的声明。

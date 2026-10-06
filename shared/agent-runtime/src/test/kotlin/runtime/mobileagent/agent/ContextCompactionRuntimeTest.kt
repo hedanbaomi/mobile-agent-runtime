@@ -51,6 +51,28 @@ import runtime.mobileagent.skills.ToolSpec
 
 class ContextCompactionRuntimeTest {
     @Test
+    fun deadlineDuringSummaryCheckpointStartsNoSummaryRequest() = runTest {
+        val history = compactableHistory()
+        var now = 0L
+        val adapter = RecordingAdapter { _, _ ->
+            emit(ModelEvent.TextDelta(VALID_SUMMARY))
+            emit(ModelEvent.Completed)
+        }
+        val persisted = mutableListOf<ContextCompactionRecord>()
+        val run = AgentRun("checkpoint-deadline", "snapshot", "conversation", budget = RunBudget(maxRuntimeMs = 1_000))
+        AgentRuntime(adapter, clock = { now }).run(request(run, prompt(history),
+            context(history, AgentContextPolicy(maxHistoryMessages = 4, keepRecentTurns = 1), compactableTurnIds(),
+                persist = { record ->
+                    persisted += record
+                    if (record.state == ContextCompactionState.DISPATCHED) now = 2_000
+                    record
+                }), maxInputBudgetUnits = 50_000)).toList()
+        assertEquals(RunState.BUDGET_EXHAUSTED, run.state)
+        assertEquals(0, adapter.requests.size)
+        assertEquals(ContextCompactionState.FAILED, persisted.last().state)
+    }
+
+    @Test
     fun failedSoftCompactionContinuesWithOriginalHistoryWithoutRetryingSummary() = runTest {
         val (history, turnIds) = twelveRoundHistory()
         val adapter = RecordingAdapter { request, _ ->
@@ -474,7 +496,7 @@ class ContextCompactionRuntimeTest {
     }
 
     @Test
-    fun summaryTimeoutBecomesUnknownWithoutReplacement() = runTest {
+    fun stalledSummaryBecomesUnknownWithoutReplacement() = runTest {
         val history = compactableHistory()
         val adapter = RecordingAdapter { request, _ ->
             if (request.isCompaction()) {
@@ -489,7 +511,7 @@ class ContextCompactionRuntimeTest {
             "summary-timeout",
             "snapshot",
             "conversation",
-            budget = RunBudget(maxRuntimeMs = 1_000),
+            budget = RunBudget(stallTimeoutMs = 1_000),
         )
         val events = AgentRuntime(adapter).run(
             request(
@@ -508,6 +530,60 @@ class ContextCompactionRuntimeTest {
         assertEquals(1, adapter.requests.size)
         assertEquals(ContextCompactionState.UNKNOWN_OUTCOME, events.lastCompaction().state)
         assertTrue(events.hasFailureContaining("UNKNOWN_OUTCOME"))
+    }
+
+    @Test
+    fun rejectedSummaryAfterTheDeadlineNeverDispatchesTheMainRequest() = runTest {
+        val (history, turnIds) = twelveRoundHistory()
+        var now = 0L
+        val adapter = RecordingAdapter { request, _ ->
+            if (request.isCompaction()) {
+                now = 2_000
+                emit(ModelEvent.Failed("CONTEXT_OVERFLOW: reasoning exhausted the output limit"))
+            } else {
+                emit(ModelEvent.TextDelta("must not be requested"))
+                emit(ModelEvent.Completed)
+            }
+        }
+        val run = AgentRun("summary-rejected-late", "snapshot", "conversation", budget = RunBudget(maxRuntimeMs = 1_000))
+        val events = AgentRuntime(adapter, clock = { now }).run(request(run, prompt(history),
+            context(history, AgentContextPolicy(), turnIds), maxInputBudgetUnits = 50_000)).toList()
+
+        assertEquals(RunState.BUDGET_EXHAUSTED, run.state)
+        assertEquals(1, adapter.requests.size)
+        assertEquals(ContextCompactionState.FAILED, events.lastCompaction().state)
+    }
+
+    @Test
+    fun summaryReceivedInFullAfterTheDeadlineIsKeptButStartsNoMainRequest() = runTest {
+        val history = compactableHistory()
+        var now = 0L
+        val adapter = RecordingAdapter { request, _ ->
+            if (request.isCompaction()) {
+                emit(ModelEvent.TextDelta(VALID_SUMMARY))
+                now = 2_000
+                emit(ModelEvent.Completed)
+            } else {
+                emit(ModelEvent.Completed)
+            }
+        }
+        val run = AgentRun("summary-late", "snapshot", "conversation", budget = RunBudget(maxRuntimeMs = 1_000))
+        val events = AgentRuntime(adapter, clock = { now }).run(
+            request(
+                run = run,
+                prompt = prompt(history = history),
+                context = context(
+                    history = history,
+                    policy = AgentContextPolicy(maxHistoryMessages = 4, keepRecentTurns = 1),
+                    turnIds = compactableTurnIds(),
+                ),
+                maxInputBudgetUnits = 50_000,
+            ),
+        ).toList()
+
+        assertEquals(RunState.BUDGET_EXHAUSTED, run.state)
+        assertEquals(1, adapter.requests.size)
+        assertEquals(ContextCompactionState.SUCCEEDED, events.lastCompaction().state)
     }
 
     @Test

@@ -5,6 +5,10 @@ package runtime.mobileagent.agent
 
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.cancellable
@@ -20,6 +24,8 @@ import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonPrimitive
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicLong
 import runtime.mobileagent.domain.AppError
 import runtime.mobileagent.domain.ContextCompactionRecord
 import runtime.mobileagent.domain.ContextCompactionState
@@ -29,6 +35,8 @@ import runtime.mobileagent.domain.RetryClass
 import runtime.mobileagent.provider.AssistantToolCall
 import runtime.mobileagent.provider.ChatMessage
 import runtime.mobileagent.provider.ModelAdapter
+import runtime.mobileagent.provider.ModelDiagnosticEvent
+import runtime.mobileagent.provider.ModelDiagnosticSink
 import runtime.mobileagent.provider.ModelEvent
 import runtime.mobileagent.provider.ModelRequest
 import runtime.mobileagent.provider.ProviderContinuationItem
@@ -92,6 +100,16 @@ class AgentRuntime(
         var activeDispatch: DispatchKind? = null
         var activeCompaction: ContextCompactionRecord? = null
         var compactionUnavailable = false
+        // Every transport diagnostic (one per SSE chunk) counts as stream progress, so a long
+        // tool-argument or hidden-reasoning phase is never mistaken for a stall.
+        val transportProgress = AtomicLong()
+        val transportDiagnostics = object : ModelDiagnosticSink {
+            override fun record(event: ModelDiagnosticEvent) {
+                transportProgress.incrementAndGet()
+                request.diagnostics?.record(event)
+            }
+            override val captureContent: Boolean get() = request.diagnostics?.captureContent ?: false
+        }
 
         suspend fun saveCompaction(record: ContextCompactionRecord): ContextCompactionRecord {
             val saved = request.context?.persist?.invoke(record) ?: record
@@ -236,7 +254,7 @@ class AgentRuntime(
                     operationId = request.operationId,
                     outputTokenLimit = request.outputTokenLimit,
                     outputTokenField = request.outputTokenField,
-                    diagnostics = request.diagnostics,
+                    diagnostics = transportDiagnostics,
                 )
                 val inputLimit = request.maxInputBudgetUnits
                 val context = request.context?.takeIf { it.policy.autoCompact && inputLimit != null && !compactionUnavailable }
@@ -300,9 +318,18 @@ class AgentRuntime(
                         val summaryText = StringBuilder()
                         var summaryTerminal: ModelEvent? = null
                         var summaryTooLarge = false
-                        val summaryCompleted = withTimeoutOrNull(remainingMs(run)) {
-                            activeDispatch = DispatchKind.MODEL
-                            adapter.stream(plan.request.copy(operationId = checkpoint.id), secret).cancellable().collect { event ->
+                        // A dispatched summary is received to its own end; only a stalled
+                        // stream becomes unknown.  The deadline is checked again below.
+                        activeDispatch = DispatchKind.MODEL
+                        // Persisting DISPATCHED may suspend, but the provider has not been
+                        // contacted yet. Recheck admission after that durable checkpoint.
+                        if (budgetExhausted(run)) {
+                            activeDispatch = null
+                            saveCompaction(checkpoint.copy(state = ContextCompactionState.FAILED))
+                            emitBudget(); return@flow
+                        }
+                        val summaryCompleted = adapter.stream(plan.request.copy(operationId = checkpoint.id), secret)
+                            .cancellable().collectUntilStalled(run.budget.stallTimeoutMs, transportProgress) { event ->
                                 when (event) {
                                     is ModelEvent.TextDelta -> {
                                         if (!summaryTooLarge) {
@@ -326,8 +353,6 @@ class AgentRuntime(
                                     else -> Unit // Neither private continuation nor reasoning enters a durable summary.
                                 }
                             }
-                            true
-                        }
                         // Compaction usage travels with its durable attempt, not the ordinary
                         // model Usage stream. Consumers reconcile by id, including on cancellation.
                         if (summaryCompleted != true || summaryTerminal == null ||
@@ -370,14 +395,20 @@ class AgentRuntime(
                         if (plan.reason == "input-budget" && after.units >= plan.beforeUnits) {
                             if (rejectSummary("summary-did-not-reduce")) break else return@flow
                         }
-                        val stillAuthorized = withTimeoutOrNull(remainingMs(run)) { request.beforeModelRequest(); true }
-                        if (stillAuthorized != true || budgetExhausted(run)) {
+                        // A summary received in full after the deadline is still kept (it was
+                        // billed and a later turn may reuse it); only the next request is gated.
+                        val pastDeadline = budgetExhausted(run)
+                        val stillAuthorized = withTimeoutOrNull(
+                            if (pastDeadline) run.budget.stallTimeoutMs else remainingMs(run),
+                        ) { request.beforeModelRequest(); true }
+                        if (stillAuthorized != true) {
                             saveCompaction(checkpoint.copy(state = ContextCompactionState.FAILED))
                             emitBudget(); return@flow
                         }
                         checkpoint = saveCompaction(checkpoint.copy(
                             state = ContextCompactionState.SUCCEEDED, summaryJson = summaryJson, afterUnits = after.units,
                         ))
+                        if (pastDeadline || budgetExhausted(run)) { emitBudget(); return@flow }
                         window.commit(plan, checkpoint)
                         segmentRounds = 0
                         modelRequest = replacement
@@ -401,7 +432,9 @@ class AgentRuntime(
                     request.beforeModelRequest()
                     true
                 }
-                if (beforeRequestCompleted != true) {
+                // A rejected summary can fall through here after the deadline; recheck
+                // admission immediately before the dispatch boundary.
+                if (beforeRequestCompleted != true || budgetExhausted(run)) {
                     emitBudget()
                     return@flow
                 }
@@ -445,98 +478,91 @@ class AgentRuntime(
                 val assistantText = StringBuilder()
                 val pendingContinuation = mutableListOf<ProviderContinuationItem>()
                 var terminal: ModelEvent? = null
+                // RequestPrepared is consumed by durable/UI collectors and can suspend.
+                // No provider request has started yet; do not admit it on an expired check.
+                if (budgetExhausted(run)) {
+                    emitBudget()
+                    return@flow
+                }
                 val modelStreamCompleted = try {
-                    withTimeoutOrNull(remainingMs(run)) {
-                        // ModelAdapter.stream is a lazy Flow in the provider contract.  The
-                        // dispatch boundary is immediately before collection, so a timeout
-                        // which fires before this point is a local budget result, while one
-                        // after it must be treated as potentially billable/unknown.
-                        val modelStream = adapter.stream(modelRequest, secret)
-                        activeDispatch = DispatchKind.MODEL
-                        modelStream.cancellable().collect { event ->
-                            if (terminal is ModelEvent.Failed) return@collect
-                            if (budgetExhausted(run)) throw CancellationException(BUDGET_CANCEL)
+                    // ModelAdapter.stream is a lazy Flow in the provider contract; the dispatch
+                    // boundary is immediately before collection.  A dispatched reply is received
+                    // to its own end even past the run deadline, which only gates the next
+                    // request.  Only a stream that stalls is abandoned as an unknown outcome.
+                    val modelStream = adapter.stream(modelRequest, secret)
+                    activeDispatch = DispatchKind.MODEL
+                    modelStream.cancellable().collectUntilStalled(run.budget.stallTimeoutMs, transportProgress) { event ->
+                        if (terminal is ModelEvent.Failed) return@collectUntilStalled
 
-                            val outgoing = when (event) {
-                                is ModelEvent.Failed -> ModelEvent.Failed(redact(event.sanitizedMessage, secret))
-                                else -> event
-                            }
-                            when (outgoing) {
-                                is ModelEvent.ToolCallDelta -> {
-                                    if (!request.toolsEnabled || toolExecutor == null) {
-                                        terminal = ModelEvent.Failed("CONFIG_INVALID: model tools are not enabled for this model")
-                                    } else {
-                                        val call = ToolCall(
-                                            callId = outgoing.callId,
-                                            name = outgoing.name,
-                                            argumentsJson = outgoing.argumentsJson,
-                                        )
-                                        val validationError = validateToolCall(call, toolSpecs, pendingTools)
-                                        if (validationError != null) {
-                                            if (undispatchedToolFeedback < MAX_UNDISPATCHED_TOOL_FEEDBACK) {
-                                                undispatchedToolFeedback++
-                                                rejectedCalls[outgoing.callId] = call to validationError
-                                            } else {
-                                                // Typed prefix so a tool-call validation failure is
-                                                // distinguishable from a truncated provider stream in
-                                                // run_state (R2 QA P2); the detail stays in stopReason.
-                                                terminal = ModelEvent.Failed(
-                                                    "${rejectedTerminalCode(validationError)}: $validationError",
-                                                )
-                                            }
+                        val outgoing = when (event) {
+                            is ModelEvent.Failed -> ModelEvent.Failed(redact(event.sanitizedMessage, secret))
+                            else -> event
+                        }
+                        when (outgoing) {
+                            is ModelEvent.ToolCallDelta -> {
+                                if (!request.toolsEnabled || toolExecutor == null) {
+                                    terminal = ModelEvent.Failed("CONFIG_INVALID: model tools are not enabled for this model")
+                                } else {
+                                    val call = ToolCall(
+                                        callId = outgoing.callId,
+                                        name = outgoing.name,
+                                        argumentsJson = outgoing.argumentsJson,
+                                    )
+                                    val validationError = validateToolCall(call, toolSpecs, pendingTools)
+                                    if (validationError != null) {
+                                        if (undispatchedToolFeedback < MAX_UNDISPATCHED_TOOL_FEEDBACK) {
+                                            undispatchedToolFeedback++
+                                            rejectedCalls[outgoing.callId] = call to validationError
                                         } else {
-                                            rejectedCalls.remove(outgoing.callId)
-                                            pendingTools[outgoing.callId] = call
-                                            emit(
-                                                RuntimeEvent.ToolCallObserved(
-                                                    callId = call.callId,
-                                                    name = call.name,
-                                                    argumentsJson = redact(call.argumentsJson, secret),
-                                                ),
+                                            // Typed prefix so a tool-call validation failure is
+                                            // distinguishable from a truncated provider stream in
+                                            // run_state (R2 QA P2); the detail stays in stopReason.
+                                            terminal = ModelEvent.Failed(
+                                                "${rejectedTerminalCode(validationError)}: $validationError",
                                             )
                                         }
+                                    } else {
+                                        rejectedCalls.remove(outgoing.callId)
+                                        pendingTools[outgoing.callId] = call
+                                        emit(
+                                            RuntimeEvent.ToolCallObserved(
+                                                callId = call.callId,
+                                                name = call.name,
+                                                argumentsJson = redact(call.argumentsJson, secret),
+                                            ),
+                                        )
                                     }
                                 }
-                                is ModelEvent.TextDelta -> {
-                                    assistantText.append(outgoing.text)
-                                    emitModel(outgoing)
-                                }
-                                // A refusal is assistant output: it stays readable and
-                                // persistable like answer text, never reasoning.
-                                is ModelEvent.RefusalDelta -> {
-                                    assistantText.append(outgoing.text)
-                                    emitModel(outgoing)
-                                }
-                                // Provider-private continuation is captured for the next
-                                // request of this run only.  It is never emitted to
-                                // the UI, diagnostics, or persisted history.
-                                is ModelEvent.ProviderContinuation -> {
-                                    pendingContinuation += outgoing.item
-                                    Unit
-                                }
-                                // Reasoning is an independent provider-owned channel.  Forward
-                                // only the explicit event; it never enters assistantText or the
-                                // next model prompt as inferred chain-of-thought.
-                                is ModelEvent.ReasoningDelta -> emitModel(outgoing)
-                                ModelEvent.Completed -> if (terminal !is ModelEvent.Failed) terminal = outgoing
-                                is ModelEvent.Failed -> terminal = outgoing
-                                else -> emitModel(outgoing)
                             }
+                            is ModelEvent.TextDelta -> {
+                                assistantText.append(outgoing.text)
+                                emitModel(outgoing)
+                            }
+                            // A refusal is assistant output: it stays readable and
+                            // persistable like answer text, never reasoning.
+                            is ModelEvent.RefusalDelta -> {
+                                assistantText.append(outgoing.text)
+                                emitModel(outgoing)
+                            }
+                            // Provider-private continuation is captured for the next
+                            // request of this run only.  It is never emitted to
+                            // the UI, diagnostics, or persisted history.
+                            is ModelEvent.ProviderContinuation -> {
+                                pendingContinuation += outgoing.item
+                                Unit
+                            }
+                            // Reasoning is an independent provider-owned channel.  Forward
+                            // only the explicit event; it never enters assistantText or the
+                            // next model prompt as inferred chain-of-thought.
+                            is ModelEvent.ReasoningDelta -> emitModel(outgoing)
+                            ModelEvent.Completed -> if (terminal !is ModelEvent.Failed) terminal = outgoing
+                            is ModelEvent.Failed -> terminal = outgoing
+                            else -> emitModel(outgoing)
                         }
-                        true
                     }
                 } catch (e: CancellationException) {
-                    // BUDGET_CANCEL is runtime-owned and is only thrown from inside an
-                    // already-started stream.  All other cancellation belongs to the caller
-                    // (or the provider's cancellation boundary) and must propagate unchanged.
-                    if (e.message == BUDGET_CANCEL) {
-                        if (activeDispatch == DispatchKind.MODEL) {
-                            emitUnknownModel()
-                        } else {
-                            emitBudget()
-                        }
-                        return@flow
-                    }
+                    // Cancellation belongs to the caller (or the provider's cancellation
+                    // boundary) and must propagate unchanged.
                     throw e
                 } catch (e: Exception) {
                     // A transport/connection exception after collection began may have
@@ -558,10 +584,8 @@ class AgentRuntime(
                 }
                 activeDispatch = null
 
-                if (budgetExhausted(run)) {
-                    emitBudget()
-                    return@flow
-                }
+                // The reply has been received in full, so its own terminal result settles
+                // first.  The deadline only decides whether this run starts more work.
                 val ended = terminal
                 if (ended is ModelEvent.Failed) {
                     run.state = if (ended.sanitizedMessage.contains("UNKNOWN_OUTCOME")) RunState.UNKNOWN_OUTCOME else RunState.FAILED
@@ -585,6 +609,10 @@ class AgentRuntime(
                         emitModel(ModelEvent.Failed("INVALID_RESPONSE: model stream ended without a terminal event"))
                         finish()
                     }
+                    return@flow
+                }
+                if (budgetExhausted(run)) {
+                    emitBudget()
                     return@flow
                 }
                 if (ended != ModelEvent.Completed) {
@@ -665,59 +693,52 @@ class AgentRuntime(
                     run.state = RunState.TOOL_EXECUTING
                     var approvalRejected = false
                     val result = try {
-                        withTimeoutOrNull(remainingMs(run)) {
-                            // invoke/approve are the executor dispatch boundary.  Once either
-                            // has been entered, cancellation or a transport timeout cannot
-                            // prove that the external operation did not happen.
-                            activeDispatch = DispatchKind.TOOL
-                            when (val first = toolExecutor.invoke(call)) {
-                                ToolResult.NeedsApproval -> {
-                                    // NeedsApproval is an authorization result, not an
-                                    // external execution.  While waiting for the user, a
-                                    // cancellation remains a known lifecycle cancellation.
-                                    activeDispatch = null
-                                    run.state = RunState.WAITING_TOOL_APPROVAL
-                                    val safeArguments = redact(call.argumentsJson, secret)
-                                    emit(
-                                        RuntimeEvent.ToolApprovalRequested(
-                                            callId = call.callId,
-                                            name = call.name,
-                                            argumentsJson = safeArguments,
-                                        ),
-                                    )
-                                    emitModel(
-                                        ModelEvent.ToolApprovalRequired(
-                                            call.callId,
-                                            call.name,
-                                            safeArguments,
-                                        ),
-                                    )
-                                    if (!onApprove(call)) {
+                        // invoke/approve are the executor dispatch boundary.  Once either has been
+                        // entered, cancellation or a stall cannot prove that the external operation
+                        // did not happen.  A dispatched tool is never cut off by the run deadline; it
+                        // ends on its own result, caller cancellation, or the stall timeout.
+                        activeDispatch = DispatchKind.TOOL
+                        when (val first = withTimeoutOrNull(run.budget.stallTimeoutMs) { toolExecutor.invoke(call) }) {
+                            ToolResult.NeedsApproval -> {
+                                // NeedsApproval is an authorization result, not an external execution.
+                                // While waiting for the user, a cancellation remains a known lifecycle
+                                // cancellation and the deadline still bounds the wait.
+                                activeDispatch = null
+                                run.state = RunState.WAITING_TOOL_APPROVAL
+                                val safeArguments = redact(call.argumentsJson, secret)
+                                emit(
+                                    RuntimeEvent.ToolApprovalRequested(
+                                        callId = call.callId,
+                                        name = call.name,
+                                        argumentsJson = safeArguments,
+                                    ),
+                                )
+                                emitModel(
+                                    ModelEvent.ToolApprovalRequired(
+                                        call.callId,
+                                        call.name,
+                                        safeArguments,
+                                    ),
+                                )
+                                when (withTimeoutOrNull(remainingMs(run)) { onApprove(call) }) {
+                                    null -> null
+                                    false -> {
                                         approvalRejected = true
                                         run.state = RunState.FAILED
                                         emitModel(ModelEvent.Failed("APPROVAL_DENIED"))
                                         null
-                                    } else {
-                                        if (budgetExhausted(run)) throw CancellationException(BUDGET_CANCEL)
+                                    }
+                                    true -> if (budgetExhausted(run)) null else {
                                         activeDispatch = DispatchKind.TOOL
-                                        toolExecutor.approve(call.callId)
+                                        withTimeoutOrNull(run.budget.stallTimeoutMs) { toolExecutor.approve(call.callId) }
                                     }
                                 }
-                                else -> first
                             }
+                            else -> first
                         }
                     } catch (e: CancellationException) {
-                        if (e.message == BUDGET_CANCEL) {
-                            if (activeDispatch == DispatchKind.TOOL) {
-                                emitUnknownTool(call)
-                            } else {
-                                emitBudget()
-                            }
-                            return@flow
-                        }
-                        // Do not swallow a lifecycle cancellation.  The outer handler keeps
-                        // the run CANCELLED, adding an UNKNOWN_OUTCOME reason when dispatch
-                        // had already begun.
+                        // Do not swallow a lifecycle cancellation.  The outer handler keeps the run
+                        // CANCELLED, adding an UNKNOWN_OUTCOME reason when dispatch had already begun.
                         throw e
                     } catch (e: Exception) {
                         if (activeDispatch == DispatchKind.TOOL) {
@@ -819,10 +840,6 @@ class AgentRuntime(
                         }
                         imagesOrNull
                     } catch (e: CancellationException) {
-                        if (e.message == BUDGET_CANCEL) {
-                            emitBudget()
-                            return@flow
-                        }
                         throw e
                     } catch (e: Exception) {
                         run.state = RunState.FAILED
@@ -877,6 +894,81 @@ class AgentRuntime(
 
     private fun remainingMs(run: AgentRun): Long =
         (run.budget.maxRuntimeMs - (clock() - run.startedAtMs)).coerceAtLeast(1)
+
+    /**
+     * Collect a dispatched model stream to its own end.  The run deadline is deliberately not
+     * applied here: a reply that is still arriving is received in full.  Progress is any
+     * delivered event or any transport diagnostic (each SSE chunk, including tool-argument and
+     * hidden-reasoning chunks that produce no event yet).  Only a stream with no progress for a
+     * full [stallMs] window is abandoned, returning false so the caller records an unknown
+     * outcome; time spent inside [accept] never counts as a stall.  Upstream failures and caller
+     * cancellation propagate unchanged.
+     */
+    private suspend fun <T> Flow<T>.collectUntilStalled(
+        stallMs: Long,
+        transportProgress: AtomicLong,
+        accept: suspend (T) -> Unit,
+    ): Boolean = coroutineScope {
+        // The producer closes the channel with an upstream failure instead of failing this
+        // scope, so every event already produced is delivered, in order, before it rethrows.
+        val events = Channel<T>(Channel.RENDEZVOUS)
+        val producer = launch {
+            try {
+                this@collectUntilStalled.collect { events.send(it) }
+                events.close()
+            } catch (e: CancellationException) {
+                events.cancel()
+                throw e
+            } catch (e: Throwable) {
+                events.close(e)
+            }
+        }
+        val delivered = AtomicLong()
+        val accepting = AtomicBoolean(false)
+        val stalled = AtomicBoolean(false)
+        val monitor = launch {
+            var seen = delivered.get() + transportProgress.get()
+            while (true) {
+                delay(stallMs.coerceAtLeast(1))
+                val now = delivered.get() + transportProgress.get()
+                if (now == seen && !accepting.get()) {
+                    stalled.set(true)
+                    producer.cancel()
+                    events.cancel()
+                    return@launch
+                }
+                seen = now
+            }
+        }
+        try {
+            while (true) {
+                val next = try {
+                    events.receiveCatching()
+                } catch (e: CancellationException) {
+                    if (stalled.get()) return@coroutineScope false
+                    throw e
+                }
+                if (stalled.get()) return@coroutineScope false
+                if (next.isClosed) {
+                    next.exceptionOrNull()?.let { throw it }
+                    return@coroutineScope true
+                }
+                delivered.incrementAndGet()
+                accepting.set(true)
+                try {
+                    accept(next.getOrThrow())
+                } finally {
+                    accepting.set(false)
+                    delivered.incrementAndGet()
+                }
+            }
+            @Suppress("UNREACHABLE_CODE")
+            error("unreachable")
+        } finally {
+            monitor.cancel()
+            producer.cancel()
+        }
+    }
 
     private fun budgetExhausted(run: AgentRun): Boolean =
         clock() - run.startedAtMs >= run.budget.maxRuntimeMs
@@ -1129,7 +1221,6 @@ class AgentRuntime(
         val json = Json { ignoreUnknownKeys = false; isLenient = false }
         val SCHEMA_TYPES = setOf("object", "array", "string", "number", "integer", "boolean", "null")
         const val MAX_SCHEMA_DEPTH = 16
-        const val BUDGET_CANCEL = "agent-runtime-budget"
         const val UNKNOWN_MODEL_OUTCOME = "UNKNOWN_OUTCOME: Model dispatch may have started; do not automatically retry"
         /**
          * Bounded, non-sensitive classification for a rejected summary. The user-facing message

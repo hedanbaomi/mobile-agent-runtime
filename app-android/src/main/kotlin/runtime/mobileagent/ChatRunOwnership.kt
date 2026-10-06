@@ -3,6 +3,7 @@
 
 package runtime.mobileagent
 
+import android.os.SystemClock
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.collect
@@ -44,7 +45,17 @@ internal class ChatRunOwnership {
 
 /** Internal runtime seam for deterministic deadline/late-event integration tests. */
 internal class ChatRunExecution(
-    val awaitWatchdog: suspend (Long) -> Unit = { delay(it) },
+    /**
+     * Returns once the run has made no observable progress for the idle limit.  A run that is
+     * still receiving a long reply keeps postponing this; only a silent pipeline trips it.
+     */
+    val awaitWatchdog: suspend (idleLimitMs: Long, lastProgressAtMs: () -> Long) -> Unit = { idleLimitMs, lastProgressAtMs ->
+        while (true) {
+            val wait = idleLimitMs - (SystemClock.elapsedRealtime() - lastProgressAtMs())
+            if (wait <= 0) break
+            delay(wait)
+        }
+    },
     val approvalReady: (suspend (ToolCall) -> Boolean) -> Unit = {},
     val collectEvents: suspend (Flow<RuntimeEvent>, suspend (RuntimeEvent) -> Unit) -> Unit =
         { events, accept -> events.collect { accept(it) } },

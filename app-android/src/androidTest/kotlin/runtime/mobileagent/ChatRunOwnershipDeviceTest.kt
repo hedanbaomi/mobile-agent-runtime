@@ -30,7 +30,7 @@ class ChatRunOwnershipDeviceTest {
         val decision = AtomicReference<Boolean>()
         lateinit var approve: suspend (ToolCall) -> Boolean
         val execution = ChatRunExecution(
-            awaitWatchdog = { deadline.await() },
+            awaitWatchdog = { _, _ -> deadline.await() },
             approvalReady = { approve = it },
             collectEvents = { _, accept -> withContext(NonCancellable) {
                 accept(RuntimeEvent.ToolApprovalRequested("approval-A", "calculator", "{}"))
@@ -73,7 +73,7 @@ class ChatRunOwnershipDeviceTest {
         val deadline = CompletableDeferred<Unit>()
         val resume = CompletableDeferred<Unit>()
         val execution = ChatRunExecution(
-            awaitWatchdog = { deadline.await() },
+            awaitWatchdog = { _, _ -> deadline.await() },
             collectEvents = { _, accept ->
                 // Simulate a storage/runtime continuation that ignores cancellation until
                 // after delivery. The normal runtime uses a cancellable rendezvous flow.
@@ -126,7 +126,7 @@ class ChatRunOwnershipDeviceTest {
         val deadline = CompletableDeferred<Unit>()
         val resume = CompletableDeferred<Unit>()
         val execution = ChatRunExecution(
-            awaitWatchdog = { deadline.await() },
+            awaitWatchdog = { _, _ -> deadline.await() },
             collectEvents = { _, accept -> withContext(NonCancellable) {
                 arrived.countDown()
                 resume.await()

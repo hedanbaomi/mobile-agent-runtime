@@ -309,7 +309,9 @@ private class PythonSkillToolExecutor(
                     entrypoint = bound.entry.manifest.entrypoint,
                     inputJson = executionInput,
                     packageSource = PythonPackageSource.Bytes(checkNotNull(verified.packageBytes)),
-                    limits = bound.entry.limits.copy(timeoutMs = minOf(bound.entry.limits.timeoutMs, remainingRunMillis())),
+                    // Admission above already enforced the run deadline; a started process keeps
+                    // its own bounded timeout instead of being cut at the deadline (ADR-0026).
+                    limits = bound.entry.limits,
                     onDispatched = { bound.dispatchAttempted = true },
                 ))
                 if (result.dispatchAccepted) bound.dispatchAttempted = true
@@ -318,7 +320,7 @@ private class PythonSkillToolExecutor(
                     (bound.sideEffectDispatched && result.status != PythonIpcProtocol.RESULT_SUCCEEDED)) {
                     return@withContext markUnknown(bound, "PYTHON_RESULT_UNCERTAIN")
                 }
-                if (!authorized(bound)) {
+                if (!authorized(bound, enforceDeadline = false)) {
                     if (bound.sideEffectDispatched) return@withContext markUnknown(bound, "AUTHORIZATION_CHANGED_AFTER_DISPATCH")
                     audit(bound, "invoke", "DENIED", "PERMISSION_DENIED")
                     return@withContext ToolResult.Denied("Python authorization changed during execution")
@@ -374,22 +376,19 @@ private class PythonSkillToolExecutor(
                 hosts = it.hosts.toSet(), methods = it.methods.toSet())
         }
 
-    private fun remainingRunMillis(): Int {
-        val run = container.runs.get(runId) ?: throw BrokerDenied("RESOURCE_LIMIT")
-        val max = (objectOrNull(run.budgetJson)?.number("maxRuntimeMs") ?: 180_000).coerceIn(1, 180_000)
-        val elapsed = Instant.now().toEpochMilli() - Instant.parse(run.startedAt ?: run.createdAt).toEpochMilli()
-        val remaining = max.toLong() - elapsed
-        if (remaining <= 0) throw BrokerDenied("RESOURCE_LIMIT")
-        return remaining.coerceAtMost(30_000).toInt()
-    }
-
-    private fun authorized(bound: BoundPythonCall): Boolean = runCatching {
+    /**
+     * [enforceDeadline] gates new work (approval, process start, broker dispatch).  The
+     * post-execution recheck passes false: a process admitted before the deadline keeps its
+     * completed result, while revoked grants or a terminal run still deny it.
+     */
+    private fun authorized(bound: BoundPythonCall, enforceDeadline: Boolean = true): Boolean = runCatching {
         val run = container.runs.get(runId) ?: return@runCatching false
         if (run.snapshotId != snapshot.id || run.state.name in setOf("COMPLETED", "CANCELLED", "FAILED", "BUDGET_EXHAUSTED", "UNKNOWN_OUTCOME")) {
             return@runCatching false
         }
         val maxRuntime = (objectOrNull(run.budgetJson)?.number("maxRuntimeMs") ?: 180_000).coerceIn(1, 180_000)
-        if (Instant.now().toEpochMilli() - Instant.parse(run.startedAt ?: run.createdAt).toEpochMilli() > maxRuntime) return@runCatching false
+        if (enforceDeadline &&
+            Instant.now().toEpochMilli() - Instant.parse(run.startedAt ?: run.createdAt).toEpochMilli() > maxRuntime) return@runCatching false
         val agent = container.agents.get(snapshot.agentId) ?: return@runCatching false
         val installed = container.skills.get(bound.entry.installId) ?: return@runCatching false
         val current = container.skills.grantsFor(installed.installId).singleOrNull { it.grantId == bound.grant.grantId }
@@ -437,6 +436,14 @@ private class PythonSkillToolExecutor(
     private inner class InvocationBroker(private val bound: BoundPythonCall) : PythonCapabilityBroker {
         private val brokerMutex = Mutex()
         private var requestEffectDispatched = false
+        /**
+         * The run deadline admits each broker request once (ADR-0026).  Inside an admitted
+         * request, e.g. a model.invoke stream that is still arriving, only revocation, a
+         * terminal run or a changed binding deny; the deadline no longer cuts it.
+         */
+        @Volatile private var admitted = false
+
+        private fun stillAuthorized(): Boolean = authorized(bound, enforceDeadline = !admitted)
 
         private fun effectDispatched() {
             requestEffectDispatched = true
@@ -444,12 +451,16 @@ private class PythonSkillToolExecutor(
         }
 
         override suspend fun authorize(ticket: InvocationTicket): Boolean = withContext(Dispatchers.IO) {
-            bound.active && bound.approved && !bound.unknownExternalOutcome && ticket == bound.ticket && authorized(bound)
+            bound.active && bound.approved && !bound.unknownExternalOutcome && ticket == bound.ticket && stillAuthorized()
         }
 
         override suspend fun invoke(request: PythonIpcProtocol.BrokerRequest): PythonIpcProtocol.BrokerResponse = brokerMutex.withLock {
             withContext(Dispatchers.IO) {
-                if (!authorize(request.ticket)) return@withContext denied(request, "PERMISSION_DENIED")
+                if (!authorize(request.ticket)) {
+                    // Past the run deadline is a resource limit, not a permission change.
+                    val deadlineOnly = authorized(bound, enforceDeadline = false)
+                    return@withContext denied(request, if (deadlineOnly) "RESOURCE_LIMIT" else "PERMISSION_DENIED")
+                }
                 if (!bound.brokerRequestIds.add(request.requestId)) return@withContext denied(request, "REPLAY_DENIED")
                 if (++bound.brokerCalls > bound.entry.limits.maxBrokerCalls || budget?.reserveBrokerCall() != true) {
                     return@withContext denied(request, "RESOURCE_LIMIT")
@@ -464,6 +475,7 @@ private class PythonSkillToolExecutor(
                     return@withContext denied(request, "PERMISSION_DENIED")
                 }
                 requestEffectDispatched = false
+                admitted = true
                 try {
                     declaration(permission)
                     audit(bound, "broker", "STARTED", capability = request.capability)
@@ -498,6 +510,8 @@ private class PythonSkillToolExecutor(
                     audit(bound, "broker", "ERROR", "CAPABILITY_FAILED", request.capability)
                     PythonIpcProtocol.BrokerResponse(request.requestId, "ERROR", errorCode = "CAPABILITY_FAILED",
                         errorMessage = "Capability failed; do not automatically replay this request")
+                } finally {
+                    admitted = false
                 }
             }
         }
@@ -616,9 +630,9 @@ private class PythonSkillToolExecutor(
             effectDispatched()
             val response = runInterruptible(Dispatchers.IO) {
                 HostHttp.get(url, hosts) { host ->
-                    if (!authorized(bound)) throw BrokerDenied("PERMISSION_DENIED")
+                    if (!stillAuthorized()) throw BrokerDenied("PERMISSION_DENIED")
                     InetAddress.getAllByName(host).toList().also {
-                        if (!authorized(bound)) throw BrokerDenied("PERMISSION_DENIED")
+                        if (!stillAuthorized()) throw BrokerDenied("PERMISSION_DENIED")
                     }
                 }
             }
@@ -682,10 +696,10 @@ private class PythonSkillToolExecutor(
             try {
                 val provider = binding.provider
                 val secret = container.secrets.resolveForHost(provider.secretRef).also { secrets += it }
-                if (!authorized(bound)) throw BrokerDenied("PERMISSION_DENIED")
+                if (!stillAuthorized()) throw BrokerDenied("PERMISSION_DENIED")
                 val adapter = OpenAiAdapterFactory.create(provider.apiFormat, providerHttp, provider.baseUrl,
                     HeaderSecretResolver { host, ref ->
-                        if (host != URI(provider.baseUrl).host || !authorized(bound)) throw BrokerDenied("PERMISSION_DENIED")
+                        if (host != URI(provider.baseUrl).host || !stillAuthorized()) throw BrokerDenied("PERMISSION_DENIED")
                         container.secrets.resolveForHost(ref).also { secrets += it }
                     }, provider.nonSecretHeaders.mapValues { RequestHeaderValue.Plain(it.value) } +
                         provider.headerSecretRefs.mapValues { RequestHeaderValue.SecretRef(it.value) })
@@ -712,7 +726,7 @@ private class PythonSkillToolExecutor(
                     outputTokenField = outputDecision.outputTokenField,
                     operationId = bound.ticket.invocationId,
                 ), secret).collect { event ->
-                    if (!authorized(bound)) throw BrokerDenied("PERMISSION_DENIED")
+                    if (!stillAuthorized()) throw BrokerDenied("PERMISSION_DENIED")
                     when (event) {
                         is ModelEvent.TextDelta -> {
                             text.append(event.text)
@@ -796,7 +810,7 @@ private class PythonSkillToolExecutor(
             val root = childDirectory(context.filesDir, "python-skill-kv/${digest(bound.entry.installId.toByteArray())}")
             val file = File(root, "${digest(key.toByteArray())}.json")
             return synchronized(STORAGE_LOCK) {
-                if (!authorized(bound)) throw BrokerDenied("PERMISSION_DENIED")
+                if (!stillAuthorized()) throw BrokerDenied("PERMISSION_DENIED")
                 if (!write) {
                     if (!file.exists()) JsonNull else {
                         if (file.length() > 24_000) throw BrokerDenied("RESOURCE_LIMIT")
@@ -828,7 +842,7 @@ private class PythonSkillToolExecutor(
                 val root = childDirectory(context.cacheDir, "python-artifacts/${bound.ticket.invocationId}")
                 val handle = UUID.randomUUID().toString()
                 val file = File(root, "$handle.json")
-                if (!authorized(bound)) throw BrokerDenied("PERMISSION_DENIED")
+                if (!stillAuthorized()) throw BrokerDenied("PERMISSION_DENIED")
                 effectDispatched()
                 writeAtomic(file, bytes)
                 bound.artifactBytes += bytes.size

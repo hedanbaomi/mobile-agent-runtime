@@ -3,6 +3,7 @@
 package runtime.mobileagent
 
 import android.app.Application
+import android.os.SystemClock
 import androidx.compose.runtime.mutableStateOf
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.SavedStateHandle
@@ -69,6 +70,7 @@ import runtime.mobileagent.skills.tooling.InternalRequestIds
 import java.net.URI
 import java.time.LocalDate
 import java.util.Base64
+import java.util.concurrent.atomic.AtomicLong
 
 /** Diagnostic classification uses the declared contract, never substrings in model tool names. */
 internal fun chatDiagnosticToolCapability(capability: String?): DiagnosticToolCapability = when (capability) {
@@ -527,9 +529,11 @@ class ChatViewModel internal constructor(
             // The Run's own model.invoke fee authorization: the user's per-run number
             // (Agent policy), clamped to what the approved package scopes allow.  An
             // approved install grant alone is not a Run permission.
-            val approvedModelCeilings = binding.snapshot.skillIds.mapNotNull { installId ->
-                container.skills.grantsFor(installId)
-                    .firstOrNull { !it.revoked && "model.invoke" in it.capabilities }?.maxModelTokens
+            val approvedModelCeilings = withContext(Dispatchers.IO) {
+                binding.snapshot.skillIds.mapNotNull { installId ->
+                    container.skills.grantsFor(installId)
+                        .firstOrNull { !it.revoked && "model.invoke" in it.capabilities }?.maxModelTokens
+                }
             }
             val runModelTokens = modelInvokeRunTokens(contextPolicy.pythonModelRunTokens, approvedModelCeilings)
             var record = RunRecord(run.runId, run.snapshotId, conversationId, createdAt = createdAt, startedAt = createdAt,
@@ -545,17 +549,24 @@ class ChatViewModel internal constructor(
             // terminal outcome of the run pipeline is delivered through one
             // collector, so a blocked store write or transport can leave the user
             // with a grey card and no feedback at all.  This coroutine is
-            // independent of that pipeline: past the run deadline plus grace it
-            // detaches the page and cancels only this execution owner. The run's
-            // collector still owns durable results and terminalization. Process
-            // death recovery marks an unsettled run UNKNOWN without replay.
+            // independent of that pipeline: once the run has delivered no event
+            // for longer than any bounded wait inside it (stall timeout, approval
+            // deadline) plus grace, it detaches the page and cancels only this
+            // execution owner.  A reply that is still arriving keeps resetting it.
+            // The run's collector still owns durable results and terminalization.
+            // Process death recovery marks an unsettled run UNKNOWN without replay.
+            // Progress is any runtime event or any transport chunk (SSE diagnostics), so a long
+            // summary or tool-argument stream keeps the run alive.  The runtime's own stall
+            // detector may take up to two stall windows to fire.
+            val lastProgressAt = AtomicLong(SystemClock.elapsedRealtime())
+            val watchdogIdleLimitMs = maxOf(2 * run.budget.stallTimeoutMs, run.budget.maxRuntimeMs) + RUN_WATCHDOG_GRACE_MS
             val watchdogJob = viewModelScope.launch {
-                execution.awaitWatchdog(run.budget.maxRuntimeMs + RUN_WATCHDOG_GRACE_MS)
+                execution.awaitWatchdog(watchdogIdleLimitMs) { lastProgressAt.get() }
                 if (record.state in TERMINAL) return@launch
                 publishRunState(owner, state.value.copy(
                     streaming = false,
                     pendingTool = null,
-                    status = "运行无响应：已超过运行时限仍未收到终态事件，已停止等待。外部结果可能未知，如需继续请重试或新建会话。",
+                    status = "运行无响应：长时间未收到任何运行事件，已停止等待。外部结果可能未知，如需继续请重试或新建会话。",
                     statusKind = "error",
                 ))
                 runOwnership.detach(owner)
@@ -643,9 +654,14 @@ class ChatViewModel internal constructor(
                 withContext(Dispatchers.IO) { record = container.runCoordinator.prepare(record, runOwnerKey) }
                 val model = binding.chatModel
                 val provider = binding.provider
-                val currentAgent = container.agents.get(binding.snapshot.agentId) ?: error("Agent 已删除，不能继续旧快照的资源授权。")
+                // Run preparation reads repositories, Skill packages and workspace
+                // backends; none of it may run on Main, where it would freeze the IME and
+                // the chat right after Send.
+                val currentAgent = withContext(Dispatchers.IO) { container.agents.get(binding.snapshot.agentId) }
+                    ?: error("Agent 已删除，不能继续旧快照的资源授权。")
+                val liveKnowledgeBaseIds = withContext(Dispatchers.IO) { container.knowledge.listKnowledgeBases().map { it.first }.toSet() }
                 val kbIds = binding.snapshot.knowledgeBaseIds.intersect(currentAgent.knowledgeBaseIds.toSet())
-                    .intersect(container.knowledge.listKnowledgeBases().map { it.first }.toSet()).toList()
+                    .intersect(liveKnowledgeBaseIds).toList()
                 val skillIds = binding.snapshot.skillIds.intersect(currentAgent.skillIds.toSet())
                 preparationStage = "retrieval"
                 val result = withContext(Dispatchers.IO) {
@@ -708,8 +724,8 @@ class ChatViewModel internal constructor(
                 metadata = citationMetadata(bound, warning, result.coverage, runCitations)
                 val system = PromptTemplates.render(binding.prompt.template, mapOf("date" to LocalDate.now().toString(),
                     "agent_name" to binding.agentName, "knowledge_bases" to kbIds.joinToString(",")))
-                val webExecutor = webSearchTools(container, binding.snapshot)
-                val mcpExecutor = mcpTools(container, binding.snapshot)
+                val webExecutor = withContext(Dispatchers.IO) { webSearchTools(container, binding.snapshot) }
+                val mcpExecutor = withContext(Dispatchers.IO) { mcpTools(container, binding.snapshot) }
                 // Freeze the run's immutable configuration before tool exposure.  The
                 // integration may re-read live grants/connections at invoke/approval,
                 // but it must never rebuild the model-visible schema from those facts.
@@ -719,12 +735,14 @@ class ChatViewModel internal constructor(
                 // model must not receive a union of their memory handles.
                 val trustedSkillId = skillIds.singleOrNull()
                 val trustedSkillRevision = trustedSkillId?.let { skillId ->
-                    val packageHash = container.skills.get(skillId)?.packageHash
-                    container.skills.grantsFor(skillId)
-                        .filter { !it.revoked && (packageHash == null || it.packageHash == packageHash) }
-                        .maxByOrNull { it.revision }
-                        ?.revision
-                        ?.toLong()
+                    withContext(Dispatchers.IO) {
+                        val packageHash = container.skills.get(skillId)?.packageHash
+                        container.skills.grantsFor(skillId)
+                            .filter { !it.revoked && (packageHash == null || it.packageHash == packageHash) }
+                            .maxByOrNull { it.revision }
+                            ?.revision
+                            ?.toLong()
+                    }
                 }
                 val toolingContext = try {
                     if (threadWorkspaceBindingReadFailed ||
@@ -816,7 +834,10 @@ class ChatViewModel internal constructor(
                 }
                 if (toolingContext == null) noteV2ToolingUnavailable(RuntimeToolingUnavailableCode.TOOL_EXECUTION_CONTEXT_UNAVAILABLE)
                 preparationStage = "tooling"
-                val runTools = RunTools(container, getApplication<Application>(), binding.snapshot, run,
+                // RunTools freezes the model-visible tool set by probing every workspace
+                // backend (SAF ContentResolver queries, privileged Binder state) and Skill
+                // package; this is the slowest preparation step and must stay off Main.
+                val runTools = withContext(Dispatchers.IO) { RunTools(container, getApplication<Application>(), binding.snapshot, run,
                     "image" in model.capabilities, degrade,
                     baseExecutors = listOf(webExecutor, mcpExecutor),
                     runExecutorFactory = { python ->
@@ -852,7 +873,7 @@ class ChatViewModel internal constructor(
                             }
                         }
                     },
-                )
+                ) }
                 val toolExecutor = runTools.executor
                 resources.executor = toolExecutor
                 // Tool dispatch/result evidence (review-APK QA P2): dispatch,
@@ -1134,6 +1155,7 @@ class ChatViewModel internal constructor(
                 // or failed dispatch left nothing to diagnose.  Observability
                 // only and typed; request/response bodies never enter it.
                 val modelDiagnostics = ModelDiagnosticSink { event ->
+                    lastProgressAt.set(SystemClock.elapsedRealtime())
                     runCatching {
                         (getApplication<Application>() as MobileAgentApp).diagnostics.recordModelRequestState(
                             ModelRequestStateRecord(
@@ -1265,6 +1287,7 @@ class ChatViewModel internal constructor(
                     // Rendezvous keeps durable old exchanges ahead of a later compaction checkpoint.
                     .flowOn(Dispatchers.IO).buffer(0)
                 execution.collectEvents(runtimeEvents) { event ->
+                        lastProgressAt.set(SystemClock.elapsedRealtime())
                         var persistRun = false
                         when (event) {
                             is RuntimeEvent.RunStarted -> {
@@ -1571,7 +1594,11 @@ class ChatViewModel internal constructor(
                         // text would become durable history and be replayed to the model.
                         emptyCompletedAnswerNotice(answer)?.let { append(" $it") }
                     }
-                    RunStatus.BUDGET_EXHAUSTED -> "已达到执行预算；未自动重试。"
+                    RunStatus.BUDGET_EXHAUSTED -> if (record.stopReason == "time") {
+                        "已达到本次运行时长上限：已收到的回复均已完整保留，未再发起新的模型请求或工具调用；可继续提问以接着处理。"
+                    } else {
+                        "已达到执行预算；未自动重试。"
+                    }
                     else -> state.value.status
                 }))
             } catch (cancel: CancellationException) {

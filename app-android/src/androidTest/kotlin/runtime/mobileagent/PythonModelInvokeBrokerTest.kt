@@ -82,6 +82,8 @@ class PythonModelInvokeBrokerTest {
         val prompt: String = "hello",
         /** When true the transport never answers, so a test can cancel in flight. */
         val holdTransport: Boolean = false,
+        /** Runs inside the provider transport, i.e. while an admitted broker call is in flight. */
+        val onTransport: Harness.() -> Unit = {},
     ) {
         lateinit var hostApp: MobileAgentApp
         lateinit var container: AppContainer
@@ -98,6 +100,7 @@ class PythonModelInvokeBrokerTest {
 
         private fun engine(response: String, contentType: String) = MockEngine { request ->
             bodies += (request.body as io.ktor.http.content.TextContent).text
+            onTransport()
             if (holdTransport) kotlinx.coroutines.delay(600_000)
             respond(response, HttpStatusCode.OK, headersOf(HttpHeaders.ContentType, contentType))
         }
@@ -238,6 +241,13 @@ class PythonModelInvokeBrokerTest {
         }
         fun persistedRun(): RunRecord = container.runs.get(runId)!!
 
+        /** Moves the persisted Run start so its runtime deadline has already passed. */
+        fun passRunDeadline() {
+            val run = persistedRun()
+            val longAgo = java.time.Instant.now().minusSeconds(600).toString()
+            container.runs.save(run.copy(startedAt = longAgo, createdAt = longAgo))
+        }
+
         /** One sanitized row per audit event for precise assertions. */
         fun auditRows(): List<String> = container.audits.list(runId)
             .map { "${it.component}/${it.action}/${it.result}/${it.errorCode ?: "-"}" }
@@ -263,6 +273,29 @@ class PythonModelInvokeBrokerTest {
 
     private fun aliasOf(body: String, field: String): Int? =
         Json.parseToJsonElement(body).jsonObject[field]?.jsonPrimitive?.content?.toIntOrNull()
+
+    /**
+     * ADR-0026: the run deadline admits each broker request once.  A model.invoke that was
+     * admitted keeps receiving its answer even when the deadline passes while it streams;
+     * only the next request is refused, as a resource limit, before any dispatch.
+     */
+    @Test(timeout = 120_000)
+    fun admittedModelInvokeFinishesAcrossTheDeadlineAndTheNextCallIsRefused() {
+        val fixture = Harness(
+            ApiFormat.OPENAI_COMPATIBLE, OutputLimitMode.MANUAL, 512, 2, 4_096, 4_096,
+            onTransport = { if (bodies.size == 1) passRunDeadline() },
+        )
+        fixture.start(chatSuccess(), "text/event-stream")
+
+        val first = fixture.run("call-across-deadline")
+        assertTrue("an admitted call must keep its answer: $first; audit=${fixture.auditTrail()}", first is ToolResult.Value)
+        assertEquals("canned answer", Json.parseToJsonElement((first as ToolResult.Value).json)
+            .jsonObject["text"]!!.jsonPrimitive.content)
+
+        val second = fixture.invoke("call-after-deadline")
+        assertTrue("past the deadline no new call may start: $second", second !is ToolResult.Value && second != ToolResult.NeedsApproval)
+        assertEquals("no HTTP request may leave after the deadline", 1, fixture.bodies.size)
+    }
 
     @Test(timeout = 120_000)
     fun manualProfileCapUsesTheRunAuthorizationAndSettlesOnce() {

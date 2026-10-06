@@ -13,6 +13,7 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
 import runtime.mobileagent.agent.AgentRun
+import runtime.mobileagent.agent.RunBudget
 import runtime.mobileagent.agent.RunState
 import runtime.mobileagent.domain.AgentProfile
 import runtime.mobileagent.domain.AgentSnapshot
@@ -176,6 +177,37 @@ class RunToolsReplayDeviceTest {
         state = RunState.MODEL_STREAMING,
         startedAtMs = System.currentTimeMillis(),
     )
+
+    /** ADR-0026: the deadline admits a tool; it never cuts one that is already running. */
+    @Test
+    fun toolAdmittedBeforeTheDeadlineKeepsItsResultAndLaterCallsAreDenied() = runBlocking {
+        val chain = prepareChain("deadline")
+        val run = AgentRun(
+            runId = "run.${chain.suffix}",
+            snapshotId = chain.snapshot.id,
+            conversationId = "conversation.${chain.suffix}",
+            state = RunState.MODEL_STREAMING,
+            budget = RunBudget(maxRuntimeMs = 300),
+            startedAtMs = System.currentTimeMillis(),
+        )
+        var dispatches = 0
+        val slow = object : ToolExecutor {
+            override val specs = listOf(ToolSpec("slow_echo", "slow echo", "{\"type\":\"object\"}", "", false))
+            override suspend fun invoke(call: ToolCall): ToolResult {
+                dispatches++
+                kotlinx.coroutines.delay(800)
+                return ToolResult.Value("""{"ok":true}""")
+            }
+            override suspend fun approve(callId: String): ToolResult = ToolResult.Invalid("not pending")
+        }
+        val tools = RunTools(chain.container, chain.app, chain.snapshot, run, false, false, runExecutor = slow)
+
+        val first = tools.executor.invoke(ToolCall("slow-1", "slow_echo", "{}"))
+        assertEquals(ToolResult.Value("""{"ok":true}"""), first)
+        val late = tools.executor.invoke(ToolCall("slow-2", "slow_echo", "{}"))
+        assertTrue(late is ToolResult.Denied)
+        assertEquals(1, dispatches)
+    }
 
     @Test
     fun revokedGrantDeniesReplayWithoutRedispatchOrDisclosure() = runBlocking {

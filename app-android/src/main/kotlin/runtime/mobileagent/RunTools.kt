@@ -10,6 +10,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.runInterruptible
 import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
@@ -310,7 +311,9 @@ class RunTools(
             routed.processed
         } ?: return emptyList()
         if (processed.result != result) throw EvidenceInvalid("Tool result changed before image attachment")
-        return withTimeout(remainingMillis()) {
+        // The caller bounds this local read by the run deadline; an inner timeout must surface
+        // as invalid evidence, never as a foreign cancellation of the run.
+        return withTimeoutOrNull(run.budget.stallTimeoutMs.coerceAtLeast(1)) {
             runInterruptible(Dispatchers.IO) {
                 verifyAll(processed.evidence)
                 val visuals = planVisuals(processed.evidence)
@@ -321,7 +324,7 @@ class RunTools(
                 verifyAll(processed.evidence)
                 images
             }
-        }
+        } ?: throw EvidenceInvalid("Tool visual evidence timed out")
     }
 
     /** UI/persistence receive only evidence that still has live Agent/KB/source authorization. */
@@ -364,7 +367,9 @@ class RunTools(
     private suspend fun execute(routed: RoutedCall, operation: suspend () -> ToolResult): ToolResult {
         if (!synchronized(run) { runActive() }) return reject(routed, ToolResult.Denied("Run deadline or terminal state prevents execution"))
         return try {
-            withTimeout(remainingMillis()) {
+            // The run deadline only admits the call (above).  Once dispatched, a tool runs to
+            // its own result; only a stall cap ends it as an unknown outcome (ADR-0026).
+            withTimeout(run.budget.stallTimeoutMs.coerceAtLeast(1)) {
                 val raw = operation()
                 if (raw == ToolResult.NeedsApproval) {
                     synchronized(callLock) {
@@ -682,11 +687,6 @@ class RunTools(
         if (run.state in setOf(RunState.COMPLETED, RunState.CANCELLED, RunState.FAILED, RunState.BUDGET_EXHAUSTED, RunState.UNKNOWN_OUTCOME)) return false
         val elapsed = System.currentTimeMillis() - run.startedAtMs
         return run.startedAtMs > 0 && elapsed >= 0 && elapsed < run.budget.maxRuntimeMs
-    }
-
-    private fun remainingMillis(): Long = synchronized(run) {
-        if (!runActive()) throw EvidenceDenied("Run deadline or terminal state prevents execution")
-        (run.budget.maxRuntimeMs - (System.currentTimeMillis() - run.startedAtMs)).coerceAtLeast(1)
     }
 
     private fun citationId(callId: String, ordinal: Int): String = run.runId + "-tool-" +

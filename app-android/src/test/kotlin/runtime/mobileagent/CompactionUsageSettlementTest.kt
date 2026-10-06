@@ -69,7 +69,7 @@ class CompactionUsageSettlementTest {
                     }
                 }
             }
-            val run = AgentRun("run", "snapshot", "conversation", budget = RunBudget(maxRuntimeMs = 250))
+            val run = AgentRun("run", "snapshot", "conversation", budget = RunBudget(maxRuntimeMs = 250, stallTimeoutMs = 250))
             val request = AgentRuntimeRequest(run = run,
                 prompt = EffectivePrompt("runtime", "system", emptyList(), emptyList(), emptyList(), "Continue",
                     typedHistory = originals.map { ChatMessage(it.role.name.lowercase(), it.text) }),

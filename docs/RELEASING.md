@@ -3,7 +3,7 @@
 
 # 正式版本构建与发布
 
-正式安装包从 [GitHub Releases](https://github.com/hedanbaomi/mobile-agent-runtime/releases) 获取。v1.1.0 的应用版本为 `versionName=1.1.0`、`versionCode=5`，正式产物仅含 arm64-v8a，最低 Android 8.0（API 26）。前版 v1.0.0/code 2、v1.0.1/code 3 与 v1.0.2/code 4 可使用同一正式签名升级。v1.0.2 起支持每日首开检查 GitHub stable release、用户点击下载与系统确认安装；旧版本需先手动安装当前正式版本。详见 [更新契约](APP_UPDATES.md)。
+正式安装包从 [GitHub Releases](https://github.com/hedanbaomi/mobile-agent-runtime/releases) 获取。v1.1.1 的应用版本为 `versionName=1.1.1`、`versionCode=6`，正式产物仅含 arm64-v8a，最低 Android 8.0（API 26）。前版 v1.0.0/code 2、v1.0.1/code 3、v1.0.2/code 4 与 v1.1.0/code 5 可使用同一正式签名升级。v1.0.2 起支持每日首开检查 GitHub stable release、用户点击下载与系统确认安装；旧版本需先手动安装当前正式版本。详见 [更新契约](APP_UPDATES.md)。
 
 首次由 Debug/Review 切换至正式包时，签名身份不同，不能直接覆盖安装。先在旧包导出所需数据、核对导出文件，再处理旧安装；导出默认不包含密钥，重新配置服务商凭据。后续正式版本使用同一正式签名身份升级。
 

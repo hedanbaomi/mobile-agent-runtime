@@ -439,6 +439,7 @@ class OpenAiCompatibleAdapter(
             dispatchStatus = ModelDispatchStatus.DISPATCHED
             request.reportDiagnostic(ModelDiagnosticStage.REQUEST_DISPATCH, dispatchStatus, started, "chat.completions")
             http.preparePost(url(baseUrl, "/chat/completions")) {
+                receiveStreamedReplyInFull(http)
                 contentType(ContentType.Application.Json)
                 headers {
                     append(HttpHeaders.Accept, "text/event-stream, application/json")

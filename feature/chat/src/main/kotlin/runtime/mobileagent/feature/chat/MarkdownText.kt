@@ -76,10 +76,11 @@ internal fun markdownBlocks(source: String): List<MarkdownBlock> {
     return grouped
 }
 
+private val inlinePattern = Regex("`([^`]+)`|\\*\\*(.+?)\\*\\*|__(.+?)__|\\*([^*]+)\\*")
+
 internal fun markdownInline(text: String) = buildAnnotatedString {
-    val pattern = Regex("`([^`]+)`|\\*\\*(.+?)\\*\\*|__(.+?)__|\\*([^*]+)\\*")
     var cursor = 0
-    pattern.findAll(text).forEach { match ->
+    inlinePattern.findAll(text).forEach { match ->
         append(text.substring(cursor, match.range.first))
         val code = match.groups[1]?.value
         val bold = match.groups[2]?.value ?: match.groups[3]?.value
@@ -104,24 +105,29 @@ internal fun MarkdownText(text: String, modifier: Modifier = Modifier) {
                     modifier = Modifier.background(MaterialTheme.colorScheme.surfaceVariant)
                         .horizontalScroll(rememberScrollState()).padding(8.dp))
                 "table" -> Column(Modifier.horizontalScroll(rememberScrollState())) {
-                    block.text.lines().forEachIndexed { rowIndex, row ->
+                    val rows = remember(block.text) {
+                        block.text.lines().map { row ->
+                            row.trim().removePrefix("|").removeSuffix("|").split('|').map { markdownInline(it.trim()) }
+                        }
+                    }
+                    rows.forEachIndexed { rowIndex, cells ->
                         Row {
-                            row.trim().removePrefix("|").removeSuffix("|").split('|').forEach { cell ->
-                                Text(markdownInline(cell.trim()), fontWeight = if (rowIndex == 0) FontWeight.Bold else null,
+                            cells.forEach { cell ->
+                                Text(cell, fontWeight = if (rowIndex == 0) FontWeight.Bold else null,
                                     modifier = Modifier.width(160.dp).padding(6.dp))
                             }
                         }
                     }
                 }
-                "heading" -> Text(markdownInline(block.text),
+                "heading" -> Text(remember(block.text) { markdownInline(block.text) },
                     style = when (block.level) {
                         1 -> MaterialTheme.typography.headlineSmall
                         2 -> MaterialTheme.typography.titleLarge
                         else -> MaterialTheme.typography.titleMedium
                     }, fontWeight = FontWeight.Bold, modifier = Modifier.padding(vertical = 4.dp))
-                "quote" -> Text(markdownInline(block.text), modifier = Modifier
+                "quote" -> Text(remember(block.text) { markdownInline(block.text) }, modifier = Modifier
                     .background(MaterialTheme.colorScheme.surfaceVariant).padding(8.dp))
-                else -> Text(markdownInline(block.text))
+                else -> Text(remember(block.text) { markdownInline(block.text) })
             }
         }
     }

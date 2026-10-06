@@ -56,10 +56,14 @@ class ContextCompactionUiTest {
                 } }
             }
         }
+        compose.onNodeWithTag(AgentTestTags.CONTEXT_POLICY_HISTORY_MESSAGES).assertDoesNotExist()
+        compose.onNodeWithTag(AgentTestTags.CONTEXT_POLICY_INPUT_BUDGET).assertDoesNotExist()
+        compose.onNodeWithTag("agents.editor.context_policy.recommended").performScrollTo().assertIsDisplayed()
+        screenshot("context-settings-basic.png")
+        compose.onNodeWithTag(AgentTestTags.CONTEXT_POLICY_ADVANCED).performScrollTo().performClick()
         compose.onNodeWithTag(AgentTestTags.CONTEXT_POLICY_HISTORY_MESSAGES).performScrollTo().performTextClearance()
         compose.runOnIdle { assertEquals("", editor.contextPolicyDraft.maxHistoryMessages) }
         compose.onNodeWithTag(AgentTestTags.CONTEXT_POLICY_HISTORY_MESSAGES).performTextInput("24")
-        compose.onNodeWithTag(AgentTestTags.CONTEXT_POLICY_ADVANCED).performScrollTo().performClick()
         compose.onNodeWithTag(AgentTestTags.CONTEXT_POLICY_MAX_COMPACTIONS).performScrollTo().assertIsDisplayed()
         screenshot("context-settings.png")
         compose.runOnIdle { assertEquals("24", editor.contextPolicyDraft.maxHistoryMessages) }

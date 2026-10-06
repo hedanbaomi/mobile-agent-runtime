@@ -55,7 +55,7 @@
 | R20 | Agent 在逐次确认、Agent/快照复核与硬配额下使用 provider-neutral typed tools 访问应用私有工作区或用户明确选择的 SAF tree；不得泄露 Android 真实路径、跨 Agent/快照访问或借此获得 shell。SAF 是 workspace backend，不是 elevated Authority | V2 + 2026-08-30 第四轮人工反馈 | S13、S14、S19 |
 | R21 | 统一 Authority/Capability/Approval/Tool Loop 模型；当前 elevated Authority 仅有 `SHIZUKU` 与 `WIRED_ADB`，持久 grant、availability、connection 和 selected provider 分离；Shizuku 与 Wired ADB 平级，失效时 fail-closed，绝不自动 fallback | V2 | S15、S16、S20、S21 |
 | R22 | Windows Desktop Companion 仅作为有线 USB ADB 的受控 backend：官方 adb、`adb reverse`、loopback、一次性配对/挑战、会话序号/HMAC、固定 protocol；不接受 host shell、PowerShell、serial、端口或 raw command 由 Agent 指定 | V2 | S17、S21 |
-| R23 | Dangerous Mode 持久保存至用户显式关闭；提供 `ENABLED_CONFIRM_HIGH_RISK` 与 `ENABLED_AUTONOMOUS` 两档；仅在选定 Authority、Agent capability 和策略均允许时暴露 `shell_exec`，执行 Android 端一次性 `/system/bin/sh`，不做 PTY，不把风险检测器伪装成 allowlist | V2 | S15、S17、S18 |
+| R23 | Dangerous Mode 持久保存至用户显式关闭；提供 `ENABLED_CONFIRM_HIGH_RISK` 与 `ENABLED_AUTONOMOUS` 两档；用户全局确认授权内置 Agent shell；仅在所选 Authority、冻结快照与当前策略均允许时暴露 `shell_exec`，执行 Android 端一次性 `/system/bin/sh`，不做 PTY，不把风险检测器伪装成 allowlist | V2 | S15、S17、S18 |
 | R24 | 权限与危险模式安全证据必须在 `debuggable=false` 的 review-like build 上复核；debug/JVM/automated evidence 不得替代真实 Shizuku/USB E2E；硬件或 Companion 缺失统一标为 `E2E BLOCKED`，不虚报 `DEVICE_PASS`/`RELEASED` | V2 | A09、S20、S21 |
 | R25 | 应用使用单一全局 Agent→Thread Drawer：手机为可关闭抽屉、宽屏为永久侧栏；不再保留手机底部一级导航或 Chat 私有第二 Drawer；从侧栏选择 Agent/工作区新建 Thread，切换页面不得取消或隐藏正在进行的流式任务 | 用户要求 S11/S12 | U07、S23 |
 | R26 | 每个 Agent 可持有多个相互独立的 opaque workspace Grant，并有一个只影响新 Thread 的默认工作区；每个 Thread 创建时持久绑定一个 workspace，之后不会因 Agent 默认值变化而改写。系统持久权限与 Agent 工具权限保持分层，但 picker 流程一次完成 backend、binding、Grant 与 Thread/default 选择并明确状态 | 用户要求 S12 + V2 | S24、S25 |
@@ -102,3 +102,5 @@ S8 初始文档任务只创建工程文档、许可说明、Agent 规则，并�
 
 
 2026-10-05 464f8f4 复审补充（R12/R19/R35）：界面超时退出等待后，旧运行的请求预览、消息、审批与资源清理必须隔离；已知成功的查询缓存可在原有授权下本地恢复，禁止因遗留 pending 再次收费。搜索撤权不披露结果，但保留请求已发送并完成、可能收费的事实；未知结果不自动重放。结果 URL 不得截断或经脱敏改成另一地址。实现取舍见 [ADR-0023](adr/0023-run-ownership-and-known-outcome-recovery.md)，正式发布与数据保留说明见 [发布文档](RELEASING.md)。
+
+2026-10-06 用户补充（R18/R21/R23/R34）：修复输入法编辑重组与摘要失败恢复，压缩设置收敛为基础项和可展开高级项；危险模式直接授权内置 Agent Android/ADB shell，保留两档确认与撤权边界；首次创建 Agent 的完整设备文件确认随保存提交，取消无授权。实现与验证见 evidence/2026-10-06/ime-context-device-access.md。

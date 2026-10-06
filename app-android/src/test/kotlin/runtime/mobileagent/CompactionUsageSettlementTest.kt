@@ -122,9 +122,10 @@ class CompactionUsageSettlementTest {
             assertEquals(if (outcome == Outcome.NO_USAGE) 0 else 321, saved.inputTokens)
             assertEquals(if (outcome == Outcome.NO_USAGE) 0 else 42, saved.outputTokens)
             val persistedRun = runs.get("run")!!
-            assertEquals(if (outcome == Outcome.NO_USAGE) 0 else if (outcome == Outcome.SUCCESS) 328 else 321, persistedRun.inputTokens)
-            assertEquals(if (outcome == Outcome.NO_USAGE) 0 else if (outcome == Outcome.SUCCESS) 45 else 42, persistedRun.outputTokens)
-            assertEquals(if (outcome == Outcome.SUCCESS) 2 else 1, requests)
+            val continued = outcome == Outcome.SUCCESS || outcome == Outcome.FAILURE
+            assertEquals(if (outcome == Outcome.NO_USAGE) 0 else if (continued) 328 else 321, persistedRun.inputTokens)
+            assertEquals(if (outcome == Outcome.NO_USAGE) 0 else if (continued) 45 else 42, persistedRun.outputTokens)
+            assertEquals(if (continued) 2 else 1, requests)
             assertEquals(originals, conversations.messages("conversation"))
             assertEquals(persistedRun, accounting.reconcile(persistedRun, listOf(saved, saved.copy(id = "foreign", runId = "other"))))
             if (outcome == Outcome.CANCEL || outcome == Outcome.CANCEL_ON_COMMIT) {

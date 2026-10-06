@@ -90,10 +90,15 @@ class ShellToolExecutor(
      * consumer is deliberately fail-closed; durable grants never invoke it.
      */
     private val onceGrantConsumer: (CapabilityGrant) -> Boolean = { false },
+    /** Runtime-owned global user consent for the built-in Agent tool, never a Skill grant. */
+    private val agentShellAuthorization: () -> Boolean = { false },
 ) : ToolExecutor {
     private val runContext = contextProvider()
     private val selectedAtRunStart = authorityManager.selectedAuthorityForExposure()
-    private val runMode = dangerousModeManager.policy()
+    private val runDangerousState = dangerousModeManager.state.value
+    private val runMode = runDangerousState.policy
+    private val agentAuthorizedAtRunStart = runContext.skillId == null && runMode != DangerousMode.DISABLED &&
+        runCatching(agentShellAuthorization).getOrDefault(false)
     private val selectedBackend: ShellExecutor? = selectedAtRunStart?.let { backends[it] }
     private val active = AtomicInteger(0)
     private val lock = Any()
@@ -237,7 +242,7 @@ class ShellToolExecutor(
         if (dangerousModeManager.policy() == DangerousMode.DISABLED) return false
         val context = contextProvider()
         if (bound.context.agentId != context.agentId || bound.context.snapshotId != context.snapshotId) return false
-        if (!resolver.revalidate(context, CapabilityId(CapabilityId.SHELL_EXECUTE))) return false
+        if (!hasShellAuthorization(context)) return false
         val selected = authorityManager.selectedAuthorityForExecution()
         val selectedState = selected?.let { authorityManager.state.value.statuses[it] }
         if (selected == null || selected != selectedAtRunStart || selectedState == null) return false
@@ -304,7 +309,7 @@ class ShellToolExecutor(
     private suspend fun invokeBound(bound: BoundShellCall, context: ToolExecutionContext): ToolResult {
         val currentMode = dangerousModeManager.policy()
         if (currentMode == DangerousMode.DISABLED) return ToolResult.Denied(ToolErrorCode.DANGEROUS_MODE_DISABLED.name)
-        if (!resolver.revalidate(context, CapabilityId(CapabilityId.SHELL_EXECUTE))) {
+        if (!hasShellAuthorization(context)) {
             return ToolResult.Denied(ToolErrorCode.SHELL_CAPABILITY_DENIED.name)
         }
         val selected = authorityManager.selectedAuthorityForExecution()
@@ -362,7 +367,7 @@ class ShellToolExecutor(
         context: ToolExecutionContext,
         approvalRequired: Boolean = true,
     ): ToolExecution {
-        if (!resolver.revalidate(context, CapabilityId(CapabilityId.SHELL_EXECUTE))) {
+        if (!hasShellAuthorization(context)) {
             return ToolExecution.Failed(ToolError(ToolErrorCode.SHELL_CAPABILITY_DENIED))
         }
         val selected = authorityManager.selectedAuthorityForExecution()
@@ -385,7 +390,9 @@ class ShellToolExecutor(
             )
             if (decision !is ApprovalDecision.Approved) return decision.toToolExecution()
         }
-        val dispatchAuthorization = resolver.authorizeForDispatch(
+        val dispatchAuthorization = if (agentAuthorizedAtRunStart) {
+            if (hasShellAuthorization(context)) DispatchAuthorization.ALLOWED_EXISTING_GRANT else DispatchAuthorization.DENIED
+        } else resolver.authorizeForDispatch(
             context = context,
             capability = CapabilityId(CapabilityId.SHELL_EXECUTE),
             consumer = onceGrantConsumer,
@@ -507,7 +514,7 @@ class ShellToolExecutor(
 
     private fun currentScope(binding: ApprovalBinding, context: ToolExecutionContext, command: String): ApprovalScope = ApprovalScope(
         capability = CapabilityId(CapabilityId.SHELL_EXECUTE),
-        grantRevision = resolver.liveGrantRevision(
+        grantRevision = if (agentAuthorizedAtRunStart) dangerousModeManager.state.value.revision else resolver.liveGrantRevision(
             context = context,
             capability = CapabilityId(CapabilityId.SHELL_EXECUTE),
         ) ?: 0L,
@@ -553,6 +560,7 @@ class ShellToolExecutor(
 
     private fun effectiveCapabilitiesAtRunStart(): Set<CapabilityId> {
         val capability = CapabilityId(CapabilityId.SHELL_EXECUTE)
+        if (agentAuthorizedAtRunStart) return if (hasShellAuthorization(runContext)) setOf(capability) else emptySet()
         if (runContext.effectiveCapabilities.isNotEmpty() && capability !in runContext.effectiveCapabilities) {
             return emptySet()
         }
@@ -561,6 +569,15 @@ class ShellToolExecutor(
         // snapshot, but must already be frozen into this run and still be live.
         // Context-only adapters retain the resolver's strict binding requirement.
         return if (resolver.revalidate(runContext, capability)) setOf(capability) else emptySet()
+    }
+
+    private fun hasShellAuthorization(context: ToolExecutionContext): Boolean {
+        if (!agentAuthorizedAtRunStart) return resolver.revalidate(context, CapabilityId(CapabilityId.SHELL_EXECUTE))
+        // Consent is frozen at preparation. Off/on or a policy revision cannot
+        // revive an old command; Skill envelopes continue using canonical grants.
+        return context == runContext && context.skillId == null &&
+            dangerousModeManager.state.value == runDangerousState &&
+            runCatching(agentShellAuthorization).getOrDefault(false)
     }
 
     private fun ShellExecResult.toToolExecution(): ToolExecution {
@@ -685,7 +702,9 @@ class ShellToolExecutor(
 
         val SHELL_SPEC = ToolSpec(
             name = SHELL_EXEC,
-            description = "Execute one shell command through the selected authority",
+            description = "Execute an Android/ADB shell command on this device through the selected Shizuku or wired ADB authority. " +
+                "Supply the device command (for example: pm list packages, settings get global airplane_mode_on), without the host 'adb shell' prefix. " +
+                "Do not invoke host adb, choose another device, or retry an unknown outcome.",
             inputSchema = SHELL_EXEC_SCHEMA,
             capability = CapabilityId(CapabilityId.SHELL_EXECUTE),
             sideEffect = true,

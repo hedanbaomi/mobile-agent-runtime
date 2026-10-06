@@ -16,6 +16,7 @@ import runtime.mobileagent.domain.ContextCompactionRecord
 import runtime.mobileagent.domain.ContextSummary
 import runtime.mobileagent.provider.ChatMessage
 import runtime.mobileagent.provider.ModelAdapter
+import runtime.mobileagent.provider.ModelDiagnosticSink
 import runtime.mobileagent.provider.ModelRequest
 import runtime.mobileagent.provider.ParameterLayers
 
@@ -50,7 +51,15 @@ object RuntimeMessageIds {
 /** A finite summary schema: data only, with no tool calls, permissions or executable fields. */
 object ContextSummaryFormat {
     val fields: Set<String> = linkedSetOf("goals", "constraints", "decisions", "pending", "results")
-    fun validate(raw: String, maxBytes: Int = 65_536): String = ContextSummary.canonicalize(raw, maxBytes)
+    fun validate(raw: String, maxBytes: Int = 65_536): String {
+        require(raw.toByteArray(Charsets.UTF_8).size <= maxBytes) { "CONTEXT_COMPACTION_FAILED: summary exceeds limit" }
+        // Normalize only a whole, single JSON fence. Never extract JSON from surrounding prose,
+        // repair incomplete output, or relax the durable data-only schema.
+        val text = raw.trim().removePrefix("\uFEFF").trim()
+        val fenced = Regex("\\A```(?:json)?[ \\t]*\\r?\\n([\\s\\S]*?)\\r?\\n```[ \\t]*\\z", RegexOption.IGNORE_CASE)
+            .matchEntire(text)?.groupValues?.get(1) ?: text
+        return ContextSummary.canonicalize(fenced, maxBytes)
+    }
 
     fun message(summary: String): ChatMessage = ChatMessage(
         role = "assistant",
@@ -287,6 +296,8 @@ internal class ContextWindow(prompt: EffectivePrompt, val context: RuntimeContex
             tools = emptyList(), parameters = ParameterLayers(), headers = request.headers,
             operationId = request.operationId + ":context-summary",
             outputTokenLimit = minOf(policy.summaryOutputTokens, request.outputTokenLimit ?: policy.summaryOutputTokens),
+            outputTokenField = request.outputTokenField,
+            diagnostics = request.diagnostics?.let { sink -> ModelDiagnosticSink { event -> sink.record(event) } },
         )
     }
 

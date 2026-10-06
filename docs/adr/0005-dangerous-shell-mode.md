@@ -28,10 +28,10 @@
 
 ```text
 dangerousMode.enabled == true
-AND current Agent allows shell.execute
+AND Runtime freezes the user's global consent for the built-in Agent tool
 AND selectedAuthority is SHIZUKU or WIRED_ADB
 AND selected Authority is configured and policy-allows shell
-AND current grant/snapshot/revision pass revalidation
+AND current snapshot/policy/consent epoch pass revalidation
 ```
 
 输入是结构化 `command`、可选 `cwd`、`timeout_ms` 与 `max_output_bytes`；Agent 不得指定 host adb path、serial、bridge host、port 或 Shizuku service 参数。返回必须结构化，至少含 invocation reference、exit code/终态、受限 stdout/stderr 和 usage；诊断与模型展示不得越过隐私契约。
@@ -65,3 +65,5 @@ AND current grant/snapshot/revision pass revalidation
 | Shizuku | 真实 Binder/UserService、shell UID、断连/恢复且不 fallback | 缺服务或设备记 `E2E BLOCKED` |
 | Wired ADB | Windows Companion、官方 adb USB、reverse、认证、断连/恢复且不 fallback | 缺 Companion/USB 设备记 `E2E BLOCKED` |
 | security build | `debuggable=false` review-like build 的工具暴露、secret 隔离与审计复核 | Debug 结果不能升级为安全 PASS |
+
+2026-10-06 用户修订：全局危险模式的明确确认就是内置 Agent shell_exec 的授权，无须再手动建立 Agent shell.execute grant。Runtime factory 为该工具使用 Agent 身份，附带 Skill 不成为 shell 的授权或审计身份；独立 Skill executor 仍须 canonical grant，不能继承此确认。每个 Run 冻结所选 Authority、policyVersion 和 Dangerous Mode revision；派发、审批结算及缓存结果披露前重新校验。关闭再开启不得复活旧 Run，策略或通道变化不得披露旧结果。命令直接写 Android 设备端语法（例如 pm list packages），等价于电脑 adb shell 后面的命令。

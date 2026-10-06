@@ -64,8 +64,11 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.SideEffect
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.State
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -79,6 +82,8 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.TextRange
+import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.foundation.layout.widthIn
@@ -336,6 +341,14 @@ data class ChatUiState(
     val compactions: List<ChatCompactionUi> = emptyList(),
 )
 
+/** Conversation presentation shared by the app shell and chat route. */
+@Composable
+fun rememberConversationPresentation(source: State<ChatUiState>): State<ChatUiState> = remember(source) {
+    // Draft changes are read by the composer. They must not invalidate the
+    // drawer, transcript, or markdown layout on every IME edit.
+    derivedStateOf { source.value.copy(input = "") }
+}
+
 data class ChatActions(
     val onInput: (String) -> Unit = {},
     val onSend: () -> Unit = {},
@@ -483,6 +496,7 @@ fun ConversationScreen(
     onOpenWorkspace: () -> Unit = {},
     showGlobalMenu: Boolean = true,
     modifier: Modifier = Modifier,
+    input: () -> String = { state.input },
 ) {
     Box(modifier.fillMaxSize()) {
         ChatConversationContent(
@@ -495,6 +509,7 @@ fun ConversationScreen(
                 .padding(horizontal = 16.dp, vertical = 8.dp),
             minimalHeader = true,
             showGlobalMenu = showGlobalMenu,
+            input = input,
         )
     }
     state.selectedCitationId?.let { id -> state.citations.firstOrNull { it.id == id } }?.let {
@@ -511,14 +526,9 @@ private fun ChatConversationContent(
     modifier: Modifier,
     minimalHeader: Boolean = false,
     showGlobalMenu: Boolean = true,
+    input: () -> String = { state.input },
 ) {
-    BoxWithConstraints(modifier) {
-        // The detail viewport gives up space first when the IME is visible,
-        // while the action FlowRow remains outside the scroll container.  At
-        // least 72 dp is retained so even a compact screen can inspect the
-        // long command/summary and reach both actions.
-        val compactApproval = maxHeight < 360.dp
-        val approvalDetailMaxHeight = if (compactApproval) 48.dp else 168.dp
+    Box(modifier) {
         Column(Modifier.fillMaxSize()) {
                 ChatHeader(
                     state,
@@ -584,12 +594,12 @@ private fun ChatConversationContent(
                         }
                     }
                 }
-                Composer(state, actions)
+                Composer(state, actions, input)
         }
         state.pendingTool?.let { pending ->
             // Keep the actual conversation visible behind the blocking sheet.
             // The full-size scrim intercepts touches on the underlying content.
-            Box(
+            BoxWithConstraints(
                 Modifier.fillMaxSize()
                     .background(MaterialTheme.colorScheme.scrim.copy(alpha = 0.30f))
                     .clickable(
@@ -599,11 +609,12 @@ private fun ChatConversationContent(
                     .windowInsetsPadding(WindowInsets.ime.union(WindowInsets.navigationBars)),
                 contentAlignment = Alignment.BottomCenter,
             ) {
+                val compactApproval = maxHeight < 360.dp
                 ApprovalCard(
                     approval = pending,
                     onChoice = actions.onToolApproval,
                     zh = state.language.equals("zh-CN", true),
-                    detailMaxHeight = approvalDetailMaxHeight,
+                    detailMaxHeight = if (compactApproval) 48.dp else 168.dp,
                     compact = compactApproval,
                 )
             }
@@ -1450,7 +1461,11 @@ private fun ApprovalCard(
 }
 
 @Composable
-private fun Composer(state: ChatUiState, actions: ChatActions) {
+private fun Composer(state: ChatUiState, actions: ChatActions, input: () -> String) {
+    val text = input()
+    var field by remember(state.selectedSessionId, state.selectedAgentId) { mutableStateOf(TextFieldValue(text)) }
+    val value = if (field.text == text) field else TextFieldValue(text, TextRange(text.length))
+    SideEffect { if (field.text != text) field = value }
     val zh = state.language.equals("zh-CN", true)
     val aqua = MaterialTheme.colorScheme.background == Color(0xFFF2F9FD)
     val focusManager = LocalFocusManager.current
@@ -1475,8 +1490,11 @@ private fun Composer(state: ChatUiState, actions: ChatActions) {
         verticalAlignment = Alignment.Bottom,
     ) {
         OutlinedTextField(
-            value = state.input,
-            onValueChange = actions.onInput,
+            value = value,
+            onValueChange = {
+                field = it
+                if (it.text != text) actions.onInput(it.text)
+            },
             enabled = state.pendingTool == null,
             placeholder = { Text(if (zh) "继续提问…" else "Ask a follow-up…") },
             minLines = 1,
@@ -1500,7 +1518,7 @@ private fun Composer(state: ChatUiState, actions: ChatActions) {
         } else {
             Button(
                 onClick = ::submit,
-                enabled = state.input.isNotBlank() && state.pendingTool == null,
+                enabled = text.isNotBlank() && state.pendingTool == null,
                 shape = CircleShape,
                 colors = if (aqua) ButtonDefaults.buttonColors(
                     containerColor = Color(0xFF66CCFF),

@@ -900,33 +900,35 @@ private fun AgentContextPolicyCard(
     ) {
         Text(if (zh) "上下文与自动压缩" else "Context & auto-compaction", fontWeight = FontWeight.SemiBold)
         Text(
-            if (zh) {
-                "压缩使用当前会话模型并可能产生额外费用，保留原始聊天记录；设置只应用于新会话。" +
-                    "上下文预算是保守计量，并非实际 tokenizer。每段模型轮达到阈值会压缩继续，" +
-                    "但同一次运行的总请求、工具次数和耗时有独立硬上限；总请求含摘要调用。"
-            } else {
-                "Compaction uses the current session model and may incur extra cost while keeping the original chat history; " +
-                    "settings apply to new sessions only. The context budget is a conservative estimate, not a real tokenizer. " +
-                    "A segment compacts and continues when it reaches the threshold, while total requests, tool calls and runtime " +
-                    "have separate hard caps per run; the request cap includes summary calls."
-            },
+            if (zh) "自动摘要保留较早对话，原始记录不删除。摘要可能产生额外费用；设置用于新会话。"
+            else "Summarize earlier turns while keeping the original history. Summaries may incur extra cost; settings apply to new sessions.",
             style = MaterialTheme.typography.bodySmall,
         )
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-            Column(Modifier.weight(1f)) {
-                Text(if (zh) "自动压缩" else "Auto-compaction", style = MaterialTheme.typography.labelLarge)
-                Text(
-                    if (zh) "关闭后不自动压缩，仍受运行硬上限约束。"
-                    else "Off disables auto-compaction; hard run caps still apply.",
-                    style = MaterialTheme.typography.bodySmall,
-                )
-            }
+            Text(if (zh) "自动压缩" else "Auto-compaction", modifier = Modifier.weight(1f))
             Switch(
                 checked = draft.autoCompact,
                 onCheckedChange = { update(draft.copy(autoCompact = it)) },
                 modifier = Modifier.testTag(AgentTestTags.CONTEXT_POLICY_AUTO),
             )
         }
+        Text(draft.summary(zh), style = MaterialTheme.typography.bodySmall)
+        Row {
+            TextButton(
+                onClick = { update(draft.recommended()) },
+                modifier = Modifier.testTag("agents.editor.context_policy.recommended"),
+            ) { Text(if (zh) "使用推荐设置" else "Use recommended settings") }
+            TextButton(
+                onClick = { advanced = !advanced },
+                modifier = Modifier.testTag(AgentTestTags.CONTEXT_POLICY_ADVANCED),
+            ) {
+                Text(if (advanced) (if (zh) "收起高级设置" else "Hide advanced") else (if (zh) "高级设置" else "Advanced"))
+            }
+        }
+        if (advanced) {
+            Text(if (zh) "预算采用保守估算。总请求包含摘要，工具与耗时另有硬上限。"
+                else "Budgets use conservative estimates. Request caps include summaries; tool and runtime caps also apply.",
+                style = MaterialTheme.typography.bodySmall)
         ContextPolicyField(
             label = if (zh) "输入预算（保守估算单位）" else "Input budget (conservative estimate)",
             value = draft.maxInputTokens,
@@ -965,13 +967,6 @@ private fun AgentContextPolicyCard(
             isError = error != null && draft.pythonModelRunTokens.isNotBlank(),
             placeholder = if (zh) "留空 = 不允许 Python 技能调用模型" else "Blank = Python skills may not call models",
         ) { update(draft.copy(pythonModelRunTokens = it)) }
-        TextButton(
-            onClick = { advanced = !advanced },
-            modifier = Modifier.testTag(AgentTestTags.CONTEXT_POLICY_ADVANCED),
-        ) {
-            Text(if (advanced) (if (zh) "收起高级设置" else "Hide advanced") else (if (zh) "高级设置" else "Advanced"))
-        }
-        if (advanced) {
             ContextPolicyField(
                 label = if (zh) "保留最近轮数" else "Keep recent turns",
                 value = draft.keepRecentTurns,

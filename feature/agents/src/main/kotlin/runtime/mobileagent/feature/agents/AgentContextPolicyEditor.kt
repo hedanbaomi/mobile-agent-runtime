@@ -35,6 +35,8 @@ data class AgentContextPolicyDraftUi(
     val targetPercent: String = "60",
     val maxCompactionsPerRun: String = "8",
 ) {
+    /** Restore the simple automatic mode without changing a separate Python fee authorization. */
+    fun recommended(): AgentContextPolicyDraftUi = AgentContextPolicyDraftUi(pythonModelRunTokens = pythonModelRunTokens)
     /**
      * Produces the JSON persisted in `AgentProfile.contextPolicyJson`.
      *
@@ -93,25 +95,10 @@ data class AgentContextPolicyDraftUi(
             else -> "off"
         }
         val input = maxInputTokens.trim().ifEmpty { if (zh) "模型可用窗口" else "model window" }
-        val messages = maxHistoryMessages.trim()
-        val turns = maxHistoryTurns.trim()
-        val rounds = maxModelRoundsPerSegment.trim()
-        val requests = maxModelRequestsPerRun.trim()
-        val modelTokens = pythonModelRunTokens.trim().ifEmpty { if (zh) "未授权" else "not authorized" }
-        val keep = keepRecentTurns.trim()
-        val soft = softLimitPercent.trim()
-        val target = targetPercent.trim()
-        val compactions = maxCompactionsPerRun.trim()
         return if (zh) {
-            "自动压缩：$auto；输入预算（保守估算单位）：$input；历史消息 ≤$messages · 历史轮 ≤$turns；" +
-                "每段模型轮 ≤$rounds；每次运行模型请求 ≤$requests（含摘要调用）；" +
-                "Python 模型调用费用上限：$modelTokens token；保留最近 $keep 轮；" +
-                "软阈值 $soft% → 目标 $target%；压缩 ≤$compactions 次。"
+            "自动压缩：$auto · 输入预算：$input"
         } else {
-            "Auto-compaction: $auto; input budget (conservative estimate): $input; history ≤$messages messages / ≤$turns turns; " +
-                "≤$rounds model rounds per segment; ≤$requests model requests per run (includes summary calls); " +
-                "Python model.invoke fee ceiling: $modelTokens tokens; keep $keep turns; " +
-                "soft $soft% → target $target%; ≤$compactions compactions."
+            "Auto-compaction: $auto · Input budget: $input"
         }
     }
 

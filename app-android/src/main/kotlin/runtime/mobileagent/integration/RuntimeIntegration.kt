@@ -1188,11 +1188,16 @@ class RuntimeIntegration(
             authorityManager = authorityManager,
             dangerousModeManager = dangerousModeManager,
             approvalEngine = approvalEngine,
-            contextProvider = { frozen },
+            // This is the built-in Agent tool. An attached Skill is not the
+            // owner of its global Dangerous Mode consent or its audit identity.
+            contextProvider = { frozen.copy(skillId = null, skillRevision = null, trustedSkillEnvelope = false) },
             backends = shellBackends.toMap(),
             resolver = effectiveCapabilityResolver,
             auditSink = auditSink,
             auditFuse = auditFuse,
+            agentShellAuthorization = {
+                dangerousModeManager.isEnabled() && authorityPolicyRepository.getPolicy().policyVersion == frozen.policyVersion
+            },
             onceGrantConsumer = { grant ->
                 capabilityGrantRepository.tryConsumeOnce(
                     grantId = grant.grantId,

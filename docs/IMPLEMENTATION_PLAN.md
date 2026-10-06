@@ -451,3 +451,5 @@ PDF 解析支持合法紧凑关闭分隔符后紧接 endobj 的对象，保持 s
 2026-10-05 464f8f4 复审修复与正式版本补充：Chat 每次发送冻结运行/会话/generation 所有者，超时后撤销页面发布并取消自身执行；原执行未收尾前保留输入并拒绝新发送，迟到事件仅保存到原会话。成功查询向量与 owner claim 清理同事务提交；在既有 Embedding 同意下优先复用经过完整校验的已知成功缓存，无成功证据的 UNKNOWN 仍需显式重试授权。搜索派发前拒绝、确定完成后扣留、派发后未知分别保留；缓存及重启恢复不抹去执行事实，不重放。URL 完整校验，过长或脱敏会改写的地址整条拒绝；标题/摘要解析后脱敏限长。决定见 [ADR-0023](adr/0023-run-ownership-and-known-outcome-recovery.md)。
 
 应用版本调整为 1.0.0 / code 2，正式产物为现有正式身份签名的 arm64 包；以干净合并源码运行 releaseGate 并记录 APK/AAB、源码、SBOM、provenance 和哈希。GitHub Release 的实际地址与证据在发布完成后记录，不替代未完成的真机/线上服务/长稳验收；[发布约定](RELEASING.md) 替代早期“缺签名、版本 0.1.0”的当前准备状态，历史证据保留其日期。
+
+2026-10-06 修订（R18/R21/R23/R34）：聊天草稿通过 derivedStateOf 从 shell/history 投影排除，Composer 使用 TextFieldValue 同步真实外部变化；Markdown 行内解析按内容缓存。摘要在明确失败且完整原文符合硬预算时对当前 Run 降级，保留 checkpoint/usage 和普通派发门禁。内置 Agent shell 在 factory 冻结全局确认，独立 Skill 授权保持原合同。首次完整设备文件确认由 AgentsViewModel 保留独立草稿，保存后走 canonical sink，保持目录草稿与 grant-only 边界。 验证见 evidence/2026-10-06/ime-context-device-access.md。

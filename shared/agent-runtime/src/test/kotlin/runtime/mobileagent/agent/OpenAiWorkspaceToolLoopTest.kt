@@ -13,11 +13,13 @@ import io.ktor.http.headersOf
 import io.ktor.http.content.TextContent
 import kotlinx.coroutines.flow.toList
 import kotlinx.coroutines.runBlocking
+import kotlinx.serialization.json.*
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
 import runtime.mobileagent.domain.ApiFormat
 import runtime.mobileagent.provider.ModelEvent
+import runtime.mobileagent.provider.InlineImage
 import runtime.mobileagent.provider.openai.OpenAiAdapterFactory
 import runtime.mobileagent.skills.ToolCall
 import runtime.mobileagent.skills.ToolExecutor
@@ -26,6 +28,83 @@ import runtime.mobileagent.skills.ToolSpec
 
 /** Proves both OpenAI wire protocols enter the same runtime-owned workspace tool loop. */
 class OpenAiWorkspaceToolLoopTest {
+    @Test
+    fun visualSearchAndWorkspaceResultsStayContiguousOnBothProtocols() = runBlocking {
+        ApiFormat.entries.forEach { format ->
+            val bodies = mutableListOf<JsonObject>()
+            val engine = MockEngine { request ->
+                bodies += Json.parseToJsonElement((request.body as TextContent).text).jsonObject
+                if (bodies.size > 1) {
+                    val input = bodies.last()[if (format == ApiFormat.OPENAI_COMPATIBLE) "messages" else "input"]!!.jsonArray
+                    val callsAt = input.indexOfFirst { it.jsonObject["tool_calls"] != null || it.jsonObject["type"]?.jsonPrimitive?.content == "function_call" }
+                    val toolResults = input.withIndex().filter { (_, value) -> value.jsonObject["role"]?.jsonPrimitive?.content == "tool" || value.jsonObject["type"]?.jsonPrimitive?.content == "function_call_output" }
+                    assertEquals(2, toolResults.size)
+                    val imagesAt = input.indexOfFirst { value ->
+                        (value.jsonObject["content"] as? JsonArray)?.any { part ->
+                            part.jsonObject["type"]?.jsonPrimitive?.content in setOf("image_url", "input_image")
+                        } == true
+                    }
+                    assertTrue(imagesAt > toolResults.last().index, "Images must follow ALL tool results: $input")
+                    assertTrue(toolResults.first().index > callsAt)
+                }
+                val response = if (bodies.size == 1) {
+                    if (format == ApiFormat.OPENAI_COMPATIBLE) {
+                        "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"search-call\",\"type\":\"function\",\"function\":{\"name\":\"search\",\"arguments\":\"{}\"}},{\"index\":1,\"id\":\"workspace-call\",\"type\":\"function\",\"function\":{\"name\":\"workspace_list\",\"arguments\":\"{}\"}}]}}]}\n\ndata: [DONE]\n\n"
+                    } else {
+                        listOf("search-call" to "search", "workspace-call" to "workspace_list").joinToString("") { (id, name) ->
+                            "data: {\"type\":\"response.output_item.added\",\"item\":{\"type\":\"function_call\",\"id\":\"fc_$id\",\"call_id\":\"$id\",\"name\":\"$name\",\"arguments\":\"\"}}\n\n" +
+                                "data: {\"type\":\"response.function_call_arguments.done\",\"item_id\":\"fc_$id\",\"call_id\":\"$id\",\"name\":\"$name\",\"arguments\":\"{}\"}\n\n"
+                        } + "data: {\"type\":\"response.completed\",\"response\":{}}\n\n"
+                    }
+                } else if (format == ApiFormat.OPENAI_COMPATIBLE) {
+                    "data: {\"choices\":[{\"delta\":{\"content\":\"answer\"}}]}\n\ndata: [DONE]\n\n"
+                } else "data: {\"type\":\"response.output_text.delta\",\"delta\":\"answer\"}\n\ndata: {\"type\":\"response.completed\",\"response\":{}}\n\n"
+                respond(response, HttpStatusCode.OK, headersOf(HttpHeaders.ContentType, ContentType.Text.EventStream.toString()))
+            }
+            val executor = object : ToolExecutor {
+                override val specs = listOf("search", "workspace_list").map { ToolSpec(it, it, "{\"type\":\"object\"}", "", false) }
+                override suspend fun invoke(call: ToolCall) = ToolResult.Value("{}")
+                override suspend fun approve(callId: String): ToolResult = error("unused")
+            }
+            val run = AgentRun("visual-${format.name}", "snapshot", "conversation")
+            val events = AgentRuntime(OpenAiAdapterFactory.create(format, HttpClient(engine), "https://example.invalid/v1")).run(
+                AgentRuntimeRequest(run, EffectivePrompt("contract", "", emptyList(), emptyList(), emptyList(), "search"), "model", "test-token".toCharArray(), true,
+                    executor = executor, toolImages = { call, _ -> if (call.name == "search") (1..4).map { InlineImage("image/png", "aW1hZ2U=", "asset-$it") } else emptyList() }),
+            ).toList()
+            assertEquals(RunState.COMPLETED, run.state, "$format: $events")
+            assertEquals(2, bodies.size)
+            val lastResult = events.indexOfLast { it is RuntimeEvent.ToolResultProduced }
+            assertTrue(events.indexOfFirst { it is RuntimeEvent.ToolImagesAttached } > lastResult, "Durable transcript must use the same ordering")
+        }
+    }
+
+    @Test
+    fun compatibleReplaysDeclaredReasoningWithToolCalls() = runBlocking {
+        var rounds = 0
+        val engine = MockEngine { request ->
+            rounds++
+            if (rounds == 2) {
+                val messages = Json.parseToJsonElement((request.body as TextContent).text).jsonObject["messages"]!!.jsonArray
+                val assistant = messages.single { it.jsonObject["tool_calls"] != null }.jsonObject
+                assertEquals("provider reasoning", assistant["reasoning_content"]?.jsonPrimitive?.content)
+                assertEquals(JsonNull, assistant["content"], "Reasoning must stay separate from answer text")
+            }
+            val response = if (rounds == 1) {
+                listOf("provider", " ", "reasoning").joinToString("") { piece ->
+                    "data: " + buildJsonObject { putJsonArray("choices") { add(buildJsonObject { putJsonObject("delta") { put("reasoning_content", piece) } }) } } + "\n\n"
+                } +
+                    "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"workspace-call\",\"function\":{\"name\":\"workspace_list\",\"arguments\":\"{}\"}}]}}]}\n\ndata: [DONE]\n\n"
+            } else "data: {\"choices\":[{\"delta\":{\"content\":\"answer\"}}]}\n\ndata: [DONE]\n\n"
+            respond(response, HttpStatusCode.OK, headersOf(HttpHeaders.ContentType, ContentType.Text.EventStream.toString()))
+        }
+        val run = AgentRun("reasoning-compatible", "snapshot", "conversation")
+        AgentRuntime(OpenAiAdapterFactory.create(ApiFormat.OPENAI_COMPATIBLE, HttpClient(engine), "https://example.invalid/v1")).run(
+            AgentRuntimeRequest(run, EffectivePrompt("contract", "", emptyList(), emptyList(), emptyList(), "hello"), "model", "test-token".toCharArray(), true, executor = RecordingWorkspaceExecutor()),
+        ).toList()
+        assertEquals(RunState.COMPLETED, run.state)
+        assertEquals(2, rounds)
+    }
+
     @Test
     fun compatibleAndResponsesBothContinueAfterWorkspaceMetadataListing() = runBlocking {
         ApiFormat.entries.forEach { format ->

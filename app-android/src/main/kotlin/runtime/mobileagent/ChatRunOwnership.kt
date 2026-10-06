@@ -45,6 +45,8 @@ internal class ChatRunOwnership {
 
 /** Internal runtime seam for deterministic deadline/late-event integration tests. */
 internal class ChatRunExecution(
+    /** Deterministic seam for another page changing visibility during asynchronous preflight. */
+    val beforeRunAdmission: suspend () -> Unit = {},
     /**
      * Returns once the run has made no observable progress for the idle limit.  A run that is
      * still receiving a long reply keeps postponing this; only a silent pipeline trips it.

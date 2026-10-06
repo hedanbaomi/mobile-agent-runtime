@@ -172,13 +172,15 @@ docs/evidence/                脱敏的验证结果，按任务分目录
 | AgentProfile | id、name、promptRevisionId、chat/vision/embedding/rerankerProfileId、retrieval/context/permission settings、revision |
 | agent_knowledge / agent_skills | agentId + resourceId 联合唯一；引用不能隐式扩大资源权限 |
 | PromptRevision | id、agentId、parentRevisionId、template、allowedVariables、createdAt；旧版本不原地覆盖 |
-| Conversation | id、snapshotId、title、createdAt、updatedAt；显式换配置创建新快照边界 |
+| Conversation | id、snapshotId、title、createdAt、updatedAt、archived（默认 false）；显式换配置创建新快照边界；归档只影响可见性并保持原始记录 |
 | AgentSnapshot | id、schemaVersion、配置展开值、模型/Provider 的非秘密修订、资源 ID/版本、createdAt；不可变 |
 | Message | id、conversationId、parentMessageId、role、typed parts、status、createdAt；文本、图片引用、tool result 分类型 |
 | Run / ToolInvocation | runId、snapshotId、state、budget、stopReason；toolCallId、permissionDecision、status、resultRef；唯一调用去重 |
 | AuditEvent | id、runId、时间、component、action、结果、errorCode、字节/Token 数、脱敏摘要；不默认保存正文 |
 
 知识库的 Document/Asset/Chunk/Embedding/IndexGeneration/ImportJob、Skills 的安装/授权和公告表见对应专题。数据库级外键、唯一约束和应用层授权同时存在，不使用模型输出来决定实体归属。
+
+2026-10-06 对话归档（R37）：Schema 30 在迁移事务增加带 CHECK 的默认 false 字段，旧数据不归档、失败回滚。侧栏操作由宿主的 typed action 列表生成，当前提供归档；设置→数据与备份提供查看和恢复。归档会话只读，归档与 Run 准入在数据库事务内互斥，新 USER 写入复核状态；准入失败恢复草稿且不虚构 Run。Transfer schema 1 的 additive 字段由新客户端保留，旧包缺省 false；导出并发栅栏包含归档状态。详见 [ADR-0028](adr/0028-conversation-archive.md)。
 
 删除 Provider 时提示被引用配置并保留快照的非秘密来源；秘密删除后旧对话续跑返回 `SECRET_UNAVAILABLE`，不自动切换其他 Provider。删除知识库不得删除其他知识库引用的 CAS blob；先解除引用并事务标记，再回收无引用内容。
 
@@ -189,6 +191,8 @@ Agent 的 embeddingProfileId 是新建/选择索引的偏好，不可覆盖已�
 ## 6. Provider、参数和 Prompt
 
 ### 6.1 Provider adapter
+
+2026-10-06 工具续轮补充（R02/R08/R12/R34）：同一 assistant 工具批次先连续提交全部工具结果，再提交搜索返回的视觉证据；旧完整批次只在请求投影中修复顺序。Chat 工具请求按 Provider 显式返回的推理独立重放 `reasoning_content`，保留空白且计入输入预算；不得由回答推测推理。无工具 Chat 与 Responses 不重放该字段，不因此受历史推理上限阻断。请求预览脱敏、诊断删除该字段；`PROVIDER_REJECTED` 显示明确错误而非 INTERNAL，不自动重试。协议和边界见 [ADR-0027](adr/0027-visual-tool-batches-and-reasoning-replay.md)。
 
 2026-10-05 兼容错误补充：Chat 与 Responses 的连接测试统一解析 error 对象。空、null 或非字符串 code 不得阻止 404 的明确模型缺失信息；明确 code 优先于消息，普通 invalid_request_error/param 错误不得因提及 unsupported/stream/tools 被判为功能不支持。消息回退仅消费 error.message 或旧服务的纯文本错误，不扫描有效 JSON 的其他字段；认证、超时、限流及计费标记保持原约定。基础 Chat 连通测试省略所有可选采样、停止与高级参数，仅保留输出预算别名，独立能力探测保留实际模型参数并仅压低探测输出预算。编辑模型 ID 留空时沿用已有 ID，同一 ID 用于持久化与上下文窗口目标。相关回归与设备/真实 Provider 验证边界见 [兼容性修复证据](evidence/2026-10-05/provider-compatibility.md)。
 

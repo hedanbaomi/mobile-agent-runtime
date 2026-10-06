@@ -55,6 +55,7 @@ import runtime.mobileagent.domain.ModelRole
 import runtime.mobileagent.domain.withEndpoint
 import runtime.mobileagent.domain.isChatEndpoint
 import runtime.mobileagent.provider.AssistantToolCall
+import runtime.mobileagent.provider.replaysChatReasoning
 import runtime.mobileagent.provider.CapabilityProbeStatus
 import runtime.mobileagent.provider.CapabilityReport
 import runtime.mobileagent.provider.CapabilityCheck
@@ -848,7 +849,14 @@ class OpenAiCompatibleAdapter(
         val runtimeFields = linkedMapOf<String, JsonElement>(
             "model" to JsonPrimitive(request.modelId),
             "messages" to buildJsonArray {
-                request.messages.forEach { add(encodeMessage(it, includeImageBytes)) }
+                request.messages.forEach { message ->
+                    val encoded = encodeMessage(message, includeImageBytes)
+                    add(if (request.replaysChatReasoning() && message.role == "assistant") {
+                        JsonObject(encoded + ("reasoning_content" to JsonPrimitive(
+                            if (includeImageBytes) message.reasoningContent.orEmpty() else "<redacted-reasoning>",
+                        )))
+                    } else encoded)
+                }
             },
             "stream" to JsonPrimitive(request.stream),
         )
@@ -1768,7 +1776,7 @@ class OpenAiCompatibleAdapter(
         listOf("reasoning_content", "reasoning")
             .firstNotNullOfOrNull { key ->
                 (message?.get(key) as? JsonPrimitive)?.contentOrNull
-                    ?.takeIf { it.isNotBlank() }
+                    ?.takeIf { it.isNotEmpty() }
             }
 
     private data class ResolvedHeaders(

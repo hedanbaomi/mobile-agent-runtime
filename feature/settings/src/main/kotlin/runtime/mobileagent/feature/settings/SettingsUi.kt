@@ -193,6 +193,7 @@ data class SettingsUiState(
 )
 
 data class SettingsActions(
+    val onOpenArchivedConversations: () -> Unit = {},
     val onLanguage: (String) -> Unit = {},
     val onTheme: (String) -> Unit = {},
     val onStats: (Boolean) -> Unit = {},
@@ -426,6 +427,9 @@ fun SettingsScreen(
             var importHelpExpanded by remember { mutableStateOf(false) }
             Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 Text(if (zh) "数据与备份" else "Data and backup", style = MaterialTheme.typography.titleMedium)
+                TextButton(onClick = actions.onOpenArchivedConversations, modifier = Modifier.testTag("settings.archived_conversations")) {
+                    Text(if (zh) "已归档的对话" else "Archived conversations")
+                }
                 Text(
                     if (zh) {
                         "ZIP 保存到所选位置，提供方可能上传或同步。扩展内容默认关闭，密钥与授权不导出。上限 512 MiB，单项 32 MiB。"

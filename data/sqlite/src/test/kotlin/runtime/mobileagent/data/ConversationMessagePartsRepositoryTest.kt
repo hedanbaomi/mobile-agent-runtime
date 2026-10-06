@@ -20,6 +20,160 @@ import runtime.mobileagent.domain.ReasoningPart
 
 class ConversationMessagePartsRepositoryTest {
     @Test
+    fun anotherRepositoryArchivingDuringPreflightRejectsUserAppendAndRunAdmission() {
+        JdbcSqlConnection().use { db ->
+            Migrations.apply(db)
+            val snapshotId = createSnapshot(db)
+            val sender = ConversationRepository(db)
+            val archiver = ConversationRepository(db)
+            sender.create(snapshotId, "Race", "conversation.race")
+            val previous = sender.append("conversation.race", MessageRole.USER, "Previously admitted")
+            // The sender's initial UI check has already passed; another VM archives before
+            // asynchronous user-message persistence and RunCoordinator preparation.
+            assertEquals(false, sender.get("conversation.race")?.archived)
+            assertEquals(true, archiver.setArchived("conversation.race", true))
+            assertThrows(AppException::class.java) { sender.append("conversation.race", MessageRole.USER, "New draft") }
+            assertThrows(AppException::class.java) {
+                RunRepository(db).create(runtime.mobileagent.domain.RunRecord(
+                    "race.run", snapshotId, "conversation.race", createdAt = "now"))
+            }
+            assertEquals(listOf(previous), sender.messages("conversation.race"))
+            assertEquals(emptyList<runtime.mobileagent.domain.RunRecord>(), RunRepository(db).list("conversation.race"))
+        }
+    }
+
+    @Test
+    fun archiveAfterUserAppendStillRejectsRunWithoutDeletingAdmittedMessage() {
+        JdbcSqlConnection().use { db ->
+            Migrations.apply(db)
+            val snapshotId = createSnapshot(db)
+            val repo = ConversationRepository(db)
+            repo.create(snapshotId, "Race", "conversation.admission")
+            val message = repo.append("conversation.admission", MessageRole.USER, "Already persisted")
+            assertEquals(true, repo.setArchived("conversation.admission", true))
+            assertThrows(AppException::class.java) {
+                RunRepository(db).create(runtime.mobileagent.domain.RunRecord(
+                    "admission.run", snapshotId, "conversation.admission", createdAt = "now"))
+            }
+            assertEquals(listOf(message), repo.messages("conversation.admission"))
+            assertEquals(emptyList<runtime.mobileagent.domain.RunRecord>(), RunRepository(db).list("conversation.admission"))
+        }
+    }
+
+    @Test
+    fun admittedRunBlocksOtherRepositoryArchivalUntilTerminal() {
+        JdbcSqlConnection().use { db ->
+            Migrations.apply(db)
+            val snapshotId = createSnapshot(db)
+            val sender = ConversationRepository(db)
+            val archiver = ConversationRepository(db)
+            sender.create(snapshotId, "Admission", "conversation.active")
+            val run = RunRepository(db).create(runtime.mobileagent.domain.RunRecord(
+                "active.run", snapshotId, "conversation.active", createdAt = "now"))
+            assertEquals(false, archiver.setArchived("conversation.active", true))
+            assertEquals(false, sender.get("conversation.active")?.archived)
+            RunRepository(db).save(run.copy(state = runtime.mobileagent.domain.RunStatus.COMPLETED))
+            assertEquals(true, archiver.setArchived("conversation.active", true))
+        }
+    }
+
+    @Test
+    fun archivePersistsAcrossDatabaseCloseAndReopen() {
+        val file = java.nio.file.Files.createTempFile("conversation-archive-", ".sqlite")
+        try {
+            JdbcSqlConnection("jdbc:sqlite:$file").use { db ->
+                Migrations.apply(db)
+                val snapshotId = createSnapshot(db)
+                val repo = ConversationRepository(db)
+                repo.create(snapshotId, "Durable archive", "conversation.durable")
+                repo.append("conversation.durable", MessageRole.USER, "Survives restart")
+                assertEquals(true, repo.setArchived("conversation.durable", true))
+            }
+            JdbcSqlConnection("jdbc:sqlite:$file").use { db ->
+                Migrations.apply(db)
+                val repo = ConversationRepository(db)
+                assertEquals(true, repo.get("conversation.durable")?.archived)
+                assertEquals(emptyList<runtime.mobileagent.domain.Conversation>(), repo.listActive())
+                assertEquals("Survives restart", repo.messages("conversation.durable").single().text)
+                assertEquals("snapshot.parts", repo.listArchived().single().snapshotId)
+            }
+        } finally { java.nio.file.Files.deleteIfExists(file) }
+    }
+
+    @Test
+    fun archivePreservesHistoryAndSnapshotAndSurvivesRepositoryRestart() {
+        JdbcSqlConnection().use { db ->
+            Migrations.apply(db)
+            val snapshotId = createSnapshot(db)
+            val snapshot = AgentRepository(db).getSnapshot(snapshotId)
+            val repo = ConversationRepository(db)
+            repo.create(snapshotId, "Archive", "conversation.archive")
+            repo.append("conversation.archive", MessageRole.USER, "Preserved transcript")
+            val before = checkNotNull(repo.get("conversation.archive"))
+            val messages = repo.messages(before.id)
+            assertEquals(true, repo.setArchived(before.id, true))
+            val reopened = ConversationRepository(db)
+            assertEquals(emptyList<runtime.mobileagent.domain.Conversation>(), reopened.listActive())
+            assertEquals(listOf(before.copy(archived = true)), reopened.listArchived())
+            assertEquals(messages, reopened.messages(before.id))
+            assertEquals(snapshot, AgentRepository(db).getSnapshot(snapshotId))
+            assertEquals(1, reopened.list().size)
+            assertEquals(true, reopened.setArchived(before.id, false))
+            assertEquals(listOf(before), reopened.listActive())
+        }
+    }
+
+    @Test
+    fun everyNonterminalRunBlocksArchiveAndTerminalRunsAllowIt() {
+        JdbcSqlConnection().use { db ->
+            Migrations.apply(db)
+            val snapshotId = createSnapshot(db)
+            val repo = ConversationRepository(db)
+            repo.create(snapshotId, "Running", "conversation.running")
+            val terminal = setOf("COMPLETED", "CANCELLED", "FAILED", "BUDGET_EXHAUSTED", "UNKNOWN_OUTCOME")
+            runtime.mobileagent.domain.RunStatus.entries.forEach { state ->
+                db.execute("DELETE FROM runs")
+                db.execute("INSERT INTO runs(run_id,snapshot_id,conversation_id,state,budget_json,created_at,updated_at) VALUES(?,?,?,?,?,?,?)",
+                    listOf("archive.run", snapshotId, "conversation.running", state.name, "{}", "now", "now"))
+                assertEquals(state.name in terminal, repo.setArchived("conversation.running", true), state.name)
+                if (state.name in terminal) repo.setArchived("conversation.running", false)
+                assertEquals(false, repo.get("conversation.running")?.archived)
+            }
+        }
+    }
+
+    @Test
+    fun v29ArchiveUpgradeIsIdempotentPreservesDataAndRollsBackDdlFailure() {
+        JdbcSqlConnection().use { db ->
+            Migrations.apply(db)
+            val snapshotId = createSnapshot(db)
+            val repo = ConversationRepository(db)
+            repo.create(snapshotId, "Upgrade", "conversation.upgrade")
+            repo.append("conversation.upgrade", MessageRole.USER, "Legacy transcript")
+            val before = repo.get("conversation.upgrade")
+            val messages = repo.messages("conversation.upgrade")
+            val snapshot = AgentRepository(db).getSnapshot(snapshotId)
+            db.execute("ALTER TABLE conversations DROP COLUMN archived")
+            db.execute("UPDATE schema_version SET version=29")
+            val failing = object : SqlConnection by db {
+                override fun execute(sql: String, args: List<Any?>) {
+                    if (sql == "DELETE FROM schema_version") error("Injected failure after ALTER")
+                    db.execute(sql, args)
+                }
+            }
+            assertThrows(IllegalStateException::class.java) { Migrations.apply(failing) }
+            assertEquals(29L, db.query("SELECT version FROM schema_version").single().long("version"))
+            assertEquals(false, db.query("PRAGMA table_info(conversations)").any { it.string("name") == "archived" })
+            Migrations.apply(db)
+            Migrations.apply(db)
+            assertEquals(30L, db.query("SELECT version FROM schema_version").single().long("version"))
+            assertEquals(before, repo.get("conversation.upgrade"))
+            assertEquals(messages, repo.messages("conversation.upgrade"))
+            assertEquals(snapshot, AgentRepository(db).getSnapshot(snapshotId))
+        }
+    }
+
+    @Test
     fun appendAndCheckpointPersistNewParts() {
         JdbcSqlConnection().use { db ->
             Migrations.apply(db)
@@ -52,6 +206,13 @@ class ConversationMessagePartsRepositoryTest {
             assertEquals(checkpointed, conversations.message(message.id))
             assertEquals("diff", db.query("SELECT part_type FROM message_parts WHERE message_id=? AND ordinal=1", listOf(message.id)).single().string("part_type"))
             assertEquals("error", db.query("SELECT part_type FROM message_parts WHERE message_id=? AND ordinal=2", listOf(message.id)).single().string("part_type"))
+            val whitespaceMessage = conversations.appendMessage(Message(
+                id = "message.whitespace", conversationId = conversation.id, role = MessageRole.ASSISTANT,
+                status = "STREAMING", createdAt = "2026-09-02T00:00:01Z",
+            ))
+            val whitespace = conversations.checkpointAssistant(whitespaceMessage.id, "", listOf(ReasoningPart(" \n")), status = "COMPLETE")
+            assertEquals(" \n", conversations.message(whitespaceMessage.id)!!.parts.filterIsInstance<ReasoningPart>().single().text)
+            assertEquals(whitespace, conversations.message(whitespaceMessage.id))
         }
     }
 

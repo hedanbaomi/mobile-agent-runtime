@@ -173,7 +173,14 @@ data class ChatMessage(
      * persisted; only the owning provider adapter encodes them.
      */
     val providerContinuationItems: List<ProviderContinuationItem> = emptyList(),
+    /** Explicit provider-returned reasoning, separate from answer text. Chat transports may
+     * replay it for reasoning + tool protocols; Responses never encodes this field. */
+    val reasoningContent: String? = null,
 )
+
+/** Opt in from observed reasoning only; ordinary models receive no extra protocol field. */
+fun ModelRequest.replaysChatReasoning(): Boolean =
+    tools.isNotEmpty() && messages.any { it.role == "assistant" && it.reasoningContent != null }
 
 data class ModelRequest(
     val modelId: String,

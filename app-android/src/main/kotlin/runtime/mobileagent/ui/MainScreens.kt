@@ -300,6 +300,7 @@ internal fun MainApp(onMoveTaskToBack: () -> Unit = {}) {
         ?.label
         ?: if (chinese) "当前智能体" else "Current Agent"
     val drawerActions = runtime.mobileagent.feature.chat.ChatActions(
+        onSessionAction = chatVm::sessionAction,
         onSelectSession = { sessionId ->
             chatVm.selectSession(sessionId)
             drawerOpen = false
@@ -465,7 +466,7 @@ internal fun MainApp(onMoveTaskToBack: () -> Unit = {}) {
                             }
                         }
                         composable(AppRoutes.SETTINGS) {
-                            SettingsRoute(it, chinese, ::requestRoute,
+                            SettingsRoute(it, chinese, ::requestRoute, chatVm,
                                 { requestRoute(AppRoutes.MCP) },
                                 { settingsRevision++ }, autoCheckUpdate = pendingUpdateCheck,
                                 onAutoCheckConsumed = { pendingUpdateCheck = false },
@@ -473,7 +474,7 @@ internal fun MainApp(onMoveTaskToBack: () -> Unit = {}) {
                                 onBack = { handleBack(compact) })
                         }
                         composable(AppRoutes.ABOUT) {
-                            SettingsRoute(it, chinese, ::requestRoute,
+                            SettingsRoute(it, chinese, ::requestRoute, chatVm,
                                 { requestRoute(AppRoutes.MCP) },
                                 { settingsRevision++ }, aboutOnly = true,
                                 showBack = navigationAffordance == ShellNavigationAffordance.BACK,
@@ -612,6 +613,7 @@ private fun ChatRoute(vm: runtime.mobileagent.ChatViewModel, chinese: Boolean, o
     val selectedAgentLabel = state.agents.firstOrNull { it.id == state.selectedAgentId }?.label
         ?: if (chinese) "当前智能体" else "Current Agent"
     val actions = runtime.mobileagent.feature.chat.ChatActions(
+        onSessionAction = vm::sessionAction, onRestoreSession = vm::restoreSession,
         onInput = vm::input, onSend = vm::send, onCancel = vm::cancel,
         onToggleDegradation = vm::degrade, onSelectSession = vm::selectSession,
         onNewSession = { vm.newSession() }, onSelectAgent = vm::selectAgent,
@@ -1684,6 +1686,7 @@ private fun AnnouncementsRoute(entry: NavBackStackEntry, chinese: Boolean, showB
 
 @Composable
 private fun SettingsRoute(entry: NavBackStackEntry, chinese: Boolean, onRoute: (String) -> Unit,
+    chatVm: runtime.mobileagent.ChatViewModel,
     onOpenMcp: () -> Unit, onSettingsChanged: () -> Unit, aboutOnly: Boolean = false,
     autoCheckUpdate: Boolean = false, onAutoCheckConsumed: () -> Unit = {}, showBack: Boolean = false,
     onBack: () -> Unit = {}) {
@@ -1691,6 +1694,7 @@ private fun SettingsRoute(entry: NavBackStackEntry, chinese: Boolean, onRoute: (
     val app = LocalContext.current.applicationContext as MobileAgentApp
     var thirdParty by remember { mutableStateOf(runtime.mobileagent.feature.settings.ThirdPartyNoticesUiState()) }
     var exportChooserOpen by remember { mutableStateOf(false) }
+    var archiveOpen by rememberSaveable { mutableStateOf(false) }
     var exportAgents by remember { mutableStateOf<List<Pair<String, String>>>(emptyList()) }
     var importUri by remember { mutableStateOf<Uri?>(null) }
     val importLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { importUri = it }
@@ -1751,6 +1755,7 @@ private fun SettingsRoute(entry: NavBackStackEntry, chinese: Boolean, onRoute: (
         }
     }
     val actions = runtime.mobileagent.feature.settings.SettingsActions(
+        onOpenArchivedConversations = { chatVm.reload(); archiveOpen = true },
         onLanguage = { vm.language(it); onSettingsChanged() }, onTheme = { vm.theme(it); onSettingsChanged() },
         onStats = vm::setStatsEnabled, onRequestInspection = vm::inspector,
         onOpenAbout = { onRoute(AppRoutes.ABOUT) },
@@ -1801,6 +1806,35 @@ private fun SettingsRoute(entry: NavBackStackEntry, chinese: Boolean, onRoute: (
         runtime.mobileagent.feature.settings.AboutScreen(state, actions, showPageTitle = false)
     } else {
         runtime.mobileagent.feature.settings.SettingsScreen(state, actions, showPageTitle = false)
+    }
+    if (archiveOpen) {
+        AlertDialog(
+            onDismissRequest = { archiveOpen = false },
+            title = { Text(if (chinese) "已归档的对话" else "Archived conversations") },
+            text = {
+                androidx.compose.foundation.lazy.LazyColumn(Modifier.heightIn(max = 420.dp).testTag("settings.archive.list")) {
+                    val archived = chatVm.state.value.archivedSessions
+                    if (archived.isEmpty()) item { Text(if (chinese) "暂无已归档的对话。" else "No archived conversations.") }
+                    items(archived.size, key = { archived[it].id }) { index ->
+                        val session = archived[index]
+                        Column(Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
+                            TextButton(onClick = {
+                                chatVm.selectSession(session.id)
+                                if (chatVm.state.value.selectedSessionId == session.id) {
+                                    archiveOpen = false
+                                    onRoute(AppRoutes.CHAT)
+                                }
+                            }, modifier = Modifier.testTag("settings.archive.view.${session.id}")) { Text(session.title) }
+                            Text(session.timeLabel, style = MaterialTheme.typography.bodySmall)
+                            TextButton(onClick = { chatVm.restoreSession(session.id) }, modifier = Modifier.testTag("settings.archive.restore.${session.id}")) {
+                                Text(if (chinese) "恢复" else "Restore")
+                            }
+                        }
+                    }
+                }
+            },
+            confirmButton = { TextButton(onClick = { archiveOpen = false }) { Text(if (chinese) "关闭" else "Close") } },
+        )
     }
     if (exportChooserOpen) ExportAgentDialog(chinese, exportAgents,
         onConfirm = { agentId, includeSkillPackages, includeKnowledgeContent, includeConversations ->

@@ -24,6 +24,8 @@
 
 ## 1. 现行状态与当前任务
 
+- **2026-10-06 v1.1.2 知识库续轮与对话归档（验证中，Codex 主协调者）**：用户授权修复、提交推送普通合并及发布。修复同批工具结果/视觉消息顺序、Chat 显式推理重放/空白持久化/预算和诊断隐私、PROVIDER_REJECTED 类型，并投影修复旧完整交换；新增由宿主 action 列表驱动的长按归档、设置查看和恢复、只读与跨实例准入事务、Schema30 与备份兼容。独立生产源码复审 APPROVE；受影响单元、设备及干净源码门禁分开核验，结果见 docs/evidence/2026-10-06/kb-and-conversation-archive.md。用户附件、诊断和私有 receipts 不进入提交。既有后台/CI/视频及共享文档 WIP 保留；本地 main 无需额外同步远端。尚未发布。
+
 - **2026-10-06 v1.1.1 审查、发布与通用贡献指南（本轮工作交付，Codex 主协调者）**：2026-10-06T16:50:48+08:00。Claude 发送准备/准入截止修复已独立只读复查 APPROVED，并补修事件消费及摘要检查点写入后的两处派发准入竞态；74/275/253 项单元、API34/x86_64 定向25项、完整本地门禁和远端 PR 检查通过。修复已由 [PR #47](https://github.com/hedanbaomi/mobile-agent-runtime/pull/47) 普通合并，正式 [v1.1.1/code6](https://github.com/hedanbaomi/mobile-agent-runtime/releases/tag/v1.1.1) 已发布并设 latest stable，8项附件服务器 digest 与本地 SHA-256 一致，正式签名延续；tag/构建/来源固定于 d523b6c39da9a51a3f1e1cd5be31df1194d8ac41。本提交将 CONTRIBUTING.md 改为面向全部开发者的环境、问题报告、测试、PR 和许可指南，贡献者使用自己的身份，维护者交接不作为普通贡献者开发报告。root 本地 main966a4bf 未额外同步远端，既有后台/CI/视频及私有交接 WIP 保留。真实 OEM 输入帧耗时、真实 Provider 长回复及物理 Shizuku/USB 未验收；验证及发布事实见 [本轮证据](docs/evidence/2026-10-06/send-freeze-and-run-deadline.md)。文档改动遵循普通 PR 门禁，远端状态以对应 PR 为准；无新增产品待办。
 
 - **2026-10-06 输入、压缩与设备访问修复（修复最终独立复查通过，v1.1.0 提交合并及发布进行中）**：R18/R21/R23/R34，U02/U07、C20—C25、S15/S18。输入草稿隔离并保留 IME composition/光标；已知摘要失败且完整原文符合硬预算时继续，未知/超窗仍停止；设置精简与推荐值。危险模式全局确认直接授权内置 Agent shell，冻结 policy/确认 revision/所选通道并拒绝旧审批/缓存披露；首次 Agent 完整设备确认随保存提交，取消丢弃、失败回滚保留草稿、默认目录不变。API34 定向 18 项与 shell 6 项通过；修复最终独立只读复查 APPROVE；干净检出 strict/offline licenseGuard/Reverse/check/pins/lock/checksums/YAML 全通过，REUSE886/886。root main 基线5a9120c（tree与origin/main869f21c一致），既有后台/CI/视频/私有交接WIP不纳入。用户追加授权发布 v1.1.0/code5，正式发布待执行；真实OEM输入帧耗时、物理Shizuku/USB及Provider未验收。见[本轮证据](docs/evidence/2026-10-06/ime-context-device-access.md)。

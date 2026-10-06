@@ -60,7 +60,7 @@ object Migrations {
     // v27 replaces the single active dispatch index with three durable slots.
     // v28 permits six durable slots and freezes v27 batches at their old default of three.
     // v29 adds the scoped import-job display index without replaying legacy binding projection.
-    const val VERSION = 29
+    const val VERSION = 30
 
     private val statements = listOf(
         "CREATE TABLE IF NOT EXISTS schema_version (version INTEGER NOT NULL PRIMARY KEY)",
@@ -251,6 +251,7 @@ object Migrations {
         Column("pipeline_units", "failure_phase", "TEXT"),
         Column("pipeline_attempts", "dispatch_slot", "INTEGER"),
         Column("chunks", "text_utf16_length", "INTEGER NOT NULL DEFAULT -1 CHECK(text_utf16_length >= -1)"),
+        Column("conversations", "archived", "INTEGER NOT NULL DEFAULT 0 CHECK(archived IN (0,1))"),
     )
 
     fun apply(connection: SqlConnection) {

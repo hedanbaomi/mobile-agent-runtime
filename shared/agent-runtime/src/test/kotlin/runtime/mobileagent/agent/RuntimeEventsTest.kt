@@ -33,6 +33,14 @@ import runtime.mobileagent.skills.tooling.ToolErrorCode
 
 class RuntimeEventsTest {
     @Test
+    fun providerRejectionIsTypedAndNeverLeaksTheBodyOrAutomaticallyRetries() {
+        val part = toSafeErrorPart("PROVIDER_REJECTED: sk-private response payload")
+        assertEquals(MessageErrorCode.PROVIDER_REJECTED, part.code)
+        assertTrue(!part.retryable)
+        assertTrue(!part.message.contains("private"))
+        assertTrue(part.message.contains("请求格式"))
+    }
+    @Test
     fun providerReasoningIsForwardedOnlyAsItsOwnRuntimeEvent() = runBlocking {
         val adapter = RecordingAdapter(
             listOf(listOf(ModelEvent.ReasoningDelta("provider thinking"), ModelEvent.TextDelta("answer"), ModelEvent.Completed)),

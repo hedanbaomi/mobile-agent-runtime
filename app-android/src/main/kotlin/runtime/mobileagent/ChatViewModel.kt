@@ -237,7 +237,7 @@ class ChatViewModel internal constructor(
                 agentLabel = agentId?.let { agentNames[it]?.name },
             )
             state.value = state.value.copy(
-                sessions = conversations.map { c ->
+                sessions = conversations.filterNot { it.archived }.map { c ->
                     val snapshotAgentId = conversationAgentIds[c.id]
                     val workspaceLabel = workspaceLabels.getValue(c.id)
                     ChatSessionUi(
@@ -248,7 +248,13 @@ class ChatViewModel internal constructor(
                         agentId = snapshotAgentId,
                         workspaceLabel = workspaceLabel,
                     )
-                }, selectedSessionId = selected,
+                },
+                archivedSessions = conversations.filter { it.archived }.map { c ->
+                    ChatSessionUi(id = c.id, title = c.title, timeLabel = c.updatedAt.take(16),
+                        agentId = conversationAgentIds[c.id], agentName = conversationAgentIds[c.id]?.let { agentNames[it]?.name }.orEmpty())
+                },
+                selectedSessionArchived = conversations.firstOrNull { it.id == selected }?.archived == true,
+                selectedSessionId = selected,
                 input = savedStateHandle.get<String>("chat.draft.${selected ?: "new:$agentId"}") ?: state.value.input,
                 agents = agents.map { ChatAgentOptionUi(it.id, it.name) }, selectedAgentId = agentId,
                 messages = messages.mapIndexed { index, message ->
@@ -357,6 +363,28 @@ class ChatViewModel internal constructor(
         } catch (failure: Exception) { fail(failure); null }
     }
 
+    fun sessionAction(id: String, action: runtime.mobileagent.feature.chat.SessionAction) {
+        when (action) {
+            runtime.mobileagent.feature.chat.SessionAction.ARCHIVE -> changeArchive(id, true)
+        }
+    }
+
+    fun restoreSession(id: String) = changeArchive(id, false)
+
+    private fun changeArchive(id: String, archived: Boolean) {
+        if (runOwnership.active?.conversationId == id || (state.value.streaming && state.value.selectedSessionId == id)) {
+            state.value = state.value.copy(status = "当前对话仍在运行，请等待完成或取消后归档。")
+            return
+        }
+        try {
+            if (!container.conversations.setArchived(id, archived)) {
+                state.value = state.value.copy(status = "对话仍有未结束的运行，暂时无法更改归档状态。")
+                return
+            }
+            reload()
+        } catch (failure: Exception) { fail(failure) }
+    }
+
     fun selectSession(id: String) {
         if (blockedSessionChange()) return
         detachRunPage()
@@ -406,6 +434,10 @@ class ChatViewModel internal constructor(
     }
 
     fun send() {
+        if (state.value.selectedSessionId?.let(container.conversations::get)?.archived == true) {
+            state.value = state.value.copy(status = "已归档的对话为只读，请先恢复后继续。")
+            return
+        }
         val text = state.value.input.trim()
         if (text.isBlank() || state.value.streaming) return
         if (runOwnership.active != null || runJob?.isActive == true || preflightJob?.isActive == true) {
@@ -520,6 +552,7 @@ class ChatViewModel internal constructor(
         runJob = viewModelScope.launch {
             resources.job = currentCoroutineContext()[Job]
             var foregroundStarted = false
+            var runAdmitted = false
             val run = AgentRun(owner.runId, binding.snapshot.id, conversationId,
                 budget = RunBudget(maxModelRounds = contextPolicy.maxModelRequestsPerRun))
             // The run owner outlives any single UI page: only this owner key
@@ -623,7 +656,7 @@ class ChatViewModel internal constructor(
                 val id = assistantId ?: return
                 val parts = buildList<MessagePart> {
                     if (answer.isNotEmpty()) add(TextPart(answer))
-                    if (reasoning.isNotBlank()) add(ReasoningPart(reasoning, streaming = status == "STREAMING"))
+                    if (reasoning.isNotEmpty()) add(ReasoningPart(reasoning, streaming = status == "STREAMING"))
                     terminalError?.let(::add)
                     addAll(observed.values)
                     addAll(runCitations.values.filter { it.first.runId == run.runId }.map { CitationPart(it.first.citationId) })
@@ -651,7 +684,11 @@ class ChatViewModel internal constructor(
             }
             try {
                 foregroundStarted = runCatching { ChatRunForegroundService.start(getApplication(), owner.runId) }.isSuccess
-                withContext(Dispatchers.IO) { record = container.runCoordinator.prepare(record, runOwnerKey) }
+                withContext(Dispatchers.IO) {
+                    execution.beforeRunAdmission()
+                    record = container.runCoordinator.prepare(record, runOwnerKey)
+                    runAdmitted = true
+                }
                 val model = binding.chatModel
                 val provider = binding.provider
                 // Run preparation reads repositories, Skill packages and workspace
@@ -999,7 +1036,9 @@ class ChatViewModel internal constructor(
                     container.conversations.messages(conversationId).filterNot { it.id == userMessage.id }
                 }
                 val contextHistory = boundedHistory(history,
-                    if (contextPolicy.autoCompact) Int.MAX_VALUE else contextPolicy.maxHistoryMessages, kbIds.toSet(), runCitations)
+                    if (contextPolicy.autoCompact) Int.MAX_VALUE else contextPolicy.maxHistoryMessages, kbIds.toSet(), runCitations,
+                    replayReasoning = provider.apiFormat == runtime.mobileagent.domain.ApiFormat.OPENAI_COMPATIBLE &&
+                        "tools" in model.capabilities && toolExecutor.specs.isNotEmpty())
                 val typedHistory = contextHistory.messages
                 val historicalSourceIds = contextHistory.sources.map { it.messageId }.toSet()
                 val historicalCitations = history.filter { it.id in historicalSourceIds }.flatMap { message ->
@@ -1372,10 +1411,8 @@ class ChatViewModel internal constructor(
                                     if (System.currentTimeMillis() - lastCheckpoint >= 500) { checkpoint(); lastCheckpoint = System.currentTimeMillis() }
                                 }
                                 is ModelEvent.ReasoningDelta -> {
-                                    val projected = e.toMessagePartOrNull() as? ReasoningPart
-                                    if (projected != null) {
-                                        reasoning = SecretRedactor.redact(reasoning + projected.text, listOf(String(secret!!)))
-                                            .take(MessagePartLimits.MAX_REASONING_CHARS)
+                                    if (e.text.isNotEmpty()) {
+                                        reasoning = appendDeclaredReasoning(reasoning, e.text, listOf(String(secret!!)))
                                         flushStreamingAnswer(assistantId, answer, force = false, reasoningText = reasoning)
                                         if (System.currentTimeMillis() - lastCheckpoint >= 500) { checkpoint(); lastCheckpoint = System.currentTimeMillis() }
                                     }
@@ -1686,7 +1723,12 @@ class ChatViewModel internal constructor(
                 }
             } catch (failure: Exception) {
                 val queryUnknown = failure is ApiQueryUnknownOutcomeException
-                val errorPart = if (failure is ChatInputBudgetExceeded) {
+                val archivedBeforeAdmission = !runAdmitted && withContext(Dispatchers.IO) {
+                    runCatching { container.conversations.get(conversationId)?.archived == true }.getOrDefault(false)
+                }
+                val errorPart = if (archivedBeforeAdmission) {
+                    ErrorPart(MessageErrorCode.PERMISSION_DENIED, "对话已归档，输入草稿已保留；请先恢复后继续。")
+                } else if (failure is ChatInputBudgetExceeded) {
                     ErrorPart(
                         MessageErrorCode.CONTEXT_OVERFLOW,
                         failure.userMessage(),
@@ -1709,8 +1751,13 @@ class ChatViewModel internal constructor(
                 record = record.copy(state = if (queryUnknown) RunStatus.UNKNOWN_OUTCOME else if (record.state in TERMINAL) record.state else RunStatus.FAILED,
                     errorCode = if (queryUnknown) "UNKNOWN_OUTCOME" else record.errorCode ?: errorPart.code.name,
                     stopReason = errorPart.message)
-                persistTerminalError(errorPart)
-                publishRunState(owner, state.value.copy(status = errorPart.message, statusKind = "error", error = null))
+                if (runAdmitted) {
+                    persistTerminalError(errorPart)
+                    publishRunState(owner, state.value.copy(status = errorPart.message, statusKind = "error", error = null))
+                } else {
+                    publishRunState(owner, state.value.copy(input = text, status = errorPart.message, statusKind = "error", error = null))
+                    saveRunDraft(owner)
+                }
             } finally {
                 watchdogJob.cancel()
                 // Shield the whole cleanup, including dispatcher returns. Individually shielding
@@ -1772,7 +1819,7 @@ class ChatViewModel internal constructor(
                             container.contextCompactions.list(conversationId)
                         })
                         record = record.copy(finishedAt = Utc.nowIso(), updatedAt = Utc.nowIso())
-                        withContext(Dispatchers.IO) { container.runs.save(record) }
+                        if (runAdmitted) withContext(Dispatchers.IO) { container.runs.save(record) }
                         container.runCoordinator.release(run.runId, runOwnerKey)
                     } catch (failure: Exception) { publishRunState(owner, state.value.copy(status = "记录保存失败：${SecretRedactor.redact(failure.message.orEmpty())}", statusKind = "error")) }
                     secret?.fill('\u0000')
@@ -2278,9 +2325,9 @@ class ChatViewModel internal constructor(
     }
     private data class ChatHistory(val messages: List<ChatMessage>, val sources: List<ContextSource>)
 
-    private fun boundedHistory(messages: List<Message>, max: Int, allowedKbs: Set<String>, source: Map<String, Pair<Citation, String>> = citations): ChatHistory {
+    private fun boundedHistory(messages: List<Message>, max: Int, allowedKbs: Set<String>, source: Map<String, Pair<Citation, String>> = citations, replayReasoning: Boolean = false): ChatHistory {
         val groups = mutableListOf<MutableList<Message>>()
-        messages.forEach { message ->
+        orderedToolEvidenceHistory(messages).forEach { message ->
             val toolEvidence = runCatching { Json.parseToJsonElement(message.metadataJson).jsonObject["toolEvidence"]?.jsonPrimitive?.booleanOrNull }.getOrNull() == true
             if ((message.role == MessageRole.USER && !toolEvidence) || groups.isEmpty()) groups.add(mutableListOf())
             groups.last().add(message)
@@ -2321,7 +2368,8 @@ class ChatViewModel internal constructor(
                 }
             }
             ChatMessage(message.role.name.lowercase(), message.text, images, message.parts.filterIsInstance<ToolResultPart>().singleOrNull()?.callId,
-                message.parts.filterIsInstance<ToolCallPart>().map { AssistantToolCall(it.callId, it.name, it.argumentsJson) })
+                message.parts.filterIsInstance<ToolCallPart>().map { AssistantToolCall(it.callId, it.name, it.argumentsJson) },
+                reasoningContent = replayableReasoning(message, replayReasoning))
         }
         return ChatHistory(projected, selected.map { ContextSource(it.id, turnIds.getValue(it.id), complete = it.status == "COMPLETE") })
     }

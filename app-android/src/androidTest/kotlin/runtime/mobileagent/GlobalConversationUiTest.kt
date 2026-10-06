@@ -36,6 +36,8 @@ import androidx.compose.ui.test.performTextInput
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performScrollTo
 import androidx.compose.ui.test.performScrollToNode
+import androidx.compose.ui.test.performTouchInput
+import androidx.compose.ui.test.longClick
 import androidx.compose.ui.unit.Density
 import androidx.compose.ui.unit.dp
 import androidx.test.ext.junit.runners.AndroidJUnit4
@@ -59,6 +61,55 @@ import runtime.mobileagent.ui.ShellNavigationAffordance
 
 @RunWith(AndroidJUnit4::class)
 class GlobalConversationUiTest {
+    @Test
+    fun emptyHostActionListDoesNotInventArchiveAction() {
+        compose.setContent {
+            MaterialTheme {
+                GlobalDrawerContent(
+                    state = ChatUiState(sessions = listOf(ChatSessionUi("no-actions", "No actions")), sessionActions = emptyList()),
+                    actions = ChatActions(),
+                )
+            }
+        }
+        compose.onNodeWithTag("global.drawer.session.no-actions").performTouchInput { longClick() }
+        compose.onAllNodesWithTag("session.action.ARCHIVE.no-actions").assertCountEquals(0)
+    }
+
+    @Test
+    fun sessionLongPressUsesHostActionListWithoutSelectingConversation() {
+        val selected = mutableListOf<String>()
+        val invoked = mutableListOf<runtime.mobileagent.feature.chat.SessionAction>()
+        compose.setContent {
+            MaterialTheme {
+                GlobalDrawerContent(
+                    state = ChatUiState(sessions = listOf(ChatSessionUi("archive", "Archive candidate"))),
+                    actions = ChatActions(onSelectSession = { selected += it }, onSessionAction = { _, action -> invoked += action }),
+                )
+            }
+        }
+        compose.onNodeWithTag("global.drawer.session.archive").performTouchInput { longClick() }
+        compose.onNodeWithTag("session.action.ARCHIVE.archive").assertIsDisplayed().performClick()
+        assertEquals(emptyList<String>(), selected)
+        assertEquals(listOf(runtime.mobileagent.feature.chat.SessionAction.ARCHIVE), invoked)
+    }
+
+    @Test
+    fun archivedConversationCannotSendAndOffersExplicitRestore() {
+        var restored = ""
+        compose.setContent {
+            MaterialTheme {
+                ConversationScreen(
+                    state = ChatUiState(selectedSessionId = "archived", selectedSessionArchived = true, input = "Draft"),
+                    actions = ChatActions(onRestoreSession = { restored = it }),
+                )
+            }
+        }
+        compose.onNodeWithTag("conversation.composer.input").assertIsNotEnabled()
+        compose.onNodeWithTag("conversation.composer.send").assertIsNotEnabled()
+        compose.onNodeWithTag("conversation.archive.restore").performClick()
+        assertEquals("archived", restored)
+    }
+
     @Test
     fun unboundThreadWithAgentDefaultExplainsStateAndCreatesOnlyANewBoundThread() {
         val requested = mutableListOf<String>()

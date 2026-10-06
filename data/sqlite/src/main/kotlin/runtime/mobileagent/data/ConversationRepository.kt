@@ -69,8 +69,11 @@ class ConversationRepository(
     ): Conversation = create(snapshotId, title, conversationId, at)
 
     /** Compatibility overload for callers that already assembled the durable Conversation value. */
-    fun create(conversation: Conversation): Conversation =
+    fun create(conversation: Conversation): Conversation = db.transaction {
         create(conversation.snapshotId, conversation.title, conversation.id, conversation.createdAt)
+        db.execute("UPDATE conversations SET archived=?,updated_at=? WHERE id=?", listOf(if (conversation.archived) 1 else 0, conversation.updatedAt, conversation.id))
+        checkNotNull(get(conversation.id))
+    }
 
     fun createConversation(conversation: Conversation): Conversation = create(conversation)
 
@@ -81,6 +84,24 @@ class ConversationRepository(
 
     fun list(): List<Conversation> =
         db.query("SELECT * FROM conversations ORDER BY updated_at DESC,id").map { it.toConversation() }
+
+    fun listActive(): List<Conversation> = listByArchive(false)
+
+    fun listArchived(): List<Conversation> = listByArchive(true)
+
+    private fun listByArchive(archived: Boolean): List<Conversation> =
+        db.query("SELECT * FROM conversations WHERE archived=? ORDER BY updated_at DESC,id", listOf(if (archived) 1 else 0))
+            .map { it.toConversation() }
+
+    /** Archive changes visibility only, never transcript, snapshot or message timestamps. */
+    fun setArchived(id: String, archived: Boolean): Boolean = db.transaction {
+        if (get(id) == null) return@transaction false
+        if (db.query("SELECT run_id FROM runs WHERE conversation_id=? AND state NOT IN ('COMPLETED','CANCELLED','FAILED','BUDGET_EXHAUSTED','UNKNOWN_OUTCOME') LIMIT 1", listOf(id)).isNotEmpty()) {
+            return@transaction false
+        }
+        db.execute("UPDATE conversations SET archived=? WHERE id=?", listOf(if (archived) 1 else 0, id))
+        true
+    }
 
     fun delete(id: String): Boolean {
         if (get(id) == null) return false
@@ -113,6 +134,11 @@ class ConversationRepository(
             val stored = existing.toMessage(json)
             if (stored != durable) throw invalid("Message ${durable.id} is immutable")
             return@transaction stored
+        }
+        if (durable.role == runtime.mobileagent.domain.MessageRole.USER &&
+            db.query("SELECT archived FROM conversations WHERE id=?", listOf(durable.conversationId)).single().long("archived") == 1L
+        ) {
+            throw invalid("已归档的对话为只读，请先恢复后继续。")
         }
         val parts = durable.parts
         db.execute(
@@ -289,6 +315,7 @@ class ConversationRepository(
         title = string("title"),
         createdAt = string("created_at"),
         updatedAt = string("updated_at"),
+        archived = long("archived") == 1L,
     )
 
     private fun SqlRow.toMessage(json: Json): Message {

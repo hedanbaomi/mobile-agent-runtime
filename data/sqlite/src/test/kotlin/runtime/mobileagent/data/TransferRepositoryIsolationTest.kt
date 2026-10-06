@@ -267,6 +267,7 @@ class TransferRepositoryIsolationTest {
             val sourceSnapshot = AgentRepository(source).createSnapshot("agent.portable", "snapshot.portable")
             ConversationRepository(source).create(sourceSnapshot.id, "Portable history", "conversation.portable")
             ConversationRepository(source).append("conversation.portable", MessageRole.USER, "Synthetic history")
+            assertTrue(ConversationRepository(source).setArchived("conversation.portable", true))
             val output = ByteArrayOutputStream()
             TransferRepository(source).exportArchive(
                 "agent.portable", TransferOptions(includeConversations = true), output,
@@ -290,6 +291,8 @@ class TransferRepositoryIsolationTest {
                 assertTrue(result.warnings.any { it.contains("history") && it.contains("local credentials") })
                 assertFalse(result.warnings.any { it.contains("Release builds block cleartext requests") })
                 assertEquals("Synthetic history", ConversationRepository(target).messages("conversation.portable").single().text)
+                assertEquals(true, ConversationRepository(target).get("conversation.portable")?.archived)
+                assertEquals(listOf("conversation.portable"), ConversationRepository(target).listArchived().map { it.id })
                 assertNotNull(ConversationRepository(target).get("conversation.unrelated"))
                 assertEquals(unrelatedSnapshot, AgentRepository(target).getSnapshot(unrelatedSnapshot.id))
 

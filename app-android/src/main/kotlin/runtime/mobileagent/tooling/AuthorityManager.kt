@@ -43,38 +43,38 @@ class AuthorityManager(
 
     /** Persist an explicit provider selection; null means no elevated provider. */
     fun selectAuthority(authority: ElevatedAuthority?): Boolean = synchronized(lock) {
-        val current = _state.value
-        val next = current.toPersistent().copy(
+        val current = normalize(store.load())
+        val next = current.copy(
             selectedAuthority = authority ?: Authority.NONE,
         )
-        persistUserChoice(current.persistenceRevision, next)
+        persistUserChoice(current.revision, next)
     }
 
     /** Persist user intent only.  This is never inferred from connection state. */
     fun setUserIntent(authority: ElevatedAuthority, enabled: Boolean): Boolean = synchronized(lock) {
         require(authority != Authority.NONE) { "NONE cannot have provider intent" }
-        val current = _state.value
-        val preferences = current.toPersistent().preferences.toMutableMap()
+        val current = normalize(store.load())
+        val preferences = current.preferences.toMutableMap()
         val previous = preferences[authority] ?: AuthorityPreferences(authority = authority)
         preferences[authority] = previous.copy(
             authority = authority,
             userIntentEnabled = enabled,
             explicitlyConfigured = previous.explicitlyConfigured,
         )
-        persistUserChoice(current.persistenceRevision, current.toPersistent().copy(preferences = preferences))
+        persistUserChoice(current.revision, current.copy(preferences = preferences))
     }
 
     /** Persist provider setup/configuration; this is not a connection probe. */
     fun setConfigured(authority: ElevatedAuthority, configured: Boolean): Boolean = synchronized(lock) {
         require(authority != Authority.NONE) { "NONE cannot be configured" }
-        val current = _state.value
-        val preferences = current.toPersistent().preferences.toMutableMap()
+        val current = normalize(store.load())
+        val preferences = current.preferences.toMutableMap()
         val previous = preferences[authority] ?: AuthorityPreferences(authority = authority)
         preferences[authority] = previous.copy(
             authority = authority,
             explicitlyConfigured = configured,
         )
-        persistUserChoice(current.persistenceRevision, current.toPersistent().copy(preferences = preferences))
+        persistUserChoice(current.revision, current.copy(preferences = preferences))
     }
 
     /** Current platform grant; grant revocation is distinct from connection loss. */

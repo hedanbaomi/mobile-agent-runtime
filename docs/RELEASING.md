@@ -3,7 +3,7 @@
 
 # 正式版本构建与发布
 
-正式安装包从 [GitHub Releases](https://github.com/hedanbaomi/mobile-agent-runtime/releases) 获取。v1.1.1 的应用版本为 `versionName=1.1.1`、`versionCode=6`，正式产物仅含 arm64-v8a，最低 Android 8.0（API 26）。前版 v1.0.0/code 2、v1.0.1/code 3、v1.0.2/code 4 与 v1.1.0/code 5 可使用同一正式签名升级。v1.0.2 起支持每日首开检查 GitHub stable release、用户点击下载与系统确认安装；旧版本需先手动安装当前正式版本。详见 [更新契约](APP_UPDATES.md)。
+正式安装包从 [GitHub Releases](https://github.com/hedanbaomi/mobile-agent-runtime/releases) 获取。v1.1.2 的应用版本为 `versionName=1.1.2`、`versionCode=7`，正式产物仅含 arm64-v8a，最低 Android 8.0（API 26）。前版 v1.0.0/code 2、v1.0.1/code 3、v1.0.2/code 4、v1.1.0/code 5 与 v1.1.1/code 6 可使用同一正式签名升级。v1.0.2 起支持每日首开检查 GitHub stable release、用户点击下载与系统确认安装；旧版本需先手动安装当前正式版本。详见 [更新契约](APP_UPDATES.md)。
 
 首次由 Debug/Review 切换至正式包时，签名身份不同，不能直接覆盖安装。先在旧包导出所需数据、核对导出文件，再处理旧安装；导出默认不包含密钥，重新配置服务商凭据。后续正式版本使用同一正式签名身份升级。
 
@@ -20,6 +20,10 @@
 正式身份比对是门禁通过后的必要发布步骤：运行 Android SDK 的 `apksigner verify --verbose --print-certs`，将实际 APK signer 的 SHA-256 与既有公开正式证书逐字比对，并保存核验记录。
 
 ## Release 附件
+
+v1.1.2 起同时发布 `mobileAgentRuntime-vVERSION-windows-adb.zip`。解压后双击 `start-wired-adb.bat`，电脑需安装 Java 17 或更新版本，并另行准备 [Google 官方 Platform-Tools](https://developer.android.com/tools/releases/platform-tools)。工具只激活用户明确选择的 USB 设备，不包含 adb/JRE，也不在电脑执行模型命令。手机开始配对后，把临时令牌输入电脑；看到等待提示时点击手机“完成配对”，确认手机已连接后即可退出电脑工具并拔线。设备常驻服务持续提供 ADB 级能力，不依赖 Shizuku；设备重启或服务被系统结束后需要重新激活。工具的第三方许可和运行库清单随 ZIP 发布。
+
+从旧桌面桥升级时，需要按新流程激活设备服务。旧电脑端目录标识不能直接用于设备端服务；已有有线 ADB 目录若提示恢复失败，请重新选择该目录。升级不会把旧标识猜测为路径或自动扩大文件范围，原 Agent 授权与其他对话数据保留。
 
 发布安装用 APK、对应源码归档、第三方声明、SBOM、来源/签名核验记录与 SHA-256 清单。Tag 和正式构建 checkout 指向已经验证并合并的远端源码提交；本地 main 的同步按本次用户指令处理，不覆盖工作区未提交内容。公开签名证书可用于比对，私钥、密码文件和用户日志不得上传。
 

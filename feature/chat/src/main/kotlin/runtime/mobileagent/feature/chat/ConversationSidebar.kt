@@ -142,6 +142,8 @@ internal fun ConversationSidebar(
                         SessionSidebarItem(
                             session = session,
                             selected = session.id == state.selectedSessionId,
+                            sessionActions = state.sessionActions,
+                            onAction = actions.onSessionAction,
                             zh = zh,
                             onClick = { actions.onSelectSession(session.id); onClose() },
                             onOpenWorkspace = { onOpenWorkspace(session.agentId, session.agentName.ifBlank { "当前智能体" }) },
@@ -175,6 +177,8 @@ internal fun ConversationSidebar(
                         SessionSidebarItem(
                             session = session,
                             selected = session.id == state.selectedSessionId,
+                            sessionActions = state.sessionActions,
+                            onAction = actions.onSessionAction,
                             zh = zh,
                             onClick = { actions.onSelectSession(session.id); onClose() },
                             onOpenWorkspace = { onOpenWorkspace(session.agentId, session.agentName.ifBlank { "当前智能体" }) },
@@ -190,17 +194,19 @@ internal fun ConversationSidebar(
 private fun SessionSidebarItem(
     session: ChatSessionUi,
     selected: Boolean,
+    sessionActions: List<SessionAction>,
+    onAction: (String, SessionAction) -> Unit,
     zh: Boolean,
     onClick: () -> Unit,
     onOpenWorkspace: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
+    SessionActionItem(session.id, sessionActions, zh, onClick, onAction, modifier) {
     Surface(
         color = if (selected) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceVariant,
         shape = RoundedCornerShape(10.dp),
         modifier = modifier
             .fillMaxWidth()
-            .clickable(onClick = onClick)
             .testTag("chat.sidebar.session.${session.id}"),
     ) {
         Column(Modifier.padding(10.dp)) {
@@ -227,6 +233,7 @@ private fun SessionSidebarItem(
                 Text(session.timeLabel, style = MaterialTheme.typography.labelSmall)
             }
         }
+    }
     }
 }
 

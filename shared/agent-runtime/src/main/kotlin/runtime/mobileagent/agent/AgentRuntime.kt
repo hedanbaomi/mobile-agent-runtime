@@ -476,6 +476,7 @@ class AgentRuntime(
                 // resend a corrected call on the next round.
                 val rejectedCalls = linkedMapOf<String, Pair<ToolCall, String>>()
                 val assistantText = StringBuilder()
+                val assistantReasoning = StringBuilder()
                 val pendingContinuation = mutableListOf<ProviderContinuationItem>()
                 var terminal: ModelEvent? = null
                 // RequestPrepared is consumed by durable/UI collectors and can suspend.
@@ -551,10 +552,12 @@ class AgentRuntime(
                                 pendingContinuation += outgoing.item
                                 Unit
                             }
-                            // Reasoning is an independent provider-owned channel.  Forward
-                            // only the explicit event; it never enters assistantText or the
-                            // next model prompt as inferred chain-of-thought.
-                            is ModelEvent.ReasoningDelta -> emitModel(outgoing)
+                            // Only provider-declared reasoning is replayable, in its own protocol
+                            // field. Never infer reasoning from ordinary assistant answer text.
+                            is ModelEvent.ReasoningDelta -> {
+                                assistantReasoning.append(outgoing.text)
+                                emitModel(outgoing)
+                            }
                             ModelEvent.Completed -> if (terminal !is ModelEvent.Failed) terminal = outgoing
                             is ModelEvent.Failed -> terminal = outgoing
                             else -> emitModel(outgoing)
@@ -645,6 +648,7 @@ class AgentRuntime(
                     // next request of this run; the owning adapter encodes
                     // them, previews and history never see them.
                     providerContinuationItems = pendingContinuation.toList(),
+                    reasoningContent = assistantReasoning.toString().takeIf { it.isNotEmpty() },
                 ), RuntimeMessageIds.assistant(run.runId, modelRequestNumber))
                 pendingContinuation.clear()
                 // Rejected calls never reached the executor; feed each one back as
@@ -675,6 +679,7 @@ class AgentRuntime(
                         RuntimeMessageIds.tool(run.runId, modelRequestNumber, rejectedCall.callId),
                     )
                 }
+                val visualResults = mutableListOf<Pair<String, List<runtime.mobileagent.provider.InlineImage>>>()
                 for (call in pendingTools.values) {
                     if (budgetExhausted(run)) {
                         emitBudget()
@@ -854,15 +859,20 @@ class AgentRuntime(
                         return@flow
                     }
                     if (images.isNotEmpty()) {
-                        emit(RuntimeEvent.ToolImagesAttached(call.callId,
+                        visualResults += call.callId to images
+                    }
+                }
+                // Every call in an assistant batch must have its tool response before a user
+                // message can follow. Keep live requests and durable history in the same order.
+                for ((callId, images) in visualResults) {
+                        emit(RuntimeEvent.ToolImagesAttached(callId,
                             images.mapNotNull { image -> image.assetId?.let { RuntimeImageReference(it, image.mediaType) } },
-                            RuntimeMessageIds.images(run.runId, modelRequestNumber, call.callId)))
+                            RuntimeMessageIds.images(run.runId, modelRequestNumber, callId)))
                         window.append(ChatMessage(
                             role = "user",
-                            text = untrustedToolImages(call.callId),
+                            text = untrustedToolImages(callId),
                             images = images,
-                        ), RuntimeMessageIds.images(run.runId, modelRequestNumber, call.callId))
-                    }
+                        ), RuntimeMessageIds.images(run.runId, modelRequestNumber, callId))
                 }
             }
         } catch (e: CancellationException) {

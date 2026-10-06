@@ -35,7 +35,7 @@ data class InputBudgetEstimate(
  */
 const val INPUT_BUDGET_BASIS: String =
     "conservative-utf8-upper-bound: text, tool call ids/names/arguments, tool schemas and " +
-        "parameter layers counted as UTF-8 bytes; fixed per-image (4096 units) and protocol " +
+        "parameter layers and replayed chat reasoning counted as UTF-8 bytes; fixed per-image (4096 units) and protocol " +
         "reservations; provider-private continuation counted as replayed payload bytes; " +
         "not a tokenizer count and not provider usage"
 
@@ -45,7 +45,7 @@ const val INPUT_BUDGET_BASIS: String =
  */
 const val INPUT_BUDGET_BASIS_WITHOUT_CONTINUATION: String =
     "conservative-utf8-upper-bound: text, tool call ids/names/arguments, tool schemas and " +
-        "parameter layers counted as UTF-8 bytes; fixed per-image (4096 units) and protocol " +
+        "parameter layers and replayed chat reasoning counted as UTF-8 bytes; fixed per-image (4096 units) and protocol " +
         "reservations; provider-private continuation excluded because this transport does " +
         "not send it; not a tokenizer count and not provider usage"
 
@@ -129,6 +129,7 @@ object RequestInputBudget {
     fun estimate(
         request: ModelRequest,
         includeProviderContinuation: Boolean = true,
+        includeChatReasoning: Boolean = request.replaysChatReasoning(),
     ): InputBudgetEstimate {
         var protocolUnits = saturatingAddUnits(PROTOCOL_ENVELOPE_UNITS, conservativeUtf8Units(request.modelId))
         protocolUnits = saturatingAddUnits(protocolUnits, parameterLayerUnits(request.parameters))
@@ -143,6 +144,10 @@ object RequestInputBudget {
             messageTextUnits = saturatingAddUnits(messageTextUnits, MESSAGE_ENVELOPE_UNITS)
             messageTextUnits = saturatingAddUnits(messageTextUnits, conservativeUtf8Units(message.role))
             messageTextUnits = saturatingAddUnits(messageTextUnits, conservativeUtf8Units(message.text))
+            if (includeChatReasoning && message.role == "assistant") {
+                messageTextUnits = saturatingAddUnits(messageTextUnits, 32L)
+                messageTextUnits = saturatingAddUnits(messageTextUnits, conservativeUtf8Units(message.reasoningContent.orEmpty()))
+            }
             message.toolCallId?.let { id ->
                 toolCallUnits = saturatingAddUnits(toolCallUnits, TOOL_CALL_ID_ENVELOPE_UNITS)
                 toolCallUnits = saturatingAddUnits(toolCallUnits, conservativeUtf8Units(id))

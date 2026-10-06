@@ -322,7 +322,7 @@ class OpenAiResponsesAdapter(
      * carries, previews or logs the encrypted content itself.
      */
     override fun estimateInput(request: ModelRequest): InputBudgetEstimate =
-        RequestInputBudget.estimate(request, includeProviderContinuation = true)
+        RequestInputBudget.estimate(request, includeProviderContinuation = true, includeChatReasoning = false)
 
     override fun stream(request: ModelRequest, secret: CharArray): Flow<ModelEvent> = flow {
         val started = System.nanoTime()

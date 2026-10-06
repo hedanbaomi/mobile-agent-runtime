@@ -157,6 +157,10 @@ interface SettingsAuthorityPort {
     fun reauthorizeWiredAdb(): SettingsAuthoritySnapshot = snapshot()
     fun forgetWiredAdb(): SettingsAuthoritySnapshot = snapshot()
 
+    /** Reports completion only after the resident service and credential are revoked. */
+    suspend fun revokeWiredAdb(): SettingsAuthorityMutation =
+        SettingsAuthorityMutation(accepted = true, snapshot = forgetWiredAdb())
+
     /**
      * Starts a foreground-only pairing exchange.  Implementations must create
      * and retain the raw token in the Wired bridge, never in a durable store.

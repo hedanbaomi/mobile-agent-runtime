@@ -22,9 +22,15 @@ import java.util.UUID
  */
 class ShizukuUserService private constructor(
     private val shellRunner: ShizukuShellRunner,
+    private val expectedAppUid: Int? = null,
 ) : IShizukuCommandService.Stub() {
     /** Public no-arg entrypoint required by Shizuku's UserService loader. */
     constructor() : this(ProcessShizukuShellRunner())
+
+    /** Resident bootstrap pins the permitted app before any Binder handshake. */
+    constructor(expectedAppUid: Int) : this(ProcessShizukuShellRunner(), expectedAppUid) {
+        require(expectedAppUid >= 10_000)
+    }
 
     /**
      * Test-only injection seam.  The marker prevents this constructor from
@@ -32,7 +38,10 @@ class ShizukuUserService private constructor(
      */
     internal constructor(shellRunner: ShizukuShellRunner, testOnly: Unit) : this(shellRunner)
 
-    private val files = ShizukuWorkspaceFileStore()
+    private val files = ShizukuWorkspaceFileStore(
+        if (expectedAppUid == null) ShizukuWorkspaceFileStore.FIXED_ROOT else
+            java.io.File("/storage/emulated/${expectedAppUid / 100_000}/Download/MobileAgentRuntime-ADB"),
+    )
     /**
      * Device-root directory handles and attached workspace handles are kept
      * only for this UserService instance.  They are opaque to the app and are
@@ -54,6 +63,7 @@ class ShizukuUserService private constructor(
         val callerUid = Binder.getCallingUid()
         val acceptedCaller = synchronized(callerLock) {
             when {
+                expectedAppUid != null && callerUid != expectedAppUid -> false
                 handshakeCallerUid == null -> {
                     handshakeCallerUid = callerUid
                     true
@@ -359,6 +369,13 @@ class ShizukuUserService private constructor(
      */
     @Volatile
     internal var destroyExitHook: (() -> Unit)? = null
+
+    /** Explicit resident shutdown; only the pinned app can request it. */
+    fun shutdownResident(): Boolean {
+        if (expectedAppUid == null || Binder.getCallingUid() != expectedAppUid) return false
+        destroyInternal(serviceUid, serviceUid)
+        return true
+    }
 
     /** Reserved transaction used by Shizuku to tear down a UserService. */
     override fun destroy() {

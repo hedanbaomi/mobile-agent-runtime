@@ -29,7 +29,7 @@ class TransferCodecTest {
 
     @Test
     fun conversationTransferRoundTripsNewMessageParts() {
-        val conversation = Conversation("conversation.one", "snapshot.one", "Conversation", "now", "now")
+        val conversation = Conversation("conversation.one", "snapshot.one", "Conversation", "now", "now", archived = true)
         val transfer = ConversationTransfer(
             conversation = conversation,
             snapshot = AgentSnapshot(
@@ -63,6 +63,8 @@ class TransferCodecTest {
         val decoded = TransferCodec.decodeConversation(TransferCodec.encodeConversation(transfer))
 
         assertEquals(transfer, decoded)
+        val legacy = TransferCodec.encodeConversation(transfer).replace("\"archived\":true,", "").replace(",\"archived\":true", "")
+        assertEquals(false, TransferCodec.decodeConversation(legacy).conversation.archived)
     }
 
     @Test

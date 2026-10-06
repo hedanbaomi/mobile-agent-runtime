@@ -48,12 +48,18 @@ class ConversationMessagePartsTest {
 
     @Test
     fun boundedPartsRejectBlankOrAbsoluteContent() {
-        assertThrows(IllegalArgumentException::class.java) { ReasoningPart(" ") }
+        assertThrows(IllegalArgumentException::class.java) { ReasoningPart("") }
         assertThrows(IllegalArgumentException::class.java) {
             DiffPart("changed", patchPreview = "/private/project/Main.kt")
         }
         assertThrows(IllegalArgumentException::class.java) {
             ErrorPart(MessageErrorCode.INTERNAL, "x".repeat(MessagePartLimits.MAX_ERROR_MESSAGE_CHARS + 1))
         }
+    }
+
+    @Test
+    fun providerDeclaredWhitespaceReasoningRoundTripsExactly() {
+        val part: MessagePart = ReasoningPart(" \n")
+        assertEquals(part, json.decodeFromString<MessagePart>(json.encodeToString(part)))
     }
 }

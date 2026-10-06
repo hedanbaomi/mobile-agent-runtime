@@ -43,6 +43,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.style.TextOverflow
@@ -193,6 +194,7 @@ data class SettingsUiState(
 )
 
 data class SettingsActions(
+    val onOpenArchivedConversations: () -> Unit = {},
     val onLanguage: (String) -> Unit = {},
     val onTheme: (String) -> Unit = {},
     val onStats: (Boolean) -> Unit = {},
@@ -426,6 +428,9 @@ fun SettingsScreen(
             var importHelpExpanded by remember { mutableStateOf(false) }
             Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 Text(if (zh) "数据与备份" else "Data and backup", style = MaterialTheme.typography.titleMedium)
+                TextButton(onClick = actions.onOpenArchivedConversations, modifier = Modifier.testTag("settings.archived_conversations")) {
+                    Text(if (zh) "已归档的对话" else "Archived conversations")
+                }
                 Text(
                     if (zh) {
                         "ZIP 保存到所选位置，提供方可能上传或同步。扩展内容默认关闭，密钥与授权不导出。上限 512 MiB，单项 32 MiB。"
@@ -581,7 +586,7 @@ private fun AuthoritySettingsCard(
 
             ProviderLifecycleBlock(
                 state = state.wiredAdbAuthority,
-                label = if (chinese) "有线 ADB" else "Wired ADB",
+                label = if (chinese) "有线 ADB（设备常驻）" else "USB ADB (device resident)",
                 chinese = chinese,
                 modifier = Modifier.testTag("settings.authority.wired_adb"),
                 onIntent = { actions.onAuthorityIntent("WIRED_ADB", it) },
@@ -601,7 +606,7 @@ private fun AuthoritySettingsCard(
                 },
                 primaryActionEnabled = state.wiredAdbAuthority.availability != "UNSUPPORTED",
                 onSecondaryAction = actions.onForgetWiredAdb,
-                secondaryActionLabel = if (chinese) "忘记此电脑" else "Forget computer",
+                secondaryActionLabel = if (chinese) "撤销 ADB 激活" else "Revoke ADB activation",
                 secondaryActionEnabled = state.wiredAdbAuthority.configured || state.wiredAdbAuthority.trust.isNotBlank(),
             )
 
@@ -611,6 +616,23 @@ private fun AuthoritySettingsCard(
                 tokenProvider = actions.onWiredPairingToken,
                 onComplete = actions.onCompleteWiredPairing,
                 onCancel = actions.onCancelWiredPairing,
+            )
+
+            val adbDownloadLinks = LocalUriHandler.current
+            ActionRow {
+                TextButton(onClick = {
+                    adbDownloadLinks.openUri("https://github.com/hedanbaomi/mobile-agent-runtime/releases/latest")
+                }) { Text(if (chinese) "下载电脑连接工具" else "Download desktop tool") }
+                TextButton(onClick = {
+                    adbDownloadLinks.openUri("https://developer.android.com/tools/releases/platform-tools")
+                }) { Text(if (chinese) "获取官方 ADB" else "Get official ADB") }
+            }
+
+            Text(
+                if (chinese) "USB 激活：用数据线连接电脑，开启开发者选项 → USB 调试，并允许此电脑调试。下载 Release 的电脑连接工具，准备 Java 17+ 和官方 Platform-Tools，双击 start-wired-adb.bat。激活后可拔线；设备常驻服务存活时权限持续可用。开始配对会启用并选用有线 ADB。"
+                else "Connect a USB data cable, enable Developer options → USB debugging, and allow this computer. Download the desktop tool from the Release, prepare Java 17+ and official Platform-Tools, then open start-wired-adb.bat. After activation you can unplug USB; authority stays available while the device service lives. Starting pairing enables and selects Wired ADB.",
+                style = MaterialTheme.typography.bodySmall,
+                modifier = Modifier.testTag("settings.wired_adb.usb.instructions"),
             )
 
             Column(
@@ -765,9 +787,9 @@ private fun AuthoritySettingsCard(
                 ) {
                     Text(
                         if (chinese) {
-                            "这会替换当前已保存的有线 ADB 信任关系，并开始一次新的前台配对。旧信任不会继续用于本次配对。"
+                            "重新激活会建立新的设备连接。若常驻服务仍在运行，请先撤销 ADB 激活；激活失败不会删除已有凭据。"
                         } else {
-                            "This replaces the saved wired ADB trust and starts a new foreground pairing. The old trust will not be used for this pairing."
+                            "Reactivation establishes a new device connection. Revoke activation first if the resident service is still running. Failed activation keeps existing credentials."
                         },
                     )
                     Text(
@@ -861,9 +883,9 @@ private fun WiredPairingBlock(
             )
             Text(
                 if (chinese) {
-                    "先在电脑运行 `mar-bridge pair --serial <serial>`，将上面的令牌粘贴到电脑提示中；成功后再点“完成配对”。"
+                    "电脑端选择 adb.exe 和 USB 设备，输入令牌；看到“等待手机完成配对”后点“完成配对”。手机显示已连接才算激活成功，之后可关闭电脑窗口并拔线。重启或设备服务被系统终止后需重新激活。"
                 } else {
-                    "First run `mar-bridge pair --serial <serial>` on the computer, paste the token above into the computer prompt, then tap \"Complete pairing\"."
+                    "Select adb.exe and the USB device, enter the token, then tap \"Complete pairing\" when prompted. Activation succeeds once the phone shows connected; you can then close the computer window and unplug USB. Reactivate after reboot or if the system terminates the device service."
                 },
                 style = MaterialTheme.typography.bodySmall,
                 modifier = Modifier.testTag("settings.wired_adb.pairing.instructions"),
@@ -885,17 +907,17 @@ private fun WiredPairingBlock(
             }
             Text(
                 if (chinese) {
-                    "过期时间（时间戳）：${pairing.expiresAtEpochMs} · 剩余尝试：${pairing.remainingAttempts}"
+                    "令牌由手机限时校验 · 剩余尝试：${pairing.remainingAttempts}"
                 } else {
-                    "Expiry (timestamp): ${pairing.expiresAtEpochMs} · Attempts remaining: ${pairing.remainingAttempts}"
+                    "Token expiry is checked on this phone · Attempts remaining: ${pairing.remainingAttempts}"
                 },
                 style = MaterialTheme.typography.bodySmall,
                 modifier = Modifier.testTag("settings.wired_adb.pairing.expiry"),
             )
             if (pairing.replacingExistingTrust) {
                 Text(
-                    if (chinese) "正在替换已保存信任；完成前旧信任不会用于本次配对。"
-                    else "Saved trust is being replaced; the old trust is not used for this pairing.",
+                    if (chinese) "新激活通过验证后才替换凭据。"
+                    else "Credentials change only after the new activation is verified.",
                     style = MaterialTheme.typography.bodySmall,
                 )
             }
@@ -1062,7 +1084,7 @@ private fun trustLabel(value: String, chinese: Boolean): String = when (value) {
 private fun pairingStatusLabel(value: String, chinese: Boolean): String = when (value) {
     "EXPIRED" -> if (chinese) "配对令牌已过期；请重新开始前台配对。" else "The pairing token expired; start a new foreground pairing."
     "CANCELLED" -> if (chinese) "前台配对已取消；令牌已清除。" else "Foreground pairing was cancelled; the token was cleared."
-    "COMPLETED" -> if (chinese) "有线 ADB 配对已完成。" else "Wired ADB pairing completed."
+    "COMPLETED" -> if (chinese) "设备 ADB 已连接，可以退出电脑工具并拔线。" else "Device ADB connected. You can close the desktop tool and unplug USB."
     "FAILED" -> if (chinese) "配对未完成；请检查电脑端状态后重试或取消。" else "Pairing did not complete; check the computer and retry or cancel."
     else -> if (chinese) "配对状态已更新。" else "Pairing status updated."
 }

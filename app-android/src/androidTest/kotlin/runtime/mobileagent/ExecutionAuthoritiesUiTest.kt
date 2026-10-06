@@ -5,6 +5,7 @@ package runtime.mobileagent
 
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertIsEnabled
+import androidx.compose.ui.test.assertTextContains
 import androidx.compose.ui.test.assertHasClickAction
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onAllNodesWithText
@@ -39,7 +40,7 @@ class ExecutionAuthoritiesUiTest {
         composeRule.onNodeWithTag("settings.authority.selected").assertIsDisplayed()
         composeRule.onNodeWithText("已启用（逐次确认）").performScrollTo().assertIsDisplayed()
         composeRule.onNodeWithText("Shizuku").performScrollTo().assertIsDisplayed()
-        composeRule.onNodeWithText("有线 ADB").performScrollTo().assertIsDisplayed()
+        composeRule.onNodeWithText("有线 ADB（设备常驻）").performScrollTo().assertIsDisplayed()
         composeRule.onNodeWithText("信任：未配置").performScrollTo().assertIsDisplayed()
         composeRule.onNodeWithText("用户授权文件（SAF）").performScrollTo().assertIsDisplayed()
         composeRule.onNodeWithTag("settings.dangerous_mode").performScrollTo().assertIsDisplayed()
@@ -265,6 +266,12 @@ class ExecutionAuthoritiesUiTest {
             .assertIsDisplayed()
         composeRule.onNodeWithTag("settings.wired_adb.pairing.instructions")
             .assertIsDisplayed()
+            .assertTextContains("等待手机完成配对", substring = true)
+        composeRule.onNodeWithTag("settings.wired_adb.usb.instructions")
+            .performScrollTo().assertIsDisplayed()
+            .assertTextContains("USB 调试", substring = true)
+            .assertTextContains("start-wired-adb.bat", substring = true)
+        composeRule.onNodeWithTag("settings.wired_adb.pairing").performScrollTo()
         composeRule.onNodeWithText("令牌已隐藏；点击“查看令牌”后才能复制。")
             .assertIsDisplayed()
         assertTrue(

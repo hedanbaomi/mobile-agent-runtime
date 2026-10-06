@@ -21,17 +21,20 @@ class RunRepository(
 ) {
     private val json = Json { ignoreUnknownKeys = false; explicitNulls = false }
 
-    fun create(record: RunRecord): RunRecord {
+    fun create(record: RunRecord): RunRecord = db.transaction {
         validate(record)
         if (db.query("SELECT run_id FROM runs WHERE run_id=?", listOf(record.runId)).isNotEmpty()) {
             throw invalid("Run ${record.runId} already exists")
         }
         requireReferences(record)
+        if (db.query("SELECT archived FROM conversations WHERE id=?", listOf(record.conversationId)).single().long("archived") == 1L) {
+            throw invalid("已归档的对话为只读，请先恢复后继续。")
+        }
         db.execute(
             "INSERT INTO runs(run_id,snapshot_id,conversation_id,state,budget_json,stop_reason,error_code,model_rounds,tool_calls,input_tokens,output_tokens,started_at,finished_at,created_at,updated_at,retry_acknowledged_at,manifest_json) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             record.args(),
         )
-        return record
+        record
     }
 
     fun save(record: RunRecord): RunRecord {

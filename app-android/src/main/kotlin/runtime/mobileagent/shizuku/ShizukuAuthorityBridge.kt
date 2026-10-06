@@ -45,7 +45,11 @@ import java.util.concurrent.atomic.AtomicInteger
  */
 class ShizukuAuthorityBridge(
     context: Context,
-) : AutoCloseable {
+    private val deviceConnection: DeviceServiceConnection? = null,
+) : AutoCloseable, DeviceServiceBridge {
+    override val unavailableErrorCode: runtime.mobileagent.skills.tooling.ToolErrorCode
+        get() = if (deviceConnection == null) runtime.mobileagent.skills.tooling.ToolErrorCode.SHIZUKU_SERVICE_UNAVAILABLE
+            else runtime.mobileagent.skills.tooling.ToolErrorCode.AUTHORITY_TEMPORARILY_UNAVAILABLE
     private val appContext = context.applicationContext
     private val lock = Any()
     private val _state = MutableStateFlow(initialState())
@@ -155,6 +159,7 @@ class ShizukuAuthorityBridge(
 
     /** Variant useful to callers that need a stable, app-owned request code. */
     fun requestPermission(requestCode: Int): Boolean {
+        if (deviceConnection != null) return false
         if (!ShizukuBridgePolicy.validPermissionRequestCode(requestCode)) return false
         val current = refresh()
         if (!current.binderAlive) return false
@@ -191,6 +196,7 @@ class ShizukuAuthorityBridge(
      * proven.  It does not request permission or retry silently.
      */
     fun bindUserService(): Boolean {
+        if (deviceConnection != null) return refresh().ready
         val current = refresh()
         if (ShizukuBridgePolicy.evaluateServer(current.asBridgeStatus()) !is ShizukuGateDecision.Allowed) {
             return false
@@ -225,6 +231,10 @@ class ShizukuAuthorityBridge(
 
     /** Explicitly removes the UserService; it is not called as a fallback. */
     fun unbindUserService() {
+        if (deviceConnection != null) {
+            synchronized(lock) { clearUserServiceLocked() }
+            return
+        }
         val shouldUnbind = synchronized(lock) {
             userServiceBinder != null || userServiceBindStartedAtElapsedMs != null
         }
@@ -258,8 +268,8 @@ class ShizukuAuthorityBridge(
             }
         }
         if (!shouldClose) return
-        runCatching { Shizuku.removeBinderReceivedListener(binderReceivedListener) }
-        runCatching { Shizuku.removeBinderDeadListener(binderDeadListener) }
+        if (deviceConnection == null) runCatching { Shizuku.removeBinderReceivedListener(binderReceivedListener) }
+        if (deviceConnection == null) runCatching { Shizuku.removeBinderDeadListener(binderDeadListener) }
         if (permissionListenerRegistered) {
             runCatching { Shizuku.removeRequestPermissionResultListener(permissionResultListener) }
             permissionListenerRegistered = false
@@ -270,10 +280,10 @@ class ShizukuAuthorityBridge(
         permissionListeners.clear()
     }
 
-    internal fun dispatchList(relativePath: String): ShizukuDispatchResult =
+    override fun dispatchList(relativePath: String): ShizukuDispatchResult =
         dispatch { service, sessionId -> service.listSession(sessionId, relativePath) }
 
-    internal fun dispatchListPaged(
+    override fun dispatchListPaged(
         relativePath: String,
         maxEntries: Int,
         cursor: String?,
@@ -281,10 +291,10 @@ class ShizukuAuthorityBridge(
         service.listPagedSession(sessionId, relativePath, maxEntries, cursor)
     }
 
-    internal fun dispatchRead(relativePath: String, maxBytes: Int): ShizukuDispatchResult =
+    override fun dispatchRead(relativePath: String, maxBytes: Int): ShizukuDispatchResult =
         dispatch { service, sessionId -> service.readSession(sessionId, relativePath, maxBytes) }
 
-    internal fun dispatchReadChunk(
+    override fun dispatchReadChunk(
         relativePath: String,
         offsetBytes: Long,
         maxBytes: Int,
@@ -292,7 +302,7 @@ class ShizukuAuthorityBridge(
         service.readChunkSession(sessionId, relativePath, offsetBytes, maxBytes)
     }
 
-    internal fun dispatchApplyPatch(
+    override fun dispatchApplyPatch(
         relativePath: String,
         patch: String,
         expectedVersion: String,
@@ -301,19 +311,19 @@ class ShizukuAuthorityBridge(
         service.applyPatchSession(sessionId, relativePath, patch, expectedVersion, format)
     }
 
-    internal fun dispatchWrite(relativePath: String, content: ByteArray, replaceExisting: Boolean): ShizukuDispatchResult =
+    override fun dispatchWrite(relativePath: String, content: ByteArray, replaceExisting: Boolean): ShizukuDispatchResult =
         dispatch { service, sessionId -> service.writeSession(sessionId, relativePath, content, replaceExisting) }
 
-    internal fun dispatchMkdir(relativePath: String): ShizukuDispatchResult =
+    override fun dispatchMkdir(relativePath: String): ShizukuDispatchResult =
         dispatch { service, sessionId -> service.mkdirSession(sessionId, relativePath) }
 
-    internal fun dispatchDelete(relativePath: String): ShizukuDispatchResult =
+    override fun dispatchDelete(relativePath: String): ShizukuDispatchResult =
         dispatch { service, sessionId -> service.deleteSession(sessionId, relativePath) }
 
-    internal fun dispatchStat(relativePath: String): ShizukuDispatchResult =
+    override fun dispatchStat(relativePath: String): ShizukuDispatchResult =
         dispatch { service, sessionId -> service.statSession(sessionId, relativePath) }
 
-    internal fun dispatchMove(
+    override fun dispatchMove(
         sourcePath: String,
         destinationPath: String,
         replaceExisting: Boolean,
@@ -322,22 +332,22 @@ class ShizukuAuthorityBridge(
     }
 
     /** Opens the typed device-root browser; the result contains opaque handles only. */
-    internal fun dispatchDirectoryRoot(maxEntries: Int, continuation: String? = null): ShizukuDispatchResult =
+    override fun dispatchDirectoryRoot(maxEntries: Int, continuation: String?): ShizukuDispatchResult =
         dispatch { service, sessionId -> service.openDirectoryRootPagedSession(sessionId, maxEntries, continuation) }
 
     /** Browses one service-owned opaque directory handle. */
-    internal fun dispatchDirectoryBrowse(handle: String, maxEntries: Int, continuation: String? = null): ShizukuDispatchResult =
+    override fun dispatchDirectoryBrowse(handle: String, maxEntries: Int, continuation: String?): ShizukuDispatchResult =
         dispatch { service, sessionId -> service.browseDirectoryPagedSession(sessionId, handle, maxEntries, continuation) }
 
     /** Attaches one service-owned opaque directory handle to the agent workspace. */
-    internal fun dispatchDirectoryAttach(handle: String): ShizukuDispatchResult =
+    override fun dispatchDirectoryAttach(handle: String): ShizukuDispatchResult =
         dispatch { service, sessionId -> service.attachDirectorySession(sessionId, handle) }
 
     /** Reopens a directory using its opaque locator and receives a new handle. */
-    internal fun dispatchDirectoryReattach(locator: ByteArray): ShizukuDispatchResult =
+    override fun dispatchDirectoryReattach(locator: ByteArray): ShizukuDispatchResult =
         dispatch { service, sessionId -> service.reattachDirectorySession(sessionId, locator) }
 
-    internal fun dispatchWorkspaceList(
+    override fun dispatchWorkspaceList(
         workspaceHandle: String,
         relativePath: String,
         maxEntries: Int,
@@ -345,7 +355,7 @@ class ShizukuAuthorityBridge(
         service.listWorkspaceSession(sessionId, workspaceHandle, relativePath, maxEntries)
     }
 
-    internal fun dispatchWorkspaceListPaged(
+    override fun dispatchWorkspaceListPaged(
         workspaceHandle: String,
         relativePath: String,
         maxEntries: Int,
@@ -354,7 +364,7 @@ class ShizukuAuthorityBridge(
         service.listWorkspacePagedSession(sessionId, workspaceHandle, relativePath, maxEntries, cursor)
     }
 
-    internal fun dispatchWorkspaceRead(
+    override fun dispatchWorkspaceRead(
         workspaceHandle: String,
         relativePath: String,
         maxBytes: Int,
@@ -362,7 +372,7 @@ class ShizukuAuthorityBridge(
         service.readWorkspaceSession(sessionId, workspaceHandle, relativePath, maxBytes)
     }
 
-    internal fun dispatchWorkspaceReadChunk(
+    override fun dispatchWorkspaceReadChunk(
         workspaceHandle: String,
         relativePath: String,
         offsetBytes: Long,
@@ -371,7 +381,7 @@ class ShizukuAuthorityBridge(
         service.readChunkWorkspaceSession(sessionId, workspaceHandle, relativePath, offsetBytes, maxBytes)
     }
 
-    internal fun dispatchWorkspaceApplyPatch(
+    override fun dispatchWorkspaceApplyPatch(
         workspaceHandle: String,
         relativePath: String,
         patch: String,
@@ -381,7 +391,7 @@ class ShizukuAuthorityBridge(
         service.applyPatchWorkspaceSession(sessionId, workspaceHandle, relativePath, patch, expectedVersion, format)
     }
 
-    internal fun dispatchWorkspaceWrite(
+    override fun dispatchWorkspaceWrite(
         workspaceHandle: String,
         relativePath: String,
         content: ByteArray,
@@ -390,28 +400,28 @@ class ShizukuAuthorityBridge(
         service.writeWorkspaceSession(sessionId, workspaceHandle, relativePath, content, replaceExisting)
     }
 
-    internal fun dispatchWorkspaceMkdir(
+    override fun dispatchWorkspaceMkdir(
         workspaceHandle: String,
         relativePath: String,
     ): ShizukuDispatchResult = dispatch { service, sessionId ->
         service.mkdirWorkspaceSession(sessionId, workspaceHandle, relativePath)
     }
 
-    internal fun dispatchWorkspaceDelete(
+    override fun dispatchWorkspaceDelete(
         workspaceHandle: String,
         relativePath: String,
     ): ShizukuDispatchResult = dispatch { service, sessionId ->
         service.deleteWorkspaceSession(sessionId, workspaceHandle, relativePath)
     }
 
-    internal fun dispatchWorkspaceStat(
+    override fun dispatchWorkspaceStat(
         workspaceHandle: String,
         relativePath: String,
     ): ShizukuDispatchResult = dispatch { service, sessionId ->
         service.statWorkspaceSession(sessionId, workspaceHandle, relativePath)
     }
 
-    internal fun dispatchWorkspaceMove(
+    override fun dispatchWorkspaceMove(
         workspaceHandle: String,
         sourcePath: String,
         destinationPath: String,
@@ -429,7 +439,7 @@ class ShizukuAuthorityBridge(
         withContext(Dispatchers.IO) { executeShellBlocking(request) }
 
     /** Alias kept small and generic for the upper-layer ShizukuShellExecutor adapter. */
-    internal suspend fun execute(request: ShizukuShellRequest): ShizukuShellResult = executeShell(request)
+    override suspend fun execute(request: ShizukuShellRequest): ShizukuShellResult = executeShell(request)
 
     /** Best-effort cancellation for a currently executing low-level call. */
     internal suspend fun cancelShell(callId: String): Boolean = withContext(Dispatchers.IO) {
@@ -455,7 +465,7 @@ class ShizukuAuthorityBridge(
     }
 
     /** Alias kept small and generic for the upper-layer adapter. */
-    internal suspend fun cancel(callId: String): Boolean = cancelShell(callId)
+    override suspend fun cancel(callId: String): Boolean = cancelShell(callId)
 
     private fun dispatch(call: (IShizukuCommandService, String) -> String): ShizukuDispatchResult {
         val current = refresh()
@@ -876,7 +886,7 @@ class ShizukuAuthorityBridge(
     }
 
     private fun registerListeners() {
-        if (!started) return
+        if (!started || deviceConnection != null) return
         runCatching { Shizuku.addBinderReceivedListenerSticky(binderReceivedListener) }
         runCatching { Shizuku.addBinderDeadListener(binderDeadListener) }
         if (!permissionListenerRegistered) {
@@ -903,7 +913,40 @@ class ShizukuAuthorityBridge(
         ShizukuDispatchResult.Failed("Shizuku operation returned an invalid response", unknownOutcome = true)
     }
 
+    /** Resident authority facts come from the authenticated shell publisher, never Shizuku. */
+    private fun readDeviceState(connection: DeviceServiceConnection): ShizukuAuthorityState {
+        val granted = connection.granted()
+        val binder = connection.binder()?.takeIf { runCatching { it.pingBinder() }.getOrDefault(false) }
+        if (!started || !granted || binder == null) {
+            synchronized(lock) { clearUserServiceLocked() }
+            return unavailable(true, BINDER_UNAVAILABLE, permissionGranted = granted)
+        }
+        synchronized(lock) {
+            if (userServiceBinder !== binder) {
+                clearUserServiceLocked()
+                userServiceBinder = binder
+                userService = IShizukuCommandService.Stub.asInterface(binder)
+                runCatching { binder.linkToDeath(userServiceDeathRecipient, 0) }.onFailure { clearUserServiceLocked() }
+            }
+        }
+        revalidateUserServiceHandshake()
+        val snapshot = synchronized(lock) {
+            ServiceSnapshot(userService != null, userServiceUid, userServiceProtocolVersion, userServiceSessionId, userServiceCallerUid)
+        }
+        val valid = snapshot.alive && snapshot.uid == ShizukuBridgePolicy.SHELL_UID &&
+            snapshot.protocolVersion == ShizukuBridgePolicy.USER_SERVICE_PROTOCOL_VERSION &&
+            !snapshot.sessionId.isNullOrBlank() && snapshot.callerUid == Process.myUid()
+        return ShizukuAuthorityState(
+            installedHint = true, binderAlive = true, permissionGranted = granted,
+            apiVersion = ShizukuBridgePolicy.MIN_SERVER_VERSION, serverUid = ShizukuBridgePolicy.SHELL_UID,
+            userServiceAlive = valid, ready = valid, errorCode = if (valid) null else USER_SERVICE_HANDSHAKE_INVALID,
+            preV11 = false, userServiceUid = snapshot.uid, userServiceProtocolVersion = snapshot.protocolVersion,
+            userServiceSessionId = snapshot.sessionId, userServiceCallerUid = snapshot.callerUid,
+        )
+    }
+
     private fun readState(): ShizukuAuthorityState {
+        if (deviceConnection != null) return readDeviceState(deviceConnection)
         val installedHint = isShizukuInstalled()
         val binderAlive = runCatching { Shizuku.pingBinder() }.getOrDefault(false)
         if (!binderAlive) {
@@ -1025,7 +1068,7 @@ class ShizukuAuthorityBridge(
         userServiceCallerUid = userServiceCallerUid,
     )
 
-    private fun initialState() = unavailable(isShizukuInstalled(), BINDER_UNAVAILABLE)
+    private fun initialState() = unavailable(deviceConnection != null || isShizukuInstalled(), BINDER_UNAVAILABLE)
 
     private fun isShizukuInstalled(): Boolean = runCatching {
         appContext.packageManager.getPackageInfo(SHIZUKU_MANAGER_PACKAGE, 0)
@@ -1122,13 +1165,13 @@ class ShizukuAuthorityBridge(
         userServiceCallerUid = userServiceCallerUid,
     )
 
-    private val userServiceArgs = Shizuku.UserServiceArgs(
+    private val userServiceArgs by lazy { Shizuku.UserServiceArgs(
         ComponentName(appContext.packageName, ShizukuUserService::class.java.name),
     )
         .daemon(false)
         .processNameSuffix("shizuku-file-service")
         .debuggable(false)
-        .version(USER_SERVICE_VERSION)
+        .version(USER_SERVICE_VERSION) }
 
     companion object {
         const val PERMISSION_REQUEST_CODE = 0x4D52

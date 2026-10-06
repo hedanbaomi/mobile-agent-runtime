@@ -38,6 +38,8 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.selected
 
 /**
  * Safe presentation data for a workspace in the global drawer.  The label and
@@ -304,14 +306,17 @@ fun GlobalDrawerContent(
                     }
                 }
                 items(sessions, key = { "session:${it.id}" }) { session ->
-                    NavigationDrawerItem(
-                        selected = session.id == state.selectedSessionId,
+                    SessionActionItem(
+                        sessionId = session.id,
+                        actions = state.sessionActions,
+                        zh = zh,
                         onClick = { actions.onSelectSession(session.id); onClose() },
-                        label = { DrawerSessionLabel(session) },
+                        onAction = actions.onSessionAction,
                         modifier = Modifier
                             .fillMaxWidth()
+                            .semantics { selected = session.id == state.selectedSessionId }
                             .testTag("global.drawer.session.${session.id}"),
-                    )
+                    ) { DrawerSessionSurface(session, session.id == state.selectedSessionId) }
                 }
             }
             val orphanSessions = sessionsByAgent[null].orEmpty() + visibleSessions.filter { session ->
@@ -327,14 +332,17 @@ fun GlobalDrawerContent(
                     )
                 }
                 items(orphanSessions.distinctBy { it.id }, key = { "orphan:${it.id}" }) { session ->
-                    NavigationDrawerItem(
-                        selected = session.id == state.selectedSessionId,
+                    SessionActionItem(
+                        sessionId = session.id,
+                        actions = state.sessionActions,
+                        zh = zh,
                         onClick = { actions.onSelectSession(session.id); onClose() },
-                        label = { DrawerSessionLabel(session) },
+                        onAction = actions.onSessionAction,
                         modifier = Modifier
                             .fillMaxWidth()
+                            .semantics { selected = session.id == state.selectedSessionId }
                             .testTag("global.drawer.session.${session.id}"),
-                    )
+                    ) { DrawerSessionSurface(session, session.id == state.selectedSessionId) }
                 }
             }
         }
@@ -364,6 +372,18 @@ fun GlobalDrawerContent(
             }
         }
         item(key = "drawer-bottom-space") { Spacer(Modifier.height(12.dp)) }
+    }
+}
+
+@Composable
+private fun DrawerSessionSurface(session: ChatSessionUi, selected: Boolean) {
+    androidx.compose.material3.Surface(
+        color = if (selected) MaterialTheme.colorScheme.secondaryContainer else MaterialTheme.colorScheme.surface,
+        shape = RoundedCornerShape(28.dp),
+    ) {
+        androidx.compose.foundation.layout.Box(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp)) {
+            DrawerSessionLabel(session)
+        }
     }
 }
 

@@ -40,6 +40,7 @@ data class Conversation(
     val title: String,
     val createdAt: String,
     val updatedAt: String,
+    val archived: Boolean = false,
 )
 
 @Serializable
@@ -56,7 +57,8 @@ sealed interface MessagePart
 /**
  * Limits applied to durable conversation parts.  These limits are deliberately part of the
  * domain contract so the database, transfer codec, and UI cannot silently choose different
- * bounds.  Reasoning and diff previews are display data, not an unbounded transcript channel.
+ * bounds. Provider-declared reasoning may also be replayed by supported Chat tool protocols;
+ * its saved limit must be checked before replay. Diff previews remain display data.
  */
 object MessagePartLimits {
     const val MAX_REASONING_CHARS = 64 * 1024
@@ -90,6 +92,7 @@ enum class MessageErrorCode {
     UNKNOWN_OUTCOME,
     CANCELLED,
     INTERNAL,
+    PROVIDER_REJECTED,
 }
 
 @Serializable
@@ -108,7 +111,7 @@ data class ReasoningPart(
     val streaming: Boolean = false,
 ) : MessagePart {
     init {
-        require(text.isNotBlank()) { "Reasoning content must not be blank" }
+        require(text.isNotEmpty()) { "Reasoning content must not be empty" }
         require(text.length <= MessagePartLimits.MAX_REASONING_CHARS) {
             "Reasoning content exceeds the durable limit"
         }

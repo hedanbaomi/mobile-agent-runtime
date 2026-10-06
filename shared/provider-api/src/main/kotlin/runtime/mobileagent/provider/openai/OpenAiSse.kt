@@ -130,7 +130,7 @@ object OpenAiSse {
         listOf("reasoning_content", "reasoning")
             .firstNotNullOfOrNull { key ->
                 (delta?.get(key) as? kotlinx.serialization.json.JsonPrimitive)?.contentOrNull
-                    ?.takeIf { it.isNotBlank() }
+                    ?.takeIf { it.isNotEmpty() }
             }
 
     /**

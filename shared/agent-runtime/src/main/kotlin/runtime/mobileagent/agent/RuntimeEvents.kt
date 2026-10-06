@@ -174,6 +174,7 @@ fun toSafeErrorPart(value: String): ErrorPart {
         token == "INVALID_CONFIG" || token == "CONFIG_INVALID" -> MessageErrorCode.CONFIG_INVALID
         token == "SECRET_UNAVAILABLE" -> MessageErrorCode.SECRET_UNAVAILABLE
         token == "PROVIDER_UNAUTHORIZED" || normalized.contains("UNAUTHORIZED") -> MessageErrorCode.PROVIDER_UNAUTHORIZED
+        token == "PROVIDER_REJECTED" -> MessageErrorCode.PROVIDER_REJECTED
         token == "RATE_LIMITED" -> MessageErrorCode.RATE_LIMITED
         token == "NETWORK_UNAVAILABLE" || normalized.contains("NETWORK") -> MessageErrorCode.NETWORK_UNAVAILABLE
         token == "CONTEXT_COMPACTION_FAILED" -> MessageErrorCode.INVALID_RESPONSE
@@ -282,6 +283,7 @@ private fun MessageErrorCode.safeMessage(): String = when (this) {
     MessageErrorCode.CONFIG_INVALID -> "配置无效。"
     MessageErrorCode.SECRET_UNAVAILABLE -> "服务商凭据不可用。"
     MessageErrorCode.PROVIDER_UNAUTHORIZED -> "服务商拒绝了请求，请检查授权。"
+    MessageErrorCode.PROVIDER_REJECTED -> "服务商拒绝了请求格式，请检查模型、图片和工具配置；本次不会自动重试。"
     MessageErrorCode.RATE_LIMITED -> "服务商暂时限流，请稍后再试。"
     MessageErrorCode.NETWORK_UNAVAILABLE -> "网络不可用，未能完成请求。"
     MessageErrorCode.CONTEXT_OVERFLOW -> "上下文或输出预算不足。"

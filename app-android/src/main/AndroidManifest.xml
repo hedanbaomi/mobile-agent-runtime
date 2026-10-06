@@ -43,6 +43,11 @@
             android:enabled="true"
             android:exported="true"
             android:permission="android.permission.INTERACT_ACROSS_USERS_FULL" />
+        <provider
+            android:name="runtime.mobileagent.resident.ResidentAdbProvider"
+            android:authorities="${applicationId}.resident-adb"
+            android:exported="true"
+            android:permission="android.permission.INTERACT_ACROSS_USERS_FULL" />
         <activity
             android:name=".MainActivity"
             android:exported="true"

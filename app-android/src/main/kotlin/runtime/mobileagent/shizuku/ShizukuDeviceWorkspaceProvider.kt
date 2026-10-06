@@ -55,12 +55,12 @@ import runtime.mobileagent.workspace.WorkspaceVersionProjection
  * path into a shell command or disclose the selected root.
  */
 internal class ShizukuDeviceWorkspaceProvider(
-    private val bridge: ShizukuAuthorityBridge,
+    private val bridge: DeviceServiceBridge,
     private val defaultWorkspaceId: String,
     private val defaultDisplayName: String,
     private val fullDeviceGrantStore: FullDeviceFilesGrantStore?,
+    override val authority: Authority = Authority.SHIZUKU,
 ) : PrivilegedWorkspaceProvider {
-    override val authority: Authority = Authority.SHIZUKU
     private val owner = Any()
     private val browser = DeviceBrowser()
     @Volatile private var closed = false
@@ -352,7 +352,7 @@ internal class ShizukuDeviceWorkspaceProvider(
 
     private fun dispatchFailure(dispatch: ShizukuDispatchResult): WorkspaceResult.Failure {
         return when (dispatch) {
-            is ShizukuDispatchResult.Denied -> WorkspaceResult.Failure(ToolError(ToolErrorCode.SHIZUKU_SERVICE_UNAVAILABLE))
+            is ShizukuDispatchResult.Denied -> WorkspaceResult.Failure(ToolError(bridge.unavailableErrorCode))
             is ShizukuDispatchResult.Failed -> WorkspaceResult.Failure(
                 ToolError(if (dispatch.unknownOutcome) ToolErrorCode.UNKNOWN_OUTCOME else mapError(dispatch.errorCode)),
             )
@@ -400,7 +400,7 @@ internal class ShizukuDeviceWorkspaceProvider(
 
 /** Backend for a service-owned attached directory token. */
 private class ShizukuTokenWorkspaceBackend(
-    private val bridge: ShizukuAuthorityBridge,
+    private val bridge: DeviceServiceBridge,
     private val workspaceHandle: String,
     workspaceId: String,
     displayName: String,
@@ -638,7 +638,7 @@ private class ShizukuTokenWorkspaceBackend(
             bridge.dispatchWorkspaceReadChunk(workspaceHandle, path, offsetBytes, maxBytes)
         }
         return when (result) {
-            is ShizukuWorkspaceReadDispatchResult.Denied -> failure(ToolErrorCode.SHIZUKU_SERVICE_UNAVAILABLE)
+            is ShizukuWorkspaceReadDispatchResult.Denied -> failure(bridge.unavailableErrorCode)
             is ShizukuWorkspaceReadDispatchResult.Failed -> failure(
                 if (result.unknownOutcome) ToolErrorCode.UNKNOWN_OUTCOME else mapError(result.errorCode),
             )
@@ -745,7 +745,7 @@ private class ShizukuTokenWorkspaceBackend(
         mutationResponse: Boolean = false,
         operation: String? = null,
     ): WorkspaceResult.Failure = when (result) {
-        is ShizukuDispatchResult.Denied -> WorkspaceResult.Failure(ToolError(ToolErrorCode.SHIZUKU_SERVICE_UNAVAILABLE))
+        is ShizukuDispatchResult.Denied -> WorkspaceResult.Failure(ToolError(bridge.unavailableErrorCode))
         is ShizukuDispatchResult.Failed -> WorkspaceResult.Failure(
             ToolError(if (result.unknownOutcome) ToolErrorCode.UNKNOWN_OUTCOME else mapError(result.errorCode)),
         )

@@ -246,6 +246,7 @@ class TransferRepository(
                 title = row.string("title"),
                 createdAt = row.string("created_at"),
                 updatedAt = row.string("updated_at"),
+                archived = row.long("archived") == 1L,
             )
             val snapshot = agentRepo.getSnapshot(conversation.snapshotId)
                 ?: throw invalid("Conversation ${conversation.id} references a missing snapshot")
@@ -277,7 +278,8 @@ class TransferRepository(
         if (current.string("snapshot_id") != expected.snapshotId ||
             current.string("title") != expected.title ||
             current.string("created_at") != expected.createdAt ||
-            current.string("updated_at") != expected.updatedAt
+            current.string("updated_at") != expected.updatedAt ||
+            (current.long("archived") == 1L) != expected.archived
         ) {
             throw invalid("Conversation ${expected.id} changed during export; retry the backup")
         }
@@ -1325,8 +1327,8 @@ class TransferRepository(
         }
         importSnapshot(remapSnapshotSkillIds(transfer.snapshot, skillInstalls), policy, warnings)
         db.execute(
-            "INSERT INTO conversations(id,snapshot_id,agent_snapshot_id,title,created_at,updated_at) VALUES(?,?,?,?,?,?)",
-            listOf(conversation.id, conversation.snapshotId, conversation.snapshotId, conversation.title, conversation.createdAt, conversation.updatedAt),
+            "INSERT INTO conversations(id,snapshot_id,agent_snapshot_id,title,created_at,updated_at,archived) VALUES(?,?,?,?,?,?,?)",
+            listOf(conversation.id, conversation.snapshotId, conversation.snapshotId, conversation.title, conversation.createdAt, conversation.updatedAt, if (conversation.archived) 1 else 0),
         )
         transfer.messages.forEach { message ->
             db.execute(

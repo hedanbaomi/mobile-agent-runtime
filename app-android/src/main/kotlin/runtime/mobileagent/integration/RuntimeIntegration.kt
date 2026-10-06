@@ -271,10 +271,15 @@ internal fun privilegedReadyEdgeAuthorities(
  * Whether a missing privileged binding row makes a registered workspace an
  * orphan worth unregistering.  Wired-ADB workspaces carry no sealed binding
  * by contract — they re-establish through the wired bridge — so a missing
- * binding is normal there, not orphan evidence.
+ * binding is normal for the legacy desktop provider, not for the resident provider.
  */
-internal fun missingBindingIsOrphan(authority: Authority?): Boolean =
-    authority != Authority.WIRED_ADB
+internal fun missingBindingIsOrphan(authority: Authority?, residentWired: Boolean = false): Boolean =
+    authority != Authority.WIRED_ADB || residentWired
+
+/** Reopen sealed directory bindings when the resident daemon's ephemeral handles changed. */
+internal fun residentWorkspaceHandlesNeedReattach(previous: WiredAdbStatus?, current: WiredAdbStatus): Boolean =
+    previous != null && current.state == WiredAdbLifecycleState.READY &&
+        (previous.state != WiredAdbLifecycleState.READY || previous.serviceSessionId != current.serviceSessionId)
 
 /**
  * Non-sensitive counts used to explain why a run did or did not receive workspace tools.
@@ -1528,6 +1533,8 @@ class RuntimeIntegration(
         val configured = runCatching {
             authorityManager.setConfigured(ElevatedAuthority.WIRED_ADB, true)
         }.getOrDefault(false)
+        // Apply the configured marker before scheduling the fresh authenticated
+        // session. A committed trust record alone does not activate authority.
         val snapshot = refresh()
         return if (configured) {
             SettingsAuthorityMutation(true, snapshot)
@@ -1578,10 +1585,31 @@ class RuntimeIntegration(
     }
 
     override fun forgetWiredAdb(): SettingsAuthoritySnapshot {
-        scope.launch { runCatching { wiredAuthority.forget() } }
-        authorityManager.setConfigured(ElevatedAuthority.WIRED_ADB, false)
-        return refresh().also {
+        scope.launch { revokeWiredAdb() }
+        return refresh()
+    }
+
+    override suspend fun revokeWiredAdb(): SettingsAuthorityMutation {
+        try {
+            wiredAuthority.forget()
+        } catch (cancelled: kotlinx.coroutines.CancellationException) {
+            throw cancelled
+        } catch (_: Exception) {
+            // A failed shutdown retains the recovery credential. Publish the
+            // canonical state and let the user retry instead of claiming revoke.
+            return SettingsAuthorityMutation(false, refresh(), "RESIDENT_ADB_REVOKE_FAILED")
+        }
+        return try {
+            check(authorityManager.setConfigured(ElevatedAuthority.WIRED_ADB, false))
+            val current = refresh()
             recordAuthorityConfigurationSnapshot(DiagnosticAuthorityConfigurationReason.USER_ACTION)
+            SettingsAuthorityMutation(accepted = true, snapshot = current)
+        } catch (cancelled: kotlinx.coroutines.CancellationException) {
+            throw cancelled
+        } catch (_: Exception) {
+            // The device shutdown succeeded; distinguish a policy save failure
+            // from a failed shutdown whose credential must be retained.
+            SettingsAuthorityMutation(false, refresh(), "WIRED_ADB_POLICY_SAVE_FAILED")
         }
     }
 
@@ -1668,6 +1696,18 @@ class RuntimeIntegration(
     }
 
     private fun wireWiredBackend() {
+        val resident = wiredAuthority as? runtime.mobileagent.resident.ResidentAdbAuthorityBridge
+        if (resident != null) {
+            shellBackends[ElevatedAuthority.WIRED_ADB] = resident.createShellExecutor()
+            val workspace = resident.createWorkspaceBackend()
+            workspaceBackends[ElevatedAuthority.WIRED_ADB] = workspace
+            privilegedWorkspaceProviders[Authority.WIRED_ADB] = resident.createWorkspaceProvider(
+                workspaceId = workspace.descriptor.id,
+                displayName = workspace.descriptor.displayName,
+                fullDeviceGrantStore = fullDeviceFilesGrantRepository,
+            )
+            return
+        }
         shellBackends[ElevatedAuthority.WIRED_ADB] = WiredShellExecutor(wiredAuthority)
         val workspace = WiredWorkspaceBackend(wiredAuthority)
         workspaceBackends[ElevatedAuthority.WIRED_ADB] = workspace
@@ -1718,7 +1758,7 @@ class RuntimeIntegration(
                 val authority = workspaceRepository.get(descriptor.id)
                     ?.rootReference?.removePrefix("authority:")
                     ?.let { runCatching { Authority.valueOf(it) }.getOrNull() }
-                if (!missingBindingIsOrphan(authority)) return@forEach
+                if (!missingBindingIsOrphan(authority, wiredAuthority is runtime.mobileagent.resident.ResidentAdbAuthorityBridge)) return@forEach
                 val binding = privilegedWorkspaceBindingRepository.get(descriptor.id)
                 if (binding == null || binding.status == PrivilegedWorkspaceBindingStatus.REVOKED) {
                     workspaceRegistry.unregister(descriptor.id)
@@ -2286,7 +2326,15 @@ class RuntimeIntegration(
             wiredAuthority.status.collect { state ->
                 val prior = previous
                 previous = state
+                if (wiredAuthority is runtime.mobileagent.resident.ResidentAdbAuthorityBridge &&
+                    residentWorkspaceHandlesNeedReattach(prior, state)
+                ) {
+                    privilegedWorkspaceBindingRepository.forAuthority(ElevatedAuthority.WIRED_ADB)
+                        .filter { it.status != PrivilegedWorkspaceBindingStatus.REVOKED }
+                        .forEach { workspaceRegistry.unregister(it.workspaceId) }
+                }
                 applyWiredState(state)
+                schedulePrivilegedWorkspaceReattach()
                 recordAuthorityConfigurationSnapshot(DiagnosticAuthorityConfigurationReason.PLATFORM_STATE_CHANGE)
                 // A transport/provider transition may be the only signal that
                 // USB became available again. Retry only on the meaningful
@@ -2318,8 +2366,8 @@ class RuntimeIntegration(
                 // switch — and drops that authority's stale entries so the
                 // reattach pass below actually re-opens them instead of
                 // skipping them.  Reattach itself stays selected-only;
-                // wired-ADB workspaces keep their own bridge-reconnect
-                // lifecycle and are never swept here.
+                // Wired ADB uses its own status collector above; resident
+                // daemon generations also invalidate its ephemeral handles.
                 privilegedReadyEdgeAuthorities(state.statuses, authorityReadySeen)
                     .forEach { authority ->
                         privilegedWorkspaceBindingRepository.forAuthority(authority)
@@ -3682,14 +3730,16 @@ class RuntimeIntegration(
         )
         // Persist the sealed recovery locator exactly like a selected-directory
         // attachment — but only when the provider supplies one.  Shizuku
-        // attachments must carry it: the remote file-service handle dies with
+        // and resident attachments must carry it: the remote file-service handle dies with
         // its process and the sealed locator is the only material a later
-        // reattach can re-open.  Wired-ADB full-device attachments carry no
+        // reattach can re-open. Legacy desktop Wired-ADB full-device attachments carry no
         // locator by contract — the wired bridge re-establishes its own
         // session on reconnect — so requiring one rejected every wired attach
         // as UNSUPPORTED.
         val recoveryLocator = value.recoveryLocator
-        if (recoveryLocator == null && authority != Authority.WIRED_ADB) {
+        if (recoveryLocator == null && (authority != Authority.WIRED_ADB ||
+            wiredAuthority is runtime.mobileagent.resident.ResidentAdbAuthorityBridge)
+        ) {
             rollbackNewFullDeviceGrant()?.let { return it }
             return workspaceAccessFailure(WorkspaceAccessErrorCode.UNSUPPORTED)
         }

@@ -23,6 +23,32 @@ import runtime.mobileagent.skills.ToolCall
 
 /** Real ChatViewModel and SQLite with a controlled runtime/deadline, no provider request. */
 class ChatRunOwnershipDeviceTest {
+    @Test
+    fun anotherViewModelArchivingDuringPreflightDeniesAdmissionAndPreservesDraft() = fixture { app, a, _ ->
+        val reachedAdmission = CountDownLatch(1)
+        val releaseAdmission = CompletableDeferred<Unit>()
+        val sender = viewModel(app, a, ChatRunExecution(beforeRunAdmission = {
+            reachedAdmission.countDown()
+            releaseAdmission.await()
+        }))
+        val archiver = viewModel(app, a, ChatRunExecution())
+        val draft = "Preserve draft after archive admission denial"
+        main { sender.input(draft); sender.send() }
+        assertTrue("Run preparation never reached the admission gate", reachedAdmission.await(15, TimeUnit.SECONDS))
+        main { archiver.sessionAction(a, runtime.mobileagent.feature.chat.SessionAction.ARCHIVE) }
+        assertTrue(app.container.conversations.get(a)!!.archived)
+        releaseAdmission.complete(Unit)
+        await { !sender.state.value.streaming }
+        assertEquals(draft, sender.state.value.input)
+        assertTrue(app.container.runs.list(a).isEmpty())
+        val history = app.container.conversations.messages(a)
+        assertEquals(1, history.size)
+        assertEquals(MessageRole.USER, history.single().role)
+        assertEquals(draft, history.single().text)
+        assertTrue(app.container.conversations.get(a)!!.archived)
+        assertTrue(sender.state.value.status.contains("归档"))
+    }
+
     @Test fun watchdogSettlesRealApprovalCallbackWithoutPublishingIntoAnotherConversation() = fixture { app, a, b ->
         val deadline = CompletableDeferred<Unit>()
         val resume = CompletableDeferred<Unit>()

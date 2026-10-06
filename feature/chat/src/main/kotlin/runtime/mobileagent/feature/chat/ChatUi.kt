@@ -305,6 +305,9 @@ enum class ChatRequestInspectorAvailability {
 
 data class ChatUiState(
     val sessions: List<ChatSessionUi> = emptyList(),
+    val archivedSessions: List<ChatSessionUi> = emptyList(),
+    val selectedSessionArchived: Boolean = false,
+    val sessionActions: List<SessionAction> = listOf(SessionAction.ARCHIVE),
     val selectedSessionId: String? = null,
     val agents: List<ChatAgentOptionUi> = emptyList(),
     val selectedAgentId: String? = null,
@@ -350,6 +353,8 @@ fun rememberConversationPresentation(source: State<ChatUiState>): State<ChatUiSt
 }
 
 data class ChatActions(
+    val onSessionAction: (String, SessionAction) -> Unit = { _, _ -> },
+    val onRestoreSession: (String) -> Unit = {},
     val onInput: (String) -> Unit = {},
     val onSend: () -> Unit = {},
     val onCancel: () -> Unit = {},
@@ -539,6 +544,14 @@ private fun ChatConversationContent(
                     showGlobalMenu = showGlobalMenu,
                 )
                 UnboundWorkspaceDefaultCard(state, actions)
+                if (state.selectedSessionArchived) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(if (state.language.equals("zh-CN", true)) "已归档的对话 · 只读" else "Archived conversation · Read only", Modifier.weight(1f))
+                        TextButton(onClick = { state.selectedSessionId?.let(actions.onRestoreSession) }, modifier = Modifier.testTag("conversation.archive.restore")) {
+                            Text(if (state.language.equals("zh-CN", true)) "恢复" else "Restore")
+                        }
+                    }
+                }
                 if (state.status.isNotBlank()) StatusLine(state.status, state.statusKind)
                 if (state.textDegradation) {
                     Text(if (state.language.equals("zh-CN", true)) "纯文本模式：原始图片不会发送给模型，视觉证据可能不完整。"
@@ -1495,7 +1508,7 @@ private fun Composer(state: ChatUiState, actions: ChatActions, input: () -> Stri
                 field = it
                 if (it.text != text) actions.onInput(it.text)
             },
-            enabled = state.pendingTool == null,
+            enabled = state.pendingTool == null && !state.selectedSessionArchived,
             placeholder = { Text(if (zh) "继续提问…" else "Ask a follow-up…") },
             minLines = 1,
             maxLines = 5,
@@ -1518,7 +1531,7 @@ private fun Composer(state: ChatUiState, actions: ChatActions, input: () -> Stri
         } else {
             Button(
                 onClick = ::submit,
-                enabled = text.isNotBlank() && state.pendingTool == null,
+                enabled = text.isNotBlank() && state.pendingTool == null && !state.selectedSessionArchived,
                 shape = CircleShape,
                 colors = if (aqua) ButtonDefaults.buttonColors(
                     containerColor = Color(0xFF66CCFF),

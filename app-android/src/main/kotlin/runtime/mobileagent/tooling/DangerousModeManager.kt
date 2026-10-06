@@ -36,7 +36,12 @@ class DangerousModeManager(
     }
 
     fun setPolicy(policy: DangerousMode): DangerousModeChange = synchronized(lock) {
-        compareAndSetLocked(_state.value.revision, policy)
+        // Authority selection shares the durable policy revision. A foreground
+        // action without an explicit revision applies to the latest persisted
+        // choice; the store CAS still rejects changes racing this action.
+        val current = normalize(store.load())
+        _state.value = effectiveState(current)
+        compareAndSetLocked(current.revision, policy)
     }
 
     fun setPolicy(policy: DangerousMode, expectedRevision: Long): DangerousModeChange = synchronized(lock) {

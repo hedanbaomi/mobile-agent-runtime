@@ -382,6 +382,7 @@ class OpenAiResponsesAdapter(
             dispatchStatus = ModelDispatchStatus.DISPATCHED
             request.reportDiagnostic(ModelDiagnosticStage.REQUEST_DISPATCH, dispatchStatus, started, "responses")
             http.preparePost(url(baseUrl, "/responses")) {
+                receiveStreamedReplyInFull(http)
                 contentType(ContentType.Application.Json)
                 headers {
                     append(HttpHeaders.Accept, "text/event-stream, application/json")

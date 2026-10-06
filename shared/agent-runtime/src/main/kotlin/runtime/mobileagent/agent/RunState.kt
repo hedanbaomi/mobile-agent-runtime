@@ -20,10 +20,19 @@ enum class RunState {
     BUDGET_EXHAUSTED,
 }
 
+/**
+ * [maxRuntimeMs] is an admission deadline: once it passes, the Runtime starts no new model
+ * request, summary, or tool call.  It never cuts off a model stream or tool that has already
+ * been dispatched; those end on their own terminal result or on the caller's cancellation.
+ * [stallTimeoutMs] bounds the rest: a model stream with no event or transport chunk for that
+ * long, or a single tool call that has not returned within it, becomes an unknown outcome that
+ * is never replayed.
+ */
 data class RunBudget(
     val maxModelRounds: Int = 8,
     val maxToolCalls: Int = 20,
     val maxRuntimeMs: Long = 180_000,
+    val stallTimeoutMs: Long = 180_000,
 )
 
 data class AgentRun(

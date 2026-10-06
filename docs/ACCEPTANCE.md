@@ -365,3 +365,5 @@ S03/S04/S05/S07 增量必须通过真实 isolated worker：API26 JSON/新 PID；
 
 
 2026-10-06 回归补充（R18/R21/R23/R34；U02/U07、C20—C25、S15/S18）：长历史输入及中文 InputConnection composition/光标不得随每字输入重组 shell；摘要合法单围栏兼容、已知失败且完整原文符合硬预算时继续原文，未知/取消/超窗仍停止，usage 不重复结算且诊断不采集正文；压缩基础/高级及推荐设置保留未知键/Python 预算。全局危险模式直接授权内置 Agent shell，独立 Skill 不继承；policy/Authority/确认 epoch 变化拒绝派发、旧审批和缓存披露，UNKNOWN 不重放。首次 Agent 完整设备确认随保存提交，取消/过期编辑器不授权、失败可见且回滚保留草稿、默认目录不变、完整设备 scope 不成为默认或 Thread binding。验证及真机/Provider 边界见 [本轮证据](evidence/2026-10-06/ime-context-device-access.md)。
+
+2026-10-06 v1.1.0 发送卡顿与“已取消接收”补充（R18/R34；U02、C22/C23，ADR-0026）：点击发送后 Run 准备（RunTools 冻结工具集、工作区 backend 能力探测、仓库读取）不得在主线程执行，回归以记录线程的 backend 证明主线程读取为 0；总运行时限只管准入，截止时间到达时仍在接收的模型回复、摘要和已派发工具必须完整收取并按自身终态结算，到期后不再开始新请求/工具/审批派发并提示已收回复完整保留；仅连续无进展达到停滞上限才判 UNKNOWN 且不重放；对话流式请求不设总时长但保留连接与空闲超时，watchdog 以空闲而非固定截止判定。C22 中“时间硬限”与 C23 中“超时”按此语义验收。验证及边界见 [本轮证据](evidence/2026-10-06/send-freeze-and-run-deadline.md)。

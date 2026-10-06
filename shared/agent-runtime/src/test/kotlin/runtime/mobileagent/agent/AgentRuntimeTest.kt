@@ -22,6 +22,7 @@ import runtime.mobileagent.provider.EmbeddingRequest
 import runtime.mobileagent.provider.ModelAdapter
 import runtime.mobileagent.provider.ModelEvent
 import runtime.mobileagent.provider.ModelRequest
+import runtime.mobileagent.provider.reportDiagnostic
 import runtime.mobileagent.skills.ToolCall
 import runtime.mobileagent.skills.ToolBroker
 import runtime.mobileagent.skills.ToolContext
@@ -30,6 +31,22 @@ import runtime.mobileagent.skills.ToolResult
 import runtime.mobileagent.skills.ToolSpec
 
 class AgentRuntimeTest {
+    @Test
+    fun deadlineDuringRequestPreparationStartsNoModelRequest() = runTest {
+        var now = 0L
+        val adapter = ScriptedAdapter(listOf(listOf(ModelEvent.TextDelta("never"), ModelEvent.Completed)))
+        val run = AgentRun("preparation-deadline", "s", "c", budget = RunBudget(maxRuntimeMs = 1_000))
+        AgentRuntime(adapter, clock = { now }).run(
+            AgentRuntimeRequest(run, prompt(), "model", charArrayOf(), toolsEnabled = false),
+        ).collect { event ->
+            // The durable request preview can suspend after the earlier admission check.
+            if (event is RuntimeEvent.RequestPrepared) now = 2_000
+        }
+        assertEquals(RunState.BUDGET_EXHAUSTED, run.state)
+        assertEquals("time", run.stopReason)
+        assertEquals(0, adapter.requests.size)
+    }
+
     @Test fun completedWithheldSearchProjectsKnownExecutionFactsToEventAndModel() = runTest {
         val adapter = ScriptedAdapter(listOf(
             listOf(ModelEvent.ToolCallDelta("s1", "web_search", """{"query":"public"}"""), ModelEvent.Completed),
@@ -148,10 +165,10 @@ class AgentRuntimeTest {
     }
 
     @Test
-    fun budgetExpiryAfterModelDispatchIsUnknown() {
+    fun budgetExpiryDuringDispatchedReplyStillDeliversTheCompleteReply() {
         var now = 0L
         val adapter = ScriptedAdapter(
-            listOf(listOf(ModelEvent.TextDelta("late"), ModelEvent.Completed)),
+            listOf(listOf(ModelEvent.TextDelta("late"), ModelEvent.TextDelta(" but complete"), ModelEvent.Completed)),
             onStream = { now = 2000 },
         )
         val runtime = AgentRuntime(adapter, clock = { now }, tools = ToolBroker(emptySet(), ToolContext({ _, _, _ -> "{}" }, { _, _ -> "{}" })))
@@ -159,11 +176,32 @@ class AgentRuntimeTest {
         val events = runBlocking {
             runtime.run(run, prompt(), "model", charArrayOf('s'), toolsEnabled = true).toList()
         }
-        assertTrue(events.any { it is ModelEvent.Failed && it.sanitizedMessage.contains("UNKNOWN_OUTCOME") })
-        assertEquals(RunState.UNKNOWN_OUTCOME, run.state)
-        assertTrue(events.none { it is ModelEvent.Completed })
+        assertEquals(RunState.COMPLETED, run.state)
+        assertEquals("late but complete", events.filterIsInstance<ModelEvent.TextDelta>().joinToString("") { it.text })
+        assertTrue(events.any { it is ModelEvent.Completed })
+        assertTrue(events.none { it is ModelEvent.Failed })
+        assertEquals(1, adapter.requests.size)
     }
 
+    @Test
+    fun deadlineAfterCompleteReplyStartsNoToolOrFollowUpRequest() = runTest {
+        var now = 0L
+        val adapter = ScriptedAdapter(
+            listOf(listOf(ModelEvent.TextDelta("checking"), ModelEvent.ToolCallDelta("t1", "external", "{}"), ModelEvent.Completed)),
+            onStream = { now = 2000 },
+        )
+        val executor = CountingExecutor()
+        val run = AgentRun("deadline-tools", "s", "c", budget = RunBudget(maxRuntimeMs = 1000))
+        val events = AgentRuntime(adapter, clock = { now }).run(
+            AgentRuntimeRequest(run, prompt(), "model", charArrayOf(), toolsEnabled = true, executor = executor),
+        ).toList()
+
+        assertEquals(RunState.BUDGET_EXHAUSTED, run.state)
+        assertEquals(0, executor.invocations)
+        assertEquals(1, adapter.requests.size)
+        assertTrue(events.filterIsInstance<RuntimeEvent.ModelEvent>().any { (it.event as? ModelEvent.TextDelta)?.text == "checking" })
+        assertTrue(events.none { it is RuntimeEvent.ToolResultProduced })
+    }
     @Test
     fun beforeModelRequestTimeoutExhaustsBudgetWithoutStartingModel() = runTest {
         var callbackStarted = false
@@ -315,7 +353,7 @@ class AgentRuntimeTest {
     }
 
     @Test
-    fun slowStreamStopsWhenBudgetExpires() {
+    fun slowButActiveStreamIsReceivedInFullPastTheDeadline() {
         val adapter = object : ModelAdapter {
             var emitted = 0
             override suspend fun probe(profile: runtime.mobileagent.domain.ModelProfile) = error("not used")
@@ -331,31 +369,28 @@ class AgentRuntimeTest {
         }
         val runtime = AgentRuntime(adapter, tools = ToolBroker(emptySet(), ToolContext({ _, _, _ -> "{}" }, { _, _ -> "{}" })))
         val run = AgentRun("r", "s", "c", budget = RunBudget(maxRuntimeMs = 20))
-        val started = System.currentTimeMillis()
         val events = runBlocking {
             runtime.run(run, prompt(), "model", charArrayOf('s'), toolsEnabled = false).toList()
         }
-        val elapsed = System.currentTimeMillis() - started
-        assertTrue(events.any { it is ModelEvent.Failed && it.sanitizedMessage.contains("UNKNOWN_OUTCOME") })
-        assertTrue(events.none { it is ModelEvent.Completed })
-        assertTrue(elapsed < 250, "elapsed=$elapsed")
-        assertTrue(adapter.emitted <= 1)
-        assertEquals(RunState.UNKNOWN_OUTCOME, run.state)
+        assertEquals(3, adapter.emitted)
+        assertEquals("xxx", events.filterIsInstance<ModelEvent.TextDelta>().joinToString("") { it.text })
+        assertTrue(events.any { it is ModelEvent.Completed })
+        assertEquals(RunState.COMPLETED, run.state)
     }
-
     @Test
-    fun modelTimeoutAfterDispatchIsUnknownAndIsNotReplayed() = runTest {
+    fun stalledModelStreamIsUnknownAndIsNotReplayed() = runTest {
         val adapter = object : ModelAdapter {
             var requests = 0
             override suspend fun probe(profile: runtime.mobileagent.domain.ModelProfile) = error("not used")
             override fun stream(request: ModelRequest, secret: CharArray): Flow<ModelEvent> = flow {
                 requests += 1
+                emit(ModelEvent.TextDelta("partial"))
                 delay(100)
                 emit(ModelEvent.Completed)
             }
             override suspend fun embed(request: EmbeddingRequest, secret: CharArray) = error("not used")
         }
-        val run = AgentRun("model-timeout", "s", "c", budget = RunBudget(maxRuntimeMs = 20))
+        val run = AgentRun("model-stall", "s", "c", budget = RunBudget(stallTimeoutMs = 20))
         val events = AgentRuntime(adapter).run(
             run,
             prompt(),
@@ -366,27 +401,87 @@ class AgentRuntimeTest {
 
         assertEquals(RunState.UNKNOWN_OUTCOME, run.state)
         assertEquals(1, adapter.requests)
+        assertTrue(events.any { it is ModelEvent.TextDelta && it.text == "partial" })
+        assertTrue(events.any { it is ModelEvent.Failed && it.sanitizedMessage.contains("UNKNOWN_OUTCOME") })
+    }
+    @Test
+    fun transportChunksWithoutModelEventsAreProgressNotAStall() = runTest {
+        // A long tool-argument or hidden-reasoning phase sends SSE chunks but no ModelEvent yet.
+        val adapter = object : ModelAdapter {
+            override suspend fun probe(profile: runtime.mobileagent.domain.ModelProfile) = error("not used")
+            override fun stream(request: ModelRequest, secret: CharArray): Flow<ModelEvent> = flow {
+                repeat(10) {
+                    delay(10)
+                    request.reportDiagnostic(runtime.mobileagent.provider.ModelDiagnosticEvent(
+                        runtime.mobileagent.provider.ModelDiagnosticStage.STREAM_EVENT,
+                        runtime.mobileagent.provider.ModelDispatchStatus.RESPONSE_RECEIVED, 0,
+                    ))
+                }
+                emit(ModelEvent.TextDelta("after a long silent phase"))
+                emit(ModelEvent.Completed)
+            }
+            override suspend fun embed(request: EmbeddingRequest, secret: CharArray) = error("not used")
+        }
+        val run = AgentRun("chunks", "s", "c", budget = RunBudget(stallTimeoutMs = 30))
+        val events = AgentRuntime(adapter).run(
+            AgentRuntimeRequest(run, prompt(), "model", charArrayOf(), toolsEnabled = false,
+                diagnostics = runtime.mobileagent.provider.ModelDiagnosticSink { }),
+        ).toList()
+
+        assertEquals(RunState.COMPLETED, run.state)
+        assertTrue(events.filterIsInstance<RuntimeEvent.ModelEvent>().any {
+            (it.event as? ModelEvent.TextDelta)?.text == "after a long silent phase"
+        })
+    }
+
+    @Test
+    fun slowConsumerIsNeverMistakenForAStalledStream() = runTest {
+        val adapter = ScriptedAdapter(listOf(listOf(
+            ModelEvent.TextDelta("a"), ModelEvent.TextDelta("b"), ModelEvent.TextDelta("c"), ModelEvent.Completed,
+        )))
+        val run = AgentRun("slow-consumer", "s", "c", budget = RunBudget(stallTimeoutMs = 20))
+        val received = StringBuilder()
+        AgentRuntime(adapter).run(
+            AgentRuntimeRequest(run, prompt(), "model", charArrayOf(), toolsEnabled = false),
+        ).collect { event ->
+            ((event as? RuntimeEvent.ModelEvent)?.event as? ModelEvent.TextDelta)?.let {
+                received.append(it.text)
+                delay(100) // e.g. a durable checkpoint write in the chat collector
+            }
+        }
+
+        assertEquals("abc", received.toString())
+        assertEquals(RunState.COMPLETED, run.state)
+    }
+
+    @Test
+    fun midStreamTransportFailureIsUnknownAndIsNotReplayed() = runTest {
+        val adapter = object : ModelAdapter {
+            var requests = 0
+            override suspend fun probe(profile: runtime.mobileagent.domain.ModelProfile) = error("not used")
+            override fun stream(request: ModelRequest, secret: CharArray): Flow<ModelEvent> = flow {
+                requests += 1
+                emit(ModelEvent.TextDelta("partial"))
+                throw java.io.IOException("connection reset")
+            }
+            override suspend fun embed(request: EmbeddingRequest, secret: CharArray) = error("not used")
+        }
+        val run = AgentRun("reset", "s", "c")
+        val events = AgentRuntime(adapter).run(run, prompt(), "model", charArrayOf(), toolsEnabled = false).toList()
+
+        assertEquals(RunState.UNKNOWN_OUTCOME, run.state)
+        assertEquals(1, adapter.requests)
+        assertTrue(events.any { it is ModelEvent.TextDelta && it.text == "partial" })
         assertTrue(events.any { it is ModelEvent.Failed && it.sanitizedMessage.contains("UNKNOWN_OUTCOME") })
     }
 
     @Test
-    fun toolTimeoutAfterDispatchIsUnknownAndIsNotReplayed() = runTest {
+    fun stalledToolIsUnknownAndIsNotReplayed() = runTest {
         val adapter = ScriptedAdapter(
             listOf(listOf(ModelEvent.ToolCallDelta("slow", "external", "{}"), ModelEvent.Completed)),
         )
-        val executor = object : runtime.mobileagent.skills.ToolExecutor {
-            override val specs = listOf(
-                runtime.mobileagent.skills.ToolSpec("external", "external tool", "{\"type\":\"object\"}", "external", false),
-            )
-            var invocations = 0
-            override suspend fun invoke(call: runtime.mobileagent.skills.ToolCall): runtime.mobileagent.skills.ToolResult {
-                invocations += 1
-                delay(100)
-                return runtime.mobileagent.skills.ToolResult.Value("{}")
-            }
-            override suspend fun approve(callId: String): runtime.mobileagent.skills.ToolResult = error("unused")
-        }
-        val run = AgentRun("tool-timeout", "s", "c", budget = RunBudget(maxRuntimeMs = 20))
+        val executor = CountingExecutor(delayMs = 100)
+        val run = AgentRun("tool-stall", "s", "c", budget = RunBudget(stallTimeoutMs = 20))
         val events = AgentRuntime(adapter).run(
             AgentRuntimeRequest(run, prompt(), "model", charArrayOf(), toolsEnabled = true, executor = executor),
         ).toList()
@@ -397,6 +492,39 @@ class AgentRuntimeTest {
         assertEquals("UNKNOWN_OUTCOME", events.filterIsInstance<RuntimeEvent.ToolResultProduced>().single().status)
     }
 
+    @Test
+    fun toolRunningPastTheDeadlineKeepsItsResultAndStopsBeforeTheNextRequest() = runTest {
+        var now = 0L
+        val adapter = ScriptedAdapter(
+            listOf(listOf(ModelEvent.ToolCallDelta("long", "external", "{}"), ModelEvent.Completed)),
+        )
+        val executor = CountingExecutor(onInvoke = { now = 2000 })
+        val run = AgentRun("tool-deadline", "s", "c", budget = RunBudget(maxRuntimeMs = 1000))
+        val events = AgentRuntime(adapter, clock = { now }).run(
+            AgentRuntimeRequest(run, prompt(), "model", charArrayOf(), toolsEnabled = true, executor = executor),
+        ).toList()
+
+        assertEquals(1, executor.invocations)
+        assertEquals("VALUE", events.filterIsInstance<RuntimeEvent.ToolResultProduced>().single().status)
+        assertEquals(RunState.BUDGET_EXHAUSTED, run.state)
+        assertEquals(1, adapter.requests.size)
+    }
+
+    @Test
+    fun approvalWaitIsStillBoundedByTheDeadlineAndNeverDispatches() = runTest {
+        val adapter = ScriptedAdapter(
+            listOf(listOf(ModelEvent.ToolCallDelta("ask", "external", "{}"), ModelEvent.Completed)),
+        )
+        val executor = CountingExecutor(needsApproval = true)
+        val run = AgentRun("approval-deadline", "s", "c", budget = RunBudget(maxRuntimeMs = 20))
+        AgentRuntime(adapter, onApprove = { delay(1_000); true }).run(
+            AgentRuntimeRequest(run, prompt(), "model", charArrayOf(), toolsEnabled = true, executor = executor),
+        ).toList()
+
+        assertEquals(RunState.BUDGET_EXHAUSTED, run.state)
+        assertEquals(0, executor.approvals)
+        assertEquals(1, adapter.requests.size)
+    }
     @Test
     fun callerCancellationAfterModelDispatchPropagatesAndMarksUnknown() = runTest {
         val started = CompletableDeferred<Unit>()
@@ -539,6 +667,26 @@ class AgentRuntimeTest {
         }
 
         override suspend fun embed(request: EmbeddingRequest, secret: CharArray): EmbeddingBatch = error("not used")
+    }
+
+    private class CountingExecutor(
+        private val delayMs: Long = 0,
+        private val needsApproval: Boolean = false,
+        private val onInvoke: () -> Unit = {},
+    ) : ToolExecutor {
+        override val specs = listOf(ToolSpec("external", "external tool", "{\"type\":\"object\"}", "external", false))
+        var invocations = 0
+        var approvals = 0
+        override suspend fun invoke(call: ToolCall): ToolResult {
+            invocations += 1
+            onInvoke()
+            if (delayMs > 0) delay(delayMs)
+            return if (needsApproval) ToolResult.NeedsApproval else ToolResult.Value("{}")
+        }
+        override suspend fun approve(callId: String): ToolResult {
+            approvals += 1
+            return ToolResult.Value("{}")
+        }
     }
 
     private class ScriptedAdapter(

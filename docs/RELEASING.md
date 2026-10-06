@@ -3,7 +3,7 @@
 
 # 正式版本构建与发布
 
-正式安装包从 [GitHub Releases](https://github.com/hedanbaomi/mobile-agent-runtime/releases) 获取。v1.0.1 的应用版本为 `versionName=1.0.1`、`versionCode=3`，正式产物仅含 arm64-v8a，最低 Android 8.0（API 26）。前版 v1.0.0/code 2 可使用同一正式签名升级。
+正式安装包从 [GitHub Releases](https://github.com/hedanbaomi/mobile-agent-runtime/releases) 获取。v1.0.2 的应用版本为 `versionName=1.0.2`、`versionCode=4`，正式产物仅含 arm64-v8a，最低 Android 8.0（API 26）。前版 v1.0.0/code 2 与 v1.0.1/code 3 可使用同一正式签名升级。v1.0.2 起支持每日首开检查 GitHub stable release、用户点击下载与系统确认安装；旧版本需先手动安装 v1.0.2。详见 [更新契约](APP_UPDATES.md)。
 
 首次由 Debug/Review 切换至正式包时，签名身份不同，不能直接覆盖安装。先在旧包导出所需数据、核对导出文件，再处理旧安装；导出默认不包含密钥，重新配置服务商凭据。后续正式版本使用同一正式签名身份升级。
 
@@ -24,3 +24,5 @@
 发布安装用 APK、对应源码归档、第三方声明、SBOM、来源/签名核验记录与 SHA-256 清单。Tag 和正式构建 checkout 指向已经验证并合并的远端源码提交；本地 main 的同步按本次用户指令处理，不覆盖工作区未提交内容。公开签名证书可用于比对，私钥、密码文件和用户日志不得上传。
 
 发布说明分别记录本地门禁、模拟器回归和未完成的真机/供应商边界；GitHub Release 不代表应用商店已上架，也不把定向回归写成全量产品验收。
+
+更新客户端依赖固定命名 `mobileAgentRuntime-vVERSION-arm64-v8a.apk` 与 GitHub Release asset SHA-256 digest。完整附件上传并验证后再公开并设为 latest stable；tag 只使用 `vMAJOR.MINOR.PATCH`，正式 versionCode 必须递增，签名必须与已发布正式版本一致。

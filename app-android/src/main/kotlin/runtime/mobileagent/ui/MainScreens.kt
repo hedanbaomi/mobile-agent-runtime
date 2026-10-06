@@ -567,6 +567,7 @@ internal fun MainApp(onMoveTaskToBack: () -> Unit = {}) {
             )
         }
         if (unsavedDialog) UnsavedChangesDialog(chinese, ::discardUnsaved, { unsavedDialog = false })
+        AppUpdateDialog(app.container.appUpdates, chinese)
     }
 }
 
@@ -1711,8 +1712,10 @@ private fun SettingsRoute(entry: NavBackStackEntry, chinese: Boolean, onRoute: (
     // Settings facts that need database/asset/diagnostics reads are loaded off the main thread and
     // cached in the ViewModel; composition only projects that cached state.
     val raw = vm.uiState(vm.noticeCount.value)
+    val update by app.container.appUpdates.state.collectAsState()
     val state = raw.copy(language = if (chinese) "zh-CN" else "en-US",
         mcpConfigured = mcpConfigured, mcpEntryEnabled = true, thirdPartyNotices = thirdParty,
+        updateState = update.message,
     )
     val context = LocalContext.current
     LifecycleEventEffect(Lifecycle.Event.ON_RESUME) {

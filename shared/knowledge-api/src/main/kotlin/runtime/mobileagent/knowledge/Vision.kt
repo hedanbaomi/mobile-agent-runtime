@@ -3,6 +3,9 @@
 
 package runtime.mobileagent.knowledge
 
+import runtime.mobileagent.domain.MAX_CONTEXT_IMAGES
+import runtime.mobileagent.domain.MAX_CONTEXT_IMAGE_BYTES
+
 const val VISION_PROMPT_VERSION = "vision-prompt-v2-provenance"
 const val VISION_SCHEMA_VERSION = "vision-result-v2"
 const val VISION_PREPROCESS_VERSION = "vision-pre-v1"
@@ -178,8 +181,28 @@ sealed interface VisualAttachmentPlan {
     data class Incomplete(val reason: String) : VisualAttachmentPlan
 }
 
+data class VisualReference(val assetId: String, val mediaType: String, val byteLength: Long, val sha256: String)
+sealed interface VisualReferencePlan {
+    data class Complete(val images: List<VisualReference>) : VisualReferencePlan
+    data class Incomplete(val reason: String) : VisualReferencePlan
+}
+
 object VisualAttachmentPolicy {
-    const val MAX_IMAGES = 4
+    fun references(assetIds: List<String>, describe: (String) -> Triple<String, Long, String>?): VisualReferencePlan {
+        val ids = assetIds.distinct()
+        if (ids.size > MAX_IMAGES) return VisualReferencePlan.Incomplete("RUN_IMAGE_BUDGET_EXCEEDED: max $MAX_IMAGES originals")
+        val references = mutableListOf<VisualReference>()
+        for (id in ids) {
+            val metadata = describe(id) ?: return VisualReferencePlan.Incomplete("Visual source missing")
+            if (metadata.second !in 1..MAX_BYTES.toLong()) return VisualReferencePlan.Incomplete("Visual original exceeds 2 MiB")
+            if (metadata.first !in setOf("image/png", "image/jpeg", "image/webp", "image/gif"))
+                return VisualReferencePlan.Incomplete("Visual media type unsupported")
+            references += VisualReference(id, metadata.first, metadata.second, metadata.third)
+        }
+        return VisualReferencePlan.Complete(references)
+    }
+
+    const val MAX_IMAGES = MAX_CONTEXT_IMAGES
     const val MAX_BYTES = 2 * 1024 * 1024
 
     fun plan(
@@ -194,11 +217,16 @@ object VisualAttachmentPolicy {
             )
         }
         val images = mutableListOf<LoadedVisual>()
+        var totalBytes = 0L
         for (id in ids) {
             val loaded = load(id)
                 ?: return VisualAttachmentPlan.Incomplete("Visual asset $id is missing from CAS.")
             if (loaded.second.size > MAX_BYTES) {
                 return VisualAttachmentPlan.Incomplete("Visual asset $id exceeds 2 MiB.")
+            }
+            totalBytes += loaded.second.size.toLong()
+            if (totalBytes > MAX_CONTEXT_IMAGE_BYTES) {
+                return VisualAttachmentPlan.Incomplete("IMAGE_BYTES_BUDGET_EXCEEDED: originals exceed 16 MiB in total.")
             }
             images += LoadedVisual(id, loaded.first, loaded.second)
         }

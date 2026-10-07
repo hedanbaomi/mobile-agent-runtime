@@ -15,6 +15,15 @@ class AgentContextPolicyTest {
         assertEquals(8, policy.maxModelRoundsPerSegment)
         assertEquals(32, policy.maxModelRequestsPerRun)
         assertEquals(8, policy.maxCompactionsPerRun)
+        assertEquals(64, policy.imageBudget)
+        assertEquals(policy.imageBudget, AgentContextPolicy().imageBudget)
+    }
+
+    @Test fun explicitImageBudgetsArePreservedAndBounded() {
+        assertEquals(4, AgentContextPolicy.fromJson("""{"imageBudget":4}""").imageBudget)
+        assertEquals(7, AgentContextPolicy.fromJson("""{"imageBudget":7}""").imageBudget)
+        assertEquals(64, AgentContextPolicy.fromJson("""{"imageBudget":64}""").imageBudget)
+        assertThrows(IllegalArgumentException::class.java) { AgentContextPolicy.fromJson("""{"imageBudget":65}""") }
     }
 
     @Test fun configuredInputCannotExceedModelWindowAfterOutputReservation() {

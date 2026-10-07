@@ -125,6 +125,9 @@ data class InlineImage(
     val mediaType: String,
     val base64: String,
     val assetId: String? = null,
+    /** Local lazy-source metadata; never serialized as a provider field. */
+    val byteLength: Long? = null,
+    val sha256: String? = null,
 )
 
 data class AssistantToolCall(

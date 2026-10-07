@@ -39,6 +39,7 @@ import runtime.mobileagent.provider.ModelDiagnosticEvent
 import runtime.mobileagent.provider.ModelDiagnosticSink
 import runtime.mobileagent.provider.ModelEvent
 import runtime.mobileagent.provider.ModelRequest
+import runtime.mobileagent.provider.RequestInputBudget
 import runtime.mobileagent.provider.ProviderContinuationItem
 import runtime.mobileagent.provider.SecretRedactor
 import runtime.mobileagent.skills.ToolBroker
@@ -207,6 +208,8 @@ class AgentRuntime(
 
             run.state = RunState.ASSEMBLING
             val window = ContextWindow(request.prompt, request.context)
+            val visualDelivery = VisualBatchDelivery(request.maxImagesPerRun, request.maxImagesPerRequest,
+                request.batchAllImages, request.prompt.currentUser)
             var segmentRounds = 0
             // Run-scoped bound on "rejected before dispatch" tool results fed
             // back to the model.  Each rejection costs one model round; the cap
@@ -256,11 +259,70 @@ class AgentRuntime(
                     outputTokenField = request.outputTokenField,
                     diagnostics = transportDiagnostics,
                 )
+                try {
+                    modelRequest = visualDelivery.prepare(modelRequest, request.imageLoader) { batch, batchId, images ->
+                        if (budgetExhausted(run) || run.modelRounds >= run.budget.maxModelRounds)
+                            throw VisualDeliveryBudgetExceeded("Run model request budget exhausted before image group")
+                        request.beforeModelRequest()
+                        val groupEstimate = adapter.estimateInput(batch)
+                        if (request.maxInputBudgetUnits?.let { groupEstimate.units > it } == true ||
+                            images.size > request.maxImagesPerRequest || !RequestInputBudget.imageBytesWithinLimit(batch))
+                            throw VisualDeliveryBudgetExceeded("CONTEXT_OVERFLOW: image group exceeds request budget")
+                        run.modelRounds++
+                        run.state = RunState.MODEL_STREAMING
+                        emit(RuntimeEvent.VisualBatchStarted(batchId, images.size, groupEstimate.units,
+                            if (request.emitRequestPreview) adapter.previewRequest(batch) else null))
+                        request.beforeModelRequest()
+                        request.beforeImageRequest(images)
+                        if (budgetExhausted(run)) throw VisualDeliveryBudgetExceeded("Run deadline before image group")
+                        val notes = StringBuilder()
+                        var batchTerminal: ModelEvent? = null
+                        var oversized = false
+                        activeDispatch = DispatchKind.MODEL
+                        val completed = adapter.stream(batch, secret).cancellable()
+                            .collectUntilStalled(run.budget.stallTimeoutMs, transportProgress) { event ->
+                                when (event) {
+                                    is ModelEvent.TextDelta -> {
+                                        if (notes.length + event.text.length > 16_000) oversized = true
+                                        else if (!oversized) notes.append(event.text)
+                                    }
+                                    is ModelEvent.Usage -> emitModel(event)
+                                    is ModelEvent.Failed -> batchTerminal = ModelEvent.Failed(redact(event.sanitizedMessage, secret))
+                                    is ModelEvent.ToolCallDelta -> batchTerminal = ModelEvent.Failed("INVALID_RESPONSE: image analysis must not call tools")
+                                    is ModelEvent.RefusalDelta -> batchTerminal = ModelEvent.Failed("VISUAL_BATCH_REFUSED: image group refused")
+                                    ModelEvent.Completed -> if (batchTerminal !is ModelEvent.Failed) batchTerminal = event
+                                    else -> Unit
+                                }
+                            }
+                        if (completed != true || batchTerminal == null) throw VisualBatchDispatchFailure(true,
+                            "UNKNOWN_OUTCOME: image group response incomplete; no automatic replay")
+                        val failure = batchTerminal as? ModelEvent.Failed
+                        if (failure != null) throw VisualBatchDispatchFailure(
+                            failure.sanitizedMessage.contains("UNKNOWN_OUTCOME"), failure.sanitizedMessage)
+                        if (oversized || notes.isBlank()) throw VisualBatchDispatchFailure(false,
+                            "INVALID_RESPONSE: image evidence notes absent or oversized")
+                        emit(RuntimeEvent.VisualBatchAnalyzed(batchId,
+                            images.mapNotNull { image -> image.assetId?.let { RuntimeImageReference(it, image.mediaType, image.sha256) } },
+                            notes.toString()))
+                        activeDispatch = null // Successful receipt collector has finished durable persistence.
+                        notes.toString()
+                    }
+                    window.transformProjectedMessages(visualDelivery::rewriteMessages)
+                } catch (failure: VisualDeliveryBudgetExceeded) {
+                    run.state = RunState.BUDGET_EXHAUSTED; run.stopReason = failure.message
+                    emitModel(ModelEvent.Failed(failure.message.orEmpty())); finish(); return@flow
+                } catch (failure: VisualBatchDispatchFailure) {
+                    run.state = if (failure.unknown) RunState.UNKNOWN_OUTCOME else RunState.FAILED
+                    run.stopReason = failure.message
+                    emitModel(ModelEvent.Failed(failure.message.orEmpty())); finish(); return@flow
+                }
                 val inputLimit = request.maxInputBudgetUnits
                 val context = request.context?.takeIf { it.policy.autoCompact && inputLimit != null && !compactionUnavailable }
                 if (context != null) {
-                    val minimum = adapter.estimateInput(window.minimumRequest(modelRequest))
-                    if (minimum.units > inputLimit!! || minimum.imageCount > request.maxImagesPerRequest) {
+                    val minimumRequest = window.minimumRequest(modelRequest)
+                    val minimum = adapter.estimateInput(minimumRequest)
+                    if (minimum.units > inputLimit!! || minimum.imageCount > request.maxImagesPerRequest ||
+                        !RequestInputBudget.imageBytesWithinLimit(minimumRequest)) {
                         run.state = RunState.BUDGET_EXHAUSTED
                         run.stopReason = "CONTEXT_OVERFLOW: protected context exceeds the input or image limit"
                         emitModel(ModelEvent.Failed(run.stopReason!!))
@@ -370,7 +432,8 @@ class AgentRuntime(
                             // dispatch still rechecks authority, total requests, tools and deadline.
                             // Unknown/cancelled dispatches never reach this recovery path.
                             val original = adapter.estimateInput(modelRequest)
-                            if (inputLimit?.let { original.units <= it } == true && original.imageCount <= request.maxImagesPerRequest) {
+                            if (inputLimit?.let { original.units <= it } == true && original.imageCount <= request.maxImagesPerRequest &&
+                                RequestInputBudget.imageBytesWithinLimit(modelRequest)) {
                                 compactionUnavailable = true
                                 return true
                             }
@@ -416,6 +479,13 @@ class AgentRuntime(
                     }
                 }
                 val estimate = adapter.estimateInput(modelRequest)
+                if (!RequestInputBudget.imageBytesWithinLimit(modelRequest)) {
+                    run.state = RunState.BUDGET_EXHAUSTED
+                    run.stopReason = "IMAGE_BYTES_BUDGET_EXCEEDED: originals exceed 16 MiB in total"
+                    emitModel(ModelEvent.Failed(run.stopReason!!))
+                    finish()
+                    return@flow
+                }
                 if (estimate.imageCount > request.maxImagesPerRequest || inputLimit?.let { estimate.units > it } == true) {
                     run.state = RunState.BUDGET_EXHAUSTED
                     run.stopReason = "context-or-image-budget"
@@ -852,13 +922,26 @@ class AgentRuntime(
                         finish()
                         return@flow
                     }
-                    if (images.any { it.mediaType.isBlank() || it.base64.isBlank() }) {
+                    if (images.any { it.mediaType.isBlank() || (it.base64.isBlank() && (it.assetId.isNullOrBlank() || it.byteLength == null)) }) {
                         run.state = RunState.FAILED
                         emitModel(ModelEvent.Failed("Tool visual result is invalid"))
                         finish()
                         return@flow
                     }
                     if (images.isNotEmpty()) {
+                        try { visualDelivery.reserve(images) } catch (failure: VisualDeliveryBudgetExceeded) {
+                            run.state = RunState.BUDGET_EXHAUSTED; run.stopReason = failure.message
+                            emitModel(ModelEvent.Failed(failure.message.orEmpty())); finish(); return@flow
+                        }
+                        // Legacy eager callbacks must not accumulate multiple full payloads.
+                        val eager = (modelRequest.messages.flatMap { it.images } +
+                            visualResults.flatMap { it.second } + images).filter { it.base64.isNotBlank() }
+                        if (!RequestInputBudget.imageBytesWithinLimit(ModelRequest(request.modelId,
+                                listOf(ChatMessage("user", images = eager))))) {
+                            run.state = RunState.BUDGET_EXHAUSTED
+                            run.stopReason = "CONTEXT_OVERFLOW: IMAGE_BYTES_BUDGET_EXCEEDED: eager originals exceed 16 MiB"
+                            emitModel(ModelEvent.Failed(run.stopReason!!)); finish(); return@flow
+                        }
                         visualResults += call.callId to images
                     }
                 }

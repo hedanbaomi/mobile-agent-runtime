@@ -13,6 +13,12 @@ import kotlinx.serialization.json.intOrNull
 /** Smallest input allowance kept when the upstream window is unknown. */
 private const val LOCAL_FLOOR_INPUT_UNITS = 1_024
 
+/** Local attachment ceiling; model-window and explicit user budgets still apply. */
+const val MAX_CONTEXT_IMAGES = 64
+const val MAX_IMAGES_PER_REQUEST = 8
+/** Local memory protection, separate from the model's image/token count. */
+const val MAX_CONTEXT_IMAGE_BYTES = 16L * 1024 * 1024
+
 data class AgentContextPolicy(
     val autoCompact: Boolean = true,
     val maxInputTokens: Int? = null,
@@ -35,7 +41,7 @@ data class AgentContextPolicy(
      */
     val pythonModelRunTokens: Int? = null,
     val knowledgeTokenBudget: Int = 3000,
-    val imageBudget: Int = 4,
+    val imageBudget: Int = MAX_CONTEXT_IMAGES,
     /**
      * Local context-protection reserve used when the provider output cap is
      * unknown (AUTO).  It is a local policy number: it protects the input budget
@@ -67,7 +73,7 @@ data class AgentContextPolicy(
             "pythonModelRunTokens must be 1..10000000"
         }
         require(knowledgeTokenBudget > 0) { "knowledgeTokenBudget must be positive" }
-        require(imageBudget in 1..32) { "imageBudget must be 1..32" }
+        require(imageBudget in 1..MAX_CONTEXT_IMAGES) { "imageBudget must be 1..$MAX_CONTEXT_IMAGES" }
     }
 
     /**
@@ -127,7 +133,7 @@ data class AgentContextPolicy(
                 summaryOutputTokens = int("summaryOutputTokens", 4096), summaryMaxUnits = int("summaryMaxUnits", 16384),
                 reservedOutputTokens = optional("reservedOutputTokens"),
                 pythonModelRunTokens = optional("pythonModelRunTokens"), knowledgeTokenBudget = int("knowledgeTokenBudget", 3000),
-                imageBudget = int("imageBudget", 4), localOutputReserve = int("localOutputReserve", 1024),
+                imageBudget = int("imageBudget", MAX_CONTEXT_IMAGES), localOutputReserve = int("localOutputReserve", 1024),
                 localUnknownWindow = int("localUnknownWindow", 16_384),
             )
         }

@@ -17,6 +17,8 @@ import runtime.mobileagent.domain.DiffPart
 import runtime.mobileagent.domain.ErrorPart
 import runtime.mobileagent.domain.MessageErrorCode
 import runtime.mobileagent.domain.MessagePart
+import runtime.mobileagent.domain.MAX_CONTEXT_IMAGES
+import runtime.mobileagent.domain.MAX_IMAGES_PER_REQUEST
 import runtime.mobileagent.domain.ReasoningPart
 import runtime.mobileagent.domain.RefusalPart
 import runtime.mobileagent.skills.ToolCall
@@ -45,7 +47,15 @@ data class AgentRuntimeRequest(
     val toolImages: suspend (ToolCall, ToolResult) -> List<InlineImage> = { _, _ -> emptyList() },
     /** Complete adapter input estimate, in conservative units rather than tokenizer counts. */
     val maxInputBudgetUnits: Long? = null,
-    val maxImagesPerRequest: Int = 4,
+    val maxImagesPerRequest: Int = MAX_IMAGES_PER_REQUEST,
+    val maxImagesPerRun: Int = MAX_CONTEXT_IMAGES,
+    val batchAllImages: Boolean = false,
+    /** Lazy CAS references use blank Base64; only a bounded group is loaded at a time. */
+    val imageLoader: suspend (InlineImage) -> InlineImage = { image ->
+        require(image.base64.isNotBlank()) { "Visual image loader is unavailable" }; image
+    },
+    /** Revalidate just this group after preview/persistence, immediately before dispatch. */
+    val beforeImageRequest: suspend (List<InlineImage>) -> Unit = {},
     val beforeModelRequest: suspend () -> Unit = {},
     val outputTokenLimit: Int? = null,
     /** Alias the resolved output decision came from (null = profile default / AUTO). */
@@ -116,6 +126,9 @@ sealed interface RuntimeEvent {
         val messageId: String? = null,
     ) : RuntimeEvent
 
+    data class VisualBatchStarted(val batchId: String, val imageCount: Int, val estimatedUnits: Long, val requestPreview: String? = null) : RuntimeEvent
+    data class VisualBatchAnalyzed(val batchId: String, val assets: List<RuntimeImageReference>, val analysis: String) : RuntimeEvent
+
     data class ToolImagesAttached(val callId: String, val assets: List<RuntimeImageReference>, val messageId: String? = null) : RuntimeEvent
 
     /** Local conversation inspector data; never a diagnostic log or a new assistant/tool instruction. */
@@ -131,7 +144,7 @@ sealed interface RuntimeEvent {
     ) : RuntimeEvent
 }
 
-data class RuntimeImageReference(val assetId: String, val mediaType: String)
+data class RuntimeImageReference(val assetId: String, val mediaType: String, val sha256: String? = null)
 
 internal fun ChatMessage.toRuntimeSummary(): RuntimeMessageSummary = RuntimeMessageSummary(
     role = role,

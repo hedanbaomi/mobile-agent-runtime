@@ -4,6 +4,7 @@
 package runtime.mobileagent.provider
 
 import kotlinx.serialization.json.JsonElement
+import runtime.mobileagent.domain.MAX_CONTEXT_IMAGE_BYTES
 
 /**
  * Conservative size of one prepared model request, in abstract *units*.
@@ -82,6 +83,19 @@ const val INPUT_BUDGET_BASIS_WITHOUT_CONTINUATION: String =
  * never wrap into a small budget.
  */
 object RequestInputBudget {
+
+    /** Measures all actual inline originals without decoding or copying Base64 buffers. */
+    fun imageBytesWithinLimit(request: ModelRequest): Boolean {
+        var total = 0L
+        for (message in request.messages) for (image in message.images) {
+            val data = image.base64
+            val padding = if (data.endsWith("==")) 2 else if (data.endsWith("=")) 1 else 0
+            val bytes = if (data.isBlank()) image.byteLength ?: Long.MAX_VALUE else (data.length.toLong() * 3 / 4 - padding).coerceAtLeast(0)
+            total = saturatingAddUnits(total, bytes)
+            if (total > MAX_CONTEXT_IMAGE_BYTES) return false
+        }
+        return true
+    }
 
     /** Fixed request-level envelope: JSON keys, model name, stream flag, arrays. */
     private const val PROTOCOL_ENVELOPE_UNITS = 256L

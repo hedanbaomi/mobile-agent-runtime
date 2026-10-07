@@ -17,6 +17,17 @@ import runtime.mobileagent.provider.openai.OpenAiResponsesAdapter
 
 class RequestInputBudgetTest {
 
+    @Test fun originalByteBudgetIncludesAllMessagesAndFailsClosedForUnknownSizes() {
+        val image = InlineImage("image/png", "", "fixture", 2L * 1024 * 1024)
+        fun request(count: Int) = ModelRequest("fixture", (1..count).map { ChatMessage("user", images = listOf(image)) })
+        assertTrue(RequestInputBudget.imageBytesWithinLimit(request(8)))
+        assertFalse(RequestInputBudget.imageBytesWithinLimit(request(9)))
+        assertFalse(RequestInputBudget.imageBytesWithinLimit(ModelRequest("fixture",
+            listOf(ChatMessage("user", images = listOf(image.copy(byteLength = null)))))))
+        assertTrue(RequestInputBudget.imageBytesWithinLimit(ModelRequest("fixture",
+            listOf(ChatMessage("user", images = listOf(InlineImage("image/png", "aW1hZ2U=")))))))
+    }
+
     @Test
     fun toolCallArgumentsJsonGrowthRaisesTheEstimate() {
         // The former estimator only summed message text and therefore ignored

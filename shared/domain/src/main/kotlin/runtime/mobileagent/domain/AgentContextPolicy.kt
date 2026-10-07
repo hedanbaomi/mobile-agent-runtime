@@ -18,6 +18,10 @@ const val MAX_CONTEXT_IMAGES = 64
 const val MAX_IMAGES_PER_REQUEST = 8
 /** Local memory protection, separate from the model's image/token count. */
 const val MAX_CONTEXT_IMAGE_BYTES = 16L * 1024 * 1024
+const val DEFAULT_RUN_MODEL_REQUESTS = 128
+const val DEFAULT_RUN_TOOL_CALLS = 100
+const val DEFAULT_RUN_RUNTIME_MS = 1_800_000
+const val MAX_RUN_RUNTIME_MS = 86_400_000
 
 data class AgentContextPolicy(
     val autoCompact: Boolean = true,
@@ -27,9 +31,9 @@ data class AgentContextPolicy(
     val keepRecentTurns: Int = 2,
     val softLimitPercent: Int = 85,
     val targetPercent: Int = 60,
-    val maxModelRoundsPerSegment: Int = 8,
-    val maxModelRequestsPerRun: Int = 32,
-    val maxCompactionsPerRun: Int = 8,
+    val maxModelRoundsPerSegment: Int = 32,
+    val maxModelRequestsPerRun: Int = DEFAULT_RUN_MODEL_REQUESTS,
+    val maxCompactionsPerRun: Int = 16,
     val summaryOutputTokens: Int = 4096,
     val summaryMaxUnits: Int = 16384,
     val reservedOutputTokens: Int? = null,
@@ -55,6 +59,11 @@ data class AgentContextPolicy(
      * sent to the provider (which does not accept a window parameter).
      */
     val localUnknownWindow: Int = 16_384,
+    /** Capacity-based mode ignores fixed message/turn/segment triggers, including old defaults. */
+    val modelAwareCompaction: Boolean = true,
+    val maxToolCalls: Int = DEFAULT_RUN_TOOL_CALLS,
+    /** Admission only; dispatched work still uses its independent stall/cancellation boundary. */
+    val maxRuntimeMs: Int = DEFAULT_RUN_RUNTIME_MS,
 ) {
     init {
         require(maxInputTokens == null || maxInputTokens > 0) { "maxInputTokens must be positive" }
@@ -63,9 +72,11 @@ data class AgentContextPolicy(
         require(keepRecentTurns in 1..20) { "keepRecentTurns must be 1..20" }
         require(softLimitPercent in 50..95) { "softLimitPercent must be 50..95" }
         require(targetPercent in 20 until softLimitPercent) { "targetPercent must be below the soft limit" }
-        require(maxModelRoundsPerSegment in 2..32) { "maxModelRoundsPerSegment must be 2..32" }
-        require(maxModelRequestsPerRun in 2..128) { "maxModelRequestsPerRun must be 2..128" }
-        require(maxCompactionsPerRun in 1..16) { "maxCompactionsPerRun must be 1..16" }
+        require(maxModelRoundsPerSegment in 2..128) { "maxModelRoundsPerSegment must be 2..128" }
+        require(maxModelRequestsPerRun in 2..512) { "maxModelRequestsPerRun must be 2..512" }
+        require(maxCompactionsPerRun in 1..64) { "maxCompactionsPerRun must be 1..64" }
+        require(maxToolCalls in 1..1000) { "maxToolCalls must be 1..1000" }
+        require(maxRuntimeMs in 1..MAX_RUN_RUNTIME_MS) { "maxRuntimeMs must be 1..$MAX_RUN_RUNTIME_MS" }
         require(summaryOutputTokens in 128..8192) { "summaryOutputTokens must be 128..8192" }
         require(summaryMaxUnits in 512..65_536) { "summaryMaxUnits must be 512..65536" }
         require(reservedOutputTokens == null || reservedOutputTokens > 0) { "reservedOutputTokens must be positive" }
@@ -119,22 +130,25 @@ data class AgentContextPolicy(
                 value.intOrNull ?: throw IllegalArgumentException("$name must be an integer")
             } ?: default
             fun optional(name: String): Int? = if (name in obj) int(name, 0) else null
-            val enabled = obj["autoCompact"]?.let {
+            fun bool(name: String, default: Boolean): Boolean = obj[name]?.let {
                 val value = it as? JsonPrimitive
-                require(value != null && !value.isString) { "autoCompact must be boolean" }
-                value.booleanOrNull ?: throw IllegalArgumentException("autoCompact must be boolean")
-            } ?: true
+                require(value != null && !value.isString) { "$name must be boolean" }
+                value.booleanOrNull ?: throw IllegalArgumentException("$name must be boolean")
+            } ?: default
             return AgentContextPolicy(
-                autoCompact = enabled, maxInputTokens = optional("maxInputTokens"),
+                autoCompact = bool("autoCompact", true), maxInputTokens = optional("maxInputTokens"),
                 maxHistoryMessages = int("maxHistoryMessages", 20), maxHistoryTurns = int("maxHistoryTurns", 10),
                 keepRecentTurns = int("keepRecentTurns", 2), softLimitPercent = int("softLimitPercent", 85),
-                targetPercent = int("targetPercent", 60), maxModelRoundsPerSegment = int("maxModelRoundsPerSegment", 8),
-                maxModelRequestsPerRun = int("maxModelRequestsPerRun", 32), maxCompactionsPerRun = int("maxCompactionsPerRun", 8),
+                targetPercent = int("targetPercent", 60), maxModelRoundsPerSegment = int("maxModelRoundsPerSegment", 32),
+                maxModelRequestsPerRun = int("maxModelRequestsPerRun", DEFAULT_RUN_MODEL_REQUESTS), maxCompactionsPerRun = int("maxCompactionsPerRun", 16),
                 summaryOutputTokens = int("summaryOutputTokens", 4096), summaryMaxUnits = int("summaryMaxUnits", 16384),
                 reservedOutputTokens = optional("reservedOutputTokens"),
                 pythonModelRunTokens = optional("pythonModelRunTokens"), knowledgeTokenBudget = int("knowledgeTokenBudget", 3000),
                 imageBudget = int("imageBudget", MAX_CONTEXT_IMAGES), localOutputReserve = int("localOutputReserve", 1024),
                 localUnknownWindow = int("localUnknownWindow", 16_384),
+                modelAwareCompaction = bool("modelAwareCompaction", true),
+                maxToolCalls = int("maxToolCalls", DEFAULT_RUN_TOOL_CALLS),
+                maxRuntimeMs = int("maxRuntimeMs", DEFAULT_RUN_RUNTIME_MS),
             )
         }
     }

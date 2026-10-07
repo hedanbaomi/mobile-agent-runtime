@@ -75,7 +75,7 @@ class CompactionUsageSettlementTest {
                     typedHistory = originals.map { ChatMessage(it.role.name.lowercase(), it.text) }),
                 modelId = "model", secret = "synthetic-usage-fixture-secret".toCharArray(), toolsEnabled = false,
                 maxInputBudgetUnits = 50_000,
-                context = RuntimeContext(policy = AgentContextPolicy(maxHistoryMessages = 4, keepRecentTurns = 1),
+                context = RuntimeContext(policy = AgentContextPolicy(modelAwareCompaction = false, maxHistoryMessages = 4, keepRecentTurns = 1),
                     historySources = originals.mapIndexed { index, message -> ContextSource(message.id, "turn-${index / 2}") },
                     currentUserMessageId = "current", modelFingerprint = "model-fp", authorizationFingerprint = "auth-fp",
                     persist = { attempt ->

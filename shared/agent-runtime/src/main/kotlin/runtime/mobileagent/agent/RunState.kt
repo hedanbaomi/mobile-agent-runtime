@@ -3,6 +3,10 @@
 
 package runtime.mobileagent.agent
 
+import runtime.mobileagent.domain.DEFAULT_RUN_MODEL_REQUESTS
+import runtime.mobileagent.domain.DEFAULT_RUN_TOOL_CALLS
+import runtime.mobileagent.domain.DEFAULT_RUN_RUNTIME_MS
+
 enum class RunState {
     CREATED,
     VALIDATING,
@@ -29,9 +33,9 @@ enum class RunState {
  * is never replayed.
  */
 data class RunBudget(
-    val maxModelRounds: Int = 8,
-    val maxToolCalls: Int = 20,
-    val maxRuntimeMs: Long = 180_000,
+    val maxModelRounds: Int = DEFAULT_RUN_MODEL_REQUESTS,
+    val maxToolCalls: Int = DEFAULT_RUN_TOOL_CALLS,
+    val maxRuntimeMs: Long = DEFAULT_RUN_RUNTIME_MS.toLong(),
     val stallTimeoutMs: Long = 180_000,
 )
 

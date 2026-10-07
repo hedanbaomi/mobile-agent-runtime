@@ -289,6 +289,86 @@ class SkillRepositoryTest {
     }
 
     @Test
+    fun disabledRetainedSkillAllowsEditsAndOnlyNewEnabledSnapshotsRestoreIt() = database { db ->
+        val skills = SkillRepository(db)
+        assertTrue(skills.importPackage(instructionOnlyPackageBytes()).accepted)
+        val installId = skills.list().single().installId
+        skills.setEnabled(installId, true)
+        createChatProfile(db)
+        val agents = AgentRepository(db)
+        val bound = agents.saveWithPrompt(agentProfile("agent.paused", "model.skills.chat", installId), "Original")
+        val before = agents.createSnapshot(bound.id)
+
+        skills.setEnabled(installId, false)
+        val edited = agents.update(bound.copy(name = "Edited while paused", revision = bound.revision + 1))
+        val saved = agents.saveWithPrompt(edited, "Changed while paused")
+        assertEquals(listOf(installId), saved.skillIds)
+        val paused = agents.createSnapshot(bound.id)
+        assertTrue(paused.skillIds.isEmpty())
+        assertTrue(agents.resolveSnapshot(paused.id).snapshot.skillIds.isEmpty())
+        assertFalse(paused.bindingManifestJson.contains(installId))
+        assertEquals(listOf(installId), agents.getSnapshot(before.id)!!.skillIds)
+
+        skills.setEnabled(installId, true)
+        assertEquals(listOf(installId), agents.createSnapshot(bound.id).skillIds)
+        assertTrue(agents.getSnapshot(paused.id)!!.skillIds.isEmpty())
+        assertTrue(agents.resolveSnapshot(paused.id).snapshot.skillIds.isEmpty())
+    }
+
+    @Test
+    fun retainedDisabledSkillCanBeRemovedButCannotBeReaddedAndMissingStillFails() = database { db ->
+        val skills = SkillRepository(db)
+        assertTrue(skills.importPackage(instructionOnlyPackageBytes()).accepted)
+        val installId = skills.list().single().installId
+        skills.setEnabled(installId, true)
+        createChatProfile(db)
+        val agents = AgentRepository(db)
+        val bound = agents.saveWithPrompt(agentProfile("agent.remove-paused", "model.skills.chat", installId), "Original")
+        skills.setEnabled(installId, false)
+        assertTrue(skills.importPackage(instructionOnlyPackageBytes("Never bound")).accepted)
+        val neverBound = skills.list().single { it.installId != installId }.installId
+        assertThrows(AppException::class.java) {
+            agents.saveWithPrompt(bound.copy(skillIds = listOf(installId, neverBound)), "No new disabled association")
+        }
+        val unbound = agents.update(bound.copy(skillIds = emptyList(), revision = bound.revision + 1))
+        assertThrows(AppException::class.java) { agents.update(unbound.copy(skillIds = listOf(installId))) }
+        val promptCount = agents.listPromptRevisions(bound.id).size
+        assertThrows(AppException::class.java) { agents.saveWithPrompt(unbound.copy(skillIds = listOf(installId)), "Cannot rebind") }
+        assertEquals(promptCount, agents.listPromptRevisions(bound.id).size)
+        assertTrue(agents.get(bound.id)!!.skillIds.isEmpty())
+
+        skills.setEnabled(installId, true)
+        val rebound = agents.update(unbound.copy(skillIds = listOf(installId)))
+        // Simulate damaged persisted identity; retained membership must never bypass existence.
+        db.execute("DELETE FROM skill_installs WHERE install_id=?", listOf(installId))
+        assertThrows(AppException::class.java) { agents.update(rebound.copy(name = "Missing")) }
+        assertThrows(AppException::class.java) { agents.saveWithPrompt(rebound, "Missing") }
+        assertThrows(AppException::class.java) { agents.createSnapshot(bound.id) }
+    }
+
+    @Test
+    fun pausedSkillDoesNotHideOtherEnabledBindingsFromSnapshotManifest() = database { db ->
+        val skills = SkillRepository(db)
+        assertTrue(skills.importPackage(instructionOnlyPackageBytes("Paused")).accepted)
+        val pausedId = skills.list().single().installId
+        assertTrue(skills.importPackage(instructionOnlyPackageBytes("Active")).accepted)
+        val activeId = skills.list().single { it.installId != pausedId }.installId
+        skills.setEnabled(pausedId, true)
+        skills.setEnabled(activeId, true)
+        createChatProfile(db)
+        val agents = AgentRepository(db)
+        val profile = agents.saveWithPrompt(
+            agentProfile("agent.mixed", "model.skills.chat", pausedId).copy(skillIds = listOf(pausedId, activeId)), "Mixed",
+        )
+        skills.setEnabled(pausedId, false)
+        val snapshot = agents.createSnapshot(profile.id)
+        assertEquals(listOf(activeId), snapshot.skillIds)
+        assertFalse(snapshot.bindingManifestJson.contains(pausedId))
+        assertTrue(snapshot.bindingManifestJson.contains(activeId))
+        assertEquals(listOf(pausedId, activeId), agents.get(profile.id)!!.skillIds)
+    }
+
+    @Test
     fun disabledSkillInstallIdCannotBeBoundToAgent() = database { db ->
         val skills = SkillRepository(db)
         assertTrue(skills.importPackage(packageBytes()).accepted)

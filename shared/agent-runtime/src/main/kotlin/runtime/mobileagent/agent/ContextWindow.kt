@@ -141,9 +141,9 @@ internal class ContextWindow(prompt: EffectivePrompt, val context: RuntimeContex
         val history = entries.filter { it.message.role != "system" && it.source.messageId != currentId }
         return when {
             adapter.estimateInput(request).units >= percentage(inputLimit, policy.softLimitPercent) -> "input-budget"
-            history.size >= policy.maxHistoryMessages -> "history-messages"
-            history.map { it.source.turnId }.distinct().size >= policy.maxHistoryTurns -> "history-turns"
-            segmentRounds >= policy.maxModelRoundsPerSegment -> "model-rounds"
+            !policy.modelAwareCompaction && history.size >= policy.maxHistoryMessages -> "history-messages"
+            !policy.modelAwareCompaction && history.map { it.source.turnId }.distinct().size >= policy.maxHistoryTurns -> "history-turns"
+            !policy.modelAwareCompaction && segmentRounds >= policy.maxModelRoundsPerSegment -> "model-rounds"
             else -> null
         }
     }
@@ -177,7 +177,8 @@ internal class ContextWindow(prompt: EffectivePrompt, val context: RuntimeContex
             if (estimate + minOf(policy.summaryMaxUnits.toLong(), inputLimit / 4) <= percentage(inputLimit, policy.targetPercent) &&
                 // Leave room for later sends rather than charging for another summary as
                 // soon as one complete user turn is appended to the restored context.
-                old.size <= targetMessages && old.map { it.source.turnId }.distinct().size <= targetTurns
+                (policy.modelAwareCompaction ||
+                    (old.size <= targetMessages && old.map { it.source.turnId }.distinct().size <= targetTurns))
             ) break
         }
         val planned = summaryRequest ?: return null

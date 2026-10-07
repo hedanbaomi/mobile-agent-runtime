@@ -66,7 +66,8 @@ class MainActivity : ComponentActivity() {
         // the announcements screen ViewModel. The coordinator handles single-flight and backoff.
         (application as? MobileAgentApp)?.container?.announcementRefreshCoordinator?.foreground()
         val app = application as? MobileAgentApp ?: return
-        app.container.appUpdates.check()
+        // Foreground entry performs the due check (at most hourly) and keeps re-checking while visible.
+        app.container.appUpdates.foreground()
         if (importRecovery?.isActive == true) return
         importRecovery = lifecycleScope.launch {
             try {
@@ -85,6 +86,12 @@ class MainActivity : ComponentActivity() {
                 // not crash navigation or erase any persisted import state.
             }
         }
+    }
+
+    override fun onStop() {
+        super.onStop()
+        // Leaving the foreground stops the update ticker; no service, worker or timer keeps running.
+        (application as? MobileAgentApp)?.container?.appUpdates?.background()
     }
 
     override fun onSaveInstanceState(outState: Bundle) {
@@ -116,8 +123,9 @@ class MainActivity : ComponentActivity() {
     @Suppress("DEPRECATION")
     private suspend fun openVerifiedUpdateInstaller() {
         val updates = currentUpdates()
-        // Also restores the daily cached candidate after process recreation during permission UI.
-        updates.check().join()
+        // Restores the persisted candidate after process recreation during the permission UI without
+        // a new network check: downloading and installing must not wait for the hourly window.
+        updates.restore().join()
         val file = updates.readyForInstall() ?: return
         try {
             val uri = FileProvider.getUriForFile(this, "$packageName.app-updates", file)

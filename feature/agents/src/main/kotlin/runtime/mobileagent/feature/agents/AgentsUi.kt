@@ -138,9 +138,22 @@ data class AgentResourceBindingUi(
     val permissionSummary: String = "",
     /** Whether this resource can be added or removed from the Agent in the editor. */
     val selectable: Boolean = true,
-    /** Whether an enabled binding is currently valid for persistence. */
+    /** Whether an association is currently active; paused existing Skill associations may persist. */
     val available: Boolean = true,
-)
+) {
+    val active: Boolean get() = enabled && available
+
+    fun withAssociation(selected: Boolean): AgentResourceBindingUi {
+        if (!selectable || (selected && !available)) return this
+        return copy(
+            enabled = selected,
+            selectable = available || selected,
+            permissionSummary = if (!selected && type == "skill" && !available) {
+                "未关联；技能可用后才能绑定"
+            } else permissionSummary,
+        )
+    }
+}
 
 /** Safe, display-only workspace metadata.  It intentionally has no root/URI/path field. */
 data class AgentWorkspaceUi(
@@ -500,7 +513,7 @@ private fun AgentSummary(state: AgentsUiState, actions: AgentsActions) {
         if (editor.resourceBindings.isEmpty()) Text(if (zh) "没有绑定知识库或技能。" else "No knowledge bases or skills are bound.", style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(top = 6.dp))
         editor.resourceBindings.forEach { binding ->
             Text(
-                "${binding.name} · ${binding.type}${if (binding.enabled) "" else if (zh) "（未启用）" else " (disabled)"}${if (binding.permissionSummary.isBlank()) "" else " · ${binding.permissionSummary}"}",
+                "${binding.name} · ${binding.type}${if (binding.active) "" else if (zh) "（未启用）" else " (disabled)"}${if (binding.permissionSummary.isBlank()) "" else " · ${binding.permissionSummary}"}",
                 style = MaterialTheme.typography.bodySmall,
                 modifier = Modifier.padding(top = 4.dp),
             )
@@ -849,13 +862,20 @@ private fun AgentEditorFields(
                     editor.resourceBindings.forEach { binding ->
                         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                             Checkbox(
-                                checked = binding.enabled,
+                                checked = binding.active,
                                 onCheckedChange = { actions.onToggleResource(binding.id, it) },
-                                enabled = binding.selectable,
+                                enabled = binding.selectable && binding.available,
+                                modifier = Modifier.testTag("agents.resource.checkbox.${binding.id}"),
                             )
                             Column(Modifier.weight(1f)) {
                                 Text(binding.name)
                                 Text("${binding.type} · ${binding.permissionSummary}", style = MaterialTheme.typography.labelSmall)
+                            }
+                            if (binding.type == "skill" && binding.enabled && !binding.available) {
+                                TextButton(
+                                    onClick = { actions.onToggleResource(binding.id, false) },
+                                    modifier = Modifier.testTag("agents.resource.unbind.${binding.id}"),
+                                ) { Text(if (zh) "取消关联" else "Unlink") }
                             }
                         }
                     }
@@ -913,6 +933,17 @@ private fun AgentContextPolicyCard(
             )
         }
         Text(draft.summary(zh), style = MaterialTheme.typography.bodySmall)
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            Column(Modifier.weight(1f)) {
+                Text(if (zh) "按模型窗口自动调整" else "Adapt to the model window")
+                Text(if (zh) "达到可用输入容量的软阈值才压缩；未知窗口采用本地保护值。"
+                    else "Compact at the available input threshold; unknown windows use a local fallback.",
+                    style = MaterialTheme.typography.bodySmall)
+            }
+            Switch(checked = draft.modelAwareCompaction,
+                onCheckedChange = { update(draft.copy(modelAwareCompaction = it)) },
+                modifier = Modifier.testTag("agents.editor.context_policy.model_aware"))
+        }
         Row {
             TextButton(
                 onClick = { update(draft.recommended()) },
@@ -936,6 +967,7 @@ private fun AgentContextPolicyCard(
             isError = error != null && draft.maxInputTokens.isNotBlank(),
             placeholder = if (zh) "留空 = 模型可用窗口" else "Blank = model's available window",
         ) { update(draft.copy(maxInputTokens = it)) }
+        if (!draft.modelAwareCompaction) {
         ContextPolicyField(
             label = if (zh) "最大历史消息数" else "Max history messages",
             value = draft.maxHistoryMessages,
@@ -954,12 +986,21 @@ private fun AgentContextPolicyCard(
             testTag = AgentTestTags.CONTEXT_POLICY_ROUNDS,
             isError = error != null,
         ) { update(draft.copy(maxModelRoundsPerSegment = it)) }
+        }
         ContextPolicyField(
             label = if (zh) "每次运行模型请求上限（含摘要）" else "Max model requests per run (incl. summaries)",
             value = draft.maxModelRequestsPerRun,
             testTag = AgentTestTags.CONTEXT_POLICY_REQUESTS,
             isError = error != null,
         ) { update(draft.copy(maxModelRequestsPerRun = it)) }
+        ContextPolicyField(
+            label = if (zh) "每次运行工具调用上限" else "Max tool calls per run",
+            value = draft.maxToolCalls, testTag = "agents.editor.context_policy.tool_calls", isError = error != null,
+        ) { update(draft.copy(maxToolCalls = it)) }
+        ContextPolicyField(
+            label = if (zh) "运行准入时限（秒，已开始的操作继续接收）" else "Admission deadline (seconds; started work finishes)",
+            value = draft.maxRuntimeSeconds, testTag = "agents.editor.context_policy.runtime_seconds", isError = error != null,
+        ) { update(draft.copy(maxRuntimeSeconds = it)) }
         ContextPolicyField(
             label = if (zh) "Python 模型调用费用上限（每次运行，token）" else "Python model.invoke fee ceiling (per run, tokens)",
             value = draft.pythonModelRunTokens,

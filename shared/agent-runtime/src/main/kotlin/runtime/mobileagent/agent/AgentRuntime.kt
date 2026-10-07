@@ -299,7 +299,7 @@ class AgentRuntime(
                         val failure = batchTerminal as? ModelEvent.Failed
                         if (failure != null) throw VisualBatchDispatchFailure(
                             failure.sanitizedMessage.contains("UNKNOWN_OUTCOME"), failure.sanitizedMessage)
-                        if (oversized || notes.isBlank()) throw VisualBatchDispatchFailure(false,
+                        if (oversized || !hasVisualEvidenceNotes(notes.toString())) throw VisualBatchDispatchFailure(false,
                             "INVALID_RESPONSE: image evidence notes absent or oversized")
                         emit(RuntimeEvent.VisualBatchAnalyzed(batchId,
                             images.mapNotNull { image -> image.assetId?.let { RuntimeImageReference(it, image.mediaType, image.sha256) } },

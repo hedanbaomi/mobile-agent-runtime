@@ -9,7 +9,9 @@
 
 应用使用独立匿名连接请求固定 GitHub 仓库 `hedanbaomi/mobile-agent-runtime` 的 `/releases/latest`，仅接受已公开 stable release。正式 tag 为 `vMAJOR.MINOR.PATCH`，按三个整数比较，候选包固定名为 `mobileAgentRuntime-vVERSION-arm64-v8a.apk`，并要求上传完成、大小 1—256 MiB、SHA-256 digest 和本仓库的精确 HTTPS 下载 URL。缺资产、无哈希、预发布、异常响应或请求失败显示错误，不能当作“最新版本”。无须更新公告、公告服务配置、Provider 或统计同意。
 
-`MainActivity.onStart` 触发应用级检查；按设备当前本地日记录成功检查日期与合法候选。当天再次进入前台或进程重建复用缓存，次日重新联网；日期回拨也重新比较。失败不记录成功日期，不覆盖合法缓存；同进程自动检查失败退避 15 分钟，手动按钮跳过每日/退避限制。同一进程只有一个检查或下载任务，防止重复点击。自动检查仅查询版本，下载必须用户点击。同一版本“稍后”记录当天选择，次日或手动检查可以再次提示。
+本地正式签名 `MAJOR.MINOR.PATCHpreview` 仅供用户设备自测，不公开分发。已安装版本允许这个精确后缀；同号纯数字正式版视为更新，更低正式版不会提示降级。更新源仍只接受纯数字正式版，preview tag 即使被错误标为 stable 也拒绝。正式版沿用同一证书并使用更高 versionCode，preview 可通过原有“检查更新→下载并安装”流程升级。
+
+v1.1.4preview 起自动检查间隔为一小时。进入或恢复前台时检查是否到期，持续前台使用也定期检查；进入后台停止定时循环，恢复前台后补查到期的版本信息，不新增常驻服务。成功检查时间戳与合法候选持久化，进程重建且未到期时复用缓存；时钟回拨、未来时间戳、无合法缓存或仅保留旧每日记录时重新检查。失败不记录成功时间，不覆盖合法缓存；同进程自动检查失败退避 15 分钟，手动按钮跳过一小时/退避限制。同一进程只有一个检查或下载任务，防止重复点击及下载状态被检查覆盖。自动检查仅查询版本，下载必须用户点击。同一版本“稍后”仍按本地日期记录，小时检查不反复弹窗，次日或手动检查可以再次提示。
 
 ## 下载与验证
 
@@ -17,7 +19,7 @@
 
 用户点击“下载并安装”后展示字节进度，可取消并重试。下载在应用私有 `files/app-updates/`，不需存储权限。连接 15 秒/读 30 秒超时，流式限制声明大小和 15 分钟下载期限；磁盘预留 16 MiB。完整字节数和 SHA-256 匹配后以只读 APK 替换临时文件；失败/取消清临时包，不把部分下载交给系统。完整包允许进程重建后复用，但安装前重新验签和哈希。
 
-Android `PackageManager` 收集 APK 签名，拒绝解析/签名失败，核对包名等于当前安装、版本名等于候选、版本 code 严格增加、stable 版本严格增加、当前签名集合完全一致、最低 SDK 不超过设备、原生库 ABI 均受设备支持。这里不接受远程下发新公钥或签名轮换；未来轮换需要独立设计。系统安装程序还会独立验证包。私有文件不能由其他普通应用写入；安装前再次完整校验。
+Android `PackageManager` 收集 APK 签名，拒绝解析/签名失败，核对包名等于当前安装、版本名等于候选、版本 code 严格增加、正式版本更新（同号正式版高于本地 preview）、当前签名集合完全一致、最低 SDK 不超过设备、原生库 ABI 均受设备支持。这里不接受远程下发新公钥或签名轮换；未来轮换需要独立设计。系统安装程序还会独立验证包。私有文件不能由其他普通应用写入；安装前再次完整校验。
 
 ## 系统安装与恢复
 
@@ -30,3 +32,5 @@ FileProvider 非 exported，仅暴露更新目录；只向系统安装程序的�
 每次正式发布沿用同一签名，递增 code 和 stable tag；上传固定命名 APK 并等待 GitHub 生成 SHA-256 digest，再将完整 release 公开为 latest stable。Draft 不提供给更新检查。签名、源码、SBOM、provenance 和校验附件仍按 [发布规范](RELEASING.md) 验证。Android 系统或网络失败不能阻塞聊天、知识库、技能和公告。
 
 依据：[GitHub Releases API](https://docs.github.com/en/rest/releases/releases#get-the-latest-release)、[Android 安装来源许可](https://developer.android.com/reference/android/content/pm/PackageManager#canRequestPackageInstalls())、[FileProvider](https://developer.android.com/training/secure-file-sharing/setup-sharing)。
+
+2026-10-07 本地人工核验版本为 `1.1.4.1preview` / versionCode `10`。第四数值段仅用于本地 preview 迭代；stable feed 仍严格采用三段版本且拒绝 preview。后续同 patch 正式版可升级，正式 versionCode 必须大于 10。此 preview 不创建公开 Release。

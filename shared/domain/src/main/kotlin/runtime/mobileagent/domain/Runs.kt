@@ -42,8 +42,8 @@ fun runBudgetJson(
     maxModelRounds: Int,
     maxModelRoundsPerSegment: Int,
     maxCompactionsPerRun: Int,
-    maxToolCalls: Int = 20,
-    maxRuntimeMs: Int = 180_000,
+    maxToolCalls: Int = DEFAULT_RUN_TOOL_CALLS,
+    maxRuntimeMs: Int = DEFAULT_RUN_RUNTIME_MS,
     modelInvokeTokens: Int? = null,
 ): String {
     require(maxModelRounds > 0 && maxModelRoundsPerSegment > 0 && maxCompactionsPerRun > 0) {

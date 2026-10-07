@@ -36,6 +36,18 @@ internal data class ReleaseVersion(val major: Int, val minor: Int, val patch: In
     }
 }
 
+/** A local preview can upgrade to its same-patch stable release; release feeds remain stable-only. */
+internal fun isNewerThanInstalled(candidate: String, installed: String): Boolean {
+    val release = ReleaseVersion.parse(candidate)
+    val preview = installed.endsWith("preview")
+    val baseline = if (preview) {
+        val number = "(?:0|[1-9][0-9]{0,8})"
+        require(Regex("$number\\.$number\\.$number(?:\\.$number)?preview").matches(installed))
+        ReleaseVersion.parse(installed.removeSuffix("preview").split('.').take(3).joinToString("."))
+    } else ReleaseVersion.parse(installed)
+    return release > baseline || (preview && release == baseline)
+}
+
 @Serializable
 internal data class AppRelease(
     val version: String,

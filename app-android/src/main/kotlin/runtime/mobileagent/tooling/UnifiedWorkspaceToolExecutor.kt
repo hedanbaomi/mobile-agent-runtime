@@ -10,6 +10,7 @@ import java.util.UUID
 import kotlinx.coroutines.CancellationException
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.add
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.contentOrNull
@@ -18,6 +19,7 @@ import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.longOrNull
 import kotlinx.serialization.json.put
 import kotlinx.serialization.json.putJsonArray
+import kotlinx.serialization.json.putJsonObject
 import runtime.mobileagent.domain.CapabilityId
 import runtime.mobileagent.domain.CapabilityGrant
 import runtime.mobileagent.domain.DangerousMode
@@ -83,6 +85,21 @@ class UnifiedWorkspaceToolExecutor(
     private val lock = Any()
     private val callsByRequest = linkedMapOf<String, BoundCall>()
     private val requestByModelCall = linkedMapOf<ModelCallKey, String>()
+
+    /**
+     * Operations that can ever reach the model for a workspace, in exposure
+     * order.  `file_move` is deliberately absent: it is never exposed, so a
+     * workspace enumeration must never imply it.
+     */
+    private val exposedWorkspaceOperations = listOf(
+        WorkspaceOperation.LIST,
+        WorkspaceOperation.STAT,
+        WorkspaceOperation.READ,
+        WorkspaceOperation.WRITE,
+        WorkspaceOperation.CREATE_DIRECTORY,
+        WorkspaceOperation.DELETE,
+        WorkspaceOperation.APPLY_PATCH,
+    )
 
     override suspend fun invoke(call: ToolCall): ToolResult = invoke(call, contextProvider())
 
@@ -406,9 +423,9 @@ class UnifiedWorkspaceToolExecutor(
     private suspend fun dispatch(parsed: ParsedCall, context: ToolExecutionContext): WorkspaceResult<Any> {
         if (parsed.kind == WorkspaceOperation.WORKSPACE_LIST) {
             @Suppress("UNCHECKED_CAST")
-            val authorized = authorizedWorkspaces(context)
+            val authorized = authorizedWorkspaceViews(context)
             if (authorized.isEmpty()) return WorkspaceResult.Failure(ToolError(ToolErrorCode.CAPABILITY_DENIED))
-            return WorkspaceResult.Success(authorized.map { it.descriptor.forAgent() }) as WorkspaceResult<Any>
+            return WorkspaceResult.Success(authorized) as WorkspaceResult<Any>
         }
         val registered = registry.registered(parsed.workspaceId)
             ?: return WorkspaceResult.Failure(ToolError(ToolErrorCode.WORKSPACE_NOT_FOUND))
@@ -417,7 +434,7 @@ class UnifiedWorkspaceToolExecutor(
         }
         @Suppress("UNCHECKED_CAST")
         return when (parsed.kind) {
-            WorkspaceOperation.WORKSPACE_LIST -> WorkspaceResult.Success(authorizedWorkspaces(context).map { it.descriptor.forAgent() }) as WorkspaceResult<Any>
+            WorkspaceOperation.WORKSPACE_LIST -> WorkspaceResult.Success(authorizedWorkspaceViews(context)) as WorkspaceResult<Any>
             WorkspaceOperation.LIST -> registered.backend.list(
                 WorkspaceListRequest(
                     workspaceId = parsed.workspaceId,
@@ -483,6 +500,165 @@ class UnifiedWorkspaceToolExecutor(
         registry.descriptors().mapNotNull { publicDescriptor ->
             registry.registered(publicDescriptor.id)
         }.filter { registered -> workspaceOperationAvailable(context, registered, operation, requireLiveReady) }
+
+    /**
+     * Model-facing workspace entries for this Agent/snapshot.
+     *
+     * Enumeration keeps its existing gate ([WorkspaceOperation.WORKSPACE_LIST]
+     * requires the enumerate capability and a live-ready backend).  Each entry
+     * then reports the intersection of the live resolver decision and the
+     * backend's supported operations, so a read-only Agent is never told that a
+     * platform-writable workspace is writable for it.  [WorkspaceDescriptor.forAgent]
+     * alone only hides the root reference and describes the backend's
+     * registration-time surface, so it is never the source of these fields.
+     */
+    private fun authorizedWorkspaceViews(
+        context: ToolExecutionContext,
+        requireLiveReady: Boolean = true,
+    ): List<AgentWorkspaceView> =
+        authorizedWorkspaces(context, WorkspaceOperation.WORKSPACE_LIST, requireLiveReady)
+            .map { registered -> workspaceView(context, registered, requireLiveReady) }
+
+    private fun workspaceView(
+        context: ToolExecutionContext,
+        registered: WorkspaceRegistry.RegisteredWorkspace,
+        requireLiveReady: Boolean,
+    ): AgentWorkspaceView {
+        val descriptor = registered.descriptor
+        val available = exposedWorkspaceOperations.filter { operation ->
+            workspaceOperationAvailable(context, registered, operation, requireLiveReady)
+        }
+        return AgentWorkspaceView(
+            id = descriptor.id,
+            displayName = descriptor.displayName,
+            enabled = descriptor.enabled,
+            workspaceScope = workspaceScopeWireName(descriptor.scope),
+            readable = available.any { !it.isMutation },
+            writable = available.any { it.isMutation },
+            // Atomic replacement is a backend contract, never inferred from an
+            // implementation class: it is exactly the backend's deterministic
+            // `file.apply_patch` support (capability bit plus the typed
+            // conditional method).  SAF_TREE advertises neither and stays false.
+            atomicReplace = backendSupports(registered.backend, WorkspaceOperation.APPLY_PATCH),
+            createOnlyOperations = available
+                .filter { it.isCreateOnly(descriptor.backendType) }
+                .map { it.modelToolName() }
+                .sorted(),
+            authorizedOperations = available.map { it.modelToolName() }.sorted(),
+            operationScopes = available.associate { operation ->
+                operation.modelToolName() to operationScope(context, registered, operation)
+            }.toSortedMap(),
+        )
+    }
+
+    /**
+     * Resolve the exact path scope the live resolver grants for one operation.
+     *
+     * `wholeWorkspace` is proven with an empty relative path: the canonical
+     * resolver admits a path for an unscoped grant only, so a path-bounded grant
+     * can never be reported as whole-workspace authority.  Bounded candidates
+     * come from the run's canonical grant rows and are reported only after the
+     * same live revalidation dispatch performs, so a revoked, expired, re-scoped
+     * or cross-Agent/cross-Skill row is never advertised.  Only already
+     * canonical workspace-relative scopes are emitted; anything else is dropped
+     * rather than exposed or widened.
+     */
+    private fun operationScope(
+        context: ToolExecutionContext,
+        registered: WorkspaceRegistry.RegisteredWorkspace,
+        operation: WorkspaceOperation,
+    ): OperationScopeView {
+        val workspaceId = registered.descriptor.id
+        val wholeWorkspace = resolver.revalidate(
+            context = context,
+            capability = operation.capability,
+            workspaceId = workspaceId,
+            path = UNSCOPED_GRANT_PROBE_PATH,
+            write = operation.isMutation,
+        )
+        val pathScopes = context.canonicalGrants.asSequence()
+            .filter { grant ->
+                grant.capability == operation.capability &&
+                    grant.agentId == context.agentId &&
+                    grant.skillInstallId == context.skillId &&
+                    (grant.workspaceId == null || grant.workspaceId == workspaceId)
+            }
+            .mapNotNull { it.pathScope }
+            .distinct()
+            .filter { scope -> isCanonicalRelativeScope(scope) }
+            .filter { scope ->
+                resolver.revalidate(
+                    context = context,
+                    capability = operation.capability,
+                    workspaceId = workspaceId,
+                    path = scope,
+                    write = operation.isMutation,
+                )
+            }
+            .distinct()
+            .sorted()
+            .toList()
+        return OperationScopeView(wholeWorkspace = wholeWorkspace, pathScopes = pathScopes)
+    }
+
+    /** A reportable scope is a relative workspace path that normalizes to itself. */
+    private fun isCanonicalRelativeScope(scope: String): Boolean =
+        runCatching { WorkspacePathPolicy.normalize(scope, false) == scope }.getOrDefault(false)
+
+    /**
+     * SAF can create a new text document or directory, but its platform contract
+     * has no atomic replacement and no compare-and-create.  Those two operations
+     * are therefore described as create-only instead of being collapsed into a
+     * general whole-workspace write claim.
+     */
+    private fun WorkspaceOperation.isCreateOnly(backendType: WorkspaceBackendType): Boolean =
+        backendType == WorkspaceBackendType.SAF_TREE &&
+            (this == WorkspaceOperation.WRITE || this == WorkspaceOperation.CREATE_DIRECTORY)
+
+    private fun workspaceScopeWireName(scope: WorkspaceScope): String = when (scope) {
+        WorkspaceScope.SELECTED_DIRECTORY -> "selected_directory"
+        WorkspaceScope.FULL_DEVICE_FILES -> "full_device_files"
+    }
+
+    /** Model-facing workspace entry; never built from a raw backend descriptor. */
+    private data class AgentWorkspaceView(
+        val id: String,
+        val displayName: String,
+        val enabled: Boolean,
+        val workspaceScope: String,
+        val readable: Boolean,
+        val writable: Boolean,
+        val atomicReplace: Boolean,
+        val createOnlyOperations: List<String>,
+        val authorizedOperations: List<String>,
+        val operationScopes: Map<String, OperationScopeView>,
+    ) {
+        fun toJson(): JsonObject = buildJsonObject {
+            put("workspace_id", id)
+            put("display_name", displayName)
+            put("enabled", enabled)
+            put("readable", readable)
+            put("writable", writable)
+            put("workspace_scope", workspaceScope)
+            put("atomic_replace", atomicReplace)
+            putJsonArray("create_only_operations") { createOnlyOperations.forEach { add(it) } }
+            putJsonArray("authorized_operations") { authorizedOperations.forEach { add(it) } }
+            putJsonObject("operation_scopes") {
+                operationScopes.forEach { (toolName, scope) ->
+                    putJsonObject(toolName) {
+                        put("whole_workspace", scope.wholeWorkspace)
+                        putJsonArray("path_scopes") { scope.pathScopes.forEach { add(it) } }
+                    }
+                }
+            }
+        }
+    }
+
+    /** One operation's resolved scope: whole-workspace, bounded relative scopes, or neither. */
+    private data class OperationScopeView(
+        val wholeWorkspace: Boolean,
+        val pathScopes: List<String>,
+    )
 
     private fun workspaceOperationAvailable(
         context: ToolExecutionContext,
@@ -955,14 +1131,13 @@ class UnifiedWorkspaceToolExecutor(
                 if (parsed.workspaceId.isNotBlank()) put("workspace_id", parsed.workspaceId)
                 when (value) {
                     is List<*> -> putJsonArray("workspaces") {
-                        value.filterIsInstance<runtime.mobileagent.skills.tooling.WorkspaceDescriptor>().forEach { descriptor ->
-                            add(buildJsonObject {
-                                put("workspace_id", descriptor.id)
-                                put("display_name", descriptor.displayName)
-                                put("readable", descriptor.readable)
-                                put("writable", descriptor.writable)
-                                put("enabled", descriptor.enabled)
-                            })
+                        value.forEach { entry ->
+                            // Only the live-authorized view is representable here.
+                            // Anything else fails closed as INTERNAL_ERROR rather
+                            // than falling back to a raw backend descriptor.
+                            val view = entry as? AgentWorkspaceView
+                                ?: error("Unsupported workspace enumeration entry")
+                            add(view.toJson())
                         }
                     }
                     is runtime.mobileagent.skills.tooling.WorkspaceListing -> {
@@ -1158,6 +1333,19 @@ class UnifiedWorkspaceToolExecutor(
         else -> null
     }
 
+    /** Inverse of [operationForTool]; `file_move` keeps its retired input-only name. */
+    private fun WorkspaceOperation.modelToolName(): String = when (this) {
+        WorkspaceOperation.WORKSPACE_LIST -> WORKSPACE_LIST
+        WorkspaceOperation.LIST -> FILE_LIST
+        WorkspaceOperation.STAT -> FILE_STAT
+        WorkspaceOperation.READ -> FILE_READ_TEXT
+        WorkspaceOperation.WRITE -> FILE_WRITE_TEXT
+        WorkspaceOperation.CREATE_DIRECTORY -> FILE_CREATE_DIRECTORY
+        WorkspaceOperation.DELETE -> FILE_DELETE
+        WorkspaceOperation.MOVE -> FILE_MOVE
+        WorkspaceOperation.APPLY_PATCH -> FILE_APPLY_PATCH
+    }
+
     private enum class WorkspaceOperation(
         val capability: CapabilityId,
         val isMutation: Boolean,
@@ -1283,6 +1471,14 @@ class UnifiedWorkspaceToolExecutor(
         const val DEFAULT_MAX_ENTRIES = 256
         const val MAX_RESULT_BYTES = 900 * 1024
         private const val PRIVILEGED_AUTHORITY_PREFIX = "authority:"
+
+        /**
+         * Probe used to prove whole-workspace (unscoped) authority.  The canonical
+         * resolver matches a non-null path only for an unscoped grant, and the
+         * empty relative path is the workspace root, so a path-bounded grant can
+         * never satisfy it.
+         */
+        private const val UNSCOPED_GRANT_PROBE_PATH = ""
         private val TOOL_NAMES = setOf(
             WORKSPACE_LIST, FILE_LIST, FILE_STAT, FILE_READ_TEXT, FILE_WRITE_TEXT,
             FILE_CREATE_DIRECTORY, FILE_DELETE, FILE_MOVE, FILE_APPLY_PATCH, APPLY_PATCH,

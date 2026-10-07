@@ -7,8 +7,10 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.async
 import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
@@ -31,13 +33,30 @@ internal data class AppUpdateState(
     val busy: Boolean get() = phase in setOf(UpdatePhase.CHECKING, UpdatePhase.DOWNLOADING, UpdatePhase.VERIFYING)
 }
 
+/** Automatic checks are throttled by wall-clock time, never by the local calendar day. */
+internal const val UPDATE_CHECK_INTERVAL_MILLIS = 60L * 60 * 1000
+
+/** Same-process failure backoff. Manual clicks always bypass it. */
+internal const val UPDATE_FAILURE_BACKOFF_MILLIS = 15L * 60 * 1000
+
+/** Foreground ticker period. A tick without an expired interval performs no network request. */
+internal const val FOREGROUND_TICK_MILLIS = 60L * 1000
+
 internal interface UpdateCheckStore {
-    var checkedDay: String
+    /** Wall-clock millis of the last successful check; 0 while unknown or never checked. */
+    var checkedAt: Long
     var cachedRelease: AppRelease?
     var dismissedPrompt: String
 }
 
-/** Process lifetime, shared by foreground, settings and announcement links. No autonomous downloads. */
+/**
+ * Process lifetime, shared by foreground, settings and announcement links. No autonomous downloads.
+ *
+ * An automatic check is due when no valid candidate is cached, when the persisted success time is
+ * missing or ahead of the clock, or when one [UPDATE_CHECK_INTERVAL_MILLIS] has elapsed since the
+ * last success. [foreground] performs the due check and keeps re-checking while the Activity stays
+ * visible; [background] stops that ticker, so no service, worker or extra dependency runs on.
+ */
 internal class AppUpdateCoordinator(
     private val source: ReleaseSource,
     private val store: UpdateCheckStore,
@@ -46,8 +65,13 @@ internal class AppUpdateCoordinator(
     private val installedVersion: String,
     private val compatible: Boolean,
     private val verify: (File, AppRelease) -> Unit,
+    /** Kept only to de-duplicate the "later" prompt of one version within a local day. */
     private val day: () -> String = { LocalDate.now().toString() },
+    /** Monotonic clock for the same-process failure backoff. */
     private val elapsed: () -> Long = { System.nanoTime() / 1_000_000 },
+    /** Wall clock. A success time ahead of it is treated as due again. */
+    private val now: () -> Long = { System.currentTimeMillis() },
+    private val tickMillis: Long = FOREGROUND_TICK_MILLIS,
 ) {
     private val mutable = MutableStateFlow(AppUpdateState(compatible = compatible))
     val state = mutable.asStateFlow()
@@ -55,6 +79,36 @@ internal class AppUpdateCoordinator(
     private val downloader = ReleaseDownloader(directory, source)
     private var lastFailure: Long? = null
     private var download: Deferred<File?>? = null
+    private var ticker: Job? = null
+
+    /** Foreground entry: one due check now, then a repeated due check for as long as it is visible. */
+    fun foreground() {
+        if (ticker?.isActive == true) return
+        ticker = scope.launch {
+            while (true) {
+                check().join()
+                delay(tickMillis)
+            }
+        }
+    }
+
+    /** Leaves the foreground; the ticker stops and is not replaced by any background mechanism. */
+    fun background() {
+        ticker?.cancel()
+        ticker = null
+    }
+
+    /**
+     * Shows the persisted candidate again without any network access, which is what the installer
+     * path needs after process recreation. An in-flight check or download is never overwritten.
+     */
+    fun restore() = scope.launch {
+        if (!operation.tryLock()) return@launch
+        try {
+            if (mutable.value.phase in setOf(UpdatePhase.CHECKING, UpdatePhase.DOWNLOADING, UpdatePhase.VERIFYING)) return@launch
+            store.cachedRelease?.let { showRelease(it, day(), false) }
+        } finally { operation.unlock() }
+    }
 
     fun check(manual: Boolean = false) = scope.launch {
         if (!operation.tryLock()) return@launch
@@ -62,16 +116,16 @@ internal class AppUpdateCoordinator(
             val today = day()
             val cached = store.cachedRelease
             if (mutable.value.phase == UpdatePhase.IDLE && cached != null) showRelease(cached, today, false)
-            if (!manual && store.checkedDay == today && cached != null) {
-                return@launch
-            }
+            // The interval throttles automatic checks only. A manual click always queries, and a
+            // missing candidate or a record without a trustworthy success time is always due.
+            if (!manual && !due(cached)) return@launch
             val failureAt = lastFailure
-            if (!manual && failureAt != null && elapsed() - failureAt in 0 until 15 * 60 * 1000) return@launch
+            if (!manual && failureAt != null && elapsed() - failureAt in 0 until UPDATE_FAILURE_BACKOFF_MILLIS) return@launch
             mutable.update { it.copy(phase = UpdatePhase.CHECKING, message = "正在检查正式版本…") }
             val release = withContext(Dispatchers.IO) { source.latest().validate() }
-            // A failed request never records a successful day or overwrites the last valid candidate.
+            // A failed request never records a success time or overwrites the last valid candidate.
             store.cachedRelease = release
-            store.checkedDay = today
+            store.checkedAt = now()
             lastFailure = null
             showRelease(release, today, manual)
         } catch (cancelled: CancellationException) {
@@ -83,8 +137,20 @@ internal class AppUpdateCoordinator(
         } finally { operation.unlock() }
     }
 
+    /**
+     * A stored success time that lies in the future, including one produced before the device clock
+     * was rolled back, must never suppress checks for hours: any negative elapsed span is due.
+     */
+    private fun due(cached: AppRelease?): Boolean {
+        if (cached == null) return true
+        val lastSuccess = store.checkedAt
+        if (lastSuccess <= 0L) return true
+        val since = now() - lastSuccess
+        return since < 0L || since >= UPDATE_CHECK_INTERVAL_MILLIS
+    }
+
     private fun showRelease(release: AppRelease?, today: String, manual: Boolean) {
-        val candidate = release?.validate()?.takeIf { ReleaseVersion.parse(it.version) > ReleaseVersion.parse(installedVersion) }
+        val candidate = release?.validate()?.takeIf { isNewerThanInstalled(it.version, installedVersion) }
         if (candidate == null) {
             mutable.value = AppUpdateState(message = "当前已是最新正式版本。", prompt = manual, compatible = compatible)
             return

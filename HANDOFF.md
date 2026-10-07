@@ -3,7 +3,7 @@
 
 # 项目交接
 
-最后更新：2026-10-06T11:29:47+08:00（UTC+8；输入、压缩与设备访问修复交付中）。项目根目录：E:/mobileAgentRuntime。
+最后更新：2026-10-07（UTC+8；v1.1.3 已发布；1.1.4preview 修复、完整源码门禁和测试 APK 编译完成，待仅本地提交授权后正式签名，禁止发布 GitHub）。项目根目录：E:/mobileAgentRuntime。
 
 按 [agent.md 第 1 节](agent.md#1-按任务读取与开工) 选择资料。现行规则见 agent.md；本文件记录现场和待办，历史任务中的授权不自动延续。
 
@@ -23,6 +23,8 @@
 - 完整证据：[2026-09-18 文档管线复审 R1–R5 收口](docs/evidence/2026-09-18/document-pipeline-r1-r5-closeout.md)。
 
 ## 1. 现行状态与当前任务
+
+- **当前任务：2026-10-07 本地 1.1.4preview 正式签名候选（源码修复完成，待仅本地提交授权）**：修复六图分析 HTTP200 后 REASONING_EXHAUSTED：分析请求继承手动/AUTO输出预算、别名和参数层；JSON指令、空结构成功前拒绝已补，0/false有效。保留16,000字符/64图总量/8图每组/授权/无重放。每小时自动检查更新、前台60秒到期判断、后台停循环、成功时间持久化、15分钟失败退避和手动越过节流；安装恢复不换联网候选，全部安装校验保留。preview可发现同号或更高的纯数字正式版，远端preview拒绝，同证书且code严格递增；本包code9，下一公开正式版至少code10。隔离工作树 C:/Users/32735/.codex/worktrees/kb-output-v1-1-4/mobileAgentRuntime 基于63e5422，仅18项任务文件；strict/offline完整源码门禁及测试APK编译通过，JUnit变体执行2169/2169（Runtime93、Provider279、App三变体各279，预算新增8方法、更新23方法），独立DSH Flash最终复审17:20（UTC+8）APPROVE；CodeGraph同步完成，REUSE快照通过且最终文档同步后复核。根main及42个未共享文档原WIP哈希保留，未提交/推送/合并/发布。正式releaseGate要求干净源码，待用户明确授权仅本地提交后执行签名及成品核验；不上传GitHub、不对外分发。证据见[本轮证据](docs/evidence/2026-10-07/visual-analysis-output-budget.md)及.private/reasoning-output-20261007/。未连接设备，真实Provider、手机升级和长稳留待用户测试；本轮没有未完成源码工作。
 
 - **2026-10-06 v1.1.2 知识库、对话归档与常驻 ADB（源码与专项验证通过，待发布，Codex 主协调者）**：用户授权修复、提交推送普通合并及发布，并明确要求自有设备常驻服务、不依赖 Shizuku。知识库续轮、推理重放与隐私、Schema30 归档及准入修复已验证；USB 电脑工具负责显式激活，手机自有 shell UID 2000 服务通过固定 App UID、单次令牌、短时挑战与 HMAC/Keystore 认证。本轮不因拔线、电脑退出或客户端关闭主动撤权，实际服务死亡会关闭执行入口；危险模式和能力授权仍独立。独立源码复查 APPROVE；API34 模拟器负向10、生命周期7、非 debug 智能体1、目录代际1与权限回归36均通过；严格完整门禁、JUnit 2119次变体执行零失败/错误/跳过、REUSE 926/926通过；正式发布另行记录，物理 USB/OEM 和真实付费 Provider 未验收。见 docs/evidence/2026-10-06/kb-and-conversation-archive.md 与 resident-adb-activation.md。私人附件与 receipts 不进入提交；既有后台/CI/视频与共享文档 WIP 保留，本地 main 不额外同步远端。尚未发布。
 

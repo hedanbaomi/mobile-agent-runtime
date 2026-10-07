@@ -36,6 +36,14 @@ internal data class ReleaseVersion(val major: Int, val minor: Int, val patch: In
     }
 }
 
+/** A local preview can upgrade to its same-patch stable release; release feeds remain stable-only. */
+internal fun isNewerThanInstalled(candidate: String, installed: String): Boolean {
+    val release = ReleaseVersion.parse(candidate)
+    val preview = installed.endsWith("preview")
+    val baseline = ReleaseVersion.parse(if (preview) installed.removeSuffix("preview") else installed)
+    return release > baseline || (preview && release == baseline)
+}
+
 @Serializable
 internal data class AppRelease(
     val version: String,

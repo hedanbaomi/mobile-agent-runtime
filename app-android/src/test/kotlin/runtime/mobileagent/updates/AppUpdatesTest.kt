@@ -25,18 +25,22 @@ import java.util.concurrent.TimeUnit
 class AppUpdatesTest {
     @TempDir lateinit var temp: Path
     private val bytes = ByteArray(200_000) { (it % 251).toByte() }
+
+    /** Controllable wall clock; the automatic interval is measured against it. */
+    @Volatile private var clock = 1_750_000_000_000L
+
     private fun release(version: String = "1.0.3", content: ByteArray = bytes) = AppRelease(
         version, "$RELEASE_REPOSITORY/releases/download/v$version/mobileAgentRuntime-v$version-arm64-v8a.apk",
         content.size.toLong(), MessageDigest.getInstance("SHA-256").digest(content).joinToString("") { "%02x".format(it) },
     )
     private class Store : UpdateCheckStore {
-        override var checkedDay = ""
+        override var checkedAt = 0L
         override var cachedRelease: AppRelease? = null
         override var dismissedPrompt = ""
     }
     private inner class Source : ReleaseSource {
-        var calls = 0
-        var downloads = 0
+        @Volatile var calls = 0
+        @Volatile var downloads = 0
         var fail = false
         var content = bytes
         var candidate = release()
@@ -59,8 +63,16 @@ class AppUpdatesTest {
         }
     }
     private fun coordinator(source: Source, store: Store, scope: CoroutineScope, day: () -> String = { "2026-10-06" },
-        elapsed: () -> Long = { 0 }, compatible: Boolean = true, verify: (File, AppRelease) -> Unit = { _, _ -> }) =
-        AppUpdateCoordinator(source, store, scope, temp.resolve("updates").toFile(), "1.0.2", compatible, verify, day, elapsed)
+        elapsed: () -> Long = { 0 }, now: () -> Long = { clock }, tickMillis: Long = FOREGROUND_TICK_MILLIS,
+        compatible: Boolean = true, verify: (File, AppRelease) -> Unit = { _, _ -> }) =
+        AppUpdateCoordinator(source, store, scope, temp.resolve("updates").toFile(), "1.0.2", compatible, verify, day, elapsed, now, tickMillis)
+
+    /** Waits for a background ticker without pinning any specific scheduling latency. */
+    private fun awaitCalls(source: Source, expected: Int) {
+        val deadline = System.nanoTime() + 10_000_000_000L
+        while (source.calls < expected && System.nanoTime() < deadline) Thread.sleep(5)
+        assertTrue(source.calls >= expected, "expected at least $expected release calls, saw ${source.calls}")
+    }
 
     @Test fun integerVersionsAndStrictStableTags() {
         assertTrue(ReleaseVersion.parse("1.0.10") > ReleaseVersion.parse("1.0.9"))
@@ -68,6 +80,36 @@ class AppUpdatesTest {
         for (bad in listOf("v1.0.2", "1.0", "1.0.3-beta", "01.0.3", "1.0.999999999999", "-1.0.0")) {
             assertThrows(IllegalArgumentException::class.java) { ReleaseVersion.parse(bad) }
         }
+    }
+
+    @Test fun previewInstallationFindsSamePatchStableWithoutAcceptingPreviewFeeds() = runBlocking<Unit> {
+        val source = Source().apply { candidate = release("1.1.3") }
+        val store = Store()
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        try {
+            val updates = AppUpdateCoordinator(source, store, scope, temp.resolve("preview-updates").toFile(),
+                "1.1.4preview", true, { _, _ -> }, now = { clock })
+            updates.check(manual = true).join()
+            assertEquals(UpdatePhase.IDLE, updates.state.value.phase)
+            source.candidate = release("1.1.4")
+            updates.check(manual = true).join()
+            assertEquals(UpdatePhase.AVAILABLE, updates.state.value.phase)
+            assertEquals("1.1.4", updates.state.value.release?.version)
+
+            val installed = ApkIdentity("runtime.mobileagent", "1.1.4preview", 9, setOf("same-signer"), 26)
+            val candidate = installed.copy(versionName = "1.1.4", versionCode = 10)
+            verifyApkIdentity(installed, candidate, source.candidate, 34)
+            assertThrows(IllegalArgumentException::class.java) { verifyApkIdentity(installed, candidate.copy(versionCode = 9), source.candidate, 34) }
+            assertFalse(isNewerThanInstalled("1.1.4", "1.1.4"))
+            assertFalse(isNewerThanInstalled("1.1.3", "1.1.4preview"))
+            assertTrue(isNewerThanInstalled("1.1.5", "1.1.4preview"))
+            for (invalid in listOf("1.1.4-beta", "1.1.4previewpreview", "01.1.4preview", "preview")) {
+                assertThrows(IllegalArgumentException::class.java) { isNewerThanInstalled("1.1.4", invalid) }
+            }
+            assertThrows(IllegalArgumentException::class.java) { ReleaseVersion.parse("1.1.4preview") }
+            assertThrows(IllegalArgumentException::class.java) { release("1.1.4preview").validate() }
+            assertThrows(Exception::class.java) { parseLatestRelease(apiBody(release("1.1.4preview"))) }
+        } finally { scope.cancel() }
     }
 
     private fun apiBody(candidate: AppRelease = release(), draft: Boolean = false, prerelease: Boolean = false,
@@ -108,53 +150,142 @@ class AppUpdatesTest {
         }
     }
 
-    @Test fun oncePerLocalDayManualBypassAndRecreationKeepCandidate() = runBlocking {
+    @Test fun automaticChecksRepeatOnlyAfterOneHour() = runBlocking {
+        val source = Source(); val store = Store()
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        try {
+            val updates = coordinator(source, store, scope)
+            updates.check().join()
+            assertEquals(1, source.calls); assertEquals(clock, store.checkedAt)
+            clock += UPDATE_CHECK_INTERVAL_MILLIS - 1
+            updates.check().join()
+            assertEquals(1, source.calls)                       // 59:59.999 is still inside the interval
+            clock += 1
+            updates.check().join()
+            assertEquals(2, source.calls)                       // exactly one hour is due again
+            assertEquals(clock, store.checkedAt)
+            assertEquals("1.0.3", updates.state.value.release?.version)
+            assertEquals(0, source.downloads)                   // a check never starts a download
+        } finally { scope.cancel() }
+    }
+
+    @Test fun successfulTimeSurvivesProcessRecreationAndRestoreNeedsNoNetwork() = runBlocking {
+        val source = Source(); val store = Store()
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        try {
+            coordinator(source, store, scope).check().join()
+            assertEquals(1, source.calls)
+            // A fresh coordinator is what a restarted process builds; the persisted success applies.
+            val restored = coordinator(source, store, scope)
+            restored.check().join()
+            assertEquals(1, source.calls)
+            // The installer path restores the persisted candidate without another network request.
+            restored.restore().join()
+            assertEquals("1.0.3", restored.state.value.release?.version)
+            assertEquals(1, source.calls)
+            clock += UPDATE_CHECK_INTERVAL_MILLIS
+            restored.check().join()
+            assertEquals(2, source.calls)
+        } finally { scope.cancel() }
+    }
+
+    @Test fun manualChecksAlwaysBypassTheHourlyInterval() = runBlocking {
+        val source = Source(); val store = Store()
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        try {
+            val updates = coordinator(source, store, scope)
+            updates.check().join(); updates.check(manual = true).join()
+            assertEquals(2, source.calls)
+            updates.check(manual = true).join()
+            assertEquals(3, source.calls)
+            clock += UPDATE_CHECK_INTERVAL_MILLIS
+            updates.check().join()
+            assertEquals(4, source.calls)
+        } finally { scope.cancel() }
+    }
+
+    @Test fun dismissedVersionDoesNotPromptAgainTheSameDayButDoesTheNextDay() = runBlocking {
         val source = Source(); val store = Store(); var today = "2026-10-06"
         val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
         try {
             val updates = coordinator(source, store, scope, day = { today })
-            updates.check().join(); updates.check().join()
-            assertEquals(1, source.calls); assertTrue(updates.state.value.prompt)
-            assertEquals(0, source.downloads)
+            updates.check().join()
+            assertTrue(updates.state.value.prompt)
             updates.dismiss()
+            assertEquals("$today:1.0.3", store.dismissedPrompt)
+            // The next due check one hour later keeps the candidate without prompting again.
+            clock += UPDATE_CHECK_INTERVAL_MILLIS
+            updates.check().join()
+            assertEquals(2, source.calls)
+            assertEquals("1.0.3", updates.state.value.release?.version)
+            assertFalse(updates.state.value.prompt)
+            // A restarted process inside the same day still does not re-prompt for the same version.
             val restored = coordinator(source, store, scope, day = { today })
             restored.check().join()
-            assertEquals(1, source.calls); assertEquals("1.0.3", restored.state.value.release?.version)
+            assertEquals(2, source.calls)
+            assertEquals("1.0.3", restored.state.value.release?.version)
             assertFalse(restored.state.value.prompt)
-            restored.check(manual = true).join()
-            assertEquals(2, source.calls); assertTrue(restored.state.value.prompt)
-            today = "2026-10-07"; restored.check().join()
+            // A new local day offers the same version again at the next due check.
+            today = "2026-10-07"
+            clock += UPDATE_CHECK_INTERVAL_MILLIS
+            restored.check().join()
             assertEquals(3, source.calls)
+            assertTrue(restored.state.value.prompt)
         } finally { scope.cancel() }
     }
 
-    @Test fun clockRollbackChecksAgainAndCorruptDailyCacheDoesNotClaimLatest() = runBlocking {
-        val source = Source(); val store = Store(); var today = "2026-10-07"
+    @Test fun futureOrRolledBackSuccessTimeNeverBlocksChecksPermanently() = runBlocking {
+        val source = Source(); val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        try {
+            // A record written while the device clock was ahead must not suppress checks after correction.
+            val store = Store().apply { cachedRelease = release(); checkedAt = clock + 86_400_000L }
+            val updates = coordinator(source, store, scope)
+            updates.check().join()
+            assertEquals(1, source.calls)
+            // A clock rollback puts the stored success in the future; the check is due, not blocked.
+            store.checkedAt = clock + 3_600_000L
+            updates.check().join()
+            assertEquals(2, source.calls)
+            // The success above rewrote a trustworthy time, so the hourly interval applies again.
+            clock += 1_000
+            updates.check().join()
+            assertEquals(2, source.calls)
+        } finally { scope.cancel() }
+    }
+
+    @Test fun missingCandidateOrLegacyDayOnlyRecordIsImmediatelyDueAgain() = runBlocking {
         val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
         try {
-            val updates = coordinator(source, store, scope, day = { today })
-            updates.check().join(); today = "2026-10-06"; updates.check().join()
-            assertEquals(2, source.calls)
-            store.cachedRelease = null
-            updates.check().join(); assertEquals(3, source.calls)
+            // A record written by the previous day-based scheme has no success time at all.
+            val legacySource = Source()
+            val legacy = Store().apply { cachedRelease = release(); checkedAt = 0L }
+            val upgraded = coordinator(legacySource, legacy, scope)
+            upgraded.check().join()
+            assertEquals(1, legacySource.calls)
+            assertEquals(clock, legacy.checkedAt)
+            // A missing candidate is due again even when a success time is present.
+            val emptySource = Source()
+            coordinator(emptySource, Store().apply { checkedAt = clock }, scope).check().join()
+            assertEquals(1, emptySource.calls)
         } finally { scope.cancel() }
     }
 
-    @Test fun failuresPreserveCacheDoNotRecordDayAndManualBypassesBackoff() = runBlocking {
-        val source = Source(); val store = Store(); var time = 0L
-        store.cachedRelease = release("1.0.4"); source.fail = true
+    @Test fun failuresPreserveCacheDoNotRecordSuccessTimeAndManualBypassesBackoff() = runBlocking {
+        val source = Source(); var time = 0L
+        val store = Store().apply { cachedRelease = release("1.0.4") }
+        source.fail = true
         val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
         try {
             val updates = coordinator(source, store, scope, elapsed = { time })
             updates.check().join(); updates.check().join()
-            assertEquals(1, source.calls); assertEquals("", store.checkedDay)
+            assertEquals(1, source.calls); assertEquals(0L, store.checkedAt)
             assertEquals("1.0.4", store.cachedRelease?.version)
             assertEquals("1.0.4", updates.state.value.release?.version)
             assertFalse(updates.state.value.prompt)
             updates.check(manual = true).join(); assertEquals(2, source.calls)
-            source.fail = false; time = 15 * 60 * 1000L
+            source.fail = false; time = UPDATE_FAILURE_BACKOFF_MILLIS
             updates.check().join(); assertEquals(3, source.calls)
-            assertEquals("2026-10-06", store.checkedDay)
+            assertEquals(clock, store.checkedAt)
         } finally { scope.cancel() }
     }
 
@@ -169,6 +300,46 @@ class AppUpdatesTest {
             assertEquals(1, source.calls)
             source.gate!!.countDown(); first.join()
         } finally { source.gate?.countDown(); scope.cancel() }
+    }
+
+    @Test fun automaticCheckNeverClobbersAnActiveDownload() = runBlocking {
+        val source = Source().apply { downloadGate = CountDownLatch(1) }
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        try {
+            val updates = coordinator(source, Store(), scope)
+            updates.check().join()
+            val download = updates.downloadOrReady()
+            assertTrue(source.downloadEntered.await(5, TimeUnit.SECONDS))
+            clock += 3 * UPDATE_CHECK_INTERVAL_MILLIS
+            updates.check().join()
+            updates.check(manual = true).join()
+            assertEquals(UpdatePhase.DOWNLOADING, updates.state.value.phase)
+            assertEquals(1, source.calls)
+            source.downloadGate!!.countDown()
+            assertNotNull(download.await())
+        } finally { source.downloadGate?.countDown(); scope.cancel() }
+    }
+
+    @Test fun foregroundTickerChecksWhenDueAndStopsAfterBackground() = runBlocking {
+        val source = Source()
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        try {
+            val updates = coordinator(source, Store(), scope, tickMillis = 10)
+            updates.foreground()
+            awaitCalls(source, 1)
+            Thread.sleep(80)                                     // ticks inside the interval stay free
+            assertEquals(1, source.calls)
+            clock += UPDATE_CHECK_INTERVAL_MILLIS                // the hour expires while still visible
+            awaitCalls(source, 2)
+            updates.background()
+            Thread.sleep(300)
+            val settled = source.calls
+            clock += UPDATE_CHECK_INTERVAL_MILLIS
+            Thread.sleep(300)
+            assertEquals(settled, source.calls)                  // no tick survives leaving the foreground
+            updates.foreground()                                 // returning foregrounds a due check again
+            awaitCalls(source, settled + 1)
+        } finally { scope.cancel() }
     }
 
     @Test fun equalAndOlderVersionsNeverOfferDownload() = runBlocking {

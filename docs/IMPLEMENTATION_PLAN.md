@@ -107,7 +107,7 @@ Cloudflare 只承载公告及其必要管理/统计，**不是模型代理或知
 | Python | CPython 官方 Android 嵌入包 3.14.x，固定已测版本 | 必须先验证 isolated service 内加载、FD、Binder、销毁；不能用普通子进程冒充 |
 | 后台导入 | 用户可见前台任务；WorkManager 补偿 | 不承诺后台无限运行；适配当期 SDK 的服务类型、启动条件与时限 |
 | 公告 | Worker + D1 + 管理 UI | 独立资源；定向、签名、离线及关闭统计仍可读公告 |
-| 应用更新 | 固定 GitHub stable Release + Android 系统安装器 | R36/ADR-0025：每日首开查询，主动下载，校验哈希/包名/版本/当前签名/设备后由系统确认；独立公告和 Provider，见 [APP_UPDATES.md](APP_UPDATES.md) |
+| 应用更新 | 固定 GitHub stable Release + Android 系统安装器 | R36/ADR-0025：v1.1.4preview 起每小时到期检查、前台定时/恢复触发，主动下载，校验哈希/包名/版本/当前签名/设备后由系统确认；独立公告和 Provider，见 [APP_UPDATES.md](APP_UPDATES.md) |
 
 各依赖精确版本、下载来源、校验值、ABI、许可与验证结果记录在版本目录/锁文件及 ADR。Android 最低版本与原生依赖冲突时停止该集成并提出方案，不擅自提高最低系统版本或删除功能。
 
@@ -195,6 +195,8 @@ Agent 的 embeddingProfileId 是新建/选择索引的偏好，不可覆盖已�
 ### 6.1 Provider adapter
 
 2026-10-07 图片传输补充（R02/R08/R34、K04/K08）：未指定图片预算时 Run 总上限64张，单次8张/16MiB，每张2MiB，显式较小总预算保留。原图采用授权元数据引用，当前组并行加载、各组串行调用同一模型；成功结果带来源标识作为不可信证据交主请求综合，并持久化哈希防止续轮重复原图。每组均计请求/时间/输入/用量，派发前复核授权，未知结果不自动重放。能力采用 acceptsImages()；降级卡显示具体原因。见 [ADR-0030](adr/0030-request-scoped-visual-budget.md) 与 [本轮证据](evidence/2026-10-07/visual-transfer.md)。
+
+2026-10-07 输出预算修正（同上需求）：每组原图分析继承主请求参数层、输出上限与别名，AUTO 不杜撰 1024 上限；手动较小预算仍生效，thinking/reasoning 与 JSON 等响应格式不被清空。分析正文沿用 16,000 字符限额，图数/字节/权限/Run 用量及无重放约束保持生效。详见 [修复证据](evidence/2026-10-07/visual-analysis-output-budget.md)。
 
 2026-10-06 工具续轮补充（R02/R08/R12/R34）：同一 assistant 工具批次先连续提交全部工具结果，再提交搜索返回的视觉证据；旧完整批次只在请求投影中修复顺序。Chat 工具请求按 Provider 显式返回的推理独立重放 `reasoning_content`，保留空白且计入输入预算；不得由回答推测推理。无工具 Chat 与 Responses 不重放该字段，不因此受历史推理上限阻断。请求预览脱敏、诊断删除该字段；`PROVIDER_REJECTED` 显示明确错误而非 INTERNAL，不自动重试。协议和边界见 [ADR-0027](adr/0027-visual-tool-batches-and-reasoning-replay.md)。
 

@@ -40,6 +40,10 @@ import java.util.zip.ZipOutputStream
 @RunWith(AndroidJUnit4::class)
 class AppUpdateDeviceTest {
     private val app: MobileAgentApp get() = ApplicationProvider.getApplicationContext()
+    /** An older synthetic stable candidate suppresses unrelated update UI, including on a local preview. */
+    private fun appRelease() = AppRelease("0.0.0",
+        "$RELEASE_REPOSITORY/releases/download/v0.0.0/mobileAgentRuntime-v0.0.0-arm64-v8a.apk",
+        1, "0".repeat(64))
     @get:Rule(order = 0) val prepare = TestRule { base, _ -> object : Statement() {
         override fun evaluate() {
             app.ensureHostInitialized()
@@ -47,11 +51,8 @@ class AppUpdateDeviceTest {
             app.container.announcements.setStatsEnabled(false)
             // Suppress an unrelated automatic network check in UI fixtures without changing production code.
             val prefs = app.getSharedPreferences("app-updates", Context.MODE_PRIVATE)
-            val current = AppRelease(BuildConfig.VERSION_NAME,
-                "$RELEASE_REPOSITORY/releases/download/v${BuildConfig.VERSION_NAME}/mobileAgentRuntime-v${BuildConfig.VERSION_NAME}-arm64-v8a.apk",
-                1, "0".repeat(64))
             val store = PreferenceUpdateStore(prefs)
-            store.cachedRelease = current; store.checkedDay = LocalDate.now().toString()
+            store.cachedRelease = appRelease(); store.checkedAt = System.currentTimeMillis()
             base.evaluate()
         }
     } }
@@ -97,6 +98,42 @@ class AppUpdateDeviceTest {
             assertNotNull(app.packageManager.getPackageArchiveInfo(original.path, flags))
             assertNull(app.packageManager.getPackageArchiveInfo(tampered.path, flags))
         } finally { tampered.delete() }
+    }
+
+    @Test fun successTimePersistsAcrossStoreRecreationAndLegacyDayRecordCannotSuppressChecks() = runBlocking {
+        val prefs = app.getSharedPreferences("update-store-device-test", Context.MODE_PRIVATE)
+        prefs.edit().clear().commit()
+        val store = PreferenceUpdateStore(prefs)
+        assertEquals(0L, store.checkedAt)
+        store.checkedAt = 1_700_000_000_000L
+        // A second instance reads the same durable preference file, which is what a restarted process does.
+        assertEquals(1_700_000_000_000L, PreferenceUpdateStore(prefs).checkedAt)
+
+        // A record written before the hourly scheme stored only the local day, so it must not suppress a check.
+        prefs.edit().clear().commit()
+        val legacy = PreferenceUpdateStore(prefs)
+        legacy.cachedRelease = appRelease()
+        prefs.edit().putString("checked-day", LocalDate.now().toString()).commit()
+        val upgraded = PreferenceUpdateStore(prefs)
+        assertEquals(0L, upgraded.checkedAt)
+        assertEquals(appRelease().version, upgraded.cachedRelease?.version)
+
+        var calls = 0
+        val source = object : ReleaseSource {
+            override fun latest(): AppRelease { calls++; return appRelease() }
+            override fun openApk(release: AppRelease) = ByteArrayInputStream(ByteArray(0))
+        }
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+        try {
+            val updates = AppUpdateCoordinator(source, upgraded, scope, File(app.filesDir, "app-updates"),
+                BuildConfig.VERSION_NAME, true, { _, _ -> })
+            updates.check(manual = true).join()
+            assertEquals(1, calls)
+            assertTrue(upgraded.checkedAt > 0L)
+            // The same timestamp then throttles the automatic check for one hour.
+            updates.check().join()
+            assertEquals(1, calls)
+        } finally { scope.cancel() }
     }
 
     @Test fun liveOfficialReleaseCanBeCheckedWithoutAnnouncements() = runBlocking {

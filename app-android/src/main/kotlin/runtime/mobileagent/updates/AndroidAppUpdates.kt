@@ -16,9 +16,15 @@ import java.security.MessageDigest
 import java.util.zip.ZipFile
 
 internal class PreferenceUpdateStore(private val preferences: SharedPreferences) : UpdateCheckStore {
-    override var checkedDay: String
-        get() = preferences.getString("checked-day", "").orEmpty()
-        set(value) { check(preferences.edit().putString("checked-day", value).commit()) }
+    /**
+     * Durable across processes and app restarts, so a restart inside the interval does not re-check.
+     * Records written by the earlier day-based scheme stored only `checked-day`; that key is
+     * deliberately not read, so an upgraded install performs its first check immediately. A missing
+     * or unreadable value reads as 0, which is always due again instead of blocking checks forever.
+     */
+    override var checkedAt: Long
+        get() = runCatching { preferences.getLong("checked-at", 0L) }.getOrDefault(0L).coerceAtLeast(0L)
+        set(value) { check(preferences.edit().putLong("checked-at", value).remove("checked-day").commit()) }
     override var cachedRelease: AppRelease?
         get() = runCatching {
             Json.decodeFromString(AppRelease.serializer(), preferences.getString("release", "").orEmpty()).validate()
@@ -38,7 +44,7 @@ internal fun verifyApkIdentity(installed: ApkIdentity, candidate: ApkIdentity, r
     require(candidate.packageName == installed.packageName)
     require(candidate.versionName == release.version)
     require(candidate.versionCode > installed.versionCode)
-    require(ReleaseVersion.parse(release.version) > ReleaseVersion.parse(requireNotNull(installed.versionName)))
+    require(isNewerThanInstalled(release.version, requireNotNull(installed.versionName)))
     require(candidate.signers.isNotEmpty() && candidate.signers == installed.signers)
     require(candidate.minSdk <= sdk)
 }

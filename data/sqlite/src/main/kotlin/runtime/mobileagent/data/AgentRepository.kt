@@ -63,7 +63,7 @@ class AgentRepository(
         val current = get(profile.id) ?: throw invalid("Agent ${profile.id} does not exist")
         if (profile.revision < current.revision) throw invalid("Agent revision is older than the stored revision")
         requirePrompt(profile.promptRevisionId, profile.id)
-        requireBindings(profile)
+        requireBindings(profile, current.skillIds.toSet())
         db.execute(
             "UPDATE agent_profiles SET name=?,prompt_revision_id=?,chat_profile_id=?,vision_profile_id=?,embedding_profile_id=?,reranker_profile_id=?,knowledge_base_ids=?,skill_ids=?,retrieval_mode=?,revision=?,parameter_overrides_json=?,context_policy_json=?,permission_settings_json=? WHERE id=?",
             listOf(
@@ -119,7 +119,7 @@ class AgentRepository(
             createdAt = clock(),
         )
         val saved = profile.copy(promptRevisionId = prompt.id, revision = nextRevision)
-        requireBindings(saved)
+        requireBindings(saved, existing?.skillIds.orEmpty().toSet())
         db.execute(
             "INSERT INTO prompt_revisions(id,agent_id,parent_revision_id,template,allowed_variables,created_at) VALUES(?,?,?,?,?,?)",
             listOf(prompt.id, prompt.agentId, prompt.parentRevisionId, prompt.template, json.encodeToString(prompt.allowedVariables.toList().sorted()), prompt.createdAt),
@@ -216,7 +216,7 @@ class AgentRepository(
         vision?.let { requireVision(it) }
         embedding?.let { requireRole(it, ModelRole.EMBEDDING, "embedding") }
         reranker?.let { requireRole(it, ModelRole.RERANKER, "reranker") }
-        requireBindings(agent)
+        val activeSkillIds = requireBindings(agent, agent.skillIds.toSet())
         requireReference("snapshot", snapshotId, db.query("SELECT id FROM agent_snapshots WHERE id=?", listOf(snapshotId)).isEmpty())
         val bindingManifest = buildJsonObject {
             put("schemaVersion", SchemaVersion.CURRENT)
@@ -247,7 +247,7 @@ class AgentRepository(
             put("contextPolicyJson", agent.contextPolicyJson)
             put("permissionSettingsJson", agent.permissionSettingsJson)
             putJsonArray("knowledgeBaseIds") { agent.knowledgeBaseIds.forEach(::add) }
-            putJsonArray("skillIds") { agent.skillIds.forEach(::add) }
+            putJsonArray("skillIds") { activeSkillIds.forEach(::add) }
         }.toString()
         val expanded = buildJsonObject {
             put("schemaVersion", SchemaVersion.CURRENT)
@@ -261,7 +261,7 @@ class AgentRepository(
             chatModelId = chat.id,
             providerRevision = provider.revision,
             knowledgeBaseIds = agent.knowledgeBaseIds,
-            skillIds = agent.skillIds,
+            skillIds = activeSkillIds,
             createdAt = at,
             providerId = provider.id,
             chatModelRevision = chat.revision,
@@ -412,7 +412,8 @@ class AgentRepository(
         if (row.string("agent_id") != agentId) throw invalid("Prompt $promptId belongs to another agent")
     }
 
-    private fun requireBindings(profile: AgentProfile) {
+    /** Existing disabled associations retain intent, but only enabled installs enter new snapshots. */
+    private fun requireBindings(profile: AgentProfile, retainedSkillIds: Set<String> = emptySet()): List<String> {
         val chat = profiles.getModel(profile.chatProfileId) ?: throw invalid("Chat model ${profile.chatProfileId} does not exist")
         requireRole(chat, ModelRole.CHAT, "chat")
         profile.visionProfileId?.let {
@@ -432,12 +433,14 @@ class AgentRepository(
                 throw invalid("Knowledge base $id is missing or deleted")
             }
         }
-        profile.skillIds.forEach { id ->
-            val exists = db.query(
-                "SELECT i.install_id FROM skill_installs i JOIN skill_packages p ON p.package_hash=i.package_hash WHERE i.install_id=? AND i.enabled=1 LIMIT 1",
+        return profile.skillIds.filter { id ->
+            val install = db.query(
+                "SELECT i.enabled FROM skill_installs i JOIN skill_packages p ON p.package_hash=i.package_hash WHERE i.install_id=? LIMIT 1",
                 listOf(id),
-            ).isNotEmpty()
-            if (!exists) throw invalid("Skill install $id is missing or disabled")
+            ).singleOrNull() ?: throw invalid("Skill install $id is missing or disabled")
+            val enabled = install.long("enabled") != 0L
+            if (!enabled && id !in retainedSkillIds) throw invalid("Skill install $id is missing or disabled")
+            enabled
         }
     }
 

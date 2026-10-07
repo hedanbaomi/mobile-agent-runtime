@@ -32,3 +32,5 @@ FileProvider 非 exported，仅暴露更新目录；只向系统安装程序的�
 每次正式发布沿用同一签名，递增 code 和 stable tag；上传固定命名 APK 并等待 GitHub 生成 SHA-256 digest，再将完整 release 公开为 latest stable。Draft 不提供给更新检查。签名、源码、SBOM、provenance 和校验附件仍按 [发布规范](RELEASING.md) 验证。Android 系统或网络失败不能阻塞聊天、知识库、技能和公告。
 
 依据：[GitHub Releases API](https://docs.github.com/en/rest/releases/releases#get-the-latest-release)、[Android 安装来源许可](https://developer.android.com/reference/android/content/pm/PackageManager#canRequestPackageInstalls())、[FileProvider](https://developer.android.com/training/secure-file-sharing/setup-sharing)。
+
+2026-10-07 本地人工核验版本为 `1.1.4.1preview` / versionCode `10`。第四数值段仅用于本地 preview 迭代；stable feed 仍严格采用三段版本且拒绝 preview。后续同 patch 正式版可升级，正式 versionCode 必须大于 10。此 preview 不创建公开 Release。

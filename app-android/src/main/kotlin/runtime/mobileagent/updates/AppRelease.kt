@@ -40,7 +40,11 @@ internal data class ReleaseVersion(val major: Int, val minor: Int, val patch: In
 internal fun isNewerThanInstalled(candidate: String, installed: String): Boolean {
     val release = ReleaseVersion.parse(candidate)
     val preview = installed.endsWith("preview")
-    val baseline = ReleaseVersion.parse(if (preview) installed.removeSuffix("preview") else installed)
+    val baseline = if (preview) {
+        val number = "(?:0|[1-9][0-9]{0,8})"
+        require(Regex("$number\\.$number\\.$number(?:\\.$number)?preview").matches(installed))
+        ReleaseVersion.parse(installed.removeSuffix("preview").split('.').take(3).joinToString("."))
+    } else ReleaseVersion.parse(installed)
     return release > baseline || (preview && release == baseline)
 }
 

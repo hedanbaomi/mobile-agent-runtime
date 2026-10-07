@@ -1171,11 +1171,15 @@ class RuntimeIntegration(
         python: ToolExecutor? = null,
     ): ToolExecutorFactory {
         val frozen = freezeContext(context)
+        // Attached Skill identity is only for Skill-owned tools (such as memory).
+        // Built-in Agent workspace tools must resolve the Agent's own grants again;
+        // changing only effectiveCapabilities would still select Skill grants at dispatch.
+        val agentContext = freezeContext(context.copy(skillId = null, skillRevision = null, trustedSkillEnvelope = false))
         val workspace = UnifiedWorkspaceToolExecutor(
             registry = workspaceRegistry,
             approvalEngine = approvalEngine,
             resolver = effectiveCapabilityResolver,
-            contextProvider = { frozen },
+            contextProvider = { agentContext },
             auditSink = auditSink,
             auditFuse = workspaceAuditFuse,
             dangerousModeProvider = { dangerousModeManager.policy() },
@@ -1195,7 +1199,7 @@ class RuntimeIntegration(
             approvalEngine = approvalEngine,
             // This is the built-in Agent tool. An attached Skill is not the
             // owner of its global Dangerous Mode consent or its audit identity.
-            contextProvider = { frozen.copy(skillId = null, skillRevision = null, trustedSkillEnvelope = false) },
+            contextProvider = { agentContext },
             backends = shellBackends.toMap(),
             resolver = effectiveCapabilityResolver,
             auditSink = auditSink,
@@ -1230,6 +1234,7 @@ class RuntimeIntegration(
      */
     fun toolExposureDiagnostics(context: ToolExecutionContext): RuntimeToolExposureDiagnostics {
         val frozen = freezeContext(context)
+        val agentContext = freezeContext(context.copy(skillId = null, skillRevision = null, trustedSkillEnvelope = false))
         val registeredIds = workspaceRegistry.descriptors().map { it.id }.toSet()
         val grantedIds = frozen.canonicalGrants.mapNotNull { it.workspaceId }.toSet()
         val boundIds = frozen.snapshotGrantBindings.mapNotNull { it.workspaceId }.toSet()
@@ -1277,8 +1282,8 @@ class RuntimeIntegration(
         val safOperationCapabilityCount = activeSafGrants.sumOf { grant ->
             workspaceRegistry.registered(grant.workspaceId)?.backend?.capabilities?.size ?: 0
         }
-        val effectiveAgentWorkspaceCapabilityCount = frozen.canonicalGrants.count { grant ->
-            grant.workspaceId != null && grant.skillInstallId == null && grant.capability in frozen.effectiveCapabilities
+        val effectiveAgentWorkspaceCapabilityCount = agentContext.canonicalGrants.count { grant ->
+            grant.workspaceId != null && grant.skillInstallId == null && grant.capability in agentContext.effectiveCapabilities
         }
         val effectiveSkillWorkspaceCapabilityCount = frozen.canonicalGrants.count { grant ->
             grant.workspaceId != null && grant.skillInstallId != null && grant.capability in frozen.effectiveCapabilities

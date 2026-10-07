@@ -145,6 +145,9 @@ interface ThreadWorkspaceRuntimePortProvider {
 
 private fun grantPortUnavailable(message: String): Nothing = error(message)
 
+internal fun activeSkillBindingCount(associatedIds: List<String>, enabledInstallIds: Set<String>): Int =
+    associatedIds.count { it in enabledInstallIds }
+
 private data class GrantUiData(
     val workspaces: List<AgentWorkspaceUi> = emptyList(),
     val grants: List<AgentGrantUi> = emptyList(),
@@ -436,6 +439,7 @@ class AgentsViewModel(
     fun reload() {
         val profiles = app.container.profiles
         val agents = app.container.agents.list()
+        val enabledSkillIds = loadGrantData(null).trustedSkills.filter { it.enabled && it.trusted }.map { it.installId }.toSet()
         val selected = state.value.selectedAgentId
             ?: savedStateHandle.get<String>(SELECTED_AGENT_KEY)
             ?: app.container.uiPreferences.getString("selected-agent", null)
@@ -445,7 +449,7 @@ class AgentsViewModel(
             agents = agents.map { agent ->
                 AgentCardUi(agent.id, agent.name, agent.revision,
                     profiles.getModel(agent.chatProfileId)?.modelId ?: "模型不可用",
-                    "${agent.knowledgeBaseIds.size} 个知识库 · ${agent.skillIds.size} 个 Skill")
+                    "${agent.knowledgeBaseIds.size} 个知识库 · ${activeSkillBindingCount(agent.skillIds, enabledSkillIds)} 个活动 Skill")
             },
             selectedAgentId = selectedId,
             summary = summary,
@@ -587,11 +591,7 @@ class AgentsViewModel(
     fun toggleResource(id: String, enabled: Boolean) {
         state.value.editor?.let { editor ->
             edit(editor.copy(resourceBindings = editor.resourceBindings.map {
-                if (it.id == id && it.selectable && (!enabled || it.available)) {
-                    // Once a stale disabled binding is removed, keep it unavailable so it
-                    // cannot be accidentally re-added without enabling the Skill first.
-                    it.copy(enabled = enabled, selectable = it.available || enabled)
-                } else it
+                if (it.id == id) it.withAssociation(enabled) else it
             }))
         }
     }
@@ -602,8 +602,14 @@ class AgentsViewModel(
             require(editor.name.isNotBlank()) { "请填写 Agent 名称。" }
             val model = editor.chatModelId ?: error("请选择 Chat 模型。")
             require(editor.retrievalMode in setOf("explicit", "automatic")) { "检索模式必须是 explicit 或 automatic。" }
-            require(editor.resourceBindings.none { it.type == "skill" && it.enabled && !it.available }) {
-                "存在已绑定但当前未启用的技能，请先在技能页启用后再保存。"
+            val retainedSkillIds = editor.id?.let { app.container.agents.get(it)?.skillIds }.orEmpty()
+            val retainedPausedSkillIds = editor.trustedSkills.filter {
+                !it.enabled && it.installId in retainedSkillIds
+            }.map { it.installId }.toSet()
+            require(editor.resourceBindings.none {
+                it.type == "skill" && it.enabled && !it.available && it.id !in retainedPausedSkillIds
+            }) {
+                "技能安装或授权信息不可用；新关联的技能必须先在技能页启用。"
             }
             val defaultChanged = editor.defaultWorkspaceId != editorBaseline?.defaultWorkspaceId
             val draftOwnsDefault = pendingWorkspaceDraft?.let { draft ->
@@ -901,16 +907,23 @@ class AgentsViewModel(
                 name = skill.name,
                 type = "skill",
                 enabled = bound,
-                // A disabled Skill cannot be newly selected, but an existing
-                // stale binding must remain removable so the editor is not trapped.
+                // enabled preserves association intent; checkbox activity also requires available.
+                // Paused associations remain removable without enabling the Skill.
                 selectable = (skill.enabled && skill.trusted) || bound,
                 available = skill.enabled && skill.trusted,
                 permissionSummary = when {
-                    !skill.enabled && bound -> "已绑定但当前未启用；请先在技能页启用后再保存"
+                    !skill.enabled && bound -> "已关联，禁用期间暂停；启用后新会话恢复，暂停期间创建的会话不会追加此技能"
                     !skill.enabled -> "未启用；请先在技能页启用后绑定"
                     !skill.trusted -> "包身份或 Skill 授权未验证"
                     else -> "执行仍受当前逐资源授权约束"
                 },
+            )
+        }
+        val missingSkills = agent?.skillIds.orEmpty().filter { id -> skills.none { it.id == id } }.map { installId ->
+            AgentResourceBindingUi(
+                id = installId, name = "Skill $installId", type = "skill", enabled = true,
+                selectable = true, available = false,
+                permissionSummary = "已关联，但安装或授权信息不可用；可取消关联，不能自动丢弃",
             )
         }
         val revisions = agent?.let { app.container.agents.listPromptRevisions(it.id) }.orEmpty()
@@ -925,7 +938,7 @@ class AgentsViewModel(
             parameters = agent?.parameterOverridesJson?.let { raw ->
                 runCatching { Json.parseToJsonElement(raw).jsonObject.mapValues { it.value.toString() } }.getOrDefault(emptyMap())
             }.orEmpty(),
-            resourceBindings = knowledge + skills,
+            resourceBindings = knowledge + skills + missingSkills,
             workspaces = grantData.workspaces,
             grants = grantData.grants,
             trustedSkills = grantData.trustedSkills,

@@ -49,8 +49,8 @@ class ModelInvokeRunAuthorizationTest {
         ).jsonObject
         assertFalse("maxModelTokens" in without.keys)
         assertEquals(8, without["maxModelRounds"]!!.jsonPrimitive.int)
-        assertEquals(20, without["maxToolCalls"]!!.jsonPrimitive.int)
-        assertEquals(180_000, without["maxRuntimeMs"]!!.jsonPrimitive.int)
+        assertEquals(100, without["maxToolCalls"]!!.jsonPrimitive.int)
+        assertEquals(1_800_000, without["maxRuntimeMs"]!!.jsonPrimitive.int)
         assertEquals(4, without["maxModelRoundsPerSegment"]!!.jsonPrimitive.int)
         assertEquals(2, without["maxCompactionsPerRun"]!!.jsonPrimitive.int)
 

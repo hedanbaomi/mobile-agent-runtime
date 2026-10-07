@@ -61,6 +61,9 @@ class ContextCompactionUiTest {
         compose.onNodeWithTag("agents.editor.context_policy.recommended").performScrollTo().assertIsDisplayed()
         screenshot("context-settings-basic.png")
         compose.onNodeWithTag(AgentTestTags.CONTEXT_POLICY_ADVANCED).performScrollTo().performClick()
+        compose.onNodeWithTag(AgentTestTags.CONTEXT_POLICY_HISTORY_MESSAGES).assertDoesNotExist()
+        compose.onNodeWithTag("agents.editor.context_policy.model_aware").performScrollTo().performClick()
+        compose.runOnIdle { assertEquals(false, editor.contextPolicyDraft.modelAwareCompaction) }
         compose.onNodeWithTag(AgentTestTags.CONTEXT_POLICY_HISTORY_MESSAGES).performScrollTo().performTextClearance()
         compose.runOnIdle { assertEquals("", editor.contextPolicyDraft.maxHistoryMessages) }
         compose.onNodeWithTag(AgentTestTags.CONTEXT_POLICY_HISTORY_MESSAGES).performTextInput("24")

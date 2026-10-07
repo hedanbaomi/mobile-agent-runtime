@@ -20,6 +20,21 @@ import runtime.mobileagent.domain.AgentContextPolicy
 class AgentContextPolicyEditorTest {
 
     @Test
+    fun configuredRunLimitsAndModelAwareModeSurviveEditAndReload() {
+        val draft = AgentContextPolicyDraftUi(modelAwareCompaction = false, maxToolCalls = "650", maxRuntimeSeconds = "7200")
+        val stored = draft.toCanonicalJson("{}")
+        val policy = AgentContextPolicy.fromJson(stored)
+        assertFalse(policy.modelAwareCompaction)
+        assertEquals(650, policy.maxToolCalls)
+        assertEquals(7_200_000, policy.maxRuntimeMs)
+        assertEquals(draft, AgentContextPolicyDraftUi.fromJson(stored))
+        val exact = """{"maxRuntimeMs":1501}"""
+        assertEquals(1501, AgentContextPolicy.fromJson(AgentContextPolicyDraftUi.fromJson(exact).toCanonicalJson(exact)).maxRuntimeMs)
+        assertThrows<IllegalArgumentException> { draft.copy(maxRuntimeSeconds = "86401").toCanonicalJson("{}") }
+        assertThrows<IllegalArgumentException> { draft.copy(maxToolCalls = "1001").toCanonicalJson("{}") }
+    }
+
+    @Test
     fun visibleFieldsRoundTripThroughTheSharedPolicyContract() {
         val draft = AgentContextPolicyDraftUi(
             autoCompact = false,
@@ -56,12 +71,12 @@ class AgentContextPolicyEditorTest {
         assertNull(policy.maxInputTokens)
         assertEquals(20, policy.maxHistoryMessages)
         assertEquals(10, policy.maxHistoryTurns)
-        assertEquals(8, policy.maxModelRoundsPerSegment)
-        assertEquals(32, policy.maxModelRequestsPerRun)
+        assertEquals(32, policy.maxModelRoundsPerSegment)
+        assertEquals(128, policy.maxModelRequestsPerRun)
         assertEquals(2, policy.keepRecentTurns)
         assertEquals(85, policy.softLimitPercent)
         assertEquals(60, policy.targetPercent)
-        assertEquals(8, policy.maxCompactionsPerRun)
+        assertEquals(16, policy.maxCompactionsPerRun)
     }
 
     @Test
@@ -192,6 +207,7 @@ class AgentContextPolicyEditorTest {
 
     private companion object {
         val visiblePolicyKeys = setOf(
+            "modelAwareCompaction", "maxToolCalls", "maxRuntimeMs",
             "autoCompact",
             "maxInputTokens",
             "maxHistoryMessages",

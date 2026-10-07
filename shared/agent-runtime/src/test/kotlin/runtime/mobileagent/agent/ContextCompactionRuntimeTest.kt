@@ -51,6 +51,56 @@ import runtime.mobileagent.skills.ToolSpec
 
 class ContextCompactionRuntimeTest {
     @Test
+    fun millionUnitWindowDoesNotPayForCountOnlyCompaction() = runTest {
+        val (history, turnIds) = twelveRoundHistory()
+        val adapter = RecordingAdapter { _, _ ->
+            emit(ModelEvent.TextDelta("complete with original history"))
+            emit(ModelEvent.Completed)
+        }
+        val run = AgentRun("long-window", "snapshot", "conversation")
+        AgentRuntime(adapter).run(request(run, prompt(history),
+            context(history, AgentContextPolicy(), turnIds),
+            maxInputBudgetUnits = AgentContextPolicy().inputLimit(1_000_000, 4096))).toList()
+        assertEquals(RunState.COMPLETED, run.state)
+        assertEquals(0, run.compactionRequests)
+        assertEquals(1, adapter.requests.size)
+        assertTrue(adapter.requests.single().messages.any { it.text == "history turn 4 assistant" })
+    }
+
+    @Test
+    fun sameTranscriptCompactsForSmallWindowAndFitsUnchangedInLargeWindow() = runTest {
+        val (original, turnIds) = twelveRoundHistory()
+        val history = original.map { it.copy(text = it.text + "x".repeat(600)) }
+        for (windowSize in listOf(16_384, 1_000_000)) {
+            val adapter = RecordingAdapter { request, _ ->
+                emit(ModelEvent.TextDelta(if (request.isCompaction()) VALID_SUMMARY else "done"))
+                emit(ModelEvent.Completed)
+            }
+            val policy = AgentContextPolicy()
+            val run = AgentRun("window-$windowSize", "snapshot", "conversation")
+            AgentRuntime(adapter).run(request(run, prompt(history), context(history, policy, turnIds),
+                maxInputBudgetUnits = policy.inputLimit(windowSize, null))).toList()
+            assertEquals(RunState.COMPLETED, run.state)
+            assertEquals(if (windowSize == 16_384) 1 else 0, run.compactionRequests)
+            assertTrue(adapter.requests.all { adapter.estimateInput(it).units <= policy.inputLimit(windowSize, null) })
+        }
+    }
+
+    @Test
+    fun modelAwareModeIgnoresSegmentCountButKeepsCapacityAndExplicitFixedMode() {
+        val (history, turnIds) = twelveRoundHistory()
+        val prompt = prompt(history)
+        val request = ModelRequest("model", prompt.asMessages())
+        val adapter = RecordingAdapter { _, _ -> error("no dispatch") }
+        val automatic = ContextWindow(prompt, context(history, AgentContextPolicy(), turnIds))
+        assertEquals(null, automatic.trigger(request, adapter, 1_000_000, 120))
+        val limit = adapter.estimateInput(request).units
+        assertEquals("input-budget", automatic.trigger(request, adapter, limit, 0))
+        val fixed = ContextWindow(prompt, context(history, AgentContextPolicy(modelAwareCompaction = false), turnIds))
+        assertEquals("history-messages", fixed.trigger(request, adapter, 1_000_000, 0))
+    }
+
+    @Test
     fun deadlineDuringSummaryCheckpointStartsNoSummaryRequest() = runTest {
         val history = compactableHistory()
         var now = 0L
@@ -61,7 +111,7 @@ class ContextCompactionRuntimeTest {
         val persisted = mutableListOf<ContextCompactionRecord>()
         val run = AgentRun("checkpoint-deadline", "snapshot", "conversation", budget = RunBudget(maxRuntimeMs = 1_000))
         AgentRuntime(adapter, clock = { now }).run(request(run, prompt(history),
-            context(history, AgentContextPolicy(maxHistoryMessages = 4, keepRecentTurns = 1), compactableTurnIds(),
+            context(history, AgentContextPolicy(modelAwareCompaction = false, maxHistoryMessages = 4, keepRecentTurns = 1), compactableTurnIds(),
                 persist = { record ->
                     persisted += record
                     if (record.state == ContextCompactionState.DISPATCHED) now = 2_000
@@ -88,7 +138,7 @@ class ContextCompactionRuntimeTest {
         }
         val run = AgentRun("soft-summary-failure", "snapshot", "conversation")
         val events = AgentRuntime(adapter).run(request(run, prompt(history),
-            context(history, AgentContextPolicy(), turnIds), maxInputBudgetUnits = 50_000)).toList()
+            context(history, AgentContextPolicy(modelAwareCompaction = false), turnIds), maxInputBudgetUnits = 50_000)).toList()
         assertEquals(RunState.COMPLETED, run.state)
         assertEquals(1, run.compactionRequests)
         assertEquals(2, adapter.requests.size)
@@ -105,7 +155,7 @@ class ContextCompactionRuntimeTest {
         }
         val run = AgentRun("fenced-summary", "snapshot", "conversation")
         val events = AgentRuntime(adapter).run(request(run, prompt(history),
-            context(history, AgentContextPolicy(), turnIds), maxInputBudgetUnits = 50_000)).toList()
+            context(history, AgentContextPolicy(modelAwareCompaction = false), turnIds), maxInputBudgetUnits = 50_000)).toList()
         assertEquals(RunState.COMPLETED, run.state)
         assertEquals(1, run.compactionRequests)
         assertEquals(VALID_SUMMARY, events.lastCompaction().summaryJson)
@@ -115,7 +165,7 @@ class ContextCompactionRuntimeTest {
     fun summaryRequestPreservesTheResolvedOutputField() {
         val (history, turnIds) = twelveRoundHistory()
         val prompt = prompt(history)
-        val window = ContextWindow(prompt, context(history, AgentContextPolicy(), turnIds))
+        val window = ContextWindow(prompt, context(history, AgentContextPolicy(modelAwareCompaction = false), turnIds))
         val original = ModelRequest("model", prompt.asMessages(), outputTokenLimit = 8192,
             outputTokenField = "max_completion_tokens")
         val adapter = RecordingAdapter { _, _ -> error("no dispatch") }
@@ -133,7 +183,7 @@ class ContextCompactionRuntimeTest {
             override fun record(event: runtime.mobileagent.provider.ModelDiagnosticEvent) = Unit
         }
         val original = ModelRequest("model", prompt.asMessages(), diagnostics = sink)
-        val plan = requireNotNull(ContextWindow(prompt, context(history, AgentContextPolicy(), turnIds))
+        val plan = requireNotNull(ContextWindow(prompt, context(history, AgentContextPolicy(modelAwareCompaction = false), turnIds))
             .plan(original, RecordingAdapter { _, _ -> error("no dispatch") }, 50_000, "history-messages"))
         assertFalse(requireNotNull(plan.request.diagnostics).captureContent)
     }
@@ -153,7 +203,7 @@ class ContextCompactionRuntimeTest {
         val history = listOf(ChatMessage("user", "original goal"), ChatMessage("assistant", "original answer"),
             ChatMessage("user", "interrupted question"), ChatMessage("assistant", "段落0062"),
             ChatMessage("user", "recent question"), ChatMessage("assistant", "recent answer"))
-        val runtimeContext = context(history, policy = AgentContextPolicy(keepRecentTurns = 1),
+        val runtimeContext = context(history, policy = AgentContextPolicy(modelAwareCompaction = false, keepRecentTurns = 1),
             turnIds = listOf("first", "first", "partial", "partial", "recent", "recent"))
         val protected = runtimeContext.copy(historySources = runtimeContext.historySources.mapIndexed { index, source ->
             source.copy(complete = index != 3)
@@ -185,7 +235,7 @@ class ContextCompactionRuntimeTest {
             request(
                 run = run,
                 prompt = prompt(history = history),
-                context = context(history, AgentContextPolicy(autoCompact = false)),
+                context = context(history, AgentContextPolicy(modelAwareCompaction = false, autoCompact = false)),
                 maxInputBudgetUnits = 64_000,
             ),
         ).toList()
@@ -214,7 +264,7 @@ class ContextCompactionRuntimeTest {
             request(
                 run = run,
                 prompt = prompt(currentUser = "execute once"),
-                context = context(emptyList(), AgentContextPolicy(autoCompact = false)),
+                context = context(emptyList(), AgentContextPolicy(modelAwareCompaction = false, autoCompact = false)),
                 maxInputBudgetUnits = 20_000,
                 toolsEnabled = true,
                 executor = executor,
@@ -247,7 +297,7 @@ class ContextCompactionRuntimeTest {
                 prompt = prompt(history = history, currentUser = "current question"),
                 context = context(
                     history = history,
-                    policy = AgentContextPolicy(maxHistoryMessages = 20, keepRecentTurns = 2),
+                    policy = AgentContextPolicy(modelAwareCompaction = false, maxHistoryMessages = 20, keepRecentTurns = 2),
                     turnIds = turnIds,
                 ),
                 maxInputBudgetUnits = 50_000,
@@ -300,7 +350,7 @@ class ContextCompactionRuntimeTest {
                 prompt = prompt(history = history),
                 context = context(
                     history = history,
-                    policy = AgentContextPolicy(maxHistoryMessages = 4, keepRecentTurns = 1),
+                    policy = AgentContextPolicy(modelAwareCompaction = false, maxHistoryMessages = 4, keepRecentTurns = 1),
                     turnIds = turnIds,
                     persist = { record ->
                         persisted += record
@@ -356,7 +406,7 @@ class ContextCompactionRuntimeTest {
                 prompt = prompt(currentUser = "keep running"),
                 context = context(
                     history = emptyList(),
-                    policy = AgentContextPolicy(
+                    policy = AgentContextPolicy(modelAwareCompaction = false,
                         maxHistoryMessages = 100,
                         maxHistoryTurns = 100,
                         maxModelRoundsPerSegment = 2,
@@ -400,7 +450,7 @@ class ContextCompactionRuntimeTest {
                 prompt = prompt(history = history),
                 context = context(
                     history = history,
-                    policy = AgentContextPolicy(maxHistoryMessages = 4, keepRecentTurns = 1),
+                    policy = AgentContextPolicy(modelAwareCompaction = false, maxHistoryMessages = 4, keepRecentTurns = 1),
                     turnIds = compactableTurnIds(),
                     persist = { record ->
                         persisted += record
@@ -449,7 +499,7 @@ class ContextCompactionRuntimeTest {
                 prompt = prompt(history = history),
                 context = context(
                     history = history,
-                    policy = AgentContextPolicy(maxHistoryMessages = 4, keepRecentTurns = 1),
+                    policy = AgentContextPolicy(modelAwareCompaction = false, maxHistoryMessages = 4, keepRecentTurns = 1),
                     turnIds = compactableTurnIds(),
                 ),
                 maxInputBudgetUnits = 1_000,
@@ -482,7 +532,7 @@ class ContextCompactionRuntimeTest {
                 prompt = prompt(history = history),
                 context = context(
                     history = history,
-                    policy = AgentContextPolicy(maxHistoryMessages = 4, keepRecentTurns = 1),
+                    policy = AgentContextPolicy(modelAwareCompaction = false, maxHistoryMessages = 4, keepRecentTurns = 1),
                     turnIds = compactableTurnIds(),
                 ),
                 maxInputBudgetUnits = 50_000,
@@ -519,7 +569,7 @@ class ContextCompactionRuntimeTest {
                 prompt = prompt(history = history),
                 context = context(
                     history = history,
-                    policy = AgentContextPolicy(maxHistoryMessages = 4, keepRecentTurns = 1),
+                    policy = AgentContextPolicy(modelAwareCompaction = false, maxHistoryMessages = 4, keepRecentTurns = 1),
                     turnIds = compactableTurnIds(),
                 ),
                 maxInputBudgetUnits = 50_000,
@@ -547,7 +597,7 @@ class ContextCompactionRuntimeTest {
         }
         val run = AgentRun("summary-rejected-late", "snapshot", "conversation", budget = RunBudget(maxRuntimeMs = 1_000))
         val events = AgentRuntime(adapter, clock = { now }).run(request(run, prompt(history),
-            context(history, AgentContextPolicy(), turnIds), maxInputBudgetUnits = 50_000)).toList()
+            context(history, AgentContextPolicy(modelAwareCompaction = false), turnIds), maxInputBudgetUnits = 50_000)).toList()
 
         assertEquals(RunState.BUDGET_EXHAUSTED, run.state)
         assertEquals(1, adapter.requests.size)
@@ -574,7 +624,7 @@ class ContextCompactionRuntimeTest {
                 prompt = prompt(history = history),
                 context = context(
                     history = history,
-                    policy = AgentContextPolicy(maxHistoryMessages = 4, keepRecentTurns = 1),
+                    policy = AgentContextPolicy(modelAwareCompaction = false, maxHistoryMessages = 4, keepRecentTurns = 1),
                     turnIds = compactableTurnIds(),
                 ),
                 maxInputBudgetUnits = 50_000,
@@ -609,7 +659,7 @@ class ContextCompactionRuntimeTest {
                         prompt = prompt(history = history),
                         context = context(
                             history = history,
-                            policy = AgentContextPolicy(maxHistoryMessages = 4, keepRecentTurns = 1),
+                            policy = AgentContextPolicy(modelAwareCompaction = false, maxHistoryMessages = 4, keepRecentTurns = 1),
                             turnIds = compactableTurnIds(),
                             persist = { record ->
                                 persisted += record
@@ -656,7 +706,7 @@ class ContextCompactionRuntimeTest {
         val turnIds = listOf("turn-0", "turn-1", "turn-1", "turn-1", "turn-2", "turn-2", "turn-3", "turn-3")
         val context = context(
             history = history,
-            policy = AgentContextPolicy(keepRecentTurns = 1),
+            policy = AgentContextPolicy(modelAwareCompaction = false, keepRecentTurns = 1),
             turnIds = turnIds,
         )
         val request = ModelRequest("model", prompt(history = history).asMessages())
@@ -692,7 +742,7 @@ class ContextCompactionRuntimeTest {
                 prompt = prompt(history = firstHistory),
                 context = context(
                     history = firstHistory,
-                    policy = AgentContextPolicy(maxHistoryMessages = 4, keepRecentTurns = 1),
+                    policy = AgentContextPolicy(modelAwareCompaction = false, maxHistoryMessages = 4, keepRecentTurns = 1),
                     turnIds = compactableTurnIds(),
                 ),
                 maxInputBudgetUnits = 50_000,
@@ -721,7 +771,7 @@ class ContextCompactionRuntimeTest {
                 prompt = prompt(history = secondHistory, currentUser = "new current question"),
                 context = context(
                     history = secondHistory,
-                    policy = AgentContextPolicy(maxHistoryMessages = 4, keepRecentTurns = 1),
+                    policy = AgentContextPolicy(modelAwareCompaction = false, maxHistoryMessages = 4, keepRecentTurns = 1),
                     turnIds = secondTurnIds,
                     initialSummary = firstRecord,
                 ),
@@ -777,7 +827,7 @@ class ContextCompactionRuntimeTest {
                 prompt = prompt(history = history, currentUser = "carry on"),
                 context = context(
                     history = history,
-                    policy = AgentContextPolicy(maxHistoryMessages = 4, keepRecentTurns = 2),
+                    policy = AgentContextPolicy(modelAwareCompaction = false, maxHistoryMessages = 4, keepRecentTurns = 2),
                     turnIds = turnIds,
                 ),
                 maxInputBudgetUnits = 200_000,
@@ -973,7 +1023,7 @@ fun runtimeRoundsKeepTheSameOutputDecisionOnTheWire() = runBlocking {
                 toolsEnabled = true,
                 executor = executor,
                 maxInputBudgetUnits = 64_000,
-                context = context(emptyList(), AgentContextPolicy(autoCompact = false)),
+                context = context(emptyList(), AgentContextPolicy(modelAwareCompaction = false, autoCompact = false)),
                 outputTokenLimit = 5000,
                 outputTokenField = "max_completion_tokens",
             ),
@@ -1019,7 +1069,7 @@ fun runtimeRoundsKeepTheSameOutputDecisionOnTheWire() = runBlocking {
             "https://example.invalid/v1",
         )
         val (history, turnIds) = twelveRoundHistory()
-        val policy = AgentContextPolicy(
+        val policy = AgentContextPolicy(modelAwareCompaction = false,
             maxHistoryMessages = 6,
             maxHistoryTurns = 3,
             keepRecentTurns = 1,

@@ -26,14 +26,17 @@ data class AgentContextPolicyDraftUi(
     val maxInputTokens: String = "",
     val maxHistoryMessages: String = "20",
     val maxHistoryTurns: String = "10",
-    val maxModelRoundsPerSegment: String = "8",
-    val maxModelRequestsPerRun: String = "32",
+    val maxModelRoundsPerSegment: String = "32",
+    val maxModelRequestsPerRun: String = "128",
     /** Blank means "no Run fee authorization for Python model.invoke". */
     val pythonModelRunTokens: String = "",
     val keepRecentTurns: String = "2",
     val softLimitPercent: String = "85",
     val targetPercent: String = "60",
-    val maxCompactionsPerRun: String = "8",
+    val maxCompactionsPerRun: String = "16",
+    val modelAwareCompaction: Boolean = true,
+    val maxToolCalls: String = "100",
+    val maxRuntimeSeconds: String = "1800",
 ) {
     /** Restore the simple automatic mode without changing a separate Python fee authorization. */
     fun recommended(): AgentContextPolicyDraftUi = AgentContextPolicyDraftUi(pythonModelRunTokens = pythonModelRunTokens)
@@ -55,6 +58,7 @@ data class AgentContextPolicyDraftUi(
         }
 
         base["autoCompact"] = JsonPrimitive(autoCompact)
+        base["modelAwareCompaction"] = JsonPrimitive(modelAwareCompaction)
         val inputTokens = maxInputTokens.trim()
         if (inputTokens.isEmpty()) {
             base.remove("maxInputTokens")
@@ -76,6 +80,14 @@ data class AgentContextPolicyDraftUi(
         base["softLimitPercent"] = JsonPrimitive(intText("软阈值百分比", softLimitPercent))
         base["targetPercent"] = JsonPrimitive(intText("目标压缩百分比", targetPercent))
         base["maxCompactionsPerRun"] = JsonPrimitive(intText("每次运行压缩次数上限", maxCompactionsPerRun))
+        base["maxToolCalls"] = JsonPrimitive(intText("每次运行工具调用上限", maxToolCalls))
+        val seconds = intText("运行准入时限", maxRuntimeSeconds)
+        require(seconds in 1..86_400) { "运行准入时限必须在 1 到 86400 秒之间。" }
+        // Keep a pre-existing subsecond deadline exact when this field is unchanged.
+        val originalMs = (base["maxRuntimeMs"] as? JsonPrimitive)?.takeIf { !it.isString }?.intOrNull
+        val millis = originalMs?.takeIf { it > 0 && (it.toLong() + 999) / 1000 == seconds.toLong() }
+            ?: (seconds * 1000)
+        base["maxRuntimeMs"] = JsonPrimitive(millis)
 
         val merged = JsonObject(base).toString()
         try {
@@ -96,9 +108,9 @@ data class AgentContextPolicyDraftUi(
         }
         val input = maxInputTokens.trim().ifEmpty { if (zh) "模型可用窗口" else "model window" }
         return if (zh) {
-            "自动压缩：$auto · 输入预算：$input"
+            "自动压缩：$auto · 输入预算：$input · ${if (modelAwareCompaction) "按模型窗口" else "固定阈值"}"
         } else {
-            "Auto-compaction: $auto · Input budget: $input"
+            "Auto-compaction: $auto · Input budget: $input · ${if (modelAwareCompaction) "model window" else "fixed thresholds"}"
         }
     }
 
@@ -121,6 +133,9 @@ data class AgentContextPolicyDraftUi(
                 ?.takeIf { it !is JsonNull && !it.isString }
                 ?.booleanOrNull
                 ?: defaults.autoCompact
+            val modelAware = (obj["modelAwareCompaction"] as? JsonPrimitive)
+                ?.takeIf { it !is JsonNull && !it.isString }?.booleanOrNull ?: defaults.modelAwareCompaction
+            val runtimeMs = (obj["maxRuntimeMs"] as? JsonPrimitive)?.takeIf { !it.isString }?.intOrNull
             return AgentContextPolicyDraftUi(
                 autoCompact = enabled,
                 maxInputTokens = text("maxInputTokens", ""),
@@ -133,6 +148,10 @@ data class AgentContextPolicyDraftUi(
                 softLimitPercent = text("softLimitPercent", defaults.softLimitPercent.toString()),
                 targetPercent = text("targetPercent", defaults.targetPercent.toString()),
                 maxCompactionsPerRun = text("maxCompactionsPerRun", defaults.maxCompactionsPerRun.toString()),
+                modelAwareCompaction = modelAware,
+                maxToolCalls = text("maxToolCalls", defaults.maxToolCalls.toString()),
+                maxRuntimeSeconds = runtimeMs?.let { ((it.toLong() + 999) / 1000).toString() }
+                    ?: (defaults.maxRuntimeMs / 1000).toString(),
             )
         }
     }
@@ -140,6 +159,9 @@ data class AgentContextPolicyDraftUi(
 
 private val contextPolicyFieldLabels = linkedMapOf(
     "autoCompact" to "自动压缩开关",
+    "modelAwareCompaction" to "按模型窗口压缩",
+    "maxToolCalls" to "每次运行工具调用上限",
+    "maxRuntimeMs" to "运行准入时限",
     "maxInputTokens" to "输入预算",
     "maxHistoryMessages" to "最大历史消息数",
     "maxHistoryTurns" to "最大历史轮数",

@@ -386,7 +386,10 @@ private class PythonSkillToolExecutor(
         if (run.snapshotId != snapshot.id || run.state.name in setOf("COMPLETED", "CANCELLED", "FAILED", "BUDGET_EXHAUSTED", "UNKNOWN_OUTCOME")) {
             return@runCatching false
         }
-        val maxRuntime = (objectOrNull(run.budgetJson)?.number("maxRuntimeMs") ?: 180_000).coerceIn(1, 180_000)
+        // Legacy records without a deadline keep the old ceiling. New Runs carry the exact
+        // configured deadline; do not silently clamp a 30-minute Run back to three minutes.
+        val maxRuntime = (objectOrNull(run.budgetJson)?.number("maxRuntimeMs") ?: 180_000)
+            .coerceIn(1, runtime.mobileagent.domain.MAX_RUN_RUNTIME_MS)
         if (enforceDeadline &&
             Instant.now().toEpochMilli() - Instant.parse(run.startedAt ?: run.createdAt).toEpochMilli() > maxRuntime) return@runCatching false
         val agent = container.agents.get(snapshot.agentId) ?: return@runCatching false

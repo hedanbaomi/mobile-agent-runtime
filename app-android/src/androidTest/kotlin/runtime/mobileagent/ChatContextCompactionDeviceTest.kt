@@ -161,7 +161,7 @@ class ChatContextCompactionDeviceTest {
                 if (toolRounds) setOf("stream", "tools") else setOf("stream"), contextLimit = 64_000, outputLimit = 1024, revision = 1)
             container.profiles.createProvider(provider); container.profiles.createModel(model)
             container.agents.saveWithPrompt(AgentProfile("context-agent-$id", "Context fixture", "pending", model.id,
-                revision = 0, contextPolicyJson = "{\"maxHistoryMessages\":20,\"maxHistoryTurns\":10,\"keepRecentTurns\":2,\"maxModelRoundsPerSegment\":${if (toolRounds) 2 else 8}${if (requestCap) ",\"autoCompact\":false,\"maxModelRequestsPerRun\":2" else ""}}"), "Answer the fixture briefly.")
+                revision = 0, contextPolicyJson = "{\"modelAwareCompaction\":false,\"maxHistoryMessages\":20,\"maxHistoryTurns\":10,\"keepRecentTurns\":2,\"maxModelRoundsPerSegment\":${if (toolRounds) 2 else 8}${if (requestCap) ",\"autoCompact\":false,\"maxModelRequestsPerRun\":2" else ""}}"), "Answer the fixture briefly.")
             val snapshot = container.agents.createSnapshot("context-agent-$id")
             val conversation = container.conversations.create(snapshot.id, "Synthetic context fixture")
             repeat(if (toolRounds) 0 else 12) { index ->

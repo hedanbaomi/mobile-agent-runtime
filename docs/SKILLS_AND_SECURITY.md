@@ -67,7 +67,7 @@ A/C/D的指令同样是不可信导入内容，启用前用户确认，不能让
 
 记录 `SkillPackage(id, version, packageHash, manifestHash, compatibility, source, license, signatureStatus)`、`SkillInstall(installId, packageHash, enabled)`、`PermissionGrant(grantId, installId, packageHash, resourceScope, capability, expiry, revision, revokedAt)`、`Invocation(invocationId, runId, packageHash, grantRevision, state)`。grant绑定包哈希，不能通过同名更新继承扩大的权限。
 
-Agent 资源绑定的稳定标识是 `SkillInstall.installId`，不是清单中的 package id。保存 Agent 时必须按 `skill_installs.install_id` 且 `enabled=1` 解析；instruction-only 的 Class A 包同样需要先由用户启用。一个已绑定后被禁用的 Skill 可以在编辑界面被取消绑定，但不能再次勾选或保存为有效绑定；否则显示明确的“缺失或已禁用”状态。
+Agent 资源绑定的稳定标识是 `SkillInstall.installId`，不是清单中的 package id。新增绑定必须已安装并启用；Class A 显式启用后创建空能力信任授权。已绑定后禁用的 Skill 保留关联意图，界面显示未勾选/已暂停，可取消关联且不阻塞 Agent 保存、工作区选择或新会话。新快照仅冻结启用的安装及 manifest，禁用期间建立的会话不会在重新启用后追加入 Skill；旧会话每次 Run 仍复核当前启用状态。已卸载/缺失安装仍失败关闭。内置 Agent workspace/shell 使用重新解析的无 Skill 身份上下文；实际 Skill 和 memory 工具仍按 Skill 与 Agent 授权交集，不借内置上下文扩权。
 
 默认上限作为实施初值：压缩包50 MiB、展开200 MiB、5000文件、膨胀比100；拒绝符号链接、硬链接、绝对路径、大小写冲突和规范化后重复路径。大小和内容检查独立于扩展名；不要只扫描`.so`字串。超限允许用户取消或在受控上限内调整，不能偷偷全部展开。
 

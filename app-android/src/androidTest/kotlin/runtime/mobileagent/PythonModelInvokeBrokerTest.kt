@@ -242,9 +242,11 @@ class PythonModelInvokeBrokerTest {
         fun persistedRun(): RunRecord = container.runs.get(runId)!!
 
         /** Moves the persisted Run start so its runtime deadline has already passed. */
-        fun passRunDeadline() {
+        fun passRunDeadline() = ageRun(3_600)
+
+        fun ageRun(seconds: Long) {
             val run = persistedRun()
-            val longAgo = java.time.Instant.now().minusSeconds(600).toString()
+            val longAgo = java.time.Instant.now().minusSeconds(seconds).toString()
             container.runs.save(run.copy(startedAt = longAgo, createdAt = longAgo))
         }
 
@@ -295,6 +297,16 @@ class PythonModelInvokeBrokerTest {
         val second = fixture.invoke("call-after-deadline")
         assertTrue("past the deadline no new call may start: $second", second !is ToolResult.Value && second != ToolResult.NeedsApproval)
         assertEquals("no HTTP request may leave after the deadline", 1, fixture.bodies.size)
+    }
+
+    @Test(timeout = 120_000)
+    fun configuredRunDeadlineBeyondThreeMinutesStillAdmitsAuthorizedModelInvoke() {
+        val fixture = Harness(ApiFormat.OPENAI_COMPATIBLE, OutputLimitMode.MANUAL, 512, 1, 4_096, 4_096)
+        fixture.start(chatSuccess(), "text/event-stream")
+        fixture.ageRun(240)
+        val result = fixture.run("call-after-four-minutes")
+        assertTrue("configured 30-minute Run must stay admitted: $result; audit=${fixture.auditTrail()}", result is ToolResult.Value)
+        assertEquals(1, fixture.bodies.size)
     }
 
     @Test(timeout = 120_000)

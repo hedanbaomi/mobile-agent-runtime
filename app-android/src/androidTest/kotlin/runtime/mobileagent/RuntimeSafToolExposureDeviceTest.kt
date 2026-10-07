@@ -7,6 +7,9 @@ import android.content.Intent
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import java.util.UUID
+import java.io.ByteArrayOutputStream
+import java.util.zip.ZipEntry
+import java.util.zip.ZipOutputStream
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.toList
@@ -87,12 +90,24 @@ class RuntimeSafToolExposureDeviceTest {
                 revision = 1,
             ),
         )
+        val archive = ByteArrayOutputStream().also { out ->
+            ZipOutputStream(out).use { zip ->
+                zip.putNextEntry(ZipEntry("SKILL.md"))
+                zip.write("# Instruction fixture $suffix\nUse local instructions only.\n".toByteArray())
+                zip.closeEntry()
+            }
+        }.toByteArray()
+        val imported = container.skills.importPackage(archive)
+        assertTrue(imported.accepted)
+        val skill = container.skills.list().single { it.packageHash == imported.inspection.packageHash }
+        container.skills.setEnabled(skill.installId, true)
         container.agents.saveWithPrompt(
             AgentProfile(
                 id = agentId,
                 name = "Internal workspace E2E fixture",
                 promptRevisionId = "pending",
                 chatProfileId = modelId,
+                skillIds = listOf(skill.installId),
                 revision = 0,
             ),
             "Use the application workspace.",
@@ -118,6 +133,8 @@ class RuntimeSafToolExposureDeviceTest {
             sessionIdentity = "session-internal-e2e-$suffix",
             taskIdentity = "task-internal-e2e-$suffix",
             configSnapshotHash = "config-internal-e2e-$suffix",
+            skillId = skill.installId,
+            skillRevision = container.skills.grantsFor(skill.installId).single { !it.revoked }.revision.toLong(),
         )
         val factory = container.runtimeIntegration.createToolExecutorFactory(context)
 

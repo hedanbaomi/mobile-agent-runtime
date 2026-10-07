@@ -103,7 +103,12 @@ class AppUpdatesTest {
             assertFalse(isNewerThanInstalled("1.1.4", "1.1.4"))
             assertFalse(isNewerThanInstalled("1.1.3", "1.1.4preview"))
             assertTrue(isNewerThanInstalled("1.1.5", "1.1.4preview"))
-            for (invalid in listOf("1.1.4-beta", "1.1.4previewpreview", "01.1.4preview", "preview")) {
+            assertTrue(isNewerThanInstalled("1.1.4", "1.1.4.1preview"))
+            assertFalse(isNewerThanInstalled("1.1.3", "1.1.4.1preview"))
+            verifyApkIdentity(installed.copy(versionName = "1.1.4.1preview", versionCode = 10),
+                candidate.copy(versionCode = 11), source.candidate, 34)
+            assertThrows(IllegalArgumentException::class.java) { release("1.1.4.1preview").validate() }
+            for (invalid in listOf("1.1.4-beta", "1.1.4previewpreview", "01.1.4preview", "1.1.4.01preview", "1.1.4.1.2preview", "1.1.4.1", "preview")) {
                 assertThrows(IllegalArgumentException::class.java) { isNewerThanInstalled("1.1.4", invalid) }
             }
             assertThrows(IllegalArgumentException::class.java) { ReleaseVersion.parse("1.1.4preview") }

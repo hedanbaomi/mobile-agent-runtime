@@ -3,11 +3,11 @@
 
 # 正式版本构建与发布
 
-已公开的正式安装包从 [GitHub Releases](https://github.com/hedanbaomi/mobile-agent-runtime/releases) 获取。当前已发布 v1.1.3/code 8；本轮 v1.1.4preview/code 9 是供用户自行测试的本地正式签名候选，不发布至 GitHub。正式产物仅含 arm64-v8a，最低 Android 8.0（API 26）。前版 v1.0.0/code 2、v1.0.1/code 3、v1.0.2/code 4、v1.1.0/code 5、v1.1.1/code 6、v1.1.2/code 7 与 v1.1.3/code 8 可使用同一正式签名升级。v1.0.2 起支持检查 GitHub stable release、用户点击下载与系统确认安装；v1.1.4preview 将自动检查间隔改为一小时，详见 [更新契约](APP_UPDATES.md)。
+已公开的正式安装包从 [GitHub Releases](https://github.com/hedanbaomi/mobile-agent-runtime/releases) 获取。当前已发布 v1.1.3/code 8；本轮 v1.1.4.1preview/code 10 是供用户人工审查的本地正式签名候选，不发布至 GitHub。正式产物仅含 arm64-v8a，最低 Android 8.0（API 26）。前版 v1.0.0/code 2、v1.0.1/code 3、v1.0.2/code 4、v1.1.0/code 5、v1.1.1/code 6、v1.1.2/code 7 与 v1.1.3/code 8 可使用同一正式签名升级。v1.0.2 起支持检查 GitHub stable release、用户点击下载与系统确认安装；v1.1.4preview 将自动检查间隔改为一小时，详见 [更新契约](APP_UPDATES.md)。
 
 首次由 Debug/Review 切换至正式包时，签名身份不同，不能直接覆盖安装。先在旧包导出所需数据、核对导出文件，再处理旧安装；导出默认不包含密钥，重新配置服务商凭据。后续正式版本使用同一正式签名身份升级。
 
-本地 `1.1.4preview` 已占用 code 9；后续公开的纯数字正式版须使用至少 code 10，并保留同一正式签名，使 preview 能经应用内检查更新覆盖升级。preview 不建立公开 Release 或公开分发附件。
+历史本地 `1.1.4preview` 使用 code 9，当前 `1.1.4.1preview` 使用 code 10；后续公开的纯数字正式版须使用大于 10 的 code，并保留同一正式签名，使 preview 能经应用内检查更新覆盖升级。preview 不建立公开 Release 或公开分发附件。
 
 ## 构建
 
@@ -32,3 +32,5 @@ v1.1.2 起同时发布 `mobileAgentRuntime-vVERSION-windows-adb.zip`。解压后
 发布说明分别记录本地门禁、模拟器回归和未完成的真机/供应商边界；GitHub Release 不代表应用商店已上架，也不把定向回归写成全量产品验收。
 
 更新客户端依赖固定命名 `mobileAgentRuntime-vVERSION-arm64-v8a.apk` 与 GitHub Release asset SHA-256 digest。完整附件上传并验证后再公开并设为 latest stable；tag 只使用 `vMAJOR.MINOR.PATCH`，正式 versionCode 必须递增，签名必须与已发布正式版本一致。
+
+2026-10-07 本地人工核验版本为 `1.1.4.1preview` / versionCode `10`。第四数值段仅用于本地 preview 迭代；stable feed 仍严格采用三段版本且拒绝 preview。后续同 patch 正式版可升级，正式 versionCode 必须大于 10。此 preview 不创建公开 Release。

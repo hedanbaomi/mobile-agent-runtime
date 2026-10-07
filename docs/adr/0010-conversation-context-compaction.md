@@ -9,6 +9,8 @@
 
 旧实现按最近用户轮裁剪历史，超过消息条数的一整个长轮会被排除；没有持久化摘要。Chat 和 Runtime 的两份输入估算只计算正文、图片和部分 schema，遗漏实际发送的 `toolCalls.argumentsJson`。相同正文下，约 65 KiB 的工具参数不会相应增加原估算。单个 Run 的八次模型请求上限也不能通过压缩续跑。
 
+2026-10-07 现行修订见 [ADR-0031](0031-skill-bindings-and-adaptive-context.md)：默认模型窗口模式不使用条数/用户轮/段轮触发，85%/60% 压力目标保留；默认累计预算为 128 模型、16 摘要、100 工具、1800 秒，显式配置值保留。下列原固定阈值/数值属于历史方案及用户可选固定模式。
+
 ## 决定
 
 1. `ModelAdapter.estimateInput` 是准备阶段及每次 Runtime 请求的统一入口。计算正文、角色、工具调用 id/name/完整参数、toolCallId、工具 schema、参数层、协议预留、图片预留，以及该适配器实际回送的私有续接大小。使用 Long 饱和运算；估算单位和 Provider usage 分开。UTF-8 字节及固定图片预留不是精确 tokenizer，也不保证所有 Provider 的视觉计量。

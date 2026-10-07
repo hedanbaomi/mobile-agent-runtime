@@ -3,7 +3,7 @@
 
 # 项目交接
 
-最后更新：2026-10-07（UTC+8；v1.1.3 已发布；1.1.4preview 修复、完整源码门禁和测试 APK 编译完成，待仅本地提交授权后正式签名，禁止发布 GitHub）。项目根目录：E:/mobileAgentRuntime。
+最后更新：2026-10-07（Asia/Taipei；Skill/工作区/模型窗口压缩本地验证完成，1.1.4.1preview/code10 准备）。项目根目录：E:/mobileAgentRuntime。
 
 按 [agent.md 第 1 节](agent.md#1-按任务读取与开工) 选择资料。现行规则见 agent.md；本文件记录现场和待办，历史任务中的授权不自动延续。
 
@@ -24,7 +24,9 @@
 
 ## 1. 现行状态与当前任务
 
-- **当前任务：2026-10-07 本地 1.1.4preview 正式签名候选（源码修复完成，待仅本地提交授权）**：修复六图分析 HTTP200 后 REASONING_EXHAUSTED：分析请求继承手动/AUTO输出预算、别名和参数层；JSON指令、空结构成功前拒绝已补，0/false有效。保留16,000字符/64图总量/8图每组/授权/无重放。每小时自动检查更新、前台60秒到期判断、后台停循环、成功时间持久化、15分钟失败退避和手动越过节流；安装恢复不换联网候选，全部安装校验保留。preview可发现同号或更高的纯数字正式版，远端preview拒绝，同证书且code严格递增；本包code9，下一公开正式版至少code10。隔离工作树 C:/Users/32735/.codex/worktrees/kb-output-v1-1-4/mobileAgentRuntime 基于63e5422，仅18项任务文件；strict/offline完整源码门禁及测试APK编译通过，JUnit变体执行2169/2169（Runtime93、Provider279、App三变体各279，预算新增8方法、更新23方法），独立DSH Flash最终复审17:20（UTC+8）APPROVE；CodeGraph同步完成，REUSE快照通过且最终文档同步后复核。根main及42个未共享文档原WIP哈希保留，未提交/推送/合并/发布。正式releaseGate要求干净源码，待用户明确授权仅本地提交后执行签名及成品核验；不上传GitHub、不对外分发。证据见[本轮证据](docs/evidence/2026-10-07/visual-analysis-output-budget.md)及.private/reasoning-output-20261007/。未连接设备，真实Provider、手机升级和长稳留待用户测试；本轮没有未完成源码工作。
+- **当前任务：2026-10-07 Skill、工作区权限及模型窗口压缩修复（本地验证完成，Git 集成及正式签名包准备）**：禁用 Skill 保留既有 Agent 关联但显示未激活，允许保存/选择工作区/新建会话；新快照排除禁用安装，重新启用仅恢复后续新会话。内置工作区与 shell 重新解析 Agent 上下文，实际 Skill 工具继续取授权交集。工作区枚举按实时授权和后端能力投影操作及相对路径范围，SAF 新建与原子覆盖分别说明。默认按有效模型窗口 85% 压力压缩至 60%，不按固定消息/轮数提前压缩；累计预算改为 128 次模型、100 次工具、30 分钟准入及最多 16 次摘要，可配置且不重置，停滞/取消/审批/未知结果边界保持。版本 1.1.4.1preview/code10；用户已授权提交、推送、普通 PR 合并、本地 main 同步和正式签名人工核验包，未授权公开 Release。验证、审阅和产物状态见 [专项证据](docs/evidence/2026-10-07/skill-workspace-adaptive-context.md)。原有公告/CI/产品视频等无关 WIP 保留。 本地 domain79/runtime96/SQLite399/Android JVM290、API36设备25项均通过；独立权限审阅APPROVE，strict完整check/许可正反向/CI固定版本及依赖锁定校验通过。修复在隔离分支 `codex/adaptive-context-v1.1.4.1-preview` 集成，正式包须从合并后的干净源码构建。
+
+- **2026-10-07 视觉分析输出预算与预览更新修复（已完成，纳入当前版本）**：分析请求继承手动/AUTO 输出预算、模型别名及参数层；增加 JSON 指令和空结构校验，保留合法 0/false、16,000 字符、64 图总量及每组 8 图限制。自动检查更新改为每小时，保留前后台调度、失败退避、手动检查及安装校验。已验证源码提交 `16db6db` 纳入当前修复分支，早期 `1.1.4preview/code9` 候选由 `1.1.4.1preview/code10` 替代，后续公开 stable code 必须大于 10。完整源码门禁、测试 APK 编译及独立审阅通过；真实 Provider、手机升级及长稳仍待人工验证。证据见 [视觉预算专项](docs/evidence/2026-10-07/visual-analysis-output-budget.md)。
 
 - **2026-10-06 v1.1.2 知识库、对话归档与常驻 ADB（源码与专项验证通过，待发布，Codex 主协调者）**：用户授权修复、提交推送普通合并及发布，并明确要求自有设备常驻服务、不依赖 Shizuku。知识库续轮、推理重放与隐私、Schema30 归档及准入修复已验证；USB 电脑工具负责显式激活，手机自有 shell UID 2000 服务通过固定 App UID、单次令牌、短时挑战与 HMAC/Keystore 认证。本轮不因拔线、电脑退出或客户端关闭主动撤权，实际服务死亡会关闭执行入口；危险模式和能力授权仍独立。独立源码复查 APPROVE；API34 模拟器负向10、生命周期7、非 debug 智能体1、目录代际1与权限回归36均通过；严格完整门禁、JUnit 2119次变体执行零失败/错误/跳过、REUSE 926/926通过；正式发布另行记录，物理 USB/OEM 和真实付费 Provider 未验收。见 docs/evidence/2026-10-06/kb-and-conversation-archive.md 与 resident-adb-activation.md。私人附件与 receipts 不进入提交；既有后台/CI/视频与共享文档 WIP 保留，本地 main 不额外同步远端。尚未发布。
 

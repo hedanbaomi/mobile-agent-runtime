@@ -554,7 +554,8 @@ class ChatViewModel internal constructor(
             var foregroundStarted = false
             var runAdmitted = false
             val run = AgentRun(owner.runId, binding.snapshot.id, conversationId,
-                budget = RunBudget(maxModelRounds = contextPolicy.maxModelRequestsPerRun))
+                budget = RunBudget(maxModelRounds = contextPolicy.maxModelRequestsPerRun,
+                    maxToolCalls = contextPolicy.maxToolCalls, maxRuntimeMs = contextPolicy.maxRuntimeMs.toLong()))
             // The run owner outlives any single UI page: only this owner key
             // may cancel/terminalize the run through the RunCoordinator.
             val runOwnerKey = "chat:$conversationId"
@@ -574,6 +575,8 @@ class ChatViewModel internal constructor(
                     maxModelRounds = run.budget.maxModelRounds,
                     maxModelRoundsPerSegment = contextPolicy.maxModelRoundsPerSegment,
                     maxCompactionsPerRun = contextPolicy.maxCompactionsPerRun,
+                    maxToolCalls = run.budget.maxToolCalls,
+                    maxRuntimeMs = contextPolicy.maxRuntimeMs,
                     modelInvokeTokens = runModelTokens,
                 ))
             var secret: CharArray? = null
@@ -699,7 +702,10 @@ class ChatViewModel internal constructor(
                 val liveKnowledgeBaseIds = withContext(Dispatchers.IO) { container.knowledge.listKnowledgeBases().map { it.first }.toSet() }
                 val kbIds = binding.snapshot.knowledgeBaseIds.intersect(currentAgent.knowledgeBaseIds.toSet())
                     .intersect(liveKnowledgeBaseIds).toList()
-                val skillIds = binding.snapshot.skillIds.intersect(currentAgent.skillIds.toSet())
+                val skillIds = withContext(Dispatchers.IO) {
+                    binding.snapshot.skillIds.intersect(currentAgent.skillIds.toSet())
+                        .filter { container.skills.get(it)?.enabled == true }.toSet()
+                }
                 preparationStage = "retrieval"
                 val result = withContext(Dispatchers.IO) {
                     if (binding.retrievalMode == "automatic") container.knowledge.retrieve(run.runId, text, 8, kbIds)

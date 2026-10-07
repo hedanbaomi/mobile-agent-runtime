@@ -28,10 +28,10 @@ import runtime.mobileagent.domain.settleReservedTokens
 import runtime.mobileagent.domain.AgentSnapshot
 import runtime.mobileagent.knowledge.Citation
 import runtime.mobileagent.knowledge.isPublishedCitationVersion
-import runtime.mobileagent.knowledge.LoadedVisual
+import runtime.mobileagent.knowledge.VisualReference
+import runtime.mobileagent.knowledge.VisualReferencePlan
 import runtime.mobileagent.knowledge.StrictVisualDecision
 import runtime.mobileagent.knowledge.StrictVisualPolicy
-import runtime.mobileagent.knowledge.VisualAttachmentPlan
 import runtime.mobileagent.knowledge.VisualAttachmentPolicy
 import runtime.mobileagent.provider.InlineImage
 import runtime.mobileagent.skills.BuiltinTools
@@ -319,7 +319,7 @@ class RunTools(
                 val visuals = planVisuals(processed.evidence)
                 if (visuals.warning != processed.warning) throw EvidenceInvalid("Visual evidence changed after tool execution")
                 val images = visuals.images.map { image ->
-                    InlineImage(image.mediaType, Base64.getEncoder().encodeToString(image.bytes), image.assetId)
+                    InlineImage(image.mediaType, "", image.assetId, image.byteLength, image.sha256)
                 }
                 verifyAll(processed.evidence)
                 images
@@ -352,7 +352,7 @@ class RunTools(
         val evidence: List<Evidence>,
         val warning: String?,
     )
-    private data class Visuals(val images: List<LoadedVisual>, val warning: String? = null)
+    private data class Visuals(val images: List<VisualReference>, val warning: String? = null)
     private data class Chunk(
         val id: String,
         val versionId: String,
@@ -656,27 +656,32 @@ class RunTools(
             is StrictVisualDecision.Allow -> Unit
         }
         if (textDegradation) return Visuals(emptyList(), TEXT_DEGRADATION_WARNING)
-        // Earlier tool images remain in model history. Count the union rather than
-        // resetting the four-image allowance on every tool call. The caller must
-        // also cap the combined automatic-RAG and tool image set at attachment.
-        val previousAssets = synchronized(registryLock) { registry.values.mapNotNull { it.citation.assetId } }
-        if ((previousAssets + assets).toSet().size > VisualAttachmentPolicy.MAX_IMAGES) {
-            return Visuals(emptyList(), withheldVisualEvidenceNotice(assets.size, detail = "RUN_IMAGE_BUDGET_EXCEEDED"))
-        }
+        // Bound this attachment set here. AgentRuntime checks the actual projected
+        // request (history, automatic retrieval and all tool images) against the
+        // frozen user budget and model window. Citation history includes withheld
+        // evidence, so it must not act as a lifetime image allowance.
         val byAsset = evidence.filter { it.citation.assetId != null }.associateBy { it.citation.assetId!! }
-        return when (val plan = VisualAttachmentPolicy.plan(assets) { id ->
-            val record = byAsset.getValue(id)
-            verify(record)
-            val source = container.knowledge.evidenceBytes(record.citation) ?: return@plan null
-            val locator = container.knowledge.locateCitation(record.citation)
-            val digest = MessageDigest.getInstance("SHA-256").digest(source.second).joinToString("") { "%02x".format(it) }
-            if (locator.removed || locator.blobHash != digest || source.first !in IMAGE_MEDIA_TYPES || source.second.isEmpty()) return@plan null
-            source
+        return when (val plan = VisualAttachmentPolicy.references(assets) { id ->
+            verify(byAsset.getValue(id))
+            container.db.query("SELECT b.media_type,b.byte_length,a.blob_hash FROM assets a JOIN blobs b ON b.hash=a.blob_hash WHERE a.id=?", listOf(id))
+                .singleOrNull()?.let { Triple(it.string("media_type"), it.string("byte_length").toLong(), it.string("blob_hash")) }
         }) {
-            is VisualAttachmentPlan.Incomplete ->
-                Visuals(emptyList(), withheldVisualEvidenceNotice(assets.size, detail = "VISUAL_ATTACHMENT_INCOMPLETE"))
-            is VisualAttachmentPlan.Complete -> Visuals(plan.images)
+            is VisualReferencePlan.Incomplete -> Visuals(emptyList(), withheldVisualEvidenceNotice(assets.size,
+                detail = if (plan.reason.startsWith("RUN_IMAGE_BUDGET_EXCEEDED")) "RUN_IMAGE_BUDGET_EXCEEDED" else "VISUAL_ATTACHMENT_INCOMPLETE"))
+            is VisualReferencePlan.Complete -> Visuals(plan.images)
         }
+    }
+
+    /** Read and verify one original only when its bounded delivery group needs it. */
+    fun loadImage(source: InlineImage): InlineImage? {
+        val record = synchronized(registryLock) { registry.values.firstOrNull { it.citation.assetId == source.assetId } } ?: return null
+        verify(record)
+        val loaded = container.knowledge.evidenceBytes(record.citation) ?: throw EvidenceInvalid("Visual source missing")
+        val hash = MessageDigest.getInstance("SHA-256").digest(loaded.second).joinToString("") { "%02x".format(it.toInt() and 255) }
+        if (loaded.first != source.mediaType || loaded.second.size.toLong() != source.byteLength ||
+            hash != source.sha256 || loaded.second.size > VisualAttachmentPolicy.MAX_BYTES) throw EvidenceInvalid("Visual original changed")
+        verify(record)
+        return source.copy(base64 = Base64.getEncoder().encodeToString(loaded.second))
     }
 
     private fun liveKnowledgeIds(): Set<String> = snapshotKnowledgeIds intersect

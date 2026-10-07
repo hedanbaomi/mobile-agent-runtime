@@ -28,6 +28,19 @@ class ModelEndpointTest {
         assertEquals(ModelRole.VISION, profile.role)
     }
 
+    @Test fun independentImageCapabilitySourcesAndTextOnlyNegative() {
+        fun profile(role: ModelRole, caps: Set<String>, endpoint: ModelEndpoint) =
+            ModelProfile("fixture", "provider", role, "fixture", caps, contextLimit = 8000, outputLimit = 1024,
+                revision = 1, endpoint = endpoint)
+        val unknown = ModelEndpoint(emptySet())
+        org.junit.jupiter.api.Assertions.assertTrue(profile(ModelRole.VISION, emptySet(), unknown).acceptsImages())
+        org.junit.jupiter.api.Assertions.assertTrue(profile(ModelRole.CHAT, setOf("image"), unknown).acceptsImages())
+        org.junit.jupiter.api.Assertions.assertTrue(profile(ModelRole.CHAT, emptySet(),
+            ModelEndpoint(setOf(ModelOperation.CHAT), setOf(InputModality.TEXT, InputModality.IMAGE))).acceptsImages())
+        org.junit.jupiter.api.Assertions.assertFalse(profile(ModelRole.CHAT, emptySet(),
+            ModelEndpoint(setOf(ModelOperation.CHAT), setOf(InputModality.TEXT))).acceptsImages())
+    }
+
     @Test
     fun embeddingAndRerankStayDistinctFromChat() {
         val embedding = ModelEndpoint.fromLegacy(ModelRole.EMBEDDING, emptySet())

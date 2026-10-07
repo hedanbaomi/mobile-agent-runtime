@@ -194,6 +194,8 @@ Agent 的 embeddingProfileId 是新建/选择索引的偏好，不可覆盖已�
 
 ### 6.1 Provider adapter
 
+2026-10-07 图片传输补充（R02/R08/R34、K04/K08）：未指定图片预算时 Run 总上限64张，单次8张/16MiB，每张2MiB，显式较小总预算保留。原图采用授权元数据引用，当前组并行加载、各组串行调用同一模型；成功结果带来源标识作为不可信证据交主请求综合，并持久化哈希防止续轮重复原图。每组均计请求/时间/输入/用量，派发前复核授权，未知结果不自动重放。能力采用 acceptsImages()；降级卡显示具体原因。见 [ADR-0030](adr/0030-request-scoped-visual-budget.md) 与 [本轮证据](evidence/2026-10-07/visual-transfer.md)。
+
 2026-10-06 工具续轮补充（R02/R08/R12/R34）：同一 assistant 工具批次先连续提交全部工具结果，再提交搜索返回的视觉证据；旧完整批次只在请求投影中修复顺序。Chat 工具请求按 Provider 显式返回的推理独立重放 `reasoning_content`，保留空白且计入输入预算；不得由回答推测推理。无工具 Chat 与 Responses 不重放该字段，不因此受历史推理上限阻断。请求预览脱敏、诊断删除该字段；`PROVIDER_REJECTED` 显示明确错误而非 INTERNAL，不自动重试。协议和边界见 [ADR-0027](adr/0027-visual-tool-batches-and-reasoning-replay.md)。
 
 2026-10-05 兼容错误补充：Chat 与 Responses 的连接测试统一解析 error 对象。空、null 或非字符串 code 不得阻止 404 的明确模型缺失信息；明确 code 优先于消息，普通 invalid_request_error/param 错误不得因提及 unsupported/stream/tools 被判为功能不支持。消息回退仅消费 error.message 或旧服务的纯文本错误，不扫描有效 JSON 的其他字段；认证、超时、限流及计费标记保持原约定。基础 Chat 连通测试省略所有可选采样、停止与高级参数，仅保留输出预算别名，独立能力探测保留实际模型参数并仅压低探测输出预算。编辑模型 ID 留空时沿用已有 ID，同一 ID 用于持久化与上下文窗口目标。相关回归与设备/真实 Provider 验证边界见 [兼容性修复证据](evidence/2026-10-05/provider-compatibility.md)。

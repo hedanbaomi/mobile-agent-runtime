@@ -30,7 +30,8 @@ import runtime.mobileagent.skills.ToolSpec
 class OpenAiWorkspaceToolLoopTest {
     @Test
     fun visualSearchAndWorkspaceResultsStayContiguousOnBothProtocols() = runBlocking {
-        ApiFormat.entries.forEach { format ->
+        listOf(4 to null, 7 to null, 64 to null, 65 to null, 7 to 4).forEach { (imageCount, explicitBudget) ->
+          ApiFormat.entries.forEach { format ->
             val bodies = mutableListOf<JsonObject>()
             val engine = MockEngine { request ->
                 bodies += Json.parseToJsonElement((request.body as TextContent).text).jsonObject
@@ -39,6 +40,15 @@ class OpenAiWorkspaceToolLoopTest {
                     val callsAt = input.indexOfFirst { it.jsonObject["tool_calls"] != null || it.jsonObject["type"]?.jsonPrimitive?.content == "function_call" }
                     val toolResults = input.withIndex().filter { (_, value) -> value.jsonObject["role"]?.jsonPrimitive?.content == "tool" || value.jsonObject["type"]?.jsonPrimitive?.content == "function_call_output" }
                     assertEquals(2, toolResults.size)
+                    val resultIds = toolResults.map { (_, value) -> value.jsonObject[
+                        if (format == ApiFormat.OPENAI_COMPATIBLE) "tool_call_id" else "call_id"
+                    ]?.jsonPrimitive?.content }
+                    assertEquals(listOf("search-call", "workspace-call"), resultIds)
+                    val declaredIds = if (format == ApiFormat.OPENAI_COMPATIBLE) {
+                        input[callsAt].jsonObject.getValue("tool_calls").jsonArray.map { it.jsonObject.getValue("id").jsonPrimitive.content }
+                    } else input.filter { it.jsonObject["type"]?.jsonPrimitive?.content == "function_call" }
+                        .map { it.jsonObject.getValue("call_id").jsonPrimitive.content }
+                    assertEquals(declaredIds, resultIds)
                     val imagesAt = input.indexOfFirst { value ->
                         (value.jsonObject["content"] as? JsonArray)?.any { part ->
                             part.jsonObject["type"]?.jsonPrimitive?.content in setOf("image_url", "input_image")
@@ -46,6 +56,9 @@ class OpenAiWorkspaceToolLoopTest {
                     }
                     assertTrue(imagesAt > toolResults.last().index, "Images must follow ALL tool results: $input")
                     assertTrue(toolResults.first().index > callsAt)
+                    val images = input.flatMap { (it.jsonObject["content"] as? JsonArray).orEmpty() }
+                        .filter { it.jsonObject["type"]?.jsonPrimitive?.content in setOf("image_url", "input_image") }
+                    assertEquals(imageCount, images.size, "$format must transmit every original")
                 }
                 val response = if (bodies.size == 1) {
                     if (format == ApiFormat.OPENAI_COMPATIBLE) {
@@ -67,14 +80,61 @@ class OpenAiWorkspaceToolLoopTest {
                 override suspend fun approve(callId: String): ToolResult = error("unused")
             }
             val run = AgentRun("visual-${format.name}", "snapshot", "conversation")
-            val events = AgentRuntime(OpenAiAdapterFactory.create(format, HttpClient(engine), "https://example.invalid/v1")).run(
-                AgentRuntimeRequest(run, EffectivePrompt("contract", "", emptyList(), emptyList(), emptyList(), "search"), "model", "test-token".toCharArray(), true,
-                    executor = executor, toolImages = { call, _ -> if (call.name == "search") (1..4).map { InlineImage("image/png", "aW1hZ2U=", "asset-$it") } else emptyList() }),
-            ).toList()
-            assertEquals(RunState.COMPLETED, run.state, "$format: $events")
-            assertEquals(2, bodies.size)
+            val baseRequest = AgentRuntimeRequest(run, EffectivePrompt("contract", "", emptyList(), emptyList(), emptyList(), "search"), "model", "test-token".toCharArray(), true,
+                    executor = executor, toolImages = { call, _ -> if (call.name == "search") (1..imageCount).map { InlineImage("image/png", "aW1hZ2U=", "asset-$it") } else emptyList() })
+            val request = explicitBudget?.let { baseRequest.copy(maxImagesPerRequest = it) } ?: baseRequest
+            val events = AgentRuntime(OpenAiAdapterFactory.create(format, HttpClient(engine), "https://example.invalid/v1"))
+                .run(request).toList()
+            val fits = imageCount <= request.maxImagesPerRequest
+            assertEquals(if (fits) RunState.COMPLETED else RunState.BUDGET_EXHAUSTED, run.state, "$format: $events")
+            assertEquals(if (fits) 2 else 1, bodies.size, "Over-budget originals must never reach HTTP")
+            if (imageCount > request.maxImagesPerRun) {
+                assertTrue(events.none { it is RuntimeEvent.ToolImagesAttached })
+                return@forEach
+            }
+            val attached = events.filterIsInstance<RuntimeEvent.ToolImagesAttached>().single()
+            assertEquals("search-call", attached.callId)
+            assertEquals((1..imageCount).map { "asset-$it" }, attached.assets.map { it.assetId })
             val lastResult = events.indexOfLast { it is RuntimeEvent.ToolResultProduced }
             assertTrue(events.indexOfFirst { it is RuntimeEvent.ToolImagesAttached } > lastResult, "Durable transcript must use the same ordering")
+          }
+        }
+    }
+
+    @Test fun sixtyFourOriginalsUseEightSerialWireRequestsOnBothProtocols() = runBlocking {
+        ApiFormat.entries.forEach { format ->
+            val payloads = mutableListOf<JsonObject>()
+            val engine = MockEngine { request ->
+                payloads += Json.parseToJsonElement((request.body as TextContent).text).jsonObject
+                val response = if (format == ApiFormat.OPENAI_COMPATIBLE) {
+                    "data: {\"choices\":[{\"delta\":{\"content\":\"notes\"}}]}\n\ndata: [DONE]\n\n"
+                } else "data: {\"type\":\"response.output_text.delta\",\"delta\":\"notes\"}\n\ndata: {\"type\":\"response.completed\",\"response\":{}}\n\n"
+                respond(response, HttpStatusCode.OK, headersOf(HttpHeaders.ContentType, ContentType.Text.EventStream.toString()))
+            }
+            val originals = (1..64).map { InlineImage("image/png",
+                java.util.Base64.getEncoder().encodeToString(("original-" + it).toByteArray()), "asset-" + it) }
+            val run = AgentRun("batch", "s", "c", budget = RunBudget(maxModelRounds = 32))
+            val events = AgentRuntime(OpenAiAdapterFactory.create(format, HttpClient(engine), "https://example.invalid/v1"))
+                .run(AgentRuntimeRequest(run,
+                    EffectivePrompt("contract", "", emptyList(), emptyList(), emptyList(), "goal", currentImages = originals),
+                    "fixture", "synthetic-only".toCharArray(), false, batchAllImages = true)).toList()
+            assertEquals(RunState.COMPLETED, run.state, events.toString())
+            assertEquals(9, payloads.size)
+            val wireImages = payloads.map { payload ->
+                payload.getValue(if (format == ApiFormat.OPENAI_COMPATIBLE) "messages" else "input").jsonArray
+                    .flatMap { (it.jsonObject["content"] as? JsonArray).orEmpty() }
+                    .mapNotNull { part ->
+                        if (format == ApiFormat.OPENAI_COMPATIBLE)
+                            part.jsonObject["image_url"]?.jsonObject?.get("url")?.jsonPrimitive?.content
+                        else if (part.jsonObject["type"]?.jsonPrimitive?.content == "input_image")
+                            part.jsonObject["image_url"]?.jsonPrimitive?.content else null
+                    }
+            }
+            assertEquals(List(8) { 8 } + listOf(0), wireImages.map { it.size })
+            assertEquals(originals.map { "data:image/png;base64," + it.base64 }, wireImages.flatten())
+            assertTrue(payloads.last().toString().contains("asset-64"))
+            assertEquals(8, events.filterIsInstance<RuntimeEvent.VisualBatchAnalyzed>().size)
+            assertEquals(9, run.modelRounds)
         }
     }
 

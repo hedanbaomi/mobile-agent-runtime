@@ -734,7 +734,7 @@ class ChatViewModel internal constructor(
                 // with a typed, runtime-authored notice — never silently dropped —
                 // and the model is told not to claim it examined those images.
                 val visualDecision = StrictVisualPolicy.allow(
-                    clipped.any { it.assetId != null }, "image" in model.capabilities, degrade,
+                    clipped.any { it.assetId != null }, model.acceptsImages(), degrade,
                 )
                 val withheldVisuals = clipped.count { it.assetId != null }
                 val hits: List<SearchHit> = when (visualDecision) {
@@ -748,11 +748,13 @@ class ChatViewModel internal constructor(
                     }
                 }
                 if (visualDecision is StrictVisualDecision.Allow && !degrade && hits.any { it.assetId != null }) {
-                    when (val plan = withContext(Dispatchers.IO) { VisualAttachmentPolicy.plan(hits.mapNotNull { it.assetId }, container.knowledge::assetBytes) }) {
-                        is VisualAttachmentPlan.Incomplete -> warning = withheldVisualEvidenceNotice(
+                    when (val plan = withContext(Dispatchers.IO) { visualReferencePlan(hits.mapNotNull { it.assetId }) }) {
+                        is VisualReferencePlan.Incomplete -> warning = withheldVisualEvidenceNotice(
                             hits.count { it.assetId != null }, detail = "VISUAL_ATTACHMENT_INCOMPLETE",
                         )
-                        is VisualAttachmentPlan.Complete -> plan.images.forEach { images += InlineImage(it.mediaType, Base64.getEncoder().encodeToString(it.bytes), it.assetId) }
+                        is VisualReferencePlan.Complete -> plan.images.forEach {
+                            images += InlineImage(it.mediaType, "", it.assetId, it.byteLength, it.sha256)
+                        }
                     }
                 }
                 if (degrade && hits.any { it.assetId != null }) warning = "未提供原始图片，视觉证据可能不完整。"
@@ -875,7 +877,7 @@ class ChatViewModel internal constructor(
                 // backend (SAF ContentResolver queries, privileged Binder state) and Skill
                 // package; this is the slowest preparation step and must stay off Main.
                 val runTools = withContext(Dispatchers.IO) { RunTools(container, getApplication<Application>(), binding.snapshot, run,
-                    "image" in model.capabilities, degrade,
+                    model.acceptsImages(), degrade,
                     baseExecutors = listOf(webExecutor, mcpExecutor),
                     runExecutorFactory = { python ->
                         toolingContext?.let { frozenContext ->
@@ -1037,6 +1039,7 @@ class ChatViewModel internal constructor(
                 }
                 val contextHistory = boundedHistory(history,
                     if (contextPolicy.autoCompact) Int.MAX_VALUE else contextPolicy.maxHistoryMessages, kbIds.toSet(), runCitations,
+                    allowOriginals = model.acceptsImages() && !degrade,
                     replayReasoning = provider.apiFormat == runtime.mobileagent.domain.ApiFormat.OPENAI_COMPATIBLE &&
                         "tools" in model.capabilities && toolExecutor.specs.isNotEmpty())
                 val typedHistory = contextHistory.messages
@@ -1142,10 +1145,14 @@ class ChatViewModel internal constructor(
                     } else emptyList(), parameters = layers, headers = headers, outputTokenLimit = sendCap,
                     outputTokenField = if (outputDecision.isAdvancedOverride) outputDecision.key else null)
                 // The same complete adapter budgeter serves this pre-credential check and every Runtime round.
-                val preflight = adapter.estimateInput(if (contextPolicy.autoCompact) {
+                val preflightRequest = if (contextPolicy.autoCompact) {
                     ContextPreflight.minimumRequest(prompt, runtimeContext, preparedRequest)
-                } else preparedRequest)
-                if (preflight.units > inputBudget || preflight.imageCount > contextPolicy.imageBudget) {
+                } else preparedRequest
+                // Originals are delivered in bounded groups before the main text request.
+                val anticipatedImages = preflightRequest.messages.flatMap { it.images }.distinctBy { it.assetId ?: it.base64 }.size
+                val preflight = adapter.estimateInput(preflightRequest.copy(
+                    messages = preflightRequest.messages.map { it.copy(images = emptyList()) }))
+                if (preflight.units > inputBudget || anticipatedImages > contextPolicy.imageBudget) {
                     // Local reserve only: under AUTO this protects the context budget
                     // without pretending to know the provider cap.
                     val outputReserve = contextPolicy.outputReserve(sendCap)
@@ -1154,7 +1161,7 @@ class ChatViewModel internal constructor(
                         limit = inputBudget.toLong(),
                         contextLimit = model.contextLimit,
                         outputReserve = outputReserve,
-                        imageCount = preflight.imageCount,
+                        imageCount = anticipatedImages,
                         imageBudget = contextPolicy.imageBudget,
                         protocolUnits = preflight.protocolUnits,
                         messageTextUnits = preflight.messageTextUnits,
@@ -1302,8 +1309,31 @@ class ChatViewModel internal constructor(
                     toolImages = runTools::toolImages, maxInputBudgetUnits = inputBudget.toLong(),
                     outputTokenLimit = sendCap,
                     outputTokenField = if (outputDecision.isAdvancedOverride) outputDecision.key else null,
-                    maxImagesPerRequest = contextPolicy.imageBudget,
+                    maxImagesPerRequest = minOf(MAX_IMAGES_PER_REQUEST, contextPolicy.imageBudget),
+                    maxImagesPerRun = contextPolicy.imageBudget,
+                    batchAllImages = true,
+                    imageLoader = { source -> withContext(Dispatchers.IO) {
+                        require(contextAuthorizationFingerprint() == authorizationFingerprint) {
+                            "PERMISSION_DENIED: visual source authorization changed"
+                        }
+                        runTools.loadImage(source) ?: run {
+                            val citation = (bound + runCitations.values.map { it.first }).firstOrNull { it.assetId == source.assetId }
+                                ?: error("PERMISSION_DENIED: visual source lacks authorized provenance")
+                            val bytes = container.knowledge.evidenceBytes(citation) ?: error("Visual source removed")
+                            require(bytes.first == source.mediaType && bytes.second.size.toLong() == source.byteLength &&
+                                RunCoordinator.sha256Hex(bytes.second) == source.sha256) { "Visual original changed" }
+                            source.copy(base64 = Base64.getEncoder().encodeToString(bytes.second))
+                        }
+                    } },
                     context = runtimeContext,
+                    beforeImageRequest = { images ->
+                        val live = container.agents.get(binding.snapshot.agentId) ?: error("Agent authorization was removed")
+                        val allowed = kbIds.intersect(live.knowledgeBaseIds.toSet())
+                        require(images.all { image -> runCitations.values.any { (citation, _) ->
+                            if (citation.assetId != image.assetId || citation.knowledgeBaseId !in allowed) false
+                            else container.knowledge.locateCitation(citation).let { !it.removed && it.blobHash == image.sha256 }
+                        } }) { "PERMISSION_DENIED: visual source removed or changed before dispatch" }
+                    },
                     beforeModelRequest = {
                         require(contextAuthorizationFingerprint() == authorizationFingerprint) {
                             "PERMISSION_DENIED: authorization changed before model request; context summary cannot restore access"
@@ -1544,9 +1574,57 @@ class ChatViewModel internal constructor(
                                 publishRunState(owner, state.value.copy(pendingTool = null, citations = citationUis(runCitations)))
                                 persistRun = true
                             }
+                            is RuntimeEvent.VisualBatchStarted -> {
+                                if (assistantId != null) checkpoint("COMPLETE")
+                                assistantId = null
+                                observed.clear(); reasoning = ""
+                                modelInFlight = true
+                                record = record.copy(state = RunStatus.MODEL_STREAMING, modelRounds = run.modelRounds)
+                                if (event.requestPreview != null) {
+                                    rememberRequestPreviewHint(conversationId)
+                                    publishRunState(owner, state.value.copy(requestPreview = ChatRequestPreviewUi("POST",
+                                        OpenAiAdapterFactory.requestEndpoint(provider.apiFormat, provider.baseUrl),
+                                        headers.keys.joinToString("\n") { it + ": [redacted]" }, requireNotNull(event.requestPreview))))
+                                }
+                                publishRunState(owner, state.value.copy(status = "正在读取图片（本组" + event.imageCount + "张）"))
+                                persistRun = true
+                            }
+                            is RuntimeEvent.VisualBatchAnalyzed -> {
+                                modelInFlight = false
+                                withContext(NonCancellable + Dispatchers.IO) {
+                                    val batchMetadata = buildJsonObject {
+                                        val ids = event.assets.map { it.assetId }.toSet()
+                                        val provenance = runCitations.values.map { it.first }.filter { it.assetId in ids }
+                                        Json.parseToJsonElement(citationMetadata(provenance, null, source = runCitations)).jsonObject
+                                            .forEach { (key, value) -> put(key, value) }
+                                        put("toolEvidence", true)
+                                        put("visualBatchAnalysis", true)
+                                        put("batchId", event.batchId)
+                                        putJsonObject("sourceHashes") { event.assets.forEach { asset ->
+                                            asset.sha256?.let { put(asset.assetId, it) }
+                                        } }
+                                    }.toString()
+                                    val receipt = buildJsonObject {
+                                        put("sourceIds", JsonArray(event.assets.map { JsonPrimitive(it.assetId) }))
+                                        put("analysis", event.analysis)
+                                    }.toString()
+                                    container.conversations.append(conversationId, MessageRole.USER,
+                                        "<untrusted-visual-evidence-analysis>\n" + receipt + "\n</untrusted-visual-evidence-analysis>",
+                                        parts = event.assets.map { ImagePart(it.assetId, it.mediaType) },
+                                        metadataJson = batchMetadata)
+                                }
+                                refreshMessages(owner)
+                                persistRun = true
+                            }
                             is RuntimeEvent.ToolImagesAttached -> withContext(Dispatchers.IO) {
                                 container.conversations.append(conversationId, MessageRole.USER, "Tool visual evidence: ${event.callId}",
-                                    parts = event.assets.map { ImagePart(it.assetId, it.mediaType) }, metadataJson = "{\"toolEvidence\":true}",
+                                    parts = event.assets.map { ImagePart(it.assetId, it.mediaType) }, metadataJson = buildJsonObject {
+                                        val ids = event.assets.map { it.assetId }.toSet()
+                                        val provenance = runCitations.values.map { it.first }.filter { it.assetId in ids }
+                                        Json.parseToJsonElement(citationMetadata(provenance, null, source = runCitations)).jsonObject
+                                            .forEach { (key, value) -> put(key, value) }
+                                        put("toolEvidence", true)
+                                    }.toString(),
                                     messageId = event.messageId ?: EntityId.random().value)
                             }
                             is RuntimeEvent.RunFinished -> {
@@ -1999,9 +2077,10 @@ class ChatViewModel internal constructor(
         // message metadata next to the citations.
         val coverageNotice = message.takeIf { it.role == MessageRole.ASSISTANT }
             ?.let { coverageNoticeOf(it.metadataJson) }
+        val visualReceipt = message.metadataJson.contains("\"visualBatchAnalysis\":true")
         return ChatMessageUi(
             id = message.id,
-            role = message.role.name.lowercase(),
+            role = if (visualReceipt) "tool" else message.role.name.lowercase(),
             text = message.text,
             timeLabel = message.createdAt.take(16),
             citationIds = message.parts.filterIsInstance<CitationPart>().map { it.citationId },
@@ -2009,15 +2088,14 @@ class ChatViewModel internal constructor(
             reasoning = reasoningParts.joinToString("") { it.text },
             reasoningStreaming = reasoningParts.lastOrNull()?.streaming == true && state.value.streaming,
             eventSummary = when {
+                visualReceipt -> "已向模型传输并分析 " + message.parts.filterIsInstance<ImagePart>().size + " 张原图"
                 errorPart != null -> errorPart.message
                 diffPart != null -> diffPart.summary
                 else -> listOfNotNull(toolFailureSummary, coverageNotice,
                     if (message.role == MessageRole.ASSISTANT && message.status != "COMPLETE" &&
                         (message.status != "STREAMING" || !state.value.streaming))
                         "本轮未完成（${message.status}）；已保留输出，不会自动重发。" else null,
-                    if (toolResultPart?.resultJson?.let { raw ->
-                            runCatching { Json.parseToJsonElement(raw).jsonObject["textDegradation"]?.jsonPrimitive?.booleanOrNull }.getOrNull()
-                        } == true) "视觉证据已降级：未向模型发送原始图片，视觉证据可能不完整。" else null,
+                    toolResultPart?.resultJson?.let(::toolVisualEvidenceSummary),
                 ).joinToString(" ")
             },
         )
@@ -2325,7 +2403,7 @@ class ChatViewModel internal constructor(
     }
     private data class ChatHistory(val messages: List<ChatMessage>, val sources: List<ContextSource>)
 
-    private fun boundedHistory(messages: List<Message>, max: Int, allowedKbs: Set<String>, source: Map<String, Pair<Citation, String>> = citations, replayReasoning: Boolean = false): ChatHistory {
+    private fun boundedHistory(messages: List<Message>, max: Int, allowedKbs: Set<String>, source: Map<String, Pair<Citation, String>> = citations, replayReasoning: Boolean = false, allowOriginals: Boolean = true): ChatHistory {
         val groups = mutableListOf<MutableList<Message>>()
         orderedToolEvidenceHistory(messages).forEach { message ->
             val toolEvidence = runCatching { Json.parseToJsonElement(message.metadataJson).jsonObject["toolEvidence"]?.jsonPrimitive?.booleanOrNull }.getOrNull() == true
@@ -2357,22 +2435,36 @@ class ChatViewModel internal constructor(
             selected.addAll(0, complete)
             complete.forEach { turnIds[it.id] = group.first().id }
         }
+        val analyzedHashes = selected.flatMap { message ->
+            val metadata = runCatching { Json.parseToJsonElement(message.metadataJson).jsonObject }.getOrNull()
+            if ((metadata?.get("visualBatchAnalysis") as? JsonPrimitive)?.booleanOrNull != true || message.text.isBlank()) emptyList()
+            else (metadata["sourceHashes"] as? JsonObject).orEmpty().map { (asset, hash) -> asset to hash.jsonPrimitive.content }
+        }.toMap()
         val projected = selected.map { message ->
             val assets = message.parts.filterIsInstance<ImagePart>()
             val images = if (assets.isEmpty()) emptyList() else {
                 require(assets.all { asset -> source.values.any { (citation, _) -> citation.assetId == asset.assetId &&
                     citation.knowledgeBaseId in allowedKbs && !container.knowledge.locateCitation(citation).removed } }) { "历史图片来源已撤销；请开启新会话。" }
-                when (val plan = VisualAttachmentPolicy.plan(assets.map { it.assetId }, container.knowledge::assetBytes)) {
-                    is VisualAttachmentPlan.Incomplete -> error(plan.reason)
-                    is VisualAttachmentPlan.Complete -> plan.images.map { InlineImage(it.mediaType, Base64.getEncoder().encodeToString(it.bytes), it.assetId) }
+                if (!allowOriginals) emptyList() else when (val plan = visualReferencePlan(assets.map { it.assetId })) {
+                    is VisualReferencePlan.Incomplete -> error(plan.reason)
+                    is VisualReferencePlan.Complete -> plan.images.filter { analyzedHashes[it.assetId] != it.sha256 }
+                        .map { InlineImage(it.mediaType, "", it.assetId, it.byteLength, it.sha256) }
                 }
             }
-            ChatMessage(message.role.name.lowercase(), message.text, images, message.parts.filterIsInstance<ToolResultPart>().singleOrNull()?.callId,
+            val historyText = if (assets.isNotEmpty() && !allowOriginals) message.text +
+                "\n历史原图本轮未发送；不得声称本轮查看了这些原图。" else message.text
+            ChatMessage(message.role.name.lowercase(), historyText, if (allowOriginals) images else emptyList(), message.parts.filterIsInstance<ToolResultPart>().singleOrNull()?.callId,
                 message.parts.filterIsInstance<ToolCallPart>().map { AssistantToolCall(it.callId, it.name, it.argumentsJson) },
                 reasoningContent = replayableReasoning(message, replayReasoning))
         }
         return ChatHistory(projected, selected.map { ContextSource(it.id, turnIds.getValue(it.id), complete = it.status == "COMPLETE") })
     }
+
+    private fun visualReferencePlan(assetIds: List<String>): VisualReferencePlan =
+        VisualAttachmentPolicy.references(assetIds) { id ->
+            container.db.query("SELECT b.media_type,b.byte_length,a.blob_hash FROM assets a JOIN blobs b ON b.hash=a.blob_hash WHERE a.id=?", listOf(id))
+                .singleOrNull()?.let { Triple(it.string("media_type"), it.string("byte_length").toLong(), it.string("blob_hash")) }
+        }
 
     private fun compactionUi(record: ContextCompactionRecord): ChatCompactionUi = ChatCompactionUi(
         id = record.id, state = record.state.name, sourceMessageIds = record.sourceMessageIds,
@@ -2457,6 +2549,15 @@ internal fun emptyCompletedAnswerNotice(answer: String): String? =
     } else {
         null
     }
+
+/** Keep the actual runtime disclosure visible instead of flattening every cause to one label. */
+internal fun toolVisualEvidenceSummary(raw: String): String? {
+    val root = runCatching { Json.parseToJsonElement(raw) as? JsonObject }.getOrNull() ?: return null
+    if ((root["textDegradation"] as? JsonPrimitive)?.booleanOrNull != true) return null
+    val warning = (root["warning"] as? JsonPrimitive)?.takeIf { it.isString }?.content
+        ?.takeIf { it.isNotBlank() }?.take(800)
+    return "视觉证据已降级：" + (warning ?: "未向模型发送原始图片，视觉证据可能不完整。")
+}
 
 /**
  * Resolve inspector availability without inspecting or persisting request contents. A prepared

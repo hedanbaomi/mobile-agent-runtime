@@ -85,6 +85,12 @@ internal data class CompactionPlan(
 internal class ContextWindow(prompt: EffectivePrompt, val context: RuntimeContext?) {
     private val entries = mutableListOf<ContextEntry>()
     private val order = mutableListOf<String>()
+    fun transformProjectedMessages(transform: (List<ChatMessage>) -> List<ChatMessage>) {
+        val transformed = transform(entries.map { it.message })
+        require(transformed.size == entries.size)
+        entries.indices.forEach { index -> entries[index] = entries[index].copy(message = transformed[index]) }
+    }
+
     var summary: ContextCompactionRecord? = context?.initialSummary
         private set
     var parentId: String? = context?.parentCheckpointId

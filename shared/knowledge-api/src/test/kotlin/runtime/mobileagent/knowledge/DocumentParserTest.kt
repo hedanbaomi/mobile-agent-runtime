@@ -14,6 +14,16 @@ import java.util.zip.ZipEntry
 import java.util.zip.ZipOutputStream
 
 class DocumentParserTest {
+    @Test fun metadataPlanAllowsSixtyFourFullSizeOriginalsWithoutLoadingBytes() {
+        val plan = VisualAttachmentPolicy.references((1..64).map { "asset-" + it }) {
+            Triple("image/png", 2L * 1024 * 1024, "source-hash")
+        } as VisualReferencePlan.Complete
+        assertEquals(64, plan.images.size)
+        assertTrue(VisualAttachmentPolicy.references((1..65).map { "asset-" + it }) {
+            error("over-budget plan must not even read metadata")
+        } is VisualReferencePlan.Incomplete)
+    }
+
     @Test
     fun compactDictionaryObjectBoundariesPreserveThePageTree() {
         // Pillow uses obj<< ... >>endobj. Dictionary delimiters separate the tokens;
@@ -1298,11 +1308,22 @@ class DocumentParserTest {
         assertTrue(mixed is VisualAttachmentPlan.Incomplete)
         val missing = VisualAttachmentPolicy.plan(listOf("gone")) { null }
         assertTrue(missing is VisualAttachmentPlan.Incomplete)
-        val five = VisualAttachmentPolicy.plan((1..5).map { "a$it" }) { tiny }
-        assertTrue(five is VisualAttachmentPlan.Incomplete)
+        val tooMany = VisualAttachmentPolicy.plan((1..VisualAttachmentPolicy.MAX_IMAGES + 1).map { "a$it" }) { tiny }
+        assertTrue(tooMany is VisualAttachmentPlan.Incomplete)
+        val seven = VisualAttachmentPolicy.plan((1..7).map { "a$it" }) { tiny }
+        assertEquals(7, (seven as VisualAttachmentPlan.Complete).images.size)
+        val boundary = VisualAttachmentPolicy.plan((1..VisualAttachmentPolicy.MAX_IMAGES).map { "a$it" }) { tiny }
+        assertEquals(VisualAttachmentPolicy.MAX_IMAGES, (boundary as VisualAttachmentPlan.Complete).images.size)
         val ok = VisualAttachmentPolicy.plan(listOf("a", "b")) { tiny }
         assertTrue(ok is VisualAttachmentPlan.Complete)
         assertEquals(2, (ok as VisualAttachmentPlan.Complete).images.size)
+        val maxSized = "image/png" to ByteArray(VisualAttachmentPolicy.MAX_BYTES)
+        val byteBoundary = VisualAttachmentPolicy.plan((1..8).map { "b$it" }) { maxSized }
+        assertEquals(8, (byteBoundary as VisualAttachmentPlan.Complete).images.size)
+        var loads = 0
+        val byteOverflow = VisualAttachmentPolicy.plan((1..64).map { "b$it" }) { loads++; maxSized }
+        assertTrue((byteOverflow as VisualAttachmentPlan.Incomplete).reason.contains("IMAGE_BYTES_BUDGET_EXCEEDED"))
+        assertEquals(9, loads, "Stop loading when the aggregate original byte bound is exceeded")
     }
 
     private fun zip(vararg files: Pair<String, ByteArray>): ByteArray {

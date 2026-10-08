@@ -30,6 +30,8 @@ DEBUG 仅在用户同时开启诊断、选中 DEBUG 后采集经凭据及 provid
 - 当前日志8 MiB、上一段8 MiB、最近崩溃32 KiB、单事件64 KiB、导出ZIP20 MiB，超限按拥有文件滚动或拒绝单条事件。滚动和导出都只保留完整 NDJSON 行。
 - 导出manifest包含设备fingerprint、当前 `activeLogLevel` 和历史级别说明。切换级别不清除旧日志，INFO 导出的 ZIP 仍可能含以前的 DEBUG 记录；单条记录的 level 说明其采集级别。
 
+2026-10-08：闭合白名单保留 capability_denied（授权拒绝）、workspace_version_unsupported（旧条件请求派发前失败）、conflict（目标条目实际变化）。未知自由文本仍归 unknown，不增加路径、URI、正文或授权对象。旧 unknown 无法还原精确码；新 schema 让普通变更省略不可执行条件，错误码不代替可用性修复。
+
 ## 3. 隐私与崩溃边界
 
 `run_preparation_failed` 只允许固定准备阶段（preflight、retrieval、tooling、prompt、manifest、context_budget、credentials、request）、`MessageErrorCode` 枚举、安全异常类型，以及可选的闭合非负整数（`configuredContextLimit`、`outputReserve`、`inputLimit`、`estimatedUnits`、`imageCount`、`imageBudget`、`protocolUnits`、`messageTextUnits`、`toolCallUnits`、`toolSchemaUnits`、`imageUnits`）。它用于区分请求准备失败并给出预算拆解数字，不记录异常消息、输入/Skill 内容、估算全文或任何凭据；默认关闭与原有大小限制不变。实际请求准备成功后不再把后续流式错误记为准备失败。

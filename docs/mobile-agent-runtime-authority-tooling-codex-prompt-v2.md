@@ -380,7 +380,7 @@ data class WorkspaceDescriptor(
 - `lstat`/等价检查防符号链接逃逸；
 - 删除只允许普通文件或空目录；
 - 禁止删除 workspace 根；
-- 原子写；
+- 原子后端使用原子替换；SAF 普通显式覆盖以 provider 流写入并核验，不冒称原子补丁；
 - 单文件大小限制；
 - 总 quota；
 - 目录项数量限制；
@@ -391,6 +391,8 @@ data class WorkspaceDescriptor(
 **注意：这些约束只约束 typed file tools。Dangerous Mode 的 `shell_exec` 是明确的高风险 escape hatch，不要假装它仍受 workspace confinement。**
 
 这一区分必须在代码和文档中说清楚。
+
+2026-10-08：返回 version 描述目标条目。Backend 按操作声明条件支持；纯 SAF、普通 Shizuku/Wired 变更不向模型暴露不可执行的可选 expected_version。混合工作区查询 workspace_list.expected_version_operations，并返回 version_scope=target_entry。真正目标变化为 CONFLICT，不支持的旧条件请求在派发/ONCE 消费前为 WORKSPACE_VERSION_UNSUPPORTED；不得清除条件或自动重放。mandatory patch 缺条件契约时不暴露。目录分页 cursor 与目标版本分开处理。见 [ADR-0032](adr/0032-workspace-crud-and-version-capabilities.md)。
 
 ## 4.2 SAF
 
@@ -403,6 +405,9 @@ data class WorkspaceDescriptor(
 - provider 撤销后标记 `GRANT_LOST`；
 - 根据 provider 实际 capability 判断 create/rename/delete；
 - URI 不暴露给模型。
+- 默认重选同一目录保留显式读写授权，新 Agent 草稿提交保留刚授予的读写；新附加仍只读，显式只读和撤销仍有效。
+- replace=true 可更新支持写入的普通文档：复核 grant/flag、配额，关闭截断流后核验同一文档 ID 和精确回读；打开流后失败为 UNKNOWN_OUTCOME，不重放。atomic_replace=false，原子补丁不可用。
+- 可创建空目录保留删除工具/授权操作面，具体目标 delete flag、空目录和根禁止删除限制仍在派发前检查。
 
 本轮不新增 `MANAGE_EXTERNAL_STORAGE` 主线实现；如现有工程已有相关代码，不要破坏，但不要把它当本方案必需项。
 
@@ -645,7 +650,7 @@ ENABLED_AUTONOMOUS
 - 路径约束；
 - symlink 防护；
 - 配额；
-- 原子写；
+- 原子后端使用原子替换；SAF 普通显式覆盖以 provider 流写入并核验，不冒称原子补丁；
 - callId / tool snapshot；
 - approval 后 revalidation。
 

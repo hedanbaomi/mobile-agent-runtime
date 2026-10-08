@@ -50,6 +50,38 @@ class WorkspaceVersionToolFlowTest {
     lateinit var tempDir: Path
 
     @Test
+    fun siblingMutationsDoNotInvalidateTargetVersionsAndFreshStateRemainsUsable(): Unit = runBlocking {
+        val harness = harness(tempDir.resolve("siblings"), context = workspaceContext(allPaths = true))
+        fun args(path: String, text: String? = null, expected: JsonElement? = null) = buildJsonObject {
+            put("workspace_id", WORKSPACE_ID)
+            put("relative_path", path)
+            text?.let { put("text", it) }
+            expected?.let { put("expected_version", it) }
+        }.toString()
+        val first = invoke(harness, "sibling-create-a", "file_write_text", args("a.txt", "one"))
+        val second = invoke(harness, "sibling-create-b", "file_write_text", args("b.txt", "two"))
+        val aVersion = version(first)
+        val bVersion = version(second)
+        val listed = invoke(harness, "sibling-list", "file_list", """{"workspace_id":"$WORKSPACE_ID"}""")
+        assertEquals(2, json(listed).getValue("entries").jsonArray.size)
+        assertEquals(bVersion, version(invoke(harness, "sibling-stat-b", "file_stat", args("b.txt"))))
+        invoke(harness, "sibling-mkdir", "file_create_directory", args("new-directory")).also(::json)
+        invoke(harness, "sibling-delete-a", "file_delete", args("a.txt", expected = aVersion)).also(::json)
+        assertFalse(Files.exists(harness.root.resolve("a.txt")))
+        assertEquals(bVersion, version(invoke(harness, "sibling-read-b", "file_read_text", args("b.txt"))))
+        val replacement = Json.parseToJsonElement(args("b.txt", "two-updated", bVersion)).jsonObject
+        val replaced = invoke(harness, "sibling-write-b", "file_write_text",
+            JsonObject(replacement + ("replace" to kotlinx.serialization.json.JsonPrimitive(true))).toString())
+        assertTrue(version(replaced) != bVersion)
+        val stale = invoke(harness, "sibling-stale-delete-b", "file_delete", args("b.txt", expected = bVersion))
+        assertFailure(stale, ToolErrorCode.CONFLICT)
+        assertEquals("two-updated", Files.readAllBytes(harness.root.resolve("b.txt")).toString(StandardCharsets.UTF_8))
+        invoke(harness, "sibling-delete-b", "file_delete", args("b.txt", expected = version(replaced))).also(::json)
+        invoke(harness, "sibling-recreate-a", "file_write_text", args("a.txt", "three")).also(::json)
+        assertEquals("three", json(invoke(harness, "sibling-reread-a", "file_read_text", args("a.txt"))).getValue("text").jsonPrimitive.content)
+    }
+
+    @Test
     fun executorRoundTripsHighBitVersionThroughJsonAndRejectsStaleMutations(): Unit = runBlocking {
         val harness = harness(tempDir.resolve("version-flow"))
         val testDigest = MessageDigest.getInstance("SHA-256")
@@ -201,12 +233,12 @@ class WorkspaceVersionToolFlowTest {
         root: Path,
         backend: InternalWorkspaceBackendApi = InternalWorkspaceBackend(root, workspaceId = WORKSPACE_ID),
         auditSink: WorkspaceAuditSink = acceptingAuditSink(),
+        context: ToolExecutionContext = workspaceContext(),
     ): Harness {
         Files.createDirectories(root)
         val adapter = SharedWorkspaceBackendAdapter(backend)
         val registry = WorkspaceRegistry()
         assertTrue(registry.register(adapter.descriptor, adapter))
-        val context = workspaceContext()
         val executor = UnifiedWorkspaceToolExecutor(
             registry = registry,
             approvalEngine = ApprovalEngine(),
@@ -216,14 +248,18 @@ class WorkspaceVersionToolFlowTest {
         return Harness(root, context, executor)
     }
 
-    private fun workspaceContext(): ToolExecutionContext {
-        val grants = listOf(
+    private fun workspaceContext(allPaths: Boolean = false): ToolExecutionContext {
+        val initial = listOf(
             grant("grant-version-list", CapabilityId(CapabilityId.FILE_LIST), null),
             grant("grant-version-stat", CapabilityId(CapabilityId.FILE_STAT), NOTE_PATH),
             grant("grant-version-read", CapabilityId(CapabilityId.FILE_READ_TEXT), NOTE_PATH),
             grant("grant-version-write", CapabilityId(CapabilityId.FILE_WRITE_TEXT), NOTE_PATH),
             grant("grant-version-patch", CapabilityId("file.apply_patch"), NOTE_PATH),
         )
+        val grants = if (allPaths) initial.map { it.copy(pathScope = null) } + listOf(
+            grant("grant-version-delete", CapabilityId(CapabilityId.FILE_DELETE), null),
+            grant("grant-version-mkdir", CapabilityId(CapabilityId.FILE_CREATE_DIRECTORY), null),
+        ) else initial
         val snapshotId = "snapshot-version-flow"
         return ToolExecutionContext(
             agentId = AGENT_ID,

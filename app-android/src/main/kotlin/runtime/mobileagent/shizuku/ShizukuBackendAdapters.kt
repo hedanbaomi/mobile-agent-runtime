@@ -289,6 +289,8 @@ class ShizukuWorkspaceBackendAdapter(
         CapabilityId("file.apply_patch"),
     )
 
+    override val expectedVersionCapabilities: Set<CapabilityId> = setOf(CapabilityId("file.apply_patch"))
+
     override suspend fun list(request: WorkspaceListRequest): WorkspaceResult<WorkspaceListing> {
         if (request.workspaceId != descriptor.id) return failure(ToolErrorCode.INVALID_REQUEST)
         val normalized = normalizePath(request.relativePath, allowRoot = true)
@@ -350,7 +352,7 @@ class ShizukuWorkspaceBackendAdapter(
 
     override suspend fun move(request: WorkspaceMoveRequest): WorkspaceResult<WorkspaceMutation> {
         if (request.workspaceId != descriptor.id) return failure(ToolErrorCode.INVALID_REQUEST)
-        if (request.expectedVersion != null) return failure(ToolErrorCode.CONFLICT)
+        if (request.expectedVersion != null) return failure(ToolErrorCode.WORKSPACE_VERSION_UNSUPPORTED)
         val source = normalizePath(request.sourcePath, allowRoot = false)
             ?: return failure(ToolErrorCode.PATH_OUT_OF_SCOPE)
         val destination = normalizePath(request.destinationPath, allowRoot = false)
@@ -364,7 +366,7 @@ class ShizukuWorkspaceBackendAdapter(
 
     override suspend fun writeText(request: WorkspaceWriteTextRequest): WorkspaceResult<WorkspaceMutation> {
         if (request.workspaceId != descriptor.id) return failure(ToolErrorCode.INVALID_REQUEST)
-        if (request.expectedVersion != null) return failure(ToolErrorCode.CONFLICT)
+        if (request.expectedVersion != null) return failure(ToolErrorCode.WORKSPACE_VERSION_UNSUPPORTED)
         val normalized = normalizePath(request.relativePath, allowRoot = false)
             ?: return failure(ToolErrorCode.PATH_OUT_OF_SCOPE)
         val content = strictUtf8(request.text)
@@ -379,7 +381,7 @@ class ShizukuWorkspaceBackendAdapter(
 
     override suspend fun createDirectory(request: WorkspaceCreateDirectoryRequest): WorkspaceResult<WorkspaceMutation> {
         if (request.workspaceId != descriptor.id) return failure(ToolErrorCode.INVALID_REQUEST)
-        if (request.expectedVersion != null) return failure(ToolErrorCode.CONFLICT)
+        if (request.expectedVersion != null) return failure(ToolErrorCode.WORKSPACE_VERSION_UNSUPPORTED)
         val normalized = normalizePath(request.relativePath, allowRoot = false)
             ?: return failure(ToolErrorCode.PATH_OUT_OF_SCOPE)
         return dispatchJson<WorkspaceMutation>(
@@ -391,7 +393,7 @@ class ShizukuWorkspaceBackendAdapter(
 
     override suspend fun delete(request: WorkspaceDeleteRequest): WorkspaceResult<WorkspaceMutation> {
         if (request.workspaceId != descriptor.id) return failure(ToolErrorCode.INVALID_REQUEST)
-        if (request.expectedVersion != null) return failure(ToolErrorCode.CONFLICT)
+        if (request.expectedVersion != null) return failure(ToolErrorCode.WORKSPACE_VERSION_UNSUPPORTED)
         val normalized = normalizePath(request.relativePath, allowRoot = false)
             ?: return failure(ToolErrorCode.PATH_OUT_OF_SCOPE)
         return dispatchJson<WorkspaceMutation>(

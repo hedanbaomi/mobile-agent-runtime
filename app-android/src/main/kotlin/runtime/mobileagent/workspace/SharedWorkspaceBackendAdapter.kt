@@ -55,6 +55,9 @@ class SharedWorkspaceBackendAdapter internal constructor(
     override val capabilities: Set<CapabilityId>
         get() = backend.descriptor.operationCapabilities
 
+    override val expectedVersionCapabilities: Set<CapabilityId>
+        get() = backend.expectedVersionCapabilities
+
     override suspend fun list(request: WorkspaceListRequest): SharedWorkspaceResult<WorkspaceListing> {
         if (request.workspaceId != backend.descriptor.id || request.maxEntries < 1) {
             return failure(ToolErrorCode.INVALID_REQUEST)
@@ -133,6 +136,9 @@ class SharedWorkspaceBackendAdapter internal constructor(
 
     override suspend fun applyPatch(request: WorkspaceApplyPatchRequest): SharedWorkspaceResult<WorkspaceMutation> {
         if (request.workspaceId != backend.descriptor.id) return failure(ToolErrorCode.INVALID_REQUEST)
+        if (InternalWorkspaceCapabilities.APPLY_PATCH !in expectedVersionCapabilities) {
+            return failure(ToolErrorCode.WORKSPACE_VERSION_UNSUPPORTED)
+        }
         val expected = when (val checked = implementationVersion(request.relativePath, request.expectedVersion)) {
             is InternalWorkspaceResult.Failure -> return failure(checked.error)
             is InternalWorkspaceResult.Success -> checked.value
@@ -157,6 +163,9 @@ class SharedWorkspaceBackendAdapter internal constructor(
 
     override suspend fun writeText(request: WorkspaceWriteTextRequest): SharedWorkspaceResult<WorkspaceMutation> {
         if (request.workspaceId != backend.descriptor.id) return failure(ToolErrorCode.INVALID_REQUEST)
+        if (request.expectedVersion != null && InternalWorkspaceCapabilities.WRITE_TEXT !in expectedVersionCapabilities) {
+            return failure(ToolErrorCode.WORKSPACE_VERSION_UNSUPPORTED)
+        }
         val expected = when (val checked = implementationVersion(request.relativePath, request.expectedVersion)) {
             is InternalWorkspaceResult.Failure -> return failure(checked.error)
             is InternalWorkspaceResult.Success -> checked.value
@@ -180,6 +189,9 @@ class SharedWorkspaceBackendAdapter internal constructor(
 
     override suspend fun createDirectory(request: WorkspaceCreateDirectoryRequest): SharedWorkspaceResult<WorkspaceMutation> {
         if (request.workspaceId != backend.descriptor.id) return failure(ToolErrorCode.INVALID_REQUEST)
+        if (request.expectedVersion != null && InternalWorkspaceCapabilities.CREATE_DIRECTORY !in expectedVersionCapabilities) {
+            return failure(ToolErrorCode.WORKSPACE_VERSION_UNSUPPORTED)
+        }
         val expected = when (val checked = implementationVersion(request.relativePath, request.expectedVersion)) {
             is InternalWorkspaceResult.Failure -> return failure(checked.error)
             is InternalWorkspaceResult.Success -> checked.value
@@ -198,6 +210,9 @@ class SharedWorkspaceBackendAdapter internal constructor(
 
     override suspend fun move(request: WorkspaceMoveRequest): SharedWorkspaceResult<WorkspaceMutation> {
         if (request.workspaceId != backend.descriptor.id) return failure(ToolErrorCode.INVALID_REQUEST)
+        if (request.expectedVersion != null && InternalWorkspaceCapabilities.MOVE !in expectedVersionCapabilities) {
+            return failure(ToolErrorCode.WORKSPACE_VERSION_UNSUPPORTED)
+        }
         val expected = when (val checked = implementationVersion(request.sourcePath, request.expectedVersion)) {
             is InternalWorkspaceResult.Failure -> return failure(checked.error)
             is InternalWorkspaceResult.Success -> checked.value
@@ -218,6 +233,9 @@ class SharedWorkspaceBackendAdapter internal constructor(
     /** App-only copy extension; the shared contract intentionally has no copy method yet. */
     override suspend fun copy(request: WorkspaceCopyRequest): SharedWorkspaceResult<WorkspaceMutation> {
         if (request.workspaceId != backend.descriptor.id) return failure(ToolErrorCode.INVALID_REQUEST)
+        if (request.expectedVersion != null && CapabilityId("file.copy") !in expectedVersionCapabilities) {
+            return failure(ToolErrorCode.WORKSPACE_VERSION_UNSUPPORTED)
+        }
         val expected = when (val checked = implementationVersion(request.sourcePath, request.expectedVersion)) {
             is InternalWorkspaceResult.Failure -> return failure(checked.error)
             is InternalWorkspaceResult.Success -> checked.value
@@ -242,6 +260,9 @@ class SharedWorkspaceBackendAdapter internal constructor(
 
     override suspend fun delete(request: runtime.mobileagent.skills.tooling.WorkspaceDeleteRequest): SharedWorkspaceResult<WorkspaceMutation> {
         if (request.workspaceId != backend.descriptor.id) return failure(ToolErrorCode.INVALID_REQUEST)
+        if (request.expectedVersion != null && InternalWorkspaceCapabilities.DELETE !in expectedVersionCapabilities) {
+            return failure(ToolErrorCode.WORKSPACE_VERSION_UNSUPPORTED)
+        }
         val expected = when (val checked = implementationVersion(request.relativePath, request.expectedVersion)) {
             is InternalWorkspaceResult.Failure -> return failure(checked.error)
             is InternalWorkspaceResult.Success -> checked.value

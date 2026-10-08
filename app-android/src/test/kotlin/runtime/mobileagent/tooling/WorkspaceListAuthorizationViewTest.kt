@@ -42,7 +42,7 @@ import runtime.mobileagent.skills.tooling.WorkspaceWriteTextRequest
 /**
  * `workspace_list` must describe this Agent's real authority, not the backend's
  * registration-time descriptor.  These are negative tests: a read-only Agent on
- * a platform-writable workspace, SAF create-only authority versus atomic
+ * a platform-writable workspace, SAF ordinary writes versus atomic
  * replacement, a path-bounded grant that must not become whole-root authority,
  * and the Skill capability intersection.
  */
@@ -51,6 +51,8 @@ class WorkspaceListAuthorizationViewTest {
     private class RecordingBackend(
         override val descriptor: WorkspaceDescriptor,
         override val capabilities: Set<CapabilityId>,
+        override val expectedVersionCapabilities: Set<CapabilityId> =
+            setOf(CapabilityId("file.apply_patch")).intersect(capabilities),
     ) : WorkspaceBackend {
         var writeCalls = 0
 
@@ -71,6 +73,84 @@ class WorkspaceListAuthorizationViewTest {
 
         private fun <T> denied(): WorkspaceResult<T> =
             WorkspaceResult.Failure(ToolError(ToolErrorCode.CAPABILITY_DENIED))
+    }
+
+    @Test
+    fun ordinaryMutationSchemasOmitUnsupportedVersionsAndRejectThemBeforeOnceConsumption(): Unit = runBlocking {
+        val capabilities = safWriteCapabilities() + CapabilityId(CapabilityId.FILE_DELETE)
+        val backend = RecordingBackend(
+            WorkspaceDescriptor(SAF_WORKSPACE, "阅读", WorkspaceBackendType.SAF_TREE, writable = true),
+            capabilities,
+        )
+        val grants = capabilities.map { grant("g-${it.value}", it.value, SAF_WORKSPACE) }
+            .map { if (it.capability == CapabilityId(CapabilityId.FILE_WRITE_TEXT)) it.copy(lifetime = GrantLifetime.ONCE) else it }
+        val context = runContext(grants)
+        var consumed = 0
+        val executor = executorFor(registryOf(backend), context) { consumed++; true }
+        val tools = listOf("file_write_text", "file_create_directory", "file_delete")
+        tools.forEach { name ->
+            val schema = Json.parseToJsonElement(executor.toolingSpecs.single { it.name == name }.inputSchema).jsonObject
+            assertFalse("expected_version" in schema.getValue("properties").jsonObject, name)
+            val text = if (name == "file_write_text") ",\"text\":\"body\"" else ""
+            val result = executor.invoke(ToolCall("unsupported-$name", name,
+                """{"workspace_id":"$SAF_WORKSPACE","relative_path":"note.txt","expected_version":123$text}"""), context)
+            assertEquals(ToolResult.Failure(ToolError(ToolErrorCode.WORKSPACE_VERSION_UNSUPPORTED)), result)
+        }
+        assertEquals(0, backend.writeCalls)
+        assertEquals(0, consumed, "unsupported preconditions must not consume a one-shot grant")
+        val view = listedWorkspaces(executor, context).getValue(SAF_WORKSPACE)
+        assertTrue(view.stringList("expected_version_operations").isEmpty())
+        assertEquals("target_entry", view.getValue("version_scope").jsonPrimitive.content)
+        val accepted = executor.invoke(ToolCall("ordinary-write", "file_write_text",
+            """{"workspace_id":"$SAF_WORKSPACE","relative_path":"note.txt","text":"body"}"""), context)
+        assertTrue(accepted is ToolResult.Value)
+        assertEquals(1, backend.writeCalls)
+        assertEquals(1, consumed)
+    }
+
+    @Test
+    fun mixedBackendSchemaKeepsVersionOnlyAsAnExplicitPerWorkspaceContract(): Unit = runBlocking {
+        val capabilities = safWriteCapabilities()
+        val internal = RecordingBackend(
+            WorkspaceDescriptor("internal-versioned", "Internal", WorkspaceBackendType.INTERNAL, writable = true),
+            capabilities, setOf(CapabilityId(CapabilityId.FILE_WRITE_TEXT)),
+        )
+        val saf = RecordingBackend(
+            WorkspaceDescriptor(SAF_WORKSPACE, "阅读", WorkspaceBackendType.SAF_TREE, writable = true), capabilities,
+        )
+        val registry = registryOf(internal)
+        assertTrue(registry.register(saf.descriptor, saf))
+        val grants = listOf(internal, saf).flatMap { backend ->
+            capabilities.map { grant("${backend.descriptor.id}-${it.value}", it.value, backend.descriptor.id) }
+        }
+        val context = runContext(grants)
+        val executor = executorFor(registry, context)
+        val spec = executor.toolingSpecs.single { it.name == "file_write_text" }
+        assertTrue("expected_version" in Json.parseToJsonElement(spec.inputSchema).jsonObject.getValue("properties").jsonObject)
+        val views = listedWorkspaces(executor, context)
+        assertEquals(listOf("file_write_text"), views.getValue("internal-versioned").stringList("expected_version_operations"))
+        assertTrue(views.getValue(SAF_WORKSPACE).stringList("expected_version_operations").isEmpty())
+        val result = executor.invoke(ToolCall("mixed-saf-version", "file_write_text",
+            """{"workspace_id":"$SAF_WORKSPACE","relative_path":"note.txt","text":"body","expected_version":123}"""), context)
+        assertEquals(ToolResult.Failure(ToolError(ToolErrorCode.WORKSPACE_VERSION_UNSUPPORTED)), result)
+        assertEquals(0, saf.writeCalls)
+        assertEquals(0, internal.writeCalls)
+    }
+
+    @Test
+    fun patchWithoutItsMandatoryVersionContractIsNeverAdvertisedAsAtomic(): Unit = runBlocking {
+        val capabilities = safWriteCapabilities() + CapabilityId("file.apply_patch")
+        val backend = RecordingBackend(
+            WorkspaceDescriptor("incomplete-patch", "Incomplete contract", WorkspaceBackendType.INTERNAL, writable = true),
+            capabilities, expectedVersionCapabilities = emptySet(),
+        )
+        val grants = capabilities.map { grant("patch-${it.value}", it.value, backend.descriptor.id) }
+        val context = runContext(grants)
+        val executor = executorFor(registryOf(backend), context)
+        assertFalse(executor.toolingSpecs.any { it.name == "file_apply_patch" })
+        val view = listedWorkspaces(executor, context).getValue(backend.descriptor.id)
+        assertFalse(view.bool("atomic_replace"))
+        assertFalse("file_apply_patch" in view.stringList("authorized_operations"))
     }
 
     @Test
@@ -126,10 +206,10 @@ class WorkspaceListAuthorizationViewTest {
             listOf("file_create_directory", "file_read_text", "file_write_text"),
             view.stringList("authorized_operations"),
         )
-        // Creating a new document/directory is stated separately from replacing
-        // an existing one, and no conditional overwrite is advertised at all.
+        // SAF can update an existing document with replace=true, without claiming
+        // atomic replacement or conditional patch support.
         assertEquals(
-            listOf("file_create_directory", "file_write_text"),
+            listOf("file_create_directory"),
             view.stringList("create_only_operations"),
         )
         assertFalse(view.bool("atomic_replace"))

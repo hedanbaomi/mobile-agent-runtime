@@ -17,6 +17,8 @@ import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
+import runtime.mobileagent.feature.agents.AgentWorkspaceAccessPreset
+import runtime.mobileagent.feature.agents.AgentWorkspaceGrantPresetUi
 import runtime.mobileagent.AgentsViewModel
 import runtime.mobileagent.ChatViewModel
 import runtime.mobileagent.MobileAgentApp
@@ -44,6 +46,8 @@ import runtime.mobileagent.skills.tooling.ToolErrorCode
 import runtime.mobileagent.skills.tooling.WorkspaceBackend
 import runtime.mobileagent.skills.tooling.WorkspaceDescriptor
 import runtime.mobileagent.skills.tooling.WorkspaceResult
+import runtime.mobileagent.skills.ToolCall
+import runtime.mobileagent.skills.ToolResult
 import runtime.mobileagent.tooling.WorkspaceRegistry
 
 /**
@@ -531,6 +535,45 @@ class RuntimeThreadWorkspaceDeviceTest {
     }
 
     @Test
+    fun selectingDefaultPreservesExplicitWriteConsentAndNextRunCanStillWrite() = runBlocking {
+        val fixture = fixture()
+        val container = fixture.app.container
+        val runtime = container.runtimeIntegration
+        val workspaceId = RuntimeIntegration.INTERNAL_WORKSPACE_ID
+        runtime.useRecentWorkspace(workspaceId, WorkspacePickerTarget(agentId = fixture.agentId))
+        val chat = ChatViewModel(fixture.app, SavedStateHandle())
+        chat.selectAgent(fixture.agentId)
+        val conversationId = requireNotNull(chat.newSession())
+        val conversation = requireNotNull(container.conversations.get(conversationId))
+        val snapshot = requireNotNull(container.agents.getSnapshot(conversation.snapshotId))
+        val write = container.agentGrantPort.saveGrant(CapabilityGrant(
+            grantId = "grant-default-write-${fixture.suffix}", agentId = fixture.agentId,
+            capability = CapabilityId(CapabilityId.FILE_WRITE_TEXT), workspaceId = workspaceId,
+            lifetime = GrantLifetime.PERSISTENT, policyVersion = container.agentGrantPort.currentPolicyVersion(),
+            createdAt = fixture.now,
+        ))
+        val reselected = runtime.useRecentWorkspace(workspaceId, WorkspacePickerTarget(agentId = fixture.agentId))
+        assertTrue(reselected is WorkspaceAccessResult.Success)
+        val active = container.agentGrantPort.listGrants(fixture.agentId, includeRevoked = false)
+        assertTrue("default selection erased explicit write consent", active.any { it.grantId == write.grantId })
+        val context = runtime.createToolExecutionContext(snapshot, "default-write-next-run", conversationId,
+            "default-write-config-${fixture.suffix}")
+        assertTrue(context.effectiveCapabilities.contains(CapabilityId(CapabilityId.FILE_WRITE_TEXT)))
+        val factory = runtime.createToolExecutorFactory(context)
+        val path = "default-write-${fixture.suffix}.txt"
+        val result = factory.invoke(ToolCall("default-write-${fixture.suffix}", "file_write_text",
+            """{"workspace_id":"$workspaceId","relative_path":"$path","text":"proof"}"""))
+        assertTrue("next Run after default re-selection could not write: $result", result is ToolResult.Value)
+        val root = File(requireNotNull(WorkspaceRepository(container.db).get(workspaceId)).rootReference)
+        // The unique application fixture is disposable; normal user entries are not touched.
+        root.resolve(path).delete()
+        container.agentGrantPort.revokeGrant(write.grantId, write.revision)
+        runtime.useRecentWorkspace(workspaceId, WorkspacePickerTarget(agentId = fixture.agentId))
+        assertTrue(container.agentGrantPort.listGrants(fixture.agentId, includeRevoked = false)
+            .none { it.workspaceId == workspaceId && it.capability == write.capability })
+    }
+
+    @Test
     fun revokedDefaultGrantsStayRevokedUntilReselectionAndReselectionNeverRestoresWrites() = runBlocking {
         val fixture = fixture()
         val container = fixture.app.container
@@ -622,7 +665,13 @@ class RuntimeThreadWorkspaceDeviceTest {
     }
 
     @Test
-    fun newAgentEditorDraftSaveThenNewSessionExposesWorkspaceTools() {
+    fun newAgentEditorDraftSaveThenNewSessionExposesWorkspaceTools() = assertDraftSaveWithPreset(null)
+
+    @Test
+    fun newAgentReadWriteDraftRetainsExplicitPresetAfterDraftCommit() =
+        assertDraftSaveWithPreset(AgentWorkspaceAccessPreset.READ_WRITE)
+
+    private fun assertDraftSaveWithPreset(preset: AgentWorkspaceAccessPreset?) {
         val app = InstrumentationRegistry.getInstrumentation().targetContext.applicationContext as MobileAgentApp
         app.ensureHostInitialized()
         val suffix = UUID.randomUUID().toString().replace("-", "")
@@ -664,6 +713,9 @@ class RuntimeThreadWorkspaceDeviceTest {
             ),
         )
         assertNotNull(vm.pendingWorkspaceDraft())
+        if (preset != null) vm.edit(requireNotNull(vm.state.value.editor).copy(
+            workspaceGrantPreset = AgentWorkspaceGrantPresetUi(RuntimeIntegration.INTERNAL_WORKSPACE_ID, preset),
+        ))
         assertTrue(vm.save())
         val agentId = requireNotNull(vm.state.value.selectedAgentId)
         assertFalse(agentId in agentsBefore)
@@ -677,6 +729,11 @@ class RuntimeThreadWorkspaceDeviceTest {
                 .any { it.workspaceId == RuntimeIntegration.INTERNAL_WORKSPACE_ID },
         )
 
+        val grants = container.agentGrantPort.listGrants(agentId, includeRevoked = false)
+        assertEquals(preset == AgentWorkspaceAccessPreset.READ_WRITE, grants.any {
+            it.workspaceId == RuntimeIntegration.INTERNAL_WORKSPACE_ID &&
+                it.capability == CapabilityId(CapabilityId.FILE_WRITE_TEXT)
+        })
         val chat = ChatViewModel(app, SavedStateHandle())
         chat.selectAgent(agentId)
         val conversationId = requireNotNull(chat.newSession())

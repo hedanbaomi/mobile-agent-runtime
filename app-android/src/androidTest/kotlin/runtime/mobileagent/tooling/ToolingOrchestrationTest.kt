@@ -1487,8 +1487,8 @@ class ToolingOrchestrationTest {
         // file_move is never model-exposed, even with a live file.move grant
         // and a move-capable backend.
         assertFalse(schemas.containsKey(UnifiedWorkspaceToolExecutor.FILE_MOVE))
-        assertTrue(schemas.getValue(UnifiedWorkspaceToolExecutor.FILE_CREATE_DIRECTORY).contains("expected_version"))
-        assertTrue(schemas.getValue(UnifiedWorkspaceToolExecutor.FILE_DELETE).contains("expected_version"))
+        assertFalse(schemas.getValue(UnifiedWorkspaceToolExecutor.FILE_CREATE_DIRECTORY).contains("expected_version"))
+        assertFalse(schemas.getValue(UnifiedWorkspaceToolExecutor.FILE_DELETE).contains("expected_version"))
 
         assertTrue(
             executor.invoke(

@@ -1423,7 +1423,9 @@ internal fun workspaceToolErrorMessage(
     runtime.mobileagent.skills.tooling.ToolErrorCode.QUOTA_EXCEEDED ->
         if (chinese) "目录或输出超过安全上限，请缩小范围后重试。" else "The directory or output exceeds its safety limit. Narrow the request and try again."
     runtime.mobileagent.skills.tooling.ToolErrorCode.CONFLICT ->
-        if (chinese) "工作区内容已变化，请刷新后重试。" else "The workspace changed. Refresh it and try again."
+        if (chinese) "目标条目已变化，请读取其最新版本后重试。" else "The requested entry changed. Read its latest version and try again."
+    runtime.mobileagent.skills.tooling.ToolErrorCode.WORKSPACE_VERSION_UNSUPPORTED ->
+        if (chinese) "此操作不支持版本条件，未执行。" else "This operation cannot enforce a version condition. Nothing was executed."
     runtime.mobileagent.skills.tooling.ToolErrorCode.UNSUPPORTED_ENTRY ->
         if (chinese) "该文件类型暂不支持。" else "This workspace entry type is not supported."
     runtime.mobileagent.skills.tooling.ToolErrorCode.OPERATION_UNAVAILABLE ->

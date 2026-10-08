@@ -1088,7 +1088,9 @@ class AgentRuntime(
             ToolErrorCode.ADB_DEVICE_DISCONNECTED,
                 -> "The workspace is temporarily unavailable. Try again after reconnecting it."
             ToolErrorCode.QUOTA_EXCEEDED -> "The workspace operation exceeded a configured size or output limit."
-            ToolErrorCode.CONFLICT -> "The workspace changed. Read the latest state before trying again."
+            ToolErrorCode.CONFLICT -> "The requested entry changed. Read that entry's latest version before trying again."
+            ToolErrorCode.WORKSPACE_VERSION_UNSUPPORTED ->
+                "This workspace cannot enforce expected_version for this operation. Nothing was executed. Check workspace_list.expected_version_operations; do not repeat the same request."
             ToolErrorCode.UNSUPPORTED_ENTRY -> "The workspace entry type is unsupported and was not opened."
             ToolErrorCode.OPERATION_UNAVAILABLE -> "This workspace operation is unavailable on the selected backend."
             else -> "The tool could not complete the request."

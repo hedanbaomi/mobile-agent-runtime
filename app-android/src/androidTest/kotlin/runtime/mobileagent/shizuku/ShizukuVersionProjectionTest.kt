@@ -4,6 +4,10 @@
 package runtime.mobileagent.shizuku
 
 import android.content.Context
+import android.os.ParcelFileDescriptor
+import java.io.File
+import java.lang.reflect.Proxy
+import java.util.UUID
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import kotlin.jvm.functions.Function1
@@ -18,10 +22,105 @@ import runtime.mobileagent.domain.WorkspaceScope
 import runtime.mobileagent.skills.tooling.ToolErrorCode
 import runtime.mobileagent.skills.tooling.WorkspaceApplyPatchRequest
 import runtime.mobileagent.skills.tooling.WorkspaceResult
+import kotlinx.coroutines.runBlocking
+import runtime.mobileagent.domain.CapabilityId
+import runtime.mobileagent.skills.tooling.WorkspaceBackend
+import runtime.mobileagent.skills.tooling.WorkspaceWriteTextRequest
+import runtime.mobileagent.skills.tooling.WorkspaceCreateDirectoryRequest
+import runtime.mobileagent.skills.tooling.WorkspaceMoveRequest
+import runtime.mobileagent.skills.tooling.WorkspaceDeleteRequest
+import runtime.mobileagent.skills.tooling.WorkspaceStatRequest
+import runtime.mobileagent.skills.tooling.WorkspaceReadTextRequest
 import runtime.mobileagent.workspace.WorkspaceVersionProjection
 
 @RunWith(AndroidJUnit4::class)
 class ShizukuVersionProjectionTest {
+    @Test
+    fun bothTypedAdaptersCreateUpdateReadAndDeleteDespiteSiblingChanges() = runBlocking {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val root = File(context.cacheDir, "shizuku-adapter-crud-${UUID.randomUUID()}")
+        check(File(root, "Download/MobileAgentRuntime-Shizuku").mkdirs())
+        val store = ShizukuWorkspaceFileStore(File(root, "Download/MobileAgentRuntime-Shizuku"))
+        val bridge = Proxy.newProxyInstance(DeviceServiceBridge::class.java.classLoader,
+            arrayOf(DeviceServiceBridge::class.java)) { _, method, original ->
+            val arguments = original.orEmpty().let { if (method.name.startsWith("dispatchWorkspace")) it.drop(1) else it.toList() }
+            val name = method.name.replace("dispatchWorkspace", "dispatch")
+            if (name == "dispatchReadChunk") {
+                val chunk = store.readChunk(arguments[0] as String, arguments[2] as Int, arguments[1] as Long)
+                when (chunk) {
+                    is ShizukuWorkspaceFileStore.ReadChunkResult.Failure -> ShizukuWorkspaceReadDispatchResult.Success(
+                        ShizukuWorkspaceReadResponse.rejected(chunk.code))
+                    is ShizukuWorkspaceFileStore.ReadChunkResult.Success -> {
+                        val pipe = ParcelFileDescriptor.createPipe()
+                        ParcelFileDescriptor.AutoCloseOutputStream(pipe[1]).use { it.write(chunk.bytes) }
+                        val metadata = JSONObject().put("ok", true).put("operation", "read").put("path", chunk.path)
+                            .put("bytes", chunk.bytes.size).put("version", chunk.version).put("offsetBytes", chunk.offsetBytes)
+                            .put("totalBytes", chunk.totalBytes).put("eof", chunk.eof).toString()
+                        ShizukuWorkspaceReadDispatchResult.Success(ShizukuWorkspaceReadResponse.accepted(metadata, pipe[0]))
+                    }
+                }
+            } else {
+                val payload = when (name) {
+                    "dispatchWrite" -> store.write(arguments[0] as String, arguments[1] as ByteArray, arguments[2] as Boolean)
+                    "dispatchMkdir" -> store.mkdir(arguments[0] as String)
+                    "dispatchDelete" -> store.delete(arguments[0] as String)
+                    "dispatchStat" -> store.stat(arguments[0] as String)
+                    "dispatchApplyPatch" -> store.applyPatch(arguments[0] as String, arguments[1] as String,
+                        arguments[2] as String, arguments[3] as String)
+                    else -> error("Unexpected typed RPC: $name")
+                }
+                ShizukuDispatchResult.Success(payload)
+            }
+        } as DeviceServiceBridge
+        try {
+            listOf(ShizukuWorkspaceBackendAdapter(bridge), newTokenBackend(bridge) as WorkspaceBackend).forEachIndexed { index, backend ->
+                val id = backend.descriptor.id
+                val a = "a-$index.txt"
+                val b = "b-$index.txt"
+                val dir = "directory-$index"
+                fun success(result: WorkspaceResult<*>) = org.junit.Assert.assertTrue("Typed RPC failed: $result", result is WorkspaceResult.Success)
+                success(backend.writeText(WorkspaceWriteTextRequest(id, a, "before")))
+                success(backend.writeText(WorkspaceWriteTextRequest(id, b, "keep")))
+                val observed = (backend.stat(WorkspaceStatRequest(id, b)) as WorkspaceResult.Success).value.version!!
+                success(backend.createDirectory(WorkspaceCreateDirectoryRequest(id, dir)))
+                success(backend.writeText(WorkspaceWriteTextRequest(id, a, "after", replace = true)))
+                assertEquals("after", (backend.readText(WorkspaceReadTextRequest(id, a, 4096)) as WorkspaceResult.Success).value.text)
+                success(backend.delete(WorkspaceDeleteRequest(id, a)))
+                success(backend.applyPatch(WorkspaceApplyPatchRequest(id, b, "updated after sibling delete", observed,
+                    format = runtime.mobileagent.skills.tooling.WorkspacePatchFormat.REPLACE)))
+                assertEquals("updated after sibling delete", (backend.readText(WorkspaceReadTextRequest(id, b, 4096)) as WorkspaceResult.Success).value.text)
+                success(backend.delete(WorkspaceDeleteRequest(id, b)))
+                success(backend.delete(WorkspaceDeleteRequest(id, dir)))
+            }
+            assertEquals(0, File(root, "Download/MobileAgentRuntime-Shizuku").listFiles()!!.size)
+        } finally {
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun ordinaryVersionPreconditionsAreUnsupportedForBothShizukuAdapters() = runBlocking {
+        val bridge = ShizukuAuthorityBridge(ApplicationProvider.getApplicationContext<Context>())
+        try {
+            val adapters = listOf(ShizukuWorkspaceBackendAdapter(bridge), newTokenBackend(bridge) as WorkspaceBackend)
+            adapters.forEach { backend ->
+                assertEquals(setOf(CapabilityId("file.apply_patch")), backend.expectedVersionCapabilities)
+                val id = backend.descriptor.id
+                val results = listOf(
+                    backend.writeText(WorkspaceWriteTextRequest(id, "note.txt", "body", expectedVersion = 123L)),
+                    backend.createDirectory(WorkspaceCreateDirectoryRequest(id, "directory", 123L)),
+                    backend.move(WorkspaceMoveRequest(id, "note.txt", "moved.txt", 123L)),
+                    backend.delete(WorkspaceDeleteRequest(id, "note.txt", 123L)),
+                )
+                results.forEach { result ->
+                    assertEquals(ToolErrorCode.WORKSPACE_VERSION_UNSUPPORTED, (result as WorkspaceResult.Failure).error.code)
+                }
+            }
+        } finally {
+            bridge.close()
+        }
+    }
+
     @Test
     fun highBitOpaqueVersionsUseTheSharedProjectionInListingAndDeviceStat() {
         val bridge = ShizukuAuthorityBridge(ApplicationProvider.getApplicationContext<Context>())
@@ -207,7 +306,7 @@ class ShizukuVersionProjectionTest {
         }
     }
 
-    private fun newTokenBackend(bridge: ShizukuAuthorityBridge): Any {
+    private fun newTokenBackend(bridge: DeviceServiceBridge): Any {
         val clazz = Class.forName("runtime.mobileagent.shizuku.ShizukuTokenWorkspaceBackend")
         val constructor = clazz.declaredConstructors.single().also { it.isAccessible = true }
         return constructor.newInstance(

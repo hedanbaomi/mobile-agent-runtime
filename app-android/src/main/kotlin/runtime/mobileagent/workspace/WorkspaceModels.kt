@@ -530,6 +530,9 @@ internal data class InternalWorkspaceTransfer(
 internal interface InternalWorkspaceBackendApi {
     val descriptor: InternalWorkspaceDescriptor
 
+    val expectedVersionCapabilities: Set<CapabilityId>
+        get() = emptySet()
+
     fun list(
         relativePath: String = "",
         maxEntries: Int = 256,

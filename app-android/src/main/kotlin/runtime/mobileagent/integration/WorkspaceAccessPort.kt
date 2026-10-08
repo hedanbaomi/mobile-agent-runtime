@@ -104,7 +104,7 @@ internal fun committedWorkspaceAccessItem(
  */
 data class WorkspaceAccessGrantTarget(
     val agentId: String,
-    /** Empty selects all available file capabilities; callers needing read-only must pass the read set. */
+    /** Empty seeds read-only grants and preserves existing consent; a non-empty set explicitly replaces the bundle. */
     val capabilities: Set<CapabilityId> = emptySet(),
     val lifetime: GrantLifetime = GrantLifetime.PERSISTENT,
     val pathScope: String? = null,

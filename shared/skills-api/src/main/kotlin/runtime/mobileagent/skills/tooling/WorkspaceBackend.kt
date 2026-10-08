@@ -304,6 +304,15 @@ typealias WorkspaceFailure = WorkspaceResult.Failure
 interface WorkspaceBackend {
     val descriptor: WorkspaceDescriptor
 
+    /**
+     * Mutations whose expectedVersion is enforced by this backend. An observed entry version
+     * does not imply that every operation accepts a precondition. Conditional patch has a
+     * mandatory version in its contract; ordinary mutations must opt in explicitly only
+     * when the adapter preserves the condition through the real mutation.
+     */
+    val expectedVersionCapabilities: Set<CapabilityId>
+        get() = setOf(CapabilityId("file.apply_patch")).intersect(capabilities)
+
     val capabilities: Set<CapabilityId>
         get() = setOf(
             CapabilityId(CapabilityId.WORKSPACE_ENUMERATE),

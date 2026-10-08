@@ -31,6 +31,15 @@ internal class InternalWorkspaceBackend(
     workspaceId: String = "internal",
     descriptorOverride: InternalWorkspaceDescriptor? = null,
 ) : InternalWorkspaceBackendApi {
+    override val expectedVersionCapabilities = setOf(
+        InternalWorkspaceCapabilities.WRITE_TEXT,
+        InternalWorkspaceCapabilities.CREATE_DIRECTORY,
+        InternalWorkspaceCapabilities.MOVE,
+        InternalWorkspaceCapabilities.DELETE,
+        InternalWorkspaceCapabilities.APPLY_PATCH,
+        runtime.mobileagent.domain.CapabilityId("file.copy"),
+    )
+
     override val descriptor: InternalWorkspaceDescriptor = descriptorOverride ?: InternalWorkspaceDescriptor(
         id = workspaceId,
         displayName = "Application workspace",

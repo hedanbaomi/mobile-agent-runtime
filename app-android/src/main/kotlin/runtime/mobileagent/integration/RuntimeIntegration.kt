@@ -3057,7 +3057,13 @@ class RuntimeIntegration(
         val policyVersion = authorityPolicyRepository.getPolicy().policyVersion
         val now = Instant.ofEpochMilli(System.currentTimeMillis())
         val existing = capabilityGrantRepository.forAgent(target.agentId, includeRevoked = true)
-        if (preserveActiveWholeDirectoryCapabilities) {
+        // Picking/reattaching a directory is not a request to downgrade the
+        // Agent's access preset. An empty target seeds read-only authority for
+        // a new workspace and preserves existing consent for the same scope.
+        // An explicit capability bundle still reconciles exactly as requested.
+        val preserveExistingAuthorization = target.capabilities.isEmpty() &&
+            (preserveActiveWholeDirectoryCapabilities || normalizedPath == null)
+        if (preserveExistingAuthorization) {
             if (normalizedPath != null || target.lifetime != runtime.mobileagent.domain.GrantLifetime.PERSISTENT) {
                 throw WorkspaceAccessException(WorkspaceAccessErrorCode.INVALID_REQUEST)
             }
@@ -3091,7 +3097,10 @@ class RuntimeIntegration(
                 if (old.pathScope != normalizedPath || old.lifetime != target.lifetime ||
                     old.taskId != null || old.sessionId != null
                 ) return@filter false
-                old.capability !in requestedCapabilities ||
+                // Provider support may shrink temporarily (e.g. an empty SAF
+                // tree no longer advertises delete). Dispatch filters support;
+                // directory selection must not erase the user's consent.
+                (!preserveExistingAuthorization && old.capability !in requestedCapabilities) ||
                     old.policyVersion != policyVersion
             }
             .forEach { old -> capabilityGrantRepository.revoke(old.grantId, old.revision) }
@@ -4759,7 +4768,7 @@ internal fun WorkspaceAuditEvent.toDiagnosticOperationState(): DiagnosticOperati
             -> DiagnosticOperationState.DENIED
         "CANCELLED", "CANCELED", "SHELL_CANCELLED", "REQUEST_CANCELLED" -> DiagnosticOperationState.CANCELLED
         "UNKNOWN", "UNKNOWN_OUTCOME" -> DiagnosticOperationState.UNKNOWN
-        "FAILED", "ERROR", "IO_ERROR", "TIMEOUT", "FILE_TOO_LARGE", "QUOTA_EXCEEDED", "CONFLICT",
+        "FAILED", "ERROR", "IO_ERROR", "TIMEOUT", "FILE_TOO_LARGE", "QUOTA_EXCEEDED", "CONFLICT", "WORKSPACE_VERSION_UNSUPPORTED",
         "INVALID_REQUEST", "INVALID_CURSOR", "INVALID_PATH", "INVALID_ARGUMENT", "INVALID_UTF8",
         "INVALID_PATCH", "ENTRY_NOT_FOUND", "ENTRY_UNSUPPORTED", "UNSUPPORTED", "UNSUPPORTED_ENTRY",
         "OPERATION_UNAVAILABLE", "BRIDGE_PROTOCOL_MISMATCH", "INTERNAL_ERROR",

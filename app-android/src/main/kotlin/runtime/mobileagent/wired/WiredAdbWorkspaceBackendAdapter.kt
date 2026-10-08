@@ -80,6 +80,8 @@ class WiredAdbWorkspaceBackendAdapter(
         CapabilityId(CapabilityId.FILE_DELETE),
     )
 
+    override val expectedVersionCapabilities: Set<CapabilityId> = setOf(CapabilityId("file.apply_patch"))
+
     override suspend fun list(request: WorkspaceListRequest): WorkspaceResult<WorkspaceListing> {
         if (request.workspaceId != descriptor.id) return failure(ToolErrorCode.INVALID_REQUEST)
         val path = request.relativePath.orEmpty()
@@ -168,7 +170,7 @@ class WiredAdbWorkspaceBackendAdapter(
 
     override suspend fun writeText(request: WorkspaceWriteTextRequest): WorkspaceResult<WorkspaceMutation> {
         if (request.workspaceId != descriptor.id) return failure(ToolErrorCode.INVALID_REQUEST)
-        if (request.expectedVersion != null) return failure(ToolErrorCode.CONFLICT)
+        if (request.expectedVersion != null) return failure(ToolErrorCode.WORKSPACE_VERSION_UNSUPPORTED)
         val bytes = request.text.toByteArray(StandardCharsets.UTF_8)
         if (bytes.size > WIRED_MAX_FILE_BYTES) return failure(ToolErrorCode.FILE_TOO_LARGE)
         return execute(
@@ -185,7 +187,7 @@ class WiredAdbWorkspaceBackendAdapter(
 
     override suspend fun createDirectory(request: WorkspaceCreateDirectoryRequest): WorkspaceResult<WorkspaceMutation> {
         if (request.workspaceId != descriptor.id) return failure(ToolErrorCode.INVALID_REQUEST)
-        if (request.expectedVersion != null) return failure(ToolErrorCode.CONFLICT)
+        if (request.expectedVersion != null) return failure(ToolErrorCode.WORKSPACE_VERSION_UNSUPPORTED)
         return execute(WiredAdbFileOperation.CREATE_DIRECTORY, request.relativePath, maxEntries = 1).mapValue { result ->
             if (result.relativePath != request.relativePath) throw ProtocolShapeException()
             WorkspaceMutation(request.relativePath, WorkspaceEntryType.DIRECTORY)
@@ -194,7 +196,7 @@ class WiredAdbWorkspaceBackendAdapter(
 
     override suspend fun move(request: WorkspaceMoveRequest): WorkspaceResult<WorkspaceMutation> {
         if (request.workspaceId != descriptor.id) return failure(ToolErrorCode.INVALID_REQUEST)
-        if (request.expectedVersion != null) return failure(ToolErrorCode.CONFLICT)
+        if (request.expectedVersion != null) return failure(ToolErrorCode.WORKSPACE_VERSION_UNSUPPORTED)
         return execute(
             operation = WiredAdbFileOperation.MOVE,
             path = request.sourcePath,
@@ -209,7 +211,7 @@ class WiredAdbWorkspaceBackendAdapter(
 
     override suspend fun delete(request: WorkspaceDeleteRequest): WorkspaceResult<WorkspaceMutation> {
         if (request.workspaceId != descriptor.id) return failure(ToolErrorCode.INVALID_REQUEST)
-        if (request.expectedVersion != null) return failure(ToolErrorCode.CONFLICT)
+        if (request.expectedVersion != null) return failure(ToolErrorCode.WORKSPACE_VERSION_UNSUPPORTED)
         return execute(WiredAdbFileOperation.DELETE, request.relativePath, maxEntries = 1).mapValue { result ->
             if (result.relativePath != request.relativePath || result.deleted != true) throw ProtocolShapeException()
             val type = result.entries.singleOrNull()?.type?.toSharedType() ?: WorkspaceEntryType.FILE

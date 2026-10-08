@@ -274,7 +274,8 @@ fun toolResultUserMessage(resultJson: String): String? {
         "SHIZUKU_SERVICE_UNAVAILABLE",
             -> "执行通道暂时不可用，请重新连接所选权限通道后重试；这不是工作区授权丢失。"
         "QUOTA_EXCEEDED" -> "操作超过工作区大小或输出限制。"
-        "CONFLICT" -> "工作区内容已变化，请读取最新状态后重试。"
+        "CONFLICT" -> "目标条目已变化，请读取该条目的最新版本后重试。"
+        "WORKSPACE_VERSION_UNSUPPORTED" -> "该工作区的此操作不支持版本条件，未执行。请检查工作区支持的版本校验操作，勿重复相同请求。"
         "UNSUPPORTED_ENTRY" -> "该工作区条目类型不受支持，未打开该条目。"
         "OPERATION_UNAVAILABLE" -> "所选工作区后端暂不支持该操作。"
         "INVALID_REQUEST" -> "工具请求参数无效，未执行任何操作。"

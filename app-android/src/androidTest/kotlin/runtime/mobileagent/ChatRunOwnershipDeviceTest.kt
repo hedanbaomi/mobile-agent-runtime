@@ -9,6 +9,7 @@ import java.util.UUID
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicReference
+import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.NonCancellable
@@ -175,6 +176,22 @@ class ChatRunOwnershipDeviceTest {
         assertEquals(selected, vm.state.value)
         assertNull(vm.state.value.requestPreview)
         assertEquals(RunStatus.COMPLETED, app.container.runs.list(a).single().state)
+    }
+
+    @Test fun cancellationAfterCompletedRejectedVisualAttemptIsCancelledNotUnknown() = fixture { app, a, _ ->
+        val rejected = CountDownLatch(1)
+        val vm = viewModel(app, a, ChatRunExecution(collectEvents = { _, accept ->
+            accept(RuntimeEvent.VisualBatchStarted("parent", 8, 100))
+            accept(RuntimeEvent.VisualBatchRejected("parent", runtime.mobileagent.agent.VisualEvidenceRejectionReason.OVERSIZED))
+            rejected.countDown()
+            awaitCancellation()
+        }))
+        main { vm.input("Read eight images"); vm.send() }
+        assertTrue(rejected.await(15, TimeUnit.SECONDS))
+        main { vm.cancel() }
+        await { app.container.runs.list(a).single().finishedAt != null }
+        assertEquals(RunStatus.CANCELLED, app.container.runs.list(a).single().state)
+        assertFalse(app.container.conversations.messages(a).any { it.metadataJson.contains("\"visualBatchAnalysis\":true") })
     }
 
     private fun viewModel(app: MobileAgentApp, id: String, execution: ChatRunExecution): ChatViewModel {

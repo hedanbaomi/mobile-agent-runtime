@@ -3,6 +3,10 @@
 
 # 验收矩阵与证据要求
 
+2026-10-08 R02/R08/K04/K08：已完成的图片分析回执为空/过大时按来源二分，单图最多一次精简恢复；全部尝试复核授权并计入同一预算。成功子回执保留，未知/拒绝/协议失败不重试，知识工具不重执行。AUTO与手动输出限制保持不变。取消已知完成的拒绝不误标UNKNOWN_OUTCOME；取消待持久化成功回执仍保留原未知边界。见 [ADR-0030](adr/0030-request-scoped-visual-budget.md) 和 [回归证据](evidence/2026-10-08/knowledge-query-and-release-regression.md)。
+
+2026-10-08 R20/R26 Agent 回滚补充：工作区提交失败后不能留下失去 Agent 所有者的默认目录偏好；重新打开数据库必须成功。SQLite31升级15—30时仅清理孤立偏好，保留有效的非空默认目录及修订、工作区和能力Grant；重复迁移结果不变。清理之后注入失败须保留旧版本及原偏好，当前schema31的孤立/畸形记录仍被拒绝。外键开/关都测试删除，快照保留阻止删除，删除失败整体回滚。实际执行与知识库报错诊断边界见[回归证据](evidence/2026-10-08/knowledge-query-and-release-regression.md)及[ADR-0033](adr/0033-agent-rollback-default-cleanup.md)。
+
 2026-10-02 全面代码 review 修复追加回归（实际结果与未测边界以 [专项记录](evidence/2026-10-02/code-review-repair.md) 为准，不代表中断的全量设备测试已通过）：
 
 - Responses 仅收到 `[DONE]` 时分别验证空响应、推理独占、已确认工具、未确认工具、正文与拒绝；不能虚报空回复成功或释放未确认调用。Chat `length` 的 EOF 与 `[DONE]` 路径保持相同分类与 Usage；未知 Responses JSON 状态只保留校验通过的 Usage。

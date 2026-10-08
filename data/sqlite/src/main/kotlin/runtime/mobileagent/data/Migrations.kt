@@ -60,7 +60,7 @@ object Migrations {
     // v27 replaces the single active dispatch index with three durable slots.
     // v28 permits six durable slots and freezes v27 batches at their old default of three.
     // v29 adds the scoped import-job display index without replaying legacy binding projection.
-    const val VERSION = 30
+    const val VERSION = 31
 
     private val statements = listOf(
         "CREATE TABLE IF NOT EXISTS schema_version (version INTEGER NOT NULL PRIMARY KEY)",
@@ -304,6 +304,12 @@ object Migrations {
             // Preserve the pre-v29 cutoff: an index upgrade must not bind an unbound thread.
             if (current < 28L) migrateExistingConversationWorkspaceBindings(connection)
             ensureDefaultAuthorityRows(connection)
+            if (current in 15L..30L) {
+                // Legacy Agent rollback relied on a cascade that the Android
+                // driver did not enable. A dead owner's default is only a
+                // preference; discard it without changing workspaces/grants.
+                connection.execute("DELETE FROM agent_workspace_defaults WHERE NOT EXISTS (SELECT 1 FROM agent_profiles WHERE agent_profiles.id = agent_workspace_defaults.agent_id)")
+            }
             validateSnapshotManifests(connection)
             validateContextCompactions(connection)
             validateAuthoritySchema(connection)

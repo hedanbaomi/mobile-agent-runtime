@@ -127,6 +127,8 @@ sealed interface RuntimeEvent {
     ) : RuntimeEvent
 
     data class VisualBatchStarted(val batchId: String, val imageCount: Int, val estimatedUnits: Long, val requestPreview: String? = null) : RuntimeEvent
+    /** A completed attempt failed local validation; it is not a successful evidence receipt. */
+    data class VisualBatchRejected(val batchId: String, val reason: VisualEvidenceRejectionReason) : RuntimeEvent
     data class VisualBatchAnalyzed(val batchId: String, val assets: List<RuntimeImageReference>, val analysis: String) : RuntimeEvent
 
     data class ToolImagesAttached(val callId: String, val assets: List<RuntimeImageReference>, val messageId: String? = null) : RuntimeEvent
@@ -143,6 +145,8 @@ sealed interface RuntimeEvent {
         val compactionRequests: Int = 0,
     ) : RuntimeEvent
 }
+
+enum class VisualEvidenceRejectionReason { EMPTY, OVERSIZED }
 
 data class RuntimeImageReference(val assetId: String, val mediaType: String, val sha256: String? = null)
 

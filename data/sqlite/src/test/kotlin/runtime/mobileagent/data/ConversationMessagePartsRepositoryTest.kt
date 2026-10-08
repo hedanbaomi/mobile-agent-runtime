@@ -166,7 +166,7 @@ class ConversationMessagePartsRepositoryTest {
             assertEquals(false, db.query("PRAGMA table_info(conversations)").any { it.string("name") == "archived" })
             Migrations.apply(db)
             Migrations.apply(db)
-            assertEquals(30L, db.query("SELECT version FROM schema_version").single().long("version"))
+            assertEquals(Migrations.VERSION.toLong(), db.query("SELECT version FROM schema_version").single().long("version"))
             assertEquals(before, repo.get("conversation.upgrade"))
             assertEquals(messages, repo.messages("conversation.upgrade"))
             assertEquals(snapshot, AgentRepository(db).getSnapshot(snapshotId))

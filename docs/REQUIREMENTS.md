@@ -3,6 +3,10 @@
 
 # 需求与决策依据
 
+2026-10-08 R02/R08/K04/K08：已完成的图片分析回执为空/过大时按来源二分，单图最多一次精简恢复；全部尝试复核授权并计入同一预算。成功子回执保留，未知/拒绝/协议失败不重试，知识工具不重执行。AUTO与手动输出限制保持不变。取消已知完成的拒绝不误标UNKNOWN_OUTCOME；取消待持久化成功回执仍保留原未知边界。见 [ADR-0030](adr/0030-request-scoped-visual-budget.md) 和 [回归证据](evidence/2026-10-08/knowledge-query-and-release-regression.md)。
+
+
+2026-10-08 R20/R26：新 Agent 工作区保存失败的回滚不得留下默认目录偏好，重开数据库必须成功。SQLite31修复旧版15—30孤立偏好，保留现有默认值、工作区及Grant。见 [ADR-0033](adr/0033-agent-rollback-default-cleanup.md)。
 2026-10-08 R20/R26/R28/R32 验收补充：SAF 文件夹显式授予读写后，默认重选/新 Agent 草稿提交保持授权；普通工具必须完成新建、现有文件修改、回读和删除。兄弟条目变化不得变成无条件冲突。版本条件只向实现该操作条件的 backend 暴露；SAF 普通覆盖不等于原子 apply_patch。见 [ADR-0032](adr/0032-workspace-crud-and-version-capabilities.md)。
 
 基线日期：2026-08-30（Asia/Taipei）。本文件记录产品设计依据，不代表任何功能已实现；涉及权限工具时，以 v2 规范为唯一现行语义，历史轮次只保留为时间限定的证据。

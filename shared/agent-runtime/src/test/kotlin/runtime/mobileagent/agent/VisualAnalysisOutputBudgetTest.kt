@@ -25,10 +25,10 @@ import runtime.mobileagent.provider.openai.OpenAiResponsesAdapter
 class VisualAnalysisOutputBudgetTest {
     private enum class Protocol { CHAT, RESPONSES }
     private val png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jYQAAAABJRU5ErkJggg=="
-    private fun images(): List<InlineImage> {
+    private fun images(count: Int = 6): List<InlineImage> {
         val bytes = Base64.getDecoder().decode(png)
         val hash = MessageDigest.getInstance("SHA-256").digest(bytes).joinToString("") { "%02x".format(it.toInt() and 255) }
-        return (1..6).map { InlineImage("image/png", "", "source-$it", bytes.size.toLong(), hash) }
+        return (1..count).map { InlineImage("image/png", "", "source-$it", bytes.size.toLong(), hash) }
     }
     private data class Outcome(val run: AgentRun, val bodies: List<JsonObject>, val events: List<RuntimeEvent>)
     private fun execute(
@@ -37,6 +37,7 @@ class VisualAnalysisOutputBudgetTest {
         field: String? = null,
         parameters: ParameterLayers = ParameterLayers(),
         analysisNotes: String? = null,
+        recoverFirst: Boolean = false,
     ): Outcome = runBlocking {
         val bodies = mutableListOf<JsonObject>()
         val client = HttpClient(MockEngine { request ->
@@ -47,8 +48,9 @@ class VisualAnalysisOutputBudgetTest {
             val disabled = body["thinking"]?.jsonObject?.get("type")?.jsonPrimitive?.content == "disabled" ||
                 body["reasoning"]?.jsonObject?.get("effort")?.jsonPrimitive?.content == "none"
             val exhausted = !disabled && cap <= 1024
-            val text = if (bodies.size == 1) "Source notes for six knowledge pages." else "A brief knowledge-base overview."
-            val content = if (bodies.size == 1 && analysisNotes != null) analysisNotes else if (body["response_format"]?.jsonObject?.get("type")?.jsonPrimitive?.content == "json_object") {
+            val imageCount = Regex("\\\"type\\\":\\\"(?:image_url|input_image)\\\"").findAll(body.toString()).count()
+            val text = if (imageCount > 0) "Source notes for six knowledge pages." else "A brief knowledge-base overview."
+            val content = if (imageCount > 0 && analysisNotes != null && (!recoverFirst || bodies.size == 1)) analysisNotes else if (body["response_format"]?.jsonObject?.get("type")?.jsonPrimitive?.content == "json_object") {
                 buildJsonObject { put(if (bodies.size == 1) "notes" else "overview", text) }.toString()
             } else text
             val encodedContent = JsonPrimitive(content).toString()
@@ -79,7 +81,7 @@ class VisualAnalysisOutputBudgetTest {
             }
             val run = AgentRun("run", "snapshot", "conversation", budget = RunBudget(maxModelRounds = 4))
             val events = AgentRuntime(adapter).run(AgentRuntimeRequest(
-                run, EffectivePrompt("Honor the configured response format, including JSON when selected.", "", emptyList(), emptyList(), emptyList(), "简要介绍知识库内容", currentImages = images()),
+                run, EffectivePrompt("Honor the configured response format, including JSON when selected.", "", emptyList(), emptyList(), emptyList(), "简要介绍知识库内容", currentImages = images(if (recoverFirst) 8 else 6)),
                 "selected-model", "fixture-secret".toCharArray(), false,
                 parameters = parameters, outputTokenLimit = limit, outputTokenField = field,
                 batchAllImages = true, imageLoader = { it.copy(base64 = png) },
@@ -173,13 +175,13 @@ class VisualAnalysisOutputBudgetTest {
         assertEquals(1, result.events.filterIsInstance<RuntimeEvent.VisualBatchAnalyzed>().size)
     }
 
-    @Test fun emptyStructuredNotesFailBeforeReceiptWithoutReplay() {
+    @Test fun emptyStructuredNotesStopAfterBoundedCompletedReplyRefinement() {
         val format = buildJsonObject { put("type", "json_object") }
         for (notes in listOf("{}", "[]", "{\"notes\":\" \"}", "{\"notes\":[null,{\"text\":\"\"}]}")) {
             val result = execute(analysisNotes = notes,
                 parameters = ParameterLayers(modelParameters = mapOf("response_format" to format)))
             assertEquals(RunState.FAILED, result.run.state, "Empty JSON evidence must not reach the main answer: $notes")
-            assertEquals(1, result.bodies.size)
+            assertEquals(4, result.bodies.size)
             assertTrue(result.events.filterIsInstance<RuntimeEvent.VisualBatchAnalyzed>().isEmpty())
             assertTrue(result.events.filterIsInstance<RuntimeEvent.ModelEvent>().none { it.event is ModelEvent.TextDelta })
             assertTrue(result.run.stopReason.orEmpty().contains("INVALID_RESPONSE"))
@@ -187,14 +189,30 @@ class VisualAnalysisOutputBudgetTest {
         assertOverview(execute(analysisNotes = "{\"figureCount\":0,\"hasTables\":false}"))
     }
 
-    @Test fun oversizedNotesFailBeforeReceiptWithoutReplayInEitherProtocol() {
+    @Test fun oversizedCompletedNotesStopAfterBoundedRefinementInEitherProtocol() {
         for (protocol in Protocol.entries) {
             val result = execute(protocol, analysisNotes = "x".repeat(16_001))
             assertEquals(RunState.FAILED, result.run.state)
-            assertEquals(1, result.bodies.size)
+            assertEquals(4, result.bodies.size)
             assertTrue(result.events.filterIsInstance<RuntimeEvent.VisualBatchAnalyzed>().isEmpty())
             assertTrue(result.events.filterIsInstance<RuntimeEvent.ModelEvent>().none { it.event is ModelEvent.TextDelta })
             assertTrue(result.run.stopReason.orEmpty().contains("INVALID_RESPONSE"))
         }
     }
+    @Test fun completedOversizedRepliesRecoverInBothProtocolsWithoutChangingAutoOrManualCaps() {
+        for (protocol in Protocol.entries) for ((limit, alias) in listOf(null to null, 8192 to null,
+            8192 to if (protocol == Protocol.CHAT) "max_completion_tokens" else "max_output_tokens")) {
+            val result = execute(protocol, limit = limit, field = alias, analysisNotes = "x".repeat(16_001), recoverFirst = true)
+            assertEquals(RunState.COMPLETED, result.run.state, result.run.stopReason)
+            assertEquals(listOf(8, 4, 4, 0), result.bodies.map { Regex("\\\"type\\\":\\\"(?:image_url|input_image)\\\"").findAll(it.toString()).count() })
+            assertEquals(2, result.events.filterIsInstance<RuntimeEvent.VisualBatchAnalyzed>().size)
+            assertEquals(1, result.events.filterIsInstance<RuntimeEvent.VisualBatchRejected>().size)
+            assertEquals(4, result.events.filterIsInstance<RuntimeEvent.ModelEvent>().count { it.event is ModelEvent.Usage })
+            for (body in result.bodies) {
+                val key = alias ?: if (protocol == Protocol.CHAT) "max_tokens" else "max_output_tokens"
+                if (limit == null) assertFalse(body.containsKey(key)) else assertEquals(limit, body[key]?.jsonPrimitive?.int)
+            }
+        }
+    }
+
 }

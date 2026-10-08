@@ -114,6 +114,18 @@ class RunToolsEnrichDeviceTest {
         )
         val runTools = RunTools(container, app, snapshot, run, false, false)
 
+        // Exercise the production broker, local embedding/index lookup and
+        // evidence enrichment before checking producer-field preservation.
+        val searched = runTools.executor.invoke(ToolCall("model-call-search", BuiltinTools.knowledgeSearch.name,
+            """{"query":"citation boundaries","knowledgeBaseIds":["$kb"],"topK":1}"""))
+        assertTrue("Real scoped knowledge_search must return usable evidence: $searched", searched is ToolResult.Value)
+        val searchedHit = Json.parseToJsonElement((searched as ToolResult.Value).json).jsonObject
+            .getValue("hits").jsonArray.single().jsonObject
+        assertEquals(kb, searchedHit.getValue("knowledgeBaseId").jsonPrimitive.content)
+        assertEquals(documentId, searchedHit.getValue("documentId").jsonPrimitive.content)
+        assertTrue("Production search must register citation evidence", runTools.evidence().isNotEmpty())
+        assertTrue("Production search must expose its citation reference", "citationId" in searchedHit)
+
         val raw = ToolResult.Value(
             buildJsonObject {
                 put("hits", buildJsonArray {

@@ -1595,6 +1595,11 @@ class ChatViewModel internal constructor(
                                 publishRunState(owner, state.value.copy(status = "正在读取图片（本组" + event.imageCount + "张）"))
                                 persistRun = true
                             }
+                            is RuntimeEvent.VisualBatchRejected -> {
+                                modelInFlight = false
+                                publishRunState(owner, state.value.copy(status = "正在精简图片证据并继续分析"))
+                                persistRun = true
+                            }
                             is RuntimeEvent.VisualBatchAnalyzed -> {
                                 modelInFlight = false
                                 withContext(NonCancellable + Dispatchers.IO) {

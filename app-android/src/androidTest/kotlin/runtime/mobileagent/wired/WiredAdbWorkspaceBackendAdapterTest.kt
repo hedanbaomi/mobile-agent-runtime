@@ -20,8 +20,13 @@ import org.junit.Assume.assumeTrue
 import org.junit.Test
 import runtime.mobileagent.bridge.BridgeProtocol
 import runtime.mobileagent.bridge.BridgeResponseEnvelope
+import runtime.mobileagent.domain.CapabilityId
 import runtime.mobileagent.domain.Authority
 import runtime.mobileagent.domain.WorkspaceScope
+import runtime.mobileagent.skills.tooling.WorkspaceWriteTextRequest
+import runtime.mobileagent.skills.tooling.WorkspaceCreateDirectoryRequest
+import runtime.mobileagent.skills.tooling.WorkspaceMoveRequest
+import runtime.mobileagent.skills.tooling.WorkspaceDeleteRequest
 import runtime.mobileagent.skills.tooling.ToolErrorCode
 import runtime.mobileagent.skills.tooling.WorkspaceAttachRequest
 import runtime.mobileagent.skills.tooling.WorkspaceBrowseRequest
@@ -32,8 +37,54 @@ import runtime.mobileagent.skills.tooling.WorkspaceEntryType
 import runtime.mobileagent.skills.tooling.WorkspaceListingWarningCode
 import runtime.mobileagent.skills.tooling.WorkspaceResult
 import runtime.mobileagent.skills.tooling.WorkspaceStatRequest
+import runtime.mobileagent.skills.tooling.WorkspaceReadTextRequest
 
 class WiredAdbWorkspaceBackendAdapterTest {
+    @Test
+    fun unsupportedVersionConditionsNeverDispatchAndOrdinaryDeleteStillDispatches() = runBlocking {
+        val root = Files.createTempDirectory("mar-wired-precondition-")
+        try {
+            val authority = FakeAuthority(root)
+            val backend = WiredAdbWorkspaceBackendAdapter(authority, workspaceId = "version-test")
+            assertEquals(setOf(CapabilityId("file.apply_patch")), backend.expectedVersionCapabilities)
+            val results = listOf(
+                backend.writeText(WorkspaceWriteTextRequest("version-test", "note.txt", "body", expectedVersion = 123L)),
+                backend.createDirectory(WorkspaceCreateDirectoryRequest("version-test", "directory", 123L)),
+                backend.move(WorkspaceMoveRequest("version-test", "note.txt", "moved.txt", 123L)),
+                backend.delete(WorkspaceDeleteRequest("version-test", "note.txt", 123L)),
+            )
+            results.forEach { result ->
+                assertEquals(ToolErrorCode.WORKSPACE_VERSION_UNSUPPORTED, (result as WorkspaceResult.Failure).error.code)
+            }
+            assertEquals(0, authority.fileCalls)
+            backend.delete(WorkspaceDeleteRequest("version-test", "note.txt"))
+            assertEquals(1, authority.fileCalls)
+        } finally {
+            deleteTree(root)
+        }
+    }
+
+    @Test
+    fun ordinaryCrudSurvivesSiblingMutationsThroughTheTypedAdapterAndRealEngine() = runBlocking {
+        val root = Files.createTempDirectory("mar-wired-crud-")
+        try {
+            val backend = WiredAdbWorkspaceBackendAdapter(FakeAuthority(root, engine = NioPrivilegedFileEngine(root)), workspaceId = "crud")
+            fun success(result: WorkspaceResult<*>) = assertTrue("Typed mutation/read failed: $result", result is WorkspaceResult.Success)
+            success(backend.writeText(WorkspaceWriteTextRequest("crud", "a.txt", "before")))
+            success(backend.writeText(WorkspaceWriteTextRequest("crud", "b.txt", "keep")))
+            success(backend.createDirectory(WorkspaceCreateDirectoryRequest("crud", "directory")))
+            success(backend.writeText(WorkspaceWriteTextRequest("crud", "a.txt", "after", replace = true)))
+            assertEquals("after", (backend.readText(WorkspaceReadTextRequest("crud", "a.txt", 4096)) as WorkspaceResult.Success).value.text)
+            success(backend.delete(WorkspaceDeleteRequest("crud", "a.txt")))
+            assertEquals("keep", (backend.readText(WorkspaceReadTextRequest("crud", "b.txt", 4096)) as WorkspaceResult.Success).value.text)
+            success(backend.delete(WorkspaceDeleteRequest("crud", "b.txt")))
+            success(backend.delete(WorkspaceDeleteRequest("crud", "directory")))
+            assertEquals(0L, Files.list(root).use { it.count() })
+        } finally {
+            deleteTree(root)
+        }
+    }
+
     @Test
     fun wiredBrowserUsesTypedRootAndBrowseAndAttachesOpaqueChild() = runBlocking {
         val root = Files.createTempDirectory("mar-wired-picker-")
@@ -367,6 +418,7 @@ class WiredAdbWorkspaceBackendAdapterTest {
     private class FakeAuthority(
         private val root: Path,
         private val fileFailure: WiredAdbErrorCode = WiredAdbErrorCode.AUTHORITY_UNSUPPORTED,
+        private val engine: NioPrivilegedFileEngine? = null,
     ) : WiredAdbAuthorityPort {
         private val owner = Any()
         private val remoteHandle = WiredAdbWorkspaceHandle(owner, "wired-picker-root", "11".repeat(32), 1L)
@@ -381,13 +433,20 @@ class WiredAdbWorkspaceBackendAdapterTest {
                 trusted = true,
             ),
         )
+        var fileCalls: Int = 0
         var lastAttachedPath: String? = null
             private set
 
         override val status: StateFlow<WiredAdbStatus> = _status
         override val workspace: WiredAdbWorkspacePort = object : WiredAdbWorkspacePort {
-            override suspend fun executeFile(request: WiredAdbFileRequest): WiredAdbResult<WiredAdbFileResult> =
-                WiredAdbResult.Failure(fileFailure)
+            override suspend fun executeFile(request: WiredAdbFileRequest): WiredAdbResult<WiredAdbFileResult> {
+                fileCalls += 1
+                return when (val result = engine?.execute(request)) {
+                    is WiredAdbFileEngineResult.Success -> WiredAdbResult.Success(result.result)
+                    is WiredAdbFileEngineResult.Failure -> WiredAdbResult.Failure(WiredAdbErrorCode.OPERATION_UNAVAILABLE)
+                    null -> WiredAdbResult.Failure(fileFailure)
+                }
+            }
 
             override suspend fun attachDirectory(
                 workspaceId: String,

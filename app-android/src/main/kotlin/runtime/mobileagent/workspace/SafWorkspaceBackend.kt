@@ -54,27 +54,30 @@ internal object SafWorkspaceCapabilityPolicy {
 
         val canCreate = writeGranted &&
             rootFlags and DocumentsContract.Document.FLAG_DIR_SUPPORTS_CREATE != 0
-        val canDelete = writeGranted && children.any {
-            it.flags and DocumentsContract.Document.FLAG_SUPPORTS_DELETE != 0
+        val canWriteExisting = writeGranted && children.any {
+            it.type == InternalWorkspaceEntryType.FILE &&
+                it.flags and DocumentsContract.Document.FLAG_SUPPORTS_WRITE != 0 &&
+                it.flags and DocumentsContract.Document.FLAG_VIRTUAL_DOCUMENT == 0
         }
+        // A creatable empty tree must retain the delete tool and READ_WRITE grant bundle:
+        // documents created later in this Run can have delete support. The actual target's
+        // FLAG_SUPPORTS_DELETE is still checked immediately before deleteDocument.
+        val canDelete = writeGranted && (canCreate || children.any {
+            it.flags and DocumentsContract.Document.FLAG_SUPPORTS_DELETE != 0
+        })
         val canMove = writeGranted && children.any {
             it.flags and (DocumentsContract.Document.FLAG_SUPPORTS_MOVE or DocumentsContract.Document.FLAG_SUPPORTS_RENAME) != 0
         }
-        if (canCreate) {
-            // A writable SAF tree can safely create a new text document even though the SAF
-            // contract cannot atomically replace an existing one.  Advertise the typed write
-            // operation so model calls with replace=false can reach the backend; write() still
-            // rejects existing-file replacement and expected-version compare/create requests.
-            capabilities += InternalWorkspaceCapabilities.WRITE_TEXT
-            capabilities += InternalWorkspaceCapabilities.CREATE_DIRECTORY
-        }
+        if (canCreate || canWriteExisting) capabilities += InternalWorkspaceCapabilities.WRITE_TEXT
+        if (canCreate) capabilities += InternalWorkspaceCapabilities.CREATE_DIRECTORY
         if (canDelete) capabilities += InternalWorkspaceCapabilities.DELETE
         if (canMove) capabilities += InternalWorkspaceCapabilities.MOVE
 
         // Writable describes the mutation surface, not an atomic-replacement guarantee.  The
-        // descriptor keeps supportsAtomicReplace=false and the backend fails closed for replace.
+        // descriptor keeps supportsAtomicReplace=false; explicit replace uses a verified
+        // provider stream, while conditional patch remains unavailable.
         return SafCapabilitySnapshot(
-            writable = canCreate || canDelete || canMove,
+            writable = canCreate || canWriteExisting || canDelete || canMove,
             operationCapabilities = capabilities,
         )
     }
@@ -432,9 +435,35 @@ internal class SafWorkspaceBackend(
                 if (existing.flags and DocumentsContract.Document.FLAG_SUPPORTS_WRITE == 0) {
                     InternalWorkspaceErrorCode.READ_ONLY.error()
                 }
-                // DocumentsProvider has no contract for atomic replacement.  Do not truncate an
-                // existing document or claim that a provider rename is atomic.
-                InternalWorkspaceErrorCode.UNSUPPORTED.error()
+                if (expectedVersion != null) InternalWorkspaceErrorCode.UNSUPPORTED.error()
+                val usage = inspectUsage()
+                val oldBytes = existing.size ?: readBounded(existing.uri, usageProbeBytes()).size.toLong()
+                if (content.size.toLong() > limits.quotaBytes - (usage.bytes - oldBytes)) {
+                    InternalWorkspaceErrorCode.QUOTA_EXCEEDED.error()
+                }
+                // Explicit replace is a normal SAF write, not an atomic patch. Opening a
+                // truncating stream may already mutate the document, so every later failure
+                // is UNKNOWN_OUTCOME and must never be automatically replayed.
+                return@guarded completeSafDispatchedMutation {
+                    val safeUri = safeDocumentUri(existing.uri)
+                    val output = resolver.openOutputStream(safeUri, "wt")
+                        ?: InternalWorkspaceErrorCode.UNKNOWN_OUTCOME.error()
+                    output.use {
+                        it.write(content)
+                        it.flush()
+                    }
+                    if (!hasPersistedGrant(write = true)) InternalWorkspaceErrorCode.UNKNOWN_OUTCOME.error()
+                    val committed = resolveAfterMutation(segments)
+                    if (committed.id != existing.id || committed.type != InternalWorkspaceEntryType.FILE) {
+                        InternalWorkspaceErrorCode.UNKNOWN_OUTCOME.error()
+                    }
+                    // Read at most one byte beyond the requested content: this proves exact
+                    // truncation without trusting stale/unknown provider COLUMN_SIZE values.
+                    if (!readBounded(safeUri, content.size + 1).contentEquals(content)) {
+                        InternalWorkspaceErrorCode.UNKNOWN_OUTCOME.error()
+                    }
+                    InternalWorkspaceWrite(segments.joinToString("/"), content.size.toLong(), false, fileVersion(safeUri))
+                }
             }
             expectVersion(null, expectedVersion)
             if (expectedVersion != null) {

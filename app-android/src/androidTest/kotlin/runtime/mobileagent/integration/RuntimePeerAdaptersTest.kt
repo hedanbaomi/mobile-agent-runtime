@@ -160,6 +160,8 @@ class RuntimePeerAdaptersTest {
             "INVALID_CURSOR" to DiagnosticOperationState.FAILED,
             "UNSUPPORTED_ENTRY" to DiagnosticOperationState.FAILED,
             "OPERATION_UNAVAILABLE" to DiagnosticOperationState.FAILED,
+            "WORKSPACE_VERSION_UNSUPPORTED" to DiagnosticOperationState.FAILED,
+            "CAPABILITY_DENIED" to DiagnosticOperationState.DENIED,
             "BRIDGE_PROTOCOL_MISMATCH" to DiagnosticOperationState.FAILED,
             "PERMISSION_DENIED" to DiagnosticOperationState.DENIED,
             "APPROVAL_DENIED" to DiagnosticOperationState.DENIED,

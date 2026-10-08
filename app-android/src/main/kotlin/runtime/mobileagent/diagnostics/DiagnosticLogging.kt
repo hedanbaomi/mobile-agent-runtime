@@ -3046,9 +3046,9 @@ class RollingDiagnosticLogStore(
         // are a closed enum, not provider text or an exception message.
         "cancelled", "permission", "permission_denied", "resource_limit", "io", "io_error",
         "validation", "rejected", "unknown", "approval_required", "approval_denied", "timeout",
-        "snapshot_stale", "invalid_request", "invalid_cursor", "call_id_replay",
+        "snapshot_stale", "invalid_request", "invalid_cursor", "call_id_replay", "capability_denied",
         "workspace_not_found", "workspace_read_only", "path_out_of_scope", "symlink_forbidden",
-        "root_operation_forbidden", "file_too_large", "quota_exceeded", "conflict",
+        "root_operation_forbidden", "file_too_large", "quota_exceeded", "conflict", "workspace_version_unsupported",
         "authority_not_granted", "authority_provider_not_selected", "authority_temporarily_unavailable",
         "shizuku_permission_denied", "shizuku_service_unavailable", "bridge_not_paired",
         "bridge_disconnected", "bridge_protocol_mismatch", "adb_device_unauthorized", "adb_device_offline",

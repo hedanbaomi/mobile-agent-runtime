@@ -545,7 +545,7 @@ class WorkspaceBackendTest {
     }
 
     @Test
-    fun safCapabilitiesExposeCreateOnlyTextWritesButNotUnsupportedMutations() {
+    fun safCapabilitiesKeepCrudAvailableAsCreatableTreeContentsChange() {
         val readOnly = SafWorkspaceCapabilityPolicy.derive(
             readGranted = true,
             writeGranted = false,
@@ -588,7 +588,16 @@ class WorkspaceBackendTest {
         assertTrue(createCapable.writable)
         assertTrue(createCapable.operationCapabilities.contains(InternalWorkspaceCapabilities.WRITE_TEXT))
         assertTrue(createCapable.operationCapabilities.contains(InternalWorkspaceCapabilities.CREATE_DIRECTORY))
-        assertFalse(createCapable.operationCapabilities.contains(InternalWorkspaceCapabilities.DELETE))
+        assertTrue(createCapable.operationCapabilities.contains(InternalWorkspaceCapabilities.DELETE))
+        val writeOnlyDocument = SafWorkspaceCapabilityPolicy.derive(
+            readGranted = true, writeGranted = true, rootFlags = 0,
+            children = listOf(SafCapabilityChild(InternalWorkspaceEntryType.FILE,
+                android.provider.DocumentsContract.Document.FLAG_SUPPORTS_WRITE)),
+        )
+        assertTrue(writeOnlyDocument.writable)
+        assertTrue(writeOnlyDocument.operationCapabilities.contains(InternalWorkspaceCapabilities.WRITE_TEXT))
+        assertFalse(writeOnlyDocument.operationCapabilities.contains(InternalWorkspaceCapabilities.CREATE_DIRECTORY))
+        assertFalse(writeOnlyDocument.operationCapabilities.contains(InternalWorkspaceCapabilities.DELETE))
         assertFalse(createCapable.operationCapabilities.contains(InternalWorkspaceCapabilities.MOVE))
         // Regression: an empty (or all-virtual) readable tree must still advertise text reads,
         // otherwise the first authorization exposes write tools without `file_read_text`.

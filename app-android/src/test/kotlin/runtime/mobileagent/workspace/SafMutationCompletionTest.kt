@@ -17,6 +17,18 @@ import org.junit.jupiter.api.io.TempDir
 class SafMutationCompletionTest {
     @TempDir lateinit var directory: Path
 
+    @Test fun existingDocumentTruncatedDuringOpenFailureIsUnknownAndNotReplayable() {
+        val target = directory.resolve("existing.txt")
+        Files.write(target, "original document".toByteArray())
+        val failure = assertThrows(InternalWorkspaceFailure::class.java) {
+            completeSafDispatchedMutation {
+                Files.newOutputStream(target).use { throw IOException("failed after truncation") }
+            }
+        }
+        assertEquals(InternalWorkspaceErrorCode.UNKNOWN_OUTCOME, failure.error.code)
+        assertEquals(0L, Files.size(target))
+    }
+
     @Test fun directoryCreationKeepsPreCreateFailuresAndPostCreateAmbiguity() {
         val pre = assertThrows(InternalWorkspaceFailure::class.java) {
             completeSafCreatedDocument(create = { InternalWorkspaceErrorCode.PERMISSION_DENIED.error() },

@@ -23,6 +23,7 @@ import runtime.mobileagent.agent.AgentRuntime
 import runtime.mobileagent.agent.EffectivePrompt
 import runtime.mobileagent.agent.RunState
 import runtime.mobileagent.domain.AgentProfile
+import runtime.mobileagent.data.SafWorkspaceGrantRepository
 import runtime.mobileagent.domain.ApiFormat
 import runtime.mobileagent.domain.CapabilityGrant
 import runtime.mobileagent.domain.CapabilityId
@@ -41,6 +42,10 @@ import runtime.mobileagent.provider.ModelEvent
 import runtime.mobileagent.provider.ModelRequest
 import runtime.mobileagent.skills.ToolCall
 import runtime.mobileagent.skills.ToolResult
+import runtime.mobileagent.skills.tooling.ToolErrorCode
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 import runtime.mobileagent.integration.WorkspaceAccessGrantTarget
 import runtime.mobileagent.integration.WorkspaceAccessResult
 import runtime.mobileagent.integration.WorkspaceAccessStatus
@@ -306,6 +311,21 @@ class RuntimeSafToolExposureDeviceTest {
                 ),
             )
         }
+        val safGrant = requireNotNull(SafWorkspaceGrantRepository(container.db).get(safWorkspaceId))
+        val platformGrant = requireNotNull(app.contentResolver.persistedUriPermissions.firstOrNull {
+            it.uri.toString() == safGrant.uriReference && it.isReadPermission && it.isWritePermission
+        }) { "The selected SAF workspace must have its own persisted read/write grant" }
+        val flags = (if (platformGrant.isReadPermission) Intent.FLAG_GRANT_READ_URI_PERMISSION else 0) or
+            (if (platformGrant.isWritePermission) Intent.FLAG_GRANT_WRITE_URI_PERMISSION else 0)
+        val reattached = container.runtimeIntegration.workspaceAccessPort.attachSaf(
+            platformGrant.uri, flags, WorkspaceAccessGrantTarget(agentId = agentId),
+        )
+        assertTrue("reattaching the same SAF folder failed: $reattached", reattached is WorkspaceAccessResult.Success)
+        assertEquals(safWorkspaceId, (reattached as WorkspaceAccessResult.Success).workspace.workspaceId)
+        assertTrue("reattaching SAF erased explicit write consent",
+            container.agentGrantPort.listGrants(agentId, includeRevoked = false).any {
+                it.workspaceId == safWorkspaceId && it.capability == CapabilityId(CapabilityId.FILE_WRITE_TEXT)
+            })
         val snapshot = container.runtimeIntegration.createSnapshotWithCurrentGrants(agentId)
         val context = container.runtimeIntegration.createToolExecutionContext(
             snapshot = snapshot,
@@ -316,6 +336,16 @@ class RuntimeSafToolExposureDeviceTest {
         )
         val factory = container.runtimeIntegration.createToolExecutorFactory(context)
         val exposedNames = factory.toolingSpecs.map { it.name }.toSet()
+        factory.toolingSpecs.filter { it.name in setOf("file_write_text", "file_create_directory", "file_delete") }
+            .forEach { spec ->
+                assertTrue("SAF must not advertise unsupported version conditions",
+                    "expected_version" !in Json.parseToJsonElement(spec.inputSchema).jsonObject.getValue("properties").jsonObject)
+            }
+        val unsupported = kotlinx.coroutines.runBlocking {
+            factory.invoke(ToolCall("saf-versioned-create-$suffix", "file_write_text",
+                """{"workspace_id":"$safWorkspaceId","relative_path":"$proofPath","text":"must-not-create","expected_version":123}"""))
+        }
+        assertEquals(ToolErrorCode.WORKSPACE_VERSION_UNSUPPORTED, (unsupported as ToolResult.Failure).error.code)
         val exposure = container.runtimeIntegration.toolExposureDiagnostics(context)
 
         assertTrue("No workspace tools were exposed: ${factory.exposureSummary}", factory.exposureSummary.totalTools > 0)
@@ -381,31 +411,37 @@ class RuntimeSafToolExposureDeviceTest {
             }
             assertTrue("SAF proof read failed: $proofRead", proofRead is ToolResult.Value)
             assertTrue((proofRead as ToolResult.Value).json.contains(proofText))
-            val unsafeReplace = kotlinx.coroutines.runBlocking {
-                factory.invoke(
-                    ToolCall(
-                        "saf-replace-$suffix",
-                        "file_write_text",
-                        """{"workspaceId":"$safWorkspaceId","relativePath":"$proofPath","text":"must-not-replace","replace":true}""",
-                    ),
-                )
+            val directoryPath = "runtime-saf-dir-$suffix"
+            val madeDirectory = kotlinx.coroutines.runBlocking {
+                factory.invoke(ToolCall("saf-mkdir-$suffix", "file_create_directory",
+                    """{"workspace_id":"$safWorkspaceId","relative_path":"$directoryPath"}"""))
             }
-            assertTrue(
-                "SAF existing-file replacement must remain fail-closed: $unsafeReplace",
-                unsafeReplace is ToolResult.Denied,
-            )
-            val unchanged = kotlinx.coroutines.runBlocking {
-                factory.invoke(
-                    ToolCall(
-                        "saf-unchanged-$suffix",
-                        "file_read_text",
-                        """{"workspaceId":"$safWorkspaceId","relativePath":"$proofPath","maxBytes":4096}""",
-                    ),
-                )
+            assertTrue("SAF directory creation failed: $madeDirectory", madeDirectory is ToolResult.Value)
+            try {
+                // Lengthening, shortening and zero-byte replacement must all work. Directory
+                // mutations between calls must not turn file updates into workspace conflicts.
+                listOf("updated-" + proofText.repeat(2), "短", "", "final-$suffix").forEachIndexed { index, replacement ->
+                    val replaced = kotlinx.coroutines.runBlocking {
+                        factory.invoke(ToolCall("saf-replace-$index-$suffix", "file_write_text",
+                            org.json.JSONObject().put("workspace_id", safWorkspaceId)
+                                .put("relative_path", proofPath).put("text", replacement).put("replace", true).toString()))
+                    }
+                    assertTrue("SAF existing-file write failed: $replaced", replaced is ToolResult.Value)
+                    val reread = kotlinx.coroutines.runBlocking {
+                        factory.invoke(ToolCall("saf-reread-$index-$suffix", "file_read_text",
+                            """{"workspace_id":"$safWorkspaceId","relative_path":"$proofPath","max_bytes":4096}"""))
+                    }
+                    assertTrue("SAF updated-file read failed: $reread", reread is ToolResult.Value)
+                    assertEquals(replacement, Json.parseToJsonElement((reread as ToolResult.Value).json)
+                        .jsonObject.getValue("text").jsonPrimitive.content)
+                }
+            } finally {
+                val deletedDirectory = kotlinx.coroutines.runBlocking {
+                    factory.invoke(ToolCall("saf-rmdir-$suffix", "file_delete",
+                        """{"workspace_id":"$safWorkspaceId","relative_path":"$directoryPath"}"""))
+                }
+                assertTrue("SAF empty-directory deletion failed: $deletedDirectory", deletedDirectory is ToolResult.Value)
             }
-            assertTrue("SAF proof reread failed: $unchanged", unchanged is ToolResult.Value)
-            assertTrue((unchanged as ToolResult.Value).json.contains(proofText))
-            assertTrue(!unchanged.json.contains("must-not-replace"))
         } finally {
             if (created) {
                 val deleted = kotlinx.coroutines.runBlocking {

@@ -39,6 +39,30 @@ class DiagnosticLogLevelTest {
     private fun log(root: File): String = File(root, RollingDiagnosticLogStore.CURRENT_FILE_NAME).readText()
 
     @Test
+    fun workspaceFailuresKeepTypedCodesWithoutAcceptingArbitraryProviderText(@TempDir root: File) {
+        val logger = store(root)
+        val cases = listOf(
+            "CAPABILITY_DENIED" to DiagnosticOperationState.DENIED,
+            "WORKSPACE_VERSION_UNSUPPORTED" to DiagnosticOperationState.FAILED,
+            "CONFLICT" to DiagnosticOperationState.FAILED,
+            "provider secret sentinel" to DiagnosticOperationState.UNKNOWN,
+        )
+        cases.forEachIndexed { index, (code, state) ->
+            assertTrue(logger.recordWorkspaceOperationState(
+                workspaceId = "fixture-workspace", operation = DiagnosticOperation.WRITE,
+                state = state, requestRef = "request-$index", errorCode = code,
+                backendType = DiagnosticWorkspaceBackendType.SAF_TREE,
+            ))
+        }
+        val content = log(root)
+        assertTrue(content.contains("\"errorCode\":\"capability_denied\""))
+        assertTrue(content.contains("\"errorCode\":\"workspace_version_unsupported\""))
+        assertTrue(content.contains("\"errorCode\":\"conflict\""))
+        assertTrue(content.contains("\"errorCode\":\"unknown\""))
+        assertFalse(content.contains("provider secret sentinel"))
+    }
+
+    @Test
     fun infoDefaultKeepsLifecycleAndFailures(@TempDir root: File) {
         val logger = store(root)
         assertFalse(logger.isLevelEnabled(DiagnosticLevel.DEBUG))

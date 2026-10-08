@@ -398,7 +398,7 @@ API 31 x86_64 定向验证已覆盖确认卡 2/2、预算 3/3、工作区 6/6；
 
 - shared/domain 和 SQLite v13 负责 Authority、Workspace、CapabilityGrant、SnapshotGrantBinding、Approval/Audit、lifetime owner 与迁移；ONCE 消费、TASK/SESSION owner、policy revision 和 snapshot binding 在 dispatch 前重新解析。
 - RuntimeIntegration 是应用唯一组合根，冻结 `ToolExecutionContext` 并创建 provider-neutral ToolExecutorFactory；模型只看到当前有效交集，不能选择 backend、serial、URI、root 或 host endpoint。
-- WorkspaceRegistry 统一 Internal、SAF 与 selected privileged backend；typed tools 按 ACL 与 Agent scope 交集、backend capability、path/symlink/version/quota 约束执行。SAF 无法证明原子替换时不冒充支持；未知后置状态返回 `UNKNOWN_OUTCOME`。
+- WorkspaceRegistry 统一 Internal、SAF 与 selected privileged backend；typed tools 按 ACL 与 Agent scope 交集、backend capability、path/symlink/version/quota 约束执行。SAF 无法证明原子替换时不冒充支持；未知后置状态返回 `UNKNOWN_OUTCOME`。 2026-10-08 普通 SAF 显式覆盖通过 provider 截断流和精确回读接通，原子 patch 仍不支持；默认重选保留显式读写、可创建空树保留删除操作面，版本参数按操作支持构造，见 ADR-0032。
 - Skill Memory 通过 canonical SQLite repository 和当前 Agent/snapshot/trusted Skill/grant/frozen capability 交集；旧 raw backend 只保留 deprecated 兼容入口，不作为第二事实源。
 - Shizuku 验证 shell UID、caller/session/protocol，typed 文件 RPC 与 shell 输出使用 PFD/有界预算；Wired ADB Companion 使用显式 USB serial、固定 loopback、挑战身份、配对 token、AEAD/序号/tombstone 与 Android Keystore bound secret。两者平级且不 fallback。
 - `shell_exec` 仅在 Dangerous Mode、`shell.execute` capability 和 selected Authority 同时有效时注册；原始 command/cwd 只在用户审批 UI 中显示，不写诊断。inline approval 只授予本次调用；长期 grant 必须在 Agent 设置独立创建。

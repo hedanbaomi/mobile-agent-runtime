@@ -384,6 +384,18 @@ class UnifiedWorkspaceToolExecutor(
             )
         }
 
+        // An observed entry version is not a promise that every mutation can
+        // enforce it. Reject stale/mixed-backend requests before consuming an
+        // ONCE grant or dispatching; never drop the caller's precondition.
+        if (operation.expectedVersion != null && registered != null &&
+            operation.capability !in registered.backend.expectedVersionCapabilities
+        ) {
+            return finishAudit(
+                bound, operation,
+                ToolExecution.Failed(ToolError(ToolErrorCode.WORKSPACE_VERSION_UNSUPPORTED)), context,
+            )
+        }
+
         // The resolver's canonical gate is the final grant/revision/lifetime
         // check. It runs immediately before dispatch, so a stale or ONCE grant
         // can never reach the backend.
@@ -478,13 +490,31 @@ class UnifiedWorkspaceToolExecutor(
 
     /** Build the model schema from the exact run snapshot, never from a global list. */
     private fun exposedSpecs(context: ToolExecutionContext): List<ToolSpec> =
-        TOOL_SPECS.filter { spec ->
-            val operation = operationForTool(spec.name) ?: return@filter false
+        TOOL_SPECS.mapNotNull { spec ->
+            val operation = operationForTool(spec.name) ?: return@mapNotNull null
             // A persisted selected authority remains part of the run schema
             // while its Binder/USB/Wi-Fi transport is temporarily offline.
             // Dispatch repeats the live-ready check and fails closed without
             // switching providers, matching the shell exposure contract.
-            authorizedWorkspaces(context, operation, requireLiveReady = false).isNotEmpty()
+            val workspaces = authorizedWorkspaces(context, operation, requireLiveReady = false)
+            if (workspaces.isEmpty()) return@mapNotNull null
+            if (!operation.isMutation) return@mapNotNull spec
+            val versioned = workspaces.filter { operation.capability in it.backend.expectedVersionCapabilities }
+            val schema = Json.parseToJsonElement(spec.inputSchema) as JsonObject
+            val properties = schema["properties"] as JsonObject
+            if ("expected_version" !in properties) return@mapNotNull spec
+            if (versioned.isEmpty()) {
+                // Patch always requires its version; never expose a backend
+                // that cannot implement that mandatory conditional contract.
+                if (operation == WorkspaceOperation.APPLY_PATCH) return@mapNotNull null
+                spec.copy(
+                    inputSchema = JsonObject(schema + ("properties" to JsonObject(properties - "expected_version"))).toString(),
+                    description = spec.description + " Omit expected_version on these workspaces; ordinary authorized mutations remain available.",
+                )
+            } else {
+                spec.copy(description = spec.description +
+                    " expected_version checks the target entry only; use it only when workspace_list lists this tool in expected_version_operations.")
+            }
         }
 
     /**
@@ -545,6 +575,9 @@ class UnifiedWorkspaceToolExecutor(
                 .map { it.modelToolName() }
                 .sorted(),
             authorizedOperations = available.map { it.modelToolName() }.sorted(),
+            expectedVersionOperations = available
+                .filter { it.isMutation && it.capability in registered.backend.expectedVersionCapabilities }
+                .map { it.modelToolName() }.sorted(),
             operationScopes = available.associate { operation ->
                 operation.modelToolName() to operationScope(context, registered, operation)
             }.toSortedMap(),
@@ -605,15 +638,9 @@ class UnifiedWorkspaceToolExecutor(
     private fun isCanonicalRelativeScope(scope: String): Boolean =
         runCatching { WorkspacePathPolicy.normalize(scope, false) == scope }.getOrDefault(false)
 
-    /**
-     * SAF can create a new text document or directory, but its platform contract
-     * has no atomic replacement and no compare-and-create.  Those two operations
-     * are therefore described as create-only instead of being collapsed into a
-     * general whole-workspace write claim.
-     */
+    /** SAF directory creation has no replace operation; ordinary text writes can replace. */
     private fun WorkspaceOperation.isCreateOnly(backendType: WorkspaceBackendType): Boolean =
-        backendType == WorkspaceBackendType.SAF_TREE &&
-            (this == WorkspaceOperation.WRITE || this == WorkspaceOperation.CREATE_DIRECTORY)
+        backendType == WorkspaceBackendType.SAF_TREE && this == WorkspaceOperation.CREATE_DIRECTORY
 
     private fun workspaceScopeWireName(scope: WorkspaceScope): String = when (scope) {
         WorkspaceScope.SELECTED_DIRECTORY -> "selected_directory"
@@ -631,6 +658,7 @@ class UnifiedWorkspaceToolExecutor(
         val atomicReplace: Boolean,
         val createOnlyOperations: List<String>,
         val authorizedOperations: List<String>,
+        val expectedVersionOperations: List<String>,
         val operationScopes: Map<String, OperationScopeView>,
     ) {
         fun toJson(): JsonObject = buildJsonObject {
@@ -643,6 +671,8 @@ class UnifiedWorkspaceToolExecutor(
             put("atomic_replace", atomicReplace)
             putJsonArray("create_only_operations") { createOnlyOperations.forEach { add(it) } }
             putJsonArray("authorized_operations") { authorizedOperations.forEach { add(it) } }
+            put("version_scope", "target_entry")
+            putJsonArray("expected_version_operations") { expectedVersionOperations.forEach { add(it) } }
             putJsonObject("operation_scopes") {
                 operationScopes.forEach { (toolName, scope) ->
                     putJsonObject(toolName) {
@@ -783,6 +813,11 @@ class UnifiedWorkspaceToolExecutor(
         operation: WorkspaceOperation,
     ): Boolean {
         if (operation.capability !in backend.capabilities) return false
+        // Patch's version is mandatory. A capability bit without an enforced
+        // conditional contract cannot be advertised as atomic replacement.
+        if (operation == WorkspaceOperation.APPLY_PATCH &&
+            operation.capability !in backend.expectedVersionCapabilities
+        ) return false
         return runCatching {
             backend.javaClass.methods.any { method ->
                 method.name == operation.backendMethod &&

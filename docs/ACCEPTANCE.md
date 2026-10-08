@@ -197,7 +197,7 @@ K06另需前台任务兼容矩阵：Android12+后台启动限制、Android14+服
 | S10 | 测试secret混入模型错误/Skill输出/日志/导出，模型超时副作用未知 | 全路径脱敏；不无限持久化内容；UNKNOWN_OUTCOME不自动重放 |
 | S11 | 受控MCP server工具发现/新增/重连/取消/错误；初始化/发现/密钥解析/已派发各窗口撤权与旧 ID 重放；Remote接口schema测试 | 不自动授权新增工具、不在手机起任意stdio、不重放副作用；Remote不自动上传用户包或知识库 |
 | S12 | 导入无 `mobile-skill.json`、含标准库 `main()` CLI 的 Claude Skill；启用、空权限确认、Agent 绑定后由模型按 program enum/argv/虚拟 Markdown 文件调用；同包含重型依赖脚本 | 原 ZIP/hash 不改；只把通过兼容门槛的程序列入 `py_*` 工具；每次调用仍批准且在新 isolated UID 中执行；隐藏已验证源码字段不能由模型声明；虚拟文件无法映射宿主路径。依赖 PyMuPDF/NumPy/PyTorch/Transformers 的 `books_kb.py` 明确不直跑，绑定知识库时由 `knowledge_search`/`read_document` 承接且模型不得伪称原脚本执行 |
-| S13 | Agent 调用应用私有 `workspace_list` 与 provider-neutral `file_*` typed tools；覆盖长路径、绝对路径、`..`、symlink、配额、重复 call ID、授权后撤销 Agent/快照、ONCE 并发消费、替换写中断 | 读、列、写、建目录、移动和受限删除由 backend-neutral schema 表达；已有有效 canonical capability grant 与 snapshot binding 时不再逐次弹出对话批准，但每次派发前仍复核撤销、过期、policy revision、workspace/path scope 与 selected Authority，ONCE grant 原子消费；真实路径不进入模型或错误；Agent+快照命名空间互相隔离；越界/撤权 fail-closed；Internal UTF-8 替换写须原子且无临时残留，SAF 仅在 provider/grant 能力可证明时新建、对既有目标的非原子替换必须拒绝；typed path 不等于 shell |
+| S13 | Agent 调用应用私有 `workspace_list` 与 provider-neutral `file_*` typed tools；覆盖长路径、绝对路径、`..`、symlink、配额、重复 call ID、授权后撤销 Agent/快照、ONCE 并发消费、替换写中断 | 读、列、写、建目录、移动和受限删除由 backend-neutral schema 表达；已有有效 canonical capability grant 与 snapshot binding 时不再逐次弹出对话批准，但每次派发前仍复核撤销、过期、policy revision、workspace/path scope 与 selected Authority，ONCE grant 原子消费；真实路径不进入模型或错误；Agent+快照命名空间互相隔离；越界/撤权 fail-closed；Internal UTF-8 替换写须原子且无临时残留，SAF 在有效 grant/文档写 flag 下新建或显式 replace=true 更新，关闭截断流后核验同一 ID 和精确回读，开流后失败为 UNKNOWN_OUTCOME；不宣称原子 patch；typed path 不等于 shell |
 | S14 | 对照 wire tool name→capability→backend-neutral 语义矩阵；Provider 无 tools、未知 tool、backend 名称伪装、schema additionalProperties 和重复 call ID | 只发送当前 Provider 声明且经 capability intersection 的中性 schema；未知/后端专用名称拒绝；schema 严格；同一 call 不重复执行；状态：mapping `IMPLEMENTED`，逐项自动化证据按工具记录 |
 | S15 | Dangerous Mode 首次开启/关闭、持久化、Agent capability、`ENABLED_CONFIRM_HIGH_RISK` 与 `ENABLED_AUTONOMOUS`、Authority 暂时不可用 | 首次开启有风险确认；显式关闭才关闭；Authority 暂时失效不清除 grant 或模式但不派发；普通模式不注册 `shell_exec`；高风险档逐次确认，自治档不逐条确认但仍受限；状态：契约 `IMPLEMENTED`，自动化/E2E 分别记录 |
 | S16 | 选择 `SHIZUKU` 或 `WIRED_ADB`，grant/availability/connection 变化，断连、重连、切换和撤权 | 两种 Authority 平级；只调度 selected provider；selected provider 失效返回确定错误且不自动 fallback；Binder/USB 恢复需 revalidate 后恢复；Shizuku selected/granted/ready/connected 与 UserService 在 API 31 `DEVICE E2E PASS`，Wired ADB 物理 USB `E2E BLOCKED` |
@@ -394,3 +394,11 @@ S03/S04/S05/S07 增量必须通过真实 isolated worker：API26 JSON/新 PID；
 实施与独立复查、本地设备测试结果见 [常驻 ADB 证据](evidence/2026-10-06/resident-adb-activation.md)。模拟器运行自有 shell 服务不代替物理 USB 拔线、OEM 杀进程或正式 arm64 升级验收。旧桌面桥验收保留为历史边界。
 
 2026-10-07 S09/S13/A06/C20—C25 增量：禁用既有 Skill 后未勾选但保留关联，编辑保存、工作区选择及新会话不受阻；新快照排除禁用安装，重新启用不修改禁用时建立的快照；新禁用绑定和缺失安装仍拒绝。唯一启用 instruction Skill 的真实 factory 内置工作区读写按 Agent 授权可用，真实 Skill envelope 保持能力交集。SAF 平台可写/Agent 只读时 descriptor writable=false；创建权限与不支持原子覆盖分别呈现，路径 grant 不声明全根授权。枚举投影不消费 file ONCE grant，实际 enumerate 调用仍消费自己的 ONCE。见 [专项证据](evidence/2026-10-07/skill-workspace-adaptive-context.md)。
+
+## 2026-10-08 SAF 与工作区内容变更回归（ADR-0032）
+
+- S13/S19：真实 DocumentsProvider 重选已读写授权目录，随后新建文件、建目录、增长/缩短/空/Unicode 覆盖、回读、文件/空目录删除全部成功。SAF 原子 patch 不暴露。可创建空树保留 DELETE 工具/读写授权，具体目标无 delete flag 时不得派发。
+- S24/S25：普通默认重选、新 Agent deferred draft 不撤销显式写权；旧绑定会话下一 Run 可写。显式只读、实时撤权、过期/策略、跨 Agent/Skill/workspace、路径及 ONCE 不被默认选择恢复或扩大。
+- S30：Internal 兄弟文件/目录变更不改变未修改目标 B 的条件版本，B 原条件写入成功；B 真正改变后 stale 为 CONFLICT。Shizuku 两 adapter+真实存储、Wired adapter+真实引擎正常增删改；schema 不提供不可执行条件。混合 backend 查询 expected_version_operations；旧条件无副作用/无 ONCE 消费，mandatory patch 无条件契约不暴露。
+- S13/S30：SAF 截断开流后遇到写/flush/close/回读/grant/ID 核验失败为 UNKNOWN_OUTCOME，不重放；大小、配额、相对路径、根删除和非空目录限制保持。变动目录的旧分页 cursor 仍需重新列举。
+- [本轮实跑与审阅](evidence/2026-10-08/saf-and-file-version-preconditions.md)。历史“SAF 非原子覆盖拒绝”描述当时实现，普通覆盖现以 ADR-0032 为准；原子 patch 边界不变。

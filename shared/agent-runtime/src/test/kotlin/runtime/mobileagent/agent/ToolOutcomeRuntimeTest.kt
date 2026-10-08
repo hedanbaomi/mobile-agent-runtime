@@ -68,6 +68,16 @@ class ToolOutcomeRuntimeTest {
     }
 
     @Test
+    fun unsupportedWorkspaceVersionExplainsNoExecutionInsteadOfAFalseConflict() = runTest {
+        val produced = runSingleTool(ToolResult.Failure(ToolError(ToolErrorCode.WORKSPACE_VERSION_UNSUPPORTED)))
+        assertEquals(ToolOutcomeStatus.FAILED, ToolOutcome.statusOf(produced.resultJson))
+        assertEquals(ToolErrorCode.WORKSPACE_VERSION_UNSUPPORTED, ToolOutcome.errorCodeOf(produced.resultJson))
+        assertTrue(produced.resultJson.contains("Nothing was executed"))
+        assertTrue(produced.resultJson.contains("expected_version_operations"))
+        assertTrue(requireNotNull(toolResultUserMessage(produced.resultJson)).contains("未执行"))
+    }
+
+    @Test
     fun valueKeepsRawJson() = runTest {
         val produced = runSingleTool(ToolResult.Value("""{"hits":[]}"""))
         assertEquals("VALUE", produced.status)

@@ -434,6 +434,8 @@ private class ShizukuTokenWorkspaceBackend(
         CapabilityId("file.apply_patch"),
     )
 
+    override val expectedVersionCapabilities: Set<CapabilityId> = setOf(CapabilityId("file.apply_patch"))
+
     override suspend fun list(request: WorkspaceListRequest): WorkspaceResult<WorkspaceListing> {
         if (request.workspaceId != descriptor.id) return failure(ToolErrorCode.INVALID_REQUEST)
         val path = normalize(request.relativePath, allowRoot = true) ?: return failure(ToolErrorCode.PATH_OUT_OF_SCOPE)
@@ -484,7 +486,7 @@ private class ShizukuTokenWorkspaceBackend(
 
     override suspend fun writeText(request: WorkspaceWriteTextRequest): WorkspaceResult<WorkspaceMutation> {
         if (request.workspaceId != descriptor.id) return failure(ToolErrorCode.INVALID_REQUEST)
-        if (request.expectedVersion != null) return failure(ToolErrorCode.CONFLICT)
+        if (request.expectedVersion != null) return failure(ToolErrorCode.WORKSPACE_VERSION_UNSUPPORTED)
         val path = normalize(request.relativePath, allowRoot = false) ?: return failure(ToolErrorCode.PATH_OUT_OF_SCOPE)
         val content = strictUtf8(request.text) ?: return failure(ToolErrorCode.INVALID_REQUEST)
         if (content.size > ShizukuWorkspaceFileStore.MAX_FILE_BYTES) return failure(ToolErrorCode.FILE_TOO_LARGE)
@@ -499,14 +501,14 @@ private class ShizukuTokenWorkspaceBackend(
 
     override suspend fun createDirectory(request: WorkspaceCreateDirectoryRequest): WorkspaceResult<WorkspaceMutation> {
         if (request.workspaceId != descriptor.id) return failure(ToolErrorCode.INVALID_REQUEST)
-        if (request.expectedVersion != null) return failure(ToolErrorCode.CONFLICT)
+        if (request.expectedVersion != null) return failure(ToolErrorCode.WORKSPACE_VERSION_UNSUPPORTED)
         val path = normalize(request.relativePath, allowRoot = false) ?: return failure(ToolErrorCode.PATH_OUT_OF_SCOPE)
         return parseMutation(dispatch { bridge.dispatchWorkspaceMkdir(workspaceHandle, path) }, "mkdir", path, WorkspaceEntryType.DIRECTORY, null)
     }
 
     override suspend fun delete(request: WorkspaceDeleteRequest): WorkspaceResult<WorkspaceMutation> {
         if (request.workspaceId != descriptor.id) return failure(ToolErrorCode.INVALID_REQUEST)
-        if (request.expectedVersion != null) return failure(ToolErrorCode.CONFLICT)
+        if (request.expectedVersion != null) return failure(ToolErrorCode.WORKSPACE_VERSION_UNSUPPORTED)
         val path = normalize(request.relativePath, allowRoot = false) ?: return failure(ToolErrorCode.PATH_OUT_OF_SCOPE)
         val result = dispatch { bridge.dispatchWorkspaceDelete(workspaceHandle, path) }
         val payload = payload(result, "delete")
@@ -522,7 +524,7 @@ private class ShizukuTokenWorkspaceBackend(
 
     override suspend fun move(request: WorkspaceMoveRequest): WorkspaceResult<WorkspaceMutation> {
         if (request.workspaceId != descriptor.id) return failure(ToolErrorCode.INVALID_REQUEST)
-        if (request.expectedVersion != null) return failure(ToolErrorCode.CONFLICT)
+        if (request.expectedVersion != null) return failure(ToolErrorCode.WORKSPACE_VERSION_UNSUPPORTED)
         val source = normalize(request.sourcePath, allowRoot = false) ?: return failure(ToolErrorCode.PATH_OUT_OF_SCOPE)
         val destination = normalize(request.destinationPath, allowRoot = false) ?: return failure(ToolErrorCode.PATH_OUT_OF_SCOPE)
         val result = dispatch { bridge.dispatchWorkspaceMove(workspaceHandle, source, destination, replaceExisting = false) }

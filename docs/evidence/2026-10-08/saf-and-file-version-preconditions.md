@@ -3,7 +3,7 @@
 
 # SAF 写入与工作区增删改修复证据
 
-日期：2026-10-08（Asia/Taipei）。R19/R20/R26/R28/R32，S13/S19/S24/S25/S30；基线 main/PR #51 合并提交 0f29e97a710213ad78ec4c4f7a9eb555f865737a，隔离分支 codex/saf-diagnostics-20261008。1.1.4.1preview/code10，供人工审查，不创建公开 Release。
+日期：2026-10-08（Asia/Taipei）。R19/R20/R26/R28/R32，S13/S19/S24/S25/S30；基线 main/PR #51 合并提交 0f29e97a710213ad78ec4c4f7a9eb555f865737a，隔离分支 codex/saf-diagnostics-20261008。1.1.4.2preview/code11，供人工审查，不创建公开 Release。
 
 ## 诊断与根因
 
@@ -39,3 +39,5 @@ DSH DeepSeek V4.1 Flash 独立只读排查确认默认重选及 draft 授权收�
 ## 集成与交付状态
 
 strict/offline licenseGuard/Reverse/check/workflow YAML 全通过（996 tasks，4m18s），REUSE941/941通过；Android Debug/Release/Review 各296单元均零失败/错误/跳过；commit/push/PR普通合并、本地main同步及合并源码正式签名人工包尚待完成。根目录83项原WIP保留，私有诊断/密钥/个人文件不进入提交。最终回执另列实际SHA、门禁与产物哈希。
+
+2026-10-08 用户追加指定本次审查版本为1.1.4.2preview，versionCode递增到11；之前1.1.4.1preview/code10产物保留。前述141项功能设备回归与本地完整源码门禁在版本更新前执行，功能源码没有随后变化；最终版本从当前PR head经远端门禁合并后构建核验。下一个公开stable版本code须大于11。

@@ -3,6 +3,10 @@
 
 # 技术实现方案
 
+2026-10-08 R02/R08/K04/K08：已完成的图片分析回执为空/过大时按来源二分，单图最多一次精简恢复；全部尝试复核授权并计入同一预算。成功子回执保留，未知/拒绝/协议失败不重试，知识工具不重执行。AUTO与手动输出限制保持不变。取消已知完成的拒绝不误标UNKNOWN_OUTCOME；取消待持久化成功回执仍保留原未知边界。见 [ADR-0030](adr/0030-request-scoped-visual-budget.md) 和 [回归证据](evidence/2026-10-08/knowledge-query-and-release-regression.md)。
+
+
+2026-10-08 Agent 回滚修复：同事务清理被删除Agent的默认目录偏好；SQLite31修复旧版15—30孤立偏好后执行原校验，不改变外键策略或授权。见 [ADR-0033](adr/0033-agent-rollback-default-cleanup.md)。
 > **2026-10-06 v1.1.2 常驻 ADB 激活（源码与专项验证通过）**：电脑工具使用官方 Platform-Tools 和显式 USB 设备，仅启动 APK 内自有 `app_process` 服务。设备服务固定 shell UID 2000，并在首次调用前固定本 App UID；单次令牌、短时挑战、HMAC 与 Android Keystore 保护重连。用户开始配对时明确启用和选用 `WIRED_ADB`，危险模式及能力授权仍独立。拔线和客户端退出不主动降权；服务真正死亡会阻止调用但保留用户配置，显式撤销才清除凭据。没有 Shizuku 依赖。设计和设备验证边界见 [ADR 0029](adr/0029-resident-adb-activation.md)、[本轮证据](evidence/2026-10-06/resident-adb-activation.md)。
 
 > **2026-10-01 r2 验收修复**：批次每次取得进程内执行权后按持久状态核对再投递，前台用唯一 KEEP 工作补入队；正常可证实追加允许推进 peer generation 栅栏，停止状态和资料/目标同意不变，空库首次追加须在发布前证明（[ADR 0018](adr/0018-acceptance-batch-delivery-and-append-fences.md)）。归档按会话短事务读取，在完成条目后核对单连接 `total_changes()` 和外连接 `data_version`，源变化明确失败。绑定保留有效整目录持久 grant、stale grant 仅明确重确认后新 ID 落盘；中断助手历史与摘要完整来源区分见 ADR 0010。本轮源码、测试与剩余验收边界见 [逐项记录](evidence/2026-10-01/acceptance-r2-repair.md)，不把原报告未判通过的整体项改为完成。

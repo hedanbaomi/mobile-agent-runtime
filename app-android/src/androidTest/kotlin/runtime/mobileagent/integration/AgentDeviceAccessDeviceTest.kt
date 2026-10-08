@@ -93,6 +93,10 @@ class AgentDeviceAccessDeviceTest {
         assertTrue(vm.hasPendingFullDeviceFiles())
         assertNotNull(vm.pendingWorkspaceDraft())
         assertTrue(vm.state.value.error, vm.state.value.error.orEmpty().contains("完整设备文件"))
+        assertTrue("Rollback must not leave defaults whose Agent was deleted",
+            f.app.container.db.query("SELECT agent_id FROM agent_workspace_defaults d WHERE NOT EXISTS (SELECT 1 FROM agent_profiles a WHERE a.id=d.agent_id)").isEmpty())
+        // The next process initialization runs this validation before any UI.
+        runtime.mobileagent.data.Migrations.apply(f.app.container.db)
         fail = false
         val saved = vm.save()
         assertTrue(vm.state.value.error, saved)

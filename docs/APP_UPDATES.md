@@ -34,3 +34,5 @@ FileProvider 非 exported，仅暴露更新目录；只向系统安装程序的�
 依据：[GitHub Releases API](https://docs.github.com/en/rest/releases/releases#get-the-latest-release)、[Android 安装来源许可](https://developer.android.com/reference/android/content/pm/PackageManager#canRequestPackageInstalls())、[FileProvider](https://developer.android.com/training/secure-file-sharing/setup-sharing)。
 
 2026-10-07 本地人工核验版本为 `1.1.4.1preview` / versionCode `10`。第四数值段仅用于本地 preview 迭代；stable feed 仍严格采用三段版本且拒绝 preview。后续同 patch 正式版可升级，正式 versionCode 必须大于 10。此 preview 不创建公开 Release。
+
+2026-10-08 正式目标为 `1.1.4/code12`，高于本地 `1.1.4.2preview/code11`，沿用正式证书，支持 preview 经 stable feed 提示并覆盖升级。

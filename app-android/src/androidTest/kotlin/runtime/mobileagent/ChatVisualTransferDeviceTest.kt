@@ -48,7 +48,11 @@ class ChatVisualTransferDeviceTest {
         exercise(ModelRole.CHAT, endpointImages = true, legacyImage = false, degrade = false,
             expectedImages = true, followupTextOnly = true)
 
-    private fun exercise(role: ModelRole, endpointImages: Boolean, legacyImage: Boolean, degrade: Boolean, expectedImages: Boolean, imageCount: Int = 1, legacyProfile: Boolean = false, largeImages: Boolean = false, followupTextOnly: Boolean = false) {
+    @Test fun completedOversizedKnowledgeImageNotesRecoverWithoutReplayingTheTool() =
+        exercise(ModelRole.CHAT, endpointImages = true, legacyImage = false, degrade = false,
+            expectedImages = true, imageCount = 8, recoverOversized = true)
+
+    private fun exercise(role: ModelRole, endpointImages: Boolean, legacyImage: Boolean, degrade: Boolean, expectedImages: Boolean, imageCount: Int = 1, legacyProfile: Boolean = false, largeImages: Boolean = false, followupTextOnly: Boolean = false, recoverOversized: Boolean = false) {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         val app = instrumentation.targetContext.applicationContext as MobileAgentApp
         app.ensureHostInitialized()
@@ -83,7 +87,7 @@ class ChatVisualTransferDeviceTest {
             }
             container.db.execute("UPDATE chunks SET asset_ids=? WHERE document_version_id=?", listOf(assets.joinToString(","), version))
         }
-        val expectedBatches = if (expectedImages) (imageCount + 7) / 8 else 0
+        val expectedBatches = if (recoverOversized) 3 else if (expectedImages) (imageCount + 7) / 8 else 0
         val initialRequests = 2 + expectedBatches
         val expectedRequests = initialRequests + if (followupTextOnly) 1 else 0
         val requests = CopyOnWriteArrayList<JsonObject>()
@@ -94,6 +98,7 @@ class ChatVisualTransferDeviceTest {
             val serving = Thread {
                 try {
                     var mainRounds = 0
+                    var analysisRounds = 0
                     repeat(expectedRequests) {
                         server.accept().use { socket ->
                             socket.soTimeout = 30_000
@@ -120,7 +125,7 @@ class ChatVisualTransferDeviceTest {
                                         if (firstMain) put("tool_calls", buildJsonArray { add(buildJsonObject {
                                             put("index", 0); put("id", "read-fixture"); put("type", "function")
                                             put("function", buildJsonObject { put("name", "read_document"); put("arguments", arguments) })
-                                        }) }) else put("content", "fixture complete")
+                                        }) }) else put("content", if (analysis && analysisRounds++ == 0 && recoverOversized) "REJECTED_PARENT_" + "x".repeat(16_001) else "fixture complete")
                                     })
                                     put("finish_reason", if (firstMain) "tool_calls" else "stop")
                                 }) })
@@ -167,7 +172,7 @@ class ChatVisualTransferDeviceTest {
                     }.orEmpty()
                 }
                 val transmitted = requests.flatMap(::imageUrls)
-                assertEquals(if (expectedImages) imageCount else 0, transmitted.size)
+                assertEquals(if (recoverOversized) imageCount * 2 else if (expectedImages) imageCount else 0, transmitted.size)
                 assertTrue(requests.all { imageUrls(it).size <= 8 })
                 assertTrue(requests.filter { (it["tools"] as? JsonArray).orEmpty().isNotEmpty() }.all { imageUrls(it).isEmpty() })
                 transmitted.forEach { url ->
@@ -177,6 +182,11 @@ class ChatVisualTransferDeviceTest {
                 }
                 if (expectedImages) assertEquals(originals.map { Base64.getEncoder().encodeToString(it) }.toSet(),
                     transmitted.map { it.substringAfter(',') }.toSet())
+                if (recoverOversized) {
+                    assertEquals(listOf(0, 8, 4, 4, 0), requests.map { imageUrls(it).size })
+                    assertEquals(1, container.runs.invocations(container.runs.list(session).single().runId).count { it.name == "read_document" })
+                    assertFalse(requests.last().toString().contains("REJECTED_PARENT_"))
+                }
                 val toolMessage = requests.last().getValue("messages").jsonArray.single {
                     it.jsonObject["role"]?.jsonPrimitive?.content == "tool"
                 }

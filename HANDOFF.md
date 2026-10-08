@@ -3,7 +3,7 @@
 
 # 项目交接
 
-最后更新：2026-10-08（Asia/Taipei；SAF 与增删改回归通过，完整门禁及交付准备）。项目根目录：E:/mobileAgentRuntime。
+最后更新：2026-10-08（Asia/Taipei；知识库调查与发布前回归进行中）。项目根目录：E:/mobileAgentRuntime。
 
 按 [agent.md 第 1 节](agent.md#1-按任务读取与开工) 选择资料。现行规则见 agent.md；本文件记录现场和待办，历史任务中的授权不自动延续。
 
@@ -24,7 +24,8 @@
 
 ## 1. 现行状态与当前任务
 
-- **当前任务：2026-10-08 SAF 写入与工作区增删改修复（实现及设备回归通过，Git/签名准备）**：R19/R20/R26/R28/R32。默认重选、新 Agent deferred draft 保留有效显式读写；SAF 普通 replace=true 支持现有文件更新，回读核验，开流后失败 UNKNOWN；可创建空目录保留删除工具/授权操作面。schema 按后端操作支持提供条件，不让普通 Shizuku/Wired/SAF 调用携带不能执行的参数；Internal/patch 的真实目标冲突保留。Android Debug 单元296、skills-api139、agent-runtime97均零失败/错误/跳过；API36 定向141零失败/跳过，含真实 DocumentsProvider 增删改；Shizuku adapter+存储、Wired adapter+引擎不是实际 Binder/物理USB验收。独立排查和只读审阅 APPROVED；strict/offline licenseGuard/Reverse/check/workflow YAML 与 REUSE941/941通过。源码分支 codex/saf-diagnostics-20261008，基线0f29e97，根目录83项原WIP保护。1.1.4.2preview/code11 人工审查包按用户最新指定版本和已有授权准备，未公开 Release。见 [证据](docs/evidence/2026-10-08/saf-and-file-version-preconditions.md) 与 [ADR-0032](docs/adr/0032-workspace-crud-and-version-capabilities.md)。
+- **当前任务：2026-10-08 知识库续轮与历史修复回归（修复完成，最终验证与v1.1.4发布进行中）**：R02/R08/K04/K08/R20/R26。新诊断确认8图分析HTTP200且流正常Completed后被Runtime本地notes校验拒绝；检索10条引用hits有效。已加入完成回执的二分/单图有界精简恢复，全部尝试仍计入预算/usage并重新复核授权；未知/拒绝/协议错误不重试，成功子回执保留，知识工具不重执行。界面清除已完成拒绝的在途标记，取消不误报未知。初始4项恢复反例均失败，修复后首轮完整agent-runtime通过；最新10项恢复、两协议输出预算及Android恢复/取消通过；最终设备233/233、合并既有专项去重240项0失败0跳过，独立复审APPROVE。另Agent偏好同事务清理及SQLite31升级修复JDBC7/7、Android旧库升级/回滚通过，有效偏好/工作区/原Grant保全，独立审阅APPROVE。历史设备去重238项已通过，正式1.1.4/code12待Git集成及干净源码正式签名/附件核验后发布。见 [证据](docs/evidence/2026-10-08/knowledge-query-and-release-regression.md)。
+- **2026-10-08 SAF 写入与工作区增删改修复（修复及审查包交付完成，人工验收待执行）**：R19/R20/R26/R28/R32。默认重选和新 Agent draft 保留有效显式读写；SAF 支持普通文件创建、replace=true 更新及删除，回读核验；空目录支持同一 Run 新建后删除。工作区条件按后端及目标操作提供，相邻文件变化不误伤正常增删改，Internal/patch 的真实目标冲突保留。真实 SAF 增删改与 API36 定向141项通过；Android Debug/Release/Review 各296单元通过，独立审阅 APPROVED。完整本地检查、许可正反向、REUSE941/941、最终PR及合并后CI均通过。PR #53 已普通合并，远端/本地 main 为 `6deb89d05ac722213bbc9634e63947f51505662b`，82项无关原WIP逐项哈希一致；使用干净隔离的合并源码通过正式 releaseGate（1308 tasks，6m21s）。交付正式签名 arm64 `1.1.4.2preview/code11`，APK SHA-256 `c03750a81b871c1b9440f1226f38aba827226fa977078623d7053891359588e8`；正式证书身份、非 debuggable、原生16 KiB对齐、APK编译SHA/版本及来源/SBOM/源码归档绑定已核验。产物与人工说明位于 `.private/manual-test/20261008-v1.1.4.2preview-saf-crud-clean/`。旧1.1.4.1preview包保留；真机“阅读”目录、真实Shizuku Binder与物理有线验收仍待人工执行。见 [证据](docs/evidence/2026-10-08/saf-and-file-version-preconditions.md) 与 [ADR-0032](docs/adr/0032-workspace-crud-and-version-capabilities.md)。
 
 - **2026-10-07 Skill、工作区权限及模型窗口压缩修复（修复及交付完成，人工验收待执行）**：禁用 Skill 保留既有 Agent 关联但显示未激活，允许保存/选择工作区/新建会话；新快照排除禁用安装，重新启用仅恢复后续新会话。内置工作区与 shell 重新解析 Agent 上下文，实际 Skill 工具继续取授权交集。工作区枚举按实时授权和后端能力投影操作及相对路径范围，SAF 新建与原子覆盖分别说明。默认按有效模型窗口 85% 压力压缩至 60%，不按固定消息/轮数提前压缩；累计预算改为 128 次模型、100 次工具、30 分钟准入及最多 16 次摘要，可配置且不重置，停滞/取消/审批/未知结果边界保持。版本 1.1.4.1preview/code10；用户已授权提交、推送、普通 PR 合并、本地 main 同步和正式签名人工核验包，未授权公开 Release。验证、审阅和产物状态见 [专项证据](docs/evidence/2026-10-07/skill-workspace-adaptive-context.md)。原有公告/CI/产品视频等无关 WIP 保留。 本地 domain79/runtime96/SQLite399/Android JVM290、API36设备25项均通过；独立权限审阅APPROVE，strict完整check/许可正反向/CI固定版本及依赖锁定校验通过。PR #51 已普通合并；远端及本地 main 同步到 `0f29e97a710213ad78ec4c4f7a9eb555f865737a`，原未提交内容按备份哈希恢复。合并后干净隔离源码通过完整正式 `releaseGate`；交付 `1.1.4.1preview/code10` 正式签名 arm64 APK，SHA-256 `412ffa957cc86b0ec580e7139e36ae61f04ba441642473f3da18bb3fe5f08f06`，证书与既有正式身份一致，非 debuggable、原生库 16 KiB 对齐、编译进 APK 的 Git SHA/版本及 clean-source provenance/SBOM/源码归档绑定均已核验。产物及人工审查说明位于 `.private/manual-test/20261007-v1.1.4.1preview-clean/`；未创建公开 Release。PR 及分支推送的源码门禁与 API31/34/35/36 冒烟、API36 收敛/文档管线远端 CI 全部通过，下载失败的许可/API31任务已按原配置重跑恢复。人工真机及真实 Provider 验收仍待用户执行。
 

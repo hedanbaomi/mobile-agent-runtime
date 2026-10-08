@@ -187,6 +187,9 @@ class AgentRepository(
         val snapshotRefs = db.query("SELECT id FROM agent_snapshots WHERE agent_id=? LIMIT 1", listOf(id)).isNotEmpty()
         if (snapshotRefs) return false
         db.transaction {
+            // Android's bundled driver does not enable FK cascades. Remove
+            // this profile-owned preference in the same rollback boundary.
+            db.execute("DELETE FROM agent_workspace_defaults WHERE agent_id=?", listOf(id))
             db.execute("DELETE FROM prompt_revisions WHERE agent_id=?", listOf(id))
             db.execute("DELETE FROM agent_profiles WHERE id=?", listOf(id))
         }

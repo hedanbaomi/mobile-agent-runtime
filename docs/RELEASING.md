@@ -3,15 +3,17 @@
 
 # 正式版本构建与发布
 
-已公开的正式安装包从 [GitHub Releases](https://github.com/hedanbaomi/mobile-agent-runtime/releases) 获取。本轮正式发行版本为 v1.1.4/code 12，附件及公开状态以 GitHub Release 为准；前版为 v1.1.3/code 8。正式产物仅含 arm64-v8a，最低 Android 8.0（API 26）。前版 v1.0.0/code 2、v1.0.1/code 3、v1.0.2/code 4、v1.1.0/code 5、v1.1.1/code 6、v1.1.2/code 7 与 v1.1.3/code 8 可使用同一正式签名升级。v1.0.2 起支持检查 GitHub stable release、用户点击下载与系统确认安装；v1.1.4preview 将自动检查间隔改为一小时，详见 [更新契约](APP_UPDATES.md)。
+已公开的正式安装包从 [GitHub Releases](https://github.com/hedanbaomi/mobile-agent-runtime/releases) 获取。本轮正式发行目标为 v1.1.5/code 15，附件及公开状态以 GitHub Release 为准；前版为 v1.1.4/code 12。正式产物仅含 arm64-v8a，最低 Android 8.0（API 26）。前版 v1.0.0/code 2、v1.0.1/code 3、v1.0.2/code 4、v1.1.0/code 5、v1.1.1/code 6、v1.1.2/code 7 与 v1.1.3/code 8 可使用同一正式签名升级。v1.0.2 起支持检查 GitHub stable release、用户点击下载与系统确认安装；v1.1.4preview 将自动检查间隔改为一小时，详见 [更新契约](APP_UPDATES.md)。
 
 首次由 Debug/Review 切换至正式包时，签名身份不同，不能直接覆盖安装。先在旧包导出所需数据、核对导出文件，再处理旧安装；导出默认不包含密钥，重新配置服务商凭据。后续正式版本使用同一正式签名身份升级。
 
-历史本地 `1.1.4preview` 使用 code 9，`1.1.4.1preview` 使用 code 10、`1.1.4.2preview` 使用 code 11；本轮纯数字正式版 `1.1.4` 使用 code 12，并保留同一正式签名，使 preview 能经应用内检查更新覆盖升级。preview 不建立公开 Release 或公开分发附件。
+历史本地 `1.1.4preview` 使用 code 9，`1.1.4.1preview` 使用 code 10、`1.1.4.2preview` 使用 code 11；既有正式版 `1.1.4` 使用 code 12，并保留同一正式签名，使 preview 能经应用内检查更新覆盖升级。preview 不建立公开 Release 或公开分发附件。
 
 ## 构建
 
-2026-10-09 本地人工核验候选为 `1.1.5.1preview` / versionCode `14`，包含 DOCX 独立纯标点段落修复、编号引用、完成后的二级工具详情及整轮回复复制。沿用既有正式证书，可覆盖 `1.1.4/code12` 与上一测试包 `1.1.5.0preview/code13`；仅交付本地安装包，不建立公开 Release/tag。构建与验证收据见 [对话展示专项](evidence/2026-10-09/chat-citations-and-tools.md)；前一 DOCX 修复见[既有专项](evidence/2026-10-09/docx-punctuation-embedding.md)。后续正式版的 versionCode 必须大于 14。
+2026-10-09 正式发行目标为 `1.1.5` / versionCode `15`，功能保持已验证的对话展示及 DOCX 纯标点修复。使用已合并的干净源码与既有正式证书重新构建，可覆盖 code14 及更早同证书安装；完整附件经摘要核对后公开为 latest stable。发行记录见 [正式版证据](evidence/2026-10-09/release-1.1.5.md)。
+
+2026-10-09 已交付的历史本地人工核验候选为 `1.1.5.1preview` / versionCode `14`，包含 DOCX 独立纯标点段落修复、编号引用、完成后的二级工具详情及整轮回复复制。沿用既有正式证书，可覆盖 `1.1.4/code12` 与上一测试包 `1.1.5.0preview/code13`；仅交付本地安装包，不建立公开 Release/tag。构建与验证收据见 [对话展示专项](evidence/2026-10-09/chat-citations-and-tools.md)；前一 DOCX 修复见[既有专项](evidence/2026-10-09/docx-punctuation-embedding.md)。后续正式版的 versionCode 必须大于 14。
 
 从待发布 tag 对应的干净 Git checkout 构建，保留版本锁、严格依赖验证与许可门禁。私钥和密码存放在仓库外，通过进程环境提供：`ANDROID_RELEASE_KEYSTORE`、`ANDROID_RELEASE_STORE_PASSWORD`、`ANDROID_RELEASE_KEY_ALIAS`、`ANDROID_RELEASE_KEY_PASSWORD`。不要写进源码、命令历史、Gradle 配置缓存或 CI 日志；正式任务缺配置会失败，不回退 Debug 签名。
 

@@ -24,6 +24,8 @@
 
 ## 1. 现行状态与当前任务
 
+- **2026-10-09 v1.1.5 正式发布（进行中，主 Agent）**：用户授权将已验证的对话展示版本作为正式1.1.5发布。发行范围仅版本号15/1.1.5及发行文档，保留既有DOCX纯标点修复与引用/工具/复制功能；不追加功能或恢复已停止的网络调查。隔离分支codex/release-115-20261009基于e620999，经许可/check/REUSE、普通PR与CI合并后，从干净合并源码正式签名构建、核验完整附件并公开latest stable。根main911603e与84份原WIP先校验保护，其他任务和私有素材保留；真机及真实Provider边界沿用专项证据。见[正式版证据](docs/evidence/2026-10-09/release-1.1.5.md)。
+
 - **2026-10-09 对话引用与工具详情 / 1.1.5.1preview（实现和本地回归完成；code14构建前源码记录）**：R08/K04；编号及同源去重、原文二级详情、终态工具折叠和整轮复制已实现。长气泡可见按钮触摸失败已修复，最终无探针三主题、大字体及末段引用交互通过。全仓check/许可正反向/工作流、28条投影单元及90项模拟器回归通过；DSH / DeepSeek V4.1 Flash Fast只读审阅APPROVE。隔离分支codex/chat-citations-preview-1151基于793929a，根main911603e及84份WIP保留。CI已加入新UI套件，远端结果不由本地推定。下一步授权范围内提交/推送、干净源码releaseGate及code14正式验签，交付本地测试；不公开Release/tag、不合并main。见[专项证据](docs/evidence/2026-10-09/chat-citations-and-tools.md)。 本条为构建前源码快照，不代表活跃代理认领；成品事实由测试包build-info/验签收据及根交接登记。
 
 - **2026-10-09 DOCX 修复分支与正式签名1.1.5.0preview/code13测试包（交付完成，人工验收待执行）**：提交及远端分支`codex/docx-local-embedding-fix`均为`793929a60d0d39c35b0873aebcaa80135eec8af4`，仅10个本轮源码/测试/技术文档文件；未合并main、未创建tag或公开preview Release，stable仍为v1.1.4。干净隔离源码执行releaseGate/许可反向/工作流校验成功（1308 tasks，9m52s）；远端6项设备任务及license-guard已通过，check已通过，远端手动release任务按条件跳过。正式arm64测试APK SHA-256 `a8632e58871671f7e103bc62b6daa46cbbd35c827ea6a00185f2e661b7a7f66d`，124231709字节；code13/版本名/编译SHA及纯标点准入代码均从APK核验，既有正式证书373f13cf…40cab50一致，非debuggable、高权限控制面启用、23个原生库16KiB对齐、171项SBOM与源码归档/成品来源绑定均通过。四原件/恢复3项及知识库设备16项已通过，304段原文保全；升级后可直接重试旧失败任务。产物、校验收据与人工步骤位于[测试包目录](.private/manual-test/20261009-v1.1.5.0preview-docx-clean/)，见[专项证据](docs/evidence/2026-10-09/docx-punctuation-embedding.md)。本轮根main仍911603e，83份原WIP哈希一致；根源码不覆盖。隔离树保持构建时的已提交干净源码，内置交接是该构建快照；现行交付记录由根交接维护。用户实体手机升级/原件重试仍待人工验收，无收费Provider调用。

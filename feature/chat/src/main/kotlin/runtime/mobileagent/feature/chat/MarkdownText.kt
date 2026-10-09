@@ -16,12 +16,17 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.LinkAnnotation
+import androidx.compose.ui.text.TextLinkStyles
+import androidx.compose.ui.text.style.BaselineShift
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 
 internal data class MarkdownBlock(val kind: String, val text: String, val level: Int = 0)
 
@@ -33,10 +38,12 @@ internal fun markdownBlocks(source: String): List<MarkdownBlock> {
     while (index < lines.size) {
         val line = lines[index]
         when {
-            line.trimStart().startsWith("```") -> {
+            line.trimStart().matches(Regex("(`{3,}|~{3,}).*")) -> {
+                val fence = line.trimStart().takeWhile { it == line.trimStart().first() }
                 val code = mutableListOf<String>()
                 index++
-                while (index < lines.size && !lines[index].trimStart().startsWith("```")) code += lines[index++]
+                while (index < lines.size && !lines[index].trim().matches(
+                        Regex("${Regex.escape(fence.first().toString())}{${fence.length},}\\s*"))) code += lines[index++]
                 if (index < lines.size) index++
                 blocks += MarkdownBlock("code", code.joinToString("\n"))
             }
@@ -78,10 +85,35 @@ internal fun markdownBlocks(source: String): List<MarkdownBlock> {
 
 private val inlinePattern = Regex("`([^`]+)`|\\*\\*(.+?)\\*\\*|__(.+?)__|\\*([^*]+)\\*")
 
-internal fun markdownInline(text: String) = buildAnnotatedString {
+internal fun markdownInline(
+    text: String,
+    markers: Map<String, ReplyCitationMarker> = emptyMap(),
+    linkColor: Color = Color.Unspecified,
+    onCitation: (String) -> Unit = {},
+) = buildAnnotatedString {
+    fun appendCitations(value: String) {
+        var start = 0
+        Regex("\\[citation:([^\\]\\n]+)]").findAll(value).forEach { match ->
+            append(value.substring(start, match.range.first))
+            val marker = markers[match.groupValues[1]]
+            if (marker == null) append(match.value) else {
+                pushLink(LinkAnnotation.Clickable(
+                    tag = "citation:${marker.citationId}",
+                    styles = TextLinkStyles(SpanStyle(color = linkColor, fontWeight = FontWeight.SemiBold)),
+                    linkInteractionListener = { onCitation(marker.citationId) },
+                ))
+                withStyle(SpanStyle(fontSize = 12.sp, baselineShift = BaselineShift.Superscript)) {
+                    append("[${marker.number}]")
+                }
+                pop()
+            }
+            start = match.range.last + 1
+        }
+        append(value.substring(start))
+    }
     var cursor = 0
     inlinePattern.findAll(text).forEach { match ->
-        append(text.substring(cursor, match.range.first))
+        appendCitations(text.substring(cursor, match.range.first))
         val code = match.groups[1]?.value
         val bold = match.groups[2]?.value ?: match.groups[3]?.value
         val italic = match.groups[4]?.value
@@ -89,15 +121,23 @@ internal fun markdownInline(text: String) = buildAnnotatedString {
             code != null -> SpanStyle(fontFamily = FontFamily.Monospace)
             bold != null -> SpanStyle(fontWeight = FontWeight.Bold)
             else -> SpanStyle(fontStyle = FontStyle.Italic)
-        }) { append(code ?: bold ?: italic.orEmpty()) }
+        }) {
+            if (code != null) append(code) else appendCitations(bold ?: italic.orEmpty())
+        }
         cursor = match.range.last + 1
     }
-    append(text.substring(cursor))
+    appendCitations(text.substring(cursor))
 }
 
 @Composable
-internal fun MarkdownText(text: String, modifier: Modifier = Modifier) {
+internal fun MarkdownText(
+    text: String,
+    modifier: Modifier = Modifier,
+    markers: Map<String, ReplyCitationMarker> = emptyMap(),
+    onCitation: (String) -> Unit = {},
+) {
     val blocks = remember(text) { markdownBlocks(text) }
+    val linkColor = MaterialTheme.colorScheme.primary
     Column(modifier) {
         blocks.forEach { block ->
             when (block.kind) {
@@ -105,9 +145,9 @@ internal fun MarkdownText(text: String, modifier: Modifier = Modifier) {
                     modifier = Modifier.background(MaterialTheme.colorScheme.surfaceVariant)
                         .horizontalScroll(rememberScrollState()).padding(8.dp))
                 "table" -> Column(Modifier.horizontalScroll(rememberScrollState())) {
-                    val rows = remember(block.text) {
+                    val rows = remember(block.text, markers, linkColor, onCitation) {
                         block.text.lines().map { row ->
-                            row.trim().removePrefix("|").removeSuffix("|").split('|').map { markdownInline(it.trim()) }
+                            row.trim().removePrefix("|").removeSuffix("|").split('|').map { markdownInline(it.trim(), markers, linkColor, onCitation) }
                         }
                     }
                     rows.forEachIndexed { rowIndex, cells ->
@@ -119,15 +159,15 @@ internal fun MarkdownText(text: String, modifier: Modifier = Modifier) {
                         }
                     }
                 }
-                "heading" -> Text(remember(block.text) { markdownInline(block.text) },
+                "heading" -> Text(remember(block.text, markers, linkColor, onCitation) { markdownInline(block.text, markers, linkColor, onCitation) },
                     style = when (block.level) {
                         1 -> MaterialTheme.typography.headlineSmall
                         2 -> MaterialTheme.typography.titleLarge
                         else -> MaterialTheme.typography.titleMedium
                     }, fontWeight = FontWeight.Bold, modifier = Modifier.padding(vertical = 4.dp))
-                "quote" -> Text(remember(block.text) { markdownInline(block.text) }, modifier = Modifier
+                "quote" -> Text(remember(block.text, markers, linkColor, onCitation) { markdownInline(block.text, markers, linkColor, onCitation) }, modifier = Modifier
                     .background(MaterialTheme.colorScheme.surfaceVariant).padding(8.dp))
-                else -> Text(remember(block.text) { markdownInline(block.text) })
+                else -> Text(remember(block.text, markers, linkColor, onCitation) { markdownInline(block.text, markers, linkColor, onCitation) })
             }
         }
     }

@@ -100,6 +100,8 @@ EPUB `epub-xml-v4` 使用有界 XHTML 扫描识别单/双引号图片；仅 prol
 
 默认本地 ONNX Embedding，可选用户 API。两者使用同一 EmbeddingPort，但不能混合向量空间。Model Pack含 manifest、权重、Tokenizer、预处理、池化、归一化、维度、距离度量、许可、来源和SHA-256；加载前校验，文件损坏或算子不支持时拒绝，不自动下载其他模型替代。
 
+本地 WordPiece 的纯标点段落（例如 DOCX 中独立的「……」）允许使用模型原有的 `[UNK]` 编码；不删除标点、不合并段落，也不改变原文及来源定位。仍拒绝完全无法表达的词、数字或非标点符号，字符和窗口上限保持。此次仅修正输入准入，既有成功输入的 token、向量和完整 `spaceId` 不变；原先因此失败的本地任务可从 CAS 重试，无需切换 API 或重新创建文档。见 [本地嵌入标点修复证据](evidence/2026-10-09/docx-punctuation-embedding.md)。
+
 ### 4.1 API 外发与未知查询的一次性重试
 
 API 空间绑定 Provider ID/revision、规范化 endpoint、ModelProfile ID/revision、实际 modelId、维度和 dataScope。确认页面展示完整目的地、模型与数据范围；Vision 同意不能替代此同意。公开 `rebuildIndex`/`repairIndexes` 在缺少该空间的有效同意时必须于解析 API adapter 前拒绝，不能借重建入口外发文本。
@@ -129,6 +131,8 @@ FTS5能力不等于中文分词质量。必须建立中文专名、英文术语�
 过滤条件采用结构化字段，不拼接用户SQL；授权过滤在候选阶段和返回阶段都执行。无命中返回空证据，回答不得捏造引用。
 
 每条citation绑定：runId、citationId、kbId、document/version、chunkId、assetId、页/章/span、parser/vision指纹。模型只能引用本次CitationMap里的ID；未知ID显示为无效引用，不生成假链接。引用点击打开原文页或原图；资源已删除显示“来源已移除”，不能跳到另一个文件。
+
+2026-10-09 对话展示使用正文编号角标，并移除重复的底部分块标签。UI以回复显式绑定的 citationIds 为准入表；完整的 kb/document/version/chunk/asset 身份才允许跨工具调用合并编号，身份不全时只按原 citationId 合并。裸 chunkId 必须在回复内无歧义；未绑定、未知或歧义 ID 保留字面文字，不生成入口。点击仍由主机 locateCitation/evidenceBytes 重新检查来源及原图可用性。重复尾注只在全部条目已被正文引用且没有说明/未知条目/代码时折叠；数据库正文、引用映射和模型历史不修改。详见 [对话展示规范](UI_DESIGN.md#scr-chat-05-引用卡片与原文回跳-citation-card)。
 
 严格模式：绑定含图知识库时Chat Model必须支持image input，并在视觉命中时发送预算内的原图或可追溯处理副本。用户主动开启文本降级模式后才只传预生成描述；每个相关回答清楚提示“未提供原始图片，视觉证据可能不完整”。不得自动开降级。
 

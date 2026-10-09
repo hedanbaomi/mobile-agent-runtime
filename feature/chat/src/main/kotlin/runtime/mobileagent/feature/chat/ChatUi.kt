@@ -6,6 +6,7 @@ package runtime.mobileagent.feature.chat
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
@@ -74,15 +75,20 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.RectangleShape
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.TextRange
+import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -186,6 +192,11 @@ data class ChatCitationUi(
     val verified: Boolean = false,
     /** Validated evidence bytes supplied by the host; the UI never reads a path or secret. */
     val imageBytes: ByteArray? = null,
+    /** Host-supplied immutable source identity; never inferred from titles or excerpts. */
+    val knowledgeBaseId: String = "",
+    val documentVersionId: String = "",
+    val chunkId: String = "",
+    val assetId: String? = null,
 )
 
 data class ChatToolApprovalUi(
@@ -603,6 +614,7 @@ private fun ChatConversationContent(
                                 citations = state.citations,
                                 onCitation = actions.onOpenCitation,
                                 zh = state.language.equals("zh-CN", true),
+                                working = item == timeline.lastOrNull() && (state.streaming || state.pendingTool != null),
                             )
                         }
                     }
@@ -1202,8 +1214,19 @@ private fun MessageBubble(
     citations: List<ChatCitationUi>,
     onCitation: (String) -> Unit,
     zh: Boolean,
+    working: Boolean = false,
 ) {
     val user = message.role.equals("user", ignoreCase = true)
+    val assistant = message.role.equals("assistant", ignoreCase = true)
+    val replyParts = remember(orderedMessages) { orderedMessages.filter { it.role.equals("assistant", true) } }
+    val presentation = remember(replyParts, message.citationIds, citations) {
+        presentReply(replyParts.map { it.text }, message.citationIds, citations)
+    }
+    val tools = remember(orderedMessages) { orderedMessages.filter { isToolEventRow(it.role) } }
+    var toolsOpen by rememberSaveable(message.id) { mutableStateOf(false) }
+    var copied by remember(presentation.copyText) { mutableStateOf(false) }
+    val clipboard = LocalClipboardManager.current
+    LaunchedEffect(working) { if (working) toolsOpen = false }
     val aqua = MaterialTheme.colorScheme.background == Color(0xFFF2F9FD)
     val userInk = if (aqua) Color(0xFF003B52) else MaterialTheme.colorScheme.onPrimary
     // Only a tool message becomes a compact event row.  An assistant message keeps
@@ -1214,7 +1237,8 @@ private fun MessageBubble(
     val tool = isToolEventRow(message.role)
     Row(Modifier.fillMaxWidth(), horizontalArrangement = if (user) Arrangement.End else Arrangement.Start) {
         if (tool) {
-            ToolEventRow(message = message, zh = zh, modifier = Modifier.fillMaxWidth())
+            if (working) ToolEventRow(message = message, zh = zh, modifier = Modifier.fillMaxWidth())
+            else ToolDetailsButton(message.id, tools.size, zh) { toolsOpen = true }
         } else {
             val bubbleModifier = Modifier
                 .fillMaxWidth(0.82f)
@@ -1234,10 +1258,16 @@ private fun MessageBubble(
                             zh = zh,
                         )
                     }
+                    var replyIndex = 0
                     orderedMessages.forEach { part ->
-                        if (isToolEventRow(part.role)) ToolEventRow(part, zh, Modifier.padding(top = 4.dp))
+                        val displayedText = if (part.role.equals("assistant", true)) presentation.texts[replyIndex++] else part.text
+                        if (isToolEventRow(part.role)) {
+                            if (working) ToolEventRow(part, zh, Modifier.padding(top = 4.dp))
+                        }
                         else if (part.text.isNotBlank()) SelectionContainer {
-                            if (part.role.equals("assistant", true)) MarkdownText(part.text, Modifier.padding(top = 4.dp))
+                            if (part.role.equals("assistant", true)) MarkdownText(
+                                displayedText, Modifier.padding(top = 4.dp), presentation.markers, onCitation,
+                            )
                             else Text(part.text, Modifier.padding(top = 4.dp))
                         }
                     }
@@ -1260,26 +1290,65 @@ private fun MessageBubble(
                     }
                     if (message.streaming) Text(if (zh) "正在流式输出…" else "Streaming…", style = MaterialTheme.typography.labelSmall, modifier = Modifier.padding(top = 4.dp))
                     if (message.timeLabel.isNotBlank()) Text(message.timeLabel, style = MaterialTheme.typography.labelSmall)
-                    val known = message.citationIds.mapNotNull { id -> citations.firstOrNull { it.id == id } }
-                    if (known.isNotEmpty()) FlowRow(Modifier.padding(top = 6.dp), horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                        known.forEach { citation -> AssistChip(onClick = { onCitation(citation.id) }, label = { Text(if (zh) "来源：${citation.title}" else "Source: ${citation.title}") }) }
+                    if (!working && tools.isNotEmpty()) ToolDetailsButton(message.id, tools.size, zh) { toolsOpen = true }
+                    if (assistant && !working && presentation.copyText.isNotBlank()) {
+                        TextButton(
+                            onClick = { clipboard.setText(AnnotatedString(presentation.copyText)); copied = true },
+                            modifier = Modifier.testTag("conversation.copy.${message.id}"),
+                        ) {
+                            Text(if (copied) { if (zh) "已复制" else "Copied" }
+                                else { if (zh) "复制回复" else "Copy reply" })
+                        }
                     }
                 }
             }
+            val shape = RoundedCornerShape(
+                topStart = 18.dp, topEnd = 18.dp,
+                bottomEnd = if (user) 5.dp else 18.dp,
+                bottomStart = if (user) 18.dp else 5.dp,
+            )
+            val container = if (user && aqua) Color(0xFF66CCFF) else if (user) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surface
+            // A tall message's rounded clipping layer can reject hits on visible
+            // links/buttons after scrolling. Draw the same rounded decoration
+            // without that layer; body padding keeps content inside its corners.
             Card(
                 colors = CardDefaults.cardColors(
-                    containerColor = if (user && aqua) Color(0xFF66CCFF) else if (user) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surface,
+                    containerColor = Color.Transparent,
                     contentColor = if (user) userInk else MaterialTheme.colorScheme.onSurface,
                 ),
-                shape = RoundedCornerShape(
-                    topStart = 18.dp,
-                    topEnd = 18.dp,
-                    bottomEnd = if (user) 5.dp else 18.dp,
-                    bottomStart = if (user) 18.dp else 5.dp,
-                ),
-                border = if (user) null else BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
-                modifier = bubbleModifier,
+                shape = RectangleShape,
+                modifier = bubbleModifier.background(container, shape)
+                    .then(if (user) Modifier else Modifier.border(1.dp, MaterialTheme.colorScheme.outlineVariant, shape)),
             ) { body() }
+        }
+    }
+    if (toolsOpen && !working) ToolDetailsPage(tools, zh) { toolsOpen = false }
+}
+
+@Composable
+private fun ToolDetailsButton(messageId: String, count: Int, zh: Boolean, onClick: () -> Unit) {
+    TextButton(onClick = onClick, modifier = Modifier.testTag("conversation.tools.open.$messageId")) {
+        Text(if (zh) "工具记录 · $count" else "Tool records · $count")
+    }
+}
+
+@Composable
+private fun ToolDetailsPage(tools: List<ChatMessageUi>, zh: Boolean, onClose: () -> Unit) {
+    Dialog(onDismissRequest = onClose, properties = DialogProperties(usePlatformDefaultWidth = false)) {
+        Surface(Modifier.fillMaxSize().windowInsetsPadding(WindowInsets.navigationBars),
+            color = MaterialTheme.colorScheme.surface) {
+            Column(Modifier.fillMaxSize().padding(16.dp).testTag("conversation.tools.detail")) {
+                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                    Text(if (zh) "工具记录" else "Tool records", style = MaterialTheme.typography.titleLarge,
+                        modifier = Modifier.weight(1f))
+                    TextButton(onClick = onClose, modifier = Modifier.testTag("conversation.tools.close")) {
+                        Text(if (zh) "返回回复" else "Back to reply")
+                    }
+                }
+                LazyColumn(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    items(tools, key = { it.id }) { ToolEventRow(it, zh, Modifier.fillMaxWidth()) }
+                }
+            }
         }
     }
 }
@@ -1568,10 +1637,9 @@ private fun CitationDialog(citation: ChatCitationUi, onClose: () -> Unit, zh: Bo
         title = { Text(citation.title) },
         text = {
             Column(Modifier.verticalScroll(rememberScrollState())) {
-                Text(citation.source, style = MaterialTheme.typography.labelLarge)
                 if (citation.location.isNotBlank()) Text(citation.location, style = MaterialTheme.typography.labelSmall, modifier = Modifier.padding(top = 4.dp))
                 CitationImagePreview(citation, zh)
-                Text(citation.excerpt, modifier = Modifier.padding(top = 12.dp))
+                SelectionContainer { Text(citation.excerpt, modifier = Modifier.padding(top = 12.dp).testTag("conversation.citation.excerpt")) }
                 Text(if (citation.verified) { if (zh) "证据已验证" else "Verified evidence" } else { if (zh) "证据状态不可用" else "Evidence status unavailable" }, style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(top = 12.dp))
             }
         },

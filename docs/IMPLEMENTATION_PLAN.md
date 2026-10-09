@@ -3,6 +3,8 @@
 
 # 技术实现方案
 
+> **2026-10-09 本地嵌入标点准入修复**：纯标点的 WordPiece `[UNK]` 编码为合法输入，避免 DOCX 的独立省略号段落阻断整份课程文档。保留原 token、正文/段落定位、模型/词表/空间、完全未知正文拒绝及资源上限；实际原件回放和恢复/检索回归见 [专项证据](evidence/2026-10-09/docx-punctuation-embedding.md)。
+
 2026-10-08 R02/R08/K04/K08：已完成的图片分析回执为空/过大时按来源二分，单图最多一次精简恢复；全部尝试复核授权并计入同一预算。成功子回执保留，未知/拒绝/协议失败不重试，知识工具不重执行。AUTO与手动输出限制保持不变。取消已知完成的拒绝不误标UNKNOWN_OUTCOME；取消待持久化成功回执仍保留原未知边界。见 [ADR-0030](adr/0030-request-scoped-visual-budget.md) 和 [回归证据](evidence/2026-10-08/knowledge-query-and-release-regression.md)。
 
 

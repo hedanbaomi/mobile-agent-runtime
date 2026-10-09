@@ -11,6 +11,8 @@
 
 ## 构建
 
+2026-10-09 本地人工核验候选为 `1.1.5.0preview` / versionCode `13`，包含 DOCX 独立纯标点段落的本地嵌入准入修复。沿用既有正式证书，可覆盖 `1.1.4/code12`；仅交付本地安装包，未建立公开 Release。构建与验证收据见 [DOCX 修复专项](evidence/2026-10-09/docx-punctuation-embedding.md)。后续正式版的 versionCode 必须大于 13。
+
 从待发布 tag 对应的干净 Git checkout 构建，保留版本锁、严格依赖验证与许可门禁。私钥和密码存放在仓库外，通过进程环境提供：`ANDROID_RELEASE_KEYSTORE`、`ANDROID_RELEASE_STORE_PASSWORD`、`ANDROID_RELEASE_KEY_ALIAS`、`ANDROID_RELEASE_KEY_PASSWORD`。不要写进源码、命令历史、Gradle 配置缓存或 CI 日志；正式任务缺配置会失败，不回退 Debug 签名。
 
 ```powershell

@@ -164,6 +164,8 @@ Typed file tools 仍须 workspace scope、路径/symlink/配额和 canonical gra
 | K07 | 破坏/删除测试索引；模拟文件写完SQL未切换及反向故障；删除文档后旧索引仍在 | 从SQLite重建；保持旧有效代际；不返回已删/未授权/未发布数据；数量/哈希一致 |
 | K08 | Token预算不足、原图过大、无命中、模型虚构 citation ID | 明示证据缺失，不自动去图；未知引用不生成假链接；可追溯chunk/version/asset |
 
+2026-10-09 K02/K05/K06/K08：独立纯标点段落不得使正常 DOCX 整体导入失败，原文、段落序号及重开后的检索/引用须保留。实际本地 ONNX、SQLite、USearch 验证失败课程原件与正常对照；公开测试只包含自造文件。完全未知的词/数字/非标点符号仍拒绝，字符/窗口上限及既有向量空间保持；旧失败任务从 CAS 重试必须沿用文档和任务 ID。见 [专项证据](evidence/2026-10-09/docx-punctuation-embedding.md)。
+
 2026-09-12 5f4fd1e 复审补充：完整知识备份允许 `READY_WITH_VISUAL_GAPS` 原样导出/导入，导入后须本地重建索引，不得升为 READY 或继承 Vision/Embedding 同意。含 Skill 的 Agent 备份按来源 `install_id` 重映射到目标安装记录，不把 package id 写入运行时绑定，也不携带原授权。检索不得仅因短且无句号删除字段值/赋值/列表项。JVM 见 [5f4fd1e 复审修订](evidence/2026-09-12/review-5f4fd1e-amend.md)。
 
 2026-09-12 af505b6 复审补充：含会话备份必须带上历史快照仍引用的 Skill，空库恢复后历史会话保留、当前 Agent 不回绑旧 Skill、目标安装禁用且无新授权。短字段只在标题结构明确时删除。更换 Provider 目标时全部目标绑定凭据失效，不得把旧辅助 Header 发往新地址。JVM 见 [af505b6 复审修订](evidence/2026-09-12/review-af505b6-amend.md)。

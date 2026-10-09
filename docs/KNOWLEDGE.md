@@ -100,6 +100,8 @@ EPUB `epub-xml-v4` 使用有界 XHTML 扫描识别单/双引号图片；仅 prol
 
 默认本地 ONNX Embedding，可选用户 API。两者使用同一 EmbeddingPort，但不能混合向量空间。Model Pack含 manifest、权重、Tokenizer、预处理、池化、归一化、维度、距离度量、许可、来源和SHA-256；加载前校验，文件损坏或算子不支持时拒绝，不自动下载其他模型替代。
 
+本地 WordPiece 的纯标点段落（例如 DOCX 中独立的「……」）允许使用模型原有的 `[UNK]` 编码；不删除标点、不合并段落，也不改变原文及来源定位。仍拒绝完全无法表达的词、数字或非标点符号，字符和窗口上限保持。此次仅修正输入准入，既有成功输入的 token、向量和完整 `spaceId` 不变；原先因此失败的本地任务可从 CAS 重试，无需切换 API 或重新创建文档。见 [本地嵌入标点修复证据](evidence/2026-10-09/docx-punctuation-embedding.md)。
+
 ### 4.1 API 外发与未知查询的一次性重试
 
 API 空间绑定 Provider ID/revision、规范化 endpoint、ModelProfile ID/revision、实际 modelId、维度和 dataScope。确认页面展示完整目的地、模型与数据范围；Vision 同意不能替代此同意。公开 `rebuildIndex`/`repairIndexes` 在缺少该空间的有效同意时必须于解析 API adapter 前拒绝，不能借重建入口外发文本。

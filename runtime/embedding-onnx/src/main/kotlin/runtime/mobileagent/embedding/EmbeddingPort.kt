@@ -145,7 +145,12 @@ internal class BertWordPieceTokenizer(
         val sentences = text.split(Regex("(?<=[.!?])(?=\\s|$)|(?<=[。！？])|[\\r\\n]+"))
             .flatMap { sentence -> basicTokens(sentence).flatMap(::wordPiece).chunked(maxSequenceLength - 2) }
             .ifEmpty { listOf(emptyList()) }
-        require(sentences.all { it.isEmpty() } || sentences.any { row -> row.any { it != unknownToken } }) {
+        // Standalone punctuation (for example a DOCX ellipsis paragraph) can
+        // legitimately be absent from the vocabulary. Keep its ordinary BERT
+        // [UNK] pieces instead of rejecting the whole document. Unsupported
+        // lexical content still must not collapse to an all-unknown embedding.
+        require(sentences.all { it.isEmpty() } || sentences.any { row -> row.any { it != unknownToken } } ||
+            basicTokens(text).all { token -> token.codePoints().allMatch { isPunctuation(it) } }) {
             "LOCAL_EMBEDDING_UNSUPPORTED_TEXT"
         }
         require(sentences.sumOf { it.size } <= 128 * (maxSequenceLength - 2)) { "LOCAL_EMBEDDING_TOO_MANY_WINDOWS" }

@@ -99,7 +99,7 @@ jobs:
           disable-animations: true
           script: |
             timeout 120 sh -c 'until adb -s "emulator-${EMULATOR_PORT:-5554}" shell service check package 2>/dev/null | grep -q "found"; do sleep 2; done'
-            ./gradlew :app-android:connectedDebugAndroidTest -Pandroid.testInstrumentationRunnerArguments.class=runtime.mobileagent.ReleaseGateUiDeviceTest --dependency-verification=strict --no-daemon
+            ./gradlew :app-android:connectedDebugAndroidTest "-Pandroid.testInstrumentationRunnerArguments.class=runtime.mobileagent.ReleaseGateUiDeviceTest,runtime.mobileagent.ChatReplyPresentationUiTest" --dependency-verification=strict --no-daemon
 
   convergence-device:
     name: Convergence device tests (API 36)

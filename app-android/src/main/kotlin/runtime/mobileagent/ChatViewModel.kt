@@ -2088,10 +2088,13 @@ class ChatViewModel internal constructor(
         // message metadata next to the citations.
         val coverageNotice = message.takeIf { it.role == MessageRole.ASSISTANT }
             ?.let { coverageNoticeOf(it.metadataJson) }
-        val visualReceipt = message.metadataJson.contains("\"visualBatchAnalysis\":true")
+        val metadata = runCatching { Json.parseToJsonElement(message.metadataJson).jsonObject }.getOrNull()
+        val visualReceipt = (metadata?.get("visualBatchAnalysis") as? JsonPrimitive)?.booleanOrNull == true
+        val toolEvidence = message.role == MessageRole.USER &&
+            (metadata?.get("toolEvidence") as? JsonPrimitive)?.booleanOrNull == true
         return ChatMessageUi(
             id = message.id,
-            role = if (visualReceipt) "tool" else message.role.name.lowercase(),
+            role = if (visualReceipt || toolEvidence) "tool" else message.role.name.lowercase(),
             text = message.text,
             timeLabel = message.createdAt.take(16),
             citationIds = message.parts.filterIsInstance<CitationPart>().map { it.citationId },
@@ -2100,6 +2103,7 @@ class ChatViewModel internal constructor(
             reasoningStreaming = reasoningParts.lastOrNull()?.streaming == true && state.value.streaming,
             eventSummary = when {
                 visualReceipt -> "已向模型传输并分析 " + message.parts.filterIsInstance<ImagePart>().size + " 张原图"
+                toolEvidence -> "工具附带 " + message.parts.filterIsInstance<ImagePart>().size + " 张原图"
                 errorPart != null -> errorPart.message
                 diffPart != null -> diffPart.summary
                 else -> listOfNotNull(toolFailureSummary, coverageNotice,
@@ -2376,7 +2380,11 @@ class ChatViewModel internal constructor(
         val loc = container.knowledge.locateCitation(value.first)
         ChatCitationUi(id, loc.displayName, value.first.documentId, if (loc.removed) "来源已移除或授权失效。" else value.second,
             "页 ${loc.page ?: "—"} · ${loc.assetId ?: loc.sourceSpan.orEmpty()}", !loc.removed,
-            imageBytes = selectedImage?.takeIf { it.first == id && !loc.removed }?.second)
+            imageBytes = selectedImage?.takeIf { it.first == id && !loc.removed }?.second,
+            knowledgeBaseId = value.first.knowledgeBaseId,
+            documentVersionId = value.first.documentVersionId,
+            chunkId = value.first.chunkId,
+            assetId = value.first.assetId)
     }
     private fun citationMetadata(bound: List<Citation>, warning: String?, coverage: RetrievalCoverage? = null, source: Map<String, Pair<Citation, String>> = citations): String = buildJsonObject {
         warning?.let { put("visualWarning", it) }

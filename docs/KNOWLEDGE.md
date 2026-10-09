@@ -132,6 +132,8 @@ FTS5能力不等于中文分词质量。必须建立中文专名、英文术语�
 
 每条citation绑定：runId、citationId、kbId、document/version、chunkId、assetId、页/章/span、parser/vision指纹。模型只能引用本次CitationMap里的ID；未知ID显示为无效引用，不生成假链接。引用点击打开原文页或原图；资源已删除显示“来源已移除”，不能跳到另一个文件。
 
+2026-10-09 对话展示使用正文编号角标，并移除重复的底部分块标签。UI以回复显式绑定的 citationIds 为准入表；完整的 kb/document/version/chunk/asset 身份才允许跨工具调用合并编号，身份不全时只按原 citationId 合并。裸 chunkId 必须在回复内无歧义；未绑定、未知或歧义 ID 保留字面文字，不生成入口。点击仍由主机 locateCitation/evidenceBytes 重新检查来源及原图可用性。重复尾注只在全部条目已被正文引用且没有说明/未知条目/代码时折叠；数据库正文、引用映射和模型历史不修改。详见 [对话展示规范](UI_DESIGN.md#scr-chat-05-引用卡片与原文回跳-citation-card)。
+
 严格模式：绑定含图知识库时Chat Model必须支持image input，并在视觉命中时发送预算内的原图或可追溯处理副本。用户主动开启文本降级模式后才只传预生成描述；每个相关回答清楚提示“未提供原始图片，视觉证据可能不完整”。不得自动开降级。
 
 预算覆盖文字、历史、工具schema、图片和输出预留；若无法容纳关键图/块，要求减少范围或分批提问。不得把删除所有图当作成功处理预算。

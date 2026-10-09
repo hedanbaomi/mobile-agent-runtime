@@ -3,7 +3,7 @@
 
 # 项目交接
 
-最后更新：2026-10-09（Asia/Taipei；DOCX修复提交/推送与正式签名测试包构建进行中）。项目根目录：E:/mobileAgentRuntime。
+最后更新：2026-10-09（Asia/Taipei；对话展示修复实现及本地回归完成，code14构建前源码快照）。项目根目录：E:/mobileAgentRuntime。
 
 按 [agent.md 第 1 节](agent.md#1-按任务读取与开工) 选择资料。现行规则见 agent.md；本文件记录现场和待办，历史任务中的授权不自动延续。
 
@@ -24,7 +24,9 @@
 
 ## 1. 现行状态与当前任务
 
-- **当前任务：2026-10-09 正式签名 1.1.5.0preview/code13 测试包（Git交付及签名构建进行中）**：用户已明确授权本次隔离分支提交和远端分支推送，以及既有正式签名本地测试包；明确禁止公开此preview。DOCX修复原件/恢复设备3/3、扩展知识库16/16及独立审阅已通过；版本设为code13，Release编译/单元/许可正反向/CI pins/依赖锁定及严格校验预检成功（267 tasks），REUSE949/949。修改仅位于隔离分支`codex/docx-local-embedding-fix`，根83份原WIP保留；本轮不合并main或创建公开Release/tag。正式身份来自既有仓库外证书目录，密码仅传给子进程环境。下一步：提交/推送已核验的修复和版本文件，干净源码执行releaseGate，然后核验正式证书、code13、编译SHA、原生16KiB及源码/SBOM绑定，交付人工测试包。执行收据位于`.private/docx-local-embedding-20261009/`，专项证据见[DOCX修复](docs/evidence/2026-10-09/docx-punctuation-embedding.md)。
+- **2026-10-09 对话引用与工具详情 / 1.1.5.1preview（实现和本地回归完成；code14构建前源码记录）**：R08/K04；编号及同源去重、原文二级详情、终态工具折叠和整轮复制已实现。长气泡可见按钮触摸失败已修复，最终无探针三主题、大字体及末段引用交互通过。全仓check/许可正反向/工作流、28条投影单元及90项模拟器回归通过；DSH / DeepSeek V4.1 Flash Fast只读审阅APPROVE。隔离分支codex/chat-citations-preview-1151基于793929a，根main911603e及84份WIP保留。CI已加入新UI套件，远端结果不由本地推定。下一步授权范围内提交/推送、干净源码releaseGate及code14正式验签，交付本地测试；不公开Release/tag、不合并main。见[专项证据](docs/evidence/2026-10-09/chat-citations-and-tools.md)。 本条为构建前源码快照，不代表活跃代理认领；成品事实由测试包build-info/验签收据及根交接登记。
+
+- **2026-10-09 DOCX 修复分支与正式签名1.1.5.0preview/code13测试包（交付完成，人工验收待执行）**：提交及远端分支`codex/docx-local-embedding-fix`均为`793929a60d0d39c35b0873aebcaa80135eec8af4`，仅10个本轮源码/测试/技术文档文件；未合并main、未创建tag或公开preview Release，stable仍为v1.1.4。干净隔离源码执行releaseGate/许可反向/工作流校验成功（1308 tasks，9m52s）；远端6项设备任务及license-guard已通过，check已通过，远端手动release任务按条件跳过。正式arm64测试APK SHA-256 `a8632e58871671f7e103bc62b6daa46cbbd35c827ea6a00185f2e661b7a7f66d`，124231709字节；code13/版本名/编译SHA及纯标点准入代码均从APK核验，既有正式证书373f13cf…40cab50一致，非debuggable、高权限控制面启用、23个原生库16KiB对齐、171项SBOM与源码归档/成品来源绑定均通过。四原件/恢复3项及知识库设备16项已通过，304段原文保全；升级后可直接重试旧失败任务。产物、校验收据与人工步骤位于[测试包目录](.private/manual-test/20261009-v1.1.5.0preview-docx-clean/)，见[专项证据](docs/evidence/2026-10-09/docx-punctuation-embedding.md)。本轮根main仍911603e，83份原WIP哈希一致；根源码不覆盖。隔离树保持构建时的已提交干净源码，内置交接是该构建快照；现行交付记录由根交接维护。用户实体手机升级/原件重试仍待人工验收，无收费Provider调用。
 
 - **2026-10-09 DOCX 本地嵌入纯标点修复（修复验证完成；测试包后续见上条）**：K02/K05/K06/K08。第9/7/6课独立「……」段落被本地 WordPiece 的全未知输入保护误拒，第5课对照无此段落；仅允许全部 basic token 均为 BERT 标点的原有编码，原文、来源、旧成功向量及资源上限保留。四原件全部 READY、304 个段落逐项保全；最终原件/恢复设备 3/3、扩展知识库设备 16/16，本地 embedding Debug/Release 各12/12，完整 Gradle check/许可正反向/CI pins/依赖锁定/严格校验成功（1053 tasks），REUSE949/949；独立 DSH / DeepSeek V4.1 Flash 只读审阅 APPROVE。旧 FAILED 任务从 CAS 重试沿用任务及文档 ID；安装含修复的版本后可恢复。修复在 `C:/Users/32735/.codex/worktrees/adaptive-context-preview/mobileAgentRuntime`，分支 `codex/docx-local-embedding-fix`，HEAD仍为 `911603e2f863de0f0d7dbd294ecd7e4b0136ed0f`；未提交/推送/合并/正式签名或发布，未验证用户实体设备。本轮83份根原WIP哈希一致；私有原件未提交或交给审阅者。仅根交接及专项证据副本更新，专题修改留在隔离树。见 [专项证据](docs/evidence/2026-10-09/docx-punctuation-embedding.md)。本段记录修复验证完成时的状态；后续用户授权的分支交付及测试包见上条，不恢复已取消的网络调查或公开正式版发布任务。
 

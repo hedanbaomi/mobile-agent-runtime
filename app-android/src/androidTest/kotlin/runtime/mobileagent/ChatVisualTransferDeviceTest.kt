@@ -166,6 +166,24 @@ class ChatVisualTransferDeviceTest {
                 assertEquals("Expected initial request and tool followup; server error: ${serverFailure.get()}", initialRequests, requests.size)
                 val session = requireNotNull(vm.state.value.selectedSessionId)
                 assertEquals(RunStatus.COMPLETED, container.runs.list(session).single().state)
+                // Display-only receipt projection must not interrupt one assistant turn;
+                // the durable USER/image records and wire protocol remain untouched.
+                val durable = container.conversations.messages(session)
+                durable.filter { message ->
+                    val metadata = Json.parseToJsonElement(message.metadataJson).jsonObject
+                    (metadata["toolEvidence"] as? JsonPrimitive)?.booleanOrNull == true ||
+                        (metadata["visualBatchAnalysis"] as? JsonPrimitive)?.booleanOrNull == true
+                }.forEach { receipt ->
+                    assertEquals(MessageRole.USER, receipt.role)
+                    assertEquals("tool", vm.state.value.messages.single { it.id == receipt.id }.role)
+                }
+                assertTrue("Tool retrieval must expose persisted source identities", vm.state.value.citations.isNotEmpty())
+                vm.state.value.citations.forEach { citation ->
+                    assertEquals(kb, citation.knowledgeBaseId)
+                    assertEquals(imported.documentId, citation.source)
+                    assertEquals(version, citation.documentVersionId)
+                    assertTrue(citation.chunkId.isNotBlank())
+                }
                 fun imageUrls(request: JsonObject): List<String> = request.getValue("messages").jsonArray.flatMap { message ->
                     (message.jsonObject["content"] as? JsonArray)?.mapNotNull { part ->
                         part.jsonObject["image_url"]?.jsonObject?.get("url")?.jsonPrimitive?.content

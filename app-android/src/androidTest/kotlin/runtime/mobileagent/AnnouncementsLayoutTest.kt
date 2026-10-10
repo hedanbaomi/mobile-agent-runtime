@@ -50,7 +50,9 @@ class AnnouncementsLayoutTest {
         compose.setContent {
             CompositionLocalProvider(LocalDensity provides Density(1f, fontScale = fontScale)) {
                 Box(Modifier.width(width).height(640.dp)) {
-                    MaterialTheme { AnnouncementsScreen(AnnouncementsUiState(language = "zh-CN")) }
+                    runtime.mobileagent.ui.AppLocalizedResources("zh-CN") {
+                        MaterialTheme { AnnouncementsScreen(AnnouncementsUiState(language = "zh-CN")) }
+                    }
                 }
             }
         }

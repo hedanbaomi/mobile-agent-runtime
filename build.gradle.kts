@@ -23,13 +23,44 @@ allprojects {
 tasks.register("check") {
     group = "verification"
     description = "Run licenseGuard and all subproject checks."
-    dependsOn("licenseGuard", "licenseGuardReverse", "verifyWorkflowYaml")
+    dependsOn("licenseGuard", "licenseGuardReverse", "verifyWorkflowYaml", "verifyWorkspace", "verifyTestSelection", "verifyModuleBoundaries", "verifyComplexity", "verifyLintWarnings", "verifyI18n")
     gradle.includedBuilds.forEach { included ->
         dependsOn(included.task(":license-guard:test"))
     }
     subprojects.forEach { sub ->
         dependsOn(sub.tasks.matching { it.name == "check" })
     }
+}
+
+tasks.register<Exec>("verifyTestSelection") {
+    group = "verification"
+    description = "Require real instrumentation classes and complete explicit suite or manual-only mappings."
+    commandLine("python", "-B", rootProject.file("tools/verify_test_selection.py").absolutePath)
+}
+
+tasks.register<Exec>("verifyI18n") {
+    group = "verification"
+    description = "Reject new feature string literals and mismatched bilingual resources without modifying the baseline."
+    commandLine("python", "-B", rootProject.file("tools/verify_i18n.py").absolutePath)
+}
+
+tasks.register<Exec>("verifyModuleBoundaries") {
+    group = "verification"
+    description = "Keep shared/data JVM layers independent of Android and feature layers."
+    commandLine("python", "-B", rootProject.file("tools/verify_module_boundaries.py").absolutePath)
+}
+
+tasks.register<Exec>("verifyComplexity") {
+    group = "verification"
+    description = "Ratchet existing Kotlin conditional-token budgets without introducing analyzer dependencies."
+    commandLine("python", "-B", rootProject.file("tools/verify_complexity.py").absolutePath)
+}
+
+tasks.register<Exec>("verifyLintWarnings") {
+    group = "verification"
+    description = "Reject new app lint warnings; Error/Fatal findings are never baseline exemptions."
+    dependsOn(":app-android:lintDebug")
+    commandLine("python", "-B", rootProject.file("tools/verify_lint_warnings.py").absolutePath)
 }
 
 /**
@@ -42,6 +73,13 @@ tasks.register<Exec>("verifyWorkflowYaml") {
     group = "verification"
     description = "Fail when a GitHub Actions workflow is not parseable YAML with the required job shape."
     commandLine("python", "-B", rootProject.file("tools/verify-workflows.py").absolutePath)
+}
+
+tasks.register<Exec>("verifyWorkspace") {
+    group = "verification"
+    description = "Reject release rollback and stale current-document links."
+    commandLine("python", "-B", rootProject.file("tools/verify_workspace.py").absolutePath)
+    if (System.getenv("CI") == "true") args("--publication")
 }
 
 apply(from = rootProject.file("tools/release-gate.gradle.kts"))

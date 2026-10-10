@@ -48,7 +48,12 @@ data class ExtractedAsset(
     val bytes: ByteArray,
     val mediaType: String,
     val surroundingText: String,
-)
+    /** PDF imports retain a source slice, rather than all embedded image copies. */
+    val byteLength: Int = bytes.size,
+    val byteSource: (() -> ByteArray)? = null,
+) {
+    fun readBytes(): ByteArray = byteSource?.invoke() ?: bytes
+}
 
 data class ExtractedPage(
     val page: Int,

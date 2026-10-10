@@ -4,6 +4,8 @@
 package runtime.mobileagent
 
 import io.ktor.client.HttpClient
+import io.ktor.client.HttpClientConfig
+import io.ktor.client.plugins.HttpTimeout
 import io.ktor.client.request.header
 import io.ktor.client.request.request
 import io.ktor.client.request.setBody
@@ -17,6 +19,16 @@ import java.util.UUID
 
 import java.net.URLEncoder
 
+/** Dedicated public transport: no Provider defaults, cookies or redirects. */
+internal fun HttpClientConfig<*>.configurePublicAnnouncementTransport() {
+    followRedirects = false
+    install(HttpTimeout) {
+        requestTimeoutMillis = 30_000
+        connectTimeoutMillis = 10_000
+        socketTimeoutMillis = 30_000
+    }
+}
+
 class AnnouncementFetcher(private val http: HttpClient) : AnnouncementFetchPort {
     override suspend fun fetch(baseUrl: String, client: ClientContext, etag: String?): FetchOutcome {
         val url = baseUrl.trimEnd('/') +
@@ -26,10 +38,6 @@ class AnnouncementFetcher(private val http: HttpClient) : AnnouncementFetchPort 
             method = HttpMethod.Get
             header("X-Install-ID", client.installId)
             if (!etag.isNullOrBlank()) header(HttpHeaders.IfNoneMatch, etag)
-        }
-        val forbidden = listOf(HttpHeaders.Authorization, "X-Api-Key", "api-key")
-        require(forbidden.none { name -> response.call.request.headers[name] != null }) {
-            "announcement fetch must not send provider credentials"
         }
         return when (response.status.value) {
             200 -> FetchOutcome.Body(response.bodyAsText(), response.headers[HttpHeaders.ETag].orEmpty())

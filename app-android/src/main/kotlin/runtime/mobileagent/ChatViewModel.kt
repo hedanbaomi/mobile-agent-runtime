@@ -474,59 +474,43 @@ class ChatViewModel internal constructor(
         val conversationId = owner.conversationId
         // Durable data and authorization use this run's own evidence, never the selected page.
         val runCitations = LinkedHashMap(citations)
-        val unknown = withContext(Dispatchers.IO) {
-            container.runs.list(conversationId).lastOrNull { it.state == RunStatus.UNKNOWN_OUTCOME && it.retryAcknowledgedAt == null }
-        }
-        if (unknown != null) {
-            if (canProjectRun(owner)) unknownRetry.value = unknown.runId
-            publishRunState(owner, state.value.copy(streaming = false, input = text))
-            saveRunDraft(owner)
-            return
-        }
-        val conversation = withContext(Dispatchers.IO) { container.conversations.get(conversationId) }
-            ?: run { publishRunState(owner, state.value.copy(streaming = false, input = text)); saveRunDraft(owner); return }
-        // Persist the user's message before any asynchronous preflight.  A provider, retrieval,
-        // workspace, or tooling failure must never make the first message disappear.  The
-        // message is also projected immediately so the chat remains responsive while the run is
-        // being prepared.  The run's history below explicitly excludes this id to avoid sending
-        // the current turn twice (as both history and currentUser).
-        val userMessage = try {
-            withContext(Dispatchers.IO) { container.conversations.append(
-                conversationId,
-                MessageRole.USER,
-                text,
-                parts = listOf(TextPart(text)),
-            ) }
-        } catch (failure: Exception) {
-            failRun(owner, failure)
-            publishRunState(owner, state.value.copy(streaming = false, input = text))
-            saveRunDraft(owner)
-            return
-        }
-        publishRunState(owner, state.value.copy(
-            messages = state.value.messages + messageUi(userMessage),
-            input = "",
-        ))
-        val binding = try { withContext(Dispatchers.IO) { container.transfer.resolveRunBinding(conversation.snapshotId) } }
-            catch (failure: Exception) { failRun(owner, failure); publishRunState(owner, state.value.copy(streaming = false)); return }
-        val contextPolicy = try { AgentContextPolicy.fromJson(binding.snapshot.contextPolicyJson) }
-            catch (failure: Exception) { failRun(owner, failure); publishRunState(owner, state.value.copy(streaming = false)); return }
-        val degrade = state.value.textDegradation
         val threadWorkspacePort = (container as? ThreadWorkspacePortProvider)?.threadWorkspacePort
-        var threadWorkspaceBindingReadFailed = false
-        val threadWorkspaceBinding = runCatching { withContext(Dispatchers.IO) {
-            threadWorkspacePort?.conversationWorkspaceBinding(conversationId)
-        } }.onFailure { threadWorkspaceBindingReadFailed = true }.getOrNull()
-        val threadWorkspaceId = threadWorkspaceBinding?.workspaceId
         val threadWorkspaceRuntimePort =
             (container as? ThreadWorkspaceRuntimePortProvider)?.threadWorkspaceRuntimePort
-        // Aggregate-only, closed-schema evidence is emitted before the run is created. Failure to
-        // write optional diagnostics never changes authorization or message delivery behavior.
-        runCatching { withContext(Dispatchers.IO) {
-            threadWorkspaceRuntimePort
-                ?.takeIf { it.available }
-                ?.recordConversationWorkspaceResolution(conversationId, binding.snapshot)
-        } }
+        val prepared = when (val result = ChatRunPreflight(
+            container.runs, container.conversations, container.transfer,
+            threadWorkspacePort, threadWorkspaceRuntimePort,
+        ).prepare(conversationId, text) { message ->
+            publishRunState(owner, state.value.copy(
+                messages = state.value.messages + messageUi(message), input = "",
+            ))
+        }) {
+            is ChatPreflightResult.Unknown -> {
+                if (canProjectRun(owner)) unknownRetry.value = result.runId
+                publishRunState(owner, state.value.copy(streaming = false, input = text))
+                saveRunDraft(owner)
+                return
+            }
+            ChatPreflightResult.MissingConversation -> {
+                publishRunState(owner, state.value.copy(streaming = false, input = text))
+                saveRunDraft(owner)
+                return
+            }
+            is ChatPreflightResult.Failed -> {
+                failRun(owner, result.failure)
+                publishRunState(owner, state.value.copy(streaming = false,
+                    input = if (result.userMessagePersisted) state.value.input else text))
+                if (!result.userMessagePersisted) saveRunDraft(owner)
+                return
+            }
+            is ChatPreflightResult.Prepared -> result
+        }
+        val userMessage = prepared.userMessage
+        val binding = prepared.binding
+        val contextPolicy = prepared.contextPolicy
+        val degrade = state.value.textDegradation
+        val threadWorkspaceBindingReadFailed = prepared.workspaceBindingReadFailed
+        val threadWorkspaceId = prepared.workspaceId
         val workspacePreflightStatus = when {
             threadWorkspaceBindingReadFailed -> "会话工作区绑定读取失败；工作区工具已关闭。"
             threadWorkspacePort == null || !threadWorkspacePort.available ->
@@ -624,67 +608,33 @@ class ChatViewModel internal constructor(
                     )
                 }
             }
-            var assistantId: String? = null
-            var answer = ""
-            var reasoning = ""
-            var terminalError: ErrorPart? = null
-            var metadata = "{}"
+            with(ChatRunResponse(
+                conversations = container.conversations,
+                conversationId = conversationId,
+                runId = run.runId,
+                citations = runCitations,
+                onFlush = { id, text, reasoningText, force ->
+                    publishRunState(owner, state.value.copy(
+                        messages = state.value.messages.map {
+                            if (it.id == id) it.copy(
+                                text = text, streaming = true, reasoning = reasoningText,
+                                reasoningStreaming = reasoningText.isNotBlank() && !force,
+                            ) else it
+                        },
+                    ))
+                },
+                onAppend = { message ->
+                    publishRunState(owner, state.value.copy(messages = state.value.messages + messageUi(message)))
+                },
+            )) {
             var round = 0
             var modelInFlight = false
             var approvedToolInFlight = false
             var approvedToolCallId: String? = null
             var toolCallInFlight = false
             var toolWaitingApproval = false
-            var lastCheckpoint = 0L
-            var lastUiFlush = 0L
             var preparationStage: String? = "preflight"
-            val observed = linkedMapOf<String, ToolCallPart>()
             val invocations = linkedMapOf<String, ToolInvocation>()
-            fun flushStreamingAnswer(id: String?, text: String, force: Boolean, reasoningText: String = reasoning) {
-                val now = System.currentTimeMillis()
-                if (!force && now - lastUiFlush < 50) return
-                lastUiFlush = now
-                publishRunState(owner, state.value.copy(
-                    messages = state.value.messages.map {
-                        if (it.id == id) it.copy(
-                            text = text,
-                            streaming = true,
-                            reasoning = reasoningText,
-                            reasoningStreaming = reasoningText.isNotBlank() && !force,
-                        ) else it
-                    },
-                ))
-            }
-            suspend fun checkpoint(status: String = "STREAMING") {
-                val id = assistantId ?: return
-                val parts = buildList<MessagePart> {
-                    if (answer.isNotEmpty()) add(TextPart(answer))
-                    if (reasoning.isNotEmpty()) add(ReasoningPart(reasoning, streaming = status == "STREAMING"))
-                    terminalError?.let(::add)
-                    addAll(observed.values)
-                    addAll(runCitations.values.filter { it.first.runId == run.runId }.map { CitationPart(it.first.citationId) })
-                }
-                withContext(NonCancellable + Dispatchers.IO) { container.conversations.checkpointAssistant(id, answer, parts, metadata, status) }
-            }
-            suspend fun persistTerminalError(part: ErrorPart) {
-                terminalError = part
-                if (assistantId == null) {
-                    val message = withContext(Dispatchers.IO) {
-                        container.conversations.append(
-                            conversationId,
-                            MessageRole.ASSISTANT,
-                            part.message,
-                            status = "ERROR",
-                            parts = listOf(part),
-                            metadataJson = metadata,
-                        )
-                    }
-                    assistantId = message.id
-                    publishRunState(owner, state.value.copy(messages = state.value.messages + messageUi(message)))
-                } else {
-                    checkpoint("ERROR")
-                }
-            }
             try {
                 foregroundStarted = runCatching { ChatRunForegroundService.start(getApplication(), owner.runId) }.isSuccess
                 withContext(Dispatchers.IO) {
@@ -1442,25 +1392,17 @@ class ChatViewModel internal constructor(
                                     persistRun = true
                                 }
                                 is ModelEvent.TextDelta -> {
-                                    answer = SecretRedactor.redact(answer + e.text, listOf(String(secret!!)))
-                                    flushStreamingAnswer(assistantId, answer, force = false)
-                                    if (System.currentTimeMillis() - lastCheckpoint >= 500) { checkpoint(); lastCheckpoint = System.currentTimeMillis() }
+                                    appendText(e.text, listOf(String(secret!!)))
                                 }
                                 is ModelEvent.ReasoningDelta -> {
-                                    if (e.text.isNotEmpty()) {
-                                        reasoning = appendDeclaredReasoning(reasoning, e.text, listOf(String(secret!!)))
-                                        flushStreamingAnswer(assistantId, answer, force = false, reasoningText = reasoning)
-                                        if (System.currentTimeMillis() - lastCheckpoint >= 500) { checkpoint(); lastCheckpoint = System.currentTimeMillis() }
-                                    }
+                                    appendReasoning(e.text, listOf(String(secret!!)))
                                 }
                                 // A refusal is readable assistant output: it joins the
                                 // answer stream like ordinary text, never reasoning.
                                 is ModelEvent.RefusalDelta -> {
                                     val projected = e.toMessagePartOrNull() as? RefusalPart
                                     if (projected != null) {
-                                        answer = SecretRedactor.redact(answer + projected.text, listOf(String(secret!!)))
-                                        flushStreamingAnswer(assistantId, answer, force = false)
-                                        if (System.currentTimeMillis() - lastCheckpoint >= 500) { checkpoint(); lastCheckpoint = System.currentTimeMillis() }
+                                        appendText(projected.text, listOf(String(secret!!)))
                                     }
                                 }
                                 is ModelEvent.Failed -> {
@@ -1933,6 +1875,7 @@ class ChatViewModel internal constructor(
                     if (activeRunResources === resources) activeRunResources = null
                     if (runJob === resources.job) runJob = null
                 }
+            }
             }
         }
     }

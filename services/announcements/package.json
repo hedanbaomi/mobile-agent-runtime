@@ -11,7 +11,7 @@
     "preflight:production": "node scripts/preflight.mjs"
   },
   "engines": {
-    "node": ">=20"
+    "node": ">=22.13.0"
   },
   "devDependencies": {
     "wrangler": "4.127.1"

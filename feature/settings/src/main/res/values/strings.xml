@@ -1,6 +1,91 @@
 <!-- SPDX-FileCopyrightText: 2026 mobileAgentRuntime contributors -->
 <!-- SPDX-License-Identifier: AGPL-3.0-only -->
 <resources>
-    <string name="sett_anonymous_metrics">Anonymous announcement metrics</string>
-    <string name="sett_metrics_help">Off by default. The install ID is only used for rollout when fetching announcements. Enabling this sends anonymous counts, never chat, keys, or knowledge.</string>
+    <string name="sett_title">Settings</string>
+    <string name="sett_appearance_language">Appearance and language</string>
+    <string name="sett_search_title">Web search</string>
+    <string name="sett_search_key_help">Keys are encrypted per provider. Search may incur charges; enable it in the Agent.</string>
+    <string name="sett_search_save_enable">Save and enable</string>
+    <string name="sett_search_remove_key">Remove key</string>
+    <string name="sett_root_prompt_title">Global root prompt</string>
+    <string name="sett_root_prompt_help">Applies to all Agents without changing tool, network, or file permissions.</string>
+    <string name="sett_root_prompt_unlock">Unlock advanced editing</string>
+    <string name="sett_root_prompt_save">Save override</string>
+    <string name="sett_root_prompt_restore">Restore default</string>
+    <string name="sett_privacy_diagnostics">Privacy and diagnostics</string>
+    <string name="sett_stats_help">On by default; turn off anytime. Sends install and announcement activity, never chat or file content.</string>
+    <string name="sett_log_level">Log level</string>
+    <string name="sett_diagnostics_rotation">Changing the level keeps old logs. Logs rotate; native crashes may still need ADB Logcat.</string>
+    <string name="sett_diagnostics_export">Export diagnostics ZIP</string>
+    <string name="sett_diagnostics_clear">Clear diagnostics</string>
+    <string name="sett_diagnostics_secrets">API keys never enter exports or the request inspector.</string>
+    <string name="sett_data_backup">Data and backup</string>
+    <string name="sett_archived_conversations">Archived conversations</string>
+    <string name="sett_export">Export</string>
+    <string name="sett_import">Import</string>
+    <string name="sett_import_help">For an imported conversation using an old HTTP endpoint, configure an HTTPS provider and its credentials, review the Agent, then explicitly start a new conversation. The old conversation remains an archive; its frozen destination and history are not changed or automatically forwarded.</string>
+    <string name="sett_configure_provider">Configure HTTPS provider</string>
+    <string name="sett_review_agent">Review Agent settings</string>
+    <string name="sett_feature_entry">Feature entry points</string>
+    <string name="sett_entry_providers">Providers</string>
+    <string name="sett_entry_knowledge">Knowledge</string>
+    <string name="sett_entry_skills">Skills</string>
+    <string name="sett_entry_news">News</string>
+    <string name="sett_entry_mcp">MCP settings</string>
+    <string name="about_title">About</string>
+    <string name="about_license_unavailable">AGPL-3.0-only text is unavailable.</string>
+    <string name="about_build">DB schema %1$d · built %2$s</string>
+    <string name="about_open_source">Open GitHub source repository</string>
+    <string name="about_version_details">Version details</string>
+    <string name="about_license">License</string>
+    <string name="about_third_party">Third-party notices</string>
+    <string name="about_news_count">News (%1$d)</string>
+    <string name="about_check_updates">Check updates</string>
+    <string name="about_diagnostics_note">Diagnostics omit secrets. A tools-capability crash still needs full Logcat bound to this revision.</string>
+    <string name="about_close">Close</string>
+    <string name="about_copy_diagnostics">Copy diagnostics</string>
+    <string name="about_license_loading">Loading AGPL-3.0-only text…</string>
+    <string name="ui_after_enabling_the_agent_may_execute_6ecec320" formatted="false">After enabling, the Agent may execute commands directly with the current Shizuku or wired ADB shell authority. Mistakes can cause data loss, stopped apps, or unexpected device state. This is not Root and not a safety sandbox.</string>
+    <string name="ui_allows_the_agent_to_execute_android_abdfa0ee" formatted="false">Allows the Agent to execute Android shell commands directly. It may modify or delete files, stop apps, or change some system settings; this is not Root.</string>
+    <string name="ui_availability_s_connection_s_180222dd">Availability: %1$s · Connection: %2$s</string>
+    <string name="ui_back_to_components_ccc15a1d" formatted="false">Back to components</string>
+    <string name="ui_cancel_998b9c48" formatted="false">Cancel</string>
+    <string name="ui_choose_directory_1aaa14b7" formatted="false">Choose directory</string>
+    <string name="ui_commands_and_authorities_7f33a147" formatted="false">Commands and authorities</string>
+    <string name="ui_complete_text_f28fdb75" formatted="false">Complete text</string>
+    <string name="ui_components_7d6565eb" formatted="false">Components</string>
+    <string name="ui_confirm_dangerous_mode_4ca71053" formatted="false">Confirm Dangerous Mode</string>
+    <string name="ui_confirm_replacing_saved_trust_5229aa78" formatted="false">Confirm replacing saved trust</string>
+    <string name="ui_connect_a_usb_data_cable_enable_4dc371d0" formatted="false">Connect a USB data cable, enable Developer options → USB debugging, and allow this computer. Download the desktop tool from the Release, prepare Java 17+ and official Platform-Tools, then open start-wired-adb.bat. After activation you can unplug USB; authority stays available while the device service lives. Starting pairing enables and selects Wired ADB.</string>
+    <string name="ui_copy_token_40e8f958" formatted="false">Copy token</string>
+    <string name="ui_credentials_change_only_after_the_new_bdf83f97" formatted="false">Credentials change only after the new activation is verified.</string>
+    <string name="ui_currently_selected_channel_8f0a8796" formatted="false">Currently selected channel</string>
+    <string name="ui_dangerous_mode_466f2b83" formatted="false">Dangerous Mode</string>
+    <string name="ui_download_desktop_tool_93932577" formatted="false">Download desktop tool</string>
+    <string name="ui_enable_8eeb2a71" formatted="false">Enable</string>
+    <string name="ui_get_official_adb_a29a5c1d" formatted="false">Get official ADB</string>
+    <string name="ui_i_understand_the_risk_and_know_d00797c8" formatted="false">I understand the risk and know that Shell remains unavailable when the selected enhancement channel is unavailable; it will not switch automatically.</string>
+    <string name="ui_loading_complete_text_c86dd633" formatted="false">Loading complete text…</string>
+    <string name="ui_no_components_are_available_007fd1e1" formatted="false">No components are available.</string>
+    <string name="ui_no_components_match_the_search_4f1e9b2f" formatted="false">No components match the search.</string>
+    <string name="ui_no_third_party_notice_overview_is_e9f83e28" formatted="false">No third-party notice overview is available.</string>
+    <string name="ui_notice_files_s_tap_to_view_5bb13369">Notice files: %1$s; tap to view the complete text</string>
+    <string name="ui_one_time_pairing_token_this_settings_a5952c3d" formatted="false">One-time pairing token (this Settings screen only)</string>
+    <string name="ui_open_agent_grants_8c9a1fb1" formatted="false">Open Agent grants</string>
+    <string name="ui_re_authorize_e730ab80" formatted="false">Re-authorize</string>
+    <string name="ui_refresh_cba212b1" formatted="false">Refresh</string>
+    <string name="ui_replace_and_start_pairing_54979497" formatted="false">Replace and start pairing</string>
+    <string name="ui_revoke_411a6c97" formatted="false">Revoke</string>
+    <string name="ui_search_name_version_or_license_61764483" formatted="false">Search name, version, or license</string>
+    <string name="ui_source_s_deaac202">Source: %1$s</string>
+    <string name="ui_system_enhancement_uses_shizuku_or_wired_49279879" formatted="false">System enhancement uses Shizuku or wired ADB, with no automatic fallback.</string>
+    <string name="ui_the_content_below_comes_only_from_54f70959" formatted="false">The content below comes only from notices bundled in the APK. Browsing does not use the network or alter third-party text.</string>
+    <string name="ui_the_one_time_token_is_shown_208c3072" formatted="false">The one-time token is shown only temporarily on this Settings screen; make sure you are ready to complete pairing on the computer.</string>
+    <string name="ui_the_setting_is_not_cleared_by_76cb4088" formatted="false">The setting is not cleared by task/session end, backgrounding, USB removal, or Binder loss; choose Disabled above to turn it off.</string>
+    <string name="ui_the_token_is_hidden_reveal_it_3d16c03e" formatted="false">The token is hidden; reveal it before copying.</string>
+    <string name="ui_this_channel_has_no_persistent_configuration_2dab4478" formatted="false">This channel has no persistent configuration; connection state does not replace user authorization.</string>
+    <string name="ui_this_records_user_intent_selects_shizuku_d1e33de1" formatted="false">This records user intent, selects Shizuku, and requests the platform grant when needed.</string>
+    <string name="ui_trust_s_ce4bb255">Trust: %1$s</string>
+    <string name="ui_user_authorized_files_saf_070a3e28" formatted="false">User-authorized files (SAF)</string>
+    <string name="ui_version_license_and_source_5256f67e" formatted="false">Version, license and source</string>
 </resources>

@@ -3,6 +3,8 @@
 
 package runtime.mobileagent.feature.skills
 
+import androidx.compose.ui.res.stringResource
+
 import android.net.Uri
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -196,21 +198,21 @@ private fun SkillListPane(state: SkillsUiState, actions: SkillsActions, zh: Bool
     Column(modifier) {
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
             if (showPageTitle) {
-                Text(if (zh) "技能" else "Skills", style = MaterialTheme.typography.headlineSmall, modifier = Modifier.weight(1f))
+                Text(stringResource(R.string.ui_skills_2a98e03d), style = MaterialTheme.typography.headlineSmall, modifier = Modifier.weight(1f))
             } else {
                 Spacer(Modifier.weight(1f))
             }
-            Button(onClick = onImport) { Text(if (zh) "导入包" else "Import package") }
+            Button(onClick = onImport) { Text(stringResource(R.string.ui_import_package_0f33589c)) }
         }
         Text(
-            if (zh) "导入技能包，检查兼容性后启用。" else "Import a skill package, check compatibility, then enable it.",
+            stringResource(R.string.ui_import_a_skill_package_check_compatibility_9a6d5f72),
             style = MaterialTheme.typography.bodySmall,
             modifier = Modifier.padding(top = 6.dp),
         )
         Row(Modifier.padding(top = 10.dp), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
             listOf("all" to if (zh) "全部" else "all", "enabled" to if (zh) "已启用" else "enabled", "disabled" to if (zh) "已停用" else "disabled").forEach { (key, label) -> FilterChip(selected = state.filter == key, onClick = { actions.onFilter(key) }, label = { Text(label) }) }
         }
-        OutlinedTextField(state.query, actions.onQuery, label = { Text(if (zh) "筛选技能" else "Filter skills") }, modifier = Modifier.fillMaxWidth().padding(top = 8.dp))
+        OutlinedTextField(state.query, actions.onQuery, label = { Text(stringResource(R.string.ui_filter_skills_c7db0d68)) }, modifier = Modifier.fillMaxWidth().padding(top = 8.dp))
         if (state.loading) CircularProgressIndicator(Modifier.padding(top = 16.dp))
         else if (state.error != null) {
             Card(
@@ -229,7 +231,7 @@ private fun SkillListPane(state: SkillsUiState, actions: SkillsActions, zh: Bool
                 (state.query.isBlank() || it.name.contains(state.query, true)) &&
                     (state.filter == "all" || (state.filter == "enabled" && it.enabled) || (state.filter == "disabled" && !it.enabled))
             }
-            if (visible.isEmpty()) Text(if (zh) "暂无技能。" else "No skills available.", style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(top = 16.dp))
+            if (visible.isEmpty()) Text(stringResource(R.string.ui_no_skills_available_65cf91a2), style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(top = 16.dp))
             else LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.height(280.dp).padding(top = 12.dp)) {
                 items(visible, key = { it.installId }) { skill -> SkillCard(skill, skill.installId == state.selectedInstallId, actions, zh) }
             }
@@ -241,7 +243,7 @@ private fun SkillListPane(state: SkillsUiState, actions: SkillsActions, zh: Bool
 private fun SkillDetailPane(state: SkillsUiState, actions: SkillsActions, zh: Boolean, modifier: Modifier) {
     Column(modifier) {
         if (state.status.isNotBlank()) Text(safeDisplay(state.status), style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(bottom = 8.dp))
-        state.detail?.let { SkillDetail(it, actions, zh) } ?: Text(if (zh) "选择技能查看详情。" else "Select a skill to view details.", modifier = Modifier.padding(24.dp))
+        state.detail?.let { SkillDetail(it, actions, zh) } ?: Text(stringResource(R.string.ui_select_a_skill_to_view_details_d6886104), modifier = Modifier.padding(24.dp))
     }
 }
 
@@ -272,8 +274,7 @@ private fun SkillDetail(detail: SkillDetailUi, actions: SkillsActions, zh: Boole
         Column(Modifier.weight(1f)) {
             Text(safeDisplay(skill.name), style = MaterialTheme.typography.headlineSmall)
             Text(
-                if (zh) "${safeDisplay(skill.classification)} · 安装包身份已校验"
-                else "${safeDisplay(skill.classification)} · install identity verified",
+                stringResource(R.string.ui_s_install_identity_verified_e3c3ceaf, (safeDisplay(skill.classification))),
                 style = MaterialTheme.typography.bodySmall,
             )
         }
@@ -282,7 +283,7 @@ private fun SkillDetail(detail: SkillDetailUi, actions: SkillsActions, zh: Boole
     OutlinedButton(
         onClick = { actions.onRequestUninstall(skill.installId) },
         modifier = Modifier.padding(top = 8.dp).testTag("skills.uninstall"),
-    ) { Text(if (zh) "卸载技能" else "Uninstall skill") }
+    ) { Text(stringResource(R.string.ui_uninstall_skill_d11f9422)) }
     if (detail.preview.isNotBlank()) {
         var previewExpanded by remember(skill.installId) { mutableStateOf(false) }
         TextButton(onClick = { previewExpanded = !previewExpanded }, modifier = Modifier.testTag("skills.instructions.toggle")) {
@@ -290,7 +291,7 @@ private fun SkillDetail(detail: SkillDetailUi, actions: SkillsActions, zh: Boole
         }
         if (previewExpanded) Text(safeDisplay(detail.preview), modifier = Modifier.padding(top = 4.dp))
     }
-    Text(if (zh) "授权状态" else "Grant status", style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(top = 16.dp))
+    Text(stringResource(R.string.ui_grant_status_d79bc46f), style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(top = 16.dp))
     Text(
         when {
             detail.binding.packageHashBound && detail.binding.grantRevision != null -> {
@@ -308,7 +309,7 @@ private fun SkillDetail(detail: SkillDetailUi, actions: SkillsActions, zh: Boole
     if (detail.binding.capabilities.isNotEmpty()) {
         Text(if (zh) "当前能力：${safeDisplay(detail.binding.capabilities.joinToString("、"))}" else "Active capabilities: ${safeDisplay(detail.binding.capabilities.joinToString(", "))}", style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(top = 4.dp))
     }
-    Text(if (zh) "技能记忆" else "Skill memory", style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(top = 16.dp))
+    Text(stringResource(R.string.ui_skill_memory_0ea065bc), style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(top = 16.dp))
     Text(
         memoryAvailabilityLabel(detail.memory.availability, zh),
         style = MaterialTheme.typography.bodySmall,
@@ -317,28 +318,28 @@ private fun SkillDetail(detail: SkillDetailUi, actions: SkillsActions, zh: Boole
     if (detail.memory.available && detail.memory.capabilities.isNotEmpty()) {
         Text(if (zh) "memory 能力：${safeDisplay(detail.memory.capabilities.joinToString("、"))}" else "Memory capabilities: ${safeDisplay(detail.memory.capabilities.joinToString(", "))}", style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(top = 4.dp))
     }
-    Text(if (zh) "权限" else "Permissions", style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(top = 16.dp))
-    if (detail.permissions.isEmpty()) Text(if (zh) "未声明权限。" else "No permissions declared.", style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(top = 6.dp))
+    Text(stringResource(R.string.ui_permissions_be9338af), style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(top = 16.dp))
+    if (detail.permissions.isEmpty()) Text(stringResource(R.string.ui_no_permissions_declared_f900ab80), style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(top = 6.dp))
     detail.permissions.forEach { permission ->
         Row(Modifier.fillMaxWidth().padding(top = 6.dp), verticalAlignment = Alignment.CenterVertically) {
             Column(Modifier.weight(1f)) {
                 Text(safeDisplay(permission.capability), fontWeight = FontWeight.SemiBold)
                 Text(safeDisplay(permission.scope), style = MaterialTheme.typography.bodySmall)
             }
-            if (permission.granted) OutlinedButton(onClick = { actions.onRevokePermission(skill.installId, permission.capability) }) { Text(if (zh) "撤销" else "Revoke") }
-            else Button(onClick = { actions.onGrantPermission(skill.installId, permission.capability) }) { Text(if (zh) "授予" else "Grant") }
+            if (permission.granted) OutlinedButton(onClick = { actions.onRevokePermission(skill.installId, permission.capability) }) { Text(stringResource(R.string.ui_revoke_411a6c97)) }
+            else Button(onClick = { actions.onGrantPermission(skill.installId, permission.capability) }) { Text(stringResource(R.string.ui_grant_a53c2c77)) }
         }
     }
-    Text(if (zh) "源码文件" else "Source files", style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(top = 16.dp))
-    if (detail.files.isEmpty()) Text(if (zh) "源码列表不可用。" else "Source listing unavailable.", style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(top = 6.dp))
+    Text(stringResource(R.string.ui_source_files_dabedad9), style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(top = 16.dp))
+    if (detail.files.isEmpty()) Text(stringResource(R.string.ui_source_listing_unavailable_4b7c7b16), style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(top = 6.dp))
     detail.files.forEach { file ->
         Row(Modifier.fillMaxWidth().padding(top = 4.dp), verticalAlignment = Alignment.CenterVertically) {
             Text(listOf(safePath(file.path), safeDisplay(file.sizeLabel), safeDisplay(file.kind)).filter(String::isNotBlank).joinToString(" · "), style = MaterialTheme.typography.bodySmall, modifier = Modifier.weight(1f))
-            TextButton(onClick = { actions.onOpenSource(skill.installId, file.path) }) { Text(if (zh) "查看" else "View") }
+            TextButton(onClick = { actions.onOpenSource(skill.installId, file.path) }) { Text(stringResource(R.string.ui_view_78059812)) }
         }
     }
-    Text(if (zh) "审计日志" else "Audit log", style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(top = 16.dp))
-    if (detail.audit.isEmpty()) Text(if (zh) "暂无审计记录。" else "No audit entries available.", style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(top = 6.dp))
+    Text(stringResource(R.string.ui_audit_log_c7dfe2f3), style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(top = 16.dp))
+    if (detail.audit.isEmpty()) Text(stringResource(R.string.ui_no_audit_entries_available_ce05939a), style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(top = 6.dp))
     detail.audit.forEach { event -> Text(listOf(event.timestamp, event.event, event.actor, event.detail).filter(String::isNotBlank).joinToString(" · ").let(::safeDisplay), style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(top = 4.dp)) }
     Spacer(Modifier.height(16.dp))
 }
@@ -347,26 +348,25 @@ private fun SkillDetail(detail: SkillDetailUi, actions: SkillsActions, zh: Boole
 private fun InstallDialog(install: SkillInstallUi, actions: SkillsActions, zh: Boolean) {
     AlertDialog(
         onDismissRequest = actions.onCancelInstall,
-        title = { Text(if (zh) "检查技能包" else "Inspect skill package") },
+        title = { Text(stringResource(R.string.ui_inspect_skill_package_857d34ad)) },
         text = {
             Column(Modifier.verticalScroll(rememberScrollState())) {
                 Text(safeDisplay(install.packageName))
                 Text(
-                    if (zh) "${safeDisplay(install.classification)} · 安装包身份已校验"
-                    else "${safeDisplay(install.classification)} · install identity verified",
+                    stringResource(R.string.ui_s_install_identity_verified_e3c3ceaf, (safeDisplay(install.classification))),
                     style = MaterialTheme.typography.bodySmall,
                     modifier = Modifier.padding(top = 4.dp),
                 )
                 install.reasons.forEach { Text(safeDisplay(it), style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(top = 6.dp)) }
                 if (install.permissions.isNotEmpty()) {
-                    Text(if (zh) "请求的权限" else "Requested permissions", style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(top = 12.dp))
+                    Text(stringResource(R.string.ui_requested_permissions_bbc6afc7), style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(top = 12.dp))
                     install.permissions.forEach { Text("${safeDisplay(it.capability)}: ${safeDisplay(it.scope)}", style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(top = 4.dp)) }
                 }
                 if (install.status.isNotBlank()) Text(safeDisplay(install.status), modifier = Modifier.padding(top = 8.dp))
             }
         },
-        confirmButton = { Button(onClick = actions.onConfirmInstall, enabled = install.installable) { Text(if (zh) "安装" else "Install") } },
-        dismissButton = { TextButton(onClick = actions.onCancelInstall) { Text(if (zh) "取消" else "Cancel") } },
+        confirmButton = { Button(onClick = actions.onConfirmInstall, enabled = install.installable) { Text(stringResource(R.string.ui_install_fb022450)) } },
+        dismissButton = { TextButton(onClick = actions.onCancelInstall) { Text(stringResource(R.string.ui_cancel_998b9c48)) } },
     )
 }
 
@@ -374,19 +374,18 @@ private fun InstallDialog(install: SkillInstallUi, actions: SkillsActions, zh: B
 private fun UninstallDialog(skill: SkillUi, actions: SkillsActions, zh: Boolean) {
     AlertDialog(
         onDismissRequest = actions.onCancelUninstall,
-        title = { Text(if (zh) "卸载技能" else "Uninstall skill") },
+        title = { Text(stringResource(R.string.ui_uninstall_skill_d11f9422)) },
         text = {
             Column {
                 Text(safeDisplay(skill.name))
                 Text(
-                    if (zh) "将移出已安装列表、撤销授权并从当前智能体解绑。历史对话、审计记录和该技能的持久记忆会保留；若历史对话仍引用原包，包字节也会保留以供导出，否则会清理。重新使用需要重新导入并授权。"
-                    else "This removes the install, revokes grants, and unbinds current agents. Conversation history, audit records, and this skill's persistent memory remain. Package bytes remain only when needed to export historical conversations. Reuse requires a fresh import and approval.",
+                    stringResource(R.string.ui_this_removes_the_install_revokes_grants_24a153db),
                     modifier = Modifier.padding(top = 8.dp),
                 )
             }
         },
-        confirmButton = { TextButton(onClick = actions.onConfirmUninstall) { Text(if (zh) "确认卸载" else "Uninstall") } },
-        dismissButton = { TextButton(onClick = actions.onCancelUninstall) { Text(if (zh) "取消" else "Cancel") } },
+        confirmButton = { TextButton(onClick = actions.onConfirmUninstall) { Text(stringResource(R.string.ui_uninstall_3e55535e)) } },
+        dismissButton = { TextButton(onClick = actions.onCancelUninstall) { Text(stringResource(R.string.ui_cancel_998b9c48)) } },
     )
 }
 
@@ -397,10 +396,10 @@ private fun SourceDialog(path: String, text: String?, onClose: () -> Unit, zh: B
         title = { Text(safePath(path)) },
         text = {
             Column(Modifier.verticalScroll(rememberScrollState())) {
-                if (text == null) Text(if (zh) "源码内容不可用。" else "Source content is unavailable.") else Text(safeDisplay(text), style = MaterialTheme.typography.bodySmall)
+                if (text == null) Text(stringResource(R.string.ui_source_content_is_unavailable_929ce8ad)) else Text(safeDisplay(text), style = MaterialTheme.typography.bodySmall)
             }
         },
-        confirmButton = { Button(onClick = onClose) { Text(if (zh) "关闭" else "Close") } },
+        confirmButton = { Button(onClick = onClose) { Text(stringResource(R.string.ui_close_6cf4a777)) } },
     )
 }
 

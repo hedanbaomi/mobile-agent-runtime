@@ -18,6 +18,7 @@ import javax.crypto.spec.GCMParameterSpec
 class AndroidSecretStore(
     private val context: Context,
     private val db: SqlConnection,
+    private val keyAlias: String = KEY_ALIAS,
 ) : SecretStore {
     override suspend fun resolveForHost(ref: String): CharArray {
         val blob = SecretInventory(db).ciphertext(ref)
@@ -47,11 +48,11 @@ class AndroidSecretStore(
 
     private fun key(): SecretKey {
         val ks = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
-        val existing = ks.getKey(KEY_ALIAS, null) as? SecretKey
+        val existing = ks.getKey(keyAlias, null) as? SecretKey
         if (existing != null) return existing
         val gen = KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, "AndroidKeyStore")
         gen.init(
-            KeyGenParameterSpec.Builder(KEY_ALIAS, KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT)
+            KeyGenParameterSpec.Builder(keyAlias, KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT)
                 .setBlockModes(KeyProperties.BLOCK_MODE_GCM)
                 .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)
                 .setRandomizedEncryptionRequired(true)

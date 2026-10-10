@@ -69,6 +69,13 @@ internal object EmbeddingInputRevision {
     )
 
     private val sources = listOf(
+        // Generation membership is immutable after publication. Direct SQL edits
+        // still invalidate a warm retrieval handle. Inactive build rows do not
+        // advance the counter for every insertion in a large new generation.
+        Source("generation_members", listOf("generation_id", "chunk_id", "space_id", "document_version_id"),
+            "SELECT id AS kb_id FROM knowledge_bases WHERE active_generation_id = NEW.generation_id") {
+            "SELECT id AS kb_id FROM knowledge_bases WHERE active_generation_id = $it.generation_id"
+        },
         Source("knowledge_bases", listOf("id", "embedding_space_id", "active_generation_id", "deleted_at"),
             "SELECT id AS kb_id FROM knowledge_bases WHERE id = NEW.id") {
             "SELECT $it.id AS kb_id"

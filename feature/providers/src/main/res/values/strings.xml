@@ -1,0 +1,54 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- SPDX-FileCopyrightText: 2026 mobileAgentRuntime contributors -->
+<!-- SPDX-License-Identifier: AGPL-3.0-only -->
+<resources>
+    <string name="ui_add_a_provider_to_select_a_ffa7447f" formatted="false">Add a provider to select a model. Credentials remain on this device.</string>
+    <string name="ui_add_provider_bf4c9732" formatted="false">Add provider</string>
+    <string name="ui_api_format_s_b2e6629e">API format: %1$s</string>
+    <string name="ui_automatic_70aefbbf" formatted="false">Automatic</string>
+    <string name="ui_base_url_434ba70e" formatted="false">Base URL</string>
+    <string name="ui_cancel_998b9c48" formatted="false">Cancel</string>
+    <string name="ui_capability_probe_cd9280e9" formatted="false">Capability probe</string>
+    <string name="ui_checking_042eed1e" formatted="false">Checking…</string>
+    <string name="ui_close_6cf4a777" formatted="false">Close</string>
+    <string name="ui_connection_failed_s_0bb2bcac">Connection failed: %1$s</string>
+    <string name="ui_connection_streaming_tools_and_images_may_5e7ca12d" formatted="false">Connection, streaming, tools and images may each incur charges. Image output is capped at 1024 tokens; no automatic retry.</string>
+    <string name="ui_connection_succeeded_0d500b13" formatted="false">Connection succeeded</string>
+    <string name="ui_context_window_4753e4c3" formatted="false">Context window</string>
+    <string name="ui_context_window_manual_02e8213a" formatted="false">Context window (manual)</string>
+    <string name="ui_declared_window_optional_overrides_catalog_3d6373f6" formatted="false">Declared window (optional, overrides catalog)</string>
+    <string name="ui_delete_5b875326" formatted="false">Delete</string>
+    <string name="ui_delete_model_metadata_c109a272" formatted="false">Delete model metadata?</string>
+    <string name="ui_delete_provider_b27fe928" formatted="false">Delete provider?</string>
+    <string name="ui_delete_s_and_its_model_metadata_53e098e3">Delete %1$s and its model metadata. Current references: %2$s models, %3$s conversation snapshots. Unreferenced ciphertext is retired and garbage-collected; Keystore entries follow the platform lifecycle.</string>
+    <string name="ui_edit_e9740dbb" formatted="false">Edit</string>
+    <string name="ui_follow_provider_3a7dba1c" formatted="false">Follow provider</string>
+    <string name="ui_follow_the_provider_limit_local_run_2aa62ff2" formatted="false">Follow the provider limit; local run budgets still apply.</string>
+    <string name="ui_manual_c4e00403" formatted="false">Manual</string>
+    <string name="ui_manual_override_ba44e3e9" formatted="false">Manual override</string>
+    <string name="ui_maximum_output_388d082c" formatted="false">Maximum output</string>
+    <string name="ui_mcp_tools_1e943d14" formatted="false">MCP tools</string>
+    <string name="ui_model_id_263d1656" formatted="false">Model id</string>
+    <string name="ui_model_response_normal_s_ms_9996fbc3">Model response normal · %1$s ms</string>
+    <string name="ui_models_and_capabilities_1b9330b3" formatted="false">Models and capabilities</string>
+    <string name="ui_models_c9b1f445" formatted="false"> models</string>
+    <string name="ui_name_dd4dc4c5" formatted="false">Name</string>
+    <string name="ui_no_model_metadata_is_available_62aa07af" formatted="false">No model metadata is available.</string>
+    <string name="ui_no_providers_configured_d8e9b861" formatted="false">No providers configured</string>
+    <string name="ui_open_mcp_settings_4c0d5a3a" formatted="false">Open MCP settings</string>
+    <string name="ui_operation_role_3b8ad69f" formatted="false">Operation / role</string>
+    <string name="ui_output_budget_963a4487" formatted="false">Output budget</string>
+    <string name="ui_parameters_json_055688f2" formatted="false">Parameters JSON</string>
+    <string name="ui_providers_e98de897" formatted="false">Providers</string>
+    <string name="ui_role_chat_embedding_reranker_chat_may_cb832d98" formatted="false">Role: CHAT / EMBEDDING / RERANKER; Chat may include images.</string>
+    <string name="ui_role_s_4222ab95">Role: %1$s</string>
+    <string name="ui_run_probe_505e98f3" formatted="false">Run probe</string>
+    <string name="ui_run_provider_probe_0d20bf18" formatted="false">Run provider probe?</string>
+    <string name="ui_save_ec8e6d58" formatted="false">Save</string>
+    <string name="ui_select_a_provider_to_inspect_models_7a56067a" formatted="false">Select a provider to inspect models and capabilities.</string>
+    <string name="ui_test_connection_00a680a7" formatted="false">Test connection</string>
+    <string name="ui_test_provider_connection_1033d112" formatted="false">Test provider connection?</string>
+    <string name="ui_this_check_may_have_incurred_provider_f64a9cb5" formatted="false">This check may have incurred provider charges.</string>
+    <string name="ui_this_removes_the_model_from_the_05f9aab4" formatted="false">This removes the model from the provider profile. The provider is not contacted automatically.</string>
+    <string name="ui_verify_capabilities_after_confirmation_provid_f616849a" formatted="false">Verify capabilities after confirmation; provider charges may apply.</string>
+</resources>

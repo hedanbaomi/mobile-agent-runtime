@@ -900,7 +900,7 @@ private class PythonSkillToolExecutor(
         }
         return ToolResult.Failure(ToolError(
             code = when (result.errorCode) {
-                "broker_limit", "RESOURCE_LIMIT", "input_limit" -> ToolErrorCode.RESOURCE_LIMIT
+        "broker_limit", "RESOURCE_LIMIT", "input_limit", "memory_limit" -> ToolErrorCode.RESOURCE_LIMIT
                 "permission_denied", "denied", "PERMISSION_DENIED", "REPLAY_DENIED" ->
                     ToolErrorCode.PERMISSION_DENIED
                 "UNKNOWN_OUTCOME" -> ToolErrorCode.UNKNOWN_OUTCOME

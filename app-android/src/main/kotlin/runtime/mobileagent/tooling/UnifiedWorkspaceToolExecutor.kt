@@ -318,13 +318,17 @@ class UnifiedWorkspaceToolExecutor(
             operation.kind == WorkspaceOperation.WORKSPACE_LIST -> null
             else -> operation.relativePath
         }
-        val sourceAllowed = resolver.revalidate(
-            context,
-            operation.capability,
-            workspaceIdForGrant,
-            pathForGrant,
-            operation.isMutation,
-        )
+        val sourceAllowed = if (operation.kind == WorkspaceOperation.WORKSPACE_LIST) {
+            // Enumeration has no caller-supplied workspace. Check each disclosed
+            // workspace explicitly; a scoped row must never authorize null scope.
+            val workspaces = authorizedWorkspaces(context, requireLiveReady = false)
+            workspaces.isNotEmpty() && workspaces.all {
+                resolver.revalidate(context, operation.capability, it.descriptor.id)
+            }
+        } else {
+            resolver.revalidate(context, operation.capability, workspaceIdForGrant,
+                pathForGrant, operation.isMutation)
+        }
         // A move has two independently user-visible paths.  A source grant
         // must never silently authorize a destination outside its scope.
         val destinationAllowed = operation.destinationPath?.let { destination ->
@@ -726,13 +730,13 @@ class UnifiedWorkspaceToolExecutor(
         }
         if (!descriptor.readable && !operation.isMutation) return false
         if (operation.isMutation && !descriptor.writable) return false
-        return resolver.revalidate(
-            context = context,
-            capability = operation.capability,
-            workspaceId = descriptor.id,
-            path = null,
-            write = operation.isMutation,
-        )
+        if (operation == WorkspaceOperation.WORKSPACE_LIST) {
+            return resolver.revalidate(context, operation.capability, descriptor.id)
+        }
+        // Schema/availability describe whether some permitted path exists.
+        // Exact dispatch still revalidates the actual source and destination.
+        val scope = operationScope(context, registered, operation)
+        return scope.wholeWorkspace || scope.pathScopes.isNotEmpty()
     }
 
     /** Exact path checks are repeated after approval and immediately before dispatch. */

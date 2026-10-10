@@ -4,6 +4,13 @@
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.TimeZone
+import java.util.zip.ZipEntry
+import java.util.zip.ZipFile
+import java.util.zip.ZipOutputStream
+import javax.inject.Inject
+import com.android.build.api.artifact.ScopedArtifact
+import com.android.build.api.variant.ScopedArtifacts
+import org.gradle.process.ExecOperations
 
 plugins {
     alias(libs.plugins.android.application)
@@ -13,6 +20,104 @@ plugins {
 }
 
 apply(from = rootProject.file("tools/debug-sbom.gradle.kts"))
+
+// Infer the ABI exposed to the separate instrumentation APK from bytecode,
+// including Runner dependencies. No test reachability rules enter Release.
+abstract class InferInstrumentationKeepRules : DefaultTask() {
+    @get:Classpath abstract val targetJars: ListProperty<RegularFile>
+    @get:Classpath abstract val targetDirectories: ListProperty<Directory>
+    @get:Classpath abstract val sourceJars: ListProperty<RegularFile>
+    @get:Classpath abstract val sourceDirectories: ListProperty<Directory>
+    @get:Classpath abstract val bootClasspath: ConfigurableFileCollection
+    @get:Classpath abstract val r8Classpath: ConfigurableFileCollection
+    @get:OutputFile abstract val outputRules: RegularFileProperty
+    @get:OutputFile abstract val outputDiagnostics: RegularFileProperty
+    @get:LocalState abstract val scratchDirectory: DirectoryProperty
+    @get:Inject abstract val execOperations: ExecOperations
+
+    private fun mergeClasses(
+        jars: List<RegularFile>,
+        directories: List<Directory>,
+        output: File,
+        excluded: Set<String> = emptySet(),
+    ): Set<String> {
+        val names = mutableSetOf<String>()
+        ZipOutputStream(output.outputStream().buffered()).use { zip ->
+            fun add(name: String, readBytes: () -> ByteArray) {
+                if (!name.endsWith(".class") || name.startsWith("META-INF/") ||
+                    name == "module-info.class" || name in excluded || !names.add(name)
+                ) return
+                zip.putNextEntry(ZipEntry(name).apply { time = 0L })
+                zip.write(readBytes())
+                zip.closeEntry()
+            }
+            directories.sortedBy { it.asFile.path }.forEach { directory ->
+                directory.asFile.walkTopDown().filter { it.isFile }.sortedBy { it.path }.forEach { file ->
+                    add(file.relativeTo(directory.asFile).invariantSeparatorsPath) { file.readBytes() }
+                }
+            }
+            jars.sortedBy { it.asFile.path }.forEach { jar ->
+                ZipFile(jar.asFile).use { input ->
+                    input.entries().asSequence().filter { !it.isDirectory }.sortedBy { it.name }.forEach { entry ->
+                        add(entry.name) { input.getInputStream(entry).use { it.readBytes() } }
+                    }
+                }
+            }
+        }
+        return names
+    }
+
+    @TaskAction
+    fun infer() {
+        val scratch = scratchDirectory.get().asFile.apply { mkdirs() }
+        val target = File(scratch, "target.jar")
+        val source = File(scratch, "source.jar")
+        val targetNames = mergeClasses(targetJars.get(), targetDirectories.get(), target)
+        // The ALL scopes overlap: classes supplied by the app must be targets,
+        // while test-only classes and libraries are sources, never duplicates.
+        val sourceNames = mergeClasses(sourceJars.get(), sourceDirectories.get(), source, targetNames)
+        check(targetNames.isNotEmpty() && sourceNames.isNotEmpty()) { "Missing instrumentation inference bytecode" }
+        val rules = outputRules.get().asFile.apply { parentFile.mkdirs(); delete() }
+        val diagnostics = outputDiagnostics.get().asFile.apply { parentFile.mkdirs() }
+        diagnostics.outputStream().buffered().use { log ->
+            execOperations.javaexec {
+                classpath(r8Classpath)
+                mainClass.set("com.android.tools.r8.tracereferences.TraceReferences")
+                args("--keep-rules", "--source", source.absolutePath, "--target", target.absolutePath,
+                    "--output", rules.absolutePath,
+                    "--map-diagnostics:MissingDefinitionsDiagnostic", "error", "info")
+                bootClasspath.files.sortedBy { it.path }.forEach { args("--lib", it.absolutePath) }
+                standardOutput = log
+                errorOutput = log
+            }.assertNormalExitValue()
+        }
+        check(rules.isFile && rules.readText().contains("-keep")) { "TraceReferences produced no instrumentation keep rules" }
+        logger.lifecycle("Inferred instrumentation ABI from ${sourceNames.size} source and ${targetNames.size} target classes: $rules")
+        logger.lifecycle("TraceReferences diagnostics: $diagnostics")
+    }
+}
+
+androidComponents.onVariants(androidComponents.selector().withBuildType("review")) { variant ->
+    val instrumentation = variant.androidTest ?: return@onVariants
+    val inference = tasks.register<InferInstrumentationKeepRules>("inferReviewInstrumentationKeepRules") {
+        group = "verification"
+        description = "Infer Review app ABI required by the separate instrumentation APK."
+        bootClasspath.from(androidComponents.sdkComponents.bootClasspath)
+        // AGP already supplies this pinned R8 distribution; do not resolve another tool dependency.
+        r8Classpath.from(com.android.tools.r8.tracereferences.TraceReferences::class.java.protectionDomain.codeSource.location)
+        outputRules.set(layout.buildDirectory.file("intermediates/instrumentation_abi/review/keep-rules.pro"))
+        outputDiagnostics.set(layout.buildDirectory.file("intermediates/instrumentation_abi/review/diagnostics.txt"))
+        scratchDirectory.set(layout.buildDirectory.dir("intermediates/instrumentation_abi/review/bytecode"))
+    }
+    variant.artifacts.forScope(ScopedArtifacts.Scope.ALL).use(inference).toGet(
+        ScopedArtifact.CLASSES, InferInstrumentationKeepRules::targetJars, InferInstrumentationKeepRules::targetDirectories,
+    )
+    instrumentation.artifacts.forScope(ScopedArtifacts.Scope.ALL).use(inference).toGet(
+        ScopedArtifact.CLASSES, InferInstrumentationKeepRules::sourceJars, InferInstrumentationKeepRules::sourceDirectories,
+    )
+    // Only compiled class providers are inputs: never depend on packaging or test minification.
+    variant.proguardFiles.add(inference.flatMap { it.outputRules })
+}
 
 // Release signing is intentionally opt-in. A release task must never silently
 // fall back to the debug keystore or create a new signing identity.
@@ -118,6 +223,8 @@ android {
     kotlinOptions {
         jvmTarget = "17"
     }
+    // App language can change independently of the device language. Ship both resources.
+    bundle { language { enableSplit = false } }
     packaging {
         resources {
             excludes += "/META-INF/{AL2.0,LGPL2.1}"
@@ -151,6 +258,10 @@ android {
             // it cannot be mistaken for or publish a formally signed release.
             initWith(getByName("debug"))
             isDebuggable = false
+            isMinifyEnabled = true
+            proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
+            testProguardFile("proguard-test-rules.pro")
+            proguardFile("proguard-review-test-boundaries.pro")
             signingConfig = signingConfigs.getByName("debug")
             matchingFallbacks += "debug"
             // Reuse only the empty test Activity, not debug resources/network policy.
@@ -162,6 +273,8 @@ android {
             }
         }
         getByName("release") {
+            isMinifyEnabled = true
+            proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
             buildConfigField("boolean", "HIGH_PRIVILEGE_CONTROL_PLANE_ENABLED", "true")
             signingConfig = signingConfigs.getByName("release")
             ndk {

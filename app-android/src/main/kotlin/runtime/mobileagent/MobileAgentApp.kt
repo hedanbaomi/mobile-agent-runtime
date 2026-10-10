@@ -60,6 +60,8 @@ class MobileAgentApp : Application() {
         private set
     lateinit var diagnostics: AndroidDiagnosticLogger
         private set
+    internal var databaseRecovery: DatabaseRecoveryStore? = null
+        private set
 
     override fun onCreate() {
         super.onCreate()
@@ -88,13 +90,30 @@ class MobileAgentApp : Application() {
      * isolated services can defer this work, while a UI smoke still runs the production shell.
      */
     internal fun ensureHostInitialized() {
-        if (::container.isInitialized) return
+        if (::container.isInitialized || databaseRecovery != null) return
         synchronized(this) {
-            if (::container.isInitialized) return
+            if (::container.isInitialized || databaseRecovery != null) return
             if (!::database.isInitialized) database = AndroidContextSqlite(this)
-            Migrations.apply(database)
+            try {
+                Migrations.apply(database)
+            } catch (failure: runtime.mobileagent.domain.AppException) {
+                if (failure.error.code != runtime.mobileagent.domain.ErrorCode.SCHEMA_UNSUPPORTED) throw failure
+                database.close()
+                databaseRecovery = DatabaseRecoveryStore(getDatabasePath("mobile-agent.db"), File(filesDir, "database-recovery"))
+                return
+            }
             container = AppContainer(this)
             container.runs.markInFlightUnknown()
+        }
+    }
+
+    internal fun startNewDatabaseFromRecovery() {
+        synchronized(this) {
+            val recovery = checkNotNull(databaseRecovery)
+            recovery.preserveForNewDatabase()
+            database = AndroidContextSqlite(this)
+            databaseRecovery = null
+            ensureHostInitialized()
         }
     }
 
@@ -140,7 +159,8 @@ class AppContainer(app: MobileAgentApp) :
      */
     val runCoordinator = RunCoordinator(runs)
     val audits = AuditRepository(db)
-    val transfer = TransferRepository(db, blobSink = CasBlobSink(File(app.filesDir, "cas")))
+    val transfer = TransferRepository(db, blobSink = CasBlobSink(File(app.filesDir, "cas")),
+        vectorIndexDirectory = File(app.cacheDir, "knowledge-index"))
     val http: HttpClient = HttpClient(OkHttp) {
         followRedirects = false
         engine {
@@ -304,12 +324,7 @@ class AppContainer(app: MobileAgentApp) :
         }
     }
     val announcementHttp: HttpClient = HttpClient(OkHttp) {
-        followRedirects = false
-        install(HttpTimeout) {
-            requestTimeoutMillis = 30_000
-            connectTimeoutMillis = 10_000
-            socketTimeoutMillis = 30_000
-        }
+        configurePublicAnnouncementTransport()
     }
     val announcementFetcher = AnnouncementFetcher(announcementHttp)
     private val announcementScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)

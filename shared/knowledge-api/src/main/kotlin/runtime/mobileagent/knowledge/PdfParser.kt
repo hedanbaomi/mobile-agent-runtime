@@ -33,11 +33,11 @@ object PdfParser {
         }.getOrNull()
     }
 
-    fun parse(bytes: ByteArray, rasterizer: PdfPageRasterizer? = null): ParsedPublication {
+    fun parse(bytes: ByteArray, rasterizer: PdfPageRasterizer? = null, deferImagePayloads: Boolean = false): ParsedPublication {
         if (bytes.size < 5 || String(bytes.copyOfRange(0, 5), Charsets.ISO_8859_1) != "%PDF-") {
             error("Not a PDF")
         }
-        val latin = String(bytes, Charsets.ISO_8859_1)
+        val latin = PdfByteView(bytes)
         val objects = extractIndirectObjects(bytes, latin)
         val pageNumbers = pageKids(objects).ifEmpty {
             objects.filter { (_, obj) -> isPageDict(obj.dict) }.keys.sorted()
@@ -49,8 +49,8 @@ object PdfParser {
         // Text extraction and visual classification happen before rasterizing.
         // Rendering only the pages that need visual evidence keeps a text-only
         // PDF cheap and leaves renderer failure visible through PAGE blockers.
-        val pagesNeedingRaster = pageNumbers.mapNotNull { objNum ->
-            val pageObj = objects[objNum] ?: return@mapNotNull null
+        val pagesNeedingRaster = if (rasterizer == null) emptyList() else pageNumbers.mapIndexedNotNull { index, objNum ->
+            val pageObj = objects[objNum] ?: return@mapIndexedNotNull null
             val content = pageContent(objects, pageObj.dict)
             val decoded = content.bytes
             val pageLatin = String(decoded, Charsets.ISO_8859_1)
@@ -79,7 +79,7 @@ object PdfParser {
                     hasPageAppearanceModifiers(objects, objNum, pageObj.dict),
                     pageMediaBox(objects, objNum, pageObj.dict),
                     pageNamedResources(objects, objNum, pageObj.dict, "ExtGState")))) {
-                pageNumbers.indexOf(objNum) + 1
+                index + 1
             } else {
                 null
             }
@@ -123,26 +123,29 @@ object PdfParser {
                 (discovery.usedForm && discovery.images.isNotEmpty())
             xobjects.forEach { (name, imageObjNum) ->
                 val image = objects[imageObjNum]
-                if (image == null || !isImageDict(image.dict) || image.stream == null) {
+                if (image == null || !isImageDict(image.dict) || !image.hasStream) {
                     hasUnsupportedPageVisual = true
                     return@forEach
                 }
-                val payload = image.stream
-                val mediaType = xObjectMediaType(image.dict, payload)
+                val payload = image.payload!!
+                val mediaType = xObjectMediaType(image.dict, payload.prefix())
                 if (mediaType == null) {
                     hasUnsupportedPageVisual = true
                     return@forEach
                 }
                 imageOrdinal += 1
                 val usedOnPage = pageLatin.contains("/$name") || Regex("/${Regex.escape(name)}\\s+Do").containsMatchIn(pageLatin)
+                val eagerBytes = if (deferImagePayloads) ByteArray(0) else payload.read() ?: error("PDF image payload unavailable")
                 assets += ExtractedAsset(
                     localId = "img-$imageOrdinal",
                     kind = "IMAGE",
                     page = if (usedOnPage || xobjects.size == 1) pageIndex else pageIndex,
                     section = name,
-                    bytes = payload,
+                    bytes = eagerBytes,
                     mediaType = mediaType,
                     surroundingText = text,
+                    byteLength = if (deferImagePayloads) payload.size else eagerBytes.size,
+                    byteSource = if (deferImagePayloads) ({ payload.read() ?: error("PDF image payload unavailable") }) else null,
                 )
             }
             // Inline image payloads are not necessarily standalone image files
@@ -203,7 +206,7 @@ object PdfParser {
             }
             val lacksCompletePageEvidence = hasUnsupportedPageVisual && rendered == null
             if (needsVision &&
-                (lacksCompletePageEvidence || assets.none { it.page == pageIndex && it.kind == "IMAGE" && it.bytes.isNotEmpty() })
+                (lacksCompletePageEvidence || assets.none { it.page == pageIndex && it.kind == "IMAGE" && it.byteLength > 0 })
             ) {
                 assets += ExtractedAsset(
                     localId = "page-$pageIndex",
@@ -621,7 +624,72 @@ object PdfParser {
         )
     }
 
-    private data class PdfObject(val dict: String, val stream: ByteArray?)
+    private data class PdfObject(val dict: String, val payload: PdfStream?) {
+        val hasStream: Boolean get() = payload != null
+        val stream: ByteArray? get() = payload?.read()
+    }
+    private class PdfStream(
+        private val source: ByteArray, private val start: Int, private val end: Int,
+        private val cache: Boolean, private val transform: ((ByteArray) -> ByteArray?)? = null,
+    ) {
+        val size: Int get() = end - start
+        private var loaded = false
+        private var stored: ByteArray? = null
+        fun read(): ByteArray? {
+            if (cache && loaded) return stored
+            val raw = source.copyOfRange(start, end)
+            val bytes = if (transform == null) raw else transform.invoke(raw)
+            if (cache) { stored = bytes; loaded = true }
+            return bytes
+        }
+        fun prefix(): ByteArray = if (transform == null) source.copyOfRange(start, minOf(end, start + 8))
+            else read()?.let { it.copyOfRange(0, minOf(8, it.size)) } ?: ByteArray(0)
+        fun completeJpeg(): Boolean {
+            if (transform != null) return read()?.let { bytes ->
+                bytes.size > 64 && bytes.takeLast(2) == listOf(0xFF.toByte(), 0xD9.toByte()) &&
+                    bytes.indices.any { it + 1 < bytes.size && bytes[it] == 0xFF.toByte() && bytes[it + 1] == 0xDA.toByte() }
+            } == true
+            return size > 64 && source[end - 2] == 0xFF.toByte() && source[end - 1] == 0xD9.toByte() &&
+                (start until end - 1).any { source[it] == 0xFF.toByte() && source[it + 1] == 0xDA.toByte() }
+        }
+        fun decrypted(decrypt: (ByteArray) -> ByteArray?): PdfStream = PdfStream(source, start, end, cache, decrypt)
+    }
+    /** A byte-backed view for object offsets: never materializes the entire binary PDF as text. */
+    private class PdfByteView(private val bytes: ByteArray) {
+        val length: Int get() = bytes.size
+        operator fun get(index: Int): Char = (bytes[index].toInt() and 255).toChar()
+        fun substring(start: Int, end: Int = length): String = String(bytes, start, end - start, Charsets.ISO_8859_1)
+        fun startsWith(value: String, start: Int): Boolean = start >= 0 && value.length <= length - start &&
+            value.indices.all { this[start + it] == value[it] }
+        fun indexOf(value: String, from: Int): Int {
+            for (index in from.coerceAtLeast(0)..length - value.length) if (startsWith(value, index)) return index
+            return -1
+        }
+        fun lastIndexOf(value: String): Int {
+            for (index in length - value.length downTo 0) if (startsWith(value, index)) return index
+            return -1
+        }
+    }
+    private data class ObjectHeader(val number: Int, val end: Int)
+    private fun objectHeader(latin: PdfByteView, from: Int): ObjectHeader? {
+        var index = from
+        while (index < latin.length) {
+            if (latin[index] !in '0'..'9') { index++; continue }
+            val start = index
+            while (index < latin.length && latin[index] in '0'..'9') index++
+            val digitsEnd = index
+            fun skipSpace(): Boolean {
+                val before = index
+                while (index < latin.length && latin[index] in " \t\r\n\u000B\u000C") index++
+                return before != index
+            }
+            if (skipSpace() && index < latin.length && latin[index++] == '0' && skipSpace() && latin.startsWith("obj", index)) {
+                return ObjectHeader(latin.substring(start, digitsEnd).toInt(), index + 3)
+            }
+            index = digitsEnd + 1
+        }
+        return null
+    }
     private enum class PdfCrypt { IDENTITY, RC4, AES }
     private data class PdfSecurity(val key: ByteArray, val streamCrypt: PdfCrypt, val encryptMetadata: Boolean)
     private data class DecodedPageContent(val bytes: ByteArray, val complete: Boolean)
@@ -797,17 +865,15 @@ object PdfParser {
         data class Operator(val name: String) : PdfContentToken()
     }
 
-    private fun extractIndirectObjects(bytes: ByteArray, latin: String): Map<Int, PdfObject> {
+    private fun extractIndirectObjects(bytes: ByteArray, latin: PdfByteView): Map<Int, PdfObject> {
         val scanned = linkedMapOf<Int, ScannedObject>()
-        // Kotlin MatchResult.next() creates a new Matcher for each match.
-        // Android's ICU matcher retains its own native input representation;
-        // recreating it over an entire binary PDF can exhaust native memory.
-        // Reuse one matcher for this whole-file scan.
-        val header = Regex("(\\d+)\\s+0\\s+obj").toPattern().matcher(latin)
-        header.region(0, latin.length)
-        while (header.find()) {
-            val number = header.group(1)!!.toInt()
-            val bodyStart = header.end()
+        // Scan byte offsets directly: an ICU regex matcher over the binary
+        // file would materialize and retain a second whole-file text buffer.
+        var position = 0
+        while (true) {
+            val header = objectHeader(latin, position) ?: break
+            val number = header.number
+            val bodyStart = header.end
             val streamStart = findStreamKeyword(latin, bodyStart)
             val next: Int
             if (streamStart == null) {
@@ -846,7 +912,7 @@ object PdfParser {
             // Do not let object headers embedded in a binary stream become
             // separate objects. The resolved endobj is the only safe restart
             // point for the whole-file matcher.
-            header.region(next.coerceIn(0, latin.length), latin.length)
+            position = next.coerceIn(0, latin.length)
         }
 
         val out = linkedMapOf<Int, PdfObject>()
@@ -871,7 +937,7 @@ object PdfParser {
                 finalBounds.dataStart >= 0 &&
                 finalBounds.dataEnd <= bytes.size
             ) {
-                bytes.copyOfRange(finalBounds.dataStart, finalBounds.dataEnd)
+                PdfStream(bytes, finalBounds.dataStart, finalBounds.dataEnd, cache = !isImageDict(candidate.dict))
             } else {
                 // Keep the object dictionary and its endobj boundary, but
                 // discard oversized bytes so later parsing fails closed.
@@ -883,11 +949,10 @@ object PdfParser {
         val security = pdfSecurity(latin, out)
         if (security != null && security.second.streamCrypt != PdfCrypt.IDENTITY) {
             out.toMap().forEach { (number, obj) ->
-                if (obj.stream != null && number != security.first &&
+                if (obj.hasStream && number != security.first &&
                     !Regex("/Type\\s*/XRef\\b").containsMatchIn(obj.dict) &&
                     (security.second.encryptMetadata || !Regex("/Type\\s*/Metadata\\b").containsMatchIn(obj.dict))) {
-                    val plain = decryptPdfStream(obj.stream, security.second, number)
-                    out[number] = obj.copy(stream = plain)
+                    out[number] = obj.copy(payload = obj.payload!!.decrypted { decryptPdfStream(it, security.second, number) })
                 }
             }
         }
@@ -929,12 +994,12 @@ object PdfParser {
     }
 
     /** Authenticate the empty user password before any encrypted stream is interpreted as PDF syntax. */
-    private fun pdfSecurity(latin: String, objects: Map<Int, PdfObject>): Pair<Int, PdfSecurity>? {
+    private fun pdfSecurity(latin: PdfByteView, objects: Map<Int, PdfObject>): Pair<Int, PdfSecurity>? {
         val trailerStart = latin.lastIndexOf("trailer")
         val trailer = if (trailerStart >= 0) dictionaryBody(latin.substring(trailerStart)) else
             objects.values.firstOrNull { Regex("/Type\\s*/XRef\\b").containsMatchIn(it.dict) }?.dict
         if (trailer == null) {
-            require(!Regex("/Encrypt\\s+\\d+\\s+0\\s+R").containsMatchIn(latin)) { "Unsupported PDF encryption trailer" }
+            require(objects.values.none { dictionaryOrReference(it.dict, "Encrypt").reference != null }) { "Unsupported PDF encryption trailer" }
             return null
         }
         val reference = dictionaryOrReference(trailer, "Encrypt")
@@ -1093,10 +1158,12 @@ object PdfParser {
             ?.toInt()
     }
 
-    private fun findStreamKeyword(latin: String, fromIndex: Int): Int? {
-        val firstEndObj = findPdfKeyword(latin, "endobj", fromIndex)
-        var candidate = latin.indexOf("stream", fromIndex)
-        while (candidate >= 0 && (firstEndObj < 0 || candidate < firstEndObj)) {
+    private fun findStreamKeyword(latin: PdfByteView, fromIndex: Int): Int? {
+        for (candidate in fromIndex until latin.length) {
+            if (latin.startsWith("endobj", candidate) &&
+                (candidate == 0 || isPdfWhitespace(latin[candidate - 1]) || latin[candidate - 1] in ">])") &&
+                (candidate + 6 == latin.length || isPdfWhitespace(latin[candidate + 6]))) return null
+            if (!latin.startsWith("stream", candidate)) continue
             val keywordEnd = candidate + "stream".length
             val afterIsWhitespace = keywordEnd < latin.length && isPdfWhitespace(latin[keywordEnd])
             if (afterIsWhitespace) {
@@ -1111,12 +1178,11 @@ object PdfParser {
                     return candidate
                 }
             }
-            candidate = latin.indexOf("stream", candidate + "stream".length)
         }
         return null
     }
 
-    private fun streamDataStart(latin: String, streamKeyword: Int): Int? {
+    private fun streamDataStart(latin: PdfByteView, streamKeyword: Int): Int? {
         var start = streamKeyword + "stream".length
         if (start >= latin.length) return null
         return when (latin[start]) {
@@ -1127,7 +1193,7 @@ object PdfParser {
     }
 
     private fun streamBounds(
-        latin: String,
+        latin: PdfByteView,
         dataStart: Int,
         declaredLength: Int?,
         expectedObjectEnd: Int? = null,
@@ -1192,7 +1258,7 @@ object PdfParser {
         }
     }
 
-    private fun findPdfKeyword(latin: String, keyword: String, fromIndex: Int): Int {
+    private fun findPdfKeyword(latin: PdfByteView, keyword: String, fromIndex: Int): Int {
         var index = latin.indexOf(keyword, fromIndex)
         while (index >= 0) {
             val end = index + keyword.length
@@ -1209,7 +1275,7 @@ object PdfParser {
         return -1
     }
 
-    private fun isPdfWhitespaceOnly(latin: String, start: Int, end: Int): Boolean {
+    private fun isPdfWhitespaceOnly(latin: PdfByteView, start: Int, end: Int): Boolean {
         if (start < 0 || end < start || end > latin.length) return false
         for (index in start until end) {
             if (!isPdfWhitespace(latin[index])) return false
@@ -1998,14 +2064,13 @@ object PdfParser {
             }) return false
         return xobjects.values.all { number ->
             val image = objects[number] ?: return@all false
-            val payload = image.stream ?: return@all false
+            val stream = image.payload ?: return@all false
+            val payload = stream.prefix()
             isImageDict(image.dict) && xObjectMediaType(image.dict, payload) == "image/jpeg" &&
                 illustrationColourSpace(objects, image.dict) &&
                 listOf("Mask", "SMask", "Decode", "DecodeParms", "DP", "ImageMask", "Alternates", "Matte")
                     .none { findTopLevelValueStart(image.dict, it) >= 0 } &&
-                payload.size > 64 && payload.takeLast(2) == listOf(0xFF.toByte(), 0xD9.toByte()) &&
-                payload.indices.any { index -> index + 1 < payload.size &&
-                    payload[index] == 0xFF.toByte() && payload[index + 1] == 0xDA.toByte() }
+                stream.completeJpeg()
         }
     }
 

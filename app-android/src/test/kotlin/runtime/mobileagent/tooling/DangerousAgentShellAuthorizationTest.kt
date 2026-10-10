@@ -4,6 +4,10 @@
 package runtime.mobileagent.tooling
 
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitCancellation
+import kotlinx.coroutines.withTimeout
 import org.junit.jupiter.api.Assertions.*
 import org.junit.jupiter.api.Test
 import runtime.mobileagent.domain.Authority
@@ -58,6 +62,27 @@ class DangerousAgentShellAuthorizationTest {
         assertTrue(f.commands.isEmpty())
     }
 
+    @Test fun revocationStopsInFlightShellAndNeverReplaysItsUnknownResult() = runBlocking {
+        for (revoke in listOf<(Fixture) -> Unit>(
+            { it.danger.setPolicy(DangerousMode.DISABLED) },
+            { it.authority.updatePlatformGrant(Authority.SHIZUKU, PlatformGrant.REVOKED) },
+            { it.authority.selectAuthority(Authority.WIRED_ADB) },
+        )) {
+            val f = Fixture()
+            f.waitForCancellation = true
+            val executor = f.executor()
+            val call = call("active")
+            val pending = async { executor.invoke(call) }
+            withTimeout(2_000) { f.started.await() }
+            revoke(f)
+            assertTrue(withTimeout(2_000) { pending.await() } is ToolResult.UnknownOutcome)
+            assertTrue(f.cancelled.isNotEmpty())
+            assertEquals(1, f.commands.size)
+            assertTrue(executor.invoke(call) is ToolResult.UnknownOutcome)
+            assertFalse(executor.authorizeReplay(call))
+        }
+    }
+
     @Test fun confirmHighRiskStillRequiresApprovalAndUnknownIsNeverReexecuted() = runBlocking {
         val f = Fixture(DangerousMode.ENABLED_CONFIRM_HIGH_RISK)
         val executor = f.executor()
@@ -78,6 +103,9 @@ class DangerousAgentShellAuthorizationTest {
         val commands = mutableListOf<String>()
         var liveAuthorization = true
         var unknown = false
+        var waitForCancellation = false
+        val started = CompletableDeferred<Unit>()
+        val cancelled = mutableListOf<String>()
         val authority = AuthorityManager().apply {
             selectAuthority(Authority.SHIZUKU)
             setUserIntent(Authority.SHIZUKU, true)
@@ -97,10 +125,15 @@ class DangerousAgentShellAuthorizationTest {
                 backends = mapOf(Authority.SHIZUKU to object : ShellExecutor {
                     override suspend fun execute(request: ShellExecRequest): ShellExecResult {
                         commands += request.command
+                        started.complete(Unit)
+                        if (waitForCancellation) awaitCancellation()
                         return if (unknown) ShellExecResult.unknownOutcome(request, 1)
                             else ShellExecResult.succeeded(request, 0, "fixture", "", 1)
                     }
-                    override suspend fun cancel(requestId: String) = true
+                    override suspend fun cancel(requestId: String): Boolean {
+                        cancelled += requestId
+                        return true
+                    }
                 }),
                 auditSink = object : ShellAuditSink {
                     override suspend fun recordStarted(event: ShellAuditEvent) = true

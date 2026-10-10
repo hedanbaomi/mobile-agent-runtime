@@ -83,7 +83,11 @@ class LicenseScanner(
         current.forEachDirectoryEntry { child ->
             val rel = child.relativeTo(root).toString().replace('\\', '/')
             if (child.isDirectory()) {
-                if (child.name !in SKIP_DIRS && !rel.startsWith(".")) {
+                // A Kotlin package may itself be named `build`. Only Gradle output
+                // directories outside source sets are generated artifacts.
+                val generatedBuild = child.name == "build" && "src" !in child.relativeTo(root).map { it.toString() }
+                val firstPartyHiddenTree = rel == ".github" || rel.startsWith(".github/")
+                if (!generatedBuild && child.name !in SKIP_DIRS && (!rel.startsWith(".") || firstPartyHiddenTree)) {
                     walk(root, child, thirdParty, violations)
                 }
             } else if (child.isRegularFile() && rel in PINNED_LEGAL_ASSETS) {
@@ -188,7 +192,6 @@ class LicenseScanner(
             ".git",
             ".codegraph",
             ".gradle",
-            "build",
             "node_modules",
             ".private",
             ".idea",
@@ -198,7 +201,7 @@ class LicenseScanner(
         )
         private val FIRST_PARTY_EXTENSIONS = setOf(
             "kt", "kts", "java", "md", "py", "ts", "js", "css", "html", "xml",
-            "yml", "yaml", "toml", "properties", "sql", "gradle",
+            "yml", "yaml", "toml", "properties", "sql", "gradle", "pro",
         )
         private val FIRST_PARTY_NAMES = setOf("CODEOWNERS", ".gitignore", ".gitattributes")
         private val THIRD_PARTY_WRAPPER = setOf(

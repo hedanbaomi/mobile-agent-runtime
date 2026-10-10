@@ -408,6 +408,9 @@ class KnowledgeViewModel(
                             // status, loading flag or preview changed meanwhile.
                             state.value = state.value.copy(
                                 bases = snapshot.bases, selectedBaseId = snapshot.selectedBaseId,
+                                storageUsedBytes = snapshot.storageUsedBytes,
+                                storageQuotaBytes = snapshot.storageQuotaBytes,
+                                foreignKeyIssueCount = snapshot.foreignKeyIssueCount,
                                 documents = snapshot.documents, jobs = snapshot.jobs, waiting = snapshot.waiting,
                                 rebuildEnabled = snapshot.selectedBaseId != null &&
                                     !state.value.loading &&
@@ -445,6 +448,7 @@ class KnowledgeViewModel(
 
     /** IO only. No Compose state is read or written while repository locks may wait. */
     private fun loadSnapshot(selectedId: String?): KnowledgeUiState {
+            val storage = repo.storageUsage()
             val bases = repo.listKnowledgeBaseDisplaySummaries()
             val selected = selectedId?.takeIf { id -> bases.any { it.id == id } } ?: bases.firstOrNull()?.id
             val documents = if (selected == null) emptyList() else app.container.db.query(
@@ -457,6 +461,9 @@ class KnowledgeViewModel(
             val defaultVisionTarget = visionTargets.firstOrNull()
             val target = defaultVisionTarget?.label.orEmpty()
             return KnowledgeUiState(
+                storageUsedBytes = storage.totalBytes,
+                storageQuotaBytes = storage.quotaBytes,
+                foreignKeyIssueCount = repo.foreignKeyCompatibility().size,
                 bases = bases.map { KnowledgeBaseUi(it.id, it.name, it.documentCount) },
                 selectedBaseId = selected,
                 documents = documents.map { row -> KnowledgeDocumentUi(row.string("id"), row.string("display_name"), row.string("format"),
@@ -614,6 +621,14 @@ class KnowledgeViewModel(
         }) { id -> if (revision == selectionRevision) selectBase(id) }
     }
     fun deleteBase(id: String) = action { repo.deleteKnowledgeBase(id); "知识库已删除，引用保留为来源已移除。" }
+    fun collectStorage() = action {
+        val result = repo.collectStorage()
+        "已回收 %.1f MiB；共享资料和未结束任务已保留。".format(java.util.Locale.ROOT, result.reclaimedBytes / (1024.0 * 1024.0))
+    }
+    fun configureStorageQuota(bytes: Long) = action {
+        repo.configureStorageQuota(bytes)
+        "本地存储上限已保存。"
+    }
     fun deleteDocument(id: String) = action { repo.deleteDocument(id); "文档已从知识库与当前索引删除。" }
     fun cancelJob(id: String) { ImportWorkScheduler.cancel(app, id); reload() }
     /** Cancel the process-owned staging operation, when the UI has an operation handle. */

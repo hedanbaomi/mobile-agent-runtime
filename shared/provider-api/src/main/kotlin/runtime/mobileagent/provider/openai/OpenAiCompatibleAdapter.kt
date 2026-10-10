@@ -18,7 +18,6 @@ import io.ktor.utils.io.ByteReadChannel
 import java.io.IOException
 import java.io.ByteArrayOutputStream
 import java.net.ConnectException
-import java.net.URI
 import java.net.URLEncoder
 import java.net.UnknownHostException
 import java.net.SocketTimeoutException
@@ -261,8 +260,6 @@ class OpenAiCompatibleAdapter(
                 retryable = false,
                 charged = true,
             )
-        } finally {
-            token.toCharArray().fill('\u0000')
         }
     }
 
@@ -384,8 +381,6 @@ class OpenAiCompatibleAdapter(
                     CapabilityCheckResult(CapabilityCheck.IMAGE, CapabilityCheckStatus.NOT_RUN),
                 ),
             )
-        } finally {
-            token.toCharArray().fill('\u0000')
         }
     }
 
@@ -617,8 +612,6 @@ class OpenAiCompatibleAdapter(
             if (dispatchStatus != ModelDispatchStatus.NOT_DISPATCHED) dispatchStatus = ModelDispatchStatus.UNKNOWN_AFTER_DISPATCH
             emitTerminalFailure(streamState, ErrorCode.UNKNOWN_OUTCOME.name)
             request.reportDiagnostic(ModelDiagnosticStage.TERMINAL, dispatchStatus, started, "chat.completions", httpStatus, ErrorCode.UNKNOWN_OUTCOME.name, error, responseContentType = responseContentType)
-        } finally {
-            token.toCharArray().fill('\u0000')
         }
     }
 
@@ -823,8 +816,6 @@ class OpenAiCompatibleAdapter(
             // transport or schema failure.  Never turn that boundary into a
             // successful or automatically retryable result.
             throw embeddingFailure(ErrorCode.UNKNOWN_OUTCOME, "Embedding outcome is unknown")
-        } finally {
-            token.toCharArray().fill('\u0000')
         }
     }
 
@@ -1534,7 +1525,6 @@ class OpenAiCompatibleAdapter(
         )
     }
 
-    private enum class ProbeFeature { STREAM, TOOLS, IMAGE }
 
     private data class MetadataProbeResult(
         val summary: String,
@@ -1570,52 +1560,7 @@ class OpenAiCompatibleAdapter(
     private suspend fun resolveHeaders(
         token: String,
         requestHeaders: Map<String, RequestHeaderValue>,
-    ): ResolvedHeaders {
-        val merged = linkedMapOf<String, RequestHeaderValue>()
-        defaultHeaders.forEach { (name, value) -> merged[name] = value }
-        requestHeaders.forEach { (name, value) ->
-            val previous = merged.keys.firstOrNull { it.equals(name, ignoreCase = true) }
-            if (previous != null) merged.remove(previous)
-            merged[name] = value
-        }
-        val values = linkedMapOf<String, String>("Authorization" to "Bearer $token")
-        val secrets = mutableListOf<String>()
-        val host = URI(baseUrl).host?.lowercase()?.trim('.')
-            ?: throw InvalidHeaderException("Provider URL has no host")
-        merged.forEach { (name, value) ->
-            validateHeaderName(name)
-            when (value) {
-                is RequestHeaderValue.Plain -> {
-                    validateHeaderValue(value.value)
-                    values[name] = value.value
-                }
-                is RequestHeaderValue.SecretRef -> {
-                    if (value.ref.isBlank()) throw SecretUnavailableException()
-                    val resolver = headerSecretResolver ?: throw SecretUnavailableException()
-                    val chars = resolver.resolve(host, value.ref)
-                    val text = chars.concatToString()
-                    chars.fill('\u0000')
-                    if (text.isEmpty()) throw SecretUnavailableException()
-                    validateHeaderValue(text)
-                    values[name] = text
-                    secrets += text
-                }
-            }
-        }
-        return ResolvedHeaders(values, secrets)
-    }
-
-    private fun validateHeaderName(name: String) {
-        if (name.isBlank() || name.any { it == '\r' || it == '\n' }) throw InvalidHeaderException("Header name is invalid")
-        val lower = name.lowercase()
-        if (lower in FORBIDDEN_HEADERS || lower == "authorization" || lower == "api_key" || lower == "api-key") {
-            throw InvalidHeaderException("Header $name is reserved")
-        }
-    }
-
-    private fun validateHeaderValue(value: String) {
-        if (value.any { it == '\r' || it == '\n' }) throw InvalidHeaderException("Header value is invalid")
-    }
+    ): ResolvedHeaders = resolveOpenAiHeaders(baseUrl, token, defaultHeaders, requestHeaders, headerSecretResolver)
 
     private suspend fun kotlinx.coroutines.flow.FlowCollector<ModelEvent>.emitJsonResponse(
         raw: String,
@@ -1779,15 +1724,6 @@ class OpenAiCompatibleAdapter(
                     ?.takeIf { it.isNotEmpty() }
             }
 
-    private data class ResolvedHeaders(
-        val values: Map<String, String>,
-        val secrets: List<String>,
-    ) {
-        override fun toString(): String = "ResolvedHeaders(values=${values.keys}, secrets=<redacted>)"
-    }
-
-    private class SecretUnavailableException : RuntimeException()
-    private class InvalidHeaderException(message: String) : RuntimeException(message)
     private class InvalidConnectionConfigException : RuntimeException()
 
     companion object {
@@ -1814,19 +1750,6 @@ class OpenAiCompatibleAdapter(
         // invalid test fixture.
 
 
-        private val FORBIDDEN_HEADERS = setOf(
-            "host",
-            "content-length",
-            "transfer-encoding",
-            "connection",
-            "upgrade",
-            "proxy-authorization",
-            "proxy-authenticate",
-            "te",
-            "trailer",
-            "content-type",
-            "accept",
-        )
 
         fun url(base: String, path: String): String = base.trimEnd('/') + path
 

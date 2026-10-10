@@ -18,6 +18,7 @@ import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
 import runtime.mobileagent.background.ConsentTicketHandler
+import runtime.mobileagent.background.ImportCancellationHandler
 import runtime.mobileagent.background.ImportWorkScheduler
 import runtime.mobileagent.background.ImportWorkerRegistry
 
@@ -29,10 +30,12 @@ class ConsentCancellationDeviceTest {
 
     private val scheduledNames = mutableListOf<String>()
     private var originalConsentHandler: ConsentTicketHandler? = null
+    private var originalCancellationHandler: ImportCancellationHandler? = null
 
     @Before
     fun disableConsentHandler() {
         originalConsentHandler = ImportWorkerRegistry.consentHandler
+        originalCancellationHandler = ImportWorkerRegistry.cancellationHandler
         ImportWorkerRegistry.consentHandler = null
     }
 
@@ -42,6 +45,7 @@ class ConsentCancellationDeviceTest {
             runCatching { WorkManager.getInstance(context).cancelUniqueWork(name).result.get(10, TimeUnit.SECONDS) }
         }
         ImportWorkerRegistry.consentHandler = originalConsentHandler
+        ImportWorkerRegistry.cancellationHandler = originalCancellationHandler
     }
 
     @Test(timeout = 60_000)
@@ -69,10 +73,32 @@ class ConsentCancellationDeviceTest {
             .single()
             .id)
 
+        var persisted = false
+        ImportWorkerRegistry.cancellationHandler = ImportCancellationHandler { cancelledJob ->
+            assertEquals(jobId, cancelledJob)
+            assertTrue("Work must still exist before durable cancellation", WorkManager.getInstance(context)
+                .getWorkInfosForUniqueWork(ticketName).get(5, TimeUnit.SECONDS).none { it.state == WorkInfo.State.CANCELLED })
+            persisted = true
+        }
         ImportWorkScheduler.cancel(context, jobId)
+        assertTrue("The durable hook must run before cancel returns", persisted)
 
         val cancelled = awaitState(ticketName, WorkInfo.State.CANCELLED, 30_000)
         assertEquals(WorkInfo.State.CANCELLED, cancelled.state)
+    }
+
+    @Test(timeout = 60_000)
+    fun failedDurableCancellationDoesNotStopScheduledWork() {
+        val jobId = "consent-cancel-${UUID.randomUUID()}"
+        val ticketId = "ticket-${UUID.randomUUID()}"
+        val name = "${ImportWorkScheduler.TAG}:consent:$ticketId"
+        scheduledNames += name
+        ImportWorkScheduler.enqueueConsent(context, ticketId, visionConfigured = false, jobId = jobId)
+        ImportWorkerRegistry.cancellationHandler = ImportCancellationHandler { error("synthetic persistence failure") }
+        val failure = runCatching { ImportWorkScheduler.cancel(context, jobId) }.exceptionOrNull()
+        assertTrue(failure is IllegalStateException)
+        val work = WorkManager.getInstance(context).getWorkInfosForUniqueWork(name).get(5, TimeUnit.SECONDS)
+        assertTrue("Cancellation must not commit before durable intent", work.none { it.state == WorkInfo.State.CANCELLED })
     }
 
     private fun awaitState(name: String, expected: WorkInfo.State, timeoutMs: Long): WorkInfo {

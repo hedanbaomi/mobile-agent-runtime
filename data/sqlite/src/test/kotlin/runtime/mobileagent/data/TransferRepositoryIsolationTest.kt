@@ -33,6 +33,70 @@ import runtime.mobileagent.serialization.TransferOptions
 
 class TransferRepositoryIsolationTest {
     @Test
+    fun exportRetainsLeasedBlobsUntilTheChangedSourceFenceRejectsBackup() {
+        JdbcSqlConnection().use { db ->
+            Migrations.apply(db)
+            createAgent(db, "caslease")
+            val sink = runtime.mobileagent.knowledge.MemoryBlobSink()
+            val knowledge = KnowledgeRepository(db, sink)
+            val kb = knowledge.createKnowledgeBase("leased export")
+            val job = knowledge.importBytes("source.txt", "text/plain", "leased immutable source".toByteArray(), false, kb)
+            val agents = AgentRepository(db)
+            agents.saveWithPrompt(agents.get("agent.caslease")!!.copy(knowledgeBaseIds = listOf(kb)), "Synthetic prompt")
+            val output = FirstWriteCheckingOutputStream {
+                knowledge.deleteDocument(job.documentId)
+                assertTrue(sink.protectedHashes().isNotEmpty())
+                assertTrue(sink.storedHashes().isNotEmpty())
+            }
+            val error = assertThrows(AppException::class.java) {
+                TransferRepository(db, blobSink = sink).exportArchive("agent.caslease", TransferOptions(includeKnowledgeContent = true), output)
+            }
+            assertTrue(error.message.orEmpty().contains("backup source changed"))
+            assertTrue(sink.protectedHashes().isEmpty())
+            knowledge.collectStorage()
+            assertTrue(sink.storedHashes().isEmpty())
+        }
+    }
+
+    @Test
+    fun importProtectsPreflightBlobsUntilFinalSqlPublication() {
+        JdbcSqlConnection().use { source ->
+            Migrations.apply(source)
+            createAgent(source, "importlease")
+            val sourceSink = runtime.mobileagent.knowledge.MemoryBlobSink()
+            val sourceKnowledge = KnowledgeRepository(source, sourceSink)
+            val kb = sourceKnowledge.createKnowledgeBase("lease import")
+            // Incompressible enough to give the bounded ZIP reader measurable input
+            // after its descriptor read-ahead, while remaining valid UTF-8 text.
+            val content = buildString { val random = Random(741); repeat(16_384) { append(('a'.code + random.nextInt(26)).toChar()) } }
+            sourceKnowledge.importBytes("source.txt", "text/plain", content.toByteArray(), false, kb)
+            val agents = AgentRepository(source)
+            agents.saveWithPrompt(agents.get("agent.importlease")!!.copy(knowledgeBaseIds = listOf(kb)), "Synthetic prompt")
+            val archive = ByteArrayOutputStream()
+            TransferRepository(source, blobSink = sourceSink).exportArchive("agent.importlease", TransferOptions(includeKnowledgeContent = true), archive)
+            JdbcSqlConnection().use { target ->
+                Migrations.apply(target)
+                val actualSink = runtime.mobileagent.knowledge.MemoryBlobSink()
+                val collector = KnowledgeRepository(target, actualSink)
+                val interleavingSink = object : runtime.mobileagent.knowledge.BlobSink by actualSink {
+                    override fun put(bytes: ByteArray, mediaType: String): runtime.mobileagent.knowledge.StoredBlob {
+                        val stored = actualSink.put(bytes, mediaType)
+                        assertTrue(stored.sha256 in actualSink.protectedHashes())
+                        collector.collectStorage()
+                        assertNotNull(actualSink.get(stored.sha256))
+                        return stored
+                    }
+                }
+                TransferRepository(target, blobSink = interleavingSink).importArchive(archive.toByteArray())
+                assertTrue(actualSink.protectedHashes().isEmpty())
+                collector.collectStorage()
+                assertTrue(actualSink.storedHashes().isNotEmpty())
+                assertTrue(target.query("SELECT id FROM documents WHERE deleted_at IS NULL").isNotEmpty())
+            }
+        }
+    }
+
+    @Test
     fun archiveWritesManifestBeforeLoadingConversationHistory() {
         JdbcSqlConnection().use { source ->
             Migrations.apply(source)

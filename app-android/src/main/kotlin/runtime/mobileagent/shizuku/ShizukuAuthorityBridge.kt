@@ -965,7 +965,15 @@ class ShizukuAuthorityBridge(
             ?.takeIf { it >= 0 }
         val permissionGranted = runCatching {
             Shizuku.checkSelfPermission() == PackageManager.PERMISSION_GRANTED
-        }.getOrElse { lastKnownPermissionGranted }
+        }.getOrNull() ?: return unavailable(
+            installedHint,
+            PERMISSION_CHECK_FAILED,
+            binderAlive = true,
+            apiVersion = apiVersion,
+            // A failed query proves neither authorization nor revocation.
+            // Retain the last platform fact for display but deny dispatch.
+            permissionGranted = lastKnownPermissionGranted,
+        )
         lastKnownPermissionGranted = permissionGranted
         if (!permissionGranted) {
             return unavailable(
@@ -1182,6 +1190,7 @@ class ShizukuAuthorityBridge(
         const val BINDER_UNAVAILABLE = "BINDER_UNAVAILABLE"
         const val API_UNSUPPORTED = "API_UNSUPPORTED"
         const val PERMISSION_REQUIRED = "PERMISSION_REQUIRED"
+        const val PERMISSION_CHECK_FAILED = "PERMISSION_CHECK_FAILED"
         const val SERVER_UID_UNTRUSTED = "SERVER_UID_UNTRUSTED"
         const val SERVER_VERSION_UNSUPPORTED = "SERVER_VERSION_UNSUPPORTED"
         const val USER_SERVICE_UNAVAILABLE = "USER_SERVICE_UNAVAILABLE"

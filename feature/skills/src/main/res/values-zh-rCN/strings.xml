@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- SPDX-FileCopyrightText: 2026 mobileAgentRuntime contributors -->
+<!-- SPDX-License-Identifier: AGPL-3.0-only -->
+<resources>
+    <string name="ui_audit_log_c7dfe2f3" formatted="false">审计日志</string>
+    <string name="ui_cancel_998b9c48" formatted="false">取消</string>
+    <string name="ui_close_6cf4a777" formatted="false">关闭</string>
+    <string name="ui_filter_skills_c7db0d68" formatted="false">筛选技能</string>
+    <string name="ui_grant_a53c2c77" formatted="false">授予</string>
+    <string name="ui_grant_status_d79bc46f" formatted="false">授权状态</string>
+    <string name="ui_import_a_skill_package_check_compatibility_9a6d5f72" formatted="false">导入技能包，检查兼容性后启用。</string>
+    <string name="ui_import_package_0f33589c" formatted="false">导入包</string>
+    <string name="ui_inspect_skill_package_857d34ad" formatted="false">检查技能包</string>
+    <string name="ui_install_fb022450" formatted="false">安装</string>
+    <string name="ui_no_audit_entries_available_ce05939a" formatted="false">暂无审计记录。</string>
+    <string name="ui_no_permissions_declared_f900ab80" formatted="false">未声明权限。</string>
+    <string name="ui_no_skills_available_65cf91a2" formatted="false">暂无技能。</string>
+    <string name="ui_permissions_be9338af" formatted="false">权限</string>
+    <string name="ui_requested_permissions_bbc6afc7" formatted="false">请求的权限</string>
+    <string name="ui_revoke_411a6c97" formatted="false">撤销</string>
+    <string name="ui_s_install_identity_verified_e3c3ceaf">%1$s · 安装包身份已校验</string>
+    <string name="ui_select_a_skill_to_view_details_d6886104" formatted="false">选择技能查看详情。</string>
+    <string name="ui_skill_memory_0ea065bc" formatted="false">技能记忆</string>
+    <string name="ui_skills_2a98e03d" formatted="false">技能</string>
+    <string name="ui_source_content_is_unavailable_929ce8ad" formatted="false">源码内容不可用。</string>
+    <string name="ui_source_files_dabedad9" formatted="false">源码文件</string>
+    <string name="ui_source_listing_unavailable_4b7c7b16" formatted="false">源码列表不可用。</string>
+    <string name="ui_this_removes_the_install_revokes_grants_24a153db" formatted="false">将移出已安装列表、撤销授权并从当前智能体解绑。历史对话、审计记录和该技能的持久记忆会保留；若历史对话仍引用原包，包字节也会保留以供导出，否则会清理。重新使用需要重新导入并授权。</string>
+    <string name="ui_uninstall_3e55535e" formatted="false">确认卸载</string>
+    <string name="ui_uninstall_skill_d11f9422" formatted="false">卸载技能</string>
+    <string name="ui_view_78059812" formatted="false">查看</string>
+</resources>

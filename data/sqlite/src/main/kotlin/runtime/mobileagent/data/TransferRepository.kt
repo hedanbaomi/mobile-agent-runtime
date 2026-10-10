@@ -79,6 +79,7 @@ class TransferRepository(
     private val db: SqlConnection,
     private val clock: () -> String = { Utc.nowIso() },
     private val blobSink: BlobSink? = null,
+    private val vectorIndexDirectory: java.io.File? = null,
 ) {
     private val json = Json { ignoreUnknownKeys = false; explicitNulls = false; encodeDefaults = true }
 
@@ -110,8 +111,16 @@ class TransferRepository(
         if (options.includeKnowledgeContent && blobSink == null) {
             throw invalid("Full knowledge export requires a BlobSink")
         }
+        val protections = mutableListOf<AutoCloseable>()
+        try {
         val archive = db.transaction {
             val payload = buildAgentBundle(agentId, options, forArchive = true)
+            if (options.includeKnowledgeContent) {
+                val sink = checkNotNull(blobSink)
+                payload.manifest.knowledgeBases.flatMap { it.blobs }.map { it.hash }.distinct().forEach {
+                    protections += sink.protect(it)
+                }
+            }
             ArchiveSourceSnapshot(payload, readArchiveSourceVersion())
         }
         val payload = archive.payload
@@ -162,6 +171,7 @@ class TransferRepository(
             verifyArchiveSourceUnchanged(archive.sourceVersion)
             zip.finish()
         }
+        } finally { protections.asReversed().forEach { it.close() } }
     }
 
     fun exportArchive(agentId: String, output: OutputStream) =
@@ -464,6 +474,7 @@ class TransferRepository(
         val stagedSkills = linkedMapOf<String, Path>()
         val stagedConversations = linkedMapOf<String, Path>()
         val stagedBlobs = linkedMapOf<String, StoredBlob>()
+        val protections = mutableListOf<AutoCloseable>()
         try {
             val countedInput = CountingInputStream(input)
             ZipInputStream(countedInput).use { zip ->
@@ -488,7 +499,13 @@ class TransferRepository(
                             val bytes = readEntryBytes(zip, entry, TransferArchiveLimits.MAX_ENTRY_BYTES, counter)
                             verifyBlob(blob, bytes)
                             val sink = blobSink ?: throw invalid("Full knowledge import requires a BlobSink")
-                            val stored = sink.put(bytes, blob.mediaType)
+                            protections += sink.protect(hash)
+                            val stored = db.transaction {
+                                sink.withStorageLock {
+                                    if (hash !in sink.storedHashes()) StorageMaintenance(db, sink, vectorIndexDirectory).requireCapacity(bytes.size.toLong() + 65_536)
+                                    sink.put(bytes, blob.mediaType)
+                                }
+                            }
                             if (stored.sha256 != blob.hash || stored.byteLength.toLong() != blob.byteLength) {
                                 throw invalid("Blob sink returned inconsistent metadata for ${blob.hash}")
                             }
@@ -523,6 +540,11 @@ class TransferRepository(
                 val warnings = mutableListOf<String>()
                 var importedAgentId: String? = null
                 db.transaction {
+                    blobSink?.let { sink ->
+                        val metadataGrowth = manifestRaw.size.toLong() * 3 +
+                            (stagedSkills.values + stagedConversations.values).sumOf { Files.size(it) * 3 } + 1_048_576
+                        StorageMaintenance(db, sink, vectorIndexDirectory).requireCapacity(metadataGrowth)
+                    }
                     captureExistingHistory()
                     bundle.knowledgeBases.forEach { kb ->
                         importKnowledge(kb, conflictPolicy, warnings, stagedBlobs)
@@ -565,6 +587,7 @@ class TransferRepository(
         } catch (error: Exception) {
             throw invalid("Transfer archive could not be imported: ${error.message ?: "malformed archive"}")
         } finally {
+            protections.asReversed().forEach { it.close() }
             (stagedSkills.values + stagedConversations.values).forEach { runCatching { Files.deleteIfExists(it) } }
         }
     }

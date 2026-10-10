@@ -59,8 +59,8 @@ data class EffectiveCapabilitySnapshot(
         val candidates = grants.filter { grant ->
             grant.capability == capability &&
                 grant.skillInstallId == skillId &&
-                (workspaceId == null || grant.workspaceId == null || grant.workspaceId == workspaceId) &&
-                (path == null || pathAllowed(grant.pathScope, path))
+                (grant.workspaceId == null || workspaceId != null && grant.workspaceId == workspaceId) &&
+                (grant.pathScope == null || path != null && pathAllowed(grant.pathScope, path))
         }
         val capabilityAllowed = if (skillId == null) capability in capabilities else {
             capability in perSkillCapabilities[skillId].orEmpty()
@@ -319,15 +319,28 @@ class EffectiveCapabilityResolver(
             snapshot.grants.asSequence()
                 .filter { grant ->
                     grant.capability == capability && grant.skillInstallId == context.skillId &&
-                        (workspaceId == null || grant.workspaceId == null || grant.workspaceId == workspaceId) &&
-                        (path == null || grant.pathScope == null || path == grant.pathScope || path.startsWith("${grant.pathScope}/"))
+                        workspaceMatches(grant.workspaceId, workspaceId) &&
+                        pathMatches(grant.pathScope, path)
                 }
                 .map { it.revision }
                 .maxOrNull()
         }.getOrNull()
     }
 
-    private fun resolveContext(context: ToolExecutionContext): EffectiveCapabilitySnapshot {
+    /** A consumed ONCE row remains valid only for its already admitted request. */
+    fun revalidateInFlight(context: ToolExecutionContext, capability: CapabilityId, consumedOnceGrant: CapabilityGrant? = null): Boolean =
+        runCatching { resolveContext(context, consumedOnceGrant).allows(capability, context.skillId) }.getOrDefault(false)
+
+    /** A single deadline wakeup suffices; immutable run grants cannot gain a later expiry. */
+    fun inFlightExpiryDelayMs(context: ToolExecutionContext, capability: CapabilityId, consumedOnceGrant: CapabilityGrant? = null): Long? {
+        val resolved = resolveContext(context, consumedOnceGrant)
+        val matching = matchingDispatchGrants(resolved, context, capability, null, null, false)
+        if (matching.any { it.expiresAt.isNullOrBlank() }) return null
+        return matching.mapNotNull { it.expiresAt?.let { expiry -> Instant.parse(expiry).toEpochMilli() } }
+            .maxOrNull()?.let { (it - nowEpochMs()).coerceAtLeast(0) }
+    }
+
+    private fun resolveContext(context: ToolExecutionContext, consumedOnceGrant: CapabilityGrant? = null): EffectiveCapabilitySnapshot {
         /*
          * A context normally contains the immutable-at-run-start rows, but
          * those rows are not a live authorization source.  When repository
@@ -360,6 +373,13 @@ class EffectiveCapabilityResolver(
             liveReadersConfigured -> liveGrants
             context.canonicalGrants.isNotEmpty() -> context.canonicalGrants
             else -> emptyList()
+        }.map { live ->
+            // Only the exact successful CAS captured by this dispatch can
+            // preserve an ONCE grant. Revocation or any later edit still fails.
+            val consumed = consumedOnceGrant
+            if (consumed != null && consumed.lifetime == GrantLifetime.ONCE && consumed.consumedAt == null &&
+                live.consumedAt != null && live == consumed.copy(revision = consumed.revision + 1, consumedAt = live.consumedAt)
+            ) consumed else live
         }
         val sourceBindings = when {
             liveReadersConfigured -> liveBindings

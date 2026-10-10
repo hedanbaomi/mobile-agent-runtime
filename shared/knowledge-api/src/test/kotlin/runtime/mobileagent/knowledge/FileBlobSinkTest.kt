@@ -36,6 +36,32 @@ class RetrievalBudgetTest {
 
 class FileBlobSinkTest {
     @Test
+    fun handlesShareIdempotentLeasesAndRejectInvalidHashes(@TempDir tmp: Path) {
+        val first = FileBlobSink(tmp.toFile())
+        val second = FileBlobSink(tmp.resolve(".").toFile())
+        val blob = first.put("protected bytes".toByteArray(), "text/plain")
+        val lease = first.protect(blob.sha256)
+        assertTrue(blob.sha256 in second.protectedHashes())
+        assertTrue(!second.remove(blob.sha256))
+        lease.close()
+        lease.close()
+        assertTrue(second.remove(blob.sha256))
+        assertEquals(0L, first.allocatedBytes())
+        org.junit.jupiter.api.Assertions.assertThrows(IllegalArgumentException::class.java) { first.get("../private") }
+        org.junit.jupiter.api.Assertions.assertThrows(IllegalArgumentException::class.java) { first.protect("x") }
+    }
+
+    @Test
+    fun temporaryCleanupOnlyRemovesItsOwnInterruptedWrites(@TempDir tmp: Path) {
+        val sink = FileBlobSink(tmp.toFile())
+        val dir = tmp.resolve("aa").toFile().also { it.mkdirs() }
+        java.io.File(dir, "${"a".repeat(64)}-123.tmp").writeBytes(ByteArray(10))
+        val unknown = java.io.File(dir, "keep.tmp").also { it.writeBytes(ByteArray(20)) }
+        assertEquals(10L, sink.removeTemporaryFiles())
+        assertTrue(unknown.exists())
+        assertEquals(20L, sink.allocatedBytes())
+    }
+    @Test
     fun replacesCorruptExistingBlob(@TempDir tmp: Path) {
         val sink = FileBlobSink(tmp.toFile())
         val payload = "hello-cas".toByteArray()

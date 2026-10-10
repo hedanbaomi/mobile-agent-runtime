@@ -3,6 +3,8 @@
 
 package runtime.mobileagent.feature.settings
 
+import androidx.compose.ui.res.stringResource
+
 import runtime.mobileagent.domain.WebSearchProvider
 
 import androidx.compose.foundation.layout.Arrangement
@@ -262,7 +264,7 @@ fun SettingsScreen(
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
         if (showPageTitle) {
-            Text(if (zh) "设置" else "Settings", style = MaterialTheme.typography.headlineSmall)
+            Text(stringResource(R.string.sett_title), style = MaterialTheme.typography.headlineSmall)
         }
         if (state.error != null) {
             Card(
@@ -279,7 +281,7 @@ fun SettingsScreen(
         }
         Card(Modifier.fillMaxWidth().testTag("settings.appearance")) {
             Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                Text(if (zh) "外观与语言" else "Appearance and language", style = MaterialTheme.typography.titleMedium)
+                Text(stringResource(R.string.sett_appearance_language), style = MaterialTheme.typography.titleMedium)
                 SelectorRow(if (zh) "语言" else "Language", state.language, { languageMenu = true }) {
                     DropdownMenu(languageMenu, { languageMenu = false }) {
                         listOf("zh-CN" to "简体中文", "en-US" to "English", "system" to if (zh) "跟随系统" else "System").forEach { (key, label) ->
@@ -301,7 +303,7 @@ fun SettingsScreen(
             var providerMenu by remember { mutableStateOf(false) }
             val providerName = WebSearchProvider.fromId(state.webSearchProviderId)?.displayName.orEmpty()
             Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                Text(if (zh) "联网搜索" else "Web search", style = MaterialTheme.typography.titleMedium)
+                Text(stringResource(R.string.sett_search_title), style = MaterialTheme.typography.titleMedium)
                 SelectorRow(if (zh) "搜索服务商" else "Search provider", providerName.ifBlank { if (zh) "请选择" else "Select" }, { providerMenu = true }) {
                     DropdownMenu(providerMenu, { providerMenu = false }) {
                         WebSearchProvider.entries.forEach { provider ->
@@ -312,8 +314,7 @@ fun SettingsScreen(
                     }
                 }
                 Text(
-                    if (zh) "密钥按服务商加密保存。搜索可能收费，需在智能体中开启。"
-                    else "Keys are encrypted per provider. Search may incur charges; enable it in the Agent.",
+                    stringResource(R.string.sett_search_key_help),
                     style = MaterialTheme.typography.bodySmall,
                 )
                 OutlinedTextField(
@@ -326,10 +327,10 @@ fun SettingsScreen(
                 )
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
                     Button(onClick = { actions.onSaveWebSearch(state.webSearchProviderId, apiKey); apiKey = "" }, enabled = apiKey.isNotBlank()) {
-                        Text(if (zh) "保存并启用" else "Save and enable")
+                        Text(stringResource(R.string.sett_search_save_enable))
                     }
                     if (state.webSearchConfigured) {
-                        OutlinedButton(onClick = { actions.onClearWebSearch(state.webSearchProviderId) }) { Text(if (zh) "移除密钥" else "Remove key") }
+                        OutlinedButton(onClick = { actions.onClearWebSearch(state.webSearchProviderId) }) { Text(stringResource(R.string.sett_search_remove_key)) }
                     }
                 }
                 SettingSwitch(
@@ -350,19 +351,18 @@ fun SettingsScreen(
                 mutableStateOf(state.globalRootPrompt)
             }
             Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                Text(if (zh) "全局根提示词" else "Global root prompt", style = MaterialTheme.typography.titleMedium)
+                Text(stringResource(R.string.sett_root_prompt_title), style = MaterialTheme.typography.titleMedium)
                 Text(
-                    if (zh) "应用于所有 Agent，不改变工具、网络或文件权限。"
-                    else "Applies to all Agents without changing tool, network, or file permissions.",
+                    stringResource(R.string.sett_root_prompt_help),
                     style = MaterialTheme.typography.bodySmall,
                 )
                 if (!state.globalRootPromptUnlocked) {
-                    OutlinedButton(onClick = actions.onUnlockRootPrompt) { Text(if (zh) "解锁高级编辑" else "Unlock advanced editing") }
+                    OutlinedButton(onClick = actions.onUnlockRootPrompt) { Text(stringResource(R.string.sett_root_prompt_unlock)) }
                 } else {
                     OutlinedTextField(draftPrompt, { draftPrompt = it }, minLines = 4, modifier = Modifier.fillMaxWidth())
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        Button(onClick = { actions.onSaveRootPrompt(draftPrompt) }) { Text(if (zh) "保存覆盖" else "Save override") }
-                        OutlinedButton(onClick = actions.onRestoreRootPrompt) { Text(if (zh) "恢复默认" else "Restore default") }
+                        Button(onClick = { actions.onSaveRootPrompt(draftPrompt) }) { Text(stringResource(R.string.sett_root_prompt_save)) }
+                        OutlinedButton(onClick = actions.onRestoreRootPrompt) { Text(stringResource(R.string.sett_root_prompt_restore)) }
                     }
                     Text(
                         "r${state.globalRootPromptRevision} · ${state.globalRootPromptUpdatedAt}",
@@ -374,17 +374,16 @@ fun SettingsScreen(
         AuthoritySettingsCard(state, actions, zh)
         Card(Modifier.fillMaxWidth().testTag("settings.privacy_diagnostics")) {
             Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                Text(if (zh) "隐私与调试" else "Privacy and diagnostics", style = MaterialTheme.typography.titleMedium)
+                Text(stringResource(R.string.sett_privacy_diagnostics), style = MaterialTheme.typography.titleMedium)
                 SettingSwitch(if (zh) "匿名使用统计" else "Anonymous usage statistics", state.statsEnabled, actions.onStats,
                     modifier = Modifier.testTag("settings.stats.switch"), labelClickable = true)
                 Text(
-                    if (zh) "默认开启，可随时关闭。仅上传安装与公告活动，不上传聊天或文件内容。"
-                    else "On by default; turn off anytime. Sends install and announcement activity, never chat or file content.",
+                    stringResource(R.string.sett_stats_help),
                     style = MaterialTheme.typography.bodySmall,
                 )
                 SettingSwitch(if (zh) "显示请求检查器" else "Show request inspector", state.requestInspectionEnabled, actions.onRequestInspection)
                 SettingSwitch(if (zh) "应用内诊断记录（默认关闭）" else "In-app diagnostics (off by default)", state.diagnosticsEnabled, actions.onDiagnosticsEnabled)
-                Text(if (zh) "日志级别" else "Log level", style = MaterialTheme.typography.bodyMedium)
+                Text(stringResource(R.string.sett_log_level), style = MaterialTheme.typography.bodyMedium)
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     for (level in listOf("INFO", "DEBUG")) {
                         FilterChip(
@@ -411,25 +410,24 @@ fun SettingsScreen(
                     style = MaterialTheme.typography.bodySmall,
                 )
                 Text(
-                    if (zh) "切换级别不清除旧日志；日志会滚动覆盖，原生崩溃可能仍需 ADB Logcat。"
-                    else "Changing the level keeps old logs. Logs rotate; native crashes may still need ADB Logcat.",
+                    stringResource(R.string.sett_diagnostics_rotation),
                     style = MaterialTheme.typography.bodySmall,
                 )
                 FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Button(onClick = actions.onExportDiagnostics) { Text(if (zh) "导出诊断 ZIP" else "Export diagnostics ZIP") }
-                    OutlinedButton(onClick = actions.onClearDiagnostics, enabled = state.diagnosticsSizeBytes > 0) { Text(if (zh) "清除诊断" else "Clear diagnostics") }
+                    Button(onClick = actions.onExportDiagnostics) { Text(stringResource(R.string.sett_diagnostics_export)) }
+                    OutlinedButton(onClick = actions.onClearDiagnostics, enabled = state.diagnosticsSizeBytes > 0) { Text(stringResource(R.string.sett_diagnostics_clear)) }
                 }
                 val diagnosticsMessage = state.diagnosticsFeedback.text(zh).ifBlank { state.diagnosticsState }
                 if (diagnosticsMessage.isNotBlank()) Text(diagnosticsMessage, style = MaterialTheme.typography.bodySmall, modifier = Modifier.testTag("settings.diagnostics.feedback"))
-                Text(if (zh) "API 密钥不会进入导出文件或请求检查器。" else "API keys never enter exports or the request inspector.", style = MaterialTheme.typography.bodySmall)
+                Text(stringResource(R.string.sett_diagnostics_secrets), style = MaterialTheme.typography.bodySmall)
             }
         }
         Card(Modifier.fillMaxWidth().testTag("settings.data_backup")) {
             var importHelpExpanded by remember { mutableStateOf(false) }
             Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                Text(if (zh) "数据与备份" else "Data and backup", style = MaterialTheme.typography.titleMedium)
+                Text(stringResource(R.string.sett_data_backup), style = MaterialTheme.typography.titleMedium)
                 TextButton(onClick = actions.onOpenArchivedConversations, modifier = Modifier.testTag("settings.archived_conversations")) {
-                    Text(if (zh) "已归档的对话" else "Archived conversations")
+                    Text(stringResource(R.string.sett_archived_conversations))
                 }
                 Text(
                     if (zh) {
@@ -440,35 +438,34 @@ fun SettingsScreen(
                     style = MaterialTheme.typography.bodySmall,
                 )
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Button(onClick = actions.onExport) { Text(if (zh) "导出" else "Export") }
-                    OutlinedButton(onClick = actions.onImport) { Text(if (zh) "导入" else "Import") }
+                    Button(onClick = actions.onExport) { Text(stringResource(R.string.sett_export)) }
+                    OutlinedButton(onClick = actions.onImport) { Text(stringResource(R.string.sett_import)) }
                 }
                 if (state.exportState.isNotBlank()) Text(state.exportState, style = MaterialTheme.typography.bodySmall)
                 TextButton(onClick = { importHelpExpanded = !importHelpExpanded }) {
                     Text(if (importHelpExpanded) { if (zh) "收起导入说明" else "Hide import help" } else { if (zh) "导入兼容说明" else "Import compatibility help" })
                 }
                 if (importHelpExpanded) Text(
-                    if (zh) "若导入的会话使用旧 HTTP 地址，请先将服务商改为 HTTPS 并重新输入该目的地密钥，再确认 Agent 配置并显式新建会话。旧会话保留为历史记录，不会修改其冻结目的地或自动转发历史内容。"
-                    else "For an imported conversation using an old HTTP endpoint, configure an HTTPS provider and its credentials, review the Agent, then explicitly start a new conversation. The old conversation remains an archive; its frozen destination and history are not changed or automatically forwarded.",
+                    stringResource(R.string.sett_import_help),
                     style = MaterialTheme.typography.bodySmall,
                 )
                 FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    OutlinedButton(onClick = actions.onOpenProviders) { Text(if (zh) "配置 HTTPS 服务商" else "Configure HTTPS provider") }
-                    OutlinedButton(onClick = actions.onOpenAgents) { Text(if (zh) "确认 Agent 配置" else "Review Agent settings") }
+                    OutlinedButton(onClick = actions.onOpenProviders) { Text(stringResource(R.string.sett_configure_provider)) }
+                    OutlinedButton(onClick = actions.onOpenAgents) { Text(stringResource(R.string.sett_review_agent)) }
                 }
             }
         }
         Card(Modifier.fillMaxWidth().testTag("settings.feature_entry")) {
             Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                Text(if (zh) "功能入口" else "Feature entry points", style = MaterialTheme.typography.titleMedium)
+                Text(stringResource(R.string.sett_feature_entry), style = MaterialTheme.typography.titleMedium)
                 FlowRow(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                    FilterChip(selected = false, onClick = actions.onOpenProviders, label = { Text(if (zh) "服务商" else "Providers") })
-                    FilterChip(selected = false, onClick = actions.onOpenKnowledge, label = { Text(if (zh) "知识" else "Knowledge") })
-                    FilterChip(selected = false, onClick = actions.onOpenSkills, label = { Text(if (zh) "技能" else "Skills") })
+                    FilterChip(selected = false, onClick = actions.onOpenProviders, label = { Text(stringResource(R.string.sett_entry_providers)) })
+                    FilterChip(selected = false, onClick = actions.onOpenKnowledge, label = { Text(stringResource(R.string.sett_entry_knowledge)) })
+                    FilterChip(selected = false, onClick = actions.onOpenSkills, label = { Text(stringResource(R.string.sett_entry_skills)) })
                 }
                 FlowRow(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                    FilterChip(selected = false, onClick = actions.onOpenAnnouncements, label = { Text(if (zh) "公告" else "News") })
-                    OutlinedButton(onClick = actions.onOpenMcpSettings, enabled = state.mcpEntryEnabled) { Text(if (zh) "MCP 设置" else "MCP settings") }
+                    FilterChip(selected = false, onClick = actions.onOpenAnnouncements, label = { Text(stringResource(R.string.sett_entry_news)) })
+                    OutlinedButton(onClick = actions.onOpenMcpSettings, enabled = state.mcpEntryEnabled) { Text(stringResource(R.string.sett_entry_mcp)) }
                 }
                 Text(
                     if (state.mcpDisabledReason == "适配器报告已配置端点后，MCP 设置才可用。" && !zh)
@@ -480,9 +477,9 @@ fun SettingsScreen(
         }
         Card(Modifier.fillMaxWidth().testTag("settings.about")) {
             Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                Text(if (zh) "关于" else "About", style = MaterialTheme.typography.titleMedium)
+                Text(stringResource(R.string.about_title), style = MaterialTheme.typography.titleMedium)
                 OutlinedButton(onClick = actions.onOpenAbout, modifier = Modifier.testTag("settings.open_about")) {
-                    Text(if (zh) "版本、许可与源码" else "Version, license and source")
+                    Text(stringResource(R.string.ui_version_license_and_source_5256f67e))
                 }
             }
         }
@@ -524,10 +521,9 @@ private fun AuthoritySettingsCard(
 
     Card(Modifier.fillMaxWidth().testTag("settings.authorities")) {
         Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            Text(if (chinese) "命令与权限" else "Commands and authorities", style = MaterialTheme.typography.titleMedium)
+            Text(stringResource(R.string.ui_commands_and_authorities_7f33a147), style = MaterialTheme.typography.titleMedium)
             Text(
-                if (chinese) "系统增强支持 Shizuku 或有线 ADB，不自动切换。"
-                else "System enhancement uses Shizuku or wired ADB, with no automatic fallback.",
+                stringResource(R.string.ui_system_enhancement_uses_shizuku_or_wired_49279879),
                 style = MaterialTheme.typography.bodySmall,
             )
             SelectorRow(
@@ -579,8 +575,7 @@ private fun AuthoritySettingsCard(
                 secondaryActionLabel = if (chinese) "打开 Shizuku" else "Open Shizuku",
             )
             Text(
-                if (chinese) "启用后会同时记录用户意图、选用 Shizuku，并在需要时请求系统授权。"
-                else "This records user intent, selects Shizuku, and requests the platform grant when needed.",
+                stringResource(R.string.ui_this_records_user_intent_selects_shizuku_d1e33de1),
                 style = MaterialTheme.typography.bodySmall,
             )
 
@@ -622,15 +617,14 @@ private fun AuthoritySettingsCard(
             ActionRow {
                 TextButton(onClick = {
                     adbDownloadLinks.openUri("https://github.com/hedanbaomi/mobile-agent-runtime/releases/latest")
-                }) { Text(if (chinese) "下载电脑连接工具" else "Download desktop tool") }
+                }) { Text(stringResource(R.string.ui_download_desktop_tool_93932577)) }
                 TextButton(onClick = {
                     adbDownloadLinks.openUri("https://developer.android.com/tools/releases/platform-tools")
-                }) { Text(if (chinese) "获取官方 ADB" else "Get official ADB") }
+                }) { Text(stringResource(R.string.ui_get_official_adb_a29a5c1d)) }
             }
 
             Text(
-                if (chinese) "USB 激活：用数据线连接电脑，开启开发者选项 → USB 调试，并允许此电脑调试。下载 Release 的电脑连接工具，准备 Java 17+ 和官方 Platform-Tools，双击 start-wired-adb.bat。激活后可拔线；设备常驻服务存活时权限持续可用。开始配对会启用并选用有线 ADB。"
-                else "Connect a USB data cable, enable Developer options → USB debugging, and allow this computer. Download the desktop tool from the Release, prepare Java 17+ and official Platform-Tools, then open start-wired-adb.bat. After activation you can unplug USB; authority stays available while the device service lives. Starting pairing enables and selects Wired ADB.",
+                stringResource(R.string.ui_connect_a_usb_data_cable_enable_4dc371d0),
                 style = MaterialTheme.typography.bodySmall,
                 modifier = Modifier.testTag("settings.wired_adb.usb.instructions"),
             )
@@ -639,7 +633,7 @@ private fun AuthoritySettingsCard(
                 Modifier.fillMaxWidth().testTag("settings.workspace.saf"),
                 verticalArrangement = Arrangement.spacedBy(6.dp),
             ) {
-                Text(if (chinese) "用户授权文件（SAF）" else "User-authorized files (SAF)", style = MaterialTheme.typography.labelLarge)
+                Text(stringResource(R.string.ui_user_authorized_files_saf_070a3e28), style = MaterialTheme.typography.labelLarge)
                 Text(
                     if (chinese) {
                         "状态：${safStatusLabel(state.safWorkspace.status, chinese)} · 读取：${readWriteLabel(state.safWorkspace.readGranted, chinese)} · 写入：${readWriteLabel(state.safWorkspace.writeGranted, chinese)}"
@@ -666,22 +660,22 @@ private fun AuthoritySettingsCard(
                     Button(
                         onClick = actions.onSelectSafTree,
                         modifier = Modifier.testTag("settings.saf.authorize"),
-                    ) { Text(if (chinese) "选择目录" else "Choose directory") }
+                    ) { Text(stringResource(R.string.ui_choose_directory_1aaa14b7)) }
                     OutlinedButton(
                         onClick = actions.onReauthorizeSaf,
                         enabled = safConfigured,
                         modifier = Modifier.testTag("settings.saf.reauthorize"),
-                    ) { Text(if (chinese) "重新授权" else "Re-authorize") }
+                    ) { Text(stringResource(R.string.ui_re_authorize_e730ab80)) }
                     OutlinedButton(
                         onClick = actions.onRevokeSaf,
                         enabled = safConfigured,
                         modifier = Modifier.testTag("settings.saf.revoke"),
-                    ) { Text(if (chinese) "撤销" else "Revoke") }
+                    ) { Text(stringResource(R.string.ui_revoke_411a6c97)) }
                     OutlinedButton(
                         onClick = actions.onOpenAgents,
                         enabled = state.safWorkspace.persisted,
                         modifier = Modifier.testTag("settings.saf.open_agents"),
-                    ) { Text(if (chinese) "去智能体授权" else "Open Agent grants") }
+                    ) { Text(stringResource(R.string.ui_open_agent_grants_8c9a1fb1)) }
                 }
             }
 
@@ -689,10 +683,9 @@ private fun AuthoritySettingsCard(
                 Modifier.fillMaxWidth().testTag("settings.dangerous_mode"),
                 verticalArrangement = Arrangement.spacedBy(6.dp),
             ) {
-                Text(if (chinese) "危险模式" else "Dangerous Mode", style = MaterialTheme.typography.labelLarge)
+                Text(stringResource(R.string.ui_dangerous_mode_466f2b83), style = MaterialTheme.typography.labelLarge)
                 Text(
-                    if (chinese) "允许 Agent 直接执行 Android Shell 命令。它可能修改或删除文件、停止应用、修改部分系统设置；这不是 Root。"
-                    else "Allows the Agent to execute Android shell commands directly. It may modify or delete files, stop apps, or change some system settings; this is not Root.",
+                    stringResource(R.string.ui_allows_the_agent_to_execute_android_abdfa0ee),
                     style = MaterialTheme.typography.bodySmall,
                 )
                 SelectorRow(
@@ -766,8 +759,7 @@ private fun AuthoritySettingsCard(
                         style = MaterialTheme.typography.bodySmall,
                     )
                     Text(
-                        if (chinese) "授权不会因任务结束、会话结束、后台、USB 拔出或 Binder 中断自动关闭；请使用上方策略选择“已关闭”。"
-                        else "The setting is not cleared by task/session end, backgrounding, USB removal, or Binder loss; choose Disabled above to turn it off.",
+                        stringResource(R.string.ui_the_setting_is_not_cleared_by_76cb4088),
                         style = MaterialTheme.typography.bodySmall,
                     )
                 }
@@ -778,7 +770,7 @@ private fun AuthoritySettingsCard(
     if (pendingWiredPairingReplacement) {
         AlertDialog(
             onDismissRequest = { pendingWiredPairingReplacement = false },
-            title = { Text(if (chinese) "确认替换已保存信任" else "Confirm replacing saved trust") },
+            title = { Text(stringResource(R.string.ui_confirm_replacing_saved_trust_5229aa78)) },
             text = {
                 Column(
                     Modifier.verticalScroll(rememberScrollState())
@@ -793,8 +785,7 @@ private fun AuthoritySettingsCard(
                         },
                     )
                     Text(
-                        if (chinese) "令牌只在当前设置页面临时显示；请确认你已准备好在电脑端完成配对。"
-                        else "The one-time token is shown only temporarily on this Settings screen; make sure you are ready to complete pairing on the computer.",
+                        stringResource(R.string.ui_the_one_time_token_is_shown_208c3072),
                         style = MaterialTheme.typography.bodySmall,
                     )
                 }
@@ -806,11 +797,11 @@ private fun AuthoritySettingsCard(
                         actions.onRequestWiredPairing(true)
                     },
                     modifier = Modifier.testTag("settings.wired_adb.replace.confirm"),
-                ) { Text(if (chinese) "替换并开始配对" else "Replace and start pairing") }
+                ) { Text(stringResource(R.string.ui_replace_and_start_pairing_54979497)) }
             },
             dismissButton = {
                 TextButton(onClick = { pendingWiredPairingReplacement = false }) {
-                    Text(if (chinese) "取消" else "Cancel")
+                    Text(stringResource(R.string.ui_cancel_998b9c48))
                 }
             },
         )
@@ -819,19 +810,17 @@ private fun AuthoritySettingsCard(
     pendingDangerousMode?.let { mode ->
         AlertDialog(
             onDismissRequest = { pendingDangerousMode = null },
-            title = { Text(if (chinese) "确认开启危险模式" else "Confirm Dangerous Mode") },
+            title = { Text(stringResource(R.string.ui_confirm_dangerous_mode_4ca71053)) },
             text = {
                 Column(
                     Modifier.verticalScroll(rememberScrollState()).testTag("settings.dangerous_mode.risk_dialog"),
                     verticalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
                     Text(
-                        if (chinese) "开启后，Agent 可以使用当前 Shizuku 或有线 ADB 的 Shell 权限直接执行命令。错误命令可能导致数据丢失、应用停止或设备状态异常。此功能不是 Root，也不是安全沙箱。"
-                        else "After enabling, the Agent may execute commands directly with the current Shizuku or wired ADB shell authority. Mistakes can cause data loss, stopped apps, or unexpected device state. This is not Root and not a safety sandbox.",
+                        stringResource(R.string.ui_after_enabling_the_agent_may_execute_6ecec320),
                     )
                     Text(
-                        if (chinese) "我理解风险，并知道系统增强通道不可用时 Shell 仍会保持不可用，不会自动切换。"
-                        else "I understand the risk and know that Shell remains unavailable when the selected enhancement channel is unavailable; it will not switch automatically.",
+                        stringResource(R.string.ui_i_understand_the_risk_and_know_d00797c8),
                         style = MaterialTheme.typography.bodySmall,
                     )
                 }
@@ -843,10 +832,10 @@ private fun AuthoritySettingsCard(
                         actions.onSetDangerousMode(mode)
                     },
                     modifier = Modifier.testTag("settings.dangerous_mode.confirm"),
-                ) { Text(if (chinese) "确认开启" else "Enable") }
+                ) { Text(stringResource(R.string.ui_enable_8eeb2a71)) }
             },
             dismissButton = {
-                TextButton(onClick = { pendingDangerousMode = null }) { Text(if (chinese) "取消" else "Cancel") }
+                TextButton(onClick = { pendingDangerousMode = null }) { Text(stringResource(R.string.ui_cancel_998b9c48)) }
             },
         )
     }
@@ -878,7 +867,7 @@ private fun WiredPairingBlock(
             verticalArrangement = Arrangement.spacedBy(6.dp),
         ) {
             Text(
-                if (chinese) "一次性配对令牌（仅保留在当前设置页面）" else "One-time pairing token (this Settings screen only)",
+                stringResource(R.string.ui_one_time_pairing_token_this_settings_a5952c3d),
                 style = MaterialTheme.typography.labelLarge,
             )
             Text(
@@ -900,7 +889,7 @@ private fun WiredPairingBlock(
                 )
             } else {
                 Text(
-                    if (chinese) "令牌已隐藏；点击“查看令牌”后才能复制。" else "The token is hidden; reveal it before copying.",
+                    stringResource(R.string.ui_the_token_is_hidden_reveal_it_3d16c03e),
                     style = MaterialTheme.typography.bodySmall,
                     modifier = Modifier.testTag("settings.wired_adb.pairing.token.hidden"),
                 )
@@ -916,8 +905,7 @@ private fun WiredPairingBlock(
             )
             if (pairing.replacingExistingTrust) {
                 Text(
-                    if (chinese) "新激活通过验证后才替换凭据。"
-                    else "Credentials change only after the new activation is verified.",
+                    stringResource(R.string.ui_credentials_change_only_after_the_new_bdf83f97),
                     style = MaterialTheme.typography.bodySmall,
                 )
             }
@@ -930,7 +918,7 @@ private fun WiredPairingBlock(
                     onClick = { if (showToken) clipboard.setText(AnnotatedString(token)) },
                     enabled = showToken,
                     modifier = Modifier.testTag("settings.wired_adb.pairing.copy"),
-                ) { Text(if (chinese) "复制令牌" else "Copy token") }
+                ) { Text(stringResource(R.string.ui_copy_token_40e8f958)) }
                 Button(
                     onClick = onComplete,
                     enabled = !pairing.completing && pairing.remainingAttempts > 0,
@@ -940,7 +928,7 @@ private fun WiredPairingBlock(
                     onClick = onCancel,
                     enabled = !pairing.completing,
                     modifier = Modifier.testTag("settings.wired_adb.pairing.cancel"),
-                ) { Text(if (chinese) "取消" else "Cancel") }
+                ) { Text(stringResource(R.string.ui_cancel_998b9c48)) }
             }
         }
     } else if (pairing.status.isNotBlank()) {
@@ -972,7 +960,7 @@ private fun ProviderLifecycleBlock(
         Text(label, style = MaterialTheme.typography.labelLarge)
         if (state.selected) {
             Text(
-                if (chinese) "当前选定通道" else "Currently selected channel",
+                stringResource(R.string.ui_currently_selected_channel_8f0a8796),
                 style = MaterialTheme.typography.labelSmall,
                 modifier = Modifier.testTag("settings.authority.${state.authority.lowercase()}.selected"),
             )
@@ -983,14 +971,13 @@ private fun ProviderLifecycleBlock(
             style = MaterialTheme.typography.bodySmall,
         )
         Text(
-            if (chinese) "可用性：${availabilityLabel(state.availability, chinese)} · 连接：${connectionLabel(state.connection, chinese)}"
-            else "Availability: ${availabilityLabel(state.availability, chinese)} · Connection: ${connectionLabel(state.connection, chinese)}",
+            stringResource(R.string.ui_availability_s_connection_s_180222dd, (availabilityLabel(state.availability, chinese)), (connectionLabel(state.connection, chinese))),
             style = MaterialTheme.typography.bodySmall,
         )
         val trust = state.trust.ifBlank { "FORGOTTEN".takeIf { state.authority == "WIRED_ADB" }.orEmpty() }
         if (trust.isNotBlank()) {
             Text(
-                if (chinese) "信任：${trustLabel(trust, chinese)}" else "Trust: ${trustLabel(trust, chinese)}",
+                stringResource(R.string.ui_trust_s_ce4bb255, (trustLabel(trust, chinese))),
                 style = MaterialTheme.typography.bodySmall,
             )
         }
@@ -1009,7 +996,7 @@ private fun ProviderLifecycleBlock(
                 ),
             ) { Text(primaryActionLabel) }
             OutlinedButton(onClick = onRefresh, modifier = Modifier.testTag("settings.authority.${state.authority.lowercase()}.refresh")) {
-                Text(if (chinese) "刷新" else "Refresh")
+                Text(stringResource(R.string.ui_refresh_cba212b1))
             }
             OutlinedButton(
                 onClick = onSecondaryAction,
@@ -1019,7 +1006,7 @@ private fun ProviderLifecycleBlock(
         }
         if (!state.configured) {
             Text(
-                if (chinese) "此通道尚未完成持久配置；连接状态不会替代用户授权。" else "This channel has no persistent configuration; connection state does not replace user authorization.",
+                stringResource(R.string.ui_this_channel_has_no_persistent_configuration_2dab4478),
                 style = MaterialTheme.typography.labelSmall,
             )
         }
@@ -1155,7 +1142,7 @@ private fun AuthorityRow(label: String, status: String, modifier: Modifier = Mod
 @Composable
 internal fun ThirdPartyNoticesDialog(
     state: ThirdPartyNoticesUiState,
-    chinese: Boolean,
+    chinese: Boolean = false,
     onSelect: (String) -> Unit,
     onClose: () -> Unit,
 ) {
@@ -1196,13 +1183,12 @@ internal fun ThirdPartyNoticesDialog(
                 state.error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
                 if (selected == null) {
                     Text(
-                        if (chinese) "以下内容仅来自 APK 内置声明资产；浏览不会联网，也不会改变第三方原文。"
-                        else "The content below comes only from notices bundled in the APK. Browsing does not use the network or alter third-party text.",
+                        stringResource(R.string.ui_the_content_below_comes_only_from_54f70959),
                         style = MaterialTheme.typography.bodySmall,
                     )
                     if (state.overview.isBlank()) {
                         if (!state.loading && state.error == null) {
-                            Text(if (chinese) "暂无第三方声明总览。" else "No third-party notice overview is available.", style = MaterialTheme.typography.bodySmall)
+                            Text(stringResource(R.string.ui_no_third_party_notice_overview_is_e9f83e28), style = MaterialTheme.typography.bodySmall)
                         }
                     } else {
                         TextButton(onClick = { overviewExpanded = !overviewExpanded }) {
@@ -1214,18 +1200,18 @@ internal fun ThirdPartyNoticesDialog(
                         }
                         if (overviewExpanded) Text(state.overview, style = MaterialTheme.typography.bodySmall)
                     }
-                    Text(if (chinese) "组件清单" else "Components", style = MaterialTheme.typography.titleMedium)
+                    Text(stringResource(R.string.ui_components_7d6565eb), style = MaterialTheme.typography.titleMedium)
                     OutlinedTextField(
                         value = searchQuery,
                         onValueChange = { searchQuery = it },
                         modifier = Modifier.fillMaxWidth(),
-                        label = { Text(if (chinese) "搜索名称、版本或许可证" else "Search name, version, or license") },
+                        label = { Text(stringResource(R.string.ui_search_name_version_or_license_61764483)) },
                         singleLine = true,
                     )
                     if (state.components.isEmpty()) {
-                        Text(if (chinese) "暂无可显示的组件。" else "No components are available.", style = MaterialTheme.typography.bodySmall)
+                        Text(stringResource(R.string.ui_no_components_are_available_007fd1e1), style = MaterialTheme.typography.bodySmall)
                     } else if (filteredComponents.isEmpty()) {
-                        Text(if (chinese) "没有匹配的组件。" else "No components match the search.", style = MaterialTheme.typography.bodySmall)
+                        Text(stringResource(R.string.ui_no_components_match_the_search_4f1e9b2f), style = MaterialTheme.typography.bodySmall)
                     } else {
                         filteredComponents.forEach { component ->
                             OutlinedButton(
@@ -1243,8 +1229,7 @@ internal fun ThirdPartyNoticesDialog(
                                     ).joinToString(" · ")
                                     if (meta.isNotBlank()) Text(meta, style = MaterialTheme.typography.labelSmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
                                     Text(
-                                        if (chinese) "声明文件：${component.files.size} 个；点击查看完整原文"
-                                        else "Notice files: ${component.files.size}; tap to view the complete text",
+                                        stringResource(R.string.ui_notice_files_s_tap_to_view_5bb13369, (component.files.size)),
                                         style = MaterialTheme.typography.bodySmall,
                                     )
                                 }
@@ -1253,7 +1238,7 @@ internal fun ThirdPartyNoticesDialog(
                     }
                 } else {
                     TextButton(onClick = { detailComponentId = null }) {
-                        Text(if (chinese) "返回组件清单" else "Back to components")
+                        Text(stringResource(R.string.ui_back_to_components_ccc15a1d))
                     }
                     val meta = listOfNotNull(
                         selected.version.takeIf { it.isNotBlank() },
@@ -1262,7 +1247,7 @@ internal fun ThirdPartyNoticesDialog(
                     if (meta.isNotBlank()) Text(meta, style = MaterialTheme.typography.labelSmall)
                     if (selected.source.isNotBlank()) {
                         Text(
-                            if (chinese) "来源：${selected.source}" else "Source: ${selected.source}",
+                            stringResource(R.string.ui_source_s_deaac202, (selected.source)),
                             style = MaterialTheme.typography.bodySmall,
                         )
                     }
@@ -1272,11 +1257,11 @@ internal fun ThirdPartyNoticesDialog(
                             style = MaterialTheme.typography.labelSmall,
                         )
                     }
-                    Text(if (chinese) "完整原文" else "Complete text", style = MaterialTheme.typography.titleSmall)
+                    Text(stringResource(R.string.ui_complete_text_f28fdb75), style = MaterialTheme.typography.titleSmall)
                     val licenseText = state.selectedLicenseText
                     if (state.selectedComponentId != selected.id || licenseText == null) {
                         if (state.loading) {
-                            Text(if (chinese) "正在读取完整原文…" else "Loading complete text…", style = MaterialTheme.typography.bodySmall)
+                            Text(stringResource(R.string.ui_loading_complete_text_c86dd633), style = MaterialTheme.typography.bodySmall)
                         }
                     } else {
                         Text(licenseText, style = MaterialTheme.typography.bodySmall)
@@ -1284,6 +1269,6 @@ internal fun ThirdPartyNoticesDialog(
                 }
             }
         },
-        confirmButton = { Button(onClick = onClose) { Text(if (chinese) "关闭" else "Close") } },
+        confirmButton = { Button(onClick = onClose) { Text(stringResource(R.string.about_close)) } },
     )
 }

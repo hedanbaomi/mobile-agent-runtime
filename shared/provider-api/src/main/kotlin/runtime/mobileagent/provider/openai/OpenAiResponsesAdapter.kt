@@ -199,8 +199,6 @@ class OpenAiResponsesAdapter(
             throw cancel
         } catch (_: Exception) {
             ProviderConnectionResult.Failure(ProviderConnectionErrorCode.UNKNOWN, retryable = false, charged = true)
-        } finally {
-            token.toCharArray().fill('\u0000')
         }
     }
 
@@ -300,8 +298,6 @@ class OpenAiResponsesAdapter(
             failedProbeReport(profileReport, operationId, "network-unreachable")
         } catch (_: Exception) {
             failedProbeReport(profileReport, operationId, "unknown-outcome")
-        } finally {
-            token.toCharArray().fill('\u0000')
         }
     }
 
@@ -542,8 +538,6 @@ class OpenAiResponsesAdapter(
             if (dispatchStatus != ModelDispatchStatus.NOT_DISPATCHED) dispatchStatus = ModelDispatchStatus.UNKNOWN_AFTER_DISPATCH
             emit(ModelEvent.Failed(ErrorCode.UNKNOWN_OUTCOME.name))
             request.reportDiagnostic(ModelDiagnosticStage.TERMINAL, dispatchStatus, started, "responses", httpStatus, ErrorCode.UNKNOWN_OUTCOME.name, error, responseContentType = responseContentType)
-        } finally {
-            token.toCharArray().fill('\u0000')
         }
     }
 
@@ -1224,49 +1218,8 @@ class OpenAiResponsesAdapter(
         return output.toByteArray().toString(Charsets.UTF_8)
     }
 
-    private suspend fun resolveHeaders(token: String, requestHeaders: Map<String, RequestHeaderValue>): ResolvedHeaders {
-        val merged = linkedMapOf<String, RequestHeaderValue>()
-        defaultHeaders.forEach { (name, value) -> merged[name] = value }
-        requestHeaders.forEach { (name, value) ->
-            merged.keys.firstOrNull { it.equals(name, true) }?.let(merged::remove)
-            merged[name] = value
-        }
-        val values = linkedMapOf("Authorization" to "Bearer $token")
-        val secrets = mutableListOf<String>()
-        val host = URI(baseUrl).host?.lowercase()?.trim('.') ?: throw InvalidHeaderException("Provider URL has no host")
-        merged.forEach { (name, value) ->
-            validateHeaderName(name)
-            when (value) {
-                is RequestHeaderValue.Plain -> {
-                    validateHeaderValue(value.value)
-                    values[name] = value.value
-                }
-                is RequestHeaderValue.SecretRef -> {
-                    if (value.ref.isBlank()) throw SecretUnavailableException()
-                    val resolver = headerSecretResolver ?: throw SecretUnavailableException()
-                    val chars = resolver.resolve(host, value.ref)
-                    val resolved = chars.concatToString()
-                    chars.fill('\u0000')
-                    if (resolved.isEmpty()) throw SecretUnavailableException()
-                    validateHeaderValue(resolved)
-                    values[name] = resolved
-                    secrets += resolved
-                }
-            }
-        }
-        return ResolvedHeaders(values, secrets)
-    }
-
-    private fun validateHeaderName(name: String) {
-        if (name.isBlank() || name.any { it == '\r' || it == '\n' }) throw InvalidHeaderException("Header name is invalid")
-        if (name.lowercase() in FORBIDDEN_HEADERS || name.equals("authorization", true) || name.equals("api-key", true)) {
-            throw InvalidHeaderException("Header $name is reserved")
-        }
-    }
-
-    private fun validateHeaderValue(value: String) {
-        if (value.any { it == '\r' || it == '\n' }) throw InvalidHeaderException("Header value is invalid")
-    }
+    private suspend fun resolveHeaders(token: String, requestHeaders: Map<String, RequestHeaderValue>): ResolvedHeaders =
+        resolveOpenAiHeaders(baseUrl, token, defaultHeaders, requestHeaders, headerSecretResolver)
 
     private fun invalidConfig(message: String, operationId: String): AppException = AppError(
         code = ErrorCode.INVALID_CONFIG,
@@ -1288,7 +1241,6 @@ class OpenAiResponsesAdapter(
 
     private fun elapsedMillis(started: Long): Long = ((System.nanoTime() - started) / 1_000_000L).coerceAtLeast(0L)
 
-    private data class ResolvedHeaders(val values: Map<String, String>, val secrets: List<String>)
     private data class FeatureProbeResult(
         val summary: String,
         val supported: Boolean,
@@ -1296,10 +1248,7 @@ class OpenAiResponsesAdapter(
         val httpStatus: Int? = null,
         val status: CapabilityCheckStatus,
     )
-    private enum class ProbeFeature { STREAM, TOOLS, IMAGE }
     private enum class ProbeRequirement { TEXT, STREAM, TOOL, IMAGE }
-    private class SecretUnavailableException : RuntimeException()
-    private class InvalidHeaderException(message: String) : RuntimeException(message)
     private class InvalidConnectionConfigException : RuntimeException()
 
     companion object {
@@ -1320,10 +1269,6 @@ class OpenAiResponsesAdapter(
         private const val MAX_RESPONSE_BYTES = 8_388_608L
         private const val MAX_LINE_BYTES = 1_048_576
 
-        private val FORBIDDEN_HEADERS = setOf(
-            "host", "content-length", "transfer-encoding", "connection", "upgrade", "proxy-authorization",
-            "proxy-authenticate", "te", "trailer", "content-type", "accept",
-        )
 
         fun url(base: String, path: String): String {
             val normalized = base.trimEnd('/')

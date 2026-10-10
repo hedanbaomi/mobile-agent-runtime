@@ -3,6 +3,8 @@
 
 package runtime.mobileagent.feature.chat
 
+import androidx.compose.ui.res.stringResource
+
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.rememberScrollState
@@ -65,7 +67,7 @@ internal fun ConversationSidebar(
     ) {
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
             Text(
-                if (zh) "会话" else "Conversations",
+                stringResource(R.string.ui_conversations_23a085e0),
                 style = MaterialTheme.typography.titleMedium,
                 fontWeight = FontWeight.SemiBold,
                 modifier = Modifier.weight(1f),
@@ -75,7 +77,7 @@ internal fun ConversationSidebar(
                     onClick = { newChatMenuOpen = true },
                     modifier = Modifier.testTag("chat.sidebar.new"),
                 ) {
-                    Text(if (zh) "新建" else "New", maxLines = 1)
+                    Text(stringResource(R.string.ui_new_5a5d1d13), maxLines = 1)
                 }
                 DropdownMenu(
                     expanded = newChatMenuOpen,
@@ -83,7 +85,7 @@ internal fun ConversationSidebar(
                 ) {
                     if (state.agents.isEmpty()) {
                         DropdownMenuItem(
-                            text = { Text(if (zh) "暂无可用智能体" else "No agent available") },
+                            text = { Text(stringResource(R.string.ui_no_agent_available_2361a44f)) },
                             onClick = { newChatMenuOpen = false },
                             enabled = false,
                         )
@@ -105,7 +107,7 @@ internal fun ConversationSidebar(
         }
         Spacer(Modifier.height(8.dp))
         if (state.loading) {
-            Text(if (zh) "正在加载…" else "Loading…", style = MaterialTheme.typography.bodySmall)
+            Text(stringResource(R.string.ui_loading_b84913a0), style = MaterialTheme.typography.bodySmall)
         } else if (state.sessions.isEmpty() && state.agents.isEmpty()) {
             Text(sidebarEmptyMessage(state, zh), style = MaterialTheme.typography.bodySmall)
         } else {
@@ -134,7 +136,7 @@ internal fun ConversationSidebar(
                                 onClick = { onOpenWorkspace(agent.id, agent.label) },
                                 modifier = Modifier.testTag("chat.sidebar.workspace"),
                             ) {
-                                Text(if (zh) "工作区" else "Files", maxLines = 1)
+                                Text(stringResource(R.string.ui_files_5c80b454), maxLines = 1)
                             }
                         }
                     }
@@ -158,7 +160,7 @@ internal fun ConversationSidebar(
                                 .padding(start = 12.dp)
                                 .testTag("chat.sidebar.newForAgent"),
                         ) {
-                            Text(if (zh) "在此智能体下新建会话" else "New under this agent", maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            Text(stringResource(R.string.ui_new_under_this_agent_39126f72), maxLines = 1, overflow = TextOverflow.Ellipsis)
                         }
                     }
                 }
@@ -168,7 +170,7 @@ internal fun ConversationSidebar(
                 if (orphanSessions.isNotEmpty()) {
                     item(key = "orphan-header") {
                         Text(
-                            if (zh) "其他会话" else "Other conversations",
+                            stringResource(R.string.ui_other_conversations_540cce6a),
                             style = MaterialTheme.typography.labelLarge,
                             modifier = Modifier.padding(top = 8.dp),
                         )
@@ -216,11 +218,11 @@ private fun SessionSidebarItem(
                     onClick = onOpenWorkspace,
                     modifier = Modifier.testTag("chat.sidebar.sessionWorkspace"),
                 ) {
-                    Text(if (zh) "工作区" else "Files", maxLines = 1)
+                    Text(stringResource(R.string.ui_files_5c80b454), maxLines = 1)
                 }
                 if (session.unread) {
                     Text(
-                        if (zh) "未读" else "Unread",
+                        stringResource(R.string.ui_unread_0af1e493),
                         style = MaterialTheme.typography.labelSmall,
                         color = MaterialTheme.colorScheme.primary,
                     )
@@ -259,18 +261,18 @@ internal fun ChatWorkspaceAccessSheet(
                 .testTag("chat.workspace.sheet"),
             verticalArrangement = Arrangement.spacedBy(10.dp),
         ) {
-            Text(if (zh) "工作区与权限" else "Workspace & access", style = MaterialTheme.typography.headlineSmall)
+            Text(stringResource(R.string.ui_workspace_access_9224cbf6), style = MaterialTheme.typography.headlineSmall)
             Text(display.agentLabel, style = MaterialTheme.typography.titleMedium)
             Text(
-                if (zh) "当前工作区：${display.workspaceSummary}" else "Current workspace: ${display.workspaceSummary}",
+                stringResource(R.string.ui_current_workspace_s_6c60ef34, (display.workspaceSummary)),
                 style = MaterialTheme.typography.bodyMedium,
             )
             Text(
-                if (zh) "系统增强访问：${display.systemAccessLabel}" else "System access: ${display.systemAccessLabel}",
+                stringResource(R.string.ui_system_access_s_22db32ee, (display.systemAccessLabel)),
                 style = MaterialTheme.typography.bodySmall,
             )
             Text(
-                if (zh) "权限状态：${display.permissionLabel}" else "Permission: ${display.permissionLabel}",
+                stringResource(R.string.ui_permission_s_05813ab1, (display.permissionLabel)),
                 style = MaterialTheme.typography.bodySmall,
             )
             if (display.notice.isNotBlank()) {
@@ -282,7 +284,7 @@ internal fun ChatWorkspaceAccessSheet(
                 onClick = onOpenAgentSettings,
                 modifier = Modifier.fillMaxWidth().testTag("chat.workspace.agentSettings"),
             ) {
-                Text(if (zh) "管理智能体工作区" else "Manage Agent workspace")
+                Text(stringResource(R.string.ui_manage_agent_workspace_a54c525c))
             }
             Spacer(Modifier.height(20.dp))
         }

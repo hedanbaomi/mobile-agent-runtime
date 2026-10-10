@@ -1,0 +1,79 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- SPDX-FileCopyrightText: 2026 mobileAgentRuntime contributors -->
+<!-- SPDX-License-Identifier: AGPL-3.0-only -->
+<resources>
+    <string name="ui_agent_252fc75c" formatted="false">Agent</string>
+    <string name="ui_agent_default_workspace_e459a394" formatted="false">Agent default workspace</string>
+    <string name="ui_agent_default_workspace_s_0ec344e3">Agent default workspace: %1$s</string>
+    <string name="ui_agent_workspace_61a16997" formatted="false">Agent workspace</string>
+    <string name="ui_allow_once_5c4277ed" formatted="false">Allow once</string>
+    <string name="ui_allows_this_invocation_only_it_does_a84a39e1" formatted="false">Allows this invocation only; it does not create a session or persistent grant.</string>
+    <string name="ui_ask_a_follow_up_93697d6f" formatted="false">Ask a follow-up…</string>
+    <string name="ui_authority_b04ffce4" formatted="false">Authority</string>
+    <string name="ui_back_to_reply_ed5e8395" formatted="false">Back to reply</string>
+    <string name="ui_cancel_998b9c48" formatted="false">Cancel</string>
+    <string name="ui_chats_b73b26c8" formatted="false">Chats</string>
+    <string name="ui_close_6cf4a777" formatted="false">Close</string>
+    <string name="ui_command_9cfdf51b" formatted="false">Command</string>
+    <string name="ui_confirmation_required_b2fc4b04" formatted="false">Confirmation required</string>
+    <string name="ui_conservative_input_estimate_s_s_units_baea5d49">Conservative input estimate: %1$s → %2$s units (not actual tokens)\nSummary usage: %3$s input / %4$s output tokens</string>
+    <string name="ui_context_compaction_history_3a8b9983" formatted="false">Context compaction history</string>
+    <string name="ui_conversations_23a085e0" formatted="false">Conversations</string>
+    <string name="ui_current_context_349f8670" formatted="false">Current context</string>
+    <string name="ui_current_workspace_s_6c60ef34">Current workspace: %1$s</string>
+    <string name="ui_dangerous_mode_de499d98" formatted="false">Dangerous mode</string>
+    <string name="ui_files_5c80b454" formatted="false">Files</string>
+    <string name="ui_high_risk_reconfirmation_required_0a28d24e" formatted="false">High risk: reconfirmation required</string>
+    <string name="ui_inspect_covered_originals_0fb5f0e7" formatted="false">Inspect covered originals</string>
+    <string name="ui_inspect_request_dd0adbf1" formatted="false">Inspect request</string>
+    <string name="ui_loading_b84913a0" formatted="false">Loading…</string>
+    <string name="ui_manage_1f04c52a" formatted="false">Manage</string>
+    <string name="ui_manage_agent_fbcf94f0" formatted="false">Manage agent</string>
+    <string name="ui_manage_agent_workspace_a54c525c" formatted="false">Manage Agent workspace</string>
+    <string name="ui_model_44c0cd42" formatted="false">Model</string>
+    <string name="ui_model_s_covers_s_original_messages_8990b847">Model: %1$s · covers %2$s original messages</string>
+    <string name="ui_more_originals_8d54d6be" formatted="false">More originals</string>
+    <string name="ui_new_5a5d1d13" formatted="false">New</string>
+    <string name="ui_new_chat_6f463698" formatted="false">New chat</string>
+    <string name="ui_new_conversation_843829cd" formatted="false">New conversation</string>
+    <string name="ui_new_conversation_9878af0c" formatted="false">New conversation</string>
+    <string name="ui_new_conversation_in_this_workspace_532596f7" formatted="false">New conversation in this workspace</string>
+    <string name="ui_new_under_this_agent_39126f72" formatted="false">New under this agent</string>
+    <string name="ui_no_agent_222531b8" formatted="false">No agent</string>
+    <string name="ui_no_agent_available_2361a44f" formatted="false">No agent available</string>
+    <string name="ui_no_conversations_81fbc382" formatted="false">No conversations</string>
+    <string name="ui_no_matching_conversations_c7c1240d" formatted="false">No matching conversations.</string>
+    <string name="ui_no_visible_output_yet_check_the_66aa196b" formatted="false">No visible output yet. Check the run status; this request is not automatically resent.</string>
+    <string name="ui_open_workspace_3a7608fa" formatted="false">Open workspace</string>
+    <string name="ui_other_conversations_540cce6a" formatted="false">Other conversations</string>
+    <string name="ui_other_conversations_820584af" formatted="false">Other conversations</string>
+    <string name="ui_permission_s_05813ab1">Permission: %1$s</string>
+    <string name="ui_permission_s_76ae437c">Permission: %1$s</string>
+    <string name="ui_prompt_layers_17c857e1" formatted="false">Prompt layers</string>
+    <string name="ui_recent_conversations_90c40dce" formatted="false">Recent conversations</string>
+    <string name="ui_reject_52e8be4e" formatted="false">Reject</string>
+    <string name="ui_request_inspector_4337f973" formatted="false">Request inspector</string>
+    <string name="ui_search_05fdb9c1" formatted="false">Search</string>
+    <string name="ui_search_conversations_or_workspaces_3dee4e59" formatted="false">Search conversations or workspaces</string>
+    <string name="ui_select_or_create_an_agent_first_90dfc1bf" formatted="false">Select or create an Agent first.</string>
+    <string name="ui_sensitive_headers_and_keys_are_redacted_09373fcc" formatted="false">Sensitive headers and keys are redacted; the content below is supplied as redacted inspector data.</string>
+    <string name="ui_streaming_96edaa09" formatted="false">Streaming…</string>
+    <string name="ui_summaries_use_this_session_s_model_df6e6f50" formatted="false">Summaries use this session\'s model and count toward run usage. Original messages remain in the conversation. Summaries grant no permissions and do not replay tools.</string>
+    <string name="ui_system_access_s_22db32ee">System access: %1$s</string>
+    <string name="ui_text_only_78afb413" formatted="false">Text only</string>
+    <string name="ui_the_citation_image_could_not_be_e9fd2779" formatted="false">The citation image could not be decoded safely; metadata and excerpt remain available.</string>
+    <string name="ui_the_citation_image_dimensions_are_invalid_52f6d487" formatted="false">The citation image dimensions are invalid or too large and were not decoded; metadata and excerpt remain available.</string>
+    <string name="ui_the_citation_image_is_empty_metadata_5e639676" formatted="false">The citation image is empty; metadata and excerpt remain available.</string>
+    <string name="ui_the_citation_image_is_too_large_d59c4e23" formatted="false">The citation image is too large and was not decoded; metadata and excerpt remain available.</string>
+    <string name="ui_this_request_may_leave_the_device_de053073" formatted="false">This request may leave the device.</string>
+    <string name="ui_tool_cc2baf94" formatted="false">Tool</string>
+    <string name="ui_tool_records_a37123a8" formatted="false">Tool records</string>
+    <string name="ui_tool_records_s_42bfa81f">Tool records · %1$s</string>
+    <string name="ui_unread_0af1e493" formatted="false">Unread</string>
+    <string name="ui_view_request_e63fbc35" formatted="false">View request</string>
+    <string name="ui_view_workspace_b7713d6d" formatted="false">View workspace</string>
+    <string name="ui_working_directory_a7efee9a" formatted="false">Working directory</string>
+    <string name="ui_workspace_58a2bde1" formatted="false">Workspace</string>
+    <string name="ui_workspace_access_9224cbf6" formatted="false">Workspace &amp; access</string>
+    <string name="ui_workspaces_592e0578" formatted="false">Workspaces</string>
+</resources>

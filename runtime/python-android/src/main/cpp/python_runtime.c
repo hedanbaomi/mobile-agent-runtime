@@ -35,6 +35,10 @@
 #define CHANNEL_NONCE_LENGTH 43
 #define RESULT_INPUT_LIMIT -2
 #define RESULT_OUTPUT_LIMIT -3
+/* Bound new mappings after ART/JNI have loaded; ART already reserves multiple
+ * GiB of virtual address space. This is a VM-growth cap, not an RSS cap. */
+#define MAX_NATIVE_VM_GROWTH_BYTES (256ULL * 1024ULL * 1024ULL)
+#define RESULT_MEMORY_LIMIT -4
 
 typedef struct {
     int package_fd;
@@ -71,6 +75,7 @@ typedef struct {
     PyObject *denial_exception;
     _Atomic(size_t) log_bytes;
     _Atomic int log_limit_exceeded;
+    int memory_error;
     /* Strong reference acquired from the already loaded built-in _io module.
      * It is cached before any package code can mutate module attributes. */
     PyObject *code_bytes_io_type;
@@ -141,6 +146,11 @@ static void capture_python_diagnostic(char *destination, size_t capacity, const 
     set_stage_diagnostic(destination, capacity, stage);
     if (!PyErr_Occurred()) return;
     PyErr_Fetch(&exception_type, &exception_value, &traceback);
+    RuntimeState *state = current_state();
+    if (state != NULL && exception_type != NULL &&
+        PyErr_GivenExceptionMatches(exception_type, PyExc_MemoryError)) {
+        state->memory_error = 1;
+    }
 
     PyObject *name = exception_type == NULL ? NULL : PyObject_GetAttrString(exception_type, "__name__");
     (void)copy_diagnostic_token(name, exception_name, sizeof(exception_name), 0);
@@ -163,7 +173,6 @@ static void capture_python_diagnostic(char *destination, size_t capacity, const 
      * created for the denial; any other exception — including a script-made
      * one with a forged .code attribute — reverts to python_error. */
     if (exception_value != NULL) {
-        RuntimeState *state = current_state();
         if (state != NULL && state->capability_error[0] != '\0' &&
             exception_value != state->denial_exception) {
             state->capability_error[0] = '\0';
@@ -1087,7 +1096,7 @@ static void set_result_fd(RuntimeState *state, const char *status, const char *e
 static int read_input(RuntimeState *state, char **input_out, size_t *length_out) {
     size_t capacity = (size_t)state->max_input_bytes;
     char *input = (char *)calloc(capacity + 1, 1);
-    if (input == NULL) return -1;
+    if (input == NULL) return RESULT_MEMORY_LIMIT;
     size_t cursor = 0;
     while (cursor < capacity) {
         if (cancelled()) {
@@ -1464,6 +1473,64 @@ static int pending_interrupt(void *argument) {
     return 0;
 }
 
+/* Sample the worker's current mappings instead of imposing a fixed total AS
+ * limit that would reject Android's existing ART reservations. The kernel
+ * enforces the additional mapping allowance for both Python and native code;
+ * allocations inside an already reserved mapping are outside this guarantee.
+ * Admission fails before any package code if limits cannot be established. */
+static int install_resource_limits(int timeout_ms, char *diagnostic, size_t capacity) {
+    struct rlimit cpu_limit;
+    struct rlimit previous_cpu_limit;
+    cpu_limit.rlim_cur = (rlim_t)(timeout_ms / 1000 + 2);
+    if (getrlimit(RLIMIT_CPU, &previous_cpu_limit) != 0) {
+        set_stage_diagnostic(diagnostic, capacity, "cpu_limit_read");
+        return -1;
+    }
+    if (previous_cpu_limit.rlim_cur < cpu_limit.rlim_cur) cpu_limit.rlim_cur = previous_cpu_limit.rlim_cur;
+    if (previous_cpu_limit.rlim_max < cpu_limit.rlim_cur) cpu_limit.rlim_cur = previous_cpu_limit.rlim_max;
+    cpu_limit.rlim_max = cpu_limit.rlim_cur;
+    if (setrlimit(RLIMIT_CPU, &cpu_limit) != 0) {
+        set_stage_diagnostic(diagnostic, capacity, "cpu_limit_setup");
+        return -1;
+    }
+
+    FILE *statm = fopen("/proc/self/statm", "r");
+    if (statm == NULL) {
+        set_stage_diagnostic(diagnostic, capacity, "memory_baseline_read");
+        return -1;
+    }
+    unsigned long long pages = 0;
+    const int parsed = fscanf(statm, "%llu", &pages);
+    const int closed = fclose(statm);
+    const long page_size = sysconf(_SC_PAGESIZE);
+    const unsigned long long finite_max = (unsigned long long)RLIM_INFINITY - 1ULL;
+    if (parsed != 1 || closed != 0 || pages == 0 || page_size <= 0 ||
+        pages > (finite_max - MAX_NATIVE_VM_GROWTH_BYTES) / (unsigned long long)page_size) {
+        set_stage_diagnostic(diagnostic, capacity, "memory_baseline_shape");
+        return -1;
+    }
+    const unsigned long long baseline = pages * (unsigned long long)page_size;
+    struct rlimit memory_limit;
+    if (getrlimit(RLIMIT_AS, &memory_limit) != 0) {
+        set_stage_diagnostic(diagnostic, capacity, "memory_limit_read");
+        return -1;
+    }
+    rlim_t target = (rlim_t)(baseline + MAX_NATIVE_VM_GROWTH_BYTES);
+    if (memory_limit.rlim_cur < target) target = memory_limit.rlim_cur;
+    if (memory_limit.rlim_max < target) target = memory_limit.rlim_max;
+    if ((unsigned long long)target <= baseline) {
+        set_stage_diagnostic(diagnostic, capacity, "memory_limit_capacity");
+        return -1;
+    }
+    memory_limit.rlim_cur = target;
+    memory_limit.rlim_max = target;
+    if (setrlimit(RLIMIT_AS, &memory_limit) != 0) {
+        set_stage_diagnostic(diagnostic, capacity, "memory_limit_setup");
+        return -1;
+    }
+    return 0;
+}
+
 static int initialize_python(RuntimeState *state, char *diagnostic, size_t diagnostic_capacity) {
     atomic_store_explicit(&g_audit_enabled, 0, memory_order_release);
     if (validate_stdlib_descriptor(state->stdlib_fd, diagnostic, diagnostic_capacity) != 0) return -1;
@@ -1607,7 +1674,8 @@ static int invoke_entrypoint(RuntimeState *state, const char *entrypoint, const 
     failure_stage = "result_encode";
     Py_ssize_t output_length = 0;
     const char *output = PyUnicode_AsUTF8AndSize(result_text, &output_length);
-    if (output == NULL || output_length < 0 || output_length > state->max_output_bytes) {
+    if (output == NULL) goto fail;
+    if (output_length < 0 || output_length > state->max_output_bytes) {
         Py_DECREF(result_text);
         PyErr_Clear();
         return RESULT_OUTPUT_LIMIT;
@@ -1615,7 +1683,8 @@ static int invoke_entrypoint(RuntimeState *state, const char *entrypoint, const 
     char *copy = (char *)malloc((size_t)output_length + 1);
     if (copy == NULL) {
         Py_DECREF(result_text);
-        return -1;
+        Py_DECREF(json_module);
+        return RESULT_MEMORY_LIMIT;
     }
     memcpy(copy, output, (size_t)output_length);
     copy[output_length] = '\0';
@@ -1731,18 +1800,17 @@ Java_runtime_mobileagent_python_PythonNative_nativeRun(
         (void)dup2(log_fd, STDOUT_FILENO);
         (void)dup2(log_fd, STDERR_FILENO);
     }
-    struct rlimit cpu_limit;
-    cpu_limit.rlim_cur = (rlim_t)(timeout_ms / 1000 + 2);
-    cpu_limit.rlim_max = cpu_limit.rlim_cur;
-    (void)setrlimit(RLIMIT_CPU, &cpu_limit);
-
     char *input = NULL;
     size_t input_length = 0;
     char *output = NULL;
     size_t output_length = 0;
     char diagnostic[MAX_DIAGNOSTIC_BYTES] = {0};
-    set_stage_diagnostic(diagnostic, sizeof(diagnostic), "input_read");
-    int result_code = read_input(state, &input, &input_length);
+    const int limits_ready = install_resource_limits(timeout_ms, diagnostic, sizeof(diagnostic)) == 0;
+    int result_code = -1;
+    if (limits_ready) {
+        set_stage_diagnostic(diagnostic, sizeof(diagnostic), "input_read");
+        result_code = read_input(state, &input, &input_length);
+    }
     if (result_code == 0 && !cancelled()) {
         if (initialize_python(state, diagnostic, sizeof(diagnostic)) != 0) {
             result_code = -1;
@@ -1758,6 +1826,10 @@ Java_runtime_mobileagent_python_PythonNative_nativeRun(
     }
     if (cancelled()) {
         set_result_fd(state, "CANCELLED", "cancelled", "Invocation cancelled", NULL, 0);
+    } else if (!limits_ready) {
+        set_result_fd(state, "FAILED", "resource_limit_setup", diagnostic, NULL, 0);
+    } else if (state->memory_error || result_code == RESULT_MEMORY_LIMIT) {
+        set_result_fd(state, "FAILED", "memory_limit", "Python allocation failed", NULL, 0);
     } else if (result_code == RESULT_INPUT_LIMIT) {
         set_result_fd(state, "FAILED", "input_limit", "Python input limit exceeded", NULL, 0);
     } else if (result_code == RESULT_OUTPUT_LIMIT) {

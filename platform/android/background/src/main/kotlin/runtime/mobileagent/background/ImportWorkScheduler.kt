@@ -171,24 +171,22 @@ object ImportWorkScheduler {
     ): UUID = enqueue(context, jobId, visionConfigured)
 
     fun cancel(context: Context, jobId: String) {
+        require(jobId.isNotBlank()) { "jobId must not be blank" }
+        // The repository intent must survive a process dying after WorkManager
+        // commits CANCELLED. A missing/failed hook must not stop work first.
+        checkNotNull(ImportWorkerRegistry.cancellationHandler) {
+            "Import cancellation handler is unavailable"
+        }.cancel(jobId)
         val applicationContext = context.applicationContext
         cancellationScope.launch {
             try {
-                // Send the scheduler stop for every worker associated with this job before
-                // waiting on repository locks. This includes consent work, whose unique name
-                // is ticket-scoped rather than job-scoped.
+                // Includes consent work, whose unique name is ticket-scoped.
                 WorkManager.getInstance(applicationContext)
                     .cancelAllWorkByTag(uniqueName(jobId))
                     .result
                     .get()
             } catch (failure: Exception) {
                 android.util.Log.e("KnowledgeImport", "Work cancellation failed: ${failure.javaClass.simpleName}")
-            }
-            try {
-                // The worker invokes this same idempotent hook on cancellation.
-                ImportWorkerRegistry.cancellationHandler?.cancel(jobId)
-            } catch (failure: Exception) {
-                android.util.Log.e("KnowledgeImport", "Cancellation persistence failed: ${failure.javaClass.simpleName}")
             }
         }
     }

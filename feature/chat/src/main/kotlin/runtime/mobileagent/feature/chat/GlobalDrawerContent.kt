@@ -3,6 +3,8 @@
 
 package runtime.mobileagent.feature.chat
 
+import androidx.compose.ui.res.stringResource
+
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
@@ -127,7 +129,7 @@ fun GlobalDrawerContent(
                         overflow = TextOverflow.Ellipsis,
                     )
                     Text(
-                        if (zh) "Agent 工作台" else "Agent workspace",
+                        stringResource(R.string.ui_agent_workspace_61a16997),
                         style = MaterialTheme.typography.bodySmall,
                         color = if (easterEgg) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSurfaceVariant,
                     )
@@ -137,7 +139,7 @@ fun GlobalDrawerContent(
                     modifier = Modifier.testTag("global.drawer.close"),
                     colors = ButtonDefaults.textButtonColors(contentColor = headerInk),
                 ) {
-                    Text(if (zh) "关闭" else "Close")
+                    Text(stringResource(R.string.ui_close_6cf4a777))
                 }
             }
         }
@@ -148,7 +150,7 @@ fun GlobalDrawerContent(
                     .fillMaxWidth()
                     .testTag("global.drawer.new"),
             ) {
-                Text(if (zh) "新对话" else "New conversation")
+                Text(stringResource(R.string.ui_new_conversation_9878af0c))
             }
         }
         item(key = "drawer-search") {
@@ -159,8 +161,8 @@ fun GlobalDrawerContent(
                     .fillMaxWidth()
                     .testTag("global.drawer.search"),
                 singleLine = true,
-                label = { Text(if (zh) "搜索" else "Search") },
-                placeholder = { Text(if (zh) "搜索会话或工作区" else "Search conversations or workspaces") },
+                label = { Text(stringResource(R.string.ui_search_05fdb9c1)) },
+                placeholder = { Text(stringResource(R.string.ui_search_conversations_or_workspaces_3dee4e59)) },
             )
         }
 
@@ -182,7 +184,7 @@ fun GlobalDrawerContent(
         if (visibleWorkspaces.isNotEmpty()) {
             item(key = "drawer-workspaces-title") {
                 Text(
-                    if (zh) "工作区" else "Workspaces",
+                    stringResource(R.string.ui_workspaces_592e0578),
                     style = MaterialTheme.typography.labelLarge,
                     modifier = Modifier
                         .padding(top = 8.dp, bottom = 2.dp)
@@ -225,7 +227,7 @@ fun GlobalDrawerContent(
                                 .widthIn(min = 48.dp)
                                 .testTag("global.drawer.workspace.new.${workspace.id}"),
                         ) {
-                            Text(if (zh) "新建" else "New", maxLines = 1)
+                            Text(stringResource(R.string.ui_new_5a5d1d13), maxLines = 1)
                         }
                     }
                 }
@@ -240,11 +242,11 @@ fun GlobalDrawerContent(
                         .fillMaxWidth()
                         .testTag("global.drawer.workspace.open"),
                 ) {
-                    Text(if (zh) "打开工作区" else "Open workspace")
+                    Text(stringResource(R.string.ui_open_workspace_3a7608fa))
                 }
                 if (state.selectedAgentId == null) {
                     Text(
-                        if (zh) "请先选择或创建智能体。" else "Select or create an Agent first.",
+                        stringResource(R.string.ui_select_or_create_an_agent_first_90dfc1bf),
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         modifier = Modifier
@@ -260,7 +262,7 @@ fun GlobalDrawerContent(
         }
         item(key = "drawer-sessions-title") {
             Text(
-                if (zh) "最近对话" else "Recent conversations",
+                stringResource(R.string.ui_recent_conversations_90c40dce),
                 style = MaterialTheme.typography.labelLarge,
                 modifier = Modifier
                     .padding(top = 8.dp, bottom = 2.dp)
@@ -270,7 +272,7 @@ fun GlobalDrawerContent(
         if (visibleAgents.isEmpty() && visibleSessions.isEmpty()) {
             item(key = "drawer-empty") {
                 Text(
-                    if (zh) "暂无匹配的对话。" else "No matching conversations.",
+                    stringResource(R.string.ui_no_matching_conversations_c7c1240d),
                     style = MaterialTheme.typography.bodySmall,
                     modifier = Modifier.padding(vertical = 8.dp),
                 )
@@ -295,13 +297,13 @@ fun GlobalDrawerContent(
                             onClick = { actions.onAuthorizeWorkspaceForAgent(agent.id); onClose() },
                             modifier = Modifier.testTag("global.drawer.agent.workspace.${agent.id}"),
                         ) {
-                            Text(if (zh) "工作区" else "Workspace", maxLines = 1)
+                            Text(stringResource(R.string.ui_workspace_58a2bde1), maxLines = 1)
                         }
                         TextButton(
                             onClick = { actions.onNewSessionForAgent(agent.id); onClose() },
                             modifier = Modifier.testTag("global.drawer.agent.new.${agent.id}"),
                         ) {
-                            Text(if (zh) "新建" else "New", maxLines = 1)
+                            Text(stringResource(R.string.ui_new_5a5d1d13), maxLines = 1)
                         }
                     }
                 }
@@ -325,7 +327,7 @@ fun GlobalDrawerContent(
             if (orphanSessions.isNotEmpty()) {
                 item(key = "orphan-header") {
                     Text(
-                        if (zh) "其他对话" else "Other conversations",
+                        stringResource(R.string.ui_other_conversations_820584af),
                         style = MaterialTheme.typography.labelMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         modifier = Modifier.padding(top = 8.dp),
@@ -353,7 +355,7 @@ fun GlobalDrawerContent(
             }
             item(key = "drawer-navigation-title") {
                 Text(
-                    if (zh) "管理" else "Manage",
+                    stringResource(R.string.ui_manage_1f04c52a),
                     style = MaterialTheme.typography.labelLarge,
                     modifier = Modifier
                         .padding(top = 8.dp, bottom = 2.dp)

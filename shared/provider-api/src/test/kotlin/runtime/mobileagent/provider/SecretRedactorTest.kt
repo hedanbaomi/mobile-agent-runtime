@@ -28,4 +28,23 @@ class SecretRedactorTest {
         val redacted = SecretRedactor.redact("Invalid credential: $token", listOf(token))
         assertFalse(redacted.contains(token))
     }
+
+    @Test
+    fun modernProviderKeysAndCredentialHeadersAreFullyRedacted() {
+        val keys = listOf("sk-proj-example_credential-with-hyphens", "sk-ant-api03-example_credential-more")
+        val input = keys.joinToString(" ") +
+            "\nx-api-key: synthetic-header-value" +
+            "\nCookie: session=synthetic-session; auth=synthetic-auth" +
+            "\n{\"cookie\":\"synthetic-json-cookie\",\"x-api-key\":\"synthetic-json-key\"}"
+        val out = SecretRedactor.redact(input)
+        keys.forEach { assertFalse(out.contains(it)) }
+        listOf("synthetic-header-value", "synthetic-session", "synthetic-auth", "synthetic-json-cookie", "synthetic-json-key")
+            .forEach { assertFalse(out.contains(it), out) }
+    }
+
+    @Test
+    fun overlappingRuntimeSecretsAreRemovedLongestFirst() {
+        assertFalse(SecretRedactor.redact("synthetic-long-credential", listOf("synthetic", "synthetic-long-credential"))
+            .contains("long-credential"))
+    }
 }

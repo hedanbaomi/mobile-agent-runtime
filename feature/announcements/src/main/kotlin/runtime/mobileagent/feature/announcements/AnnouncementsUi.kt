@@ -36,6 +36,7 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.rememberTextMeasurer
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import runtime.mobileagent.announcements.AnnouncementAction
@@ -74,24 +75,23 @@ fun AnnouncementsScreen(
     modifier: Modifier = Modifier,
     showPageTitle: Boolean = true,
 ) {
-    val zh = state.language.equals("zh-CN", true)
     val uriHandler = LocalUriHandler.current
     val textMeasurer = rememberTextMeasurer()
     Column(modifier.fillMaxSize().padding(16.dp)) {
         Row(Modifier.fillMaxWidth()) {
             Column(Modifier.weight(1f)) {
                 if (showPageTitle) {
-                    Text(if (zh) "公告" else "News", style = MaterialTheme.typography.headlineSmall)
+                    Text(stringResource(R.string.ann_title), style = MaterialTheme.typography.headlineSmall)
                 }
                 if (state.status.isNotBlank()) Text(state.status, style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(top = 4.dp))
             }
-            Button(onClick = actions.onRefresh, enabled = !state.loading) { Text(if (zh) "刷新" else "Refresh") }
+            Button(onClick = actions.onRefresh, enabled = !state.loading) { Text(stringResource(R.string.ann_refresh)) }
         }
         state.error?.let { Text(it, color = MaterialTheme.colorScheme.error, modifier = Modifier.padding(top = 8.dp)) }
-        state.banner?.let { BannerCard(it, actions, zh) }
+        state.banner?.let { BannerCard(it, actions) }
         BoxWithConstraints(Modifier.fillMaxWidth()) {
             val buttonWidth = (maxWidth.value - 24f) / 4f
-            val markReadLabel = if (zh) "全部标为已读" else "Read all"
+            val markReadLabel = stringResource(R.string.ann_mark_all_read)
             // Material's button content has insets beyond contentPadding. Reserve enough space
             // for those insets before measuring the full label, including on 320dp screens.
             val availableTextWidth = with(LocalDensity.current) { (buttonWidth - 12f).dp.roundToPx() }
@@ -105,7 +105,11 @@ fun AnnouncementsScreen(
                 ).size.width <= availableTextWidth
             }?.let { (it / 2f).sp } ?: 6.sp
             Row(Modifier.fillMaxWidth().padding(vertical = 10.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                listOf("unread" to if (zh) "未读" else "Unread", "all" to if (zh) "全部" else "All", "history" to if (zh) "历史" else "History").forEach { (key, label) ->
+                listOf(
+                    "unread" to stringResource(R.string.ann_filter_unread),
+                    "all" to stringResource(R.string.ann_filter_all),
+                    "history" to stringResource(R.string.ann_filter_history),
+                ).forEach { (key, label) ->
                     FilterChip(
                         selected = state.filter == key,
                         onClick = { actions.onFilter(key) },
@@ -125,15 +129,15 @@ fun AnnouncementsScreen(
         if (state.loading) {
             CircularProgressIndicator(Modifier.padding(top = 20.dp))
         } else if (state.items.isEmpty()) {
-            Text(if (zh) "暂无公告。" else "No announcements available.", style = MaterialTheme.typography.bodyMedium, modifier = Modifier.padding(top = 20.dp))
+            Text(stringResource(R.string.ann_empty), style = MaterialTheme.typography.bodyMedium, modifier = Modifier.padding(top = 20.dp))
         } else {
             LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.weight(1f)) {
-                items(state.items, key = { "${it.item.id}:${it.item.revision}" }) { record -> AnnouncementCard(record, actions, zh) }
+                items(state.items, key = { "${it.item.id}:${it.item.revision}" }) { record -> AnnouncementCard(record, actions) }
             }
         }
     }
     state.selected?.let { record ->
-        AnnouncementDetailDialog(record, actions.onCloseDetail, zh) { action ->
+        AnnouncementDetailDialog(record, actions.onCloseDetail) { action ->
             if (AnnouncementActions.allowed(action)) {
                 actions.onActionClicked(record, action)
                 when (action.type) {
@@ -152,31 +156,31 @@ fun AnnouncementsScreen(
             title = { Text(record.item.title) },
             text = { Text(record.item.bodyMarkdown, modifier = Modifier.verticalScroll(rememberScrollState())) },
             confirmButton = {
-                if (record.item.mustAcknowledge) Button(onClick = { actions.onAcknowledge(record) }) { Text(if (zh) "确认" else "Acknowledge") }
-                else Button(onClick = { actions.onDismiss(record) }) { Text(if (zh) "忽略" else "Dismiss") }
+                if (record.item.mustAcknowledge) Button(onClick = { actions.onAcknowledge(record) }) { Text(stringResource(R.string.ann_acknowledge)) }
+                else Button(onClick = { actions.onDismiss(record) }) { Text(stringResource(R.string.ann_dismiss)) }
             },
-            dismissButton = if (canDismiss) ({ TextButton(onClick = { actions.onDismiss(record) }) { Text(if (zh) "关闭" else "Close") } }) else null,
+            dismissButton = if (canDismiss) ({ TextButton(onClick = { actions.onDismiss(record) }) { Text(stringResource(R.string.ann_close)) } }) else null,
         )
     }
 }
 
 @Composable
-private fun BannerCard(record: CachedAnnouncement, actions: AnnouncementsActions, zh: Boolean) {
+private fun BannerCard(record: CachedAnnouncement, actions: AnnouncementsActions) {
     Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer), modifier = Modifier.fillMaxWidth().padding(top = 10.dp)) {
         Column(Modifier.padding(12.dp)) {
-            Text(if (zh) "置顶公告" else "Pinned notice", style = MaterialTheme.typography.labelLarge)
+            Text(stringResource(R.string.ann_pinned_notice), style = MaterialTheme.typography.labelLarge)
             Text(record.item.title, style = MaterialTheme.typography.titleMedium)
             Text(record.item.summary, style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(top = 4.dp))
             Row(Modifier.padding(top = 8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                OutlinedButton(onClick = { actions.onOpen(record) }) { Text(if (zh) "打开" else "Open") }
-                if (record.item.dismissible) TextButton(onClick = { actions.onDismiss(record) }) { Text(if (zh) "忽略" else "Dismiss") }
+                OutlinedButton(onClick = { actions.onOpen(record) }) { Text(stringResource(R.string.ann_open)) }
+                if (record.item.dismissible) TextButton(onClick = { actions.onDismiss(record) }) { Text(stringResource(R.string.ann_dismiss)) }
             }
         }
     }
 }
 
 @Composable
-private fun AnnouncementCard(record: CachedAnnouncement, actions: AnnouncementsActions, zh: Boolean) {
+private fun AnnouncementCard(record: CachedAnnouncement, actions: AnnouncementsActions) {
     val item = record.item
     val container = when (item.severity.name) {
         "CRITICAL" -> MaterialTheme.colorScheme.errorContainer
@@ -192,8 +196,11 @@ private fun AnnouncementCard(record: CachedAnnouncement, actions: AnnouncementsA
             }
             Text(item.summary, style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(top = 4.dp))
             Text(
-                if (zh) "${item.category.name} · 修订 ${item.revision}${if (item.mustAcknowledge) " · 需要确认" else ""}"
-                else "${item.category.name} · rev ${item.revision}${if (item.mustAcknowledge) " · acknowledgement required" else ""}",
+                if (item.mustAcknowledge) {
+                    stringResource(R.string.ann_revision_ack_required, item.category.name, item.revision)
+                } else {
+                    stringResource(R.string.ann_revision, item.category.name, item.revision)
+                },
                 style = MaterialTheme.typography.labelSmall,
                 modifier = Modifier.padding(top = 4.dp),
             )
@@ -202,7 +209,7 @@ private fun AnnouncementCard(record: CachedAnnouncement, actions: AnnouncementsA
 }
 
 @Composable
-private fun AnnouncementDetailDialog(record: CachedAnnouncement, onClose: () -> Unit, zh: Boolean, onAction: (AnnouncementAction) -> Unit) {
+private fun AnnouncementDetailDialog(record: CachedAnnouncement, onClose: () -> Unit, onAction: (AnnouncementAction) -> Unit) {
     AlertDialog(
         onDismissRequest = onClose,
         title = { Text(record.item.title) },
@@ -215,6 +222,6 @@ private fun AnnouncementDetailDialog(record: CachedAnnouncement, onClose: () -> 
                 }
             }
         },
-        confirmButton = { Button(onClick = onClose) { Text(if (zh) "关闭" else "Close") } },
+        confirmButton = { Button(onClick = onClose) { Text(stringResource(R.string.ann_close)) } },
     )
 }

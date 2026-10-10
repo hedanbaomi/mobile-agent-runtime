@@ -1,0 +1,76 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- SPDX-FileCopyrightText: 2026 mobileAgentRuntime contributors -->
+<!-- SPDX-License-Identifier: AGPL-3.0-only -->
+<resources>
+    <string name="ui_access_channel_s_e7931cea">Access channel: %1$s</string>
+    <string name="ui_active_2b6e4af7" formatted="false">Active</string>
+    <string name="ui_adapt_to_the_model_window_f6a84b14" formatted="false">Adapt to the model window</string>
+    <string name="ui_add_capability_grant_1165e325" formatted="false">Add capability grant</string>
+    <string name="ui_advanced_permissions_e86be370" formatted="false">Advanced permissions</string>
+    <string name="ui_agent_scoped_no_workspace_7790b7e9" formatted="false">Agent scoped (no workspace)</string>
+    <string name="ui_agents_8039b104" formatted="false">Agents</string>
+    <string name="ui_allow_reading_and_writing_c57f45b3" formatted="false">Allow reading and writing</string>
+    <string name="ui_allow_reading_b738171d" formatted="false">Allow reading</string>
+    <string name="ui_allow_web_search_7d0fa1ad" formatted="false">Allow web search</string>
+    <string name="ui_auto_compaction_78571f2d" formatted="false">Auto-compaction</string>
+    <string name="ui_browse_device_directory_865b3714" formatted="false">Browse device directory</string>
+    <string name="ui_budgets_use_conservative_estimates_request_ca_e643af41" formatted="false">Budgets use conservative estimates. Request caps include summaries; tool and runtime caps also apply.</string>
+    <string name="ui_cancel_998b9c48" formatted="false">Cancel</string>
+    <string name="ui_capability_grants_56d2de6d" formatted="false">Capability grants</string>
+    <string name="ui_choose_a_saf_or_app_workspace_dcd4edaf" formatted="false">Choose a SAF or app workspace, then grant the common read-only or read-write tools at once. Advanced per-capability grants remain below.</string>
+    <string name="ui_choose_phone_folder_b40c3e60" formatted="false">Choose phone folder</string>
+    <string name="ui_compact_at_the_available_input_threshold_6040fd8f" formatted="false">Compact at the available input threshold; unknown windows use a local fallback.</string>
+    <string name="ui_context_auto_compaction_2e8cc503" formatted="false">Context &amp; auto-compaction</string>
+    <string name="ui_current_snapshot_grant_bindings_64946389" formatted="false">Current snapshot grant bindings</string>
+    <string name="ui_default_workspace_for_new_conversations_a2e3217d" formatted="false">Default workspace for new conversations</string>
+    <string name="ui_edit_e9740dbb" formatted="false">Edit</string>
+    <string name="ui_filter_agents_3b62b75b" formatted="false">Filter agents</string>
+    <string name="ui_full_device_files_42f1a6aa" formatted="false">Full device files</string>
+    <string name="ui_grant_lifetime_614735ae" formatted="false">Grant lifetime</string>
+    <string name="ui_grant_storage_is_unavailable_grant_changes_f1d5338e" formatted="false">Grant storage is unavailable; grant changes will not be silently ignored.</string>
+    <string name="ui_limited_to_what_adb_can_see_9b3f736d" formatted="false">Limited to what ADB can see, not Root; enabling persists for this Agent.</string>
+    <string name="ui_load_r_s_s_a0b0fd26">Load r%1$s %2$s</string>
+    <string name="ui_model_roles_fc5da317" formatted="false">Model roles</string>
+    <string name="ui_name_dd4dc4c5" formatted="false">Name</string>
+    <string name="ui_new_agent_5a36831a" formatted="false">New agent</string>
+    <string name="ui_new_conversations_can_run_tools_without_a6129257" formatted="false">New conversations can run tools without per-call prompts; grants still apply. Turning this off takes effect immediately.</string>
+    <string name="ui_new_grant_saved_with_the_agent_4d02b849" formatted="false">New grant (saved with the Agent)</string>
+    <string name="ui_no_agents_available_79df1c1b" formatted="false">No agents available.</string>
+    <string name="ui_no_existing_grants_44bd93be" formatted="false">No existing grants.</string>
+    <string name="ui_no_explicit_capability_grants_c2ccd114" formatted="false">No explicit capability grants.</string>
+    <string name="ui_no_knowledge_bases_or_skills_are_5b267557" formatted="false">No knowledge bases or skills are bound.</string>
+    <string name="ui_no_knowledge_bases_or_skills_are_e2526f0c" formatted="false">No knowledge bases or skills are available to bind.</string>
+    <string name="ui_no_parameter_overrides_453a2861" formatted="false">No parameter overrides.</string>
+    <string name="ui_no_s_models_available_2ccc24d2">No %1$s models available</string>
+    <string name="ui_no_workspace_is_available_choose_a_67498e4c" formatted="false">No workspace is available; choose a SAF directory in Settings first.</string>
+    <string name="ui_none_agent_scoped_c3eaddc7" formatted="false">None (Agent scoped)</string>
+    <string name="ui_not_configured_8b6c7ecc" formatted="false">Not configured</string>
+    <string name="ui_parameter_schema_unavailable_no_override_fiel_4f661441" formatted="false">Parameter schema unavailable; no override field is shown.</string>
+    <string name="ui_parameters_af94b2b3" formatted="false">Parameters</string>
+    <string name="ui_prompt_44ac51fa" formatted="false">Prompt</string>
+    <string name="ui_prompt_history_93fee38e" formatted="false">Prompt history</string>
+    <string name="ui_prompt_history_s_cb99ff1a">Prompt history (%1$s)</string>
+    <string name="ui_prompt_revision_acf2ff77" formatted="false">Prompt revision</string>
+    <string name="ui_quick_file_tool_grant_850a14d4" formatted="false">Quick file tool grant</string>
+    <string name="ui_relative_scope_optional_14c79525" formatted="false">Relative scope (optional)</string>
+    <string name="ui_remove_this_new_grant_4e106b82" formatted="false">Remove this new grant</string>
+    <string name="ui_resource_bindings_14fb156b" formatted="false">Resource bindings</string>
+    <string name="ui_resources_ccecd0da" formatted="false">Resources</string>
+    <string name="ui_retrieval_mode_ab73f89a" formatted="false">Retrieval mode</string>
+    <string name="ui_retrieval_mode_s_14a0ab5e">Retrieval mode: %1$s</string>
+    <string name="ui_revision_s_e36588e9">Revision %1$s</string>
+    <string name="ui_save_ec8e6d58" formatted="false">Save</string>
+    <string name="ui_select_an_agent_to_view_its_1e797d37" formatted="false">Select an agent to view its settings.</string>
+    <string name="ui_shell_execute_is_effective_only_when_ba884065" formatted="false">shell.execute is effective only when the selected Authority, Dangerous Mode, and live policy allow it.</string>
+    <string name="ui_skip_tool_run_confirmations_e4481e04" formatted="false">Skip tool run confirmations</string>
+    <string name="ui_start_a_new_conversation_with_this_014ebfd6" formatted="false">Start a new conversation with this Agent</string>
+    <string name="ui_start_a_new_conversation_with_this_a6054013" formatted="false">Start a new conversation with this Agent after saving; existing conversations do not change.</string>
+    <string name="ui_summarize_earlier_turns_while_keeping_the_bddcf43c" formatted="false">Summarize earlier turns while keeping the original history. Summaries may incur extra cost; settings apply to new sessions.</string>
+    <string name="ui_trusted_skill_bindings_ab7c43ad" formatted="false">Trusted Skill bindings</string>
+    <string name="ui_trusted_skill_s_0f8385b9">Trusted Skill: %1$s</string>
+    <string name="ui_unlink_7882f235" formatted="false">Unlink</string>
+    <string name="ui_use_a_workspace_relative_scope_never_ccc95195" formatted="false">Use a workspace-relative scope, never a device path.</string>
+    <string name="ui_use_recommended_settings_6754f65f" formatted="false">Use recommended settings</string>
+    <string name="ui_use_the_configured_search_service_without_92bc0ab7" formatted="false">Use the configured search service without per-query prompts; charges may apply. Enable for new conversations; disable immediately.</string>
+    <string name="ui_workspace_access_7dc4e36c" formatted="false">Workspace access</string>
+</resources>

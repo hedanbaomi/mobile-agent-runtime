@@ -4,6 +4,8 @@
 
 Line numbers are excluded so a source move does not renew existing warnings.
 Error/Fatal findings always fail; they can never be entered in this baseline.
+Online version-availability notices stay in lint reports but are not source
+regressions: their results change when repository metadata changes.
 """
 from __future__ import annotations
 
@@ -13,12 +15,17 @@ import pathlib
 import xml.etree.ElementTree as ET
 
 
+VERSION_AVAILABILITY_WARNINGS = frozenset({"AndroidGradlePluginVersion", "GradleDependency"})
+
+
 def findings(report: pathlib.Path, root: pathlib.Path) -> tuple[set[str], list[str]]:
     warnings, errors = set(), []
     prefix = root.as_posix().rstrip("/") + "/"
     for issue in ET.parse(report).getroot().iter("issue"):
         severity = issue.get("severity")
         if severity not in ("Warning", "Error", "Fatal"):
+            continue
+        if severity == "Warning" and issue.get("id") in VERSION_AVAILABILITY_WARNINGS:
             continue
         locations = [location.get("file", "").replace("\\", "/").removeprefix(prefix) for location in issue.findall("location")]
         identity = json.dumps([issue.get("id"), sorted(locations), issue.get("message")], ensure_ascii=False)

@@ -5,6 +5,7 @@ package runtime.mobileagent.tooling
 
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.CompletableDeferred
@@ -1816,7 +1817,7 @@ class ToolingOrchestrationTest {
         val baseContext = workspaceContext(
             workspaceGrants(grant("grant-once-race", read, descriptor.id, "shared.txt").copy(lifetime = GrantLifetime.ONCE)),
         )
-        val auditEvents = mutableListOf<WorkspaceAuditEvent>()
+        val auditEvents = CopyOnWriteArrayList<WorkspaceAuditEvent>()
         val executor = UnifiedWorkspaceToolExecutor(
             registry = registry,
             approvalEngine = ApprovalEngine(),

@@ -4,8 +4,8 @@
 import groovy.json.JsonOutput
 import groovy.json.JsonSlurper
 import java.io.File
+import java.util.function.Function
 import java.nio.charset.StandardCharsets
-import java.security.MessageDigest
 import java.util.UUID
 import java.util.zip.ZipFile
 import javax.xml.parsers.DocumentBuilderFactory
@@ -19,19 +19,9 @@ import org.gradle.api.artifacts.component.ProjectComponentIdentifier
  * packaged-artifact hash is calculated from the bytes on disk.
  */
 
-fun sha256(file: File): String {
-    check(file.isFile) { "Cannot hash a missing file: ${file.absolutePath}" }
-    val digest = MessageDigest.getInstance("SHA-256")
-    file.inputStream().use { input ->
-        val buffer = ByteArray(64 * 1024)
-        while (true) {
-            val count = input.read(buffer)
-            if (count < 0) break
-            if (count > 0) digest.update(buffer, 0, count)
-        }
-    }
-    return digest.digest().joinToString("") { "%02x".format(it.toInt() and 0xff) }
-}
+@Suppress("UNCHECKED_CAST")
+fun sha256(file: File): String =
+    (rootProject.extensions.extraProperties["mobileagentEvidenceSha256"] as Function<File, String>).apply(file)
 
 fun gitOutput(vararg arguments: String): String {
     val process = ProcessBuilder(listOf("git") + arguments.toList())
@@ -57,24 +47,9 @@ fun gitState(requireClean: Boolean): Pair<String, Boolean> {
     return head.lowercase() to status.isNotBlank()
 }
 
-fun sourceArchiveSha256(): String {
-    val digest = MessageDigest.getInstance("SHA-256")
-    val process = ProcessBuilder("git", "archive", "--format=tar", "HEAD")
-        .directory(rootProject.projectDir)
-        .redirectErrorStream(false)
-        .start()
-    process.inputStream.use { input ->
-        val buffer = ByteArray(64 * 1024)
-        while (true) {
-            val count = input.read(buffer)
-            if (count < 0) break
-            if (count > 0) digest.update(buffer, 0, count)
-        }
-    }
-    val errors = process.errorStream.bufferedReader(StandardCharsets.UTF_8).readText().trim()
-    check(process.waitFor() == 0) { "git archive failed: $errors" }
-    return digest.digest().joinToString("") { "%02x".format(it.toInt() and 0xff) }
-}
+@Suppress("UNCHECKED_CAST")
+fun sourceArchiveSha256(): String =
+    (rootProject.extensions.extraProperties["mobileagentEvidenceSourceArchiveSha256"] as Function<File, String>).apply(rootProject.projectDir)
 
 fun pomLicenses(group: String, module: String, version: String): List<Map<String, Any>> {
     val directory = File(gradle.gradleUserHomeDir, "caches/modules-2/files-2.1/$group/$module/$version")
@@ -704,6 +679,18 @@ val verifyReviewArtifact = tasks.register("verifyReviewArtifact") {
     doLast {
         verifyVariantSecurity("review", variantApkFile("review"), expectedDebuggable = false, expectedControlPlaneEnabled = true)
         verifyNativePageAlignment(variantApkFile("review"))
+        val apk = variantApkFile("review")
+        val entries = ZipFile(apk).use { zip ->
+            zip.entries().asSequence().filterNot { it.isDirectory }.map { entry ->
+                mapOf("path" to entry.name, "compressedBytes" to entry.compressedSize, "uncompressedBytes" to entry.size)
+            }.toList()
+        }
+        val report = layout.buildDirectory.file("reports/apk-size/review.json").get().asFile
+        report.parentFile.mkdirs()
+        report.writeText(JsonOutput.prettyPrint(JsonOutput.toJson(mapOf(
+            "apkBytes" to apk.length(), "apkSha256" to sha256(apk), "entries" to entries,
+        ))) + "\n")
+        logger.lifecycle("Review APK size: ${apk.length()} bytes; ZIP/native payload metrics: ${report.absolutePath}")
     }
 }
 

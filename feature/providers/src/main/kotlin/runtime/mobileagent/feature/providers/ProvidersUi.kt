@@ -3,6 +3,8 @@
 
 package runtime.mobileagent.feature.providers
 
+import androidx.compose.ui.res.stringResource
+
 import runtime.mobileagent.domain.BudgetValidationError
 import runtime.mobileagent.domain.ContextLimitSource
 import runtime.mobileagent.domain.ContextLimitMode
@@ -442,7 +444,7 @@ fun ProvidersScreen(
     if (connectionRequested) {
         AlertDialog(
             onDismissRequest = { connectionRequested = false },
-            title = { Text(if (zh) "测试服务商连接？" else "Test provider connection?") },
+            title = { Text(stringResource(R.string.ui_test_provider_connection_1033d112)) },
             text = {
                 Text(
                     if (zh) {
@@ -454,43 +456,42 @@ fun ProvidersScreen(
             },
             confirmButton = {
                 Button(onClick = { connectionRequested = false; actions.onTestConnection() }) {
-                    Text(if (zh) "测试连接" else "Test connection")
+                    Text(stringResource(R.string.ui_test_connection_00a680a7))
                 }
             },
             dismissButton = {
-                TextButton(onClick = { connectionRequested = false }) { Text(if (zh) "取消" else "Cancel") }
+                TextButton(onClick = { connectionRequested = false }) { Text(stringResource(R.string.ui_cancel_998b9c48)) }
             },
         )
     }
     if (probeRequested) {
         AlertDialog(
             onDismissRequest = { probeRequested = false },
-            title = { Text(if (zh) "运行服务商探测？" else "Run provider probe?") },
-            text = { Text(if (zh) "验证连接、流式、工具和图片，可能分别收费。图片请求最多输出 1024 tokens；不会自动重试。" else "Connection, streaming, tools and images may each incur charges. Image output is capped at 1024 tokens; no automatic retry.") },
-            confirmButton = { Button(onClick = { probeRequested = false; actions.onProbe() }) { Text(if (zh) "运行探测" else "Run probe") } },
-            dismissButton = { TextButton(onClick = { probeRequested = false }) { Text(if (zh) "取消" else "Cancel") } },
+            title = { Text(stringResource(R.string.ui_run_provider_probe_0d20bf18)) },
+            text = { Text(stringResource(R.string.ui_connection_streaming_tools_and_images_may_5e7ca12d)) },
+            confirmButton = { Button(onClick = { probeRequested = false; actions.onProbe() }) { Text(stringResource(R.string.ui_run_probe_505e98f3)) } },
+            dismissButton = { TextButton(onClick = { probeRequested = false }) { Text(stringResource(R.string.ui_cancel_998b9c48)) } },
         )
     }
     deleteProviderId?.let { providerId ->
         val name = state.providers.firstOrNull { it.id == providerId }?.name.orEmpty()
         AlertDialog(
             onDismissRequest = { deleteProviderId = null },
-            title = { Text(if (zh) "删除服务商？" else "Delete provider?") },
+            title = { Text(stringResource(R.string.ui_delete_provider_b27fe928)) },
             text = { Text(
-                if (zh) "将删除 $name 及其模型元数据。当前引用：${state.deleteModelCount} 个模型，${state.deleteSnapshotCount} 个会话快照。无引用时密文会退休并进入垃圾回收；Keystore 条目由系统生命周期管理。"
-                else "Delete $name and its model metadata. Current references: ${state.deleteModelCount} models, ${state.deleteSnapshotCount} conversation snapshots. Unreferenced ciphertext is retired and garbage-collected; Keystore entries follow the platform lifecycle."
+                stringResource(R.string.ui_delete_s_and_its_model_metadata_53e098e3, (name), (state.deleteModelCount), (state.deleteSnapshotCount))
             ) },
-            confirmButton = { Button(onClick = { deleteProviderId = null; actions.onDelete() }) { Text(if (zh) "删除" else "Delete") } },
-            dismissButton = { TextButton(onClick = { deleteProviderId = null }) { Text(if (zh) "取消" else "Cancel") } },
+            confirmButton = { Button(onClick = { deleteProviderId = null; actions.onDelete() }) { Text(stringResource(R.string.ui_delete_5b875326)) } },
+            dismissButton = { TextButton(onClick = { deleteProviderId = null }) { Text(stringResource(R.string.ui_cancel_998b9c48)) } },
         )
     }
     deleteModelId?.let { modelId ->
         AlertDialog(
             onDismissRequest = { deleteModelId = null },
-            title = { Text(if (zh) "删除模型元数据？" else "Delete model metadata?") },
-            text = { Text(if (zh) "将从服务商配置中删除此模型；不会自动联系服务商。" else "This removes the model from the provider profile. The provider is not contacted automatically.") },
-            confirmButton = { Button(onClick = { deleteModelId = null; actions.onDeleteModel(modelId) }) { Text(if (zh) "删除" else "Delete") } },
-            dismissButton = { TextButton(onClick = { deleteModelId = null }) { Text(if (zh) "取消" else "Cancel") } },
+            title = { Text(stringResource(R.string.ui_delete_model_metadata_c109a272)) },
+            text = { Text(stringResource(R.string.ui_this_removes_the_model_from_the_05f9aab4)) },
+            confirmButton = { Button(onClick = { deleteModelId = null; actions.onDeleteModel(modelId) }) { Text(stringResource(R.string.ui_delete_5b875326)) } },
+            dismissButton = { TextButton(onClick = { deleteModelId = null }) { Text(stringResource(R.string.ui_cancel_998b9c48)) } },
         )
     }
 }
@@ -506,11 +507,11 @@ private fun ProviderListPane(
     Column(modifier) {
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
             if (showPageTitle) {
-                Text(if (zh) "服务商" else "Providers", style = MaterialTheme.typography.headlineSmall, modifier = Modifier.weight(1f))
+                Text(stringResource(R.string.ui_providers_e98de897), style = MaterialTheme.typography.headlineSmall, modifier = Modifier.weight(1f))
             } else {
                 Spacer(Modifier.weight(1f))
             }
-            Button(onClick = { actions.onOpenEditor(null) }) { Text(if (zh) "添加服务商" else "Add provider") }
+            Button(onClick = { actions.onOpenEditor(null) }) { Text(stringResource(R.string.ui_add_provider_bf4c9732)) }
         }
         if (state.status.isNotBlank()) ProviderStatus(state.status, Modifier.padding(vertical = 8.dp))
         if (state.loading) {
@@ -533,8 +534,8 @@ private fun ProviderListPane(
 private fun EmptyProviderState(zh: Boolean) {
     Card(Modifier.fillMaxWidth().padding(top = 16.dp), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerLow)) {
         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-            Text(if (zh) "尚未配置服务商" else "No providers configured", style = MaterialTheme.typography.titleMedium)
-            Text(if (zh) "添加服务商以选择模型。凭据保留在本设备。" else "Add a provider to select a model. Credentials remain on this device.", style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(top = 4.dp))
+            Text(stringResource(R.string.ui_no_providers_configured_d8e9b861), style = MaterialTheme.typography.titleMedium)
+            Text(stringResource(R.string.ui_add_a_provider_to_select_a_ffa7447f), style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(top = 4.dp))
         }
     }
 }
@@ -567,7 +568,7 @@ private fun ProviderCard(provider: ProviderCardUi, selected: Boolean, zh: Boolea
             Row(Modifier.fillMaxWidth().padding(top = 10.dp), verticalAlignment = Alignment.Bottom) {
                 Text(provider.modelCount.toString(), fontSize = 19.sp, fontWeight = FontWeight.Bold,
                     color = if (selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface)
-                Text(if (zh) " 个模型" else " models", style = MaterialTheme.typography.labelSmall,
+                Text(stringResource(R.string.ui_models_c9b1f445), style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     modifier = Modifier.padding(bottom = 2.dp))
                 Spacer(Modifier.weight(1f))
@@ -612,7 +613,7 @@ private fun ProviderDetail(
 ) {
     val provider = state.providers.firstOrNull { it.id == state.selectedProviderId }
     if (provider == null) {
-        Text(if (zh) "选择服务商以查看模型和能力。" else "Select a provider to inspect models and capabilities.", style = MaterialTheme.typography.bodyMedium, modifier = Modifier.padding(24.dp))
+        Text(stringResource(R.string.ui_select_a_provider_to_inspect_models_7a56067a), style = MaterialTheme.typography.bodyMedium, modifier = Modifier.padding(24.dp))
         return
     }
     // The window state is judged against the live target of this provider, exactly
@@ -638,11 +639,11 @@ private fun ProviderDetail(
         Button(
             onClick = onRequestConnection,
             modifier = Modifier.testTag("provider.testConnection"),
-        ) { Text(if (zh) "测试连接" else "Test connection") }
+        ) { Text(stringResource(R.string.ui_test_connection_00a680a7)) }
         OutlinedButton(
             onClick = onRequestProbe,
             modifier = Modifier.testTag("provider.capabilityProbe"),
-        ) { Text(if (zh) "能力探测" else "Capability probe") }
+        ) { Text(stringResource(R.string.ui_capability_probe_cd9280e9)) }
         Box {
             IconButton(
                 onClick = { providerMenuOpen = true },
@@ -660,20 +661,20 @@ private fun ProviderDetail(
                 onDismissRequest = { providerMenuOpen = false },
             ) {
                 DropdownMenuItem(
-                    text = { Text(if (zh) "编辑" else "Edit") },
+                    text = { Text(stringResource(R.string.ui_edit_e9740dbb)) },
                     onClick = { providerMenuOpen = false; actions.onOpenEditor(provider.id) },
                     modifier = Modifier.testTag("provider.overflow.edit"),
                 )
                 DropdownMenuItem(
-                    text = { Text(if (zh) "删除" else "Delete") },
+                    text = { Text(stringResource(R.string.ui_delete_5b875326)) },
                     onClick = { providerMenuOpen = false; onRequestDeleteProvider(provider.id) },
                     modifier = Modifier.testTag("provider.overflow.delete"),
                 )
             }
         }
     }
-    Text(if (zh) "模型与能力" else "Models and capabilities", style = MaterialTheme.typography.titleMedium)
-    if (state.models.isEmpty()) Text(if (zh) "暂无模型元数据。" else "No model metadata is available.", style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(top = 8.dp))
+    Text(stringResource(R.string.ui_models_and_capabilities_1b9330b3), style = MaterialTheme.typography.titleMedium)
+    if (state.models.isEmpty()) Text(stringResource(R.string.ui_no_model_metadata_is_available_62aa07af), style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(top = 8.dp))
     state.models.forEach { model ->
         var modelMenuOpen by remember(model.id) { mutableStateOf(false) }
         Card(Modifier.fillMaxWidth().padding(top = 8.dp).testTag("provider.model.${model.id}")) {
@@ -703,17 +704,17 @@ private fun ProviderDetail(
                             onDismissRequest = { modelMenuOpen = false },
                         ) {
                             DropdownMenuItem(
-                                text = { Text(if (zh) "编辑" else "Edit") },
+                                text = { Text(stringResource(R.string.ui_edit_e9740dbb)) },
                                 onClick = { modelMenuOpen = false; actions.onEditModel(model.id) },
                             )
                             DropdownMenuItem(
-                                text = { Text(if (zh) "删除" else "Delete") },
+                                text = { Text(stringResource(R.string.ui_delete_5b875326)) },
                                 onClick = { modelMenuOpen = false; onRequestDeleteModel(model.id) },
                             )
                         }
                     }
                 }
-                Text(if (zh) "角色：${model.role}" else "Role: ${model.role}", style = MaterialTheme.typography.bodySmall)
+                Text(stringResource(R.string.ui_role_s_4222ab95, (model.role)), style = MaterialTheme.typography.bodySmall)
                 val capabilityLabel = if (model.capabilities.isEmpty()) {
                     if (zh) "能力不可用" else "Capabilities unavailable"
                 } else {
@@ -734,10 +735,10 @@ private fun ProviderDetail(
         }
     }
     Spacer(Modifier.height(16.dp))
-    Text(if (zh) "MCP 工具" else "MCP tools", style = MaterialTheme.typography.titleMedium)
+    Text(stringResource(R.string.ui_mcp_tools_1e943d14), style = MaterialTheme.typography.titleMedium)
     Text(state.mcpReason, style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(top = 4.dp))
     OutlinedButton(onClick = actions.onOpenMcpSettings, enabled = state.mcpEntryEnabled, modifier = Modifier.padding(top = 8.dp)) {
-        Text(if (zh) "打开 MCP 设置" else "Open MCP settings")
+        Text(stringResource(R.string.ui_open_mcp_settings_4c0d5a3a))
     }
 }
 
@@ -759,8 +760,8 @@ private fun ProviderEditorDialog(state: ProvidersUiState, actions: ProvidersActi
                 modifier = Modifier.verticalScroll(rememberScrollState()),
             )
         },
-        confirmButton = { Button(onClick = actions.onSave, enabled = budgetError == null) { Text(if (zh) "保存" else "Save") } },
-        dismissButton = { TextButton(onClick = actions.onCloseEditor) { Text(if (zh) "取消" else "Cancel") } },
+        confirmButton = { Button(onClick = actions.onSave, enabled = budgetError == null) { Text(stringResource(R.string.ui_save_ec8e6d58)) } },
+        dismissButton = { TextButton(onClick = actions.onCloseEditor) { Text(stringResource(R.string.ui_cancel_998b9c48)) } },
     )
 }
 
@@ -788,8 +789,8 @@ private fun ProviderEditorPage(
                 Modifier.fillMaxWidth().padding(top = 12.dp),
                 horizontalArrangement = Arrangement.End,
             ) {
-                TextButton(onClick = actions.onCloseEditor) { Text(if (zh) "取消" else "Cancel") }
-                Button(onClick = actions.onSave, enabled = budgetError == null) { Text(if (zh) "保存" else "Save") }
+                TextButton(onClick = actions.onCloseEditor) { Text(stringResource(R.string.ui_cancel_998b9c48)) }
+                Button(onClick = actions.onSave, enabled = budgetError == null) { Text(stringResource(R.string.ui_save_ec8e6d58)) }
             }
         }
     }
@@ -829,8 +830,8 @@ private fun ProviderEditorFields(
     Column(modifier, verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 state.editorError?.let { Text(it, color = MaterialTheme.colorScheme.error) }
                 budgetError?.let { Text(it, color = MaterialTheme.colorScheme.error) }
-                OutlinedTextField(draft.name, { actions.onDraftChange(draft.copy(name = it)) }, label = { Text(if (zh) "名称" else "Name") }, keyboardOptions = noCorrectionText, modifier = Modifier.fillMaxWidth())
-                OutlinedTextField(draft.baseUrl, { actions.onDraftChange(draft.copy(baseUrl = it)) }, label = { Text(if (zh) "基础地址" else "Base URL") }, keyboardOptions = uriOptions, modifier = Modifier.fillMaxWidth())
+                OutlinedTextField(draft.name, { actions.onDraftChange(draft.copy(name = it)) }, label = { Text(stringResource(R.string.ui_name_dd4dc4c5)) }, keyboardOptions = noCorrectionText, modifier = Modifier.fillMaxWidth())
+                OutlinedTextField(draft.baseUrl, { actions.onDraftChange(draft.copy(baseUrl = it)) }, label = { Text(stringResource(R.string.ui_base_url_434ba70e)) }, keyboardOptions = uriOptions, modifier = Modifier.fillMaxWidth())
                 var apiFormatMenuOpen by remember(draft.id) { mutableStateOf(false) }
                 Box {
                     OutlinedButton(
@@ -838,8 +839,7 @@ private fun ProviderEditorFields(
                         modifier = Modifier.fillMaxWidth().testTag("provider.apiFormat"),
                     ) {
                         Text(
-                            if (zh) "API 格式：${providerApiFormatLabel(draft.apiFormat, zh)}"
-                            else "API format: ${providerApiFormatLabel(draft.apiFormat, zh)}",
+                            stringResource(R.string.ui_api_format_s_b2e6629e, (providerApiFormatLabel(draft.apiFormat, zh))),
                         )
                     }
                     DropdownMenu(
@@ -870,43 +870,43 @@ private fun ProviderEditorFields(
                     modifier = Modifier.testTag("provider.apiFormat.explanation"),
                 )
                 if (showModelFields) {
-                    OutlinedTextField(draft.modelId, { actions.onDraftChange(draft.copy(modelId = it)) }, label = { Text(if (zh) "模型 ID" else "Model id") }, keyboardOptions = noCorrectionAscii, modifier = Modifier.fillMaxWidth())
-                    Text(if (zh) "角色：CHAT / EMBEDDING / RERANKER；Chat 可含图片。" else "Role: CHAT / EMBEDDING / RERANKER; Chat may include images.", style = MaterialTheme.typography.bodySmall)
-                    OutlinedTextField(draft.role, { actions.onDraftChange(draft.copy(role = it)) }, label = { Text(if (zh) "操作/角色" else "Operation / role") }, keyboardOptions = noCorrectionAscii, modifier = Modifier.fillMaxWidth())
-                    OutlinedTextField(draft.parametersJson, { actions.onDraftChange(draft.copy(parametersJson = it)) }, label = { Text(if (zh) "参数 JSON" else "Parameters JSON") }, keyboardOptions = noCorrectionText, minLines = 2, modifier = Modifier.fillMaxWidth())
-                    Text(if (zh) "上下文窗口" else "Context window", style = MaterialTheme.typography.titleSmall, modifier = Modifier.testTag("provider.contextLimit.title"))
+                    OutlinedTextField(draft.modelId, { actions.onDraftChange(draft.copy(modelId = it)) }, label = { Text(stringResource(R.string.ui_model_id_263d1656)) }, keyboardOptions = noCorrectionAscii, modifier = Modifier.fillMaxWidth())
+                    Text(stringResource(R.string.ui_role_chat_embedding_reranker_chat_may_cb832d98), style = MaterialTheme.typography.bodySmall)
+                    OutlinedTextField(draft.role, { actions.onDraftChange(draft.copy(role = it)) }, label = { Text(stringResource(R.string.ui_operation_role_3b8ad69f)) }, keyboardOptions = noCorrectionAscii, modifier = Modifier.fillMaxWidth())
+                    OutlinedTextField(draft.parametersJson, { actions.onDraftChange(draft.copy(parametersJson = it)) }, label = { Text(stringResource(R.string.ui_parameters_json_055688f2)) }, keyboardOptions = noCorrectionText, minLines = 2, modifier = Modifier.fillMaxWidth())
+                    Text(stringResource(R.string.ui_context_window_4753e4c3), style = MaterialTheme.typography.titleSmall, modifier = Modifier.testTag("provider.contextLimit.title"))
                     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         FilterChip(
                             selected = parseContextLimitMode(draft.contextLimitMode) == ContextLimitMode.AUTO,
                             onClick = { actions.onDraftChange(draft.copy(contextLimitMode = ContextLimitMode.AUTO.name)) },
-                            label = { Text(if (zh) "自动" else "Automatic") },
+                            label = { Text(stringResource(R.string.ui_automatic_70aefbbf)) },
                             modifier = Modifier.testTag("provider.contextLimitMode.auto"),
                         )
                         FilterChip(
                             selected = parseContextLimitMode(draft.contextLimitMode) == ContextLimitMode.MANUAL,
                             onClick = { actions.onDraftChange(draft.copy(contextLimitMode = ContextLimitMode.MANUAL.name)) },
-                            label = { Text(if (zh) "手动覆盖" else "Manual override") },
+                            label = { Text(stringResource(R.string.ui_manual_override_ba44e3e9)) },
                             modifier = Modifier.testTag("provider.contextLimitMode.manual"),
                         )
                     }
                     Text(effectiveContextWindowSource(draft, zh, state.models.firstOrNull { it.id == draft.modelProfileId }), style = MaterialTheme.typography.bodySmall, modifier = Modifier.testTag("provider.contextLimit.effectiveSource"))
                     if (parseContextLimitMode(draft.contextLimitMode) == ContextLimitMode.AUTO) {
-                        OutlinedTextField(draft.contextWindowValue, { actions.onDraftChange(draft.copy(contextWindowValue = it)) }, label = { Text(if (zh) "窗口声明（可选，覆盖目录）" else "Declared window (optional, overrides catalog)") }, keyboardOptions = noCorrectionAscii, modifier = Modifier.fillMaxWidth().testTag("provider.contextWindowValue"))
+                        OutlinedTextField(draft.contextWindowValue, { actions.onDraftChange(draft.copy(contextWindowValue = it)) }, label = { Text(stringResource(R.string.ui_declared_window_optional_overrides_catalog_3d6373f6)) }, keyboardOptions = noCorrectionAscii, modifier = Modifier.fillMaxWidth().testTag("provider.contextWindowValue"))
                     } else {
-                        OutlinedTextField(draft.contextLimit, { actions.onDraftChange(draft.copy(contextLimit = it)) }, label = { Text(if (zh) "上下文窗口（手动）" else "Context window (manual)") }, keyboardOptions = noCorrectionAscii, modifier = Modifier.fillMaxWidth(), isError = budgetError != null && parsePositiveProviderBudget(draft.contextLimit) == null)
+                        OutlinedTextField(draft.contextLimit, { actions.onDraftChange(draft.copy(contextLimit = it)) }, label = { Text(stringResource(R.string.ui_context_window_manual_02e8213a)) }, keyboardOptions = noCorrectionAscii, modifier = Modifier.fillMaxWidth(), isError = budgetError != null && parsePositiveProviderBudget(draft.contextLimit) == null)
                     }
-                    Text(if (zh) "最大输出" else "Maximum output", style = MaterialTheme.typography.titleSmall, modifier = Modifier.testTag("provider.outputLimit.title"))
+                    Text(stringResource(R.string.ui_maximum_output_388d082c), style = MaterialTheme.typography.titleSmall, modifier = Modifier.testTag("provider.outputLimit.title"))
                     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         FilterChip(
                             selected = parseOutputLimitMode(draft.outputLimitMode) == OutputLimitMode.AUTO,
                             onClick = { actions.onDraftChange(draft.copy(outputLimitMode = OutputLimitMode.AUTO.name)) },
-                            label = { Text(if (zh) "跟随服务商" else "Follow provider") },
+                            label = { Text(stringResource(R.string.ui_follow_provider_3a7dba1c)) },
                             modifier = Modifier.testTag("provider.outputLimitMode.auto"),
                         )
                         FilterChip(
                             selected = parseOutputLimitMode(draft.outputLimitMode) == OutputLimitMode.MANUAL,
                             onClick = { actions.onDraftChange(draft.copy(outputLimitMode = OutputLimitMode.MANUAL.name)) },
-                            label = { Text(if (zh) "手动设置" else "Manual") },
+                            label = { Text(stringResource(R.string.ui_manual_c4e00403)) },
                             modifier = Modifier.testTag("provider.outputLimitMode.manual"),
                         )
                     }
@@ -916,14 +916,14 @@ private fun ProviderEditorFields(
                         modifier = Modifier.testTag("provider.outputLimit.effectiveSource"),
                     )
                     if (parseOutputLimitMode(draft.outputLimitMode) == OutputLimitMode.MANUAL) {
-                        OutlinedTextField(draft.outputLimit, { actions.onDraftChange(draft.copy(outputLimit = it)) }, label = { Text(if (zh) "输出预算" else "Output budget") }, keyboardOptions = noCorrectionAscii, modifier = Modifier.fillMaxWidth(), isError = budgetError != null && (parsePositiveProviderBudget(draft.outputLimit) == null || (parsePositiveProviderBudget(draft.contextLimit)?.let { context -> parsePositiveProviderBudget(draft.outputLimit)?.let { output -> output > context } } == true)))
+                        OutlinedTextField(draft.outputLimit, { actions.onDraftChange(draft.copy(outputLimit = it)) }, label = { Text(stringResource(R.string.ui_output_budget_963a4487)) }, keyboardOptions = noCorrectionAscii, modifier = Modifier.fillMaxWidth(), isError = budgetError != null && (parsePositiveProviderBudget(draft.outputLimit) == null || (parsePositiveProviderBudget(draft.contextLimit)?.let { context -> parsePositiveProviderBudget(draft.outputLimit)?.let { output -> output > context } } == true)))
                     }
-                    Text(if (zh) "跟随服务商上限，仍受本地运行预算约束。" else "Follow the provider limit; local run budgets still apply.", style = MaterialTheme.typography.labelSmall)
+                    Text(stringResource(R.string.ui_follow_the_provider_limit_local_run_2aa62ff2), style = MaterialTheme.typography.labelSmall)
                     CheckRow(if (zh) "输入包含图片" else "Input includes images", draft.vision) { actions.onDraftChange(draft.copy(vision = it)) }
                     CheckRow(if (zh) "可调用工具" else "Can call tools", draft.tools) { actions.onDraftChange(draft.copy(tools = it)) }
                 }
                 OutlinedTextField(draft.apiKey, { actions.onDraftChange(draft.copy(apiKey = it)) }, label = { Text(if (draft.id == null) { if (zh) "API 密钥" else "API key" } else { if (zh) "替换 API 密钥（可选）" else "Replace API key (optional)" }) }, visualTransformation = PasswordVisualTransformation(), keyboardOptions = noCorrectionAscii, modifier = Modifier.fillMaxWidth())
-                Text(if (zh) "能力需确认后探测，可能收费。" else "Verify capabilities after confirmation; provider charges may apply.", style = MaterialTheme.typography.bodySmall)
+                Text(stringResource(R.string.ui_verify_capabilities_after_confirmation_provid_f616849a), style = MaterialTheme.typography.bodySmall)
     }
 }
 
@@ -952,22 +952,22 @@ private fun ProbeDialog(probe: ProviderProbeUiState, onClose: () -> Unit, zh: Bo
             Column(Modifier.verticalScroll(rememberScrollState())) {
                 if (probe.phase == ProbePhase.RUNNING) {
                     CircularProgressIndicator(Modifier.size(24.dp))
-                    Text(if (zh) "正在检查…" else "Checking…", modifier = Modifier.padding(top = 8.dp))
+                    Text(stringResource(R.string.ui_checking_042eed1e), modifier = Modifier.padding(top = 8.dp))
                 } else {
                     Text(probePhaseLabel(probe.phase, zh), modifier = Modifier.padding(top = 8.dp))
                 }
                 probe.connection?.let { connection ->
                     if (connection.success) {
-                        Text(if (zh) "连接成功" else "Connection succeeded", style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(top = 8.dp))
+                        Text(stringResource(R.string.ui_connection_succeeded_0d500b13), style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(top = 8.dp))
                         connection.latencyMs?.let { latency ->
                             Text(
-                                if (zh) "模型响应正常 · ${latency} ms" else "Model response normal · ${latency} ms",
+                                stringResource(R.string.ui_model_response_normal_s_ms_9996fbc3, (latency)),
                                 style = MaterialTheme.typography.bodySmall,
                             )
                         }
                     } else {
                         Text(
-                            if (zh) "连接失败：${connectionErrorLabel(connection.error, zh)}" else "Connection failed: ${connectionErrorLabel(connection.error, zh)}",
+                            stringResource(R.string.ui_connection_failed_s_0bb2bcac, (connectionErrorLabel(connection.error, zh))),
                             color = MaterialTheme.colorScheme.error,
                             style = MaterialTheme.typography.titleMedium,
                             modifier = Modifier.padding(top = 8.dp),
@@ -989,7 +989,7 @@ private fun ProbeDialog(probe: ProviderProbeUiState, onClose: () -> Unit, zh: Bo
                 }
                 if (probe.charged && probe.phase != ProbePhase.RUNNING) {
                     Text(
-                        if (zh) "本次检查可能产生服务商费用。" else "This check may have incurred provider charges.",
+                        stringResource(R.string.ui_this_check_may_have_incurred_provider_f64a9cb5),
                         style = MaterialTheme.typography.labelSmall,
                         modifier = Modifier.padding(top = 8.dp),
                     )
@@ -999,7 +999,7 @@ private fun ProbeDialog(probe: ProviderProbeUiState, onClose: () -> Unit, zh: Bo
                 }
             }
         },
-        confirmButton = { if (probe.phase != ProbePhase.RUNNING) Button(onClick = onClose) { Text(if (zh) "关闭" else "Close") } },
+        confirmButton = { if (probe.phase != ProbePhase.RUNNING) Button(onClick = onClose) { Text(stringResource(R.string.ui_close_6cf4a777)) } },
     )
 }
 

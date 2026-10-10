@@ -126,10 +126,29 @@ class KnowledgeRepository(
     private val vectorIndexDirectory: File? = null,
     /** Exact retired bundled spaces only; never infer an upgrade from an unknown or API space. */
     private val legacyLocalEmbeddingSpaces: Set<String> = emptySet(),
+    private val automaticStorageMaintenance: Boolean = true,
 ) {
     private val indexLock = Any()
     private val pipeline = DocumentPipelineStore(db)
     private val unitPlanner = DocumentUnitPlanner(plannerVersion)
+    private val storage = StorageMaintenance(db, blobs, vectorIndexDirectory)
+    private val batchProgressStore = KnowledgeBatchProgressStore(db)
+    private val visualSource = KnowledgeVisualSource(pdfRasterizer)
+    private val retrievalStore = KnowledgeRetrievalStore(db) { kbId -> vectorIndexCache.invalidateKnowledgeBase(kbId) }
+    private val repairState = KnowledgeIndexRepairState(db)
+
+    fun storageUsage(): StorageUsage = synchronized(indexLock) { storage.usage() }
+    fun configureStorageQuota(totalBytes: Long): StorageUsage = synchronized(indexLock) { storage.configureQuota(totalBytes) }
+    fun collectStorage(): StorageMaintenanceResult = synchronized(indexLock) { storage.collect() }
+    fun foreignKeyCompatibility(): List<ForeignKeyCompatibilityIssue> = Migrations.foreignKeyCompatibility(db)
+
+    private fun putManagedBlob(bytes: ByteArray, mediaType: String): StoredBlob = db.transaction {
+        blobs.withStorageLock {
+            val hash = sha256Hex(bytes)
+            if (hash !in blobs.storedHashes()) storage.requireCapacity(bytes.size.toLong() + 65_536)
+            blobs.put(bytes, mediaType)
+        }
+    }
 
     fun batchPipelineProgress(batchId: String): PipelineProgress = pipeline.progress(batchId)
 
@@ -226,20 +245,14 @@ class KnowledgeRepository(
     }
 
     private fun planSource(bytes: ByteArray, format: String, name: String, targetFingerprint: String? = null): List<ProcessingUnit> {
-        val parsed = when (format) {
-            SourceFormat.PDF.name -> PdfParser.parse(bytes)
-            SourceFormat.IMAGE.name -> standaloneImage(bytes,name)
-            SourceFormat.OFFICE_ARCHIVE.name -> OfficeParser.parse(name,bytes)
-            else -> ParsedPublication(SourceFormat.TEXT, String(bytes,Charsets.UTF_8),
-                listOf(ExtractedPage(1,String(bytes,Charsets.UTF_8),false)),emptyList(),false,PARSER_FINGERPRINT)
-        }
+        val parsed = KnowledgeSourceParser.parse(bytes, SourceFormat.valueOf(format), name)
         return planPublication(bytes,parsed,targetFingerprint)
     }
 
     private fun planPublication(bytes: ByteArray, parsed: ParsedPublication, targetFingerprint: String? = null): List<ProcessingUnit> {
         val imageRenderer = pdfRasterizer as? ImageUnitRasterizer
         val dimensions = if(imageRenderer == null) emptyMap() else parsed.assets.mapNotNull { asset ->
-            imageRenderer.imageDimensions(asset.bytes)?.let { asset.localId to it }
+            imageRenderer.imageDimensions(asset.readBytes())?.let { asset.localId to it }
         }.toMap()
         val target = targetFingerprint?.takeIf { it.isNotBlank() }
         val binding = if (target == null) visionBinding() else
@@ -479,6 +492,16 @@ class KnowledgeRepository(
         visionConsent: Boolean = false,
         embeddingIsApi: Boolean = false,
         embeddingConsent: Boolean = false,
+    ): ImportJob = blobs.protect(sha256Hex(bytes)).use {
+        if (automaticStorageMaintenance) collectStorage()
+        importBytesCancellableOwned(displayName, mediaType, bytes, visionConfigured, knowledgeBaseId, pauseAt,
+            visionConsent, embeddingIsApi, embeddingConsent)
+    }.also { if (automaticStorageMaintenance) collectStorage() }
+
+    private suspend fun importBytesCancellableOwned(
+        displayName: String, mediaType: String, bytes: ByteArray, visionConfigured: Boolean,
+        knowledgeBaseId: String?, pauseAt: ImportStage?, visionConsent: Boolean,
+        embeddingIsApi: Boolean, embeddingConsent: Boolean,
     ): ImportJob {
         val kbId = knowledgeBaseId ?: ensureDefaultBase()
         requireKb(kbId)
@@ -495,7 +518,7 @@ class KnowledgeRepository(
             )
         }
         require(bytes.size <= MediaKind.MAX_IMPORT_BYTES) { "RESOURCE_LIMIT" }
-        val stored = blobs.put(bytes, mediaType.ifBlank { guessedMime(format) })
+        val stored = putManagedBlob(bytes, mediaType.ifBlank { guessedMime(format) })
         val existingId = existingDocument(kbId, stored.sha256)
         if (existingId != null) {
             val prior = db.query("SELECT active_version_id, deleted_at FROM documents WHERE id = ?", listOf(existingId)).single()
@@ -555,7 +578,7 @@ class KnowledgeRepository(
                 upsertBlob(stored)
                 val documentId = existingId ?: EntityId.random().value
                 db.execute(
-                    "INSERT OR REPLACE INTO documents(id,kb_id,blob_hash,display_name,format,active_version_id,deleted_at) VALUES (?,?,?,?,?,?,?)",
+                    "INSERT INTO documents(id,kb_id,blob_hash,display_name,format,active_version_id,deleted_at) VALUES (?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET kb_id=excluded.kb_id,blob_hash=excluded.blob_hash,display_name=excluded.display_name,format=excluded.format,active_version_id=excluded.active_version_id,deleted_at=excluded.deleted_at",
                     listOf(documentId, kbId, stored.sha256, displayName, format.name, null, null),
                 )
                 syncBlobRef(stored.sha256)
@@ -948,6 +971,16 @@ class KnowledgeRepository(
         visionConsent: Boolean = false,
         embeddingIsApi: Boolean = false,
         embeddingConsent: Boolean = false,
+    ): ImportJob = blobs.protect(sha256Hex(bytes)).use {
+        if (automaticStorageMaintenance) collectStorage()
+        importBytesOwned(displayName, mediaType, bytes, visionConfigured, knowledgeBaseId, pauseAt,
+            visionConsent, embeddingIsApi, embeddingConsent)
+    }.also { if (automaticStorageMaintenance) collectStorage() }
+
+    private fun importBytesOwned(
+        displayName: String, mediaType: String, bytes: ByteArray, visionConfigured: Boolean,
+        knowledgeBaseId: String?, pauseAt: ImportStage?, visionConsent: Boolean,
+        embeddingIsApi: Boolean, embeddingConsent: Boolean,
     ): ImportJob {
         val routedKbId = knowledgeBaseId ?: ensureDefaultBase()
         // API embedding is the only potentially billable path.  Keep the
@@ -982,7 +1015,7 @@ class KnowledgeRepository(
             )
         }
         require(bytes.size <= MediaKind.MAX_IMPORT_BYTES) { "RESOURCE_LIMIT" }
-        val stored = blobs.put(bytes, mediaType.ifBlank { guessedMime(format) })
+        val stored = putManagedBlob(bytes, mediaType.ifBlank { guessedMime(format) })
         val existingId = existingDocument(kbId, stored.sha256)
         if (existingId != null) {
             val prior = db.query("SELECT active_version_id, deleted_at FROM documents WHERE id = ?", listOf(existingId)).single()
@@ -1041,7 +1074,7 @@ class KnowledgeRepository(
             upsertBlob(stored)
             val documentId = existingId ?: EntityId.random().value
             db.execute(
-                "INSERT OR REPLACE INTO documents(id,kb_id,blob_hash,display_name,format,active_version_id,deleted_at) VALUES (?,?,?,?,?,?,?)",
+                "INSERT INTO documents(id,kb_id,blob_hash,display_name,format,active_version_id,deleted_at) VALUES (?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET kb_id=excluded.kb_id,blob_hash=excluded.blob_hash,display_name=excluded.display_name,format=excluded.format,active_version_id=excluded.active_version_id,deleted_at=excluded.deleted_at",
                 listOf(documentId, kbId, stored.sha256, displayName, format.name, null, null),
             )
             syncBlobRef(stored.sha256)
@@ -1522,7 +1555,7 @@ class KnowledgeRepository(
             ).singleOrNull() ?: return missing
             val chunkAssets = chunk.string("asset_ids").split(',').filter { it.isNotBlank() }
             if (citation.assetId != null && citation.assetId !in chunkAssets) return missing
-            if (citation.assetId != null && isPageContextSpan(chunk.string("source_span"))) return missing
+            if (citation.assetId != null && KnowledgeRetrievalStore.isPageContextSpan(chunk.string("source_span"))) return missing
             // Location comes from the immutable chunk, never caller/model supplied hints.
             val page = chunk.string("page").toIntOrNull()
             val sourceSpan = chunk.string("source_span").ifBlank { null }
@@ -1706,7 +1739,7 @@ class KnowledgeRepository(
             }
             usedPins[kbId] = runtime.mobileagent.domain.KnowledgePin(kbId, pin, space)
             searched += kbId
-            sources += lexicalHits(kbId, query, 40, pin).rankOrdered()
+            sources += retrievalStore.lexicalHits(kbId, query, 40, pin).rankOrdered()
             val queryClaim = apiQueryHash?.let {
                 if (cachedQueryVector == null) claimApiQueryAttempt(kbId, space, it, createIfAbsent = true) else null
             }
@@ -1852,7 +1885,7 @@ class KnowledgeRepository(
             db.transaction {
                 db.execute("UPDATE documents SET deleted_at = ? WHERE id = ?", listOf(Utc.nowIso(), documentId))
                 db.execute(
-                    "UPDATE import_jobs SET stage = ?, error = ? WHERE document_id = ? AND stage NOT IN (?,?,?)",
+                    "UPDATE import_jobs SET stage = ?, error = CASE WHEN COALESCE(error,'') LIKE '%UNKNOWN%' THEN error ELSE ? END WHERE document_id = ? AND stage NOT IN (?,?,?)",
                     listOf(ImportStage.CANCELLED.name, "document deleted", documentId, ImportStage.READY.name, ImportStage.READY_WITH_VISUAL_GAPS.name, ImportStage.CANCELLED.name),
                 )
                 db.execute(
@@ -1872,8 +1905,19 @@ class KnowledgeRepository(
                 db.execute("UPDATE knowledge_bases SET active_generation_id = NULL WHERE id = ?", listOf(kbId))
             }
         } else {
-            rebuildIndex(kbId)
+            try {
+                rebuildIndex(kbId)
+            } catch (failure: IllegalStateException) {
+                if (!failure.message.orEmpty().startsWith("RESOURCE_LIMIT")) throw failure
+                // Truth is already revoked. A disposable generation may be rebuilt
+                // after reclamation; capacity must never prevent deletion.
+                synchronized(indexLock) {
+                    db.execute("UPDATE knowledge_bases SET active_generation_id = NULL WHERE id = ?", listOf(kbId))
+                }
+                vectorIndexCache.invalidateKnowledgeBase(kbId)
+            }
         }
+        if (automaticStorageMaintenance) collectStorage()
     }
 
     fun deleteKnowledgeBase(kbId: String) {
@@ -1882,7 +1926,7 @@ class KnowledgeRepository(
                 db.query("SELECT id, blob_hash FROM documents WHERE kb_id = ? AND deleted_at IS NULL", listOf(kbId)).forEach { row ->
                     db.execute("UPDATE documents SET deleted_at = ? WHERE id = ?", listOf(Utc.nowIso(), row.string("id")))
                     db.execute(
-                        "UPDATE import_jobs SET stage = ?, error = ? WHERE document_id = ? AND stage NOT IN (?,?,?)",
+                        "UPDATE import_jobs SET stage = ?, error = CASE WHEN COALESCE(error,'') LIKE '%UNKNOWN%' THEN error ELSE ? END WHERE document_id = ? AND stage NOT IN (?,?,?)",
                         listOf(ImportStage.CANCELLED.name, "knowledge base deleted", row.string("id"), ImportStage.READY.name, ImportStage.READY_WITH_VISUAL_GAPS.name, ImportStage.CANCELLED.name),
                     )
                     syncBlobRef(row.string("blob_hash"))
@@ -1897,6 +1941,7 @@ class KnowledgeRepository(
         // The generation is gone; release any cached ANN handles for this KB
         // so native memory cannot outlive the data it indexes.
         vectorIndexCache.invalidateKnowledgeBase(kbId)
+        if (automaticStorageMaintenance) collectStorage()
     }
 
     fun rebuildIndex(kbId: String, acknowledgeDuplicateCharge: Boolean = false): String {
@@ -1988,42 +2033,48 @@ class KnowledgeRepository(
         return activeChunks == currentMembers && generationMembers == currentMembers
     }
 
-    fun repairIndexes() {
+    fun repairIndexes(onlyChanged: Boolean = false) {
+        val candidates = repairState.candidates(embedder.spaceId, onlyChanged)
+        if (candidates.isEmpty()) {
+            if (automaticStorageMaintenance) collectStorage()
+            return
+        }
         // Model-space upgrades are lazy at query/import/rebuild boundaries.
         // Schema repair must not depend on a model pack or one KB's upgrade.
         // API rebuilds must leave the repository monitor before awaiting the
         // adapter.  The legacy local repair below remains serialized exactly
         // as before and explicitly skips API spaces.
-        listKnowledgeBases()
-            .map { it.first }
-            .filter {
-                isApiKnowledgeBase(it) && hasApiEmbeddingConsent(it) &&
-                    localRebuildSourceProblem(it) == null &&
-                    latestUnknownEmbeddingOperation(it, "REBUILD") == null &&
-                    db.query(
-                        "SELECT embedding_space_id FROM knowledge_bases WHERE id = ? AND deleted_at IS NULL",
-                        listOf(it),
-                    ).singleOrNull()?.string("embedding_space_id")?.let { space -> apiEmbedderForSpace(space) != null } == true
+        val checkedRevisions = mutableMapOf<String, Long>()
+        candidates.forEach { kbId ->
+            val check = apiIndexRepairCheck(kbId) ?: return@forEach
+            if (onlyChanged && check.second) {
+                // Existing vectors already avoid provider dispatch in rebuild,
+                // but a valid generation need not create another operation at all.
+                checkedRevisions[kbId] = check.first
+            } else {
+                runBlocking { rebuildIndexCancellable(kbId) }
+                // Rebuild changes publication pointers. Capture its new revision
+                // BEFORE validating the resulting generation, never after a scan.
+                val repaired = apiIndexRepairCheck(kbId)
+                if (repaired?.second == true) checkedRevisions[kbId] = repaired.first
             }
-            .forEach { runBlocking { rebuildIndexCancellable(it) } }
+        }
         val pendingLocalRebuild = mutableListOf<String>()
         synchronized(indexLock) {
-            db.query("SELECT id, active_version_id, blob_hash FROM documents WHERE deleted_at IS NULL AND active_version_id IS NOT NULL").forEach { doc ->
-                val versionId = doc.string("active_version_id")
-                val exists = db.query("SELECT id FROM document_versions WHERE id = ?", listOf(versionId))
-                if (exists.isEmpty()) {
-                    db.execute(
-                        "INSERT INTO document_versions(id,document_id,parser_fingerprint,content_hash,status,created_at) VALUES (?,?,?,?,?,?)",
-                        listOf(versionId, doc.string("id"), PARSER_FINGERPRINT, doc.string("blob_hash"), "READY", Utc.nowIso()),
-                    )
-                }
+            db.transaction {
+            candidates.forEach { kbId ->
+                db.execute("""
+                    INSERT OR IGNORE INTO document_versions(id,document_id,parser_fingerprint,content_hash,status,created_at)
+                    SELECT d.active_version_id,d.id,?,d.blob_hash,'READY',? FROM documents d
+                    WHERE d.kb_id=? AND d.deleted_at IS NULL AND d.active_version_id IS NOT NULL
+                    AND NOT EXISTS(SELECT 1 FROM document_versions v WHERE v.id=d.active_version_id)
+                """.trimIndent(), listOf(PARSER_FINGERPRINT, Utc.nowIso(), kbId))
             }
-            listKnowledgeBases().forEach { (kbId, _) ->
+            listKnowledgeBases().filter { it.first in candidates }.forEach { (kbId, _) ->
                 val live = db.query(
                     "SELECT COUNT(*) AS n FROM documents WHERE kb_id = ? AND deleted_at IS NULL AND active_version_id IS NOT NULL",
                     listOf(kbId),
                 ).single().long("n")
-                if (live == 0L) return@forEach
                 var space = db.query("SELECT embedding_space_id FROM knowledge_bases WHERE id = ?", listOf(kbId))
                     .singleOrNull()?.string("embedding_space_id").orEmpty()
                 if (space.isBlank()) {
@@ -2043,6 +2094,10 @@ class KnowledgeRepository(
                 // the local fixture space.
                 if (space != embedder.spaceId) return@forEach
                 if (embeddingForSpace(space) == null) return@forEach
+                if (live == 0L) {
+                    checkedRevisions[kbId] = EmbeddingInputRevision.current(db, kbId)
+                    return@forEach
+                }
                 val pin = pinnedReadyGeneration(kbId)
                 val generationIsCurrent = pin != null && generationMatchesActiveChunks(kbId, pin)
                 val sourceProblem = localRebuildSourceProblem(kbId)
@@ -2059,11 +2114,64 @@ class KnowledgeRepository(
                     }
                     !generationIsCurrent && sourceProblem == null -> pendingLocalRebuild += kbId
                 }
+                if (kbId !in pendingLocalRebuild) checkedRevisions[kbId] = EmbeddingInputRevision.current(db, kbId)
+            }
             }
         }
         // Long rebuild phases run outside the index lock so a repair can never
         // freeze retrieval for the whole scan.
-        pendingLocalRebuild.forEach { rebuildIndexPhased(it) }
+        pendingLocalRebuild.forEach { kbId ->
+            rebuildIndexPhased(kbId)
+            db.transaction {
+                val pin = pinnedReadyGeneration(kbId)
+                if (pin != null && generationMatchesActiveChunks(kbId, pin) && localRebuildSourceProblem(kbId) == null) {
+                    checkedRevisions[kbId] = EmbeddingInputRevision.current(db, kbId)
+                }
+            }
+        }
+        // Record after successful repair, including generation switches. Explicit
+        // repair remains available; startup can skip the unchanged expensive scan.
+        checkedRevisions.forEach { (kbId, revision) -> repairState.completed(kbId, embedder.spaceId, revision) }
+        if (automaticStorageMaintenance) collectStorage()
+    }
+
+    /** null leaves unavailable/uncertain work dirty; false requires a real rebuild. */
+    private fun apiIndexRepairCheck(kbId: String): Pair<Long, Boolean>? = db.transaction {
+        val checkedRevision = EmbeddingInputRevision.current(db, kbId)
+        if (!isApiKnowledgeBase(kbId) || !hasApiEmbeddingConsent(kbId) || localRebuildSourceProblem(kbId) != null)
+            return@transaction null
+        if (db.query("SELECT token FROM embedding_operations WHERE kb_id=? AND state='UNKNOWN' LIMIT 1", listOf(kbId)).isNotEmpty())
+            return@transaction null
+        val space = db.query("SELECT embedding_space_id FROM knowledge_bases WHERE id=? AND deleted_at IS NULL", listOf(kbId))
+            .singleOrNull()?.string("embedding_space_id") ?: return@transaction null
+        val selected = apiEmbedderForSpace(space) ?: return@transaction null
+        val active = activeEmbeddingOperation(kbId)
+        if (active != null) return@transaction if (active.kind == "REBUILD" && active.spaceId == space)
+            checkedRevision to false else null
+        val generation = pinnedReadyGeneration(kbId) ?: return@transaction checkedRevision to false
+        if (!generationMatchesActiveChunks(kbId, generation)) return@transaction checkedRevision to false
+        // READY metadata alone cannot certify missing, mismatched or malformed
+        // vectors. Validate persisted vectors in bounded pages, without a backend.
+        var after: String? = null
+        while (true) {
+            val afterClause = if (after == null) "" else " AND m.chunk_id>?"
+            val rows = db.query("""
+                SELECT m.chunk_id, m.space_id AS member_space, c.content_hash AS chunk_hash,
+                       e.content_hash AS embedding_hash, e.vector_blob
+                FROM generation_members m JOIN chunks c ON c.id=m.chunk_id
+                LEFT JOIN embeddings e ON e.chunk_id=m.chunk_id AND e.space_id=m.space_id
+                WHERE m.generation_id=? $afterClause ORDER BY m.chunk_id LIMIT 512
+            """.trimIndent(), listOf(generation) + listOfNotNull(after))
+            for (row in rows) {
+                if (row.string("member_space") != space || row.string("embedding_hash") != row.string("chunk_hash"))
+                    return@transaction checkedRevision to false
+                if (runCatching { validateEmbeddingBytes(embeddingBytes(row), selected.dimension) }.isFailure)
+                    return@transaction checkedRevision to false
+            }
+            if (rows.size < 512) break
+            after = rows.last().string("chunk_id")
+        }
+        checkedRevision to true
     }
 
     /**
@@ -2385,6 +2493,12 @@ class KnowledgeRepository(
         displayName: String,
         bytes: ByteArray,
         format: SourceFormat,
+    ): ImportJob = blobs.protect(sha256Hex(bytes)).use {
+        continueImportCancellableOwned(job, displayName, bytes, format)
+    }.also { if (automaticStorageMaintenance) collectStorage() }
+
+    private suspend fun continueImportCancellableOwned(
+        job: ImportJob, displayName: String, bytes: ByteArray, format: SourceFormat,
     ): ImportJob {
         // A CACHE_READY operation is resumable without another provider call.
         // A DISPATCHED operation has an unknown external outcome (for example
@@ -2426,15 +2540,15 @@ class KnowledgeRepository(
         try {
             advanceThrough(job, ImportStage.PARSING)
             when (format) {
-                SourceFormat.IMAGE -> indexPublicationCancellable(job, bytes, standaloneImage(bytes, displayName))
+                SourceFormat.IMAGE -> indexPublicationCancellable(job, bytes, KnowledgeSourceParser.parse(bytes, format, displayName))
                 SourceFormat.TEXT, SourceFormat.MARKDOWN -> indexTextDocumentCancellable(job, bytes, format)
-                SourceFormat.PDF -> indexPublicationCancellable(job, bytes, PdfParser.parse(bytes))
+                SourceFormat.PDF -> indexPublicationCancellable(job, bytes, KnowledgeSourceParser.parse(bytes, format, displayName))
                 SourceFormat.OFFICE_ARCHIVE -> {
                     val inspection = ZipSafety.inspect(bytes)
                     if (!inspection.ok) {
                         fail(job, inspection.reason)
                     } else {
-                        indexPublicationCancellable(job, bytes, OfficeParser.parse(displayName, bytes))
+                        indexPublicationCancellable(job, bytes, KnowledgeSourceParser.parse(bytes, SourceFormat.OFFICE_ARCHIVE, displayName))
                     }
                 }
                 SourceFormat.KNOWLEDGE_ARCHIVE -> {
@@ -2549,10 +2663,10 @@ class KnowledgeRepository(
 
     private suspend fun indexPublicationCancellable(job: ImportJob, bytes: ByteArray, parsed: ParsedPublication) {
         if (!materializePlan(job,bytes,planPublication(bytes,parsed,job.consentedVisionFingerprint))) return
-        val processable = parsed.assets.filter { it.kind == "IMAGE" && it.bytes.isNotEmpty() }
+        val processable = parsed.assets.filter { it.kind == "IMAGE" && it.byteLength > 0 }
         val blocked = parsed.assets.filter {
             it.kind == "EXTERNAL" || it.kind == "MISSING" || it.kind == "UNSUPPORTED" || it.kind == "PAGE" ||
-                (it.kind == "IMAGE" && it.bytes.isEmpty())
+                (it.kind == "IMAGE" && it.byteLength == 0)
         }
         job.hasImages = parsed.needsVision || processable.isNotEmpty() || blocked.isNotEmpty()
         // A durable batch authorization is not a blanket consent: it is re-validated against the
@@ -2633,11 +2747,16 @@ class KnowledgeRepository(
     }
 
     private fun continueImport(job: ImportJob, displayName: String, bytes: ByteArray, format: SourceFormat): ImportJob {
+        return blobs.protect(sha256Hex(bytes)).use { continueImportOwned(job, displayName, bytes, format) }
+            .also { if (automaticStorageMaintenance) collectStorage() }
+    }
+
+    private fun continueImportOwned(job: ImportJob, displayName: String, bytes: ByteArray, format: SourceFormat): ImportJob {
         advanceThrough(job, ImportStage.PARSING)
         when (format) {
             SourceFormat.IMAGE -> {
                 try {
-                    indexPublication(job, bytes, standaloneImage(bytes, displayName))
+                    indexPublication(job, bytes, KnowledgeSourceParser.parse(bytes, format, displayName))
                 } catch (cancelled: CancellationException) {
                     throw cancelled
                 } catch (interrupted: InterruptedException) {
@@ -2665,7 +2784,7 @@ class KnowledgeRepository(
             }
             SourceFormat.PDF -> {
                 try {
-                    indexPublication(job, bytes, PdfParser.parse(bytes))
+                    indexPublication(job, bytes, KnowledgeSourceParser.parse(bytes, format, displayName))
                 } catch (cancelled: CancellationException) {
                     throw cancelled
                 } catch (interrupted: InterruptedException) {
@@ -2683,7 +2802,7 @@ class KnowledgeRepository(
                     fail(job, inspection.reason)
                 } else {
                     try {
-                        indexPublication(job, bytes, OfficeParser.parse(displayName, bytes))
+                        indexPublication(job, bytes, KnowledgeSourceParser.parse(bytes, SourceFormat.OFFICE_ARCHIVE, displayName))
                     } catch (cancelled: CancellationException) {
                         throw cancelled
                     } catch (interrupted: InterruptedException) {
@@ -2701,24 +2820,6 @@ class KnowledgeRepository(
         }
         persistJob(job, displayName)
         return job
-    }
-
-    private fun standaloneImage(bytes: ByteArray, displayName: String): ParsedPublication {
-        val mime = when {
-            displayName.lowercase().endsWith(".png") -> "image/png"
-            displayName.lowercase().endsWith(".jpg") || displayName.lowercase().endsWith(".jpeg") -> "image/jpeg"
-            else -> "image/*"
-        }
-        return ParsedPublication(
-            format = SourceFormat.IMAGE,
-            text = "",
-            pages = listOf(ExtractedPage(1, "", needsVision = true)),
-            assets = listOf(
-                ExtractedAsset("image-1", "IMAGE", 1, displayName, bytes, mime, ""),
-            ),
-            needsVision = true,
-            parserFingerprint = "image-v1",
-        )
     }
 
     private fun indexTextDocument(job: ImportJob, bytes: ByteArray, format: SourceFormat) {
@@ -2747,10 +2848,10 @@ class KnowledgeRepository(
 
     private fun indexPublication(job: ImportJob, bytes: ByteArray, parsed: ParsedPublication) {
         if (!materializePlan(job,bytes,planPublication(bytes,parsed,job.consentedVisionFingerprint))) return
-        val processable = parsed.assets.filter { it.kind == "IMAGE" && it.bytes.isNotEmpty() }
+        val processable = parsed.assets.filter { it.kind == "IMAGE" && it.byteLength > 0 }
         val blocked = parsed.assets.filter {
             it.kind == "EXTERNAL" || it.kind == "MISSING" || it.kind == "UNSUPPORTED" || it.kind == "PAGE" ||
-                (it.kind == "IMAGE" && it.bytes.isEmpty())
+                (it.kind == "IMAGE" && it.byteLength == 0)
         }
         job.hasImages = parsed.needsVision || processable.isNotEmpty() || blocked.isNotEmpty()
         // A durable batch authorization is not a blanket consent: it is re-validated against the
@@ -2850,7 +2951,7 @@ class KnowledgeRepository(
         processable: List<ExtractedAsset>,
         blocked: List<ExtractedAsset>,
     ): VisionBatch {
-        if (blocked.any { it.kind == "EXTERNAL" || it.kind == "MISSING" || it.kind == "UNSUPPORTED" || (it.kind == "IMAGE" && it.bytes.isEmpty()) }) {
+        if (blocked.any { it.kind == "EXTERNAL" || it.kind == "MISSING" || it.kind == "UNSUPPORTED" || (it.kind == "IMAGE" && it.byteLength == 0) }) {
             return VisionBatch.Failed("Visual sources are missing, external or unsupported. Nothing was downloaded.")
         }
         val pageBlockers=blocked.filter { it.kind=="PAGE" }
@@ -2950,68 +3051,16 @@ class KnowledgeRepository(
                 pipeline.failUnit(job.id, unit.unitId, "PIPELINE_TEXT_LIMIT_EXCEEDED", "LOCAL_PREPARE")
                 return VisionBatch.Failed("PIPELINE_TEXT_LIMIT_EXCEEDED: request text exceeds the local bound; no request was sent")
             }
-            val asset = if (parsed.format == SourceFormat.PDF && pdfRasterizer != null && unit.sourceAssetId == null) {
-                val rendered = (pdfRasterizer as? PdfUnitRasterizer)?.renderUnit(bytes,unit)
-                    ?: if(unit.region == null) PdfParser.renderPage(bytes,pdfRasterizer,unit.page) else null
-                if(rendered == null) {
-                    // A page unit can cover masks, transforms, annotations or
-                    // vector marks. An embedded JPEG is never a substitute for
-                    // the complete rendered appearance of that page.
-                    pipeline.failUnit(job.id, unit.unitId, "RENDER_FAILED", "LOCAL_RENDER")
-                    return VisionBatch.Failed("PDF unit could not be rendered within local limits")
-                } else ExtractedAsset("unit-${unit.unitId}","IMAGE",unit.page,
-                    if(unit.region == null) "pdf-page-${unit.page}" else "pdf-unit-${unit.unitId}",
-                    rendered.bytes,rendered.mediaType,unit.effectiveRequestText())
-            } else {
-                val source = processable.firstOrNull { it.localId == unit.sourceAssetId }
-                    ?: processable.firstOrNull { it.page == unit.page }
-                if (source == null) {
-                    pipeline.failUnit(job.id, unit.unitId, "MISSING_LOCAL_RASTER_SOURCE", "LOCAL_PREPARE")
-                    return VisionBatch.Failed("Unit has no local raster source")
+            val prepared = visualSource.prepare(bytes, parsed, processable, unit)
+            when (prepared) {
+                is KnowledgeVisualSource.Result.Failed -> {
+                    val stage = if (prepared.code.startsWith("RENDER")) "LOCAL_RENDER" else "LOCAL_PREPARE"
+                    pipeline.failUnit(job.id, unit.unitId, prepared.code, stage)
+                    return VisionBatch.Failed(prepared.detail)
                 }
-                val imageRenderer = pdfRasterizer as? ImageUnitRasterizer
-                val dimensions = imageRenderer?.imageDimensions(source.bytes)
-                val limits = runtime.mobileagent.knowledge.UnitRenderLimits()
-                val oversized = dimensions != null && (dimensions.first > limits.maxDimension || dimensions.second > limits.maxDimension || dimensions.first.toLong()*dimensions.second > limits.maxPixels)
-                if (parsed.format == SourceFormat.PDF && unit.sourceAssetId != null) {
-                    // Decode the independent JPEG before dispatch. A valid header is
-                    // not enough to prove the whole payload is usable. If decoding
-                    // fails, keep the page evidence by rendering the complete page.
-                    val rendered = imageRenderer?.renderImageUnit(source.bytes, unit)
-                    if (rendered != null) {
-                        source.copy(bytes = rendered.bytes, mediaType = rendered.mediaType,
-                            section = if (unit.region == null) source.section else "image-unit-${unit.unitId}",
-                            surroundingText = unit.effectiveRequestText())
-                    } else {
-                        val page = pdfRasterizer?.let { PdfParser.renderPage(bytes, it, unit.page) }
-                        if (page == null) {
-                            pipeline.failUnit(job.id, unit.unitId, "RENDER_FAILED", "LOCAL_RENDER")
-                            return VisionBatch.Failed("PDF illustration and page could not be rendered within local limits")
-                        }
-                        ExtractedAsset("unit-${unit.unitId}", "IMAGE", unit.page, "pdf-page-${unit.page}",
-                            page.bytes, page.mediaType, unit.effectiveRequestText())
-                    }
-                } else if(imageRenderer != null && (unit.region != null || oversized || source.bytes.size > limits.maxEncodedBytes)) {
-                    val rendered = imageRenderer.renderImageUnit(source.bytes,unit)
-                    if (rendered == null) {
-                        pipeline.failUnit(job.id, unit.unitId, "RENDER_FAILED", "LOCAL_RENDER")
-                        return VisionBatch.Failed("Image unit could not be rendered within local limits")
-                    }
-                    source.copy(bytes=rendered.bytes,mediaType=rendered.mediaType,
-                        section=if(unit.region == null) source.section else "image-unit-${unit.unitId}",
-                        surroundingText=unit.effectiveRequestText())
-                } else {
-                    if(unit.region != null || source.bytes.size > runtime.mobileagent.knowledge.UnitRenderLimits().maxEncodedBytes) {
-                        pipeline.failUnit(job.id, unit.unitId, "RENDER_LIMIT_EXCEEDED", "LOCAL_RENDER")
-                        return VisionBatch.Failed("Region rendering is unavailable or image exceeds local byte limit")
-                    }
-                    source.copy(surroundingText=unit.effectiveRequestText())
-                }
+                is KnowledgeVisualSource.Result.Ready ->
+                    return processAssets(job, listOf(prepared.asset), unit, duplicateFailures, firstTerminalIndex, index)
             }
-            // DOCX paragraphs and EPUB sections are structural ordinals, not
-            // physical pages. Keep the section locator without inventing a page.
-            val locatedAsset = if (parsed.format == SourceFormat.OFFICE_ARCHIVE) asset.copy(page = null) else asset
-            return processAssets(job,listOf(locatedAsset),unit,duplicateFailures,firstTerminalIndex,index)
     }
 
     private fun hasLegacyVisionUnknown(jobId: String, documentId: String, page: Int, target: String): Boolean {
@@ -3160,6 +3209,18 @@ class KnowledgeRepository(
     }
 
     private fun processAssetsOwned(job: ImportJob, assets: List<ExtractedAsset>, unit: ProcessingUnit): VisionBatch {
+        // Materialize only this bounded unit, once, through hashing/CAS/dispatch.
+        val materialized = assets.map { asset ->
+            if (asset.byteSource == null) asset else asset.readBytes().let { bytes ->
+                asset.copy(bytes = bytes, byteLength = bytes.size, byteSource = null)
+            }
+        }
+        val protections = materialized.map { blobs.protect(sha256Hex(it.bytes)) }
+        try { return processAssetsLeased(job, materialized, unit) }
+        finally { protections.asReversed().forEach { it.close() } }
+    }
+
+    private fun processAssetsLeased(job: ImportJob, assets: List<ExtractedAsset>, unit: ProcessingUnit): VisionBatch {
         val backend = vision ?: return VisionBatch.Failed("Vision model is configured in profile but no backend is bound")
         val requestedFingerprint = job.consentedVisionFingerprint?.takeIf { it.isNotBlank() }
             ?: return VisionBatch.Failed("Vision destination is not bound to this job")
@@ -3185,11 +3246,19 @@ class KnowledgeRepository(
                     "Vision destination changed. Remaining pages were not sent. Approve upload to the current Provider and model.",
                 )
             }
-            val stored = synchronized(indexLock) {
-                blobs.put(asset.bytes, asset.mediaType).also(::upsertBlob)
-            }
             val assetId = EntityId.random().value
             val contextHash = VisionCacheKey.contextHash(asset.surroundingText, asset.page, asset.section)
+            val stored = synchronized(indexLock) {
+                db.transaction {
+                    putManagedBlob(asset.bytes, asset.mediaType).also {
+                            upsertBlob(it)
+                            db.execute(
+                                "INSERT INTO assets(id,document_id,document_version_id,blob_hash,page,section,kind,surrounding_text_hash) VALUES (?,?,?,?,?,?,?,?)",
+                                listOf(assetId, job.documentId, null, it.sha256, asset.page, asset.section, asset.kind, contextHash),
+                            )
+                    }
+                }
+            }
             val input = VisionInput(
                 assetHash = stored.sha256,
                 contextHash = contextHash,
@@ -3207,10 +3276,6 @@ class KnowledgeRepository(
                 textImageAssociation = unit.textImageAssociation,
                 layoutDegradation = unit.layoutDegradation,
                 pageNativeTextChars = unit.nativeText.length,
-            )
-            db.execute(
-                "INSERT OR REPLACE INTO assets(id,document_id,document_version_id,blob_hash,page,section,kind,surrounding_text_hash) VALUES (?,?,?,?,?,?,?,?)",
-                listOf(assetId, job.documentId, null, stored.sha256, asset.page, asset.section, asset.kind, contextHash),
             )
             var dispatchInput = input
             var latestDiagnostic = VisionDiagnosticMetadata()
@@ -3923,7 +3988,10 @@ class KnowledgeRepository(
                 else emptySequence()
             for (batch in batches) {
                 val pending = synchronized(indexLock) {
-                    db.transaction { stageEmbeddingCacheHits(batch, operation.spaceId, selectedEmbedder.dimension) }
+                    db.transaction {
+                        storage.requireCapacity(batch.size.toLong() * (selectedEmbedder.dimension * 4L + 4096) + 65_536)
+                        stageEmbeddingCacheHits(batch, operation.spaceId, selectedEmbedder.dimension)
+                    }
                 }
                 if (pending.isEmpty()) continue
                 val currentDispatch = dispatched ?: dispatchEmbeddingOperation(operation).also { dispatched = it }
@@ -3944,7 +4012,7 @@ class KnowledgeRepository(
                         val current = operationByToken(operation.token) ?: error("embedding operation not found")
                         check(current.state == "DISPATCHED" || current.state == "UNKNOWN") { "embedding operation changed while provider request was in flight" }
                         pending.forEach { (hash, inputs) ->
-                            inputs.forEach { input -> insertEmbedding(input.chunkId, operation.spaceId, bytesByHash.getValue(hash), hash) }
+                            inputs.forEach { input -> insertEmbedding(input.chunkId, operation.spaceId, bytesByHash.getValue(hash), hash, preserveReceipt = true) }
                         }
                     }
                 }
@@ -4334,6 +4402,7 @@ class KnowledgeRepository(
         // accumulating duplicates.
         val versionId = synchronized(indexLock) {
             db.transaction {
+                check(db.query("SELECT d.id FROM documents d JOIN knowledge_bases k ON k.id=d.kb_id WHERE d.id=? AND d.deleted_at IS NULL AND k.deleted_at IS NULL", listOf(job.documentId)).isNotEmpty()) { "document deleted" }
                 val staged = db.query(
                     "SELECT id FROM document_versions WHERE document_id = ? AND content_hash = ? AND status = 'STAGING' ORDER BY created_at DESC LIMIT 1",
                     listOf(job.documentId, contentHash),
@@ -4368,13 +4437,16 @@ class KnowledgeRepository(
         withEmbeddingRepair(rebuild.indexEmbedder) {
             synchronized(indexLock) {
                 db.transaction {
+                    // Inference ran outside the transaction. Deletion wins over a
+                    // late result; never clear its tombstone while publishing.
+                    check(db.query("SELECT d.id FROM documents d JOIN knowledge_bases k ON k.id=d.kb_id WHERE d.id=? AND d.deleted_at IS NULL AND k.deleted_at IS NULL", listOf(job.documentId)).isNotEmpty()) { "document deleted" }
                     val firstAppend = isFirstAppendToEmptyFenceLocked(job.knowledgeBaseId, rebuild.indexEmbedder.spaceId)
                     db.execute("UPDATE assets SET document_version_id = ? WHERE document_id = ? AND (document_version_id IS NULL OR document_version_id = '')", listOf(versionId, job.documentId))
                     db.execute(
                         "UPDATE document_versions SET status = ? WHERE id = ?",
                         listOf(if (job.visualGapsAccepted) "READY_WITH_VISUAL_GAPS" else "READY", versionId),
                     )
-                    db.execute("UPDATE documents SET active_version_id = ?, deleted_at = NULL WHERE id = ?", listOf(versionId, job.documentId))
+                    db.execute("UPDATE documents SET active_version_id = ? WHERE id = ? AND deleted_at IS NULL", listOf(versionId, job.documentId))
                     ensureBatchGenerationCurrentLocked(job.id)
                     val generation = commitRebuild(rebuild, firstAppend)
                     advanceBatchGenerationAfterPublicationLocked(job.id, generation)
@@ -4386,6 +4458,7 @@ class KnowledgeRepository(
     }
 
     private fun persistChunks(documentVersionId: String, chunks: List<IndexedChunk>) {
+        storage.requireCapacity(chunks.sumOf { it.text.toByteArray(Charsets.UTF_8).size.toLong() * 3 + 4096 })
         val version = db.query("SELECT document_id, status FROM document_versions WHERE id=?", listOf(documentVersionId)).single()
         check(version.string("status") == "STAGING") { "Published chunks are immutable" }
         val documentId = version.string("document_id")
@@ -4467,6 +4540,7 @@ class KnowledgeRepository(
         check(selectedEmbedder.spaceId == embedder.spaceId) { "Prepared vectors must use the local embedding space" }
         inputsForVersion(documentVersionId).chunked(128).forEach { batch ->
             db.transaction {
+                reserveEmbeddingGrowth(batch.filter { it.contentHash in vectors }, selectedEmbedder)
                 batch.forEach { input ->
                     val prepared = vectors[input.contentHash] ?: return@forEach
                     val canonical = cachedEmbedding(selectedEmbedder.spaceId, input.contentHash)?.bytes ?: prepared
@@ -4496,6 +4570,7 @@ class KnowledgeRepository(
     private fun ensureEmbeddings(inputs: List<EmbeddingInput>, selectedEmbedder: TextEmbedder) {
         if (inputs.isEmpty()) return
         val pending = db.transaction {
+            reserveEmbeddingGrowth(inputs, selectedEmbedder)
             stageEmbeddingCacheHits(inputs, selectedEmbedder.spaceId, selectedEmbedder.dimension)
         }
         if (pending.isEmpty()) return
@@ -4510,6 +4585,7 @@ class KnowledgeRepository(
             "embedding backend returned ${vectors.size} vectors for ${representatives.size} cache misses"
         }
         db.transaction {
+            reserveEmbeddingGrowth(pending.values.flatten(), selectedEmbedder)
             pending.entries.zip(vectors).forEach { (entry, vector) ->
                 val contentHash = entry.key
                 validateEmbeddingVector(vector, selectedEmbedder.dimension)
@@ -4525,6 +4601,11 @@ class KnowledgeRepository(
         val contentHash: String,
         val bytes: ByteArray,
     )
+
+    private fun reserveEmbeddingGrowth(inputs: List<EmbeddingInput>, selectedEmbedder: TextEmbedder) {
+        val missing = inputs.count { storedEmbedding(it.chunkId, selectedEmbedder.spaceId) == null }
+        if (missing > 0) storage.requireCapacity(missing.toLong() * (selectedEmbedder.dimension * 4L + 4096) + 65_536)
+    }
 
     private fun storedEmbedding(chunkId: String, spaceId: String): StoredEmbedding? =
         db.query(
@@ -4547,7 +4628,7 @@ class KnowledgeRepository(
     private fun storedEmbedding(row: SqlRow): StoredEmbedding =
         StoredEmbedding(row.string("content_hash"), embeddingBytes(row))
 
-    private fun insertEmbedding(chunkId: String, spaceId: String, bytes: ByteArray, contentHash: String) {
+    private fun insertEmbedding(chunkId: String, spaceId: String, bytes: ByteArray, contentHash: String, preserveReceipt: Boolean = false) {
         val existing = storedEmbedding(chunkId, spaceId)
         if (existing != null) {
             check(existing.contentHash == contentHash) {
@@ -4558,6 +4639,7 @@ class KnowledgeRepository(
             }
             return
         }
+        if (!preserveReceipt) storage.requireCapacity(bytes.size.toLong() + 4096)
         db.execute(
             "INSERT INTO embeddings(chunk_id,space_id,vector_blob,content_hash) VALUES (?,?,?,?)",
             listOf(chunkId, spaceId, bytes.copyOf(), contentHash),
@@ -4589,64 +4671,6 @@ class KnowledgeRepository(
         }
     }
 
-    private fun lexicalHits(kbId: String, query: String, topK: Int, generation: String): List<SearchHit> {
-        val tokenized = CjkLexical.indexText(query)
-        val fts = runCatching {
-            db.query(
-                """
-                SELECT chunks.id AS chunk_id, documents.id AS document_id, chunks.text AS text, chunks.document_version_id AS version_id,
-                       chunks.page AS page, chunks.asset_ids AS asset_ids, chunks.source_span AS source_span
-                FROM chunks_fts
-                JOIN chunks ON chunks.rowid = chunks_fts.rowid
-                JOIN generation_members ON generation_members.chunk_id = chunks.id AND generation_members.generation_id = ?
-                JOIN documents ON documents.active_version_id = chunks.document_version_id
-                WHERE documents.kb_id = ? AND documents.deleted_at IS NULL AND chunks_fts MATCH ?
-                ORDER BY bm25(chunks_fts) ASC, chunks.id ASC
-                LIMIT ?
-                """.trimIndent(),
-                listOf(generation, kbId, quoteFts(tokenized.ifBlank { query }), topK),
-            )
-        }.getOrDefault(emptyList())
-        val rows = fts.ifEmpty {
-            db.query(
-                """
-                SELECT chunks.id AS chunk_id, documents.id AS document_id, chunks.text AS text, chunks.document_version_id AS version_id,
-                       chunks.page AS page, chunks.asset_ids AS asset_ids, chunks.source_span AS source_span
-                FROM chunks
-                JOIN generation_members ON generation_members.chunk_id = chunks.id AND generation_members.generation_id = ?
-                JOIN documents ON documents.active_version_id = chunks.document_version_id
-                WHERE documents.kb_id = ? AND documents.deleted_at IS NULL AND chunks.text LIKE ?
-                ORDER BY chunks.id ASC
-                LIMIT ?
-                """.trimIndent(),
-                listOf(generation, kbId, "%$query%", topK),
-            )
-        }
-        return rows.mapIndexed { index, row ->
-            SearchHit(
-                chunkId = row.string("chunk_id"),
-                documentId = row.string("document_id"),
-                text = row.string("text"),
-                score = 1.0 / (index + 1),
-                knowledgeBaseId = kbId,
-                documentVersionId = row.string("version_id"),
-                assetId = sourceAssetForHit(row),
-                page = row.string("page").toIntOrNull(),
-                sourceSpan = row.string("source_span").ifBlank { null },
-            )
-        }
-    }
-
-    private fun isPageContextSpan(span: String): Boolean =
-        runCatching {
-            runtime.mobileagent.knowledge.decodeSourceSpan(span)?.isPageContext ?: span.startsWith("v2|")
-        }.getOrDefault(true) // Invalid structured provenance must never expose a guessed image.
-
-    /** Legacy context rows remain searchable without claiming their crop as the source. */
-    private fun sourceAssetForHit(row: SqlRow): String? =
-        if (isPageContextSpan(row.string("source_span"))) null
-        else row.string("asset_ids").split(',').firstOrNull { it.isNotBlank() }
-
     private fun vectorHits(
         kbId: String,
         query: String,
@@ -4658,25 +4682,25 @@ class KnowledgeRepository(
         onQueryEmbeddingReturned: (() -> Unit)? = null,
         warnings: MutableList<String>,
     ): List<SearchHit> {
-        val queryVec = queryVector?.copyOf() ?: selectedEmbedder.embed(query)
+        val queryVec = queryVector?.copyOf() ?: run {
+            // Local query vectors are transient: a read must work above quota.
+            // Remote queries reserve space for their durable paid/UNKNOWN receipt.
+            if (isApiKnowledgeBase(kbId)) storage.requireCapacity(selectedEmbedder.dimension * 4L + 65_536)
+            selectedEmbedder.embed(query)
+        }
         onQueryEmbeddingReturned?.invoke()
         validateEmbeddingVector(queryVec, selectedEmbedder.dimension)
         onQueryVectorReady?.invoke(queryVec.copyOf())
         // Membership needs IDs only. Retaining every chunk body here can be
         // larger than the index itself (50k ordinary 1800-char chunks).
         // Fetch text/provenance only for native matches, under the same pin.
-        val ids = db.query(
-            """
-            SELECT chunks.id AS chunk_id
-            FROM generation_members
-            JOIN chunks ON chunks.id = generation_members.chunk_id
-            JOIN documents ON documents.active_version_id = chunks.document_version_id
-            WHERE generation_members.generation_id = ? AND documents.kb_id = ? AND documents.deleted_at IS NULL
-            """.trimIndent(),
-            listOf(generation, kbId),
-        ).mapTo(linkedSetOf()) { it.string("chunk_id") }
-        if (ids.isEmpty()) return emptyList()
         val key = VectorIndexCache.Key(kbId, selectedEmbedder.spaceId, selectedEmbedder.dimension, generation)
+        val ids = try { retrievalStore.memberIds(key) }
+        catch (_: runtime.mobileagent.knowledge.StaleVectorBuildException) {
+            warnings += "Knowledge base $kbId vector membership changed during retrieval; vector matches omitted"
+            return emptyList()
+        }
+        if (ids.isEmpty()) return emptyList()
         // Borrowed-handle lease: the search runs while the lease is held, so
         // eviction/invalidation/replacement cannot free the native handle
         // mid-search (b07 follow-up finding B).  Concurrent misses for one
@@ -4710,7 +4734,7 @@ class KnowledgeRepository(
                     val row = byId[id] ?: return@mapNotNull null
                     SearchHit(id, row.string("document_id"), row.string("text"), score.toDouble(),
                         knowledgeBaseId = kbId, documentVersionId = row.string("version_id"),
-                        assetId = sourceAssetForHit(row), page = row.string("page").toIntOrNull(),
+                        assetId = KnowledgeRetrievalStore.sourceAssetForHit(row), page = row.string("page").toIntOrNull(),
                         sourceSpan = row.string("source_span").ifBlank { null })
                 }
             }
@@ -4793,7 +4817,9 @@ class KnowledgeRepository(
             val identity = runtime.mobileagent.knowledge.VectorIndexSnapshotIdentity(key.spaceId, key.dimension, orderedIds)
             if (snapshot?.isFile == true && index is runtime.mobileagent.knowledge.VectorIndexSnapshotPort) {
                 try {
-                    (index as runtime.mobileagent.knowledge.VectorIndexSnapshotPort).loadSnapshot(snapshot, identity)
+                    blobs.withStorageLock {
+                        (index as runtime.mobileagent.knowledge.VectorIndexSnapshotPort).loadSnapshot(snapshot, identity)
+                    }
                     check(index.vectorCount == ids.size) { "INDEX_SNAPSHOT_MEMBERSHIP_MISMATCH" }
                     indexSnapshotLoads.incrementAndGet()
                     return index
@@ -4823,10 +4849,14 @@ class KnowledgeRepository(
             if (snapshot != null && index is runtime.mobileagent.knowledge.VectorIndexSnapshotPort) {
                 // Cache write failure never discards validated truth or a usable handle.
                 runCatching {
+                  db.transaction { blobs.withStorageLock {
+                    requireKb(key.knowledgeBaseId)
+                    storage.requireCapacity(ids.size.toLong() * (key.dimension * 4L + 4096) + 65_536)
                     check(snapshot.parentFile.isDirectory || snapshot.parentFile.mkdirs())
                     val temporary = File.createTempFile("ann-", ".tmp", snapshot.parentFile)
                     try {
                         val saved = (index as runtime.mobileagent.knowledge.VectorIndexSnapshotPort).saveSnapshot(temporary)
+                        check(storage.usage(refreshIndexes = true).totalBytes <= storage.usage().quotaBytes) { "RESOURCE_LIMIT: index snapshot exceeded storage quota" }
                         check(saved == identity) { "INDEX_SNAPSHOT_IDENTITY_MISMATCH" }
                         try {
                             java.nio.file.Files.move(temporary.toPath(), snapshot.toPath(),
@@ -4839,6 +4869,7 @@ class KnowledgeRepository(
                     } finally {
                         java.nio.file.Files.deleteIfExists(temporary.toPath())
                     }
+                  } }
                 }
             }
             return index
@@ -5388,13 +5419,20 @@ class KnowledgeRepository(
     }
 
     private fun persistJob(job: ImportJob, displayName: String) = synchronized(indexLock) {
+        val deleted = db.query("SELECT deleted_at FROM documents WHERE id=?", listOf(job.documentId)).singleOrNull()
+        if (deleted == null || deleted.string("deleted_at").isNotBlank()) {
+            job.stage = ImportStage.CANCELLED
+            val oldError = db.query("SELECT error FROM import_jobs WHERE id=?", listOf(job.id)).singleOrNull()?.string("error")
+            if (oldError?.contains("UNKNOWN", ignoreCase = true) == true) job.error = oldError
+            else if (job.error?.contains("UNKNOWN", ignoreCase = true) != true) job.error = "document deleted"
+        }
         if (job.visionConsent && job.consentedVisionFingerprint.isNullOrBlank()) {
             job.consentedVisionFingerprint = visionFingerprint()
         }
         val batchId = db.query("SELECT batch_id FROM import_jobs WHERE id = ?", listOf(job.id))
             .singleOrNull()?.string("batch_id")?.ifBlank { null }
         db.execute(
-            "INSERT OR REPLACE INTO import_jobs(id,kb_id,document_id,display_name,stage,has_images,error,updated_at,vision_consent,embedding_is_api,embedding_consent,vision_binding_json,batch_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "INSERT INTO import_jobs(id,kb_id,document_id,display_name,stage,has_images,error,updated_at,vision_consent,embedding_is_api,embedding_consent,vision_binding_json,batch_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET kb_id=excluded.kb_id,document_id=excluded.document_id,display_name=excluded.display_name,stage=excluded.stage,has_images=excluded.has_images,error=excluded.error,updated_at=excluded.updated_at,vision_consent=excluded.vision_consent,embedding_is_api=excluded.embedding_is_api,embedding_consent=excluded.embedding_consent,vision_binding_json=excluded.vision_binding_json,batch_id=excluded.batch_id",
             listOf(
                 job.id,
                 job.knowledgeBaseId,
@@ -5450,16 +5488,6 @@ class KnowledgeRepository(
             listOf(hash),
         ).single().long("n")
         db.execute("UPDATE blobs SET ref_count = ? WHERE hash = ?", listOf(live, hash))
-    }
-
-    private fun quoteFts(query: String): String {
-        val cleaned = query.replace("\"", " ").trim()
-        if (cleaned.isEmpty()) return "\"\""
-        return if (cleaned.any { it.isWhitespace() }) {
-            cleaned.split(Regex("\\s+")).joinToString(" OR ") { token -> "\"$token\"" }
-        } else {
-            cleaned
-        }
     }
 
     fun issueConsentTicket(kind: String, jobId: String?, knowledgeBaseId: String, fingerprint: String): String {
@@ -6285,62 +6313,7 @@ class KnowledgeRepository(
     /** Honest, derived batch progress.  Completion is only ever reported from published items. */
     fun batchProgress(batchId: String): ImportBatchProgress = synchronized(indexLock) { batchProgressLocked(batchId) }
 
-    private fun batchProgressLocked(batchId: String): ImportBatchProgress {
-        val fullyStaged = db.query("SELECT staging_complete FROM import_batches WHERE id = ?", listOf(batchId))
-            .singleOrNull()?.long("staging_complete") == 1L
-        val items = db.query("SELECT state, job_id FROM import_items WHERE batch_id = ?", listOf(batchId))
-        var published = 0
-        var pending = 0
-        var copying = 0
-        var queued = 0
-        var processing = 0
-        var waiting = 0
-        var failed = 0
-        var unknown = 0
-        var cancelled = 0
-        items.forEach { row ->
-            when (runCatching { ImportItemState.valueOf(row.string("state")) }.getOrNull()) {
-                ImportItemState.PUBLISHED -> published += 1
-                ImportItemState.PENDING -> pending += 1
-                ImportItemState.COPYING -> if (fullyStaged) queued += 1 else copying += 1
-                ImportItemState.QUEUED -> queued += 1
-                ImportItemState.PROCESSING -> processing += 1
-                ImportItemState.WAITING -> {
-                    waiting += 1
-                    if (jobHasUnknownOutcomeLocked(row.string("job_id"))) unknown += 1
-                }
-                ImportItemState.FAILED -> {
-                    failed += 1
-                    if (jobHasUnknownOutcomeLocked(row.string("job_id"))) unknown += 1
-                }
-                ImportItemState.CANCELLED -> cancelled += 1
-                null -> failed += 1
-            }
-        }
-        val batch = db.query("SELECT staging_complete, total_items FROM import_batches WHERE id = ?", listOf(batchId)).singleOrNull()
-        val unstaged = if (batch?.long("staging_complete") == 0L)
-            (batch.long("total_items").toInt() - items.size).coerceAtLeast(0) else 0
-        return ImportBatchProgress(
-            total = items.size + unstaged,
-            published = published,
-            pending = pending + unstaged,
-            copying = copying,
-            queued = queued,
-            processing = processing,
-            waiting = waiting,
-            failed = failed,
-            unknown = unknown,
-            cancelled = cancelled,
-        )
-    }
-
-    private fun jobHasUnknownOutcomeLocked(jobId: String): Boolean {
-        if (jobId.isBlank()) return false
-        return db.query("SELECT error FROM import_jobs WHERE id = ?", listOf(jobId))
-            .singleOrNull()?.string("error")
-            .orEmpty()
-            .contains("UNKNOWN_OUTCOME", ignoreCase = true)
-    }
+    private fun batchProgressLocked(batchId: String): ImportBatchProgress = batchProgressStore.progress(batchId)
 
     /**
      * The Vision destination this batch is currently authorized for, or null when the authorization
@@ -6815,8 +6788,8 @@ class KnowledgeRepository(
             writeBatchCountersLocked(batchId, batchProgressLocked(batchId))
             return
         }
-        val items = db.query("SELECT state FROM import_items WHERE batch_id = ?", listOf(batchId))
-        if (items.isEmpty()) {
+        val progress = batchProgressLocked(batchId)
+        if (progress.total == 0) {
             db.execute(
                 "UPDATE import_batches SET state = ?, total_items = 0, copied = 0, processing = 0, waiting = 0, " +
                     "failed = 0, published_items = 0, unknown_items = 0, updated_at = ? WHERE id = ?",
@@ -6824,9 +6797,8 @@ class KnowledgeRepository(
             )
             return
         }
-        val progress = batchProgressLocked(batchId)
         val generationOk = generationStillCurrentLocked(batchId)
-        val total = items.size
+        val total = progress.total
         val active = progress.pending > 0 || progress.copying > 0 || progress.queued > 0 || progress.processing > 0
         val derived = when {
             !generationOk -> ImportBatchState.FAILED

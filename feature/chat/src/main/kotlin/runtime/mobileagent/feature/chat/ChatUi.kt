@@ -3,6 +3,8 @@
 
 package runtime.mobileagent.feature.chat
 
+import androidx.compose.ui.res.stringResource
+
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import androidx.compose.foundation.background
@@ -668,8 +670,7 @@ private fun UnboundWorkspaceDefaultCard(state: ChatUiState, actions: ChatActions
                 style = MaterialTheme.typography.bodySmall,
             )
             Text(
-                if (zh) "Agent 默认工作区：${state.workspaceAccess.agentDefaultWorkspaceLabel}"
-                else "Agent default workspace: ${state.workspaceAccess.agentDefaultWorkspaceLabel}",
+                stringResource(R.string.ui_agent_default_workspace_s_0ec344e3, (state.workspaceAccess.agentDefaultWorkspaceLabel)),
                 style = MaterialTheme.typography.bodySmall,
                 fontWeight = FontWeight.SemiBold,
             )
@@ -681,7 +682,7 @@ private fun UnboundWorkspaceDefaultCard(state: ChatUiState, actions: ChatActions
                     .testTag("conversation.unbound.newAtDefault"),
             ) {
                 Text(
-                    if (zh) "在此工作区新建会话" else "New conversation in this workspace",
+                    stringResource(R.string.ui_new_conversation_in_this_workspace_532596f7),
                     maxLines = 2,
                     overflow = TextOverflow.Ellipsis,
                 )
@@ -694,7 +695,7 @@ private fun UnboundWorkspaceDefaultCard(state: ChatUiState, actions: ChatActions
 private fun ChatSessionList(state: ChatUiState, onSelect: (String) -> Unit, modifier: Modifier) {
     val zh = state.language.equals("zh-CN", true)
     Column(modifier.fillMaxHeight().background(MaterialTheme.colorScheme.surfaceVariant).padding(12.dp)) {
-        Text(if (zh) "会话" else "Conversations", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+        Text(stringResource(R.string.ui_conversations_23a085e0), style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
         Spacer(Modifier.height(12.dp))
         if (state.loading) {
             CircularProgressIndicator(Modifier.size(24.dp))
@@ -731,7 +732,7 @@ private fun SessionChooser(state: ChatUiState, onSelect: (String) -> Unit) {
     val selected = state.sessions.firstOrNull { it.id == state.selectedSessionId }
     Row(Modifier.fillMaxWidth().padding(bottom = 8.dp), verticalAlignment = Alignment.CenterVertically) {
         Text(
-            if (zh) "会话" else "Conversations",
+            stringResource(R.string.ui_conversations_23a085e0),
             style = MaterialTheme.typography.titleMedium,
             modifier = Modifier.weight(1f),
             maxLines = 1,
@@ -751,7 +752,7 @@ private fun SessionChooser(state: ChatUiState, onSelect: (String) -> Unit) {
                 )
             }
             DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
-                if (state.sessions.isEmpty()) DropdownMenuItem(text = { Text(if (zh) "暂无会话" else "No conversations") }, onClick = { expanded = false }, enabled = false)
+                if (state.sessions.isEmpty()) DropdownMenuItem(text = { Text(stringResource(R.string.ui_no_conversations_81fbc382)) }, onClick = { expanded = false }, enabled = false)
                 else state.sessions.forEach { session ->
                     DropdownMenuItem(
                         text = {
@@ -822,7 +823,7 @@ private fun ChatHeader(
                 onClick = onOpenSidebar,
                 modifier = Modifier.testTag("chat.sidebar.open"),
             ) {
-                Text(if (zh) "会话" else "Chats", maxLines = 1)
+                Text(stringResource(R.string.ui_chats_b73b26c8), maxLines = 1)
             }
         }
         FlowRow(
@@ -834,26 +835,26 @@ private fun ChatHeader(
                 onClick = actions.onNewSession,
                 colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.onSurface),
             ) {
-                Text(if (zh) "新会话" else "New chat", maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Text(stringResource(R.string.ui_new_chat_6f463698), maxLines = 1, overflow = TextOverflow.Ellipsis)
             }
             AgentChooser(state, actions.onSelectAgent)
             OutlinedButton(
                 onClick = onOpenWorkspace,
                 modifier = Modifier.testTag("chat.workspace.open"),
             ) {
-                Text(if (zh) "工作区" else "Files", maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Text(stringResource(R.string.ui_files_5c80b454), maxLines = 1, overflow = TextOverflow.Ellipsis)
             }
             FilterChip(
                 selected = state.textDegradation,
                 onClick = { actions.onToggleDegradation(!state.textDegradation) },
-                label = { Text(if (zh) "纯文本" else "Text only", maxLines = 1, overflow = TextOverflow.Ellipsis) },
+                label = { Text(stringResource(R.string.ui_text_only_78afb413), maxLines = 1, overflow = TextOverflow.Ellipsis) },
             )
             TextButton(
                 onClick = actions.onOpenRequestInspector,
                 colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.onSurface),
                 modifier = Modifier.testTag("chat.requestInspector.open"),
             ) {
-                Text(if (zh) "查看请求" else "View request", maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Text(stringResource(R.string.ui_view_request_e63fbc35), maxLines = 1, overflow = TextOverflow.Ellipsis)
             }
         }
     }
@@ -941,12 +942,12 @@ fun ConversationTopBar(
                 onDismissRequest = { overflowOpen = false },
             ) {
                 DropdownMenuItem(
-                    text = { Text(if (zh) "查看请求" else "Inspect request") },
+                    text = { Text(stringResource(R.string.ui_inspect_request_dd0adbf1)) },
                     onClick = { overflowOpen = false; actions.onOpenRequestInspector() },
                     modifier = Modifier.testTag("conversation.requestInspector.open"),
                 )
                 DropdownMenuItem(
-                    text = { Text(if (zh) "新对话" else "New conversation") },
+                    text = { Text(stringResource(R.string.ui_new_conversation_9878af0c)) },
                     onClick = { overflowOpen = false; actions.onNewSession() },
                     modifier = Modifier.testTag("conversation.new"),
                 )
@@ -1017,15 +1018,15 @@ fun ConversationContextSheet(
                 .testTag("conversation.context.sheet"),
             verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
-            Text(if (zh) "当前上下文" else "Current context", style = MaterialTheme.typography.headlineSmall)
-            Text(if (zh) "智能体" else "Agent", style = MaterialTheme.typography.labelLarge)
+            Text(stringResource(R.string.ui_current_context_349f8670), style = MaterialTheme.typography.headlineSmall)
+            Text(stringResource(R.string.ui_agent_252fc75c), style = MaterialTheme.typography.labelLarge)
             Text(agent, style = MaterialTheme.typography.bodyLarge)
-            Text(if (zh) "工作区" else "Workspace", style = MaterialTheme.typography.labelLarge)
+            Text(stringResource(R.string.ui_workspace_58a2bde1), style = MaterialTheme.typography.labelLarge)
             Text(workspace, style = MaterialTheme.typography.bodyLarge)
             if (state.workspaceAccess.threadWorkspaceState == ChatThreadWorkspaceState.UNBOUND_AGENT_DEFAULT_AVAILABLE &&
                 state.workspaceAccess.agentDefaultWorkspaceId != null
             ) {
-                Text(if (zh) "Agent 默认工作区" else "Agent default workspace", style = MaterialTheme.typography.labelLarge)
+                Text(stringResource(R.string.ui_agent_default_workspace_e459a394), style = MaterialTheme.typography.labelLarge)
                 Text(state.workspaceAccess.agentDefaultWorkspaceLabel, style = MaterialTheme.typography.bodyLarge)
                 Button(
                     onClick = { onNewSessionAtDefault(requireNotNull(state.workspaceAccess.agentDefaultWorkspaceId)) },
@@ -1034,7 +1035,7 @@ fun ConversationContextSheet(
                         .heightIn(min = 48.dp)
                         .testTag("conversation.context.newAtDefault"),
                 ) {
-                    Text(if (zh) "在此工作区新建会话" else "New conversation in this workspace")
+                    Text(stringResource(R.string.ui_new_conversation_in_this_workspace_532596f7))
                 }
             }
             if (state.workspaceAccess.systemAccessLabel.isNotBlank()) {
@@ -1042,12 +1043,12 @@ fun ConversationContextSheet(
             }
             if (state.workspaceAccess.localizedPermission(zh).isNotBlank()) {
                 Text(
-                    if (zh) "权限：${state.workspaceAccess.localizedPermission(zh)}" else "Permission: ${state.workspaceAccess.localizedPermission(zh)}",
+                    stringResource(R.string.ui_permission_s_76ae437c, (state.workspaceAccess.localizedPermission(zh))),
                     style = MaterialTheme.typography.bodySmall,
                 )
             }
             if (state.modelLabel.isNotBlank()) {
-                Text(if (zh) "模型" else "Model", style = MaterialTheme.typography.labelLarge)
+                Text(stringResource(R.string.ui_model_44c0cd42), style = MaterialTheme.typography.labelLarge)
                 Text(state.modelLabel, style = MaterialTheme.typography.bodyLarge)
             }
             OutlinedButton(
@@ -1056,7 +1057,7 @@ fun ConversationContextSheet(
                     .fillMaxWidth()
                     .testTag("conversation.context.workspace"),
             ) {
-                Text(if (zh) "查看工作区" else "View workspace")
+                Text(stringResource(R.string.ui_view_workspace_b7713d6d))
             }
             OutlinedButton(
                 onClick = onOpenAgentSettings,
@@ -1064,7 +1065,7 @@ fun ConversationContextSheet(
                     .fillMaxWidth()
                     .testTag("conversation.context.agentSettings"),
             ) {
-                Text(if (zh) "管理智能体" else "Manage agent")
+                Text(stringResource(R.string.ui_manage_agent_fbcf94f0))
             }
             Button(
                 onClick = onNewSession,
@@ -1072,7 +1073,7 @@ fun ConversationContextSheet(
                     .fillMaxWidth()
                     .testTag("conversation.context.new"),
             ) {
-                Text(if (zh) "新建对话" else "New conversation")
+                Text(stringResource(R.string.ui_new_conversation_843829cd))
             }
             Spacer(Modifier.height(16.dp))
         }
@@ -1090,7 +1091,7 @@ private fun AgentChooser(state: ChatUiState, onSelect: (String) -> Unit) {
             enabled = false,
             modifier = Modifier.heightIn(min = 48.dp).widthIn(min = 112.dp, max = 180.dp),
         ) {
-            Text(if (zh) "无智能体" else "No agent", maxLines = 1, overflow = TextOverflow.Ellipsis)
+            Text(stringResource(R.string.ui_no_agent_222531b8), maxLines = 1, overflow = TextOverflow.Ellipsis)
         }
     } else {
         Box {
@@ -1145,12 +1146,11 @@ private fun ContextCompactionHistory(records: List<ChatCompactionUi>, messages: 
     }
     if (open) AlertDialog(
         onDismissRequest = { open = false },
-        title = { Text(if (zh) "上下文压缩记录" else "Context compaction history") },
+        title = { Text(stringResource(R.string.ui_context_compaction_history_3a8b9983)) },
         text = {
             Column(Modifier.heightIn(max = 480.dp).verticalScroll(rememberScrollState()).testTag("conversation.compaction.history"),
                 verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                Text(if (zh) "摘要使用本会话模型，额外请求计入运行用量。原始消息仍在对话中；摘要不授予权限，也不会自动重做工具。" else
-                    "Summaries use this session's model and count toward run usage. Original messages remain in the conversation. Summaries grant no permissions and do not replay tools.")
+                Text(stringResource(R.string.ui_summaries_use_this_session_s_model_df6e6f50))
                 records.asReversed().forEach { record ->
                     val label = when (record.state) {
                         "PREPARED" -> if (zh) "已准备" else "Prepared"
@@ -1161,14 +1161,12 @@ private fun ContextCompactionHistory(records: List<ChatCompactionUi>, messages: 
                         else -> if (zh) "未完成，原始上下文保留" else "Failed; original context retained"
                     }
                     Text("$label · ${record.createdAt.take(19)}", style = MaterialTheme.typography.titleSmall)
-                    Text(if (zh) "模型：${record.modelId} · 覆盖 ${record.sourceMessageIds.size} 条原始消息" else
-                        "Model: ${record.modelId} · covers ${record.sourceMessageIds.size} original messages")
-                    Text(if (zh) "保守输入估算：${record.beforeUnits} → ${record.afterUnits} 单位（非实际 token）\n摘要用量：输入 ${record.inputTokens} / 输出 ${record.outputTokens} tokens" else
-                        "Conservative input estimate: ${record.beforeUnits} → ${record.afterUnits} units (not actual tokens)\nSummary usage: ${record.inputTokens} input / ${record.outputTokens} output tokens")
+                    Text(stringResource(R.string.ui_model_s_covers_s_original_messages_8990b847, (record.modelId), (record.sourceMessageIds.size)))
+                    Text(stringResource(R.string.ui_conservative_input_estimate_s_s_units_baea5d49, (record.beforeUnits), (record.afterUnits), (record.inputTokens), (record.outputTokens)))
                     record.summaryJson?.let { Text(it, modifier = Modifier.testTag("conversation.compaction.summary.${record.id}")) }
                     var sourcesOpen by remember(record.id) { mutableStateOf(false) }
                     var sourceLimit by remember(record.id) { mutableStateOf(50) }
-                    TextButton(onClick = { sourcesOpen = !sourcesOpen }) { Text(if (zh) "查看覆盖的原始消息" else "Inspect covered originals") }
+                    TextButton(onClick = { sourcesOpen = !sourcesOpen }) { Text(stringResource(R.string.ui_inspect_covered_originals_0fb5f0e7)) }
                     if (sourcesOpen) {
                         val byId = messages.associateBy { it.id }
                         record.sourceMessageIds.take(sourceLimit).forEach { id ->
@@ -1179,14 +1177,14 @@ private fun ContextCompactionHistory(records: List<ChatCompactionUi>, messages: 
                             }
                         }
                         if (sourceLimit < record.sourceMessageIds.size) TextButton(onClick = { sourceLimit += 50 }) {
-                            Text(if (zh) "更多原始消息" else "More originals")
+                            Text(stringResource(R.string.ui_more_originals_8d54d6be))
                         }
                         Text("SHA-256: ${record.inputHash}", style = MaterialTheme.typography.labelSmall)
                     }
                 }
             }
         },
-        confirmButton = { TextButton(onClick = { open = false }) { Text(if (zh) "关闭" else "Close") } },
+        confirmButton = { TextButton(onClick = { open = false }) { Text(stringResource(R.string.ui_close_6cf4a777)) } },
     )
 }
 
@@ -1272,8 +1270,7 @@ private fun MessageBubble(
                         }
                     }
                     if (!user && orderedMessages.none { it.text.isNotBlank() || it.reasoning.isNotBlank() || isToolEventRow(it.role) }) {
-                        Text(if (zh) "尚无可见输出；请查看本轮运行状态，不会自动重发。"
-                            else "No visible output yet. Check the run status; this request is not automatically resent.",
+                        Text(stringResource(R.string.ui_no_visible_output_yet_check_the_66aa196b),
                             style = MaterialTheme.typography.bodySmall, modifier = Modifier.testTag("conversation.emptyAnswer.${message.id}"))
                     }
                     // Supplementary disclosure, never a substitute for the answer:
@@ -1288,7 +1285,7 @@ private fun MessageBubble(
                             modifier = Modifier.padding(top = 6.dp).testTag("conversation.notice.${message.id}"),
                         )
                     }
-                    if (message.streaming) Text(if (zh) "正在流式输出…" else "Streaming…", style = MaterialTheme.typography.labelSmall, modifier = Modifier.padding(top = 4.dp))
+                    if (message.streaming) Text(stringResource(R.string.ui_streaming_96edaa09), style = MaterialTheme.typography.labelSmall, modifier = Modifier.padding(top = 4.dp))
                     if (message.timeLabel.isNotBlank()) Text(message.timeLabel, style = MaterialTheme.typography.labelSmall)
                     if (!working && tools.isNotEmpty()) ToolDetailsButton(message.id, tools.size, zh) { toolsOpen = true }
                     if (assistant && !working && presentation.copyText.isNotBlank()) {
@@ -1328,7 +1325,7 @@ private fun MessageBubble(
 @Composable
 private fun ToolDetailsButton(messageId: String, count: Int, zh: Boolean, onClick: () -> Unit) {
     TextButton(onClick = onClick, modifier = Modifier.testTag("conversation.tools.open.$messageId")) {
-        Text(if (zh) "工具记录 · $count" else "Tool records · $count")
+        Text(stringResource(R.string.ui_tool_records_s_42bfa81f, (count)))
     }
 }
 
@@ -1339,10 +1336,10 @@ private fun ToolDetailsPage(tools: List<ChatMessageUi>, zh: Boolean, onClose: ()
             color = MaterialTheme.colorScheme.surface) {
             Column(Modifier.fillMaxSize().padding(16.dp).testTag("conversation.tools.detail")) {
                 Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                    Text(if (zh) "工具记录" else "Tool records", style = MaterialTheme.typography.titleLarge,
+                    Text(stringResource(R.string.ui_tool_records_a37123a8), style = MaterialTheme.typography.titleLarge,
                         modifier = Modifier.weight(1f))
                     TextButton(onClick = onClose, modifier = Modifier.testTag("conversation.tools.close")) {
-                        Text(if (zh) "返回回复" else "Back to reply")
+                        Text(stringResource(R.string.ui_back_to_reply_ed5e8395))
                     }
                 }
                 LazyColumn(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -1369,7 +1366,7 @@ private fun ToolEventRow(message: ChatMessageUi, zh: Boolean, modifier: Modifier
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Text(
-                if (zh) "工具" else "Tool",
+                stringResource(R.string.ui_tool_cc2baf94),
                 style = MaterialTheme.typography.labelMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
@@ -1449,7 +1446,7 @@ private fun ApprovalCard(
                 .background(MaterialTheme.colorScheme.outline, CircleShape))
             Spacer(Modifier.height(12.dp))
             Text(
-                if (zh) "需要确认" else "Confirmation required",
+                stringResource(R.string.ui_confirmation_required_b2fc4b04),
                 style = if (compact) MaterialTheme.typography.labelLarge else MaterialTheme.typography.titleMedium,
                 fontWeight = FontWeight.SemiBold,
                 maxLines = 1,
@@ -1470,34 +1467,34 @@ private fun ApprovalCard(
                     .testTag("chat.approval.details"),
             ) {
                 approval.command?.let {
-                    Text(if (zh) "命令" else "Command", style = MaterialTheme.typography.labelMedium, modifier = Modifier.padding(top = 4.dp))
+                    Text(stringResource(R.string.ui_command_9cfdf51b), style = MaterialTheme.typography.labelMedium, modifier = Modifier.padding(top = 4.dp))
                     Text(it)
                 }
                 approval.cwd?.let {
-                    Text(if (zh) "工作目录" else "Working directory", style = MaterialTheme.typography.labelMedium, modifier = Modifier.padding(top = 8.dp))
+                    Text(stringResource(R.string.ui_working_directory_a7efee9a), style = MaterialTheme.typography.labelMedium, modifier = Modifier.padding(top = 8.dp))
                     Text(it)
                 }
                 approval.authority?.let {
-                    Text(if (zh) "权限通道" else "Authority", style = MaterialTheme.typography.labelMedium, modifier = Modifier.padding(top = 8.dp))
+                    Text(stringResource(R.string.ui_authority_b04ffce4), style = MaterialTheme.typography.labelMedium, modifier = Modifier.padding(top = 8.dp))
                     Text(it)
                 }
                 approval.dangerousMode?.let {
-                    Text(if (zh) "危险模式" else "Dangerous mode", style = MaterialTheme.typography.labelMedium, modifier = Modifier.padding(top = 8.dp))
+                    Text(stringResource(R.string.ui_dangerous_mode_de499d98), style = MaterialTheme.typography.labelMedium, modifier = Modifier.padding(top = 8.dp))
                     Text(it)
                 }
                 if (approval.highRisk) {
-                    Text(if (zh) "高风险：需要重新确认" else "High risk: reconfirmation required", style = MaterialTheme.typography.labelMedium, modifier = Modifier.padding(top = 8.dp))
+                    Text(stringResource(R.string.ui_high_risk_reconfirmation_required_0a28d24e), style = MaterialTheme.typography.labelMedium, modifier = Modifier.padding(top = 8.dp))
                 }
                 Text(approval.summary, Modifier.padding(top = 4.dp))
                 if (approval.externalEffect) {
                     Text(
-                        if (zh) "此请求可能离开设备。" else "This request may leave the device.",
+                        stringResource(R.string.ui_this_request_may_leave_the_device_de053073),
                         style = MaterialTheme.typography.bodySmall,
                         modifier = Modifier.padding(top = 4.dp),
                     )
                 }
                 Text(
-                    if (zh) "仅允许本次调用，不会创建会话或持久权限。" else "Allows this invocation only; it does not create a session or persistent grant.",
+                    stringResource(R.string.ui_allows_this_invocation_only_it_does_a84a39e1),
                     style = MaterialTheme.typography.bodySmall,
                     modifier = Modifier.padding(top = 6.dp),
                 )
@@ -1512,14 +1509,14 @@ private fun ApprovalCard(
                         modifier = Modifier.weight(1f).testTag("chat.approval.reject"),
                         contentPadding = PaddingValues(horizontal = 8.dp),
                     ) {
-                        Text(if (zh) "拒绝" else "Reject", style = MaterialTheme.typography.labelMedium, maxLines = 1)
+                        Text(stringResource(R.string.ui_reject_52e8be4e), style = MaterialTheme.typography.labelMedium, maxLines = 1)
                     }
                     Button(
                         onClick = { onChoice(ToolApprovalChoice.APPROVE) },
                         modifier = Modifier.weight(1f).testTag("chat.approval.approve"),
                         contentPadding = PaddingValues(horizontal = 8.dp),
                     ) {
-                        Text(if (zh) "允许一次" else "Allow once", style = MaterialTheme.typography.labelMedium, maxLines = 1)
+                        Text(stringResource(R.string.ui_allow_once_5c4277ed), style = MaterialTheme.typography.labelMedium, maxLines = 1)
                     }
                 }
             } else {
@@ -1531,11 +1528,11 @@ private fun ApprovalCard(
                     OutlinedButton(
                         onClick = { onChoice(ToolApprovalChoice.REJECT) },
                         modifier = Modifier.testTag("chat.approval.reject"),
-                    ) { Text(if (zh) "拒绝" else "Reject") }
+                    ) { Text(stringResource(R.string.ui_reject_52e8be4e)) }
                     Button(
                         onClick = { onChoice(ToolApprovalChoice.APPROVE) },
                         modifier = Modifier.testTag("chat.approval.approve"),
-                    ) { Text(if (zh) "允许一次" else "Allow once") }
+                    ) { Text(stringResource(R.string.ui_allow_once_5c4277ed)) }
                 }
             }
         }
@@ -1578,7 +1575,7 @@ private fun Composer(state: ChatUiState, actions: ChatActions, input: () -> Stri
                 if (it.text != text) actions.onInput(it.text)
             },
             enabled = state.pendingTool == null && !state.selectedSessionArchived,
-            placeholder = { Text(if (zh) "继续提问…" else "Ask a follow-up…") },
+            placeholder = { Text(stringResource(R.string.ui_ask_a_follow_up_93697d6f)) },
             minLines = 1,
             maxLines = 5,
             modifier = Modifier
@@ -1596,7 +1593,7 @@ private fun Composer(state: ChatUiState, actions: ChatActions, input: () -> Stri
                     actions.onCancel()
                 },
                 modifier = Modifier.testTag("conversation.composer.cancel"),
-            ) { Text(if (zh) "取消" else "Cancel") }
+            ) { Text(stringResource(R.string.ui_cancel_998b9c48)) }
         } else {
             Button(
                 onClick = ::submit,
@@ -1643,7 +1640,7 @@ private fun CitationDialog(citation: ChatCitationUi, onClose: () -> Unit, zh: Bo
                 Text(if (citation.verified) { if (zh) "证据已验证" else "Verified evidence" } else { if (zh) "证据状态不可用" else "Evidence status unavailable" }, style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(top = 12.dp))
             }
         },
-        confirmButton = { Button(onClick = onClose) { Text(if (zh) "关闭" else "Close") } },
+        confirmButton = { Button(onClick = onClose) { Text(stringResource(R.string.ui_close_6cf4a777)) } },
     )
 }
 
@@ -1661,7 +1658,7 @@ private fun CitationImagePreview(citation: ChatCitationUi, zh: Boolean) {
     val bytes = citation.imageBytes ?: return
     if (bytes.isEmpty()) {
         Text(
-            if (zh) "引用图片为空；仍显示元数据和摘录。" else "The citation image is empty; metadata and excerpt remain available.",
+            stringResource(R.string.ui_the_citation_image_is_empty_metadata_5e639676),
             style = MaterialTheme.typography.bodySmall,
             modifier = Modifier.padding(top = 10.dp),
         )
@@ -1669,7 +1666,7 @@ private fun CitationImagePreview(citation: ChatCitationUi, zh: Boolean) {
     }
     if (bytes.size > MAX_CITATION_IMAGE_BYTES) {
         Text(
-            if (zh) "引用图片文件过大，已拒绝解码；仍显示元数据和摘录。" else "The citation image is too large and was not decoded; metadata and excerpt remain available.",
+            stringResource(R.string.ui_the_citation_image_is_too_large_d59c4e23),
             style = MaterialTheme.typography.bodySmall,
             modifier = Modifier.padding(top = 10.dp),
         )
@@ -1692,7 +1689,7 @@ private fun CitationImagePreview(citation: ChatCitationUi, zh: Boolean) {
         width.toLong() * height.toLong() <= MAX_CITATION_IMAGE_SOURCE_AREA
     if (!boundsAccepted) {
         Text(
-            if (zh) "引用图片尺寸无效或过大，已拒绝解码；仍显示元数据和摘录。" else "The citation image dimensions are invalid or too large and were not decoded; metadata and excerpt remain available.",
+            stringResource(R.string.ui_the_citation_image_dimensions_are_invalid_52f6d487),
             style = MaterialTheme.typography.bodySmall,
             modifier = Modifier.padding(top = 10.dp),
         )
@@ -1712,7 +1709,7 @@ private fun CitationImagePreview(citation: ChatCitationUi, zh: Boolean) {
     }
     if (bitmap == null) {
         Text(
-            if (zh) "引用图片无法安全解码；仍显示元数据和摘录。" else "The citation image could not be decoded safely; metadata and excerpt remain available.",
+            stringResource(R.string.ui_the_citation_image_could_not_be_e9fd2779),
             style = MaterialTheme.typography.bodySmall,
             modifier = Modifier.padding(top = 10.dp),
         )
@@ -1754,11 +1751,11 @@ fun RequestInspectorScreen(
     Column(modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp)) {
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
             if (showPageTitle) {
-                Text(if (zh) "请求检查器" else "Request inspector", style = MaterialTheme.typography.headlineSmall, modifier = Modifier.weight(1f))
+                Text(stringResource(R.string.ui_request_inspector_4337f973), style = MaterialTheme.typography.headlineSmall, modifier = Modifier.weight(1f))
             } else {
                 Spacer(Modifier.weight(1f))
             }
-            Button(onClick = onClose) { Text(if (zh) "关闭" else "Close") }
+            Button(onClick = onClose) { Text(stringResource(R.string.ui_close_6cf4a777)) }
         }
         // An explicit DISABLED state is authoritative even when a caller still
         // holds an older in-memory preview.  Keep this guard at the rendering
@@ -1782,8 +1779,7 @@ fun RequestInspectorScreen(
             Text("${effectiveRequest.method} ${effectiveRequest.url}", style = MaterialTheme.typography.labelLarge, modifier = Modifier.padding(top = 12.dp))
             if (effectiveRequest.redacted) {
                 Text(
-                    if (zh) "敏感请求头与密钥已遮盖；以下内容仅来自脱敏请求检查数据。"
-                    else "Sensitive headers and keys are redacted; the content below is supplied as redacted inspector data.",
+                    stringResource(R.string.ui_sensitive_headers_and_keys_are_redacted_09373fcc),
                     style = MaterialTheme.typography.bodySmall,
                     modifier = Modifier.padding(top = 4.dp),
                 )
@@ -1791,7 +1787,7 @@ fun RequestInspectorScreen(
             if (effectiveRequest.headers.isNotBlank()) Text(effectiveRequest.headers, modifier = Modifier.padding(top = 10.dp))
             if (effectiveRequest.body.isNotBlank()) Text(effectiveRequest.body, modifier = Modifier.padding(top = 10.dp))
             if (layers.isNotEmpty()) {
-                Text(if (zh) "提示词层" else "Prompt layers", style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(top = 14.dp))
+                Text(stringResource(R.string.ui_prompt_layers_17c857e1), style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(top = 14.dp))
                 layers.forEach { layer ->
                     Text(layer.label, style = MaterialTheme.typography.labelLarge, modifier = Modifier.padding(top = 8.dp))
                     Text(layer.text, style = MaterialTheme.typography.bodySmall)
@@ -1805,10 +1801,10 @@ fun RequestInspectorScreen(
 private fun RequestInspectorDialog(request: ChatRequestPreviewUi, layers: List<ChatPromptLayerUi>, onClose: () -> Unit, zh: Boolean) {
     AlertDialog(
         onDismissRequest = onClose,
-        title = { Text(if (zh) "请求检查器" else "Request inspector") },
+        title = { Text(stringResource(R.string.ui_request_inspector_4337f973)) },
         text = {
             RequestInspectorScreen(request, layers, onClose, zh)
         },
-        confirmButton = { Button(onClick = onClose) { Text(if (zh) "关闭" else "Close") } },
+        confirmButton = { Button(onClick = onClose) { Text(stringResource(R.string.ui_close_6cf4a777)) } },
     )
 }

@@ -3,6 +3,8 @@
 
 package runtime.mobileagent.feature.knowledge
 
+import androidx.compose.ui.res.stringResource
+
 import android.net.Uri
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -182,6 +184,9 @@ data class KnowledgeEvidenceUi(
 )
 
 data class KnowledgeUiState(
+    val storageUsedBytes: Long = 0,
+    val storageQuotaBytes: Long = 0,
+    val foreignKeyIssueCount: Int = 0,
     val bases: List<KnowledgeBaseUi> = emptyList(),
     val selectedBaseId: String? = null,
     val documents: List<KnowledgeDocumentUi> = emptyList(),
@@ -216,6 +221,8 @@ data class KnowledgeUiState(
 )
 
 data class KnowledgeActions(
+    val onCollectStorage: () -> Unit = {},
+    val onConfigureStorageQuota: (Long) -> Unit = {},
     val onStageImport: (List<Uri>, String) -> Unit = { _, _ -> },
     val onClearPendingImport: () -> Unit = {},
     val onSelectPendingVisionTarget: (String?) -> Unit = {},
@@ -382,7 +389,7 @@ fun KnowledgeScreen(
                         Text(state.bases.firstOrNull { it.id == state.selectedBaseId }?.name.orEmpty(),
                             style = MaterialTheme.typography.titleMedium, modifier = Modifier.weight(1f))
                         TextButton(onClick = { manageBases = !manageBases }) {
-                            Text(if (zh) "管理知识库" else "Manage libraries")
+                            Text(stringResource(R.string.ui_manage_libraries_81eba5d7))
                         }
                     }
                 }
@@ -406,12 +413,12 @@ fun KnowledgeScreen(
     if (newBaseDialog) {
         AlertDialog(
             onDismissRequest = { newBaseDialog = false },
-            title = { Text(if (zh) "新建知识库" else "New knowledge base") },
+            title = { Text(stringResource(R.string.ui_new_knowledge_base_b46c2c13)) },
             text = {
                 OutlinedTextField(
                     value = newBaseName,
                     onValueChange = { newBaseName = it },
-                    label = { Text(if (zh) "名称" else "Name") },
+                    label = { Text(stringResource(R.string.ui_name_dd4dc4c5)) },
                     singleLine = true,
                 )
             },
@@ -424,39 +431,39 @@ fun KnowledgeScreen(
                         actions.onCreateBase(name)
                     },
                     enabled = newBaseName.trim().isNotEmpty(),
-                ) { Text(if (zh) "创建" else "Create") }
+                ) { Text(stringResource(R.string.ui_create_7570cfc4)) }
             },
-            dismissButton = { TextButton(onClick = { newBaseDialog = false }) { Text(if (zh) "取消" else "Cancel") } },
+            dismissButton = { TextButton(onClick = { newBaseDialog = false }) { Text(stringResource(R.string.ui_cancel_998b9c48)) } },
         )
     }
     deleteBaseId?.let { baseId ->
         val baseName = state.bases.firstOrNull { it.id == baseId }?.name.orEmpty()
         AlertDialog(
             onDismissRequest = { deleteBaseId = null },
-            title = { Text(if (zh) "删除知识库？" else "Delete knowledge base?") },
-            text = { Text(if (zh) "将删除“$baseName”及其文档索引；此操作不可撤销。" else "This removes $baseName and its document index. The operation cannot be undone.") },
+            title = { Text(stringResource(R.string.ui_delete_knowledge_base_96db098f)) },
+            text = { Text(stringResource(R.string.ui_this_removes_s_and_its_document_d99c6d71, (baseName))) },
             confirmButton = {
-                Button(onClick = { deleteBaseId = null; actions.onDeleteBase(baseId) }) { Text(if (zh) "删除" else "Delete") }
+                Button(onClick = { deleteBaseId = null; actions.onDeleteBase(baseId) }) { Text(stringResource(R.string.ui_delete_5b875326)) }
             },
-            dismissButton = { TextButton(onClick = { deleteBaseId = null }) { Text(if (zh) "取消" else "Cancel") } },
+            dismissButton = { TextButton(onClick = { deleteBaseId = null }) { Text(stringResource(R.string.ui_cancel_998b9c48)) } },
         )
     }
     deleteDocumentId?.let { documentId ->
         AlertDialog(
             onDismissRequest = { deleteDocumentId = null },
-            title = { Text(if (zh) "删除文档？" else "Delete document?") },
-            text = { Text(if (zh) "将从当前知识库及索引中删除此文档；此操作不可撤销。" else "This removes the document from the selected knowledge base and its index. The operation is irreversible.") },
-            confirmButton = { Button(onClick = { deleteDocumentId = null; actions.onDeleteDocument(documentId) }) { Text(if (zh) "删除" else "Delete") } },
-            dismissButton = { TextButton(onClick = { deleteDocumentId = null }) { Text(if (zh) "取消" else "Cancel") } },
+            title = { Text(stringResource(R.string.ui_delete_document_5c27de9e)) },
+            text = { Text(stringResource(R.string.ui_this_removes_the_document_from_the_9b67d9e1)) },
+            confirmButton = { Button(onClick = { deleteDocumentId = null; actions.onDeleteDocument(documentId) }) { Text(stringResource(R.string.ui_delete_5b875326)) } },
+            dismissButton = { TextButton(onClick = { deleteDocumentId = null }) { Text(stringResource(R.string.ui_cancel_998b9c48)) } },
         )
     }
     if (rebuildRequested) {
         AlertDialog(
             onDismissRequest = { rebuildRequested = false },
-            title = { Text(if (zh) "重建索引？" else "Rebuild index?") },
-            text = { Text(if (zh) "从本地文档重建索引，可能需要一些时间。" else "Rebuild the index from local documents. This may take time.") },
-            confirmButton = { Button(onClick = { rebuildRequested = false; actions.onRebuild() }) { Text(if (zh) "重建" else "Rebuild") } },
-            dismissButton = { TextButton(onClick = { rebuildRequested = false }) { Text(if (zh) "取消" else "Cancel") } },
+            title = { Text(stringResource(R.string.ui_rebuild_index_5ad6867e)) },
+            text = { Text(stringResource(R.string.ui_rebuild_the_index_from_local_documents_5c750e9a)) },
+            confirmButton = { Button(onClick = { rebuildRequested = false; actions.onRebuild() }) { Text(stringResource(R.string.ui_rebuild_fae46c9d)) } },
+            dismissButton = { TextButton(onClick = { rebuildRequested = false }) { Text(stringResource(R.string.ui_cancel_998b9c48)) } },
         )
     }
     if (embeddingDialog) {
@@ -468,7 +475,7 @@ fun KnowledgeScreen(
                 embeddingDialog = false
                 embeddingModelMenu = false
             },
-            title = { Text(if (zh) "配置 API Embedding" else "Configure API Embedding") },
+            title = { Text(stringResource(R.string.ui_configure_api_embedding_6fc9442f)) },
             text = {
                 Column(
                     modifier = Modifier.verticalScroll(rememberScrollState()),
@@ -515,7 +522,7 @@ fun KnowledgeScreen(
                     }
                     if (state.embeddingModels.isEmpty()) {
                         Text(
-                            if (zh) "没有可选择的 Embedding 模型，请先在服务商中配置模型。" else "No Embedding models are available. Configure a model under Providers first.",
+                            stringResource(R.string.ui_no_embedding_models_are_available_configure_5d20e7ef),
                             color = MaterialTheme.colorScheme.error,
                             style = MaterialTheme.typography.bodySmall,
                         )
@@ -523,8 +530,8 @@ fun KnowledgeScreen(
                     OutlinedTextField(
                         value = embeddingDimension,
                         onValueChange = { embeddingDimension = it },
-                        label = { Text(if (zh) "向量维度" else "Vector dimension") },
-                        supportingText = { Text(if (zh) "必须由模型文档或服务商配置提供，不能猜测。" else "Use the dimension documented by the model or provider; do not guess.") },
+                        label = { Text(stringResource(R.string.ui_vector_dimension_0b32824c)) },
+                        supportingText = { Text(stringResource(R.string.ui_use_the_dimension_documented_by_the_6a0fbcdc)) },
                         singleLine = true,
                         keyboardOptions = KeyboardOptions(
                             capitalization = KeyboardCapitalization.None,
@@ -546,13 +553,13 @@ fun KnowledgeScreen(
                         }
                     },
                     enabled = selectedModel != null && embeddingModelId.isNotBlank() && dimension != null && dimension > 0,
-                ) { Text(if (zh) "继续确认" else "Continue to consent") }
+                ) { Text(stringResource(R.string.ui_continue_to_consent_61370b6a)) }
             },
             dismissButton = {
                 TextButton(onClick = {
                     embeddingDialog = false
                     embeddingModelMenu = false
-                }) { Text(if (zh) "取消" else "Cancel") }
+                }) { Text(stringResource(R.string.ui_cancel_998b9c48)) }
             },
         )
     }
@@ -566,18 +573,18 @@ fun KnowledgeScreen(
         val selectedName = selectedBase?.name ?: if (zh) "默认知识库" else "the default knowledge base"
         AlertDialog(
             onDismissRequest = clearStagedImport,
-            title = { Text(if (zh) "创建并开始导入" else "Create and start import") },
+            title = { Text(stringResource(R.string.ui_create_and_start_import_bb498dff)) },
             text = {
                 Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     Text(
-                        if (zh) "本批次选定 ${uris.size} 项资料，导入到「$selectedName」。" else "${uris.size} selected item(s) will be imported into $selectedName.",
+                        stringResource(R.string.ui_s_selected_item_s_will_be_1958c56f, (uris.size), (selectedName)),
                         style = MaterialTheme.typography.bodySmall,
                     )
                     if (state.importSubmitting) {
                         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                             CircularProgressIndicator()
                             Text(
-                                if (zh) "正在准备本次选择…" else "Preparing the selected items…",
+                                stringResource(R.string.ui_preparing_the_selected_items_d19b0aca),
                                 style = MaterialTheme.typography.bodySmall,
                             )
                         }
@@ -593,14 +600,13 @@ fun KnowledgeScreen(
                         style = MaterialTheme.typography.bodySmall,
                     )
                     Text(
-                        if (zh) "此批次固定使用所选视觉目标；配置变化后需重新确认。"
-                        else "This batch uses the selected Vision target; configuration changes require confirmation.",
+                        stringResource(R.string.ui_this_batch_uses_the_selected_vision_50936f49),
                         style = MaterialTheme.typography.bodySmall,
                     )
                     if (state.visionTargetsLoading) {
                         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                             CircularProgressIndicator()
-                            Text(if (zh) "正在刷新可用视觉模型…" else "Refreshing available Vision models…")
+                            Text(stringResource(R.string.ui_refreshing_available_vision_models_c9976a12))
                         }
                     } else if (importTargets.isNotEmpty()) {
                         Box {
@@ -626,7 +632,7 @@ fun KnowledgeScreen(
                                     )
                                 }
                                 DropdownMenuItem(
-                                    text = { Text(if (zh) "不选择视觉目标（遇到图片时暂停）" else "No Vision target (pause if images need processing)") },
+                                    text = { Text(stringResource(R.string.ui_no_vision_target_pause_if_images_7140120e)) },
                                     enabled = !state.importSubmitting,
                                     onClick = {
                                         visionTargetMenu = false
@@ -637,30 +643,28 @@ fun KnowledgeScreen(
                         }
                         if (selectedTargetMissing) {
                             Text(
-                                if (zh) "之前选择的视觉目标已不可用。请选择新的目标，或明确选择不使用视觉目标。"
-                                else "The previously selected Vision target is no longer available. Choose another target or explicitly continue without one.",
+                                stringResource(R.string.ui_the_previously_selected_vision_target_is_bf0caeeb),
                                 color = MaterialTheme.colorScheme.error,
                                 style = MaterialTheme.typography.bodySmall,
                             )
                         }
                     } else {
                         Text(
-                            if (zh) "当前没有可处理图片的视觉模型。纯文本资料可以继续；如果遇到图片，批次会暂停并显示配置入口。"
-                            else "No image-capable Vision model is configured. Text-only material can continue; a batch pauses with a configuration action if it reaches an image.",
+                            stringResource(R.string.ui_no_image_capable_vision_model_is_62cdaf25),
                             style = MaterialTheme.typography.bodySmall,
                         )
                     }
                     Text(
-                        if (zh) "可能外发的内容：只有本批次中确实包含图片、且本机解析无法覆盖的页面或图片会发送到上面的视觉目标。纯文本资料只在本机处理。" else "What may leave the device: only pages or images in this batch that actually contain visual content the local parser cannot cover. Text-only material stays local.",
+                        stringResource(R.string.ui_what_may_leave_the_device_only_57aa8cb4),
                         style = MaterialTheme.typography.bodySmall,
                     )
                     Text(
-                        if (zh) "费用提示：视觉处理由服务商计费，金额取决于实际发送的图片数量与所选模型。本次授权只覆盖本批次已选资料，不会扩展到以后新增的文件。" else "Cost: visual processing is billed by the provider and depends on how many images are actually sent. This authorization covers only the material selected now and never widens to files added later.",
+                        stringResource(R.string.ui_cost_visual_processing_is_billed_by_1b99577e),
                         style = MaterialTheme.typography.bodySmall,
                     )
                     if (pending.visionTargetSelectionInitialized && pending.selectedVisionTargetFingerprint == null) {
                         Text(
-                            if (zh) "当前没有可处理图片的视觉目标。纯文本资料不受影响；一旦真正遇到需要视觉的内容，本批次会整体暂停并提示你配置后继续。" else "No image-capable Vision target is configured. Text-only material is unaffected; if visual content is actually found the whole batch pauses and asks you to configure and continue.",
+                            stringResource(R.string.ui_no_image_capable_vision_target_is_c46cf4cf),
                             style = MaterialTheme.typography.bodySmall,
                         )
                     }
@@ -684,9 +688,9 @@ fun KnowledgeScreen(
                     },
                     enabled = !state.visionTargetsLoading && pending.visionTargetSelectionInitialized &&
                         !selectedTargetMissing && !state.importSubmitting,
-                ) { Text(if (zh) "创建并开始导入" else "Create and start import") }
+                ) { Text(stringResource(R.string.ui_create_and_start_import_bb498dff)) }
             },
-            dismissButton = { TextButton(onClick = clearStagedImport) { Text(if (zh) "取消" else "Cancel") } },
+            dismissButton = { TextButton(onClick = clearStagedImport) { Text(stringResource(R.string.ui_cancel_998b9c48)) } },
         )
     }
     pendingBatchVision?.let { pending ->
@@ -701,13 +705,13 @@ fun KnowledgeScreen(
         val needsUnknownConfirmation = (reviewedReuse?.unknown ?: 0) > 0
         AlertDialog(
             onDismissRequest = actions.onDismissBatchVision,
-            title = { Text(if (zh) "确认本批次视觉处理" else "Confirm batch Vision processing") },
+            title = { Text(stringResource(R.string.ui_confirm_batch_vision_processing_8fec22de)) },
             text = { Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 Text(if (zh) "目标：${selectedTarget?.label ?: if (pending.visionTargetSelectionInitialized) "未选择" else "正在读取配置…" }" else "Target: ${selectedTarget?.label ?: if (pending.visionTargetSelectionInitialized) "none selected" else "loading configuration…"}")
                 if (state.visionTargetsLoading) {
                     Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         CircularProgressIndicator()
-                        Text(if (zh) "正在刷新可用视觉模型…" else "Refreshing available Vision models…")
+                        Text(stringResource(R.string.ui_refreshing_available_vision_models_c9976a12))
                     }
                 } else if (availableTargets.isNotEmpty()) {
                     Box {
@@ -728,7 +732,7 @@ fun KnowledgeScreen(
                                 )
                             }
                             DropdownMenuItem(
-                                text = { Text(if (zh) "不选择视觉目标（继续后遇到图片会再次暂停）" else "No Vision target (pause again if images need processing)") },
+                                text = { Text(stringResource(R.string.ui_no_vision_target_pause_again_if_b635aed7)) },
                                 onClick = {
                                     batchVisionTargetMenu = false
                                     actions.onSelectBatchVisionTarget(null)
@@ -738,26 +742,26 @@ fun KnowledgeScreen(
                     }
                     if (selectedTargetMissing) {
                         Text(
-                            if (zh) "之前选择的视觉目标已不可用，请重新选择。" else "The previously selected Vision target is no longer available; choose another target.",
+                            stringResource(R.string.ui_the_previously_selected_vision_target_is_d5cebe48),
                             color = MaterialTheme.colorScheme.error,
                             style = MaterialTheme.typography.bodySmall,
                         )
                     }
                 } else {
-                    Text(if (zh) "当前没有可处理图片的视觉模型。请先配置后返回。" else "No image-capable Vision model is configured. Configure one and return.")
+                    Text(stringResource(R.string.ui_no_image_capable_vision_model_is_8de44dfe))
                 }
-                Text(if (zh) "仅将本批次需要视觉处理的页面或图片发送到此目标。服务商可能收费；后续新增资料不在授权范围内。" else "Send only this batch's required visual pages or images to this destination. Provider charges may apply. Files added later are excluded.")
+                Text(stringResource(R.string.ui_send_only_this_batch_s_required_048311f0))
                 reviewedReuse?.let { ReuseSummaryText(it, zh) }
                 if (pending.selectedVisionTargetFingerprint != null && reviewedReuse == null) {
-                    Text(if (zh) "正在读取本地处理范围，完成后才能确认。" else "Loading the local processing scope before confirmation.")
+                    Text(stringResource(R.string.ui_loading_the_local_processing_scope_before_67a9f94f))
                 }
                 if (needsUnknownConfirmation) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Checkbox(checked = acknowledgeDuplicateCharge, onCheckedChange = { acknowledgeDuplicateCharge = it })
-                        Text(if (zh) "我确认重试 UNKNOWN；旧请求可能已收费，新请求可能重复收费。" else "I approve retrying UNKNOWN: previous requests may have charged, and new requests may charge again.")
+                        Text(stringResource(R.string.ui_i_approve_retrying_unknown_previous_requests_4beb1ab2))
                     }
                 }
-                if (pending.visionTargetSelectionInitialized && pending.selectedVisionTargetFingerprint == null) Text(if (zh) "请先选择可处理图片的模型，然后返回继续。" else "Choose an image-capable model before continuing.")
+                if (pending.visionTargetSelectionInitialized && pending.selectedVisionTargetFingerprint == null) Text(stringResource(R.string.ui_choose_an_image_capable_model_before_c613cda6))
             } },
             confirmButton = { Button(onClick = {
                 if (pending.selectedVisionTargetFingerprint != null && !selectedTargetMissing) {
@@ -769,7 +773,7 @@ fun KnowledgeScreen(
                     (reviewedReuse != null && (!needsUnknownConfirmation || acknowledgeDuplicateCharge)))) {
                 Text(if (pending.selectedVisionTargetFingerprint == null) (if (zh) "配置视觉模型" else "Configure Vision model") else (if (zh) "确认并继续" else "Confirm and continue"))
             } },
-            dismissButton = { TextButton(onClick = actions.onDismissBatchVision) { Text(if (zh) "取消" else "Cancel") } },
+            dismissButton = { TextButton(onClick = actions.onDismissBatchVision) { Text(stringResource(R.string.ui_cancel_998b9c48)) } },
         )
     }
     state.evidence?.let { EvidenceDialog(it, actions.onCloseEvidence) }
@@ -790,29 +794,30 @@ private fun KnowledgeBasePane(
     showPageTitle: Boolean,
 ) {
     Column(modifier) {
+        StorageCard(state, actions, zh)
         if (showPageTitle) {
-            Text(if (zh) "知识" else "Knowledge", style = MaterialTheme.typography.headlineSmall)
+            Text(stringResource(R.string.ui_knowledge_b09e4bdc), style = MaterialTheme.typography.headlineSmall)
         }
         Row(Modifier.fillMaxWidth().padding(top = 8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            Button(onClick = onCreateBase) { Text(if (zh) "新建" else "New") }
+            Button(onClick = onCreateBase) { Text(stringResource(R.string.ui_new_5a5d1d13)) }
         }
         Row(Modifier.fillMaxWidth().padding(top = 8.dp), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
             val buttonModifier = Modifier.weight(1f).heightIn(min = 48.dp)
             val buttonPadding = PaddingValues(horizontal = 4.dp, vertical = 8.dp)
             OutlinedButton(onClick = onImport, modifier = buttonModifier, contentPadding = buttonPadding) {
-                Text(if (zh) "添加文件" else "Add files", maxLines = 1, softWrap = false, overflow = TextOverflow.Clip)
+                Text(stringResource(R.string.ui_add_files_bcabb786), maxLines = 1, softWrap = false, overflow = TextOverflow.Clip)
             }
             OutlinedButton(onClick = onImportFolder, modifier = buttonModifier, contentPadding = buttonPadding) {
-                Text(if (zh) "导入文件夹" else "Import folder", maxLines = 1, softWrap = false, overflow = TextOverflow.Clip)
+                Text(stringResource(R.string.ui_import_folder_d7d0aeb7), maxLines = 1, softWrap = false, overflow = TextOverflow.Clip)
             }
             OutlinedButton(onClick = onImportZip, modifier = buttonModifier, contentPadding = buttonPadding) {
-                Text(if (zh) "导入 ZIP" else "Import ZIP", maxLines = 1, softWrap = false, overflow = TextOverflow.Clip)
+                Text(stringResource(R.string.ui_import_zip_5773854e), maxLines = 1, softWrap = false, overflow = TextOverflow.Clip)
             }
         }
-        Text(if (zh) "导入文件保存在应用内，文本优先本机解析。" else "Imported files stay in the app; text is parsed locally first.", style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(top = 6.dp))
+        Text(stringResource(R.string.ui_imported_files_stay_in_the_app_5b09be2a), style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(top = 6.dp))
         if (state.embeddingSpaceLabel.isNotBlank()) {
             Text(
-                if (zh) "当前 Embedding 空间：${state.embeddingSpaceLabel}" else "Current Embedding space: ${state.embeddingSpaceLabel}",
+                stringResource(R.string.ui_current_embedding_space_s_c1bea4c9, (state.embeddingSpaceLabel)),
                 style = MaterialTheme.typography.bodySmall,
                 modifier = Modifier.padding(top = 6.dp),
             )
@@ -824,7 +829,7 @@ private fun KnowledgeBasePane(
                 colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer),
             ) { Text(state.error, color = MaterialTheme.colorScheme.onErrorContainer, modifier = Modifier.padding(14.dp)) }
         }
-        else if (state.bases.isEmpty()) Text(if (zh) "暂无知识库。" else "No knowledge bases available.", modifier = Modifier.padding(top = 16.dp))
+        else if (state.bases.isEmpty()) Text(stringResource(R.string.ui_no_knowledge_bases_available_af940d79), modifier = Modifier.padding(top = 16.dp))
         else Column(verticalArrangement = Arrangement.spacedBy(12.dp), modifier = Modifier.padding(top = 12.dp)) {
             state.bases.forEach { base ->
                 Card(
@@ -846,7 +851,7 @@ private fun KnowledgeBasePane(
                         }
                         Row(Modifier.padding(top = 10.dp), verticalAlignment = Alignment.Bottom) {
                             Text(base.documentCount.toString(), fontSize = 19.sp, fontWeight = FontWeight.Bold)
-                            Text(if (zh) " 文档" else " documents", style = MaterialTheme.typography.labelSmall,
+                            Text(stringResource(R.string.ui_documents_2e4d6744), style = MaterialTheme.typography.labelSmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                                 modifier = Modifier.padding(bottom = 2.dp))
                         }
@@ -857,14 +862,46 @@ private fun KnowledgeBasePane(
         val selectedBase = state.selectedBaseId
         if (selectedBase != null) {
             OutlinedButton(onClick = { onDeleteBase(selectedBase) }, modifier = Modifier.padding(top = 8.dp)) {
-                Text(if (zh) "删除当前知识库" else "Delete selected base")
+                Text(stringResource(R.string.ui_delete_selected_base_b065bddc))
             }
             OutlinedButton(onClick = onConfigureEmbedding, modifier = Modifier.fillMaxWidth().padding(top = 8.dp)) {
-                Text(if (zh) "配置 API Embedding" else "Configure API Embedding")
+                Text(stringResource(R.string.ui_configure_api_embedding_6fc9442f))
             }
         }
     }
 }
+
+@Composable
+private fun StorageCard(state: KnowledgeUiState, actions: KnowledgeActions, zh: Boolean) {
+    if (state.storageQuotaBytes <= 0) return
+    var editing by rememberSaveable { mutableStateOf(false) }
+    var quotaGiB by rememberSaveable { mutableStateOf("2") }
+    val overQuota = state.storageUsedBytes > state.storageQuotaBytes
+    Card(Modifier.fillMaxWidth().padding(bottom = 8.dp)) {
+        Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            Text(stringResource(R.string.ui_local_storage_s_s_e1990a9a, (storageSize(state.storageUsedBytes)), (storageSize(state.storageQuotaBytes))))
+            Text(stringResource(R.string.ui_knowledge_content_database_and_search_indexes_63fb4efb), style = MaterialTheme.typography.bodySmall)
+            if (overQuota) Text(stringResource(R.string.ui_over_the_limit_reading_deletion_and_f364d9a1), color = MaterialTheme.colorScheme.error)
+            if (state.foreignKeyIssueCount > 0) Text(stringResource(R.string.ui_s_legacy_database_relation_issues_detected_3fd8bd78, (state.foreignKeyIssueCount)), style = MaterialTheme.typography.bodySmall)
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                TextButton(onClick = actions.onCollectStorage, modifier = Modifier.weight(1f), enabled = !state.loading) { Text(stringResource(R.string.ui_reclaim_deleted_content_8ca77c69)) }
+                TextButton(onClick = { quotaGiB = ((state.storageQuotaBytes + (1L shl 30) - 1) / (1L shl 30)).toString(); editing = true }, modifier = Modifier.weight(1f), enabled = !state.loading) { Text(stringResource(R.string.ui_storage_budget_3a90a935)) }
+            }
+        }
+    }
+    if (editing) {
+        val amount = quotaGiB.toLongOrNull()?.takeIf { it in 1..64 }
+        AlertDialog(onDismissRequest = { editing = false }, title = { Text(stringResource(R.string.ui_local_storage_budget_dc31eacc)) },
+            text = { Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                OutlinedTextField(value = quotaGiB, onValueChange = { quotaGiB = it }, label = { Text("GiB (1–64)") }, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number), isError = amount == null)
+                Text(stringResource(R.string.ui_changing_the_limit_does_not_delete_f595fe9f))
+            } },
+            confirmButton = { TextButton(onClick = { amount?.let { actions.onConfigureStorageQuota(it * (1L shl 30)); editing = false } }, enabled = amount != null) { Text(stringResource(R.string.ui_save_ec8e6d58)) } },
+            dismissButton = { TextButton(onClick = { editing = false }) { Text(stringResource(R.string.ui_cancel_998b9c48)) } })
+    }
+}
+
+private fun storageSize(bytes: Long): String = java.lang.String.format(java.util.Locale.ROOT, "%.1f MiB", bytes / (1024.0 * 1024.0))
 
 @Composable
 private fun KnowledgeContentPane(state: KnowledgeUiState, actions: KnowledgeActions, zh: Boolean, onDelete: (String) -> Unit, onRebuild: () -> Unit, modifier: Modifier) {
@@ -890,13 +927,12 @@ private fun KnowledgeContentPane(state: KnowledgeUiState, actions: KnowledgeActi
             ) {
                 Column(Modifier.padding(15.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     Text(
-                        if (zh) "${state.waiting.size} 项资料等待视觉处理，完成前不会标记就绪。"
-                        else "${state.waiting.size} items await Vision processing and will not be marked ready yet.",
+                        stringResource(R.string.ui_s_items_await_vision_processing_and_e80d8658, (state.waiting.size)),
                         style = MaterialTheme.typography.bodyMedium,
                         color = warningInk,
                     )
                     OutlinedButton(onClick = actions.onConfigureVision) {
-                        Text(if (zh) "配置视觉模型" else "Configure Vision model")
+                        Text(stringResource(R.string.ui_configure_vision_model_53a303ac))
                     }
                 }
             }
@@ -911,23 +947,23 @@ private fun KnowledgeContentPane(state: KnowledgeUiState, actions: KnowledgeActi
         val selectedQueryAttempts = state.apiQueryAttempts
         if (selectedQueryAttempts.isNotEmpty()) {
             Text(
-                if (zh) "未知查询" else "Queries with unknown results",
+                stringResource(R.string.ui_queries_with_unknown_results_3c16b575),
                 style = MaterialTheme.typography.titleMedium,
                 modifier = Modifier.padding(top = 8.dp),
             )
             selectedQueryAttempts.forEach { attempt -> QueryRetryCard(attempt, actions, zh) }
         }
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-            Text(if (zh) "文档" else "Documents", style = MaterialTheme.typography.titleLarge, modifier = Modifier.weight(1f))
+            Text(stringResource(R.string.ui_documents_5dac12b8), style = MaterialTheme.typography.titleLarge, modifier = Modifier.weight(1f))
             OutlinedButton(onClick = onRebuild, enabled = state.rebuildEnabled && !knowledgeImportActive(state)) {
-                Text(if (zh) "重建索引" else "Rebuild index")
+                Text(stringResource(R.string.ui_rebuild_index_5df89300))
             }
         }
         if (state.batches.isEmpty() && (knowledgeImportActive(state) || state.jobs.isNotEmpty() || state.loading)) {
             Text(knowledgeImportSummary(state, zh), style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(top = 8.dp))
         }
         if (state.documents.isEmpty() && !knowledgeImportActive(state) && !state.loading && state.jobs.isEmpty()) {
-            Text(if (zh) "此知识库没有文档。" else "No documents in this knowledge base.", style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(top = 12.dp))
+            Text(stringResource(R.string.ui_no_documents_in_this_knowledge_base_cd58f8fa), style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(top = 12.dp))
         }
         var showDocuments by rememberSaveable(state.selectedBaseId) { mutableStateOf(false) }
         if (state.batches.isNotEmpty()) {
@@ -941,11 +977,11 @@ private fun KnowledgeContentPane(state: KnowledgeUiState, actions: KnowledgeActi
         val batchJobIds = state.batches.flatMap { it.items }.mapNotNull { it.jobId }.toSet()
         val legacyJobs = state.jobs.filter { it.id !in batchJobIds }
         if (legacyJobs.isNotEmpty()) {
-            Text(if (zh) "导入任务" else "Import jobs", style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(top = 18.dp))
+            Text(stringResource(R.string.ui_import_jobs_bddacf29), style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(top = 18.dp))
             legacyJobs.forEach { job -> JobCard(job, actions, zh) }
         }
         Spacer(Modifier.height(16.dp))
-        Text(if (zh) "未明确配置视觉模型的图片会保持等待，不会标记为已完成。" else "Images without an explicitly configured Vision model remain waiting and are not marked ready.", style = MaterialTheme.typography.bodySmall)
+        Text(stringResource(R.string.ui_images_without_an_explicitly_configured_visio_49eb4d07), style = MaterialTheme.typography.bodySmall)
     }
 }
 
@@ -957,7 +993,7 @@ private fun QueryRetryCard(attempt: KnowledgeQueryAttemptUi, actions: KnowledgeA
     ) {
         Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
             Text(
-                if (zh) "查询结果未知" else "Query result is unknown",
+                stringResource(R.string.ui_query_result_is_unknown_3f635e8b),
                 style = MaterialTheme.typography.titleSmall,
                 fontWeight = FontWeight.SemiBold,
             )
@@ -973,21 +1009,19 @@ private fun QueryRetryCard(attempt: KnowledgeQueryAttemptUi, actions: KnowledgeA
             )
             if (attempt.retryAuthorized) {
                 Text(
-                    if (zh) "已授权：等待你重新提交此查询。授权不会自动发起请求。"
-                    else "Authorized: waiting for you to resubmit this query. Authorization does not send a request automatically.",
+                    stringResource(R.string.ui_authorized_waiting_for_you_to_resubmit_98c15625),
                     style = MaterialTheme.typography.bodySmall,
                 )
             } else {
                 Text(
-                    if (zh) "再次提交可能重复收费。授权仅限同一知识库、同一模型与同一查询一次；点击后不会自动请求。"
-                    else "Resubmitting may incur a duplicate charge. Authorization is limited to this knowledge base, model, and query once; it will not send a request automatically.",
+                    stringResource(R.string.ui_resubmitting_may_incur_a_duplicate_charge_b91a048e),
                     style = MaterialTheme.typography.bodySmall,
                 )
                 Button(
                     onClick = { actions.onAuthorizeQueryRetry(attempt.spaceId, attempt.queryHash) },
                     enabled = attempt.spaceId.isNotBlank() && attempt.queryHash.isNotBlank(),
                 ) {
-                    Text(if (zh) "允许再次提交此查询" else "Allow resubmitting this query")
+                    Text(stringResource(R.string.ui_allow_resubmitting_this_query_b31e35ec))
                 }
             }
         }
@@ -1015,16 +1049,15 @@ private fun BatchProgressCard(batch: KnowledgeBatchUi, jobs: List<KnowledgeImpor
     var editPolicy by rememberSaveable(batch.id) { mutableStateOf(false) }
     if (confirmResume) AlertDialog(
         onDismissRequest = { confirmResume = false },
-        title = { Text(if (zh) "确认恢复范围" else "Review resume scope") },
+        title = { Text(stringResource(R.string.ui_review_resume_scope_0e07c6e4)) },
         text = { Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
             ReuseSummaryText(batch.reuse, zh)
-            Text(if (zh) "成功单元保留；UNKNOWN 不会自动重试。暂停只停止新增请求，在途请求仍可能完成并收费。取消后保留成果；重新启动仍受相同检查点约束。"
-                else "Successful units are retained; UNKNOWN is never retried automatically. Pause stops new dispatch; in-flight requests may finish and incur charges. Cancel retains results; restarting uses the same checkpoints.")
+            Text(stringResource(R.string.ui_successful_units_are_retained_unknown_is_5c913918))
         } },
         confirmButton = { Button(onClick = { confirmResume = false; actions.onResumeBatch(batch.id) }) {
-            Text(if (zh) "确认继续" else "Confirm resume")
+            Text(stringResource(R.string.ui_confirm_resume_2bdd89bf))
         } },
-        dismissButton = { TextButton(onClick = { confirmResume = false }) { Text(if (zh) "返回" else "Back") } },
+        dismissButton = { TextButton(onClick = { confirmResume = false }) { Text(stringResource(R.string.ui_back_5db5cac5)) } },
     )
     if (editPolicy) PipelinePolicyDialog(batch, zh, onDismiss = { editPolicy = false }) { policy ->
         editPolicy = false
@@ -1075,7 +1108,7 @@ private fun BatchProgressCard(batch: KnowledgeBatchUi, jobs: List<KnowledgeImpor
                 .firstOrNull { it.contains("UNKNOWN_OUTCOME") }?.take(300)
             if (unknownReason != null) {
                 Text(
-                    if (zh) "未知原因：$unknownReason" else "Unknown reason: $unknownReason",
+                    stringResource(R.string.ui_unknown_reason_s_2b4c1b9d, (unknownReason)),
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.error,
                     modifier = Modifier.padding(top = 4.dp),
@@ -1088,23 +1121,23 @@ private fun BatchProgressCard(batch: KnowledgeBatchUi, jobs: List<KnowledgeImpor
             Column(Modifier.padding(top = 8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 when {
                     blocked && batch.blockedReason == "MISSING_VISUAL_SOURCE" -> {
-                        Text(if (zh) "请单独导入图片，或在详情中明确选择仅文本（保留视觉缺口）。" else "Import the images separately, or explicitly accept text only with visual gaps in details.")
-                        TextButton(onClick = { expanded = true }) { Text(if (zh) "查看待处理资料" else "Review affected items") }
+                        Text(stringResource(R.string.ui_import_the_images_separately_or_explicitly_74c7ec47))
+                        TextButton(onClick = { expanded = true }) { Text(stringResource(R.string.ui_review_affected_items_a6b05303)) }
                     }
                     blocked -> {
                         Button(onClick = { actions.onAuthorizeBatchVision(batch.id, "", false) }, enabled = !busy) {
-                            Text(if (zh) "配置并继续" else "Configure and continue")
+                            Text(stringResource(R.string.ui_configure_and_continue_02fb6cd4))
                         }
                         OutlinedButton(onClick = { actions.onConfigureVision() }) {
-                            Text(if (zh) "配置视觉模型" else "Configure Vision model")
+                            Text(stringResource(R.string.ui_configure_vision_model_53a303ac))
                         }
                     }
                     paused || batch.resumeStagingAvailable -> Button(onClick = { confirmResume = true }, enabled = !busy) {
-                        Text(if (zh) "继续导入" else "Resume import")
+                        Text(stringResource(R.string.ui_resume_import_39aa59bf))
                     }
                     batch.state.uppercase() !in setOf("COMPLETED", "CANCELLED", "FAILED") ->
                         OutlinedButton(onClick = { actions.onPauseBatch(batch.id) }) {
-                            Text(if (zh) "暂停" else "Pause")
+                            Text(stringResource(R.string.ui_pause_c65f066c))
                         }
                 }
                 TextButton(onClick = { expanded = !expanded }) {
@@ -1118,15 +1151,15 @@ private fun BatchProgressCard(batch: KnowledgeBatchUi, jobs: List<KnowledgeImpor
             ReuseSummaryText(batch.reuse, zh)
             if (batch.reuse.localRebuild > 0 && batch.reuse.newRequests == 0 && batch.reuse.unknown == 0 && batch.reuse.unplannedFiles == 0) {
                 OutlinedButton(onClick = { actions.onRebuildBatchLocalChunks(batch.id) }, enabled = !busy) {
-                    Text(if (zh) "仅本地重建检索片段" else "Rebuild retrieval chunks locally")
+                    Text(stringResource(R.string.ui_rebuild_retrieval_chunks_locally_6fd08124))
                 }
             }
-            Text(if (zh) "最大并发 ${batch.policy.maxConcurrency} · 连续失败停止阈值 ${batch.policy.consecutiveFailureLimit}" else "Concurrency ${batch.policy.maxConcurrency} · Stop after ${batch.policy.consecutiveFailureLimit} consecutive failures")
+            Text(stringResource(R.string.ui_concurrency_s_stop_after_s_consecutive_3727c191, (batch.policy.maxConcurrency), (batch.policy.consecutiveFailureLimit)))
             TextButton(onClick = { editPolicy = true }, enabled = !busy) {
-                Text(if (zh) "处理限制" else "Processing limits")
+                Text(stringResource(R.string.ui_processing_limits_2d068b3e))
             }
             TextButton(onClick = { actions.onAuthorizeBatchVision(batch.id, "", false) }, enabled = !busy) {
-                Text(if (zh) "查看更换视觉配置的影响" else "Review Vision configuration change")
+                Text(stringResource(R.string.ui_review_vision_configuration_change_b1fbb5dc))
             }
             Text(
                 if (zh) {
@@ -1141,7 +1174,7 @@ private fun BatchProgressCard(batch: KnowledgeBatchUi, jobs: List<KnowledgeImpor
             )
             batch.visionTarget?.let { fingerprint ->
                 Text(
-                    if (zh) "本批次视觉目标：${batch.visionTargetLabel ?: fingerprint}" else "Batch Vision target: ${batch.visionTargetLabel ?: fingerprint}",
+                    stringResource(R.string.ui_batch_vision_target_s_19e3378a, (batch.visionTargetLabel ?: fingerprint)),
                     style = MaterialTheme.typography.labelSmall,
                     modifier = Modifier.padding(top = 4.dp),
                 )
@@ -1161,7 +1194,7 @@ private fun BatchProgressCard(batch: KnowledgeBatchUi, jobs: List<KnowledgeImpor
                             ), actions, zh)
                             if (batch.blockedReason == "MISSING_VISUAL_SOURCE" && job.stage == "WAITING_FOR_VISION_MODEL") {
                                 OutlinedButton(onClick = { actions.onTextOnly(job.id) }, enabled = !busy) {
-                                    Text(if (zh) "仅文本继续（保留视觉缺口）" else "Continue with text only (visual gaps remain)")
+                                    Text(stringResource(R.string.ui_continue_with_text_only_visual_gaps_f25cac9f))
                                 }
                             }
                         }
@@ -1175,21 +1208,18 @@ private fun BatchProgressCard(batch: KnowledgeBatchUi, jobs: List<KnowledgeImpor
 
 @Composable
 private fun PipelineProgressText(progress: PipelineProgress, zh: Boolean) {
-    Text(if (zh) "页面 ${progress.pages} · 处理单元 ${progress.units}" else "Pages ${progress.pages} · Processing units ${progress.units}", style = MaterialTheme.typography.bodySmall)
-    Text(if (zh) "待处理 ${progress.pending} · 在途 ${progress.inFlight} · 成功 ${progress.succeeded} · 失败 ${progress.failed} · UNKNOWN ${progress.unknown} · 已索引 ${progress.published}"
-        else "Pending ${progress.pending} · In flight ${progress.inFlight} · Succeeded ${progress.succeeded} · Failed ${progress.failed} · UNKNOWN ${progress.unknown} · Indexed ${progress.published}", style = MaterialTheme.typography.bodySmall)
+    Text(stringResource(R.string.ui_pages_s_processing_units_s_89ee0550, (progress.pages), (progress.units)), style = MaterialTheme.typography.bodySmall)
+    Text(stringResource(R.string.ui_pending_s_in_flight_s_succeeded_5b14923c, (progress.pending), (progress.inFlight), (progress.succeeded), (progress.failed), (progress.unknown), (progress.published)), style = MaterialTheme.typography.bodySmall)
     val usage = progress.usage
     Text(if (zh) "Provider token：输入 ${usage.inputTokens ?: "未知"} · 输出 ${usage.outputTokens ?: "未知"} · reasoning ${usage.reasoningTokens ?: "未知"}（包含在输出中）"
         else "Provider tokens: input ${usage.inputTokens ?: "unknown"} · output ${usage.outputTokens ?: "unknown"} · reasoning ${usage.reasoningTokens ?: "unknown"} (included in output)", style = MaterialTheme.typography.bodySmall)
-    Text(if (zh) "usage 未知请求 ${usage.unknownUsageAttempts} · 安全预留 ${usage.reservedTokens}（不是实际收费）"
-        else "Unknown usage attempts ${usage.unknownUsageAttempts} · Safety reservation ${usage.reservedTokens} (not actual charges)", style = MaterialTheme.typography.bodySmall)
+    Text(stringResource(R.string.ui_unknown_usage_attempts_s_safety_reservation_cbab5631, (usage.unknownUsageAttempts), (usage.reservedTokens)), style = MaterialTheme.typography.bodySmall)
 }
 
 @Composable
 private fun ReuseSummaryText(summary: PipelineReuseSummary, zh: Boolean) {
-    Text(if (zh) "可直接复用 ${summary.directReuse} · 仅本地重建 ${summary.localRebuild} · 新增 Provider 请求 ${summary.newRequests} · UNKNOWN 待确认 ${summary.unknown}"
-        else "Reuse ${summary.directReuse} · Local rebuild ${summary.localRebuild} · New Provider requests ${summary.newRequests} · UNKNOWN needs confirmation ${summary.unknown}", style = MaterialTheme.typography.bodySmall)
-    if (summary.unplannedFiles > 0) Text(if (zh) "尚未规划/旧文件 ${summary.unplannedFiles}：计划完成后才能确定请求数。" else "Unplanned/legacy files ${summary.unplannedFiles}: request count is not yet known.", style = MaterialTheme.typography.bodySmall)
+    Text(stringResource(R.string.ui_reuse_s_local_rebuild_s_new_361f961a, (summary.directReuse), (summary.localRebuild), (summary.newRequests), (summary.unknown)), style = MaterialTheme.typography.bodySmall)
+    if (summary.unplannedFiles > 0) Text(stringResource(R.string.ui_unplanned_legacy_files_s_request_count_25814151, (summary.unplannedFiles)), style = MaterialTheme.typography.bodySmall)
 }
 
 @Composable
@@ -1204,24 +1234,24 @@ private fun PipelinePolicyDialog(batch: KnowledgeBatchUi, zh: Boolean, onDismiss
         (reservation.isBlank() || reservation.toLongOrNull()?.let { it > 0 } == true) &&
         (ceiling.isBlank() || reservation.isNotBlank())
     AlertDialog(onDismissRequest = onDismiss,
-        title = { Text(if (zh) "处理限制" else "Processing limits") },
+        title = { Text(stringResource(R.string.ui_processing_limits_2d068b3e)) },
         text = { Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            Text(if (zh) "达到限制只停止新请求；UNKNOWN 保留安全预算。" else "Limits stop new dispatch only; UNKNOWN retains its safety reservation.")
-            OutlinedTextField(concurrency, { concurrency = it }, label = { Text(if (zh) "最大并发（1–6）" else "Maximum concurrency (1–6)") }, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number))
-            OutlinedTextField(failures, { failures = it }, label = { Text(if (zh) "连续失败阈值" else "Consecutive failure limit") }, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number))
-            OutlinedTextField(ceiling, { ceiling = it }, label = { Text(if (zh) "批次 token 派发上限（可留空）" else "Token dispatch ceiling (optional)") }, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number))
-            OutlinedTextField(reservation, { reservation = it }, label = { Text(if (zh) "每请求保守预留" else "Conservative reservation per request") }, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number))
-            Text(if (zh) "预留用于限制后续派发，不是 Provider 实际 token 或货币费用。" else "Reservations limit subsequent dispatch; they are not provider usage or currency charges.")
+            Text(stringResource(R.string.ui_limits_stop_new_dispatch_only_unknown_a341ab59))
+            OutlinedTextField(concurrency, { concurrency = it }, label = { Text(stringResource(R.string.ui_maximum_concurrency_4fb6c774)) }, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number))
+            OutlinedTextField(failures, { failures = it }, label = { Text(stringResource(R.string.ui_consecutive_failure_limit_62eb3e74)) }, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number))
+            OutlinedTextField(ceiling, { ceiling = it }, label = { Text(stringResource(R.string.ui_token_dispatch_ceiling_optional_6672fd82)) }, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number))
+            OutlinedTextField(reservation, { reservation = it }, label = { Text(stringResource(R.string.ui_conservative_reservation_per_request_35cae466)) }, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number))
+            Text(stringResource(R.string.ui_reservations_limit_subsequent_dispatch_they_a_1276c0e7))
         } },
-        confirmButton = { Button(enabled = valid, onClick = { onSave(PipelinePolicy(maxConcurrency = concurrency.toInt(), consecutiveFailureLimit = failures.toInt(), tokenDispatchCeiling = ceiling.toLongOrNull(), reservationTokensPerRequest = reservation.toLongOrNull())) }) { Text(if (zh) "保存" else "Save") } },
-        dismissButton = { TextButton(onClick = onDismiss) { Text(if (zh) "取消" else "Cancel") } })
+        confirmButton = { Button(enabled = valid, onClick = { onSave(PipelinePolicy(maxConcurrency = concurrency.toInt(), consecutiveFailureLimit = failures.toInt(), tokenDispatchCeiling = ceiling.toLongOrNull(), reservationTokensPerRequest = reservation.toLongOrNull())) }) { Text(stringResource(R.string.ui_save_ec8e6d58)) } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text(stringResource(R.string.ui_cancel_998b9c48)) } })
 }
 
 @Composable
 private fun ProgressRow(batch: KnowledgeBatchUi, percent: Int?, zh: Boolean) {
     if (batch.totalItems <= 0) {
         Text(
-            if (zh) "本批次文件总量尚未确定。" else "The batch file count is not known yet.",
+            stringResource(R.string.ui_the_batch_file_count_is_not_541e324f),
             style = MaterialTheme.typography.bodySmall,
             modifier = Modifier.padding(top = 6.dp),
         )
@@ -1233,8 +1263,7 @@ private fun ProgressRow(batch: KnowledgeBatchUi, percent: Int?, zh: Boolean) {
             modifier = Modifier.fillMaxWidth(),
         )
         Text(
-            if (zh) "已完成 ${batch.published} / ${batch.totalItems}（${percent ?: 0}%）"
-            else "Finished ${batch.published} / ${batch.totalItems} (${percent ?: 0}%)",
+            stringResource(R.string.ui_finished_s_s_s_c204ae60, (batch.published), (batch.totalItems), (percent ?: 0)),
             style = MaterialTheme.typography.bodySmall,
             modifier = Modifier.padding(top = 4.dp),
         )
@@ -1252,14 +1281,14 @@ private fun BatchItemRow(item: KnowledgeBatchItemUi, zh: Boolean) {
 private fun WaitingCard(waiting: KnowledgeWaitingUi, actions: KnowledgeActions, zh: Boolean) {
     Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.tertiaryContainer), modifier = Modifier.fillMaxWidth().padding(bottom = 10.dp)) {
         Column(Modifier.padding(12.dp)) {
-            Text(if (zh) "等待视觉模型" else "Waiting for Vision model", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+            Text(stringResource(R.string.ui_waiting_for_vision_model_0b90df35), style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
             Text(waiting.displayName, modifier = Modifier.padding(top = 4.dp))
             Text(waiting.reason, style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(top = 4.dp))
-            if (waiting.authorizationTarget.isNotBlank()) Text(if (zh) "授权目标：${waiting.authorizationTarget}" else "Authorization target: ${waiting.authorizationTarget}", style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(top = 4.dp))
+            if (waiting.authorizationTarget.isNotBlank()) Text(stringResource(R.string.ui_authorization_target_s_be9a7770, (waiting.authorizationTarget)), style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(top = 4.dp))
             Column(Modifier.padding(top = 8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                if (waiting.canConfigureVision) OutlinedButton(onClick = actions.onConfigureVision) { Text(if (zh) "配置视觉" else "Configure Vision") }
-                Button(onClick = actions.onKeepWaiting) { Text(if (zh) "继续等待" else "Keep waiting") }
-                OutlinedButton(onClick = { actions.onTextOnly(waiting.jobId) }) { Text(if (zh) "仅使用文本" else "Use text only") }
+                if (waiting.canConfigureVision) OutlinedButton(onClick = actions.onConfigureVision) { Text(stringResource(R.string.ui_configure_vision_2d81db1a)) }
+                Button(onClick = actions.onKeepWaiting) { Text(stringResource(R.string.ui_keep_waiting_6d98f03d)) }
+                OutlinedButton(onClick = { actions.onTextOnly(waiting.jobId) }) { Text(stringResource(R.string.ui_use_text_only_61383e87)) }
             }
         }
     }
@@ -1276,8 +1305,8 @@ private fun DocumentCard(document: KnowledgeDocumentUi, onDelete: (String) -> Un
             if (document.mimeType.isNotBlank()) Text(document.mimeType, style = MaterialTheme.typography.bodySmall)
             if (document.sizeLabel.isNotBlank() || document.updatedAt.isNotBlank()) Text(listOf(document.sizeLabel, document.updatedAt).filter(String::isNotBlank).joinToString(" · "), style = MaterialTheme.typography.labelSmall)
             Row(Modifier.padding(top = 6.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                OutlinedButton(onClick = { actions.onOpenEvidence(document.id) }) { Text(if (zh) "查看证据" else "View evidence") }
-                OutlinedButton(onClick = { onDelete(document.id) }) { Text(if (zh) "删除" else "Delete") }
+                OutlinedButton(onClick = { actions.onOpenEvidence(document.id) }) { Text(stringResource(R.string.ui_view_evidence_e90fbed5)) }
+                OutlinedButton(onClick = { onDelete(document.id) }) { Text(stringResource(R.string.ui_delete_5b875326)) }
             }
         }
     }
@@ -1294,21 +1323,21 @@ private fun JobCard(job: KnowledgeImportJobUi, actions: KnowledgeActions, zh: Bo
             Column(Modifier.padding(top = 4.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 if (embeddingConsentRequired) {
                     Button(onClick = { actions.onGrantEmbedding(job.id) }) {
-                        Text(if (zh) "同意 API Embedding" else "Consent to API Embedding")
+                        Text(stringResource(R.string.ui_consent_to_api_embedding_53fe3597))
                     }
                 }
                 if (job.requiresVisionConsent) {
-                    Button(onClick = { actions.onGrantVision(job.id) }) { Text(if (zh) "批准视觉上传" else "Approve Vision upload") }
+                    Button(onClick = { actions.onGrantVision(job.id) }) { Text(stringResource(R.string.ui_approve_vision_upload_99eb421f)) }
                 }
                 if (job.unknownOutcome && job.embeddingIsApi) {
                     OutlinedButton(onClick = { actions.onRetryEmbedding(job.id) }) {
-                        Text(if (zh) "重试 Embedding（可能重复收费）" else "Retry Embedding (may charge twice)")
+                        Text(stringResource(R.string.ui_retry_embedding_may_charge_twice_3b32f4c3))
                     }
                 } else if (job.unknownOutcome) {
-                    OutlinedButton(onClick = { actions.onRetryVision(job.id) }) { Text(if (zh) "重试视觉（可能重复收费）" else "Retry Vision (may charge twice)") }
+                    OutlinedButton(onClick = { actions.onRetryVision(job.id) }) { Text(stringResource(R.string.ui_retry_vision_may_charge_twice_cca5f0a2)) }
                 }
                 if (job.stage !in setOf("READY", "FAILED", "CANCELLED")) {
-                    TextButton(onClick = { actions.onCancelJob(job.id) }) { Text(if (zh) "取消任务" else "Cancel job") }
+                    TextButton(onClick = { actions.onCancelJob(job.id) }) { Text(stringResource(R.string.ui_cancel_job_7b34b54e)) }
                 }
             }
         }
@@ -1339,17 +1368,17 @@ private fun knowledgeStageLabel(stage: String, zh: Boolean): String = when (stag
 private fun EvidenceDialog(evidence: KnowledgeEvidenceUi, onClose: () -> Unit) {
     AlertDialog(
         onDismissRequest = onClose,
-            title = { Text("证据 / Evidence") },
+        title = { Text(stringResource(R.string.knowledge_evidence_title)) },
         text = {
             Column(Modifier.verticalScroll(rememberScrollState())) {
                 Text(evidence.source)
-                evidence.chunkCount?.let { Text("分块 / Chunks: $it", style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(top = 6.dp)) }
-                if (evidence.contentHash.isNotBlank()) Text("内容哈希 / Content hash: ${evidence.contentHash}", style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(top = 6.dp))
-                evidence.verified?.let { Text(if (it) "证据已验证 / Evidence verified" else "证据未验证 / Evidence not verified", style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(top = 6.dp)) }
+                evidence.chunkCount?.let { Text(stringResource(R.string.knowledge_evidence_chunks, it), style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(top = 6.dp)) }
+                if (evidence.contentHash.isNotBlank()) Text(stringResource(R.string.knowledge_evidence_hash, evidence.contentHash), style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(top = 6.dp))
+                evidence.verified?.let { Text(stringResource(if (it) R.string.knowledge_evidence_verified else R.string.knowledge_evidence_unverified), style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(top = 6.dp)) }
                 if (evidence.details.isNotBlank()) Text(evidence.details, style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(top = 8.dp))
             }
         },
-        confirmButton = { Button(onClick = onClose) { Text("关闭 / Close") } },
+        confirmButton = { Button(onClick = onClose) { Text(stringResource(R.string.knowledge_evidence_close)) } },
     )
 }
 

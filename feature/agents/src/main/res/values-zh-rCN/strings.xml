@@ -1,0 +1,76 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- SPDX-FileCopyrightText: 2026 mobileAgentRuntime contributors -->
+<!-- SPDX-License-Identifier: AGPL-3.0-only -->
+<resources>
+    <string name="ui_access_channel_s_e7931cea">访问通道：%1$s</string>
+    <string name="ui_active_2b6e4af7" formatted="false">当前生效</string>
+    <string name="ui_adapt_to_the_model_window_f6a84b14" formatted="false">按模型窗口自动调整</string>
+    <string name="ui_add_capability_grant_1165e325" formatted="false">添加能力授权</string>
+    <string name="ui_advanced_permissions_e86be370" formatted="false">高级权限</string>
+    <string name="ui_agent_scoped_no_workspace_7790b7e9" formatted="false">Agent 级（不限定工作区）</string>
+    <string name="ui_agents_8039b104" formatted="false">智能体</string>
+    <string name="ui_allow_reading_and_writing_c57f45b3" formatted="false">允许读写</string>
+    <string name="ui_allow_reading_b738171d" formatted="false">允许读取</string>
+    <string name="ui_allow_web_search_7d0fa1ad" formatted="false">允许联网搜索</string>
+    <string name="ui_auto_compaction_78571f2d" formatted="false">自动压缩</string>
+    <string name="ui_browse_device_directory_865b3714" formatted="false">浏览设备目录</string>
+    <string name="ui_budgets_use_conservative_estimates_request_ca_e643af41" formatted="false">预算采用保守估算。总请求包含摘要，工具与耗时另有硬上限。</string>
+    <string name="ui_cancel_998b9c48" formatted="false">取消</string>
+    <string name="ui_capability_grants_56d2de6d" formatted="false">能力授权</string>
+    <string name="ui_choose_a_saf_or_app_workspace_dcd4edaf" formatted="false">选择工作区并授予读取或读写权限；可在下方逐项调整。</string>
+    <string name="ui_choose_phone_folder_b40c3e60" formatted="false">选择手机文件夹</string>
+    <string name="ui_compact_at_the_available_input_threshold_6040fd8f" formatted="false">达到可用输入容量的软阈值才压缩；未知窗口采用本地保护值。</string>
+    <string name="ui_context_auto_compaction_2e8cc503" formatted="false">上下文与自动压缩</string>
+    <string name="ui_current_snapshot_grant_bindings_64946389" formatted="false">当前快照授权绑定</string>
+    <string name="ui_default_workspace_for_new_conversations_a2e3217d" formatted="false">新会话默认工作区</string>
+    <string name="ui_edit_e9740dbb" formatted="false">编辑</string>
+    <string name="ui_filter_agents_3b62b75b" formatted="false">筛选智能体</string>
+    <string name="ui_full_device_files_42f1a6aa" formatted="false">完整设备文件</string>
+    <string name="ui_grant_lifetime_614735ae" formatted="false">授权期限</string>
+    <string name="ui_grant_storage_is_unavailable_grant_changes_f1d5338e" formatted="false">授权存储未就绪；保存不会静默忽略授权变更。</string>
+    <string name="ui_limited_to_what_adb_can_see_9b3f736d" formatted="false">仅限 ADB 可见范围，不等于 Root；开启后对该智能体长期生效。</string>
+    <string name="ui_load_r_s_s_a0b0fd26">载入 r%1$s %2$s</string>
+    <string name="ui_model_roles_fc5da317" formatted="false">模型角色</string>
+    <string name="ui_name_dd4dc4c5" formatted="false">名称</string>
+    <string name="ui_new_agent_5a36831a" formatted="false">新建</string>
+    <string name="ui_new_conversations_can_run_tools_without_a6129257" formatted="false">新会话中的工具和程序可免逐次确认；仍须满足授权。关闭后立即恢复确认。</string>
+    <string name="ui_new_grant_saved_with_the_agent_4d02b849" formatted="false">新授权（保存 Agent 时写入）</string>
+    <string name="ui_no_agents_available_79df1c1b" formatted="false">暂无智能体。</string>
+    <string name="ui_no_existing_grants_44bd93be" formatted="false">暂无现有授权。</string>
+    <string name="ui_no_explicit_capability_grants_c2ccd114" formatted="false">没有显式能力授权。</string>
+    <string name="ui_no_knowledge_bases_or_skills_are_5b267557" formatted="false">没有绑定知识库或技能。</string>
+    <string name="ui_no_knowledge_bases_or_skills_are_e2526f0c" formatted="false">暂无可绑定的知识库或技能。</string>
+    <string name="ui_no_parameter_overrides_453a2861" formatted="false">没有参数覆盖。</string>
+    <string name="ui_no_s_models_available_2ccc24d2">没有可用的 %1$s 模型</string>
+    <string name="ui_no_workspace_is_available_choose_a_67498e4c" formatted="false">暂无可用工作区；请先到设置选择 SAF 目录。</string>
+    <string name="ui_none_agent_scoped_c3eaddc7" formatted="false">无（Agent 级授权）</string>
+    <string name="ui_not_configured_8b6c7ecc" formatted="false">未配置</string>
+    <string name="ui_parameter_schema_unavailable_no_override_fiel_4f661441" formatted="false">参数模式不可用，因此不显示覆盖字段。</string>
+    <string name="ui_parameters_af94b2b3" formatted="false">参数</string>
+    <string name="ui_prompt_44ac51fa" formatted="false">提示词</string>
+    <string name="ui_prompt_history_93fee38e" formatted="false">提示词历史</string>
+    <string name="ui_prompt_history_s_cb99ff1a">提示词历史（%1$s）</string>
+    <string name="ui_prompt_revision_acf2ff77" formatted="false">提示词修订</string>
+    <string name="ui_quick_file_tool_grant_850a14d4" formatted="false">快捷授权文件工具</string>
+    <string name="ui_relative_scope_optional_14c79525" formatted="false">相对范围（可选）</string>
+    <string name="ui_remove_this_new_grant_4e106b82" formatted="false">移除此新授权</string>
+    <string name="ui_resource_bindings_14fb156b" formatted="false">资源绑定</string>
+    <string name="ui_resources_ccecd0da" formatted="false">资源</string>
+    <string name="ui_retrieval_mode_ab73f89a" formatted="false">检索模式</string>
+    <string name="ui_retrieval_mode_s_14a0ab5e">检索模式：%1$s</string>
+    <string name="ui_revision_s_e36588e9">修订版 %1$s</string>
+    <string name="ui_save_ec8e6d58" formatted="false">保存</string>
+    <string name="ui_select_an_agent_to_view_its_1e797d37" formatted="false">选择智能体查看配置。</string>
+    <string name="ui_shell_execute_is_effective_only_when_ba884065" formatted="false">shell.execute 仅在已选 Authority、Dangerous Mode 和实时策略均允许时生效。</string>
+    <string name="ui_skip_tool_run_confirmations_e4481e04" formatted="false">跳过工具运行确认</string>
+    <string name="ui_start_a_new_conversation_with_this_014ebfd6" formatted="false">用此智能体新建会话</string>
+    <string name="ui_start_a_new_conversation_with_this_a6054013" formatted="false">保存后请用此智能体新建会话；已有会话的工具不会变化。</string>
+    <string name="ui_summarize_earlier_turns_while_keeping_the_bddcf43c" formatted="false">自动摘要保留较早对话，原始记录不删除。摘要可能产生额外费用；设置用于新会话。</string>
+    <string name="ui_trusted_skill_bindings_ab7c43ad" formatted="false">可信 Skill 绑定</string>
+    <string name="ui_trusted_skill_s_0f8385b9">可信 Skill：%1$s</string>
+    <string name="ui_unlink_7882f235" formatted="false">取消关联</string>
+    <string name="ui_use_a_workspace_relative_scope_never_ccc95195" formatted="false">仅填写工作区内的相对范围，不是设备路径。</string>
+    <string name="ui_use_recommended_settings_6754f65f" formatted="false">使用推荐设置</string>
+    <string name="ui_use_the_configured_search_service_without_92bc0ab7" formatted="false">使用设置中的搜索服务，无需逐次确认，可能收费。开启适用于新会话；关闭立即撤权。</string>
+    <string name="ui_workspace_access_7dc4e36c" formatted="false">工作区访问</string>
+</resources>

@@ -7,12 +7,12 @@
     <string name="ann_mark_all_read">Mark all read</string>
     <string name="ann_dismiss">Dismiss</string>
     <string name="ann_close">Close</string>
+    <string name="ann_open">Open</string>
     <string name="ann_pinned_notice">Pinned notice</string>
     <string name="ann_acknowledge">I have read and acknowledge</string>
-    <string name="ann_base_url">Announcement service URL</string>
-    <string name="ann_public_key">Ed25519 public key (hex)</string>
-    <string name="ann_save_endpoint">Save local endpoint</string>
     <string name="ann_filter_unread">Unread</string>
     <string name="ann_filter_all">All</string>
     <string name="ann_filter_history">History</string>
+    <string name="ann_revision">%1$s · rev %2$d</string>
+    <string name="ann_revision_ack_required">%1$s · rev %2$d · acknowledgement required</string>
 </resources>

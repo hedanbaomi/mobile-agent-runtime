@@ -39,6 +39,14 @@ object LicenseGuardReverseTests {
                 root.resolve("shared/example.kt").writeText("class Example\n")
                 LicenseScanner().scan(root)
             }
+            assertFails("SPDX omitted inside a source package named build") {
+                val root = fixture(tmp.resolve("build-package"), licenseBytes)
+                root.resolve("module/src/test/kotlin/runtime/build/Unlicensed.kt").apply {
+                    parent.createDirectories()
+                    writeText("class Unlicensed\n")
+                }
+                LicenseScanner().scan(root)
+            }
             assertFails("license metadata changed") {
                 val root = fixture(tmp.resolve("metadata"), licenseBytes)
                 root.resolve("LICENSE_POLICY.md").writeText("# policy without marker\n")

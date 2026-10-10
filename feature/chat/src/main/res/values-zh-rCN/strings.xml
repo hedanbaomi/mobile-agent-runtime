@@ -1,0 +1,79 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- SPDX-FileCopyrightText: 2026 mobileAgentRuntime contributors -->
+<!-- SPDX-License-Identifier: AGPL-3.0-only -->
+<resources>
+    <string name="ui_agent_252fc75c" formatted="false">智能体</string>
+    <string name="ui_agent_default_workspace_e459a394" formatted="false">Agent 默认工作区</string>
+    <string name="ui_agent_default_workspace_s_0ec344e3">Agent 默认工作区：%1$s</string>
+    <string name="ui_agent_workspace_61a16997" formatted="false">Agent 工作台</string>
+    <string name="ui_allow_once_5c4277ed" formatted="false">允许一次</string>
+    <string name="ui_allows_this_invocation_only_it_does_a84a39e1" formatted="false">仅允许本次调用，不会创建会话或持久权限。</string>
+    <string name="ui_ask_a_follow_up_93697d6f" formatted="false">继续提问…</string>
+    <string name="ui_authority_b04ffce4" formatted="false">权限通道</string>
+    <string name="ui_back_to_reply_ed5e8395" formatted="false">返回回复</string>
+    <string name="ui_cancel_998b9c48" formatted="false">取消</string>
+    <string name="ui_chats_b73b26c8" formatted="false">会话</string>
+    <string name="ui_close_6cf4a777" formatted="false">关闭</string>
+    <string name="ui_command_9cfdf51b" formatted="false">命令</string>
+    <string name="ui_confirmation_required_b2fc4b04" formatted="false">需要确认</string>
+    <string name="ui_conservative_input_estimate_s_s_units_baea5d49">保守输入估算：%1$s → %2$s 单位（非实际 token）\n摘要用量：输入 %3$s / 输出 %4$s tokens</string>
+    <string name="ui_context_compaction_history_3a8b9983" formatted="false">上下文压缩记录</string>
+    <string name="ui_conversations_23a085e0" formatted="false">会话</string>
+    <string name="ui_current_context_349f8670" formatted="false">当前上下文</string>
+    <string name="ui_current_workspace_s_6c60ef34">当前工作区：%1$s</string>
+    <string name="ui_dangerous_mode_de499d98" formatted="false">危险模式</string>
+    <string name="ui_files_5c80b454" formatted="false">工作区</string>
+    <string name="ui_high_risk_reconfirmation_required_0a28d24e" formatted="false">高风险：需要重新确认</string>
+    <string name="ui_inspect_covered_originals_0fb5f0e7" formatted="false">查看覆盖的原始消息</string>
+    <string name="ui_inspect_request_dd0adbf1" formatted="false">查看请求</string>
+    <string name="ui_loading_b84913a0" formatted="false">正在加载…</string>
+    <string name="ui_manage_1f04c52a" formatted="false">管理</string>
+    <string name="ui_manage_agent_fbcf94f0" formatted="false">管理智能体</string>
+    <string name="ui_manage_agent_workspace_a54c525c" formatted="false">管理智能体工作区</string>
+    <string name="ui_model_44c0cd42" formatted="false">模型</string>
+    <string name="ui_model_s_covers_s_original_messages_8990b847">模型：%1$s · 覆盖 %2$s 条原始消息</string>
+    <string name="ui_more_originals_8d54d6be" formatted="false">更多原始消息</string>
+    <string name="ui_new_5a5d1d13" formatted="false">新建</string>
+    <string name="ui_new_chat_6f463698" formatted="false">新会话</string>
+    <string name="ui_new_conversation_843829cd" formatted="false">新建对话</string>
+    <string name="ui_new_conversation_9878af0c" formatted="false">新对话</string>
+    <string name="ui_new_conversation_in_this_workspace_532596f7" formatted="false">在此工作区新建会话</string>
+    <string name="ui_new_under_this_agent_39126f72" formatted="false">在此智能体下新建会话</string>
+    <string name="ui_no_agent_222531b8" formatted="false">无智能体</string>
+    <string name="ui_no_agent_available_2361a44f" formatted="false">暂无可用智能体</string>
+    <string name="ui_no_conversations_81fbc382" formatted="false">暂无会话</string>
+    <string name="ui_no_matching_conversations_c7c1240d" formatted="false">暂无匹配的对话。</string>
+    <string name="ui_no_visible_output_yet_check_the_66aa196b" formatted="false">尚无可见输出；请查看本轮运行状态，不会自动重发。</string>
+    <string name="ui_open_workspace_3a7608fa" formatted="false">打开工作区</string>
+    <string name="ui_other_conversations_540cce6a" formatted="false">其他会话</string>
+    <string name="ui_other_conversations_820584af" formatted="false">其他对话</string>
+    <string name="ui_permission_s_05813ab1">权限状态：%1$s</string>
+    <string name="ui_permission_s_76ae437c">权限：%1$s</string>
+    <string name="ui_prompt_layers_17c857e1" formatted="false">提示词层</string>
+    <string name="ui_recent_conversations_90c40dce" formatted="false">最近对话</string>
+    <string name="ui_reject_52e8be4e" formatted="false">拒绝</string>
+    <string name="ui_request_inspector_4337f973" formatted="false">请求检查器</string>
+    <string name="ui_search_05fdb9c1" formatted="false">搜索</string>
+    <string name="ui_search_conversations_or_workspaces_3dee4e59" formatted="false">搜索会话或工作区</string>
+    <string name="ui_select_or_create_an_agent_first_90dfc1bf" formatted="false">请先选择或创建智能体。</string>
+    <string name="ui_sensitive_headers_and_keys_are_redacted_09373fcc" formatted="false">敏感请求头与密钥已遮盖；以下内容仅来自脱敏请求检查数据。</string>
+    <string name="ui_streaming_96edaa09" formatted="false">正在流式输出…</string>
+    <string name="ui_summaries_use_this_session_s_model_df6e6f50" formatted="false">摘要使用本会话模型，额外请求计入运行用量。原始消息仍在对话中；摘要不授予权限，也不会自动重做工具。</string>
+    <string name="ui_system_access_s_22db32ee">系统增强访问：%1$s</string>
+    <string name="ui_text_only_78afb413" formatted="false">纯文本</string>
+    <string name="ui_the_citation_image_could_not_be_e9fd2779" formatted="false">引用图片无法安全解码；仍显示元数据和摘录。</string>
+    <string name="ui_the_citation_image_dimensions_are_invalid_52f6d487" formatted="false">引用图片尺寸无效或过大，已拒绝解码；仍显示元数据和摘录。</string>
+    <string name="ui_the_citation_image_is_empty_metadata_5e639676" formatted="false">引用图片为空；仍显示元数据和摘录。</string>
+    <string name="ui_the_citation_image_is_too_large_d59c4e23" formatted="false">引用图片文件过大，已拒绝解码；仍显示元数据和摘录。</string>
+    <string name="ui_this_request_may_leave_the_device_de053073" formatted="false">此请求可能离开设备。</string>
+    <string name="ui_tool_cc2baf94" formatted="false">工具</string>
+    <string name="ui_tool_records_a37123a8" formatted="false">工具记录</string>
+    <string name="ui_tool_records_s_42bfa81f">工具记录 · %1$s</string>
+    <string name="ui_unread_0af1e493" formatted="false">未读</string>
+    <string name="ui_view_request_e63fbc35" formatted="false">查看请求</string>
+    <string name="ui_view_workspace_b7713d6d" formatted="false">查看工作区</string>
+    <string name="ui_working_directory_a7efee9a" formatted="false">工作目录</string>
+    <string name="ui_workspace_58a2bde1" formatted="false">工作区</string>
+    <string name="ui_workspace_access_9224cbf6" formatted="false">工作区与权限</string>
+    <string name="ui_workspaces_592e0578" formatted="false">工作区</string>
+</resources>

@@ -195,16 +195,34 @@ function recordAt(store, installId, receivedAt, dimensions, suffix) {
 
   const script = admin.match(/<script>([\s\S]*?)<\/script>/)?.[1];
   assert.ok(script, "缺少管理端脚本");
-  const elements = new Map();
-  const element = (id) => {
-    if (!elements.has(id)) elements.set(id, { id, value:"", checked:false, hidden:false, disabled:false, textContent:"", append() {} });
-    return elements.get(id);
+  // Use the real HTML IDs; missing controls must fail rather than be invented.
+  const makeElement = (tag, attributes = '') => {
+    const classes = new Set();
+    let text = '';
+    return {
+      tag, value:/\bvalue="([^"]*)"/.exec(attributes)?.[1] ?? '',
+      checked:/\bchecked\b/.test(attributes), hidden:/\bhidden\b/.test(attributes),
+      disabled:/\bdisabled\b/.test(attributes), children:[],
+      classList:{ add:(name) => classes.add(name), remove:(name) => classes.delete(name), contains:(name) => classes.has(name) },
+      get textContent() { return text; },
+      set textContent(value) { text = value; this.children = []; },
+      append(...nodes) { this.children.push(...nodes); },
+    };
   };
+  const elements = new Map();
+  for (const [, tag, attributes, id] of admin.matchAll(/<(\w+)\b([^>]*\bid="([^"]+)"[^>]*)>/g)) {
+    assert.equal(elements.has(id), false, `duplicate HTML control: ${id}`);
+    const node = makeElement(tag, attributes);
+    if (tag === 'select') node.value = optionsFor(id)[0][0];
+    elements.set(id, node);
+  }
+  const element = (id) => elements.get(id) ?? null;
+  let requests = 0;
   const context = {
     location:{ origin:"http://127.0.0.1:8787", hostname:"127.0.0.1" },
-    document:{ getElementById:element, createElement:(tag) => ({ tag, type:"", disabled:false, textContent:"", append() {} }) },
+    document:{ getElementById:element, createElement:makeElement },
     crypto:{ randomUUID:() => "00000000-0000-4000-8000-000000000000" },
-    fetch:async () => { throw new Error("测试不应联网"); },
+    fetch:async () => { requests += 1; throw new Error("测试不应联网"); },
   };
   const runtimeSample = {
     items:[{ status:"published", pendingRevision:null, revisions:[{ revisionStatus:"superseded" }], body:{
@@ -213,10 +231,31 @@ function recordAt(store, installId, receivedAt, dimensions, suffix) {
     } }],
     byChannel:[{ channel:"nightly", count:1 }], byPlatform:[{ platform:"desktop", count:1 }],
   };
-  const executable = script.replace(/\s*applyPreset\("general"\);\s*$/, "") +
+  const executable = script +
     `\nglobalThis.__localized = localizeAdminData(${JSON.stringify(runtimeSample)});` +
     `\nglobalThis.__formatted = formatAdminResponse(${JSON.stringify(JSON.stringify(runtimeSample))}, "服务器数据：");`;
   runInNewContext(executable, context);
+  assert.equal(requests, 0, 'initialization must remain offline');
+  assert.equal(element('localAuth').hidden, false);
+  assert.equal(element('id').value, 'general-demo');
+  assert.equal(element('presetHint').textContent, '普通公告：信息提示，可关闭。');
+  assert.equal(element('preview').children[0].textContent, '展示方式：居中展示');
+  assert.equal(element('preview').children[4].textContent, '关闭');
+
+  // Execute the handler actually declared by the HTML, in the same script scope.
+  const titleTag = [...admin.matchAll(/<input\b[^>]*>/g)].find(([tag]) => /\bid="title"/.test(tag))?.[0];
+  const titleHandler = /\boninput="([^"]+)"/.exec(titleTag ?? '')?.[1];
+  assert.ok(titleHandler, 'title control must update the preview');
+  element('title').value = '新的标题';
+  runInNewContext(titleHandler, context);
+  assert.equal(element('preview').children[1].textContent, '新的标题');
+  const importantTag = [...admin.matchAll(/<button\b[^>]*>/g)].find(([tag]) => /applyPreset\('important'\)/.test(tag))?.[0];
+  const importantHandler = /\bonclick="([^"]+)"/.exec(importantTag ?? '')?.[1];
+  assert.ok(importantHandler, 'important preset control must be connected');
+  runInNewContext(importantHandler, context);
+  assert.equal(element('id').value, 'important-demo');
+  assert.equal(element('mustAck').checked, true);
+  assert.equal(element('preview').children[4].textContent, '我已阅读并确认');
   assert.equal(context.__localized["公告条目"][0]["状态"], "已发布");
   assert.equal(context.__localized["公告条目"][0]["待发布修订"], "无");
   assert.equal(context.__localized["公告条目"][0]["修订记录"][0]["修订状态"], "已被新修订替代");

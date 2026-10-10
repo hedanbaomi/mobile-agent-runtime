@@ -60,7 +60,7 @@ object Migrations {
     // v27 replaces the single active dispatch index with three durable slots.
     // v28 permits six durable slots and freezes v27 batches at their old default of three.
     // v29 adds the scoped import-job display index without replaying legacy binding projection.
-    const val VERSION = 31
+    const val VERSION = 32
 
     private val statements = listOf(
         "CREATE TABLE IF NOT EXISTS schema_version (version INTEGER NOT NULL PRIMARY KEY)",
@@ -255,6 +255,10 @@ object Migrations {
     )
 
     fun apply(connection: SqlConnection) {
+        // Structural corruption is not a legacy FK orphan: never migrate a damaged database.
+        check(connection.query("PRAGMA quick_check").all { it.columns.values.singleOrNull() == "ok" }) {
+            "SQLite integrity check failed; database was preserved"
+        }
         connection.transaction {
             // A malformed pre-existing table must fail here; never replace it or clear data.
             connection.execute(statements.first())
@@ -272,6 +276,7 @@ object Migrations {
                 connection.execute("DROP VIEW workspace_acl")
             }
             statements.drop(1).forEach { sql -> connection.execute(sql) }
+            connection.execute("CREATE TABLE IF NOT EXISTS blob_gc_pending(hash TEXT PRIMARY KEY CHECK(length(hash)=64))")
             // v24 is additive and lazy: legacy jobs/cache rows are not guessed into unit plans.
             DocumentPipelineStore.schema.forEach { sql -> connection.execute(sql) }
             columns.forEach { column -> ensureColumn(connection, column) }
@@ -321,8 +326,14 @@ object Migrations {
         }
         // Index repair is a data migration owned by KnowledgeRepository. It is deliberately not
         // wrapped in runCatching: callers must see a failed repair and can retry explicitly.
-        KnowledgeRepository(connection, runtime.mobileagent.knowledge.MemoryBlobSink()).repairIndexes()
+        KnowledgeRepository(connection, runtime.mobileagent.knowledge.MemoryBlobSink(), automaticStorageMaintenance = false).repairIndexes(onlyChanged = true)
     }
+
+    /** Existing orphan user rows are preserved for explicit repair; new writes enforce FKs. */
+    fun foreignKeyCompatibility(connection: SqlConnection): List<ForeignKeyCompatibilityIssue> =
+        connection.query("PRAGMA foreign_key_check").map {
+            ForeignKeyCompatibilityIssue(it.string("table"), it.longOrNull("rowid"), it.string("parent"), it.long("fkid"))
+        }
 
     private fun readVersion(connection: SqlConnection): Long {
         val rows = connection.query("SELECT version FROM schema_version")

@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- SPDX-FileCopyrightText: 2026 mobileAgentRuntime contributors -->
+<!-- SPDX-License-Identifier: AGPL-3.0-only -->
+<resources>
+    <string name="ui_audit_log_c7dfe2f3" formatted="false">Audit log</string>
+    <string name="ui_cancel_998b9c48" formatted="false">Cancel</string>
+    <string name="ui_close_6cf4a777" formatted="false">Close</string>
+    <string name="ui_filter_skills_c7db0d68" formatted="false">Filter skills</string>
+    <string name="ui_grant_a53c2c77" formatted="false">Grant</string>
+    <string name="ui_grant_status_d79bc46f" formatted="false">Grant status</string>
+    <string name="ui_import_a_skill_package_check_compatibility_9a6d5f72" formatted="false">Import a skill package, check compatibility, then enable it.</string>
+    <string name="ui_import_package_0f33589c" formatted="false">Import package</string>
+    <string name="ui_inspect_skill_package_857d34ad" formatted="false">Inspect skill package</string>
+    <string name="ui_install_fb022450" formatted="false">Install</string>
+    <string name="ui_no_audit_entries_available_ce05939a" formatted="false">No audit entries available.</string>
+    <string name="ui_no_permissions_declared_f900ab80" formatted="false">No permissions declared.</string>
+    <string name="ui_no_skills_available_65cf91a2" formatted="false">No skills available.</string>
+    <string name="ui_permissions_be9338af" formatted="false">Permissions</string>
+    <string name="ui_requested_permissions_bbc6afc7" formatted="false">Requested permissions</string>
+    <string name="ui_revoke_411a6c97" formatted="false">Revoke</string>
+    <string name="ui_s_install_identity_verified_e3c3ceaf">%1$s · install identity verified</string>
+    <string name="ui_select_a_skill_to_view_details_d6886104" formatted="false">Select a skill to view details.</string>
+    <string name="ui_skill_memory_0ea065bc" formatted="false">Skill memory</string>
+    <string name="ui_skills_2a98e03d" formatted="false">Skills</string>
+    <string name="ui_source_content_is_unavailable_929ce8ad" formatted="false">Source content is unavailable.</string>
+    <string name="ui_source_files_dabedad9" formatted="false">Source files</string>
+    <string name="ui_source_listing_unavailable_4b7c7b16" formatted="false">Source listing unavailable.</string>
+    <string name="ui_this_removes_the_install_revokes_grants_24a153db" formatted="false">This removes the install, revokes grants, and unbinds current agents. Conversation history, audit records, and this skill\'s persistent memory remain. Package bytes remain only when needed to export historical conversations. Reuse requires a fresh import and approval.</string>
+    <string name="ui_uninstall_3e55535e" formatted="false">Uninstall</string>
+    <string name="ui_uninstall_skill_d11f9422" formatted="false">Uninstall skill</string>
+    <string name="ui_view_78059812" formatted="false">View</string>
+</resources>

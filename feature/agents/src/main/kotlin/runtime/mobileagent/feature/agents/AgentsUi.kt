@@ -3,6 +3,8 @@
 
 package runtime.mobileagent.feature.agents
 
+import androidx.compose.ui.res.stringResource
+
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
@@ -373,18 +375,18 @@ private fun AgentListPane(state: AgentsUiState, actions: AgentsActions, modifier
     Column(modifier.testTag(AgentTestTags.LIST)) {
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
             if (showPageTitle) {
-                Text(if (zh) "智能体" else "Agents", style = MaterialTheme.typography.headlineSmall, modifier = Modifier.weight(1f))
+                Text(stringResource(R.string.ui_agents_8039b104), style = MaterialTheme.typography.headlineSmall, modifier = Modifier.weight(1f))
             } else {
                 Spacer(Modifier.weight(1f))
             }
             Button(onClick = { actions.onOpenEditor(null) }, modifier = Modifier.testTag(AgentTestTags.NEW)) {
-                Text(if (zh) "新建" else "New agent")
+                Text(stringResource(R.string.ui_new_agent_5a36831a))
             }
         }
         OutlinedTextField(
             state.query,
             actions.onQuery,
-            label = { Text(if (zh) "筛选智能体" else "Filter agents") },
+            label = { Text(stringResource(R.string.ui_filter_agents_3b62b75b)) },
             modifier = Modifier.fillMaxWidth().padding(top = 10.dp).testTag(AgentTestTags.QUERY),
         )
         if (state.status.isNotBlank()) {
@@ -423,7 +425,7 @@ private fun AgentListPane(state: AgentsUiState, actions: AgentsActions, modifier
                     colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerLow),
                 ) {
                     Text(
-                        if (zh) "暂无智能体。" else "No agents available.",
+                        stringResource(R.string.ui_no_agents_available_79df1c1b),
                         style = MaterialTheme.typography.bodySmall,
                         modifier = Modifier.padding(14.dp),
                     )
@@ -464,53 +466,53 @@ private fun AgentSummary(state: AgentsUiState, actions: AgentsActions) {
     val zh = state.language.equals("zh-CN", true)
     val editor = state.summary
     if (editor == null) {
-        Text(if (zh) "选择智能体查看配置。" else "Select an agent to view its settings.", modifier = Modifier.padding(24.dp))
+        Text(stringResource(R.string.ui_select_an_agent_to_view_its_1e797d37), modifier = Modifier.padding(24.dp))
         return
     }
     Column(Modifier.fillMaxWidth().testTag(AgentTestTags.SUMMARY)) {
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
             Column(Modifier.weight(1f)) {
                 Text(editor.name.ifBlank { if (zh) "智能体" else "Agent" }, style = MaterialTheme.typography.headlineSmall)
-                Text(if (zh) "修订版 ${editor.revision}" else "Revision ${editor.revision}", style = MaterialTheme.typography.bodySmall)
+                Text(stringResource(R.string.ui_revision_s_e36588e9, (editor.revision)), style = MaterialTheme.typography.bodySmall)
             }
-            Button(onClick = { actions.onOpenEditor(state.selectedAgentId) }) { Text(if (zh) "编辑" else "Edit") }
+            Button(onClick = { actions.onOpenEditor(state.selectedAgentId) }) { Text(stringResource(R.string.ui_edit_e9740dbb)) }
         }
         if (editor.snapshotLabel.isNotBlank()) {
             Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.tertiaryContainer), modifier = Modifier.fillMaxWidth().padding(top = 12.dp)) {
                 Text(editor.snapshotLabel, modifier = Modifier.padding(12.dp), style = MaterialTheme.typography.bodySmall)
             }
         }
-        Text(if (zh) "模型角色" else "Model roles", style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(top = 16.dp))
+        Text(stringResource(R.string.ui_model_roles_fc5da317), style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(top = 16.dp))
         ModelRoleRow(if (zh) "对话" else "Chat", editor.chatModelId, editor, actions, zh)
         ModelRoleRow(if (zh) "视觉（可选）" else "Vision (optional)", editor.visionModelId, editor, actions, zh)
         if (state.hasRerankerModels) {
             ModelRoleRow(if (zh) "重排" else "Reranker", editor.rerankerModelId, editor, actions, zh)
         }
-        Text(if (zh) "提示词" else "Prompt", style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(top = 16.dp))
+        Text(stringResource(R.string.ui_prompt_44ac51fa), style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(top = 16.dp))
         Text(editor.prompt.ifBlank { if (zh) "暂无提示词修订版。" else "No prompt revision is available." }, modifier = Modifier.padding(top = 6.dp))
         if (editor.promptRevisions.isNotEmpty()) {
-            Text(if (zh) "提示词历史" else "Prompt history", style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(top = 12.dp))
+            Text(stringResource(R.string.ui_prompt_history_93fee38e), style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(top = 12.dp))
             editor.promptRevisions.forEach { revision ->
                 Card(Modifier.fillMaxWidth().padding(top = 6.dp)) {
                     Column(Modifier.padding(10.dp)) {
                         Text("r${revision.revision} · ${revision.label}", fontWeight = FontWeight.SemiBold)
                         if (revision.createdAt.isNotBlank()) Text(revision.createdAt, style = MaterialTheme.typography.labelSmall)
-                        if (revision.active) Text(if (zh) "当前生效" else "Active", style = MaterialTheme.typography.labelSmall)
+                        if (revision.active) Text(stringResource(R.string.ui_active_2b6e4af7), style = MaterialTheme.typography.labelSmall)
                     }
                 }
             }
         }
-        Text(if (zh) "参数" else "Parameters", style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(top = 16.dp))
-        if (editor.parameters.isEmpty()) Text(if (zh) "没有参数覆盖。" else "No parameter overrides.", style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(top = 6.dp))
+        Text(stringResource(R.string.ui_parameters_af94b2b3), style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(top = 16.dp))
+        if (editor.parameters.isEmpty()) Text(stringResource(R.string.ui_no_parameter_overrides_453a2861), style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(top = 6.dp))
         editor.parameters.forEach { (name, value) -> Text("$name: $value", style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(top = 4.dp)) }
-        Text(if (zh) "上下文与自动压缩" else "Context & auto-compaction", style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(top = 16.dp))
+        Text(stringResource(R.string.ui_context_auto_compaction_2e8cc503), style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(top = 16.dp))
         Text(
             editor.contextPolicyDraft.summary(zh),
             style = MaterialTheme.typography.bodySmall,
             modifier = Modifier.padding(top = 6.dp),
         )
-        Text(if (zh) "资源" else "Resources", style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(top = 16.dp))
-        if (editor.resourceBindings.isEmpty()) Text(if (zh) "没有绑定知识库或技能。" else "No knowledge bases or skills are bound.", style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(top = 6.dp))
+        Text(stringResource(R.string.ui_resources_ccecd0da), style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(top = 16.dp))
+        if (editor.resourceBindings.isEmpty()) Text(stringResource(R.string.ui_no_knowledge_bases_or_skills_are_5b267557), style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(top = 6.dp))
         editor.resourceBindings.forEach { binding ->
             Text(
                 "${binding.name} · ${binding.type}${if (binding.active) "" else if (zh) "（未启用）" else " (disabled)"}${if (binding.permissionSummary.isBlank()) "" else " · ${binding.permissionSummary}"}",
@@ -518,7 +520,7 @@ private fun AgentSummary(state: AgentsUiState, actions: AgentsActions) {
                 modifier = Modifier.padding(top = 4.dp),
             )
         }
-        Text(if (zh) "能力授权" else "Capability grants", style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(top = 16.dp))
+        Text(stringResource(R.string.ui_capability_grants_56d2de6d), style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(top = 16.dp))
         if (!state.grantStoreAvailable || state.grantStoreError != null) {
             Text(
                 state.grantStoreError ?: if (zh) "授权存储未就绪，无法编辑或创建授权。" else "Grant storage is unavailable; grants cannot be edited or created.",
@@ -528,7 +530,7 @@ private fun AgentSummary(state: AgentsUiState, actions: AgentsActions) {
             )
         }
         if (editor.grants.isEmpty()) {
-            Text(if (zh) "没有显式能力授权。" else "No explicit capability grants.", style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(top = 6.dp))
+            Text(stringResource(R.string.ui_no_explicit_capability_grants_c2ccd114), style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(top = 6.dp))
         } else {
             editor.grants.forEach { grant ->
                 val location = listOfNotNull(grant.workspaceName, grant.grant.pathScope?.let { if (zh) "范围：$it" else "Scope: $it" }).joinToString(" · ")
@@ -554,7 +556,7 @@ private fun AgentSummary(state: AgentsUiState, actions: AgentsActions) {
             }
         }
         if (editor.trustedSkills.isNotEmpty()) {
-            Text(if (zh) "可信 Skill 绑定" else "Trusted Skill bindings", style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(top = 12.dp))
+            Text(stringResource(R.string.ui_trusted_skill_bindings_ab7c43ad), style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(top = 12.dp))
             editor.trustedSkills.forEach { skill ->
                 val status = when {
                     !skill.enabled -> if (zh) "未启用" else "Disabled"
@@ -565,7 +567,7 @@ private fun AgentSummary(state: AgentsUiState, actions: AgentsActions) {
             }
         }
         if (editor.snapshotGrantBindings.isNotEmpty()) {
-            Text(if (zh) "当前快照授权绑定" else "Current snapshot grant bindings", style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(top = 12.dp))
+            Text(stringResource(R.string.ui_current_snapshot_grant_bindings_64946389), style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(top = 12.dp))
             editor.snapshotGrantBindings.forEach { binding ->
                 val scope = binding.binding.pathScope?.let { if (zh) "范围：$it" else "Scope: $it" }
                 Text(
@@ -575,9 +577,9 @@ private fun AgentSummary(state: AgentsUiState, actions: AgentsActions) {
                 )
             }
         }
-        Text(if (zh) "检索模式：${editor.retrievalMode}" else "Retrieval mode: ${editor.retrievalMode}", style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(top = 8.dp))
+        Text(stringResource(R.string.ui_retrieval_mode_s_14a0ab5e, (editor.retrievalMode)), style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(top = 8.dp))
         OutlinedButton(onClick = actions.onSnapshot, modifier = Modifier.padding(top = 8.dp).testTag(AgentTestTags.SNAPSHOT)) {
-            Text(if (zh) "用此智能体新建会话" else "Start a new conversation with this Agent")
+            Text(stringResource(R.string.ui_start_a_new_conversation_with_this_014ebfd6))
         }
     }
 }
@@ -587,7 +589,7 @@ private fun ModelRoleRow(role: String, selectedId: String?, editor: AgentEditorU
     val selected = editor.modelOptions.firstOrNull { it.id == selectedId }
     Row(Modifier.fillMaxWidth().padding(top = 6.dp), verticalAlignment = Alignment.CenterVertically) {
         Text(role, Modifier.weight(0.25f), style = MaterialTheme.typography.labelLarge)
-        if (selected == null) Text(if (zh) "未配置" else "Not configured", Modifier.weight(0.75f), style = MaterialTheme.typography.bodySmall)
+        if (selected == null) Text(stringResource(R.string.ui_not_configured_8b6c7ecc), Modifier.weight(0.75f), style = MaterialTheme.typography.bodySmall)
         else FilterChip(selected = true, onClick = {}, enabled = false, label = { Text(selected.label) })
     }
 }
@@ -609,7 +611,7 @@ private fun AgentWorkspaceAccessCard(
             verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
             Text(
-                if (zh) "工作区访问" else "Workspace access",
+                stringResource(R.string.ui_workspace_access_7dc4e36c),
                 style = MaterialTheme.typography.titleMedium,
             )
             Text(
@@ -622,7 +624,7 @@ private fun AgentWorkspaceAccessCard(
             )
             access.selectedBackendLabel?.takeIf { it.isNotBlank() }?.let {
                 Text(
-                    if (zh) "访问通道：$it" else "Access channel: $it",
+                    stringResource(R.string.ui_access_channel_s_e7931cea, (it)),
                     style = MaterialTheme.typography.bodySmall,
                 )
             }
@@ -648,12 +650,12 @@ private fun AgentWorkspaceAccessCard(
                     onClick = actions.onChooseSafWorkspace,
                     enabled = access.canChooseSaf,
                     modifier = Modifier.weight(1f).testTag(AgentTestTags.WORKSPACE_ACCESS_SAF),
-                ) { Text(if (zh) "选择手机文件夹" else "Choose phone folder", maxLines = 2) }
+                ) { Text(stringResource(R.string.ui_choose_phone_folder_b40c3e60), maxLines = 2) }
                 OutlinedButton(
                     onClick = actions.onBrowsePrivilegedWorkspace,
                     enabled = access.canBrowsePrivileged,
                     modifier = Modifier.weight(1f).testTag(AgentTestTags.WORKSPACE_ACCESS_PRIVILEGED),
-                ) { Text(if (zh) "浏览设备目录" else "Browse device directory", maxLines = 2) }
+                ) { Text(stringResource(R.string.ui_browse_device_directory_865b3714), maxLines = 2) }
             }
             if (access.fullDeviceFilesEligible || access.fullDeviceFilesEnabled) {
                 Row(
@@ -661,10 +663,9 @@ private fun AgentWorkspaceAccessCard(
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
                     Column(Modifier.weight(1f)) {
-                        Text(if (zh) "完整设备文件" else "Full device files", style = MaterialTheme.typography.labelLarge)
+                        Text(stringResource(R.string.ui_full_device_files_42f1a6aa), style = MaterialTheme.typography.labelLarge)
                         Text(
-                            if (zh) "仅限 ADB 可见范围，不等于 Root；开启后对该智能体长期生效。"
-                            else "Limited to what ADB can see, not Root; enabling persists for this Agent.",
+                            stringResource(R.string.ui_limited_to_what_adb_can_see_9b3f736d),
                             style = MaterialTheme.typography.bodySmall,
                         )
                     }
@@ -711,12 +712,12 @@ private fun AgentEditorDialog(
                 enabled = !workspaceSelectionBusy,
                 modifier = Modifier.testTag(AgentTestTags.SAVE),
             ) {
-                Text(if (zh) "保存" else "Save")
+                Text(stringResource(R.string.ui_save_ec8e6d58))
             }
         },
         dismissButton = {
             TextButton(onClick = actions.onCloseEditor, modifier = Modifier.testTag(AgentTestTags.CANCEL)) {
-                Text(if (zh) "取消" else "Cancel")
+                Text(stringResource(R.string.ui_cancel_998b9c48))
             }
         },
     )
@@ -750,14 +751,14 @@ private fun AgentEditorPage(
                 horizontalArrangement = Arrangement.End,
             ) {
                 TextButton(onClick = actions.onCloseEditor, modifier = Modifier.testTag(AgentTestTags.CANCEL)) {
-                    Text(if (zh) "取消" else "Cancel")
+                    Text(stringResource(R.string.ui_cancel_998b9c48))
                 }
                 Button(
                     onClick = actions.onSave,
                     enabled = !workspaceSelectionBusy,
                     modifier = Modifier.testTag(AgentTestTags.SAVE),
                 ) {
-                    Text(if (zh) "保存" else "Save")
+                    Text(stringResource(R.string.ui_save_ec8e6d58))
                 }
             }
         }
@@ -790,26 +791,26 @@ private fun AgentEditorFields(
                 OutlinedTextField(
                     editor.name,
                     { actions.onEditorChange(editor.copy(name = it)) },
-                    label = { Text(if (zh) "名称" else "Name") },
+                    label = { Text(stringResource(R.string.ui_name_dd4dc4c5)) },
                     modifier = Modifier.fillMaxWidth().testTag(AgentTestTags.NAME),
                 )
                 OutlinedTextField(
                     editor.prompt,
                     { actions.onEditorChange(editor.copy(prompt = it)) },
-                    label = { Text(if (zh) "提示词修订" else "Prompt revision") },
+                    label = { Text(stringResource(R.string.ui_prompt_revision_acf2ff77)) },
                     minLines = 5,
                     modifier = Modifier.fillMaxWidth().testTag(AgentTestTags.PROMPT),
                 )
                 var showPromptHistory by androidx.compose.runtime.saveable.rememberSaveable(editor.id) { mutableStateOf(false) }
                 TextButton(onClick = { showPromptHistory = !showPromptHistory }) {
-                    Text(if (zh) "提示词历史（${editor.promptRevisions.size}）" else "Prompt history (${editor.promptRevisions.size})")
+                    Text(stringResource(R.string.ui_prompt_history_s_cb99ff1a, (editor.promptRevisions.size)))
                 }
                 if (showPromptHistory) editor.promptRevisions.filter { !it.active }.forEach { revision ->
                     TextButton(onClick = { actions.onRestorePrompt(revision.id) }) {
-                        Text(if (zh) "载入 r${revision.revision} ${revision.label}" else "Load r${revision.revision} ${revision.label}")
+                        Text(stringResource(R.string.ui_load_r_s_s_a0b0fd26, (revision.revision), (revision.label)))
                     }
                 }
-                OutlinedTextField(editor.retrievalMode, { actions.onEditorChange(editor.copy(retrievalMode = it)) }, label = { Text(if (zh) "检索模式" else "Retrieval mode") }, modifier = Modifier.fillMaxWidth())
+                OutlinedTextField(editor.retrievalMode, { actions.onEditorChange(editor.copy(retrievalMode = it)) }, label = { Text(stringResource(R.string.ui_retrieval_mode_ab73f89a)) }, modifier = Modifier.fillMaxWidth())
                 Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                     Switch(
                         checked = editor.webSearchEnabled,
@@ -817,10 +818,9 @@ private fun AgentEditorFields(
                         modifier = Modifier.testTag("agents.editor.web_search"),
                     )
                     Column(Modifier.padding(start = 12.dp)) {
-                        Text(if (zh) "允许联网搜索" else "Allow web search")
+                        Text(stringResource(R.string.ui_allow_web_search_7d0fa1ad))
                         Text(
-                            if (zh) "使用设置中的搜索服务，无需逐次确认，可能收费。开启适用于新会话；关闭立即撤权。"
-                            else "Use the configured search service without per-query prompts; charges may apply. Enable for new conversations; disable immediately.",
+                            stringResource(R.string.ui_use_the_configured_search_service_without_92bc0ab7),
                             style = MaterialTheme.typography.bodySmall,
                         )
                     }
@@ -831,22 +831,22 @@ private fun AgentEditorFields(
                         onCheckedChange = { actions.onEditorChange(editor.copy(skipToolConfirmations = it)) },
                     )
                     Column(Modifier.padding(start = 12.dp)) {
-                        Text(if (zh) "跳过工具运行确认" else "Skip tool run confirmations")
+                        Text(stringResource(R.string.ui_skip_tool_run_confirmations_e4481e04))
                         Text(
-                            if (zh) "新会话中的工具和程序可免逐次确认；仍须满足授权。关闭后立即恢复确认。" else "New conversations can run tools without per-call prompts; grants still apply. Turning this off takes effect immediately.",
+                            stringResource(R.string.ui_new_conversations_can_run_tools_without_a6129257),
                             style = MaterialTheme.typography.bodySmall,
                         )
                     }
                 }
-                Text(if (zh) "模型角色" else "Model roles", style = MaterialTheme.typography.titleMedium)
+                Text(stringResource(R.string.ui_model_roles_fc5da317), style = MaterialTheme.typography.titleMedium)
                 RoleDropdown(if (zh) "对话" else "Chat", editor.chatModelId, editor.modelOptions, "CHAT", zh) { actions.onEditorChange(editor.copy(chatModelId = it)) }
                 RoleDropdown(if (zh) "视觉（可选）" else "Vision (optional)", editor.visionModelId, editor.modelOptions, "VISION", zh) { actions.onEditorChange(editor.copy(visionModelId = it)) }
                 if (editor.modelOptions.any { it.role.equals("RERANKER", true) }) {
                     RoleDropdown(if (zh) "重排" else "Reranker", editor.rerankerModelId, editor.modelOptions, "RERANKER", zh) { actions.onEditorChange(editor.copy(rerankerModelId = it)) }
                 }
-                Text(if (zh) "参数" else "Parameters", style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(top = 8.dp))
+                Text(stringResource(R.string.ui_parameters_af94b2b3), style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(top = 8.dp))
                 val parameterNames = (editor.parameterSchema + editor.parameters.keys).distinct()
-                if (parameterNames.isEmpty()) Text(if (zh) "参数模式不可用，因此不显示覆盖字段。" else "Parameter schema unavailable; no override field is shown.", style = MaterialTheme.typography.bodySmall)
+                if (parameterNames.isEmpty()) Text(stringResource(R.string.ui_parameter_schema_unavailable_no_override_fiel_4f661441), style = MaterialTheme.typography.bodySmall)
                 parameterNames.forEach { name ->
                     OutlinedTextField(
                         value = editor.parameters[name].orEmpty(),
@@ -857,8 +857,8 @@ private fun AgentEditorFields(
                 }
                 AgentContextPolicyCard(editor = editor, actions = actions, zh = zh, modifier = Modifier.padding(top = 8.dp))
                 Column(Modifier.fillMaxWidth().testTag(AgentTestTags.RESOURCES)) {
-                    Text(if (zh) "资源绑定" else "Resource bindings", style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(top = 8.dp))
-                    if (editor.resourceBindings.isEmpty()) Text(if (zh) "暂无可绑定的知识库或技能。" else "No knowledge bases or skills are available to bind.", style = MaterialTheme.typography.bodySmall)
+                    Text(stringResource(R.string.ui_resource_bindings_14fb156b), style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(top = 8.dp))
+                    if (editor.resourceBindings.isEmpty()) Text(stringResource(R.string.ui_no_knowledge_bases_or_skills_are_e2526f0c), style = MaterialTheme.typography.bodySmall)
                     editor.resourceBindings.forEach { binding ->
                         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                             Checkbox(
@@ -875,7 +875,7 @@ private fun AgentEditorFields(
                                 TextButton(
                                     onClick = { actions.onToggleResource(binding.id, false) },
                                     modifier = Modifier.testTag("agents.resource.unbind.${binding.id}"),
-                                ) { Text(if (zh) "取消关联" else "Unlink") }
+                                ) { Text(stringResource(R.string.ui_unlink_7882f235)) }
                             }
                         }
                     }
@@ -918,14 +918,13 @@ private fun AgentContextPolicyCard(
             .testTag(AgentTestTags.CONTEXT_POLICY),
         verticalArrangement = Arrangement.spacedBy(6.dp),
     ) {
-        Text(if (zh) "上下文与自动压缩" else "Context & auto-compaction", fontWeight = FontWeight.SemiBold)
+        Text(stringResource(R.string.ui_context_auto_compaction_2e8cc503), fontWeight = FontWeight.SemiBold)
         Text(
-            if (zh) "自动摘要保留较早对话，原始记录不删除。摘要可能产生额外费用；设置用于新会话。"
-            else "Summarize earlier turns while keeping the original history. Summaries may incur extra cost; settings apply to new sessions.",
+            stringResource(R.string.ui_summarize_earlier_turns_while_keeping_the_bddcf43c),
             style = MaterialTheme.typography.bodySmall,
         )
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-            Text(if (zh) "自动压缩" else "Auto-compaction", modifier = Modifier.weight(1f))
+            Text(stringResource(R.string.ui_auto_compaction_78571f2d), modifier = Modifier.weight(1f))
             Switch(
                 checked = draft.autoCompact,
                 onCheckedChange = { update(draft.copy(autoCompact = it)) },
@@ -935,9 +934,8 @@ private fun AgentContextPolicyCard(
         Text(draft.summary(zh), style = MaterialTheme.typography.bodySmall)
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
             Column(Modifier.weight(1f)) {
-                Text(if (zh) "按模型窗口自动调整" else "Adapt to the model window")
-                Text(if (zh) "达到可用输入容量的软阈值才压缩；未知窗口采用本地保护值。"
-                    else "Compact at the available input threshold; unknown windows use a local fallback.",
+                Text(stringResource(R.string.ui_adapt_to_the_model_window_f6a84b14))
+                Text(stringResource(R.string.ui_compact_at_the_available_input_threshold_6040fd8f),
                     style = MaterialTheme.typography.bodySmall)
             }
             Switch(checked = draft.modelAwareCompaction,
@@ -948,7 +946,7 @@ private fun AgentContextPolicyCard(
             TextButton(
                 onClick = { update(draft.recommended()) },
                 modifier = Modifier.testTag("agents.editor.context_policy.recommended"),
-            ) { Text(if (zh) "使用推荐设置" else "Use recommended settings") }
+            ) { Text(stringResource(R.string.ui_use_recommended_settings_6754f65f)) }
             TextButton(
                 onClick = { advanced = !advanced },
                 modifier = Modifier.testTag(AgentTestTags.CONTEXT_POLICY_ADVANCED),
@@ -957,8 +955,7 @@ private fun AgentContextPolicyCard(
             }
         }
         if (advanced) {
-            Text(if (zh) "预算采用保守估算。总请求包含摘要，工具与耗时另有硬上限。"
-                else "Budgets use conservative estimates. Request caps include summaries; tool and runtime caps also apply.",
+            Text(stringResource(R.string.ui_budgets_use_conservative_estimates_request_ca_e643af41),
                 style = MaterialTheme.typography.bodySmall)
         ContextPolicyField(
             label = if (zh) "输入预算（保守估算单位）" else "Input budget (conservative estimate)",
@@ -1087,7 +1084,7 @@ private fun AgentDefaultWorkspaceCard(
         verticalArrangement = Arrangement.spacedBy(6.dp),
     ) {
         Text(
-            if (zh) "新会话默认工作区" else "Default workspace for new conversations",
+            stringResource(R.string.ui_default_workspace_for_new_conversations_a2e3217d),
             fontWeight = FontWeight.SemiBold,
         )
         Text(
@@ -1189,13 +1186,13 @@ private fun AgentGrantEditor(
 ) {
     val grantEditorReady = grantStoreAvailable && grantStoreError == null
     Column(Modifier.fillMaxWidth().testTag(AgentTestTags.GRANTS)) {
-        Text(if (zh) "高级权限" else "Advanced permissions", style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(top = 8.dp))
+        Text(stringResource(R.string.ui_advanced_permissions_e86be370), style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(top = 8.dp))
         grantStoreError?.let {
             Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
         }
         if (!grantStoreAvailable) {
             Text(
-                if (zh) "授权存储未就绪；保存不会静默忽略授权变更。" else "Grant storage is unavailable; grant changes will not be silently ignored.",
+                stringResource(R.string.ui_grant_storage_is_unavailable_grant_changes_f1d5338e),
                 color = MaterialTheme.colorScheme.error,
                 style = MaterialTheme.typography.bodySmall,
             )
@@ -1210,10 +1207,9 @@ private fun AgentGrantEditor(
                 .testTag(AgentTestTags.WORKSPACE_PRESET),
             verticalArrangement = Arrangement.spacedBy(6.dp),
         ) {
-            Text(if (zh) "快捷授权文件工具" else "Quick file tool grant", fontWeight = FontWeight.SemiBold)
+            Text(stringResource(R.string.ui_quick_file_tool_grant_850a14d4), fontWeight = FontWeight.SemiBold)
             Text(
-                if (zh) "选择工作区并授予读取或读写权限；可在下方逐项调整。"
-                else "Choose a SAF or app workspace, then grant the common read-only or read-write tools at once. Advanced per-capability grants remain below.",
+                stringResource(R.string.ui_choose_a_saf_or_app_workspace_dcd4edaf),
                 style = MaterialTheme.typography.bodySmall,
             )
             WorkspaceDropdown(
@@ -1233,7 +1229,7 @@ private fun AgentGrantEditor(
             }
             if (editor.workspaces.none { it.enabled }) {
                 Text(
-                    if (zh) "暂无可用工作区；请先到设置选择 SAF 目录。" else "No workspace is available; choose a SAF directory in Settings first.",
+                    stringResource(R.string.ui_no_workspace_is_available_choose_a_67498e4c),
                     color = MaterialTheme.colorScheme.error,
                     style = MaterialTheme.typography.bodySmall,
                 )
@@ -1259,7 +1255,7 @@ private fun AgentGrantEditor(
                     },
                     enabled = grantEditorReady && presetWorkspaceId != null,
                     modifier = Modifier.testTag(AgentTestTags.WORKSPACE_PRESET_READ_ONLY),
-                ) { Text(if (zh) "允许读取" else "Allow reading") }
+                ) { Text(stringResource(R.string.ui_allow_reading_b738171d)) }
                 Button(
                     onClick = {
                         presetWorkspaceId?.let { workspaceId ->
@@ -1278,7 +1274,7 @@ private fun AgentGrantEditor(
                         it.id == presetWorkspaceId && it.enabled && it.writable
                     },
                     modifier = Modifier.testTag(AgentTestTags.WORKSPACE_PRESET_READ_WRITE),
-                ) { Text(if (zh) "允许读写" else "Allow reading and writing") }
+                ) { Text(stringResource(R.string.ui_allow_reading_and_writing_c57f45b3)) }
             }
             editor.workspaceGrantPreset?.let { preset ->
                 Text(
@@ -1292,13 +1288,12 @@ private fun AgentGrantEditor(
                 )
             }
             Text(
-                if (zh) "保存后请用此智能体新建会话；已有会话的工具不会变化。"
-                else "Start a new conversation with this Agent after saving; existing conversations do not change.",
+                stringResource(R.string.ui_start_a_new_conversation_with_this_a6054013),
                 style = MaterialTheme.typography.bodySmall,
             )
         }
         if (editor.grants.isEmpty()) {
-            Text(if (zh) "暂无现有授权。" else "No existing grants.", style = MaterialTheme.typography.bodySmall)
+            Text(stringResource(R.string.ui_no_existing_grants_44bd93be), style = MaterialTheme.typography.bodySmall)
         } else {
             editor.grants.forEach { grant ->
                 val location = listOfNotNull(
@@ -1339,7 +1334,7 @@ private fun AgentGrantEditor(
                             listOfNotNull(location.takeIf { it.isNotBlank() }, grantLifetimeLabel(grant.grant.lifetime, zh), "r${grant.grant.revision}", stateLabel).joinToString(" · "),
                             style = MaterialTheme.typography.labelSmall,
                         )
-                        grant.skillName?.let { Text(if (zh) "可信 Skill：$it" else "Trusted Skill: $it", style = MaterialTheme.typography.labelSmall) }
+                        grant.skillName?.let { Text(stringResource(R.string.ui_trusted_skill_s_0f8385b9, (it)), style = MaterialTheme.typography.labelSmall) }
                     }
                 }
             }
@@ -1350,7 +1345,7 @@ private fun AgentGrantEditor(
                 enabled = grantEditorReady,
                 modifier = Modifier.fillMaxWidth().testTag(AgentTestTags.GRANT_ADD),
             ) {
-                Text(if (zh) "添加能力授权" else "Add capability grant")
+                Text(stringResource(R.string.ui_add_capability_grant_1165e325))
             }
         } else {
             AgentGrantDraftEditor(editor, actions, zh, grantEditorReady)
@@ -1367,7 +1362,7 @@ private fun AgentGrantDraftEditor(editor: AgentEditorUi, actions: AgentsActions,
             .padding(10.dp),
         verticalArrangement = Arrangement.spacedBy(6.dp),
     ) {
-        Text(if (zh) "新授权（保存 Agent 时写入）" else "New grant (saved with the Agent)", fontWeight = FontWeight.SemiBold)
+        Text(stringResource(R.string.ui_new_grant_saved_with_the_agent_4d02b849), fontWeight = FontWeight.SemiBold)
         CapabilityDropdown(draft.capability, zh, enabled) {
             actions.onEditorChange(
                 editor.copy(
@@ -1381,7 +1376,7 @@ private fun AgentGrantDraftEditor(editor: AgentEditorUi, actions: AgentsActions,
         }
         if (draft.capability.value == CapabilityId.SHELL_EXECUTE) {
             Text(
-                if (zh) "shell.execute 仅在已选 Authority、Dangerous Mode 和实时策略均允许时生效。" else "shell.execute is effective only when the selected Authority, Dangerous Mode, and live policy allow it.",
+                stringResource(R.string.ui_shell_execute_is_effective_only_when_ba884065),
                 color = MaterialTheme.colorScheme.error,
                 style = MaterialTheme.typography.bodySmall,
                 modifier = Modifier.testTag(AgentTestTags.GRANT_SHELL),
@@ -1399,8 +1394,8 @@ private fun AgentGrantDraftEditor(editor: AgentEditorUi, actions: AgentsActions,
             value = draft.pathScope.orEmpty(),
             onValueChange = { actions.onEditorChange(editor.copy(grantDraft = draft.copy(pathScope = it.ifBlank { null }))) },
             enabled = enabled && draft.capability.value != CapabilityId.SHELL_EXECUTE,
-            label = { Text(if (zh) "相对范围（可选）" else "Relative scope (optional)") },
-            supportingText = { Text(if (zh) "仅填写工作区内的相对范围，不是设备路径。" else "Use a workspace-relative scope, never a device path.") },
+            label = { Text(stringResource(R.string.ui_relative_scope_optional_14c79525)) },
+            supportingText = { Text(stringResource(R.string.ui_use_a_workspace_relative_scope_never_ccc95195)) },
             modifier = Modifier.fillMaxWidth().testTag(AgentTestTags.GRANT_SCOPE),
         )
         val hasEditorLifetimeContext = draft.lifetime in agentEditorGrantLifetimes
@@ -1432,7 +1427,7 @@ private fun AgentGrantDraftEditor(editor: AgentEditorUi, actions: AgentsActions,
             enabled = enabled,
         ) { installId -> actions.onEditorChange(editor.copy(grantDraft = draft.copy(skillInstallId = installId))) }
         TextButton(onClick = { actions.onEditorChange(editor.copy(grantDraft = null)) }, enabled = enabled) {
-            Text(if (zh) "移除此新授权" else "Remove this new grant")
+            Text(stringResource(R.string.ui_remove_this_new_grant_4e106b82))
         }
     }
 }
@@ -1490,7 +1485,7 @@ private fun WorkspaceDropdown(
         }
         if (allowAgentScope) {
             DropdownMenuItem(
-                text = { Text(if (zh) "Agent 级（不限定工作区）" else "Agent scoped (no workspace)") },
+                text = { Text(stringResource(R.string.ui_agent_scoped_no_workspace_7790b7e9)) },
                 onClick = { expanded = false; onSelect(null) },
             )
         }
@@ -1519,7 +1514,7 @@ private fun workspaceAccessModeLabel(workspace: AgentWorkspaceUi, zh: Boolean): 
 @Composable
 @OptIn(ExperimentalLayoutApi::class)
 private fun LifetimeSelector(selected: GrantLifetime, zh: Boolean, enabled: Boolean, onSelect: (GrantLifetime) -> Unit) {
-    Text(if (zh) "授权期限" else "Grant lifetime", style = MaterialTheme.typography.labelLarge, modifier = Modifier.testTag(AgentTestTags.GRANT_LIFETIME))
+    Text(stringResource(R.string.ui_grant_lifetime_614735ae), style = MaterialTheme.typography.labelLarge, modifier = Modifier.testTag(AgentTestTags.GRANT_LIFETIME))
     FlowRow(
         modifier = Modifier.fillMaxWidth(),
         horizontalArrangement = Arrangement.spacedBy(4.dp),
@@ -1556,7 +1551,7 @@ private fun SkillBindingDropdown(
     }
     DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
         DropdownMenuItem(
-            text = { Text(if (zh) "无（Agent 级授权）" else "None (Agent scoped)") },
+            text = { Text(stringResource(R.string.ui_none_agent_scoped_c3eaddc7)) },
             onClick = { expanded = false; onSelect(null) },
         )
         skills.forEach { skill ->
@@ -1596,7 +1591,7 @@ private fun RoleDropdown(
         }
         DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
             if (matching.isEmpty()) {
-                DropdownMenuItem(text = { Text(if (zh) "没有可用的 $role 模型" else "No $role models available") }, onClick = { expanded = false }, enabled = false)
+                DropdownMenuItem(text = { Text(stringResource(R.string.ui_no_s_models_available_2ccc24d2, (role))) }, onClick = { expanded = false }, enabled = false)
             } else {
                 matching.forEach { option ->
                     DropdownMenuItem(

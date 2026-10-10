@@ -4,6 +4,9 @@
 package runtime.mobileagent
 
 import android.graphics.Color
+import android.content.Context
+import runtime.mobileagent.domain.LocalePreference
+import runtime.mobileagent.ui.ActivityLocaleConfiguration
 import android.os.Bundle
 import android.Manifest
 import android.content.pm.PackageManager
@@ -27,9 +30,39 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.runInterruptible
 import runtime.mobileagent.background.ImportWorkScheduler
 import runtime.mobileagent.ui.MainApp
+import runtime.mobileagent.ui.DatabaseRecoveryScreen
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
 
 class MainActivity : ComponentActivity() {
+    private val localeConfiguration = ActivityLocaleConfiguration()
+
+    override fun attachBaseContext(newBase: Context) {
+        super.attachBaseContext(localeConfiguration.attach(newBase))
+    }
+
+    internal fun syncLocalePreference(preference: LocalePreference) {
+        localeConfiguration.sync(this, preference)
+    }
+
     private var importRecovery: Job? = null
+    private var recoveryBusy by mutableStateOf(false)
+    private var recoveryMessage by mutableStateOf<String?>(null)
+    private val exportRecovery = registerForActivityResult(ActivityResultContracts.CreateDocument("application/zip")) { uri ->
+        if (uri != null) lifecycleScope.launch {
+            recoveryBusy = true
+            recoveryMessage = try {
+                runInterruptible(Dispatchers.IO) {
+                    val recovery = checkNotNull((application as MobileAgentApp).databaseRecovery)
+                    checkNotNull(contentResolver.openOutputStream(uri)).use { recovery.export(it) }
+                }
+                getString(R.string.database_recovery_exported)
+            } catch (cancelled: CancellationException) { throw cancelled }
+            catch (_: Exception) { getString(R.string.database_recovery_failed) }
+            finally { recoveryBusy = false }
+        }
+    }
     private var updateInstallRunning = false
     private var pendingUpdatePermission = false
     private var installingUpdates: runtime.mobileagent.updates.AppUpdateCoordinator? = null
@@ -48,6 +81,24 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         (application as? MobileAgentApp)?.ensureHostInitialized()
+        if ((application as MobileAgentApp).databaseRecovery != null) {
+            configureSystemBars()
+            setContent {
+                DatabaseRecoveryScreen(recoveryBusy, recoveryMessage,
+                    onExport = { exportRecovery.launch("mobile-agent-database-recovery.zip") },
+                    onStartNew = { lifecycleScope.launch {
+                        recoveryBusy = true
+                        try {
+                            runInterruptible(Dispatchers.IO) { (application as MobileAgentApp).startNewDatabaseFromRecovery() }
+                            recreate()
+                        } catch (cancelled: CancellationException) { throw cancelled }
+                        catch (_: Exception) { recoveryMessage = getString(R.string.database_recovery_failed) }
+                        finally { recoveryBusy = false }
+                    } },
+                )
+            }
+            return
+        }
         pendingUpdatePermission = savedInstanceState?.getBoolean("pending-update-permission") ?: false
         configureSystemBars()
         setContent { MainApp(onMoveTaskToBack = { moveTaskToBack(true) }) }
@@ -62,6 +113,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onStart() {
         super.onStart()
+        if (!(application as MobileAgentApp).isHostInitialized) return
         // Foreground refresh belongs to the Activity/process lifecycle, not to construction of
         // the announcements screen ViewModel. The coordinator handles single-flight and backoff.
         (application as? MobileAgentApp)?.container?.announcementRefreshCoordinator?.foreground()
@@ -90,6 +142,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onStop() {
         super.onStop()
+        if (!(application as MobileAgentApp).isHostInitialized) return
         // Leaving the foreground stops the update ticker; no service, worker or timer keeps running.
         (application as? MobileAgentApp)?.container?.appUpdates?.background()
     }

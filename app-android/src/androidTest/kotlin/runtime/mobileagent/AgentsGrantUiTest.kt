@@ -48,6 +48,7 @@ import runtime.mobileagent.feature.agents.AgentWorkspaceAccessUi
 import runtime.mobileagent.feature.agents.AgentsActions
 import runtime.mobileagent.feature.agents.AgentsScreen
 import runtime.mobileagent.feature.agents.AgentsUiState
+import runtime.mobileagent.feature.agents.R as AgentsR
 import runtime.mobileagent.integration.WorkspaceAccessItem
 import runtime.mobileagent.integration.WorkspaceAccessStatus
 import runtime.mobileagent.skills.tooling.ToolErrorCode
@@ -312,7 +313,10 @@ class AgentsGrantUiTest {
             .performClick()
         assertNull(editor.defaultWorkspaceId)
         assertEquals(listOf("workspace.one", null), selectedDefaults)
-        composeRule.onNodeWithText("高级权限", useUnmergedTree = true)
+        composeRule.onNodeWithText(
+            composeRule.activity.getString(AgentsR.string.ui_advanced_permissions_e86be370),
+            useUnmergedTree = true,
+        )
             .performScrollTo()
             .assertIsDisplayed()
     }
@@ -341,7 +345,10 @@ class AgentsGrantUiTest {
             .performScrollTo()
             .performClick()
         assertEquals(AgentWorkspaceAccessPreset.READ_ONLY, editor.workspaceGrantPreset?.access)
-        composeRule.onNodeWithText("保存后请用此智能体新建会话；已有会话的工具不会变化。", useUnmergedTree = true)
+        composeRule.onNodeWithText(
+            composeRule.activity.getString(AgentsR.string.ui_start_a_new_conversation_with_this_a6054013),
+            useUnmergedTree = true,
+        )
             .performScrollTo()
             .assertIsDisplayed()
     }
@@ -406,7 +413,10 @@ class AgentsGrantUiTest {
         composeRule.onNodeWithTag(AgentTestTags.GRANT_SHELL, useUnmergedTree = true)
             .performScrollTo()
             .assertIsDisplayed()
-        composeRule.onNodeWithText("仅填写工作区内的相对范围，不是设备路径。", useUnmergedTree = true)
+        composeRule.onNodeWithText(
+            composeRule.activity.getString(AgentsR.string.ui_use_a_workspace_relative_scope_never_ccc95195),
+            useUnmergedTree = true,
+        )
             .performScrollTo()
             .assertIsDisplayed()
         assertTrue(composeRule.onAllNodesWithText("content://", useUnmergedTree = true).fetchSemanticsNodes().isEmpty())

@@ -7,6 +7,11 @@ import android.app.Application
 import androidx.compose.runtime.mutableStateOf
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.SavedStateHandle
+import androidx.lifecycle.viewModelScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.jsonObject
@@ -418,6 +423,7 @@ class AgentsViewModel(
     private val canonicalWorkspaceSink: runtime.mobileagent.workspace.CanonicalWorkspaceSink? =
         (app.container as? runtime.mobileagent.workspace.CanonicalWorkspaceSinkProvider)?.canonicalWorkspaceSink
     val state = mutableStateOf(AgentsUiState())
+    val saving = mutableStateOf(false)
     private var editorBaseline: AgentEditorUi? = null
     private var grantPortError: String? = null
     /**
@@ -437,15 +443,19 @@ class AgentsViewModel(
     }
 
     fun reload() {
+        state.value = loadState(state.value)
+    }
+
+    private fun loadState(current: AgentsUiState): AgentsUiState {
         val profiles = app.container.profiles
         val agents = app.container.agents.list()
         val enabledSkillIds = loadGrantData(null).trustedSkills.filter { it.enabled && it.trusted }.map { it.installId }.toSet()
-        val selected = state.value.selectedAgentId
+        val selected = current.selectedAgentId
             ?: savedStateHandle.get<String>(SELECTED_AGENT_KEY)
             ?: app.container.uiPreferences.getString("selected-agent", null)
         val selectedId = selected?.takeIf { id -> agents.any { it.id == id } }
         val summary = selectedId?.let { editorFrom(it) }
-        state.value = state.value.copy(
+        return current.copy(
             agents = agents.map { agent ->
                 AgentCardUi(agent.id, agent.name, agent.revision,
                     profiles.getModel(agent.chatProfileId)?.modelId ?: "模型不可用",
@@ -460,6 +470,7 @@ class AgentsViewModel(
     }
 
     fun select(id: String) {
+        if (saving.value) return
         if (state.value.editorDirty) return
         if (app.container.agents.get(id) == null) return
         editorSessionToken += 1L
@@ -481,6 +492,7 @@ class AgentsViewModel(
     }
 
     fun openEditor(id: String?) {
+        if (saving.value) return
         editorSessionToken += 1L
         pendingWorkspaceDraft = null
         pendingFullDeviceDraft = null
@@ -498,9 +510,11 @@ class AgentsViewModel(
     }
 
     fun edit(editor: AgentEditorUi) {
+        if (saving.value) return
         state.value = state.value.copy(editor = editor, editorDirty = pendingWorkspaceDraft != null || pendingFullDeviceDraft != null || editor != editorBaseline)
     }
     fun closeEditor() {
+        if (saving.value) return
         editorSessionToken += 1L
         editorBaseline = null
         pendingWorkspaceDraft = null
@@ -514,7 +528,7 @@ class AgentsViewModel(
         draft: runtime.mobileagent.domain.WorkspaceDraft,
         expectedEditorSessionToken: Long = editorSessionToken,
     ): Boolean {
-        if (expectedEditorSessionToken != editorSessionToken) return false
+        if (saving.value || expectedEditorSessionToken != editorSessionToken) return false
         val editor = state.value.editor ?: return false
         pendingWorkspaceDraft = draft
         val data = loadGrantData(null)
@@ -534,7 +548,7 @@ class AgentsViewModel(
 
     /** Keep explicit full-device consent in this new-Agent editor only, without granting yet. */
     fun stageFullDeviceFiles(expectedEditorSessionToken: Long = editorSessionToken): Boolean {
-        if (expectedEditorSessionToken != editorSessionToken || state.value.editor?.id != null || !state.value.editorOpen) return false
+        if (saving.value || expectedEditorSessionToken != editorSessionToken || state.value.editor?.id != null || !state.value.editorOpen) return false
         return try {
             val snapshot = authorityPort.snapshot()
             require(snapshot.selectedAuthority != runtime.mobileagent.domain.Authority.NONE &&
@@ -553,6 +567,7 @@ class AgentsViewModel(
     fun hasPendingFullDeviceFiles(): Boolean = pendingFullDeviceDraft != null
 
     fun clearFullDeviceFilesDraft() {
+        if (saving.value) return
         pendingFullDeviceDraft = null
         state.value = state.value.copy(editorDirty = pendingWorkspaceDraft != null || state.value.editor != editorBaseline)
     }
@@ -562,11 +577,13 @@ class AgentsViewModel(
 
     /** Drop any staged draft without mutating persisted state. */
     fun clearWorkspaceDraft() {
+        if (saving.value) return
         pendingWorkspaceDraft = null
     }
 
     /** Refresh canonical default/grants after an explicit existing-Agent workspace operation. */
     fun refreshWorkspaceConfiguration() {
+        if (saving.value) return
         val editor = state.value.editor ?: return
         val data = loadGrantData(editor.id)
         val refreshed = editor.withWorkspaceConfiguration(data).let { current ->
@@ -596,9 +613,58 @@ class AgentsViewModel(
         }
     }
 
-    fun save(): Boolean {
-        val editor = state.value.editor ?: return false
-        return try {
+    private data class SaveResult(val agentId: String, val workspaceUpdated: Boolean)
+
+    /** Freeze the editor until durable writes and privileged reattachment finish off Main. */
+    fun save() {
+        viewModelScope.launch { saveAndAwait() }
+    }
+
+    internal suspend fun saveAndAwait(): Boolean = withContext(Dispatchers.Main.immediate) {
+        if (saving.value) return@withContext false
+        val editor = state.value.editor ?: return@withContext false
+        saving.value = true
+        state.value = state.value.copy(error = null)
+        try {
+            // Once persistence begins, finish success or compensating rollback even if the
+            // editor's owner is cleared. No profile is left behind by a cancelled UI job.
+            val result = withContext(NonCancellable + Dispatchers.IO) { persistEditor(editor) }
+            app.container.uiPreferences.edit().putString("selected-agent", result.agentId).apply()
+            savedStateHandle[SELECTED_AGENT_KEY] = result.agentId
+            savedStateHandle.remove<String>(EDITOR_ID_KEY)
+            editorSessionToken += 1L
+            editorBaseline = null
+            pendingWorkspaceDraft = null
+            pendingFullDeviceDraft = null
+            state.value = state.value.copy(
+                selectedAgentId = result.agentId,
+                editor = null,
+                editorOpen = false,
+                editorDirty = false,
+                error = null,
+                status = if (result.workspaceUpdated) {
+                    "已保存 Agent、工作区默认值和能力授权；新会话将使用默认值，旧会话不变。"
+                } else {
+                    "已保存 Agent；旧会话快照不变。"
+                },
+                grantStoreAvailable = grantPort.available,
+                grantStoreError = grantPortError,
+            )
+            val current = state.value
+            state.value = withContext(Dispatchers.IO) { loadState(current) }
+            true
+        } catch (cancel: kotlinx.coroutines.CancellationException) {
+            throw cancel
+        } catch (failure: Exception) {
+            state.value = state.value.copy(error = SecretRedactor.redact(failure.message ?: "保存 Agent 失败。"))
+            false
+        } finally {
+            saving.value = false
+        }
+    }
+
+    private suspend fun persistEditor(editor: AgentEditorUi): SaveResult {
+        return run {
             require(editor.name.isNotBlank()) { "请填写 Agent 名称。" }
             val model = editor.chatModelId ?: error("请选择 Chat 模型。")
             require(editor.retrievalMode in setOf("explicit", "automatic")) { "检索模式必须是 explicit 或 automatic。" }
@@ -670,38 +736,13 @@ class AgentsViewModel(
                 commitPendingFullDeviceFiles(saved.id)
                 val workspaceUpdated = defaultChanged || hadDraft ||
                     editor.workspaceGrantPreset != null || editor.grantDraft != null
-                app.container.uiPreferences.edit().putString("selected-agent", saved.id).apply()
-                savedStateHandle[SELECTED_AGENT_KEY] = saved.id
-                savedStateHandle.remove<String>(EDITOR_ID_KEY)
-                editorSessionToken += 1L
-                editorBaseline = null
-                pendingWorkspaceDraft = null
-                pendingFullDeviceDraft = null
-                state.value = state.value.copy(
-                    selectedAgentId = saved.id,
-                    editor = null,
-                    editorOpen = false,
-                    editorDirty = false,
-                    error = null,
-                    status = if (workspaceUpdated) {
-                        "已保存 Agent、工作区默认值和能力授权；新会话将使用默认值，旧会话不变。"
-                    } else {
-                        "已保存 Agent；旧会话快照不变。"
-                    },
-                    grantStoreAvailable = grantPort.available,
-                    grantStoreError = grantPortError,
-                )
-                reload()
-                true
+                SaveResult(saved.id, workspaceUpdated)
             } catch (failure: Exception) {
                 if (createdNew && savedId != null) {
                     rollbackNewAgent(savedId)
                 }
                 throw failure
             }
-        } catch (error: Exception) {
-            state.value = state.value.copy(error = SecretRedactor.redact(error.message ?: "保存 Agent 失败。"))
-            false
         }
     }
 
@@ -782,14 +823,13 @@ class AgentsViewModel(
      * newly-created Agent; editing an existing Agent never goes through the
      * draft path because the editor already supplies an agent id.
      */
-    private fun commitPendingWorkspaceDraft(agentId: String) {
+    private suspend fun commitPendingWorkspaceDraft(agentId: String) {
         val draft = pendingWorkspaceDraft ?: return
         val sink = canonicalWorkspaceSink ?: error("工作区写入通道未就绪。")
         // The draft commit is part of the Agent save and must complete before
         // save() reports success, so an abandoned editor never leaves a
-        // half-configured Agent. It may reattach a privileged backend, hence
-        // the blocking bridge over the suspend sink.
-        val result = kotlinx.coroutines.runBlocking { sink.commitDraft(draft, agentId) }
+        // half-configured Agent. This suspend path runs on the save IO dispatcher.
+        val result = sink.commitDraft(draft, agentId)
         if (result is runtime.mobileagent.integration.WorkspaceAccessResult.Failure) {
             error("保存工作区授权失败：${result.code.name}")
         }
@@ -805,13 +845,12 @@ class AgentsViewModel(
         }
     }
 
-    private fun commitPendingFullDeviceFiles(agentId: String) {
+    private suspend fun commitPendingFullDeviceFiles(agentId: String) {
         val draft = pendingFullDeviceDraft ?: return
         validatePendingFullDeviceFiles()
         val sink = canonicalWorkspaceSink ?: error("工作区写入通道未就绪。")
         val target = runtime.mobileagent.domain.WorkspaceTarget(agentId = agentId)
-        val result = kotlinx.coroutines.runBlocking {
-            sink.openFullDeviceFiles(
+        val result = sink.openFullDeviceFiles(
                 authority = draft.authority,
                 request = runtime.mobileagent.skills.tooling.FullDeviceFilesRequest(
                     workspaceId = runtime.mobileagent.workspace.agentFullDeviceWorkspaceId(agentId, draft.authority),
@@ -819,7 +858,6 @@ class AgentsViewModel(
                 ),
                 plan = runtime.mobileagent.domain.WorkspaceIntent.ADD_TO_LIBRARY.plan(target), target = target,
             )
-        }
         require(result is runtime.mobileagent.integration.WorkspaceAccessResult.Success) {
             "开启完整设备文件失败：${(result as? runtime.mobileagent.integration.WorkspaceAccessResult.Failure)?.code?.name ?: "CONFLICT"}；请重新确认或取消开启后重试。"
         }
@@ -840,7 +878,7 @@ class AgentsViewModel(
         runCatching { app.container.agents.delete(agentId) }
     }
 
-    private fun persistWorkspaceDefault(editor: AgentEditorUi, agentId: String) {
+    private suspend fun persistWorkspaceDefault(editor: AgentEditorUi, agentId: String) {
         val port = threadWorkspacePort ?: error("线程工作区绑定存储未就绪。")
         require(port.available) { port.unavailableMessage }
         val current = port.agentWorkspaceDefault(agentId)
@@ -852,13 +890,11 @@ class AgentsViewModel(
         if (selectedWorkspaceId != null) {
             val sink = canonicalWorkspaceSink ?: error("工作区写入通道未就绪。")
             val target = runtime.mobileagent.domain.WorkspaceTarget(agentId = agentId)
-            val result = kotlinx.coroutines.runBlocking {
-                sink.useRecent(
+            val result = sink.useRecent(
                     workspaceId = selectedWorkspaceId,
                     plan = runtime.mobileagent.domain.WorkspaceIntent.SET_AGENT_DEFAULT.plan(target),
                     target = target,
                 )
-            }
             if (result is runtime.mobileagent.integration.WorkspaceAccessResult.Failure) {
                 error("保存工作区授权失败：${result.code.name}")
             }

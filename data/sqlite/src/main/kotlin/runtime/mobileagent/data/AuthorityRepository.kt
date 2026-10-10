@@ -5,6 +5,10 @@ package runtime.mobileagent.data
 
 import java.time.Instant
 import java.util.UUID
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.update
 import runtime.mobileagent.domain.ApprovalDecision
 import runtime.mobileagent.domain.ApprovalRecord
 import runtime.mobileagent.domain.Authority
@@ -839,6 +843,10 @@ class CapabilityGrantRepository(
     private val db: SqlConnection,
     private val clock: () -> String = { Utc.nowIso() },
 ) {
+    private val changeRevision = MutableStateFlow(0L)
+    /** In-process invalidation; consumers re-read canonical rows after an event. */
+    val changes: StateFlow<Long> = changeRevision.asStateFlow()
+
     fun get(grantId: String): CapabilityGrant? = db.query(
         "SELECT * FROM capability_grants WHERE grant_id = ?", listOf(grantId),
     ).singleOrNull()?.toCapabilityGrant()
@@ -879,7 +887,9 @@ class CapabilityGrantRepository(
                 throw AuthorityPolicyConflictException("Capability grant update lost its compare-and-set race")
             }
         }
-        return get(grant.grantId) ?: error("Capability grant save failed")
+        val saved = get(grant.grantId) ?: error("Capability grant save failed")
+        changeRevision.update { it + 1 }
+        return saved
     }
 
     fun upsert(grant: CapabilityGrant): CapabilityGrant = save(grant)
@@ -892,7 +902,7 @@ class CapabilityGrantRepository(
     fun compareAndSet(expectedRevision: Long, next: CapabilityGrant): Boolean {
         require(expectedRevision > 0) { "Expected grant revision must be positive" }
         require(next.revision == expectedRevision + 1) { "Next grant revision must increment by one" }
-        return db.transaction {
+        val changed = db.transaction {
             val current = get(next.grantId) ?: return@transaction false
             if (current.revision != expectedRevision) return@transaction false
             val actual = if (next.createdAt.isBlank()) next.copy(createdAt = current.createdAt) else next
@@ -900,6 +910,8 @@ class CapabilityGrantRepository(
             update(expectedRevision, actual)
             get(actual.grantId) == actual
         }
+        if (changed) changeRevision.update { it + 1 }
+        return changed
     }
 
     private fun insert(grant: CapabilityGrant) {
@@ -927,7 +939,7 @@ class CapabilityGrantRepository(
     }
 
     fun revoke(grantId: String, expectedRevision: Long? = null): Boolean {
-        return db.transaction {
+        val changed = db.transaction {
             val current = get(grantId) ?: return@transaction false
             if (expectedRevision != null && current.revision != expectedRevision) {
                 throw AuthorityPolicyConflictException("Capability grant revision changed")
@@ -949,6 +961,8 @@ class CapabilityGrantRepository(
             }
             true
         }
+        if (changed) changeRevision.update { it + 1 }
+        return changed
     }
 
     fun active(
@@ -974,7 +988,7 @@ class CapabilityGrantRepository(
     ): CapabilityGrant? {
         require(expectedRevision > 0) { "Expected grant revision must be positive" }
         require(consumedAt.isNotBlank() && consumedAt.length <= 128) { "Grant consumption timestamp is invalid" }
-        return db.transaction {
+        val consumed = db.transaction {
             val current = get(grantId) ?: return@transaction null
             if (current.revision != expectedRevision ||
                 current.lifetime != GrantLifetime.ONCE ||
@@ -988,6 +1002,8 @@ class CapabilityGrantRepository(
             val updated = get(grantId)
             if (updated?.revision == expectedRevision + 1 && updated.consumedAt == consumedAt) updated else null
         }
+        if (consumed != null) changeRevision.update { it + 1 }
+        return consumed
     }
 
     fun consume(

@@ -11,9 +11,19 @@ import org.gradle.api.file.DirectoryProperty
 import org.gradle.api.tasks.Internal
 import org.gradle.api.tasks.TaskAction
 import org.gradle.api.tasks.UntrackedTask
+import java.io.File
+import java.util.function.Function
 
 class LicenseGuardPlugin : Plugin<Project> {
     override fun apply(project: Project) {
+        // Applied Kotlin scripts have a separate compilation classpath. Expose
+        // shared hashing through JDK types instead of importing plugin classes.
+        project.rootProject.extensions.extraProperties.set(
+            "mobileagentEvidenceSha256", Function<File, String>(BuildEvidenceHashes::sha256),
+        )
+        project.rootProject.extensions.extraProperties.set(
+            "mobileagentEvidenceSourceArchiveSha256", Function<File, String>(BuildEvidenceHashes::sourceArchiveSha256),
+        )
         val licenseGuard = project.tasks.register("licenseGuard", LicenseGuardTask::class.java)
         licenseGuard.configure {
             group = "verification"

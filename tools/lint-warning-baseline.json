@@ -1,0 +1,20 @@
+{
+  "SPDX-FileCopyrightText": "2026 mobileAgentRuntime contributors",
+  "SPDX-License-Identifier": "AGPL-3.0-only",
+  "warnings": [
+    "[\"ChromeOsAbiSupport\", [\"app-android/build.gradle.kts\"], \"Missing x86_64 ABI support for ChromeOS\"]",
+    "[\"DataExtractionRules\", [\"app-android/src/main/AndroidManifest.xml\"], \"The attribute `android:allowBackup` is deprecated from Android 12 and higher and may be removed in future versions. Consider adding the attribute `android:dataExtractionRules` specifying an `@xml` resource which configures cloud backups and device transfers on Android 12 and higher.\"]",
+    "[\"DiscouragedPrivateApi\", [\"app-android/src/main/kotlin/runtime/mobileagent/resident/ResidentAdbProviderTransport.kt\"], \"Reflective access to getService, which is not part of the public SDK and therefore likely to change in future Android releases\"]",
+    "[\"InlinedApi\", [\"app-android/src/main/kotlin/runtime/mobileagent/shizuku/ShizukuUserService.kt\"], \"Field requires API level 29 (current min is 26): `android.os.Process#ROOT_UID`\"]",
+    "[\"ModifierParameter\", [\"app-android/src/main/kotlin/runtime/mobileagent/ui/DesignSystem.kt\"], \"Modifier parameter should be the first optional parameter\"]",
+    "[\"ModifierParameter\", [\"app-android/src/main/kotlin/runtime/mobileagent/ui/McpSettingsScreen.kt\"], \"Modifier parameter should be the first optional parameter\"]",
+    "[\"ModifierParameter\", [\"app-android/src/main/kotlin/runtime/mobileagent/ui/MobileAgentTheme.kt\"], \"Modifier parameter should be the first optional parameter\"]",
+    "[\"ObsoleteSdkInt\", [\"app-android/src/main/kotlin/runtime/mobileagent/ChatRunForegroundService.kt\"], \"Unnecessary; `SDK_INT` is always >= 26\"]",
+    "[\"ObsoleteSdkInt\", [\"app-android/src/main/res/mipmap-anydpi-v26\"], \"This folder configuration (`v26`) is unnecessary; `minSdkVersion` is 26. Merge all the resources in this folder into `mipmap-anydpi`.\"]",
+    "[\"PrivateApi\", [\"app-android/src/main/kotlin/runtime/mobileagent/resident/ResidentAdbProviderTransport.kt\"], \"Accessing internal APIs via reflection is not supported and may not work on all devices or in the future\"]",
+    "[\"SdCardPath\", [\"app-android/src/main/kotlin/runtime/mobileagent/wired/WiredAdbFileEngine.kt\"], \"Do not hardcode \\\"/sdcard/\\\"; use `Environment.getExternalStorageDirectory().getPath()` instead\"]",
+    "[\"SimpleDateFormat\", [\"app-android/src/main/kotlin/runtime/mobileagent/diagnostics/DiagnosticLogging.kt\"], \"To get local formatting use `getDateInstance()`, `getDateTimeInstance()`, or `getTimeInstance()`, or use `new SimpleDateFormat(String template, Locale locale)` with for example `Locale.US` for ASCII dates.\"]",
+    "[\"UsableSpace\", [\"app-android/src/main/kotlin/runtime/mobileagent/updates/AppRelease.kt\"], \"Consider also using `StorageManager#getAllocatableBytes` and `allocateBytes` which will consider clearable cached data\"]",
+    "[\"UseTomlInstead\", [\"app-android/build.gradle.kts\"], \"Use version catalog instead\"]"
+  ]
+}

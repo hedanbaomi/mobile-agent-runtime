@@ -4,6 +4,7 @@
 package runtime.mobileagent.announcements
 
 import kotlinx.serialization.Serializable
+import java.net.URI
 
 @Serializable
 enum class AnnouncementCategory { GENERAL, FEATURE, MAINTENANCE, SERVICE_INCIDENT, UPDATE, SECURITY, DEPRECATION }
@@ -112,12 +113,18 @@ object AnnouncementActions {
     fun allowed(action: AnnouncementAction): Boolean {
         if (action.type !in allowedTypes) return false
         return when (action.type) {
-            "OPEN_HTTPS_URL" -> action.url?.startsWith("https://") == true &&
-                action.url.none { it.isISOControl() }
+            "OPEN_HTTPS_URL" -> validHttpsUrl(action.url)
             "OPEN_APP_ROUTE" -> action.url in allowedRoutes
             else -> true
         }
     }
+}
+
+/** Same URI contract as the publisher: HTTPS host, no embedded credentials. */
+internal fun validHttpsUrl(value: String?): Boolean {
+    if (value == null || value.length > 2048 || value.any { it.isISOControl() }) return false
+    val uri = runCatching { URI(value) }.getOrNull() ?: return false
+    return uri.scheme.equals("https", ignoreCase = true) && !uri.host.isNullOrBlank() && uri.rawUserInfo == null
 }
 
 object AnnouncementContentGuard {
@@ -127,7 +134,7 @@ object AnnouncementContentGuard {
     fun allowedMarkdown(text: String): Boolean =
         text.length <= 32 * 1024 && !html.containsMatchIn(text) && !blockedScheme.containsMatchIn(text)
 
-    fun allowedImage(url: String?): Boolean = url == null || url.startsWith("https://")
+    fun allowedImage(url: String?): Boolean = url == null || validHttpsUrl(url)
 }
 
 object FeedLimits {

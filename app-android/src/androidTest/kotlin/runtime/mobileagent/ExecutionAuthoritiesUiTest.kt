@@ -25,6 +25,7 @@ import runtime.mobileagent.feature.settings.SettingsActions
 import runtime.mobileagent.feature.settings.SettingsScreen
 import runtime.mobileagent.feature.settings.SettingsUiState
 import runtime.mobileagent.feature.settings.WiredPairingUiState
+import runtime.mobileagent.feature.settings.R as SettingsR
 
 class ExecutionAuthoritiesUiTest {
     @get:Rule
@@ -41,8 +42,12 @@ class ExecutionAuthoritiesUiTest {
         composeRule.onNodeWithText("已启用（逐次确认）").performScrollTo().assertIsDisplayed()
         composeRule.onNodeWithText("Shizuku").performScrollTo().assertIsDisplayed()
         composeRule.onNodeWithText("有线 ADB（设备常驻）").performScrollTo().assertIsDisplayed()
-        composeRule.onNodeWithText("信任：未配置").performScrollTo().assertIsDisplayed()
-        composeRule.onNodeWithText("用户授权文件（SAF）").performScrollTo().assertIsDisplayed()
+        composeRule.onNodeWithText(
+            composeRule.activity.getString(SettingsR.string.ui_trust_s_ce4bb255, "未配置"),
+        ).performScrollTo().assertIsDisplayed()
+        composeRule.onNodeWithText(
+            composeRule.activity.getString(SettingsR.string.ui_user_authorized_files_saf_070a3e28),
+        ).performScrollTo().assertIsDisplayed()
         composeRule.onNodeWithTag("settings.dangerous_mode").performScrollTo().assertIsDisplayed()
         composeRule.onNodeWithTag("settings.dangerous_mode.fail_closed").assertIsDisplayed()
         assertNoText("外部命令运行时")
@@ -93,7 +98,9 @@ class ExecutionAuthoritiesUiTest {
             .performScrollTo()
             .assertIsEnabled()
             .assertHasClickAction()
-        composeRule.onNodeWithText("启用后会同时记录用户意图、选用 Shizuku，并在需要时请求系统授权。")
+        composeRule.onNodeWithText(
+            composeRule.activity.getString(SettingsR.string.ui_this_records_user_intent_selects_shizuku_d1e33de1),
+        )
             .performScrollTo()
             .assertIsDisplayed()
         composeRule.onNodeWithText("目录已授权给应用；还需到智能体页选择“只读”或“读写”，再用该智能体新建会话。")
@@ -173,7 +180,7 @@ class ExecutionAuthoritiesUiTest {
         composeRule.onNodeWithTag("settings.dangerous_mode.selector").performScrollTo().performClick()
         composeRule.onNodeWithTag("settings.dangerous_mode.option.${DangerousMode.ENABLED_AUTONOMOUS.name}").performClick()
         composeRule.onNodeWithTag("settings.dangerous_mode.risk_dialog").assertIsDisplayed()
-        composeRule.onNodeWithText("确认开启").performClick()
+        composeRule.onNodeWithText(composeRule.activity.getString(SettingsR.string.ui_enable_8eeb2a71)).performClick()
         assert(selected == DangerousMode.ENABLED_AUTONOMOUS.name)
         composeRule.onNodeWithText("危险模式：已开启 · Shell：当前不可用").performScrollTo().assertIsDisplayed()
     }
@@ -232,7 +239,9 @@ class ExecutionAuthoritiesUiTest {
         // The dialog's text body is an independently scrollable node. Assert
         // presence by title, then assert the fixed action slot is reachable
         // before confirming the replacement.
-        composeRule.onNodeWithText("确认替换已保存信任").assertExists()
+        composeRule.onNodeWithText(
+            composeRule.activity.getString(SettingsR.string.ui_confirm_replacing_saved_trust_5229aa78),
+        ).assertExists()
         composeRule.onNodeWithTag("settings.wired_adb.replace.confirm").assertIsDisplayed()
         composeRule.onNodeWithTag("settings.wired_adb.replace.confirm").performClick()
         assertTrue(replaceExistingTrust == true)
@@ -269,11 +278,15 @@ class ExecutionAuthoritiesUiTest {
             .assertTextContains("等待手机完成配对", substring = true)
         composeRule.onNodeWithTag("settings.wired_adb.usb.instructions")
             .performScrollTo().assertIsDisplayed()
-            .assertTextContains("USB 调试", substring = true)
+            .assertTextContains(
+                composeRule.activity.getString(SettingsR.string.ui_connect_a_usb_data_cable_enable_4dc371d0),
+                substring = true,
+            )
             .assertTextContains("start-wired-adb.bat", substring = true)
         composeRule.onNodeWithTag("settings.wired_adb.pairing").performScrollTo()
-        composeRule.onNodeWithText("令牌已隐藏；点击“查看令牌”后才能复制。")
-            .assertIsDisplayed()
+        composeRule.onNodeWithText(
+            composeRule.activity.getString(SettingsR.string.ui_the_token_is_hidden_reveal_it_3d16c03e),
+        ).performScrollTo().assertIsDisplayed()
         assertTrue(
             composeRule.onAllNodesWithText(token, useUnmergedTree = true)
                 .fetchSemanticsNodes().isEmpty(),

@@ -62,7 +62,9 @@ class ChatReplyPresentationUiTest {
         assertEquals(listOf(second.id), opened)
         compose.onNodeWithText("课程笔记.docx").assertIsDisplayed()
         compose.onNodeWithTag("conversation.citation.excerpt", useUnmergedTree = true).assertTextEquals("第二段对应原文")
-        compose.onNodeWithText("关闭").performClick()
+        compose.onNodeWithText(compose.activity.getString(
+            runtime.mobileagent.feature.knowledge.R.string.knowledge_evidence_close,
+        )).performClick()
         tapCitation("答案[1]及[1]、[2]", 1)
         assertEquals(listOf(second.id, first.id), opened)
         compose.onNodeWithTag("conversation.citation.excerpt", useUnmergedTree = true).assertTextEquals("第一段对应原文")

@@ -7,7 +7,7 @@ import androidx.lifecycle.SavedStateHandle
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import java.util.UUID
-import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.*
 import org.junit.Assert.*
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -34,6 +34,8 @@ class AgentDeviceAccessDeviceTest {
         replace(vm, "canonicalWorkspaceSink", object : CanonicalWorkspaceSink by f.app.container.runtimeIntegration {
             override suspend fun openFullDeviceFiles(authority: Authority, request: FullDeviceFilesRequest,
                 plan: WorkspaceIntentPlan, target: WorkspaceTarget): WorkspaceAccessResult {
+                assertTrue("Agent save reattachment must run off Main",
+                    android.os.Looper.myLooper() != android.os.Looper.getMainLooper())
                 assertEquals(Authority.SHIZUKU, authority)
                 assertNotNull(f.app.container.agents.get(requireNotNull(target.agentId)))
                 assertFalse(plan.setAgentDefault)
@@ -49,12 +51,54 @@ class AgentDeviceAccessDeviceTest {
         assertTrue(vm.hasPendingFullDeviceFiles())
         assertNull(targetId)
         assertEquals(RuntimeIntegration.INTERNAL_WORKSPACE_ID, vm.state.value.editor?.defaultWorkspaceId)
-        val saved = vm.save()
+        val saved = runBlocking { vm.saveAndAwait() }
         assertTrue(vm.state.value.error, saved)
         assertEquals(vm.state.value.selectedAgentId, targetId)
         assertFalse(vm.hasPendingFullDeviceFiles())
         assertEquals(RuntimeIntegration.INTERNAL_WORKSPACE_ID,
             f.app.container.threadWorkspacePort.agentWorkspaceDefault(requireNotNull(targetId))?.workspaceId)
+    }
+
+    @Test fun asynchronousSaveKeepsMainResponsiveAndFreezesDraftUntilCommitCompletes() = runBlocking {
+        val f = fixture()
+        val vm = f.editor()
+        val entered = CompletableDeferred<Unit>()
+        val release = CompletableDeferred<Unit>()
+        var commits = 0
+        replace(vm, "canonicalWorkspaceSink", object : CanonicalWorkspaceSink by f.app.container.runtimeIntegration {
+            override suspend fun commitDraft(draft: WorkspaceDraft, agentId: String): WorkspaceAccessResult {
+                assertTrue(android.os.Looper.myLooper() != android.os.Looper.getMainLooper())
+                commits++
+                entered.complete(Unit)
+                release.await()
+                return f.app.container.runtimeIntegration.commitDraft(draft, agentId)
+            }
+        })
+        vm.stageWorkspaceDraft(WorkspaceDraft(RuntimeIntegration.INTERNAL_WORKSPACE_ID, "Internal", true))
+        val original = requireNotNull(vm.state.value.editor)
+        withContext(Dispatchers.Main) { vm.save() }
+        try {
+            withTimeout(5_000) { entered.await() }
+            // A still-pending IO operation must not block another Main dispatch.
+            withContext(Dispatchers.Main) {
+                assertTrue(vm.saving.value)
+                vm.edit(original.copy(name = "Unexpected concurrent edit"))
+                vm.closeEditor()
+                vm.save()
+                assertEquals(original, vm.state.value.editor)
+                assertNotNull(vm.pendingWorkspaceDraft())
+            }
+        } finally {
+            release.complete(Unit)
+        }
+        withTimeout(5_000) {
+            while (withContext(Dispatchers.Main) { vm.saving.value }) delay(10)
+        }
+        assertEquals(1, commits)
+        assertNull(vm.state.value.error)
+        assertNull(vm.state.value.editor)
+        assertNull(vm.pendingWorkspaceDraft())
+        assertNotNull(f.app.container.agents.get(requireNotNull(vm.state.value.selectedAgentId)))
     }
 
     @Test fun cancellationStaleEditorAndChangedConsentCannotCreateAccess() {
@@ -70,7 +114,7 @@ class AgentDeviceAccessDeviceTest {
         vm.edit(requireNotNull(vm.state.value.editor).copy(name = "Consent fixture", chatModelId = f.modelId))
         assertTrue(vm.stageFullDeviceFiles())
         f.consent = f.consent.copy(revision = f.consent.revision + 1)
-        assertFalse(vm.save())
+        assertFalse(runBlocking { vm.saveAndAwait() })
         assertTrue(vm.state.value.error.orEmpty().contains("重新确认"))
         assertEquals(before, f.app.container.agents.list().map { it.id }.toSet())
     }
@@ -88,7 +132,7 @@ class AgentDeviceAccessDeviceTest {
         })
         vm.stageWorkspaceDraft(WorkspaceDraft(RuntimeIntegration.INTERNAL_WORKSPACE_ID, "Internal", true))
         assertTrue(vm.stageFullDeviceFiles())
-        assertFalse(vm.save())
+        assertFalse(runBlocking { vm.saveAndAwait() })
         assertEquals(before, f.app.container.agents.list().map { it.id }.toSet())
         assertTrue(vm.hasPendingFullDeviceFiles())
         assertNotNull(vm.pendingWorkspaceDraft())
@@ -98,7 +142,7 @@ class AgentDeviceAccessDeviceTest {
         // The next process initialization runs this validation before any UI.
         runtime.mobileagent.data.Migrations.apply(f.app.container.db)
         fail = false
-        val saved = vm.save()
+        val saved = runBlocking { vm.saveAndAwait() }
         assertTrue(vm.state.value.error, saved)
         assertFalse(vm.hasPendingFullDeviceFiles())
         assertNull(vm.pendingWorkspaceDraft())

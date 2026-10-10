@@ -29,7 +29,6 @@ android {
 dependencies {
     implementation(project(":shared:knowledge-api"))
     implementation(project(":shared:domain"))
-    implementation(project(":data:sqlite"))
     implementation(libs.androidx.lifecycle.viewmodel.compose)
     implementation(libs.androidx.lifecycle.runtime.compose)
 

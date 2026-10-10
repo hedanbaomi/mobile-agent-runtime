@@ -125,10 +125,14 @@ class AuthorityRepositoryTest {
                 ),
             )
             assertEquals(listOf(once), grants.active("agent-1", once.capability, taskIdentity = "task-1", sessionIdentity = "session-1"))
+            val beforeConsumption = grants.changes.value
             val consumed = grants.consumeOnce(once.grantId, once.revision, consumedAt = now)
+            assertTrue(grants.changes.value > beforeConsumption)
             assertEquals(once.revision + 1, consumed!!.revision)
             assertTrue(grants.active("agent-1", once.capability, taskIdentity = "task-1", sessionIdentity = "session-1").isEmpty())
+            val afterConsumption = grants.changes.value
             assertNull(grants.consumeOnce(once.grantId, once.revision, consumedAt = now))
+            assertEquals(afterConsumption, grants.changes.value)
 
             val task = grants.save(
                 CapabilityGrant(
@@ -159,7 +163,11 @@ class AuthorityRepositoryTest {
                 ),
             )
             assertTrue(grants.compareAndSet(cas.revision, cas.copy(revision = cas.revision + 1)))
+            val afterCas = grants.changes.value
             assertFalse(grants.compareAndSet(cas.revision, cas.copy(revision = cas.revision + 1)))
+            assertEquals(afterCas, grants.changes.value)
+            assertTrue(grants.revoke(cas.grantId))
+            assertTrue(grants.changes.value > afterCas)
         }
     }
 

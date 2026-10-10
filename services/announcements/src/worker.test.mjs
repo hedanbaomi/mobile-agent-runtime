@@ -1,9 +1,9 @@
 // SPDX-FileCopyrightText: 2026 mobileAgentRuntime contributors
 // SPDX-License-Identifier: AGPL-3.0-only
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { verify } from "node:crypto";
+import { DatabaseSync } from "node:sqlite";
 import { createWorker } from "./app.mjs";
 import workerEntry from "./worker.mjs";
 import { SIGN_PREFIX, audienceHash, generateKeyPair, keyPairFromSeed, signPayload } from "./sign.mjs";
@@ -447,14 +447,41 @@ assert.deepEqual(localeFallback("zh-Hans-CN"), ["zh-Hans-CN", "zh-CN", "zh-Hans"
 {
   const schema = readFileSync(new URL("./schema.sql", import.meta.url), "utf8");
   assert.equal(schema.trimStart().startsWith("//"), false);
-  const py = spawnSync(
-    "python",
-    ["-c", "import sqlite3,sys; sql=sys.stdin.read(); c=sqlite3.connect(':memory:'); c.executescript(sql); print(c.execute('select count(*) from sqlite_master').fetchone()[0])"],
-    { input: schema, encoding: "utf8" },
-  );
-  assert.equal(py.status, 0, py.stderr + py.stdout);
-  assert.ok(Number(py.stdout.trim()) > 0);
-  console.log("NAR02 schema.sql executes in SQLite ok");
+  const database = new DatabaseSync(":memory:");
+  try {
+    database.exec(schema);
+    const objects = database.prepare("SELECT COUNT(*) AS count FROM sqlite_master").get().count;
+    assert.ok(objects > 0);
+    const feedState = database.prepare(
+      "SELECT id, sequence, content_version, key_id FROM feed_state",
+    ).get();
+    assert.deepEqual({ ...feedState }, { id: 1, sequence: 0, content_version: 0, key_id: "" });
+
+    const schemaTimestamp = "2026-08-29T12:00:00.000Z";
+    database.prepare(
+      "INSERT INTO announcements (id, current_published_revision, status, created_at, updated_at) VALUES (?, NULL, 'draft', ?, ?)",
+    ).run("node-sqlite-fixture", schemaTimestamp, schemaTimestamp);
+    const addRevision = database.prepare(
+      "INSERT INTO announcement_revisions (announcement_id, revision, revision_status, body_json, rollout_salt, updated_at) VALUES (?, ?, ?, '{}', 'fixture', ?)",
+    );
+    addRevision.run("node-sqlite-fixture", 1, "draft", schemaTimestamp);
+    assert.throws(
+      () => addRevision.run("node-sqlite-fixture", 2, "scheduled", schemaTimestamp),
+      /UNIQUE constraint failed/,
+      "the migrated partial index must allow only one pending revision",
+    );
+    database.prepare(
+      "UPDATE announcement_revisions SET revision_status = 'published' WHERE announcement_id = ? AND revision = 1",
+    ).run("node-sqlite-fixture");
+    addRevision.run("node-sqlite-fixture", 2, "draft", schemaTimestamp);
+    assert.equal(
+      database.prepare("SELECT COUNT(*) AS count FROM announcement_revisions WHERE announcement_id = ?").get("node-sqlite-fixture").count,
+      2,
+    );
+  } finally {
+    database.close();
+  }
+  console.log("NAR02 schema.sql executes in Node SQLite and enforces the pending-revision index ok");
 }
 
 {

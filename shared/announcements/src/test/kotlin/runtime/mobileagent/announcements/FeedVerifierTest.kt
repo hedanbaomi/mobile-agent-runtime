@@ -73,6 +73,16 @@ class FeedVerifierTest {
     }
 
     @Test
+    fun externalLinksAndImagesRequireARealHttpsHostWithoutCredentials() {
+        for (url in listOf("https://", "https:///missing-host", "https://user:password@example.invalid/docs", "https://example.invalid/ bad", "https://example.invalid/\n")) {
+            assertFalse(AnnouncementActions.allowed(AnnouncementAction("OPEN_HTTPS_URL", "x", "Docs", url)), url)
+            assertFalse(AnnouncementContentGuard.allowedImage(url), url)
+        }
+        assertTrue(AnnouncementActions.allowed(AnnouncementAction("OPEN_HTTPS_URL", "x", "Docs", "https://example.invalid/docs?q=notice")))
+        assertTrue(AnnouncementContentGuard.allowedImage("https://example.invalid/image.png"))
+    }
+
+    @Test
     fun readIsNotAcknowledgeAndRevisionStateIsIndependent() {
         val item = AnnouncementItem(
             id = "n1",

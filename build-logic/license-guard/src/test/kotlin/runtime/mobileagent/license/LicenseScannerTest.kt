@@ -122,6 +122,13 @@ class LicenseScannerTest {
         val source = tmp.resolve("shared/Missing.kt")
         source.writeText("class Missing\n")
 
+        val buildPackage = tmp.resolve("module/src/main/kotlin/runtime/mobileagent/build/Missing.kt")
+        buildPackage.parent.createDirectories()
+        buildPackage.writeText("class MissingInBuildPackage\n")
+        val workflow = tmp.resolve(".github/workflows/unlicensed.yml")
+        workflow.parent.createDirectories()
+        workflow.writeText("name: unlicensed\n")
+
         val violations = scanner.scan(tmp)
         assertTrue(
             violations.none { it.contains("build/generated/Missing.kt") },
@@ -143,6 +150,11 @@ class LicenseScannerTest {
             violations.any { it.contains("shared/Missing.kt") },
             violations.joinToString("\n"),
         )
+        assertTrue(
+            violations.any { it.contains("src/main/kotlin/runtime/mobileagent/build/Missing.kt") },
+            violations.joinToString("\n"),
+        )
+        assertTrue(violations.any { it.contains(".github/workflows/unlicensed.yml") }, violations.joinToString("\n"))
     }
 
     private fun writeMinimalProject(root: Path, license: ByteArray) {

@@ -1,0 +1,54 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- SPDX-FileCopyrightText: 2026 mobileAgentRuntime contributors -->
+<!-- SPDX-License-Identifier: AGPL-3.0-only -->
+<resources>
+    <string name="ui_add_a_provider_to_select_a_ffa7447f" formatted="false">添加服务商以选择模型。凭据保留在本设备。</string>
+    <string name="ui_add_provider_bf4c9732" formatted="false">添加服务商</string>
+    <string name="ui_api_format_s_b2e6629e">API 格式：%1$s</string>
+    <string name="ui_automatic_70aefbbf" formatted="false">自动</string>
+    <string name="ui_base_url_434ba70e" formatted="false">基础地址</string>
+    <string name="ui_cancel_998b9c48" formatted="false">取消</string>
+    <string name="ui_capability_probe_cd9280e9" formatted="false">能力探测</string>
+    <string name="ui_checking_042eed1e" formatted="false">正在检查…</string>
+    <string name="ui_close_6cf4a777" formatted="false">关闭</string>
+    <string name="ui_connection_failed_s_0bb2bcac">连接失败：%1$s</string>
+    <string name="ui_connection_streaming_tools_and_images_may_5e7ca12d" formatted="false">验证连接、流式、工具和图片，可能分别收费。图片请求最多输出 1024 tokens；不会自动重试。</string>
+    <string name="ui_connection_succeeded_0d500b13" formatted="false">连接成功</string>
+    <string name="ui_context_window_4753e4c3" formatted="false">上下文窗口</string>
+    <string name="ui_context_window_manual_02e8213a" formatted="false">上下文窗口（手动）</string>
+    <string name="ui_declared_window_optional_overrides_catalog_3d6373f6" formatted="false">窗口声明（可选，覆盖目录）</string>
+    <string name="ui_delete_5b875326" formatted="false">删除</string>
+    <string name="ui_delete_model_metadata_c109a272" formatted="false">删除模型元数据？</string>
+    <string name="ui_delete_provider_b27fe928" formatted="false">删除服务商？</string>
+    <string name="ui_delete_s_and_its_model_metadata_53e098e3">将删除 %1$s 及其模型元数据。当前引用：%2$s 个模型，%3$s 个会话快照。无引用时密文会退休并进入垃圾回收；Keystore 条目由系统生命周期管理。</string>
+    <string name="ui_edit_e9740dbb" formatted="false">编辑</string>
+    <string name="ui_follow_provider_3a7dba1c" formatted="false">跟随服务商</string>
+    <string name="ui_follow_the_provider_limit_local_run_2aa62ff2" formatted="false">跟随服务商上限，仍受本地运行预算约束。</string>
+    <string name="ui_manual_c4e00403" formatted="false">手动设置</string>
+    <string name="ui_manual_override_ba44e3e9" formatted="false">手动覆盖</string>
+    <string name="ui_maximum_output_388d082c" formatted="false">最大输出</string>
+    <string name="ui_mcp_tools_1e943d14" formatted="false">MCP 工具</string>
+    <string name="ui_model_id_263d1656" formatted="false">模型 ID</string>
+    <string name="ui_model_response_normal_s_ms_9996fbc3">模型响应正常 · %1$s ms</string>
+    <string name="ui_models_and_capabilities_1b9330b3" formatted="false">模型与能力</string>
+    <string name="ui_models_c9b1f445" formatted="false"> 个模型</string>
+    <string name="ui_name_dd4dc4c5" formatted="false">名称</string>
+    <string name="ui_no_model_metadata_is_available_62aa07af" formatted="false">暂无模型元数据。</string>
+    <string name="ui_no_providers_configured_d8e9b861" formatted="false">尚未配置服务商</string>
+    <string name="ui_open_mcp_settings_4c0d5a3a" formatted="false">打开 MCP 设置</string>
+    <string name="ui_operation_role_3b8ad69f" formatted="false">操作/角色</string>
+    <string name="ui_output_budget_963a4487" formatted="false">输出预算</string>
+    <string name="ui_parameters_json_055688f2" formatted="false">参数 JSON</string>
+    <string name="ui_providers_e98de897" formatted="false">服务商</string>
+    <string name="ui_role_chat_embedding_reranker_chat_may_cb832d98" formatted="false">角色：CHAT / EMBEDDING / RERANKER；Chat 可含图片。</string>
+    <string name="ui_role_s_4222ab95">角色：%1$s</string>
+    <string name="ui_run_probe_505e98f3" formatted="false">运行探测</string>
+    <string name="ui_run_provider_probe_0d20bf18" formatted="false">运行服务商探测？</string>
+    <string name="ui_save_ec8e6d58" formatted="false">保存</string>
+    <string name="ui_select_a_provider_to_inspect_models_7a56067a" formatted="false">选择服务商以查看模型和能力。</string>
+    <string name="ui_test_connection_00a680a7" formatted="false">测试连接</string>
+    <string name="ui_test_provider_connection_1033d112" formatted="false">测试服务商连接？</string>
+    <string name="ui_this_check_may_have_incurred_provider_f64a9cb5" formatted="false">本次检查可能产生服务商费用。</string>
+    <string name="ui_this_removes_the_model_from_the_05f9aab4" formatted="false">将从服务商配置中删除此模型；不会自动联系服务商。</string>
+    <string name="ui_verify_capabilities_after_confirmation_provid_f616849a" formatted="false">能力需确认后探测，可能收费。</string>
+</resources>

@@ -1,0 +1,119 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- SPDX-FileCopyrightText: 2026 mobileAgentRuntime contributors -->
+<!-- SPDX-License-Identifier: AGPL-3.0-only -->
+<resources>
+    <string name="ui_add_files_bcabb786" formatted="false">添加文件</string>
+    <string name="ui_allow_resubmitting_this_query_b31e35ec" formatted="false">允许再次提交此查询</string>
+    <string name="ui_approve_vision_upload_99eb421f" formatted="false">批准视觉上传</string>
+    <string name="ui_authorization_target_s_be9a7770">授权目标：%1$s</string>
+    <string name="ui_authorized_waiting_for_you_to_resubmit_98c15625" formatted="false">已授权：等待你重新提交此查询。授权不会自动发起请求。</string>
+    <string name="ui_back_5db5cac5" formatted="false">返回</string>
+    <string name="ui_batch_vision_target_s_19e3378a">本批次视觉目标：%1$s</string>
+    <string name="ui_cancel_998b9c48" formatted="false">取消</string>
+    <string name="ui_cancel_job_7b34b54e" formatted="false">取消任务</string>
+    <string name="ui_changing_the_limit_does_not_delete_f595fe9f" formatted="false">修改上限不会删除已有资料；共享内容和未结束任务不会被回收。</string>
+    <string name="ui_choose_an_image_capable_model_before_c613cda6" formatted="false">请先选择可处理图片的模型，然后返回继续。</string>
+    <string name="ui_concurrency_s_stop_after_s_consecutive_3727c191">最大并发 %1$s · 连续失败停止阈值 %2$s</string>
+    <string name="ui_configure_and_continue_02fb6cd4" formatted="false">配置并继续</string>
+    <string name="ui_configure_api_embedding_6fc9442f" formatted="false">配置 API Embedding</string>
+    <string name="ui_configure_vision_2d81db1a" formatted="false">配置视觉</string>
+    <string name="ui_configure_vision_model_53a303ac" formatted="false">配置视觉模型</string>
+    <string name="ui_confirm_batch_vision_processing_8fec22de" formatted="false">确认本批次视觉处理</string>
+    <string name="ui_confirm_resume_2bdd89bf" formatted="false">确认继续</string>
+    <string name="ui_consecutive_failure_limit_62eb3e74" formatted="false">连续失败阈值</string>
+    <string name="ui_consent_to_api_embedding_53fe3597" formatted="false">同意 API Embedding</string>
+    <string name="ui_conservative_reservation_per_request_35cae466" formatted="false">每请求保守预留</string>
+    <string name="ui_continue_to_consent_61370b6a" formatted="false">继续确认</string>
+    <string name="ui_continue_with_text_only_visual_gaps_f25cac9f" formatted="false">仅文本继续（保留视觉缺口）</string>
+    <string name="ui_cost_visual_processing_is_billed_by_1b99577e" formatted="false">费用提示：视觉处理由服务商计费，金额取决于实际发送的图片数量与所选模型。本次授权只覆盖本批次已选资料，不会扩展到以后新增的文件。</string>
+    <string name="ui_create_7570cfc4" formatted="false">创建</string>
+    <string name="ui_create_and_start_import_bb498dff" formatted="false">创建并开始导入</string>
+    <string name="ui_current_embedding_space_s_c1bea4c9">当前 Embedding 空间：%1$s</string>
+    <string name="ui_delete_5b875326" formatted="false">删除</string>
+    <string name="ui_delete_document_5c27de9e" formatted="false">删除文档？</string>
+    <string name="ui_delete_knowledge_base_96db098f" formatted="false">删除知识库？</string>
+    <string name="ui_delete_selected_base_b065bddc" formatted="false">删除当前知识库</string>
+    <string name="ui_documents_2e4d6744" formatted="false"> 文档</string>
+    <string name="ui_documents_5dac12b8" formatted="false">文档</string>
+    <string name="ui_finished_s_s_s_c204ae60">已完成 %1$s / %2$s（%3$s%%）</string>
+    <string name="ui_i_approve_retrying_unknown_previous_requests_4beb1ab2" formatted="false">我确认重试 UNKNOWN；旧请求可能已收费，新请求可能重复收费。</string>
+    <string name="ui_images_without_an_explicitly_configured_visio_49eb4d07" formatted="false">未明确配置视觉模型的图片会保持等待，不会标记为已完成。</string>
+    <string name="ui_import_folder_d7d0aeb7" formatted="false">导入文件夹</string>
+    <string name="ui_import_jobs_bddacf29" formatted="false">导入任务</string>
+    <string name="ui_import_the_images_separately_or_explicitly_74c7ec47" formatted="false">请单独导入图片，或在详情中明确选择仅文本（保留视觉缺口）。</string>
+    <string name="ui_import_zip_5773854e" formatted="false">导入 ZIP</string>
+    <string name="ui_imported_files_stay_in_the_app_5b09be2a" formatted="false">导入文件保存在应用内，文本优先本机解析。</string>
+    <string name="ui_keep_waiting_6d98f03d" formatted="false">继续等待</string>
+    <string name="ui_knowledge_b09e4bdc" formatted="false">知识</string>
+    <string name="ui_knowledge_content_database_and_search_indexes_63fb4efb" formatted="false">含知识资料、数据库和检索索引；达到预算后暂停新增资料，已开始的处理结果仍会保存。</string>
+    <string name="ui_limits_stop_new_dispatch_only_unknown_a341ab59" formatted="false">达到限制只停止新请求；UNKNOWN 保留安全预算。</string>
+    <string name="ui_loading_the_local_processing_scope_before_67a9f94f" formatted="false">正在读取本地处理范围，完成后才能确认。</string>
+    <string name="ui_local_storage_budget_dc31eacc" formatted="false">本地存储预算</string>
+    <string name="ui_local_storage_s_s_e1990a9a">本地存储 %1$s / %2$s</string>
+    <string name="ui_manage_libraries_81eba5d7" formatted="false">管理知识库</string>
+    <string name="ui_maximum_concurrency_4fb6c774" formatted="false">最大并发（1–6）</string>
+    <string name="ui_name_dd4dc4c5" formatted="false">名称</string>
+    <string name="ui_new_5a5d1d13" formatted="false">新建</string>
+    <string name="ui_new_knowledge_base_b46c2c13" formatted="false">新建知识库</string>
+    <string name="ui_no_documents_in_this_knowledge_base_cd58f8fa" formatted="false">此知识库没有文档。</string>
+    <string name="ui_no_embedding_models_are_available_configure_5d20e7ef" formatted="false">没有可选择的 Embedding 模型，请先在服务商中配置模型。</string>
+    <string name="ui_no_image_capable_vision_model_is_62cdaf25" formatted="false">当前没有可处理图片的视觉模型。纯文本资料可以继续；如果遇到图片，批次会暂停并显示配置入口。</string>
+    <string name="ui_no_image_capable_vision_model_is_8de44dfe" formatted="false">当前没有可处理图片的视觉模型。请先配置后返回。</string>
+    <string name="ui_no_image_capable_vision_target_is_c46cf4cf" formatted="false">当前没有可处理图片的视觉目标。纯文本资料不受影响；一旦真正遇到需要视觉的内容，本批次会整体暂停并提示你配置后继续。</string>
+    <string name="ui_no_knowledge_bases_available_af940d79" formatted="false">暂无知识库。</string>
+    <string name="ui_no_vision_target_pause_again_if_b635aed7" formatted="false">不选择视觉目标（继续后遇到图片会再次暂停）</string>
+    <string name="ui_no_vision_target_pause_if_images_7140120e" formatted="false">不选择视觉目标（遇到图片时暂停）</string>
+    <string name="ui_over_the_limit_reading_deletion_and_f364d9a1" formatted="false">已超过上限；可继续读取、删除或提高上限。</string>
+    <string name="ui_pages_s_processing_units_s_89ee0550">页面 %1$s · 处理单元 %2$s</string>
+    <string name="ui_pause_c65f066c" formatted="false">暂停</string>
+    <string name="ui_pending_s_in_flight_s_succeeded_5b14923c">待处理 %1$s · 在途 %2$s · 成功 %3$s · 失败 %4$s · UNKNOWN %5$s · 已索引 %6$s</string>
+    <string name="ui_preparing_the_selected_items_d19b0aca" formatted="false">正在准备本次选择…</string>
+    <string name="ui_processing_limits_2d068b3e" formatted="false">处理限制</string>
+    <string name="ui_queries_with_unknown_results_3c16b575" formatted="false">未知查询</string>
+    <string name="ui_query_result_is_unknown_3f635e8b" formatted="false">查询结果未知</string>
+    <string name="ui_rebuild_fae46c9d" formatted="false">重建</string>
+    <string name="ui_rebuild_index_5ad6867e" formatted="false">重建索引？</string>
+    <string name="ui_rebuild_index_5df89300" formatted="false">重建索引</string>
+    <string name="ui_rebuild_retrieval_chunks_locally_6fd08124" formatted="false">仅本地重建检索片段</string>
+    <string name="ui_rebuild_the_index_from_local_documents_5c750e9a" formatted="false">从本地文档重建索引，可能需要一些时间。</string>
+    <string name="ui_reclaim_deleted_content_8ca77c69" formatted="false">回收已删除资料</string>
+    <string name="ui_refreshing_available_vision_models_c9976a12" formatted="false">正在刷新可用视觉模型…</string>
+    <string name="ui_reservations_limit_subsequent_dispatch_they_a_1276c0e7" formatted="false">预留用于限制后续派发，不是 Provider 实际 token 或货币费用。</string>
+    <string name="ui_resubmitting_may_incur_a_duplicate_charge_b91a048e" formatted="false">再次提交可能重复收费。授权仅限同一知识库、同一模型与同一查询一次；点击后不会自动请求。</string>
+    <string name="ui_resume_import_39aa59bf" formatted="false">继续导入</string>
+    <string name="ui_retry_embedding_may_charge_twice_3b32f4c3" formatted="false">重试 Embedding（可能重复收费）</string>
+    <string name="ui_retry_vision_may_charge_twice_cca5f0a2" formatted="false">重试视觉（可能重复收费）</string>
+    <string name="ui_reuse_s_local_rebuild_s_new_361f961a">可直接复用 %1$s · 仅本地重建 %2$s · 新增 Provider 请求 %3$s · UNKNOWN 待确认 %4$s</string>
+    <string name="ui_review_affected_items_a6b05303" formatted="false">查看待处理资料</string>
+    <string name="ui_review_resume_scope_0e07c6e4" formatted="false">确认恢复范围</string>
+    <string name="ui_review_vision_configuration_change_b1fbb5dc" formatted="false">查看更换视觉配置的影响</string>
+    <string name="ui_s_items_await_vision_processing_and_e80d8658">%1$s 项资料等待视觉处理，完成前不会标记就绪。</string>
+    <string name="ui_s_legacy_database_relation_issues_detected_3fd8bd78">检测到 %1$s 项旧数据库关联异常，原记录已保留。</string>
+    <string name="ui_s_selected_item_s_will_be_1958c56f">本批次选定 %1$s 项资料，导入到「%2$s」。</string>
+    <string name="ui_save_ec8e6d58" formatted="false">保存</string>
+    <string name="ui_send_only_this_batch_s_required_048311f0" formatted="false">仅将本批次需要视觉处理的页面或图片发送到此目标。服务商可能收费；后续新增资料不在授权范围内。</string>
+    <string name="ui_storage_budget_3a90a935" formatted="false">容量预算</string>
+    <string name="ui_successful_units_are_retained_unknown_is_5c913918" formatted="false">成功单元保留；UNKNOWN 不会自动重试。暂停只停止新增请求，在途请求仍可能完成并收费。取消后保留成果；重新启动仍受相同检查点约束。</string>
+    <string name="ui_the_batch_file_count_is_not_541e324f" formatted="false">本批次文件总量尚未确定。</string>
+    <string name="ui_the_previously_selected_vision_target_is_bf0caeeb" formatted="false">之前选择的视觉目标已不可用。请选择新的目标，或明确选择不使用视觉目标。</string>
+    <string name="ui_the_previously_selected_vision_target_is_d5cebe48" formatted="false">之前选择的视觉目标已不可用，请重新选择。</string>
+    <string name="ui_this_batch_uses_the_selected_vision_50936f49" formatted="false">此批次固定使用所选视觉目标；配置变化后需重新确认。</string>
+    <string name="ui_this_removes_s_and_its_document_d99c6d71">将删除“%1$s”及其文档索引；此操作不可撤销。</string>
+    <string name="ui_this_removes_the_document_from_the_9b67d9e1" formatted="false">将从当前知识库及索引中删除此文档；此操作不可撤销。</string>
+    <string name="ui_token_dispatch_ceiling_optional_6672fd82" formatted="false">批次 token 派发上限（可留空）</string>
+    <string name="ui_unknown_reason_s_2b4c1b9d">未知原因：%1$s</string>
+    <string name="ui_unknown_usage_attempts_s_safety_reservation_cbab5631">usage 未知请求 %1$s · 安全预留 %2$s（不是实际收费）</string>
+    <string name="ui_unplanned_legacy_files_s_request_count_25814151">尚未规划/旧文件 %1$s：计划完成后才能确定请求数。</string>
+    <string name="ui_use_text_only_61383e87" formatted="false">仅使用文本</string>
+    <string name="ui_use_the_dimension_documented_by_the_6a0fbcdc" formatted="false">必须由模型文档或服务商配置提供，不能猜测。</string>
+    <string name="ui_vector_dimension_0b32824c" formatted="false">向量维度</string>
+    <string name="ui_view_evidence_e90fbed5" formatted="false">查看证据</string>
+    <string name="ui_waiting_for_vision_model_0b90df35" formatted="false">等待视觉模型</string>
+    <string name="ui_what_may_leave_the_device_only_57aa8cb4" formatted="false">可能外发的内容：只有本批次中确实包含图片、且本机解析无法覆盖的页面或图片会发送到上面的视觉目标。纯文本资料只在本机处理。</string>
+    <string name="knowledge_evidence_title" formatted="false">证据</string>
+    <string name="knowledge_evidence_chunks">分块：%1$s</string>
+    <string name="knowledge_evidence_hash">内容哈希：%1$s</string>
+    <string name="knowledge_evidence_verified" formatted="false">证据已验证</string>
+    <string name="knowledge_evidence_unverified" formatted="false">证据未验证</string>
+    <string name="knowledge_evidence_close" formatted="false">关闭</string>
+</resources>

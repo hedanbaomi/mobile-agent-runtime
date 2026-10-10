@@ -40,9 +40,9 @@ REUSE对可注释文件使用逐文件header；不可注释资产使用`.license
 
 每次提交/推送前运行`gradlew.bat licenseGuard`、`gradlew.bat check`及`reuse lint`，CI同时生成依赖许可报告和CycloneDX SBOM。任务缺失或检查未运行不能写PASS，更不能用文档检查替代。
 
-所有者确认后配置CODEOWNERS保护许可证、归属清单、Agent规则、CI和guard；main要求PR、required checks、code-owner review，推新提交后旧approval失效，禁止force-push/删除和Agent bypass。实际支持能力取决于远程仓库配置，必须用可验证证据证明；仓库文件不能代替服务端规则。
+CODEOWNERS登记许可证、归属清单、Agent规则、CI和guard的责任人；main要求PR、required checks，禁止force-push/删除和Agent bypass。按所有者2026-10-10的明确要求，审阅为可选，允许所有者在CI通过后合并自己创建的PR。实际支持能力取决于远程仓库配置，必须用可验证证据证明；仓库文件不能代替服务端规则。
 
-当前仓库已有远程和历史 CI 证据，但本轮没有新的 commit/push、Ruleset 或 CODEOWNER 身份变更授权。远程 CI/Ruleset 只能凭相应 GitHub 证据记为有效；本地 dirty WIP 的 PASS 不自动成为远程 PASS。本轮不创建绕过检查要求的提交，也不沿用旧授权推送当前产品变更。
+当前服务端规则见 [main ruleset](https://github.com/hedanbaomi/mobile-agent-runtime/rules/24835375)：PR、零强制审批、CODEOWNER/latest-push强制审批关闭、线程解决、八项 Actions 检查、禁止删除/force-push，无 bypass。GitHub不允许PR作者批准自己的PR；所有者可在检查通过后自行合并。AGPL、SPDX、license guard、REUSE和相关CI要求继续有效，本地测试通过不能代替远程必需检查。
 
 ## 5. 发布与变更
 

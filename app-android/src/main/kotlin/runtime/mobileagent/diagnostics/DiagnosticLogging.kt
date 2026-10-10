@@ -2054,7 +2054,7 @@ class RollingDiagnosticLogStore(
                     "truncated" to (fields["truncated"] as? Boolean ?: return null),
                     // Local verbose traces are enabled explicitly by the user. Credentials and
                     // private continuation must be removed before entering this API.
-                    "content" to content,
+                    "content" to SecretRedactor.redact(content),
                 ).apply {
                     listOf("chunk", "chunks", "originalChars", "capturedChars").forEach { key ->
                         put(key, (fields[key] as? Int ?: return null).coerceAtLeast(0))

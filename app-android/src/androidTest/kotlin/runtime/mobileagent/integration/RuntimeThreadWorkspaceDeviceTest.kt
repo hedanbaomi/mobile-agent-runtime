@@ -716,7 +716,7 @@ class RuntimeThreadWorkspaceDeviceTest {
         if (preset != null) vm.edit(requireNotNull(vm.state.value.editor).copy(
             workspaceGrantPreset = AgentWorkspaceGrantPresetUi(RuntimeIntegration.INTERNAL_WORKSPACE_ID, preset),
         ))
-        assertTrue(vm.save())
+        assertTrue(runBlocking { vm.saveAndAwait() })
         val agentId = requireNotNull(vm.state.value.selectedAgentId)
         assertFalse(agentId in agentsBefore)
         assertNull(vm.pendingWorkspaceDraft())
@@ -837,7 +837,7 @@ class RuntimeThreadWorkspaceDeviceTest {
                 setAsAgentDefault = true,
             ),
         )
-        assertFalse(vm.save())
+        assertFalse(runBlocking { vm.saveAndAwait() })
         assertEquals(agentsBefore, container.agents.list().map { it.id }.toSet())
         assertNotNull(vm.pendingWorkspaceDraft())
     }

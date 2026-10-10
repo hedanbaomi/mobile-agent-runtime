@@ -7,7 +7,19 @@ import java.nio.charset.StandardCharsets
 import java.util.Collections
 import java.util.concurrent.atomic.AtomicInteger
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.TimeoutCancellationException
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.flowOf
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonNull
@@ -92,6 +104,8 @@ class ShellToolExecutor(
     private val onceGrantConsumer: (CapabilityGrant) -> Boolean = { false },
     /** Runtime-owned global user consent for the built-in Agent tool, never a Skill grant. */
     private val agentShellAuthorization: () -> Boolean = { false },
+    /** Canonical repository invalidation events; each event triggers a fresh read. */
+    private val grantChanges: Flow<Long> = flowOf(0L),
 ) : ToolExecutor {
     private val runContext = contextProvider()
     private val selectedAtRunStart = authorityManager.selectedAuthorityForExposure()
@@ -390,12 +404,13 @@ class ShellToolExecutor(
             )
             if (decision !is ApprovalDecision.Approved) return decision.toToolExecution()
         }
+        var consumedOnceGrant: CapabilityGrant? = null
         val dispatchAuthorization = if (agentAuthorizedAtRunStart) {
             if (hasShellAuthorization(context)) DispatchAuthorization.ALLOWED_EXISTING_GRANT else DispatchAuthorization.DENIED
         } else resolver.authorizeForDispatch(
             context = context,
             capability = CapabilityId(CapabilityId.SHELL_EXECUTE),
-            consumer = onceGrantConsumer,
+            consumer = { grant -> onceGrantConsumer(grant).also { consumed -> if (consumed) consumedOnceGrant = grant } },
         )
         if (dispatchAuthorization == DispatchAuthorization.DENIED) {
             // This is the final live grant/revalidation gate.  It must run
@@ -422,12 +437,14 @@ class ShellToolExecutor(
                 // The selected backend enforces the command limit and needs time to return its
                 // terminal envelope (Shizuku IPC and Wired ADB both have a delivery grace).
                 // Cancelling at exactly the command deadline discards a proven TIMED_OUT result.
-                withTimeout(bound.request.timeoutMs + BACKEND_RESULT_GRACE_MS) { backend.execute(bound.request) }
+                withTimeout(bound.request.timeoutMs + BACKEND_RESULT_GRACE_MS) {
+                    executeWhileAuthorized(backend, bound.request, context, consumedOnceGrant)
+                }
             } catch (_: TimeoutCancellationException) {
-                backend.cancel(bound.request.requestId)
+                withContext(NonCancellable) { runCatching { backend.cancel(bound.request.requestId) } }
                 ShellExecResult.unknownOutcome(bound.request, clock.nowMillis() - started)
             } catch (_: CancellationException) {
-                backend.cancel(bound.request.requestId)
+                withContext(NonCancellable) { runCatching { backend.cancel(bound.request.requestId) } }
                 ShellExecResult.unknownOutcome(bound.request, clock.nowMillis() - started)
             } catch (_: Throwable) {
                 ShellExecResult.failed(bound.request)
@@ -441,6 +458,45 @@ class ShellToolExecutor(
         } finally {
             synchronized(lock) { auditCorrelation.remove(bound.request.requestId) }
             active.decrementAndGet()
+        }
+    }
+
+    /** Watch existing state events only while a request is in flight. */
+    private suspend fun executeWhileAuthorized(
+        backend: ShellExecutor,
+        request: ShellExecRequest,
+        context: ToolExecutionContext,
+        consumedOnceGrant: CapabilityGrant?,
+    ): ShellExecResult = coroutineScope {
+        val execution = async(start = CoroutineStart.LAZY) { backend.execute(request) }
+        suspend fun stop() {
+            withContext(NonCancellable) { runCatching { backend.cancel(request.requestId) } }
+            execution.cancel()
+        }
+        val revocation = launch(start = CoroutineStart.UNDISPATCHED) {
+            combine(dangerousModeManager.state, authorityManager.state, grantChanges) { mode, authority, _ ->
+                mode == runDangerousState && authority.selectedAuthority == selectedAtRunStart &&
+                    selectedAtRunStart?.let { authority.statuses[it]?.isReady } == true &&
+                    if (agentAuthorizedAtRunStart) hasShellAuthorization(context)
+                    else resolver.revalidateInFlight(context, CapabilityId(CapabilityId.SHELL_EXECUTE), consumedOnceGrant)
+            }.first { authorized -> !authorized }
+            // A dispatched command may have changed external state already.
+            // Stop the selected backend; the caller preserves UNKNOWN_OUTCOME.
+            stop()
+        }
+        val expiry = if (agentAuthorizedAtRunStart) null else launch(start = CoroutineStart.UNDISPATCHED) {
+            grantChanges.collectLatest {
+                resolver.inFlightExpiryDelayMs(context, CapabilityId(CapabilityId.SHELL_EXECUTE), consumedOnceGrant)?.let { remaining ->
+                    delay(remaining)
+                    stop()
+                }
+            }
+        }
+        try {
+            execution.await()
+        } finally {
+            revocation.cancel()
+            expiry?.cancel()
         }
     }
 

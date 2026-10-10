@@ -1,0 +1,119 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- SPDX-FileCopyrightText: 2026 mobileAgentRuntime contributors -->
+<!-- SPDX-License-Identifier: AGPL-3.0-only -->
+<resources>
+    <string name="ui_add_files_bcabb786" formatted="false">Add files</string>
+    <string name="ui_allow_resubmitting_this_query_b31e35ec" formatted="false">Allow resubmitting this query</string>
+    <string name="ui_approve_vision_upload_99eb421f" formatted="false">Approve Vision upload</string>
+    <string name="ui_authorization_target_s_be9a7770">Authorization target: %1$s</string>
+    <string name="ui_authorized_waiting_for_you_to_resubmit_98c15625" formatted="false">Authorized: waiting for you to resubmit this query. Authorization does not send a request automatically.</string>
+    <string name="ui_back_5db5cac5" formatted="false">Back</string>
+    <string name="ui_batch_vision_target_s_19e3378a">Batch Vision target: %1$s</string>
+    <string name="ui_cancel_998b9c48" formatted="false">Cancel</string>
+    <string name="ui_cancel_job_7b34b54e" formatted="false">Cancel job</string>
+    <string name="ui_changing_the_limit_does_not_delete_f595fe9f" formatted="false">Changing the limit does not delete content. Shared content and unfinished tasks are retained.</string>
+    <string name="ui_choose_an_image_capable_model_before_c613cda6" formatted="false">Choose an image-capable model before continuing.</string>
+    <string name="ui_concurrency_s_stop_after_s_consecutive_3727c191">Concurrency %1$s · Stop after %2$s consecutive failures</string>
+    <string name="ui_configure_and_continue_02fb6cd4" formatted="false">Configure and continue</string>
+    <string name="ui_configure_api_embedding_6fc9442f" formatted="false">Configure API Embedding</string>
+    <string name="ui_configure_vision_2d81db1a" formatted="false">Configure Vision</string>
+    <string name="ui_configure_vision_model_53a303ac" formatted="false">Configure Vision model</string>
+    <string name="ui_confirm_batch_vision_processing_8fec22de" formatted="false">Confirm batch Vision processing</string>
+    <string name="ui_confirm_resume_2bdd89bf" formatted="false">Confirm resume</string>
+    <string name="ui_consecutive_failure_limit_62eb3e74" formatted="false">Consecutive failure limit</string>
+    <string name="ui_consent_to_api_embedding_53fe3597" formatted="false">Consent to API Embedding</string>
+    <string name="ui_conservative_reservation_per_request_35cae466" formatted="false">Conservative reservation per request</string>
+    <string name="ui_continue_to_consent_61370b6a" formatted="false">Continue to consent</string>
+    <string name="ui_continue_with_text_only_visual_gaps_f25cac9f" formatted="false">Continue with text only (visual gaps remain)</string>
+    <string name="ui_cost_visual_processing_is_billed_by_1b99577e" formatted="false">Cost: visual processing is billed by the provider and depends on how many images are actually sent. This authorization covers only the material selected now and never widens to files added later.</string>
+    <string name="ui_create_7570cfc4" formatted="false">Create</string>
+    <string name="ui_create_and_start_import_bb498dff" formatted="false">Create and start import</string>
+    <string name="ui_current_embedding_space_s_c1bea4c9">Current Embedding space: %1$s</string>
+    <string name="ui_delete_5b875326" formatted="false">Delete</string>
+    <string name="ui_delete_document_5c27de9e" formatted="false">Delete document?</string>
+    <string name="ui_delete_knowledge_base_96db098f" formatted="false">Delete knowledge base?</string>
+    <string name="ui_delete_selected_base_b065bddc" formatted="false">Delete selected base</string>
+    <string name="ui_documents_2e4d6744" formatted="false"> documents</string>
+    <string name="ui_documents_5dac12b8" formatted="false">Documents</string>
+    <string name="ui_finished_s_s_s_c204ae60">Finished %1$s / %2$s (%3$s%%)</string>
+    <string name="ui_i_approve_retrying_unknown_previous_requests_4beb1ab2" formatted="false">I approve retrying UNKNOWN: previous requests may have charged, and new requests may charge again.</string>
+    <string name="ui_images_without_an_explicitly_configured_visio_49eb4d07" formatted="false">Images without an explicitly configured Vision model remain waiting and are not marked ready.</string>
+    <string name="ui_import_folder_d7d0aeb7" formatted="false">Import folder</string>
+    <string name="ui_import_jobs_bddacf29" formatted="false">Import jobs</string>
+    <string name="ui_import_the_images_separately_or_explicitly_74c7ec47" formatted="false">Import the images separately, or explicitly accept text only with visual gaps in details.</string>
+    <string name="ui_import_zip_5773854e" formatted="false">Import ZIP</string>
+    <string name="ui_imported_files_stay_in_the_app_5b09be2a" formatted="false">Imported files stay in the app; text is parsed locally first.</string>
+    <string name="ui_keep_waiting_6d98f03d" formatted="false">Keep waiting</string>
+    <string name="ui_knowledge_b09e4bdc" formatted="false">Knowledge</string>
+    <string name="ui_knowledge_content_database_and_search_indexes_63fb4efb" formatted="false">Knowledge content, database and search indexes. At the budget, new content pauses; results already in progress are retained.</string>
+    <string name="ui_limits_stop_new_dispatch_only_unknown_a341ab59" formatted="false">Limits stop new dispatch only; UNKNOWN retains its safety reservation.</string>
+    <string name="ui_loading_the_local_processing_scope_before_67a9f94f" formatted="false">Loading the local processing scope before confirmation.</string>
+    <string name="ui_local_storage_budget_dc31eacc" formatted="false">Local storage budget</string>
+    <string name="ui_local_storage_s_s_e1990a9a">Local storage %1$s / %2$s</string>
+    <string name="ui_manage_libraries_81eba5d7" formatted="false">Manage libraries</string>
+    <string name="ui_maximum_concurrency_4fb6c774" formatted="false">Maximum concurrency (1–6)</string>
+    <string name="ui_name_dd4dc4c5" formatted="false">Name</string>
+    <string name="ui_new_5a5d1d13" formatted="false">New</string>
+    <string name="ui_new_knowledge_base_b46c2c13" formatted="false">New knowledge base</string>
+    <string name="ui_no_documents_in_this_knowledge_base_cd58f8fa" formatted="false">No documents in this knowledge base.</string>
+    <string name="ui_no_embedding_models_are_available_configure_5d20e7ef" formatted="false">No Embedding models are available. Configure a model under Providers first.</string>
+    <string name="ui_no_image_capable_vision_model_is_62cdaf25" formatted="false">No image-capable Vision model is configured. Text-only material can continue; a batch pauses with a configuration action if it reaches an image.</string>
+    <string name="ui_no_image_capable_vision_model_is_8de44dfe" formatted="false">No image-capable Vision model is configured. Configure one and return.</string>
+    <string name="ui_no_image_capable_vision_target_is_c46cf4cf" formatted="false">No image-capable Vision target is configured. Text-only material is unaffected; if visual content is actually found the whole batch pauses and asks you to configure and continue.</string>
+    <string name="ui_no_knowledge_bases_available_af940d79" formatted="false">No knowledge bases available.</string>
+    <string name="ui_no_vision_target_pause_again_if_b635aed7" formatted="false">No Vision target (pause again if images need processing)</string>
+    <string name="ui_no_vision_target_pause_if_images_7140120e" formatted="false">No Vision target (pause if images need processing)</string>
+    <string name="ui_over_the_limit_reading_deletion_and_f364d9a1" formatted="false">Over the limit. Reading, deletion and raising the limit remain available.</string>
+    <string name="ui_pages_s_processing_units_s_89ee0550">Pages %1$s · Processing units %2$s</string>
+    <string name="ui_pause_c65f066c" formatted="false">Pause</string>
+    <string name="ui_pending_s_in_flight_s_succeeded_5b14923c">Pending %1$s · In flight %2$s · Succeeded %3$s · Failed %4$s · UNKNOWN %5$s · Indexed %6$s</string>
+    <string name="ui_preparing_the_selected_items_d19b0aca" formatted="false">Preparing the selected items…</string>
+    <string name="ui_processing_limits_2d068b3e" formatted="false">Processing limits</string>
+    <string name="ui_queries_with_unknown_results_3c16b575" formatted="false">Queries with unknown results</string>
+    <string name="ui_query_result_is_unknown_3f635e8b" formatted="false">Query result is unknown</string>
+    <string name="ui_rebuild_fae46c9d" formatted="false">Rebuild</string>
+    <string name="ui_rebuild_index_5ad6867e" formatted="false">Rebuild index?</string>
+    <string name="ui_rebuild_index_5df89300" formatted="false">Rebuild index</string>
+    <string name="ui_rebuild_retrieval_chunks_locally_6fd08124" formatted="false">Rebuild retrieval chunks locally</string>
+    <string name="ui_rebuild_the_index_from_local_documents_5c750e9a" formatted="false">Rebuild the index from local documents. This may take time.</string>
+    <string name="ui_reclaim_deleted_content_8ca77c69" formatted="false">Reclaim deleted content</string>
+    <string name="ui_refreshing_available_vision_models_c9976a12" formatted="false">Refreshing available Vision models…</string>
+    <string name="ui_reservations_limit_subsequent_dispatch_they_a_1276c0e7" formatted="false">Reservations limit subsequent dispatch; they are not provider usage or currency charges.</string>
+    <string name="ui_resubmitting_may_incur_a_duplicate_charge_b91a048e" formatted="false">Resubmitting may incur a duplicate charge. Authorization is limited to this knowledge base, model, and query once; it will not send a request automatically.</string>
+    <string name="ui_resume_import_39aa59bf" formatted="false">Resume import</string>
+    <string name="ui_retry_embedding_may_charge_twice_3b32f4c3" formatted="false">Retry Embedding (may charge twice)</string>
+    <string name="ui_retry_vision_may_charge_twice_cca5f0a2" formatted="false">Retry Vision (may charge twice)</string>
+    <string name="ui_reuse_s_local_rebuild_s_new_361f961a">Reuse %1$s · Local rebuild %2$s · New Provider requests %3$s · UNKNOWN needs confirmation %4$s</string>
+    <string name="ui_review_affected_items_a6b05303" formatted="false">Review affected items</string>
+    <string name="ui_review_resume_scope_0e07c6e4" formatted="false">Review resume scope</string>
+    <string name="ui_review_vision_configuration_change_b1fbb5dc" formatted="false">Review Vision configuration change</string>
+    <string name="ui_s_items_await_vision_processing_and_e80d8658">%1$s items await Vision processing and will not be marked ready yet.</string>
+    <string name="ui_s_legacy_database_relation_issues_detected_3fd8bd78">%1$s legacy database relation issues detected; original records are retained.</string>
+    <string name="ui_s_selected_item_s_will_be_1958c56f">%1$s selected item(s) will be imported into %2$s.</string>
+    <string name="ui_save_ec8e6d58" formatted="false">Save</string>
+    <string name="ui_send_only_this_batch_s_required_048311f0" formatted="false">Send only this batch\'s required visual pages or images to this destination. Provider charges may apply. Files added later are excluded.</string>
+    <string name="ui_storage_budget_3a90a935" formatted="false">Storage budget</string>
+    <string name="ui_successful_units_are_retained_unknown_is_5c913918" formatted="false">Successful units are retained; UNKNOWN is never retried automatically. Pause stops new dispatch; in-flight requests may finish and incur charges. Cancel retains results; restarting uses the same checkpoints.</string>
+    <string name="ui_the_batch_file_count_is_not_541e324f" formatted="false">The batch file count is not known yet.</string>
+    <string name="ui_the_previously_selected_vision_target_is_bf0caeeb" formatted="false">The previously selected Vision target is no longer available. Choose another target or explicitly continue without one.</string>
+    <string name="ui_the_previously_selected_vision_target_is_d5cebe48" formatted="false">The previously selected Vision target is no longer available; choose another target.</string>
+    <string name="ui_this_batch_uses_the_selected_vision_50936f49" formatted="false">This batch uses the selected Vision target; configuration changes require confirmation.</string>
+    <string name="ui_this_removes_s_and_its_document_d99c6d71">This removes %1$s and its document index. The operation cannot be undone.</string>
+    <string name="ui_this_removes_the_document_from_the_9b67d9e1" formatted="false">This removes the document from the selected knowledge base and its index. The operation is irreversible.</string>
+    <string name="ui_token_dispatch_ceiling_optional_6672fd82" formatted="false">Token dispatch ceiling (optional)</string>
+    <string name="ui_unknown_reason_s_2b4c1b9d">Unknown reason: %1$s</string>
+    <string name="ui_unknown_usage_attempts_s_safety_reservation_cbab5631">Unknown usage attempts %1$s · Safety reservation %2$s (not actual charges)</string>
+    <string name="ui_unplanned_legacy_files_s_request_count_25814151">Unplanned/legacy files %1$s: request count is not yet known.</string>
+    <string name="ui_use_text_only_61383e87" formatted="false">Use text only</string>
+    <string name="ui_use_the_dimension_documented_by_the_6a0fbcdc" formatted="false">Use the dimension documented by the model or provider; do not guess.</string>
+    <string name="ui_vector_dimension_0b32824c" formatted="false">Vector dimension</string>
+    <string name="ui_view_evidence_e90fbed5" formatted="false">View evidence</string>
+    <string name="ui_waiting_for_vision_model_0b90df35" formatted="false">Waiting for Vision model</string>
+    <string name="ui_what_may_leave_the_device_only_57aa8cb4" formatted="false">What may leave the device: only pages or images in this batch that actually contain visual content the local parser cannot cover. Text-only material stays local.</string>
+    <string name="knowledge_evidence_title" formatted="false">Evidence</string>
+    <string name="knowledge_evidence_chunks">Chunks: %1$s</string>
+    <string name="knowledge_evidence_hash">Content hash: %1$s</string>
+    <string name="knowledge_evidence_verified" formatted="false">Evidence verified</string>
+    <string name="knowledge_evidence_unverified" formatted="false">Evidence not verified</string>
+    <string name="knowledge_evidence_close" formatted="false">Close</string>
+</resources>

@@ -16,7 +16,7 @@
 1. Fork 仓库并克隆自己的副本，或在有写权限的仓库中创建功能分支。每个 Pull Request 尽量只解决一个明确问题。
 2. 安装 JDK 17 和 Android SDK 35，使用仓库内的 Gradle Wrapper。SDK 路径通过 Android Studio 或本机 `local.properties` 设置；不要提交机器路径。
 3. 原生库、Python 运行时和模型包使用仓库锁定的版本、来源和校验值。首次构建需要下载依赖；NDK、CMake 等组件版本以构建配置为准。
-4. 安装 Python 3.11+ 和用于许可证检查的 REUSE。CI 当前使用 `reuse==6.2.0`；公告服务开发另需满足依赖要求的 Node.js（20+，具体要求以该服务的 package.json 为准）。
+4. 安装 Python 3.11+ 和用于许可证检查的 REUSE。CI 当前使用 `reuse==6.2.0`；公告服务开发使用 Node.js 24，最低为 22.13.0（测试使用内置 `node:sqlite`，具体要求以该服务的 package.json 为准）。
 
 Windows PowerShell：
 

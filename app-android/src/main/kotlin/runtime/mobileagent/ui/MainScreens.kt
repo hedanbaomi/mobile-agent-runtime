@@ -35,6 +35,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
@@ -250,7 +251,10 @@ internal fun MainApp(onMoveTaskToBack: () -> Unit = {}) {
     }
 
     val settings = remember(settingsRevision) { app.container.settings.get() }
-    val deviceLanguage = LocalConfiguration.current.locales.get(0)?.language.orEmpty()
+    // This is the accepted durable settings record, never a loading/default UI placeholder.
+    val localeActivity = androidx.activity.compose.LocalActivity.current as? runtime.mobileagent.MainActivity
+    SideEffect { localeActivity?.syncLocalePreference(settings.locale) }
+    val deviceLanguage = android.content.res.Resources.getSystem().configuration.locales.get(0)?.language.orEmpty()
     val language = effectiveLanguage(
         when (settings.locale) {
             runtime.mobileagent.domain.LocalePreference.SYSTEM -> "system"
@@ -348,6 +352,7 @@ internal fun MainApp(onMoveTaskToBack: () -> Unit = {}) {
 
     BackHandler(enabled = editorOwner == route && editorDirty) { requestEditorClose() }
     MobileAgentTheme(mode = themeMode) {
+        AppLocalizedResources(language) {
         BoxWithConstraints(Modifier.fillMaxSize()) {
             val compact = maxWidth < 600.dp
             val shellDetailOpen = shellDetailOwner == route && shellDetailTitle != null && shellDetailBack != null
@@ -570,6 +575,7 @@ internal fun MainApp(onMoveTaskToBack: () -> Unit = {}) {
         }
         if (unsavedDialog) UnsavedChangesDialog(chinese, ::discardUnsaved, { unsavedDialog = false })
         AppUpdateDialog(app.container.appUpdates, chinese)
+        }
     }
 }
 
@@ -737,13 +743,14 @@ private fun AgentsRoute(entry: NavBackStackEntry, chinese: Boolean, onRoute: (St
             item.status != runtime.mobileagent.integration.WorkspaceAccessStatus.REVOKED &&
                 item.status != runtime.mobileagent.integration.WorkspaceAccessStatus.DISABLED
         },
-        canChooseSaf = !workspaceBusy,
-        canBrowsePrivileged = authorityReady && !workspaceBusy,
+        canChooseSaf = !workspaceBusy && !vm.saving.value,
+        canBrowsePrivileged = authorityReady && !workspaceBusy && !vm.saving.value,
         fullDeviceFilesEnabled = fullDeviceCurrentGrant || vm.hasPendingFullDeviceFiles(),
         fullDeviceFilesEligible = authorityReady &&
             authoritySnapshot.dangerousModeBuildAllowed &&
             authoritySnapshot.dangerousMode != runtime.mobileagent.domain.DangerousMode.DISABLED && !workspaceBusy,
         status = when {
+            vm.saving.value -> if (chinese) "正在保存智能体…" else "Saving agent…"
             workspaceBusy -> if (chinese) "正在更新工作区…" else "Updating workspace…"
             workspaceStatus.isNotBlank() -> workspaceStatus
             vm.hasPendingFullDeviceFiles() -> if (chinese) "已确认完整设备文件；保存智能体后开启。" else "Full-device files confirmed; enabled after saving the agent."
@@ -783,7 +790,7 @@ private fun AgentsRoute(entry: NavBackStackEntry, chinese: Boolean, onRoute: (St
     )
     val state = baseState.copy(
         editor = baseState.editor?.copy(workspaceAccess = workspaceAccess),
-        workspaceSelectionBusy = workspaceBusy,
+        workspaceSelectionBusy = workspaceBusy || vm.saving.value,
     )
     val discard = remember(vm) { { vm.closeEditor() } }
     LaunchedEffect(state.editorDirty) { onEditorState(AppRoutes.AGENTS, state.editorDirty, discard) }
@@ -926,14 +933,14 @@ private fun AgentsRoute(entry: NavBackStackEntry, chinese: Boolean, onRoute: (St
         onOpenEditor = { id -> detailOpen = id != null; vm.openEditor(id) },
         onCloseEditor = onRequestEditorClose, onEditorChange = vm::edit,
         onSave = {
-            if (workspaceBusy) {
+            if (workspaceBusy || vm.saving.value) {
                 workspaceStatus = if (chinese) "请等待工作区选择完成。" else "Wait for workspace selection to finish."
             } else {
                 vm.save()
             }
         },
         onSavePromptRevision = {
-            if (workspaceBusy) {
+            if (workspaceBusy || vm.saving.value) {
                 workspaceStatus = if (chinese) "请等待工作区选择完成。" else "Wait for workspace selection to finish."
             } else {
                 vm.save()
@@ -1593,6 +1600,8 @@ private fun KnowledgeRoute(vm: runtime.mobileagent.KnowledgeViewModel, chinese: 
     LifecycleEventEffect(Lifecycle.Event.ON_RESUME) { vm.refreshVisionTargets() }
     val state = vm.state.value.copy(language = if (chinese) "zh-CN" else "en-US")
     val actions = runtime.mobileagent.feature.knowledge.KnowledgeActions(
+        onCollectStorage = vm::collectStorage,
+        onConfigureStorageQuota = vm::configureStorageQuota,
         onStageImport = vm::stageImport,
         onClearPendingImport = vm::clearPendingImport,
         onSelectPendingVisionTarget = vm::selectPendingVisionTarget,

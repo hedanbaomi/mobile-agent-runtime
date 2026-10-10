@@ -387,6 +387,85 @@ class PythonRuntimeDeviceTest {
     }
 
     @Test(timeout = 45_000)
+    fun nativeVmGrowthLimitAllowsNormalAllocationRejectsHugeAllocationAndRestarts() = runBlocking {
+        val source = """
+            import os
+            import mobileagent_sdk
+            def run(value):
+                mobileagent_sdk._request('test.ready', {'pid': os.getpid()})
+                data = bytearray(value['bytes'])
+                data[0] = 17
+                data[-1] = 23
+                return {'bytes': len(data), 'first': data[0], 'last': data[-1]}
+        """.trimIndent()
+        val fixture = skillZip(source)
+        val normalBytes = 32 * 1024 * 1024
+        val normal = execute(fixture, buildJsonObject { put("bytes", normalBytes) }.toString())
+        val normalValue = succeeded(normal)
+        assertEquals(normalBytes, normalValue.getValue("bytes").jsonPrimitive.int)
+        assertEquals(17, normalValue.getValue("first").jsonPrimitive.int)
+        assertEquals(23, normalValue.getValue("last").jsonPrimitive.int)
+
+        val allocationTicket = ticket(fixture)
+        val broker = TicketGateBroker(allocationTicket)
+        val oversizedInput = buildJsonObject { put("bytes", 1024 * 1024 * 1024) }.toString()
+        val failedAllocation = withTimeout(20_000) {
+            IsolatedPythonRuntime(context, broker).execute(request(fixture, allocationTicket, oversizedInput))
+        }
+        assertTrue("The package must run before the oversized allocation is rejected", broker.ready.isCompleted)
+        assertEquals("Kernel allocation failure must return the real failed result", PythonIpcProtocol.RESULT_FAILED, failedAllocation.status)
+        assertEquals("memory_limit", failedAllocation.errorCode)
+        assertNull(failedAllocation.valueJson)
+        val allocationPid = broker.ready.await().argumentsJson.let {
+            Json.parseToJsonElement(it).jsonObject.getValue("pid").jsonPrimitive.int
+        }
+        assertEquals(allocationPid, failedAllocation.isolatedPid)
+        assertNotEquals(normal.isolatedPid, failedAllocation.isolatedPid)
+        val next = execute(skillZip(IDENTITY_SOURCE))
+        assertEquals(JsonNull, succeeded(next)["previous"])
+        assertNotEquals("A memory-limited worker cannot be reused", allocationPid, next.isolatedPid)
+        awaitProcessGone(checkNotNull(normal.isolatedPid))
+        awaitProcessGone(allocationPid)
+        awaitProcessGone(checkNotNull(next.isolatedPid))
+    }
+
+    @Test(timeout = 45_000)
+    fun scriptIgnoringCancellationIsKilledByExistingServiceWatchdog() = runBlocking {
+        val source = """
+            import os
+            import mobileagent_sdk
+            def run(value):
+                mobileagent_sdk._request('test.ready', {'pid': os.getpid()})
+                while True:
+                    try:
+                        while True:
+                            pass
+                    except BaseException:
+                        pass
+        """.trimIndent()
+        val fixture = skillZip(source)
+        val invocationTicket = ticket(fixture)
+        val broker = TicketGateBroker(invocationTicket)
+        val started = SystemClock.elapsedRealtime()
+        val result = withTimeout(20_000) {
+            IsolatedPythonRuntime(context, broker).execute(request(fixture, invocationTicket,
+                limits = PythonIpcProtocol.PythonLimits(timeoutMs = 3_000)))
+        }
+        assertTrue("The cancellation-ignoring loop must start", broker.ready.isCompleted)
+        assertEquals(PythonIpcProtocol.RESULT_UNKNOWN, result.status)
+        assertTrue("The host and service watchdog must bound an uncooperative script", SystemClock.elapsedRealtime() - started < 15_000)
+        val childPid = broker.ready.await().argumentsJson.let {
+            Json.parseToJsonElement(it).jsonObject.getValue("pid").jsonPrimitive.int
+        }
+        assertEquals(childPid, result.isolatedPid)
+        val next = execute(skillZip(IDENTITY_SOURCE))
+        assertEquals(JsonNull, succeeded(next)["previous"])
+        assertNotEquals(childPid, next.isolatedPid)
+        awaitProcessGone(childPid)
+        awaitProcessGone(checkNotNull(next.isolatedPid))
+    }
+
+    @Test(timeout = 45_000)
     fun cancellationAfterReadyKillsWorkerAndNextInvocationSucceeds() = runBlocking {
         val fixture = skillZip(LOOP_SOURCE)
         val ticket = ticket(fixture)

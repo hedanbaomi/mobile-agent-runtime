@@ -1,14 +1,9 @@
 // SPDX-FileCopyrightText: 2026 mobileAgentRuntime contributors
 // SPDX-License-Identifier: AGPL-3.0-only
 
-import groovy.json.JsonOutput
 import groovy.json.JsonSlurper
 import java.io.File
-import java.nio.charset.StandardCharsets
-import java.security.MessageDigest
-import java.util.UUID
-import java.util.zip.ZipFile
-import javax.xml.parsers.DocumentBuilderFactory
+import java.util.function.Function
 
 /*
  * Shared release-gate tasks.  This is deliberately implemented with Gradle's
@@ -18,182 +13,21 @@ import javax.xml.parsers.DocumentBuilderFactory
  * unavailable.
  */
 
-fun digestBytes(algorithm: String, update: (MessageDigest) -> Unit): String {
-    val digest = MessageDigest.getInstance(algorithm)
-    update(digest)
-    return digest.digest().joinToString("") { "%02x".format(it.toInt() and 0xff) }
-}
-
-fun sha256(file: File): String = digestBytes("SHA-256") { digest ->
-    file.inputStream().use { input ->
-        val buffer = ByteArray(64 * 1024)
-        while (true) {
-            val count = input.read(buffer)
-            if (count < 0) break
-            if (count > 0) digest.update(buffer, 0, count)
-        }
-    }
-}
+@Suppress("UNCHECKED_CAST")
+fun sha256(file: File): String =
+    (rootProject.extensions.extraProperties["mobileagentEvidenceSha256"] as Function<File, String>).apply(file)
 
 fun gitOutput(vararg arguments: String): String {
     val process = ProcessBuilder(listOf("git") + arguments.toList())
-        .directory(rootProject.projectDir)
-        .redirectErrorStream(true)
-        .start()
+        .directory(rootProject.projectDir).redirectErrorStream(true).start()
     val output = process.inputStream.bufferedReader(Charsets.UTF_8).readText().trim()
-    check(process.waitFor() == 0) { "git ${arguments.joinToString(" ")} failed: $output" }
+    check(process.waitFor() == 0) { "git command failed: $output" }
     return output
 }
 
-fun cleanGitState(): String {
-    val status = gitOutput("status", "--porcelain=v1", "--untracked-files=all")
-    check(status.isBlank()) {
-        "Release artifacts require a clean Git worktree; uncommitted or untracked paths are present"
-    }
-    val head = gitOutput("rev-parse", "--verify", "HEAD")
-    check(Regex("[0-9a-fA-F]{40}").matches(head)) { "Git HEAD is not a full commit SHA" }
-    return head.lowercase()
-}
-
-fun sourceArchiveSha256(): String = digestBytes("SHA-256") { digest ->
-    val process = ProcessBuilder("git", "archive", "--format=tar", "HEAD")
-        .directory(rootProject.projectDir)
-        .redirectErrorStream(false)
-        .start()
-    process.inputStream.use { input ->
-        val buffer = ByteArray(64 * 1024)
-        while (true) {
-            val count = input.read(buffer)
-            if (count < 0) break
-            if (count > 0) digest.update(buffer, 0, count)
-        }
-    }
-    val errors = process.errorStream.bufferedReader(Charsets.UTF_8).readText().trim()
-    check(process.waitFor() == 0) { "git archive failed: $errors" }
-}
-
-fun pomLicenses(group: String, module: String, version: String): List<Map<String, Any>> {
-    val directory = File(gradle.gradleUserHomeDir, "caches/modules-2/files-2.1/$group/$module/$version")
-    val pom = directory.listFiles().orEmpty().asSequence()
-        .filter { it.isDirectory }
-        .flatMap { it.listFiles().orEmpty().asSequence() }
-        .firstOrNull { it.extension == "pom" }
-        ?: return emptyList()
-    val factory = DocumentBuilderFactory.newInstance().apply {
-        // POMs are local Gradle-cache inputs.  Never resolve an external
-        // entity while creating a release report.
-        setFeature("http://apache.org/xml/features/disallow-doctype-decl", true)
-        setFeature("http://xml.org/sax/features/external-general-entities", false)
-        setFeature("http://xml.org/sax/features/external-parameter-entities", false)
-        isXIncludeAware = false
-        isExpandEntityReferences = false
-    }
-    val licenses = factory.newDocumentBuilder().parse(pom).getElementsByTagName("license")
-    return (0 until licenses.length).mapNotNull { index ->
-        val node = licenses.item(index) as? org.w3c.dom.Element ?: return@mapNotNull null
-        val name = node.getElementsByTagName("name").item(0)?.textContent?.trim().orEmpty()
-        val url = node.getElementsByTagName("url").item(0)?.textContent?.trim().orEmpty()
-        if (name.isBlank()) return@mapNotNull null
-        mapOf("license" to buildMap<String, String> {
-            put("name", name)
-            if (url.startsWith("https://") || url.startsWith("http://")) put("url", url)
-        })
-    }
-}
-
-fun componentPurl(group: String, name: String, version: String): String =
-    "pkg:maven/${group.replace(".", "/")}/$name@$version"
-
-fun resolvedComponents(configurationName: String): List<Map<String, Any>> {
-    val configuration = project(":app-android").configurations.getByName(configurationName)
-    val artifacts = configuration.incoming.artifactView {
-        componentFilter { it is org.gradle.api.artifacts.component.ModuleComponentIdentifier }
-    }.artifacts.artifacts.groupBy { it.id.componentIdentifier }
-    val rootId = configuration.incoming.resolutionResult.root.id
-    return configuration.incoming.resolutionResult.allComponents
-        .filter { it.id != rootId }
-        .sortedBy { it.id.displayName }
-        .map { component ->
-            val projectId = component.id as? org.gradle.api.artifacts.component.ProjectComponentIdentifier
-            val moduleId = component.moduleVersion
-            val firstParty = projectId != null
-            val group = if (firstParty) "runtime.mobileagent" else checkNotNull(moduleId).group
-            val name = if (firstParty) projectId!!.projectPath.removePrefix(":").replace(":", "-")
-            else checkNotNull(moduleId).name
-            val version = if (firstParty) "source" else checkNotNull(moduleId).version
-            val purl = if (firstParty) {
-                "pkg:generic/mobileAgentRuntime/$name@$version"
-            } else {
-                componentPurl(group, name, version)
-            }
-            val files = artifacts[component.id].orEmpty().sortedBy { it.file.name }.map { artifact ->
-                check(artifact.file.isFile) { "Resolved artifact is missing: ${artifact.id.displayName}" }
-                mapOf(
-                    "name" to "mobileagent:artifact:${artifact.file.name}:sha256",
-                    "value" to sha256(artifact.file),
-                )
-            }
-            val licenses = if (firstParty) {
-                listOf(mapOf("license" to mapOf("id" to "AGPL-3.0-only")))
-            } else {
-                pomLicenses(group, name, version)
-            }
-            buildMap<String, Any> {
-                put("type", "library")
-                put("bom-ref", purl)
-                put("group", group)
-                put("name", name)
-                put("version", version)
-                put("purl", purl)
-                if (licenses.isNotEmpty()) put("licenses", licenses)
-                put("properties", files + mapOf(
-                    "name" to "mobileagent:license-evidence",
-                    "value" to if (firstParty) "repository-license-policy" else if (licenses.isEmpty()) "cached-pom-has-no-license" else "cached-upstream-pom",
-                ))
-            }
-        }
-}
-
-fun writeSbom(variant: String, configurationName: String, apkOrBundle: File, destination: File, requireClean: Boolean) {
-    check(apkOrBundle.isFile) { "${variant.uppercase()} artifact is missing: ${apkOrBundle.absolutePath}" }
-    val head = if (requireClean) cleanGitState() else gitOutput("rev-parse", "--verify", "HEAD").lowercase()
-    val sourceHash = sourceArchiveSha256()
-    val artifactHash = sha256(apkOrBundle)
-    val components = resolvedComponents(configurationName)
-    check(components.isNotEmpty()) { "Resolved $configurationName has no components; refusing an empty SBOM" }
-    val serial = UUID.nameUUIDFromBytes("mobileAgentRuntime:$variant:$head:$artifactHash".toByteArray(StandardCharsets.UTF_8))
-    val report = linkedMapOf<String, Any>(
-        "bomFormat" to "CycloneDX",
-        "specVersion" to "1.6",
-        "serialNumber" to "urn:uuid:$serial",
-        "version" to 1,
-        "metadata" to mapOf(
-            "timestamp" to java.time.Instant.now().toString(),
-            "component" to mapOf(
-                "type" to "application",
-                "bom-ref" to "pkg:generic/mobileAgentRuntime/mobileAgentRuntime-$variant@$head",
-                "name" to "mobileAgentRuntime-$variant",
-                "version" to head,
-                "group" to "mobileAgentRuntime",
-                "licenses" to listOf(mapOf("license" to mapOf("id" to "AGPL-3.0-only"))),
-                "hashes" to listOf(mapOf("alg" to "SHA-256", "content" to artifactHash)),
-            ),
-        ),
-        "components" to components,
-        "properties" to listOf(
-            mapOf("name" to "mobileagent:git-sha", "value" to head),
-            mapOf("name" to "mobileagent:source-archive-sha256", "value" to sourceHash),
-            mapOf("name" to "mobileagent:artifact-sha256", "value" to artifactHash),
-            mapOf("name" to "mobileagent:artifact-path", "value" to apkOrBundle.relativeTo(rootProject.projectDir).invariantSeparatorsPath),
-            mapOf("name" to "mobileagent:configuration", "value" to configurationName),
-            mapOf("name" to "mobileagent:clean-git", "value" to requireClean.toString()),
-        ),
-    )
-    destination.parentFile.mkdirs()
-    destination.writeText(JsonOutput.prettyPrint(JsonOutput.toJson(report)) + "\n", Charsets.UTF_8)
-    check(destination.isFile && destination.length() > 0) { "SBOM was not written" }
-    logger.lifecycle("CycloneDX SBOM: ${destination.absolutePath} (${components.size} components)")
-}
+@Suppress("UNCHECKED_CAST")
+fun sourceArchiveSha256(): String =
+    (rootProject.extensions.extraProperties["mobileagentEvidenceSourceArchiveSha256"] as Function<File, String>).apply(rootProject.projectDir)
 
 val verifyCiPins = tasks.register("verifyCiPins") {
     group = "verification"

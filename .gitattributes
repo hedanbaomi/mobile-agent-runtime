@@ -1,6 +1,22 @@
 # SPDX-FileCopyrightText: 2026 mobileAgentRuntime contributors
 # SPDX-License-Identifier: AGPL-3.0-only
 * text=auto
+*.kt text eol=lf
+*.kts text eol=lf
+*.java text eol=lf
+*.xml text eol=lf
+*.json text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+*.toml text eol=lf
+*.properties text eol=lf
+*.py text eol=lf
+*.mjs text eol=lf
+*.js text eol=lf
+*.sh text eol=lf
+*.cpp text eol=lf
+*.c text eol=lf
+*.h text eol=lf
 *.md text eol=lf
 /.gitignore text eol=lf
 /.gitattributes text eol=lf

@@ -22,6 +22,7 @@ import android.graphics.Bitmap
 import java.io.File
 import runtime.mobileagent.feature.agents.*
 import runtime.mobileagent.feature.chat.*
+import runtime.mobileagent.feature.chat.R as ChatR
 
 class ContextCompactionUiTest {
     @get:Rule val compose = createAndroidComposeRule<ComposeTestHostActivity>()
@@ -38,7 +39,8 @@ class ContextCompactionUiTest {
         compose.onNodeWithTag("conversation.compaction.open").performClick()
         compose.onNodeWithTag("conversation.compaction.summary.summary").performScrollTo().assertIsDisplayed()
         screenshot("context-summary.png")
-        compose.onNodeWithText("查看覆盖的原始消息").performScrollTo().performClick()
+        compose.onNodeWithText(compose.activity.getString(ChatR.string.ui_inspect_covered_originals_0fb5f0e7))
+            .performScrollTo().performClick()
         compose.onNodeWithTag("conversation.compaction.source.m0").performScrollTo().performClick()
         compose.onNodeWithTag("conversation.compaction.history").assertDoesNotExist()
         compose.onNodeWithText("Original full message 0").assertIsDisplayed()

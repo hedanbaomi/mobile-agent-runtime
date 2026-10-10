@@ -5,29 +5,53 @@ name: ci
 
 on:
   push:
+    branches: [main]
   pull_request:
   workflow_dispatch:
+    inputs:
+      signed_release:
+        description: Run the formally signed release gate using configured repository secrets
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   check:
     runs-on: ubuntu-latest
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
       - name: Grant wrapper execute permission
         run: chmod +x gradlew
       - uses: actions/setup-java@c5195efecf7bdfc987ee8bae7a71cb8b11521c00 # v4.7.1
         with:
           distribution: temurin
           java-version: "17"
+          cache: gradle
+          cache-dependency-path: |
+            **/*.gradle.kts
+            **/*.lockfile
+            **/verification-metadata.xml
+            gradle/wrapper/gradle-wrapper.properties
       - uses: actions/setup-python@42375524e23c412d93fb67b49958b491fce71c38 # v5.4.0
         with:
           python-version: "3.11"
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
-          node-version: "20"
+          node-version: "24"
       - name: Announcement worker tests
         working-directory: services/announcements
-        run: node src/rollout.test.mjs && node src/worker.test.mjs
+        run: |
+          npm ci
+          npm test
       - name: licenseGuard
         run: ./gradlew licenseGuard licenseGuardReverse --no-daemon
       - name: REUSE
@@ -40,6 +64,17 @@ jobs:
         run: |
           python -m pip install "pyyaml==6.0.2"
           ./gradlew verifyWorkflowYaml --dependency-verification=strict --no-daemon
+      - name: Verify instrumentation selection and regression fixtures
+        run: |
+          python tools/verify_test_selection.py
+          python tools/test_verify_test_selection.py
+          python tools/verify_module_boundaries.py
+          python tools/test_verify_module_boundaries.py
+          python tools/verify_complexity.py
+          python tools/test_verify_complexity.py
+          python tools/test_verify_lint_warnings.py
+          python -B tools/verify_i18n.py
+          python -B tools/test_verify_i18n.py
       - name: Native page alignment checker regression tests
         run: python tools/test_verify_native_alignment.py
       - name: Packaged notice inventory regression tests
@@ -64,10 +99,12 @@ jobs:
             app-android/build/outputs/apk/review/*.apk
             app-android/build/reports/sbom/review.cdx.json
             app-android/build/reports/provenance/review.provenance.json
+            app-android/build/reports/apk-size/review.json
 
   android-smoke:
     name: Android UI smoke (API ${{ matrix.api-level }})
     runs-on: ubuntu-latest
+    timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
@@ -99,11 +136,12 @@ jobs:
           disable-animations: true
           script: |
             timeout 120 sh -c 'until adb -s "emulator-${EMULATOR_PORT:-5554}" shell service check package 2>/dev/null | grep -q "found"; do sleep 2; done'
-            ./gradlew :app-android:connectedDebugAndroidTest "-Pandroid.testInstrumentationRunnerArguments.class=runtime.mobileagent.ReleaseGateUiDeviceTest,runtime.mobileagent.ChatReplyPresentationUiTest" --dependency-verification=strict --no-daemon
+            ./gradlew :app-android:connectedDebugAndroidTest "-Pandroid.testInstrumentationRunnerArguments.class=runtime.mobileagent.ReleaseGateUiDeviceTest,runtime.mobileagent.ChatReplyPresentationUiTest,runtime.mobileagent.AppLocalizedResourcesDeviceTest" --dependency-verification=strict --no-daemon
 
   convergence-device:
     name: Convergence device tests (API 36)
     runs-on: ubuntu-latest
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       - name: Grant wrapper execute permission
@@ -131,12 +169,13 @@ jobs:
           disable-animations: true
           script: |
             timeout 120 sh -c 'until adb -s "emulator-${EMULATOR_PORT:-5554}" shell service check package 2>/dev/null | grep -q "found"; do sleep 2; done'
-            ./gradlew :app-android:connectedDebugAndroidTest "-Pandroid.testInstrumentationRunnerArguments.class=runtime.mobileagent.RunToolsReplayDeviceTest,runtime.mobileagent.shizuku.ShizukuWorkspaceFileStoreTest,runtime.mobileagent.VectorIndexCacheDeviceTest,runtime.mobileagent.ChatContextCompactionDeviceTest,runtime.mobileagent.ContextCompactionUiTest,runtime.mobileagent.ChatInputBudgetDeviceTest,runtime.mobileagent.ChatVisualTransferDeviceTest,runtime.mobileagent.AgentsConversationRoutingDeviceTest,runtime.mobileagent.TransferArchiveDeviceTest,runtime.mobileagent.ThirdPartyNoticesDeviceTest,runtime.mobileagent.workspace.WorkspaceBackendTest,runtime.mobileagent.PythonModelInvokeBrokerTest,runtime.mobileagent.SkillGrantScopeUiTest" --dependency-verification=strict --no-daemon
+            ./gradlew :app-android:connectedDebugAndroidTest "-Pandroid.testInstrumentationRunnerArguments.class=runtime.mobileagent.RunToolsReplayDeviceTest,runtime.mobileagent.shizuku.ShizukuWorkspaceFileStoreTest,runtime.mobileagent.VectorIndexCacheDeviceTest,runtime.mobileagent.ChatContextCompactionDeviceTest,runtime.mobileagent.ContextCompactionUiTest,runtime.mobileagent.ChatInputBudgetDeviceTest,runtime.mobileagent.ChatVisualTransferDeviceTest,runtime.mobileagent.AgentsConversationRoutingDeviceTest,runtime.mobileagent.TransferArchiveDeviceTest,runtime.mobileagent.ThirdPartyNoticesDeviceTest,runtime.mobileagent.workspace.WorkspaceBackendTest,runtime.mobileagent.PythonModelInvokeBrokerTest,runtime.mobileagent.SkillGrantScopeUiTest,runtime.mobileagent.KnowledgeStorageUiDeviceTest,runtime.mobileagent.storage.BundledSqliteReliabilityTest,runtime.mobileagent.AgentsGrantUiTest,runtime.mobileagent.ExecutionAuthoritiesTest,runtime.mobileagent.ExecutionAuthoritiesUiTest,runtime.mobileagent.WebSearchPermissionDeviceTest,runtime.mobileagent.diagnostics.DiagnosticsDeviceTest,runtime.mobileagent.DiagnosticsLogLevelUiTest,runtime.mobileagent.DisabledSkillBindingUiTest,runtime.mobileagent.tooling.EffectiveCapabilityResolverHotUpdateTest,runtime.mobileagent.tooling.ToolingOrchestrationTest,runtime.mobileagent.RuntimeSafToolExposureDeviceTest,runtime.mobileagent.security.AndroidSecretStoreDeviceTest" --dependency-verification=strict --no-daemon
     # No continue-on-error: a red convergence job blocks the commit.
 
   knowledge-pipeline-device:
     name: Document pipeline device tests (API 36, synthetic only)
     runs-on: ubuntu-latest
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       - name: Grant wrapper execute permission
@@ -172,13 +211,9 @@ jobs:
 
   release:
     name: Signed release gate (manual only)
-    if: github.event_name == 'workflow_dispatch'
+    if: github.event_name == 'workflow_dispatch' && inputs.signed_release
     runs-on: ubuntu-latest
-    env:
-      ANDROID_RELEASE_KEYSTORE: ${{ secrets.ANDROID_RELEASE_KEYSTORE }}
-      ANDROID_RELEASE_STORE_PASSWORD: ${{ secrets.ANDROID_RELEASE_STORE_PASSWORD }}
-      ANDROID_RELEASE_KEY_ALIAS: ${{ secrets.ANDROID_RELEASE_KEY_ALIAS }}
-      ANDROID_RELEASE_KEY_PASSWORD: ${{ secrets.ANDROID_RELEASE_KEY_PASSWORD }}
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       - name: Grant wrapper execute permission
@@ -187,8 +222,31 @@ jobs:
         with:
           distribution: temurin
           java-version: "17"
+      - uses: actions/setup-python@42375524e23c412d93fb67b49958b491fce71c38 # v5.4.0
+        with:
+          python-version: "3.11"
+      - name: Install workflow validation dependency
+        run: python -m pip install "pyyaml==6.0.2"
       - name: Run signed release gate
-        run: ./gradlew releaseGate --dependency-verification=strict --no-daemon
+        env:
+          ANDROID_RELEASE_KEYSTORE_BASE64: ${{ secrets.ANDROID_RELEASE_KEYSTORE_BASE64 }}
+          ANDROID_RELEASE_STORE_PASSWORD: ${{ secrets.ANDROID_RELEASE_STORE_PASSWORD }}
+          ANDROID_RELEASE_KEY_ALIAS: ${{ secrets.ANDROID_RELEASE_KEY_ALIAS }}
+          ANDROID_RELEASE_KEY_PASSWORD: ${{ secrets.ANDROID_RELEASE_KEY_PASSWORD }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          export ANDROID_RELEASE_KEYSTORE="$RUNNER_TEMP/android-release.jks"
+          trap 'rm -f -- "$ANDROID_RELEASE_KEYSTORE"' EXIT
+          test -n "$ANDROID_RELEASE_KEYSTORE_BASE64"
+          umask 077
+          printf '%s' "$ANDROID_RELEASE_KEYSTORE_BASE64" | base64 --decode > "$ANDROID_RELEASE_KEYSTORE"
+          unset ANDROID_RELEASE_KEYSTORE_BASE64
+          ./gradlew releaseGate --dependency-verification=strict --no-daemon
+      - name: Remove temporary signing input
+        if: always()
+        shell: bash
+        run: rm -f -- "$RUNNER_TEMP/android-release.jks"
       - name: Upload signed APK, SBOM and provenance
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:

@@ -77,9 +77,27 @@ class AppUpdatesTest {
     @Test fun integerVersionsAndStrictStableTags() {
         assertTrue(ReleaseVersion.parse("1.0.10") > ReleaseVersion.parse("1.0.9"))
         assertTrue(ReleaseVersion.parse("2.0.0") > ReleaseVersion.parse("1.99.99"))
-        for (bad in listOf("v1.0.2", "1.0", "1.0.3-beta", "01.0.3", "1.0.999999999999", "-1.0.0")) {
+        for (bad in listOf("v1.0.2", "1.0", "1.0.3-beta", "01.0.3", "1.0.999999999999", "-1.0.0",
+            "1.1.6.01", "1.1.6.-1", "1.1.6.999999999999", "1.1.6.1.1")) {
             assertThrows(IllegalArgumentException::class.java) { ReleaseVersion.parse(bad) }
         }
+    }
+
+    @Test fun stableHotfixIsParsedComparedAndVerifiedWithoutAllowingDowngrades() {
+        assertTrue(isNewerThanInstalled("1.1.7", "1.1.5"))
+        val hotfix = release("1.1.6.1")
+        assertEquals(hotfix.copy(notes = "Release notes"), parseLatestRelease(apiBody(hotfix)))
+        assertTrue(isNewerThanInstalled("1.1.6.1", "1.1.6"))
+        assertFalse(isNewerThanInstalled("1.1.6", "1.1.6.1"))
+        assertFalse(isNewerThanInstalled("1.1.6.1", "1.1.6.1"))
+        assertTrue(isNewerThanInstalled("1.1.7", "1.1.6.99"))
+        assertTrue(isNewerThanInstalled("1.1.6.10", "1.1.6.9"))
+        assertEquals(ReleaseVersion.parse("1.1.6"), ReleaseVersion.parse("1.1.6.0"))
+        val installed = ApkIdentity("runtime.mobileagent", "1.1.6", 18, setOf("same-signer"), 26)
+        val candidate = installed.copy(versionName = hotfix.version, versionCode = 19)
+        verifyApkIdentity(installed, candidate, hotfix, 36)
+        assertThrows(IllegalArgumentException::class.java) { verifyApkIdentity(installed, candidate.copy(versionCode = 18), hotfix, 36) }
+        assertThrows(IllegalArgumentException::class.java) { verifyApkIdentity(installed, candidate.copy(signers = setOf("wrong-signer")), hotfix, 36) }
     }
 
     @Test fun previewInstallationFindsSamePatchStableWithoutAcceptingPreviewFeeds() = runBlocking<Unit> {
@@ -108,7 +126,7 @@ class AppUpdatesTest {
             verifyApkIdentity(installed.copy(versionName = "1.1.4.1preview", versionCode = 10),
                 candidate.copy(versionCode = 11), source.candidate, 34)
             assertThrows(IllegalArgumentException::class.java) { release("1.1.4.1preview").validate() }
-            for (invalid in listOf("1.1.4-beta", "1.1.4previewpreview", "01.1.4preview", "1.1.4.01preview", "1.1.4.1.2preview", "1.1.4.1", "preview")) {
+            for (invalid in listOf("1.1.4-beta", "1.1.4previewpreview", "01.1.4preview", "1.1.4.01preview", "1.1.4.1.2preview", "preview")) {
                 assertThrows(IllegalArgumentException::class.java) { isNewerThanInstalled("1.1.4", invalid) }
             }
             assertThrows(IllegalArgumentException::class.java) { ReleaseVersion.parse("1.1.4preview") }

@@ -38,6 +38,16 @@ class WorkspaceGuardTest(unittest.TestCase):
         self.identity(16, "1.1.6.1preview")
         self.assertTrue(check(self.root))
 
+    def test_hotfix_stable_tag_raises_floor(self):
+        self.identity(19, "1.1.6.1")
+        subprocess.run(["git", "add", "."], cwd=self.root, check=True)
+        subprocess.run(["git", "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit", "-qm", "hotfix fixture"], cwd=self.root, check=True)
+        subprocess.run(["git", "tag", "v1.1.6.1"], cwd=self.root, check=True)
+        self.identity(18, "1.1.6")
+        self.assertTrue(check(self.root))
+        self.identity(19, "1.1.6.1")
+        self.assertEqual([], check(self.root))
+
     def test_missing_reference_and_bloated_handoff_fail(self):
         self.identity(15, "1.1.5")
         (self.root / "docs/CURRENT.md").write_text("[missing](absent.md)\n", encoding="utf-8")

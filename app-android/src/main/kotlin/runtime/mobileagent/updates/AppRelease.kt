@@ -22,16 +22,17 @@ internal const val RELEASE_REPOSITORY = "https://github.com/hedanbaomi/mobile-ag
 internal const val LATEST_RELEASE_API = "https://api.github.com/repos/hedanbaomi/mobile-agent-runtime/releases/latest"
 internal const val MAX_APK_BYTES = 256L * 1024 * 1024
 
-/** Stable tags are compared as integer triples, never lexicographically or against announcements. */
-internal data class ReleaseVersion(val major: Int, val minor: Int, val patch: Int) : Comparable<ReleaseVersion> {
+/** Stable tags have three numeric parts and an optional hotfix part, compared as integers. */
+internal data class ReleaseVersion(val major: Int, val minor: Int, val patch: Int, val hotfix: Int = 0) : Comparable<ReleaseVersion> {
     override fun compareTo(other: ReleaseVersion): Int =
-        compareValuesBy(this, other, ReleaseVersion::major, ReleaseVersion::minor, ReleaseVersion::patch)
+        compareValuesBy(this, other, ReleaseVersion::major, ReleaseVersion::minor, ReleaseVersion::patch, ReleaseVersion::hotfix)
 
     companion object {
         fun parse(value: String): ReleaseVersion {
-            require(Regex("(?:0|[1-9][0-9]{0,8})\\.(?:0|[1-9][0-9]{0,8})\\.(?:0|[1-9][0-9]{0,8})").matches(value))
+            val number = "(?:0|[1-9][0-9]{0,8})"
+            require(Regex("$number\\.$number\\.$number(?:\\.$number)?").matches(value))
             val parts = value.split('.').map(String::toInt)
-            return ReleaseVersion(parts[0], parts[1], parts[2])
+            return ReleaseVersion(parts[0], parts[1], parts[2], parts.getOrElse(3) { 0 })
         }
     }
 }

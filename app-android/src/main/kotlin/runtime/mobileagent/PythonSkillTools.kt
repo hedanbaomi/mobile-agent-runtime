@@ -234,7 +234,9 @@ private class PythonSkillToolExecutor(
                 return@withContext ToolResult.NeedsApproval
             }
             if (!call.callId.matches(Regex("[A-Za-z0-9._:-]{1,128}"))) return@withContext ToolResult.Invalid("Invalid call ID")
-            if (calls.size >= 20) return@withContext ToolResult.Denied("Run Python invocation budget exhausted")
+            // AgentRuntime already charges every invocation to the configured Run tool budget.
+            // The IPC limit of 20 applies to broker requests inside one invocation, not to
+            // the number of Python invocations across the Run.
             val entry = entries[call.name] ?: return@withContext ToolResult.Invalid("Unknown Python tool")
             if (call.argumentsJson.toByteArray().size > entry.limits.maxInputBytes) return@withContext ToolResult.Invalid("Python input exceeds limit")
             val input = runCatching { Json.parseToJsonElement(call.argumentsJson) }.getOrNull()

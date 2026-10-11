@@ -833,6 +833,7 @@ class RollingDiagnosticLogStore(
     private var writeFailureCount = 0L
     private var droppedEventCount = 0L
     private var droppedByteCount = 0L
+    private val modelStreamSampler = ModelStreamDiagnosticSampler()
 
     private val eventFields = mapOf(
         "process_started" to setOf<String>(),
@@ -1005,14 +1006,16 @@ class RollingDiagnosticLogStore(
             noteDrop(0)
             return@synchronized false
         }
-        val line = runCatching { renderLine(event, level, normalized, threadName()) }
-            .getOrElse {
-                noteWriteFailure(0)
-                return@synchronized false
-            }
-        val written = runCatching { appendCurrent(line) }.getOrDefault(false)
-        if (!written) noteWriteFailure(line.toByteArray(StandardCharsets.UTF_8).size)
-        written
+        modelStreamSampler.recordIfNeeded(event, normalized) {
+            val line = runCatching { renderLine(event, level, normalized, threadName()) }
+                .getOrElse {
+                    noteWriteFailure(0)
+                    return@recordIfNeeded false
+                }
+            val written = runCatching { appendCurrent(line) }.getOrDefault(false)
+            if (!written) noteWriteFailure(line.toByteArray(StandardCharsets.UTF_8).size)
+            written
+        }
     }
 
     fun recordProcessStarted(): Boolean = record("process_started")
@@ -1884,6 +1887,7 @@ class RollingDiagnosticLogStore(
         listOf(currentFile, previousFile, lastCrashFile).forEach { file ->
             if (file.exists() && !file.delete()) throw IOException("无法清除诊断文件。")
         }
+        modelStreamSampler.clear()
     }
 
     /** Test/read-only helper; only known file names can be inspected. */

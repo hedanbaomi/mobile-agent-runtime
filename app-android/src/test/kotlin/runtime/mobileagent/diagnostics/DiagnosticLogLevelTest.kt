@@ -39,6 +39,32 @@ class DiagnosticLogLevelTest {
     private fun log(root: File): String = File(root, RollingDiagnosticLogStore.CURRENT_FILE_NAME).readText()
 
     @Test
+    fun streamFloodKeepsToolFailuresAndTerminalStages(@TempDir root: File) {
+        val logger = store(root, minimumLevel = DiagnosticLevel.DEBUG)
+        val stream = ModelRequestStateRecord(
+            stage = DiagnosticModelStage.STREAM_EVENT,
+            dispatchState = DiagnosticModelDispatchState.RESPONSE_RECEIVED,
+            requestRef = "run-fixture", endpointKind = "chat.completions",
+        )
+        assertTrue(logger.recordToolInvocationState(ToolInvocationStateRecord(
+            callId = "failed-script", state = DiagnosticToolRunState.FAILED, errorCode = "RESOURCE_LIMIT",
+        )))
+        repeat(20_000) { index -> logger.recordModelRequestState(stream.copy(durationMs = index.toLong())) }
+        assertTrue(logger.recordModelRequestState(stream.copy(durationMs = 19_999, errorCode = "INVALID_RESPONSE")))
+        assertTrue(logger.recordModelRequestState(stream.copy(stage = DiagnosticModelStage.TERMINAL)))
+        assertTrue(logger.recordModelRequestState(stream.copy(stage = DiagnosticModelStage.REQUEST_DISPATCH)))
+        assertTrue(logger.recordModelRequestState(stream.copy(durationMs = 0)))
+        val lines = log(root).lines().filter(String::isNotBlank)
+        assertEquals(25, lines.size)
+        assertTrue(lines.first().contains("\"errorCode\":\"RESOURCE_LIMIT\""))
+        assertTrue(lines.any { it.contains("\"errorCode\":\"INVALID_RESPONSE\"") })
+        assertTrue(lines.any { it.contains("\"stage\":\"terminal\"") })
+        assertTrue(logger.status().sizeBytes < 32 * 1024)
+        assertEquals(0L, logger.status().droppedEventCount)
+        assertEquals(DiagnosticHealth.HEALTHY, logger.status().health)
+    }
+
+    @Test
     fun workspaceFailuresKeepTypedCodesWithoutAcceptingArbitraryProviderText(@TempDir root: File) {
         val logger = store(root)
         val cases = listOf(

@@ -32,6 +32,32 @@ import runtime.mobileagent.skills.ToolSpec
 
 class AgentRuntimeTest {
     @Test
+    fun configuredRunBudgetAllowsMoreThanTwentyScriptsAndStopsAtTheSelectedLimit() = runTest {
+        for (limit in listOf(7, 25)) {
+            val adapter = ScriptedAdapter((1..limit + 1).map { index ->
+                listOf(ModelEvent.ToolCallDelta("script-$index", "py_fixture", "{}"), ModelEvent.Completed)
+            })
+            var dispatched = 0
+            val executor = object : ToolExecutor {
+                override val specs = listOf(ToolSpec("py_fixture", "fixture script", "{\"type\":\"object\"}", "python.execute", true))
+                override suspend fun invoke(call: ToolCall): ToolResult {
+                    dispatched++
+                    return ToolResult.Value("{}")
+                }
+                override suspend fun approve(callId: String): ToolResult = error("unused")
+            }
+            val run = AgentRun("script-budget-$limit", "snapshot", "conversation", budget = RunBudget(maxModelRounds = 64, maxToolCalls = limit))
+            AgentRuntime(adapter).run(AgentRuntimeRequest(
+                run, prompt(), "model", charArrayOf(), toolsEnabled = true, executor = executor,
+            )).toList()
+            assertEquals(limit, dispatched)
+            assertEquals(limit, run.toolCalls)
+            assertEquals(RunState.BUDGET_EXHAUSTED, run.state)
+            assertEquals("tool-calls", run.stopReason)
+        }
+    }
+
+    @Test
     fun deadlineDuringRequestPreparationStartsNoModelRequest() = runTest {
         var now = 0L
         val adapter = ScriptedAdapter(listOf(listOf(ModelEvent.TextDelta("never"), ModelEvent.Completed)))

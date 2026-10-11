@@ -1081,7 +1081,7 @@ class AgentRuntime(
         val message = when (error.code) {
             ToolErrorCode.FILE_TOO_LARGE -> "The selected file is too large to read as text."
             ToolErrorCode.INVALID_CURSOR -> "The directory changed. Enumerate it again from the first page."
-            ToolErrorCode.PERMISSION_DENIED -> "The workspace provider denied access. Check the workspace permission."
+            ToolErrorCode.PERMISSION_DENIED -> "Current authorization does not allow this tool operation. Check the tool or resource grant."
             ToolErrorCode.SYMLINK_FORBIDDEN -> "Symbolic links cannot be followed from this workspace."
             ToolErrorCode.PATH_OUT_OF_SCOPE -> "The requested path is outside the authorized workspace."
             ToolErrorCode.WORKSPACE_NOT_FOUND -> "The selected workspace or entry is no longer available."
@@ -1097,6 +1097,8 @@ class AgentRuntime(
                 "This workspace cannot enforce expected_version for this operation. Nothing was executed. Check workspace_list.expected_version_operations; do not repeat the same request."
             ToolErrorCode.UNSUPPORTED_ENTRY -> "The workspace entry type is unsupported and was not opened."
             ToolErrorCode.OPERATION_UNAVAILABLE -> "This workspace operation is unavailable on the selected backend."
+            ToolErrorCode.RESOURCE_LIMIT -> "The tool reached an execution resource limit."
+            ToolErrorCode.PYTHON_EXECUTION_FAILED -> "The Skill script failed during execution."
             else -> "The tool could not complete the request."
         }
         // Unified ToolOutcome envelope: FAILED carries the same ok/status/error

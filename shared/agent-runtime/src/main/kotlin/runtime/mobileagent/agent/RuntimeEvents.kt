@@ -267,7 +267,7 @@ fun toolResultUserMessage(resultJson: String): String? {
     return when (error["code"]?.jsonPrimitive?.contentOrNull) {
         "FILE_TOO_LARGE" -> "文件太大，无法作为文本读取。"
         "INVALID_CURSOR" -> "目录内容已发生变化，请从第一页重新列举。"
-        "PERMISSION_DENIED" -> "没有权限访问该工作区，请检查工作区授权。"
+        "PERMISSION_DENIED" -> "当前授权不允许执行此工具操作，请检查对应工具或资源的授权。"
         "SYMLINK_FORBIDDEN" -> "不允许从工作区跟随符号链接。"
         "PATH_OUT_OF_SCOPE" -> "请求路径超出已授权工作区。"
         "WORKSPACE_NOT_FOUND" -> "工作区或目标条目已不可用。"

@@ -126,6 +126,20 @@ class PythonSkillToolDeviceTest {
         val value = Json.parseToJsonElement((result as ToolResult.Value).json).jsonObject
         assertEquals(program, value.getValue("program").jsonPrimitive.content)
         assertEquals("corpus|example|4\n", value.getValue("stdout").jsonPrimitive.content)
+
+        // A Run's configured tool budget governs invocation count. Twenty is the
+        // per-invocation broker ceiling, so the 21st script must still be runnable.
+        for (index in 2..21) {
+            val next = call.copy(callId = "legacy-device-call-$index")
+            assertEquals("Python invocation $index", ToolResult.NeedsApproval, executor.invoke(next))
+            if (index == 21) {
+                val nextResult = executor.approve(next.callId)
+                assertTrue("21st Python invocation: $nextResult", nextResult is ToolResult.Value)
+                assertEquals(value, Json.parseToJsonElement((nextResult as ToolResult.Value).json))
+            }
+        }
+        container.skills.revoke(install.installId)
+        assertTrue(executor.invoke(call.copy(callId = "legacy-device-call-revoked")) is ToolResult.Denied)
     }
 
     private fun legacyClaudeZip(program: String, source: String): ByteArray {

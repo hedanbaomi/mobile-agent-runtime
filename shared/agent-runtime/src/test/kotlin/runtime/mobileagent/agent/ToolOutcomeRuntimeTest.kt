@@ -39,6 +39,19 @@ class ToolOutcomeRuntimeTest {
     }
 
     @Test
+    fun scriptFailuresKeepTheirCodesAndNeverSuggestWorkspaceAuthorization() = runTest {
+        for (code in listOf(ToolErrorCode.PERMISSION_DENIED, ToolErrorCode.RESOURCE_LIMIT, ToolErrorCode.PYTHON_EXECUTION_FAILED)) {
+            val produced = runSingleTool(ToolResult.Failure(ToolError(code, message = "private-worker-message")))
+            assertEquals(code, ToolOutcome.errorCodeOf(produced.resultJson))
+            assertTrue(!produced.resultJson.contains("private-worker-message"))
+            assertTrue(!produced.resultJson.contains("workspace"))
+            assertTrue(!requireNotNull(toolResultUserMessage(produced.resultJson)).contains("工作区"))
+        }
+        val denied = runSingleTool(ToolResult.Denied("Original Python authorization changed"))
+        assertTrue(!requireNotNull(toolResultUserMessage(denied.resultJson)).contains("工作区"))
+    }
+
+    @Test
     fun authorityUnavailableDeniedKeepsTypedCode() = runTest {
         val produced = runSingleTool(ToolResult.Denied("AUTHORITY_TEMPORARILY_UNAVAILABLE"))
         assertEquals("DENIED", produced.status)

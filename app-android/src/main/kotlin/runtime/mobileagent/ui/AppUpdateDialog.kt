@@ -3,6 +3,7 @@
 
 package runtime.mobileagent.ui
 
+import androidx.activity.compose.LocalActivity
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -17,7 +18,6 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.unit.dp
 import runtime.mobileagent.MainActivity
@@ -28,7 +28,7 @@ import runtime.mobileagent.updates.UpdatePhase
 internal fun AppUpdateDialog(updates: AppUpdateCoordinator, chinese: Boolean) {
     val state by updates.state.collectAsState()
     if (!state.prompt) return
-    val context = LocalContext.current
+    val activity = LocalActivity.current as? MainActivity
     val release = state.release
     AlertDialog(
         modifier = Modifier.testTag("app-update-dialog"),
@@ -51,7 +51,7 @@ internal fun AppUpdateDialog(updates: AppUpdateCoordinator, chinese: Boolean) {
         },
         confirmButton = {
             if (release != null && state.compatible && !state.busy) {
-                TextButton(onClick = { (context as? MainActivity)?.downloadAndInstallUpdate(updates) }) {
+                TextButton(onClick = { activity?.downloadAndInstallUpdate(updates) }) {
                     Text(if (state.phase == UpdatePhase.READY) { if (chinese) "安装更新" else "Install update" }
                         else if (chinese) "下载并安装" else "Download and install")
                 }

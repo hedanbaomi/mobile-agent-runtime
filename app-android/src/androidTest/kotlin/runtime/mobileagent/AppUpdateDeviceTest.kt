@@ -10,6 +10,7 @@ import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.activity.compose.setContent
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
+import androidx.compose.ui.platform.LocalContext
 import androidx.core.content.FileProvider
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.platform.app.InstrumentationRegistry
@@ -27,11 +28,14 @@ import org.junit.runner.RunWith
 import org.junit.rules.TestRule
 import org.junit.runners.model.Statement
 import runtime.mobileagent.ui.AppUpdateDialog
+import runtime.mobileagent.ui.AppLocalizedResources
 import runtime.mobileagent.ui.MobileAgentTheme
 import runtime.mobileagent.updates.*
 import java.io.ByteArrayInputStream
 import java.io.File
+import java.io.IOException
 import java.time.LocalDate
+import java.util.concurrent.atomic.AtomicInteger
 import java.util.zip.ZipEntry
 import java.util.zip.ZipFile
 import java.util.zip.ZipOutputStream
@@ -57,6 +61,55 @@ class AppUpdateDeviceTest {
         }
     } }
     @get:Rule(order = 1) val compose = createAndroidComposeRule<MainActivity>()
+
+    @Test fun chineseLocalizedDialogStartsDownloadAndAllowsRetry() = localizedDialogStartsDownload("zh-CN", true)
+
+    @Test fun englishLocalizedDialogStartsDownloadAndAllowsRetry() = localizedDialogStartsDownload("en-US", false)
+
+    private fun localizedDialogStartsDownload(language: String, chinese: Boolean) = runBlocking {
+        val attempts = AtomicInteger()
+        val candidate = AppRelease("99.0.0",
+            "$RELEASE_REPOSITORY/releases/download/v99.0.0/mobileAgentRuntime-v99.0.0-arm64-v8a.apk",
+            1, "0".repeat(64))
+        val source = object : ReleaseSource {
+            override fun latest() = candidate
+            override fun openApk(release: AppRelease): ByteArrayInputStream {
+                attempts.incrementAndGet()
+                throw IOException("Synthetic download failure")
+            }
+        }
+        val prefs = app.getSharedPreferences("update-localized-$language", Context.MODE_PRIVATE)
+        prefs.edit().clear().commit()
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+        val directory = File(app.cacheDir, "update-localized-$language")
+        val updates = AppUpdateCoordinator(source, PreferenceUpdateStore(prefs), scope, directory,
+            BuildConfig.VERSION_NAME, true, { _, _ -> fail("A failed download cannot reach APK verification") })
+        try {
+            updates.check(manual = true).join()
+            compose.runOnUiThread {
+                compose.activity.setContent {
+                    MobileAgentTheme {
+                        AppLocalizedResources(language) {
+                            // Production wraps the Activity for localized resources. A direct cast fails.
+                            assertFalse(LocalContext.current is MainActivity)
+                            AppUpdateDialog(updates, chinese)
+                        }
+                    }
+                }
+            }
+            val button = if (chinese) "下载并安装" else "Download and install"
+            compose.onNodeWithText(button).performClick()
+            compose.waitUntil(5_000) { attempts.get() == 1 && updates.state.value.phase == UpdatePhase.ERROR }
+            compose.onNodeWithText("下载或安全校验失败，请重试。").assertExists()
+            compose.onNodeWithText(button).performClick()
+            compose.waitUntil(5_000) { attempts.get() == 2 && updates.state.value.phase == UpdatePhase.ERROR }
+        } finally {
+            scope.cancel()
+            prefs.edit().clear().commit()
+            directory.listFiles()?.forEach { it.delete() }
+            directory.delete()
+        }
+    }
 
     @Test fun fileProviderIsPrivateNarrowAndReadOnlyWhenGranted() {
         val pm = app.packageManager

@@ -33,7 +33,7 @@ def check(root, publication=False):
     floors = [RELEASE_FLOOR]
     tags = subprocess.check_output(["git", "tag", "--list", "v*"], cwd=root, text=True, encoding="utf-8").splitlines()
     for tag in tags:
-        if re.fullmatch(r"v\d+\.\d+\.\d+", tag):
+        if re.fullmatch(r"v\d+\.\d+\.\d+(?:\.\d+)?", tag):
             blob = subprocess.check_output(["git", "show", f"{tag}:{RELEASE_FILE}"], cwd=root, text=True, encoding="utf-8")
             floors.append(version(blob))
     floor = max(floors)

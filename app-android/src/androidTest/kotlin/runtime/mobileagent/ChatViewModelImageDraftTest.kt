@@ -20,7 +20,7 @@ import runtime.mobileagent.domain.ModelProfile
 import runtime.mobileagent.domain.ModelRole
 import runtime.mobileagent.domain.ProviderProfile
 
-/** Composer image draft lifetime on the real ViewModel; no model request is made. */
+/** Composer lifetime and original delivery on the real ViewModel; synthetic providers only. */
 @RunWith(AndroidJUnit4::class)
 class ChatViewModelImageDraftTest {
     private val app = InstrumentationRegistry.getInstrumentation().targetContext.applicationContext as MobileAgentApp
@@ -43,6 +43,95 @@ class ChatViewModelImageDraftTest {
     }
 
     private fun onMain(block: () -> Unit) = InstrumentationRegistry.getInstrumentation().runOnMainSync(block)
+
+    @Test
+    fun uploadedOriginalAndTextFollowupReachMainRequestsInBothProtocols() {
+        app.ensureHostInitialized()
+        val container = app.container
+        val png = java.util.Base64.getDecoder().decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jGd0AAAAASUVORK5CYII=")
+        for (format in listOf(ApiFormat.OPENAI_COMPATIBLE, ApiFormat.OPENAI_RESPONSES)) {
+            val suffix = UUID.randomUUID().toString().replace("-", "")
+            val bodies = java.util.concurrent.CopyOnWriteArrayList<String>()
+            val failure = java.util.concurrent.atomic.AtomicReference<Throwable?>()
+            java.net.ServerSocket(0, 2, java.net.InetAddress.getByName("127.0.0.1")).use { server ->
+                server.soTimeout = 30_000
+                val serving = Thread {
+                    try {
+                        repeat(2) {
+                            server.accept().use { socket ->
+                                socket.soTimeout = 30_000
+                                val input = socket.getInputStream()
+                                val header = java.io.ByteArrayOutputStream()
+                                var tail = 0
+                                while (header.size() < 16_384) {
+                                    val next = input.read(); check(next >= 0)
+                                    header.write(next); tail = (tail shl 8) or next
+                                    if (tail == 0x0d0a0d0a) break
+                                }
+                                val length = header.toString("US-ASCII").split("\r\n")
+                                    .first { it.startsWith("Content-Length:", true) }.substringAfter(':').trim().toInt()
+                                check(length in 1..1_048_576)
+                                val body = ByteArray(length)
+                                var read = 0
+                                while (read < length) { val n = input.read(body, read, length - read); check(n > 0); read += n }
+                                bodies += body.toString(Charsets.UTF_8)
+                                val stream = if (format == ApiFormat.OPENAI_COMPATIBLE)
+                                    "data: {\"choices\":[{\"delta\":{\"content\":\"image answer\"}}]}\n\ndata: [DONE]\n\n"
+                                else "data: {\"type\":\"response.output_text.delta\",\"delta\":\"image answer\"}\n\n" +
+                                    "data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\"}}\n\n"
+                                socket.getOutputStream().apply {
+                                    write("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n".toByteArray())
+                                    write(stream.toByteArray()); flush()
+                                }
+                            }
+                        }
+                    } catch (error: Throwable) { failure.set(error) }
+                }.apply { isDaemon = true; start() }
+                val secret = "direct-image-$suffix"
+                container.secrets.put(secret, "synthetic-only".toCharArray())
+                val provider = ProviderProfile("provider.direct.$suffix", "Synthetic loopback", format,
+                    "http://127.0.0.1:${server.localPort}/v1", secretRef = secret, revision = 1)
+                container.profiles.createProvider(provider)
+                val model = ModelProfile("model.direct.$suffix", provider.id, ModelRole.CHAT,
+                    "synthetic-direct", setOf("stream", "image"), contextLimit = 64_000, outputLimit = 512, revision = 1)
+                container.profiles.createModel(model)
+                val agent = "agent.direct.$suffix"
+                container.agents.saveWithPrompt(AgentProfile(agent, "Direct fixture", "pending", model.id, revision = 0), "Describe the original image.")
+                lateinit var vm: ChatViewModel
+                onMain {
+                    vm = ChatViewModel(app, SavedStateHandle())
+                    vm.selectAgent(agent)
+                    vm.sendWithImages(listOf(ChatImageUpload(png, "image/png")))
+                }
+                try {
+                    fun awaitRun() {
+                        val deadline = System.currentTimeMillis() + 30_000
+                        while (vm.state.value.streaming && System.currentTimeMillis() < deadline) Thread.sleep(50)
+                        assertFalse("${vm.state.value.status}; server=${failure.get()}", vm.state.value.streaming)
+                        assertTrue(vm.state.value.error.orEmpty(), vm.state.value.error.isNullOrEmpty())
+                    }
+                    awaitRun()
+                    assertEquals("No separate analysis request", 1, bodies.size)
+                    val session = requireNotNull(vm.state.value.selectedSessionId)
+                    onMain { vm.input("Read the same original again."); vm.send() }
+                    awaitRun()
+                    assertEquals(2, bodies.size)
+                    val dataUri = "data:image/png;base64," + java.util.Base64.getEncoder().encodeToString(png)
+                    bodies.forEach { body ->
+                        assertTrue(body, body.contains(dataUri))
+                        assertTrue(body.contains(if (format == ApiFormat.OPENAI_COMPATIBLE) "image_url" else "input_image"))
+                        assertFalse(body.contains("untrusted-visual-evidence-analysis"))
+                        assertTrue(body.contains("Describe the original image."))
+                    }
+                    assertTrue(container.runs.list(session).all { it.state == runtime.mobileagent.domain.RunStatus.COMPLETED && it.modelRounds == 1 })
+                    assertTrue(container.conversations.messages(session).none { it.metadataJson.contains("\"visualBatchAnalysis\":true") })
+                } finally {
+                    onMain { vm.cancel() }
+                    server.close(); serving.join(2_000)
+                }
+            }
+        }
+    }
 
     @Test
     fun capLimitRemovalAndSessionSwitchKeepStripTruthful() {

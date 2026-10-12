@@ -13,8 +13,12 @@ import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.captureToImage
+import androidx.compose.ui.test.onRoot
+import androidx.compose.ui.graphics.asAndroidBitmap
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -51,6 +55,14 @@ class ChatImageComposerUiTest {
             }
         }
         compose.onNodeWithTag("conversation.composer.pendingImages").assertIsDisplayed()
+        val input = compose.onNodeWithTag("conversation.composer.input").fetchSemanticsNode().boundsInRoot
+        val attach = compose.onNodeWithTag("conversation.composer.attachImage").fetchSemanticsNode().boundsInRoot
+        val send = compose.onNodeWithTag("conversation.composer.send").fetchSemanticsNode().boundsInRoot
+        assertTrue("Image button must be right of input", input.right <= attach.left)
+        assertTrue("Image button must be left of send", attach.right <= send.left)
+        java.io.File(compose.activity.cacheDir, "chat-composer-right.png").outputStream().use {
+            compose.onRoot().captureToImage().asAndroidBitmap().compress(android.graphics.Bitmap.CompressFormat.PNG, 100, it)
+        }
         compose.onNodeWithContentDescription(compose.activity.getString(runtime.mobileagent.feature.chat.R.string.chat_pending_image, 1)).assertIsDisplayed()
         compose.onNodeWithTag("conversation.composer.send").assertIsEnabled().performClick()
         compose.onNodeWithTag("conversation.composer.attachImage").assertIsEnabled().performClick()

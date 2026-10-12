@@ -17,7 +17,16 @@ import runtime.mobileagent.data.*
 import runtime.mobileagent.domain.*
 
 class ChatRunPreflightTest {
-    @Test fun uploadedOriginalReachesBothProviderProtocolsAndMainAnswerUsesAnalysis() = runBlocking {
+    @Test fun directOriginalSelectionKeepsRecentUploadsAndHonorsSmallerBudgets() {
+        fun image(id: String) = runtime.mobileagent.provider.InlineImage("image/png", "", id, 5, "hash")
+        val history = (1..9).map { runtime.mobileagent.provider.ChatMessage("user", images = listOf(image("chat-upload:$it"))) }
+        val messages = history + runtime.mobileagent.provider.ChatMessage("user", images = listOf(image("chat-upload:10"), image("kb-asset")))
+        assertEquals((3..10).map { "chat-upload:$it" }.toSet(), ChatImagePolicy.directAssetIds(messages, 8))
+        assertEquals(setOf("chat-upload:9", "chat-upload:10"), ChatImagePolicy.directAssetIds(messages, 2))
+        assertTrue(ChatImagePolicy.directAssetIds(listOf(runtime.mobileagent.provider.ChatMessage("user", images = listOf(image("kb-asset")))), 8).isEmpty())
+    }
+
+    @Test fun uploadedOriginalReachesMainAnswerInBothProviderProtocols() = runBlocking {
         withConversation { db, conversations, _ ->
             val sink = runtime.mobileagent.knowledge.MemoryBlobSink()
             val images = ConversationImageRepository(db, conversations, sink)
@@ -41,15 +50,17 @@ class ChatRunPreflightTest {
                         runtime.mobileagent.agent.AgentRun("run-${format.name}", "snapshot", "conversation"),
                         runtime.mobileagent.agent.EffectivePrompt("Runtime", "System", emptyList(), emptyList(), emptyList(), "", references),
                         "synthetic", "test-token".toCharArray(), false, batchAllImages = true, maxInputBudgetUnits = 16384,
+                        directImageAssetIds = references.mapNotNull { it.assetId }.toSet(),
                         imageLoader = { images.load("conversation", it) },
                         beforeImageRequest = { group -> group.forEach { images.verify("conversation", it) } },
                     )).toList()
-                    assertEquals(2, bodies.size, events.toString())
+                    assertEquals(1, bodies.size, events.toString())
                     val url = "data:image/png;base64," + java.util.Base64.getEncoder().encodeToString(bytes)
                     assertTrue(bodies[0].contains(url), bodies[0])
                     assertTrue(bodies[0].contains(if (format == ApiFormat.OPENAI_COMPATIBLE) "image_url" else "input_image"))
-                    assertFalse(bodies[1].contains("data:image/"))
-                    assertTrue(bodies[1].contains("A small image"))
+                    assertTrue(bodies[0].contains("System"))
+                    assertFalse(bodies[0].contains("untrusted-visual-evidence-analysis"))
+                    assertTrue(events.filterIsInstance<runtime.mobileagent.agent.RuntimeEvent.VisualBatchAnalyzed>().isEmpty())
                     assertTrue(events.filterIsInstance<runtime.mobileagent.agent.RuntimeEvent.RunFinished>().single().state == runtime.mobileagent.agent.RunState.COMPLETED)
                 } finally { client.close() }
             }

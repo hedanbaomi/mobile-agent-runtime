@@ -1597,15 +1597,6 @@ private fun Composer(state: ChatUiState, actions: ChatActions, input: () -> Stri
     ) {
     if (state.pendingImages.isNotEmpty()) PendingImageStrip(state.pendingImages, !state.streaming, actions.onRemovePendingImage)
     Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.Bottom) {
-        actions.onPickImages?.let { pick ->
-            IconButton(
-                onClick = pick,
-                enabled = editable && !state.streaming && state.pendingImages.size < CHAT_MAX_PENDING_IMAGES,
-                modifier = Modifier.size(48.dp).testTag("conversation.composer.attachImage"),
-            ) {
-                Icon(Icons.Filled.Add, contentDescription = stringResource(R.string.chat_add_images))
-            }
-        }
         OutlinedTextField(
             value = value,
             onValueChange = {
@@ -1622,6 +1613,15 @@ private fun Composer(state: ChatUiState, actions: ChatActions, input: () -> Stri
                 .testTag("conversation.composer.input"),
             shape = RoundedCornerShape(24.dp),
         )
+        actions.onPickImages?.let { pick ->
+            IconButton(
+                onClick = pick,
+                enabled = editable && !state.streaming && state.pendingImages.size < CHAT_MAX_PENDING_IMAGES,
+                modifier = Modifier.size(48.dp).testTag("conversation.composer.attachImage"),
+            ) {
+                Icon(Icons.Filled.Add, contentDescription = stringResource(R.string.chat_add_images))
+            }
+        }
         Spacer(Modifier.width(8.dp))
         if (state.streaming) {
             OutlinedButton(

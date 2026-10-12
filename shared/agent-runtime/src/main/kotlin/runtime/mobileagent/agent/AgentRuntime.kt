@@ -209,7 +209,7 @@ class AgentRuntime(
             run.state = RunState.ASSEMBLING
             val window = ContextWindow(request.prompt, request.context)
             val visualDelivery = VisualBatchDelivery(request.maxImagesPerRun, request.maxImagesPerRequest,
-                request.batchAllImages, request.prompt.currentUser)
+                request.batchAllImages, request.prompt.currentUser, request.directImageAssetIds)
             var segmentRounds = 0
             // Run-scoped bound on "rejected before dispatch" tool results fed
             // back to the model.  Each rejection costs one model round; the cap
@@ -311,7 +311,10 @@ class AgentRuntime(
                         activeDispatch = null // Successful receipt collector has finished durable persistence.
                         notes.toString()
                     }
-                    window.transformProjectedMessages(visualDelivery::rewriteMessages)
+                    // Compaction rebuilds from the window: retain the bounded, loaded originals there.
+                    window.transformProjectedMessages { messages ->
+                        visualDelivery.rewriteMessages(messages, modelRequest.messages.flatMap { it.images })
+                    }
                 } catch (failure: VisualDeliveryBudgetExceeded) {
                     run.state = RunState.BUDGET_EXHAUSTED; run.stopReason = failure.message
                     emitModel(ModelEvent.Failed(failure.message.orEmpty())); finish(); return@flow
@@ -555,7 +558,7 @@ class AgentRuntime(
                 var terminal: ModelEvent? = null
                 // RequestPrepared is consumed by durable/UI collectors and can suspend.
                 // No provider request has started yet; do not admit it on an expired check.
-                if (budgetExhausted(run)) {
+                if (!request.validateAnsweringImages(modelRequest, remainingMs(run)) { budgetExhausted(run) }) {
                     emitBudget()
                     return@flow
                 }

@@ -1138,10 +1138,14 @@ class ChatViewModel internal constructor(
                 val preflightRequest = if (contextPolicy.autoCompact) {
                     ContextPreflight.minimumRequest(prompt, runtimeContext, preparedRequest)
                 } else preparedRequest
-                // Originals are delivered in bounded groups before the main text request.
+                val directImageAssetIds = ChatImagePolicy.directAssetIds(preparedRequest.messages,
+                    minOf(MAX_IMAGES_PER_REQUEST, contextPolicy.imageBudget))
+                // Uploaded originals remain in the answer; other sources use bounded evidence groups.
                 val anticipatedImages = preflightRequest.messages.flatMap { it.images }.distinctBy { it.assetId ?: it.base64 }.size
                 val preflight = adapter.estimateInput(preflightRequest.copy(
-                    messages = preflightRequest.messages.map { it.copy(images = emptyList()) }))
+                    messages = preflightRequest.messages.map { message ->
+                        message.copy(images = message.images.filter { it.assetId in directImageAssetIds })
+                    }))
                 if (preflight.units > inputBudget || anticipatedImages > contextPolicy.imageBudget) {
                     // Local reserve only: under AUTO this protects the context budget
                     // without pretending to know the provider cap.
@@ -1302,6 +1306,7 @@ class ChatViewModel internal constructor(
                     maxImagesPerRequest = minOf(MAX_IMAGES_PER_REQUEST, contextPolicy.imageBudget),
                     maxImagesPerRun = contextPolicy.imageBudget,
                     batchAllImages = true,
+                    directImageAssetIds = directImageAssetIds,
                     imageLoader = { source -> withContext(Dispatchers.IO) {
                         require(contextAuthorizationFingerprint() == authorizationFingerprint) {
                             "PERMISSION_DENIED: visual source authorization changed"

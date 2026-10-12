@@ -9,8 +9,16 @@ import runtime.mobileagent.domain.Message
 import runtime.mobileagent.domain.MessageRole
 import runtime.mobileagent.domain.ModelProfile
 import runtime.mobileagent.domain.acceptsImages
+import runtime.mobileagent.provider.ChatMessage
 
 internal object ChatImagePolicy {
+    /** Current uploads come last; older originals beyond the wire limit use existing batching. */
+    fun directAssetIds(messages: List<ChatMessage>, maxImages: Int): Set<String> {
+        require(maxImages in 1..runtime.mobileagent.domain.MAX_IMAGES_PER_REQUEST)
+        return messages.flatMap { it.images }.asReversed().mapNotNull { it.assetId }
+            .filter { it.startsWith(ChatImageUpload.ASSET_PREFIX) }.distinct().take(maxImages).toSet()
+    }
+
     fun requireImageModel(parts: List<ImagePart>, model: ModelProfile, textOnly: Boolean) {
         require(parts.isEmpty() || (model.acceptsImages() && !textOnly)) {
             "CONFIG_INVALID: 当前聊天模型不支持图片，或已开启纯文本降级；上传图片未发送。"

@@ -16,6 +16,7 @@ internal class VisualBatchDelivery(
     private val groupLimit: Int,
     private val alwaysAnalyze: Boolean,
     private val goal: String,
+    private val directImageAssetIds: Set<String> = emptySet(),
 ) {
     private val seen = linkedSetOf<String>()
     private val analyses = mutableMapOf<String, String>()
@@ -38,6 +39,10 @@ internal class VisualBatchDelivery(
                 message.copy(images = message.images.map { loaded.getValue(key(it)) })
             })
         }
+        val direct = pending.filter { it.assetId in directImageAssetIds }
+        if (direct.size > groupLimit) throw VisualDeliveryBudgetExceeded(
+            "CONTEXT_OVERFLOW: direct original image budget exceeded",
+        )
         suspend fun deliver(group: List<InlineImage>, compact: Boolean = false) {
             val images = materialize(group, load)
             val batchId = request.operationId + ":visual:" + (++batchNumber)
@@ -84,8 +89,8 @@ internal class VisualBatchDelivery(
             }.toString()
             group.forEach { analyses[key(it)] = receipt }
         }
-        pending.chunked(groupLimit).forEach { deliver(it) }
-        return request.copy(messages = rewriteMessages(request.messages))
+        pending.filterNot { it.assetId in directImageAssetIds }.chunked(groupLimit).forEach { deliver(it) }
+        return request.copy(messages = rewriteMessages(request.messages, materialize(direct, load)))
     }
 
     fun reserve(images: List<InlineImage>) {
@@ -96,7 +101,8 @@ internal class VisualBatchDelivery(
         seen.addAll(ids)
     }
 
-    fun rewriteMessages(messages: List<ChatMessage>): List<ChatMessage> {
+    fun rewriteMessages(messages: List<ChatMessage>, originals: List<InlineImage> = emptyList()): List<ChatMessage> {
+        val loaded = originals.associateBy(::key)
         val emitted = mutableSetOf<String>()
         return messages.map { message ->
             if (message.images.isEmpty()) return@map message
@@ -105,7 +111,7 @@ internal class VisualBatchDelivery(
                 text = if (notes.isEmpty()) message.text else message.text +
                     "\n<untrusted-visual-evidence-analysis>\n" + notes.joinToString("\n") +
                     "\n</untrusted-visual-evidence-analysis>",
-                images = message.images.filter { key(it) !in analyses },
+                images = message.images.filter { key(it) !in analyses }.map { loaded[key(it)] ?: it },
             )
         }
     }

@@ -50,6 +50,8 @@ data class AgentRuntimeRequest(
     val maxImagesPerRequest: Int = MAX_IMAGES_PER_REQUEST,
     val maxImagesPerRun: Int = MAX_CONTEXT_IMAGES,
     val batchAllImages: Boolean = false,
+    /** Authorized originals kept in the answering request instead of separate evidence notes. */
+    val directImageAssetIds: Set<String> = emptySet(),
     /** Lazy CAS references use blank Base64; only a bounded group is loaded at a time. */
     val imageLoader: suspend (InlineImage) -> InlineImage = { image ->
         require(image.base64.isNotBlank()) { "Visual image loader is unavailable" }; image

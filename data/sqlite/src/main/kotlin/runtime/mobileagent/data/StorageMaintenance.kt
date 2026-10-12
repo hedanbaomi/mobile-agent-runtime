@@ -165,6 +165,12 @@ internal class StorageMaintenance(private val db: SqlConnection, private val blo
     }
 
     private fun retainedHashes(): Set<String> = buildSet {
+        // Keep all declared original hashes, including legacy casing. Invalid JSON aborts GC
+        // rather than making an unreadable reference collectible. Recheck on every candidate:
+        // publication may run between the independent deletion transactions above.
+        db.query("SELECT DISTINCT json_extract(payload_json,'$.blobHash') AS hash FROM message_parts " +
+            "WHERE lower(part_type)='image' AND json_extract(payload_json,'$.blobHash') IS NOT NULL")
+            .forEach { add(it.string("hash")) }
         // Retained tombstones include paused and unknown jobs; all versions/assets of live docs are roots.
         listOf("SELECT blob_hash AS hash FROM documents", "SELECT blob_hash AS hash FROM assets",
             "SELECT asset_hash AS hash FROM vision_results", "SELECT asset_hash AS hash FROM vision_attempts",

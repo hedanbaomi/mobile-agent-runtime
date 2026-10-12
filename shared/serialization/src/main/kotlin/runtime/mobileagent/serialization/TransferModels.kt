@@ -157,6 +157,10 @@ data class ConversationTransfer(
     /** Full archive exports carry conversation rows in a bounded, separate ZIP entry. */
     val contentIncluded: Boolean = false,
     val contentEntry: String? = null,
+    /** Included only with explicit conversation backup; originals are sensitive user content. */
+    @OptIn(kotlinx.serialization.ExperimentalSerializationApi::class)
+    @kotlinx.serialization.EncodeDefault(kotlinx.serialization.EncodeDefault.Mode.NEVER)
+    val uploadedImages: List<BlobTransfer> = emptyList(),
 )
 
 @Serializable

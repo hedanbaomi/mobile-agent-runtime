@@ -432,6 +432,10 @@ object TransferCodec {
         }
         validateSnapshot(transfer.snapshot, conversation, operationId)
 
+        validateUploadedChatImages(transfer, { requireHash(it, operationId, "chatImage.hash") }) {
+            invalid(operationId, it)
+        }
+
         val messageIds = mutableSetOf<String>()
         transfer.messages.forEach { message ->
             validateMessage(message, conversation, operationId)

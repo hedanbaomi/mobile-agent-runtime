@@ -35,10 +35,13 @@ internal class ChatRunPreflight(
     private val transfer: TransferRepository,
     private val workspace: ThreadWorkspacePort?,
     private val workspaceRuntime: ThreadWorkspaceRuntimePort?,
+    private val images: runtime.mobileagent.data.ConversationImageRepository? = null,
 ) {
     suspend fun prepare(
         conversationId: String,
         text: String,
+        uploads: List<ChatImageUpload> = emptyList(),
+        textOnly: Boolean = false,
         onUserPersisted: (Message) -> Unit,
     ): ChatPreflightResult {
         val unknown = withContext(Dispatchers.IO) {
@@ -49,9 +52,26 @@ internal class ChatRunPreflight(
         if (unknown != null) return ChatPreflightResult.Unknown(unknown.runId)
         val conversation = withContext(Dispatchers.IO) { conversations.get(conversationId) }
             ?: return ChatPreflightResult.MissingConversation
+        // Persisting an image turn the frozen model cannot accept would poison every later history
+        // projection, so this capability check precedes the message write. Text-only degradation is
+        // known without the snapshot; a snapshot that cannot be resolved keeps the existing
+        // persist-then-fail behavior below so no durable user content is lost to a transient read.
+        var resolved: SnapshotBinding? = null
+        if (uploads.isNotEmpty()) {
+            if (textOnly) return imagesRejected()
+            resolved = try {
+                withContext(Dispatchers.IO) { transfer.resolveRunBinding(conversation.snapshotId) }
+            } catch (cancel: CancellationException) {
+                throw cancel
+            } catch (_: Exception) {
+                null
+            }
+            if (resolved?.chatModel?.acceptsImages() == false) return imagesRejected()
+        }
         val userMessage = try {
             withContext(Dispatchers.IO) {
-                conversations.append(conversationId, MessageRole.USER, text, parts = listOf(TextPart(text)))
+                if (uploads.isEmpty()) conversations.append(conversationId, MessageRole.USER, text, parts = listOf(TextPart(text)))
+                else checkNotNull(images) { "Chat image storage is unavailable" }.appendUser(conversationId, text, uploads)
             }
         } catch (cancel: CancellationException) {
             throw cancel
@@ -62,7 +82,7 @@ internal class ChatRunPreflight(
         val binding: SnapshotBinding
         val policy: AgentContextPolicy
         try {
-            binding = withContext(Dispatchers.IO) { transfer.resolveRunBinding(conversation.snapshotId) }
+            binding = resolved ?: withContext(Dispatchers.IO) { transfer.resolveRunBinding(conversation.snapshotId) }
             policy = AgentContextPolicy.fromJson(binding.snapshot.contextPolicyJson)
         } catch (cancel: CancellationException) {
             throw cancel
@@ -92,4 +112,9 @@ internal class ChatRunPreflight(
         return ChatPreflightResult.Prepared(userMessage, binding, policy,
             workspaceBinding?.workspaceId, bindingReadFailed)
     }
+
+    private fun imagesRejected() = ChatPreflightResult.Failed(
+        IllegalArgumentException("CONFIG_INVALID: 当前聊天模型不支持图片，或已开启纯文本降级；图片未发送，已保留待发内容。"),
+        userMessagePersisted = false,
+    )
 }

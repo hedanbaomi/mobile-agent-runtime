@@ -618,9 +618,36 @@ private fun ChatRoute(vm: runtime.mobileagent.ChatViewModel, chinese: Boolean, o
     val state = presentation.copy(language = if (chinese) "zh-CN" else "en-US")
     val selectedAgentLabel = state.agents.firstOrNull { it.id == state.selectedAgentId }?.label
         ?: if (chinese) "当前智能体" else "Current Agent"
+    val context = LocalContext.current
+    val imageScope = rememberCoroutineScope()
+    var pickedForSession by remember { mutableStateOf<String?>(null) }
+    var pickedForAgent by remember { mutableStateOf<String?>(null) }
+    // System photo picker: no storage permission, and only the user-chosen items are readable.
+    val imagePicker = rememberLauncherForActivityResult(
+        ActivityResultContracts.PickMultipleVisualMedia(runtime.mobileagent.domain.ChatImageUpload.MAX_IMAGES_PER_MESSAGE),
+    ) { uris ->
+        val resolver = context.contentResolver
+        // The page the user picked on, not whichever page is selected when the read completes.
+        val pickerSession = pickedForSession
+        val pickerAgent = pickedForAgent
+        imageScope.launch {
+            val picked = withContext(Dispatchers.IO) {
+                runtime.mobileagent.ChatImagePicker.read(resolver, uris)
+            }
+            vm.attachImages(picked.uploads, picked.rejected, pickerSession, pickerAgent)
+        }
+    }
     val actions = runtime.mobileagent.feature.chat.ChatActions(
         onSessionAction = vm::sessionAction, onRestoreSession = vm::restoreSession,
         onInput = vm::input, onSend = vm::send, onCancel = vm::cancel,
+        onPickImages = {
+            pickedForSession = vm.state.value.selectedSessionId
+            pickedForAgent = vm.state.value.selectedAgentId
+            imagePicker.launch(androidx.activity.result.PickVisualMediaRequest(
+                ActivityResultContracts.PickVisualMedia.ImageOnly,
+            ))
+        },
+        onRemovePendingImage = vm::removePendingImage,
         onToggleDegradation = vm::degrade, onSelectSession = vm::selectSession,
         onNewSession = { vm.newSession() }, onSelectAgent = vm::selectAgent,
         onNewSessionForAgent = { agentId -> vm.selectAgent(agentId); vm.newSession(); Unit },

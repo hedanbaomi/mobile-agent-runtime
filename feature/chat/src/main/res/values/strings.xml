@@ -2,6 +2,10 @@
 <!-- SPDX-FileCopyrightText: 2026 mobileAgentRuntime contributors -->
 <!-- SPDX-License-Identifier: AGPL-3.0-only -->
 <resources>
+    <string name="chat_images_attached">%1$d image(s) attached</string>
+    <string name="chat_add_images">Add images</string>
+    <string name="chat_pending_image">Pending image %1$d</string>
+    <string name="chat_remove_pending_image">Remove %1$s</string>
     <string name="ui_agent_252fc75c" formatted="false">Agent</string>
     <string name="ui_agent_default_workspace_e459a394" formatted="false">Agent default workspace</string>
     <string name="ui_agent_default_workspace_s_0ec344e3">Agent default workspace: %1$s</string>

@@ -40,9 +40,12 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.automirrored.filled.Send
@@ -70,6 +73,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.State
 import androidx.compose.runtime.remember
@@ -132,6 +136,8 @@ data class ChatMessageUi(
     val reasoningStreaming: Boolean = false,
     /** Optional compact event summary for tool/diff/test rows. */
     val eventSummary: String = "",
+    /** Images the user uploaded with this message; originals stay in app storage. */
+    val attachedImages: Int = 0,
 )
 
 /** A display projection only. Durable assistant/tool records keep their protocol order. */
@@ -226,6 +232,16 @@ data class ChatRequestPreviewUi(
 )
 
 data class ChatAgentOptionUi(val id: String, val label: String)
+
+/** A picked image waiting in the composer. The thumbnail is a small, already-decoded preview. */
+data class ChatPendingImageUi(
+    val id: String,
+    val mediaType: String,
+    val byteLength: Int,
+    val thumbnail: Bitmap? = null,
+)
+
+const val CHAT_MAX_PENDING_IMAGES = 8
 
 data class ChatCompactionUi(
     val id: String, val state: String, val sourceMessageIds: List<String>,
@@ -355,6 +371,8 @@ data class ChatUiState(
     val drawerDestinations: List<ChatDrawerDestinationUi> = emptyList(),
     val modelLabel: String = "",
     val compactions: List<ChatCompactionUi> = emptyList(),
+    /** Images picked for the next message; empty when the host does not support uploads. */
+    val pendingImages: List<ChatPendingImageUi> = emptyList(),
 )
 
 /** Conversation presentation shared by the app shell and chat route. */
@@ -370,6 +388,9 @@ data class ChatActions(
     val onRestoreSession: (String) -> Unit = {},
     val onInput: (String) -> Unit = {},
     val onSend: () -> Unit = {},
+    /** Null hides the attach button (host without image upload support). */
+    val onPickImages: (() -> Unit)? = null,
+    val onRemovePendingImage: (String) -> Unit = {},
     val onCancel: () -> Unit = {},
     val onToggleDegradation: (Boolean) -> Unit = {},
     val onSelectSession: (String) -> Unit = {},
@@ -1256,6 +1277,12 @@ private fun MessageBubble(
                             zh = zh,
                         )
                     }
+                    if (user && message.attachedImages > 0) Text(
+                        stringResource(R.string.chat_images_attached, message.attachedImages),
+                        style = MaterialTheme.typography.labelSmall,
+                        color = userInk,
+                        modifier = Modifier.padding(top = 4.dp).testTag("conversation.attachedImages.${message.id}"),
+                    )
                     var replyIndex = 0
                     orderedMessages.forEach { part ->
                         val displayedText = if (part.role.equals("assistant", true)) presentation.texts[replyIndex++] else part.text
@@ -1561,13 +1588,24 @@ private fun Composer(state: ChatUiState, actions: ChatActions, input: () -> Stri
             submitting = false
         }
     }
-    Row(
+    val editable = state.pendingTool == null && !state.selectedSessionArchived
+    Column(
         Modifier
             .fillMaxWidth()
             .windowInsetsPadding(WindowInsets.ime.union(WindowInsets.navigationBars))
             .padding(top = 8.dp),
-        verticalAlignment = Alignment.Bottom,
     ) {
+    if (state.pendingImages.isNotEmpty()) PendingImageStrip(state.pendingImages, !state.streaming, actions.onRemovePendingImage)
+    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.Bottom) {
+        actions.onPickImages?.let { pick ->
+            IconButton(
+                onClick = pick,
+                enabled = editable && !state.streaming && state.pendingImages.size < CHAT_MAX_PENDING_IMAGES,
+                modifier = Modifier.size(48.dp).testTag("conversation.composer.attachImage"),
+            ) {
+                Icon(Icons.Filled.Add, contentDescription = stringResource(R.string.chat_add_images))
+            }
+        }
         OutlinedTextField(
             value = value,
             onValueChange = {
@@ -1597,7 +1635,7 @@ private fun Composer(state: ChatUiState, actions: ChatActions, input: () -> Stri
         } else {
             Button(
                 onClick = ::submit,
-                enabled = text.isNotBlank() && state.pendingTool == null && !state.selectedSessionArchived,
+                enabled = (text.isNotBlank() || state.pendingImages.isNotEmpty()) && editable,
                 shape = CircleShape,
                 colors = if (aqua) ButtonDefaults.buttonColors(
                     containerColor = Color(0xFF66CCFF),
@@ -1606,6 +1644,59 @@ private fun Composer(state: ChatUiState, actions: ChatActions, input: () -> Stri
                 contentPadding = PaddingValues(0.dp),
                 modifier = Modifier.size(48.dp).testTag("conversation.composer.send"),
             ) { Icon(Icons.AutoMirrored.Filled.Send, contentDescription = if (zh) "发送" else "Send") }
+        }
+    }
+    }
+}
+
+@Composable
+private fun PendingImageStrip(images: List<ChatPendingImageUi>, removable: Boolean, onRemove: (String) -> Unit) {
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .horizontalScroll(rememberScrollState())
+            .padding(bottom = 8.dp)
+            .testTag("conversation.composer.pendingImages"),
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        images.forEachIndexed { index, image ->
+            key(image.id) {
+            val label = stringResource(R.string.chat_pending_image, index + 1)
+            Box(Modifier.size(64.dp).testTag("conversation.composer.pendingImage.${image.id}")) {
+                Surface(
+                    shape = RoundedCornerShape(12.dp),
+                    color = MaterialTheme.colorScheme.surfaceVariant,
+                    modifier = Modifier.fillMaxSize(),
+                ) {
+                    val thumbnail = image.thumbnail
+                    if (thumbnail != null) Image(
+                        bitmap = remember(thumbnail) { thumbnail.asImageBitmap() },
+                        contentDescription = label,
+                        contentScale = ContentScale.Crop,
+                        modifier = Modifier.fillMaxSize(),
+                    ) else Box(Modifier.fillMaxSize().semantics { contentDescription = label }, contentAlignment = Alignment.Center) {
+                        Text(image.mediaType.substringAfter('/').uppercase(), style = MaterialTheme.typography.labelSmall)
+                    }
+                }
+                if (removable) Surface(
+                    shape = CircleShape,
+                    color = MaterialTheme.colorScheme.inverseSurface.copy(alpha = 0.8f),
+                    modifier = Modifier.align(Alignment.TopEnd).size(24.dp),
+                ) {
+                    IconButton(
+                        onClick = { onRemove(image.id) },
+                        modifier = Modifier.fillMaxSize().testTag("conversation.composer.removeImage.${image.id}"),
+                    ) {
+                        Icon(
+                            Icons.Filled.Close,
+                            contentDescription = stringResource(R.string.chat_remove_pending_image, label),
+                            tint = MaterialTheme.colorScheme.inverseOnSurface,
+                            modifier = Modifier.size(16.dp),
+                        )
+                    }
+                }
+            }
+            }
         }
     }
 }

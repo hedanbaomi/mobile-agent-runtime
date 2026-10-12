@@ -82,6 +82,7 @@ class TransferRepository(
     private val vectorIndexDirectory: java.io.File? = null,
 ) {
     private val json = Json { ignoreUnknownKeys = false; explicitNulls = false; encodeDefaults = true }
+    private val conversationImages = ConversationImageTransfer(db, json, ::invalid)
 
     /**
      * Legacy JSON export.  It remains metadata-only for knowledge and conversations; the boolean
@@ -115,9 +116,9 @@ class TransferRepository(
         try {
         val archive = db.transaction {
             val payload = buildAgentBundle(agentId, options, forArchive = true)
-            if (options.includeKnowledgeContent) {
-                val sink = checkNotNull(blobSink)
-                payload.manifest.knowledgeBases.flatMap { it.blobs }.map { it.hash }.distinct().forEach {
+            if (archiveBlobs(payload.manifest).isNotEmpty()) {
+                val sink = blobSink ?: throw invalid("Chat image export requires a BlobSink")
+                archiveBlobs(payload.manifest).map { it.hash }.distinct().forEach {
                     protections += sink.protect(it)
                 }
             }
@@ -141,9 +142,9 @@ class TransferRepository(
             }
 
             writeBytes(MANIFEST_ENTRY, manifest.toByteArray(Charsets.UTF_8), TransferArchiveLimits.MAX_METADATA_BYTES)
-            if (options.includeKnowledgeContent) {
+            if (archiveBlobs(payload.manifest).isNotEmpty()) {
                 val sink = blobSink ?: throw invalid("Full knowledge export requires a BlobSink")
-                payload.manifest.knowledgeBases.flatMap { it.blobs }.distinctBy { it.hash }.forEach { blob ->
+                archiveBlobs(payload.manifest).distinctBy { it.hash }.forEach { blob ->
                     val bytes = sink.get(blob.hash) ?: throw invalid("Blob ${blob.hash} is missing from the configured BlobSink")
                     verifyBlob(blob, bytes)
                     writeBytes(blobEntry(blob.hash), bytes)
@@ -275,6 +276,7 @@ class TransferRepository(
                 auditEvents = emptyList(),
                 contentIncluded = true,
                 contentEntry = entryName,
+                uploadedImages = uploadedImageBlobs(conversation.id),
             )
             ArchiveConversation(manifest, entryName)
         }
@@ -301,6 +303,7 @@ class TransferRepository(
         val runsRepo = RunRepository(db)
         val auditRepo = AuditRepository(db)
         val runs = runsRepo.list(expected.id)
+        conversationImages.requireUnchanged(expected.id, item.manifest.uploadedImages)
         item.manifest.copy(
             messages = ConversationRepository(db).messages(expected.id),
             runs = runs,
@@ -570,6 +573,7 @@ class TransferRepository(
                                 "transfer-conversation-${manifest.conversation.id}",
                             )
                         } ?: throw invalid("Conversation ${manifest.conversation.id} content is missing")
+                        conversationImages.restore(full, manifest, stagedBlobs, blobSink)
                         importConversation(full, conflictPolicy, warnings, skillInstalls)
                     }
                     assertHistoryPreserved()
@@ -646,10 +650,7 @@ class TransferRepository(
     }
 
     private fun requireArchiveBundle(bundle: TransferBundle) {
-        val expectedBytes = bundle.knowledgeBases
-            .filter { it.contentIncluded }
-            .flatMap { it.blobs }
-            .sumOf { it.byteLength }
+        val expectedBytes = archiveBlobs(bundle).distinctBy { it.hash }.sumOf { it.byteLength }
         if (expectedBytes > TransferArchiveLimits.MAX_TOTAL_UNCOMPRESSED_BYTES) {
             throw invalid("Archive content exceeds the total uncompressed transfer limit")
         }
@@ -671,8 +672,7 @@ class TransferRepository(
         skillHashes: Set<String>,
         conversationEntries: Set<String>,
     ) {
-        val expectedBlobs = bundle.knowledgeBases.filter { it.contentIncluded }
-            .flatMap { it.blobs }.map { blobEntry(it.hash) }.toSet()
+        val expectedBlobs = archiveBlobs(bundle).map { blobEntry(it.hash) }.toSet()
         val expectedSkills = bundle.skills.filter { it.packageIncluded }.map { skillEntry(it.packageHash) }.toSet()
         val expectedConversations = bundle.conversations.filter { it.contentIncluded }
             .mapNotNull { it.contentEntry }.toSet()
@@ -683,11 +683,13 @@ class TransferRepository(
         }
     }
 
-    private fun expectedBlob(bundle: TransferBundle, hash: String): BlobTransfer {
-        val matches = bundle.knowledgeBases.filter { it.contentIncluded }
-            .flatMap { it.blobs }.filter { it.hash == hash }
-        return matches.firstOrNull() ?: throw invalid("Archive contains an unlisted blob $hash")
-    }
+    private fun expectedBlob(bundle: TransferBundle, hash: String): BlobTransfer = conversationImages.expectedBlob(bundle, hash)
+
+    private fun archiveBlobs(bundle: TransferBundle): List<BlobTransfer> =
+        conversationImages.archiveBlobs(bundle)
+
+    private fun uploadedImageBlobs(conversationId: String): List<BlobTransfer> =
+        conversationImages.metadata(conversationId)
 
     private fun verifyBlob(blob: BlobTransfer, bytes: ByteArray) {
         if (bytes.size.toLong() != blob.byteLength) throw invalid("Blob ${blob.hash} length does not match its manifest")

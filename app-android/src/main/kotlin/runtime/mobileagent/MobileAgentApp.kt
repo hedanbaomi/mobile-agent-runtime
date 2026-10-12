@@ -141,6 +141,8 @@ class AppContainer(app: MobileAgentApp) :
     val profiles = ProfileRepository(db)
     val agents = AgentRepository(db)
     val conversations = ConversationRepository(db)
+    val conversationImages = runtime.mobileagent.data.ConversationImageRepository(db, conversations,
+        CasBlobSink(File(app.filesDir, "cas")), File(app.cacheDir, "knowledge-index"))
     val contextCompactions = runtime.mobileagent.data.ContextCompactionRepository(db)
     val settings = SettingsRepository(db)
     val shizuku = ShizukuAuthorityBridge(app).also { bridge ->

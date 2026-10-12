@@ -3,6 +3,7 @@
 package runtime.mobileagent
 
 import android.app.Application
+import android.graphics.Bitmap
 import android.os.SystemClock
 import androidx.compose.runtime.mutableStateOf
 import androidx.lifecycle.AndroidViewModel
@@ -164,6 +165,7 @@ class ChatViewModel internal constructor(
     private var activeRunResources: RunResources? = null
     private val citations = linkedMapOf<String, Pair<Citation, String>>()
     private var selectedImage: Pair<String, ByteArray>? = null
+    private val imageDraft = ChatImageDraft(state)
     private val sessionPreviews = mutableMapOf<String, Pair<ChatRequestPreviewUi, List<ChatPromptLayerUi>>>()
     private fun draftKey(sessionId: String? = state.value.selectedSessionId) = "chat.draft.${sessionId ?: "new:${state.value.selectedAgentId}"}"
     private fun saveDraft() { savedStateHandle[draftKey()] = state.value.input }
@@ -274,6 +276,7 @@ class ChatViewModel internal constructor(
                 inspectorOpen = savedStateHandle.get<Boolean>(INSPECTOR_KEY) ?: false, error = null,
                 workspaceAccess = workspaceAccess,
             )
+            imageDraft.sync()
             if (invalidatedApprovalRuns > 0) {
                 state.value = state.value.copy(
                     status = "待审批请求已因进程重启失效，未执行工具；不会自动批准或重放。",
@@ -427,24 +430,51 @@ class ChatViewModel internal constructor(
     }
     fun closeCitation() { selectedImage = null; state.value = state.value.copy(selectedCitationId = null); locator.value = null }
     fun cancelUnknownRetry() { unknownRetry.value = null }
+    fun clearImageDraft() = imageDraft.clear()
+
+    /**
+     * Adds picker results to the pending selection. [uploads] were already validated by
+     * [ChatImageUpload]; [rejected] are per-file messages from the picker reader. Extras past the
+     * per-message limit are dropped with a visible message instead of being sent later.
+     */
+    fun attachImages(
+        uploads: List<Pair<ChatImageUpload, Bitmap?>>,
+        rejected: List<String> = emptyList(),
+        forSession: String? = state.value.selectedSessionId,
+        forAgent: String? = state.value.selectedAgentId,
+    ) = imageDraft.attach(uploads, rejected, forSession, forAgent)
+
+    fun removePendingImage(id: String) = imageDraft.remove(id)
+
     fun acknowledgeUnknown() {
         unknownRetry.value?.let { container.runs.acknowledgeUnknown(it, true) }
         unknownRetry.value = null
-        send()
+        sendWithImages(imageDraft.uploads())
     }
 
-    fun send() {
+    fun send() = sendWithImages(imageDraft.uploads())
+
+    /** Backend seam for a foreground image picker; no UI/URI handling is required here. */
+    fun sendWithImages(uploads: List<ChatImageUpload>) {
         if (state.value.selectedSessionId?.let(container.conversations::get)?.archived == true) {
             state.value = state.value.copy(status = "已归档的对话为只读，请先恢复后继续。")
             return
         }
         val text = state.value.input.trim()
-        if (text.isBlank() || state.value.streaming) return
+        if (!imageDraft.hasSendableInput(text, uploads)) return
+        if (uploads.size > ChatImageUpload.MAX_IMAGES_PER_MESSAGE) {
+            state.value = state.value.copy(status = "每条消息最多上传8张图片，每张不超过2 MiB。", statusKind = "error")
+            return
+        }
+        val inputImages = uploads.toList()
         if (runOwnership.active != null || runJob?.isActive == true || preflightJob?.isActive == true) {
             state.value = state.value.copy(status = "上一运行仍在收尾，请稍后发送；输入已保留。")
             return
         }
+        // Creating the session detaches the page and clears the draft; keep the thumbnails first.
+        val pendingImages = imageDraft.pending()
         val conversationId = state.value.selectedSessionId ?: newSession() ?: return
+        imageDraft.adopt(conversationId, inputImages, pendingImages)
         runJob = null
         val owner = runOwnership.begin(conversationId)
         val resources = RunResources(owner)
@@ -453,7 +483,7 @@ class ChatViewModel internal constructor(
         saveRunDraft(owner)
         preflightJob = viewModelScope.launch {
             try {
-                sendAfterInput(text, owner, resources)
+                sendAfterInput(text, owner, resources, inputImages)
             } catch (cancel: CancellationException) {
                 publishRunState(owner, state.value.copy(streaming = false))
                 throw cancel
@@ -470,7 +500,7 @@ class ChatViewModel internal constructor(
         }
     }
 
-    private suspend fun sendAfterInput(text: String, owner: ChatRunOwner, resources: RunResources) {
+    private suspend fun sendAfterInput(text: String, owner: ChatRunOwner, resources: RunResources, uploads: List<ChatImageUpload>) {
         val conversationId = owner.conversationId
         // Durable data and authorization use this run's own evidence, never the selected page.
         val runCitations = LinkedHashMap(citations)
@@ -479,8 +509,9 @@ class ChatViewModel internal constructor(
             (container as? ThreadWorkspaceRuntimePortProvider)?.threadWorkspaceRuntimePort
         val prepared = when (val result = ChatRunPreflight(
             container.runs, container.conversations, container.transfer,
-            threadWorkspacePort, threadWorkspaceRuntimePort,
-        ).prepare(conversationId, text) { message ->
+            threadWorkspacePort, threadWorkspaceRuntimePort, container.conversationImages,
+        ).prepare(conversationId, text, uploads, textOnly = state.value.textDegradation) { message ->
+            imageDraft.persisted(conversationId)
             publishRunState(owner, state.value.copy(
                 messages = state.value.messages + messageUi(message), input = "",
             ))
@@ -644,6 +675,8 @@ class ChatViewModel internal constructor(
                 }
                 val model = binding.chatModel
                 val provider = binding.provider
+                val uploadedParts = userMessage.parts.filterIsInstance<ImagePart>()
+                ChatImagePolicy.requireImageModel(uploadedParts, model, degrade)
                 // Run preparation reads repositories, Skill packages and workspace
                 // backends; none of it may run on Main, where it would freeze the IME and
                 // the chat right after Send.
@@ -658,7 +691,7 @@ class ChatViewModel internal constructor(
                 }
                 preparationStage = "retrieval"
                 val result = withContext(Dispatchers.IO) {
-                    if (binding.retrievalMode == "automatic") container.knowledge.retrieve(run.runId, text, 8, kbIds)
+                    if (binding.retrievalMode == "automatic" && text.isNotBlank()) container.knowledge.retrieve(run.runId, text, 8, kbIds)
                     else RetrievalResult(
                         emptyList(),
                         emptyList(),
@@ -683,6 +716,7 @@ class ChatViewModel internal constructor(
                 val inputBudget = contextPolicy.inputLimit(contextWindow, outputDecision.value).toInt()
                 val clipped = RetrievalBudget.clip(result.hits, limit("knowledgeTokenBudget", 3000, inputBudget))
                 val images = mutableListOf<InlineImage>()
+                images += withContext(Dispatchers.IO) { container.conversationImages.references(conversationId, uploadedParts) }
                 var warning: String? = null
                 // Narrowed strict-visual policy (review-APK QA P2): one visual hit
                 // no longer rejects the whole retrieval, and a policy decision is
@@ -993,11 +1027,11 @@ class ChatViewModel internal constructor(
                 val history = withContext(Dispatchers.IO) {
                     container.conversations.messages(conversationId).filterNot { it.id == userMessage.id }
                 }
-                val contextHistory = boundedHistory(history,
+                val contextHistory = withContext(Dispatchers.IO) { boundedHistory(history,
                     if (contextPolicy.autoCompact) Int.MAX_VALUE else contextPolicy.maxHistoryMessages, kbIds.toSet(), runCitations,
                     allowOriginals = model.acceptsImages() && !degrade,
                     replayReasoning = provider.apiFormat == runtime.mobileagent.domain.ApiFormat.OPENAI_COMPATIBLE &&
-                        "tools" in model.capabilities && toolExecutor.specs.isNotEmpty())
+                        "tools" in model.capabilities && toolExecutor.specs.isNotEmpty()) }
                 val typedHistory = contextHistory.messages
                 val historicalSourceIds = contextHistory.sources.map { it.messageId }.toSet()
                 val historicalCitations = history.filter { it.id in historicalSourceIds }.flatMap { message ->
@@ -1272,6 +1306,9 @@ class ChatViewModel internal constructor(
                         require(contextAuthorizationFingerprint() == authorizationFingerprint) {
                             "PERMISSION_DENIED: visual source authorization changed"
                         }
+                        if (source.assetId?.startsWith(ChatImageUpload.ASSET_PREFIX) == true) {
+                            return@withContext container.conversationImages.load(conversationId, source)
+                        }
                         runTools.loadImage(source) ?: run {
                             val citation = (bound + runCitations.values.map { it.first }).firstOrNull { it.assetId == source.assetId }
                                 ?: error("PERMISSION_DENIED: visual source lacks authorized provenance")
@@ -1285,7 +1322,11 @@ class ChatViewModel internal constructor(
                     beforeImageRequest = { images ->
                         val live = container.agents.get(binding.snapshot.agentId) ?: error("Agent authorization was removed")
                         val allowed = kbIds.intersect(live.knowledgeBaseIds.toSet())
-                        require(images.all { image -> runCitations.values.any { (citation, _) ->
+                        require(images.all { image ->
+                            if (image.assetId?.startsWith(ChatImageUpload.ASSET_PREFIX) == true) {
+                                container.conversationImages.verify(conversationId, image)
+                                true
+                            } else runCitations.values.any { (citation, _) ->
                             if (citation.assetId != image.assetId || citation.knowledgeBaseId !in allowed) false
                             else container.knowledge.locateCitation(citation).let { !it.removed && it.blobHash == image.sha256 }
                         } }) { "PERMISSION_DENIED: visual source removed or changed before dispatch" }
@@ -1302,7 +1343,8 @@ class ChatViewModel internal constructor(
                         require(historicalCitations.all { id -> runCitations[id]?.first?.let { citation ->
                             citation.knowledgeBaseId in allowed && !container.knowledge.locateCitation(citation).removed
                         } == true }) { "PERMISSION_DENIED: historical knowledge was removed or revoked; start a new conversation" }
-                        val historyAssetIds = typedHistory.flatMap { it.images }.mapNotNull { it.assetId }.toSet()
+                        val historyAssetIds = typedHistory.flatMap { it.images }.mapNotNull { it.assetId }
+                            .filterNot { it.startsWith(ChatImageUpload.ASSET_PREFIX) }.toSet()
                         require(historyAssetIds.all { assetId -> runCitations.values.any { (citation, _) ->
                             citation.assetId == assetId && citation.knowledgeBaseId in allowed && !container.knowledge.locateCitation(citation).removed
                         } }) { "PERMISSION_DENIED: historical visual evidence was removed or revoked" }
@@ -1991,6 +2033,7 @@ class ChatViewModel internal constructor(
 
     private fun detachRunPage() {
         runOwnership.active?.let(runOwnership::detach)
+        imageDraft.detach()
         selectedImage = null
         locator.value = null
         unknownRetry.value = null
@@ -2040,6 +2083,7 @@ class ChatViewModel internal constructor(
             role = if (visualReceipt || toolEvidence) "tool" else message.role.name.lowercase(),
             text = message.text,
             timeLabel = message.createdAt.take(16),
+            attachedImages = ChatImagePolicy.attachedCount(message, visualReceipt, toolEvidence),
             citationIds = message.parts.filterIsInstance<CitationPart>().map { it.citationId },
             streaming = message.status == "STREAMING" && state.value.streaming,
             reasoning = reasoningParts.joinToString("") { it.text },
@@ -2405,13 +2449,19 @@ class ChatViewModel internal constructor(
         val projected = selected.map { message ->
             val assets = message.parts.filterIsInstance<ImagePart>()
             val images = if (assets.isEmpty()) emptyList() else {
-                require(assets.all { asset -> source.values.any { (citation, _) -> citation.assetId == asset.assetId &&
+                val uploads = assets.filter { it.assetId.startsWith(ChatImageUpload.ASSET_PREFIX) }
+                val knowledgeAssets = assets - uploads.toSet()
+                val uploadedReferences = container.conversationImages.referencesForHistory(
+                    message.conversationId, uploads, analyzedHashes, allowOriginals,
+                )
+                require(knowledgeAssets.all { asset -> source.values.any { (citation, _) -> citation.assetId == asset.assetId &&
                     citation.knowledgeBaseId in allowedKbs && !container.knowledge.locateCitation(citation).removed } }) { "历史图片来源已撤销；请开启新会话。" }
-                if (!allowOriginals) emptyList() else when (val plan = visualReferencePlan(assets.map { it.assetId })) {
+                val knowledgeImages = if (!allowOriginals) emptyList() else when (val plan = visualReferencePlan(knowledgeAssets.map { it.assetId })) {
                     is VisualReferencePlan.Incomplete -> error(plan.reason)
                     is VisualReferencePlan.Complete -> plan.images.filter { analyzedHashes[it.assetId] != it.sha256 }
                         .map { InlineImage(it.mediaType, "", it.assetId, it.byteLength, it.sha256) }
                 }
+                uploadedReferences + knowledgeImages
             }
             val historyText = if (assets.isNotEmpty() && !allowOriginals) message.text +
                 "\n历史原图本轮未发送；不得声称本轮查看了这些原图。" else message.text

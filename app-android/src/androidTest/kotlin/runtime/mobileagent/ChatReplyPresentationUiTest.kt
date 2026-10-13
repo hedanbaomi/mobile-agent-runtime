@@ -3,6 +3,7 @@
 
 package runtime.mobileagent
 
+import android.app.KeyguardManager
 import android.content.ClipboardManager
 import android.content.ClipData
 import android.content.Context
@@ -32,6 +33,36 @@ class ChatReplyPresentationUiTest {
         knowledgeBaseId = "kb", documentVersionId = "v1", chunkId = "chunk-1")
     private val repeated = first.copy(id = "call-two-0")
     private val second = first.copy(id = "call-two-1", excerpt = "第二段对应原文", chunkId = "chunk-2")
+
+    private fun awaitClipboardCondition(condition: () -> Boolean) {
+        try {
+            compose.waitUntil(timeoutMillis = 5_000) { compose.runOnIdle(condition) }
+        } catch (failure: ComposeTimeoutException) {
+            val state = compose.runOnIdle {
+                val clipboard = compose.activity.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                val keyguard = compose.activity.getSystemService(Context.KEYGUARD_SERVICE) as KeyguardManager
+                "focus=${compose.activity.hasWindowFocus()}, locked=${keyguard.isDeviceLocked}, " +
+                    "clipItems=${clipboard.primaryClip?.itemCount ?: 0}"
+            }
+            throw AssertionError("Clipboard precondition timed out: $state", failure)
+        }
+    }
+
+    private fun awaitWindowFocus() = awaitClipboardCondition { compose.activity.hasWindowFocus() }
+
+    private fun assertClipboardText(expected: String) {
+        var clip: ClipData? = null
+        awaitClipboardCondition {
+            if (!compose.activity.hasWindowFocus()) false else {
+                val clipboard = compose.activity.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                clip = clipboard.primaryClip
+                (clip?.itemCount ?: 0) > 0
+            }
+        }
+        compose.runOnIdle {
+            assertEquals(expected, checkNotNull(clip).getItemAt(0).coerceToText(compose.activity).toString())
+        }
+    }
 
     private fun tapCitation(text: String, number: Int, last: Boolean = false) {
         val node = compose.onNodeWithText(text, useUnmergedTree = true)
@@ -77,11 +108,9 @@ class ChatReplyPresentationUiTest {
             ChatMessageUi("t", "tool", "TOOL_PAYLOAD"),
             ChatMessageUi("final", "assistant", text, citationIds = listOf(first.id))), citations = listOf(first))
         compose.setContent { MaterialTheme { ConversationScreen(state) } }
+        awaitWindowFocus()
         compose.onNodeWithTag("conversation.copy.a").performScrollTo().performClick()
-        compose.runOnIdle {
-            val clipboard = compose.activity.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-            assertEquals("前文\n\n答复[1]", clipboard.primaryClip!!.getItemAt(0).coerceToText(compose.activity).toString())
-        }
+        assertClipboardText("前文\n\n答复[1]")
         compose.onNodeWithText("Copied").assertIsDisplayed()
         compose.onAllNodesWithText("TOOL_PAYLOAD").assertCountEquals(0)
     }
@@ -180,11 +209,9 @@ class ChatReplyPresentationUiTest {
         compose.onNodeWithText("Tool visual evidence: a genuine user message").assertIsDisplayed()
         compose.onNodeWithText("Code: [citation:call-one-0]").assertIsDisplayed()
         compose.onNodeWithText("[call-one-0]").assertIsDisplayed()
+        awaitWindowFocus()
         compose.onNodeWithTag("conversation.copy.a").performClick()
-        compose.runOnIdle {
-            val clipboard = compose.activity.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-            assertEquals(state.messages.last().text, clipboard.primaryClip!!.getItemAt(0).text.toString())
-        }
+        assertClipboardText(state.messages.last().text)
     }
 
     @Test fun longReplyRemainsCopyableAcrossThemesAndLargeFontWithOneToolEntry() {
@@ -210,6 +237,7 @@ class ChatReplyPresentationUiTest {
             File(folder, "$name.png").outputStream().use { bitmap.compress(Bitmap.CompressFormat.PNG, 100, it) }
         }
         listOf(AppThemeMode.LIGHT, AppThemeMode.DARK, AppThemeMode.CC66FF).forEach { theme ->
+            awaitWindowFocus()
             compose.runOnIdle {
                 mode.value = theme
                 val clipboard = compose.activity.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
@@ -217,12 +245,10 @@ class ChatReplyPresentationUiTest {
             }
             val copy = compose.onNodeWithTag("conversation.copy.a").performScrollTo().assertIsDisplayed()
             val position = copy.fetchSemanticsNode().boundsInRoot.center
+            awaitWindowFocus()
             compose.onRoot().performTouchInput { click(position) }
             compose.onNodeWithText("已复制").assertIsDisplayed()
-            compose.runOnIdle {
-                val clipboard = compose.activity.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-                assertEquals(answer.replace("【call-one-0】", "[1]"), clipboard.primaryClip!!.getItemAt(0).text.toString())
-            }
+            assertClipboardText(answer.replace("【call-one-0】", "[1]"))
             compose.onAllNodesWithTag("conversation.tools.open.a").assertCountEquals(1)
             compose.onAllNodesWithTag("conversation.tool.tool-1").assertCountEquals(0)
             compose.onAllNodesWithText("来源：课程笔记.docx").assertCountEquals(0)

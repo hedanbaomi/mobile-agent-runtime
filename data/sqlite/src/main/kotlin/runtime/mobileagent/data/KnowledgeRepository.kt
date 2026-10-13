@@ -444,7 +444,10 @@ class KnowledgeRepository(
             if (candidates.isEmpty()) summary = summary.copy(unplannedFiles=summary.unplannedFiles+1)
             else {
                 val target=targetFingerprint ?: row.string("vision_binding_json").ifBlank { visionFingerprint() }
-                val legacyUnknown=candidates.filter { it.requiresVision && hasLegacyVisionUnknown(row.string("id"),row.string("document_id"),it.page,target) }
+                val legacyPages = if (candidates.any { it.requiresVision }) readLegacyVisionUnknownPages(
+                    db, row.string("id"), row.string("document_id"), target, legacyVisionCacheTarget(target)?.fingerprint,
+                ) else emptySet()
+                val legacyUnknown=candidates.filter { it.requiresVision && (null in legacyPages || it.page.toLong() in legacyPages) }
                 val result = pipeline.reuse(row.string("id"),candidates-legacyUnknown.toSet(),target,chunkVersion)
                 summary = summary.copy(directReuse=summary.directReuse+result.directReuse,localRebuild=summary.localRebuild+result.localRebuild,
                     newRequests=summary.newRequests+result.newRequests,unknown=summary.unknown+result.unknown+legacyUnknown.size)

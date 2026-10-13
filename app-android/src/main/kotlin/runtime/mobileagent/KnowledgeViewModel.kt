@@ -454,10 +454,10 @@ class KnowledgeViewModel(
             val documents = if (selected == null) emptyList() else app.container.db.query(
                 "SELECT d.id,d.display_name,d.format,d.active_version_id,v.status,b.byte_length FROM documents d LEFT JOIN document_versions v ON v.id=d.active_version_id LEFT JOIN blobs b ON b.hash=d.blob_hash WHERE d.kb_id=? AND d.deleted_at IS NULL ORDER BY d.display_name,d.id", listOf(selected))
             val jobs = selected?.let(repo::listJobs).orEmpty()
-            val visionTargets = visionTargetOptions(
-                app.container.profiles.listProviders(),
-                app.container.profiles.listModels(),
-            )
+            val metadata = readKnowledgeDisplayMetadata(app.container.profiles::listProviders, { app.container.profiles.listModels() })
+            val visionTargets = metadata.visionTargets
+            val waitingJobs = jobs.filter { it.first.stage in setOf(ImportStage.WAITING_FOR_VISION_MODEL, ImportStage.AWAITING_UPLOAD_CONSENT) }
+            val waitingTargets = readKnowledgeWaitingBatchTargets(app.container.db, selected, waitingJobs.map { it.first.id })
             val defaultVisionTarget = visionTargets.firstOrNull()
             val target = defaultVisionTarget?.label.orEmpty()
             return KnowledgeUiState(
@@ -475,9 +475,9 @@ class KnowledgeViewModel(
                     unknownOutcome = job.error?.contains("UNKNOWN_OUTCOME") == true && !isRebindUnknown(job.error),
                     embeddingIsApi = job.embeddingIsApi && !(job.error?.contains("UNKNOWN_OUTCOME") == true && job.error?.contains("embedding", true) != true),
                     requiresEmbeddingConsent = job.stage == ImportStage.AWAITING_EMBEDDING_CONSENT) },
-                waiting = jobs.filter { it.first.stage in setOf(ImportStage.WAITING_FOR_VISION_MODEL, ImportStage.AWAITING_UPLOAD_CONSENT) }
+                waiting = waitingJobs
                     .map { (job, name, _) ->
-                        val fingerprint = repo.jobBatchId(job.id)?.let(repo::findBatch)?.visionTarget
+                        val fingerprint = waitingTargets[job.id]
                             ?: job.consentedVisionFingerprint
                         val label = if (fingerprint != null) {
                             visionTargets.singleOrNull { it.fingerprint == fingerprint }?.label ?: "原 Vision 目标已变更，请重新确认"
@@ -488,7 +488,7 @@ class KnowledgeViewModel(
                 embeddingSpaceLabel = selected?.let { kb -> repo.embeddingSpaceId(kb)?.let { space ->
                     ApiEmbeddingBinding.parseSpaceId(space)?.let(app.container.apiEmbeddings::label) ?: "本机模型 · $space"
                 } }.orEmpty(),
-                embeddingModels = app.container.apiEmbeddings.options().map { (id, label) -> KnowledgeEmbeddingModelUi(id, label) },
+                embeddingModels = metadata.embeddingModels,
                 apiQueryAttempts = selected?.let(repo::pendingApiQueries).orEmpty().map { attempt ->
                     KnowledgeQueryAttemptUi(attempt.spaceId, attempt.queryHash,
                         ApiEmbeddingBinding.parseSpaceId(attempt.spaceId)?.let(app.container.apiEmbeddings::label)

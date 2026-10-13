@@ -180,7 +180,7 @@ internal class DocumentPipelineStore(private val db: SqlConnection) {
 
     /** Existing reported facts count once; no terminal history is rewritten during migration. */
     private fun legacyAttempts(batchId: String): List<SqlRow> = db.query(
-        "SELECT a.*,0 AS reservation_tokens,NULL AS reasoning_tokens,CASE WHEN a.status='SUCCESS' THEN 'SUCCEEDED' ELSE a.status END AS state,CASE WHEN a.dispatch_status IN ('DISPATCHED','RESPONSE_RECEIVED') THEN a.created_at ELSE NULL END AS dispatched_at FROM vision_attempts a JOIN import_jobs j ON j.id=a.job_id WHERE j.batch_id=? AND NOT EXISTS(SELECT 1 FROM pipeline_attempts p WHERE p.request_id=a.request_id)",listOf(batchId))
+        "SELECT a.input_tokens,a.output_tokens,0 AS reservation_tokens,NULL AS reasoning_tokens,CASE WHEN a.status='SUCCESS' THEN 'SUCCEEDED' ELSE a.status END AS state,CASE WHEN a.dispatch_status IN ('DISPATCHED','RESPONSE_RECEIVED') THEN a.created_at ELSE NULL END AS dispatched_at FROM vision_attempts a JOIN import_jobs j ON j.id=a.job_id WHERE j.batch_id=? AND NOT EXISTS(SELECT 1 FROM pipeline_attempts p WHERE p.request_id=a.request_id)",listOf(batchId))
 
     fun prepare(jobId: String, unit: ProcessingUnit, batchId: String?, target: String, cacheKey: String, requestId: String): Int = db.transaction {
         check(!unknown(jobId,unit.unitId,unit.page)) { "UNKNOWN_OUTCOME: explicit duplicate-charge acknowledgement required" }
@@ -240,15 +240,13 @@ internal class DocumentPipelineStore(private val db: SqlConnection) {
 
     fun progress(batchId: String): PipelineProgress {
         val jobs = db.query("SELECT id FROM import_jobs WHERE batch_id=?",listOf(batchId))
-        val rows = db.query("SELECT u.* FROM pipeline_units u JOIN pipeline_plans p ON p.job_id=u.job_id AND p.planner_version=u.planner_version JOIN import_jobs j ON j.id=u.job_id WHERE j.batch_id=? AND u.active=1",listOf(batchId))
+        val rows = db.query("SELECT u.job_id,u.page,u.state,u.published FROM pipeline_units u JOIN pipeline_plans p ON p.job_id=u.job_id AND p.planner_version=u.planner_version JOIN import_jobs j ON j.id=u.job_id WHERE j.batch_id=? AND u.active=1",listOf(batchId))
         val attempts = db.query(
             """
-            SELECT p.request_id, p.job_id, p.batch_id, p.unit_id, p.ordinal, p.target,
-                   p.config_fingerprint, p.planner_version, p.result_version, p.cache_key,
-                   p.state, p.reservation_tokens,
+            SELECT p.state, p.reservation_tokens,
                    COALESCE(p.input_tokens, v.input_tokens) AS input_tokens,
                    COALESCE(p.output_tokens, v.output_tokens) AS output_tokens,
-                   p.reasoning_tokens, p.failure_code, p.created_at, p.dispatched_at, p.terminal_at
+                   p.reasoning_tokens, p.dispatched_at
             FROM pipeline_attempts p
             LEFT JOIN vision_attempts v ON v.request_id = p.request_id
             WHERE p.batch_id=?
@@ -265,19 +263,35 @@ internal class DocumentPipelineStore(private val db: SqlConnection) {
             usage=PipelineUsage(sum("input_tokens"),sum("output_tokens"),sum("reasoning_tokens"),attempts.size,attempts.count { it.longOrNull("input_tokens")==null || it.longOrNull("output_tokens")==null },attempts.sumOf(::chargedReservation)))
     }
 
-    fun reuse(jobId: String, candidate: List<ProcessingUnit>, target: String, chunkVersion: String): PipelineReuseSummary {
+    fun reuse(jobId: String, candidate: List<ProcessingUnit>, target: String, chunkVersion: String): PipelineReuseSummary = db.transaction {
         var direct=0; var local=0; var requests=0; var unknown=0
         val publishedTarget=db.query("SELECT vision_binding_json FROM import_jobs WHERE id=?",listOf(jobId)).singleOrNull()?.string("vision_binding_json")
+        // Project facts once per job, including inactive units: an old split's uncertain page
+        // must still block a new split. All four reads share the caller's/nested SQL snapshot.
+        val priorById = db.query("SELECT unit_id,chunk_version,published FROM pipeline_units WHERE job_id=?",
+            listOf(jobId)).associateBy { it.string("unit_id") }
+        val savedIds = db.query("SELECT unit_id FROM pipeline_results WHERE job_id=? AND target=? AND result_version=?",
+            listOf(jobId,target,resultVersion)).mapTo(hashSetOf()) { it.string("unit_id") }
+        val unresolved = db.query("""
+            SELECT a.unit_id,u.page FROM pipeline_attempts a
+            JOIN pipeline_units u ON u.job_id=a.job_id AND u.unit_id=a.unit_id
+            WHERE a.job_id=? AND a.state IN ('UNKNOWN_OUTCOME','READY','DISPATCHED')
+              AND a.ordinal=(SELECT MAX(b.ordinal) FROM pipeline_attempts b WHERE b.job_id=a.job_id AND b.unit_id=a.unit_id)
+              AND NOT EXISTS(SELECT 1 FROM pipeline_retry_permits r WHERE r.unknown_attempt_id=a.request_id AND r.consumed=1 AND r.replacement_request_id IS NOT NULL)
+              AND NOT EXISTS(SELECT 1 FROM pipeline_retry_permits r WHERE r.unknown_attempt_id=a.request_id AND r.consumed=0)
+        """.trimIndent(), listOf(jobId))
+        val unknownIds = unresolved.mapTo(hashSetOf()) { it.string("unit_id") }
+        val unknownPages = unresolved.mapNotNullTo(hashSetOf()) { it.longOrNull("page") }
         candidate.forEach { unit ->
-            val prior = db.query("SELECT chunk_version,published FROM pipeline_units WHERE job_id=? AND unit_id=?",listOf(jobId,unit.unitId)).singleOrNull()
+            val prior = priorById[unit.unitId]
             when {
-                unknown(jobId,unit.unitId,unit.page) -> unknown++
-                !unit.requiresVision || result(jobId,unit.unitId,target)!=null ->
+                unit.unitId in unknownIds || unit.page.toLong() in unknownPages -> unknown++
+                !unit.requiresVision || unit.unitId in savedIds ->
                     if (prior?.string("chunk_version")==chunkVersion && prior.long("published")==1L && (!unit.requiresVision || publishedTarget==target)) direct++ else local++
                 else -> requests++
             }
         }
-        return PipelineReuseSummary(direct,local,requests,unknown,plannerVersion=candidate.firstOrNull()?.plannerVersion.orEmpty(),chunkVersion=chunkVersion)
+        PipelineReuseSummary(direct,local,requests,unknown,plannerVersion=candidate.firstOrNull()?.plannerVersion.orEmpty(),chunkVersion=chunkVersion)
     }
 
     companion object {

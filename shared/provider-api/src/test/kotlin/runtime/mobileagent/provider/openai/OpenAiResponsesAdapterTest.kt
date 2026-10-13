@@ -39,39 +39,39 @@ class OpenAiResponsesSseTest {
     @Test
     fun parsesTextLifecycleReasoningAndUnknownEventsWithoutCrashing() {
         val state = OpenAiResponsesSse.State()
-        assertTrue(OpenAiResponsesSse.eventsFromLine("event: response.created", state).isEmpty())
-        assertTrue(OpenAiResponsesSse.eventsFromLine("data: {\"type\":\"response.created\",\"response\":{}}", state).isEmpty())
+        assertTrue(OpenAiResponsesSse.eventsFromData("", state).isEmpty())
+        assertTrue(OpenAiResponsesSse.eventsFromData("{\"type\":\"response.created\",\"response\":{}}", state).isEmpty())
         assertEquals(
             listOf(ModelEvent.ReasoningDelta("plan")),
-            OpenAiResponsesSse.eventsFromLine("data: {\"type\":\"response.reasoning_summary_text.delta\",\"delta\":\"plan\"}", state),
+            OpenAiResponsesSse.eventsFromData("{\"type\":\"response.reasoning_summary_text.delta\",\"delta\":\"plan\"}", state),
         )
         assertEquals(
             listOf(ModelEvent.TextDelta("Hello")),
-            OpenAiResponsesSse.eventsFromLine("data: {\"type\":\"response.output_text.delta\",\"delta\":\"Hello\"}", state),
+            OpenAiResponsesSse.eventsFromData("{\"type\":\"response.output_text.delta\",\"delta\":\"Hello\"}", state),
         )
         // A text done marker is a lifecycle acknowledgement, not a second answer delta.
         assertTrue(
-            OpenAiResponsesSse.eventsFromLine(
-                "data: {\"type\":\"response.output_text.done\",\"text\":\"Hello\"}",
+            OpenAiResponsesSse.eventsFromData(
+                "{\"type\":\"response.output_text.done\",\"text\":\"Hello\"}",
                 state,
             ).isEmpty(),
         )
-        assertTrue(OpenAiResponsesSse.eventsFromLine("data: {\"type\":\"response.custom.future_event\"}", state).isEmpty())
+        assertTrue(OpenAiResponsesSse.eventsFromData("{\"type\":\"response.custom.future_event\"}", state).isEmpty())
     }
 
     @Test
     fun doneEventsSupplyTextWhenProviderOmitsDeltas() {
         assertEquals(
             listOf(ModelEvent.TextDelta("complete answer")),
-            OpenAiResponsesSse.eventsFromLine(
-                "data: {\"type\":\"response.output_text.done\",\"item_id\":\"msg_1\",\"content_index\":0,\"text\":\"complete answer\"}",
+            OpenAiResponsesSse.eventsFromData(
+                "{\"type\":\"response.output_text.done\",\"item_id\":\"msg_1\",\"content_index\":0,\"text\":\"complete answer\"}",
                 OpenAiResponsesSse.State(),
             ),
         )
         assertEquals(
             listOf(ModelEvent.ReasoningDelta("complete summary")),
-            OpenAiResponsesSse.eventsFromLine(
-                "data: {\"type\":\"response.reasoning_summary_text.done\",\"item_id\":\"rs_1\",\"summary_text\":\"complete summary\"}",
+            OpenAiResponsesSse.eventsFromData(
+                "{\"type\":\"response.reasoning_summary_text.done\",\"item_id\":\"rs_1\",\"summary_text\":\"complete summary\"}",
                 OpenAiResponsesSse.State(),
             ),
         )
@@ -80,26 +80,26 @@ class OpenAiResponsesSseTest {
     @Test
     fun accumulatesFunctionArgumentsAndEmitsOneToolCallAtDone() {
         val state = OpenAiResponsesSse.State()
-        OpenAiResponsesSse.eventsFromLine(
-            "data: {\"type\":\"response.output_item.added\",\"item\":{\"type\":\"function_call\",\"id\":\"fc_1\",\"call_id\":\"call_1\",\"name\":\"weather\",\"arguments\":\"\"}}",
+        OpenAiResponsesSse.eventsFromData(
+            "{\"type\":\"response.output_item.added\",\"item\":{\"type\":\"function_call\",\"id\":\"fc_1\",\"call_id\":\"call_1\",\"name\":\"weather\",\"arguments\":\"\"}}",
             state,
         )
-        OpenAiResponsesSse.eventsFromLine(
-            "data: {\"type\":\"response.function_call_arguments.delta\",\"item_id\":\"fc_1\",\"delta\":\"{\\\"city\\\":\"}",
+        OpenAiResponsesSse.eventsFromData(
+            "{\"type\":\"response.function_call_arguments.delta\",\"item_id\":\"fc_1\",\"delta\":\"{\\\"city\\\":\"}",
             state,
         )
-        OpenAiResponsesSse.eventsFromLine(
-            "data: {\"type\":\"response.function_call_arguments.delta\",\"item_id\":\"fc_1\",\"delta\":\"\\\"Paris\\\"}\"}",
+        OpenAiResponsesSse.eventsFromData(
+            "{\"type\":\"response.function_call_arguments.delta\",\"item_id\":\"fc_1\",\"delta\":\"\\\"Paris\\\"}\"}",
             state,
         )
-        val done = OpenAiResponsesSse.eventsFromLine(
-            "data: {\"type\":\"response.function_call_arguments.done\",\"item_id\":\"fc_1\",\"arguments\":\"{\\\"city\\\":\\\"Paris\\\"}\"}",
+        val done = OpenAiResponsesSse.eventsFromData(
+            "{\"type\":\"response.function_call_arguments.done\",\"item_id\":\"fc_1\",\"arguments\":\"{\\\"city\\\":\\\"Paris\\\"}\"}",
             state,
         )
         assertEquals(listOf(ModelEvent.ToolCallDelta("call_1", "weather", "{\"city\":\"Paris\"}")), done)
         assertTrue(
-            OpenAiResponsesSse.eventsFromLine(
-                "data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"function_call\",\"id\":\"fc_1\",\"call_id\":\"call_1\",\"name\":\"weather\",\"arguments\":\"{\\\"city\\\":\\\"Paris\\\"}\"}}",
+            OpenAiResponsesSse.eventsFromData(
+                "{\"type\":\"response.output_item.done\",\"item\":{\"type\":\"function_call\",\"id\":\"fc_1\",\"call_id\":\"call_1\",\"name\":\"weather\",\"arguments\":\"{\\\"city\\\":\\\"Paris\\\"}\"}}",
                 state,
             ).isEmpty(),
         )
@@ -108,25 +108,25 @@ class OpenAiResponsesSseTest {
     @Test
     fun emitsCompletionUsageAndSanitizedFailure() {
         val state = OpenAiResponsesSse.State()
-        OpenAiResponsesSse.eventsFromLine(
-            "data: {\"type\":\"response.output_text.delta\",\"delta\":\"answer\"}",
+        OpenAiResponsesSse.eventsFromData(
+            "{\"type\":\"response.output_text.delta\",\"delta\":\"answer\"}",
             state,
         )
-        val completed = OpenAiResponsesSse.eventsFromLine(
-            "data: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":3,\"output_tokens\":2}}}",
+        val completed = OpenAiResponsesSse.eventsFromData(
+            "{\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":3,\"output_tokens\":2}}}",
             state,
         )
         assertEquals(listOf(ModelEvent.Usage(3, 2), ModelEvent.Completed), completed)
         val secret = "responses-secret"
-        val failed = OpenAiResponsesSse.eventsFromLine(
-            "data: {\"type\":\"error\",\"message\":\"bad $secret\"}",
+        val failed = OpenAiResponsesSse.eventsFromData(
+            "{\"type\":\"error\",\"message\":\"bad $secret\"}",
             OpenAiResponsesSse.State(),
             listOf(secret),
         )
         assertEquals(1, failed.size)
         assertFalse((failed.single() as ModelEvent.Failed).sanitizedMessage.contains(secret))
-        val nestedFailed = OpenAiResponsesSse.eventsFromLine(
-            "data: {\"type\":\"response.failed\",\"response\":{\"error\":{\"message\":\"nested failure\"}}}",
+        val nestedFailed = OpenAiResponsesSse.eventsFromData(
+            "{\"type\":\"response.failed\",\"response\":{\"error\":{\"message\":\"nested failure\"}}}",
             OpenAiResponsesSse.State(),
         )
         assertEquals(listOf(ModelEvent.Failed("nested failure")), nestedFailed)
@@ -135,12 +135,12 @@ class OpenAiResponsesSseTest {
     @Test
     fun streamingReasoningOnlyCompletedIsReasoningOnly() {
         val state = OpenAiResponsesSse.State()
-        OpenAiResponsesSse.eventsFromLine(
-            "data: {\"type\":\"response.reasoning_text.delta\",\"delta\":\"thinking\"}",
+        OpenAiResponsesSse.eventsFromData(
+            "{\"type\":\"response.reasoning_text.delta\",\"delta\":\"thinking\"}",
             state,
         )
-        val completed = OpenAiResponsesSse.eventsFromLine(
-            "data: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":9,\"output_tokens\":40,\"output_tokens_details\":{\"reasoning_tokens\":40}}}}",
+        val completed = OpenAiResponsesSse.eventsFromData(
+            "{\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":9,\"output_tokens\":40,\"output_tokens_details\":{\"reasoning_tokens\":40}}}}",
             state,
         )
         assertEquals(ModelEvent.Failed(ErrorCode.REASONING_ONLY.name), completed.last())
@@ -149,8 +149,8 @@ class OpenAiResponsesSseTest {
 
     @Test
     fun streamingEmptyCompletedIsInvalidResponse() {
-        val completed = OpenAiResponsesSse.eventsFromLine(
-            "data: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":3,\"output_tokens\":0}}}",
+        val completed = OpenAiResponsesSse.eventsFromData(
+            "{\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":3,\"output_tokens\":0}}}",
             OpenAiResponsesSse.State(),
         )
         assertEquals(ModelEvent.Failed(ProviderConnectionErrorCode.INVALID_RESPONSE.name), completed.last())
@@ -158,8 +158,8 @@ class OpenAiResponsesSseTest {
 
     @Test
     fun functionArgumentsDoneCanIntroduceTheCallNameWithoutAddedItem() {
-        val events = OpenAiResponsesSse.eventsFromLine(
-            "data: {\"type\":\"response.function_call_arguments.done\",\"item_id\":\"fc_2\",\"call_id\":\"call_2\",\"name\":\"lookup\",\"arguments\":\"{}\"}",
+        val events = OpenAiResponsesSse.eventsFromData(
+            "{\"type\":\"response.function_call_arguments.done\",\"item_id\":\"fc_2\",\"call_id\":\"call_2\",\"name\":\"lookup\",\"arguments\":\"{}\"}",
             OpenAiResponsesSse.State(),
         )
         assertEquals(listOf(ModelEvent.ToolCallDelta("call_2", "lookup", "{}")), events)
@@ -173,22 +173,22 @@ class OpenAiResponsesSseTest {
         // response.
         assertEquals(
             listOf(ModelEvent.ToolCallDelta("call_3", "lookup", "{\"city\":")),
-            OpenAiResponsesSse.eventsFromLine(
-                "data: {\"type\":\"response.function_call_arguments.done\",\"item_id\":\"fc_3\",\"call_id\":\"call_3\",\"name\":\"lookup\",\"arguments\":\"{\\\"city\\\":\"}",
+            OpenAiResponsesSse.eventsFromData(
+                "{\"type\":\"response.function_call_arguments.done\",\"item_id\":\"fc_3\",\"call_id\":\"call_3\",\"name\":\"lookup\",\"arguments\":\"{\\\"city\\\":\"}",
                 OpenAiResponsesSse.State(),
             ),
         )
         assertEquals(
             listOf(ModelEvent.ToolCallDelta("call_4", "", "{}")),
-            OpenAiResponsesSse.eventsFromLine(
-                "data: {\"type\":\"response.function_call_arguments.done\",\"item_id\":\"fc_4\",\"call_id\":\"call_4\",\"name\":\"\",\"arguments\":\"{}\"}",
+            OpenAiResponsesSse.eventsFromData(
+                "{\"type\":\"response.function_call_arguments.done\",\"item_id\":\"fc_4\",\"call_id\":\"call_4\",\"name\":\"\",\"arguments\":\"{}\"}",
                 OpenAiResponsesSse.State(),
             ),
         )
         assertEquals(
             listOf(ModelEvent.Failed(ProviderConnectionErrorCode.INVALID_RESPONSE.name)),
-            OpenAiResponsesSse.eventsFromLine(
-                "data: {\"type\":\"response.function_call_arguments.done\",\"item_id\":\"fc_5\",\"name\":\"lookup\",\"arguments\":\"{\\\"city\\\":\"}",
+            OpenAiResponsesSse.eventsFromData(
+                "{\"type\":\"response.function_call_arguments.done\",\"item_id\":\"fc_5\",\"name\":\"lookup\",\"arguments\":\"{\\\"city\\\":\"}",
                 OpenAiResponsesSse.State(),
             ),
         )
@@ -199,8 +199,8 @@ class OpenAiResponsesSseTest {
         val secret = "synthetic-responses-credential-12345"
         assertEquals(
             listOf(ModelEvent.Failed(ErrorCode.UNKNOWN_OUTCOME.name)),
-            OpenAiResponsesSse.eventsFromLine(
-                "data: {\"type\":\"response.function_call_arguments.done\",\"item_id\":\"fc_5\",\"call_id\":\"call_5\",\"name\":\"lookup\",\"arguments\":\"{\\\"token\\\":\\\"$secret\\\"}\"}",
+            OpenAiResponsesSse.eventsFromData(
+                "{\"type\":\"response.function_call_arguments.done\",\"item_id\":\"fc_5\",\"call_id\":\"call_5\",\"name\":\"lookup\",\"arguments\":\"{\\\"token\\\":\\\"$secret\\\"}\"}",
                 OpenAiResponsesSse.State(),
                 listOf(secret),
             ),
@@ -519,16 +519,16 @@ class OpenAiResponsesAdapterTest {
         val state = OpenAiResponsesSse.State()
         assertEquals(
             listOf(ModelEvent.RefusalDelta("I cannot")),
-            OpenAiResponsesSse.eventsFromLine(
-                "data: {\"type\":\"response.refusal.delta\",\"item_id\":\"msg_1\",\"output_index\":0,\"content_index\":0,\"delta\":\"I cannot\"}",
+            OpenAiResponsesSse.eventsFromData(
+                "{\"type\":\"response.refusal.delta\",\"item_id\":\"msg_1\",\"output_index\":0,\"content_index\":0,\"delta\":\"I cannot\"}",
                 state,
             ),
         )
         // The done marker only supplies the missing tail, like text and reasoning.
         assertEquals(
             listOf(ModelEvent.RefusalDelta(" help.")),
-            OpenAiResponsesSse.eventsFromLine(
-                "data: {\"type\":\"response.refusal.done\",\"item_id\":\"msg_1\",\"output_index\":0,\"content_index\":0,\"refusal\":\"I cannot help.\"}",
+            OpenAiResponsesSse.eventsFromData(
+                "{\"type\":\"response.refusal.done\",\"item_id\":\"msg_1\",\"output_index\":0,\"content_index\":0,\"refusal\":\"I cannot help.\"}",
                 state,
             ),
         )
@@ -538,15 +538,15 @@ class OpenAiResponsesAdapterTest {
     fun reasoningTextEventsSurfaceAsReasoningWithoutFabrication() {
         assertEquals(
             listOf(ModelEvent.ReasoningDelta("thinking")),
-            OpenAiResponsesSse.eventsFromLine(
-                "data: {\"type\":\"response.reasoning_text.delta\",\"delta\":\"thinking\"}",
+            OpenAiResponsesSse.eventsFromData(
+                "{\"type\":\"response.reasoning_text.delta\",\"delta\":\"thinking\"}",
                 OpenAiResponsesSse.State(),
             ),
         )
         assertEquals(
             listOf(ModelEvent.ReasoningDelta("done thinking")),
-            OpenAiResponsesSse.eventsFromLine(
-                "data: {\"type\":\"response.reasoning_text.done\",\"item_id\":\"rs_1\",\"text\":\"done thinking\"}",
+            OpenAiResponsesSse.eventsFromData(
+                "{\"type\":\"response.reasoning_text.done\",\"item_id\":\"rs_1\",\"text\":\"done thinking\"}",
                 OpenAiResponsesSse.State(),
             ),
         )
@@ -555,13 +555,13 @@ class OpenAiResponsesAdapterTest {
     @Test
     fun completedReasoningItemIsCapturedAsPrivateContinuation() {
         val state = OpenAiResponsesSse.State()
-        val added = OpenAiResponsesSse.eventsFromLine(
-            "data: {\"type\":\"response.output_item.added\",\"item\":{\"type\":\"reasoning\",\"id\":\"rs_1\"}}",
+        val added = OpenAiResponsesSse.eventsFromData(
+            "{\"type\":\"response.output_item.added\",\"item\":{\"type\":\"reasoning\",\"id\":\"rs_1\"}}",
             state,
         )
         assertTrue(added.isEmpty())
-        val done = OpenAiResponsesSse.eventsFromLine(
-            "data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"reasoning\",\"id\":\"rs_1\",\"encrypted_content\":\"enc-blob\"}}",
+        val done = OpenAiResponsesSse.eventsFromData(
+            "{\"type\":\"response.output_item.done\",\"item\":{\"type\":\"reasoning\",\"id\":\"rs_1\",\"encrypted_content\":\"enc-blob\"}}",
             state,
         )
         assertEquals(1, done.size)
@@ -570,14 +570,14 @@ class OpenAiResponsesAdapterTest {
         assertEquals("enc-blob", continuation.item.encryptedContent)
         // Replays and items without payload never surface.
         assertTrue(
-            OpenAiResponsesSse.eventsFromLine(
-                "data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"reasoning\",\"id\":\"rs_1\",\"encrypted_content\":\"enc-blob\"}}",
+            OpenAiResponsesSse.eventsFromData(
+                "{\"type\":\"response.output_item.done\",\"item\":{\"type\":\"reasoning\",\"id\":\"rs_1\",\"encrypted_content\":\"enc-blob\"}}",
                 state,
             ).isEmpty(),
         )
         assertTrue(
-            OpenAiResponsesSse.eventsFromLine(
-                "data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"reasoning\",\"id\":\"rs_2\"}}",
+            OpenAiResponsesSse.eventsFromData(
+                "{\"type\":\"response.output_item.done\",\"item\":{\"type\":\"reasoning\",\"id\":\"rs_2\"}}",
                 OpenAiResponsesSse.State(),
             ).isEmpty(),
         )

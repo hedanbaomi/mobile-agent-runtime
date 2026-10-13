@@ -66,6 +66,13 @@ class AgentsConversationRoutingDeviceTest {
         instrumentation.runOnMainSync {
             chat.selectSession(created)
         }
+        val deadline = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(15)
+        var loaded = false
+        while (!loaded && System.nanoTime() < deadline) {
+            instrumentation.runOnMainSync { loaded = !chat.state.value.loading && chat.state.value.selectedSessionId == created }
+            if (!loaded) Thread.sleep(10)
+        }
+        org.junit.Assert.assertTrue("New conversation projection did not load", loaded)
         assertEquals(created, chat.state.value.selectedSessionId)
         assertEquals(secondAgentId, chat.state.value.selectedAgentId)
         assertEquals(created, container.uiPreferences.getString("selected-conversation", null))

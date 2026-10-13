@@ -16,7 +16,7 @@ class KnowledgeCitationProvenanceTest {
         val bytes = java.io.ByteArrayOutputStream().also { output ->
             java.util.zip.ZipOutputStream(output).use { zip ->
                 zip.putNextEntry(java.util.zip.ZipEntry("word/document.xml"))
-                zip.write("<w:document><w:p><w:r><w:t>first paragraph</w:t></w:r></w:p><w:p><w:r><w:t>Cobalt evidence</w:t></w:r></w:p></w:document>".toByteArray())
+                zip.write("<w:document xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\"><w:p><w:r><w:t>first paragraph</w:t></w:r></w:p><w:p><w:r><w:t>Cobalt evidence</w:t></w:r></w:p></w:document>".toByteArray())
                 zip.closeEntry()
             }
         }.toByteArray()

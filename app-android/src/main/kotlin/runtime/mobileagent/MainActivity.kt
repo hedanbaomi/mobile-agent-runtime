@@ -32,6 +32,9 @@ import runtime.mobileagent.background.ImportWorkScheduler
 import runtime.mobileagent.ui.MainApp
 import runtime.mobileagent.ui.DatabaseRecoveryScreen
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.LaunchedEffect
+import runtime.mobileagent.ui.HostInitializationScreen
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 
@@ -65,31 +68,48 @@ class MainActivity : ComponentActivity() {
     }
     private var updateInstallRunning = false
     private var pendingUpdatePermission = false
+    private var deferredUpdatePermissionResult = false
+    private var deferredUpdateResult: String? = null
     private var installingUpdates: runtime.mobileagent.updates.AppUpdateCoordinator? = null
     private fun currentUpdates() = installingUpdates ?: (application as MobileAgentApp).container.appUpdates
     private val updatePermission = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) {
         if (pendingUpdatePermission) {
+            if (!(application as MobileAgentApp).isHostInitialized) {
+                deferredUpdatePermissionResult = true
+                return@registerForActivityResult
+            }
             pendingUpdatePermission = false
             if (packageManager.canRequestPackageInstalls()) lifecycleScope.launch { openVerifiedUpdateInstaller() }
             else currentUpdates().installationMessage("未允许安装；可在允许后重试。")
         }
     }
     private val updateInstaller = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
-        currentUpdates().installationMessage(if (result.resultCode == RESULT_OK) "安装已完成，请重新打开应用。" else "安装未完成，可重试安装。")
+        val message = if (result.resultCode == RESULT_OK) "安装已完成，请重新打开应用。" else "安装未完成，可重试安装。"
+        if ((application as MobileAgentApp).isHostInitialized) currentUpdates().installationMessage(message)
+        else deferredUpdateResult = message
     }
     private val notificationPermission = registerForActivityResult(ActivityResultContracts.RequestPermission()) { }
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        (application as? MobileAgentApp)?.ensureHostInitialized()
-        if ((application as MobileAgentApp).databaseRecovery != null) {
-            configureSystemBars()
-            setContent {
-                DatabaseRecoveryScreen(recoveryBusy, recoveryMessage,
+        val app = application as MobileAgentApp
+        app.initializeHostAsync()
+        pendingUpdatePermission = savedInstanceState?.getBoolean("pending-update-permission") ?: false
+        configureSystemBars()
+        setContent {
+            val initialization by app.hostInitialization.collectAsState()
+            LaunchedEffect(initialization) {
+                if (initialization == HostInitialization.READY && lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED)) hostForeground()
+            }
+            when (initialization) {
+                HostInitialization.INITIALIZING -> HostInitializationScreen(false)
+                HostInitialization.FAILED -> HostInitializationScreen(true)
+                HostInitialization.READY -> MainApp(onMoveTaskToBack = { moveTaskToBack(true) })
+                HostInitialization.RECOVERY -> DatabaseRecoveryScreen(recoveryBusy, recoveryMessage,
                     onExport = { exportRecovery.launch("mobile-agent-database-recovery.zip") },
                     onStartNew = { lifecycleScope.launch {
                         recoveryBusy = true
                         try {
-                            runInterruptible(Dispatchers.IO) { (application as MobileAgentApp).startNewDatabaseFromRecovery() }
+                            runInterruptible(Dispatchers.IO) { app.startNewDatabaseFromRecovery() }
                             recreate()
                         } catch (cancelled: CancellationException) { throw cancelled }
                         catch (_: Exception) { recoveryMessage = getString(R.string.database_recovery_failed) }
@@ -97,11 +117,10 @@ class MainActivity : ComponentActivity() {
                     } },
                 )
             }
-            return
         }
-        pendingUpdatePermission = savedInstanceState?.getBoolean("pending-update-permission") ?: false
-        configureSystemBars()
-        setContent { MainApp(onMoveTaskToBack = { moveTaskToBack(true) }) }
+    }
+
+    private fun requestNotificationsIfNeeded() {
         if (Build.VERSION.SDK_INT >= 33 && checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
             val preferences = getSharedPreferences("notification-permission", MODE_PRIVATE)
             if (!preferences.getBoolean("requested", false)) {
@@ -111,9 +130,23 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    private var foregroundActive = false
     override fun onStart() {
         super.onStart()
-        if (!(application as MobileAgentApp).isHostInitialized) return
+        hostForeground()
+    }
+
+    private fun hostForeground() {
+        if (!(application as MobileAgentApp).isHostInitialized || foregroundActive) return
+        foregroundActive = true
+        deferredUpdateResult?.let { currentUpdates().installationMessage(it); deferredUpdateResult = null }
+        if (deferredUpdatePermissionResult) {
+            deferredUpdatePermissionResult = false
+            pendingUpdatePermission = false
+            if (packageManager.canRequestPackageInstalls()) lifecycleScope.launch { openVerifiedUpdateInstaller() }
+            else currentUpdates().installationMessage("未允许安装；可在允许后重试。")
+        }
+        requestNotificationsIfNeeded()
         // Foreground refresh belongs to the Activity/process lifecycle, not to construction of
         // the announcements screen ViewModel. The coordinator handles single-flight and backoff.
         (application as? MobileAgentApp)?.container?.announcementRefreshCoordinator?.foreground()
@@ -142,7 +175,10 @@ class MainActivity : ComponentActivity() {
 
     override fun onStop() {
         super.onStop()
+        foregroundActive = false
         if (!(application as MobileAgentApp).isHostInitialized) return
+        val drafts = (application as MobileAgentApp).container.chatDraftPersistence
+        drafts.requestFlushAll()
         // Leaving the foreground stops the update ticker; no service, worker or timer keeps running.
         (application as? MobileAgentApp)?.container?.appUpdates?.background()
     }

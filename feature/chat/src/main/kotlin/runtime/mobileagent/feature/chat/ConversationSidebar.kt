@@ -164,6 +164,11 @@ internal fun ConversationSidebar(
                         }
                     }
                 }
+                if (state.hasMoreSessions) item(key = "more-conversations") {
+                    TextButton(onClick = actions.onLoadMoreSessions, modifier = Modifier.fillMaxWidth().testTag("chat.sessions.loadMore")) {
+                        Text(stringResource(R.string.chat_load_more_sessions))
+                    }
+                }
                 val orphanSessions = sessionsByAgent[null].orEmpty() + state.sessions.filter { session ->
                     session.agentId != null && state.agents.none { it.id == session.agentId }
                 }

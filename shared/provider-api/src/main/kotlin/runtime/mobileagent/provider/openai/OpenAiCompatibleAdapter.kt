@@ -12,7 +12,6 @@ import io.ktor.client.statement.bodyAsChannel
 import io.ktor.http.ContentType
 import io.ktor.http.HttpHeaders
 import io.ktor.http.contentType
-import io.ktor.utils.io.readUTF8Line
 import io.ktor.utils.io.readAvailable
 import io.ktor.utils.io.ByteReadChannel
 import java.io.IOException
@@ -484,61 +483,56 @@ class OpenAiCompatibleAdapter(
                     val channel = response.bodyAsChannel()
                     val toolBuf = linkedMapOf<String, Pair<String, StringBuilder>>()
                     val indexToId = mutableMapOf<Int, String>()
-                    var sawCompleted = false
-                    var sawFailed = false
-                    var receivedBytes = 0L
-                    while (!channel.isClosedForRead) {
-                        val line = channel.readUTF8Line(1_048_576) ?: break
-                        receivedBytes += line.toByteArray(Charsets.UTF_8).size + 1L
-                        require(receivedBytes <= 8_388_608L) { "Provider response exceeds limit" }
+                    val decoder = SseEventDecoder()
+                    var terminal = false
+                    val receivedBytes = SseLineReader().read(channel) { line, bytes ->
                         val captureLine = request.wantsDiagnosticContent()
                         request.reportDiagnostic(
                             ModelDiagnosticStage.STREAM_EVENT, dispatchStatus, started, "chat.completions",
                             httpStatus = status, responseContentType = responseType,
-                            responseBytes = receivedBytes, eventType = "sse.event",
+                            responseBytes = bytes, eventType = "sse.event",
                             contentKind = if (captureLine) "response.sse.event" else null,
                             content = if (captureLine) DiagnosticJsonSanitizer.sanitizeSseLine(line, redactionSecrets) else null,
                             originalContentChars = line.length.toLong(),
                             originalContentBytes = line.toByteArray(Charsets.UTF_8).size.toLong(),
                         )
-                        val parsedEvents = OpenAiSse.eventsFromLine(
-                            line,
-                            toolBuf,
-                            redactionSecrets,
-                            indexToId,
-                        )
-                        OpenAiSse.finishReasonFromLine(line)?.let { streamState.finishReason = it }
-                        for (event in parsedEvents) {
-                            val usage = event as? ModelEvent.Usage
-                            request.reportDiagnostic(
-                                ModelDiagnosticStage.STREAM_EVENT, dispatchStatus, started, "chat.completions",
-                                httpStatus = status, usage = usage, responseContentType = responseType,
-                                responseBytes = receivedBytes, eventType = event::class.simpleName,
-                            )
-                            val terminal = emitRedacted(event, streamRedactor, redactionSecrets, streamState)
-                            streamState.diagnosticEvents.forEach { safeEvent ->
+                        // Framing first: one event may span several `data:` lines and
+                        // is only committed by a blank line.
+                        decoder.feed(line) { data ->
+                            OpenAiSse.finishReasonFromData(data)?.let { streamState.finishReason = it }
+                            for (event in OpenAiSse.eventsFromData(data, toolBuf, redactionSecrets, indexToId)) {
+                                val usage = event as? ModelEvent.Usage
                                 request.reportDiagnostic(
                                     ModelDiagnosticStage.STREAM_EVENT, dispatchStatus, started, "chat.completions",
-                                    httpStatus = status, responseContentType = responseType,
-                                    responseBytes = receivedBytes, eventType = safeEvent::class.simpleName,
-                                    contentKind = if (request.wantsDiagnosticContent()) "response.sse.model_event" else null,
-                                    content = if (request.wantsDiagnosticContent()) {
-                                        DiagnosticJsonSanitizer.sanitizeModelEvent(safeEvent, redactionSecrets)
-                                    } else null,
+                                    httpStatus = status, usage = usage, responseContentType = responseType,
+                                    responseBytes = bytes, eventType = event::class.simpleName,
                                 )
+                                val decision = emitRedacted(event, streamRedactor, redactionSecrets, streamState)
+                                streamState.diagnosticEvents.forEach { safeEvent ->
+                                    request.reportDiagnostic(
+                                        ModelDiagnosticStage.STREAM_EVENT, dispatchStatus, started, "chat.completions",
+                                        httpStatus = status, responseContentType = responseType,
+                                        responseBytes = bytes, eventType = safeEvent::class.simpleName,
+                                        contentKind = if (request.wantsDiagnosticContent()) "response.sse.model_event" else null,
+                                        content = if (request.wantsDiagnosticContent()) {
+                                            DiagnosticJsonSanitizer.sanitizeModelEvent(safeEvent, redactionSecrets)
+                                        } else null,
+                                    )
+                                }
+                                streamState.diagnosticEvents.clear()
+                                if (decision != null) {
+                                    terminal = true
+                                    break
+                                }
                             }
-                            streamState.diagnosticEvents.clear()
-                            when (terminal) {
-                                ModelEvent.Completed -> sawCompleted = true
-                                is ModelEvent.Failed -> sawFailed = true
-                                null -> Unit
-                                else -> Unit
-                            }
-                            if (terminal != null) break
+                            terminal
                         }
-                        if (sawCompleted || sawFailed) break
+                        terminal
                     }
-                    if (!sawFailed && !sawCompleted) {
+                    // An event the stream never delimited is discarded, never
+                    // reported, and never a success.
+                    decoder.finish()
+                    if (!terminal) {
                         // EOF is not a successful completion.  In particular, do not flush a
                         // suffix which could still become a credential on a later delta.
                         streamRedactor.discard()
@@ -1441,48 +1435,55 @@ class OpenAiCompatibleAdapter(
 
     private suspend fun parseStreamProbe(channel: ByteReadChannel): Boolean {
         val toolBuf = linkedMapOf<String, Pair<String, StringBuilder>>()
+        val decoder = SseEventDecoder()
         var sawPayload = false
         var sawCompleted = false
         var sawFailed = false
-        var receivedBytes = 0L
-        while (!channel.isClosedForRead) {
-            val line = channel.readUTF8Line(1_048_576) ?: break
-            receivedBytes += line.toByteArray(Charsets.UTF_8).size + 1L
-            require(receivedBytes <= MAX_PROBE_RESPONSE_BYTES) { "Provider probe response exceeds limit" }
-            OpenAiSse.eventsFromLine(line, toolBuf).forEach { event ->
-                when (event) {
-                    is ModelEvent.TextDelta,
-                    is ModelEvent.RefusalDelta,
-                    is ModelEvent.ToolCallDelta,
-                    -> sawPayload = true
-                    ModelEvent.Completed -> sawCompleted = true
-                    is ModelEvent.Failed -> sawFailed = true
-                    else -> Unit
+        SseLineReader(maxResponseBytes = MAX_PROBE_RESPONSE_BYTES).read(channel) { line, _ ->
+            decoder.feed(line) { data ->
+                OpenAiSse.eventsFromData(data, toolBuf).forEach { event ->
+                    when (event) {
+                        is ModelEvent.TextDelta,
+                        is ModelEvent.RefusalDelta,
+                        is ModelEvent.ToolCallDelta,
+                        -> sawPayload = true
+                        ModelEvent.Completed -> sawCompleted = true
+                        is ModelEvent.Failed -> sawFailed = true
+                        else -> Unit
+                    }
                 }
+                sawCompleted || sawFailed
             }
-            if (sawCompleted || sawFailed) break
+            sawCompleted || sawFailed
         }
+        decoder.finish()
         return sawPayload && sawCompleted && !sawFailed
     }
 
-    private fun parseConnectionSse(raw: String): Boolean {
+    private suspend fun parseConnectionSse(raw: String): Boolean {
         val toolBuf = linkedMapOf<String, Pair<String, StringBuilder>>()
+        val decoder = SseEventDecoder()
         var sawPayload = false
         var sawCompleted = false
         var sawFailed = false
-        raw.lineSequence().forEach { line ->
-            OpenAiSse.eventsFromLine(line, toolBuf).forEach { event ->
-                when (event) {
-                    is ModelEvent.TextDelta,
-                    is ModelEvent.RefusalDelta,
-                    is ModelEvent.ToolCallDelta,
-                    -> sawPayload = true
-                    ModelEvent.Completed -> sawCompleted = true
-                    is ModelEvent.Failed -> sawFailed = true
-                    else -> Unit
+        SseLineReader(maxResponseBytes = MAX_PROBE_RESPONSE_BYTES).read(ByteReadChannel(raw)) { line, _ ->
+            decoder.feed(line) { data ->
+                OpenAiSse.eventsFromData(data, toolBuf).forEach { event ->
+                    when (event) {
+                        is ModelEvent.TextDelta,
+                        is ModelEvent.RefusalDelta,
+                        is ModelEvent.ToolCallDelta,
+                        -> sawPayload = true
+                        ModelEvent.Completed -> sawCompleted = true
+                        is ModelEvent.Failed -> sawFailed = true
+                        else -> Unit
+                    }
                 }
+                false
             }
+            false
         }
+        decoder.finish()
         return sawPayload && sawCompleted && !sawFailed
     }
 

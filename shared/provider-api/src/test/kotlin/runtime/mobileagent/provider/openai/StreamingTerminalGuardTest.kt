@@ -73,7 +73,9 @@ class StreamingTerminalGuardTest {
     }
 
     private fun sseEngine(vararg frames: String) = MockEngine {
-        respond(frames.joinToString("\n\n"), HttpStatusCode.OK, headersOf(HttpHeaders.ContentType, "text/event-stream"))
+        // Every event, including the last one, is terminated by a blank line:
+        // an event the stream never delimits is discarded, not dispatched.
+        respond(frames.joinToString("\n\n") + "\n\n", HttpStatusCode.OK, headersOf(HttpHeaders.ContentType, "text/event-stream"))
     }
 
     private suspend fun responsesEvents(vararg frames: String): List<ModelEvent> =

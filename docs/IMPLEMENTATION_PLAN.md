@@ -469,3 +469,7 @@ PDF 解析支持合法紧凑关闭分隔符后紧接 endobj 的对象，保持 s
 应用版本调整为 1.0.0 / code 2，正式产物为现有正式身份签名的 arm64 包；以干净合并源码运行 releaseGate 并记录 APK/AAB、源码、SBOM、provenance 和哈希。GitHub Release 的实际地址与证据在发布完成后记录，不替代未完成的真机/线上服务/长稳验收；[发布约定](RELEASING.md) 替代早期“缺签名、版本 0.1.0”的当前准备状态，历史证据保留其日期。
 
 2026-10-06 修订（R18/R21/R23/R34）：聊天草稿通过 derivedStateOf 从 shell/history 投影排除，Composer 使用 TextFieldValue 同步真实外部变化；Markdown 行内解析按内容缓存。摘要在明确失败且完整原文符合硬预算时对当前 Run 降级，保留 checkpoint/usage 和普通派发门禁。内置 Agent shell 在 factory 冻结全局确认，独立 Skill 授权保持原合同。首次完整设备文件确认由 AgentsViewModel 保留独立草稿，保存后走 canonical sink，保持目录草稿与 grant-only 边界。 验证见 evidence/2026-10-06/ime-context-device-access.md。
+
+## 2026-10-13：审查修复增量
+
+R02/R04/R05/R25 沿用既有契约：Office 解析改为有界 XML 和标准 spine；OpenAI 流与探测统一事件分帧；宿主及 Chat 存储投影移至 IO，代次拒绝迟到结果。UI 每页50条，执行/导出完整历史保持。草稿和不可变 MCP 固定信息存入现有 app_prefs（schema32），创建由同一事务发布，MCP 每次派发复核授权与 schema。批次短快照→无锁规划→短事务复核发布。详细取舍与边界见 [ADR-0039](adr/0039-review-parser-stream-and-chat-persistence.md)，执行证据见 [本轮记录](evidence/2026-10-13/review-remediation.md)。

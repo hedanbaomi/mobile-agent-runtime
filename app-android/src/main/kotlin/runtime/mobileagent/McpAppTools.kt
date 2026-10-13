@@ -52,99 +52,13 @@ data class McpSnapshotTool(
 )
 
 /**
- * Capture the currently approved MCP tool list for a real Agent snapshot.
- * A missing endpoint, discovery, grant, or persisted snapshot binding returns
- * null and therefore cannot silently enable network tools.
- */
-fun captureMcpSnapshot(container: AppContainer, snapshotId: String, agentId: String): McpSnapshot? {
-    if (snapshotId.isBlank() || agentId.isBlank()) return null
-    val agentSnapshot = runCatching { container.agents.getSnapshot(snapshotId) }.getOrNull() ?: return null
-    if (agentSnapshot.agentId != agentId) return null
-    val config = McpConfigStore.read(container).value ?: return null
-    if (config.networkApprovedAt.isNullOrBlank() || config.discoveryRevision <= 0) return null
-    val fingerprint = config.discoveryFingerprint ?: return null
-    val grant = config.grants.singleOrNull { it.agentId == agentId } ?: return null
-    val byName = config.tools.associateBy { it.namespacedName }
-    if (grant.toolNames.isEmpty() || grant.toolNames.any { it !in byName }) return null
-    if (grant.schemaHashes.keys != grant.toolNames.toSet()) return null
-    if (grant.schemaHashes.any { (name, hash) -> byName[name]?.schemaHash != hash }) return null
-    if (grant.revision != config.discoveryRevision) return null
-
-    val existing = config.snapshots.singleOrNull { it.snapshotId == snapshotId && it.agentId == agentId }
-    val stored = existing ?: McpStoredSnapshot(
-        snapshotId = snapshotId,
-        agentId = agentId,
-        grantId = grant.grantId,
-        revision = grant.revision,
-        discoveryFingerprint = fingerprint,
-        toolNames = grant.toolNames.sorted(),
-        schemaHashes = grant.schemaHashes.toSortedMap(),
-    ).also { created ->
-        McpConfigStore.write(
-            container,
-            config.copy(
-                snapshots = (config.snapshots.filterNot { it.snapshotId == snapshotId } + created).takeLast(MAX_SNAPSHOTS),
-            ),
-        )
-    }
-    if (stored.grantId != grant.grantId || stored.revision != grant.revision ||
-        stored.discoveryFingerprint != fingerprint || stored.toolNames.toSet() != grant.toolNames.toSet() ||
-        stored.schemaHashes != grant.schemaHashes
-    ) return null
-    return publicMcpSnapshot(config, stored)
-}
-
-/**
- * Load only a binding that was already persisted for this exact Agent snapshot.
- * This is intentionally read-only: unlike [captureMcpSnapshot], it never creates
- * a grant or snapshot entry for an older session.
- */
-fun loadMcpSnapshot(container: AppContainer, snapshotId: String, agentId: String): McpSnapshot? {
-    if (snapshotId.isBlank() || agentId.isBlank()) return null
-    val agentSnapshot = runCatching { container.agents.getSnapshot(snapshotId) }.getOrNull() ?: return null
-    if (agentSnapshot.agentId != agentId) return null
-    val config = McpConfigStore.read(container).value ?: return null
-    val stored = config.snapshots.singleOrNull { it.snapshotId == snapshotId && it.agentId == agentId }
-        ?: return null
-    val snapshot = publicMcpSnapshot(config, stored) ?: return null
-    return snapshot.takeIf { snapshotBindingIsCurrent(config, it) }
-}
-
-private fun publicMcpSnapshot(config: McpStoredConfig, stored: McpStoredSnapshot): McpSnapshot? {
-    if (config.networkApprovedAt.isNullOrBlank() || config.discoveryRevision <= 0) return null
-    val fingerprint = config.discoveryFingerprint ?: return null
-    if (stored.revision != config.discoveryRevision || stored.discoveryFingerprint != fingerprint) return null
-    val grant = config.grants.singleOrNull { it.agentId == stored.agentId } ?: return null
-    if (grant.grantId != stored.grantId || grant.revision != stored.revision) return null
-    if (grant.toolNames.toSet() != stored.toolNames.toSet() || grant.schemaHashes != stored.schemaHashes) return null
-    val byName = config.tools.associateBy { it.namespacedName }
-    val tools = stored.toolNames.mapNotNull { name ->
-        byName[name]?.let { tool ->
-            McpSnapshotTool(tool.namespacedName, tool.description, tool.inputSchemaJson, tool.schemaHash)
-        }
-    }
-    if (tools.size != stored.toolNames.size || tools.isEmpty()) return null
-    return McpSnapshot(
-        snapshotId = stored.snapshotId,
-        agentId = stored.agentId,
-        endpoint = config.endpoint,
-        host = config.host,
-        namespace = config.namespace,
-        grantId = stored.grantId,
-        discoveryRevision = stored.revision,
-        discoveryFingerprint = stored.discoveryFingerprint,
-        tools = tools,
-    )
-}
-
-/**
  * Return an app-level MCP executor for a previously captured binding.  The
  * returned empty executor is deliberate for old sessions, revoked grants, or
  * any metadata mismatch.  Construction never performs network I/O.
  */
 fun mcpTools(container: AppContainer, snapshot: McpSnapshot): ToolExecutor = mcpTools(
     snapshot,
-    readConfig = { McpConfigStore.read(container).value },
+    readConfig = { readPinnedMcpConfig(container, snapshot.snapshotId, snapshot.agentId) },
     createAdapter = { config, captureSecret, authorized -> createMcpAdapter(container, config, captureSecret, authorized) },
 )
 
@@ -492,7 +406,7 @@ private fun sanitizeMcpText(value: String, blockedValues: List<String>): String 
     return result.take(MAX_MODEL_TEXT_LENGTH)
 }
 
-private fun snapshotBindingIsCurrent(config: McpStoredConfig, snapshot: McpSnapshot): Boolean {
+internal fun snapshotBindingIsCurrent(config: McpStoredConfig, snapshot: McpSnapshot): Boolean {
     if (config.endpoint != snapshot.endpoint || config.host != snapshot.host || config.namespace != snapshot.namespace) return false
     if (config.networkApprovedAt.isNullOrBlank() || config.discoveryRevision != snapshot.discoveryRevision) return false
     if (config.discoveryFingerprint != snapshot.discoveryFingerprint) return false
@@ -501,7 +415,8 @@ private fun snapshotBindingIsCurrent(config: McpStoredConfig, snapshot: McpSnaps
     val storedSnapshot = config.snapshots.singleOrNull { it.snapshotId == snapshot.snapshotId && it.agentId == snapshot.agentId }
         ?: return false
     if (storedSnapshot.grantId != snapshot.grantId || storedSnapshot.revision != snapshot.discoveryRevision ||
-        storedSnapshot.discoveryFingerprint != snapshot.discoveryFingerprint || storedSnapshot.toolNames.toSet() != snapshot.tools.map { it.namespacedName }.toSet()
+        storedSnapshot.discoveryFingerprint != snapshot.discoveryFingerprint || storedSnapshot.toolNames.toSet() != snapshot.tools.map { it.namespacedName }.toSet() ||
+        storedSnapshot.schemaHashes != snapshot.tools.associate { it.namespacedName to it.schemaHash }
     ) return false
     val configTools = config.tools.associateBy { it.namespacedName }
     return snapshot.tools.all { tool ->

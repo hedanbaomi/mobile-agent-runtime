@@ -49,23 +49,26 @@ object OpenAiResponsesSse {
         val arguments: StringBuilder = StringBuilder(),
     )
 
-    fun eventsFromLine(
-        line: String,
+    /**
+     * Map one committed SSE event to model events.  [data] is the joined `data`
+     * payload of that event, never a raw transport line: framing, including the
+     * joining of several `data` fields, belongs to [SseEventDecoder].
+     */
+    fun eventsFromData(
+        data: String,
         state: State = State(),
         extraSecrets: List<String> = emptyList(),
     ): List<ModelEvent> {
-        val trimmed = line.trim()
-        if (trimmed.isEmpty() || trimmed.startsWith(":")) return emptyList()
-        if (!trimmed.startsWith("data:")) return emptyList()
-        val data = trimmed.removePrefix("data:").trim()
-        if (data == "[DONE]") {
+        val payload = data.trim()
+        if (payload.isEmpty()) return emptyList()
+        if (payload == "[DONE]") {
             // `[DONE]` is a transport end marker, not proof of a usable answer: a
             // compatible endpoint may end the stream here without ever sending
             // `response.completed`.  It passes through the same terminal guard as
             // that event, so both end markers decide alike.
             return terminalForContent(state, reasoningTokens = null)
         }
-        val obj = runCatching { json.parseToJsonElement(data).jsonObject }.getOrNull() ?: return emptyList()
+        val obj = runCatching { json.parseToJsonElement(payload).jsonObject }.getOrNull() ?: return emptyList()
         val type = string(obj, "type") ?: return emptyList()
         return when (type) {
             "response.output_text.delta" -> appendTextDelta(obj, state, Channel.TEXT)
@@ -153,11 +156,11 @@ object OpenAiResponsesSse {
     }
 
     /** Responses equivalent of a terminal finish reason, without output text. */
-    internal fun finishReasonFromLine(line: String): String? {
-        val data = line.trim().takeIf { it.startsWith("data:") }?.removePrefix("data:")?.trim()
-            ?: return null
-        if (data == "[DONE]") return "done"
-        val obj = runCatching { json.parseToJsonElement(data).jsonObject }.getOrNull() ?: return null
+    internal fun finishReasonFromData(data: String): String? {
+        val payload = data.trim()
+        if (payload.isEmpty()) return null
+        if (payload == "[DONE]") return "done"
+        val obj = runCatching { json.parseToJsonElement(payload).jsonObject }.getOrNull() ?: return null
         val type = string(obj, "type") ?: return null
         if (type !in setOf("response.completed", "response.failed", "response.incomplete")) return null
         val response = obj["response"]?.let { runCatching { it.jsonObject }.getOrNull() }

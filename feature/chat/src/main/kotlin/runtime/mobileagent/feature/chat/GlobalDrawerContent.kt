@@ -349,6 +349,15 @@ fun GlobalDrawerContent(
             }
         }
 
+        if (state.hasMoreSessions) {
+            item(key = "drawer-more-sessions") {
+                TextButton(onClick = actions.onLoadMoreSessions,
+                    modifier = Modifier.fillMaxWidth().testTag("chat.sessions.loadMore")) {
+                    Text(stringResource(R.string.chat_load_more_sessions))
+                }
+            }
+        }
+
         if (destinations.isNotEmpty()) {
             item(key = "drawer-navigation-divider") {
                 HorizontalDivider(Modifier.padding(top = 8.dp))

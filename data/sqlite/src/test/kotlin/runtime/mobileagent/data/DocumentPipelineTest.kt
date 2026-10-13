@@ -399,7 +399,7 @@ class DocumentPipelineTest {
         database().use { db ->
             val out=java.io.ByteArrayOutputStream()
             java.util.zip.ZipOutputStream(out).use { zip ->
-                mapOf("word/document.xml" to "<w:document><w:body><w:p><w:r><w:t>retained native context</w:t></w:r></w:p></w:body></w:document>".toByteArray(),
+                mapOf("word/document.xml" to "<w:document xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\"><w:body><w:p><w:r><w:t>retained native context</w:t></w:r></w:p></w:body></w:document>".toByteArray(),
                     "word/media/figure.png" to byteArrayOf(1,2,3)).forEach { (name,bytes) ->
                     zip.putNextEntry(java.util.zip.ZipEntry(name));zip.write(bytes);zip.closeEntry()
                 }

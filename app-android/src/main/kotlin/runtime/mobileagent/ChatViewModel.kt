@@ -145,6 +145,7 @@ class ChatViewModel internal constructor(
     application: Application,
     private val savedStateHandle: SavedStateHandle,
     private val execution: ChatRunExecution,
+    private val storageDispatcher: CoroutineDispatcher = Dispatchers.IO,
 ) : AndroidViewModel(application) {
     constructor(application: Application, savedStateHandle: SavedStateHandle) :
         this(application, savedStateHandle, ChatRunExecution())
@@ -167,8 +168,45 @@ class ChatViewModel internal constructor(
     private var selectedImage: Pair<String, ByteArray>? = null
     private val imageDraft = ChatImageDraft(state)
     private val sessionPreviews = mutableMapOf<String, Pair<ChatRequestPreviewUi, List<ChatPromptLayerUi>>>()
-    private fun draftKey(sessionId: String? = state.value.selectedSessionId) = "chat.draft.${sessionId ?: "new:${state.value.selectedAgentId}"}"
-    private fun saveDraft() { savedStateHandle[draftKey()] = state.value.input }
+    private var readGeneration = 0L
+    private var inputRevision = 0L
+    private var readJob: Job? = null
+    private var earlierJob: Job? = null
+    private var sessionPageJob: Job? = null
+    private var creationJob: Job? = null
+    private var activeSessionCursor: runtime.mobileagent.data.ConversationCursor? = null
+    private var archivedSessionCursor: runtime.mobileagent.data.ConversationCursor? = null
+    private var messageCursor: String? = null
+    private val draftCache = object : java.util.LinkedHashMap<runtime.mobileagent.data.ChatDraftOwner, String>(8, .75f, true) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<runtime.mobileagent.data.ChatDraftOwner, String>?) = size > 4
+    }
+    private fun draftOwner() = chatDraftOwner(state.value.selectedSessionId, state.value.selectedAgentId)
+    private fun draftFailure(owner: runtime.mobileagent.data.ChatDraftOwner, failure: Exception) {
+        viewModelScope.launch { if (draftOwner() == owner) fail(failure) }
+    }
+    private fun saveDraft() {
+        val owner = draftOwner()
+        val body = state.value.input
+        draftCache[owner] = body
+        container.chatDraftPersistence.stage(owner, body) { draftFailure(owner, it) }
+    }
+    private fun peekDraft(sessionId: String?, agentId: String?) = draftCache[chatDraftOwner(sessionId, agentId)]
+        ?: savedStateHandle.get<String>("chat.draft.${sessionId ?: "new:$agentId"}").orEmpty()
+    private fun invalidateRead() {
+        readGeneration++
+        readJob?.cancel()
+        earlierJob?.cancel()
+        sessionPageJob?.cancel()
+    }
+    private fun legacyDrafts(): List<Triple<String, runtime.mobileagent.data.ChatDraftOwner, String>> =
+        savedStateHandle.keys().filter { it.startsWith("chat.draft.") }.mapNotNull { key ->
+            val suffix = key.removePrefix("chat.draft.")
+            val owner = runCatching {
+                if (suffix.startsWith("new:")) chatDraftOwner(null, suffix.removePrefix("new:").takeUnless { it == "null" })
+                else chatDraftOwner(suffix, null)
+            }.getOrNull() ?: return@mapNotNull null
+            Triple(key, owner, savedStateHandle.get<String>(key).orEmpty())
+        }
     private fun blockedSessionChange(): Boolean {
         if (!state.value.streaming) return false
         state.value = state.value.copy(status = "当前会话仍在运行。请等待完成或明确取消后，再切换或新建会话；草稿已保留。")
@@ -193,103 +231,117 @@ class ChatViewModel internal constructor(
 
     init { reload() }
 
-    fun reload() {
-        val inspectorEnabled = requestInspectorEnabled()
-        // A settings refresh can happen after a preview was prepared.  Clear the
-        // in-memory payload before any caller can project the refreshed state;
-        // the availability enum is the second, explicit fail-closed guard in
-        // the inspector UI.
-        if (!inspectorEnabled) {
+    fun reload() = reloadChat(preserveTerminalStatus = false)
+
+    private fun reloadChat(preserveTerminalStatus: Boolean) {
+        val inspector = requestInspectorEnabled()
+        if (!inspector) {
             sessionPreviews.clear()
-            state.value = state.value.copy(
-                requestPreview = null,
-                requestInspectorAvailability = ChatRequestInspectorAvailability.DISABLED,
-            )
+            state.value = state.value.copy(requestPreview = null,
+                requestInspectorAvailability = ChatRequestInspectorAvailability.DISABLED)
         }
         if (state.value.streaming) return
-        try {
-            val invalidatedApprovalRuns = closeOrphanedToolApprovals()
-            val conversations = container.conversations.list()
-            val agents = container.agents.list()
-            val selected = state.value.selectedSessionId?.takeIf { id -> conversations.any { it.id == id } }
-                ?: savedStateHandle.get<String>(SELECTED_SESSION_KEY)?.takeIf { id -> conversations.any { it.id == id } }
-                ?: container.uiPreferences.getString("selected-conversation", null)?.takeIf { id -> conversations.any { it.id == id } }
-            val snapshotAgentIds = container.agents.snapshotAgentIds(conversations.map { it.snapshotId })
-            val conversationAgentIds = conversations.associate { conversation ->
-                conversation.id to snapshotAgentIds[conversation.snapshotId]
+        invalidateRead()
+        val generation = readGeneration
+        val edit = inputRevision
+        val previous = state.value
+        val savedSession = savedStateHandle.get<String>(SELECTED_SESSION_KEY)
+        val savedAgent = savedStateHandle.get<String>(SELECTED_AGENT_KEY)
+        val inspectorOpen = savedStateHandle.get<Boolean>(INSPECTOR_KEY) ?: false
+        val sourceCitations = LinkedHashMap(citations)
+        val legacy = legacyDrafts()
+        state.value = state.value.copy(loading = true, loadingEarlierMessages = false)
+        readJob = viewModelScope.launch {
+            try {
+                withContext(NonCancellable + storageDispatcher) {
+                    legacy.forEach { (_, owner, body) -> container.chatDrafts.migrateLegacy(owner, body) }
+                    withContext(Dispatchers.Main) { legacy.forEach { (key, _, _) -> savedStateHandle.remove<String>(key) } }
+                }
+                val (result, invalidated) = withContext(storageDispatcher) {
+                    val closed = closeOrphanedToolApprovals()
+                    readChatHistory(container, previous, savedSession, savedAgent, inspectorOpen,
+                        sourceCitations, ::messageUi, ::restoreCitations, ::citationUis, ::compactionUi,
+                        ::projectWorkspaceAccess, ::hasPersistedRequestPreviewHint) to closed
+                }
+                if (generation != readGeneration || state.value.streaming) return@launch
+                citations.clear()
+                citations.putAll(result.citations)
+                activeSessionCursor = result.activeCursor
+                archivedSessionCursor = result.archivedCursor
+                messageCursor = result.messageCursor
+                val statusChanged = preserveTerminalStatus || state.value.status != previous.status
+                state.value = result.state.copy(input = if (edit == inputRevision) result.state.input else state.value.input,
+                    status = if (statusChanged) state.value.status else result.state.status,
+                    statusKind = if (statusChanged) state.value.statusKind else result.state.statusKind)
+                draftCache[draftOwner()] = state.value.input
+                imageDraft.sync()
+                if (invalidated > 0 && !preserveTerminalStatus) state.value = state.value.copy(
+                    status = "待审批请求已因进程重启失效，未执行工具；不会自动批准或重放。", statusKind = "")
+                else if (!preserveTerminalStatus && result.state.selectedSessionId != null && withContext(storageDispatcher) {
+                    container.db.query("SELECT run_id FROM runs WHERE conversation_id=? AND state='UNKNOWN_OUTCOME' LIMIT 1",
+                        listOf(result.state.selectedSessionId)).isNotEmpty()
+                }) {
+                    if (generation == readGeneration && !statusChanged && state.value.status == previous.status) state.value = state.value.copy(status = "存在结果未知的运行，可能已产生费用或外部操作。不会自动重放。")
+                }
+            } catch (cancelled: CancellationException) { throw cancelled }
+            catch (failure: Exception) {
+                if (generation == readGeneration) { state.value = state.value.copy(loading = false); fail(failure) }
             }
-            val agentId = selected?.let(conversationAgentIds::get)
-                ?: state.value.selectedAgentId
-                ?: savedStateHandle.get<String>(SELECTED_AGENT_KEY)
-                ?: container.uiPreferences.getString("selected-agent", null)
-                ?: agents.firstOrNull()?.id
-            val messages = selected?.let(container.conversations::messages).orEmpty()
-            citations.clear()
-            messages.forEach { restoreCitations(it.metadataJson) }
-            val agentNames = agents.associateBy { it.id }
-            val threadPort = (container as? ThreadWorkspacePortProvider)?.threadWorkspacePort
-            val workspaceLabels = chatSessionWorkspaceLabels(
-                conversations.map { it.id },
-                bindingWorkspaceId = { threadPort?.conversationWorkspaceBinding(it)?.workspaceId },
-                title = { container.runtimeIntegration.workspaceUiPresentation(it)?.title },
-            )
-            val workspaceAccess = projectWorkspaceAccess(
-                conversationId = selected,
-                agentId = agentId,
-                agentLabel = agentId?.let { agentNames[it]?.name },
-            )
-            state.value = state.value.copy(
-                sessions = conversations.filterNot { it.archived }.map { c ->
-                    val snapshotAgentId = conversationAgentIds[c.id]
-                    val workspaceLabel = workspaceLabels.getValue(c.id)
-                    ChatSessionUi(
-                        id = c.id,
-                        title = c.title,
-                        timeLabel = c.updatedAt.take(16),
-                        agentName = snapshotAgentId?.let { agentNames[it]?.name } ?: "配置快照 " + c.snapshotId.take(8),
-                        agentId = snapshotAgentId,
-                        workspaceLabel = workspaceLabel,
-                    )
-                },
-                archivedSessions = conversations.filter { it.archived }.map { c ->
-                    ChatSessionUi(id = c.id, title = c.title, timeLabel = c.updatedAt.take(16),
-                        agentId = conversationAgentIds[c.id], agentName = conversationAgentIds[c.id]?.let { agentNames[it]?.name }.orEmpty())
-                },
-                selectedSessionArchived = conversations.firstOrNull { it.id == selected }?.archived == true,
-                selectedSessionId = selected,
-                input = savedStateHandle.get<String>("chat.draft.${selected ?: "new:$agentId"}") ?: state.value.input,
-                agents = agents.map { ChatAgentOptionUi(it.id, it.name) }, selectedAgentId = agentId,
-                messages = messages.mapIndexed { index, message ->
-                    messageUi(message).let { ui ->
-                        if (index == messages.lastIndex && message.role == MessageRole.USER)
-                            ui.copy(eventSummary = "消息已在本机保存；尚无本轮完成确认，送达与处理结果未确认，不会自动重发。")
-                        else ui
-                    }
-                }, citations = citationUis(),
-                compactions = selected?.let { container.contextCompactions.list(it).map(::compactionUi) }.orEmpty(),
-                requestPreview = state.value.requestPreview?.takeIf { inspectorEnabled },
-                requestInspectorAvailability = resolveRequestInspectorAvailability(
-                    inspectorEnabled = inspectorEnabled,
-                    previewAvailable = inspectorEnabled && state.value.requestPreview != null,
-                    persistedPreviewHint = hasPersistedRequestPreviewHint(selected),
-                ),
-                inspectorOpen = savedStateHandle.get<Boolean>(INSPECTOR_KEY) ?: false, error = null,
-                workspaceAccess = workspaceAccess,
-            )
-            imageDraft.sync()
-            if (invalidatedApprovalRuns > 0) {
-                state.value = state.value.copy(
-                    status = "待审批请求已因进程重启失效，未执行工具；不会自动批准或重放。",
-                    statusKind = "",
-                )
-            } else if (selected != null && container.runs.list(selected).any { it.state == RunStatus.UNKNOWN_OUTCOME }) {
-                state.value = state.value.copy(status = "存在结果未知的运行，可能已产生费用或外部操作。不会自动重放。")
-            }
-        } catch (failure: Exception) { fail(failure) }
+        }
+    }
+
+    fun loadMoreSessions(archived: Boolean = false) {
+        val cursor = (if (archived) archivedSessionCursor else activeSessionCursor) ?: return
+        if (sessionPageJob?.isActive == true) return
+        val generation = readGeneration
+        val names = state.value.agents.associate { it.id to it.label }
+        sessionPageJob = viewModelScope.launch {
+            try {
+                val (rows, next) = withContext(storageDispatcher) { container.readChatSessionPage(archived, cursor, names) }
+                if (generation != readGeneration) return@launch
+                if (archived) {
+                    archivedSessionCursor = next
+                    state.value = state.value.copy(archivedSessions = (state.value.archivedSessions + rows).distinctBy { it.id },
+                        hasMoreArchivedSessions = next != null)
+                } else {
+                    activeSessionCursor = next
+                    state.value = state.value.copy(sessions = (state.value.sessions + rows).distinctBy { it.id }, hasMoreSessions = next != null)
+                }
+            } catch (cancelled: CancellationException) { throw cancelled }
+            catch (failure: Exception) { if (generation == readGeneration) fail(failure) }
+        }
+    }
+
+    fun loadEarlierMessages() {
+        val conversation = state.value.selectedSessionId ?: return
+        val cursor = messageCursor ?: return
+        if (earlierJob?.isActive == true) return
+        val generation = readGeneration
+        state.value = state.value.copy(loadingEarlierMessages = true)
+        earlierJob = viewModelScope.launch {
+            try {
+                val (page, source, references) = withContext(storageDispatcher) {
+                    val page = container.conversations.messagePage(conversation, cursor)
+                    val source = linkedMapOf<String, Pair<Citation, String>>()
+                    page.messages.forEach { restoreCitations(it.metadataJson, source) }
+                    Triple(page, source, citationUis(source))
+                }
+                if (generation != readGeneration || state.value.selectedSessionId != conversation) return@launch
+                citations.putAll(source)
+                val existing = state.value.messages.map { it.id }.toSet()
+                messageCursor = page.nextBeforeMessageId
+                state.value = state.value.copy(messages = page.messages.filterNot { it.id in existing }.map(::messageUi) + state.value.messages,
+                    citations = (state.value.citations + references).distinctBy { it.id },
+                    hasMoreMessages = page.nextBeforeMessageId != null, loadingEarlierMessages = false)
+            } catch (cancelled: CancellationException) { throw cancelled }
+            catch (failure: Exception) { if (generation == readGeneration) { state.value = state.value.copy(loadingEarlierMessages = false); fail(failure) } }
+        }
     }
 
     fun selectAgent(id: String) {
         if (blockedSessionChange()) return
+        invalidateRead()
+        inputRevision++
         detachRunPage()
         saveDraft()
         state.value.selectedSessionId?.let { previous ->
@@ -298,12 +350,14 @@ class ChatViewModel internal constructor(
         container.uiPreferences.edit().putString("selected-agent", id).remove("selected-conversation").apply()
         savedStateHandle[SELECTED_AGENT_KEY] = id
         savedStateHandle.remove<String>(SELECTED_SESSION_KEY)
-        state.value = state.value.copy(selectedAgentId = id, selectedSessionId = null, input = savedStateHandle.get<String>("chat.draft.new:$id").orEmpty(), messages = emptyList(), citations = emptyList(),
+        state.value = state.value.copy(selectedAgentId = id, selectedSessionId = null, input = peekDraft(null, id), messages = emptyList(), citations = emptyList(),
             requestPreview = null,
             requestInspectorAvailability = resolveRequestInspectorAvailability(
                 inspectorEnabled = requestInspectorEnabled(), previewAvailable = false, persistedPreviewHint = false,
             ),
-            status = "新会话将冻结所选 Agent 的当前配置。")
+            status = "新会话将冻结所选 Agent 的当前配置。", loading = false)
+        citations.clear()
+        reload()
     }
 
     /** Create a conversation using the canonical Agent default, if one is valid. */
@@ -322,48 +376,35 @@ class ChatViewModel internal constructor(
         if (blockedSessionChange()) return null
         return try {
             val id = state.value.selectedAgentId ?: error("请先创建并选择 Agent。")
-            val agent = container.agents.get(id) ?: error("Agent 已不存在。")
-            val workspacePort = (container as? ThreadWorkspacePortProvider)?.threadWorkspacePort
-            val runtimePort = (container as? ThreadWorkspaceRuntimePortProvider)?.threadWorkspaceRuntimePort
-            val chosenWorkspaceId = if (useAgentDefault) {
-                workspacePort
-                    ?.takeIf { it.available }
-                    ?.resolveNewThreadWorkspace(id)
-            } else {
-                requestedWorkspaceId
-            }
-            require(chosenWorkspaceId == null || runtimePort?.available == true) {
-                runtimePort?.unavailableMessage ?: "线程工作区运行时未就绪。"
-            }
-            require(chosenWorkspaceId == null || workspacePort?.available == true) {
-                workspacePort?.unavailableMessage ?: "线程工作区绑定存储未就绪。"
-            }
-            // A missing integration may create a safe no-workspace snapshot during staged
-            // upgrades.  It must not call createSnapshotWithCurrentGrants(), whose old behavior
-            // copied every workspace grant into the new conversation.
-            val snapshot = runtimePort
-                ?.takeIf { it.available }
-                ?.createSnapshotWithWorkspace(id, chosenWorkspaceId)
-                ?: container.agents.createSnapshot(id)
-            require(snapshot.agentId == id) { "Runtime grant binding returned a snapshot for a different agent." }
-            require(snapshot.id.isNotBlank()) { "Runtime grant binding returned an invalid snapshot." }
-            captureMcpSnapshot(container, snapshot.id, id)
-            val conversation = container.conversations.create(snapshot.id, agent.name + " · " + LocalDate.now())
-            if (chosenWorkspaceId != null) {
-                val port = workspacePort ?: error("线程工作区绑定存储未就绪。")
-                require(port.available) { port.unavailableMessage }
-                val binding = ConversationWorkspaceBinding(
-                    sessionId = conversation.id,
-                    workspaceId = chosenWorkspaceId,
-                    boundAt = Utc.nowIso(),
-                    revision = 1L,
-                )
-                val persisted = port.bindConversationWorkspace(binding)
-                require(persisted == binding) { "会话工作区绑定保存返回了不一致的绑定。" }
-            }
-            selectSession(conversation.id)
+            val conversation = container.createChatConversation(id, requestedWorkspaceId, useAgentDefault)
+            selectCommittedSession(conversation.id, id)
             conversation.id
         } catch (failure: Exception) { fail(failure); null }
+    }
+
+    /** UI entry point; the synchronous overloads remain compatible with explicit test/host callers. */
+    fun newSessionAsync(workspaceId: String? = null, useAgentDefault: Boolean = true) {
+        if (blockedSessionChange() || creationJob?.isActive == true) return
+        saveDraft()
+        invalidateRead()
+        val generation = readGeneration
+        val agent = state.value.selectedAgentId
+        val owner = draftOwner()
+        state.value = state.value.copy(loading = true)
+        creationJob = viewModelScope.launch {
+            try {
+                val created = withContext(storageDispatcher) {
+                    container.chatDraftPersistence.flush(owner)
+                    container.createChatConversation(agent ?: error("请先创建并选择 Agent。"), workspaceId, useAgentDefault)
+                }
+                if (generation == readGeneration && !state.value.streaming) selectCommittedSession(created.id, agent)
+            } catch (cancelled: CancellationException) { throw cancelled }
+            catch (failure: Exception) { if (generation == readGeneration) fail(failure) }
+            finally {
+                if (generation == readGeneration) state.value = state.value.copy(loading = false)
+                creationJob = null
+            }
+        }
     }
 
     fun sessionAction(id: String, action: runtime.mobileagent.feature.chat.SessionAction) {
@@ -390,17 +431,26 @@ class ChatViewModel internal constructor(
 
     fun selectSession(id: String) {
         if (blockedSessionChange()) return
+        selectCommittedSession(id)
+    }
+
+    private fun selectCommittedSession(id: String, knownAgentId: String? = null) {
+        invalidateRead()
+        inputRevision++
         detachRunPage()
         saveDraft()
         state.value.selectedSessionId?.let { previous ->
             state.value.requestPreview?.let { sessionPreviews[previous] = it to state.value.promptLayers }
         }
         val cached = sessionPreviews[id].takeIf { requestInspectorEnabled() }
+        val agent = knownAgentId ?: (state.value.sessions + state.value.archivedSessions).firstOrNull { it.id == id }?.agentId
         container.uiPreferences.edit().putString("selected-conversation", id).apply()
         savedStateHandle[SELECTED_SESSION_KEY] = id
         state.value = state.value.copy(
             selectedSessionId = id,
-            input = savedStateHandle.get<String>(draftKey(id)).orEmpty(),
+            selectedAgentId = agent,
+            input = peekDraft(id, agent),
+            messages = emptyList(), citations = emptyList(), hasMoreMessages = false,
             requestPreview = cached?.first,
             requestInspectorAvailability = resolveRequestInspectorAvailability(
                 inspectorEnabled = requestInspectorEnabled(), previewAvailable = cached != null,
@@ -409,9 +459,11 @@ class ChatViewModel internal constructor(
             promptLayers = cached?.second.orEmpty(),
             status = "会话使用已保存的配置快照。",
         )
+        citations.clear()
+        messageCursor = null
         reload()
     }
-    fun input(value: String) { state.value = state.value.copy(input = value); saveDraft() }
+    fun input(value: String) { inputRevision++; state.value = state.value.copy(input = value); saveDraft() }
     fun degrade(value: Boolean) { if (!state.value.streaming) state.value = state.value.copy(textDegradation = value) }
     fun inspector(open: Boolean) {
         val inspectorEnabled = requestInspectorEnabled()
@@ -456,7 +508,7 @@ class ChatViewModel internal constructor(
 
     /** Backend seam for a foreground image picker; no UI/URI handling is required here. */
     fun sendWithImages(uploads: List<ChatImageUpload>) {
-        if (state.value.selectedSessionId?.let(container.conversations::get)?.archived == true) {
+        if (state.value.selectedSessionArchived) {
             state.value = state.value.copy(status = "已归档的对话为只读，请先恢复后继续。")
             return
         }
@@ -471,30 +523,54 @@ class ChatViewModel internal constructor(
             state.value = state.value.copy(status = "上一运行仍在收尾，请稍后发送；输入已保留。")
             return
         }
-        // Creating the session detaches the page and clears the draft; keep the thumbnails first.
         val pendingImages = imageDraft.pending()
-        val conversationId = state.value.selectedSessionId ?: newSession() ?: return
-        imageDraft.adopt(conversationId, inputImages, pendingImages)
+        val selectedConversation = state.value.selectedSessionId
+        val selectedAgent = state.value.selectedAgentId
+        saveDraft()
+        invalidateRead()
+        val generation = readGeneration
         runJob = null
-        val owner = runOwnership.begin(conversationId)
-        val resources = RunResources(owner)
-        activeRunResources = resources
-        publishRunState(owner, state.value.copy(input = "", streaming = true, status = "正在准备会话…", statusKind = ""))
-        saveRunDraft(owner)
+        state.value = state.value.copy(streaming = true, loading = false, status = "正在准备会话…", statusKind = "")
         preflightJob = viewModelScope.launch {
+            var resources: RunResources? = null
             try {
-                sendAfterInput(text, owner, resources, inputImages)
-            } catch (cancel: CancellationException) {
-                publishRunState(owner, state.value.copy(streaming = false))
-                throw cancel
+                val conversationId = selectedConversation ?: withContext(storageDispatcher) {
+                    container.createChatConversation(selectedAgent ?: error("请先创建并选择 Agent。")).id
+                }
+                if (generation != readGeneration || state.value.selectedSessionId != selectedConversation || state.value.selectedAgentId != selectedAgent) return@launch
+                if (selectedConversation == null) selectCommittedSession(conversationId, selectedAgent)
+                imageDraft.adopt(conversationId, inputImages, pendingImages)
+                val owner = runOwnership.begin(conversationId)
+                val admitted = RunResources(owner)
+                resources = admitted
+                activeRunResources = admitted
+                container.chatDraftPersistence.stage(chatDraftOwner(conversationId, selectedAgent), text) {
+                    draftFailure(chatDraftOwner(conversationId, selectedAgent), it)
+                }
+                publishRunState(owner, state.value.copy(input = "", streaming = true, loading = false))
+                sendAfterInput(text, owner, admitted, inputImages)
+            } catch (cancelled: CancellationException) {
+                resources?.let { publishRunState(it.owner, state.value.copy(streaming = false)) }
+                throw cancelled
             } catch (failure: Exception) {
-                failRun(owner, failure)
-                publishRunState(owner, state.value.copy(streaming = false))
+                val admitted = resources
+                if (admitted != null) {
+                    failRun(admitted.owner, failure)
+                    publishRunState(admitted.owner, state.value.copy(streaming = false, input = text))
+                    saveRunDraft(admitted.owner)
+                } else if (generation == readGeneration) {
+                    state.value = state.value.copy(streaming = false)
+                    fail(failure)
+                }
             } finally {
                 if (preflightJob === currentCoroutineContext()[Job]) preflightJob = null
-                if (resources.job == null) {
-                    runOwnership.finish(owner)
-                    if (activeRunResources === resources) activeRunResources = null
+                val admitted = resources
+                if (admitted?.job == null) {
+                    admitted?.let {
+                        runOwnership.finish(it.owner)
+                        if (activeRunResources === it) activeRunResources = null
+                    }
+                    if (admitted == null && generation == readGeneration) state.value = state.value.copy(streaming = false)
                 }
             }
         }
@@ -515,6 +591,7 @@ class ChatViewModel internal constructor(
             publishRunState(owner, state.value.copy(
                 messages = state.value.messages + messageUi(message), input = "",
             ))
+            saveRunDraft(owner)
         }) {
             is ChatPreflightResult.Unknown -> {
                 if (canProjectRun(owner)) unknownRetry.value = result.runId
@@ -1027,6 +1104,8 @@ class ChatViewModel internal constructor(
                 val history = withContext(Dispatchers.IO) {
                     container.conversations.messages(conversationId).filterNot { it.id == userMessage.id }
                 }
+                // Runtime citations come from the full durable history, never the paged UI cache.
+                history.forEach { restoreCitations(it.metadataJson, runCitations) }
                 val contextHistory = withContext(Dispatchers.IO) { boundedHistory(history,
                     if (contextPolicy.autoCompact) Int.MAX_VALUE else contextPolicy.maxHistoryMessages, kbIds.toSet(), runCitations,
                     allowOriginals = model.acceptsImages() && !degrade,
@@ -1909,7 +1988,7 @@ class ChatViewModel internal constructor(
                     container.runCoordinator.release(run.runId, runOwnerKey)
                     publishRunState(owner, state.value.copy(streaming = false, pendingTool = null))
                     if (foregroundStarted) runCatching { ChatRunForegroundService.stop(getApplication(), owner.runId) }
-                    if (canProjectRun(owner)) reload()
+                    if (canProjectRun(owner)) reloadChat(preserveTerminalStatus = record.state in setOf(RunStatus.UNKNOWN_OUTCOME, RunStatus.CANCELLED))
                     if (canProjectRun(owner)) {
                         val interruptionStatus = when (record.state) {
                             RunStatus.UNKNOWN_OUTCOME -> "已取消接收，部分响应保留；外部结果未知，可能已产生费用或操作，继续前需要再次确认。"
@@ -1968,7 +2047,12 @@ class ChatViewModel internal constructor(
         }
     }
     fun cancel() {
-        val resources = activeRunResources ?: return
+        val resources = activeRunResources
+        if (resources == null) {
+            preflightJob?.cancel()
+            state.value = state.value.copy(streaming = false, loading = false)
+            return
+        }
         val callId = resources.approvalCallId
         val deferred = resources.approval
         val executor = resources.executor
@@ -2064,57 +2148,11 @@ class ChatViewModel internal constructor(
     }
 
     private suspend fun refreshMessages(owner: ChatRunOwner) {
-        val messages = withContext(Dispatchers.IO) { container.conversations.messages(owner.conversationId) }
-        publishRunState(owner, state.value.copy(messages = messages.map(::messageUi)))
+        val messages = withContext(storageDispatcher) { container.conversations.messagePage(owner.conversationId).messages }
+        val ids = messages.map { it.id }.toSet()
+        publishRunState(owner, state.value.copy(messages = state.value.messages.filterNot { it.id in ids } + messages.map(::messageUi)))
     }
-    private fun messageUi(message: Message): ChatMessageUi {
-        val reasoningParts = message.parts.filterIsInstance<ReasoningPart>()
-        val errorPart = message.parts.filterIsInstance<ErrorPart>().lastOrNull()
-        val diffPart = message.parts.filterIsInstance<DiffPart>().lastOrNull()
-        val toolResultPart = message.parts.filterIsInstance<ToolResultPart>().lastOrNull()
-        val toolFailureSummary = toolResultPart
-            ?.takeIf { it.status != "SUCCEEDED" }
-            ?.let { toolResultUserMessage(it.resultJson) }
-        // Reload-visible partial-coverage note, persisted in the assistant
-        // message metadata next to the citations.
-        val coverageNotice = message.takeIf { it.role == MessageRole.ASSISTANT }
-            ?.let { coverageNoticeOf(it.metadataJson) }
-        val metadata = runCatching { Json.parseToJsonElement(message.metadataJson).jsonObject }.getOrNull()
-        val visualReceipt = (metadata?.get("visualBatchAnalysis") as? JsonPrimitive)?.booleanOrNull == true
-        val toolEvidence = message.role == MessageRole.USER &&
-            (metadata?.get("toolEvidence") as? JsonPrimitive)?.booleanOrNull == true
-        return ChatMessageUi(
-            id = message.id,
-            role = if (visualReceipt || toolEvidence) "tool" else message.role.name.lowercase(),
-            text = message.text,
-            timeLabel = message.createdAt.take(16),
-            attachedImages = ChatImagePolicy.attachedCount(message, visualReceipt, toolEvidence),
-            citationIds = message.parts.filterIsInstance<CitationPart>().map { it.citationId },
-            streaming = message.status == "STREAMING" && state.value.streaming,
-            reasoning = reasoningParts.joinToString("") { it.text },
-            reasoningStreaming = reasoningParts.lastOrNull()?.streaming == true && state.value.streaming,
-            eventSummary = when {
-                visualReceipt -> "已向模型传输并分析 " + message.parts.filterIsInstance<ImagePart>().size + " 张原图"
-                toolEvidence -> "工具附带 " + message.parts.filterIsInstance<ImagePart>().size + " 张原图"
-                errorPart != null -> errorPart.message
-                diffPart != null -> diffPart.summary
-                else -> listOfNotNull(toolFailureSummary, coverageNotice,
-                    if (message.role == MessageRole.ASSISTANT && message.status != "COMPLETE" &&
-                        (message.status != "STREAMING" || !state.value.streaming))
-                        "本轮未完成（${message.status}）；已保留输出，不会自动重发。" else null,
-                    toolResultPart?.resultJson?.let(::toolVisualEvidenceSummary),
-                ).joinToString(" ")
-            },
-        )
-    }
-
-    private fun coverageNoticeOf(metadataJson: String): String? {
-        val root = runCatching { Json.parseToJsonElement(metadataJson).jsonObject }.getOrNull() ?: return null
-        val coverage = root["retrievalCoverage"]?.jsonObject ?: return null
-        if (coverage["partial"]?.jsonPrimitive?.booleanOrNull != true) return null
-        return coverage["noticeUi"]?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() }
-            ?: "本次检索有知识库未参与；不要声称已检索这些未参与的来源。"
-    }
+    private fun messageUi(message: Message) = projectChatMessage(message, state.value.streaming)
 
     /**
      * Terminalize every durable invocation still waiting for approval.  Approval callbacks are
@@ -2191,7 +2229,8 @@ class ChatViewModel internal constructor(
      */
     private fun closeOrphanedToolApprovals(): Int {
         var invalidated = 0
-        container.runs.list().filter { it.state == RunStatus.WAITING_TOOL_APPROVAL }.forEach { candidate ->
+        container.db.query("SELECT run_id FROM runs WHERE state='WAITING_TOOL_APPROVAL'")
+            .mapNotNull { container.runs.get(it.string("run_id")) }.forEach { candidate ->
             val closed = synchronized(PENDING_APPROVAL_LOCK) {
                 val persisted = container.runs.get(candidate.runId) ?: return@synchronized false
                 if (persisted.state != RunStatus.WAITING_TOOL_APPROVAL) return@synchronized false
@@ -2378,104 +2417,11 @@ class ChatViewModel internal constructor(
             chunkId = value.first.chunkId,
             assetId = value.first.assetId)
     }
-    private fun citationMetadata(bound: List<Citation>, warning: String?, coverage: RetrievalCoverage? = null, source: Map<String, Pair<Citation, String>> = citations): String = buildJsonObject {
-        warning?.let { put("visualWarning", it) }
-        // Durable retrieval-scope fact: no query text, only ids and reason
-        // codes, so reload and diagnostics can show partial coverage safely.
-        coverage?.let {
-            putJsonObject("retrievalCoverage") {
-                putJsonArray("requested") { it.requested.forEach { id -> add(id) } }
-                putJsonArray("searched") { it.searched.forEach { id -> add(id) } }
-                putJsonArray("unavailable") { it.unavailable.forEach { source -> add(buildJsonObject {
-                    put("kb", source.knowledgeBaseId); put("reason", source.reason.name)
-                }) } }
-                put("partial", it.partial)
-                it.notice()?.let { notice ->
-                    put("notice", notice)
-                    put("noticeUi", notice)
-                }
-            }
-        }
-        putJsonArray("citations") { bound.forEach { c -> add(buildJsonObject {
-            put("id", c.citationId); put("runId", c.runId); put("kb", c.knowledgeBaseId); put("document", c.documentId)
-            put("chunk", c.chunkId); put("version", c.documentVersionId); c.assetId?.let { put("asset", it) }
-            c.page?.let { put("page", it) }; c.sourceSpan?.let { put("span", it) }; put("excerpt", source[c.citationId]?.second.orEmpty())
-        }) } }
-    }.toString()
-    private fun restoreCitations(raw: String) {
-        val root = runCatching { Json.parseToJsonElement(raw).jsonObject }.getOrNull() ?: return
-        root["citations"]?.jsonArray?.forEach { element ->
-            val c = element.jsonObject
-            fun value(key: String) = c[key]?.jsonPrimitive?.contentOrNull.orEmpty()
-            val citation = Citation(value("id"), value("runId"), value("kb"), value("document"), value("chunk"),
-                value("asset").ifBlank { null }, c["page"]?.jsonPrimitive?.intOrNull, value("version"), value("span").ifBlank { null })
-            citations[citation.citationId] = citation to value("excerpt")
-        }
-    }
-    private data class ChatHistory(val messages: List<ChatMessage>, val sources: List<ContextSource>)
+    private fun citationMetadata(bound: List<Citation>, warning: String?, coverage: RetrievalCoverage? = null, source: Map<String, Pair<Citation, String>> = citations) = chatCitationMetadata(bound, warning, coverage, source)
+    private fun restoreCitations(raw: String, target: MutableMap<String, Pair<Citation, String>> = citations) = restoreChatCitations(raw, target)
 
-    private fun boundedHistory(messages: List<Message>, max: Int, allowedKbs: Set<String>, source: Map<String, Pair<Citation, String>> = citations, replayReasoning: Boolean = false, allowOriginals: Boolean = true): ChatHistory {
-        val groups = mutableListOf<MutableList<Message>>()
-        orderedToolEvidenceHistory(messages).forEach { message ->
-            val toolEvidence = runCatching { Json.parseToJsonElement(message.metadataJson).jsonObject["toolEvidence"]?.jsonPrimitive?.booleanOrNull }.getOrNull() == true
-            if ((message.role == MessageRole.USER && !toolEvidence) || groups.isEmpty()) groups.add(mutableListOf())
-            groups.last().add(message)
-        }
-        val selected = mutableListOf<Message>()
-        val turnIds = mutableMapOf<String, String>()
-        for (group in groups.asReversed()) {
-            val pending = linkedSetOf<String>()
-            var valid = true
-            var completeEnd = 0
-            for ((index, message) in group.withIndex()) {
-                if (message.status != "COMPLETE" && !canIncludePartialAssistant(
-                        message.role.name.lowercase(), message.status, message.text,
-                        message.parts.any { it is ToolCallPart || it is ToolResultPart ||
-                            (it is ErrorPart && it.code !in setOf(MessageErrorCode.UNKNOWN_OUTCOME, MessageErrorCode.CANCELLED)) },
-                    )) break
-                message.parts.filterIsInstance<ToolCallPart>().forEach { if (!pending.add(it.callId)) valid = false }
-                message.parts.filterIsInstance<ToolResultPart>().forEach { if (!pending.remove(it.callId)) valid = false }
-                if (!valid) break
-                if (pending.isEmpty()) completeEnd = index + 1
-            }
-            // A later cancelled/error response must not erase complete exchanges already
-            // summarized earlier in this same run. Exclude only the incomplete suffix.
-            val complete = group.take(completeEnd)
-            if (complete.isEmpty()) continue
-            if (selected.size + complete.size > max) break
-            selected.addAll(0, complete)
-            complete.forEach { turnIds[it.id] = group.first().id }
-        }
-        val analyzedHashes = selected.flatMap { message ->
-            val metadata = runCatching { Json.parseToJsonElement(message.metadataJson).jsonObject }.getOrNull()
-            if ((metadata?.get("visualBatchAnalysis") as? JsonPrimitive)?.booleanOrNull != true || message.text.isBlank()) emptyList()
-            else (metadata["sourceHashes"] as? JsonObject).orEmpty().map { (asset, hash) -> asset to hash.jsonPrimitive.content }
-        }.toMap()
-        val projected = selected.map { message ->
-            val assets = message.parts.filterIsInstance<ImagePart>()
-            val images = if (assets.isEmpty()) emptyList() else {
-                val uploads = assets.filter { it.assetId.startsWith(ChatImageUpload.ASSET_PREFIX) }
-                val knowledgeAssets = assets - uploads.toSet()
-                val uploadedReferences = container.conversationImages.referencesForHistory(
-                    message.conversationId, uploads, analyzedHashes, allowOriginals,
-                )
-                require(knowledgeAssets.all { asset -> source.values.any { (citation, _) -> citation.assetId == asset.assetId &&
-                    citation.knowledgeBaseId in allowedKbs && !container.knowledge.locateCitation(citation).removed } }) { "历史图片来源已撤销；请开启新会话。" }
-                val knowledgeImages = if (!allowOriginals) emptyList() else when (val plan = visualReferencePlan(knowledgeAssets.map { it.assetId })) {
-                    is VisualReferencePlan.Incomplete -> error(plan.reason)
-                    is VisualReferencePlan.Complete -> plan.images.filter { analyzedHashes[it.assetId] != it.sha256 }
-                        .map { InlineImage(it.mediaType, "", it.assetId, it.byteLength, it.sha256) }
-                }
-                uploadedReferences + knowledgeImages
-            }
-            val historyText = if (assets.isNotEmpty() && !allowOriginals) message.text +
-                "\n历史原图本轮未发送；不得声称本轮查看了这些原图。" else message.text
-            ChatMessage(message.role.name.lowercase(), historyText, if (allowOriginals) images else emptyList(), message.parts.filterIsInstance<ToolResultPart>().singleOrNull()?.callId,
-                message.parts.filterIsInstance<ToolCallPart>().map { AssistantToolCall(it.callId, it.name, it.argumentsJson) },
-                reasoningContent = replayableReasoning(message, replayReasoning))
-        }
-        return ChatHistory(projected, selected.map { ContextSource(it.id, turnIds.getValue(it.id), complete = it.status == "COMPLETE") })
-    }
+    private fun boundedHistory(messages: List<Message>, max: Int, allowedKbs: Set<String>, source: Map<String, Pair<Citation, String>> = citations, replayReasoning: Boolean = false, allowOriginals: Boolean = true) =
+        projectBoundedHistory(container, ::visualReferencePlan, messages, max, allowedKbs, source, replayReasoning, allowOriginals)
 
     private fun visualReferencePlan(assetIds: List<String>): VisualReferencePlan =
         VisualAttachmentPolicy.references(assetIds) { id ->

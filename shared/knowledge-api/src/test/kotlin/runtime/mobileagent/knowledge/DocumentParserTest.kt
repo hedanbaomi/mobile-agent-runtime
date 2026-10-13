@@ -896,7 +896,7 @@ class DocumentParserTest {
         val png = byteArrayOf(0x89.toByte(), 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A) + ByteArray(8)
         val zip = zip(
             "word/document.xml" to """
-                <w:document><w:body>
+                <w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><w:body>
                 <w:p><w:r><w:t>DOCX torque table 12Nm</w:t></w:r></w:p>
                 <w:p><w:r><w:drawing><a:blip r:embed="rId4"/></w:drawing></w:r></w:p>
                 </w:body></w:document>
@@ -920,7 +920,8 @@ class DocumentParserTest {
         val png = byteArrayOf(0x89.toByte(), 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A) + ByteArray(8)
         val zip = zip(
             "mimetype" to "application/epub+zip".toByteArray(),
-            "META-INF/container.xml" to "<container><rootfiles><rootfile full-path=\"OPS/content.opf\"/></rootfiles></container>".toByteArray(),
+            "META-INF/container.xml" to """<container xmlns="urn:oasis:names:tc:opendocument:xmlns:container" version="1.0"><rootfiles><rootfile full-path="OPS/content.opf" media-type="application/oebps-package+xml"/></rootfiles></container>""".toByteArray(),
+            "OPS/content.opf" to """<package xmlns="http://www.idpf.org/2007/opf" version="3.0"><manifest><item id="c0" href="ch1.xhtml" media-type="application/xhtml+xml"/></manifest><spine><itemref idref="c0"/></spine></package>""".toByteArray(),
             "OPS/ch1.xhtml" to "<html><body><p>EPUB chapter mentions USearch</p><img src=\"images/fig.png\"/></body></html>".toByteArray(),
             "OPS/images/fig.png" to png,
         )
@@ -1206,7 +1207,7 @@ class DocumentParserTest {
     fun docxExternalImageIsRecordedAndNotFetched() {
         val zip = zip(
             "word/document.xml" to """
-                <w:document><w:body>
+                <w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><w:body>
                 <w:p><w:r><w:t>caption text</w:t></w:r></w:p>
                 <w:p><w:r><w:drawing><a:blip r:link="rId9"/></w:drawing></w:r></w:p>
                 </w:body></w:document>
@@ -1227,7 +1228,8 @@ class DocumentParserTest {
     fun epubExternalImageIsRecorded() {
         val zip = zip(
             "mimetype" to "application/epub+zip".toByteArray(),
-            "META-INF/container.xml" to "<container><rootfiles><rootfile full-path=\"OPS/content.opf\"/></rootfiles></container>".toByteArray(),
+            "META-INF/container.xml" to """<container xmlns="urn:oasis:names:tc:opendocument:xmlns:container" version="1.0"><rootfiles><rootfile full-path="OPS/content.opf" media-type="application/oebps-package+xml"/></rootfiles></container>""".toByteArray(),
+            "OPS/content.opf" to """<package xmlns="http://www.idpf.org/2007/opf" version="3.0"><manifest><item id="c0" href="ch1.xhtml" media-type="application/xhtml+xml"/></manifest><spine><itemref idref="c0"/></spine></package>""".toByteArray(),
             "OPS/ch1.xhtml" to "<html><body><p>chapter</p><img src=\"https://example.invalid/fig.png\"/></body></html>".toByteArray(),
         )
         val parsed = OfficeParser.parse("book.epub", zip)
@@ -1241,7 +1243,8 @@ class DocumentParserTest {
         val pngB = byteArrayOf(0x89.toByte(), 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A) + "MARK-B".toByteArray()
         val zip = zip(
             "mimetype" to "application/epub+zip".toByteArray(),
-            "META-INF/container.xml" to "<container><rootfiles><rootfile full-path=\"OPS/content.opf\"/></rootfiles></container>".toByteArray(),
+            "META-INF/container.xml" to """<container xmlns="urn:oasis:names:tc:opendocument:xmlns:container" version="1.0"><rootfiles><rootfile full-path="OPS/content.opf" media-type="application/oebps-package+xml"/></rootfiles></container>""".toByteArray(),
+            "OPS/content.opf" to """<package xmlns="http://www.idpf.org/2007/opf" version="3.0"><manifest><item id="c0" href="ch1/chapter.xhtml" media-type="application/xhtml+xml"/><item id="c1" href="ch2/chapter.xhtml" media-type="application/xhtml+xml"/></manifest><spine><itemref idref="c0"/><itemref idref="c1"/></spine></package>""".toByteArray(),
             "OPS/ch1/chapter.xhtml" to "<html><body><p>one</p><img src=\"images/fig.png\"/></body></html>".toByteArray(),
             "OPS/ch2/chapter.xhtml" to "<html><body><p>two</p><img src=\"images/fig.png\"/></body></html>".toByteArray(),
             "OPS/ch1/images/fig.png" to pngA,

@@ -11,4 +11,6 @@
     <string name="database_recovery_cancel">Cancel</string>
     <string name="database_recovery_exported">Recovery copy saved.</string>
     <string name="database_recovery_failed">Could not complete recovery. Your saved data was kept.</string>
+    <string name="host_initializing">Initializing local data…</string>
+    <string name="host_initialization_failed">Local data could not be initialized. Reopen the app; existing data is retained.</string>
 </resources>

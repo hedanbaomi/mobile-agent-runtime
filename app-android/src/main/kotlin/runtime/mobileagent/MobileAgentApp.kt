@@ -14,6 +14,9 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import runtime.mobileagent.announcements.ClientContext
 import runtime.mobileagent.data.AnnouncementRepository
 import runtime.mobileagent.data.KnowledgeRepository
@@ -62,6 +65,11 @@ class MobileAgentApp : Application() {
         private set
     internal var databaseRecovery: DatabaseRecoveryStore? = null
         private set
+    private val hostScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private val hostLaunchLock = Any()
+    private val initialization = MutableStateFlow(HostInitialization.INITIALIZING)
+    internal val hostInitialization = initialization.asStateFlow()
+    private var hostJob: Job? = null
 
     override fun onCreate() {
         super.onCreate()
@@ -82,17 +90,16 @@ class MobileAgentApp : Application() {
             }
             runCatching { diagnostics.recordProcessStarted() }
         }
-        if (!deferHostInitializationForInstrumentation) ensureHostInitialized()
+        if (!deferHostInitializationForInstrumentation) initializeHostAsync()
     }
 
     /**
-     * Initialize host-only state before the first Activity frame. Instrumentation that exercises
-     * isolated services can defer this work, while a UI smoke still runs the production shell.
+     * Synchronous host/test seam. Production Application/Activity use [initializeHostAsync].
      */
     internal fun ensureHostInitialized() {
-        if (::container.isInitialized || databaseRecovery != null) return
+        if (initialization.value == HostInitialization.READY || databaseRecovery != null) return
         synchronized(this) {
-            if (::container.isInitialized || databaseRecovery != null) return
+            if (initialization.value == HostInitialization.READY || databaseRecovery != null) return
             if (!::database.isInitialized) database = AndroidContextSqlite(this)
             try {
                 Migrations.apply(database)
@@ -100,11 +107,20 @@ class MobileAgentApp : Application() {
                 if (failure.error.code != runtime.mobileagent.domain.ErrorCode.SCHEMA_UNSUPPORTED) throw failure
                 database.close()
                 databaseRecovery = DatabaseRecoveryStore(getDatabasePath("mobile-agent.db"), File(filesDir, "database-recovery"))
+                initialization.value = HostInitialization.RECOVERY
                 return
             }
             container = AppContainer(this)
             container.runs.markInFlightUnknown()
+            initialization.value = HostInitialization.READY
         }
+    }
+
+    internal fun initializeHostAsync(): Job = synchronized(hostLaunchLock) {
+        hostJob?.takeIf { it.isActive } ?: hostScope.launch {
+            try { ensureHostInitialized() }
+            catch (_: Exception) { initialization.value = HostInitialization.FAILED }
+        }.also { hostJob = it }
     }
 
     internal fun startNewDatabaseFromRecovery() {
@@ -113,12 +129,13 @@ class MobileAgentApp : Application() {
             recovery.preserveForNewDatabase()
             database = AndroidContextSqlite(this)
             databaseRecovery = null
+            initialization.value = HostInitialization.INITIALIZING
             ensureHostInitialized()
         }
     }
 
     internal val isHostInitialized: Boolean
-        get() = ::container.isInitialized
+        get() = initialization.value == HostInitialization.READY
 
     companion object {
         @Volatile
@@ -141,6 +158,7 @@ class AppContainer(app: MobileAgentApp) :
     val profiles = ProfileRepository(db)
     val agents = AgentRepository(db)
     val conversations = ConversationRepository(db)
+    val chatDrafts = runtime.mobileagent.data.ChatDraftRepository(db)
     val conversationImages = runtime.mobileagent.data.ConversationImageRepository(db, conversations,
         CasBlobSink(File(app.filesDir, "cas")), File(app.cacheDir, "knowledge-index"))
     val contextCompactions = runtime.mobileagent.data.ContextCompactionRepository(db)
@@ -335,6 +353,7 @@ class AppContainer(app: MobileAgentApp) :
      * `Application.onCreate`.  Cancelled in [close] together with the other process bridges.
      */
     private val recoveryScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    internal val chatDraftPersistence by lazy { ChatDraftPersistence(chatDrafts, recoveryScope) }
     internal val appUpdates = runtime.mobileagent.updates.createAppUpdates(app, recoveryScope)
     val announcementRefreshCoordinator = AnnouncementRefreshCoordinator(
         store = RepositoryAnnouncementRefreshStore(announcements) {

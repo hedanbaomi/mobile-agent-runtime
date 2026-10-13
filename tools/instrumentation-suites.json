@@ -35,7 +35,8 @@
       "runtime.mobileagent.tooling.EffectiveCapabilityResolverHotUpdateTest",
       "runtime.mobileagent.tooling.ToolingOrchestrationTest",
       "runtime.mobileagent.RuntimeSafToolExposureDeviceTest",
-      "runtime.mobileagent.security.AndroidSecretStoreDeviceTest"
+      "runtime.mobileagent.security.AndroidSecretStoreDeviceTest",
+      "runtime.mobileagent.ChatStorageProjectionDeviceTest"
     ],
     "pipeline": [
       "runtime.mobileagent.DocumentUnitRenderDeviceTest",
@@ -148,7 +149,8 @@
       "runtime.mobileagent.wired.WiredAdbWorkspaceBackendAdapterTest",
       "runtime.mobileagent.workspace.CanonicalWorkspaceCoordinatorTest",
       "runtime.mobileagent.workspace.WorkspaceBackendTest",
-      "runtime.mobileagent.workspace.WorkspaceUiPresentationTest"
+      "runtime.mobileagent.workspace.WorkspaceUiPresentationTest",
+      "runtime.mobileagent.ChatStorageProjectionDeviceTest"
     ]
   },
   "manual_only": {

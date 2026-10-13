@@ -28,7 +28,9 @@ import runtime.mobileagent.provider.ProviderHttpResponseException
  */
 class IncidentRegressionTest {
     private fun sseEngine(vararg frames: String) = MockEngine {
-        respond(frames.joinToString("\n\n"), HttpStatusCode.OK, headersOf(HttpHeaders.ContentType, "text/event-stream"))
+        // Every event, including the last one, is terminated by a blank line:
+        // an event the stream never delimits is discarded, not dispatched.
+        respond(frames.joinToString("\n\n") + "\n\n", HttpStatusCode.OK, headersOf(HttpHeaders.ContentType, "text/event-stream"))
     }
 
     private suspend fun responsesEvents(vararg frames: String): List<ModelEvent> =
@@ -156,11 +158,11 @@ class IncidentRegressionTest {
     fun largeResponseTailToolCallWithUnusableArgumentsIsForwardedForRetry() = runTest {
         val chunk = "x".repeat(140)
         val filler = buildString {
-            repeat(300) { append("data: {\"choices\":[{\"delta\":{\"content\":\"$chunk\"}}]}\n") }
+            repeat(300) { append("data: {\"choices\":[{\"delta\":{\"content\":\"$chunk\"}}]}\n\n") }
         }
         val tail =
-            "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call-tail\",\"function\":{\"name\":\"python_skill\",\"arguments\":\"{\\\"code\\\":\\\"print(1)\"}}]}}]}\n"
-        val body = filler + tail + "data: [DONE]\n"
+            "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call-tail\",\"function\":{\"name\":\"python_skill\",\"arguments\":\"{\\\"code\\\":\\\"print(1)\"}}]}}]}\n\n"
+        val body = filler + tail + "data: [DONE]\n\n"
         assertTrue(body.length > 50_000, "evidence shape expected a ~60KB stream, got ${body.length}")
         val engine = MockEngine {
             respond(body, HttpStatusCode.OK, headersOf(HttpHeaders.ContentType, "text/event-stream"))

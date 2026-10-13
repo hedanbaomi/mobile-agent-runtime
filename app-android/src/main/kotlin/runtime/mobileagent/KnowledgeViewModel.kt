@@ -460,6 +460,9 @@ class KnowledgeViewModel(
             val waitingTargets = readKnowledgeWaitingBatchTargets(app.container.db, selected, waitingJobs.map { it.first.id })
             val defaultVisionTarget = visionTargets.firstOrNull()
             val target = defaultVisionTarget?.label.orEmpty()
+            val batches = selected?.let(repo::listBatches).orEmpty()
+            val batchDisplays = runtime.mobileagent.data.KnowledgeBatchDisplayStore(app.container.db)
+                .read(selected, batches.map { it.id })
             return KnowledgeUiState(
                 storageUsedBytes = storage.totalBytes,
                 storageQuotaBytes = storage.quotaBytes,
@@ -498,8 +501,9 @@ class KnowledgeViewModel(
                 visionConfigured = visionTargets.isNotEmpty(),
                 visionTargetFingerprint = defaultVisionTarget?.fingerprint,
                 visionTargets = visionTargets,
-                batches = selected?.let(repo::listBatches).orEmpty().map { batch ->
+                batches = batches.map { batch ->
                     val progress = repo.batchProgress(batch.id)
+                    val display = batchDisplays.getValue(batch.id)
                     KnowledgeBatchUi(
                         id = batch.id,
                         displayName = batch.displayName,
@@ -526,9 +530,8 @@ class KnowledgeViewModel(
                         paused = batch.state == ImportBatchState.PAUSED,
                         resumeStagingAvailable = batch.state in setOf(ImportBatchState.COPYING, ImportBatchState.STAGING) &&
                             importCoordinator.activeOperation()?.progress?.value?.batchId != batch.id &&
-                            app.container.db.query("SELECT staging_complete FROM import_batches WHERE id=?", listOf(batch.id))
-                                .singleOrNull()?.long("staging_complete") == 0L,
-                        items = repo.listBatchItemViews(batch.id).map { view ->
+                            display.stagingComplete == 0L,
+                        items = display.items.map { view ->
                             KnowledgeBatchItemUi(
                                 jobId = view.jobId,
                                 displayName = view.displayName,
@@ -538,7 +541,7 @@ class KnowledgeViewModel(
                         },
                         pipeline = repo.batchPipelineProgress(batch.id),
                         reuse = repo.batchReuseSummary(batch.id, refreshPlan = false),
-                        policy = repo.batchPipelinePolicy(batch.id),
+                        policy = display.policy,
                     )
                 },
             )

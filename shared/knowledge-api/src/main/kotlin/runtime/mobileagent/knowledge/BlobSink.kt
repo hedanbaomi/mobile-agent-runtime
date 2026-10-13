@@ -91,7 +91,7 @@ class FileBlobSink(private val root: java.io.File) : BlobSink {
             error("Could not create CAS directory")
         }
         val file = java.io.File(dir, sha)
-        if (file.isFile && file.length() == bytes.size.toLong() && sha256Hex(file.readBytes()) == sha) {
+        if (file.isFile && file.length() == bytes.size.toLong() && file.inputStream().use(::sha256Hex) == sha) {
             return@withStorageLock StoredBlob(sha, bytes.size, mediaType, ref(sha))
         }
         if (file.exists()) {
@@ -105,14 +105,14 @@ class FileBlobSink(private val root: java.io.File) : BlobSink {
                 out.fd.sync()
             }
             check(tmp.length() == bytes.size.toLong()) { "CAS write length mismatch" }
-            check(sha256Hex(tmp.readBytes()) == sha) { "CAS write hash mismatch" }
+            check(tmp.inputStream().use(::sha256Hex) == sha) { "CAS write hash mismatch" }
             if (!tmp.renameTo(file)) {
                 error("CAS atomic commit failed")
             }
         } finally {
             if (tmp.exists()) tmp.delete()
         }
-        check(file.isFile && file.length() == bytes.size.toLong() && sha256Hex(file.readBytes()) == sha) {
+        check(file.isFile && file.length() == bytes.size.toLong() && file.inputStream().use(::sha256Hex) == sha) {
             "CAS commit failed"
         }
         StoredBlob(sha, bytes.size, mediaType, ref(sha))
@@ -149,11 +149,29 @@ private fun protection(counts: MutableMap<String, Int>, hash: String, lock: ((()
     }
 }
 
-fun sha256Hex(bytes: ByteArray): String {
-    val digest = java.security.MessageDigest.getInstance("SHA-256").digest(bytes)
+fun sha256Hex(bytes: ByteArray): String =
+    java.security.MessageDigest.getInstance("SHA-256").digest(bytes).digestHex()
+
+/** Caller owns the stream; verification never allocates another full blob-sized array. */
+internal fun sha256Hex(input: java.io.InputStream): String {
+    val digest = java.security.MessageDigest.getInstance("SHA-256")
+    val buffer = ByteArray(64 * 1024)
+    while (true) {
+        val count = input.read(buffer)
+        if (count < 0) break
+        if (count == 0) {
+            val byte = input.read()
+            if (byte < 0) break
+            digest.update(byte.toByte())
+        } else digest.update(buffer, 0, count)
+    }
+    return digest.digest().digestHex()
+}
+
+private fun ByteArray.digestHex(): String {
     val alphabet = "0123456789abcdef"
-    val hex = CharArray(digest.size * 2)
-    digest.forEachIndexed { index, byte ->
+    val hex = CharArray(size * 2)
+    forEachIndexed { index, byte ->
         val value = byte.toInt() and 0xFF
         hex[index * 2] = alphabet[value ushr 4]
         hex[index * 2 + 1] = alphabet[value and 0x0F]

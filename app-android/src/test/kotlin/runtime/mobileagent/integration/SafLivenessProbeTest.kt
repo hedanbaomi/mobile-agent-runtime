@@ -9,6 +9,9 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeout
 import org.junit.jupiter.api.AfterEach
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertFalse
@@ -64,7 +67,7 @@ class SafLivenessProbeTest {
         val probe = probe()
         val b = backend { false }
         probe.schedule("w1", b)
-        awaitUntil { probe.isDown("w1", b) }
+        runBlocking { withTimeout(5_000) { probe.revision.first { it == 1L } } }
         assertTrue(probe.isDown("w1", b))
         assertEquals(1L, probe.revision.value)
     }
@@ -75,7 +78,7 @@ class SafLivenessProbeTest {
         val probe = probe(deadlineMs = 60L)
         val b = backend { latch.await(10, TimeUnit.SECONDS); false }
         probe.schedule("w1", b)
-        awaitUntil { probe.isDown("w1", b) }
+        runBlocking { withTimeout(5_000) { probe.revision.first { it == 1L } } }
         // In-flight must be cleared even though the worker still lingers;
         // a re-schedule must actually run again rather than being dropped.
         probe.schedule("w1", b)

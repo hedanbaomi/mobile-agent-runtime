@@ -302,6 +302,10 @@ object Migrations {
             // Bounded result pages also need bounded SQL access paths.
             connection.execute("CREATE INDEX IF NOT EXISTS chunk_embedding_keyset ON chunks(document_version_id,id)")
             connection.execute("CREATE INDEX IF NOT EXISTS embedding_content_lookup ON embeddings(space_id,content_hash,chunk_id)")
+            // Derived read paths are installed for current-version databases too; no durable
+            // row or compatibility version is changed by these non-unique covering indexes.
+            connection.execute("CREATE INDEX IF NOT EXISTS assets_document_vision_lookup ON assets(document_id,blob_hash,surrounding_text_hash,page)")
+            connection.execute("CREATE INDEX IF NOT EXISTS vision_result_asset_lookup ON vision_results(asset_hash,context_hash,status,model_fingerprint)")
             backfillConversationSnapshotIds(connection)
             backfillV11(connection)
             backfillV12(connection)

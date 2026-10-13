@@ -410,3 +410,12 @@ S03/S04/S05/S07 增量必须通过真实 isolated worker：API26 JSON/新 PID；
 - S30：Internal 兄弟文件/目录变更不改变未修改目标 B 的条件版本，B 原条件写入成功；B 真正改变后 stale 为 CONFLICT。Shizuku 两 adapter+真实存储、Wired adapter+真实引擎正常增删改；schema 不提供不可执行条件。混合 backend 查询 expected_version_operations；旧条件无副作用/无 ONCE 消费，mandatory patch 无条件契约不暴露。
 - S13/S30：SAF 截断开流后遇到写/flush/close/回读/grant/ID 核验失败为 UNKNOWN_OUTCOME，不重放；大小、配额、相对路径、根删除和非空目录限制保持。变动目录的旧分页 cursor 仍需重新列举。
 - [本轮实跑与审阅](evidence/2026-10-08/saf-and-file-version-preconditions.md)。历史“SAF 非原子覆盖拒绝”描述当时实现，普通覆盖现以 ADR-0032 为准；原子 patch 边界不变。
+
+## 2026-10-13：审查修复增量（R02/R04/R05/R25）
+
+- K02：DOCX 的 tab/br/cr、数字实体、单次解码、同 namespace 不同前缀、标点及图片关系；EPUB 合法 container/OPF/spine 顺序、声明的导航/辅助内容、越界/缺失引用、CDATA 字面实体；旧指纹须显式重导，历史版本保留，禁止自动付费重放。
+- A04/A10：两协议合法多行 SSE、CR/LF/CRLF、BOM、未定界 EOF、UTF-8/行/响应上限；流和探测一致，usage/取消/未知费用原语义保留。
+- A05/U07：创建各边界故障整体回滚；IO 投影选择代次拒绝迟到结果；50条分页最终覆盖完整顺序，模型历史不截断；多个大草稿保存状态不含正文，失败/清空/新旧写入一致。MCP 数据库固定信息可用、旧记录兼容、损坏/撤销及审批后 schema 变化均失败关闭。
+- K06：慢 CAS 规划期间会话写、暂停和删除可推进，版本/generation/计划突变拒绝发布；50/300/500合成文本及50 Office档记录事务/写等待/堆峰值，无事务内 CAS 读取；小批次与大量无关历史查询使用限定的索引查找。数字只证明对应本地档位，不能代替设备容量/磁盘耗尽验收。
+
+详见 [ADR-0039](adr/0039-review-parser-stream-and-chat-persistence.md) 与 [执行证据](evidence/2026-10-13/review-remediation.md)；未实际运行的边界不得记为 PASS。

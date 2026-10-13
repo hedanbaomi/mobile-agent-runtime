@@ -43,11 +43,11 @@ class OpenAiSseTest {
     @Test
     fun textDeltaAndDone() {
         val buf = linkedMapOf<String, Pair<String, StringBuilder>>()
-        val delta = OpenAiSse.eventsFromLine(
-            """data: {"choices":[{"delta":{"content":"Hello"}}]}""",
+        val delta = OpenAiSse.eventsFromData(
+            """{"choices":[{"delta":{"content":"Hello"}}]}""",
             buf,
         )
-        val done = OpenAiSse.eventsFromLine("data: [DONE]", buf)
+        val done = OpenAiSse.eventsFromData("[DONE]", buf)
         assertEquals(listOf(ModelEvent.TextDelta("Hello")), delta)
         assertEquals(listOf(ModelEvent.Completed), done)
     }
@@ -55,12 +55,12 @@ class OpenAiSseTest {
     @Test
     fun explicitReasoningFieldsBecomeTypedDeltasWithoutInventingReasoning() {
         val buf = linkedMapOf<String, Pair<String, StringBuilder>>()
-        val canonical = OpenAiSse.eventsFromLine(
-            """data: {"choices":[{"delta":{"reasoning_content":"think"}}]}""",
+        val canonical = OpenAiSse.eventsFromData(
+            """{"choices":[{"delta":{"reasoning_content":"think"}}]}""",
             buf,
         )
-        val alias = OpenAiSse.eventsFromLine(
-            """data: {"choices":[{"delta":{"reasoning":"also think","content":"answer"}}]}""",
+        val alias = OpenAiSse.eventsFromData(
+            """{"choices":[{"delta":{"reasoning":"also think","content":"answer"}}]}""",
             buf,
         )
         assertEquals(listOf(ModelEvent.ReasoningDelta("think")), canonical)
@@ -74,22 +74,22 @@ class OpenAiSseTest {
     fun interleavedToolIndexesDoNotCrossAppend() {
         val buf = linkedMapOf<String, Pair<String, StringBuilder>>()
         val indexToId = mutableMapOf<Int, String>()
-        OpenAiSse.eventsFromLine(
-            """data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call-a","function":{"name":"a","arguments":"{\"x\":"}}]}}]}""",
+        OpenAiSse.eventsFromData(
+            """{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call-a","function":{"name":"a","arguments":"{\"x\":"}}]}}]}""",
             buf,
             indexToId = indexToId,
         )
-        OpenAiSse.eventsFromLine(
-            """data: {"choices":[{"delta":{"tool_calls":[{"index":1,"id":"call-b","function":{"name":"b","arguments":"{\"y\":1}"}}]}}]}""",
+        OpenAiSse.eventsFromData(
+            """{"choices":[{"delta":{"tool_calls":[{"index":1,"id":"call-b","function":{"name":"b","arguments":"{\"y\":1}"}}]}}]}""",
             buf,
             indexToId = indexToId,
         )
-        OpenAiSse.eventsFromLine(
-            """data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"1}"}}]}}]}""",
+        OpenAiSse.eventsFromData(
+            """{"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"1}"}}]}}]}""",
             buf,
             indexToId = indexToId,
         )
-        val done = OpenAiSse.eventsFromLine("data: [DONE]", buf, indexToId = indexToId)
+        val done = OpenAiSse.eventsFromData("[DONE]", buf, indexToId = indexToId)
         val calls = done.filterIsInstance<ModelEvent.ToolCallDelta>()
         assertEquals("call-a", calls[0].callId)
         assertEquals("""{"x":1}""", calls[0].argumentsJson)
@@ -103,11 +103,11 @@ class OpenAiSseTest {
         // The provider-escaped `\n` in the frame decodes to a RAW newline inside
         // the argument text: illegal JSON, but semantically unambiguous.
         val buf = linkedMapOf<String, Pair<String, StringBuilder>>()
-        OpenAiSse.eventsFromLine(
-            "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call-1\",\"function\":{\"name\":\"run\",\"arguments\":\"{\\\"code\\\":\\\"line one\\nline two\\\"}\"}}]}}]}",
+        OpenAiSse.eventsFromData(
+            "{\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call-1\",\"function\":{\"name\":\"run\",\"arguments\":\"{\\\"code\\\":\\\"line one\\nline two\\\"}\"}}]}}]}",
             buf,
         )
-        val done = OpenAiSse.eventsFromLine("data: [DONE]", buf)
+        val done = OpenAiSse.eventsFromData("[DONE]", buf)
         val call = done.filterIsInstance<ModelEvent.ToolCallDelta>().single()
         assertEquals(
             "line one\nline two",
@@ -124,26 +124,26 @@ class OpenAiSseTest {
         // and feeds a bounded INVALID result back for a corrected resend; it
         // must never claim an unknown external outcome.
         val buf = linkedMapOf<String, Pair<String, StringBuilder>>()
-        OpenAiSse.eventsFromLine(
-            """data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call-1","function":{"name":"run","arguments":"{\"code\":"}}]}}]}""",
+        OpenAiSse.eventsFromData(
+            """{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call-1","function":{"name":"run","arguments":"{\"code\":"}}]}}]}""",
             buf,
         )
         assertEquals(
             listOf(ModelEvent.ToolCallDelta("call-1", "run", "{\"code\":"), ModelEvent.Completed),
-            OpenAiSse.eventsFromLine("data: [DONE]", buf),
+            OpenAiSse.eventsFromData("[DONE]", buf),
         )
     }
 
     @Test
     fun nonObjectToolArgumentsAtDoneAreForwardedForRuntimeFeedback() {
         val buf = linkedMapOf<String, Pair<String, StringBuilder>>()
-        OpenAiSse.eventsFromLine(
-            """data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call-1","function":{"name":"run","arguments":"5"}}]}}]}""",
+        OpenAiSse.eventsFromData(
+            """{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call-1","function":{"name":"run","arguments":"5"}}]}}]}""",
             buf,
         )
         assertEquals(
             listOf(ModelEvent.ToolCallDelta("call-1", "run", "5"), ModelEvent.Completed),
-            OpenAiSse.eventsFromLine("data: [DONE]", buf),
+            OpenAiSse.eventsFromData("[DONE]", buf),
         )
     }
 
@@ -152,13 +152,13 @@ class OpenAiSseTest {
         // The call id still pairs a fed-back INVALID result; the runtime's own
         // validation rejects the unknown (blank) tool name.
         val buf = linkedMapOf<String, Pair<String, StringBuilder>>()
-        OpenAiSse.eventsFromLine(
-            """data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call-1","function":{"name":"","arguments":"{\"x\":1}"}}]}}]}""",
+        OpenAiSse.eventsFromData(
+            """{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call-1","function":{"name":"","arguments":"{\"x\":1}"}}]}}]}""",
             buf,
         )
         assertEquals(
             listOf(ModelEvent.ToolCallDelta("call-1", "", "{\"x\":1}"), ModelEvent.Completed),
-            OpenAiSse.eventsFromLine("data: [DONE]", buf),
+            OpenAiSse.eventsFromData("[DONE]", buf),
         )
     }
 
@@ -167,13 +167,13 @@ class OpenAiSseTest {
         // No call id means no fed-back result can be paired, so this stays a
         // decided invalid response instead of entering the retry loop.
         val buf = linkedMapOf<String, Pair<String, StringBuilder>>()
-        OpenAiSse.eventsFromLine(
-            """data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"","function":{"name":"run","arguments":"{bad"}}]}}]}""",
+        OpenAiSse.eventsFromData(
+            """{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"","function":{"name":"run","arguments":"{bad"}}]}}]}""",
             buf,
         )
         assertEquals(
             listOf(ModelEvent.Failed(ProviderConnectionErrorCode.INVALID_RESPONSE.name)),
-            OpenAiSse.eventsFromLine("data: [DONE]", buf),
+            OpenAiSse.eventsFromData("[DONE]", buf),
         )
     }
 
@@ -181,28 +181,31 @@ class OpenAiSseTest {
     fun credentialsInToolArgumentsAtDoneStayUnknownOutcome() {
         val secret = "synthetic-tool-credential-12345"
         val buf = linkedMapOf<String, Pair<String, StringBuilder>>()
-        OpenAiSse.eventsFromLine(
-            """data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call-1","function":{"name":"send","arguments":"{\"value\":\"$secret\"}"}}]}}]}""",
+        OpenAiSse.eventsFromData(
+            """{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call-1","function":{"name":"send","arguments":"{\"value\":\"$secret\"}"}}]}}]}""",
             buf,
         )
         assertEquals(
             listOf(ModelEvent.Failed(ErrorCode.UNKNOWN_OUTCOME.name)),
-            OpenAiSse.eventsFromLine("data: [DONE]", buf, listOf(secret)),
+            OpenAiSse.eventsFromData("[DONE]", buf, listOf(secret)),
         )
     }
 
     @Test
-    fun commentsAreIgnored() {
-        val buf = linkedMapOf<String, Pair<String, StringBuilder>>()
-        assertTrue(OpenAiSse.eventsFromLine(": keep-alive", buf).isEmpty())
+    fun commentLinesAreFramingAndNeverReachTheParser() = runTest {
+        // `:` lines are framing comments, decided by the event decoder before any
+        // protocol parsing: they commit no event and produce no model input.
+        val committed = mutableListOf<String>()
+        SseEventDecoder().feed(": keep-alive") { committed += it; false }
+        assertTrue(committed.isEmpty())
     }
 
     @Test
     fun errorMessageIsRedactedWithProvidedSecret() {
         val buf = linkedMapOf<String, Pair<String, StringBuilder>>()
         val secret = "synthetic-provider-token-12345"
-        val events = OpenAiSse.eventsFromLine(
-            """data: {"error":{"message":"Invalid credential: $secret"}}""",
+        val events = OpenAiSse.eventsFromData(
+            """{"error":{"message":"Invalid credential: $secret"}}""",
             buf,
             listOf(secret),
         )
@@ -214,8 +217,8 @@ class OpenAiSseTest {
     @Test
     fun usageOnlyFrameWithEmptyChoicesIsPreserved() {
         val buf = linkedMapOf<String, Pair<String, StringBuilder>>()
-        val events = OpenAiSse.eventsFromLine(
-            """data: {"choices":[],"usage":{"prompt_tokens":8,"completion_tokens":2}}""",
+        val events = OpenAiSse.eventsFromData(
+            """{"choices":[],"usage":{"prompt_tokens":8,"completion_tokens":2}}""",
             buf,
         )
         assertEquals(listOf(ModelEvent.Usage(8, 2)), events)

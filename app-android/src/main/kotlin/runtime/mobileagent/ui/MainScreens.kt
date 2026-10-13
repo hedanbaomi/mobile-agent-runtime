@@ -305,19 +305,21 @@ internal fun MainApp(onMoveTaskToBack: () -> Unit = {}) {
         ?: if (chinese) "当前智能体" else "Current Agent"
     val drawerActions = runtime.mobileagent.feature.chat.ChatActions(
         onSessionAction = chatVm::sessionAction,
+        onLoadMoreSessions = { chatVm.loadMoreSessions() },
+        onLoadMoreArchivedSessions = { chatVm.loadMoreSessions(true) },
         onSelectSession = { sessionId ->
             chatVm.selectSession(sessionId)
             drawerOpen = false
             requestRoute(AppRoutes.CHAT)
         },
         onNewSession = {
-            chatVm.newSession()
+            chatVm.newSessionAsync()
             drawerOpen = false
             requestRoute(AppRoutes.CHAT)
         },
         onNewSessionForAgent = { agentId ->
             chatVm.selectAgent(agentId)
-            chatVm.newSession()
+            chatVm.newSessionAsync()
             drawerOpen = false
             requestRoute(AppRoutes.CHAT)
         },
@@ -327,7 +329,7 @@ internal fun MainApp(onMoveTaskToBack: () -> Unit = {}) {
             requestRoute(AppRoutes.CHAT)
         },
         onNewSessionForWorkspace = { workspaceId ->
-            chatVm.newSession(workspaceId)
+            chatVm.newSessionAsync(workspaceId, useAgentDefault = false)
             drawerOpen = false
             requestRoute(AppRoutes.CHAT)
         },
@@ -557,7 +559,7 @@ internal fun MainApp(onMoveTaskToBack: () -> Unit = {}) {
                                 pending = pending,
                                 onConfirmed = { confirmedWorkspaceId ->
                                     chatVm.selectAgent(pending.agentId)
-                                    chatVm.newSession(confirmedWorkspaceId)
+                                    chatVm.newSessionAsync(confirmedWorkspaceId, useAgentDefault = false)
                                     closeWorkspacePicker()
                                     drawerOpen = false
                                     requestRoute(AppRoutes.CHAT)
@@ -639,6 +641,9 @@ private fun ChatRoute(vm: runtime.mobileagent.ChatViewModel, chinese: Boolean, o
     }
     val actions = runtime.mobileagent.feature.chat.ChatActions(
         onSessionAction = vm::sessionAction, onRestoreSession = vm::restoreSession,
+        onLoadMoreSessions = { vm.loadMoreSessions() },
+        onLoadMoreArchivedSessions = { vm.loadMoreSessions(true) },
+        onLoadEarlierMessages = vm::loadEarlierMessages,
         onInput = vm::input, onSend = vm::send, onCancel = vm::cancel,
         onPickImages = {
             pickedForSession = vm.state.value.selectedSessionId
@@ -649,9 +654,9 @@ private fun ChatRoute(vm: runtime.mobileagent.ChatViewModel, chinese: Boolean, o
         },
         onRemovePendingImage = vm::removePendingImage,
         onToggleDegradation = vm::degrade, onSelectSession = vm::selectSession,
-        onNewSession = { vm.newSession() }, onSelectAgent = vm::selectAgent,
-        onNewSessionForAgent = { agentId -> vm.selectAgent(agentId); vm.newSession(); Unit },
-        onNewSessionForWorkspace = { workspaceId -> vm.newSession(workspaceId) },
+        onNewSession = { vm.newSessionAsync() }, onSelectAgent = vm::selectAgent,
+        onNewSessionForAgent = { agentId -> vm.selectAgent(agentId); vm.newSessionAsync(); Unit },
+        onNewSessionForWorkspace = { workspaceId -> vm.newSessionAsync(workspaceId, useAgentDefault = false) },
         onOpenCitation = vm::openCitation, onCloseCitation = vm::closeCitation,
         onToolApproval = { choice -> vm.approveTool(choice == runtime.mobileagent.feature.chat.ToolApprovalChoice.APPROVE) },
         onOpenRequestInspector = { vm.inspector(true); onRoute(AppRoutes.INSPECTOR) },
@@ -975,8 +980,7 @@ private fun AgentsRoute(entry: NavBackStackEntry, chinese: Boolean, onRoute: (St
         },
         onRestorePrompt = vm::restorePrompt, onToggleResource = vm::toggleResource,
         onSnapshot = {
-            val conversationId = vm.createConversation()
-            if (conversationId != null) {
+            vm.createConversationAsync { conversationId ->
                 onConversationCreated(conversationId)
                 onRoute(AppRoutes.CHAT)
             }
@@ -1845,35 +1849,12 @@ private fun SettingsRoute(entry: NavBackStackEntry, chinese: Boolean, onRoute: (
     } else {
         runtime.mobileagent.feature.settings.SettingsScreen(state, actions, showPageTitle = false)
     }
-    if (archiveOpen) {
-        AlertDialog(
-            onDismissRequest = { archiveOpen = false },
-            title = { Text(if (chinese) "已归档的对话" else "Archived conversations") },
-            text = {
-                androidx.compose.foundation.lazy.LazyColumn(Modifier.heightIn(max = 420.dp).testTag("settings.archive.list")) {
-                    val archived = chatVm.state.value.archivedSessions
-                    if (archived.isEmpty()) item { Text(if (chinese) "暂无已归档的对话。" else "No archived conversations.") }
-                    items(archived.size, key = { archived[it].id }) { index ->
-                        val session = archived[index]
-                        Column(Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
-                            TextButton(onClick = {
-                                chatVm.selectSession(session.id)
-                                if (chatVm.state.value.selectedSessionId == session.id) {
-                                    archiveOpen = false
-                                    onRoute(AppRoutes.CHAT)
-                                }
-                            }, modifier = Modifier.testTag("settings.archive.view.${session.id}")) { Text(session.title) }
-                            Text(session.timeLabel, style = MaterialTheme.typography.bodySmall)
-                            TextButton(onClick = { chatVm.restoreSession(session.id) }, modifier = Modifier.testTag("settings.archive.restore.${session.id}")) {
-                                Text(if (chinese) "恢复" else "Restore")
-                            }
-                        }
-                    }
-                }
-            },
-            confirmButton = { TextButton(onClick = { archiveOpen = false }) { Text(if (chinese) "关闭" else "Close") } },
-        )
-    }
+    if (archiveOpen) ArchivedConversationsDialog(chatVm.state.value, chinese,
+        onClose = { archiveOpen = false },
+        onSelect = { id ->
+            chatVm.selectSession(id)
+            if (chatVm.state.value.selectedSessionId == id) { archiveOpen = false; onRoute(AppRoutes.CHAT) }
+        }, onRestore = chatVm::restoreSession, onLoadMore = { chatVm.loadMoreSessions(true) })
     if (exportChooserOpen) ExportAgentDialog(chinese, exportAgents,
         onConfirm = { agentId, includeSkillPackages, includeKnowledgeContent, includeConversations ->
             exportChooserOpen = false

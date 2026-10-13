@@ -80,4 +80,7 @@
     <string name="ui_workspace_58a2bde1" formatted="false">Workspace</string>
     <string name="ui_workspace_access_9224cbf6" formatted="false">Workspace &amp; access</string>
     <string name="ui_workspaces_592e0578" formatted="false">Workspaces</string>
+    <string name="chat_load_earlier_messages">Load earlier messages</string>
+    <string name="chat_load_more_sessions">Load more conversations</string>
+    <string name="chat_load_more_archived">Load more archived conversations</string>
 </resources>

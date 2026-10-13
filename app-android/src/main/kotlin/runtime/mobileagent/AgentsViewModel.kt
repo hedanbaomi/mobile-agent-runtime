@@ -754,47 +754,43 @@ class AgentsViewModel(
         state.value = state.value.copy(status = "已载入历史 Prompt。保存将创建新修订，不覆盖历史。")
     }
 
-    fun createConversation(): String? = try {
-        val agentId = state.value.selectedAgentId ?: error("请先选择已保存的 Agent。")
-        val now = Utc.nowIso()
-        val workspaceId = threadWorkspacePort
-            ?.takeIf { it.available }
-            ?.resolveNewThreadWorkspace(agentId)
-        // RuntimeIntegration owns the exact workspace-filtered snapshot grant set.  During a
-        // staged migration, a missing runtime adapter may still create a safe, unbound snapshot;
-        // it must never use createSnapshotWithCurrentGrants(), which would union every workspace.
-        val snapshot = threadWorkspaceRuntimePort
-            ?.takeIf { it.available }
-            ?.createSnapshotWithWorkspace(agentId, workspaceId, at = now)
-            ?: app.container.agents.createSnapshot(agentId)
-        require(snapshot.agentId == agentId) { "Workspace snapshot belongs to another Agent" }
-        if (workspaceId != null) {
-            val port = threadWorkspacePort ?: error("线程工作区绑定存储未就绪。")
-            require(port.available) { port.unavailableMessage }
-        }
-        captureMcpSnapshot(app.container, snapshot.id, agentId)
-        val conversation = Conversation(EntityId.random().value, snapshot.id, "新对话", now, now)
-        app.container.conversations.create(conversation)
-        if (workspaceId != null) {
-            val port = threadWorkspacePort ?: error("线程工作区绑定存储未就绪。")
-            val binding = ConversationWorkspaceBinding(
-                sessionId = conversation.id,
-                workspaceId = workspaceId,
-                boundAt = now,
-                revision = 1L,
-            )
-            val persisted = port.bindConversationWorkspace(binding)
-            require(persisted == binding) { "会话工作区绑定保存返回了不一致的绑定。" }
-        }
+    private fun persistConversation(agentId: String): String {
+        val conversation = app.container.createChatConversation(agentId)
         app.container.uiPreferences.edit()
             .putString("selected-agent", agentId)
             .putString("selected-conversation", conversation.id)
             .apply()
+        return conversation.id
+    }
+
+    /** Compatibility entry point for explicit host/test callers. UI uses the async entry point. */
+    fun createConversation(): String? = try {
+        val id = persistConversation(state.value.selectedAgentId ?: error("请先选择已保存的 Agent。"))
         reload()
-        conversation.id
+        id
     } catch (error: Exception) {
         state.value = state.value.copy(error = SecretRedactor.redact(error.message ?: "创建会话失败。"))
         null
+    }
+
+    fun createConversationAsync(onCreated: (String) -> Unit) {
+        if (saving.value) return
+        val agentId = state.value.selectedAgentId ?: return
+        val previous = state.value
+        saving.value = true
+        viewModelScope.launch {
+            try {
+                val (id, projection) = withContext(Dispatchers.IO) {
+                    val id = persistConversation(agentId)
+                    id to loadState(previous)
+                }
+                state.value = projection
+                onCreated(id)
+            } catch (failure: Exception) {
+                if (failure is kotlinx.coroutines.CancellationException) throw failure
+                state.value = state.value.copy(error = SecretRedactor.redact(failure.message ?: "创建会话失败。"))
+            } finally { saving.value = false }
+        }
     }
 
     private fun persistGrantChanges(editor: AgentEditorUi, agentId: String) {

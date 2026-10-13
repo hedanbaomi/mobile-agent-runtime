@@ -13,7 +13,6 @@ import io.ktor.http.HttpHeaders
 import io.ktor.http.contentType
 import io.ktor.utils.io.ByteReadChannel
 import io.ktor.utils.io.readAvailable
-import io.ktor.utils.io.readUTF8Line
 import java.io.ByteArrayOutputStream
 import java.io.IOException
 import java.net.ConnectException
@@ -412,47 +411,53 @@ class OpenAiResponsesAdapter(
                 if (responseType.contains("text/event-stream")) {
                     val channel = response.bodyAsChannel()
                     val state = OpenAiResponsesSse.State()
+                    val decoder = SseEventDecoder()
                     var terminal = false
-                    var bytes = 0L
-                    while (!channel.isClosedForRead && !terminal) {
-                        val line = channel.readUTF8Line(MAX_LINE_BYTES) ?: break
-                        bytes += line.toByteArray(Charsets.UTF_8).size + 1L
-                        require(bytes <= MAX_RESPONSE_BYTES) { "Provider response exceeds limit" }
+                    val bytes = SseLineReader().read(channel) { line, readBytes ->
                         val captureLine = request.wantsDiagnosticContent()
                         request.reportDiagnostic(
                             ModelDiagnosticStage.STREAM_EVENT, dispatchStatus, started, "responses",
                             httpStatus = status, responseContentType = responseType,
-                            responseBytes = bytes, eventType = "sse.event",
+                            responseBytes = readBytes, eventType = "sse.event",
                             contentKind = if (captureLine) "response.sse.event" else null,
                             content = if (captureLine) DiagnosticJsonSanitizer.sanitizeSseLine(line, redactionSecrets) else null,
                             originalContentChars = line.length.toLong(),
                             originalContentBytes = line.toByteArray(Charsets.UTF_8).size.toLong(),
                         )
-                        OpenAiResponsesSse.finishReasonFromLine(line)?.let { finishReason = it }
-                        OpenAiResponsesSse.eventsFromLine(line, state, redactionSecrets).forEach { event ->
-                            if (event is ModelEvent.Usage) lastUsage = event
-                            if (event is ModelEvent.Failed) terminalError = event.sanitizedMessage
-                            request.reportDiagnostic(
-                                ModelDiagnosticStage.STREAM_EVENT, dispatchStatus, started, "responses",
-                                httpStatus = status, errorCode = (event as? ModelEvent.Failed)?.sanitizedMessage,
-                                finishReason = finishReason, usage = event as? ModelEvent.Usage,
-                                responseContentType = responseType, responseBytes = bytes,
-                                eventType = event::class.simpleName,
-                            )
-                            val safeTerminal = emitSafe(event, redactor, redactionSecrets) { safeEvent ->
+                        // Framing first: one event may span several `data:` lines and
+                        // is only committed by a blank line.
+                        decoder.feed(line) { data ->
+                            OpenAiResponsesSse.finishReasonFromData(data)?.let { finishReason = it }
+                            OpenAiResponsesSse.eventsFromData(data, state, redactionSecrets).forEach { event ->
+                                if (event is ModelEvent.Usage) lastUsage = event
+                                if (event is ModelEvent.Failed) terminalError = event.sanitizedMessage
                                 request.reportDiagnostic(
                                     ModelDiagnosticStage.STREAM_EVENT, dispatchStatus, started, "responses",
-                                    httpStatus = status, responseContentType = responseType,
-                                    responseBytes = bytes, eventType = safeEvent::class.simpleName,
-                                    contentKind = if (request.wantsDiagnosticContent()) "response.sse.model_event" else null,
-                                    content = if (request.wantsDiagnosticContent()) {
-                                        DiagnosticJsonSanitizer.sanitizeModelEvent(safeEvent, redactionSecrets)
-                                    } else null,
+                                    httpStatus = status, errorCode = (event as? ModelEvent.Failed)?.sanitizedMessage,
+                                    finishReason = finishReason, usage = event as? ModelEvent.Usage,
+                                    responseContentType = responseType, responseBytes = readBytes,
+                                    eventType = event::class.simpleName,
                                 )
+                                val safeTerminal = emitSafe(event, redactor, redactionSecrets) { safeEvent ->
+                                    request.reportDiagnostic(
+                                        ModelDiagnosticStage.STREAM_EVENT, dispatchStatus, started, "responses",
+                                        httpStatus = status, responseContentType = responseType,
+                                        responseBytes = readBytes, eventType = safeEvent::class.simpleName,
+                                        contentKind = if (request.wantsDiagnosticContent()) "response.sse.model_event" else null,
+                                        content = if (request.wantsDiagnosticContent()) {
+                                            DiagnosticJsonSanitizer.sanitizeModelEvent(safeEvent, redactionSecrets)
+                                        } else null,
+                                    )
+                                }
+                                if (safeTerminal) terminal = true
                             }
-                            if (safeTerminal) terminal = true
+                            terminal
                         }
+                        terminal
                     }
+                    // An event the stream never delimited is discarded, never
+                    // reported, and never a success.
+                    decoder.finish()
                     if (!terminal) {
                         redactor.discard()
                         terminalError = ProviderConnectionErrorCode.INVALID_RESPONSE.name
@@ -811,10 +816,20 @@ class OpenAiResponsesAdapter(
         })
     }
 
-    private fun parseResponseBody(raw: String, responseType: String, secrets: List<String>): List<ModelEvent> {
+    private suspend fun parseResponseBody(raw: String, responseType: String, secrets: List<String>): List<ModelEvent> {
         if (responseType.contains("text/event-stream")) {
             val state = OpenAiResponsesSse.State()
-            return raw.lineSequence().flatMap { OpenAiResponsesSse.eventsFromLine(it, state, secrets).asSequence() }.toList()
+            val decoder = SseEventDecoder()
+            val events = mutableListOf<ModelEvent>()
+            SseLineReader().read(ByteReadChannel(raw)) { line, _ ->
+                decoder.feed(line) { data ->
+                    events += OpenAiResponsesSse.eventsFromData(data, state, secrets)
+                    false
+                }
+                false
+            }
+            decoder.finish()
+            return events
         }
         val root = runCatching { Json.parseToJsonElement(raw).jsonObject }.getOrNull()
             ?: return listOf(ModelEvent.Failed(ProviderConnectionErrorCode.INVALID_RESPONSE.name))
@@ -1267,8 +1282,6 @@ class OpenAiResponsesAdapter(
         const val CAPABILITY_PROBE_MAX_OUTPUT_TOKENS = 128
         private const val CONNECTION_TIMEOUT_MS = 15_000L
         private const val MAX_RESPONSE_BYTES = 8_388_608L
-        private const val MAX_LINE_BYTES = 1_048_576
-
 
         fun url(base: String, path: String): String {
             val normalized = base.trimEnd('/')

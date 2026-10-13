@@ -11,4 +11,6 @@
     <string name="database_recovery_cancel">取消</string>
     <string name="database_recovery_exported">恢复副本已保存。</string>
     <string name="database_recovery_failed">恢复未能完成，已保存的数据仍保留。</string>
+    <string name="host_initializing">正在初始化本地数据…</string>
+    <string name="host_initialization_failed">无法初始化本地数据。请重新打开应用；已有数据已保留。</string>
 </resources>

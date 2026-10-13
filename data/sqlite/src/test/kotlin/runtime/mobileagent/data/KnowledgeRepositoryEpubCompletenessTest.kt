@@ -62,7 +62,10 @@ class KnowledgeRepositoryEpubCompletenessTest {
 
     private fun epub(visual: String): ByteArray = ByteArrayOutputStream().also { out ->
         ZipOutputStream(out).use { zip ->
-            for ((name, text) in listOf("mimetype" to "application/epub+zip", "OPS/ch.xhtml" to
+            for ((name, text) in listOf("mimetype" to "application/epub+zip",
+                "META-INF/container.xml" to """<container xmlns="urn:oasis:names:tc:opendocument:xmlns:container" version="1.0"><rootfiles><rootfile full-path="OPS/content.opf" media-type="application/oebps-package+xml"/></rootfiles></container>""",
+                "OPS/content.opf" to """<package xmlns="http://www.idpf.org/2007/opf" version="3.0"><manifest><item id="ch" href="ch.xhtml" media-type="application/xhtml+xml"/></manifest><spine><itemref idref="ch"/></spine></package>""",
+                "OPS/ch.xhtml" to
                 "<html><body><p>epub fixture searchable text</p>$visual</body></html>")) {
                 zip.putNextEntry(ZipEntry(name)); zip.write(text.toByteArray()); zip.closeEntry()
             }

@@ -51,6 +51,20 @@ class EpubVisualCompletenessTest {
         assertTrue(parsed.assets.isEmpty())
     }
 
+    @Test fun cdataKeepsLiteralEntitiesWhileOrdinaryTextDecodesExactlyOnce() {
+        val parsed = parse("<html><body><!-- &copy; &nbsp; --><?fixture &copy; &nbsp;?>" +
+            "<p><![CDATA[A &copy; B &nbsp; C]]></p><p>&copy; D&nbsp;E &amp;nbsp;</p></body></html>")
+        assertEquals("A &copy; B &nbsp; C © D E &nbsp;", parsed.text)
+        assertFalse(parsed.needsVision)
+        assertTrue(parsed.assets.isEmpty())
+    }
+
+    @Test fun xmlLiteralRegionsAreNotRewrittenBeforeSax() {
+        val literal = "<![CDATA[&copy; &nbsp;]]><!-- &copy; &nbsp; --><?fixture &copy; &nbsp;?>"
+        assertEquals(literal, expandHtmlEntities(literal))
+        assertEquals("&#169; &#160; &amp;nbsp;", expandHtmlEntities("&copy; &nbsp; &amp;nbsp;"))
+    }
+
     @Test fun fixedHtmlDoctypeKeepsTextAndImageCompatibilityWithoutDtdProcessing() {
         val text = parse("<!DOCTYPE html><html><body>text</body></html>")
         assertEquals("text", text.text)
@@ -82,6 +96,8 @@ class EpubVisualCompletenessTest {
         val out = ByteArrayOutputStream()
         ZipOutputStream(out).use { zip ->
             for ((name, bytes) in listOf("mimetype" to "application/epub+zip".toByteArray(),
+                "META-INF/container.xml" to """<container xmlns="urn:oasis:names:tc:opendocument:xmlns:container" version="1.0"><rootfiles><rootfile full-path="OPS/content.opf" media-type="application/oebps-package+xml"/></rootfiles></container>""".toByteArray(),
+                "OPS/content.opf" to """<package xmlns="http://www.idpf.org/2007/opf" version="3.0"><manifest><item id="c0" href="ch.xhtml" media-type="application/xhtml+xml"/></manifest><spine><itemref idref="c0"/></spine></package>""".toByteArray(),
                 "OPS/ch.xhtml" to html.toByteArray()) + assets) {
                 zip.putNextEntry(ZipEntry(name)); zip.write(bytes); zip.closeEntry()
             }

@@ -359,6 +359,10 @@ data class ChatUiState(
     val requestInspectorAvailability: ChatRequestInspectorAvailability? = null,
     val inspectorOpen: Boolean = false,
     val loading: Boolean = false,
+    val hasMoreSessions: Boolean = false,
+    val hasMoreArchivedSessions: Boolean = false,
+    val hasMoreMessages: Boolean = false,
+    val loadingEarlierMessages: Boolean = false,
     val error: String? = null,
     /** Optional host supplied empty-state copy; a blank value uses the session-aware default. */
     val emptyMessage: String = "",
@@ -394,6 +398,9 @@ data class ChatActions(
     val onCancel: () -> Unit = {},
     val onToggleDegradation: (Boolean) -> Unit = {},
     val onSelectSession: (String) -> Unit = {},
+    val onLoadMoreSessions: () -> Unit = {},
+    val onLoadMoreArchivedSessions: () -> Unit = {},
+    val onLoadEarlierMessages: () -> Unit = {},
     val onNewSession: () -> Unit = {},
     val onNewSessionForAgent: (String) -> Unit = {},
     val onSelectAgent: (String) -> Unit = {},
@@ -612,7 +619,7 @@ private fun ChatConversationContent(
                 }
                 ContextCompactionHistory(state.compactions, state.messages, state.language.equals("zh-CN", true)) { id ->
                     val index = timeline.indexOfFirst { id in it.sourceIds }
-                    if (index >= 0) scrollScope.launch { listState.scrollToItem(index) }
+                    if (index >= 0) scrollScope.launch { listState.scrollToItem(index + if (state.hasMoreMessages) 1 else 0) }
                 }
                 if (state.loading) {
                     CenterState(if (state.language.equals("zh-CN", true)) "正在加载会话…" else "Loading conversations…", true, Modifier.weight(1f))
@@ -621,10 +628,16 @@ private fun ChatConversationContent(
                 } else if (state.messages.isEmpty()) {
                     CenterState(emptyConversationMessage(state, state.language.equals("zh-CN", true)), false, Modifier.weight(1f))
                 } else {
-                    LaunchedEffect(timeline.size, timeline.lastOrNull()?.sourceIds?.size, state.streaming) {
-                        if (timeline.isNotEmpty()) listState.animateScrollToItem(timeline.lastIndex)
+                    LaunchedEffect(timeline.lastOrNull()?.message?.id, timeline.lastOrNull()?.sourceIds?.size, state.streaming) {
+                        if (timeline.isNotEmpty()) listState.animateScrollToItem(timeline.lastIndex + if (state.hasMoreMessages) 1 else 0)
                     }
                     LazyColumn(state = listState, modifier = Modifier.weight(1f).fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        if (state.hasMoreMessages) item(key = "earlier-history") {
+                            TextButton(onClick = actions.onLoadEarlierMessages, enabled = !state.loadingEarlierMessages,
+                                modifier = Modifier.fillMaxWidth().testTag("conversation.history.loadEarlier")) {
+                                Text(stringResource(R.string.chat_load_earlier_messages))
+                            }
+                        }
                         items(timeline, key = { it.message.id }) { item ->
                             item.sourceIds.filter { it in coveredIds }.forEach { sourceId ->
                                 Text(if (state.language.equals("zh-CN", true)) "已纳入上下文摘要 · 原文保留" else "Included in a context summary · original retained",
@@ -1603,7 +1616,7 @@ private fun Composer(state: ChatUiState, actions: ChatActions, input: () -> Stri
                 field = it
                 if (it.text != text) actions.onInput(it.text)
             },
-            enabled = state.pendingTool == null && !state.selectedSessionArchived,
+            enabled = editable && !state.loading,
             placeholder = { Text(stringResource(R.string.ui_ask_a_follow_up_93697d6f)) },
             minLines = 1,
             maxLines = 5,
@@ -1616,7 +1629,7 @@ private fun Composer(state: ChatUiState, actions: ChatActions, input: () -> Stri
         actions.onPickImages?.let { pick ->
             IconButton(
                 onClick = pick,
-                enabled = editable && !state.streaming && state.pendingImages.size < CHAT_MAX_PENDING_IMAGES,
+                enabled = editable && !state.loading && !state.streaming && state.pendingImages.size < CHAT_MAX_PENDING_IMAGES,
                 modifier = Modifier.size(48.dp).testTag("conversation.composer.attachImage"),
             ) {
                 Icon(Icons.Filled.Add, contentDescription = stringResource(R.string.chat_add_images))
@@ -1635,7 +1648,7 @@ private fun Composer(state: ChatUiState, actions: ChatActions, input: () -> Stri
         } else {
             Button(
                 onClick = ::submit,
-                enabled = (text.isNotBlank() || state.pendingImages.isNotEmpty()) && editable,
+                enabled = (text.isNotBlank() || state.pendingImages.isNotEmpty()) && editable && !state.loading,
                 shape = CircleShape,
                 colors = if (aqua) ButtonDefaults.buttonColors(
                     containerColor = Color(0xFF66CCFF),

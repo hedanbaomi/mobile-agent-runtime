@@ -16,17 +16,20 @@ import runtime.mobileagent.provider.SecretRedactor
 object OpenAiSse {
     private val json = Json { ignoreUnknownKeys = true }
 
-    fun eventsFromLine(
-        line: String,
+    /**
+     * Map one committed SSE event to model events.  [data] is the joined `data`
+     * payload of that event, never a raw transport line: framing, including the
+     * joining of several `data` fields, belongs to [SseEventDecoder].
+     */
+    fun eventsFromData(
+        data: String,
         toolBuf: LinkedHashMap<String, Pair<String, StringBuilder>>,
         extraSecrets: List<String> = emptyList(),
         indexToId: MutableMap<Int, String> = mutableMapOf(),
     ): List<ModelEvent> {
-        val trimmed = line.trim()
-        if (trimmed.isEmpty() || trimmed.startsWith(":")) return emptyList()
-        if (!trimmed.startsWith("data:")) return emptyList()
-        val data = trimmed.removePrefix("data:").trim()
-        if (data == "[DONE]") {
+        val payload = data.trim()
+        if (payload.isEmpty()) return emptyList()
+        if (payload == "[DONE]") {
             val toolEvents = flushToolCalls(toolBuf, extraSecrets)
             toolBuf.clear()
             indexToId.clear()
@@ -36,7 +39,7 @@ object OpenAiSse {
             if (toolEvents.any { it is ModelEvent.Failed }) return toolEvents
             return toolEvents + ModelEvent.Completed
         }
-        val obj = runCatching { json.parseToJsonElement(data).jsonObject }.getOrNull() ?: return emptyList()
+        val obj = runCatching { json.parseToJsonElement(payload).jsonObject }.getOrNull() ?: return emptyList()
         val events = mutableListOf<ModelEvent>()
         // Some OpenAI-compatible providers put cumulative usage in a final
         // usage-only frame with `choices: []`. Parse it before looking for a
@@ -99,24 +102,13 @@ object OpenAiSse {
             reasoning?.takeIf { it >= 0 && (output == null || it <= output) }, input, output)
     }
 
-    /** Structural usage metadata only; never returns provider text. */
-    internal fun usageFromLine(line: String): ModelEvent.Usage? {
-        val data = line.trim().takeIf { it.startsWith("data:") }?.removePrefix("data:")?.trim()
-            ?: return null
-        if (data == "[DONE]") return null
-        val obj = runCatching { json.parseToJsonElement(data).jsonObject }.getOrNull() ?: return null
-        val usage = obj["usage"]?.let { runCatching { it.jsonObject }.getOrNull() } ?: return null
-        return usageFromJson(usage)
-    }
-
     /** Structural terminal metadata only; never returns provider text. */
-    internal fun finishReasonFromLine(line: String): String? {
-        val data = line.trim().takeIf { it.startsWith("data:") }?.removePrefix("data:")?.trim()
-            ?: return null
+    internal fun finishReasonFromData(data: String): String? {
+        val payload = data.trim()
         // `[DONE]` is the transport end marker, not a finish reason: a preceding
         // `finish_reason=length` must survive it or the truncation is lost.
-        if (data == "[DONE]") return null
-        val obj = runCatching { json.parseToJsonElement(data).jsonObject }.getOrNull() ?: return null
+        if (payload.isEmpty() || payload == "[DONE]") return null
+        val obj = runCatching { json.parseToJsonElement(payload).jsonObject }.getOrNull() ?: return null
         return obj["choices"]?.let { runCatching { it.jsonArray.firstOrNull()?.jsonObject }.getOrNull() }
             ?.get("finish_reason")?.jsonPrimitive?.contentOrNull
     }

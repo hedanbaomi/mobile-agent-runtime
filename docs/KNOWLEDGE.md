@@ -293,3 +293,7 @@ PDF 解析支持合法紧凑关闭分隔符后紧接 endobj 的对象，保持 s
 ## 2026-10-03 API 查询 attempt 所有权
 
 查询派发前持久化随机 owner token；确定失败、成功清理和 UNKNOWN 更新只对本次 token 且 `retry_authorized=0` 的行作 CAS。旧调用不能覆盖新重试或尚未消费的授权；token 对 UI 隐藏。2026-10-05 的 §4.1 成功证据恢复规则替代旧“已有缓存仍需付费重试授权”的约束；无成功证据的旧无 token 尝试仍需明确授权。早期验证见 [五项复审修复](evidence/2026-10-03/five-review-fixes.md)。
+
+## 2026-10-13：Office 修复与批次规划边界
+
+DOCX/EPUB 提取指纹更新为 `docx-xml-v3` / `epub-xml-v5`，使用有界命名空间 XML 与 container→OPF→spine。旧 Office 当前派生版本须明确重新导入原文件；新检索、当前正文读取和仅重建索引均不能把它当作已修复正文，历史版本仍可明确读取，不自动外发 Vision/API embedding。批次重配将 CAS 读取和规划移出 indexLock/事务，发布前复核身份、版本、generation 和配置，聚合仅查本批次。原 UNKNOWN/取消/复用和显式重配完成批次的行为保留；发布写入和必要计划仍随批次规模增长。见 [ADR-0039](adr/0039-review-parser-stream-and-chat-persistence.md)。

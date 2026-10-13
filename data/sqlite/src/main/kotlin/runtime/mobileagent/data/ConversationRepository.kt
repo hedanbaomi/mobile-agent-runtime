@@ -89,6 +89,22 @@ class ConversationRepository(
 
     fun listArchived(): List<Conversation> = listByArchive(true)
 
+    /** Keyset UI projection. Full durable history remains available to execution and export. */
+    fun page(archived: Boolean = false, after: ConversationCursor? = null, limit: Int = 50): ConversationPage {
+        require(limit in 1..100)
+        val args = mutableListOf<Any?>(if (archived) 1 else 0)
+        val cursor = if (after == null) "" else {
+            requireId(after.id, "conversation cursor")
+            args.addAll(listOf(after.updatedAt, after.updatedAt, after.id))
+            " AND (updated_at < ? OR (updated_at = ? AND id > ?))"
+        }
+        args += limit + 1
+        val rows = db.query("SELECT * FROM conversations WHERE archived=?$cursor ORDER BY updated_at DESC,id LIMIT ?", args)
+            .map { it.toConversation() }
+        val visible = rows.take(limit)
+        return ConversationPage(visible, visible.lastOrNull()?.takeIf { rows.size > limit }?.let { ConversationCursor(it.updatedAt, it.id) })
+    }
+
     private fun listByArchive(archived: Boolean): List<Conversation> =
         db.query("SELECT * FROM conversations WHERE archived=? ORDER BY updated_at DESC,id", listOf(if (archived) 1 else 0))
             .map { it.toConversation() }
@@ -241,6 +257,25 @@ class ConversationRepository(
             .map { it.toMessage(json) }
 
     fun listMessages(conversationId: String): List<Message> = messages(conversationId)
+
+    /** Older pages use the same timestamp/rowid order as the full transcript, including ties. */
+    fun messagePage(conversationId: String, beforeMessageId: String? = null, limit: Int = 50): MessagePage = db.transaction {
+        requireId(conversationId, "conversationId")
+        require(limit in 1..100)
+        val args = mutableListOf<Any?>(conversationId)
+        val before = if (beforeMessageId == null) "" else {
+            requireId(beforeMessageId, "message cursor")
+            val anchor = db.query("SELECT created_at,rowid AS sequence FROM messages WHERE id=? AND conversation_id=?",
+                listOf(beforeMessageId, conversationId)).singleOrNull() ?: throw invalid("Message cursor is no longer available")
+            args.addAll(listOf(anchor.string("created_at"), anchor.string("created_at"), anchor.long("sequence")))
+            " AND (created_at < ? OR (created_at = ? AND rowid < ?))"
+        }
+        args += limit + 1
+        val rows = db.query("SELECT * FROM messages WHERE conversation_id=?$before ORDER BY created_at DESC,rowid DESC LIMIT ?", args)
+            .map { it.toMessage(json) }
+        val visible = rows.take(limit).asReversed()
+        MessagePage(visible, visible.firstOrNull()?.id?.takeIf { rows.size > limit })
+    }
 
     fun updateMessageStatus(messageId: String, status: String): Boolean {
         requireText(status, "status")

@@ -190,35 +190,244 @@ class KnowledgeRepository(
     /** Explicitly commit a reviewed configuration diff; old results/attempts remain intact. */
     fun reconfigureBatchPipeline(batchId: String, targetFingerprint: String, reviewedSummary: PipelineReuseSummary,
         acknowledgeDuplicateCharge: Boolean = false,
-    ): ImportBatch = synchronized(indexLock) {
+    ): ImportBatch {
+        // F07: the reviewed plan is derived outside the repository lock and outside the SQL
+        // transaction. Phase 1 reads durable identity only, phase 2 reads CAS sources and re-parses
+        // one member at a time, and phase 3 re-verifies every fact phase 1 read before publishing
+        // atomically. A conflict rejects instead of overwriting newer state, and no lock is simply
+        // dropped: the commit-time recheck carries the whole consistency contract.
+        val snapshot = batchReconfigurationSnapshot(batchId, targetFingerprint, reviewedSummary, acknowledgeDuplicateCharge)
+        val planned = planBatchReconfiguration(snapshot)
+        check(planned.summary == reviewedSummary) { "Reuse preview changed; review it again" }
+        // A member whose source cannot be re-planned fails the whole review, exactly as the former
+        // in-transaction loop did, instead of silently leaving that member unqueued.
+        planned.failure?.let { throw it }
+        return publishBatchReconfiguration(planned)
+    }
+
+    /** One batch member's durable identity; compared verbatim before the review is published. */
+    private data class BatchReconfigurationMember(
+        val jobId: String,
+        val documentId: String,
+        val blobHash: String,
+        val format: String,
+        val displayName: String,
+        val visionBindingJson: String,
+        val stage: String,
+        val documentVersionId: String,
+        val documentDeletedAt: String,
+        val documentRevision: String,
+        val planFingerprint: String,
+    )
+
+    private data class BatchReconfigurationSnapshot(
+        val batchId: String,
+        val knowledgeBaseId: String,
+        val generationId: String?,
+        val batchRevision: String,
+        val targetFingerprint: String,
+        val acknowledgeDuplicateCharge: Boolean,
+        val members: List<BatchReconfigurationMember>,
+    )
+
+    private data class PlannedBatchReconfigurationMember(
+        val member: BatchReconfigurationMember,
+        val units: List<ProcessingUnit>,
+    )
+
+    private data class PlannedBatchReconfiguration(
+        val snapshot: BatchReconfigurationSnapshot,
+        val summary: PipelineReuseSummary,
+        val failure: Throwable?,
+        val publish: List<PlannedBatchReconfigurationMember>,
+    )
+
+    private data class PlannedReconfigurationSource(val units: List<ProcessingUnit>, val failure: Throwable?)
+
+    /** Everything the publish step re-reads: batch state/authorization, generation and members. */
+    private fun batchReconfigurationRevision(batch: SqlRow): String = listOf(
+        batch.string("state"), batch.string("staging_complete"), batch.string("vision_target"),
+        batch.string("vision_scope_hash"), batch.string("vision_authorized_at"),
+    ).joinToString("|")
+
+    /**
+     * Member identity includes the document revision and the pipeline plan/cache fingerprint, so a
+     * concurrent re-import, re-plan or newly cached result is a conflict. `active_version_id` is part
+     * of that identity because an equal content hash does not imply an equal revision.
+     */
+    private fun batchReconfigurationMembers(batchId: String): List<BatchReconfigurationMember> = db.query(
+        """
+        SELECT j.id AS job_id, j.document_id AS document_id, j.vision_binding_json AS vision_binding_json,
+               j.stage AS stage, j.display_name AS display_name,
+               d.format AS format, d.blob_hash AS blob_hash,
+               COALESCE(d.active_version_id,'') AS version_id,
+               COALESCE(d.deleted_at,'') AS document_deleted_at,
+               COALESCE(v.parser_fingerprint,'')||'|'||COALESCE(v.content_hash,'') AS document_revision,
+               COALESCE(p.planner_version,'')||'|'||COALESCE(p.result_version,'')||'|'||COALESCE(p.content_hash,'')||'|'||COALESCE(p.plan_hash,'')
+                 ||'|'||COALESCE(u.unit_count,0)||'|'||COALESCE(u.published_count,0)||'|'||COALESCE(r.result_count,0) AS plan_fingerprint
+        FROM import_jobs j
+        JOIN documents d ON d.id = j.document_id
+        LEFT JOIN document_versions v ON v.id = d.active_version_id AND v.document_id = d.id
+        LEFT JOIN pipeline_plans p ON p.job_id = j.id
+        LEFT JOIN (SELECT job_id, COUNT(*) AS unit_count, SUM(published) AS published_count
+                   FROM pipeline_units WHERE active = 1 AND job_id IN (SELECT id FROM import_jobs WHERE batch_id = ?)
+                   GROUP BY job_id) u ON u.job_id = j.id
+        LEFT JOIN (SELECT job_id, COUNT(*) AS result_count FROM pipeline_results
+                   WHERE job_id IN (SELECT id FROM import_jobs WHERE batch_id = ?) GROUP BY job_id) r ON r.job_id = j.id
+        WHERE j.batch_id = ?
+        ORDER BY j.id
+        """.trimIndent(),
+        listOf(batchId, batchId, batchId),
+    ).map { row ->
+        BatchReconfigurationMember(
+            jobId = row.string("job_id"),
+            documentId = row.string("document_id"),
+            blobHash = row.string("blob_hash"),
+            format = row.string("format"),
+            displayName = row.string("display_name"),
+            visionBindingJson = row.string("vision_binding_json"),
+            stage = row.string("stage"),
+            documentVersionId = row.string("version_id"),
+            documentDeletedAt = row.string("document_deleted_at"),
+            documentRevision = row.string("document_revision"),
+            planFingerprint = row.string("plan_fingerprint"),
+        )
+    }
+
+    /** Phase 1: cheap durable preconditions and member identity. No CAS read and no parse here. */
+    private fun batchReconfigurationSnapshot(batchId: String, targetFingerprint: String,
+        reviewedSummary: PipelineReuseSummary, acknowledgeDuplicateCharge: Boolean,
+    ): BatchReconfigurationSnapshot = synchronized(indexLock) {
         check(findBatch(batchId) != null) { "Batch not found" }
-        check(db.query("SELECT staging_complete FROM import_batches WHERE id=?",listOf(batchId)).single().boolean("staging_complete")) { "Batch membership is still being staged" }
-        check(batchReuseSummary(batchId,targetFingerprint) == reviewedSummary) { "Reuse preview changed; review it again" }
+        val batch = db.query(
+            "SELECT kb_id,generation_id,state,staging_complete,vision_target,vision_scope_hash,vision_authorized_at FROM import_batches WHERE id=?",
+            listOf(batchId),
+        ).single()
+        check(batch.boolean("staging_complete")) { "Batch membership is still being staged" }
         check(reviewedSummary.unknown == 0 || acknowledgeDuplicateCharge) { "UNKNOWN_OUTCOME requires separate duplicate-charge acknowledgement" }
         check(visionTargetAvailable(targetFingerprint)) { "Vision destination changed" }
         check(batchId !in activeBatchWorkers) { "Pause and wait for current work before reconfiguration" }
         check(pipeline.stopReason(null) != "PIPELINE_MAX_CONCURRENCY") { "Wait for in-flight work" }
-        check(findBatch(batchId)?.state != ImportBatchState.CANCELLED) { "Cancelled batch cannot be restarted" }
-        db.transaction {
-            check(pipeline.stopReason(null) != "PIPELINE_MAX_CONCURRENCY") { "Wait for in-flight work" }
-            db.query("SELECT j.id,j.document_id,j.vision_binding_json,j.display_name,d.format,d.blob_hash FROM import_jobs j JOIN documents d ON d.id=j.document_id WHERE j.batch_id=?",listOf(batchId)).forEach { row ->
-                val bytes=blobs.get(row.string("blob_hash")) ?: error("CAS source missing")
-                val units=planSource(bytes,row.string("format"),row.string("display_name"),targetFingerprint)
-                val diff=pipeline.reuse(row.string("id"),units,targetFingerprint,chunkVersion)
-                if(diff.newRequests>0 || diff.localRebuild>0 || diff.unknown>0 || (acknowledgeDuplicateCharge && units.any { hasLegacyVisionUnknown(row.string("id"),row.string("document_id"),it.page,targetFingerprint) })) {
-                    if (acknowledgeDuplicateCharge) {
-                        pipeline.authorizeUnknown(row.string("id"))
-                        db.execute("DELETE FROM vision_results WHERE status='UNKNOWN_OUTCOME' AND EXISTS(SELECT 1 FROM assets a WHERE a.document_id=? AND a.blob_hash=vision_results.asset_hash AND a.surrounding_text_hash=vision_results.context_hash) AND (model_fingerprint=? OR model_fingerprint=? OR EXISTS(SELECT 1 FROM vision_attempts old WHERE old.job_id=? AND old.cache_key=vision_results.cache_key))",
-                            listOf(row.string("document_id"),row.string("vision_binding_json"),targetFingerprint,row.string("id")))
-                    }
-                    pipeline.materialize(row.string("id"),row.string("blob_hash"),plannerVersion,units)
-                    pipeline.selectTarget(row.string("id"),targetFingerprint)
-                    db.execute("UPDATE import_jobs SET stage='COPYING',error=NULL,vision_binding_json=?,vision_consent=1 WHERE id=?",listOf(targetFingerprint,row.string("id")))
-                    db.execute("UPDATE import_items SET state='QUEUED',error=NULL WHERE batch_id=? AND job_id=?",listOf(batchId,row.string("id")))
-                }
+        check(batch.string("state") != ImportBatchState.CANCELLED.name) { "Cancelled batch cannot be restarted" }
+        BatchReconfigurationSnapshot(
+            batchId = batchId,
+            knowledgeBaseId = batch.string("kb_id"),
+            generationId = batch.string("generation_id").ifBlank { null },
+            batchRevision = batchReconfigurationRevision(batch),
+            targetFingerprint = targetFingerprint,
+            acknowledgeDuplicateCharge = acknowledgeDuplicateCharge,
+            members = batchReconfigurationMembers(batchId),
+        )
+    }
+
+    /**
+     * Phase 2: read CAS sources and re-parse one member at a time while holding neither the
+     * repository lock nor a SQL transaction, so a concurrent conversation write, pause, cancel,
+     * delete or plan change is free to proceed. Source bytes stay scoped to the member being planned;
+     * only members whose plan actually changes retain their planned units for the publish step.
+     */
+    private fun planBatchReconfiguration(snapshot: BatchReconfigurationSnapshot): PlannedBatchReconfiguration {
+        var summary = PipelineReuseSummary(plannerVersion = plannerVersion, chunkVersion = chunkVersion)
+        var failure: Throwable? = null
+        val publish = mutableListOf<PlannedBatchReconfigurationMember>()
+        val target = snapshot.targetFingerprint
+        snapshot.members.forEach { member ->
+            val planned = planReconfigurationSource(member, target)
+            if (planned.failure != null && failure == null) failure = planned.failure
+            val candidates = planned.units
+            if (candidates.isEmpty()) {
+                summary = summary.copy(unplannedFiles = summary.unplannedFiles + 1)
+                return@forEach
             }
-            db.execute("UPDATE import_batches SET state='PROCESSING',error=NULL,blocked_reason=NULL,paused_at=NULL WHERE id=?",listOf(batchId))
-            authorizeBatchVision(batchId,targetFingerprint)
+            val legacyUnknown = candidates.filter {
+                it.requiresVision && hasLegacyVisionUnknown(member.jobId, member.documentId, it.page, target)
+            }
+            val reviewed = pipeline.reuse(member.jobId, candidates - legacyUnknown.toSet(), target, chunkVersion)
+            summary = summary.copy(
+                directReuse = summary.directReuse + reviewed.directReuse,
+                localRebuild = summary.localRebuild + reviewed.localRebuild,
+                newRequests = summary.newRequests + reviewed.newRequests,
+                unknown = summary.unknown + reviewed.unknown + legacyUnknown.size,
+            )
+            val decision = pipeline.reuse(member.jobId, candidates, target, chunkVersion)
+            if (decision.newRequests > 0 || decision.localRebuild > 0 || decision.unknown > 0 ||
+                (snapshot.acknowledgeDuplicateCharge && legacyUnknown.isNotEmpty())
+            ) {
+                publish += PlannedBatchReconfigurationMember(member, candidates)
+            }
+        }
+        return PlannedBatchReconfiguration(snapshot, summary, failure, publish)
+    }
+
+    /** Re-extract parser metadata only: no bitmap or provider work, and no repository lock. */
+    private fun planReconfigurationSource(member: BatchReconfigurationMember, target: String): PlannedReconfigurationSource {
+        val bytes = blobs.get(member.blobHash)
+            ?: return PlannedReconfigurationSource(emptyList(), error("CAS source missing"))
+        return runCatching { planSource(bytes, member.format, member.displayName, target) }
+            .fold({ PlannedReconfigurationSource(it, null) }, { PlannedReconfigurationSource(emptyList(), it) })
+    }
+
+    /**
+     * Phase 3: re-verify every fact phase 1 read and only then publish, in one short transaction.
+     * Anything that changed - cancellation, deletion, a new revision or generation, a different
+     * plan/cache fingerprint, new in-flight work - rejects the review instead of overwriting it.
+     * The delete/acknowledgement and the batch authorization stay inside this transaction, so a
+     * failure rolls the whole reconfiguration back.
+     */
+    private fun publishBatchReconfiguration(planned: PlannedBatchReconfiguration): ImportBatch {
+        val snapshot = planned.snapshot
+        return synchronized(indexLock) {
+            db.transaction {
+                verifyBatchReconfigurationUnchanged(snapshot)
+                planned.publish.forEach { ready ->
+                    val member = ready.member
+                    if (snapshot.acknowledgeDuplicateCharge) {
+                        pipeline.authorizeUnknown(member.jobId)
+                        db.execute("DELETE FROM vision_results WHERE status='UNKNOWN_OUTCOME' AND EXISTS(SELECT 1 FROM assets a WHERE a.document_id=? AND a.blob_hash=vision_results.asset_hash AND a.surrounding_text_hash=vision_results.context_hash) AND (model_fingerprint=? OR model_fingerprint=? OR EXISTS(SELECT 1 FROM vision_attempts old WHERE old.job_id=? AND old.cache_key=vision_results.cache_key))",
+                            listOf(member.documentId, member.visionBindingJson, snapshot.targetFingerprint, member.jobId))
+                    }
+                    pipeline.materialize(member.jobId, member.blobHash, plannerVersion, ready.units)
+                    pipeline.selectTarget(member.jobId, snapshot.targetFingerprint)
+                    db.execute("UPDATE import_jobs SET stage='COPYING',error=NULL,vision_binding_json=?,vision_consent=1 WHERE id=?",
+                        listOf(snapshot.targetFingerprint, member.jobId))
+                    db.execute("UPDATE import_items SET state='QUEUED',error=NULL WHERE batch_id=? AND job_id=?",
+                        listOf(snapshot.batchId, member.jobId))
+                }
+                db.execute("UPDATE import_batches SET state='PROCESSING',error=NULL,blocked_reason=NULL,paused_at=NULL WHERE id=?",
+                    listOf(snapshot.batchId))
+                authorizeBatchVision(snapshot.batchId, snapshot.targetFingerprint)
+            }
+        }
+    }
+
+    private fun verifyBatchReconfigurationUnchanged(snapshot: BatchReconfigurationSnapshot) {
+        val batch = db.query(
+            "SELECT kb_id,generation_id,state,staging_complete,vision_target,vision_scope_hash,vision_authorized_at FROM import_batches WHERE id=?",
+            listOf(snapshot.batchId),
+        ).singleOrNull() ?: error("Batch not found")
+        check(batch.string("kb_id") == snapshot.knowledgeBaseId) { "Batch membership changed; review the reuse preview again" }
+        check(batch.boolean("staging_complete")) { "Batch membership is still being staged" }
+        check(batch.string("state") != ImportBatchState.CANCELLED.name) { "Cancelled batch cannot be restarted" }
+        check(batchReconfigurationRevision(batch) == snapshot.batchRevision) {
+            "Batch state or authorization changed while the review was being planned; review it again"
+        }
+        check(visionTargetAvailable(snapshot.targetFingerprint)) { "Vision destination changed" }
+        check(snapshot.batchId !in activeBatchWorkers) { "Pause and wait for current work before reconfiguration" }
+        check(pipeline.stopReason(null) != "PIPELINE_MAX_CONCURRENCY") { "Wait for in-flight work" }
+        val knowledgeBase = db.query("SELECT deleted_at,active_generation_id FROM knowledge_bases WHERE id=?",
+            listOf(snapshot.knowledgeBaseId)).singleOrNull() ?: error("Knowledge base not found")
+        check(knowledgeBase.string("deleted_at").isBlank()) {
+            "Knowledge base was deleted while the review was being planned; nothing was reconfigured"
+        }
+        check(knowledgeBase.string("active_generation_id").ifBlank { null } == snapshot.generationId) {
+            "Knowledge base generation changed; review the reuse preview again"
+        }
+        val current = batchReconfigurationMembers(snapshot.batchId)
+        check(current.size == snapshot.members.size) { "Batch membership changed; review the reuse preview again" }
+        current.forEachIndexed { index, member ->
+            check(member == snapshot.members[index]) {
+                "Batch member ${snapshot.members[index].jobId} changed while the review was being planned; review it again"
+            }
         }
     }
 
@@ -1678,6 +1887,12 @@ class KnowledgeRepository(
         // scales are never mixed by raw score.
         val sources = mutableListOf<List<SearchHit>>()
         for (kbId in bases) {
+            if (staleOfficeDerivatives(db, kbId)) {
+                warnings += OFFICE_REPARSE_REQUIRED
+                unavailable += UnavailableSource(kbId, RetrievalUnavailableReason.GENERATION_NOT_READY)
+                usedPins[kbId] = runtime.mobileagent.domain.KnowledgePin(kbId, null, "")
+                continue
+            }
             try {
                 upgradeLocalEmbeddingSpace(kbId)
             } catch (cancelled: CancellationException) {
@@ -1856,15 +2071,16 @@ class KnowledgeRepository(
         require(offset >= 0) { "Document offset must be nonnegative" }
         require(offset == 0 || !expectedVersion.isNullOrBlank()) { "DOCUMENT_VERSION_REQUIRED: continuation requires expectedVersion" }
         val empty = KnowledgeDocumentRange("", offset, null, 0)
-        val document = db.query("SELECT active_version_id, deleted_at, kb_id FROM documents WHERE id = ?", listOf(documentId)).singleOrNull()
+        val document = db.query("SELECT active_version_id, deleted_at, kb_id,format FROM documents WHERE id = ?", listOf(documentId)).singleOrNull()
             ?: return@transaction empty
         if (document.string("deleted_at").isNotBlank()) return@transaction empty
         if (allowedKnowledgeBaseIds != null && document.string("kb_id") !in allowedKnowledgeBaseIds) return@transaction empty
         val version = expectedVersion ?: document.string("active_version_id")
         if (version.isBlank()) return@transaction empty
-        val published = db.query("SELECT document_id, status FROM document_versions WHERE id = ?", listOf(version)).singleOrNull()
+        val published = db.query("SELECT document_id, status,parser_fingerprint FROM document_versions WHERE id = ?", listOf(version)).singleOrNull()
         require(published != null && published.string("document_id") == documentId &&
             published.string("status") in setOf("READY", "READY_WITH_VISUAL_GAPS")) { "DOCUMENT_VERSION_UNAVAILABLE" }
+        checkOfficeReadFingerprint(expectedVersion, document.string("format"), published.string("parser_fingerprint"))
         val range = ChunkTextMetadata.read(db, version, maxChars, offset)
         KnowledgeDocumentRange(range.text, range.offset, range.nextOffset, range.totalChars, version)
     }
@@ -1966,6 +2182,7 @@ class KnowledgeRepository(
         allowTerminalImports: Boolean = false,
         publishingDocumentId: String? = null,
     ): String? {
+        if (staleOfficeDerivatives(db, kbId, publishingDocumentId)) return OFFICE_REPARSE_REQUIRED
         val documents = db.query(
             """
             SELECT d.id AS document_id, d.active_version_id AS version_id, v.status AS version_status,

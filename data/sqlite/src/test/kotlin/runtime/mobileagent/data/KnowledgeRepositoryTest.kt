@@ -1769,6 +1769,8 @@ class KnowledgeRepositoryTest {
         val repo = KnowledgeRepository(db, MemoryBlobSink())
         val zip = zipBytesNamed(
             "mimetype" to "application/epub+zip",
+            "META-INF/container.xml" to """<container xmlns="urn:oasis:names:tc:opendocument:xmlns:container" version="1.0"><rootfiles><rootfile full-path="OPS/content.opf" media-type="application/oebps-package+xml"/></rootfiles></container>""",
+            "OPS/content.opf" to """<package xmlns="http://www.idpf.org/2007/opf" version="3.0"><manifest><item id="ch1" href="ch1.xhtml" media-type="application/xhtml+xml"/></manifest><spine><itemref idref="ch1"/></spine></package>""",
             "OPS/ch1.xhtml" to "<html><body><p>EPUB mentions USearch JNI</p></body></html>",
         )
         val job = repo.importBytes("book.epub", "application/epub+zip", zip, false)
@@ -2424,6 +2426,8 @@ class KnowledgeRepositoryTest {
         val pngB = byteArrayOf(0x89.toByte(), 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A) + "MARK-B".toByteArray()
         val zip = zipNamedBytes(
             "mimetype" to "application/epub+zip".toByteArray(),
+            "META-INF/container.xml" to """<container xmlns="urn:oasis:names:tc:opendocument:xmlns:container" version="1.0"><rootfiles><rootfile full-path="OPS/content.opf" media-type="application/oebps-package+xml"/></rootfiles></container>""".toByteArray(),
+            "OPS/content.opf" to """<package xmlns="http://www.idpf.org/2007/opf" version="3.0"><manifest><item id="c0" href="ch1/chapter.xhtml" media-type="application/xhtml+xml"/><item id="c1" href="ch2/chapter.xhtml" media-type="application/xhtml+xml"/></manifest><spine><itemref idref="c0"/><itemref idref="c1"/></spine></package>""".toByteArray(),
             "OPS/ch1/chapter.xhtml" to "<html><body><p>chapter-one-unique</p><img src=\"images/fig.png\"/></body></html>".toByteArray(),
             "OPS/ch2/chapter.xhtml" to "<html><body><p>chapter-two-unique</p><img src=\"images/fig.png\"/></body></html>".toByteArray(),
             "OPS/ch1/images/fig.png" to pngA,

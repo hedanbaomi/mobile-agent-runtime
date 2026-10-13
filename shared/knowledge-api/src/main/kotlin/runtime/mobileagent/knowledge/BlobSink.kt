@@ -149,6 +149,14 @@ private fun protection(counts: MutableMap<String, Int>, hash: String, lock: ((()
     }
 }
 
-fun sha256Hex(bytes: ByteArray): String =
-    java.security.MessageDigest.getInstance("SHA-256").digest(bytes)
-        .joinToString("") { "%02x".format(it.toInt() and 0xFF) }
+fun sha256Hex(bytes: ByteArray): String {
+    val digest = java.security.MessageDigest.getInstance("SHA-256").digest(bytes)
+    val alphabet = "0123456789abcdef"
+    val hex = CharArray(digest.size * 2)
+    digest.forEachIndexed { index, byte ->
+        val value = byte.toInt() and 0xFF
+        hex[index * 2] = alphabet[value ushr 4]
+        hex[index * 2 + 1] = alphabet[value and 0x0F]
+    }
+    return hex.concatToString()
+}

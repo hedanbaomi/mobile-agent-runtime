@@ -46,11 +46,11 @@
       "runtime.mobileagent.KnowledgeImportLifecycleTest"
     ],
     "full": [
+      "runtime.mobileagent.ApiEmbeddingDeviceTest",
       "runtime.mobileagent.AgentsConversationRoutingDeviceTest",
       "runtime.mobileagent.AgentsGrantUiTest",
       "runtime.mobileagent.AnnouncementRefreshCoordinatorTest",
       "runtime.mobileagent.AnnouncementsLayoutTest",
-      "runtime.mobileagent.ApiEmbeddingDeviceTest",
       "runtime.mobileagent.AppLocalizedResourcesDeviceTest",
       "runtime.mobileagent.AppUpdateDeviceTest",
       "runtime.mobileagent.ArchiveNavigationDeviceTest",
@@ -161,5 +161,8 @@
     "runtime.mobileagent.resident.ResidentAdbProcessRestartDeviceTest": "Requires host-orchestrated app/daemon kills, seeded phases and explicit disposable-device activation.",
     "runtime.mobileagent.resident.ResidentAdbDirectoryReattachDeviceTest": "Requires explicit disposable-device resident activation and daemon replacement.",
     "runtime.mobileagent.resident.RuntimeResidentToolExposureDeviceTest": "Requires explicit disposable non-debuggable review device via requireReview."
-  }
+  },
+  "fresh_host_first": [
+    "runtime.mobileagent.ApiEmbeddingDeviceTest"
+  ]
 }

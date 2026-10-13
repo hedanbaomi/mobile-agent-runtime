@@ -127,13 +127,17 @@ class GlobalConversationUiTest {
             ),
         )
         compose.setContent {
-            CompositionLocalProvider(LocalDensity provides Density(1f, fontScale = 1.8f)) {
-                MaterialTheme {
-                    Box(Modifier.width(320.dp).height(640.dp)) {
-                        ConversationScreen(
-                            state = state,
-                            actions = ChatActions(onNewSessionForWorkspace = { requested += it }),
-                        )
+            // The production shell resolves string resources against the UI-state language;
+            // keep the same contract so this large-font layout check runs on the intended copy.
+            runtime.mobileagent.ui.AppLocalizedResources(state.language) {
+                CompositionLocalProvider(LocalDensity provides Density(1f, fontScale = 1.8f)) {
+                    MaterialTheme {
+                        Box(Modifier.width(320.dp).height(640.dp)) {
+                            ConversationScreen(
+                                state = state,
+                                actions = ChatActions(onNewSessionForWorkspace = { requested += it }),
+                            )
+                        }
                     }
                 }
             }

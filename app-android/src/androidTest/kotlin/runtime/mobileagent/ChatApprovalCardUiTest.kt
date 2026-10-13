@@ -37,12 +37,17 @@ class ChatApprovalCardUiTest {
         val summary = (1..80).joinToString(separator = "\n") { index ->
             "请求参数详情第 $index 行：该工具可能读取并发送受限数据。"
         }
+        val state = approvalState(summary = summary, language = "zh-CN", externalEffect = true)
         compose.setContent {
-            MaterialTheme {
-                ChatScreen(
-                    state = approvalState(summary = summary, language = "zh-CN", externalEffect = true),
-                    actions = ChatActions(onToolApproval = { choices += it }),
-                )
+            // The production shell resolves string resources against the UI-state language;
+            // a direct ChatScreen call must keep the same contract (see UiTestLocaleSupport.kt).
+            runtime.mobileagent.ui.AppLocalizedResources(state.language) {
+                MaterialTheme {
+                    ChatScreen(
+                        state = state,
+                        actions = ChatActions(onToolApproval = { choices += it }),
+                    )
+                }
             }
         }
 
@@ -60,16 +65,19 @@ class ChatApprovalCardUiTest {
     @Test
     fun shortEnglishDetailsKeepSecurityCopyAndActionsVisible() {
         val choices = mutableListOf<ToolApprovalChoice>()
+        val state = approvalState(
+            summary = "The tool will inspect the selected document.",
+            language = "en-US",
+            externalEffect = true,
+        )
         compose.setContent {
-            MaterialTheme {
-                ChatScreen(
-                    state = approvalState(
-                        summary = "The tool will inspect the selected document.",
-                        language = "en-US",
-                        externalEffect = true,
-                    ),
-                    actions = ChatActions(onToolApproval = { choices += it }),
-                )
+            runtime.mobileagent.ui.AppLocalizedResources(state.language) {
+                MaterialTheme {
+                    ChatScreen(
+                        state = state,
+                        actions = ChatActions(onToolApproval = { choices += it }),
+                    )
+                }
             }
         }
 

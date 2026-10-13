@@ -9,6 +9,9 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.ui.ExperimentalComposeUiApi
+import androidx.compose.ui.platform.InterceptPlatformTextInput
+import androidx.compose.ui.platform.PlatformTextInputInterceptor
 import androidx.compose.ui.test.assertTextEquals
 import androidx.compose.ui.test.ExperimentalTestApi
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
@@ -23,11 +26,14 @@ import androidx.compose.ui.test.SemanticsMatcher
 import androidx.compose.ui.test.assert
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
+import org.junit.Assert.assertSame
+import kotlinx.coroutines.awaitCancellation
+import java.util.concurrent.atomic.AtomicReference
 import org.junit.Rule
 import org.junit.Test
 import runtime.mobileagent.feature.chat.*
 
-@OptIn(ExperimentalTestApi::class)
+@OptIn(ExperimentalTestApi::class, ExperimentalComposeUiApi::class)
 class ChatImeResponsivenessDeviceTest {
     @get:Rule val compose = createAndroidComposeRule<ComposeTestHostActivity>()
 
@@ -42,10 +48,12 @@ class ChatImeResponsivenessDeviceTest {
             val presentation by rememberConversationPresentation(source)
             val shellState = presentation
             SideEffect { shellCompositions++ }
-            MaterialTheme { ConversationScreen(shellState,
-                actions = ChatActions(onInput = { source.value = source.value.copy(input = it) },
-                    onSend = { source.value = source.value.copy(input = "") }),
-                input = { source.value.input }) }
+            runtime.mobileagent.ui.AppLocalizedResources(shellState.language) {
+                MaterialTheme { ConversationScreen(shellState,
+                    actions = ChatActions(onInput = { source.value = source.value.copy(input = it) },
+                        onSend = { source.value = source.value.copy(input = "") }),
+                    input = { source.value.input }) }
+            }
         }
         compose.onNodeWithTag("conversation.composer.input").performClick()
         compose.waitForIdle()
@@ -68,27 +76,39 @@ class ChatImeResponsivenessDeviceTest {
 
     @Test fun androidInputConnectionKeepsChineseCompositionAcrossTaskUpdates() {
         val source = mutableStateOf(ChatUiState(selectedSessionId = "composition", language = "zh-CN"))
+        val inputConnection = AtomicReference<InputConnection>()
+        // Capture the real Compose request before forwarding to the platform
+        // IME. This fixture is the only IME writer, without system settings.
+        val interceptor = PlatformTextInputInterceptor { request, _ ->
+            inputConnection.set(request.createInputConnection(EditorInfo()))
+            awaitCancellation()
+        }
         compose.setContent {
             val presentation by rememberConversationPresentation(source)
-            MaterialTheme { ConversationScreen(presentation,
-                actions = ChatActions(onInput = { source.value = source.value.copy(input = it) }),
-                input = { source.value.input }) }
+            runtime.mobileagent.ui.AppLocalizedResources(presentation.language) {
+                InterceptPlatformTextInput(interceptor) {
+                MaterialTheme { ConversationScreen(presentation,
+                    actions = ChatActions(onInput = { source.value = source.value.copy(input = it) }),
+                    input = { source.value.input }) }
+                }
+            }
         }
         val field = compose.onNodeWithTag("conversation.composer.input")
         field.performClick()
-        lateinit var connection: InputConnection
-        compose.runOnIdle {
-            connection = requireNotNull(compose.activity.window.decorView.findFocus().onCreateInputConnection(EditorInfo()))
-            assertTrue(connection.setComposingText("ni", 1))
-        }
-        field.assertTextEquals("ni")
-        compose.runOnIdle { source.value = source.value.copy(status = "任务状态更新") }
-        compose.runOnIdle { assertTrue(connection.setComposingText("你", 1)) }
-        field.assertTextEquals("你")
-        compose.runOnIdle { assertTrue(connection.setComposingText("你好", 1)) }
-        field.assertTextEquals("你好")
-        compose.runOnIdle { assertTrue(connection.finishComposingText()) }
-        field.performTextInput("！")
-        field.assertTextEquals("你好！")
+        compose.waitUntil(5_000) { inputConnection.get() != null }
+        val connection = requireNotNull(inputConnection.get())
+            compose.runOnIdle {
+                assertTrue(connection.setComposingText("ni", 1))
+            }
+            field.assertTextEquals("ni")
+            compose.runOnIdle { source.value = source.value.copy(status = "任务状态更新") }
+            compose.runOnIdle { assertSame("Task updates must preserve the IME session", connection, inputConnection.get()) }
+            compose.runOnIdle { assertTrue(connection.setComposingText("你", 1)) }
+            field.assertTextEquals("你")
+            compose.runOnIdle { assertTrue(connection.setComposingText("你好", 1)) }
+            field.assertTextEquals("你好")
+            compose.runOnIdle { assertTrue(connection.finishComposingText()) }
+            field.performTextInput("！")
+            field.assertTextEquals("你好！")
     }
 }

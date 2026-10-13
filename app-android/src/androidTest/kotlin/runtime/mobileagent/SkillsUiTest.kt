@@ -44,10 +44,15 @@ class SkillsUiTest {
 
     @Test
     fun narrowScreenKeepsLongSkillDetailsScrollable() {
+        val state = longState()
         compose.setContent {
-            Box(Modifier.width(320.dp).height(640.dp)) {
-                MaterialTheme {
-                    SkillsScreen(longState())
+            // The production shell resolves string resources against the UI-state language;
+            // a direct SkillsScreen call must keep the same contract (see UiTestLocaleSupport.kt).
+            runtime.mobileagent.ui.AppLocalizedResources(state.language) {
+                Box(Modifier.width(320.dp).height(640.dp)) {
+                    MaterialTheme {
+                        SkillsScreen(state)
+                    }
                 }
             }
         }
@@ -60,11 +65,14 @@ class SkillsUiTest {
 
     @Test
     fun largeFontKeepsPermissionControlsInScrollableContent() {
+        val state = longState()
         compose.setContent {
-            CompositionLocalProvider(LocalDensity provides Density(1f, fontScale = 2f)) {
-                Box(Modifier.width(320.dp).height(640.dp)) {
-                    MaterialTheme {
-                        SkillsScreen(longState())
+            runtime.mobileagent.ui.AppLocalizedResources(state.language) {
+                CompositionLocalProvider(LocalDensity provides Density(1f, fontScale = 2f)) {
+                    Box(Modifier.width(320.dp).height(640.dp)) {
+                        MaterialTheme {
+                            SkillsScreen(state)
+                        }
                     }
                 }
             }
@@ -87,9 +95,12 @@ class SkillsUiTest {
         val availability = mutableStateOf(states.first().first)
 
         compose.setContent {
-            Box(Modifier.width(320.dp).height(640.dp)) {
-                MaterialTheme {
-                    SkillsScreen(stateWithMemory(SkillMemoryUi(availability = availability.value)))
+            val state = stateWithMemory(SkillMemoryUi(availability = availability.value))
+            runtime.mobileagent.ui.AppLocalizedResources(state.language) {
+                Box(Modifier.width(320.dp).height(640.dp)) {
+                    MaterialTheme {
+                        SkillsScreen(state)
+                    }
                 }
             }
         }
@@ -108,11 +119,14 @@ class SkillsUiTest {
 
     @Test
     fun memoryStatusRemainsReachableAtLargeFont() {
+        val state = stateWithMemory(SkillMemoryUi(availability = SkillMemoryAvailability.GRANT_LOST))
         compose.setContent {
-            CompositionLocalProvider(LocalDensity provides Density(1f, fontScale = 2f)) {
-                Box(Modifier.width(320.dp).height(640.dp)) {
-                    MaterialTheme {
-                        SkillsScreen(stateWithMemory(SkillMemoryUi(availability = SkillMemoryAvailability.GRANT_LOST)))
+            runtime.mobileagent.ui.AppLocalizedResources(state.language) {
+                CompositionLocalProvider(LocalDensity provides Density(1f, fontScale = 2f)) {
+                    Box(Modifier.width(320.dp).height(640.dp)) {
+                        MaterialTheme {
+                            SkillsScreen(state)
+                        }
                     }
                 }
             }
@@ -128,27 +142,28 @@ class SkillsUiTest {
     @Test
     fun expandedInstructionsAndSourceListDoNotRenderRawSecretsOrAbsolutePaths() {
         val secret = "TOP_SECRET_VALUE_123"
+        val state = SkillsUiState(
+            selectedInstallId = "install-id",
+            detail = SkillDetailUi(
+                skill = SkillUi(
+                    installId = "install-id",
+                    name = "safe skill",
+                    classification = "B",
+                    enabled = true,
+                    license = "AGPL-3.0-only",
+                    packageHash = "a".repeat(64),
+                ),
+                preview = "authorization=$secret",
+                manifestJson = "{\"apiKey\":\"$secret\",\"endpoint\":\"https://private.example\"}",
+                files = listOf(SkillSourceFileUi("/sdcard/private/$secret.txt")),
+            ),
+        )
         compose.setContent {
-            Box(Modifier.width(320.dp).height(640.dp)) {
-                MaterialTheme {
-                    SkillsScreen(
-                        SkillsUiState(
-                            selectedInstallId = "install-id",
-                            detail = SkillDetailUi(
-                                skill = SkillUi(
-                                    installId = "install-id",
-                                    name = "safe skill",
-                                    classification = "B",
-                                    enabled = true,
-                                    license = "AGPL-3.0-only",
-                                    packageHash = "a".repeat(64),
-                                ),
-                                preview = "authorization=$secret",
-                                manifestJson = "{\"apiKey\":\"$secret\",\"endpoint\":\"https://private.example\"}",
-                                files = listOf(SkillSourceFileUi("/sdcard/private/$secret.txt")),
-                            ),
-                        ),
-                    )
+            runtime.mobileagent.ui.AppLocalizedResources(state.language) {
+                Box(Modifier.width(320.dp).height(640.dp)) {
+                    MaterialTheme {
+                        SkillsScreen(state)
+                    }
                 }
             }
         }
@@ -169,9 +184,12 @@ class SkillsUiTest {
 
     @Test
     fun skillHomeIsConciseAndInstructionsExpandOnDemand() {
+        val state = longState()
         compose.setContent {
-            Box(Modifier.width(320.dp).height(640.dp)) {
-                MaterialTheme { SkillsScreen(longState()) }
+            runtime.mobileagent.ui.AppLocalizedResources(state.language) {
+                Box(Modifier.width(320.dp).height(640.dp)) {
+                    MaterialTheme { SkillsScreen(state) }
+                }
             }
         }
         compose.onNodeWithText("访问边界摘要", useUnmergedTree = true).assertDoesNotExist()

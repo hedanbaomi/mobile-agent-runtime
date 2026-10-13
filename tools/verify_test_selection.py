@@ -51,6 +51,16 @@ def violations(root: pathlib.Path, manifest: dict) -> list[str]:
             errors.append(f"manual-only class is selected by CI: {target}")
     if set(suites["full"]) != actual - set(manual):
         errors.append("full suite must explicitly include every non-manual test class")
+    # These fixtures intentionally require the deferred app host and build their
+    # own synthetic storage. Keep them ahead of tests that initialize the host;
+    # never remove their safety guard to make combined execution pass.
+    fresh = manifest.get("fresh_host_first", [])
+    if len(fresh) != len(set(fresh)) or any(target not in actual - set(manual) for target in fresh):
+        errors.append("fresh-host targets must be distinct non-manual test classes")
+    for name, classes in suites.items():
+        required = [target for target in fresh if target in classes]
+        if classes[:len(required)] != required:
+            errors.append(f"{name}: fresh-host tests must run before host-initializing fixtures")
     workflow = (root / ".github/workflows/ci.yml").read_text(encoding="utf-8")
     for name in ("smoke", "convergence", "pipeline"):
         if ",".join(suites[name]) not in workflow:

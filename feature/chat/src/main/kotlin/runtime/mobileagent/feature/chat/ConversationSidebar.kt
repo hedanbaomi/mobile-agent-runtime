@@ -29,6 +29,9 @@ import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
+import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.ui.platform.LocalConfiguration
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -257,7 +260,10 @@ internal fun ChatWorkspaceAccessSheet(
     onOpenAgentSettings: () -> Unit,
 ) {
     val display = state.localized(zh)
+    val context = LocalContext.current
+    val configuration = LocalConfiguration.current
     ModalBottomSheet(onDismissRequest = onDismiss) {
+        CompositionLocalProvider(LocalContext provides context, LocalConfiguration provides configuration) {
         Column(
             Modifier
                 .fillMaxWidth()
@@ -292,6 +298,7 @@ internal fun ChatWorkspaceAccessSheet(
                 Text(stringResource(R.string.ui_manage_agent_workspace_a54c525c))
             }
             Spacer(Modifier.height(20.dp))
+        }
         }
     }
 }

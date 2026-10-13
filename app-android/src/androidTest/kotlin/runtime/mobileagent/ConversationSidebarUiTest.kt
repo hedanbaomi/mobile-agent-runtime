@@ -43,28 +43,33 @@ class ConversationSidebarUiTest {
     fun compactDrawerGroupsSessionsAndOffersAgentPicker() {
         val selectedAgents = mutableListOf<String>()
         val selectedSessions = mutableListOf<String>()
+        val state = ChatUiState(
+            agents = listOf(
+                ChatAgentOptionUi("agent-a", "研究助手"),
+                ChatAgentOptionUi("agent-b", "写作助手"),
+            ),
+            sessions = listOf(
+                ChatSessionUi("session-a", "今日研究", agentName = "研究助手", agentId = "agent-a"),
+                ChatSessionUi("session-b", "昨天草稿", agentName = "写作助手", agentId = "agent-b"),
+            ),
+            selectedSessionId = "session-a",
+            selectedAgentId = "agent-a",
+        )
         compose.setContent {
-            MaterialTheme {
-                Box(Modifier.width(320.dp).height(640.dp)) {
-                    ChatScreen(
-                        state = ChatUiState(
-                            agents = listOf(
-                                ChatAgentOptionUi("agent-a", "研究助手"),
-                                ChatAgentOptionUi("agent-b", "写作助手"),
+            // The production shell resolves string resources against the UI-state language;
+            // a direct ChatScreen call must keep the same contract (see UiTestLocaleSupport.kt).
+            runtime.mobileagent.ui.AppLocalizedResources(state.language) {
+                MaterialTheme {
+                    Box(Modifier.width(320.dp).height(640.dp)) {
+                        ChatScreen(
+                            state = state,
+                            actions = ChatActions(
+                                onSelectAgent = { selectedAgents += it },
+                                onSelectSession = { selectedSessions += it },
+                                onNewSessionForAgent = { selectedAgents += "new:$it" },
                             ),
-                            sessions = listOf(
-                                ChatSessionUi("session-a", "今日研究", agentName = "研究助手", agentId = "agent-a"),
-                                ChatSessionUi("session-b", "昨天草稿", agentName = "写作助手", agentId = "agent-b"),
-                            ),
-                            selectedSessionId = "session-a",
-                            selectedAgentId = "agent-a",
-                        ),
-                        actions = ChatActions(
-                            onSelectAgent = { selectedAgents += it },
-                            onSelectSession = { selectedSessions += it },
-                            onNewSessionForAgent = { selectedAgents += "new:$it" },
-                        ),
-                    )
+                        )
+                    }
                 }
             }
         }
@@ -80,18 +85,19 @@ class ConversationSidebarUiTest {
 
     @Test
     fun wideLayoutKeepsSidebarVisibleAndSessionWorkspaceEntryReachable() {
+        val state = ChatUiState(
+            agents = listOf(ChatAgentOptionUi("agent-a", "研究助手")),
+            sessions = listOf(ChatSessionUi("session-a", "今日研究", agentName = "研究助手", agentId = "agent-a")),
+            selectedSessionId = "session-a",
+            selectedAgentId = "agent-a",
+        )
         compose.setContent {
-            CompositionLocalProvider(LocalDensity provides Density(1f)) {
-                MaterialTheme {
-                    Box(Modifier.width(700.dp).height(640.dp)) {
-                        ChatScreen(
-                            state = ChatUiState(
-                                agents = listOf(ChatAgentOptionUi("agent-a", "研究助手")),
-                                sessions = listOf(ChatSessionUi("session-a", "今日研究", agentName = "研究助手", agentId = "agent-a")),
-                                selectedSessionId = "session-a",
-                                selectedAgentId = "agent-a",
-                            ),
-                        )
+            runtime.mobileagent.ui.AppLocalizedResources(state.language) {
+                CompositionLocalProvider(LocalDensity provides Density(1f)) {
+                    MaterialTheme {
+                        Box(Modifier.width(700.dp).height(640.dp)) {
+                            ChatScreen(state = state)
+                        }
                     }
                 }
             }
@@ -105,23 +111,26 @@ class ConversationSidebarUiTest {
     @Test
     fun workspaceSheetShowsAgentSummaryAndOpensAgentSettings() {
         val settingsTargets = mutableListOf<String?>()
+        val state = ChatUiState(
+            agents = listOf(ChatAgentOptionUi("agent-a", "研究助手")),
+            sessions = listOf(ChatSessionUi("session-a", "今日研究", agentName = "研究助手", agentId = "agent-a")),
+            selectedSessionId = "session-a",
+            selectedAgentId = "agent-a",
+            workspaceAccess = ChatWorkspaceAccessUi(
+                agentLabel = "研究助手",
+                workspaceSummary = "研究资料",
+                permissionLabel = "读写",
+            ),
+        )
         compose.setContent {
-            MaterialTheme {
-                Box(Modifier.width(320.dp).height(640.dp)) {
-                    ChatScreen(
-                        state = ChatUiState(
-                            agents = listOf(ChatAgentOptionUi("agent-a", "研究助手")),
-                            sessions = listOf(ChatSessionUi("session-a", "今日研究", agentName = "研究助手", agentId = "agent-a")),
-                            selectedSessionId = "session-a",
-                            selectedAgentId = "agent-a",
-                            workspaceAccess = ChatWorkspaceAccessUi(
-                                agentLabel = "研究助手",
-                                workspaceSummary = "研究资料",
-                                permissionLabel = "读写",
-                            ),
-                        ),
-                        actions = ChatActions(onOpenAgentSettings = { settingsTargets += it }),
-                    )
+            runtime.mobileagent.ui.AppLocalizedResources(state.language) {
+                MaterialTheme {
+                    Box(Modifier.width(320.dp).height(640.dp)) {
+                        ChatScreen(
+                            state = state,
+                            actions = ChatActions(onOpenAgentSettings = { settingsTargets += it }),
+                        )
+                    }
                 }
             }
         }
@@ -136,17 +145,18 @@ class ConversationSidebarUiTest {
 
     @Test
     fun systemBackClosesWorkspaceSheetThenDrawer() {
+        val state = ChatUiState(
+            agents = listOf(ChatAgentOptionUi("agent-a", "研究助手")),
+            sessions = listOf(ChatSessionUi("session-a", "今日研究", agentName = "研究助手", agentId = "agent-a")),
+            selectedSessionId = "session-a",
+            selectedAgentId = "agent-a",
+        )
         compose.setContent {
-            MaterialTheme {
-                Box(Modifier.width(320.dp).height(640.dp)) {
-                    ChatScreen(
-                        state = ChatUiState(
-                            agents = listOf(ChatAgentOptionUi("agent-a", "研究助手")),
-                            sessions = listOf(ChatSessionUi("session-a", "今日研究", agentName = "研究助手", agentId = "agent-a")),
-                            selectedSessionId = "session-a",
-                            selectedAgentId = "agent-a",
-                        ),
-                    )
+            runtime.mobileagent.ui.AppLocalizedResources(state.language) {
+                MaterialTheme {
+                    Box(Modifier.width(320.dp).height(640.dp)) {
+                        ChatScreen(state = state)
+                    }
                 }
             }
         }

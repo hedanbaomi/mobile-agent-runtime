@@ -391,8 +391,11 @@ class PythonRuntimeDeviceTest {
         val source = """
             import os
             import mobileagent_sdk
+            import _mobileagent
             def run(value):
                 mobileagent_sdk._request('test.ready', {'pid': os.getpid()})
+                if value.get('checkVmLimit', False):
+                    _mobileagent._check_vm_growth_limit()
                 data = bytearray(value['bytes'])
                 data[0] = 17
                 data[-1] = 23
@@ -406,15 +409,20 @@ class PythonRuntimeDeviceTest {
         assertEquals(17, normalValue.getValue("first").jsonPrimitive.int)
         assertEquals(23, normalValue.getValue("last").jsonPrimitive.int)
 
+        // Bytearrays can fit inside already reserved allocator arenas. Read back
+        // the installed finite cap and reject an untouched new mapping instead.
+        // The script leaves the probe's MemoryError uncaught.
         val allocationTicket = ticket(fixture)
         val broker = TicketGateBroker(allocationTicket)
-        val oversizedInput = buildJsonObject { put("bytes", 1024 * 1024 * 1024) }.toString()
+        val oversizedInput = buildJsonObject { put("bytes", 1); put("checkVmLimit", true) }.toString()
         val failedAllocation = withTimeout(20_000) {
             IsolatedPythonRuntime(context, broker).execute(request(fixture, allocationTicket, oversizedInput))
         }
         assertTrue("The package must run before the oversized allocation is rejected", broker.ready.isCompleted)
         assertEquals("Kernel allocation failure must return the real failed result", PythonIpcProtocol.RESULT_FAILED, failedAllocation.status)
         assertEquals("memory_limit", failedAllocation.errorCode)
+        assertTrue("The kernel probe must follow accepted dispatch", failedAllocation.dispatchAccepted)
+        assertEquals(1, broker.requests.size)
         assertNull(failedAllocation.valueJson)
         val allocationPid = broker.ready.await().argumentsJson.let {
             Json.parseToJsonElement(it).jsonObject.getValue("pid").jsonPrimitive.int

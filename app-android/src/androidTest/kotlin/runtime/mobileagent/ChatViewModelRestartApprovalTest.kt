@@ -95,7 +95,8 @@ class ChatViewModelRestartApprovalTest {
             ),
         )
 
-        val viewModel = ChatViewModel(app, SavedStateHandle())
+        val viewModel = createViewModel(app)
+        awaitReload(viewModel)
         val closed = container.runs.get(runId)
         val invocation = container.runs.invocations(runId).single()
         assertEquals(RunStatus.CANCELLED, closed?.state)
@@ -120,7 +121,8 @@ class ChatViewModelRestartApprovalTest {
             argumentsJson = "{}", state = "WAITING_APPROVAL", permissionDecision = "APPROVED",
             createdAt = now,
         ))
-        viewModel.reload()
+        main { viewModel.reload() }
+        awaitReload(viewModel)
         assertEquals(RunStatus.UNKNOWN_OUTCOME, container.runs.get(approvedRunId)?.state)
         assertEquals("UNKNOWN_OUTCOME", container.runs.invocations(approvedRunId).single().errorCode)
         assertTrue(container.runs.get(approvedRunId)?.stopReason?.contains("outcome unknown") == true)
@@ -136,7 +138,8 @@ class ChatViewModelRestartApprovalTest {
             callId = "model-call.chat-restart.result.$suffix", name = "shell_exec",
             argumentsJson = "{}", state = "SUCCEEDED", createdAt = now,
         ))
-        viewModel.reload()
+        main { viewModel.reload() }
+        awaitReload(viewModel)
         assertEquals(RunStatus.UNKNOWN_OUTCOME, container.runs.get(completedToolRunId)?.state)
         assertEquals("SUCCEEDED", container.runs.invocations(completedToolRunId).single().state)
     }
@@ -186,7 +189,8 @@ class ChatViewModelRestartApprovalTest {
         val snapshot = container.agents.createSnapshot(agentId)
         val conversation = container.conversations.create(snapshot.id, "Chat streaming fixture")
         val now = Utc.nowIso()
-        val viewModel = ChatViewModel(app, SavedStateHandle())
+        val viewModel = createViewModel(app)
+        awaitReload(viewModel)
         container.runs.save(
             RunRecord(
                 runId = runId,
@@ -198,12 +202,36 @@ class ChatViewModelRestartApprovalTest {
                 createdAt = now,
             ),
         )
-        viewModel.state.value = viewModel.state.value.copy(streaming = true)
-        viewModel.reload()
+        main {
+            viewModel.state.value = viewModel.state.value.copy(streaming = true)
+            viewModel.reload()
+        }
         assertEquals(RunStatus.WAITING_TOOL_APPROVAL, container.runs.get(runId)?.state)
-        viewModel.state.value = viewModel.state.value.copy(streaming = false)
-        viewModel.reload()
+        main {
+            viewModel.state.value = viewModel.state.value.copy(streaming = false)
+            viewModel.reload()
+        }
+        awaitReload(viewModel)
         assertEquals(RunStatus.CANCELLED, container.runs.get(runId)?.state)
+    }
+
+    private fun main(block: () -> Unit) = InstrumentationRegistry.getInstrumentation().runOnMainSync(block)
+
+    private fun createViewModel(app: MobileAgentApp): ChatViewModel {
+        lateinit var viewModel: ChatViewModel
+        main { viewModel = ChatViewModel(app, SavedStateHandle()) }
+        return viewModel
+    }
+
+    private fun awaitReload(viewModel: ChatViewModel) {
+        val deadline = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(15)
+        while (System.nanoTime() < deadline) {
+            var loading = true
+            main { loading = viewModel.state.value.loading }
+            if (!loading) return
+            Thread.sleep(10)
+        }
+        assertFalse("Approval recovery did not finish", viewModel.state.value.loading)
     }
 
     @Test

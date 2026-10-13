@@ -16,6 +16,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/resource.h>
+#include <sys/mman.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -76,6 +77,8 @@ typedef struct {
     _Atomic(size_t) log_bytes;
     _Atomic int log_limit_exceeded;
     int memory_error;
+    rlim_t vm_baseline;
+    rlim_t vm_limit;
     /* Strong reference acquired from the already loaded built-in _io module.
      * It is cached before any package code can mutate module attributes. */
     PyObject *code_bytes_io_type;
@@ -856,8 +859,56 @@ static PyObject *python_request(PyObject *module, PyObject *arguments) {
     return value;
 }
 
+/* Diagnostic only: no parameters, committed memory, external access or limit
+ * changes. Verify the installed finite cap before probing untouched mappings.
+ * This does not claim an RSS cap or constrain allocations in reserved arenas. */
+static PyObject *python_check_vm_growth_limit(PyObject *self, PyObject *unused) {
+    (void)self;
+    (void)unused;
+    RuntimeState *state = current_state();
+    struct rlimit limit;
+    const long page_size = sysconf(_SC_PAGESIZE);
+    if (state == NULL || state->vm_limit == 0 || page_size <= 0 ||
+        getrlimit(RLIMIT_AS, &limit) != 0 || limit.rlim_cur == RLIM_INFINITY ||
+        limit.rlim_cur != state->vm_limit || limit.rlim_max != state->vm_limit ||
+        state->vm_limit <= state->vm_baseline ||
+        state->vm_limit - state->vm_baseline > MAX_NATIVE_VM_GROWTH_BYTES ||
+        state->vm_limit > SIZE_MAX) {
+        PyErr_SetString(PyExc_RuntimeError, "VM growth limit readback failed");
+        return NULL;
+    }
+    void *control = mmap(NULL, (size_t)page_size, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (control == MAP_FAILED) {
+        PyErr_SetString(PyExc_RuntimeError, "VM growth control mapping failed");
+        return NULL;
+    }
+    if (munmap(control, (size_t)page_size) != 0) {
+        PyErr_SetString(PyExc_RuntimeError, "VM growth control release failed");
+        return NULL;
+    }
+    /* A mapping as large as the entire cap cannot coexist with this process's
+     * existing mappings. Even if enforcement regresses, PROT_NONE commits no
+     * pages and the unexpected mapping is immediately released. */
+    void *oversized = mmap(NULL, (size_t)state->vm_limit, PROT_NONE,
+        MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    const int mapping_errno = errno;
+    if (oversized != MAP_FAILED) {
+        const int released = munmap(oversized, (size_t)state->vm_limit);
+        PyErr_SetString(PyExc_RuntimeError, released == 0 ?
+            "VM growth limit accepted an oversized mapping" : "VM growth probe release failed");
+        return NULL;
+    }
+    if (mapping_errno != ENOMEM) {
+        PyErr_SetString(PyExc_RuntimeError, "VM growth probe failed for an unexpected reason");
+        return NULL;
+    }
+    return PyErr_NoMemory();
+}
+
 static PyMethodDef mobileagent_methods[] = {
     {"request", python_request, METH_VARARGS, "Request one host capability using the private Broker."},
+    {"_check_vm_growth_limit", python_check_vm_growth_limit, METH_NOARGS,
+        "Verify finite VM-growth limit readback and untouched mapping rejection."},
     {NULL, NULL, 0, NULL},
 };
 
@@ -1528,6 +1579,13 @@ static int install_resource_limits(int timeout_ms, char *diagnostic, size_t capa
         set_stage_diagnostic(diagnostic, capacity, "memory_limit_setup");
         return -1;
     }
+    RuntimeState *state = current_state();
+    if (state == NULL) {
+        set_stage_diagnostic(diagnostic, capacity, "memory_limit_state");
+        return -1;
+    }
+    state->vm_baseline = (rlim_t)baseline;
+    state->vm_limit = target;
     return 0;
 }
 

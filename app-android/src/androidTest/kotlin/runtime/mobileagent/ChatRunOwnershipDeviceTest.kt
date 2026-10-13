@@ -80,6 +80,7 @@ class ChatRunOwnershipDeviceTest {
         deadline.complete(Unit)
         await { !vm.state.value.streaming }
         main { vm.selectSession(b); vm.input("B approval draft") }
+        await { !vm.state.value.loading && vm.state.value.selectedSessionId == b }
         val selected = vm.state.value
         assertTrue(approvalReturned.await(15, TimeUnit.SECONDS))
         assertEquals(false, decision.get())
@@ -124,6 +125,7 @@ class ChatRunOwnershipDeviceTest {
         deadline.complete(Unit)
         await { !vm.state.value.streaming }
         main { vm.selectSession(b); vm.input("B draft") }
+        await { !vm.state.value.loading && vm.state.value.selectedSessionId == b }
         val bState = vm.state.value
         // A detached task still owns execution until it finishes; sending does not erase B input.
         main { vm.send() }
@@ -169,6 +171,7 @@ class ChatRunOwnershipDeviceTest {
         deadline.complete(Unit)
         await { !vm.state.value.streaming }
         main { vm.selectSession(b); vm.selectSession(a) }
+        await { !vm.state.value.loading && vm.state.value.selectedSessionId == a }
         val selected = vm.state.value
         resume.complete(Unit)
         await { app.container.runs.list(a).single().finishedAt != null }
@@ -197,6 +200,7 @@ class ChatRunOwnershipDeviceTest {
     private fun viewModel(app: MobileAgentApp, id: String, execution: ChatRunExecution): ChatViewModel {
         lateinit var vm: ChatViewModel
         main { vm = ChatViewModel(app, SavedStateHandle(), execution); vm.selectSession(id) }
+        await { !vm.state.value.loading && vm.state.value.selectedSessionId == id }
         return vm
     }
 

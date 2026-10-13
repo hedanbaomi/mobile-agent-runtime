@@ -81,7 +81,7 @@ class ProvidersViewModelConnectionDeviceTest {
         cases.forEach { (result, phase) ->
             val harness = harness(onTest = { result })
             harness.vm.testConnection(harness.modelId, approved = true)
-            waitUntil { harness.vm.probeState.value.phase == phase }
+            waitUntil(harness.vm) { harness.vm.probeState.value.phase == phase }
             val state = harness.vm.probeState.value
             assertEquals(ProbeOperation.CONNECTION, state.operation)
             assertEquals(phase, state.phase)
@@ -119,9 +119,9 @@ class ProvidersViewModelConnectionDeviceTest {
             },
         )
         harness.vm.testConnection(harness.modelId, approved = true)
-        waitUntil { harness.vm.probeState.value.connection?.success == true }
+        waitUntil(harness.vm) { harness.vm.probeState.value.connection?.success == true }
         harness.vm.probe(harness.modelId, approved = true)
-        waitUntil { harness.vm.probeState.value.operation == ProbeOperation.CAPABILITY && harness.vm.probeState.value.phase == ProbePhase.PARTIAL }
+        waitUntil(harness.vm) { harness.vm.probeState.value.operation == ProbeOperation.CAPABILITY && harness.vm.probeState.value.phase == ProbePhase.PARTIAL }
         assertTrue(harness.vm.probeState.value.connection!!.success)
         assertEquals(ProbePhase.PARTIAL, harness.vm.probeState.value.phase)
     }
@@ -140,10 +140,10 @@ class ProvidersViewModelConnectionDeviceTest {
             },
         )
         harness.vm.testConnection(harness.modelId, approved = true)
-        waitUntil { harness.vm.probeState.value.connection?.success == false }
+        waitUntil(harness.vm) { harness.vm.probeState.value.connection?.success == false }
         assertEquals(ProviderConnectionErrorCode.AUTH_FAILED, harness.vm.probeState.value.connection?.error)
         harness.vm.testConnection(harness.modelId, approved = true)
-        waitUntil { harness.vm.probeState.value.connection?.success == true }
+        waitUntil(harness.vm) { harness.vm.probeState.value.connection?.success == true }
         assertEquals(ProbePhase.SUCCESS, harness.vm.probeState.value.phase)
         assertEquals(2, calls)
     }
@@ -205,7 +205,7 @@ class ProvidersViewModelConnectionDeviceTest {
         vm.testConnection(slowModel.id, approved = true)
         assertTrue(started.await(2, TimeUnit.SECONDS))
         vm.testConnection(fastModel.id, approved = true)
-        waitUntil { vm.probeState.value.connection?.success == true }
+        waitUntil(vm) { vm.probeState.value.connection?.success == true }
         assertEquals(fastModel.id, vm.probeState.value.modelId)
         assertEquals(ProbePhase.SUCCESS, vm.probeState.value.phase)
         assertTrue(vm.probeState.value.connection!!.success)
@@ -223,7 +223,7 @@ class ProvidersViewModelConnectionDeviceTest {
             providerId = provider.id, modelProfileId = model.id, name = provider.name,
             baseUrl = provider.baseUrl, modelId = model.modelId,
         )))
-        waitUntil { harness.vm.models.single { it.id == model.id }.contextWindowValue == 1000000 }
+        waitUntil(harness.vm) { harness.vm.models.single { it.id == model.id }.contextWindowValue == 1000000 }
         val saved = harness.vm.models.single { it.id == model.id }
         assertEquals(runtime.mobileagent.domain.ContextLimitSource.PROVIDER_METADATA, saved.contextWindowSource)
         assertEquals(runtime.mobileagent.domain.contextWindowTarget(provider.id, provider.baseUrl, model.modelId), saved.contextWindowTarget)
@@ -236,7 +236,7 @@ class ProvidersViewModelConnectionDeviceTest {
             onMetadata = { metadata(it) },
         )
         harness.vm.testConnection(harness.modelId, approved = true)
-        waitUntil { !harness.vm.busy.value && harness.vm.models.single { it.id == harness.modelId }.contextWindowValue == 1000000 }
+        waitUntil(harness.vm) { !harness.vm.busy.value && harness.vm.models.single { it.id == harness.modelId }.contextWindowValue == 1000000 }
         assertEquals(ProbePhase.SUCCESS, harness.vm.probeState.value.phase)
     }
 
@@ -249,7 +249,7 @@ class ProvidersViewModelConnectionDeviceTest {
         )
         harness.vm.testConnection(harness.modelId, approved = true)
         assertTrue(started.await(2, TimeUnit.SECONDS))
-        waitUntil { !harness.vm.busy.value }
+        waitUntil(harness.vm) { !harness.vm.busy.value }
         val model = harness.vm.models.single { it.id == harness.modelId }
         val provider = harness.vm.providers.single { it.id == model.providerId }
         assertTrue(harness.vm.saveDraft(ProviderDraft(
@@ -273,7 +273,7 @@ class ProvidersViewModelConnectionDeviceTest {
             onMetadata = { if (online) metadata(it) else null },
         )
         harness.vm.testConnection(harness.modelId, approved = true)
-        waitUntil { !harness.vm.busy.value && harness.vm.models.single { it.id == harness.modelId }.contextWindowValue == 1000000 }
+        waitUntil(harness.vm) { !harness.vm.busy.value && harness.vm.models.single { it.id == harness.modelId }.contextWindowValue == 1000000 }
         online = false
         val model = harness.vm.models.single { it.id == harness.modelId }
         val provider = harness.vm.providers.single { it.id == model.providerId }
@@ -300,7 +300,7 @@ class ProvidersViewModelConnectionDeviceTest {
             },
         )
         harness.vm.testConnection(harness.modelId, approved = true)
-        waitUntil { !harness.vm.busy.value && harness.vm.probeState.value.phase != ProbePhase.IDLE }
+        waitUntil(harness.vm) { !harness.vm.busy.value && harness.vm.probeState.value.phase != ProbePhase.IDLE }
         assertTrue(returned.await(2, TimeUnit.SECONDS))
         assertEquals(ProbePhase.SUCCESS, harness.vm.probeState.value.phase)
     }
@@ -348,14 +348,30 @@ class ProvidersViewModelConnectionDeviceTest {
         return Harness(vm, model.id)
     }
 
-    private fun waitUntil(timeoutMs: Long = 5_000, condition: () -> Boolean) {
-        val deadline = System.currentTimeMillis() + timeoutMs
-        while (System.currentTimeMillis() < deadline) {
-            if (condition()) return
-            Thread.sleep(25)
-        }
-        error("timed out waiting for ViewModel state")
-    }
+    /**
+     * Waits for [condition] and, on timeout or on a failing condition, reports the observed
+     * ViewModel state instead of a bare "timed out". The previous silent timeout hid whether the
+     * row was missing, the connection had stalled, or a recorded status/error explained it.
+     */
+    private fun waitUntil(
+        vm: ProvidersViewModel,
+        timeoutMs: Long = 5_000,
+        condition: () -> Boolean,
+    ) = awaitUiState(
+        timeoutMs = timeoutMs,
+        observation = { vm.diagnostics() },
+        condition = condition,
+    )
+
+    private fun ProvidersViewModel.diagnostics(): List<String> = listOf(
+        "busy=${busy.value}",
+        "status=\"${status.value}\"",
+        "probe.phase=${probeState.value.phase} operation=${probeState.value.operation} " +
+            "modelId=${probeState.value.modelId} error=${probeState.value.error} " +
+            "connectionSuccess=${probeState.value.connection?.success} " +
+            "connectionError=${probeState.value.connection?.error}",
+        "in-memory providers=${providers.size} models=${models.size}",
+    )
 
     private fun failure(
         code: ProviderConnectionErrorCode,

@@ -49,20 +49,25 @@ class ProvidersTypedUiTest {
 
     @Test
     fun successfulConnectionRendersSuccessWithoutFailureCopy() {
+        val uiState = state(
+            probe = ProviderProbeUiState(
+                phase = ProbePhase.SUCCESS,
+                operation = ProbeOperation.CONNECTION,
+                connection = ConnectionCheckUi(
+                    success = true,
+                    latencyMs = 842,
+                ),
+            ),
+        )
         compose.setContent {
-            MaterialTheme {
-                ProvidersScreen(
-                    state = state(
-                        probe = ProviderProbeUiState(
-                            phase = ProbePhase.SUCCESS,
-                            operation = ProbeOperation.CONNECTION,
-                            connection = ConnectionCheckUi(
-                                success = true,
-                                latencyMs = 842,
-                            ),
-                        ),
-                    ),
-                )
+            // The production shell resolves string resources against the ProvidersUiState
+            // language; a direct ProvidersScreen call must keep the same contract.
+            runtime.mobileagent.ui.AppLocalizedResources(uiState.language) {
+                MaterialTheme {
+                    ProvidersScreen(
+                        state = uiState,
+                    )
+                }
             }
         }
 
@@ -77,24 +82,27 @@ class ProvidersTypedUiTest {
 
     @Test
     fun partialCapabilityKeepsConnectionSuccessAndRendersTypedSubcheck() {
+        val uiState = state(
+            probe = ProviderProbeUiState(
+                phase = ProbePhase.PARTIAL,
+                operation = ProbeOperation.CAPABILITY,
+                connection = ConnectionCheckUi(success = true, latencyMs = 12),
+                checks = listOf(
+                    ProbeCheckUi(CapabilityCheck.METADATA, CapabilityCheckStatus.VERIFIED),
+                    ProbeCheckUi(CapabilityCheck.STREAM, CapabilityCheckStatus.VERIFIED),
+                    ProbeCheckUi(CapabilityCheck.TOOLS, CapabilityCheckStatus.UNSUPPORTED, 404),
+                    ProbeCheckUi(CapabilityCheck.IMAGE, CapabilityCheckStatus.NOT_DECLARED),
+                ),
+                charged = true,
+            ),
+        )
         compose.setContent {
-            MaterialTheme {
-                ProvidersScreen(
-                    state = state(
-                        probe = ProviderProbeUiState(
-                            phase = ProbePhase.PARTIAL,
-                            operation = ProbeOperation.CAPABILITY,
-                            connection = ConnectionCheckUi(success = true, latencyMs = 12),
-                            checks = listOf(
-                                ProbeCheckUi(CapabilityCheck.METADATA, CapabilityCheckStatus.VERIFIED),
-                                ProbeCheckUi(CapabilityCheck.STREAM, CapabilityCheckStatus.VERIFIED),
-                                ProbeCheckUi(CapabilityCheck.TOOLS, CapabilityCheckStatus.UNSUPPORTED, 404),
-                                ProbeCheckUi(CapabilityCheck.IMAGE, CapabilityCheckStatus.NOT_DECLARED),
-                            ),
-                            charged = true,
-                        ),
-                    ),
-                )
+            runtime.mobileagent.ui.AppLocalizedResources(uiState.language) {
+                MaterialTheme {
+                    ProvidersScreen(
+                        state = uiState,
+                    )
+                }
             }
         }
 
@@ -154,22 +162,25 @@ class ProvidersTypedUiTest {
     @Test
     fun imageProbeConsentShowsBoundAndCancelDoesNotDispatch() {
         var requests = 0
+        val uiState = state(probe = ProviderProbeUiState()).copy(
+            providers = listOf(ProviderCardUi("provider", "Command Code", "https://api.commandcode.ai/provider/v1", "OPENAI_COMPATIBLE", modelCount = 1, secretConfigured = true)),
+            models = listOf(ProviderModelUi(
+                id = "model", modelId = "deepseek/deepseek-v4.1-flash",
+                contextWindowValue = "1000000", contextWindowRecorded = true,
+                contextWindowTarget = runtime.mobileagent.domain.contextWindowTarget(
+                    "provider", "https://api.commandcode.ai/provider/v1", "deepseek/deepseek-v4.1-flash"),
+                contextWindowSource = runtime.mobileagent.domain.ContextLimitSource.PROVIDER_METADATA,
+            )),
+        )
         compose.setContent {
-            MaterialTheme {
-                Box(Modifier.width(320.dp).height(640.dp)) {
-                    ProvidersScreen(
-                        state = state(probe = ProviderProbeUiState()).copy(
-                            providers = listOf(ProviderCardUi("provider", "Command Code", "https://api.commandcode.ai/provider/v1", "OPENAI_COMPATIBLE", modelCount = 1, secretConfigured = true)),
-                            models = listOf(ProviderModelUi(
-                                id = "model", modelId = "deepseek/deepseek-v4.1-flash",
-                                contextWindowValue = "1000000", contextWindowRecorded = true,
-                                contextWindowTarget = runtime.mobileagent.domain.contextWindowTarget(
-                                    "provider", "https://api.commandcode.ai/provider/v1", "deepseek/deepseek-v4.1-flash"),
-                                contextWindowSource = runtime.mobileagent.domain.ContextLimitSource.PROVIDER_METADATA,
-                            )),
-                        ),
-                        actions = ProvidersActions(onProbe = { requests++ }),
-                    )
+            runtime.mobileagent.ui.AppLocalizedResources(uiState.language) {
+                MaterialTheme {
+                    Box(Modifier.width(320.dp).height(640.dp)) {
+                        ProvidersScreen(
+                            state = uiState,
+                            actions = ProvidersActions(onProbe = { requests++ }),
+                        )
+                    }
                 }
             }
         }

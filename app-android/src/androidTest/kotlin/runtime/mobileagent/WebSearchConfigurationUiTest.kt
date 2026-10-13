@@ -32,11 +32,15 @@ class WebSearchConfigurationUiTest {
         val state = mutableStateOf(SettingsUiState())
         val saved = mutableListOf<Pair<String, String>>()
         compose.setContent {
-            MaterialTheme {
-                SettingsScreen(state.value, SettingsActions(
-                    onWebSearchProvider = { state.value = state.value.copy(webSearchProviderId = it) },
-                    onSaveWebSearch = { provider, key -> saved += provider to key },
-                ))
+            // The production shell resolves string resources against the SettingsUiState
+            // language; a direct SettingsScreen call must keep the same contract.
+            runtime.mobileagent.ui.AppLocalizedResources(state.value.language) {
+                MaterialTheme {
+                    SettingsScreen(state.value, SettingsActions(
+                        onWebSearchProvider = { state.value = state.value.copy(webSearchProviderId = it) },
+                        onSaveWebSearch = { provider, key -> saved += provider to key },
+                    ))
+                }
             }
         }
         compose.onNodeWithTag("settings.web_search.key").performScrollTo().performTextInput("discarded-draft")
@@ -57,10 +61,12 @@ class WebSearchConfigurationUiTest {
     @Test fun agentSearchOptInIsSeparateFromSkippingOtherToolConfirmations() {
         val state = mutableStateOf(AgentsUiState(editor = AgentEditorUi(name = "Fixture"), editorOpen = true))
         compose.setContent {
-            MaterialTheme {
-                AgentsScreen(state.value, AgentsActions(onEditorChange = {
-                    state.value = state.value.copy(editor = it)
-                }), renderEditorAsPage = true)
+            runtime.mobileagent.ui.AppLocalizedResources(state.value.language) {
+                MaterialTheme {
+                    AgentsScreen(state.value, AgentsActions(onEditorChange = {
+                        state.value = state.value.copy(editor = it)
+                    }), renderEditorAsPage = true)
+                }
             }
         }
         compose.onNodeWithTag("agents.editor.web_search").performScrollTo().assertIsOff().performClick().assertIsOn()

@@ -37,7 +37,13 @@ class LocaleReactiveStatusUiTest {
     @Test
     fun unconfiguredWorkspaceUpdatesLanguageWithoutRebuildingWorkspaceState() {
         val state = mutableStateOf(ChatUiState(language = "en-US"))
-        compose.setContent { MaterialTheme { ConversationScreen(state.value) } }
+        compose.setContent {
+            // Resources follow the same language the UI state carries, exactly like the
+            // production shell does (see UiTestLocaleSupport.kt).
+            runtime.mobileagent.ui.AppLocalizedResources(state.value.language) {
+                MaterialTheme { ConversationScreen(state.value) }
+            }
+        }
         compose.onNodeWithText("No agent selected · No workspace", useUnmergedTree = true).assertIsDisplayed()
         compose.onAllNodesWithText("未配置工作区", substring = true, useUnmergedTree = true).assertCountEquals(0)
         compose.runOnUiThread { state.value = state.value.copy(language = "zh-CN") }
@@ -48,7 +54,9 @@ class LocaleReactiveStatusUiTest {
     fun openUnboundWorkspaceSheetResolvesEveryStatusAfterLanguageChange() {
         val state = mutableStateOf(ChatUiState(language = "en-US"))
         compose.setContent {
-            MaterialTheme { Box(Modifier.width(320.dp).height(640.dp)) { ChatScreen(state.value) } }
+            runtime.mobileagent.ui.AppLocalizedResources(state.value.language) {
+                MaterialTheme { Box(Modifier.width(320.dp).height(640.dp)) { ChatScreen(state.value) } }
+            }
         }
         compose.onNodeWithTag("chat.workspace.open").performClick()
         listOf("Current workspace: No workspace", "Permission: This conversation has no workspace access",
@@ -69,7 +77,9 @@ class LocaleReactiveStatusUiTest {
             workspaceSummary = "研究资料", threadWorkspaceState = ChatThreadWorkspaceState.BOUND,
         )))
         compose.setContent {
-            MaterialTheme { Box(Modifier.width(320.dp).height(640.dp)) { ChatScreen(state.value) } }
+            runtime.mobileagent.ui.AppLocalizedResources(state.value.language) {
+                MaterialTheme { Box(Modifier.width(320.dp).height(640.dp)) { ChatScreen(state.value) } }
+            }
         }
         compose.onNodeWithTag("chat.workspace.open").performClick()
         compose.onNodeWithText("Current workspace: 研究资料", useUnmergedTree = true).performScrollTo().assertIsDisplayed()
@@ -87,7 +97,11 @@ class LocaleReactiveStatusUiTest {
     fun existingDiagnosticsFeedbackUpdatesWhenLanguageChanges() {
         val state = mutableStateOf(SettingsUiState(language = "en-US", diagnosticsEnabled = true,
             diagnosticsFeedback = SettingsDiagnosticsFeedback.ENABLED))
-        compose.setContent { MaterialTheme { SettingsScreen(state.value) } }
+        compose.setContent {
+            runtime.mobileagent.ui.AppLocalizedResources(state.value.language) {
+                MaterialTheme { SettingsScreen(state.value) }
+            }
+        }
         compose.onNodeWithTag("settings.diagnostics.feedback", useUnmergedTree = true).performScrollTo().assertIsDisplayed()
         compose.onNodeWithText("Diagnostics enabled.", useUnmergedTree = true).assertIsDisplayed()
         compose.runOnUiThread { state.value = state.value.copy(language = "zh-CN") }

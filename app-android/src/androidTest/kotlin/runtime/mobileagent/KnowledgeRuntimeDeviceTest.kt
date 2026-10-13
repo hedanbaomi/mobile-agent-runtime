@@ -160,10 +160,21 @@ class KnowledgeRuntimeDeviceTest {
             val oldGeneration = generation(db, kbA, expectedCount = 2, embedder.spaceId)
             val blobHash = sha256(sharedBytes.inputStream())
             assertEquals(2L, repository.blobRefCount(blobHash))
-            repository.deleteDocument(a.documentId)
+            // An in-flight reader retains source rows until its CAS lease closes; deletion
+            // still revokes retrieval/citation access immediately. Unleased deleted rows
+            // are reclaimed by automatic storage maintenance rather than retained forever.
+            blobs.protect(blobHash).use {
+                repository.deleteDocument(a.documentId)
+                assertEquals(2L, db.query("SELECT COUNT(*) AS n FROM generation_members WHERE generation_id=?", listOf(oldGeneration)).single().long("n"))
+                assertTrue(repository.locateCitation(citation).removed)
+                assertEquals(1L, repository.blobRefCount(blobHash))
+            }
+            repository.collectStorage()
             val newGeneration = generation(db, kbA, expectedCount = 1, embedder.spaceId)
             assertNotEquals(oldGeneration, newGeneration)
-            assertEquals(2L, db.query("SELECT COUNT(*) AS n FROM generation_members WHERE generation_id=?", listOf(oldGeneration)).single().long("n"))
+            assertEquals(1L, db.query("SELECT COUNT(*) AS n FROM generation_members WHERE generation_id=?", listOf(oldGeneration)).single().long("n"))
+            assertTrue(db.query("SELECT id FROM documents WHERE id=?", listOf(a.documentId)).isEmpty())
+            assertArrayEquals(sharedBytes, requireNotNull(blobs.get(blobHash)))
             assertTrue(repository.locateCitation(citation).removed)
             assertEquals(1L, repository.blobRefCount(blobHash))
             assertTrue(repository.search("quasar", 8, listOf(kbA)).none { it.documentId == a.documentId || it.documentId == b.documentId })

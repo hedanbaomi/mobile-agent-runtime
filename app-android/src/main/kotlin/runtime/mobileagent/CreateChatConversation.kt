@@ -9,6 +9,14 @@ import runtime.mobileagent.domain.ConversationWorkspaceBinding
 import runtime.mobileagent.domain.Utc
 import java.time.LocalDate
 
+/** A loaded UI page is only a projection; the selected conversation owns the Agent identity. */
+internal fun AppContainer.creationAgentId(selectedConversationId: String?, selectedAgentId: String?): String {
+    if (selectedConversationId == null) return selectedAgentId ?: error("请先创建并选择 Agent。")
+    val conversation = conversations.get(selectedConversationId) ?: error("会话已不存在。")
+    val snapshot = agents.getSnapshot(conversation.snapshotId) ?: error("会话的 Agent 配置快照不可用。")
+    return snapshot.agentId.takeIf { it.isNotBlank() } ?: error("会话的 Agent 身份不可用。")
+}
+
 /** The production ports use this container's database; no remote request is made by creation. */
 internal fun AppContainer.createChatConversation(
     agentId: String,

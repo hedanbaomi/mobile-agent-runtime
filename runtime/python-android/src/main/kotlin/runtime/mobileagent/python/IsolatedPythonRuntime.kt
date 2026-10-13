@@ -35,11 +35,12 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.selects.select
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.withTimeoutOrNull
-import kotlinx.coroutines.selects.select
 import runtime.mobileagent.ipc.InvocationTicket
 import runtime.mobileagent.ipc.PythonBinderCodec
 import runtime.mobileagent.ipc.PythonIpcProtocol
@@ -209,16 +210,28 @@ class IsolatedPythonRuntime(
             val result = coroutineScope {
                 val protocolViolation = CompletableDeferred<String>()
                 val logLimit = CompletableDeferred<Unit>()
+                val brokerResponseClosed = CompletableDeferred<Unit>()
                 val cleanupStarted = AtomicBoolean(false)
                 val brokerJob = launch(Dispatchers.IO) {
-                    brokerLoop(
+                    runPythonBrokerChannel(
                         descriptors.pipes.brokerRequestRead,
                         descriptors.pipes.brokerResponseWrite,
                         request,
                         channelNonce,
-                    ) { code ->
-                        if (protocolViolation.complete(code)) abort(bound.binder, request.ticket)
-                    }
+                        broker,
+                        BROKER_CALL_TIMEOUT_MS,
+                        onProtocolViolation = { code ->
+                            if (protocolViolation.complete(code)) abort(bound.binder, request.ticket)
+                        },
+                        onResponseChannelClosed = {
+                            // Cleanup closes blocking descriptors before cancelling
+                            // their jobs. Its expected write interruption must not
+                            // overwrite a result or cancellation already selected.
+                            if (isActive && !cleanupStarted.get() && brokerResponseClosed.complete(Unit)) {
+                                abort(bound.binder, request.ticket)
+                            }
+                        },
+                    )
                 }
                 val logJob = launch(Dispatchers.IO) {
                     drainLog(descriptors.pipes.logRead, request.limits.maxLogBytes, cleanupStarted) {
@@ -256,6 +269,18 @@ class IsolatedPythonRuntime(
                                     protocolViolation.onAwait { code ->
                                         unknown(code, "Python private channel authentication failed")
                                     }
+                                    brokerResponseClosed.onAwait {
+                                        // Do not wait for worker death here: the
+                                        // invocation timeout stays the outer
+                                        // bound, so the broker-specific cause
+                                        // cannot be preempted and rewritten as
+                                        // a generic timeout.
+                                        unknown(
+                                            "broker_channel_closed",
+                                            "Python capability response channel closed before the worker finished",
+                                            dispatchAccepted = dispatch.accepted,
+                                        )
+                                    }
                                     death.onAwait {
                                         when {
                                             logLimit.isCompleted -> {
@@ -277,6 +302,11 @@ class IsolatedPythonRuntime(
                                                         "invalid_nonce",
                                                         "Python private channel authentication failed",
                                                     )
+                                                    brokerResponseClosed.isCompleted -> unknown(
+                                                        "broker_channel_closed",
+                                                        "Python capability response channel closed before the worker finished",
+                                                        dispatchAccepted = dispatch.accepted,
+                                                    )
                                                     drained != null -> normalizeWorkerResult(drained)
                                                     else -> unknown(
                                                         "worker_death",
@@ -295,6 +325,11 @@ class IsolatedPythonRuntime(
                                             protocolViolation.isCompleted -> unknown(
                                                 "invalid_nonce",
                                                 "Python private channel authentication failed",
+                                            )
+                                            brokerResponseClosed.isCompleted -> unknown(
+                                                "broker_channel_closed",
+                                                "Python capability response channel closed before the worker finished",
+                                                dispatchAccepted = dispatch.accepted,
                                             )
                                             else -> normalizeWorkerResult(result)
                                         }
@@ -393,73 +428,6 @@ class IsolatedPythonRuntime(
             return "input_limit" to "Python input limit exceeded"
         }
         return null
-    }
-
-    private suspend fun brokerLoop(
-        requestRead: ParcelFileDescriptor,
-        responseWrite: ParcelFileDescriptor,
-        request: PythonExecutionRequest,
-        expectedNonce: String,
-        onProtocolViolation: (String) -> Unit,
-    ) {
-        ParcelFileDescriptor.AutoCloseInputStream(requestRead).use { input ->
-            ParcelFileDescriptor.AutoCloseOutputStream(responseWrite).use { output ->
-                while (true) {
-                    val payload = try {
-                        PythonIpcProtocol.Frames.read(input)
-                    } catch (_: Throwable) {
-                        onProtocolViolation("invalid_nonce")
-                        return
-                    } ?: return
-                    val frame = try {
-                        PythonIpcProtocol.decodeBrokerRequestFrame(payload)
-                    } catch (_: Throwable) {
-                        onProtocolViolation("invalid_nonce")
-                        return
-                    }
-                    if (frame.channelNonce != expectedNonce) {
-                        onProtocolViolation("invalid_nonce")
-                        return
-                    }
-                    val brokerRequest = frame.request
-                    val response = if (brokerRequest.ticket != request.ticket || !broker.authorize(brokerRequest.ticket)) {
-                        PythonIpcProtocol.BrokerResponse(
-                            requestId = brokerRequest.requestId,
-                            status = "DENIED",
-                            errorCode = "permission_denied",
-                            errorMessage = "Capability not granted",
-                        )
-                    } else {
-                        try {
-                            withTimeout(BROKER_CALL_TIMEOUT_MS) { broker.invoke(brokerRequest) }
-                        } catch (cancelled: CancellationException) {
-                            throw cancelled
-                        } catch (_: Throwable) {
-                            PythonIpcProtocol.BrokerResponse(
-                                requestId = brokerRequest.requestId,
-                                status = "ERROR",
-                                errorCode = "broker_error",
-                                errorMessage = "Capability failed",
-                            )
-                        }
-                    }
-                    val normalized = response.copy(requestId = brokerRequest.requestId)
-                    val encoded = try {
-                        PythonIpcProtocol.encodeBrokerResponseChunks(normalized)
-                    } catch (_: Throwable) {
-                        listOf(PythonIpcProtocol.encodeBrokerResponse(
-                            PythonIpcProtocol.BrokerResponse(
-                                requestId = brokerRequest.requestId,
-                                status = "ERROR",
-                                errorCode = "broker_protocol",
-                                errorMessage = "Invalid capability response",
-                            ),
-                        ))
-                    }
-                    encoded.forEach { frame -> PythonIpcProtocol.Frames.write(output, frame) }
-                }
-            }
-        }
     }
 
     private fun writeInput(inputWrite: ParcelFileDescriptor, inputJson: String) {

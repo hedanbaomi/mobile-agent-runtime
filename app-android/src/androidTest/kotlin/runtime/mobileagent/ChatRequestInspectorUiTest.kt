@@ -62,23 +62,27 @@ class ChatRequestInspectorUiTest {
         )
         val availability = mutableStateOf(states.first().first)
         compose.setContent {
-            MaterialTheme {
-                RequestInspectorScreen(
-                    request = if (availability.value == ChatRequestInspectorAvailability.READY) {
-                        runtime.mobileagent.feature.chat.ChatRequestPreviewUi(
-                            method = "POST",
-                            url = "https://api.example.invalid/v1/chat",
-                            headers = "Authorization: [REDACTED]",
-                            body = "{\"messages\":[{\"role\":\"user\",\"content\":\"hello\"}]}",
-                        )
-                    } else {
-                        null
-                    },
-                    layers = emptyList(),
-                    onClose = {},
-                    zh = true,
-                    availability = availability.value,
-                )
+            // The production shell resolves string resources against the UI-state language;
+            // a direct feature call must keep the same contract (see UiTestLocaleSupport.kt).
+            runtime.mobileagent.ui.AppLocalizedResources("zh-CN") {
+                MaterialTheme {
+                    RequestInspectorScreen(
+                        request = if (availability.value == ChatRequestInspectorAvailability.READY) {
+                            runtime.mobileagent.feature.chat.ChatRequestPreviewUi(
+                                method = "POST",
+                                url = "https://api.example.invalid/v1/chat",
+                                headers = "Authorization: [REDACTED]",
+                                body = "{\"messages\":[{\"role\":\"user\",\"content\":\"hello\"}]}",
+                            )
+                        } else {
+                            null
+                        },
+                        layers = emptyList(),
+                        onClose = {},
+                        zh = true,
+                        availability = availability.value,
+                    )
+                }
             }
         }
 
@@ -106,14 +110,16 @@ class ChatRequestInspectorUiTest {
             body = "{\"staleBodyMarker\":\"stale-body\"}",
         )
         compose.setContent {
-            MaterialTheme {
-                RequestInspectorScreen(
-                    request = stalePreview,
-                    layers = listOf(runtime.mobileagent.feature.chat.ChatPromptLayerUi("system", "stale-prompt-marker")),
-                    onClose = {},
-                    zh = true,
-                    availability = ChatRequestInspectorAvailability.DISABLED,
-                )
+            runtime.mobileagent.ui.AppLocalizedResources("zh-CN") {
+                MaterialTheme {
+                    RequestInspectorScreen(
+                        request = stalePreview,
+                        layers = listOf(runtime.mobileagent.feature.chat.ChatPromptLayerUi("system", "stale-prompt-marker")),
+                        onClose = {},
+                        zh = true,
+                        availability = ChatRequestInspectorAvailability.DISABLED,
+                    )
+                }
             }
         }
 
@@ -139,19 +145,22 @@ class ChatRequestInspectorUiTest {
 
     @Test
     fun approvalCardOffersOnlyOneInvocationApproval() {
+        val state = ChatUiState(
+            sessions = listOf(ChatSessionUi("session", "Approval")),
+            selectedSessionId = "session",
+            pendingTool = ChatToolApprovalUi(
+                id = "request",
+                name = "shell_exec",
+                summary = "A bounded command requires confirmation.",
+            ),
+        )
         compose.setContent {
-            MaterialTheme {
-                ChatScreen(
-                    state = ChatUiState(
-                        sessions = listOf(ChatSessionUi("session", "Approval")),
-                        selectedSessionId = "session",
-                        pendingTool = ChatToolApprovalUi(
-                            id = "request",
-                            name = "shell_exec",
-                            summary = "A bounded command requires confirmation.",
-                        ),
-                    ),
-                )
+            // ChatUiState.language defaults to the product default zh-CN; the resources must
+            // follow it exactly as the production shell does.
+            runtime.mobileagent.ui.AppLocalizedResources(state.language) {
+                MaterialTheme {
+                    ChatScreen(state = state)
+                }
             }
         }
 

@@ -47,6 +47,18 @@ class TestSelectionTest(unittest.TestCase):
             self.assertIn("skipped: 1", result_summary(root))
             self.assertIn("physical USB absent", result_summary(root))
 
+    def test_fresh_host_fixture_must_precede_other_classes_without_omitting_them(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            manifest = self.fixture(root)
+            (root / "app-android/src/androidTest/kotlin/DeferredTest.kt").write_text(
+                "package example\nclass DeferredTest { @Test fun works() {} }", encoding="utf-8")
+            manifest["fresh_host_first"] = ["example.DeferredTest"]
+            manifest["suites"]["full"].append("example.DeferredTest")
+            self.assertIn("full: fresh-host tests must run before host-initializing fixtures", violations(root, manifest))
+            manifest["suites"]["full"].reverse()
+            self.assertEqual([], violations(root, manifest))
+
 
 if __name__ == "__main__":
     unittest.main()

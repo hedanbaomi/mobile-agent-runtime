@@ -36,7 +36,6 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.MoreVert
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
@@ -442,7 +441,7 @@ fun ProvidersScreen(
     if (state.editorOpen) ProviderEditorDialog(state, actions, zh)
     if (state.probe.phase != ProbePhase.IDLE) ProbeDialog(state.probe, actions.onCloseProbe, zh)
     if (connectionRequested) {
-        AlertDialog(
+        ProviderAlertDialog(
             onDismissRequest = { connectionRequested = false },
             title = { Text(stringResource(R.string.ui_test_provider_connection_1033d112)) },
             text = {
@@ -465,7 +464,7 @@ fun ProvidersScreen(
         )
     }
     if (probeRequested) {
-        AlertDialog(
+        ProviderAlertDialog(
             onDismissRequest = { probeRequested = false },
             title = { Text(stringResource(R.string.ui_run_provider_probe_0d20bf18)) },
             text = { Text(stringResource(R.string.ui_connection_streaming_tools_and_images_may_5e7ca12d)) },
@@ -475,7 +474,7 @@ fun ProvidersScreen(
     }
     deleteProviderId?.let { providerId ->
         val name = state.providers.firstOrNull { it.id == providerId }?.name.orEmpty()
-        AlertDialog(
+        ProviderAlertDialog(
             onDismissRequest = { deleteProviderId = null },
             title = { Text(stringResource(R.string.ui_delete_provider_b27fe928)) },
             text = { Text(
@@ -486,7 +485,7 @@ fun ProvidersScreen(
         )
     }
     deleteModelId?.let { modelId ->
-        AlertDialog(
+        ProviderAlertDialog(
             onDismissRequest = { deleteModelId = null },
             title = { Text(stringResource(R.string.ui_delete_model_metadata_c109a272)) },
             text = { Text(stringResource(R.string.ui_this_removes_the_model_from_the_05f9aab4)) },
@@ -747,7 +746,7 @@ private fun ProviderEditorDialog(state: ProvidersUiState, actions: ProvidersActi
     val draft = state.draft
     val showModelFields = draft.modelProfileId != null || draft.modelId.isNotBlank() || draft.id == null
     val budgetError = if (showModelFields) providerBudgetError(draft.contextLimit, draft.outputLimit, draft.outputLimitMode, draft.contextLimitMode, draft.contextWindowValue, zh) else null
-    AlertDialog(
+    ProviderAlertDialog(
         onDismissRequest = actions.onCloseEditor,
         title = { Text(providerEditorTitle(draft, zh)) },
         text = {
@@ -937,7 +936,7 @@ private fun CheckRow(label: String, checked: Boolean, onChecked: (Boolean) -> Un
 
 @Composable
 private fun ProbeDialog(probe: ProviderProbeUiState, onClose: () -> Unit, zh: Boolean) {
-    AlertDialog(
+    ProviderAlertDialog(
         onDismissRequest = { if (probe.phase != ProbePhase.RUNNING) onClose() },
         title = {
             Text(

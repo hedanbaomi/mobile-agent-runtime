@@ -106,6 +106,72 @@ class ChatStorageProjectionDeviceTest {
         }
     }
 
+    @Test fun creatingBeforeHistoryLoadsUsesTheSelectedConversationAgentAndExplicitWorkspace() {
+        val (app, ids) = fixture()
+        val (_, otherIds) = fixture()
+        val container = app.container
+        val selected = requireNotNull(container.conversations.get(ids[0]))
+        val selectedAgent = requireNotNull(container.agents.getSnapshot(selected.snapshotId)).agentId
+        val other = requireNotNull(container.conversations.get(otherIds[0]))
+        val otherAgent = requireNotNull(container.agents.getSnapshot(other.snapshotId)).agentId
+        container.agentGrantPort.saveGrant(runtime.mobileagent.domain.CapabilityGrant(
+            grantId = "projection-default-${UUID.randomUUID()}",
+            agentId = selectedAgent,
+            capability = runtime.mobileagent.domain.CapabilityId(runtime.mobileagent.domain.CapabilityId.FILE_READ_TEXT),
+            workspaceId = runtime.mobileagent.integration.RuntimeIntegration.INTERNAL_WORKSPACE_ID,
+            lifetime = runtime.mobileagent.domain.GrantLifetime.PERSISTENT,
+            policyVersion = container.agentGrantPort.currentPolicyVersion(),
+            createdAt = Utc.nowIso(),
+        ))
+        container.threadWorkspacePort.saveAgentWorkspaceDefault(
+            AgentWorkspaceDefault(selectedAgent, runtime.mobileagent.integration.RuntimeIntegration.INTERNAL_WORKSPACE_ID, updatedAt = Utc.nowIso()),
+        )
+        val pool = Executors.newFixedThreadPool(2)
+        val entered = CountDownLatch(1)
+        val release = CountDownLatch(1)
+        val finished = CountDownLatch(1)
+        val first = AtomicBoolean(true)
+        val dispatcher = object : CoroutineDispatcher() {
+            override fun dispatch(context: CoroutineContext, block: Runnable) = pool.execute {
+                val hold = first.compareAndSet(true, false)
+                try {
+                    if (hold) { entered.countDown(); check(release.await(15, TimeUnit.SECONDS)) }
+                    block.run()
+                } finally { if (hold) finished.countDown() }
+            }
+        }
+        val store = ViewModelStore()
+        lateinit var vm: ChatViewModel
+        try {
+            instrumentation.runOnMainSync {
+                vm = ChatViewModel(app, SavedStateHandle(), ChatRunExecution(), dispatcher)
+                store.put("chat", vm)
+            }
+            assertTrue(entered.await(10, TimeUnit.SECONDS))
+            instrumentation.runOnMainSync {
+                vm.selectAgent(otherAgent)
+                vm.selectSession(selected.id)
+                assertTrue(vm.state.value.loading)
+                assertTrue(vm.state.value.sessions.none { it.id == selected.id })
+                vm.newSessionAsync(workspaceId = null, useAgentDefault = false)
+            }
+            await { !vm.state.value.loading && vm.state.value.selectedSessionId != selected.id && vm.state.value.selectedSessionId != null }
+            val createdId = requireNotNull(vm.state.value.selectedSessionId)
+            val created = requireNotNull(container.conversations.get(createdId))
+            assertEquals(selectedAgent, requireNotNull(container.agents.getSnapshot(created.snapshotId)).agentId)
+            assertNull(container.threadWorkspacePort.conversationWorkspaceBinding(createdId))
+            assertNull(container.threadWorkspacePort.conversationWorkspaceBinding(selected.id))
+            release.countDown()
+            assertTrue(finished.await(10, TimeUnit.SECONDS))
+            instrumentation.waitForIdleSync()
+            instrumentation.runOnMainSync { assertEquals(createdId, vm.state.value.selectedSessionId) }
+        } finally {
+            release.countDown()
+            instrumentation.runOnMainSync { store.clear() }
+            pool.shutdownNow()
+        }
+    }
+
     @Test fun multipleLargeDraftsKeepSavedStateSmallAndRestoreFromSqlite() = runBlocking {
         val (app, ids) = fixture()
         val handle = SavedStateHandle(mapOf("chat.selectedSessionId" to ids[0]))

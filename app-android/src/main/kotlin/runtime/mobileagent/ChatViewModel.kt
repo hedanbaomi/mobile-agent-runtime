@@ -375,7 +375,7 @@ class ChatViewModel internal constructor(
     private fun createSession(requestedWorkspaceId: String?, useAgentDefault: Boolean): String? {
         if (blockedSessionChange()) return null
         return try {
-            val id = state.value.selectedAgentId ?: error("请先创建并选择 Agent。")
+            val id = container.creationAgentId(state.value.selectedSessionId, state.value.selectedAgentId)
             val conversation = container.createChatConversation(id, requestedWorkspaceId, useAgentDefault)
             selectCommittedSession(conversation.id, id)
             conversation.id
@@ -388,14 +388,16 @@ class ChatViewModel internal constructor(
         saveDraft()
         invalidateRead()
         val generation = readGeneration
-        val agent = state.value.selectedAgentId
+        val selectedConversation = state.value.selectedSessionId
+        val selectedAgent = state.value.selectedAgentId
         val owner = draftOwner()
         state.value = state.value.copy(loading = true)
         creationJob = viewModelScope.launch {
             try {
-                val created = withContext(storageDispatcher) {
+                val (created, agent) = withContext(storageDispatcher) {
                     container.chatDraftPersistence.flush(owner)
-                    container.createChatConversation(agent ?: error("请先创建并选择 Agent。"), workspaceId, useAgentDefault)
+                    val agent = container.creationAgentId(selectedConversation, selectedAgent)
+                    container.createChatConversation(agent, workspaceId, useAgentDefault) to agent
                 }
                 if (generation == readGeneration && !state.value.streaming) selectCommittedSession(created.id, agent)
             } catch (cancelled: CancellationException) { throw cancelled }

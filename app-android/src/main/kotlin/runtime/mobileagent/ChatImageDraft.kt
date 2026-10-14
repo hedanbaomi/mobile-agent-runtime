@@ -24,7 +24,9 @@ internal class ChatImageDraft(private val state: MutableState<ChatUiState>) {
     fun hasSendableInput(text: String, uploads: List<ChatImageUpload>) =
         (text.isNotBlank() || uploads.isNotEmpty()) && !state.value.streaming
     fun pending() = draft?.second.orEmpty()
-    fun sync() { if (draft?.first != state.value.selectedSessionId) draft = null }
+    // A completed history read can replace the UI projection even for the same owner.
+    // Reapply the selected draft (including an empty one) to keep visible and sent images equal.
+    fun sync() { draft = draft?.takeIf { it.first == state.value.selectedSessionId } }
     fun clear() { if (!state.value.streaming) draft = null }
     fun detach() { draft = null }
     fun persisted(conversationId: String) { if (draft?.first == conversationId) draft = null }

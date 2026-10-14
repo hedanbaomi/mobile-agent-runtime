@@ -152,6 +152,7 @@ class ChatRunResponseTest {
             } }
         }
         override fun <T> transaction(block: () -> T): T {
+            if (!connection.autoCommit) return block()
             connection.autoCommit = false
             return try { block().also { connection.commit() } }
             catch (failure: Throwable) { connection.rollback(); throw failure }

@@ -32,6 +32,31 @@ import runtime.mobileagent.serialization.TransferConflictPolicy
 import runtime.mobileagent.serialization.TransferOptions
 
 class TransferRepositoryIsolationTest {
+    @Test fun importedHistoryGetsIndexedChronologyWithoutChangingOriginalTimestamps() {
+        JdbcSqlConnection().use { source ->
+            Migrations.apply(source)
+            createAgent(source, "chronology")
+            val snapshot = AgentRepository(source).createSnapshot("agent.chronology")
+            val repo = ConversationRepository(source)
+            repo.create(snapshot.id, "Chronology", "c")
+            val times = listOf("2026-10-13T00:00:00.100001Z", "2026-10-13T00:00:00.100Z", "2026-10-13T08:00:00.1+08:00", "legacy-unparseable")
+            times.forEachIndexed { i, time -> repo.append("c", MessageRole.USER, "$i", messageId = "m$i", createdAt = time) }
+            val output = ByteArrayOutputStream()
+            TransferRepository(source).exportArchive("agent.chronology", TransferOptions(includeConversations = true), output)
+            JdbcSqlConnection().use { target ->
+                Migrations.apply(target)
+                TransferRepository(target).importArchive(output.toByteArray())
+                assertTrue(target.query("SELECT id FROM messages WHERE chronology_key='' OR chronology_ordinal IS NULL OR chronology_ordinal<>rowid").isEmpty())
+                val imported = ConversationRepository(target)
+                assertEquals(listOf("m1", "m2", "m0", "m3"), imported.messages("c").map { it.id })
+                assertEquals(times, times.indices.map { imported.message("m$it")!!.createdAt })
+                assertEquals(repo.messages("c"), imported.messages("c"))
+                assertEquals(listOf("m0", "m3"), imported.messagePage("c", limit = 2).messages.map { it.id })
+                assertEquals(listOf("m1", "m2"), imported.messagePage("c", beforeMessageId = "m0", limit = 2).messages.map { it.id })
+            }
+        }
+    }
+
     @Test
     fun exportRetainsLeasedBlobsUntilTheChangedSourceFenceRejectsBackup() {
         JdbcSqlConnection().use { db ->

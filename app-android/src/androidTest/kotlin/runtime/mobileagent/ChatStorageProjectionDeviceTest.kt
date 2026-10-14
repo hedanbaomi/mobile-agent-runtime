@@ -90,7 +90,9 @@ class ChatStorageProjectionDeviceTest {
 
     @Test fun uiPagesRecoverAllMessagesWithoutTruncatingDurableExecutionHistory() {
         val (app, ids) = fixture()
-        repeat(121) { app.container.conversations.append(ids[0], MessageRole.USER, "message $it") }
+        // Reverse insertion and variable precision must still produce chronological UI pages.
+        val base = java.time.Instant.parse("2026-10-13T00:00:00.100Z")
+        (120 downTo 0).forEach { app.container.conversations.append(ids[0], MessageRole.USER, "message $it", createdAt = base.plusNanos(it.toLong()).toString()) }
         withVm(app, SavedStateHandle(mapOf("chat.selectedSessionId" to ids[0]))) { vm ->
             await { !vm.state.value.loading }
             instrumentation.runOnMainSync { assertEquals(50, vm.state.value.messages.size); assertTrue(vm.state.value.hasMoreMessages) }
@@ -104,6 +106,30 @@ class ChatStorageProjectionDeviceTest {
             }
             assertEquals(121, app.container.conversations.messages(ids[0]).size)
         }
+    }
+
+    @Test fun equalInstantPagesUseBothIndexedCursorTermsOnAndroidSqlite() {
+        val (app, ids) = fixture()
+        val times = listOf("2026-10-13T00:00:00.100Z", "2026-10-13T08:00:00.1+08:00")
+        val inserted = (0..120).map { i -> app.container.conversations.append(ids[0], MessageRole.USER,
+            "tied $i", createdAt = times[i % 2]) }
+        val first = app.container.conversations.messagePage(ids[0])
+        assertEquals(inserted.takeLast(50), first.messages)
+        val second = app.container.conversations.messagePage(ids[0], first.nextBeforeMessageId)
+        assertEquals(inserted.subList(21, 71), second.messages)
+        val anchor = app.container.db.query("SELECT chronology_key,chronology_ordinal FROM messages WHERE id=?", listOf(inserted[71].id)).single()
+        val sql = "SELECT * FROM messages WHERE conversation_id=? AND (chronology_key,chronology_ordinal)<(?,?) ORDER BY chronology_key DESC,chronology_ordinal DESC LIMIT ?"
+        val args = listOf(ids[0], anchor.string("chronology_key"), anchor.long("chronology_ordinal"), 51)
+        val plan = app.container.db.query("EXPLAIN QUERY PLAN $sql", args).map { it.string("detail") }
+        assertTrue(plan.toString(), plan.any { it.contains("messages_chronology") && it.contains("chronology_ordinal") })
+        assertFalse(plan.toString(), plan.any { it.contains("TEMP B-TREE") })
+        val seeks = app.container.db.query("EXPLAIN $sql", args).filter { it.string("opcode") in listOf("SeekLT", "SeekLE") }
+        assertTrue(seeks.toString(), seeks.any { it.string("p4") == "3" })
+        val repair = app.container.db.query("EXPLAIN QUERY PLAN SELECT id,created_at FROM messages INDEXED BY messages_missing_chronology WHERE (chronology_key='' OR chronology_ordinal IS NULL) AND conversation_id=? ORDER BY conversation_id,id LIMIT 128", listOf(ids[0]))
+            .map { it.string("detail") }
+        assertTrue(repair.toString(), repair.any { it.contains("messages_missing_chronology") })
+        assertFalse(repair.toString(), repair.any { it.contains("TEMP B-TREE") })
+        println("MESSAGE_CHRONOLOGY_PLAN $plan repair=$repair seeks=$seeks")
     }
 
     @Test fun creatingBeforeHistoryLoadsUsesTheSelectedConversationAgentAndExplicitWorkspace() {

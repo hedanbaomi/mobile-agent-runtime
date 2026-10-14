@@ -158,7 +158,7 @@ class ConversationRepository(
         }
         val parts = durable.parts
         db.execute(
-            "INSERT INTO messages(id,conversation_id,parent_message_id,role,text,status,created_at,parts_json,metadata_json) VALUES(?,?,?,?,?,?,?,?,?)",
+            "INSERT INTO messages(id,conversation_id,parent_message_id,role,text,status,created_at,parts_json,metadata_json,chronology_key) VALUES(?,?,?,?,?,?,?,?,?,?)",
             listOf(
                 durable.id,
                 durable.conversationId,
@@ -169,8 +169,10 @@ class ConversationRepository(
                 durable.createdAt,
                 json.encodeToString(parts),
                 durable.metadataJson,
+                MessageChronology.key(durable.createdAt),
             ),
         )
+        db.execute("UPDATE messages SET chronology_ordinal=rowid WHERE id=?", listOf(durable.id))
         parts.forEachIndexed { index, part ->
             db.execute(
                 "INSERT INTO message_parts(id,message_id,ordinal,part_type,payload_json) VALUES(?,?,?,?,?)",
@@ -249,29 +251,31 @@ class ConversationRepository(
     fun message(id: String): Message? =
         db.query("SELECT * FROM messages WHERE id=?", listOf(id)).singleOrNull()?.toMessage(json)
 
-    fun messages(conversationId: String): List<Message> =
-        // UUIDs are intentionally opaque and do not provide a conversation order.  Keep timestamp
-        // ordering for normal history, then use SQLite's durable row insertion order to keep an
-        // assistant/tool pair deterministic when one request writes both at the same instant.
-        db.query("SELECT * FROM messages WHERE conversation_id=? ORDER BY created_at,rowid", listOf(conversationId))
+    fun messages(conversationId: String): List<Message> {
+        MessageChronology.backfill(db, conversationId)
+        // Equivalent instants tie by durable insertion order, never opaque UUID or spelling.
+        // Append/import publish both derived fields atomically; decode on the normal reader.
+        return db.query("SELECT * FROM messages WHERE conversation_id=? ORDER BY chronology_key,chronology_ordinal", listOf(conversationId))
             .map { it.toMessage(json) }
+    }
 
     fun listMessages(conversationId: String): List<Message> = messages(conversationId)
 
-    /** Older pages use the same timestamp/rowid order as the full transcript, including ties. */
+    /** Older pages use the same indexed instant/rowid order as the full transcript. */
     fun messagePage(conversationId: String, beforeMessageId: String? = null, limit: Int = 50): MessagePage = db.transaction {
         requireId(conversationId, "conversationId")
         require(limit in 1..100)
+        MessageChronology.backfill(db, conversationId)
         val args = mutableListOf<Any?>(conversationId)
         val before = if (beforeMessageId == null) "" else {
             requireId(beforeMessageId, "message cursor")
-            val anchor = db.query("SELECT created_at,rowid AS sequence FROM messages WHERE id=? AND conversation_id=?",
+            val anchor = db.query("SELECT chronology_key,chronology_ordinal AS sequence FROM messages WHERE id=? AND conversation_id=?",
                 listOf(beforeMessageId, conversationId)).singleOrNull() ?: throw invalid("Message cursor is no longer available")
-            args.addAll(listOf(anchor.string("created_at"), anchor.string("created_at"), anchor.long("sequence")))
-            " AND (created_at < ? OR (created_at = ? AND rowid < ?))"
+            args.addAll(listOf(anchor.string("chronology_key"), anchor.long("sequence")))
+            " AND (chronology_key,chronology_ordinal) < (?,?)"
         }
         args += limit + 1
-        val rows = db.query("SELECT * FROM messages WHERE conversation_id=?$before ORDER BY created_at DESC,rowid DESC LIMIT ?", args)
+        val rows = db.query("SELECT * FROM messages WHERE conversation_id=?$before ORDER BY chronology_key DESC,chronology_ordinal DESC LIMIT ?", args)
             .map { it.toMessage(json) }
         val visible = rows.take(limit).asReversed()
         MessagePage(visible, visible.firstOrNull()?.id?.takeIf { rows.size > limit })

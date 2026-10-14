@@ -1357,10 +1357,11 @@ class TransferRepository(
         )
         transfer.messages.forEach { message ->
             db.execute(
-                "INSERT INTO messages(id,conversation_id,parent_message_id,role,text,status,created_at,parts_json,metadata_json) VALUES(?,?,?,?,?,?,?,?,?)",
+                "INSERT INTO messages(id,conversation_id,parent_message_id,role,text,status,created_at,parts_json,metadata_json,chronology_key) VALUES(?,?,?,?,?,?,?,?,?,?)",
                 listOf(message.id, message.conversationId, message.parentMessageId, message.role.name, message.text, message.status,
-                    message.createdAt, json.encodeToString(message.parts), message.metadataJson),
+                    message.createdAt, json.encodeToString(message.parts), message.metadataJson, MessageChronology.key(message.createdAt)),
             )
+            db.execute("UPDATE messages SET chronology_ordinal=rowid WHERE id=?", listOf(message.id))
             message.parts.forEachIndexed { index, part ->
                 db.execute(
                     "INSERT INTO message_parts(id,message_id,ordinal,part_type,payload_json) VALUES(?,?,?,?,?)",

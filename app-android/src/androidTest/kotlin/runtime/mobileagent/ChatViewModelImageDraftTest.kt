@@ -4,9 +4,15 @@
 package runtime.mobileagent
 
 import androidx.lifecycle.SavedStateHandle
+import androidx.lifecycle.ViewModelStore
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import java.util.UUID
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
+import kotlin.coroutines.CoroutineContext
+import kotlinx.coroutines.CoroutineDispatcher
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -43,6 +49,62 @@ class ChatViewModelImageDraftTest {
     }
 
     private fun onMain(block: () -> Unit) = InstrumentationRegistry.getInstrumentation().runOnMainSync(block)
+
+    @Test
+    fun sameSessionHistoryCompletionKeepsAttachedAndRemovedImagesVisible() {
+        val (first, _) = fixture(setOf("stream", "image"))
+        val entered = CountDownLatch(1)
+        val release = CountDownLatch(1)
+        val pool = Executors.newSingleThreadExecutor()
+        val dispatcher = object : CoroutineDispatcher() {
+            override fun dispatch(context: CoroutineContext, block: Runnable) {
+                pool.execute { entered.countDown(); check(release.await(15, TimeUnit.SECONDS)); block.run() }
+            }
+        }
+        val store = ViewModelStore()
+        lateinit var vm: ChatViewModel
+        fun awaitProjection() {
+            val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(15)
+            while (System.nanoTime() < deadline) {
+                var loaded = false
+                onMain { loaded = !vm.state.value.loading && vm.state.value.selectedSessionId == first }
+                if (loaded) return
+                Thread.sleep(10)
+            }
+            org.junit.Assert.fail("Same-session history did not complete")
+        }
+        try {
+            var ids = emptyList<String>()
+            onMain {
+                vm = ChatViewModel(app, SavedStateHandle(), ChatRunExecution(), dispatcher)
+                store.put("images", vm)
+                vm.selectSession(first)
+                vm.attachImages(List(9) { gif to null })
+                ids = vm.state.value.pendingImages.map { it.id }
+                assertEquals(8, ids.size)
+            }
+            assertTrue(entered.await(10, TimeUnit.SECONDS))
+            release.countDown()
+            awaitProjection()
+            onMain {
+                assertEquals(ids, vm.state.value.pendingImages.map { it.id })
+                vm.removePendingImage(ids.first())
+                vm.reload()
+            }
+            awaitProjection()
+            onMain {
+                assertEquals(ids.drop(1), vm.state.value.pendingImages.map { it.id })
+                vm.clearImageDraft()
+                vm.reload()
+            }
+            awaitProjection()
+            onMain { assertTrue(vm.state.value.pendingImages.isEmpty()) }
+        } finally {
+            release.countDown()
+            onMain { store.clear() }
+            pool.shutdownNow()
+        }
+    }
 
     @Test
     fun uploadedOriginalAndTextFollowupReachMainRequestsInBothProtocols() {

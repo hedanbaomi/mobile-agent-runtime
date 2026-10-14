@@ -33,3 +33,9 @@
 | 性能与兼容 | JDBC 和 Android SQLite 实际计划使用三列范围，无临时排序；超128缺失行全部修复；闰秒、扩展年份、最小/最大 Instant、偏移和旧无效值保持明确定义 |
 
 回归入口：ChatProjectionPersistenceTest、MessageChronologyMigrationTest、ContextCompactionRepositoryTest、TransferRepositoryIsolationTest、Android ChatStorageProjectionDeviceTest。执行收据由主 Agent 记入本次发布证据；JVM、模拟器、真实设备/Provider 与公开发布状态分别记录。
+
+## 发布验证补充：图片草稿投影
+
+后续收敛CI还复现了同会话历史读取完成后图片条变空：历史结果带回读取前的 `pendingImages`，而旧 `ChatImageDraft.sync()` 仅在owner变化时刷新。内存待发图片仍存在，界面却不可见。sync现每次按当前会话重新投影实际草稿（包括空草稿），等值状态依既有结构相等策略不触发重组；owner变化仍丢弃旧草稿，已清空/已持久化图片不能由旧投影复活，发送和picker身份校验保持原规则。
+
+A05/U07追加：用可控IO延迟覆盖attach→历史完成、remove→reload、clear→reload，UI数量/ID须与待发草稿一致；跨会话late picker拒绝、两协议原图实际发送与文本后续、无视觉模型保留草稿的既有设备用例保留。ChatImageDraftSynchronizationTest须在旧实现变红，ChatViewModelImageDraftTest包含确定性异步路径；不能用固定sleep或减少断言掩盖问题。该补充经DSH DeepSeek V4.1 Flash限定只读审查，实际测试/CI状态仍单独记入发行收据。

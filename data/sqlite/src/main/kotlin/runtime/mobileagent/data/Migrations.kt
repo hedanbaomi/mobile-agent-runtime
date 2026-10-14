@@ -60,7 +60,8 @@ object Migrations {
     // v27 replaces the single active dispatch index with three durable slots.
     // v28 permits six durable slots and freezes v27 batches at their old default of three.
     // v29 adds the scoped import-job display index without replaying legacy binding projection.
-    const val VERSION = 32
+    // v33 derives an indexed instant key without rewriting message timestamps or hashes.
+    const val VERSION = 33
 
     private val statements = listOf(
         "CREATE TABLE IF NOT EXISTS schema_version (version INTEGER NOT NULL PRIMARY KEY)",
@@ -189,6 +190,8 @@ object Migrations {
         Column("agent_snapshots", "expanded_json", "TEXT NOT NULL DEFAULT '{}'"),
         Column("messages", "parts_json", "TEXT NOT NULL DEFAULT '[]'"),
         Column("messages", "metadata_json", "TEXT NOT NULL DEFAULT '{}'"),
+        Column("messages", "chronology_key", "TEXT NOT NULL DEFAULT ''"),
+        Column("messages", "chronology_ordinal", "INTEGER"),
         Column("audit_events", "input_bytes", "INTEGER NOT NULL DEFAULT 0"),
         Column("audit_events", "output_bytes", "INTEGER NOT NULL DEFAULT 0"),
         Column("audit_events", "input_tokens", "INTEGER NOT NULL DEFAULT 0"),
@@ -280,6 +283,7 @@ object Migrations {
             // v24 is additive and lazy: legacy jobs/cache rows are not guessed into unit plans.
             DocumentPipelineStore.schema.forEach { sql -> connection.execute(sql) }
             columns.forEach { column -> ensureColumn(connection, column) }
+            MessageChronology.install(connection)
             if (current in 1L..27L) {
                 // The old default lived in code, not a policy row. Preserve it for existing
                 // batches before changing the default for newly created batches.
@@ -741,6 +745,8 @@ object Migrations {
         "agent_profiles" to "parameter_overrides_json",
         "agent_snapshots" to "expanded_json",
         "messages" to "parts_json",
+        "messages" to "chronology_key",
+        "messages" to "chronology_ordinal",
         "audit_events" to "metadata_json",
         "import_jobs" to "vision_binding_json",
         "runs" to "retry_acknowledged_at",

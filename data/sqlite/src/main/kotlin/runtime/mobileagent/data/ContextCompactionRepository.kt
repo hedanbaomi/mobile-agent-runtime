@@ -282,13 +282,14 @@ class ContextCompactionRepository(
 
     /**
      * Loads every listed row from the bound conversation. A missing row, a row that is not
-     * COMPLETE, or a list whose order does not match the durable `created_at,rowid` conversation
+     * COMPLETE, or a list whose order does not match the durable instant/rowid conversation
      * order is rejected: a summary may only cover transcript that is still present, still settled
      * and still in the order the reader replays it.
      */
     private fun loadSources(conversationId: String, ids: List<String>): List<ContextCompactionSource> {
+        MessageChronology.backfill(db, conversationId)
         val rows = db.query(
-            "SELECT rowid AS source_ordinal,id,role,text,status,parts_json,created_at FROM messages WHERE conversation_id=?",
+            "SELECT rowid AS source_ordinal,id,role,text,status,parts_json,created_at FROM messages WHERE conversation_id=? ORDER BY chronology_key,chronology_ordinal",
             listOf(conversationId),
         )
         val byId = rows.associateBy { it.string("id") }
@@ -309,7 +310,8 @@ class ContextCompactionRepository(
                 status = status,
             )
         }
-        val durableOrder = sources.sortedWith(compareBy({ it.createdAt }, { it.ordinal })).map { it.messageId }
+        val selected = ids.toSet()
+        val durableOrder = rows.map { it.string("id") }.filter { it in selected }
         if (durableOrder != ids) {
             throw invalid("Source message ids must be listed in durable conversation order")
         }

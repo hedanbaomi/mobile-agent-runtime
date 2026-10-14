@@ -95,7 +95,7 @@ class KnowledgeLegacyVisionReadEfficiencyTest {
     @Test fun currentSchemaReinstallsMissingDerivedIndexesWithoutChangingReceipts() {
         JdbcSqlConnection().use { db ->
             Migrations.apply(db)
-            assertEquals(32L, db.query("SELECT version FROM schema_version").single().long("version"))
+            assertEquals(Migrations.VERSION.toLong(), db.query("SELECT version FROM schema_version").single().long("version"))
             val repo = KnowledgeRepository(db, MemoryBlobSink(), automaticStorageMaintenance = false)
             val job = repo.importBytes("receipts.txt", "text/plain", "retained local receipt source".toByteArray(), false, pauseAt = ImportStage.COPYING)
             insertAssetAndResult(db, job.documentId, "receipt", null, "target", "UNKNOWN_OUTCOME")
@@ -108,7 +108,7 @@ class KnowledgeLegacyVisionReadEfficiencyTest {
             assertEquals(0, db.query("SELECT name FROM sqlite_master WHERE type='index' AND name IN (?,?)",
                 listOf("assets_document_vision_lookup", "vision_result_asset_lookup")).size)
             Migrations.apply(db)
-            assertEquals(32L, db.query("SELECT version FROM schema_version").single().long("version"))
+            assertEquals(Migrations.VERSION.toLong(), db.query("SELECT version FROM schema_version").single().long("version"))
             assertEquals(2, db.query("SELECT name FROM sqlite_master WHERE type='index' AND name IN (?,?)",
                 listOf("assets_document_vision_lookup", "vision_result_asset_lookup")).size)
             assertEquals(beforeAssets, db.query("SELECT * FROM assets ORDER BY id"))

@@ -11,6 +11,41 @@ class ContextCompactionRepositoryTest {
     private val summary = """{"goals":["continue"],"constraints":["preserve originals"],"decisions":[],"pending":[],"results":[]}"""
     private val at = "2026-09-11T00:00:00Z"
 
+    @Test fun v32MisorderedSummaryIsPreservedButNotReusedAndCanParentCorrectedSummary() = fixture { db, repo ->
+        val conversations = ConversationRepository(db)
+        conversations.append("c", MessageRole.USER, "later", messageId = "later", createdAt = "2026-10-13T00:00:00.100001Z")
+        conversations.append("c", MessageRole.USER, "earlier", messageId = "earlier", createdAt = "2026-10-13T00:00:00.100Z")
+        val legacyRows = db.query("SELECT rowid AS sequence,* FROM messages WHERE conversation_id='c' ORDER BY created_at,rowid")
+        val legacySources = legacyRows.map { row -> ContextCompactionSource(row.string("id"), row.string("created_at"),
+            row.long("sequence"), row.string("role"), row.string("text"), row.string("parts_json"), row.string("status")) }
+        val legacyHash = ContextCompactionDigest.sourceContentHash(legacySources)
+        assertEquals(listOf("m0", "later", "earlier"), legacySources.map { it.messageId })
+        db.execute("INSERT INTO context_compactions(id,conversation_id,snapshot_id,run_id,source_message_ids_json,source_content_hash,input_hash,model_id,model_fingerprint,authorization_fingerprint,reason,state,summary_json,parent_id,version,before_units,after_units,input_tokens,output_tokens,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            listOf("legacy", "c", "s", "r", "[\"m0\",\"later\",\"earlier\"]", legacyHash, "old-input", "model", "model-fp", "auth-fp",
+                "history-messages", "SUCCEEDED", ContextSummary.canonicalize(summary), null, 1, 1000, 500, 100, 20, at, at))
+        val before = db.query("SELECT * FROM context_compactions WHERE id='legacy'").single()
+        val rawMessages = db.query("SELECT rowid,id,text,created_at,parts_json,status FROM messages ORDER BY rowid")
+        db.execute("DROP INDEX messages_chronology")
+        db.execute("DROP INDEX messages_missing_chronology")
+        db.execute("ALTER TABLE messages DROP COLUMN chronology_key")
+        db.execute("ALTER TABLE messages DROP COLUMN chronology_ordinal")
+        db.execute("UPDATE schema_version SET version=32")
+        Migrations.apply(db)
+        assertEquals(before, db.query("SELECT * FROM context_compactions WHERE id='legacy'").single())
+        assertEquals(rawMessages, db.query("SELECT rowid,id,text,created_at,parts_json,status FROM messages ORDER BY rowid"))
+        assertFalse(repo.validateSources(repo.get("legacy")!!))
+        assertNull(repo.latestSucceeded("c", "s", "model-fp", "auth-fp"))
+        val canonical = listOf("m0", "earlier", "later")
+        assertThrows(AppException::class.java) { repo.create(attempt("missing-parent", canonical)) }
+        repo.create(attempt("corrected", canonical).copy(parentId = "legacy"))
+        repo.transition("corrected", ContextCompactionState.DISPATCHED)
+        val corrected = repo.transition("corrected", ContextCompactionState.SUCCEEDED, summary, 500)
+        assertTrue(repo.validateSources(corrected))
+        assertEquals("corrected", repo.latestSucceeded("c", "s", "model-fp", "auth-fp")?.id)
+        assertEquals(legacyHash, repo.get("legacy")!!.sourceContentHash)
+        assertEquals(before, db.query("SELECT * FROM context_compactions WHERE id='legacy'").single())
+    }
+
     @Test fun successKeepsTranscriptAndTerminalRowsImmutable() = fixture { db, repo ->
         val before = ConversationRepository(db).messages("c")
         repo.create(attempt("z"))

@@ -8,6 +8,47 @@ import org.junit.jupiter.api.Test
 import runtime.mobileagent.domain.*
 
 class ChatProjectionPersistenceTest {
+    @Test fun nanosecondChronologySurvivesReverseInsertionAndEveryPageBoundary() {
+        JdbcSqlConnection().use { db ->
+            val repo = fixture(db)
+            val base = java.time.Instant.parse("2026-10-13T00:00:00.100Z")
+            (136 downTo 0).forEach { index ->
+                repo.append("conversation", MessageRole.USER, "$index", messageId = "instant.$index",
+                    createdAt = base.plusNanos(index.toLong()).toString())
+            }
+            val expected = (0..136).map { "instant.$it" }
+            assertEquals(expected, repo.messages("conversation").map { it.id })
+            var page = repo.messagePage("conversation", limit = 17)
+            var collected = page.messages
+            while (page.nextBeforeMessageId != null) {
+                page = repo.messagePage("conversation", page.nextBeforeMessageId, 17)
+                collected = page.messages + collected
+            }
+            assertEquals(expected, collected.map { it.id })
+            assertEquals(137, collected.map { it.id }.distinct().size)
+        }
+    }
+
+    @Test fun equivalentInstantsTieByInsertionAndMalformedLegacyTimesRemainReadable() {
+        JdbcSqlConnection().use { db ->
+            val repo = fixture(db)
+            val times = listOf("not-a-time-z", "+10000-01-01T00:00:00Z", "2026-10-13T08:00:00.1+08:00",
+                "2026-10-13T00:00:00.100000000Z", "2026-10-13T00:00:00.100Z", "not-a-time-a",
+                "2016-12-31T23:59:60Z", "2016-12-31T23:59:59Z", java.time.Instant.MIN.toString(), java.time.Instant.MAX.toString())
+            times.forEachIndexed { i, at -> repo.append("conversation", MessageRole.USER, "$i", messageId = "time.$i", createdAt = at) }
+            val expected = listOf(8, 6, 7, 2, 3, 4, 1, 9, 0, 5).map { "time.$it" }
+            assertEquals(expected, repo.messages("conversation").map { it.id })
+            assertEquals(times, times.indices.map { repo.message("time.$it")!!.createdAt })
+            var page = repo.messagePage("conversation", limit = 1)
+            var collected = page.messages
+            while (page.nextBeforeMessageId != null) {
+                page = repo.messagePage("conversation", page.nextBeforeMessageId, 1)
+                collected = page.messages + collected
+            }
+            assertEquals(expected, collected.map { it.id })
+        }
+    }
+
     @Test fun messagePagesMatchFullHistoryWithEqualTimestampsAndOpaqueIds() {
         JdbcSqlConnection().use { db ->
             val repo = fixture(db)

@@ -90,7 +90,9 @@ class ChatStorageProjectionDeviceTest {
 
     @Test fun uiPagesRecoverAllMessagesWithoutTruncatingDurableExecutionHistory() {
         val (app, ids) = fixture()
-        repeat(121) { app.container.conversations.append(ids[0], MessageRole.USER, "message $it") }
+        // This fixture asserts insertion order; a shared timestamp makes rowid the ordering key.
+        // The wall clock and variable-precision UTC strings cannot define the expected sequence.
+        repeat(121) { app.container.conversations.append(ids[0], MessageRole.USER, "message $it", createdAt = "2026-10-13T00:00:00Z") }
         withVm(app, SavedStateHandle(mapOf("chat.selectedSessionId" to ids[0]))) { vm ->
             await { !vm.state.value.loading }
             instrumentation.runOnMainSync { assertEquals(50, vm.state.value.messages.size); assertTrue(vm.state.value.hasMoreMessages) }

@@ -1,0 +1,15 @@
+<!-- SPDX-FileCopyrightText: 2026 mobileAgentRuntime contributors -->
+<!-- SPDX-License-Identifier: AGPL-3.0-only -->
+<resources>
+    <string name="sett_observation_title">屏幕观察</string>
+    <string name="sett_observation_help">可选用无障碍读取前台应用的文字与控件，辅助 Shizuku 或电脑激活的设备常驻 ADB。是否确认沿用 Agent 的工具设置；此功能不点击或输入。</string>
+    <string name="sett_observation_allow">允许 Agent 请求读屏</string>
+    <string name="sett_observation_disabled">已关闭</string>
+    <string name="sett_observation_connected">服务已连接，沿用 Agent 的工具确认设置</string>
+    <string name="sett_observation_waiting">等待系统无障碍服务连接</string>
+    <string name="sett_observation_open_settings">打开系统无障碍设置</string>
+    <string name="sett_observation_setup">在系统设置中启用“屏幕观察”，返回后自动检测。部分侧载安装需先在应用信息中允许受限设置。</string>
+    <string name="sett_observation_disclosure_title">允许请求屏幕内容？</string>
+    <string name="sett_observation_disclosure">开启后，Agent 请求的可见文字和控件将按工具确认设置发送给你配置的模型。密码字段会被跳过，但页面可能包含其他个人信息。你可以随时关闭此开关或系统无障碍服务。</string>
+    <string name="sett_observation_confirm">允许请求</string>
+</resources>

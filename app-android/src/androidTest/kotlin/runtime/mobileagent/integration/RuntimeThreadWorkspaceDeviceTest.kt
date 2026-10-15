@@ -156,10 +156,9 @@ class RuntimeThreadWorkspaceDeviceTest {
             configSnapshotHash = "config-read-only-${fixture.suffix}",
         )
         assertEquals(readOnlyCapabilities, context.canonicalGrants.map { it.capability }.toSet())
-        assertEquals(
-            setOf("workspace_list", "file_list", "file_stat", "file_read_text"),
-            runtime.createToolExecutorFactory(context).toolingSpecs.map { it.name }.toSet(),
-        )
+        val exposed = runtime.createToolExecutorFactory(context).toolingSpecs
+        assertEquals(readOnlyCapabilities, exposed.mapNotNull { it.capability }.toSet())
+        assertTrue(exposed.none { it.sideEffect })
     }
 
     @Test

@@ -162,6 +162,7 @@ class ChatViewModel internal constructor(
         var approval: CompletableDeferred<Boolean>? = null
         var approvalCallId: String? = null
         var executor: ToolExecutor? = null
+        var productivity: RunProductivityTools? = null
     }
     private var activeRunResources: RunResources? = null
     private val citations = linkedMapOf<String, Pair<Citation, String>>()
@@ -982,8 +983,18 @@ class ChatViewModel internal constructor(
                         }
                     },
                 ) }
-                val toolExecutor = runTools.executor
+                val productivity = RunProductivityTools(
+                    core = runTools.executor,
+                    scope = kotlinx.coroutines.CoroutineScope(currentCoroutineContext() + Dispatchers.IO),
+                    liveContext = { withContext(Dispatchers.IO) { container.agents.isLiveBinding(binding.snapshot) } },
+                    reserveCalls = runTools::reserveAdditionalToolCalls,
+                )
+                resources.productivity = productivity
+                val toolExecutor = productivity.executor
                 resources.executor = toolExecutor
+                fun invocationId(callId: String, toolName: String): String? =
+                    if (productivity.ownsTool(toolName)) productivity.runtimeInvocationId(callId)
+                    else runTools.runtimeInvocationId(callId)
                 // Tool dispatch/result evidence (review-APK QA P2): dispatch,
                 // result and UNKNOWN_OUTCOME previously wrote zero diagnostic
                 // events, so a failed tool left no trace to diagnose.  Typed and
@@ -1330,7 +1341,7 @@ class ChatViewModel internal constructor(
                     val approvalAudit = PendingApprovalAudit(
                         runId = run.runId,
                         callId = call.callId,
-                        invocationId = runTools.runtimeInvocationId(call.callId),
+                        invocationId = invocationId(call.callId, call.name),
                         agentId = binding.snapshot.agentId,
                         sessionRef = conversationId,
                         capability = diagnosticToolCapability(call.name, toolExecutor.specs),
@@ -1341,7 +1352,8 @@ class ChatViewModel internal constructor(
                     }
                     if (!withContext(Dispatchers.Main) { canProjectRun(owner) }) return@approvalDecision false
                     val liveAgent = container.agents.get(binding.snapshot.agentId)
-                    if (AgentToolConfirmation.allows(binding.snapshot.permissionSettingsJson,
+                    if (!AgentToolConfirmation.requiresExplicitApproval(call.name) &&
+                        AgentToolConfirmation.allows(binding.snapshot.permissionSettingsJson,
                             liveAgent?.permissionSettingsJson)) {
                         markPendingApprovalDecision(run.runId, approvalAudit.invocationId, call.callId, "APPROVED")
                         recordToolApprovalState(approvalAudit, DiagnosticApprovalState.APPROVED, "agent_auto_skip")
@@ -1381,7 +1393,9 @@ class ChatViewModel internal constructor(
                 })
                 val runtimeEvents = runtime.run(AgentRuntimeRequest(run, prompt, model.modelId, secret!!, "tools" in model.capabilities,
                     parameters = layers, headers = headers, emitRequestPreview = container.uiPreferences.getBoolean("request-inspector", true),
-                    toolImages = runTools::toolImages, maxInputBudgetUnits = inputBudget.toLong(),
+                    toolImages = { call, result ->
+                        if (productivity.ownsTool(call.name)) emptyList() else runTools.toolImages(call, result)
+                    }, maxInputBudgetUnits = inputBudget.toLong(),
                     outputTokenLimit = sendCap,
                     outputTokenField = if (outputDecision.isAdvancedOverride) outputDecision.key else null,
                     maxImagesPerRequest = minOf(MAX_IMAGES_PER_REQUEST, contextPolicy.imageBudget),
@@ -1562,7 +1576,7 @@ class ChatViewModel internal constructor(
                                     event.callId, event.name, DiagnosticToolRunState.WAITING_APPROVAL, run.runId,
                                 )
                                 record = record.copy(state = RunStatus.WAITING_TOOL_APPROVAL)
-                                val runtimeInvocationId = runTools.runtimeInvocationId(event.callId)
+                                val runtimeInvocationId = invocationId(event.callId, event.name)
                                     ?: InternalRequestIds.new()
                                 val invocation = ToolInvocation(runtimeInvocationId, run.runId, event.callId, event.name,
                                     event.argumentsJson, state = "WAITING_APPROVAL", createdAt = Utc.nowIso())
@@ -1620,7 +1634,7 @@ class ChatViewModel internal constructor(
                                 metadata = citationMetadata(runCitations.values.filter { it.first.runId == run.runId }.map { it.first },
                                     (listOfNotNull(warning) + runTools.warnings()).joinToString("\n").ifBlank { null }, source = runCitations)
                                 checkpoint()
-                                val runtimeInvocationId = runTools.runtimeInvocationId(event.callId) ?: InternalRequestIds.new()
+                                val runtimeInvocationId = invocationId(event.callId, event.name) ?: InternalRequestIds.new()
                                 val persistedDecision = withContext(Dispatchers.IO) {
                                     container.runs.invocations(run.runId)
                                         .firstOrNull { it.invocationId == runtimeInvocationId }?.permissionDecision
@@ -1923,6 +1937,13 @@ class ChatViewModel internal constructor(
                 // an IO block can still throw while returning to this already-cancelled UI job.
                 withContext(NonCancellable) {
                     try {
+                        // End all Run-owned background work before persisting the final Run state.
+                        resources.productivity?.closeChildren()
+                        if (resources.productivity?.hasUnknownOutcomes == true) {
+                            record = record.copy(state = RunStatus.UNKNOWN_OUTCOME,
+                                errorCode = "UNKNOWN_OUTCOME", stopReason = "background-tool-outcome-unknown")
+                            run.state = runtime.mobileagent.agent.RunState.UNKNOWN_OUTCOME
+                        }
                         // A child executor may durably record uncertainty while cancellation prevents
                         // its final event from reaching this collector. Never erase that safety gate.
                         val persisted = withContext(Dispatchers.IO) { container.runs.get(run.runId) }
@@ -1981,11 +2002,14 @@ class ChatViewModel internal constructor(
                         if (runAdmitted) withContext(Dispatchers.IO) { container.runs.save(record) }
                         container.runCoordinator.release(run.runId, runOwnerKey)
                     } catch (failure: Exception) { publishRunState(owner, state.value.copy(status = "记录保存失败：${SecretRedactor.redact(failure.message.orEmpty())}", statusKind = "error")) }
+                    // Keep core bindings until pending approvals have been settled above.
+                    runCatching { resources.executor?.close() }
                     secret?.fill('\u0000')
                     resources.approval?.complete(false)
                     resources.approval = null
                     resources.approvalCallId = null
                     resources.executor = null
+                    resources.productivity = null
                     forgetPendingApproval(run.runId)
                     container.runCoordinator.release(run.runId, runOwnerKey)
                     publishRunState(owner, state.value.copy(streaming = false, pendingTool = null))
@@ -2381,12 +2405,13 @@ class ChatViewModel internal constructor(
     ): ChatToolApprovalUi {
         val safeArguments = SecretRedactor.redact(call.argumentsJson, secret?.let { listOf(String(it)) }.orEmpty())
         val root = runCatching { Json.parseToJsonElement(safeArguments).jsonObject }.getOrNull()
+        val shellArguments = AgentToolConfirmation.shellArguments(call.name, root)
         fun stringValue(vararg keys: String): String? = keys.asSequence()
-            .mapNotNull { key -> (root?.get(key) as? JsonPrimitive)?.takeIf { it.isString }?.content }
+            .mapNotNull { key -> ((shellArguments ?: root)?.get(key) as? JsonPrimitive)?.takeIf { it.isString }?.content }
             .firstOrNull { it.isNotBlank() }
         val command = stringValue("command")
         val cwd = stringValue("cwd")
-        val shell = call.name == "shell_exec"
+        val shell = shellArguments != null
         val highRisk = shell && command?.let(HighRiskDetector::isHighRisk) == true
         val description = specs.firstOrNull { it.name == call.name }?.description.orEmpty()
         val summary = buildString {

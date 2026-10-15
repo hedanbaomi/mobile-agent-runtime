@@ -5,9 +5,22 @@ package runtime.mobileagent
 
 import org.junit.jupiter.api.Assertions.assertFalse
 import org.junit.jupiter.api.Assertions.assertTrue
+import org.junit.jupiter.api.Assertions.assertEquals
+import org.junit.jupiter.api.Assertions.assertNull
 import org.junit.jupiter.api.Test
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.jsonObject
 
 class AgentToolConfirmationTest {
+    @Test fun backgroundShellPreservesCommandDisclosureAndCannotSkipApproval() {
+        val arguments = Json.parseToJsonElement("""{"tool":"shell_exec","arguments":{"command":"rm -rf /sdcard/example","cwd":"/sdcard"}}""").jsonObject
+        assertEquals(arguments["arguments"], AgentToolConfirmation.shellArguments("job_start", arguments))
+        assertTrue(AgentToolConfirmation.requiresExplicitApproval("job_start"))
+        assertFalse(AgentToolConfirmation.requiresExplicitApproval("device_observe"))
+        assertFalse(AgentToolConfirmation.requiresExplicitApproval("device_wait_for"))
+        assertNull(AgentToolConfirmation.shellArguments("read_batch", arguments))
+        assertNull(AgentToolConfirmation.shellArguments("job_start", Json.parseToJsonElement("""{"tool":"calculator","arguments":{}}""").jsonObject))
+    }
     @Test fun missingOrMalformedSettingsRequireConfirmation() {
         assertFalse(AgentToolConfirmation.skip(null))
         assertFalse(AgentToolConfirmation.skip("not-json"))

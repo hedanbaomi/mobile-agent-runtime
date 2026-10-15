@@ -16,15 +16,15 @@
     "app-android/src/main/kotlin/runtime/mobileagent/ProvidersViewModel.kt": 124,
     "app-android/src/main/kotlin/runtime/mobileagent/PythonSkillTools.kt": 329,
     "app-android/src/main/kotlin/runtime/mobileagent/resident/ResidentAdbRegistry.kt": 76,
-    "app-android/src/main/kotlin/runtime/mobileagent/RunTools.kt": 159,
-    "app-android/src/main/kotlin/runtime/mobileagent/SettingsViewModel.kt": 95,
+    "app-android/src/main/kotlin/runtime/mobileagent/RunTools.kt": 177,
+    "app-android/src/main/kotlin/runtime/mobileagent/SettingsViewModel.kt": 96,
     "app-android/src/main/kotlin/runtime/mobileagent/shizuku/ShizukuAuthorityBridge.kt": 168,
     "app-android/src/main/kotlin/runtime/mobileagent/shizuku/ShizukuBackendAdapters.kt": 156,
     "app-android/src/main/kotlin/runtime/mobileagent/shizuku/ShizukuDeviceWorkspaceProvider.kt": 202,
     "app-android/src/main/kotlin/runtime/mobileagent/shizuku/ShizukuShellRunner.kt": 124,
     "app-android/src/main/kotlin/runtime/mobileagent/shizuku/ShizukuWorkspaceFileStore.kt": 239,
     "app-android/src/main/kotlin/runtime/mobileagent/tooling/ShellToolExecutor.kt": 120,
-    "app-android/src/main/kotlin/runtime/mobileagent/tooling/UnifiedWorkspaceToolExecutor.kt": 222,
+    "app-android/src/main/kotlin/runtime/mobileagent/tooling/UnifiedWorkspaceToolExecutor.kt": 279,
     "app-android/src/main/kotlin/runtime/mobileagent/ui/MainScreens.kt": 316,
     "app-android/src/main/kotlin/runtime/mobileagent/wired/WiredAdbAuthorityBridge.kt": 253,
     "app-android/src/main/kotlin/runtime/mobileagent/wired/WiredAdbFileEngine.kt": 221,
@@ -63,6 +63,8 @@
     "feature/skills/src/main/kotlin/runtime/mobileagent/feature/skills/SkillsUi.kt": 80,
     "runtime/python-android/src/main/kotlin/runtime/mobileagent/python/IsolatedPythonRuntime.kt": 84,
     "desktop/bridge/src/main/kotlin/runtime/mobileagent/desktop/bridge/AuthenticatedBridge.kt": 86,
-    "desktop/bridge/src/main/kotlin/runtime/mobileagent/desktop/bridge/WiredAdbTypedFiles.kt": 93
+    "desktop/bridge/src/main/kotlin/runtime/mobileagent/desktop/bridge/WiredAdbTypedFiles.kt": 93,
+    "shared/skills-api/src/main/kotlin/runtime/mobileagent/skills/ReadBatchToolExecutor.kt": 84,
+    "shared/skills-api/src/main/kotlin/runtime/mobileagent/skills/ManagedJobToolExecutor.kt": 99
   }
 }

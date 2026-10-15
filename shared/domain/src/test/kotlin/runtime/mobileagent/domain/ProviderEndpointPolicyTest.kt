@@ -34,6 +34,20 @@ class ProviderEndpointPolicyTest {
         }
     }
 
+    @Test fun outOfRangeAndNonNumericPortsAreReportedAsPortErrors() {
+        listOf(
+            "http://proxy.example.invalid:0/v1",
+            "http://proxy.example.invalid:65536/v1",
+            "http://proxy.example.invalid:99999999999/v1",
+            "http://proxy.example.invalid:abc/v1",
+            "http://[::1]:70000/v1",
+        ).forEach { raw ->
+            val failure = assertThrows(IllegalArgumentException::class.java) { ProviderEndpointPolicy.parseBaseUrl(raw) }
+            assertEquals(ProviderEndpointPolicy.INVALID_PORT, failure.message, raw)
+        }
+        assertEquals("http://[::1]:65535/v1", ProviderEndpointPolicy.parseBaseUrl("http://[::1]:65535/v1").toASCIIString())
+    }
+
     @Test fun schemePortAndPathChangesDetachAuxiliaryCredentials() {
         val old = ProviderProfile("proxy", "Proxy", ApiFormat.OPENAI_COMPATIBLE,
             "https://proxy.example.invalid/v1", mapOf("X-Token" to "secret-ref"), secretRef = "primary-ref", revision = 1)

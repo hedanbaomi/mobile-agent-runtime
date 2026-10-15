@@ -1421,9 +1421,10 @@ class ToolingOrchestrationTest {
         )
 
         assertEquals(
-            listOf("workspace_list", "file_list", "file_read_text"),
-            executor.toolingSpecs.map { it.name },
+            setOf(enumerate, list, read),
+            executor.toolingSpecs.mapNotNull { it.capability }.toSet(),
         )
+        assertTrue(executor.toolingSpecs.none { it.sideEffect })
         assertTrue(executor.toolingSpecs.none { it.name == "file_stat" })
         assertTrue(executor.toolingSpecs.none { it.name == "file_write_text" })
         assertTrue(executor.toolingSpecs.none { it.name == "file_move" })
@@ -1704,9 +1705,10 @@ class ToolingOrchestrationTest {
             auditSink = acceptingWorkspaceAuditSink(auditEvents),
         )
         assertEquals(
-            listOf("file_list", "file_stat", "file_read_text"),
-            executor.toolingSpecs.map { it.name },
+            setOf(list, stat, read),
+            executor.toolingSpecs.mapNotNull { it.capability }.toSet(),
         )
+        assertTrue(executor.toolingSpecs.none { it.sideEffect })
 
         val calls = listOf(
             UnifiedWorkspaceToolExecutor.FILE_LIST to "{\"workspaceId\":\"${descriptor.id}\"}",

@@ -151,7 +151,9 @@
       "runtime.mobileagent.workspace.CanonicalWorkspaceCoordinatorTest",
       "runtime.mobileagent.workspace.WorkspaceBackendTest",
       "runtime.mobileagent.workspace.WorkspaceUiPresentationTest",
-      "runtime.mobileagent.ChatStorageProjectionDeviceTest"
+      "runtime.mobileagent.ChatStorageProjectionDeviceTest",
+      "runtime.mobileagent.ScreenObservationDeviceTest",
+      "runtime.mobileagent.ScreenObservationSettingsUiTest"
     ]
   },
   "manual_only": {

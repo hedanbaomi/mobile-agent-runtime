@@ -26,6 +26,35 @@ import runtime.mobileagent.skills.tooling.ToolInvocation
  * by `RunToolsReplayDeviceTest`.
  */
 class ToolExecutorFactoryReplayTest {
+    @Test fun deferredDisclosureTraversesCompositeWithoutRelaxingCachedReplay(): Unit = runBlocking {
+        var dispatched: ToolCall? = null
+        var live = true
+        val child = object : ToolExecutor {
+            override val specs = listOf(ToolSpec("once_read", "fixture", "{}", "", false))
+            override suspend fun invoke(call: ToolCall): ToolResult {
+                dispatched = call
+                return ToolResult.Value("private body")
+            }
+            override suspend fun approve(callId: String): ToolResult = ToolResult.Invalid("unused")
+            override suspend fun authorizeDeferredResult(call: ToolCall): Boolean = live && call == dispatched
+        }
+        val composite = ToolExecutorFactory(web = child).createLegacyExecutor()
+        val call = ToolCall("once-1", "once_read", "{}")
+        assertFalse(composite.authorizeDeferredResult(call))
+        composite.invoke(call)
+        assertTrue(composite.authorizeDeferredResult(call))
+        assertFalse(composite.authorizeDeferredResult(call.copy(argumentsJson = "{\"x\":1}")))
+        assertFalse(composite.authorizeReplay(call))
+        assertFalse(composite.authorizeDeferredResult(call), "Denied replay tombstones the original payload")
+        val revokedCall = call.copy(callId = "once-2")
+        composite.invoke(revokedCall)
+        live = false
+        assertFalse(composite.authorizeDeferredResult(revokedCall))
+        live = true
+        assertFalse(composite.authorizeDeferredResult(revokedCall))
+        composite.close()
+        assertFalse(composite.authorizeDeferredResult(revokedCall))
+    }
     @Test
     fun typedFactoryKeepsDistinctRuntimeInvocationsWithTheSameModelCallIdSeparate(): Unit = runBlocking {
         val accepted = linkedMapOf<String, ToolCall>()

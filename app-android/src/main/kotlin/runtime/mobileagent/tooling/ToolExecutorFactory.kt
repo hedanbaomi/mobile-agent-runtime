@@ -6,10 +6,12 @@ package runtime.mobileagent.tooling
 import java.util.Collections
 import kotlinx.coroutines.CancellationException
 import runtime.mobileagent.domain.CapabilityId
+import runtime.mobileagent.skills.ResultDisclosure
 import runtime.mobileagent.skills.ToolCall
 import runtime.mobileagent.skills.ToolExecutor
 import runtime.mobileagent.skills.ToolResult
 import runtime.mobileagent.skills.ToolSpec as LegacyToolSpec
+import runtime.mobileagent.skills.authorizeDisclosure
 import runtime.mobileagent.skills.tooling.ToolExecution
 import runtime.mobileagent.skills.tooling.ToolHandler
 import runtime.mobileagent.skills.tooling.ToolInvocation
@@ -255,15 +257,29 @@ private class CompositeToolExecutor(executors: List<ToolExecutor>) : ToolExecuto
      * never returns the cached result itself (b07 follow-up finding A).
      */
     override suspend fun authorizeReplay(call: ToolCall): Boolean {
+        return authorizeCompleted(call, ResultDisclosure.REPLAY)
+    }
+
+    override suspend fun authorizeDeferredResult(call: ToolCall): Boolean {
+        return authorizeCompleted(call, ResultDisclosure.DEFERRED)
+    }
+
+    private suspend fun authorizeCompleted(call: ToolCall, disclosure: ResultDisclosure): Boolean {
         val settled = synchronized(lock) {
             val binding = callsById[call.callId] ?: return@synchronized null
             if (binding.state != LegacyCallState.SETTLED) return@synchronized null
             if (binding.call != call) return@synchronized null
             if (owners[call.name] !== binding.owner) return@synchronized null
             val cached = binding.result ?: return@synchronized null
+            if (disclosure == ResultDisclosure.DEFERRED && cached !is ToolResult.Value) return@synchronized null
             SettledReplay(binding, cached)
         } ?: return false
-        return authorizeReplay(call, settled)
+        return authorizeReplay(call, settled, disclosure)
+    }
+
+    override suspend fun close() {
+        try { owners.values.distinct().forEach { it.close() } }
+        finally { synchronized(lock) { callsById.clear() } }
     }
 
     /**
@@ -287,9 +303,13 @@ private class CompositeToolExecutor(executors: List<ToolExecutor>) : ToolExecuto
         }
     }
 
-    private suspend fun authorizeReplay(call: ToolCall, settled: SettledReplay): Boolean {
+    private suspend fun authorizeReplay(
+        call: ToolCall,
+        settled: SettledReplay,
+        disclosure: ResultDisclosure = ResultDisclosure.REPLAY,
+    ): Boolean {
         val allowed = try {
-            settled.binding.owner.authorizeReplay(call)
+            settled.binding.owner.authorizeDisclosure(call, disclosure)
         } catch (_: Exception) {
             false
         }

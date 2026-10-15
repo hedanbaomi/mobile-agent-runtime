@@ -1797,6 +1797,8 @@ private fun SettingsRoute(entry: NavBackStackEntry, chinese: Boolean, onRoute: (
         }
     }
     val actions = runtime.mobileagent.feature.settings.SettingsActions(
+        onScreenObservationEnabled = vm::setScreenObservationEnabled,
+        onOpenAccessibilitySettings = vm::openAccessibilitySettings,
         onOpenArchivedConversations = { chatVm.reload(); archiveOpen = true },
         onLanguage = { vm.language(it); onSettingsChanged() }, onTheme = { vm.theme(it); onSettingsChanged() },
         onStats = vm::setStatsEnabled, onRequestInspection = vm::inspector,

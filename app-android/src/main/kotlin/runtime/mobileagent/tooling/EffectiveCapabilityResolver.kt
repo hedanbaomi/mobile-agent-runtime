@@ -83,6 +83,13 @@ data class EffectiveCapabilitySnapshot(
     }
 }
 
+/** The workspace/path a grant check is scoped to; [UNSCOPED] admits only unscoped grants. */
+data class GrantScope(val workspaceId: String?, val path: String?, val write: Boolean = false) {
+    companion object {
+        val UNSCOPED = GrantScope(workspaceId = null, path = null)
+    }
+}
+
 /**
  * Adapter from SQLite/domain grant rows to the shared skills-api resolver
  * semantics.  It never treats AgentSnapshot.skillIds as a grant: the
@@ -327,9 +334,30 @@ class EffectiveCapabilityResolver(
         }.getOrNull()
     }
 
-    /** A consumed ONCE row remains valid only for its already admitted request. */
-    fun revalidateInFlight(context: ToolExecutionContext, capability: CapabilityId, consumedOnceGrant: CapabilityGrant? = null): Boolean =
-        runCatching { resolveContext(context, consumedOnceGrant).allows(capability, context.skillId) }.getOrDefault(false)
+    /**
+     * In-flight revalidation of one exact already-consumed ONCE grant, under the
+     * same workspace/path scope rule the dispatch gate uses.
+     *
+     * [consumedOnceGrant] must be the pre-consumption row this dispatch handed to
+     * the durable CAS consumer.  [resolveContext] re-reads the live row and
+     * substitutes that row back only when the persisted row is exactly
+     * `revision + 1` carrying the recorded consumption timestamp and nothing else
+     * changed.  A revocation, expiry, scope/capability edit, snapshot-binding
+     * removal or policy-version change therefore still fails closed.
+     *
+     * [scope] defaults to [GrantScope.UNSCOPED] for callers that own their scope
+     * check; that form never admits a workspace- or path-scoped grant, so a
+     * request with a scope of its own must pass it explicitly.
+     */
+    fun revalidateInFlight(
+        context: ToolExecutionContext,
+        capability: CapabilityId,
+        consumedOnceGrant: CapabilityGrant? = null,
+        scope: GrantScope = GrantScope.UNSCOPED,
+    ): Boolean = runCatching {
+        resolveContext(context, consumedOnceGrant)
+            .allows(capability, context.skillId, scope.workspaceId, scope.path, scope.write)
+    }.getOrDefault(false)
 
     /** A single deadline wakeup suffices; immutable run grants cannot gain a later expiry. */
     fun inFlightExpiryDelayMs(context: ToolExecutionContext, capability: CapabilityId, consumedOnceGrant: CapabilityGrant? = null): Long? {

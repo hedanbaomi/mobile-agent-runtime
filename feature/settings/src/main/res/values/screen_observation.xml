@@ -1,0 +1,15 @@
+<!-- SPDX-FileCopyrightText: 2026 mobileAgentRuntime contributors -->
+<!-- SPDX-License-Identifier: AGPL-3.0-only -->
+<resources>
+    <string name="sett_observation_title">Screen observation</string>
+    <string name="sett_observation_help">Optionally read foreground text and controls through accessibility alongside Shizuku or on-device ADB. Confirmation follows the Agent tool settings. This feature does not click or type.</string>
+    <string name="sett_observation_allow">Allow Agent screen requests</string>
+    <string name="sett_observation_disabled">Disabled</string>
+    <string name="sett_observation_connected">Connected; follows the Agent tool confirmation setting</string>
+    <string name="sett_observation_waiting">Waiting for the accessibility service</string>
+    <string name="sett_observation_open_settings">Open accessibility settings</string>
+    <string name="sett_observation_setup">Enable Screen observation in system settings, then return. Some sideloaded installs require Allow restricted settings in app info.</string>
+    <string name="sett_observation_disclosure_title">Allow screen content requests?</string>
+    <string name="sett_observation_disclosure">When enabled, requested visible text and controls are sent to your configured model, following the Agent tool confirmation setting. Password fields are skipped, but pages may contain other personal information. You can turn this switch or the system service off at any time.</string>
+    <string name="sett_observation_confirm">Allow requests</string>
+</resources>

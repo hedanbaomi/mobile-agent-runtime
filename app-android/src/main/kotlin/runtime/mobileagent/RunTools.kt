@@ -22,6 +22,7 @@ import kotlinx.serialization.json.intOrNull
 import kotlinx.serialization.json.put
 import runtime.mobileagent.agent.AgentRun
 import runtime.mobileagent.agent.RunState
+import runtime.mobileagent.data.AgentRepository
 import runtime.mobileagent.data.SqlRow
 import runtime.mobileagent.domain.admitsModelInvocation
 import runtime.mobileagent.domain.settleReservedTokens
@@ -33,13 +34,17 @@ import runtime.mobileagent.knowledge.VisualReferencePlan
 import runtime.mobileagent.knowledge.StrictVisualDecision
 import runtime.mobileagent.knowledge.StrictVisualPolicy
 import runtime.mobileagent.knowledge.VisualAttachmentPolicy
+import runtime.mobileagent.observation.ScreenObservationRegistry
+import runtime.mobileagent.observation.ScreenObservationToolExecutor
 import runtime.mobileagent.provider.InlineImage
 import runtime.mobileagent.skills.BuiltinTools
 import runtime.mobileagent.skills.HttpPolicy
+import runtime.mobileagent.skills.ResultDisclosure
 import runtime.mobileagent.skills.ToolCall
 import runtime.mobileagent.skills.ToolExecutor
 import runtime.mobileagent.skills.ToolResult
 import runtime.mobileagent.skills.ToolSpec
+import runtime.mobileagent.skills.authorizeDisclosure
 import runtime.mobileagent.skills.tooling.ToolResultBudget
 import runtime.mobileagent.skills.tooling.InternalRequestIds
 import java.security.MessageDigest
@@ -79,6 +84,10 @@ internal fun rebuildKnowledgeSearchRoot(root: JsonObject, hits: JsonArray): Json
     for ((key, value) in root) if (key != "hits") put(key, value)
     put("hits", hits)
 }
+
+/** The frozen Agent and its snapshot binding still exist; Run-owned tools stop when either is gone. */
+internal fun AgentRepository.isLiveBinding(snapshot: AgentSnapshot): Boolean =
+    get(snapshot.agentId) != null && getSnapshot(snapshot.id)?.agentId == snapshot.agentId
 
 /** Run-local routing, provider composition, and verified knowledge evidence. */
 class RunTools(
@@ -165,12 +174,16 @@ class RunTools(
     // legacy provider list to prevent duplicate names or fallback routes.
     private val python: ToolExecutor = pythonSkillTools(container, context, snapshot, run.runId, pythonBudget, providerHttp)
     private val providerExecutor: ToolExecutor? = runExecutor ?: runExecutorFactory?.invoke(python)
+    private val screenObservation = ScreenObservationToolExecutor(
+        ScreenObservationRegistry.get(context),
+        liveContext = { container.agents.isLiveBinding(snapshot) },
+    )
     private val routeOwners: List<ToolExecutor> = when {
-        providerExecutor != null -> listOf(builtins, providerExecutor)
+        providerExecutor != null -> listOf(builtins, providerExecutor, screenObservation)
         // A failed/unavailable v2 factory must not silently expose an old
         // privileged workspace/shell executor.  Web/MCP/Python remain the
         // only compatibility routes until the next run can rebuild the seam.
-        else -> listOf(builtins, python) + baseExecutors
+        else -> listOf(builtins, python, screenObservation) + baseExecutors
     }
     private val routes: Map<String, ToolExecutor> = buildMap {
         for (owner in routeOwners) {
@@ -253,6 +266,37 @@ class RunTools(
 
         override suspend fun expire(callId: String): ToolResult = settleApproval(callId) { owner, runtimeId ->
             owner.expire(runtimeId)
+        }
+
+        override suspend fun authorizeReplay(call: ToolCall): Boolean = authorizeResult(call, ResultDisclosure.REPLAY)
+
+        override suspend fun authorizeDeferredResult(call: ToolCall): Boolean = authorizeResult(call, ResultDisclosure.DEFERRED)
+
+        private suspend fun authorizeResult(call: ToolCall, disclosure: ResultDisclosure): Boolean {
+            val routed = synchronized(callLock) {
+                callsByModelId[call.callId]?.firstOrNull { it.call == call }
+                    ?.takeIf { it.completed is ToolResult.Value && !it.inFlight && !it.needsApproval }
+            } ?: return false
+            val owner = routed.owner ?: return false
+            val cached = synchronized(callLock) { routed.completed }
+            val allowed = try {
+                synchronized(run) { runActive() } && routes[call.name] === owner &&
+                    owner.authorizeDisclosure(routed.ownerCall(), disclosure)
+            }
+            catch (cancel: CancellationException) { throw cancel }
+            catch (_: Exception) { false }
+            val live = allowed && synchronized(run) { runActive() } && routes[call.name] === owner
+            return synchronized(callLock) {
+                if (!live && routed.completed === cached) {
+                    routed.completed = ToolResult.Denied("Tool authorization changed; cached tool output is unavailable")
+                }
+                live && routed.completed === cached && !routed.inFlight && !routed.needsApproval
+            }
+        }
+
+        override suspend fun close() {
+            routeOwners.distinct().forEach { it.close() }
+            synchronized(callLock) { calls.clear(); callsByModelId.clear() }
         }
     }
 
@@ -687,6 +731,14 @@ class RunTools(
     private fun liveKnowledgeIds(): Set<String> = snapshotKnowledgeIds intersect
         container.agents.get(agentId)?.knowledgeBaseIds.orEmpty().toSet() intersect
         container.knowledge.listKnowledgeBases().map { it.first }.toSet()
+
+    /** Reserve nested batch calls against the very same counter used by AgentRuntime/Python. */
+    internal fun reserveAdditionalToolCalls(requested: Int): Int = synchronized(run) {
+        if (requested <= 0 || !runActive()) return@synchronized 0
+        val granted = minOf(requested, (run.budget.maxToolCalls - run.toolCalls).coerceAtLeast(0))
+        run.toolCalls += granted
+        granted
+    }
 
     private fun runActive(): Boolean {
         if (run.state in setOf(RunState.COMPLETED, RunState.CANCELLED, RunState.FAILED, RunState.BUDGET_EXHAUSTED, RunState.UNKNOWN_OUTCOME)) return false

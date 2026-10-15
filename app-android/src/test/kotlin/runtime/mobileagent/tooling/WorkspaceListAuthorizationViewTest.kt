@@ -176,7 +176,8 @@ class WorkspaceListAuthorizationViewTest {
 
         assertTrue(view.bool("readable"))
         assertFalse(view.bool("writable"), "a read-only Agent must never be told writable")
-        assertEquals(listOf("file_list", "file_read_text"), view.stringList("authorized_operations"))
+        assertAuthorizedCapabilities(registry, runContext(grants), view,
+            setOf(CapabilityId.FILE_LIST, CapabilityId.FILE_READ_TEXT))
         assertTrue(view.stringList("create_only_operations").isEmpty())
     }
 
@@ -202,10 +203,8 @@ class WorkspaceListAuthorizationViewTest {
         val view = listedWorkspaces(registry, runContext(grants)).getValue(SAF_WORKSPACE)
 
         assertTrue(view.bool("writable"))
-        assertEquals(
-            listOf("file_create_directory", "file_read_text", "file_write_text"),
-            view.stringList("authorized_operations"),
-        )
+        assertAuthorizedCapabilities(registry, runContext(grants), view,
+            setOf(CapabilityId.FILE_CREATE_DIRECTORY, CapabilityId.FILE_READ_TEXT, CapabilityId.FILE_WRITE_TEXT))
         // SAF can update an existing document with replace=true, without claiming
         // atomic replacement or conditional patch support.
         assertEquals(
@@ -326,14 +325,13 @@ class WorkspaceListAuthorizationViewTest {
 
         val agentView = listedWorkspaces(registry, runContext(grants)).getValue("internal-skill")
         assertTrue(agentView.bool("writable"))
-        assertEquals(
-            listOf("file_list", "file_read_text", "file_write_text"),
-            agentView.stringList("authorized_operations"),
-        )
+        assertAuthorizedCapabilities(registry, runContext(grants), agentView,
+            setOf(CapabilityId.FILE_LIST, CapabilityId.FILE_READ_TEXT, CapabilityId.FILE_WRITE_TEXT))
 
         val skillView = listedWorkspaces(registry, runContext(grants, skillId = SKILL)).getValue("internal-skill")
         assertFalse(skillView.bool("writable"), "the Skill envelope must not widen the Agent authority")
-        assertEquals(listOf("file_read_text"), skillView.stringList("authorized_operations"))
+        assertAuthorizedCapabilities(registry, runContext(grants, skillId = SKILL), skillView,
+            setOf(CapabilityId.FILE_READ_TEXT))
     }
 
     @Test
@@ -379,6 +377,18 @@ class WorkspaceListAuthorizationViewTest {
         val registry = WorkspaceRegistry()
         assertTrue(registry.register(backend.descriptor, backend))
         return registry
+    }
+
+    /** Assert the permission contract without freezing the complete, extensible tool catalog. */
+    private fun assertAuthorizedCapabilities(
+        registry: WorkspaceRegistry,
+        context: ToolExecutionContext,
+        view: JsonObject,
+        expected: Set<String>,
+    ) {
+        val specs = executorFor(registry, context).toolingSpecs.associateBy { it.name }
+        val actual = view.stringList("authorized_operations").map { specs.getValue(it).capability?.value }.toSet()
+        assertEquals(expected, actual)
     }
 
     private fun executorFor(

@@ -48,6 +48,22 @@ internal fun safeExportFailureDetail(failure: Exception): String = when (failure
 
 class SettingsViewModel(application: Application) : AndroidViewModel(application) {
     private val app = application as MobileAgentApp
+    private val screenObservation = runtime.mobileagent.observation.ScreenObservationRegistry.get(application)
+    private val screenObservationState = mutableStateOf(screenObservation.access.value)
+    init { viewModelScope.launch { screenObservation.access.collect { screenObservationState.value = it } } }
+
+    fun setScreenObservationEnabled(enabled: Boolean) {
+        viewModelScope.launch {
+            if (!withContext(Dispatchers.IO) { screenObservation.setConsent(enabled) }) {
+                error.value = "无法保存屏幕观察设置 / Could not save screen observation settings"
+            }
+        }
+    }
+
+    fun openAccessibilitySettings() {
+        runCatching { app.startActivity(Intent(android.provider.Settings.ACTION_ACCESSIBILITY_SETTINGS).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)) }
+            .onFailure { error.value = "无法打开系统无障碍设置 / Could not open accessibility settings" }
+    }
     private val authorityPort = settingsAuthorityPort(app)
     /** UI-facing copy of the adapter snapshot; the adapter remains the source of truth. */
     val authorityState = mutableStateOf(authorityPort.snapshot())
@@ -154,6 +170,8 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
         val facts = runtimeFacts.value
         val authority = authorityState.value
         return SettingsUiState(
+        screenObservationEnabled = screenObservationState.value.consent,
+        screenObservationConnected = screenObservationState.value.connected,
         versionName = BuildConfig.VERSION_NAME + " ${BuildConfig.BUILD_TYPE}",
         gitRevision = BuildConfig.GIT_REVISION,
         gitDirty = BuildConfig.GIT_DIRTY,

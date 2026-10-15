@@ -36,6 +36,52 @@ import runtime.mobileagent.tooling.ToolExecutorFactory
  */
 @RunWith(AndroidJUnit4::class)
 class RunToolsReplayDeviceTest {
+    @Test fun disabledObservationLeavesExistingShellRouteAvailable() = runBlocking {
+        val chain = prepareChain("optional-observation")
+        val registry = runtime.mobileagent.observation.ScreenObservationRegistry.get(chain.app)
+        val previous = registry.access.value.consent
+        registry.setConsent(false)
+        var dispatches = 0
+        val shell = object : ToolExecutor {
+            override val specs = listOf(ToolSpec("shell_exec", "fixture", "{}", "shell.execute", true))
+            override suspend fun invoke(call: ToolCall): ToolResult {
+                dispatches++
+                return ToolResult.Value("{\"stdout\":\"adb-route-fixture\"}")
+            }
+            override suspend fun approve(callId: String): ToolResult = ToolResult.Invalid("unused")
+        }
+        val tools = RunTools(chain.container, chain.app, chain.snapshot, newRun(chain), false, false,
+            runExecutor = ToolExecutorFactory(web = shell).createLegacyExecutor())
+        try {
+            assertTrue(tools.executor.specs.any { it.name == "shell_exec" })
+            assertFalse(tools.executor.specs.any { it.name in setOf("device_observe", "device_wait_for") })
+            assertTrue(tools.executor.invoke(ToolCall("shell", "shell_exec", "{}")) is ToolResult.Value)
+            assertEquals(1, dispatches)
+        } finally { tools.executor.close(); registry.setConsent(previous) }
+    }
+    @Test fun externalDisclosureMapsTheExactRuntimeCallAndCannotResurrectRevokedData() = runBlocking {
+        val chain = prepareChain("external-replay")
+        val run = newRun(chain)
+        val child = ApprovalEchoExecutor()
+        val composite = ToolExecutorFactory(web = child).createLegacyExecutor()
+        val tools = RunTools(chain.container, chain.app, chain.snapshot, run, false, false, runExecutor = composite)
+        val call = ToolCall("model-output", "approval_echo", "{}")
+        assertFalse(tools.executor.authorizeReplay(call))
+        assertEquals(ToolResult.NeedsApproval, tools.executor.invoke(call))
+        assertFalse(tools.executor.authorizeDeferredResult(call))
+        assertTrue(tools.executor.approve(call.callId) is ToolResult.Value)
+        assertTrue(tools.executor.authorizeReplay(call))
+        assertTrue(tools.executor.authorizeDeferredResult(call))
+        assertFalse(tools.executor.authorizeReplay(call.copy(argumentsJson = "{\"changed\":true}")))
+        child.revoked = true
+        assertFalse(tools.executor.authorizeDeferredResult(call))
+        child.revoked = false
+        assertFalse(tools.executor.authorizeReplay(call))
+        assertFalse(tools.executor.invoke(call).toString().contains("approval-settled-payload"))
+        assertEquals(1, child.dispatches)
+        tools.executor.close()
+        assertFalse(tools.executor.authorizeDeferredResult(call))
+    }
     @Test fun searchReplayPreservesCompletedAndUnknownFactsWithoutRedispatch() = runBlocking {
         for (unknown in listOf(false, true)) {
             val chain = prepareChain("search-facts")

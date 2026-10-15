@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- SPDX-FileCopyrightText: 2026 mobileAgentRuntime contributors -->
+<!-- SPDX-License-Identifier: AGPL-3.0-only -->
+<resources>
+    <string name="screen_observation_label">Screen observation</string>
+    <string name="screen_observation_description">Reads requested visible text and controls following your Agent tool confirmation setting. Screen content is sent to the model you configured. Password fields are excluded. This service does not click, type, or change system permissions.</string>
+</resources>

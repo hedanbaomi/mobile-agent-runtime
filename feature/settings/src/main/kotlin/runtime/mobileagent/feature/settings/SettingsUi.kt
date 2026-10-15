@@ -142,6 +142,8 @@ data class WiredPairingUiState(
 }
 
 data class SettingsUiState(
+    val screenObservationEnabled: Boolean = false,
+    val screenObservationConnected: Boolean = false,
     val versionName: String = "",
     val gitRevision: String = "",
     val gitDirty: Boolean = false,
@@ -196,6 +198,8 @@ data class SettingsUiState(
 )
 
 data class SettingsActions(
+    val onScreenObservationEnabled: (Boolean) -> Unit = {},
+    val onOpenAccessibilitySettings: () -> Unit = {},
     val onOpenArchivedConversations: () -> Unit = {},
     val onLanguage: (String) -> Unit = {},
     val onTheme: (String) -> Unit = {},
@@ -372,6 +376,7 @@ fun SettingsScreen(
             }
         }
         AuthoritySettingsCard(state, actions, zh)
+        ScreenObservationCard(state, actions)
         Card(Modifier.fillMaxWidth().testTag("settings.privacy_diagnostics")) {
             Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                 Text(stringResource(R.string.sett_privacy_diagnostics), style = MaterialTheme.typography.titleMedium)
@@ -484,6 +489,36 @@ fun SettingsScreen(
             }
         }
     }
+}
+
+@Composable
+private fun ScreenObservationCard(state: SettingsUiState, actions: SettingsActions) {
+    var confirming by remember { mutableStateOf(false) }
+    Card(Modifier.fillMaxWidth().testTag("settings.screen_observation")) {
+        Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text(stringResource(R.string.sett_observation_title), style = MaterialTheme.typography.titleMedium)
+            Text(stringResource(R.string.sett_observation_help))
+            SettingSwitch(stringResource(R.string.sett_observation_allow), state.screenObservationEnabled,
+                { if (it) confirming = true else actions.onScreenObservationEnabled(false) },
+                modifier = Modifier.testTag("settings.screen_observation.enabled"))
+            Text(stringResource(when {
+                !state.screenObservationEnabled -> R.string.sett_observation_disabled
+                state.screenObservationConnected -> R.string.sett_observation_connected
+                else -> R.string.sett_observation_waiting
+            }), modifier = Modifier.testTag("settings.screen_observation.status"))
+            OutlinedButton(onClick = actions.onOpenAccessibilitySettings,
+                modifier = Modifier.testTag("settings.screen_observation.settings")) {
+                Text(stringResource(R.string.sett_observation_open_settings))
+            }
+            Text(stringResource(R.string.sett_observation_setup),
+                style = MaterialTheme.typography.bodySmall)
+        }
+    }
+    if (confirming) AlertDialog(onDismissRequest = { confirming = false },
+        title = { Text(stringResource(R.string.sett_observation_disclosure_title)) },
+        text = { Text(stringResource(R.string.sett_observation_disclosure)) },
+        confirmButton = { TextButton(onClick = { confirming = false; actions.onScreenObservationEnabled(true) }) { Text(stringResource(R.string.sett_observation_confirm)) } },
+        dismissButton = { TextButton(onClick = { confirming = false }) { Text(stringResource(R.string.ui_cancel_998b9c48)) } })
 }
 
 @Composable

@@ -25,6 +25,7 @@ import runtime.mobileagent.domain.Utc
 import runtime.mobileagent.domain.contextWindowTarget
 import runtime.mobileagent.domain.ModelRole
 import runtime.mobileagent.domain.ProviderDestinationBinding
+import runtime.mobileagent.domain.ProviderEndpointPolicy
 import runtime.mobileagent.domain.ProviderProfile
 import runtime.mobileagent.domain.withEndpoint
 import runtime.mobileagent.diagnostics.DiagnosticHttpClass
@@ -131,10 +132,7 @@ class ProvidersViewModel @JvmOverloads constructor(
         }
         return try {
             require(draft.name.isNotBlank()) { "请填写名称。" }
-            val endpoint = URI(draft.baseUrl.trim().trimEnd('/'))
-            require(endpoint.host != null && endpoint.rawUserInfo == null && endpoint.rawFragment == null && endpoint.rawQuery == null) { "服务地址必须是有效的 Base URL，不能含凭据、查询或片段。" }
-            val debugLocal = BuildConfig.DEBUG && endpoint.host in setOf("localhost", "127.0.0.1", "10.0.2.2", "[::1]")
-            require(endpoint.scheme == "https" || (debugLocal && endpoint.scheme == "http")) { "服务地址必须使用 HTTPS。Debug 仅允许本机测试 HTTP。" }
+            val endpoint = ProviderEndpointPolicy.parseBaseUrl(draft.baseUrl)
             val apiFormat = runCatching { ApiFormat.valueOf(draft.apiFormat.trim()) }
                 .getOrElse { throw IllegalArgumentException("API 格式不受支持。") }
             val previous = draft.providerId?.let { app.container.profiles.getProvider(it) }
@@ -297,12 +295,16 @@ class ProvidersViewModel @JvmOverloads constructor(
             runtime.mobileagent.domain.LocalePreference.EN_US -> false
             runtime.mobileagent.domain.LocalePreference.SYSTEM -> app.resources.configuration.locales.get(0)?.language == "zh"
         }
-        if (chinese) return message
+        if (chinese) return when (message) {
+            ProviderEndpointPolicy.INVALID_BASE_URL -> "服务地址必须是有效的 Base URL，不能含凭据、查询或片段。"
+            ProviderEndpointPolicy.INVALID_SCHEME -> "服务地址必须使用 HTTP 或 HTTPS。"
+            ProviderEndpointPolicy.INVALID_PORT -> "服务地址端口必须在 1—65535 之间。"
+            else -> message
+        }
         return when (message) {
             "请填写名称。" -> "Enter a name."
             "请填写模型 ID。" -> "Enter a model ID."
             "服务地址必须是有效的 Base URL，不能含凭据、查询或片段。" -> "Enter a valid base URL without credentials, a query, or a fragment."
-            "服务地址必须使用 HTTPS。Debug 仅允许本机测试 HTTP。" -> "The endpoint must use HTTPS. Debug builds allow HTTP only for local testing."
             "API 格式不受支持。" -> "The API format is unsupported."
             "服务已被删除，请重新打开表单。" -> "This provider was deleted. Reopen the form."
             "新服务需要 API Key；密钥只会以 Keystore 密文保存。" -> "A new provider needs an API key, stored encrypted with Keystore."
@@ -657,7 +659,7 @@ class ProvidersViewModel @JvmOverloads constructor(
             http = app.container.http,
             baseUrl = provider.baseUrl,
             headerSecretResolver = HeaderSecretResolver { host, ref ->
-                require(host.equals(URI(provider.baseUrl).host, true) && ref in provider.headerSecretRefs.values) {
+                require(host.equals(URI(provider.baseUrl).host?.trim('.'), true) && ref in provider.headerSecretRefs.values) {
                     "Header secret destination mismatch"
                 }
                 app.container.secrets.resolveForHost(ref)

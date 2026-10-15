@@ -47,6 +47,7 @@
     ],
     "full": [
       "runtime.mobileagent.ApiEmbeddingDeviceTest",
+      "runtime.mobileagent.ProviderHttpEndpointDeviceTest",
       "runtime.mobileagent.AgentsConversationRoutingDeviceTest",
       "runtime.mobileagent.AgentsGrantUiTest",
       "runtime.mobileagent.AnnouncementRefreshCoordinatorTest",

@@ -1137,7 +1137,7 @@ class ChatViewModel internal constructor(
                 )
                 preparationStage = "context_budget"
                 val adapter = OpenAiAdapterFactory.create(provider.apiFormat, container.http, provider.baseUrl, headerSecretResolver = HeaderSecretResolver { host, ref ->
-                    require(host.equals(URI(provider.baseUrl).host, true) && ref in provider.headerSecretRefs.values) { "Header secret destination mismatch" }
+                    require(host.equals(URI(provider.baseUrl).host?.trim('.'), true) && ref in provider.headerSecretRefs.values) { "Header secret destination mismatch" }
                     container.secrets.resolveForHost(ref)
                 })
                 val headers = mutableMapOf<String, RequestHeaderValue>()

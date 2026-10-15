@@ -181,53 +181,9 @@ class AppContainer(app: MobileAgentApp) :
     val audits = AuditRepository(db)
     val transfer = TransferRepository(db, blobSink = CasBlobSink(File(app.filesDir, "cas")),
         vectorIndexDirectory = File(app.cacheDir, "knowledge-index"))
-    val http: HttpClient = HttpClient(OkHttp) {
-        followRedirects = false
-        engine {
-            config {
-                followRedirects(false)
-                followSslRedirects(false)
-                retryOnConnectionFailure(false)
-                addNetworkInterceptor { chain ->
-                    val response = chain.proceed(chain.request())
-                    if (response.code == 503) {
-                        response.close()
-                        throw runtime.mobileagent.provider.ProviderHttpResponseException(503)
-                    }
-                    response
-                }
-            }
-        }
-        install(HttpTimeout) {
-            requestTimeoutMillis = 180_000
-            connectTimeoutMillis = 15_000
-            socketTimeoutMillis = 180_000
-        }
-    }
+    val http: HttpClient = createProviderHttpClient()
     /** Large visual pages can legitimately run past the ordinary chat timeout. */
-    val visionHttp: HttpClient = HttpClient(OkHttp) {
-        followRedirects = false
-        engine {
-            config {
-                followRedirects(false)
-                followSslRedirects(false)
-                retryOnConnectionFailure(false)
-                addNetworkInterceptor { chain ->
-                    val response = chain.proceed(chain.request())
-                    if (response.code == 503) {
-                        response.close()
-                        throw runtime.mobileagent.provider.ProviderHttpResponseException(503)
-                    }
-                    response
-                }
-            }
-        }
-        install(HttpTimeout) {
-            requestTimeoutMillis = 600_000
-            connectTimeoutMillis = 15_000
-            socketTimeoutMillis = 600_000
-        }
-    }
+    val visionHttp: HttpClient = createProviderHttpClient(timeoutMillis = 600_000)
     val apiEmbeddings = ApiEmbeddingRegistry(profiles, secrets, http)
     val knowledge = KnowledgeRepository(
         db,

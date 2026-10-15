@@ -6,6 +6,7 @@ package runtime.mobileagent
 import io.ktor.client.HttpClient
 import runtime.mobileagent.data.ProfileRepository
 import runtime.mobileagent.domain.ModelRole
+import runtime.mobileagent.domain.ProviderEndpointPolicy
 import runtime.mobileagent.embedding.ApiEmbeddingTextEmbedderFactory
 import runtime.mobileagent.knowledge.ApiEmbeddingBinding
 import runtime.mobileagent.knowledge.TextEmbedder
@@ -72,7 +73,7 @@ class ApiEmbeddingRegistry(
             binding.endpoint,
             headerSecretResolver = HeaderSecretResolver { host, ref ->
                 requireCurrent()
-                require(host.equals(endpoint.host, true) && ref in provider.headerSecretRefs.values) {
+                require(host.equals(endpoint.host?.trim('.'), true) && ref in provider.headerSecretRefs.values) {
                     "Embedding header credential destination mismatch"
                 }
                 secrets.resolveForHost(ref)
@@ -91,15 +92,7 @@ class ApiEmbeddingRegistry(
             "Model profile ${binding.modelProfileId} r${binding.modelRevision}\n" +
             "数据范围 / Data scope: ${binding.dataScope}"
 
-    private fun validateEndpoint(raw: String): URI {
-        val uri = URI(raw)
-        require(uri.host != null && uri.rawUserInfo == null && uri.rawQuery == null && uri.rawFragment == null) {
-            "Embedding 地址必须是无凭据、查询及片段的 Base URL。"
-        }
-        val localDebug = BuildConfig.DEBUG && uri.host in setOf("localhost", "127.0.0.1", "10.0.2.2", "[::1]")
-        require(uri.scheme == "https" || (localDebug && uri.scheme == "http")) { "Embedding 地址必须使用 HTTPS。" }
-        return uri
-    }
+    private fun validateEndpoint(raw: String): URI = ProviderEndpointPolicy.parseBaseUrl(raw)
 
     companion object {
         fun scope(knowledgeBaseId: String): String = "knowledge-base:$knowledgeBaseId:text-chunks-and-retrieval-queries"

@@ -7,6 +7,8 @@
     <string name="ui_api_format_s_b2e6629e">API format: %1$s</string>
     <string name="ui_automatic_70aefbbf" formatted="false">Automatic</string>
     <string name="ui_base_url_434ba70e" formatted="false">Base URL</string>
+    <string name="ui_provider_endpoint_help">Supports HTTP/HTTPS, custom ports and proxy path prefixes. Enter the API base URL supplied by your provider.</string>
+    <string name="ui_provider_http_warning">HTTP sends the API key and content without encryption. Use a trusted proxy and network; prefer HTTPS when available.</string>
     <string name="ui_cancel_998b9c48" formatted="false">Cancel</string>
     <string name="ui_capability_probe_cd9280e9" formatted="false">Capability probe</string>
     <string name="ui_checking_042eed1e" formatted="false">Checking…</string>

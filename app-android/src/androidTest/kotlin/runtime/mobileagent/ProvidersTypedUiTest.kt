@@ -48,6 +48,22 @@ class ProvidersTypedUiTest {
     val compose = createAndroidComposeRule<ComposeTestHostActivity>()
 
     @Test
+    fun httpEditorExplainsPlaintextCredentialsInBothLanguages() {
+        val uiState = mutableStateOf(state(ProviderProbeUiState()).copy(editorOpen = true, language = "zh-CN",
+            draft = ProviderDraft(name = "Proxy", baseUrl = "http://192.168.1.20:8080/v1")))
+        compose.setContent {
+            runtime.mobileagent.ui.AppLocalizedResources(uiState.value.language) {
+                MaterialTheme { ProvidersScreen(state = uiState.value) }
+            }
+        }
+        compose.onNodeWithText("HTTP 会以明文传输 API Key 和内容。请使用可信反代与网络；可用时优先选择 HTTPS。", useUnmergedTree = true)
+            .performScrollTo().assertIsDisplayed()
+        compose.runOnIdle { uiState.value = uiState.value.copy(language = "en-US") }
+        compose.onNodeWithText("HTTP sends the API key and content without encryption. Use a trusted proxy and network; prefer HTTPS when available.", useUnmergedTree = true)
+            .performScrollTo().assertIsDisplayed()
+    }
+
+    @Test
     fun successfulConnectionRendersSuccessWithoutFailureCopy() {
         val uiState = state(
             probe = ProviderProbeUiState(

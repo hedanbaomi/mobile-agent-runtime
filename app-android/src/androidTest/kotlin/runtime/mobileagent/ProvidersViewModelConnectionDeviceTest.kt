@@ -43,6 +43,31 @@ import runtime.mobileagent.provider.ProviderConnectionResult
 @RunWith(AndroidJUnit4::class)
 class ProvidersViewModelConnectionDeviceTest {
     @Test
+    fun httpReverseProxySavesAndDestinationChangeRequiresItsOwnKey() {
+        val harness = harness(onTest = { error("Saving must not send a request") })
+        val initial = harness.vm.providers.single { it.id == harness.vm.models.single { it.id == harness.modelId }.providerId }
+        val app = InstrumentationRegistry.getInstrumentation().targetContext.applicationContext as MobileAgentApp
+        val auxiliaryRef = "${initial.secretRef}:aux"
+        app.container.secrets.put(auxiliaryRef, "SYNTHETIC_AUXILIARY_NOT_REAL".toCharArray())
+        app.container.profiles.updateProvider(initial.copy(headerSecretRefs = mapOf("X-Proxy-Token" to auxiliaryRef), revision = initial.revision + 1))
+        harness.vm.reload()
+        val provider = harness.vm.providers.single { it.id == initial.id }
+        assertEquals(mapOf("X-Proxy-Token" to auxiliaryRef), provider.headerSecretRefs)
+        val draft = ProviderDraft(providerId = provider.id, name = provider.name,
+            baseUrl = "http://192.168.1.20:8080/gateway/v1/", modelId = "")
+        assertFalse(harness.vm.saveDraft(draft))
+        assertEquals(provider, harness.vm.providers.single { it.id == provider.id })
+        assertTrue(harness.vm.saveDraft(draft.copy(apiKey = "SYNTHETIC_PROXY_KEY_NOT_REAL")))
+        val saved = harness.vm.providers.single { it.id == provider.id }
+        assertEquals("http://192.168.1.20:8080/gateway/v1", saved.baseUrl)
+        assertTrue(saved.headerSecretRefs.isEmpty())
+        assertTrue("A new destination needs a separate primary credential reference", saved.secretRef != provider.secretRef)
+        assertFalse("Changing the port is also a new credential destination", harness.vm.saveDraft(
+            draft.copy(baseUrl = "http://192.168.1.20:8081/gateway/v1")))
+        assertEquals(saved, harness.vm.providers.single { it.id == provider.id })
+    }
+
+    @Test
     fun editingWithBlankModelIdKeepsIdentityAndPersistsOtherChanges() {
         val harness = harness(onTest = { error("No provider request expected") })
         val original = harness.vm.models.single { it.id == harness.modelId }

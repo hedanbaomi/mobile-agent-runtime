@@ -223,7 +223,7 @@ class OpenAiCompatibleVision(
                     http,
                     provider.baseUrl,
                     HeaderSecretResolver { host, ref ->
-                        if (!host.equals(URI(provider.baseUrl).host, true) || ref !in provider.headerSecretRefs.values) {
+                        if (!host.equals(URI(provider.baseUrl).host?.trim('.'), true) || ref !in provider.headerSecretRefs.values) {
                             throw IllegalArgumentException("Invalid secret destination binding")
                         }
                         secretResolver(ref)

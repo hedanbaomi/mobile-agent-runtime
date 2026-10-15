@@ -830,7 +830,13 @@ private fun ProviderEditorFields(
                 state.editorError?.let { Text(it, color = MaterialTheme.colorScheme.error) }
                 budgetError?.let { Text(it, color = MaterialTheme.colorScheme.error) }
                 OutlinedTextField(draft.name, { actions.onDraftChange(draft.copy(name = it)) }, label = { Text(stringResource(R.string.ui_name_dd4dc4c5)) }, keyboardOptions = noCorrectionText, modifier = Modifier.fillMaxWidth())
-                OutlinedTextField(draft.baseUrl, { actions.onDraftChange(draft.copy(baseUrl = it)) }, label = { Text(stringResource(R.string.ui_base_url_434ba70e)) }, keyboardOptions = uriOptions, modifier = Modifier.fillMaxWidth())
+                OutlinedTextField(draft.baseUrl, { actions.onDraftChange(draft.copy(baseUrl = it)) },
+                    label = { Text(stringResource(R.string.ui_base_url_434ba70e)) },
+                    supportingText = {
+                        Text(stringResource(if (draft.baseUrl.trim().startsWith("http:", ignoreCase = true))
+                            R.string.ui_provider_http_warning else R.string.ui_provider_endpoint_help))
+                    },
+                    keyboardOptions = uriOptions, modifier = Modifier.fillMaxWidth())
                 var apiFormatMenuOpen by remember(draft.id) { mutableStateOf(false) }
                 Box {
                     OutlinedButton(

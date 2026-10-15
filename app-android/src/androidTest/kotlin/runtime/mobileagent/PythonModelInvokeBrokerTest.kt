@@ -84,6 +84,9 @@ class PythonModelInvokeBrokerTest {
         val holdTransport: Boolean = false,
         /** Runs inside the provider transport, i.e. while an admitted broker call is in flight. */
         val onTransport: Harness.() -> Unit = {},
+        val baseUrl: String = "https://example.invalid/v1",
+        val providerHttpOverride: HttpClient? = null,
+        val withAuxiliaryCredential: Boolean = false,
     ) {
         lateinit var hostApp: MobileAgentApp
         lateinit var container: AppContainer
@@ -118,11 +121,15 @@ class PythonModelInvokeBrokerTest {
                 id = providerId,
                 name = "Python broker fixture",
                 apiFormat = format,
-                baseUrl = "https://example.invalid/v1",
+                baseUrl = baseUrl,
+                headerSecretRefs = if (withAuxiliaryCredential)
+                    mapOf("X-Proxy-Token" to "fixture-aux-$suffix") else emptyMap(),
                 secretRef = "fixture-secret-$suffix",
                 revision = 1,
             ))
             container.secrets.put("fixture-secret-$suffix", "synthetic-broker-token".toCharArray())
+            if (withAuxiliaryCredential) container.secrets.put("fixture-aux-$suffix",
+                "SYNTHETIC_HTTP_AUXILIARY_NOT_A_REAL_KEY".toCharArray())
             container.profiles.createModel(ModelProfile(
                 id = modelId,
                 providerId = providerId,
@@ -223,7 +230,7 @@ class PythonModelInvokeBrokerTest {
                 agentRun,
                 supportsImages = false,
                 textDegradation = false,
-                providerHttp = HttpClient(engine(response, contentType)),
+                providerHttp = providerHttpOverride ?: HttpClient(engine(response, contentType)),
             )
             executor = tools.executor
             // RunTools exposes every route; this test drives the Python Skill route.
@@ -307,6 +314,38 @@ class PythonModelInvokeBrokerTest {
         val result = fixture.run("call-after-four-minutes")
         assertTrue("configured 30-minute Run must stay admitted: $result; audit=${fixture.auditTrail()}", result is ToolResult.Value)
         assertEquals(1, fixture.bodies.size)
+    }
+
+    @Test(timeout = 120_000)
+    fun modelInvokeUsesHttpProxyThroughRealIpcAndProductionTransportInBothFormats() {
+        for (format in ApiFormat.entries) for (host in listOf("LOCALHOST", "localhost.")) {
+            val contentType = if (format == ApiFormat.OPENAI_COMPATIBLE) "text/event-stream" else "application/json"
+            val response = if (format == ApiFormat.OPENAI_COMPATIBLE) chatSuccess() else responsesSuccess()
+            ProviderHttpEndpointDeviceTest.Fixture(bindHost = host, expectedKey = "synthetic-broker-token") { _ ->
+                ProviderHttpEndpointDeviceTest.Reply(contentType = contentType, body = response)
+            }.use { server ->
+                createProviderHttpClient(10_000).use { http ->
+                    val fixture = Harness(format, OutputLimitMode.MANUAL, 512, 1, 4_096, 4_096,
+                        baseUrl = "${server.base}/broker/proxy/v1", providerHttpOverride = http,
+                        withAuxiliaryCredential = true)
+                    fixture.start(response, contentType)
+                    val callId = "call-http-${format.name}"
+                    val result = fixture.run(callId)
+                    assertTrue("HTTP broker call must complete; $result; ${fixture.auditTrail()}", result is ToolResult.Value)
+                    val value = Json.parseToJsonElement((result as ToolResult.Value).json).jsonObject
+                    assertEquals("canned answer", value["text"]!!.jsonPrimitive.content)
+                    assertEquals(1, server.requests.size)
+                    assertTrue("The primary credential must reach the authorized HTTP proxy", server.requests.single().credentialMatched)
+                    assertTrue("The auxiliary credential must reach the authorized HTTP proxy", server.requests.single().auxiliaryMatched)
+                    val path = if (format == ApiFormat.OPENAI_COMPATIBLE) "/chat/completions" else "/responses"
+                    assertEquals("/broker/proxy/v1$path", server.requests.single().path)
+                    fixture.approve(callId)
+                    assertEquals("Duplicate approval must not replay HTTP", 1, server.requests.size)
+                    server.assertHealthy()
+                }
+            }
+            waitForTheIsolatedServiceToExit()
+        }
     }
 
     @Test(timeout = 120_000)

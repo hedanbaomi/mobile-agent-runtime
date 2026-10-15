@@ -635,7 +635,7 @@ class TransferRepository(
         if (bundle.conversations.isEmpty()) return
         warnings += "Imported conversation history needs local credentials for the same provider endpoint before it can continue"
         if (bundle.conversations.any(::hasHttpHistoricalProvider)) {
-            warnings += "Some imported history is frozen to an HTTP provider destination. Release builds block cleartext requests; configure HTTPS and start a new conversation. The old history is not redirected or sent automatically."
+            warnings += "Some imported history is frozen to an HTTP provider destination. HTTP sends credentials and content without encryption. Verify this destination and configure its local credentials before continuing; the old history is not redirected or sent automatically."
         }
     }
 

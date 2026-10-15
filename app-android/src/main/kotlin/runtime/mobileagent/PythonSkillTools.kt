@@ -704,7 +704,8 @@ private class PythonSkillToolExecutor(
                 if (!stillAuthorized()) throw BrokerDenied("PERMISSION_DENIED")
                 val adapter = OpenAiAdapterFactory.create(provider.apiFormat, providerHttp, provider.baseUrl,
                     HeaderSecretResolver { host, ref ->
-                        if (host != URI(provider.baseUrl).host || !stillAuthorized()) throw BrokerDenied("PERMISSION_DENIED")
+                        if (!host.equals(URI(provider.baseUrl).host?.trim('.'), true) ||
+                            ref !in provider.headerSecretRefs.values || !stillAuthorized()) throw BrokerDenied("PERMISSION_DENIED")
                         container.secrets.resolveForHost(ref).also { secrets += it }
                     }, provider.nonSecretHeaders.mapValues { RequestHeaderValue.Plain(it.value) } +
                         provider.headerSecretRefs.mapValues { RequestHeaderValue.SecretRef(it.value) })

@@ -2,6 +2,8 @@
 <!-- SPDX-FileCopyrightText: 2026 mobileAgentRuntime contributors -->
 <!-- SPDX-License-Identifier: AGPL-3.0-only -->
 <resources>
+    <string name="ui_provider_endpoint_help">支持 HTTP/HTTPS、自定义端口和反代路径前缀。请填写服务方提供的 API 基础地址。</string>
+    <string name="ui_provider_http_warning">HTTP 会以明文传输 API Key 和内容。请使用可信反代与网络；可用时优先选择 HTTPS。</string>
     <string name="ui_add_a_provider_to_select_a_ffa7447f" formatted="false">添加服务商以选择模型。凭据保留在本设备。</string>
     <string name="ui_add_provider_bf4c9732" formatted="false">添加服务商</string>
     <string name="ui_api_format_s_b2e6629e">API 格式：%1$s</string>

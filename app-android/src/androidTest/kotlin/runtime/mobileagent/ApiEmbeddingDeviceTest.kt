@@ -277,7 +277,7 @@ class ApiEmbeddingDeviceTest {
         check(testApp != null && !testApp.isHostInitialized) {
             "Use PythonRuntimeDeviceTestRunner's deferred host, never initialized user App state"
         }
-        check(BuildConfig.DEBUG) { "Loopback cleartext fixtures are debug-only" }
+        // Main network policy supports explicitly configured HTTP providers in every variant.
         val id = UUID.randomUUID().toString()
         val cache = target.cacheDir.canonicalFile
         val root = File(cache, "api-embedding-device-" + id).canonicalFile

@@ -1,0 +1,9 @@
+<!-- SPDX-FileCopyrightText: 2026 mobileAgentRuntime contributors -->
+<!-- SPDX-License-Identifier: AGPL-3.0-only -->
+<network-security-config xmlns:tools="http://schemas.android.com/tools">
+    <!-- Provider destinations are user-configured and cannot be a static domain list.
+         Feature policies still restrict tools/MCP to HTTPS; TLS trust is unchanged. -->
+    <!-- ADR-0041 explicitly supports user-configured HTTP model proxies. This one
+         deliberate policy exception does not suppress any other security lint. -->
+    <base-config cleartextTrafficPermitted="true" tools:ignore="InsecureBaseConfiguration" />
+</network-security-config>

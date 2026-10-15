@@ -378,7 +378,7 @@ class TransferRepositoryIsolationTest {
 
                 val result = TransferRepository(target).importArchive(bytes)
                 assertTrue(result.warnings.any { it.contains("history") && it.contains("local credentials") })
-                assertFalse(result.warnings.any { it.contains("Release builds block cleartext requests") })
+                assertFalse(result.warnings.any { it.contains("HTTP sends credentials and content without encryption") })
                 assertEquals("Synthetic history", ConversationRepository(target).messages("conversation.portable").single().text)
                 assertEquals(true, ConversationRepository(target).get("conversation.portable")?.archived)
                 assertEquals(listOf("conversation.portable"), ConversationRepository(target).listArchived().map { it.id })
@@ -511,7 +511,7 @@ class TransferRepositoryIsolationTest {
                 Migrations.apply(target)
                 val repository = TransferRepository(target)
                 val result = repository.importArchive(archive.toByteArray())
-                assertTrue(result.warnings.any { it.contains("Release builds block cleartext requests") })
+                assertTrue(result.warnings.any { it.contains("HTTP sends credentials and content without encryption") })
 
                 val agents = AgentRepository(target)
                 val frozen = agents.getSnapshot(snapshot.id)!!

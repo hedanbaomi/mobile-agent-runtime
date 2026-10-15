@@ -9,6 +9,10 @@
 -keep class runtime.mobileagent.bridge.AdbHelperMain { public static void main(java.lang.String[]); }
 -keep class runtime.mobileagent.resident.ResidentAdbMain { public static void main(java.lang.String[]); }
 
+# Shizuku loads this Binder through reflection in a separate process. A class
+# literal at the call site does not keep its public no-argument constructor.
+-keep class runtime.mobileagent.shizuku.ShizukuUserService { public <init>(); }
+
 # ONNX Runtime's Java API is called back by its native library. Preserve its
 # boundary while allowing the rest of the dependency graph to shrink.
 -keep class ai.onnxruntime.** { *; }

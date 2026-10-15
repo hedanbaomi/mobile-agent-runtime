@@ -255,6 +255,17 @@ fun verifyReviewBuildConfiguration() {
     }
 }
 
+fun verifyShizukuUserServiceEntrypoint(artifact: File) {
+    val code = runExternalCommand(
+        apkAnalyzer(),
+        listOf("dex", "code", "--class", "runtime.mobileagent.shizuku.ShizukuUserService", artifact.absolutePath),
+    )
+    check(Regex("""(?m)^\s*\.method public constructor <init>\(\)V\s*$""").containsMatchIn(code)) {
+        "Shizuku UserService public no-argument constructor is missing from the assembled APK: " +
+            artifact.absolutePath
+    }
+}
+
 fun verifyVariantSecurity(
     variant: String,
     artifact: File,
@@ -678,6 +689,7 @@ val verifyReviewArtifact = tasks.register("verifyReviewArtifact") {
     dependsOn("assembleReview")
     doLast {
         verifyVariantSecurity("review", variantApkFile("review"), expectedDebuggable = false, expectedControlPlaneEnabled = true)
+        verifyShizukuUserServiceEntrypoint(variantApkFile("review"))
         verifyNativePageAlignment(variantApkFile("review"))
         val apk = variantApkFile("review")
         val entries = ZipFile(apk).use { zip ->
@@ -851,6 +863,7 @@ tasks.register("verifyReleaseArtifact") {
         val apk = variantApkFile("release")
         verifyArm64ReleaseApk(apk)
         verifyVariantSecurity("release", apk, expectedDebuggable = false, expectedControlPlaneEnabled = true)
+        verifyShizukuUserServiceEntrypoint(apk)
         verifyNativePageAlignment(apk)
         logger.lifecycle("Release APK verified: non-debuggable, arm64-v8a only (${apk.length()} bytes)")
     }

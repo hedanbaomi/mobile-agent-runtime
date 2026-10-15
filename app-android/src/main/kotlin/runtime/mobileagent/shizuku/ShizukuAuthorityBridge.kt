@@ -239,6 +239,10 @@ class ShizukuAuthorityBridge(
             userServiceBinder != null || userServiceBindStartedAtElapsedMs != null
         }
         if (shouldUnbind && runCatching { Shizuku.pingBinder() }.getOrDefault(false)) {
+            // remove=true kills the remote service but leaves the SDK's shared connection cache
+            // until its asynchronous death callback. Detach first so an immediate rebind cannot
+            // inherit that cache and lose its new connection to the old service's death callback.
+            runCatching { Shizuku.unbindUserService(userServiceArgs, userServiceConnection, false) }
             runCatching { Shizuku.unbindUserService(userServiceArgs, userServiceConnection, true) }
         }
         synchronized(lock) { clearUserServiceLocked() }

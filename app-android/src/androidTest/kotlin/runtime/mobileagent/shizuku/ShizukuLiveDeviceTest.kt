@@ -57,9 +57,9 @@ class ShizukuLiveDeviceTest {
         val file = "$directory/proof.txt"
         val movedFile = "$directory/moved-proof.txt"
         try {
-            val serverReady = bridge.refresh().permissionGranted && bridge.bindUserService()
+            val serverReady = waitForServer(bridge, requireShizuku) && bridge.bindUserService()
             if (requireShizuku) {
-                assertTrue("Shizuku server and permission must be available", serverReady)
+                assertTrue("Shizuku server and permission must be available: ${bridge.safeState()}", serverReady)
             } else {
                 assumeTrue("Shizuku server or permission is unavailable", serverReady)
             }
@@ -147,15 +147,15 @@ class ShizukuLiveDeviceTest {
             .equals("true", ignoreCase = true)
         val bridge = ShizukuAuthorityBridge(ApplicationProvider.getApplicationContext<Context>())
         try {
-            val serverReady = bridge.refresh().permissionGranted && bridge.bindUserService()
+            val serverReady = waitForServer(bridge, requireShizuku) && bridge.bindUserService()
             if (requireShizuku) {
-                assertTrue("Only a shell-backed Shizuku server may run this test", serverReady)
+                assertTrue("Only a shell-backed Shizuku server may run this test: ${bridge.safeState()}", serverReady)
             } else {
                 assumeTrue("Shizuku shell authority is unavailable", serverReady)
             }
             val ready = waitUntilReady(bridge)
             if (requireShizuku) {
-                assertTrue("Shizuku shell UserService did not become ready", ready)
+                assertTrue("Shizuku shell UserService did not become ready: ${bridge.safeState()}", ready)
             } else {
                 assumeTrue("Shizuku shell UserService is unavailable", ready)
             }
@@ -177,6 +177,44 @@ class ShizukuLiveDeviceTest {
         } finally {
             bridge.close()
         }
+    }
+
+    @Test
+    fun immediateCloseAndRebindCreatesAReadyUserService() = runBlocking {
+        val requireShizuku = InstrumentationRegistry.getArguments()
+            .getString("requireShizuku")
+            .equals("true", ignoreCase = true)
+        repeat(5) { cycle ->
+            val bridge = ShizukuAuthorityBridge(ApplicationProvider.getApplicationContext<Context>())
+            try {
+                val serverReady = waitForServer(bridge, requireShizuku) && bridge.bindUserService()
+                if (requireShizuku) {
+                    assertTrue("Shizuku server unavailable at cycle $cycle: ${bridge.safeState()}", serverReady)
+                } else {
+                    assumeTrue("Shizuku server or permission is unavailable", serverReady)
+                }
+                val ready = waitUntilReady(bridge)
+                assertTrue("Rebind cycle $cycle did not become ready: ${bridge.safeState()}", ready)
+                assertEquals(ShizukuBridgePolicy.SHELL_UID, bridge.refresh().userServiceUid)
+            } finally {
+                bridge.close()
+            }
+        }
+    }
+
+    // Shizuku delivers its server binder asynchronously after process creation.
+    // The required live run waits for that delivery; ordinary device suites still skip promptly.
+    private suspend fun waitForServer(bridge: ShizukuAuthorityBridge, required: Boolean): Boolean {
+        repeat(if (required) 100 else 1) {
+            if (bridge.refresh().permissionGranted) return true
+            kotlinx.coroutines.delay(50)
+        }
+        return bridge.refresh().permissionGranted
+    }
+
+    private fun ShizukuAuthorityBridge.safeState(): String = refresh().let {
+        "binder=${it.binderAlive}, granted=${it.permissionGranted}, api=${it.apiVersion}, " +
+            "serverUid=${it.serverUid}, serviceAlive=${it.userServiceAlive}, error=${it.errorCode}"
     }
 
     private suspend fun approve(

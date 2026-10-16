@@ -18,7 +18,7 @@ class WebSearchSettingsTest {
             inventory.putActive("search:legacy", byteArrayOf(1))
             assertEquals(WebSearchProvider.BRAVE, settings.webSearchProvider())
             assertTrue(settings.webSearchEnabled())
-            for (provider in listOf(WebSearchProvider.TAVILY, WebSearchProvider.EXA)) {
+            for (provider in WebSearchProvider.entries.filter { it != WebSearchProvider.BRAVE }) {
                 settings.selectWebSearchProvider(provider)
                 assertFalse(settings.webSearchEnabled())
                 assertNull(settings.webSearchSecretRef())
@@ -34,6 +34,12 @@ class WebSearchSettingsTest {
             inventory.retireIfUnreferenced("search:tavily:fixture")
             assertEquals(SecretStatus.DELETED, inventory.status("search:tavily:fixture"))
             assertEquals(SecretStatus.ACTIVE, inventory.status("search:exa:fixture"))
+            settings.selectWebSearchProvider(WebSearchProvider.DEEPSEEK)
+            assertEquals("search:deepseek:fixture", SettingsRepository(db).webSearchSecretRef())
+            settings.setWebSearch("search:deepseek:fixture", false)
+            inventory.collectOrphans()
+            assertEquals(SecretStatus.ACTIVE, inventory.status("search:deepseek:fixture"))
+            assertFalse(settings.webSearchEnabled())
             settings.selectWebSearchProvider(WebSearchProvider.BRAVE)
             assertEquals("search:legacy", settings.webSearchSecretRef())
             assertTrue(settings.webSearchEnabled())

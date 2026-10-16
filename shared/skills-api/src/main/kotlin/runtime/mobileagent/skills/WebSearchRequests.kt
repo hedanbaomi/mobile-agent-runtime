@@ -40,6 +40,25 @@ internal fun webSearchRequest(provider: WebSearchProvider, query: String, count:
             builder.url("https://api.exa.ai/search").header("x-api-key", key)
                 .post(body.toString().toRequestBody("application/json; charset=utf-8".toMediaType()))
         }
+        WebSearchProvider.DEEPSEEK -> {
+            require(query.codePointCount(0, query.length) <= 128)
+            val body = buildJsonObject {
+                put("query", query); put("count", count); put("need_content", false)
+            }
+            builder.url("https://api.deepseek.com/v1/tools/search").header("Authorization", "Bearer $key")
+                .post(body.toString().toRequestBody("application/json; charset=utf-8".toMediaType()))
+        }
     }
     return builder.header("Accept", "application/json").build()
+}
+
+/** The supplied URL is JSON data for DeepSeek, never the credential-bearing HTTP destination. */
+internal fun webFetchRequest(url: String, key: String): Request {
+    require(WebFetchPolicy.isAllowedUrl(url)) { "Invalid public web URL" }
+    require(key.isNotBlank() && key.length <= 4096 && key.all { it.code in 33..126 })
+    require(!url.contains(key)) { "URL contains a credential" }
+    val body = buildJsonObject { put("url", url) }
+    return Request.Builder().url("https://api.deepseek.com/v1/tools/fetch")
+        .header("Authorization", "Bearer $key").header("Accept", "application/json")
+        .post(body.toString().toRequestBody("application/json; charset=utf-8".toMediaType())).build()
 }

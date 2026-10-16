@@ -56,6 +56,15 @@ class WebSearchConfigurationUiTest {
         compose.onNodeWithTag("settings.web_search.key").performTextInput("fixture-exa")
         compose.onNodeWithText("Save and enable").performScrollTo().performClick()
         compose.runOnIdle { assertEquals("exa" to "fixture-exa", saved.last()) }
+        compose.onNodeWithText("Exa").performScrollTo().performClick()
+        compose.onNodeWithTag("settings.web_search.provider.deepseek").performClick()
+        compose.onNodeWithTag("settings.web_search.key").assertTextEquals("DeepSeek API Key", "")
+        compose.onNodeWithText("DeepSeek supports Search and Fetch with one API key. The model chooses whether to search or read a public page. Queries and page URLs are sent to DeepSeek; both operations may incur charges.").assertExists()
+        compose.onNodeWithTag("settings.web_search.key").performTextInput("fixture-deepseek")
+        compose.onNodeWithText("Save and enable").performScrollTo().performClick()
+        compose.runOnIdle { assertEquals("deepseek" to "fixture-deepseek", saved.last()) }
+        compose.runOnUiThread { state.value = state.value.copy(language = "zh-CN") }
+        compose.onNodeWithText("DeepSeek 的 Search 和 Fetch 共用一个 API Key，模型可按需搜索或读取公开网页。查询词和网页地址会发送给 DeepSeek，两种操作都可能收费。").assertExists()
     }
 
     @Test fun agentSearchOptInIsSeparateFromSkippingOtherToolConfirmations() {

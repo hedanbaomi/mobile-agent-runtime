@@ -503,13 +503,14 @@ class RunTools(
     private suspend fun discloseCached(routed: RoutedCall, cached: ToolResult, owner: ToolExecutor): ToolResult {
         // Disclosure checks must not erase an external request's settled execution facts.
         // These outcomes contain no provider result content and cannot authorize replay.
-        if (routed.call.name == "web_search" &&
+        val webRequest = routed.call.name in setOf("web_search", "web_fetch")
+        if (webRequest &&
             (cached is ToolResult.UnknownOutcome ||
                 cached is ToolResult.Denied && cached.completion == ToolResult.Completion.COMPLETED_WITHHELD)
         ) return cached
-        fun unavailable(reason: String): ToolResult = if (routed.call.name == "web_search" && cached is ToolResult.Value) {
+        fun unavailable(reason: String): ToolResult = if (webRequest && cached is ToolResult.Value) {
             ToolResult.Denied(
-                "Web search was dispatched and completed; charges may apply. Results are withheld. Do not retry automatically.",
+                "Web request was dispatched and completed; charges may apply. Results are withheld. Do not retry automatically.",
                 ToolResult.Completion.COMPLETED_WITHHELD,
             )
         } else ToolResult.Denied(reason)

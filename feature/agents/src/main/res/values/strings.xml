@@ -71,6 +71,6 @@
     <string name="ui_unlink_7882f235" formatted="false">Unlink</string>
     <string name="ui_use_a_workspace_relative_scope_never_ccc95195" formatted="false">Use a workspace-relative scope, never a device path.</string>
     <string name="ui_use_recommended_settings_6754f65f" formatted="false">Use recommended settings</string>
-    <string name="ui_use_the_configured_search_service_without_92bc0ab7" formatted="false">Use the configured search service without per-query prompts; charges may apply. Enable for new conversations; disable immediately.</string>
+    <string name="ui_use_the_configured_search_service_without_92bc0ab7" formatted="false">Use the configured search service without per-call prompts, including reading public pages with DeepSeek Fetch. Queries and page URLs are sent to the service; charges may apply. Enable for new conversations; disable immediately.</string>
     <string name="ui_workspace_access_7dc4e36c" formatted="false">Workspace access</string>
 </resources>

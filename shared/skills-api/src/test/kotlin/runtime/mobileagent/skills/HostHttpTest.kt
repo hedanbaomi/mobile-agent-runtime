@@ -43,6 +43,7 @@ class HostHttpTest {
                 WebSearchProvider.BRAVE -> "api.search.brave.com"
                 WebSearchProvider.TAVILY -> "api.tavily.com"
                 WebSearchProvider.EXA -> "api.exa.ai"
+                WebSearchProvider.DEEPSEEK -> "api.deepseek.com"
             }
             LocalTlsFixture(name).use { fixture ->
                 fixture.server.enqueue(MockResponse().setBody("{\"results\":[]}"))
@@ -61,15 +62,24 @@ class HostHttpTest {
                     assertNull(request.getHeader("Authorization"))
                 } else {
                     assertEquals("POST", request.method)
-                    assertEquals("/search", request.path)
+                    assertEquals(if (provider == WebSearchProvider.DEEPSEEK) "/v1/tools/search" else "/search", request.path)
                     val body = Json.parseToJsonElement(request.body.readUtf8()).jsonObject
                     assertEquals("中文 & query", body["query"]!!.jsonPrimitive.content)
-                    val countKey = if (provider == WebSearchProvider.TAVILY) "max_results" else "numResults"
+                    val countKey = when (provider) {
+                        WebSearchProvider.TAVILY -> "max_results"
+                        WebSearchProvider.DEEPSEEK -> "count"
+                        else -> "numResults"
+                    }
                     assertEquals("3", body[countKey]!!.jsonPrimitive.content)
                     if (provider == WebSearchProvider.TAVILY) {
                         assertEquals("Bearer synthetic-key", request.getHeader("Authorization"))
                         assertEquals("false", body["auto_parameters"]!!.jsonPrimitive.content)
                         assertEquals("false", body["include_raw_content"]!!.jsonPrimitive.content)
+                        assertNull(request.getHeader("x-api-key"))
+                    } else if (provider == WebSearchProvider.DEEPSEEK) {
+                        assertEquals("Bearer synthetic-key", request.getHeader("Authorization"))
+                        assertEquals("false", body["need_content"]!!.jsonPrimitive.content)
+                        assertEquals(setOf("query", "count", "need_content"), body.keys)
                         assertNull(request.getHeader("x-api-key"))
                     } else {
                         assertEquals("synthetic-key", request.getHeader("x-api-key"))
@@ -80,6 +90,70 @@ class HostHttpTest {
                 assertEquals(1, fixture.server.requestCount)
             }
         }
+    }
+
+    @Test fun fetchSendsUrlOnlyAsJsonToDeepSeekAndKeepsCredentialsOffThePageUrl() = LocalTlsFixture("api.deepseek.com").use { fixture ->
+        fixture.server.enqueue(MockResponse().setBody("{\"title\":\"Title\",\"content\":\"# Body\"}"))
+        val page = "http://example.com/a%2Fb?q=中文&x=%25"
+        var dispatched = 0
+        val hosts = mutableListOf<String>()
+        val raw = HostHttp.webFetch(page, "synthetic-key", { true }, { dispatched++ },
+            { hosts += it; listOf(publicAddress) }, fixture.client)
+        assertTrue(raw.contains("# Body"))
+        val request = fixture.server.takeRequest(2, TimeUnit.SECONDS)!!
+        assertEquals("POST", request.method)
+        assertEquals("api.deepseek.com", request.getHeader("Host"))
+        assertEquals("/v1/tools/fetch", request.path)
+        assertEquals("Bearer synthetic-key", request.getHeader("Authorization"))
+        assertNull(request.getHeader("Cookie"))
+        val body = Json.parseToJsonElement(request.body.readUtf8()).jsonObject
+        assertEquals(setOf("url"), body.keys)
+        assertEquals(page, body["url"]!!.jsonPrimitive.content)
+        assertEquals(listOf("api.deepseek.com"), hosts)
+        assertEquals(1, dispatched)
+        assertEquals(1, fixture.server.requestCount)
+    }
+
+    @Test fun deepSeekFailuresDoNotFollowRedirectsRetryOrLeakResponseBodies() {
+        for (fetch in listOf(false, true)) for (code in listOf(302, 307, 400, 401, 402, 403, 404, 408, 429, 500, 503, 504)) {
+            LocalTlsFixture("api.deepseek.com").use { fixture ->
+                fixture.server.enqueue(MockResponse().setResponseCode(code)
+                    .addHeader("Location", "https://example.com/leak").addHeader("Retry-After", "0")
+                    .setBody("private-provider-error"))
+                fixture.server.enqueue(MockResponse().setBody("would-be-duplicate"))
+                var dispatched = 0
+                val failure = assertThrows(Exception::class.java) {
+                    if (fetch) HostHttp.webFetch("https://example.com/", "synthetic-key", { true }, { dispatched++ },
+                        { listOf(publicAddress) }, fixture.client)
+                    else HostHttp.webSearch(WebSearchProvider.DEEPSEEK, "query", 5, "synthetic-key", { true }, { dispatched++ },
+                        { listOf(publicAddress) }, fixture.client)
+                }
+                assertFalse(failure.toString().contains("private-provider-error"))
+                assertEquals(1, fixture.server.requestCount, "fetch=$fetch code=$code")
+                assertEquals(1, dispatched)
+            }
+        }
+    }
+
+    @Test fun fetchRevocationPrivateDnsAndUnsafeInputNeverDispatch() = LocalTlsFixture("api.deepseek.com").use { fixture ->
+        var dispatched = 0
+        var allowed = true
+        assertThrows(IOException::class.java) {
+            HostHttp.webFetch("https://example.com/", "synthetic-key", { allowed }, { dispatched++ },
+                { allowed = false; listOf(publicAddress) }, fixture.client)
+        }
+        assertThrows(UnknownHostException::class.java) {
+            HostHttp.webFetch("https://example.com/", "synthetic-key", { true }, { dispatched++ },
+                { listOf(InetAddress.getLoopbackAddress()) }, fixture.client)
+        }
+        for ((page, key) in listOf(
+            "https://localhost/" to "synthetic-key", "https://example.com/synthetic-key" to "synthetic-key",
+            "https://example.com/" to "key\r\nInjected: value",
+        )) assertThrows(IllegalArgumentException::class.java) {
+            HostHttp.webFetch(page, key, { true }, { dispatched++ }, { listOf(publicAddress) }, fixture.client)
+        }
+        assertEquals(0, dispatched)
+        assertEquals(0, fixture.server.requestCount)
     }
 
     @Test

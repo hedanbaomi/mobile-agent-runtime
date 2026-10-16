@@ -7,7 +7,8 @@ package runtime.mobileagent.domain
 enum class WebSearchProvider(val id: String, val displayName: String) {
     BRAVE("brave", "Brave"),
     TAVILY("tavily", "Tavily"),
-    EXA("exa", "Exa");
+    EXA("exa", "Exa"),
+    DEEPSEEK("deepseek", "DeepSeek");
 
     companion object {
         fun fromId(id: String): WebSearchProvider? = entries.firstOrNull { it.id == id }

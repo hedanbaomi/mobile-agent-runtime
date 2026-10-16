@@ -323,6 +323,9 @@ fun SettingsScreen(
                     stringResource(R.string.sett_search_key_help),
                     style = MaterialTheme.typography.bodySmall,
                 )
+                if (state.webSearchProviderId == WebSearchProvider.DEEPSEEK.id) {
+                    Text(stringResource(R.string.sett_search_deepseek_help), style = MaterialTheme.typography.bodySmall)
+                }
                 OutlinedTextField(
                     value = apiKey,
                     onValueChange = { apiKey = it },

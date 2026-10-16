@@ -4,6 +4,7 @@
     <string name="sett_title">Settings</string>
     <string name="sett_appearance_language">Appearance and language</string>
     <string name="sett_search_title">Web search</string>
+    <string name="sett_search_deepseek_help">DeepSeek supports Search and Fetch with one API key. The model chooses whether to search or read a public page. Queries and page URLs are sent to DeepSeek; both operations may incur charges.</string>
     <string name="sett_search_key_help">Keys are encrypted per provider. Search may incur charges; enable it in the Agent.</string>
     <string name="sett_search_save_enable">Save and enable</string>
     <string name="sett_search_remove_key">Remove key</string>

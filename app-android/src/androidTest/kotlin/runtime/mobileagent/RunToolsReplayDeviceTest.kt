@@ -83,13 +83,13 @@ class RunToolsReplayDeviceTest {
         assertFalse(tools.executor.authorizeDeferredResult(call))
     }
     @Test fun searchReplayPreservesCompletedAndUnknownFactsWithoutRedispatch() = runBlocking {
-        for (unknown in listOf(false, true)) {
+        for (name in listOf("web_search", "web_fetch")) for (unknown in listOf(false, true)) {
             val chain = prepareChain("search-facts")
             val run = newRun(chain)
             var allowed = true
             var dispatches = 0
             val fake = object : ToolExecutor {
-                override val specs = listOf(runtime.mobileagent.skills.WebSearchTools.webSearch)
+                override val specs = listOf(if (name == "web_fetch") runtime.mobileagent.skills.WebSearchTools.webFetch else runtime.mobileagent.skills.WebSearchTools.webSearch)
                 override suspend fun invoke(call: ToolCall): ToolResult {
                     dispatches++
                     return if (unknown) ToolResult.UnknownOutcome("dispatched; unknown")
@@ -99,7 +99,7 @@ class RunToolsReplayDeviceTest {
                 override suspend fun authorizeReplay(call: ToolCall): Boolean = allowed
             }
             val tools = RunTools(chain.container, chain.app, chain.snapshot, run, false, false, runExecutor = fake)
-            val call = ToolCall("search-replay", "web_search", """{"query":"public"}""")
+            val call = ToolCall("search-replay", name, if (name == "web_fetch") """{"url":"https://example.com/"}""" else """{"query":"public"}""")
             val first = tools.executor.invoke(call)
             allowed = false
             val withheld = tools.executor.invoke(call)

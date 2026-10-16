@@ -131,7 +131,7 @@ class SecretInventory(private val db: SqlConnection) {
         }
         if (tableExists("app_prefs")) {
             val searchKeys = WebSearchProvider.entries.map(SettingsRepository::webSearchSecretKey)
-            db.query("SELECT value FROM app_prefs WHERE key IN (?,?,?)", searchKeys)
+            db.query("SELECT value FROM app_prefs WHERE key IN (${searchKeys.joinToString(",") { "?" }})", searchKeys)
                 .forEach { row ->
                     val ref = requiredText(row, "value", "web-search secret reference")
                     if (ref.isNotBlank()) refs += ref

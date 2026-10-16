@@ -4,6 +4,7 @@
     <string name="sett_title">设置</string>
     <string name="sett_appearance_language">外观与语言</string>
     <string name="sett_search_title">联网搜索</string>
+    <string name="sett_search_deepseek_help">DeepSeek 的 Search 和 Fetch 共用一个 API Key，模型可按需搜索或读取公开网页。查询词和网页地址会发送给 DeepSeek，两种操作都可能收费。</string>
     <string name="sett_search_key_help">密钥按服务商加密保存。搜索可能收费，需在智能体中开启。</string>
     <string name="sett_search_save_enable">保存并启用</string>
     <string name="sett_search_remove_key">移除密钥</string>

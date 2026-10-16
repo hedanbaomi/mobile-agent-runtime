@@ -549,7 +549,29 @@ object HostHttp {
         resolve: (String) -> List<InetAddress>,
         client: OkHttpClient,
     ): String {
-        val request = webSearchRequest(provider, query, maxResults, key)
+        return webRequest(webSearchRequest(provider, query, maxResults, key), authorized, onDispatched, resolve, client)
+    }
+
+    /** One remote page fetch, using the same authorization and no-retry transport as search. */
+    fun webFetch(url: String, key: String, authorized: () -> Boolean, onDispatched: () -> Unit): String =
+        webFetch(url, key, authorized, onDispatched, { host -> InetAddress.getAllByName(host).toList() }, client)
+
+    internal fun webFetch(
+        url: String,
+        key: String,
+        authorized: () -> Boolean,
+        onDispatched: () -> Unit,
+        resolve: (String) -> List<InetAddress>,
+        client: OkHttpClient,
+    ): String = webRequest(webFetchRequest(url, key), authorized, onDispatched, resolve, client)
+
+    private fun webRequest(
+        request: Request,
+        authorized: () -> Boolean,
+        onDispatched: () -> Unit,
+        resolve: (String) -> List<InetAddress>,
+        client: OkHttpClient,
+    ): String {
         val host = request.url.host
         HttpPolicy.assertRequest(request.url.toString(), setOf(host))
         val deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(MAX_TIMEOUT_MILLIS)

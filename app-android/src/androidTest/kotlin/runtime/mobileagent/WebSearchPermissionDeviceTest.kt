@@ -56,17 +56,18 @@ class WebSearchPermissionDeviceTest {
     }
 
     @Test fun frozenOptInAndLiveRevocationGateTheActualHostExecutor() = runBlocking {
+        for (provider in listOf(WebSearchProvider.BRAVE, WebSearchProvider.DEEPSEEK)) {
         val app = InstrumentationRegistry.getInstrumentation().targetContext.applicationContext as MobileAgentApp
         app.ensureHostInitialized()
         val container = app.container
         val oldProvider = container.settings.webSearchProvider() ?: WebSearchProvider.BRAVE
-        val oldRef = container.settings.webSearchSecretRef(WebSearchProvider.BRAVE)
-        val oldEnabled = container.settings.webSearchEnabled(WebSearchProvider.BRAVE)
+        val oldRef = container.settings.webSearchSecretRef(provider)
+        val oldEnabled = container.settings.webSearchEnabled(provider)
         val id = UUID.randomUUID().toString()
-        val ref = "search:brave:device:$id"
+        val ref = "search:${provider.id}:device:$id"
         try {
             container.secrets.put(ref, "fixture-not-a-real-api-key".toCharArray())
-            container.settings.selectWebSearchProvider(WebSearchProvider.BRAVE)
+            container.settings.selectWebSearchProvider(provider)
             container.settings.setWebSearch(ref, true)
             container.profiles.createProvider(ProviderProfile(
                 id = "provider.$id", name = "Search fixture", apiFormat = ApiFormat.OPENAI_COMPATIBLE,
@@ -90,24 +91,35 @@ class WebSearchPermissionDeviceTest {
             assertTrue(webSearchTools(container, offSnapshot).specs.isEmpty())
             val onSnapshot = container.agents.createSnapshot(agent.id)
             val executor = webSearchTools(container, onSnapshot)
-            assertEquals(listOf("web_search"), executor.specs.map { it.name })
+            val expectedTools = if (provider == WebSearchProvider.DEEPSEEK) listOf("web_search", "web_fetch") else listOf("web_search")
+            assertEquals(expectedTools, executor.specs.map { it.name })
             agent = container.agents.saveWithPrompt(agent.copy(
                 permissionSettingsJson = AgentSearchPermission.update(agent.permissionSettingsJson, false),
             ), "Fixture")
             assertTrue(executor.invoke(ToolCall("revoked", "web_search", """{"query":"fixture"}""")) is ToolResult.Denied)
+            if (provider == WebSearchProvider.DEEPSEEK) {
+                assertTrue(executor.invoke(ToolCall("fetch-revoked", "web_fetch", """{"url":"https://example.com/"}""")) is ToolResult.Denied)
+            }
             agent = container.agents.saveWithPrompt(agent.copy(
                 permissionSettingsJson = AgentSearchPermission.update(agent.permissionSettingsJson, true),
             ), "Fixture")
             // Disable/re-enable is a new grant; the old executor cannot resume.
             assertTrue(executor.invoke(ToolCall("old-grant", "web_search", """{"query":"fixture"}""")) is ToolResult.Denied)
+            if (provider == WebSearchProvider.DEEPSEEK) {
+                assertTrue(executor.invoke(ToolCall("fetch-old-grant", "web_fetch", """{"url":"https://example.com/"}""")) is ToolResult.Denied)
+            }
             val fresh = webSearchTools(container, container.agents.createSnapshot(agent.id))
             container.settings.selectWebSearchProvider(WebSearchProvider.TAVILY)
-            container.settings.selectWebSearchProvider(WebSearchProvider.BRAVE)
+            container.settings.selectWebSearchProvider(provider)
             assertTrue(fresh.invoke(ToolCall("old-config", "web_search", """{"query":"fixture"}""")) is ToolResult.Denied)
+            if (provider == WebSearchProvider.DEEPSEEK) {
+                assertTrue(fresh.invoke(ToolCall("fetch-old-config", "web_fetch", """{"url":"https://example.com/"}""")) is ToolResult.Denied)
+            }
         } finally {
-            container.settings.setWebSearch(oldRef, oldEnabled, WebSearchProvider.BRAVE)
+            container.settings.setWebSearch(oldRef, oldEnabled, provider)
             container.settings.selectWebSearchProvider(oldProvider)
             container.secrets.inventory().retireIfUnreferenced(ref)
+        }
         }
     }
 }

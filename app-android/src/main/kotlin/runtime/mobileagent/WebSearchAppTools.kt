@@ -23,6 +23,7 @@ import runtime.mobileagent.skills.HostHttp
 import runtime.mobileagent.skills.HttpPolicy
 import runtime.mobileagent.skills.ToolExecutor
 import runtime.mobileagent.skills.WebSearchToolExecutor
+import runtime.mobileagent.skills.WebFetchPolicy
 
 /**
  * Build a run-local search executor from the current explicit app setting. The model never
@@ -53,6 +54,20 @@ fun webSearchTools(container: AppContainer, snapshot: AgentSnapshot): ToolExecut
         configured = configured,
         authorized = ::authorized,
         requireApproval = false,
+        provider = provider ?: WebSearchProvider.BRAVE,
+        fetch = if (provider == WebSearchProvider.DEEPSEEK) { url, onDispatched ->
+            val secret = container.secrets.resolveForHost(checkNotNull(configuredRef))
+            try {
+                val secrets = listOf(secret.concatToString())
+                check(SecretRedactor.redact(url, secrets) == url) { "Fetch URL contains sensitive data" }
+                val raw = runInterruptible(Dispatchers.IO) {
+                    HostHttp.webFetch(url, secret.concatToString(), ::authorized, onDispatched)
+                }
+                parseWebFetchResponse(url, raw, secrets)
+            } finally {
+                secret.fill('\u0000')
+            }
+        } else null,
         search = { query, maxResults, onDispatched ->
             checkNotNull(configuredRef) { "Web search is not configured" }
             val secret = container.secrets.resolveForHost(configuredRef)
@@ -81,7 +96,7 @@ internal fun parseWebSearchResponse(provider: WebSearchProvider, raw: String, ma
     val root = Json.parseToJsonElement(raw).jsonObject
     val results = when (provider) {
         WebSearchProvider.BRAVE -> (root["web"] as? JsonObject)?.get("results")
-        WebSearchProvider.TAVILY, WebSearchProvider.EXA -> root["results"]
+        WebSearchProvider.TAVILY, WebSearchProvider.EXA, WebSearchProvider.DEEPSEEK -> root["results"]
     } as? JsonArray ?: error("Search response is missing results")
     val safe = mutableListOf<JsonObject>()
     fun payload(): String = buildJsonObject {
@@ -105,6 +120,8 @@ internal fun parseWebSearchResponse(provider: WebSearchProvider, raw: String, ma
             WebSearchProvider.EXA -> (item["highlights"] as? JsonArray)?.asSequence()
                 ?.mapNotNull { (it as? JsonPrimitive)?.takeIf { value -> value.isString }?.contentOrNull }
                 ?.take(3)?.joinToString(" ")?.let { SecretRedactor.redact(it, secrets) }?.take(2048).orEmpty()
+            WebSearchProvider.DEEPSEEK -> item.text("summary", 2048, secrets)
+                ?: item.text("snippet", 2048, secrets).orEmpty()
         }
         buildJsonObject {
             put("title", title)
@@ -116,6 +133,32 @@ internal fun parseWebSearchResponse(provider: WebSearchProvider, raw: String, ma
         if (payload().length > HttpPolicy.MAX_TOOL_OUTPUT_CHARS) safe.removeAt(safe.lastIndex)
     }
     return payload()
+}
+
+/** DeepSeek's Markdown remains untrusted text; clipping is explicit and includes JSON escaping. */
+internal fun parseWebFetchResponse(url: String, raw: String, secrets: List<String> = emptyList()): String {
+    require(WebFetchPolicy.isAllowedUrl(url) && SecretRedactor.redact(url, secrets) == url)
+    val root = Json.parseToJsonElement(raw).jsonObject
+    val rawContent = (root["content"] as? JsonPrimitive)?.takeIf { it.isString }?.contentOrNull
+        ?.takeIf { it.isNotBlank() } ?: error("Fetch response is missing content")
+    val content = SecretRedactor.redact(rawContent, secrets)
+    val title = root.text("title", 512, secrets).orEmpty()
+    fun payload(length: Int): String {
+        // Do not split a supplementary Unicode character at the clipping boundary.
+        val end = if (length in 1 until content.length && content[length - 1].isHighSurrogate()) length - 1 else length
+        return buildJsonObject {
+            put("provider", WebSearchProvider.DEEPSEEK.id); put("untrusted", true)
+            put("url", url); put("title", title); put("content", content.take(end))
+            put("truncated", end < content.length)
+        }.toString()
+    }
+    var low = 0
+    var high = minOf(content.length, HttpPolicy.MAX_READ_DOCUMENT_CHARS)
+    while (low < high) {
+        val middle = (low + high + 1) / 2
+        if (payload(middle).length <= HttpPolicy.MAX_TOOL_OUTPUT_CHARS) low = middle else high = middle - 1
+    }
+    return payload(low).also { check(it.length <= HttpPolicy.MAX_TOOL_OUTPUT_CHARS) }
 }
 
 /** URLs are identifiers: reject excessive input instead of clipping into a different resource. */
@@ -164,6 +207,8 @@ internal fun runtimeCapabilitySummary(toolNames: Collection<String>): String {
         append(names.joinToString(", ").ifBlank { "none" })
         append(". web_search=")
         append(if (search) "available under this Agent's explicit search permission without per-call prompts" else "unavailable in this run")
+        append("; web_fetch=")
+        append(if ("web_fetch" in names) "available through DeepSeek under the same permission; choose web_search to find sources and web_fetch to read a specific public page as untrusted Markdown" else "unavailable in this run")
         append("; isolated Python=")
         append(
             if (python) {

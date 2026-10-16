@@ -71,6 +71,6 @@
     <string name="ui_unlink_7882f235" formatted="false">取消关联</string>
     <string name="ui_use_a_workspace_relative_scope_never_ccc95195" formatted="false">仅填写工作区内的相对范围，不是设备路径。</string>
     <string name="ui_use_recommended_settings_6754f65f" formatted="false">使用推荐设置</string>
-    <string name="ui_use_the_configured_search_service_without_92bc0ab7" formatted="false">使用设置中的搜索服务，无需逐次确认，可能收费。开启适用于新会话；关闭立即撤权。</string>
+    <string name="ui_use_the_configured_search_service_without_92bc0ab7" formatted="false">使用设置中的搜索服务，包括通过 DeepSeek Fetch 读取公开网页，无需逐次确认。查询词和网页地址会发送给服务商，可能收费。开启适用于新会话；关闭立即撤权。</string>
     <string name="ui_workspace_access_7dc4e36c" formatted="false">工作区访问</string>
 </resources>

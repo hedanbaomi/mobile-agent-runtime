@@ -54,7 +54,7 @@ class AppLocalizedResourcesDeviceTest {
                     while (current is ContextWrapper && current !is Activity) current = current.baseContext
                     assertTrue("Localized Context preserves the Activity chain", current is Activity)
                     assertEquals(language.value, context.resources.configuration.locales[0].toLanguageTag())
-                    Text(stringResource(R.string.nav_agents))
+                    Text(stringResource(runtime.mobileagent.feature.agents.R.string.ui_agents_8039b104))
                 }
             }
         }

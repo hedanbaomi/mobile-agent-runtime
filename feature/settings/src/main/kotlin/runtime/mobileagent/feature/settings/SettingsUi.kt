@@ -144,6 +144,7 @@ data class WiredPairingUiState(
 data class SettingsUiState(
     val screenObservationEnabled: Boolean = false,
     val screenObservationConnected: Boolean = false,
+    val screenActionsEnabled: Boolean = false,
     val versionName: String = "",
     val gitRevision: String = "",
     val gitDirty: Boolean = false,
@@ -199,6 +200,7 @@ data class SettingsUiState(
 
 data class SettingsActions(
     val onScreenObservationEnabled: (Boolean) -> Unit = {},
+    val onScreenActionsEnabled: (Boolean) -> Unit = {},
     val onOpenAccessibilitySettings: () -> Unit = {},
     val onOpenArchivedConversations: () -> Unit = {},
     val onLanguage: (String) -> Unit = {},
@@ -494,6 +496,7 @@ fun SettingsScreen(
 @Composable
 private fun ScreenObservationCard(state: SettingsUiState, actions: SettingsActions) {
     var confirming by remember { mutableStateOf(false) }
+    var confirmingActions by remember { mutableStateOf(false) }
     Card(Modifier.fillMaxWidth().testTag("settings.screen_observation")) {
         Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Text(stringResource(R.string.sett_observation_title), style = MaterialTheme.typography.titleMedium)
@@ -501,6 +504,11 @@ private fun ScreenObservationCard(state: SettingsUiState, actions: SettingsActio
             SettingSwitch(stringResource(R.string.sett_observation_allow), state.screenObservationEnabled,
                 { if (it) confirming = true else actions.onScreenObservationEnabled(false) },
                 modifier = Modifier.testTag("settings.screen_observation.enabled"))
+            SettingSwitch(stringResource(R.string.sett_observation_actions_allow), state.screenActionsEnabled,
+                { if (it) confirmingActions = true else actions.onScreenActionsEnabled(false) },
+                enabled = state.screenObservationEnabled,
+                modifier = Modifier.testTag("settings.screen_observation.actions"))
+            Text(stringResource(R.string.sett_observation_actions_help), style = MaterialTheme.typography.bodySmall)
             Text(stringResource(when {
                 !state.screenObservationEnabled -> R.string.sett_observation_disabled
                 state.screenObservationConnected -> R.string.sett_observation_connected
@@ -519,6 +527,12 @@ private fun ScreenObservationCard(state: SettingsUiState, actions: SettingsActio
         text = { Text(stringResource(R.string.sett_observation_disclosure)) },
         confirmButton = { TextButton(onClick = { confirming = false; actions.onScreenObservationEnabled(true) }) { Text(stringResource(R.string.sett_observation_confirm)) } },
         dismissButton = { TextButton(onClick = { confirming = false }) { Text(stringResource(R.string.ui_cancel_998b9c48)) } })
+    if (confirmingActions) AlertDialog(onDismissRequest = { confirmingActions = false },
+        title = { Text(stringResource(R.string.sett_observation_actions_title)) },
+        text = { Text(stringResource(R.string.sett_observation_actions_disclosure)) },
+        confirmButton = { TextButton(onClick = { confirmingActions = false; actions.onScreenActionsEnabled(true) }) {
+            Text(stringResource(R.string.sett_observation_actions_confirm)) } },
+        dismissButton = { TextButton(onClick = { confirmingActions = false }) { Text(stringResource(R.string.ui_cancel_998b9c48)) } })
 }
 
 @Composable
@@ -1159,10 +1173,11 @@ private fun SettingSwitch(
     onChange: (Boolean) -> Unit,
     modifier: Modifier = Modifier,
     labelClickable: Boolean = false,
+    enabled: Boolean = true,
 ) {
     Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-        Text(label, Modifier.weight(1f).then(if (labelClickable) Modifier.clickable { onChange(!checked) } else Modifier))
-        Switch(checked = checked, onCheckedChange = onChange, modifier = modifier.heightIn(min = 48.dp))
+        Text(label, Modifier.weight(1f).then(if (labelClickable && enabled) Modifier.clickable { onChange(!checked) } else Modifier))
+        Switch(checked = checked, onCheckedChange = onChange, enabled = enabled, modifier = modifier.heightIn(min = 48.dp))
     }
 }
 

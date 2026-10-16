@@ -1,7 +1,6 @@
 <!-- SPDX-FileCopyrightText: 2026 mobileAgentRuntime contributors -->
 <!-- SPDX-License-Identifier: AGPL-3.0-only -->
 <resources>
-    <string name="nav_agents">智能体</string>
     <string name="database_recovery_title">此数据库需要较新版本的应用</string>
     <string name="database_recovery_help">安装兼容版本后可继续使用原数据。也可以保存数据库文件作为恢复副本；该副本不是完整的迁移备份。</string>
     <string name="database_recovery_export">保存恢复副本</string>

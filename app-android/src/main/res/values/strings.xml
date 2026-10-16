@@ -1,7 +1,6 @@
 <!-- SPDX-FileCopyrightText: 2026 mobileAgentRuntime contributors -->
 <!-- SPDX-License-Identifier: AGPL-3.0-only -->
 <resources>
-    <string name="nav_agents">Agents</string>
     <string name="database_recovery_title">This database needs a newer app</string>
     <string name="database_recovery_help">Install a compatible app to keep using this data. You can save the database files for recovery. This copy is not a complete transfer backup.</string>
     <string name="database_recovery_export">Save recovery copy</string>

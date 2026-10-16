@@ -15,6 +15,20 @@ import runtime.mobileagent.feature.settings.SettingsUiState
 class ScreenObservationSettingsUiTest {
     @get:Rule val compose = createAndroidComposeRule<ComposeTestHostActivity>()
 
+    @Test fun actionsHaveSeparateOptInAndCannotEnableBeforeObservationConsent() {
+        var actionsAllowed = false
+        val observation = androidx.compose.runtime.mutableStateOf(false)
+        compose.setContent { SettingsScreen(SettingsUiState(language = "en-US", screenObservationEnabled = observation.value),
+            SettingsActions(onScreenActionsEnabled = { actionsAllowed = it })) }
+        compose.onNodeWithTag("settings.screen_observation.actions").performScrollTo().assertIsNotEnabled()
+        compose.runOnUiThread { observation.value = true }
+        compose.onNodeWithTag("settings.screen_observation.actions").assertIsEnabled().performClick()
+        compose.onNodeWithText("Allow assisted control?").assertIsDisplayed()
+        assertFalse(actionsAllowed)
+        compose.onNodeWithText("Allow actions", useUnmergedTree = true).performClick()
+        assertTrue(actionsAllowed)
+    }
+
     @Test fun enablingRequiresDisclosureAndSystemSettingsIsAnExplicitAction() {
         var consent = false
         var settingsOpened = false

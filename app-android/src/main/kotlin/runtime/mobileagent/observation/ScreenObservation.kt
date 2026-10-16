@@ -5,20 +5,24 @@ package runtime.mobileagent.observation
 
 import kotlinx.coroutines.flow.StateFlow
 
-data class ScreenAccess(val consent: Boolean = false, val connected: Boolean = false, val revision: Long = 0) {
+data class ScreenAccess(val consent: Boolean = false, val connected: Boolean = false, val revision: Long = 0,
+    val actionsAllowed: Boolean = false) {
     val ready: Boolean get() = consent && connected
+    val actionsReady: Boolean get() = ready && actionsAllowed
 }
 
 data class ScreenNode(
     val index: Int, val parent: Int?, val text: String, val description: String,
     val role: String, val bounds: List<Int>, val clickable: Boolean,
     val editable: Boolean, val scrollable: Boolean, val enabled: Boolean,
+    val actions: List<String> = emptyList(),
 )
 
 data class ScreenSnapshot(
     val packageName: String, val windowId: Int, val sequence: Long,
     val capturedAtElapsedMs: Long, val nodes: List<ScreenNode>,
     val truncated: Boolean, val stable: Boolean,
+    val observationId: String? = null,
 )
 
 /** No screen content is retained in either observable flow. */

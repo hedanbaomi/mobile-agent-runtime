@@ -36,6 +36,7 @@ import runtime.mobileagent.knowledge.StrictVisualPolicy
 import runtime.mobileagent.knowledge.VisualAttachmentPolicy
 import runtime.mobileagent.observation.ScreenObservationRegistry
 import runtime.mobileagent.observation.ScreenObservationToolExecutor
+import runtime.mobileagent.observation.ScreenActionToolExecutor
 import runtime.mobileagent.provider.InlineImage
 import runtime.mobileagent.skills.BuiltinTools
 import runtime.mobileagent.skills.HttpPolicy
@@ -178,12 +179,17 @@ class RunTools(
         ScreenObservationRegistry.get(context),
         liveContext = { container.agents.isLiveBinding(snapshot) },
     )
+    private val screenActions = ScreenActionToolExecutor(
+        ScreenObservationRegistry.get(context),
+        authority = container.runtimeIntegration::screenActionAuthority,
+        liveContext = { container.agents.isLiveBinding(snapshot) },
+    )
     private val routeOwners: List<ToolExecutor> = when {
-        providerExecutor != null -> listOf(builtins, providerExecutor, screenObservation)
+        providerExecutor != null -> listOf(builtins, providerExecutor, screenObservation, screenActions)
         // A failed/unavailable v2 factory must not silently expose an old
         // privileged workspace/shell executor.  Web/MCP/Python remain the
         // only compatibility routes until the next run can rebuild the seam.
-        else -> listOf(builtins, python, screenObservation) + baseExecutors
+        else -> listOf(builtins, python, screenObservation, screenActions) + baseExecutors
     }
     private val routes: Map<String, ToolExecutor> = buildMap {
         for (owner in routeOwners) {

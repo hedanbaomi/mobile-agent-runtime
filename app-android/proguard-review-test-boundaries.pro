@@ -14,3 +14,30 @@
 -keep interface androidx.compose.ui.platform.InfiniteAnimationPolicy {
     kotlin.coroutines.CoroutineContext$Key getKey();
 }
+
+# ShizukuVersionProjectionTest drives typed RPC through a name-dispatching Proxy
+# and probes private parsers/fields. TraceReferences cannot see these string-based
+# edges. Preserve only this test ABI in Review; Release still optimizes it normally.
+-keepclassmembers interface runtime.mobileagent.shizuku.DeviceServiceBridge {
+    *** dispatch*(...);
+}
+-keep class runtime.mobileagent.shizuku.ShizukuTokenWorkspaceBackend {
+    <init>(...);
+    *** parseStat(...);
+    *** parsePatchPayload(...);
+    *** dispatchFailure(...);
+    *** payload(...);
+}
+-keepclassmembers class runtime.mobileagent.shizuku.ShizukuWorkspaceBackendAdapter {
+    *** parseOpaqueVersion(...);
+    *** dispatchJson(...);
+}
+-keepclassmembers class runtime.mobileagent.shizuku.ShizukuWorkspaceBackendAdapter$ParsedVersion {
+    java.lang.String opaqueVersion;
+}
+-keepclassmembers class runtime.mobileagent.skills.tooling.WorkspaceFileStat {
+    java.lang.Long version;
+}
+-keepclassmembers class runtime.mobileagent.skills.tooling.WorkspaceMutation {
+    java.lang.Long version;
+}

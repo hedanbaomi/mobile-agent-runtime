@@ -37,6 +37,7 @@ path = [
     "tools/instrumentation-suites.json",
     "tools/lint-warning-baseline.json",
     "feature/agents/src/main/res/values-zh-rCN/strings.xml",
+    "feature/settings/src/main/res/values-zh-rCN/screen_observation.xml",
 ]
 precedence = "aggregate"
 SPDX-FileCopyrightText = "2026 mobileAgentRuntime contributors"

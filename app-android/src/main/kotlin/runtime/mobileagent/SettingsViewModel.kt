@@ -52,10 +52,13 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
     private val screenObservationState = mutableStateOf(screenObservation.access.value)
     init { viewModelScope.launch { screenObservation.access.collect { screenObservationState.value = it } } }
 
-    fun setScreenObservationEnabled(enabled: Boolean) {
+    fun setScreenObservationEnabled(enabled: Boolean) = saveScreenSetting(
+        { screenObservation.setConsent(enabled) }, "无法保存屏幕观察设置 / Could not save screen observation settings")
+
+    private fun saveScreenSetting(save: () -> Boolean, failureMessage: String) {
         viewModelScope.launch {
-            if (!withContext(Dispatchers.IO) { screenObservation.setConsent(enabled) }) {
-                error.value = "无法保存屏幕观察设置 / Could not save screen observation settings"
+            if (!withContext(Dispatchers.IO) { save() }) {
+                error.value = failureMessage
             }
         }
     }
@@ -64,6 +67,8 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
         runCatching { app.startActivity(Intent(android.provider.Settings.ACTION_ACCESSIBILITY_SETTINGS).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)) }
             .onFailure { error.value = "无法打开系统无障碍设置 / Could not open accessibility settings" }
     }
+    fun setScreenActionsEnabled(enabled: Boolean) = saveScreenSetting(
+        { screenObservation.setActionsAllowed(enabled) }, "无法保存辅助操作设置 / Could not save assisted control settings")
     private val authorityPort = settingsAuthorityPort(app)
     /** UI-facing copy of the adapter snapshot; the adapter remains the source of truth. */
     val authorityState = mutableStateOf(authorityPort.snapshot())
@@ -172,6 +177,7 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
         return SettingsUiState(
         screenObservationEnabled = screenObservationState.value.consent,
         screenObservationConnected = screenObservationState.value.connected,
+        screenActionsEnabled = screenObservationState.value.actionsAllowed,
         versionName = BuildConfig.VERSION_NAME + " ${BuildConfig.BUILD_TYPE}",
         gitRevision = BuildConfig.GIT_REVISION,
         gitDirty = BuildConfig.GIT_DIRTY,

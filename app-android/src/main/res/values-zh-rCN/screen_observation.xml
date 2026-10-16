@@ -3,5 +3,5 @@
 <!-- SPDX-License-Identifier: AGPL-3.0-only -->
 <resources>
     <string name="screen_observation_label">屏幕观察</string>
-    <string name="screen_observation_description">按你设置的 Agent 工具确认方式读取请求的可见文字和控件，并将内容发送给你配置的模型。跳过密码字段。此服务不点击、不输入、不修改系统权限。</string>
+    <string name="screen_observation_description">按 Agent 工具确认设置读取请求的可见文字和控件，并发送给你配置的模型，跳过密码字段。单独允许辅助操作且 Shizuku 或 ADB 权限可用时，可点击、输入、滚动和导航；系统服务和应用同意需由你启用。</string>
 </resources>

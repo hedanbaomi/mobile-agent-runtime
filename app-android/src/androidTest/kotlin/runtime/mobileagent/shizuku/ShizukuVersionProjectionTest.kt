@@ -100,211 +100,203 @@ class ShizukuVersionProjectionTest {
 
     @Test
     fun ordinaryVersionPreconditionsAreUnsupportedForBothShizukuAdapters() = runBlocking {
-        val bridge = ShizukuAuthorityBridge(ApplicationProvider.getApplicationContext<Context>())
-        try {
-            val adapters = listOf(ShizukuWorkspaceBackendAdapter(bridge), newTokenBackend(bridge) as WorkspaceBackend)
-            adapters.forEach { backend ->
-                assertEquals(setOf(CapabilityId("file.apply_patch")), backend.expectedVersionCapabilities)
-                val id = backend.descriptor.id
-                val results = listOf(
-                    backend.writeText(WorkspaceWriteTextRequest(id, "note.txt", "body", expectedVersion = 123L)),
-                    backend.createDirectory(WorkspaceCreateDirectoryRequest(id, "directory", 123L)),
-                    backend.move(WorkspaceMoveRequest(id, "note.txt", "moved.txt", 123L)),
-                    backend.delete(WorkspaceDeleteRequest(id, "note.txt", 123L)),
-                )
-                results.forEach { result ->
-                    assertEquals(ToolErrorCode.WORKSPACE_VERSION_UNSUPPORTED, (result as WorkspaceResult.Failure).error.code)
-                }
+        val bridge = parserOnlyBridge()
+        val adapters = listOf(ShizukuWorkspaceBackendAdapter(bridge), newTokenBackend(bridge) as WorkspaceBackend)
+        adapters.forEach { backend ->
+            assertEquals(setOf(CapabilityId("file.apply_patch")), backend.expectedVersionCapabilities)
+            val id = backend.descriptor.id
+            val results = listOf(
+                backend.writeText(WorkspaceWriteTextRequest(id, "note.txt", "body", expectedVersion = 123L)),
+                backend.createDirectory(WorkspaceCreateDirectoryRequest(id, "directory", 123L)),
+                backend.move(WorkspaceMoveRequest(id, "note.txt", "moved.txt", 123L)),
+                backend.delete(WorkspaceDeleteRequest(id, "note.txt", 123L)),
+            )
+            results.forEach { result ->
+                assertEquals(ToolErrorCode.WORKSPACE_VERSION_UNSUPPORTED, (result as WorkspaceResult.Failure).error.code)
             }
-        } finally {
-            bridge.close()
         }
     }
 
     @Test
     fun highBitOpaqueVersionsUseTheSharedProjectionInListingAndDeviceStat() {
-        val bridge = ShizukuAuthorityBridge(ApplicationProvider.getApplicationContext<Context>())
-        try {
-            val raw = highBitVersion()
-            val expected = WorkspaceVersionProjection.toPublic(raw)
-            assertEquals(Long.MAX_VALUE, expected)
+        val bridge = parserOnlyBridge()
+        val raw = highBitVersion()
+        val expected = WorkspaceVersionProjection.toPublic(raw)
+        assertEquals(Long.MAX_VALUE, expected)
 
-            val adapter = ShizukuWorkspaceBackendAdapter(bridge)
-            val listing = adapter.parseListPayload(
-                JSONObject()
-                    .put("path", "")
-                    .put(
-                        "entries",
-                        JSONArray().put(
-                            JSONObject()
-                                .put("path", "note.txt")
-                                .put("type", "file")
-                                .put("bytes", 3)
-                                .put("version", raw.uppercase()),
-                        ),
-                    )
-                    .put("truncated", false)
-                    .put("skippedEntries", 0),
-                "",
-                16,
-            )
-            val listedVersion = listing?.entries?.single()?.version
-            assertEquals(expected, listedVersion)
-            val parsed = invokePrivate(adapter, "parseOpaqueVersion", raw.uppercase())
-            val opaque = parsed?.javaClass?.getDeclaredField("opaqueVersion")?.also { it.isAccessible = true }?.get(parsed)
-            assertEquals(raw, opaque)
-            val patchRequest = WorkspaceApplyPatchRequest(
-                workspaceId = ShizukuWorkspaceBackendAdapter.DEFAULT_WORKSPACE_ID,
-                relativePath = "note.txt",
-                patch = "replacement",
-                expectedVersion = listedVersion ?: error("listing version missing"),
-            )
-            assertEquals(expected, patchRequest.expectedVersion)
+        val adapter = ShizukuWorkspaceBackendAdapter(bridge)
+        val listing = adapter.parseListPayload(
+            JSONObject()
+                .put("path", "")
+                .put(
+                    "entries",
+                    JSONArray().put(
+                        JSONObject()
+                            .put("path", "note.txt")
+                            .put("type", "file")
+                            .put("bytes", 3)
+                            .put("version", raw.uppercase()),
+                    ),
+                )
+                .put("truncated", false)
+                .put("skippedEntries", 0),
+            "",
+            16,
+        )
+        val listedVersion = listing?.entries?.single()?.version
+        assertEquals(expected, listedVersion)
+        val parsed = invokePrivate(adapter, "parseOpaqueVersion", raw.uppercase())
+        val opaque = parsed?.javaClass?.getDeclaredField("opaqueVersion")?.also { it.isAccessible = true }?.get(parsed)
+        assertEquals(raw, opaque)
+        val patchRequest = WorkspaceApplyPatchRequest(
+            workspaceId = ShizukuWorkspaceBackendAdapter.DEFAULT_WORKSPACE_ID,
+            relativePath = "note.txt",
+            patch = "replacement",
+            expectedVersion = listedVersion ?: error("listing version missing"),
+        )
+        assertEquals(expected, patchRequest.expectedVersion)
 
-            val tokenBackend = newTokenBackend(bridge)
-            val stat = invokePrivate(
-                tokenBackend,
-                "parseStat",
-                ShizukuDispatchResult.Success(
-                    JSONObject()
-                        .put("ok", true)
-                        .put("operation", "stat")
-                        .put("path", "note.txt")
-                        .put("type", "file")
-                        .put("bytes", 3)
-                        .put("version", raw.uppercase())
-                        .toString(),
-                ),
-                "note.txt",
-            )
-            assertEquals(expected, successVersion(stat))
-
-            val patch = invokePrivate(
-                tokenBackend,
-                "parsePatchPayload",
+        val tokenBackend = newTokenBackend(bridge)
+        val stat = invokePrivate(
+            tokenBackend,
+            "parseStat",
+            ShizukuDispatchResult.Success(
                 JSONObject()
                     .put("ok", true)
-                    .put("operation", "apply_patch")
+                    .put("operation", "stat")
                     .put("path", "note.txt")
                     .put("type", "file")
                     .put("bytes", 3)
-                    .put("created", false)
-                    .put("version", raw.uppercase()),
-                "note.txt",
-            )
-            assertEquals(expected, successVersion(patch))
-        } finally {
-            bridge.close()
-        }
-    }
+                    .put("version", raw.uppercase())
+                    .toString(),
+            ),
+            "note.txt",
+        )
+        assertEquals(expected, successVersion(stat))
 
-    @Test
-    fun successfulMutationWithUnusableVersionIsUnknownButReadMappingFailureIsProtocolError() {
-        val bridge = ShizukuAuthorityBridge(ApplicationProvider.getApplicationContext<Context>())
-        try {
-            val tokenBackend = newTokenBackend(bridge)
-            val badPatchPayload = JSONObject()
+        val patch = invokePrivate(
+            tokenBackend,
+            "parsePatchPayload",
+            JSONObject()
                 .put("ok", true)
                 .put("operation", "apply_patch")
                 .put("path", "note.txt")
                 .put("type", "file")
                 .put("bytes", 3)
                 .put("created", false)
-                .put("version", "not-a-version")
-            val patch = invokePrivate(tokenBackend, "parsePatchPayload", badPatchPayload, "note.txt")
-            assertEquals(ToolErrorCode.UNKNOWN_OUTCOME, errorCode(patch))
+                .put("version", raw.uppercase()),
+            "note.txt",
+        )
+        assertEquals(expected, successVersion(patch))
+    }
 
-            val badStatPayload = JSONObject()
-                .put("ok", true)
-                .put("operation", "stat")
-                .put("path", "note.txt")
-                .put("type", "file")
-                .put("bytes", 3)
-                .put("version", "not-a-version")
-            val stat = invokePrivate(
-                tokenBackend,
-                "parseStat",
-                ShizukuDispatchResult.Success(badStatPayload.toString()),
-                "note.txt",
-            )
-            assertEquals(ToolErrorCode.BRIDGE_PROTOCOL_MISMATCH, errorCode(stat))
+    @Test
+    fun successfulMutationWithUnusableVersionIsUnknownButReadMappingFailureIsProtocolError() {
+        val bridge = parserOnlyBridge()
+        val tokenBackend = newTokenBackend(bridge)
+        val badPatchPayload = JSONObject()
+            .put("ok", true)
+            .put("operation", "apply_patch")
+            .put("path", "note.txt")
+            .put("type", "file")
+            .put("bytes", 3)
+            .put("created", false)
+            .put("version", "not-a-version")
+        val patch = invokePrivate(tokenBackend, "parsePatchPayload", badPatchPayload, "note.txt")
+        assertEquals(ToolErrorCode.UNKNOWN_OUTCOME, errorCode(patch))
 
-            val typedConflict = invokePrivate(
-                tokenBackend,
-                "dispatchFailure",
-                ShizukuDispatchResult.Success(
+        val badStatPayload = JSONObject()
+            .put("ok", true)
+            .put("operation", "stat")
+            .put("path", "note.txt")
+            .put("type", "file")
+            .put("bytes", 3)
+            .put("version", "not-a-version")
+        val stat = invokePrivate(
+            tokenBackend,
+            "parseStat",
+            ShizukuDispatchResult.Success(badStatPayload.toString()),
+            "note.txt",
+        )
+        assertEquals(ToolErrorCode.BRIDGE_PROTOCOL_MISMATCH, errorCode(stat))
+
+        val typedConflict = invokePrivate(
+            tokenBackend,
+            "dispatchFailure",
+            ShizukuDispatchResult.Success(
+                JSONObject()
+                    .put("ok", false)
+                    .put("operation", "apply_patch")
+                    .put("code", ShizukuWorkspaceFileStore.CONFLICT)
+                    .toString(),
+            ),
+            true,
+            "apply_patch",
+        )
+        assertEquals(ToolErrorCode.CONFLICT, errorCode(typedConflict))
+
+        val adapter = ShizukuWorkspaceBackendAdapter(bridge)
+        assertEquals(
+            ToolErrorCode.UNKNOWN_OUTCOME,
+            errorCode(invokeDispatchJson(adapter, "apply_patch", null)),
+        )
+        assertEquals(
+            ToolErrorCode.BRIDGE_PROTOCOL_MISMATCH,
+            errorCode(invokeDispatchJson(adapter, "stat", null)),
+        )
+        assertEquals(
+            ToolErrorCode.CONFLICT,
+            errorCode(
+                invokeDispatchJson(
+                    adapter,
+                    "apply_patch",
                     JSONObject()
                         .put("ok", false)
                         .put("operation", "apply_patch")
-                        .put("code", ShizukuWorkspaceFileStore.CONFLICT)
-                        .toString(),
+                        .put("code", ShizukuWorkspaceFileStore.CONFLICT),
                 ),
-                true,
-                "apply_patch",
-            )
-            assertEquals(ToolErrorCode.CONFLICT, errorCode(typedConflict))
-
-            val adapter = ShizukuWorkspaceBackendAdapter(bridge)
-            assertEquals(
-                ToolErrorCode.UNKNOWN_OUTCOME,
-                errorCode(invokeDispatchJson(adapter, "apply_patch", null)),
-            )
-            assertEquals(
-                ToolErrorCode.BRIDGE_PROTOCOL_MISMATCH,
-                errorCode(invokeDispatchJson(adapter, "stat", null)),
-            )
-            assertEquals(
-                ToolErrorCode.CONFLICT,
-                errorCode(
-                    invokeDispatchJson(
-                        adapter,
-                        "apply_patch",
-                        JSONObject()
-                            .put("ok", false)
-                            .put("operation", "apply_patch")
-                            .put("code", ShizukuWorkspaceFileStore.CONFLICT),
-                    ),
-                ),
-            )
-        } finally {
-            bridge.close()
-        }
+            ),
+        )
     }
 
     private fun highBitVersion(): String = "ffffffffffffffff" + "0".repeat(48)
 
     @Test
     fun malformedMutationEnvelopeNeverClaimsKnownFailure() {
-        val bridge = ShizukuAuthorityBridge(ApplicationProvider.getApplicationContext<Context>())
-        try {
-            val adapter = ShizukuWorkspaceBackendAdapter(bridge)
-            val tokenBackend = newTokenBackend(bridge)
-            val malformed = listOf(
-                JSONObject(),
-                JSONObject().put("ok", "true"),
-                JSONObject().put("ok", "false").put("code", ShizukuWorkspaceFileStore.CONFLICT),
-                JSONObject().put("ok", 0).put("code", ShizukuWorkspaceFileStore.CONFLICT),
-                JSONObject().put("ok", false),
-                JSONObject().put("ok", false).put("code", 42),
-                JSONObject().put("ok", false).put("code", "UNKNOWN_TEST_CODE"),
+        val bridge = parserOnlyBridge()
+        val adapter = ShizukuWorkspaceBackendAdapter(bridge)
+        val tokenBackend = newTokenBackend(bridge)
+        val malformed = listOf(
+            JSONObject(),
+            JSONObject().put("ok", "true"),
+            JSONObject().put("ok", "false").put("code", ShizukuWorkspaceFileStore.CONFLICT),
+            JSONObject().put("ok", 0).put("code", ShizukuWorkspaceFileStore.CONFLICT),
+            JSONObject().put("ok", false),
+            JSONObject().put("ok", false).put("code", 42),
+            JSONObject().put("ok", false).put("code", "UNKNOWN_TEST_CODE"),
+        )
+        malformed.forEach { response ->
+            response.put("operation", "apply_patch")
+            assertEquals(
+                ToolErrorCode.UNKNOWN_OUTCOME,
+                errorCode(invokeDispatchJson(adapter, "apply_patch", response)),
             )
-            malformed.forEach { response ->
-                response.put("operation", "apply_patch")
-                assertEquals(
-                    ToolErrorCode.UNKNOWN_OUTCOME,
-                    errorCode(invokeDispatchJson(adapter, "apply_patch", response)),
-                )
-                val dispatch = ShizukuDispatchResult.Success(response.toString())
-                assertNull(invokePrivate(tokenBackend, "payload", dispatch, "apply_patch"))
-                assertEquals(
-                    ToolErrorCode.UNKNOWN_OUTCOME,
-                    errorCode(invokePrivate(tokenBackend, "dispatchFailure", dispatch, true, "apply_patch")),
-                )
-            }
-        } finally {
-            bridge.close()
+            val dispatch = ShizukuDispatchResult.Success(response.toString())
+            assertNull(invokePrivate(tokenBackend, "payload", dispatch, "apply_patch"))
+            assertEquals(
+                ToolErrorCode.UNKNOWN_OUTCOME,
+                errorCode(invokePrivate(tokenBackend, "dispatchFailure", dispatch, true, "apply_patch")),
+            )
         }
     }
+
+    // These cases inspect parsing and version preconditions; opening a real bridge
+    // would mutate the SDK connection pool owned by the running application.
+    private fun parserOnlyBridge(): DeviceServiceBridge = Proxy.newProxyInstance(
+        DeviceServiceBridge::class.java.classLoader, arrayOf(DeviceServiceBridge::class.java),
+    ) { _, method, _ ->
+        error("Unexpected RPC in parser-only fixture: ${method.name}")
+    } as DeviceServiceBridge
 
     private fun newTokenBackend(bridge: DeviceServiceBridge): Any {
         val clazz = Class.forName("runtime.mobileagent.shizuku.ShizukuTokenWorkspaceBackend")

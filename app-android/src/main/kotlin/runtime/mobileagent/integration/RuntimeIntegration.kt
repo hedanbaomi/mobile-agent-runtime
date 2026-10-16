@@ -666,6 +666,9 @@ class RuntimeIntegration(
         )
     }
 
+    /** Optional accessibility actions assist only the explicitly selected, ready ADB authority. */
+    fun screenActionAuthority() = runtime.mobileagent.observation.ScreenActionAdmission.from(authorityManager.state.value)
+
     override fun authoritySnapshot(): WorkspacePickerAuthoritySnapshot {
         val manager = authorityManager.state.value
         val selected = manager.selectedAuthority ?: Authority.NONE

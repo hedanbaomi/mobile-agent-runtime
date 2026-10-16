@@ -3,5 +3,5 @@
 <!-- SPDX-License-Identifier: AGPL-3.0-only -->
 <resources>
     <string name="screen_observation_label">Screen observation</string>
-    <string name="screen_observation_description">Reads requested visible text and controls following your Agent tool confirmation setting. Screen content is sent to the model you configured. Password fields are excluded. This service does not click, type, or change system permissions.</string>
+    <string name="screen_observation_description">Reads requested visible text and controls following your Agent tool confirmation setting. Screen content is sent to your configured model; password fields are excluded. With separate assisted-control consent and an available Shizuku or ADB authority, it can click, enter text, scroll and navigate. System access and app consent must be enabled by you.</string>
 </resources>

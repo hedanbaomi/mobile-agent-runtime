@@ -2,7 +2,12 @@
 <!-- SPDX-License-Identifier: AGPL-3.0-only -->
 <resources>
     <string name="sett_observation_title">屏幕观察</string>
-    <string name="sett_observation_help">可选用无障碍读取前台应用的文字与控件，辅助 Shizuku 或电脑激活的设备常驻 ADB。是否确认沿用 Agent 的工具设置；此功能不点击或输入。</string>
+    <string name="sett_observation_help">可选用无障碍读取前台应用的文字与控件，辅助 Shizuku 或电脑激活的设备常驻 ADB。是否确认沿用 Agent 的工具设置；辅助操作需单独开启下方开关。</string>
+    <string name="sett_observation_actions_allow">允许辅助操作</string>
+    <string name="sett_observation_actions_help">所选 Shizuku 或 ADB 权限可用时，通过无障碍点击控件、输入文字、滚动和导航。默认关闭，开启后从下一次运行生效。</string>
+    <string name="sett_observation_actions_title">允许辅助操作手机？</string>
+    <string name="sett_observation_actions_disclosure">Agent 可以操作其他应用的可见控件，并执行返回、主页和最近任务。操作沿用 Agent 的工具确认设置，可能改变应用内容；所选 Shizuku 或 ADB 权限需保持可用。关闭此开关即可阻止后续操作。</string>
+    <string name="sett_observation_actions_confirm">允许操作</string>
     <string name="sett_observation_allow">允许 Agent 请求读屏</string>
     <string name="sett_observation_disabled">已关闭</string>
     <string name="sett_observation_connected">服务已连接，沿用 Agent 的工具确认设置</string>

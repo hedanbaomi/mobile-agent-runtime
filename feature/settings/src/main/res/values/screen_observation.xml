@@ -2,7 +2,12 @@
 <!-- SPDX-License-Identifier: AGPL-3.0-only -->
 <resources>
     <string name="sett_observation_title">Screen observation</string>
-    <string name="sett_observation_help">Optionally read foreground text and controls through accessibility alongside Shizuku or on-device ADB. Confirmation follows the Agent tool settings. This feature does not click or type.</string>
+    <string name="sett_observation_help">Optionally read foreground text and controls through accessibility alongside Shizuku or on-device ADB. Confirmation follows the Agent tool settings. Assisted actions have a separate switch below.</string>
+    <string name="sett_observation_actions_allow">Allow assisted control</string>
+    <string name="sett_observation_actions_help">Click controls, enter text, scroll and navigate through accessibility while the selected Shizuku or ADB authority is available. Off by default; starts with a new run.</string>
+    <string name="sett_observation_actions_title">Allow assisted control?</string>
+    <string name="sett_observation_actions_disclosure">The Agent can operate other apps using visible controls and back, home or recents. Actions follow your Agent tool confirmation setting and can change app content. Shizuku or ADB must remain available. Turn this switch off to stop new actions.</string>
+    <string name="sett_observation_actions_confirm">Allow actions</string>
     <string name="sett_observation_allow">Allow Agent screen requests</string>
     <string name="sett_observation_disabled">Disabled</string>
     <string name="sett_observation_connected">Connected; follows the Agent tool confirmation setting</string>

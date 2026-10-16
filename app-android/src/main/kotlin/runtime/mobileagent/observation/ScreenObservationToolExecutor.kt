@@ -152,12 +152,14 @@ class ScreenObservationToolExecutor(
             put("status", "observed"); put("package_name", snapshot.packageName); put("window_id", snapshot.windowId)
             put("sequence", snapshot.sequence); put("captured_at_elapsed_ms", snapshot.capturedAtElapsedMs)
             put("truncated", snapshot.truncated); put("stable", snapshot.stable)
+            snapshot.observationId?.let { put("observation_id", it) }
             putJsonArray("nodes") { snapshot.nodes.forEach { node -> add(buildJsonObject {
                 put("index", node.index); node.parent?.let { put("parent", it) }
                 put("text", node.text); put("description", node.description); put("role", node.role)
                 putJsonArray("bounds") { node.bounds.forEach { add(JsonPrimitive(it)) } }
                 put("clickable", node.clickable); put("editable", node.editable)
                 put("scrollable", node.scrollable); put("enabled", node.enabled)
+                if (node.actions.isNotEmpty()) putJsonArray("actions") { node.actions.forEach { add(JsonPrimitive(it)) } }
             }) } }
         }.toString()
     }

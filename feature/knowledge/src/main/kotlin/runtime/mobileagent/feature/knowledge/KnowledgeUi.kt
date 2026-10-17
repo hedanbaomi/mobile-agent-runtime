@@ -151,8 +151,15 @@ data class KnowledgeBatchUi(
     val visionTargetLabel: String? = null,
     val paused: Boolean = false,
     val resumeStagingAvailable: Boolean = false,
-    /** Per-item detail.  Rendered only when the user expands the overall progress card. */
-    val items: List<KnowledgeBatchItemUi> = emptyList(),
+    /**
+     * Per-item detail.  The rows exist only for the batch the user opened, while [size] always
+     * states this batch's real member count.
+     */
+    val items: KnowledgeBatchItemDetails = KnowledgeBatchItemDetails.Collapsed(0),
+    /** First member error carrying an unknown outcome, shown without opening the details. */
+    val unknownOutcomeReason: String? = null,
+    /** A member is queued or processing while its own job already failed: an automatic retry waits. */
+    val retryWaiting: Boolean = false,
     val pipeline: PipelineProgress = PipelineProgress(),
     val reuse: PipelineReuseSummary = PipelineReuseSummary(),
     val reuseByTarget: Map<String, PipelineReuseSummary> = emptyMap(),
@@ -165,6 +172,35 @@ data class KnowledgeBatchItemUi(
     val state: String,
     val error: String? = null,
 )
+
+/**
+ * The member rows of one batch, which exist only after that batch was opened and read by its id.
+ *
+ * [size] is always the real member count, so a card states how many members a batch has even while
+ * its rows are not materialized: an unopened batch is [Collapsed] and can never be mistaken for a
+ * batch without members.
+ */
+sealed interface KnowledgeBatchItemDetails {
+    val size: Int
+
+    /** The real member count is known; the rows are deliberately not materialized. */
+    data class Collapsed(override val size: Int) : KnowledgeBatchItemDetails
+
+    /** The rows of exactly one batch, read back by that batch's id. */
+    data class Loaded(val rows: List<KnowledgeBatchItemUi>) : KnowledgeBatchItemDetails {
+        override val size: Int get() = rows.size
+    }
+
+    companion object {
+        /** Rows when this batch was read, otherwise only the member count of its summary. */
+        fun of(count: Int, rows: List<KnowledgeBatchItemUi>?): KnowledgeBatchItemDetails =
+            if (rows == null) Collapsed(count) else Loaded(rows)
+    }
+}
+
+/** Display state of the opened batch detail sections, so a refresh reads only the opened batches. */
+fun Set<String>.withBatchExpanded(batchId: String, expanded: Boolean): Set<String> =
+    if (expanded) this + batchId else this - batchId
 
 data class KnowledgeWaitingUi(
     val jobId: String,
@@ -202,6 +238,8 @@ data class KnowledgeUiState(
     val embeddingModels: List<KnowledgeEmbeddingModelUi> = emptyList(),
     val apiQueryAttempts: List<KnowledgeQueryAttemptUi> = emptyList(),
     val batches: List<KnowledgeBatchUi> = emptyList(),
+    /** Jobs owned by a batch of the selected base, so the legacy job list never repeats a member. */
+    val batchMemberJobIds: Set<String> = emptySet(),
     /** Human-readable Vision destination shown on the create-and-import step. */
     val visionTargetLabel: String = "",
     /** True when an image-capable target exists, so visual work can be authorized at creation. */
@@ -255,6 +293,8 @@ data class KnowledgeActions(
     val onAuthorizeBatchVision: (String, String, Boolean) -> Unit = { _, _, _ -> },
     val onConfigurePipeline: (String, PipelinePolicy) -> Unit = { _, _ -> },
     val onRebuildBatchLocalChunks: (String) -> Unit = {},
+    /** A batch card reports its detail section opening or closing, so only opened batches load rows. */
+    val onToggleBatchDetails: (String, Boolean) -> Unit = { _, _ -> },
 )
 
 @Composable
@@ -974,8 +1014,7 @@ private fun KnowledgeContentPane(state: KnowledgeUiState, actions: KnowledgeActi
         if (state.batches.isEmpty() || showDocuments) {
             state.documents.forEach { document -> DocumentCard(document, onDelete, actions, zh) }
         }
-        val batchJobIds = state.batches.flatMap { it.items }.mapNotNull { it.jobId }.toSet()
-        val legacyJobs = state.jobs.filter { it.id !in batchJobIds }
+        val legacyJobs = state.jobs.filter { it.id !in state.batchMemberJobIds }
         if (legacyJobs.isNotEmpty()) {
             Text(stringResource(R.string.ui_import_jobs_bddacf29), style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(top = 18.dp))
             legacyJobs.forEach { job -> JobCard(job, actions, zh) }
@@ -1045,6 +1084,7 @@ private fun StatusCard(status: String) {
 @Composable
 private fun BatchProgressCard(batch: KnowledgeBatchUi, jobs: List<KnowledgeImportJobUi>, actions: KnowledgeActions, zh: Boolean, busy: Boolean) {
     var expanded by rememberSaveable(batch.id) { mutableStateOf(false) }
+    LaunchedEffect(batch.id, expanded) { actions.onToggleBatchDetails(batch.id, expanded) }
     var confirmResume by rememberSaveable(batch.id) { mutableStateOf(false) }
     var editPolicy by rememberSaveable(batch.id) { mutableStateOf(false) }
     if (confirmResume) AlertDialog(
@@ -1065,10 +1105,9 @@ private fun BatchProgressCard(batch: KnowledgeBatchUi, jobs: List<KnowledgeImpor
     }
     val blocked = batch.blockedReason != null || batch.state.equals("BLOCKED", true)
     val paused = batch.paused || batch.state.equals("PAUSED", true)
-    val automaticRetryPending = batch.state.equals("PROCESSING", true) && batch.items.any { item ->
-        item.state.uppercase() in setOf("QUEUED", "PROCESSING") &&
-            jobs.any { job -> job.id == item.jobId && job.stage.equals("FAILED", true) }
-    }
+    // The summary read already decided whether a member waits on an automatic retry, so the
+    // collapsed card needs no member rows to say so.
+    val automaticRetryPending = batch.state.equals("PROCESSING", true) && batch.retryWaiting
     val percent = if (batch.totalItems > 0) batch.published * 100 / batch.totalItems else null
     Card(
         colors = CardDefaults.cardColors(
@@ -1104,8 +1143,8 @@ private fun BatchProgressCard(batch: KnowledgeBatchUi, jobs: List<KnowledgeImpor
                 modifier = Modifier.padding(top = 4.dp),
             )
             // The unknown reason must be visible on the card itself, not only behind "details".
-            val unknownReason = if (automaticRetryPending) null else batch.items.asSequence().mapNotNull { it.error }
-                .firstOrNull { it.contains("UNKNOWN_OUTCOME") }?.take(300)
+            // The summary read already carries the first member error, so this needs no member rows.
+            val unknownReason = if (automaticRetryPending) null else batch.unknownOutcomeReason?.take(300)
             if (unknownReason != null) {
                 Text(
                     stringResource(R.string.ui_unknown_reason_s_2b4c1b9d, (unknownReason)),
@@ -1122,7 +1161,9 @@ private fun BatchProgressCard(batch: KnowledgeBatchUi, jobs: List<KnowledgeImpor
                 when {
                     blocked && batch.blockedReason == "MISSING_VISUAL_SOURCE" -> {
                         Text(stringResource(R.string.ui_import_the_images_separately_or_explicitly_74c7ec47))
-                        TextButton(onClick = { expanded = true }) { Text(stringResource(R.string.ui_review_affected_items_a6b05303)) }
+                        TextButton(onClick = {
+                            expanded = true
+                        }) { Text(stringResource(R.string.ui_review_affected_items_a6b05303)) }
                     }
                     blocked -> {
                         Button(onClick = { actions.onAuthorizeBatchVision(batch.id, "", false) }, enabled = !busy) {
@@ -1140,7 +1181,12 @@ private fun BatchProgressCard(batch: KnowledgeBatchUi, jobs: List<KnowledgeImpor
                             Text(stringResource(R.string.ui_pause_c65f066c))
                         }
                 }
-                TextButton(onClick = { expanded = !expanded }) {
+                TextButton(onClick = {
+                    // The card owns the open/closed look; the ViewModel reads the member rows of
+                    // exactly the opened batches and drops them again when this closes.
+                    val open = !expanded
+                    expanded = open
+                }) {
                     Text(
                         if (expanded) (if (zh) "收起详情" else "Hide details")
                         else (if (zh) "展开 ${batch.items.size} 项详情" else "Show ${batch.items.size} item details"),
@@ -1180,7 +1226,12 @@ private fun BatchProgressCard(batch: KnowledgeBatchUi, jobs: List<KnowledgeImpor
                 )
             }
                 Column(Modifier.padding(top = 8.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                    batch.items.forEach { item ->
+                    if (batch.items is KnowledgeBatchItemDetails.Collapsed) {
+                        LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+                    }
+                    // Rows exist only for the opened batch that was read back by its id; an unopened
+                    // batch renders nothing here while the toggle above states its real member count.
+                    (batch.items as? KnowledgeBatchItemDetails.Loaded)?.rows.orEmpty().forEach { item ->
                         val job = jobs.firstOrNull { it.id == item.jobId }
                         if (job != null) {
                             val automaticRetry = job.stage.equals("FAILED", true) &&

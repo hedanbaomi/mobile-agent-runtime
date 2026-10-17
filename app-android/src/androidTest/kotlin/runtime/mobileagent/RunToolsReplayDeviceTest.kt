@@ -7,9 +7,17 @@ import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import java.util.UUID
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitCancellation
+import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.withTimeout
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
+import org.junit.Assert.assertNull
+import org.junit.Assert.assertThrows
 import org.junit.Test
 import org.junit.runner.RunWith
 import runtime.mobileagent.agent.AgentRun
@@ -21,6 +29,14 @@ import runtime.mobileagent.domain.ApiFormat
 import runtime.mobileagent.domain.ModelProfile
 import runtime.mobileagent.domain.ModelRole
 import runtime.mobileagent.domain.ProviderProfile
+import runtime.mobileagent.domain.RunRecord
+import runtime.mobileagent.domain.RunStatus
+import runtime.mobileagent.domain.ToolInvocation
+import runtime.mobileagent.domain.ToolResultPart
+import runtime.mobileagent.domain.Utc
+import runtime.mobileagent.domain.Authority
+import runtime.mobileagent.data.SqlConnection
+import runtime.mobileagent.observation.*
 import runtime.mobileagent.skills.ToolCall
 import runtime.mobileagent.skills.ToolExecutor
 import runtime.mobileagent.skills.ToolResult
@@ -36,6 +52,80 @@ import runtime.mobileagent.tooling.ToolExecutorFactory
  */
 @RunWith(AndroidJUnit4::class)
 class RunToolsReplayDeviceTest {
+    @Test fun cancellationPreservesOnlyARealOsAcknowledgementAndPublishesItsReceiptAtomically() = runBlocking {
+        withTimeout(30_000) {
+            val chain = prepareChain("confirmed-device-cancel")
+            val registry = ScreenObservationRegistry.get(chain.app)
+            val previous = registry.access.value.consent
+            registry.setConsent(false)
+            try {
+                for (acknowledged in listOf(false, true)) {
+                    val conversation = chain.container.conversations.create(chain.snapshot.id, "Synthetic cancellation")
+                    val run = AgentRun(runId = "run.${UUID.randomUUID()}", snapshotId = chain.snapshot.id, conversationId = conversation.id,
+                        state = RunState.TOOL_EXECUTING, startedAtMs = System.currentTimeMillis())
+                    chain.container.runs.save(RunRecord(run.runId, run.snapshotId, run.conversationId,
+                        state = RunStatus.TOOL_EXECUTING, createdAt = Utc.nowIso()))
+                    val entered = CompletableDeferred<Unit>()
+                    var dispatches = 0
+                    val port = object : ScreenActionPort, ScreenObservationPort {
+                        override val access = MutableStateFlow(ScreenAccess(true, true, 1, true))
+                        override val changes = MutableStateFlow(1L)
+                        override suspend fun perform(request: ScreenActionRequest, authorized: suspend () -> Boolean,
+                            onDispatch: () -> Unit): Boolean {
+                            check(authorized()); onDispatch(); dispatches++
+                            if (!acknowledged) { entered.complete(Unit); awaitCancellation() }
+                            return true
+                        }
+                        override suspend fun capture(expectedPackage: String?): ScreenSnapshot {
+                            entered.complete(Unit); awaitCancellation()
+                        }
+                    }
+                    val action = ScreenActionToolExecutor(port, { ScreenActionAuthority(Authority.SHIZUKU, 1) }, { true })
+                    val tools = RunTools(chain.container, chain.app, chain.snapshot, run, false, false, runExecutor = action)
+                    try {
+                        val call = ToolCall("cancel-${UUID.randomUUID()}", "device_act",
+                            """{"observation_id":"${UUID.randomUUID()}","action":"click","node_index":0,"observe_after":{}}""")
+                        assertEquals(ToolResult.NeedsApproval, tools.executor.invoke(call))
+                        assertNull(tools.confirmedDeviceActionReceipt(call.callId))
+                        val invocationId = requireNotNull(tools.runtimeInvocationId(call.callId))
+                        chain.container.runs.recordInvocation(ToolInvocation(invocationId, run.runId, call.callId, call.name,
+                            call.argumentsJson, permissionDecision = "APPROVED", createdAt = Utc.nowIso()))
+                        val execution = async { tools.executor.approve(call.callId) }
+                        withTimeout(5000) { entered.await() }
+                        execution.cancelAndJoin()
+                        val receipt = tools.confirmedDeviceActionReceipt(call.callId)
+                        assertEquals(acknowledged, receipt != null)
+                        if (receipt != null) {
+                            assertNull(ConfirmedDeviceActionCancellation.persist(chain.container.db, run.runId, "wrong-conversation", receipt))
+                            val fault = object : SqlConnection by chain.container.db {
+                                override fun execute(sql: String, args: List<Any?>) {
+                                    if (sql.startsWith("INSERT INTO messages")) error("synthetic receipt persistence failure")
+                                    chain.container.db.execute(sql, args)
+                                }
+                            }
+                            assertThrows(IllegalStateException::class.java) {
+                                ConfirmedDeviceActionCancellation.persist(fault, run.runId, conversation.id, receipt)
+                            }
+                            assertEquals("PENDING", chain.container.runs.invocations(run.runId).single().state)
+                            assertTrue(chain.container.conversations.messages(conversation.id).isEmpty())
+                            val settled = ConfirmedDeviceActionCancellation.persist(chain.container.db, run.runId, conversation.id, receipt)
+                            assertEquals("SUCCEEDED", settled?.state)
+                            assertTrue(settled?.resultJson.orEmpty().contains("\"action_confirmed\":true"))
+                            assertFalse(settled?.resultJson.orEmpty().contains("nodes"))
+                            assertNull(ConfirmedDeviceActionCancellation.persist(chain.container.db, run.runId, conversation.id, receipt))
+                            val parts = chain.container.conversations.messages(conversation.id).flatMap { it.parts }.filterIsInstance<ToolResultPart>()
+                            assertEquals(1, parts.size)
+                            assertEquals(receipt.resultJson, parts.single().resultJson)
+                        } else assertEquals("PENDING", chain.container.runs.invocations(run.runId).single().state)
+                        assertEquals(1, dispatches)
+                        run.state = RunState.CANCELLED
+                        assertTrue(tools.executor.invoke(call) is ToolResult.Denied)
+                        assertEquals(1, dispatches)
+                    } finally { tools.executor.close() }
+                }
+            } finally { registry.setConsent(previous) }
+        }
+    }
     @Test fun disabledObservationLeavesExistingShellRouteAvailable() = runBlocking {
         val chain = prepareChain("optional-observation")
         val registry = runtime.mobileagent.observation.ScreenObservationRegistry.get(chain.app)

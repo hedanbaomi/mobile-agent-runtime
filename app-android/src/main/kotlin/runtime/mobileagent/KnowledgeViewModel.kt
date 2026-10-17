@@ -364,6 +364,15 @@ class KnowledgeViewModel(
     private var refreshReadError: String? = null
     private val observedImportOperations = mutableSetOf<String>()
 
+    /**
+     * Batches whose detail section the user opened.
+     *
+     * Kept here so a refresh reads member rows for exactly the opened batches, each by its exact id,
+     * and a collapsed or closed batch never materializes them.  [selectBase] clears it, so another
+     * knowledge base never inherits this one's opened sections.
+     */
+    private var expandedBatchIds: Set<String> = emptySet()
+
     private enum class EmbeddingAction { REBIND, REBUILD, GRANT, RETRY, QUERY_RETRY }
     private data class PendingEmbedding(
         val kind: EmbeddingAction,
@@ -401,8 +410,10 @@ class KnowledgeViewModel(
                     refreshRequested = false
                     val revision = selectionRevision
                     val selected = state.value.selectedBaseId
+                    // Read on the main dispatcher: one IO read must see one consistent opened set.
+                    val expanded = expandedBatchIds
                     try {
-                        val snapshot = runInterruptible(Dispatchers.IO) { loadSnapshot(selected) }
+                        val snapshot = runInterruptible(Dispatchers.IO) { loadSnapshot(selected, expanded) }
                         if (revision == selectionRevision) {
                             // Keep live UI fields: a slow read must not reset a
                             // status, loading flag or preview changed meanwhile.
@@ -418,6 +429,7 @@ class KnowledgeViewModel(
                                 embeddingSpaceLabel = snapshot.embeddingSpaceLabel,
                                 embeddingModels = snapshot.embeddingModels, apiQueryAttempts = snapshot.apiQueryAttempts,
                                 batches = snapshot.batches,
+                                batchMemberJobIds = snapshot.batchMemberJobIds,
                                 visionConfigured = snapshot.visionConfigured,
                                 visionTargetLabel = snapshot.visionTargetLabel,
                                 visionTargetFingerprint = snapshot.visionTargetFingerprint,
@@ -446,8 +458,21 @@ class KnowledgeViewModel(
         reload()
     }
 
+    /**
+     * The batch card reports its detail section opening or closing.
+     *
+     * Only opened batches are read, each by its exact id, on the refresh path: a collapsed batch
+     * keeps its real summary counters and its member rows stay unmaterialized.
+     */
+    fun setBatchExpanded(batchId: String, expanded: Boolean) {
+        expandedBatchIds.withBatchExpanded(batchId, expanded).takeUnless { it == expandedBatchIds }?.let {
+            expandedBatchIds = it
+            reload()
+        }
+    }
+
     /** IO only. No Compose state is read or written while repository locks may wait. */
-    private fun loadSnapshot(selectedId: String?): KnowledgeUiState {
+    private fun loadSnapshot(selectedId: String?, expandedBatchIds: Set<String>): KnowledgeUiState {
             val storage = repo.storageUsage()
             val bases = repo.listKnowledgeBaseDisplaySummaries()
             val selected = selectedId?.takeIf { id -> bases.any { it.id == id } } ?: bases.firstOrNull()?.id
@@ -461,8 +486,12 @@ class KnowledgeViewModel(
             val defaultVisionTarget = visionTargets.firstOrNull()
             val target = defaultVisionTarget?.label.orEmpty()
             val batches = selected?.let(repo::listBatches).orEmpty()
-            val batchDisplays = runtime.mobileagent.data.KnowledgeBatchDisplayStore(app.container.db)
-                .read(selected, batches.map { it.id })
+            val displayStore = runtime.mobileagent.data.KnowledgeBatchDisplayStore(app.container.db)
+            // A collapsed snapshot reads counters only; the rows of the opened batches are read
+            // afterwards, each by its own batch id.
+            val batchSummaries = displayStore.summaries(selected, batches.map { it.id })
+            val openedBatchIds = expandedBatchIds intersect batches.map { it.id }.toSet()
+            val batchDetails = openedBatchIds.associateWith { batchId -> displayStore.details(batchId) }
             return KnowledgeUiState(
                 storageUsedBytes = storage.totalBytes,
                 storageQuotaBytes = storage.quotaBytes,
@@ -497,13 +526,14 @@ class KnowledgeViewModel(
                         ApiEmbeddingBinding.parseSpaceId(attempt.spaceId)?.let(app.container.apiEmbeddings::label)
                             ?: attempt.spaceId, attempt.retryAuthorized)
                 },
+                batchMemberJobIds = displayStore.memberJobIds(selected),
                 visionTargetLabel = target,
                 visionConfigured = visionTargets.isNotEmpty(),
                 visionTargetFingerprint = defaultVisionTarget?.fingerprint,
                 visionTargets = visionTargets,
                 batches = batches.map { batch ->
                     val progress = repo.batchProgress(batch.id)
-                    val display = batchDisplays.getValue(batch.id)
+                    val summary = batchSummaries.getValue(batch.id)
                     KnowledgeBatchUi(
                         id = batch.id,
                         displayName = batch.displayName,
@@ -530,18 +560,20 @@ class KnowledgeViewModel(
                         paused = batch.state == ImportBatchState.PAUSED,
                         resumeStagingAvailable = batch.state in setOf(ImportBatchState.COPYING, ImportBatchState.STAGING) &&
                             importCoordinator.activeOperation()?.progress?.value?.batchId != batch.id &&
-                            display.stagingComplete == 0L,
-                        items = display.items.map { view ->
-                            KnowledgeBatchItemUi(
+                            summary.stagingComplete == 0L,
+                        // Only an opened batch has rows, and its real member count is known either way.
+                        items = KnowledgeBatchItemDetails.of(summary.itemCount,
+                            batchDetails[batch.id]?.map { view -> KnowledgeBatchItemUi(
                                 jobId = view.jobId,
                                 displayName = view.displayName,
                                 state = view.state,
                                 error = view.error,
-                            )
-                        },
+                            ) }),
+                        retryWaiting = summary.retryWaiting,
+                        unknownOutcomeReason = summary.unknownOutcomeReason,
                         pipeline = repo.batchPipelineProgress(batch.id),
                         reuse = repo.batchReuseSummary(batch.id, refreshPlan = false),
-                        policy = display.policy,
+                        policy = summary.policy,
                     )
                 },
             )
@@ -549,6 +581,7 @@ class KnowledgeViewModel(
     fun selectBase(id: String) {
         selectionRevision += 1
         closeEvidence(); dismissEmbedding(); dismissVision()
+        expandedBatchIds = emptySet()
         state.value = state.value.copy(selectedBaseId = id, documents = emptyList(), jobs = emptyList(), waiting = emptyList())
         reload()
     }

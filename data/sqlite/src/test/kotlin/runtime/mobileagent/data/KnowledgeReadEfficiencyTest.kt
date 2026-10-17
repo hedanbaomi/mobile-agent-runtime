@@ -271,4 +271,134 @@ class KnowledgeReadEfficiencyTest {
             assertFalse(kb in KnowledgeIndexRepairState(db).candidates(HashingTextEmbedder().spaceId, onlyChanged = true))
         }
     }
+
+    /** Counts the rows a store hands back to Kotlin, so a summary read and a bulk read are comparable. */
+    private class Rows(private val db: SqlConnection) : SqlConnection by db {
+        var rows = 0
+        override fun query(sql: String, args: List<Any?>): List<SqlRow> {
+            val result = db.query(sql, args)
+            rows += result.size
+            return result
+        }
+
+        fun <T> measure(block: () -> T): Pair<T, Int> {
+            val before = rows
+            val value = block()
+            return value to (rows - before)
+        }
+    }
+
+    /**
+     * One fully staged batch of [members] mixed member states, joined to a real job row.
+     *
+     * `staging_complete=1` is what makes a still-copying member read as QUEUED, so this fixture
+     * exercises the shared effective-state rule of the summary and the detail read.
+     */
+    private fun seedBatch(db: SqlConnection, batch: String, job: String, members: Int) {
+        db.execute("UPDATE import_batches SET total_items=?,staging_complete=1 WHERE id=?", listOf(members, batch))
+        db.execute("UPDATE import_jobs SET stage='FAILED' WHERE id=?", listOf(job))
+        val states = listOf("PUBLISHED", "PENDING", "COPYING", "QUEUED", "PROCESSING", "WAITING", "FAILED", "CANCELLED")
+        db.transaction {
+            repeat(members) { index ->
+                db.execute(
+                    "INSERT INTO import_items(id,batch_id,item_key,relative_path,job_id,kind,state,error) VALUES(?,?,?,?,?,'FILE',?,?)",
+                    listOf("$batch-member-$index", batch, "item-$index", "synthetic/$index", job,
+                        states[index % states.size], if (index == 3) "UNKNOWN_OUTCOME: receipt pending" else null),
+                )
+            }
+        }
+    }
+
+    @Test fun collapsedBatchSummaryReadsEveryCountWithoutMaterializingMemberRows() {
+        JdbcSqlConnection().use { db ->
+            Migrations.apply(db)
+            val repo = KnowledgeRepository(db, MemoryBlobSink(), automaticStorageMaintenance = false)
+            val kb = repo.createKnowledgeBase("collapsed snapshot")
+            val job = repo.importBytes("member.txt", "text/plain", "member source".toByteArray(), false, kb)
+            val batch = repo.beginBatch(kb, ImportBatchKind.FILES, "collapsed batch")
+            seedBatch(db, batch, job.id, 400)
+            val rows = Rows(db)
+            val store = KnowledgeBatchDisplayStore(rows)
+            val bulk = rows.measure { store.read(kb, listOf(batch)) }
+            val summary = rows.measure { store.summaries(kb, listOf(batch)) }
+            val bulkDisplay = bulk.first.getValue(batch)
+            val batchSummary = summary.first.getValue(batch)
+            // Every number the collapsed card shows stays real, so truthfulness never depends on rows.
+            assertEquals(1, summary.first.size)
+            assertEquals(bulkDisplay.stagingComplete, batchSummary.stagingComplete)
+            assertEquals(400, batchSummary.itemCount)
+            assertEquals(bulkDisplay.items.size, batchSummary.itemCount)
+            assertEquals(bulkDisplay.policy, batchSummary.policy)
+            assertEquals("UNKNOWN_OUTCOME: receipt pending", batchSummary.unknownOutcomeReason)
+            assertTrue(batchSummary.retryWaiting)
+            // The split itself: a collapsed snapshot stops carrying one row per imported member.
+            assertEquals(401, bulk.second)
+            assertEquals(3, summary.second)
+            println("KNOWLEDGE_BATCH_SUMMARY members=400 bulk_rows=${bulk.second} summary_rows=${summary.second}")
+            db.execute("UPDATE import_items SET error='unknown_outcome: lowercase' WHERE batch_id=?", listOf(batch))
+            db.execute("UPDATE import_items SET error='UNKNOWNxOUTCOME: wildcard' WHERE id=?", listOf("$batch-member-0"))
+            assertEquals(null, store.summaries(kb, listOf(batch)).getValue(batch).unknownOutcomeReason,
+                "The summary must use the same literal, case-sensitive marker as the member cards")
+        }
+    }
+
+    @Test fun openedBatchDetailReadsOnlyTheRowsOfThatExactBatch() {
+        JdbcSqlConnection().use { db ->
+            Migrations.apply(db)
+            val repo = KnowledgeRepository(db, MemoryBlobSink(), automaticStorageMaintenance = false)
+            val kb = repo.createKnowledgeBase("opened detail")
+            val job = repo.importBytes("member.txt", "text/plain", "member source".toByteArray(), false, kb)
+            val opened = repo.beginBatch(kb, ImportBatchKind.FILES, "opened")
+            val other = repo.beginBatch(kb, ImportBatchKind.FILES, "other")
+            seedBatch(db, opened, job.id, 400)
+            seedBatch(db, other, job.id, 7)
+            val rows = Rows(db)
+            val store = KnowledgeBatchDisplayStore(rows)
+            val detail = rows.measure { store.details(opened) }
+            val truth = db.query("SELECT COUNT(*) AS n FROM import_items WHERE batch_id=?", listOf(opened)).single().long("n").toInt()
+            assertEquals(400, truth)
+            assertEquals(truth, detail.first.size)
+            // One query, and never another batch's members.
+            assertEquals(400, detail.second)
+            assertEquals(7, store.details(other).size)
+            assertEquals("UNKNOWN_OUTCOME: receipt pending", detail.first.first { it.error != null }.error)
+            assertEquals("QUEUED", detail.first.first { it.state == "QUEUED" }.state)
+            assertEquals(400, store.summaries(kb, listOf(opened)).getValue(opened).itemCount)
+            println("KNOWLEDGE_BATCH_DETAIL opened=${detail.first.size} other=7 detail_rows=${detail.second}")
+        }
+    }
+
+    @Test fun summariesMatchTheBulkReadForEmptyBatchListsAndForeignBases() {
+        JdbcSqlConnection().use { db ->
+            Migrations.apply(db)
+            val repo = KnowledgeRepository(db, MemoryBlobSink(), automaticStorageMaintenance = false)
+            val kb = repo.createKnowledgeBase("summary equivalence")
+            val empty = repo.beginBatch(kb, ImportBatchKind.FILES, "empty")
+            val foreign = repo.beginBatch(repo.createKnowledgeBase("foreign base"), ImportBatchKind.FILES, "foreign")
+            val job = repo.importBytes("member.txt", "text/plain", "member source".toByteArray(), false, kb)
+            val populated = repo.beginBatch(kb, ImportBatchKind.FILES, "populated")
+            seedBatch(db, populated, job.id, 9)
+            val store = KnowledgeBatchDisplayStore(db)
+            val requested = listOf(empty, populated, foreign)
+            // The bulk read stays the oracle: the summary must agree on every batch it keeps.
+            val bulk = store.read(kb, requested)
+            val summary = store.summaries(kb, requested)
+            assertEquals(bulk.keys, summary.keys)
+            bulk.forEach { (batchId, display) ->
+                assertEquals(display.items.size, summary.getValue(batchId).itemCount, batchId)
+                assertEquals(display.stagingComplete, summary.getValue(batchId).stagingComplete, batchId)
+                assertEquals(display.policy, summary.getValue(batchId).policy, batchId)
+            }
+            assertEquals(0, summary.getValue(empty).itemCount)
+            assertEquals(9, summary.getValue(populated).itemCount)
+            assertEquals(null, summary.getValue(empty).unknownOutcomeReason)
+            assertFalse(summary.getValue(empty).retryWaiting)
+            assertTrue(store.details(empty).isEmpty())
+            assertTrue(store.summaries(kb, emptyList()).isEmpty())
+            assertTrue(store.summaries(null, requested).isEmpty())
+            assertEquals(setOf(job.id), store.memberJobIds(kb))
+            assertTrue(store.memberJobIds(null).isEmpty())
+            println("KNOWLEDGE_BATCH_SUMMARY_EQUIVALENCE batches=${summary.size} members=${summary.getValue(populated).itemCount}")
+        }
+    }
 }

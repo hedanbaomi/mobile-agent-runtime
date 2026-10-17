@@ -19,7 +19,9 @@ import runtime.mobileagent.domain.ApiFormat
 import runtime.mobileagent.domain.ModelProfile
 import runtime.mobileagent.domain.ModelRole
 import runtime.mobileagent.domain.ProviderProfile
+import runtime.mobileagent.feature.knowledge.KnowledgeBatchItemDetails
 import runtime.mobileagent.feature.knowledge.KnowledgeUiState
+import runtime.mobileagent.knowledge.ImportBatchKind
 
 /** Real repository -> asynchronous ViewModel snapshot -> Compose state, without a model request. */
 @RunWith(AndroidJUnit4::class)
@@ -198,6 +200,90 @@ class KnowledgeVisionStateDeviceTest {
         }
     }
 
+    /**
+     * A collapsed batch card must state its real counters without member rows, and only the batch
+     * the user opens may be read back by its own id.  Opening, refreshing, closing and switching the
+     * knowledge base must all keep that split truthful.
+     */
+    @Test
+    fun collapsedBatchKeepsRealCountsAndOnlyTheOpenedBatchReadsItsRows() {
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        val app = instrumentation.targetContext.applicationContext as MobileAgentApp
+        app.ensureHostInitialized()
+        val repo = app.container.knowledge
+        val suffix = UUID.randomUUID().toString().replace("-", "")
+        val base = repo.createKnowledgeBase("knowledge batch summary $suffix")
+        val otherBase = repo.createKnowledgeBase("knowledge batch summary other $suffix")
+        val job = repo.importBytes("member.txt", "text/plain", "member source".toByteArray(), false, base)
+        val batch = repo.beginBatch(base, ImportBatchKind.FILES, "summary batch $suffix")
+        app.container.db.execute("UPDATE import_batches SET total_items=400,staging_complete=1 WHERE id=?", listOf(batch))
+        app.container.db.execute("UPDATE import_jobs SET stage='FAILED' WHERE id=?", listOf(job.id))
+        val states = listOf("PUBLISHED", "PENDING", "COPYING", "QUEUED", "PROCESSING", "WAITING", "FAILED", "CANCELLED")
+        app.container.db.transaction {
+            repeat(400) { index ->
+                app.container.db.execute(
+                    "INSERT INTO import_items(id,batch_id,item_key,relative_path,job_id,kind,state,error) VALUES(?,?,?,?,?,'FILE',?,?)",
+                    listOf("$suffix-member-$index", batch, "item-$index", "synthetic/$index", job.id,
+                        states[index % states.size], if (index == 3) "UNKNOWN_OUTCOME: receipt pending" else null),
+                )
+            }
+        }
+        var vm: KnowledgeViewModel? = null
+        try {
+            instrumentation.runOnMainSync { vm = KnowledgeViewModel(app) }
+            val viewModel = requireNotNull(vm)
+            instrumentation.runOnMainSync { viewModel.selectBase(base) }
+            val collapsed = awaitState(viewModel) {
+                it.selectedBaseId == base && it.batches.any { card -> card.id == batch }
+            }.batches.first { it.id == batch }
+            // Counters and the unknown reason are real while no member row has been read at all.
+            assertTrue(collapsed.items is KnowledgeBatchItemDetails.Collapsed)
+            assertEquals(400, collapsed.items.size)
+            assertEquals("UNKNOWN_OUTCOME: receipt pending", collapsed.unknownOutcomeReason)
+            assertTrue(collapsed.retryWaiting)
+
+            instrumentation.runOnMainSync { viewModel.setBatchExpanded(batch, true) }
+            val opened = awaitState(viewModel) {
+                it.batches.firstOrNull { card -> card.id == batch }?.items is KnowledgeBatchItemDetails.Loaded
+            }.batches.first { it.id == batch }
+            val openedRows = (opened.items as? KnowledgeBatchItemDetails.Loaded)?.rows.orEmpty()
+            assertEquals(400, openedRows.size)
+            assertEquals(400, opened.items.size)
+            assertEquals("QUEUED", openedRows.first { it.state == "QUEUED" }.state)
+
+            // A refresh keeps the opened batch's rows.
+            instrumentation.runOnMainSync { viewModel.reload() }
+            val refreshed = awaitState(viewModel) {
+                it.batches.firstOrNull { card -> card.id == batch }?.items is KnowledgeBatchItemDetails.Loaded
+            }.batches.first { it.id == batch }
+            assertEquals(400, refreshed.items.size)
+
+            // Closing drops the rows but never the real count.
+            instrumentation.runOnMainSync { viewModel.setBatchExpanded(batch, false) }
+            val closed = awaitState(viewModel) {
+                it.batches.firstOrNull { card -> card.id == batch }?.items is KnowledgeBatchItemDetails.Collapsed
+            }.batches.first { it.id == batch }
+            assertTrue(closed.items is KnowledgeBatchItemDetails.Collapsed)
+            assertEquals(400, closed.items.size)
+
+            // Another knowledge base never inherits this one's opened sections.
+            instrumentation.runOnMainSync { viewModel.selectBase(otherBase) }
+            awaitState(viewModel) { it.selectedBaseId == otherBase }
+            instrumentation.runOnMainSync { viewModel.selectBase(base) }
+            val switched = awaitState(viewModel) {
+                it.selectedBaseId == base &&
+                    it.batches.firstOrNull { card -> card.id == batch }?.items is KnowledgeBatchItemDetails.Collapsed
+            }.batches.first { it.id == batch }
+            assertEquals(400, switched.items.size)
+        } finally {
+            vm?.let { viewModel -> runBlocking { viewModel.viewModelScope.coroutineContext[Job]?.cancelAndJoin() } }
+            repo.deleteKnowledgeBase(base)
+            repo.deleteKnowledgeBase(otherBase)
+            app.container.db.execute("DELETE FROM import_items WHERE batch_id=?", listOf(batch))
+            app.container.db.execute("DELETE FROM import_batches WHERE id=?", listOf(batch))
+        }
+    }
+
     private fun fingerprint(provider: ProviderProfile, model: ModelProfile): String =
         visionProfileBinding(provider, model).fingerprint
 
@@ -210,6 +296,6 @@ class KnowledgeVisionStateDeviceTest {
             if (ready(snapshot)) return snapshot
             Thread.sleep(25)
         }
-        error("KnowledgeViewModel did not publish the expected Vision target; configured=${snapshot.visionConfigured}, error=${snapshot.error}")
+        error("KnowledgeViewModel did not publish the expected snapshot; configured=${snapshot.visionConfigured}, error=${snapshot.error}")
     }
 }

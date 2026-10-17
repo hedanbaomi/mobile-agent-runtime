@@ -7,10 +7,7 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
-import kotlinx.coroutines.flow.combine
-import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.withContext
-import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.serialization.json.*
 import runtime.mobileagent.skills.ToolCall
 import runtime.mobileagent.skills.ToolExecutor
@@ -53,33 +50,16 @@ class ScreenObservationToolExecutor(
         val result = try {
             val request = bound.request
             val observed = if (bound.call.name == "device_observe") port.capture(request.packageName) else {
-                withTimeoutOrNull(request.timeoutMs) {
-                    while (true) {
-                        currentCoroutineContext().ensureActive()
-                        if (!authorized()) throw ScreenObservationException("SCREEN_ACCESS_CHANGED")
-                        // Capture the event counter before reading, so a concurrent event is never lost.
-                        val before = port.changes.value
-                        val snapshot = try { port.capture(request.packageName) } catch (e: ScreenObservationException) {
-                            if (e.code in setOf("SCREEN_PACKAGE_MISMATCH", "SCREEN_WINDOW_UNAVAILABLE", "SCREEN_WINDOW_CHANGED")) null else throw e
-                        }
-                        if (snapshot != null && snapshot.stable &&
-                            (request.afterSequence == null || snapshot.sequence > request.afterSequence) &&
-                            (request.text == null || snapshot.nodes.any { request.text in it.text || request.text in it.description })) {
-                            return@withTimeoutOrNull snapshot
-                        }
-                        combine(port.changes, port.access) { change, access -> change != before || access != admitted }
-                            .first { it }
-                    }
-                    @Suppress("UNREACHABLE_CODE")
-                    null
-                }
+                // Events only wake the shared wait; the condition is judged on a new snapshot.
+                ScreenObservationWait.await(port, admitted, { authorized() }, request.packageName, request.text,
+                    request.afterSequence, request.timeoutMs)
             }
             if (!authorized() || synchronized(bound) { bound.result != null }) ToolResult.Denied("SCREEN_RESULT_WITHHELD", ToolResult.Completion.COMPLETED_WITHHELD)
             else if (observed == null) ToolResult.Value("{\"status\":\"timeout\",\"matched\":false}")
             else {
                 bound.sequence = observed.sequence
                 val json = render(observed)
-                if (json.toByteArray(Charsets.UTF_8).size > 96 * 1024) ToolResult.Invalid("SCREEN_RESULT_LIMIT")
+                if (json.toByteArray(Charsets.UTF_8).size > ScreenObservationWait.RESULT_LIMIT_BYTES) ToolResult.Invalid("SCREEN_RESULT_LIMIT")
                 else ToolResult.Value(json)
             }
         } catch (cancel: CancellationException) { throw cancel }
@@ -137,7 +117,7 @@ class ScreenObservationToolExecutor(
             p.longOrNull ?: error("Invalid")
         }
         val packageName = string("package_name", 200)
-        require(packageName == null || packageName.matches(Regex("[A-Za-z][A-Za-z0-9_.]{0,199}")))
+        require(packageName == null || packageName.matches(ScreenObservationWait.PACKAGE_NAME))
         val after = number("after_sequence")?.also { require(it >= 0) }
         val text = string("text", 200)
         if (call.name == "device_wait_for") require(packageName != null || text != null || after != null)
@@ -148,10 +128,16 @@ class ScreenObservationToolExecutor(
     companion object {
         private const val OBSERVE_SCHEMA = """{"type":"object","additionalProperties":false,"properties":{"package_name":{"type":"string","minLength":1,"maxLength":200}}}"""
         private const val WAIT_SCHEMA = """{"type":"object","additionalProperties":false,"properties":{"package_name":{"type":"string","minLength":1,"maxLength":200},"text":{"type":"string","minLength":1,"maxLength":200},"after_sequence":{"type":"integer","minimum":0},"timeout_ms":{"type":"integer","minimum":1,"maximum":10000}}}"""
-        internal fun render(snapshot: ScreenSnapshot): String = buildJsonObject {
+        /**
+         * The one snapshot rendering. [matched] is set only by a caller that really
+         * evaluated a requested condition, so an observed screen is never reported as
+         * a completed page transition on its own.
+         */
+        internal fun render(snapshot: ScreenSnapshot, matched: Boolean? = null): String = buildJsonObject {
             put("status", "observed"); put("package_name", snapshot.packageName); put("window_id", snapshot.windowId)
             put("sequence", snapshot.sequence); put("captured_at_elapsed_ms", snapshot.capturedAtElapsedMs)
             put("truncated", snapshot.truncated); put("stable", snapshot.stable)
+            matched?.let { put("matched", it) }
             snapshot.observationId?.let { put("observation_id", it) }
             putJsonArray("nodes") { snapshot.nodes.forEach { node -> add(buildJsonObject {
                 put("index", node.index); node.parent?.let { put("parent", it) }

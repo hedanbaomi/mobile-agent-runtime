@@ -93,7 +93,7 @@ class TransferRepositoryIsolationTest {
             val kb = sourceKnowledge.createKnowledgeBase("lease import")
             // Incompressible enough to give the bounded ZIP reader measurable input
             // after its descriptor read-ahead, while remaining valid UTF-8 text.
-            val content = buildString { val random = Random(741); repeat(16_384) { append(('a'.code + random.nextInt(26)).toChar()) } }
+            val content = "铁路运输退款记录。\n" + buildString { val random = Random(741); repeat(16_384) { append(('a'.code + random.nextInt(26)).toChar()) } }
             sourceKnowledge.importBytes("source.txt", "text/plain", content.toByteArray(), false, kb)
             val agents = AgentRepository(source)
             agents.saveWithPrompt(agents.get("agent.importlease")!!.copy(knowledgeBaseIds = listOf(kb)), "Synthetic prompt")
@@ -102,6 +102,7 @@ class TransferRepositoryIsolationTest {
             JdbcSqlConnection().use { target ->
                 Migrations.apply(target)
                 val actualSink = runtime.mobileagent.knowledge.MemoryBlobSink()
+                target.execute("INSERT INTO chunks_fts(rowid,text) VALUES(1,'obsoletearchive')")
                 val collector = KnowledgeRepository(target, actualSink)
                 val interleavingSink = object : runtime.mobileagent.knowledge.BlobSink by actualSink {
                     override fun put(bytes: ByteArray, mediaType: String): runtime.mobileagent.knowledge.StoredBlob {
@@ -113,6 +114,9 @@ class TransferRepositoryIsolationTest {
                     }
                 }
                 TransferRepository(target, blobSink = interleavingSink).importArchive(archive.toByteArray())
+                assertTrue(target.query("SELECT rowid FROM chunks_fts WHERE chunks_fts MATCH ?", listOf("\"铁路\"")).isNotEmpty(),
+                    "Archive restore must index canonical CJK tokens directly, without LIKE fallback")
+                assertTrue(target.query("SELECT rowid FROM chunks_fts WHERE chunks_fts MATCH 'obsoletearchive'").isEmpty())
                 assertTrue(actualSink.protectedHashes().isEmpty())
                 collector.collectStorage()
                 assertTrue(actualSink.storedHashes().isNotEmpty())

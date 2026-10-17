@@ -61,7 +61,10 @@ object Migrations {
     // v28 permits six durable slots and freezes v27 batches at their old default of three.
     // v29 adds the scoped import-job display index without replaying legacy binding projection.
     // v33 derives an indexed instant key without rewriting message timestamps or hashes.
-    const val VERSION = 33
+    // v34 converts chunks_fts from an external-content index into a contentless-delete
+    // index rebuilt from chunks.text. Only derived postings change; every source,
+    // embedding, generation, pin, permission and consent row stays in place.
+    const val VERSION = 34
 
     private val statements = listOf(
         "CREATE TABLE IF NOT EXISTS schema_version (version INTEGER NOT NULL PRIMARY KEY)",
@@ -284,6 +287,9 @@ object Migrations {
             DocumentPipelineStore.schema.forEach { sql -> connection.execute(sql) }
             columns.forEach { column -> ensureColumn(connection, column) }
             MessageChronology.install(connection)
+            // v34: the historical external-content statement above may have just created the
+            // wrong table, so the index is repaired from chunks.text in this same transaction.
+            LexicalIndexMigration.ensure(connection, current)
             if (current in 1L..27L) {
                 // The old default lived in code, not a policy row. Preserve it for existing
                 // batches before changing the default for newly created batches.

@@ -296,6 +296,7 @@ class OnnxTextEmbedder(
         options.setInterOpNumThreads(1)
         environment.createSession(pack.modelFile.absolutePath, options)
     }
+    private val windowCache = EmbeddingWindowCache()
 
     init {
         require(pack.manifest.pooling.equals("mean", ignoreCase = true)) {
@@ -319,9 +320,9 @@ class OnnxTextEmbedder(
         return normalize(pooled)
     }
 
-    private fun embedWindow(encoded: BertWordPieceTokenizer.Encoded): FloatArray {
+    private fun embedWindow(encoded: BertWordPieceTokenizer.Encoded): FloatArray = windowCache.vector(encoded) {
         val inputs = linkedMapOf<String, ai.onnxruntime.OnnxTensor>()
-        return try {
+        try {
             inputs["input_ids"] = ai.onnxruntime.OnnxTensor.createTensor(environment, arrayOf(encoded.inputIds))
             inputs["attention_mask"] = ai.onnxruntime.OnnxTensor.createTensor(environment, arrayOf(encoded.attentionMask))
             if ("token_type_ids" in session.inputNames) {
@@ -344,7 +345,7 @@ class OnnxTextEmbedder(
     override suspend fun embed(texts: List<String>): List<FloatArray> = texts.map(::embed)
 
     override fun close() {
-        session.close()
+        windowCache.close { session.close() }
     }
 
     private fun meanPool(output: Any, mask: LongArray): FloatArray {

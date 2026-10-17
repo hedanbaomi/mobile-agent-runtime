@@ -158,6 +158,7 @@
     ]
   },
   "manual_only": {
+    "runtime.mobileagent.OnnxEmbeddingThroughputDeviceTest": "Synthetic real-model performance comparison requires explicit embeddingPerformance=true; separate from functional acceptance.",
     "runtime.mobileagent.KnowledgeLoadDeviceTest": "K06 large-load fixture needs explicit workload, time/memory budget and knowledgeLoad arguments.",
     "runtime.mobileagent.KnowledgeOriginalFailureDeviceTest": "Requires explicitly staged private source PDFs and host-orchestrated restart phase.",
     "runtime.mobileagent.shizuku.ShizukuLiveDeviceTest": "Requires real Shizuku server, shell-backed authority and explicit device permission.",

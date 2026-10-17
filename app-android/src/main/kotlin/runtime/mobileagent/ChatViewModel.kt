@@ -163,6 +163,7 @@ class ChatViewModel internal constructor(
         var approvalCallId: String? = null
         var executor: ToolExecutor? = null
         var productivity: RunProductivityTools? = null
+        var confirmedDeviceAction: (String) -> ConfirmedDeviceActionReceipt? = { null }
     }
     private var activeRunResources: RunResources? = null
     private val citations = linkedMapOf<String, Pair<Citation, String>>()
@@ -990,6 +991,7 @@ class ChatViewModel internal constructor(
                     reserveCalls = runTools::reserveAdditionalToolCalls,
                 )
                 resources.productivity = productivity
+                resources.confirmedDeviceAction = runTools::confirmedDeviceActionReceipt
                 val toolExecutor = productivity.executor
                 resources.executor = toolExecutor
                 fun invocationId(callId: String, toolName: String): String? =
@@ -1813,6 +1815,16 @@ class ChatViewModel internal constructor(
                 }))
             } catch (cancel: CancellationException) {
                 withContext(NonCancellable) {
+                    pendingApprovalFor(run.runId)?.let { pending -> resources.confirmedDeviceAction(pending.callId) }
+                        ?.let { receipt -> withContext(Dispatchers.IO) {
+                            runCatching { ConfirmedDeviceActionCancellation.persist(container.db, run.runId, conversationId, receipt) }.getOrNull()
+                        } }?.let { completed ->
+                            invocations[completed.invocationId] = completed
+                            forgetPendingApproval(run.runId, completed.callId)
+                            approvedToolInFlight = false; approvedToolCallId = null
+                            toolCallInFlight = false; toolWaitingApproval = false
+                            publishRunState(owner, state.value.copy(pendingTool = null))
+                        }
                     val persisted = withContext(Dispatchers.IO) { container.runs.get(run.runId) }
                     val cancelledBeforeDispatch = withContext(Dispatchers.IO) {
                         approvedToolCallId?.let { callId -> container.runs.invocations(run.runId).any {

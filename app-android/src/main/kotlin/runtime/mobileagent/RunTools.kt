@@ -351,6 +351,15 @@ class RunTools(
         }
     }
 
+    /** Only the actual device-action owner can attest an OS acknowledgement, even after its read was cancelled. */
+    internal fun confirmedDeviceActionReceipt(callId: String): ConfirmedDeviceActionReceipt? {
+        val routed = synchronized(callLock) { routedFor(callId) }
+        return routed?.let { route ->
+            (route.owner as? ScreenActionToolExecutor)?.takeIf { it.isActionConfirmed(route.runtimeInvocationId) }
+                ?.let { ConfirmedDeviceActionReceipt(route.call.callId, route.runtimeInvocationId) }
+        }
+    }
+
     /** Called by AgentRuntime before attaching the tool's following multimodal user message. */
     suspend fun toolImages(call: ToolCall, result: ToolResult): List<InlineImage> {
         if (result !is ToolResult.Value) return emptyList()

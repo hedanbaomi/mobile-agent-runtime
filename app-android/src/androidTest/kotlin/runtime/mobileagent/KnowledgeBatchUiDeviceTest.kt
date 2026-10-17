@@ -15,6 +15,7 @@ import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertIsNotEnabled
 import androidx.compose.ui.test.isToggleable
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
+import androidx.compose.ui.test.junit4.StateRestorationTester
 import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
@@ -32,6 +33,25 @@ class KnowledgeBatchUiDeviceTest {
     // Component tests own their composition and do not launch the product's
     // first-run notification permission activity.
     @get:Rule val compose = createAndroidComposeRule<ComposeTestHostActivity>()
+
+    @Test fun restoredExpandedBatchRequestsItsDetailsAgain() {
+        val requests = mutableListOf<Pair<String, Boolean>>()
+        val restore = StateRestorationTester(compose)
+        val batch = KnowledgeBatchUi("restore", "Restored batch", "FILES", "COMPLETED", 400, 400, 0, 0, 0,
+            published = 400, items = KnowledgeBatchItemDetails.Collapsed(400))
+        restore.setContent { MaterialTheme {
+            KnowledgeScreen(KnowledgeUiState(language = "en", batches = listOf(batch)),
+                KnowledgeActions(onToggleBatchDetails = { id, expanded -> requests += id to expanded }))
+        } }
+        compose.onNodeWithText("Show 400 item details").performScrollTo().performClick()
+        compose.runOnIdle {
+            assertEquals("restore" to true, requests.last())
+            requests.clear()
+        }
+        restore.emulateSavedInstanceStateRestore()
+        compose.onNodeWithText("Hide details").performScrollTo().assertIsDisplayed()
+        compose.runOnIdle { assertEquals("restore" to true, requests.last()) }
+    }
 
     @Test fun pipelineProgressAndResumeScopeRequireExplicitConfirmation() {
         var resumed: String? = null
@@ -125,9 +145,10 @@ class KnowledgeBatchUiDeviceTest {
         val documents = (1..294).map { KnowledgeDocumentUi("doc-$it", "Document $it", status = "READY") }
         val job = KnowledgeImportJobUi("job-unknown", "Visual sample", "AWAITING_UPLOAD_CONSENT", "UNKNOWN_OUTCOME", unknownOutcome = true)
         val batch = KnowledgeBatchUi("batch", "Corpus", "FILES", "WAITING", 294, 294, 0, 1, 0,
-            published = 293, unknown = 1, items = listOf(KnowledgeBatchItemUi(job.id, job.displayName, job.stage, job.error)))
+            published = 293, unknown = 1,
+            items = KnowledgeBatchItemDetails.Loaded(listOf(KnowledgeBatchItemUi(job.id, job.displayName, job.stage, job.error))))
         compose.activity.runOnUiThread { compose.activity.setContent { MaterialTheme {
-            KnowledgeScreen(KnowledgeUiState(language = "en", documents = documents, jobs = listOf(job), batches = listOf(batch)),
+            KnowledgeScreen(KnowledgeUiState(language = "en", documents = documents, jobs = listOf(job), batches = listOf(batch), batchMemberJobIds = setOf(job.id)),
                 KnowledgeActions(onRetryVision = { retry = it }))
         } } }
         compose.onNodeWithText("Corpus").assertIsDisplayed()
@@ -136,5 +157,21 @@ class KnowledgeBatchUiDeviceTest {
         compose.onNodeWithText("Show 1 item details").performScrollTo().performClick()
         compose.onNodeWithText("Retry Vision (may charge twice)").performScrollTo().performClick()
         compose.runOnIdle { assertEquals(job.id, retry) }
+    }
+
+    @Test fun collapsedBatchStatesItsRealMemberCountWithoutMaterializedRows() {
+        var toggled: Pair<String, Boolean>? = null
+        // A 400-member batch whose rows were deliberately not read back: the card must state the
+        // real count from its summary instead of looking like a batch with no members.
+        val batch = KnowledgeBatchUi("summary", "Summary corpus", "FILES", "PROCESSING", 400, 0, 0, 400, 0,
+            items = KnowledgeBatchItemDetails.Collapsed(400))
+        compose.activity.runOnUiThread { compose.activity.setContent { MaterialTheme {
+            KnowledgeScreen(KnowledgeUiState(language = "en", batches = listOf(batch)),
+                KnowledgeActions(onToggleBatchDetails = { id, open -> toggled = id to open }))
+        } } }
+        compose.onNodeWithText("Show 400 item details").performScrollTo().assertIsDisplayed()
+        compose.runOnIdle { assertEquals("summary" to false, toggled) }
+        compose.onNodeWithText("Show 400 item details").performClick()
+        compose.runOnIdle { assertEquals("summary" to true, toggled) }
     }
 }

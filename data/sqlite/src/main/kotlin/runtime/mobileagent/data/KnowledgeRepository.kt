@@ -135,6 +135,7 @@ class KnowledgeRepository(
     private val batchProgressStore = KnowledgeBatchProgressStore(db)
     private val visualSource = KnowledgeVisualSource(pdfRasterizer)
     private val retrievalStore = KnowledgeRetrievalStore(db) { kbId -> vectorIndexCache.invalidateKnowledgeBase(kbId) }
+    private val lexicalIndex = KnowledgeLexicalIndexStore(db)
     private val repairState = KnowledgeIndexRepairState(db)
 
     fun storageUsage(): StorageUsage = synchronized(indexLock) { storage.usage() }
@@ -2125,7 +2126,7 @@ class KnowledgeRepository(
             }
         } else {
             try {
-                rebuildIndex(kbId)
+                upgradeLocalEmbeddingSpace(kbId) ?: rebuildIndexPhased(kbId)
             } catch (failure: IllegalStateException) {
                 if (!failure.message.orEmpty().startsWith("RESOURCE_LIMIT")) throw failure
                 // Truth is already revoked. A disposable generation may be rebuilt
@@ -2168,11 +2169,11 @@ class KnowledgeRepository(
             requireKb(kbId)
             localRebuildSourceProblem(kbId)?.let { error("INDEX_SOURCE_INCOMPLETE: $it") }
         }
-        upgradeLocalEmbeddingSpace(kbId)?.let { return it }
+        upgradeLocalEmbeddingSpace(kbId, repairLexical = true)?.let { return it }
         if (isApiKnowledgeBase(kbId)) {
             return runBlocking { rebuildIndexCancellable(kbId, acknowledgeDuplicateCharge) }
         }
-        return rebuildIndexPhased(kbId)
+        return rebuildIndexPhased(kbId, repairLexical = true)
     }
 
     /**
@@ -2403,7 +2404,7 @@ class KnowledgeRepository(
     private class VersionsChangedDuringUpgradeException :
         IllegalStateException("Document versions changed during local upgrade")
 
-    fun upgradeLocalEmbeddingSpace(kbId: String): String? {
+    fun upgradeLocalEmbeddingSpace(kbId: String, repairLexical: Boolean = false): String? {
         // The embed phase below runs unlocked, so a concurrent publish can
         // legitimately change the version set mid-upgrade.  Replan once: rows
         // already embedded are cache hits, so a retry only pays for the new
@@ -2437,7 +2438,7 @@ class KnowledgeRepository(
                             if (embeddingInputsByVersionForKnowledgeBase(kbId).keys != inputs.keys) {
                                 throw VersionsChangedDuringUpgradeException()
                             }
-                            val generation = buildGenerationFromCachedUnlocked(kbId, embedder)
+                            val generation = buildGenerationFromCachedUnlocked(kbId, embedder, repairLexical = repairLexical)
                             db.execute("UPDATE knowledge_bases SET embedding_space_id = ? WHERE id = ?", listOf(embedder.spaceId, kbId))
                             generation
                         }
@@ -2519,7 +2520,7 @@ class KnowledgeRepository(
      * rebind could interleave between plan and commit — publishing anyway
      * would label the generation with a stale embedding space.
      */
-    private fun commitRebuild(plan: RebuildPlan, firstAppend: Boolean = false): String {
+    private fun commitRebuild(plan: RebuildPlan, firstAppend: Boolean = false, repairLexical: Boolean = false): String {
         val boundSpace = db.query(
             "SELECT embedding_space_id FROM knowledge_bases WHERE id = ?",
             listOf(plan.knowledgeBaseId),
@@ -2528,7 +2529,8 @@ class KnowledgeRepository(
             "Knowledge base ${plan.knowledgeBaseId} binding changed while rebuilding; refusing a mixed-space generation"
         }
         localRebuildSourceProblem(plan.knowledgeBaseId, plan.allowTerminalImports, plan.publishingDocumentId)?.let { error("INDEX_SOURCE_INCOMPLETE: $it") }
-        return buildGenerationFromCachedUnlocked(plan.knowledgeBaseId, plan.indexEmbedder, firstAppend = firstAppend)
+        return buildGenerationFromCachedUnlocked(plan.knowledgeBaseId, plan.indexEmbedder,
+            firstAppend = firstAppend, repairLexical = repairLexical)
     }
 
     /**
@@ -2569,13 +2571,14 @@ class KnowledgeRepository(
      * index lock NOR a database transaction; the commit holds the index lock
      * and runs one short transaction (with [withEmbeddingRepair] self-healing).
      */
-    private fun rebuildIndexPhased(kbId: String, apiConsentGrantedForOperation: Boolean = false): String {
+    private fun rebuildIndexPhased(kbId: String, apiConsentGrantedForOperation: Boolean = false,
+        repairLexical: Boolean = false): String {
         val plan = planRebuild(kbId, apiConsentGrantedForOperation)
         embedRebuild(plan)
         // The repair loop stays outside the index lock: a commit attempt is a
         // short locked transaction, while a miss is embedded lock-free.
         return withEmbeddingRepair(plan.indexEmbedder) {
-            synchronized(indexLock) { db.transaction { commitRebuild(plan) } }
+            synchronized(indexLock) { db.transaction { commitRebuild(plan, repairLexical = repairLexical) } }
         }
     }
 
@@ -2590,6 +2593,7 @@ class KnowledgeRepository(
         indexEmbedder: TextEmbedder,
         chunksByVersion: LinkedHashMap<String, Sequence<EmbeddingInput>> = embeddingInputsByVersionForKnowledgeBase(kbId),
         firstAppend: Boolean = false,
+        repairLexical: Boolean = false,
     ): String {
         val previousGeneration = db.query("SELECT active_generation_id FROM knowledge_bases WHERE id=?", listOf(kbId))
             .singleOrNull()?.string("active_generation_id")?.ifBlank { null }
@@ -2600,27 +2604,7 @@ class KnowledgeRepository(
             listOf(generationId, kbId, indexEmbedder.spaceId, generationId, "BUILDING", 0, 1, Utc.nowIso()),
         )
         chunksByVersion.forEach { (versionId, chunks) ->
-            chunks.forEach { chunk ->
-                val chunkId = chunk.chunkId
-                val text = chunk.text
-                val rowid = db.query("SELECT rowid AS rid FROM chunks WHERE id = ?", listOf(chunkId)).single().long("rid")
-                runCatching { db.execute("DELETE FROM chunks_fts WHERE rowid = ?", listOf(rowid)) }
-                runCatching { db.execute("INSERT INTO chunks_fts(rowid, text) VALUES (?, ?)", listOf(rowid, CjkLexical.indexText(text))) }
-                val stored = db.query(
-                    "SELECT content_hash, vector_blob FROM embeddings WHERE chunk_id = ? AND space_id = ?",
-                    listOf(chunkId, indexEmbedder.spaceId),
-                ).singleOrNull() ?: throw MissingEmbeddingException(chunk)
-                check(stored.string("content_hash") == chunk.contentHash) {
-                    "embedding content hash changed for chunk $chunkId"
-                }
-                val bytes = embeddingBytes(stored)
-                validateEmbeddingBytes(bytes, indexEmbedder.dimension)
-                db.execute(
-                    "INSERT OR IGNORE INTO generation_members(generation_id,chunk_id,space_id,document_version_id) VALUES (?,?,?,?)",
-                    listOf(generationId, chunkId, indexEmbedder.spaceId, versionId),
-                )
-                vectors += 1
-            }
+            vectors += populateGenerationMembers(generationId, versionId, chunks, indexEmbedder, repairLexical)
         }
         val actualVectors = db.query(
             "SELECT COUNT(*) AS n FROM generation_members g JOIN embeddings e ON e.chunk_id = g.chunk_id AND e.space_id = g.space_id WHERE g.generation_id = ?",
@@ -2649,6 +2633,27 @@ class KnowledgeRepository(
         // the reader's view because the cache key contains the generation id.
         vectorIndexCache.invalidateKnowledgeBase(kbId)
         return generationId
+    }
+
+    /** Verify all immutable vectors, but keep SQL crossings and temporary rows bounded. */
+    private fun populateGenerationMembers(
+        generationId: String,
+        versionId: String,
+        chunks: Sequence<EmbeddingInput>,
+        indexEmbedder: TextEmbedder,
+        repairLexical: Boolean,
+    ): Int {
+        var count = 0
+        val members = KnowledgeGenerationMemberStore(db, lexicalIndex)
+        chunks.chunked(128).forEach { batch ->
+            val byId = batch.associateBy { it.chunkId }
+            count += members.append(generationId, versionId,
+                batch.map { KnowledgeGenerationMemberStore.Input(it.chunkId, it.text, it.contentHash) },
+                indexEmbedder.spaceId, repairLexical,
+                onMissingEmbedding = { id -> throw MissingEmbeddingException(byId.getValue(id)) },
+                validateVector = { row -> validateEmbeddingBytes(embeddingBytes(row), indexEmbedder.dimension) })
+        }
+        return count
     }
 
     /** A new derived index may add members, but may not remove/replace a frozen source or change its space. */
@@ -4446,6 +4451,7 @@ class KnowledgeRepository(
                         operation.knowledgeBaseId,
                         selectedEmbedder,
                         firstAppend = firstAppend,
+                        repairLexical = operation.kind == "REBUILD",
                     )
                     operation.jobId?.let { jobId ->
                         advanceBatchGenerationAfterPublicationLocked(jobId, generation)
@@ -4668,7 +4674,7 @@ class KnowledgeRepository(
                     )
                     db.execute("UPDATE documents SET active_version_id = ? WHERE id = ? AND deleted_at IS NULL", listOf(versionId, job.documentId))
                     ensureBatchGenerationCurrentLocked(job.id)
-                    val generation = commitRebuild(rebuild, firstAppend)
+                    val generation = commitRebuild(rebuild, firstAppend, repairLexical = false)
                     advanceBatchGenerationAfterPublicationLocked(job.id, generation)
                     if (!job.visualGapsAccepted) pipeline.recordPublication(job.id,chunkVersion,versionId)
                 }
@@ -4702,42 +4708,43 @@ class KnowledgeRepository(
         val reusable = existing.groupBy { it.string("content_hash") }
             .mapValues { (_, rows) -> ArrayDeque(rows) }
         val retainedIds = mutableSetOf<String>()
-        existing.forEach { row ->
-            runCatching { db.execute("DELETE FROM chunks_fts WHERE rowid = ?", listOf(row.long("rid"))) }
-        }
+        lexicalIndex.remove(existing.map { it.long("rid") })
         // STAGING chunks have no issued citations. Preserve immutable vectors by
         // retaining chunk IDs for equal content, even when a retry reorders it.
         // Move old ordinals aside before assigning the replacement ordering.
         db.execute("UPDATE chunks SET ordinal = -ordinal - 1 WHERE document_version_id = ?", listOf(documentVersionId))
-        chunks.forEachIndexed { ordinal, chunk ->
-            val hash = sha256Hex(chunk.text.toByteArray(Charsets.UTF_8))
-            val prior = reusable[hash]?.removeFirstOrNull()
-            val id = prior?.string("id") ?: EntityId.random().value
-            val values = listOf(
-                ordinal,
-                chunk.text,
-                hash,
-                chunk.span,
-                chunk.assetIds.map { versionAssets.getValue(it) }.joinToString(","),
-                chunk.page,
-                chunk.text.length,
-            )
-            if (prior != null) {
-                retainedIds += id
-                db.execute(
-                    "UPDATE chunks SET ordinal=?,text=?,content_hash=?,source_span=?,asset_ids=?,page=?,text_utf16_length=? WHERE id=?",
-                    values + id,
+        chunks.chunked(128).forEachIndexed { batchIndex, batch ->
+            val lexicalRows = ArrayList<KnowledgeLexicalIndexStore.Source>(batch.size)
+            batch.forEachIndexed { offset, chunk ->
+                val ordinal = batchIndex * 128 + offset
+                val hash = sha256Hex(chunk.text.toByteArray(Charsets.UTF_8))
+                val prior = reusable[hash]?.removeFirstOrNull()
+                val id = prior?.string("id") ?: EntityId.random().value
+                val values = listOf(
+                    ordinal,
+                    chunk.text,
+                    hash,
+                    chunk.span,
+                    chunk.assetIds.map { versionAssets.getValue(it) }.joinToString(","),
+                    chunk.page,
+                    chunk.text.length,
                 )
-            } else {
-                db.execute(
-                    "INSERT INTO chunks(ordinal,text,content_hash,source_span,asset_ids,page,text_utf16_length,id,document_version_id) VALUES (?,?,?,?,?,?,?,?,?)",
-                    values + listOf(id, documentVersionId),
-                )
+                if (prior != null) {
+                    retainedIds += id
+                    db.execute(
+                        "UPDATE chunks SET ordinal=?,text=?,content_hash=?,source_span=?,asset_ids=?,page=?,text_utf16_length=? WHERE id=?",
+                        values + id,
+                    )
+                } else {
+                    db.execute(
+                        "INSERT INTO chunks(ordinal,text,content_hash,source_span,asset_ids,page,text_utf16_length,id,document_version_id) VALUES (?,?,?,?,?,?,?,?,?)",
+                        values + listOf(id, documentVersionId),
+                    )
+                }
+                val rowid = db.query("SELECT rowid AS rid FROM chunks WHERE id = ?", listOf(id)).single().long("rid")
+                lexicalRows += KnowledgeLexicalIndexStore.Source(rowid, chunk.text)
             }
-            val rowid = db.query("SELECT rowid AS rid FROM chunks WHERE id = ?", listOf(id)).single().long("rid")
-            runCatching {
-                db.execute("INSERT INTO chunks_fts(rowid, text) VALUES (?, ?)", listOf(rowid, CjkLexical.indexText(chunk.text)))
-            }
+            lexicalIndex.insertMissing(lexicalRows)
         }
         existing.filter { it.string("id") !in retainedIds }.forEach { row ->
             // No FK cascade exists. Remove only superseded rows of this staged

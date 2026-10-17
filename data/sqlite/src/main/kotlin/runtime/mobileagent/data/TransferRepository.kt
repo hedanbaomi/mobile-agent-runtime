@@ -1142,9 +1142,7 @@ class TransferRepository(
                     throw conflict("Chunk ${chunk.id} conflicts with local data")
                 }
                 val rowid = db.query("SELECT rowid AS rid FROM chunks WHERE id=?", listOf(chunk.id)).single().long("rid")
-                runCatching {
-                    db.execute("INSERT OR REPLACE INTO chunks_fts(rowid,text) VALUES(?,?)", listOf(rowid, chunk.text))
-                }
+                KnowledgeLexicalIndexStore(db).replace(listOf(KnowledgeLexicalIndexStore.Source(rowid, chunk.text)))
             }
             kb.assets.forEach { asset ->
                 val existingAsset = db.query("SELECT * FROM assets WHERE id=?", listOf(asset.id)).singleOrNull()

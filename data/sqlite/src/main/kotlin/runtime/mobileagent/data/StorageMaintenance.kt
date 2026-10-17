@@ -145,14 +145,16 @@ internal class StorageMaintenance(private val db: SqlConnection, private val blo
             db.execute("DELETE FROM import_jobs WHERE id=?", listOf(job))
         }
         val versions = db.query("SELECT id FROM document_versions WHERE document_id=?", listOf(id)).map { it.string("id") }
+        // v34 chunks_fts is a contentless-delete index: postings are removed with a plain rowid
+        // DELETE and no source text. An absent index keeps the legacy no-FTS compatibility path.
+        val lexicalIndexPresent = db.query(
+            "SELECT 1 AS available FROM sqlite_master WHERE type='table' AND name='chunks_fts' LIMIT 1",
+        ).isNotEmpty()
         versions.forEach { version ->
-            // External-content FTS delete must precede removal of its source row.
-            db.query("SELECT rowid,text FROM chunks WHERE document_version_id=?", listOf(version)).forEach {
-                // Older restores can contain source rows which were never indexed. The
-                // default FTS5 columnsize=1 schema keeps one docsize row per indexed row;
-                // deleting nonexistent postings reports CORRUPT_VTAB instead of being a no-op.
-                if (db.query("SELECT id FROM chunks_fts_docsize WHERE id=?", listOf(it.long("rowid"))).isNotEmpty()) {
-                    db.execute("INSERT INTO chunks_fts(chunks_fts,rowid,text) VALUES('delete',?,?)", listOf(it.long("rowid"), runtime.mobileagent.knowledge.CjkLexical.indexText(it.string("text"))))
+            // Postings must disappear before their source rows so no indexed row outlives its chunk.
+            if (lexicalIndexPresent) {
+                db.query("SELECT rowid AS rid FROM chunks WHERE document_version_id=?", listOf(version)).forEach {
+                    db.execute("DELETE FROM chunks_fts WHERE rowid=?", listOf(it.long("rid")))
                 }
             }
             db.execute("DELETE FROM generation_members WHERE document_version_id=?", listOf(version))

@@ -1652,6 +1652,7 @@ private fun KnowledgeRoute(vm: runtime.mobileagent.KnowledgeViewModel, chinese: 
         onConfigurePipeline = vm::configurePipeline,
         onRebuildBatchLocalChunks = vm::rebuildBatchLocalChunks,
         onAuthorizeBatchVision = vm::authorizeBatchVision,
+        onToggleBatchDetails = vm::setBatchExpanded,
     )
     runtime.mobileagent.feature.knowledge.KnowledgeScreen(state, actions, showPageTitle = false)
     vm.visionRequest.value?.let { (jobId, retry) ->

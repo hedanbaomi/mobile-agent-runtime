@@ -7,6 +7,9 @@ import androidx.test.platform.app.InstrumentationRegistry
 import org.junit.Assert.*
 import org.junit.Test
 import runtime.mobileagent.data.Migrations
+import runtime.mobileagent.data.KnowledgeRepository
+import runtime.mobileagent.data.SqlConnection
+import runtime.mobileagent.knowledge.MemoryBlobSink
 import java.io.File
 import java.util.UUID
 import java.util.concurrent.CountDownLatch
@@ -16,6 +19,56 @@ import java.util.concurrent.TimeUnit
 class BundledSqliteReliabilityTest {
     private fun file(): File = File(InstrumentationRegistry.getInstrumentation().targetContext.cacheDir,
         "bundled-reliability-${UUID.randomUUID()}.db")
+
+    @Test fun lexicalMigrationUsesBundledFtsAndRollsBackBeforePublishingTheVersion() {
+        BundledSqliteConnection(file().absolutePath).use { db ->
+            Migrations.apply(db)
+            val repo = KnowledgeRepository(db, MemoryBlobSink(), automaticStorageMaintenance = false)
+            db.execute("DELETE FROM chunks_fts WHERE rowid IN (?)", listOf(123456789L))
+            val first = repo.createKnowledgeBase("railway fixture")
+            val other = repo.createKnowledgeBase("garden fixture")
+            repo.importBytes("train.txt", "text/plain", "铁路运输退款记录 railway refund".toByteArray(), false, first)
+            repo.importBytes("garden.txt", "text/plain", "Garden roses need sunlight".toByteArray(), false, other)
+            repo.repairIndexes(onlyChanged = true)
+            val chunks = db.query("SELECT id,text,content_hash FROM chunks ORDER BY id")
+            val vectors = db.query("SELECT chunk_id,space_id,hex(vector_blob) AS bytes FROM embeddings ORDER BY chunk_id")
+            val pins = repo.generationPins(listOf(first, other))
+            val rowId = db.query("SELECT rowid AS rid FROM chunks ORDER BY rowid LIMIT 1").single().long("rid")
+            db.execute("DROP TABLE chunks_fts")
+            db.execute("CREATE VIRTUAL TABLE chunks_fts USING fts5(text, content='chunks', content_rowid='rowid')")
+            db.execute("INSERT INTO chunks_fts(rowid,text) VALUES(?,?)", listOf(rowId, "obsoletewrong"))
+            db.execute("UPDATE schema_version SET version=33")
+            val fault = object : SqlConnection by db {
+                override fun execute(sql: String, args: List<Any?>) {
+                    if (sql.startsWith("INSERT INTO chunks_fts(rowid")) error("synthetic migration interruption")
+                    db.execute(sql, args)
+                }
+            }
+            assertThrows(IllegalStateException::class.java) { Migrations.apply(fault) }
+            assertEquals(33L, db.query("SELECT version FROM schema_version").single().long("version"))
+            assertEquals(1, db.query("SELECT rowid FROM chunks_fts WHERE chunks_fts MATCH 'obsoletewrong'").size)
+            assertEquals(chunks, db.query("SELECT id,text,content_hash FROM chunks ORDER BY id"))
+            Migrations.apply(db)
+            Migrations.apply(db)
+            assertEquals(Migrations.VERSION.toLong(), db.query("SELECT version FROM schema_version").single().long("version"))
+            assertTrue(db.query("SELECT sql FROM sqlite_master WHERE name='chunks_fts'").single().string("sql").contains("contentless_delete=1"))
+            assertEquals(1, db.query("SELECT rowid FROM chunks_fts WHERE chunks_fts MATCH '\"铁路\"'").size)
+            assertEquals(1, db.query("SELECT rowid FROM chunks_fts WHERE chunks_fts MATCH 'garden'").size)
+            assertTrue(db.query("SELECT rowid FROM chunks_fts WHERE chunks_fts MATCH 'obsoletewrong'").isEmpty())
+            assertEquals(chunks, db.query("SELECT id,text,content_hash FROM chunks ORDER BY id"))
+            assertEquals(vectors, db.query("SELECT chunk_id,space_id,hex(vector_blob) AS bytes FROM embeddings ORDER BY chunk_id"))
+            assertEquals(pins, repo.generationPins(listOf(first, other)))
+            assertNull(db.query("SELECT text FROM chunks_fts LIMIT 1").single().columns["text"])
+            assertEquals(listOf(rowId), db.query("SELECT rowid AS rid FROM chunks_fts WHERE rowid IN (?,?)",
+                listOf(rowId, 123456789L)).map { it.long("rid") })
+            db.execute("DELETE FROM chunks_fts WHERE rowid=?", listOf(rowId))
+            repo.rebuildIndex(first)
+            assertEquals(1, db.query("SELECT rowid FROM chunks_fts WHERE chunks_fts MATCH '\"铁路\"'").size)
+            assertEquals(1, db.query("SELECT rowid FROM chunks_fts WHERE chunks_fts MATCH 'garden'").size)
+            android.util.Log.i("LexicalMigration", "sqlite_version=" + db.query("SELECT sqlite_version() AS v").single().string("v") +
+                " schema=" + db.query("SELECT version FROM schema_version").single().long("version") + " chunks=" + chunks.size)
+        }
+    }
 
     @Test fun additiveOldFileCreatesNewTablesAndPreservesOldChunkText() {
         val file = file()

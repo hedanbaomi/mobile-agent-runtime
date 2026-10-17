@@ -110,10 +110,12 @@ class ScreenActionDeviceTest {
         } ?: error("Fixture observation timed out: $lastState")
     }
 
-    private fun call(snapshot: ScreenSnapshot, action: String, node: ScreenNode? = null, text: String? = null): ToolCall =
+    private fun call(snapshot: ScreenSnapshot, action: String, node: ScreenNode? = null, text: String? = null,
+        observeAfter: JsonObject? = null): ToolCall =
         ToolCall("action-${++callNumber}", "device_act", buildJsonObject {
             put("observation_id", snapshot.observationId!!); put("action", action)
             node?.let { put("node_index", it.index) }; text?.let { put("text", it) }
+            observeAfter?.let { put("observe_after", it) }
         }.toString())
 
     private suspend fun act(call: ToolCall) {
@@ -180,6 +182,34 @@ class ScreenActionDeviceTest {
         }
         assertTrue(executor.invoke(home) is ToolResult.Value)
         assertTrue(executor.approve(home.callId) is ToolResult.Invalid)
+    }
+
+    @Test fun observeAfterFoldsTheFollowUpReadIntoTheSameActionCall(): Unit = runBlocking {
+        val before = observe { s -> s.nodes.any { it.text == "clicks=0 longs=0" } }
+        val click = call(before, "click", before.nodes.first { it.description == "tap-target" },
+            observeAfter = buildJsonObject { put("text", "clicks=1 longs=0"); put("timeout_ms", 5000) })
+        assertEquals(ToolResult.NeedsApproval, executor.invoke(click))
+        val result = executor.approve(click.callId)
+        assertTrue(result.toString(), result is ToolResult.Value)
+        val root = Json.parseToJsonElement((result as ToolResult.Value).json).jsonObject
+        assertEquals("performed", root["status"]?.jsonPrimitive?.content)
+        assertEquals(true, root["action_confirmed"]?.jsonPrimitive?.boolean)
+        val observed = root["observation"]?.jsonObject
+        assertNotNull(observed)
+        assertEquals("observed", observed!!["status"]?.jsonPrimitive?.content)
+        assertEquals(true, observed["matched"]?.jsonPrimitive?.boolean)
+        val nodes = observed["nodes"] as JsonArray
+        assertTrue(nodes.any { it.jsonObject["text"]?.jsonPrimitive?.contentOrNull == "clicks=1 longs=0" })
+        // The returned handle is directly actionable: no separate observation round is needed.
+        val handle = observed["observation_id"]?.jsonPrimitive?.content
+        assertNotNull(handle)
+        val target = nodes.first { it.jsonObject["description"]?.jsonPrimitive?.contentOrNull == "tap-target" }.jsonObject
+        val next = ToolCall("action-next", "device_act", buildJsonObject {
+            put("observation_id", handle); put("action", "click"); put("node_index", target["index"]!!.jsonPrimitive.int)
+        }.toString())
+        assertEquals(ToolResult.NeedsApproval, executor.invoke(next))
+        assertTrue(executor.approve(next.callId) is ToolResult.Value)
+        observe { s -> s.nodes.any { it.text == "clicks=2 longs=0" } }
     }
 
     @Test fun compareAcknowledgedClicksWithLocalShellInput() = runBlocking {

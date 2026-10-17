@@ -20,7 +20,7 @@ class MessageChronologyMigrationTest {
             val original = originals(db)
             val tracked = TrackingConnection(db)
             Migrations.apply(tracked)
-            assertEquals(33L, db.query("SELECT version FROM schema_version").single().long("version"))
+            assertEquals(Migrations.VERSION.toLong(), db.query("SELECT version FROM schema_version").single().long("version"))
             assertEquals(original, originals(db))
             assertEquals(listOf(1, 128, 128, 5, 0), tracked.batches)
             assertEquals(261, tracked.metadataWrites)

@@ -360,6 +360,17 @@ class RunTools(
         }
     }
 
+    /** Read only a monotonic OS acknowledgement; never redispatch or recover screen content. */
+    internal fun confirmedDeviceActionAfterTimeout(call: ToolCall): ToolResult.Value? {
+        return synchronized(callLock) {
+            callsByModelId[call.callId]?.singleOrNull { it.call == call }
+        }?.let { routed ->
+            confirmedDeviceActionReceipt(routed.runtimeInvocationId)?.let { receipt ->
+                ToolResult.Value(receipt.timedOutResultJson).also { complete(routed, it) }
+            }
+        }
+    }
+
     /** Called by AgentRuntime before attaching the tool's following multimodal user message. */
     suspend fun toolImages(call: ToolCall, result: ToolResult): List<InlineImage> {
         if (result !is ToolResult.Value) return emptyList()
@@ -477,7 +488,7 @@ class RunTools(
                 }
             }
         } catch (timeout: TimeoutCancellationException) {
-            reject(routed, ToolResult.UnknownOutcome("Tool execution timed out; outcome is unknown"))
+            complete(routed, ConfirmedDeviceActionReceipt.timeoutOutcome(confirmedDeviceActionReceipt(routed.runtimeInvocationId)))
         } catch (cancelled: CancellationException) {
             // Once an owner operation has started, cancellation cannot prove
             // whether the external side effect happened.  Preserve the

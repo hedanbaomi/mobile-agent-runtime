@@ -774,7 +774,7 @@ class AgentRuntime(
                     }
                     run.state = RunState.TOOL_EXECUTING
                     var approvalRejected = false
-                    val result = try {
+                    val immediateResult = try {
                         // invoke/approve are the executor dispatch boundary.  Once either has been
                         // entered, cancellation or a stall cannot prove that the external operation
                         // did not happen.  A dispatched tool is never cut off by the run deadline; it
@@ -829,6 +829,7 @@ class AgentRuntime(
                         }
                         throw e
                     }
+                    val result = request.settleTimedOutToolResult(immediateResult, call, activeDispatch == DispatchKind.TOOL)
                     if (result == null && approvalRejected) {
                         activeDispatch = null
                         // The rejection branch emits its user-facing failure,

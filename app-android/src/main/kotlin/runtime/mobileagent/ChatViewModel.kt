@@ -1395,6 +1395,7 @@ class ChatViewModel internal constructor(
                 })
                 val runtimeEvents = runtime.run(AgentRuntimeRequest(run, prompt, model.modelId, secret!!, "tools" in model.capabilities,
                     parameters = layers, headers = headers, emitRequestPreview = container.uiPreferences.getBoolean("request-inspector", true),
+                    confirmedToolResultAfterTimeout = runTools::confirmedDeviceActionAfterTimeout,
                     toolImages = { call, result ->
                         if (productivity.ownsTool(call.name)) emptyList() else runTools.toolImages(call, result)
                     }, maxInputBudgetUnits = inputBudget.toLong(),
@@ -1815,7 +1816,7 @@ class ChatViewModel internal constructor(
                 }))
             } catch (cancel: CancellationException) {
                 withContext(NonCancellable) {
-                    pendingApprovalFor(run.runId)?.let { pending -> resources.confirmedDeviceAction(pending.callId) }
+                    pendingApprovalFor(run.runId)?.invocationId?.let { id -> resources.confirmedDeviceAction(id) }
                         ?.let { receipt -> withContext(Dispatchers.IO) {
                             runCatching { ConfirmedDeviceActionCancellation.persist(container.db, run.runId, conversationId, receipt) }.getOrNull()
                         } }?.let { completed ->

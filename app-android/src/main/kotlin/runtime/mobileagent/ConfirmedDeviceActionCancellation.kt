@@ -11,10 +11,19 @@ import runtime.mobileagent.domain.MessageRole
 import runtime.mobileagent.domain.ToolInvocation
 import runtime.mobileagent.domain.ToolResultPart
 import runtime.mobileagent.domain.Utc
+import runtime.mobileagent.skills.ToolResult
 
 /** A monotonic OS acknowledgement, with no screen content or authority to dispatch anything. */
 internal data class ConfirmedDeviceActionReceipt(val callId: String, val invocationId: String) {
     val resultJson: String get() = """{"status":"performed","action_confirmed":true,"observe_again":true,"observation":{"status":"cancelled"}}"""
+    val timedOutResultJson: String get() = """{"status":"performed","action_confirmed":true,"observe_again":true,"observation":{"status":"timeout"}}"""
+
+    companion object {
+        /** A stall without an OS receipt must retain the ordinary unknown outcome. */
+        fun timeoutOutcome(receipt: ConfirmedDeviceActionReceipt?): ToolResult =
+            receipt?.let { ToolResult.Value(it.timedOutResultJson) }
+                ?: ToolResult.UnknownOutcome("Tool execution timed out; outcome is unknown")
+    }
 }
 
 /** Cancelled flow collectors cannot emit a result event; settle the known fact before generic cancellation cleanup. */

@@ -29,8 +29,9 @@ enum class RunState {
  * request, summary, or tool call.  It never cuts off a model stream or tool that has already
  * been dispatched; those end on their own terminal result or on the caller's cancellation.
  * [stallTimeoutMs] bounds the rest: a model stream with no event or transport chunk for that
- * long, or a single tool call that has not returned within it, becomes an unknown outcome that
- * is never replayed.
+ * long, or a single tool call that has not returned within it, times out. Without a trusted
+ * application receipt it becomes UNKNOWN. An already-confirmed receipt preserves the execution
+ * fact; neither outcome permits the tool to be executed again.
  */
 data class RunBudget(
     val maxModelRounds: Int = DEFAULT_RUN_MODEL_REQUESTS,

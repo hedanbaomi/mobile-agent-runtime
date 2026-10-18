@@ -71,7 +71,18 @@ data class AgentRuntimeRequest(
      * request/response bodies unless the sink explicitly opts in.
      */
     val diagnostics: runtime.mobileagent.provider.ModelDiagnosticSink? = null,
+    /**
+     * Trusted application hook for an already-confirmed execution fact after a tool stall.
+     * It must only read a local receipt for this exact call: no execution, retry or new data
+     * disclosure. Null or failure preserves UNKNOWN; ordinary cancellation never invokes it.
+     * Recovered values still pass the normal output-size and redaction boundaries.
+     */
+    val confirmedToolResultAfterTimeout: (ToolCall) -> ToolResult.Value? = { null },
 )
+
+/** An outer stall can win before the executor returns; approval waits are never execution proof. */
+internal fun AgentRuntimeRequest.settleTimedOutToolResult(result: ToolResult?, call: ToolCall, dispatched: Boolean): ToolResult? =
+    result ?: if (dispatched) runCatching { confirmedToolResultAfterTimeout(call) }.getOrNull() else null
 
 /** A bounded summary safe for persistence and inspector lists. */
 data class RuntimeMessageSummary(

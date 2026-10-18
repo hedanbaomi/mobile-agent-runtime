@@ -12,6 +12,8 @@ import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.flow
+import kotlinx.coroutines.flow.toList
 import kotlinx.coroutines.withTimeout
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -23,6 +25,10 @@ import org.junit.runner.RunWith
 import runtime.mobileagent.agent.AgentRun
 import runtime.mobileagent.agent.RunBudget
 import runtime.mobileagent.agent.RunState
+import runtime.mobileagent.agent.AgentRuntime
+import runtime.mobileagent.agent.AgentRuntimeRequest
+import runtime.mobileagent.agent.EffectivePrompt
+import runtime.mobileagent.agent.RuntimeEvent
 import runtime.mobileagent.domain.AgentProfile
 import runtime.mobileagent.domain.AgentSnapshot
 import runtime.mobileagent.domain.ApiFormat
@@ -42,6 +48,7 @@ import runtime.mobileagent.skills.ToolExecutor
 import runtime.mobileagent.skills.ToolResult
 import runtime.mobileagent.skills.ToolSpec
 import runtime.mobileagent.tooling.ToolExecutorFactory
+import runtime.mobileagent.provider.*
 
 /**
  * Cached tool results must be re-validated for disclosure before replay.
@@ -52,6 +59,117 @@ import runtime.mobileagent.tooling.ToolExecutorFactory
  */
 @RunWith(AndroidJUnit4::class)
 class RunToolsReplayDeviceTest {
+    @Test fun runtimeStallRecoversTheExactActionWhenModelCallIdsAreReused(): Unit = runBlocking {
+        withTimeout(15_000) {
+            val chain = prepareChain("runtime-device-stall")
+            val registry = ScreenObservationRegistry.get(chain.app)
+            val previous = registry.access.value.consent
+            registry.setConsent(false)
+            var dispatches = 0
+            val run = AgentRun("run.${UUID.randomUUID()}", chain.snapshot.id, "conversation.${UUID.randomUUID()}",
+                budget = RunBudget(stallTimeoutMs = 250))
+            val port = object : ScreenActionPort, ScreenObservationPort {
+                override val access = MutableStateFlow(ScreenAccess(true, true, 1, true))
+                override val changes = MutableStateFlow(1L)
+                override suspend fun perform(request: ScreenActionRequest, authorized: suspend () -> Boolean,
+                    onDispatch: () -> Unit): Boolean {
+                    check(authorized()); onDispatch(); dispatches++
+                    return true
+                }
+                override suspend fun capture(expectedPackage: String?): ScreenSnapshot = awaitCancellation()
+            }
+            val action = ScreenActionToolExecutor(port, { ScreenActionAuthority(Authority.SHIZUKU, 1) }, { true })
+            val tools = RunTools(chain.container, chain.app, chain.snapshot, run, false, false, runExecutor = action)
+            try {
+                val first = ToolCall("reused-model-id", "device_act",
+                    """{"observation_id":"${UUID.randomUUID()}","action":"click","node_index":0}""")
+                val second = first.copy(argumentsJson =
+                    """{"observation_id":"${UUID.randomUUID()}","action":"click","node_index":1,"observe_after":{}}""")
+                var round = 0
+                val adapter = object : ModelAdapter {
+                    override suspend fun probe(profile: ModelProfile): CapabilityReport = error("unused")
+                    override suspend fun embed(request: EmbeddingRequest, secret: CharArray): EmbeddingBatch = error("unused")
+                    override fun stream(request: ModelRequest, secret: CharArray) = flow {
+                        when (round++) {
+                            0 -> emit(ModelEvent.ToolCallDelta(first.callId, first.name, first.argumentsJson))
+                            1 -> emit(ModelEvent.ToolCallDelta(second.callId, second.name, second.argumentsJson))
+                            else -> emit(ModelEvent.TextDelta("done"))
+                        }
+                        emit(ModelEvent.Completed)
+                    }
+                }
+                val invocationIds = mutableListOf<String>()
+                val events = AgentRuntime(adapter, onApprove = { call ->
+                    invocationIds += requireNotNull(tools.runtimeInvocationId(call.callId))
+                    true
+                }).run(AgentRuntimeRequest(run, EffectivePrompt("contract", "", emptyList(), emptyList(), emptyList(), "hello"),
+                    "model", charArrayOf(), toolsEnabled = true, executor = tools.executor,
+                    confirmedToolResultAfterTimeout = tools::confirmedDeviceActionAfterTimeout)).toList()
+                val results = events.filterIsInstance<RuntimeEvent.ToolResultProduced>()
+                assertEquals(listOf("VALUE", "VALUE"), results.map { it.status })
+                assertTrue(results.last().resultJson.contains("\"status\":\"timeout\""))
+                assertEquals(RunState.COMPLETED, run.state)
+                assertEquals(2, dispatches)
+                assertEquals(2, invocationIds.toSet().size)
+                assertNull(tools.confirmedDeviceActionReceipt(second.callId))
+                assertEquals(invocationIds.last(), tools.confirmedDeviceActionReceipt(invocationIds.last())?.invocationId)
+                assertNull(tools.confirmedDeviceActionAfterTimeout(second.copy(argumentsJson = "{}")))
+                assertEquals(results.last().resultJson, tools.confirmedDeviceActionAfterTimeout(second)?.json)
+                assertEquals(2, dispatches)
+            } finally { tools.executor.close(); registry.setConsent(previous) }
+        }
+    }
+
+    @Test fun stalledFollowUpPreservesOnlyConfirmedActionsWithoutRedispatch(): Unit = runBlocking {
+        withTimeout(15_000) {
+            val chain = prepareChain("confirmed-device-stall")
+            val registry = ScreenObservationRegistry.get(chain.app)
+            val previous = registry.access.value.consent
+            registry.setConsent(false)
+            try {
+                for ((acknowledged, revoked) in listOf(false to false, true to false, true to true)) {
+                    val run = AgentRun(runId = "run.${UUID.randomUUID()}", snapshotId = chain.snapshot.id,
+                        conversationId = "conversation.${UUID.randomUUID()}", state = RunState.TOOL_EXECUTING,
+                        budget = RunBudget(stallTimeoutMs = 200), startedAtMs = System.currentTimeMillis())
+                    var dispatches = 0
+                    val port = object : ScreenActionPort, ScreenObservationPort {
+                        override val access = MutableStateFlow(ScreenAccess(true, true, 1, true))
+                        override val changes = MutableStateFlow(1L)
+                        override suspend fun perform(request: ScreenActionRequest, authorized: suspend () -> Boolean,
+                            onDispatch: () -> Unit): Boolean {
+                            check(authorized()); onDispatch(); dispatches++
+                            if (!acknowledged) awaitCancellation()
+                            return true
+                        }
+                        override suspend fun capture(expectedPackage: String?): ScreenSnapshot {
+                            if (revoked) access.value = ScreenAccess(false, true, 2)
+                            awaitCancellation()
+                        }
+                    }
+                    val action = ScreenActionToolExecutor(port, { ScreenActionAuthority(Authority.SHIZUKU, 1) }, { true })
+                    val tools = RunTools(chain.container, chain.app, chain.snapshot, run, false, false, runExecutor = action)
+                    try {
+                        val call = ToolCall("stall-${UUID.randomUUID()}", "device_act",
+                            """{"observation_id":"${UUID.randomUUID()}","action":"click","node_index":0,"observe_after":{}}""")
+                        assertEquals(ToolResult.NeedsApproval, tools.executor.invoke(call))
+                        val result = tools.executor.approve(call.callId)
+                        if (acknowledged) {
+                            assertTrue("Confirmed action lost after its read stalled: $result", result is ToolResult.Value)
+                            val json = (result as ToolResult.Value).json
+                            assertTrue(json.contains("\"status\":\"performed\""))
+                            assertTrue(json.contains("\"status\":\"timeout\""))
+                            assertFalse(json.contains("nodes"))
+                        } else assertTrue(result is ToolResult.UnknownOutcome)
+                        val replay = tools.executor.invoke(call)
+                        if (acknowledged && !revoked) assertEquals(result, replay)
+                        else assertTrue(replay is ToolResult.Denied)
+                        assertEquals(1, dispatches)
+                    } finally { tools.executor.close() }
+                }
+            } finally { registry.setConsent(previous) }
+        }
+    }
+
     @Test fun cancellationPreservesOnlyARealOsAcknowledgementAndPublishesItsReceiptAtomically() = runBlocking {
         withTimeout(30_000) {
             val chain = prepareChain("confirmed-device-cancel")

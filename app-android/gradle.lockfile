@@ -113,6 +113,7 @@ androidx.work:work-runtime:2.10.5=debugAndroidTestRuntimeClasspath,debugRuntimeC
 androidx.work:work-testing:2.10.5=debugAndroidTestRuntimeClasspath,reviewAndroidTestCompileClasspath,reviewAndroidTestRuntimeClasspath
 com.google.code.findbugs:jsr305:2.0.2=debugAndroidTestRuntimeClasspath,reviewAndroidTestRuntimeClasspath
 com.google.guava:listenablefuture:1.0=debugAndroidTestRuntimeClasspath,debugRuntimeClasspath,reviewAndroidTestCompileClasspath,reviewAndroidTestRuntimeClasspath,reviewRuntimeClasspath
+com.google.re2j:re2j:1.8=debugRuntimeClasspath,reviewRuntimeClasspath
 com.microsoft.onnxruntime:onnxruntime-android:1.29.0=debugRuntimeClasspath,reviewRuntimeClasspath
 com.squareup.okhttp3:okhttp-sse:4.12.0=debugRuntimeClasspath,reviewAndroidTestCompileClasspath,reviewCompileClasspath,reviewRuntimeClasspath
 com.squareup.okhttp3:okhttp:4.12.0=debugRuntimeClasspath,reviewAndroidTestCompileClasspath,reviewCompileClasspath,reviewRuntimeClasspath

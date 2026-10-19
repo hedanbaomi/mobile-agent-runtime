@@ -83,6 +83,8 @@ internal data class CompactionPlan(
  * call/result units may be replaced. Images and opaque provider continuation are always retained.
  */
 internal class ContextWindow(prompt: EffectivePrompt, val context: RuntimeContext?) {
+    private val worldBooks = prompt.worldBooks
+    private val outletConfiguration = prompt.outletConfiguration()
     private val entries = mutableListOf<ContextEntry>()
     private val order = mutableListOf<String>()
     fun transformProjectedMessages(transform: (List<ChatMessage>) -> List<ChatMessage>) {
@@ -98,7 +100,7 @@ internal class ContextWindow(prompt: EffectivePrompt, val context: RuntimeContex
     private val currentId = context?.currentUserMessageId ?: "current-user"
 
     init {
-        val assembled = prompt.asMessages()
+        val assembled = prompt.assemble(includeWorldBooks = false).messages
         val historySize = prompt.typedHistory?.size ?: prompt.history.size
         require(context == null || context.historySources.size == historySize) { "Context source mapping does not match history" }
         val prefixSize = assembled.size - historySize - 1
@@ -126,8 +128,8 @@ internal class ContextWindow(prompt: EffectivePrompt, val context: RuntimeContex
 
     fun messages(): List<ChatMessage> {
         val prefix = entries.takeWhile { it.message.role == "system" }
-        return prefix.map { it.message } + listOfNotNull(summary?.summaryJson?.let(ContextSummaryFormat::message)) +
-            entries.drop(prefix.size).map { it.message }
+        return projectWorldBooks(prefix.map { it.message } + listOfNotNull(summary?.summaryJson?.let(ContextSummaryFormat::message)) +
+            entries.drop(prefix.size).map { it.message })
     }
 
     fun append(message: ChatMessage, sourceId: String) {
@@ -151,7 +153,7 @@ internal class ContextWindow(prompt: EffectivePrompt, val context: RuntimeContex
     /** The irreducible request is checked before resolving credentials or calling a summarizer. */
     fun minimumRequest(request: ModelRequest): ModelRequest {
         val pinned = protectedEntries().map { it.source.messageId }.toSet()
-        return request.copy(messages = entries.filter { it.source.messageId in pinned }.map { it.message })
+        return request.copy(messages = projectWorldBooks(entries.filter { it.source.messageId in pinned }.map { it.message }))
     }
 
     fun plan(request: ModelRequest, adapter: ModelAdapter, inputLimit: Long, reason: String): CompactionPlan? {
@@ -172,7 +174,7 @@ internal class ContextWindow(prompt: EffectivePrompt, val context: RuntimeContex
             summaryRequest = attempt
             val selectedIds = selected.map { it.source.messageId }.toSet()
             val remaining = entries.filterNot { it.source.messageId in selectedIds }
-            val estimate = adapter.estimateInput(request.copy(messages = remaining.map { it.message })).units
+            val estimate = adapter.estimateInput(request.copy(messages = projectWorldBooks(remaining.map { it.message }))).units
             val old = remaining.filter { it.message.role != "system" && it.source.messageId != currentId }
             if (estimate + minOf(policy.summaryMaxUnits.toLong(), inputLimit / 4) <= percentage(inputLimit, policy.targetPercent) &&
                 // Leave room for later sends rather than charging for another summary as
@@ -192,9 +194,12 @@ internal class ContextWindow(prompt: EffectivePrompt, val context: RuntimeContex
         val remove = plan.entries.map { it.source.messageId }.toSet()
         val kept = entries.filterNot { it.source.messageId in remove }
         val prefix = kept.takeWhile { it.message.role == "system" }
-        return request.copy(messages = prefix.map { it.message } + ContextSummaryFormat.message(summaryJson) +
-            kept.drop(prefix.size).map { it.message })
+        return request.copy(messages = projectWorldBooks(prefix.map { it.message } + ContextSummaryFormat.message(summaryJson) +
+            kept.drop(prefix.size).map { it.message }))
     }
+
+    private fun projectWorldBooks(messages: List<ChatMessage>) =
+        runtime.mobileagent.agent.worldbook.WorldBookPromptComposer.apply(messages, worldBooks, outletConfiguration)
 
     fun commit(plan: CompactionPlan, record: ContextCompactionRecord) {
         val remove = plan.entries.map { it.source.messageId }.toSet()

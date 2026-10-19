@@ -318,6 +318,7 @@ dependencies {
     implementation(project(":feature:skills"))
     implementation(project(":feature:announcements"))
     implementation(project(":feature:settings"))
+    implementation(project(":feature:worldbooks"))
     implementation(libs.androidx.documentfile)
     implementation(libs.shizuku.api)
     implementation(libs.shizuku.provider)

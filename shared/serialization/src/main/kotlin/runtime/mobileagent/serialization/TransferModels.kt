@@ -161,6 +161,9 @@ data class ConversationTransfer(
     @OptIn(kotlinx.serialization.ExperimentalSerializationApi::class)
     @kotlinx.serialization.EncodeDefault(kotlinx.serialization.EncodeDefault.Mode.NEVER)
     val uploadedImages: List<BlobTransfer> = emptyList(),
+    @OptIn(kotlinx.serialization.ExperimentalSerializationApi::class)
+    @kotlinx.serialization.EncodeDefault(kotlinx.serialization.EncodeDefault.Mode.NEVER)
+    val worldBooks: WorldBookConversationTransfer? = null,
 )
 
 @Serializable
@@ -171,6 +174,9 @@ data class TransferBundle(
     val knowledgeBases: List<KnowledgeTransfer> = emptyList(),
     val skills: List<SkillTransfer> = emptyList(),
     val conversations: List<ConversationTransfer> = emptyList(),
+    @OptIn(kotlinx.serialization.ExperimentalSerializationApi::class)
+    @kotlinx.serialization.EncodeDefault(kotlinx.serialization.EncodeDefault.Mode.NEVER)
+    val worldBooks: List<WorldBookTransfer> = emptyList(),
 )
 
 /** Runtime options are deliberately not serialized into the transfer document. */
@@ -178,6 +184,7 @@ data class TransferOptions(
     val includeSkillPackageBytes: Boolean = false,
     val includeKnowledgeContent: Boolean = false,
     val includeConversations: Boolean = false,
+    val includeWorldBookContent: Boolean = false,
 )
 
 enum class TransferConflictPolicy {

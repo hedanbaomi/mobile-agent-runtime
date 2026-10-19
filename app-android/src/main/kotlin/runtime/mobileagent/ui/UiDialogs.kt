@@ -282,13 +282,14 @@ internal fun SkillPermissionScopeDialog(
 internal fun ExportAgentDialog(
     chinese: Boolean,
     agents: List<Pair<String, String>>,
-    onConfirm: (String, Boolean, Boolean, Boolean) -> Unit,
+    onConfirm: (String, Boolean, Boolean, Boolean, Boolean) -> Unit,
     onCancel: () -> Unit,
 ) {
     var selectedId by remember(agents) { mutableStateOf(agents.firstOrNull()?.first) }
     var includeSkillPackages by remember(agents) { mutableStateOf(false) }
     var includeKnowledgeContent by remember(agents) { mutableStateOf(false) }
     var includeConversations by remember(agents) { mutableStateOf(false) }
+    var includeWorldBookContent by remember(agents) { mutableStateOf(false) }
     AlertDialog(
         onDismissRequest = onCancel,
         title = { Text(if (chinese) "选择要导出的 Agent" else "Choose an Agent to export") },
@@ -330,6 +331,10 @@ internal fun ExportAgentDialog(
                             modifier = Modifier.weight(1f),
                         )
                     }
+                    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                        Checkbox(checked = includeWorldBookContent, onCheckedChange = { includeWorldBookContent = it })
+                        Text(if (chinese) "包含世界书正文与原始扩展字段" else "Include world book content and original extensions", modifier = Modifier.weight(1f))
+                    }
                     Text(
                         if (chinese) {
                             "扩展内容可能包含敏感信息，将写入你选择的位置；若选择云端文档提供方，该提供方可能上传或同步。应用不另行上传。不包含密钥或授权。总大小上限 512 MiB，单项上限 50 MiB。"
@@ -345,7 +350,7 @@ internal fun ExportAgentDialog(
             Button(
                 onClick = {
                     selectedId?.let {
-                        onConfirm(it, includeSkillPackages, includeKnowledgeContent, includeConversations)
+                        onConfirm(it, includeSkillPackages, includeKnowledgeContent, includeConversations, includeWorldBookContent)
                     }
                 },
                 enabled = selectedId != null,

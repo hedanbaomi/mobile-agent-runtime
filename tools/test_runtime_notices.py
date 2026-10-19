@@ -12,6 +12,14 @@ notices = runpy.run_path(str(Path(__file__).with_name("runtime-notices.py")))
 
 
 class PackagedNoticeInventoryTest(unittest.TestCase):
+    def test_re2j_retains_its_bsd_license_and_pinned_official_source(self) -> None:
+        coordinate = notices["Coordinate"]("com.google.re2j", "re2j", "1.8")
+        kind, source, _ = notices["license_kind_for_pom"](coordinate, None, [])
+        self.assertEqual("BSD-3-Clause", kind)
+        self.assertIn("57278921a609461c14d9cdb057d7aa9511c8f7ac", source)
+        self.assertEqual("BSD-3-Clause", notices["sidecar_for"](kind))
+        notices["check_official_url"](source)
+
     def setUp(self) -> None:
         self.components = [{"files": [{"path": "licenses/maven/example__library__1/LICENSE.txt"}]}]
 

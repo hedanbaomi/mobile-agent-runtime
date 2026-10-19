@@ -52,7 +52,7 @@ class AgentRepository(
         requireReference("agent", profile.id, get(profile.id) == null)
         requireBindings(profile)
         db.execute(
-            "INSERT INTO agent_profiles(id,name,prompt_revision_id,chat_profile_id,vision_profile_id,embedding_profile_id,reranker_profile_id,knowledge_base_ids,skill_ids,retrieval_mode,revision,parameter_overrides_json,context_policy_json,permission_settings_json) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "INSERT INTO agent_profiles(id,name,prompt_revision_id,chat_profile_id,vision_profile_id,embedding_profile_id,reranker_profile_id,knowledge_base_ids,skill_ids,retrieval_mode,revision,parameter_overrides_json,context_policy_json,permission_settings_json,world_book_ids) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             profile.args(json),
         )
         return profile
@@ -65,7 +65,7 @@ class AgentRepository(
         requirePrompt(profile.promptRevisionId, profile.id)
         requireBindings(profile, current.skillIds.toSet())
         db.execute(
-            "UPDATE agent_profiles SET name=?,prompt_revision_id=?,chat_profile_id=?,vision_profile_id=?,embedding_profile_id=?,reranker_profile_id=?,knowledge_base_ids=?,skill_ids=?,retrieval_mode=?,revision=?,parameter_overrides_json=?,context_policy_json=?,permission_settings_json=? WHERE id=?",
+            "UPDATE agent_profiles SET name=?,prompt_revision_id=?,chat_profile_id=?,vision_profile_id=?,embedding_profile_id=?,reranker_profile_id=?,knowledge_base_ids=?,skill_ids=?,retrieval_mode=?,revision=?,parameter_overrides_json=?,context_policy_json=?,permission_settings_json=?,world_book_ids=? WHERE id=?",
             listOf(
                 profile.name,
                 profile.promptRevisionId,
@@ -80,6 +80,7 @@ class AgentRepository(
                 profile.parameterOverridesJson,
                 profile.contextPolicyJson,
                 profile.permissionSettingsJson,
+                json.encodeToString(profile.worldBookIds),
                 profile.id,
             ),
         )
@@ -131,18 +132,18 @@ class AgentRepository(
             // Prompt and profile are committed together; no FK is used for prompt_revision_id so
             // the initial profile can be inserted immediately after the new immutable revision.
             db.execute(
-                "INSERT INTO agent_profiles(id,name,prompt_revision_id,chat_profile_id,vision_profile_id,embedding_profile_id,reranker_profile_id,knowledge_base_ids,skill_ids,retrieval_mode,revision,parameter_overrides_json,context_policy_json,permission_settings_json) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "INSERT INTO agent_profiles(id,name,prompt_revision_id,chat_profile_id,vision_profile_id,embedding_profile_id,reranker_profile_id,knowledge_base_ids,skill_ids,retrieval_mode,revision,parameter_overrides_json,context_policy_json,permission_settings_json,world_book_ids) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 saved.args(json),
             )
         } else {
             if (profile.revision < existing.revision) throw invalid("Agent revision is older than the stored revision")
             db.execute(
-                "UPDATE agent_profiles SET name=?,prompt_revision_id=?,chat_profile_id=?,vision_profile_id=?,embedding_profile_id=?,reranker_profile_id=?,knowledge_base_ids=?,skill_ids=?,retrieval_mode=?,revision=?,parameter_overrides_json=?,context_policy_json=?,permission_settings_json=? WHERE id=?",
+                "UPDATE agent_profiles SET name=?,prompt_revision_id=?,chat_profile_id=?,vision_profile_id=?,embedding_profile_id=?,reranker_profile_id=?,knowledge_base_ids=?,skill_ids=?,retrieval_mode=?,revision=?,parameter_overrides_json=?,context_policy_json=?,permission_settings_json=?,world_book_ids=? WHERE id=?",
                 listOf(
                     saved.name, saved.promptRevisionId, saved.chatProfileId, saved.visionProfileId,
                     saved.embeddingProfileId, saved.rerankerProfileId, json.encodeToString(saved.knowledgeBaseIds),
                     json.encodeToString(saved.skillIds), saved.retrievalMode, saved.revision,
-                    saved.parameterOverridesJson, saved.contextPolicyJson, saved.permissionSettingsJson, saved.id,
+                    saved.parameterOverridesJson, saved.contextPolicyJson, saved.permissionSettingsJson, json.encodeToString(saved.worldBookIds), saved.id,
                 ),
             )
         }
@@ -251,6 +252,7 @@ class AgentRepository(
             put("permissionSettingsJson", agent.permissionSettingsJson)
             putJsonArray("knowledgeBaseIds") { agent.knowledgeBaseIds.forEach(::add) }
             putJsonArray("skillIds") { activeSkillIds.forEach(::add) }
+            putJsonArray("worldBookIds") { agent.worldBookIds.forEach(::add) }
         }.toString()
         val expanded = buildJsonObject {
             put("schemaVersion", SchemaVersion.CURRENT)
@@ -278,16 +280,17 @@ class AgentRepository(
             contextPolicyJson = agent.contextPolicyJson,
             permissionSettingsJson = agent.permissionSettingsJson,
             bindingManifestJson = bindingManifest,
+            worldBookIds = agent.worldBookIds,
         )
         db.execute(
-            "INSERT INTO agent_snapshots(id,schema_version,agent_id,prompt_revision_id,chat_model_id,provider_revision,knowledge_base_ids,skill_ids,created_at,provider_id,chat_model_revision,vision_model_id,vision_model_revision,embedding_model_id,embedding_model_revision,reranker_model_id,reranker_model_revision,parameter_overrides_json,context_policy_json,permission_settings_json,binding_manifest_json,expanded_json) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "INSERT INTO agent_snapshots(id,schema_version,agent_id,prompt_revision_id,chat_model_id,provider_revision,knowledge_base_ids,skill_ids,created_at,provider_id,chat_model_revision,vision_model_id,vision_model_revision,embedding_model_id,embedding_model_revision,reranker_model_id,reranker_model_revision,parameter_overrides_json,context_policy_json,permission_settings_json,binding_manifest_json,expanded_json,world_book_ids) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             listOf(
                 snapshot.id, snapshot.schemaVersion, snapshot.agentId, snapshot.promptRevisionId, snapshot.chatModelId,
                 snapshot.providerRevision, json.encodeToString(snapshot.knowledgeBaseIds), json.encodeToString(snapshot.skillIds),
                 snapshot.createdAt, snapshot.providerId, snapshot.chatModelRevision, snapshot.visionModelId, snapshot.visionModelRevision,
                 snapshot.embeddingModelId, snapshot.embeddingModelRevision, snapshot.rerankerModelId, snapshot.rerankerModelRevision,
                 snapshot.parameterOverridesJson, snapshot.contextPolicyJson, snapshot.permissionSettingsJson,
-                snapshot.bindingManifestJson, expanded,
+                snapshot.bindingManifestJson, expanded, json.encodeToString(snapshot.worldBookIds),
             ),
         )
         snapshot
@@ -335,6 +338,7 @@ class AgentRepository(
         val manifestVersion = root["schemaVersion"]?.jsonPrimitive?.contentOrNull?.toIntOrNull()
             ?: throw invalid("Snapshot binding manifest schemaVersion is missing")
         if (manifestVersion != SchemaVersion.CURRENT) throw invalid("Unsupported snapshot binding schemaVersion $manifestVersion")
+        WorldBookAgentPolicy.requireManifest(snapshot, root) { throw invalid(it) }
         val provider = decodeManifest<ProviderProfile>(root, "provider")
         val chatModel = decodeManifest<ModelProfile>(root, "chatModel")
         val prompt = decodeManifest<PromptRevision>(root, "prompt")
@@ -400,6 +404,8 @@ class AgentRepository(
         profile.rerankerProfileId?.let { requireId(it, "agent.rerankerProfileId") }
         profile.knowledgeBaseIds.forEach { requireId(it, "agent.knowledgeBaseIds") }
         profile.skillIds.forEach { requireId(it, "agent.skillIds") }
+        profile.worldBookIds.forEach { requireId(it, "agent.worldBookIds") }
+        WorldBookAgentPolicy.validate(profile.worldBookIds) { throw invalid(it) }
         if (profile.knowledgeBaseIds.size != profile.knowledgeBaseIds.toSet().size) throw invalid("Duplicate knowledge base binding")
         if (profile.skillIds.size != profile.skillIds.toSet().size) throw invalid("Duplicate skill binding")
         if (profile.retrievalMode !in setOf("explicit", "automatic")) throw invalid("Unsupported retrieval mode")
@@ -436,6 +442,7 @@ class AgentRepository(
                 throw invalid("Knowledge base $id is missing or deleted")
             }
         }
+        WorldBookAgentPolicy.requireBindings(db, profile.worldBookIds) { throw invalid(it) }
         return profile.skillIds.filter { id ->
             val install = db.query(
                 "SELECT i.enabled FROM skill_installs i JOIN skill_packages p ON p.package_hash=i.package_hash WHERE i.install_id=? LIMIT 1",
@@ -504,7 +511,7 @@ class AgentRepository(
         if (template.isBlank() || template.length > MAX_PROMPT_CHARS) throw invalid("Prompt template is empty or too long")
         if (allowedVariables.any { it !in DEFAULT_ALLOWED_VARIABLES }) throw invalid("Prompt contains an unknown variable")
         val placeholders = TEMPLATE_VARIABLE.findAll(template).map { it.groupValues[1].trim() }.toList()
-        if (placeholders.any { it !in allowedVariables }) throw invalid("Prompt contains a variable outside its allow-list")
+        if (placeholders.any { !WorldBookAgentPolicy.permitsVariable(it, allowedVariables) }) throw invalid("Prompt contains a variable outside its allow-list")
         val remainder = TEMPLATE_VARIABLE.replace(template, "")
         if (remainder.contains("{{") || remainder.contains("}}")) throw invalid("Prompt contains a malformed variable")
     }
@@ -539,7 +546,7 @@ class AgentRepository(
     private fun AgentProfile.args(json: Json): List<Any?> = listOf(
         id, name, promptRevisionId, chatProfileId, visionProfileId, embeddingProfileId, rerankerProfileId,
         json.encodeToString(knowledgeBaseIds), json.encodeToString(skillIds), retrievalMode, revision,
-        parameterOverridesJson, contextPolicyJson, permissionSettingsJson,
+        parameterOverridesJson, contextPolicyJson, permissionSettingsJson, json.encodeToString(worldBookIds),
     )
 
     private fun SqlRow.toAgent(): AgentProfile = AgentProfile(
@@ -557,6 +564,7 @@ class AgentRepository(
         parameterOverridesJson = string("parameter_overrides_json").ifBlank { "{}" },
         contextPolicyJson = string("context_policy_json").ifBlank { "{}" },
         permissionSettingsJson = string("permission_settings_json").ifBlank { "{}" },
+        worldBookIds = decodeList(string("world_book_ids")),
     )
 
     private fun SqlRow.toPrompt(json: Json): PromptRevision = PromptRevision(
@@ -591,6 +599,7 @@ class AgentRepository(
         contextPolicyJson = string("context_policy_json").ifBlank { "{}" },
         permissionSettingsJson = string("permission_settings_json").ifBlank { "{}" },
         bindingManifestJson = string("binding_manifest_json").ifBlank { "{}" },
+        worldBookIds = decodeList(string("world_book_ids")),
     )
 
     private fun decodeList(raw: String): List<String> =

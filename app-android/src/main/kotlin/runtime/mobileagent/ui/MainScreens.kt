@@ -89,6 +89,7 @@ internal fun MainApp(onMoveTaskToBack: () -> Unit = {}) {
     val shellOwner = checkNotNull(LocalViewModelStoreOwner.current) { "MainApp requires a stable shell ViewModelStoreOwner" }
     val chatVm: runtime.mobileagent.ChatViewModel = viewModel(viewModelStoreOwner = shellOwner)
     val knowledgeVm: runtime.mobileagent.KnowledgeViewModel = viewModel(viewModelStoreOwner = shellOwner)
+    val worldBooksVm: runtime.mobileagent.WorldBooksViewModel = viewModel(viewModelStoreOwner = shellOwner)
     val navController = rememberNavController()
     val initialRoute = shellVm.route().takeIf { it in allAppRoutes } ?: AppRoutes.CHAT
     var route by rememberSaveable { mutableStateOf(initialRoute) }
@@ -460,6 +461,7 @@ internal fun MainApp(onMoveTaskToBack: () -> Unit = {}) {
                                 { handleBack(compact) })
                         }
                         composable(AppRoutes.KNOWLEDGE) { KnowledgeRoute(knowledgeVm, chinese, ::requestRoute) }
+                        composable(AppRoutes.WORLD_BOOKS) { WorldBooksRoute(worldBooksVm, chinese, ::requestEditorClose, ::registerEditorState, ::registerShellDetail) }
                         composable(AppRoutes.SKILLS) { SkillsRoute(it, chinese) }
                         composable(AppRoutes.NEWS) {
                             AnnouncementsRoute(
@@ -582,7 +584,7 @@ internal fun MainApp(onMoveTaskToBack: () -> Unit = {}) {
 }
 
 private val allAppRoutes = setOf(
-    AppRoutes.CHAT, AppRoutes.AGENTS, AppRoutes.PROVIDERS, AppRoutes.KNOWLEDGE,
+    AppRoutes.CHAT, AppRoutes.AGENTS, AppRoutes.PROVIDERS, AppRoutes.KNOWLEDGE, AppRoutes.WORLD_BOOKS,
     AppRoutes.SKILLS, AppRoutes.NEWS, AppRoutes.SETTINGS,
     AppRoutes.ABOUT, AppRoutes.INSPECTOR, AppRoutes.MCP,
 )
@@ -670,6 +672,10 @@ private fun ChatRoute(vm: runtime.mobileagent.ChatViewModel, chinese: Boolean, o
         },
         onOpenAgentSettings = onOpenAgentSettings,
     )
+    Column(Modifier.fillMaxSize()) {
+    WorldBookChatBar((context.applicationContext as MobileAgentApp).container, state.selectedSessionId,
+        state.streaming, state.messages.size, chinese) { onRoute(AppRoutes.WORLD_BOOKS) }
+    Box(Modifier.weight(1f)) {
     runtime.mobileagent.feature.chat.ConversationScreen(
         state = state,
         input = { vm.state.value.input },
@@ -680,6 +686,8 @@ private fun ChatRoute(vm: runtime.mobileagent.ChatViewModel, chinese: Boolean, o
             onOpenWorkspacePicker(state.selectedAgentId, state.selectedSessionId, selectedAgentLabel)
         },
     )
+    }
+    }
     vm.unknownRetry.value?.let { UnknownOutcomeDialog(chinese, vm::acknowledgeUnknown, vm::cancelUnknownRetry) }
     LaunchedEffect(Unit) { onEditorState(AppRoutes.CHAT, false, null) }
 }
@@ -1860,9 +1868,9 @@ private fun SettingsRoute(entry: NavBackStackEntry, chinese: Boolean, onRoute: (
             if (chatVm.state.value.selectedSessionId == id) { archiveOpen = false; onRoute(AppRoutes.CHAT) }
         }, onRestore = chatVm::restoreSession, onLoadMore = { chatVm.loadMoreSessions(true) })
     if (exportChooserOpen) ExportAgentDialog(chinese, exportAgents,
-        onConfirm = { agentId, includeSkillPackages, includeKnowledgeContent, includeConversations ->
+        onConfirm = { agentId, includeSkillPackages, includeKnowledgeContent, includeConversations, includeWorldBookContent ->
             exportChooserOpen = false
-            vm.prepareExport(agentId, includeSkillPackages, includeKnowledgeContent, includeConversations) { exportLauncher.launch("mobile-agent-$agentId.zip") }
+            vm.prepareExport(agentId, includeSkillPackages, includeKnowledgeContent, includeConversations, includeWorldBookContent) { exportLauncher.launch("mobile-agent-$agentId.zip") }
         }, onCancel = { exportChooserOpen = false })
     importUri?.let { uri ->
         ImportConflictDialog(

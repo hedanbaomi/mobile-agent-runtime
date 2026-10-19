@@ -11,6 +11,7 @@ enum class PromptTrust {
     USER_CONFIGURATION,
     UNTRUSTED_SKILL,
     UNTRUSTED_KNOWLEDGE,
+    UNTRUSTED_WORLD_BOOK,
     USER_INPUT,
     CONVERSATION_HISTORY,
 }
@@ -36,6 +37,7 @@ data class EffectivePrompt(
     /** Typed history preserves tool calls, tool results, and image metadata. */
     val typedHistory: List<ChatMessage>? = null,
     val globalRootPrompt: String = "",
+    val worldBooks: runtime.mobileagent.agent.worldbook.WorldBookPromptPlan = runtime.mobileagent.agent.worldbook.WorldBookPromptPlan(),
 ) {
     /**
      * Assemble a model prompt with visible trust boundaries.  Skills and
@@ -44,7 +46,7 @@ data class EffectivePrompt(
      * capability grants.  Tool definitions are attached separately by the
      * runtime and never come from these strings.
      */
-    fun assemble(): PromptAssembly {
+    fun assemble(includeWorldBooks: Boolean = true): PromptAssembly {
         val blocks = buildList {
             add(PromptBlock(PromptTrust.TRUSTED_RUNTIME, runtimeContract))
             if (globalRootPrompt.isNotBlank()) {
@@ -53,6 +55,7 @@ data class EffectivePrompt(
             add(PromptBlock(PromptTrust.USER_CONFIGURATION, userSystemPrompt))
             skillInstructions.forEach { add(PromptBlock(PromptTrust.UNTRUSTED_SKILL, it)) }
             retrieved.forEach { add(PromptBlock(PromptTrust.UNTRUSTED_KNOWLEDGE, it)) }
+            worldBooks.activated.forEach { add(PromptBlock(PromptTrust.UNTRUSTED_WORLD_BOOK, it.content)) }
             add(PromptBlock(PromptTrust.USER_INPUT, currentUser))
         }
         val messages = mutableListOf<ChatMessage>()
@@ -80,10 +83,14 @@ data class EffectivePrompt(
             }
         }
         messages += ChatMessage(role = "user", text = currentUser, images = currentImages)
-        return PromptAssembly(blocks = blocks, messages = messages)
+        return PromptAssembly(blocks = blocks, messages = if (includeWorldBooks) runtime.mobileagent.agent.worldbook.WorldBookPromptComposer.apply(messages, worldBooks, outletConfiguration()) else messages)
     }
 
     fun asMessages(): List<ChatMessage> = assemble().messages
+
+    internal fun outletConfiguration(): Map<String, String> = linkedMapOf(
+        "runtime-contract" to runtimeContract, "global-root-prompt" to globalRootPrompt, "user-system-prompt" to userSystemPrompt,
+    )
 
     private fun StringBuilder.appendTagged(name: String, value: String) {
         if (value.isBlank()) return
@@ -116,8 +123,8 @@ object PromptTemplates {
             !template.substring(cursor).contains("}}")) {
             "Malformed template variable"
         }
-        val illegal = matches.map { it.groupValues[1] }.filter { it !in allowed }.toSet()
+        val illegal = matches.map { it.groupValues[1] }.filter { it !in allowed && !runtime.mobileagent.agent.worldbook.WorldBookPromptComposer.isOutletVariable(it) }.toSet()
         require(illegal.isEmpty()) { "Unsupported template variables: $illegal" }
-        return placeholder.replace(template) { values[it.groupValues[1]].orEmpty() }
+        return placeholder.replace(template) { if (runtime.mobileagent.agent.worldbook.WorldBookPromptComposer.isOutletVariable(it.groupValues[1])) it.value else values[it.groupValues[1]].orEmpty() }
     }
 }

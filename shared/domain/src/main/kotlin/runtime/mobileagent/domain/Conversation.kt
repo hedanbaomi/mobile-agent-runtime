@@ -31,6 +31,10 @@ data class AgentSnapshot(
     val permissionSettingsJson: String = "{}",
     /** Canonical, non-secret expansion retained for inspection and transfer validation. */
     val bindingManifestJson: String = "{}",
+    /** Resource identities frozen at snapshot creation; content versions are selected per Run. */
+    @OptIn(kotlinx.serialization.ExperimentalSerializationApi::class)
+    @kotlinx.serialization.EncodeDefault(kotlinx.serialization.EncodeDefault.Mode.NEVER)
+    val worldBookIds: List<String> = emptyList(),
 )
 
 @Serializable

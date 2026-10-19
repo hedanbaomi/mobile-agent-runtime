@@ -50,7 +50,7 @@ DEFAULT_GENERATED_ASSET_ROOTS = (
 )
 ARTIFACT_ASSET_PREFIXES = ("assets/", "base/assets/")
 
-EXPECTED_COORDINATES = 148
+EXPECTED_COORDINATES = 149
 ALLOWED_OFFICIAL_HOSTS = {
     "www.apache.org",
     "raw.githubusercontent.com",
@@ -79,6 +79,7 @@ TEXT_SUFFIXES = {
 }
 
 APACHE_URL = "https://www.apache.org/licenses/LICENSE-2.0.txt"
+RE2J_LICENSE_URL = "https://raw.githubusercontent.com/google/re2j/57278921a609461c14d9cdb057d7aa9511c8f7ac/LICENSE"
 ONNX_LICENSE_URL = "https://raw.githubusercontent.com/microsoft/onnxruntime/v1.29.0/LICENSE"
 BOUNCY_LICENSE_URL = "https://raw.githubusercontent.com/bcgit/bc-java/r1rv79/LICENSE.html"
 SLF4J_LICENSE_URL = "https://raw.githubusercontent.com/qos-ch/slf4j/v_2.0.16/LICENSE.txt"
@@ -427,6 +428,8 @@ def fetch_official(url: str, offline: bool) -> bytes:
 
 
 def license_kind_for_pom(coordinate: Coordinate, metadata: PomMetadata, extracted: list[ArchiveNotice]) -> tuple[str, str, str]:
+    if coordinate.gav == "com.google.re2j:re2j:1.8":
+        return "BSD-3-Clause", RE2J_LICENSE_URL, "official RE2/J 1.8 source pinned to 57278921"
     if coordinate.group == "dev.rikka.shizuku" and coordinate.version == "13.1.5":
         return "MIT", SHIZUKU_LICENSE_URL, "official Shizuku-API source pinned to 510fc988"
     if coordinate.gav == "com.microsoft.onnxruntime:onnxruntime-android:1.29.0":
@@ -452,6 +455,8 @@ def license_kind_for_pom(coordinate: Coordinate, metadata: PomMetadata, extracte
 
 
 def sidecar_for(license_kind: str) -> str:
+    if license_kind == "BSD-3-Clause":
+        return "BSD-3-Clause"
     if license_kind == "MIT":
         return "MIT"
     if license_kind == "MPL-2.0":
@@ -467,6 +472,8 @@ def write_legal_file(path: Path, data: bytes, license_kind: str) -> str:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(data)
     sidecar_lines = []
+    if license_kind == "BSD-3-Clause" and b"Copyright (c) 2009 The Go Authors. All rights reserved." in data:
+        sidecar_lines.append(SPDX_COPYRIGHT_PREFIX + "2009 The Go Authors. All rights reserved.")
     if license_kind == "MPL-2.0":
         # The NOTICE and the standard MPL text carry no copyright line of
         # their own.  NONE records that fact without inventing an owner.
@@ -892,6 +899,17 @@ def generate(log_path: Path, cache_root: Path, offline: bool) -> tuple[list[dict
                     "origin": license_source,
                 },
             )
+            if coordinate.gav == "com.google.re2j:re2j:1.8":
+                # Preserve the upstream copyright/conditions as a covered attribution asset too.
+                # REUSE intentionally excludes files named LICENSE from its source inventory.
+                attribution_name = "COPYRIGHT.txt"
+                attribution_hash = write_legal_file(output_dir / attribution_name, license_bytes, license_kind)
+                files.append({
+                    "label": "upstream copyright and redistribution conditions",
+                    "path": f"licenses/maven/{coordinate.slug}/{attribution_name}",
+                    "sha256": attribution_hash,
+                    "origin": license_source,
+                })
             if any(
                 notice.label.startswith("license:")
                 and not is_complete_embedded_license(coordinate, license_kind, notice.data)

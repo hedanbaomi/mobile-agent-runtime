@@ -43,7 +43,7 @@ class ConversationRepository(
         title: String,
         conversationId: String = EntityId.random().value,
         at: String = clock(),
-    ): Conversation {
+    ): Conversation = db.transaction {
         requireId(snapshotId, "snapshotId")
         requireText(title, "title")
         requireId(conversationId, "conversationId")
@@ -58,7 +58,8 @@ class ConversationRepository(
             "INSERT INTO conversations(id,snapshot_id,agent_snapshot_id,title,created_at,updated_at) VALUES(?,?,?,?,?,?)",
             listOf(conversation.id, conversation.snapshotId, conversation.snapshotId, conversation.title, conversation.createdAt, conversation.updatedAt),
         )
-        return conversation
+        WorldBookRepository(db, clock).initializeConversation(conversation.id)
+        conversation
     }
 
     fun createConversation(
@@ -125,6 +126,8 @@ class ConversationRepository(
         db.transaction {
             db.execute("DELETE FROM message_parts WHERE message_id IN (SELECT id FROM messages WHERE conversation_id=?)", listOf(id))
             db.execute("DELETE FROM messages WHERE conversation_id=?", listOf(id))
+            db.execute("DELETE FROM world_book_effects WHERE conversation_id=?", listOf(id))
+            db.execute("DELETE FROM world_book_conversations WHERE conversation_id=?", listOf(id))
             db.execute("DELETE FROM conversations WHERE id=?", listOf(id))
         }
         return true

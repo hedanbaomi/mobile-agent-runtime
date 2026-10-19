@@ -717,6 +717,7 @@ class AgentsViewModel(
                 embeddingProfileId = previous?.embeddingProfileId, rerankerProfileId = editor.rerankerModelId,
                 knowledgeBaseIds = editor.resourceBindings.filter { it.type == "knowledge" && it.enabled }.map { it.id },
                 skillIds = editor.resourceBindings.filter { it.type == "skill" && it.enabled }.map { it.id },
+                worldBookIds = worldBookIds(editor),
                 retrievalMode = editor.retrievalMode, revision = (previous?.revision ?: 0) + 1,
                 parameterOverridesJson = parameters.toString(), contextPolicyJson = contextPolicyJson,
                 permissionSettingsJson = AgentSearchPermission.update(
@@ -970,7 +971,7 @@ class AgentsViewModel(
             parameters = agent?.parameterOverridesJson?.let { raw ->
                 runCatching { Json.parseToJsonElement(raw).jsonObject.mapValues { it.value.toString() } }.getOrDefault(emptyMap())
             }.orEmpty(),
-            resourceBindings = knowledge + skills + missingSkills,
+            resourceBindings = knowledge + skills + missingSkills + worldBookBindings(app.container, agent),
             workspaces = grantData.workspaces,
             grants = grantData.grants,
             trustedSkills = grantData.trustedSkills,

@@ -3420,6 +3420,47 @@
       }
     },
     {
+      "id": "maven:com.google.re2j:re2j:1.8",
+      "name": "re2j",
+      "version": "1.8",
+      "license": "BSD-3-Clause",
+      "source": "https://repo1.maven.org/maven2/com/google/re2j/re2j/1.8/re2j-1.8.pom",
+      "licenseSource": "https://raw.githubusercontent.com/google/re2j/57278921a609461c14d9cdb057d7aa9511c8f7ac/LICENSE",
+      "files": [
+        {
+          "label": "complete BSD-3-Clause text (official RE2/J 1.8 source pinned to 57278921)",
+          "path": "licenses/maven/com.google.re2j__re2j__1.8/LICENSE.txt",
+          "sha256": "26a6133577cc8e48d7c002ac4d4a554786e7c0e1732e10f2db205e5e494c411b",
+          "origin": "https://raw.githubusercontent.com/google/re2j/57278921a609461c14d9cdb057d7aa9511c8f7ac/LICENSE"
+        },
+        {
+          "label": "upstream copyright and redistribution conditions",
+          "path": "licenses/maven/com.google.re2j__re2j__1.8/COPYRIGHT.txt",
+          "sha256": "26a6133577cc8e48d7c002ac4d4a554786e7c0e1732e10f2db205e5e494c411b",
+          "origin": "https://raw.githubusercontent.com/google/re2j/57278921a609461c14d9cdb057d7aa9511c8f7ac/LICENSE"
+        }
+      ],
+      "provenance": {
+        "pomSha256": "df62699335cd46fc465f4c03b8c581d3d507792212d27b65adb923b4c27de4e7",
+        "cachedArtifacts": [
+          {
+            "file": "re2j-1.8.jar",
+            "sha256": "7b52c72156dd7f98b3237a5b35c1d34fba381b21048c89208913ad80a45dfbd7"
+          }
+        ],
+        "pomLicenseNames": [
+          "Go License"
+        ],
+        "pomLicenseUrls": [
+          "https://golang.org/LICENSE"
+        ],
+        "parent": null,
+        "projectUrl": "http://github.com/google/re2j",
+        "scmUrl": "https://github.com/google/re2j.git",
+        "resolution": "official RE2/J 1.8 source pinned to 57278921"
+      }
+    },
+    {
       "id": "maven:com.microsoft.onnxruntime:onnxruntime-android:1.29.0",
       "name": "onnxruntime-android",
       "version": "1.29.0",

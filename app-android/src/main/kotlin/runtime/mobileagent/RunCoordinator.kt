@@ -41,6 +41,7 @@ data class PreparedRunFacts(
     val toolSchemaFingerprint: String,
     /** Durable retrieval-scope summary (ids and reason codes only). */
     val retrievalScope: RetrievalScopePin,
+    val worldBooks: runtime.mobileagent.domain.worldbook.PreparedWorldBooks? = null,
 )
 
 /**
@@ -179,6 +180,8 @@ class RunCoordinator(private val runs: RunRepository) {
             retrievalPolicy: String,
             modelTokenBudget: Int?,
             retrievalScope: RetrievalScopePin = RetrievalScopePin(),
+            worldBooks: List<runtime.mobileagent.domain.worldbook.WorldBookRunPin> = emptyList(),
+            worldBookBindingRevision: Int = 0,
         ): RunManifest = RunManifest(
             runId = runId,
             conversationId = conversationId,
@@ -200,6 +203,8 @@ class RunCoordinator(private val runs: RunRepository) {
             retrievalPolicy = retrievalPolicy,
             modelTokenBudget = modelTokenBudget,
             retrievalScope = retrievalScope,
+            worldBooks = worldBooks,
+            worldBookBindingRevision = worldBookBindingRevision,
         )
 
         fun sha256Hex(bytes: ByteArray): String =

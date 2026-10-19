@@ -737,12 +737,13 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
     fun exportAgents(): List<Pair<String, String>> = app.container.agents.list().map { it.id to it.name }
 
     fun prepareExport(agentId: String, includeSkillPackages: Boolean = false,
-        includeKnowledgeContent: Boolean = false, includeConversations: Boolean = false, ready: () -> Unit) {
+        includeKnowledgeContent: Boolean = false, includeConversations: Boolean = false,
+        includeWorldBookContent: Boolean = false, ready: () -> Unit) {
         if (transferRunning) { error.value = "另一项导入或导出尚未结束。"; return }
         viewModelScope.launch {
             try {
                 withContext(Dispatchers.IO) { require(app.container.agents.get(agentId) != null) { "Agent 已不存在。" } }
-                pendingExport = agentId to TransferOptions(includeSkillPackages, includeKnowledgeContent, includeConversations)
+                pendingExport = agentId to TransferOptions(includeSkillPackages, includeKnowledgeContent, includeConversations, includeWorldBookContent)
                 exportStatus.value = "请选择 ZIP 保存位置。所勾选内容将流式写入；不包含密钥或可继承的授权。"
                 error.value = null
                 ready()

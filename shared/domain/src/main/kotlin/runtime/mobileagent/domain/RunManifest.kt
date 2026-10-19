@@ -95,6 +95,9 @@ data class RunManifest(
     val modelTokenBudget: Int? = null,
     /** Durable summary of the run's automatic retrieval scope. */
     val retrievalScope: RetrievalScopePin = RetrievalScopePin(),
+    /** World book identities and immutable content revisions; no entry text. */
+    val worldBooks: List<runtime.mobileagent.domain.worldbook.WorldBookRunPin> = emptyList(),
+    val worldBookBindingRevision: Int = 0,
 ) {
     init {
         require(runId.isNotBlank() && conversationId.isNotBlank() && snapshotId.isNotBlank()) {

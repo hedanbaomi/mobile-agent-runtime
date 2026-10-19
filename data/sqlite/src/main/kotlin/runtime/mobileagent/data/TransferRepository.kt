@@ -83,6 +83,7 @@ class TransferRepository(
 ) {
     private val json = Json { ignoreUnknownKeys = false; explicitNulls = false; encodeDefaults = true }
     private val conversationImages = ConversationImageTransfer(db, json, ::invalid)
+    private val worldBookTransfer = WorldBookTransferSupport(db, clock)
 
     /**
      * Legacy JSON export.  It remains metadata-only for knowledge and conversations; the boolean
@@ -221,7 +222,7 @@ class TransferRepository(
         val knowledge = agent.knowledgeBaseIds.map { id ->
             exportKnowledge(id, options.includeKnowledgeContent) ?: throw invalid("Agent references missing knowledge base $id")
         }
-        val conversations = if (options.includeConversations) exportConversations(agent.id) else emptyList()
+        val conversations = if (options.includeConversations) exportConversations(agent.id, options.includeWorldBookContent) else emptyList()
         val historicalSkillIds = conversations.flatMap { it.manifest.snapshot.skillIds }
         val skills = exportBoundAndHistoricalSkills(
             currentIds = agent.skillIds,
@@ -240,11 +241,12 @@ class TransferRepository(
                 knowledgeBases = knowledge,
                 skills = skills,
                 conversations = manifestConversations,
+                worldBooks = worldBookTransfer.export(agentId, options),
         )
         return ArchivePayload(manifest, conversations)
     }
 
-    private fun exportConversations(agentId: String): List<ArchiveConversation> {
+    private fun exportConversations(agentId: String, includeWorldBookContent: Boolean): List<ArchiveConversation> {
         val agentRepo = AgentRepository(db)
         val conversations = db.query(
             "SELECT c.* FROM conversations c JOIN agent_snapshots s ON s.id=c.snapshot_id WHERE s.agent_id=? ORDER BY c.created_at,c.rowid",
@@ -277,6 +279,7 @@ class TransferRepository(
                 contentIncluded = true,
                 contentEntry = entryName,
                 uploadedImages = uploadedImageBlobs(conversation.id),
+                worldBooks = worldBookTransfer.exportConversation(conversation.id, includeWorldBookContent),
             )
             ArchiveConversation(manifest, entryName)
         }
@@ -443,6 +446,7 @@ class TransferRepository(
         var importedAgentId: String? = null
         db.transaction {
             captureExistingHistory()
+            worldBookTransfer.import(bundle.worldBooks, conflictPolicy, warnings)
             bundle.knowledgeBases.forEach { kb -> importKnowledge(kb, conflictPolicy, warnings) }
             val skillInstalls = importSkills(bundle.skills, conflictPolicy, warnings)
             bundle.agent?.let { transfer ->
@@ -529,7 +533,7 @@ class TransferRepository(
                             val bytes = readEntryBytes(zip, entry, TransferArchiveLimits.MAX_ENTRY_BYTES, counter)
                             val full = TransferCodec.decodeConversation(bytes.toString(Charsets.UTF_8), "transfer-conversation-${transfer.conversation.id}")
                             if (full.conversation != transfer.conversation || full.snapshot != transfer.snapshot ||
-                                full.snapshotRebindPolicy != transfer.snapshotRebindPolicy || full.contentEntry != transfer.contentEntry
+                                full.snapshotRebindPolicy != transfer.snapshotRebindPolicy || !worldBookTransfer.matchesEnvelope(full, transfer)
                             ) {
                                 throw invalid("Conversation entry ${entry.name} does not match its manifest binding")
                             }
@@ -549,6 +553,7 @@ class TransferRepository(
                         StorageMaintenance(db, sink, vectorIndexDirectory).requireCapacity(metadataGrowth)
                     }
                     captureExistingHistory()
+                    worldBookTransfer.import(bundle.worldBooks, conflictPolicy, warnings)
                     bundle.knowledgeBases.forEach { kb ->
                         importKnowledge(kb, conflictPolicy, warnings, stagedBlobs)
                     }
@@ -864,6 +869,7 @@ class TransferRepository(
     }
 
     private fun preflight(bundle: TransferBundle, policy: TransferConflictPolicy) {
+        worldBookTransfer.preflight(bundle.worldBooks, policy)
         bundle.agent?.let { transfer ->
             val existing = db.query("SELECT * FROM agent_profiles WHERE id=?", listOf(transfer.profile.id)).singleOrNull()
             if (existing != null && policy == TransferConflictPolicy.REJECT) throw conflict("Agent ${transfer.profile.id} already exists")
@@ -972,7 +978,8 @@ class TransferRepository(
         warnings: MutableList<String>,
         skillInstalls: SkillInstallAliases,
     ): String {
-        val profile = remapAgentSkillIds(transfer.profile, skillInstalls)
+        val remapped = remapAgentSkillIds(transfer.profile, skillInstalls)
+        val profile = remapped.copy(worldBookIds = worldBookTransfer.available(remapped.worldBookIds, warnings))
         val existing = db.query("SELECT id FROM agent_profiles WHERE id=?", listOf(profile.id)).isNotEmpty()
         if (existing && policy == TransferConflictPolicy.KEEP_EXISTING) {
             warnings += "Agent ${profile.id} already exists; kept local configuration"
@@ -993,12 +1000,12 @@ class TransferRepository(
         }
         if (existing) {
                 db.execute(
-                "UPDATE agent_profiles SET name=?,prompt_revision_id=?,chat_profile_id=?,vision_profile_id=?,embedding_profile_id=?,reranker_profile_id=?,knowledge_base_ids=?,skill_ids=?,retrieval_mode=?,revision=?,parameter_overrides_json=?,context_policy_json=?,permission_settings_json=? WHERE id=?",
+                "UPDATE agent_profiles SET name=?,prompt_revision_id=?,chat_profile_id=?,vision_profile_id=?,embedding_profile_id=?,reranker_profile_id=?,knowledge_base_ids=?,skill_ids=?,retrieval_mode=?,revision=?,parameter_overrides_json=?,context_policy_json=?,permission_settings_json=?,world_book_ids=? WHERE id=?",
                 profileArgs(profile).drop(1) + profile.id,
             )
         } else {
             db.execute(
-                "INSERT INTO agent_profiles(id,name,prompt_revision_id,chat_profile_id,vision_profile_id,embedding_profile_id,reranker_profile_id,knowledge_base_ids,skill_ids,retrieval_mode,revision,parameter_overrides_json,context_policy_json,permission_settings_json) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "INSERT INTO agent_profiles(id,name,prompt_revision_id,chat_profile_id,vision_profile_id,embedding_profile_id,reranker_profile_id,knowledge_base_ids,skill_ids,retrieval_mode,revision,parameter_overrides_json,context_policy_json,permission_settings_json,world_book_ids) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 profileArgs(profile),
             )
         }
@@ -1056,13 +1063,13 @@ class TransferRepository(
         }
         val expanded = snapshot.bindingManifestJson.ifBlank { "{}" }
         db.execute(
-            "INSERT INTO agent_snapshots(id,schema_version,agent_id,prompt_revision_id,chat_model_id,provider_revision,knowledge_base_ids,skill_ids,created_at,provider_id,chat_model_revision,vision_model_id,vision_model_revision,embedding_model_id,embedding_model_revision,reranker_model_id,reranker_model_revision,parameter_overrides_json,context_policy_json,permission_settings_json,binding_manifest_json,expanded_json) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "INSERT INTO agent_snapshots(id,schema_version,agent_id,prompt_revision_id,chat_model_id,provider_revision,knowledge_base_ids,skill_ids,created_at,provider_id,chat_model_revision,vision_model_id,vision_model_revision,embedding_model_id,embedding_model_revision,reranker_model_id,reranker_model_revision,parameter_overrides_json,context_policy_json,permission_settings_json,binding_manifest_json,expanded_json,world_book_ids) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             listOf(
                 snapshot.id, snapshot.schemaVersion, snapshot.agentId, snapshot.promptRevisionId, snapshot.chatModelId, snapshot.providerRevision,
                 json.encodeToString(snapshot.knowledgeBaseIds), json.encodeToString(snapshot.skillIds), snapshot.createdAt, snapshot.providerId,
                 snapshot.chatModelRevision, snapshot.visionModelId, snapshot.visionModelRevision, snapshot.embeddingModelId, snapshot.embeddingModelRevision,
                 snapshot.rerankerModelId, snapshot.rerankerModelRevision, snapshot.parameterOverridesJson, snapshot.contextPolicyJson,
-                snapshot.permissionSettingsJson, snapshot.bindingManifestJson, expanded,
+                snapshot.permissionSettingsJson, snapshot.bindingManifestJson, expanded, json.encodeToString(snapshot.worldBookIds),
             ),
         )
     }
@@ -1353,6 +1360,7 @@ class TransferRepository(
             "INSERT INTO conversations(id,snapshot_id,agent_snapshot_id,title,created_at,updated_at,archived) VALUES(?,?,?,?,?,?,?)",
             listOf(conversation.id, conversation.snapshotId, conversation.snapshotId, conversation.title, conversation.createdAt, conversation.updatedAt, if (conversation.archived) 1 else 0),
         )
+        worldBookTransfer.restoreConversation(transfer.worldBooks, conversation.id, warnings)
         transfer.messages.forEach { message ->
             db.execute(
                 "INSERT INTO messages(id,conversation_id,parent_message_id,role,text,status,created_at,parts_json,metadata_json,chronology_key) VALUES(?,?,?,?,?,?,?,?,?,?)",
@@ -1494,7 +1502,7 @@ class TransferRepository(
     private fun profileArgs(profile: AgentProfile): List<Any?> = listOf(
         profile.id, profile.name, profile.promptRevisionId, profile.chatProfileId, profile.visionProfileId, profile.embeddingProfileId,
         profile.rerankerProfileId, json.encodeToString(profile.knowledgeBaseIds), json.encodeToString(profile.skillIds), profile.retrievalMode,
-        profile.revision, profile.parameterOverridesJson, profile.contextPolicyJson, profile.permissionSettingsJson,
+        profile.revision, profile.parameterOverridesJson, profile.contextPolicyJson, profile.permissionSettingsJson, json.encodeToString(profile.worldBookIds),
     )
 
     private fun SqlRow.toPrompt(json: Json): PromptRevision = PromptRevision(
@@ -1512,6 +1520,7 @@ class TransferRepository(
         rerankerModelId = string("reranker_model_id").ifBlank { null }, rerankerModelRevision = columns["reranker_model_revision"]?.toString()?.toIntOrNull(),
         parameterOverridesJson = string("parameter_overrides_json").ifBlank { "{}" }, contextPolicyJson = string("context_policy_json").ifBlank { "{}" },
         permissionSettingsJson = string("permission_settings_json").ifBlank { "{}" }, bindingManifestJson = string("binding_manifest_json").ifBlank { "{}" },
+        worldBookIds = decodeStringsList(string("world_book_ids")),
     )
 
     private fun decodeStringsList(raw: String): List<String> = runCatching { json.decodeFromString<List<String>>(raw.ifBlank { "[]" }) }.getOrDefault(emptyList())

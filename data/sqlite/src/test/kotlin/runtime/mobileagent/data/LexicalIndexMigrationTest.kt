@@ -33,8 +33,8 @@ class LexicalIndexMigrationTest {
             val tracked = TrackingConnection(db)
             Migrations.apply(tracked)
 
-            assertEquals(34L, Migrations.VERSION.toLong())
-            assertEquals(34L, version(db))
+            assertTrue(Migrations.VERSION >= 34)
+            assertEquals(Migrations.VERSION.toLong(), version(db))
             val definition = ftsSql(db)
             assertTrue(definition.contains("contentless_delete=1"), definition)
             assertTrue(definition.contains("content=''"), definition)
@@ -55,7 +55,7 @@ class LexicalIndexMigrationTest {
     }
 
     @Test
-    fun reopeningAV34DatabaseRebuildsNothingAndWritesNoPostings() {
+    fun reopeningACurrentDatabaseRebuildsNothingAndWritesNoPostings() {
         JdbcSqlConnection().use { db ->
             v33Fixture(db)
             Migrations.apply(db)
@@ -65,7 +65,7 @@ class LexicalIndexMigrationTest {
             val tracked = TrackingConnection(db)
             Migrations.apply(tracked)
 
-            assertEquals(34L, version(db))
+            assertEquals(Migrations.VERSION.toLong(), version(db))
             assertEquals(emptyList<String>(), tracked.lexicalWrites)
             assertEquals(emptyList<Int>(), tracked.batches)
             assertEquals(definition, ftsSql(db))
@@ -103,7 +103,7 @@ class LexicalIndexMigrationTest {
 
             Migrations.apply(db)
 
-            assertEquals(34L, version(db))
+            assertEquals(Migrations.VERSION.toLong(), version(db))
             assertFalse(ftsSql(db).contains("content='chunks'"), ftsSql(db))
             assertEquals(0L, matchCount(db, STALE))
             assertEquals(CHUNKS.toLong(), matchCount(db, ENGLISH))
@@ -137,7 +137,7 @@ class LexicalIndexMigrationTest {
 
             Migrations.apply(db)
 
-            assertEquals(34L, version(db))
+            assertEquals(Migrations.VERSION.toLong(), version(db))
             assertEquals(0L, matchCount(db, STALE))
             assertEquals(CHUNKS.toLong(), matchCount(db, ENGLISH))
             assertEquals(preserved, preserved(db))
@@ -145,21 +145,21 @@ class LexicalIndexMigrationTest {
     }
 
     @Test
-    fun aV34DatabaseThatLostItsIndexRecoversTheContentlessIndexWithoutRewritingChunks() {
+    fun aCurrentDatabaseThatLostItsIndexRecoversTheContentlessIndexWithoutRewritingChunks() {
         JdbcSqlConnection().use { db ->
             v33Fixture(db)
             Migrations.apply(db)
-            assertEquals(34L, version(db))
+            assertEquals(Migrations.VERSION.toLong(), version(db))
             val preserved = preserved(db)
 
-            // A restore or manual cleanup can drop the derived index while the version stays 34.
+            // A restore or manual cleanup can drop the derived index while the schema version stays current.
             db.execute("DROP TABLE chunks_fts")
             assertEquals("", ftsSql(db))
 
             val tracked = TrackingConnection(db)
             Migrations.apply(tracked)
 
-            assertEquals(34L, version(db))
+            assertEquals(Migrations.VERSION.toLong(), version(db))
             // The historical create-if-not-exists statement runs first on every open; the repair
             // replaces the derived index once and refills it in three posting batches.
             assertEquals(2, tracked.indexReplacements)

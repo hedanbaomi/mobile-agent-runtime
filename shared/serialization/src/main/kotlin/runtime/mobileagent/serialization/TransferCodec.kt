@@ -109,12 +109,13 @@ object TransferCodec {
         val kbs = bundle.knowledgeBases
         val skills = bundle.skills
         val conversations = bundle.conversations
-        if (agent == null && kbs.isEmpty() && skills.isEmpty() && conversations.isEmpty()) {
+        if (!WorldBookTransferValidation.hasPayload(bundle)) {
             invalid(operationId, "Transfer must contain an agent, knowledge base, skill, or conversation")
         }
         if (agent != null) validateAgent(agent, kbs, skills, operationId)
         validateKnowledge(kbs, operationId)
         validateSkills(skills, operationId)
+        WorldBookTransferValidation.bundle(bundle.worldBooks, operationId)
         validateConversations(conversations, operationId)
         val encoded = json.encodeToString(bundle)
         requireMetadataSize(encoded, operationId, "manifest")
@@ -158,6 +159,7 @@ object TransferCodec {
             }
         requireDistinctIds(profile.knowledgeBaseIds, operationId, "agent.knowledgeBaseIds")
         requireDistinctIds(profile.skillIds, operationId, "agent.skillIds")
+        WorldBookTransferValidation.ids(profile.worldBookIds, operationId)
         val kbIds = knowledgeBases.map { it.id }.toSet()
         val skillIds = skills.map { it.id }.toSet()
         profile.knowledgeBaseIds.filterNot { it in kbIds }.forEach { missing ->
@@ -410,6 +412,7 @@ object TransferCodec {
 
     private fun validateConversation(transfer: ConversationTransfer, operationId: String) {
         val conversation = transfer.conversation
+        WorldBookTransferValidation.binding(transfer.worldBooks, conversation.id, operationId)
         requireId(conversation.id, operationId, "conversation.id")
         requireId(conversation.snapshotId, operationId, "conversation.snapshotId")
         requireText(conversation.title, operationId, "conversation.title")
@@ -477,6 +480,7 @@ object TransferCodec {
         requireNonNegative(snapshot.chatModelRevision, operationId, "snapshot.chatModelRevision")
         snapshot.knowledgeBaseIds.forEach { requireId(it, operationId, "snapshot.knowledgeBaseId") }
         snapshot.skillIds.forEach { requireId(it, operationId, "snapshot.skillId") }
+        WorldBookTransferValidation.ids(snapshot.worldBookIds, operationId)
         if (snapshot.knowledgeBaseIds.size != snapshot.knowledgeBaseIds.toSet().size ||
             snapshot.skillIds.size != snapshot.skillIds.toSet().size) {
             invalid(operationId, "Snapshot resource bindings contain duplicates")

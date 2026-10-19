@@ -273,6 +273,10 @@ data class AgentProfile(
     val contextPolicyJson: String = "{}",
     /** JSON object containing deterministic permission and degradation settings. */
     val permissionSettingsJson: String = "{}",
+    /** Defaults for new conversations; existing conversations keep their own world book binding. */
+    @OptIn(kotlinx.serialization.ExperimentalSerializationApi::class)
+    @kotlinx.serialization.EncodeDefault(kotlinx.serialization.EncodeDefault.Mode.NEVER)
+    val worldBookIds: List<String> = emptyList(),
 )
 
 @Serializable

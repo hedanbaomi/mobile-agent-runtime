@@ -8,6 +8,12 @@ SPDX-PackageSupplier = "mobileAgentRuntime contributors"
 SPDX-PackageDownloadLocation = "https://github.com/hedanbaomi/mobile-agent-runtime"
 
 [[annotations]]
+path = ["shared/serialization/src/main/kotlin/runtime/mobileagent/serialization/worldbook/WorldBookEntryWriter.kt"]
+precedence = "aggregate"
+SPDX-FileCopyrightText = "2026 mobileAgentRuntime contributors"
+SPDX-License-Identifier = "AGPL-3.0-only"
+
+[[annotations]]
 path = [
     "gradlew",
     "gradlew.bat",

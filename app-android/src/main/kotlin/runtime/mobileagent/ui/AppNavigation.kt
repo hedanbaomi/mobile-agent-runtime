@@ -19,6 +19,7 @@ object AppRoutes {
     const val AGENTS = "agents"
     const val PROVIDERS = "providers"
     const val KNOWLEDGE = "knowledge"
+    const val WORLD_BOOKS = "worldbooks"
     const val SKILLS = "skills"
     const val NEWS = "news"
     const val SETTINGS = "settings"
@@ -49,6 +50,7 @@ private val topLevelMenuRoutes = setOf(
     AppRoutes.AGENTS,
     AppRoutes.PROVIDERS,
     AppRoutes.KNOWLEDGE,
+    AppRoutes.WORLD_BOOKS,
     AppRoutes.SKILLS,
     AppRoutes.NEWS,
     AppRoutes.SETTINGS,
@@ -87,6 +89,7 @@ fun appShellTitle(
         AppRoutes.AGENTS -> if (chinese) "智能体" else "Agents"
         AppRoutes.PROVIDERS -> if (chinese) "服务商" else "Providers"
         AppRoutes.KNOWLEDGE -> if (chinese) "知识" else "Knowledge"
+        AppRoutes.WORLD_BOOKS -> if (chinese) "世界书" else "World books"
         AppRoutes.SKILLS -> if (chinese) "技能" else "Skills"
         AppRoutes.NEWS -> if (chinese) "公告" else "News"
         AppRoutes.SETTINGS -> if (chinese) "设置" else "Settings"
@@ -104,6 +107,7 @@ fun defaultAppDestinations(chinese: Boolean = true): List<AppNavigationDestinati
     AppNavigationDestination(AppRoutes.AGENTS, if (chinese) "智能体" else "Agents", Icons.Outlined.SmartToy),
     AppNavigationDestination(AppRoutes.PROVIDERS, if (chinese) "服务商" else "Providers", Icons.Outlined.Tune),
     AppNavigationDestination(AppRoutes.KNOWLEDGE, if (chinese) "知识" else "Knowledge", Icons.Outlined.MenuBook),
+    AppNavigationDestination(AppRoutes.WORLD_BOOKS, if (chinese) "世界书" else "World books", Icons.Outlined.MenuBook),
     AppNavigationDestination(AppRoutes.SKILLS, if (chinese) "技能" else "Skills", Icons.Outlined.Extension),
     AppNavigationDestination(AppRoutes.NEWS, if (chinese) "公告" else "News", Icons.Outlined.Campaign),
     AppNavigationDestination(AppRoutes.SETTINGS, if (chinese) "设置" else "Settings", Icons.Outlined.Settings),

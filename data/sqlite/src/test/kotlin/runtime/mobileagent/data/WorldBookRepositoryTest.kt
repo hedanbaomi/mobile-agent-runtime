@@ -117,6 +117,10 @@ class WorldBookRepositoryTest {
         }
         books.recordEvaluation("run", frozen, "{}", "[]", 1, 100, 4)
         assertTrue(db.query("SELECT * FROM world_book_effects").isEmpty())
+        books.validateDispatch("run")
+        books.validateDispatch("run")
+        assertTrue(db.query("SELECT * FROM world_book_effects").isEmpty())
+        assertEquals(0L, db.query("SELECT dispatched FROM world_book_runs WHERE run_id='run'").single().long("dispatched"))
         books.beforeDispatch("run"); books.beforeDispatch("run")
         assertEquals(1, db.query("SELECT * FROM world_book_effects").size)
         assertEquals(1L, db.query("SELECT dispatched FROM world_book_runs").single().long("dispatched"))
@@ -248,6 +252,40 @@ class WorldBookRepositoryTest {
                 zip.closeEntry(); entry = zip.nextEntry
             }
         } }
+    }
+
+    @Test fun batchImportHeadsMatchProbeHashesAndReplaceKeepsIdentityAndBindings() = database { db ->
+        val books = WorldBookRepository(db)
+        val text = """{"name":"PHB","entries":{"0":{"uid":0,"key":["火球术"],"content":"3d6"}}}"""
+        val probe = runtime.mobileagent.serialization.worldbook.WorldBookBatchPlanner.probe(text, "file")
+            as runtime.mobileagent.serialization.worldbook.WorldBookProbe.Book
+        books.save(runtime.mobileagent.serialization.worldbook.WorldBookCodec.decode(text, "file").document, "phb")
+        assertEquals(probe.nativeHash, books.heads().single().contentHash)
+        assertEquals(probe.nativeBytes, books.storageUsage().storedBytes)
+        assertEquals(1, books.storageUsage().books)
+        books.setEnabled("phb", false, 1)
+        val head = books.heads().single()
+        assertEquals(probe.nativeHash, head.contentHash, "toggling must not change the content hash")
+        assertFalse(head.enabled)
+
+        // Re-importing the same file is detected as identical; a newer edition replaces in place.
+        val again = runtime.mobileagent.serialization.worldbook.WorldBookBatchCandidate("c0", "PHB.json", probe, true)
+        val policy = WorldBookConflictPolicy.REPLACE
+        val same = runtime.mobileagent.serialization.worldbook.WorldBookBatchPlanner.plan(listOf(again), books.heads(), books.storageUsage(), policy)
+        assertEquals(WorldBookBatchAction.SKIP_IDENTICAL, same.rows.single().action)
+        val agent = agent(db, listOf("phb"))
+        val newer = text.replace("3d6", "4d6")
+        val row = runtime.mobileagent.serialization.worldbook.WorldBookBatchPlanner.plan(listOf(again.copy(
+            probe = runtime.mobileagent.serialization.worldbook.WorldBookBatchPlanner.probe(newer, "file"))),
+            books.heads(), books.storageUsage(), policy).rows.single()
+        assertEquals(WorldBookBatchAction.REPLACE, row.action)
+        val document = runtime.mobileagent.serialization.worldbook.WorldBookCodec.decode(newer, "file").document.copy(name = row.targetName)
+        val stored = books.save(document, checkNotNull(row.targetId), row.targetRevision, row.targetEnabled)
+        assertEquals("phb", stored.summary.id)
+        assertFalse(stored.summary.enabled)
+        assertEquals("4d6", books.get("phb")!!.document.entries.single().content)
+        assertEquals(listOf("phb"), AgentRepository(db).get(agent.id)!!.worldBookIds)
+        assertThrows(IllegalStateException::class.java) { books.save(document, "phb", row.targetRevision, false) }
     }
 
     private fun agent(db: SqlConnection, books: List<String>): AgentProfile {

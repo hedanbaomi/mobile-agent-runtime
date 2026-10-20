@@ -66,7 +66,7 @@ object Migrations {
     // embedding, generation, pin, permission and consent row stays in place.
     // v35 adds immutable world book revisions, conversation bindings and activation receipts.
     // v36 adds optional imported character metadata; old Agents and snapshots retain their values.
-    const val VERSION = 36
+    const val VERSION = 37
 
     private val statements = listOf(
         "CREATE TABLE IF NOT EXISTS schema_version (version INTEGER NOT NULL PRIMARY KEY)",
@@ -290,6 +290,7 @@ object Migrations {
             columns.forEach { column -> ensureColumn(connection, column) }
             WorldBookSchema.install(connection)
             CharacterCardStorage.install(connection)
+            WorldBookRevisionStorage.install(connection, current)
             MessageChronology.install(connection)
             // v34: the historical external-content statement above may have just created the
             // wrong table, so the index is repaired from chunks.text in this same transaction.

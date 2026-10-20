@@ -3,6 +3,9 @@
 
 package runtime.mobileagent.feature.worldbooks
 
+import runtime.mobileagent.domain.worldbook.WorldBookBatchAction
+import runtime.mobileagent.domain.worldbook.WorldBookConflictPolicy
+import runtime.mobileagent.domain.worldbook.WorldBookFileSkip
 /**
  * Lightweight presentation model for the world book screen.
  *
@@ -71,7 +74,40 @@ data class WorldBookImportUi(
     val name: String,
     val entryCount: Int,
     val notices: List<String>,
+    /** One row per candidate JSON; empty only for a legacy single-book preview. */
+    val items: List<WorldBookImportItemUi> = emptyList(),
+    /** Files that never became candidates (images, unsupported types, unreadable ZIP members). */
+    val skipped: List<WorldBookImportSkipUi> = emptyList(),
+    val policy: WorldBookConflictPolicy = WorldBookConflictPolicy.KEEP_BOTH,
+    /** Selected candidates whose outcome depends on [policy]; zero hides the choice. */
+    val conflicts: Int = 0,
+    val writeCount: Int = 1,
+    val bytesToWrite: Long = 0,
+    val storedBytes: Long = 0,
+    val maxStoredBytes: Long = 0,
+    val overStorage: Boolean = false,
+    val overBooks: Boolean = false,
+    val maxBooks: Int = 0,
+    val canConfirm: Boolean = true,
 )
+
+data class WorldBookImportItemUi(
+    val key: String,
+    val source: String,
+    /** Name the book will be stored under, or the name in the file when nothing is written. */
+    val name: String,
+    val entryCount: Int,
+    val action: WorldBookBatchAction,
+    val selected: Boolean,
+    val selectable: Boolean,
+    /** Existing book or earlier file this row conflicts with. */
+    val conflictWith: String? = null,
+    /** Short technical reason for invalid or non world book files, rendered verbatim. */
+    val detail: String = "",
+    val notices: List<String> = emptyList(),
+)
+
+data class WorldBookImportSkipUi(val source: String, val reason: WorldBookFileSkip)
 
 data class WorldBooksUiState(
     val books: List<WorldBookCardUi> = emptyList(),
@@ -84,6 +120,8 @@ data class WorldBooksUiState(
     val preview: WorldBookPreviewUi? = null,
     val pendingImport: WorldBookImportUi? = null,
     val language: String = "zh-CN",
+    /** The running work can be stopped from the status row (import scanning and writing). */
+    val cancellable: Boolean = false,
 )
 
 enum class WorldBookExportKind { NATIVE, SILLY_TAVERN, ORIGINAL }
@@ -108,8 +146,12 @@ data class WorldBooksActions(
     val onDuplicateBook: () -> Unit = {},
     val onDeleteBook: () -> Unit = {},
     val onImport: () -> Unit = {},
+    val onImportFolder: () -> Unit = {},
     val onConfirmImport: () -> Unit = {},
     val onCancelImport: () -> Unit = {},
+    val onImportPolicy: (WorldBookConflictPolicy) -> Unit = {},
+    val onToggleImportItem: (String) -> Unit = {},
+    val onCancelBusy: () -> Unit = {},
     val onExport: (WorldBookExportKind) -> Unit = {},
     val onPreviewInput: (String) -> Unit = {},
     val onPreview: () -> Unit = {},
@@ -172,6 +214,12 @@ object WorldBookTestTags {
     const val IMPORT_CONFIRM = "worldbooks.import.confirm"
     const val IMPORT_CANCEL = "worldbooks.import.cancel"
     const val IMPORT_NOTICE_PREFIX = "worldbooks.import.notice."
+    const val IMPORT_FILES = "worldbooks.import.files"
+    const val IMPORT_FOLDER = "worldbooks.import.folder"
+    const val IMPORT_ITEM_PREFIX = "worldbooks.import.item."
+    const val IMPORT_POLICY_PREFIX = "worldbooks.import.policy."
+    const val IMPORT_SKIPPED = "worldbooks.import.skipped"
+    const val BUSY_CANCEL = "worldbooks.busy.cancel"
     const val FIELD_PREFIX = "worldbooks.field."
     const val BINDING_DIALOG = "worldbooks.binding.dialog"
     const val BINDING_BOOK_PREFIX = "worldbooks.binding.book."
@@ -191,6 +239,8 @@ object WorldBookTestTags {
     fun match(index: Int): String = RUN_MATCH_PREFIX + index
     fun warning(index: Int): String = RUN_WARNING_PREFIX + index
     fun importNotice(index: Int): String = IMPORT_NOTICE_PREFIX + index
+    fun importItem(key: String): String = IMPORT_ITEM_PREFIX + key
+    fun importPolicy(policy: WorldBookConflictPolicy): String = IMPORT_POLICY_PREFIX + policy.name.lowercase()
     fun bindingBook(id: String): String = BINDING_BOOK_PREFIX + id
     fun exportOption(kind: WorldBookExportKind): String = "worldbooks.export.option." + kind.name.lowercase()
 }
@@ -278,4 +328,14 @@ fun WorldBookPreviewUi.budgetFraction(): Float {
 fun WorldBookImportUi.hasNotices(): Boolean = notices.isNotEmpty()
 
 /** True when the import preview would change nothing; the confirm button stays optional. */
-fun WorldBookImportUi.isEmptyImport(): Boolean = entryCount <= 0
+fun WorldBookImportUi.isEmptyImport(): Boolean = if (items.isEmpty()) entryCount <= 0 else writeCount <= 0
+
+/** A preview of more than one candidate, or one that also reports skipped files. */
+fun WorldBookImportUi.isBatch(): Boolean = items.size > 1 || skipped.isNotEmpty()
+
+/** Binary MiB with one decimal, independent of the device locale; any non-empty size shows at least 0.1. */
+fun worldBookMiB(bytes: Long): String {
+    val rounded = (bytes.coerceAtLeast(0) * 10 + 524_288) / 1_048_576
+    val tenths = if (bytes > 0) rounded.coerceAtLeast(1) else 0
+    return "${tenths / 10}.${tenths % 10}"
+}

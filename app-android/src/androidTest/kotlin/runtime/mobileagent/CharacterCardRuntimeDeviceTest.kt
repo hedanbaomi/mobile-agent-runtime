@@ -38,7 +38,7 @@ class CharacterCardRuntimeDeviceTest {
             assertEquals(35L, db.query("SELECT version FROM schema_version").single().long("version"))
             assertFalse(db.query("PRAGMA table_info(agent_profiles)").any { it.string("name") == "character_card_json" })
             Migrations.apply(db)
-            assertEquals(36L, db.query("SELECT version FROM schema_version").single().long("version"))
+            assertEquals(Migrations.VERSION.toLong(), db.query("SELECT version FROM schema_version").single().long("version"))
             assertTrue(db.query("PRAGMA table_info(agent_profiles)").any { it.string("name") == "character_card_json" })
             assertEquals("保留旧资料", db.query("SELECT value FROM character_migration_sentinel").single().string("value"))
         } } finally { file.delete(); java.io.File(file.path + "-wal").delete(); java.io.File(file.path + "-shm").delete() }

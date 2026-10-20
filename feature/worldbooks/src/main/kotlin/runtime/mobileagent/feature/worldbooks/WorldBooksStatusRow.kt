@@ -31,6 +31,7 @@ internal fun WorldBooksStatusRow(
     loading: Boolean,
     actions: WorldBooksActions,
     modifier: Modifier = Modifier,
+    cancellable: Boolean = false,
 ) {
     Column(modifier.fillMaxWidth()) {
         if (status.isNotBlank()) {
@@ -68,8 +69,13 @@ internal fun WorldBooksStatusRow(
                 Text(
                     stringResource(R.string.wb_loading),
                     style = MaterialTheme.typography.bodySmall,
-                    modifier = Modifier.padding(start = 8.dp).testTag(WorldBookTestTags.LOADING),
+                    modifier = Modifier.padding(start = 8.dp).weight(1f).testTag(WorldBookTestTags.LOADING),
                 )
+                if (cancellable) {
+                    TextButton(onClick = actions.onCancelBusy, modifier = Modifier.testTag(WorldBookTestTags.BUSY_CANCEL)) {
+                        Text(stringResource(R.string.wb_busy_stop))
+                    }
+                }
             }
         }
     }

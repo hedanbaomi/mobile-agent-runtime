@@ -130,10 +130,10 @@ class WorldBookCodecRoundTripTest {
     fun `encodeNative keeps unknown entry fields inside originalJson`() {
         val document = fullDocument()
         val encoded = WorldBookCodec.encodeNative(document)
-        val entry = parse(encoded).getValue("entries").jsonArray.first().jsonObject
+        val entry = WorldBookCodec.decode(encoded).document.entries.first()
         assertEquals(
             "keep",
-            entry.getValue("originalJson").jsonObject.getValue("futureField").jsonPrimitive.content,
+            entry.originalJson.getValue("futureField").jsonPrimitive.content,
         )
     }
 

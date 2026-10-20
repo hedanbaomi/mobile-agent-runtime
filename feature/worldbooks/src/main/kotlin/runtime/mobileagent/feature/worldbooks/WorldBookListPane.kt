@@ -4,6 +4,8 @@
 package runtime.mobileagent.feature.worldbooks
 
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Spacer
@@ -15,6 +17,8 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.Button
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
@@ -45,6 +49,7 @@ internal fun WorldBookListPane(
     modifier: Modifier = Modifier,
 ) {
     var exportOpen by remember { mutableStateOf(false) }
+    var importMenu by remember { mutableStateOf(false) }
     val visible = state.visibleBooks()
 
     LazyColumn(
@@ -63,6 +68,7 @@ internal fun WorldBookListPane(
                 error = state.error,
                 loading = state.loading,
                 actions = actions,
+                cancellable = state.cancellable,
             )
         }
         item(key = "query") {
@@ -83,8 +89,22 @@ internal fun WorldBookListPane(
                 Button(onClick = actions.onCreate, modifier = Modifier.testTag(WorldBookTestTags.CREATE)) {
                     Text(stringResource(R.string.wb_create))
                 }
-                OutlinedButton(onClick = actions.onImport, modifier = Modifier.testTag(WorldBookTestTags.IMPORT)) {
-                    Text(stringResource(R.string.wb_import))
+                Box {
+                    OutlinedButton(onClick = { importMenu = true }, modifier = Modifier.testTag(WorldBookTestTags.IMPORT)) {
+                        Text(stringResource(R.string.wb_import))
+                    }
+                    DropdownMenu(expanded = importMenu, onDismissRequest = { importMenu = false }) {
+                        DropdownMenuItem(
+                            text = { ImportMenuText(R.string.wb_import_files, R.string.wb_import_files_hint) },
+                            onClick = { importMenu = false; actions.onImport() },
+                            modifier = Modifier.testTag(WorldBookTestTags.IMPORT_FILES),
+                        )
+                        DropdownMenuItem(
+                            text = { ImportMenuText(R.string.wb_import_folder, R.string.wb_import_folder_hint) },
+                            onClick = { importMenu = false; actions.onImportFolder() },
+                            modifier = Modifier.testTag(WorldBookTestTags.IMPORT_FOLDER),
+                        )
+                    }
                 }
                 OutlinedButton(onClick = { exportOpen = true }, modifier = Modifier.testTag(WorldBookTestTags.EXPORT)) {
                     Text(stringResource(R.string.wb_export))
@@ -113,5 +133,13 @@ internal fun WorldBookListPane(
             },
             onDismiss = { exportOpen = false },
         )
+    }
+}
+
+@Composable
+private fun ImportMenuText(label: Int, hint: Int) {
+    Column {
+        Text(stringResource(label), style = MaterialTheme.typography.bodyMedium)
+        Text(stringResource(hint), style = MaterialTheme.typography.bodySmall)
     }
 }

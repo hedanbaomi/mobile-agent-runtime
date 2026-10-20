@@ -78,6 +78,12 @@ data class AgentRuntimeRequest(
      * Recovered values still pass the normal output-size and redaction boundaries.
      */
     val confirmedToolResultAfterTimeout: (ToolCall) -> ToolResult.Value? = { null },
+    /**
+     * Synchronous commit at the adapter's final answering HTTP dispatch gate, after validation,
+     * admission and durable preview work. Evidence-only visual and summary requests never invoke it.
+     * Repeated answering/tool-continuation requests must be handled idempotently by the host.
+     */
+    val beforeAnsweringDispatch: () -> Unit = {},
 )
 
 /** An outer stall can win before the executor returns; approval waits are never execution proof. */

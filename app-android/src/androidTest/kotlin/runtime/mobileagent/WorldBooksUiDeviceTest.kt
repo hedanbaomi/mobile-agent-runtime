@@ -86,6 +86,59 @@ class WorldBooksUiDeviceTest {
         } finally { input.delete(); output.delete() }
     }
 
+    @Test fun batchImportPreviewsFilesAndZipThenReplacesInPlaceAndSkipsUnchecked() {
+        val vm = screen()
+        val app = compose.activity.application as MobileAgentApp
+        val id = UUID.randomUUID().toString().take(8)
+        val directory = File(app.filesDir, "app-updates").apply { mkdirs() }
+        fun book(name: String, content: String) =
+            """{"name":"$name","entries":{"0":{"uid":0,"key":["火球术"],"content":"$content"}}}"""
+        val phb = "PHB-$id"
+        val existing = app.container.worldBooks.save(
+            runtime.mobileagent.serialization.worldbook.WorldBookCodec.decode(book(phb, "old"), "x").document)
+        val json = File(directory, "phb-$id.json").apply { writeText(book(phb, "new")) }
+        val zip = File(directory, "rules-$id.zip")
+        java.util.zip.ZipOutputStream(zip.outputStream()).use { out ->
+            listOf("怪物图鉴-$id.json" to book("MM-$id", "goblin"), "城主指南-$id.json" to book("DMG-$id", "trap"),
+                "封面.png" to "x").forEach { (name, text) ->
+                out.putNextEntry(java.util.zip.ZipEntry("rules/$name")); out.write(text.toByteArray()); out.closeEntry()
+            }
+        }
+        val uris = listOf(json, zip).map { FileProvider.getUriForFile(app, "${app.packageName}.app-updates", it) }
+        val before = app.container.worldBooks.list().size
+        try {
+            compose.onNodeWithTag("worldbooks.import").performClick()
+            compose.onNodeWithTag("worldbooks.import.files").assertIsDisplayed()
+            compose.onNodeWithTag("worldbooks.import.folder").assertIsDisplayed()
+            // Close the menu without launching the system picker; the picker result is injected below.
+            androidx.test.platform.app.InstrumentationRegistry.getInstrumentation().sendKeyDownUpSync(android.view.KeyEvent.KEYCODE_BACK)
+            compose.waitForIdle()
+            compose.onNodeWithTag("worldbooks.import.files").assertDoesNotExist()
+            compose.runOnIdle { vm.importFiles(uris) }; settled(vm)
+            compose.onNodeWithTag("worldbooks.import.dialog").assertIsDisplayed()
+            assertEquals(before, app.container.worldBooks.list().size)
+            val pending = compose.runOnIdle { vm.state.value.pendingImport!! }
+            assertEquals(3, pending.items.size)
+            assertEquals(1, pending.skipped.size)
+            assertEquals(1, pending.conflicts)
+            compose.onNodeWithTag("worldbooks.import.policy.replace").performClick()
+            val dmg = pending.items.first { it.name == "DMG-$id" }.key
+            compose.runOnIdle { vm.toggleImportItem(dmg) }
+            compose.runOnIdle { assertEquals(2, vm.state.value.pendingImport!!.writeCount) }
+            // Evidence only: Compose cannot capture dialog windows below API 28.
+            if (android.os.Build.VERSION.SDK_INT >= 28) File(compose.activity.cacheDir, "worldbooks-batch-import.png").outputStream().use {
+                compose.onNodeWithTag("worldbooks.import.dialog").captureToImage().asAndroidBitmap().compress(Bitmap.CompressFormat.PNG, 100, it)
+            }
+            compose.onNodeWithTag("worldbooks.import.confirm").performClick(); settled(vm)
+            val books = app.container.worldBooks.list()
+            assertEquals(before + 1, books.size)
+            assertTrue(books.any { it.name == "MM-$id" })
+            assertFalse(books.any { it.name == "DMG-$id" })
+            assertEquals("new", app.container.worldBooks.get(existing.summary.id)!!.document.entries.single().content)
+            compose.runOnIdle { assertTrue(vm.state.value.status.isNotBlank()); assertNull(vm.state.value.editor) }
+        } finally { json.delete(); zip.delete() }
+    }
+
     private fun screen(): WorldBooksViewModel {
         val app = compose.activity.application as MobileAgentApp
         app.ensureHostInitialized()

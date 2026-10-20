@@ -96,7 +96,13 @@ data class WorldBookDocument(
     val settings: WorldBookSettings = WorldBookSettings(),
     val originalJson: JsonObject = JsonObject(emptyMap()),
     val format: WorldBookFormat = WorldBookFormat.NATIVE,
-)
+) {
+    companion object {
+        /** 仓储接受的书名与描述长度上限。 */
+        const val MAX_NAME_CHARS = 256
+        const val MAX_DESCRIPTION_CHARS = 4096
+    }
+}
 
 /**
  * 世界书载体格式。导入时按结构探测，导出时按此选择目标结构。

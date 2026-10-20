@@ -83,4 +83,16 @@
     <string name="chat_load_earlier_messages">Load earlier messages</string>
     <string name="chat_load_more_sessions">Load more conversations</string>
     <string name="chat_load_more_archived">Load more archived conversations</string>
+    <string name="trpg_tool_dice_title">Tabletop Dice Roll · %1$s</string>
+    <string name="trpg_tool_coc_title">CoC 7e Skill Check · Skill %1$s</string>
+    <string name="trpg_tool_state_title">Campaign State Sync · Rev #%1$s</string>
+    <string name="trpg_tool_dc_pass">DC %1$s · SUCCESS</string>
+    <string name="trpg_tool_dc_fail">DC %1$s · FAILURE</string>
+    <string name="trpg_tool_coc_thresholds">Extreme ≤%1$s · Hard ≤%2$s · Regular ≤%3$s · Fumble ≥%4$s</string>
+    <string name="trpg_tool_coc_critical" formatted="false">CRITICAL SUCCESS</string>
+    <string name="trpg_tool_coc_extreme" formatted="false">EXTREME SUCCESS</string>
+    <string name="trpg_tool_coc_hard" formatted="false">HARD SUCCESS</string>
+    <string name="trpg_tool_coc_regular" formatted="false">REGULAR SUCCESS</string>
+    <string name="trpg_tool_coc_failure" formatted="false">FAILURE</string>
+    <string name="trpg_tool_coc_fumble" formatted="false">FUMBLE</string>
 </resources>

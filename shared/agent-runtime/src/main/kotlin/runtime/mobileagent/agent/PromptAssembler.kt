@@ -38,6 +38,7 @@ data class EffectivePrompt(
     val typedHistory: List<ChatMessage>? = null,
     val globalRootPrompt: String = "",
     val worldBooks: runtime.mobileagent.agent.worldbook.WorldBookPromptPlan = runtime.mobileagent.agent.worldbook.WorldBookPromptPlan(),
+    val trpgSession: runtime.mobileagent.domain.trpg.TrpgSession? = null,
 ) {
     /**
      * Assemble a model prompt with visible trust boundaries.  Skills and
@@ -46,7 +47,7 @@ data class EffectivePrompt(
      * capability grants.  Tool definitions are attached separately by the
      * runtime and never come from these strings.
      */
-    fun assemble(includeWorldBooks: Boolean = true): PromptAssembly {
+    fun assemble(includeWorldBooks: Boolean = true, includeTrpg: Boolean = true): PromptAssembly {
         val blocks = buildList {
             add(PromptBlock(PromptTrust.TRUSTED_RUNTIME, runtimeContract))
             if (globalRootPrompt.isNotBlank()) {
@@ -83,7 +84,8 @@ data class EffectivePrompt(
             }
         }
         messages += ChatMessage(role = "user", text = currentUser, images = currentImages)
-        return PromptAssembly(blocks = blocks, messages = if (includeWorldBooks) runtime.mobileagent.agent.worldbook.WorldBookPromptComposer.apply(messages, worldBooks, outletConfiguration()) else messages)
+        val worldBookMessages = if (includeWorldBooks) runtime.mobileagent.agent.worldbook.WorldBookPromptComposer.apply(messages, worldBooks, outletConfiguration()) else messages
+        return PromptAssembly(blocks = blocks, messages = if (includeTrpg) TrpgPromptComposer.apply(worldBookMessages, trpgSession) else worldBookMessages)
     }
 
     fun asMessages(): List<ChatMessage> = assemble().messages

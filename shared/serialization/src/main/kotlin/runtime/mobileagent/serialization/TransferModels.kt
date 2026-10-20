@@ -164,6 +164,9 @@ data class ConversationTransfer(
     @OptIn(kotlinx.serialization.ExperimentalSerializationApi::class)
     @kotlinx.serialization.EncodeDefault(kotlinx.serialization.EncodeDefault.Mode.NEVER)
     val worldBooks: WorldBookConversationTransfer? = null,
+    @OptIn(kotlinx.serialization.ExperimentalSerializationApi::class)
+    @kotlinx.serialization.EncodeDefault(kotlinx.serialization.EncodeDefault.Mode.NEVER)
+    val trpgSession: runtime.mobileagent.domain.trpg.TrpgSession? = null,
 )
 
 @Serializable

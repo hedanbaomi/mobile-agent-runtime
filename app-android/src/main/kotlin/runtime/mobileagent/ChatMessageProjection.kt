@@ -24,12 +24,14 @@ internal fun projectChatMessage(message: Message, streaming: Boolean): ChatMessa
     val visualReceipt = (metadata?.get("visualBatchAnalysis") as? JsonPrimitive)?.booleanOrNull == true
     val toolEvidence = message.role == MessageRole.USER &&
         (metadata?.get("toolEvidence") as? JsonPrimitive)?.booleanOrNull == true
+    val trpgCard = parseTrpgToolCard(message)
     return ChatMessageUi(
         id = message.id,
         role = if (visualReceipt || toolEvidence) "tool" else message.role.name.lowercase(),
         text = message.text,
         timeLabel = message.createdAt.take(16),
         attachedImages = ChatImagePolicy.attachedCount(message, visualReceipt, toolEvidence),
+        trpgToolCard = trpgCard,
         citationIds = message.parts.filterIsInstance<CitationPart>().map { it.citationId },
         streaming = message.status == "STREAMING" && streaming,
         reasoning = reasoningParts.joinToString("") { it.text },
@@ -44,6 +46,7 @@ internal fun projectChatMessage(message: Message, streaming: Boolean): ChatMessa
                     (message.status != "STREAMING" || !streaming))
                     "本轮未完成（${message.status}）；已保留输出，不会自动重发。" else null,
                 toolResultPart?.resultJson?.let(::toolVisualEvidenceSummary),
+                trpgCard?.let(::trpgToolEventSummary),
             ).joinToString(" ")
         },
     )

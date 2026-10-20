@@ -113,6 +113,7 @@ data class AgentCardUi(
     val revision: Int,
     val modelLabel: String = "",
     val status: String = "",
+    val mode: runtime.mobileagent.domain.AgentMode = runtime.mobileagent.domain.AgentMode.NORMAL,
 )
 
 data class AgentModelOptionUi(
@@ -275,6 +276,7 @@ data class AgentEditorUi(
     val characterCardLoading: Boolean = false,
     /** Unsaved import data; discarded with the editor and never written to SavedStateHandle. */
     val pendingCharacterWorldBook: runtime.mobileagent.domain.worldbook.WorldBookDocument? = null,
+    val mode: runtime.mobileagent.domain.AgentMode = runtime.mobileagent.domain.AgentMode.NORMAL,
 )
 
 data class AgentsUiState(
@@ -467,8 +469,9 @@ private fun AgentCard(agent: AgentCardUi, selected: Boolean, onClick: () -> Unit
             .testTag("${AgentTestTags.CARD_PREFIX}${agent.id}"),
     ) {
         Column(Modifier.padding(14.dp)) {
-            Row(Modifier.fillMaxWidth()) {
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                 Text(agent.name, style = MaterialTheme.typography.titleMedium, modifier = Modifier.weight(1f))
+                AgentCardModeBadge(agent.id, agent.mode)
                 Text("r${agent.revision}", style = MaterialTheme.typography.labelSmall)
             }
             if (agent.modelLabel.isNotBlank()) Text(agent.modelLabel, style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(top = 4.dp))
@@ -493,6 +496,7 @@ private fun AgentSummary(state: AgentsUiState, actions: AgentsActions) {
             }
             Button(onClick = { actions.onOpenEditor(state.selectedAgentId) }) { Text(stringResource(R.string.ui_edit_e9740dbb)) }
         }
+        AgentSummaryModeSection(editor)
         if (editor.snapshotLabel.isNotBlank()) {
             Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.tertiaryContainer), modifier = Modifier.fillMaxWidth().padding(top = 12.dp)) {
                 Text(editor.snapshotLabel, modifier = Modifier.padding(12.dp), style = MaterialTheme.typography.bodySmall)
@@ -810,6 +814,7 @@ private fun AgentEditorFields(
                     label = { Text(stringResource(R.string.ui_name_dd4dc4c5)) },
                     modifier = Modifier.fillMaxWidth().testTag(AgentTestTags.NAME),
                 )
+                AgentEditorModeSection(editor, actions)
                 OutlinedTextField(
                     editor.prompt,
                     { actions.onEditorChange(editor.copy(prompt = it)) },

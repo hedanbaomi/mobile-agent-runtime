@@ -255,6 +255,9 @@ data class ContextWindowState(
 }
 
 @Serializable
+enum class AgentMode { NORMAL, TRPG }
+
+@Serializable
 data class AgentProfile(
     val id: String,
     val name: String,
@@ -281,6 +284,10 @@ data class AgentProfile(
     @OptIn(kotlinx.serialization.ExperimentalSerializationApi::class)
     @kotlinx.serialization.EncodeDefault(kotlinx.serialization.EncodeDefault.Mode.NEVER)
     val characterCard: ImportedCharacterCard? = null,
+    /** Creation-time mode; persisted profiles cannot change it. */
+    @OptIn(kotlinx.serialization.ExperimentalSerializationApi::class)
+    @kotlinx.serialization.EncodeDefault(kotlinx.serialization.EncodeDefault.Mode.NEVER)
+    val mode: AgentMode = AgentMode.NORMAL,
 )
 
 @Serializable

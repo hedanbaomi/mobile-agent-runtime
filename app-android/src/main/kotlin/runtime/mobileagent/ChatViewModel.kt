@@ -1151,6 +1151,8 @@ class ChatViewModel internal constructor(
                         hits.mapIndexed { i, hit -> "[citation:${bound[i].citationId}] ${hit.text}" },
                     history = emptyList(), currentUser = text, currentImages = images, typedHistory = typedHistory,
                     globalRootPrompt = preparedFacts.rootPrompt,
+                    trpgSession = if (binding.snapshot.mode == AgentMode.TRPG)
+                        withContext(Dispatchers.IO) { container.trpg.get(conversationId) } else null,
                 )
                 preparationStage = "context_budget"
                 val adapter = OpenAiAdapterFactory.create(provider.apiFormat, container.http, provider.baseUrl, headerSecretResolver = HeaderSecretResolver { host, ref ->
@@ -1465,6 +1467,7 @@ class ChatViewModel internal constructor(
                     },
                     diagnostics = modelDiagnostics,
                     beforeAnsweringDispatch = { container.worldBooks.beforeDispatch(run.runId) },
+                    currentTrpgSession = trpgSessionReader(container.trpg, binding.snapshot, conversationId),
                 ))
                     // Rendezvous keeps durable old exchanges ahead of a later compaction checkpoint.
                     .flowOn(Dispatchers.IO).buffer(0)
@@ -1665,6 +1668,7 @@ class ChatViewModel internal constructor(
                                     val diffPart = event.toDiffPartOrNull()
                                     container.conversations.append(conversationId, MessageRole.TOOL, event.resultJson,
                                         messageId = event.messageId ?: EntityId.random().value,
+                                        metadataJson = buildJsonObject { put("toolName", event.name) }.toString(),
                                         parts = buildList {
                                             add(ToolResultPart(event.callId, event.resultJson, invocation.state))
                                             // A diff is persisted only when the tool returned an

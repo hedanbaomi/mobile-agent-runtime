@@ -73,7 +73,7 @@ class NavigationScopeTest {
         val drawer = globalDrawerDestinations(false).map { it.route }
         assertEquals(
             listOf(
-                AppRoutes.CHAT, AppRoutes.AGENTS, AppRoutes.PROVIDERS, AppRoutes.KNOWLEDGE,
+                AppRoutes.CHAT, AppRoutes.AGENTS, AppRoutes.PROVIDERS, AppRoutes.KNOWLEDGE, AppRoutes.WORLD_BOOKS,
                 AppRoutes.SKILLS, AppRoutes.NEWS, AppRoutes.SETTINGS,
                 AppRoutes.MCP, AppRoutes.INSPECTOR,
             ),

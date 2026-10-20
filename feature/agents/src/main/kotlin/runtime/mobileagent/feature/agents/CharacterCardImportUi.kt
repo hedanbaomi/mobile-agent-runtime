@@ -28,6 +28,7 @@ data class CharacterCardImportUi(
     val worldBookEntries: Int = 0,
     val hasWorldBook: Boolean = false,
     val importWorldBook: Boolean = true,
+    val mode: runtime.mobileagent.domain.AgentMode = runtime.mobileagent.domain.AgentMode.NORMAL,
 )
 
 @Composable
@@ -45,6 +46,7 @@ internal fun CharacterCardImportDialog(state: AgentsUiState, actions: AgentsActi
                 OutlinedTextField(card.name, { actions.onCharacterImportChange(card.copy(name = it)) },
                     enabled = !busy, label = { Text(stringResource(R.string.character_card_name)) },
                     modifier = Modifier.fillMaxWidth().testTag("agents.character_import.name"))
+                CharacterCardImportModeSelector(card, busy, actions)
                 OutlinedTextField(card.userName, { actions.onCharacterImportChange(card.copy(userName = it)) },
                     enabled = !busy, label = { Text(stringResource(R.string.character_card_player_macro)) },
                     modifier = Modifier.fillMaxWidth().testTag("agents.character_import.user_name"))

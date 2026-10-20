@@ -84,6 +84,13 @@ internal data class CompactionPlan(
  */
 internal class ContextWindow(prompt: EffectivePrompt, val context: RuntimeContext?) {
     private val worldBooks = prompt.worldBooks
+    private var trpgSession = prompt.trpgSession
+
+    fun updateTrpgSession(session: runtime.mobileagent.domain.trpg.TrpgSession) {
+        require(trpgSession != null && session.conversationId == trpgSession?.conversationId) { "TRPG session binding changed" }
+        runtime.mobileagent.domain.trpg.TrpgStateValidation.validate(session)
+        trpgSession = session
+    }
     private val outletConfiguration = prompt.outletConfiguration()
     private val entries = mutableListOf<ContextEntry>()
     private val order = mutableListOf<String>()
@@ -100,7 +107,7 @@ internal class ContextWindow(prompt: EffectivePrompt, val context: RuntimeContex
     private val currentId = context?.currentUserMessageId ?: "current-user"
 
     init {
-        val assembled = prompt.assemble(includeWorldBooks = false).messages
+        val assembled = prompt.assemble(includeWorldBooks = false, includeTrpg = false).messages
         val historySize = prompt.typedHistory?.size ?: prompt.history.size
         require(context == null || context.historySources.size == historySize) { "Context source mapping does not match history" }
         val prefixSize = assembled.size - historySize - 1
@@ -199,7 +206,7 @@ internal class ContextWindow(prompt: EffectivePrompt, val context: RuntimeContex
     }
 
     private fun projectWorldBooks(messages: List<ChatMessage>) =
-        runtime.mobileagent.agent.worldbook.WorldBookPromptComposer.apply(messages, worldBooks, outletConfiguration)
+        TrpgPromptComposer.apply(runtime.mobileagent.agent.worldbook.WorldBookPromptComposer.apply(messages, worldBooks, outletConfiguration), trpgSession)
 
     fun commit(plan: CompactionPlan, record: ContextCompactionRecord) {
         val remove = plan.entries.map { it.source.messageId }.toSet()

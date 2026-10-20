@@ -5,6 +5,7 @@ package runtime.mobileagent.resident
 
 import android.content.AttributionSource
 import android.os.Bundle
+import android.os.Build
 import android.os.IBinder
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import org.junit.Assert.*
@@ -19,6 +20,7 @@ class ResidentAdbProviderTransportTest {
     interface Api30 { fun call(pkg: String, tag: String?, authority: String, method: String, arg: String?, extras: Bundle?): Bundle? }
     interface Api31 { fun call(source: AttributionSource, authority: String, method: String, arg: String?, extras: Bundle?): Bundle? }
     interface Invalid { fun call(source: AttributionSource, authority: String, method: String, arg: String?, extras: Bundle?, extra: Int): Bundle? }
+    interface InvalidLegacy { fun call(pkg: String, method: String, arg: String?, extras: Bundle?, extra: Int): Bundle? }
     interface Release {
         fun removeContentProviderExternal(authority: String, token: IBinder)
         fun removeContentProviderExternalAsUser(authority: String, token: IBinder, user: Int)
@@ -26,14 +28,19 @@ class ResidentAdbProviderTransportTest {
     }
 
     @Test fun eachSdkAcceptsOnlyItsCanonicalProviderSignature() {
+        // Reflecting a method resolves every parameter type. AttributionSource
+        // does not exist before API31, so exercise its shape only where present.
         val shapes = listOf(Api26::class.java to 26..28, Api29::class.java to 29..29,
-            Api30::class.java to 30..30, Api31::class.java to 31..35)
-        for (sdk in 26..35) {
+            Api30::class.java to 30..30) + if (Build.VERSION.SDK_INT >= 31)
+            listOf(Api31::class.java to 31..36) else emptyList()
+        for (sdk in 26..36) {
             shapes.forEach { (type, range) ->
                 assertEquals("SDK $sdk signature ${type.simpleName}", sdk in range,
                     ResidentAdbProviderTransport.validCall(type.methods.single(), sdk))
             }
-            assertFalse(ResidentAdbProviderTransport.validCall(Invalid::class.java.methods.single(), sdk))
+            assertFalse(ResidentAdbProviderTransport.validCall(InvalidLegacy::class.java.methods.single(), sdk))
+            if (Build.VERSION.SDK_INT >= 31)
+                assertFalse(ResidentAdbProviderTransport.validCall(Invalid::class.java.methods.single(), sdk))
         }
     }
 

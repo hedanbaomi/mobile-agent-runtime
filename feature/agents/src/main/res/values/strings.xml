@@ -93,4 +93,12 @@
     <string name="character_card_pending_book">World book created on save: %1$s (%2$s entries)</string>
     <string name="character_card_exclude_book" formatted="false">Exclude this world book</string>
     <string name="character_card_snapshot_help" formatted="false">Greeting and character context affect new conversations only.</string>
+    <string name="trpg_agent_mode_title" formatted="false">Agent mode</string>
+    <string name="trpg_agent_mode_normal" formatted="false">Standard chat</string>
+    <string name="trpg_agent_mode_trpg" formatted="false">TRPG campaign (CoC / D&amp;D / Lorebook)</string>
+    <string name="trpg_agent_mode_normal_desc" formatted="false">General assistant conversation mode without tabletop campaign state or TRPG dice tools.</string>
+    <string name="trpg_agent_mode_trpg_desc" formatted="false">Enables universal CoC &amp; D&amp;D numeric frameworks, WorldBook-driven custom rules, user &amp; LLM custom numeric columns, manual &amp; model dice checks, and host-bound campaign state tools. Mode is permanent once saved.</string>
+    <string name="trpg_agent_mode_locked" formatted="false">Agent mode is locked after first save and cannot be changed.</string>
+    <string name="trpg_agent_mode_badge" formatted="false">TRPG</string>
+    <string name="trpg_agent_summary_mode">Mode: %1$s</string>
 </resources>

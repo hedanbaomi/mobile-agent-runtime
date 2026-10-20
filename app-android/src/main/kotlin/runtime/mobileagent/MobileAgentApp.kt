@@ -159,6 +159,7 @@ class AppContainer(app: MobileAgentApp) :
     val agents = AgentRepository(db)
     val conversations = ConversationRepository(db)
     val worldBooks = runtime.mobileagent.data.WorldBookRepository(db)
+    val trpg = runtime.mobileagent.data.TrpgRepository(db)
     val chatDrafts = runtime.mobileagent.data.ChatDraftRepository(db)
     val conversationImages = runtime.mobileagent.data.ConversationImageRepository(db, conversations,
         CasBlobSink(File(app.filesDir, "cas")), File(app.cacheDir, "knowledge-index"))

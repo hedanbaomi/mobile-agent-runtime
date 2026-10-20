@@ -148,7 +148,7 @@ class ToolBroker(
             return remembered
         }
         val spec = BuiltinTools.byName[call.name] ?: return ToolResult.Invalid("Unknown tool ${call.name}")
-        val args = parseObject(call.argumentsJson) ?: return ToolResult.Invalid("Tool arguments are incomplete JSON")
+        val args = TrpgToolArguments.builtin(call.name, call.argumentsJson) ?: return ToolResult.Invalid("Tool arguments are incomplete JSON")
         val missing = specRequired(spec).filter { key -> !args.containsKey(key) }
         if (missing.isNotEmpty()) {
             return ToolResult.Invalid("Missing parameters: ${missing.joinToString()}")
@@ -184,7 +184,7 @@ class ToolBroker(
         val ctx = activeContext(grant)
         completionScopes[call.callId] = scope(caps, ctx, grant)
         val spec = BuiltinTools.byName[call.name] ?: return ToolResult.Invalid("Unknown tool ${call.name}")
-        val args = parseObject(call.argumentsJson) ?: return ToolResult.Invalid("Tool arguments are incomplete JSON")
+        val args = TrpgToolArguments.builtin(call.name, call.argumentsJson) ?: return ToolResult.Invalid("Tool arguments are incomplete JSON")
         if (spec.capability.isNotEmpty() && spec.capability !in caps) {
             return remember(call.callId, ToolResult.Denied("Capability ${spec.capability} is not granted"))
         }
@@ -296,6 +296,7 @@ class ToolBroker(
             val value = RandomNumber.draw(min, max, random)
             """{"min":$min,"max":$max,"value":$value}"""
         }
+        "dice_roll" -> DiceRoll.execute(args, random).toString()
         "http_request" -> {
             val url = args.string("url")
             val method = args["method"]?.jsonPrimitive?.contentOrNull ?: "GET"
@@ -306,11 +307,6 @@ class ToolBroker(
         else -> error("Unknown tool")
     }
 
-    private fun parseObject(raw: String): JsonObject? {
-        if (raw.isBlank()) return null
-        val element = runCatching { Json.parseToJsonElement(raw) }.getOrNull() ?: return null
-        return element as? JsonObject
-    }
 
     private fun specRequired(spec: ToolSpec): List<String> {
         val params = runCatching { Json.parseToJsonElement(spec.parametersJson).jsonObject }.getOrNull() ?: return emptyList()
@@ -386,7 +382,15 @@ object BuiltinTools {
         sideEffect = false,
     )
 
-    val all = listOf(knowledgeSearch, readDocument, calculator, randomNumber, httpRequest)
+    val diceRoll = ToolSpec(
+        name = "dice_roll",
+        description = "Roll TRPG dice or make a Call of Cthulhu 7e percentile skill check. Dice mode: expression with terms like 8d6, 2d20kh1+7 or 4d6kh3; khK keeps the highest K dice, klK keeps the lowest K, and constant or dice terms may be added or subtracted. Optional dc succeeds when total >= dc; there is no automatic natural-20 rule. CoC mode: set skill (1-100) instead of expression, with optional bonusDice/penaltyDice (0-2 each) that cancel by their net value; dc is not allowed. The result lists every die, kept dice, total, and for CoC the percentile roll and machine outcome. Reusing the same call ID and arguments returns the original rolls without rerolling.",
+        parametersJson = """{"type":"object","additionalProperties":false,"properties":{"expression":{"type":"string","minLength":1,"maxLength":256},"dc":{"type":"integer","minimum":-1000000000,"maximum":1000000000},"skill":{"type":"integer","minimum":1,"maximum":100},"bonusDice":{"type":"integer","minimum":0,"maximum":2},"penaltyDice":{"type":"integer","minimum":0,"maximum":2}}}""",
+        capability = "",
+        sideEffect = false,
+    )
+
+    val all = listOf(knowledgeSearch, readDocument, calculator, randomNumber, diceRoll, httpRequest)
     val byName = all.associateBy { it.name }
 }
 

@@ -138,6 +138,7 @@ data class ChatMessageUi(
     val eventSummary: String = "",
     /** Images the user uploaded with this message; originals stay in app storage. */
     val attachedImages: Int = 0,
+    val trpgToolCard: ChatTrpgToolCardUi? = null,
 )
 
 /** A display projection only. Durable assistant/tool records keep their protocol order. */
@@ -1301,6 +1302,7 @@ private fun MessageBubble(
                         val displayedText = if (part.role.equals("assistant", true)) presentation.texts[replyIndex++] else part.text
                         if (isToolEventRow(part.role)) {
                             if (working) ToolEventRow(part, zh, Modifier.padding(top = 4.dp))
+                            else TrpgInlineToolCard(part)
                         }
                         else if (part.text.isNotBlank()) SelectionContainer {
                             if (part.role.equals("assistant", true)) MarkdownText(
@@ -1419,6 +1421,7 @@ private fun ToolEventRow(message: ChatMessageUi, zh: Boolean, modifier: Modifier
             )
         }
         TextButton(onClick = { expanded = !expanded }) { Text(if (expanded) { if (zh) "收起" else "Collapse" } else { if (zh) "查看并复制工具结果" else "View and copy tool result" }) }
+        TrpgInlineToolCard(message, Modifier.padding(horizontal = 12.dp, vertical = 4.dp))
         if (expanded) SelectionContainer { Text(message.text, modifier = Modifier.padding(12.dp)) }
         }
     }

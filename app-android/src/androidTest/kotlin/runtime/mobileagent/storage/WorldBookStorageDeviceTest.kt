@@ -53,7 +53,7 @@ class WorldBookStorageDeviceTest {
             assertEquals(document, books.get("book")!!.document)
             assertEquals(102, books.get("book")!!.summary.revision)
             assertEquals(document, books.get("book", 51)!!.document)
-            assertEquals(37L, db.query("SELECT version FROM schema_version").single().long("version"))
+            assertEquals(Migrations.VERSION.toLong(), db.query("SELECT version FROM schema_version").single().long("version"))
         }
     }
 

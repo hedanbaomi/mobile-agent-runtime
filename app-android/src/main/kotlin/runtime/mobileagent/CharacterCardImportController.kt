@@ -11,6 +11,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import runtime.mobileagent.domain.AgentMode
 import runtime.mobileagent.domain.ImportedCharacterCard
 import runtime.mobileagent.domain.worldbook.WorldBookDocument
 import runtime.mobileagent.feature.agents.CharacterCardImportUi
@@ -31,7 +32,7 @@ internal class CharacterCardImportController(
     private val scope: CoroutineScope,
     private val owner: () -> Long,
     private val eligible: () -> Boolean,
-    private val applyDraft: (String, String, ImportedCharacterCard, WorldBookDocument?) -> Unit,
+    private val applyDraft: (String, String, ImportedCharacterCard, WorldBookDocument?, AgentMode) -> Unit,
 ) {
     val state = mutableStateOf(CharacterCardImportState())
     private var generation = 0L
@@ -81,7 +82,7 @@ internal class CharacterCardImportController(
         job = scope.launch {
             try {
                 val draft = withContext(Dispatchers.IO) { prepareDraft(parsed, selected) }
-                if (owns(token)) applyDraft(selected.name.trim(), draft.prompt, draft.card, draft.book)
+                if (owns(token)) applyDraft(selected.name.trim(), draft.prompt, draft.card, draft.book, selected.mode)
             } catch (cancel: CancellationException) { throw cancel }
             catch (failure: Exception) {
                 if (owns(token)) state.value = state.value.copy(busy = false, error = error(failure))

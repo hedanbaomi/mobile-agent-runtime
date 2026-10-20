@@ -109,6 +109,7 @@ object TransferCodec {
         val kbs = bundle.knowledgeBases
         val skills = bundle.skills
         val conversations = bundle.conversations
+        TrpgTransferValidation.bundle(bundle) { invalid(operationId, it) }
         if (!WorldBookTransferValidation.hasPayload(bundle)) {
             invalid(operationId, "Transfer must contain an agent, knowledge base, skill, or conversation")
         }
@@ -223,6 +224,7 @@ object TransferCodec {
             }
         }
         transfer.snapshots.forEach { snapshot ->
+            TrpgTransferValidation.agentSnapshot(snapshot, profile.mode) { invalid(operationId, it) }
             SchemaVersion.requireSupported(snapshot.schemaVersion, operationId)
             requireId(snapshot.id, operationId, "snapshot.id")
             if (snapshot.agentId != profile.id) invalid(operationId, "Snapshot ${snapshot.id} is bound to another agent")
@@ -412,6 +414,7 @@ object TransferCodec {
     }
 
     private fun validateConversation(transfer: ConversationTransfer, operationId: String) {
+        TrpgTransferValidation.conversation(transfer) { invalid(operationId, it) }
         val conversation = transfer.conversation
         WorldBookTransferValidation.binding(transfer.worldBooks, conversation.id, operationId)
         requireId(conversation.id, operationId, "conversation.id")
@@ -470,6 +473,7 @@ object TransferCodec {
     }
 
     private fun validateSnapshot(snapshot: AgentSnapshot, conversation: Conversation, operationId: String) {
+        TrpgTransferValidation.snapshot(snapshot) { invalid(operationId, it) }
         SchemaVersion.requireSupported(snapshot.schemaVersion, operationId)
         requireId(snapshot.id, operationId, "snapshot.id")
         if (snapshot.id != conversation.snapshotId) invalid(operationId, "Conversation snapshot id does not match its snapshot")

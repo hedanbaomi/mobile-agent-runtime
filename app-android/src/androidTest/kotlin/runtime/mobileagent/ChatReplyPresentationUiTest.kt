@@ -8,6 +8,7 @@ import android.content.ClipboardManager
 import android.content.ClipData
 import android.content.Context
 import android.graphics.Bitmap
+import android.os.Build
 import java.io.File
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.ui.platform.LocalDensity
@@ -19,6 +20,7 @@ import androidx.compose.ui.semantics.SemanticsActions
 import androidx.compose.ui.text.TextLayoutResult
 import androidx.compose.ui.test.*
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
+import androidx.test.platform.app.InstrumentationRegistry
 import org.junit.Assert.*
 import org.junit.Rule
 import org.junit.Test
@@ -232,7 +234,12 @@ class ChatReplyPresentationUiTest {
         }
         fun capture(name: String, tag: String? = null) {
             val node = if (tag == null) compose.onRoot() else compose.onNodeWithTag(tag)
-            val bitmap = node.captureToImage().asAndroidBitmap()
+            node.assertIsDisplayed()
+            // Compose cannot capture a Dialog window below API 28. Keep the real
+            // dialog assertions and capture its whole screen via UiAutomation.
+            val bitmap = if (tag != null && Build.VERSION.SDK_INT < 28)
+                requireNotNull(InstrumentationRegistry.getInstrumentation().uiAutomation.takeScreenshot())
+                else node.captureToImage().asAndroidBitmap()
             val folder = File(compose.activity.getExternalFilesDir(null), "chat-preview-1151").apply { mkdirs() }
             File(folder, "$name.png").outputStream().use { bitmap.compress(Bitmap.CompressFormat.PNG, 100, it) }
         }

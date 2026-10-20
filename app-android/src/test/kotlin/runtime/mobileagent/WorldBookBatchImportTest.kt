@@ -9,15 +9,19 @@ import java.io.File
 import java.io.IOException
 import java.io.InputStream
 import java.sql.DriverManager
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 import java.util.zip.ZipEntry
 import java.util.zip.ZipOutputStream
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeout
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertFalse
 import org.junit.jupiter.api.Assertions.assertThrows
@@ -193,18 +197,28 @@ class WorldBookBatchImportTest {
         var stop = false
         var resumed = false
         runBlocking {
+            val writing = CompletableDeferred<Unit>()
+            val finishCurrentBook = CountDownLatch(1)
             lateinit var caller: kotlinx.coroutines.Job
             caller = launch(start = CoroutineStart.LAZY) {
                 withContext(Dispatchers.IO + NonCancellable) {
                     session.writeAndDiscard(books, true, { stop }) {
-                        // Same cancellation boundary as ViewModelStore.clear/onCleared.
+                        writing.complete(Unit)
+                        check(finishCurrentBook.await(10, TimeUnit.SECONDS)) { "Caller did not release the in-flight write" }
                         stop = true
-                        caller.cancel()
                     }
                 }
                 resumed = true
             }
             caller.start()
+            try {
+                withTimeout(10_000) { writing.await() }
+                // Keep IO in flight until the caller has suspended. Without this barrier a fast
+                // write can complete before withContext suspends, making resumption timing-dependent.
+                caller.cancel()
+            } finally {
+                finishCurrentBook.countDown()
+            }
             caller.join()
         }
         assertFalse(resumed, "caller cancellation must exercise the resume boundary")

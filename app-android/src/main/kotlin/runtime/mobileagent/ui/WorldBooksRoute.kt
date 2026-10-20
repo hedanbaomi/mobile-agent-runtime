@@ -21,7 +21,8 @@ internal fun WorldBooksRoute(vm: WorldBooksViewModel, chinese: Boolean,
     onShellDetail: (String, String?, (() -> Unit)?) -> Unit,
 ) {
     val state = vm.state.value
-    val importer = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument(), vm::importFrom)
+    val importer = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments(), vm::importFiles)
+    val folderImporter = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree(), vm::importFolder)
     val exporter = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/json"), vm::exportTo)
     LifecycleEventEffect(Lifecycle.Event.ON_RESUME) { vm.reload() }
     LaunchedEffect(chinese) { vm.language(if (chinese) "zh-CN" else "en-US") }
@@ -37,9 +38,16 @@ internal fun WorldBooksRoute(vm: WorldBooksViewModel, chinese: Boolean,
         onAddEntry = vm::addEntry, onSelectEntry = vm::selectEntry, onEntryFieldChange = vm::entryField,
         onSettingFieldChange = vm::settingField, onDuplicateEntry = vm::duplicateEntry, onDeleteEntry = vm::deleteEntry,
         onSave = vm::save, onCloseEditor = vm::closeEditor, onDuplicateBook = vm::duplicateBook, onDeleteBook = vm::deleteBook,
-        onImport = { if (vm.canImport()) importer.launch(arrayOf("application/json", "text/*", "application/octet-stream")) },
+        onImport = { if (vm.canImport()) importer.launch(IMPORT_TYPES) },
+        onImportFolder = { if (vm.canImport()) folderImporter.launch(null) },
         onConfirmImport = vm::confirmImport, onCancelImport = vm::cancelImport,
+        onImportPolicy = vm::importPolicy, onToggleImportItem = vm::toggleImportItem, onCancelBusy = vm::cancelBusy,
         onExport = { kind -> vm.prepareExport(kind) { exporter.launch(it) } },
         onPreviewInput = vm::previewInput, onPreview = vm::preview, onDismissError = vm::dismissError,
     ))
 }
+
+/** Providers label JSON and ZIP inconsistently; the stager sniffs content for unknown types. */
+private val IMPORT_TYPES = arrayOf(
+    "application/json", "text/*", "application/zip", "application/x-zip-compressed", "application/octet-stream",
+)

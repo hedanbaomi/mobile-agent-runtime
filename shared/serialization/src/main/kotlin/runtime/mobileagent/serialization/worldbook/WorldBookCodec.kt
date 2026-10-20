@@ -26,9 +26,10 @@ import runtime.mobileagent.domain.worldbook.WorldBookSettings
  *
  * 支持的载体（[WorldBookFormat]）与线格式：
  *  - [WorldBookFormat.NATIVE]
- *    `{"spec":"mobileagent.worldbook","version":1,"format":<来源格式>,"name","description",
- *      "settings","originalJson","entries":[<WorldBookEntry 逐字段序列化>]}`
- *    完全无损（含 `originalJson` / `originalKey` / `format` 来源）；仓储权威格式。
+ *    v2 保存一份 `originalJson`；条目以稀疏 `values` 和指向该原始树的 JSON Pointer
+ *    `references` 保存，省略类型默认值、共享完全相等的原始子树。保留 v1 逐字段格式读取；
+ *    [WorldBookFieldNames.NATIVE_VERSION] 为 legacy v1 编码常量，当前写出版本由紧凑 codec 定义。
+ *    完全无损（含 `originalJson` / `originalKey` / `format` 来源）；未知原生版本拒绝读取。
  *  - [WorldBookFormat.SILLY_TAVERN]（ST 1.19 原生文件 / 编辑器导出）
  *    `{"name"?,"description"?,"entries":{"<uid>":{...camelCase ST 字段...}}}`
  *  - [WorldBookFormat.CHARACTER_BOOK]（Character Card V2 `CharacterBook`，独立导出）
@@ -50,7 +51,7 @@ import runtime.mobileagent.domain.worldbook.WorldBookSettings
  */
 object WorldBookCodec {
 
-    /** 宽容读取用（原生格式可能来自更新版本）。 */
+    /** v1 保持历史字段容忍；v2 在展开前单独校验字段与版本。 */
     private val json = Json {
         encodeDefaults = true
         ignoreUnknownKeys = true
@@ -73,7 +74,7 @@ object WorldBookCodec {
         limits: WorldBookImportLimits = WorldBookImportLimits(),
     ): WorldBookImportResult {
         val sink = NoticeSink(limits)
-        val guarded = WorldBookJsonGuard.parse(text, limits)
+        val guarded = WorldBookNativeBounds.parse(text, limits)
         guarded.notices.forEach { sink.add(it.entryUid, it.code, it.message) }
         val root = guarded.root
         if (isNative(root)) return decodeNative(root, sink, limits)
@@ -100,6 +101,10 @@ object WorldBookCodec {
 
     /** 原生无损格式（仓储权威格式）；往返后文档逐字段相等。 */
     fun encodeNative(document: WorldBookDocument): String =
+        WorldBookNativeCompact.encode(document)
+
+    /** Legacy fixture/compatibility representation; persisted identity uses [encodeNative]. */
+    internal fun encodeLegacyNative(document: WorldBookDocument): String =
         json.encodeToString(JsonObject.serializer(), nativeJson(document))
 
     // ------------------------------------------------------------------ 原生格式
@@ -126,7 +131,8 @@ object WorldBookCodec {
         sink: NoticeSink,
         limits: WorldBookImportLimits,
     ): WorldBookImportResult {
-        val rawEntries = when (val container = root[WorldBookFieldNames.ST_ENTRIES]) {
+        val expanded = WorldBookNativeCompact.expand(root, limits)
+        val rawEntries = when (val container = expanded[WorldBookFieldNames.ST_ENTRIES]) {
             null, is JsonNull -> emptyList()
             is JsonArray -> container
             else -> throw WorldBookImportException(
@@ -170,7 +176,7 @@ object WorldBookCodec {
             entries += entry
         }
         val rawSettings = try {
-            root[WorldBookFieldNames.NATIVE_SETTINGS_KEY]
+            expanded[WorldBookFieldNames.NATIVE_SETTINGS_KEY]
                 ?.let { json.decodeFromJsonElement(WorldBookSettings.serializer(), it) }
                 ?: WorldBookSettings()
         } catch (e: Exception) {
@@ -188,16 +194,16 @@ object WorldBookCodec {
                     ", maxMessageScanChars<=${WorldBookSettings.HARD_MAX_MESSAGE_SCAN_CHARS}).",
             )
         }
-        val provenance = (root[WorldBookFieldNames.NATIVE_FORMAT_KEY] as? JsonPrimitive)
+        val provenance = (expanded[WorldBookFieldNames.NATIVE_FORMAT_KEY] as? JsonPrimitive)
             ?.content
             ?.let { name -> WorldBookFormat.entries.firstOrNull { it.name == name } }
-        val originalJson = root[WorldBookFieldNames.NATIVE_ORIGINAL_KEY] as? JsonObject ?: JsonObject(emptyMap())
+        val originalJson = expanded[WorldBookFieldNames.NATIVE_ORIGINAL_KEY] as? JsonObject ?: JsonObject(emptyMap())
         sink.add(null, WorldBookNoticeCodes.FORMAT_DETECTED, "Detected NATIVE with ${entries.size} entries.")
         return WorldBookImportResult(
             document = WorldBookDocument(
-                name = JsonRead.stringField(root, WorldBookFieldNames.CC_NAME) ?: "Imported world book",
+                name = JsonRead.stringField(expanded, WorldBookFieldNames.CC_NAME) ?: "Imported world book",
                 entries = entries,
-                description = JsonRead.stringField(root, WorldBookFieldNames.CC_DESCRIPTION) ?: "",
+                description = JsonRead.stringField(expanded, WorldBookFieldNames.CC_DESCRIPTION) ?: "",
                 settings = settings,
                 originalJson = originalJson,
                 format = provenance ?: WorldBookFormat.NATIVE,

@@ -127,7 +127,7 @@ class CharacterCardRepositoryTest {
         db.execute("ALTER TABLE agent_profiles DROP COLUMN character_card_json")
         db.execute("UPDATE schema_version SET version=35")
         Migrations.apply(db)
-        assertEquals(36L, db.query("SELECT version FROM schema_version").single().long("version"))
+        assertEquals(Migrations.VERSION.toLong(), db.query("SELECT version FROM schema_version").single().long("version"))
         assertNull(agents.get(old.id)!!.characterCard)
         assertEquals(listOf(message), conversations.messages(chat.id))
         assertEquals("Old prompt", agents.resolveSnapshot(chat.snapshotId).prompt.template)

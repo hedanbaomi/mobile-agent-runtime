@@ -94,6 +94,7 @@ object WorldBookEngine {
         val activated = LinkedHashMap<String, ScanEntry>()
         val substituted = HashMap<String, SubstitutedContent>()
         val failedProbability = HashSet<String>()
+        // Budget every injected body, including entries excluded from recursive matching.
         val activatedText = StringBuilder()
         var estimatedTotal = 0
         var overflowed = false
@@ -216,6 +217,7 @@ object WorldBookEngine {
                     continue
                 }
 
+                val previousContentLength = newContent.length
                 newContent.append(result.text).append('\n')
                 val units = estimateUnits(result.text).coerceAtLeast(0)
                 if (!entry.entry.ignoreBudget && baseUnits + estimateUnits(newContent.toString()) >= softBudget) {
@@ -228,6 +230,7 @@ object WorldBookEngine {
                     continue
                 }
                 if (estimatedTotal + units > hardBudget) {
+                    newContent.setLength(previousContentLength)
                     recordDecision(
                         decisions, entry, WorldBookDecisionStatus.DENIED, "hard-budget-exhausted",
                         emptyList(), units, loop, scanState,
@@ -286,8 +289,11 @@ object WorldBookEngine {
             scanState = nextScanState ?: break
             if (recursionText.isNotEmpty()) {
                 buffer.addRecurse(recursionText)
+            }
+            val injectedText = activatedThisLoop.joinToString("\n") { substituted.getValue(it.key).text }
+            if (injectedText.isNotEmpty()) {
                 if (activatedText.isNotEmpty()) activatedText.insert(0, "\n")
-                activatedText.insert(0, recursionText)
+                activatedText.insert(0, injectedText)
             }
         }
 

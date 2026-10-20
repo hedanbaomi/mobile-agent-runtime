@@ -567,7 +567,7 @@ class AgentRuntime(
                     // boundary is immediately before collection.  A dispatched reply is received
                     // to its own end even past the run deadline, which only gates the next
                     // request.  Only a stream that stalls is abandoned as an unknown outcome.
-                    val modelStream = adapter.stream(modelRequest, secret)
+                    val modelStream = adapter.stream(request.answeringDispatchRequest(modelRequest) { !budgetExhausted(run) }, secret)
                     activeDispatch = DispatchKind.MODEL
                     modelStream.cancellable().collectUntilStalled(run.budget.stallTimeoutMs, transportProgress) { event ->
                         if (terminal is ModelEvent.Failed) return@collectUntilStalled

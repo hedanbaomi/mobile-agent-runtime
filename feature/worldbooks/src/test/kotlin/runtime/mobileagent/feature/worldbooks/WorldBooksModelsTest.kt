@@ -117,6 +117,25 @@ class WorldBooksModelsTest {
     }
 
     @Test
+    fun batchImportHelpersReportWritesBatchShapeAndSizes() {
+        val item = WorldBookImportItemUi("c0", "a.json", "A", 3, runtime.mobileagent.domain.worldbook.WorldBookBatchAction.CREATE,
+            selected = true, selectable = true)
+        val single = WorldBookImportUi("A", 3, emptyList(), items = listOf(item), writeCount = 1)
+        assertFalse(single.isBatch())
+        assertFalse(single.isEmptyImport())
+        assertTrue(single.copy(items = listOf(item, item.copy(key = "c1"))).isBatch())
+        assertTrue(single.copy(skipped = listOf(WorldBookImportSkipUi("x.png", runtime.mobileagent.domain.worldbook.WorldBookFileSkip.IMAGE))).isBatch())
+        assertTrue(single.copy(writeCount = 0).isEmptyImport())
+        assertEquals("0.0", worldBookMiB(0))
+        assertEquals("0.1", worldBookMiB(1), "a non-empty write never reads as zero")
+        assertEquals("1.0", worldBookMiB(1L shl 20))
+        assertEquals("128.0", worldBookMiB(128L shl 20))
+        assertEquals("2.5", worldBookMiB((5L shl 20) / 2))
+        assertEquals("worldbooks.import.policy.keep_both",
+            WorldBookTestTags.importPolicy(runtime.mobileagent.domain.worldbook.WorldBookConflictPolicy.KEEP_BOTH))
+    }
+
+    @Test
     fun numericDraftFilterAcceptsPrefixesAndRejectsLetters() {
         assertTrue("".isNumericDraft())
         assertTrue("12".isNumericDraft())

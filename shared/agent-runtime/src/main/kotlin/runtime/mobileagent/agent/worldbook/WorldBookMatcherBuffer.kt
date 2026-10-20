@@ -27,18 +27,10 @@ internal class WorldBookBuffer(
      * `world_info_include_names` 为真时把已提供的参与者名字拼进扫描文本（`name: text`），
      * 否则只用正文；消息对象与导出数据本身**不被改写**（只构造新的扫描字符串）。
      */
-    private val depthBuffer: List<String> = buildList {
+    private val depthBuffer: List<WorldBookScanMessage> = buildList {
         val max = minOf(messages.size, WorldBookSettings.MAX_SCAN_DEPTH)
         for (offset in 0 until max) {
-            val message = messages[messages.size - 1 - offset]
-            val text = message.text.trim()
-            add(
-                if (settings.includeNames && message.name.isNotBlank()) {
-                    "${message.name}: $text"
-                } else {
-                    text
-                },
-            )
+            add(messages[messages.size - 1 - offset])
         }
     }
 
@@ -74,36 +66,48 @@ internal class WorldBookBuffer(
         if (depth < 0) return ""
         val end = minOf(depth, settings.maxScanDepth, depthBuffer.size)
         if (end <= 0) return ""
-        val builder = StringBuilder()
-        builder.append(MATCHER)
-        for (index in 0 until end) {
-            if (index > 0) builder.append(JOINER)
-            builder.append(depthBuffer[index])
-        }
-
-        fun appendExtra(value: String) {
-            if (value.isNotEmpty()) builder.append(JOINER).append(value)
-        }
-
-        if (entry.entry.matchPersonaDescription) appendExtra(context.personaDescription)
-        if (entry.entry.matchCharacterDescription) appendExtra(context.characterDescription)
-        if (entry.entry.matchCharacterPersonality) appendExtra(context.characterPersonality)
-        if (entry.entry.matchCharacterDepthPrompt) appendExtra(context.characterDepthPrompt)
-        if (entry.entry.matchScenario) appendExtra(context.scenario)
-        if (entry.entry.matchCreatorNotes) appendExtra(context.creatorNotes)
-        if (injectBuffer.isNotEmpty()) appendExtra(injectBuffer.joinToString(JOINER))
-        // 最小激活扫描不应看到递归缓冲（ST 行为）
-        if (recurseBuffer.isNotEmpty() && scanState != WorldBookScanState.MIN_ACTIVATIONS) {
-            appendExtra(recurseBuffer.joinToString(JOINER))
-        }
-        if (builder.length > settings.maxMessageScanChars) {
+        val builder = StringBuilder(minOf(settings.maxMessageScanChars, 4096))
+        fun appendBounded(value: String, start: Int = 0, end: Int = value.length): Boolean {
+            val remaining = settings.maxMessageScanChars - builder.length
+            if (end - start <= remaining) { builder.append(value, start, end); return true }
+            builder.append(value, start, start + remaining)
             if (!truncated) {
                 truncated = true
                 warnOnce("scan.text-truncated:${settings.maxMessageScanChars}")
             }
-            return builder.substring(0, settings.maxMessageScanChars)
+            return false
         }
+        fun appendExtra(value: String): Boolean = value.isEmpty() ||
+            (appendBounded(JOINER) && appendBounded(value))
+        fun appendMessage(message: WorldBookScanMessage): Boolean {
+            if (settings.includeNames && message.name.isNotBlank() &&
+                (!appendBounded(message.name) || !appendBounded(": "))) return false
+            var start = 0
+            var end = message.text.length
+            while (start < end && message.text[start].isWhitespace()) start++
+            while (end > start && message.text[end - 1].isWhitespace()) end--
+            return appendBounded(message.text, start, end)
+        }
+
+        if (!appendBounded(MATCHER)) return builder.toString()
+        for (index in 0 until end) {
+            if (index > 0 && !appendBounded(JOINER)) return builder.toString()
+            if (!appendMessage(depthBuffer[index])) return builder.toString()
+        }
+        for (value in extraText(entry, scanState)) if (!appendExtra(value)) return builder.toString()
         return builder.toString()
+    }
+
+    private fun extraText(entry: ScanEntry, scanState: WorldBookScanState): List<String> = buildList {
+        if (entry.entry.matchPersonaDescription) add(context.personaDescription)
+        if (entry.entry.matchCharacterDescription) add(context.characterDescription)
+        if (entry.entry.matchCharacterPersonality) add(context.characterPersonality)
+        if (entry.entry.matchCharacterDepthPrompt) add(context.characterDepthPrompt)
+        if (entry.entry.matchScenario) add(context.scenario)
+        if (entry.entry.matchCreatorNotes) add(context.creatorNotes)
+        addAll(injectBuffer)
+        // 最小激活扫描不应看到递归缓冲（ST 行为）
+        if (scanState != WorldBookScanState.MIN_ACTIVATIONS) addAll(recurseBuffer)
     }
 
     fun matchKeys(haystack: String, needle: String, entry: ScanEntry, budget: StepBudget): Boolean {

@@ -1445,7 +1445,7 @@ class ChatViewModel internal constructor(
                         } }) { "PERMISSION_DENIED: visual source removed or changed before dispatch" }
                     },
                     beforeModelRequest = {
-                        container.worldBooks.beforeDispatch(run.runId)
+                        container.worldBooks.validateDispatch(run.runId)
                         require(contextAuthorizationFingerprint() == authorizationFingerprint) {
                             "PERMISSION_DENIED: authorization changed before model request; context summary cannot restore access"
                         }
@@ -1464,6 +1464,7 @@ class ChatViewModel internal constructor(
                         } }) { "PERMISSION_DENIED: historical visual evidence was removed or revoked" }
                     },
                     diagnostics = modelDiagnostics,
+                    beforeAnsweringDispatch = { container.worldBooks.beforeDispatch(run.runId) },
                 ))
                     // Rendezvous keeps durable old exchanges ahead of a later compaction checkpoint.
                     .flowOn(Dispatchers.IO).buffer(0)

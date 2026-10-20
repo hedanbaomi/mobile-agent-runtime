@@ -60,7 +60,7 @@ internal object WorldBookEngineGroups {
 
         for ((group, members) in grouped) {
             if (hasSticky[group] == true) continue
-            if (activated.values.any { it.entry.group == group }) {
+            if (activated.values.any { group in it.entry.group.split(GROUP_SEPARATOR) }) {
                 members.forEach { removeEntry(it, group, "group-already-activated") }
                 continue
             }
@@ -96,7 +96,8 @@ internal object WorldBookEngineGroups {
                 members.filter { it.key !in stickyKeys }
                     .forEach { removeEntry(it, group, "group-sticky-loser") }
             }
-            members.filter { effects.isActive(WorldBookTimedEffectType.COOLDOWN, it) }
+            members.filter { effects.isActive(WorldBookTimedEffectType.COOLDOWN, it) &&
+                !effects.isActive(WorldBookTimedEffectType.STICKY, it) }
                 .forEach { removeEntry(it, group, "group-cooldown") }
             members.filter { effects.isActive(WorldBookTimedEffectType.DELAY, it) }
                 .forEach { removeEntry(it, group, "group-delay") }

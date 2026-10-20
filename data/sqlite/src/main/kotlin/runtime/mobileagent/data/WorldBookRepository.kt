@@ -21,12 +21,24 @@ class WorldBookRepository(private val db: SqlConnection, private val clock: () -
     fun list(): List<WorldBookSummary> =
         db.query("SELECT * FROM world_books ORDER BY name COLLATE NOCASE,id").map(::summary)
 
+    /** Current head of every book without decoding content; used for import conflict detection. */
+    fun heads(): List<WorldBookHead> =
+        db.query("SELECT b.id,b.name,b.revision,b.enabled,r.content_hash FROM world_books b JOIN world_book_revisions r ON r.book_id=b.id AND r.revision=b.revision ORDER BY b.name COLLATE NOCASE,b.id")
+            .map { WorldBookHead(it.string("id"), it.string("name"), it.long("revision").toInt(), it.long("enabled") == 1L, it.string("content_hash")) }
+
+    /** Advisory preflight only; [save] re-checks every limit inside its own transaction. */
+    fun storageUsage(): WorldBookStorageUsage = WorldBookStorageUsage(
+        books = db.query("SELECT COUNT(*) AS n FROM world_books").single().long("n").toInt(),
+        storedBytes = db.query("SELECT COALESCE(SUM(byte_length),0) AS n FROM world_book_revisions").single().long("n"),
+        maxBooks = MAX_BOOKS, maxStoredBytes = MAX_STORED_BYTES, maxRevisionBytes = MAX_REVISION_BYTES,
+    )
+
     fun get(id: String, revision: Int? = null): StoredWorldBook? {
         val head = db.query("SELECT * FROM world_books WHERE id=?", listOf(id)).singleOrNull() ?: return null
         val selected = revision ?: head.long("revision").toInt()
         val row = db.query("SELECT * FROM world_book_revisions WHERE book_id=? AND revision=?", listOf(id, selected))
             .singleOrNull() ?: return null
-        val raw = row.string("document_json")
+        val raw = WorldBookRevisionStorage.body(db, row).string("document_json")
         check(hash(raw) == row.string("content_hash")) { "World book revision integrity check failed" }
         val document = WorldBookCodec.decode(raw).document
         return StoredWorldBook(summary(head).copy(revision = selected, name = document.name,
@@ -38,8 +50,10 @@ class WorldBookRepository(private val db: SqlConnection, private val clock: () -
     fun save(document: WorldBookDocument, id: String = EntityId.random().value,
         expectedRevision: Int = 0, enabled: Boolean = true): StoredWorldBook {
         requireId(id)
-        require(document.name.isNotBlank() && document.name.length <= 256) { "World book name is required (maximum 256 characters)" }
-        require(document.description.length <= 4096) { "World book description is too long" }
+        require(document.name.isNotBlank() && document.name.length <= WorldBookDocument.MAX_NAME_CHARS) {
+            "World book name is required (maximum ${WorldBookDocument.MAX_NAME_CHARS} characters)"
+        }
+        require(document.description.length <= WorldBookDocument.MAX_DESCRIPTION_CHARS) { "World book description is too long" }
         val raw = WorldBookCodec.encodeNative(document)
         // Validate programmatically constructed values through the same bounded import path.
         val validated = WorldBookCodec.decode(raw).document
@@ -53,8 +67,14 @@ class WorldBookRepository(private val db: SqlConnection, private val clock: () -
             if (current == null) check(db.query("SELECT COUNT(*) AS n FROM world_books").single().long("n") < MAX_BOOKS) {
                 "World book count limit reached"
             }
+            val contentHash = hash(raw)
+            val previous = current?.let { db.query(
+                "SELECT * FROM world_book_revisions WHERE book_id=? AND revision=?", listOf(id, expectedRevision)).single() }
+            val reusedBody = previous?.takeIf { it.string("content_hash") == contentHash }
+                ?.let { WorldBookRevisionStorage.body(db, it) }
+            val addedBytes = if (reusedBody == null) bytes else 0L
             val total = db.query("SELECT COALESCE(SUM(byte_length),0) AS n FROM world_book_revisions").single().long("n")
-            check(total <= MAX_STORED_BYTES - bytes) { "World book storage is full; export and remove unused books" }
+            check(total <= MAX_STORED_BYTES - addedBytes) { "World book storage is full; export and remove unused books" }
             val revision = expectedRevision + 1
             val now = clock()
             val previousEpoch = current?.long("revocation_epoch") ?: db.query(
@@ -69,8 +89,9 @@ class WorldBookRepository(private val db: SqlConnection, private val clock: () -
                 db.execute("UPDATE world_books SET name=?,description=?,enabled=?,revision=?,entry_count=?,revocation_epoch=?,updated_at=? WHERE id=?",
                     listOf(document.name, document.description, enabled.bit(), revision, document.entries.size, epoch, now, id))
             }
-            db.execute("INSERT INTO world_book_revisions(book_id,revision,document_json,content_hash,byte_length,created_at) VALUES(?,?,?,?,?,?)",
-                listOf(id, revision, raw, hash(raw), bytes, now))
+            db.execute("INSERT INTO world_book_revisions(book_id,revision,document_json,content_hash,byte_length,created_at,document_revision) VALUES(?,?,?,?,?,?,?)",
+                listOf(id, revision, if (reusedBody == null) raw else "", contentHash, addedBytes, now,
+                    reusedBody?.long("revision")))
             checkNotNull(get(id))
         }
     }
@@ -78,13 +99,35 @@ class WorldBookRepository(private val db: SqlConnection, private val clock: () -
     fun setEnabled(id: String, enabled: Boolean, expectedRevision: Int): StoredWorldBook = db.transaction {
         val current = checkNotNull(get(id)) { "World book was removed" }
         check(current.summary.revision == expectedRevision) { "World book changed; reload before saving" }
-        if (current.summary.enabled == enabled) current else save(current.document, id, expectedRevision, enabled)
+        if (current.summary.enabled == enabled) return@transaction current
+        check(expectedRevision < Int.MAX_VALUE) { "World book revision limit reached" }
+        check(current.revocationEpoch < Long.MAX_VALUE) { "World book revocation limit reached" }
+        val previous = db.query("SELECT * FROM world_book_revisions WHERE book_id=? AND revision=?",
+            listOf(id, expectedRevision)).single()
+        val body = WorldBookRevisionStorage.body(db, previous)
+        val revision = expectedRevision + 1
+        val now = clock()
+        db.execute("UPDATE world_books SET enabled=?,revision=?,revocation_epoch=?,updated_at=? WHERE id=?",
+            listOf(enabled.bit(), revision, current.revocationEpoch + 1, now, id))
+        db.execute("INSERT INTO world_book_revisions(book_id,revision,document_json,content_hash,byte_length,created_at,document_revision) VALUES(?,?,?,?,?,?,?)",
+            listOf(id, revision, "", current.contentHash, 0L, now, body.long("revision")))
+        current.copy(summary = current.summary.copy(enabled = enabled, revision = revision, updatedAt = now),
+            revocationEpoch = current.revocationEpoch + 1)
     }
 
     fun duplicate(id: String): StoredWorldBook {
         val current = checkNotNull(get(id)) { "World book was removed" }
         return save(current.document.copy(name = current.document.name.take(240) + " (copy)"), enabled = current.summary.enabled)
     }
+
+    /** A no-op replacement still validates the preview's revision inside the transaction. */
+    fun replaceIfChanged(document: WorldBookDocument, id: String, expectedRevision: Int, enabled: Boolean): StoredWorldBook? =
+        db.transaction {
+            val current = checkNotNull(get(id)) { "World book was removed" }
+            check(current.summary.revision == expectedRevision) { "World book changed; reload before saving" }
+            if (current.contentHash == hash(WorldBookCodec.encodeNative(document))) null
+            else save(document, id, expectedRevision, enabled)
+        }
 
     /** Delete content, not transcripts. Immutable snapshot IDs remain historical references. */
     fun delete(id: String, expectedRevision: Int): Boolean = db.transaction {
@@ -188,9 +231,21 @@ class WorldBookRepository(private val db: SqlConnection, private val clock: () -
                 json.encodeToString(prepared.pins), evaluationJson, nextEffectsJson, messageCount, budgetUnits, seed, clock()))
     }
 
-    /** Called before every model dispatch, including tool continuation and compaction. */
+    /** Read-only admission, also used for visual and compaction preflights. */
+    fun validateDispatch(runId: String) = db.transaction { validatedReceipt(runId); Unit }
+
+    /** Publish effects only when the answering request actually reaches its dispatch boundary. */
     fun beforeDispatch(runId: String) = db.transaction {
-        val receipt = db.query("SELECT * FROM world_book_runs WHERE run_id=?", listOf(runId)).singleOrNull() ?: return@transaction
+        val receipt = validatedReceipt(runId) ?: return@transaction
+        if (receipt.long("dispatched") == 0L) {
+            db.execute("INSERT INTO world_book_effects(conversation_id,binding_revision,effects_json,message_count) VALUES(?,?,?,?) ON CONFLICT(conversation_id) DO UPDATE SET binding_revision=excluded.binding_revision,effects_json=excluded.effects_json,message_count=excluded.message_count",
+                listOf(receipt.string("conversation_id"), receipt.long("binding_revision"), receipt.string("next_effects_json"), receipt.long("message_count")))
+            db.execute("UPDATE world_book_runs SET dispatched=1 WHERE run_id=?", listOf(runId))
+        }
+    }
+
+    private fun validatedReceipt(runId: String): SqlRow? {
+        val receipt = db.query("SELECT * FROM world_book_runs WHERE run_id=?", listOf(runId)).singleOrNull() ?: return null
         val owner = owner(receipt.string("conversation_id"))
         check(owner.string("agent_id") == receipt.string("agent_id") && owner.string("snapshot_id") == receipt.string("snapshot_id")) {
             "PERMISSION_DENIED: world book run ownership changed"
@@ -198,11 +253,7 @@ class WorldBookRepository(private val db: SqlConnection, private val clock: () -
         val config = conversationConfig(receipt.string("conversation_id"))
         check(config.revision == receipt.long("binding_revision").toInt()) { "PERMISSION_DENIED: world book binding changed; send again" }
         validatePins(json.decodeFromString(receipt.string("pins_json")))
-        if (receipt.long("dispatched") == 0L) {
-            db.execute("INSERT INTO world_book_effects(conversation_id,binding_revision,effects_json,message_count) VALUES(?,?,?,?) ON CONFLICT(conversation_id) DO UPDATE SET binding_revision=excluded.binding_revision,effects_json=excluded.effects_json,message_count=excluded.message_count",
-                listOf(config.conversationId, config.revision, receipt.string("next_effects_json"), receipt.long("message_count")))
-            db.execute("UPDATE world_book_runs SET dispatched=1 WHERE run_id=?", listOf(runId))
-        }
+        return receipt
     }
 
     fun latestReceipt(conversationId: String): WorldBookRunReceipt? =

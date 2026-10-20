@@ -10,6 +10,11 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import runtime.mobileagent.agent.worldbook.WorldBookEngine
@@ -17,18 +22,26 @@ import runtime.mobileagent.domain.worldbook.*
 import runtime.mobileagent.feature.worldbooks.*
 import runtime.mobileagent.provider.SecretRedactor
 import runtime.mobileagent.serialization.worldbook.WorldBookCodec
-import runtime.mobileagent.serialization.worldbook.WorldBookImportResult
 
 class WorldBooksViewModel(application: Application) : AndroidViewModel(application) {
     private val app = application as MobileAgentApp
     private val repository get() = app.container.worldBooks
     val state = mutableStateOf(WorldBooksUiState())
     private var draft: WorldBookDocument? = null
-    private var pending: WorldBookImportResult? = null
     private var exportText: String? = null
     private val chinese get() = state.value.language == "zh-CN"
 
-    init { reload() }
+    /** Staged batch import awaiting confirmation; owns its private copies of the selected files. */
+    private var importSession: WorldBookImportSession? = null
+    private var busyJob: Job? = null
+    @Volatile private var confirming = false
+    @Volatile private var stopRequested = false
+
+    init {
+        reload()
+        val cache = app.cacheDir
+        viewModelScope.launch(Dispatchers.IO) { runCatching { WorldBookBatchStager.sweep(cache) } }
+    }
 
     fun language(language: String) {
         if (state.value.language == language) return
@@ -143,30 +156,120 @@ class WorldBooksViewModel(application: Application) : AndroidViewModel(applicati
         return !state.value.loading
     }
 
-    fun importFrom(uri: Uri?) {
-        if (uri == null || !canImport()) return
-        work {
-            pending = withContext(Dispatchers.IO) {
-                val (raw, name) = WorldBookFileIO.read(app.contentResolver, uri)
-                WorldBookCodec.decode(raw, name)
+    /** One picked file; kept for callers that hand over a single document. */
+    fun importFrom(uri: Uri?) { if (uri != null) importFiles(listOf(uri)) }
+
+    fun importFiles(uris: List<Uri>) {
+        if (uris.isNotEmpty() && canImport()) beginImport { stager -> stager.stageFiles(uris.map { it.toString() }) }
+    }
+
+    fun importFolder(uri: Uri?) {
+        if (uri != null && canImport()) beginImport { stager -> stager.stageFolder(folderRootNode(app.contentResolver, uri)) }
+    }
+
+    /** Copies, classifies and parses the selection off the main thread; nothing is written. */
+    private fun beginImport(select: (WorldBookBatchStager) -> WorldBookStaging) = work(cancellable = true) {
+        discardImport()
+        val zh = chinese
+        var made: WorldBookImportSession? = null
+        val prepared = try {
+            withContext(Dispatchers.IO) {
+                val context = currentCoroutineContext()
+                val checkpoint = { context.ensureActive() }
+                val stager = WorldBookBatchStager.forResolver(app.contentResolver, app.cacheDir, zh, checkpoint, ::progress)
+                WorldBookImportSession.prepare(select(stager), repository, zh, checkpoint, ::progress).also { made = it }
             }
-            val parsed = checkNotNull(pending)
-            state.value = state.value.copy(pendingImport = WorldBookImportUi(parsed.document.name, parsed.document.entries.size,
-                parsed.notices.map { it.message }), error = null)
+        } catch (cancelled: CancellationException) {
+            // Cancelled just as preparation finished: the result is dropped, so drop its staged copies too.
+            made?.let { session -> Thread { session.discard() }.start() }
+            throw cancelled
+        }
+        WorldBookImportSession.identicalMessage(prepared, zh)?.let { message ->
+            Thread { prepared.discard() }.start()
+            state.value = state.value.copy(status = message)
+            return@work
+        }
+        importSession = prepared
+        publishImport()
+        state.value = state.value.copy(status = "")
+    }
+
+    fun importPolicy(policy: WorldBookConflictPolicy) {
+        val session = importSession ?: return
+        if (!state.value.loading) { session.replan(policy); publishImport() }
+    }
+
+    fun toggleImportItem(key: String) {
+        val session = importSession ?: return
+        if (!state.value.loading && session.toggle(key)) publishImport()
+    }
+
+    private fun publishImport() {
+        val session = importSession ?: return
+        state.value = state.value.copy(pendingImport = worldBookImportUi(session.plan, session.staging, chinese), error = null)
+    }
+
+    /** Each selected book commits on its own; "Stop" lets the book being written finish. */
+    fun confirmImport() {
+        val session = importSession ?: return
+        if (!session.plan.canConfirm || state.value.loading) return
+        state.value = state.value.copy(pendingImport = null)
+        work(cancellable = true) {
+            confirming = true
+            stopRequested = false
+            val zh = chinese
+            // Everything after the first write must finish: a second "Stop" or leaving the screen may
+            // not drop the summary or report committed books as not written.
+            val outcome = try {
+                withContext(Dispatchers.IO + NonCancellable) { session.writeAndDiscard(repository, zh, { stopRequested }, ::progress) }
+                    .also { withContext(NonCancellable) { discardImport(); refreshBooks() } }
+            } finally {
+                confirming = false
+            }
+            val single = outcome.single
+            if (single != null) {
+                stage(single.document, single.summary.id, single.summary.revision, single.summary.enabled)
+                if (outcome.replaced == 1) status("已覆盖；新内容从下一轮发送生效。", "Replaced. The new content takes effect on the next send.")
+                else status("已导入；在 Agent 或对话中选择后才会发送。", "Imported. Select it in an Agent or chat before it is sent.")
+            } else {
+                state.value = state.value.copy(status = outcome.summary(zh), error = outcome.failures())
+            }
         }
     }
 
-    fun confirmImport() = work {
-        val parsed = checkNotNull(pending) { "Import preview expired" }
-        val stored = withContext(Dispatchers.IO) { repository.save(parsed.document) }
-        pending = null
-        state.value = state.value.copy(pendingImport = null)
-        stage(stored.document, stored.summary.id, stored.summary.revision, stored.summary.enabled)
-        refreshBooks()
-        status("已导入；在 Agent 或对话中选择后才会发送。", "Imported. Select it in an Agent or chat before it is sent.")
+    fun cancelImport() { if (!state.value.loading) discardImport() }
+
+    /** Stops scanning immediately; while writing, the current book finishes first. */
+    fun cancelBusy() {
+        if (!state.value.cancellable) return
+        if (confirming) {
+            stopRequested = true
+            status("将在当前这本写入完成后停止…", "Stopping after the current book is written…")
+        } else {
+            busyJob?.cancel()
+        }
     }
 
-    fun cancelImport() { pending = null; state.value = state.value.copy(pendingImport = null) }
+    private fun discardImport() {
+        val previous = importSession ?: return
+        importSession = null
+        state.value = state.value.copy(pendingImport = null)
+        Thread { previous.discard() }.start()
+    }
+
+    /** Progress from IO threads is applied in order on the main thread, never after the work ends. */
+    private fun progress(message: String) {
+        viewModelScope.launch(Dispatchers.Main.immediate) {
+            if (state.value.loading) state.value = state.value.copy(status = message)
+        }
+    }
+
+    override fun onCleared() {
+        stopRequested = true
+        // A confirm that is still writing owns the session and discards it when it finishes.
+        if (!confirming) importSession?.let { session -> Thread { session.discard() }.start() }
+        super.onCleared()
+    }
 
     fun prepareExport(kind: WorldBookExportKind, ready: (String) -> Unit) = work {
         val document = flushed()
@@ -249,13 +352,17 @@ class WorldBooksViewModel(application: Application) : AndroidViewModel(applicati
     }
     private fun status(zh: String, en: String) { state.value = state.value.copy(status = if (chinese) zh else en, error = null) }
     private fun fail(error: Exception) { state.value = state.value.copy(error = SecretRedactor.redact(error.message ?: "World book operation failed").take(600)) }
-    private fun work(block: suspend () -> Unit) {
+    private fun work(cancellable: Boolean = false, block: suspend () -> Unit) {
         if (state.value.loading) return
-        state.value = state.value.copy(loading = true, error = null)
-        viewModelScope.launch {
-            try { block() } catch (cancelled: CancellationException) { throw cancelled }
+        state.value = state.value.copy(loading = true, cancellable = cancellable, error = null)
+        busyJob = viewModelScope.launch {
+            try { block() } catch (cancelled: CancellationException) {
+                // Only the preview scan is cancelled by the user; writing stops between books instead.
+                if (viewModelScope.isActive) status("已取消导入，未写入任何内容。", "Import cancelled. Nothing was written.")
+                throw cancelled
+            }
             catch (error: Exception) { fail(error) }
-            finally { state.value = state.value.copy(loading = false) }
+            finally { state.value = state.value.copy(loading = false, cancellable = false) }
         }
     }
     companion object { private const val PREVIEW_WINDOW = 16_384 }

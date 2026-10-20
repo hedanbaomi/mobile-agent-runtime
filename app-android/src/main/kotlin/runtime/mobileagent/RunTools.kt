@@ -169,6 +169,11 @@ class RunTools(
     }
 
     private val builtins = boundBuiltinTools(container, snapshot)
+    private val trpg = TrpgSessionToolExecutor(snapshot, run,
+        read = { container.trpg.get(run.conversationId) },
+        update = { call, revision, state -> container.trpg.updateFromRun(
+            run.conversationId, snapshot.id, run.runId, call.callId, call.argumentsJson, revision, state) },
+        liveBinding = { container.agents.isLiveBinding(snapshot) })
     // Always construct Python here so the factory receives the same run budget
     // and context used by the legacy path.  A factory-owned executor contains
     // Python/workspace/memory/shell; it replaces, rather than supplements, the
@@ -185,11 +190,11 @@ class RunTools(
         liveContext = { container.agents.isLiveBinding(snapshot) },
     )
     private val routeOwners: List<ToolExecutor> = when {
-        providerExecutor != null -> listOf(builtins, providerExecutor, screenObservation, screenActions)
+        providerExecutor != null -> listOf(builtins, trpg, providerExecutor, screenObservation, screenActions)
         // A failed/unavailable v2 factory must not silently expose an old
         // privileged workspace/shell executor.  Web/MCP/Python remain the
         // only compatibility routes until the next run can rebuild the seam.
-        else -> listOf(builtins, python, screenObservation, screenActions) + baseExecutors
+        else -> listOf(builtins, trpg, python, screenObservation, screenActions) + baseExecutors
     }
     private val routes: Map<String, ToolExecutor> = buildMap {
         for (owner in routeOwners) {

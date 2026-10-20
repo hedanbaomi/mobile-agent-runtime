@@ -247,6 +247,7 @@ class AgentRuntime(
                     emitBudget()
                     return@flow
                 }
+                request.currentTrpgSession?.let { read -> window.updateTrpgSession(read()) }
                 var modelRequest = ModelRequest(
                     modelId = request.modelId,
                     messages = window.messages(),
@@ -1130,7 +1131,9 @@ class AgentRuntime(
         if (pending.containsKey(call.callId)) return "Tool call ID was repeated"
         val spec = specs.firstOrNull { it.name == call.name }
             ?: return "Unknown tool ${call.name}"
-        val arguments = runCatching { json.parseToJsonElement(call.argumentsJson) }.getOrNull()
+        val arguments = runCatching {
+            runtime.mobileagent.skills.TrpgToolArguments.forTool(call.name, call.argumentsJson, json::parseToJsonElement)
+        }.getOrNull()
             ?: return TOOL_ARGS_INVALID_JSON
         val objectArguments = arguments as? JsonObject
             ?: return TOOL_ARGS_NOT_OBJECT

@@ -93,4 +93,12 @@
     <string name="character_card_pending_book">保存时新建世界书：%1$s（%2$s 条）</string>
     <string name="character_card_exclude_book" formatted="false">取消导入此世界书</string>
     <string name="character_card_snapshot_help" formatted="false">开场白和角色上下文只影响新会话；已有会话保留原快照。</string>
+    <string name="trpg_agent_mode_title" formatted="false">智能体模式</string>
+    <string name="trpg_agent_mode_normal" formatted="false">常规对话</string>
+    <string name="trpg_agent_mode_trpg" formatted="false">跑团模式（CoC / D&amp;D / 世界书规则）</string>
+    <string name="trpg_agent_mode_normal_desc" formatted="false">标准助手对话模式，不启用跑团状态板与跑团专用检定工具。</string>
+    <string name="trpg_agent_mode_trpg_desc" formatted="false">支持挂载世界书自定义规则，预设 CoC 与 D&amp;D 通用数值框架（按需选用），并允许玩家与模型通过工具自由新增/维护自定义数值栏目、角色卡与掷骰检定。首次保存后模式不可更改。</string>
+    <string name="trpg_agent_mode_locked" formatted="false">智能体首次保存后模式已锁定，不可切换。</string>
+    <string name="trpg_agent_mode_badge" formatted="false">跑团 TRPG</string>
+    <string name="trpg_agent_summary_mode">模式：%1$s</string>
 </resources>

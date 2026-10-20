@@ -8,6 +8,7 @@ import android.net.Uri
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.graphics.asAndroidBitmap
+import androidx.compose.ui.semantics.SemanticsActions
 import androidx.compose.ui.test.*
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.core.content.FileProvider
@@ -33,7 +34,7 @@ class CharacterCardImportDeviceTest {
     private val characterName = "角色卡青禾-$suffix"
 
     @Test fun jsonPreviewCancelDraftModelSelectionSaveAndGreetingAreReal() {
-        val (vm, modelLabel) = screen()
+        val (vm, modelLabel) = screen(decoys = true)
         val app = compose.activity.application as MobileAgentApp
         val beforeAgents = app.container.agents.list().size
         val beforeBooks = app.container.worldBooks.list().size
@@ -47,6 +48,7 @@ class CharacterCardImportDeviceTest {
             assertEquals(beforeBooks, app.container.worldBooks.list().size)
             compose.onNodeWithTag("agents.character_import.open").performClick(); imported(vm)
             compose.onNodeWithTag("agents.character_import.user_name").performTextReplacement("旅人")
+            compose.onNodeWithTag("agents.character_import.mode.trpg").performScrollTo().performClick()
             compose.onNodeWithTag("agents.character_import.confirm").performClick()
             compose.waitUntil(15_000) { vm.state.value.editor != null }
             assertEquals(beforeAgents, app.container.agents.list().size)
@@ -56,12 +58,30 @@ class CharacterCardImportDeviceTest {
             compose.runOnIdle { assertNotNull(vm.state.value.error) }
             assertEquals(beforeAgents, app.container.agents.list().size)
             scrollTo("agents.model.chat").performClick()
-            compose.onNodeWithText(modelLabel).performClick()
-            compose.onNodeWithTag(AgentTestTags.SAVE).performClick()
-            compose.waitUntil(30_000) { !vm.saving.value && vm.state.value.editor == null }
+            // Full-suite fixtures leave a long menu. A composed offscreen label
+            // is not a selected model; scroll to the real item before tapping.
+            val modelOption = compose.onNodeWithText(modelLabel)
+            val menu = compose.onNode(hasScrollAction() and hasAnyAncestor(isPopup()))
+            var scrolls = 0
+            val step = menu.fetchSemanticsNode().boundsInRoot.height / 2f
+            while (!modelOption.isDisplayed() && scrolls++ < 80) {
+                menu.performSemanticsAction(SemanticsActions.ScrollBy) { it(0f, step) }
+            }
+            modelOption.assertIsDisplayed().performClick()
+            compose.runOnIdle { assertEquals("cc-model-$suffix", vm.state.value.editor!!.chatModelId) }
+            compose.onNodeWithTag(AgentTestTags.SAVE).assertIsEnabled().performClick()
+            try {
+                compose.waitUntil(30_000) { !vm.saving.value && vm.state.value.editor == null }
+            } catch (failure: ComposeTimeoutException) {
+                val detail = compose.runOnIdle {
+                    "saving=${vm.saving.value}, loading=${vm.state.value.editor?.characterCardLoading}, error=${vm.state.value.error}"
+                }
+                throw AssertionError("Character save did not complete: $detail", failure)
+            }
             compose.runOnIdle { assertNull(vm.state.value.error) }
             val saved = app.container.agents.list().single { it.name == characterName }
             assertNotNull(saved.characterCard)
+            assertEquals(AgentMode.TRPG, saved.mode)
             assertEquals(1, saved.worldBookIds.size)
             assertFalse(AgentSearchPermission.enabled(saved.permissionSettingsJson))
             assertFalse(AgentToolConfirmation.skip(saved.permissionSettingsJson))
@@ -73,6 +93,8 @@ class CharacterCardImportDeviceTest {
             assertEquals("你好旅人，我是$characterName。", greeting.text)
             assertEquals(MessageRole.ASSISTANT, greeting.role)
             assertEquals("旅人", app.container.worldBooks.conversationConfig(conversation!!).context.userName)
+            val snapshot = app.container.conversations.get(conversation!!)!!.snapshotId
+            assertEquals(AgentMode.TRPG, app.container.agents.resolveSnapshot(snapshot).snapshot.mode)
             compose.runOnIdle {
                 vm.openEditor(saved.id)
                 assertTrue(vm.state.value.editor!!.characterCardLoading)
@@ -80,10 +102,16 @@ class CharacterCardImportDeviceTest {
             }
             compose.waitUntil(15_000) { vm.state.value.editor?.characterCardLoading == false }
             assertEquals(saved.characterCard, app.container.agents.get(saved.id)!!.characterCard)
+            scrollTo("agents.editor.mode.trpg").assertIsSelected().assertIsNotEnabled()
+            scrollTo("agents.editor.mode.normal").assertIsNotEnabled()
             compose.onNodeWithTag("agents.editor.character_greeting").performScrollTo().assertTextContains("{{user}}", substring = true)
             File(compose.activity.cacheDir, "character-card-editor.png").outputStream().use {
                 compose.onRoot().captureToImage().asAndroidBitmap().compress(Bitmap.CompressFormat.PNG, 100, it)
             }
+            compose.runOnIdle { vm.edit(vm.state.value.editor!!.copy(name = "$characterName edited")); vm.save() }
+            compose.waitUntil(30_000) { !vm.saving.value && vm.state.value.editor == null }
+            assertEquals(AgentMode.TRPG, app.container.agents.get(saved.id)!!.mode)
+            assertEquals(saved.characterCard, app.container.agents.get(saved.id)!!.characterCard)
         } finally { input.delete() }
     }
 
@@ -136,7 +164,7 @@ class CharacterCardImportDeviceTest {
         } finally { input.delete() }
     }
 
-    private fun screen(): Pair<AgentsViewModel, String> {
+    private fun screen(decoys: Boolean = false): Pair<AgentsViewModel, String> {
         val app = compose.activity.application as MobileAgentApp
         app.ensureHostInitialized()
         val providerId = "cc-provider-$suffix"
@@ -146,6 +174,10 @@ class CharacterCardImportDeviceTest {
             "https://example.invalid/v1", secretRef = "fixture-absent", revision = 1))
         app.container.profiles.createModel(ModelProfile(modelId, providerId, ModelRole.CHAT, "card-fixture",
             capabilities = setOf("stream"), contextLimit = 32768, outputLimit = 1024, revision = 1))
+        if (decoys) repeat(24) { index ->
+            app.container.profiles.createModel(ModelProfile("000-cc-$suffix-$index", providerId, ModelRole.CHAT, "000-decoy-$index",
+                capabilities = setOf("stream"), contextLimit = 32768, outputLimit = 1024, revision = 1))
+        }
         lateinit var vm: AgentsViewModel
         compose.runOnUiThread { vm = AgentsViewModel(app, SavedStateHandle()) }
         compose.setContent {

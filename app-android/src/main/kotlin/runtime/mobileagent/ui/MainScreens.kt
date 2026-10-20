@@ -672,9 +672,12 @@ private fun ChatRoute(vm: runtime.mobileagent.ChatViewModel, chinese: Boolean, o
         },
         onOpenAgentSettings = onOpenAgentSettings,
     )
+    val appContainer = (context.applicationContext as MobileAgentApp).container
     Column(Modifier.fillMaxSize()) {
-    WorldBookChatBar((context.applicationContext as MobileAgentApp).container, state.selectedSessionId,
+    WorldBookChatBar(appContainer, state.selectedSessionId,
         state.streaming, state.messages.size, chinese) { onRoute(AppRoutes.WORLD_BOOKS) }
+    TrpgChatBar(appContainer, state.selectedSessionId, state.streaming, state.selectedSessionArchived,
+        state.messages.size, chinese) { line -> vm.input(appendTrpgRollToDraft(vm.state.value.input, line)) }
     Box(Modifier.weight(1f)) {
     runtime.mobileagent.feature.chat.ConversationScreen(
         state = state,

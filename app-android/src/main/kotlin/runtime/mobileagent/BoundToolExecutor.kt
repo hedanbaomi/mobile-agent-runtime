@@ -39,6 +39,7 @@ private class BoundBuiltinToolExecutor(
     snapshot: AgentSnapshot,
 ) : ToolExecutor {
     private val agentId = snapshot.agentId
+    private val trpgMode = snapshot.mode == runtime.mobileagent.domain.AgentMode.TRPG
     private val snapshotKnowledgeIds = snapshot.knowledgeBaseIds.toSet()
     private val snapshotSkillIds = snapshot.skillIds.toSet()
     private val mutex = Mutex()
@@ -51,7 +52,7 @@ private class BoundBuiltinToolExecutor(
             grant.hosts.any { host -> runCatching { HttpPolicy.assertRequest("https://$host/", grant.hosts) }.isSuccess }
         }
         BuiltinTools.all.filter { spec ->
-            when (spec.capability) {
+            (spec.name != "dice_roll" || trpgMode) && when (spec.capability) {
                 "" -> true
                 "knowledge.search", "knowledge.read" -> hasKnowledge
                 "network.http" -> hasHttp
@@ -63,6 +64,7 @@ private class BoundBuiltinToolExecutor(
     override suspend fun invoke(call: ToolCall): ToolResult = mutex.withLock {
         runInterruptible(Dispatchers.IO) {
             if (call.callId.isBlank()) return@runInterruptible ToolResult.Invalid("Tool call ID is missing")
+            if (call.name == "dice_roll" && !trpgMode) return@runInterruptible ToolResult.Invalid("TRPG mode is required")
             val previous = calls[call.callId]
             if (previous != null && previous.call != call) {
                 return@runInterruptible ToolResult.Invalid("Tool call ID was already used for a different request")

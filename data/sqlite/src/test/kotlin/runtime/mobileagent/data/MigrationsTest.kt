@@ -103,7 +103,8 @@ class MigrationsTest {
     fun conversationAgentSnapshotProjectionIsAddedAndBackfilled() {
         val db = JdbcSqlConnection()
         db.execute("CREATE TABLE schema_version(version INTEGER NOT NULL PRIMARY KEY)")
-        db.execute("INSERT INTO schema_version(version) VALUES (?)", listOf(Migrations.VERSION - 1))
+        // This fixture predates the v16 conversation projection, not the latest schema.
+        db.execute("INSERT INTO schema_version(version) VALUES (?)", listOf(15))
         db.execute(
             "CREATE TABLE conversations(id TEXT PRIMARY KEY, snapshot_id TEXT NOT NULL, title TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL)",
         )

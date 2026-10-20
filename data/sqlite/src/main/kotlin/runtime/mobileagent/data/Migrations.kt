@@ -66,7 +66,9 @@ object Migrations {
     // embedding, generation, pin, permission and consent row stays in place.
     // v35 adds immutable world book revisions, conversation bindings and activation receipts.
     // v36 adds optional imported character metadata; old Agents and snapshots retain their values.
-    const val VERSION = 37
+    // v38 fixes the Agent mode at creation and adds bounded per-conversation TRPG state/receipts.
+    // It also repairs old API26 offset-timestamp ordering keys without rewriting messages.
+    const val VERSION = 38
 
     private val statements = listOf(
         "CREATE TABLE IF NOT EXISTS schema_version (version INTEGER NOT NULL PRIMARY KEY)",
@@ -290,8 +292,10 @@ object Migrations {
             columns.forEach { column -> ensureColumn(connection, column) }
             WorldBookSchema.install(connection)
             CharacterCardStorage.install(connection)
+            TrpgSchema.install(connection)
             WorldBookRevisionStorage.install(connection, current)
             MessageChronology.install(connection)
+            MessageChronologyCompatibility.repair(connection, current)
             // v34: the historical external-content statement above may have just created the
             // wrong table, so the index is repaired from chunks.text in this same transaction.
             LexicalIndexMigration.ensure(connection, current)

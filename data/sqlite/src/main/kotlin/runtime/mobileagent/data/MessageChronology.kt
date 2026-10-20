@@ -9,7 +9,7 @@ import java.time.Instant
 /** Derived, fixed-width ASCII keys; the original timestamp remains immutable. */
 internal object MessageChronology {
     fun key(raw: String): String = try {
-        val instant = Instant.parse(raw)
+        val instant = MessageChronologyCompatibility.parse(raw)
         // The entire Instant range is 63,113,904,031,622,399 seconds: 17 digits.
         "0" + (instant.epochSecond - Instant.MIN.epochSecond).toString().padStart(17, '0') +
             instant.nano.toString().padStart(9, '0')

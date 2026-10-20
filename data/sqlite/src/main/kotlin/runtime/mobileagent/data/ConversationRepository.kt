@@ -128,6 +128,8 @@ class ConversationRepository(
             db.execute("DELETE FROM messages WHERE conversation_id=?", listOf(id))
             db.execute("DELETE FROM world_book_effects WHERE conversation_id=?", listOf(id))
             db.execute("DELETE FROM world_book_conversations WHERE conversation_id=?", listOf(id))
+            db.execute("DELETE FROM trpg_run_receipts WHERE conversation_id=?", listOf(id))
+            db.execute("DELETE FROM trpg_sessions WHERE conversation_id=?", listOf(id))
             db.execute("DELETE FROM conversations WHERE id=?", listOf(id))
         }
         return true

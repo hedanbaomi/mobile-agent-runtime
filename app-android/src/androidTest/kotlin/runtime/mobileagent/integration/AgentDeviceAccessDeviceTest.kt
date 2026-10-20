@@ -120,6 +120,12 @@ class AgentDeviceAccessDeviceTest {
     }
 
     @Test fun failedFullDeviceCommitRollsBackAgentAndRetainsBothDraftsForExplicitRetry() {
+        val rounds = InstrumentationRegistry.getArguments().getString("rollbackRounds")?.toIntOrNull() ?: 1
+        require(rounds in 1..100)
+        repeat(rounds) { verifyFailedCommitRollbackAndRestart() }
+    }
+
+    private fun verifyFailedCommitRollbackAndRestart() {
         val f = fixture()
         val vm = f.editor()
         val before = f.app.container.agents.list().map { it.id }.toSet()
@@ -140,7 +146,21 @@ class AgentDeviceAccessDeviceTest {
         assertTrue("Rollback must not leave defaults whose Agent was deleted",
             f.app.container.db.query("SELECT agent_id FROM agent_workspace_defaults d WHERE NOT EXISTS (SELECT 1 FROM agent_profiles a WHERE a.id=d.agent_id)").isEmpty())
         // The next process initialization runs this validation before any UI.
-        runtime.mobileagent.data.Migrations.apply(f.app.container.db)
+        var firstIntegrityRows = emptyList<List<Any?>>()
+        val checkedDb = object : runtime.mobileagent.data.SqlConnection by f.app.container.db {
+            override fun query(sql: String, args: List<Any?>): List<runtime.mobileagent.data.SqlRow> =
+                f.app.container.db.query(sql, args).also { rows ->
+                    if (sql == "PRAGMA quick_check") firstIntegrityRows = rows.map { it.columns.values.toList() }
+                }
+        }
+        try {
+            runtime.mobileagent.data.Migrations.apply(checkedDb)
+        } catch (failure: Exception) {
+            val readerChecks = List(3) {
+                f.app.container.db.query("PRAGMA quick_check").map { it.columns.values.toList() }
+            }
+            throw AssertionError("Restart integrity guard rejected the rollback fixture; initial=$firstIntegrityRows, pooled reader checks=$readerChecks", failure)
+        }
         fail = false
         val saved = runBlocking { vm.saveAndAwait() }
         assertTrue(vm.state.value.error, saved)

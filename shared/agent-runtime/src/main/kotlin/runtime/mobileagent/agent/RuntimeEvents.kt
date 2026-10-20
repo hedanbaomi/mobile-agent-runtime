@@ -84,6 +84,8 @@ data class AgentRuntimeRequest(
      * Repeated answering/tool-continuation requests must be handled idempotently by the host.
      */
     val beforeAnsweringDispatch: () -> Unit = {},
+    /** Refresh authoritative campaign state before every answering/tool-continuation request. */
+    val currentTrpgSession: (suspend () -> runtime.mobileagent.domain.trpg.TrpgSession)? = null,
 )
 
 /** An outer stall can win before the executor returns; approval waits are never execution proof. */

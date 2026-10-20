@@ -14,6 +14,8 @@ import androidx.compose.ui.test.assertIsNotEnabled
 import androidx.compose.ui.test.hasTestTag
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onNodeWithTag
+import androidx.compose.ui.test.isDisplayed
+import androidx.compose.ui.test.isEnabled
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performScrollTo
 import androidx.compose.ui.test.performScrollToNode
@@ -77,11 +79,15 @@ class ArchiveNavigationDeviceTest {
             compose.onNodeWithTag("settings.archive.list")
                 .performScrollToNode(hasTestTag("settings.archive.view.${archived.id}"))
             compose.onNodeWithTag("settings.archive.view.${archived.id}").assertIsDisplayed().performClick()
+            compose.waitUntil(15_000) { compose.onNodeWithTag("conversation.archive.restore").isDisplayed() }
             compose.onNodeWithTag("conversation.composer.input").assertIsNotEnabled()
             compose.onNodeWithTag("conversation.composer.send").assertIsNotEnabled()
             assertTrue(container.conversations.get(archived.id)!!.archived)
             assertEquals(listOf(message), container.conversations.messages(archived.id))
             compose.onNodeWithTag("conversation.archive.restore").assertIsDisplayed().performClick()
+            compose.waitUntil(15_000) {
+                compose.onAllNodes(hasTestTag("conversation.composer.input") and isEnabled()).fetchSemanticsNodes().isNotEmpty()
+            }
             compose.onNodeWithTag("conversation.composer.input").assertIsEnabled()
             assertFalse(container.conversations.get(archived.id)!!.archived)
             assertTrue(container.conversations.listActive().any { it.id == archived.id })

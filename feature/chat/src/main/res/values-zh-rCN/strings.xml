@@ -83,4 +83,16 @@
     <string name="chat_load_earlier_messages">加载更早消息</string>
     <string name="chat_load_more_sessions">加载更多会话</string>
     <string name="chat_load_more_archived">加载更多已归档会话</string>
+    <string name="trpg_tool_dice_title">桌面掷骰检定 · %1$s</string>
+    <string name="trpg_tool_coc_title">CoC 7th 百分检定 · 技能 %1$s</string>
+    <string name="trpg_tool_state_title">跑团状态同步 · 修订 #%1$s</string>
+    <string name="trpg_tool_dc_pass">DC %1$s · 检定成功</string>
+    <string name="trpg_tool_dc_fail">DC %1$s · 检定失败</string>
+    <string name="trpg_tool_coc_thresholds">极难 ≤%1$s · 困难 ≤%2$s · 常规 ≤%3$s · 大失败 ≥%4$s</string>
+    <string name="trpg_tool_coc_critical" formatted="false">大成功 CRITICAL</string>
+    <string name="trpg_tool_coc_extreme" formatted="false">极难成功 EXTREME</string>
+    <string name="trpg_tool_coc_hard" formatted="false">困难成功 HARD</string>
+    <string name="trpg_tool_coc_regular" formatted="false">常规成功 SUCCESS</string>
+    <string name="trpg_tool_coc_failure" formatted="false">检定失败 FAILURE</string>
+    <string name="trpg_tool_coc_fumble" formatted="false">大失败 FUMBLE</string>
 </resources>

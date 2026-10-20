@@ -15,6 +15,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.toList
 import kotlinx.coroutines.withTimeout
+import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -59,6 +60,29 @@ import runtime.mobileagent.provider.*
  */
 @RunWith(AndroidJUnit4::class)
 class RunToolsReplayDeviceTest {
+    @Test fun randomNumberIsAvailableWithoutGrantsAndReplayKeepsTheDraw(): Unit = runBlocking {
+        val chain = prepareChain("random-number")
+        val run = newRun(chain)
+        val tools = RunTools(chain.container, chain.app, chain.snapshot, run, false, false)
+        try {
+            assertTrue(tools.executor.specs.any { it.name == "random_number" })
+            val call = ToolCall("die", "random_number", """{"min":1,"max":20}""")
+            val result = tools.executor.invoke(call)
+            assertTrue(result is ToolResult.Value)
+            val invocationId = tools.runtimeInvocationId(call.callId)
+            repeat(10) {
+                assertEquals(result, tools.executor.invoke(call))
+                assertEquals(invocationId, tools.runtimeInvocationId(call.callId))
+                assertTrue(tools.executor.authorizeReplay(call))
+            }
+            assertTrue(tools.executor.invoke(call.copy(callId = "another-die")) is ToolResult.Value)
+            assertNotEquals(invocationId, tools.runtimeInvocationId("another-die"))
+            run.state = RunState.COMPLETED
+            assertFalse(tools.executor.authorizeReplay(call))
+            assertTrue(tools.executor.invoke(call) is ToolResult.Denied)
+        } finally { tools.executor.close() }
+    }
+
     @Test fun runtimeStallRecoversTheExactActionWhenModelCallIdsAreReused(): Unit = runBlocking {
         withTimeout(15_000) {
             val chain = prepareChain("runtime-device-stall")

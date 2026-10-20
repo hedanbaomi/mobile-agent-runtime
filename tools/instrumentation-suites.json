@@ -9,6 +9,7 @@
     ],
     "convergence": [
       "runtime.mobileagent.RunToolsReplayDeviceTest",
+      "runtime.mobileagent.RandomNumberDeviceTest",
       "runtime.mobileagent.shizuku.ShizukuWorkspaceFileStoreTest",
       "runtime.mobileagent.VectorIndexCacheDeviceTest",
       "runtime.mobileagent.ChatContextCompactionDeviceTest",
@@ -113,6 +114,7 @@
       "runtime.mobileagent.ReleaseGateUiDeviceTest",
       "runtime.mobileagent.RunToolsEnrichDeviceTest",
       "runtime.mobileagent.RunToolsReplayDeviceTest",
+      "runtime.mobileagent.RandomNumberDeviceTest",
       "runtime.mobileagent.RuntimeSafToolExposureDeviceTest",
       "runtime.mobileagent.RuntimeShizukuToolExposureDeviceTest",
       "runtime.mobileagent.SkillGrantScopeUiTest",

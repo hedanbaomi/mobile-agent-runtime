@@ -30,6 +30,7 @@ import java.util.concurrent.CancellationException
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicReference
+import kotlin.random.Random
 import runtime.mobileagent.skills.tooling.AuthorizationDecision
 import runtime.mobileagent.skills.tooling.AuthorizationEvaluator
 import runtime.mobileagent.skills.tooling.ToolError
@@ -85,6 +86,7 @@ class ToolBroker(
     private val context: ToolContext,
     private val autoApproveSideEffects: Boolean = false,
     private val liveGrant: (() -> PermissionGrant)? = null,
+    private val random: Random = Random.Default,
 ) {
     private val completed = linkedMapOf<String, ToolResult>()
     private val pending = linkedMapOf<String, ToolCall>()
@@ -288,6 +290,12 @@ class ToolBroker(
             val value = Calculator.eval(args.string("expression"))
             """{"value":$value}"""
         }
+        "random_number" -> {
+            val min = args.getValue("min").jsonPrimitive.intOrNull!!
+            val max = args.getValue("max").jsonPrimitive.intOrNull!!
+            val value = RandomNumber.draw(min, max, random)
+            """{"min":$min,"max":$max,"value":$value}"""
+        }
         "http_request" -> {
             val url = args.string("url")
             val method = args["method"]?.jsonPrimitive?.contentOrNull ?: "GET"
@@ -370,7 +378,15 @@ object BuiltinTools {
         sideEffect = true,
     )
 
-    val all = listOf(knowledgeSearch, readDocument, calculator, httpRequest)
+    val randomNumber = ToolSpec(
+        name = "random_number",
+        description = "Draw one uniformly random integer between min and max, inclusive. Use min=1,max=20 for a d20 or min=1,max=6 for a d6. Both bounds must be signed 32-bit integers and min <= max. Each die needs a distinct tool call ID. Reusing the same call ID and arguments within a run returns the original result without rerolling.",
+        parametersJson = """{"type":"object","additionalProperties":false,"required":["min","max"],"properties":{"min":{"type":"integer","minimum":-2147483648,"maximum":2147483647},"max":{"type":"integer","minimum":-2147483648,"maximum":2147483647}}}""",
+        capability = "",
+        sideEffect = false,
+    )
+
+    val all = listOf(knowledgeSearch, readDocument, calculator, randomNumber, httpRequest)
     val byName = all.associateBy { it.name }
 }
 

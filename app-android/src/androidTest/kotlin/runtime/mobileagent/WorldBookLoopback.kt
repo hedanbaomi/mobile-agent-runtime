@@ -14,8 +14,13 @@ import java.util.concurrent.atomic.AtomicReference
 import kotlinx.serialization.json.*
 import org.junit.Assert.assertNull
 import runtime.mobileagent.domain.ApiFormat
+import runtime.mobileagent.skills.ToolCall
 
-internal class WorldBookLoopback(private val format: ApiFormat, private val tools: Boolean) : AutoCloseable {
+internal class WorldBookLoopback(
+    private val format: ApiFormat,
+    private val tools: Boolean,
+    private val toolCall: ToolCall = ToolCall("worldbook-calculation", "calculator", """{"expression":"1+1"}"""),
+) : AutoCloseable {
     private val server = ServerSocket(0, 4, InetAddress.getByName("127.0.0.1")).apply { soTimeout = 200 }
     val port = server.localPort
     val requests = CopyOnWriteArrayList<JsonObject>()
@@ -59,17 +64,23 @@ internal class WorldBookLoopback(private val format: ApiFormat, private val tool
     }
 
     private fun response(request: JsonObject): String {
-        if (format != ApiFormat.OPENAI_COMPATIBLE) return "data: {\"type\":\"response.output_text.delta\",\"delta\":\"fixture reply\"}\n\n" +
-            "data: {\"type\":\"response.completed\",\"response\":{}}\n\n"
+        val callTool = tools && requests.size == 1
+        if (format != ApiFormat.OPENAI_COMPATIBLE) {
+            val event = if (callTool) buildJsonObject {
+                put("type", "response.function_call_arguments.done")
+                put("item_id", "fc_fixture"); put("call_id", toolCall.callId)
+                put("name", toolCall.name); put("arguments", toolCall.argumentsJson)
+            } else buildJsonObject { put("type", "response.output_text.delta"); put("delta", "fixture reply") }
+            return "data: $event\n\ndata: {\"type\":\"response.completed\",\"response\":{}}\n\n"
+        }
         val summary = request["messages"]!!.jsonArray.first().jsonObject["content"]!!.jsonPrimitive.content
             .startsWith("Summarize the supplied conversation data")
         val text = if (summary) """{"goals":["continue"],"constraints":[],"decisions":[],"pending":[],"results":["earlier replies retained"]}""" else "fixture reply"
-        val callTool = tools && requests.size == 1
         val chunk = buildJsonObject { put("choices", buildJsonArray { add(buildJsonObject {
             put("delta", buildJsonObject {
                 if (callTool) put("tool_calls", buildJsonArray { add(buildJsonObject {
-                    put("index", 0); put("id", "worldbook-calculation"); put("type", "function")
-                    put("function", buildJsonObject { put("name", "calculator"); put("arguments", "{\"expression\":\"1+1\"}") })
+                    put("index", 0); put("id", toolCall.callId); put("type", "function")
+                    put("function", buildJsonObject { put("name", toolCall.name); put("arguments", toolCall.argumentsJson) })
                 }) }) else put("content", text)
             }); put("finish_reason", if (callTool) "tool_calls" else "stop")
         }) }) }

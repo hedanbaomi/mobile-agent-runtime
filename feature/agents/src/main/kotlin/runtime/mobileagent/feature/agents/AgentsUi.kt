@@ -271,6 +271,10 @@ data class AgentEditorUi(
     val workspacePresetWorkspaceId: String? = null,
     val workspaceGrantPreset: AgentWorkspaceGrantPresetUi? = null,
     val workspaceAccess: AgentWorkspaceAccessUi = AgentWorkspaceAccessUi(),
+    val characterCard: runtime.mobileagent.domain.ImportedCharacterCard? = null,
+    val characterCardLoading: Boolean = false,
+    /** Unsaved import data; discarded with the editor and never written to SavedStateHandle. */
+    val pendingCharacterWorldBook: runtime.mobileagent.domain.worldbook.WorldBookDocument? = null,
 )
 
 data class AgentsUiState(
@@ -291,6 +295,8 @@ data class AgentsUiState(
     /** False only when the VM could not resolve its injected grant port. */
     val grantStoreAvailable: Boolean = true,
     val grantStoreError: String? = null,
+    val characterImport: CharacterCardImportUi? = null,
+    val characterImportBusy: Boolean = false,
 )
 
 enum class AgentCompactPane { BOTH, LIST, DETAIL }
@@ -311,6 +317,10 @@ data class AgentsActions(
     val onChooseSafWorkspace: () -> Unit = {},
     val onBrowsePrivilegedWorkspace: () -> Unit = {},
     val onToggleFullDeviceFiles: (Boolean) -> Unit = {},
+    val onImportCharacter: () -> Unit = {},
+    val onCharacterImportChange: (CharacterCardImportUi) -> Unit = {},
+    val onConfirmCharacterImport: () -> Unit = {},
+    val onCancelCharacterImport: () -> Unit = {},
 )
 
 @Composable
@@ -323,6 +333,7 @@ fun AgentsScreen(
     renderEditorAsPage: Boolean = false,
 ) {
     val zh = state.language.equals("zh-CN", true)
+    CharacterCardImportDialog(state, actions)
     if (state.editor != null && renderEditorAsPage) {
         AgentEditorPage(
             editor = state.editor,
@@ -383,6 +394,11 @@ private fun AgentListPane(state: AgentsUiState, actions: AgentsActions, modifier
                 Text(stringResource(R.string.ui_new_agent_5a36831a))
             }
         }
+        OutlinedButton(onClick = actions.onImportCharacter, enabled = !state.characterImportBusy && state.editor == null,
+            modifier = Modifier.fillMaxWidth().padding(top = 8.dp).testTag("agents.character_import.open")) {
+            Text(stringResource(R.string.character_card_open))
+        }
+        if (state.characterImportBusy) androidx.compose.material3.LinearProgressIndicator(Modifier.fillMaxWidth().padding(top = 8.dp))
         OutlinedTextField(
             state.query,
             actions.onQuery,
@@ -709,7 +725,7 @@ private fun AgentEditorDialog(
         confirmButton = {
             Button(
                 onClick = actions.onSave,
-                enabled = !workspaceSelectionBusy,
+                enabled = !workspaceSelectionBusy && !editor.characterCardLoading,
                 modifier = Modifier.testTag(AgentTestTags.SAVE),
             ) {
                 Text(stringResource(R.string.ui_save_ec8e6d58))
@@ -755,7 +771,7 @@ private fun AgentEditorPage(
                 }
                 Button(
                     onClick = actions.onSave,
-                    enabled = !workspaceSelectionBusy,
+                    enabled = !workspaceSelectionBusy && !editor.characterCardLoading,
                     modifier = Modifier.testTag(AgentTestTags.SAVE),
                 ) {
                     Text(stringResource(R.string.ui_save_ec8e6d58))
@@ -802,6 +818,7 @@ private fun AgentEditorFields(
                     modifier = Modifier.fillMaxWidth().testTag(AgentTestTags.PROMPT),
                 )
                 var showPromptHistory by androidx.compose.runtime.saveable.rememberSaveable(editor.id) { mutableStateOf(false) }
+                CharacterCardEditorFields(editor, actions, zh)
                 TextButton(onClick = { showPromptHistory = !showPromptHistory }) {
                     Text(stringResource(R.string.ui_prompt_history_s_cb99ff1a, (editor.promptRevisions.size)))
                 }
@@ -1586,7 +1603,7 @@ private fun RoleDropdown(
     }
     val selected = options.firstOrNull { it.id == selectedId }
     Column {
-        OutlinedButton(onClick = { expanded = true }, modifier = Modifier.fillMaxWidth()) {
+        OutlinedButton(onClick = { expanded = true }, modifier = Modifier.fillMaxWidth().testTag("agents.model.${role.lowercase()}")) {
             Text("$label: ${selected?.label ?: if (zh) "未配置" else "Not configured"}", modifier = Modifier.fillMaxWidth())
         }
         DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {

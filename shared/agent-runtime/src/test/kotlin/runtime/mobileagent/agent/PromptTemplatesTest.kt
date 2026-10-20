@@ -10,6 +10,15 @@ import org.junit.jupiter.api.Test
 
 class PromptTemplatesTest {
     @Test
+    fun importedCharacterUserRendersOnceAndExpansionIsBoundedBeforeAllocation() {
+        assertEquals("青禾 welcomes {{agent_name}}", PromptTemplates.render("{{agent_name}} welcomes {{character_user}}",
+            mapOf("agent_name" to "青禾", "character_user" to "{{agent_name}}")))
+        assertThrows(IllegalArgumentException::class.java) {
+            PromptTemplates.render("{{character_user}}".repeat(10_000), mapOf("character_user" to "x".repeat(128)))
+        }
+    }
+
+    @Test
     fun allowedVariablesRender() {
         val text = PromptTemplates.render("Hello {{agent_name}}", mapOf("agent_name" to "Ada"))
         assertEquals("Hello Ada", text)

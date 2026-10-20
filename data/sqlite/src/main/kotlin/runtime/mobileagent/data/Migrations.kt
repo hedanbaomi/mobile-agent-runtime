@@ -65,7 +65,8 @@ object Migrations {
     // index rebuilt from chunks.text. Only derived postings change; every source,
     // embedding, generation, pin, permission and consent row stays in place.
     // v35 adds immutable world book revisions, conversation bindings and activation receipts.
-    const val VERSION = 35
+    // v36 adds optional imported character metadata; old Agents and snapshots retain their values.
+    const val VERSION = 36
 
     private val statements = listOf(
         "CREATE TABLE IF NOT EXISTS schema_version (version INTEGER NOT NULL PRIMARY KEY)",
@@ -288,6 +289,7 @@ object Migrations {
             DocumentPipelineStore.schema.forEach { sql -> connection.execute(sql) }
             columns.forEach { column -> ensureColumn(connection, column) }
             WorldBookSchema.install(connection)
+            CharacterCardStorage.install(connection)
             MessageChronology.install(connection)
             // v34: the historical external-content statement above may have just created the
             // wrong table, so the index is repaired from chunks.text in this same transaction.

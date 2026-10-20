@@ -277,6 +277,10 @@ data class AgentProfile(
     @OptIn(kotlinx.serialization.ExperimentalSerializationApi::class)
     @kotlinx.serialization.EncodeDefault(kotlinx.serialization.EncodeDefault.Mode.NEVER)
     val worldBookIds: List<String> = emptyList(),
+    /** Imported user content and the explicitly selected greeting, independent of tool grants. */
+    @OptIn(kotlinx.serialization.ExperimentalSerializationApi::class)
+    @kotlinx.serialization.EncodeDefault(kotlinx.serialization.EncodeDefault.Mode.NEVER)
+    val characterCard: ImportedCharacterCard? = null,
 )
 
 @Serializable

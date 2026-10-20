@@ -17,6 +17,7 @@ class CreateConversationUseCase(private val db: SqlConnection, private val conve
         val frozen = snapshot()
         capturePins(frozen)
         val conversation = conversations.create(frozen.id, title)
+        CharacterCardConversation.initialize(db, frozen, conversation)
         bindWorkspace(conversation)
         conversation
     }

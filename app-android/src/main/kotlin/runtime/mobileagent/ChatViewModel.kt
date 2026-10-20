@@ -833,7 +833,8 @@ class ChatViewModel internal constructor(
                 bound.zip(hits).forEach { (citation, hit) -> runCitations[citation.citationId] = citation to hit.text }
                 metadata = citationMetadata(bound, warning, result.coverage, runCitations)
                 val system = PromptTemplates.render(binding.prompt.template, mapOf("date" to LocalDate.now().toString(),
-                    "agent_name" to binding.agentName, "knowledge_bases" to kbIds.joinToString(",")))
+                    "agent_name" to binding.agentName, "knowledge_bases" to kbIds.joinToString(","),
+                    "character_user" to (binding.characterCard?.context?.userName ?: "User")))
                 val webExecutor = withContext(Dispatchers.IO) { webSearchTools(container, binding.snapshot) }
                 val mcpExecutor = withContext(Dispatchers.IO) { mcpTools(container, binding.snapshot) }
                 // Freeze the run's immutable configuration before tool exposure.  The

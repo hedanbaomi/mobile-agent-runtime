@@ -436,6 +436,13 @@ class AgentsViewModel(
     private var pendingFullDeviceDraft: FullDeviceDraft? = null
     private val authorityPort = settingsAuthorityPort(app)
     private var editorSessionToken: Long = 0L
+    internal val characterImports = CharacterCardImportController(app, viewModelScope,
+        owner = { editorSessionToken }, eligible = { canImportCharacterCard(state.value, saving.value) },
+        applyDraft = { name, prompt, card, book ->
+            openEditor(null)
+            val editor = checkNotNull(state.value.editor)
+            edit(editor.copy(name = name, prompt = prompt, characterCard = card, pendingCharacterWorldBook = book))
+        })
 
     init {
         reload()
@@ -448,7 +455,7 @@ class AgentsViewModel(
 
     private fun loadState(current: AgentsUiState): AgentsUiState {
         val profiles = app.container.profiles
-        val agents = app.container.agents.list()
+        val agents = app.container.agents.listOverviews()
         val enabledSkillIds = loadGrantData(null).trustedSkills.filter { it.enabled && it.trusted }.map { it.installId }.toSet()
         val selected = current.selectedAgentId
             ?: savedStateHandle.get<String>(SELECTED_AGENT_KEY)
@@ -472,7 +479,8 @@ class AgentsViewModel(
     fun select(id: String) {
         if (saving.value) return
         if (state.value.editorDirty) return
-        if (app.container.agents.get(id) == null) return
+        if (app.container.agents.getOverview(id) == null) return
+        characterImports.cancel()
         editorSessionToken += 1L
         pendingWorkspaceDraft = null
         pendingFullDeviceDraft = null
@@ -493,10 +501,12 @@ class AgentsViewModel(
 
     fun openEditor(id: String?) {
         if (saving.value) return
+        characterImports.cancel()
         editorSessionToken += 1L
         pendingWorkspaceDraft = null
         pendingFullDeviceDraft = null
-        val editor = editorFrom(id)
+        val needsCard = characterCardNeedsLoad(app.container.agents, id)
+        val editor = editorFrom(id).copy(characterCardLoading = needsCard)
         editorBaseline = editor
         savedStateHandle[EDITOR_ID_KEY] = id
         state.value = state.value.copy(
@@ -507,6 +517,17 @@ class AgentsViewModel(
             grantStoreAvailable = grantPort.available,
             grantStoreError = grantPortError,
         )
+        loadCharacterCard(id, editorSessionToken)
+    }
+
+    private fun loadCharacterCard(id: String?, token: Long) {
+        loadCharacterCardForEditor(viewModelScope, app.container.agents, id,
+            current = { token == editorSessionToken }, loaded = { card ->
+                editorBaseline = checkNotNull(editorBaseline).copy(characterCard = card, characterCardLoading = false)
+                state.value = state.value.copy(editor = checkNotNull(state.value.editor).copy(characterCard = card, characterCardLoading = false))
+            }, failed = {
+                state.value = state.value.copy(error = "角色卡读取失败，请关闭编辑器后重试。")
+            })
     }
 
     fun edit(editor: AgentEditorUi) {
@@ -515,6 +536,7 @@ class AgentsViewModel(
     }
     fun closeEditor() {
         if (saving.value) return
+        characterImports.cancel()
         editorSessionToken += 1L
         editorBaseline = null
         pendingWorkspaceDraft = null
@@ -621,7 +643,7 @@ class AgentsViewModel(
     }
 
     internal suspend fun saveAndAwait(): Boolean = withContext(Dispatchers.Main.immediate) {
-        if (saving.value) return@withContext false
+        if (!canSaveCharacterEditor(saving.value, state.value.editor)) return@withContext false
         val editor = state.value.editor ?: return@withContext false
         saving.value = true
         state.value = state.value.copy(error = null)
@@ -718,6 +740,7 @@ class AgentsViewModel(
                 knowledgeBaseIds = editor.resourceBindings.filter { it.type == "knowledge" && it.enabled }.map { it.id },
                 skillIds = editor.resourceBindings.filter { it.type == "skill" && it.enabled }.map { it.id },
                 worldBookIds = worldBookIds(editor),
+                characterCard = editor.characterCard,
                 retrievalMode = editor.retrievalMode, revision = (previous?.revision ?: 0) + 1,
                 parameterOverridesJson = parameters.toString(), contextPolicyJson = contextPolicyJson,
                 permissionSettingsJson = AgentSearchPermission.update(
@@ -727,8 +750,12 @@ class AgentsViewModel(
             )
             val createdNew = previous == null
             var savedId: String? = null
+            var importedWorldBookId: String? = null
             try {
-                val saved = app.container.agents.saveWithPrompt(profile, editor.prompt)
+                val receipt = CharacterCardAgentPersistence.save(app.container.db, app.container.agents,
+                    profile, editor.prompt, createdNew, editor.pendingCharacterWorldBook)
+                val saved = receipt.profile
+                importedWorldBookId = receipt.createdWorldBookId
                 savedId = saved.id
                 persistGrantChanges(editor, saved.id)
                 if (defaultChanged && !draftOwnsDefault) persistWorkspaceDefault(editor, saved.id)
@@ -741,6 +768,7 @@ class AgentsViewModel(
             } catch (failure: Exception) {
                 if (createdNew && savedId != null) {
                     rollbackNewAgent(savedId)
+                    CharacterCardAgentPersistence.rollbackBook(app.container.db, importedWorldBookId)
                 }
                 throw failure
             }
@@ -923,7 +951,7 @@ class AgentsViewModel(
     }
 
     private fun editorFrom(id: String?): AgentEditorUi {
-        val agent = id?.let { app.container.agents.get(it) }
+        val agent = id?.let { app.container.agents.getOverview(it) }
         val options = app.container.profiles.listModels().map { model ->
             val provider = app.container.profiles.getProvider(model.providerId)
             AgentModelOptionUi(model.id, "${provider?.name.orEmpty()} / ${model.modelId}", model.role.name, model.capabilities)
@@ -963,6 +991,7 @@ class AgentsViewModel(
         val prompt = agent?.let { app.container.agents.getPromptRevision(it.promptRevisionId)?.template }.orEmpty()
         return AgentEditorUi(
             id = agent?.id, name = agent?.name.orEmpty(), modelOptions = options,
+            characterCard = agent?.characterCard,
             chatModelId = agent?.chatProfileId, visionModelId = agent?.visionProfileId,
             embeddingModelId = null, rerankerModelId = agent?.rerankerProfileId,
             prompt = prompt, promptRevisions = revisions.mapIndexed { index, item ->

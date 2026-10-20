@@ -73,4 +73,24 @@
     <string name="ui_use_recommended_settings_6754f65f" formatted="false">Use recommended settings</string>
     <string name="ui_use_the_configured_search_service_without_92bc0ab7" formatted="false">Use the configured search service without per-call prompts, including reading public pages with DeepSeek Fetch. Queries and page URLs are sent to the service; charges may apply. Enable for new conversations; disable immediately.</string>
     <string name="ui_workspace_access_7dc4e36c" formatted="false">Workspace access</string>
+    <string name="character_card_title" formatted="false">Import character card</string>
+    <string name="character_card_open" formatted="false">Import character card (JSON / PNG)</string>
+    <string name="character_card_name" formatted="false">New Agent name</string>
+    <string name="character_card_player_macro" formatted="false">Player name (for {{user}})</string>
+    <string name="character_card_use_greeting" formatted="false">Use a greeting in new conversations</string>
+    <string name="character_card_previous" formatted="false">Previous</string>
+    <string name="character_card_next" formatted="false">Next</string>
+    <string name="character_card_book">Import embedded world book (%1$s entries)</string>
+    <string name="character_card_book_name" formatted="false">World book name</string>
+    <string name="character_card_draft_help" formatted="false">Next creates an editable draft. Choose a Chat model and save to create the Agent and selected world book.</string>
+    <string name="character_card_limits_help" formatted="false">Imports character text and greetings. PNG supplies card metadata; portraits and external assets are not imported. Scripts do not run. Additional instructions join the editable prompt.</string>
+    <string name="character_card_draft" formatted="false">Create draft</string>
+    <string name="character_card_cancel" formatted="false">Cancel</string>
+    <string name="character_card_loading" formatted="false">Loading character card…</string>
+    <string name="character_card_format">Character card · %1$s</string>
+    <string name="character_card_player" formatted="false">Player name</string>
+    <string name="character_card_greeting" formatted="false">Greeting</string>
+    <string name="character_card_pending_book">World book created on save: %1$s (%2$s entries)</string>
+    <string name="character_card_exclude_book" formatted="false">Exclude this world book</string>
+    <string name="character_card_snapshot_help" formatted="false">Greeting and character context affect new conversations only.</string>
 </resources>

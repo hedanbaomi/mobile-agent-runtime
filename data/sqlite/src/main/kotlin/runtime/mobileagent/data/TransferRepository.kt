@@ -237,7 +237,8 @@ class TransferRepository(
                 // Runtime snapshots are intentionally not part of the portable configuration:
                 // their immutable provider expansion may contain host-only secret references.
                 // A fresh snapshot is created after import once local credentials are configured.
-                agent = AgentTransfer(agent, prompts, emptyList(), providers, models),
+                agent = AgentTransfer(agent.copy(characterCard = runtime.mobileagent.serialization.CharacterCardSupport.forTransfer(
+                    agent.characterCard, options.includeWorldBookContent)), prompts, emptyList(), providers, models),
                 knowledgeBases = knowledge,
                 skills = skills,
                 conversations = manifestConversations,
@@ -1000,12 +1001,12 @@ class TransferRepository(
         }
         if (existing) {
                 db.execute(
-                "UPDATE agent_profiles SET name=?,prompt_revision_id=?,chat_profile_id=?,vision_profile_id=?,embedding_profile_id=?,reranker_profile_id=?,knowledge_base_ids=?,skill_ids=?,retrieval_mode=?,revision=?,parameter_overrides_json=?,context_policy_json=?,permission_settings_json=?,world_book_ids=? WHERE id=?",
+                "UPDATE agent_profiles SET name=?,prompt_revision_id=?,chat_profile_id=?,vision_profile_id=?,embedding_profile_id=?,reranker_profile_id=?,knowledge_base_ids=?,skill_ids=?,retrieval_mode=?,revision=?,parameter_overrides_json=?,context_policy_json=?,permission_settings_json=?,world_book_ids=?,character_card_json=? WHERE id=?",
                 profileArgs(profile).drop(1) + profile.id,
             )
         } else {
             db.execute(
-                "INSERT INTO agent_profiles(id,name,prompt_revision_id,chat_profile_id,vision_profile_id,embedding_profile_id,reranker_profile_id,knowledge_base_ids,skill_ids,retrieval_mode,revision,parameter_overrides_json,context_policy_json,permission_settings_json,world_book_ids) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "INSERT INTO agent_profiles(id,name,prompt_revision_id,chat_profile_id,vision_profile_id,embedding_profile_id,reranker_profile_id,knowledge_base_ids,skill_ids,retrieval_mode,revision,parameter_overrides_json,context_policy_json,permission_settings_json,world_book_ids,character_card_json) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 profileArgs(profile),
             )
         }
@@ -1502,7 +1503,7 @@ class TransferRepository(
     private fun profileArgs(profile: AgentProfile): List<Any?> = listOf(
         profile.id, profile.name, profile.promptRevisionId, profile.chatProfileId, profile.visionProfileId, profile.embeddingProfileId,
         profile.rerankerProfileId, json.encodeToString(profile.knowledgeBaseIds), json.encodeToString(profile.skillIds), profile.retrievalMode,
-        profile.revision, profile.parameterOverridesJson, profile.contextPolicyJson, profile.permissionSettingsJson, json.encodeToString(profile.worldBookIds),
+        profile.revision, profile.parameterOverridesJson, profile.contextPolicyJson, profile.permissionSettingsJson, json.encodeToString(profile.worldBookIds), CharacterCardStorage.encode(profile.characterCard),
     )
 
     private fun SqlRow.toPrompt(json: Json): PromptRevision = PromptRevision(

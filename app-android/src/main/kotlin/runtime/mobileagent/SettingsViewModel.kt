@@ -734,7 +734,7 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
         refreshRuntimeFacts()
     }
 
-    fun exportAgents(): List<Pair<String, String>> = app.container.agents.list().map { it.id to it.name }
+    fun exportAgents(): List<Pair<String, String>> = app.container.agents.listOverviews().map { it.id to it.name }
 
     fun prepareExport(agentId: String, includeSkillPackages: Boolean = false,
         includeKnowledgeContent: Boolean = false, includeConversations: Boolean = false,

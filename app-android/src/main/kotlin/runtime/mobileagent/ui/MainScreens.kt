@@ -699,6 +699,11 @@ private fun AgentsRoute(entry: NavBackStackEntry, chinese: Boolean, onRoute: (St
     initialAgentId: String? = null, onInitialAgentConsumed: () -> Unit = {},
     onConversationCreated: (String) -> Unit = {}) {
     val vm: runtime.mobileagent.AgentsViewModel = viewModel(viewModelStoreOwner = entry)
+    var characterPickerToken by rememberSaveable { mutableStateOf<Long?>(null) }
+    val characterPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        vm.characterImports.picked(uri, characterPickerToken)
+        characterPickerToken = null
+    }
     var detailOpen by rememberSaveable { mutableStateOf(false) }
     val app = LocalContext.current.applicationContext as MobileAgentApp
     val integration = app.container.runtimeIntegration
@@ -739,7 +744,10 @@ private fun AgentsRoute(entry: NavBackStackEntry, chinese: Boolean, onRoute: (St
             onInitialAgentConsumed()
         }
     }
-    val baseState = vm.state.value.copy(language = if (chinese) "zh-CN" else "en-US")
+    val characterImport = vm.characterImports.state.value
+    val baseState = vm.state.value.copy(language = if (chinese) "zh-CN" else "en-US",
+        characterImport = characterImport.preview, characterImportBusy = characterImport.busy,
+        error = characterImport.error ?: vm.state.value.error)
     val editorAgentId = baseState.editor?.id
     val authoritySnapshot = remember(editorAgentId, workspaceRevision) { integration.snapshot() }
     val workspaceLoad = remember(editorAgentId, workspaceRevision) {
@@ -968,6 +976,15 @@ private fun AgentsRoute(entry: NavBackStackEntry, chinese: Boolean, onRoute: (St
     }
 
     val actions = runtime.mobileagent.feature.agents.AgentsActions(
+        onImportCharacter = {
+            vm.characterImports.beginPicker(chinese)?.let { token ->
+                characterPickerToken = token
+                characterPicker.launch(arrayOf("application/json", "text/json", "text/plain", "image/png", "application/octet-stream"))
+            }
+        },
+        onCharacterImportChange = vm.characterImports::change,
+        onConfirmCharacterImport = vm.characterImports::confirm,
+        onCancelCharacterImport = vm.characterImports::cancel,
         onQuery = vm::query,
         onSelectAgent = { id -> vm.select(id); detailOpen = true },
         onOpenEditor = { id -> detailOpen = id != null; vm.openEditor(id) },

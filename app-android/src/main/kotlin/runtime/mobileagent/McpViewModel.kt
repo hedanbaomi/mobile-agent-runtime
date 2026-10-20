@@ -137,7 +137,7 @@ class McpViewModel(
 
     /** Load local configuration and the current Agent list; never performs network I/O. */
     fun reload() {
-        val agents = app.container.agents.list()
+        val agents = app.container.agents.listOverviews()
             .map { McpUiAgent(it.id, it.name) }
         val stored = McpConfigStore.read(app.container)
         if (stored.error != null) {
@@ -325,7 +325,7 @@ class McpViewModel(
             state.value = current.copy(pendingGrantConfirmation = false, error = "MCP 发现授权已失效，请重新发现工具。")
             return
         }
-        if (app.container.agents.get(agentId) == null) {
+        if (app.container.agents.getOverview(agentId) == null) {
             state.value = current.copy(pendingGrantConfirmation = false, error = "目标 Agent 已不存在，不能建立 MCP 授权。")
             return
         }

@@ -205,7 +205,7 @@ class WorldBookRepositoryTest {
         db.execute("UPDATE schema_version SET version=34")
         assertFalse(db.query("PRAGMA table_info(agent_snapshots)").any { it.string("name") == "world_book_ids" })
         Migrations.apply(db)
-        assertEquals(35L, db.query("SELECT version FROM schema_version").single().long("version"))
+        assertEquals(Migrations.VERSION.toLong(), db.query("SELECT version FROM schema_version").single().long("version"))
         assertEquals(originalAgent, AgentRepository(db).get(originalAgent.id))
         assertEquals(snapshot, AgentRepository(db).getSnapshot(chat.snapshotId))
         assertEquals(messages, conversations.messages(chat.id))
@@ -233,7 +233,7 @@ class WorldBookRepositoryTest {
             assertEquals(34L, db.query("SELECT version FROM schema_version").single().long("version"))
             assertTrue(db.query("SELECT name FROM sqlite_master WHERE name='world_books'").isEmpty())
             Migrations.apply(db); Migrations.apply(db)
-            assertEquals(35L, db.query("SELECT version FROM schema_version").single().long("version"))
+            assertEquals(Migrations.VERSION.toLong(), db.query("SELECT version FROM schema_version").single().long("version"))
             assertEquals("retained", db.query("SELECT value FROM app_prefs WHERE key='existing'").single().string("value"))
         }
     }

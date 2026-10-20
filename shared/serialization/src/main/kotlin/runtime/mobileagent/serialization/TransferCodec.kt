@@ -160,6 +160,7 @@ object TransferCodec {
         requireDistinctIds(profile.knowledgeBaseIds, operationId, "agent.knowledgeBaseIds")
         requireDistinctIds(profile.skillIds, operationId, "agent.skillIds")
         WorldBookTransferValidation.ids(profile.worldBookIds, operationId)
+        CharacterCardTransferValidation.validate(profile.characterCard, operationId)
         val kbIds = knowledgeBases.map { it.id }.toSet()
         val skillIds = skills.map { it.id }.toSet()
         profile.knowledgeBaseIds.filterNot { it in kbIds }.forEach { missing ->
@@ -753,7 +754,7 @@ object TransferCodec {
     private const val MAX_HEADER_VALUE = 4096
     private const val MAX_TEXT = 32_768
     private const val LOCAL_CREDENTIALS_REQUIRED = "LOCAL_CREDENTIALS_REQUIRED"
-    private val ALLOWED_PROMPT_VARIABLES = setOf("date", "agent_name", "knowledge_bases")
+    private val ALLOWED_PROMPT_VARIABLES = setOf("date", "agent_name", "knowledge_bases", "character_user")
 }
 
 /** Alias for callers that prefer a validator named after the public wire format. */

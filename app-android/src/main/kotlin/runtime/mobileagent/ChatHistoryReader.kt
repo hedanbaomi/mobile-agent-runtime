@@ -42,7 +42,7 @@ internal suspend fun readChatHistory(
         .firstOrNull { it != null && repository.get(it) != null }
     val selectedConversation = selected?.let(repository::get)
     val conversations = (active.conversations + archived.conversations + listOfNotNull(selectedConversation)).distinctBy { it.id }
-    val agents = container.agents.list()
+    val agents = container.agents.listOverviews()
     val snapshotAgents = container.agents.snapshotAgentIds(conversations.map { it.snapshotId })
     val agentId = selectedConversation?.let { snapshotAgents[it.snapshotId] }
         ?: previous.selectedAgentId ?: savedAgentId ?: container.uiPreferences.getString("selected-agent", null) ?: agents.firstOrNull()?.id

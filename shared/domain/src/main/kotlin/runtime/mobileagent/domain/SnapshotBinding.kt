@@ -27,4 +27,5 @@ data class SnapshotBinding(
     val visionProvider: ProviderProfile? = null,
     val embeddingProvider: ProviderProfile? = null,
     val rerankerProvider: ProviderProfile? = null,
+    val characterCard: CharacterCardSnapshot? = null,
 )

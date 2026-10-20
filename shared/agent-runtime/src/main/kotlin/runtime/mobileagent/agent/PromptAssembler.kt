@@ -101,7 +101,8 @@ data class EffectivePrompt(
 }
 
 object PromptTemplates {
-    val allowed = setOf("date", "agent_name", "knowledge_bases")
+    val allowed = setOf("date", "agent_name", "knowledge_bases", "character_user")
+    private const val MAX_RENDERED_CHARS = 1_048_576
     private val placeholder = Regex("\\{\\{([^{}]*)\\}\\}")
 
     /** Render only the small, literal allow-list; no expression evaluation is performed. */
@@ -125,6 +126,11 @@ object PromptTemplates {
         }
         val illegal = matches.map { it.groupValues[1] }.filter { it !in allowed && !runtime.mobileagent.agent.worldbook.WorldBookPromptComposer.isOutletVariable(it) }.toSet()
         require(illegal.isEmpty()) { "Unsupported template variables: $illegal" }
-        return placeholder.replace(template) { if (runtime.mobileagent.agent.worldbook.WorldBookPromptComposer.isOutletVariable(it.groupValues[1])) it.value else values[it.groupValues[1]].orEmpty() }
+        fun replacement(match: MatchResult): String =
+            if (runtime.mobileagent.agent.worldbook.WorldBookPromptComposer.isOutletVariable(match.groupValues[1])) match.value
+            else values[match.groupValues[1]].orEmpty()
+        val renderedLength = matches.fold(template.length.toLong()) { size, match -> size - match.value.length + replacement(match).length }
+        require(renderedLength <= MAX_RENDERED_CHARS) { "Prompt expansion exceeds the safe length limit" }
+        return placeholder.replace(template, ::replacement)
     }
 }

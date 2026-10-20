@@ -43,6 +43,16 @@ class AgentRepository(
 
     fun agent(id: String): AgentProfile? = get(id)
 
+    /** UI summaries deliberately exclude potentially multi-megabyte character metadata. */
+    fun getOverview(id: String): AgentProfile? =
+        db.query("SELECT ${CharacterCardStorage.OVERVIEW_COLUMNS} FROM agent_profiles WHERE id = ?", listOf(id)).singleOrNull()?.toAgent()
+
+    fun listOverviews(): List<AgentProfile> =
+        db.query("SELECT ${CharacterCardStorage.OVERVIEW_COLUMNS} FROM agent_profiles ORDER BY name, id").map { it.toAgent() }
+
+    fun hasCharacterCard(id: String): Boolean =
+        db.query("SELECT id FROM agent_profiles WHERE id = ? AND character_card_json IS NOT NULL", listOf(id)).isNotEmpty()
+
     fun list(): List<AgentProfile> =
         db.query("SELECT * FROM agent_profiles ORDER BY name, id").map { it.toAgent() }
 
@@ -52,7 +62,7 @@ class AgentRepository(
         requireReference("agent", profile.id, get(profile.id) == null)
         requireBindings(profile)
         db.execute(
-            "INSERT INTO agent_profiles(id,name,prompt_revision_id,chat_profile_id,vision_profile_id,embedding_profile_id,reranker_profile_id,knowledge_base_ids,skill_ids,retrieval_mode,revision,parameter_overrides_json,context_policy_json,permission_settings_json,world_book_ids) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "INSERT INTO agent_profiles(id,name,prompt_revision_id,chat_profile_id,vision_profile_id,embedding_profile_id,reranker_profile_id,knowledge_base_ids,skill_ids,retrieval_mode,revision,parameter_overrides_json,context_policy_json,permission_settings_json,world_book_ids,character_card_json) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             profile.args(json),
         )
         return profile
@@ -65,7 +75,7 @@ class AgentRepository(
         requirePrompt(profile.promptRevisionId, profile.id)
         requireBindings(profile, current.skillIds.toSet())
         db.execute(
-            "UPDATE agent_profiles SET name=?,prompt_revision_id=?,chat_profile_id=?,vision_profile_id=?,embedding_profile_id=?,reranker_profile_id=?,knowledge_base_ids=?,skill_ids=?,retrieval_mode=?,revision=?,parameter_overrides_json=?,context_policy_json=?,permission_settings_json=?,world_book_ids=? WHERE id=?",
+            "UPDATE agent_profiles SET name=?,prompt_revision_id=?,chat_profile_id=?,vision_profile_id=?,embedding_profile_id=?,reranker_profile_id=?,knowledge_base_ids=?,skill_ids=?,retrieval_mode=?,revision=?,parameter_overrides_json=?,context_policy_json=?,permission_settings_json=?,world_book_ids=?,character_card_json=? WHERE id=?",
             listOf(
                 profile.name,
                 profile.promptRevisionId,
@@ -81,6 +91,7 @@ class AgentRepository(
                 profile.contextPolicyJson,
                 profile.permissionSettingsJson,
                 json.encodeToString(profile.worldBookIds),
+                CharacterCardStorage.encode(profile.characterCard),
                 profile.id,
             ),
         )
@@ -132,18 +143,18 @@ class AgentRepository(
             // Prompt and profile are committed together; no FK is used for prompt_revision_id so
             // the initial profile can be inserted immediately after the new immutable revision.
             db.execute(
-                "INSERT INTO agent_profiles(id,name,prompt_revision_id,chat_profile_id,vision_profile_id,embedding_profile_id,reranker_profile_id,knowledge_base_ids,skill_ids,retrieval_mode,revision,parameter_overrides_json,context_policy_json,permission_settings_json,world_book_ids) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "INSERT INTO agent_profiles(id,name,prompt_revision_id,chat_profile_id,vision_profile_id,embedding_profile_id,reranker_profile_id,knowledge_base_ids,skill_ids,retrieval_mode,revision,parameter_overrides_json,context_policy_json,permission_settings_json,world_book_ids,character_card_json) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 saved.args(json),
             )
         } else {
             if (profile.revision < existing.revision) throw invalid("Agent revision is older than the stored revision")
             db.execute(
-                "UPDATE agent_profiles SET name=?,prompt_revision_id=?,chat_profile_id=?,vision_profile_id=?,embedding_profile_id=?,reranker_profile_id=?,knowledge_base_ids=?,skill_ids=?,retrieval_mode=?,revision=?,parameter_overrides_json=?,context_policy_json=?,permission_settings_json=?,world_book_ids=? WHERE id=?",
+                "UPDATE agent_profiles SET name=?,prompt_revision_id=?,chat_profile_id=?,vision_profile_id=?,embedding_profile_id=?,reranker_profile_id=?,knowledge_base_ids=?,skill_ids=?,retrieval_mode=?,revision=?,parameter_overrides_json=?,context_policy_json=?,permission_settings_json=?,world_book_ids=?,character_card_json=? WHERE id=?",
                 listOf(
                     saved.name, saved.promptRevisionId, saved.chatProfileId, saved.visionProfileId,
                     saved.embeddingProfileId, saved.rerankerProfileId, json.encodeToString(saved.knowledgeBaseIds),
                     json.encodeToString(saved.skillIds), saved.retrievalMode, saved.revision,
-                    saved.parameterOverridesJson, saved.contextPolicyJson, saved.permissionSettingsJson, json.encodeToString(saved.worldBookIds), saved.id,
+                    saved.parameterOverridesJson, saved.contextPolicyJson, saved.permissionSettingsJson, json.encodeToString(saved.worldBookIds), CharacterCardStorage.encode(saved.characterCard), saved.id,
                 ),
             )
         }
@@ -253,6 +264,7 @@ class AgentRepository(
             putJsonArray("knowledgeBaseIds") { agent.knowledgeBaseIds.forEach(::add) }
             putJsonArray("skillIds") { activeSkillIds.forEach(::add) }
             putJsonArray("worldBookIds") { agent.worldBookIds.forEach(::add) }
+            CharacterCardStorage.addToManifest(this, agent)
         }.toString()
         val expanded = buildJsonObject {
             put("schemaVersion", SchemaVersion.CURRENT)
@@ -379,6 +391,7 @@ class AgentRepository(
             visionProvider = visionProvider,
             embeddingProvider = embeddingProvider,
             rerankerProvider = rerankerProvider,
+            characterCard = runtime.mobileagent.serialization.CharacterCardSupport.snapshotFromManifest(root),
         )
     }
 
@@ -395,6 +408,7 @@ class AgentRepository(
         createSnapshot(agentId, snapshotId, at)
 
     private fun validateAgentFields(profile: AgentProfile) {
+        CharacterCardStorage.validate(profile)
         requireId(profile.id, "agent.id")
         requireText(profile.name, "agent.name")
         requireId(profile.promptRevisionId, "agent.promptRevisionId")
@@ -546,7 +560,7 @@ class AgentRepository(
     private fun AgentProfile.args(json: Json): List<Any?> = listOf(
         id, name, promptRevisionId, chatProfileId, visionProfileId, embeddingProfileId, rerankerProfileId,
         json.encodeToString(knowledgeBaseIds), json.encodeToString(skillIds), retrievalMode, revision,
-        parameterOverridesJson, contextPolicyJson, permissionSettingsJson, json.encodeToString(worldBookIds),
+        parameterOverridesJson, contextPolicyJson, permissionSettingsJson, json.encodeToString(worldBookIds), CharacterCardStorage.encode(characterCard),
     )
 
     private fun SqlRow.toAgent(): AgentProfile = AgentProfile(
@@ -565,6 +579,7 @@ class AgentRepository(
         contextPolicyJson = string("context_policy_json").ifBlank { "{}" },
         permissionSettingsJson = string("permission_settings_json").ifBlank { "{}" },
         worldBookIds = decodeList(string("world_book_ids")),
+        characterCard = CharacterCardStorage.decode(this),
     )
 
     private fun SqlRow.toPrompt(json: Json): PromptRevision = PromptRevision(
@@ -611,6 +626,6 @@ class AgentRepository(
         private const val MAX_PROMPT_CHARS = 256_000
         private val SAFE_ID = Regex("[A-Za-z0-9][A-Za-z0-9._:-]{0,255}")
         private val TEMPLATE_VARIABLE = Regex("\\{\\{([^{}]*)\\}\\}")
-        val DEFAULT_ALLOWED_VARIABLES: Set<String> = setOf("date", "agent_name", "knowledge_bases")
+        val DEFAULT_ALLOWED_VARIABLES: Set<String> = setOf("date", "agent_name", "knowledge_bases", "character_user")
     }
 }

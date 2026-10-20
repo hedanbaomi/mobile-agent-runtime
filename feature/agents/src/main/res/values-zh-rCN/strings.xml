@@ -73,4 +73,24 @@
     <string name="ui_use_recommended_settings_6754f65f" formatted="false">使用推荐设置</string>
     <string name="ui_use_the_configured_search_service_without_92bc0ab7" formatted="false">使用设置中的搜索服务，包括通过 DeepSeek Fetch 读取公开网页，无需逐次确认。查询词和网页地址会发送给服务商，可能收费。开启适用于新会话；关闭立即撤权。</string>
     <string name="ui_workspace_access_7dc4e36c" formatted="false">工作区访问</string>
+    <string name="character_card_title" formatted="false">导入角色卡</string>
+    <string name="character_card_open" formatted="false">导入角色卡（JSON / PNG）</string>
+    <string name="character_card_name" formatted="false">新 Agent 名称</string>
+    <string name="character_card_player_macro" formatted="false">玩家名称（用于 {{user}}）</string>
+    <string name="character_card_use_greeting" formatted="false">新会话使用开场白</string>
+    <string name="character_card_previous" formatted="false">上一条</string>
+    <string name="character_card_next" formatted="false">下一条</string>
+    <string name="character_card_book">同时导入世界书（%1$s 条）</string>
+    <string name="character_card_book_name" formatted="false">世界书名称</string>
+    <string name="character_card_draft_help" formatted="false">下一步创建可编辑草稿。选择 Chat 模型并保存后才创建 Agent 和所选世界书。</string>
+    <string name="character_card_limits_help" formatted="false">支持角色设定与开场白；PNG 仅提取卡片数据，头像和外部素材暂不导入。脚本不会执行。卡片的附加提示合并到可编辑提示词。</string>
+    <string name="character_card_draft" formatted="false">创建草稿</string>
+    <string name="character_card_cancel" formatted="false">取消</string>
+    <string name="character_card_loading" formatted="false">正在读取角色卡…</string>
+    <string name="character_card_format">角色卡 · %1$s</string>
+    <string name="character_card_player" formatted="false">玩家名称</string>
+    <string name="character_card_greeting" formatted="false">开场白</string>
+    <string name="character_card_pending_book">保存时新建世界书：%1$s（%2$s 条）</string>
+    <string name="character_card_exclude_book" formatted="false">取消导入此世界书</string>
+    <string name="character_card_snapshot_help" formatted="false">开场白和角色上下文只影响新会话；已有会话保留原快照。</string>
 </resources>

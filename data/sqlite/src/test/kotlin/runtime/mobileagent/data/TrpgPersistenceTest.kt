@@ -61,7 +61,7 @@ class TrpgPersistenceTest {
         db.execute("ALTER TABLE agent_snapshots DROP COLUMN mode")
         db.execute("UPDATE schema_version SET version=37")
         Migrations.apply(db)
-        assertEquals(38L, db.query("SELECT version FROM schema_version").single().long("version"))
+        assertEquals(Migrations.VERSION.toLong(), db.query("SELECT version FROM schema_version").single().long("version"))
         assertEquals(AgentMode.NORMAL, agents.get("agent")!!.mode)
         assertEquals(snapshot, agents.getSnapshot("snapshot"))
         assertEquals(message, conversations.message("message"))

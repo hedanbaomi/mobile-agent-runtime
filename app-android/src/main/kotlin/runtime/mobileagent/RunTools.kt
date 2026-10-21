@@ -173,7 +173,9 @@ class RunTools(
         read = { container.trpg.get(run.conversationId) },
         update = { call, revision, state -> container.trpg.updateFromRun(
             run.conversationId, snapshot.id, run.runId, call.callId, call.argumentsJson, revision, state) },
-        liveBinding = { container.agents.isLiveBinding(snapshot) })
+        liveBinding = { container.agents.isLiveBinding(snapshot) },
+        command = { call, revision, command -> container.trpg.commandFromRun(
+            run.conversationId, snapshot.id, run.runId, call.callId, call.argumentsJson, revision, command) })
     // Always construct Python here so the factory receives the same run budget
     // and context used by the legacy path.  A factory-owned executor contains
     // Python/workspace/memory/shell; it replaces, rather than supplements, the

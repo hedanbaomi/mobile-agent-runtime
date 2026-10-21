@@ -46,7 +46,15 @@
       "runtime.mobileagent.tooling.ToolingOrchestrationTest",
       "runtime.mobileagent.RuntimeSafToolExposureDeviceTest",
       "runtime.mobileagent.security.AndroidSecretStoreDeviceTest",
-      "runtime.mobileagent.ChatStorageProjectionDeviceTest"
+      "runtime.mobileagent.ChatStorageProjectionDeviceTest",
+      "runtime.mobileagent.ChatScrollFollowUiTest",
+      "runtime.mobileagent.TrpgJournalDeviceTest",
+      "runtime.mobileagent.TrpgCampaignDialogUiTest",
+      "runtime.mobileagent.TrpgPartyDialogUiTest",
+      "runtime.mobileagent.TrpgStoryDialogUiTest",
+      "runtime.mobileagent.TrpgCampaignFlowDeviceTest",
+      "runtime.mobileagent.TrpgAtlasDialogUiTest",
+      "runtime.mobileagent.TrpgMediaDeviceTest"
     ],
     "pipeline": [
       "runtime.mobileagent.DocumentUnitRenderDeviceTest",
@@ -174,7 +182,15 @@
       "runtime.mobileagent.ChatStorageProjectionDeviceTest",
       "runtime.mobileagent.ScreenObservationDeviceTest",
       "runtime.mobileagent.ScreenObservationSettingsUiTest",
-      "runtime.mobileagent.ScreenActionDeviceTest"
+      "runtime.mobileagent.ScreenActionDeviceTest",
+      "runtime.mobileagent.ChatScrollFollowUiTest",
+      "runtime.mobileagent.TrpgJournalDeviceTest",
+      "runtime.mobileagent.TrpgCampaignDialogUiTest",
+      "runtime.mobileagent.TrpgPartyDialogUiTest",
+      "runtime.mobileagent.TrpgStoryDialogUiTest",
+      "runtime.mobileagent.TrpgCampaignFlowDeviceTest",
+      "runtime.mobileagent.TrpgAtlasDialogUiTest",
+      "runtime.mobileagent.TrpgMediaDeviceTest"
     ]
   },
   "manual_only": {

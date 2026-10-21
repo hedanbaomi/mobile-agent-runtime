@@ -36,7 +36,9 @@ import androidx.compose.foundation.layout.union
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.gestures.scrollBy
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.shape.CircleShape
@@ -107,6 +109,7 @@ import androidx.compose.material3.ModalNavigationDrawer
 import androidx.compose.material3.DrawerValue
 import androidx.compose.material3.rememberDrawerState
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.runtime.saveable.rememberSaveable
 import kotlinx.coroutines.launch
 
@@ -612,15 +615,82 @@ private fun ChatConversationContent(
                         Text(if (state.language.equals("zh-CN", true)) "保留历史并新建会话" else "Keep history and start a new conversation")
                     }
                 }
-                val listState = rememberLazyListState()
+                val listState = rememberSaveable(state.selectedSessionId, saver = LazyListState.Saver) { LazyListState() }
                 val scrollScope = rememberCoroutineScope()
                 val timeline = remember(state.messages) { groupConversationMessages(state.messages) }
                 val coveredIds = remember(state.compactions) {
                     state.compactions.lastOrNull { it.state == "SUCCEEDED" }?.sourceMessageIds.orEmpty().toSet()
                 }
+                val atBottom by remember(listState) {
+                    derivedStateOf {
+                        val info = listState.layoutInfo
+                        val last = info.visibleItemsInfo.lastOrNull() ?: return@derivedStateOf true
+                        val viewportEnd = info.viewportEndOffset - info.afterContentPadding
+                        // The last index alone is not "at bottom": a message taller than the viewport
+                        // counts as followed only while its bottom edge is still inside the viewport.
+                        last.index >= info.totalItemsCount - 1 && last.offset + last.size <= viewportEnd + 1
+                    }
+                }
+                var followLatest by rememberSaveable(state.selectedSessionId) { mutableStateOf(true) }
+                var autoScrolling by remember(listState) { mutableStateOf(false) }
+                suspend fun scrollToNewest(forceJump: Boolean) {
+                    if (timeline.isEmpty()) return
+                    autoScrolling = true
+                    try {
+                        val target = timeline.lastIndex + if (state.hasMoreMessages) 1 else 0
+                        val before = listState.layoutInfo
+                        val visible = before.visibleItemsInfo.lastOrNull()
+                        if (forceJump || visible == null || visible.index < target) {
+                            listState.animateScrollToItem(target)
+                        }
+                        val after = listState.layoutInfo
+                        val newest = after.visibleItemsInfo.lastOrNull()
+                        if (newest != null) {
+                            val end = after.viewportEndOffset - after.afterContentPadding
+                            val overflow = newest.offset + newest.size - end
+                            if (overflow > 0) listState.scrollBy(overflow.toFloat())
+                        }
+                    } finally {
+                        autoScrolling = false
+                    }
+                }
+                // Only user-initiated scrolling disables following; programmatic follow and
+                // content-driven layout changes must not be mistaken for the user leaving the bottom.
+                LaunchedEffect(listState) {
+                    snapshotFlow { Triple(listState.isScrollInProgress, atBottom, autoScrolling) }.collect { (scrolling, bottom, automatic) ->
+                        if (scrolling && !automatic) {
+                            followLatest = false
+                        } else if (!scrolling && bottom && !automatic) {
+                            followLatest = true
+                        }
+                    }
+                }
+                val lastItem = timeline.lastOrNull()
+                val followKey = lastItem?.let { item ->
+                    listOf(
+                        item.message.id,
+                        item.message.text.length,
+                        item.message.reasoning.length,
+                        item.orderedMessages.sumOf { it.text.length },
+                        item.sourceIds.size,
+                        state.streaming,
+                    )
+                }
+                LaunchedEffect(state.selectedSessionId, followKey) {
+                    if (!state.loading && state.error == null && followLatest && timeline.isNotEmpty()) {
+                        scrollToNewest(forceJump = false)
+                    }
+                }
                 ContextCompactionHistory(state.compactions, state.messages, state.language.equals("zh-CN", true)) { id ->
                     val index = timeline.indexOfFirst { id in it.sourceIds }
-                    if (index >= 0) scrollScope.launch { listState.scrollToItem(index + if (state.hasMoreMessages) 1 else 0) }
+                    if (index >= 0) {
+                        followLatest = false
+                        autoScrolling = true
+                        scrollScope.launch {
+                            try { listState.scrollToItem(index + if (state.hasMoreMessages) 1 else 0) }
+                            finally { autoScrolling = false }
+                        }
+                    }
                 }
                 if (state.loading) {
                     CenterState(if (state.language.equals("zh-CN", true)) "正在加载会话…" else "Loading conversations…", true, Modifier.weight(1f))
@@ -629,30 +699,45 @@ private fun ChatConversationContent(
                 } else if (state.messages.isEmpty()) {
                     CenterState(emptyConversationMessage(state, state.language.equals("zh-CN", true)), false, Modifier.weight(1f))
                 } else {
-                    LaunchedEffect(timeline.lastOrNull()?.message?.id, timeline.lastOrNull()?.sourceIds?.size, state.streaming) {
-                        if (timeline.isNotEmpty()) listState.animateScrollToItem(timeline.lastIndex + if (state.hasMoreMessages) 1 else 0)
-                    }
-                    LazyColumn(state = listState, modifier = Modifier.weight(1f).fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                        if (state.hasMoreMessages) item(key = "earlier-history") {
-                            TextButton(onClick = actions.onLoadEarlierMessages, enabled = !state.loadingEarlierMessages,
-                                modifier = Modifier.fillMaxWidth().testTag("conversation.history.loadEarlier")) {
-                                Text(stringResource(R.string.chat_load_earlier_messages))
+                    Box(Modifier.weight(1f).fillMaxWidth()) {
+                        LazyColumn(state = listState, modifier = Modifier.fillMaxSize().testTag("conversation.list"), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                            if (state.hasMoreMessages) item(key = "earlier-history") {
+                                TextButton(onClick = {
+                                    // Prepending must not be overridden by the follow animation.
+                                    followLatest = false
+                                    actions.onLoadEarlierMessages()
+                                }, enabled = !state.loadingEarlierMessages,
+                                    modifier = Modifier.fillMaxWidth().testTag("conversation.history.loadEarlier")) {
+                                    Text(stringResource(R.string.chat_load_earlier_messages))
+                                }
+                            }
+                            items(timeline, key = { it.message.id }) { item ->
+                                item.sourceIds.filter { it in coveredIds }.forEach { sourceId ->
+                                    Text(if (state.language.equals("zh-CN", true)) "已纳入上下文摘要 · 原文保留" else "Included in a context summary · original retained",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        modifier = Modifier.testTag("conversation.summarized.$sourceId"))
+                                }
+                                MessageBubble(
+                                    message = item.message,
+                                    orderedMessages = item.orderedMessages,
+                                    citations = state.citations,
+                                    onCitation = actions.onOpenCitation,
+                                    zh = state.language.equals("zh-CN", true),
+                                    working = item == timeline.lastOrNull() && (state.streaming || state.pendingTool != null),
+                                )
                             }
                         }
-                        items(timeline, key = { it.message.id }) { item ->
-                            item.sourceIds.filter { it in coveredIds }.forEach { sourceId ->
-                                Text(if (state.language.equals("zh-CN", true)) "已纳入上下文摘要 · 原文保留" else "Included in a context summary · original retained",
-                                    style = MaterialTheme.typography.labelSmall,
-                                    modifier = Modifier.testTag("conversation.summarized.$sourceId"))
+                        if (!atBottom) {
+                            TextButton(
+                                onClick = {
+                                    followLatest = true
+                                    scrollScope.launch { scrollToNewest(forceJump = true) }
+                                },
+                                modifier = Modifier.align(Alignment.BottomEnd).padding(12.dp)
+                                    .testTag("conversation.scroll.latest"),
+                            ) {
+                                Text(stringResource(R.string.chat_jump_to_latest))
                             }
-                            MessageBubble(
-                                message = item.message,
-                                orderedMessages = item.orderedMessages,
-                                citations = state.citations,
-                                onCitation = actions.onOpenCitation,
-                                zh = state.language.equals("zh-CN", true),
-                                working = item == timeline.lastOrNull() && (state.streaming || state.pendingTool != null),
-                            )
                         }
                     }
                 }

@@ -163,6 +163,9 @@ class AppContainer(app: MobileAgentApp) :
     val chatDrafts = runtime.mobileagent.data.ChatDraftRepository(db)
     val conversationImages = runtime.mobileagent.data.ConversationImageRepository(db, conversations,
         CasBlobSink(File(app.filesDir, "cas")), File(app.cacheDir, "knowledge-index"))
+    val trpgCheckpoints = runtime.mobileagent.data.TrpgCheckpointRepository(db, imageValidator = { conversationId, image ->
+        conversationImages.verify(conversationId, conversationImages.references(conversationId, listOf(image)).single())
+    })
     val contextCompactions = runtime.mobileagent.data.ContextCompactionRepository(db)
     val settings = SettingsRepository(db)
     val shizuku = ShizukuAuthorityBridge(app).also { bridge ->

@@ -68,7 +68,7 @@ object Migrations {
     // v36 adds optional imported character metadata; old Agents and snapshots retain their values.
     // v38 fixes the Agent mode at creation and adds bounded per-conversation TRPG state/receipts.
     // It also repairs old API26 offset-timestamp ordering keys without rewriting messages.
-    const val VERSION = 38
+    const val VERSION = 39
 
     private val statements = listOf(
         "CREATE TABLE IF NOT EXISTS schema_version (version INTEGER NOT NULL PRIMARY KEY)",
@@ -753,9 +753,22 @@ object Migrations {
         "skill_memory_spaces", "skill_memory_entries", "approval_records", "tool_audit_details",
         "context_compactions", "pipeline_plans", "pipeline_units", "pipeline_results", "pipeline_attempts",
         "pipeline_retry_permits", "pipeline_policies",
+        "trpg_sessions", "trpg_run_receipts", "trpg_events", "trpg_undo", "trpg_checkpoints",
     )
 
     private val REQUIRED_COLUMNS = listOf(
+        "trpg_checkpoints" to "checkpoint_id",
+        "trpg_checkpoints" to "name",
+        "trpg_checkpoints" to "created_at",
+        "trpg_checkpoints" to "payload_json",
+        "trpg_events" to "event_id",
+        "trpg_events" to "revision",
+        "trpg_events" to "action_id",
+        "trpg_events" to "request_hash",
+        "trpg_events" to "event_json",
+        "trpg_events" to "run_id",
+        "trpg_events" to "kind",
+        "trpg_undo" to "undo_json",
         "model_profiles" to "parameters_json",
         "agent_profiles" to "parameter_overrides_json",
         "agent_snapshots" to "expanded_json",

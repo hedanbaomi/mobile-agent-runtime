@@ -14,7 +14,7 @@ object TrpgToolArguments {
     private val json = Json { ignoreUnknownKeys = false; isLenient = false }
 
     fun forTool(name: String, text: String, fallback: (String) -> JsonElement): JsonElement =
-        if (name in setOf("session_state_read", "session_state_update", "dice_roll")) parse(text) else fallback(text)
+        if (name in setOf("session_state_read", "session_state_update", "campaign_action", "dice_roll")) parse(text) else fallback(text)
 
     internal fun builtin(name: String, text: String): JsonObject? =
         runCatching { forTool(name, text, Json::parseToJsonElement) as? JsonObject }.getOrNull()

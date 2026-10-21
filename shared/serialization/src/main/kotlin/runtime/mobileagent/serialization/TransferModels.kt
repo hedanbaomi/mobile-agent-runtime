@@ -167,6 +167,19 @@ data class ConversationTransfer(
     @OptIn(kotlinx.serialization.ExperimentalSerializationApi::class)
     @kotlinx.serialization.EncodeDefault(kotlinx.serialization.EncodeDefault.Mode.NEVER)
     val trpgSession: runtime.mobileagent.domain.trpg.TrpgSession? = null,
+    /** Small envelope marker; journal content lives in the streamed conversation entry. */
+    @OptIn(kotlinx.serialization.ExperimentalSerializationApi::class)
+    @kotlinx.serialization.EncodeDefault(kotlinx.serialization.EncodeDefault.Mode.NEVER)
+    val trpgJournalRevision: Long? = null,
+    @OptIn(kotlinx.serialization.ExperimentalSerializationApi::class)
+    @kotlinx.serialization.EncodeDefault(kotlinx.serialization.EncodeDefault.Mode.NEVER)
+    val trpgJournal: runtime.mobileagent.domain.trpg.TrpgJournal? = null,
+    @OptIn(kotlinx.serialization.ExperimentalSerializationApi::class)
+    @kotlinx.serialization.EncodeDefault(kotlinx.serialization.EncodeDefault.Mode.NEVER)
+    val trpgCheckpointIds: List<String> = emptyList(),
+    @OptIn(kotlinx.serialization.ExperimentalSerializationApi::class)
+    @kotlinx.serialization.EncodeDefault(kotlinx.serialization.EncodeDefault.Mode.NEVER)
+    val trpgCheckpoints: List<runtime.mobileagent.domain.trpg.TrpgCheckpointTransfer> = emptyList(),
 )
 
 @Serializable

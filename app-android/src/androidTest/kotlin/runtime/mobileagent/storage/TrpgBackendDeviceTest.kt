@@ -46,13 +46,39 @@ class TrpgBackendDeviceTest {
         }
         BundledSqliteConnection(path.absolutePath).use { db ->
             Migrations.apply(db)
-            assertEquals(38L, db.query("SELECT version FROM schema_version").single().long("version"))
+            assertEquals(Migrations.VERSION.toLong(), db.query("SELECT version FROM schema_version").single().long("version"))
             val session = TrpgRepository(db).get("c")
             assertEquals(1L, session.revision)
             assertEquals("图书馆", session.state.scene)
             assertEquals(58, session.state.resources.single().current)
             assertTrue(ConversationRepository(db).delete("c"))
             assertTrue(db.query("SELECT * FROM trpg_sessions").isEmpty())
+        }
+    }
+
+    @Test fun schema38UpgradePreservesExistingStateAndAddsEmptyHistoryStores() {
+        val path = file()
+        BundledSqliteConnection(path.absolutePath).use { db ->
+            fixture(db)
+            ConversationRepository(db).append("c", MessageRole.USER, "Legacy transcript", messageId = "legacy", createdAt = at)
+            TrpgRepository(db).update("c", 0, TrpgState(scene = "Legacy room"))
+            db.execute("DROP TABLE trpg_checkpoints")
+            db.execute("DROP TABLE trpg_events")
+            db.execute("DROP TABLE trpg_undo")
+            db.execute("UPDATE schema_version SET version=38")
+        }
+        BundledSqliteConnection(path.absolutePath).use { db ->
+            Migrations.apply(db)
+            val repo = TrpgRepository(db)
+            assertEquals(1L, repo.get("c").revision)
+            assertEquals("Legacy room", repo.get("c").state.scene)
+            assertEquals("Legacy transcript", ConversationRepository(db).message("legacy")!!.text)
+            assertTrue(repo.events("c").isEmpty())
+            assertTrue(TrpgCheckpointRepository(db).list("c").isEmpty())
+            assertNull(repo.undoableEventId("c"))
+            repo.update("c", 1, repo.get("c").state.copy(scene = "Continued"))
+            assertEquals(2L, repo.events("c").single().revision)
+            assertTrue(db.query("PRAGMA foreign_key_check").isEmpty())
         }
     }
 

@@ -8,6 +8,7 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
@@ -37,6 +38,8 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.text.font.FontFamily
@@ -45,6 +48,7 @@ import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.launch
+import runtime.mobileagent.domain.trpg.TrpgResource
 import runtime.mobileagent.domain.trpg.TrpgRuleset
 import runtime.mobileagent.domain.trpg.TrpgSession
 import runtime.mobileagent.domain.trpg.TrpgState
@@ -236,6 +240,11 @@ private fun TrpgOverviewTab(
     val focus = LocalFocusManager.current
     val keyboard = LocalSoftwareKeyboardController.current
     val resourceKeyboardActions = KeyboardActions(onDone = { keyboard?.hide(); focus.clearFocus() })
+    // Manual resource edit is draft-only; invalid input keeps the dialog and the draft intact.
+    var editingResource by remember { mutableStateOf<TrpgResource?>(null) }
+    var editText by remember { mutableStateOf("") }
+    var editAsDelta by remember { mutableStateOf(false) }
+    var editError by remember { mutableStateOf<String?>(null) }
     FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
         TrpgRuleset.entries.forEach { ruleset ->
             FilterChip(
@@ -328,11 +337,31 @@ private fun TrpgOverviewTab(
                     },
                     enabled = writable,
                 ) { Text("-1") }
-                Text(
-                    text = "${res.current}${res.maximum?.let { "/$it" }.orEmpty()}",
-                    fontFamily = FontFamily.Monospace,
-                    fontWeight = FontWeight.Bold,
-                )
+                TextButton(
+                    onClick = {
+                        editingResource = res
+                        editText = res.current.toString()
+                        editAsDelta = false
+                        editError = null
+                    },
+                    enabled = writable,
+                    contentPadding = PaddingValues(horizontal = 6.dp),
+                    modifier = Modifier.heightIn(min = 48.dp)
+                        .testTag("trpg.sheet.res.value.${res.name}")
+                        .semantics {
+                            contentDescription = if (chinese) {
+                                "${res.name} 当前 ${res.current}，点击输入绝对值或增减量"
+                            } else {
+                                "${res.name} current ${res.current}; tap to enter an absolute value or adjustment"
+                            }
+                        },
+                ) {
+                    Text(
+                        text = "${res.current}${res.maximum?.let { "/$it" }.orEmpty()}",
+                        fontFamily = FontFamily.Monospace,
+                        fontWeight = FontWeight.Bold,
+                    )
+                }
                 TextButton(
                     onClick = {
                         val updated = draft.resources.toMutableList()
@@ -399,6 +428,109 @@ private fun TrpgOverviewTab(
             ) { Text("+") }
         }
     }
+    editingResource?.let { resource ->
+        AlertDialog(
+            onDismissRequest = { editingResource = null },
+            modifier = Modifier.testTag("trpg.sheet.res.value.dialog"),
+            title = { Text(if (chinese) "编辑 ${resource.name}" else "Edit ${resource.name}") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text(
+                        text = if (chinese) "当前值 ${resource.current}${resource.maximum?.let { "/$it" }.orEmpty()}"
+                        else "Current ${resource.current}${resource.maximum?.let { "/$it" }.orEmpty()}",
+                        style = MaterialTheme.typography.bodyMedium,
+                    )
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        FilterChip(
+                            selected = !editAsDelta,
+                            onClick = { if (editAsDelta) editText = resource.current.toString(); editAsDelta = false; editError = null },
+                            enabled = writable,
+                            label = { Text(if (chinese) "设为绝对值" else "Set value") },
+                            modifier = Modifier.testTag("trpg.sheet.res.value.mode.set"),
+                        )
+                        FilterChip(
+                            selected = editAsDelta,
+                            onClick = { if (!editAsDelta) editText = "0"; editAsDelta = true; editError = null },
+                            enabled = writable,
+                            label = { Text(if (chinese) "增减量" else "Adjust") },
+                            modifier = Modifier.testTag("trpg.sheet.res.value.mode.delta"),
+                        )
+                    }
+                    OutlinedTextField(
+                        value = editText,
+                        onValueChange = { editText = it; editError = null },
+                        enabled = writable,
+                        singleLine = true,
+                        keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
+                        keyboardActions = resourceKeyboardActions,
+                        label = {
+                            Text(
+                                if (editAsDelta) {
+                                    if (chinese) "增减量（如 -3）" else "Delta (e.g. -3)"
+                                } else {
+                                    if (chinese) "绝对值（-1000000..1000000）" else "Value (-1000000..1000000)"
+                                },
+                            )
+                        },
+                        modifier = Modifier.fillMaxWidth().testTag("trpg.sheet.res.value.input"),
+                    )
+                    editError?.let { message ->
+                        Text(
+                            text = message,
+                            color = MaterialTheme.colorScheme.error,
+                            style = MaterialTheme.typography.bodySmall,
+                            modifier = Modifier.testTag("trpg.sheet.res.value.error"),
+                        )
+                    }
+                }
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        val next = resolveTrpgResourceValue(resource.current, editText, editAsDelta)
+                        if (next == null) {
+                            editError = if (chinese) {
+                                "请输入整数；调整后的值必须在 -1000000 到 1000000 之间。"
+                            } else {
+                                "Enter an integer; the resulting value must be between -1000000 and 1000000."
+                            }
+                        } else {
+                            onDraftChange(
+                                draft.copy(resources = draft.resources.map {
+                                    if (it.name == resource.name) it.copy(current = next) else it
+                                }),
+                            )
+                            editingResource = null
+                            editError = null
+                        }
+                    },
+                    enabled = writable,
+                    modifier = Modifier.testTag("trpg.sheet.res.value.apply"),
+                ) { Text(if (chinese) "应用" else "Apply") }
+            },
+            dismissButton = {
+                TextButton(
+                    onClick = { editingResource = null },
+                    modifier = Modifier.testTag("trpg.sheet.res.value.cancel"),
+                ) { Text(if (chinese) "取消" else "Cancel") }
+            },
+        )
+    }
+}
+
+/** Domain bound for both absolute values and deltas; display maximum is not a hard cap. */
+internal const val TRPG_RESOURCE_VALUE_LIMIT = 1_000_000
+
+/**
+ * Resolves a manual resource edit into the new current value.
+ * Absolute mode requires an integer in ±[TRPG_RESOURCE_VALUE_LIMIT]; delta mode adds it to the
+ * current value and rejects results outside that domain (negative HP and values above the display maximum
+ * stay valid). Returns null for blank/non-integer/out-of-range input so the caller keeps the draft.
+ */
+internal fun resolveTrpgResourceValue(current: Int, raw: String, asDelta: Boolean): Int? {
+    val value = raw.trim().toLongOrNull() ?: return null
+    val result = if (asDelta) try { Math.addExact(current.toLong(), value) } catch (_: ArithmeticException) { return null } else value
+    return result.takeIf { it in -TRPG_RESOURCE_VALUE_LIMIT.toLong()..TRPG_RESOURCE_VALUE_LIMIT.toLong() }?.toInt()
 }
 
 @OptIn(ExperimentalLayoutApi::class)

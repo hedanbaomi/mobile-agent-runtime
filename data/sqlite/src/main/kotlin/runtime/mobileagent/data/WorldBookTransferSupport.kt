@@ -25,6 +25,14 @@ internal class WorldBookTransferSupport(private val db: SqlConnection, clock: ()
                 .forEach {
                     ids += Json.decodeFromString<List<String>>(it.string("world_book_ids"))
                     ids += books.conversationConfig(it.string("id")).bookIds
+                    db.query("SELECT payload_json FROM trpg_checkpoints WHERE conversation_id=?", listOf(it.string("id")))
+                        .forEach { row ->
+                            val historicalIds = TrpgCheckpointPayloadCodec().decode(row.string("payload_json")).worldBooks.bookIds
+                            require(historicalIds.all { id -> books.get(id) != null }) {
+                                "A historical checkpoint world book is unavailable; the full backup cannot preserve it"
+                            }
+                            ids += historicalIds
+                        }
                 }
         }
         return ids.mapNotNull { id -> books.get(id)?.let { WorldBookTransfer(id, WorldBookCodec.encodeNative(it.document), it.summary.enabled) } }

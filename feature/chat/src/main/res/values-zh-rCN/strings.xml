@@ -95,4 +95,5 @@
     <string name="trpg_tool_coc_regular" formatted="false">常规成功 SUCCESS</string>
     <string name="trpg_tool_coc_failure" formatted="false">检定失败 FAILURE</string>
     <string name="trpg_tool_coc_fumble" formatted="false">大失败 FUMBLE</string>
+    <string name="chat_jump_to_latest">回到最新</string>
 </resources>

@@ -6,6 +6,11 @@ package runtime.mobileagent.ui
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.BoxWithConstraints
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.isImeVisible
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
@@ -17,6 +22,9 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.FilterChip
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
@@ -33,6 +41,10 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -41,12 +53,30 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.ui.platform.LocalContext
+import runtime.mobileagent.serialization.TrpgPlayerExport
+import runtime.mobileagent.domain.Utc
 import runtime.mobileagent.AppContainer
+import runtime.mobileagent.trpgMessageForDisplay
 import runtime.mobileagent.domain.AgentMode
+import runtime.mobileagent.domain.Message
+import runtime.mobileagent.domain.trpg.TrpgProjection
+import runtime.mobileagent.domain.trpg.TrpgCommand
+import runtime.mobileagent.domain.trpg.TrpgOperation
+import runtime.mobileagent.domain.trpg.TrpgPartyCommand
+import runtime.mobileagent.domain.trpg.TrpgPartyOperation
 import runtime.mobileagent.domain.trpg.TrpgResource
 import runtime.mobileagent.domain.trpg.TrpgRuleset
 import runtime.mobileagent.domain.trpg.TrpgSession
 import runtime.mobileagent.domain.trpg.TrpgState
+import runtime.mobileagent.domain.trpg.TrpgEvent
+import runtime.mobileagent.domain.trpg.TrpgEventKind
+import runtime.mobileagent.domain.trpg.TrpgJournalView
+import runtime.mobileagent.domain.trpg.TrpgCheckStatus
+import runtime.mobileagent.domain.trpg.TrpgViewRole
+import runtime.mobileagent.domain.trpg.TrpgVisibility
 
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
@@ -57,24 +87,78 @@ internal fun TrpgChatBar(
     archived: Boolean,
     refreshTick: Int,
     chinese: Boolean,
+    onOpenConversation: (String) -> Unit = {},
     onInsertDraft: (String) -> Unit,
 ) {
     if (conversationId == null) return
     var session by remember(conversationId) { mutableStateOf<TrpgSession?>(null) }
-    var hudExpanded by remember(conversationId) { mutableStateOf(true) }
+    // A display preference, not campaign state. IME suppression must not overwrite it.
+    var preferExpanded by remember(container.uiPreferences) {
+        mutableStateOf(container.uiPreferences.getBoolean(TRPG_HUD_EXPANDED, false))
+    }
     var sheetOpen by remember(conversationId) { mutableStateOf(false) }
     var diceOpen by remember(conversationId) { mutableStateOf(false) }
+    var journalOpen by remember(conversationId) { mutableStateOf(false) }
+    var campaignOpen by remember(conversationId) { mutableStateOf(false) }
+    var partyOpen by remember(conversationId) { mutableStateOf(false) }
+    var storyOpen by remember(conversationId) { mutableStateOf(false) }
+    var atlasOpen by remember(conversationId) { mutableStateOf(false) }
+    var mediaOpen by remember(conversationId) { mutableStateOf(false) }
+    var checkpointsOpen by remember(conversationId) { mutableStateOf(false) }
+    var checkpoints by remember(conversationId) { mutableStateOf<List<runtime.mobileagent.domain.trpg.TrpgCheckpoint>>(emptyList()) }
+    var exportPreview by remember(conversationId) { mutableStateOf<String?>(null) }
+    var pendingExport by remember { mutableStateOf<String?>(null) }
+    var recentMessages by remember(conversationId) { mutableStateOf<List<Message>>(emptyList()) }
+    var sourceMessage by remember(conversationId) { mutableStateOf<Message?>(null) }
     var saving by remember(conversationId) { mutableStateOf(false) }
     var conflictMsg by remember(conversationId) { mutableStateOf<String?>(null) }
+    var notice by remember(conversationId) { mutableStateOf<String?>(null) }
     var rollHistory by remember(conversationId) { mutableStateOf<List<TrpgManualRollEntry>>(emptyList()) }
+    var events by remember(conversationId) { mutableStateOf<List<TrpgEvent>>(emptyList()) }
+    var latestTurn by remember(conversationId) { mutableStateOf<List<TrpgEvent>>(emptyList()) }
+    var undoableId by remember(conversationId) { mutableStateOf<String?>(null) }
+    var hasEarlierEvents by remember(conversationId) { mutableStateOf(false) }
+    var pendingRoll by remember(conversationId) { mutableStateOf<TrpgManualRollEntry?>(null) }
+    var pendingEdit by remember(conversationId) { mutableStateOf<Triple<Long, TrpgState, String>?>(null) }
     val scope = rememberCoroutineScope()
-    val palette = rememberTrpgPalette()
     val writable = !streaming && !archived
+    val context = LocalContext.current
+    val exportLauncher = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/json")) { uri ->
+        val content = pendingExport
+        pendingExport = null
+        if (uri != null && content != null) scope.launch {
+            try {
+                withContext(Dispatchers.IO) {
+                    val output = context.contentResolver.openOutputStream(uri, "w") ?: error("Cannot open selected document")
+                    output.use { it.write(content.toByteArray(Charsets.UTF_8)) }
+                }
+                notice = if (chinese) "玩家资料已保存。" else "Player record saved."
+            } catch (cancel: CancellationException) { throw cancel } catch (_: Exception) {
+                conflictMsg = if (chinese) "导出未完成，请重新选择文件重试。" else "Export failed. Choose a file and retry."
+            }
+        }
+    }
 
-    LaunchedEffect(conversationId, streaming, refreshTick) {
+    fun applyView(view: TrpgJournalView) {
+        session = view.session
+        events = view.events
+        latestTurn = view.latestTurn
+        undoableId = view.undoableEventId
+        hasEarlierEvents = view.events.size == 50
+        val shownEvents = if (view.session.state.campaign.preferences.viewRole == TrpgViewRole.GAME_MASTER) view.events
+            else view.events.mapNotNull(TrpgProjection::eventForPlayer)
+        rollHistory = listOfNotNull(pendingRoll) + shownEvents.filter { it.kind == TrpgEventKind.ROLL }
+            .map { TrpgManualRollEntry(it.title, it.detail, id = it.id) }
+    }
+
+    LaunchedEffect(conversationId, streaming, refreshTick, journalOpen, campaignOpen, partyOpen, storyOpen, checkpointsOpen, atlasOpen, mediaOpen) {
         try {
             val loaded = withContext(Dispatchers.IO) { loadTrpgSessionIfEligible(container, conversationId) }
-            session = loaded
+            if (loaded == null) session = null else applyView(withContext(Dispatchers.IO) { container.trpg.journalView(conversationId) })
+            if (loaded != null && (campaignOpen || storyOpen || mediaOpen)) recentMessages = withContext(Dispatchers.IO) {
+                container.conversations.messagePage(conversationId, limit = 20).messages.map(::trpgMessageForDisplay)
+            }
+            if (loaded != null && checkpointsOpen) checkpoints = withContext(Dispatchers.IO) { container.trpgCheckpoints.list(conversationId) }
         } catch (cancel: CancellationException) {
             throw cancel
         } catch (_: Exception) {
@@ -84,140 +168,138 @@ internal fun TrpgChatBar(
 
     val activeSession = session ?: return
     val state = activeSession.state
+    val focusActor = state.campaign.party.actors.singleOrNull { it.id == state.campaign.preferences.focusActorId &&
+        (it.visibility == TrpgVisibility.PLAYER || state.campaign.preferences.viewRole == TrpgViewRole.GAME_MASTER) }
+    val hudSession = if (focusActor == null) activeSession else activeSession.copy(state = state.copy(
+        playerName = focusActor.name, characterSheet = focusActor.description, resources = focusActor.resources,
+    ))
+
+    val mutationUi = TrpgSessionUiCallbacks({ session = it }, ::applyView, { conflictMsg = it }, { saving = it })
 
     fun persistState(expectedRevision: Long, nextState: TrpgState, closeSheetOnSuccess: Boolean) {
         if (!writable || saving) return
-        saving = true
-        scope.launch {
-            try {
-                val updated = withContext(Dispatchers.IO) {
-                    container.trpg.update(conversationId, expectedRevision, nextState)
-                }
-                session = updated
-                conflictMsg = null
-                if (closeSheetOnSuccess) sheetOpen = false
-            } catch (cancel: CancellationException) {
-                throw cancel
-            } catch (_: Exception) {
-                val latest = try {
-                    withContext(Dispatchers.IO) { container.trpg.get(conversationId) }
-                } catch (cancel: CancellationException) { throw cancel } catch (_: Exception) { null }
-                if (latest != null) session = latest
-                conflictMsg = if (chinese) {
-                    "状态未保存（最新 #${latest?.revision ?: "?"}）：版本冲突、活动运行或存储错误。草稿已保留，可载入最新状态后重试。"
-                } else {
-                    "State was not saved (latest #${latest?.revision ?: "?"}): revision conflict, active run or storage error. Draft retained; reload and retry."
-                }
-            } finally {
-                saving = false
-            }
+        val action = pendingEdit?.takeIf { it.first == expectedRevision && it.second == nextState }
+            ?: Triple(expectedRevision, nextState, java.util.UUID.randomUUID().toString()).also { pendingEdit = it }
+        launchTrpgUiMutation(scope, container, conversationId, chinese, mutationUi,
+            onCommitted = { pendingEdit = null; if (closeSheetOnSuccess) sheetOpen = false }) {
+            container.trpg.update(conversationId, expectedRevision, nextState, action.third)
         }
     }
 
-    Surface(
-        color = palette.boardSurface,
-        shape = RoundedCornerShape(bottomStart = 16.dp, bottomEnd = 16.dp),
-        border = BorderStroke(1.dp, palette.border),
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(horizontal = 8.dp, vertical = 2.dp)
-            .testTag("trpg.chat.bar"),
-    ) {
-        Column(Modifier.padding(horizontal = 10.dp, vertical = 8.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(6.dp),
-            ) {
-                Surface(
-                    color = palette.crestContainer,
-                    contentColor = palette.crestContent,
-                    shape = RoundedCornerShape(8.dp),
-                    modifier = Modifier.testTag("trpg.chat.ruleset"),
-                ) {
-                    Text(
-                        text = trpgRulesetTitle(state.ruleset, chinese),
-                        style = MaterialTheme.typography.labelSmall,
-                        fontWeight = FontWeight.Bold,
-                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp),
-                    )
-                }
-                Text(
-                    text = buildTrpgHeadline(state, chinese),
-                    style = MaterialTheme.typography.bodySmall,
-                    fontWeight = FontWeight.SemiBold,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.weight(1f).testTag("trpg.chat.scene"),
-                )
-                Text(
-                    text = "#${activeSession.revision}",
-                    style = MaterialTheme.typography.labelSmall,
-                    fontFamily = FontFamily.Monospace,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.testTag("trpg.chat.revision"),
-                )
-            }
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.End,
-            ) {
-                TextButton(
-                    onClick = { diceOpen = true },
-                    modifier = Modifier.testTag("trpg.chat.open_dice"),
-                ) {
-                    Text(if (chinese) "🎲 骰盘" else "🎲 Dice", style = MaterialTheme.typography.labelMedium)
-                }
-                TextButton(
-                    onClick = { sheetOpen = true },
-                    modifier = Modifier.testTag("trpg.chat.open_sheet"),
-                ) {
-                    Text(if (chinese) "📜 状态板" else "📜 Sheet", style = MaterialTheme.typography.labelMedium)
-                }
-                TextButton(
-                    onClick = { hudExpanded = !hudExpanded },
-                    modifier = Modifier.testTag("trpg.chat.toggle_hud"),
-                ) {
-                    Text(if (hudExpanded) "▴" else "▾")
-                }
-            }
+    fun persistRoll(entry: TrpgManualRollEntry) {
+        if (!writable || saving) return
+        pendingRoll = entry
+        launchTrpgUiMutation(scope, container, conversationId, chinese, mutationUi, onCommitted = { pendingRoll = null }) {
+            container.trpg.recordRoll(conversationId, actionId = entry.id, title = entry.summary, detail = entry.detail)
+        }
+    }
 
-            conflictMsg?.let {
-                Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall,
-                    maxLines = 3, modifier = Modifier.testTag("trpg.chat.error"))
-            }
-            if (hudExpanded) {
-                Column(Modifier.fillMaxWidth().heightIn(max = 180.dp).verticalScroll(rememberScrollState())
-                    .testTag("trpg.chat.hud_body")) {
-                    TrpgExpandedHudBody(
-                        session = activeSession,
-                        palette = palette,
-                        writable = writable && !saving,
-                        canInsertDraft = !archived,
-                        chinese = chinese,
-                        latestRoll = rollHistory.firstOrNull(),
+    suspend fun mutateCampaign(action: () -> TrpgSession): TrpgSession {
+        check(writable && !saving) { "Campaign is not writable" }
+        return mutateTrpgUi(container, conversationId, chinese, mutationUi, action = action)
+    }
+
+    TrpgChatChrome(activeSession, hudSession, focusActor != null, writable, saving, archived, chinese,
+        preferExpanded, notice, conflictMsg, pendingRoll, rollHistory,
+        onExpanded = { next -> preferExpanded = next; container.uiPreferences.edit().putBoolean(TRPG_HUD_EXPANDED, next).apply() },
+        onOpen = { panel -> when (panel) {
+            TrpgPanel.SHEET -> sheetOpen = true
+            TrpgPanel.DICE -> diceOpen = true
+            TrpgPanel.PARTY -> partyOpen = true
+            TrpgPanel.CAMPAIGN -> campaignOpen = true
+            TrpgPanel.STORY -> storyOpen = true
+            TrpgPanel.CHECKPOINTS -> checkpointsOpen = true
+            TrpgPanel.JOURNAL -> journalOpen = true
+            TrpgPanel.EXPORT -> exportPreview = TrpgPlayerExport.encode(activeSession, Utc.nowIso())
+            TrpgPanel.ATLAS -> atlasOpen = true
+            TrpgPanel.MEDIA -> mediaOpen = true
+        } }, onRetryRoll = ::persistRoll,
                         onAdjustResource = { res, delta ->
-                            val nextResources = state.resources.map { item ->
-                                if (item.name == res.name) {
-                                    adjustTrpgResource(item, delta)
-                                } else {
-                                    item
-                                }
+                            if (focusActor != null) {
+                                scope.launch { try {
+                                    mutateCampaign { container.trpg.command(conversationId, activeSession.revision, java.util.UUID.randomUUID().toString(),
+                                        TrpgCommand(TrpgOperation.PARTY, party = TrpgPartyCommand(TrpgPartyOperation.ADJUST_RESOURCE,
+                                            id = focusActor.id, resource = res.name, amount = delta))) }
+                                } catch (cancel: CancellationException) { throw cancel } catch (_: Exception) { /* Error retained above. */ } }
+                            } else {
+                                val nextResources = state.resources.map { item -> if (item.name == res.name) adjustTrpgResource(item, delta) else item }
+                                persistState(activeSession.revision, state.copy(resources = nextResources), false)
                             }
-                            persistState(activeSession.revision, state.copy(resources = nextResources), false)
                         },
                         onApplyStarter = { ruleset ->
-                            runCatching { trpgStarterState(ruleset, state, chinese) }
-                                .onSuccess { persistState(activeSession.revision, it, false) }
+                            runCatching {
+                                val starter = trpgStarterState(ruleset, hudSession.state, chinese)
+                                if (focusActor == null) starter else state.copy(ruleset = ruleset, campaign = state.campaign.copy(
+                                    party = state.campaign.party.copy(actors = state.campaign.party.actors.map {
+                                        if (it.id == focusActor.id) it.copy(resources = starter.resources) else it
+                                    })))
+                            }.onSuccess { persistState(activeSession.revision, it, false) }
                                 .onFailure { conflictMsg = it.message }
                         },
-                        onInsertRoll = onInsertDraft,
-                    )
-                }
+        onInsertRoll = onInsertDraft,
+    )
+
+    fun showSource(messageId: String) {
+        scope.launch {
+            sourceMessage = withContext(Dispatchers.IO) {
+                container.conversations.message(messageId)?.takeIf { it.conversationId == conversationId }?.let(::trpgMessageForDisplay)
             }
+            if (sourceMessage == null) conflictMsg = if (chinese) "来源消息已不可用。" else "Source message is no longer available."
         }
     }
+    if (atlasOpen) TrpgAtlasDialog(activeSession, state.campaign.atlas, writable, saving, conflictMsg, chinese,
+        onCommand = { revision, command -> mutateCampaign {
+            container.trpg.command(conversationId, revision, java.util.UUID.randomUUID().toString(),
+                TrpgCommand(TrpgOperation.ATLAS, atlas = command))
+        } }, onDismiss = { atlasOpen = false })
+    if (mediaOpen) TrpgMediaDialog(conversationId,
+        recentMessages.lastOrNull { it.role == runtime.mobileagent.domain.MessageRole.ASSISTANT && it.text.isNotBlank() }?.text.orEmpty(),
+        !archived, chinese, onInsertDraft, onDismiss = { mediaOpen = false })
+    if (storyOpen) TrpgStoryDialog(activeSession, state.campaign.story, writable, saving, conflictMsg, chinese, recentMessages,
+        onCommand = { revision, command -> mutateCampaign {
+            container.trpg.command(conversationId, revision, java.util.UUID.randomUUID().toString(),
+                TrpgCommand(TrpgOperation.STORY, story = command))
+        } }, onSource = ::showSource, onDismiss = { storyOpen = false })
+    if (checkpointsOpen) TrpgCheckpointsDialog(activeSession, checkpoints, writable, !streaming, saving, conflictMsg, chinese,
+        onCreate = { revision, name, id ->
+            var created: runtime.mobileagent.domain.trpg.TrpgCheckpoint? = null
+            mutateCampaign {
+                created = container.trpgCheckpoints.create(conversationId, revision, name, id)
+                container.trpg.get(conversationId)
+            }
+            checkpoints = (checkpoints + checkNotNull(created)).distinctBy { it.checkpointId }
+            checkNotNull(created)
+        },
+        onBranch = { checkpointId, title, newId ->
+            check(!streaming && !saving)
+            saving = true
+            try {
+                withContext(Dispatchers.IO) {
+                    val existing = container.conversations.get(newId)
+                    if (existing == null) container.trpgCheckpoints.branch(conversationId, checkpointId, title, newId).id
+                    else {
+                        val origin = container.trpg.get(newId).state.campaign.origin
+                        require(origin?.sourceConversationId == conversationId && origin.checkpointId == checkpointId && existing.title == title)
+                        newId
+                    }
+                }
+            } finally { saving = false }
+        }, onOpenConversation = onOpenConversation, onDismiss = { checkpointsOpen = false })
+
+    exportPreview?.let { content -> TrpgExportDialog(content, chinese,
+        onSave = { pendingExport = content; exportPreview = null; exportLauncher.launch("trpg-player.json") },
+        onDismiss = { exportPreview = null }) }
+    if (partyOpen) TrpgPartyDialog(activeSession, writable, saving, conflictMsg, chinese,
+        onCommand = { revision, command -> mutateCampaign {
+            container.trpg.command(conversationId, revision, java.util.UUID.randomUUID().toString(), command)
+        } },
+        onFocusActor = { revision, id -> mutateCampaign {
+            val current = container.trpg.get(conversationId)
+            require(current.revision == revision)
+            require(id == null || current.state.campaign.party.actors.any { it.id == id })
+            container.trpg.update(conversationId, revision, current.state.copy(campaign = current.state.campaign.copy(
+                preferences = current.state.campaign.preferences.copy(focusActorId = id))))
+        } }, onDismiss = { partyOpen = false })
 
     if (sheetOpen) {
         TrpgStateSheetDialog(
@@ -245,7 +327,10 @@ internal fun TrpgChatBar(
             saveError = conflictMsg,
             chinese = chinese,
             history = rollHistory,
-            onRollRecorded = { entry -> rollHistory = listOf(entry) + rollHistory.take(5) },
+            onRollRecorded = { entry ->
+                rollHistory = listOf(entry) + rollHistory.take(5)
+                if (writable) persistRoll(entry) else conflictMsg = if (chinese) "临时骰点：当前会话只读，结果未保存。" else "Temporary roll: the conversation is read-only; result not saved."
+            },
             onInsertDraft = { text -> onInsertDraft(text); diceOpen = false },
             onAppendNotes = { text ->
                 runCatching { appendTrpgNote(state, text) }
@@ -254,153 +339,57 @@ internal fun TrpgChatBar(
                         "Note was not saved: notes or state capacity exceeded." }
             },
             onDismiss = { diceOpen = false },
+            rollingEnabled = !saving && pendingRoll == null,
+            onRetrySave = pendingRoll?.let { roll -> { persistRoll(roll) } },
+            showDetails = state.campaign.preferences.showRollDetails,
         )
     }
-}
-
-@OptIn(ExperimentalLayoutApi::class)
-@Composable
-private fun TrpgExpandedHudBody(
-    session: TrpgSession,
-    palette: TrpgTabletopPalette,
-    writable: Boolean,
-    canInsertDraft: Boolean,
-    chinese: Boolean,
-    latestRoll: TrpgManualRollEntry?,
-    onAdjustResource: (TrpgResource, Int) -> Unit,
-    onApplyStarter: (TrpgRuleset) -> Unit,
-    onInsertRoll: (String) -> Unit,
-) {
-    val state = session.state
-    if (state.resources.isEmpty()) {
-        FlowRow(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(6.dp),
-        ) {
-            Text(
-                text = if (chinese) "数值框架预设：" else "Framework:",
-                style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-            FilterChip(
-                selected = false,
-                onClick = { onApplyStarter(TrpgRuleset.DND_5E) },
-                enabled = writable,
-                label = { Text(if (chinese) "⚔ D&D 通用框架" else "⚔ D&D Universal", style = MaterialTheme.typography.labelSmall) },
-                modifier = Modifier.testTag("trpg.preset.dnd5e"),
-            )
-            FilterChip(
-                selected = false,
-                onClick = { onApplyStarter(TrpgRuleset.COC_7) },
-                enabled = writable,
-                label = { Text(if (chinese) "🐙 CoC 通用框架" else "🐙 CoC Universal", style = MaterialTheme.typography.labelSmall) },
-                modifier = Modifier.testTag("trpg.preset.coc7"),
-            )
-            FilterChip(
-                selected = false,
-                onClick = { onApplyStarter(TrpgRuleset.CUSTOM) },
-                enabled = writable,
-                label = { Text(if (chinese) "📖 世界书自定义" else "📖 Lorebook Custom", style = MaterialTheme.typography.labelSmall) },
-                modifier = Modifier.testTag("trpg.preset.custom"),
-            )
-        }
-    } else {
-        FlowRow(
-            horizontalArrangement = Arrangement.spacedBy(6.dp),
-            verticalArrangement = Arrangement.spacedBy(6.dp),
-        ) {
-            state.resources.forEach { res ->
-                TrpgResourceGaugeChip(res, palette, writable, onAdjustResource)
+    val shownEvents = if (state.campaign.preferences.viewRole == TrpgViewRole.GAME_MASTER) events else events.mapNotNull(TrpgProjection::eventForPlayer)
+    val shownTurn = if (state.campaign.preferences.viewRole == TrpgViewRole.GAME_MASTER) latestTurn else latestTurn.mapNotNull(TrpgProjection::eventForPlayer)
+    if (journalOpen) TrpgJournalDialog(shownEvents, undoableId, writable, saving, chinese, conflictMsg, hasEarlierEvents,
+        onUndo = { target ->
+            if (writable && !saving) {
+                saving = true
+                val actionId = java.util.UUID.randomUUID().toString()
+                scope.launch {
+                    try {
+                        val view = withContext(Dispatchers.IO) {
+                            container.trpg.undo(conversationId, activeSession.revision, target, actionId)
+                            container.trpg.journalView(conversationId)
+                        }
+                        applyView(view)
+                        conflictMsg = null
+                    } catch (cancel: CancellationException) { throw cancel
+                    } catch (_: Exception) {
+                        conflictMsg = if (chinese) "未撤销：状态已变化、正在运行或存储失败。请重新打开日志后重试。" else "Undo failed: state changed, a run is active, or storage failed. Reopen the journal and retry."
+                    } finally { saving = false }
+                }
             }
-        }
-    }
-
-    latestRoll?.let { roll ->
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
-        ) {
-            Text(
-                text = roll.summary,
-                style = MaterialTheme.typography.labelSmall,
-                fontFamily = FontFamily.Monospace,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-                modifier = Modifier.weight(1f).testTag("trpg.chat.last_roll"),
-            )
-            OutlinedButton(
-                onClick = { onInsertRoll(roll.summary) },
-                enabled = canInsertDraft,
-                modifier = Modifier.testTag("trpg.chat.insert_last_roll"),
-            ) {
-                Text(if (chinese) "填入输入" else "Insert", style = MaterialTheme.typography.labelSmall)
+        },
+        onLoadEarlier = {
+            saving = true
+            scope.launch {
+                try {
+                    val page = withContext(Dispatchers.IO) { container.trpg.events(conversationId, beforeRevision = events.lastOrNull()?.revision ?: Long.MAX_VALUE) }
+                    events = (events + page).distinctBy { it.id }
+                    hasEarlierEvents = page.size == 50
+                } catch (cancel: CancellationException) { throw cancel
+                } catch (_: Exception) { conflictMsg = if (chinese) "读取日志失败，可重试。" else "Could not load history. Retry."
+                } finally { saving = false }
             }
-        }
-    }
+        }, onDismiss = { journalOpen = false }, latestTurn = shownTurn)
+    if (campaignOpen) TrpgCampaignDialog(
+        session = activeSession, writable = writable, saving = saving, error = conflictMsg, chinese = chinese,
+        recentMessages = recentMessages,
+        onSave = { revision, next -> mutateCampaign { container.trpg.update(conversationId, revision, next) } },
+        onCommand = { revision, command -> mutateCampaign { container.trpg.command(conversationId, revision, java.util.UUID.randomUUID().toString(), command) } },
+        onRollCheck = { revision, checkId -> mutateCampaign { container.trpg.rollCheck(conversationId, revision, checkId, java.util.UUID.randomUUID().toString()) } },
+        onSource = ::showSource,
+        onInsertDraft = { text -> if (!archived) { onInsertDraft(text); campaignOpen = false } },
+        onDismiss = { campaignOpen = false },
+        onOpenJournal = { campaignOpen = false; journalOpen = true },
+    )
+    sourceMessage?.let { TrpgSourceDialog(it, chinese) { sourceMessage = null } }
 }
 
-@Composable
-private fun TrpgResourceGaugeChip(
-    res: TrpgResource,
-    palette: TrpgTabletopPalette,
-    writable: Boolean,
-    onAdjust: (TrpgResource, Int) -> Unit,
-) {
-    val visual = trpgResourceVisual(res.name, palette)
-    Surface(
-        color = palette.headerSurface,
-        shape = RoundedCornerShape(10.dp),
-        border = BorderStroke(1.dp, visual.accent.copy(alpha = 0.45f)),
-        modifier = Modifier.testTag("trpg.resource.card.${res.name}"),
-    ) {
-        Column(Modifier.padding(horizontal = 8.dp, vertical = 4.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                Text("${visual.icon} ${res.name}", style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold)
-                TextButton(
-                    onClick = { onAdjust(res, -1) },
-                    enabled = writable,
-                    modifier = Modifier.testTag("trpg.resource.dec.${res.name}"),
-                ) { Text("-", style = MaterialTheme.typography.labelSmall) }
-                Text(
-                    text = "${res.current}${res.maximum?.let { "/$it" }.orEmpty()}",
-                    style = MaterialTheme.typography.labelMedium,
-                    fontFamily = FontFamily.Monospace,
-                    fontWeight = FontWeight.Bold,
-                    color = visual.accent,
-                )
-                TextButton(
-                    onClick = { onAdjust(res, 1) },
-                    enabled = writable,
-                    modifier = Modifier.testTag("trpg.resource.inc.${res.name}"),
-                ) { Text("+", style = MaterialTheme.typography.labelSmall) }
-            }
-            val max = res.maximum
-            if (max != null && max > 0) {
-                val ratio = (res.current.toFloat() / max.toFloat()).coerceIn(0f, 1f)
-                LinearProgressIndicator(
-                    progress = { ratio },
-                    color = visual.accent,
-                    trackColor = palette.boardSurface,
-                    modifier = Modifier.fillMaxWidth().height(4.dp),
-                )
-            }
-        }
-    }
-}
-
-private fun loadTrpgSessionIfEligible(container: AppContainer, conversationId: String): TrpgSession? {
-    val conversation = container.conversations.get(conversationId) ?: return null
-    val resolved = container.agents.resolveSnapshot(conversation.snapshotId)
-    if (resolved.snapshot.mode != AgentMode.TRPG) return null
-    return container.trpg.get(conversationId)
-}
-
-private fun buildTrpgHeadline(state: TrpgState, chinese: Boolean): String {
-    val actor = state.playerName.ifBlank { if (chinese) "未命名角色" else "Unnamed PC" }
-    val scene = state.scene.ifBlank { if (chinese) "待推进场景" else "Unset scene" }
-    return "$actor · 📍 $scene"
-}
-
-internal fun appendTrpgRollToDraft(current: String, rollLine: String): String =
-    if (current.isBlank()) rollLine else "$current\n$rollLine"
+internal const val TRPG_HUD_EXPANDED = "trpg-hud-expanded"

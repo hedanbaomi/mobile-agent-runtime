@@ -79,7 +79,7 @@ class TrpgRuntimeTest {
     @Test fun runtimeRejectsDeepDuplicateAndOversizedTrpgArgumentsBeforeExecutor() = runBlocking<Unit> {
         val badArguments = listOf("{\"state\":" + "[".repeat(20_000) + "0" + "]".repeat(20_000) + "}",
             "{\"a\":1,\"\\u0061\":2}", "{\"state\":\"" + "x".repeat(128 * 1024) + "\"}")
-        for (name in listOf("session_state_update", "dice_roll")) for (args in badArguments) {
+        for (name in listOf("session_state_read", "session_state_update", "campaign_action", "dice_roll")) for (args in badArguments) {
             var dispatched = 0
             val executor = object : ToolExecutor {
                 override val specs = listOf(ToolSpec(name, "fixture", "{\"type\":\"object\"}", "", false))

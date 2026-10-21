@@ -283,6 +283,8 @@ class TransferRepository(
                 uploadedImages = uploadedImageBlobs(conversation.id),
                 worldBooks = worldBookTransfer.exportConversation(conversation.id, includeWorldBookContent),
                 trpgSession = trpgTransfer.export(snapshot, conversation.id),
+                trpgJournalRevision = trpgTransfer.export(snapshot, conversation.id)?.revision,
+                trpgCheckpointIds = trpgTransfer.checkpointIds(snapshot, conversation.id),
             )
             ArchiveConversation(manifest, entryName)
         }
@@ -312,6 +314,8 @@ class TransferRepository(
         val runs = runsRepo.list(expected.id)
         conversationImages.requireUnchanged(expected.id, item.manifest.uploadedImages)
         item.manifest.copy(
+            trpgCheckpoints = trpgTransfer.checkpointEntries(snapshot, expected.id),
+            trpgJournal = if (snapshot.mode == runtime.mobileagent.domain.AgentMode.TRPG) TrpgRepository(db, clock).exportJournal(expected.id) else null,
             messages = ConversationRepository(db).messages(expected.id),
             runs = runs,
             toolInvocations = runs.flatMap { runsRepo.invocations(it.runId) },
@@ -631,10 +635,7 @@ class TransferRepository(
     private fun requireMetadataOnly(bundle: TransferBundle) {
         if (bundle.knowledgeBases.any { it.contentIncluded } ||
             bundle.skills.any { it.packageIncluded } ||
-            bundle.conversations.any {
-                it.contentIncluded || it.messages.isNotEmpty() || it.runs.isNotEmpty() ||
-                    it.toolInvocations.isNotEmpty() || it.auditEvents.isNotEmpty()
-            }
+            bundle.conversations.any(trpgTransfer::requiresArchive)
         ) {
             throw invalid("Full transfer content must be imported with importArchive")
         }
@@ -664,6 +665,7 @@ class TransferRepository(
             throw invalid("Archive content exceeds the total uncompressed transfer limit")
         }
         bundle.conversations.forEach { conversation ->
+            trpgTransfer.requireLightManifest(conversation)
             if (!conversation.contentIncluded || conversation.contentEntry.isNullOrBlank()) {
                 throw invalid("Archive conversations must provide a separate content entry")
             }
@@ -1370,6 +1372,10 @@ class TransferRepository(
         )
         worldBookTransfer.restoreConversation(transfer.worldBooks, conversation.id, warnings)
         transfer.trpgSession?.let { TrpgRepository(db, clock).restore(it.copy(conversationId = conversation.id)) }
+        transfer.trpgJournal?.let { value ->
+            val session = transfer.trpgSession ?: throw invalid("TRPG journal is missing its state")
+            TrpgRepository(db, clock).restoreJournal(session.copy(conversationId = conversation.id), value)
+        }
         transfer.messages.forEach { message ->
             db.execute(
                 "INSERT INTO messages(id,conversation_id,parent_message_id,role,text,status,created_at,parts_json,metadata_json,chronology_key) VALUES(?,?,?,?,?,?,?,?,?,?)",
@@ -1407,6 +1413,7 @@ class TransferRepository(
                     event.summary, event.inputBytes, event.outputBytes, event.inputTokens, event.outputTokens, event.metadataJson),
             )
         }
+        trpgTransfer.restoreCheckpoints(transfer, blobSink, vectorIndexDirectory)
     }
 
     private fun transferPartType(part: MessagePart): String = when (part) {

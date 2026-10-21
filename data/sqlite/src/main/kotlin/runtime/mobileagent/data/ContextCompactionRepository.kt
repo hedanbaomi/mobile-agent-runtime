@@ -320,6 +320,10 @@ class ContextCompactionRepository(
     private fun hashSources(conversationId: String, ids: List<String>): String =
         ContextCompactionDigest.sourceContentHash(loadSources(conversationId, ids))
 
+    /** Rebind already validated portable summary coverage to this database's durable encoding. */
+    internal fun sourceContentHash(conversationId: String, ids: List<String>): String =
+        hashSources(conversationId, requireSourceIds(ids))
+
     /** The latest successful summary of the conversation/snapshot chain, reusable or not. */
     private fun chainTipId(conversationId: String, snapshotId: String): String? = db.query(
         "SELECT id FROM context_compactions WHERE conversation_id=? AND snapshot_id=? AND state=? ORDER BY rowid DESC LIMIT 1",

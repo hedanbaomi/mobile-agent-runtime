@@ -47,7 +47,8 @@ import runtime.mobileagent.skills.StandardRoll
 internal data class TrpgManualRollEntry(
     val summary: String,
     val detail: String,
-    val result: DiceRollResult,
+    val result: DiceRollResult? = null,
+    val id: String = java.util.UUID.randomUUID().toString(),
 )
 
 private val STANDARD_PRESETS = listOf(
@@ -79,6 +80,9 @@ internal fun TrpgDiceRollerDialog(
     onInsertDraft: (String) -> Unit,
     onAppendNotes: (String) -> Unit,
     onDismiss: () -> Unit,
+    rollingEnabled: Boolean = true,
+    onRetrySave: (() -> Unit)? = null,
+    showDetails: Boolean = true,
 ) {
     val palette = rememberTrpgPalette()
     var cocMode by remember(defaultRuleset) { mutableStateOf(defaultRuleset == TrpgRuleset.COC_7) }
@@ -169,6 +173,7 @@ internal fun TrpgDiceRollerDialog(
                                 errorText = err.message ?: "Invalid dice expression"
                             }
                         },
+                        enabled = rollingEnabled,
                         modifier = Modifier.fillMaxWidth().testTag("trpg.dice.roll"),
                     ) {
                         Text(if (chinese) "🎲 立即掷骰" else "🎲 Roll Dice")
@@ -218,6 +223,7 @@ internal fun TrpgDiceRollerDialog(
                                 errorText = err.message ?: "Invalid CoC check"
                             }
                         },
+                        enabled = rollingEnabled,
                         modifier = Modifier.fillMaxWidth().testTag("trpg.dice.roll_coc"),
                     ) {
                         Text(if (chinese) "🐙 进行百分检定 (d100)" else "🐙 Roll d100 Check")
@@ -236,6 +242,11 @@ internal fun TrpgDiceRollerDialog(
                     Text(msg, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall,
                         modifier = Modifier.testTag("trpg.dice.save_error"))
                 }
+                onRetrySave?.let { retry ->
+                    OutlinedButton(onClick = retry, enabled = writable, modifier = Modifier.testTag("trpg.dice.retry_save")) {
+                        Text(if (chinese) "重试保存同一骰点" else "Retry saving this roll")
+                    }
+                }
 
                 latest?.let { entry ->
                     TrpgDiceResultCard(
@@ -246,6 +257,7 @@ internal fun TrpgDiceRollerDialog(
                         chinese = chinese,
                         onInsertDraft = { onInsertDraft(entry.summary) },
                         onAppendNotes = { onAppendNotes(entry.summary) },
+                        showDetails = showDetails,
                     )
                 }
             }
@@ -291,7 +303,9 @@ private fun TrpgDiceResultCard(
     chinese: Boolean,
     onInsertDraft: () -> Unit,
     onAppendNotes: () -> Unit,
+    showDetails: Boolean = true,
 ) {
+    var detailsExpanded by remember(entry.id, showDetails) { mutableStateOf(showDetails) }
     Surface(
         color = palette.boardSurface,
         shape = RoundedCornerShape(14.dp),
@@ -305,11 +319,15 @@ private fun TrpgDiceResultCard(
                 fontFamily = FontFamily.Monospace,
                 fontWeight = FontWeight.Bold,
             )
-            Text(
+            if (detailsExpanded) Text(
                 text = entry.detail,
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
+            TextButton(onClick = { detailsExpanded = !detailsExpanded }) {
+                Text(if (detailsExpanded) { if (chinese) "收起逐骰详情" else "Hide dice details" }
+                    else { if (chinese) "查看逐骰详情" else "Show dice details" })
+            }
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(8.dp),

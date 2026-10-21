@@ -19,6 +19,7 @@ import runtime.mobileagent.domain.AgentSnapshot
 import runtime.mobileagent.domain.trpg.TrpgSession
 import runtime.mobileagent.domain.trpg.TrpgState
 import runtime.mobileagent.domain.trpg.TrpgStateValidation
+import runtime.mobileagent.domain.trpg.TrpgCommand
 import runtime.mobileagent.skills.ToolCall
 import runtime.mobileagent.skills.ToolExecutor
 import runtime.mobileagent.skills.ToolResult
@@ -32,11 +33,12 @@ internal class TrpgSessionToolExecutor(
     private val read: () -> TrpgSession,
     private val update: (ToolCall, Long, TrpgState) -> TrpgSession,
     private val liveBinding: () -> Boolean,
+    private val command: ((ToolCall, Long, TrpgCommand) -> TrpgSession)? = null,
 ) : ToolExecutor {
     private val mutex = Mutex()
     private val calls = linkedMapOf<String, Pair<ToolCall, ToolResult>>()
     private val json = Json { encodeDefaults = true; explicitNulls = false; ignoreUnknownKeys = false }
-    override val specs: List<ToolSpec> = if (snapshot.mode == AgentMode.TRPG) listOf(READ, UPDATE) else emptyList()
+    override val specs: List<ToolSpec> = if (snapshot.mode == AgentMode.TRPG) listOfNotNull(READ, UPDATE, COMMAND.takeIf { command != null }) else emptyList()
 
     override suspend fun invoke(call: ToolCall): ToolResult = mutex.withLock {
         runInterruptible(Dispatchers.IO) {
@@ -54,11 +56,20 @@ internal class TrpgSessionToolExecutor(
                         val revision = args["expectedRevision"] as? JsonPrimitive
                         require(revision != null && !revision.isString && revision.longOrNull != null)
                         val state = args.getValue("state") as? kotlinx.serialization.json.JsonObject ?: error("Invalid state")
-                        require(state.keys == STATE_FIELDS) { "Provide the complete state" }
+                        require(state.keys == STATE_FIELDS || state.keys == STATE_FIELDS + "campaign") { "Provide the complete legacy state" }
                         val decoded = json.decodeFromJsonElement<TrpgState>(state)
                         TrpgStateValidation.validate(decoded)
                         require(available())
                         update(call, checkNotNull(revision.longOrNull), decoded)
+                    }
+                    COMMAND.name -> {
+                        require(args.keys == setOf("expectedRevision", "command"))
+                        val revision = args["expectedRevision"] as? JsonPrimitive
+                        require(revision != null && !revision.isString && revision.longOrNull != null)
+                        val decoded = json.decodeFromJsonElement<TrpgCommand>(args.getValue("command"))
+                        decoded.validate()
+                        require(available())
+                        checkNotNull(command)(call, checkNotNull(revision.longOrNull), decoded)
                     }
                     else -> return@runInterruptible ToolResult.Invalid("Unknown TRPG tool")
                 }
@@ -88,6 +99,8 @@ internal class TrpgSessionToolExecutor(
         private val STATE_FIELDS = setOf("ruleset", "playerName", "characterSheet", "scene", "notes", "resources")
         private val READ = ToolSpec("session_state_read", "Read this roleplaying conversation's authoritative state and revision. No other conversation can be selected.",
             """{"type":"object","properties":{},"additionalProperties":false}""", "", false)
+        private val COMMAND = ToolSpec("campaign_action", "Apply one campaign operation using the revision from session_state_read. REQUEST_CHECK creates a real dice request; the user's dice preference chooses player roll or an atomic automatic roll. RESOLVE_CHECK requires an actual stored roll and a resolution note. Never fabricate roll evidence. Facts can reference an existing message in this conversation. PARTY applies one typed actor/inventory/condition/encounter/rest operation. Specify only fields belonging to its operation. REST follows configured recovery, not assumed rules. ARCHIVE_CHECK removes a finished check from the active list. User preferences cannot be changed here.",
+            TrpgCommandSchema.JSON, "", true)
         private val UPDATE = ToolSpec("session_state_update", "Replace this conversation's complete campaign state using expectedRevision from session_state_read. Resources support universal CoC/D&D framework entries as well as custom lorebook numeric columns (set maximum for capped pools or omit maximum for standalone attributes/modifiers; not every preset field is required). Only record established events and report resource changes. A conflict requires reading and reconciling again.",
             """{"type":"object","properties":{"expectedRevision":{"type":"integer","minimum":0},"state":{"type":"object","properties":{"ruleset":{"type":"string","enum":["CUSTOM","DND_3R","DND_5E","COC_7"]},"playerName":{"type":"string","maxLength":128},"characterSheet":{"type":"string","maxLength":8192},"scene":{"type":"string","maxLength":4096},"notes":{"type":"string","maxLength":8192},"resources":{"type":"array","maxItems":32,"items":{"type":"object","properties":{"name":{"type":"string","maxLength":64},"current":{"type":"integer","minimum":-1000000,"maximum":1000000},"maximum":{"type":"integer","minimum":0,"maximum":1000000}},"required":["name","current"],"additionalProperties":false}}},"required":["ruleset","playerName","characterSheet","scene","notes","resources"],"additionalProperties":false}},"required":["expectedRevision","state"],"additionalProperties":false}""", "", true)
     }

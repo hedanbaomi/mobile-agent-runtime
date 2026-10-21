@@ -8,7 +8,8 @@ import runtime.mobileagent.domain.*
 import runtime.mobileagent.feature.chat.ChatMessageUi
 import runtime.mobileagent.agent.toolResultUserMessage
 
-internal fun projectChatMessage(message: Message, streaming: Boolean): ChatMessageUi {
+internal fun projectChatMessage(rawMessage: Message, streaming: Boolean): ChatMessageUi {
+    val message = trpgMessageForDisplay(rawMessage)
     val reasoningParts = message.parts.filterIsInstance<ReasoningPart>()
     val errorPart = message.parts.filterIsInstance<ErrorPart>().lastOrNull()
     val diffPart = message.parts.filterIsInstance<DiffPart>().lastOrNull()

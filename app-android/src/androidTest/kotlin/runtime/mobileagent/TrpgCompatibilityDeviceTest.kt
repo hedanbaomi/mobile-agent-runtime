@@ -6,11 +6,15 @@ package runtime.mobileagent
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.systemBarsPadding
+import androidx.compose.ui.Modifier
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performScrollTo
 import androidx.compose.ui.test.performTextReplacement
 import androidx.lifecycle.SavedStateHandle
 import androidx.test.platform.app.InstrumentationRegistry
@@ -133,6 +137,7 @@ class TrpgCompatibilityDeviceTest {
     @Test fun trpgChatBarSheetAndDiceRollerRespectSnapshotModeAndCas() =
         fixture(ApiFormat.OPENAI_COMPATIBLE) { app, _, trpgChatId ->
             val c = app.container
+            c.uiPreferences.edit().remove(runtime.mobileagent.ui.TRPG_HUD_EXPANDED).commit()
             val modelId = c.profiles.listModels().first { it.role == ModelRole.CHAT }.id
             val normalAgent = c.agents.saveWithPrompt(
                 AgentProfile("normal-${UUID.randomUUID()}", "Normal Agent", "p", modelId, revision = 1, mode = AgentMode.NORMAL),
@@ -143,8 +148,12 @@ class TrpgCompatibilityDeviceTest {
 
             var activeConversationId by mutableStateOf<String?>(normalChat.id)
             var insertedDraft = ""
+            compose.runOnUiThread {
+                androidx.core.view.WindowCompat.setDecorFitsSystemWindows(compose.activity.window, false)
+            }
             compose.setContent {
                 MobileAgentTheme(mode = AppThemeMode.CC66FF) {
+                    Box(Modifier.systemBarsPadding()) {
                     TrpgChatBar(
                         container = c,
                         conversationId = activeConversationId,
@@ -154,6 +163,7 @@ class TrpgCompatibilityDeviceTest {
                         chinese = true,
                         onInsertDraft = { insertedDraft = it },
                     )
+                    }
                 }
             }
             compose.waitForIdle()
@@ -162,6 +172,8 @@ class TrpgCompatibilityDeviceTest {
             compose.runOnIdle { activeConversationId = trpgChatId }
             compose.waitUntil(10_000) { compose.onAllNodesWithTag("trpg.chat.bar").fetchSemanticsNodes().isNotEmpty() }
             compose.onNodeWithTag("trpg.chat.bar").assertIsDisplayed()
+            compose.onNodeWithTag("trpg.chat.hud_body").assertDoesNotExist()
+            compose.onNodeWithTag("trpg.chat.toggle_hud").performClick()
             compose.onNodeWithTag("trpg.resource.dec.HP").performClick()
             compose.waitUntil(10_000) { c.trpg.get(trpgChatId).revision == 2L }
             assertEquals(9, c.trpg.get(trpgChatId).state.resources.single().current)
@@ -177,8 +189,11 @@ class TrpgCompatibilityDeviceTest {
             compose.onNodeWithTag("trpg.dice.dialog").assertIsDisplayed()
             compose.onNodeWithTag("trpg.dice.roll").performClick()
             compose.onNodeWithTag("trpg.dice.result").assertIsDisplayed()
-            compose.onNodeWithTag("trpg.dice.insert_draft").performClick()
-            assertTrue(insertedDraft.contains("1d20"))
+            compose.waitUntil(10_000) { c.trpg.get(trpgChatId).revision == 4L }
+            compose.waitForIdle()
+            compose.onNodeWithTag("trpg.dice.insert_draft").performScrollTo().assertIsDisplayed().performClick()
+            compose.waitUntil(5_000) { insertedDraft.isNotEmpty() }
+            assertTrue("Inserted draft: $insertedDraft", insertedDraft.contains("1d20"))
             assertTrue(c.runs.list(trpgChatId).isEmpty())
         }
 

@@ -3,6 +3,11 @@
 
 package runtime.mobileagent
 
+import kotlinx.serialization.encodeToString
+import kotlinx.serialization.decodeFromString
+import runtime.mobileagent.domain.TextPart
+import runtime.mobileagent.domain.ToolCallPart
+import runtime.mobileagent.domain.trpg.TrpgProjection
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.booleanOrNull
@@ -34,7 +39,7 @@ internal fun parseTrpgToolCard(message: Message): ChatTrpgToolCardUi? {
         // JSON shape must retain the ordinary tool presentation. Older receipts
         // without identity also fall back without changing their stored content.
         val name = TrpgToolArguments.parse(message.metadataJson)["toolName"]?.jsonPrimitive?.contentOrNull
-        if (name !in setOf("dice_roll", "session_state_read", "session_state_update")) return null
+        if (name !in setOf("dice_roll", "session_state_read", "session_state_update", "campaign_action")) return null
         val obj = TrpgToolArguments.parseResult(receipt.resultJson)
         when (name) {
             "dice_roll" -> when (obj["mode"]?.jsonPrimitive?.contentOrNull) {
@@ -44,7 +49,7 @@ internal fun parseTrpgToolCard(message: Message): ChatTrpgToolCardUi? {
             }
             else -> trpgSummaryJson.decodeFromJsonElement<TrpgSession>(obj).let {
                 TrpgStateValidation.validate(it)
-                if (it.conversationId == message.conversationId) ChatTrpgToolCardUi.CampaignState(it) else null
+                if (it.conversationId == message.conversationId) ChatTrpgToolCardUi.CampaignState(it.copy(state = TrpgProjection.player(it.state))) else null
             }
         }
     }.getOrNull()
@@ -120,4 +125,34 @@ internal fun trpgToolEventSummary(card: ChatTrpgToolCardUi): String {
             ).joinToString(" · ")
         }
     }
+}
+
+/** Raw state tool receipts may contain GM secrets, even when malformed or no longer parseable.
+ * Keep the durable message untouched and make every ordinary chat/source/recap surface fail closed.
+ */
+internal fun trpgMessageForDisplay(message: Message): Message {
+    val stateTools = setOf("session_state_read", "session_state_update", "campaign_action")
+    val toolName = runCatching { TrpgToolArguments.parse(message.metadataJson)["toolName"]?.jsonPrimitive?.contentOrNull }.getOrNull()
+    if (message.role == MessageRole.TOOL && toolName in stateTools) {
+        val receipt = message.parts.filterIsInstance<ToolResultPart>().singleOrNull()
+        val projected = receipt?.takeIf { it.status == "SUCCEEDED" }?.let {
+            runCatching {
+                val session = trpgSummaryJson.decodeFromJsonElement<TrpgSession>(TrpgToolArguments.parseResult(it.resultJson))
+                TrpgStateValidation.validate(session)
+                require(session.conversationId == message.conversationId)
+                trpgSummaryJson.encodeToString(session.copy(state = TrpgProjection.player(session.state)))
+            }.getOrNull()
+        }
+        val safeText = projected ?: "跑团状态操作已记录；请在团务面板查看可见资料。 / Campaign operation recorded; open the campaign panel."
+        return message.copy(text = safeText, parts = receipt?.let {
+            listOf(it.copy(resultJson = safeText))
+        } ?: listOf(TextPart(safeText)))
+    }
+    // Arguments are historical data, but can also contain a hidden fact before the result exists.
+    if (message.parts.filterIsInstance<ToolCallPart>().any { it.name in stateTools }) {
+        return message.copy(parts = message.parts.map { part ->
+            if (part is ToolCallPart && part.name in stateTools) part.copy(argumentsJson = "{}") else part
+        })
+    }
+    return message
 }

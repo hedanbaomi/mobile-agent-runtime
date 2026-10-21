@@ -66,6 +66,50 @@ class TrpgSessionToolsTest {
         assertTrue(executor.invoke(call) is ToolResult.Denied)
     }
 
+    @Test fun campaignCommandsUseTheBoundCallbackAndRejectForgedRollsAndPreferences() = runBlocking<Unit> {
+        var writes = 0
+        var current = TrpgSession("c")
+        val executor = TrpgSessionToolExecutor(snapshot(), AgentRun("r", "s", "c"), { current },
+            { _, _, _ -> error("Legacy update must not handle commands") }, { true },
+            command = { _, revision, command ->
+                assertEquals(current.revision, revision)
+                writes++
+                current = current.copy(revision = revision + 1, state = TrpgCommandReducer.apply(current.state, command))
+                current
+            })
+        assertTrue(executor.specs.any { it.name == "campaign_action" })
+        val call = ToolCall("check", "campaign_action", """{"expectedRevision":0,"command":{"operation":"REQUEST_CHECK","check":{"id":"check","title":"Listen","expression":"1d20"}}}""")
+        val first = executor.invoke(call)
+        assertTrue(first is ToolResult.Value)
+        assertEquals(first, executor.invoke(call))
+        assertEquals(1, writes)
+        val forged = listOf(
+            """{"operation":"REQUEST_CHECK","check":{"id":"new","title":"Forged","roll":{"total":20}}}""",
+            """{"operation":"REQUEST_CHECK","check":{"id":"new","title":"Forged"},"preferences":{"diceMode":"AUTOMATIC"}}""",
+            """{"operation":"REMOVE_FACT","id":"missing","note":"unexpected"}""",
+        )
+        forged.forEachIndexed { index, value ->
+            assertTrue(executor.invoke(ToolCall("forged$index", "campaign_action", """{"expectedRevision":1,"command":$value}""")) is ToolResult.Invalid)
+        }
+        assertEquals(1, writes)
+    }
+
+    @Test fun stateReceiptDisplayIsProjectedAndMalformedReceiptFailsClosed() {
+        val secret = TrpgSession("c", state = TrpgState(campaign = TrpgCampaign(facts = listOf(
+            TrpgFact("hidden", "SECRET", visibility = TrpgVisibility.GAME_MASTER)))))
+        val payload = json.encodeToString(TrpgSession.serializer(), secret)
+        val message = runtime.mobileagent.domain.Message(id = "m", conversationId = "c", role = runtime.mobileagent.domain.MessageRole.TOOL, text = payload,
+            parts = listOf(runtime.mobileagent.domain.ToolResultPart("call", payload)),
+            metadataJson = """{"toolName":"campaign_action"}""", status = "COMPLETE", createdAt = "now")
+        val display = projectChatMessage(message, false)
+        assertFalse(display.text.contains("SECRET"))
+        assertNotNull(display.trpgToolCard)
+        assertTrue(message.text.contains("SECRET"))
+        val malformed = message.copy(text = "SECRET malformed", parts = listOf(runtime.mobileagent.domain.ToolResultPart("call", "SECRET malformed")))
+        assertFalse(projectChatMessage(malformed, false).text.contains("SECRET"))
+        assertFalse(trpgMessageForDisplay(malformed).parts.toString().contains("SECRET"))
+    }
+
     @Test fun malformedAndPartialStateNeverReachesPersistence() = runBlocking<Unit> {
         val executor = TrpgSessionToolExecutor(snapshot(), AgentRun("r", "s", "c"), { error("no read") }, { _, _, _ -> error("no write") }, { true })
         val bad = listOf("{\"expectedRevision\":0,\"state\":{}}", "{\"expectedRevision\":\"0\",\"state\":{}}",

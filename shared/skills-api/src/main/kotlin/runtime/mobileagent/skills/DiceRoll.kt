@@ -196,6 +196,12 @@ object DiceRoll {
         ) : ParsedTerm
     }
 
+    /** Check a proposed request without drawing any random values. */
+    fun validateExpression(expression: String, dc: Int? = null) {
+        require(dc == null || dc in -MAX_ABS_DC..MAX_ABS_DC)
+        parseExpression(expression)
+    }
+
     /** Roll a validated dice expression. A present [dc] means `total >= dc` succeeds. */
     fun roll(expression: String, random: Random = Random.Default, dc: Int? = null): StandardRoll {
         require(dc == null || dc in -MAX_ABS_DC..MAX_ABS_DC) { "dc is outside the supported range" }

@@ -22,6 +22,9 @@ data class TrpgState(
     val scene: String = "",
     val notes: String = "",
     val resources: List<TrpgResource> = emptyList(),
+    @OptIn(kotlinx.serialization.ExperimentalSerializationApi::class)
+    @kotlinx.serialization.EncodeDefault(kotlinx.serialization.EncodeDefault.Mode.NEVER)
+    val campaign: TrpgCampaign = TrpgCampaign(),
 )
 
 @Serializable
@@ -43,6 +46,7 @@ object TrpgStateValidation {
             require(it.current in -1_000_000..1_000_000) { "TRPG resource value is out of range" }
             require(it.maximum == null || it.maximum in 0..1_000_000) { "TRPG resource maximum is out of range" }
         }
+        TrpgCampaignValidation.validate(state.campaign)
         require(json.encodeToString(state).toByteArray(Charsets.UTF_8).size <= MAX_ENCODED_BYTES) { "TRPG state exceeds 64 KiB" }
     }
     fun validate(session: TrpgSession) {

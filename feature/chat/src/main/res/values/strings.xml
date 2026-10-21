@@ -95,4 +95,5 @@
     <string name="trpg_tool_coc_regular" formatted="false">REGULAR SUCCESS</string>
     <string name="trpg_tool_coc_failure" formatted="false">FAILURE</string>
     <string name="trpg_tool_coc_fumble" formatted="false">FUMBLE</string>
+    <string name="chat_jump_to_latest">Jump to latest</string>
 </resources>

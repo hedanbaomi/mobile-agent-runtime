@@ -149,6 +149,8 @@ data class AssistantToolCall(
 data class ProviderContinuationItem(
     val itemId: String? = null,
     val encryptedContent: String,
+    /** Transport ownership; private payloads must never cross protocol boundaries. */
+    val protocol: String = "openai-responses",
 ) {
     init {
         require(encryptedContent.isNotBlank()) { "Continuation content must not be blank" }

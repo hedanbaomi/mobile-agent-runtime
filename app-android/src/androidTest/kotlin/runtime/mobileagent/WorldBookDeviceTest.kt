@@ -15,7 +15,7 @@ import runtime.mobileagent.domain.worldbook.*
 /** Production Chat VM, SQLite and both wire adapters; all provider traffic stays on loopback. */
 class WorldBookDeviceTest {
     @Test fun bothProtocolsUseFrozenBooksAndEditsApplyOnlyToTheNextSend() {
-        for (format in ApiFormat.entries) fixture(format) { app, server, chat, book ->
+        for (format in listOf(ApiFormat.OPENAI_COMPATIBLE, ApiFormat.OPENAI_RESPONSES)) fixture(format) { app, server, chat, book ->
             val vm = viewModel(app, chat)
             val grants = app.container.db.query("SELECT * FROM capability_grants")
             send(vm, "请介绍白塔")

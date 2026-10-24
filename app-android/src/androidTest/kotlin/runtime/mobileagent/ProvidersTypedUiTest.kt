@@ -48,6 +48,38 @@ class ProvidersTypedUiTest {
     val compose = createAndroidComposeRule<ComposeTestHostActivity>()
 
     @Test
+    fun googleFormatsFillOfficialEndpointsAndExplainOAuthInBothLanguages() {
+        val uiState = mutableStateOf(state(ProviderProbeUiState()).copy(editorOpen = true, language = "en-US",
+            draft = ProviderDraft(name = "Google", apiKey = "synthetic-unsaved-key")))
+        compose.setContent {
+            runtime.mobileagent.ui.AppLocalizedResources(uiState.value.language) {
+                MaterialTheme { ProvidersScreen(state = uiState.value,
+                    actions = ProvidersActions(onDraftChange = { uiState.value = uiState.value.copy(draft = it) })) }
+            }
+        }
+        for ((format, base) in listOf(
+            "GOOGLE_AI_STUDIO" to "https://generativelanguage.googleapis.com/v1beta",
+            "GOOGLE_VERTEX_EXPRESS" to "https://aiplatform.googleapis.com/v1/publishers/google",
+            "GOOGLE_VERTEX_AI" to "https://aiplatform.googleapis.com/v1/projects/PROJECT_ID/locations/global/publishers/google",
+        )) {
+            compose.onNodeWithTag("provider.apiFormat").performScrollTo().performClick()
+            compose.onNodeWithTag("provider.apiFormat.$format").performClick()
+            compose.runOnIdle {
+                assertEquals(format, uiState.value.draft.apiFormat)
+                assertEquals(base, uiState.value.draft.baseUrl)
+                assertEquals("", uiState.value.draft.apiKey)
+            }
+        }
+        compose.onNodeWithText("OAuth access token (without Bearer)", useUnmergedTree = true).performScrollTo().assertIsDisplayed()
+        compose.runOnIdle { uiState.value = uiState.value.copy(language = "zh-CN") }
+        compose.onNodeWithText("OAuth Access Token（不含 Bearer）", useUnmergedTree = true).performScrollTo().assertIsDisplayed()
+        compose.runOnIdle { uiState.value = uiState.value.copy(draft = uiState.value.draft.copy(baseUrl = "https://custom.example.invalid/v1beta")) }
+        compose.onNodeWithTag("provider.apiFormat").performScrollTo().performClick()
+        compose.onNodeWithTag("provider.apiFormat.GOOGLE_AI_STUDIO").performClick()
+        compose.runOnIdle { assertEquals("https://custom.example.invalid/v1beta", uiState.value.draft.baseUrl) }
+    }
+
+    @Test
     fun httpEditorExplainsPlaintextCredentialsInBothLanguages() {
         val uiState = mutableStateOf(state(ProviderProbeUiState()).copy(editorOpen = true, language = "zh-CN",
             draft = ProviderDraft(name = "Proxy", baseUrl = "http://192.168.1.20:8080/v1")))

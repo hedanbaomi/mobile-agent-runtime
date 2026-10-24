@@ -7,6 +7,7 @@ import io.ktor.client.HttpClient
 import runtime.mobileagent.data.ProfileRepository
 import runtime.mobileagent.domain.ModelRole
 import runtime.mobileagent.domain.ProviderEndpointPolicy
+import runtime.mobileagent.domain.isGoogleNative
 import runtime.mobileagent.embedding.ApiEmbeddingTextEmbedderFactory
 import runtime.mobileagent.knowledge.ApiEmbeddingBinding
 import runtime.mobileagent.knowledge.TextEmbedder
@@ -24,15 +25,20 @@ class ApiEmbeddingRegistry(
 ) {
     fun options(): List<Pair<String, String>> = profiles.listModels()
         .filter { it.role == ModelRole.EMBEDDING }
-        .mapNotNull { model -> profiles.getProvider(model.providerId)?.let { provider ->
-            model.id to "${provider.name} · ${model.modelId} · r${provider.revision}/${model.revision}"
-        } }
+        .mapNotNull { model ->
+            profiles.getProvider(model.providerId)
+                ?.takeUnless { it.apiFormat.isGoogleNative() }
+                ?.let { provider ->
+                    model.id to "${provider.name} · ${model.modelId} · r${provider.revision}/${model.revision}"
+                }
+        }
 
     fun binding(modelProfileId: String, dimension: Int, knowledgeBaseId: String): ApiEmbeddingBinding {
         require(dimension in 1..8192) { "Embedding 维度必须为 1—8192，请按服务商模型规格填写。" }
         val model = profiles.getModel(modelProfileId) ?: error("Embedding 模型已被移除。")
         require(model.role == ModelRole.EMBEDDING) { "请选择 Embedding 角色的模型。" }
         val provider = profiles.getProvider(model.providerId) ?: error("Embedding 服务商已被移除。")
+        require(!provider.apiFormat.isGoogleNative()) { "Google 原生格式当前支持聊天与视觉模型。" }
         require(provider.secretRef.isNotBlank()) { "请先在本机为 Embedding 服务商配置凭据。" }
         validateEndpoint(provider.baseUrl)
         return ApiEmbeddingBinding(
@@ -52,6 +58,7 @@ class ApiEmbeddingRegistry(
         val model = profiles.getModel(binding.modelProfileId) ?: return null
         val provider = profiles.getProvider(binding.providerId) ?: return null
         if (model.role != ModelRole.EMBEDDING || model.providerId != provider.id ||
+            provider.apiFormat.isGoogleNative() ||
             model.modelId != binding.modelId || model.revision != binding.modelRevision ||
             provider.revision != binding.providerRevision ||
             provider.baseUrl.trimEnd('/') != binding.endpoint || provider.secretRef.isBlank()) return null

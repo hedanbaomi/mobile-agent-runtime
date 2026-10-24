@@ -38,7 +38,7 @@ import runtime.mobileagent.ui.TrpgChatBar
 class TrpgCompatibilityDeviceTest {
     @get:Rule val compose = createAndroidComposeRule<ComposeTestHostActivity>()
     @Test fun characterBookAndStateUpdateCoexistThroughBothWireProtocols() {
-        for (format in ApiFormat.entries) fixture(format, tools = true) { app, server, chat ->
+        for (format in listOf(ApiFormat.OPENAI_COMPATIBLE, ApiFormat.OPENAI_RESPONSES)) fixture(format, tools = true) { app, server, chat ->
             val c = app.container
             val grants = c.db.query("SELECT * FROM capability_grants")
             val vm = viewModel(app, chat)

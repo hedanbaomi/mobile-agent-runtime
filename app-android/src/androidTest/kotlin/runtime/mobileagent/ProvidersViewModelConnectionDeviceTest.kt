@@ -43,6 +43,33 @@ import runtime.mobileagent.provider.ProviderConnectionResult
 @RunWith(AndroidJUnit4::class)
 class ProvidersViewModelConnectionDeviceTest {
     @Test
+    fun googleProfilesPersistAndChangingAuthRequiresFreshCredentialsWithoutTraffic() {
+        val harness = harness(onTest = { error("Saving must not send a request") })
+        val vm = harness.vm
+        val name = "Google native ${UUID.randomUUID()}"
+        assertTrue(vm.saveDraft(ProviderDraft(name = name, baseUrl = "https://generativelanguage.googleapis.com/v1beta",
+            apiFormat = ApiFormat.GOOGLE_AI_STUDIO.name, modelId = "gemini-fixture", apiKey = "SYNTHETIC_GOOGLE_KEY")))
+        val saved = vm.providers.single { it.name == name }
+        val model = vm.models.single { it.providerId == saved.id }
+        assertEquals(ApiFormat.GOOGLE_AI_STUDIO, saved.apiFormat)
+        vm.reload()
+        assertEquals(saved, vm.providers.single { it.id == saved.id })
+        assertFalse(vm.saveDraft(ProviderDraft(providerId = saved.id, name = saved.name,
+            baseUrl = saved.baseUrl, apiFormat = ApiFormat.OPENAI_COMPATIBLE.name, modelId = "")))
+        val changed = ProviderDraft(providerId = saved.id, modelProfileId = model.id, name = saved.name,
+            baseUrl = "https://aiplatform.googleapis.com/v1/projects/test-project/locations/global/publishers/google",
+            apiFormat = ApiFormat.GOOGLE_VERTEX_AI.name, modelId = "gemini-fixture")
+        assertFalse(vm.saveDraft(changed))
+        assertTrue(vm.saveDraft(changed.copy(apiKey = "SYNTHETIC_OAUTH_TOKEN")))
+        val vertex = vm.providers.single { it.id == saved.id }
+        assertEquals(ApiFormat.GOOGLE_VERTEX_AI, vertex.apiFormat)
+        assertTrue(vertex.secretRef != saved.secretRef)
+        assertFalse(vm.saveDraft(changed.copy(baseUrl = changed.baseUrl.replace("test-project", "PROJECT_ID"), apiKey = "SYNTHETIC_OAUTH_TOKEN")))
+        assertFalse(vm.saveDraft(changed.copy(apiKey = "SYNTHETIC_OAUTH_TOKEN", parametersJson = """{"generationConfig":{"contents":[]}}""")))
+        assertFalse(vm.saveDraft(changed.copy(apiKey = "SYNTHETIC_OAUTH_TOKEN", role = ModelRole.EMBEDDING)))
+    }
+
+    @Test
     fun httpReverseProxySavesAndDestinationChangeRequiresItsOwnKey() {
         val harness = harness(onTest = { error("Saving must not send a request") })
         val initial = harness.vm.providers.single { it.id == harness.vm.models.single { it.id == harness.modelId }.providerId }

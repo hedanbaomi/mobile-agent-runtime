@@ -14,9 +14,10 @@ object ProviderDestinationBinding {
         previous: ProviderProfile?,
         newBaseUrl: String,
         requested: Map<String, String> = emptyMap(),
+        newApiFormat: ApiFormat? = previous?.apiFormat,
     ): Map<String, String> {
         if (previous == null) return requested
-        if (previous.baseUrl == newBaseUrl) return requested.ifEmpty { previous.headerSecretRefs }
+        if (previous.baseUrl == newBaseUrl && previous.apiFormat == newApiFormat) return requested.ifEmpty { previous.headerSecretRefs }
         if (requested.isEmpty() || requested == previous.headerSecretRefs) return emptyMap()
         return requested
     }

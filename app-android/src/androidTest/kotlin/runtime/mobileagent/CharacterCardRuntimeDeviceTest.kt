@@ -49,7 +49,7 @@ class CharacterCardRuntimeDeviceTest {
         val app = instrumentation.targetContext.applicationContext as MobileAgentApp
         app.ensureHostInitialized()
         val c = app.container
-        for (format in ApiFormat.entries) WorldBookLoopback(format, false).use { server ->
+        for (format in listOf(ApiFormat.OPENAI_COMPATIBLE, ApiFormat.OPENAI_RESPONSES)) WorldBookLoopback(format, false).use { server ->
             val id = UUID.randomUUID().toString()
             val ref = "character-fixture-$id"
             c.secrets.put(ref, "synthetic-character-fixture".toCharArray())

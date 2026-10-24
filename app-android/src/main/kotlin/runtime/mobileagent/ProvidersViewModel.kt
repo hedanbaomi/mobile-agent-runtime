@@ -13,6 +13,8 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonElement
 import runtime.mobileagent.domain.ApiFormat
 import runtime.mobileagent.domain.EntityId
 import runtime.mobileagent.domain.ModelProfile
@@ -137,9 +139,9 @@ class ProvidersViewModel @JvmOverloads constructor(
                 .getOrElse { throw IllegalArgumentException("API 格式不受支持。") }
             val previous = draft.providerId?.let { app.container.profiles.getProvider(it) }
             require(draft.providerId == null || previous != null) { "服务已被删除，请重新打开表单。" }
-            require(previous != null || draft.apiKey.isNotBlank()) { "新服务需要 API Key；密钥只会以 Keystore 密文保存。" }
-            require(previous == null || previous.baseUrl == endpoint.toASCIIString() || draft.apiKey.isNotBlank()) {
-                "服务目标发生变化，请重新填写该目标的 API Key；不会把旧目标的密钥转发到新地址。"
+            require(previous != null || draft.apiKey.isNotBlank()) { "新服务需要凭据；密钥只会以 Keystore 密文保存。" }
+            require(previous == null || (previous.baseUrl == endpoint.toASCIIString() && previous.apiFormat == apiFormat) || draft.apiKey.isNotBlank()) {
+                "服务目标或认证格式发生变化，请重新填写该目标的凭据；不会复用旧目标的密钥。"
             }
             val providerId = previous?.id ?: EntityId.random().value
             val saveModel = draft.modelId.isNotBlank() || draft.modelProfileId != null
@@ -200,13 +202,22 @@ class ProvidersViewModel @JvmOverloads constructor(
                 }
                 val parsed = Json.parseToJsonElement(draft.parametersJson)
                 require(parsed is JsonObject) { "模型参数必须是 JSON 对象。" }
-                rejectReserved(parsed)
+                rejectReserved(parsed, apiFormat)
                 parameters = parsed
             }
+            OpenAiAdapterFactory.validateDraftSave(
+                format = apiFormat,
+                baseUrl = endpoint.toASCIIString(),
+                saveModel = saveModel,
+                draftRole = draft.role,
+                effectiveModelId = effectiveModelId,
+                existingModels = app.container.profiles.listModels(providerId),
+                editingModelId = modelPrevious?.id,
+            )
             val provider = ProviderProfile(
                 id = providerId, name = draft.name.trim(), apiFormat = apiFormat,
                 baseUrl = endpoint.toASCIIString(), secretRef = if (draft.apiKey.isNotBlank()) "provider:$providerId:${EntityId.random().value}" else previous!!.secretRef,
-                headerSecretRefs = ProviderDestinationBinding.headerSecretRefsForSave(previous, endpoint.toASCIIString()),
+                headerSecretRefs = ProviderDestinationBinding.headerSecretRefsForSave(previous, endpoint.toASCIIString(), newApiFormat = apiFormat),
                 nonSecretHeaders = previous?.nonSecretHeaders.orEmpty(),
                 revision = (previous?.revision ?: 0) + 1,
             )
@@ -215,6 +226,7 @@ class ProvidersViewModel @JvmOverloads constructor(
             // An unrelated edit must retain a verified catalog fact without
             // relabeling it as a user declaration or requiring a new network read.
             val windowFact = if (draft.contextLimitMode == ContextLimitMode.AUTO && declaredWindow == null &&
+                previous?.apiFormat == apiFormat &&
                 modelPrevious?.contextWindowSource == ContextLimitSource.PROVIDER_METADATA &&
                 modelPrevious.contextWindowValue?.let { it > 0 } == true &&
                 runtime.mobileagent.domain.contextWindowTargetMatches(modelPrevious.contextWindowTarget, target)
@@ -238,8 +250,7 @@ class ProvidersViewModel @JvmOverloads constructor(
             ).withEndpoint() else null
             app.container.db.transaction {
                 if (draft.apiKey.isNotBlank()) app.container.secrets.put(provider.secretRef, draft.apiKey.toCharArray())
-                app.container.profiles.upsertProvider(provider)
-                if (model != null) app.container.profiles.upsertModel(model)
+                app.container.profiles.upsertProviderAndModel(provider, model)
             }
             // A replacement key gets a fresh reference. Retire the previous
             // reference only after the provider row points at the new one;
@@ -307,8 +318,10 @@ class ProvidersViewModel @JvmOverloads constructor(
             "服务地址必须是有效的 Base URL，不能含凭据、查询或片段。" -> "Enter a valid base URL without credentials, a query, or a fragment."
             "API 格式不受支持。" -> "The API format is unsupported."
             "服务已被删除，请重新打开表单。" -> "This provider was deleted. Reopen the form."
-            "新服务需要 API Key；密钥只会以 Keystore 密文保存。" -> "A new provider needs an API key, stored encrypted with Keystore."
-            "服务目标发生变化，请重新填写该目标的 API Key；不会把旧目标的密钥转发到新地址。" -> "The destination changed. Enter its API key; the old destination's key will not be forwarded."
+            "新服务需要凭据；密钥只会以 Keystore 密文保存。" -> "A new provider needs a credential, stored encrypted with Keystore."
+            "服务目标或认证格式发生变化，请重新填写该目标的凭据；不会复用旧目标的密钥。" -> "The destination or authentication format changed. Enter a credential for the new target; the previous target's secret will not be reused."
+            "Google 原生格式当前支持聊天与视觉模型。" -> "Google native formats currently support chat and vision models only."
+            "请将 Base URL 中的 PROJECT_ID 替换为 Google Cloud 项目 ID。" -> "Replace PROJECT_ID in the Base URL with your Google Cloud project ID."
             "保存失败。" -> "Could not save the provider."
             else -> message
         }
@@ -894,10 +907,16 @@ class ProvidersViewModel @JvmOverloads constructor(
         CapabilityCheckStatus.UNKNOWN -> "unknown"
     }
 
-    private fun rejectReserved(objectValue: JsonObject) {
-        objectValue.forEach { (key, value) ->
-            require(key.lowercase() !in setOf("model", "messages", "input", "instructions", "tools", "stream", "authorization", "api_key", "headers")) { "参数 $key 由运行时控制，不能覆盖。" }
-            if (value is JsonObject) rejectReserved(value)
+    private fun rejectReserved(element: JsonElement, format: ApiFormat) {
+        when (element) {
+            is JsonObject -> element.forEach { (key, value) ->
+                val reserved = setOf("model", "messages", "input", "instructions", "tools", "tool_choice", "stream", "authorization", "api_key", "headers") +
+                    if (format.name.startsWith("GOOGLE_")) setOf("contents", "systeminstruction", "system_instruction", "toolconfig", "tool_config", "cachedcontent", "cached_content", "key", "x-goog-api-key") else emptySet()
+                require(key.lowercase() !in reserved) { "参数 $key 由运行时控制，不能覆盖。" }
+                rejectReserved(value, format)
+            }
+            is JsonArray -> element.forEach { rejectReserved(it, format) }
+            else -> Unit
         }
     }
 

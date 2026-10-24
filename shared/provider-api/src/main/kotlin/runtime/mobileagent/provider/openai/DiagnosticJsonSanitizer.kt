@@ -20,6 +20,8 @@ internal object DiagnosticJsonSanitizer {
         "provider_continuation_items",
         "providercontinuationitems",
         "reasoning_content",
+        "thought_signature",
+        "thoughtsignature",
     )
 
     fun sanitize(raw: String, secrets: List<String>): String? {

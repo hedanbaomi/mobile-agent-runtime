@@ -32,6 +32,58 @@ import runtime.mobileagent.provider.openai.OpenAiAdapterFactory
 /** Real loopback sockets and the production transport, including non-debuggable review builds. */
 @RunWith(AndroidJUnit4::class)
 class ProviderHttpEndpointDeviceTest {
+    @Test fun googleNativeFormatsUseProductionAuthAndTypedHttpFailures() = runBlocking {
+        val native = """{"candidates":[{"content":{"role":"model","parts":[{"text":"Google fixture ok"}]},"finishReason":"STOP"}]}"""
+        for (format in listOf(ApiFormat.GOOGLE_AI_STUDIO, ApiFormat.GOOGLE_VERTEX_AI, ApiFormat.GOOGLE_VERTEX_EXPRESS)) {
+            val status = java.util.concurrent.atomic.AtomicInteger(200)
+            Fixture { Reply(body = native) }.use { redirectTarget ->
+                Fixture(bindHost = "localhost.") { request ->
+                    if (status.get() != 200) Reply(status.get(), body = "{}", location = redirectTarget.base)
+                    else if (request.path.contains(":streamGenerateContent")) Reply(contentType = "text/event-stream", body = "data: $native\n\n")
+                    else Reply(body = native)
+                }.use { server ->
+                    createProviderHttpClient(3_000).use { http ->
+                        val suffix = when (format) {
+                            ApiFormat.GOOGLE_AI_STUDIO -> "/prefix/v1beta"
+                            ApiFormat.GOOGLE_VERTEX_AI -> "/prefix/v1/projects/test-project/locations/global/publishers/google"
+                            else -> "/prefix/v1/publishers/google"
+                        }
+                        val adapter = OpenAiAdapterFactory.create(format, http, server.base + suffix,
+                            HeaderSecretResolver { host, _ -> assertEquals("localhost", host); DUMMY_AUX.toCharArray() },
+                            mapOf("X-Proxy-Token" to RequestHeaderValue.SecretRef("aux-ref")))
+                        val model = ModelProfile("google-fixture", "provider", ModelRole.CHAT, "gemini-fixture", setOf("stream"),
+                            contextLimit = 4096, outputLimit = 32, revision = 1)
+                        assertTrue(adapter.testConnection(model, DUMMY_KEY.toCharArray()) is ProviderConnectionResult.Success)
+                        val captured = server.requests.single()
+                        assertEquals(format == ApiFormat.GOOGLE_VERTEX_AI, captured.credentialMatched)
+                        assertEquals(format != ApiFormat.GOOGLE_VERTEX_AI, captured.apiKeyMatched)
+                        assertTrue(captured.auxiliaryMatched)
+                        assertEquals(suffix + "/models/gemini-fixture:generateContent", captured.path)
+                        val request = ModelRequest("gemini-fixture", listOf(ChatMessage("user", "hello")))
+                        val events = adapter.stream(request, DUMMY_KEY.toCharArray()).toList()
+                        assertTrue(events.toString(), events.last() is ModelEvent.Completed)
+                        assertTrue(server.requests.last().path.endsWith(":streamGenerateContent?alt=sse"))
+                        assertFalse(server.requests.last().body.contains(DUMMY_KEY))
+                        val count = server.requests.size
+                        assertFalse(adapter.probe(model, DUMMY_KEY.toCharArray(), ProbeConsent.NOT_GRANTED).charged)
+                        assertEquals(count, server.requests.size)
+                        adapter.stream(request.copy(beforeDispatch = { false }), DUMMY_KEY.toCharArray()).toList()
+                        assertEquals(count, server.requests.size)
+                        status.set(503)
+                        val failure = adapter.testConnection(model, DUMMY_KEY.toCharArray()) as ProviderConnectionResult.Failure
+                        assertEquals(ProviderConnectionErrorCode.PROVIDER_REJECTED, failure.code)
+                        assertEquals(503, failure.httpStatus)
+                        assertEquals(count + 1, server.requests.size)
+                        status.set(302)
+                        val redirect = adapter.testConnection(model, DUMMY_KEY.toCharArray()) as ProviderConnectionResult.Failure
+                        assertEquals(ProviderConnectionErrorCode.ENDPOINT_UNSUPPORTED, redirect.code)
+                        assertTrue(redirectTarget.requests.isEmpty())
+                    }
+                }
+            }
+        }
+    }
+
     @Test fun knowledgeVisionParsesHttpContentAndKeepsAuxiliaryHeaderBindingInBothFormats() {
         val bitmap = Bitmap.createBitmap(1, 1, Bitmap.Config.ARGB_8888)
         val png = ByteArrayOutputStream().also { bitmap.compress(Bitmap.CompressFormat.PNG, 100, it) }.toByteArray()
@@ -39,7 +91,7 @@ class ProviderHttpEndpointDeviceTest {
         val description = "HTTP evidence http://source.example.invalid/chart"
         val visionJson = """{"ocrText":"HTTP OCR","semanticDescription":"$description","tableMarkdown":"","type":"image"}"""
         val encoded = JsonPrimitive(visionJson).toString()
-        for (format in ApiFormat.entries) for (host in listOf("LOCALHOST", "localhost.")) {
+        for (format in listOf(ApiFormat.OPENAI_COMPATIBLE, ApiFormat.OPENAI_RESPONSES)) for (host in listOf("LOCALHOST", "localhost.")) {
             Fixture(bindHost = host) { _ -> Reply(body = if (format == ApiFormat.OPENAI_COMPATIBLE)
                 """{"choices":[{"message":{"content":$encoded},"finish_reason":"stop"}]}"""
                 else """{"status":"completed","output":[{"type":"message","content":[{"type":"output_text","text":$encoded}]}]}""") }.use { server ->
@@ -68,7 +120,7 @@ class ProviderHttpEndpointDeviceTest {
     }
 
     @Test fun ipv6HttpPrefixAndAuxiliaryCredentialsReachOnlyTheSelectedHost() = runBlocking {
-        for (format in ApiFormat.entries) {
+        for (format in listOf(ApiFormat.OPENAI_COMPATIBLE, ApiFormat.OPENAI_RESPONSES)) {
             Fixture(bindHost = "::1") { request -> successReply(request, format) }.use { server ->
                 createProviderHttpClient(3_000).use { http ->
                     val base = "${server.base}/ipv6/v1"
@@ -92,7 +144,7 @@ class ProviderHttpEndpointDeviceTest {
     }
 
     @Test fun httpCapabilityMetadataAndStreamProbeRequireConsentAndPreserveProxyPrefix() = runBlocking {
-        for (format in ApiFormat.entries) {
+        for (format in listOf(ApiFormat.OPENAI_COMPATIBLE, ApiFormat.OPENAI_RESPONSES)) {
             Fixture { request -> if (request.path.endsWith("/models/fixture-model"))
                 Reply(body = """{"id":"fixture-model","object":"model"}""")
                 else successReply(request, format) }.use { server ->
@@ -122,7 +174,7 @@ class ProviderHttpEndpointDeviceTest {
 
     @Test fun configuredHttpWorksForConnectionVisionStreamAndEmbeddingInBothFormats() = runBlocking {
         assertTrue(NetworkSecurityPolicy.getInstance().isCleartextTrafficPermitted("proxy.example.invalid"))
-        for (format in ApiFormat.entries) {
+        for (format in listOf(ApiFormat.OPENAI_COMPATIBLE, ApiFormat.OPENAI_RESPONSES)) {
             Fixture { request -> successReply(request, format) }.use { server ->
                 createProviderHttpClient(3_000).use { http ->
                     val base = ProviderEndpointPolicy.parseBaseUrl("${server.base}/gateway/openai/v1/").toASCIIString()
@@ -148,7 +200,7 @@ class ProviderHttpEndpointDeviceTest {
     }
 
     @Test fun redirectsNeverForwardCredentialsOrContentToAnotherProxy() = runBlocking {
-        for (format in ApiFormat.entries) for (status in listOf(301, 302, 303, 307, 308)) {
+        for (format in listOf(ApiFormat.OPENAI_COMPATIBLE, ApiFormat.OPENAI_RESPONSES)) for (status in listOf(301, 302, 303, 307, 308)) {
             Fixture { request -> successReply(request, format) }.use { destination ->
                 Fixture { Reply(status, "application/json", "{}", "${destination.base}/unexpected") }.use { source ->
                     createProviderHttpClient(3_000).use { http ->
@@ -169,7 +221,7 @@ class ProviderHttpEndpointDeviceTest {
     }
 
     @Test fun serviceUnavailableIsSentOnceEvenWhenProxySuggestsImmediateRetry() = runBlocking {
-        for (format in ApiFormat.entries) {
+        for (format in listOf(ApiFormat.OPENAI_COMPATIBLE, ApiFormat.OPENAI_RESPONSES)) {
             Fixture { Reply(status = 503, body = "{}", retryAfter = "0") }.use { server ->
                 createProviderHttpClient(3_000).use { http ->
                     val adapter = OpenAiAdapterFactory.create(format, http, "${server.base}/v1")
@@ -195,7 +247,8 @@ class ProviderHttpEndpointDeviceTest {
         else -> Reply(body = """{"status":"completed","output":[{"type":"message","content":[{"type":"output_text","text":"ok"}]}]}""")
     }
 
-    internal data class Request(val path: String, val body: String, val credentialMatched: Boolean, val auxiliaryMatched: Boolean)
+    internal data class Request(val path: String, val body: String, val credentialMatched: Boolean, val auxiliaryMatched: Boolean,
+        val apiKeyMatched: Boolean = false)
     internal data class Reply(val status: Int = 200, val contentType: String = "application/json", val body: String,
         val location: String? = null, val retryAfter: String? = null)
 
@@ -237,7 +290,7 @@ class ProviderHttpEndpointDeviceTest {
                         read += count
                     }
                     val request = Request(path, body.toString(Charsets.UTF_8), headers["authorization"] == "Bearer $expectedKey",
-                        headers["x-proxy-token"] == DUMMY_AUX)
+                        headers["x-proxy-token"] == DUMMY_AUX, headers["x-goog-api-key"] == expectedKey)
                     requests += request
                     val response = reply(request)
                     val bytes = response.body.toByteArray(Charsets.UTF_8)

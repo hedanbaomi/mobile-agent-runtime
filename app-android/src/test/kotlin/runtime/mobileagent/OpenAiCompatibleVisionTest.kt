@@ -46,7 +46,7 @@ import kotlinx.serialization.json.jsonPrimitive
 
 class OpenAiCompatibleVisionTest {
     @Test fun tinyKnownWindowFailsLocallyWithoutDispatchOnBothProtocols() {
-        for (format in ApiFormat.entries) {
+        for (format in listOf(ApiFormat.OPENAI_COMPATIBLE, ApiFormat.OPENAI_RESPONSES)) {
             val original = target("tiny-window", "vision")
             val selected = original.first.copy(apiFormat = format) to original.second.copy(
                 contextLimit = 4096, outputLimitMode = OutputLimitMode.AUTO, outputLimit = 0)
@@ -98,7 +98,7 @@ class OpenAiCompatibleVisionTest {
     }
 
     @Test fun httpErrorKeepsReportedUsageOnBothProtocols() {
-        for (format in ApiFormat.entries) {
+        for (format in listOf(ApiFormat.OPENAI_COMPATIBLE, ApiFormat.OPENAI_RESPONSES)) {
             val pair = target("error-usage", "vision")
             val selected = pair.first.copy(apiFormat = format) to pair.second
             val response = """{"error":{"message":"rejected"},"usage":{"input_tokens":8,"output_tokens":5,"output_tokens_details":{"reasoning_tokens":3}}}"""
@@ -739,7 +739,7 @@ class OpenAiCompatibleVisionTest {
             "甲".repeat(4_000) + "😀" + "乙".repeat(4_000),
             "短页😀保留完整上下文",
         )
-        for (format in ApiFormat.entries) for (source in sources) {
+        for (format in listOf(ApiFormat.OPENAI_COMPATIBLE, ApiFormat.OPENAI_RESPONSES)) for (source in sources) {
             val pair = target("review-wire", "review-wire-model")
             val selected = pair.first.copy(apiFormat = format) to pair.second
             val intercepted = mutableListOf<String>()

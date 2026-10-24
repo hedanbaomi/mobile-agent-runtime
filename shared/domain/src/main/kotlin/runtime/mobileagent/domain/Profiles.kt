@@ -15,10 +15,31 @@ enum class ApiFormat {
     OPENAI_COMPATIBLE,
     /** OpenAI Responses API providers using POST /responses. */
     OPENAI_RESPONSES,
+    /** Google Gemini Developer API (AI Studio API key). */
+    GOOGLE_AI_STUDIO,
+    /** Standard Vertex publisher endpoint (OAuth access token). */
+    GOOGLE_VERTEX_AI,
+    /** Vertex Express publisher endpoint (API key). */
+    GOOGLE_VERTEX_EXPRESS,
 }
 
 @Serializable
 enum class ModelRole { CHAT, VISION, EMBEDDING, RERANKER }
+
+fun ApiFormat.isGoogleNative(): Boolean =
+    this == ApiFormat.GOOGLE_AI_STUDIO || this == ApiFormat.GOOGLE_VERTEX_AI || this == ApiFormat.GOOGLE_VERTEX_EXPRESS
+
+/** Shared domain invariant for Google native provider/model bindings across UI, SQLite, and transfer bundles. */
+fun validateGoogleNativeBinding(
+    apiFormat: ApiFormat,
+    baseUrl: String,
+    roles: Iterable<ModelRole> = emptyList(),
+): String? = when {
+    !apiFormat.isGoogleNative() -> null
+    baseUrl.contains("PROJECT_ID") -> "Google Vertex Base URL contains unreplaced PROJECT_ID placeholder"
+    roles.any { it != ModelRole.CHAT && it != ModelRole.VISION } -> "Google native format supports only CHAT and VISION roles"
+    else -> null
+}
 
 /**
  * How a model's maximum output cap is configured.
@@ -60,7 +81,14 @@ fun contextWindowTargetKey(providerId: String, providerRevision: Int, endpoint: 
     "$providerId|$providerRevision|${endpoint.trimEnd('/')}|$modelId"
 
 /** Advanced-parameter keys that are themselves an explicit output-cap override. */
-val ADVANCED_OUTPUT_LIMIT_KEYS = listOf("max_tokens", "max_completion_tokens", "max_output_tokens")
+val ADVANCED_OUTPUT_LIMIT_KEYS = listOf("max_tokens", "max_completion_tokens", "max_output_tokens", "maxOutputTokens")
+
+/** Native Google caps participate in the same admission and reservation decision. */
+internal fun outputCapEntries(root: JsonObject): List<Pair<String, kotlinx.serialization.json.JsonElement>> =
+    ADVANCED_OUTPUT_LIMIT_KEYS.mapNotNull { key -> root[key]?.let { key to it } } +
+        ((root["generationConfig"] as? JsonObject)?.get("maxOutputTokens")?.let {
+            listOf("maxOutputTokens" to it)
+        } ?: emptyList())
 
 /**
  * The explicit output cap carried by advanced parameters, or null when the JSON
@@ -147,12 +175,12 @@ fun hasAdvancedOutputLimitOverride(vararg parameterJsonLayers: String?): Boolean
     parameterJsonLayers.any { layer ->
         if (layer.isNullOrBlank()) return@any false
         val root = runCatching { Json.parseToJsonElement(layer) as? JsonObject }.getOrNull() ?: return@any false
-        ADVANCED_OUTPUT_LIMIT_KEYS.any { key -> root[key] is JsonPrimitive }
+        outputCapEntries(root).any { (_, value) -> value is JsonPrimitive }
     }
 fun advancedOutputLimitOverride(parametersJson: String): Pair<String, Long>? {
     val root = runCatching { Json.parseToJsonElement(parametersJson) as? JsonObject }.getOrNull() ?: return null
-    return ADVANCED_OUTPUT_LIMIT_KEYS.firstNotNullOfOrNull { key ->
-        val value = (root[key] as? JsonPrimitive)?.longOrNull ?: return@firstNotNullOfOrNull null
+    return outputCapEntries(root).firstNotNullOfOrNull { (key, element) ->
+        val value = (element as? JsonPrimitive)?.longOrNull ?: return@firstNotNullOfOrNull null
         key to value
     }
 }

@@ -31,7 +31,7 @@ class OpenAiWorkspaceToolLoopTest {
     @Test
     fun visualSearchAndWorkspaceResultsStayContiguousOnBothProtocols() = runBlocking {
         listOf(4 to null, 7 to null, 64 to null, 65 to null, 7 to 4).forEach { (imageCount, explicitBudget) ->
-          ApiFormat.entries.forEach { format ->
+          listOf(ApiFormat.OPENAI_COMPATIBLE, ApiFormat.OPENAI_RESPONSES).forEach { format ->
             val bodies = mutableListOf<JsonObject>()
             val engine = MockEngine { request ->
                 bodies += Json.parseToJsonElement((request.body as TextContent).text).jsonObject
@@ -102,7 +102,7 @@ class OpenAiWorkspaceToolLoopTest {
     }
 
     @Test fun sixtyFourOriginalsUseEightSerialWireRequestsOnBothProtocols() = runBlocking {
-        ApiFormat.entries.forEach { format ->
+        listOf(ApiFormat.OPENAI_COMPATIBLE, ApiFormat.OPENAI_RESPONSES).forEach { format ->
             val payloads = mutableListOf<JsonObject>()
             val engine = MockEngine { request ->
                 payloads += Json.parseToJsonElement((request.body as TextContent).text).jsonObject
@@ -167,7 +167,7 @@ class OpenAiWorkspaceToolLoopTest {
 
     @Test
     fun compatibleAndResponsesBothContinueAfterWorkspaceMetadataListing() = runBlocking {
-        ApiFormat.entries.forEach { format ->
+        listOf(ApiFormat.OPENAI_COMPATIBLE, ApiFormat.OPENAI_RESPONSES).forEach { format ->
             val bodies = mutableListOf<String>()
             val paths = mutableListOf<String>()
             val engine = MockEngine { request ->
@@ -188,6 +188,7 @@ class OpenAiWorkspaceToolLoopTest {
                         "data: {\"type\":\"response.output_text.delta\",\"delta\":\"workspace complete\"}\n\n" +
                             "data: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}}\n\n"
                     }
+                    else -> error("OpenAI fixture requires an OpenAI format")
                 }
                 respond(
                     response,
@@ -229,6 +230,7 @@ class OpenAiWorkspaceToolLoopTest {
                     assertTrue(bodies.last().contains("function_call_output"))
                     assertTrue(bodies.last().contains("\"call_id\":\"workspace-call\""))
                 }
+                else -> error("OpenAI fixture requires an OpenAI format")
             }
             assertTrue(bodies.last().contains("large.bin"), format.name)
         }

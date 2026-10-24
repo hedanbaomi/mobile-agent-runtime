@@ -33,7 +33,7 @@ class ReverseProxyContractTest {
 
     @Test
     fun gatewayRoutesPreservePrefixAliasImageAndProxyBearerKey() = runBlocking {
-        for (format in ApiFormat.entries) {
+        for (format in listOf(ApiFormat.OPENAI_COMPATIBLE, ApiFormat.OPENAI_RESPONSES)) {
             var calls = 0
             HttpClient(MockEngine { request ->
                 calls++
@@ -148,7 +148,7 @@ class ReverseProxyContractTest {
 
     @Test
     fun embeddingGatewayUsesIndependentEndpointWithTheConfiguredAliasAndBearer() = runBlocking {
-        for (format in ApiFormat.entries) {
+        for (format in listOf(ApiFormat.OPENAI_COMPATIBLE, ApiFormat.OPENAI_RESPONSES)) {
             var calls = 0
             HttpClient(MockEngine { request ->
                 calls++

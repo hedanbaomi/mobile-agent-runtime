@@ -1530,7 +1530,7 @@ class ChatViewModel internal constructor(
                                 record = record.copy(state = RunStatus.MODEL_STREAMING, modelRounds = run.modelRounds)
                                 val inspectorEnabled = requestInspectorEnabled()
                                 val requestPreview = event.requestPreview?.takeIf { inspectorEnabled }?.let { ChatRequestPreviewUi("POST",
-                                    OpenAiAdapterFactory.requestEndpoint(provider.apiFormat, provider.baseUrl),
+                                    OpenAiAdapterFactory.requestEndpoint(provider.apiFormat, provider.baseUrl, model.modelId),
                                     event.headerNames.joinToString("\n") { "$it: [redacted]" },
                                     it,
                                 ) }
@@ -1692,7 +1692,7 @@ class ChatViewModel internal constructor(
                                 if (event.requestPreview != null) {
                                     rememberRequestPreviewHint(conversationId)
                                     publishRunState(owner, state.value.copy(requestPreview = ChatRequestPreviewUi("POST",
-                                        OpenAiAdapterFactory.requestEndpoint(provider.apiFormat, provider.baseUrl),
+                                        OpenAiAdapterFactory.requestEndpoint(provider.apiFormat, provider.baseUrl, model.modelId),
                                         headers.keys.joinToString("\n") { it + ": [redacted]" }, requireNotNull(event.requestPreview))))
                                 }
                                 publishRunState(owner, state.value.copy(status = "正在读取图片（本组" + event.imageCount + "张）"))

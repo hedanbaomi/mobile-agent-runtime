@@ -19,7 +19,7 @@ class RandomNumberDeviceTest {
         val app = instrumentation.targetContext.applicationContext as MobileAgentApp
         app.ensureHostInitialized()
         val c = app.container
-        for (format in ApiFormat.entries) {
+        for (format in listOf(ApiFormat.OPENAI_COMPATIBLE, ApiFormat.OPENAI_RESPONSES)) {
             val call = ToolCall("roll-d20", "random_number", """{"min":1,"max":20}""")
             WorldBookLoopback(format, true, call).use { server ->
                 val id = UUID.randomUUID().toString()

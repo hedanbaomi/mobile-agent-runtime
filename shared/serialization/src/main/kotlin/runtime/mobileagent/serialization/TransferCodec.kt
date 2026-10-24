@@ -193,7 +193,7 @@ object TransferCodec {
             requireId(provider.id, operationId, "provider.id")
             requireText(provider.name, operationId, "provider.name")
             requireText(provider.apiFormat, operationId, "provider.apiFormat")
-            if (provider.apiFormat !in setOf("OPENAI_COMPATIBLE", "OPENAI_RESPONSES")) {
+            if (provider.apiFormat !in runtime.mobileagent.domain.ApiFormat.entries.map { it.name }) {
                 invalid(operationId, "Unsupported provider apiFormat")
             }
             requireText(provider.baseUrl, operationId, "provider.baseUrl")
@@ -222,6 +222,12 @@ object TransferCodec {
             if (model.profile.providerId !in providerIds) {
                 invalid(operationId, "Model ${model.profile.id} references an unlisted provider")
             }
+        }
+        transfer.providers.forEach { provider ->
+            val apiFormat = runtime.mobileagent.domain.ApiFormat.valueOf(provider.apiFormat)
+            val roles = transfer.models.filter { it.profile.providerId == provider.id }.map { it.profile.role }
+            runtime.mobileagent.domain.validateGoogleNativeBinding(apiFormat, provider.baseUrl, roles)
+                ?.let { invalid(operationId, it) }
         }
         transfer.snapshots.forEach { snapshot ->
             TrpgTransferValidation.agentSnapshot(snapshot, profile.mode) { invalid(operationId, it) }

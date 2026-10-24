@@ -855,7 +855,7 @@ private fun ProviderEditorFields(
                             text = { Text(providerApiFormatLabel("OPENAI_COMPATIBLE", zh)) },
                             onClick = {
                                 apiFormatMenuOpen = false
-                                actions.onDraftChange(draft.copy(apiFormat = "OPENAI_COMPATIBLE"))
+                                actions.onDraftChange(providerDraftForFormat(draft, "OPENAI_COMPATIBLE"))
                             },
                             modifier = Modifier.testTag("provider.apiFormat.compatible"),
                         )
@@ -863,10 +863,20 @@ private fun ProviderEditorFields(
                             text = { Text(providerApiFormatLabel("OPENAI_RESPONSES", zh)) },
                             onClick = {
                                 apiFormatMenuOpen = false
-                                actions.onDraftChange(draft.copy(apiFormat = "OPENAI_RESPONSES"))
+                                actions.onDraftChange(providerDraftForFormat(draft, "OPENAI_RESPONSES"))
                             },
                             modifier = Modifier.testTag("provider.apiFormat.responses"),
                         )
+                        listOf("GOOGLE_AI_STUDIO", "GOOGLE_VERTEX_AI", "GOOGLE_VERTEX_EXPRESS").forEach { format ->
+                            DropdownMenuItem(
+                                text = { Text(providerApiFormatLabel(format, zh)) },
+                                onClick = {
+                                    apiFormatMenuOpen = false
+                                    actions.onDraftChange(providerDraftForFormat(draft, format))
+                                },
+                                modifier = Modifier.testTag("provider.apiFormat.$format"),
+                            )
+                        }
                     }
                 }
                 Text(
@@ -927,7 +937,12 @@ private fun ProviderEditorFields(
                     CheckRow(if (zh) "输入包含图片" else "Input includes images", draft.vision) { actions.onDraftChange(draft.copy(vision = it)) }
                     CheckRow(if (zh) "可调用工具" else "Can call tools", draft.tools) { actions.onDraftChange(draft.copy(tools = it)) }
                 }
-                OutlinedTextField(draft.apiKey, { actions.onDraftChange(draft.copy(apiKey = it)) }, label = { Text(if (draft.id == null) { if (zh) "API 密钥" else "API key" } else { if (zh) "替换 API 密钥（可选）" else "Replace API key (optional)" }) }, visualTransformation = PasswordVisualTransformation(), keyboardOptions = noCorrectionAscii, modifier = Modifier.fillMaxWidth())
+                OutlinedTextField(draft.apiKey, { actions.onDraftChange(draft.copy(apiKey = it)) }, label = {
+                    Text(if (draft.apiFormat == "GOOGLE_VERTEX_AI") {
+                        stringResource(R.string.ui_google_oauth_credential)
+                    } else if (draft.id == null) { if (zh) "API 密钥" else "API key" }
+                    else { if (zh) "替换 API 密钥（可选）" else "Replace API key (optional)" })
+                }, visualTransformation = PasswordVisualTransformation(), keyboardOptions = noCorrectionAscii, modifier = Modifier.fillMaxWidth().testTag("provider.credential"))
                 Text(stringResource(R.string.ui_verify_capabilities_after_confirmation_provid_f616849a), style = MaterialTheme.typography.bodySmall)
     }
 }
@@ -1049,11 +1064,18 @@ private fun connectionErrorLabel(error: ProviderConnectionErrorCode?, zh: Boolea
 }
 
 private fun providerApiFormatLabel(format: String, zh: Boolean): String = when (format.uppercase()) {
+    "GOOGLE_AI_STUDIO" -> "Google AI Studio (Gemini API)"
+    "GOOGLE_VERTEX_AI" -> "Google Vertex AI (OAuth)"
+    "GOOGLE_VERTEX_EXPRESS" -> "Google Vertex AI Express (API key)"
     "OPENAI_RESPONSES" -> if (zh) "OpenAI Responses（/responses）" else "OpenAI Responses (/responses)"
     else -> if (zh) "OpenAI Compatible（/chat/completions）" else "OpenAI Compatible (/chat/completions)"
 }
 
+@Composable
 private fun providerApiFormatExplanation(format: String, zh: Boolean): String = when (format.uppercase()) {
+    "GOOGLE_AI_STUDIO" -> stringResource(R.string.ui_google_ai_studio_help)
+    "GOOGLE_VERTEX_AI" -> stringResource(R.string.ui_google_vertex_oauth_help)
+    "GOOGLE_VERTEX_EXPRESS" -> stringResource(R.string.ui_google_vertex_express_help)
     "OPENAI_RESPONSES" -> if (zh) {
         "Responses 使用 input、function_call_output 和独立 SSE 事件；仅适用于支持 POST /responses 的服务。"
     } else {
@@ -1065,3 +1087,18 @@ private fun providerApiFormatExplanation(format: String, zh: Boolean): String = 
         "Compatible uses traditional messages and /chat/completions for legacy OpenAI-style endpoints."
     }
 }
+
+private fun providerSuggestedBaseUrl(format: String): String = when (format) {
+    "GOOGLE_AI_STUDIO" -> "https://generativelanguage.googleapis.com/v1beta"
+    "GOOGLE_VERTEX_EXPRESS" -> "https://aiplatform.googleapis.com/v1/publishers/google"
+    "GOOGLE_VERTEX_AI" -> "https://aiplatform.googleapis.com/v1/projects/PROJECT_ID/locations/global/publishers/google"
+    else -> ""
+}
+
+private fun providerDraftForFormat(draft: ProviderDraft, format: String): ProviderDraft = draft.copy(
+    apiFormat = format,
+    apiKey = if (draft.apiFormat == format) draft.apiKey else "",
+    baseUrl = if (draft.baseUrl.isBlank() || draft.baseUrl == providerSuggestedBaseUrl(draft.apiFormat)) {
+        providerSuggestedBaseUrl(format)
+    } else draft.baseUrl,
+)

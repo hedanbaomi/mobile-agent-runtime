@@ -772,7 +772,7 @@ class OpenAiResponsesAdapter(
                 // Provider-private continuation items replay first, in provider
                 // output order, so a reasoning model can continue statelessly.
                 // They are transport-only and never enter previews or history.
-                message.providerContinuationItems.forEach { continuation ->
+                message.providerContinuationItems.filter { it.protocol == "openai-responses" }.forEach { continuation ->
                     add(buildJsonObject {
                         put("type", JsonPrimitive("reasoning"))
                         continuation.itemId?.let { put("id", JsonPrimitive(it)) }

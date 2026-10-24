@@ -318,7 +318,7 @@ class PythonModelInvokeBrokerTest {
 
     @Test(timeout = 120_000)
     fun modelInvokeUsesHttpProxyThroughRealIpcAndProductionTransportInBothFormats() {
-        for (format in ApiFormat.entries) for (host in listOf("LOCALHOST", "localhost.")) {
+        for (format in listOf(ApiFormat.OPENAI_COMPATIBLE, ApiFormat.OPENAI_RESPONSES)) for (host in listOf("LOCALHOST", "localhost.")) {
             val contentType = if (format == ApiFormat.OPENAI_COMPATIBLE) "text/event-stream" else "application/json"
             val response = if (format == ApiFormat.OPENAI_COMPATIBLE) chatSuccess() else responsesSuccess()
             ProviderHttpEndpointDeviceTest.Fixture(bindHost = host, expectedKey = "synthetic-broker-token") { _ ->

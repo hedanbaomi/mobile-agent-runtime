@@ -430,4 +430,158 @@ class ProductDataRepositoryTest {
             assertEquals(0L, db.query("SELECT COUNT(*) AS n FROM knowledge_bases").single().long("n"))
         }
     }
+
+    @Test
+    fun googleNativeProvidersValidateBindingsAndPromoteStructuredCapabilityProbe() {
+        JdbcSqlConnection().use { db ->
+            Migrations.apply(db)
+            val profiles = ProfileRepository(db)
+            assertThrows(AppException::class.java) {
+                profiles.createProvider(
+                    ProviderProfile(
+                        id = "provider.vertex.placeholder",
+                        name = "Vertex",
+                        apiFormat = ApiFormat.GOOGLE_VERTEX_AI,
+                        baseUrl = "https://aiplatform.googleapis.com/v1/projects/PROJECT_ID/locations/global/publishers/google",
+                        secretRef = "vertex-secret",
+                        revision = 1,
+                    ),
+                )
+            }
+            val google = profiles.createProvider(
+                ProviderProfile(
+                    id = "provider.google",
+                    name = "Google",
+                    apiFormat = ApiFormat.GOOGLE_AI_STUDIO,
+                    baseUrl = "https://generativelanguage.googleapis.com/v1beta",
+                    secretRef = "google-secret",
+                    revision = 1,
+                ),
+            )
+            assertThrows(AppException::class.java) {
+                profiles.createModel(
+                    ModelProfile(
+                        id = "model.google.embed",
+                        providerId = google.id,
+                        role = ModelRole.EMBEDDING,
+                        modelId = "text-embedding-004",
+                        capabilities = emptySet(),
+                        contextLimit = 2048,
+                        outputLimit = 256,
+                        revision = 1,
+                    ),
+                )
+            }
+            val chat = profiles.createModel(
+                ModelProfile(
+                    id = "model.google.chat",
+                    providerId = google.id,
+                    role = ModelRole.CHAT,
+                    modelId = "gemini-2.5-pro",
+                    capabilities = setOf("stream", "tools"),
+                    contextLimit = 32768,
+                    outputLimit = 4096,
+                    revision = 1,
+                ),
+            )
+            profiles.recordProbe(
+                modelId = chat.id,
+                providerRevision = google.revision,
+                toolsSummary = "verified",
+                imagesSummary = "not-declared",
+                source = "metadata=verified;stream=verified;tools=verified;image=not-declared",
+                probed = true,
+            )
+            assertEquals(
+                runtime.mobileagent.domain.CapabilityVerification.PROBED,
+                profiles.getModel(chat.id)!!.endpoint.verification,
+            )
+            val openAiProvider = profiles.createProvider(
+                ProviderProfile(
+                    id = "provider.switch",
+                    name = "Switchable",
+                    apiFormat = ApiFormat.OPENAI_COMPATIBLE,
+                    baseUrl = "https://api.openai.com/v1",
+                    secretRef = "switch-secret",
+                    revision = 1,
+                ),
+            )
+            val switchModel = profiles.createModel(
+                ModelProfile(
+                    id = "model.switch.1",
+                    providerId = openAiProvider.id,
+                    role = ModelRole.EMBEDDING,
+                    modelId = "text-embedding-3-small",
+                    capabilities = emptySet(),
+                    contextLimit = 8192,
+                    outputLimit = 256,
+                    revision = 1,
+                ),
+            )
+            profiles.upsertProviderAndModel(
+                openAiProvider.copy(
+                    apiFormat = ApiFormat.GOOGLE_AI_STUDIO,
+                    baseUrl = "https://generativelanguage.googleapis.com/v1beta",
+                    revision = 2,
+                ),
+                switchModel.copy(
+                    role = ModelRole.CHAT,
+                    modelId = "gemini-2.5-flash",
+                    capabilities = setOf("stream", "tools"),
+                    endpoint = runtime.mobileagent.domain.ModelEndpoint.fromLegacy(ModelRole.CHAT, setOf("stream", "tools")),
+                    revision = 2,
+                ),
+            )
+            assertEquals(ApiFormat.GOOGLE_AI_STUDIO, profiles.getProvider(openAiProvider.id)!!.apiFormat)
+            assertEquals(ModelRole.CHAT, profiles.getModel(switchModel.id)!!.role)
+
+            profiles.upsertProviderAndModel(
+                openAiProvider.copy(
+                    apiFormat = ApiFormat.OPENAI_COMPATIBLE,
+                    baseUrl = "https://api.openai.com/v1",
+                    revision = 3,
+                ),
+                switchModel.copy(
+                    role = ModelRole.EMBEDDING,
+                    modelId = "text-embedding-3-small",
+                    capabilities = emptySet(),
+                    endpoint = runtime.mobileagent.domain.ModelEndpoint.fromLegacy(ModelRole.EMBEDDING, emptySet()),
+                    revision = 3,
+                ),
+            )
+            assertEquals(ApiFormat.OPENAI_COMPATIBLE, profiles.getProvider(openAiProvider.id)!!.apiFormat)
+            assertEquals(ModelRole.EMBEDDING, profiles.getModel(switchModel.id)!!.role)
+
+            profiles.createModel(
+                ModelProfile(
+                    id = "model.switch.2",
+                    providerId = openAiProvider.id,
+                    role = ModelRole.EMBEDDING,
+                    modelId = "text-embedding-3-large",
+                    capabilities = emptySet(),
+                    contextLimit = 8192,
+                    outputLimit = 256,
+                    revision = 1,
+                ),
+            )
+            assertThrows(AppException::class.java) {
+                profiles.upsertProviderAndModel(
+                    openAiProvider.copy(
+                        apiFormat = ApiFormat.GOOGLE_AI_STUDIO,
+                        baseUrl = "https://generativelanguage.googleapis.com/v1beta",
+                        revision = 4,
+                    ),
+                    switchModel.copy(
+                        role = ModelRole.CHAT,
+                        modelId = "gemini-2.5-flash",
+                        capabilities = setOf("stream"),
+                        endpoint = runtime.mobileagent.domain.ModelEndpoint.fromLegacy(ModelRole.CHAT, setOf("stream")),
+                        revision = 4,
+                    ),
+                )
+            }
+            assertEquals(ApiFormat.OPENAI_COMPATIBLE, profiles.getProvider(openAiProvider.id)!!.apiFormat)
+            assertEquals(ModelRole.EMBEDDING, profiles.getModel(switchModel.id)!!.role)
+        }
+    }
 }

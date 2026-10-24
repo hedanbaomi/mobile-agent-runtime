@@ -56,7 +56,7 @@ class ReasoningReplayTransportTest {
     }
 
     @Test fun onlyChatToolRequestsCountOrSendObservedReasoning() = runBlocking {
-        ApiFormat.entries.forEach { format ->
+        listOf(ApiFormat.OPENAI_COMPATIBLE, ApiFormat.OPENAI_RESPONSES).forEach { format ->
             var wire = ""
             val client = HttpClient(MockEngine { incoming ->
                 wire = (incoming.body as TextContent).text

@@ -61,17 +61,19 @@ enum class OutputCapValidationError {
 fun stripOutputCapAliases(parametersJson: String): String {
     val root = runCatching { Json.parseToJsonElement(parametersJson) as? JsonObject }.getOrNull()
         ?: return parametersJson
-    if (ADVANCED_OUTPUT_LIMIT_KEYS.none { root.containsKey(it) }) return parametersJson
-    return JsonObject(root.filterKeys { it !in ADVANCED_OUTPUT_LIMIT_KEYS }).toString()
+    if (outputCapEntries(root).isEmpty()) return parametersJson
+    val stripped = root.filterKeys { it !in ADVANCED_OUTPUT_LIMIT_KEYS }.toMutableMap()
+    (stripped["generationConfig"] as? JsonObject)?.let {
+        stripped["generationConfig"] = JsonObject(it.filterKeys { key -> key != "maxOutputTokens" })
+    }
+    return JsonObject(stripped).toString()
 }
 
 fun validateOutputCapLayers(vararg parameterJsonLayers: String?): OutputCapValidationError? {
     parameterJsonLayers.forEach { layer ->
         if (layer.isNullOrBlank()) return@forEach
         val root = runCatching { Json.parseToJsonElement(layer) as? JsonObject }.getOrNull() ?: return@forEach
-        val stated = ADVANCED_OUTPUT_LIMIT_KEYS.mapNotNull { key ->
-            root[key]?.let { element -> key to element }
-        }
+        val stated = outputCapEntries(root)
         if (stated.isEmpty()) return@forEach
         val values = mutableListOf<Pair<String, Long>>()
         for ((key, element) in stated) {

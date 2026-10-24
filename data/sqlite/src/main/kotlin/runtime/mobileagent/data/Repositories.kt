@@ -32,6 +32,8 @@ import runtime.mobileagent.domain.Utc
 import runtime.mobileagent.domain.acceptsImages
 import runtime.mobileagent.domain.contextWindowTarget
 import runtime.mobileagent.domain.isChatEndpoint
+import runtime.mobileagent.domain.isGoogleNative
+import runtime.mobileagent.domain.validateGoogleNativeBinding
 
 /**
  * Persistence for user configured providers and models.
@@ -72,6 +74,7 @@ class ProfileRepository(private val db: SqlConnection) {
                     existing,
                     profile.baseUrl,
                     profile.headerSecretRefs,
+                    profile.apiFormat,
                 ),
             )
             val oldRefs = providerSecretRefs(existing)
@@ -97,6 +100,23 @@ class ProfileRepository(private val db: SqlConnection) {
 
     fun upsertProvider(profile: ProviderProfile): ProviderProfile {
         return if (getProvider(profile.id) == null) createProvider(profile) else updateProvider(profile)
+    }
+
+    /**
+     * Save a provider and its optional edited/new model atomically in the order required by
+     * cross-entity role constraints (for example, changing an existing model from EMBEDDING to
+     * CHAT in the same save that switches its provider to a Google native format, or vice versa).
+     */
+    fun upsertProviderAndModel(
+        provider: ProviderProfile,
+        model: ModelProfile? = null,
+    ): Pair<ProviderProfile, ModelProfile?> = db.transaction {
+        if (model != null && getProvider(provider.id) != null && getModel(model.id) != null && provider.apiFormat.isGoogleNative()) {
+            val savedModel = upsertModel(model)
+            upsertProvider(provider) to savedModel
+        } else {
+            upsertProvider(provider) to model?.let(::upsertModel)
+        }
     }
 
     /** Returns false when models or immutable snapshots still reference the provider. */
@@ -410,6 +430,8 @@ class ProfileRepository(private val db: SqlConnection) {
                 throw invalid("Provider header $header must use a secret reference")
             }
         }
+        validateGoogleNativeBinding(profile.apiFormat, profile.baseUrl, listModels(profile.id).map { it.role })
+            ?.let { throw invalid(it) }
     }
 
     private fun validateModel(profile: ModelProfile) {
@@ -422,6 +444,10 @@ class ProfileRepository(private val db: SqlConnection) {
         parseJsonObject(profile.parameterSchemaJson, "model.parameterSchemaJson")
         parseJsonObject(profile.parametersJson, "model.parametersJson")
         validateEndpointRole(profile.copy(endpoint = resolveEndpoint(profile)))
+        getProvider(profile.providerId)?.let { provider ->
+            validateGoogleNativeBinding(provider.apiFormat, provider.baseUrl, listOf(profile.role))
+                ?.let { throw invalid(it) }
+        }
     }
 
     private fun decodeMap(raw: String): Map<String, String> =
@@ -564,28 +590,7 @@ class ProfileRepository(private val db: SqlConnection) {
         decodePersistedEndpoint(raw, role, capabilities, modelId)
 
     private fun validateEndpointRole(profile: ModelProfile) {
-        val endpoint = profile.endpoint
-        if (endpoint.operations.isEmpty()) throw invalid("Model ${profile.id} has an empty endpoint operation set")
-        val expectedOperations = when (profile.role) {
-            ModelRole.CHAT, ModelRole.VISION -> setOf(ModelOperation.CHAT)
-            ModelRole.EMBEDDING -> setOf(ModelOperation.EMBEDDING)
-            ModelRole.RERANKER -> setOf(ModelOperation.RERANK)
-        }
-        if (endpoint.operations != expectedOperations) {
-            throw invalid("Model ${profile.id} role ${profile.role} conflicts with its endpoint operations")
-        }
-        if (profile.role == ModelRole.VISION && InputModality.IMAGE !in endpoint.inputModalities) {
-            throw invalid("Model ${profile.id} vision role is missing image input")
-        }
-        if ("image" in profile.capabilities && InputModality.IMAGE !in endpoint.inputModalities) {
-            throw invalid("Model ${profile.id} image capability conflicts with its endpoint")
-        }
-        if ("stream" in profile.capabilities && ModelFeature.STREAMING !in endpoint.features) {
-            throw invalid("Model ${profile.id} stream capability conflicts with its endpoint")
-        }
-        if ("tools" in profile.capabilities && ModelFeature.TOOL_CALLING !in endpoint.features) {
-            throw invalid("Model ${profile.id} tools capability conflicts with its endpoint")
-        }
+        validateEndpointStructure(profile.endpoint, profile.role, profile.capabilities, profile.id, ::invalid)
     }
 
     private fun providerSecretRefs(profile: ProviderProfile): Set<String> = buildSet {
@@ -648,28 +653,38 @@ class ProfileRepository(private val db: SqlConnection) {
             val endpoint = runCatching {
                 persistenceJson.decodeFromString(ModelEndpoint.serializer(), normalized)
             }.getOrElse { throw invalidPersisted("Model $modelId has an invalid persisted endpoint") }
-            if (endpoint.operations.isEmpty()) throw invalidPersisted("Model $modelId has an empty persisted endpoint")
+            validateEndpointStructure(endpoint, role, capabilities, modelId, ::invalidPersisted)
+            return endpoint
+        }
+
+        internal fun validateEndpointStructure(
+            endpoint: ModelEndpoint,
+            role: ModelRole,
+            capabilities: Set<String>,
+            modelId: String,
+            error: (String) -> AppException,
+        ) {
+            if (endpoint.operations.isEmpty()) throw error("Model $modelId has an empty endpoint operation set")
             val expectedOperations = when (role) {
                 ModelRole.CHAT, ModelRole.VISION -> setOf(ModelOperation.CHAT)
                 ModelRole.EMBEDDING -> setOf(ModelOperation.EMBEDDING)
                 ModelRole.RERANKER -> setOf(ModelOperation.RERANK)
             }
             if (endpoint.operations != expectedOperations) {
-                throw invalidPersisted("Model $modelId role conflicts with its persisted endpoint")
+                throw error("Model $modelId role $role conflicts with its endpoint operations")
             }
             if (role == ModelRole.VISION && InputModality.IMAGE !in endpoint.inputModalities) {
-                throw invalidPersisted("Model $modelId vision role lacks image input")
+                throw error("Model $modelId vision role is missing image input")
             }
             if ("image" in capabilities && InputModality.IMAGE !in endpoint.inputModalities) {
-                throw invalidPersisted("Model $modelId image capability conflicts with its endpoint")
+                throw error("Model $modelId image capability conflicts with its endpoint")
             }
             if ("stream" in capabilities && ModelFeature.STREAMING !in endpoint.features) {
-                throw invalidPersisted("Model $modelId stream capability conflicts with its endpoint")
+                throw error("Model $modelId stream capability conflicts with its endpoint")
             }
             if ("tools" in capabilities && ModelFeature.TOOL_CALLING !in endpoint.features) {
-                throw invalidPersisted("Model $modelId tools capability conflicts with its endpoint")
+                throw error("Model $modelId tools capability conflicts with its endpoint")
             }
-            return endpoint
         }
 
         internal fun invalidPersisted(message: String): AppException = AppError(

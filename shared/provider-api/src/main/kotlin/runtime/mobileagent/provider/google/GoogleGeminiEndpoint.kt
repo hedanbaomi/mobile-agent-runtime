@@ -10,19 +10,31 @@ import runtime.mobileagent.provider.openai.DiagnosticJsonSanitizer
 
 /** Native publisher path validation and diagnostic helpers shared by configuration and dispatch. */
 internal object GoogleGeminiEndpoint {
+    private val MODEL_ID = Regex("(?!models/|projects/|locations/|publishers/|endpoints/)(?:[A-Za-z0-9][A-Za-z0-9._-]{0,99}/)?[A-Za-z0-9][A-Za-z0-9._-]{0,199}")
+
     fun url(format: ApiFormat, baseUrl: String, modelId: String, stream: Boolean = false): String {
         require(format in setOf(ApiFormat.GOOGLE_AI_STUDIO, ApiFormat.GOOGLE_VERTEX_AI, ApiFormat.GOOGLE_VERTEX_EXPRESS))
         val uri = URI(baseUrl)
         require(uri.scheme in setOf("http", "https") && !uri.host.isNullOrBlank() && uri.rawUserInfo == null &&
-            uri.rawQuery == null && uri.rawFragment == null && (uri.port == -1 || uri.port in 1..65535))
-        require(uri.rawPath.orEmpty().split('/').none { it == "." || it == ".." || it.contains('%') || it.contains('\\') })
+            uri.rawQuery == null && uri.rawFragment == null && (uri.port == -1 || uri.port in 1..65535)) {
+            "服务地址必须是有效的 Base URL，不能含凭据、查询或片段。"
+        }
+        require(uri.rawPath.orEmpty().split('/').none { it == "." || it == ".." || it.contains('%') || it.contains('\\') }) {
+            "服务地址必须是有效的 Base URL，不能含凭据、查询或片段。"
+        }
         val model = modelId.removePrefix("models/")
-        require(model.matches(Regex("[A-Za-z0-9][A-Za-z0-9._-]{0,199}")) && !model.contains(".."))
+        require(MODEL_ID.matches(model) && !model.contains("..")) { "请填写有效的 Google 模型 ID。" }
         val base = baseUrl.trimEnd('/')
         when (format) {
-            ApiFormat.GOOGLE_AI_STUDIO -> require(uri.path.trimEnd('/').endsWith("/v1beta") || uri.path.trimEnd('/').endsWith("/v1"))
-            ApiFormat.GOOGLE_VERTEX_AI -> require(Regex(".*/v1(?:beta1)?/projects/[^/]+/locations/[^/]+/publishers/google").matches(uri.path.trimEnd('/')))
-            ApiFormat.GOOGLE_VERTEX_EXPRESS -> require(uri.path.trimEnd('/').endsWith("/v1/publishers/google") || uri.path.trimEnd('/').endsWith("/v1beta1/publishers/google"))
+            ApiFormat.GOOGLE_AI_STUDIO -> require(Regex(".*/v1(?:beta)?").matches(uri.path.trimEnd('/'))) {
+                "Google AI Studio Base URL 需以 /v1beta 或 /v1 结尾。"
+            }
+            ApiFormat.GOOGLE_VERTEX_AI -> require(Regex(".*/v1(?:beta1?)?/projects/[^/]+/locations/[^/]+/publishers/google").matches(uri.path.trimEnd('/'))) {
+                "Google Vertex AI Base URL 需包含 /v1/projects/{project}/locations/{location}/publishers/google。"
+            }
+            ApiFormat.GOOGLE_VERTEX_EXPRESS -> require(Regex(".*/v1(?:beta1?)?/publishers/google").matches(uri.path.trimEnd('/'))) {
+                "Google Vertex Express Base URL 需以 /v1/publishers/google 或 /v1beta1/publishers/google 结尾。"
+            }
             else -> error("Unsupported format")
         }
         return "$base/models/$model:" + if (stream) "streamGenerateContent?alt=sse" else "generateContent"

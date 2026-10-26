@@ -21,7 +21,7 @@ object OpenAiAdapterFactory {
     fun requestEndpoint(format: ApiFormat, baseUrl: String, modelId: String = "", stream: Boolean = true): String = when (format) {
         ApiFormat.OPENAI_COMPATIBLE -> OpenAiCompatibleAdapter.url(baseUrl, "/chat/completions")
         ApiFormat.OPENAI_RESPONSES -> OpenAiResponsesAdapter.url(baseUrl, "/responses")
-        ApiFormat.GOOGLE_AI_STUDIO, ApiFormat.GOOGLE_VERTEX_AI, ApiFormat.GOOGLE_VERTEX_EXPRESS ->
+        ApiFormat.GOOGLE_AI_STUDIO, ApiFormat.GOOGLE_VERTEX_EXPRESS ->
             GoogleGeminiAdapter.requestEndpoint(format, baseUrl, modelId, stream)
     }
 
@@ -52,7 +52,7 @@ object OpenAiAdapterFactory {
     ): ModelAdapter = when (format) {
         ApiFormat.OPENAI_COMPATIBLE -> OpenAiCompatibleAdapter(http, baseUrl, headerSecretResolver, defaultHeaders)
         ApiFormat.OPENAI_RESPONSES -> OpenAiResponsesAdapter(http, baseUrl, headerSecretResolver, defaultHeaders)
-        ApiFormat.GOOGLE_AI_STUDIO, ApiFormat.GOOGLE_VERTEX_AI, ApiFormat.GOOGLE_VERTEX_EXPRESS ->
+        ApiFormat.GOOGLE_AI_STUDIO, ApiFormat.GOOGLE_VERTEX_EXPRESS ->
             GoogleGeminiAdapter(http, baseUrl, format, headerSecretResolver, defaultHeaders)
     }
 }

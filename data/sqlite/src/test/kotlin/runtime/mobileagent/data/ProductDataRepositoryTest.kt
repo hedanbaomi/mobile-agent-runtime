@@ -441,7 +441,7 @@ class ProductDataRepositoryTest {
                     ProviderProfile(
                         id = "provider.vertex.placeholder",
                         name = "Vertex",
-                        apiFormat = ApiFormat.GOOGLE_VERTEX_AI,
+                        apiFormat = ApiFormat.GOOGLE_VERTEX_EXPRESS,
                         baseUrl = "https://aiplatform.googleapis.com/v1/projects/PROJECT_ID/locations/global/publishers/google",
                         secretRef = "vertex-secret",
                         revision = 1,

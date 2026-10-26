@@ -78,17 +78,17 @@ class GoogleGeminiAdapterTest {
         assertFalse(wire!!.containsKey("messages"))
     }
 
-    @Test fun `Vertex standard bearer and express key remain in headers`() = runBlocking {
+    @Test fun `AI Studio and Vertex Express keys remain in headers and fold google publisher prefix`() = runBlocking {
         for ((format, url) in listOf(
-            ApiFormat.GOOGLE_VERTEX_AI to "https://region.example.invalid/v1/projects/p/locations/global/publishers/google",
+            ApiFormat.GOOGLE_AI_STUDIO to base,
             ApiFormat.GOOGLE_VERTEX_EXPRESS to "https://native.example.invalid/v1/publishers/google",
             ApiFormat.GOOGLE_VERTEX_EXPRESS to "https://native.example.invalid/v1beta1/projects/p/locations/global/publishers/google",
         )) {
             val engine = MockEngine { req ->
                 assertEquals("$url/models/gemini-4-argon:generateContent", req.url.toString())
                 assertFalse(req.url.toString().contains(key.concatToString()))
-                if (format == ApiFormat.GOOGLE_VERTEX_AI) { assertEquals("Bearer ${key.concatToString()}", req.headers[HttpHeaders.Authorization]); assertNull(req.headers["x-goog-api-key"]) }
-                else { assertEquals(key.concatToString(), req.headers["x-goog-api-key"]); assertNull(req.headers[HttpHeaders.Authorization]) }
+                assertEquals(key.concatToString(), req.headers["x-goog-api-key"])
+                assertNull(req.headers[HttpHeaders.Authorization])
                 respond(reply(), headers = headersOf(HttpHeaders.ContentType, "application/json"))
             }
             val subject = adapter(engine, format, url)
@@ -106,14 +106,9 @@ class GoogleGeminiAdapterTest {
         for (url in listOf("$base?key=x", "$base#x", "https://u:p@h/v1beta", "https://h/a/../v1beta", "https://h/%2e%2e/v1beta"))
             assertThrows(IllegalArgumentException::class.java) { GoogleGeminiAdapter.requestEndpoint(ApiFormat.GOOGLE_AI_STUDIO, url, "x") }
         assertEquals("$base/models/x:streamGenerateContent?alt=sse", GoogleGeminiAdapter.requestEndpoint(ApiFormat.GOOGLE_AI_STUDIO, base, "models/x", true))
-        assertEquals("$base/models/google/gemini-4-argon:generateContent", GoogleGeminiAdapter.requestEndpoint(ApiFormat.GOOGLE_AI_STUDIO, base, "google/gemini-4-argon"))
-        val vertexBase = "https://aiplatform.googleapis.com/v1/projects/demo/locations/global/publishers/google"
+        assertEquals("$base/models/gemini-4-argon:generateContent", GoogleGeminiAdapter.requestEndpoint(ApiFormat.GOOGLE_AI_STUDIO, base, "google/gemini-4-argon"))
         val expressBase = "https://aiplatform.googleapis.com/v1/publishers/google"
         val expressProjectBase = "https://aiplatform.googleapis.com/v1beta1/projects/demo/locations/global/publishers/google"
-        assertEquals(
-            "$vertexBase/models/gemini-4-argon:generateContent",
-            GoogleGeminiAdapter.requestEndpoint(ApiFormat.GOOGLE_VERTEX_AI, vertexBase, "google/gemini-4-argon"),
-        )
         assertEquals(
             "$expressBase/models/gemini-4-argon:streamGenerateContent?alt=sse",
             GoogleGeminiAdapter.requestEndpoint(ApiFormat.GOOGLE_VERTEX_EXPRESS, expressBase, "models/google/gemini-4-argon", true),
@@ -123,8 +118,8 @@ class GoogleGeminiAdapterTest {
             GoogleGeminiAdapter.requestEndpoint(ApiFormat.GOOGLE_VERTEX_EXPRESS, expressProjectBase, "google/gemini-4-argon"),
         )
         runtime.mobileagent.provider.openai.OpenAiAdapterFactory.validateDraftSave(
-            format = ApiFormat.GOOGLE_VERTEX_AI,
-            baseUrl = vertexBase,
+            format = ApiFormat.GOOGLE_VERTEX_EXPRESS,
+            baseUrl = expressProjectBase,
             saveModel = true,
             draftRole = ModelRole.CHAT,
             effectiveModelId = "google/gemini-4-argon",
@@ -446,7 +441,7 @@ class GoogleGeminiAdapterTest {
 
         assertThrows(IllegalArgumentException::class.java) {
             runtime.mobileagent.provider.openai.OpenAiAdapterFactory.validateDraftSave(
-                format = ApiFormat.GOOGLE_VERTEX_AI,
+                format = ApiFormat.GOOGLE_VERTEX_EXPRESS,
                 baseUrl = "https://aiplatform.googleapis.com/v1/projects/PROJECT_ID/locations/global/publishers/google",
                 saveModel = false,
                 draftRole = ModelRole.CHAT,

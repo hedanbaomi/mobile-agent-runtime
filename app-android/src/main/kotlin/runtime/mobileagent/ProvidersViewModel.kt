@@ -324,8 +324,6 @@ class ProvidersViewModel @JvmOverloads constructor(
             "请将 Base URL 中的 PROJECT_ID 替换为 Google Cloud 项目 ID。" -> "Replace PROJECT_ID in the Base URL with your Google Cloud project ID."
             "请填写有效的 Google 模型 ID。" -> "Enter a valid Google model ID."
             "Google AI Studio Base URL 需以 /v1beta 或 /v1 结尾。" -> "Google AI Studio Base URL must end with /v1beta or /v1."
-            "Google Vertex AI Base URL 需包含 /v1/projects/{project}/locations/{location}/publishers/google。" ->
-                "Google Vertex AI Base URL must end with /v1/projects/{project}/locations/{location}/publishers/google."
             "Google Vertex Express Base URL 需以 /v1/publishers/google 或 /v1beta1/publishers/google 结尾。" ->
                 "Google Vertex Express Base URL must end with /v1/publishers/google or /v1beta1/publishers/google."
             "保存失败。" -> "Could not save the provider."

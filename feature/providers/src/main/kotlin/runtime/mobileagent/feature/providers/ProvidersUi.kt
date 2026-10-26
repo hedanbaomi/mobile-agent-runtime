@@ -867,7 +867,7 @@ private fun ProviderEditorFields(
                             },
                             modifier = Modifier.testTag("provider.apiFormat.responses"),
                         )
-                        listOf("GOOGLE_AI_STUDIO", "GOOGLE_VERTEX_AI", "GOOGLE_VERTEX_EXPRESS").forEach { format ->
+                        listOf("GOOGLE_AI_STUDIO", "GOOGLE_VERTEX_EXPRESS").forEach { format ->
                             DropdownMenuItem(
                                 text = { Text(providerApiFormatLabel(format, zh)) },
                                 onClick = {
@@ -938,9 +938,7 @@ private fun ProviderEditorFields(
                     CheckRow(if (zh) "可调用工具" else "Can call tools", draft.tools) { actions.onDraftChange(draft.copy(tools = it)) }
                 }
                 OutlinedTextField(draft.apiKey, { actions.onDraftChange(draft.copy(apiKey = it)) }, label = {
-                    Text(if (draft.apiFormat == "GOOGLE_VERTEX_AI") {
-                        stringResource(R.string.ui_google_oauth_credential)
-                    } else if (draft.id == null) { if (zh) "API 密钥" else "API key" }
+                    Text(if (draft.id == null) { if (zh) "API 密钥" else "API key" }
                     else { if (zh) "替换 API 密钥（可选）" else "Replace API key (optional)" })
                 }, visualTransformation = PasswordVisualTransformation(), keyboardOptions = noCorrectionAscii, modifier = Modifier.fillMaxWidth().testTag("provider.credential"))
                 Text(stringResource(R.string.ui_verify_capabilities_after_confirmation_provid_f616849a), style = MaterialTheme.typography.bodySmall)
@@ -1065,7 +1063,6 @@ private fun connectionErrorLabel(error: ProviderConnectionErrorCode?, zh: Boolea
 
 private fun providerApiFormatLabel(format: String, zh: Boolean): String = when (format.uppercase()) {
     "GOOGLE_AI_STUDIO" -> "Google AI Studio (Gemini API)"
-    "GOOGLE_VERTEX_AI" -> "Google Vertex AI (OAuth)"
     "GOOGLE_VERTEX_EXPRESS" -> "Google Vertex AI Express (API key)"
     "OPENAI_RESPONSES" -> if (zh) "OpenAI Responses（/responses）" else "OpenAI Responses (/responses)"
     else -> if (zh) "OpenAI Compatible（/chat/completions）" else "OpenAI Compatible (/chat/completions)"
@@ -1074,7 +1071,6 @@ private fun providerApiFormatLabel(format: String, zh: Boolean): String = when (
 @Composable
 private fun providerApiFormatExplanation(format: String, zh: Boolean): String = when (format.uppercase()) {
     "GOOGLE_AI_STUDIO" -> stringResource(R.string.ui_google_ai_studio_help)
-    "GOOGLE_VERTEX_AI" -> stringResource(R.string.ui_google_vertex_oauth_help)
     "GOOGLE_VERTEX_EXPRESS" -> stringResource(R.string.ui_google_vertex_express_help)
     "OPENAI_RESPONSES" -> if (zh) {
         "Responses 使用 input、function_call_output 和独立 SSE 事件；仅适用于支持 POST /responses 的服务。"
@@ -1090,9 +1086,7 @@ private fun providerApiFormatExplanation(format: String, zh: Boolean): String = 
 
 private fun providerSuggestedBaseUrl(format: String): String = when (format) {
     "GOOGLE_AI_STUDIO" -> "https://generativelanguage.googleapis.com/v1beta"
-    "GOOGLE_VERTEX_EXPRESS",
-    "GOOGLE_VERTEX_AI",
-    -> "https://aiplatform.googleapis.com/v1/projects/PROJECT_ID/locations/global/publishers/google"
+    "GOOGLE_VERTEX_EXPRESS" -> "https://aiplatform.googleapis.com/v1/projects/PROJECT_ID/locations/global/publishers/google"
     else -> ""
 }
 

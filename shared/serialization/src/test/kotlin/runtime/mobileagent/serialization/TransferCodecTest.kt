@@ -193,7 +193,7 @@ class TransferCodecTest {
         val decoded = TransferCodec.decode(TransferCodec.encode(bundle))
         assertEquals(bundle, decoded)
         assertEquals("OPENAI_COMPATIBLE", ApiFormat.OPENAI_COMPATIBLE.name)
-        for (format in listOf(ApiFormat.GOOGLE_AI_STUDIO, ApiFormat.GOOGLE_VERTEX_AI, ApiFormat.GOOGLE_VERTEX_EXPRESS)) {
+        for (format in listOf(ApiFormat.GOOGLE_AI_STUDIO, ApiFormat.GOOGLE_VERTEX_EXPRESS)) {
             val google = bundle.copy(agent = requireNotNull(bundle.agent).copy(providers = listOf(provider.copy(apiFormat = format.name))))
             assertEquals(google, TransferCodec.decode(TransferCodec.encode(google)))
         }
@@ -201,7 +201,7 @@ class TransferCodecTest {
             agent = requireNotNull(bundle.agent).copy(
                 providers = listOf(
                     provider.copy(
-                        apiFormat = ApiFormat.GOOGLE_VERTEX_AI.name,
+                        apiFormat = ApiFormat.GOOGLE_VERTEX_EXPRESS.name,
                         baseUrl = "https://aiplatform.googleapis.com/v1/projects/PROJECT_ID/locations/global/publishers/google",
                     ),
                 ),

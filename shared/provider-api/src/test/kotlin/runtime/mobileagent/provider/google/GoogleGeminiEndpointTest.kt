@@ -13,7 +13,6 @@ import runtime.mobileagent.provider.openai.OpenAiAdapterFactory
 class GoogleGeminiEndpointTest {
     private val endpoints = mapOf(
         ApiFormat.GOOGLE_AI_STUDIO to "https://native.example.invalid/v1beta",
-        ApiFormat.GOOGLE_VERTEX_AI to "https://native.example.invalid/v1/projects/demo/locations/global/publishers/google",
         ApiFormat.GOOGLE_VERTEX_EXPRESS to "https://native.example.invalid/v1/publishers/google",
     )
 
@@ -43,8 +42,7 @@ class GoogleGeminiEndpointTest {
             }
             listOf("google/$model", "models/google/$model").forEach { input ->
                 OpenAiAdapterFactory.validateDraftSave(format, base, true, ModelRole.CHAT, input)
-                val expectedModel = if (format == ApiFormat.GOOGLE_AI_STUDIO) "google/$model" else model
-                assertEquals("$base/models/$expectedModel:streamGenerateContent?alt=sse",
+                assertEquals("$base/models/$model:streamGenerateContent?alt=sse",
                     GoogleGeminiAdapter.requestEndpoint(format, base, input, true))
             }
             listOf("a".repeat(201), "g/${"a".repeat(201)}", "google/${"a".repeat(201)}", "${"g".repeat(101)}/m",

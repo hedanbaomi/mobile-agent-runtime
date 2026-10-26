@@ -60,7 +60,6 @@ class ProvidersTypedUiTest {
         for ((format, base) in listOf(
             "GOOGLE_AI_STUDIO" to "https://generativelanguage.googleapis.com/v1beta",
             "GOOGLE_VERTEX_EXPRESS" to "https://aiplatform.googleapis.com/v1/projects/PROJECT_ID/locations/global/publishers/google",
-            "GOOGLE_VERTEX_AI" to "https://aiplatform.googleapis.com/v1/projects/PROJECT_ID/locations/global/publishers/google",
         )) {
             compose.onNodeWithTag("provider.apiFormat").performScrollTo().performClick()
             compose.onNodeWithTag("provider.apiFormat.$format").performClick()
@@ -70,9 +69,9 @@ class ProvidersTypedUiTest {
                 assertEquals("", uiState.value.draft.apiKey)
             }
         }
-        compose.onNodeWithText("OAuth access token (without Bearer)", useUnmergedTree = true).performScrollTo().assertIsDisplayed()
+        compose.onNodeWithText("API key", useUnmergedTree = true).performScrollTo().assertIsDisplayed()
         compose.runOnIdle { uiState.value = uiState.value.copy(language = "zh-CN") }
-        compose.onNodeWithText("OAuth Access Token（不含 Bearer）", useUnmergedTree = true).performScrollTo().assertIsDisplayed()
+        compose.onNodeWithText("API 密钥", useUnmergedTree = true).performScrollTo().assertIsDisplayed()
         compose.runOnIdle { uiState.value = uiState.value.copy(draft = uiState.value.draft.copy(baseUrl = "https://custom.example.invalid/v1beta")) }
         compose.onNodeWithTag("provider.apiFormat").performScrollTo().performClick()
         compose.onNodeWithTag("provider.apiFormat.GOOGLE_AI_STUDIO").performClick()

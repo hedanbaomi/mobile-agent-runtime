@@ -47,6 +47,6 @@ class GoogleProviderBudgetTest {
             "https://example.invalid/v1", headerSecretRefs = mapOf("X-Tenant-Token" to "synthetic-ref"), revision = 1)
         assertEquals(old.headerSecretRefs, ProviderDestinationBinding.headerSecretRefsForSave(old, old.baseUrl))
         assertTrue(ProviderDestinationBinding.headerSecretRefsForSave(old, old.baseUrl,
-            old.headerSecretRefs, ApiFormat.GOOGLE_VERTEX_AI).isEmpty())
+            old.headerSecretRefs, ApiFormat.GOOGLE_VERTEX_EXPRESS).isEmpty())
     }
 }

@@ -34,7 +34,11 @@ import runtime.mobileagent.provider.openai.OpenAiAdapterFactory
 class ProviderHttpEndpointDeviceTest {
     @Test fun googleNativeFormatsUseProductionAuthAndTypedHttpFailures() = runBlocking {
         val native = """{"candidates":[{"content":{"role":"model","parts":[{"text":"Google fixture ok"}]},"finishReason":"STOP"}]}"""
-        for (format in listOf(ApiFormat.GOOGLE_AI_STUDIO, ApiFormat.GOOGLE_VERTEX_AI, ApiFormat.GOOGLE_VERTEX_EXPRESS)) {
+        for ((format, suffix) in listOf(
+            ApiFormat.GOOGLE_AI_STUDIO to "/prefix/v1beta",
+            ApiFormat.GOOGLE_VERTEX_EXPRESS to "/prefix/v1/projects/test-project/locations/global/publishers/google",
+            ApiFormat.GOOGLE_VERTEX_EXPRESS to "/prefix/v1/publishers/google",
+        )) {
             val status = java.util.concurrent.atomic.AtomicInteger(200)
             Fixture { Reply(body = native) }.use { redirectTarget ->
                 Fixture(bindHost = "localhost.") { request ->
@@ -43,11 +47,6 @@ class ProviderHttpEndpointDeviceTest {
                     else Reply(body = native)
                 }.use { server ->
                     createProviderHttpClient(3_000).use { http ->
-                        val suffix = when (format) {
-                            ApiFormat.GOOGLE_AI_STUDIO -> "/prefix/v1beta"
-                            ApiFormat.GOOGLE_VERTEX_AI -> "/prefix/v1/projects/test-project/locations/global/publishers/google"
-                            else -> "/prefix/v1/publishers/google"
-                        }
                         val adapter = OpenAiAdapterFactory.create(format, http, server.base + suffix,
                             HeaderSecretResolver { host, _ -> assertEquals("localhost", host); DUMMY_AUX.toCharArray() },
                             mapOf("X-Proxy-Token" to RequestHeaderValue.SecretRef("aux-ref")))
@@ -55,8 +54,8 @@ class ProviderHttpEndpointDeviceTest {
                             contextLimit = 4096, outputLimit = 32, revision = 1)
                         assertTrue(adapter.testConnection(model, DUMMY_KEY.toCharArray()) is ProviderConnectionResult.Success)
                         val captured = server.requests.single()
-                        assertEquals(format == ApiFormat.GOOGLE_VERTEX_AI, captured.credentialMatched)
-                        assertEquals(format != ApiFormat.GOOGLE_VERTEX_AI, captured.apiKeyMatched)
+                        assertFalse(captured.credentialMatched)
+                        assertTrue(captured.apiKeyMatched)
                         assertTrue(captured.auxiliaryMatched)
                         assertEquals(suffix + "/models/gemini-fixture:generateContent", captured.path)
                         val request = ModelRequest("gemini-fixture", listOf(ChatMessage("user", "hello")))

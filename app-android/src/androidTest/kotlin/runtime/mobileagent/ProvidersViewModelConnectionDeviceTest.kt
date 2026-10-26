@@ -58,22 +58,16 @@ class ProvidersViewModelConnectionDeviceTest {
             baseUrl = saved.baseUrl, apiFormat = ApiFormat.OPENAI_COMPATIBLE.name, modelId = "")))
         val changed = ProviderDraft(providerId = saved.id, modelProfileId = model.id, name = saved.name,
             baseUrl = "https://aiplatform.googleapis.com/v1/projects/test-project/locations/global/publishers/google",
-            apiFormat = ApiFormat.GOOGLE_VERTEX_AI.name, modelId = "gemini-fixture")
+            apiFormat = ApiFormat.GOOGLE_VERTEX_EXPRESS.name, modelId = "gemini-fixture")
         assertFalse(vm.saveDraft(changed))
-        assertTrue(vm.saveDraft(changed.copy(apiKey = "SYNTHETIC_OAUTH_TOKEN")))
+        assertTrue(vm.saveDraft(changed.copy(apiKey = "SYNTHETIC_VERTEX_EXPRESS_KEY")))
         val vertex = vm.providers.single { it.id == saved.id }
-        assertEquals(ApiFormat.GOOGLE_VERTEX_AI, vertex.apiFormat)
+        assertEquals(ApiFormat.GOOGLE_VERTEX_EXPRESS, vertex.apiFormat)
         assertTrue(vertex.secretRef != saved.secretRef)
-        assertFalse(vm.saveDraft(changed.copy(baseUrl = changed.baseUrl.replace("test-project", "PROJECT_ID"), apiKey = "SYNTHETIC_OAUTH_TOKEN")))
-        assertFalse(vm.saveDraft(changed.copy(apiKey = "SYNTHETIC_OAUTH_TOKEN", parametersJson = """{"generationConfig":{"contents":[]}}""")))
-        assertFalse(vm.saveDraft(changed.copy(apiKey = "SYNTHETIC_OAUTH_TOKEN", role = ModelRole.EMBEDDING)))
-        assertFalse(vm.saveDraft(changed.copy(
-            baseUrl = "https://aiplatform.googleapis.com/v1/projects/PROJECT_ID/locations/global/publishers/google",
-            apiFormat = ApiFormat.GOOGLE_VERTEX_EXPRESS.name,
-            modelId = "google/gemini-4-argon",
-            apiKey = "SYNTHETIC_VERTEX_EXPRESS_KEY",
-        )))
+        assertFalse(vm.saveDraft(changed.copy(baseUrl = changed.baseUrl.replace("test-project", "PROJECT_ID"), apiKey = "SYNTHETIC_VERTEX_EXPRESS_KEY")))
         assertTrue(vm.status.value.contains("PROJECT_ID"))
+        assertFalse(vm.saveDraft(changed.copy(apiKey = "SYNTHETIC_VERTEX_EXPRESS_KEY", parametersJson = """{"generationConfig":{"contents":[]}}""")))
+        assertFalse(vm.saveDraft(changed.copy(apiKey = "SYNTHETIC_VERTEX_EXPRESS_KEY", role = ModelRole.EMBEDDING)))
         assertTrue(vm.saveDraft(changed.copy(
             baseUrl = "https://aiplatform.googleapis.com/v1beta1/projects/test-project/locations/global/publishers/google",
             apiFormat = ApiFormat.GOOGLE_VERTEX_EXPRESS.name,

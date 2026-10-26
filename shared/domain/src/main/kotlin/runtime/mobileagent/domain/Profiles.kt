@@ -17,8 +17,6 @@ enum class ApiFormat {
     OPENAI_RESPONSES,
     /** Google Gemini Developer API (AI Studio API key). */
     GOOGLE_AI_STUDIO,
-    /** Standard Vertex publisher endpoint (OAuth access token). */
-    GOOGLE_VERTEX_AI,
     /** Vertex Express publisher endpoint (API key). */
     GOOGLE_VERTEX_EXPRESS,
 }
@@ -27,7 +25,7 @@ enum class ApiFormat {
 enum class ModelRole { CHAT, VISION, EMBEDDING, RERANKER }
 
 fun ApiFormat.isGoogleNative(): Boolean =
-    this == ApiFormat.GOOGLE_AI_STUDIO || this == ApiFormat.GOOGLE_VERTEX_AI || this == ApiFormat.GOOGLE_VERTEX_EXPRESS
+    this == ApiFormat.GOOGLE_AI_STUDIO || this == ApiFormat.GOOGLE_VERTEX_EXPRESS
 
 /** Shared domain invariant for Google native provider/model bindings across UI, SQLite, and transfer bundles. */
 fun validateGoogleNativeBinding(

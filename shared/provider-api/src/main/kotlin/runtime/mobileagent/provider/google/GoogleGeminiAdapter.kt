@@ -177,7 +177,6 @@ class GoogleGeminiAdapter(
             require(token.isNotBlank() && token.none { it == '\r' || it == '\n' })
             val resolved = resolveHeaders(request.headers)
             val secrets = listOf(token) + resolved.second
-            val auth = if (apiFormat == ApiFormat.GOOGLE_VERTEX_AI) "Authorization" to "Bearer $token" else "x-goog-api-key" to token
             val responseParser = GoogleGeminiResponse(secrets)
             parser = responseParser
             GoogleGeminiEndpoint.reportReady(request, started, payload, secrets)
@@ -185,7 +184,7 @@ class GoogleGeminiAdapter(
                 if (request.stream) receiveStreamedReplyInFull(client)
                 contentType(ContentType.Application.Json)
                 accept(if (request.stream) ContentType.Text.EventStream else ContentType.Application.Json)
-                header(auth.first, auth.second)
+                header("x-goog-api-key", token)
                 resolved.first.forEach { (name, value) -> header(name, value) }
                 setBody(payload)
             }

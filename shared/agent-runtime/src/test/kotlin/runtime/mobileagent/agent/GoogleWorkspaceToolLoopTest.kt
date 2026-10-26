@@ -62,7 +62,7 @@ class GoogleWorkspaceToolLoopTest {
     @Test fun nativeFormatsContinueSignedWorkspaceCallsWithoutExposingPrivateData() = runBlocking {
         for ((format, base) in listOf(
             ApiFormat.GOOGLE_AI_STUDIO to "https://example.invalid/v1beta",
-            ApiFormat.GOOGLE_VERTEX_AI to "https://example.invalid/v1/projects/test-project/locations/global/publishers/google",
+            ApiFormat.GOOGLE_VERTEX_EXPRESS to "https://example.invalid/v1/projects/test-project/locations/global/publishers/google",
             ApiFormat.GOOGLE_VERTEX_EXPRESS to "https://example.invalid/v1/publishers/google",
         )) {
             val requests = mutableListOf<JsonObject>()
@@ -70,8 +70,8 @@ class GoogleWorkspaceToolLoopTest {
                 requests += Json.parseToJsonElement((req.body as TextContent).text).jsonObject
                 assertTrue(req.url.encodedPath.endsWith("/models/gemini-fixture:streamGenerateContent"))
                 assertEquals("sse", req.url.parameters["alt"])
-                assertEquals(if (format == ApiFormat.GOOGLE_VERTEX_AI) "Bearer synthetic-credential" else null, req.headers["Authorization"])
-                assertEquals(if (format != ApiFormat.GOOGLE_VERTEX_AI) "synthetic-credential" else null, req.headers["x-goog-api-key"])
+                assertNull(req.headers["Authorization"])
+                assertEquals("synthetic-credential", req.headers["x-goog-api-key"])
                 val json = if (requests.size == 1) {
                     """{"candidates":[{"content":{"role":"model","parts":[{"text":"Inspecting files.","thoughtSignature":"synthetic-private-signature"},{"functionCall":{"id":"google-workspace-call","name":"workspace_list","args":{}}}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":2,"thoughtsTokenCount":3}}"""
                 } else {

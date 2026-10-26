@@ -13,7 +13,7 @@ internal object GoogleGeminiEndpoint {
     private val MODEL_ID = Regex("(?!models/|projects/|locations/|publishers/|endpoints/)(?:[A-Za-z0-9][A-Za-z0-9._-]{0,99}/)?[A-Za-z0-9][A-Za-z0-9._-]{0,199}")
 
     fun url(format: ApiFormat, baseUrl: String, modelId: String, stream: Boolean = false): String {
-        require(format in setOf(ApiFormat.GOOGLE_AI_STUDIO, ApiFormat.GOOGLE_VERTEX_AI, ApiFormat.GOOGLE_VERTEX_EXPRESS))
+        require(format in setOf(ApiFormat.GOOGLE_AI_STUDIO, ApiFormat.GOOGLE_VERTEX_EXPRESS))
         val uri = URI(baseUrl)
         require(uri.scheme in setOf("http", "https") && !uri.host.isNullOrBlank() && uri.rawUserInfo == null &&
             uri.rawQuery == null && uri.rawFragment == null && (uri.port == -1 || uri.port in 1..65535)) {
@@ -25,27 +25,20 @@ internal object GoogleGeminiEndpoint {
         val rawModel = modelId.removePrefix("models/")
         require(MODEL_ID.matches(rawModel) && !rawModel.contains("..")) { "请填写有效的 Google 模型 ID。" }
         val base = baseUrl.trimEnd('/')
-        val model = when (format) {
+        when (format) {
             ApiFormat.GOOGLE_AI_STUDIO -> {
                 require(Regex(".*/v1(?:beta)?").matches(uri.path.trimEnd('/'))) {
                     "Google AI Studio Base URL 需以 /v1beta 或 /v1 结尾。"
                 }
-                rawModel
-            }
-            ApiFormat.GOOGLE_VERTEX_AI -> {
-                require(Regex(".*/v1(?:beta1?)?/projects/[^/]+/locations/[^/]+/publishers/google").matches(uri.path.trimEnd('/'))) {
-                    "Google Vertex AI Base URL 需包含 /v1/projects/{project}/locations/{location}/publishers/google。"
-                }
-                rawModel.removePrefix("google/")
             }
             ApiFormat.GOOGLE_VERTEX_EXPRESS -> {
                 require(Regex(".*/v1(?:beta1?)?(?:/projects/[^/]+/locations/[^/]+)?/publishers/google").matches(uri.path.trimEnd('/'))) {
                     "Google Vertex Express Base URL 需以 /v1/publishers/google 或 /v1beta1/publishers/google 结尾。"
                 }
-                rawModel.removePrefix("google/")
             }
             else -> error("Unsupported format")
         }
+        val model = rawModel.removePrefix("google/")
         return "$base/models/$model:" + if (stream) "streamGenerateContent?alt=sse" else "generateContent"
     }
 

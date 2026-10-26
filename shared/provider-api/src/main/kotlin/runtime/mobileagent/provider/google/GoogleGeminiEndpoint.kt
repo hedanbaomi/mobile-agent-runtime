@@ -22,18 +22,27 @@ internal object GoogleGeminiEndpoint {
         require(uri.rawPath.orEmpty().split('/').none { it == "." || it == ".." || it.contains('%') || it.contains('\\') }) {
             "服务地址必须是有效的 Base URL，不能含凭据、查询或片段。"
         }
-        val model = modelId.removePrefix("models/")
-        require(MODEL_ID.matches(model) && !model.contains("..")) { "请填写有效的 Google 模型 ID。" }
+        val rawModel = modelId.removePrefix("models/")
+        require(MODEL_ID.matches(rawModel) && !rawModel.contains("..")) { "请填写有效的 Google 模型 ID。" }
         val base = baseUrl.trimEnd('/')
-        when (format) {
-            ApiFormat.GOOGLE_AI_STUDIO -> require(Regex(".*/v1(?:beta)?").matches(uri.path.trimEnd('/'))) {
-                "Google AI Studio Base URL 需以 /v1beta 或 /v1 结尾。"
+        val model = when (format) {
+            ApiFormat.GOOGLE_AI_STUDIO -> {
+                require(Regex(".*/v1(?:beta)?").matches(uri.path.trimEnd('/'))) {
+                    "Google AI Studio Base URL 需以 /v1beta 或 /v1 结尾。"
+                }
+                rawModel
             }
-            ApiFormat.GOOGLE_VERTEX_AI -> require(Regex(".*/v1(?:beta1?)?/projects/[^/]+/locations/[^/]+/publishers/google").matches(uri.path.trimEnd('/'))) {
-                "Google Vertex AI Base URL 需包含 /v1/projects/{project}/locations/{location}/publishers/google。"
+            ApiFormat.GOOGLE_VERTEX_AI -> {
+                require(Regex(".*/v1(?:beta1?)?/projects/[^/]+/locations/[^/]+/publishers/google").matches(uri.path.trimEnd('/'))) {
+                    "Google Vertex AI Base URL 需包含 /v1/projects/{project}/locations/{location}/publishers/google。"
+                }
+                rawModel.removePrefix("google/")
             }
-            ApiFormat.GOOGLE_VERTEX_EXPRESS -> require(Regex(".*/v1(?:beta1?)?/publishers/google").matches(uri.path.trimEnd('/'))) {
-                "Google Vertex Express Base URL 需以 /v1/publishers/google 或 /v1beta1/publishers/google 结尾。"
+            ApiFormat.GOOGLE_VERTEX_EXPRESS -> {
+                require(Regex(".*/v1(?:beta1?)?(?:/projects/[^/]+/locations/[^/]+)?/publishers/google").matches(uri.path.trimEnd('/'))) {
+                    "Google Vertex Express Base URL 需以 /v1/publishers/google 或 /v1beta1/publishers/google 结尾。"
+                }
+                rawModel.removePrefix("google/")
             }
             else -> error("Unsupported format")
         }

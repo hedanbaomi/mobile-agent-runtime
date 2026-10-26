@@ -867,18 +867,6 @@ class ProvidersViewModel @JvmOverloads constructor(
             CapabilityProbeStatus.PROFILE_ONLY -> "仅记录配置声明，未完成真实验证。"
         } + if (charged) "可能产生服务商费用。" else "未发送可能计费请求。"
 
-    private fun probeFailureCode(checks: List<ProbeCheckUi>): ProviderConnectionErrorCode? {
-        val failed = checks.firstOrNull {
-            it.status == CapabilityCheckStatus.FAILED || it.status == CapabilityCheckStatus.UNKNOWN
-        } ?: return null
-        return failed.httpStatus?.let(::connectionErrorForHttp)
-            ?: when (failed.status) {
-                CapabilityCheckStatus.FAILED -> ProviderConnectionErrorCode.INVALID_RESPONSE
-                CapabilityCheckStatus.UNKNOWN -> ProviderConnectionErrorCode.UNKNOWN
-                else -> null
-            }
-    }
-
     private fun connectionErrorStatusLabel(code: ProviderConnectionErrorCode): String = when (code) {
         ProviderConnectionErrorCode.NETWORK_UNREACHABLE -> "网络不可达"
         ProviderConnectionErrorCode.TLS_FAILURE -> "安全连接失败"
@@ -893,15 +881,6 @@ class ProvidersViewModel @JvmOverloads constructor(
         ProviderConnectionErrorCode.CONFIG_INVALID -> "配置无效"
         ProviderConnectionErrorCode.CREDENTIAL_UNAVAILABLE -> "凭据不可用"
         ProviderConnectionErrorCode.UNKNOWN -> "未知错误"
-    }
-
-    private fun connectionErrorForHttp(status: Int): ProviderConnectionErrorCode = when (status) {
-        401, 403 -> ProviderConnectionErrorCode.AUTH_FAILED
-        404 -> ProviderConnectionErrorCode.MODEL_NOT_FOUND
-        408 -> ProviderConnectionErrorCode.TIMEOUT
-        429 -> ProviderConnectionErrorCode.RATE_LIMITED
-        in 400..599 -> ProviderConnectionErrorCode.PROVIDER_REJECTED
-        else -> ProviderConnectionErrorCode.UNKNOWN
     }
 
     private fun CapabilityCheckStatus.toProbeSummary(): String = when (this) {
@@ -926,4 +905,25 @@ class ProvidersViewModel @JvmOverloads constructor(
         }
     }
 
+}
+
+internal fun probeFailureCode(checks: List<ProbeCheckUi>): ProviderConnectionErrorCode? {
+    val failed = checks.filter {
+        it.status == CapabilityCheckStatus.FAILED || it.status == CapabilityCheckStatus.UNKNOWN
+    }
+    return failed.firstNotNullOfOrNull { it.httpStatus }?.let(::connectionErrorForHttp)
+        ?: when (failed.firstOrNull()?.status) {
+            CapabilityCheckStatus.FAILED -> ProviderConnectionErrorCode.INVALID_RESPONSE
+            CapabilityCheckStatus.UNKNOWN -> ProviderConnectionErrorCode.UNKNOWN
+            else -> null
+        }
+}
+
+private fun connectionErrorForHttp(status: Int): ProviderConnectionErrorCode = when (status) {
+    401, 403 -> ProviderConnectionErrorCode.AUTH_FAILED
+    404 -> ProviderConnectionErrorCode.MODEL_NOT_FOUND
+    408 -> ProviderConnectionErrorCode.TIMEOUT
+    429 -> ProviderConnectionErrorCode.RATE_LIMITED
+    in 400..599 -> ProviderConnectionErrorCode.PROVIDER_REJECTED
+    else -> ProviderConnectionErrorCode.UNKNOWN
 }

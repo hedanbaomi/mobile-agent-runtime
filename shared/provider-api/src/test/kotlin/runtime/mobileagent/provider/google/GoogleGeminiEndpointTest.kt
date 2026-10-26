@@ -41,8 +41,14 @@ class GoogleGeminiEndpointTest {
                         GoogleGeminiAdapter.requestEndpoint(format, base, input, true))
                 }
             }
-            listOf("a".repeat(201), "g/${"a".repeat(201)}", "${"g".repeat(101)}/m",
-                "g/../m", "g/.", "g/m/extra", "g/m?key=x", "g/m#x", "g/m%2fx",
+            listOf("google/$model", "models/google/$model").forEach { input ->
+                OpenAiAdapterFactory.validateDraftSave(format, base, true, ModelRole.CHAT, input)
+                val expectedModel = if (format == ApiFormat.GOOGLE_AI_STUDIO) "google/$model" else model
+                assertEquals("$base/models/$expectedModel:streamGenerateContent?alt=sse",
+                    GoogleGeminiAdapter.requestEndpoint(format, base, input, true))
+            }
+            listOf("a".repeat(201), "g/${"a".repeat(201)}", "google/${"a".repeat(201)}", "${"g".repeat(101)}/m",
+                "g/../m", "g/.", "g/m/extra", "google/google/m", "g/m?key=x", "g/m#x", "g/m%2fx",
                 "g\\m", "projects/m", "publishers/m", "models/models/m").forEach { input ->
                 assertThrows(IllegalArgumentException::class.java) {
                     GoogleGeminiAdapter.requestEndpoint(format, base, input)
@@ -51,6 +57,21 @@ class GoogleGeminiEndpointTest {
                     OpenAiAdapterFactory.validateDraftSave(format, base, true, ModelRole.CHAT, input)
                 }
             }
+        }
+        val expressProjectBase = "https://native.example.invalid/v1beta1/projects/demo/locations/global/publishers/google"
+        OpenAiAdapterFactory.validateDraftSave(ApiFormat.GOOGLE_VERTEX_EXPRESS, expressProjectBase, true, ModelRole.CHAT, "google/gemini-4-argon")
+        assertEquals(
+            "$expressProjectBase/models/gemini-4-argon:generateContent",
+            GoogleGeminiAdapter.requestEndpoint(ApiFormat.GOOGLE_VERTEX_EXPRESS, expressProjectBase, "google/gemini-4-argon"),
+        )
+        assertThrows(IllegalArgumentException::class.java) {
+            OpenAiAdapterFactory.validateDraftSave(
+                ApiFormat.GOOGLE_VERTEX_EXPRESS,
+                expressProjectBase.replace("demo", "PROJECT_ID"),
+                true,
+                ModelRole.CHAT,
+                "gemini-4-argon",
+            )
         }
     }
 }

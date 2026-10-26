@@ -59,7 +59,7 @@ class ProvidersTypedUiTest {
         }
         for ((format, base) in listOf(
             "GOOGLE_AI_STUDIO" to "https://generativelanguage.googleapis.com/v1beta",
-            "GOOGLE_VERTEX_EXPRESS" to "https://aiplatform.googleapis.com/v1/publishers/google",
+            "GOOGLE_VERTEX_EXPRESS" to "https://aiplatform.googleapis.com/v1/projects/PROJECT_ID/locations/global/publishers/google",
             "GOOGLE_VERTEX_AI" to "https://aiplatform.googleapis.com/v1/projects/PROJECT_ID/locations/global/publishers/google",
         )) {
             compose.onNodeWithTag("provider.apiFormat").performScrollTo().performClick()

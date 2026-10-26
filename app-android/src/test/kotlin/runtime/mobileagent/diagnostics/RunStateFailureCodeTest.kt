@@ -88,4 +88,28 @@ class RunStateFailureCodeTest {
         assertTrue("\"failureCode\":\"TIMEOUT\"" in line, line)
         assertTrue("\"reasonCode\":\"WATCHDOG_TIMEOUT\"" in line, line)
     }
+
+    @Test
+    fun probeFailureCodeUsesHttpStatusWhenLeadingMetadataCheckLacksStatus() {
+        val checks = listOf(
+            runtime.mobileagent.feature.providers.ProbeCheckUi(
+                runtime.mobileagent.provider.CapabilityCheck.METADATA,
+                runtime.mobileagent.provider.CapabilityCheckStatus.FAILED,
+                null,
+            ),
+            runtime.mobileagent.feature.providers.ProbeCheckUi(
+                runtime.mobileagent.provider.CapabilityCheck.STREAM,
+                runtime.mobileagent.provider.CapabilityCheckStatus.FAILED,
+                404,
+            ),
+        )
+        org.junit.jupiter.api.Assertions.assertEquals(
+            runtime.mobileagent.provider.ProviderConnectionErrorCode.MODEL_NOT_FOUND,
+            runtime.mobileagent.probeFailureCode(checks),
+        )
+        org.junit.jupiter.api.Assertions.assertEquals(
+            runtime.mobileagent.provider.ProviderConnectionErrorCode.INVALID_RESPONSE,
+            runtime.mobileagent.probeFailureCode(checks.take(1)),
+        )
+    }
 }

@@ -67,6 +67,19 @@ class ProvidersViewModelConnectionDeviceTest {
         assertFalse(vm.saveDraft(changed.copy(baseUrl = changed.baseUrl.replace("test-project", "PROJECT_ID"), apiKey = "SYNTHETIC_OAUTH_TOKEN")))
         assertFalse(vm.saveDraft(changed.copy(apiKey = "SYNTHETIC_OAUTH_TOKEN", parametersJson = """{"generationConfig":{"contents":[]}}""")))
         assertFalse(vm.saveDraft(changed.copy(apiKey = "SYNTHETIC_OAUTH_TOKEN", role = ModelRole.EMBEDDING)))
+        assertFalse(vm.saveDraft(changed.copy(
+            baseUrl = "https://aiplatform.googleapis.com/v1/projects/PROJECT_ID/locations/global/publishers/google",
+            apiFormat = ApiFormat.GOOGLE_VERTEX_EXPRESS.name,
+            modelId = "google/gemini-4-argon",
+            apiKey = "SYNTHETIC_VERTEX_EXPRESS_KEY",
+        )))
+        assertTrue(vm.status.value.contains("PROJECT_ID"))
+        assertTrue(vm.saveDraft(changed.copy(
+            baseUrl = "https://aiplatform.googleapis.com/v1beta1/projects/test-project/locations/global/publishers/google",
+            apiFormat = ApiFormat.GOOGLE_VERTEX_EXPRESS.name,
+            modelId = "google/gemini-4-argon",
+            apiKey = "SYNTHETIC_VERTEX_EXPRESS_KEY",
+        )))
     }
 
     @Test
@@ -176,6 +189,15 @@ class ProvidersViewModelConnectionDeviceTest {
         waitUntil(harness.vm) { harness.vm.probeState.value.operation == ProbeOperation.CAPABILITY && harness.vm.probeState.value.phase == ProbePhase.PARTIAL }
         assertTrue(harness.vm.probeState.value.connection!!.success)
         assertEquals(ProbePhase.PARTIAL, harness.vm.probeState.value.phase)
+        assertEquals(
+            ProviderConnectionErrorCode.MODEL_NOT_FOUND,
+            probeFailureCode(
+                listOf(
+                    runtime.mobileagent.feature.providers.ProbeCheckUi(CapabilityCheck.METADATA, CapabilityCheckStatus.FAILED, null),
+                    runtime.mobileagent.feature.providers.ProbeCheckUi(CapabilityCheck.STREAM, CapabilityCheckStatus.FAILED, 404),
+                ),
+            ),
+        )
     }
 
     @Test

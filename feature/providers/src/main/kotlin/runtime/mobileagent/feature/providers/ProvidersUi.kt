@@ -1090,8 +1090,9 @@ private fun providerApiFormatExplanation(format: String, zh: Boolean): String = 
 
 private fun providerSuggestedBaseUrl(format: String): String = when (format) {
     "GOOGLE_AI_STUDIO" -> "https://generativelanguage.googleapis.com/v1beta"
-    "GOOGLE_VERTEX_EXPRESS" -> "https://aiplatform.googleapis.com/v1/publishers/google"
-    "GOOGLE_VERTEX_AI" -> "https://aiplatform.googleapis.com/v1/projects/PROJECT_ID/locations/global/publishers/google"
+    "GOOGLE_VERTEX_EXPRESS",
+    "GOOGLE_VERTEX_AI",
+    -> "https://aiplatform.googleapis.com/v1/projects/PROJECT_ID/locations/global/publishers/google"
     else -> ""
 }
 
